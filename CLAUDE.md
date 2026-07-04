@@ -64,7 +64,9 @@ BRSNAP EV <frame> <kind> <id> <def> <team>     unit lifecycle event
 The widget is strictly read-only (`Get*` + `Spring.Echo` only) so it cannot desync the
 deterministic replay. `__SAMPLE_EVERY__` is substituted at write time (`-every`, default 30 = 1 Hz).
 It also echoes plain `[barreplay] ...` heartbeat lines (on load + every 300 frames ≈ 10s of
-game time) for infolog visibility; `capture` ignores any line without the `BRSNAP` tag. The
+game time) for infolog visibility; when the heartbeat frame was also sampled it appends
+`sample_time=<n>us` (the per-sample processing cost, timed via `Spring.GetTimer`/`DiffTimers`;
+falls back to `<n>ms` via `os.clock` if the hi-res timer is absent). `capture` ignores any line without the `BRSNAP` tag. The
 widget forces max playback speed via `setminspeed`/`setmaxspeed` in `Initialize` (re-asserted
 each heartbeat) — without a loaded widget the replay runs realtime.
 

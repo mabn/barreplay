@@ -85,6 +85,7 @@ func TestWidgetHasRequiredCallins(t *testing.T) {
 		"BRSNAP EV ",
 		"spectatorfullview 1",
 		"quitforce",
+		"sample_time=",
 	} {
 		if !strings.Contains(src, need) {
 			t.Errorf("widget missing required fragment %q", need)
