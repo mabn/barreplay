@@ -34,6 +34,10 @@ import (
 	"github.com/mabn/barreplay/snapshot"
 )
 
+// workerThreadsUnset is the -worker-threads default meaning "don't override the
+// engine's WorkerThreadCount" (any value >= -1 is a real engine setting).
+const workerThreadsUnset = -2
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "barreplay: "+err.Error())
@@ -58,6 +62,7 @@ func run() error {
 		profile      = flag.Bool("profile", false, "enable the engine's internal time profiler for a fine-grained Sim breakdown and a unit-count growth table (small overhead)")
 		disWidgets   = flag.Bool("disable-widgets", true, "disable BAR's default widget suite during the replay (pure unsynced overhead; cannot affect the sim); =false to keep it")
 		throttleDraw = flag.Bool("throttle-draw", true, "throttle the headless draw loop to ~1 fps via MinDrawFPS/MinSimDrawBalance; =false for engine defaults")
+		workerThr    = flag.Int("worker-threads", workerThreadsUnset, "override the engine's WorkerThreadCount for this run (-1 = auto, 0/1 = no workers; scheduling only, cannot desync); unset = keep user/engine default")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: barreplay [flags] <replay-link | gameId | path.sdfz>\n\n")
@@ -138,7 +143,7 @@ func run() error {
 	}
 
 	// 3. Locate the engine and provision missing content.
-	eng, err := engine.Locate(engine.Config{
+	engCfg := engine.Config{
 		DataDir:            *dataDir,
 		EngineBinary:       *engineBin,
 		PRDownloaderBinary: *prdBin,
@@ -152,7 +157,11 @@ func run() error {
 		Profile:            *profile,
 		DisableWidgets:     *disWidgets,
 		ThrottleDraw:       *throttleDraw,
-	}, h.EngineVersion)
+	}
+	if *workerThr != workerThreadsUnset {
+		engCfg.WorkerThreads = workerThr
+	}
+	eng, err := engine.Locate(engCfg, h.EngineVersion)
 	if err != nil {
 		return err
 	}

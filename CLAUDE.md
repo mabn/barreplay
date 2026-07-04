@@ -240,6 +240,17 @@ expensive as the unit count grows". Profiling overhead is visible in the table i
 Caveats: profiler scopes **nest** (`Sim::Path` time is also counted inside `Sim`), so
 entries overlap and don't sum to 100%. Records only exist for scopes the engine actually
 entered; if the API is missing on some engine build the widget logs that and skips it.
+`ThreadPool::{RunTask,AddTask,WaitFor}` are **inflated under `-profile`**: every tiny
+task then pays two locked `Misc::Profiler::AddTime` calls, so judge threading changes by
+plain-run wall time, never by the profiled totals. `ThreadPool::RunTask` also sums time
+across all worker threads and can exceed 100% of wall.
+
+The heartbeat line also reports `draws=<N>` (draw frames since the last heartbeat,
+counted via the `widget:Update` callin — the engine's *real* draw rate, i.e. whether
+`-throttle-draw` is holding) and `widgets=<N>` (currently active widget count — whether
+the default suite stayed disabled). `-worker-threads N` injects the `WorkerThreadCount`
+springsetting for the run (-1 = auto, 0/1 = no workers); it only changes local task
+scheduling, so it cannot desync — sweep it with plain runs and pick the fastest.
 
 Interpreting the split for optimization work:
 

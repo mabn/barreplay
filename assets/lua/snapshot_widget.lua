@@ -182,6 +182,28 @@ local function emitProfileTotals()
 	writeChunk(table.concat(lines, "\n"))
 end
 
+-- Draw-frame counter: widget:Update fires exactly once per draw frame, so the
+-- per-heartbeat delta is the engine's real draw rate — the direct check on
+-- whether -throttle-draw is holding (the sim/draw balance can be overridden by
+-- e.g. packet-queue starvation against the local demo server).
+local drawFrames = 0
+local lastDrawFrames = 0
+
+function widget:Update()
+	drawFrames = drawFrames + 1
+end
+
+-- activeWidgetCount reports how many widgets are currently active ("-" if the
+-- handler is unavailable): confirms the default suite stayed disabled.
+local function activeWidgetCount()
+	local wh = widget.widgetHandler
+	local ok, n = pcall(function() return #wh.widgets end)
+	if ok and n then
+		return tostring(n)
+	end
+	return "-"
+end
+
 -- disableOtherWidgets turns off every other active widget through the handler's
 -- queued DisableWidget (callin-safe: the handler applies it between callins).
 -- BAR auto-enables its whole game-archive widget suite in replays and a seeded
@@ -292,12 +314,14 @@ function widget:GameFrame(frame)
 		-- Re-assert speed in case demo playback reset it, and show progress. Include
 		-- the sample processing time when this heartbeat frame was also sampled.
 		forceMaxSpeed()
+		local draws = drawFrames - lastDrawFrames
+		lastDrawFrames = drawFrames
+		local line = string.format("[barreplay] heartbeat frame=%d t=%.0fs units=%d draws=%d widgets=%s",
+			frame, spGetGameSeconds(), n, draws, activeWidgetCount())
 		if sampleTime then
-			Echo(string.format("[barreplay] heartbeat frame=%d t=%.0fs units=%d sample_time=%s",
-				frame, spGetGameSeconds(), n, sampleTime))
-		else
-			Echo(string.format("[barreplay] heartbeat frame=%d t=%.0fs units=%d", frame, spGetGameSeconds(), n))
+			line = line .. " sample_time=" .. sampleTime
 		end
+		Echo(line)
 		-- Top profiler scopes so far (infolog only): shows whether the frame cost
 		-- is drifting (e.g. Sim growing with unit count) as the replay progresses.
 		local recs = profilerTotals()

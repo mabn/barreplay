@@ -69,6 +69,11 @@ type Config struct {
 	// MinDrawFPS/MinSimDrawBalance springsettings (injected through a
 	// barreplay-owned config file; the user's springsettings.cfg is not touched).
 	ThrottleDraw bool
+	// WorkerThreads, when non-nil, overrides the engine's WorkerThreadCount
+	// springsetting for this run (-1 = auto, 0/1 = no worker threads). It only
+	// changes local task scheduling, so it cannot desync the replay. Nil leaves
+	// the user's/engine's own setting in effect.
+	WorkerThreads *int
 }
 
 // Engine is a resolved, launch-ready engine.
@@ -322,6 +327,9 @@ func (e *Engine) WriteEngineConfig() (string, error) {
 	if e.cfg.ThrottleDraw {
 		overrides["MinDrawFPS"] = "1"
 		overrides["MinSimDrawBalance"] = "0.001"
+	}
+	if e.cfg.WorkerThreads != nil {
+		overrides["WorkerThreadCount"] = fmt.Sprint(*e.cfg.WorkerThreads)
 	}
 	p, err := filepath.Abs(filepath.Join(e.cfg.DataDir, "_barreplay_springsettings.cfg"))
 	if err != nil {
