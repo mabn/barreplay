@@ -59,6 +59,7 @@ Key flags:
 | `-engine <path>` | Path to `spring-headless` (overrides auto-location under `-data/engine/`). |
 | `-no-provision` | Assume engine/game/map are already installed; skip `pr-downloader`. |
 | `-game` / `-map` | Override the `pr-downloader` game/map identifiers (the rapid-tag mapping is best-effort). |
+| `-rapid-repo <url>` | Override the `pr-downloader` rapid master repo (default: BAR's repo). |
 | `-no-run` | Download + parse only; don't launch the engine (useful for inspecting metadata). |
 
 ### Examples
@@ -102,14 +103,42 @@ To change the persisted format, implement `snapshot.Writer` — nothing else cha
   `<data>/engine/<version>/spring-headless`. If missing, build the `engine-headless`
   target from the matching RecoilEngine tag, or point `-engine` at a build.
 - The **game archive** (the `gameVersion` from the demo) and the **map** under
-  `<data>/games` and `<data>/maps`. If a `pr-downloader` binary is found beside the
-  engine and `-no-provision` is not set, `barreplay` fetches missing content; use
-  `-game`/`-map` to override the identifiers if the automatic mapping misses.
-- **A working GL stack (GPU or full software GL).** This engine build still initializes
-  GL and builds a unit-icon render-to-texture atlas at load even when headless; on a
-  GPU-less host it never finishes and the game never starts playing (no snapshots). See
-  the "GPU / headless caveat" and the validated `pr-downloader` provisioning recipe in
-  [`CLAUDE.md`](./CLAUDE.md).
+  `<data>/games` and `<data>/maps`. Unless `-no-provision` is set, `barreplay` runs the
+  bundled `pr-downloader` **pointed at BAR's rapid repo** (`repos.beyondallreason.dev`)
+  to fetch whatever is missing — no manual `pr-downloader` steps needed. Provisioning is
+  best-effort (it warns and continues if a fetch fails, since content may already be
+  installed). Use `-game`/`-map`/`-rapid-repo` to override identifiers, and set
+  `PRD_RAPID_USE_STREAMER=false` / `PRD_SSL_CERT_FILE=<ca>` in the environment if you are
+  behind a proxy (they are passed through to `pr-downloader`).
+- **A working GL stack (GPU or full software GL) — see the next section.** Recoil's
+  `spring-headless` (through at least engine `2025.06.24`) still initializes GL and
+  builds a unit-icon render-to-texture atlas at load; on a GPU-less host it never
+  finishes and the game never starts playing, so no snapshots are produced.
+
+## Running on Linux / Windows / WSL
+
+The engine, not this tool, is the constraint. Two facts drive the choice of engine:
+
+1. **Engine version must match the replay** (or the re-sim desyncs), so you generally
+   run the exact `spring-headless` the replay was recorded with.
+2. **The pre-2026-04-12 `spring-headless` needs real GL.** The headless icon-atlas hang
+   (`CreateAtlasTexture … atlasRendered=0` looping forever at frame `-1`) was a Recoil
+   bug fixed on 2026-04-12 (*"do not run atlas/iconhandler in headless"*). Builds after
+   that skip the atlas and run with **no GPU at all**; builds at/before it need GL.
+
+Pick the row that matches your engine + host:
+
+| Host | Engine | What to run |
+| --- | --- | --- |
+| **Windows** (native) | any, incl. old | `barreplay.exe` (`GOOS=windows go build ./cmd/barreplay`) against `spring-headless.exe`. Windows has a real GL driver, so the atlas completes — the most reliable route. |
+| **Linux / WSL, no GPU** | **post-2026-04-12** | Just run it — `-engine` at that headless build; fully headless, no GPU/Xvfb. Only valid when the replay was recorded on a compatible engine. |
+| **Linux / WSL, no GPU** | old (e.g. `2025.06.24`) | Headless will hang. Run the **graphical** binary instead: `-engine <data>/engine/<ver>/spring` under Xvfb + Mesa llvmpipe (`LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe xvfb-run -a …`). Needs `libsdl2-2.0-0` + `libopenal1`; slow. |
+| **WSL2 + WSLg + GPU** (Win11) | old | WSLg provides GPU GL (d3d12). Run the **graphical** `-engine <data>/engine/<ver>/spring`; BAR calls WSLg "too slow for the game", so prefer the Windows-native route. |
+
+`-engine` accepts **any** engine binary (headless or graphical) — the tool just execs it
+with `--isolation --write-dir <script>`, which both accept — so switching to the
+graphical `spring`/`spring.exe` needs no code change, only the flag. See
+[`CLAUDE.md`](./CLAUDE.md) for the full GPU/GL caveat and the source-level explanation.
 
 ### Manual end-to-end verification
 
@@ -132,9 +161,10 @@ within the map bounds.
 - The widget forces `spectatorfullview 1` so `Spring.GetAllUnits()` returns every
   unit regardless of line-of-sight. It is strictly read-only (only `Get*` +
   `Spring.Echo`), so it cannot desync the replay.
-- Headless widget **auto-enable** and the exact `pr-downloader` **rapid-tag mapping**
-  from a `gameVersion` string are the two most install-specific pieces; `-engine`,
-  `-no-provision`, `-game`, and `-map` exist as escape hatches.
+- The widget declares `enabled = true`, which BAR's widget handler honors to
+  auto-load an unknown widget dropped into `<data>/LuaUI/Widgets/` — no in-game
+  "enable" step. `-engine`, `-no-provision`, `-game`, `-map`, and `-rapid-repo` are the
+  escape hatches for install-specific setups.
 - The transport from Lua to Go is tagged stdout lines (`BRSNAP ...`). `internal/capture`
   isolates this so a TCP-socket transport can be added later without touching the
   `snapshot` format.
