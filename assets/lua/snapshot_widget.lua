@@ -23,6 +23,7 @@
 --   BRSNAP F <frame> <timeSec> <count>
 --   BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp>
 --   BRSNAP EV <frame> <kind> <id> <def> <team>
+--   BRSNAP PROF <totalMs> <name>               engine time-profiler record (at game over)
 -- Plain "[barreplay] ..." heartbeat lines are also echoed for infolog visibility;
 -- capture ignores anything without the BRSNAP tag.
 
@@ -101,6 +102,70 @@ local function writeChunk(s)
 	if out then
 		out:write(s, "\n")
 	end
+end
+
+-- The engine keeps an internal time profiler (the /debug overlay data): named
+-- scopes like "Sim", "Sim::Path", "Lua" with accumulated wall time. Recoil
+-- exposes it to Lua, which lets us report where the replay run actually spends
+-- its time. Scopes nest ("Sim::Path" time is also inside "Sim"), so totals
+-- overlap and do not sum to wall time — read them as relative weights.
+local spGetProfilerRecordNames = Spring.GetProfilerRecordNames
+local spGetProfilerTimeRecord  = Spring.GetProfilerTimeRecord
+
+-- collectProfilerTotals returns { {name=..., ms=<total accumulated ms>}, ... }
+-- sorted largest first. May raise; call via profilerTotals.
+local function collectProfilerTotals()
+	local names = spGetProfilerRecordNames()
+	if not names then
+		return nil
+	end
+	local recs = {}
+	for i = 1, #names do
+		local name = names[i]
+		-- The second (frameData) argument is nominally optional but MUST be passed:
+		-- the engine pushes its return values before reading arg 2 at a fixed stack
+		-- index, so with only one argument it reads its own pushed number there and
+		-- raises "boolean expected, got number".
+		local totalMs = spGetProfilerTimeRecord(name, false) -- first return: total ms
+		if totalMs and totalMs > 0 then
+			recs[#recs + 1] = { name = name, ms = totalMs }
+		end
+	end
+	table.sort(recs, function(a, b) return a.ms > b.ms end)
+	return recs
+end
+
+-- profilerTotals is the safe wrapper around collectProfilerTotals: profiling is
+-- auxiliary, and an error escaping a callin makes BAR's widget handler unload the
+-- whole widget — which would silently kill snapshot sampling too. On the first
+-- failure it reports the error and disables further attempts.
+local profilerBroken = false
+local function profilerTotals()
+	if profilerBroken or not (spGetProfilerRecordNames and spGetProfilerTimeRecord) then
+		return nil
+	end
+	local ok, recs = pcall(collectProfilerTotals)
+	if not ok then
+		profilerBroken = true
+		Echo("[barreplay] engine time profiler failed (" .. tostring(recs) .. "); disabling prof output")
+		return nil
+	end
+	return recs
+end
+
+-- emitProfileTotals writes the largest profiler records as BRSNAP PROF lines to
+-- the output file so the Go CLI can print a where-did-the-time-go summary.
+local function emitProfileTotals()
+	local recs = profilerTotals()
+	if not recs or not recs[1] then
+		Echo("[barreplay] engine time profiler not available; skipping PROF summary")
+		return
+	end
+	local lines = {}
+	for i = 1, math.min(#recs, 20) do
+		lines[i] = string.format("BRSNAP PROF %.1f %s", recs[i].ms, recs[i].name)
+	end
+	writeChunk(table.concat(lines, "\n"))
 end
 
 local function emitPreamble()
@@ -182,6 +247,16 @@ function widget:GameFrame(frame)
 		else
 			Echo(string.format("[barreplay] heartbeat frame=%d t=%.0fs units=%d", frame, spGetGameSeconds(), n))
 		end
+		-- Top profiler scopes so far (infolog only): shows whether the frame cost
+		-- is drifting (e.g. Sim growing with unit count) as the replay progresses.
+		local recs = profilerTotals()
+		if recs and recs[1] then
+			local parts = {}
+			for i = 1, math.min(5, #recs) do
+				parts[i] = string.format("%s=%.0fms", recs[i].name, recs[i].ms)
+			end
+			Echo("[barreplay] prof " .. table.concat(parts, " "))
+		end
 	end
 end
 
@@ -211,6 +286,7 @@ local function closeOut()
 end
 
 function widget:GameOver()
+	emitProfileTotals()
 	Echo("[barreplay] game over; quitting")
 	closeOut()
 	-- Clean, deterministic exit of the headless process.
