@@ -50,6 +50,10 @@ type Config struct {
 	// RapidRepoMaster overrides the pr-downloader rapid master repo URL. Empty
 	// uses barRapidRepoMaster.
 	RapidRepoMaster string
+	// SnapshotStreamPath is the absolute path the widget writes its BRSNAP stream
+	// to (substituted into the Lua). Required for a real run; the tool reads this
+	// file back through capture after the engine exits.
+	SnapshotStreamPath string
 }
 
 // Engine is a resolved, launch-ready engine.
@@ -233,11 +237,21 @@ func (e *Engine) WriteWidget() (string, error) {
 		return "", err
 	}
 	src := strings.ReplaceAll(assets.SnapshotWidgetLua, "__SAMPLE_EVERY__", fmt.Sprint(e.cfg.SampleEvery))
+	src = strings.ReplaceAll(src, "__OUTPUT_PATH__", luaEscapeString(e.cfg.SnapshotStreamPath))
 	widgetPath := filepath.Join(widgetsDir, "snapshot_widget.lua")
 	if err := os.WriteFile(widgetPath, []byte(src), 0o644); err != nil {
 		return "", err
 	}
 	return widgetPath, nil
+}
+
+// luaEscapeString escapes s for embedding inside a Lua double-quoted string
+// literal (the widget's __OUTPUT_PATH__). Paths may contain spaces (harmless) but
+// backslashes and quotes must be escaped.
+func luaEscapeString(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return s
 }
 
 // BuildStartscript writes a wrapper startscript that plays demoPath at maximum

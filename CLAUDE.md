@@ -43,21 +43,30 @@ between the engine's text output and the writer.
 ### Data flow
 
 `barapi.Resolve/Download` → `demofile.Parse` (versions/map/gameId) →
-`engine.Locate` → `engine.EnsureContent` (pr-downloader) → `engine.WriteWidget` →
-`engine.EnableWidget` (seed widget config) → `engine.BuildStartscript` →
-`engine.Run` (stdout) → `capture.Consume` → `snapshot.NewJSONLWriter`.
+`engine.Locate` → `engine.EnsureContent` (pr-downloader) → `engine.WriteWidget`
+(substitutes the output-file path) → `engine.EnableWidget` (seed widget config) →
+`engine.BuildStartscript` → `engine.Run` (widget writes `<out>/<gameId>.brsnap`
+directly) → `capture.Consume` reads that file → `snapshot.NewJSONLWriter`.
+
+Note the widget writes its BRSNAP stream to its **own file** (path substituted from
+`Config.SnapshotStreamPath`), not to stdout: the tool drains the engine's stdout to
+`io.Discard` and parses the file after the engine exits. `-progress` still works off
+`infolog.txt` (the widget's heartbeat lines keep `[f=]` markers flowing there).
 
 ### Widget wire protocol (BRSNAP)
 
-The Lua widget echoes tagged lines to stdout; `internal/capture` parses them. Evolve
-the widget and `capture` together.
+The Lua widget writes tagged lines to its output file; `internal/capture` parses that
+file after the run. Evolve the widget and `capture` together.
 
-Each sampled frame is emitted with a **single `Spring.Echo`** (the `F` line plus all its
-`U` lines joined by `\n`), not one Echo per unit: the engine flushes the log on every
-Echo, so per-unit Echo made the emission I/O — not the Lua sampling — dominate runtime.
-The bytes on the wire are unchanged (still newline-separated `BRSNAP` lines), so
-`capture` is untouched; it does compare each frame's `U` count against the `F` line's
-declared `<count>` and warns on a mismatch (the signature of a truncated log write).
+**Why a file, not `Spring.Echo`:** the engine flushes its log on every Echo *and* caps
+each Echo at a few hundred units (a real replay hit 617), so streaming snapshots through
+stdout was slow and silently truncated. `System` exposes `io` to widgets (BAR's own
+`savetable.lua` uses `io.open`), so the widget opens the substituted `__OUTPUT_PATH__`
+and writes each whole sampled frame (`F` line + all `U` lines) with one `out:write`,
+flushing at each heartbeat and closing in `GameOver`/`Shutdown`. No size cap, one write
+per frame. Only the small `[barreplay]` heartbeat lines still go through `Spring.Echo`
+(for `infolog.txt` / `-progress`). `capture` still cross-checks each frame's `U` count
+against the `F` line's declared `<count>` and warns on a mismatch.
 
 ```
 BRSNAP D <defID> <name>                        unit-def id -> internal name (preamble)
