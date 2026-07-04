@@ -42,6 +42,8 @@ func TestConsume(t *testing.T) {
 		"BRSNAP F 60 2.000 1",
 		"BRSNAP U 100 1 0 512.0 80.0 1030.0 2900.0 3000.0",
 		"BRSNAP EV 58 destroyed 101 2 1",
+		"BRSNAP PROFD 300 120 1200.5 Sim",
+		"BRSNAP PROFD 600 450 3400.0 Sim::Unit::MoveType",
 		"BRSNAP PROF 95123.5 Sim",
 		"BRSNAP PROF 61200.0 Lua",
 	}, "\n")
@@ -102,6 +104,15 @@ func TestConsume(t *testing.T) {
 	}
 	if stats.Profile[1].Name != "Lua" || stats.Profile[1].Ms != 61200.0 {
 		t.Errorf("stats.Profile[1] = %+v", stats.Profile[1])
+	}
+	if len(stats.ProfileSamples) != 2 {
+		t.Fatalf("ProfileSamples = %d, want 2", len(stats.ProfileSamples))
+	}
+	if s := stats.ProfileSamples[0]; s.Frame != 300 || s.Units != 120 || s.Ms != 1200.5 || s.Name != "Sim" {
+		t.Errorf("ProfileSamples[0] = %+v", s)
+	}
+	if s := stats.ProfileSamples[1]; s.Frame != 600 || s.Units != 450 || s.Name != "Sim::Unit::MoveType" {
+		t.Errorf("ProfileSamples[1] = %+v", s)
 	}
 }
 

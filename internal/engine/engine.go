@@ -57,6 +57,10 @@ type Config struct {
 	// to (substituted into the Lua). Required for a real run; the tool reads this
 	// file back through capture after the engine exits.
 	SnapshotStreamPath string
+	// Profile makes the widget enable the engine's internal time profiler
+	// ("debug 1 0": collection on, overlay drawer off), unlocking the fine-grained
+	// Sim::* sub-scope records and per-heartbeat PROFD samples. Small overhead.
+	Profile bool
 }
 
 // Engine is a resolved, launch-ready engine.
@@ -261,6 +265,11 @@ func (e *Engine) WriteWidget() (string, error) {
 	}
 	src := strings.ReplaceAll(assets.SnapshotWidgetLua, "__SAMPLE_EVERY__", fmt.Sprint(e.cfg.SampleEvery))
 	src = strings.ReplaceAll(src, "__OUTPUT_PATH__", luaEscapeString(e.cfg.SnapshotStreamPath))
+	profile := "0"
+	if e.cfg.Profile {
+		profile = "1"
+	}
+	src = strings.ReplaceAll(src, "__PROFILE__", profile)
 	widgetPath := filepath.Join(widgetsDir, "snapshot_widget.lua")
 	if err := os.WriteFile(widgetPath, []byte(src), 0o644); err != nil {
 		return "", err

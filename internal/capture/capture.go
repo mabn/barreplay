@@ -42,6 +42,10 @@ type Stats struct {
 	// "Sim::Path" is also inside "Sim"), so entries overlap and do not sum to
 	// wall time.
 	Profile []ProfileEntry
+	// ProfileSamples holds the per-heartbeat profiler samples (PROFD lines,
+	// -profile mode only) in stream order: cumulative per-scope totals tagged
+	// with the sim frame and unit count at sampling time.
+	ProfileSamples []ProfileSample
 }
 
 // ProfileEntry is one engine time-profiler record: total accumulated wall
@@ -49,6 +53,15 @@ type Stats struct {
 type ProfileEntry struct {
 	Name string
 	Ms   float64
+}
+
+// ProfileSample is one per-heartbeat profiler observation: the cumulative wall
+// milliseconds a scope had accumulated by a sim frame, plus the unit count then.
+type ProfileSample struct {
+	Frame int32
+	Units int32
+	Ms    float64
+	Name  string
 }
 
 // Consume reads the widget stream from r and writes records to w. base carries the
@@ -166,6 +179,15 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 				stats.Profile = append(stats.Profile, ProfileEntry{
 					Name: strings.Join(fields[2:], " "),
 					Ms:   atof64(fields[1]),
+				})
+			}
+		case "PROFD": // PROFD <frame> <units> <totalMs> <name> (name last, as in PROF)
+			if len(fields) >= 5 {
+				stats.ProfileSamples = append(stats.ProfileSamples, ProfileSample{
+					Frame: atoi32(fields[1]),
+					Units: atoi32(fields[2]),
+					Ms:    atof64(fields[3]),
+					Name:  strings.Join(fields[4:], " "),
 				})
 			}
 		case "EV": // EV <frame> <kind> <id> <def> <team>

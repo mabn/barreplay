@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -54,6 +55,7 @@ func run() error {
 		rapidRepo    = flag.String("rapid-repo", "", "pr-downloader rapid master repo URL (default: BAR's repo)")
 		noRun        = flag.Bool("no-run", false, "download + parse only; do not launch the engine")
 		progress     = flag.Bool("progress", false, "poll infolog.txt every 2s and print replay progress (time, %, ETA, fps)")
+		profile      = flag.Bool("profile", false, "enable the engine's internal time profiler for a fine-grained Sim breakdown and a unit-count growth table (small overhead)")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: barreplay [flags] <replay-link | gameId | path.sdfz>\n\n")
@@ -145,6 +147,7 @@ func run() error {
 		MapOverride:        *mapOverride,
 		RapidRepoMaster:    *rapidRepo,
 		SnapshotStreamPath: relStream,
+		Profile:            *profile,
 	}, h.EngineVersion)
 	if err != nil {
 		return err
@@ -320,6 +323,105 @@ func printRunTiming(out io.Writer, engineDuration, loadDuration time.Duration, s
 			fmt.Fprintf(out, "    %9.0f ms  %3.0f%%  %s\n",
 				p.Ms, 100*p.Ms/(float64(engineDuration)/float64(time.Millisecond)), p.Name)
 		}
+	}
+	printProfileGrowth(out, stats.ProfileSamples)
+}
+
+// printProfileGrowth reports, per profiler scope, the sim cost in ms per frame
+// over the first vs the last third of the game (from the widget's per-heartbeat
+// PROFD samples, -profile mode only). Scopes whose per-frame cost grows are the
+// ones that get expensive as the unit count rises.
+func printProfileGrowth(out io.Writer, samples []capture.ProfileSample) {
+	if len(samples) == 0 {
+		return
+	}
+	minF, maxF := samples[0].Frame, samples[0].Frame
+	for _, s := range samples {
+		minF = min(minF, s.Frame)
+		maxF = max(maxF, s.Frame)
+	}
+	span := maxF - minF
+	if span < 3 {
+		return // too short to split into meaningful windows
+	}
+	earlyEnd := minF + span/3
+	lateStart := maxF - span/3
+
+	// The samples are cumulative totals, so a window's ms/frame rate is
+	// (last - first cumulative ms) / (last - first frame) within that window.
+	type window struct {
+		firstMs, lastMs float64
+		firstF, lastF   int32
+		n               int
+	}
+	type scopeAgg struct {
+		name        string
+		early, late window
+	}
+	aggs := map[string]*scopeAgg{}
+	for _, s := range samples {
+		a := aggs[s.Name]
+		if a == nil {
+			a = &scopeAgg{name: s.Name}
+			aggs[s.Name] = a
+		}
+		var w *window
+		switch {
+		case s.Frame <= earlyEnd:
+			w = &a.early
+		case s.Frame >= lateStart:
+			w = &a.late
+		default:
+			continue
+		}
+		if w.n == 0 {
+			w.firstMs, w.firstF = s.Ms, s.Frame
+		}
+		w.lastMs, w.lastF = s.Ms, s.Frame
+		w.n++
+	}
+	rate := func(w window) (float64, bool) {
+		if w.n < 2 || w.lastF <= w.firstF {
+			return 0, false
+		}
+		return (w.lastMs - w.firstMs) / float64(w.lastF-w.firstF), true
+	}
+
+	type row struct {
+		name        string
+		early, late float64
+		hasEarly    bool
+	}
+	var rows []row
+	for _, a := range aggs {
+		lateRate, ok := rate(a.late)
+		if !ok || lateRate < 0.01 { // < 0.01 ms/frame is noise
+			continue
+		}
+		earlyRate, hasEarly := rate(a.early)
+		rows = append(rows, row{name: a.name, early: earlyRate, late: lateRate, hasEarly: hasEarly})
+	}
+	if len(rows) == 0 {
+		return
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].late > rows[j].late })
+	if len(rows) > 12 {
+		rows = rows[:12]
+	}
+
+	fmt.Fprintf(out, "  profiler growth, first vs last third of the sim (units %d -> %d):\n",
+		samples[0].Units, samples[len(samples)-1].Units)
+	fmt.Fprintf(out, "    %8s %8s %7s  %s\n", "early", "late", "growth", "scope (ms per sim frame)")
+	for _, r := range rows {
+		growth := "     -"
+		if r.hasEarly && r.early > 0 {
+			growth = fmt.Sprintf("%5.1fx", r.late/r.early)
+		}
+		early := "       -"
+		if r.hasEarly {
+			early = fmt.Sprintf("%8.3f", r.early)
+		}
+		fmt.Fprintf(out, "    %s %8.3f %s  %s\n", early, r.late, growth, r.name)
 	}
 }
 
