@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/mabn/barreplay/internal/barapi"
 	"github.com/mabn/barreplay/internal/capture"
@@ -48,6 +49,7 @@ func run() error {
 		mapOverride  = flag.String("map", "", "pr-downloader map identifier override")
 		rapidRepo    = flag.String("rapid-repo", "", "pr-downloader rapid master repo URL (default: BAR's repo)")
 		noRun        = flag.Bool("no-run", false, "download + parse only; do not launch the engine")
+		progress     = flag.Bool("progress", false, "poll infolog.txt every 2s and print replay progress (time, %, ETA, fps)")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: barreplay [flags] <replay-link | gameId | path.sdfz>\n\n")
@@ -172,6 +174,11 @@ func run() error {
 	if err != nil {
 		w.Close()
 		return err
+	}
+	if *progress {
+		pctx, pcancel := context.WithCancel(ctx)
+		defer pcancel()
+		go engine.WatchProgress(pctx, eng.InfologPath(), int(h.GameTime), 2*time.Second, os.Stderr)
 	}
 	consumeErr := capture.Consume(stdout, base, w)
 	waitErr := wait()
