@@ -63,10 +63,17 @@ each Echo at a few hundred units (a real replay hit 617), so streaming snapshots
 stdout was slow and silently truncated. `System` exposes `io` to widgets (BAR's own
 `savetable.lua` uses `io.open`), so the widget opens the substituted `__OUTPUT_PATH__`
 and writes each whole sampled frame (`F` line + all `U` lines) with one `out:write`,
-flushing at each heartbeat and closing in `GameOver`/`Shutdown`. No size cap, one write
-per frame. Only the small `[barreplay]` heartbeat lines still go through `Spring.Echo`
-(for `infolog.txt` / `-progress`). `capture` still cross-checks each frame's `U` count
-against the `F` line's declared `<count>` and warns on a mismatch.
+flushing every sample and closing in `GameOver`/`Shutdown`. No size cap, one write per
+frame. Only the small `[barreplay]` heartbeat lines still go through `Spring.Echo` (for
+`infolog.txt` / `-progress`). `capture` still cross-checks each frame's `U` count against
+the `F` line's declared `<count>` and warns on a mismatch.
+
+**Path sandbox (non-obvious):** Spring's `LuaIO::fopen` runs `IsSafePath`, which rejects
+**absolute paths** and any `..`, so the widget can only write a *relative* path resolved
+against the engine's working directory. `engine.Run` sets `cmd.Dir` to the write-dir and
+passes the widget a relative `barreplay/<gameId>.brsnap` (`Config.SnapshotStreamPath`);
+the tool reads it from `<data>/barreplay/<gameId>.brsnap` after the run and moves it to
+`<out>/<gameId>.brsnap`. An absolute path makes `io.open` return nil → no file at all.
 
 ```
 BRSNAP D <defID> <name>                        unit-def id -> internal name (preamble)

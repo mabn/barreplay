@@ -32,7 +32,7 @@ func TestBuildStartscript(t *testing.T) {
 
 func TestWriteWidgetSubstitutesInterval(t *testing.T) {
 	dir := t.TempDir()
-	streamPath := "/out/dir with space/game.brsnap"
+	streamPath := "barreplay/game.brsnap" // relative: Spring's LuaIO forbids absolute paths
 	e := &Engine{cfg: Config{DataDir: dir, SampleEvery: 15, SnapshotStreamPath: streamPath}}
 	p, err := e.WriteWidget()
 	if err != nil {
