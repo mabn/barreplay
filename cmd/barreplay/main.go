@@ -47,6 +47,7 @@ func run() error {
 		engineBin    = flag.String("engine", "", "path to spring-headless (overrides auto-location)")
 		prdBin       = flag.String("pr-downloader", "", "path to pr-downloader (overrides auto-location)")
 		skipProv     = flag.Bool("no-provision", false, "do not download engine/game/map; assume already installed")
+		forceProv    = flag.Bool("force-provision", false, "re-run pr-downloader even for content already provisioned into -data")
 		gameOverride = flag.String("game", "", "pr-downloader game identifier override (rapid tag / springname)")
 		mapOverride  = flag.String("map", "", "pr-downloader map identifier override")
 		rapidRepo    = flag.String("rapid-repo", "", "pr-downloader rapid master repo URL (default: BAR's repo)")
@@ -138,6 +139,7 @@ func run() error {
 		PRDownloaderBinary: *prdBin,
 		SampleEvery:        *every,
 		SkipProvision:      *skipProv,
+		ForceProvision:     *forceProv,
 		GameOverride:       *gameOverride,
 		MapOverride:        *mapOverride,
 		RapidRepoMaster:    *rapidRepo,
