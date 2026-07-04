@@ -83,13 +83,19 @@ The Recoil engine is on GitHub Releases (`beyond-all-reason/RecoilEngine`). The
 `spring-dedicated`, and `pr-downloader`. Extract it into a data dir (`7z x`); use that
 dir as both the engine location and `--write-dir`.
 
-`pr-downloader` defaults to `springfiles.springrts.com`, which has **no BAR content**.
-The tool therefore sets `PRD_RAPID_REPO_MASTER` to BAR's repo automatically in
-`engine.EnsureContent` (override with `-rapid-repo` or a pre-set env var), and treats
-a download failure as a warning rather than a hard abort (idempotent; skips content
-already installed). Behind a proxy you may still need `PRD_RAPID_USE_STREAMER=false`
-and `PRD_SSL_CERT_FILE=<ca>` in the environment — the tool passes them through. The
-equivalent manual recipe:
+`pr-downloader` defaults to `springrts.com`, which has **no BAR content**. The tool
+therefore sets two env vars automatically in `engine.prdEnv` (each overridable — a
+pre-set value in the environment wins):
+
+- `PRD_RAPID_REPO_MASTER=https://repos.beyondallreason.dev/repos.gz` — **games/mods**
+  (rapid). Also settable via `-rapid-repo`.
+- `PRD_HTTP_SEARCH_URL=https://files-cdn.beyondallreason.dev/find` — **maps** (BAR maps
+  are not in rapid; they resolve through this springfiles-compatible search endpoint).
+
+Provisioning is best-effort — a download failure is a warning, not a hard abort
+(idempotent; skips content already installed). Behind a proxy you may still need
+`PRD_RAPID_USE_STREAMER=false` and `PRD_SSL_CERT_FILE=<ca>` in the environment — the
+tool passes them through. The equivalent manual recipe:
 
 ```sh
 # from inside the extracted engine/data dir:

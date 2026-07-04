@@ -19,10 +19,15 @@ import (
 	"github.com/mabn/barreplay/assets"
 )
 
-// barRapidRepoMaster is BAR's rapid repository index. pr-downloader defaults to
-// springrts.com, which does not host BAR content, so we point it here unless the
-// caller overrides it (via -rapid-repo or a pre-set PRD_RAPID_REPO_MASTER).
-const barRapidRepoMaster = "https://repos.beyondallreason.dev/repos.gz"
+// pr-downloader defaults to springrts.com for both rapid (games/mods) and the
+// HTTP map search, but that host has little/no BAR content. Point both at BAR's
+// infrastructure unless the caller overrides them (via -rapid-repo or pre-set
+// PRD_RAPID_REPO_MASTER / PRD_HTTP_SEARCH_URL). Games come from the rapid repo;
+// maps come from the springfiles-compatible search endpoint.
+const (
+	barRapidRepoMaster = "https://repos.beyondallreason.dev/repos.gz"
+	barMapSearchURL    = "https://files-cdn.beyondallreason.dev/find"
+)
 
 // Config describes where BAR content lives and how to launch the engine.
 type Config struct {
@@ -178,22 +183,28 @@ func (e *Engine) runPRD(ctx context.Context, args ...string) error {
 	return cmd.Run()
 }
 
-// prdEnv returns the environment for pr-downloader, ensuring BAR's rapid repo is
-// configured. A PRD_RAPID_REPO_MASTER already present in the environment wins, so
-// users behind proxies can still tune pr-downloader (e.g. PRD_RAPID_USE_STREAMER,
-// PRD_SSL_CERT_FILE) freely.
+// prdEnv returns the environment for pr-downloader, ensuring BAR's rapid repo
+// (games) and map search endpoint are configured. Any value already present in
+// the environment wins, so users behind proxies can still tune pr-downloader
+// (e.g. PRD_RAPID_USE_STREAMER, PRD_SSL_CERT_FILE) freely.
 func (e *Engine) prdEnv() []string {
 	env := os.Environ()
-	for _, kv := range env {
-		if strings.HasPrefix(kv, "PRD_RAPID_REPO_MASTER=") {
-			return env
+	setDefault := func(key, val string) {
+		prefix := key + "="
+		for _, kv := range env {
+			if strings.HasPrefix(kv, prefix) {
+				return // caller's environment already sets it
+			}
 		}
+		env = append(env, prefix+val)
 	}
-	master := e.cfg.RapidRepoMaster
-	if master == "" {
-		master = barRapidRepoMaster
+	repo := e.cfg.RapidRepoMaster
+	if repo == "" {
+		repo = barRapidRepoMaster
 	}
-	return append(env, "PRD_RAPID_REPO_MASTER="+master)
+	setDefault("PRD_RAPID_REPO_MASTER", repo)
+	setDefault("PRD_HTTP_SEARCH_URL", barMapSearchURL)
+	return env
 }
 
 // WriteWidget writes the snapshot widget (with SampleEvery substituted) into
