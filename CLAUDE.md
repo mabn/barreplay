@@ -83,9 +83,13 @@ The Recoil engine is on GitHub Releases (`beyond-all-reason/RecoilEngine`). The
 `spring-dedicated`, and `pr-downloader`. Extract it into a data dir (`7z x`); use that
 dir as both the engine location and `--write-dir`.
 
-`pr-downloader` defaults to `springfiles.springrts.com`; for BAR content point it at
-BAR's rapid repo and disable the streamer (which fails behind some proxies). This
-recipe worked end-to-end:
+`pr-downloader` defaults to `springfiles.springrts.com`, which has **no BAR content**.
+The tool therefore sets `PRD_RAPID_REPO_MASTER` to BAR's repo automatically in
+`engine.EnsureContent` (override with `-rapid-repo` or a pre-set env var), and treats
+a download failure as a warning rather than a hard abort (idempotent; skips content
+already installed). Behind a proxy you may still need `PRD_RAPID_USE_STREAMER=false`
+and `PRD_SSL_CERT_FILE=<ca>` in the environment — the tool passes them through. The
+equivalent manual recipe:
 
 ```sh
 # from inside the extracted engine/data dir:

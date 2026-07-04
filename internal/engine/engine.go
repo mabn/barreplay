@@ -19,6 +19,11 @@ import (
 	"github.com/mabn/barreplay/assets"
 )
 
+// barRapidRepoMaster is BAR's rapid repository index. pr-downloader defaults to
+// springrts.com, which does not host BAR content, so we point it here unless the
+// caller overrides it (via -rapid-repo or a pre-set PRD_RAPID_REPO_MASTER).
+const barRapidRepoMaster = "https://repos.beyondallreason.dev/repos.gz"
+
 // Config describes where BAR content lives and how to launch the engine.
 type Config struct {
 	// DataDir is the BAR/Spring data directory (contains engine/, games/, maps/,
@@ -37,6 +42,9 @@ type Config struct {
 	// best-effort; these are the escape hatch).
 	GameOverride string
 	MapOverride  string
+	// RapidRepoMaster overrides the pr-downloader rapid master repo URL. Empty
+	// uses barRapidRepoMaster.
+	RapidRepoMaster string
 }
 
 // Engine is a resolved, launch-ready engine.
@@ -128,25 +136,35 @@ func fileExists(p string) bool {
 // engine/game/map came from a normal client), so this is a no-op. Errors from
 // pr-downloader are returned so the caller can decide whether to proceed.
 func (e *Engine) EnsureContent(ctx context.Context, gameVersion, mapName string) error {
-	if e.cfg.SkipProvision || e.prdPath == "" {
+	if e.cfg.SkipProvision {
+		return nil
+	}
+	if e.prdPath == "" {
+		fmt.Fprintln(os.Stderr, "engine: pr-downloader not found; skipping provisioning (assuming game/map are installed)")
 		return nil
 	}
 	game := e.cfg.GameOverride
 	if game == "" {
-		game = gameVersion // pr-downloader accepts the full springname
+		game = gameVersion // pr-downloader resolves the full springname via rapid
 	}
 	m := e.cfg.MapOverride
 	if m == "" {
 		m = mapName
 	}
+	// Provisioning is best-effort: pr-downloader is idempotent (it verifies and
+	// skips content that is already present), and a download failure should not
+	// abort a run whose content is already installed — the engine will surface a
+	// clear error later if something is genuinely missing.
 	if game != "" {
+		fmt.Fprintf(os.Stderr, "engine: ensuring game %q via pr-downloader...\n", game)
 		if err := e.runPRD(ctx, "--download-game", game); err != nil {
-			return fmt.Errorf("engine: download game %q: %w", game, err)
+			fmt.Fprintf(os.Stderr, "engine: warning: could not fetch game %q: %v (continuing; it may already be installed)\n", game, err)
 		}
 	}
 	if m != "" {
+		fmt.Fprintf(os.Stderr, "engine: ensuring map %q via pr-downloader...\n", m)
 		if err := e.runPRD(ctx, "--download-map", m); err != nil {
-			return fmt.Errorf("engine: download map %q: %w", m, err)
+			fmt.Fprintf(os.Stderr, "engine: warning: could not fetch map %q: %v (continuing; it may already be installed)\n", m, err)
 		}
 	}
 	return nil
@@ -155,8 +173,27 @@ func (e *Engine) EnsureContent(ctx context.Context, gameVersion, mapName string)
 func (e *Engine) runPRD(ctx context.Context, args ...string) error {
 	full := append([]string{"--filesystem-writepath", e.cfg.DataDir}, args...)
 	cmd := exec.CommandContext(ctx, e.prdPath, full...)
+	cmd.Env = e.prdEnv()
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	return cmd.Run()
+}
+
+// prdEnv returns the environment for pr-downloader, ensuring BAR's rapid repo is
+// configured. A PRD_RAPID_REPO_MASTER already present in the environment wins, so
+// users behind proxies can still tune pr-downloader (e.g. PRD_RAPID_USE_STREAMER,
+// PRD_SSL_CERT_FILE) freely.
+func (e *Engine) prdEnv() []string {
+	env := os.Environ()
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "PRD_RAPID_REPO_MASTER=") {
+			return env
+		}
+	}
+	master := e.cfg.RapidRepoMaster
+	if master == "" {
+		master = barRapidRepoMaster
+	}
+	return append(env, "PRD_RAPID_REPO_MASTER="+master)
 }
 
 // WriteWidget writes the snapshot widget (with SampleEvery substituted) into

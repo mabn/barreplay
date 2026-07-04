@@ -98,6 +98,40 @@ func TestWidgetHasRequiredCallins(t *testing.T) {
 	}
 }
 
+func envValue(env []string, key string) (string, bool) {
+	p := key + "="
+	// last occurrence wins, matching exec's behavior
+	val, ok := "", false
+	for _, kv := range env {
+		if strings.HasPrefix(kv, p) {
+			val, ok = kv[len(p):], true
+		}
+	}
+	return val, ok
+}
+
+func TestPRDEnvInjectsBARRepo(t *testing.T) {
+	// Default: no user setting -> BAR's repo is injected.
+	t.Setenv("PRD_RAPID_REPO_MASTER", "")
+	os.Unsetenv("PRD_RAPID_REPO_MASTER")
+	e := &Engine{cfg: Config{DataDir: "/x"}}
+	if v, ok := envValue(e.prdEnv(), "PRD_RAPID_REPO_MASTER"); !ok || v != barRapidRepoMaster {
+		t.Errorf("default PRD_RAPID_REPO_MASTER = %q (ok=%v), want %q", v, ok, barRapidRepoMaster)
+	}
+
+	// Config override wins over the default.
+	e2 := &Engine{cfg: Config{DataDir: "/x", RapidRepoMaster: "https://example.test/repos.gz"}}
+	if v, _ := envValue(e2.prdEnv(), "PRD_RAPID_REPO_MASTER"); v != "https://example.test/repos.gz" {
+		t.Errorf("config override PRD_RAPID_REPO_MASTER = %q", v)
+	}
+
+	// A user-set environment variable wins over everything.
+	t.Setenv("PRD_RAPID_REPO_MASTER", "https://user.test/repos.gz")
+	if v, _ := envValue(e2.prdEnv(), "PRD_RAPID_REPO_MASTER"); v != "https://user.test/repos.gz" {
+		t.Errorf("user env should win, got %q", v)
+	}
+}
+
 func firstLineWith(s, sub string) string {
 	for _, ln := range strings.Split(s, "\n") {
 		if strings.Contains(ln, sub) {

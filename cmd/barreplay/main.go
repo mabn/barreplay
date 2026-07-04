@@ -46,6 +46,7 @@ func run() error {
 		skipProv     = flag.Bool("no-provision", false, "do not download engine/game/map; assume already installed")
 		gameOverride = flag.String("game", "", "pr-downloader game identifier override (rapid tag / springname)")
 		mapOverride  = flag.String("map", "", "pr-downloader map identifier override")
+		rapidRepo    = flag.String("rapid-repo", "", "pr-downloader rapid master repo URL (default: BAR's repo)")
 		noRun        = flag.Bool("no-run", false, "download + parse only; do not launch the engine")
 	)
 	flag.Usage = func() {
@@ -125,6 +126,7 @@ func run() error {
 		SkipProvision:      *skipProv,
 		GameOverride:       *gameOverride,
 		MapOverride:        *mapOverride,
+		RapidRepoMaster:    *rapidRepo,
 	}, h.EngineVersion)
 	if err != nil {
 		return err
