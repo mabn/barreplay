@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/mabn/barreplay/assets"
@@ -61,13 +62,21 @@ type Config struct {
 	// ("debug 1 0": collection on, overlay drawer off), unlocking the fine-grained
 	// Sim::* sub-scope records and per-heartbeat PROFD samples. Small overhead.
 	Profile bool
+	// DisableWidgets makes the snapshot widget turn off BAR's default widget suite
+	// at the first sim frame (unsynced-only overhead; cannot affect the replay).
+	DisableWidgets bool
+	// ThrottleDraw lowers the engine's draw pacing to ~1 fps for the run via the
+	// MinDrawFPS/MinSimDrawBalance springsettings (injected through a
+	// barreplay-owned config file; the user's springsettings.cfg is not touched).
+	ThrottleDraw bool
 }
 
 // Engine is a resolved, launch-ready engine.
 type Engine struct {
-	cfg          Config
-	headlessPath string
-	prdPath      string
+	cfg           Config
+	headlessPath  string
+	prdPath       string
+	engineCfgPath string // set by WriteEngineConfig; passed to the engine as --config
 }
 
 func headlessName() string {
@@ -265,11 +274,8 @@ func (e *Engine) WriteWidget() (string, error) {
 	}
 	src := strings.ReplaceAll(assets.SnapshotWidgetLua, "__SAMPLE_EVERY__", fmt.Sprint(e.cfg.SampleEvery))
 	src = strings.ReplaceAll(src, "__OUTPUT_PATH__", luaEscapeString(e.cfg.SnapshotStreamPath))
-	profile := "0"
-	if e.cfg.Profile {
-		profile = "1"
-	}
-	src = strings.ReplaceAll(src, "__PROFILE__", profile)
+	src = strings.ReplaceAll(src, "__PROFILE__", boolToken(e.cfg.Profile))
+	src = strings.ReplaceAll(src, "__DISABLE_WIDGETS__", boolToken(e.cfg.DisableWidgets))
 	widgetPath := filepath.Join(widgetsDir, "snapshot_widget.lua")
 	if err := os.WriteFile(widgetPath, []byte(src), 0o644); err != nil {
 		return "", err
@@ -284,6 +290,82 @@ func luaEscapeString(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `"`, `\"`)
 	return s
+}
+
+// boolToken renders a bool as the "1"/"0" the widget's Lua token comparisons use.
+func boolToken(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
+}
+
+// WriteEngineConfig writes the barreplay-owned engine config file that Run passes
+// via --config: the user's <DataDir>/springsettings.cfg (if any) merged with
+// barreplay's overrides. Using a separate file leaves the user's real config
+// untouched (the engine also writes runtime config changes back to whatever file
+// --config names, so it must be ours). Returns the file's path.
+//
+// With ThrottleDraw, MinDrawFPS/MinSimDrawBalance are overridden: they govern how
+// often the demo-playback loop yields from sim to draw (default: every 15 sim
+// frames plus 15% of CPU time reserved for drawing), and even headless each draw
+// runs the full unsynced update chain (WorldDrawer, unit/feature drawer updates).
+// MinDrawFPS=1 + MinSimDrawBalance=0.001 give ~1 draw/s. Both are read once at
+// engine startup (CGlobalConfig), so a config file — not a runtime Lua call — is
+// the only way to set them.
+func (e *Engine) WriteEngineConfig() (string, error) {
+	existing, err := os.ReadFile(filepath.Join(e.cfg.DataDir, "springsettings.cfg"))
+	if err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	overrides := map[string]string{}
+	if e.cfg.ThrottleDraw {
+		overrides["MinDrawFPS"] = "1"
+		overrides["MinSimDrawBalance"] = "0.001"
+	}
+	p, err := filepath.Abs(filepath.Join(e.cfg.DataDir, "_barreplay_springsettings.cfg"))
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(p, mergeSpringSettings(existing, overrides), 0o644); err != nil {
+		return "", err
+	}
+	e.engineCfgPath = p
+	return p, nil
+}
+
+// mergeSpringSettings overlays overrides onto an existing springsettings.cfg
+// ("key = value" lines): matching keys (case-insensitive) are replaced in place,
+// missing ones appended in sorted order. Unrelated lines pass through untouched.
+func mergeSpringSettings(existing []byte, overrides map[string]string) []byte {
+	pending := map[string]string{} // lower(key) -> canonical key
+	for k := range overrides {
+		pending[strings.ToLower(k)] = k
+	}
+	var out []string
+	if len(existing) > 0 {
+		for _, line := range strings.Split(strings.TrimRight(string(existing), "\n"), "\n") {
+			if k, _, found := strings.Cut(line, "="); found {
+				lk := strings.ToLower(strings.TrimSpace(k))
+				if ck, hit := pending[lk]; hit {
+					out = append(out, ck+" = "+overrides[ck])
+					delete(pending, lk)
+					continue
+				}
+			}
+			out = append(out, line)
+		}
+	}
+	rest := make([]string, 0, len(pending))
+	for _, ck := range pending {
+		rest = append(rest, ck+" = "+overrides[ck])
+	}
+	sort.Strings(rest)
+	out = append(out, rest...)
+	if len(out) == 0 {
+		return []byte{}
+	}
+	return []byte(strings.Join(out, "\n") + "\n")
 }
 
 // BuildStartscript writes a wrapper startscript that plays demoPath at maximum
@@ -317,7 +399,11 @@ func (e *Engine) BuildStartscript(demoPath string) (string, error) {
 // end EOFs when the engine exits) via capture.Consume, then calls wait.
 // Cancelling ctx kills the engine.
 func (e *Engine) Run(ctx context.Context, scriptPath string) (io.Reader, func() error, error) {
-	args := []string{"--isolation", "--write-dir", e.cfg.DataDir, scriptPath}
+	args := []string{"--isolation", "--write-dir", e.cfg.DataDir}
+	if e.engineCfgPath != "" {
+		args = append(args, "--config", e.engineCfgPath)
+	}
+	args = append(args, scriptPath)
 	cmd := exec.CommandContext(ctx, e.headlessPath, args...)
 	// Pin the working directory to the write-dir: the widget writes its stream via a
 	// relative path (Spring's LuaIO sandbox forbids absolute paths), resolved against

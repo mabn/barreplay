@@ -37,6 +37,7 @@ function widget:GetInfo()
 		license = "MIT",
 		layer   = 0,
 		enabled = true, -- self-enable; the tool also seeds the widget order list
+		handler = true, -- grants widget.widgetHandler (used to disable the default suite)
 	}
 end
 
@@ -58,6 +59,12 @@ local playbackSpeed = 1000
 -- Sim::Los, ...) record — CTimeProfiler drops non-"special" timers while
 -- disabled — and each heartbeat writes per-scope PROFD samples to the stream.
 local profileMode = ("__PROFILE__" == "1")
+
+-- Disable BAR's default widget suite (substituted from -disable-widgets). In a
+-- replay the game's whole UI widget set loads and runs per-frame callins nobody
+-- watches — pure unsynced overhead (~15% of wall time measured). Widgets cannot
+-- affect the synced sim, so disabling them cannot change the captured data.
+local disableWidgets = ("__DISABLE_WIDGETS__" == "1")
 
 -- Snapshot output file path (substituted by the Go tool). Spring's LuaIO sandbox
 -- rejects absolute paths (see IsSafePath), so this is a RELATIVE path resolved
@@ -175,6 +182,30 @@ local function emitProfileTotals()
 	writeChunk(table.concat(lines, "\n"))
 end
 
+-- disableOtherWidgets turns off every other active widget through the handler's
+-- queued DisableWidget (callin-safe: the handler applies it between callins).
+-- BAR auto-enables its whole game-archive widget suite in replays and a seeded
+-- order list cannot prevent that (absent widgets re-enable at order 12345), so
+-- runtime disabling via the handler is the only reliable off switch. Runs once,
+-- from the first GameFrame, when the full suite is guaranteed loaded.
+local widgetsDisabled = false
+local function disableOtherWidgets()
+	widgetsDisabled = true
+	local wh = widget.widgetHandler
+	if not (wh and wh.knownWidgets and wh.DisableWidget) then
+		Echo("[barreplay] widget handler API unavailable; leaving default widgets enabled")
+		return
+	end
+	local n = 0
+	for name, ki in pairs(wh.knownWidgets) do
+		if ki.active and name ~= "BAR Replay Snapshotter" then
+			wh:DisableWidget(name)
+			n = n + 1
+		end
+	end
+	Echo(string.format("[barreplay] disabling %d default widgets (unsynced overhead only)", n))
+end
+
 local function emitPreamble()
 	local parts = {}
 	-- Unit-def id -> internal name table (stable for the whole game).
@@ -216,6 +247,12 @@ function widget:Initialize()
 end
 
 function widget:GameFrame(frame)
+	if disableWidgets and not widgetsDisabled then
+		local ok, err = pcall(disableOtherWidgets)
+		if not ok then
+			Echo("[barreplay] disabling widgets failed (" .. tostring(err) .. "); continuing")
+		end
+	end
 	local beat = (frame % heartbeatEvery == 0)
 	local sample = (frame % sampleEvery == 0)
 	if not beat and not sample then

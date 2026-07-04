@@ -56,6 +56,8 @@ func run() error {
 		noRun        = flag.Bool("no-run", false, "download + parse only; do not launch the engine")
 		progress     = flag.Bool("progress", false, "poll infolog.txt every 2s and print replay progress (time, %, ETA, fps)")
 		profile      = flag.Bool("profile", false, "enable the engine's internal time profiler for a fine-grained Sim breakdown and a unit-count growth table (small overhead)")
+		disWidgets   = flag.Bool("disable-widgets", true, "disable BAR's default widget suite during the replay (pure unsynced overhead; cannot affect the sim); =false to keep it")
+		throttleDraw = flag.Bool("throttle-draw", true, "throttle the headless draw loop to ~1 fps via MinDrawFPS/MinSimDrawBalance; =false for engine defaults")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: barreplay [flags] <replay-link | gameId | path.sdfz>\n\n")
@@ -148,6 +150,8 @@ func run() error {
 		RapidRepoMaster:    *rapidRepo,
 		SnapshotStreamPath: relStream,
 		Profile:            *profile,
+		DisableWidgets:     *disWidgets,
+		ThrottleDraw:       *throttleDraw,
 	}, h.EngineVersion)
 	if err != nil {
 		return err
@@ -163,6 +167,15 @@ func run() error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "widget: %s (every %d frames)\n", widgetPath, *every)
+
+	// Engine config (user's springsettings.cfg + our overrides, e.g. the draw
+	// throttle), passed to the engine via --config so the real config is untouched.
+	engineCfg, err := eng.WriteEngineConfig()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "engine config: %s (draw throttle: %v, default widgets disabled: %v)\n",
+		engineCfg, *throttleDraw, *disWidgets)
 
 	// BAR won't auto-run a fresh user widget in a replay; seed its widget-config
 	// order list to enable ours, restoring the user's original config afterward.
