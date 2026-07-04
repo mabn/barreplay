@@ -25,6 +25,17 @@ func TestWidgetNameMatchesAsset(t *testing.T) {
 	}
 }
 
+// The widget-suite disabling needs handler access and must exclude itself by the
+// exact GetInfo name — otherwise it disables its own sampling.
+func TestWidgetDisableSuiteGuards(t *testing.T) {
+	if !strings.Contains(assets.SnapshotWidgetLua, "handler = true") {
+		t.Error("widget asset must set handler = true in GetInfo to reach widgetHandler")
+	}
+	if !strings.Contains(assets.SnapshotWidgetLua, `name ~= "`+widgetName+`"`) {
+		t.Errorf("widget disable loop must self-exclude by the exact name %q", widgetName)
+	}
+}
+
 func TestEnableWidgetPreservesExistingConfig(t *testing.T) {
 	dir := t.TempDir()
 	cfg := configPath(dir)

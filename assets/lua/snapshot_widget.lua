@@ -24,6 +24,7 @@
 --   BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp>
 --   BRSNAP EV <frame> <kind> <id> <def> <team>
 --   BRSNAP PROF <totalMs> <name>               engine time-profiler record (at game over)
+--   BRSNAP PROFD <frame> <units> <totalMs> <name>   per-heartbeat profiler sample (-profile only)
 -- Plain "[barreplay] ..." heartbeat lines are also echoed for infolog visibility;
 -- capture ignores anything without the BRSNAP tag.
 
@@ -36,6 +37,7 @@ function widget:GetInfo()
 		license = "MIT",
 		layer   = 0,
 		enabled = true, -- self-enable; the tool also seeds the widget order list
+		handler = true, -- grants widget.widgetHandler (used to disable the default suite)
 	}
 end
 
@@ -51,6 +53,18 @@ local heartbeatEvery = 300
 -- replay fast-forwards instead of running realtime; the engine clamps to its own
 -- ceiling and otherwise runs as fast as the CPU allows.
 local playbackSpeed = 1000
+
+-- Profile mode (substituted by the Go tool from -profile). When on, Initialize
+-- enables the engine's time profiler so the fine-grained scopes (Sim::Unit::*,
+-- Sim::Los, ...) record — CTimeProfiler drops non-"special" timers while
+-- disabled — and each heartbeat writes per-scope PROFD samples to the stream.
+local profileMode = ("__PROFILE__" == "1")
+
+-- Disable BAR's default widget suite (substituted from -disable-widgets). In a
+-- replay the game's whole UI widget set loads and runs per-frame callins nobody
+-- watches — pure unsynced overhead (~15% of wall time measured). Widgets cannot
+-- affect the synced sim, so disabling them cannot change the captured data.
+local disableWidgets = ("__DISABLE_WIDGETS__" == "1")
 
 -- Snapshot output file path (substituted by the Go tool). Spring's LuaIO sandbox
 -- rejects absolute paths (see IsSafePath), so this is a RELATIVE path resolved
@@ -85,7 +99,9 @@ end
 -- high-res timer is available, else "<n>ms" (milliseconds).
 local function elapsedStr(t0)
 	if hiResTimer then
-		local ms = spDiffTimers(spGetTimer(), t0) -- milliseconds (float)
+		-- DiffTimers returns SECONDS unless returnMs=true is passed — omitting it
+		-- once made 2ms samples display as "2us".
+		local ms = spDiffTimers(spGetTimer(), t0, true) -- milliseconds (float)
 		return string.format("%.0fus", ms * 1000)
 	end
 	return string.format("%.1fms", (os.clock() - t0) * 1000)
@@ -162,10 +178,56 @@ local function emitProfileTotals()
 		return
 	end
 	local lines = {}
-	for i = 1, math.min(#recs, 20) do
+	for i = 1, math.min(#recs, 40) do
 		lines[i] = string.format("BRSNAP PROF %.1f %s", recs[i].ms, recs[i].name)
 	end
 	writeChunk(table.concat(lines, "\n"))
+end
+
+-- Draw-frame counter: widget:Update fires exactly once per draw frame, so the
+-- per-heartbeat delta is the engine's real draw rate — the direct check on
+-- whether -throttle-draw is holding (the sim/draw balance can be overridden by
+-- e.g. packet-queue starvation against the local demo server).
+local drawFrames = 0
+local lastDrawFrames = 0
+
+function widget:Update()
+	drawFrames = drawFrames + 1
+end
+
+-- activeWidgetCount reports how many widgets are currently active ("-" if the
+-- handler is unavailable): confirms the default suite stayed disabled.
+local function activeWidgetCount()
+	local wh = widget.widgetHandler
+	local ok, n = pcall(function() return #wh.widgets end)
+	if ok and n then
+		return tostring(n)
+	end
+	return "-"
+end
+
+-- disableOtherWidgets turns off every other active widget through the handler's
+-- queued DisableWidget (callin-safe: the handler applies it between callins).
+-- BAR auto-enables its whole game-archive widget suite in replays and a seeded
+-- order list cannot prevent that (absent widgets re-enable at order 12345), so
+-- runtime disabling via the handler is the only reliable off switch. Runs once,
+-- from the first GameFrame, when the full suite is guaranteed loaded.
+local widgetsDisabled = false
+local function disableOtherWidgets()
+	widgetsDisabled = true
+	local wh = widget.widgetHandler
+	if not (wh and wh.knownWidgets and wh.DisableWidget) then
+		Echo("[barreplay] widget handler API unavailable; leaving default widgets enabled")
+		return
+	end
+	local n = 0
+	for name, ki in pairs(wh.knownWidgets) do
+		if ki.active and name ~= "BAR Replay Snapshotter" then
+			wh:DisableWidget(name)
+			n = n + 1
+		end
+	end
+	Echo(string.format("[barreplay] disabling %d default widgets (unsynced overhead only)", n))
 end
 
 local function emitPreamble()
@@ -191,6 +253,13 @@ function widget:Initialize()
 	-- GetAllUnits returns every unit regardless of line-of-sight.
 	forceMaxSpeed()
 	Spring.SendCommands("spectatorfullview 1")
+	if profileMode then
+		-- "debug <drawDebug> <draw4Real>": arg 1 enables CTimeProfiler collection
+		-- (unlocking the non-"special" scopes like Sim::Unit::*), arg 2 keeps the
+		-- ProfileDrawer overlay off — there is nothing to draw headless.
+		Spring.SendCommands("debug 1 0")
+		Echo("[barreplay] profile mode: engine time profiler enabled (debug 1 0)")
+	end
 	out = io.open(outputPath, "w")
 	if out then
 		Echo(string.format("[barreplay] snapshot widget loaded: writing %s, sampling every %d frames, heartbeat every %d, speed %d",
@@ -202,6 +271,12 @@ function widget:Initialize()
 end
 
 function widget:GameFrame(frame)
+	if disableWidgets and not widgetsDisabled then
+		local ok, err = pcall(disableOtherWidgets)
+		if not ok then
+			Echo("[barreplay] disabling widgets failed (" .. tostring(err) .. "); continuing")
+		end
+	end
 	local beat = (frame % heartbeatEvery == 0)
 	local sample = (frame % sampleEvery == 0)
 	if not beat and not sample then
@@ -241,12 +316,14 @@ function widget:GameFrame(frame)
 		-- Re-assert speed in case demo playback reset it, and show progress. Include
 		-- the sample processing time when this heartbeat frame was also sampled.
 		forceMaxSpeed()
+		local draws = drawFrames - lastDrawFrames
+		lastDrawFrames = drawFrames
+		local line = string.format("[barreplay] heartbeat frame=%d t=%.0fs units=%d draws=%d widgets=%s",
+			frame, spGetGameSeconds(), n, draws, activeWidgetCount())
 		if sampleTime then
-			Echo(string.format("[barreplay] heartbeat frame=%d t=%.0fs units=%d sample_time=%s",
-				frame, spGetGameSeconds(), n, sampleTime))
-		else
-			Echo(string.format("[barreplay] heartbeat frame=%d t=%.0fs units=%d", frame, spGetGameSeconds(), n))
+			line = line .. " sample_time=" .. sampleTime
 		end
+		Echo(line)
 		-- Top profiler scopes so far (infolog only): shows whether the frame cost
 		-- is drifting (e.g. Sim growing with unit count) as the replay progresses.
 		local recs = profilerTotals()
@@ -256,6 +333,16 @@ function widget:GameFrame(frame)
 				parts[i] = string.format("%s=%.0fms", recs[i].name, recs[i].ms)
 			end
 			Echo("[barreplay] prof " .. table.concat(parts, " "))
+			-- In profile mode, also record per-scope cumulative totals with the
+			-- current unit count into the stream: the CLI turns consecutive samples
+			-- into per-interval deltas and reports which scopes grow with unit count.
+			if profileMode then
+				local lines = {}
+				for i = 1, math.min(15, #recs) do
+					lines[i] = string.format("BRSNAP PROFD %d %d %.1f %s", frame, n, recs[i].ms, recs[i].name)
+				end
+				writeChunk(table.concat(lines, "\n"))
+			end
 		end
 	end
 end
