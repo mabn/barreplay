@@ -44,8 +44,8 @@ between the engine's text output and the writer.
 
 `barapi.Resolve/Download` → `demofile.Parse` (versions/map/gameId) →
 `engine.Locate` → `engine.EnsureContent` (pr-downloader) → `engine.WriteWidget` →
-`engine.BuildStartscript` → `engine.Run` (stdout) → `capture.Consume` →
-`snapshot.NewJSONLWriter`.
+`engine.EnableWidget` (seed widget config) → `engine.BuildStartscript` →
+`engine.Run` (stdout) → `capture.Consume` → `snapshot.NewJSONLWriter`.
 
 ### Widget wire protocol (BRSNAP)
 
@@ -63,6 +63,26 @@ BRSNAP EV <frame> <kind> <id> <def> <team>     unit lifecycle event
 
 The widget is strictly read-only (`Get*` + `Spring.Echo` only) so it cannot desync the
 deterministic replay. `__SAMPLE_EVERY__` is substituted at write time (`-every`, default 30 = 1 Hz).
+It also echoes plain `[barreplay] ...` heartbeat lines (on load + every 300 frames ≈ 10s of
+game time) for infolog visibility; `capture` ignores any line without the `BRSNAP` tag. The
+widget forces max playback speed via `setminspeed`/`setmaxspeed` in `Initialize` (re-asserted
+each heartbeat) — without a loaded widget the replay runs realtime.
+
+### Making BAR actually load the widget (non-obvious)
+
+Dropping a widget into `<data>/LuaUI/Widgets/` with `enabled = true` is **not** enough. BAR's
+widget handler (`luaui/barwidgets.lua`) auto-runs a *new user* widget only when
+`self.allowUserWidgets and not allowuserwidgets` — but a **replay forces `allowuserwidgets = true`**,
+so that clause is false and the widget is scanned yet left disabled. A user widget runs only if
+its name is already in the saved order list `<data>/LuaUI/Config/<gameShortName>.lua` (BAR is
+`BYAR`). So `engine.EnableWidget` (`internal/engine/widgetconfig.go`) seeds a minimal config
+`return { order = { ["BAR Replay Snapshotter"] = 1 }, ... }`, backing up and restoring the user's
+real config around the run (with self-heal if a prior run was interrupted). The widget name in
+the seeded config must exactly match `GetInfo().name` in the Lua asset (a test guards this).
+
+A **gadget** would be worse here: `luarules/gadgets.lua` only scans the write-dir when
+`Spring.IsDevLuaEnabled()` (else `VFS.ZIP_ONLY`, game-archive only), so a dropped-in gadget
+won't load without an extra dev flag. Widgets are the right injection point.
 
 ## Running a real capture (needs the engine + content)
 

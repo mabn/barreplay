@@ -142,6 +142,19 @@ func run() error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "widget: %s (every %d frames)\n", widgetPath, *every)
+
+	// BAR won't auto-run a fresh user widget in a replay; seed its widget-config
+	// order list to enable ours, restoring the user's original config afterward.
+	restoreCfg, err := eng.EnableWidget()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if rerr := restoreCfg(); rerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not restore widget config: %v\n", rerr)
+		}
+	}()
+
 	scriptPath, err := eng.BuildStartscript(demoPath)
 	if err != nil {
 		return err

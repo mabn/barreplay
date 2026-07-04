@@ -168,10 +168,14 @@ within the map bounds.
 - The widget forces `spectatorfullview 1` so `Spring.GetAllUnits()` returns every
   unit regardless of line-of-sight. It is strictly read-only (only `Get*` +
   `Spring.Echo`), so it cannot desync the replay.
-- The widget declares `enabled = true`, which BAR's widget handler honors to
-  auto-load an unknown widget dropped into `<data>/LuaUI/Widgets/` — no in-game
-  "enable" step. `-engine`, `-no-provision`, `-game`, `-map`, and `-rapid-repo` are the
-  escape hatches for install-specific setups.
+- Dropping the widget into `<data>/LuaUI/Widgets/` with `enabled = true` is **not**
+  enough: BAR only auto-runs a user widget already named in its saved order list, and
+  a replay forces `allowuserwidgets = true`, which paradoxically skips the
+  `enabled`-based auto-enable for fresh user widgets. So `barreplay` seeds
+  `<data>/LuaUI/Config/BYAR.lua` to enable the widget, backing up and restoring your
+  real widget config around the run. (A gadget would need engine dev-Lua to load from
+  the write-dir, so a widget is the right mechanism.) `-engine`, `-no-provision`,
+  `-game`, `-map`, and `-rapid-repo` are the escape hatches for install-specific setups.
 - The transport from Lua to Go is tagged stdout lines (`BRSNAP ...`). `internal/capture`
   isolates this so a TCP-socket transport can be added later without touching the
   `snapshot` format.
