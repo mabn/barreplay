@@ -114,9 +114,13 @@ func TestPRDEnvInjectsBARRepo(t *testing.T) {
 	// Default: no user setting -> BAR's repo is injected.
 	t.Setenv("PRD_RAPID_REPO_MASTER", "")
 	os.Unsetenv("PRD_RAPID_REPO_MASTER")
+	os.Unsetenv("PRD_HTTP_SEARCH_URL")
 	e := &Engine{cfg: Config{DataDir: "/x"}}
 	if v, ok := envValue(e.prdEnv(), "PRD_RAPID_REPO_MASTER"); !ok || v != barRapidRepoMaster {
 		t.Errorf("default PRD_RAPID_REPO_MASTER = %q (ok=%v), want %q", v, ok, barRapidRepoMaster)
+	}
+	if v, ok := envValue(e.prdEnv(), "PRD_HTTP_SEARCH_URL"); !ok || v != barMapSearchURL {
+		t.Errorf("default PRD_HTTP_SEARCH_URL = %q (ok=%v), want %q", v, ok, barMapSearchURL)
 	}
 
 	// Config override wins over the default.
