@@ -156,60 +156,85 @@ func (e *Engine) EnsureContent(ctx context.Context, gameVersion, mapName string)
 		return nil
 	}
 
-	// pr-downloader re-queries (and can re-download) content on every call even when
-	// it is already installed, so remember what we've fetched into this data dir and
-	// skip repeat work. -force-provision bypasses the cache.
-	pc := e.loadProvisioned()
-
-	if e.cfg.GameOverride == "" && !e.cfg.ForceProvision && pc.Games[gameVersion] {
-		fmt.Fprintf(os.Stderr, "engine: game %q already provisioned; skipping (use -force-provision to refetch)\n", gameVersion)
-	} else {
-		game := e.cfg.GameOverride
-		if game == "" {
-			// A replay pins one exact game build. Resolve the demo's game springname to
-			// its precise rapid tag ("byar:git:<sha>") so pr-downloader fetches that build
-			// and not the moving byar:test — otherwise the engine aborts because the
-			// dependent archive the demo requires is not installed.
-			game = gameVersion
-			if tag, ok := e.resolveRapidGameTag(ctx, gameVersion); ok {
-				fmt.Fprintf(os.Stderr, "engine: resolved game %q -> rapid tag %s\n", gameVersion, tag)
-				game = tag
-			} else {
-				fmt.Fprintf(os.Stderr, "engine: could not resolve a rapid tag for %q; passing it to pr-downloader as-is\n", gameVersion)
-			}
+	// Resolve the game to its precise rapid tag + package md5. A replay pins one exact
+	// build; resolving to "byar:git:<sha>" makes pr-downloader fetch that build and not
+	// the moving byar:test (which would leave the engine unable to find the dependent
+	// archive). The md5 lets us check whether the package is already installed.
+	game := e.cfg.GameOverride
+	var gameMD5 string
+	if game == "" {
+		game = gameVersion
+		if tag, md5, ok := e.resolveRapidGameTag(ctx, gameVersion); ok {
+			fmt.Fprintf(os.Stderr, "engine: resolved game %q -> rapid tag %s\n", gameVersion, tag)
+			game, gameMD5 = tag, md5
+		} else {
+			fmt.Fprintf(os.Stderr, "engine: could not resolve a rapid tag for %q; passing it to pr-downloader as-is\n", gameVersion)
 		}
-		// Provisioning is best-effort: a download failure should not abort a run whose
-		// content is already installed — the engine surfaces a clear error later if
-		// something is genuinely missing.
-		if game != "" {
+	}
+	// Provisioning is best-effort: a download failure should not abort a run whose
+	// content is already installed — the engine surfaces a clear error later if
+	// something is genuinely missing. pr-downloader re-queries/re-downloads even when
+	// content is present, so skip it when we can see the content on disk already: a
+	// rapid game is a finalized packages/<md5>.sdp, a map an archive in maps/.
+	if game != "" {
+		if !e.cfg.ForceProvision && e.cfg.GameOverride == "" && e.gameInstalled(gameMD5) {
+			fmt.Fprintf(os.Stderr, "engine: game %q already installed (packages/%s.sdp); skipping download\n", gameVersion, gameMD5)
+		} else {
 			fmt.Fprintf(os.Stderr, "engine: ensuring game %q via pr-downloader...\n", game)
 			if err := e.runPRD(ctx, "--download-game", game); err != nil {
 				fmt.Fprintf(os.Stderr, "engine: warning: could not fetch game %q: %v (continuing; it may already be installed)\n", game, err)
-			} else if e.cfg.GameOverride == "" {
-				pc.Games[gameVersion] = true
-				e.saveProvisioned(pc)
 			}
 		}
 	}
 
-	if e.cfg.MapOverride == "" && !e.cfg.ForceProvision && pc.Maps[mapName] {
-		fmt.Fprintf(os.Stderr, "engine: map %q already provisioned; skipping (use -force-provision to refetch)\n", mapName)
-	} else {
-		m := e.cfg.MapOverride
-		if m == "" {
-			m = mapName
-		}
-		if m != "" {
+	m := e.cfg.MapOverride
+	if m == "" {
+		m = mapName
+	}
+	if m != "" {
+		if !e.cfg.ForceProvision && e.cfg.MapOverride == "" && e.mapInstalled(mapName) {
+			fmt.Fprintf(os.Stderr, "engine: map %q already installed; skipping download\n", mapName)
+		} else {
 			fmt.Fprintf(os.Stderr, "engine: ensuring map %q via pr-downloader...\n", m)
 			if err := e.runPRD(ctx, "--download-map", m); err != nil {
 				fmt.Fprintf(os.Stderr, "engine: warning: could not fetch map %q: %v (continuing; it may already be installed)\n", m, err)
-			} else if e.cfg.MapOverride == "" {
-				pc.Maps[mapName] = true
-				e.saveProvisioned(pc)
 			}
 		}
 	}
 	return nil
+}
+
+// gameInstalled reports whether the rapid game package <md5>.sdp is finalized in the
+// data dir (an unfinished download leaves only <md5>.sdp.incomplete, which the engine
+// ignores). Empty md5 (rapid resolution failed) -> false, so we still try to fetch.
+func (e *Engine) gameInstalled(md5 string) bool {
+	return md5 != "" && fileExists(filepath.Join(e.cfg.DataDir, "packages", md5+".sdp"))
+}
+
+// mapInstalled reports whether a map archive for springname is present in <data>/maps.
+// BAR maps are named after a normalized springname (lowercase, spaces -> underscores,
+// e.g. "Hooked 1.1.1" -> hooked_1.1.1.sd7), matched case-insensitively. A miss just
+// means we ask pr-downloader (no worse than before), so a false negative is harmless.
+func (e *Engine) mapInstalled(springname string) bool {
+	want := strings.ToLower(strings.ReplaceAll(springname, " ", "_"))
+	entries, err := os.ReadDir(filepath.Join(e.cfg.DataDir, "maps"))
+	if err != nil {
+		return false
+	}
+	for _, ent := range entries {
+		if ent.IsDir() {
+			continue
+		}
+		name := ent.Name()
+		ext := strings.ToLower(filepath.Ext(name))
+		if ext != ".sd7" && ext != ".sdz" {
+			continue
+		}
+		if strings.ToLower(name[:len(name)-len(ext)]) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) runPRD(ctx context.Context, args ...string) error {

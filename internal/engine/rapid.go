@@ -28,50 +28,50 @@ import (
 // when the build is absent from it — new builds appear over time, so a stale cache
 // must trigger exactly one refresh. It is best-effort: any failure returns ok=false
 // and the caller falls back to passing the springname as-is (or a -game override).
-func (e *Engine) resolveRapidGameTag(ctx context.Context, springname string) (string, bool) {
+func (e *Engine) resolveRapidGameTag(ctx context.Context, springname string) (tag, md5 string, ok bool) {
 	cachePath := e.versionsCachePath()
 
 	// Fast path: the cached index already knows this build.
-	if tag, ok, _ := searchVersionsFile(cachePath, springname); ok {
-		return tag, true
+	if tag, md5, ok, _ := searchVersionsFile(cachePath, springname); ok {
+		return tag, md5, true
 	}
 
 	// Cache is absent or predates this build — refresh it, then look again.
 	fmt.Fprintf(os.Stderr, "engine: refreshing rapid index (%s)...\n", e.versionsURL())
 	if err := e.downloadVersions(ctx, cachePath); err != nil {
 		fmt.Fprintf(os.Stderr, "engine: could not fetch rapid index: %v\n", err)
-		return "", false
+		return "", "", false
 	}
-	tag, ok, _ := searchVersionsFile(cachePath, springname)
-	return tag, ok
+	tag, md5, ok, _ = searchVersionsFile(cachePath, springname)
+	return tag, md5, ok
 }
 
 // searchVersionsFile opens a cached versions.gz and searches it for springname.
-func searchVersionsFile(path, springname string) (string, bool, error) {
+func searchVersionsFile(path, springname string) (tag, md5 string, ok bool, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 	defer f.Close()
 	return searchVersions(f, springname)
 }
 
 // searchVersions scans a gzipped rapid index for an exact springname match and
-// returns its tag.
-func searchVersions(r io.Reader, springname string) (string, bool, error) {
+// returns its tag and package md5.
+func searchVersions(r io.Reader, springname string) (tag, md5 string, ok bool, err error) {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 	defer gz.Close()
 	sc := bufio.NewScanner(gz)
 	sc.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	for sc.Scan() {
-		if tag, ok := matchRapidLine(sc.Text(), springname); ok {
-			return tag, true, nil
+		if tag, md5, ok := matchRapidLine(sc.Text(), springname); ok {
+			return tag, md5, true, nil
 		}
 	}
-	return "", false, sc.Err()
+	return "", "", false, sc.Err()
 }
 
 // downloadVersions fetches the rapid index and writes it to dest atomically (a
@@ -128,19 +128,28 @@ func verifyGzip(path string) error {
 }
 
 // matchRapidLine parses one rapid versions.gz line ("tag,md5,depends,springname")
-// and returns the tag when the springname (the last comma-separated field) matches
-// exactly. Taking the field after the last comma keeps it correct even if the
-// depends field itself contains commas; BAR springnames never do.
-func matchRapidLine(line, springname string) (string, bool) {
+// and returns the tag and package md5 when the springname (the last comma-separated
+// field) matches exactly. Taking the field after the last comma keeps it correct even
+// if the depends field itself contains commas; BAR springnames never do.
+func matchRapidLine(line, springname string) (tag, md5 string, ok bool) {
 	last := strings.LastIndexByte(line, ',')
 	if last < 0 || line[last+1:] != springname {
-		return "", false
+		return "", "", false
 	}
 	first := strings.IndexByte(line, ',')
 	if first < 0 || first >= last { // need at least tag,...,name
-		return "", false
+		return "", "", false
 	}
-	return line[:first], true
+	tag = line[:first]
+	// md5 is the next field, between the 1st and 2nd comma.
+	if rest := line[first+1 : last]; rest != "" {
+		if j := strings.IndexByte(rest, ','); j >= 0 {
+			md5 = rest[:j]
+		} else {
+			md5 = rest
+		}
+	}
+	return tag, md5, true
 }
 
 // versionsCachePath is where the rapid index is cached, under the data dir.

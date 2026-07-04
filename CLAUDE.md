@@ -143,10 +143,13 @@ pre-set value in the environment wins):
   exits 0). Defaulted off for reliability; set `PRD_RAPID_USE_STREAMER=true` to opt back in.
 
 `pr-downloader` re-queries (and can re-download) content on every call even when it is
-already installed, so `EnsureContent` records fetched game/map springnames in
-`<data>/cache/barreplay-provisioned.json` (`internal/engine/provisioned.go`) and skips
-anything already listed. `-force-provision` (`Config.ForceProvision`) bypasses the cache;
-`-game`/`-map` overrides always run and are never cached.
+already installed, so `EnsureContent` first checks the filesystem and skips the download
+when the content is already there: a rapid game is a finalized `packages/<md5>.sdp` (the
+md5 comes from the same versions.gz line as the tag; a `.sdp.incomplete` does not count),
+and a map is an archive in `maps/` named after the normalized springname (lowercase,
+spaces→`_`, e.g. `Hooked 1.1.1` → `hooked_1.1.1.sd7`, matched case-insensitively). This is
+self-correcting — delete the content and it re-downloads. `-force-provision`
+(`Config.ForceProvision`) forces the download; `-game`/`-map` overrides always run.
 
 Provisioning is best-effort — a download failure is a warning, not a hard abort
 (idempotent; skips content already installed). Behind a proxy you may still need

@@ -164,21 +164,21 @@ func TestPRDEnvInjectsBARRepo(t *testing.T) {
 func TestMatchRapidLine(t *testing.T) {
 	// Real line from repos.beyondallreason.dev/byar/versions.gz.
 	const line = "byar:git:1efcf40595187087532936c707f2b38227848a55,47a24f460845204ee5f426f4d21ae16f,,Beyond All Reason test-30541-1efcf40"
-	tag, ok := matchRapidLine(line, "Beyond All Reason test-30541-1efcf40")
-	if !ok || tag != "byar:git:1efcf40595187087532936c707f2b38227848a55" {
-		t.Fatalf("matchRapidLine = %q, ok=%v; want the byar:git tag", tag, ok)
+	tag, md5, ok := matchRapidLine(line, "Beyond All Reason test-30541-1efcf40")
+	if !ok || tag != "byar:git:1efcf40595187087532936c707f2b38227848a55" || md5 != "47a24f460845204ee5f426f4d21ae16f" {
+		t.Fatalf("matchRapidLine = %q md5=%q ok=%v; want the byar:git tag + md5", tag, md5, ok)
 	}
 	// A non-empty depends field (commas in the middle) must not confuse the parse.
-	if tag, ok := matchRapidLine("byar:stable,deadbeef,byar:some|byar:other,My Game", "My Game"); !ok || tag != "byar:stable" {
-		t.Errorf("depends with commas: tag=%q ok=%v", tag, ok)
+	if tag, md5, ok := matchRapidLine("byar:stable,deadbeef,byar:some|byar:other,My Game", "My Game"); !ok || tag != "byar:stable" || md5 != "deadbeef" {
+		t.Errorf("depends with commas: tag=%q md5=%q ok=%v", tag, md5, ok)
 	}
-	if _, ok := matchRapidLine(line, "Some Other Game"); ok {
+	if _, _, ok := matchRapidLine(line, "Some Other Game"); ok {
 		t.Error("must not match a different springname")
 	}
-	if _, ok := matchRapidLine("garbage-without-commas", "x"); ok {
+	if _, _, ok := matchRapidLine("garbage-without-commas", "x"); ok {
 		t.Error("must not match a line without commas")
 	}
-	if _, ok := matchRapidLine("only,onecomma", "onecomma"); ok {
+	if _, _, ok := matchRapidLine("only,onecomma", "onecomma"); ok {
 		t.Error("must require at least tag,...,name")
 	}
 }
