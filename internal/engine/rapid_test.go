@@ -28,11 +28,11 @@ func gzipBytes(t *testing.T, s string) []byte {
 func TestSearchVersions(t *testing.T) {
 	idx := "byar:git:abc123def0,md5a,,Beyond All Reason test-1-abc123d\n" +
 		"byar:git:9876543210,md5b,,Beyond All Reason test-2-9876543\n"
-	tag, ok, err := searchVersions(bytes.NewReader(gzipBytes(t, idx)), "Beyond All Reason test-2-9876543")
-	if err != nil || !ok || tag != "byar:git:9876543210" {
-		t.Fatalf("searchVersions = %q ok=%v err=%v", tag, ok, err)
+	tag, md5, ok, err := searchVersions(bytes.NewReader(gzipBytes(t, idx)), "Beyond All Reason test-2-9876543")
+	if err != nil || !ok || tag != "byar:git:9876543210" || md5 != "md5b" {
+		t.Fatalf("searchVersions = %q md5=%q ok=%v err=%v", tag, md5, ok, err)
 	}
-	if _, ok, _ := searchVersions(bytes.NewReader(gzipBytes(t, idx)), "Nope"); ok {
+	if _, _, ok, _ := searchVersions(bytes.NewReader(gzipBytes(t, idx)), "Nope"); ok {
 		t.Error("should not match an absent springname")
 	}
 }
@@ -58,9 +58,9 @@ func TestResolveRapidGameTagCaches(t *testing.T) {
 	e := &Engine{cfg: Config{DataDir: dir, RapidRepoMaster: srv.URL + "/repos.gz"}}
 	ctx := context.Background()
 
-	// 1. Cold cache -> one download, resolves.
-	if tag, ok := e.resolveRapidGameTag(ctx, springname); !ok || tag != "byar:git:abc123def0" {
-		t.Fatalf("cold lookup: tag=%q ok=%v", tag, ok)
+	// 1. Cold cache -> one download, resolves (with md5).
+	if tag, md5, ok := e.resolveRapidGameTag(ctx, springname); !ok || tag != "byar:git:abc123def0" || md5 != "md5" {
+		t.Fatalf("cold lookup: tag=%q md5=%q ok=%v", tag, md5, ok)
 	}
 	if got := atomic.LoadInt32(&hits); got != 1 {
 		t.Fatalf("cold lookup should download once, got %d", got)
@@ -70,7 +70,7 @@ func TestResolveRapidGameTagCaches(t *testing.T) {
 	}
 
 	// 2. Same build again -> served from cache, no new download.
-	if tag, ok := e.resolveRapidGameTag(ctx, springname); !ok || tag != "byar:git:abc123def0" {
+	if tag, _, ok := e.resolveRapidGameTag(ctx, springname); !ok || tag != "byar:git:abc123def0" {
 		t.Fatalf("cached lookup: tag=%q ok=%v", tag, ok)
 	}
 	if got := atomic.LoadInt32(&hits); got != 1 {
@@ -78,7 +78,7 @@ func TestResolveRapidGameTagCaches(t *testing.T) {
 	}
 
 	// 3. Unknown build absent from the cache -> exactly one refresh, still absent.
-	if _, ok := e.resolveRapidGameTag(ctx, "Beyond All Reason test-2-deadbee"); ok {
+	if _, _, ok := e.resolveRapidGameTag(ctx, "Beyond All Reason test-2-deadbee"); ok {
 		t.Fatal("unknown build should not resolve")
 	}
 	if got := atomic.LoadInt32(&hits); got != 2 {

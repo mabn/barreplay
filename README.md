@@ -121,9 +121,10 @@ To change the persisted format, implement `snapshot.Writer` — nothing else cha
   with `content_error: Dependent archive … not found`. Provisioning is best-effort (it
   warns and continues if a fetch fails, since content may already be installed). Because
   `pr-downloader` re-queries (and can re-download) content on every call even when it is
-  present, `barreplay` records what it fetched into a data dir in
-  `<data>/cache/barreplay-provisioned.json` and skips a game/map already listed there;
-  `-force-provision` bypasses that (or delete the file). Rapid
+  present, `barreplay` first checks the filesystem and skips the download when the content
+  is already there (a rapid game's `packages/<md5>.sdp`, or a map archive in `maps/`); this
+  is self-correcting — delete the content and it re-downloads. `-force-provision` forces the
+  download anyway. Rapid
   pool downloads use `PRD_RAPID_USE_STREAMER=false` by default (the streamer is faster
   but stalls mid-pool on WSL/behind proxies, leaving a `.sdp.incomplete` the engine
   ignores — so the game would be reported "not found"); set it to `true` to opt back in.
