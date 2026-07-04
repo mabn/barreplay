@@ -24,6 +24,7 @@
 --   BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp>
 --   BRSNAP EV <frame> <kind> <id> <def> <team>
 --   BRSNAP PROF <totalMs> <name>               engine time-profiler record (at game over)
+--   BRSNAP PROFD <frame> <units> <totalMs> <name>   per-heartbeat profiler sample (-profile only)
 -- Plain "[barreplay] ..." heartbeat lines are also echoed for infolog visibility;
 -- capture ignores anything without the BRSNAP tag.
 
@@ -51,6 +52,12 @@ local heartbeatEvery = 300
 -- replay fast-forwards instead of running realtime; the engine clamps to its own
 -- ceiling and otherwise runs as fast as the CPU allows.
 local playbackSpeed = 1000
+
+-- Profile mode (substituted by the Go tool from -profile). When on, Initialize
+-- enables the engine's time profiler so the fine-grained scopes (Sim::Unit::*,
+-- Sim::Los, ...) record — CTimeProfiler drops non-"special" timers while
+-- disabled — and each heartbeat writes per-scope PROFD samples to the stream.
+local profileMode = ("__PROFILE__" == "1")
 
 -- Snapshot output file path (substituted by the Go tool). Spring's LuaIO sandbox
 -- rejects absolute paths (see IsSafePath), so this is a RELATIVE path resolved
@@ -162,7 +169,7 @@ local function emitProfileTotals()
 		return
 	end
 	local lines = {}
-	for i = 1, math.min(#recs, 20) do
+	for i = 1, math.min(#recs, 40) do
 		lines[i] = string.format("BRSNAP PROF %.1f %s", recs[i].ms, recs[i].name)
 	end
 	writeChunk(table.concat(lines, "\n"))
@@ -191,6 +198,13 @@ function widget:Initialize()
 	-- GetAllUnits returns every unit regardless of line-of-sight.
 	forceMaxSpeed()
 	Spring.SendCommands("spectatorfullview 1")
+	if profileMode then
+		-- "debug <drawDebug> <draw4Real>": arg 1 enables CTimeProfiler collection
+		-- (unlocking the non-"special" scopes like Sim::Unit::*), arg 2 keeps the
+		-- ProfileDrawer overlay off — there is nothing to draw headless.
+		Spring.SendCommands("debug 1 0")
+		Echo("[barreplay] profile mode: engine time profiler enabled (debug 1 0)")
+	end
 	out = io.open(outputPath, "w")
 	if out then
 		Echo(string.format("[barreplay] snapshot widget loaded: writing %s, sampling every %d frames, heartbeat every %d, speed %d",
@@ -256,6 +270,16 @@ function widget:GameFrame(frame)
 				parts[i] = string.format("%s=%.0fms", recs[i].name, recs[i].ms)
 			end
 			Echo("[barreplay] prof " .. table.concat(parts, " "))
+			-- In profile mode, also record per-scope cumulative totals with the
+			-- current unit count into the stream: the CLI turns consecutive samples
+			-- into per-interval deltas and reports which scopes grow with unit count.
+			if profileMode then
+				local lines = {}
+				for i = 1, math.min(15, #recs) do
+					lines[i] = string.format("BRSNAP PROFD %d %d %.1f %s", frame, n, recs[i].ms, recs[i].name)
+				end
+				writeChunk(table.concat(lines, "\n"))
+			end
 		end
 	end
 end

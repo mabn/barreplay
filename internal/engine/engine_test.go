@@ -55,6 +55,25 @@ func TestWriteWidgetSubstitutesInterval(t *testing.T) {
 	if !strings.Contains(s, `local outputPath = "`+streamPath+`"`) {
 		t.Errorf("output path not substituted; got fragment: %q", firstLineWith(s, "outputPath ="))
 	}
+	if strings.Contains(s, "__PROFILE__") {
+		t.Error("profile token not substituted")
+	}
+	if !strings.Contains(s, `local profileMode = ("0" == "1")`) {
+		t.Errorf("profile off not substituted; got fragment: %q", firstLineWith(s, "profileMode ="))
+	}
+}
+
+func TestWriteWidgetSubstitutesProfileOn(t *testing.T) {
+	dir := t.TempDir()
+	e := &Engine{cfg: Config{DataDir: dir, SampleEvery: 30, SnapshotStreamPath: "barreplay/g.brsnap", Profile: true}}
+	p, err := e.WriteWidget()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	if !strings.Contains(string(b), `local profileMode = ("1" == "1")`) {
+		t.Errorf("profile on not substituted; got fragment: %q", firstLineWith(string(b), "profileMode ="))
+	}
 }
 
 func TestLuaEscapeString(t *testing.T) {

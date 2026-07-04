@@ -84,6 +84,7 @@ BRSNAP F <frame> <timeSec> <count>             start of a periodic snapshot
 BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp>   one unit (follows an F line)
 BRSNAP EV <frame> <kind> <id> <def> <team>     unit lifecycle event
 BRSNAP PROF <totalMs> <name>                   engine time-profiler record (once, at game over)
+BRSNAP PROFD <frame> <units> <totalMs> <name>  per-heartbeat profiler sample (-profile only)
 ```
 
 The widget is strictly read-only (`Get*` + `Spring.Echo` only) so it cannot desync the
@@ -218,9 +219,23 @@ profiler** (the `/debug` overlay data) via `Spring.GetProfilerRecordNames()` /
 
 - every heartbeat: a `[barreplay] prof Sim=…ms Lua=…ms …` line (top 5, infolog only) —
   shows whether per-frame cost drifts as unit count grows;
-- at game over: `BRSNAP PROF <totalMs> <name>` lines (top 20) written into the stream
+- at game over: `BRSNAP PROF <totalMs> <name>` lines (top 40) written into the stream
   file, which `capture` collects into `capture.Stats.Profile` and the CLI prints as a
   sorted table with % of wall time.
+
+**`-profile` (fine-grained mode, non-obvious):** by default the table only shows a few
+coarse rows because `CTimeProfiler::AddTime` **drops all non-"special" timers while the
+profiler is disabled** — only `SCOPED_SPECIAL_TIMER`s (`Sim`, `Draw`, `Lua::Callins::*`,
+GC) always record. The detailed scopes (`Sim::Unit::{MoveType,SlowUpdate,Update,Weapon}`,
+`Sim::Los`, `Sim::Path`, `Sim::Projectiles::*`, `Sim::Script`, …) exist but stay at 0.
+`-profile` substitutes `__PROFILE__` so the widget runs `Spring.SendCommands("debug 1 0")`
+in `Initialize`: arg 1 (`drawDebug`) enables profiler collection, arg 2 (`draw4Real=0`)
+keeps the ProfileDrawer overlay off (nothing to draw headless). In this mode the widget
+also writes `BRSNAP PROFD <frame> <units> <totalMs> <name>` samples (top 15 scopes) each
+heartbeat, and the CLI prints a **growth table**: per-scope ms/sim-frame over the first vs
+last third of the game, with the unit-count range — the direct answer to "what gets
+expensive as the unit count grows". Profiling overhead is visible in the table itself as
+`Misc::Profiler::AddTime`.
 
 Caveats: profiler scopes **nest** (`Sim::Path` time is also counted inside `Sim`), so
 entries overlap and don't sum to 100%. Records only exist for scopes the engine actually
@@ -230,8 +245,11 @@ Interpreting the split for optimization work:
 
 - **Synced sim** (`Sim*` scopes, synced Lua = BAR's LuaRules gadgets, pathfinding, unit
   scripts, LOS) is the deterministic re-simulation itself — it *cannot* be skipped or
-  approximated without desyncing, so if it dominates, the wins are engine-level
-  (faster single-core CPU; engine threading settings), not tool-level.
+  approximated without desyncing. If `Sim::Unit::*`/`Sim::Script` dominate, the run is
+  single-core bound (faster CPU or upstream engine work only). If `Sim::Path`, `Sim::Los`
+  or `Sim::Projectiles::Collisions` dominate, those parts use the engine ThreadPool —
+  check the `WorkerThreadCount` springsetting (default -1 = auto) actually spins up
+  workers headless (`ThreadPool::RunTask` in the table is the tell).
 - **Unsynced overhead** (LuaUI = BAR's own default widget suite, which loads in replays;
   logging/infolog flushes; draw-adjacent scopes) is fair game — it does not affect
   determinism and can in principle be disabled or reduced.
