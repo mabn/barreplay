@@ -115,12 +115,22 @@ func TestPRDEnvInjectsBARRepo(t *testing.T) {
 	t.Setenv("PRD_RAPID_REPO_MASTER", "")
 	os.Unsetenv("PRD_RAPID_REPO_MASTER")
 	os.Unsetenv("PRD_HTTP_SEARCH_URL")
+	os.Unsetenv("PRD_RAPID_USE_STREAMER")
 	e := &Engine{cfg: Config{DataDir: "/x"}}
 	if v, ok := envValue(e.prdEnv(), "PRD_RAPID_REPO_MASTER"); !ok || v != barRapidRepoMaster {
 		t.Errorf("default PRD_RAPID_REPO_MASTER = %q (ok=%v), want %q", v, ok, barRapidRepoMaster)
 	}
 	if v, ok := envValue(e.prdEnv(), "PRD_HTTP_SEARCH_URL"); !ok || v != barMapSearchURL {
 		t.Errorf("default PRD_HTTP_SEARCH_URL = %q (ok=%v), want %q", v, ok, barMapSearchURL)
+	}
+	if v, ok := envValue(e.prdEnv(), "PRD_RAPID_USE_STREAMER"); !ok || v != "false" {
+		t.Errorf("default PRD_RAPID_USE_STREAMER = %q (ok=%v), want %q", v, ok, "false")
+	}
+
+	// A user-set streamer preference wins over the default.
+	t.Setenv("PRD_RAPID_USE_STREAMER", "true")
+	if v, _ := envValue(e.prdEnv(), "PRD_RAPID_USE_STREAMER"); v != "true" {
+		t.Errorf("user PRD_RAPID_USE_STREAMER should win, got %q", v)
 	}
 
 	// Config override wins over the default.

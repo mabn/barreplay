@@ -214,6 +214,13 @@ func (e *Engine) prdEnv() []string {
 	}
 	setDefault("PRD_RAPID_REPO_MASTER", repo)
 	setDefault("PRD_HTTP_SEARCH_URL", barMapSearchURL)
+	// The rapid "streamer" bundles pool files into one stream; it is faster but
+	// flaky (notably on WSL and behind proxies), where it stalls mid-pool and
+	// leaves a "<md5>.sdp.incomplete" the engine ignores — so the game archive is
+	// reported "not found" even though pr-downloader exits 0. Default it off so
+	// pool files download individually over HTTP (slower, reliable). Set
+	// PRD_RAPID_USE_STREAMER=true in the environment to opt back into the streamer.
+	setDefault("PRD_RAPID_USE_STREAMER", "false")
 	return env
 }
 
