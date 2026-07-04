@@ -55,6 +55,109 @@ func TestWriteWidgetSubstitutesInterval(t *testing.T) {
 	if !strings.Contains(s, `local outputPath = "`+streamPath+`"`) {
 		t.Errorf("output path not substituted; got fragment: %q", firstLineWith(s, "outputPath ="))
 	}
+	if strings.Contains(s, "__PROFILE__") {
+		t.Error("profile token not substituted")
+	}
+	if !strings.Contains(s, `local profileMode = ("0" == "1")`) {
+		t.Errorf("profile off not substituted; got fragment: %q", firstLineWith(s, "profileMode ="))
+	}
+	if strings.Contains(s, "__DISABLE_WIDGETS__") {
+		t.Error("disable-widgets token not substituted")
+	}
+	if !strings.Contains(s, `local disableWidgets = ("0" == "1")`) {
+		t.Errorf("disable-widgets off not substituted; got fragment: %q", firstLineWith(s, "disableWidgets ="))
+	}
+}
+
+func TestWriteWidgetSubstitutesProfileOn(t *testing.T) {
+	dir := t.TempDir()
+	e := &Engine{cfg: Config{DataDir: dir, SampleEvery: 30, SnapshotStreamPath: "barreplay/g.brsnap", Profile: true, DisableWidgets: true}}
+	p, err := e.WriteWidget()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	if !strings.Contains(string(b), `local profileMode = ("1" == "1")`) {
+		t.Errorf("profile on not substituted; got fragment: %q", firstLineWith(string(b), "profileMode ="))
+	}
+	if !strings.Contains(string(b), `local disableWidgets = ("1" == "1")`) {
+		t.Errorf("disable-widgets on not substituted; got fragment: %q", firstLineWith(string(b), "disableWidgets ="))
+	}
+}
+
+func TestMergeSpringSettings(t *testing.T) {
+	over := map[string]string{"MinDrawFPS": "1", "MinSimDrawBalance": "0.001"}
+
+	// No existing config: overrides only, sorted.
+	got := string(mergeSpringSettings(nil, over))
+	if want := "MinDrawFPS = 1\nMinSimDrawBalance = 0.001\n"; got != want {
+		t.Errorf("empty existing: got %q, want %q", got, want)
+	}
+
+	// Existing keys are replaced in place (case-insensitive), others preserved.
+	existing := []byte("WorkerThreadCount = 8\nmindrawfps = 30\nVSync = 0\n")
+	got = string(mergeSpringSettings(existing, over))
+	if want := "WorkerThreadCount = 8\nMinDrawFPS = 1\nVSync = 0\nMinSimDrawBalance = 0.001\n"; got != want {
+		t.Errorf("merge: got %q, want %q", got, want)
+	}
+
+	// No overrides: pass-through.
+	got = string(mergeSpringSettings(existing, nil))
+	if got != string(existing) {
+		t.Errorf("passthrough: got %q, want %q", got, existing)
+	}
+}
+
+func TestWriteEngineConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "springsettings.cfg"), []byte("VSync = 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := &Engine{cfg: Config{DataDir: dir, ThrottleDraw: true}}
+	p, err := e.WriteEngineConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(p) {
+		t.Errorf("config path should be absolute (engine cwd differs): %q", p)
+	}
+	b, _ := os.ReadFile(p)
+	s := string(b)
+	for _, want := range []string{"VSync = 0", "MinDrawFPS = 1", "MinSimDrawBalance = 0.001", "SpeedControl = 2"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("config missing %q:\n%s", want, s)
+		}
+	}
+	if e.engineCfgPath != p {
+		t.Error("engineCfgPath not recorded for Run's --config")
+	}
+
+	// Throttle off: user's settings pass through, no overrides injected. The
+	// zero-value Config must also not inject WorkerThreadCount (nil pointer).
+	e2 := &Engine{cfg: Config{DataDir: dir}}
+	p2, err := e2.WriteEngineConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2, _ := os.ReadFile(p2)
+	if strings.Contains(string(b2), "MinDrawFPS") {
+		t.Errorf("throttle off should not inject MinDrawFPS:\n%s", b2)
+	}
+	if strings.Contains(string(b2), "WorkerThreadCount") {
+		t.Errorf("unset WorkerThreads should not inject WorkerThreadCount:\n%s", b2)
+	}
+
+	// -worker-threads set: WorkerThreadCount is injected (0 is a real value).
+	wt := 0
+	e3 := &Engine{cfg: Config{DataDir: dir, WorkerThreads: &wt}}
+	p3, err := e3.WriteEngineConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b3, _ := os.ReadFile(p3)
+	if !strings.Contains(string(b3), "WorkerThreadCount = 0") {
+		t.Errorf("WorkerThreads=0 not injected:\n%s", b3)
+	}
 }
 
 func TestLuaEscapeString(t *testing.T) {

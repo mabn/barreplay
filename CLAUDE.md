@@ -84,10 +84,11 @@ BRSNAP F <frame> <timeSec> <count>             start of a periodic snapshot
 BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp>   one unit (follows an F line)
 BRSNAP EV <frame> <kind> <id> <def> <team>     unit lifecycle event
 BRSNAP PROF <totalMs> <name>                   engine time-profiler record (once, at game over)
+BRSNAP PROFD <frame> <units> <totalMs> <name>  per-heartbeat profiler sample (-profile only)
 ```
 
-The widget is strictly read-only (`Get*` + `Spring.Echo` only) so it cannot desync the
-deterministic replay. `__SAMPLE_EVERY__` is substituted at write time (`-every`, default 30 = 1 Hz).
+The widget never touches synced state (only `Get*` reads, unsynced console commands, its
+own output file, and unsynced widget-handler calls) so it cannot desync the replay. `__SAMPLE_EVERY__` is substituted at write time (`-every`, default 30 = 1 Hz).
 It also echoes plain `[barreplay] ...` heartbeat lines (on load + every 300 frames ≈ 10s of
 game time) for infolog visibility; when the heartbeat frame was also sampled it appends
 `sample_time=<n>us` (the per-sample processing cost, timed via `Spring.GetTimer`/`DiffTimers`;
@@ -218,20 +219,48 @@ profiler** (the `/debug` overlay data) via `Spring.GetProfilerRecordNames()` /
 
 - every heartbeat: a `[barreplay] prof Sim=…ms Lua=…ms …` line (top 5, infolog only) —
   shows whether per-frame cost drifts as unit count grows;
-- at game over: `BRSNAP PROF <totalMs> <name>` lines (top 20) written into the stream
+- at game over: `BRSNAP PROF <totalMs> <name>` lines (top 40) written into the stream
   file, which `capture` collects into `capture.Stats.Profile` and the CLI prints as a
   sorted table with % of wall time.
+
+**`-profile` (fine-grained mode, non-obvious):** by default the table only shows a few
+coarse rows because `CTimeProfiler::AddTime` **drops all non-"special" timers while the
+profiler is disabled** — only `SCOPED_SPECIAL_TIMER`s (`Sim`, `Draw`, `Lua::Callins::*`,
+GC) always record. The detailed scopes (`Sim::Unit::{MoveType,SlowUpdate,Update,Weapon}`,
+`Sim::Los`, `Sim::Path`, `Sim::Projectiles::*`, `Sim::Script`, …) exist but stay at 0.
+`-profile` substitutes `__PROFILE__` so the widget runs `Spring.SendCommands("debug 1 0")`
+in `Initialize`: arg 1 (`drawDebug`) enables profiler collection, arg 2 (`draw4Real=0`)
+keeps the ProfileDrawer overlay off (nothing to draw headless). In this mode the widget
+also writes `BRSNAP PROFD <frame> <units> <totalMs> <name>` samples (top 15 scopes) each
+heartbeat, and the CLI prints a **growth table**: per-scope ms/sim-frame over the first vs
+last third of the game, with the unit-count range — the direct answer to "what gets
+expensive as the unit count grows". Profiling overhead is visible in the table itself as
+`Misc::Profiler::AddTime`.
 
 Caveats: profiler scopes **nest** (`Sim::Path` time is also counted inside `Sim`), so
 entries overlap and don't sum to 100%. Records only exist for scopes the engine actually
 entered; if the API is missing on some engine build the widget logs that and skips it.
+`ThreadPool::{RunTask,AddTask,WaitFor}` are **inflated under `-profile`**: every tiny
+task then pays two locked `Misc::Profiler::AddTime` calls, so judge threading changes by
+plain-run wall time, never by the profiled totals. `ThreadPool::RunTask` also sums time
+across all worker threads and can exceed 100% of wall.
+
+The heartbeat line also reports `draws=<N>` (draw frames since the last heartbeat,
+counted via the `widget:Update` callin — the engine's *real* draw rate, i.e. whether
+`-throttle-draw` is holding) and `widgets=<N>` (currently active widget count — whether
+the default suite stayed disabled). `-worker-threads N` injects the `WorkerThreadCount`
+springsetting for the run (-1 = auto, 0/1 = no workers); it only changes local task
+scheduling, so it cannot desync — sweep it with plain runs and pick the fastest.
 
 Interpreting the split for optimization work:
 
 - **Synced sim** (`Sim*` scopes, synced Lua = BAR's LuaRules gadgets, pathfinding, unit
   scripts, LOS) is the deterministic re-simulation itself — it *cannot* be skipped or
-  approximated without desyncing, so if it dominates, the wins are engine-level
-  (faster single-core CPU; engine threading settings), not tool-level.
+  approximated without desyncing. If `Sim::Unit::*`/`Sim::Script` dominate, the run is
+  single-core bound (faster CPU or upstream engine work only). If `Sim::Path`, `Sim::Los`
+  or `Sim::Projectiles::Collisions` dominate, those parts use the engine ThreadPool —
+  check the `WorkerThreadCount` springsetting (default -1 = auto) actually spins up
+  workers headless (`ThreadPool::RunTask` in the table is the tell).
 - **Unsynced overhead** (LuaUI = BAR's own default widget suite, which loads in replays;
   logging/infolog flushes; draw-adjacent scopes) is fair game — it does not affect
   determinism and can in principle be disabled or reduced.
@@ -239,6 +268,51 @@ Interpreting the split for optimization work:
 For a C++-level answer beyond the engine's own scopes, use `perf` on the running
 process: `perf record -g -p $(pidof spring-headless)` then `perf report` (symbol quality
 depends on how the release binary was built).
+
+## Cutting unsynced overhead (default-on speedups)
+
+Profiling showed ~40-50% of the sim-phase wall time is **unsynced** work that cannot
+affect the deterministic re-sim: BAR's default widget suite (`Lua::Callins::Unsynced`)
+and the draw-side update chain that runs even headless (`Update::WorldDrawer`, `Draw`,
+unit/feature drawer updates). Two default-on optimizations remove it; since the sim is
+untouched, the output `.jsonl` must stay **byte-identical** — diff against a previous
+run to verify any change here.
+
+- **`-disable-widgets` (default true):** the snapshot widget disables every other active
+  widget on the first `GameFrame`. This must happen at runtime: BAR's handler
+  auto-enables any game-archive widget with `enabled=true` that is *absent* from the
+  saved order list (order 12345), so a seeded config can only disable widgets it can
+  name, and the suite's names vary by game version. The widget sets `handler = true` in
+  `GetInfo()` (grants `widget.widgetHandler`), then calls the **queued**
+  `widgetHandler:DisableWidget(name)` (applied between callins; never mutate the widget
+  list mid-callin via the `*Raw` variants) for every `knownWidgets` entry that is
+  `active` and not itself. pcall-guarded like the profiler dump.
+- **`-throttle-draw` (default true):** in demo playback the engine yields from sim to
+  draw every `GAME_SPEED/MinDrawFPS` sim frames and reserves `MinSimDrawBalance`
+  (default **0.15** = 15%!) of CPU time for drawing; each draw runs the full unsynced
+  update chain even with headless null-GL. `engine.WriteEngineConfig` writes
+  `<data>/_barreplay_springsettings.cfg` = the user's `springsettings.cfg` (if any,
+  preserving e.g. `WorkerThreadCount`) merged with `MinDrawFPS=1` +
+  `MinSimDrawBalance=0.001` (≈1 draw/s), and `engine.Run` passes it via `--config`. The
+  user's real config is never touched — important because the engine *writes runtime
+  config changes back* to whatever file `--config` names. Both settings are read once at
+  startup (`CGlobalConfig`), so `Spring.SetConfigInt` from the widget would not work.
+
+**Replay speed is governed by the local server, not raw CPU (non-obvious).** In demo
+playback the client process hosts a local `CGameServer` that releases the demo's
+pre-recorded NEWFRAME packets paced by `modGameTime += dt * internalSpeed`, and
+`LagProtection` (`rts/Net/GameServer.cpp`) continuously adjusts `internalSpeed` toward a
+**hardcoded client-CPU target**: the client reports `GetTimePercentage("Sim")` (draw time
+barely counts) every second, and the server holds that at 60% (`SpeedControl=1`, default)
+or 75% (`SpeedControl=2`, injected by `-throttle-draw` — with one local client the
+median/max distinction is moot, so this is a free ~+25% ceiling). Consequences: the sim
+idles ~40%/~25% of wall time by design, and whenever the client outruns the feed its
+packet queue starves, `ClientReadNet` returns empty-handed, and the main loop spins full
+`UpdateUnsynced`+`Draw` passes (the heartbeat `draws=` counter exposes this: hundreds of
+draws/s late game despite `MinDrawFPS=1`). Fully removing the governor (pin
+`internalSpeed` to `userSpeedFactor` when a demo is being read) needs a small engine
+patch — sync-safe, since pacing changes only when pre-recorded packets are released,
+never their content — and is the main remaining speed lever (~25-35% at the 60% target).
 
 ## Conventions / gotchas
 
