@@ -184,10 +184,12 @@ and that positions fall within the map bounds.
   real widget config around the run. (A gadget would need engine dev-Lua to load from
   the write-dir, so a widget is the right mechanism.) `-engine`, `-no-provision`,
   `-game`, `-map`, and `-rapid-repo` are the escape hatches for install-specific setups.
-- The transport from Lua to Go is a file of tagged `BRSNAP ...` lines (`<out>/<gameId>.brsnap`)
-  that the widget writes with `io.open`, not stdout: the engine flushes its log on every
-  `Spring.Echo` and caps each Echo at a few hundred units, so streaming through stdout was
-  slow and truncated. `internal/capture` parses that file after the run, isolating the
-  transport so it can change without touching the `snapshot` format. The `.brsnap` file is
-  the raw intermediate; the `.jsonl` is the final deliverable.
+- The transport from Lua to Go is a file of tagged `BRSNAP ...` lines that the widget
+  writes with `io.open`, not stdout: the engine flushes its log on every `Spring.Echo` and
+  caps each Echo at a few hundred units, so streaming through stdout was slow and truncated.
+  Spring's LuaIO sandbox forbids absolute paths, so the widget writes a relative path inside
+  the engine's write-dir (`<data>/barreplay/<gameId>.brsnap`); the tool reads it after the
+  run and moves it to `<out>/<gameId>.brsnap`. `internal/capture` parses that file, isolating
+  the transport so it can change without touching the `snapshot` format. The `.brsnap` file
+  is the raw intermediate; the `.jsonl` is the final deliverable.
 ```

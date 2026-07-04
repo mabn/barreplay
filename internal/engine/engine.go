@@ -287,6 +287,10 @@ func (e *Engine) BuildStartscript(demoPath string) (string, error) {
 func (e *Engine) Run(ctx context.Context, scriptPath string) (io.Reader, func() error, error) {
 	args := []string{"--isolation", "--write-dir", e.cfg.DataDir, scriptPath}
 	cmd := exec.CommandContext(ctx, e.headlessPath, args...)
+	// Pin the working directory to the write-dir: the widget writes its stream via a
+	// relative path (Spring's LuaIO sandbox forbids absolute paths), resolved against
+	// the CWD, so this makes SnapshotStreamPath land where the tool expects to read it.
+	cmd.Dir = e.cfg.DataDir
 
 	// An os.Pipe (not io.Pipe) is passed to the child as a real fd, so the read
 	// end reaches EOF on its own when the child exits — no deadlock between

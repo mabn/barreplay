@@ -121,14 +121,13 @@ func run() error {
 		return fmt.Errorf("-data is required to run the engine")
 	}
 
-	// The widget writes its BRSNAP stream to this file (next to the snapshot output),
-	// which the tool reads back after the run. An absolute path is required because
-	// the engine's working directory is not the output dir.
-	rawPath, err := filepath.Abs(filepath.Join(*outDir, h.GameID+".brsnap"))
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(rawPath), 0o755); err != nil {
+	// The widget writes its BRSNAP stream to a file. Spring's LuaIO sandbox rejects
+	// absolute paths, so the widget uses a RELATIVE path resolved against the engine's
+	// write-dir (= dataDir); we read it back from there, then move it next to the
+	// snapshot output. Forward slashes keep the Lua path portable.
+	relStream := "barreplay/" + h.GameID + ".brsnap"
+	streamPath := filepath.Join(*dataDir, "barreplay", h.GameID+".brsnap")
+	if err := os.MkdirAll(filepath.Dir(streamPath), 0o755); err != nil {
 		return err
 	}
 
@@ -142,7 +141,7 @@ func run() error {
 		GameOverride:       *gameOverride,
 		MapOverride:        *mapOverride,
 		RapidRepoMaster:    *rapidRepo,
-		SnapshotStreamPath: rawPath,
+		SnapshotStreamPath: relStream,
 	}, h.EngineVersion)
 	if err != nil {
 		return err
@@ -203,13 +202,23 @@ func run() error {
 
 	// 7. Parse the widget's stream file into the snapshot writer.
 	var consumeErr error
-	if raw, oerr := os.Open(rawPath); oerr != nil {
-		consumeErr = fmt.Errorf("open widget output %s: %w (did the widget load and run?)", rawPath, oerr)
+	if raw, oerr := os.Open(streamPath); oerr != nil {
+		consumeErr = fmt.Errorf("open widget output %s: %w (did the widget load and run?)", streamPath, oerr)
 	} else {
 		consumeErr = capture.Consume(raw, base, w)
 		raw.Close()
 	}
 	closeErr := w.Close()
+
+	// Move the raw stream next to the snapshot output (best-effort); it lives in the
+	// data dir because the widget could only write inside the write-dir.
+	rawPath := filepath.Join(*outDir, h.GameID+".brsnap")
+	if consumeErr == nil {
+		if merr := moveFile(streamPath, rawPath); merr != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not move %s -> %s: %v\n", streamPath, rawPath, merr)
+			rawPath = streamPath
+		}
+	}
 
 	for _, e := range []error{consumeErr, closeErr} {
 		if e != nil {
@@ -235,6 +244,30 @@ func run() error {
 		fmt.Fprintf(os.Stderr, "  snapshot: %.2f MB, %d lines\n", mb, lines)
 	}
 	return nil
+}
+
+// moveFile renames src to dst, falling back to copy+remove across filesystems.
+func moveFile(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return os.Remove(src)
 }
 
 // fileSizeMB returns the size of path in megabytes; ok is false if it can't stat.

@@ -51,8 +51,10 @@ local heartbeatEvery = 300
 -- ceiling and otherwise runs as fast as the CPU allows.
 local playbackSpeed = 1000
 
--- Absolute path of the snapshot output file (substituted by the Go tool). The
--- widget writes the whole BRSNAP stream here; `out` is the open file handle.
+-- Snapshot output file path (substituted by the Go tool). Spring's LuaIO sandbox
+-- rejects absolute paths (see IsSafePath), so this is a RELATIVE path resolved
+-- against the engine's write-dir; the Go tool reads it back from there. `out` is
+-- the open file handle.
 local outputPath = "__OUTPUT_PATH__"
 local out = nil
 
@@ -164,6 +166,9 @@ function widget:GameFrame(frame)
 				unitID, defID or -1, team or -1, x or 0, y or 0, z or 0, hp or 0, maxHp or 0)
 		end
 		writeChunk(table.concat(lines, "\n"))
+		if out then
+			out:flush() -- flush every sample so the file is durable if the run is cut short
+		end
 		sampleTime = elapsedStr(t0)
 	end
 
@@ -171,9 +176,6 @@ function widget:GameFrame(frame)
 		-- Re-assert speed in case demo playback reset it, and show progress. Include
 		-- the sample processing time when this heartbeat frame was also sampled.
 		forceMaxSpeed()
-		if out then
-			out:flush() -- bound data loss if the run is interrupted before Shutdown
-		end
 		if sampleTime then
 			Echo(string.format("[barreplay] heartbeat frame=%d t=%.0fs units=%d sample_time=%s",
 				frame, spGetGameSeconds(), n, sampleTime))
