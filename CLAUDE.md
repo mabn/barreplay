@@ -91,11 +91,16 @@ pre-set value in the environment wins):
   (rapid). Also settable via `-rapid-repo`.
 - `PRD_HTTP_SEARCH_URL=https://files-cdn.beyondallreason.dev/find` — **maps** (BAR maps
   are not in rapid; they resolve through this springfiles-compatible search endpoint).
+- `PRD_RAPID_USE_STREAMER=false` — download rapid pool files individually over HTTP
+  instead of via the streamer. The streamer is faster but **flaky on WSL / behind
+  proxies**: it stalls mid-pool and leaves a `packages/<md5>.sdp.incomplete` (which the
+  engine ignores, so the game archive is reported "not found" even though pr-downloader
+  exits 0). Defaulted off for reliability; set `PRD_RAPID_USE_STREAMER=true` to opt back in.
 
 Provisioning is best-effort — a download failure is a warning, not a hard abort
 (idempotent; skips content already installed). Behind a proxy you may still need
-`PRD_RAPID_USE_STREAMER=false` and `PRD_SSL_CERT_FILE=<ca>` in the environment — the
-tool passes them through. The equivalent manual recipe:
+`PRD_SSL_CERT_FILE=<ca>` in the environment (the tool passes it through); the streamer
+is already disabled by default (see above). The equivalent manual recipe:
 
 ```sh
 # from inside the extracted engine/data dir:

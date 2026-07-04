@@ -111,10 +111,12 @@ To change the persisted format, implement `snapshot.Writer` — nothing else cha
   `<data>/cache/`) and downloads *that* — using
   the moving `byar:test` tag would install the wrong build and the engine would abort
   with `content_error: Dependent archive … not found`. Provisioning is best-effort (it
-  warns and continues if a fetch fails, since content may already be installed). Use
-  `-game`/`-map`/`-rapid-repo` to override identifiers, and set
-  `PRD_RAPID_USE_STREAMER=false` / `PRD_SSL_CERT_FILE=<ca>` in the environment if you are
-  behind a proxy (they are passed through to `pr-downloader`).
+  warns and continues if a fetch fails, since content may already be installed). Rapid
+  pool downloads use `PRD_RAPID_USE_STREAMER=false` by default (the streamer is faster
+  but stalls mid-pool on WSL/behind proxies, leaving a `.sdp.incomplete` the engine
+  ignores — so the game would be reported "not found"); set it to `true` to opt back in.
+  Use `-game`/`-map`/`-rapid-repo` to override identifiers, and set `PRD_SSL_CERT_FILE=<ca>`
+  in the environment if you are behind a proxy (it is passed through to `pr-downloader`).
 - **A working GL stack (GPU or full software GL) — see the next section.** Recoil's
   `spring-headless` (through at least engine `2025.06.24`) still initializes GL and
   builds a unit-icon render-to-texture atlas at load; on a GPU-less host it never
