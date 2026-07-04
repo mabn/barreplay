@@ -87,8 +87,8 @@ BRSNAP PROF <totalMs> <name>                   engine time-profiler record (once
 BRSNAP PROFD <frame> <units> <totalMs> <name>  per-heartbeat profiler sample (-profile only)
 ```
 
-The widget is strictly read-only (`Get*` + `Spring.Echo` only) so it cannot desync the
-deterministic replay. `__SAMPLE_EVERY__` is substituted at write time (`-every`, default 30 = 1 Hz).
+The widget never touches synced state (only `Get*` reads, unsynced console commands, its
+own output file, and unsynced widget-handler calls) so it cannot desync the replay. `__SAMPLE_EVERY__` is substituted at write time (`-every`, default 30 = 1 Hz).
 It also echoes plain `[barreplay] ...` heartbeat lines (on load + every 300 frames ≈ 10s of
 game time) for infolog visibility; when the heartbeat frame was also sampled it appends
 `sample_time=<n>us` (the per-sample processing cost, timed via `Spring.GetTimer`/`DiffTimers`;
@@ -257,6 +257,35 @@ Interpreting the split for optimization work:
 For a C++-level answer beyond the engine's own scopes, use `perf` on the running
 process: `perf record -g -p $(pidof spring-headless)` then `perf report` (symbol quality
 depends on how the release binary was built).
+
+## Cutting unsynced overhead (default-on speedups)
+
+Profiling showed ~40-50% of the sim-phase wall time is **unsynced** work that cannot
+affect the deterministic re-sim: BAR's default widget suite (`Lua::Callins::Unsynced`)
+and the draw-side update chain that runs even headless (`Update::WorldDrawer`, `Draw`,
+unit/feature drawer updates). Two default-on optimizations remove it; since the sim is
+untouched, the output `.jsonl` must stay **byte-identical** — diff against a previous
+run to verify any change here.
+
+- **`-disable-widgets` (default true):** the snapshot widget disables every other active
+  widget on the first `GameFrame`. This must happen at runtime: BAR's handler
+  auto-enables any game-archive widget with `enabled=true` that is *absent* from the
+  saved order list (order 12345), so a seeded config can only disable widgets it can
+  name, and the suite's names vary by game version. The widget sets `handler = true` in
+  `GetInfo()` (grants `widget.widgetHandler`), then calls the **queued**
+  `widgetHandler:DisableWidget(name)` (applied between callins; never mutate the widget
+  list mid-callin via the `*Raw` variants) for every `knownWidgets` entry that is
+  `active` and not itself. pcall-guarded like the profiler dump.
+- **`-throttle-draw` (default true):** in demo playback the engine yields from sim to
+  draw every `GAME_SPEED/MinDrawFPS` sim frames and reserves `MinSimDrawBalance`
+  (default **0.15** = 15%!) of CPU time for drawing; each draw runs the full unsynced
+  update chain even with headless null-GL. `engine.WriteEngineConfig` writes
+  `<data>/_barreplay_springsettings.cfg` = the user's `springsettings.cfg` (if any,
+  preserving e.g. `WorkerThreadCount`) merged with `MinDrawFPS=1` +
+  `MinSimDrawBalance=0.001` (≈1 draw/s), and `engine.Run` passes it via `--config`. The
+  user's real config is never touched — important because the engine *writes runtime
+  config changes back* to whatever file `--config` names. Both settings are read once at
+  startup (`CGlobalConfig`), so `Spring.SetConfigInt` from the widget would not work.
 
 ## Conventions / gotchas
 
