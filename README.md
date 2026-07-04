@@ -60,7 +60,7 @@ Key flags:
 | `-no-provision` | Assume engine/game/map are already installed; skip `pr-downloader`. |
 | `-game` / `-map` | Override the `pr-downloader` game/map identifiers (the rapid-tag mapping is best-effort). |
 | `-rapid-repo <url>` | Override the `pr-downloader` rapid master repo (default: BAR's repo). |
-| `-progress` | Poll `<data>/infolog.txt` every 2s and print replay progress: in-game time / total, % complete, ETA, and processing speed (sim frames/sec). |
+| `-progress` | Poll `<data>/infolog.txt` every 2s and print replay progress: current/total frame, in-game time / total, % complete, ETA, and processing speed (sim frames/sec and speed-up vs realtime, e.g. 45 fps = 1.5x). |
 | `-no-run` | Download + parse only; don't launch the engine (useful for inspecting metadata). |
 
 ### Examples
