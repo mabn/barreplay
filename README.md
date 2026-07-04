@@ -58,6 +58,7 @@ Key flags:
 | `-every <frames>` | Sampling interval in sim frames (30 = 1 Hz, the default). |
 | `-engine <path>` | Path to `spring-headless` (overrides auto-location under `-data/engine/`). |
 | `-no-provision` | Assume engine/game/map are already installed; skip `pr-downloader`. |
+| `-force-provision` | Re-run `pr-downloader` even for content already recorded as provisioned (see below). |
 | `-game` / `-map` | Override the `pr-downloader` game/map identifiers (the rapid-tag mapping is best-effort). |
 | `-rapid-repo <url>` | Override the `pr-downloader` rapid master repo (default: BAR's repo). |
 | `-progress` | Poll `<data>/infolog.txt` every 2s and print replay progress: current/total frame, in-game time / total, % complete, ETA, and processing speed (sim frames/sec and speed-up vs realtime, e.g. 45 fps = 1.5x). |
@@ -118,7 +119,11 @@ To change the persisted format, implement `snapshot.Writer` — nothing else cha
   `<data>/cache/`) and downloads *that* — using
   the moving `byar:test` tag would install the wrong build and the engine would abort
   with `content_error: Dependent archive … not found`. Provisioning is best-effort (it
-  warns and continues if a fetch fails, since content may already be installed). Rapid
+  warns and continues if a fetch fails, since content may already be installed). Because
+  `pr-downloader` re-queries (and can re-download) content on every call even when it is
+  present, `barreplay` records what it fetched into a data dir in
+  `<data>/cache/barreplay-provisioned.json` and skips a game/map already listed there;
+  `-force-provision` bypasses that (or delete the file). Rapid
   pool downloads use `PRD_RAPID_USE_STREAMER=false` by default (the streamer is faster
   but stalls mid-pool on WSL/behind proxies, leaving a `.sdp.incomplete` the engine
   ignores — so the game would be reported "not found"); set it to `true` to opt back in.

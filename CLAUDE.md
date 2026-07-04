@@ -142,6 +142,12 @@ pre-set value in the environment wins):
   engine ignores, so the game archive is reported "not found" even though pr-downloader
   exits 0). Defaulted off for reliability; set `PRD_RAPID_USE_STREAMER=true` to opt back in.
 
+`pr-downloader` re-queries (and can re-download) content on every call even when it is
+already installed, so `EnsureContent` records fetched game/map springnames in
+`<data>/cache/barreplay-provisioned.json` (`internal/engine/provisioned.go`) and skips
+anything already listed. `-force-provision` (`Config.ForceProvision`) bypasses the cache;
+`-game`/`-map` overrides always run and are never cached.
+
 Provisioning is best-effort — a download failure is a warning, not a hard abort
 (idempotent; skips content already installed). Behind a proxy you may still need
 `PRD_SSL_CERT_FILE=<ca>` in the environment (the tool passes it through); the streamer
