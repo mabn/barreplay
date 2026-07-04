@@ -112,12 +112,9 @@ end
 local spGetProfilerRecordNames = Spring.GetProfilerRecordNames
 local spGetProfilerTimeRecord  = Spring.GetProfilerTimeRecord
 
--- profilerTotals returns { {name=..., ms=<total accumulated ms>}, ... } sorted
--- largest first, or nil when this engine build doesn't expose the profiler.
-local function profilerTotals()
-	if not (spGetProfilerRecordNames and spGetProfilerTimeRecord) then
-		return nil
-	end
+-- collectProfilerTotals returns { {name=..., ms=<total accumulated ms>}, ... }
+-- sorted largest first. May raise; call via profilerTotals.
+local function collectProfilerTotals()
 	local names = spGetProfilerRecordNames()
 	if not names then
 		return nil
@@ -125,12 +122,34 @@ local function profilerTotals()
 	local recs = {}
 	for i = 1, #names do
 		local name = names[i]
-		local totalMs = spGetProfilerTimeRecord(name) -- first return: total ms
+		-- The second (frameData) argument is nominally optional but MUST be passed:
+		-- the engine pushes its return values before reading arg 2 at a fixed stack
+		-- index, so with only one argument it reads its own pushed number there and
+		-- raises "boolean expected, got number".
+		local totalMs = spGetProfilerTimeRecord(name, false) -- first return: total ms
 		if totalMs and totalMs > 0 then
 			recs[#recs + 1] = { name = name, ms = totalMs }
 		end
 	end
 	table.sort(recs, function(a, b) return a.ms > b.ms end)
+	return recs
+end
+
+-- profilerTotals is the safe wrapper around collectProfilerTotals: profiling is
+-- auxiliary, and an error escaping a callin makes BAR's widget handler unload the
+-- whole widget — which would silently kill snapshot sampling too. On the first
+-- failure it reports the error and disables further attempts.
+local profilerBroken = false
+local function profilerTotals()
+	if profilerBroken or not (spGetProfilerRecordNames and spGetProfilerTimeRecord) then
+		return nil
+	end
+	local ok, recs = pcall(collectProfilerTotals)
+	if not ok then
+		profilerBroken = true
+		Echo("[barreplay] engine time profiler failed (" .. tostring(recs) .. "); disabling prof output")
+		return nil
+	end
 	return recs
 end
 
