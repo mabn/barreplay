@@ -105,6 +105,11 @@ To change the persisted format, implement `snapshot.Writer` — nothing else cha
   `<data>/games` and `<data>/maps`. If a `pr-downloader` binary is found beside the
   engine and `-no-provision` is not set, `barreplay` fetches missing content; use
   `-game`/`-map` to override the identifiers if the automatic mapping misses.
+- **A working GL stack (GPU or full software GL).** This engine build still initializes
+  GL and builds a unit-icon render-to-texture atlas at load even when headless; on a
+  GPU-less host it never finishes and the game never starts playing (no snapshots). See
+  the "GPU / headless caveat" and the validated `pr-downloader` provisioning recipe in
+  [`CLAUDE.md`](./CLAUDE.md).
 
 ### Manual end-to-end verification
 
