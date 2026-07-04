@@ -121,6 +121,17 @@ func run() error {
 		return fmt.Errorf("-data is required to run the engine")
 	}
 
+	// The widget writes its BRSNAP stream to this file (next to the snapshot output),
+	// which the tool reads back after the run. An absolute path is required because
+	// the engine's working directory is not the output dir.
+	rawPath, err := filepath.Abs(filepath.Join(*outDir, h.GameID+".brsnap"))
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(rawPath), 0o755); err != nil {
+		return err
+	}
+
 	// 3. Locate the engine and provision missing content.
 	eng, err := engine.Locate(engine.Config{
 		DataDir:            *dataDir,
@@ -131,6 +142,7 @@ func run() error {
 		GameOverride:       *gameOverride,
 		MapOverride:        *mapOverride,
 		RapidRepoMaster:    *rapidRepo,
+		SnapshotStreamPath: rawPath,
 	}, h.EngineVersion)
 	if err != nil {
 		return err
@@ -170,7 +182,9 @@ func run() error {
 		return err
 	}
 
-	// 6. Launch the engine and stream state into the writer.
+	// 6. Launch the engine. The widget writes snapshots to rawPath directly; here we
+	// only drain the engine's stdout so its pipe never blocks the sim (the heartbeat
+	// and engine logs also go to infolog.txt, which -progress reads).
 	fmt.Fprintln(os.Stderr, "launching headless replay...")
 	runStart := time.Now()
 	stdout, wait, err := eng.Run(ctx, scriptPath)
@@ -178,14 +192,23 @@ func run() error {
 		w.Close()
 		return err
 	}
+	go io.Copy(io.Discard, stdout)
 	if *progress {
 		pctx, pcancel := context.WithCancel(ctx)
 		defer pcancel()
 		go engine.WatchProgress(pctx, eng.InfologPath(), int(h.GameTime), 2*time.Second, os.Stderr)
 	}
-	consumeErr := capture.Consume(stdout, base, w)
 	waitErr := wait()
 	simDuration := time.Since(runStart)
+
+	// 7. Parse the widget's stream file into the snapshot writer.
+	var consumeErr error
+	if raw, oerr := os.Open(rawPath); oerr != nil {
+		consumeErr = fmt.Errorf("open widget output %s: %w (did the widget load and run?)", rawPath, oerr)
+	} else {
+		consumeErr = capture.Consume(raw, base, w)
+		raw.Close()
+	}
 	closeErr := w.Close()
 
 	for _, e := range []error{consumeErr, closeErr} {
@@ -203,6 +226,9 @@ func run() error {
 	fmt.Fprintf(os.Stderr, "  engine simulation took %s\n", simDuration.Round(time.Millisecond))
 	if mb, ok := fileSizeMB(eng.InfologPath()); ok {
 		fmt.Fprintf(os.Stderr, "  infolog.txt: %.2f MB\n", mb)
+	}
+	if mb, ok := fileSizeMB(rawPath); ok {
+		fmt.Fprintf(os.Stderr, "  widget stream: %.2f MB (%s)\n", mb, rawPath)
 	}
 	if mb, ok := fileSizeMB(outPath); ok {
 		lines, _ := countLines(outPath)

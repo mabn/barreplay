@@ -32,7 +32,8 @@ func TestBuildStartscript(t *testing.T) {
 
 func TestWriteWidgetSubstitutesInterval(t *testing.T) {
 	dir := t.TempDir()
-	e := &Engine{cfg: Config{DataDir: dir, SampleEvery: 15}}
+	streamPath := "/out/dir with space/game.brsnap"
+	e := &Engine{cfg: Config{DataDir: dir, SampleEvery: 15, SnapshotStreamPath: streamPath}}
 	p, err := e.WriteWidget()
 	if err != nil {
 		t.Fatal(err)
@@ -47,6 +48,19 @@ func TestWriteWidgetSubstitutesInterval(t *testing.T) {
 	}
 	if !strings.Contains(s, `tonumber("15")`) {
 		t.Errorf("interval 15 not substituted; got fragment: %q", firstLineWith(s, "sampleEvery ="))
+	}
+	if strings.Contains(s, "__OUTPUT_PATH__") {
+		t.Error("output path token not substituted")
+	}
+	if !strings.Contains(s, `local outputPath = "`+streamPath+`"`) {
+		t.Errorf("output path not substituted; got fragment: %q", firstLineWith(s, "outputPath ="))
+	}
+}
+
+func TestLuaEscapeString(t *testing.T) {
+	got := luaEscapeString(`C:\bar\a"b`)
+	if want := `C:\\bar\\a\"b`; got != want {
+		t.Errorf("luaEscapeString = %q, want %q", got, want)
 	}
 }
 

@@ -20,8 +20,8 @@ replay link / gameId / local .sdfz
         ▼  internal/barapi      resolve gameId → metadata, download .sdfz from OVH storage
         ▼  internal/demofile    gunzip + parse header & startscript (engine/game/map/gameId)
         ▼  internal/engine      locate spring-headless, provision content, inject widget, launch
-        ▼  assets/lua           snapshot_widget.lua samples units each N frames → BRSNAP stdout lines
-        ▼  internal/capture     parse BRSNAP lines → snapshot records
+        ▼  assets/lua           snapshot_widget.lua samples units each N frames → writes BRSNAP lines to <gameId>.brsnap
+        ▼  internal/capture     parse the BRSNAP file → snapshot records
         ▼  snapshot             pluggable Writer persists them (v1: JSONL)
 ```
 
@@ -32,8 +32,8 @@ replay link / gameId / local .sdfz
 | `snapshot/` | **Public data model + pluggable `Writer`.** Owns the on-disk format so it can be swapped for a binary/columnar layout later without touching anything else. v1 impl is line-delimited JSON. |
 | `internal/barapi` | Resolve a gameId/URL via `api.bar-rts.com` and download the `.sdfz` from the OVH bucket. |
 | `internal/demofile` | Parse the `.sdfz` header (byte-packed, little-endian) and the embedded TDF startscript. |
-| `internal/engine` | Locate `spring-headless`/`pr-downloader`, provision missing content, write the widget, build the playback startscript, launch and stream stdout. |
-| `internal/capture` | Parse the widget's `BRSNAP` stdout protocol into `snapshot` records. |
+| `internal/engine` | Locate `spring-headless`/`pr-downloader`, provision missing content, write the widget (with its output-file path), build the playback startscript, launch the engine. |
+| `internal/capture` | Parse the widget's `BRSNAP` output file into `snapshot` records. |
 | `assets/lua` | The embedded, read-only Lua widget injected into the engine's write-dir. |
 
 ## Build
@@ -184,7 +184,10 @@ and that positions fall within the map bounds.
   real widget config around the run. (A gadget would need engine dev-Lua to load from
   the write-dir, so a widget is the right mechanism.) `-engine`, `-no-provision`,
   `-game`, `-map`, and `-rapid-repo` are the escape hatches for install-specific setups.
-- The transport from Lua to Go is tagged stdout lines (`BRSNAP ...`). `internal/capture`
-  isolates this so a TCP-socket transport can be added later without touching the
-  `snapshot` format.
+- The transport from Lua to Go is a file of tagged `BRSNAP ...` lines (`<out>/<gameId>.brsnap`)
+  that the widget writes with `io.open`, not stdout: the engine flushes its log on every
+  `Spring.Echo` and caps each Echo at a few hundred units, so streaming through stdout was
+  slow and truncated. `internal/capture` parses that file after the run, isolating the
+  transport so it can change without touching the `snapshot` format. The `.brsnap` file is
+  the raw intermediate; the `.jsonl` is the final deliverable.
 ```

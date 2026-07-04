@@ -3,14 +3,20 @@
 -- Injected into <write-dir>/LuaUI/Widgets/ by the Go tool before launching the
 -- engine on a replay. It runs read-only: it never issues unit orders or mutates
 -- simulation state, so it cannot desync the deterministic replay. It samples every
--- visible unit every `sampleEvery` frames and emits tagged lines to stdout (via
--- Spring.Echo) which the Go `capture` package parses.
+-- visible unit every `sampleEvery` frames and writes tagged lines directly to the
+-- output file whose absolute path the Go tool substitutes into __OUTPUT_PATH__.
+--
+-- Writing to a dedicated file (not Spring.Echo) is deliberate: the engine flushes
+-- its log on every Echo AND caps each Echo at a few hundred units, so streaming
+-- snapshots through stdout was both slow and truncated. A plain file handle has
+-- neither limit. Only the small `[barreplay] ...` heartbeat lines still go through
+-- Spring.Echo, for infolog visibility / the -progress poller.
 --
 -- BAR only auto-runs a user widget whose name is already in its saved widget order
 -- list, so `enabled = true` below is not sufficient on its own; the Go tool also
 -- seeds LuaUI/Config/BYAR.lua to enable this widget (see internal/engine).
 --
--- Wire format (see internal/capture/capture.go):
+-- File format (see internal/capture/capture.go):
 --   BRSNAP D <defID> <name>
 --   BRSNAP T <teamID> <allyTeam> <side>
 --   BRSNAP READY
@@ -44,6 +50,11 @@ local heartbeatEvery = 300
 -- replay fast-forwards instead of running realtime; the engine clamps to its own
 -- ceiling and otherwise runs as fast as the CPU allows.
 local playbackSpeed = 1000
+
+-- Absolute path of the snapshot output file (substituted by the Go tool). The
+-- widget writes the whole BRSNAP stream here; `out` is the open file handle.
+local outputPath = "__OUTPUT_PATH__"
+local out = nil
 
 local Echo = Spring.Echo
 local spGetAllUnits    = Spring.GetAllUnits
@@ -82,17 +93,30 @@ local function forceMaxSpeed()
 	Spring.SendCommands("setminspeed " .. playbackSpeed)
 end
 
+-- writeChunk writes s plus a trailing newline to the output file (no-op if the
+-- file could not be opened).
+local function writeChunk(s)
+	if out then
+		out:write(s, "\n")
+	end
+end
+
 local function emitPreamble()
+	local parts = {}
 	-- Unit-def id -> internal name table (stable for the whole game).
 	for defID, ud in pairs(UnitDefs) do
-		Echo(string.format("BRSNAP D %d %s", defID, ud.name))
+		parts[#parts + 1] = string.format("BRSNAP D %d %s", defID, ud.name)
 	end
 	-- Teams and their allyteam + side.
 	for _, teamID in ipairs(Spring.GetTeamList()) do
 		local _, _, _, _, side, allyTeam = Spring.GetTeamInfo(teamID, false)
-		Echo(string.format("BRSNAP T %d %d %s", teamID, allyTeam or -1, side or ""))
+		parts[#parts + 1] = string.format("BRSNAP T %d %d %s", teamID, allyTeam or -1, side or "")
 	end
-	Echo("BRSNAP READY")
+	parts[#parts + 1] = "BRSNAP READY"
+	writeChunk(table.concat(parts, "\n"))
+	if out then
+		out:flush()
+	end
 end
 
 function widget:Initialize()
@@ -100,8 +124,13 @@ function widget:Initialize()
 	-- GetAllUnits returns every unit regardless of line-of-sight.
 	forceMaxSpeed()
 	Spring.SendCommands("spectatorfullview 1")
-	Echo(string.format("[barreplay] snapshot widget loaded: sampling every %d frames, heartbeat every %d, speed %d",
-		sampleEvery, heartbeatEvery, playbackSpeed))
+	out = io.open(outputPath, "w")
+	if out then
+		Echo(string.format("[barreplay] snapshot widget loaded: writing %s, sampling every %d frames, heartbeat every %d, speed %d",
+			outputPath, sampleEvery, heartbeatEvery, playbackSpeed))
+	else
+		Echo("[barreplay] ERROR: could not open output file: " .. tostring(outputPath))
+	end
 	emitPreamble()
 end
 
@@ -119,12 +148,9 @@ function widget:GameFrame(frame)
 	local units = spGetAllUnits()
 	local n = #units
 
-	-- Emit the whole sampled frame in a SINGLE Echo (one log write). The engine
-	-- flushes the log on every Echo, so one Echo per unit makes the emission I/O —
-	-- not the Lua sampling — dominate the runtime. Building the lines in a table and
-	-- writing them all at once collapses hundreds of flushes per sample into one.
-	-- The bytes on the wire are identical (newline-separated BRSNAP lines), so the
-	-- capture parser is unchanged.
+	-- Write the whole sampled frame (F line + all U lines) to the output file in one
+	-- write. A file handle has no per-write size cap and isn't flushed by the engine
+	-- on every call, so this scales to thousands of units — unlike Spring.Echo.
 	local sampleTime
 	if sample then
 		local lines = { string.format("BRSNAP F %d %.3f %d", frame, spGetGameSeconds(), n) }
@@ -137,7 +163,7 @@ function widget:GameFrame(frame)
 			lines[i + 1] = string.format("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f",
 				unitID, defID or -1, team or -1, x or 0, y or 0, z or 0, hp or 0, maxHp or 0)
 		end
-		Echo(table.concat(lines, "\n"))
+		writeChunk(table.concat(lines, "\n"))
 		sampleTime = elapsedStr(t0)
 	end
 
@@ -145,6 +171,9 @@ function widget:GameFrame(frame)
 		-- Re-assert speed in case demo playback reset it, and show progress. Include
 		-- the sample processing time when this heartbeat frame was also sampled.
 		forceMaxSpeed()
+		if out then
+			out:flush() -- bound data loss if the run is interrupted before Shutdown
+		end
 		if sampleTime then
 			Echo(string.format("[barreplay] heartbeat frame=%d t=%.0fs units=%d sample_time=%s",
 				frame, spGetGameSeconds(), n, sampleTime))
@@ -155,7 +184,7 @@ function widget:GameFrame(frame)
 end
 
 local function event(kind, unitID, defID, team)
-	Echo(string.format("BRSNAP EV %d %s %d %d %d",
+	writeChunk(string.format("BRSNAP EV %d %s %d %d %d",
 		Spring.GetGameFrame(), kind, unitID, defID or -1, team or -1))
 end
 
@@ -171,9 +200,23 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
 	event("destroyed", unitID, unitDefID, unitTeam)
 end
 
+local function closeOut()
+	if out then
+		out:flush()
+		out:close()
+		out = nil
+	end
+end
+
 function widget:GameOver()
-	Echo("BRSNAP READY") -- ensure meta flushes even for zero-frame games
 	Echo("[barreplay] game over; quitting")
+	closeOut()
 	-- Clean, deterministic exit of the headless process.
 	Spring.SendCommands("quitforce")
+end
+
+-- Shutdown fires on engine teardown even if GameOver did not (e.g. the run was
+-- cut short); make sure the output file is flushed and closed.
+function widget:Shutdown()
+	closeOut()
 end
