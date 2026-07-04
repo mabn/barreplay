@@ -111,13 +111,17 @@ function widget:GameFrame(frame)
 	if not beat and not sample then
 		return
 	end
+	-- Time the whole sample, including gathering the unit list.
+	local t0
+	if sample then
+		t0 = startClock()
+	end
 	local units = spGetAllUnits()
 	local n = #units
 
 	-- Emit the sampled frame, timing how long that processing takes.
 	local sampleTime
 	if sample then
-		local t0 = startClock()
 		Echo(string.format("BRSNAP F %d %.3f %d", frame, spGetGameSeconds(), n))
 		for i = 1, n do
 			local unitID = units[i]
