@@ -42,6 +42,8 @@ func TestConsume(t *testing.T) {
 		"BRSNAP F 60 2.000 1",
 		"BRSNAP U 100 1 0 512.0 80.0 1030.0 2900.0 3000.0",
 		"BRSNAP EV 58 destroyed 101 2 1",
+		"BRSNAP PROF 95123.5 Sim",
+		"BRSNAP PROF 61200.0 Lua",
 	}, "\n")
 
 	base := snapshot.Meta{
@@ -51,8 +53,9 @@ func TestConsume(t *testing.T) {
 		SampleEvery:   30,
 	}
 	w := &recordingWriter{}
-	if err := Consume(strings.NewReader(stream), base, w); err != nil {
-		t.Fatalf("Consume: %v", err)
+	var stats Stats
+	if err := ConsumeStats(strings.NewReader(stream), base, w, &stats); err != nil {
+		t.Fatalf("ConsumeStats: %v", err)
 	}
 
 	if w.meta == nil {
@@ -89,6 +92,16 @@ func TestConsume(t *testing.T) {
 	}
 	if w.events[1].Kind != snapshot.EventDestroyed || w.events[1].Frame != 58 {
 		t.Errorf("event1 = %+v", w.events[1])
+	}
+
+	if stats.Frames != 2 || stats.LastFrame != 60 {
+		t.Errorf("stats frames = %d lastFrame = %d, want 2/60", stats.Frames, stats.LastFrame)
+	}
+	if len(stats.Profile) != 2 || stats.Profile[0].Name != "Sim" || stats.Profile[0].Ms != 95123.5 {
+		t.Errorf("stats.Profile = %+v", stats.Profile)
+	}
+	if stats.Profile[1].Name != "Lua" || stats.Profile[1].Ms != 61200.0 {
+		t.Errorf("stats.Profile[1] = %+v", stats.Profile[1])
 	}
 }
 

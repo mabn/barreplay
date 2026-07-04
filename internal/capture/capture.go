@@ -10,6 +10,7 @@
 //	BRSNAP F <frame> <timeSec> <count>            start of a periodic snapshot
 //	BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp>   one unit (follows an F line)
 //	BRSNAP EV <frame> <kind> <id> <def> <team>    unit lifecycle event
+//	BRSNAP PROF <totalMs> <name>                  engine time-profiler record (at game over)
 //
 // The format is internal and evolves in lockstep with assets/lua/snapshot_widget.lua.
 // The persisted on-disk format is owned separately by the snapshot package.
@@ -29,6 +30,27 @@ import (
 // Tag prefixes every line the widget emits.
 const Tag = "BRSNAP"
 
+// Stats reports counters observed in the stream, for the CLI's end-of-run
+// summary. All fields are best-effort: a truncated stream (or a widget that
+// never loaded) leaves the corresponding zero values.
+type Stats struct {
+	// Frames counts sampled frames; LastFrame is the sim frame of the newest one.
+	Frames    int
+	LastFrame int32
+	// Profile holds the engine's internal time-profiler records (PROF lines,
+	// emitted once at game over), largest first. Profiler scopes nest (e.g.
+	// "Sim::Path" is also inside "Sim"), so entries overlap and do not sum to
+	// wall time.
+	Profile []ProfileEntry
+}
+
+// ProfileEntry is one engine time-profiler record: total accumulated wall
+// milliseconds spent in a named internal scope over the whole run.
+type ProfileEntry struct {
+	Name string
+	Ms   float64
+}
+
 // Consume reads the widget stream from r and writes records to w. base carries the
 // static metadata already known to the caller (gameId, versions, map, sampleEvery);
 // the unit-def and team tables discovered in the stream are merged into it, and the
@@ -37,6 +59,15 @@ const Tag = "BRSNAP"
 // Consume is tolerant of interleaved non-BRSNAP engine output and of a truncated
 // stream (e.g. the engine is killed) — it flushes whatever it has.
 func Consume(r io.Reader, base snapshot.Meta, w snapshot.Writer) error {
+	return ConsumeStats(r, base, w, nil)
+}
+
+// ConsumeStats is Consume, additionally filling stats (which may be nil) with
+// counters as they are observed in the stream.
+func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Stats) error {
+	if stats == nil {
+		stats = &Stats{}
+	}
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
@@ -108,6 +139,8 @@ func Consume(r io.Reader, base snapshot.Meta, w snapshot.Writer) error {
 			}
 			if len(fields) >= 3 {
 				fr := snapshot.Frame{Frame: atoi32(fields[1]), TimeSec: atof32(fields[2])}
+				stats.Frames++
+				stats.LastFrame = fr.Frame
 				pendingCount = -1
 				if len(fields) >= 4 {
 					pendingCount = atoi32(fields[3])
@@ -126,6 +159,13 @@ func Consume(r io.Reader, base snapshot.Meta, w snapshot.Writer) error {
 					Pos:       snapshot.Vec3{X: atof32(fields[4]), Y: atof32(fields[5]), Z: atof32(fields[6])},
 					Health:    atof32(fields[7]),
 					MaxHealth: atof32(fields[8]),
+				})
+			}
+		case "PROF": // PROF <totalMs> <name> (name is last; profiler names may contain anything)
+			if len(fields) >= 3 {
+				stats.Profile = append(stats.Profile, ProfileEntry{
+					Name: strings.Join(fields[2:], " "),
+					Ms:   atof64(fields[1]),
 				})
 			}
 		case "EV": // EV <frame> <kind> <id> <def> <team>
@@ -166,4 +206,9 @@ func atoi32(s string) int32 {
 func atof32(s string) float32 {
 	f, _ := strconv.ParseFloat(s, 32)
 	return float32(f)
+}
+
+func atof64(s string) float64 {
+	f, _ := strconv.ParseFloat(s, 64)
+	return f
 }
