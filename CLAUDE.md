@@ -13,10 +13,12 @@ positions is to replay it in the engine and sample state from a read-only Lua wi
 ## Build / test / common commands
 
 ```sh
-go build ./cmd/barreplay        # build the CLI -> ./barreplay
+go build ./cmd/barreplay        # build the capture CLI -> ./barreplay
+go build ./cmd/barreplay-viz    # build the visualization server -> ./barreplay-viz
 go test ./...                   # all unit tests (no engine required)
 go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
 go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, no engine
+go run ./cmd/barreplay-viz -snapshots ./snapshots        # serve the viewer at 127.0.0.1:8080
 ```
 
 Tests are hermetic: `barapi` uses a mock HTTP server, `demofile` tests against the
@@ -27,10 +29,12 @@ are pure. None of them launch the engine.
 
 ```
 cmd/barreplay/main.go     CLI: link/gameId/.sdfz -> full pipeline
+cmd/barreplay-viz/main.go CLI: serve the browser playback UI over a snapshots dir
 internal/barapi/          resolve gameId via api.bar-rts.com; download .sdfz from OVH
 internal/demofile/        gunzip + parse packed header + TDF startscript
 internal/engine/          locate spring-headless/pr-downloader, provision, launch, stream stdout
 internal/capture/         parse the widget's BRSNAP stdout protocol -> snapshot records
+internal/viz/             load .jsonl/.brsnap -> compact wire JSON; serve embedded HTML/JS viewer
 snapshot/                 PUBLIC data model + pluggable Writer (owns on-disk format; v1 JSONL)
 assets/lua/snapshot_widget.lua   embedded, read-only sampler (go:embed)
 ```
@@ -111,6 +115,39 @@ the seeded config must exactly match `GetInfo().name` in the Lua asset (a test g
 A **gadget** would be worse here: `luarules/gadgets.lua` only scans the write-dir when
 `Spring.IsDevLuaEnabled()` (else `VFS.ZIP_ONLY`, game-archive only), so a dropped-in gadget
 won't load without an extra dev flag. Widgets are the right injection point.
+
+## Visualization tool (`cmd/barreplay-viz` + `internal/viz`)
+
+A **separate, read-only** tool that serves a browser playback of a finished capture; it
+never touches the engine. `barreplay-viz -snapshots <dir> [-addr host:port]` scans the
+dir for `.jsonl`/`.brsnap` files and serves the viewer.
+
+- **`internal/viz/loader.go`** decodes a file into an in-memory `Replay` (Meta + Frames +
+  Events). `.jsonl` goes through `snapshot.NewReader`; `.brsnap` (the raw widget stream)
+  is re-parsed through `internal/capture` via an in-memory `snapshot.Writer` (`memWriter`)
+  — so the viz tool reuses the exact same parser as the capture pipeline. A `.brsnap` has
+  no versions/map in it (only the `D`/`T` preamble), so only the gameId (from the filename)
+  is seeded there.
+- **`internal/viz/wire.go`** converts a `Replay` into the browser payload. Frames pack their
+  units into a **flat `[]int32` of stride 7** (`[id, def, team, x, z, hp, maxHp]`, positions/
+  health rounded to ints, height `y` dropped) instead of an array of objects: a real replay
+  is ~600 units/frame over thousands of frames, so this cuts the JSON an order of magnitude.
+  `unitStride` (Go) must stay in lockstep with `STRIDE` (JS in `web/app.js`). It also computes
+  the world-space `bounds` (for viewport fit) and a team roster (Meta.Teams plus any team id
+  seen only in frames/events, so nothing renders colourless).
+- **`internal/viz/server.go`** embeds `web/{index.html,app.js,style.css}` via `go:embed` and
+  exposes `/api/replays` (the file list) and `/api/replay?file=<basename>` (one capture's wire
+  payload). The `file` param is confined to the snapshots dir (basename only — rejects any path
+  separator / traversal). Assets are served `no-store` so a changed UI never serves stale.
+- **`internal/viz/web/`** is plain HTML/Canvas/vanilla-JS — **no framework, no build step**
+  (the prompt allowed Vite but it's unnecessary for a single embedded page). `app.js` reads the
+  flat unit arrays by index (no per-unit objects), batches dots by team colour, and does
+  timeline scrub / play / zoom / pan / hover-tooltip. Colours are assigned per ally-team (a base
+  hue per ally, lightness varied per team within it).
+
+Guarding the tool: `internal/viz/viz_test.go` round-trips a synthetic `.jsonl` and `.brsnap`
+through `Load`, checks the flat-array packing + bounds in `toWire`, and checks the dir listing.
+No engine or browser needed.
 
 ## Running a real capture (needs the engine + content)
 

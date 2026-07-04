@@ -1,0 +1,401 @@
+'use strict';
+
+// barreplay viewer — vanilla JS canvas playback of a recorded capture.
+//
+// Wire format (see internal/viz/wire.go): each frame packs its units into a
+// flat Int32 array `u` of stride 7: [id, def, team, x, z, hp, maxHp]. We read it
+// by index rather than materialising per-unit objects — a replay can hold ~600
+// units across thousands of frames, so avoiding the object churn keeps playback
+// smooth.
+
+const STRIDE = 7;
+const F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6 };
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const tooltip = document.getElementById('tooltip');
+const emptyEl = document.getElementById('empty');
+
+let data = null;            // loaded wire payload
+let idx = 0;               // current frame index
+let scale = 1;             // world->screen px per elmo
+let center = { x: 0, z: 0 };// world point at viewport centre
+let teamColor = {};        // team id -> css colour
+let mouse = null;          // {x,y} canvas px or null
+let drag = null;           // pan state or null
+let playTimer = null;
+let secPerFrame = 1;       // game seconds represented by one sampled frame
+
+// ---- colour assignment ----------------------------------------------------
+// Group teams by ally; each ally gets a base hue, teams within it vary in
+// lightness so allies read as one colour family but stay distinguishable.
+const ALLY_HUES = [210, 5, 135, 45, 275, 190, 320, 95, 20, 165];
+
+function assignColors(teams) {
+  const byAlly = {};
+  teams.forEach(t => { (byAlly[t.ally] ||= []).push(t); });
+  const allies = Object.keys(byAlly).map(Number).sort((a, b) => a - b);
+  const colors = {};
+  allies.forEach((ally, ai) => {
+    const hue = ALLY_HUES[ai % ALLY_HUES.length];
+    const members = byAlly[ally].sort((a, b) => a.team - b.team);
+    members.forEach((t, ti) => {
+      const light = members.length > 1 ? 45 + (ti / (members.length - 1)) * 28 : 58;
+      colors[t.team] = `hsl(${hue} 62% ${light}%)`;
+    });
+  });
+  return colors;
+}
+
+function teamLabel(t) {
+  if (t.player) return t.player;
+  const side = t.side ? ` (${t.side})` : '';
+  return `Team ${t.team}${side}`;
+}
+
+// ---- coordinate transforms ------------------------------------------------
+function w2s(x, z) {
+  return [cv.width / 2 + (x - center.x) * scale, cv.height / 2 + (z - center.z) * scale];
+}
+function s2w(sx, sy) {
+  return [(sx - cv.width / 2) / scale + center.x, (sy - cv.height / 2) / scale + center.z];
+}
+
+function resize() {
+  const r = cv.parentElement.getBoundingClientRect();
+  cv.width = r.width;
+  cv.height = r.height;
+  draw();
+}
+window.addEventListener('resize', resize);
+
+// Fit the whole map extent into the viewport with a margin.
+function fitView() {
+  const b = data.bounds;
+  const w = Math.max(1, b.maxX - b.minX);
+  const h = Math.max(1, b.maxZ - b.minZ);
+  center = { x: (b.minX + b.maxX) / 2, z: (b.minZ + b.maxZ) / 2 };
+  scale = Math.min(cv.width / (w * 1.12), cv.height / (h * 1.12));
+  if (!isFinite(scale) || scale <= 0) scale = 0.1;
+}
+
+// ---- drawing --------------------------------------------------------------
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!data) return;
+
+  drawMapFrame();
+
+  const fr = data.frames[idx];
+  if (!fr) return;
+  const u = fr.u;
+
+  // Radius: a hair larger when zoomed in, clamped so a full-map view stays
+  // legible without turning into a blob.
+  const rad = Math.max(1.6, Math.min(5, scale * 8));
+
+  // Batch by colour to minimise canvas state changes.
+  const byColor = {};
+  for (let i = 0; i < u.length; i += STRIDE) {
+    const c = teamColor[u[i + F.TEAM]] || '#9aa6b2';
+    (byColor[c] ||= []).push(i);
+  }
+  for (const color in byColor) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    for (const i of byColor[color]) {
+      const [sx, sy] = w2s(u[i + F.X], u[i + F.Z]);
+      // Cull off-screen units.
+      if (sx < -8 || sy < -8 || sx > cv.width + 8 || sy > cv.height + 8) continue;
+      ctx.moveTo(sx + rad, sy);
+      ctx.arc(sx, sy, rad, 0, 7);
+    }
+    ctx.fill();
+  }
+
+  updateTooltip();
+}
+
+// Map extent rectangle + a light grid so panning/zoom has reference.
+function drawMapFrame() {
+  const b = data.bounds;
+  const [x0, y0] = w2s(b.minX, b.minZ);
+  const [x1, y1] = w2s(b.maxX, b.maxZ);
+  ctx.fillStyle = '#0e1319';
+  ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+
+  // Grid every 512 elmos when it isn't too dense.
+  const step = 512;
+  if (scale * step > 24) {
+    ctx.strokeStyle = '#1a232c';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let gx = Math.ceil(b.minX / step) * step; gx <= b.maxX; gx += step) {
+      const [sx] = w2s(gx, b.minZ);
+      ctx.moveTo(sx, y0); ctx.lineTo(sx, y1);
+    }
+    for (let gz = Math.ceil(b.minZ / step) * step; gz <= b.maxZ; gz += step) {
+      const [, sy] = w2s(b.minX, gz);
+      ctx.moveTo(x0, sy); ctx.lineTo(x1, sy);
+    }
+    ctx.stroke();
+  }
+  ctx.strokeStyle = '#2d3a47';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+}
+
+// ---- hit testing / tooltip ------------------------------------------------
+function hitTest() {
+  if (!mouse || !data) return null;
+  const fr = data.frames[idx];
+  if (!fr) return null;
+  const u = fr.u;
+  let best = -1, bestD = 10 * 10; // 10px pick radius (squared)
+  for (let i = 0; i < u.length; i += STRIDE) {
+    const [sx, sy] = w2s(u[i + F.X], u[i + F.Z]);
+    const dx = sx - mouse.x, dy = sy - mouse.y;
+    const d = dx * dx + dy * dy;
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best;
+}
+
+function defName(def) {
+  return (data.unitDefs && data.unitDefs[def]) || `def ${def}`;
+}
+
+function updateTooltip() {
+  if (!mouse || drag) { tooltip.style.display = 'none'; return; }
+  const i = hitTest();
+  if (i < 0) { tooltip.style.display = 'none'; return; }
+  const u = data.frames[idx].u;
+  const team = u[i + F.TEAM];
+  const hp = u[i + F.HP], maxHp = u[i + F.MAXHP];
+  const frac = maxHp > 0 ? Math.max(0, Math.min(1, hp / maxHp)) : 1;
+  const col = frac > 0.5 ? '#6fd07f' : (frac > 0.25 ? '#f2cf5b' : '#e2785b');
+  tooltip.innerHTML =
+    `<h3>${defName(u[i + F.DEF])}</h3>` +
+    `<div class="row"><span class="label">Unit</span><span>#${u[i + F.ID]}</span></div>` +
+    `<div class="row"><span class="label">Team</span><span style="color:${teamColor[team] || '#fff'}">${teamNameById(team)}</span></div>` +
+    `<div class="row"><span class="label">Position</span><span>${u[i + F.X]}, ${u[i + F.Z]}</span></div>` +
+    (maxHp > 0
+      ? `<div class="row"><span class="label">Health</span><span>${hp} / ${maxHp}</span></div>` +
+        `<div class="bar"><div style="width:${(frac * 100).toFixed(0)}%;background:${col}"></div></div>`
+      : '');
+  tooltip.style.display = 'block';
+  const parent = cv.parentElement.getBoundingClientRect();
+  let px = mouse.x + 14, py = mouse.y + 14;
+  tooltip.style.left = px + 'px';
+  tooltip.style.top = py + 'px';
+  const tr = tooltip.getBoundingClientRect();
+  if (tr.right > parent.right) tooltip.style.left = (mouse.x - tr.width - 14) + 'px';
+  if (tr.bottom > parent.bottom) tooltip.style.top = (mouse.y - tr.height - 14) + 'px';
+}
+
+function teamNameById(id) {
+  const t = (data.teams || []).find(t => t.team === id);
+  return t ? teamLabel(t) : `Team ${id}`;
+}
+
+// ---- sidebar --------------------------------------------------------------
+function renderTeams() {
+  const root = document.getElementById('teams');
+  root.innerHTML = '';
+  const counts = {};
+  const fr = data.frames[idx];
+  if (fr) for (let i = 0; i < fr.u.length; i += STRIDE) {
+    const t = fr.u[i + F.TEAM];
+    counts[t] = (counts[t] || 0) + 1;
+  }
+  const teams = (data.teams || []).slice().sort((a, b) => a.ally - b.ally || a.team - b.team);
+  teams.forEach(t => {
+    const row = document.createElement('div');
+    row.className = 'teamrow';
+    row.innerHTML =
+      `<span class="sw" style="background:${teamColor[t.team]}"></span>` +
+      `<span class="nm">${teamLabel(t)}</span>` +
+      `<span class="ct">${counts[t.team] || 0}</span>`;
+    root.appendChild(row);
+  });
+}
+
+// Show the most recent lifecycle events up to the current sim frame.
+function renderEvents() {
+  const ul = document.getElementById('events');
+  ul.innerHTML = '';
+  const evs = data.events || [];
+  const simFrame = data.frames[idx] ? data.frames[idx].f : 0;
+  const recent = [];
+  for (let i = evs.length - 1; i >= 0 && recent.length < 40; i--) {
+    if (evs[i].f <= simFrame) recent.push(evs[i]);
+  }
+  recent.forEach(e => {
+    const li = document.createElement('li');
+    li.className = e.k;
+    const t = fmtTime(e.f / 30);
+    const verb = { created: '+', finished: '✓', destroyed: '×' }[e.k] || '·';
+    li.textContent = `${t}  ${verb} ${defName(e.def)} #${e.id}`;
+    ul.appendChild(li);
+  });
+  if (!recent.length) ul.innerHTML = '<li style="color:#5a6875">none yet</li>';
+}
+
+// ---- playback -------------------------------------------------------------
+function fmtTime(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function show() {
+  const fr = data.frames[idx];
+  document.getElementById('s_time').textContent = fr ? fmtTime(fr.t) : '—';
+  document.getElementById('s_frame').textContent = fr ? fr.f : '—';
+  document.getElementById('s_units').textContent = fr ? fr.n : '—';
+  const last = data.frames.length - 1;
+  document.getElementById('timelabel').textContent =
+    fr ? `${fmtTime(fr.t)}   frame ${idx} / ${last}` : '—';
+  document.getElementById('slider').value = idx;
+  renderTeams();
+  renderEvents();
+  draw();
+}
+
+function go(i) {
+  idx = Math.max(0, Math.min(data.frames.length - 1, i));
+  show();
+}
+
+function stopPlay() {
+  if (playTimer) { clearInterval(playTimer); playTimer = null; }
+  document.getElementById('play').textContent = '▶ Play';
+}
+function startPlay() {
+  if (!data || data.frames.length < 2) return;
+  if (idx >= data.frames.length - 1) idx = 0;
+  const speed = +document.getElementById('speed').value || 1;
+  const period = Math.max(16, (1000 * secPerFrame) / speed);
+  playTimer = setInterval(() => {
+    if (idx >= data.frames.length - 1) { stopPlay(); return; }
+    go(idx + 1);
+  }, period);
+  document.getElementById('play').textContent = '⏸ Pause';
+}
+function togglePlay() { playTimer ? stopPlay() : startPlay(); }
+
+// ---- input ----------------------------------------------------------------
+cv.addEventListener('mousemove', e => {
+  const r = cv.getBoundingClientRect();
+  mouse = { x: e.clientX - r.left, y: e.clientY - r.top };
+  if (drag) {
+    center.x = drag.wx - (e.clientX - drag.cx) / scale;
+    center.z = drag.wz - (e.clientY - drag.cy) / scale;
+    draw();
+  } else {
+    updateTooltip();
+  }
+});
+cv.addEventListener('mouseleave', () => { mouse = null; updateTooltip(); });
+cv.addEventListener('mousedown', e => {
+  if (e.button !== 0) return;
+  drag = { cx: e.clientX, cy: e.clientY, wx: center.x, wz: center.z };
+  cv.style.cursor = 'grabbing';
+});
+window.addEventListener('mouseup', () => {
+  if (!drag) return;
+  drag = null;
+  cv.style.cursor = '';
+  updateTooltip();
+});
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  const r = cv.getBoundingClientRect();
+  const mx = e.clientX - r.left, my = e.clientY - r.top;
+  const [wx, wz] = s2w(mx, my);
+  scale = Math.max(0.01, Math.min(40, scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+  center.x = wx - (mx - cv.width / 2) / scale;
+  center.z = wz - (my - cv.height / 2) / scale;
+  draw();
+}, { passive: false });
+
+document.getElementById('first').onclick = () => { stopPlay(); go(0); };
+document.getElementById('prev').onclick = () => { stopPlay(); go(idx - 1); };
+document.getElementById('next').onclick = () => { stopPlay(); go(idx + 1); };
+document.getElementById('last').onclick = () => { stopPlay(); go(data.frames.length - 1); };
+document.getElementById('play').onclick = togglePlay;
+document.getElementById('speed').onchange = () => { if (playTimer) { stopPlay(); startPlay(); } };
+document.getElementById('slider').oninput = e => { stopPlay(); go(+e.target.value); };
+window.addEventListener('keydown', e => {
+  if (e.target.tagName === 'SELECT') return;
+  if (e.key === 'ArrowLeft') { stopPlay(); go(idx - 1); }
+  else if (e.key === 'ArrowRight') { stopPlay(); go(idx + 1); }
+  else if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+});
+
+// ---- loading --------------------------------------------------------------
+function setEmpty(msg) {
+  emptyEl.style.display = msg ? 'flex' : 'none';
+  emptyEl.textContent = msg || '';
+}
+
+async function loadReplay(file) {
+  stopPlay();
+  setEmpty('Loading…');
+  try {
+    const r = await fetch('/api/replay?file=' + encodeURIComponent(file));
+    if (!r.ok) throw new Error(await r.text());
+    data = await r.json();
+  } catch (err) {
+    setEmpty('Failed to load ' + file + ': ' + err.message);
+    data = null;
+    return;
+  }
+  if (!data.frames || !data.frames.length) {
+    setEmpty('No frames in this capture (the widget may never have sampled — see the GPU/headless note in CLAUDE.md).');
+    // Still render meta/teams so the sidebar isn't blank.
+  } else {
+    setEmpty('');
+  }
+  teamColor = assignColors(data.teams || []);
+  secPerFrame = data.sampleEvery > 0 ? data.sampleEvery / 30 : 1;
+  document.getElementById('subtitle').textContent =
+    [data.gameId, data.mapName, data.gameVersion].filter(Boolean).join(' · ') || 'replay state viewer';
+  document.getElementById('slider').max = Math.max(0, data.frames.length - 1);
+  idx = 0;
+  resize();      // sets canvas size
+  fitView();     // fit map to viewport
+  show();
+}
+
+async function init() {
+  let list = [];
+  try {
+    const r = await fetch('/api/replays');
+    list = await r.json();
+  } catch (err) {
+    setEmpty('Could not list snapshots: ' + err.message);
+    return;
+  }
+  const sel = document.getElementById('file');
+  if (!list || !list.length) {
+    setEmpty('No .jsonl or .brsnap files in the snapshots directory. Run a capture first, or point -snapshots at the right directory.');
+    return;
+  }
+  list.forEach(info => {
+    const o = document.createElement('option');
+    o.value = info.file;
+    o.textContent = `${info.gameId} (${info.format}, ${fmtSize(info.size)})`;
+    sel.appendChild(o);
+  });
+  sel.onchange = () => loadReplay(sel.value);
+  await loadReplay(list[0].file);
+}
+
+function fmtSize(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + ' MB';
+  if (n >= 1e3) return (n / 1e3).toFixed(0) + ' KB';
+  return n + ' B';
+}
+
+init();
