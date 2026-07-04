@@ -53,6 +53,30 @@ local spGetUnitTeam    = Spring.GetUnitTeam
 local spGetUnitHealth  = Spring.GetUnitHealth
 local spGetGameSeconds = Spring.GetGameSeconds
 
+-- High-resolution timing for the per-sample processing cost. Spring.GetTimer /
+-- DiffTimers give sub-millisecond precision (reported as microseconds); on an
+-- engine without them we fall back to os.clock (millisecond resolution).
+local spGetTimer = Spring.GetTimer
+local spDiffTimers = Spring.DiffTimers
+local hiResTimer = (spGetTimer ~= nil and spDiffTimers ~= nil)
+
+local function startClock()
+	if hiResTimer then
+		return spGetTimer()
+	end
+	return os.clock()
+end
+
+-- elapsedStr returns the time since startClock() as "<n>us" (microseconds) when a
+-- high-res timer is available, else "<n>ms" (milliseconds).
+local function elapsedStr(t0)
+	if hiResTimer then
+		local ms = spDiffTimers(spGetTimer(), t0) -- milliseconds (float)
+		return string.format("%.0fus", ms * 1000)
+	end
+	return string.format("%.1fms", (os.clock() - t0) * 1000)
+end
+
 local function forceMaxSpeed()
 	Spring.SendCommands("setmaxspeed " .. playbackSpeed)
 	Spring.SendCommands("setminspeed " .. playbackSpeed)
@@ -89,23 +113,34 @@ function widget:GameFrame(frame)
 	end
 	local units = spGetAllUnits()
 	local n = #units
+
+	-- Emit the sampled frame, timing how long that processing takes.
+	local sampleTime
+	if sample then
+		local t0 = startClock()
+		Echo(string.format("BRSNAP F %d %.3f %d", frame, spGetGameSeconds(), n))
+		for i = 1, n do
+			local unitID = units[i]
+			local x, y, z = spGetUnitPosition(unitID)
+			local defID = spGetUnitDefID(unitID)
+			local team = spGetUnitTeam(unitID)
+			local hp, maxHp = spGetUnitHealth(unitID)
+			Echo(string.format("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f",
+				unitID, defID or -1, team or -1, x or 0, y or 0, z or 0, hp or 0, maxHp or 0))
+		end
+		sampleTime = elapsedStr(t0)
+	end
+
 	if beat then
-		-- Re-assert speed in case demo playback reset it, and show progress.
+		-- Re-assert speed in case demo playback reset it, and show progress. Include
+		-- the sample processing time when this heartbeat frame was also sampled.
 		forceMaxSpeed()
-		Echo(string.format("[barreplay] heartbeat frame=%d t=%.0fs units=%d", frame, spGetGameSeconds(), n))
-	end
-	if not sample then
-		return
-	end
-	Echo(string.format("BRSNAP F %d %.3f %d", frame, spGetGameSeconds(), n))
-	for i = 1, n do
-		local unitID = units[i]
-		local x, y, z = spGetUnitPosition(unitID)
-		local defID = spGetUnitDefID(unitID)
-		local team = spGetUnitTeam(unitID)
-		local hp, maxHp = spGetUnitHealth(unitID)
-		Echo(string.format("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f",
-			unitID, defID or -1, team or -1, x or 0, y or 0, z or 0, hp or 0, maxHp or 0))
+		if sampleTime then
+			Echo(string.format("[barreplay] heartbeat frame=%d t=%.0fs units=%d sample_time=%s",
+				frame, spGetGameSeconds(), n, sampleTime))
+		else
+			Echo(string.format("[barreplay] heartbeat frame=%d t=%.0fs units=%d", frame, spGetGameSeconds(), n))
+		end
 	end
 end
 
