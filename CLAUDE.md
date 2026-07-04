@@ -298,6 +298,22 @@ run to verify any change here.
   config changes back* to whatever file `--config` names. Both settings are read once at
   startup (`CGlobalConfig`), so `Spring.SetConfigInt` from the widget would not work.
 
+**Replay speed is governed by the local server, not raw CPU (non-obvious).** In demo
+playback the client process hosts a local `CGameServer` that releases the demo's
+pre-recorded NEWFRAME packets paced by `modGameTime += dt * internalSpeed`, and
+`LagProtection` (`rts/Net/GameServer.cpp`) continuously adjusts `internalSpeed` toward a
+**hardcoded client-CPU target**: the client reports `GetTimePercentage("Sim")` (draw time
+barely counts) every second, and the server holds that at 60% (`SpeedControl=1`, default)
+or 75% (`SpeedControl=2`, injected by `-throttle-draw` — with one local client the
+median/max distinction is moot, so this is a free ~+25% ceiling). Consequences: the sim
+idles ~40%/~25% of wall time by design, and whenever the client outruns the feed its
+packet queue starves, `ClientReadNet` returns empty-handed, and the main loop spins full
+`UpdateUnsynced`+`Draw` passes (the heartbeat `draws=` counter exposes this: hundreds of
+draws/s late game despite `MinDrawFPS=1`). Fully removing the governor (pin
+`internalSpeed` to `userSpeedFactor` when a demo is being read) needs a small engine
+patch — sync-safe, since pacing changes only when pre-recorded packets are released,
+never their content — and is the main remaining speed lever (~25-35% at the 60% target).
+
 ## Conventions / gotchas
 
 - Go module: `github.com/mabn/barreplay`, Go 1.24. No third-party deps (stdlib only).

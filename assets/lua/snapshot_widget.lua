@@ -99,7 +99,9 @@ end
 -- high-res timer is available, else "<n>ms" (milliseconds).
 local function elapsedStr(t0)
 	if hiResTimer then
-		local ms = spDiffTimers(spGetTimer(), t0) -- milliseconds (float)
+		-- DiffTimers returns SECONDS unless returnMs=true is passed — omitting it
+		-- once made 2ms samples display as "2us".
+		local ms = spDiffTimers(spGetTimer(), t0, true) -- milliseconds (float)
 		return string.format("%.0fus", ms * 1000)
 	end
 	return string.format("%.1fms", (os.clock() - t0) * 1000)

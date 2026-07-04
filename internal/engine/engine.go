@@ -327,6 +327,14 @@ func (e *Engine) WriteEngineConfig() (string, error) {
 	if e.cfg.ThrottleDraw {
 		overrides["MinDrawFPS"] = "1"
 		overrides["MinSimDrawBalance"] = "0.001"
+		// Demo playback is paced by the LOCAL SERVER: LagProtection adjusts the
+		// frame-release speed to hold the client's reported Sim CPU share at a
+		// hardcoded target — 60% with SpeedControl=1 (default; median of client
+		// CPUs) or 75% with SpeedControl=2 (max). With one local client median
+		// and max are the same player, so 2 is a free ~+25% sim-speed ceiling.
+		// Pacing changes when pre-recorded packets are released, never their
+		// content or order, so it cannot desync the re-sim.
+		overrides["SpeedControl"] = "2"
 	}
 	if e.cfg.WorkerThreads != nil {
 		overrides["WorkerThreadCount"] = fmt.Sprint(*e.cfg.WorkerThreads)

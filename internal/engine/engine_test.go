@@ -123,7 +123,7 @@ func TestWriteEngineConfig(t *testing.T) {
 	}
 	b, _ := os.ReadFile(p)
 	s := string(b)
-	for _, want := range []string{"VSync = 0", "MinDrawFPS = 1", "MinSimDrawBalance = 0.001"} {
+	for _, want := range []string{"VSync = 0", "MinDrawFPS = 1", "MinSimDrawBalance = 0.001", "SpeedControl = 2"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("config missing %q:\n%s", want, s)
 		}
