@@ -49,9 +49,10 @@ between the engine's text output and the writer.
 directly) → `capture.Consume` reads that file → `snapshot.NewJSONLWriter`.
 
 Note the widget writes its BRSNAP stream to its **own file** (path substituted from
-`Config.SnapshotStreamPath`), not to stdout: the tool drains the engine's stdout to
-`io.Discard` and parses the file after the engine exits. `-progress` still works off
-`infolog.txt` (the widget's heartbeat lines keep `[f=]` markers flowing there).
+`Config.SnapshotStreamPath`), not to stdout: the tool drains the engine's stdout (watching
+only for the widget's first `[barreplay]` line, which marks the load/sim boundary) and
+parses the file after the engine exits. `-progress` still works off `infolog.txt` (the
+widget's heartbeat lines keep `[f=]` markers flowing there).
 
 ### Widget wire protocol (BRSNAP)
 
@@ -82,6 +83,7 @@ BRSNAP READY                                   end of preamble
 BRSNAP F <frame> <timeSec> <count>             start of a periodic snapshot
 BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp>   one unit (follows an F line)
 BRSNAP EV <frame> <kind> <id> <def> <team>     unit lifecycle event
+BRSNAP PROF <totalMs> <name>                   engine time-profiler record (once, at game over)
 ```
 
 The widget is strictly read-only (`Get*` + `Spring.Echo` only) so it cannot desync the
@@ -202,6 +204,42 @@ a GPU-less runner:
 - `spring-headless` under Xvfb does **not** help: it ignores the X display and keeps
   its null GL context.
 
+## Profiling a run (where does the time go?)
+
+The replay wall time has two parts, and the CLI splits them in its completion summary
+(`engine total X = load Y + sim Z (N frames, fps, speed-up)`): **load** (engine boot, VFS
+archive scan, map load, icon atlas — everything until the widget initializes, detected by
+watching the engine's stdout for the first `[barreplay]` line while draining it) and
+**sim** (frame processing). Load is a fixed cost; sim scales with game length and unit count.
+
+For *what inside the sim* is expensive, the widget dumps the engine's **internal time
+profiler** (the `/debug` overlay data) via `Spring.GetProfilerRecordNames()` /
+`Spring.GetProfilerTimeRecord(name)`:
+
+- every heartbeat: a `[barreplay] prof Sim=…ms Lua=…ms …` line (top 5, infolog only) —
+  shows whether per-frame cost drifts as unit count grows;
+- at game over: `BRSNAP PROF <totalMs> <name>` lines (top 20) written into the stream
+  file, which `capture` collects into `capture.Stats.Profile` and the CLI prints as a
+  sorted table with % of wall time.
+
+Caveats: profiler scopes **nest** (`Sim::Path` time is also counted inside `Sim`), so
+entries overlap and don't sum to 100%. Records only exist for scopes the engine actually
+entered; if the API is missing on some engine build the widget logs that and skips it.
+
+Interpreting the split for optimization work:
+
+- **Synced sim** (`Sim*` scopes, synced Lua = BAR's LuaRules gadgets, pathfinding, unit
+  scripts, LOS) is the deterministic re-simulation itself — it *cannot* be skipped or
+  approximated without desyncing, so if it dominates, the wins are engine-level
+  (faster single-core CPU; engine threading settings), not tool-level.
+- **Unsynced overhead** (LuaUI = BAR's own default widget suite, which loads in replays;
+  logging/infolog flushes; draw-adjacent scopes) is fair game — it does not affect
+  determinism and can in principle be disabled or reduced.
+
+For a C++-level answer beyond the engine's own scopes, use `perf` on the running
+process: `perf record -g -p $(pidof spring-headless)` then `perf report` (symbol quality
+depends on how the release binary was built).
+
 ## Conventions / gotchas
 
 - Go module: `github.com/mabn/barreplay`, Go 1.24. No third-party deps (stdlib only).
@@ -213,7 +251,8 @@ a GPU-less runner:
   version 5, headerSize 352).
 - Output: `<out>/<gameId>.jsonl` — a `meta` line then interleaved `frame`/`event` lines.
   Read it back with `snapshot.NewReader`. On completion the CLI prints the engine
-  simulation wall-time, `infolog.txt` size, and the snapshot's size + line count.
+  wall-time (split into load + sim, with sim fps/speed-up), the engine profiler totals
+  (see "Profiling a run"), `infolog.txt` size, and the snapshot's size + line count.
 - `-progress` (`cmd/barreplay` + `engine.WatchProgress`) polls the tail of
   `<data>/infolog.txt` every 2s, parses the newest `[f=<frame>]` marker, and prints
   frame/total, in-game time, %, processing fps, speed-up (fps/30), and ETA. Total game

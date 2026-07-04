@@ -13,6 +13,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"flag"
@@ -183,9 +184,12 @@ func run() error {
 		return err
 	}
 
-	// 6. Launch the engine. The widget writes snapshots to rawPath directly; here we
-	// only drain the engine's stdout so its pipe never blocks the sim (the heartbeat
-	// and engine logs also go to infolog.txt, which -progress reads).
+	// 6. Launch the engine. The widget writes snapshots to rawPath directly; the
+	// engine's stdout only needs draining so its pipe never blocks the sim (the
+	// heartbeat and engine logs also go to infolog.txt, which -progress reads).
+	// While draining, watch for the widget's first "[barreplay]" line: the widget
+	// initializes exactly when loading ends, so its timestamp splits the engine
+	// wall time into a load phase and a sim phase.
 	fmt.Fprintln(os.Stderr, "launching headless replay...")
 	runStart := time.Now()
 	stdout, wait, err := eng.Run(ctx, scriptPath)
@@ -193,21 +197,39 @@ func run() error {
 		w.Close()
 		return err
 	}
-	go io.Copy(io.Discard, stdout)
+	widgetLoaded := make(chan time.Time, 1)
+	go func() {
+		sc := bufio.NewScanner(stdout)
+		sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		for sc.Scan() {
+			if strings.Contains(sc.Text(), "[barreplay]") {
+				widgetLoaded <- time.Now()
+				break
+			}
+		}
+		io.Copy(io.Discard, stdout) // keep draining (also covers a scanner error)
+	}()
 	if *progress {
 		pctx, pcancel := context.WithCancel(ctx)
 		defer pcancel()
 		go engine.WatchProgress(pctx, eng.InfologPath(), int(h.GameTime), 2*time.Second, os.Stderr)
 	}
 	waitErr := wait()
-	simDuration := time.Since(runStart)
+	engineDuration := time.Since(runStart)
+	var loadDuration time.Duration // 0 = widget never announced itself
+	select {
+	case t := <-widgetLoaded:
+		loadDuration = t.Sub(runStart)
+	default:
+	}
 
 	// 7. Parse the widget's stream file into the snapshot writer.
+	var stats capture.Stats
 	var consumeErr error
 	if raw, oerr := os.Open(streamPath); oerr != nil {
 		consumeErr = fmt.Errorf("open widget output %s: %w (did the widget load and run?)", streamPath, oerr)
 	} else {
-		consumeErr = capture.Consume(raw, base, w)
+		consumeErr = capture.ConsumeStats(raw, base, w, &stats)
 		raw.Close()
 	}
 	closeErr := w.Close()
@@ -234,7 +256,7 @@ func run() error {
 
 	outPath := filepath.Join(*outDir, h.GameID+".jsonl")
 	fmt.Fprintf(os.Stderr, "done: wrote %s\n", outPath)
-	fmt.Fprintf(os.Stderr, "  engine simulation took %s\n", simDuration.Round(time.Millisecond))
+	printRunTiming(os.Stderr, engineDuration, loadDuration, &stats)
 	if mb, ok := fileSizeMB(eng.InfologPath()); ok {
 		fmt.Fprintf(os.Stderr, "  infolog.txt: %.2f MB\n", mb)
 	}
@@ -270,6 +292,35 @@ func moveFile(src, dst string) error {
 		return err
 	}
 	return os.Remove(src)
+}
+
+// printRunTiming breaks the engine wall time into a load phase (launch until the
+// widget's first "[barreplay]" stdout line: VFS scan, map load, icon atlas, ...)
+// and a sim phase (everything after), and prints the engine's own time-profiler
+// totals when the widget dumped them at game over. Profiler scopes nest (e.g.
+// "Sim::Path" time is also inside "Sim"), so percentages overlap and don't sum
+// to 100.
+func printRunTiming(out io.Writer, engineDuration, loadDuration time.Duration, stats *capture.Stats) {
+	if loadDuration <= 0 {
+		fmt.Fprintf(out, "  engine run took %s (widget never announced itself; no load/sim split)\n",
+			engineDuration.Round(time.Millisecond))
+	} else {
+		sim := engineDuration - loadDuration
+		fmt.Fprintf(out, "  engine total %s = load %s + sim %s",
+			engineDuration.Round(time.Second), loadDuration.Round(time.Second), sim.Round(time.Second))
+		if stats.LastFrame > 0 && sim > 0 {
+			fps := float64(stats.LastFrame) / sim.Seconds()
+			fmt.Fprintf(out, " (%d frames, %.0f fps, %.1fx realtime)", stats.LastFrame, fps, fps/30)
+		}
+		fmt.Fprintln(out)
+	}
+	if len(stats.Profile) > 0 {
+		fmt.Fprintf(out, "  engine profiler totals (scopes nest, so entries overlap):\n")
+		for _, p := range stats.Profile {
+			fmt.Fprintf(out, "    %9.0f ms  %3.0f%%  %s\n",
+				p.Ms, 100*p.Ms/(float64(engineDuration)/float64(time.Millisecond)), p.Name)
+		}
+	}
 }
 
 // fileSizeMB returns the size of path in megabytes; ok is false if it can't stat.
