@@ -17,7 +17,9 @@ package capture
 
 import (
 	"bufio"
+	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 
@@ -43,6 +45,7 @@ func Consume(r io.Reader, base snapshot.Meta, w snapshot.Writer) error {
 	}
 	metaWritten := false
 	var pending *snapshot.Frame // frame currently being assembled from U lines
+	pendingCount := int32(-1)   // unit count the F line declared (-1 = unknown)
 
 	flushMeta := func() error {
 		if metaWritten {
@@ -55,8 +58,16 @@ func Consume(r io.Reader, base snapshot.Meta, w snapshot.Writer) error {
 		if pending == nil {
 			return nil
 		}
+		// The widget emits a whole frame in one Echo; if the engine's log ever
+		// truncated that write, we'd see fewer U lines than the F line declared.
+		// Surface it rather than silently persisting a short frame.
+		if pendingCount >= 0 && int(pendingCount) != len(pending.Units) {
+			fmt.Fprintf(os.Stderr, "capture: frame %d declared %d units but parsed %d (truncated log line?)\n",
+				pending.Frame, pendingCount, len(pending.Units))
+		}
 		fr := *pending
 		pending = nil
+		pendingCount = -1
 		return w.WriteFrame(fr)
 	}
 
@@ -97,9 +108,11 @@ func Consume(r io.Reader, base snapshot.Meta, w snapshot.Writer) error {
 			}
 			if len(fields) >= 3 {
 				fr := snapshot.Frame{Frame: atoi32(fields[1]), TimeSec: atof32(fields[2])}
+				pendingCount = -1
 				if len(fields) >= 4 {
-					if n := atoi32(fields[3]); n > 0 {
-						fr.Units = make([]snapshot.UnitState, 0, n)
+					pendingCount = atoi32(fields[3])
+					if pendingCount > 0 {
+						fr.Units = make([]snapshot.UnitState, 0, pendingCount)
 					}
 				}
 				pending = &fr

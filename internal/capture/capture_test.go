@@ -92,6 +92,32 @@ func TestConsume(t *testing.T) {
 	}
 }
 
+// A frame whose declared count exceeds the U lines present (e.g. a truncated log
+// write) is still persisted with the units that did arrive; the mismatch only
+// warns.
+func TestConsumeTruncatedFrameKeepsPartialUnits(t *testing.T) {
+	stream := strings.Join([]string{
+		"BRSNAP F 30 1.000 3", // declares 3 units
+		"BRSNAP U 100 1 0 1.0 2.0 3.0 100.0 100.0",
+		"BRSNAP U 101 1 0 4.0 5.0 6.0 100.0 100.0", // only 2 arrive
+		"BRSNAP F 60 2.000 1",
+		"BRSNAP U 102 1 0 7.0 8.0 9.0 100.0 100.0",
+	}, "\n")
+	w := &recordingWriter{}
+	if err := Consume(strings.NewReader(stream), snapshot.Meta{GameID: "x"}, w); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.frames) != 2 {
+		t.Fatalf("frames = %d, want 2", len(w.frames))
+	}
+	if len(w.frames[0].Units) != 2 {
+		t.Errorf("truncated frame kept %d units, want the 2 that arrived", len(w.frames[0].Units))
+	}
+	if len(w.frames[1].Units) != 1 {
+		t.Errorf("frame1 units = %d, want 1", len(w.frames[1].Units))
+	}
+}
+
 func TestConsumeEmptyStillWritesMeta(t *testing.T) {
 	w := &recordingWriter{}
 	if err := Consume(strings.NewReader("no snapshot data here\n"), snapshot.Meta{GameID: "x"}, w); err != nil {

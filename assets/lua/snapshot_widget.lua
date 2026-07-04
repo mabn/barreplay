@@ -119,19 +119,25 @@ function widget:GameFrame(frame)
 	local units = spGetAllUnits()
 	local n = #units
 
-	-- Emit the sampled frame, timing how long that processing takes.
+	-- Emit the whole sampled frame in a SINGLE Echo (one log write). The engine
+	-- flushes the log on every Echo, so one Echo per unit makes the emission I/O —
+	-- not the Lua sampling — dominate the runtime. Building the lines in a table and
+	-- writing them all at once collapses hundreds of flushes per sample into one.
+	-- The bytes on the wire are identical (newline-separated BRSNAP lines), so the
+	-- capture parser is unchanged.
 	local sampleTime
 	if sample then
-		Echo(string.format("BRSNAP F %d %.3f %d", frame, spGetGameSeconds(), n))
+		local lines = { string.format("BRSNAP F %d %.3f %d", frame, spGetGameSeconds(), n) }
 		for i = 1, n do
 			local unitID = units[i]
 			local x, y, z = spGetUnitPosition(unitID)
 			local defID = spGetUnitDefID(unitID)
 			local team = spGetUnitTeam(unitID)
 			local hp, maxHp = spGetUnitHealth(unitID)
-			Echo(string.format("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f",
-				unitID, defID or -1, team or -1, x or 0, y or 0, z or 0, hp or 0, maxHp or 0))
+			lines[i + 1] = string.format("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f",
+				unitID, defID or -1, team or -1, x or 0, y or 0, z or 0, hp or 0, maxHp or 0)
 		end
+		Echo(table.concat(lines, "\n"))
 		sampleTime = elapsedStr(t0)
 	end
 
