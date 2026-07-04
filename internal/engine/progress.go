@@ -98,24 +98,27 @@ func WatchProgress(ctx context.Context, infologPath string, totalGameSec int, in
 }
 
 // formatProgress renders one progress line. totalFrames<=0 or an unknown fps
-// (<0) gracefully degrade to "--".
+// (<0) gracefully degrade to "--". Speed-up is fps relative to the baseline 30
+// sim frames/game-second (e.g. 45 fps -> 1.5x realtime).
 func formatProgress(frame, totalFrames int32, fps float64) string {
 	cur := mmss(float64(frame) / simFPS)
 
-	total, pct, eta := "--:--", "--", "--:--"
+	totalF, total, pct, eta := "--", "--:--", "--", "--:--"
 	if totalFrames > 0 {
+		totalF = strconv.FormatInt(int64(totalFrames), 10)
 		total = mmss(float64(totalFrames) / simFPS)
 		pct = fmt.Sprintf("%.1f%%", 100*float64(frame)/float64(totalFrames))
 		if fps > 0 {
 			eta = mmss(float64(totalFrames-frame) / fps)
 		}
 	}
-	speed := "--"
+	speed, speedup := "--", "--"
 	if fps >= 0 {
 		speed = fmt.Sprintf("%.0f", fps)
+		speedup = fmt.Sprintf("%.1fx", fps/simFPS)
 	}
-	return fmt.Sprintf("progress: %s / %s game (%s)  •  %s sim-fps  •  ETA %s",
-		cur, total, pct, speed, eta)
+	return fmt.Sprintf("progress: frame %d/%s  •  %s / %s game (%s)  •  %s sim-fps (%s)  •  ETA %s",
+		frame, totalF, cur, total, pct, speed, speedup, eta)
 }
 
 // mmss formats a non-negative number of seconds as MM:SS (or HH:MM:SS past an hour).

@@ -51,17 +51,22 @@ func TestLastFrameInBytes(t *testing.T) {
 }
 
 func TestFormatProgress(t *testing.T) {
-	// frame 2700 = 90s in; total 5790 = 193s; ~450 fps.
+	// frame 2700 = 90s in; total 5790 = 193s; 450 fps -> 15.0x realtime.
 	line := formatProgress(2700, 5790, 450)
-	for _, want := range []string{"01:30 / 03:13", "46.6%", "450 sim-fps", "ETA"} {
+	for _, want := range []string{"frame 2700/5790", "01:30 / 03:13", "46.6%", "450 sim-fps (15.0x)", "ETA"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("progress line %q missing %q", line, want)
 		}
 	}
 
+	// The example from the request: 45 fps is a 1.5x speed-up.
+	if line := formatProgress(300, 5790, 45); !strings.Contains(line, "45 sim-fps (1.5x)") {
+		t.Errorf("speed-up wrong: %q", line)
+	}
+
 	// Unknown total and fps degrade gracefully.
 	line = formatProgress(300, 0, -1)
-	for _, want := range []string{"00:10 / --:--", "(--)", "-- sim-fps", "ETA --:--"} {
+	for _, want := range []string{"frame 300/--", "00:10 / --:--", "(--)", "-- sim-fps (--)", "ETA --:--"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("degraded line %q missing %q", line, want)
 		}
