@@ -13,9 +13,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -170,6 +172,7 @@ func run() error {
 
 	// 6. Launch the engine and stream state into the writer.
 	fmt.Fprintln(os.Stderr, "launching headless replay...")
+	runStart := time.Now()
 	stdout, wait, err := eng.Run(ctx, scriptPath)
 	if err != nil {
 		w.Close()
@@ -182,6 +185,7 @@ func run() error {
 	}
 	consumeErr := capture.Consume(stdout, base, w)
 	waitErr := wait()
+	simDuration := time.Since(runStart)
 	closeErr := w.Close()
 
 	for _, e := range []error{consumeErr, closeErr} {
@@ -193,8 +197,48 @@ func run() error {
 	if waitErr != nil {
 		fmt.Fprintf(os.Stderr, "engine exited: %v\n", waitErr)
 	}
-	fmt.Fprintf(os.Stderr, "done: wrote %s\n", filepath.Join(*outDir, h.GameID+".jsonl"))
+
+	outPath := filepath.Join(*outDir, h.GameID+".jsonl")
+	fmt.Fprintf(os.Stderr, "done: wrote %s\n", outPath)
+	fmt.Fprintf(os.Stderr, "  engine simulation took %s\n", simDuration.Round(time.Millisecond))
+	if mb, ok := fileSizeMB(eng.InfologPath()); ok {
+		fmt.Fprintf(os.Stderr, "  infolog.txt: %.2f MB\n", mb)
+	}
+	if mb, ok := fileSizeMB(outPath); ok {
+		lines, _ := countLines(outPath)
+		fmt.Fprintf(os.Stderr, "  snapshot: %.2f MB, %d lines\n", mb, lines)
+	}
 	return nil
+}
+
+// fileSizeMB returns the size of path in megabytes; ok is false if it can't stat.
+func fileSizeMB(path string) (mb float64, ok bool) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0, false
+	}
+	return float64(fi.Size()) / (1024 * 1024), true
+}
+
+// countLines counts newline-terminated lines in path.
+func countLines(path string) (int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	buf := make([]byte, 64*1024)
+	count := 0
+	for {
+		n, err := f.Read(buf)
+		count += bytes.Count(buf[:n], []byte{'\n'})
+		if err == io.EOF {
+			return count, nil
+		}
+		if err != nil {
+			return count, err
+		}
+	}
 }
 
 func isLocalSDFZ(s string) bool {
