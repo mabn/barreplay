@@ -183,5 +183,10 @@ a GPU-less runner:
   `internal/demofile/demofile.go` against the real sample (magic `spring demofile`,
   version 5, headerSize 352).
 - Output: `<out>/<gameId>.jsonl` — a `meta` line then interleaved `frame`/`event` lines.
-  Read it back with `snapshot.NewReader`.
+  Read it back with `snapshot.NewReader`. On completion the CLI prints the engine
+  simulation wall-time, `infolog.txt` size, and the snapshot's size + line count.
+- `-progress` (`cmd/barreplay` + `engine.WatchProgress`) polls the tail of
+  `<data>/infolog.txt` every 2s, parses the newest `[f=<frame>]` marker, and prints
+  frame/total, in-game time, %, processing fps, speed-up (fps/30), and ETA. Total game
+  length comes from the demo header `GameTime`; the engine sims at 30 frames/game-second.
 - Development happens on branch `claude/bar-replay-snapshots-g8jmfj`; `main` is the base.

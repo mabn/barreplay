@@ -72,12 +72,18 @@ barreplay -no-run https://www.beyondallreason.info/replays?gameId=836d486a5480a9
 # demo: gameId=836d486a... engine=2025.06.24 map="Isidis crack 1.1" game="Beyond All Reason test-30541-..." gameTime=720s
 ```
 
-Full capture (requires a BAR install / engine — see below):
+Full capture (requires a BAR install / engine — see below); `-progress` streams live
+status and the run prints a summary when it finishes:
 
 ```sh
-barreplay -data ~/.local/share/Beyond-All-Reason/data -out ./snaps \
+barreplay -progress -data ~/.local/share/Beyond-All-Reason/data -out ./snaps \
     https://www.beyondallreason.info/replays?gameId=836d486a5480a9e830be54db7d2c7be9
-# → ./snaps/836d486a...jsonl
+# progress: frame 2700/5790  •  01:30 / 03:13 game (46.6%)  •  512 sim-fps (17.1x)  •  ETA 00:12
+# ...
+# done: wrote snaps/836d486a...jsonl
+#   engine simulation took 12.847s
+#   infolog.txt: 45.20 MB
+#   snapshot: 3.10 MB, 256 lines
 ```
 
 ## Output format (v1: JSONL)
@@ -158,11 +164,12 @@ go build ./cmd/barreplay
     https://www.beyondallreason.info/replays?gameId=836d486a5480a9e830be54db7d2c7be9
 ```
 
-Expect: the `.sdfz` downloaded into `<data>/demos`, a fast headless run (min/max
-speed forced to 9999 in the startscript and `setmaxspeed` from the widget), and
-`./snaps/<gameId>.jsonl` containing a `meta` line followed by ~`gameTime` frame
-blocks. Spot-check that unit counts rise and fall plausibly and that positions fall
-within the map bounds.
+Expect: the `.sdfz` downloaded into `<data>/demos`, a fast run (the widget forces max
+playback speed via `setmin/maxspeed` — add `-progress` to watch the speed-up), and
+`./snaps/<gameId>.jsonl` containing a `meta` line followed by ~`gameTime` frame blocks.
+On completion the tool reports the engine simulation time, the `infolog.txt` size, and
+the snapshot's size and line count. Spot-check that unit counts rise and fall plausibly
+and that positions fall within the map bounds.
 
 ## Notes & known rough edges
 
