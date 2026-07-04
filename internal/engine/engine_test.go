@@ -132,7 +132,8 @@ func TestWriteEngineConfig(t *testing.T) {
 		t.Error("engineCfgPath not recorded for Run's --config")
 	}
 
-	// Throttle off: user's settings pass through, no overrides injected.
+	// Throttle off: user's settings pass through, no overrides injected. The
+	// zero-value Config must also not inject WorkerThreadCount (nil pointer).
 	e2 := &Engine{cfg: Config{DataDir: dir}}
 	p2, err := e2.WriteEngineConfig()
 	if err != nil {
@@ -141,6 +142,21 @@ func TestWriteEngineConfig(t *testing.T) {
 	b2, _ := os.ReadFile(p2)
 	if strings.Contains(string(b2), "MinDrawFPS") {
 		t.Errorf("throttle off should not inject MinDrawFPS:\n%s", b2)
+	}
+	if strings.Contains(string(b2), "WorkerThreadCount") {
+		t.Errorf("unset WorkerThreads should not inject WorkerThreadCount:\n%s", b2)
+	}
+
+	// -worker-threads set: WorkerThreadCount is injected (0 is a real value).
+	wt := 0
+	e3 := &Engine{cfg: Config{DataDir: dir, WorkerThreads: &wt}}
+	p3, err := e3.WriteEngineConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b3, _ := os.ReadFile(p3)
+	if !strings.Contains(string(b3), "WorkerThreadCount = 0") {
+		t.Errorf("WorkerThreads=0 not injected:\n%s", b3)
 	}
 }
 
