@@ -107,7 +107,8 @@ To change the persisted format, implement `snapshot.Writer` — nothing else cha
   bundled `pr-downloader` **pointed at BAR's rapid repo** (`repos.beyondallreason.dev`)
   to fetch whatever is missing — no manual `pr-downloader` steps needed. A replay pins
   one exact game build, so `barreplay` resolves the demo's game name to its precise
-  `byar:git:<sha>` rapid tag (via BAR's `versions.gz` index) and downloads *that* — using
+  `byar:git:<sha>` rapid tag (via BAR's `versions.gz` index, cached under
+  `<data>/cache/`) and downloads *that* — using
   the moving `byar:test` tag would install the wrong build and the engine would abort
   with `content_error: Dependent archive … not found`. Provisioning is best-effort (it
   warns and continues if a fetch fails, since content may already be installed). Use

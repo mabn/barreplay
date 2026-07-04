@@ -114,11 +114,13 @@ only the **short** sha, and pr-downloader won't resolve a game by springname —
 hand it the full `byar:git:<full-sha>` rapid tag.
 
 `engine.resolveRapidGameTag` (`internal/engine/rapid.go`) does this automatically: it
-fetches the gzipped rapid index (`https://repos.beyondallreason.dev/byar/versions.gz`,
+reads the gzipped rapid index (`https://repos.beyondallreason.dev/byar/versions.gz`,
 lines are `tag,md5,depends,springname`), matches the demo's springname exactly, and
-downloads the resulting tag. It is best-effort — if the lookup fails it falls back to
-passing the springname as-is; `-game <tag>` is the manual override. The versions URL is
-derived from `-rapid-repo` (`…/repos.gz` → `…/byar/versions.gz`).
+downloads the resulting tag. The index is cached at **`<data>/cache/versions.gz`**: a
+cache hit skips the download; a miss (new build not in the cached copy) triggers exactly
+one refresh that atomically replaces the cache. It is best-effort — if the lookup fails
+it falls back to passing the springname as-is; `-game <tag>` is the manual override. The
+versions URL is derived from `-rapid-repo` (`…/repos.gz` → `…/byar/versions.gz`).
 
 The wrapper startscript `barreplay` writes forces max speed:
 `[game]{ demofile=<abs path>; } [modoptions]{ MinSpeed=9999; MaxSpeed=9999; }`.
