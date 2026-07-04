@@ -1,0 +1,239 @@
+// Package engine locates the Recoil headless engine, provisions the content a
+// replay needs (hybrid: reuse what's installed, download the rest via
+// pr-downloader), injects the snapshot widget, and launches a replay.
+//
+// The engine must match the version the replay was recorded with or the
+// deterministic re-simulation desyncs; callers pass the replay's engineVersion.
+package engine
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+
+	"github.com/mabn/barreplay/assets"
+)
+
+// Config describes where BAR content lives and how to launch the engine.
+type Config struct {
+	// DataDir is the BAR/Spring data directory (contains engine/, games/, maps/,
+	// and is used as --write-dir). Required.
+	DataDir string
+	// EngineBinary, if set, overrides auto-location of spring-headless.
+	EngineBinary string
+	// PRDownloaderBinary, if set, overrides auto-location of pr-downloader.
+	PRDownloaderBinary string
+	// SampleEvery is the widget sampling interval in sim frames (default 30).
+	SampleEvery int
+	// SkipProvision disables all pr-downloader calls (assume content present).
+	SkipProvision bool
+	// GameOverride / MapOverride force the pr-downloader game/map identifiers
+	// instead of deriving them from the replay (the rapid-tag mapping is
+	// best-effort; these are the escape hatch).
+	GameOverride string
+	MapOverride  string
+}
+
+// Engine is a resolved, launch-ready engine.
+type Engine struct {
+	cfg          Config
+	headlessPath string
+	prdPath      string
+}
+
+func headlessName() string {
+	if runtime.GOOS == "windows" {
+		return "spring-headless.exe"
+	}
+	return "spring-headless"
+}
+
+func prdName() string {
+	if runtime.GOOS == "windows" {
+		return "pr-downloader.exe"
+	}
+	return "pr-downloader"
+}
+
+// Locate resolves the headless engine (and pr-downloader when provisioning is
+// enabled) for the given recorded engine version. It searches, in order: an
+// explicit override, then <DataDir>/engine/<version>/, then <DataDir>/engine/*,
+// then $PATH.
+func Locate(cfg Config, engineVersion string) (*Engine, error) {
+	if cfg.DataDir == "" {
+		return nil, fmt.Errorf("engine: DataDir is required")
+	}
+	if cfg.SampleEvery <= 0 {
+		cfg.SampleEvery = 30
+	}
+	e := &Engine{cfg: cfg}
+
+	var err error
+	e.headlessPath, err = findBinary(cfg.EngineBinary, cfg.DataDir, engineVersion, headlessName())
+	if err != nil {
+		return nil, fmt.Errorf("engine: locate %s: %w", headlessName(), err)
+	}
+	if !cfg.SkipProvision {
+		// pr-downloader usually sits beside the engine binary.
+		if p, perr := findBinary(cfg.PRDownloaderBinary, cfg.DataDir, engineVersion, prdName()); perr == nil {
+			e.prdPath = p
+		}
+	}
+	return e, nil
+}
+
+// findBinary applies the search order described on Locate.
+func findBinary(override, dataDir, version, name string) (string, error) {
+	if override != "" {
+		if fileExists(override) {
+			return override, nil
+		}
+		return "", fmt.Errorf("override %q not found", override)
+	}
+	candidates := []string{
+		filepath.Join(dataDir, "engine", version, name),
+	}
+	// Any engine subdir (some installs suffix the version, e.g. "<ver> bar").
+	if entries, err := os.ReadDir(filepath.Join(dataDir, "engine")); err == nil {
+		for _, ent := range entries {
+			if ent.IsDir() {
+				candidates = append(candidates, filepath.Join(dataDir, "engine", ent.Name(), name))
+			}
+		}
+	}
+	for _, c := range candidates {
+		if fileExists(c) {
+			return c, nil
+		}
+	}
+	if p, err := exec.LookPath(name); err == nil {
+		return p, nil
+	}
+	return "", fmt.Errorf("not found under %s/engine or $PATH", dataDir)
+}
+
+func fileExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir()
+}
+
+// EnsureContent downloads the game and map if provisioning is enabled and a
+// pr-downloader binary was found. Missing content is fetched into DataDir. This is
+// best-effort: on real installs the content is usually already present (the demo's
+// engine/game/map came from a normal client), so this is a no-op. Errors from
+// pr-downloader are returned so the caller can decide whether to proceed.
+func (e *Engine) EnsureContent(ctx context.Context, gameVersion, mapName string) error {
+	if e.cfg.SkipProvision || e.prdPath == "" {
+		return nil
+	}
+	game := e.cfg.GameOverride
+	if game == "" {
+		game = gameVersion // pr-downloader accepts the full springname
+	}
+	m := e.cfg.MapOverride
+	if m == "" {
+		m = mapName
+	}
+	if game != "" {
+		if err := e.runPRD(ctx, "--download-game", game); err != nil {
+			return fmt.Errorf("engine: download game %q: %w", game, err)
+		}
+	}
+	if m != "" {
+		if err := e.runPRD(ctx, "--download-map", m); err != nil {
+			return fmt.Errorf("engine: download map %q: %w", m, err)
+		}
+	}
+	return nil
+}
+
+func (e *Engine) runPRD(ctx context.Context, args ...string) error {
+	full := append([]string{"--filesystem-writepath", e.cfg.DataDir}, args...)
+	cmd := exec.CommandContext(ctx, e.prdPath, full...)
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	return cmd.Run()
+}
+
+// WriteWidget writes the snapshot widget (with SampleEvery substituted) into
+// <DataDir>/LuaUI/Widgets/ and best-effort seeds a widget config that enables it,
+// so it runs unattended in headless mode. Returns the widget path.
+func (e *Engine) WriteWidget() (string, error) {
+	widgetsDir := filepath.Join(e.cfg.DataDir, "LuaUI", "Widgets")
+	if err := os.MkdirAll(widgetsDir, 0o755); err != nil {
+		return "", err
+	}
+	src := strings.ReplaceAll(assets.SnapshotWidgetLua, "__SAMPLE_EVERY__", fmt.Sprint(e.cfg.SampleEvery))
+	widgetPath := filepath.Join(widgetsDir, "snapshot_widget.lua")
+	if err := os.WriteFile(widgetPath, []byte(src), 0o644); err != nil {
+		return "", err
+	}
+	return widgetPath, nil
+}
+
+// BuildStartscript writes a wrapper startscript that plays demoPath at maximum
+// speed and returns its path (under DataDir). The demo carries its own map/game
+// setup, so only the demofile and speed modoptions are needed.
+func (e *Engine) BuildStartscript(demoPath string) (string, error) {
+	abs, err := filepath.Abs(demoPath)
+	if err != nil {
+		return "", err
+	}
+	script := fmt.Sprintf(`[game]
+{
+	demofile = %s;
+}
+[modoptions]
+{
+	MinSpeed = 9999;
+	MaxSpeed = 9999;
+}
+`, abs)
+	scriptPath := filepath.Join(e.cfg.DataDir, "_barreplay_script.txt")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o644); err != nil {
+		return "", err
+	}
+	return scriptPath, nil
+}
+
+// Run launches spring-headless on scriptPath. It returns a reader over the merged
+// engine stdout+stderr (where the widget's BRSNAP lines appear) and a wait
+// function that reaps the process. The caller drains the reader to EOF (the read
+// end EOFs when the engine exits) via capture.Consume, then calls wait.
+// Cancelling ctx kills the engine.
+func (e *Engine) Run(ctx context.Context, scriptPath string) (io.Reader, func() error, error) {
+	args := []string{"--isolation", "--write-dir", e.cfg.DataDir, scriptPath}
+	cmd := exec.CommandContext(ctx, e.headlessPath, args...)
+
+	// An os.Pipe (not io.Pipe) is passed to the child as a real fd, so the read
+	// end reaches EOF on its own when the child exits — no deadlock between
+	// draining and Wait.
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return nil, nil, err
+	}
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+	if err := cmd.Start(); err != nil {
+		pw.Close()
+		pr.Close()
+		return nil, nil, fmt.Errorf("engine: start %s: %w", e.headlessPath, err)
+	}
+	// The parent must drop its copy of the write end so the reader can EOF once
+	// the child (the only remaining writer) exits.
+	pw.Close()
+
+	wait := func() error {
+		err := cmd.Wait()
+		pr.Close()
+		return err
+	}
+	return pr, wait, nil
+}
+
+// HeadlessPath reports the resolved engine binary (for logging).
+func (e *Engine) HeadlessPath() string { return e.headlessPath }
