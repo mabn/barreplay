@@ -136,6 +136,38 @@ func TestPRDEnvInjectsBARRepo(t *testing.T) {
 	}
 }
 
+func TestMatchRapidLine(t *testing.T) {
+	// Real line from repos.beyondallreason.dev/byar/versions.gz.
+	const line = "byar:git:1efcf40595187087532936c707f2b38227848a55,47a24f460845204ee5f426f4d21ae16f,,Beyond All Reason test-30541-1efcf40"
+	tag, ok := matchRapidLine(line, "Beyond All Reason test-30541-1efcf40")
+	if !ok || tag != "byar:git:1efcf40595187087532936c707f2b38227848a55" {
+		t.Fatalf("matchRapidLine = %q, ok=%v; want the byar:git tag", tag, ok)
+	}
+	// A non-empty depends field (commas in the middle) must not confuse the parse.
+	if tag, ok := matchRapidLine("byar:stable,deadbeef,byar:some|byar:other,My Game", "My Game"); !ok || tag != "byar:stable" {
+		t.Errorf("depends with commas: tag=%q ok=%v", tag, ok)
+	}
+	if _, ok := matchRapidLine(line, "Some Other Game"); ok {
+		t.Error("must not match a different springname")
+	}
+	if _, ok := matchRapidLine("garbage-without-commas", "x"); ok {
+		t.Error("must not match a line without commas")
+	}
+	if _, ok := matchRapidLine("only,onecomma", "onecomma"); ok {
+		t.Error("must require at least tag,...,name")
+	}
+}
+
+func TestVersionsURL(t *testing.T) {
+	if got := (&Engine{}).versionsURL(); got != "https://repos.beyondallreason.dev/byar/versions.gz" {
+		t.Errorf("default versionsURL = %q", got)
+	}
+	e := &Engine{cfg: Config{RapidRepoMaster: "https://mirror.test/foo/repos.gz"}}
+	if got := e.versionsURL(); got != "https://mirror.test/foo/byar/versions.gz" {
+		t.Errorf("override versionsURL = %q", got)
+	}
+}
+
 func firstLineWith(s, sub string) string {
 	for _, ln := range strings.Split(s, "\n") {
 		if strings.Contains(ln, sub) {

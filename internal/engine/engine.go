@@ -150,7 +150,17 @@ func (e *Engine) EnsureContent(ctx context.Context, gameVersion, mapName string)
 	}
 	game := e.cfg.GameOverride
 	if game == "" {
-		game = gameVersion // pr-downloader resolves the full springname via rapid
+		// A replay pins one exact game build. Resolve the demo's game springname to
+		// its precise rapid tag ("byar:git:<sha>") so pr-downloader fetches that build
+		// and not the moving byar:test — otherwise the engine aborts because the
+		// dependent archive the demo requires is not installed.
+		game = gameVersion
+		if tag, ok := e.resolveRapidGameTag(ctx, gameVersion); ok {
+			fmt.Fprintf(os.Stderr, "engine: resolved game %q -> rapid tag %s\n", gameVersion, tag)
+			game = tag
+		} else {
+			fmt.Fprintf(os.Stderr, "engine: could not resolve a rapid tag for %q; passing it to pr-downloader as-is\n", gameVersion)
+		}
 	}
 	m := e.cfg.MapOverride
 	if m == "" {

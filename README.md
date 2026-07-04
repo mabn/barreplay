@@ -105,9 +105,13 @@ To change the persisted format, implement `snapshot.Writer` — nothing else cha
 - The **game archive** (the `gameVersion` from the demo) and the **map** under
   `<data>/games` and `<data>/maps`. Unless `-no-provision` is set, `barreplay` runs the
   bundled `pr-downloader` **pointed at BAR's rapid repo** (`repos.beyondallreason.dev`)
-  to fetch whatever is missing — no manual `pr-downloader` steps needed. Provisioning is
-  best-effort (it warns and continues if a fetch fails, since content may already be
-  installed). Use `-game`/`-map`/`-rapid-repo` to override identifiers, and set
+  to fetch whatever is missing — no manual `pr-downloader` steps needed. A replay pins
+  one exact game build, so `barreplay` resolves the demo's game name to its precise
+  `byar:git:<sha>` rapid tag (via BAR's `versions.gz` index) and downloads *that* — using
+  the moving `byar:test` tag would install the wrong build and the engine would abort
+  with `content_error: Dependent archive … not found`. Provisioning is best-effort (it
+  warns and continues if a fetch fails, since content may already be installed). Use
+  `-game`/`-map`/`-rapid-repo` to override identifiers, and set
   `PRD_RAPID_USE_STREAMER=false` / `PRD_SSL_CERT_FILE=<ca>` in the environment if you are
   behind a proxy (they are passed through to `pr-downloader`).
 - **A working GL stack (GPU or full software GL) — see the next section.** Recoil's

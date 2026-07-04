@@ -106,9 +106,19 @@ PRD_SSL_CERT_FILE=/path/to/ca-bundle.crt \   # only if the system trust store la
 ./pr-downloader --filesystem-writepath . --download-map "Isidis crack 1.1"
 ```
 
-Pin the exact game with the `byar:git:<sha>` rapid tag (from the demo's `gameVersion`)
-rather than the moving `byar:test`. Check the mapping in
-`https://repos.beyondallreason.dev/byar/versions.gz` (gzipped rapid index).
+A replay pins **one exact game build**, so the moving `byar:test` tag is wrong: it
+resolves to the latest test build, not the one the demo needs, and the engine then
+aborts with `content_error: Dependent archive "…" not found`. The demo's `gameVersion`
+is the build's *springname* (e.g. `Beyond All Reason test-30541-1efcf40`) but carries
+only the **short** sha, and pr-downloader won't resolve a game by springname — you must
+hand it the full `byar:git:<full-sha>` rapid tag.
+
+`engine.resolveRapidGameTag` (`internal/engine/rapid.go`) does this automatically: it
+fetches the gzipped rapid index (`https://repos.beyondallreason.dev/byar/versions.gz`,
+lines are `tag,md5,depends,springname`), matches the demo's springname exactly, and
+downloads the resulting tag. It is best-effort — if the lookup fails it falls back to
+passing the springname as-is; `-game <tag>` is the manual override. The versions URL is
+derived from `-rapid-repo` (`…/repos.gz` → `…/byar/versions.gz`).
 
 The wrapper startscript `barreplay` writes forces max speed:
 `[game]{ demofile=<abs path>; } [modoptions]{ MinSpeed=9999; MaxSpeed=9999; }`.
