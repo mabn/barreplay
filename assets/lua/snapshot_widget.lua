@@ -1,10 +1,14 @@
 -- BAR Replay Snapshotter widget.
 --
--- Injected into <write-dir>/LuaUI/Widgets/ by the Go tool before launching
--- spring-headless on a replay. It runs read-only: it never issues unit orders or
--- mutates simulation state, so it cannot desync the deterministic replay. It
--- samples every visible unit every `sampleEvery` frames and emits tagged lines to
--- stdout (via Spring.Echo) which the Go `capture` package parses.
+-- Injected into <write-dir>/LuaUI/Widgets/ by the Go tool before launching the
+-- engine on a replay. It runs read-only: it never issues unit orders or mutates
+-- simulation state, so it cannot desync the deterministic replay. It samples every
+-- visible unit every `sampleEvery` frames and emits tagged lines to stdout (via
+-- Spring.Echo) which the Go `capture` package parses.
+--
+-- BAR only auto-runs a user widget whose name is already in its saved widget order
+-- list, so `enabled = true` below is not sufficient on its own; the Go tool also
+-- seeds LuaUI/Config/BYAR.lua to enable this widget (see internal/engine).
 --
 -- Wire format (see internal/capture/capture.go):
 --   BRSNAP D <defID> <name>
@@ -13,6 +17,8 @@
 --   BRSNAP F <frame> <timeSec> <count>
 --   BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp>
 --   BRSNAP EV <frame> <kind> <id> <def> <team>
+-- Plain "[barreplay] ..." heartbeat lines are also echoed for infolog visibility;
+-- capture ignores anything without the BRSNAP tag.
 
 function widget:GetInfo()
 	return {
@@ -22,13 +28,22 @@ function widget:GetInfo()
 		date    = "2026",
 		license = "MIT",
 		layer   = 0,
-		enabled = true, -- self-enable so it runs unattended in headless mode
+		enabled = true, -- self-enable; the tool also seeds the widget order list
 	}
 end
 
 -- Sampling interval in sim frames. Overridden at write time by the Go tool
 -- substituting the __SAMPLE_EVERY__ token; falls back to 30 (1 Hz).
 local sampleEvery = tonumber("__SAMPLE_EVERY__") or 30
+
+-- Heartbeat interval in sim frames. BAR simulates at 30 frames/sec, so 300 frames
+-- is one line every ~10s of game time (use 150 for ~5s).
+local heartbeatEvery = 300
+
+-- Target playback speed. setminspeed forces the sim up to this multiplier so the
+-- replay fast-forwards instead of running realtime; the engine clamps to its own
+-- ceiling and otherwise runs as fast as the CPU allows.
+local playbackSpeed = 1000
 
 local Echo = Spring.Echo
 local spGetAllUnits    = Spring.GetAllUnits
@@ -37,6 +52,11 @@ local spGetUnitDefID   = Spring.GetUnitDefID
 local spGetUnitTeam    = Spring.GetUnitTeam
 local spGetUnitHealth  = Spring.GetUnitHealth
 local spGetGameSeconds = Spring.GetGameSeconds
+
+local function forceMaxSpeed()
+	Spring.SendCommands("setmaxspeed " .. playbackSpeed)
+	Spring.SendCommands("setminspeed " .. playbackSpeed)
+end
 
 local function emitPreamble()
 	-- Unit-def id -> internal name table (stable for the whole game).
@@ -52,20 +72,31 @@ local function emitPreamble()
 end
 
 function widget:Initialize()
-	-- Run as fast as the CPU allows and see the whole map (spectator full view),
-	-- so GetAllUnits returns every unit regardless of line-of-sight.
-	Spring.SendCommands("setmaxspeed 1000")
-	Spring.SendCommands("setminspeed 1000")
+	-- Run as fast as possible and see the whole map (spectator full view), so
+	-- GetAllUnits returns every unit regardless of line-of-sight.
+	forceMaxSpeed()
 	Spring.SendCommands("spectatorfullview 1")
+	Echo(string.format("[barreplay] snapshot widget loaded: sampling every %d frames, heartbeat every %d, speed %d",
+		sampleEvery, heartbeatEvery, playbackSpeed))
 	emitPreamble()
 end
 
 function widget:GameFrame(frame)
-	if frame % sampleEvery ~= 0 then
+	local beat = (frame % heartbeatEvery == 0)
+	local sample = (frame % sampleEvery == 0)
+	if not beat and not sample then
 		return
 	end
 	local units = spGetAllUnits()
 	local n = #units
+	if beat then
+		-- Re-assert speed in case demo playback reset it, and show progress.
+		forceMaxSpeed()
+		Echo(string.format("[barreplay] heartbeat frame=%d t=%.0fs units=%d", frame, spGetGameSeconds(), n))
+	end
+	if not sample then
+		return
+	end
 	Echo(string.format("BRSNAP F %d %.3f %d", frame, spGetGameSeconds(), n))
 	for i = 1, n do
 		local unitID = units[i]
@@ -97,6 +128,7 @@ end
 
 function widget:GameOver()
 	Echo("BRSNAP READY") -- ensure meta flushes even for zero-frame games
+	Echo("[barreplay] game over; quitting")
 	-- Clean, deterministic exit of the headless process.
 	Spring.SendCommands("quitforce")
 end
