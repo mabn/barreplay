@@ -52,6 +52,13 @@ between the engine's text output and the writer.
 The Lua widget echoes tagged lines to stdout; `internal/capture` parses them. Evolve
 the widget and `capture` together.
 
+Each sampled frame is emitted with a **single `Spring.Echo`** (the `F` line plus all its
+`U` lines joined by `\n`), not one Echo per unit: the engine flushes the log on every
+Echo, so per-unit Echo made the emission I/O — not the Lua sampling — dominate runtime.
+The bytes on the wire are unchanged (still newline-separated `BRSNAP` lines), so
+`capture` is untouched; it does compare each frame's `U` count against the `F` line's
+declared `<count>` and warns on a mismatch (the signature of a truncated log write).
+
 ```
 BRSNAP D <defID> <name>                        unit-def id -> internal name (preamble)
 BRSNAP T <teamID> <allyTeam> <side>            team info (preamble)
