@@ -21,6 +21,7 @@ go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
 go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, no engine
 go run ./cmd/barreplay-viz -snapshots ./snapshots        # serve the viewer at 127.0.0.1:8080
 go run ./cmd/barreplay-pack ./snapshots/*.jsonl          # shrink legacy captures to .brp
+go run ./cmd/barreplay-pack ./caps/<gameId>.brsnap       # raw stream -> FULL .brp (fetches the demo for map/versions/players; -id overrides, -no-demo skips)
 ```
 
 Tests are hermetic: `barapi` uses a mock HTTP server, `demofile` tests against the
@@ -147,7 +148,8 @@ maxHealth, speed, footprint `xsize`/`zsize`, `iconType`, builder/factory/fly fla
 weaponCount), not just id→name — mods add
 and modify unit types, and the id space depends on the exact game build the replay pins.
 The legacy `D` line (id→name) is still parsed for old `.brsnap` files. **Players** are
-seeded from the **demo startscript** (`cmd/barreplay` → `playersFromDemo`), the authoritative
+seeded from the **demo startscript** (`demofile.BaseMeta`, used by both `cmd/barreplay`
+and `barreplay-pack`'s demo fetch), the authoritative
 source for per-player metadata the live engine list lacks: country flag (`countrycode`),
 ladder rank, OpenSkill rating ("OS", the bracketed `skill`) + uncertainty, `accountid`, and
 `boss`. The widget's `P` line (name/team/spectator) is a fallback for a raw `.brsnap` with no
@@ -280,9 +282,10 @@ legacy parsing; viz has none).
   network just yields a plain background (the Map checkbox enables only once the texture
   loads, and the field extent falls back to the sampled unit bounds). The front-end
   positions the texture at world `(0,0)`–`(width,height)` so units overlay correctly;
-  the **Map** checkbox toggles it. Caveat: a `.brp` packed from a raw `.brsnap` has an
-  empty `mapName` (the widget stream doesn't record it — only the demo startscript path
-  does), so those captures render the plain background.
+  the **Map** checkbox toggles it. Caveat: the widget stream doesn't record the map name
+  (only the demo startscript path does), so a `.brp` packed from a raw `.brsnap` with
+  `barreplay-pack -no-demo` has an empty `mapName` and renders the plain background; the
+  default pack fetches the demo by gameId and fills it in.
 - **`internal/viz/server.go`** embeds `web/{index.html,app.js,style.css}` via `go:embed` and
   exposes `/api/replays` (the file list), `/api/replay?file=<basename>` (one capture's wire
   payload), `/api/replay/chunk` (frame data), and `/icons/<file>` (the embedded icons,

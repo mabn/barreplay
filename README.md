@@ -122,7 +122,18 @@ Legacy captures still load everywhere they did, and can be shrunk in place:
 
 ```sh
 barreplay-pack ./snapshots/*.jsonl     # writes <gameId>.brp next to each input
+barreplay-pack ./snapshots/*.brsnap    # raw widget streams work too (see below)
 ```
+
+A raw `.brsnap` is just the widget's stream — it has no map name, versions, or
+player roster (those live in the demo the capture replayed). To still produce a
+**full** `.brp` without re-running the simulation, `barreplay-pack` takes the
+replay's gameId from the input's file name (the pipeline names streams
+`<gameId>.brsnap`; use `-id <gameId|link>` if yours is named differently),
+downloads the demo from the BAR API, and seeds its startscript metadata exactly
+like a capture run does. `-no-demo` skips the download (offline) at the cost of
+that metadata; the sampling interval is inferred from the stream's frame
+spacing either way.
 
 `-format jsonl` keeps writing the old line-delimited JSON (one tagged object per
 line — see `snapshot/jsonl.go`) if you want a human-inspectable capture.
@@ -190,8 +201,8 @@ icon set and BAR's `icontypes.lua` name→bitmap table are vendored under
 so no Lua VM / third-party dependency is added. The map terrain is fetched by the
 **browser directly** from the BAR maps API (`api.bar-rts.com`) using the capture's map
 name — the viz server never proxies it; if the API is unreachable (or the capture has
-no map name, e.g. one packed from a raw `.brsnap`) the viewer just falls back to a
-plain background.
+no map name, e.g. one packed from a raw `.brsnap` with `-no-demo`) the viewer just
+falls back to a plain background.
 
 ## Requirements for a real run
 
