@@ -86,13 +86,20 @@ type TeamInfo struct {
 }
 
 // PlayerInfo describes a human/AI player in the replay, tied to the team it
-// controls. Names come from the engine's player list (which mirrors the demo's
-// startscript).
+// controls. The roster basics come from the engine's player list; the richer
+// per-player metadata (flag, rank, OpenSkill "OS" rating, account id) comes from
+// the demo startscript and is populated when available.
 type PlayerInfo struct {
-	PlayerID  int32  `json:"id"`
-	Name      string `json:"name"`
-	Team      int32  `json:"team"`
-	Spectator bool   `json:"spectator,omitempty"`
+	PlayerID         int32   `json:"id"`
+	Name             string  `json:"name"`
+	Team             int32   `json:"team"`
+	Spectator        bool    `json:"spectator,omitempty"`
+	CountryCode      string  `json:"country,omitempty"` // ISO country code (flag)
+	Rank             int32   `json:"rank,omitempty"`
+	Skill            float32 `json:"skill,omitempty"`            // OpenSkill rating ("OS")
+	SkillUncertainty float32 `json:"skillUncertainty,omitempty"` // OpenSkill sigma
+	AccountID        string  `json:"accountId,omitempty"`
+	Boss             bool    `json:"boss,omitempty"`
 }
 
 // UnitDef is a unit type's definition. Mods add and modify unit types, so the
