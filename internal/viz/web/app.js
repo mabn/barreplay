@@ -8,8 +8,65 @@
 // units across thousands of frames, so avoiding the object churn keeps playback
 // smooth.
 
-const STRIDE = 7;
-const F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6 };
+const STRIDE = 9;
+const F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6, DVX: 7, DVZ: 8 };
+
+// Per-interval lookup: unit id -> base index of that unit in the NEXT sampled
+// frame. Lets movement be animated toward each unit's actual next position
+// (direction) at the speed implied by its velocity (magnitude). Rebuilt whenever
+// the integer keyframe changes.
+let nextPosMap = null;
+function buildNextPosMap() {
+  nextPosMap = new Map();
+  const nf = data && data.frames[idx + 1];
+  if (!nf) return;
+  const nu = nf.u;
+  for (let j = 0; j < nu.length; j += STRIDE) nextPosMap.set(nu[j + F.ID], j);
+}
+
+// Tangent length cap (as a multiple of the straight-line distance between the two
+// samples) for the Hermite curve below — keeps a wildly-inconsistent velocity from
+// bending the path into a big loop or bulge.
+const TANGENT_CAP = 2;
+function clampVec(x, z, max) {
+  const m = Math.hypot(x, z);
+  if (m <= max || m === 0) return [x, z];
+  const s = max / m;
+  return [x * s, z * s];
+}
+
+// Interpolated world [x, z] of unit i in the current frame array u, via a cubic
+// Hermite spline between this sample (P0) and the unit's next sample (P1), using
+// each end's velocity as the tangent: the unit leaves P0 at its frame-A velocity
+// and arrives at P1 at its frame-B velocity, so motion curves naturally and is C1
+// continuous across samples (no kink at the boundary). dvx/dvz are the velocity
+// displacement over one interval — the exact Hermite tangents for t in [0,1].
+// Constant-velocity motion reduces to a straight line. Stationary units (zero
+// current velocity) and on-keyframe renders return the sampled position unchanged.
+function interpPos(u, i) {
+  const bx = u[i + F.X], bz = u[i + F.Z];              // P0
+  if (renderFrac === 0) return [bx, bz];
+  const m0x = u[i + F.DVX], m0z = u[i + F.DVZ];        // tangent at A (frame-A velocity)
+  if (m0x === 0 && m0z === 0) return [bx, bz];         // zero velocity: stationary, don't animate
+  const j = nextPosMap ? nextPosMap.get(u[i + F.ID]) : undefined;
+  if (j === undefined) {
+    // No next sample (unit is gone by then): fall back to velocity extrapolation.
+    return [bx + m0x * renderFrac, bz + m0z * renderFrac];
+  }
+  const nu = data.frames[idx + 1].u;
+  const px = nu[j + F.X], pz = nu[j + F.Z];            // P1
+  const chord = Math.hypot(px - bx, pz - bz);
+  if (chord === 0) return [bx, bz];                    // same position in both samples
+  const cap = TANGENT_CAP * chord;
+  const [a0x, a0z] = clampVec(m0x, m0z, cap);
+  const [a1x, a1z] = clampVec(nu[j + F.DVX], nu[j + F.DVZ], cap); // tangent at B (frame-B velocity)
+  const t = renderFrac, t2 = t * t, t3 = t2 * t;
+  const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
+  return [
+    h00 * bx + h10 * a0x + h01 * px + h11 * a1x,
+    h00 * bz + h10 * a0z + h01 * pz + h11 * a1z,
+  ];
+}
 
 const cv = document.getElementById('cv');
 const ctx = cv.getContext('2d');
@@ -23,12 +80,16 @@ let center = { x: 0, z: 0 };// world point at viewport centre
 let teamColor = {};        // team id -> css colour
 let mouse = null;          // {x,y} canvas px (CSS px) or null
 let drag = null;           // pan state or null
-let playTimer = null;
-let secPerFrame = 1;       // game seconds represented by one sampled frame
+let playRAF = null;        // requestAnimationFrame handle while playing
+let playLastTs = 0;        // timestamp of the previous animation tick
+let playPos = 0;           // continuous playhead in keyframe units (idx = floor)
+let renderFrac = 0;        // sub-frame fraction [0,1) within the current interval
+let secPerFrame = 1;       // game seconds per keyframe interval (sampleEvery/30)
 let showIcons = true;      // draw BAR unit icons (vs plain dots)
 let showTexture = true;    // draw the map terrain texture behind everything
 let showGrid = true;       // draw the build/small/large grid
 let showFootprints = true; // draw build-footprint rectangles for buildings
+let growIcons = true;      // grow a building's icon toward its footprint when zoomed in
 let mapW = 0, mapH = 0;    // map world extent in elmos (0 if unknown)
 let mapTex = null;         // HTMLImageElement of the terrain texture, or null
 // Viewport in CSS pixels + the device-pixel ratio. The canvas backing store is
@@ -201,7 +262,8 @@ function drawDots(u) {
     ctx.fillStyle = color;
     ctx.beginPath();
     for (const i of byColor[color]) {
-      const [sx, sy] = w2s(u[i + F.X], u[i + F.Z]);
+      const p = interpPos(u, i);
+      const [sx, sy] = w2s(p[0], p[1]);
       if (sx < -8 || sy < -8 || sx > viewW + 8 || sy > viewH + 8) continue;
       ctx.moveTo(sx + rad, sy);
       ctx.arc(sx, sy, rad, 0, 7);
@@ -211,13 +273,26 @@ function drawDots(u) {
 }
 
 // Primary render: every unit as its BAR icon, tinted to the team colour and
-// drawn at a constant screen size (see iconScale). A unit with no icon (or whose
-// bitmap hasn't loaded yet) shows a coloured dot so it is never invisible.
+// drawn at a constant screen size (see iconScale). When growIcons is on, a
+// building's icon additionally grows to 90% of its footprint once zoomed in far
+// enough that that exceeds the constant size — so it fills the footprint instead
+// of looking tiny inside it (mobile units, having no footprint, stay constant).
+// A unit with no icon (or whose bitmap hasn't loaded yet) shows a coloured dot so
+// it is never invisible.
 function drawIcons(u) {
   for (let i = 0; i < u.length; i += STRIDE) {
-    const [sx, sy] = w2s(u[i + F.X], u[i + F.Z]);
+    const p = interpPos(u, i);
+    const [sx, sy] = w2s(p[0], p[1]);
     const info = iconInfoFor(u[i + F.DEF]);
-    const px = Math.round(Math.max(ICON_MIN_PX, Math.min(ICON_MAX_PX, iconScale * (info ? info.s : 1))));
+    let px = Math.max(ICON_MIN_PX, Math.min(ICON_MAX_PX, iconScale * (info ? info.s : 1)));
+    if (growIcons) {
+      const fp = footprintFor(u[i + F.DEF]); // buildings only; null for mobile units
+      if (fp) {
+        const cap = 0.9 * Math.min(fp.w, fp.h) * scale; // 90% of the smaller footprint side, in px
+        if (cap > px) px = cap;                          // zoomed in: grow to fit the footprint
+      }
+    }
+    px = Math.round(px);
     const r = px / 2;
     if (sx < -px || sy < -px || sx > viewW + px || sy > viewH + px) continue;
     const color = teamColor[u[i + F.TEAM]] || '#9aa6b2';
@@ -270,7 +345,8 @@ function drawFootprints(u) {
     ctx.beginPath();
     for (const i of byColor[color]) {
       const fp = footprintFor(u[i + F.DEF]);
-      const [cx, cy] = w2s(u[i + F.X], u[i + F.Z]);
+      const p = interpPos(u, i);
+      const [cx, cy] = w2s(p[0], p[1]);
       const wpx = fp.w * scale, hpx = fp.h * scale;
       if (cx + wpx / 2 < 0 || cy + hpx / 2 < 0 || cx - wpx / 2 > viewW || cy - hpx / 2 > viewH) continue;
       ctx.rect(cx - wpx / 2, cy - hpx / 2, wpx, hpx);
@@ -381,7 +457,8 @@ function hitTest() {
   const u = fr.u;
   let best = -1, bestD = 10 * 10; // 10px pick radius (squared)
   for (let i = 0; i < u.length; i += STRIDE) {
-    const [sx, sy] = w2s(u[i + F.X], u[i + F.Z]);
+    const p = interpPos(u, i);
+    const [sx, sy] = w2s(p[0], p[1]);
     const dx = sx - mouse.x, dy = sy - mouse.y;
     const d = dx * dx + dy * dy;
     if (d < bestD) { bestD = d; best = i; }
@@ -476,41 +553,73 @@ function fmtTime(sec) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-function show() {
+// The heavy sidebar (per-team counts + event feed) only depends on the integer
+// keyframe, so it refreshes when idx changes, not every animation tick.
+function updateSidebar() {
   const fr = data.frames[idx];
   document.getElementById('s_time').textContent = fr ? fmtTime(fr.t) : '—';
   document.getElementById('s_frame').textContent = fr ? fr.f : '—';
   document.getElementById('s_units').textContent = fr ? fr.n : '—';
-  const last = data.frames.length - 1;
-  document.getElementById('timelabel').textContent =
-    fr ? `${fmtTime(fr.t)}   frame ${idx} / ${last}` : '—';
-  document.getElementById('slider').value = idx;
   renderTeams();
   renderEvents();
+}
+
+function updateTimeLabel() {
+  const fr = data.frames[idx];
+  const last = data.frames.length - 1;
+  const t = fr ? fr.t + renderFrac * secPerFrame : 0; // interpolate the shown game time
+  document.getElementById('timelabel').textContent =
+    fr ? `${fmtTime(t)}   frame ${idx} / ${last}` : '—';
+  document.getElementById('slider').value = idx;
+}
+
+// Move the continuous playhead (in keyframe units). idx = floor(playPos) is the
+// current sampled frame; renderFrac is the fraction into the interval to the next
+// one, which the draw helpers (ux/uz) use to interpolate unit movement.
+function setPlayhead(pos, forceSidebar) {
+  const last = data.frames.length - 1;
+  playPos = Math.max(0, Math.min(last, pos));
+  const newIdx = Math.floor(playPos + 1e-6);
+  renderFrac = Math.max(0, playPos - newIdx);
+  const changed = newIdx !== idx || forceSidebar;
+  idx = newIdx;
+  if (changed) { updateSidebar(); buildNextPosMap(); }
+  updateTimeLabel();
   draw();
 }
 
+function show() { setPlayhead(idx, true); } // full refresh at the current keyframe
+
+// Jump to a whole keyframe (stepping / scrubbing): no interpolation.
 function go(i) {
-  idx = Math.max(0, Math.min(data.frames.length - 1, i));
-  show();
+  setPlayhead(Math.round(i), true);
 }
 
 function stopPlay() {
-  if (playTimer) { clearInterval(playTimer); playTimer = null; }
+  if (playRAF) { cancelAnimationFrame(playRAF); playRAF = null; }
   document.getElementById('play').textContent = '▶ Play';
 }
 function startPlay() {
   if (!data || data.frames.length < 2) return;
-  if (idx >= data.frames.length - 1) idx = 0;
-  const speed = +document.getElementById('speed').value || 1;
-  const period = Math.max(16, (1000 * secPerFrame) / speed);
-  playTimer = setInterval(() => {
-    if (idx >= data.frames.length - 1) { stopPlay(); return; }
-    go(idx + 1);
-  }, period);
+  const last = data.frames.length - 1;
+  if (playPos >= last) setPlayhead(0, true); // restart from the beginning at the end
+  playLastTs = 0;
   document.getElementById('play').textContent = '⏸ Pause';
+  const tick = (ts) => {
+    if (!playLastTs) playLastTs = ts;
+    // Clamp large gaps (e.g. the tab was backgrounded) so we don't jump.
+    const dtReal = Math.min(0.1, (ts - playLastTs) / 1000);
+    playLastTs = ts;
+    const speed = +document.getElementById('speed').value || 1;
+    // 1x = real time: 1 game-second per second. Advance in keyframe units.
+    const next = playPos + (dtReal * speed) / secPerFrame;
+    if (next >= last) { setPlayhead(last, false); stopPlay(); return; }
+    setPlayhead(next, false);
+    playRAF = requestAnimationFrame(tick);
+  };
+  playRAF = requestAnimationFrame(tick);
 }
-function togglePlay() { playTimer ? stopPlay() : startPlay(); }
+function togglePlay() { playRAF ? stopPlay() : startPlay(); }
 
 // ---- input ----------------------------------------------------------------
 cv.addEventListener('mousemove', e => {
@@ -555,11 +664,13 @@ document.getElementById('prev').onclick = () => { stopPlay(); go(idx - 1); };
 document.getElementById('next').onclick = () => { stopPlay(); go(idx + 1); };
 document.getElementById('last').onclick = () => { stopPlay(); go(data.frames.length - 1); };
 document.getElementById('play').onclick = togglePlay;
-document.getElementById('speed').onchange = () => { if (playTimer) { stopPlay(); startPlay(); } };
+// Speed is read live inside the play loop, so a change takes effect immediately.
+document.getElementById('speed').onchange = () => {};
 document.getElementById('icons').onchange = e => { showIcons = e.target.checked; draw(); };
 document.getElementById('maptex').onchange = e => { showTexture = e.target.checked; draw(); };
 document.getElementById('grid').onchange = e => { showGrid = e.target.checked; draw(); };
 document.getElementById('footprints').onchange = e => { showFootprints = e.target.checked; draw(); };
+document.getElementById('growicons').onchange = e => { growIcons = e.target.checked; draw(); };
 document.getElementById('iconsize').oninput = e => {
   iconScale = +e.target.value;
   setParam('iconsize', iconScale);

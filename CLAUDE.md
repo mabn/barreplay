@@ -151,15 +151,31 @@ dir for `.jsonl`/`.brsnap` files and serves the viewer.
   no versions/map in it (only the `D`/`T` preamble), so only the gameId (from the filename)
   is seeded there.
 - **`internal/viz/wire.go`** converts a `Replay` into the browser payload. Frames pack their
-  units into a **flat `[]int32` of stride 7** (`[id, def, team, x, z, hp, maxHp]`, positions/
-  health rounded to ints, height `y` dropped) instead of an array of objects: a real replay
-  is ~600 units/frame over thousands of frames, so this cuts the JSON an order of magnitude.
+  units into a **flat `[]int32` of stride 9** (`[id, def, team, x, z, hp, maxHp, dvx, dvz]`,
+  positions/health rounded to ints, height `y` dropped) instead of an array of objects: a real
+  replay is ~600 units/frame over thousands of frames, so this cuts the JSON an order of
+  magnitude. `dvx`/`dvz` are the unit's **per-keyframe-interval velocity displacement**
+  (`GetUnitVelocity` is per sim-frame, so `wire.go` multiplies by `SampleEvery`) — used to
+  **interpolate movement smoothly** between the 1 Hz samples rather than blinking. The
+  front-end (`app.js` `interpPos`) fits a **cubic Hermite spline** between a unit's current
+  sample (P0) and its next sample (P1, matched by id via `nextPosMap`), using each end's
+  velocity displacement (`dvx/dvz`) as the tangent — so the unit leaves P0 at its frame-A
+  velocity and arrives at P1 at its frame-B velocity, curving naturally and C1-continuous
+  across samples (no boundary kink). Constant-velocity motion reduces to a straight line;
+  tangents are length-capped (`TANGENT_CAP`× the chord) so an inconsistent velocity can't bend
+  the path into a loop. A stationary unit (`dvx==dvz==0`) stays put; a unit absent from the
+  next sample falls back to plain velocity extrapolation. Playback is a `requestAnimationFrame` loop over a continuous
+  `playPos` (keyframe units), so **1× = real time** (1 game-second/second) and every speed
+  interpolates.
   `unitStride` (Go) must stay in lockstep with `STRIDE` (JS in `web/app.js`). It also computes
   the world-space `bounds` (for viewport fit) and a team roster (Meta.Teams plus any team id
   seen only in frames/events, so nothing renders colourless). It also fills `footprints`
-  (name→`{w,h}` in elmos) for **buildings only** (`UnitDef.IsBuilding`): `XSize`/`ZSize` are
-  in 8-elmo squares, so it multiplies by 8. Presence in the map == it's a building, so the
-  front-end draws a footprint rectangle only for those (mobile units carry no entry). This is
+  (name→`{w,h}` in elmos) for **structures only** (`!UnitDef.CanMove || UnitDef.IsBuilding`):
+  neither flag alone is enough — nano/build turrets are immobile but tagged builders (not
+  buildings), while some factories report `CanMove`, so the union catches both and still
+  excludes genuinely mobile units. `XSize`/`ZSize` are in 8-elmo squares, so it multiplies by
+  8. Presence in the map == it's a structure, so the front-end draws a footprint rectangle
+  only for those (mobile units carry no entry). This is
   best-effort — a capture predating the unit-def footprint dump has empty `XSize`, so no
   footprints; the **Footprints** checkbox toggles the layer. Unlike icons, footprints are drawn
   in world space, so they scale with zoom and are centred on the unit position (the footprint
@@ -180,6 +196,11 @@ dir for `.jsonl`/`.brsnap` files and serves the viewer.
   UI slider (`iconScale`, persisted as `?iconsize=`); the Icons checkbox switches to plain
   dots. A unit with no/loading icon shows a coloured dot so it is never invisible. The
   selected replay and icon size are both kept in the URL, so a refresh/shared link restores them.
+  The **Fit icons** checkbox (`growIcons`, default on) makes a *building's* icon grow to 90%
+  of its footprint (`0.9 * min(fpW,fpH) * scale`) once that exceeds the constant size — i.e.
+  it stays constant when zoomed out and fills the footprint when zoomed in; mobile units
+  (no footprint) are unaffected. The icon is resolved by the unit-def's `iconType` key first
+  (falling back to its name), so units whose iconType differs from their name still get an icon.
 - **`internal/viz/maptex.go`** draws the **real map terrain** behind the units. It proxies
   BAR's maps API (`api.bar-rts.com/maps/<name>`): `/api/mapinfo?map=<name>` returns the map's
   world extent in elmos (the API's width/height are map units × 512) and whether a texture
