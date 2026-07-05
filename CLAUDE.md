@@ -152,12 +152,12 @@ dir for `.jsonl`/`.brsnap` files and serves the viewer.
   `unitStride` (Go) must stay in lockstep with `STRIDE` (JS in `web/app.js`). It also computes
   the world-space `bounds` (for viewport fit) and a team roster (Meta.Teams plus any team id
   seen only in frames/events, so nothing renders colourless). It also fills `footprints`
-  (name→`{w,h}` in elmos) for **immobile units only** (`!UnitDef.CanMove` — keyed on
-  immobility, not the `IsBuilding` flag, so fixed *builder* structures like epic nano/build
-  turrets, which BAR tags as builders rather than buildings, still get a footprint):
-  `XSize`/`ZSize` are in 8-elmo squares, so it multiplies by 8. Presence in the map == it
-  doesn't move, so the front-end draws a footprint rectangle only for those (mobile units
-  carry no entry). This is
+  (name→`{w,h}` in elmos) for **structures only** (`!UnitDef.CanMove || UnitDef.IsBuilding`):
+  neither flag alone is enough — nano/build turrets are immobile but tagged builders (not
+  buildings), while some factories report `CanMove`, so the union catches both and still
+  excludes genuinely mobile units. `XSize`/`ZSize` are in 8-elmo squares, so it multiplies by
+  8. Presence in the map == it's a structure, so the front-end draws a footprint rectangle
+  only for those (mobile units carry no entry). This is
   best-effort — a capture predating the unit-def footprint dump has empty `XSize`, so no
   footprints; the **Footprints** checkbox toggles the layer. Unlike icons, footprints are drawn
   in world space, so they scale with zoom and are centred on the unit position (the footprint
