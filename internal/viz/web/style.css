@@ -32,6 +32,17 @@ select { padding: 5px 8px; }
 }
 .controls .grow { flex: 1; }
 input[type=range] { flex: 1; min-width: 120px; accent-color: #5a9fd0; }
+
+/* Timeline: the scrub slider with the downloaded-ranges bar underneath
+   (video-player style: blue = fully loaded chunk, dim = keyframe only). */
+#timeline { flex: 1; min-width: 120px; display: flex; flex-direction: column; gap: 1px; }
+#timeline input[type=range] { width: 100%; margin: 0; }
+#buffbar { height: 3px; border-radius: 2px; background: transparent; }
+#buffering {
+  font-size: 11px; color: #f2cf5b; white-space: nowrap;
+  animation: buffpulse 1s ease-in-out infinite alternate;
+}
+@keyframes buffpulse { from { opacity: 0.5; } to { opacity: 1; } }
 .timelabel {
   min-width: 190px; text-align: right; font-size: 12px;
   font-variant-numeric: tabular-nums; color: #9fb0bf;

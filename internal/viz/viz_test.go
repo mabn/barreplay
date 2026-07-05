@@ -9,18 +9,20 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/mabn/barreplay/snapshot"
 )
 
-// parseWire splits a BRW1 payload into tag->gzip-payload and decodes the head.
+// parseWire splits a BRW payload into tag->payload and decodes the head.
 func parseWire(t *testing.T, payload []byte) (wireHead, map[byte][]byte) {
 	t.Helper()
-	sections, err := snapshot.ReadContainer(bytes.NewReader(payload), snapshot.BRWMagic)
+	version, sections, err := snapshot.ReadContainer(bytes.NewReader(payload), snapshot.BRWMagic)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if version != snapshot.BRPVersion {
+		t.Fatalf("wire version = %d, want %d", version, snapshot.BRPVersion)
 	}
 	secs := map[byte][]byte{}
 	for _, s := range sections {
@@ -41,10 +43,10 @@ func parseWire(t *testing.T, payload []byte) (wireHead, map[byte][]byte) {
 	return head, secs
 }
 
-// writeJSONL writes a small capture to <dir>/<gameID>.jsonl and returns its path.
-func writeJSONL(t *testing.T, dir, gameID string) string {
+// writeBRP writes a small two-frame capture to <dir>/<gameID>.brp.
+func writeBRP(t *testing.T, dir, gameID string) string {
 	t.Helper()
-	w, err := snapshot.NewJSONLWriter(dir, gameID)
+	w, err := snapshot.NewBRPWriter(dir, gameID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,6 +75,7 @@ func writeJSONL(t *testing.T, dir, gameID string) string {
 		}},
 		{Frame: 60, TimeSec: 2, Units: []snapshot.UnitState{
 			{UnitID: 100, DefID: 1, Team: 0, Pos: snapshot.Vec3{X: 12, Y: 0, Z: 22}, Health: 3000, MaxHealth: 3000},
+			{UnitID: 300, DefID: 1, Team: 7, Pos: snapshot.Vec3{X: 500, Y: 0, Z: 600}, Health: 100, MaxHealth: 100}, // team 7 not in Meta.Teams
 		}},
 	}
 	for _, f := range frames {
@@ -86,62 +89,73 @@ func writeJSONL(t *testing.T, dir, gameID string) string {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	return filepath.Join(dir, gameID+".jsonl")
+	return filepath.Join(dir, gameID+".brp")
 }
 
-func TestLoadJSONL(t *testing.T) {
+// The head payload must carry everything the viewer needs before any frame
+// data arrives: bounds, the full team roster (including teams only seen in
+// frames), footprints, and the chunk index. The E section and every chunk
+// must be served byte-for-byte from the stored file.
+func TestServeBRP(t *testing.T) {
 	dir := t.TempDir()
-	path := writeJSONL(t, dir, "game123")
+	path := writeBRP(t, dir, "g")
 
-	rep, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rep.Meta.GameID != "game123" || rep.Meta.MapName != "Test Map" {
-		t.Errorf("meta not loaded: %+v", rep.Meta)
-	}
-	if len(rep.Frames) != 2 {
-		t.Fatalf("got %d frames, want 2", len(rep.Frames))
-	}
-	if len(rep.Events) != 1 || rep.Events[0].Kind != snapshot.EventDestroyed {
-		t.Fatalf("events not loaded: %+v", rep.Events)
-	}
-	if rep.Meta.UnitDefs[1].Name != "armcom" {
-		t.Errorf("unitDefs not loaded: %+v", rep.Meta.UnitDefs)
-	}
-}
+	srv := httptest.NewServer((&Server{Dir: dir}).Handler())
+	defer srv.Close()
 
-func TestWirePayload(t *testing.T) {
-	dir := t.TempDir()
-	path := writeJSONL(t, dir, "g")
-	rep, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
+	get := func(url string) ([]byte, *http.Response) {
+		t.Helper()
+		resp, err := http.Get(srv.URL + url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("GET %s: status %d: %s", url, resp.StatusCode, b)
+		}
+		return b, resp
 	}
-	payload, err := rep.wirePayload()
-	if err != nil {
-		t.Fatal(err)
+
+	payload, resp := get("/api/replay?file=g.brp")
+	if resp.Header.Get("ETag") == "" {
+		t.Error("no ETag on head payload")
 	}
 	head, secs := parseWire(t, payload)
 
-	// The F/E sections must be exactly what the shared snapshot codec produces —
-	// the same bytes a .brp file stores (the pass-through contract).
-	if !bytes.Equal(secs[snapshot.SecFrames], snapshot.EncodeFramesSection(rep.Frames, rep.Meta.SampleEvery)) {
-		t.Errorf("frames section differs from the snapshot codec output")
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !bytes.Equal(secs[snapshot.SecEvents], snapshot.EncodeEventsSection(rep.Events)) {
-		t.Errorf("events section differs from the snapshot codec output")
+	bf, err := snapshot.ParseBRP(f)
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	// Bounds must cover both frames' units (x in [-50,12], z in [20,80]).
-	if head.Bounds.MinX != -50 || head.Bounds.MaxX != 12 || head.Bounds.MinZ != 20 || head.Bounds.MaxZ != 80 {
-		t.Errorf("bounds=%+v", head.Bounds)
-	}
-	if len(head.Teams) != 2 || head.Teams[0].Side != "armada" {
-		t.Errorf("teams=%+v", head.Teams)
+	// Head basics.
+	if head.GameID != "g" || head.MapName != "Test Map" || head.SampleEvery != 30 {
+		t.Errorf("head = %+v", head)
 	}
 	if head.UnitDefs[1] != "armcom" {
-		t.Errorf("unitDefs=%+v", head.UnitDefs)
+		t.Errorf("unitDefs = %+v", head.UnitDefs)
+	}
+	// Bounds cover both frames' units: x in [-50, 500], z in [20, 600].
+	if head.Bounds.MinX != -50 || head.Bounds.MaxX != 500 || head.Bounds.MinZ != 20 || head.Bounds.MaxZ != 600 {
+		t.Errorf("bounds = %+v", head.Bounds)
+	}
+	// Team 7 appears only in a frame; the head must still list it.
+	found := false
+	for _, tm := range head.Teams {
+		if tm.TeamID == 7 {
+			found = true
+		}
+	}
+	if len(head.Teams) != 3 || !found {
+		t.Errorf("teams = %+v", head.Teams)
 	}
 
 	// Footprints: immobile units are included, in elmos (xsize/zsize * 8).
@@ -157,126 +171,60 @@ func TestWirePayload(t *testing.T) {
 		t.Errorf("armlab footprint = %+v (ok=%v), want {W:40 H:40}", fp, ok)
 	}
 	if _, ok := head.Footprints["armcom"]; ok {
-		t.Errorf("armcom is mobile; should have no footprint, got %+v", head.Footprints["armcom"])
-	}
-}
-
-// A .brp capture must be served with its stored F/E sections byte-for-byte
-// (no re-encoding), and its head must use the precomputed bounds/teams.
-func TestServeBRPPassthrough(t *testing.T) {
-	dir := t.TempDir()
-	w, err := snapshot.NewBRPWriter(dir, "brpgame")
-	if err != nil {
-		t.Fatal(err)
-	}
-	meta := snapshot.Meta{
-		GameID:      "brpgame",
-		MapName:     "Test Map",
-		SampleEvery: 30,
-		UnitDefs:    map[int32]snapshot.UnitDef{1: {DefID: 1, Name: "armcom", CanMove: true}},
-		Teams:       []snapshot.TeamInfo{{TeamID: 0, AllyTeam: 0, Side: "armada"}},
-	}
-	if err := w.WriteMeta(meta); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.WriteFrame(snapshot.Frame{Frame: 30, TimeSec: 1, Units: []snapshot.UnitState{
-		{UnitID: 100, DefID: 1, Team: 0, Pos: snapshot.Vec3{X: 10, Z: 20}, Health: 3000, MaxHealth: 3000},
-		{UnitID: 200, DefID: 1, Team: 7, Pos: snapshot.Vec3{X: 500, Z: 600}, Health: 100, MaxHealth: 100}, // team 7 not in Meta.Teams
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.WriteEvent(snapshot.Event{Frame: 45, Kind: snapshot.EventDestroyed, UnitID: 200, DefID: 1, Team: 7}); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
+		t.Errorf("armcom is mobile; should have no footprint")
 	}
 
-	srv := httptest.NewServer((&Server{Dir: dir}).Handler())
-	defer srv.Close()
-	resp, err := http.Get(srv.URL + "/api/replay?file=brpgame.brp")
-	if err != nil {
-		t.Fatal(err)
+	// Chunk index mirrors the file's.
+	if head.FrameCount != 2 || len(head.Chunks) != 1 {
+		t.Fatalf("frameCount=%d chunks=%+v", head.FrameCount, head.Chunks)
 	}
-	payload, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		t.Fatal(err)
+	if head.Chunks[0].Frame != 30 || head.Chunks[0].Count != 2 ||
+		head.Chunks[0].KeyLen != bf.Chunks[0].FKeyLen || head.Chunks[0].Len != bf.Chunks[0].FLen {
+		t.Errorf("wire chunk = %+v, file chunk = %+v", head.Chunks[0], bf.Chunks[0])
 	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("status %d: %s", resp.StatusCode, payload)
-	}
-	head, secs := parseWire(t, payload)
 
-	f, err := os.Open(filepath.Join(dir, "brpgame.brp"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	bf, err := snapshot.ParseBRP(f)
-	f.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(secs[snapshot.SecFrames], bf.Sections[snapshot.SecFrames]) {
-		t.Errorf("served F section is not the stored one")
-	}
+	// E section passes through byte-for-byte; no frame data in the head payload.
 	if !bytes.Equal(secs[snapshot.SecEvents], bf.Sections[snapshot.SecEvents]) {
 		t.Errorf("served E section is not the stored one")
 	}
-	if head.Bounds.MinX != 10 || head.Bounds.MaxX != 500 || head.Bounds.MinZ != 20 || head.Bounds.MaxZ != 600 {
-		t.Errorf("bounds=%+v", head.Bounds)
-	}
-	// Team 7 appears only in frames/events; the head must still list it.
-	found := false
-	for _, tm := range head.Teams {
-		if tm.TeamID == 7 {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("team 7 missing from head teams: %+v", head.Teams)
+	if _, ok := secs[snapshot.SecFrames]; ok {
+		t.Errorf("head payload must not contain a frames section")
 	}
 
-	// Load() must also fully decode the .brp.
-	rep, err := Load(filepath.Join(dir, "brpgame.brp"))
+	// Chunk endpoint: full chunk and keyframe-only both slice the stored bytes.
+	c := bf.Chunks[0]
+	fsec := bf.Sections[snapshot.SecFrames]
+	full, _ := get("/api/replay/chunk?file=g.brp&i=0")
+	if !bytes.Equal(full, fsec[c.FOff:c.FOff+c.FLen]) {
+		t.Errorf("chunk 0 is not the stored byte range")
+	}
+	key, _ := get("/api/replay/chunk?file=g.brp&i=0&key=1")
+	if !bytes.Equal(key, fsec[c.FOff:c.FOff+c.FKeyLen]) {
+		t.Errorf("keyframe slice is not the stored byte range")
+	}
+
+	// Out-of-range chunk and bad file names are rejected.
+	if resp, err := http.Get(srv.URL + "/api/replay/chunk?file=g.brp&i=9"); err != nil || resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("chunk i=9: %v %v", resp.StatusCode, err)
+	} else {
+		resp.Body.Close()
+	}
+	if resp, err := http.Get(srv.URL + "/api/replay?file=../g.brp"); err != nil || resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("traversal name: %v %v", resp.StatusCode, err)
+	} else {
+		resp.Body.Close()
+	}
+
+	// ETag revalidation: a matching If-None-Match yields 304 with no body.
+	req, _ := http.NewRequest("GET", srv.URL+"/api/replay/chunk?file=g.brp&i=0", nil)
+	req.Header.Set("If-None-Match", resp.Header.Get("ETag"))
+	r304, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rep.Frames) != 1 || len(rep.Frames[0].Units) != 2 || len(rep.Events) != 1 {
-		t.Errorf("Load(.brp): frames=%d events=%d", len(rep.Frames), len(rep.Events))
-	}
-}
-
-func TestLoadBRSNAP(t *testing.T) {
-	// A minimal raw widget stream, as internal/capture parses it.
-	stream := strings.Join([]string{
-		"BRSNAP D 1 armcom",
-		"BRSNAP D 2 corllt",
-		"BRSNAP T 0 0 armada",
-		"BRSNAP T 1 1 cortex",
-		"BRSNAP READY",
-		"BRSNAP F 30 1.0 2",
-		"BRSNAP U 100 1 0 10 5 20 3000 3000",
-		"BRSNAP U 200 2 1 -50 5 80 400 800",
-		"BRSNAP EV 45 destroyed 200 2 1",
-		"",
-	}, "\n")
-
-	rep, err := loadBRSNAP(strings.NewReader(stream), "raw-game")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rep.Meta.GameID != "raw-game" {
-		t.Errorf("gameID=%q", rep.Meta.GameID)
-	}
-	if rep.Meta.UnitDefs[1].Name != "armcom" || rep.Meta.UnitDefs[2].Name != "corllt" {
-		t.Errorf("unitDefs=%+v", rep.Meta.UnitDefs)
-	}
-	if len(rep.Frames) != 1 || len(rep.Frames[0].Units) != 2 {
-		t.Fatalf("frames=%+v", rep.Frames)
-	}
-	if len(rep.Events) != 1 || rep.Events[0].Kind != snapshot.EventDestroyed {
-		t.Errorf("events=%+v", rep.Events)
+	r304.Body.Close()
+	if r304.StatusCode != http.StatusNotModified {
+		t.Errorf("revalidation status = %d, want 304", r304.StatusCode)
 	}
 }
 
@@ -311,15 +259,15 @@ func TestUnitIcons(t *testing.T) {
 	}
 }
 
-func TestToWireIncludesIcons(t *testing.T) {
-	dir := t.TempDir()
-	path := writeJSONL(t, dir, "g")
-	rep, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
+func TestHeadIncludesIcons(t *testing.T) {
+	meta := snapshot.Meta{
+		GameID: "g",
+		UnitDefs: map[int32]snapshot.UnitDef{
+			1: {DefID: 1, Name: "armcom"},
+			2: {DefID: 2, Name: "corllt"},
+		},
 	}
-	// The fixture's UnitDefs include armcom and corllt; both have icons.
-	head := buildHead(rep.Meta, bounds(rep.Frames), nil)
+	head := buildHead(meta, defaultBounds(), nil)
 	if head.UnitIcons["armcom"].Path != "icons/armcom.png" || head.UnitIcons["armcom"].Size <= 0 {
 		t.Errorf("armcom icon=%+v", head.UnitIcons["armcom"])
 	}
@@ -409,19 +357,23 @@ func TestMapForName(t *testing.T) {
 	}
 }
 
-func TestListConfinesFiles(t *testing.T) {
+// The listing shows only .brp files; legacy formats are invisible to the UI.
+func TestListBRPOnly(t *testing.T) {
 	dir := t.TempDir()
-	writeJSONL(t, dir, "a")
-	writeJSONL(t, dir, "b")
+	writeBRP(t, dir, "a")
+	writeBRP(t, dir, "b")
+	if err := os.WriteFile(filepath.Join(dir, "legacy.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "raw.brsnap"), []byte("BRSNAP READY\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	s := &Server{Dir: dir}
 	infos, err := s.list()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(infos) != 2 {
-		t.Fatalf("got %d infos want 2: %+v", len(infos), infos)
-	}
-	if infos[0].Format != "jsonl" {
-		t.Errorf("format=%q", infos[0].Format)
+	if len(infos) != 2 || infos[0].File != "a.brp" || infos[1].File != "b.brp" {
+		t.Fatalf("got %+v, want just a.brp and b.brp", infos)
 	}
 }

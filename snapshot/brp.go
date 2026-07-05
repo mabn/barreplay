@@ -6,22 +6,34 @@ package snapshot
 // (with the unit's own velocity as the position predictor) shrink to near-zero
 // varints, and gzip flattens what remains.
 //
-// Layout: a magic + version header, then tagged sections, each independently
-// gzip-compressed:
+// Layout: a magic + version header, then tagged sections:
 //
-//	"BRP1" <version u8> then per section: <tag u8> <len u32le> <gzip payload>
+//	"BRP1" <version u8 = 2> then per section: <tag u8> <len u32le> <payload>
 //
-//	M  meta JSON: {"meta": <Meta>, "bounds": ..., "frameTeams": [...], counts}
+//	M  meta JSON: {"meta": <Meta>, "bounds", "frameTeams", "chunks" index, counts}
 //	F  core frame columns: id def team x z hp maxHp dvx dvz   (the viewer's data)
 //	X  extra frame columns: y dvy build + team resources      (full fidelity)
 //	E  lifecycle events
 //
-// Sections are separate gzip streams ON PURPOSE: the viz server sends the F and
-// E payloads to the browser byte-for-byte (inside a "BRW1" container, same
-// framing) with no server-side re-encoding, and the browser gunzips them with
-// its native DecompressionStream. The X section (data the viewer doesn't use
-// yet) is simply not sent. Unknown tags are skipped on read, so sections can be
-// added compatibly.
+// The M and E payloads are single gzip streams. The F and X payloads are a
+// concatenation of CHUNKS — the random-access unit (the video-codec model):
+// frames are grouped into runs of chunkFrames samples (64 ≈ 1 min at 1 Hz) and
+// the codec's prediction state is RESET at every chunk boundary, so a chunk's
+// first frame encodes with the "new id / absolute" path — a keyframe — and the
+// chunk decodes with no bytes from outside it. Each chunk is two standalone
+// gzip streams: K (the keyframe alone) then D (the remaining delta frames;
+// absent when the chunk has one frame), so a consumer can fetch/decode just
+// keyframes to skim a capture cheaply. The M record's "chunks" array indexes
+// them: first sim frame, sample count, and byte ranges (offsets RELATIVE to
+// the owning section's payload start; a section's absolute file offset is
+// reported by ReadContainer, so range-based consumers can add the two).
+//
+// Chunks are separately gzipped ON PURPOSE: the viz server slices individual
+// chunk byte ranges (and the E payload) out of the file and sends them to the
+// browser byte-for-byte with no re-encoding, and the browser gunzips them with
+// its native DecompressionStream — that is what makes instant start, seeking
+// and skimming cheap. The X section (data the viewer doesn't use yet) is never
+// sent. Unknown tags are skipped on read, so sections can be added compatibly.
 //
 // Values are quantized once at write time: positions/health to whole
 // elmos/points, velocities to whole elmos *per sample interval* (dv =
@@ -58,12 +70,21 @@ const (
 	BRPMagic = "BRP1"
 	BRWMagic = "BRW1"
 
+	// BRPVersion is the only readable format version. v1 (unchunked) existed
+	// only briefly pre-release and is not supported.
+	BRPVersion byte = 2
+
 	SecMeta   byte = 'M' // .brp: meta JSON
 	SecFrames byte = 'F' // core frame columns
 	SecExtra  byte = 'X' // extra frame columns (not sent to the browser)
 	SecEvents byte = 'E' // lifecycle events
 	SecHead   byte = 'J' // wire payload: head JSON (viz-specific)
 )
+
+// defaultChunkFrames is the random-access granularity: samples per chunk.
+// 64 at the default 1 Hz sampling ≈ one minute of game per seek unit. Smaller
+// chunks seek finer but repeat keyframes more often (~+5% size at 64).
+const defaultChunkFrames = 64
 
 // simFPS is the engine's fixed simulation rate; frame time is derived from it.
 const simFPS = 30
@@ -74,10 +95,14 @@ const buildScale = 255
 // resScale quantizes resource values (metal/energy/storage/income) to tenths.
 const resScale = 10
 
-// Section is one tagged, independently-gzipped payload of a container.
+// Section is one tagged payload of a container.
 type Section struct {
 	Tag     byte
-	Payload []byte // still gzip-compressed
+	Payload []byte // still compressed / raw section bytes
+	// Offset is the payload's absolute byte offset in the container stream
+	// (filled by ReadContainer). Adding a chunk's section-relative offset to it
+	// yields the chunk's absolute file range — e.g. for HTTP Range serving.
+	Offset int64
 }
 
 // WriteContainer writes magic + version + the sections in order.
@@ -102,29 +127,34 @@ func WriteContainer(w io.Writer, magic string, version byte, sections []Section)
 	return nil
 }
 
-// ReadContainer parses a container written by WriteContainer.
-func ReadContainer(r io.Reader, magic string) ([]Section, error) {
+// ReadContainer parses a container written by WriteContainer, returning its
+// version byte and sections (with absolute payload offsets filled in).
+func ReadContainer(r io.Reader, magic string) (byte, []Section, error) {
 	head := make([]byte, len(magic)+1)
 	if _, err := io.ReadFull(r, head); err != nil {
-		return nil, fmt.Errorf("snapshot: reading container header: %w", err)
+		return 0, nil, fmt.Errorf("snapshot: reading container header: %w", err)
 	}
 	if string(head[:len(magic)]) != magic {
-		return nil, fmt.Errorf("snapshot: bad magic %q (want %q)", head[:len(magic)], magic)
+		return 0, nil, fmt.Errorf("snapshot: bad magic %q (want %q)", head[:len(magic)], magic)
 	}
+	version := head[len(magic)]
+	pos := int64(len(head))
 	var sections []Section
 	var hdr [5]byte
 	for {
 		if _, err := io.ReadFull(r, hdr[:]); err == io.EOF {
-			return sections, nil
+			return version, sections, nil
 		} else if err != nil {
-			return nil, fmt.Errorf("snapshot: reading section header: %w", err)
+			return 0, nil, fmt.Errorf("snapshot: reading section header: %w", err)
 		}
+		pos += int64(len(hdr))
 		n := binary.LittleEndian.Uint32(hdr[1:])
 		payload := make([]byte, n)
 		if _, err := io.ReadFull(r, payload); err != nil {
-			return nil, fmt.Errorf("snapshot: reading section %q: %w", hdr[0], err)
+			return 0, nil, fmt.Errorf("snapshot: reading section %q: %w", hdr[0], err)
 		}
-		sections = append(sections, Section{Tag: hdr[0], Payload: payload})
+		sections = append(sections, Section{Tag: hdr[0], Payload: payload, Offset: pos})
+		pos += int64(n)
 	}
 }
 
@@ -137,6 +167,22 @@ type BRPBounds struct {
 	MaxZ float64 `json:"maxZ"`
 }
 
+// BRPChunk locates one random-access chunk inside the F and X sections. All
+// offsets/lengths are in bytes, relative to the owning section's payload
+// start. The key part ([Off, Off+KeyLen)) is a standalone gzip stream holding
+// only the keyframe; the rest ([Off+KeyLen, Off+Len)) is a second gzip stream
+// with the chunk's delta frames (absent when Count == 1, i.e. Len == KeyLen).
+type BRPChunk struct {
+	Frame   int32 `json:"frame"` // sim frame of the chunk's first sample
+	Count   int   `json:"count"` // samples in this chunk
+	FOff    int64 `json:"fOff"`
+	FKeyLen int64 `json:"fKeyLen"`
+	FLen    int64 `json:"fLen"`
+	XOff    int64 `json:"xOff"`
+	XKeyLen int64 `json:"xKeyLen"`
+	XLen    int64 `json:"xLen"`
+}
+
 // brpMetaRecord is the JSON stored in the M section: the capture Meta plus
 // aggregates a consumer would otherwise need a full frame scan for.
 type brpMetaRecord struct {
@@ -145,14 +191,17 @@ type brpMetaRecord struct {
 	Bounds *BRPBounds `json:"bounds,omitempty"`
 	// FrameTeams lists every team id that appears in frames or events, so a
 	// consumer can colour teams missing from Meta.Teams without scanning.
-	FrameTeams  []int32 `json:"frameTeams,omitempty"`
-	Frames      int     `json:"frames"`
-	Events      int     `json:"events"`
-	UnitRecords int64   `json:"unitRecords"`
+	FrameTeams  []int32    `json:"frameTeams,omitempty"`
+	Frames      int        `json:"frames"`
+	Events      int        `json:"events"`
+	UnitRecords int64      `json:"unitRecords"`
+	ChunkFrames int        `json:"chunkFrames"` // samples per chunk (last may be short)
+	Chunks      []BRPChunk `json:"chunks,omitempty"`
 }
 
 // BRPFile is a parsed .brp container: the decoded meta plus the raw
-// (still-gzipped) sections, so consumers can forward F/E without re-encoding.
+// (still-compressed) sections, so consumers can slice chunks / forward E
+// without re-encoding.
 type BRPFile struct {
 	Meta        Meta
 	Bounds      *BRPBounds
@@ -160,7 +209,9 @@ type BRPFile struct {
 	FrameCount  int
 	EventCount  int
 	UnitRecords int64
-	Sections    map[byte][]byte // tag -> gzip payload
+	ChunkFrames int
+	Chunks      []BRPChunk
+	Sections    map[byte][]byte // tag -> raw section payload
 }
 
 // ---------------------------------------------------------------------------
@@ -613,38 +664,21 @@ func gunzip(b []byte) ([]byte, error) {
 	return io.ReadAll(gz)
 }
 
-// EncodeFramesSection encodes frames into a gzip-compressed F-section payload.
-// Used by consumers (the viz server) that need to serve a legacy capture in
-// wire form; NewBRPWriter uses the same codec internally.
-func EncodeFramesSection(frames []Frame, sampleEvery int32) []byte {
-	var core, extra bytes.Buffer
-	cw := &varintWriter{w: &core}
-	xw := &varintWriter{w: &extra}
-	c := newFrameCodec(sampleEvery)
-	for _, fr := range frames {
-		c.encodeFrame(cw, xw, fr)
-	}
-	return gzipCompress(core.Bytes())
-}
-
-// EncodeEventsSection encodes events into a gzip-compressed E-section payload.
-func EncodeEventsSection(events []Event) []byte {
-	return gzipCompress(encodeEvents(events))
-}
-
 // ---------------------------------------------------------------------------
 // writer
 
-// brpWriter implements Writer, streaming frames through the codec into
-// in-memory gzip buffers and assembling the container at Close.
+// brpWriter implements Writer: frames buffer until a chunk fills, each chunk
+// is encoded with fresh codec state (its first frame becomes the keyframe) and
+// compressed into the growing F/X payloads, and the container is assembled at
+// Close.
 type brpWriter struct {
-	path  string
-	meta  Meta
-	codec *frameCodec
+	path        string
+	meta        Meta
+	chunkFrames int
 
+	pending           []Frame // frames of the not-yet-flushed chunk
 	coreBuf, extraBuf bytes.Buffer
-	coreGz, extraGz   *gzip.Writer
-	coreVW, extraVW   *varintWriter
+	chunks            []BRPChunk
 
 	events      []Event
 	bounds      BRPBounds
@@ -660,43 +694,73 @@ func NewBRPWriter(dir, gameID string) (Writer, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	w := &brpWriter{
-		path:       filepath.Join(dir, gameID+".brp"),
-		frameTeams: map[int32]bool{},
-		bounds:     BRPBounds{MinX: math.Inf(1), MaxX: math.Inf(-1), MinZ: math.Inf(1), MaxZ: math.Inf(-1)},
-	}
-	w.coreGz, _ = gzip.NewWriterLevel(&w.coreBuf, gzip.DefaultCompression)
-	w.extraGz, _ = gzip.NewWriterLevel(&w.extraBuf, gzip.DefaultCompression)
-	w.coreVW = &varintWriter{w: w.coreGz}
-	w.extraVW = &varintWriter{w: w.extraGz}
-	return w, nil
+	return &brpWriter{
+		path:        filepath.Join(dir, gameID+".brp"),
+		chunkFrames: defaultChunkFrames,
+		frameTeams:  map[int32]bool{},
+		bounds:      BRPBounds{MinX: math.Inf(1), MaxX: math.Inf(-1), MinZ: math.Inf(1), MaxZ: math.Inf(-1)},
+	}, nil
 }
 
 func (w *brpWriter) WriteMeta(m Meta) error {
 	w.meta = m
-	w.codec = newFrameCodec(m.SampleEvery)
 	return nil
 }
 
 func (w *brpWriter) WriteFrame(fr Frame) error {
-	if w.codec == nil { // meta not written; tolerate with defaults like jsonl would
-		w.codec = newFrameCodec(0)
+	w.pending = append(w.pending, fr)
+	if len(w.pending) >= w.chunkFrames {
+		w.flushChunk()
 	}
-	q := w.codec.encodeFrame(w.coreVW, w.extraVW, fr)
-	for _, u := range q {
-		w.anyUnit = true
-		w.bounds.MinX = math.Min(w.bounds.MinX, float64(u.x))
-		w.bounds.MaxX = math.Max(w.bounds.MaxX, float64(u.x))
-		w.bounds.MinZ = math.Min(w.bounds.MinZ, float64(u.z))
-		w.bounds.MaxZ = math.Max(w.bounds.MaxZ, float64(u.z))
-		w.frameTeams[int32(u.team)] = true
+	return nil
+}
+
+// flushChunk encodes the pending frames as one self-contained chunk: fresh
+// codec state (first frame all-absolute = keyframe), the keyframe and the
+// delta remainder gzipped separately, both appended to the section buffers.
+func (w *brpWriter) flushChunk() {
+	if len(w.pending) == 0 {
+		return
 	}
-	w.frames++
-	w.unitRecords += int64(len(q))
-	if w.coreVW.err != nil {
-		return w.coreVW.err
+	codec := newFrameCodec(w.meta.SampleEvery)
+	var coreKey, coreRest, extraKey, extraRest bytes.Buffer
+	encode := func(core, extra *bytes.Buffer, fr Frame) {
+		q := codec.encodeFrame(&varintWriter{w: core}, &varintWriter{w: extra}, fr)
+		for _, u := range q {
+			w.anyUnit = true
+			w.bounds.MinX = math.Min(w.bounds.MinX, float64(u.x))
+			w.bounds.MaxX = math.Max(w.bounds.MaxX, float64(u.x))
+			w.bounds.MinZ = math.Min(w.bounds.MinZ, float64(u.z))
+			w.bounds.MaxZ = math.Max(w.bounds.MaxZ, float64(u.z))
+			w.frameTeams[int32(u.team)] = true
+		}
+		w.unitRecords += int64(len(q))
 	}
-	return w.extraVW.err
+	encode(&coreKey, &extraKey, w.pending[0])
+	for _, fr := range w.pending[1:] {
+		encode(&coreRest, &extraRest, fr)
+	}
+
+	c := BRPChunk{
+		Frame: w.pending[0].Frame,
+		Count: len(w.pending),
+		FOff:  int64(w.coreBuf.Len()),
+		XOff:  int64(w.extraBuf.Len()),
+	}
+	w.coreBuf.Write(gzipCompress(coreKey.Bytes()))
+	c.FKeyLen = int64(w.coreBuf.Len()) - c.FOff
+	w.extraBuf.Write(gzipCompress(extraKey.Bytes()))
+	c.XKeyLen = int64(w.extraBuf.Len()) - c.XOff
+	if len(w.pending) > 1 {
+		w.coreBuf.Write(gzipCompress(coreRest.Bytes()))
+		w.extraBuf.Write(gzipCompress(extraRest.Bytes()))
+	}
+	c.FLen = int64(w.coreBuf.Len()) - c.FOff
+	c.XLen = int64(w.extraBuf.Len()) - c.XOff
+
+	w.chunks = append(w.chunks, c)
+	w.frames += len(w.pending)
+	w.pending = w.pending[:0]
 }
 
 func (w *brpWriter) WriteEvent(e Event) error {
@@ -706,18 +770,15 @@ func (w *brpWriter) WriteEvent(e Event) error {
 }
 
 func (w *brpWriter) Close() error {
-	if err := w.coreGz.Close(); err != nil {
-		return err
-	}
-	if err := w.extraGz.Close(); err != nil {
-		return err
-	}
+	w.flushChunk()
 
 	rec := brpMetaRecord{
 		Meta:        w.meta,
 		Frames:      w.frames,
 		Events:      len(w.events),
 		UnitRecords: w.unitRecords,
+		ChunkFrames: w.chunkFrames,
+		Chunks:      w.chunks,
 	}
 	if w.anyUnit {
 		b := w.bounds
@@ -745,7 +806,7 @@ func (w *brpWriter) Close() error {
 		{Tag: SecExtra, Payload: w.extraBuf.Bytes()},
 		{Tag: SecEvents, Payload: gzipCompress(encodeEvents(w.events))},
 	}
-	if err := WriteContainer(f, BRPMagic, 1, sections); err != nil {
+	if err := WriteContainer(f, BRPMagic, BRPVersion, sections); err != nil {
 		f.Close()
 		return err
 	}
@@ -755,12 +816,16 @@ func (w *brpWriter) Close() error {
 // ---------------------------------------------------------------------------
 // reader
 
-// ParseBRP reads the container and decodes only the meta section, leaving the
-// data sections compressed (for pass-through serving).
+// ParseBRP reads the container and decodes only the meta section (including
+// the chunk index), leaving the data sections compressed — the basis for
+// pass-through chunk serving and random access.
 func ParseBRP(r io.Reader) (*BRPFile, error) {
-	sections, err := ReadContainer(r, BRPMagic)
+	version, sections, err := ReadContainer(r, BRPMagic)
 	if err != nil {
 		return nil, err
+	}
+	if version != BRPVersion {
+		return nil, fmt.Errorf("snapshot: unsupported .brp version %d (want %d)", version, BRPVersion)
 	}
 	f := &BRPFile{Sections: map[byte][]byte{}}
 	for _, s := range sections {
@@ -784,32 +849,78 @@ func ParseBRP(r io.Reader) (*BRPFile, error) {
 	f.FrameCount = rec.Frames
 	f.EventCount = rec.Events
 	f.UnitRecords = rec.UnitRecords
+	f.ChunkFrames = rec.ChunkFrames
+	f.Chunks = rec.Chunks
 	return f, nil
 }
 
-// ReadBRP fully decodes a .brp capture. Frames come back with units sorted by
-// id and values at the format's storage precision (whole elmos, per-interval
-// velocity, 1/255 build progress, 1/10 resources); TimeSec is frame/30.
+// chunkSlice extracts and decompresses one chunk's frames from a section
+// payload: gunzip the keyframe stream, then the delta stream when present,
+// returning the concatenated raw codec bytes.
+func chunkSlice(sec []byte, off, keyLen, totalLen int64) ([]byte, error) {
+	if off < 0 || keyLen < 0 || totalLen < keyLen || off+totalLen > int64(len(sec)) {
+		return nil, fmt.Errorf("snapshot: chunk range [%d,+%d) outside section (%d bytes)", off, totalLen, len(sec))
+	}
+	raw, err := gunzip(sec[off : off+keyLen])
+	if err != nil {
+		return nil, fmt.Errorf("snapshot: chunk keyframe: %w", err)
+	}
+	if totalLen > keyLen {
+		rest, err := gunzip(sec[off+keyLen : off+totalLen])
+		if err != nil {
+			return nil, fmt.Errorf("snapshot: chunk deltas: %w", err)
+		}
+		raw = append(raw, rest...)
+	}
+	return raw, nil
+}
+
+// DecodeChunk decodes chunk i into frames — the random-access entry point: no
+// other chunk's bytes are touched. Values come back at the format's storage
+// precision (whole elmos, per-interval velocity, 1/255 build progress, 1/10
+// resources); TimeSec is frame/30. Units are sorted by id.
+func (f *BRPFile) DecodeChunk(i int) ([]Frame, error) {
+	if i < 0 || i >= len(f.Chunks) {
+		return nil, fmt.Errorf("snapshot: chunk %d out of range (%d chunks)", i, len(f.Chunks))
+	}
+	c := f.Chunks[i]
+	fsec, ok := f.Sections[SecFrames]
+	if !ok {
+		return nil, fmt.Errorf("snapshot: .brp has no frames section")
+	}
+	core, err := chunkSlice(fsec, c.FOff, c.FKeyLen, c.FLen)
+	if err != nil {
+		return nil, err
+	}
+	var extra []byte
+	if xsec, ok := f.Sections[SecExtra]; ok {
+		if extra, err = chunkSlice(xsec, c.XOff, c.XKeyLen, c.XLen); err != nil {
+			return nil, err
+		}
+	}
+	frames, err := decodeFrames(core, extra, f.Meta.SampleEvery)
+	if err != nil {
+		return nil, err
+	}
+	if len(frames) != c.Count {
+		return nil, fmt.Errorf("snapshot: chunk %d decoded %d frames, index says %d", i, len(frames), c.Count)
+	}
+	return frames, nil
+}
+
+// ReadBRP fully decodes a .brp capture by decoding every chunk in order.
 func ReadBRP(r io.Reader) (Meta, []Frame, []Event, error) {
 	f, err := ParseBRP(r)
 	if err != nil {
 		return Meta{}, nil, nil, err
 	}
 	var frames []Frame
-	if sec, ok := f.Sections[SecFrames]; ok {
-		core, err := gunzip(sec)
+	for i := range f.Chunks {
+		fs, err := f.DecodeChunk(i)
 		if err != nil {
-			return f.Meta, nil, nil, fmt.Errorf("snapshot: frames section: %w", err)
-		}
-		var extra []byte
-		if xsec, ok := f.Sections[SecExtra]; ok {
-			if extra, err = gunzip(xsec); err != nil {
-				return f.Meta, nil, nil, fmt.Errorf("snapshot: extra section: %w", err)
-			}
-		}
-		if frames, err = decodeFrames(core, extra, f.Meta.SampleEvery); err != nil {
 			return f.Meta, nil, nil, err
 		}
+		frames = append(frames, fs...)
 	}
 	var events []Event
 	if sec, ok := f.Sections[SecEvents]; ok {
