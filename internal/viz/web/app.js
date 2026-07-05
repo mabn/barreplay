@@ -445,10 +445,13 @@ cv.addEventListener('mousemove', e => {
 });
 cv.addEventListener('mouseleave', () => { mouse = null; updateTooltip(); });
 cv.addEventListener('mousedown', e => {
-  if (e.button !== 0) return;
+  if (e.button !== 1) return; // middle button pans
+  e.preventDefault();         // suppress the browser's middle-click autoscroll
   drag = { cx: e.clientX, cy: e.clientY, wx: center.x, wz: center.z };
   cv.style.cursor = 'grabbing';
 });
+// Middle-click also fires auxclick; swallow it so nothing else reacts.
+cv.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefault(); });
 window.addEventListener('mouseup', () => {
   if (!drag) return;
   drag = null;
