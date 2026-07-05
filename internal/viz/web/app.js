@@ -28,13 +28,16 @@ let secPerFrame = 1;       // game seconds represented by one sampled frame
 let showIcons = true;      // draw BAR unit icons (vs plain dots)
 
 // Icons are drawn at a CONSTANT screen size, independent of zoom — exactly like
-// BAR's own minimap icons. Per-unit size = ICON_PX_PER_SIZE * the icon type's
-// size multiplier (from icontypes.lua: ~0.8 for a mex, ~1.8 for a commander),
-// clamped to [ICON_MIN_PX, ICON_MAX_PX]. Because the size is fixed in pixels,
-// icons naturally spread apart when you zoom in and overlap when you zoom out.
-const ICON_PX_PER_SIZE = 20;
-const ICON_MIN_PX = 7;
-const ICON_MAX_PX = 64;
+// BAR's own minimap icons. Per-unit size = iconScale * the icon type's size
+// multiplier (from icontypes.lua: ~0.8 for a mex, ~1.8 for a commander), clamped
+// to [ICON_MIN_PX, ICON_MAX_PX]. Because the size is fixed in pixels, icons
+// naturally spread apart when you zoom in and overlap when you zoom out.
+// iconScale is the base px-per-size-unit, adjustable via the UI slider (and the
+// ?iconsize= URL param).
+let iconScale = 20;
+const ICON_SCALE_MIN = 4, ICON_SCALE_MAX = 60;
+const ICON_MIN_PX = 3;
+const ICON_MAX_PX = 200;
 
 // imageCache: served icon path -> HTMLImageElement (may still be loading) or
 // null once it has failed to load (so we don't retry).
@@ -187,7 +190,7 @@ function drawIcons(u) {
   for (let i = 0; i < u.length; i += STRIDE) {
     const [sx, sy] = w2s(u[i + F.X], u[i + F.Z]);
     const info = iconInfoFor(u[i + F.DEF]);
-    const px = Math.max(ICON_MIN_PX, Math.min(ICON_MAX_PX, ICON_PX_PER_SIZE * (info ? info.s : 1)));
+    const px = Math.max(ICON_MIN_PX, Math.min(ICON_MAX_PX, iconScale * (info ? info.s : 1)));
     const r = px / 2;
     if (sx < -px || sy < -px || sx > cv.width + px || sy > cv.height + px) continue;
     const color = teamColor[u[i + F.TEAM]] || '#9aa6b2';
@@ -420,6 +423,11 @@ document.getElementById('last').onclick = () => { stopPlay(); go(data.frames.len
 document.getElementById('play').onclick = togglePlay;
 document.getElementById('speed').onchange = () => { if (playTimer) { stopPlay(); startPlay(); } };
 document.getElementById('icons').onchange = e => { showIcons = e.target.checked; draw(); };
+document.getElementById('iconsize').oninput = e => {
+  iconScale = +e.target.value;
+  setParam('iconsize', iconScale);
+  draw();
+};
 document.getElementById('slider').oninput = e => { stopPlay(); go(+e.target.value); };
 window.addEventListener('keydown', e => {
   if (e.target.tagName === 'SELECT') return;
@@ -467,6 +475,12 @@ async function loadReplay(file) {
 }
 
 async function init() {
+  // Restore icon size from the URL (?iconsize=) before the first paint.
+  const params = new URLSearchParams(location.search);
+  const isz = parseInt(params.get('iconsize'), 10);
+  if (isz >= ICON_SCALE_MIN && isz <= ICON_SCALE_MAX) iconScale = isz;
+  document.getElementById('iconsize').value = iconScale;
+
   let list = [];
   try {
     const r = await fetch('/api/replays');
@@ -496,13 +510,14 @@ async function init() {
   await loadReplay(initial);
 }
 
-// Persist the selected replay in the URL without adding history entries, so a
-// page refresh reopens the same capture.
-function setReplayInUrl(file) {
+// Persist a viewer setting in the URL without adding history entries, so a page
+// refresh (or a shared link) restores it.
+function setParam(key, val) {
   const u = new URL(location.href);
-  u.searchParams.set('replay', file);
+  u.searchParams.set(key, val);
   history.replaceState(null, '', u);
 }
+function setReplayInUrl(file) { setParam('replay', file); }
 
 // Support browser back/forward and manual URL edits.
 window.addEventListener('popstate', () => {
