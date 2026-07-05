@@ -1,0 +1,24 @@
+{
+  "name": "barreplay-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker hosting the barreplay UI and server (Hono + Vite).",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "hono": "^4.12.27"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.13.6",
+    "typescript": "^5.9.2",
+    "vite": "^6.3.5",
+    "wrangler": "^4.105.0"
+  }
+}

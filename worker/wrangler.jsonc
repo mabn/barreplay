@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "barreplay",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-06-27",
+  // Same Cloudflare account as the sibling claudebar/lavabalance worker.
+  "account_id": "9a1829e6502587e153ffa45b76de7ed3",
+
+  // The Vite build (client bundle in dist/client) is served as static assets by the
+  // runtime BEFORE the Worker runs. Requests that don't match an asset fall through to
+  // the Hono app in src/worker/index.ts. `single-page-application` serves index.html for
+  // unmatched non-API navigations so client-side routing works.
+  "assets": {
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+
+  "observability": {
+    "enabled": true
+  }
+}

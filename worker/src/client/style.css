@@ -1,0 +1,22 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  padding: 2rem;
+}
+
+#app {
+  max-width: 60rem;
+  margin: 0 auto;
+}
+
+h1 {
+  margin: 0 0 0.5rem;
+}
+
+#status {
+  color: #888;
+}
