@@ -39,8 +39,8 @@ func TestConsume(t *testing.T) {
 		"BRSNAP READY",
 		"some other infolog line",
 		"BRSNAP F 30 1.000 2",
-		"BRSNAP U 100 1 0 512.0 80.0 1024.0 3000.0 3000.0",
-		"BRSNAP U 101 2 1 600.5 82.0 900.0 2500.0 3000.0",
+		"BRSNAP U 100 1 0 512.0 80.0 1024.0 3000.0 3000.0 1.50 0.00 -2.25 0.750", // extended
+		"BRSNAP U 101 2 1 600.5 82.0 900.0 2500.0 3000.0",                        // legacy (no vel/build)
 		"BRSNAP R 0 500.0 1200.0 1000.0 5000.0 45.60 90.00",
 		"BRSNAP R 1 250.0 800.0 1000.0 5000.0 30.00 60.00",
 		"BRSNAP EV 45 created 102 1 0",
@@ -97,8 +97,14 @@ func TestConsume(t *testing.T) {
 	if len(w.frames[0].Units) != 2 {
 		t.Errorf("frame0 units = %d, want 2", len(w.frames[0].Units))
 	}
+	if got := w.frames[0].Units[0]; got.VelX != 1.5 || got.VelZ != -2.25 || got.BuildProgress != 0.75 {
+		t.Errorf("frame0 unit0 velocity/build = %+v", got)
+	}
 	if got := w.frames[0].Units[1]; got.UnitID != 101 || got.Pos.X != 600.5 || got.Team != 1 {
 		t.Errorf("frame0 unit1 = %+v", got)
+	}
+	if got := w.frames[0].Units[1]; got.VelX != 0 || got.BuildProgress != 0 {
+		t.Errorf("frame0 unit1 legacy line should have zero vel/build: %+v", got)
 	}
 	if len(w.frames[1].Units) != 1 {
 		t.Errorf("frame1 units = %d, want 1", len(w.frames[1].Units))

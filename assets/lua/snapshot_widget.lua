@@ -22,7 +22,7 @@
 --   BRSNAP P <playerID> <team> <spectator> <name...>   player info (preamble)
 --   BRSNAP READY
 --   BRSNAP F <frame> <timeSec> <count>
---   BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp>
+--   BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp> <vx> <vy> <vz> <build>
 --   BRSNAP R <teamID> <metal> <energy> <mStore> <eStore> <mIncome> <eIncome>   team economy
 --   BRSNAP EV <frame> <kind> <id> <def> <team>
 --   BRSNAP PROF <totalMs> <name>               engine time-profiler record (at game over)
@@ -81,6 +81,7 @@ local spGetUnitPosition = Spring.GetUnitPosition
 local spGetUnitDefID   = Spring.GetUnitDefID
 local spGetUnitTeam    = Spring.GetUnitTeam
 local spGetUnitHealth  = Spring.GetUnitHealth
+local spGetUnitVelocity = Spring.GetUnitVelocity
 local spGetGameSeconds = Spring.GetGameSeconds
 local spGetTeamList    = Spring.GetTeamList
 local spGetTeamInfo    = Spring.GetTeamInfo
@@ -388,9 +389,13 @@ function widget:GameFrame(frame)
 			local x, y, z = spGetUnitPosition(unitID)
 			local defID = spGetUnitDefID(unitID)
 			local team = spGetUnitTeam(unitID)
-			local hp, maxHp = spGetUnitHealth(unitID)
-			lines[i + 1] = string.format("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f",
-				unitID, defID or -1, team or -1, x or 0, y or 0, z or 0, hp or 0, maxHp or 0)
+			-- GetUnitHealth's 5th return is buildProgress (1 = finished, <1 = under
+			-- construction). Velocity is the current movement vector.
+			local hp, maxHp, _, _, buildProgress = spGetUnitHealth(unitID)
+			local vx, vy, vz = spGetUnitVelocity(unitID)
+			lines[i + 1] = string.format("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f %.2f %.2f %.2f %.3f",
+				unitID, defID or -1, team or -1, x or 0, y or 0, z or 0, hp or 0, maxHp or 0,
+				vx or 0, vy or 0, vz or 0, buildProgress or 1)
 		end
 		-- Per-team economy at this frame. GetTeamResources returns
 		-- current, storage, pull, income, ... — income is per sim frame, so scale

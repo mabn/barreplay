@@ -17,13 +17,22 @@ type Vec3 struct {
 }
 
 // UnitState is the sampled state of a single unit at one frame.
+//
+// Velocity is stored as three flat components (rather than a Vec3) so that an
+// idle unit's zero velocity is omitted from the JSON — most units are stationary
+// most of the time. BuildProgress is 1 for a finished unit and <1 while it is
+// still under construction.
 type UnitState struct {
-	UnitID    int32   `json:"id"`
-	DefID     int32   `json:"def"`
-	Team      int32   `json:"team"`
-	Pos       Vec3    `json:"pos"`
-	Health    float32 `json:"hp"`
-	MaxHealth float32 `json:"maxHp"`
+	UnitID        int32   `json:"id"`
+	DefID         int32   `json:"def"`
+	Team          int32   `json:"team"`
+	Pos           Vec3    `json:"pos"`
+	Health        float32 `json:"hp"`
+	MaxHealth     float32 `json:"maxHp"`
+	VelX          float32 `json:"vx,omitempty"`
+	VelY          float32 `json:"vy,omitempty"`
+	VelZ          float32 `json:"vz,omitempty"`
+	BuildProgress float32 `json:"build,omitempty"`
 }
 
 // TeamResource is one team's economy at a sampled frame: current metal/energy,

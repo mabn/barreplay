@@ -10,7 +10,7 @@
 //	BRSNAP P <playerID> <team> <spectator> <name...>   player info (preamble)
 //	BRSNAP READY                                  end of preamble (optional)
 //	BRSNAP F <frame> <timeSec> <count>            start of a periodic snapshot
-//	BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp>   one unit (follows an F line)
+//	BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp> [<vx> <vy> <vz> <build>]   one unit (follows an F line)
 //	BRSNAP R <teamID> <metal> <energy> <mStore> <eStore> <mIncome> <eIncome>   team economy (follows an F line)
 //	BRSNAP EV <frame> <kind> <id> <def> <team>    unit lifecycle event
 //	BRSNAP PROF <totalMs> <name>                  engine time-profiler record (at game over)
@@ -205,16 +205,25 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 				}
 				pending = &fr
 			}
-		case "U": // U <id> <def> <team> <x> <y> <z> <hp> <maxHp>
+		case "U": // U <id> <def> <team> <x> <y> <z> <hp> <maxHp> [<vx> <vy> <vz> <build>]
 			if pending != nil && len(fields) >= 9 {
-				pending.Units = append(pending.Units, snapshot.UnitState{
+				us := snapshot.UnitState{
 					UnitID:    atoi32(fields[1]),
 					DefID:     atoi32(fields[2]),
 					Team:      atoi32(fields[3]),
 					Pos:       snapshot.Vec3{X: atof32(fields[4]), Y: atof32(fields[5]), Z: atof32(fields[6])},
 					Health:    atof32(fields[7]),
 					MaxHealth: atof32(fields[8]),
-				})
+				}
+				// Velocity + build progress are appended by newer widgets; older
+				// .brsnap streams stop at maxHp.
+				if len(fields) >= 13 {
+					us.VelX = atof32(fields[9])
+					us.VelY = atof32(fields[10])
+					us.VelZ = atof32(fields[11])
+					us.BuildProgress = atof32(fields[12])
+				}
+				pending.Units = append(pending.Units, us)
 			}
 		case "R": // R <teamID> <metal> <energy> <mStore> <eStore> <mIncome> <eIncome>
 			if pending != nil && len(fields) >= 8 {
