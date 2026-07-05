@@ -163,12 +163,26 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 			}
 		case "P": // P <playerID> <team> <spectator> <name...> (name last, may contain spaces)
 			if len(fields) >= 5 {
-				base.Players = append(base.Players, snapshot.PlayerInfo{
-					PlayerID:  atoi32(fields[1]),
-					Team:      atoi32(fields[2]),
-					Spectator: fields[3] == "1",
-					Name:      strings.Join(fields[4:], " "),
-				})
+				id := atoi32(fields[1])
+				// The startscript-seeded roster (base.Players) is richer than the
+				// widget's live P line (it carries flag/rank/OpenSkill), so only add
+				// a player the seed didn't already provide — e.g. when re-parsing a
+				// raw .brsnap with no startscript behind it.
+				seen := false
+				for _, p := range base.Players {
+					if p.PlayerID == id {
+						seen = true
+						break
+					}
+				}
+				if !seen {
+					base.Players = append(base.Players, snapshot.PlayerInfo{
+						PlayerID:  id,
+						Team:      atoi32(fields[2]),
+						Spectator: fields[3] == "1",
+						Name:      strings.Join(fields[4:], " "),
+					})
+				}
 			}
 		case "T": // T <teamID> <allyTeam> <side> <color> (side "_" = none; color optional)
 			if len(fields) >= 3 {
