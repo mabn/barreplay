@@ -1099,26 +1099,44 @@ async function loadReplay(file) {
   show();
 }
 
-// Fetch this replay's map extent + terrain texture from the server (which
-// proxies the BAR maps API). Best-effort: if the map is unknown or offline, the
-// viewer just keeps the plain background.
+// The BAR maps API. The browser talks to it directly (the API allows
+// cross-origin use): /maps/<name> gives the map's extent, and
+// /maps/<name>/texture-mq.jpg is the terrain image drawn behind the units.
+const MAP_API = 'https://api.bar-rts.com';
+// The API reports map width/height in map units; 1 map unit = 512 elmos.
+const MAP_ELMOS_PER_UNIT = 512;
+
+// normalizeMapName turns the capture's display map name ("Supreme Isthmus
+// v2.1") into the API's file-name form ("supreme_isthmus_v2.1").
+function normalizeMapName(display) {
+  return (display || '').trim().toLowerCase().replace(/ /g, '_');
+}
+
+// Fetch this replay's map extent + terrain texture straight from the BAR maps
+// API, using the map name stored in the capture's meta. Best-effort: if the
+// map is unknown or the API unreachable, the viewer just keeps the plain
+// background (and falls back to unit bounds for the field extent).
 async function loadMap(name) {
+  const gen = loadGen; // ignore responses if the user switched replays mid-fetch
   mapW = mapH = 0;
   mapTex = null;
   const maptexEl = document.getElementById('maptex');
-  if (!name) { maptexEl.disabled = true; return; }
-  let info = {};
+  maptexEl.disabled = true; // enabled once the texture actually loads
+  const norm = normalizeMapName(name);
+  if (!norm) return;
+  const base = MAP_API + '/maps/' + encodeURIComponent(norm);
   try {
-    info = await (await fetch('/api/mapinfo?map=' + encodeURIComponent(name))).json();
-  } catch (_) { /* offline: leave plain background */ }
-  mapW = info.width || 0;
-  mapH = info.height || 0;
-  maptexEl.disabled = !info.texture;
-  if (info.texture) {
-    const img = new Image();
-    img.onload = () => { mapTex = img; draw(); };
-    img.src = '/api/maptex?map=' + encodeURIComponent(name);
-  }
+    const info = await (await fetch(base)).json();
+    if (gen !== loadGen) return;
+    mapW = (info.width || 0) * MAP_ELMOS_PER_UNIT;
+    mapH = (info.height || 0) * MAP_ELMOS_PER_UNIT;
+  } catch (_) { /* offline/unknown: keep unit-bounds extent, still try the texture */ }
+  if (gen !== loadGen) return;
+  const img = new Image();
+  img.crossOrigin = 'anonymous'; // the API sends CORS headers; keeps the canvas untainted
+  img.onload = () => { if (gen !== loadGen) return; mapTex = img; maptexEl.disabled = false; draw(); };
+  img.onerror = () => { /* no texture for this map: checkbox stays disabled */ };
+  img.src = base + '/texture-mq.jpg';
   draw(); // reflect the (possibly updated) map extent immediately
 }
 

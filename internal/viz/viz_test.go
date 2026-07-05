@@ -311,52 +311,6 @@ func TestHeadIconByType(t *testing.T) {
 	}
 }
 
-func TestNormalizeMapName(t *testing.T) {
-	if got := normalizeMapName("Supreme Isthmus v2.1"); got != "supreme_isthmus_v2.1" {
-		t.Errorf("normalizeMapName = %q", got)
-	}
-	if got := normalizeMapName("  All That Glitters  "); got != "all_that_glitters" {
-		t.Errorf("normalizeMapName trims/lowers wrong: %q", got)
-	}
-}
-
-func TestMapForName(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/maps/supreme_isthmus_v2.1":
-			w.Write([]byte(`{"fileName":"supreme_isthmus_v2.1","width":24,"height":24}`))
-		case "/maps/supreme_isthmus_v2.1/texture-mq.jpg":
-			w.Header().Set("Content-Type", "image/jpeg")
-			w.Write([]byte("JPEGDATA"))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer srv.Close()
-
-	oldBase := mapAPIBase
-	mapAPIBase = srv.URL
-	defer func() { mapAPIBase = oldBase }()
-	mapMu.Lock()
-	mapCache = map[string]*mapEntry{}
-	mapMu.Unlock()
-
-	e := mapForName("Supreme Isthmus v2.1")
-	// 24 map units * 512 = 12288 elmos.
-	if e.info.Width != 12288 || e.info.Height != 12288 {
-		t.Errorf("dims = %dx%d, want 12288x12288", e.info.Width, e.info.Height)
-	}
-	if !e.info.Texture || string(e.texture) != "JPEGDATA" {
-		t.Errorf("texture not fetched: %+v", e.info)
-	}
-
-	// A map the mock doesn't know: no dims, no texture, but no error.
-	miss := mapForName("Nonexistent Map")
-	if miss.info.Texture || miss.info.Width != 0 {
-		t.Errorf("unknown map should be empty: %+v", miss.info)
-	}
-}
-
 // The listing shows only .brp files; legacy formats are invisible to the UI.
 func TestListBRPOnly(t *testing.T) {
 	dir := t.TempDir()

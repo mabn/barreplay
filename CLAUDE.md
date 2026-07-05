@@ -269,18 +269,24 @@ legacy parsing; viz has none).
   it stays constant when zoomed out and fills the footprint when zoomed in; mobile units
   (no footprint) are unaffected. The icon is resolved by the unit-def's `iconType` key first
   (falling back to its name), so units whose iconType differs from their name still get an icon.
-- **`internal/viz/maptex.go`** draws the **real map terrain** behind the units. It proxies
-  BAR's maps API (`api.bar-rts.com/maps/<name>`): `/api/mapinfo?map=<name>` returns the map's
-  world extent in elmos (the API's width/height are map units × 512) and whether a texture
-  exists; `/api/maptex?map=<name>` serves the cached `texture-mq.jpg`. The demo's display map
-  name is normalized to the API's file name (lowercase, spaces→`_`). Both are best-effort and
-  cached in-memory — no network, no map, or offline just yields a plain background. The
-  front-end positions the texture at world `(0,0)`–`(width,height)` so units overlay correctly;
-  the **Map** checkbox toggles it.
+- The **real map terrain** behind the units is loaded **entirely client-side** (`loadMap`
+  in `app.js`): the browser takes the head's `mapName` (from the capture's meta),
+  normalizes it to the API's file-name form (lowercase, spaces→`_`), and talks straight
+  to BAR's maps API — `https://api.bar-rts.com/maps/<name>` for the world extent in
+  elmos (the API's width/height are map units × 512) and `…/texture-mq.jpg` for the
+  terrain image. The API sends `access-control-allow-origin: *`, and the image is loaded
+  with `crossOrigin="anonymous"` so the canvas stays untainted. The viz server has **no
+  map code at all**. Best-effort: no name in the meta, an unknown map, or no outbound
+  network just yields a plain background (the Map checkbox enables only once the texture
+  loads, and the field extent falls back to the sampled unit bounds). The front-end
+  positions the texture at world `(0,0)`–`(width,height)` so units overlay correctly;
+  the **Map** checkbox toggles it. Caveat: a `.brp` packed from a raw `.brsnap` has an
+  empty `mapName` (the widget stream doesn't record it — only the demo startscript path
+  does), so those captures render the plain background.
 - **`internal/viz/server.go`** embeds `web/{index.html,app.js,style.css}` via `go:embed` and
   exposes `/api/replays` (the file list), `/api/replay?file=<basename>` (one capture's wire
-  payload), `/icons/<file>` (the embedded icons, cached), and `/api/mapinfo` + `/api/maptex`
-  (the map terrain, above). The `file` param is confined to the snapshots dir (basename only —
+  payload), `/api/replay/chunk` (frame data), and `/icons/<file>` (the embedded icons,
+  cached). The `file` param is confined to the snapshots dir (basename only —
   rejects any path separator / traversal). UI/JSON assets are served `no-store` so a changed
   UI never serves stale.
 - **`internal/viz/web/`** is plain HTML/Canvas/vanilla-JS — **no framework, no build step**
