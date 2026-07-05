@@ -392,9 +392,10 @@ let renderFrac = 0;        // sub-frame fraction [0,1) within the current interv
 let secPerFrame = 1;       // game seconds per keyframe interval (sampleEvery/30)
 let showIcons = true;      // draw BAR unit icons (vs plain dots)
 let showTexture = true;    // draw the map terrain texture behind everything
-let showGrid = true;       // draw the build/small/large grid
-let showFootprints = true; // draw build-footprint rectangles for buildings
+let showGrid = false;      // draw the build/small/large grid
+let showFootprints = false;// draw build-footprint rectangles for buildings
 let growIcons = true;      // grow a building's icon toward its footprint when zoomed in
+let autoTeamColors = true; // true: distinct auto colours per team; false: the real in-game team colours from the replay
 let mapW = 0, mapH = 0;    // map world extent in elmos (0 if unknown)
 let mapTex = null;         // HTMLImageElement of the terrain texture, or null
 // Viewport in CSS pixels + the device-pixel ratio. The canvas backing store is
@@ -481,6 +482,20 @@ function assignColors(teams) {
     });
   });
   return colors;
+}
+
+// computeTeamColors returns the team id -> css colour map used everywhere teams
+// are drawn (units, footprints, player/team lists). With autoTeamColors on we use
+// the distinct auto-assigned palette (allies share a hue); off, we use each
+// team's real in-game colour from the replay JSON, falling back to the auto colour
+// for any team that carries none.
+function computeTeamColors() {
+  const auto = assignColors(data.teams || []);
+  if (autoTeamColors) return auto;
+  const out = {};
+  (data.teams || []).forEach(t => { out[t.team] = t.color || auto[t.team]; });
+  for (const id in auto) if (!(id in out)) out[id] = auto[id];
+  return out;
 }
 
 function teamLabel(t) {
@@ -1149,6 +1164,14 @@ document.getElementById('maptex').onchange = e => { showTexture = e.target.check
 document.getElementById('grid').onchange = e => { showGrid = e.target.checked; draw(); };
 document.getElementById('footprints').onchange = e => { showFootprints = e.target.checked; draw(); };
 document.getElementById('growicons').onchange = e => { growIcons = e.target.checked; draw(); };
+document.getElementById('teamcolors').onchange = e => {
+  autoTeamColors = e.target.checked;
+  if (!data) return;
+  // Icon tint/render caches key on the colour string, so a colour change just
+  // produces fresh entries — no need to clear them.
+  teamColor = computeTeamColors();
+  renderPlayers(); renderTeams(); draw();
+};
 document.getElementById('iconsize').oninput = e => {
   iconScale = +e.target.value;
   setParam('iconsize', iconScale);
@@ -1199,7 +1222,7 @@ async function loadReplay(file) {
   } else {
     setEmpty('');
   }
-  teamColor = assignColors(data.teams || []);
+  teamColor = computeTeamColors();
   secPerFrame = data.sampleEvery > 0 ? data.sampleEvery / 30 : 1;
   document.getElementById('subtitle').textContent =
     [data.gameId, data.mapName, data.gameVersion].filter(Boolean).join(' · ') || 'replay state viewer';
