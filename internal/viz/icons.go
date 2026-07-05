@@ -4,6 +4,7 @@ import (
 	"embed"
 	"io/fs"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -26,27 +27,38 @@ var iconEntryRe = regexp.MustCompile(`^([A-Za-z0-9_]+)\s*=\s*\{`)
 // iconBitmapRe extracts a bitmap path: `bitmap = "icons/foo.png"`.
 var iconBitmapRe = regexp.MustCompile(`bitmap\s*=\s*"([^"]+)"`)
 
-var (
-	iconOnce   sync.Once
-	iconByName map[string]string // unit name -> bitmap path present on disk, e.g. "icons/mex_t1.png"
-)
+// iconSizeRe extracts the icon size multiplier: `size = 1.05`.
+var iconSizeRe = regexp.MustCompile(`size\s*=\s*([0-9.]+)`)
 
-// unitIcon returns the served icon path for a unit's internal name (as recorded
-// in Meta.UnitDefs), or "" if there is no icon for it. The path is relative
-// ("icons/foo.png") and is served under /icons/ by the server, so the browser
-// requests "/" + path.
-func unitIcon(name string) string {
-	iconOnce.Do(loadIcons)
-	return iconByName[name]
+// iconInfo is one unit type's icon: the served bitmap path and BAR's per-type
+// size multiplier (relative icon scale; ~0.8 for a mex, ~1.8 for a commander).
+type iconInfo struct {
+	Path string
+	Size float64
 }
 
-// loadIcons parses icontypes.lua into a name->bitmap map, keeping only entries
-// whose bitmap file actually exists in the embedded FS (so the payload never
-// advertises a 404). The trailing Lua loop in the file synthesises "<name>_scav"
-// variants pointing at icons/inverted/<foo>.png; we replicate that here rather
-// than evaluating Lua, keeping the tool stdlib-only.
+var (
+	iconOnce   sync.Once
+	iconByName map[string]iconInfo // unit name -> icon path (present on disk) + size
+)
+
+// unitIcon returns the icon path and size multiplier for a unit's internal name
+// (as recorded in Meta.UnitDefs). ok is false if there is no icon for it. The
+// path is relative ("icons/foo.png") and is served under /icons/, so the browser
+// requests "/" + path. Size defaults to 1 when the entry omits it.
+func unitIcon(name string) (path string, size float64, ok bool) {
+	iconOnce.Do(loadIcons)
+	ic, ok := iconByName[name]
+	return ic.Path, ic.Size, ok
+}
+
+// loadIcons parses icontypes.lua into a name->{bitmap,size} map, keeping only
+// entries whose bitmap file actually exists in the embedded FS (so the payload
+// never advertises a 404). The trailing Lua loop in the file synthesises
+// "<name>_scav" variants pointing at icons/inverted/<foo>.png; we replicate that
+// here rather than evaluating Lua, keeping the tool stdlib-only.
 func loadIcons() {
-	iconByName = map[string]string{}
+	iconByName = map[string]iconInfo{}
 	exists := func(bitmap string) bool {
 		if bitmap == "" {
 			return false
@@ -55,7 +67,7 @@ func loadIcons() {
 		return err == nil
 	}
 
-	base := map[string]string{}
+	base := map[string]iconInfo{}
 	var cur string
 	depth := 0
 	for _, raw := range strings.Split(iconTypesLua, "\n") {
@@ -69,9 +81,16 @@ func loadIcons() {
 				cur = m[1]
 			}
 		} else if depth == 2 && cur != "" {
+			ic := base[cur]
 			if m := iconBitmapRe.FindStringSubmatch(line); m != nil {
-				base[cur] = m[1]
+				ic.Path = m[1]
 			}
+			if m := iconSizeRe.FindStringSubmatch(line); m != nil {
+				if s, err := strconv.ParseFloat(m[1], 64); err == nil {
+					ic.Size = s
+				}
+			}
+			base[cur] = ic
 		}
 		depth += strings.Count(raw, "{") - strings.Count(raw, "}")
 		if depth <= 1 {
@@ -79,14 +98,20 @@ func loadIcons() {
 		}
 	}
 
-	for name, bitmap := range base {
-		if exists(bitmap) {
-			iconByName[name] = bitmap
+	norm := func(size float64) float64 {
+		if size <= 0 {
+			return 1
 		}
-		// Scavenger variant: same bitmap under an inverted/ path.
-		scav := strings.Replace(bitmap, "/", "/inverted/", 1)
+		return size
+	}
+	for name, ic := range base {
+		if exists(ic.Path) {
+			iconByName[name] = iconInfo{Path: ic.Path, Size: norm(ic.Size)}
+		}
+		// Scavenger variant: same bitmap under an inverted/ path, same size.
+		scav := strings.Replace(ic.Path, "/", "/inverted/", 1)
 		if exists(scav) {
-			iconByName[name+"_scav"] = scav
+			iconByName[name+"_scav"] = iconInfo{Path: scav, Size: norm(ic.Size)}
 		}
 	}
 }

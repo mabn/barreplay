@@ -27,12 +27,14 @@ let playTimer = null;
 let secPerFrame = 1;       // game seconds represented by one sampled frame
 let showIcons = true;      // draw BAR unit icons (vs plain dots)
 
-// On-screen icon size: scale * ICON_WORLD, clamped to [ICON_MIN_PX, ICON_MAX_PX].
-// Icons are ALWAYS drawn (never hidden by zoom) — when zoomed out they shrink to
-// the floor and overlap, exactly like BAR's own minimap.
-const ICON_WORLD = 60;
-const ICON_MIN_PX = 9;
-const ICON_MAX_PX = 34;
+// Icons are drawn at a CONSTANT screen size, independent of zoom — exactly like
+// BAR's own minimap icons. Per-unit size = ICON_PX_PER_SIZE * the icon type's
+// size multiplier (from icontypes.lua: ~0.8 for a mex, ~1.8 for a commander),
+// clamped to [ICON_MIN_PX, ICON_MAX_PX]. Because the size is fixed in pixels,
+// icons naturally spread apart when you zoom in and overlap when you zoom out.
+const ICON_PX_PER_SIZE = 20;
+const ICON_MIN_PX = 7;
+const ICON_MAX_PX = 64;
 
 // imageCache: served icon path -> HTMLImageElement (may still be loading) or
 // null once it has failed to load (so we don't retry).
@@ -172,32 +174,32 @@ function drawDots(u) {
   }
 }
 
-// Primary render: every unit as its BAR icon, tinted to the team colour. Icons
-// are always drawn; when zoomed out they clamp to ICON_MIN_PX and overlap. A
-// unit with no icon (or whose bitmap hasn't loaded yet) shows a coloured dot so
-// it is never invisible.
+// Primary render: every unit as its BAR icon, tinted to the team colour and
+// drawn at a constant screen size (see ICON_PX_PER_SIZE). A unit with no icon
+// (or whose bitmap hasn't loaded yet) shows a coloured dot so it is never
+// invisible.
 function drawIcons(u) {
-  const px = Math.max(ICON_MIN_PX, Math.min(ICON_MAX_PX, scale * ICON_WORLD));
-  const r = px / 2;
-  const dot = Math.max(1.5, px * 0.32);
   for (let i = 0; i < u.length; i += STRIDE) {
     const [sx, sy] = w2s(u[i + F.X], u[i + F.Z]);
+    const info = iconInfoFor(u[i + F.DEF]);
+    const px = Math.max(ICON_MIN_PX, Math.min(ICON_MAX_PX, ICON_PX_PER_SIZE * (info ? info.s : 1)));
+    const r = px / 2;
     if (sx < -px || sy < -px || sx > cv.width + px || sy > cv.height + px) continue;
     const color = teamColor[u[i + F.TEAM]] || '#9aa6b2';
-    const path = iconPathFor(u[i + F.DEF]);
-    const tinted = path ? tintedIcon(path, color) : null;
+    const tinted = info ? tintedIcon(info.p, color) : null;
     if (tinted) {
       ctx.drawImage(tinted, sx - r, sy - r, px, px);
     } else {
       ctx.fillStyle = color;
       ctx.beginPath();
-      ctx.arc(sx, sy, dot, 0, 7);
+      ctx.arc(sx, sy, Math.max(1.5, r * 0.5), 0, 7);
       ctx.fill();
     }
   }
 }
 
-function iconPathFor(def) {
+// iconInfoFor returns {p: path, s: size} for a unit def, or null.
+function iconInfoFor(def) {
   if (!data.unitIcons) return null;
   const name = data.unitDefs && data.unitDefs[def];
   return name ? (data.unitIcons[name] || null) : null;
@@ -453,7 +455,7 @@ async function loadReplay(file) {
   idx = 0;
   // Pre-warm the icon set (only a few dozen distinct unit types per replay) so
   // they're ready on the first paint.
-  Object.values(data.unitIcons || {}).forEach(getImage);
+  Object.values(data.unitIcons || {}).forEach(info => getImage(info.p));
   resize();      // sets canvas size
   fitView();     // fit map to viewport
   show();

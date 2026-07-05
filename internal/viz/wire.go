@@ -26,12 +26,20 @@ type wireReplay struct {
 	Bounds        wireBounds       `json:"bounds"`
 	Teams         []wireTeam       `json:"teams"`
 	UnitDefs      map[int32]string `json:"unitDefs"`
-	// UnitIcons maps a unit's internal name to its served icon path
-	// ("icons/foo.png"), limited to the def names present in this replay. The
-	// browser looks a unit up by name (via UnitDefs) and requests "/" + path.
-	UnitIcons map[string]string `json:"unitIcons"`
-	Frames    []wireFrame       `json:"frames"`
-	Events    []wireEvent       `json:"events"`
+	// UnitIcons maps a unit's internal name to its icon (served path + BAR size
+	// multiplier), limited to the def names present in this replay. The browser
+	// looks a unit up by name (via UnitDefs) and requests "/" + path.
+	UnitIcons map[string]wireIcon `json:"unitIcons"`
+	Frames    []wireFrame         `json:"frames"`
+	Events    []wireEvent         `json:"events"`
+}
+
+// wireIcon is one unit type's icon in the payload: p = served bitmap path
+// ("icons/foo.png"), s = per-type size multiplier (icons are drawn at a constant
+// screen size of base*s px, independent of zoom, like BAR's own minimap icons).
+type wireIcon struct {
+	Path string  `json:"p"`
+	Size float64 `json:"s"`
 }
 
 // wireBounds is the world-space extent of all sampled unit positions (x/z
@@ -84,12 +92,12 @@ func (rep *Replay) toWire() wireReplay {
 	// seen across frames/events so the front-end can still colour by team.
 	w.Teams = teams(rep)
 
-	// Icon paths for the unit types present in this replay (missing icons are
-	// simply omitted; the front-end falls back to a coloured dot).
-	w.UnitIcons = map[string]string{}
+	// Icons for the unit types present in this replay (missing icons are simply
+	// omitted; the front-end falls back to a coloured dot).
+	w.UnitIcons = map[string]wireIcon{}
 	for _, name := range w.UnitDefs {
-		if path := unitIcon(name); path != "" {
-			w.UnitIcons[name] = path
+		if path, size, ok := unitIcon(name); ok {
+			w.UnitIcons[name] = wireIcon{Path: path, Size: size}
 		}
 	}
 
