@@ -56,13 +56,16 @@ npx wrangler r2 bucket create barreplay-replays-preview
 go build ./cmd/barreplay-static
 ./barreplay-static -out ./static ./snapshots/*.brp     # writes index.json + replays/**
 
-# 2. upload to R2 (walks only replays/**; no index.json — the listing is dynamic)
+# 2. upload to real R2 (walks only replays/**; no index.json — the listing is dynamic)
 cd worker
-npm run upload -- ../static <id>         # ONE replay (the common case)
-npm run upload -- ../static              # every replay in the dir
-npm run upload -- ../static <id> --preview   # the wrangler-dev bucket
-npm run upload -- ../static <id> --local     # local miniflare R2 (for `npm run dev`)
+npm run upload -- ../static <id>         # ONE replay to real R2 (the common case)
+npm run upload -- ../static              # every replay in the dir, to real R2
+npm run upload -- ../static <id> --local # into the local dev simulator (for `npm run dev`)
 ```
+
+The default is **real R2** (`wrangler r2 object put --remote`). The bucket must exist first —
+`npx wrangler r2 bucket create barreplay-replays` — and you must be logged in
+(`npx wrangler login`) to the account in `wrangler.jsonc` (`account_id`).
 
 Because the listing is built live, you upload **one replay at a time** —
 `npm run upload -- ../static <gameId>` pushes just that replay's `.brw`, `.resources`, and
