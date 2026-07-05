@@ -5,7 +5,10 @@
   "description": "Cloudflare Worker hosting the barreplay UI and server (Hono + Vite).",
   "type": "module",
   "scripts": {
+    "sync-assets": "node tools/sync-assets.mjs",
+    "predev": "npm run sync-assets",
     "dev": "vite",
+    "prebuild": "npm run sync-assets",
     "build": "vite build",
     "preview": "vite preview",
     "deploy": "npm run build && wrangler deploy",
