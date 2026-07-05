@@ -21,7 +21,7 @@ func writeJSONL(t *testing.T, dir, gameID string) string {
 		GameID:      gameID,
 		MapName:     "Test Map",
 		SampleEvery: 30,
-		UnitDefs:    map[int32]string{1: "armcom", 2: "corllt"},
+		UnitDefs:    map[int32]snapshot.UnitDef{1: {DefID: 1, Name: "armcom"}, 2: {DefID: 2, Name: "corllt"}},
 		Teams: []snapshot.TeamInfo{
 			{TeamID: 0, AllyTeam: 0, Side: "armada"},
 			{TeamID: 1, AllyTeam: 1, Side: "cortex"},
@@ -70,7 +70,7 @@ func TestLoadJSONL(t *testing.T) {
 	if len(rep.Events) != 1 || rep.Events[0].Kind != snapshot.EventDestroyed {
 		t.Fatalf("events not loaded: %+v", rep.Events)
 	}
-	if rep.Meta.UnitDefs[1] != "armcom" {
+	if rep.Meta.UnitDefs[1].Name != "armcom" {
 		t.Errorf("unitDefs not loaded: %+v", rep.Meta.UnitDefs)
 	}
 }
@@ -129,7 +129,7 @@ func TestLoadBRSNAP(t *testing.T) {
 	if rep.Meta.GameID != "raw-game" {
 		t.Errorf("gameID=%q", rep.Meta.GameID)
 	}
-	if rep.Meta.UnitDefs[1] != "armcom" || rep.Meta.UnitDefs[2] != "corllt" {
+	if rep.Meta.UnitDefs[1].Name != "armcom" || rep.Meta.UnitDefs[2].Name != "corllt" {
 		t.Errorf("unitDefs=%+v", rep.Meta.UnitDefs)
 	}
 	if len(rep.Frames) != 1 || len(rep.Frames[0].Units) != 2 {
