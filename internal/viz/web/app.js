@@ -278,7 +278,7 @@ function drawMapFrame() {
   // when its spacing is legible, so a zoomed-out view isn't a solid mesh.
   const BUILD = 16;
   drawGrid(b, x0, y0, x1, y1, BUILD, '#161f28');       // fine: one build square
-  drawGrid(b, x0, y0, x1, y1, BUILD * 8, '#243444');   // coarse: every 8 squares (128 elmos)
+  drawGrid(b, x0, y0, x1, y1, BUILD * 4, '#243444');   // coarse: every 4 squares (64 elmos)
 
   ctx.strokeStyle = '#2d3a47';
   ctx.lineWidth = 1;
