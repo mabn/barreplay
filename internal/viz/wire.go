@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"math"
 
 	"github.com/mabn/barreplay/snapshot"
 )
@@ -22,6 +23,13 @@ import (
 // independently gzipped exactly so that no re-encoding is ever needed). The
 // decoder lives in web/app.js and must mirror snapshot/brp.go's column layout
 // exactly — evolve them together.
+
+// resourceStride is the number of ints packed per team in a resource record
+// (see /api/replay/resources): [team, metal, energy, metalStore, energyStore,
+// metalIncome, energyIncome]. Income is per game-second; values are rounded to
+// integers (a resource UI needs no sub-unit precision). The front-end reads this
+// stride.
+const resourceStride = 7
 
 // wireHead is the J-section JSON: everything the viewer needs besides the
 // frame/event columns.
@@ -42,11 +50,28 @@ type wireHead struct {
 	// elmos. Only immobile units are included (presence == it doesn't move), so the
 	// front-end draws a footprint rectangle only for buildings/turrets/etc.
 	Footprints map[string]wireFootprint `json:"footprints"`
+	// Players is the human/AI roster the sidebar player list renders (country
+	// flag, rank, OpenSkill "OS"), tied to a team. Small, so it rides the head.
+	Players []wirePlayer `json:"players"`
 	// FrameCount is the total number of sampled frames; Chunks indexes the
 	// fetchable chunks in order (chunk i covers frames
 	// [sum(count[:i]), sum(count[:i+1])) of the global timeline).
 	FrameCount int         `json:"frameCount"`
 	Chunks     []wireChunk `json:"chunks"`
+}
+
+// wirePlayer is one player in the roster. Only the fields the player list needs
+// are sent; richer demo metadata (account id, uncertainty, boss) stays in the
+// capture file. Zero-valued optional fields are omitted so a fallback roster (a
+// raw .brsnap with only name/team/spectator) stays compact.
+type wirePlayer struct {
+	ID        int32   `json:"id"`
+	Name      string  `json:"name"`
+	Team      int32   `json:"team"`
+	Spectator bool    `json:"spec,omitempty"`
+	Country   string  `json:"country,omitempty"` // ISO code -> flag
+	Rank      int32   `json:"rank,omitempty"`
+	Skill     float32 `json:"skill,omitempty"` // OpenSkill "OS" rating
 }
 
 // wireChunk describes one fetchable chunk to the browser. keyLen is where the
@@ -148,6 +173,23 @@ func buildHead(meta snapshot.Meta, b wireBounds, extraTeams []int32) wireHead {
 			h.Footprints[d.Name] = wireFootprint{W: d.XSize * squareSize, H: d.ZSize * squareSize}
 		}
 	}
+
+	// Player roster (drives the sidebar player list). Passed through verbatim from
+	// Meta; the front-end maps each player to its team's per-frame economy (fetched
+	// separately via /api/replay/resources).
+	h.Players = make([]wirePlayer, 0, len(meta.Players))
+	for _, p := range meta.Players {
+		h.Players = append(h.Players, wirePlayer{
+			ID:        p.PlayerID,
+			Name:      p.Name,
+			Team:      p.Team,
+			Spectator: p.Spectator,
+			Country:   p.CountryCode,
+			Rank:      p.Rank,
+			Skill:     p.Skill,
+		})
+	}
+
 	return h
 }
 
@@ -181,6 +223,52 @@ func brpWirePayload(f *snapshot.BRPFile) ([]byte, error) {
 	}
 	return buf.Bytes(), nil
 }
+
+// wireResFrame is one sampled frame's per-team economy for the player list:
+// the sim frame plus a flat int slice of stride resourceStride.
+type wireResFrame struct {
+	F int32   `json:"f"`
+	R []int32 `json:"r"`
+}
+
+// brpResourcesPayload builds the /api/replay/resources response: a gzipped JSON
+// array of {f, r} for every sampled frame that carries team economy. The viewer
+// fetches this once (lazily, after the head) to drive the player list's metal/
+// energy bars — resources are stored in the .brp X stream, which the frame
+// chunk-streaming path never fetches, so we decode them here instead. Decoding
+// chunk-by-chunk keeps peak memory bounded (frames are discarded after their
+// resources are copied out).
+func brpResourcesPayload(f *snapshot.BRPFile) ([]byte, error) {
+	out := make([]wireResFrame, 0, f.FrameCount)
+	for i := range f.Chunks {
+		frames, err := f.DecodeChunk(i)
+		if err != nil {
+			return nil, err
+		}
+		for _, fr := range frames {
+			if len(fr.Resources) == 0 {
+				continue
+			}
+			r := make([]int32, 0, len(fr.Resources)*resourceStride)
+			for _, rs := range fr.Resources {
+				r = append(r,
+					rs.Team,
+					round(rs.Metal), round(rs.Energy),
+					round(rs.MetalStorage), round(rs.EnergyStorage),
+					round(rs.MetalIncome), round(rs.EnergyIncome),
+				)
+			}
+			out = append(out, wireResFrame{F: fr.Frame, R: r})
+		}
+	}
+	js, err := json.Marshal(out)
+	if err != nil {
+		return nil, err
+	}
+	return gzipBytes(js), nil
+}
+
+func round(f float32) int32 { return int32(math.Round(float64(f))) }
 
 // gzipBytes compresses b as a standalone gzip stream, matching how the
 // snapshot section encoders compress theirs.

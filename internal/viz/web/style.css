@@ -53,7 +53,7 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: #5a9fd0; }
 canvas { display: block; width: 100%; height: 100%; background: #0c0f13; cursor: crosshair; }
 
 #side {
-  width: 260px; background: #161b21; border-left: 1px solid #2a323c;
+  width: 300px; background: #161b21; border-left: 1px solid #2a323c;
   padding: 12px; overflow-y: auto; font-size: 13px;
 }
 #side h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
@@ -61,6 +61,48 @@ canvas { display: block; width: 100%; height: 100%; background: #0c0f13; cursor:
 #side h2:first-child { margin-top: 0; }
 .stat { display: flex; justify-content: space-between; padding: 2px 0; }
 .stat b { color: #fff; font-variant-numeric: tabular-nums; }
+
+/* ---- player list ---- */
+#players { display: flex; flex-direction: column; gap: 6px; }
+.pgroup { border-top: 1px solid #232c35; padding-top: 6px; }
+.pgroup:first-child { border-top: none; padding-top: 0; }
+.prow { padding: 3px 0; }
+.prow.spectator { opacity: .55; }
+.prow .phead {
+  display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 1.3;
+}
+.prow .rank {
+  flex: 0 0 auto; min-width: 20px; text-align: center;
+  font-size: 10px; font-variant-numeric: tabular-nums;
+  color: #c8a24a; background: #2a2415; border: 1px solid #3d3418;
+  border-radius: 3px; padding: 0 3px;
+}
+.prow .flag { flex: 0 0 auto; font-size: 13px; line-height: 1; }
+.prow .os {
+  flex: 0 0 auto; min-width: 24px; text-align: right;
+  color: #9fb0bf; font-variant-numeric: tabular-nums; font-size: 11px;
+}
+.prow .pname {
+  flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* two stacked resource bars (metal, energy) */
+.pres { margin: 3px 0 0 26px; display: flex; flex-direction: column; gap: 2px; }
+.resrow { display: flex; align-items: center; gap: 6px; font-size: 10px; }
+.resrow .rbar {
+  flex: 1; height: 6px; background: #222c36; border-radius: 3px; overflow: hidden;
+}
+.resrow .rbar > div { height: 100%; }
+.resrow .rval {
+  flex: 0 0 auto; min-width: 40px; text-align: right;
+  font-variant-numeric: tabular-nums; color: #c7d0d9;
+}
+.resrow .rinc {
+  flex: 0 0 auto; min-width: 44px; text-align: right;
+  font-variant-numeric: tabular-nums; color: #6f87a0;
+}
+.resrow.metal .rbar > div { background: #cfd6dd; }
+.resrow.energy .rbar > div { background: #e3c34a; }
+.resrow.energy .rinc, .resrow.metal .rinc { color: #7f9a5f; }
 
 .teamrow { display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: 12px; }
 .teamrow .sw { width: 11px; height: 11px; border-radius: 3px; flex: 0 0 auto; }
