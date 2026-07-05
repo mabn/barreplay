@@ -109,6 +109,9 @@ type UnitDef struct {
 	BuildTime   float32 `json:"buildTime,omitempty"`
 	MaxHealth   float32 `json:"maxHealth,omitempty"`
 	Speed       float32 `json:"speed,omitempty"`
+	XSize       int32   `json:"xsize,omitempty"`    // footprint width  (in 8-elmo squares)
+	ZSize       int32   `json:"zsize,omitempty"`    // footprint depth  (in 8-elmo squares)
+	IconType    string  `json:"iconType,omitempty"` // icontypes.lua key -> minimap/UI bitmap
 	IsBuilder   bool    `json:"isBuilder,omitempty"`
 	IsBuilding  bool    `json:"isBuilding,omitempty"`
 	IsFactory   bool    `json:"isFactory,omitempty"`
