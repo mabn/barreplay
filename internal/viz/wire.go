@@ -119,14 +119,15 @@ func (rep *Replay) toWire() wireReplay {
 		}
 	}
 
-	// Build footprints for immobile structures only. Keyed on immobility (!CanMove)
-	// rather than the IsBuilding flag: some fixed structures (e.g. epic nano/build
-	// turrets) are tagged builders, not buildings, but still occupy a footprint.
-	// XSize/ZSize are in 8-elmo squares (engine SQUARE_SIZE), so multiply by 8.
+	// Build footprints for structures only, via !CanMove OR IsBuilding. Neither
+	// flag alone suffices: nano/build turrets are immobile but tagged builders (not
+	// buildings), while some factories report CanMove — so the union catches both
+	// and still excludes genuinely mobile units. XSize/ZSize are in 8-elmo squares
+	// (engine SQUARE_SIZE), so multiply by 8.
 	const squareSize = 8
 	w.Footprints = map[string]wireFootprint{}
 	for _, d := range rep.Meta.UnitDefs {
-		if !d.CanMove && d.XSize > 0 {
+		if (!d.CanMove || d.IsBuilding) && d.XSize > 0 {
 			w.Footprints[d.Name] = wireFootprint{W: d.XSize * squareSize, H: d.ZSize * squareSize}
 		}
 	}
