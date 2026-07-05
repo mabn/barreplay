@@ -947,6 +947,10 @@ func main() {
 
 	// ---- change statistics over delta frames --------------------------------
 	var totRec, idleAll, idleCore int64
+	// tolerance probes: how many more records become skippable if ±1 elmo
+	// position error is acceptable (idleCoreTol), and additionally ignoring
+	// the extra-section terrain-following y/dvy noise (idleAllTol).
+	var idleCoreTol, idleAllTol int64
 	var colChanged [nCols]int64
 	var deadCount, newCount int64
 	{
@@ -992,6 +996,14 @@ func main() {
 					if coreZero {
 						idleCore++
 					}
+					coreTol := d[0] == 0 && d[1] == 0 && abs64(d[2]) <= 1 && abs64(d[3]) <= 1 &&
+						d[4] == 0 && d[5] == 0 && d[6] == 0 && d[7] == 0
+					if coreTol {
+						idleCoreTol++
+						if abs64(d[8]) <= 2 && abs64(d[9]) <= 2 && d[10] == 0 {
+							idleAllTol++
+						}
+					}
 				}
 				next[u.id] = u
 			}
@@ -1001,6 +1013,8 @@ func main() {
 	fmt.Printf("== change statistics (delta frames only, %d unit records) ==\n", totRec)
 	fmt.Printf("fully idle (all 11 cols zero-delta): %d (%.1f%%)\n", idleAll, 100*float64(idleAll)/float64(totRec))
 	fmt.Printf("core-idle (8 core cols zero-delta):  %d (%.1f%%)\n", idleCore, 100*float64(idleCore)/float64(totRec))
+	fmt.Printf("core-idle if |x|,|z| residual <=1 tolerated: %d (%.1f%%)\n", idleCoreTol, 100*float64(idleCoreTol)/float64(totRec))
+	fmt.Printf("  ... and |y|,|dvy| <=2 tolerated too:       %d (%.1f%%)\n", idleAllTol, 100*float64(idleAllTol)/float64(totRec))
 	fmt.Printf("new-unit records: %d   deaths: %d\n", newCount, deadCount)
 	names := []string{"def", "team", "x", "z", "hp", "maxHp", "dvx", "dvz", "y", "dvy", "build"}
 	for c := 0; c < nCols; c++ {
