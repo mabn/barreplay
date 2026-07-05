@@ -825,15 +825,42 @@ function teamNameById(id) {
 
 // ---- sidebar --------------------------------------------------------------
 
-// Resource stride in wireFrame.r (see internal/viz/wire.go resourceStride):
-// [team, metal, energy, metalStore, energyStore, metalIncome, energyIncome].
+// Resource stride in the /api/replay/resources records (see wire.go
+// resourceStride): [team, metal, energy, metalStore, energyStore, metalIncome,
+// energyIncome].
 const RSTRIDE = 7;
 const R = { TEAM: 0, METAL: 1, ENERGY: 2, MSTORE: 3, ESTORE: 4, MINC: 5, EINC: 6 };
 
-// resourcesByTeam builds team id -> economy object for one frame's packed r array.
-function resourcesByTeam(fr) {
+// resByFrame maps a sim frame number -> its flat per-team economy array (stride
+// RSTRIDE). Team economy lives in the .brp X stream, which the frame chunk path
+// never fetches, so the player list pulls the whole (small) timeline once from
+// /api/replay/resources. Null until that fetch lands.
+let resByFrame = null;
+
+// loadResources fetches the economy timeline for the current replay and keys it
+// by sim frame, then refreshes the sidebar so the bars fill in. Best-effort: a
+// failure (or a capture with no resources) just leaves the bars off.
+async function loadResources(file, gen) {
+  resByFrame = null;
+  try {
+    const r = await fetch('/api/replay/resources?file=' + encodeURIComponent(file));
+    if (!r.ok) return;
+    const arr = await r.json(); // [{f, r:[...]}]
+    if (gen !== loadGen) return; // a newer replay load superseded this one
+    const m = new Map();
+    for (const e of arr) m.set(e.f, e.r);
+    resByFrame = m;
+    if (data) updateSidebar();
+  } catch (_) { /* offline / no resources: bars simply stay empty */ }
+}
+
+// resourcesByTeam builds team id -> economy object for one sim frame, from the
+// fetched timeline. Returns {} until the timeline has loaded or when the frame
+// carries no economy.
+function resourcesByTeam(simFrame) {
   const out = {};
-  const r = (fr && fr.r) || [];
+  const r = resByFrame && resByFrame.get(simFrame);
+  if (!r) return out;
   for (let i = 0; i < r.length; i += RSTRIDE) {
     out[r[i + R.TEAM]] = {
       metal: r[i + R.METAL], energy: r[i + R.ENERGY],
@@ -889,7 +916,8 @@ function renderPlayers() {
     root.innerHTML = '<div class="hint">no player roster in this capture</div>';
     return;
   }
-  const res = resourcesByTeam(data.frames[idx]);
+  const fr = dispIdx >= 0 ? data.frames[dispIdx] : null;
+  const res = resourcesByTeam(fr ? fr.f : -1);
   const allyOf = {};
   (data.teams || []).forEach(t => { allyOf[t.team] = t.ally; });
 
@@ -1251,6 +1279,7 @@ async function loadReplay(file) {
   ensureChunk(0, { urgent: true });
   ensureChunk(1);
   pumpBackground();
+  loadResources(file, loadGen); // economy timeline for the player-list bars (async)
   show();
 }
 
