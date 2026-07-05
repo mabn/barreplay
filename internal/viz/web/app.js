@@ -395,7 +395,7 @@ let showTexture = true;    // draw the map terrain texture behind everything
 let showGrid = false;      // draw the build/small/large grid
 let showFootprints = false;// draw build-footprint rectangles for buildings
 let growIcons = true;      // grow a building's icon toward its footprint when zoomed in
-let autoTeamColors = true; // true: distinct auto colours per team; false: the real in-game team colours from the replay
+let autoTeamColors = false; // true: distinct auto colours per team; false: the real in-game team colours from the replay
 let mapW = 0, mapH = 0;    // map world extent in elmos (0 if unknown)
 let mapTex = null;         // HTMLImageElement of the terrain texture, or null
 // Viewport in CSS pixels + the device-pixel ratio. The canvas backing store is
