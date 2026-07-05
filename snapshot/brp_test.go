@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"bytes"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -152,12 +153,12 @@ func TestBRPRoundTrip(t *testing.T) {
 				tol       float64
 			}{
 				{"x", gu.Pos.X, wu.Pos.X, 0.5},
-				{"y", gu.Pos.Y, wu.Pos.Y, 0.5},
+				{"y (not stored in v3)", gu.Pos.Y, 0, 0.001},
 				{"z", gu.Pos.Z, wu.Pos.Z, 0.5},
 				{"hp", gu.Health, wu.Health, 0.5},
 				{"maxHp", gu.MaxHealth, wu.MaxHealth, 0.5},
 				{"vx", gu.VelX, wu.VelX, 1.0 / 60},
-				{"vy", gu.VelY, wu.VelY, 1.0 / 60},
+				{"vy (not stored in v3)", gu.VelY, 0, 0.001},
 				{"vz", gu.VelZ, wu.VelZ, 1.0 / 60},
 				{"build", gu.BuildProgress, wu.BuildProgress, 1.0 / 255 * 0.5001},
 			}
@@ -411,5 +412,87 @@ func TestBRPEmptyCapture(t *testing.T) {
 func TestReadContainerBadMagic(t *testing.T) {
 	if _, _, err := ReadContainer(bytes.NewReader([]byte("NOPE\x01")), BRPMagic); err == nil {
 		t.Error("want error for bad magic")
+	}
+}
+
+// TestBRPSkipIdleUnits exercises the v3 delta-frame contract: units with no
+// change (including movers at constant velocity, whose position the decoder
+// must advance by dv) are omitted from the stream entirely, deaths are an
+// explicit id list, and the decoder reconstructs the FULL unit set of every
+// frame exactly.
+func TestBRPSkipIdleUnits(t *testing.T) {
+	mk := func(id int32, x, z, hp float32, vx, vz float32) UnitState {
+		return UnitState{UnitID: id, DefID: 1, Team: 0, Pos: Vec3{X: x, Z: z},
+			Health: hp, MaxHealth: 1000, VelX: vx, VelZ: vz, BuildProgress: 1}
+	}
+	// A(1): stationary, never changes. B(2): constant velocity (2,-1) elmos
+	// per sim frame = (60,-30) per sample. C(3): takes damage each frame.
+	frames := []Frame{
+		{Frame: 30, Units: []UnitState{mk(1, 500, 500, 1000, 0, 0), mk(2, 100, 200, 1000, 2, -1), mk(3, 50, 50, 500, 0, 0)}},
+		{Frame: 60, Units: []UnitState{mk(1, 500, 500, 1000, 0, 0), mk(2, 160, 170, 1000, 2, -1), mk(3, 50, 50, 400, 0, 0)}},
+		{Frame: 90, Units: []UnitState{mk(1, 500, 500, 1000, 0, 0), mk(2, 220, 140, 1000, 2, -1)}}, // C died
+	}
+	meta := Meta{GameID: "skip-test", SampleEvery: 30}
+
+	dir := t.TempDir()
+	w, err := NewBRPWriter(dir, meta.GameID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteMeta(meta); err != nil {
+		t.Fatal(err)
+	}
+	for _, fr := range frames {
+		if err := w.WriteFrame(fr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := os.Open(filepath.Join(dir, meta.GameID+".brp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	_, got, _, err := ReadBRP(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("decoded %d frames, want 3", len(got))
+	}
+	for fi, want := range frames {
+		if len(got[fi].Units) != len(want.Units) {
+			t.Fatalf("frame[%d]: %d units, want %d (skipped units must be re-materialised)", fi, len(got[fi].Units), len(want.Units))
+		}
+		for ui, wu := range want.Units { // both sorted by id
+			gu := got[fi].Units[ui]
+			if gu.UnitID != wu.UnitID || gu.Pos.X != wu.Pos.X || gu.Pos.Z != wu.Pos.Z ||
+				gu.Health != wu.Health || gu.VelX != wu.VelX || gu.VelZ != wu.VelZ {
+				t.Errorf("frame[%d] unit %d: got pos(%v,%v) hp %v vel(%v,%v), want pos(%v,%v) hp %v vel(%v,%v)",
+					fi, wu.UnitID, gu.Pos.X, gu.Pos.Z, gu.Health, gu.VelX, gu.VelZ,
+					wu.Pos.X, wu.Pos.Z, wu.Health, wu.VelX, wu.VelZ)
+			}
+		}
+	}
+
+	// The size contract: encode the frames directly and check the idle units
+	// truly cost nothing. Frame 2 changes only unit 3's hp -> frameDelta +
+	// nDead(0) + nChanged(1) + id + 8 column deltas (hp's -100 zigzags to a
+	// 2-byte varint) = 13 core bytes; frame 3 is one death and nothing else
+	// -> 4 core bytes.
+	codec := newFrameCodec(30)
+	var core2, extra2 bytes.Buffer
+	codec.encodeFrame(&varintWriter{w: io.Discard}, &varintWriter{w: io.Discard}, frames[0])
+	codec.encodeFrame(&varintWriter{w: &core2}, &varintWriter{w: &extra2}, frames[1])
+	if core2.Len() != 13 {
+		t.Errorf("delta frame with 1 changed of 3 units = %d core bytes, want 13", core2.Len())
+	}
+	var core3 bytes.Buffer
+	codec.encodeFrame(&varintWriter{w: &core3}, &varintWriter{w: io.Discard}, frames[2])
+	if core3.Len() != 4 {
+		t.Errorf("delta frame with only a death = %d core bytes, want 4", core3.Len())
 	}
 }

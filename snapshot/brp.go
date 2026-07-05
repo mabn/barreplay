@@ -12,7 +12,7 @@ package snapshot
 //
 //	M  meta JSON: {"meta": <Meta>, "bounds", "frameTeams", "chunks" index, counts}
 //	F  core frame columns: id def team x z hp maxHp dvx dvz   (the viewer's data)
-//	X  extra frame columns: y dvy build + team resources      (full fidelity)
+//	X  extra frame column: build + team resources             (not sent to the browser)
 //	E  lifecycle events
 //
 // The M and E payloads are single gzip streams. The F and X payloads are a
@@ -40,14 +40,33 @@ package snapshot
 // round(vel*sampleEvery) — exactly the displacement the viewer interpolates
 // with), build progress to 1/255, resources to 1/10. Frame time is not stored
 // (t = frame/30 by the engine's fixed sim rate). Units within a frame are
-// sorted by id.
+// sorted by id. The unit's elevation (Pos.Y/VelY) is NOT stored (v3): the
+// viewer renders the x/z plane only, and ground units' y is terrain-following
+// noise that cost ~28% of all column changes; decoded frames return y=0.
 //
-// Column encoding (all zigzag varints, one column at a time per frame): a
-// unit's value is stored as a delta against the SAME unit in the previous
-// sampled frame (absolute if the id is new). The x/z columns additionally add
-// the previous frame's dvx/dvz to the prediction, so a unit moving at constant
-// velocity encodes as zero. The id column is delta-encoded within the frame
-// (ids ascend). Decoders must mirror this exactly; the JS decoder lives in
+// Frame encoding (v3, all zigzag varints; every frame uses the same layout —
+// a keyframe is just a frame encoded against empty prior state):
+//
+//	sv frameDelta
+//	uv nDead      ids in the previous sampled frame but absent now
+//	  sv idDelta…   (ascending, delta-coded from 0)
+//	uv nChanged   new ids + ids with ≥1 non-zero column delta
+//	  sv idDelta…   (ascending, delta-coded from 0)
+//	8 core columns × nChanged   def team x z hp maxHp dvx dvz
+//	(X stream) build × nChanged, then team resources
+//
+// A unit absent from BOTH lists is implicitly unchanged: the decoder keeps it
+// alive and advances its position by its velocity displacement (x += dvx,
+// z += dvz — the same prediction the encoder used to decide "unchanged", so
+// the reconstruction is exact). This is what makes idle units — ~2/3 of all
+// unit records in a real game — cost zero bytes in delta frames.
+//
+// Column values are deltas against the SAME unit in the previous sampled
+// frame (absolute if the id is new); x/z additionally add the previous
+// frame's dvx/dvz to the prediction, so constant-velocity movement encodes
+// as zero. "Changed" is judged across all stored columns including build, so
+// the X stream's build column always covers exactly the F stream's changed
+// list. Decoders must mirror this exactly; the JS decoder lives in
 // internal/viz/web/app.js — evolve them together.
 
 import (
@@ -70,9 +89,11 @@ const (
 	BRPMagic = "BRP1"
 	BRWMagic = "BRW1"
 
-	// BRPVersion is the only readable format version. v1 (unchunked) existed
-	// only briefly pre-release and is not supported.
-	BRPVersion byte = 2
+	// BRPVersion is the only readable format version. v1 (unchunked) and v2
+	// (every live unit re-encoded per frame, y/dvy columns) existed only
+	// pre-release and are not supported — regenerate a .brp from its source
+	// .brsnap/.jsonl with barreplay-pack.
+	BRPVersion byte = 3
 
 	SecMeta   byte = 'M' // .brp: meta JSON
 	SecFrames byte = 'F' // core frame columns
@@ -266,7 +287,17 @@ func (vr *varintReader) sv() (int64, error) {
 // sampled frame, in quantized units.
 type prevUnitState struct {
 	def, team, x, z, hp, maxHp, dvx, dvz int64
-	y, dvy, build                        int64
+	build                                int64
+}
+
+// advance returns the state an unchanged unit reaches one sample later: the
+// position moves by the velocity displacement, everything else stays. This is
+// simultaneously the column predictor and the decoder's reconstruction of a
+// skipped unit — they must be the same function for skipping to be lossless.
+func (p prevUnitState) advance() prevUnitState {
+	p.x += p.dvx
+	p.z += p.dvz
+	return p
 }
 
 type prevResState struct{ m, e, ms, es, mi, ei int64 }
@@ -301,13 +332,27 @@ func (c *frameCodec) quantize(u UnitState) prevUnitState {
 		x: roundq(u.Pos.X), z: roundq(u.Pos.Z),
 		hp: roundq(u.Health), maxHp: roundq(u.MaxHealth),
 		dvx: roundq(u.VelX * se), dvz: roundq(u.VelZ * se),
-		y: roundq(u.Pos.Y), dvy: roundq(u.VelY * se),
 		build: roundq(u.BuildProgress * buildScale),
 	}
 }
 
-// encodeFrame appends one frame to the core (F) and extra (X) streams. Units
-// are sorted by id. Returns the sorted, quantized units so the writer can
+// coreColumns defines the 8 core columns' accessors in stream order. The
+// predictor for every column is the same: the corresponding field of
+// prev.advance() — see prevUnitState.advance.
+var coreColumns = []func(*prevUnitState) *int64{
+	func(s *prevUnitState) *int64 { return &s.def },
+	func(s *prevUnitState) *int64 { return &s.team },
+	func(s *prevUnitState) *int64 { return &s.x },
+	func(s *prevUnitState) *int64 { return &s.z },
+	func(s *prevUnitState) *int64 { return &s.hp },
+	func(s *prevUnitState) *int64 { return &s.maxHp },
+	func(s *prevUnitState) *int64 { return &s.dvx },
+	func(s *prevUnitState) *int64 { return &s.dvz },
+}
+
+// encodeFrame appends one frame to the core (F) and extra (X) streams (see
+// the frame-encoding layout at the top of the file). Returns the full frame's
+// sorted, quantized units — including the skipped ones — so the writer can
 // update aggregates.
 func (c *frameCodec) encodeFrame(core, extra *varintWriter, fr Frame) []prevUnitState {
 	units := make([]UnitState, len(fr.Units))
@@ -321,48 +366,62 @@ func (c *frameCodec) encodeFrame(core, extra *varintWriter, fr Frame) []prevUnit
 
 	core.sv(int64(fr.Frame) - c.prevFrame)
 	c.prevFrame = int64(fr.Frame)
-	core.uv(uint64(len(units)))
 
-	// id column: delta within the frame (ascending).
-	last := int64(0)
+	// Dead ids: in the previous frame, absent now.
+	live := make(map[int32]bool, len(units))
 	for _, u := range units {
-		core.sv(int64(u.UnitID) - last)
-		last = int64(u.UnitID)
+		live[u.UnitID] = true
 	}
-	// Remaining columns: delta vs the same unit in the previous frame (absolute
-	// when new); x/z predict with the previous frame's velocity displacement.
-	type colFn struct {
-		get  func(prevUnitState) int64
-		pred func(prevUnitState) int64 // base when the unit existed last frame
-	}
-	coreCols := []colFn{
-		{get: func(s prevUnitState) int64 { return s.def }, pred: func(p prevUnitState) int64 { return p.def }},
-		{get: func(s prevUnitState) int64 { return s.team }, pred: func(p prevUnitState) int64 { return p.team }},
-		{get: func(s prevUnitState) int64 { return s.x }, pred: func(p prevUnitState) int64 { return p.x + p.dvx }},
-		{get: func(s prevUnitState) int64 { return s.z }, pred: func(p prevUnitState) int64 { return p.z + p.dvz }},
-		{get: func(s prevUnitState) int64 { return s.hp }, pred: func(p prevUnitState) int64 { return p.hp }},
-		{get: func(s prevUnitState) int64 { return s.maxHp }, pred: func(p prevUnitState) int64 { return p.maxHp }},
-		{get: func(s prevUnitState) int64 { return s.dvx }, pred: func(p prevUnitState) int64 { return p.dvx }},
-		{get: func(s prevUnitState) int64 { return s.dvz }, pred: func(p prevUnitState) int64 { return p.dvz }},
-	}
-	extraCols := []colFn{
-		{get: func(s prevUnitState) int64 { return s.y }, pred: func(p prevUnitState) int64 { return p.y + p.dvy }},
-		{get: func(s prevUnitState) int64 { return s.dvy }, pred: func(p prevUnitState) int64 { return p.dvy }},
-		{get: func(s prevUnitState) int64 { return s.build }, pred: func(p prevUnitState) int64 { return p.build }},
-	}
-	emit := func(vw *varintWriter, cols []colFn) {
-		for _, col := range cols {
-			for i, u := range units {
-				base := int64(0)
-				if p, ok := c.prev[u.UnitID]; ok {
-					base = col.pred(p)
-				}
-				vw.sv(col.get(q[i]) - base)
-			}
+	var dead []int64
+	for id := range c.prev {
+		if !live[id] {
+			dead = append(dead, int64(id))
 		}
 	}
-	emit(core, coreCols)
-	emit(extra, extraCols)
+	sort.Slice(dead, func(i, j int) bool { return dead[i] < dead[j] })
+	core.uv(uint64(len(dead)))
+	last := int64(0)
+	for _, id := range dead {
+		core.sv(id - last)
+		last = id
+	}
+
+	// Changed set: new units, plus units whose quantized state differs from
+	// the prediction in any stored column (including build).
+	changed := make([]int, 0, len(units))
+	for i, u := range units {
+		p, ok := c.prev[u.UnitID]
+		if !ok || p.advance() != q[i] {
+			changed = append(changed, i)
+		}
+	}
+	core.uv(uint64(len(changed)))
+	last = 0
+	for _, i := range changed {
+		core.sv(int64(units[i].UnitID) - last)
+		last = int64(units[i].UnitID)
+	}
+
+	// Core columns for the changed units: delta vs the advanced previous state
+	// (absolute when the id is new), one column at a time.
+	for _, col := range coreColumns {
+		for _, i := range changed {
+			base := int64(0)
+			if p, ok := c.prev[units[i].UnitID]; ok {
+				pa := p.advance()
+				base = *col(&pa)
+			}
+			core.sv(*col(&q[i]) - base)
+		}
+	}
+	// Extra stream: the build column for the same changed set.
+	for _, i := range changed {
+		base := int64(0)
+		if p, ok := c.prev[units[i].UnitID]; ok {
+			base = p.build
+		}
+		extra.sv(q[i].build - base)
+	}
 
 	// Team resources ride the extra stream, delta-coded per team.
 	res := make([]TeamResource, len(fr.Resources))
@@ -394,8 +453,10 @@ func (c *frameCodec) encodeFrame(core, extra *varintWriter, fr Frame) []prevUnit
 	return q
 }
 
-// decodeFrames reconstructs frames from the F section and, when present, the X
-// section (which cannot be decoded standalone: it relies on F's ids/order).
+// decodeFrames reconstructs full frames from the F section and, when present,
+// the X section (which cannot be decoded standalone: it relies on F's changed
+// list). Every live unit appears in every decoded frame: units skipped by the
+// encoder are re-materialised by advancing their previous state.
 func decodeFrames(core, extra []byte, sampleEvery int32) ([]Frame, error) {
 	c := newFrameCodec(sampleEvery)
 	se := float32(c.sampleEvery)
@@ -403,6 +464,23 @@ func decodeFrames(core, extra []byte, sampleEvery int32) ([]Frame, error) {
 	var xr *varintReader
 	if extra != nil {
 		xr = &varintReader{b: extra}
+	}
+	readIDs := func() ([]int32, error) {
+		n, err := cr.uv()
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]int32, n)
+		last := int64(0)
+		for i := range ids {
+			d, err := cr.sv()
+			if err != nil {
+				return nil, err
+			}
+			last += d
+			ids[i] = int32(last)
+		}
+		return ids, nil
 	}
 	var frames []Frame
 	for !cr.done() {
@@ -412,76 +490,53 @@ func decodeFrames(core, extra []byte, sampleEvery int32) ([]Frame, error) {
 		}
 		frame := c.prevFrame + fd
 		c.prevFrame = frame
-		n64, err := cr.uv()
+
+		dead, err := readIDs()
 		if err != nil {
 			return nil, err
 		}
-		n := int(n64)
-		ids := make([]int32, n)
-		last := int64(0)
-		for i := 0; i < n; i++ {
-			d, err := cr.sv()
-			if err != nil {
-				return nil, err
-			}
-			last += d
-			ids[i] = int32(last)
+		chIDs, err := readIDs()
+		if err != nil {
+			return nil, err
 		}
+
+		// Decode the changed units' columns.
+		n := len(chIDs)
 		q := make([]prevUnitState, n)
 		exists := make([]bool, n)
-		prevs := make([]prevUnitState, n)
-		for i, id := range ids {
-			prevs[i], exists[i] = c.prev[id]
+		preds := make([]prevUnitState, n)
+		for i, id := range chIDs {
+			if p, ok := c.prev[id]; ok {
+				preds[i], exists[i] = p.advance(), true
+			}
 		}
-		readCol := func(vr *varintReader, set func(i int, v int64), pred func(p prevUnitState) int64) error {
+		for _, col := range coreColumns {
 			for i := 0; i < n; i++ {
-				d, err := vr.sv()
+				d, err := cr.sv()
 				if err != nil {
-					return err
+					return nil, err
 				}
 				base := int64(0)
 				if exists[i] {
-					base = pred(prevs[i])
+					base = *col(&preds[i])
 				}
-				set(i, base+d)
-			}
-			return nil
-		}
-		coreCols := []struct {
-			set  func(i int, v int64)
-			pred func(p prevUnitState) int64
-		}{
-			{func(i int, v int64) { q[i].def = v }, func(p prevUnitState) int64 { return p.def }},
-			{func(i int, v int64) { q[i].team = v }, func(p prevUnitState) int64 { return p.team }},
-			{func(i int, v int64) { q[i].x = v }, func(p prevUnitState) int64 { return p.x + p.dvx }},
-			{func(i int, v int64) { q[i].z = v }, func(p prevUnitState) int64 { return p.z + p.dvz }},
-			{func(i int, v int64) { q[i].hp = v }, func(p prevUnitState) int64 { return p.hp }},
-			{func(i int, v int64) { q[i].maxHp = v }, func(p prevUnitState) int64 { return p.maxHp }},
-			{func(i int, v int64) { q[i].dvx = v }, func(p prevUnitState) int64 { return p.dvx }},
-			{func(i int, v int64) { q[i].dvz = v }, func(p prevUnitState) int64 { return p.dvz }},
-		}
-		for _, col := range coreCols {
-			if err := readCol(cr, col.set, col.pred); err != nil {
-				return nil, err
+				*col(&q[i]) = base + d
 			}
 		}
 
 		fr := Frame{Frame: int32(frame), TimeSec: float32(frame) / simFPS}
-		fr.Units = make([]UnitState, n)
 
 		if xr != nil {
-			extraCols := []struct {
-				set  func(i int, v int64)
-				pred func(p prevUnitState) int64
-			}{
-				{func(i int, v int64) { q[i].y = v }, func(p prevUnitState) int64 { return p.y + p.dvy }},
-				{func(i int, v int64) { q[i].dvy = v }, func(p prevUnitState) int64 { return p.dvy }},
-				{func(i int, v int64) { q[i].build = v }, func(p prevUnitState) int64 { return p.build }},
-			}
-			for _, col := range extraCols {
-				if err := readCol(xr, col.set, col.pred); err != nil {
+			for i := 0; i < n; i++ {
+				d, err := xr.sv()
+				if err != nil {
 					return nil, err
 				}
+				base := int64(0)
+				if exists[i] {
+					base = preds[i].build
+				}
+				q[i].build = base + d
 			}
 			nr, err := xr.uv()
 			if err != nil {
@@ -512,18 +567,39 @@ func decodeFrames(core, extra []byte, sampleEvery int32) ([]Frame, error) {
 			}
 		}
 
-		next := make(map[int32]prevUnitState, n)
-		for i := range q {
-			fr.Units[i] = UnitState{
-				UnitID: ids[i], DefID: int32(q[i].def), Team: int32(q[i].team),
-				Pos:    Vec3{X: float32(q[i].x), Y: float32(q[i].y), Z: float32(q[i].z)},
-				Health: float32(q[i].hp), MaxHealth: float32(q[i].maxHp),
-				VelX: float32(q[i].dvx) / se, VelY: float32(q[i].dvy) / se, VelZ: float32(q[i].dvz) / se,
-				BuildProgress: float32(q[i].build) / buildScale,
+		// Assemble the next state: survivors advance, changed units override.
+		next := make(map[int32]prevUnitState, len(c.prev)+n)
+		for id, p := range c.prev {
+			next[id] = p.advance()
+		}
+		for _, id := range dead {
+			if _, ok := next[id]; !ok {
+				return nil, fmt.Errorf("snapshot: frame %d: dead unit %d was not alive", frame, id)
 			}
-			next[ids[i]] = q[i]
+			delete(next, id)
+		}
+		for i, id := range chIDs {
+			next[id] = q[i]
 		}
 		c.prev = next
+
+		// Materialise the full frame, sorted by id.
+		ids := make([]int32, 0, len(next))
+		for id := range next {
+			ids = append(ids, id)
+		}
+		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		fr.Units = make([]UnitState, len(ids))
+		for i, id := range ids {
+			s := next[id]
+			fr.Units[i] = UnitState{
+				UnitID: id, DefID: int32(s.def), Team: int32(s.team),
+				Pos:    Vec3{X: float32(s.x), Z: float32(s.z)},
+				Health: float32(s.hp), MaxHealth: float32(s.maxHp),
+				VelX: float32(s.dvx) / se, VelZ: float32(s.dvz) / se,
+				BuildProgress: float32(s.build) / buildScale,
+			}
+		}
 		frames = append(frames, fr)
 	}
 	return frames, nil

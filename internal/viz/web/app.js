@@ -37,7 +37,7 @@ function parseContainer(buf) {
   for (let i = 0; i < magic.length; i++) {
     if (u8[i] !== magic.charCodeAt(i)) throw new Error('not a BRW payload (old server?)');
   }
-  if (u8[magic.length] !== 2) throw new Error('unsupported payload version ' + u8[magic.length]);
+  if (u8[magic.length] !== 3) throw new Error('unsupported payload version ' + u8[magic.length]);
   const dv = new DataView(buf);
   const secs = {};
   let off = magic.length + 1; // + version byte
@@ -50,11 +50,15 @@ function parseContainer(buf) {
   return secs;
 }
 
-// Frame columns: per frame — zigzag-varint frame delta, unit count, then the
-// id column (delta within the frame, ascending) and 8 value columns, each
-// delta-coded against the same unit in the previous frame (absolute when the
-// id is new). x/z additionally predict with the previous frame's velocity
-// displacement, so constant-velocity movement decodes from near-zero deltas.
+// Frame decoding (.brp v3; mirrors snapshot/brp.go decodeFrames): per frame —
+// zigzag-varint frame delta, a DEAD id list (units that disappeared), a
+// CHANGED id list (new units + units with any column change), then 8 value
+// columns for the changed units only, delta-coded against the same unit in
+// the previous frame (absolute when the id is new); x/z predict with the
+// previous frame's velocity displacement. Every other previously-live unit
+// was skipped by the encoder because it matched its prediction exactly, so
+// the decoder re-materialises it: position advances by dv, all else keeps.
+// The output frame is the FULL live unit set, sorted by id.
 function decodeFrames(b) {
   let p = 0;
   const end = b.length;
@@ -82,34 +86,77 @@ function decodeFrames(b) {
   }
 
   const frames = [];
-  let prevU = null;             // previous frame's Int32Array
+  let prevU = null;             // previous frame's Int32Array (sorted by id)
   let prevMap = new Map();      // unit id -> base offset into prevU
   let frame = 0;
   while (p < end) {
     frame += sv();
-    const n = uv();
-    const u = new Int32Array(n * STRIDE);
-    const pidx = new Int32Array(n); // prev-frame base offset per unit, -1 if new
+
+    // Dead ids (delta-coded, ascending).
+    const nDead = uv();
+    const dead = nDead ? new Set() : null;
     let id = 0;
-    for (let i = 0; i < n; i++) {
+    for (let i = 0; i < nDead; i++) { id += sv(); dead.add(id); }
+
+    // Changed ids + how many of them already existed.
+    const nCh = uv();
+    const chIds = new Int32Array(nCh);
+    const pidx = new Int32Array(nCh); // prev-frame base offset per unit, -1 if new
+    let nChExisting = 0;
+    id = 0;
+    for (let i = 0; i < nCh; i++) {
       id += sv();
-      u[i * STRIDE] = id;
+      chIds[i] = id;
       const prev = prevMap.get(id);
-      pidx[i] = prev === undefined ? -1 : prev;
+      if (prev === undefined) { pidx[i] = -1; } else { pidx[i] = prev; nChExisting++; }
     }
+
+    // Decode the changed units' columns against prevU.
+    const ch = new Int32Array(nCh * STRIDE);
+    for (let i = 0; i < nCh; i++) ch[i * STRIDE] = chIds[i];
     for (let c = 1; c < STRIDE; c++) {
-      for (let i = 0, o = c; i < n; i++, o += STRIDE) {
+      for (let i = 0, o = c; i < nCh; i++, o += STRIDE) {
         const d = sv();
         const j = pidx[i];
-        if (j < 0) { u[o] = d; continue; }
+        if (j < 0) { ch[o] = d; continue; }
         let base = prevU[j + c];
         if (c === F.X) base += prevU[j + F.DVX];
         else if (c === F.Z) base += prevU[j + F.DVZ];
-        u[o] = base + d;
+        ch[o] = base + d;
       }
     }
+
+    // Merge survivors (advanced by their velocity) with the changed units.
+    // Both prevU and chIds are sorted by id, so this is a linear merge.
+    const prevN = prevU ? prevU.length / STRIDE : 0;
+    const n = prevN - nDead - nChExisting + nCh;
+    const u = new Int32Array(n * STRIDE);
+    let i = 0, j = 0, k = 0;
+    while (i < prevN || j < nCh) {
+      const pid = i < prevN ? prevU[i * STRIDE] : Infinity;
+      const cid = j < nCh ? chIds[j] : Infinity;
+      if (cid <= pid) {
+        u.set(ch.subarray(j * STRIDE, (j + 1) * STRIDE), k * STRIDE);
+        if (cid === pid) i++;
+        j++; k++;
+      } else {
+        if (dead && dead.has(pid)) { i++; continue; }
+        const o = i * STRIDE, t = k * STRIDE;
+        u[t] = prevU[o];
+        u[t + F.DEF] = prevU[o + F.DEF];
+        u[t + F.TEAM] = prevU[o + F.TEAM];
+        u[t + F.X] = prevU[o + F.X] + prevU[o + F.DVX];
+        u[t + F.Z] = prevU[o + F.Z] + prevU[o + F.DVZ];
+        u[t + F.HP] = prevU[o + F.HP];
+        u[t + F.MAXHP] = prevU[o + F.MAXHP];
+        u[t + F.DVX] = prevU[o + F.DVX];
+        u[t + F.DVZ] = prevU[o + F.DVZ];
+        i++; k++;
+      }
+    }
+
     prevMap = new Map();
-    for (let i = 0; i < n; i++) prevMap.set(u[i * STRIDE], i * STRIDE);
+    for (let m = 0; m < n; m++) prevMap.set(u[m * STRIDE], m * STRIDE);
     prevU = u;
     frames.push({ f: frame, t: frame / 30, n, u });
   }

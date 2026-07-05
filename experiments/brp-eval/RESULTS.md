@@ -1,5 +1,11 @@
 # .brp frame-section layout experiments — size evaluation
 
+> **Historical note:** these experiments measured candidate layouts against
+> the **v2** format and led to **v3** (opt1 + opt4 shipped; see
+> `docs/brp-optimizations.md` for the outcome report). The harness re-encodes
+> a v2 `.brp`, so rerunning it requires a pre-v3 checkout; the numbers below
+> are kept as the record of the decision.
+
 Question: the current F/X delta frames store every column for **every unit in
 every sampled frame**, even when all of a unit's deltas are zero. Would (1)
 skipping unchanged units, and/or (2) reorganizing a chunk as per-unit,
