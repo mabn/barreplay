@@ -26,6 +26,9 @@ let drag = null;           // pan state or null
 let playTimer = null;
 let secPerFrame = 1;       // game seconds represented by one sampled frame
 let showIcons = true;      // draw BAR unit icons (vs plain dots)
+let showTexture = true;    // draw the map terrain texture behind everything
+let mapW = 0, mapH = 0;    // map world extent in elmos (0 if unknown)
+let mapTex = null;         // HTMLImageElement of the terrain texture, or null
 // Viewport in CSS pixels + the device-pixel ratio. The canvas backing store is
 // viewW*DPR x viewH*DPR and the context is pre-scaled by DPR, so all drawing is
 // done in CSS px while staying crisp on HiDPI displays.
@@ -263,22 +266,36 @@ function scaleCanvas(src, w, h) {
   return c;
 }
 
-// Map extent rectangle + a light grid so panning/zoom has reference.
+// The rendered field: the full map extent when its size is known (so the terrain
+// texture and grid cover the real map), otherwise just the unit bounds.
+function fieldRect() {
+  if (mapW > 0 && mapH > 0) return { minX: 0, minZ: 0, maxX: mapW, maxZ: mapH };
+  return data.bounds;
+}
+
+// Map terrain (or a plain fill) + the build grid so panning/zoom has reference.
 function drawMapFrame() {
-  const b = data.bounds;
+  const b = fieldRect();
   const [x0, y0] = w2s(b.minX, b.minZ);
   const [x1, y1] = w2s(b.maxX, b.maxZ);
-  ctx.fillStyle = '#0e1319';
-  ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+  if (showTexture && mapTex && mapTex.complete && mapTex.naturalWidth) {
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(mapTex, x0, y0, x1 - x0, y1 - y0);
+  } else {
+    ctx.fillStyle = '#0e1319';
+    ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+  }
 
   // BAR build grid: buildings snap to a 16-elmo "build square" (a 2x2 building
   // is 32 elmos, 3x3 is 48, ...). Draw the fine 16-elmo grid — the same one BAR
   // shows when placing — plus a coarser every-8th line, both aligned to the world
   // origin so lines fall on real build-square boundaries. Each tier only draws
   // when its spacing is legible, so a zoomed-out view isn't a solid mesh.
+  // Light, semi-transparent lines so the grid reads over both the dark fallback
+  // and a bright terrain texture.
   const BUILD = 16;
-  drawGrid(b, x0, y0, x1, y1, BUILD, '#161f28');       // fine: one build square
-  drawGrid(b, x0, y0, x1, y1, BUILD * 4, '#243444');   // coarse: every 4 squares (64 elmos)
+  drawGrid(b, x0, y0, x1, y1, BUILD, 'rgba(255,255,255,0.07)');      // fine: one build square
+  drawGrid(b, x0, y0, x1, y1, BUILD * 4, 'rgba(255,255,255,0.16)');  // coarse: every 4 squares (64 elmos)
 
   ctx.strokeStyle = '#2d3a47';
   ctx.lineWidth = 1;
@@ -487,6 +504,7 @@ document.getElementById('last').onclick = () => { stopPlay(); go(data.frames.len
 document.getElementById('play').onclick = togglePlay;
 document.getElementById('speed').onchange = () => { if (playTimer) { stopPlay(); startPlay(); } };
 document.getElementById('icons').onchange = e => { showIcons = e.target.checked; draw(); };
+document.getElementById('maptex').onchange = e => { showTexture = e.target.checked; draw(); };
 document.getElementById('iconsize').oninput = e => {
   iconScale = +e.target.value;
   setParam('iconsize', iconScale);
@@ -533,9 +551,33 @@ async function loadReplay(file) {
   // Pre-warm the icon set (only a few dozen distinct unit types per replay) so
   // they're ready on the first paint.
   Object.values(data.unitIcons || {}).forEach(info => getImage(info.p));
+  loadMap(data.mapName);
   resize();      // sets canvas size
   fitView();     // fit map to viewport
   show();
+}
+
+// Fetch this replay's map extent + terrain texture from the server (which
+// proxies the BAR maps API). Best-effort: if the map is unknown or offline, the
+// viewer just keeps the plain background.
+async function loadMap(name) {
+  mapW = mapH = 0;
+  mapTex = null;
+  const maptexEl = document.getElementById('maptex');
+  if (!name) { maptexEl.disabled = true; return; }
+  let info = {};
+  try {
+    info = await (await fetch('/api/mapinfo?map=' + encodeURIComponent(name))).json();
+  } catch (_) { /* offline: leave plain background */ }
+  mapW = info.width || 0;
+  mapH = info.height || 0;
+  maptexEl.disabled = !info.texture;
+  if (info.texture) {
+    const img = new Image();
+    img.onload = () => { mapTex = img; draw(); };
+    img.src = '/api/maptex?map=' + encodeURIComponent(name);
+  }
+  draw(); // reflect the (possibly updated) map extent immediately
 }
 
 async function init() {

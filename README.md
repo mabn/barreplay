@@ -126,6 +126,8 @@ the normal input; `.brsnap` (the raw widget stream) is also accepted so you can 
 a run whose `.jsonl` was never produced. The page renders each sampled frame as a
 top-down map, colouring units by team (grouped by ally-team), with:
 
+- the **real map terrain** behind the units (fetched from the BAR maps API by map name and
+  positioned in world space), toggled with the **Map** checkbox,
 - **real BAR unit icons** (from vendored game assets), team-tinted and drawn at a
   constant screen size (per-type, like BAR's minimap — icons overlap when zoomed out and
   spread apart when zoomed in); toggle to plain dots with the **Icons** checkbox and adjust
@@ -138,10 +140,14 @@ top-down map, colouring units by team (grouped by ally-team), with:
 The front-end is plain HTML/JS/Canvas (no framework, no build step) embedded into the
 binary via `go:embed`; the server exposes `/api/replays` (the file list),
 `/api/replay?file=<name>` (one capture, in a compact flat-array wire format — see
-`internal/viz/wire.go`), and `/icons/<file>` (the vendored unit icons). The
+`internal/viz/wire.go`), `/icons/<file>` (the vendored unit icons), and
+`/api/mapinfo` + `/api/maptex` (the map's world extent and terrain texture, proxied and
+cached from the BAR maps API by map name). The
 icon set and BAR's `icontypes.lua` name→bitmap table are vendored under
 `internal/viz/bardata/` (see its README); the mapping is parsed directly in Go,
-so no Lua VM / third-party dependency is added.
+so no Lua VM / third-party dependency is added. The map texture is fetched at view time
+(it needs outbound access to `api.bar-rts.com`); if that's unavailable the viewer just
+falls back to a plain background.
 
 ## Requirements for a real run
 
