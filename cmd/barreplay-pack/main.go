@@ -2,10 +2,20 @@
 // into the compact binary .brp format — typically a ~35x size reduction, and
 // the only format the viewer serves. Use it once per legacy capture.
 //
+// A raw .brsnap is just the widget's stream: it carries frames, unit defs and
+// teams, but no map name, versions, or player roster — those live in the demo
+// (.sdfz) the capture replayed. To still produce a FULL .brp without
+// re-running the simulation, pack takes the replay's gameId (from the input's
+// file name, which is how the pipeline names widget streams, or from -id),
+// downloads the demo from the BAR API, and seeds its startscript metadata
+// exactly like cmd/barreplay does. -no-demo skips that (offline; the .brp
+// then has no map/version/player metadata).
+//
 // Usage:
 //
 //	barreplay-pack [flags] <capture.jsonl|capture.brsnap> [...]
 //	barreplay-pack -out ./snapshots ./snapshots/*.jsonl
+//	barreplay-pack -id 6da7496aca487581a12b7a6d5bd99bc0 ./renamed.brsnap
 //
 // Each input produces "<gameId>.brp" (gameId = the input's basename) in the
 // input's own directory, or in -out when set. Inputs are processed
@@ -13,20 +23,27 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
+	"github.com/mabn/barreplay/internal/barapi"
 	"github.com/mabn/barreplay/internal/capture"
+	"github.com/mabn/barreplay/internal/demofile"
 	"github.com/mabn/barreplay/snapshot"
 )
 
 func main() {
 	var (
 		outDir = flag.String("out", "", "output directory (default: next to each input)")
+		idArg  = flag.String("id", "", "replay gameId or link used to fetch the demo metadata for a .brsnap input (default: the input's file name; only valid with a single input)")
+		noDemo = flag.Bool("no-demo", false, "do not fetch the demo for .brsnap inputs; the .brp then has no map/version/player metadata")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: barreplay-pack [flags] <capture.jsonl|capture.brsnap> [...]\n\n")
@@ -37,9 +54,18 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
+	if *idArg != "" && flag.NArg() > 1 {
+		fmt.Fprintln(os.Stderr, "barreplay-pack: -id applies to exactly one input")
+		os.Exit(2)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	client := barapi.New()
 	failed := 0
 	for _, in := range flag.Args() {
-		if err := pack(in, *outDir); err != nil {
+		if err := pack(ctx, client, in, *outDir, *idArg, *noDemo); err != nil {
 			fmt.Fprintf(os.Stderr, "barreplay-pack: %s: %v\n", in, err)
 			failed++
 		}
@@ -68,11 +94,12 @@ func (l *loaded) WriteEvent(e snapshot.Event) error {
 }
 func (l *loaded) Close() error { return nil }
 
-// load reads a legacy capture. .jsonl decodes through snapshot.NewReader;
-// .brsnap (the raw widget stream) re-parses through internal/capture — the
-// exact parser the capture pipeline uses. A .brsnap carries no versions/map,
-// so only the gameId (from the filename) is seeded.
-func load(path, gameID string) (*loaded, error) {
+// load reads a legacy capture. .jsonl decodes through snapshot.NewReader (its
+// meta line is complete, so base is unused); .brsnap (the raw widget stream)
+// re-parses through internal/capture — the exact parser the capture pipeline
+// uses — seeded with base, which carries whatever demo metadata the caller
+// obtained.
+func load(path string, base snapshot.Meta) (*loaded, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -106,7 +133,7 @@ func load(path, gameID string) (*loaded, error) {
 			return nil, fmt.Errorf("no meta record found (is this a barreplay .jsonl?)")
 		}
 	case ".brsnap":
-		if err := capture.Consume(f, snapshot.Meta{GameID: gameID}, l); err != nil {
+		if err := capture.Consume(f, base, l); err != nil {
 			return nil, fmt.Errorf("parsing brsnap: %w", err)
 		}
 	default:
@@ -115,14 +142,76 @@ func load(path, gameID string) (*loaded, error) {
 	return l, nil
 }
 
-func pack(in, outDir string) error {
+// demoMeta resolves id (a gameId or replay link) via the BAR API, downloads the
+// .sdfz demo to a temp dir, and parses its header + startscript into the base
+// capture metadata — the same seeding cmd/barreplay performs, minus the engine
+// run. The demo is only needed for its first few KB (header + startscript), but
+// the download is whole-file; a demo is a few MB, so this stays cheap.
+func demoMeta(ctx context.Context, client *barapi.Client, id string) (snapshot.Meta, error) {
+	r, err := client.Resolve(ctx, id)
+	if err != nil {
+		return snapshot.Meta{}, err
+	}
+	tmp, err := os.MkdirTemp("", "barreplay-pack-")
+	if err != nil {
+		return snapshot.Meta{}, err
+	}
+	defer os.RemoveAll(tmp)
+	p, err := client.Download(ctx, r, tmp)
+	if err != nil {
+		return snapshot.Meta{}, err
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return snapshot.Meta{}, err
+	}
+	demo, err := demofile.Parse(f)
+	f.Close()
+	if err != nil {
+		return snapshot.Meta{}, fmt.Errorf("parsing demo %s: %w", r.FileName, err)
+	}
+	return demofile.BaseMeta(demo), nil
+}
+
+// inferSampleEvery returns the sampling interval implied by the frame stream:
+// the smallest positive gap between consecutive sampled sim frames. A raw
+// .brsnap does not record the capture's -every choice, and the .brp codec
+// needs it (velocity displacement is quantized per sample interval).
+func inferSampleEvery(frames []snapshot.Frame) int32 {
+	best := int32(0)
+	for i := 1; i < len(frames); i++ {
+		if d := frames[i].Frame - frames[i-1].Frame; d > 0 && (best == 0 || d < best) {
+			best = d
+		}
+	}
+	return best
+}
+
+func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, noDemo bool) error {
 	gameID := strings.TrimSuffix(filepath.Base(in), filepath.Ext(in))
-	l, err := load(in, gameID)
+	base := snapshot.Meta{GameID: gameID}
+	if strings.EqualFold(filepath.Ext(in), ".brsnap") && !noDemo {
+		id := idArg
+		if id == "" {
+			id = gameID
+		}
+		m, err := demoMeta(ctx, client, id)
+		if err != nil {
+			return fmt.Errorf("fetching demo metadata for %q: %w (pass -id <gameId|link> if the file name is not the gameId, or -no-demo to pack without map/version/player metadata)", id, err)
+		}
+		fmt.Fprintf(os.Stderr, "%s: demo metadata: map %q, game %q, engine %s, %d players\n",
+			in, m.MapName, m.GameVersion, m.EngineVersion, len(m.Players))
+		base = m
+	}
+	l, err := load(in, base)
 	if err != nil {
 		return err
 	}
 	if l.meta.GameID == "" {
 		l.meta.GameID = gameID
+	}
+	if l.meta.SampleEvery == 0 {
+		l.meta.SampleEvery = inferSampleEvery(l.frames)
 	}
 	dir := outDir
 	if dir == "" {

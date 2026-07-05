@@ -122,7 +122,18 @@ Legacy captures still load everywhere they did, and can be shrunk in place:
 
 ```sh
 barreplay-pack ./snapshots/*.jsonl     # writes <gameId>.brp next to each input
+barreplay-pack ./snapshots/*.brsnap    # raw widget streams work too (see below)
 ```
+
+A raw `.brsnap` is just the widget's stream — it has no map name, versions, or
+player roster (those live in the demo the capture replayed). To still produce a
+**full** `.brp` without re-running the simulation, `barreplay-pack` takes the
+replay's gameId from the input's file name (the pipeline names streams
+`<gameId>.brsnap`; use `-id <gameId|link>` if yours is named differently),
+downloads the demo from the BAR API, and seeds its startscript metadata exactly
+like a capture run does. `-no-demo` skips the download (offline) at the cost of
+that metadata; the sampling interval is inferred from the stream's frame
+spacing either way.
 
 `-format jsonl` keeps writing the old line-delimited JSON (one tagged object per
 line — see `snapshot/jsonl.go`) if you want a human-inspectable capture.
@@ -156,8 +167,9 @@ fetch. A bar under the timeline shows which ranges are downloaded, video-player
 style. The page renders each sampled frame as a
 top-down map, colouring units by team (grouped by ally-team), with:
 
-- the **real map terrain** behind the units (fetched from the BAR maps API by map name and
-  positioned in world space), toggled with the **Map** checkbox,
+- the **real map terrain** behind the units (the browser loads it straight from the BAR
+  maps API using the capture's map name, positioned in world space), toggled with the
+  **Map** checkbox,
 - **real BAR unit icons** (from vendored game assets), team-tinted and drawn at a
   constant screen size (per-type, like BAR's minimap — icons overlap when zoomed out and
   spread apart when zoomed in); toggle to plain dots with the **Icons** checkbox and adjust
@@ -183,13 +195,13 @@ binary via `go:embed`; the server exposes `/api/replays` (the file list),
 `/api/replay/chunk?file=<name>&i=<n>` (one chunk's frame data, sliced byte-for-byte
 from the stored file; `&key=1` returns just its keyframe — the browser decodes both
 with its native `DecompressionStream`, see `internal/viz/wire.go` and
-`snapshot/brp.go`), `/icons/<file>` (the vendored unit icons), and
-`/api/mapinfo` + `/api/maptex` (the map's world extent and terrain texture, proxied and
-cached from the BAR maps API by map name). The
+`snapshot/brp.go`), and `/icons/<file>` (the vendored unit icons). The
 icon set and BAR's `icontypes.lua` name→bitmap table are vendored under
 `internal/viz/bardata/` (see its README); the mapping is parsed directly in Go,
-so no Lua VM / third-party dependency is added. The map texture is fetched at view time
-(it needs outbound access to `api.bar-rts.com`); if that's unavailable the viewer just
+so no Lua VM / third-party dependency is added. The map terrain is fetched by the
+**browser directly** from the BAR maps API (`api.bar-rts.com`) using the capture's map
+name — the viz server never proxies it; if the API is unreachable (or the capture has
+no map name, e.g. one packed from a raw `.brsnap` with `-no-demo`) the viewer just
 falls back to a plain background.
 
 ## Requirements for a real run
