@@ -87,7 +87,7 @@ BRSNAP T <teamID> <allyTeam> <side> <color>    team info (preamble; side "_" = n
 BRSNAP P <playerID> <team> <spectator> <name...>   player info (preamble; name last, may have spaces)
 BRSNAP READY                                   end of preamble
 BRSNAP F <frame> <timeSec> <count>             start of a periodic snapshot
-BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp>   one unit (follows an F line)
+BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp> <vx> <vy> <vz> <build>   one unit (follows an F line)
 BRSNAP R <teamID> <metal> <energy> <mStore> <eStore> <mIncome> <eIncome>   team economy (follows an F line)
 BRSNAP EV <frame> <kind> <id> <def> <team>     unit lifecycle event
 BRSNAP PROF <totalMs> <name>                   engine time-profiler record (once, at game over)
@@ -102,6 +102,10 @@ carry the roster (name/team/spectator) and **team colours** ride the `T` line; `
 backfills each `TeamInfo.PlayerName` from the first non-spectator player on that team.
 Each sampled frame also emits one `R` line per team with its current metal/energy, storage
 caps, and per-game-second income (the engine's per-frame income × the 30 fps sim rate).
+Each `U` line carries, besides position and health, the unit's velocity (`vx/vy/vz`) and
+`buildProgress` (1 = finished, <1 = under construction; from `GetUnitHealth`'s 5th return).
+Both are appended after `maxHp`, so pre-velocity `.brsnap` streams still parse (capture reads
+them only when the line has all 12 fields).
 
 The widget never touches synced state (only `Get*` reads, unsynced console commands, its
 own output file, and unsynced widget-handler calls) so it cannot desync the replay. `__SAMPLE_EVERY__` is substituted at write time (`-every`, default 30 = 1 Hz).
