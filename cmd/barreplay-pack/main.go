@@ -1,6 +1,6 @@
-// Command barreplay-pack converts existing captures (.jsonl or raw .brsnap)
-// into the compact binary .brp format — typically a ~40x size reduction. Use it
-// to shrink captures recorded before .brp became the default output.
+// Command barreplay-pack converts legacy captures (.jsonl or raw .brsnap)
+// into the compact binary .brp format — typically a ~35x size reduction, and
+// the only format the viewer serves. Use it once per legacy capture.
 //
 // Usage:
 //
@@ -15,11 +15,12 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/mabn/barreplay/internal/viz"
+	"github.com/mabn/barreplay/internal/capture"
 	"github.com/mabn/barreplay/snapshot"
 )
 
@@ -48,18 +49,80 @@ func main() {
 	}
 }
 
-func pack(in, outDir string) error {
-	ext := strings.ToLower(filepath.Ext(in))
-	if ext != ".jsonl" && ext != ".brsnap" {
-		return fmt.Errorf("unsupported input type %q (want .jsonl or .brsnap)", ext)
+// loaded is an in-memory capture; it doubles as the snapshot.Writer sink when
+// re-parsing a raw .brsnap through internal/capture.
+type loaded struct {
+	meta   snapshot.Meta
+	frames []snapshot.Frame
+	events []snapshot.Event
+}
+
+func (l *loaded) WriteMeta(m snapshot.Meta) error { l.meta = m; return nil }
+func (l *loaded) WriteFrame(f snapshot.Frame) error {
+	l.frames = append(l.frames, f)
+	return nil
+}
+func (l *loaded) WriteEvent(e snapshot.Event) error {
+	l.events = append(l.events, e)
+	return nil
+}
+func (l *loaded) Close() error { return nil }
+
+// load reads a legacy capture. .jsonl decodes through snapshot.NewReader;
+// .brsnap (the raw widget stream) re-parses through internal/capture — the
+// exact parser the capture pipeline uses. A .brsnap carries no versions/map,
+// so only the gameId (from the filename) is seeded.
+func load(path, gameID string) (*loaded, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
 	}
-	rep, err := viz.Load(in)
+	defer f.Close()
+
+	l := &loaded{}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".jsonl":
+		rd := snapshot.NewReader(f)
+		sawMeta := false
+		for {
+			meta, frame, event, err := rd.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("reading jsonl: %w", err)
+			}
+			switch {
+			case meta != nil:
+				l.meta = *meta
+				sawMeta = true
+			case frame != nil:
+				l.frames = append(l.frames, *frame)
+			case event != nil:
+				l.events = append(l.events, *event)
+			}
+		}
+		if !sawMeta {
+			return nil, fmt.Errorf("no meta record found (is this a barreplay .jsonl?)")
+		}
+	case ".brsnap":
+		if err := capture.Consume(f, snapshot.Meta{GameID: gameID}, l); err != nil {
+			return nil, fmt.Errorf("parsing brsnap: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported input type %q (want .jsonl or .brsnap)", filepath.Ext(path))
+	}
+	return l, nil
+}
+
+func pack(in, outDir string) error {
+	gameID := strings.TrimSuffix(filepath.Base(in), filepath.Ext(in))
+	l, err := load(in, gameID)
 	if err != nil {
 		return err
 	}
-	gameID := strings.TrimSuffix(filepath.Base(in), filepath.Ext(in))
-	if rep.Meta.GameID == "" {
-		rep.Meta.GameID = gameID
+	if l.meta.GameID == "" {
+		l.meta.GameID = gameID
 	}
 	dir := outDir
 	if dir == "" {
@@ -69,17 +132,17 @@ func pack(in, outDir string) error {
 	if err != nil {
 		return err
 	}
-	if err := w.WriteMeta(rep.Meta); err != nil {
+	if err := w.WriteMeta(l.meta); err != nil {
 		w.Close()
 		return err
 	}
-	for _, fr := range rep.Frames {
+	for _, fr := range l.frames {
 		if err := w.WriteFrame(fr); err != nil {
 			w.Close()
 			return err
 		}
 	}
-	for _, e := range rep.Events {
+	for _, e := range l.events {
 		if err := w.WriteEvent(e); err != nil {
 			w.Close()
 			return err
@@ -96,7 +159,7 @@ func pack(in, outDir string) error {
 		ratio = fmt.Sprintf(", %.0fx smaller", float64(inSize)/float64(outSize))
 	}
 	fmt.Fprintf(os.Stderr, "%s (%.1f MB) -> %s (%.2f MB%s): %d frames, %d events\n",
-		in, mb(inSize), outPath, mb(outSize), ratio, len(rep.Frames), len(rep.Events))
+		in, mb(inSize), outPath, mb(outSize), ratio, len(l.frames), len(l.events))
 	return nil
 }
 

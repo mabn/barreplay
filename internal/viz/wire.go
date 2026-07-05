@@ -4,25 +4,24 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
-	"math"
-	"sort"
 
 	"github.com/mabn/barreplay/snapshot"
 )
 
-// The browser payload is a binary "BRW1" container (see snapshot/brp.go for
-// the framing), not JSON: a real capture holds millions of unit records, and
-// the flat-JSON encoding used previously was ~150 MB where the binary sections
-// are ~10 MB. Sections:
+// The browser payload is binary, not JSON — a real capture holds millions of
+// unit records. /api/replay returns a small "BRW1" container (same section
+// framing as .brp, see snapshot/brp.go):
 //
-//	J  head JSON (this file's wireHead): meta, teams, icons, footprints, bounds
-//	F  core frame columns — for a .brp capture this is the file's F section
-//	   byte-for-byte (no server-side re-encoding); legacy .jsonl/.brsnap
-//	   captures are encoded through the same snapshot codec on the fly
-//	E  events — same pass-through rule
+//	J  head JSON (this file's wireHead): meta, teams, icons, footprints,
+//	   bounds, and the CHUNK INDEX
+//	E  events — the .brp file's E section byte-for-byte
 //
-// The decoder lives in web/app.js (decodeReplay) and must mirror
-// snapshot/brp.go's column layout exactly — evolve them together.
+// The frame data itself is NOT in this payload: the browser fetches chunks
+// individually via /api/replay/chunk as the user plays/seeks/skims, and the
+// server slices each chunk's bytes straight out of the stored file (they are
+// independently gzipped exactly so that no re-encoding is ever needed). The
+// decoder lives in web/app.js and must mirror snapshot/brp.go's column layout
+// exactly — evolve them together.
 
 // wireHead is the J-section JSON: everything the viewer needs besides the
 // frame/event columns.
@@ -43,6 +42,22 @@ type wireHead struct {
 	// elmos. Only immobile units are included (presence == it doesn't move), so the
 	// front-end draws a footprint rectangle only for buildings/turrets/etc.
 	Footprints map[string]wireFootprint `json:"footprints"`
+	// FrameCount is the total number of sampled frames; Chunks indexes the
+	// fetchable chunks in order (chunk i covers frames
+	// [sum(count[:i]), sum(count[:i+1])) of the global timeline).
+	FrameCount int         `json:"frameCount"`
+	Chunks     []wireChunk `json:"chunks"`
+}
+
+// wireChunk describes one fetchable chunk to the browser. keyLen is where the
+// keyframe gzip stream ends within the chunk's bytes, so the client can split
+// a fetched chunk into its two gzip streams (and so it knows what a
+// keyframe-only response contains).
+type wireChunk struct {
+	Frame  int32 `json:"frame"` // sim frame of the chunk's first sample
+	Count  int   `json:"count"` // samples in this chunk
+	KeyLen int64 `json:"keyLen"`
+	Len    int64 `json:"len"`
 }
 
 // wireIcon is one unit type's icon in the payload: p = served bitmap path
@@ -136,20 +151,32 @@ func buildHead(meta snapshot.Meta, b wireBounds, extraTeams []int32) wireHead {
 	return h
 }
 
-// assembleWire builds the BRW1 response from a head and the (already gzipped)
-// F/E section payloads.
-func assembleWire(head wireHead, framesSec, eventsSec []byte) ([]byte, error) {
+// brpWirePayload builds the /api/replay response for a parsed .brp: the head
+// (with the chunk index) plus the stored E section byte-for-byte. Bounds and
+// teams come from the file's meta record, precomputed at capture time — the
+// server never decodes a frame.
+func brpWirePayload(f *snapshot.BRPFile) ([]byte, error) {
+	b := defaultBounds()
+	if f.Bounds != nil {
+		b = wireBounds{MinX: f.Bounds.MinX, MaxX: f.Bounds.MaxX, MinZ: f.Bounds.MinZ, MaxZ: f.Bounds.MaxZ}
+	}
+	head := buildHead(f.Meta, b, f.FrameTeams)
+	head.FrameCount = f.FrameCount
+	head.Chunks = make([]wireChunk, len(f.Chunks))
+	for i, c := range f.Chunks {
+		head.Chunks[i] = wireChunk{Frame: c.Frame, Count: c.Count, KeyLen: c.FKeyLen, Len: c.FLen}
+	}
+
 	headJSON, err := json.Marshal(head)
 	if err != nil {
 		return nil, err
 	}
+	sections := []snapshot.Section{{Tag: snapshot.SecHead, Payload: gzipBytes(headJSON)}}
+	if e, ok := f.Sections[snapshot.SecEvents]; ok {
+		sections = append(sections, snapshot.Section{Tag: snapshot.SecEvents, Payload: e})
+	}
 	var buf bytes.Buffer
-	err = snapshot.WriteContainer(&buf, snapshot.BRWMagic, 1, []snapshot.Section{
-		{Tag: snapshot.SecHead, Payload: gzipBytes(headJSON)},
-		{Tag: snapshot.SecFrames, Payload: framesSec},
-		{Tag: snapshot.SecEvents, Payload: eventsSec},
-	})
-	if err != nil {
+	if err := snapshot.WriteContainer(&buf, snapshot.BRWMagic, snapshot.BRPVersion, sections); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
@@ -165,81 +192,4 @@ func gzipBytes(b []byte) []byte {
 	return buf.Bytes()
 }
 
-// wirePayload encodes a fully-loaded legacy capture (.jsonl/.brsnap) into the
-// wire container, running the frames/events through the same snapshot codec
-// that .brp files store.
-func (rep *Replay) wirePayload() ([]byte, error) {
-	head := buildHead(rep.Meta, bounds(rep.Frames), frameTeams(rep))
-	return assembleWire(head,
-		snapshot.EncodeFramesSection(rep.Frames, rep.Meta.SampleEvery),
-		snapshot.EncodeEventsSection(rep.Events))
-}
-
-// brpWirePayload builds the wire container for a parsed .brp: the stored F/E
-// sections are forwarded byte-for-byte, and bounds/teams come from the file's
-// meta record (precomputed at capture time), so nothing is re-encoded.
-func brpWirePayload(f *snapshot.BRPFile) ([]byte, error) {
-	b := defaultBounds()
-	if f.Bounds != nil {
-		b = wireBounds{MinX: f.Bounds.MinX, MaxX: f.Bounds.MaxX, MinZ: f.Bounds.MinZ, MaxZ: f.Bounds.MaxZ}
-	}
-	head := buildHead(f.Meta, b, f.FrameTeams)
-	framesSec := f.Sections[snapshot.SecFrames]
-	if framesSec == nil {
-		framesSec = snapshot.EncodeFramesSection(nil, f.Meta.SampleEvery)
-	}
-	eventsSec := f.Sections[snapshot.SecEvents]
-	if eventsSec == nil {
-		eventsSec = snapshot.EncodeEventsSection(nil)
-	}
-	return assembleWire(head, framesSec, eventsSec)
-}
-
-// bounds returns the min/max x/z over every unit in every frame. When there are
-// no units it returns a small default box so the front-end has a valid extent.
-func bounds(frames []snapshot.Frame) wireBounds {
-	b := wireBounds{MinX: math.Inf(1), MaxX: math.Inf(-1), MinZ: math.Inf(1), MaxZ: math.Inf(-1)}
-	any := false
-	for _, fr := range frames {
-		for _, u := range fr.Units {
-			any = true
-			x, z := float64(u.Pos.X), float64(u.Pos.Z)
-			b.MinX, b.MaxX = math.Min(b.MinX, x), math.Max(b.MaxX, x)
-			b.MinZ, b.MaxZ = math.Min(b.MinZ, z), math.Max(b.MaxZ, z)
-		}
-	}
-	if !any {
-		return defaultBounds()
-	}
-	return b
-}
-
 func defaultBounds() wireBounds { return wireBounds{MinX: 0, MaxX: 1024, MinZ: 0, MaxZ: 1024} }
-
-// frameTeams returns the sorted team ids that appear in frames/events but not
-// in Meta.Teams.
-func frameTeams(rep *Replay) []int32 {
-	seen := map[int32]bool{}
-	for _, t := range rep.Meta.Teams {
-		seen[t.TeamID] = true
-	}
-	extra := map[int32]bool{}
-	for _, fr := range rep.Frames {
-		for _, u := range fr.Units {
-			if !seen[u.Team] {
-				extra[u.Team] = true
-			}
-		}
-	}
-	for _, e := range rep.Events {
-		if !seen[e.Team] {
-			extra[e.Team] = true
-		}
-	}
-	ids := make([]int32, 0, len(extra))
-	for id := range extra {
-		ids = append(ids, id)
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	return ids
-}

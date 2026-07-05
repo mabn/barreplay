@@ -227,16 +227,138 @@ func TestBRPParseSections(t *testing.T) {
 		}
 	}
 
-	// The F and E payloads must be identical to what the section encoders
-	// produce for the same data — that is the pass-through contract the viz
-	// server relies on for legacy captures.
-	sortedFrames := make([]Frame, len(frames))
-	copy(sortedFrames, frames)
-	if got := EncodeFramesSection(sortedFrames, meta.SampleEvery); !bytes.Equal(got, bf.Sections[SecFrames]) {
-		t.Errorf("EncodeFramesSection differs from the writer's F section (%d vs %d bytes)", len(got), len(bf.Sections[SecFrames]))
+	// 3 frames fit in one chunk; its index entry must describe the whole F/X
+	// payloads and start at the first frame.
+	if bf.ChunkFrames != defaultChunkFrames || len(bf.Chunks) != 1 {
+		t.Fatalf("chunkFrames=%d chunks=%+v", bf.ChunkFrames, bf.Chunks)
 	}
-	if got := EncodeEventsSection(events); !bytes.Equal(got, bf.Sections[SecEvents]) {
-		t.Errorf("EncodeEventsSection differs from the writer's E section")
+	c := bf.Chunks[0]
+	if c.Frame != 30 || c.Count != 3 || c.FOff != 0 || c.XOff != 0 {
+		t.Errorf("chunk = %+v", c)
+	}
+	if c.FLen != int64(len(bf.Sections[SecFrames])) || c.XLen != int64(len(bf.Sections[SecExtra])) {
+		t.Errorf("chunk lengths %d/%d don't span the sections (%d/%d)",
+			c.FLen, c.XLen, len(bf.Sections[SecFrames]), len(bf.Sections[SecExtra]))
+	}
+	if c.FKeyLen <= 0 || c.FKeyLen >= c.FLen {
+		t.Errorf("keyframe range [0,%d) of %d looks wrong", c.FKeyLen, c.FLen)
+	}
+}
+
+// A capture longer than one chunk must split into self-contained chunks:
+// decoding any single chunk in isolation yields exactly the corresponding
+// slice of the full decode.
+func TestBRPChunking(t *testing.T) {
+	meta, _, _ := testCapture()
+	var frames []Frame
+	for i := 0; i < 150; i++ { // 3 chunks: 64 + 64 + 22
+		fr := Frame{Frame: int32(30 * (i + 1)), TimeSec: float32(i + 1)}
+		for u := 0; u < 5; u++ {
+			fr.Units = append(fr.Units, UnitState{
+				UnitID: int32(100 + u), DefID: 1, Team: int32(u % 2),
+				Pos:    Vec3{X: float32(10*u + i), Y: 1, Z: float32(2000 - i*2)},
+				Health: float32(3000 - i), MaxHealth: 3000, VelX: 1, VelZ: -2,
+			})
+		}
+		frames = append(frames, fr)
+	}
+	events := []Event{{Frame: 30, Kind: EventCreated, UnitID: 100, DefID: 1, Team: 0}}
+
+	dir := t.TempDir()
+	w, err := NewBRPWriter(dir, meta.GameID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteMeta(meta); err != nil {
+		t.Fatal(err)
+	}
+	for _, fr := range frames {
+		if err := w.WriteFrame(fr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.WriteEvent(events[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := os.Open(filepath.Join(dir, meta.GameID+".brp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	bf, err := ParseBRP(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bf.Chunks) != 3 || bf.Chunks[0].Count != 64 || bf.Chunks[1].Count != 64 || bf.Chunks[2].Count != 22 {
+		t.Fatalf("chunks = %+v", bf.Chunks)
+	}
+	if bf.Chunks[1].Frame != frames[64].Frame || bf.Chunks[2].Frame != frames[128].Frame {
+		t.Errorf("chunk first frames: %d, %d", bf.Chunks[1].Frame, bf.Chunks[2].Frame)
+	}
+	// Chunks tile the sections without gaps.
+	if bf.Chunks[1].FOff != bf.Chunks[0].FLen || bf.Chunks[2].FOff != bf.Chunks[1].FOff+bf.Chunks[1].FLen {
+		t.Errorf("F offsets don't tile: %+v", bf.Chunks)
+	}
+
+	// Full decode == concatenation of standalone chunk decodes, and each chunk
+	// decode must not depend on any other chunk (fresh BRPFile slice per call
+	// isn't needed — DecodeChunk only touches the indexed byte range).
+	_, full, _, err := readBRPFile(t, filepath.Join(dir, meta.GameID+".brp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full) != 150 {
+		t.Fatalf("full decode: %d frames", len(full))
+	}
+	// Decode the middle chunk in isolation and compare against the full decode.
+	mid, err := bf.DecodeChunk(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, fr := range mid {
+		want := full[64+i]
+		if fr.Frame != want.Frame || len(fr.Units) != len(want.Units) {
+			t.Fatalf("chunk1[%d]: frame %d units %d, want %d/%d", i, fr.Frame, len(fr.Units), want.Frame, len(want.Units))
+		}
+		for j := range fr.Units {
+			if fr.Units[j] != want.Units[j] {
+				t.Fatalf("chunk1[%d].Units[%d] = %+v want %+v", i, j, fr.Units[j], want.Units[j])
+			}
+		}
+	}
+	// A seek to the last chunk decodes without the first two.
+	last, err := bf.DecodeChunk(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(last) != 22 || last[0].Frame != frames[128].Frame {
+		t.Errorf("last chunk: %d frames, first %d", len(last), last[0].Frame)
+	}
+}
+
+func readBRPFile(t *testing.T, path string) (Meta, []Frame, []Event, error) {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	return ReadBRP(f)
+}
+
+// Only the current format version is readable; anything else must be rejected
+// with a clear error rather than misdecoded.
+func TestBRPRejectsOtherVersions(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteContainer(&buf, BRPMagic, 1, []Section{{Tag: SecMeta, Payload: gzipCompress([]byte(`{}`))}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseBRP(bytes.NewReader(buf.Bytes())); err == nil {
+		t.Error("want error for version 1")
 	}
 }
 
@@ -287,7 +409,7 @@ func TestBRPEmptyCapture(t *testing.T) {
 }
 
 func TestReadContainerBadMagic(t *testing.T) {
-	if _, err := ReadContainer(bytes.NewReader([]byte("NOPE\x01")), BRPMagic); err == nil {
+	if _, _, err := ReadContainer(bytes.NewReader([]byte("NOPE\x01")), BRPMagic); err == nil {
 		t.Error("want error for bad magic")
 	}
 }

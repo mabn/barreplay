@@ -2,14 +2,20 @@
 
 // barreplay viewer — vanilla JS canvas playback of a recorded capture.
 //
-// Wire format (see internal/viz/wire.go and snapshot/brp.go): the server sends
-// a binary "BRW1" container — a small JSON head plus the capture's gzipped,
-// delta-coded frame/event columns, forwarded byte-for-byte from the .brp file.
-// decodeReplay() below gunzips the sections with the browser's native
-// DecompressionStream and unpacks each frame into a flat Int32Array `u` of
-// stride 9: [id, def, team, x, z, hp, maxHp, dvx, dvz]. We read it by index
-// rather than materialising per-unit objects — a replay can hold millions of
-// unit records, so avoiding the object churn keeps loading and playback smooth.
+// Wire format (see internal/viz/wire.go and snapshot/brp.go): /api/replay
+// returns a small binary "BRW1" container — the JSON head (meta, teams, icons,
+// bounds, and the CHUNK INDEX) plus the events section. Frame data arrives
+// separately, one chunk at a time, from /api/replay/chunk: each chunk is a
+// self-contained run of ~64 samples starting with a keyframe, sliced
+// byte-for-byte out of the .brp file. The viewer streams chunks around the
+// playhead (and sequentially in the background), so playback starts after the
+// first ~300 KB, seeking anywhere costs one chunk, and scrubbing an unloaded
+// region shows its keyframe (a ~10 KB fetch) immediately.
+//
+// Frames unpack into a flat Int32Array `u` of stride 9:
+// [id, def, team, x, z, hp, maxHp, dvx, dvz]. We read it by index rather than
+// materialising per-unit objects — a replay can hold millions of unit records,
+// so avoiding the object churn keeps loading and playback smooth.
 
 const STRIDE = 9;
 const F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6, DVX: 7, DVZ: 8 };
@@ -24,13 +30,14 @@ async function gunzipU8(u8) {
   return new Uint8Array(await resp.arrayBuffer());
 }
 
-// Split a BRW1 container into its sections: {tag: Uint8Array (still gzipped)}.
+// Split a BRW container into its sections: {tag: Uint8Array (still gzipped)}.
 function parseContainer(buf) {
   const u8 = new Uint8Array(buf);
   const magic = 'BRW1';
   for (let i = 0; i < magic.length; i++) {
     if (u8[i] !== magic.charCodeAt(i)) throw new Error('not a BRW payload (old server?)');
   }
+  if (u8[magic.length] !== 2) throw new Error('unsupported payload version ' + u8[magic.length]);
   const dv = new DataView(buf);
   const secs = {};
   let off = magic.length + 1; // + version byte
@@ -147,31 +154,175 @@ function decodeEvents(b) {
   return evs;
 }
 
-// Decode a fetched /api/replay ArrayBuffer into the in-memory shape the viewer
-// uses: the head JSON's fields plus frames [{f,t,n,u}] and events [{f,k,...}].
-async function decodeReplay(buf) {
+// Decode the /api/replay head payload: the head JSON's fields plus events
+// [{f,k,id,def,team}]. Frames stream in separately per chunk.
+async function decodeHead(buf) {
   if (typeof DecompressionStream === 'undefined') {
     throw new Error('this browser lacks DecompressionStream (needed to read the capture)');
   }
   const secs = parseContainer(buf);
   if (!secs.J) throw new Error('payload has no head section');
   const head = JSON.parse(new TextDecoder().decode(await gunzipU8(secs.J)));
-  head.frames = secs.F ? decodeFrames(await gunzipU8(secs.F)) : [];
   head.events = secs.E ? decodeEvents(await gunzipU8(secs.E)) : [];
   return head;
+}
+
+// ---- chunk streaming --------------------------------------------------------
+// data.chunks (from the head) indexes the fetchable chunks; chunkStartIdx[i] is
+// chunk i's first global frame index. Chunk states advance monotonically:
+//   0 none -> 1 keyframe requested -> 2 keyframe shown -> 3 full requested -> 4 full loaded
+// A small queue keeps at most MAX_INFLIGHT requests going, with playhead
+// requests jumping ahead of the background sequential download.
+
+const MAX_INFLIGHT = 2;
+let chunkStartIdx = [];   // chunk i -> global index of its first frame
+let chunkState = [];      // per-chunk state (see above)
+let fetchQueue = [];      // pending {i, keyOnly}
+let inflight = 0;
+let loadGen = 0;          // bumped per loadReplay; stale completions are dropped
+let currentFile = null;   // ?file= value for chunk URLs
+
+// chunkOf returns the chunk containing global frame index gi.
+function chunkOf(gi) {
+  let lo = 0, hi = chunkStartIdx.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (chunkStartIdx[mid] <= gi) lo = mid; else hi = mid - 1;
+  }
+  return lo;
+}
+
+// frameNumAt derives the sim frame number of global index gi from the index
+// alone (sampling is uniform), so the time label works for unloaded frames.
+function frameNumAt(gi) {
+  if (!data || !data.chunks.length) return 0;
+  const c = chunkOf(gi);
+  return data.chunks[c].frame + (gi - chunkStartIdx[c]) * data.sampleEvery;
+}
+
+// ensureChunk queues a fetch for chunk i unless it is already at (or heading
+// to) the needed level. urgent requests jump the queue (playhead beats the
+// background downloader).
+function ensureChunk(i, opts) {
+  if (!data || i < 0 || i >= data.chunks.length) return;
+  const keyOnly = !!(opts && opts.keyOnly);
+  const st = chunkState[i];
+  if (st >= 3 || (keyOnly && st >= 1)) return; // full underway, or key already covered
+  chunkState[i] = keyOnly ? 1 : 3;
+  const item = { i, keyOnly };
+  if (opts && opts.urgent) fetchQueue.unshift(item); else fetchQueue.push(item);
+  pumpFetches();
+}
+
+function pumpFetches() {
+  while (inflight < MAX_INFLIGHT && fetchQueue.length) {
+    const item = fetchQueue.shift();
+    // A full fetch may have superseded a queued key fetch (or vice versa).
+    if (chunkState[item.i] >= 4 || (item.keyOnly && chunkState[item.i] >= 2)) continue;
+    inflight++;
+    fetchChunk(item.i, item.keyOnly);
+  }
+}
+
+async function fetchChunk(i, keyOnly) {
+  const gen = loadGen;
+  try {
+    const url = '/api/replay/chunk?file=' + encodeURIComponent(currentFile) + '&i=' + i + (keyOnly ? '&key=1' : '');
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(await r.text());
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    if (gen !== loadGen) return; // a different replay was loaded meanwhile
+    const c = data.chunks[i];
+    let raw;
+    if (keyOnly) {
+      raw = await gunzipU8(bytes);
+    } else {
+      // The chunk is two gzip streams: keyframe [0, keyLen) + deltas.
+      const key = await gunzipU8(bytes.subarray(0, c.keyLen));
+      if (bytes.length > c.keyLen) {
+        const rest = await gunzipU8(bytes.subarray(c.keyLen));
+        raw = new Uint8Array(key.length + rest.length);
+        raw.set(key, 0);
+        raw.set(rest, key.length);
+      } else {
+        raw = key;
+      }
+    }
+    if (gen !== loadGen) return;
+    const frames = decodeFrames(raw);
+    const base = chunkStartIdx[i];
+    for (let k = 0; k < frames.length; k++) data.frames[base + k] = frames[k];
+    chunkState[i] = keyOnly ? Math.max(chunkState[i], 2) : 4;
+  } catch (err) {
+    if (gen !== loadGen) return;
+    chunkState[i] = 0; // allow a retry on the next ensure
+    console.error('chunk ' + i + (keyOnly ? ' (key)' : '') + ' failed:', err);
+  } finally {
+    if (gen === loadGen) {
+      inflight--;
+      pumpFetches();
+      pumpBackground();
+    }
+  }
+  if (gen === loadGen) onChunkArrived(i);
+}
+
+// pumpBackground keeps the sequential full download going whenever the fetch
+// slots are otherwise idle — this is what makes the whole replay "arrive
+// gradually" while the user is already watching.
+function pumpBackground() {
+  if (!data || fetchQueue.length || inflight >= MAX_INFLIGHT) return;
+  for (let i = 0; i < data.chunks.length; i++) {
+    if (chunkState[i] < 3) { ensureChunk(i); return; }
+  }
+}
+
+// onChunkArrived refreshes whatever was waiting on chunk i.
+function onChunkArrived(i) {
+  if (!data) return;
+  updateBuffBar();
+  const c = chunkOf(idx);
+  if (i === c || i === c + 1) {
+    // The playhead's chunk (or its interpolation neighbour) landed: recompute
+    // the displayed frame and redraw. setPlayhead also restarts a stalled
+    // play loop's frame advance naturally (the RAF keeps ticking).
+    setPlayhead(playPos, true);
+  }
+}
+
+// updateBuffBar shades the loaded ranges under the timeline slider
+// (video-player style): solid for full chunks, dim for keyframe-only.
+function updateBuffBar() {
+  const bar = document.getElementById('buffbar');
+  if (!bar || !data || !data.frameCount) return;
+  const total = data.frameCount;
+  const stops = ['transparent 0%'];
+  for (let i = 0; i < data.chunks.length; i++) {
+    if (chunkState[i] < 2) continue;
+    const a = (chunkStartIdx[i] / total * 100).toFixed(2) + '%';
+    const b = ((chunkStartIdx[i] + data.chunks[i].count) / total * 100).toFixed(2) + '%';
+    const col = chunkState[i] >= 4 ? '#5a9fd0' : '#3a5568';
+    stops.push(`transparent ${a}`, `${col} ${a}`, `${col} ${b}`, `transparent ${b}`);
+  }
+  stops.push('transparent 100%');
+  bar.style.background = `linear-gradient(to right, ${stops.join(', ')})`;
 }
 
 // Per-interval lookup: unit id -> base index of that unit in the NEXT sampled
 // frame. Lets movement be animated toward each unit's actual next position
 // (direction) at the speed implied by its velocity (magnitude). Rebuilt whenever
-// the integer keyframe changes.
+// the integer keyframe changes. nextU is that next frame's unit array (frames
+// stream in chunk by chunk, so it may simply not be here yet — interpolation
+// then falls back to velocity extrapolation).
 let nextPosMap = null;
+let nextU = null;
 function buildNextPosMap() {
   nextPosMap = new Map();
-  const nf = data && data.frames[idx + 1];
+  nextU = null;
+  const nf = data && data.frames[dispIdx + 1];
   if (!nf) return;
-  const nu = nf.u;
-  for (let j = 0; j < nu.length; j += STRIDE) nextPosMap.set(nu[j + F.ID], j);
+  nextU = nf.u;
+  for (let j = 0; j < nextU.length; j += STRIDE) nextPosMap.set(nextU[j + F.ID], j);
 }
 
 // Tangent length cap (as a multiple of the straight-line distance between the two
@@ -199,11 +350,12 @@ function interpPos(u, i) {
   const m0x = u[i + F.DVX], m0z = u[i + F.DVZ];        // tangent at A (frame-A velocity)
   if (m0x === 0 && m0z === 0) return [bx, bz];         // zero velocity: stationary, don't animate
   const j = nextPosMap ? nextPosMap.get(u[i + F.ID]) : undefined;
-  if (j === undefined) {
-    // No next sample (unit is gone by then): fall back to velocity extrapolation.
+  if (j === undefined || !nextU) {
+    // No next sample (unit gone, or that frame not streamed in yet): fall back
+    // to velocity extrapolation.
     return [bx + m0x * renderFrac, bz + m0z * renderFrac];
   }
-  const nu = data.frames[idx + 1].u;
+  const nu = nextU;
   const px = nu[j + F.X], pz = nu[j + F.Z];            // P1
   const chord = Math.hypot(px - bx, pz - bz);
   if (chord === 0) return [bx, bz];                    // same position in both samples
@@ -223,8 +375,11 @@ const ctx = cv.getContext('2d');
 const tooltip = document.getElementById('tooltip');
 const emptyEl = document.getElementById('empty');
 
-let data = null;            // loaded wire payload
-let idx = 0;               // current frame index
+let data = null;            // loaded head (+ sparse frames array)
+let idx = 0;               // current frame index (may not be loaded yet)
+let dispIdx = -1;          // frame actually rendered: idx when loaded, else the
+                           // chunk keyframe / last shown frame while buffering
+let scrubTimer = null;     // dwell timer upgrading a skimmed chunk to a full fetch
 let scale = 1;             // world->screen px per elmo
 let center = { x: 0, z: 0 };// world point at viewport centre
 let teamColor = {};        // team id -> css colour
@@ -383,7 +538,7 @@ function draw() {
 
   drawMapFrame();
 
-  const fr = data.frames[idx];
+  const fr = dispIdx >= 0 ? data.frames[dispIdx] : null;
   if (!fr) return;
   const u = fr.u;
 
@@ -601,8 +756,8 @@ function drawGrid(b, x0, y0, x1, y1, step, color) {
 
 // ---- hit testing / tooltip ------------------------------------------------
 function hitTest() {
-  if (!mouse || !data) return null;
-  const fr = data.frames[idx];
+  if (!mouse || !data || dispIdx < 0) return null;
+  const fr = data.frames[dispIdx];
   if (!fr) return null;
   const u = fr.u;
   let best = -1, bestD = 10 * 10; // 10px pick radius (squared)
@@ -623,8 +778,8 @@ function defName(def) {
 function updateTooltip() {
   if (!mouse || drag) { tooltip.style.display = 'none'; return; }
   const i = hitTest();
-  if (i < 0) { tooltip.style.display = 'none'; return; }
-  const u = data.frames[idx].u;
+  if (i === null || i < 0) { tooltip.style.display = 'none'; return; }
+  const u = data.frames[dispIdx].u;
   const team = u[i + F.TEAM];
   const hp = u[i + F.HP], maxHp = u[i + F.MAXHP];
   const frac = maxHp > 0 ? Math.max(0, Math.min(1, hp / maxHp)) : 1;
@@ -658,7 +813,7 @@ function renderTeams() {
   const root = document.getElementById('teams');
   root.innerHTML = '';
   const counts = {};
-  const fr = data.frames[idx];
+  const fr = dispIdx >= 0 ? data.frames[dispIdx] : null;
   if (fr) for (let i = 0; i < fr.u.length; i += STRIDE) {
     const t = fr.u[i + F.TEAM];
     counts[t] = (counts[t] || 0) + 1;
@@ -680,7 +835,7 @@ function renderEvents() {
   const ul = document.getElementById('events');
   ul.innerHTML = '';
   const evs = data.events || [];
-  const simFrame = data.frames[idx] ? data.frames[idx].f : 0;
+  const simFrame = frameNumAt(idx); // derived from the index: works while buffering
   const recent = [];
   for (let i = evs.length - 1; i >= 0 && recent.length < 40; i--) {
     if (evs[i].f <= simFrame) recent.push(evs[i]);
@@ -706,7 +861,7 @@ function fmtTime(sec) {
 // The heavy sidebar (per-team counts + event feed) only depends on the integer
 // keyframe, so it refreshes when idx changes, not every animation tick.
 function updateSidebar() {
-  const fr = data.frames[idx];
+  const fr = dispIdx >= 0 ? data.frames[dispIdx] : null;
   document.getElementById('s_time').textContent = fr ? fmtTime(fr.t) : '—';
   document.getElementById('s_frame').textContent = fr ? fr.f : '—';
   document.getElementById('s_units').textContent = fr ? fr.n : '—';
@@ -715,24 +870,49 @@ function updateSidebar() {
 }
 
 function updateTimeLabel() {
-  const fr = data.frames[idx];
-  const last = data.frames.length - 1;
-  const t = fr ? fr.t + renderFrac * secPerFrame : 0; // interpolate the shown game time
+  const last = data.frameCount - 1;
+  // Time derives from the index (uniform sampling), so the label tracks the
+  // slider even before the frame has streamed in.
+  const t = frameNumAt(idx) / 30 + renderFrac * secPerFrame;
   document.getElementById('timelabel').textContent =
-    fr ? `${fmtTime(t)}   frame ${idx} / ${last}` : '—';
+    data.frameCount ? `${fmtTime(t)}   frame ${idx} / ${last}` : '—';
   document.getElementById('slider').value = idx;
+}
+
+// resolveDisplay picks the frame to render for the current idx: the exact
+// frame when its chunk has streamed in, else the chunk's keyframe (fetched
+// cheaply while skimming), else whatever was shown last. Interpolation only
+// runs on the exact frame.
+function resolveDisplay() {
+  if (!data || !data.frameCount) { dispIdx = -1; return; }
+  const prev = dispIdx;
+  if (data.frames[idx]) {
+    dispIdx = idx;
+  } else {
+    const ks = chunkStartIdx[chunkOf(idx)];
+    if (data.frames[ks]) dispIdx = ks;
+    else if (!(prev >= 0 && data.frames[prev])) dispIdx = -1;
+    renderFrac = 0; // no interpolation on a stand-in frame
+  }
+  const buffering = dispIdx !== idx;
+  const el = document.getElementById('buffering');
+  if (el) el.style.display = buffering ? '' : 'none';
 }
 
 // Move the continuous playhead (in keyframe units). idx = floor(playPos) is the
 // current sampled frame; renderFrac is the fraction into the interval to the next
 // one, which the draw helpers (ux/uz) use to interpolate unit movement.
+// Deciding WHAT to fetch is the caller's job: the play loop streams full
+// chunks ahead, scrubbing skims keyframes — setPlayhead itself must stay
+// fetch-free because it runs on every animation tick and slider move.
 function setPlayhead(pos, forceSidebar) {
-  const last = data.frames.length - 1;
+  const last = data.frameCount - 1;
   playPos = Math.max(0, Math.min(last, pos));
   const newIdx = Math.floor(playPos + 1e-6);
   renderFrac = Math.max(0, playPos - newIdx);
   const changed = newIdx !== idx || forceSidebar;
   idx = newIdx;
+  resolveDisplay();
   if (changed) { updateSidebar(); buildNextPosMap(); }
   updateTimeLabel();
   draw();
@@ -740,9 +920,21 @@ function setPlayhead(pos, forceSidebar) {
 
 function show() { setPlayhead(idx, true); } // full refresh at the current keyframe
 
-// Jump to a whole keyframe (stepping / scrubbing): no interpolation.
+// Jump to a whole keyframe (stepping / scrubbing): no interpolation. Scrubbing
+// an unloaded region grabs the chunk's keyframe right away (~10 KB) so the map
+// keeps up with the slider; the full chunk fetch starts once the user dwells.
 function go(i) {
-  setPlayhead(Math.round(i), true);
+  const target = Math.round(i);
+  if (data && !data.frames[target]) {
+    ensureChunk(chunkOf(target), { keyOnly: true, urgent: true });
+    clearTimeout(scrubTimer);
+    scrubTimer = setTimeout(() => {
+      const c = chunkOf(idx);
+      ensureChunk(c, { urgent: true });
+      ensureChunk(c + 1);
+    }, 250);
+  }
+  setPlayhead(target, true);
 }
 
 function stopPlay() {
@@ -750,8 +942,8 @@ function stopPlay() {
   document.getElementById('play').textContent = '▶ Play';
 }
 function startPlay() {
-  if (!data || data.frames.length < 2) return;
-  const last = data.frames.length - 1;
+  if (!data || data.frameCount < 2) return;
+  const last = data.frameCount - 1;
   if (playPos >= last) setPlayhead(0, true); // restart from the beginning at the end
   playLastTs = 0;
   document.getElementById('play').textContent = '⏸ Pause';
@@ -764,7 +956,20 @@ function startPlay() {
     // 1x = real time: 1 game-second per second. Advance in keyframe units.
     const next = playPos + (dtReal * speed) / secPerFrame;
     if (next >= last) { setPlayhead(last, false); stopPlay(); return; }
-    setPlayhead(next, false);
+    // Keep the pipeline primed: the playhead's chunk plus the next one (the
+    // higher the speed, the sooner the boundary arrives — c+1 covers both
+    // interpolation and continued playback).
+    const c = chunkOf(Math.floor(next));
+    ensureChunk(c, { urgent: true });
+    ensureChunk(c + 1);
+    if (!data.frames[Math.floor(next)]) {
+      // The next frame hasn't streamed in yet: hold position (buffering) and
+      // keep ticking — playback resumes the moment the chunk decodes.
+      playLastTs = ts;
+      setPlayhead(playPos, false);
+    } else {
+      setPlayhead(next, false);
+    }
     playRAF = requestAnimationFrame(tick);
   };
   playRAF = requestAnimationFrame(tick);
@@ -812,7 +1017,7 @@ cv.addEventListener('wheel', e => {
 document.getElementById('first').onclick = () => { stopPlay(); go(0); };
 document.getElementById('prev').onclick = () => { stopPlay(); go(idx - 1); };
 document.getElementById('next').onclick = () => { stopPlay(); go(idx + 1); };
-document.getElementById('last').onclick = () => { stopPlay(); go(data.frames.length - 1); };
+document.getElementById('last').onclick = () => { stopPlay(); go(data.frameCount - 1); };
 document.getElementById('play').onclick = togglePlay;
 // Speed is read live inside the play loop, so a change takes effect immediately.
 document.getElementById('speed').onchange = () => {};
@@ -843,16 +1048,29 @@ function setEmpty(msg) {
 async function loadReplay(file) {
   stopPlay();
   setEmpty('Loading…');
+  // Invalidate any in-flight chunk fetches from the previous replay.
+  loadGen++;
+  fetchQueue = [];
+  inflight = 0;
+  clearTimeout(scrubTimer);
+  currentFile = file;
   try {
     const r = await fetch('/api/replay?file=' + encodeURIComponent(file));
     if (!r.ok) throw new Error(await r.text());
-    data = await decodeReplay(await r.arrayBuffer());
+    data = await decodeHead(await r.arrayBuffer());
   } catch (err) {
     setEmpty('Failed to load ' + file + ': ' + err.message);
     data = null;
     return;
   }
-  if (!data.frames || !data.frames.length) {
+  data.chunks = data.chunks || [];
+  data.frameCount = data.frameCount || 0;
+  data.frames = new Array(data.frameCount); // sparse: filled as chunks stream in
+  chunkStartIdx = [];
+  chunkState = new Array(data.chunks.length).fill(0);
+  let acc = 0;
+  for (const c of data.chunks) { chunkStartIdx.push(acc); acc += c.count; }
+  if (!data.frameCount) {
     setEmpty('No frames in this capture (the widget may never have sampled — see the GPU/headless note in CLAUDE.md).');
     // Still render meta/teams so the sidebar isn't blank.
   } else {
@@ -862,14 +1080,22 @@ async function loadReplay(file) {
   secPerFrame = data.sampleEvery > 0 ? data.sampleEvery / 30 : 1;
   document.getElementById('subtitle').textContent =
     [data.gameId, data.mapName, data.gameVersion].filter(Boolean).join(' · ') || 'replay state viewer';
-  document.getElementById('slider').max = Math.max(0, data.frames.length - 1);
+  document.getElementById('slider').max = Math.max(0, data.frameCount - 1);
   idx = 0;
+  playPos = 0;
+  dispIdx = -1;
   // Pre-warm the icon set (only a few dozen distinct unit types per replay) so
   // they're ready on the first paint.
   Object.values(data.unitIcons || {}).forEach(info => getImage(info.p));
   loadMap(data.mapName);
   resize();      // sets canvas size
   fitView();     // fit map to viewport
+  updateBuffBar();
+  // Start streaming: the playhead's chunk first, then the rest sequentially in
+  // the background — the timeline fills in while the user is already watching.
+  ensureChunk(0, { urgent: true });
+  ensureChunk(1);
+  pumpBackground();
   show();
 }
 
@@ -913,13 +1139,13 @@ async function init() {
   }
   const sel = document.getElementById('file');
   if (!list || !list.length) {
-    setEmpty('No .jsonl or .brsnap files in the snapshots directory. Run a capture first, or point -snapshots at the right directory.');
+    setEmpty('No .brp files in the snapshots directory. Run a capture (or convert a legacy .jsonl/.brsnap with barreplay-pack), or point -snapshots at the right directory.');
     return;
   }
   list.forEach(info => {
     const o = document.createElement('option');
     o.value = info.file;
-    o.textContent = `${info.gameId} (${info.format}, ${fmtSize(info.size)})`;
+    o.textContent = `${info.gameId} (${fmtSize(info.size)})`;
     sel.appendChild(o);
   });
   sel.onchange = () => { setReplayInUrl(sel.value); loadReplay(sel.value); };

@@ -99,17 +99,23 @@ by `snapshot/brp.go`. Unit state barely changes between 1 Hz samples, so each
 unit's values are stored as deltas against the same unit in the previous frame
 (positions additionally predicted by the unit's own velocity), zigzag-varint
 encoded column by column, then gzipped. On a real ~33-minute 8v8 game (4.2M unit
-records) this is **13 MB where the v1 JSONL was 476 MB (~35x)**, with no loss
+records) this is **~14 MB where the v1 JSONL was 476 MB (~33x)**, with no loss
 beyond fixed quantization (whole elmos/hp, velocity per sample interval, build
 progress 1/255, resources 0.1).
+
+Frames are grouped into **self-contained chunks of 64 samples** (~1 minute of
+game each), every chunk starting with a keyframe and indexed in the file's meta
+— the video-codec model. That is what makes the viewer start instantly, seek to
+any timestamp, and skim a replay by fetching only keyframes, at a cost of ~4%
+extra size versus one monolithic stream.
 
 A `.brp` holds everything the JSONL did: full meta (unit-def table, teams,
 players), per-unit position/velocity/health/build progress, per-team economy,
 and lifecycle events, plus precomputed bounds so the viewer doesn't scan frames.
-Read it back with `snapshot.ReadBRP`. The frame/event sections are independently
-compressed **on purpose**: `barreplay-viz` streams them to the browser
-byte-for-byte (no server-side re-encoding), and the browser gunzips them
-natively.
+Read it back with `snapshot.ReadBRP` (or one chunk at a time via
+`snapshot.ParseBRP` + `DecodeChunk`). Chunks are independently compressed **on
+purpose**: `barreplay-viz` serves each one to the browser byte-for-byte (no
+server-side re-encoding), and the browser gunzips them natively.
 
 Legacy captures still load everywhere they did, and can be shrunk in place:
 
@@ -138,12 +144,15 @@ go build ./cmd/barreplay-viz
 | `-snapshots <dir>` | Directory of snapshot files to browse (default `./snapshots`). |
 | `-addr <host:port>` | Listen address (default `127.0.0.1:8080`). |
 
-It lists every `.brp`, `.jsonl` and `.brsnap` file in the directory in a picker. `.brp`
-is the normal input — its compressed frame/event sections are forwarded to the browser
-as-is, so even a multi-hour game is a ~10 MB transfer that decodes in about a second.
-Legacy `.jsonl` and raw `.brsnap` (the widget stream) files are also accepted; they are
-loaded and encoded on the fly, which is much slower for big files — run `barreplay-pack`
-on them once instead. The page renders each sampled frame as a
+It lists every `.brp` file in the directory in a picker (**only `.brp` is supported**;
+convert a legacy `.jsonl` or raw `.brsnap` once with `barreplay-pack`). The replay
+**streams**: the viewer fetches a small head (metadata, teams, icons, events, chunk
+index) and then chunk-sized pieces of frame data around the playhead while the rest
+downloads in the background — playback starts in under a second even on a slow
+connection, jumping to any timestamp costs one ~300 KB chunk, and dragging the
+timeline across not-yet-downloaded regions shows each minute's keyframe from a ~10 KB
+fetch. A bar under the timeline shows which ranges are downloaded, video-player
+style. The page renders each sampled frame as a
 top-down map, colouring units by team (grouped by ally-team), with:
 
 - the **real map terrain** behind the units (fetched from the BAR maps API by map name and
@@ -169,9 +178,11 @@ top-down map, colouring units by team (grouped by ally-team), with:
 
 The front-end is plain HTML/JS/Canvas (no framework, no build step) embedded into the
 binary via `go:embed`; the server exposes `/api/replays` (the file list),
-`/api/replay?file=<name>` (one capture, as a binary container of gzipped delta-coded
-columns the browser decodes with its native `DecompressionStream` — see
-`internal/viz/wire.go` and `snapshot/brp.go`), `/icons/<file>` (the vendored unit icons), and
+`/api/replay?file=<name>` (one capture's head: metadata + events + chunk index) and
+`/api/replay/chunk?file=<name>&i=<n>` (one chunk's frame data, sliced byte-for-byte
+from the stored file; `&key=1` returns just its keyframe — the browser decodes both
+with its native `DecompressionStream`, see `internal/viz/wire.go` and
+`snapshot/brp.go`), `/icons/<file>` (the vendored unit icons), and
 `/api/mapinfo` + `/api/maptex` (the map's world extent and terrain texture, proxied and
 cached from the BAR maps API by map name). The
 icon set and BAR's `icontypes.lua` name→bitmap table are vendored under
