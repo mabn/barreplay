@@ -28,6 +28,7 @@ let secPerFrame = 1;       // game seconds represented by one sampled frame
 let showIcons = true;      // draw BAR unit icons (vs plain dots)
 let showTexture = true;    // draw the map terrain texture behind everything
 let showGrid = true;       // draw the build/small/large grid
+let showFootprints = true; // draw build-footprint rectangles for buildings
 let mapW = 0, mapH = 0;    // map world extent in elmos (0 if unknown)
 let mapTex = null;         // HTMLImageElement of the terrain texture, or null
 // Viewport in CSS pixels + the device-pixel ratio. The canvas backing store is
@@ -175,6 +176,9 @@ function draw() {
   if (!fr) return;
   const u = fr.u;
 
+  // Footprints sit under the unit markers.
+  if (showFootprints) drawFootprints(u);
+
   if (showIcons) {
     drawIcons(u);
   } else {
@@ -238,6 +242,42 @@ function iconInfoFor(def) {
   if (!data.unitIcons) return null;
   const name = data.unitDefs && data.unitDefs[def];
   return name ? (data.unitIcons[name] || null) : null;
+}
+
+// footprintFor returns {w, h} (build-footprint size in elmos) for a unit def, or
+// null. Only buildings have an entry (the wire payload omits mobile units), so a
+// null result means "don't draw a footprint".
+function footprintFor(def) {
+  if (!data.footprints) return null;
+  const name = data.unitDefs && data.unitDefs[def];
+  return name ? (data.footprints[name] || null) : null;
+}
+
+// Draw each building's build footprint as a team-coloured rectangle centred on
+// the unit's position (which is the footprint centre). Unlike icons, footprints
+// are drawn in world space, so they scale with zoom. Batched by team colour.
+function drawFootprints(u) {
+  const byColor = {};
+  for (let i = 0; i < u.length; i += STRIDE) {
+    if (!footprintFor(u[i + F.DEF])) continue;
+    const c = teamColor[u[i + F.TEAM]] || '#9aa6b2';
+    (byColor[c] ||= []).push(i);
+  }
+  ctx.lineWidth = 1;
+  ctx.globalAlpha = 0.7;
+  for (const color in byColor) {
+    ctx.strokeStyle = color;
+    ctx.beginPath();
+    for (const i of byColor[color]) {
+      const fp = footprintFor(u[i + F.DEF]);
+      const [cx, cy] = w2s(u[i + F.X], u[i + F.Z]);
+      const wpx = fp.w * scale, hpx = fp.h * scale;
+      if (cx + wpx / 2 < 0 || cy + hpx / 2 < 0 || cx - wpx / 2 > viewW || cy - hpx / 2 > viewH) continue;
+      ctx.rect(cx - wpx / 2, cy - hpx / 2, wpx, hpx);
+    }
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
 }
 
 // renderCache: "path|color|devPx" -> offscreen canvas of the tinted icon
@@ -524,6 +564,7 @@ document.getElementById('speed').onchange = () => { if (playTimer) { stopPlay();
 document.getElementById('icons').onchange = e => { showIcons = e.target.checked; draw(); };
 document.getElementById('maptex').onchange = e => { showTexture = e.target.checked; draw(); };
 document.getElementById('grid').onchange = e => { showGrid = e.target.checked; draw(); };
+document.getElementById('footprints').onchange = e => { showFootprints = e.target.checked; draw(); };
 document.getElementById('iconsize').oninput = e => {
   iconScale = +e.target.value;
   setParam('iconsize', iconScale);
