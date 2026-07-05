@@ -33,6 +33,18 @@ Variants:
   gzip-locality probe.
 - **opt1+2** — opt2 plus a per-unit column bitmask so a fully idle unit costs
   1 byte/chunk instead of 11 zero counts.
+- **opt3 — polar velocity.** The dvx/dvz columns are replaced by
+  (speed, angle): speed = round(hypot(dvx,dvz)) in whole elmos per sample
+  interval (same radial precision as today), angle quantized to N steps per
+  full turn (integer, no floats), delta-coded with shortest-path wrap-around;
+  a stopped unit keeps its previous angle so stopping costs one speed delta,
+  not an angle jump. The x/z position predictor becomes the velocity
+  *reconstructed* from (speed, angle), so polar quantization error leaks into
+  the x/z residual columns — positions stay exact, but the stored
+  interpolation tangent is now approximate. Tested at 1024 and 256 angle
+  steps, alone and combined with opt1, plus a 2nd-order angle predictor
+  (predict angle += previous angle delta, so a constant-rate turn encodes as
+  zero).
 
 ## Change statistics (why there's room)
 
@@ -43,6 +55,35 @@ baseline stores ~46 M varints of which ~85% are single `0x00` bytes — highly
 gzip-compressible, which is exactly why the wins below are smaller than the
 raw numbers suggest.
 
+Polar change rates (opt3, vs the cartesian columns they replace — records
+with a previous sample, 4.14 M):
+
+| column | nonzero rate |
+|---|---|
+| dvx (current) | 26.6% |
+| dvz (current) | 27.3% |
+| speed | 24.4% |
+| angle (1024 steps) | 23.4% |
+| angle (2nd-order predictor) | 25.8% |
+| x residual w/ polar predictor | 27.3% (was 27.2%) |
+| z residual w/ polar predictor | 27.7% (was 27.9%) |
+
+So the "straight lines → one polar coordinate stays constant" hypothesis
+holds only weakly: pathfinding jitter wobbles both heading and speed, and the
+nonzero *rate* barely drops (2×~27% → 24.4%+23.4%). What polar does win is
+*magnitude* — angle deltas of a wiggling heading are a few steps where
+cartesian dv deltas are a few elmos in two columns — which shows up after
+gzip, not in the counts.
+
+Tangent fidelity (the viewer interpolates with dv, which is now reconstructed
+from speed+angle; positions remain exact because the x/z residuals absorb the
+reconstruction error):
+
+| angle steps | mean L1 error (elmo/interval) | max | exact |
+|---|---|---|---|
+| 1024 | 0.125 | 2 | 89.3% |
+| 256 | 0.580 | 9 | 77.8% |
+
 ## Results
 
 | variant | F+X gzipped | file total | vs baseline | D streams gz (K excluded) | D raw (pre-gzip) |
@@ -52,6 +93,14 @@ raw numbers suggest.
 | opt2 unit sparse series | 10,295,350 | 10,555,942 | 72.1% | 9,534,538 (70.0%) | 17,550,394 (33.6%) |
 | opt2u (unit-major order) | 10,551,750 | 10,812,342 | 73.9% | 9,790,938 (71.9%) | same as opt2 |
 | opt1+2 sparse + bitmask | 10,146,911 | 10,407,503 | **71.1%** | 9,386,099 (68.9%) | 17,099,075 (32.8%) |
+| opt3 polar dv, 1024 steps | 13,833,445 | 14,094,037 | 96.3% | 13,072,633 (96.0%) | 51,970,194 (99.5%) |
+| opt3 polar dv, 256 steps | 13,371,647 | 13,632,239 | 93.1% | 12,610,835 (92.6%) | 51,509,492 (98.7%) |
+| opt1+3 skip idle + polar, 1024 | 9,940,208 | 10,200,800 | **69.7%** | 9,179,396 (67.4%) | 19,322,767 (37.0%) |
+| opt1+3 skip idle + polar, 256 | 9,589,965 | 9,850,557 | **67.3%** | 8,829,153 (64.8%) | 18,891,809 (36.2%) |
+| opt1+3 + 2nd-order angle, 1024 | 9,967,655 | 10,228,247 | 69.9% | 9,206,843 (67.6%) | 19,339,566 (37.0%) |
+
+(the "vs baseline" column here is file total; the harness also prints F+X-only
+ratios, which differ by ~0.5 pt since meta+events are constant.)
 
 ("file total" = M + E + headers unchanged + re-encoded F + X. Keyframe gzip
 streams are identical in all variants: 760,812 bytes total.)
@@ -79,15 +128,35 @@ streams are identical in all variants: 760,812 bytes total.)
 5. Keyframes are untouched by all of this (0.76 MB total here) and grow in
    relative weight as the delta side shrinks; deeper cuts would need keyframe
    work or a chunk-size change, which trades against seek granularity.
+6. **opt3 alone is nearly worthless (-3.7%)** — on the baseline layout the
+   dominant cost is the 65.7% of records that are all-zero in every column,
+   and polar doesn't touch those. **Combined with opt1 it's a real add-on:
+   opt1+3 lands at 69.7% (1024 angle steps) vs opt1's 71.7%** — polar buys an
+   extra ~2 pt (~290 KB) once the idle records are already gone. Dropping to
+   256 angle steps buys ~2.4 pt more (67.3%) but visibly degrades the stored
+   tangent (mean error 0.58 elmo/interval, max 9, only 77.8% exact) — the
+   viewer's interpolation curves get slightly wrong end-slopes. 1024 steps is
+   the fidelity-safe choice (max 2 elmo/interval error on tangents only;
+   positions are exact in every variant).
+7. The polar win comes from smaller delta *magnitudes*, not fewer nonzero
+   deltas: nonzero rates barely move (see stats above) because pathfinding
+   jitter wobbles heading and speed almost as often as it wobbles dvx/dvz.
+   The 2nd-order angle predictor (constant turn rate → zero) is a wash —
+   slightly worse than first-order, because real headings jitter rather than
+   sweep smooth arcs at 1 Hz sampling.
 
 ## Recommendation
 
-If ~1.4× (‑29%) matters, implement **opt1** (skip idle units + dead-id list):
-it delivers within 0.6 pt of the best combined variant at a fraction of the
-complexity — the frame decode loop stays frame-major in both Go and JS, and
-the keyframe/skim/chunk-serving model is untouched. opt2 is not worth its
-decoder rewrite (three implementations must change in lockstep) for ~0.9 pt
-over opt1. Note the absolute stakes: ~4.2 MB on a 33-min 8v8; the format is
-already 22× smaller than the source `.brsnap`.
+Implement **opt1** (skip idle units + dead-id list) — it's the bulk of the
+win (-28%) at the lowest complexity: the frame decode loop stays frame-major
+in both Go and JS, and the keyframe/skim/chunk-serving model is untouched.
+**opt3 at 1024 angle steps is a defensible add-on** (-30.3% total) if the
+extra ~290 KB matters: it's still a frame-major column swap (dvx/dvz →
+speed/angle, integer math only), but it costs trig in the hot decode path of
+all three codec implementations and turns the stored tangent from exact to
+±2 elmo/interval. Skip opt2 (decoder rewrite for ~1 pt) and skip the
+2nd-order angle predictor (no gain). Absolute stakes on this capture:
+14.64 MB → 10.49 MB (opt1) → 10.20 MB (opt1+3); the format is already 22×
+smaller than the source `.brsnap`.
 
 Reproduce: `go run ./experiments/brp-eval <capture.brp>`.

@@ -492,6 +492,169 @@ func encodeOpt2Deltas(core, extra vw, frames []qFrame, prevFrame *int64, prevRes
 }
 
 // --------------------------------------------------------------------------
+// opt3: polar velocity. The dvx/dvz columns are replaced by (speed, angle):
+// speed = round(hypot(dvx,dvz)) in elmos per sample interval (same radial
+// precision as today), angle quantized to `steps` per full turn, delta-coded
+// with wrap-around (a stopped unit keeps its previous angle so stopping costs
+// one speed delta, not an angle jump). The x/z position predictor becomes the
+// RECONSTRUCTED velocity (spd·cos, spd·sin), so polar quantization error
+// leaks into the x/z residual columns — that trade-off is the experiment.
+// secondOrder additionally predicts angle += previous angle delta (constant
+// turn rate encodes as zero). skipIdle layers opt1 on top.
+
+type pState struct {
+	q        qUnit
+	spd, ang int64
+	angD     int64 // previous frame's angle delta (2nd-order predictor)
+	rdx, rdz int64 // velocity reconstructed from (spd, ang) — the x/z predictor
+}
+
+func polarOf(dvx, dvz int64, steps int64, prevAng int64, hadPrev bool) (spd, ang int64) {
+	spd = int64(math.Round(math.Hypot(float64(dvx), float64(dvz))))
+	if spd == 0 {
+		if hadPrev {
+			return 0, prevAng
+		}
+		return 0, 0
+	}
+	a := math.Atan2(float64(dvz), float64(dvx))
+	ang = int64(math.Round(a / (2 * math.Pi) * float64(steps)))
+	ang = ((ang % steps) + steps) % steps
+	return
+}
+
+func reconDV(spd, ang, steps int64) (int64, int64) {
+	if spd == 0 {
+		return 0, 0
+	}
+	th := 2 * math.Pi * float64(ang) / float64(steps)
+	return int64(math.Round(float64(spd) * math.Cos(th))),
+		int64(math.Round(float64(spd) * math.Sin(th)))
+}
+
+func wrapAng(d, steps int64) int64 {
+	d = ((d % steps) + steps) % steps
+	if d >= steps/2 {
+		d -= steps
+	}
+	return d
+}
+
+func polarState(u qUnit, steps int64) pState {
+	spd, ang := polarOf(u.dvx, u.dvz, steps, 0, false)
+	rdx, rdz := reconDV(spd, ang, steps)
+	return pState{q: u, spd: spd, ang: ang, rdx: rdx, rdz: rdz}
+}
+
+func encodePolarDeltas(core, extra vw, frames []qFrame, prev map[int32]pState, prevFrame *int64, prevRes map[int32]qRes, steps int64, secondOrder, skipIdle bool) {
+	for _, fr := range frames {
+		core.sv(fr.frame - *prevFrame)
+		*prevFrame = fr.frame
+
+		type rec struct {
+			u        qUnit
+			d        [8]int64 // def team x z hp maxHp spd ang
+			xd       [3]int64 // y dvy build
+			spd, ang int64
+		}
+		recs := make([]rec, 0, len(fr.units))
+		next := make(map[int32]pState, len(fr.units))
+		for _, u := range fr.units {
+			p, ok := prev[u.id]
+			spd, ang := polarOf(u.dvx, u.dvz, steps, p.ang, ok)
+			r := rec{u: u, spd: spd, ang: ang}
+			if ok {
+				r.d = [8]int64{
+					u.def - p.q.def, u.team - p.q.team,
+					u.x - (p.q.x + p.rdx), u.z - (p.q.z + p.rdz),
+					u.hp - p.q.hp, u.maxHp - p.q.maxHp,
+					spd - p.spd, 0,
+				}
+				pa := p.ang
+				if secondOrder {
+					pa = ((p.ang+p.angD)%steps + steps) % steps
+				}
+				r.d[7] = wrapAng(ang-pa, steps)
+				r.xd = [3]int64{u.y - (p.q.y + p.q.dvy), u.dvy - p.q.dvy, u.build - p.q.build}
+			} else {
+				r.d = [8]int64{u.def, u.team, u.x, u.z, u.hp, u.maxHp, spd, ang}
+				r.xd = [3]int64{u.y, u.dvy, u.build}
+			}
+			recs = append(recs, r)
+
+			np := pState{q: u, spd: spd, ang: ang}
+			if ok {
+				np.angD = wrapAng(ang-p.ang, steps)
+			}
+			np.rdx, np.rdz = reconDV(spd, ang, steps)
+			next[u.id] = np
+		}
+
+		if skipIdle {
+			cur := make(map[int32]bool, len(fr.units))
+			for _, u := range fr.units {
+				cur[u.id] = true
+			}
+			var dead []int64
+			for id := range prev {
+				if !cur[id] {
+					dead = append(dead, int64(id))
+				}
+			}
+			sort.Slice(dead, func(i, j int) bool { return dead[i] < dead[j] })
+			core.uv(uint64(len(dead)))
+			last := int64(0)
+			for _, id := range dead {
+				core.sv(id - last)
+				last = id
+			}
+			kept := recs[:0]
+			for _, r := range recs {
+				_, existed := prev[r.u.id]
+				any := !existed
+				for _, v := range r.d {
+					if v != 0 {
+						any = true
+					}
+				}
+				for _, v := range r.xd {
+					if v != 0 {
+						any = true
+					}
+				}
+				if any {
+					kept = append(kept, r)
+				}
+			}
+			recs = kept
+		}
+
+		core.uv(uint64(len(recs)))
+		last := int64(0)
+		for _, r := range recs {
+			core.sv(int64(r.u.id) - last)
+			last = int64(r.u.id)
+		}
+		for c := 0; c < 8; c++ {
+			for _, r := range recs {
+				core.sv(r.d[c])
+			}
+		}
+		for c := 0; c < 3; c++ {
+			for _, r := range recs {
+				extra.sv(r.xd[c])
+			}
+		}
+		writeRes(extra, fr.res, prevRes)
+
+		clear(prev)
+		for k, v := range next {
+			prev[k] = v
+		}
+	}
+}
+
+// --------------------------------------------------------------------------
 
 type variant struct {
 	name string
@@ -601,6 +764,67 @@ func main() {
 	}
 	fmt.Println()
 
+	// ---- polar (opt3) statistics: change rates + tangent fidelity -----------
+	for _, steps := range []int64{1024, 256} {
+		var nzX, nzZ, nzSpd, nzAng, nzAng2, withPrev int64
+		var errSum, errMax, errCnt, exact int64
+		prev := map[int32]pState{}
+		for i, fr := range qframes {
+			if i%chunkFrames == 0 {
+				prev = map[int32]pState{}
+				for _, u := range fr.units {
+					prev[u.id] = polarState(u, steps)
+				}
+				continue
+			}
+			next := make(map[int32]pState, len(fr.units))
+			for _, u := range fr.units {
+				p, ok := prev[u.id]
+				spd, ang := polarOf(u.dvx, u.dvz, steps, p.ang, ok)
+				np := pState{q: u, spd: spd, ang: ang}
+				if ok {
+					np.angD = wrapAng(ang-p.ang, steps)
+				}
+				np.rdx, np.rdz = reconDV(spd, ang, steps)
+				ex := abs64(np.rdx-u.dvx) + abs64(np.rdz-u.dvz)
+				errSum += ex
+				errCnt++
+				if ex == 0 {
+					exact++
+				}
+				if ex > errMax {
+					errMax = ex
+				}
+				if ok {
+					withPrev++
+					if u.x-(p.q.x+p.rdx) != 0 {
+						nzX++
+					}
+					if u.z-(p.q.z+p.rdz) != 0 {
+						nzZ++
+					}
+					if spd-p.spd != 0 {
+						nzSpd++
+					}
+					if wrapAng(ang-p.ang, steps) != 0 {
+						nzAng++
+					}
+					if wrapAng(ang-((p.ang+p.angD)%steps+steps)%steps, steps) != 0 {
+						nzAng2++
+					}
+				}
+				next[u.id] = np
+			}
+			prev = next
+		}
+		pc := func(n int64) float64 { return 100 * float64(n) / float64(withPrev) }
+		fmt.Printf("== polar stats, angle steps=%d (records with prev: %d) ==\n", steps, withPrev)
+		fmt.Printf("nonzero: x-res %.1f%%  z-res %.1f%%  spd %.1f%%  ang %.1f%%  ang(2nd-order) %.1f%%\n",
+			pc(nzX), pc(nzZ), pc(nzSpd), pc(nzAng), pc(nzAng2))
+		fmt.Printf("tangent |recon-dv| L1 error: mean %.3f elmo/interval, max %d, exact %.1f%%\n\n",
+			float64(errSum)/float64(errCnt), errMax, 100*float64(exact)/float64(errCnt))
+	}
+
 	// ---- variants ------------------------------------------------------------
 	variants := []variant{
 		{"baseline", func(ck, xk, cd, xd vw, fs []qFrame) {
@@ -634,6 +858,25 @@ func main() {
 			encodeOpt2Deltas(cd, xd, fs, &prevFrame, prevRes, false, true)
 		}},
 	}
+	polar := func(name string, steps int64, secondOrder, skipIdle bool) variant {
+		return variant{name, func(ck, xk, cd, xd vw, fs []qFrame) {
+			prevFrame := int64(0)
+			prevRes := map[int32]qRes{}
+			encodeKeyframe(ck, xk, fs[0], &prevFrame, prevRes)
+			prev := make(map[int32]pState, len(fs[0].units))
+			for _, u := range fs[0].units {
+				prev[u.id] = polarState(u, steps)
+			}
+			encodePolarDeltas(cd, xd, fs[1:], prev, &prevFrame, prevRes, steps, secondOrder, skipIdle)
+		}}
+	}
+	variants = append(variants,
+		polar("opt3 polar dv (1024 steps)", 1024, false, false),
+		polar("opt3 polar dv (256 steps)", 256, false, false),
+		polar("opt1+3 (skip idle, 1024)", 1024, false, true),
+		polar("opt1+3 (skip idle, 256)", 256, false, true),
+		polar("opt1+3 2nd-order angle", 1024, true, true),
+	)
 
 	origF := int64(len(pf.Sections[snapshot.SecFrames]))
 	origX := int64(len(pf.Sections[snapshot.SecExtra]))
@@ -679,4 +922,11 @@ func main() {
 			100*float64(sz.fDelta+sz.xDelta)/float64(baseD),
 			sz.fRaw+sz.xRaw, 100*float64(sz.fRaw+sz.xRaw)/float64(baseRaw))
 	}
+}
+
+func abs64(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
