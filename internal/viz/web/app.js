@@ -25,13 +25,14 @@ let mouse = null;          // {x,y} canvas px or null
 let drag = null;           // pan state or null
 let playTimer = null;
 let secPerFrame = 1;       // game seconds represented by one sampled frame
-let showIcons = true;      // draw BAR unit icons when zoomed in enough
+let showIcons = true;      // draw BAR unit icons (vs plain dots)
 
-// Nominal on-screen size of a unit icon, in world elmos. Icons only replace the
-// fast dots once this projects to a legible pixel size (see ICON_MIN_PX).
-const ICON_WORLD = 46;
-const ICON_MIN_PX = 11;    // below this, icons are illegible — draw dots instead
-const ICON_MAX_UNITS = 1200; // above this many units, keep dots for playback perf
+// On-screen icon size: scale * ICON_WORLD, clamped to [ICON_MIN_PX, ICON_MAX_PX].
+// Icons are ALWAYS drawn (never hidden by zoom) — when zoomed out they shrink to
+// the floor and overlap, exactly like BAR's own minimap.
+const ICON_WORLD = 60;
+const ICON_MIN_PX = 9;
+const ICON_MAX_PX = 34;
 
 // imageCache: served icon path -> HTMLImageElement (may still be loading) or
 // null once it has failed to load (so we don't retry).
@@ -44,6 +45,28 @@ function getImage(path) {
   img.src = '/' + path;
   imageCache[path] = img;
   return img;
+}
+
+// tintCache: "path|color" -> offscreen canvas of the icon flat-tinted to a team
+// colour (BAR minimap icons are alpha silhouettes, so we mask-fill them). Built
+// lazily once the source bitmap has loaded; there are only a few icon×team combos.
+const tintCache = {};
+function tintedIcon(path, color) {
+  const key = path + '|' + color;
+  const cached = tintCache[key];
+  if (cached !== undefined) return cached;
+  const img = getImage(path);
+  if (!img || !img.complete || !img.naturalWidth) return null; // not ready; retry next draw
+  const w = img.naturalWidth, h = img.naturalHeight;
+  const oc = document.createElement('canvas');
+  oc.width = w; oc.height = h;
+  const octx = oc.getContext('2d');
+  octx.drawImage(img, 0, 0);
+  octx.globalCompositeOperation = 'source-in'; // keep icon alpha, replace colour
+  octx.fillStyle = color;
+  octx.fillRect(0, 0, w, h);
+  tintCache[key] = oc;
+  return oc;
 }
 
 // Coalesce the many onload-triggered redraws into one per animation frame.
@@ -118,9 +141,8 @@ function draw() {
   if (!fr) return;
   const u = fr.u;
 
-  const iconPx = scale * ICON_WORLD;
-  if (showIcons && iconPx >= ICON_MIN_PX && fr.n <= ICON_MAX_UNITS) {
-    drawIcons(u, iconPx);
+  if (showIcons) {
+    drawIcons(u);
   } else {
     drawDots(u);
   }
@@ -128,8 +150,8 @@ function draw() {
   updateTooltip();
 }
 
-// Fast path: one filled dot per unit, batched by team colour to minimise canvas
-// state changes. Used when zoomed out or for very large frames.
+// Fast path: one filled dot per unit, batched by team colour. Used only when the
+// icon layer is toggled off.
 function drawDots(u) {
   const rad = Math.max(1.6, Math.min(5, scale * 8));
   const byColor = {};
@@ -150,24 +172,27 @@ function drawDots(u) {
   }
 }
 
-// Detailed path: a team-coloured backing disc (so team stays readable) with the
-// unit's BAR icon drawn on top. Falls back to a plain disc while the icon loads
-// or when a unit type has no icon.
-function drawIcons(u, px) {
+// Primary render: every unit as its BAR icon, tinted to the team colour. Icons
+// are always drawn; when zoomed out they clamp to ICON_MIN_PX and overlap. A
+// unit with no icon (or whose bitmap hasn't loaded yet) shows a coloured dot so
+// it is never invisible.
+function drawIcons(u) {
+  const px = Math.max(ICON_MIN_PX, Math.min(ICON_MAX_PX, scale * ICON_WORLD));
   const r = px / 2;
+  const dot = Math.max(1.5, px * 0.32);
   for (let i = 0; i < u.length; i += STRIDE) {
     const [sx, sy] = w2s(u[i + F.X], u[i + F.Z]);
     if (sx < -px || sy < -px || sx > cv.width + px || sy > cv.height + px) continue;
-    ctx.fillStyle = teamColor[u[i + F.TEAM]] || '#9aa6b2';
-    ctx.globalAlpha = 0.92;
-    ctx.beginPath();
-    ctx.arc(sx, sy, r, 0, 7);
-    ctx.fill();
-    ctx.globalAlpha = 1;
+    const color = teamColor[u[i + F.TEAM]] || '#9aa6b2';
     const path = iconPathFor(u[i + F.DEF]);
-    const img = path ? getImage(path) : null;
-    if (img && img.complete && img.naturalWidth > 0) {
-      ctx.drawImage(img, sx - r, sy - r, px, px);
+    const tinted = path ? tintedIcon(path, color) : null;
+    if (tinted) {
+      ctx.drawImage(tinted, sx - r, sy - r, px, px);
+    } else {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(sx, sy, dot, 0, 7);
+      ctx.fill();
     }
   }
 }
@@ -427,7 +452,7 @@ async function loadReplay(file) {
   document.getElementById('slider').max = Math.max(0, data.frames.length - 1);
   idx = 0;
   // Pre-warm the icon set (only a few dozen distinct unit types per replay) so
-  // they're ready the moment the user zooms in.
+  // they're ready on the first paint.
   Object.values(data.unitIcons || {}).forEach(getImage);
   resize();      // sets canvas size
   fitView();     // fit map to viewport
@@ -454,9 +479,33 @@ async function init() {
     o.textContent = `${info.gameId} (${info.format}, ${fmtSize(info.size)})`;
     sel.appendChild(o);
   });
-  sel.onchange = () => loadReplay(sel.value);
-  await loadReplay(list[0].file);
+  sel.onchange = () => { setReplayInUrl(sel.value); loadReplay(sel.value); };
+
+  // Restore the replay named in the URL (?replay=<file>) so a refresh keeps it.
+  const wanted = new URLSearchParams(location.search).get('replay');
+  const initial = list.some(i => i.file === wanted) ? wanted : list[0].file;
+  sel.value = initial;
+  setReplayInUrl(initial);
+  await loadReplay(initial);
 }
+
+// Persist the selected replay in the URL without adding history entries, so a
+// page refresh reopens the same capture.
+function setReplayInUrl(file) {
+  const u = new URL(location.href);
+  u.searchParams.set('replay', file);
+  history.replaceState(null, '', u);
+}
+
+// Support browser back/forward and manual URL edits.
+window.addEventListener('popstate', () => {
+  const wanted = new URLSearchParams(location.search).get('replay');
+  const sel = document.getElementById('file');
+  if (wanted && wanted !== sel.value && [...sel.options].some(o => o.value === wanted)) {
+    sel.value = wanted;
+    loadReplay(wanted);
+  }
+});
 
 function fmtSize(n) {
   if (n >= 1e6) return (n / 1e6).toFixed(1) + ' MB';
