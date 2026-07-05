@@ -39,17 +39,32 @@ type iconInfo struct {
 
 var (
 	iconOnce   sync.Once
-	iconByName map[string]iconInfo // unit name -> icon path (present on disk) + size
+	iconByName map[string]iconInfo // icontype key -> icon path (present on disk) + size
 )
 
-// unitIcon returns the icon path and size multiplier for a unit's internal name
-// (as recorded in Meta.UnitDefs). ok is false if there is no icon for it. The
-// path is relative ("icons/foo.png") and is served under /icons/, so the browser
-// requests "/" + path. Size defaults to 1 when the entry omits it.
-func unitIcon(name string) (path string, size float64, ok bool) {
+// unitIcon returns the icon path and size multiplier for an icontype key (the
+// top-level keys of icontypes.lua — usually, but not always, a unit's own name).
+// ok is false if there is no icon for it. The path is relative ("icons/foo.png")
+// and is served under /icons/, so the browser requests "/" + path. Size defaults
+// to 1 when the entry omits it.
+func unitIcon(key string) (path string, size float64, ok bool) {
 	iconOnce.Do(loadIcons)
-	ic, ok := iconByName[name]
+	ic, ok := iconByName[key]
 	return ic.Path, ic.Size, ok
+}
+
+// unitIconFor resolves a unit's icon by its icontype key first (the authoritative
+// icontypes.lua key the engine uses to pick the icon), falling back to its
+// internal name. The name fallback covers captures with no IconType and units
+// whose name is itself an icontype key (incl. the synthesised "<name>_scav"
+// variants). ok is false if neither resolves to an icon present on disk.
+func unitIconFor(iconType, name string) (path string, size float64, ok bool) {
+	if iconType != "" {
+		if path, size, ok = unitIcon(iconType); ok {
+			return path, size, true
+		}
+	}
+	return unitIcon(name)
 }
 
 // loadIcons parses icontypes.lua into a name->{bitmap,size} map, keeping only

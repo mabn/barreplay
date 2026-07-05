@@ -28,6 +28,7 @@ let secPerFrame = 1;       // game seconds represented by one sampled frame
 let showIcons = true;      // draw BAR unit icons (vs plain dots)
 let showTexture = true;    // draw the map terrain texture behind everything
 let showGrid = true;       // draw the build/small/large grid
+let showFootprints = true; // draw build-footprint rectangles for buildings
 let mapW = 0, mapH = 0;    // map world extent in elmos (0 if unknown)
 let mapTex = null;         // HTMLImageElement of the terrain texture, or null
 // Viewport in CSS pixels + the device-pixel ratio. The canvas backing store is
@@ -175,6 +176,9 @@ function draw() {
   if (!fr) return;
   const u = fr.u;
 
+  // Footprints sit under the unit markers.
+  if (showFootprints) drawFootprints(u);
+
   if (showIcons) {
     drawIcons(u);
   } else {
@@ -240,6 +244,42 @@ function iconInfoFor(def) {
   return name ? (data.unitIcons[name] || null) : null;
 }
 
+// footprintFor returns {w, h} (build-footprint size in elmos) for a unit def, or
+// null. Only buildings have an entry (the wire payload omits mobile units), so a
+// null result means "don't draw a footprint".
+function footprintFor(def) {
+  if (!data.footprints) return null;
+  const name = data.unitDefs && data.unitDefs[def];
+  return name ? (data.footprints[name] || null) : null;
+}
+
+// Draw each building's build footprint as a team-coloured rectangle centred on
+// the unit's position (which is the footprint centre). Unlike icons, footprints
+// are drawn in world space, so they scale with zoom. Batched by team colour.
+function drawFootprints(u) {
+  const byColor = {};
+  for (let i = 0; i < u.length; i += STRIDE) {
+    if (!footprintFor(u[i + F.DEF])) continue;
+    const c = teamColor[u[i + F.TEAM]] || '#9aa6b2';
+    (byColor[c] ||= []).push(i);
+  }
+  ctx.lineWidth = 1;
+  ctx.globalAlpha = 0.7;
+  for (const color in byColor) {
+    ctx.strokeStyle = color;
+    ctx.beginPath();
+    for (const i of byColor[color]) {
+      const fp = footprintFor(u[i + F.DEF]);
+      const [cx, cy] = w2s(u[i + F.X], u[i + F.Z]);
+      const wpx = fp.w * scale, hpx = fp.h * scale;
+      if (cx + wpx / 2 < 0 || cy + hpx / 2 < 0 || cx - wpx / 2 > viewW || cy - hpx / 2 > viewH) continue;
+      ctx.rect(cx - wpx / 2, cy - hpx / 2, wpx, hpx);
+    }
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
 // renderCache: "path|color|devPx" -> offscreen canvas of the tinted icon
 // downscaled to the exact device-pixel size it will be drawn at. The 128px BAR
 // icons downscaled ~10x with the canvas's default (low-quality) bilinear filter
@@ -296,23 +336,18 @@ function drawMapFrame() {
     ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
   }
 
-  // BAR build grid: buildings snap to a 16-elmo "build square" (a 2x2 building
-  // is 32 elmos, 3x3 is 48, ...). Draw the fine 16-elmo grid — the same one BAR
-  // shows when placing — plus a coarser every-8th line, both aligned to the world
-  // origin so lines fall on real build-square boundaries. Each tier only draws
-  // when its spacing is legible, so a zoomed-out view isn't a solid mesh.
-  // BAR grid hierarchy (all aligned to the world origin, where buildings snap):
-  //   build square = 16 elmos (the placement grid)
+  // Two-tier reference grid, aligned to the world origin (where BAR buildings
+  // snap on the 16-elmo build grid):
   //   small square = 48 elmos  = 3x3 build squares
-  //   large square = 192 elmos = 4x4 small squares = 3x3 metal makers (each 4x4 build)
-  // Each tier only draws when its spacing is legible, and gets bolder with size,
-  // so a zoomed-out view shows just the large grid and detail appears on zoom.
-  // Semi-transparent white so lines read over both the dark fallback and terrain.
+  //   large square = 192 elmos = 4x4 small squares (= 3x3 metal makers, each 4x4 build)
+  // Each tier only draws when its on-screen spacing is legible, and the large tier
+  // is bolder, so a zoomed-out view shows just the large grid and the small grid
+  // appears on zoom. Semi-transparent white so lines read over both the dark
+  // fallback and the terrain texture.
   if (showGrid) {
-    const BUILD = 16;
-    drawGrid(b, x0, y0, x1, y1, BUILD, 'rgba(255,255,255,0.05)');       // build square (16)
-    drawGrid(b, x0, y0, x1, y1, BUILD * 3, 'rgba(255,255,255,0.10)');   // small square (48)
-    drawGrid(b, x0, y0, x1, y1, BUILD * 12, 'rgba(255,255,255,0.20)');  // large square (192)
+    const SMALL = 48;
+    drawGrid(b, x0, y0, x1, y1, SMALL, 'rgba(255,255,255,0.10)');       // small square (48)
+    drawGrid(b, x0, y0, x1, y1, SMALL * 4, 'rgba(255,255,255,0.20)');   // large square (192) = 4x4 small
   }
 
   ctx.strokeStyle = '#2d3a47';
@@ -524,6 +559,7 @@ document.getElementById('speed').onchange = () => { if (playTimer) { stopPlay();
 document.getElementById('icons').onchange = e => { showIcons = e.target.checked; draw(); };
 document.getElementById('maptex').onchange = e => { showTexture = e.target.checked; draw(); };
 document.getElementById('grid').onchange = e => { showGrid = e.target.checked; draw(); };
+document.getElementById('footprints').onchange = e => { showFootprints = e.target.checked; draw(); };
 document.getElementById('iconsize').oninput = e => {
   iconScale = +e.target.value;
   setParam('iconsize', iconScale);

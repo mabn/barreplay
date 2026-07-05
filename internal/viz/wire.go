@@ -30,8 +30,12 @@ type wireReplay struct {
 	// multiplier), limited to the def names present in this replay. The browser
 	// looks a unit up by name (via UnitDefs) and requests "/" + path.
 	UnitIcons map[string]wireIcon `json:"unitIcons"`
-	Frames    []wireFrame         `json:"frames"`
-	Events    []wireEvent         `json:"events"`
+	// Footprints maps a building's internal name to its build-footprint size in
+	// elmos. Only immobile structures are included (presence == it's a building),
+	// so the front-end draws a footprint rectangle only for buildings.
+	Footprints map[string]wireFootprint `json:"footprints"`
+	Frames     []wireFrame              `json:"frames"`
+	Events     []wireEvent              `json:"events"`
 }
 
 // wireIcon is one unit type's icon in the payload: p = served bitmap path
@@ -40,6 +44,14 @@ type wireReplay struct {
 type wireIcon struct {
 	Path string  `json:"p"`
 	Size float64 `json:"s"`
+}
+
+// wireFootprint is a building's build footprint in elmos (w = x extent, h = z
+// extent). The unit's sampled position is the footprint centre, so the front-end
+// draws the rectangle centred on it.
+type wireFootprint struct {
+	W int32 `json:"w"`
+	H int32 `json:"h"`
 }
 
 // wireBounds is the world-space extent of all sampled unit positions (x/z
@@ -97,10 +109,23 @@ func (rep *Replay) toWire() wireReplay {
 
 	// Icons for the unit types present in this replay (missing icons are simply
 	// omitted; the front-end falls back to a coloured dot).
+	// Resolve each def's icon by its icontype key (falling back to its name), so a
+	// unit whose iconType differs from its name still gets an icon. Keyed by name,
+	// which is how the front-end looks it up (via unitDefs[def]).
 	w.UnitIcons = map[string]wireIcon{}
-	for _, name := range w.UnitDefs {
-		if path, size, ok := unitIcon(name); ok {
-			w.UnitIcons[name] = wireIcon{Path: path, Size: size}
+	for _, d := range rep.Meta.UnitDefs {
+		if path, size, ok := unitIconFor(d.IconType, d.Name); ok {
+			w.UnitIcons[d.Name] = wireIcon{Path: path, Size: size}
+		}
+	}
+
+	// Build footprints for immobile structures only. XSize/ZSize are in 8-elmo
+	// squares (engine SQUARE_SIZE), so multiply by 8 for world elmos.
+	const squareSize = 8
+	w.Footprints = map[string]wireFootprint{}
+	for _, d := range rep.Meta.UnitDefs {
+		if d.IsBuilding && d.XSize > 0 {
+			w.Footprints[d.Name] = wireFootprint{W: d.XSize * squareSize, H: d.ZSize * squareSize}
 		}
 	}
 
