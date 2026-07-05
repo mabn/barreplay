@@ -126,9 +126,9 @@ the normal input; `.brsnap` (the raw widget stream) is also accepted so you can 
 a run whose `.jsonl` was never produced. The page renders each sampled frame as a
 top-down map, colouring units by team (grouped by ally-team), with:
 
-- **real BAR unit icons** (from vendored game assets) drawn on a team-coloured backing
-  once you zoom in; a fast dot render is used when zoomed out (toggle with the **Icons**
-  checkbox),
+- **real BAR unit icons** (from vendored game assets), team-tinted and drawn at a
+  constant screen size (per-type, like BAR's minimap — icons overlap when zoomed out and
+  spread apart when zoomed in); toggle to plain dots with the **Icons** checkbox,
 - a **timeline scrubber** + play/pause and a speed control (game-time playback),
 - **scroll to zoom, drag to pan**, and a hover **tooltip** (unit name, team, position, health),
 - a live **sidebar**: game time / sim frame / unit count, per-team unit counts, and a

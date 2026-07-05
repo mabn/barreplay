@@ -140,9 +140,13 @@ dir for `.jsonl`/`.brsnap` files and serves the viewer.
   **parses the Lua data table directly in Go** (a small line/brace scanner, no `gopher-lua`)
   — keeping the repo stdlib-only. It also replicates the file's trailing `_scav` synthesis
   (inverted-path variants) and keeps only entries whose bitmap file actually exists in the
-  embedded FS, so the payload never advertises a 404. `toWire` fills `unitIcons` (name→path)
-  for just the def names in the replay; the front-end draws the icon (team-coloured backing)
-  once zoomed in, else the fast dots.
+  embedded FS, so the payload never advertises a 404. It also parses each type's `size`
+  multiplier. `toWire` fills `unitIcons` (name→`{path,size}`) for just the def names in the
+  replay; the front-end draws every unit as its icon, **team-tinted** (BAR icons are alpha
+  silhouettes, mask-filled via canvas `source-in`, cached per icon×team) at a **constant
+  screen size** (`ICON_PX_PER_SIZE * size`, independent of zoom, like BAR's minimap — so icons
+  spread apart when zoomed in and overlap when zoomed out). A unit with no/loading icon shows
+  a coloured dot so it is never invisible; the Icons checkbox switches to plain dots.
 - **`internal/viz/server.go`** embeds `web/{index.html,app.js,style.css}` via `go:embed` and
   exposes `/api/replays` (the file list), `/api/replay?file=<basename>` (one capture's wire
   payload), and `/icons/<file>` (the embedded icons, cached). The `file` param is confined to

@@ -148,16 +148,24 @@ func TestUnitIcons(t *testing.T) {
 		"armmex": "icons/mex_t1.png",
 	}
 	for name, want := range cases {
-		if got := unitIcon(name); got != want {
-			t.Errorf("unitIcon(%q)=%q want %q", name, got, want)
+		got, size, ok := unitIcon(name)
+		if !ok || got != want {
+			t.Errorf("unitIcon(%q)=(%q,%v,%v) want path %q", name, got, size, ok, want)
+		}
+		if size <= 0 {
+			t.Errorf("unitIcon(%q) size=%v, want > 0", name, size)
 		}
 	}
-	if got := unitIcon("not_a_real_unit"); got != "" {
-		t.Errorf("unitIcon(unknown)=%q want empty", got)
+	// The commander icon is meaningfully larger than a mex icon (per-type size).
+	if _, comSize, _ := unitIcon("armcom"); comSize < 1.5 {
+		t.Errorf("armcom size=%v, want ~1.8", comSize)
+	}
+	if _, _, ok := unitIcon("not_a_real_unit"); ok {
+		t.Errorf("unitIcon(unknown) ok=true, want false")
 	}
 	// Scavenger variant should resolve to the inverted path.
-	if got := unitIcon("armcom_scav"); got != "icons/inverted/armcom.png" {
-		t.Errorf("unitIcon(armcom_scav)=%q want icons/inverted/armcom.png", got)
+	if got, _, ok := unitIcon("armcom_scav"); !ok || got != "icons/inverted/armcom.png" {
+		t.Errorf("unitIcon(armcom_scav)=(%q,%v) want icons/inverted/armcom.png", got, ok)
 	}
 }
 
@@ -170,11 +178,11 @@ func TestToWireIncludesIcons(t *testing.T) {
 	}
 	// The fixture's UnitDefs include armcom and corllt; both have icons.
 	w := rep.toWire()
-	if w.UnitIcons["armcom"] != "icons/armcom.png" {
-		t.Errorf("armcom icon=%q", w.UnitIcons["armcom"])
+	if w.UnitIcons["armcom"].Path != "icons/armcom.png" || w.UnitIcons["armcom"].Size <= 0 {
+		t.Errorf("armcom icon=%+v", w.UnitIcons["armcom"])
 	}
-	if w.UnitIcons["corllt"] != "icons/defence_0_laser.png" {
-		t.Errorf("corllt icon=%q", w.UnitIcons["corllt"])
+	if w.UnitIcons["corllt"].Path != "icons/defence_0_laser.png" {
+		t.Errorf("corllt icon=%+v", w.UnitIcons["corllt"])
 	}
 }
 
