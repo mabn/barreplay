@@ -26,16 +26,21 @@
 // measured are purely the layout change in the D streams.
 //
 // Usage: go run ./experiments/brp-eval <capture.brp>
+//
+//	-unit <id>   instead of benchmarking, dump one unit's per-frame encoded
+//	             deltas (cartesian vs polar) across all chunks and exit
 package main
 
 import (
 	"bytes"
 	"compress/gzip"
 	"encoding/binary"
+	"flag"
 	"fmt"
 	"math"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/mabn/barreplay/snapshot"
 )
@@ -655,6 +660,233 @@ func encodePolarDeltas(core, extra vw, frames []qFrame, prev map[int32]pState, p
 }
 
 // --------------------------------------------------------------------------
+// -unit dump: one unit's per-frame encoded values under both schemes.
+
+// svLen is the encoded size in bytes of one zigzag varint.
+func svLen(v int64) int {
+	var tmp [binary.MaxVarintLen64]byte
+	return binary.PutUvarint(tmp[:], uint64((v<<1)^(v>>63)))
+}
+
+func gameTime(frame int64) string {
+	sec := frame / simFPSDump
+	return fmt.Sprintf("%3dm %02ds f%6d", sec/60, sec%60, frame)
+}
+
+const simFPSDump = 30
+const dumpAngleSteps = 1024
+
+// dumpUnit prints, for every sampled frame where the unit appears, the deltas
+// the CURRENT cartesian codec stores (def team x z hp maxHp dvx dvz | y dvy
+// build) and what the polar codec (opt3, 1024 angle steps) would store
+// (spd/ang replacing dvx/dvz, x/z residual vs the reconstructed velocity).
+// "—" means every delta is zero: the record costs 11 one-byte zeros in the
+// current format and would be skipped entirely under opt1. Chunk keyframes
+// (every 64th sample) are marked K and store absolutes.
+func dumpUnit(qframes []qFrame, id int32) {
+	names := []string{"def", "team", "x", "z", "hp", "maxHp", "dvx", "dvz", "y", "dvy", "build"}
+	polNames := []string{"def", "team", "x", "z", "hp", "maxHp", "spd", "ang", "y", "dvy", "build"}
+
+	fmtDeltas := func(d []int64, n []string) string {
+		var parts []string
+		for i, v := range d {
+			if v != 0 {
+				parts = append(parts, fmt.Sprintf("%s%+d", n[i], v))
+			}
+		}
+		if parts == nil {
+			return "—"
+		}
+		return strings.Join(parts, " ")
+	}
+	sum := func(d []int64) (n int) {
+		for _, v := range d {
+			n += svLen(v)
+		}
+		return
+	}
+
+	prevCart := map[int32]qUnit{}
+	prevPol := map[int32]pState{}
+	present := false
+	var frames, idleCart, idlePol int
+	var bytesCart, bytesPol int64
+
+	for i, fr := range qframes {
+		key := i%chunkFrames == 0
+		if key {
+			prevCart = map[int32]qUnit{}
+			prevPol = map[int32]pState{}
+			for _, u := range fr.units {
+				prevCart[u.id] = u
+				prevPol[u.id] = polarState(u, dumpAngleSteps)
+			}
+		}
+		var cur *qUnit
+		for j := range fr.units {
+			if fr.units[j].id == id {
+				cur = &fr.units[j]
+				break
+			}
+		}
+		if cur == nil {
+			if present && !key {
+				fmt.Printf("%s   unit died / left sampling\n", gameTime(fr.frame))
+			}
+			present = cur != nil
+			if !key { // advance shared state for non-key frames
+				nc := make(map[int32]qUnit, len(fr.units))
+				np := make(map[int32]pState, len(fr.units))
+				for _, u := range fr.units {
+					nc[u.id] = u
+					p, ok := prevPol[u.id]
+					spd, ang := polarOf(u.dvx, u.dvz, dumpAngleSteps, p.ang, ok)
+					s := pState{q: u, spd: spd, ang: ang}
+					if ok {
+						s.angD = wrapAng(ang-p.ang, dumpAngleSteps)
+					}
+					s.rdx, s.rdz = reconDV(spd, ang, dumpAngleSteps)
+					np[u.id] = s
+				}
+				prevCart, prevPol = nc, np
+			}
+			continue
+		}
+		present = true
+		frames++
+
+		spd, angNow := polarOf(cur.dvx, cur.dvz, dumpAngleSteps, prevPol[id].ang, !key && func() bool { _, ok := prevPol[id]; return ok }())
+		state := fmt.Sprintf("pos %5d,%5d  dv %+4d,%+4d  spd %3d ang %4d  hp %5d",
+			cur.x, cur.z, cur.dvx, cur.dvz, spd, angNow, cur.hp)
+
+		if key {
+			abs := []int64{cur.def, cur.team, cur.x, cur.z, cur.hp, cur.maxHp, cur.dvx, cur.dvz, cur.y, cur.dvy, cur.build}
+			fmt.Printf("%s K %s | keyframe, absolute (%dB)\n", gameTime(fr.frame), state, sum(abs))
+		} else {
+			dc := deltas(*cur, prevCart)
+			p, ok := prevPol[id]
+			var dp [11]int64
+			if ok {
+				dp = [11]int64{
+					cur.def - p.q.def, cur.team - p.q.team,
+					cur.x - (p.q.x + p.rdx), cur.z - (p.q.z + p.rdz),
+					cur.hp - p.q.hp, cur.maxHp - p.q.maxHp,
+					spd - p.spd, wrapAng(angNow-p.ang, dumpAngleSteps),
+					cur.y - (p.q.y + p.q.dvy), cur.dvy - p.q.dvy, cur.build - p.q.build,
+				}
+			} else {
+				dp = [11]int64{cur.def, cur.team, cur.x, cur.z, cur.hp, cur.maxHp, spd, angNow, cur.y, cur.dvy, cur.build}
+			}
+			bc, bp := sum(dc[:]), sum(dp[:])
+			bytesCart += int64(bc)
+			bytesPol += int64(bp)
+			czero, pzero := fmtDeltas(dc[:], names) == "—", fmtDeltas(dp[:], polNames) == "—"
+			if czero {
+				idleCart++
+			}
+			if pzero {
+				idlePol++
+			}
+			mark := func(zero bool) string {
+				if zero {
+					return " opt1:SKIP"
+				}
+				return ""
+			}
+			fmt.Printf("%s   %s | cart: %-28s (%2dB)%s | polar: %-24s (%2dB)%s\n",
+				gameTime(fr.frame), state,
+				fmtDeltas(dc[:], names), bc, mark(czero),
+				fmtDeltas(dp[:], polNames), bp, mark(pzero))
+		}
+
+		// advance shared codec state
+		nc := make(map[int32]qUnit, len(fr.units))
+		np := make(map[int32]pState, len(fr.units))
+		for _, u := range fr.units {
+			nc[u.id] = u
+			pp, ok := prevPol[u.id]
+			s2, a2 := polarOf(u.dvx, u.dvz, dumpAngleSteps, pp.ang, ok && !key)
+			s := pState{q: u, spd: s2, ang: a2}
+			if ok && !key {
+				s.angD = wrapAng(a2-pp.ang, dumpAngleSteps)
+			}
+			s.rdx, s.rdz = reconDV(s2, a2, dumpAngleSteps)
+			np[u.id] = s
+		}
+		if !key {
+			prevCart, prevPol = nc, np
+		}
+	}
+	fmt.Printf("\nunit %d summary: %d sampled frames; delta frames all-zero: cart %d, polar %d;"+
+		" delta bytes (11 cols, pre-gzip): cart %d, polar %d\n",
+		id, frames, idleCart, idlePol, bytesCart, bytesPol)
+}
+
+// findConstant lists the units with the most "moving but free" delta frames —
+// dv non-zero yet every cartesian column delta zero (the constant-velocity
+// sweet spot the codec's velocity predictor is built around) — to pick good
+// dump subjects.
+func findConstant(qframes []qFrame, defs map[int32]snapshot.UnitDef) {
+	type acc struct{ free, moving, frames int }
+	byID := map[int32]*acc{}
+	def := map[int32]int32{}
+	prev := map[int32]qUnit{}
+	for i, fr := range qframes {
+		if i%chunkFrames == 0 {
+			prev = map[int32]qUnit{}
+			for _, u := range fr.units {
+				prev[u.id] = u
+			}
+			continue
+		}
+		next := make(map[int32]qUnit, len(fr.units))
+		for _, u := range fr.units {
+			a := byID[u.id]
+			if a == nil {
+				a = &acc{}
+				byID[u.id] = a
+				def[u.id] = int32(u.def)
+			}
+			a.frames++
+			if _, ok := prev[u.id]; ok {
+				d := deltas(u, prev)
+				zero := true
+				for _, v := range d {
+					if v != 0 {
+						zero = false
+						break
+					}
+				}
+				if u.dvx != 0 || u.dvz != 0 {
+					a.moving++
+					if zero {
+						a.free++
+					}
+				}
+			}
+			next[u.id] = u
+		}
+		prev = next
+	}
+	type row struct {
+		id   int32
+		a    *acc
+		name string
+	}
+	var rows []row
+	for id, a := range byID {
+		name := defs[def[id]].Name
+		rows = append(rows, row{id, a, name})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].a.free > rows[j].a.free })
+	fmt.Println("units with the most moving-yet-all-zero-delta frames (constant velocity):")
+	for _, r := range rows[:min(20, len(rows))] {
+		fmt.Printf("  unit %5d %-16s frames=%4d moving=%4d free-while-moving=%4d\n",
+			r.id, r.name, r.a.frames, r.a.moving, r.a.free)
+	}
+}
+
+// --------------------------------------------------------------------------
 
 type variant struct {
 	name string
@@ -662,11 +894,14 @@ type variant struct {
 }
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: brp-eval <capture.brp>")
+	unitID := flag.Int("unit", -1, "dump per-frame encoding details for this unit id and exit")
+	findConst := flag.Bool("find-constant", false, "list units with the most constant-velocity (free) frames and exit")
+	flag.Parse()
+	if flag.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: brp-eval [-unit <id>] <capture.brp>")
 		os.Exit(2)
 	}
-	path := os.Args[1]
+	path := flag.Arg(0)
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		panic(err)
@@ -699,6 +934,15 @@ func main() {
 		}
 		sort.Slice(qf.res, func(a, b int) bool { return qf.res[a].team < qf.res[b].team })
 		qframes[i] = qf
+	}
+
+	if *unitID >= 0 {
+		dumpUnit(qframes, int32(*unitID))
+		return
+	}
+	if *findConst {
+		findConstant(qframes, meta.UnitDefs)
+		return
 	}
 
 	// ---- change statistics over delta frames --------------------------------

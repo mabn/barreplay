@@ -160,3 +160,14 @@ all three codec implementations and turns the stored tangent from exact to
 smaller than the source `.brsnap`.
 
 Reproduce: `go run ./experiments/brp-eval <capture.brp>`.
+
+Inspection helpers:
+
+- `-unit <id>` dumps one unit's every sampled frame — game time, frame,
+  position/velocity/polar state, then the exact deltas the cartesian codec
+  stores vs what the polar codec would store, each with its pre-gzip byte
+  cost and an `opt1:SKIP` marker when all 11 deltas are zero. `—` means
+  "nothing changed vs prediction": 11 zero bytes today, 0 bytes under opt1.
+- `-find-constant` ranks units by how many delta frames are "moving yet
+  all-zero" (dv ≠ 0 but every column delta 0) — the constant-velocity case
+  the position predictor is built around — to find good dump subjects.
