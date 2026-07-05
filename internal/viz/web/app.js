@@ -8,8 +8,15 @@
 // units across thousands of frames, so avoiding the object churn keeps playback
 // smooth.
 
-const STRIDE = 7;
-const F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6 };
+const STRIDE = 9;
+const F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6, DVX: 7, DVZ: 8 };
+
+// Interpolated world position of unit i in frame array u, using the current
+// sub-frame fraction. dvx/dvz are the displacement over one keyframe interval, so
+// pos + d*frac animates movement between sampled frames. A stationary unit has
+// dvx==dvz==0 and is simply left at its sampled position.
+function ux(u, i) { return u[i + F.X] + u[i + F.DVX] * renderFrac; }
+function uz(u, i) { return u[i + F.Z] + u[i + F.DVZ] * renderFrac; }
 
 const cv = document.getElementById('cv');
 const ctx = cv.getContext('2d');
@@ -23,8 +30,11 @@ let center = { x: 0, z: 0 };// world point at viewport centre
 let teamColor = {};        // team id -> css colour
 let mouse = null;          // {x,y} canvas px (CSS px) or null
 let drag = null;           // pan state or null
-let playTimer = null;
-let secPerFrame = 1;       // game seconds represented by one sampled frame
+let playRAF = null;        // requestAnimationFrame handle while playing
+let playLastTs = 0;        // timestamp of the previous animation tick
+let playPos = 0;           // continuous playhead in keyframe units (idx = floor)
+let renderFrac = 0;        // sub-frame fraction [0,1) within the current interval
+let secPerFrame = 1;       // game seconds per keyframe interval (sampleEvery/30)
 let showIcons = true;      // draw BAR unit icons (vs plain dots)
 let showTexture = true;    // draw the map terrain texture behind everything
 let showGrid = true;       // draw the build/small/large grid
@@ -202,7 +212,7 @@ function drawDots(u) {
     ctx.fillStyle = color;
     ctx.beginPath();
     for (const i of byColor[color]) {
-      const [sx, sy] = w2s(u[i + F.X], u[i + F.Z]);
+      const [sx, sy] = w2s(ux(u, i), uz(u, i));
       if (sx < -8 || sy < -8 || sx > viewW + 8 || sy > viewH + 8) continue;
       ctx.moveTo(sx + rad, sy);
       ctx.arc(sx, sy, rad, 0, 7);
@@ -220,7 +230,7 @@ function drawDots(u) {
 // it is never invisible.
 function drawIcons(u) {
   for (let i = 0; i < u.length; i += STRIDE) {
-    const [sx, sy] = w2s(u[i + F.X], u[i + F.Z]);
+    const [sx, sy] = w2s(ux(u, i), uz(u, i));
     const info = iconInfoFor(u[i + F.DEF]);
     let px = Math.max(ICON_MIN_PX, Math.min(ICON_MAX_PX, iconScale * (info ? info.s : 1)));
     if (growIcons) {
@@ -283,7 +293,7 @@ function drawFootprints(u) {
     ctx.beginPath();
     for (const i of byColor[color]) {
       const fp = footprintFor(u[i + F.DEF]);
-      const [cx, cy] = w2s(u[i + F.X], u[i + F.Z]);
+      const [cx, cy] = w2s(ux(u, i), uz(u, i));
       const wpx = fp.w * scale, hpx = fp.h * scale;
       if (cx + wpx / 2 < 0 || cy + hpx / 2 < 0 || cx - wpx / 2 > viewW || cy - hpx / 2 > viewH) continue;
       ctx.rect(cx - wpx / 2, cy - hpx / 2, wpx, hpx);
@@ -394,7 +404,7 @@ function hitTest() {
   const u = fr.u;
   let best = -1, bestD = 10 * 10; // 10px pick radius (squared)
   for (let i = 0; i < u.length; i += STRIDE) {
-    const [sx, sy] = w2s(u[i + F.X], u[i + F.Z]);
+    const [sx, sy] = w2s(ux(u, i), uz(u, i));
     const dx = sx - mouse.x, dy = sy - mouse.y;
     const d = dx * dx + dy * dy;
     if (d < bestD) { bestD = d; best = i; }
@@ -489,41 +499,73 @@ function fmtTime(sec) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-function show() {
+// The heavy sidebar (per-team counts + event feed) only depends on the integer
+// keyframe, so it refreshes when idx changes, not every animation tick.
+function updateSidebar() {
   const fr = data.frames[idx];
   document.getElementById('s_time').textContent = fr ? fmtTime(fr.t) : '—';
   document.getElementById('s_frame').textContent = fr ? fr.f : '—';
   document.getElementById('s_units').textContent = fr ? fr.n : '—';
-  const last = data.frames.length - 1;
-  document.getElementById('timelabel').textContent =
-    fr ? `${fmtTime(fr.t)}   frame ${idx} / ${last}` : '—';
-  document.getElementById('slider').value = idx;
   renderTeams();
   renderEvents();
+}
+
+function updateTimeLabel() {
+  const fr = data.frames[idx];
+  const last = data.frames.length - 1;
+  const t = fr ? fr.t + renderFrac * secPerFrame : 0; // interpolate the shown game time
+  document.getElementById('timelabel').textContent =
+    fr ? `${fmtTime(t)}   frame ${idx} / ${last}` : '—';
+  document.getElementById('slider').value = idx;
+}
+
+// Move the continuous playhead (in keyframe units). idx = floor(playPos) is the
+// current sampled frame; renderFrac is the fraction into the interval to the next
+// one, which the draw helpers (ux/uz) use to interpolate unit movement.
+function setPlayhead(pos, forceSidebar) {
+  const last = data.frames.length - 1;
+  playPos = Math.max(0, Math.min(last, pos));
+  const newIdx = Math.floor(playPos + 1e-6);
+  renderFrac = Math.max(0, playPos - newIdx);
+  const changed = newIdx !== idx || forceSidebar;
+  idx = newIdx;
+  if (changed) updateSidebar();
+  updateTimeLabel();
   draw();
 }
 
+function show() { setPlayhead(idx, true); } // full refresh at the current keyframe
+
+// Jump to a whole keyframe (stepping / scrubbing): no interpolation.
 function go(i) {
-  idx = Math.max(0, Math.min(data.frames.length - 1, i));
-  show();
+  setPlayhead(Math.round(i), true);
 }
 
 function stopPlay() {
-  if (playTimer) { clearInterval(playTimer); playTimer = null; }
+  if (playRAF) { cancelAnimationFrame(playRAF); playRAF = null; }
   document.getElementById('play').textContent = '▶ Play';
 }
 function startPlay() {
   if (!data || data.frames.length < 2) return;
-  if (idx >= data.frames.length - 1) idx = 0;
-  const speed = +document.getElementById('speed').value || 1;
-  const period = Math.max(16, (1000 * secPerFrame) / speed);
-  playTimer = setInterval(() => {
-    if (idx >= data.frames.length - 1) { stopPlay(); return; }
-    go(idx + 1);
-  }, period);
+  const last = data.frames.length - 1;
+  if (playPos >= last) setPlayhead(0, true); // restart from the beginning at the end
+  playLastTs = 0;
   document.getElementById('play').textContent = '⏸ Pause';
+  const tick = (ts) => {
+    if (!playLastTs) playLastTs = ts;
+    // Clamp large gaps (e.g. the tab was backgrounded) so we don't jump.
+    const dtReal = Math.min(0.1, (ts - playLastTs) / 1000);
+    playLastTs = ts;
+    const speed = +document.getElementById('speed').value || 1;
+    // 1x = real time: 1 game-second per second. Advance in keyframe units.
+    const next = playPos + (dtReal * speed) / secPerFrame;
+    if (next >= last) { setPlayhead(last, false); stopPlay(); return; }
+    setPlayhead(next, false);
+    playRAF = requestAnimationFrame(tick);
+  };
+  playRAF = requestAnimationFrame(tick);
 }
-function togglePlay() { playTimer ? stopPlay() : startPlay(); }
+function togglePlay() { playRAF ? stopPlay() : startPlay(); }
 
 // ---- input ----------------------------------------------------------------
 cv.addEventListener('mousemove', e => {
@@ -568,7 +610,8 @@ document.getElementById('prev').onclick = () => { stopPlay(); go(idx - 1); };
 document.getElementById('next').onclick = () => { stopPlay(); go(idx + 1); };
 document.getElementById('last').onclick = () => { stopPlay(); go(data.frames.length - 1); };
 document.getElementById('play').onclick = togglePlay;
-document.getElementById('speed').onchange = () => { if (playTimer) { stopPlay(); startPlay(); } };
+// Speed is read live inside the play loop, so a change takes effect immediately.
+document.getElementById('speed').onchange = () => {};
 document.getElementById('icons').onchange = e => { showIcons = e.target.checked; draw(); };
 document.getElementById('maptex').onchange = e => { showTexture = e.target.checked; draw(); };
 document.getElementById('grid').onchange = e => { showGrid = e.target.checked; draw(); };
