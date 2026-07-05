@@ -60,6 +60,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
+	// Vendored BAR unit icons, served at /icons/<file> to match the bitmap paths
+	// in the wire payload. Icons are immutable, so let the browser cache them.
+	if sub, err := iconsSubFS(); err == nil {
+		mux.Handle("/icons/", http.StripPrefix("/icons/", cacheForever(http.FileServer(http.FS(sub)))))
+	}
 	mux.HandleFunc("/api/replays", s.handleList)
 	mux.HandleFunc("/api/replay", s.handleReplay)
 	return mux
@@ -132,6 +137,15 @@ func (s *Server) list() ([]replayInfo, error) {
 	}
 	sort.Slice(infos, func(i, j int) bool { return infos[i].File < infos[j].File })
 	return infos, nil
+}
+
+// cacheForever wraps a handler with a long-lived immutable cache header, for
+// the embedded icon assets (they never change for a given binary).
+func cacheForever(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
+		h.ServeHTTP(w, r)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

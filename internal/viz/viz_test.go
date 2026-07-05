@@ -138,6 +138,46 @@ func TestLoadBRSNAP(t *testing.T) {
 	}
 }
 
+func TestUnitIcons(t *testing.T) {
+	// Well-known BAR units should resolve to an icon that exists in the embedded
+	// FS. defence_0_laser is shared by arm/cor light laser towers.
+	cases := map[string]string{
+		"armcom": "icons/armcom.png",
+		"armllt": "icons/defence_0_laser.png",
+		"corllt": "icons/defence_0_laser.png",
+		"armmex": "icons/mex_t1.png",
+	}
+	for name, want := range cases {
+		if got := unitIcon(name); got != want {
+			t.Errorf("unitIcon(%q)=%q want %q", name, got, want)
+		}
+	}
+	if got := unitIcon("not_a_real_unit"); got != "" {
+		t.Errorf("unitIcon(unknown)=%q want empty", got)
+	}
+	// Scavenger variant should resolve to the inverted path.
+	if got := unitIcon("armcom_scav"); got != "icons/inverted/armcom.png" {
+		t.Errorf("unitIcon(armcom_scav)=%q want icons/inverted/armcom.png", got)
+	}
+}
+
+func TestToWireIncludesIcons(t *testing.T) {
+	dir := t.TempDir()
+	path := writeJSONL(t, dir, "g")
+	rep, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fixture's UnitDefs include armcom and corllt; both have icons.
+	w := rep.toWire()
+	if w.UnitIcons["armcom"] != "icons/armcom.png" {
+		t.Errorf("armcom icon=%q", w.UnitIcons["armcom"])
+	}
+	if w.UnitIcons["corllt"] != "icons/defence_0_laser.png" {
+		t.Errorf("corllt icon=%q", w.UnitIcons["corllt"])
+	}
+}
+
 func TestListConfinesFiles(t *testing.T) {
 	dir := t.TempDir()
 	writeJSONL(t, dir, "a")

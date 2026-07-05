@@ -26,8 +26,12 @@ type wireReplay struct {
 	Bounds        wireBounds       `json:"bounds"`
 	Teams         []wireTeam       `json:"teams"`
 	UnitDefs      map[int32]string `json:"unitDefs"`
-	Frames        []wireFrame      `json:"frames"`
-	Events        []wireEvent      `json:"events"`
+	// UnitIcons maps a unit's internal name to its served icon path
+	// ("icons/foo.png"), limited to the def names present in this replay. The
+	// browser looks a unit up by name (via UnitDefs) and requests "/" + path.
+	UnitIcons map[string]string `json:"unitIcons"`
+	Frames    []wireFrame       `json:"frames"`
+	Events    []wireEvent       `json:"events"`
 }
 
 // wireBounds is the world-space extent of all sampled unit positions (x/z
@@ -79,6 +83,15 @@ func (rep *Replay) toWire() wireReplay {
 	// Teams come from Meta when present; otherwise synthesize from the team ids
 	// seen across frames/events so the front-end can still colour by team.
 	w.Teams = teams(rep)
+
+	// Icon paths for the unit types present in this replay (missing icons are
+	// simply omitted; the front-end falls back to a coloured dot).
+	w.UnitIcons = map[string]string{}
+	for _, name := range w.UnitDefs {
+		if path := unitIcon(name); path != "" {
+			w.UnitIcons[name] = path
+		}
+	}
 
 	w.Frames = make([]wireFrame, len(rep.Frames))
 	for i, fr := range rep.Frames {

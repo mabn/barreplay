@@ -124,17 +124,23 @@ go build ./cmd/barreplay-viz
 It lists every `.jsonl` and `.brsnap` file in the directory in a picker. `.jsonl` is
 the normal input; `.brsnap` (the raw widget stream) is also accepted so you can inspect
 a run whose `.jsonl` was never produced. The page renders each sampled frame as a
-top-down map of unit dots coloured by team (grouped by ally-team), with:
+top-down map, colouring units by team (grouped by ally-team), with:
 
+- **real BAR unit icons** (from vendored game assets) drawn on a team-coloured backing
+  once you zoom in; a fast dot render is used when zoomed out (toggle with the **Icons**
+  checkbox),
 - a **timeline scrubber** + play/pause and a speed control (game-time playback),
 - **scroll to zoom, drag to pan**, and a hover **tooltip** (unit name, team, position, health),
 - a live **sidebar**: game time / sim frame / unit count, per-team unit counts, and a
   lifecycle **event feed** (created/finished/destroyed) up to the current frame.
 
 The front-end is plain HTML/JS/Canvas (no framework, no build step) embedded into the
-binary via `go:embed`; the server exposes `/api/replays` (the file list) and
+binary via `go:embed`; the server exposes `/api/replays` (the file list),
 `/api/replay?file=<name>` (one capture, in a compact flat-array wire format — see
-`internal/viz/wire.go`).
+`internal/viz/wire.go`), and `/icons/<file>` (the vendored unit icons). The
+icon set and BAR's `icontypes.lua` name→bitmap table are vendored under
+`internal/viz/bardata/` (see its README); the mapping is parsed directly in Go,
+so no Lua VM / third-party dependency is added.
 
 ## Requirements for a real run
 

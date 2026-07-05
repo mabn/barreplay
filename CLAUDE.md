@@ -135,10 +135,19 @@ dir for `.jsonl`/`.brsnap` files and serves the viewer.
   `unitStride` (Go) must stay in lockstep with `STRIDE` (JS in `web/app.js`). It also computes
   the world-space `bounds` (for viewport fit) and a team roster (Meta.Teams plus any team id
   seen only in frames/events, so nothing renders colourless).
+- **`internal/viz/icons.go`** renders **real BAR unit icons**. It embeds the vendored icon
+  PNGs and BAR's `icontypes.lua` (a unit-name→bitmap gamedata table) under `bardata/`, and
+  **parses the Lua data table directly in Go** (a small line/brace scanner, no `gopher-lua`)
+  — keeping the repo stdlib-only. It also replicates the file's trailing `_scav` synthesis
+  (inverted-path variants) and keeps only entries whose bitmap file actually exists in the
+  embedded FS, so the payload never advertises a 404. `toWire` fills `unitIcons` (name→path)
+  for just the def names in the replay; the front-end draws the icon (team-coloured backing)
+  once zoomed in, else the fast dots.
 - **`internal/viz/server.go`** embeds `web/{index.html,app.js,style.css}` via `go:embed` and
-  exposes `/api/replays` (the file list) and `/api/replay?file=<basename>` (one capture's wire
-  payload). The `file` param is confined to the snapshots dir (basename only — rejects any path
-  separator / traversal). Assets are served `no-store` so a changed UI never serves stale.
+  exposes `/api/replays` (the file list), `/api/replay?file=<basename>` (one capture's wire
+  payload), and `/icons/<file>` (the embedded icons, cached). The `file` param is confined to
+  the snapshots dir (basename only — rejects any path separator / traversal). UI/JSON assets
+  are served `no-store` so a changed UI never serves stale.
 - **`internal/viz/web/`** is plain HTML/Canvas/vanilla-JS — **no framework, no build step**
   (the prompt allowed Vite but it's unnecessary for a single embedded page). `app.js` reads the
   flat unit arrays by index (no per-unit objects), batches dots by team colour, and does
