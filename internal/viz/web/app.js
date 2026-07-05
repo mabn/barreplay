@@ -27,6 +27,7 @@ let playTimer = null;
 let secPerFrame = 1;       // game seconds represented by one sampled frame
 let showIcons = true;      // draw BAR unit icons (vs plain dots)
 let showTexture = true;    // draw the map terrain texture behind everything
+let showGrid = true;       // draw the build/small/large grid
 let mapW = 0, mapH = 0;    // map world extent in elmos (0 if unknown)
 let mapTex = null;         // HTMLImageElement of the terrain texture, or null
 // Viewport in CSS pixels + the device-pixel ratio. The canvas backing store is
@@ -152,11 +153,20 @@ function fitView() {
   if (!isFinite(scale) || scale <= 0) scale = 0.1;
 }
 
+// Show the current zoom (screen px per world elmo) so it can be referred to.
+function updateZoomLabel() {
+  const el = document.getElementById('zoomlabel');
+  if (!el) return;
+  const z = scale >= 1 ? scale.toFixed(2) : scale.toPrecision(2);
+  el.textContent = `zoom ${z} px/elmo`;
+}
+
 // ---- drawing --------------------------------------------------------------
 function draw() {
   // Draw in CSS px; the DPR scale keeps the backing store at full device res.
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   ctx.clearRect(0, 0, viewW, viewH);
+  updateZoomLabel();
   if (!data) return;
 
   drawMapFrame();
@@ -298,10 +308,12 @@ function drawMapFrame() {
   // Each tier only draws when its spacing is legible, and gets bolder with size,
   // so a zoomed-out view shows just the large grid and detail appears on zoom.
   // Semi-transparent white so lines read over both the dark fallback and terrain.
-  const BUILD = 16;
-  drawGrid(b, x0, y0, x1, y1, BUILD, 'rgba(255,255,255,0.05)');       // build square (16)
-  drawGrid(b, x0, y0, x1, y1, BUILD * 3, 'rgba(255,255,255,0.10)');   // small square (48)
-  drawGrid(b, x0, y0, x1, y1, BUILD * 12, 'rgba(255,255,255,0.20)');  // large square (192)
+  if (showGrid) {
+    const BUILD = 16;
+    drawGrid(b, x0, y0, x1, y1, BUILD, 'rgba(255,255,255,0.05)');       // build square (16)
+    drawGrid(b, x0, y0, x1, y1, BUILD * 3, 'rgba(255,255,255,0.10)');   // small square (48)
+    drawGrid(b, x0, y0, x1, y1, BUILD * 12, 'rgba(255,255,255,0.20)');  // large square (192)
+  }
 
   ctx.strokeStyle = '#2d3a47';
   ctx.lineWidth = 1;
@@ -511,6 +523,7 @@ document.getElementById('play').onclick = togglePlay;
 document.getElementById('speed').onchange = () => { if (playTimer) { stopPlay(); startPlay(); } };
 document.getElementById('icons').onchange = e => { showIcons = e.target.checked; draw(); };
 document.getElementById('maptex').onchange = e => { showTexture = e.target.checked; draw(); };
+document.getElementById('grid').onchange = e => { showGrid = e.target.checked; draw(); };
 document.getElementById('iconsize').oninput = e => {
   iconScale = +e.target.value;
   setParam('iconsize', iconScale);
