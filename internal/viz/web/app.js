@@ -21,11 +21,15 @@ let idx = 0;               // current frame index
 let scale = 1;             // world->screen px per elmo
 let center = { x: 0, z: 0 };// world point at viewport centre
 let teamColor = {};        // team id -> css colour
-let mouse = null;          // {x,y} canvas px or null
+let mouse = null;          // {x,y} canvas px (CSS px) or null
 let drag = null;           // pan state or null
 let playTimer = null;
 let secPerFrame = 1;       // game seconds represented by one sampled frame
 let showIcons = true;      // draw BAR unit icons (vs plain dots)
+// Viewport in CSS pixels + the device-pixel ratio. The canvas backing store is
+// viewW*DPR x viewH*DPR and the context is pre-scaled by DPR, so all drawing is
+// done in CSS px while staying crisp on HiDPI displays.
+let viewW = 0, viewH = 0, DPR = 1;
 
 // Icons are drawn at a CONSTANT screen size, independent of zoom — exactly like
 // BAR's own minimap icons. Per-unit size = iconScale * the icon type's size
@@ -34,7 +38,7 @@ let showIcons = true;      // draw BAR unit icons (vs plain dots)
 // naturally spread apart when you zoom in and overlap when you zoom out.
 // iconScale is the base px-per-size-unit, adjustable via the UI slider (and the
 // ?iconsize= URL param).
-let iconScale = 20;
+let iconScale = 12;
 const ICON_SCALE_MIN = 4, ICON_SCALE_MAX = 60;
 const ICON_MIN_PX = 3;
 const ICON_MAX_PX = 200;
@@ -116,16 +120,21 @@ function teamLabel(t) {
 
 // ---- coordinate transforms ------------------------------------------------
 function w2s(x, z) {
-  return [cv.width / 2 + (x - center.x) * scale, cv.height / 2 + (z - center.z) * scale];
+  return [viewW / 2 + (x - center.x) * scale, viewH / 2 + (z - center.z) * scale];
 }
 function s2w(sx, sy) {
-  return [(sx - cv.width / 2) / scale + center.x, (sy - cv.height / 2) / scale + center.z];
+  return [(sx - viewW / 2) / scale + center.x, (sy - viewH / 2) / scale + center.z];
 }
 
 function resize() {
   const r = cv.parentElement.getBoundingClientRect();
-  cv.width = r.width;
-  cv.height = r.height;
+  DPR = window.devicePixelRatio || 1;
+  viewW = r.width;
+  viewH = r.height;
+  cv.width = Math.round(viewW * DPR);
+  cv.height = Math.round(viewH * DPR);
+  cv.style.width = viewW + 'px';
+  cv.style.height = viewH + 'px';
   draw();
 }
 window.addEventListener('resize', resize);
@@ -136,13 +145,15 @@ function fitView() {
   const w = Math.max(1, b.maxX - b.minX);
   const h = Math.max(1, b.maxZ - b.minZ);
   center = { x: (b.minX + b.maxX) / 2, z: (b.minZ + b.maxZ) / 2 };
-  scale = Math.min(cv.width / (w * 1.12), cv.height / (h * 1.12));
+  scale = Math.min(viewW / (w * 1.12), viewH / (h * 1.12));
   if (!isFinite(scale) || scale <= 0) scale = 0.1;
 }
 
 // ---- drawing --------------------------------------------------------------
 function draw() {
-  ctx.clearRect(0, 0, cv.width, cv.height);
+  // Draw in CSS px; the DPR scale keeps the backing store at full device res.
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.clearRect(0, 0, viewW, viewH);
   if (!data) return;
 
   drawMapFrame();
@@ -174,7 +185,7 @@ function drawDots(u) {
     ctx.beginPath();
     for (const i of byColor[color]) {
       const [sx, sy] = w2s(u[i + F.X], u[i + F.Z]);
-      if (sx < -8 || sy < -8 || sx > cv.width + 8 || sy > cv.height + 8) continue;
+      if (sx < -8 || sy < -8 || sx > viewW + 8 || sy > viewH + 8) continue;
       ctx.moveTo(sx + rad, sy);
       ctx.arc(sx, sy, rad, 0, 7);
     }
@@ -183,20 +194,23 @@ function drawDots(u) {
 }
 
 // Primary render: every unit as its BAR icon, tinted to the team colour and
-// drawn at a constant screen size (see ICON_PX_PER_SIZE). A unit with no icon
-// (or whose bitmap hasn't loaded yet) shows a coloured dot so it is never
-// invisible.
+// drawn at a constant screen size (see iconScale). A unit with no icon (or whose
+// bitmap hasn't loaded yet) shows a coloured dot so it is never invisible.
 function drawIcons(u) {
   for (let i = 0; i < u.length; i += STRIDE) {
     const [sx, sy] = w2s(u[i + F.X], u[i + F.Z]);
     const info = iconInfoFor(u[i + F.DEF]);
-    const px = Math.max(ICON_MIN_PX, Math.min(ICON_MAX_PX, iconScale * (info ? info.s : 1)));
+    const px = Math.round(Math.max(ICON_MIN_PX, Math.min(ICON_MAX_PX, iconScale * (info ? info.s : 1))));
     const r = px / 2;
-    if (sx < -px || sy < -px || sx > cv.width + px || sy > cv.height + px) continue;
+    if (sx < -px || sy < -px || sx > viewW + px || sy > viewH + px) continue;
     const color = teamColor[u[i + F.TEAM]] || '#9aa6b2';
-    const tinted = info ? tintedIcon(info.p, color) : null;
-    if (tinted) {
-      ctx.drawImage(tinted, sx - r, sy - r, px, px);
+    const glyph = info ? renderIcon(info.p, color, px) : null;
+    if (glyph) {
+      // Draw the pre-rendered glyph at its CSS size; snapping the top-left to a
+      // device-pixel grid keeps the small icon crisp.
+      const dx = Math.round((sx - r) * DPR) / DPR;
+      const dy = Math.round((sy - r) * DPR) / DPR;
+      ctx.drawImage(glyph, dx, dy, px, px);
     } else {
       ctx.fillStyle = color;
       ctx.beginPath();
@@ -211,6 +225,42 @@ function iconInfoFor(def) {
   if (!data.unitIcons) return null;
   const name = data.unitDefs && data.unitDefs[def];
   return name ? (data.unitIcons[name] || null) : null;
+}
+
+// renderCache: "path|color|devPx" -> offscreen canvas of the tinted icon
+// downscaled to the exact device-pixel size it will be drawn at. The 128px BAR
+// icons downscaled ~10x with the canvas's default (low-quality) bilinear filter
+// smear adjacent detail into blobs; instead we halve repeatedly with
+// high-quality smoothing (a mipmap-style box filter) down to the target, which
+// keeps features like the two feet-dots distinct. Keyed by device px so HiDPI
+// gets a full-res glyph; rebuilt only when the icon size (slider) changes.
+const renderCache = {};
+function renderIcon(path, color, cssPx) {
+  const devPx = Math.max(1, Math.round(cssPx * DPR));
+  const key = path + '|' + color + '|' + devPx;
+  const cached = renderCache[key];
+  if (cached !== undefined) return cached;
+  const tint = tintedIcon(path, color);
+  if (!tint) return null; // bitmap not loaded yet; retry next draw
+  let src = tint;
+  while (src.width > devPx * 2) {
+    const nw = Math.max(devPx, Math.floor(src.width / 2));
+    const nh = Math.max(devPx, Math.floor(src.height / 2));
+    src = scaleCanvas(src, nw, nh);
+  }
+  const out = scaleCanvas(src, devPx, devPx);
+  renderCache[key] = out;
+  return out;
+}
+
+function scaleCanvas(src, w, h) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const cx = c.getContext('2d');
+  cx.imageSmoothingEnabled = true;
+  cx.imageSmoothingQuality = 'high';
+  cx.drawImage(src, 0, 0, w, h);
+  return c;
 }
 
 // Map extent rectangle + a light grid so panning/zoom has reference.
@@ -411,8 +461,8 @@ cv.addEventListener('wheel', e => {
   const mx = e.clientX - r.left, my = e.clientY - r.top;
   const [wx, wz] = s2w(mx, my);
   scale = Math.max(0.01, Math.min(40, scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
-  center.x = wx - (mx - cv.width / 2) / scale;
-  center.z = wz - (my - cv.height / 2) / scale;
+  center.x = wx - (mx - viewW / 2) / scale;
+  center.z = wz - (my - viewH / 2) / scale;
   draw();
 }, { passive: false });
 
