@@ -9,8 +9,9 @@ A BAR replay (`.sdfz`) only stores the deterministic input stream — not unit
 positions — so the only way to recover positions is to replay it in the engine and
 sample state from inside via a small read-only Lua widget.
 
-> A later phase will add a UI that scrubs back and forth through the captured data.
-> That is out of scope here; the `snapshot` package is the seam it will read from.
+A companion tool, **`barreplay-viz`**, serves a browser UI that scrubs back and
+forth through the captured data (unit positions/teams/health on a top-down map).
+See [Visualizing a capture](#visualizing-a-capture) below.
 
 ## Pipeline
 
@@ -34,12 +35,14 @@ replay link / gameId / local .sdfz
 | `internal/demofile` | Parse the `.sdfz` header (byte-packed, little-endian) and the embedded TDF startscript. |
 | `internal/engine` | Locate `spring-headless`/`pr-downloader`, provision missing content, write the widget (with its output-file path), build the playback startscript, launch the engine. |
 | `internal/capture` | Parse the widget's `BRSNAP` output file into `snapshot` records. |
+| `internal/viz` | Load `.jsonl`/`.brsnap` captures and serve the browser playback UI (embedded HTML/JS/CSS). |
 | `assets/lua` | The embedded, read-only Lua widget injected into the engine's write-dir. |
 
 ## Build
 
 ```sh
-go build ./cmd/barreplay
+go build ./cmd/barreplay        # the capture CLI
+go build ./cmd/barreplay-viz    # the visualization server
 go test ./...
 ```
 
@@ -101,6 +104,50 @@ One JSON object per line, tagged by `type`:
 in `meta` and is stable for the whole game. Read it back with `snapshot.NewReader`.
 
 To change the persisted format, implement `snapshot.Writer` — nothing else changes.
+
+## Visualizing a capture
+
+`barreplay-viz` serves an interactive, browser-based playback of a capture. It is a
+separate, **read-only** tool: it never launches the engine — it only reads finished
+snapshot files.
+
+```sh
+go build ./cmd/barreplay-viz
+./barreplay-viz -snapshots ./snapshots      # then open http://127.0.0.1:8080
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `-snapshots <dir>` | Directory of snapshot files to browse (default `./snapshots`). |
+| `-addr <host:port>` | Listen address (default `127.0.0.1:8080`). |
+
+It lists every `.jsonl` and `.brsnap` file in the directory in a picker. `.jsonl` is
+the normal input; `.brsnap` (the raw widget stream) is also accepted so you can inspect
+a run whose `.jsonl` was never produced. The page renders each sampled frame as a
+top-down map, colouring units by team (grouped by ally-team), with:
+
+- the **real map terrain** behind the units (fetched from the BAR maps API by map name and
+  positioned in world space), toggled with the **Map** checkbox,
+- **real BAR unit icons** (from vendored game assets), team-tinted and drawn at a
+  constant screen size (per-type, like BAR's minimap — icons overlap when zoomed out and
+  spread apart when zoomed in); toggle to plain dots with the **Icons** checkbox and adjust
+  their size with the slider next to it (persisted in the URL as `?iconsize=`),
+- a **timeline scrubber** + play/pause and a speed control (game-time playback),
+- **scroll to zoom, middle-drag to pan**, and a hover **tooltip** (unit name, team, position, health),
+- a live **sidebar**: game time / sim frame / unit count, per-team unit counts, and a
+  lifecycle **event feed** (created/finished/destroyed) up to the current frame.
+
+The front-end is plain HTML/JS/Canvas (no framework, no build step) embedded into the
+binary via `go:embed`; the server exposes `/api/replays` (the file list),
+`/api/replay?file=<name>` (one capture, in a compact flat-array wire format — see
+`internal/viz/wire.go`), `/icons/<file>` (the vendored unit icons), and
+`/api/mapinfo` + `/api/maptex` (the map's world extent and terrain texture, proxied and
+cached from the BAR maps API by map name). The
+icon set and BAR's `icontypes.lua` name→bitmap table are vendored under
+`internal/viz/bardata/` (see its README); the mapping is parsed directly in Go,
+so no Lua VM / third-party dependency is added. The map texture is fetched at view time
+(it needs outbound access to `api.bar-rts.com`); if that's unavailable the viewer just
+falls back to a plain background.
 
 ## Requirements for a real run
 
