@@ -25,8 +25,9 @@ go run ./cmd/barreplay-pack ./caps/<gameId>.brsnap       # raw stream -> FULL .b
 ```
 
 Tests are hermetic: `barapi` uses a mock HTTP server, `demofile` tests against the
-real fixture `internal/demofile/testdata/sample_header.sdfz`, and `snapshot`/`capture`
-are pure. None of them launch the engine.
+real fixture `internal/demofile/testdata/sample_header.sdfz`, `snapshot`/`capture`
+are pure, and `cmd/barreplay-pack` exercises its demo-metadata fetch against a mock
+BAR API serving that same fixture. None of them launch the engine or touch the network.
 
 ## Architecture (where things live)
 
