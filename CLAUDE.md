@@ -147,8 +147,10 @@ dir for `.jsonl`/`.brsnap` files and serves the viewer.
   into a team-colour field then clipped to its own alpha, preserving the internal detail;
   cached per icon×team) at a **constant
   screen size** (`ICON_PX_PER_SIZE * size`, independent of zoom, like BAR's minimap — so icons
-  spread apart when zoomed in and overlap when zoomed out). A unit with no/loading icon shows
-  a coloured dot so it is never invisible; the Icons checkbox switches to plain dots.
+  spread apart when zoomed in and overlap when zoomed out). The base px-per-size-unit is a
+  UI slider (`iconScale`, persisted as `?iconsize=`); the Icons checkbox switches to plain
+  dots. A unit with no/loading icon shows a coloured dot so it is never invisible. The
+  selected replay and icon size are both kept in the URL, so a refresh/shared link restores them.
 - **`internal/viz/server.go`** embeds `web/{index.html,app.js,style.css}` via `go:embed` and
   exposes `/api/replays` (the file list), `/api/replay?file=<basename>` (one capture's wire
   payload), and `/icons/<file>` (the embedded icons, cached). The `file` param is confined to
