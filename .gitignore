@@ -2,8 +2,3 @@
 /barreplay-viz
 /snapshots/
 *.part
-
-# stray scratch scripts (never commit)
-/shot*.js
-/gen*.go
-/viz

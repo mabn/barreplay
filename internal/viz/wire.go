@@ -8,13 +8,10 @@ import (
 )
 
 // unitStride is the number of ints packed per unit in a wireFrame.U slice:
-// [id, def, team, x, z, hp, maxHp, dvx, dvz]. Positions/health are rounded to
-// integers — engine "elmo" precision is far finer than a top-down map view needs,
-// and integer JSON encodes much smaller than float. dvx/dvz are the unit's
-// per-keyframe-interval displacement (velocity × SampleEvery, in elmos), used by
-// the front-end to interpolate movement smoothly between sampled frames instead
-// of blinking. The front-end reads this stride.
-const unitStride = 9
+// [id, def, team, x, z, hp, maxHp]. Positions/health are rounded to integers —
+// engine "elmo" precision is far finer than a top-down map view needs, and
+// integer JSON encodes much smaller than float. The front-end reads this stride.
+const unitStride = 7
 
 // wireReplay is the JSON payload sent to the browser. Frames use a flat integer
 // array per frame instead of an array of objects: a real replay can hold ~600
@@ -135,13 +132,6 @@ func (rep *Replay) toWire() wireReplay {
 		}
 	}
 
-	// Velocity is captured per sim-frame; multiply by the sample interval to get the
-	// displacement between consecutive sampled frames, which the front-end scales by
-	// the interpolation fraction to animate movement.
-	sampleEvery := rep.Meta.SampleEvery
-	if sampleEvery <= 0 {
-		sampleEvery = 30
-	}
 	w.Frames = make([]wireFrame, len(rep.Frames))
 	for i, fr := range rep.Frames {
 		u := make([]int32, 0, len(fr.Units)*unitStride)
@@ -150,7 +140,6 @@ func (rep *Replay) toWire() wireReplay {
 				us.UnitID, us.DefID, us.Team,
 				round(us.Pos.X), round(us.Pos.Z),
 				round(us.Health), round(us.MaxHealth),
-				round(us.VelX*float32(sampleEvery)), round(us.VelZ*float32(sampleEvery)),
 			)
 		}
 		w.Frames[i] = wireFrame{Frame: fr.Frame, Time: fr.TimeSec, N: len(fr.Units), U: u}
