@@ -95,7 +95,8 @@ barreplay -progress -data ~/.local/share/Beyond-All-Reason/data -out ./snaps \
 ## Output format (v2: `.brp` compact binary)
 
 The default output is `.brp` — a sectioned, gzip-compressed columnar binary owned
-by `snapshot/brp.go`. Unit state barely changes between 1 Hz samples, so each
+by `snapshot/brp.go` and specified byte-for-byte in
+[`docs/brp-format.md`](./docs/brp-format.md). Unit state barely changes between 1 Hz samples, so each
 unit's values are stored as deltas against the same unit in the previous frame
 (positions additionally predicted by the unit's own velocity), zigzag-varint
 encoded column by column, then gzipped. On a real ~33-minute 8v8 game (4.2M unit

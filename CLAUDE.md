@@ -49,6 +49,7 @@ output and the writer.
 
 ### On-disk format v2: `.brp` (snapshot/brp.go)
 
+Full byte-level spec: `docs/brp-format.md` — keep it in sync with any codec change.
 The default output (`-format brp`; `-format jsonl` keeps the legacy JSONL). A real
 33-min 8v8 game is **476 MB of JSONL but ~14 MB of .brp (~33x)** with full fidelity
 kept (every JSONL field, quantized once: whole elmos/hp, velocity as
