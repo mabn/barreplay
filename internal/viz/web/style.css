@@ -74,6 +74,13 @@ canvas { display: block; width: 100%; height: 100%; background: #0c0f13; cursor:
 #tooltip .bar { height: 5px; background: #222c36; border-radius: 3px; margin: 3px 0 1px; overflow: hidden; }
 #tooltip .bar > div { height: 100%; }
 
+#zoomlabel {
+  position: absolute; left: 8px; bottom: 8px; pointer-events: none;
+  background: rgba(20,26,33,0.82); border: 1px solid #2a323c; border-radius: 4px;
+  padding: 3px 7px; font-size: 11px; color: #9fb0bf;
+  font-variant-numeric: tabular-nums; z-index: 5;
+}
+
 .hint { font-size: 11px; color: #6a7785; line-height: 1.5; }
 #empty {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
