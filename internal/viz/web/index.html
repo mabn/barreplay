@@ -23,6 +23,8 @@
   <button id="last" title="Last frame">⏭</button>
   <label style="font-size:12px;color:#9fb0bf;">Speed
     <select id="speed">
+      <option value="1">1× (real time)</option>
+      <option value="2">2×</option>
       <option value="4">4×</option>
       <option value="8">8×</option>
       <option value="16" selected>16×</option>
@@ -43,6 +45,9 @@
     <input type="checkbox" id="icons" checked> Icons
     <input type="range" id="iconsize" min="4" max="60" step="1" value="12"
            style="flex:0 0 auto;width:80px;" title="Icon size">
+  </label>
+  <label style="font-size:12px;color:#9fb0bf;display:flex;align-items:center;gap:4px;" title="When zoomed in, grow a building's icon to 90% of its footprint instead of a constant size">
+    <input type="checkbox" id="growicons" checked> Fit icons
   </label>
   <input type="range" id="slider" min="0" max="0" value="0">
   <span class="timelabel" id="timelabel">—</span>

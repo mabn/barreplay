@@ -8,10 +8,13 @@ import (
 )
 
 // unitStride is the number of ints packed per unit in a wireFrame.U slice:
-// [id, def, team, x, z, hp, maxHp]. Positions/health are rounded to integers —
-// engine "elmo" precision is far finer than a top-down map view needs, and
-// integer JSON encodes much smaller than float. The front-end reads this stride.
-const unitStride = 7
+// [id, def, team, x, z, hp, maxHp, dvx, dvz]. Positions/health are rounded to
+// integers — engine "elmo" precision is far finer than a top-down map view needs,
+// and integer JSON encodes much smaller than float. dvx/dvz are the unit's
+// per-keyframe-interval displacement (velocity × SampleEvery, in elmos), used by
+// the front-end to interpolate movement smoothly between sampled frames instead
+// of blinking. The front-end reads this stride.
+const unitStride = 9
 
 // wireReplay is the JSON payload sent to the browser. Frames use a flat integer
 // array per frame instead of an array of objects: a real replay can hold ~600
@@ -30,9 +33,9 @@ type wireReplay struct {
 	// multiplier), limited to the def names present in this replay. The browser
 	// looks a unit up by name (via UnitDefs) and requests "/" + path.
 	UnitIcons map[string]wireIcon `json:"unitIcons"`
-	// Footprints maps a building's internal name to its build-footprint size in
-	// elmos. Only immobile structures are included (presence == it's a building),
-	// so the front-end draws a footprint rectangle only for buildings.
+	// Footprints maps a structure's internal name to its build-footprint size in
+	// elmos. Only immobile units are included (presence == it doesn't move), so the
+	// front-end draws a footprint rectangle only for buildings/turrets/etc.
 	Footprints map[string]wireFootprint `json:"footprints"`
 	Frames     []wireFrame              `json:"frames"`
 	Events     []wireEvent              `json:"events"`
@@ -119,16 +122,26 @@ func (rep *Replay) toWire() wireReplay {
 		}
 	}
 
-	// Build footprints for immobile structures only. XSize/ZSize are in 8-elmo
-	// squares (engine SQUARE_SIZE), so multiply by 8 for world elmos.
+	// Build footprints for structures only, via !CanMove OR IsBuilding. Neither
+	// flag alone suffices: nano/build turrets are immobile but tagged builders (not
+	// buildings), while some factories report CanMove — so the union catches both
+	// and still excludes genuinely mobile units. XSize/ZSize are in 8-elmo squares
+	// (engine SQUARE_SIZE), so multiply by 8.
 	const squareSize = 8
 	w.Footprints = map[string]wireFootprint{}
 	for _, d := range rep.Meta.UnitDefs {
-		if d.IsBuilding && d.XSize > 0 {
+		if (!d.CanMove || d.IsBuilding) && d.XSize > 0 {
 			w.Footprints[d.Name] = wireFootprint{W: d.XSize * squareSize, H: d.ZSize * squareSize}
 		}
 	}
 
+	// Velocity is captured per sim-frame; multiply by the sample interval to get the
+	// displacement between consecutive sampled frames, which the front-end scales by
+	// the interpolation fraction to animate movement.
+	sampleEvery := rep.Meta.SampleEvery
+	if sampleEvery <= 0 {
+		sampleEvery = 30
+	}
 	w.Frames = make([]wireFrame, len(rep.Frames))
 	for i, fr := range rep.Frames {
 		u := make([]int32, 0, len(fr.Units)*unitStride)
@@ -137,6 +150,7 @@ func (rep *Replay) toWire() wireReplay {
 				us.UnitID, us.DefID, us.Team,
 				round(us.Pos.X), round(us.Pos.Z),
 				round(us.Health), round(us.MaxHealth),
+				round(us.VelX*float32(sampleEvery)), round(us.VelZ*float32(sampleEvery)),
 			)
 		}
 		w.Frames[i] = wireFrame{Frame: fr.Frame, Time: fr.TimeSec, N: len(fr.Units), U: u}

@@ -22,8 +22,10 @@ func writeJSONL(t *testing.T, dir, gameID string) string {
 		MapName:     "Test Map",
 		SampleEvery: 30,
 		UnitDefs: map[int32]snapshot.UnitDef{
-			1: {DefID: 1, Name: "armcom", CanMove: true},                        // mobile: no footprint
-			2: {DefID: 2, Name: "corllt", XSize: 2, ZSize: 3, IsBuilding: true}, // building: 16x24 elmos
+			1: {DefID: 1, Name: "armcom", CanMove: true},                                       // mobile: no footprint
+			2: {DefID: 2, Name: "corllt", XSize: 2, ZSize: 3, IsBuilding: true},                // building: 16x24 elmos
+			3: {DefID: 3, Name: "armnanotct3", XSize: 12, ZSize: 12, IsBuilder: true},          // immobile builder (nano turret): footprint despite not IsBuilding
+			4: {DefID: 4, Name: "armlab", XSize: 5, ZSize: 5, IsBuilding: true, CanMove: true}, // factory: reports CanMove but IsBuilding -> footprint
 		},
 		Teams: []snapshot.TeamInfo{
 			{TeamID: 0, AllyTeam: 0, Side: "armada"},
@@ -35,7 +37,7 @@ func writeJSONL(t *testing.T, dir, gameID string) string {
 	}
 	frames := []snapshot.Frame{
 		{Frame: 30, TimeSec: 1, Units: []snapshot.UnitState{
-			{UnitID: 100, DefID: 1, Team: 0, Pos: snapshot.Vec3{X: 10, Y: 0, Z: 20}, Health: 3000, MaxHealth: 3000},
+			{UnitID: 100, DefID: 1, Team: 0, Pos: snapshot.Vec3{X: 10, Y: 0, Z: 20}, Health: 3000, MaxHealth: 3000, VelX: 2, VelZ: -1},
 			{UnitID: 200, DefID: 2, Team: 1, Pos: snapshot.Vec3{X: -50, Y: 0, Z: 80}, Health: 400, MaxHealth: 800},
 		}},
 		{Frame: 60, TimeSec: 2, Units: []snapshot.UnitState{
@@ -94,8 +96,9 @@ func TestToWirePacking(t *testing.T) {
 	if f0.N != 2 || len(f0.U) != 2*unitStride {
 		t.Fatalf("frame0: N=%d len(U)=%d want N=2 len=%d", f0.N, len(f0.U), 2*unitStride)
 	}
-	// First unit: id=100, def=1, team=0, x=10, z=20, hp=3000, maxHp=3000.
-	want := []int32{100, 1, 0, 10, 20, 3000, 3000}
+	// First unit: id=100, def=1, team=0, x=10, z=20, hp=3000, maxHp=3000, and the
+	// velocity displacement over one interval: vx=2*30=60, vz=-1*30=-30.
+	want := []int32{100, 1, 0, 10, 20, 3000, 3000, 60, -30}
 	for i, v := range want {
 		if f0.U[i] != v {
 			t.Errorf("U[%d]=%d want %d (full=%v)", i, f0.U[i], v, f0.U[:unitStride])
@@ -109,9 +112,17 @@ func TestToWirePacking(t *testing.T) {
 		t.Errorf("teams=%+v", w.Teams)
 	}
 
-	// Footprints: only the building (corllt) is included, in elmos (xsize/zsize * 8).
+	// Footprints: immobile units are included, in elmos (xsize/zsize * 8).
 	if fp, ok := w.Footprints["corllt"]; !ok || fp.W != 16 || fp.H != 24 {
 		t.Errorf("corllt footprint = %+v (ok=%v), want {W:16 H:24}", fp, ok)
+	}
+	// An immobile builder (nano turret) is not IsBuilding but still gets a footprint.
+	if fp, ok := w.Footprints["armnanotct3"]; !ok || fp.W != 96 || fp.H != 96 {
+		t.Errorf("armnanotct3 footprint = %+v (ok=%v), want {W:96 H:96}", fp, ok)
+	}
+	// A factory reports CanMove but is IsBuilding, so it gets a footprint.
+	if fp, ok := w.Footprints["armlab"]; !ok || fp.W != 40 || fp.H != 40 {
+		t.Errorf("armlab footprint = %+v (ok=%v), want {W:40 H:40}", fp, ok)
 	}
 	if _, ok := w.Footprints["armcom"]; ok {
 		t.Errorf("armcom is mobile; should have no footprint, got %+v", w.Footprints["armcom"])
