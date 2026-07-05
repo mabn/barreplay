@@ -136,6 +136,9 @@ top-down map, colouring units by team (grouped by ally-team), with:
   drawn in world space (so it scales with zoom) and team-tinted; mobile units get none.
   Toggle with the **Footprints** checkbox. (The footprint size comes from the captured
   unit-def `xsize`/`zsize`, so only captures made after the unit-def dump was added carry it.)
+- **Fit icons** (checkbox, default on): normally icons are a constant screen size, but when
+  you zoom in far enough that a building's icon would reach 90% of its footprint, the icon
+  grows with the footprint instead of staying tiny inside it. Mobile units are unaffected.
 - a **timeline scrubber** + play/pause and a speed control (game-time playback),
 - **scroll to zoom, middle-drag to pan**, and a hover **tooltip** (unit name, team, position, health),
 - a live **sidebar**: game time / sim frame / unit count, per-team unit counts, and a
