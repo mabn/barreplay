@@ -291,11 +291,17 @@ function drawMapFrame() {
   // shows when placing — plus a coarser every-8th line, both aligned to the world
   // origin so lines fall on real build-square boundaries. Each tier only draws
   // when its spacing is legible, so a zoomed-out view isn't a solid mesh.
-  // Light, semi-transparent lines so the grid reads over both the dark fallback
-  // and a bright terrain texture.
+  // BAR grid hierarchy (all aligned to the world origin, where buildings snap):
+  //   build square = 16 elmos (the placement grid)
+  //   small square = 48 elmos  = 3x3 build squares
+  //   large square = 192 elmos = 4x4 small squares = 3x3 metal makers (each 4x4 build)
+  // Each tier only draws when its spacing is legible, and gets bolder with size,
+  // so a zoomed-out view shows just the large grid and detail appears on zoom.
+  // Semi-transparent white so lines read over both the dark fallback and terrain.
   const BUILD = 16;
-  drawGrid(b, x0, y0, x1, y1, BUILD, 'rgba(255,255,255,0.07)');      // fine: one build square
-  drawGrid(b, x0, y0, x1, y1, BUILD * 4, 'rgba(255,255,255,0.16)');  // coarse: every 4 squares (64 elmos)
+  drawGrid(b, x0, y0, x1, y1, BUILD, 'rgba(255,255,255,0.05)');       // build square (16)
+  drawGrid(b, x0, y0, x1, y1, BUILD * 3, 'rgba(255,255,255,0.10)');   // small square (48)
+  drawGrid(b, x0, y0, x1, y1, BUILD * 12, 'rgba(255,255,255,0.20)');  // large square (192)
 
   ctx.strokeStyle = '#2d3a47';
   ctx.lineWidth = 1;
