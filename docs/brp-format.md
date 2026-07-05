@@ -1,4 +1,4 @@
-# The BRP capture format, version 2
+# The BRP capture format, version 3
 
 `.brp` is barreplay's on-disk (and effectively over-the-wire) format for a
 recorded replay capture: periodic snapshots of every unit's state plus unit
@@ -16,16 +16,29 @@ Reference implementations (these three must stay in lockstep):
 | Serving / wire container | `internal/viz/wire.go`, `internal/viz/server.go` |
 
 Measured on a real 33-minute 8v8 game (1 952 sampled frames, 4 223 293 unit
-records, 48 823 events): **476 MB** as v1 JSONL → **13.96 MB** as `.brp`
-(~33×), of which the browser-relevant part is ~10 MB.
+records, 48 823 events): **476 MB** as v1 JSONL → **8 069 696 bytes (7.7 MiB)**
+as `.brp` v3 (~59×; v2 of the format measured 14.0 MiB). Section split on that
+capture: F 7.34 MB, X 0.46 MB, E 0.20 MB, M 0.06 MB.
+
+The two ideas that took v2 → v3 (see `docs/brp-optimizations.md` for the full
+evaluation, including the ideas that were measured and rejected):
+
+1. **Skip unchanged units.** In a real game ~2/3 of all per-frame unit records
+   are byte-for-byte predictable from the previous sample. v3 delta frames
+   list only the units that *changed* (plus an explicit dead list); everything
+   else is reconstructed by the decoder.
+2. **Drop the elevation columns.** y/dvy were ~28 % of all column changes
+   (terrain-following noise on every walking unit) and nothing consumed them:
+   the viewer renders the x/z plane, and a ground unit's height is implied by
+   the map heightmap. v3 does not store them; decoded frames return y = 0.
 
 ---
 
 ## 1. Design goals
 
 1. **Small.** Unit state barely changes between 1 Hz samples, so the format is
-   built around *temporal prediction*: store what changed, predict what can be
-   predicted, entropy-code the residual.
+   built around *temporal prediction*: store only what changed, predict what
+   can be predicted, entropy-code the residual.
 2. **Cheap to serve.** A web server must be able to hand any part of the
    capture to a browser **byte-for-byte, with no re-encoding** — every
    independently-fetchable piece is its own gzip stream, decodable with the
@@ -34,10 +47,11 @@ records, 48 823 events): **476 MB** as v1 JSONL → **13.96 MB** as `.brp`
    timestamp, and *skim* (render sparse preview frames) without downloading or
    decoding the whole file. This is the video-codec model: keyframes + delta
    frames, grouped into self-contained chunks, described by an index.
-4. **Full fidelity.** Everything the legacy JSONL carried is preserved
-   (subject to fixed quantization, §8), including data the current viewer
-   doesn't use — unit height, vertical velocity, build progress, per-team
-   economy. That data lives in its own section so a viewer never pays for it.
+4. **Fidelity by decision, not accident.** Everything stored is exact up to a
+   fixed, documented quantization (§8). What is *not* stored is a deliberate
+   choice: unit elevation and vertical velocity (see above). Build progress
+   and per-team economy are kept, in their own section, so a viewer never
+   pays for them.
 5. **Deterministic.** The same capture always produces a byte-identical file.
    barreplay's "diff two runs to prove an engine optimization changed nothing"
    workflow depends on this.
@@ -67,15 +81,17 @@ records, 48 823 events): **476 MB** as v1 JSONL → **13.96 MB** as `.brp`
 ```
 offset  size  value
 0       4     magic "BRP1" (ASCII)
-4       1     format version, u8. MUST be 2.
+4       1     format version, u8. MUST be 3.
 5       …     zero or more sections, back to back, until EOF:
               tag u8 | payloadLength u32le | payload (payloadLength bytes)
 ```
 
 - The magic is `BRP1` for **all** versions; the version byte is what changes.
-  Version 2 is the only defined version (a v1 existed only on an unmerged
-  development branch and was never released; readers MUST reject any version
-  byte other than 2).
+  Version 3 is the only defined version — v1 (unchunked) and v2 (every live
+  unit re-encoded in every frame; y/dvy columns) existed only pre-release.
+  Readers MUST reject any version byte other than 3. A v2 file cannot be
+  converted in place; regenerate it from its source `.brsnap`/`.jsonl` with
+  `barreplay-pack`.
 - Readers MUST skip sections with unknown tags (that is the format's
   forward-compatibility mechanism: new sections can be added without a version
   bump).
@@ -88,7 +104,7 @@ offset  size  value
 | --- | --- | --- | --- |
 | `M` (0x4D) | meta | one gzip stream of JSON | capture metadata + aggregates + **chunk index** |
 | `F` (0x46) | frames | concatenated **chunks** (§5) | core per-unit columns — everything the viewer renders |
-| `X` (0x58) | extra | concatenated chunks, same boundaries as `F` | full-fidelity extras: y, vertical velocity, build progress, team economy |
+| `X` (0x58) | extra | concatenated chunks, same boundaries as `F` | extras: build progress, team economy |
 | `E` (0x45) | events | one gzip stream (§7) | unit lifecycle events |
 | `J` (0x4A) | head | one gzip stream of JSON | **not used in files** — reserved for the viz wire container (§10) |
 
@@ -114,6 +130,8 @@ offset  size  value
   viewport. Omitted when the capture contains no units.
 - `frameTeams` (sorted ascending) exists so a consumer can colour/list teams
   that appear in frame or event data but are missing from `meta.teams`.
+- `unitRecords` counts **full frame contents** (live units per frame, summed),
+  not stored changed-records — it is unaffected by delta-frame skipping.
 
 ### 4.1 `meta` — the capture metadata
 
@@ -183,9 +201,10 @@ remains). Two properties make a chunk the unit of random access:
 
 1. **The codec's prediction state resets at every chunk boundary.** All
    temporal deltas (§6) are computed against the previous frame *within the
-   same chunk*; the chunk's first frame therefore encodes every unit through
-   the "new unit" path — fully absolute values. That first frame is the
-   **keyframe**. A chunk decodes correctly with zero bytes from outside it.
+   same chunk*; the chunk's first frame therefore has no prior state — every
+   unit is "new", so it appears in the changed list with fully absolute
+   values. That first frame is the **keyframe**. A chunk decodes correctly
+   with zero bytes from outside it.
 2. **A chunk's bytes are two standalone gzip streams**, concatenated:
 
    ```
@@ -205,48 +224,76 @@ Do **not** rely on the two streams being decodable as one concatenated
 multi-member gzip: some `DecompressionStream` implementations stop at the
 first member's end. Split at `fKeyLen` and gunzip each part separately.
 
-The `X` section chunks at exactly the same frame boundaries (its columns share
+The `X` section chunks at exactly the same frame boundaries (its column shares
 the same prediction-state lifetime), with its own byte ranges in the index.
 
 Chunk-size trade-off: smaller chunks seek at finer granularity but repeat
-keyframes more often. At 64 frames the measured overhead versus one monolithic
-delta stream is ~+4 % file size.
+keyframes more often; keyframes also weigh more, relatively, now that delta
+frames skip unchanged units (on the reference capture keyframes are ~10 % of
+F). At 64 frames the measured overhead versus one monolithic delta stream was
+~+4 % of file size in v2; in v3 the same keyframes sit in a smaller file, so
+the relative overhead is ~+8 %.
 
 ## 6. `F` — the core frame codec
 
-The decompressed codec stream of one chunk is a sequence of frames, each:
+The decompressed codec stream of one chunk is a sequence of frames. **Every
+frame — keyframe included — uses the same layout** (a keyframe is simply a
+frame encoded against empty prior state, so its lists degenerate to "nothing
+died, everything changed"):
 
 ```
 svarint  frameDelta        // this frame's sim frame − previous frame's (0 at chunk start)
-uvarint  n                 // unit count
-n × svarint                // column 0: unit id
-n × svarint                // column 1: def
-n × svarint                // column 2: team
-n × svarint                // column 3: x
-n × svarint                // column 4: z
-n × svarint                // column 5: hp
-n × svarint                // column 6: maxHp
-n × svarint                // column 7: dvx
-n × svarint                // column 8: dvz
+uvarint  nDead             // units present in the previous sample, absent now
+nDead × svarint            //   their ids: ascending, delta-coded from 0
+uvarint  nChanged          // new units + units with ≥1 changed column
+nChanged × svarint         //   their ids: ascending, delta-coded from 0
+nChanged × svarint         // column: def
+nChanged × svarint         // column: team
+nChanged × svarint         // column: x
+nChanged × svarint         // column: z
+nChanged × svarint         // column: hp
+nChanged × svarint         // column: maxHp
+nChanged × svarint         // column: dvx
+nChanged × svarint         // column: dvz
 ```
 
 Frames continue until the stream is exhausted (the chunk's `count` in the
 index says how many to expect; the Go reader cross-checks).
 
-### 6.1 The id column
+### 6.1 Implicitly-unchanged units — the core of v3
 
-Units within a frame are **sorted by unit id, ascending** (the writer sorts;
-original in-frame order is not preserved). The id column is delta-coded
-*within the frame*: each value is `id[i] − id[i−1]`, with `id[−1] = 0`.
+A unit that was alive in the previous sample and appears in **neither** list
+is *implicitly unchanged*: it is still alive, and its state one sample later
+is fully determined by prediction. The decoder MUST re-materialise it as
 
-While reading the id column, the decoder also resolves, per unit, whether that
-id existed in the **previous frame of the same chunk** — this drives the
-prediction of every other column.
+```
+x   += dvx        // dead reckoning by the velocity displacement
+z   += dvz
+def, team, hp, maxHp, dvx, dvz, build   unchanged
+```
+
+The encoder puts a unit in the changed list exactly when its actual quantized
+state differs from that prediction in **any** stored column — including
+`build`, which lives in the X stream — so skipping is lossless by
+construction: "skipped" *means* "the prediction is exact".
+
+This is the dominant size mechanism of the format: on the reference capture
+65.7 % of all delta-frame unit records are skipped (stationary structures,
+and units moving at constant velocity, cost zero bytes per frame), and a
+frame where nothing died and nothing changed costs 3 bytes total.
+
+Deaths must be explicit (the `nDead` list) precisely because absence from the
+changed list means "unchanged", not "gone". A unit destroyed between samples
+appears in the dead list of the next sampled frame (its destruction is also
+logged in the `E` section). The decoded frame is the full live set —
+survivors + changed — **sorted by unit id** (both input lists are sorted, so
+this is a linear merge).
 
 ### 6.2 Value columns and prediction
 
 Every value column entry is `svarint(actual − predicted)`. The prediction
-depends only on the *same unit's* record in the previous frame (`prev`):
+depends only on the *same unit's* record in the previous frame (`prev`) and is
+the same "advance" rule the decoder applies to skipped units:
 
 | Column | Predicted value when the id existed in the previous frame | When new |
 | --- | --- | --- |
@@ -264,20 +311,20 @@ depends only on the *same unit's* record in the previous frame (`prev`):
 choice:
 
 - The x/z predictor `prev.pos + prev.dv` is dead reckoning: a unit moving at
-  constant velocity encodes as an all-zero residual. This is the single
-  biggest size win in the format.
+  constant velocity has a zero residual — and therefore, if nothing else about
+  it changed, is skipped entirely (§6.1).
 - `dv` is *exactly* the Hermite tangent the viewer uses to interpolate motion
   between samples, so no unit conversion happens at render time.
 
-After each frame, the decoder replaces its `prev` map with the frame just
-decoded (state is per-chunk; see §5).
+After each frame, the decoder's `prev` state is the frame just decoded —
+including the re-materialised skipped units (state is per-chunk; see §5).
 
 ### 6.3 Worked example
 
-A chunk's first two frames; two units in frame 30, one destroyed and one built
-by frame 60. `sv(v)` denotes the zigzag varint of `v`.
+A chunk's first three frames. `sv(v)` denotes the zigzag varint of `v`.
 
-Frame 30 (keyframe — no previous frame, everything absolute):
+Frame 30 (keyframe — no prior state, so every unit is in the changed list
+with absolute values):
 
 | unit | def | team | x | z | hp | maxHp | dvx | dvz |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -285,9 +332,11 @@ Frame 30 (keyframe — no previous frame, everything absolute):
 | 9 | 12 | 2 | 400 | 401 | 80 | 100 | 0 | 0 |
 
 ```
-sv(30) uv(2)
-ids:   sv(5)  sv(4)          // 5, then 9−5
-def:   sv(10) sv(12)         // absolute (new ids)
+sv(30)                        // frame delta from 0
+uv(0)                         // nDead
+uv(2)                         // nChanged
+ids:   sv(5)  sv(4)           // 5, then 9−5
+def:   sv(10) sv(12)          // absolute (new ids)
 team:  sv(1)  sv(2)
 x:     sv(100) sv(400)
 z:     sv(200) sv(401)
@@ -297,35 +346,45 @@ dvx:   sv(3)  sv(0)
 dvz:   sv(0)  sv(0)
 ```
 
-Frame 60: unit 5 moved to (103, 200) still at dv (3, 0); unit 9 is gone; new
-unit 11 (def 10, team 1) at (500, 7) with hp 20/50, dv (0, 0):
+Frame 60: unit 5 moved to (103, 200), exactly its dead-reckoned position,
+nothing else about it changed → **unit 5 is not encoded at all**. Unit 9 took
+damage (80 → 60):
 
 ```
-sv(30) uv(2)                 // frame 60 − 30; two units
-ids:   sv(5)  sv(6)          // 5, then 11−5
-def:   sv(0)   sv(10)        // unit 5: 10−10; unit 11: absolute
-team:  sv(0)   sv(1)
-x:     sv(0)   sv(500)       // unit 5: 103 − (100+3) = 0 — dead reckoning hit
-z:     sv(0)   sv(7)         // unit 5: 200 − (200+0)
-hp:    sv(0)   sv(20)
-maxHp: sv(0)   sv(50)
-dvx:   sv(0)   sv(0)         // unit 5: 3−3
-dvz:   sv(0)   sv(0)
+sv(30) uv(0)                  // +30 sim frames; nothing died
+uv(1)  sv(9)                  // one changed unit: id 9
+def:   sv(0)                  // 12 − 12
+team:  sv(0)
+x:     sv(0)                  // 400 − (400+0)
+z:     sv(0)
+hp:    sv(-20)                // 60 − 80
+maxHp: sv(0)
+dvx:   sv(0)
+dvz:   sv(0)
 ```
 
-Unit 9 needs no "removal" record — it is simply absent from frame 60's id set
-(its destruction is also logged in the `E` section).
+The decoder reconstructs frame 60 as: unit 5 at (103, 200) — advanced by its
+dv — and unit 9 with hp 60. 12 bytes for the frame (`sv(-20)` is 1 byte;
+zigzag values ≥ 64 take 2).
+
+Frame 90: unit 9 is destroyed; unit 5 still cruising:
+
+```
+sv(30)
+uv(1)  sv(9)                  // dead: unit 9
+uv(0)                         // nothing changed
+```
+
+4 bytes. The decoder drops unit 9 and advances unit 5 to (106, 200).
 
 ## 7. `X` — the extra section
 
-Everything the current viewer does *not* render, kept for full fidelity and
-future UI (height display, build-progress bars, economy graphs). Same chunk
-boundaries as `F`; per frame, the decompressed stream is:
+Data the viewer does not render, kept for other consumers (build-progress
+display, economy graphs). Same chunk boundaries as `F`; per frame, the
+decompressed stream is:
 
 ```
-n × svarint                // column: y      (predicted prev.y + prev.dvy | 0)
-n × svarint                // column: dvy    (predicted prev.dvy          | 0)
-n × svarint                // column: build  (predicted prev.build        | 0)
+nChanged × svarint         // column: build  (predicted prev.build | 0 when new)
 uvarint  r                 // team-resource record count
 r × {                      // sorted by team id, ascending
   svarint team             //   absolute
@@ -339,30 +398,41 @@ r × {                      // sorted by team id, ascending
 ```
 
 `build` is `round(buildProgress × 255)` (255 = finished). Incomes are per
-game-second.
+game-second. The build column covers exactly the F frame's **changed list** —
+a skipped unit's build is unchanged by definition (build participates in the
+changed test, §6.1).
 
 **`X` is not self-describing:** it has no unit counts or ids of its own — the
-column lengths, unit order, and the existed-in-previous-frame flags all come
+column length, unit order, and the existed-in-previous-frame flags all come
 from decoding the same chunk of `F` first. Decode them together
 (`snapshot.ReadBRP` / `BRPFile.DecodeChunk` do).
 
-## 8. Quantization
+## 8. Quantization and dropped fields
 
 All quantization happens **once, at write time**; decoders return the
 quantized values (there is no way, and no need, to recover the raw floats).
 
 | Quantity | Stored as | Resolution |
 | --- | --- | --- |
-| Position x, y, z | whole elmos, `round()` | 1 elmo (the map is 10 000+ elmos across) |
+| Position x, z | whole elmos, `round()` | 1 elmo (the map is 10 000+ elmos across) |
 | Health, max health | whole points, `round()` | 1 hp |
-| Velocity | displacement per sample interval: `round(vel × sampleEvery)` | 1 elmo / interval (= 1/30 elmo/frame at 1 Hz) |
+| Velocity (x, z) | displacement per sample interval: `round(vel × sampleEvery)` | 1 elmo / interval (= 1/30 elmo/frame at 1 Hz) |
 | Build progress | `round(progress × 255)` | 1/255 |
 | Resources (all six fields) | `round(value × 10)` | 0.1 metal/energy |
 | Frame time | *not stored* — `t = frame / 30` | exact |
+| Position y, velocity y | **not stored** (since v3) | decoded as 0 |
 
 On decode, velocities come back as `dv / sampleEvery` (per sim frame, matching
 the engine's `GetUnitVelocity` units), build as `build / 255`, resources as
 `value / 10`.
+
+y/dvy were dropped in v3 because they changed in ~28 % / ~23 % of all unit
+records (a walking unit's height tracks the terrain under it every sample)
+while nothing consumed them — the viewer renders the x/z plane, and a ground
+unit's elevation is recoverable from the map heightmap at (x, z) if ever
+needed. They were ~25 % of a v2 file. The BRSNAP source stream still carries
+them, so a future format revision could reintroduce elevation (e.g. for air
+units only) from the original captures.
 
 ## 9. `E` — the events section
 
@@ -392,7 +462,8 @@ Not part of the file format, but specified here because it reuses the same
 framing and the same chunk bytes. `barreplay-viz` serves:
 
 - **`GET /api/replay?file=<name>.brp`** → a container with magic **`BRW1`**,
-  version 2, sections:
+  version 3 (always equal to the file format version, since chunk bytes pass
+  through untouched), sections:
   - `J`: gzip(JSON head) — a *viewer-shaped* projection of `M`: `gameId`,
     `engineVersion`, `gameVersion`, `mapName`, `sampleEvery`, `bounds`,
     `teams` (meta teams + `frameTeams` fill-ins), `unitDefs` (id→name only),
@@ -415,15 +486,20 @@ Implementations may rely on:
 - **Determinism:** encoding the same capture (same meta, frames, events)
   produces a byte-identical file for a given writer version.
 - **Chunk independence:** any chunk decodes from its indexed byte range alone.
+- **Full-frame decode:** every decoded frame contains the complete live unit
+  set, sorted by id — delta-frame skipping is an encoding detail, invisible in
+  the decoded data.
 - **Round-trip fidelity:** decode(encode(capture)) preserves everything except
   (a) unit order within a frame (always sorted by id afterwards),
-  (b) sub-quantization precision (§8), and
-  (c) `TimeSec`, which is re-derived as `frame/30`.
+  (b) sub-quantization precision (§8),
+  (c) `TimeSec`, which is re-derived as `frame/30`, and
+  (d) `Pos.Y`/`VelY`, which are not stored and decode as 0.
 - **Forward compatibility:** unknown section tags are skipped, and unknown
   JSON keys in `M` are ignored, so both can be extended without a version
   bump. Anything that changes how existing bytes must be *interpreted* —
-  column set, column order, prediction rules, chunk framing — requires
-  incrementing the version byte, and readers reject versions they don't know.
+  column set, column order, prediction rules, frame layout, chunk framing —
+  requires incrementing the version byte, and readers reject versions they
+  don't know (exactly what v3 did over v2).
 
 Explicitly **not** guaranteed:
 
@@ -436,7 +512,7 @@ Explicitly **not** guaranteed:
 ## 12. Reading a file, end to end
 
 ```
-1. Read 4-byte magic "BRP1"; read version byte; reject if != 2.
+1. Read 4-byte magic "BRP1"; read version byte; reject if != 3.
 2. Scan sections (tag, u32le length, payload) until EOF, remembering each
    payload's absolute offset. Skip unknown tags.
 3. gunzip M; parse JSON → meta, bounds, counts, chunk index.
@@ -445,9 +521,10 @@ Explicitly **not** guaranteed:
       to chunks; t = frame/30).
    b. Slice F[fOff : fOff+fLen]. gunzip [0 : fKeyLen) and, if fLen > fKeyLen,
       [fKeyLen : fLen); concatenate the decompressed bytes.
-   c. Decode frames per §6 with fresh prediction state.
-   d. (Optional, for y/build/resources:) slice and gunzip the X ranges the
-      same way and decode per §7, driven by F's ids/order.
+   c. Decode frames per §6 with fresh prediction state: apply the dead list,
+      decode the changed units, advance every other live unit by its dv.
+   d. (Optional, for build/resources:) slice and gunzip the X ranges the
+      same way and decode per §7, driven by F's changed lists.
 5. gunzip E and decode per §9 when events are needed.
 ```
 

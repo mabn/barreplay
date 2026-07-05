@@ -49,19 +49,22 @@ interface. To change it implement `snapshot.Writer`; nothing in `capture`/`engin
 changes. `capture.Consume(r, baseMeta, w)` is the seam between the engine's text
 output and the writer.
 
-### On-disk format v2: `.brp` (snapshot/brp.go)
+### On-disk format v3: `.brp` (snapshot/brp.go)
 
-Full byte-level spec: `docs/brp-format.md` — keep it in sync with any codec change.
-The default output (`-format brp`; `-format jsonl` keeps the legacy JSONL). A real
-33-min 8v8 game is **476 MB of JSONL but ~14 MB of .brp (~33x)** with full fidelity
-kept (every JSONL field, quantized once: whole elmos/hp, velocity as
-per-sample-interval displacement, build progress 1/255, resources 0.1; `t` is derived
-as `frame/30`, not stored). Container: `"BRP1" <ver u8 = 2>` then tagged sections
-`<tag u8><len u32le><payload>` — `M` meta JSON (Meta + precomputed
-bounds/frameTeams/counts + the **chunk index**), `F` core frame columns (id def team
-x z hp maxHp dvx dvz), `X` extra columns (y, dvy, build, team resources — not sent to
-the browser), `E` events. Unknown tags are skipped, so sections can be added
-compatibly; any version byte other than 2 is rejected (v1 existed only pre-release).
+Full byte-level spec: `docs/brp-format.md` — keep it in sync with any codec change
+(`docs/brp-optimizations.md` records the measured evaluation behind the format's
+design decisions). The default output (`-format brp`; `-format jsonl` keeps the
+legacy JSONL). A real 33-min 8v8 game is **476 MB of JSONL but ~8.1 MB of .brp
+(~59x)** (quantized once: whole elmos/hp, velocity as per-sample-interval
+displacement, build progress 1/255, resources 0.1; `t` is derived as `frame/30`,
+not stored; **y/dvy are not stored at all** — the viewer renders the x/z plane and
+ground-unit elevation is terrain noise, so decoded `Pos.Y`/`VelY` are 0). Container:
+`"BRP1" <ver u8 = 3>` then tagged sections `<tag u8><len u32le><payload>` — `M` meta
+JSON (Meta + precomputed bounds/frameTeams/counts + the **chunk index**), `F` core
+frame columns (id def team x z hp maxHp dvx dvz), `X` extra (build column + team
+resources — not sent to the browser), `E` events. Unknown tags are skipped, so
+sections can be added compatibly; any version byte other than 3 is rejected (v1/v2
+existed only pre-release; regenerate a .brp from its .brsnap with barreplay-pack).
 
 **Chunking (random access / streaming).** F and X are not single streams: frames are
 grouped into **chunks of 64 samples** (~1 min at 1 Hz), and the codec's prediction
@@ -72,16 +75,21 @@ D (delta frames) — so a consumer can fetch/decode *just keyframes* to skim a c
 (~10 KB per minute of game). The `M` record's `chunks` array indexes them (first sim
 frame, sample count, byte ranges relative to the section payload; `Section.Offset`
 from `ReadContainer` gives the absolute file position, enabling future HTTP-Range
-static hosting). Keyframe repetition + per-chunk gzip cost ~+4% file size. X chunks
-in lockstep with F (its columns share the prediction state) but is never fetched by
-the viewer.
+static hosting). Keyframe repetition + per-chunk gzip cost ~+8% file size (v3;
+keyframes always carry every live unit, so they weigh relatively more now that
+delta frames skip the unchanged ones). X chunks in lockstep with F (its build
+column covers exactly F's changed list) but is never fetched by the viewer.
 
-Why it's small: units are sorted by id per frame and every column is a zigzag-varint
-**delta against the same unit in the previous sampled frame** (absolute when the id
-is new); x/z additionally add the previous frame's velocity displacement to the
-prediction (`dv = round(vel*sampleEvery)` — exactly the interpolation tangent the
-viewer uses), so constant-velocity movement encodes as ~zero. Chunks gzip at
-DefaultCompression (BestCompression measured >10x slower for <2% size).
+Why it's small: a delta frame stores only an explicit **dead-id list** and a
+**changed-unit list** (new units + units where any column differs from its
+prediction); every other live unit costs zero bytes — the decoder re-materializes
+it by advancing `x += dvx, z += dvz` (~66% of all unit records skip this way).
+Changed units' columns are zigzag-varint **deltas against the same unit in the
+previous sampled frame** (absolute when the id is new); x/z predict with the
+previous frame's velocity displacement (`dv = round(vel*sampleEvery)` — exactly the
+interpolation tangent the viewer uses), so constant-velocity movement is "no
+change" and skips too. Chunks gzip at DefaultCompression (BestCompression measured
+>10x slower for <2% size).
 
 Chunks are **independently** gzipped so the viz server can serve any chunk to the
 browser byte-for-byte. Three codec implementations must stay in lockstep: the encoder
@@ -90,8 +98,8 @@ browser byte-for-byte. Three codec implementations must stay in lockstep: the en
 byte-identical file), which the "diff two runs to verify an optimization" workflow
 relies on. `snapshot.ReadBRP` fully decodes; `snapshot.ParseBRP` decodes only meta +
 index and hands back the raw sections; `BRPFile.DecodeChunk(i)` decodes one chunk
-standalone. A roundtrip loses unit order within a frame (sorted by id) and
-sub-quantization precision — nothing else.
+standalone. A roundtrip loses unit order within a frame (sorted by id),
+sub-quantization precision, and y/dvy (decoded as 0) — nothing else.
 
 ### Data flow
 
