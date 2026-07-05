@@ -29,7 +29,7 @@ func (r *recordingWriter) Close() error { r.closed = true; return nil }
 func TestConsume(t *testing.T) {
 	stream := strings.Join([]string{
 		"[t=00:00:00] Loading widget BAR Replay Snapshotter", // engine noise, ignored
-		`BRSNAP DEF {"id":1,"name":"armcom","humanName":"Armada Commander","metalCost":2700,"maxHealth":3000,"isBuilder":true}`,
+		`BRSNAP DEF {"id":1,"name":"armcom","humanName":"Armada Commander","metalCost":2700,"maxHealth":3000,"xsize":8,"zsize":8,"iconType":"armcom","isBuilder":true}`,
 		"BRSNAP D 2 corcom", // legacy id->name line still understood
 		"BRSNAP T 0 0 armada #ff0000",
 		"BRSNAP T 1 1 cortex #0000ff",
@@ -73,6 +73,9 @@ func TestConsume(t *testing.T) {
 	}
 	if d := w.meta.UnitDefs[1]; d.Name != "armcom" || d.HumanName != "Armada Commander" || d.MetalCost != 2700 || !d.IsBuilder {
 		t.Errorf("unitDefs[1] = %+v", d)
+	}
+	if d := w.meta.UnitDefs[1]; d.XSize != 8 || d.ZSize != 8 || d.IconType != "armcom" {
+		t.Errorf("unitDefs[1] footprint/icon = %+v", d)
 	}
 	if w.meta.UnitDefs[2].Name != "corcom" { // legacy D line
 		t.Errorf("unitDefs[2] = %+v", w.meta.UnitDefs[2])

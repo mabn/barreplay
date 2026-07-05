@@ -95,7 +95,8 @@ BRSNAP PROFD <frame> <units> <totalMs> <name>  per-heartbeat profiler sample (-p
 ```
 
 The **unit defs are dumped in full** (`DEF` JSON: name, humanName, costs, buildTime,
-maxHealth, speed, builder/factory/fly flags, weaponCount), not just id→name — mods add
+maxHealth, speed, footprint `xsize`/`zsize`, `iconType`, builder/factory/fly flags,
+weaponCount), not just id→name — mods add
 and modify unit types, and the id space depends on the exact game build the replay pins.
 The legacy `D` line (id→name) is still parsed for old `.brsnap` files. **Players** (`P`)
 carry the roster (name/team/spectator) and **team colours** ride the `T` line; `capture`
