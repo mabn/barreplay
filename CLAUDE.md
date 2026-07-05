@@ -98,9 +98,14 @@ The **unit defs are dumped in full** (`DEF` JSON: name, humanName, costs, buildT
 maxHealth, speed, footprint `xsize`/`zsize`, `iconType`, builder/factory/fly flags,
 weaponCount), not just id→name — mods add
 and modify unit types, and the id space depends on the exact game build the replay pins.
-The legacy `D` line (id→name) is still parsed for old `.brsnap` files. **Players** (`P`)
-carry the roster (name/team/spectator) and **team colours** ride the `T` line; `capture`
-backfills each `TeamInfo.PlayerName` from the first non-spectator player on that team.
+The legacy `D` line (id→name) is still parsed for old `.brsnap` files. **Players** are
+seeded from the **demo startscript** (`cmd/barreplay` → `playersFromDemo`), the authoritative
+source for per-player metadata the live engine list lacks: country flag (`countrycode`),
+ladder rank, OpenSkill rating ("OS", the bracketed `skill`) + uncertainty, `accountid`, and
+`boss`. The widget's `P` line (name/team/spectator) is a fallback for a raw `.brsnap` with no
+startscript behind it — `capture` merges it by player id so a seeded player is never
+duplicated. **Team colours** ride the `T` line; `capture` backfills each `TeamInfo.PlayerName`
+from the first non-spectator player on that team.
 Each sampled frame also emits one `R` line per team with its current metal/energy, storage
 caps, and per-game-second income (the engine's per-frame income × the 30 fps sim rate).
 Each `U` line carries, besides position and health, the unit's velocity (`vx/vy/vz`) and
