@@ -45,17 +45,25 @@ worker/
 ## Producing and uploading replay data
 
 ```sh
-# from the repo root: build the packer and pack captures into a bucket mirror
+# 0. create the buckets once (prod + the preview one `wrangler dev` binds)
+npx wrangler r2 bucket create barreplay-replays
+npx wrangler r2 bucket create barreplay-replays-preview
+
+# 1. from the repo root: build the packer and pack captures into a bucket mirror
 go build ./cmd/barreplay-static
 ./barreplay-static -out ./static ./snapshots/*.brp     # writes index.json + replays/**
 
-# upload the mirror to the R2 bucket (any S3-compatible sync works)
-wrangler r2 object put barreplay-replays/index.json --file ./static/index.json
-# ...or rclone/aws s3 sync ./static -> the bucket
+# 2. upload the mirror to R2 (walks only index.json + replays/**, nothing else)
+cd worker
+npm run upload -- ../static              # prod bucket
+npm run upload -- ../static --preview    # the wrangler-dev bucket
+npm run upload -- ../static --local      # local miniflare R2 (for `npm run dev`)
 ```
 
 `barreplay-static` rebuilds `index.json` from whatever is in the output dir, so keep a
-local mirror of the bucket, pack new captures into it, and sync the whole dir up.
+local mirror of the bucket, pack new captures into it, and re-run the upload. For a large
+library, `rclone`/`aws s3 sync ./static -> bucket` against R2's S3 API works too (needs an
+R2 API token).
 
 ## Commands
 
@@ -69,13 +77,11 @@ npm run cf-typegen  # regenerate worker-configuration.d.ts from wrangler.jsonc
 npm run deploy      # build, then wrangler deploy (needs Cloudflare auth)
 ```
 
-For local dev/preview, seed the local R2 with a packed bundle (wrangler dev binds the
+For local dev, seed the local R2 with a packed bundle (`wrangler dev` binds the
 `preview_bucket_name`):
 
 ```sh
-for k in index.json replays/<id>.brw replays/<id>.resources replays/<id>/c0 ...; do
-  wrangler r2 object put "barreplay-replays-preview/$k" --file "./static/$k" --local
-done
+npm run upload -- ../static --local
 ```
 
 ## Alternative: public R2 domain
