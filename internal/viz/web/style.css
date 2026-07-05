@@ -24,6 +24,8 @@ select, button {
 }
 button:hover { background: #344450; }
 button:disabled { opacity: .4; cursor: default; }
+/* Fixed width so toggling "▶ Play" / "⏸ Pause" doesn't reflow the controls row. */
+#play { min-width: 74px; text-align: center; }
 select { padding: 5px 8px; }
 
 .controls {
@@ -53,7 +55,7 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: #5a9fd0; }
 canvas { display: block; width: 100%; height: 100%; background: #0c0f13; cursor: crosshair; }
 
 #side {
-  width: 260px; background: #161b21; border-left: 1px solid #2a323c;
+  width: 320px; background: #161b21; border-left: 1px solid #2a323c;
   padding: 12px; overflow-y: auto; font-size: 13px;
 }
 #side h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
@@ -61,6 +63,55 @@ canvas { display: block; width: 100%; height: 100%; background: #0c0f13; cursor:
 #side h2:first-child { margin-top: 0; }
 .stat { display: flex; justify-content: space-between; padding: 2px 0; }
 .stat b { color: #fff; font-variant-numeric: tabular-nums; }
+
+/* ---- player list ----
+   One row per player: rank / flag / OS / name on the left, the metal + energy
+   bars (small) on the right, laid out like BAR's in-game player list. */
+#players { display: flex; flex-direction: column; }
+.pgroup { border-top: 1px solid #2a323c; }
+.pgroup:first-child { border-top: none; }
+.prow {
+  display: flex; align-items: center; gap: 6px; padding: 3px 0;
+}
+.prow.spectator { opacity: .55; }
+.prow .phead {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 5px;
+  font-size: 12px; line-height: 1.3;
+}
+/* rank badge: BAR's chevron/star icon (served from /ranks/), constant-size slot
+   so names align whether or not a player has a rank. */
+.prow .rank {
+  flex: 0 0 auto; width: 18px; height: 14px; object-fit: contain;
+  image-rendering: auto;
+}
+span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
+.prow .flag { flex: 0 0 auto; width: 15px; text-align: center; font-size: 12px; line-height: 1; }
+.prow .os {
+  flex: 0 0 auto; min-width: 26px; text-align: right;
+  color: #9fb0bf; font-variant-numeric: tabular-nums; font-size: 11px;
+}
+.prow .pname {
+  flex: 1; min-width: 0; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* right block: two small stacked resource bars (metal over energy) */
+.pres { flex: 0 0 auto; display: flex; flex-direction: column; gap: 3px; }
+.resrow { display: flex; align-items: center; gap: 5px; font-size: 10px; line-height: 1; }
+.resrow .rbar {
+  flex: 0 0 auto; width: 46px; height: 4px;
+  background: #222c36; border-radius: 3px; overflow: hidden;
+}
+.resrow .rbar > div { height: 100%; }
+.resrow .rval, .resrow .rinc {
+  flex: 0 0 auto; text-align: right; font-variant-numeric: tabular-nums;
+}
+.resrow .rval { min-width: 34px; }
+.resrow .rinc { min-width: 42px; }
+/* Numbers follow the bar colour: metal white/silver, energy yellow. */
+.resrow.metal .rbar > div { background: #cfd6dd; }
+.resrow.metal .rval, .resrow.metal .rinc { color: #cfd6dd; }
+.resrow.energy .rbar > div { background: #e3c34a; }
+.resrow.energy .rval, .resrow.energy .rinc { color: #e3c34a; }
 
 .teamrow { display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: 12px; }
 .teamrow .sw { width: 11px; height: 11px; border-radius: 3px; flex: 0 0 auto; }

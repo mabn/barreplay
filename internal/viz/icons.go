@@ -20,6 +20,13 @@ var iconsFS embed.FS
 //go:embed bardata/icontypes.lua
 var iconTypesLua string
 
+// ranksFS holds BAR's player rank icons (the chevron/star badges shown left of a
+// player's name in the in-game player list). Files are named 1.png..8.png for
+// rank levels 0..7. Served at /ranks/<n>.png.
+//
+//go:embed bardata/ranks
+var ranksFS embed.FS
+
 // iconEntry opens a top-level table entry: `name = {` with tolerant spacing
 // (the real file has both `name = {` and `legjam ={`).
 var iconEntryRe = regexp.MustCompile(`^([A-Za-z0-9_]+)\s*=\s*\{`)
@@ -135,4 +142,10 @@ func loadIcons() {
 // /icons/<file> (matching the "icons/..." bitmap paths in the wire payload).
 func iconsSubFS() (fs.FS, error) {
 	return fs.Sub(iconsFS, "bardata/icons")
+}
+
+// ranksSubFS returns the embedded rank-icon directory rooted so files are served
+// as /ranks/<n>.png.
+func ranksSubFS() (fs.FS, error) {
+	return fs.Sub(ranksFS, "bardata/ranks")
 }

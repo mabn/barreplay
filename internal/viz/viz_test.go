@@ -311,6 +311,91 @@ func TestHeadIconByType(t *testing.T) {
 	}
 }
 
+// The head must carry the player roster, and brpResourcesPayload must return
+// each sampled frame's per-team economy (the .brp X stream, which the frame
+// chunk path never fetches) so the sidebar player list can draw its bars.
+func TestPlayersAndResources(t *testing.T) {
+	dir := t.TempDir()
+	w, err := snapshot.NewBRPWriter(dir, "g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := snapshot.Meta{
+		GameID: "g", SampleEvery: 30,
+		Teams: []snapshot.TeamInfo{{TeamID: 0, AllyTeam: 0}, {TeamID: 1, AllyTeam: 1}},
+		Players: []snapshot.PlayerInfo{
+			{PlayerID: 0, Name: "Alice", Team: 0, CountryCode: "us", Rank: 5, Skill: 31.2},
+			{PlayerID: 2, Name: "Watcher", Team: 0, Spectator: true},
+		},
+	}
+	if err := w.WriteMeta(meta); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteFrame(snapshot.Frame{
+		Frame: 30, TimeSec: 1,
+		Units: []snapshot.UnitState{{UnitID: 1, DefID: 1, Team: 0, Health: 1, MaxHealth: 1}},
+		Resources: []snapshot.TeamResource{
+			{Team: 0, Metal: 314, Energy: 14700, MetalStorage: 1000, EnergyStorage: 20000, MetalIncome: 12.5, EnergyIncome: 850},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := os.Open(filepath.Join(dir, "g.brp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	bf, err := snapshot.ParseBRP(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Players ride the head payload.
+	head := buildHead(bf.Meta, defaultBounds(), bf.FrameTeams)
+	if len(head.Players) != 2 {
+		t.Fatalf("players: got %d want 2 (%+v)", len(head.Players), head.Players)
+	}
+	if p := head.Players[0]; p.Name != "Alice" || p.Country != "us" || p.Rank != 5 || p.Skill != 31.2 {
+		t.Errorf("player0=%+v", p)
+	}
+	if !head.Players[1].Spectator {
+		t.Errorf("player1 should be a spectator: %+v", head.Players[1])
+	}
+
+	// Resources payload: gzipped JSON, one {f, r} per sampled frame.
+	gz, err := brpResourcesPayload(bf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(gz))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(zr)
+	var arr []wireResFrame
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		t.Fatal(err)
+	}
+	if len(arr) != 1 || arr[0].F != 30 {
+		t.Fatalf("resource frames = %+v", arr)
+	}
+	// [team, metal, energy, mStore, eStore, mInc, eInc]; income 12.5 -> 13 (rounded
+	// from the format's 1/10 quantization).
+	want := []int32{0, 314, 14700, 1000, 20000, 13, 850}
+	if len(arr[0].R) != resourceStride {
+		t.Fatalf("R len=%d want %d (%v)", len(arr[0].R), resourceStride, arr[0].R)
+	}
+	for i, v := range want {
+		if arr[0].R[i] != v {
+			t.Errorf("R[%d]=%d want %d (full=%v)", i, arr[0].R[i], v, arr[0].R)
+		}
+	}
+}
+
 // The listing shows only .brp files; legacy formats are invisible to the UI.
 func TestListBRPOnly(t *testing.T) {
 	dir := t.TempDir()
