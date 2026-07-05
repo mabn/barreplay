@@ -904,12 +904,11 @@ function playerRow(p, r) {
   row.className = 'prow';
   const color = teamColor[p.team] || '#c7d0d9';
   const rank = `<span class="rank">${p.rank ? p.rank : ''}</span>`;
-  const flag = flagEmoji(p.country);
+  const flag = `<span class="flag">${flagEmoji(p.country)}</span>`;
   const os = `<span class="os">${p.skill ? p.skill.toFixed(1) : ''}</span>`;
   let html =
-    `<div class="phead">${rank}` +
-    (flag ? `<span class="flag">${flag}</span>` : '') +
-    `${os}<span class="pname" style="color:${color}">${escapeHtml(p.name)}</span></div>`;
+    `<div class="phead">${rank}${flag}${os}` +
+    `<span class="pname" style="color:${color}">${escapeHtml(p.name)}</span></div>`;
   if (r) {
     html += '<div class="pres">' +
       resBar('metal', r.metal, r.mStore, r.mInc) +
