@@ -271,25 +271,36 @@ function drawMapFrame() {
   ctx.fillStyle = '#0e1319';
   ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
 
-  // Grid every 512 elmos when it isn't too dense.
-  const step = 512;
-  if (scale * step > 24) {
-    ctx.strokeStyle = '#1a232c';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (let gx = Math.ceil(b.minX / step) * step; gx <= b.maxX; gx += step) {
-      const [sx] = w2s(gx, b.minZ);
-      ctx.moveTo(sx, y0); ctx.lineTo(sx, y1);
-    }
-    for (let gz = Math.ceil(b.minZ / step) * step; gz <= b.maxZ; gz += step) {
-      const [, sy] = w2s(b.minX, gz);
-      ctx.moveTo(x0, sy); ctx.lineTo(x1, sy);
-    }
-    ctx.stroke();
-  }
+  // BAR build grid: buildings snap to a 16-elmo "build square" (a 2x2 building
+  // is 32 elmos, 3x3 is 48, ...). Draw the fine 16-elmo grid — the same one BAR
+  // shows when placing — plus a coarser every-8th line, both aligned to the world
+  // origin so lines fall on real build-square boundaries. Each tier only draws
+  // when its spacing is legible, so a zoomed-out view isn't a solid mesh.
+  const BUILD = 16;
+  drawGrid(b, x0, y0, x1, y1, BUILD, '#161f28');       // fine: one build square
+  drawGrid(b, x0, y0, x1, y1, BUILD * 8, '#243444');   // coarse: every 8 squares (128 elmos)
+
   ctx.strokeStyle = '#2d3a47';
   ctx.lineWidth = 1;
   ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+}
+
+// drawGrid strokes world-aligned grid lines at `step` elmos within the bounds
+// rect, skipping when the on-screen spacing would be too dense to read.
+function drawGrid(b, x0, y0, x1, y1, step, color) {
+  if (scale * step < 6) return;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let gx = Math.ceil(b.minX / step) * step; gx <= b.maxX; gx += step) {
+    const [sx] = w2s(gx, b.minZ);
+    ctx.moveTo(sx, y0); ctx.lineTo(sx, y1);
+  }
+  for (let gz = Math.ceil(b.minZ / step) * step; gz <= b.maxZ; gz += step) {
+    const [, sy] = w2s(b.minX, gz);
+    ctx.moveTo(x0, sy); ctx.lineTo(x1, sy);
+  }
+  ctx.stroke();
 }
 
 // ---- hit testing / tooltip ------------------------------------------------
