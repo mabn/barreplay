@@ -29,6 +29,7 @@ let showIcons = true;      // draw BAR unit icons (vs plain dots)
 let showTexture = true;    // draw the map terrain texture behind everything
 let showGrid = true;       // draw the build/small/large grid
 let showFootprints = true; // draw build-footprint rectangles for buildings
+let growIcons = true;      // grow a building's icon toward its footprint when zoomed in
 let mapW = 0, mapH = 0;    // map world extent in elmos (0 if unknown)
 let mapTex = null;         // HTMLImageElement of the terrain texture, or null
 // Viewport in CSS pixels + the device-pixel ratio. The canvas backing store is
@@ -211,13 +212,25 @@ function drawDots(u) {
 }
 
 // Primary render: every unit as its BAR icon, tinted to the team colour and
-// drawn at a constant screen size (see iconScale). A unit with no icon (or whose
-// bitmap hasn't loaded yet) shows a coloured dot so it is never invisible.
+// drawn at a constant screen size (see iconScale). When growIcons is on, a
+// building's icon additionally grows to 90% of its footprint once zoomed in far
+// enough that that exceeds the constant size — so it fills the footprint instead
+// of looking tiny inside it (mobile units, having no footprint, stay constant).
+// A unit with no icon (or whose bitmap hasn't loaded yet) shows a coloured dot so
+// it is never invisible.
 function drawIcons(u) {
   for (let i = 0; i < u.length; i += STRIDE) {
     const [sx, sy] = w2s(u[i + F.X], u[i + F.Z]);
     const info = iconInfoFor(u[i + F.DEF]);
-    const px = Math.round(Math.max(ICON_MIN_PX, Math.min(ICON_MAX_PX, iconScale * (info ? info.s : 1))));
+    let px = Math.max(ICON_MIN_PX, Math.min(ICON_MAX_PX, iconScale * (info ? info.s : 1)));
+    if (growIcons) {
+      const fp = footprintFor(u[i + F.DEF]); // buildings only; null for mobile units
+      if (fp) {
+        const cap = 0.9 * Math.min(fp.w, fp.h) * scale; // 90% of the smaller footprint side, in px
+        if (cap > px) px = cap;                          // zoomed in: grow to fit the footprint
+      }
+    }
+    px = Math.round(px);
     const r = px / 2;
     if (sx < -px || sy < -px || sx > viewW + px || sy > viewH + px) continue;
     const color = teamColor[u[i + F.TEAM]] || '#9aa6b2';
@@ -560,6 +573,7 @@ document.getElementById('icons').onchange = e => { showIcons = e.target.checked;
 document.getElementById('maptex').onchange = e => { showTexture = e.target.checked; draw(); };
 document.getElementById('grid').onchange = e => { showGrid = e.target.checked; draw(); };
 document.getElementById('footprints').onchange = e => { showFootprints = e.target.checked; draw(); };
+document.getElementById('growicons').onchange = e => { growIcons = e.target.checked; draw(); };
 document.getElementById('iconsize').oninput = e => {
   iconScale = +e.target.value;
   setParam('iconsize', iconScale);
