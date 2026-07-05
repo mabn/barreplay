@@ -175,6 +175,11 @@ dir for `.jsonl`/`.brsnap` files and serves the viewer.
   UI slider (`iconScale`, persisted as `?iconsize=`); the Icons checkbox switches to plain
   dots. A unit with no/loading icon shows a coloured dot so it is never invisible. The
   selected replay and icon size are both kept in the URL, so a refresh/shared link restores them.
+  The **Fit icons** checkbox (`growIcons`, default on) makes a *building's* icon grow to 90%
+  of its footprint (`0.9 * min(fpW,fpH) * scale`) once that exceeds the constant size — i.e.
+  it stays constant when zoomed out and fills the footprint when zoomed in; mobile units
+  (no footprint) are unaffected. The icon is resolved by the unit-def's `iconType` key first
+  (falling back to its name), so units whose iconType differs from their name still get an icon.
 - **`internal/viz/maptex.go`** draws the **real map terrain** behind the units. It proxies
   BAR's maps API (`api.bar-rts.com/maps/<name>`): `/api/mapinfo?map=<name>` returns the map's
   world extent in elmos (the API's width/height are map units × 512) and whether a texture
