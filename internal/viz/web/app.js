@@ -336,23 +336,18 @@ function drawMapFrame() {
     ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
   }
 
-  // BAR build grid: buildings snap to a 16-elmo "build square" (a 2x2 building
-  // is 32 elmos, 3x3 is 48, ...). Draw the fine 16-elmo grid — the same one BAR
-  // shows when placing — plus a coarser every-8th line, both aligned to the world
-  // origin so lines fall on real build-square boundaries. Each tier only draws
-  // when its spacing is legible, so a zoomed-out view isn't a solid mesh.
-  // BAR grid hierarchy (all aligned to the world origin, where buildings snap):
-  //   build square = 16 elmos (the placement grid)
+  // Two-tier reference grid, aligned to the world origin (where BAR buildings
+  // snap on the 16-elmo build grid):
   //   small square = 48 elmos  = 3x3 build squares
-  //   large square = 192 elmos = 4x4 small squares = 3x3 metal makers (each 4x4 build)
-  // Each tier only draws when its spacing is legible, and gets bolder with size,
-  // so a zoomed-out view shows just the large grid and detail appears on zoom.
-  // Semi-transparent white so lines read over both the dark fallback and terrain.
+  //   large square = 192 elmos = 4x4 small squares (= 3x3 metal makers, each 4x4 build)
+  // Each tier only draws when its on-screen spacing is legible, and the large tier
+  // is bolder, so a zoomed-out view shows just the large grid and the small grid
+  // appears on zoom. Semi-transparent white so lines read over both the dark
+  // fallback and the terrain texture.
   if (showGrid) {
-    const BUILD = 16;
-    drawGrid(b, x0, y0, x1, y1, BUILD, 'rgba(255,255,255,0.05)');       // build square (16)
-    drawGrid(b, x0, y0, x1, y1, BUILD * 3, 'rgba(255,255,255,0.10)');   // small square (48)
-    drawGrid(b, x0, y0, x1, y1, BUILD * 12, 'rgba(255,255,255,0.20)');  // large square (192)
+    const SMALL = 48;
+    drawGrid(b, x0, y0, x1, y1, SMALL, 'rgba(255,255,255,0.10)');       // small square (48)
+    drawGrid(b, x0, y0, x1, y1, SMALL * 4, 'rgba(255,255,255,0.20)');   // large square (192) = 4x4 small
   }
 
   ctx.strokeStyle = '#2d3a47';

@@ -199,6 +199,41 @@ func TestToWireIncludesIcons(t *testing.T) {
 	}
 }
 
+func TestUnitIconFor(t *testing.T) {
+	// A def whose name is not itself an icontype key still gets an icon via its
+	// IconType (the authoritative key), fixing the missing-icon case.
+	if got, _, ok := unitIconFor("armcom", "made_up_unit_xyz"); !ok || got != "icons/armcom.png" {
+		t.Errorf("unitIconFor(armcom, made_up)=(%q,%v) want icons/armcom.png", got, ok)
+	}
+	// Empty IconType falls back to the name lookup (old captures / name==key).
+	if got, _, ok := unitIconFor("", "armcom"); !ok || got != "icons/armcom.png" {
+		t.Errorf("unitIconFor(\"\", armcom)=(%q,%v) want icons/armcom.png", got, ok)
+	}
+	// An unknown IconType falls back to the name.
+	if got, _, ok := unitIconFor("no_such_type", "corllt"); !ok || got != "icons/defence_0_laser.png" {
+		t.Errorf("unitIconFor(bad, corllt)=(%q,%v) want icons/defence_0_laser.png", got, ok)
+	}
+	// Neither resolves -> not ok.
+	if _, _, ok := unitIconFor("no_such_type", "no_such_unit"); ok {
+		t.Errorf("unitIconFor(bad,bad) ok=true, want false")
+	}
+}
+
+// toWire resolves an icon by IconType even when the unit's name is not an
+// icontype key.
+func TestToWireIconByType(t *testing.T) {
+	rep := &Replay{Meta: snapshot.Meta{
+		GameID: "g",
+		UnitDefs: map[int32]snapshot.UnitDef{
+			1: {DefID: 1, Name: "made_up_unit_xyz", IconType: "armcom"},
+		},
+	}}
+	w := rep.toWire()
+	if w.UnitIcons["made_up_unit_xyz"].Path != "icons/armcom.png" {
+		t.Errorf("icon-by-type = %+v, want icons/armcom.png", w.UnitIcons["made_up_unit_xyz"])
+	}
+}
+
 func TestNormalizeMapName(t *testing.T) {
 	if got := normalizeMapName("Supreme Isthmus v2.1"); got != "supreme_isthmus_v2.1" {
 		t.Errorf("normalizeMapName = %q", got)

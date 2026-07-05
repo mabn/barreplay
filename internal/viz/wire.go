@@ -109,10 +109,13 @@ func (rep *Replay) toWire() wireReplay {
 
 	// Icons for the unit types present in this replay (missing icons are simply
 	// omitted; the front-end falls back to a coloured dot).
+	// Resolve each def's icon by its icontype key (falling back to its name), so a
+	// unit whose iconType differs from its name still gets an icon. Keyed by name,
+	// which is how the front-end looks it up (via unitDefs[def]).
 	w.UnitIcons = map[string]wireIcon{}
-	for _, name := range w.UnitDefs {
-		if path, size, ok := unitIcon(name); ok {
-			w.UnitIcons[name] = wireIcon{Path: path, Size: size}
+	for _, d := range rep.Meta.UnitDefs {
+		if path, size, ok := unitIconFor(d.IconType, d.Name); ok {
+			w.UnitIcons[d.Name] = wireIcon{Path: path, Size: size}
 		}
 	}
 
