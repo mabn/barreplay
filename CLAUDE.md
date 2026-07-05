@@ -149,12 +149,16 @@ dir for `.jsonl`/`.brsnap` files and serves the viewer.
   units into a **flat `[]int32` of stride 9** (`[id, def, team, x, z, hp, maxHp, dvx, dvz]`,
   positions/health rounded to ints, height `y` dropped) instead of an array of objects: a real
   replay is ~600 units/frame over thousands of frames, so this cuts the JSON an order of
-  magnitude. `dvx`/`dvz` are the unit's **per-keyframe-interval displacement** (`GetUnitVelocity`
-  is per sim-frame, so `wire.go` multiplies by `SampleEvery`); the front-end scales it by the
-  sub-frame fraction to **interpolate movement smoothly** between sampled frames (`app.js`
-  `ux`/`uz`) rather than blinking each sample. A stationary unit has `dvx==dvz==0` and stays put.
-  Playback is a `requestAnimationFrame` loop over a continuous `playPos` (keyframe units), so
-  **1× = real time** (1 game-second/second) and every speed interpolates.
+  magnitude. `dvx`/`dvz` are the unit's **per-keyframe-interval velocity displacement**
+  (`GetUnitVelocity` is per sim-frame, so `wire.go` multiplies by `SampleEvery`) — used to
+  **interpolate movement smoothly** between the 1 Hz samples rather than blinking. The
+  front-end (`app.js` `interpPos`) takes only the *speed* (`hypot(dvx,dvz)`) from velocity and
+  the *direction* from the unit's actual position in the **next** sampled frame (matched by id
+  via `nextPosMap`): it moves the unit along that line at its speed, clamped so it lands on the
+  next sample instead of overshooting a stale heading and snapping. A stationary unit
+  (`dvx==dvz==0`) stays put. Playback is a `requestAnimationFrame` loop over a continuous
+  `playPos` (keyframe units), so **1× = real time** (1 game-second/second) and every speed
+  interpolates.
   `unitStride` (Go) must stay in lockstep with `STRIDE` (JS in `web/app.js`). It also computes
   the world-space `bounds` (for viewport fit) and a team roster (Meta.Teams plus any team id
   seen only in frames/events, so nothing renders colourless). It also fills `footprints`
