@@ -152,11 +152,14 @@ dir for `.jsonl`/`.brsnap` files and serves the viewer.
   magnitude. `dvx`/`dvz` are the unit's **per-keyframe-interval velocity displacement**
   (`GetUnitVelocity` is per sim-frame, so `wire.go` multiplies by `SampleEvery`) — used to
   **interpolate movement smoothly** between the 1 Hz samples rather than blinking. The
-  front-end (`app.js` `interpPos`) takes only the *speed* (`hypot(dvx,dvz)`) from velocity and
-  the *direction* from the unit's actual position in the **next** sampled frame (matched by id
-  via `nextPosMap`): it moves the unit along that line at its speed, clamped so it lands on the
-  next sample instead of overshooting a stale heading and snapping. A stationary unit
-  (`dvx==dvz==0`) stays put. Playback is a `requestAnimationFrame` loop over a continuous
+  front-end (`app.js` `interpPos`) fits a **cubic Hermite spline** between a unit's current
+  sample (P0) and its next sample (P1, matched by id via `nextPosMap`), using each end's
+  velocity displacement (`dvx/dvz`) as the tangent — so the unit leaves P0 at its frame-A
+  velocity and arrives at P1 at its frame-B velocity, curving naturally and C1-continuous
+  across samples (no boundary kink). Constant-velocity motion reduces to a straight line;
+  tangents are length-capped (`TANGENT_CAP`× the chord) so an inconsistent velocity can't bend
+  the path into a loop. A stationary unit (`dvx==dvz==0`) stays put; a unit absent from the
+  next sample falls back to plain velocity extrapolation. Playback is a `requestAnimationFrame` loop over a continuous
   `playPos` (keyframe units), so **1× = real time** (1 game-second/second) and every speed
   interpolates.
   `unitStride` (Go) must stay in lockstep with `STRIDE` (JS in `web/app.js`). It also computes
