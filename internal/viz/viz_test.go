@@ -1,14 +1,45 @@
 package viz
 
 import (
+	"bytes"
+	"compress/gzip"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/mabn/barreplay/snapshot"
 )
+
+// parseWire splits a BRW1 payload into tag->gzip-payload and decodes the head.
+func parseWire(t *testing.T, payload []byte) (wireHead, map[byte][]byte) {
+	t.Helper()
+	sections, err := snapshot.ReadContainer(bytes.NewReader(payload), snapshot.BRWMagic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secs := map[byte][]byte{}
+	for _, s := range sections {
+		secs[s.Tag] = s.Payload
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(secs[snapshot.SecHead]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	headJSON, err := io.ReadAll(gz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var head wireHead
+	if err := json.Unmarshal(headJSON, &head); err != nil {
+		t.Fatal(err)
+	}
+	return head, secs
+}
 
 // writeJSONL writes a small capture to <dir>/<gameID>.jsonl and returns its path.
 func writeJSONL(t *testing.T, dir, gameID string) string {
@@ -80,52 +111,139 @@ func TestLoadJSONL(t *testing.T) {
 	}
 }
 
-func TestToWirePacking(t *testing.T) {
+func TestWirePayload(t *testing.T) {
 	dir := t.TempDir()
 	path := writeJSONL(t, dir, "g")
 	rep, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := rep.toWire()
+	payload, err := rep.wirePayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, secs := parseWire(t, payload)
 
-	if len(w.Frames) != 2 {
-		t.Fatalf("frames: got %d want 2", len(w.Frames))
+	// The F/E sections must be exactly what the shared snapshot codec produces —
+	// the same bytes a .brp file stores (the pass-through contract).
+	if !bytes.Equal(secs[snapshot.SecFrames], snapshot.EncodeFramesSection(rep.Frames, rep.Meta.SampleEvery)) {
+		t.Errorf("frames section differs from the snapshot codec output")
 	}
-	f0 := w.Frames[0]
-	if f0.N != 2 || len(f0.U) != 2*unitStride {
-		t.Fatalf("frame0: N=%d len(U)=%d want N=2 len=%d", f0.N, len(f0.U), 2*unitStride)
+	if !bytes.Equal(secs[snapshot.SecEvents], snapshot.EncodeEventsSection(rep.Events)) {
+		t.Errorf("events section differs from the snapshot codec output")
 	}
-	// First unit: id=100, def=1, team=0, x=10, z=20, hp=3000, maxHp=3000, and the
-	// velocity displacement over one interval: vx=2*30=60, vz=-1*30=-30.
-	want := []int32{100, 1, 0, 10, 20, 3000, 3000, 60, -30}
-	for i, v := range want {
-		if f0.U[i] != v {
-			t.Errorf("U[%d]=%d want %d (full=%v)", i, f0.U[i], v, f0.U[:unitStride])
-		}
-	}
+
 	// Bounds must cover both frames' units (x in [-50,12], z in [20,80]).
-	if w.Bounds.MinX != -50 || w.Bounds.MaxX != 12 || w.Bounds.MinZ != 20 || w.Bounds.MaxZ != 80 {
-		t.Errorf("bounds=%+v", w.Bounds)
+	if head.Bounds.MinX != -50 || head.Bounds.MaxX != 12 || head.Bounds.MinZ != 20 || head.Bounds.MaxZ != 80 {
+		t.Errorf("bounds=%+v", head.Bounds)
 	}
-	if len(w.Teams) != 2 || w.Teams[0].Side != "armada" {
-		t.Errorf("teams=%+v", w.Teams)
+	if len(head.Teams) != 2 || head.Teams[0].Side != "armada" {
+		t.Errorf("teams=%+v", head.Teams)
+	}
+	if head.UnitDefs[1] != "armcom" {
+		t.Errorf("unitDefs=%+v", head.UnitDefs)
 	}
 
 	// Footprints: immobile units are included, in elmos (xsize/zsize * 8).
-	if fp, ok := w.Footprints["corllt"]; !ok || fp.W != 16 || fp.H != 24 {
+	if fp, ok := head.Footprints["corllt"]; !ok || fp.W != 16 || fp.H != 24 {
 		t.Errorf("corllt footprint = %+v (ok=%v), want {W:16 H:24}", fp, ok)
 	}
 	// An immobile builder (nano turret) is not IsBuilding but still gets a footprint.
-	if fp, ok := w.Footprints["armnanotct3"]; !ok || fp.W != 96 || fp.H != 96 {
+	if fp, ok := head.Footprints["armnanotct3"]; !ok || fp.W != 96 || fp.H != 96 {
 		t.Errorf("armnanotct3 footprint = %+v (ok=%v), want {W:96 H:96}", fp, ok)
 	}
 	// A factory reports CanMove but is IsBuilding, so it gets a footprint.
-	if fp, ok := w.Footprints["armlab"]; !ok || fp.W != 40 || fp.H != 40 {
+	if fp, ok := head.Footprints["armlab"]; !ok || fp.W != 40 || fp.H != 40 {
 		t.Errorf("armlab footprint = %+v (ok=%v), want {W:40 H:40}", fp, ok)
 	}
-	if _, ok := w.Footprints["armcom"]; ok {
-		t.Errorf("armcom is mobile; should have no footprint, got %+v", w.Footprints["armcom"])
+	if _, ok := head.Footprints["armcom"]; ok {
+		t.Errorf("armcom is mobile; should have no footprint, got %+v", head.Footprints["armcom"])
+	}
+}
+
+// A .brp capture must be served with its stored F/E sections byte-for-byte
+// (no re-encoding), and its head must use the precomputed bounds/teams.
+func TestServeBRPPassthrough(t *testing.T) {
+	dir := t.TempDir()
+	w, err := snapshot.NewBRPWriter(dir, "brpgame")
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := snapshot.Meta{
+		GameID:      "brpgame",
+		MapName:     "Test Map",
+		SampleEvery: 30,
+		UnitDefs:    map[int32]snapshot.UnitDef{1: {DefID: 1, Name: "armcom", CanMove: true}},
+		Teams:       []snapshot.TeamInfo{{TeamID: 0, AllyTeam: 0, Side: "armada"}},
+	}
+	if err := w.WriteMeta(meta); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteFrame(snapshot.Frame{Frame: 30, TimeSec: 1, Units: []snapshot.UnitState{
+		{UnitID: 100, DefID: 1, Team: 0, Pos: snapshot.Vec3{X: 10, Z: 20}, Health: 3000, MaxHealth: 3000},
+		{UnitID: 200, DefID: 1, Team: 7, Pos: snapshot.Vec3{X: 500, Z: 600}, Health: 100, MaxHealth: 100}, // team 7 not in Meta.Teams
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteEvent(snapshot.Event{Frame: 45, Kind: snapshot.EventDestroyed, UnitID: 200, DefID: 1, Team: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer((&Server{Dir: dir}).Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/api/replay?file=brpgame.brp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d: %s", resp.StatusCode, payload)
+	}
+	head, secs := parseWire(t, payload)
+
+	f, err := os.Open(filepath.Join(dir, "brpgame.brp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bf, err := snapshot.ParseBRP(f)
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(secs[snapshot.SecFrames], bf.Sections[snapshot.SecFrames]) {
+		t.Errorf("served F section is not the stored one")
+	}
+	if !bytes.Equal(secs[snapshot.SecEvents], bf.Sections[snapshot.SecEvents]) {
+		t.Errorf("served E section is not the stored one")
+	}
+	if head.Bounds.MinX != 10 || head.Bounds.MaxX != 500 || head.Bounds.MinZ != 20 || head.Bounds.MaxZ != 600 {
+		t.Errorf("bounds=%+v", head.Bounds)
+	}
+	// Team 7 appears only in frames/events; the head must still list it.
+	found := false
+	for _, tm := range head.Teams {
+		if tm.TeamID == 7 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("team 7 missing from head teams: %+v", head.Teams)
+	}
+
+	// Load() must also fully decode the .brp.
+	rep, err := Load(filepath.Join(dir, "brpgame.brp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Frames) != 1 || len(rep.Frames[0].Units) != 2 || len(rep.Events) != 1 {
+		t.Errorf("Load(.brp): frames=%d events=%d", len(rep.Frames), len(rep.Events))
 	}
 }
 
@@ -201,12 +319,12 @@ func TestToWireIncludesIcons(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The fixture's UnitDefs include armcom and corllt; both have icons.
-	w := rep.toWire()
-	if w.UnitIcons["armcom"].Path != "icons/armcom.png" || w.UnitIcons["armcom"].Size <= 0 {
-		t.Errorf("armcom icon=%+v", w.UnitIcons["armcom"])
+	head := buildHead(rep.Meta, bounds(rep.Frames), nil)
+	if head.UnitIcons["armcom"].Path != "icons/armcom.png" || head.UnitIcons["armcom"].Size <= 0 {
+		t.Errorf("armcom icon=%+v", head.UnitIcons["armcom"])
 	}
-	if w.UnitIcons["corllt"].Path != "icons/defence_0_laser.png" {
-		t.Errorf("corllt icon=%+v", w.UnitIcons["corllt"])
+	if head.UnitIcons["corllt"].Path != "icons/defence_0_laser.png" {
+		t.Errorf("corllt icon=%+v", head.UnitIcons["corllt"])
 	}
 }
 
@@ -230,18 +348,18 @@ func TestUnitIconFor(t *testing.T) {
 	}
 }
 
-// toWire resolves an icon by IconType even when the unit's name is not an
+// The head resolves an icon by IconType even when the unit's name is not an
 // icontype key.
-func TestToWireIconByType(t *testing.T) {
-	rep := &Replay{Meta: snapshot.Meta{
+func TestHeadIconByType(t *testing.T) {
+	meta := snapshot.Meta{
 		GameID: "g",
 		UnitDefs: map[int32]snapshot.UnitDef{
 			1: {DefID: 1, Name: "made_up_unit_xyz", IconType: "armcom"},
 		},
-	}}
-	w := rep.toWire()
-	if w.UnitIcons["made_up_unit_xyz"].Path != "icons/armcom.png" {
-		t.Errorf("icon-by-type = %+v, want icons/armcom.png", w.UnitIcons["made_up_unit_xyz"])
+	}
+	head := buildHead(meta, defaultBounds(), nil)
+	if head.UnitIcons["made_up_unit_xyz"].Path != "icons/armcom.png" {
+		t.Errorf("icon-by-type = %+v, want icons/armcom.png", head.UnitIcons["made_up_unit_xyz"])
 	}
 }
 

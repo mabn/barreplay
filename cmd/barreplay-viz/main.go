@@ -1,7 +1,7 @@
 // Command barreplay-viz serves an interactive browser playback of recorded
-// barreplay snapshots. It reads the .jsonl (or raw .brsnap) files a capture run
-// wrote and renders unit positions, teams, and health over time on a top-down
-// map with a timeline scrubber.
+// barreplay snapshots. It reads the .brp (or legacy .jsonl / raw .brsnap) files
+// a capture run wrote and renders unit positions, teams, and health over time
+// on a top-down map with a timeline scrubber.
 //
 // Usage:
 //
@@ -31,7 +31,7 @@ func main() {
 
 func run() error {
 	var (
-		dir  = flag.String("snapshots", "./snapshots", "directory of .jsonl/.brsnap snapshot files to browse")
+		dir  = flag.String("snapshots", "./snapshots", "directory of .brp/.jsonl/.brsnap snapshot files to browse")
 		addr = flag.String("addr", "127.0.0.1:8080", "address to listen on")
 	)
 	flag.Usage = func() {

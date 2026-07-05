@@ -15,10 +15,12 @@ positions is to replay it in the engine and sample state from a read-only Lua wi
 ```sh
 go build ./cmd/barreplay        # build the capture CLI -> ./barreplay
 go build ./cmd/barreplay-viz    # build the visualization server -> ./barreplay-viz
+go build ./cmd/barreplay-pack   # build the .jsonl/.brsnap -> .brp converter
 go test ./...                   # all unit tests (no engine required)
 go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
 go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, no engine
 go run ./cmd/barreplay-viz -snapshots ./snapshots        # serve the viewer at 127.0.0.1:8080
+go run ./cmd/barreplay-pack ./snapshots/*.jsonl          # shrink legacy captures to .brp
 ```
 
 Tests are hermetic: `barapi` uses a mock HTTP server, `demofile` tests against the
@@ -30,19 +32,48 @@ are pure. None of them launch the engine.
 ```
 cmd/barreplay/main.go     CLI: link/gameId/.sdfz -> full pipeline
 cmd/barreplay-viz/main.go CLI: serve the browser playback UI over a snapshots dir
+cmd/barreplay-pack/main.go CLI: convert legacy .jsonl/.brsnap captures to .brp
 internal/barapi/          resolve gameId via api.bar-rts.com; download .sdfz from OVH
 internal/demofile/        gunzip + parse packed header + TDF startscript
 internal/engine/          locate spring-headless/pr-downloader, provision, launch, stream stdout
 internal/capture/         parse the widget's BRSNAP stdout protocol -> snapshot records
-internal/viz/             load .jsonl/.brsnap -> compact wire JSON; serve embedded HTML/JS viewer
-snapshot/                 PUBLIC data model + pluggable Writer (owns on-disk format; v1 JSONL)
+internal/viz/             load .brp/.jsonl/.brsnap; serve embedded HTML/JS viewer + binary wire payload
+snapshot/                 PUBLIC data model + pluggable Writer (owns on-disk format; v2 .brp binary, legacy v1 JSONL)
 assets/lua/snapshot_widget.lua   embedded, read-only sampler (go:embed)
 ```
 
 Key design rule: **the on-disk format lives only in `snapshot/`** behind the `Writer`
-interface. To change it (e.g. a binary/columnar format) implement `snapshot.Writer`;
-nothing in `capture`/`engine` changes. `capture.Consume(r, baseMeta, w)` is the seam
-between the engine's text output and the writer.
+interface. To change it implement `snapshot.Writer`; nothing in `capture`/`engine`
+changes. `capture.Consume(r, baseMeta, w)` is the seam between the engine's text
+output and the writer.
+
+### On-disk format v2: `.brp` (snapshot/brp.go)
+
+The default output (`-format brp`; `-format jsonl` keeps v1). A real 33-min 8v8 game
+is **476 MB of JSONL but 13 MB of .brp (~35x)** with full fidelity kept (every JSONL
+field, quantized once: whole elmos/hp, velocity as per-sample-interval displacement,
+build progress 1/255, resources 0.1; `t` is derived as `frame/30`, not stored).
+Container: `"BRP1" <ver u8>` then tagged sections `<tag u8><len u32le><gzip payload>`
+— `M` meta JSON (Meta + precomputed bounds/frameTeams/counts, so consumers never scan
+frames for them), `F` core frame columns (id def team x z hp maxHp dvx dvz), `X`
+extra columns (y, dvy, build, team resources — not sent to the browser), `E` events.
+Unknown tags are skipped, so sections can be added compatibly.
+
+Why it's small: units are sorted by id per frame and every column is a zigzag-varint
+**delta against the same unit in the previous sampled frame** (absolute when the id
+is new); x/z additionally add the previous frame's velocity displacement to the
+prediction (`dv = round(vel*sampleEvery)` — exactly the interpolation tangent the
+viewer uses), so constant-velocity movement encodes as ~zero. Sections gzip at
+DefaultCompression (BestCompression measured >10x slower for <2% size).
+
+Sections are **independently** gzipped so the viz server can forward `F`/`E` to the
+browser byte-for-byte. Three codec implementations must stay in lockstep: the encoder
++ Go decoder in `snapshot/brp.go` and the JS decoder in `internal/viz/web/app.js`
+(`decodeFrames`/`decodeEvents`). The writer is deterministic (same capture →
+byte-identical file), which the "diff two runs to verify an optimization" workflow
+relies on. `snapshot.ReadBRP` fully decodes; `snapshot.ParseBRP` decodes only meta
+and hands back the raw compressed sections. A roundtrip loses unit order within a
+frame (sorted by id) and sub-quantization precision — nothing else.
 
 ### Data flow
 
@@ -50,7 +81,8 @@ between the engine's text output and the writer.
 `engine.Locate` → `engine.EnsureContent` (pr-downloader) → `engine.WriteWidget`
 (substitutes the output-file path) → `engine.EnableWidget` (seed widget config) →
 `engine.BuildStartscript` → `engine.Run` (widget writes `<out>/<gameId>.brsnap`
-directly) → `capture.Consume` reads that file → `snapshot.NewJSONLWriter`.
+directly) → `capture.Consume` reads that file → `snapshot.NewBRPWriter` (or
+`NewJSONLWriter` with `-format jsonl`).
 
 Note the widget writes its BRSNAP stream to its **own file** (path substituted from
 `Config.SnapshotStreamPath`), not to stdout: the tool drains the engine's stdout (watching
@@ -142,20 +174,28 @@ won't load without an extra dev flag. Widgets are the right injection point.
 
 A **separate, read-only** tool that serves a browser playback of a finished capture; it
 never touches the engine. `barreplay-viz -snapshots <dir> [-addr host:port]` scans the
-dir for `.jsonl`/`.brsnap` files and serves the viewer.
+dir for `.brp`/`.jsonl`/`.brsnap` files and serves the viewer.
 
 - **`internal/viz/loader.go`** decodes a file into an in-memory `Replay` (Meta + Frames +
-  Events). `.jsonl` goes through `snapshot.NewReader`; `.brsnap` (the raw widget stream)
-  is re-parsed through `internal/capture` via an in-memory `snapshot.Writer` (`memWriter`)
-  — so the viz tool reuses the exact same parser as the capture pipeline. A `.brsnap` has
-  no versions/map in it (only the `D`/`T` preamble), so only the gameId (from the filename)
-  is seeded there.
-- **`internal/viz/wire.go`** converts a `Replay` into the browser payload. Frames pack their
-  units into a **flat `[]int32` of stride 9** (`[id, def, team, x, z, hp, maxHp, dvx, dvz]`,
-  positions/health rounded to ints, height `y` dropped) instead of an array of objects: a real
-  replay is ~600 units/frame over thousands of frames, so this cuts the JSON an order of
-  magnitude. `dvx`/`dvz` are the unit's **per-keyframe-interval velocity displacement**
-  (`GetUnitVelocity` is per sim-frame, so `wire.go` multiplies by `SampleEvery`) — used to
+  Events). `.brp` goes through `snapshot.ReadBRP`, `.jsonl` through `snapshot.NewReader`;
+  `.brsnap` (the raw widget stream) is re-parsed through `internal/capture` via an
+  in-memory `snapshot.Writer` (`memWriter`) — so the viz tool reuses the exact same parser
+  as the capture pipeline. A `.brsnap` has no versions/map in it (only the `D`/`T`
+  preamble), so only the gameId (from the filename) is seeded there.
+- **`internal/viz/wire.go`** builds the browser payload: a binary **"BRW1" container**
+  (same section framing as `.brp`) of a gzipped `J` head JSON (meta, teams, unitDef
+  names, icons, footprints, bounds) plus the capture's `F`/`E` sections. For a `.brp`
+  input those sections are **copied byte-for-byte from the file** (`brpWirePayload`,
+  fed by `snapshot.ParseBRP` — the server never decodes frames; bounds/teams come from
+  the file's precomputed meta), so serving a 33-min game costs ~0.1s and ~10 MB. Legacy
+  `.jsonl`/`.brsnap` inputs are fully loaded and pushed through the same snapshot codec
+  per request (`Replay.wirePayload`) — slow for big files (tens of seconds); convert
+  them with `barreplay-pack` instead. In the browser, `app.js decodeReplay()` gunzips
+  the sections with the native `DecompressionStream` and unpacks each frame into the
+  same flat stride-9 `Int32Array` (`[id, def, team, x, z, hp, maxHp, dvx, dvz]`) the
+  renderer always used (~1-2s for 4.2M unit records). `dvx`/`dvz` are the unit's
+  **per-keyframe-interval velocity displacement**
+  (`GetUnitVelocity` is per sim-frame, so the codec multiplies by `SampleEvery`) — used to
   **interpolate movement smoothly** between the 1 Hz samples rather than blinking. The
   front-end (`app.js` `interpPos`) fits a **cubic Hermite spline** between a unit's current
   sample (P0) and its next sample (P1, matched by id via `nextPosMap`), using each end's
@@ -167,8 +207,11 @@ dir for `.jsonl`/`.brsnap` files and serves the viewer.
   next sample falls back to plain velocity extrapolation. Playback is a `requestAnimationFrame` loop over a continuous
   `playPos` (keyframe units), so **1× = real time** (1 game-second/second) and every speed
   interpolates.
-  `unitStride` (Go) must stay in lockstep with `STRIDE` (JS in `web/app.js`). It also computes
-  the world-space `bounds` (for viewport fit) and a team roster (Meta.Teams plus any team id
+  The column layout is defined by the `.brp` codec — `snapshot/brp.go` (Go encode+decode)
+  and `decodeFrames` in `web/app.js` (JS decode) must stay in lockstep, as must `STRIDE`
+  (JS). `wire.go` also computes,
+  for legacy inputs, the world-space `bounds` (for viewport fit) and a team roster
+  (Meta.Teams plus any team id
   seen only in frames/events, so nothing renders colourless). It also fills `footprints`
   (name→`{w,h}` in elmos) for **structures only** (`!UnitDef.CanMove || UnitDef.IsBuilding`):
   neither flag alone is enough — nano/build turrets are immobile but tagged builders (not
@@ -186,7 +229,7 @@ dir for `.jsonl`/`.brsnap` files and serves the viewer.
   — keeping the repo stdlib-only. It also replicates the file's trailing `_scav` synthesis
   (inverted-path variants) and keeps only entries whose bitmap file actually exists in the
   embedded FS, so the payload never advertises a 404. It also parses each type's `size`
-  multiplier. `toWire` fills `unitIcons` (name→`{path,size}`) for just the def names in the
+  multiplier. `buildHead` fills `unitIcons` (name→`{path,size}`) for just the def names in the
   replay; the front-end draws every unit as its icon, **team-tinted** (BAR icons are grayscale
   luminance masks — bright→team colour, black→black — so the icon is `multiply`-composited
   into a team-colour field then clipped to its own alpha, preserving the internal detail;
@@ -221,8 +264,9 @@ dir for `.jsonl`/`.brsnap` files and serves the viewer.
   timeline scrub / play / zoom / pan / hover-tooltip. Colours are assigned per ally-team (a base
   hue per ally, lightness varied per team within it).
 
-Guarding the tool: `internal/viz/viz_test.go` round-trips a synthetic `.jsonl` and `.brsnap`
-through `Load`, checks the flat-array packing + bounds in `toWire`, and checks the dir listing.
+Guarding the tool: `internal/viz/viz_test.go` round-trips a synthetic `.jsonl`, `.brsnap`
+and `.brp` through `Load`, checks the wire container's head + the F/E pass-through
+contract (served `.brp` sections must be the stored bytes), and checks the dir listing.
 No engine or browser needed.
 
 ## Running a real capture (needs the engine + content)
@@ -391,8 +435,8 @@ Profiling showed ~40-50% of the sim-phase wall time is **unsynced** work that ca
 affect the deterministic re-sim: BAR's default widget suite (`Lua::Callins::Unsynced`)
 and the draw-side update chain that runs even headless (`Update::WorldDrawer`, `Draw`,
 unit/feature drawer updates). Two default-on optimizations remove it; since the sim is
-untouched, the output `.jsonl` must stay **byte-identical** — diff against a previous
-run to verify any change here.
+untouched, the output snapshot file must stay **byte-identical** (the `.brp` writer is
+deterministic) — diff against a previous run to verify any change here.
 
 - **`-disable-widgets` (default true):** the snapshot widget disables every other active
   widget on the first `GameFrame`. This must happen at runtime: BAR's handler
@@ -439,10 +483,11 @@ never their content — and is the main remaining speed lever (~25-35% at the 60
 - The demo header is little-endian, byte-packed; layout verified in
   `internal/demofile/demofile.go` against the real sample (magic `spring demofile`,
   version 5, headerSize 352).
-- Output: `<out>/<gameId>.jsonl` — a `meta` line then interleaved `frame`/`event` lines.
-  Read it back with `snapshot.NewReader`. On completion the CLI prints the engine
-  wall-time (split into load + sim, with sim fps/speed-up), the engine profiler totals
-  (see "Profiling a run"), `infolog.txt` size, and the snapshot's size + line count.
+- Output: `<out>/<gameId>.brp` (see "On-disk format v2"); read it back with
+  `snapshot.ReadBRP`. `-format jsonl` writes the legacy `<gameId>.jsonl` (a `meta` line
+  then interleaved `frame`/`event` lines; `snapshot.NewReader`). On completion the CLI
+  prints the engine wall-time (split into load + sim, with sim fps/speed-up), the engine
+  profiler totals (see "Profiling a run"), `infolog.txt` size, and the snapshot's size.
 - `-progress` (`cmd/barreplay` + `engine.WatchProgress`) polls the tail of
   `<data>/infolog.txt` every 2s, parses the newest `[f=<frame>]` marker, and prints
   frame/total, in-game time, %, processing fps, speed-up (fps/30), and ETA. Total game

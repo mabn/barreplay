@@ -49,6 +49,7 @@ func run() error {
 	var (
 		dataDir      = flag.String("data", envOr("BAR_DATA_DIR", ""), "BAR/Spring data directory (engine/, games/, maps/); also used as --write-dir")
 		outDir       = flag.String("out", "./snapshots", "output directory for snapshot files")
+		format       = flag.String("format", "brp", "snapshot output format: brp (compact binary) or jsonl (legacy, ~40x larger)")
 		every        = flag.Int("every", 30, "snapshot sampling interval in sim frames (30 = 1s)")
 		engineBin    = flag.String("engine", "", "path to spring-headless (overrides auto-location)")
 		prdBin       = flag.String("pr-downloader", "", "path to pr-downloader (overrides auto-location)")
@@ -204,8 +205,19 @@ func run() error {
 		return err
 	}
 
-	// 5. Open the snapshot writer (this package owns the on-disk format).
-	w, err := snapshot.NewJSONLWriter(*outDir, h.GameID)
+	// 5. Open the snapshot writer (the snapshot package owns the on-disk format).
+	var w snapshot.Writer
+	var outPath string
+	switch *format {
+	case "brp":
+		w, err = snapshot.NewBRPWriter(*outDir, h.GameID)
+		outPath = filepath.Join(*outDir, h.GameID+".brp")
+	case "jsonl":
+		w, err = snapshot.NewJSONLWriter(*outDir, h.GameID)
+		outPath = filepath.Join(*outDir, h.GameID+".jsonl")
+	default:
+		return fmt.Errorf("unknown -format %q (want brp or jsonl)", *format)
+	}
 	if err != nil {
 		return err
 	}
@@ -280,7 +292,6 @@ func run() error {
 		fmt.Fprintf(os.Stderr, "engine exited: %v\n", waitErr)
 	}
 
-	outPath := filepath.Join(*outDir, h.GameID+".jsonl")
 	fmt.Fprintf(os.Stderr, "done: wrote %s\n", outPath)
 	printRunTiming(os.Stderr, engineDuration, loadDuration, &stats)
 	if mb, ok := fileSizeMB(eng.InfologPath()); ok {
@@ -290,8 +301,12 @@ func run() error {
 		fmt.Fprintf(os.Stderr, "  widget stream: %.2f MB (%s)\n", mb, rawPath)
 	}
 	if mb, ok := fileSizeMB(outPath); ok {
-		lines, _ := countLines(outPath)
-		fmt.Fprintf(os.Stderr, "  snapshot: %.2f MB, %d lines\n", mb, lines)
+		if *format == "jsonl" {
+			lines, _ := countLines(outPath)
+			fmt.Fprintf(os.Stderr, "  snapshot: %.2f MB, %d lines\n", mb, lines)
+		} else {
+			fmt.Fprintf(os.Stderr, "  snapshot: %.2f MB\n", mb)
+		}
 	}
 	return nil
 }

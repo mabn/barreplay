@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/mabn/barreplay/snapshot"
 )
 
 //go:embed web/index.html web/app.js web/style.css
@@ -17,7 +19,7 @@ var webFS embed.FS
 // Server serves the playback UI and a small JSON API over a directory of
 // snapshot files.
 type Server struct {
-	// Dir is the directory scanned for .jsonl/.brsnap snapshot files.
+	// Dir is the directory scanned for .brp/.jsonl/.brsnap snapshot files.
 	Dir string
 }
 
@@ -25,7 +27,7 @@ type Server struct {
 type replayInfo struct {
 	File   string `json:"file"`   // basename, used as the ?file= key
 	GameID string `json:"gameId"` // filename without extension
-	Format string `json:"format"` // "jsonl" or "brsnap"
+	Format string `json:"format"` // "brp", "jsonl" or "brsnap"
 	Size   int64  `json:"size"`
 }
 
@@ -82,9 +84,13 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, infos)
 }
 
-// handleReplay loads one snapshot file (?file=<basename>) and returns its wire
-// payload. The file is confined to Dir — the basename is taken to avoid path
-// traversal.
+// handleReplay loads one snapshot file (?file=<basename>) and returns its
+// binary wire payload (the BRW1 container; see wire.go). The file is confined
+// to Dir — the basename is taken to avoid path traversal.
+//
+// A .brp file's frame/event sections are copied into the response byte-for-
+// byte (they're independently gzipped exactly so this needs no re-encoding);
+// legacy .jsonl/.brsnap files are fully loaded and encoded on the fly.
 func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("file")
 	if name == "" {
@@ -97,12 +103,39 @@ func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := filepath.Join(s.Dir, name)
-	rep, err := Load(path)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+
+	var payload []byte
+	if strings.EqualFold(filepath.Ext(name), ".brp") {
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		bf, perr := snapshot.ParseBRP(f)
+		f.Close()
+		if perr != nil {
+			http.Error(w, perr.Error(), http.StatusInternalServerError)
+			return
+		}
+		payload, err = brpWirePayload(bf)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		rep, err := Load(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if payload, err = rep.wirePayload(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
-	writeJSON(w, rep.toWire())
+	w.Header().Set("Cache-Control", "no-store, must-revalidate")
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Write(payload)
 }
 
 // list scans Dir for snapshot files, newest first.
@@ -119,6 +152,8 @@ func (s *Server) list() ([]replayInfo, error) {
 		ext := strings.ToLower(filepath.Ext(e.Name()))
 		format := ""
 		switch ext {
+		case ".brp":
+			format = "brp"
 		case ".jsonl":
 			format = "jsonl"
 		case ".brsnap":
