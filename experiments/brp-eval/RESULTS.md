@@ -161,8 +161,52 @@ smaller than the source `.brsnap`.
 
 Reproduce: `go run ./experiments/brp-eval <capture.brp>`.
 
+## opt4 + opt5 (dv precision) — second round
+
+Going-forward layout per project decision: **opt1 (skip idle units) + opt4
+(drop the y/dvy columns; X keeps build + team resources)**. Measured against
+the original file:
+
+| variant | F | X | file total | vs original |
+|---|---|---|---|---|
+| opt1+4 | 7,344,889 | 464,250 | **8,069,731** | **55.1%** |
+
+(opt4 collapses X from 2.94 MB under opt1 to 0.45 MB — most of X was y/dvy.)
+
+**opt5 — dv at 1/scale elmo precision with a fractional position
+accumulator** (decoder tracks position in fine units, advances by fine dv,
+predicts round(fx/scale); corrections stay whole elmos and preserve the
+fractional phase). Requires the raw `.brsnap` (float velocities); the harness
+validates the brsnap-derived frames match the `.brp` exactly. Also tested
+**5b**: keyframe x/z additionally stored at fine precision (from the true
+float positions) so the accumulator starts phase-exact.
+
+| variant | file total | vs opt1+4 | x-res nonzero | dv-delta nonzero |
+|---|---|---|---|---|
+| opt1+4 (dv ×1) | 8,069,731 | 100.0% | 26.9% | 27.0% |
+| dv ×2 | 8,401,651 | 104.3% | 27.2% | 27.9% |
+| dv ×4 | 8,762,149 | 108.9% | 27.2% | 28.5% |
+| dv ×10 | 9,227,005 | 114.8% | 27.2% | 28.5% |
+| dv ×100 | 10,289,853 | 128.4% | 27.2% | 28.5% |
+| 5b: dv+keyframe pos ×10 | 9,274,370 | 115.4% | 27.2% | — |
+| 5b: dv+keyframe pos ×100 | 10,380,943 | 129.6% | 27.2% | — |
+
+**Verdict: rejected.** Finer dv does not reduce position corrections at all —
+not even at ×100 with exact keyframe phase — because the corrections are not
+caused by dv rounding. The dominant cause: a correction almost always
+coincides with a *real velocity change* during the sample interval (x-res
+27% ≈ ddv 28%) — the stored dv is the instantaneous velocity at the sample
+instant, so when the unit accelerates/turns mid-interval no dv precision can
+predict the sampled position. The pure rounding-noise corrections opt5 was
+aimed at are only ~1.1% of records (the earlier ±1-tolerance probe) at ~1
+byte each. Meanwhile the cost side is real: every dv delta magnitude scales
+with the precision (mean |ddv| ×10 at scale 10) and keyframe dv absolutes
+grow too — +14.8% file at ×10, +28.4% at ×100.
+
 Inspection helpers:
 
+- `-brsnap <path>` feeds the original raw capture (float velocities/positions)
+  and runs the opt5 dv-precision sweep against the .brp given as the main arg.
 - `-unit <id>` dumps one unit's every sampled frame — game time, frame,
   position/velocity/polar state, then the exact deltas the cartesian codec
   stores vs what the polar codec would store, each with its pre-gzip byte

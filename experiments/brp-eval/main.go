@@ -42,6 +42,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/mabn/barreplay/internal/capture"
 	"github.com/mabn/barreplay/snapshot"
 )
 
@@ -52,11 +53,16 @@ const (
 )
 
 // qUnit is a unit's state in the quantized integer domain, mirroring
-// snapshot's prevUnitState (plus the id).
+// snapshot's prevUnitState (plus the id). fvx/fvz keep the velocity
+// displacement at full float precision (elmos per sample interval) for the
+// opt5 dv-precision sweep; they only carry real sub-elmo information when the
+// frames were loaded from a raw .brsnap (a .brp already rounded them).
 type qUnit struct {
 	id                                   int32
 	def, team, x, z, hp, maxHp, dvx, dvz int64
 	y, dvy, build                        int64
+	fvx, fvz                             float64
+	fpx, fpz                             float64
 }
 
 func colVal(u qUnit, c int) int64 {
@@ -113,6 +119,8 @@ func quantize(u snapshot.UnitState, se float32) qUnit {
 		dvx: roundq(u.VelX * se), dvz: roundq(u.VelZ * se),
 		y: roundq(u.Pos.Y), dvy: roundq(u.VelY * se),
 		build: roundq(u.BuildProgress * 255),
+		fvx:   float64(u.VelX * se), fvz: float64(u.VelZ * se),
+		fpx: float64(u.Pos.X), fpz: float64(u.Pos.Z),
 	}
 }
 
@@ -822,6 +830,282 @@ func dumpUnit(qframes []qFrame, id int32) {
 		id, frames, idleCart, idlePol, bytesCart, bytesPol)
 }
 
+// --------------------------------------------------------------------------
+// opt4+5: the "going forward" layout. opt4 drops the y/dvy columns entirely
+// (the viewer never reads them; X keeps build + resources). opt5 stores dv in
+// units of 1/scale elmo per sample interval and predicts position through a
+// FRACTIONAL accumulator: the decoder tracks fx (position in 1/scale elmos),
+// advances it by the fine dv each frame, and the whole-elmo prediction is
+// round(fx/scale) — so a fractional cruise velocity no longer forces the
+// periodic ±1 x/z corrections that integer dv causes. Corrections shift fx by
+// whole elmos, preserving the fractional phase. scale=1 degenerates to
+// exactly opt1+4 (integer dv, plain prediction). Always frame-major with
+// opt1's skip-idle + dead-id list.
+
+type s5 struct {
+	def, team, hp, maxHp, build int64
+	x, z, fx, fz, dvx, dvz      int64
+}
+
+// roundDiv rounds v/s half away from zero (encoder and decoder must agree).
+func roundDiv(v, s int64) int64 {
+	if v >= 0 {
+		return (v + s/2) / s
+	}
+	return -((-v + s/2) / s)
+}
+
+func dvq(u qUnit, scale int64) (int64, int64) {
+	return int64(math.Round(u.fvx * float64(scale))), int64(math.Round(u.fvz * float64(scale)))
+}
+
+func newS5(u qUnit, scale int64, finePos bool) s5 {
+	dx, dz := dvq(u, scale)
+	fx, fz := u.x*scale, u.z*scale
+	if finePos {
+		fx = int64(math.Round(u.fpx * float64(scale)))
+		fz = int64(math.Round(u.fpz * float64(scale)))
+	}
+	return s5{def: u.def, team: u.team, hp: u.hp, maxHp: u.maxHp, build: u.build,
+		x: roundDiv(fx, scale), z: roundDiv(fz, scale), fx: fx, fz: fz, dvx: dx, dvz: dz}
+}
+
+// o5Stats aggregates the mechanism metrics for one dv scale.
+type o5Stats struct {
+	recs, nzX, nzZ, nzDvx, nzDvz, skippable int64
+	sumAbsDv                                int64
+}
+
+// encodeChunk5 encodes one chunk under opt1+4+5 at the given dv scale:
+// keyframe absolutes into coreK/extraK, then skip-idle delta frames into
+// coreD/extraD. Core columns: def team x z hp maxHp dvx dvz; extra: build.
+func encodeChunk5(coreK, extraK, coreD, extraD vw, fs []qFrame, scale int64, finePos bool, st *o5Stats) {
+	prevFrame := int64(0)
+	prevRes := map[int32]qRes{}
+
+	// keyframe
+	kf := fs[0]
+	coreK.sv(kf.frame - prevFrame)
+	prevFrame = kf.frame
+	coreK.uv(uint64(len(kf.units)))
+	last := int64(0)
+	for _, u := range kf.units {
+		coreK.sv(int64(u.id) - last)
+		last = int64(u.id)
+	}
+	prev := make(map[int32]s5, len(kf.units))
+	states := make([]s5, len(kf.units))
+	for i, u := range kf.units {
+		states[i] = newS5(u, scale, finePos)
+		prev[u.id] = states[i]
+	}
+	for c := 0; c < 8; c++ {
+		for _, s := range states {
+			kx, kz := s.x, s.z
+			if finePos {
+				kx, kz = s.fx, s.fz // keyframe positions stored at 1/scale precision
+			}
+			coreK.sv([8]int64{s.def, s.team, kx, kz, s.hp, s.maxHp, s.dvx, s.dvz}[c])
+		}
+	}
+	for _, s := range states {
+		extraK.sv(s.build)
+	}
+	writeRes(extraK, kf.res, prevRes)
+
+	// delta frames
+	for _, fr := range fs[1:] {
+		coreD.sv(fr.frame - prevFrame)
+		prevFrame = fr.frame
+
+		cur := make(map[int32]bool, len(fr.units))
+		for _, u := range fr.units {
+			cur[u.id] = true
+		}
+		var dead []int64
+		for id := range prev {
+			if !cur[id] {
+				dead = append(dead, int64(id))
+			}
+		}
+		sort.Slice(dead, func(i, j int) bool { return dead[i] < dead[j] })
+		coreD.uv(uint64(len(dead)))
+		last = 0
+		for _, id := range dead {
+			coreD.sv(id - last)
+			last = id
+		}
+
+		type rec struct {
+			id int32
+			d  [8]int64
+			db int64
+		}
+		var changed []rec
+		next := make(map[int32]s5, len(fr.units))
+		for _, u := range fr.units {
+			p, ok := prev[u.id]
+			cdvx, cdvz := dvq(u, scale)
+			var r rec
+			r.id = u.id
+			var ns s5
+			if ok {
+				pfx, pfz := p.fx+p.dvx, p.fz+p.dvz
+				dx := u.x - roundDiv(pfx, scale)
+				dz := u.z - roundDiv(pfz, scale)
+				r.d = [8]int64{u.def - p.def, u.team - p.team, dx, dz,
+					u.hp - p.hp, u.maxHp - p.maxHp, cdvx - p.dvx, cdvz - p.dvz}
+				r.db = u.build - p.build
+				ns = s5{def: u.def, team: u.team, hp: u.hp, maxHp: u.maxHp, build: u.build,
+					x: u.x, z: u.z, fx: pfx + dx*scale, fz: pfz + dz*scale, dvx: cdvx, dvz: cdvz}
+
+				st.recs++
+				if dx != 0 {
+					st.nzX++
+				}
+				if dz != 0 {
+					st.nzZ++
+				}
+				if r.d[6] != 0 {
+					st.nzDvx++
+				}
+				if r.d[7] != 0 {
+					st.nzDvz++
+				}
+				st.sumAbsDv += abs64(r.d[6]) + abs64(r.d[7])
+			} else {
+				// mid-chunk new units: keep whole-elmo absolutes (rare)
+				ns = newS5(u, scale, false)
+				r.d = [8]int64{ns.def, ns.team, ns.x, ns.z, ns.hp, ns.maxHp, ns.dvx, ns.dvz}
+				r.db = ns.build
+			}
+			next[u.id] = ns
+
+			any := !ok || r.db != 0
+			for _, v := range r.d {
+				if v != 0 {
+					any = true
+				}
+			}
+			if any {
+				changed = append(changed, r)
+			} else {
+				st.skippable++
+			}
+		}
+		coreD.uv(uint64(len(changed)))
+		last = 0
+		for _, r := range changed {
+			coreD.sv(int64(r.id) - last)
+			last = int64(r.id)
+		}
+		for c := 0; c < 8; c++ {
+			for _, r := range changed {
+				coreD.sv(r.d[c])
+			}
+		}
+		for _, r := range changed {
+			extraD.sv(r.db)
+		}
+		writeRes(extraD, fr.res, prevRes)
+		prev = next
+	}
+}
+
+// loadBRSnap re-parses a raw .brsnap through internal/capture (the pipeline's
+// own parser) and returns quantized frames that carry full-precision float
+// velocities in fvx/fvz.
+func loadBRSnap(path string, se float32) ([]qFrame, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	l := &collector{}
+	if err := capture.Consume(f, snapshot.Meta{GameID: "eval"}, l); err != nil {
+		return nil, err
+	}
+	out := make([]qFrame, len(l.frames))
+	for i, fr := range l.frames {
+		qf := qFrame{frame: int64(fr.Frame)}
+		qf.units = make([]qUnit, len(fr.Units))
+		for j, u := range fr.Units {
+			qf.units[j] = quantize(u, se)
+		}
+		sort.Slice(qf.units, func(a, b int) bool { return qf.units[a].id < qf.units[b].id })
+		qf.res = make([]qRes, len(fr.Resources))
+		for j, r := range fr.Resources {
+			qf.res[j] = quantizeRes(r)
+		}
+		sort.Slice(qf.res, func(a, b int) bool { return qf.res[a].team < qf.res[b].team })
+		out[i] = qf
+	}
+	return out, nil
+}
+
+type collector struct {
+	frames []snapshot.Frame
+}
+
+func (c *collector) WriteMeta(snapshot.Meta) error { return nil }
+func (c *collector) WriteFrame(f snapshot.Frame) error {
+	c.frames = append(c.frames, f)
+	return nil
+}
+func (c *collector) WriteEvent(snapshot.Event) error { return nil }
+func (c *collector) Close() error                    { return nil }
+
+// runOpt5 evaluates opt1+4 (scale 1) and opt5 dv-precision scales on frames
+// that carry full-precision velocities.
+func runOpt5(qframes []qFrame, origTotal, origF, origX int64) {
+	type cfg struct {
+		scale int64
+		fine  bool
+	}
+	cfgs := []cfg{{1, false}, {2, false}, {4, false}, {10, false}, {100, false},
+		{2, true}, {4, true}, {10, true}, {100, true}}
+	fmt.Println("== opt5: dv precision sweep (layout: opt1 skip-idle + opt4 no y/dvy) ==")
+	fmt.Printf("%-18s %10s %10s %10s %12s %9s %9s | %6s %6s %6s %8s %6s\n",
+		"variant", "F bytes", "X bytes", "F+X", "file total", "vs o1+4", "vs orig",
+		"x-res", "z-res", "ddv", "mean|ddv|", "skip")
+	var base int64
+	for _, c := range cfgs {
+		scale := c.scale
+		var sz sizes
+		var st o5Stats
+		for start := 0; start < len(qframes); start += chunkFrames {
+			end := min(start+chunkFrames, len(qframes))
+			var ck, xk, cd, xd bytes.Buffer
+			encodeChunk5(vw{&ck}, vw{&xk}, vw{&cd}, vw{&xd}, qframes[start:end], scale, c.fine, &st)
+			sz.fKey += int64(gz(ck.Bytes()))
+			sz.xKey += int64(gz(xk.Bytes()))
+			if end-start > 1 {
+				sz.fDelta += int64(gz(cd.Bytes()))
+				sz.xDelta += int64(gz(xd.Bytes()))
+			}
+		}
+		if scale == 1 {
+			base = sz.total()
+		}
+		fileTotal := origTotal - origF - origX + sz.total()
+		name := fmt.Sprintf("opt1+4 (dv x%d)", scale)
+		if c.fine {
+			name = fmt.Sprintf("5b: dv+kfpos x%d", scale)
+		}
+		if scale == 1 {
+			name = "opt1+4 (base)"
+		}
+		pc := func(n int64) float64 { return 100 * float64(n) / float64(st.recs) }
+		fmt.Printf("%-18s %10d %10d %10d %12d %8.1f%% %8.1f%% | %5.1f%% %5.1f%% %5.1f%% %8.2f %5.1f%%\n",
+			name, sz.f(), sz.x(), sz.total(), fileTotal,
+			100*float64(sz.total())/float64(base), 100*float64(fileTotal)/float64(origTotal),
+			pc(st.nzX), pc(st.nzZ), pc(st.nzDvx+st.nzDvz)/2,
+			float64(st.sumAbsDv)/float64(2*st.recs), pc(st.skippable))
+	}
+	fmt.Println("\n(x-res/z-res: % of delta records needing a position correction; ddv: % with a")
+	fmt.Println(" dv delta; mean|ddv| in 1/scale elmos; skip: % of records fully skipped by opt1)")
+}
+
 // findConstant lists the units with the most "moving but free" delta frames —
 // dv non-zero yet every cartesian column delta zero (the constant-velocity
 // sweet spot the codec's velocity predictor is built around) — to pick good
@@ -896,6 +1180,7 @@ type variant struct {
 func main() {
 	unitID := flag.Int("unit", -1, "dump per-frame encoding details for this unit id and exit")
 	findConst := flag.Bool("find-constant", false, "list units with the most constant-velocity (free) frames and exit")
+	brsnapPath := flag.String("brsnap", "", "original .brsnap (full-precision velocities): run the opt5 dv-precision sweep and exit")
 	flag.Parse()
 	if flag.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "usage: brp-eval [-unit <id>] <capture.brp>")
@@ -942,6 +1227,45 @@ func main() {
 	}
 	if *findConst {
 		findConstant(qframes, meta.UnitDefs)
+		return
+	}
+	if *brsnapPath != "" {
+		qf5, err := loadBRSnap(*brsnapPath, se)
+		if err != nil {
+			panic(err)
+		}
+		// The brsnap-derived frames must match the .brp-derived ones exactly in
+		// every stored integer field — validates the alternate load path.
+		mism := 0
+		if len(qf5) != len(qframes) {
+			fmt.Printf("!! frame count mismatch: brsnap=%d brp=%d\n", len(qf5), len(qframes))
+			mism++
+		} else {
+			for i := range qf5 {
+				a, b := qf5[i], qframes[i]
+				if a.frame != b.frame || len(a.units) != len(b.units) {
+					mism++
+					continue
+				}
+				for j := range a.units {
+					ua, ub := a.units[j], b.units[j]
+					ua.fvx, ua.fvz, ua.fpx, ua.fpz = 0, 0, 0, 0
+					ub.fvx, ub.fvz, ub.fpx, ub.fpz = 0, 0, 0, 0
+					if ua != ub {
+						mism++
+						break
+					}
+				}
+			}
+		}
+		if mism > 0 {
+			fmt.Printf("!! brsnap/.brp MISMATCH in %d frames — sweep numbers unreliable\n", mism)
+		} else {
+			fmt.Printf("brsnap load validated: %d frames identical to the .brp in all stored fields\n\n", len(qf5))
+		}
+		origF := int64(len(pf.Sections[snapshot.SecFrames]))
+		origX := int64(len(pf.Sections[snapshot.SecExtra]))
+		runOpt5(qf5, int64(len(raw)), origF, origX)
 		return
 	}
 
