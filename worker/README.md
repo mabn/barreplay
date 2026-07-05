@@ -16,14 +16,17 @@ into plain files by `cmd/barreplay-static` and served straight from an **R2 buck
 
 | Go server endpoint | Static object (in R2) |
 | --- | --- |
-| `GET /api/replays` | `index.json` |
+| `GET /api/replays` | built live by the Worker from the bucket (no stored file) |
 | `GET /api/replay?file=<id>.brp` | `replays/<id>.brw` |
 | `GET /api/replay/chunk?file=<id>&i=<n>` | `replays/<id>/c<n>` |
 | `GET /api/replay/chunk?...&key=1` (skim) | HTTP `Range: bytes=0-(keyLen-1)` on `c<n>` |
 | `GET /api/replay/resources?file=<id>` | `replays/<id>.resources` |
 
 The Worker (`src/worker/index.ts`) is a thin Hono app that streams these out of R2 with
-Range support — no frame is ever decoded server-side. The SPA and the vendored unit/rank
+Range support — no frame is ever decoded server-side. The replay listing (`/index.json`) is
+built **live** from the bucket (it lists the `replays/` prefix), so there is no listing file
+to maintain: uploading one replay's handful of files makes it appear, and deleting them
+removes it. The SPA and the vendored unit/rank
 icons (`/icons/*`, `/ranks/*`) are fixed static assets bundled with the deploy. Map terrain
 is fetched **browser-side directly** from `api.bar-rts.com` (degrades gracefully if
 unreachable), so there is no map proxy.
@@ -53,17 +56,19 @@ npx wrangler r2 bucket create barreplay-replays-preview
 go build ./cmd/barreplay-static
 ./barreplay-static -out ./static ./snapshots/*.brp     # writes index.json + replays/**
 
-# 2. upload the mirror to R2 (walks only index.json + replays/**, nothing else)
+# 2. upload to R2 (walks only replays/**; no index.json — the listing is dynamic)
 cd worker
-npm run upload -- ../static              # prod bucket
-npm run upload -- ../static --preview    # the wrangler-dev bucket
-npm run upload -- ../static --local      # local miniflare R2 (for `npm run dev`)
+npm run upload -- ../static <id>         # ONE replay (the common case)
+npm run upload -- ../static              # every replay in the dir
+npm run upload -- ../static <id> --preview   # the wrangler-dev bucket
+npm run upload -- ../static <id> --local     # local miniflare R2 (for `npm run dev`)
 ```
 
-`barreplay-static` rebuilds `index.json` from whatever is in the output dir, so keep a
-local mirror of the bucket, pack new captures into it, and re-run the upload. For a large
-library, `rclone`/`aws s3 sync ./static -> bucket` against R2's S3 API works too (needs an
-R2 API token).
+Because the listing is built live, you upload **one replay at a time** —
+`npm run upload -- ../static <gameId>` pushes just that replay's `.brw`, `.resources`, and
+chunk files, and it shows up in the picker immediately. For a bulk import, `rclone`/`aws s3
+sync ./static/replays -> bucket/replays` against R2's S3 API works too (needs an R2 API
+token).
 
 ## Commands
 
