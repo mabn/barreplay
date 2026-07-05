@@ -19,8 +19,9 @@ const app = new Hono<{ Bindings: Env }>();
 
 app.get("/api/health", (c) => c.json({ status: "ok" }));
 
-// R2-backed paths. Everything else falls through to static assets.
-app.get("/index.json", (c) => serveR2(c.env.BUCKET, "index.json", c.req.raw, false));
+// The replay listing is built live from the bucket (list the replays/ prefix), so
+// uploading a single replay's files makes it appear with no index.json to maintain.
+app.get("/index.json", (c) => handleIndex(c.env.BUCKET));
 app.on(["GET", "HEAD"], "/replays/*", (c) => {
   const key = c.req.path.slice(1); // strip leading "/"
   return serveR2(c.env.BUCKET, key, c.req.raw, true);
@@ -31,6 +32,43 @@ app.on(["GET", "HEAD"], "/replays/*", (c) => {
 app.all("*", (c) => c.env.ASSETS.fetch(c.req.raw));
 
 export default app;
+
+// handleIndex builds the replay picker listing by scanning the bucket's replays/
+// prefix — one entry per replay (a <id>.brw exists), with size = the sum of that
+// replay's objects (head + resources + chunks). No index.json object is needed, so
+// a single-replay upload is self-sufficient.
+const REPLAY_PREFIX = "replays/";
+
+async function handleIndex(bucket: R2Bucket): Promise<Response> {
+  const sizes = new Map<string, number>();
+  const replays = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    const page = await bucket.list({ prefix: REPLAY_PREFIX, cursor, limit: 1000 });
+    for (const o of page.objects) {
+      const rest = o.key.slice(REPLAY_PREFIX.length);
+      const slash = rest.indexOf("/");
+      let id: string;
+      if (slash >= 0) {
+        id = rest.slice(0, slash); // replays/<id>/c<n>
+      } else if (rest.endsWith(".brw")) {
+        id = rest.slice(0, -".brw".length);
+        replays.add(id); // the marker file for a valid replay
+      } else if (rest.endsWith(".resources")) {
+        id = rest.slice(0, -".resources".length);
+      } else {
+        id = rest;
+      }
+      sizes.set(id, (sizes.get(id) ?? 0) + o.size);
+    }
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+
+  const list = [...replays]
+    .sort()
+    .map((id) => ({ file: id, gameId: id, size: sizes.get(id) ?? 0 }));
+  return Response.json(list, { headers: { "cache-control": "no-cache" } });
+}
 
 // serveR2 streams an object out of the bucket, honoring a byte Range request
 // (used by the viewer's keyframe skim). `immutable` marks per-replay files that
