@@ -76,13 +76,13 @@ canvas { display: block; width: 100%; height: 100%; background: #0c0f13; cursor:
   flex: 1; min-width: 0; display: flex; align-items: center; gap: 5px;
   font-size: 12px; line-height: 1.3;
 }
+/* rank badge: BAR's chevron/star icon (served from /ranks/), constant-size slot
+   so names align whether or not a player has a rank. */
 .prow .rank {
-  flex: 0 0 auto; min-width: 18px; text-align: center;
-  font-size: 10px; font-variant-numeric: tabular-nums;
-  color: #c8a24a; background: #2a2415; border: 1px solid #3d3418;
-  border-radius: 3px; padding: 0 3px;
+  flex: 0 0 auto; width: 18px; height: 14px; object-fit: contain;
+  image-rendering: auto;
 }
-.prow .rank:empty { border: none; background: none; padding: 0; min-width: 0; }
+span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 .prow .flag { flex: 0 0 auto; width: 15px; text-align: center; font-size: 12px; line-height: 1; }
 .prow .os {
   flex: 0 0 auto; min-width: 26px; text-align: right;

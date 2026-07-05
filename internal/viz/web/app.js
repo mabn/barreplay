@@ -853,6 +853,15 @@ function flagEmoji(cc) {
   return String.fromCodePoint(base + u.charCodeAt(0) - A, base + u.charCodeAt(1) - A);
 }
 
+// Rank badge: BAR's chevron/star icon for a player's rank. Rank levels 0..7 map
+// to /ranks/1.png../ranks/8.png (BAR's own numbering). Spectators and out-of-range
+// values get an empty placeholder span so the column still aligns.
+function rankBadge(p) {
+  const r = p.rank || 0;
+  if (p.spec || r < 0 || r > 7) return '<span class="rank"></span>';
+  return `<img class="rank" src="/ranks/${r + 1}.png" alt="rank ${r}" title="Rank ${r}">`;
+}
+
 // Compact resource number in BAR's HUD style: 314, 1.06k, 85k, 1.2M.
 function fmtNum(n) {
   n = Math.round(n);
@@ -918,7 +927,7 @@ function playerRow(p, r) {
   const row = document.createElement('div');
   row.className = 'prow';
   const color = teamColor[p.team] || '#c7d0d9';
-  const rank = `<span class="rank">${p.rank ? p.rank : ''}</span>`;
+  const rank = rankBadge(p);
   const flag = `<span class="flag">${flagEmoji(p.country)}</span>`;
   const os = `<span class="os">${p.skill ? p.skill.toFixed(1) : ''}</span>`;
   let html =
