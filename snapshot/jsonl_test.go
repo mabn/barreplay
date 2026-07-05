@@ -22,12 +22,18 @@ func TestJSONLRoundTrip(t *testing.T) {
 		MapName:       "Isidis crack 1.1",
 		StartUnix:     1783132379,
 		SampleEvery:   30,
-		UnitDefs:      map[int32]string{1: "armcom", 2: "corcom"},
-		Teams:         []TeamInfo{{TeamID: 0, AllyTeam: 0, Side: "armada"}},
+		UnitDefs: map[int32]UnitDef{
+			1: {DefID: 1, Name: "armcom", HumanName: "Armada Commander", MetalCost: 2700, MaxHealth: 3000, IsBuilder: true},
+			2: {DefID: 2, Name: "corcom"},
+		},
+		Teams:   []TeamInfo{{TeamID: 0, AllyTeam: 0, Side: "armada", Color: "#ff0000", PlayerName: "Alice"}},
+		Players: []PlayerInfo{{PlayerID: 0, Name: "Alice", Team: 0}},
 	}
 	frames := []Frame{
 		{Frame: 30, TimeSec: 1, Units: []UnitState{
 			{UnitID: 100, DefID: 1, Team: 0, Pos: Vec3{X: 512, Y: 80, Z: 1024}, Health: 3000, MaxHealth: 3000},
+		}, Resources: []TeamResource{
+			{Team: 0, Metal: 500, Energy: 1200, MetalStorage: 1000, EnergyStorage: 5000, MetalIncome: 45.6, EnergyIncome: 90},
 		}},
 		{Frame: 60, TimeSec: 2, Units: nil},
 	}

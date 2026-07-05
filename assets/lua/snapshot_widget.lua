@@ -17,11 +17,13 @@
 -- seeds LuaUI/Config/BYAR.lua to enable this widget (see internal/engine).
 --
 -- File format (see internal/capture/capture.go):
---   BRSNAP D <defID> <name>
---   BRSNAP T <teamID> <allyTeam> <side>
+--   BRSNAP DEF <json>                          full unit-def (JSON; preamble)
+--   BRSNAP T <teamID> <allyTeam> <side> <color>   team info (side "_" = none)
+--   BRSNAP P <playerID> <team> <spectator> <name...>   player info (preamble)
 --   BRSNAP READY
 --   BRSNAP F <frame> <timeSec> <count>
 --   BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp>
+--   BRSNAP R <teamID> <metal> <energy> <mStore> <eStore> <mIncome> <eIncome>   team economy
 --   BRSNAP EV <frame> <kind> <id> <def> <team>
 --   BRSNAP PROF <totalMs> <name>               engine time-profiler record (at game over)
 --   BRSNAP PROFD <frame> <units> <totalMs> <name>   per-heartbeat profiler sample (-profile only)
@@ -80,6 +82,16 @@ local spGetUnitDefID   = Spring.GetUnitDefID
 local spGetUnitTeam    = Spring.GetUnitTeam
 local spGetUnitHealth  = Spring.GetUnitHealth
 local spGetGameSeconds = Spring.GetGameSeconds
+local spGetTeamList    = Spring.GetTeamList
+local spGetTeamInfo    = Spring.GetTeamInfo
+local spGetTeamColor   = Spring.GetTeamColor
+local spGetTeamResources = Spring.GetTeamResources
+local spGetPlayerList  = Spring.GetPlayerList
+local spGetPlayerInfo  = Spring.GetPlayerInfo
+
+-- Sim frames per game-second (30 in BAR). Used to turn the engine's per-frame
+-- resource income into a per-second rate for the snapshot.
+local gameSpeed = (Game and Game.gameSpeed) or 30
 
 -- High-resolution timing for the per-sample processing cost. Spring.GetTimer /
 -- DiffTimers give sub-millisecond precision (reported as microseconds); on an
@@ -230,16 +242,91 @@ local function disableOtherWidgets()
 	Echo(string.format("[barreplay] disabling %d default widgets (unsynced overhead only)", n))
 end
 
+-- jsonEscape escapes the characters JSON forbids raw in a string. Unit-def
+-- humanNames can carry spaces, quotes and non-ASCII (translated), so the def
+-- table is emitted as JSON rather than space-delimited fields; raw UTF-8 bytes
+-- are left as-is (valid JSON).
+local function jsonEscape(s)
+	s = string.gsub(s, "\\", "\\\\")
+	s = string.gsub(s, '"', '\\"')
+	s = string.gsub(s, "\n", "\\n")
+	s = string.gsub(s, "\r", "\\r")
+	s = string.gsub(s, "\t", "\\t")
+	return s
+end
+
+-- jsonValue encodes a scalar Lua value (string/number/boolean) as JSON.
+local function jsonValue(v)
+	local t = type(v)
+	if t == "string" then
+		return '"' .. jsonEscape(v) .. '"'
+	elseif t == "boolean" then
+		return v and "true" or "false"
+	elseif t == "number" then
+		if v == math.floor(v) and math.abs(v) < 1e15 then
+			return string.format("%d", v)
+		end
+		return string.format("%.3f", v)
+	end
+	return "null"
+end
+
+-- defJSON serialises one unit def as a compact JSON object. Fields are listed in
+-- a fixed order; any that the engine build does not expose (nil) is skipped, so
+-- this stays robust across engine/mod versions.
+local function defJSON(defID, ud)
+	local fields = {
+		{ "id", defID },
+		{ "name", ud.name },
+		{ "humanName", ud.translatedHumanName or ud.humanName },
+		{ "metalCost", ud.metalCost },
+		{ "energyCost", ud.energyCost },
+		{ "buildTime", ud.buildTime },
+		{ "maxHealth", ud.health },
+		{ "speed", ud.speed },
+		{ "isBuilder", ud.isBuilder },
+		{ "isBuilding", ud.isBuilding },
+		{ "isFactory", ud.isFactory },
+		{ "canFly", ud.canFly },
+		{ "canMove", ud.canMove },
+		{ "weaponCount", ud.weapons and #ud.weapons or nil },
+	}
+	local parts = {}
+	for _, kv in ipairs(fields) do
+		if kv[2] ~= nil then
+			parts[#parts + 1] = '"' .. kv[1] .. '":' .. jsonValue(kv[2])
+		end
+	end
+	return "{" .. table.concat(parts, ",") .. "}"
+end
+
 local function emitPreamble()
 	local parts = {}
-	-- Unit-def id -> internal name table (stable for the whole game).
+	-- Full unit-def table (stable for the whole game). Mods add/modify units, so
+	-- the whole definition is dumped, not just id->name.
 	for defID, ud in pairs(UnitDefs) do
-		parts[#parts + 1] = string.format("BRSNAP D %d %s", defID, ud.name)
+		parts[#parts + 1] = "BRSNAP DEF " .. defJSON(defID, ud)
 	end
-	-- Teams and their allyteam + side.
-	for _, teamID in ipairs(Spring.GetTeamList()) do
-		local _, _, _, _, side, allyTeam = Spring.GetTeamInfo(teamID, false)
-		parts[#parts + 1] = string.format("BRSNAP T %d %d %s", teamID, allyTeam or -1, side or "")
+	-- Teams: allyteam, side and in-game colour (side "_" = none, so the colour
+	-- token stays in a fixed position).
+	for _, teamID in ipairs(spGetTeamList()) do
+		local _, _, _, _, side, allyTeam = spGetTeamInfo(teamID, false)
+		local r, g, b = spGetTeamColor(teamID)
+		local color = "-"
+		if r then
+			color = string.format("#%02x%02x%02x",
+				math.floor(r * 255 + 0.5), math.floor(g * 255 + 0.5), math.floor(b * 255 + 0.5))
+		end
+		if side == nil or side == "" then
+			side = "_"
+		end
+		parts[#parts + 1] = string.format("BRSNAP T %d %d %s %s", teamID, allyTeam or -1, side, color)
+	end
+	-- Players: name (last, may contain spaces), controlling team, spectator flag.
+	for _, playerID in ipairs(spGetPlayerList()) do
+		local name, _, spectator, teamID = spGetPlayerInfo(playerID, false)
+		parts[#parts + 1] = string.format("BRSNAP P %d %d %d %s",
+			playerID, teamID or -1, (spectator and 1) or 0, name or "")
 	end
 	parts[#parts + 1] = "BRSNAP READY"
 	writeChunk(table.concat(parts, "\n"))
@@ -304,6 +391,17 @@ function widget:GameFrame(frame)
 			local hp, maxHp = spGetUnitHealth(unitID)
 			lines[i + 1] = string.format("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f",
 				unitID, defID or -1, team or -1, x or 0, y or 0, z or 0, hp or 0, maxHp or 0)
+		end
+		-- Per-team economy at this frame. GetTeamResources returns
+		-- current, storage, pull, income, ... — income is per sim frame, so scale
+		-- it to a per-second rate. The widget spectates full-view, so it can read
+		-- every team's resources.
+		for _, teamID in ipairs(spGetTeamList()) do
+			local m, mStore, _, mInc = spGetTeamResources(teamID, "metal")
+			local e, eStore, _, eInc = spGetTeamResources(teamID, "energy")
+			lines[#lines + 1] = string.format("BRSNAP R %d %.1f %.1f %.1f %.1f %.2f %.2f",
+				teamID, m or 0, e or 0, mStore or 0, eStore or 0,
+				(mInc or 0) * gameSpeed, (eInc or 0) * gameSpeed)
 		end
 		writeChunk(table.concat(lines, "\n"))
 		if out then
