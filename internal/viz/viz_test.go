@@ -22,9 +22,10 @@ func writeJSONL(t *testing.T, dir, gameID string) string {
 		MapName:     "Test Map",
 		SampleEvery: 30,
 		UnitDefs: map[int32]snapshot.UnitDef{
-			1: {DefID: 1, Name: "armcom", CanMove: true},                              // mobile: no footprint
-			2: {DefID: 2, Name: "corllt", XSize: 2, ZSize: 3, IsBuilding: true},       // building: 16x24 elmos
-			3: {DefID: 3, Name: "armnanotct3", XSize: 12, ZSize: 12, IsBuilder: true}, // immobile builder (nano turret): footprint despite not IsBuilding
+			1: {DefID: 1, Name: "armcom", CanMove: true},                                       // mobile: no footprint
+			2: {DefID: 2, Name: "corllt", XSize: 2, ZSize: 3, IsBuilding: true},                // building: 16x24 elmos
+			3: {DefID: 3, Name: "armnanotct3", XSize: 12, ZSize: 12, IsBuilder: true},          // immobile builder (nano turret): footprint despite not IsBuilding
+			4: {DefID: 4, Name: "armlab", XSize: 5, ZSize: 5, IsBuilding: true, CanMove: true}, // factory: reports CanMove but IsBuilding -> footprint
 		},
 		Teams: []snapshot.TeamInfo{
 			{TeamID: 0, AllyTeam: 0, Side: "armada"},
@@ -117,6 +118,10 @@ func TestToWirePacking(t *testing.T) {
 	// An immobile builder (nano turret) is not IsBuilding but still gets a footprint.
 	if fp, ok := w.Footprints["armnanotct3"]; !ok || fp.W != 96 || fp.H != 96 {
 		t.Errorf("armnanotct3 footprint = %+v (ok=%v), want {W:96 H:96}", fp, ok)
+	}
+	// A factory reports CanMove but is IsBuilding, so it gets a footprint.
+	if fp, ok := w.Footprints["armlab"]; !ok || fp.W != 40 || fp.H != 40 {
+		t.Errorf("armlab footprint = %+v (ok=%v), want {W:40 H:40}", fp, ok)
 	}
 	if _, ok := w.Footprints["armcom"]; ok {
 		t.Errorf("armcom is mobile; should have no footprint, got %+v", w.Footprints["armcom"])
