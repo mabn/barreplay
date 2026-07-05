@@ -24,6 +24,8 @@ select, button {
 }
 button:hover { background: #344450; }
 button:disabled { opacity: .4; cursor: default; }
+/* Fixed width so toggling "▶ Play" / "⏸ Pause" doesn't reflow the controls row. */
+#play { min-width: 74px; text-align: center; }
 select { padding: 5px 8px; }
 
 .controls {
