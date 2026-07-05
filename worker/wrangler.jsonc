@@ -15,6 +15,18 @@
     "not_found_handling": "single-page-application"
   },
 
+  // The growing set of replay data (index.json + per-capture head/chunks/resources)
+  // lives in this R2 bucket, produced by `barreplay-static` and synced up. The Worker
+  // serves it byte-for-byte with Range support; the viewer can't tell it from the Go
+  // server. Fixed assets (SPA, unit/rank icons) ship as static assets, not R2.
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "barreplay-replays",
+      "preview_bucket_name": "barreplay-replays-preview"
+    }
+  ],
+
   "observability": {
     "enabled": true
   }

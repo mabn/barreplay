@@ -1,0 +1,150 @@
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #11151a;
+  color: #d7dee6;
+  overflow: hidden;
+}
+header {
+  padding: 8px 16px;
+  background: #1a2027;
+  border-bottom: 1px solid #2a323c;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+h1 { font-size: 15px; margin: 0; white-space: nowrap; }
+h1 .sub { color: #6f87a0; font-weight: 400; font-size: 12px; margin-left: 8px; }
+#picker { display: flex; align-items: center; gap: 6px; margin-left: auto; font-size: 12px; color: #9fb0bf; }
+select, button {
+  background: #2a3742; color: #d7dee6; border: 1px solid #3a4856;
+  border-radius: 4px; padding: 5px 10px; cursor: pointer; font-size: 13px;
+}
+button:hover { background: #344450; }
+button:disabled { opacity: .4; cursor: default; }
+/* Fixed width so toggling "▶ Play" / "⏸ Pause" doesn't reflow the controls row. */
+#play { min-width: 74px; text-align: center; }
+select { padding: 5px 8px; }
+
+.controls {
+  display: flex; gap: 8px; align-items: center;
+  padding: 7px 16px; background: #1a2027; border-bottom: 1px solid #2a323c;
+}
+.controls .grow { flex: 1; }
+input[type=range] { flex: 1; min-width: 120px; accent-color: #5a9fd0; }
+
+/* Timeline: the scrub slider with the downloaded-ranges bar underneath
+   (video-player style: blue = fully loaded chunk, dim = keyframe only). */
+#timeline { flex: 1; min-width: 120px; display: flex; flex-direction: column; gap: 1px; }
+#timeline input[type=range] { width: 100%; margin: 0; }
+#buffbar { height: 3px; border-radius: 2px; background: transparent; }
+#buffering {
+  font-size: 11px; color: #f2cf5b; white-space: nowrap;
+  animation: buffpulse 1s ease-in-out infinite alternate;
+}
+@keyframes buffpulse { from { opacity: 0.5; } to { opacity: 1; } }
+.timelabel {
+  min-width: 190px; text-align: right; font-size: 12px;
+  font-variant-numeric: tabular-nums; color: #9fb0bf;
+}
+
+#wrap { display: flex; height: calc(100vh - 92px); }
+#left { flex: 1; position: relative; }
+canvas { display: block; width: 100%; height: 100%; background: #0c0f13; cursor: crosshair; }
+
+#side {
+  width: 320px; background: #161b21; border-left: 1px solid #2a323c;
+  padding: 12px; overflow-y: auto; font-size: 13px;
+}
+#side h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
+  color: #6f87a0; margin: 14px 0 6px; }
+#side h2:first-child { margin-top: 0; }
+.stat { display: flex; justify-content: space-between; padding: 2px 0; }
+.stat b { color: #fff; font-variant-numeric: tabular-nums; }
+
+/* ---- player list ----
+   One row per player: rank / flag / OS / name on the left, the metal + energy
+   bars (small) on the right, laid out like BAR's in-game player list. */
+#players { display: flex; flex-direction: column; }
+.pgroup { border-top: 1px solid #2a323c; }
+.pgroup:first-child { border-top: none; }
+.prow {
+  display: flex; align-items: center; gap: 6px; padding: 3px 0;
+}
+.prow.spectator { opacity: .55; }
+.prow .phead {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 5px;
+  font-size: 12px; line-height: 1.3;
+}
+/* rank badge: BAR's chevron/star icon (served from /ranks/), constant-size slot
+   so names align whether or not a player has a rank. */
+.prow .rank {
+  flex: 0 0 auto; width: 18px; height: 14px; object-fit: contain;
+  image-rendering: auto;
+}
+span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
+.prow .flag { flex: 0 0 auto; width: 15px; text-align: center; font-size: 12px; line-height: 1; }
+.prow .os {
+  flex: 0 0 auto; min-width: 26px; text-align: right;
+  color: #9fb0bf; font-variant-numeric: tabular-nums; font-size: 11px;
+}
+.prow .pname {
+  flex: 1; min-width: 0; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* right block: two small stacked resource bars (metal over energy) */
+.pres { flex: 0 0 auto; display: flex; flex-direction: column; gap: 3px; }
+.resrow { display: flex; align-items: center; gap: 5px; font-size: 10px; line-height: 1; }
+.resrow .rbar {
+  flex: 0 0 auto; width: 46px; height: 4px;
+  background: #222c36; border-radius: 3px; overflow: hidden;
+}
+.resrow .rbar > div { height: 100%; }
+.resrow .rval, .resrow .rinc {
+  flex: 0 0 auto; text-align: right; font-variant-numeric: tabular-nums;
+}
+.resrow .rval { min-width: 34px; }
+.resrow .rinc { min-width: 42px; }
+/* Numbers follow the bar colour: metal white/silver, energy yellow. */
+.resrow.metal .rbar > div { background: #cfd6dd; }
+.resrow.metal .rval, .resrow.metal .rinc { color: #cfd6dd; }
+.resrow.energy .rbar > div { background: #e3c34a; }
+.resrow.energy .rval, .resrow.energy .rinc { color: #e3c34a; }
+
+.teamrow { display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: 12px; }
+.teamrow .sw { width: 11px; height: 11px; border-radius: 3px; flex: 0 0 auto; }
+.teamrow .nm { flex: 1; color: #b9c4cf; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.teamrow .ct { color: #9fb0bf; font-variant-numeric: tabular-nums; }
+
+#events { list-style: none; padding: 0; margin: 0; max-height: 220px; overflow-y: auto; }
+#events li { font-size: 11px; padding: 1px 0; color: #9fb0bf; font-variant-numeric: tabular-nums; }
+#events .created { color: #6fd07f; }
+#events .destroyed { color: #e2785b; }
+#events .finished { color: #8fd3ff; }
+
+#tooltip {
+  position: absolute; pointer-events: none; display: none;
+  background: rgba(20,26,33,0.96); border: 1px solid #3a4856; border-radius: 4px;
+  padding: 7px 9px; font-size: 12px; line-height: 1.5; color: #d7dee6;
+  max-width: 240px; z-index: 10; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+}
+#tooltip h3 { margin: 0 0 3px; font-size: 12px; color: #fff; }
+#tooltip .row { display: flex; justify-content: space-between; gap: 12px; }
+#tooltip .label { color: #8a98a6; }
+#tooltip .bar { height: 5px; background: #222c36; border-radius: 3px; margin: 3px 0 1px; overflow: hidden; }
+#tooltip .bar > div { height: 100%; }
+
+#zoomlabel {
+  position: absolute; left: 8px; bottom: 8px; pointer-events: none;
+  background: rgba(20,26,33,0.82); border: 1px solid #2a323c; border-radius: 4px;
+  padding: 3px 7px; font-size: 11px; color: #9fb0bf;
+  font-variant-numeric: tabular-nums; z-index: 5;
+}
+
+.hint { font-size: 11px; color: #6a7785; line-height: 1.5; }
+#empty {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  text-align: center; color: #6a7785; font-size: 14px; padding: 24px;
+}
