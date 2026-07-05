@@ -21,7 +21,10 @@ func writeJSONL(t *testing.T, dir, gameID string) string {
 		GameID:      gameID,
 		MapName:     "Test Map",
 		SampleEvery: 30,
-		UnitDefs:    map[int32]snapshot.UnitDef{1: {DefID: 1, Name: "armcom"}, 2: {DefID: 2, Name: "corllt"}},
+		UnitDefs: map[int32]snapshot.UnitDef{
+			1: {DefID: 1, Name: "armcom", CanMove: true},                        // mobile: no footprint
+			2: {DefID: 2, Name: "corllt", XSize: 2, ZSize: 3, IsBuilding: true}, // building: 16x24 elmos
+		},
 		Teams: []snapshot.TeamInfo{
 			{TeamID: 0, AllyTeam: 0, Side: "armada"},
 			{TeamID: 1, AllyTeam: 1, Side: "cortex"},
@@ -104,6 +107,14 @@ func TestToWirePacking(t *testing.T) {
 	}
 	if len(w.Teams) != 2 || w.Teams[0].Side != "armada" {
 		t.Errorf("teams=%+v", w.Teams)
+	}
+
+	// Footprints: only the building (corllt) is included, in elmos (xsize/zsize * 8).
+	if fp, ok := w.Footprints["corllt"]; !ok || fp.W != 16 || fp.H != 24 {
+		t.Errorf("corllt footprint = %+v (ok=%v), want {W:16 H:24}", fp, ok)
+	}
+	if _, ok := w.Footprints["armcom"]; ok {
+		t.Errorf("armcom is mobile; should have no footprint, got %+v", w.Footprints["armcom"])
 	}
 }
 
