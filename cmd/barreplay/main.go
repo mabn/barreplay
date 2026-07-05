@@ -122,6 +122,7 @@ func run() error {
 		StartUnix:     int64(h.UnixTime),
 		SampleEvery:   int32(*every),
 		UnitDefs:      map[int32]snapshot.UnitDef{},
+		Players:       playersFromDemo(demo.Startscript.Players),
 	}
 
 	if *noRun {
@@ -293,6 +294,31 @@ func run() error {
 		fmt.Fprintf(os.Stderr, "  snapshot: %.2f MB, %d lines\n", mb, lines)
 	}
 	return nil
+}
+
+// playersFromDemo converts the startscript player roster into snapshot metadata.
+// The startscript is the authoritative source for per-player attributes (flag,
+// rank, OpenSkill, account id) that the engine's live player list does not carry.
+func playersFromDemo(players []demofile.Player) []snapshot.PlayerInfo {
+	if len(players) == 0 {
+		return nil
+	}
+	out := make([]snapshot.PlayerInfo, 0, len(players))
+	for _, p := range players {
+		out = append(out, snapshot.PlayerInfo{
+			PlayerID:         int32(p.Index),
+			Name:             p.Name,
+			Team:             int32(p.Team),
+			Spectator:        p.Spectator,
+			CountryCode:      p.CountryCode,
+			Rank:             int32(p.Rank),
+			Skill:            float32(p.Skill),
+			SkillUncertainty: float32(p.SkillUncertainty),
+			AccountID:        p.AccountID,
+			Boss:             p.Boss,
+		})
+	}
+	return out
 }
 
 // moveFile renames src to dst, falling back to copy+remove across filesystems.

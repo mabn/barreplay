@@ -47,6 +47,23 @@ func TestParseRealSample(t *testing.T) {
 	if len(ss.Players) == 0 {
 		t.Error("no players parsed")
 	}
+	// Per-player metadata (flag/rank/OpenSkill/account) comes off the startscript.
+	// Subsection order isn't stable, so look player0 up by index.
+	var p0 *Player
+	for i := range ss.Players {
+		if ss.Players[i].Index == 0 {
+			p0 = &ss.Players[i]
+		}
+	}
+	if p0 == nil {
+		t.Fatal("player0 not found")
+	}
+	if p0.Name != "[Crd]Stylyn" || p0.CountryCode != "CA" || p0.Rank != 4 {
+		t.Errorf("player0 basics = %+v", *p0)
+	}
+	if p0.Skill != 31.24 || p0.AccountID != "202413" {
+		t.Errorf("player0 skill/account = %+v", *p0)
+	}
 	// The sample has modoptions we can spot-check.
 	if ss.ModOptions["zombies"] != "disabled" {
 		t.Errorf("modoption zombies = %q, want disabled", ss.ModOptions["zombies"])

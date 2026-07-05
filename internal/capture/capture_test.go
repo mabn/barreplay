@@ -178,6 +178,33 @@ func TestConsumeTruncatedFrameKeepsPartialUnits(t *testing.T) {
 	}
 }
 
+// When the caller pre-seeds a rich player roster (from the demo startscript),
+// the widget's live P line for the same id must not duplicate it.
+func TestConsumeKeepsSeededPlayers(t *testing.T) {
+	stream := strings.Join([]string{
+		"BRSNAP P 0 0 0 Alice",    // same id as the seed -> merged away
+		"BRSNAP P 5 3 0 Newcomer", // not in the seed -> appended
+		"BRSNAP READY",
+	}, "\n")
+	base := snapshot.Meta{
+		GameID:  "x",
+		Players: []snapshot.PlayerInfo{{PlayerID: 0, Name: "Alice", Team: 0, CountryCode: "US", Skill: 31.24}},
+	}
+	w := &recordingWriter{}
+	if err := Consume(strings.NewReader(stream), base, w); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.meta.Players) != 2 {
+		t.Fatalf("players = %d, want 2 (seed kept, newcomer added)", len(w.meta.Players))
+	}
+	if p := w.meta.Players[0]; p.Skill != 31.24 || p.CountryCode != "US" {
+		t.Errorf("seeded player0 lost its rich fields: %+v", p)
+	}
+	if w.meta.Players[1].Name != "Newcomer" {
+		t.Errorf("newcomer not appended: %+v", w.meta.Players)
+	}
+}
+
 func TestConsumeEmptyStillWritesMeta(t *testing.T) {
 	w := &recordingWriter{}
 	if err := Consume(strings.NewReader("no snapshot data here\n"), snapshot.Meta{GameID: "x"}, w); err != nil {

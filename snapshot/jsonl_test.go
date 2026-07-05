@@ -27,7 +27,7 @@ func TestJSONLRoundTrip(t *testing.T) {
 			2: {DefID: 2, Name: "corcom"},
 		},
 		Teams:   []TeamInfo{{TeamID: 0, AllyTeam: 0, Side: "armada", Color: "#ff0000", PlayerName: "Alice"}},
-		Players: []PlayerInfo{{PlayerID: 0, Name: "Alice", Team: 0}},
+		Players: []PlayerInfo{{PlayerID: 0, Name: "Alice", Team: 0, CountryCode: "US", Rank: 4, Skill: 31.24, AccountID: "202413"}},
 	}
 	frames := []Frame{
 		{Frame: 30, TimeSec: 1, Units: []UnitState{

@@ -27,12 +27,20 @@ type Startscript struct {
 	ModOptions map[string]string
 }
 
-// Player is one [player N] entry.
+// Player is one [player N] entry. Beyond the roster basics, BAR replays carry
+// per-player metadata: country flag, ladder rank, OpenSkill rating ("OS") and
+// its uncertainty, the BAR account id, and whether the player is a game boss.
 type Player struct {
-	Index     int
-	Name      string
-	Team      int
-	Spectator bool
+	Index            int
+	Name             string
+	Team             int
+	Spectator        bool
+	CountryCode      string  // ISO country code for the flag, e.g. "US"
+	Rank             int     // ladder rank
+	Skill            float64 // OpenSkill rating (the "OS" number)
+	SkillUncertainty float64 // OpenSkill sigma
+	AccountID        string  // BAR account id
+	Boss             bool    // game boss (can pause/manage the game)
 }
 
 // AllyTeam is one [allyteam N] entry.
@@ -68,11 +76,19 @@ func ParseStartscript(s string) (*Startscript, error) {
 		case strings.HasPrefix(name, "player"):
 			idx, _ := strconv.Atoi(strings.TrimPrefix(name, "player"))
 			team, _ := strconv.Atoi(sub.Values["team"])
+			rank, _ := strconv.Atoi(sub.Values["rank"])
+			unc, _ := strconv.ParseFloat(sub.Values["skilluncertainty"], 64)
 			out.Players = append(out.Players, Player{
-				Index:     idx,
-				Name:      sub.Values["name"],
-				Team:      team,
-				Spectator: sub.Values["spectator"] == "1",
+				Index:            idx,
+				Name:             sub.Values["name"],
+				Team:             team,
+				Spectator:        sub.Values["spectator"] == "1",
+				CountryCode:      sub.Values["countrycode"],
+				Rank:             rank,
+				Skill:            parseSkill(sub.Values["skill"]),
+				SkillUncertainty: unc,
+				AccountID:        sub.Values["accountid"],
+				Boss:             sub.Values["boss"] == "1",
 			})
 		case strings.HasPrefix(name, "allyteam"):
 			idx, _ := strconv.Atoi(strings.TrimPrefix(name, "allyteam"))
@@ -173,3 +189,13 @@ func stripComments(s string) string {
 }
 
 func isSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\r' || c == '\n' }
+
+// parseSkill parses BAR's OpenSkill value, which is written wrapped in brackets
+// (e.g. "[31.24]"). Returns 0 for an empty or unparseable value.
+func parseSkill(s string) float64 {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "[")
+	s = strings.TrimSuffix(s, "]")
+	f, _ := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	return f
+}
