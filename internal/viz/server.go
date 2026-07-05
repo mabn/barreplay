@@ -67,6 +67,8 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.HandleFunc("/api/replays", s.handleList)
 	mux.HandleFunc("/api/replay", s.handleReplay)
+	mux.HandleFunc("/api/mapinfo", s.handleMapInfo)
+	mux.HandleFunc("/api/maptex", s.handleMapTexture)
 	return mux
 }
 

@@ -151,11 +151,20 @@ dir for `.jsonl`/`.brsnap` files and serves the viewer.
   UI slider (`iconScale`, persisted as `?iconsize=`); the Icons checkbox switches to plain
   dots. A unit with no/loading icon shows a coloured dot so it is never invisible. The
   selected replay and icon size are both kept in the URL, so a refresh/shared link restores them.
+- **`internal/viz/maptex.go`** draws the **real map terrain** behind the units. It proxies
+  BAR's maps API (`api.bar-rts.com/maps/<name>`): `/api/mapinfo?map=<name>` returns the map's
+  world extent in elmos (the API's width/height are map units × 512) and whether a texture
+  exists; `/api/maptex?map=<name>` serves the cached `texture-mq.jpg`. The demo's display map
+  name is normalized to the API's file name (lowercase, spaces→`_`). Both are best-effort and
+  cached in-memory — no network, no map, or offline just yields a plain background. The
+  front-end positions the texture at world `(0,0)`–`(width,height)` so units overlay correctly;
+  the **Map** checkbox toggles it.
 - **`internal/viz/server.go`** embeds `web/{index.html,app.js,style.css}` via `go:embed` and
   exposes `/api/replays` (the file list), `/api/replay?file=<basename>` (one capture's wire
-  payload), and `/icons/<file>` (the embedded icons, cached). The `file` param is confined to
-  the snapshots dir (basename only — rejects any path separator / traversal). UI/JSON assets
-  are served `no-store` so a changed UI never serves stale.
+  payload), `/icons/<file>` (the embedded icons, cached), and `/api/mapinfo` + `/api/maptex`
+  (the map terrain, above). The `file` param is confined to the snapshots dir (basename only —
+  rejects any path separator / traversal). UI/JSON assets are served `no-store` so a changed
+  UI never serves stale.
 - **`internal/viz/web/`** is plain HTML/Canvas/vanilla-JS — **no framework, no build step**
   (the prompt allowed Vite but it's unnecessary for a single embedded page). `app.js` reads the
   flat unit arrays by index (no per-unit objects), batches dots by team colour, and does
