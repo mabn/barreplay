@@ -131,7 +131,7 @@ top-down map, colouring units by team (grouped by ally-team), with:
   spread apart when zoomed in); toggle to plain dots with the **Icons** checkbox and adjust
   their size with the slider next to it (persisted in the URL as `?iconsize=`),
 - a **timeline scrubber** + play/pause and a speed control (game-time playback),
-- **scroll to zoom, drag to pan**, and a hover **tooltip** (unit name, team, position, health),
+- **scroll to zoom, middle-drag to pan**, and a hover **tooltip** (unit name, team, position, health),
 - a live **sidebar**: game time / sim frame / unit count, per-team unit counts, and a
   lifecycle **event feed** (created/finished/destroyed) up to the current frame.
 
