@@ -81,15 +81,32 @@ the tool reads it from `<data>/barreplay/<gameId>.brsnap` after the run and move
 `<out>/<gameId>.brsnap`. An absolute path makes `io.open` return nil → no file at all.
 
 ```
-BRSNAP D <defID> <name>                        unit-def id -> internal name (preamble)
-BRSNAP T <teamID> <allyTeam> <side>            team info (preamble)
+BRSNAP DEF <json>                              full unit-def as JSON (preamble)
+BRSNAP D <defID> <name>                        unit-def id -> internal name (legacy preamble)
+BRSNAP T <teamID> <allyTeam> <side> <color>    team info (preamble; side "_" = none, color "#rrggbb")
+BRSNAP P <playerID> <team> <spectator> <name...>   player info (preamble; name last, may have spaces)
 BRSNAP READY                                   end of preamble
 BRSNAP F <frame> <timeSec> <count>             start of a periodic snapshot
-BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp>   one unit (follows an F line)
+BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp> <vx> <vy> <vz> <build>   one unit (follows an F line)
+BRSNAP R <teamID> <metal> <energy> <mStore> <eStore> <mIncome> <eIncome>   team economy (follows an F line)
 BRSNAP EV <frame> <kind> <id> <def> <team>     unit lifecycle event
 BRSNAP PROF <totalMs> <name>                   engine time-profiler record (once, at game over)
 BRSNAP PROFD <frame> <units> <totalMs> <name>  per-heartbeat profiler sample (-profile only)
 ```
+
+The **unit defs are dumped in full** (`DEF` JSON: name, humanName, costs, buildTime,
+maxHealth, speed, footprint `xsize`/`zsize`, `iconType`, builder/factory/fly flags,
+weaponCount), not just id→name — mods add
+and modify unit types, and the id space depends on the exact game build the replay pins.
+The legacy `D` line (id→name) is still parsed for old `.brsnap` files. **Players** (`P`)
+carry the roster (name/team/spectator) and **team colours** ride the `T` line; `capture`
+backfills each `TeamInfo.PlayerName` from the first non-spectator player on that team.
+Each sampled frame also emits one `R` line per team with its current metal/energy, storage
+caps, and per-game-second income (the engine's per-frame income × the 30 fps sim rate).
+Each `U` line carries, besides position and health, the unit's velocity (`vx/vy/vz`) and
+`buildProgress` (1 = finished, <1 = under construction; from `GetUnitHealth`'s 5th return).
+Both are appended after `maxHp`, so pre-velocity `.brsnap` streams still parse (capture reads
+them only when the line has all 12 fields).
 
 The widget never touches synced state (only `Get*` reads, unsynced console commands, its
 own output file, and unsynced widget-handler calls) so it cannot desync the replay. `__SAMPLE_EVERY__` is substituted at write time (`-every`, default 30 = 1 Hz).

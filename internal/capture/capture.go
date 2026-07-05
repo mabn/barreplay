@@ -4,11 +4,14 @@
 // Wire format (one record per line; every line the widget emits is prefixed with
 // the BRSNAP tag so unrelated engine infolog output is ignored):
 //
-//	BRSNAP D <defID> <name>                       unit-def id -> internal name (preamble)
-//	BRSNAP T <teamID> <allyTeam> <side>           team info (preamble)
+//	BRSNAP DEF <json>                             full unit-def (JSON; preamble)
+//	BRSNAP D <defID> <name>                       unit-def id -> internal name (legacy preamble)
+//	BRSNAP T <teamID> <allyTeam> <side> <color>   team info (preamble; side "_" = none)
+//	BRSNAP P <playerID> <team> <spectator> <name...>   player info (preamble)
 //	BRSNAP READY                                  end of preamble (optional)
 //	BRSNAP F <frame> <timeSec> <count>            start of a periodic snapshot
-//	BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp>   one unit (follows an F line)
+//	BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp> [<vx> <vy> <vz> <build>]   one unit (follows an F line)
+//	BRSNAP R <teamID> <metal> <energy> <mStore> <eStore> <mIncome> <eIncome>   team economy (follows an F line)
 //	BRSNAP EV <frame> <kind> <id> <def> <team>    unit lifecycle event
 //	BRSNAP PROF <totalMs> <name>                  engine time-profiler record (at game over)
 //
@@ -18,6 +21,7 @@ package capture
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -85,10 +89,10 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
 	if base.UnitDefs == nil {
-		base.UnitDefs = map[int32]string{}
+		base.UnitDefs = map[int32]snapshot.UnitDef{}
 	}
 	metaWritten := false
-	var pending *snapshot.Frame // frame currently being assembled from U lines
+	var pending *snapshot.Frame // frame currently being assembled from U/R lines
 	pendingCount := int32(-1)   // unit count the F line declared (-1 = unknown)
 
 	flushMeta := func() error {
@@ -96,6 +100,20 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 			return nil
 		}
 		metaWritten = true
+		// Backfill each team's display player from the roster (first non-spectator
+		// player controlling the team) so consumers that key on TeamInfo alone
+		// still get a name.
+		for i := range base.Teams {
+			if base.Teams[i].PlayerName != "" {
+				continue
+			}
+			for _, p := range base.Players {
+				if !p.Spectator && p.Team == base.Teams[i].TeamID {
+					base.Teams[i].PlayerName = p.Name
+					break
+				}
+			}
+		}
 		return w.WriteMeta(base)
 	}
 	flushFrame := func() error {
@@ -122,20 +140,44 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 		if idx < 0 {
 			continue
 		}
-		fields := strings.Fields(line[idx+len(Tag)+1:])
+		content := line[idx+len(Tag)+1:]
+		fields := strings.Fields(content)
 		if len(fields) == 0 {
 			continue
 		}
 		switch fields[0] {
-		case "D": // D <defID> <name>
+		case "D": // D <defID> <name> (legacy: id->name only)
 			if len(fields) >= 3 {
-				base.UnitDefs[atoi32(fields[1])] = fields[2]
+				id := atoi32(fields[1])
+				def := base.UnitDefs[id]
+				def.DefID, def.Name = id, fields[2]
+				base.UnitDefs[id] = def
 			}
-		case "T": // T <teamID> <allyTeam> <side>
+		case "DEF": // DEF <json> (full unit def; humanName may contain spaces, so JSON)
+			var def snapshot.UnitDef
+			payload := strings.TrimSpace(content[len(fields[0]):])
+			if err := json.Unmarshal([]byte(payload), &def); err != nil {
+				fmt.Fprintf(os.Stderr, "capture: bad DEF record %q: %v\n", payload, err)
+			} else {
+				base.UnitDefs[def.DefID] = def
+			}
+		case "P": // P <playerID> <team> <spectator> <name...> (name last, may contain spaces)
+			if len(fields) >= 5 {
+				base.Players = append(base.Players, snapshot.PlayerInfo{
+					PlayerID:  atoi32(fields[1]),
+					Team:      atoi32(fields[2]),
+					Spectator: fields[3] == "1",
+					Name:      strings.Join(fields[4:], " "),
+				})
+			}
+		case "T": // T <teamID> <allyTeam> <side> <color> (side "_" = none; color optional)
 			if len(fields) >= 3 {
 				ti := snapshot.TeamInfo{TeamID: atoi32(fields[1]), AllyTeam: atoi32(fields[2])}
-				if len(fields) >= 4 {
+				if len(fields) >= 4 && fields[3] != "_" {
 					ti.Side = fields[3]
+				}
+				if len(fields) >= 5 && fields[4] != "-" {
+					ti.Color = fields[4]
 				}
 				base.Teams = append(base.Teams, ti)
 			}
@@ -163,15 +205,36 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 				}
 				pending = &fr
 			}
-		case "U": // U <id> <def> <team> <x> <y> <z> <hp> <maxHp>
+		case "U": // U <id> <def> <team> <x> <y> <z> <hp> <maxHp> [<vx> <vy> <vz> <build>]
 			if pending != nil && len(fields) >= 9 {
-				pending.Units = append(pending.Units, snapshot.UnitState{
+				us := snapshot.UnitState{
 					UnitID:    atoi32(fields[1]),
 					DefID:     atoi32(fields[2]),
 					Team:      atoi32(fields[3]),
 					Pos:       snapshot.Vec3{X: atof32(fields[4]), Y: atof32(fields[5]), Z: atof32(fields[6])},
 					Health:    atof32(fields[7]),
 					MaxHealth: atof32(fields[8]),
+				}
+				// Velocity + build progress are appended by newer widgets; older
+				// .brsnap streams stop at maxHp.
+				if len(fields) >= 13 {
+					us.VelX = atof32(fields[9])
+					us.VelY = atof32(fields[10])
+					us.VelZ = atof32(fields[11])
+					us.BuildProgress = atof32(fields[12])
+				}
+				pending.Units = append(pending.Units, us)
+			}
+		case "R": // R <teamID> <metal> <energy> <mStore> <eStore> <mIncome> <eIncome>
+			if pending != nil && len(fields) >= 8 {
+				pending.Resources = append(pending.Resources, snapshot.TeamResource{
+					Team:          atoi32(fields[1]),
+					Metal:         atof32(fields[2]),
+					Energy:        atof32(fields[3]),
+					MetalStorage:  atof32(fields[4]),
+					EnergyStorage: atof32(fields[5]),
+					MetalIncome:   atof32(fields[6]),
+					EnergyIncome:  atof32(fields[7]),
 				})
 			}
 		case "PROF": // PROF <totalMs> <name> (name is last; profiler names may contain anything)

@@ -121,7 +121,7 @@ func run() error {
 		MapName:       demo.Startscript.MapName,
 		StartUnix:     int64(h.UnixTime),
 		SampleEvery:   int32(*every),
-		UnitDefs:      map[int32]string{},
+		UnitDefs:      map[int32]snapshot.UnitDef{},
 	}
 
 	if *noRun {
