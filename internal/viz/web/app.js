@@ -25,6 +25,34 @@ let mouse = null;          // {x,y} canvas px or null
 let drag = null;           // pan state or null
 let playTimer = null;
 let secPerFrame = 1;       // game seconds represented by one sampled frame
+let showIcons = true;      // draw BAR unit icons when zoomed in enough
+
+// Nominal on-screen size of a unit icon, in world elmos. Icons only replace the
+// fast dots once this projects to a legible pixel size (see ICON_MIN_PX).
+const ICON_WORLD = 46;
+const ICON_MIN_PX = 11;    // below this, icons are illegible — draw dots instead
+const ICON_MAX_UNITS = 1200; // above this many units, keep dots for playback perf
+
+// imageCache: served icon path -> HTMLImageElement (may still be loading) or
+// null once it has failed to load (so we don't retry).
+const imageCache = {};
+function getImage(path) {
+  if (path in imageCache) return imageCache[path];
+  const img = new Image();
+  img.onload = scheduleDraw;      // redraw once the bitmap arrives
+  img.onerror = () => { imageCache[path] = null; };
+  img.src = '/' + path;
+  imageCache[path] = img;
+  return img;
+}
+
+// Coalesce the many onload-triggered redraws into one per animation frame.
+let drawQueued = false;
+function scheduleDraw() {
+  if (drawQueued) return;
+  drawQueued = true;
+  requestAnimationFrame(() => { drawQueued = false; draw(); });
+}
 
 // ---- colour assignment ----------------------------------------------------
 // Group teams by ally; each ally gets a base hue, teams within it vary in
@@ -90,11 +118,20 @@ function draw() {
   if (!fr) return;
   const u = fr.u;
 
-  // Radius: a hair larger when zoomed in, clamped so a full-map view stays
-  // legible without turning into a blob.
-  const rad = Math.max(1.6, Math.min(5, scale * 8));
+  const iconPx = scale * ICON_WORLD;
+  if (showIcons && iconPx >= ICON_MIN_PX && fr.n <= ICON_MAX_UNITS) {
+    drawIcons(u, iconPx);
+  } else {
+    drawDots(u);
+  }
 
-  // Batch by colour to minimise canvas state changes.
+  updateTooltip();
+}
+
+// Fast path: one filled dot per unit, batched by team colour to minimise canvas
+// state changes. Used when zoomed out or for very large frames.
+function drawDots(u) {
+  const rad = Math.max(1.6, Math.min(5, scale * 8));
   const byColor = {};
   for (let i = 0; i < u.length; i += STRIDE) {
     const c = teamColor[u[i + F.TEAM]] || '#9aa6b2';
@@ -105,15 +142,40 @@ function draw() {
     ctx.beginPath();
     for (const i of byColor[color]) {
       const [sx, sy] = w2s(u[i + F.X], u[i + F.Z]);
-      // Cull off-screen units.
       if (sx < -8 || sy < -8 || sx > cv.width + 8 || sy > cv.height + 8) continue;
       ctx.moveTo(sx + rad, sy);
       ctx.arc(sx, sy, rad, 0, 7);
     }
     ctx.fill();
   }
+}
 
-  updateTooltip();
+// Detailed path: a team-coloured backing disc (so team stays readable) with the
+// unit's BAR icon drawn on top. Falls back to a plain disc while the icon loads
+// or when a unit type has no icon.
+function drawIcons(u, px) {
+  const r = px / 2;
+  for (let i = 0; i < u.length; i += STRIDE) {
+    const [sx, sy] = w2s(u[i + F.X], u[i + F.Z]);
+    if (sx < -px || sy < -px || sx > cv.width + px || sy > cv.height + px) continue;
+    ctx.fillStyle = teamColor[u[i + F.TEAM]] || '#9aa6b2';
+    ctx.globalAlpha = 0.92;
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, 0, 7);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    const path = iconPathFor(u[i + F.DEF]);
+    const img = path ? getImage(path) : null;
+    if (img && img.complete && img.naturalWidth > 0) {
+      ctx.drawImage(img, sx - r, sy - r, px, px);
+    }
+  }
+}
+
+function iconPathFor(def) {
+  if (!data.unitIcons) return null;
+  const name = data.unitDefs && data.unitDefs[def];
+  return name ? (data.unitIcons[name] || null) : null;
 }
 
 // Map extent rectangle + a light grid so panning/zoom has reference.
@@ -325,6 +387,7 @@ document.getElementById('next').onclick = () => { stopPlay(); go(idx + 1); };
 document.getElementById('last').onclick = () => { stopPlay(); go(data.frames.length - 1); };
 document.getElementById('play').onclick = togglePlay;
 document.getElementById('speed').onchange = () => { if (playTimer) { stopPlay(); startPlay(); } };
+document.getElementById('icons').onchange = e => { showIcons = e.target.checked; draw(); };
 document.getElementById('slider').oninput = e => { stopPlay(); go(+e.target.value); };
 window.addEventListener('keydown', e => {
   if (e.target.tagName === 'SELECT') return;
@@ -363,6 +426,9 @@ async function loadReplay(file) {
     [data.gameId, data.mapName, data.gameVersion].filter(Boolean).join(' · ') || 'replay state viewer';
   document.getElementById('slider').max = Math.max(0, data.frames.length - 1);
   idx = 0;
+  // Pre-warm the icon set (only a few dozen distinct unit types per replay) so
+  // they're ready the moment the user zooms in.
+  Object.values(data.unitIcons || {}).forEach(getImage);
   resize();      // sets canvas size
   fitView();     // fit map to viewport
   show();
