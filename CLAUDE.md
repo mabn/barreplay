@@ -21,11 +21,13 @@ go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
 go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, no engine
 go run ./cmd/barreplay-viz -snapshots ./snapshots        # serve the viewer at 127.0.0.1:8080
 go run ./cmd/barreplay-pack ./snapshots/*.jsonl          # shrink legacy captures to .brp
+go run ./cmd/barreplay-pack ./caps/<gameId>.brsnap       # raw stream -> FULL .brp (fetches the demo for map/versions/players; -id overrides, -no-demo skips)
 ```
 
 Tests are hermetic: `barapi` uses a mock HTTP server, `demofile` tests against the
-real fixture `internal/demofile/testdata/sample_header.sdfz`, and `snapshot`/`capture`
-are pure. None of them launch the engine.
+real fixture `internal/demofile/testdata/sample_header.sdfz`, `snapshot`/`capture`
+are pure, and `cmd/barreplay-pack` exercises its demo-metadata fetch against a mock
+BAR API serving that same fixture. None of them launch the engine or touch the network.
 
 ## Architecture (where things live)
 
@@ -147,7 +149,8 @@ maxHealth, speed, footprint `xsize`/`zsize`, `iconType`, builder/factory/fly fla
 weaponCount), not just id→name — mods add
 and modify unit types, and the id space depends on the exact game build the replay pins.
 The legacy `D` line (id→name) is still parsed for old `.brsnap` files. **Players** are
-seeded from the **demo startscript** (`cmd/barreplay` → `playersFromDemo`), the authoritative
+seeded from the **demo startscript** (`demofile.BaseMeta`, used by both `cmd/barreplay`
+and `barreplay-pack`'s demo fetch), the authoritative
 source for per-player metadata the live engine list lacks: country flag (`countrycode`),
 ladder rank, OpenSkill rating ("OS", the bracketed `skill`) + uncertainty, `accountid`, and
 `boss`. The widget's `P` line (name/team/spectator) is a fallback for a raw `.brsnap` with no
@@ -269,18 +272,25 @@ legacy parsing; viz has none).
   it stays constant when zoomed out and fills the footprint when zoomed in; mobile units
   (no footprint) are unaffected. The icon is resolved by the unit-def's `iconType` key first
   (falling back to its name), so units whose iconType differs from their name still get an icon.
-- **`internal/viz/maptex.go`** draws the **real map terrain** behind the units. It proxies
-  BAR's maps API (`api.bar-rts.com/maps/<name>`): `/api/mapinfo?map=<name>` returns the map's
-  world extent in elmos (the API's width/height are map units × 512) and whether a texture
-  exists; `/api/maptex?map=<name>` serves the cached `texture-mq.jpg`. The demo's display map
-  name is normalized to the API's file name (lowercase, spaces→`_`). Both are best-effort and
-  cached in-memory — no network, no map, or offline just yields a plain background. The
-  front-end positions the texture at world `(0,0)`–`(width,height)` so units overlay correctly;
-  the **Map** checkbox toggles it.
+- The **real map terrain** behind the units is loaded **entirely client-side** (`loadMap`
+  in `app.js`): the browser takes the head's `mapName` (from the capture's meta),
+  normalizes it to the API's file-name form (lowercase, spaces→`_`), and talks straight
+  to BAR's maps API — `https://api.bar-rts.com/maps/<name>` for the world extent in
+  elmos (the API's width/height are map units × 512) and `…/texture-mq.jpg` for the
+  terrain image. The API sends `access-control-allow-origin: *`, and the image is loaded
+  with `crossOrigin="anonymous"` so the canvas stays untainted. The viz server has **no
+  map code at all**. Best-effort: no name in the meta, an unknown map, or no outbound
+  network just yields a plain background (the Map checkbox enables only once the texture
+  loads, and the field extent falls back to the sampled unit bounds). The front-end
+  positions the texture at world `(0,0)`–`(width,height)` so units overlay correctly;
+  the **Map** checkbox toggles it. Caveat: the widget stream doesn't record the map name
+  (only the demo startscript path does), so a `.brp` packed from a raw `.brsnap` with
+  `barreplay-pack -no-demo` has an empty `mapName` and renders the plain background; the
+  default pack fetches the demo by gameId and fills it in.
 - **`internal/viz/server.go`** embeds `web/{index.html,app.js,style.css}` via `go:embed` and
   exposes `/api/replays` (the file list), `/api/replay?file=<basename>` (one capture's wire
-  payload), `/icons/<file>` (the embedded icons, cached), and `/api/mapinfo` + `/api/maptex`
-  (the map terrain, above). The `file` param is confined to the snapshots dir (basename only —
+  payload), `/api/replay/chunk` (frame data), and `/icons/<file>` (the embedded icons,
+  cached). The `file` param is confined to the snapshots dir (basename only —
   rejects any path separator / traversal). UI/JSON assets are served `no-store` so a changed
   UI never serves stale.
 - **`internal/viz/web/`** is plain HTML/Canvas/vanilla-JS — **no framework, no build step**
