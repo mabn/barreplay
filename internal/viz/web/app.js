@@ -24,29 +24,48 @@ function buildNextPosMap() {
   for (let j = 0; j < nu.length; j += STRIDE) nextPosMap.set(nu[j + F.ID], j);
 }
 
-// Interpolated world [x, z] of unit i in the current frame array u. Velocity is
-// used only for SPEED (how far the unit travels this interval); DIRECTION comes
-// from the unit's position in the next sampled frame, so it heads to the right
-// place and lands there instead of overshooting along a stale heading and
-// snapping. Clamped so it never passes the next position (arrives and waits if it
-// got there early). Stationary units (zero velocity) and on-keyframe renders
-// return the sampled position unchanged.
+// Tangent length cap (as a multiple of the straight-line distance between the two
+// samples) for the Hermite curve below — keeps a wildly-inconsistent velocity from
+// bending the path into a big loop or bulge.
+const TANGENT_CAP = 2;
+function clampVec(x, z, max) {
+  const m = Math.hypot(x, z);
+  if (m <= max || m === 0) return [x, z];
+  const s = max / m;
+  return [x * s, z * s];
+}
+
+// Interpolated world [x, z] of unit i in the current frame array u, via a cubic
+// Hermite spline between this sample (P0) and the unit's next sample (P1), using
+// each end's velocity as the tangent: the unit leaves P0 at its frame-A velocity
+// and arrives at P1 at its frame-B velocity, so motion curves naturally and is C1
+// continuous across samples (no kink at the boundary). dvx/dvz are the velocity
+// displacement over one interval — the exact Hermite tangents for t in [0,1].
+// Constant-velocity motion reduces to a straight line. Stationary units (zero
+// current velocity) and on-keyframe renders return the sampled position unchanged.
 function interpPos(u, i) {
-  const bx = u[i + F.X], bz = u[i + F.Z];
+  const bx = u[i + F.X], bz = u[i + F.Z];              // P0
   if (renderFrac === 0) return [bx, bz];
-  const speed = Math.hypot(u[i + F.DVX], u[i + F.DVZ]); // elmos travelled over one interval at this unit's speed
-  if (speed === 0) return [bx, bz];                     // stationary: don't animate
+  const m0x = u[i + F.DVX], m0z = u[i + F.DVZ];        // tangent at A (frame-A velocity)
+  if (m0x === 0 && m0z === 0) return [bx, bz];         // zero velocity: stationary, don't animate
   const j = nextPosMap ? nextPosMap.get(u[i + F.ID]) : undefined;
   if (j === undefined) {
     // No next sample (unit is gone by then): fall back to velocity extrapolation.
-    return [bx + u[i + F.DVX] * renderFrac, bz + u[i + F.DVZ] * renderFrac];
+    return [bx + m0x * renderFrac, bz + m0z * renderFrac];
   }
   const nu = data.frames[idx + 1].u;
-  const dx = nu[j + F.X] - bx, dz = nu[j + F.Z] - bz;
-  const dist = Math.hypot(dx, dz);
-  if (dist === 0) return [bx, bz];                      // didn't move between samples
-  const t = Math.min(1, (speed * renderFrac) / dist);   // travel at `speed`, but don't overshoot the destination
-  return [bx + dx * t, bz + dz * t];
+  const px = nu[j + F.X], pz = nu[j + F.Z];            // P1
+  const chord = Math.hypot(px - bx, pz - bz);
+  if (chord === 0) return [bx, bz];                    // same position in both samples
+  const cap = TANGENT_CAP * chord;
+  const [a0x, a0z] = clampVec(m0x, m0z, cap);
+  const [a1x, a1z] = clampVec(nu[j + F.DVX], nu[j + F.DVZ], cap); // tangent at B (frame-B velocity)
+  const t = renderFrac, t2 = t * t, t3 = t2 * t;
+  const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
+  return [
+    h00 * bx + h10 * a0x + h01 * px + h11 * a1x,
+    h00 * bz + h10 * a0z + h01 * pz + h11 * a1z,
+  ];
 }
 
 const cv = document.getElementById('cv');
