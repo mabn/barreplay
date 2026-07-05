@@ -11,12 +11,43 @@
 const STRIDE = 9;
 const F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6, DVX: 7, DVZ: 8 };
 
-// Interpolated world position of unit i in frame array u, using the current
-// sub-frame fraction. dvx/dvz are the displacement over one keyframe interval, so
-// pos + d*frac animates movement between sampled frames. A stationary unit has
-// dvx==dvz==0 and is simply left at its sampled position.
-function ux(u, i) { return u[i + F.X] + u[i + F.DVX] * renderFrac; }
-function uz(u, i) { return u[i + F.Z] + u[i + F.DVZ] * renderFrac; }
+// Per-interval lookup: unit id -> base index of that unit in the NEXT sampled
+// frame. Lets movement be animated toward each unit's actual next position
+// (direction) at the speed implied by its velocity (magnitude). Rebuilt whenever
+// the integer keyframe changes.
+let nextPosMap = null;
+function buildNextPosMap() {
+  nextPosMap = new Map();
+  const nf = data && data.frames[idx + 1];
+  if (!nf) return;
+  const nu = nf.u;
+  for (let j = 0; j < nu.length; j += STRIDE) nextPosMap.set(nu[j + F.ID], j);
+}
+
+// Interpolated world [x, z] of unit i in the current frame array u. Velocity is
+// used only for SPEED (how far the unit travels this interval); DIRECTION comes
+// from the unit's position in the next sampled frame, so it heads to the right
+// place and lands there instead of overshooting along a stale heading and
+// snapping. Clamped so it never passes the next position (arrives and waits if it
+// got there early). Stationary units (zero velocity) and on-keyframe renders
+// return the sampled position unchanged.
+function interpPos(u, i) {
+  const bx = u[i + F.X], bz = u[i + F.Z];
+  if (renderFrac === 0) return [bx, bz];
+  const speed = Math.hypot(u[i + F.DVX], u[i + F.DVZ]); // elmos travelled over one interval at this unit's speed
+  if (speed === 0) return [bx, bz];                     // stationary: don't animate
+  const j = nextPosMap ? nextPosMap.get(u[i + F.ID]) : undefined;
+  if (j === undefined) {
+    // No next sample (unit is gone by then): fall back to velocity extrapolation.
+    return [bx + u[i + F.DVX] * renderFrac, bz + u[i + F.DVZ] * renderFrac];
+  }
+  const nu = data.frames[idx + 1].u;
+  const dx = nu[j + F.X] - bx, dz = nu[j + F.Z] - bz;
+  const dist = Math.hypot(dx, dz);
+  if (dist === 0) return [bx, bz];                      // didn't move between samples
+  const t = Math.min(1, (speed * renderFrac) / dist);   // travel at `speed`, but don't overshoot the destination
+  return [bx + dx * t, bz + dz * t];
+}
 
 const cv = document.getElementById('cv');
 const ctx = cv.getContext('2d');
@@ -212,7 +243,8 @@ function drawDots(u) {
     ctx.fillStyle = color;
     ctx.beginPath();
     for (const i of byColor[color]) {
-      const [sx, sy] = w2s(ux(u, i), uz(u, i));
+      const p = interpPos(u, i);
+      const [sx, sy] = w2s(p[0], p[1]);
       if (sx < -8 || sy < -8 || sx > viewW + 8 || sy > viewH + 8) continue;
       ctx.moveTo(sx + rad, sy);
       ctx.arc(sx, sy, rad, 0, 7);
@@ -230,7 +262,8 @@ function drawDots(u) {
 // it is never invisible.
 function drawIcons(u) {
   for (let i = 0; i < u.length; i += STRIDE) {
-    const [sx, sy] = w2s(ux(u, i), uz(u, i));
+    const p = interpPos(u, i);
+    const [sx, sy] = w2s(p[0], p[1]);
     const info = iconInfoFor(u[i + F.DEF]);
     let px = Math.max(ICON_MIN_PX, Math.min(ICON_MAX_PX, iconScale * (info ? info.s : 1)));
     if (growIcons) {
@@ -293,7 +326,8 @@ function drawFootprints(u) {
     ctx.beginPath();
     for (const i of byColor[color]) {
       const fp = footprintFor(u[i + F.DEF]);
-      const [cx, cy] = w2s(ux(u, i), uz(u, i));
+      const p = interpPos(u, i);
+      const [cx, cy] = w2s(p[0], p[1]);
       const wpx = fp.w * scale, hpx = fp.h * scale;
       if (cx + wpx / 2 < 0 || cy + hpx / 2 < 0 || cx - wpx / 2 > viewW || cy - hpx / 2 > viewH) continue;
       ctx.rect(cx - wpx / 2, cy - hpx / 2, wpx, hpx);
@@ -404,7 +438,8 @@ function hitTest() {
   const u = fr.u;
   let best = -1, bestD = 10 * 10; // 10px pick radius (squared)
   for (let i = 0; i < u.length; i += STRIDE) {
-    const [sx, sy] = w2s(ux(u, i), uz(u, i));
+    const p = interpPos(u, i);
+    const [sx, sy] = w2s(p[0], p[1]);
     const dx = sx - mouse.x, dy = sy - mouse.y;
     const d = dx * dx + dy * dy;
     if (d < bestD) { bestD = d; best = i; }
@@ -529,7 +564,7 @@ function setPlayhead(pos, forceSidebar) {
   renderFrac = Math.max(0, playPos - newIdx);
   const changed = newIdx !== idx || forceSidebar;
   idx = newIdx;
-  if (changed) updateSidebar();
+  if (changed) { updateSidebar(); buildNextPosMap(); }
   updateTimeLabel();
   draw();
 }
