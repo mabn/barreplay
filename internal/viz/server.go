@@ -91,6 +91,10 @@ func (s *Server) Handler() http.Handler {
 	if sub, err := iconsSubFS(); err == nil {
 		mux.Handle("/icons/", http.StripPrefix("/icons/", cacheForever(http.FileServer(http.FS(sub)))))
 	}
+	// Vendored BAR player rank icons, served at /ranks/<n>.png (also immutable).
+	if sub, err := ranksSubFS(); err == nil {
+		mux.Handle("/ranks/", http.StripPrefix("/ranks/", cacheForever(http.FileServer(http.FS(sub)))))
+	}
 	mux.HandleFunc("/api/replays", s.handleList)
 	mux.HandleFunc("/api/replay", s.handleReplay)
 	mux.HandleFunc("/api/replay/chunk", s.handleChunk)
