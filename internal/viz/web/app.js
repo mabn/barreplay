@@ -809,6 +809,129 @@ function teamNameById(id) {
 }
 
 // ---- sidebar --------------------------------------------------------------
+
+// Resource stride in wireFrame.r (see internal/viz/wire.go resourceStride):
+// [team, metal, energy, metalStore, energyStore, metalIncome, energyIncome].
+const RSTRIDE = 7;
+const R = { TEAM: 0, METAL: 1, ENERGY: 2, MSTORE: 3, ESTORE: 4, MINC: 5, EINC: 6 };
+
+// resourcesByTeam builds team id -> economy object for one frame's packed r array.
+function resourcesByTeam(fr) {
+  const out = {};
+  const r = (fr && fr.r) || [];
+  for (let i = 0; i < r.length; i += RSTRIDE) {
+    out[r[i + R.TEAM]] = {
+      metal: r[i + R.METAL], energy: r[i + R.ENERGY],
+      mStore: r[i + R.MSTORE], eStore: r[i + R.ESTORE],
+      mInc: r[i + R.MINC], eInc: r[i + R.EINC],
+    };
+  }
+  return out;
+}
+
+// Two-letter ISO country code -> flag emoji (regional-indicator pair). Returns ''
+// for a missing/malformed code so the row simply has no flag.
+function flagEmoji(cc) {
+  if (!/^[a-zA-Z]{2}$/.test(cc || '')) return '';
+  const base = 0x1F1E6, A = 65;
+  const u = cc.toUpperCase();
+  return String.fromCodePoint(base + u.charCodeAt(0) - A, base + u.charCodeAt(1) - A);
+}
+
+// Compact resource number in BAR's HUD style: 314, 1.06k, 85k, 1.2M.
+function fmtNum(n) {
+  n = Math.round(n);
+  const a = Math.abs(n);
+  if (a >= 1e6) return (n / 1e6).toFixed(2).replace(/\.?0+$/, '') + 'M';
+  if (a >= 1e4) return Math.round(n / 1e3) + 'k';
+  if (a >= 1e3) return (n / 1e3).toFixed(2).replace(/\.?0+$/, '') + 'k';
+  return String(n);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+// Player list: rank, flag, OS (skill), name — then per-resource storage bars and
+// income/s — grouped by ally team. Economy comes from the current frame's per-team
+// resources (a player controls one team). Spectators have no economy and are
+// listed dimmed at the end. Player-leaving isn't tracked yet, so everyone shows
+// for the whole replay.
+function renderPlayers() {
+  const root = document.getElementById('players');
+  root.innerHTML = '';
+  const players = data.players || [];
+  if (!players.length) {
+    root.innerHTML = '<div class="hint">no player roster in this capture</div>';
+    return;
+  }
+  const res = resourcesByTeam(data.frames[idx]);
+  const allyOf = {};
+  (data.teams || []).forEach(t => { allyOf[t.team] = t.ally; });
+
+  const playing = players.filter(p => !p.spec);
+  const specs = players.filter(p => p.spec);
+
+  // Group by ally; within an ally sort by skill (desc), then team.
+  playing.sort((a, b) =>
+    (allyOf[a.team] ?? 999) - (allyOf[b.team] ?? 999) ||
+    (b.skill || 0) - (a.skill || 0) ||
+    a.team - b.team);
+
+  let lastAlly, group = null;
+  playing.forEach(p => {
+    const ally = allyOf[p.team];
+    if (ally !== lastAlly) {
+      group = document.createElement('div');
+      group.className = 'pgroup';
+      root.appendChild(group);
+      lastAlly = ally;
+    }
+    group.appendChild(playerRow(p, res[p.team]));
+  });
+
+  if (specs.length) {
+    const g = document.createElement('div');
+    g.className = 'pgroup';
+    g.innerHTML = `<div class="hint">Spectators ${specs.length}: ` +
+      specs.map(s => escapeHtml(s.name)).join(', ') + '</div>';
+    root.appendChild(g);
+  }
+}
+
+function playerRow(p, r) {
+  const row = document.createElement('div');
+  row.className = 'prow';
+  const color = teamColor[p.team] || '#c7d0d9';
+  const rank = `<span class="rank">${p.rank ? p.rank : ''}</span>`;
+  const flag = flagEmoji(p.country);
+  const os = `<span class="os">${p.skill ? p.skill.toFixed(1) : ''}</span>`;
+  let html =
+    `<div class="phead">${rank}` +
+    (flag ? `<span class="flag">${flag}</span>` : '') +
+    `${os}<span class="pname" style="color:${color}">${escapeHtml(p.name)}</span></div>`;
+  if (r) {
+    html += '<div class="pres">' +
+      resBar('metal', r.metal, r.mStore, r.mInc) +
+      resBar('energy', r.energy, r.eStore, r.eInc) +
+      '</div>';
+  }
+  row.innerHTML = html;
+  return row;
+}
+
+// One resource line: a storage-fill bar (current / storage), the current amount,
+// and the per-second income.
+function resBar(kind, cur, store, inc) {
+  const frac = store > 0 ? Math.max(0, Math.min(1, cur / store)) : 0;
+  const incStr = (inc >= 0 ? '+' : '') + fmtNum(inc);
+  return `<div class="resrow ${kind}">` +
+    `<div class="rbar"><div style="width:${(frac * 100).toFixed(0)}%"></div></div>` +
+    `<span class="rval">${fmtNum(cur)}</span>` +
+    `<span class="rinc">${incStr}/s</span>` +
+    '</div>';
+}
+
 function renderTeams() {
   const root = document.getElementById('teams');
   root.innerHTML = '';
@@ -865,6 +988,7 @@ function updateSidebar() {
   document.getElementById('s_time').textContent = fr ? fmtTime(fr.t) : '—';
   document.getElementById('s_frame').textContent = fr ? fr.f : '—';
   document.getElementById('s_units').textContent = fr ? fr.n : '—';
+  renderPlayers();
   renderTeams();
   renderEvents();
 }
