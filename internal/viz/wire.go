@@ -56,6 +56,7 @@ type wireTeam struct {
 	AllyTeam int32  `json:"ally"`
 	Side     string `json:"side,omitempty"`
 	Player   string `json:"player,omitempty"`
+	Color    string `json:"color,omitempty"`
 }
 
 type wireFrame struct {
@@ -81,11 +82,13 @@ func (rep *Replay) toWire() wireReplay {
 		GameVersion:   rep.Meta.GameVersion,
 		MapName:       rep.Meta.MapName,
 		SampleEvery:   rep.Meta.SampleEvery,
-		UnitDefs:      rep.Meta.UnitDefs,
 		Bounds:        bounds(rep.Frames),
 	}
-	if w.UnitDefs == nil {
-		w.UnitDefs = map[int32]string{}
+	// The browser only needs id->name for icon lookup and tooltips; the full unit
+	// defs live in the .jsonl. Derive the compact name map from them.
+	w.UnitDefs = make(map[int32]string, len(rep.Meta.UnitDefs))
+	for id, d := range rep.Meta.UnitDefs {
+		w.UnitDefs[id] = d.Name
 	}
 
 	// Teams come from Meta when present; otherwise synthesize from the team ids
@@ -147,7 +150,7 @@ func teams(rep *Replay) []wireTeam {
 	out := make([]wireTeam, 0, len(rep.Meta.Teams))
 	seen := map[int32]bool{}
 	for _, t := range rep.Meta.Teams {
-		out = append(out, wireTeam{TeamID: t.TeamID, AllyTeam: t.AllyTeam, Side: t.Side, Player: t.PlayerName})
+		out = append(out, wireTeam{TeamID: t.TeamID, AllyTeam: t.AllyTeam, Side: t.Side, Player: t.PlayerName, Color: t.Color})
 		seen[t.TeamID] = true
 	}
 	extra := map[int32]bool{}
