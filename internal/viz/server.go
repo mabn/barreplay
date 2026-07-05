@@ -41,8 +41,11 @@ type cacheEntry struct {
 	size    int64
 	brp     *snapshot.BRPFile
 	payload []byte // the /api/replay head payload, built once
-	etag    string
-	lastUse time.Time
+	// resources is the gzipped /api/replay/resources body, built lazily on the
+	// first request (decoding every chunk's economy) and reused thereafter.
+	resources []byte
+	etag      string
+	lastUse   time.Time
 }
 
 // replayInfo is one entry in the /api/replays listing.
@@ -88,9 +91,14 @@ func (s *Server) Handler() http.Handler {
 	if sub, err := iconsSubFS(); err == nil {
 		mux.Handle("/icons/", http.StripPrefix("/icons/", cacheForever(http.FileServer(http.FS(sub)))))
 	}
+	// Vendored BAR player rank icons, served at /ranks/<n>.png (also immutable).
+	if sub, err := ranksSubFS(); err == nil {
+		mux.Handle("/ranks/", http.StripPrefix("/ranks/", cacheForever(http.FileServer(http.FS(sub)))))
+	}
 	mux.HandleFunc("/api/replays", s.handleList)
 	mux.HandleFunc("/api/replay", s.handleReplay)
 	mux.HandleFunc("/api/replay/chunk", s.handleChunk)
+	mux.HandleFunc("/api/replay/resources", s.handleResources)
 	return mux
 }
 
@@ -233,6 +241,43 @@ func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Write(sec[c.FOff:end])
+}
+
+// handleResources returns the per-frame team economy for a capture (?file=), a
+// gzipped JSON array of {f, r} the sidebar player list turns into metal/energy
+// bars. Frame resources live in the .brp X stream, which the frame chunk path
+// never fetches, so this decodes them once and caches the compressed body on
+// the entry. Sent with Content-Encoding: gzip so the browser inflates it.
+func (s *Server) handleResources(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("file")
+	if !validName(name) {
+		http.Error(w, "missing or invalid ?file= (want a .brp basename)", http.StatusBadRequest)
+		return
+	}
+	e, err := s.get(name)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.mu.Lock()
+	body := e.resources
+	if body == nil {
+		body, err = brpResourcesPayload(e.brp)
+		if err == nil {
+			e.resources = body
+		}
+	}
+	s.mu.Unlock()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if notModified(w, r, e.etag) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Encoding", "gzip")
+	w.Write(body)
 }
 
 // list scans Dir for .brp files.

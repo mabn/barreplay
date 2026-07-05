@@ -392,9 +392,10 @@ let renderFrac = 0;        // sub-frame fraction [0,1) within the current interv
 let secPerFrame = 1;       // game seconds per keyframe interval (sampleEvery/30)
 let showIcons = true;      // draw BAR unit icons (vs plain dots)
 let showTexture = true;    // draw the map terrain texture behind everything
-let showGrid = true;       // draw the build/small/large grid
-let showFootprints = true; // draw build-footprint rectangles for buildings
+let showGrid = false;      // draw the build/small/large grid
+let showFootprints = false;// draw build-footprint rectangles for buildings
 let growIcons = true;      // grow a building's icon toward its footprint when zoomed in
+let autoTeamColors = false; // true: distinct auto colours per team; false: the real in-game team colours from the replay
 let mapW = 0, mapH = 0;    // map world extent in elmos (0 if unknown)
 let mapTex = null;         // HTMLImageElement of the terrain texture, or null
 // Viewport in CSS pixels + the device-pixel ratio. The canvas backing store is
@@ -481,6 +482,20 @@ function assignColors(teams) {
     });
   });
   return colors;
+}
+
+// computeTeamColors returns the team id -> css colour map used everywhere teams
+// are drawn (units, footprints, player/team lists). With autoTeamColors on we use
+// the distinct auto-assigned palette (allies share a hue); off, we use each
+// team's real in-game colour from the replay JSON, falling back to the auto colour
+// for any team that carries none.
+function computeTeamColors() {
+  const auto = assignColors(data.teams || []);
+  if (autoTeamColors) return auto;
+  const out = {};
+  (data.teams || []).forEach(t => { out[t.team] = t.color || auto[t.team]; });
+  for (const id in auto) if (!(id in out)) out[id] = auto[id];
+  return out;
 }
 
 function teamLabel(t) {
@@ -809,6 +824,165 @@ function teamNameById(id) {
 }
 
 // ---- sidebar --------------------------------------------------------------
+
+// Resource stride in the /api/replay/resources records (see wire.go
+// resourceStride): [team, metal, energy, metalStore, energyStore, metalIncome,
+// energyIncome].
+const RSTRIDE = 7;
+const R = { TEAM: 0, METAL: 1, ENERGY: 2, MSTORE: 3, ESTORE: 4, MINC: 5, EINC: 6 };
+
+// resByFrame maps a sim frame number -> its flat per-team economy array (stride
+// RSTRIDE). Team economy lives in the .brp X stream, which the frame chunk path
+// never fetches, so the player list pulls the whole (small) timeline once from
+// /api/replay/resources. Null until that fetch lands.
+let resByFrame = null;
+
+// loadResources fetches the economy timeline for the current replay and keys it
+// by sim frame, then refreshes the sidebar so the bars fill in. Best-effort: a
+// failure (or a capture with no resources) just leaves the bars off.
+async function loadResources(file, gen) {
+  resByFrame = null;
+  try {
+    const r = await fetch('/api/replay/resources?file=' + encodeURIComponent(file));
+    if (!r.ok) return;
+    const arr = await r.json(); // [{f, r:[...]}]
+    if (gen !== loadGen) return; // a newer replay load superseded this one
+    const m = new Map();
+    for (const e of arr) m.set(e.f, e.r);
+    resByFrame = m;
+    if (data) updateSidebar();
+  } catch (_) { /* offline / no resources: bars simply stay empty */ }
+}
+
+// resourcesByTeam builds team id -> economy object for one sim frame, from the
+// fetched timeline. Returns {} until the timeline has loaded or when the frame
+// carries no economy.
+function resourcesByTeam(simFrame) {
+  const out = {};
+  const r = resByFrame && resByFrame.get(simFrame);
+  if (!r) return out;
+  for (let i = 0; i < r.length; i += RSTRIDE) {
+    out[r[i + R.TEAM]] = {
+      metal: r[i + R.METAL], energy: r[i + R.ENERGY],
+      mStore: r[i + R.MSTORE], eStore: r[i + R.ESTORE],
+      mInc: r[i + R.MINC], eInc: r[i + R.EINC],
+    };
+  }
+  return out;
+}
+
+// Two-letter ISO country code -> flag emoji (regional-indicator pair). Returns ''
+// for a missing/malformed code so the row simply has no flag.
+function flagEmoji(cc) {
+  if (!/^[a-zA-Z]{2}$/.test(cc || '')) return '';
+  const base = 0x1F1E6, A = 65;
+  const u = cc.toUpperCase();
+  return String.fromCodePoint(base + u.charCodeAt(0) - A, base + u.charCodeAt(1) - A);
+}
+
+// Rank badge: BAR's chevron/star icon for a player's rank. Rank levels 0..7 map
+// to /ranks/1.png../ranks/8.png (BAR's own numbering). Spectators and out-of-range
+// values get an empty placeholder span so the column still aligns.
+function rankBadge(p) {
+  const r = p.rank || 0;
+  if (p.spec || r < 0 || r > 7) return '<span class="rank"></span>';
+  return `<img class="rank" src="/ranks/${r + 1}.png" alt="rank ${r}" title="Rank ${r}">`;
+}
+
+// Compact resource number in BAR's HUD style: 314, 1.06k, 85k, 1.2M.
+function fmtNum(n) {
+  n = Math.round(n);
+  const a = Math.abs(n);
+  if (a >= 1e6) return (n / 1e6).toFixed(2).replace(/\.?0+$/, '') + 'M';
+  if (a >= 1e4) return Math.round(n / 1e3) + 'k';
+  if (a >= 1e3) return (n / 1e3).toFixed(2).replace(/\.?0+$/, '') + 'k';
+  return String(n);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+// Player list: rank, flag, OS (skill), name — then per-resource storage bars and
+// income/s — grouped by ally team. Economy comes from the current frame's per-team
+// resources (a player controls one team). Spectators have no economy and are
+// listed dimmed at the end. Player-leaving isn't tracked yet, so everyone shows
+// for the whole replay.
+function renderPlayers() {
+  const root = document.getElementById('players');
+  root.innerHTML = '';
+  const players = data.players || [];
+  if (!players.length) {
+    root.innerHTML = '<div class="hint">no player roster in this capture</div>';
+    return;
+  }
+  const fr = dispIdx >= 0 ? data.frames[dispIdx] : null;
+  const res = resourcesByTeam(fr ? fr.f : -1);
+  const allyOf = {};
+  (data.teams || []).forEach(t => { allyOf[t.team] = t.ally; });
+
+  const playing = players.filter(p => !p.spec);
+  const specs = players.filter(p => p.spec);
+
+  // Group by ally; within an ally sort by skill (desc), then team.
+  playing.sort((a, b) =>
+    (allyOf[a.team] ?? 999) - (allyOf[b.team] ?? 999) ||
+    (b.skill || 0) - (a.skill || 0) ||
+    a.team - b.team);
+
+  let lastAlly, group = null;
+  playing.forEach(p => {
+    const ally = allyOf[p.team];
+    if (ally !== lastAlly) {
+      group = document.createElement('div');
+      group.className = 'pgroup';
+      root.appendChild(group);
+      lastAlly = ally;
+    }
+    group.appendChild(playerRow(p, res[p.team]));
+  });
+
+  if (specs.length) {
+    const g = document.createElement('div');
+    g.className = 'pgroup';
+    g.innerHTML = `<div class="hint">Spectators ${specs.length}: ` +
+      specs.map(s => escapeHtml(s.name)).join(', ') + '</div>';
+    root.appendChild(g);
+  }
+}
+
+function playerRow(p, r) {
+  const row = document.createElement('div');
+  row.className = 'prow';
+  const color = teamColor[p.team] || '#c7d0d9';
+  const rank = rankBadge(p);
+  const flag = `<span class="flag">${flagEmoji(p.country)}</span>`;
+  const os = `<span class="os">${p.skill ? p.skill.toFixed(1) : ''}</span>`;
+  let html =
+    `<div class="phead">${rank}${flag}${os}` +
+    `<span class="pname" style="color:${color}">${escapeHtml(p.name)}</span></div>`;
+  if (r) {
+    html += '<div class="pres">' +
+      resBar('metal', r.metal, r.mStore, r.mInc) +
+      resBar('energy', r.energy, r.eStore, r.eInc) +
+      '</div>';
+  }
+  row.innerHTML = html;
+  return row;
+}
+
+// One resource line: a storage-fill bar (current / storage), the current amount,
+// and the per-second income.
+function resBar(kind, cur, store, inc) {
+  const frac = store > 0 ? Math.max(0, Math.min(1, cur / store)) : 0;
+  const incStr = (inc >= 0 ? '+' : '') + fmtNum(inc);
+  return `<div class="resrow ${kind}">` +
+    `<div class="rbar"><div style="width:${(frac * 100).toFixed(0)}%"></div></div>` +
+    `<span class="rval">${fmtNum(cur)}</span>` +
+    `<span class="rinc">${incStr}/s</span>` +
+    '</div>';
+}
+
 function renderTeams() {
   const root = document.getElementById('teams');
   root.innerHTML = '';
@@ -865,6 +1039,7 @@ function updateSidebar() {
   document.getElementById('s_time').textContent = fr ? fmtTime(fr.t) : '—';
   document.getElementById('s_frame').textContent = fr ? fr.f : '—';
   document.getElementById('s_units').textContent = fr ? fr.n : '—';
+  renderPlayers();
   renderTeams();
   renderEvents();
 }
@@ -1026,6 +1201,14 @@ document.getElementById('maptex').onchange = e => { showTexture = e.target.check
 document.getElementById('grid').onchange = e => { showGrid = e.target.checked; draw(); };
 document.getElementById('footprints').onchange = e => { showFootprints = e.target.checked; draw(); };
 document.getElementById('growicons').onchange = e => { growIcons = e.target.checked; draw(); };
+document.getElementById('teamcolors').onchange = e => {
+  autoTeamColors = e.target.checked;
+  if (!data) return;
+  // Icon tint/render caches key on the colour string, so a colour change just
+  // produces fresh entries — no need to clear them.
+  teamColor = computeTeamColors();
+  renderPlayers(); renderTeams(); draw();
+};
 document.getElementById('iconsize').oninput = e => {
   iconScale = +e.target.value;
   setParam('iconsize', iconScale);
@@ -1076,7 +1259,7 @@ async function loadReplay(file) {
   } else {
     setEmpty('');
   }
-  teamColor = assignColors(data.teams || []);
+  teamColor = computeTeamColors();
   secPerFrame = data.sampleEvery > 0 ? data.sampleEvery / 30 : 1;
   document.getElementById('subtitle').textContent =
     [data.gameId, data.mapName, data.gameVersion].filter(Boolean).join(' · ') || 'replay state viewer';
@@ -1096,6 +1279,7 @@ async function loadReplay(file) {
   ensureChunk(0, { urgent: true });
   ensureChunk(1);
   pumpBackground();
+  loadResources(file, loadGen); // economy timeline for the player-list bars (async)
   show();
 }
 
