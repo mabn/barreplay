@@ -3,13 +3,15 @@
 // time). It is a separate tool from the capture pipeline: it only ever reads
 // finished snapshot files.
 //
-// Two on-disk shapes are understood:
+// Three on-disk shapes are understood:
 //
-//   - .jsonl  — the persisted v1 format owned by the snapshot package
-//     (snapshot.NewReader). This is the normal input.
+//   - .brp    — the compact binary v2 format owned by the snapshot package.
+//     This is the normal input; the server additionally serves its data
+//     sections to the browser without decoding (see server.go).
+//   - .jsonl  — the legacy v1 line-delimited JSON format (snapshot.NewReader).
 //   - .brsnap — the raw tagged stream the Lua widget writes during a run
-//     (parsed by internal/capture). Useful for inspecting a run whose .jsonl
-//     was never produced (e.g. the engine was killed before Consume ran).
+//     (parsed by internal/capture). Useful for inspecting a run whose capture
+//     file was never produced (e.g. the engine was killed before Consume ran).
 //
 // Both are decoded into the same in-memory Replay, which the server encodes
 // into a compact wire format for the front-end.
@@ -52,8 +54,9 @@ func (m *memWriter) WriteEvent(e snapshot.Event) error {
 }
 func (m *memWriter) Close() error { return nil }
 
-// Load reads a snapshot file, dispatching on its extension. .brsnap is parsed
-// through internal/capture; anything else is treated as JSONL.
+// Load reads a snapshot file, dispatching on its extension. .brp is decoded by
+// the snapshot package, .brsnap is parsed through internal/capture; anything
+// else is treated as JSONL.
 func Load(path string) (*Replay, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -61,7 +64,14 @@ func Load(path string) (*Replay, error) {
 	}
 	defer f.Close()
 
-	if strings.EqualFold(filepath.Ext(path), ".brsnap") {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".brp":
+		meta, frames, events, err := snapshot.ReadBRP(f)
+		if err != nil {
+			return nil, fmt.Errorf("viz: reading brp: %w", err)
+		}
+		return &Replay{Meta: meta, Frames: frames, Events: events}, nil
+	case ".brsnap":
 		return loadBRSNAP(f, gameIDFromPath(path))
 	}
 	return loadJSONL(f)

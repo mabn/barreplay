@@ -2,14 +2,164 @@
 
 // barreplay viewer — vanilla JS canvas playback of a recorded capture.
 //
-// Wire format (see internal/viz/wire.go): each frame packs its units into a
-// flat Int32 array `u` of stride 7: [id, def, team, x, z, hp, maxHp]. We read it
-// by index rather than materialising per-unit objects — a replay can hold ~600
-// units across thousands of frames, so avoiding the object churn keeps playback
-// smooth.
+// Wire format (see internal/viz/wire.go and snapshot/brp.go): the server sends
+// a binary "BRW1" container — a small JSON head plus the capture's gzipped,
+// delta-coded frame/event columns, forwarded byte-for-byte from the .brp file.
+// decodeReplay() below gunzips the sections with the browser's native
+// DecompressionStream and unpacks each frame into a flat Int32Array `u` of
+// stride 9: [id, def, team, x, z, hp, maxHp, dvx, dvz]. We read it by index
+// rather than materialising per-unit objects — a replay can hold millions of
+// unit records, so avoiding the object churn keeps loading and playback smooth.
 
 const STRIDE = 9;
 const F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6, DVX: 7, DVZ: 8 };
+
+// ---- wire payload decoding --------------------------------------------------
+// Mirrors the encoder in snapshot/brp.go exactly; evolve them together.
+
+// gunzip a byte slice via the browser's native DecompressionStream.
+async function gunzipU8(u8) {
+  const ds = new DecompressionStream('gzip');
+  const resp = new Response(new Blob([u8]).stream().pipeThrough(ds));
+  return new Uint8Array(await resp.arrayBuffer());
+}
+
+// Split a BRW1 container into its sections: {tag: Uint8Array (still gzipped)}.
+function parseContainer(buf) {
+  const u8 = new Uint8Array(buf);
+  const magic = 'BRW1';
+  for (let i = 0; i < magic.length; i++) {
+    if (u8[i] !== magic.charCodeAt(i)) throw new Error('not a BRW payload (old server?)');
+  }
+  const dv = new DataView(buf);
+  const secs = {};
+  let off = magic.length + 1; // + version byte
+  while (off + 5 <= u8.length) {
+    const tag = String.fromCharCode(u8[off]);
+    const len = dv.getUint32(off + 1, true);
+    secs[tag] = u8.subarray(off + 5, off + 5 + len);
+    off += 5 + len;
+  }
+  return secs;
+}
+
+// Frame columns: per frame — zigzag-varint frame delta, unit count, then the
+// id column (delta within the frame, ascending) and 8 value columns, each
+// delta-coded against the same unit in the previous frame (absolute when the
+// id is new). x/z additionally predict with the previous frame's velocity
+// displacement, so constant-velocity movement decodes from near-zero deltas.
+function decodeFrames(b) {
+  let p = 0;
+  const end = b.length;
+  function uv() { // unsigned LEB128; falls back to float math past 28 bits
+    let c = b[p++];
+    if (c < 0x80) return c;
+    let x = c & 0x7f;
+    c = b[p++]; if (c < 0x80) return x | (c << 7);
+    x |= (c & 0x7f) << 7;
+    c = b[p++]; if (c < 0x80) return x | (c << 14);
+    x |= (c & 0x7f) << 14;
+    c = b[p++]; if (c < 0x80) return x | (c << 21);
+    let xf = (x | ((c & 0x7f) << 21)) >>> 0;
+    let mul = 268435456; // 2^28
+    for (;;) {
+      c = b[p++];
+      xf += (c & 0x7f) * mul;
+      if (c < 0x80) return xf;
+      mul *= 128;
+    }
+  }
+  function sv() { // zigzag
+    const u = uv();
+    return u < 0x80000000 ? ((u >>> 1) ^ -(u & 1)) : (u % 2 === 0 ? u / 2 : -(u + 1) / 2);
+  }
+
+  const frames = [];
+  let prevU = null;             // previous frame's Int32Array
+  let prevMap = new Map();      // unit id -> base offset into prevU
+  let frame = 0;
+  while (p < end) {
+    frame += sv();
+    const n = uv();
+    const u = new Int32Array(n * STRIDE);
+    const pidx = new Int32Array(n); // prev-frame base offset per unit, -1 if new
+    let id = 0;
+    for (let i = 0; i < n; i++) {
+      id += sv();
+      u[i * STRIDE] = id;
+      const prev = prevMap.get(id);
+      pidx[i] = prev === undefined ? -1 : prev;
+    }
+    for (let c = 1; c < STRIDE; c++) {
+      for (let i = 0, o = c; i < n; i++, o += STRIDE) {
+        const d = sv();
+        const j = pidx[i];
+        if (j < 0) { u[o] = d; continue; }
+        let base = prevU[j + c];
+        if (c === F.X) base += prevU[j + F.DVX];
+        else if (c === F.Z) base += prevU[j + F.DVZ];
+        u[o] = base + d;
+      }
+    }
+    prevMap = new Map();
+    for (let i = 0; i < n; i++) prevMap.set(u[i * STRIDE], i * STRIDE);
+    prevU = u;
+    frames.push({ f: frame, t: frame / 30, n, u });
+  }
+  return frames;
+}
+
+// Events: count, a kind string table, then one column at a time (frame and
+// unit-id delta-coded, def/team absolute).
+function decodeEvents(b) {
+  let p = 0;
+  function uv() {
+    let x = 0, mul = 1;
+    for (;;) {
+      const c = b[p++];
+      x += (c & 0x7f) * mul;
+      if (c < 0x80) return x;
+      mul *= 128;
+    }
+  }
+  function sv() {
+    const u = uv();
+    return u % 2 === 0 ? u / 2 : -(u + 1) / 2;
+  }
+  const n = uv();
+  const nk = uv();
+  const td = new TextDecoder();
+  const kinds = [];
+  for (let i = 0; i < nk; i++) {
+    const l = uv();
+    kinds.push(td.decode(b.subarray(p, p + l)));
+    p += l;
+  }
+  const evs = new Array(n);
+  for (let i = 0; i < n; i++) evs[i] = { f: 0, k: '', id: 0, def: 0, team: 0 };
+  let acc = 0;
+  for (let i = 0; i < n; i++) { acc += sv(); evs[i].f = acc; }
+  for (let i = 0; i < n; i++) evs[i].k = kinds[uv()];
+  acc = 0;
+  for (let i = 0; i < n; i++) { acc += sv(); evs[i].id = acc; }
+  for (let i = 0; i < n; i++) evs[i].def = sv();
+  for (let i = 0; i < n; i++) evs[i].team = sv();
+  return evs;
+}
+
+// Decode a fetched /api/replay ArrayBuffer into the in-memory shape the viewer
+// uses: the head JSON's fields plus frames [{f,t,n,u}] and events [{f,k,...}].
+async function decodeReplay(buf) {
+  if (typeof DecompressionStream === 'undefined') {
+    throw new Error('this browser lacks DecompressionStream (needed to read the capture)');
+  }
+  const secs = parseContainer(buf);
+  if (!secs.J) throw new Error('payload has no head section');
+  const head = JSON.parse(new TextDecoder().decode(await gunzipU8(secs.J)));
+  head.frames = secs.F ? decodeFrames(await gunzipU8(secs.F)) : [];
+  head.events = secs.E ? decodeEvents(await gunzipU8(secs.E)) : [];
+  return head;
+}
 
 // Per-interval lookup: unit id -> base index of that unit in the NEXT sampled
 // frame. Lets movement be animated toward each unit's actual next position
@@ -696,7 +846,7 @@ async function loadReplay(file) {
   try {
     const r = await fetch('/api/replay?file=' + encodeURIComponent(file));
     if (!r.ok) throw new Error(await r.text());
-    data = await r.json();
+    data = await decodeReplay(await r.arrayBuffer());
   } catch (err) {
     setEmpty('Failed to load ' + file + ': ' + err.message);
     data = null;
