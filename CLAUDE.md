@@ -142,8 +142,10 @@ dir for `.jsonl`/`.brsnap` files and serves the viewer.
   (inverted-path variants) and keeps only entries whose bitmap file actually exists in the
   embedded FS, so the payload never advertises a 404. It also parses each type's `size`
   multiplier. `toWire` fills `unitIcons` (name→`{path,size}`) for just the def names in the
-  replay; the front-end draws every unit as its icon, **team-tinted** (BAR icons are alpha
-  silhouettes, mask-filled via canvas `source-in`, cached per icon×team) at a **constant
+  replay; the front-end draws every unit as its icon, **team-tinted** (BAR icons are grayscale
+  luminance masks — bright→team colour, black→black — so the icon is `multiply`-composited
+  into a team-colour field then clipped to its own alpha, preserving the internal detail;
+  cached per icon×team) at a **constant
   screen size** (`ICON_PX_PER_SIZE * size`, independent of zoom, like BAR's minimap — so icons
   spread apart when zoomed in and overlap when zoomed out). A unit with no/loading icon shows
   a coloured dot so it is never invisible; the Icons checkbox switches to plain dots.
