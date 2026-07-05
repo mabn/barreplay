@@ -30,9 +30,9 @@ type wireReplay struct {
 	// multiplier), limited to the def names present in this replay. The browser
 	// looks a unit up by name (via UnitDefs) and requests "/" + path.
 	UnitIcons map[string]wireIcon `json:"unitIcons"`
-	// Footprints maps a building's internal name to its build-footprint size in
-	// elmos. Only immobile structures are included (presence == it's a building),
-	// so the front-end draws a footprint rectangle only for buildings.
+	// Footprints maps a structure's internal name to its build-footprint size in
+	// elmos. Only immobile units are included (presence == it doesn't move), so the
+	// front-end draws a footprint rectangle only for buildings/turrets/etc.
 	Footprints map[string]wireFootprint `json:"footprints"`
 	Frames     []wireFrame              `json:"frames"`
 	Events     []wireEvent              `json:"events"`
@@ -119,12 +119,14 @@ func (rep *Replay) toWire() wireReplay {
 		}
 	}
 
-	// Build footprints for immobile structures only. XSize/ZSize are in 8-elmo
-	// squares (engine SQUARE_SIZE), so multiply by 8 for world elmos.
+	// Build footprints for immobile structures only. Keyed on immobility (!CanMove)
+	// rather than the IsBuilding flag: some fixed structures (e.g. epic nano/build
+	// turrets) are tagged builders, not buildings, but still occupy a footprint.
+	// XSize/ZSize are in 8-elmo squares (engine SQUARE_SIZE), so multiply by 8.
 	const squareSize = 8
 	w.Footprints = map[string]wireFootprint{}
 	for _, d := range rep.Meta.UnitDefs {
-		if d.IsBuilding && d.XSize > 0 {
+		if !d.CanMove && d.XSize > 0 {
 			w.Footprints[d.Name] = wireFootprint{W: d.XSize * squareSize, H: d.ZSize * squareSize}
 		}
 	}
