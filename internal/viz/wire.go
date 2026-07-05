@@ -1,26 +1,31 @@
 package viz
 
 import (
-	"math"
-	"sort"
+	"bytes"
+	"compress/gzip"
+	"encoding/json"
 
 	"github.com/mabn/barreplay/snapshot"
 )
 
-// unitStride is the number of ints packed per unit in a wireFrame.U slice:
-// [id, def, team, x, z, hp, maxHp, dvx, dvz]. Positions/health are rounded to
-// integers — engine "elmo" precision is far finer than a top-down map view needs,
-// and integer JSON encodes much smaller than float. dvx/dvz are the unit's
-// per-keyframe-interval displacement (velocity × SampleEvery, in elmos), used by
-// the front-end to interpolate movement smoothly between sampled frames instead
-// of blinking. The front-end reads this stride.
-const unitStride = 9
+// The browser payload is binary, not JSON — a real capture holds millions of
+// unit records. /api/replay returns a small "BRW1" container (same section
+// framing as .brp, see snapshot/brp.go):
+//
+//	J  head JSON (this file's wireHead): meta, teams, icons, footprints,
+//	   bounds, and the CHUNK INDEX
+//	E  events — the .brp file's E section byte-for-byte
+//
+// The frame data itself is NOT in this payload: the browser fetches chunks
+// individually via /api/replay/chunk as the user plays/seeks/skims, and the
+// server slices each chunk's bytes straight out of the stored file (they are
+// independently gzipped exactly so that no re-encoding is ever needed). The
+// decoder lives in web/app.js and must mirror snapshot/brp.go's column layout
+// exactly — evolve them together.
 
-// wireReplay is the JSON payload sent to the browser. Frames use a flat integer
-// array per frame instead of an array of objects: a real replay can hold ~600
-// units/frame over thousands of frames, so dropping JSON key overhead (and the
-// unused Y/height axis) keeps the payload an order of magnitude smaller.
-type wireReplay struct {
+// wireHead is the J-section JSON: everything the viewer needs besides the
+// frame/event columns.
+type wireHead struct {
 	GameID        string           `json:"gameId"`
 	EngineVersion string           `json:"engineVersion,omitempty"`
 	GameVersion   string           `json:"gameVersion,omitempty"`
@@ -37,8 +42,22 @@ type wireReplay struct {
 	// elmos. Only immobile units are included (presence == it doesn't move), so the
 	// front-end draws a footprint rectangle only for buildings/turrets/etc.
 	Footprints map[string]wireFootprint `json:"footprints"`
-	Frames     []wireFrame              `json:"frames"`
-	Events     []wireEvent              `json:"events"`
+	// FrameCount is the total number of sampled frames; Chunks indexes the
+	// fetchable chunks in order (chunk i covers frames
+	// [sum(count[:i]), sum(count[:i+1])) of the global timeline).
+	FrameCount int         `json:"frameCount"`
+	Chunks     []wireChunk `json:"chunks"`
+}
+
+// wireChunk describes one fetchable chunk to the browser. keyLen is where the
+// keyframe gzip stream ends within the chunk's bytes, so the client can split
+// a fetched chunk into its two gzip streams (and so it knows what a
+// keyframe-only response contains).
+type wireChunk struct {
+	Frame  int32 `json:"frame"` // sim frame of the chunk's first sample
+	Count  int   `json:"count"` // samples in this chunk
+	KeyLen int64 `json:"keyLen"`
+	Len    int64 `json:"len"`
 }
 
 // wireIcon is one unit type's icon in the payload: p = served bitmap path
@@ -74,51 +93,46 @@ type wireTeam struct {
 	Color    string `json:"color,omitempty"`
 }
 
-type wireFrame struct {
-	Frame int32   `json:"f"`
-	Time  float32 `json:"t"`
-	N     int     `json:"n"` // unit count (U has N*unitStride entries)
-	U     []int32 `json:"u"`
-}
-
-type wireEvent struct {
-	Frame int32  `json:"f"`
-	Kind  string `json:"k"`
-	Unit  int32  `json:"id"`
-	Def   int32  `json:"def"`
-	Team  int32  `json:"team"`
-}
-
-// toWire builds the browser payload from a loaded Replay.
-func (rep *Replay) toWire() wireReplay {
-	w := wireReplay{
-		GameID:        rep.Meta.GameID,
-		EngineVersion: rep.Meta.EngineVersion,
-		GameVersion:   rep.Meta.GameVersion,
-		MapName:       rep.Meta.MapName,
-		SampleEvery:   rep.Meta.SampleEvery,
-		Bounds:        bounds(rep.Frames),
+// buildHead assembles the J-section head from capture metadata. extraTeams
+// lists team ids seen in frames/events but absent from Meta.Teams, so nothing
+// renders colourless.
+func buildHead(meta snapshot.Meta, b wireBounds, extraTeams []int32) wireHead {
+	h := wireHead{
+		GameID:        meta.GameID,
+		EngineVersion: meta.EngineVersion,
+		GameVersion:   meta.GameVersion,
+		MapName:       meta.MapName,
+		SampleEvery:   meta.SampleEvery,
+		Bounds:        b,
 	}
 	// The browser only needs id->name for icon lookup and tooltips; the full unit
-	// defs live in the .jsonl. Derive the compact name map from them.
-	w.UnitDefs = make(map[int32]string, len(rep.Meta.UnitDefs))
-	for id, d := range rep.Meta.UnitDefs {
-		w.UnitDefs[id] = d.Name
+	// defs stay in the capture file.
+	h.UnitDefs = make(map[int32]string, len(meta.UnitDefs))
+	for id, d := range meta.UnitDefs {
+		h.UnitDefs[id] = d.Name
 	}
 
-	// Teams come from Meta when present; otherwise synthesize from the team ids
-	// seen across frames/events so the front-end can still colour by team.
-	w.Teams = teams(rep)
+	seen := map[int32]bool{}
+	for _, t := range meta.Teams {
+		h.Teams = append(h.Teams, wireTeam{TeamID: t.TeamID, AllyTeam: t.AllyTeam, Side: t.Side, Player: t.PlayerName, Color: t.Color})
+		seen[t.TeamID] = true
+	}
+	for _, id := range extraTeams {
+		if !seen[id] {
+			seen[id] = true
+			h.Teams = append(h.Teams, wireTeam{TeamID: id, AllyTeam: id})
+		}
+	}
 
 	// Icons for the unit types present in this replay (missing icons are simply
 	// omitted; the front-end falls back to a coloured dot).
 	// Resolve each def's icon by its icontype key (falling back to its name), so a
 	// unit whose iconType differs from its name still gets an icon. Keyed by name,
 	// which is how the front-end looks it up (via unitDefs[def]).
-	w.UnitIcons = map[string]wireIcon{}
-	for _, d := range rep.Meta.UnitDefs {
+	h.UnitIcons = map[string]wireIcon{}
+	for _, d := range meta.UnitDefs {
 		if path, size, ok := unitIconFor(d.IconType, d.Name); ok {
-			w.UnitIcons[d.Name] = wireIcon{Path: path, Size: size}
+			h.UnitIcons[d.Name] = wireIcon{Path: path, Size: size}
 		}
 	}
 
@@ -128,92 +142,54 @@ func (rep *Replay) toWire() wireReplay {
 	// and still excludes genuinely mobile units. XSize/ZSize are in 8-elmo squares
 	// (engine SQUARE_SIZE), so multiply by 8.
 	const squareSize = 8
-	w.Footprints = map[string]wireFootprint{}
-	for _, d := range rep.Meta.UnitDefs {
+	h.Footprints = map[string]wireFootprint{}
+	for _, d := range meta.UnitDefs {
 		if (!d.CanMove || d.IsBuilding) && d.XSize > 0 {
-			w.Footprints[d.Name] = wireFootprint{W: d.XSize * squareSize, H: d.ZSize * squareSize}
+			h.Footprints[d.Name] = wireFootprint{W: d.XSize * squareSize, H: d.ZSize * squareSize}
 		}
 	}
-
-	// Velocity is captured per sim-frame; multiply by the sample interval to get the
-	// displacement between consecutive sampled frames, which the front-end scales by
-	// the interpolation fraction to animate movement.
-	sampleEvery := rep.Meta.SampleEvery
-	if sampleEvery <= 0 {
-		sampleEvery = 30
-	}
-	w.Frames = make([]wireFrame, len(rep.Frames))
-	for i, fr := range rep.Frames {
-		u := make([]int32, 0, len(fr.Units)*unitStride)
-		for _, us := range fr.Units {
-			u = append(u,
-				us.UnitID, us.DefID, us.Team,
-				round(us.Pos.X), round(us.Pos.Z),
-				round(us.Health), round(us.MaxHealth),
-				round(us.VelX*float32(sampleEvery)), round(us.VelZ*float32(sampleEvery)),
-			)
-		}
-		w.Frames[i] = wireFrame{Frame: fr.Frame, Time: fr.TimeSec, N: len(fr.Units), U: u}
-	}
-
-	w.Events = make([]wireEvent, len(rep.Events))
-	for i, e := range rep.Events {
-		w.Events[i] = wireEvent{Frame: e.Frame, Kind: string(e.Kind), Unit: e.UnitID, Def: e.DefID, Team: e.Team}
-	}
-	return w
+	return h
 }
 
-// bounds returns the min/max x/z over every unit in every frame. When there are
-// no units it returns a small default box so the front-end has a valid extent.
-func bounds(frames []snapshot.Frame) wireBounds {
-	b := wireBounds{MinX: math.Inf(1), MaxX: math.Inf(-1), MinZ: math.Inf(1), MaxZ: math.Inf(-1)}
-	any := false
-	for _, fr := range frames {
-		for _, u := range fr.Units {
-			any = true
-			x, z := float64(u.Pos.X), float64(u.Pos.Z)
-			b.MinX, b.MaxX = math.Min(b.MinX, x), math.Max(b.MaxX, x)
-			b.MinZ, b.MaxZ = math.Min(b.MinZ, z), math.Max(b.MaxZ, z)
-		}
+// brpWirePayload builds the /api/replay response for a parsed .brp: the head
+// (with the chunk index) plus the stored E section byte-for-byte. Bounds and
+// teams come from the file's meta record, precomputed at capture time — the
+// server never decodes a frame.
+func brpWirePayload(f *snapshot.BRPFile) ([]byte, error) {
+	b := defaultBounds()
+	if f.Bounds != nil {
+		b = wireBounds{MinX: f.Bounds.MinX, MaxX: f.Bounds.MaxX, MinZ: f.Bounds.MinZ, MaxZ: f.Bounds.MaxZ}
 	}
-	if !any {
-		return wireBounds{MinX: 0, MaxX: 1024, MinZ: 0, MaxZ: 1024}
+	head := buildHead(f.Meta, b, f.FrameTeams)
+	head.FrameCount = f.FrameCount
+	head.Chunks = make([]wireChunk, len(f.Chunks))
+	for i, c := range f.Chunks {
+		head.Chunks[i] = wireChunk{Frame: c.Frame, Count: c.Count, KeyLen: c.FKeyLen, Len: c.FLen}
 	}
-	return b
+
+	headJSON, err := json.Marshal(head)
+	if err != nil {
+		return nil, err
+	}
+	sections := []snapshot.Section{{Tag: snapshot.SecHead, Payload: gzipBytes(headJSON)}}
+	if e, ok := f.Sections[snapshot.SecEvents]; ok {
+		sections = append(sections, snapshot.Section{Tag: snapshot.SecEvents, Payload: e})
+	}
+	var buf bytes.Buffer
+	if err := snapshot.WriteContainer(&buf, snapshot.BRWMagic, snapshot.BRPVersion, sections); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
-// teams returns the team roster. Meta.Teams is authoritative; any team id that
-// appears in the frames/events but not in Meta is appended so nothing renders
-// without a colour.
-func teams(rep *Replay) []wireTeam {
-	out := make([]wireTeam, 0, len(rep.Meta.Teams))
-	seen := map[int32]bool{}
-	for _, t := range rep.Meta.Teams {
-		out = append(out, wireTeam{TeamID: t.TeamID, AllyTeam: t.AllyTeam, Side: t.Side, Player: t.PlayerName, Color: t.Color})
-		seen[t.TeamID] = true
-	}
-	extra := map[int32]bool{}
-	for _, fr := range rep.Frames {
-		for _, u := range fr.Units {
-			if !seen[u.Team] {
-				extra[u.Team] = true
-			}
-		}
-	}
-	for _, e := range rep.Events {
-		if !seen[e.Team] {
-			extra[e.Team] = true
-		}
-	}
-	ids := make([]int32, 0, len(extra))
-	for id := range extra {
-		ids = append(ids, id)
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	for _, id := range ids {
-		out = append(out, wireTeam{TeamID: id, AllyTeam: id})
-	}
-	return out
+// gzipBytes compresses b as a standalone gzip stream, matching how the
+// snapshot section encoders compress theirs.
+func gzipBytes(b []byte) []byte {
+	var buf bytes.Buffer
+	gz, _ := gzip.NewWriterLevel(&buf, gzip.DefaultCompression)
+	gz.Write(b)
+	gz.Close()
+	return buf.Bytes()
 }
 
-func round(f float32) int32 { return int32(math.Round(float64(f))) }
+func defaultBounds() wireBounds { return wireBounds{MinX: 0, MaxX: 1024, MinZ: 0, MaxZ: 1024} }
