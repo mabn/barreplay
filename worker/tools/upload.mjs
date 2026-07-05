@@ -3,15 +3,17 @@
 // (e.g. .wrangler/) is ever swept in. No index.json is uploaded — the Worker builds
 // the listing live from the bucket, so a single replay's files are self-sufficient.
 //
-//   node tools/upload.mjs <bundleDir> [replayId] [--preview] [--local]
+//   node tools/upload.mjs <bundleDir> [replayId] [--local] [--preview]
 //
 //   <bundleDir>   the -out dir you passed to barreplay-static (default ../static)
 //   [replayId]    upload just this one replay (replays/<id>.brw, .resources, /c*).
 //                 Omit to upload every replay in the dir.
-//   --preview     target barreplay-replays-preview (what `wrangler dev` binds)
-//   --local       target the local (miniflare) R2, for `npm run dev`
+//   --local       target the local (miniflare) R2 used by `npm run dev`
+//                 (default is REAL R2 — `wrangler r2 object put --remote`)
+//   --preview     with --local, use the preview bucket wrangler dev binds
 //
-// Requires `wrangler login` (or CLOUDFLARE_API_TOKEN) for a real upload.
+// Uploading to real R2 needs `wrangler login` (or CLOUDFLARE_API_TOKEN) and the
+// bucket to exist: `npx wrangler r2 bucket create barreplay-replays`.
 import { spawnSync } from "node:child_process";
 import { readdirSync, statSync, existsSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -21,9 +23,11 @@ const flags = raw.filter((a) => a.startsWith("--"));
 const positional = raw.filter((a) => !a.startsWith("--"));
 const dir = positional[0] ?? "../static";
 const replayId = positional[1]; // optional: a single replay to upload
-const preview = flags.includes("--preview") || flags.includes("--local");
+
+// Default is REAL R2 (--remote). --local targets the local dev simulator, and only
+// then does the preview bucket (which `wrangler dev` binds) come into play.
 const local = flags.includes("--local");
-const bucket = preview ? "barreplay-replays-preview" : "barreplay-replays";
+const bucket = local && flags.includes("--preview") ? "barreplay-replays-preview" : "barreplay-replays";
 
 // Collect the object files for either one replay or every replay under replays/.
 function replayFiles(root, id) {
@@ -59,12 +63,14 @@ if (files.length === 0) {
   process.exit(1);
 }
 
+const target = local ? `${bucket} (LOCAL dev simulator)` : `${bucket} (real R2)`;
 const what = replayId ? `replay "${replayId}" (${files.length} objects)` : `${files.length} objects`;
-console.log(`uploading ${what} to ${bucket}${local ? " (local)" : ""}`);
+console.log(`uploading ${what} to ${target}`);
 for (const file of files) {
   const key = relative(dir, file).split("\\").join("/"); // POSIX keys on Windows too
-  const cmd = ["wrangler", "r2", "object", "put", `${bucket}/${key}`, "--file", file];
-  if (local) cmd.push("--local");
+  // Explicit --remote/--local: wrangler's own default for `r2 object put` is LOCAL,
+  // so without this an "upload" silently writes to disk and never reaches R2.
+  const cmd = ["wrangler", "r2", "object", "put", `${bucket}/${key}`, "--file", file, local ? "--local" : "--remote"];
   const r = spawnSync("npx", cmd, { stdio: ["ignore", "ignore", "inherit"] });
   if (r.status !== 0) {
     console.error(`failed: ${key}`);
