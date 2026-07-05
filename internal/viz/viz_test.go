@@ -21,7 +21,10 @@ func writeJSONL(t *testing.T, dir, gameID string) string {
 		GameID:      gameID,
 		MapName:     "Test Map",
 		SampleEvery: 30,
-		UnitDefs:    map[int32]snapshot.UnitDef{1: {DefID: 1, Name: "armcom"}, 2: {DefID: 2, Name: "corllt"}},
+		UnitDefs: map[int32]snapshot.UnitDef{
+			1: {DefID: 1, Name: "armcom", CanMove: true},                        // mobile: no footprint
+			2: {DefID: 2, Name: "corllt", XSize: 2, ZSize: 3, IsBuilding: true}, // building: 16x24 elmos
+		},
 		Teams: []snapshot.TeamInfo{
 			{TeamID: 0, AllyTeam: 0, Side: "armada"},
 			{TeamID: 1, AllyTeam: 1, Side: "cortex"},
@@ -105,6 +108,14 @@ func TestToWirePacking(t *testing.T) {
 	if len(w.Teams) != 2 || w.Teams[0].Side != "armada" {
 		t.Errorf("teams=%+v", w.Teams)
 	}
+
+	// Footprints: only the building (corllt) is included, in elmos (xsize/zsize * 8).
+	if fp, ok := w.Footprints["corllt"]; !ok || fp.W != 16 || fp.H != 24 {
+		t.Errorf("corllt footprint = %+v (ok=%v), want {W:16 H:24}", fp, ok)
+	}
+	if _, ok := w.Footprints["armcom"]; ok {
+		t.Errorf("armcom is mobile; should have no footprint, got %+v", w.Footprints["armcom"])
+	}
 }
 
 func TestLoadBRSNAP(t *testing.T) {
@@ -185,6 +196,41 @@ func TestToWireIncludesIcons(t *testing.T) {
 	}
 	if w.UnitIcons["corllt"].Path != "icons/defence_0_laser.png" {
 		t.Errorf("corllt icon=%+v", w.UnitIcons["corllt"])
+	}
+}
+
+func TestUnitIconFor(t *testing.T) {
+	// A def whose name is not itself an icontype key still gets an icon via its
+	// IconType (the authoritative key), fixing the missing-icon case.
+	if got, _, ok := unitIconFor("armcom", "made_up_unit_xyz"); !ok || got != "icons/armcom.png" {
+		t.Errorf("unitIconFor(armcom, made_up)=(%q,%v) want icons/armcom.png", got, ok)
+	}
+	// Empty IconType falls back to the name lookup (old captures / name==key).
+	if got, _, ok := unitIconFor("", "armcom"); !ok || got != "icons/armcom.png" {
+		t.Errorf("unitIconFor(\"\", armcom)=(%q,%v) want icons/armcom.png", got, ok)
+	}
+	// An unknown IconType falls back to the name.
+	if got, _, ok := unitIconFor("no_such_type", "corllt"); !ok || got != "icons/defence_0_laser.png" {
+		t.Errorf("unitIconFor(bad, corllt)=(%q,%v) want icons/defence_0_laser.png", got, ok)
+	}
+	// Neither resolves -> not ok.
+	if _, _, ok := unitIconFor("no_such_type", "no_such_unit"); ok {
+		t.Errorf("unitIconFor(bad,bad) ok=true, want false")
+	}
+}
+
+// toWire resolves an icon by IconType even when the unit's name is not an
+// icontype key.
+func TestToWireIconByType(t *testing.T) {
+	rep := &Replay{Meta: snapshot.Meta{
+		GameID: "g",
+		UnitDefs: map[int32]snapshot.UnitDef{
+			1: {DefID: 1, Name: "made_up_unit_xyz", IconType: "armcom"},
+		},
+	}}
+	w := rep.toWire()
+	if w.UnitIcons["made_up_unit_xyz"].Path != "icons/armcom.png" {
+		t.Errorf("icon-by-type = %+v, want icons/armcom.png", w.UnitIcons["made_up_unit_xyz"])
 	}
 }
 
