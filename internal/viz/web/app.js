@@ -49,9 +49,12 @@ function getImage(path) {
   return img;
 }
 
-// tintCache: "path|color" -> offscreen canvas of the icon flat-tinted to a team
-// colour (BAR minimap icons are alpha silhouettes, so we mask-fill them). Built
-// lazily once the source bitmap has loaded; there are only a few icon×team combos.
+// tintCache: "path|color" -> offscreen canvas of the icon tinted to a team
+// colour. BAR minimap icons are grayscale luminance masks (bright areas take the
+// team colour, dark areas stay black) with an alpha-shaped surround, so we
+// MULTIPLY the icon into a team-colour field and then clip to the icon's alpha —
+// this keeps the black internal detail instead of flattening to a solid blob.
+// Built lazily once the bitmap has loaded; there are only a few icon×team combos.
 const tintCache = {};
 function tintedIcon(path, color) {
   const key = path + '|' + color;
@@ -63,10 +66,12 @@ function tintedIcon(path, color) {
   const oc = document.createElement('canvas');
   oc.width = w; oc.height = h;
   const octx = oc.getContext('2d');
-  octx.drawImage(img, 0, 0);
-  octx.globalCompositeOperation = 'source-in'; // keep icon alpha, replace colour
-  octx.fillStyle = color;
+  octx.fillStyle = color;                        // solid team-colour field
   octx.fillRect(0, 0, w, h);
+  octx.globalCompositeOperation = 'multiply';    // white->team colour, black->black
+  octx.drawImage(img, 0, 0);
+  octx.globalCompositeOperation = 'destination-in'; // clip to the icon's own alpha
+  octx.drawImage(img, 0, 0);
   tintCache[key] = oc;
   return oc;
 }
