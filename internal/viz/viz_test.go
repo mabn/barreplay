@@ -2,7 +2,6 @@ package viz
 
 import (
 	"bytes"
-	"compress/gzip"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,36 +13,8 @@ import (
 	"github.com/mabn/barreplay/snapshot"
 )
 
-// parseWire splits a BRW payload into tag->payload and decodes the head.
-func parseWire(t *testing.T, payload []byte) (wireHead, map[byte][]byte) {
-	t.Helper()
-	version, sections, err := snapshot.ReadContainer(bytes.NewReader(payload), snapshot.BRWMagic)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if version != snapshot.BRPVersion {
-		t.Fatalf("wire version = %d, want %d", version, snapshot.BRPVersion)
-	}
-	secs := map[byte][]byte{}
-	for _, s := range sections {
-		secs[s.Tag] = s.Payload
-	}
-	gz, err := gzip.NewReader(bytes.NewReader(secs[snapshot.SecHead]))
-	if err != nil {
-		t.Fatal(err)
-	}
-	headJSON, err := io.ReadAll(gz)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var head wireHead
-	if err := json.Unmarshal(headJSON, &head); err != nil {
-		t.Fatal(err)
-	}
-	return head, secs
-}
-
-// writeBRP writes a small two-frame capture to <dir>/<gameID>.brp.
+// writeBRP writes a small two-frame capture to <dir>/<gameID>.brp and returns
+// its path.
 func writeBRP(t *testing.T, dir, gameID string) string {
 	t.Helper()
 	w, err := snapshot.NewBRPWriter(dir, gameID)
@@ -55,10 +26,8 @@ func writeBRP(t *testing.T, dir, gameID string) string {
 		MapName:     "Test Map",
 		SampleEvery: 30,
 		UnitDefs: map[int32]snapshot.UnitDef{
-			1: {DefID: 1, Name: "armcom", CanMove: true},                                       // mobile: no footprint
-			2: {DefID: 2, Name: "corllt", XSize: 2, ZSize: 3, IsBuilding: true},                // building: 16x24 elmos
-			3: {DefID: 3, Name: "armnanotct3", XSize: 12, ZSize: 12, IsBuilder: true},          // immobile builder (nano turret): footprint despite not IsBuilding
-			4: {DefID: 4, Name: "armlab", XSize: 5, ZSize: 5, IsBuilding: true, CanMove: true}, // factory: reports CanMove but IsBuilding -> footprint
+			1: {DefID: 1, Name: "armcom", CanMove: true},
+			2: {DefID: 2, Name: "corllt", XSize: 2, ZSize: 3, IsBuilding: true},
 		},
 		Teams: []snapshot.TeamInfo{
 			{TeamID: 0, AllyTeam: 0, Side: "armada"},
@@ -70,12 +39,11 @@ func writeBRP(t *testing.T, dir, gameID string) string {
 	}
 	frames := []snapshot.Frame{
 		{Frame: 30, TimeSec: 1, Units: []snapshot.UnitState{
-			{UnitID: 100, DefID: 1, Team: 0, Pos: snapshot.Vec3{X: 10, Y: 0, Z: 20}, Health: 3000, MaxHealth: 3000, VelX: 2, VelZ: -1},
-			{UnitID: 200, DefID: 2, Team: 1, Pos: snapshot.Vec3{X: -50, Y: 0, Z: 80}, Health: 400, MaxHealth: 800},
+			{UnitID: 100, DefID: 1, Team: 0, Pos: snapshot.Vec3{X: 10, Z: 20}, Health: 3000, MaxHealth: 3000, VelX: 2, VelZ: -1},
+			{UnitID: 200, DefID: 2, Team: 1, Pos: snapshot.Vec3{X: -50, Z: 80}, Health: 400, MaxHealth: 800},
 		}},
 		{Frame: 60, TimeSec: 2, Units: []snapshot.UnitState{
-			{UnitID: 100, DefID: 1, Team: 0, Pos: snapshot.Vec3{X: 12, Y: 0, Z: 22}, Health: 3000, MaxHealth: 3000},
-			{UnitID: 300, DefID: 1, Team: 7, Pos: snapshot.Vec3{X: 500, Y: 0, Z: 600}, Health: 100, MaxHealth: 100}, // team 7 not in Meta.Teams
+			{UnitID: 100, DefID: 1, Team: 0, Pos: snapshot.Vec3{X: 12, Z: 22}, Health: 3000, MaxHealth: 3000},
 		}},
 	}
 	for _, f := range frames {
@@ -83,336 +51,144 @@ func writeBRP(t *testing.T, dir, gameID string) string {
 			t.Fatal(err)
 		}
 	}
-	if err := w.WriteEvent(snapshot.Event{Frame: 45, Kind: snapshot.EventDestroyed, UnitID: 200, DefID: 2, Team: 1}); err != nil {
-		t.Fatal(err)
-	}
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
 	return filepath.Join(dir, gameID+".brp")
 }
 
-// The head payload must carry everything the viewer needs before any frame
-// data arrives: bounds, the full team roster (including teams only seen in
-// frames), footprints, and the chunk index. The E section and every chunk
-// must be served byte-for-byte from the stored file.
-func TestServeBRP(t *testing.T) {
+// The viewer reads a .brp directly, so the server only needs to list the
+// captures and stream each file with Range support (plus the icon table). This
+// checks the listing shape, the full/partial file transfers, the traversal
+// guard, and the icon-table endpoint.
+func TestServeReplays(t *testing.T) {
 	dir := t.TempDir()
 	path := writeBRP(t, dir, "g")
+	// A non-.brp file must be invisible to the listing.
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fileBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	srv := httptest.NewServer((&Server{Dir: dir}).Handler())
 	defer srv.Close()
 
-	get := func(url string) ([]byte, *http.Response) {
-		t.Helper()
-		resp, err := http.Get(srv.URL + url)
+	// /index.json lists only the .brp, keyed by gameId (no extension).
+	resp, err := http.Get(srv.URL + "/index.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var infos []replayInfo
+	if err := json.NewDecoder(resp.Body).Decode(&infos); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(infos) != 1 || infos[0].File != "g" || infos[0].GameID != "g" || infos[0].Size != int64(len(fileBytes)) {
+		t.Fatalf("index = %+v (file size %d)", infos, len(fileBytes))
+	}
+
+	// Full file transfer: bytes must match the stored .brp exactly.
+	full, resp := get(t, srv.URL+"/replays/g.brp", "")
+	if resp.StatusCode != 200 || !bytes.Equal(full, fileBytes) {
+		t.Fatalf("full GET: status %d, %d bytes (want %d)", resp.StatusCode, len(full), len(fileBytes))
+	}
+	if resp.Header.Get("Accept-Ranges") != "bytes" {
+		t.Errorf("no Accept-Ranges header")
+	}
+
+	// Range request: the browser reads meta/chunks as byte ranges.
+	part, resp := get(t, srv.URL+"/replays/g.brp", "bytes=0-9")
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("range GET status = %d, want 206", resp.StatusCode)
+	}
+	if !bytes.Equal(part, fileBytes[:10]) {
+		t.Errorf("range 0-9 mismatch")
+	}
+
+	// Traversal / non-.brp names are rejected; a missing file is a 404.
+	for _, tc := range []struct {
+		path string
+		want int
+	}{
+		{"/replays/sub/x.brp", http.StatusBadRequest}, // a path separator in the name
+		{"/replays/notes.txt", http.StatusBadRequest}, // not a .brp
+		{"/replays/missing.brp", http.StatusNotFound},
+	} {
+		r, err := http.Get(srv.URL + tc.path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		b, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if resp.StatusCode != 200 {
-			t.Fatalf("GET %s: status %d: %s", url, resp.StatusCode, b)
-		}
-		return b, resp
-	}
-
-	payload, resp := get("/api/replay?file=g.brp")
-	if resp.Header.Get("ETag") == "" {
-		t.Error("no ETag on head payload")
-	}
-	head, secs := parseWire(t, payload)
-
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bf, err := snapshot.ParseBRP(f)
-	f.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Head basics.
-	if head.GameID != "g" || head.MapName != "Test Map" || head.SampleEvery != 30 {
-		t.Errorf("head = %+v", head)
-	}
-	if head.UnitDefs[1] != "armcom" {
-		t.Errorf("unitDefs = %+v", head.UnitDefs)
-	}
-	// Bounds cover both frames' units: x in [-50, 500], z in [20, 600].
-	if head.Bounds.MinX != -50 || head.Bounds.MaxX != 500 || head.Bounds.MinZ != 20 || head.Bounds.MaxZ != 600 {
-		t.Errorf("bounds = %+v", head.Bounds)
-	}
-	// Team 7 appears only in a frame; the head must still list it.
-	found := false
-	for _, tm := range head.Teams {
-		if tm.TeamID == 7 {
-			found = true
+		r.Body.Close()
+		if r.StatusCode != tc.want {
+			t.Errorf("GET %s: status %d, want %d", tc.path, r.StatusCode, tc.want)
 		}
 	}
-	if len(head.Teams) != 3 || !found {
-		t.Errorf("teams = %+v", head.Teams)
-	}
 
-	// Footprints: immobile units are included, in elmos (xsize/zsize * 8).
-	if fp, ok := head.Footprints["corllt"]; !ok || fp.W != 16 || fp.H != 24 {
-		t.Errorf("corllt footprint = %+v (ok=%v), want {W:16 H:24}", fp, ok)
+	// The icon table the browser fetches to resolve unit icons.
+	icons, resp := get(t, srv.URL+"/icontypes.json", "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("/icontypes.json status %d", resp.StatusCode)
 	}
-	// An immobile builder (nano turret) is not IsBuilding but still gets a footprint.
-	if fp, ok := head.Footprints["armnanotct3"]; !ok || fp.W != 96 || fp.H != 96 {
-		t.Errorf("armnanotct3 footprint = %+v (ok=%v), want {W:96 H:96}", fp, ok)
+	var table map[string]struct {
+		P string  `json:"p"`
+		S float64 `json:"s"`
 	}
-	// A factory reports CanMove but is IsBuilding, so it gets a footprint.
-	if fp, ok := head.Footprints["armlab"]; !ok || fp.W != 40 || fp.H != 40 {
-		t.Errorf("armlab footprint = %+v (ok=%v), want {W:40 H:40}", fp, ok)
-	}
-	if _, ok := head.Footprints["armcom"]; ok {
-		t.Errorf("armcom is mobile; should have no footprint")
-	}
-
-	// Chunk index mirrors the file's.
-	if head.FrameCount != 2 || len(head.Chunks) != 1 {
-		t.Fatalf("frameCount=%d chunks=%+v", head.FrameCount, head.Chunks)
-	}
-	if head.Chunks[0].Frame != 30 || head.Chunks[0].Count != 2 ||
-		head.Chunks[0].KeyLen != bf.Chunks[0].FKeyLen || head.Chunks[0].Len != bf.Chunks[0].FLen {
-		t.Errorf("wire chunk = %+v, file chunk = %+v", head.Chunks[0], bf.Chunks[0])
-	}
-
-	// E section passes through byte-for-byte; no frame data in the head payload.
-	if !bytes.Equal(secs[snapshot.SecEvents], bf.Sections[snapshot.SecEvents]) {
-		t.Errorf("served E section is not the stored one")
-	}
-	if _, ok := secs[snapshot.SecFrames]; ok {
-		t.Errorf("head payload must not contain a frames section")
-	}
-
-	// Chunk endpoint: full chunk and keyframe-only both slice the stored bytes.
-	c := bf.Chunks[0]
-	fsec := bf.Sections[snapshot.SecFrames]
-	full, _ := get("/api/replay/chunk?file=g.brp&i=0")
-	if !bytes.Equal(full, fsec[c.FOff:c.FOff+c.FLen]) {
-		t.Errorf("chunk 0 is not the stored byte range")
-	}
-	key, _ := get("/api/replay/chunk?file=g.brp&i=0&key=1")
-	if !bytes.Equal(key, fsec[c.FOff:c.FOff+c.FKeyLen]) {
-		t.Errorf("keyframe slice is not the stored byte range")
-	}
-
-	// Out-of-range chunk and bad file names are rejected.
-	if resp, err := http.Get(srv.URL + "/api/replay/chunk?file=g.brp&i=9"); err != nil || resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("chunk i=9: %v %v", resp.StatusCode, err)
-	} else {
-		resp.Body.Close()
-	}
-	if resp, err := http.Get(srv.URL + "/api/replay?file=../g.brp"); err != nil || resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("traversal name: %v %v", resp.StatusCode, err)
-	} else {
-		resp.Body.Close()
-	}
-
-	// ETag revalidation: a matching If-None-Match yields 304 with no body.
-	req, _ := http.NewRequest("GET", srv.URL+"/api/replay/chunk?file=g.brp&i=0", nil)
-	req.Header.Set("If-None-Match", resp.Header.Get("ETag"))
-	r304, err := http.DefaultClient.Do(req)
-	if err != nil {
+	if err := json.Unmarshal(icons, &table); err != nil {
 		t.Fatal(err)
 	}
-	r304.Body.Close()
-	if r304.StatusCode != http.StatusNotModified {
-		t.Errorf("revalidation status = %d, want 304", r304.StatusCode)
+	if table["armcom"].P != "icons/armcom.png" || table["armcom"].S <= 0 {
+		t.Errorf("armcom icon = %+v", table["armcom"])
 	}
 }
 
-func TestUnitIcons(t *testing.T) {
-	// Well-known BAR units should resolve to an icon that exists in the embedded
-	// FS. defence_0_laser is shared by arm/cor light laser towers.
-	cases := map[string]string{
-		"armcom": "icons/armcom.png",
-		"armllt": "icons/defence_0_laser.png",
-		"corllt": "icons/defence_0_laser.png",
-		"armmex": "icons/mex_t1.png",
+func get(t *testing.T, url, rangeHdr string) ([]byte, *http.Response) {
+	t.Helper()
+	req, _ := http.NewRequest("GET", url, nil)
+	if rangeHdr != "" {
+		req.Header.Set("Range", rangeHdr)
 	}
-	for name, want := range cases {
-		got, size, ok := unitIcon(name)
-		if !ok || got != want {
-			t.Errorf("unitIcon(%q)=(%q,%v,%v) want path %q", name, got, size, ok, want)
-		}
-		if size <= 0 {
-			t.Errorf("unitIcon(%q) size=%v, want > 0", name, size)
-		}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The commander icon is meaningfully larger than a mex icon (per-type size).
-	if _, comSize, _ := unitIcon("armcom"); comSize < 1.5 {
-		t.Errorf("armcom size=%v, want ~1.8", comSize)
+	b, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, _, ok := unitIcon("not_a_real_unit"); ok {
-		t.Errorf("unitIcon(unknown) ok=true, want false")
-	}
-	// Scavenger variant should resolve to the inverted path.
-	if got, _, ok := unitIcon("armcom_scav"); !ok || got != "icons/inverted/armcom.png" {
-		t.Errorf("unitIcon(armcom_scav)=(%q,%v) want icons/inverted/armcom.png", got, ok)
-	}
+	return b, resp
 }
 
-func TestHeadIncludesIcons(t *testing.T) {
-	meta := snapshot.Meta{
-		GameID: "g",
-		UnitDefs: map[int32]snapshot.UnitDef{
-			1: {DefID: 1, Name: "armcom"},
-			2: {DefID: 2, Name: "corllt"},
-		},
-	}
-	head := buildHead(meta, defaultBounds(), nil)
-	if head.UnitIcons["armcom"].Path != "icons/armcom.png" || head.UnitIcons["armcom"].Size <= 0 {
-		t.Errorf("armcom icon=%+v", head.UnitIcons["armcom"])
-	}
-	if head.UnitIcons["corllt"].Path != "icons/defence_0_laser.png" {
-		t.Errorf("corllt icon=%+v", head.UnitIcons["corllt"])
-	}
-}
-
-func TestUnitIconFor(t *testing.T) {
-	// A def whose name is not itself an icontype key still gets an icon via its
-	// IconType (the authoritative key), fixing the missing-icon case.
-	if got, _, ok := unitIconFor("armcom", "made_up_unit_xyz"); !ok || got != "icons/armcom.png" {
-		t.Errorf("unitIconFor(armcom, made_up)=(%q,%v) want icons/armcom.png", got, ok)
-	}
-	// Empty IconType falls back to the name lookup (old captures / name==key).
-	if got, _, ok := unitIconFor("", "armcom"); !ok || got != "icons/armcom.png" {
-		t.Errorf("unitIconFor(\"\", armcom)=(%q,%v) want icons/armcom.png", got, ok)
-	}
-	// An unknown IconType falls back to the name.
-	if got, _, ok := unitIconFor("no_such_type", "corllt"); !ok || got != "icons/defence_0_laser.png" {
-		t.Errorf("unitIconFor(bad, corllt)=(%q,%v) want icons/defence_0_laser.png", got, ok)
-	}
-	// Neither resolves -> not ok.
-	if _, _, ok := unitIconFor("no_such_type", "no_such_unit"); ok {
-		t.Errorf("unitIconFor(bad,bad) ok=true, want false")
-	}
-}
-
-// The head resolves an icon by IconType even when the unit's name is not an
-// icontype key.
-func TestHeadIconByType(t *testing.T) {
-	meta := snapshot.Meta{
-		GameID: "g",
-		UnitDefs: map[int32]snapshot.UnitDef{
-			1: {DefID: 1, Name: "made_up_unit_xyz", IconType: "armcom"},
-		},
-	}
-	head := buildHead(meta, defaultBounds(), nil)
-	if head.UnitIcons["made_up_unit_xyz"].Path != "icons/armcom.png" {
-		t.Errorf("icon-by-type = %+v, want icons/armcom.png", head.UnitIcons["made_up_unit_xyz"])
-	}
-}
-
-// The head must carry the player roster, and brpResourcesPayload must return
-// each sampled frame's per-team economy (the .brp X stream, which the frame
-// chunk path never fetches) so the sidebar player list can draw its bars.
-func TestPlayersAndResources(t *testing.T) {
-	dir := t.TempDir()
-	w, err := snapshot.NewBRPWriter(dir, "g")
+// IconTableJSON dumps every icontype (incl. the synthesised _scav variants) that
+// has a bitmap on disk, so the browser can resolve icons itself.
+func TestIconTableJSON(t *testing.T) {
+	b, err := IconTableJSON()
 	if err != nil {
 		t.Fatal(err)
 	}
-	meta := snapshot.Meta{
-		GameID: "g", SampleEvery: 30,
-		Teams: []snapshot.TeamInfo{{TeamID: 0, AllyTeam: 0}, {TeamID: 1, AllyTeam: 1}},
-		Players: []snapshot.PlayerInfo{
-			{PlayerID: 0, Name: "Alice", Team: 0, CountryCode: "us", Rank: 5, Skill: 31.2},
-			{PlayerID: 2, Name: "Watcher", Team: 0, Spectator: true},
-		},
+	var table map[string]struct {
+		P string  `json:"p"`
+		S float64 `json:"s"`
 	}
-	if err := w.WriteMeta(meta); err != nil {
+	if err := json.Unmarshal(b, &table); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.WriteFrame(snapshot.Frame{
-		Frame: 30, TimeSec: 1,
-		Units: []snapshot.UnitState{{UnitID: 1, DefID: 1, Team: 0, Health: 1, MaxHealth: 1}},
-		Resources: []snapshot.TeamResource{
-			{Team: 0, Metal: 314, Energy: 14700, MetalStorage: 1000, EnergyStorage: 20000, MetalIncome: 12.5, EnergyIncome: 850},
-		},
-	}); err != nil {
-		t.Fatal(err)
+	// Well-known units resolve to a bitmap that exists in the embedded FS.
+	if table["armcom"].P != "icons/armcom.png" {
+		t.Errorf("armcom = %+v", table["armcom"])
 	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
+	if table["armllt"].P != "icons/defence_0_laser.png" {
+		t.Errorf("armllt = %+v", table["armllt"])
 	}
-
-	f, err := os.Open(filepath.Join(dir, "g.brp"))
-	if err != nil {
-		t.Fatal(err)
+	// The scavenger variant points at the inverted path.
+	if table["armcom_scav"].P != "icons/inverted/armcom.png" {
+		t.Errorf("armcom_scav = %+v", table["armcom_scav"])
 	}
-	defer f.Close()
-	bf, err := snapshot.ParseBRP(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Players ride the head payload.
-	head := buildHead(bf.Meta, defaultBounds(), bf.FrameTeams)
-	if len(head.Players) != 2 {
-		t.Fatalf("players: got %d want 2 (%+v)", len(head.Players), head.Players)
-	}
-	if p := head.Players[0]; p.Name != "Alice" || p.Country != "us" || p.Rank != 5 || p.Skill != 31.2 {
-		t.Errorf("player0=%+v", p)
-	}
-	if !head.Players[1].Spectator {
-		t.Errorf("player1 should be a spectator: %+v", head.Players[1])
-	}
-
-	// Resources payload: gzipped JSON, one {f, r} per sampled frame.
-	gz, err := brpResourcesPayload(bf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	zr, err := gzip.NewReader(bytes.NewReader(gz))
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, _ := io.ReadAll(zr)
-	var arr []wireResFrame
-	if err := json.Unmarshal(raw, &arr); err != nil {
-		t.Fatal(err)
-	}
-	if len(arr) != 1 || arr[0].F != 30 {
-		t.Fatalf("resource frames = %+v", arr)
-	}
-	// [team, metal, energy, mStore, eStore, mInc, eInc]; income 12.5 -> 13 (rounded
-	// from the format's 1/10 quantization).
-	want := []int32{0, 314, 14700, 1000, 20000, 13, 850}
-	if len(arr[0].R) != resourceStride {
-		t.Fatalf("R len=%d want %d (%v)", len(arr[0].R), resourceStride, arr[0].R)
-	}
-	for i, v := range want {
-		if arr[0].R[i] != v {
-			t.Errorf("R[%d]=%d want %d (full=%v)", i, arr[0].R[i], v, arr[0].R)
-		}
-	}
-}
-
-// The listing shows only .brp files; legacy formats are invisible to the UI.
-func TestListBRPOnly(t *testing.T) {
-	dir := t.TempDir()
-	writeBRP(t, dir, "a")
-	writeBRP(t, dir, "b")
-	if err := os.WriteFile(filepath.Join(dir, "legacy.jsonl"), []byte("{}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "raw.brsnap"), []byte("BRSNAP READY\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	s := &Server{Dir: dir}
-	infos, err := s.list()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(infos) != 2 || infos[0].File != "a.brp" || infos[1].File != "b.brp" {
-		t.Fatalf("got %+v, want just a.brp and b.brp", infos)
+	// The commander icon is meaningfully larger than 1 (per-type size preserved).
+	if table["armcom"].S < 1.5 {
+		t.Errorf("armcom size = %v, want ~1.8", table["armcom"].S)
 	}
 }
