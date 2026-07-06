@@ -394,7 +394,11 @@ automatically — the same three-way codec lockstep note applies.
 The Recoil engine is on GitHub Releases (`beyond-all-reason/RecoilEngine`). The
 `recoil_<ver>_amd64-linux.7z` asset (~31 MB) bundles `spring`, `spring-headless`,
 `spring-dedicated`, and `pr-downloader`. Extract it into a data dir (`7z x`); use that
-dir as both the engine location and `--write-dir`.
+dir as both the engine location and `--write-dir`. The engine can also be **built from
+source at the replay's exact tag** — validated recipe in `docs/building-recoil.md`
+(official pinned Docker build image, ~35 min on 4 cores; capture verified byte-identical
+to one from the official binary). That's the path for engine patches, and for
+environments where GitHub release-asset downloads are blocked but `git`/`ghcr.io` work.
 
 `pr-downloader` defaults to `springrts.com`, which has **no BAR content**. The tool
 therefore sets two env vars automatically in `engine.prdEnv` (each overridable — a
@@ -452,10 +456,10 @@ versions URL is derived from `-rapid-repo` (`…/repos.gz` → `…/byar/version
 The wrapper startscript `barreplay` writes forces max speed:
 `[game]{ demofile=<abs path>; } [modoptions]{ MinSpeed=9999; MaxSpeed=9999; }`.
 
-## GPU / headless caveat (important)
+## GPU / headless caveat (engine-version dependent)
 
-This Recoil build's `spring-headless` still initializes a **null GL context (version
-0.0)** and builds a unit-icon **render-to-texture atlas** at load (`CIconHandler` /
+Some Recoil builds' `spring-headless` initialize a **null GL context (version
+0.0)** and build a unit-icon **render-to-texture atlas** at load (`CIconHandler` /
 `CTextureRenderAtlas`). On a **GPU-less** machine that render never completes
 (`atlasRendered=0` loops forever), so the game never reaches "playing" and LuaUI
 widgets — including the snapshotter — never load. Symptoms in `infolog.txt`: stuck at
@@ -463,8 +467,13 @@ widgets — including the snapshotter — never load. Symptoms in `infolog.txt`:
 The demo does re-simulate up to that point (you'll see players connect, initial spawns,
 and demo chat replay), so this is purely a rendering-init wall, not a logic problem.
 
-Run on a host with **working GL** (a real GPU, or a full software-GL setup). Notes for
-a GPU-less runner:
+**Engine 2025.06.24 does not hit this wall**: on a GPU-less cloud VM (no X, no GL) a
+source-built `spring-headless` ran a full replay to completion — its
+`CreateAtlasTexture` fails fast under the null-GL stubs (`FBO::IsReady()`/`IsValid()`
+false) and the retry is a cheap per-draw no-op instead of a load blocker
+(`docs/building-recoil.md` has the validated run). If you do hit the symptoms above on
+some other engine build, run on a host with **working GL** (a real GPU, or a full
+software-GL setup). Notes for a GPU-less runner:
 
 - The graphical `spring` binary can use software GL via **Xvfb + Mesa llvmpipe**
   (`LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe xvfb-run -a ./spring …`) — it needs
