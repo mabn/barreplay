@@ -1760,6 +1760,42 @@ async function loadMap(name) {
   draw(); // reflect the (possibly updated) map extent immediately
 }
 
+// Render-smoothness FPS monitor. Fully self-contained: when enabled (?debug=true)
+// it drops a small overlay in the top-left of the map and runs its own
+// requestAnimationFrame loop, counting real browser animation frames (not sim
+// frames). It shows frames drawn in the last full second and in the last 5
+// seconds, each refreshed on every whole-second boundary. Nothing else in the
+// app references it — remove this one call and function to drop the feature.
+function startFpsMonitor() {
+  const el = document.createElement('div');
+  el.id = 'fpsmon';
+  el.style.cssText =
+    'position:absolute;left:8px;top:8px;z-index:20;pointer-events:none;' +
+    'background:rgba(20,26,33,0.82);border:1px solid #2a323c;border-radius:4px;' +
+    'padding:3px 7px;font:11px/1.5 monospace;color:#9fb0bf;' +
+    'font-variant-numeric:tabular-nums;white-space:pre;';
+  (document.getElementById('left') || document.body).appendChild(el);
+
+  let frames = 0;          // frames since the last whole-second boundary
+  let secStart = null;     // timestamp of the current second window
+  const last5 = [];        // per-second frame counts, most-recent-last (max 5)
+
+  const tick = (ts) => {
+    if (secStart === null) secStart = ts;
+    frames++;
+    if (ts - secStart >= 1000) {
+      last5.push(frames);
+      if (last5.length > 5) last5.shift();
+      const fps5 = last5.reduce((a, b) => a + b, 0);
+      el.textContent = `${frames} fps\n${fps5} / 5s`;
+      frames = 0;
+      secStart = ts;
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
 async function init() {
   initGL(); // one-time; a null result just means the 2D icon path is used
   // Restore icon size from the URL (?iconsize=) before the first paint.
@@ -1767,6 +1803,9 @@ async function init() {
   const isz = parseInt(params.get('iconsize'), 10);
   if (isz >= ICON_SCALE_MIN && isz <= ICON_SCALE_MAX) iconScale = isz;
   document.getElementById('iconsize').value = iconScale;
+
+  // Optional render-smoothness overlay, gated on ?debug=true.
+  if (params.get('debug') === 'true') startFpsMonitor();
 
   let list = [];
   try {
