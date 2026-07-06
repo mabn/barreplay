@@ -40,8 +40,13 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: #5a9fd0; }
 #timeline { flex: 1; min-width: 120px; display: flex; flex-direction: column; gap: 1px; }
 #timeline input[type=range] { width: 100%; margin: 0; }
 #buffbar { height: 3px; border-radius: 2px; background: transparent; }
+/* Overlay in the map area (top-centre), so showing/hiding it never reflows the
+   control bar. #left is position:relative, so this anchors to the viewport. */
 #buffering {
-  font-size: 11px; color: #f2cf5b; white-space: nowrap;
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+  z-index: 5; padding: 4px 12px; border-radius: 12px;
+  background: rgba(12, 15, 19, 0.78); border: 1px solid #2d3a47;
+  font-size: 12px; color: #f2cf5b; white-space: nowrap; pointer-events: none;
   animation: buffpulse 1s ease-in-out infinite alternate;
 }
 @keyframes buffpulse { from { opacity: 0.5; } to { opacity: 1; } }
