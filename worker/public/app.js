@@ -380,12 +380,6 @@ function buildNextPosMap() {
 // samples) for the Hermite curve below — keeps a wildly-inconsistent velocity from
 // bending the path into a big loop or bulge.
 const TANGENT_CAP = 2;
-function clampVec(x, z, max) {
-  const m = Math.hypot(x, z);
-  if (m <= max || m === 0) return [x, z];
-  const s = max / m;
-  return [x * s, z * s];
-}
 
 // Interpolated world [x, z] of unit i in the current frame array u, via a cubic
 // Hermite spline between this sample (P0) and the unit's next sample (P1), using
@@ -395,30 +389,40 @@ function clampVec(x, z, max) {
 // displacement over one interval — the exact Hermite tangents for t in [0,1].
 // Constant-velocity motion reduces to a straight line. Stationary units (zero
 // current velocity) and on-keyframe renders return the sampled position unchanged.
+//
+// Returns a shared scratch array (valid only until the next call): this runs for
+// every unit on every animation frame, and allocating a fresh [x, z] per unit was
+// a measurable GC load during playback.
+const _pos = [0, 0];
 function interpPos(u, i) {
   const bx = u[i + F.X], bz = u[i + F.Z];              // P0
-  if (renderFrac === 0) return [bx, bz];
+  _pos[0] = bx; _pos[1] = bz;
+  if (renderFrac === 0) return _pos;
   const m0x = u[i + F.DVX], m0z = u[i + F.DVZ];        // tangent at A (frame-A velocity)
-  if (m0x === 0 && m0z === 0) return [bx, bz];         // zero velocity: stationary, don't animate
+  if (m0x === 0 && m0z === 0) return _pos;             // zero velocity: stationary, don't animate
   const j = nextPosMap ? nextPosMap.get(u[i + F.ID]) : undefined;
   if (j === undefined || !nextU) {
     // No next sample (unit gone, or that frame not streamed in yet): fall back
     // to velocity extrapolation.
-    return [bx + m0x * renderFrac, bz + m0z * renderFrac];
+    _pos[0] = bx + m0x * renderFrac; _pos[1] = bz + m0z * renderFrac;
+    return _pos;
   }
   const nu = nextU;
   const px = nu[j + F.X], pz = nu[j + F.Z];            // P1
   const chord = Math.hypot(px - bx, pz - bz);
-  if (chord === 0) return [bx, bz];                    // same position in both samples
+  if (chord === 0) return _pos;                        // same position in both samples
   const cap = TANGENT_CAP * chord;
-  const [a0x, a0z] = clampVec(m0x, m0z, cap);
-  const [a1x, a1z] = clampVec(nu[j + F.DVX], nu[j + F.DVZ], cap); // tangent at B (frame-B velocity)
+  let a0x = m0x, a0z = m0z;                            // tangents, length-capped in place
+  let m = Math.hypot(a0x, a0z);
+  if (m > cap) { const s = cap / m; a0x *= s; a0z *= s; }
+  let a1x = nu[j + F.DVX], a1z = nu[j + F.DVZ];        // tangent at B (frame-B velocity)
+  m = Math.hypot(a1x, a1z);
+  if (m > cap) { const s = cap / m; a1x *= s; a1z *= s; }
   const t = renderFrac, t2 = t * t, t3 = t2 * t;
   const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
-  return [
-    h00 * bx + h10 * a0x + h01 * px + h11 * a1x,
-    h00 * bz + h10 * a0z + h01 * pz + h11 * a1z,
-  ];
+  _pos[0] = h00 * bx + h10 * a0x + h01 * px + h11 * a1x;
+  _pos[1] = h00 * bz + h10 * a0z + h01 * pz + h11 * a1z;
+  return _pos;
 }
 
 const cv = document.getElementById('cv');
@@ -549,6 +553,31 @@ function computeTeamColors() {
   return out;
 }
 
+// teamTint: team id -> [r,g,b] 0..1 floats parsed from the css teamColor — the
+// GL renderer needs numeric colours. Rebuilt alongside teamColor.
+let teamTint = new Map();
+const GRAY_TINT = [0.604, 0.651, 0.698]; // #9aa6b2, the unknown-team colour
+const _colorCtx = document.createElement('canvas').getContext('2d');
+function cssToTint(css) {
+  _colorCtx.fillStyle = '#9aa6b2';
+  _colorCtx.fillStyle = css; // the 2D canvas normalises any css colour to #rrggbb
+  const s = _colorCtx.fillStyle;
+  if (!/^#[0-9a-f]{6}$/.test(s)) return GRAY_TINT;
+  return [
+    parseInt(s.slice(1, 3), 16) / 255,
+    parseInt(s.slice(3, 5), 16) / 255,
+    parseInt(s.slice(5, 7), 16) / 255,
+  ];
+}
+
+// applyTeamColors (re)derives everything that hangs off the team palette.
+function applyTeamColors() {
+  teamColor = computeTeamColors();
+  teamTint = new Map();
+  for (const id in teamColor) teamTint.set(+id, cssToTint(teamColor[id]));
+  colorGen++;
+}
+
 function teamLabel(t) {
   if (t.player) return t.player;
   const side = t.side ? ` (${t.side})` : '';
@@ -572,6 +601,12 @@ function resize() {
   cv.height = Math.round(viewH * DPR);
   cv.style.width = viewW + 'px';
   cv.style.height = viewH + 'px';
+  if (glcv) {
+    glcv.width = Math.round(viewW * DPR);
+    glcv.height = Math.round(viewH * DPR);
+    glcv.style.width = viewW + 'px';
+    glcv.style.height = viewH + 'px';
+  }
   draw();
 }
 window.addEventListener('resize', resize);
@@ -595,24 +630,55 @@ function updateZoomLabel() {
 }
 
 // ---- drawing --------------------------------------------------------------
+// With the WebGL icon renderer active, the 2D canvas only carries the BASE
+// layer (map, grid, footprints, loading-fallback dots) — static between
+// keyframes — while the moving icons live on the GL overlay. baseKey captures
+// everything the base layer depends on, so a playback tick where only icons
+// moved repaints nothing but the (cheap) GL pass instead of the whole
+// viewport. Any 2D-dynamic content (dots mode, no GL, fallback dots) simply
+// forces a repaint, preserving the original behaviour.
+let lastBaseKey = '';
+let colorGen = 0; // bumped when team colours change (baseKey ingredient)
+
 function draw() {
+  updateZoomLabel();
+  const fr = data && dispIdx >= 0 ? data.frames[dispIdx] : null;
+  const u = fr ? fr.u : null;
+
+  // GL icon pass first: it reports which units still need the 2D dot fallback
+  // (bitmaps not in the atlas yet), which the base layer below must paint.
+  const glActive = !!(glr && showIcons && u);
+  let glFallback = null;
+  if (glActive) glFallback = glBuildInstances(u);
+  if (glr) glRender(glActive);
+
+  const dynamic2D = !glActive || glFallback !== null;
+  if (!dynamic2D) {
+    const b = data.bounds;
+    const key = loadGen + ',' + dispIdx + ',' + scale + ',' + center.x + ',' + center.z + ',' +
+      viewW + ',' + viewH + ',' + DPR + ',' + showTexture + ',' + showGrid + ',' + showFootprints + ',' +
+      (mapTex && mapTex.complete ? 1 : 0) + ',' + mapW + ',' + mapH + ',' + colorGen + ',' +
+      b.minX + ',' + b.maxX;
+    if (key === lastBaseKey) { updateTooltip(); return; }
+    lastBaseKey = key;
+  } else {
+    lastBaseKey = '';
+  }
+
   // Draw in CSS px; the DPR scale keeps the backing store at full device res.
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   ctx.clearRect(0, 0, viewW, viewH);
-  updateZoomLabel();
   if (!data) return;
 
   drawMapFrame();
-
-  const fr = dispIdx >= 0 ? data.frames[dispIdx] : null;
   if (!fr) return;
-  const u = fr.u;
 
   // Footprints sit under the unit markers.
   if (showFootprints) drawFootprints(u);
 
   if (showIcons) {
-    drawIcons(u);
+    if (!glActive) drawIcons2D(u);
+    else if (glFallback) drawGLFallbackDots(u, glFallback);
   } else {
     drawDots(u);
   }
@@ -634,7 +700,8 @@ function drawDots(u) {
     ctx.beginPath();
     for (const i of byColor[color]) {
       const p = interpPos(u, i);
-      const [sx, sy] = w2s(p[0], p[1]);
+      const sx = viewW / 2 + (p[0] - center.x) * scale;
+      const sy = viewH / 2 + (p[1] - center.z) * scale;
       if (sx < -8 || sy < -8 || sx > viewW + 8 || sy > viewH + 8) continue;
       ctx.moveTo(sx + rad, sy);
       ctx.arc(sx, sy, rad, 0, 7);
@@ -650,24 +717,33 @@ function drawDots(u) {
 // of looking tiny inside it (mobile units, having no footprint, stay constant).
 // A unit with no icon (or whose bitmap hasn't loaded yet) shows a coloured dot so
 // it is never invisible.
-function drawIcons(u) {
+//
+// Two implementations: the WebGL instanced renderer (see "WebGL icon renderer"
+// below — one GPU atlas texture, one draw call per frame) whenever WebGL2 is
+// available, else the original per-unit ctx.drawImage loop. Both share the
+// per-draw def memo: an icon's glyph and pixel size are constant per def within
+// one draw, so resolving them once per def (instead of once per unit, with a
+// per-unit "path|color|px" string key) removes most of the lookup cost.
+function drawIcons2D(u) {
+  const pxMemo = new Map();     // def -> rounded CSS px this draw
+  const glyphMemo = new Map();  // def*4096+team -> canvas or null
   for (let i = 0; i < u.length; i += STRIDE) {
-    const p = interpPos(u, i);
-    const [sx, sy] = w2s(p[0], p[1]);
-    const info = iconInfoFor(u[i + F.DEF]);
-    let px = Math.max(ICON_MIN_PX, Math.min(ICON_MAX_PX, iconScale * (info ? info.s : 1)));
-    if (growIcons) {
-      const fp = footprintFor(u[i + F.DEF]); // buildings only; null for mobile units
-      if (fp) {
-        const cap = 0.9 * Math.min(fp.w, fp.h) * scale; // 90% of the smaller footprint side, in px
-        if (cap > px) px = cap;                          // zoomed in: grow to fit the footprint
-      }
-    }
-    px = Math.round(px);
+    const def = u[i + F.DEF], team = u[i + F.TEAM];
+    let px = pxMemo.get(def);
+    if (px === undefined) { px = Math.round(iconPxFor(def)); pxMemo.set(def, px); }
     const r = px / 2;
+    const p = interpPos(u, i);
+    const sx = viewW / 2 + (p[0] - center.x) * scale;
+    const sy = viewH / 2 + (p[1] - center.z) * scale;
     if (sx < -px || sy < -px || sx > viewW + px || sy > viewH + px) continue;
-    const color = teamColor[u[i + F.TEAM]] || '#9aa6b2';
-    const glyph = info ? renderIcon(info.p, color, px) : null;
+    const color = teamColor[team] || '#9aa6b2';
+    const gk = def * 4096 + team;
+    let glyph = glyphMemo.get(gk);
+    if (glyph === undefined) {
+      const info = defIcon.get(def);
+      glyph = info ? renderIcon(info.p, color, px) : null;
+      glyphMemo.set(gk, glyph);
+    }
     if (glyph) {
       // Draw the pre-rendered glyph at its CSS size; snapping the top-left to a
       // device-pixel grid keeps the small icon crisp.
@@ -683,20 +759,43 @@ function drawIcons(u) {
   }
 }
 
-// iconInfoFor returns {p: path, s: size} for a unit def, or null.
-function iconInfoFor(def) {
-  if (!data.unitIcons) return null;
-  const name = data.unitDefs && data.unitDefs[def];
-  return name ? (data.unitIcons[name] || null) : null;
+// Per-def render info, resolved ONCE per replay load. The draw loops touch this
+// for every unit on every animation frame, and the original two-step lookup
+// (unitDefs[def] -> name -> unitIcons[name]) cost two string-hash probes per
+// unit per frame — a top self-time entry in profiles of unit-heavy replays.
+let defIcon = new Map(); // def id -> {p: path, s: size} or null
+let defFp = new Map();   // def id -> {w, h} footprint in elmos, or null (mobile)
+function buildDefTables() {
+  defIcon = new Map();
+  defFp = new Map();
+  const defs = data.unitDefs || {};
+  for (const id in defs) {
+    const name = defs[id];
+    defIcon.set(+id, (data.unitIcons && data.unitIcons[name]) || null);
+    defFp.set(+id, (data.footprints && data.footprints[name]) || null);
+  }
 }
 
 // footprintFor returns {w, h} (build-footprint size in elmos) for a unit def, or
 // null. Only buildings have an entry (the wire payload omits mobile units), so a
 // null result means "don't draw a footprint".
 function footprintFor(def) {
-  if (!data.footprints) return null;
-  const name = data.unitDefs && data.unitDefs[def];
-  return name ? (data.footprints[name] || null) : null;
+  return defFp.get(def) || null;
+}
+
+// iconPxFor: the on-screen size (CSS px) a def's icon draws at right now —
+// constant per def within one draw (depends only on def, zoom and growIcons).
+function iconPxFor(def) {
+  const info = defIcon.get(def);
+  let px = Math.max(ICON_MIN_PX, Math.min(ICON_MAX_PX, iconScale * (info ? info.s : 1)));
+  if (growIcons) {
+    const fp = defFp.get(def); // buildings only; null for mobile units
+    if (fp) {
+      const cap = 0.9 * Math.min(fp.w, fp.h) * scale; // 90% of the smaller footprint side, in px
+      if (cap > px) px = cap;                          // zoomed in: grow to fit the footprint
+    }
+  }
+  return px;
 }
 
 // Draw each building's build footprint as a team-coloured rectangle centred on
@@ -761,6 +860,262 @@ function scaleCanvas(src, w, h) {
   cx.imageSmoothingQuality = 'high';
   cx.drawImage(src, 0, 0, w, h);
   return c;
+}
+
+// ---- WebGL icon renderer ----------------------------------------------------
+// The icon layer is the playback hot path (every unit, every animation frame),
+// and the 2D-canvas version pays a per-unit ctx.drawImage plus a repaint of the
+// whole viewport each tick — the dominant cost on unit-heavy replays. This
+// renderer does what a game engine does instead: every icon bitmap lives in ONE
+// grayscale atlas texture in GPU memory (uploaded when the bitmaps arrive, then
+// never again), and each frame only ships a small per-unit instance buffer
+// [center, size, uv rect, tint] and issues a single instanced draw call. Team
+// tinting happens in the fragment shader (rgb * tint, icon's own alpha) — the
+// same multiply + destination-in composite the 2D path bakes into per-team
+// glyph canvases, so no per-team pixels exist at all. Icons render on the
+// transparent overlay canvas #glcv above the 2D base layer (map / grid /
+// footprints), matching the old single-canvas draw order. If WebGL2 is missing
+// or the context is lost, everything falls back to the 2D path unchanged.
+
+const glcv = document.getElementById('glcv');
+let glr = null; // GL state, or null -> 2D fallback path
+
+const ATLAS_SIZE = 2048; // px; power of two so the mip chain is clean
+const ATLAS_PAD = 16;    // gap between packed icons: keeps mip levels 0-4 from bleeding
+const INST_FLOATS = 10;  // per instance: cx cy size u0 v0 u1 v1 r g b
+
+function initGL() {
+  if (!glcv || glr) return;
+  // ?gl=0 forces the 2D path, ?gl=1 forces WebGL even on a software renderer
+  // (by default a software GL like SwiftShader is refused: its frames reach the
+  // compositor through a pixel readback, which is slower than the 2D path).
+  const pref = new URLSearchParams(location.search).get('gl');
+  if (pref === '0') { console.info('WebGL icon renderer disabled by ?gl=0'); return; }
+  let gl = null;
+  try { gl = glcv.getContext('webgl2', { antialias: false, premultipliedAlpha: true }); } catch (_) { /* fall through */ }
+  if (!gl) { console.info('WebGL2 unavailable — icons render via the 2D canvas path'); return; }
+  if (pref !== '1') {
+    let renderer = '';
+    try {
+      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      renderer = String(gl.getParameter(dbg ? dbg.UNMASKED_RENDERER_WEBGL : gl.RENDERER) || '');
+    } catch (_) { /* renderer string stays unknown */ }
+    if (/swiftshader|software|llvmpipe/i.test(renderer)) {
+      console.info('software WebGL renderer (' + renderer + ') — using the 2D canvas path (?gl=1 overrides)');
+      return;
+    }
+  }
+
+  const vs = `#version 300 es
+layout(location=0) in vec2 corner;   // unit quad, -0.5..0.5
+layout(location=1) in vec2 center;   // instance: icon centre, device px
+layout(location=2) in float size;    // instance: icon size, device px
+layout(location=3) in vec4 uvRect;   // instance: atlas u0 v0 u1 v1
+layout(location=4) in vec3 tint;     // instance: team colour
+uniform vec2 viewSize;               // canvas size, device px
+out vec2 uv;
+out vec3 vTint;
+void main() {
+  vec2 p = center + corner * size;
+  gl_Position = vec4(p.x / viewSize.x * 2.0 - 1.0, 1.0 - p.y / viewSize.y * 2.0, 0.0, 1.0);
+  uv = mix(uvRect.xy, uvRect.zw, corner + 0.5);
+  vTint = tint;
+}`;
+  const fs = `#version 300 es
+precision mediump float;
+in vec2 uv;
+in vec3 vTint;
+uniform sampler2D tex;
+out vec4 o;
+void main() {
+  vec4 t = texture(tex, uv);
+  o = vec4(t.rgb * vTint, t.a); // atlas is premultiplied: rgb already carries alpha
+}`;
+
+  let prog;
+  try {
+    const sh = (type, src) => {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+      return s;
+    };
+    prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, vs));
+    gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  } catch (err) {
+    console.warn('WebGL icon renderer failed to initialise; using the 2D canvas path:', err);
+    return;
+  }
+
+  // One static unit quad, instanced per icon; the instance buffer is refilled
+  // every frame (interleaved, INST_FLOATS floats per icon).
+  const quadBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-0.5, -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, 0.5]), gl.STATIC_DRAW);
+  const instBuf = gl.createBuffer();
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
+  const stride = INST_FLOATS * 4;
+  const attr = (loc, n, off) => {
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, n, gl.FLOAT, false, stride, off * 4);
+    gl.vertexAttribDivisor(loc, 1);
+  };
+  attr(1, 2, 0); attr(2, 1, 2); attr(3, 4, 3); attr(4, 3, 7);
+  gl.bindVertexArray(null);
+
+  const ac = document.createElement('canvas');
+  ac.width = ac.height = ATLAS_SIZE;
+  const atlas = {
+    canvas: ac,
+    ctx: ac.getContext('2d'),
+    tex: gl.createTexture(),
+    slots: new Map(), // icon path -> {u0,v0,u1,v1}, or null (load failed / atlas full)
+    x: ATLAS_PAD, y: ATLAS_PAD, rowH: 0,
+    dirty: false,
+    full: false,
+  };
+  gl.bindTexture(gl.TEXTURE_2D, atlas.tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  // Icons rarely draw below ~8 device px, so mips past level 4 (1/16 size) are
+  // never sampled; capping the chain also caps cross-icon bleed to the pad.
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, 4);
+
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); // premultiplied-alpha source-over
+
+  glr = {
+    gl, prog, vao, instBuf, atlas,
+    uView: gl.getUniformLocation(prog, 'viewSize'),
+    inst: new Float32Array(4096 * INST_FLOATS),
+    n: 0,
+  };
+  console.info('WebGL icon renderer active');
+}
+
+if (glcv) {
+  glcv.addEventListener('webglcontextlost', e => {
+    e.preventDefault(); // allow restore
+    glr = null;         // 2D fallback takes over on the next draw
+    scheduleDraw();
+  });
+  glcv.addEventListener('webglcontextrestored', () => { initGL(); scheduleDraw(); });
+}
+
+// atlasSlot returns the atlas uv rect for an icon path: undefined while the
+// bitmap is still loading (the caller falls back to a dot, exactly like the 2D
+// path), null if it can never be packed (load failed, or the atlas is full).
+// Icons pack at their native bitmap size on a simple shelf layout; the atlas
+// canvas re-uploads (with fresh mipmaps) on the draw after new icons land —
+// a handful of times right after load, then never again.
+function atlasSlot(path) {
+  const a = glr.atlas;
+  let s = a.slots.get(path);
+  if (s !== undefined) return s;
+  const img = getImage(path);
+  if (img === null) { a.slots.set(path, null); return null; }
+  if (!img.complete || !img.naturalWidth) return undefined;
+  const w = img.naturalWidth, h = img.naturalHeight;
+  if (a.x + w + ATLAS_PAD > ATLAS_SIZE) { a.x = ATLAS_PAD; a.y += a.rowH + ATLAS_PAD; a.rowH = 0; }
+  if (a.y + h + ATLAS_PAD > ATLAS_SIZE || w + 2 * ATLAS_PAD > ATLAS_SIZE) {
+    if (!a.full) { a.full = true; console.warn('icon atlas full; overflow icons draw as dots'); }
+    a.slots.set(path, null);
+    return null;
+  }
+  a.ctx.drawImage(img, a.x, a.y);
+  s = { u0: a.x / ATLAS_SIZE, v0: a.y / ATLAS_SIZE, u1: (a.x + w) / ATLAS_SIZE, v1: (a.y + h) / ATLAS_SIZE };
+  a.x += w + ATLAS_PAD;
+  if (h > a.rowH) a.rowH = h;
+  a.slots.set(path, s);
+  a.dirty = true;
+  return s;
+}
+
+function uploadAtlas() {
+  const gl = glr.gl, a = glr.atlas;
+  gl.bindTexture(gl.TEXTURE_2D, a.tex);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, a.canvas);
+  gl.generateMipmap(gl.TEXTURE_2D);
+  a.dirty = false;
+}
+
+// glBuildInstances fills the instance buffer for one frame. Returns the units
+// that still need the 2D dot fallback (bitmap not in the atlas yet) as a flat
+// [unitBase, sx, sy, px] list, or null when every unit had an atlas glyph.
+function glBuildInstances(u) {
+  const memo = new Map(); // def -> {px, rect}; both constant per def per draw
+  let inst = glr.inst;
+  const needed = (u.length / STRIDE) * INST_FLOATS;
+  if (inst.length < needed) inst = glr.inst = new Float32Array(needed * 2);
+  let n = 0;
+  let fb = null;
+  for (let i = 0; i < u.length; i += STRIDE) {
+    const def = u[i + F.DEF];
+    let m = memo.get(def);
+    if (m === undefined) {
+      const info = defIcon.get(def);
+      m = { px: iconPxFor(def), rect: info ? atlasSlot(info.p) : null };
+      memo.set(def, m);
+    }
+    const px = m.px;
+    const p = interpPos(u, i);
+    const sx = viewW / 2 + (p[0] - center.x) * scale;
+    const sy = viewH / 2 + (p[1] - center.z) * scale;
+    if (sx < -px || sy < -px || sx > viewW + px || sy > viewH + px) continue;
+    const rect = m.rect;
+    if (!rect) { (fb ||= []).push(i, sx, sy, px); continue; }
+    const tint = teamTint.get(u[i + F.TEAM]) || GRAY_TINT;
+    const o = n * INST_FLOATS;
+    inst[o] = sx * DPR; inst[o + 1] = sy * DPR; inst[o + 2] = px * DPR;
+    inst[o + 3] = rect.u0; inst[o + 4] = rect.v0; inst[o + 5] = rect.u1; inst[o + 6] = rect.v1;
+    inst[o + 7] = tint[0]; inst[o + 8] = tint[1]; inst[o + 9] = tint[2];
+    n++;
+  }
+  glr.n = n;
+  return fb;
+}
+
+// glRender draws the built instances — or just clears the overlay when the GL
+// icon pass is off this frame (dots mode, icons hidden, no data yet).
+function glRender(active) {
+  const gl = glr.gl;
+  gl.viewport(0, 0, glcv.width, glcv.height);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  if (!active || !glr.n) return;
+  if (glr.atlas.dirty) uploadAtlas();
+  gl.useProgram(glr.prog);
+  gl.uniform2f(glr.uView, glcv.width, glcv.height);
+  gl.bindTexture(gl.TEXTURE_2D, glr.atlas.tex);
+  gl.bindVertexArray(glr.vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, glr.instBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, glr.inst.subarray(0, glr.n * INST_FLOATS), gl.DYNAMIC_DRAW);
+  gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, glr.n);
+  gl.bindVertexArray(null);
+}
+
+// The 2D dot pass for units the GL renderer couldn't draw yet (their icon
+// bitmap is still loading). Transient: a second later they're in the atlas.
+function drawGLFallbackDots(u, fb) {
+  for (let k = 0; k < fb.length; k += 4) {
+    const i = fb[k], sx = fb[k + 1], sy = fb[k + 2], r = fb[k + 3] / 2;
+    ctx.fillStyle = teamColor[u[i + F.TEAM]] || '#9aa6b2';
+    ctx.beginPath();
+    ctx.arc(sx, sy, Math.max(1.5, r * 0.5), 0, 7);
+    ctx.fill();
+  }
 }
 
 // The rendered field: the full map extent when its size is known (so the terrain
@@ -829,7 +1184,8 @@ function hitTest() {
   let best = -1, bestD = 10 * 10; // 10px pick radius (squared)
   for (let i = 0; i < u.length; i += STRIDE) {
     const p = interpPos(u, i);
-    const [sx, sy] = w2s(p[0], p[1]);
+    const sx = viewW / 2 + (p[0] - center.x) * scale;
+    const sy = viewH / 2 + (p[1] - center.z) * scale;
     const dx = sx - mouse.x, dy = sy - mouse.y;
     const d = dx * dx + dy * dy;
     if (d < bestD) { bestD = d; best = i; }
@@ -1095,14 +1451,22 @@ function updateSidebar() {
   renderEvents();
 }
 
+let lastTimeText = null; // skip the DOM writes below when nothing changed:
+let lastSliderIdx = -1;  // they run every animation tick and cost style/layout
 function updateTimeLabel() {
   const last = data.frameCount - 1;
   // Time derives from the index (uniform sampling), so the label tracks the
   // slider even before the frame has streamed in.
   const t = frameNumAt(idx) / 30 + renderFrac * secPerFrame;
-  document.getElementById('timelabel').textContent =
-    data.frameCount ? `${fmtTime(t)}   frame ${idx} / ${last}` : '—';
-  document.getElementById('slider').value = idx;
+  const text = data.frameCount ? `${fmtTime(t)}   frame ${idx} / ${last}` : '—';
+  if (text !== lastTimeText) {
+    lastTimeText = text;
+    document.getElementById('timelabel').textContent = text;
+  }
+  if (idx !== lastSliderIdx) {
+    lastSliderIdx = idx;
+    document.getElementById('slider').value = idx;
+  }
 }
 
 // resolveDisplay picks the frame to render for the current idx: the exact
@@ -1131,6 +1495,21 @@ function resolveDisplay() {
 // Deciding WHAT to fetch is the caller's job: the play loop streams full
 // chunks ahead, scrubbing skims keyframes — setPlayhead itself must stay
 // fetch-free because it runs on every animation tick and slider move.
+// The sidebar rebuild (innerHTML for players/teams/events) is throttled while
+// playing: at 16x+ speed the keyframe changes many times a second, and
+// rebuilding that DOM each time caused parse/style/layout work that competed
+// with the draw for the frame budget. Paused/scrubbing updates stay immediate.
+const SIDEBAR_MIN_MS = 200;
+let sidebarAt = 0;        // performance.now() of the last rebuild
+let sidebarStale = false; // a throttled-away update is pending
+function maybeUpdateSidebar(force) {
+  const now = performance.now();
+  if (!force && playRAF && now - sidebarAt < SIDEBAR_MIN_MS) { sidebarStale = true; return; }
+  sidebarAt = now;
+  sidebarStale = false;
+  updateSidebar();
+}
+
 function setPlayhead(pos, forceSidebar) {
   const last = data.frameCount - 1;
   playPos = Math.max(0, Math.min(last, pos));
@@ -1139,7 +1518,7 @@ function setPlayhead(pos, forceSidebar) {
   const changed = newIdx !== idx || forceSidebar;
   idx = newIdx;
   resolveDisplay();
-  if (changed) { updateSidebar(); buildNextPosMap(); }
+  if (changed) { maybeUpdateSidebar(forceSidebar); buildNextPosMap(); }
   updateTimeLabel();
   draw();
 }
@@ -1166,6 +1545,9 @@ function go(i) {
 function stopPlay() {
   if (playRAF) { cancelAnimationFrame(playRAF); playRAF = null; }
   document.getElementById('play').textContent = '▶ Play';
+  // Flush a sidebar update the playback throttle skipped, so the panel matches
+  // the frame the playhead stopped on.
+  if (sidebarStale && data) maybeUpdateSidebar(true);
 }
 function startPlay() {
   if (!data || data.frameCount < 2) return;
@@ -1257,7 +1639,7 @@ document.getElementById('teamcolors').onchange = e => {
   if (!data) return;
   // Icon tint/render caches key on the colour string, so a colour change just
   // produces fresh entries — no need to clear them.
-  teamColor = computeTeamColors();
+  applyTeamColors();
   renderPlayers(); renderTeams(); draw();
 };
 document.getElementById('iconsize').oninput = e => {
@@ -1310,7 +1692,10 @@ async function loadReplay(file) {
   } else {
     setEmpty('');
   }
-  teamColor = computeTeamColors();
+  buildDefTables();
+  applyTeamColors();
+  lastTimeText = null;
+  lastSliderIdx = -1;
   secPerFrame = data.sampleEvery > 0 ? data.sampleEvery / 30 : 1;
   document.getElementById('subtitle').textContent =
     [data.gameId, data.mapName, data.gameVersion].filter(Boolean).join(' · ') || 'replay state viewer';
@@ -1376,6 +1761,7 @@ async function loadMap(name) {
 }
 
 async function init() {
+  initGL(); // one-time; a null result just means the 2D icon path is used
   // Restore icon size from the URL (?iconsize=) before the first paint.
   const params = new URLSearchParams(location.search);
   const isz = parseInt(params.get('iconsize'), 10);
