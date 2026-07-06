@@ -120,7 +120,7 @@ func TestServeBRP(t *testing.T) {
 		return b, resp
 	}
 
-	payload, resp := get("/api/replay?file=g.brp")
+	payload, resp := get("/replays/g.brw")
 	if resp.Header.Get("ETag") == "" {
 		t.Error("no ETag on head payload")
 	}
@@ -174,12 +174,13 @@ func TestServeBRP(t *testing.T) {
 		t.Errorf("armcom is mobile; should have no footprint")
 	}
 
-	// Chunk index mirrors the file's.
+	// Chunk index mirrors the file's: kLen is the keyframe's RAW length in the
+	// decompressed keys stream, len the delta bytes.
 	if head.FrameCount != 2 || len(head.Chunks) != 1 {
 		t.Fatalf("frameCount=%d chunks=%+v", head.FrameCount, head.Chunks)
 	}
 	if head.Chunks[0].Frame != 30 || head.Chunks[0].Count != 2 ||
-		head.Chunks[0].KeyLen != bf.Chunks[0].FKeyLen || head.Chunks[0].Len != bf.Chunks[0].FLen {
+		head.Chunks[0].KLen != bf.Chunks[0].KLen || head.Chunks[0].Len != bf.Chunks[0].FLen {
 		t.Errorf("wire chunk = %+v, file chunk = %+v", head.Chunks[0], bf.Chunks[0])
 	}
 
@@ -191,32 +192,33 @@ func TestServeBRP(t *testing.T) {
 		t.Errorf("head payload must not contain a frames section")
 	}
 
-	// Chunk endpoint: full chunk and keyframe-only both slice the stored bytes.
+	// Chunk endpoint serves the stored delta byte range; the keys endpoint the
+	// stored K section — both byte-for-byte.
 	c := bf.Chunks[0]
 	fsec := bf.Sections[snapshot.SecFrames]
-	full, _ := get("/api/replay/chunk?file=g.brp&i=0")
+	full, _ := get("/replays/g/c0")
 	if !bytes.Equal(full, fsec[c.FOff:c.FOff+c.FLen]) {
 		t.Errorf("chunk 0 is not the stored byte range")
 	}
-	key, _ := get("/api/replay/chunk?file=g.brp&i=0&key=1")
-	if !bytes.Equal(key, fsec[c.FOff:c.FOff+c.FKeyLen]) {
-		t.Errorf("keyframe slice is not the stored byte range")
+	keys, _ := get("/replays/g.keys")
+	if !bytes.Equal(keys, bf.Sections[snapshot.SecKeyframes]) {
+		t.Errorf("keys is not the stored K section")
 	}
 
-	// Out-of-range chunk and bad file names are rejected.
-	if resp, err := http.Get(srv.URL + "/api/replay/chunk?file=g.brp&i=9"); err != nil || resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("chunk i=9: %v %v", resp.StatusCode, err)
+	// Out-of-range chunk and bad ids are rejected.
+	if resp, err := http.Get(srv.URL + "/replays/g/c9"); err != nil || resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("chunk c9: %v %v", resp.StatusCode, err)
 	} else {
 		resp.Body.Close()
 	}
-	if resp, err := http.Get(srv.URL + "/api/replay?file=../g.brp"); err != nil || resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("traversal name: %v %v", resp.StatusCode, err)
+	if resp, err := http.Get(srv.URL + "/replays/..%2Fg.brw"); err != nil || resp.StatusCode == http.StatusOK {
+		t.Errorf("traversal name served: %v %v", resp.StatusCode, err)
 	} else {
 		resp.Body.Close()
 	}
 
 	// ETag revalidation: a matching If-None-Match yields 304 with no body.
-	req, _ := http.NewRequest("GET", srv.URL+"/api/replay/chunk?file=g.brp&i=0", nil)
+	req, _ := http.NewRequest("GET", srv.URL+"/replays/g/c0", nil)
 	req.Header.Set("If-None-Match", resp.Header.Get("ETag"))
 	r304, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -412,7 +414,7 @@ func TestListBRPOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(infos) != 2 || infos[0].File != "a.brp" || infos[1].File != "b.brp" {
-		t.Fatalf("got %+v, want just a.brp and b.brp", infos)
+	if len(infos) != 2 || infos[0].File != "a" || infos[1].File != "b" {
+		t.Fatalf("got %+v, want just a and b", infos)
 	}
 }

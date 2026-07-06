@@ -10,20 +10,22 @@ No front-end framework — the viewer is the same plain Canvas/vanilla-JS app as
 ## How it works
 
 The `.brp` format was designed so serving is a byte copy, not a re-encode: the
-`/api/replay` head is a pure function of the file's meta, and each frame chunk is an
-independently-gzipped byte range. So the Go server's endpoints are precomputed **offline**
-into plain files by `cmd/barreplay-static` and served straight from an **R2 bucket**:
+head is a pure function of the file's meta, the keyframes section and each frame
+chunk are independently-gzipped byte ranges. The Go viz server and this Worker
+share ONE URL scheme, so the same `worker/public` front-end works against both.
+The files are precomputed **offline** by `cmd/barreplay-static` and served
+straight from an **R2 bucket**:
 
-| Go server endpoint | Static object (in R2) |
+| URL | Static object (in R2) |
 | --- | --- |
-| `GET /api/replays` | built live by the Worker from the bucket (no stored file) |
-| `GET /api/replay?file=<id>.brp` | `replays/<id>.brw` |
-| `GET /api/replay/chunk?file=<id>&i=<n>` | `replays/<id>/c<n>` |
-| `GET /api/replay/chunk?...&key=1` (skim) | HTTP `Range: bytes=0-(keyLen-1)` on `c<n>` |
-| `GET /api/replay/resources?file=<id>` | `replays/<id>.resources` |
+| `GET /index.json` | built live by the Worker from the bucket (no stored file) |
+| `GET /replays/<id>.brw` | `replays/<id>.brw` (head: meta, teams, icons, chunk index) |
+| `GET /replays/<id>.keys` | `replays/<id>.keys` (every keyframe, one gzip stream — streamed first, makes the whole timeline scrubbable) |
+| `GET /replays/<id>/c<n>` | `replays/<id>/c<n>` (chunk n's delta frames; absent for single-frame chunks) |
+| `GET /replays/<id>.resources` | `replays/<id>.resources` |
 
-The Worker (`src/worker/index.ts`) is a thin Hono app that streams these out of R2 with
-Range support — no frame is ever decoded server-side. The replay listing (`/index.json`) is
+The Worker (`src/worker/index.ts`) is a thin Hono app that streams these out of R2 —
+no frame is ever decoded server-side. The replay listing (`/index.json`) is
 built **live** from the bucket (it lists the `replays/` prefix), so there is no listing file
 to maintain: uploading one replay's handful of files makes it appear, and deleting them
 removes it. The SPA and the vendored unit/rank
