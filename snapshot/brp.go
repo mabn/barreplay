@@ -1,39 +1,55 @@
 package snapshot
 
-// The v2 on-disk format: ".brp", a compact binary capture. It replaces JSONL as
-// the default because a real game is ~500 MB of JSONL but ~13 MB of .brp — unit
+// The on-disk format: ".brp", a compact binary capture. It replaces JSONL as
+// the default because a real game is ~500 MB of JSONL but ~8 MB of .brp — unit
 // state changes very little between 1 Hz samples, so per-unit temporal deltas
 // (with the unit's own velocity as the position predictor) shrink to near-zero
-// varints, and gzip flattens what remains.
+// varints, delta frames skip unchanged units entirely, and gzip flattens what
+// remains.
 //
 // Layout: a magic + version header, then tagged sections:
 //
-//	"BRP1" <version u8 = 2> then per section: <tag u8> <len u32le> <payload>
+//	"BRP1" <version u8 = 4> then per section: <tag u8> <len u32le> <payload>
 //
 //	M  meta JSON: {"meta": <Meta>, "bounds", "frameTeams", "chunks" index, counts}
-//	F  core frame columns: id def team x z hp maxHp dvx dvz   (the viewer's data)
-//	X  extra frame column: build + team resources             (not sent to the browser)
+//	K  ALL core keyframes, one gzip stream (keys-first streaming + skimming)
+//	F  core delta frames, chunked: id def team x z hp maxHp dvx dvz
+//	X  extra: build + team resources (keyframe+delta per chunk; never sent to a browser)
 //	E  lifecycle events
 //
-// The M and E payloads are single gzip streams. The F and X payloads are a
+// The M, K and E payloads are single gzip streams. The F and X payloads are a
 // concatenation of CHUNKS — the random-access unit (the video-codec model):
 // frames are grouped into runs of chunkFrames samples (64 ≈ 1 min at 1 Hz) and
 // the codec's prediction state is RESET at every chunk boundary, so a chunk's
-// first frame encodes with the "new id / absolute" path — a keyframe — and the
-// chunk decodes with no bytes from outside it. Each chunk is two standalone
-// gzip streams: K (the keyframe alone) then D (the remaining delta frames;
-// absent when the chunk has one frame), so a consumer can fetch/decode just
-// keyframes to skim a capture cheaply. The M record's "chunks" array indexes
-// them: first sim frame, sample count, and byte ranges (offsets RELATIVE to
-// the owning section's payload start; a section's absolute file offset is
-// reported by ReadContainer, so range-based consumers can add the two).
+// first frame encodes with the "new id / absolute" path — a keyframe.
 //
-// Chunks are separately gzipped ON PURPOSE: the viz server slices individual
-// chunk byte ranges (and the E payload) out of the file and sends them to the
-// browser byte-for-byte with no re-encoding, and the browser gunzips them with
-// its native DecompressionStream — that is what makes instant start, seeking
-// and skimming cheap. The X section (data the viewer doesn't use yet) is never
-// sent. Unknown tags are skipped on read, so sections can be added compatibly.
+// KEYFRAMES LIVE OUTSIDE THE CHUNKS (v4): every chunk's core keyframe is
+// concatenated (in chunk order) into the K section and gzipped as ONE stream.
+// A viewer downloads K first — one request, streamed through
+// DecompressionStream — and can render/scrub ANY minute of the game before
+// any chunk arrives; keyframe i's raw byte range inside the decompressed K is
+// in the chunk index (kOff/kLen), so the stream is consumed progressively
+// with no trial parsing. The F section holds only each chunk's DELTA frames
+// (one standalone gzip stream per chunk; absent when the chunk has a single
+// frame), so no byte is ever fetched twice. Decoding a chunk therefore needs
+// its keyframe first: decode K[kOff:kOff+kLen] with fresh codec state, then
+// the chunk's delta bytes with that state (BRPFile.DecodeChunk does). Merging
+// the keyframes into one stream also compresses ~12% better than per-chunk
+// keyframe streams (adjacent keyframes are near-duplicates). The X section
+// (never sent to a browser) keeps its keyframe+delta split per chunk.
+//
+// The M record's "chunks" array indexes everything: first sim frame, sample
+// count, the keyframe's raw range in K, and the delta byte ranges (offsets
+// RELATIVE to the owning section's payload start; a section's absolute file
+// offset is reported by ReadContainer, so range-based consumers can add the
+// two).
+//
+// Chunks are separately gzipped ON PURPOSE: the viz server (and the static
+// bundle for R2 hosting) hands individual chunk byte ranges, the K payload,
+// and the E payload to the browser byte-for-byte with no re-encoding, and the
+// browser gunzips them with its native DecompressionStream — that is what
+// makes instant start, seeking and skimming cheap. Unknown tags are skipped
+// on read, so sections can be added compatibly.
 //
 // Values are quantized once at write time: positions/health to whole
 // elmos/points, velocities to whole elmos *per sample interval* (dv =
@@ -44,7 +60,7 @@ package snapshot
 // viewer renders the x/z plane only, and ground units' y is terrain-following
 // noise that cost ~28% of all column changes; decoded frames return y=0.
 //
-// Frame encoding (v3, all zigzag varints; every frame uses the same layout —
+// Frame encoding (all zigzag varints; every frame uses the same layout —
 // a keyframe is just a frame encoded against empty prior state):
 //
 //	sv frameDelta
@@ -67,7 +83,7 @@ package snapshot
 // as zero. "Changed" is judged across all stored columns including build, so
 // the X stream's build column always covers exactly the F stream's changed
 // list. Decoders must mirror this exactly; the JS decoder lives in
-// internal/viz/web/app.js — evolve them together.
+// worker/public/app.js — evolve them together.
 
 import (
 	"bytes"
@@ -89,17 +105,18 @@ const (
 	BRPMagic = "BRP1"
 	BRWMagic = "BRW1"
 
-	// BRPVersion is the only readable format version. v1 (unchunked) and v2
-	// (every live unit re-encoded per frame, y/dvy columns) existed only
-	// pre-release and are not supported — regenerate a .brp from its source
-	// .brsnap/.jsonl with barreplay-pack.
-	BRPVersion byte = 3
+	// BRPVersion is the only readable format version. v1 (unchunked), v2
+	// (every live unit re-encoded per frame, y/dvy columns) and v3 (keyframes
+	// inside the chunks) existed only pre-release and are not supported —
+	// regenerate a .brp from its source .brsnap/.jsonl with barreplay-pack.
+	BRPVersion byte = 4
 
-	SecMeta   byte = 'M' // .brp: meta JSON
-	SecFrames byte = 'F' // core frame columns
-	SecExtra  byte = 'X' // extra frame columns (not sent to the browser)
-	SecEvents byte = 'E' // lifecycle events
-	SecHead   byte = 'J' // wire payload: head JSON (viz-specific)
+	SecMeta      byte = 'M' // .brp: meta JSON
+	SecKeyframes byte = 'K' // all core keyframes, one gzip stream
+	SecFrames    byte = 'F' // core delta frames, chunked
+	SecExtra     byte = 'X' // extra frame columns (not sent to the browser)
+	SecEvents    byte = 'E' // lifecycle events
+	SecHead      byte = 'J' // wire payload: head JSON (viz-specific)
 )
 
 // defaultChunkFrames is the random-access granularity: samples per chunk.
@@ -188,16 +205,25 @@ type BRPBounds struct {
 	MaxZ float64 `json:"maxZ"`
 }
 
-// BRPChunk locates one random-access chunk inside the F and X sections. All
-// offsets/lengths are in bytes, relative to the owning section's payload
-// start. The key part ([Off, Off+KeyLen)) is a standalone gzip stream holding
-// only the keyframe; the rest ([Off+KeyLen, Off+Len)) is a second gzip stream
-// with the chunk's delta frames (absent when Count == 1, i.e. Len == KeyLen).
+// BRPChunk locates one random-access chunk's pieces.
+//
+//   - KOff/KLen: the chunk's core keyframe as a RAW (decompressed) byte range
+//     inside the gunzipped K section — the boundaries a streaming consumer
+//     needs, and Go's random-access entry into K.
+//   - FOff/FLen: the chunk's core DELTA frames, one standalone gzip stream in
+//     the F section payload (FLen == 0 when Count == 1: no delta frames).
+//   - XOff/XKeyLen/XLen: the extra columns keep the pre-v4 two-stream shape —
+//     keyframe gzip [XOff, XOff+XKeyLen) then delta gzip up to XOff+XLen —
+//     since no browser ever fetches X.
+//
+// F/X offsets are compressed-byte offsets relative to the owning section's
+// payload start; K offsets are decompressed-byte offsets.
 type BRPChunk struct {
 	Frame   int32 `json:"frame"` // sim frame of the chunk's first sample
 	Count   int   `json:"count"` // samples in this chunk
+	KOff    int64 `json:"kOff"`
+	KLen    int64 `json:"kLen"`
 	FOff    int64 `json:"fOff"`
-	FKeyLen int64 `json:"fKeyLen"`
 	FLen    int64 `json:"fLen"`
 	XOff    int64 `json:"xOff"`
 	XKeyLen int64 `json:"xKeyLen"`
@@ -233,6 +259,8 @@ type BRPFile struct {
 	ChunkFrames int
 	Chunks      []BRPChunk
 	Sections    map[byte][]byte // tag -> raw section payload
+
+	keysRaw []byte // gunzipped K section, cached on first DecodeChunk
 }
 
 // ---------------------------------------------------------------------------
@@ -453,12 +481,14 @@ func (c *frameCodec) encodeFrame(core, extra *varintWriter, fr Frame) []prevUnit
 	return q
 }
 
-// decodeFrames reconstructs full frames from the F section and, when present,
-// the X section (which cannot be decoded standalone: it relies on F's changed
-// list). Every live unit appears in every decoded frame: units skipped by the
-// encoder are re-materialised by advancing their previous state.
-func decodeFrames(core, extra []byte, sampleEvery int32) ([]Frame, error) {
-	c := newFrameCodec(sampleEvery)
+// decodeFrames reconstructs full frames from a core stream and, when present,
+// the matching extra stream (which cannot be decoded standalone: it relies on
+// the core stream's changed list). Every live unit appears in every decoded
+// frame: units skipped by the encoder are re-materialised by advancing their
+// previous state. The codec carries the prediction state ACROSS calls — the
+// caller decodes a chunk by running its keyframe bytes (from the K section)
+// and then its delta bytes through the same codec.
+func decodeFrames(c *frameCodec, core, extra []byte) ([]Frame, error) {
 	se := float32(c.sampleEvery)
 	cr := &varintReader{b: core}
 	var xr *varintReader
@@ -744,15 +774,17 @@ func gunzip(b []byte) ([]byte, error) {
 // writer
 
 // brpWriter implements Writer: frames buffer until a chunk fills, each chunk
-// is encoded with fresh codec state (its first frame becomes the keyframe) and
-// compressed into the growing F/X payloads, and the container is assembled at
-// Close.
+// is encoded with fresh codec state (its first frame becomes the keyframe).
+// Core keyframe bytes accumulate RAW in keysBuf (gzipped once, as the K
+// section, at Close); delta frames are gzipped per chunk into the growing F/X
+// payloads. The container is assembled at Close.
 type brpWriter struct {
 	path        string
 	meta        Meta
 	chunkFrames int
 
-	pending           []Frame // frames of the not-yet-flushed chunk
+	pending           []Frame      // frames of the not-yet-flushed chunk
+	keysBuf           bytes.Buffer // raw concatenated core keyframes -> K
 	coreBuf, extraBuf bytes.Buffer
 	chunks            []BRPChunk
 
@@ -791,9 +823,10 @@ func (w *brpWriter) WriteFrame(fr Frame) error {
 	return nil
 }
 
-// flushChunk encodes the pending frames as one self-contained chunk: fresh
-// codec state (first frame all-absolute = keyframe), the keyframe and the
-// delta remainder gzipped separately, both appended to the section buffers.
+// flushChunk encodes the pending frames as one chunk: fresh codec state
+// (first frame all-absolute = keyframe). The core keyframe bytes go raw into
+// keysBuf (the future K section); the core delta frames are gzipped into the
+// F payload; the extra stream keeps its keyframe+delta gzip pair in X.
 func (w *brpWriter) flushChunk() {
 	if len(w.pending) == 0 {
 		return
@@ -820,11 +853,12 @@ func (w *brpWriter) flushChunk() {
 	c := BRPChunk{
 		Frame: w.pending[0].Frame,
 		Count: len(w.pending),
+		KOff:  int64(w.keysBuf.Len()),
+		KLen:  int64(coreKey.Len()),
 		FOff:  int64(w.coreBuf.Len()),
 		XOff:  int64(w.extraBuf.Len()),
 	}
-	w.coreBuf.Write(gzipCompress(coreKey.Bytes()))
-	c.FKeyLen = int64(w.coreBuf.Len()) - c.FOff
+	w.keysBuf.Write(coreKey.Bytes())
 	w.extraBuf.Write(gzipCompress(extraKey.Bytes()))
 	c.XKeyLen = int64(w.extraBuf.Len()) - c.XOff
 	if len(w.pending) > 1 {
@@ -878,6 +912,7 @@ func (w *brpWriter) Close() error {
 	}
 	sections := []Section{
 		{Tag: SecMeta, Payload: gzipCompress(metaJSON)},
+		{Tag: SecKeyframes, Payload: gzipCompress(w.keysBuf.Bytes())},
 		{Tag: SecFrames, Payload: w.coreBuf.Bytes()},
 		{Tag: SecExtra, Payload: w.extraBuf.Bytes()},
 		{Tag: SecEvents, Payload: gzipCompress(encodeEvents(w.events))},
@@ -930,53 +965,93 @@ func ParseBRP(r io.Reader) (*BRPFile, error) {
 	return f, nil
 }
 
-// chunkSlice extracts and decompresses one chunk's frames from a section
-// payload: gunzip the keyframe stream, then the delta stream when present,
-// returning the concatenated raw codec bytes.
-func chunkSlice(sec []byte, off, keyLen, totalLen int64) ([]byte, error) {
-	if off < 0 || keyLen < 0 || totalLen < keyLen || off+totalLen > int64(len(sec)) {
-		return nil, fmt.Errorf("snapshot: chunk range [%d,+%d) outside section (%d bytes)", off, totalLen, len(sec))
+// chunkSlice extracts and decompresses one gzip stream out of a section
+// payload.
+func chunkSlice(sec []byte, off, length int64, what string) ([]byte, error) {
+	if off < 0 || length < 0 || off+length > int64(len(sec)) {
+		return nil, fmt.Errorf("snapshot: %s range [%d,+%d) outside section (%d bytes)", what, off, length, len(sec))
 	}
-	raw, err := gunzip(sec[off : off+keyLen])
+	raw, err := gunzip(sec[off : off+length])
 	if err != nil {
-		return nil, fmt.Errorf("snapshot: chunk keyframe: %w", err)
-	}
-	if totalLen > keyLen {
-		rest, err := gunzip(sec[off+keyLen : off+totalLen])
-		if err != nil {
-			return nil, fmt.Errorf("snapshot: chunk deltas: %w", err)
-		}
-		raw = append(raw, rest...)
+		return nil, fmt.Errorf("snapshot: %s: %w", what, err)
 	}
 	return raw, nil
 }
 
-// DecodeChunk decodes chunk i into frames — the random-access entry point: no
-// other chunk's bytes are touched. Values come back at the format's storage
-// precision (whole elmos, per-interval velocity, 1/255 build progress, 1/10
-// resources); TimeSec is frame/30. Units are sorted by id.
+// Keyframes returns the decompressed K section (every chunk's core keyframe,
+// concatenated; chunk i's slice is [KOff, KOff+KLen)), gunzipping it once and
+// caching the result.
+func (f *BRPFile) Keyframes() ([]byte, error) {
+	if f.keysRaw != nil {
+		return f.keysRaw, nil
+	}
+	sec, ok := f.Sections[SecKeyframes]
+	if !ok {
+		return nil, fmt.Errorf("snapshot: .brp has no keyframes section")
+	}
+	raw, err := gunzip(sec)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot: keyframes section: %w", err)
+	}
+	f.keysRaw = raw
+	return raw, nil
+}
+
+// DecodeChunk decodes chunk i into frames — the random-access entry point: it
+// touches only chunk i's keyframe (in K) and delta bytes. Values come back at
+// the format's storage precision (whole elmos, per-interval velocity, 1/255
+// build progress, 1/10 resources); TimeSec is frame/30. Units are sorted by
+// id.
 func (f *BRPFile) DecodeChunk(i int) ([]Frame, error) {
 	if i < 0 || i >= len(f.Chunks) {
 		return nil, fmt.Errorf("snapshot: chunk %d out of range (%d chunks)", i, len(f.Chunks))
 	}
 	c := f.Chunks[i]
+	keys, err := f.Keyframes()
+	if err != nil {
+		return nil, err
+	}
+	if c.KOff < 0 || c.KLen < 0 || c.KOff+c.KLen > int64(len(keys)) {
+		return nil, fmt.Errorf("snapshot: chunk %d keyframe range [%d,+%d) outside K (%d bytes)", i, c.KOff, c.KLen, len(keys))
+	}
+	key := keys[c.KOff : c.KOff+c.KLen]
+
 	fsec, ok := f.Sections[SecFrames]
 	if !ok {
 		return nil, fmt.Errorf("snapshot: .brp has no frames section")
 	}
-	core, err := chunkSlice(fsec, c.FOff, c.FKeyLen, c.FLen)
-	if err != nil {
-		return nil, err
-	}
-	var extra []byte
-	if xsec, ok := f.Sections[SecExtra]; ok {
-		if extra, err = chunkSlice(xsec, c.XOff, c.XKeyLen, c.XLen); err != nil {
+	var deltas []byte
+	if c.FLen > 0 {
+		if deltas, err = chunkSlice(fsec, c.FOff, c.FLen, "chunk deltas"); err != nil {
 			return nil, err
 		}
 	}
-	frames, err := decodeFrames(core, extra, f.Meta.SampleEvery)
+	var extraKey, extraDeltas []byte
+	if xsec, ok := f.Sections[SecExtra]; ok {
+		if extraKey, err = chunkSlice(xsec, c.XOff, c.XKeyLen, "chunk extra keyframe"); err != nil {
+			return nil, err
+		}
+		if c.XLen > c.XKeyLen {
+			if extraDeltas, err = chunkSlice(xsec, c.XOff+c.XKeyLen, c.XLen-c.XKeyLen, "chunk extra deltas"); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// The keyframe and the delta frames run through the SAME codec: the
+	// keyframe (encoded against empty state) establishes the prediction state
+	// the delta frames were encoded against.
+	codec := newFrameCodec(f.Meta.SampleEvery)
+	frames, err := decodeFrames(codec, key, extraKey)
 	if err != nil {
 		return nil, err
+	}
+	if len(deltas) > 0 {
+		rest, err := decodeFrames(codec, deltas, extraDeltas)
+		if err != nil {
+			return nil, err
+		}
+		frames = append(frames, rest...)
 	}
 	if len(frames) != c.Count {
 		return nil, fmt.Errorf("snapshot: chunk %d decoded %d frames, index says %d", i, len(frames), c.Count)

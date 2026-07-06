@@ -1,4 +1,4 @@
-# The BRP capture format, version 3
+# The BRP capture format, version 4
 
 `.brp` is barreplay's on-disk (and effectively over-the-wire) format for a
 recorded replay capture: periodic snapshots of every unit's state plus unit
@@ -16,21 +16,28 @@ Reference implementations (these three must stay in lockstep):
 | Serving / wire container | `internal/viz/wire.go`, `internal/viz/server.go` |
 
 Measured on a real 33-minute 8v8 game (1 952 sampled frames, 4 223 293 unit
-records, 48 823 events): **476 MB** as v1 JSONL → **8 069 696 bytes (7.7 MiB)**
-as `.brp` v3 (~59×; v2 of the format measured 14.0 MiB). Section split on that
-capture: F 7.34 MB, X 0.46 MB, E 0.20 MB, M 0.06 MB.
+records, 48 823 events): **476 MB** as v1 JSONL → **7 993 143 bytes (7.6 MiB)**
+as `.brp` v4 (~62×; v2 of the format measured 14.0 MiB). Section split on that
+capture: K 0.55 MB, F 6.72 MB, X 0.46 MB, E 0.20 MB, M 0.06 MB.
 
-The two ideas that took v2 → v3 (see `docs/brp-optimizations.md` for the full
+The ideas that took v2 → v3 → v4 (see `docs/brp-optimizations.md` for the full
 evaluation, including the ideas that were measured and rejected):
 
-1. **Skip unchanged units.** In a real game ~2/3 of all per-frame unit records
-   are byte-for-byte predictable from the previous sample. v3 delta frames
-   list only the units that *changed* (plus an explicit dead list); everything
-   else is reconstructed by the decoder.
-2. **Drop the elevation columns.** y/dvy were ~28 % of all column changes
+1. **Skip unchanged units** (v3). In a real game ~2/3 of all per-frame unit
+   records are byte-for-byte predictable from the previous sample. Delta
+   frames list only the units that *changed* (plus an explicit dead list);
+   everything else is reconstructed by the decoder.
+2. **Drop the elevation columns** (v3). y/dvy were ~28 % of all column changes
    (terrain-following noise on every walking unit) and nothing consumed them:
    the viewer renders the x/z plane, and a ground unit's height is implied by
-   the map heightmap. v3 does not store them; decoded frames return y = 0.
+   the map heightmap. They are not stored; decoded frames return y = 0.
+3. **Keyframes together, outside the chunks** (v4). All core keyframes moved
+   into one gzip stream (the `K` section) so a viewer downloads them FIRST —
+   one request, decoded progressively while it streams — making the whole
+   timeline scrubbable within seconds, before any chunk arrives. Chunks now
+   hold only delta frames (no byte is fetched twice), and merging the
+   near-duplicate adjacent keyframes into one stream compresses ~12 % better
+   than the per-chunk keyframe streams it replaced.
 
 ---
 
@@ -81,30 +88,31 @@ evaluation, including the ideas that were measured and rejected):
 ```
 offset  size  value
 0       4     magic "BRP1" (ASCII)
-4       1     format version, u8. MUST be 3.
+4       1     format version, u8. MUST be 4.
 5       …     zero or more sections, back to back, until EOF:
               tag u8 | payloadLength u32le | payload (payloadLength bytes)
 ```
 
 - The magic is `BRP1` for **all** versions; the version byte is what changes.
-  Version 3 is the only defined version — v1 (unchunked) and v2 (every live
-  unit re-encoded in every frame; y/dvy columns) existed only pre-release.
-  Readers MUST reject any version byte other than 3. A v2 file cannot be
-  converted in place; regenerate it from its source `.brsnap`/`.jsonl` with
-  `barreplay-pack`.
+  Version 4 is the only defined version — v1 (unchunked), v2 (every live unit
+  re-encoded in every frame; y/dvy columns) and v3 (keyframes inside the
+  chunks) existed only pre-release. Readers MUST reject any version byte other
+  than 4. Older files cannot be converted in place; regenerate them from their
+  source `.brsnap`/`.jsonl` with `barreplay-pack`.
 - Readers MUST skip sections with unknown tags (that is the format's
   forward-compatibility mechanism: new sections can be added without a version
   bump).
-- The writer emits sections in the order `M F X E`; readers MUST NOT rely on
-  order.
+- The writer emits sections in the order `M K F X E`; readers MUST NOT rely
+  on order.
 
 ### Section tags
 
 | Tag | Name | Payload | Purpose |
 | --- | --- | --- | --- |
 | `M` (0x4D) | meta | one gzip stream of JSON | capture metadata + aggregates + **chunk index** |
-| `F` (0x46) | frames | concatenated **chunks** (§5) | core per-unit columns — everything the viewer renders |
-| `X` (0x58) | extra | concatenated chunks, same boundaries as `F` | extras: build progress, team economy |
+| `K` (0x4B) | keyframes | **one gzip stream**: every chunk's core keyframe, concatenated in chunk order | the keys-first download; also the prediction base every chunk's deltas decode from |
+| `F` (0x46) | frames | concatenated **chunks** (§5): each chunk's DELTA frames as one gzip stream | core per-unit columns — everything the viewer renders |
+| `X` (0x58) | extra | concatenated chunks, same frame boundaries as `F` (keyframe gzip + delta gzip per chunk) | extras: build progress, team economy |
 | `E` (0x45) | events | one gzip stream (§7) | unit lifecycle events |
 | `J` (0x4A) | head | one gzip stream of JSON | **not used in files** — reserved for the viz wire container (§10) |
 
@@ -173,73 +181,79 @@ Each entry of `chunks` locates one chunk (§5) inside the `F` and `X` sections:
 {
   "frame":   1920,   // sim frame of the chunk's FIRST sample
   "count":   64,     // samples in this chunk
-  "fOff":    433201, // byte offset of the chunk in the F section payload
-  "fKeyLen": 10233,  // bytes of the keyframe gzip stream within it
-  "fLen":    331890, // total chunk bytes in F (keyframe + delta streams)
-  "xOff":    150114, // same three, for the X section
-  "xKeyLen": 3021,
+  "kOff":    482112, // the keyframe's RAW byte range inside the DECOMPRESSED K
+  "kLen":    31544,  //   (kOff/kLen are decompressed-byte offsets, see below)
+  "fOff":    433201, // the chunk's delta gzip stream in the F section payload
+  "fLen":    321657, //   (fLen == 0 when count == 1: no delta frames at all)
+  "xOff":    150114, // the X section pieces: keyframe gzip [xOff, xOff+xKeyLen)
+  "xKeyLen": 3021,   //   then delta gzip up to xOff+xLen
   "xLen":    99852
 }
 ```
 
-- Offsets are **relative to the owning section's payload start**, *not* to the
-  file. This avoids a chicken-and-egg problem (the `M` section, which contains
-  the index, precedes `F`/`X` in the file, so absolute offsets would depend on
-  `M`'s own compressed size). To compute an absolute file range — e.g. to serve
-  chunks via HTTP Range requests from a static host — add the section's payload
-  offset, which any container scan yields (`snapshot.ReadContainer` reports it
-  as `Section.Offset`).
-- Chunks tile their section contiguously and in order
-  (`chunks[i+1].fOff == chunks[i].fOff + chunks[i].fLen`), but readers should
-  navigate by the index, not by that property.
+- `kOff`/`kLen` are offsets into the **decompressed** K payload — they are the
+  slice boundaries a consumer needs while *streaming* the keys download
+  through a decompressor (each keyframe is decoded the moment its bytes are
+  complete, no trial parsing), and the random-access index into K for
+  everything else.
+- F/X offsets are compressed-byte offsets **relative to the owning section's
+  payload start**, *not* to the file. This avoids a chicken-and-egg problem
+  (the `M` section, which contains the index, precedes `F`/`X` in the file, so
+  absolute offsets would depend on `M`'s own compressed size). To compute an
+  absolute file range — e.g. to serve chunks via HTTP Range requests from a
+  static host — add the section's payload offset, which any container scan
+  yields (`snapshot.ReadContainer` reports it as `Section.Offset`).
+- Chunks tile their sections contiguously and in order (in K:
+  `chunks[i+1].kOff == chunks[i].kOff + chunks[i].kLen`; likewise in F/X),
+  but readers should navigate by the index, not by that property.
 
 ## 5. Chunking — the random-access model
 
 Frames are grouped into **chunks of `chunkFrames` consecutive samples**
 (64 by default ≈ one minute of game at 1 Hz; the final chunk holds whatever
-remains). Two properties make a chunk the unit of random access:
+remains). The codec's prediction state resets at every chunk boundary: all
+temporal deltas (§6) are computed against the previous frame *within the same
+chunk*, so the chunk's first frame has no prior state — every unit is "new"
+and appears in the changed list with fully absolute values. That first frame
+is the **keyframe**.
 
-1. **The codec's prediction state resets at every chunk boundary.** All
-   temporal deltas (§6) are computed against the previous frame *within the
-   same chunk*; the chunk's first frame therefore has no prior state — every
-   unit is "new", so it appears in the changed list with fully absolute
-   values. That first frame is the **keyframe**. A chunk decodes correctly
-   with zero bytes from outside it.
-2. **A chunk's bytes are two standalone gzip streams**, concatenated:
+The pieces are stored by role (v4):
 
-   ```
-   [ gzip(keyframe codec bytes) ][ gzip(delta frames codec bytes) ]
-     `- fKeyLen bytes            `- (fLen - fKeyLen) bytes
-   ```
+1. **All keyframes live in the K section, as ONE gzip stream**, concatenated
+   in chunk order; the index locates keyframe *i* at decompressed
+   `[kOff, kOff+kLen)`. A consumer downloads K once, decoding keyframes
+   progressively while the stream arrives (each is one self-contained frame),
+   and can render any minute of the game — skimming/scrubbing — before any
+   chunk is fetched. One merged stream also compresses ~12 % better than the
+   per-chunk keyframe streams of v3 (adjacent keyframes are near-duplicates),
+   and a static host serves it as one contiguous range.
+2. **A chunk's F bytes are its DELTA frames only**, one standalone gzip
+   stream (absent entirely — `fLen == 0` — when the chunk has exactly one
+   frame). Decoding a chunk requires its keyframe first: run keyframe *i*
+   through a fresh codec, then the delta bytes through the same codec (§6).
+   No byte is ever downloaded twice: skim fetches the keyframe (via K),
+   playback adds only deltas.
 
-   The second stream is **absent when the chunk has exactly one frame**
-   (`fLen == fKeyLen`). The split exists so a consumer can fetch and decode
-   *only the keyframe* — ~10 KB for a 2 000-unit game — which is what makes
-   skimming (rendering one preview frame per minute while scrubbing) nearly
-   free. To decode a full chunk, gunzip both streams and concatenate the
-   *decompressed* bytes; the result is a single codec stream (§6) containing
-   `count` frames.
-
-Do **not** rely on the two streams being decodable as one concatenated
-multi-member gzip: some `DecompressionStream` implementations stop at the
-first member's end. Split at `fKeyLen` and gunzip each part separately.
-
-The `X` section chunks at exactly the same frame boundaries (its column shares
-the same prediction-state lifetime), with its own byte ranges in the index.
+The `X` section chunks at the same frame boundaries but keeps its
+keyframe+delta gzip pair per chunk (`[xOff, xOff+xKeyLen)` +
+`[xOff+xKeyLen, xOff+xLen)`) — browsers never fetch X, so it gains nothing
+from the K treatment. Do **not** rely on adjacent gzip streams being
+decodable as one concatenated multi-member gzip: some `DecompressionStream`
+implementations stop at the first member's end; slice at the index boundaries
+and gunzip each stream separately.
 
 Chunk-size trade-off: smaller chunks seek at finer granularity but repeat
 keyframes more often; keyframes also weigh more, relatively, now that delta
-frames skip unchanged units (on the reference capture keyframes are ~10 % of
-F). At 64 frames the measured overhead versus one monolithic delta stream was
-~+4 % of file size in v2; in v3 the same keyframes sit in a smaller file, so
-the relative overhead is ~+8 %.
+frames skip unchanged units (on the reference capture K is ~7 % of the file).
 
-## 6. `F` — the core frame codec
+## 6. The core frame codec (`K` + `F`)
 
-The decompressed codec stream of one chunk is a sequence of frames. **Every
-frame — keyframe included — uses the same layout** (a keyframe is simply a
-frame encoded against empty prior state, so its lists degenerate to "nothing
-died, everything changed"):
+A decompressed codec stream is a sequence of frames. **Every frame — keyframe
+included — uses the same layout** (a keyframe is simply a frame encoded
+against empty prior state, so its lists degenerate to "nothing died,
+everything changed"). Decoding order for chunk *i*: feed keyframe *i* (its
+`[kOff, kOff+kLen)` slice of the decompressed K) through a fresh codec, then
+the chunk's decompressed F bytes through the same codec.
 
 ```
 svarint  frameDelta        // this frame's sim frame − previous frame's (0 at chunk start)
@@ -257,8 +271,8 @@ nChanged × svarint         // column: dvx
 nChanged × svarint         // column: dvz
 ```
 
-Frames continue until the stream is exhausted (the chunk's `count` in the
-index says how many to expect; the Go reader cross-checks).
+Frames continue until the stream is exhausted (keyframe slice: exactly one
+frame; chunk delta stream: `count − 1` frames; the Go reader cross-checks).
 
 ### 6.1 Implicitly-unchanged units — the core of v3
 
@@ -323,8 +337,8 @@ including the re-materialised skipped units (state is per-chunk; see §5).
 
 A chunk's first three frames. `sv(v)` denotes the zigzag varint of `v`.
 
-Frame 30 (keyframe — no prior state, so every unit is in the changed list
-with absolute values):
+Frame 30 (the chunk's keyframe, stored in K — no prior state, so every unit
+is in the changed list with absolute values):
 
 | unit | def | team | x | z | hp | maxHp | dvx | dvz |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -332,7 +346,7 @@ with absolute values):
 | 9 | 12 | 2 | 400 | 401 | 80 | 100 | 0 | 0 |
 
 ```
-sv(30)                        // frame delta from 0
+sv(30)                        // frame delta from 0 (the codec was just reset)
 uv(0)                         // nDead
 uv(2)                         // nChanged
 ids:   sv(5)  sv(4)           // 5, then 9−5
@@ -346,9 +360,9 @@ dvx:   sv(3)  sv(0)
 dvz:   sv(0)  sv(0)
 ```
 
-Frame 60: unit 5 moved to (103, 200), exactly its dead-reckoned position,
-nothing else about it changed → **unit 5 is not encoded at all**. Unit 9 took
-damage (80 → 60):
+Frame 60 (the first frame of the chunk's delta stream, in F): unit 5 moved to
+(103, 200), exactly its dead-reckoned position, nothing else about it changed
+→ **unit 5 is not encoded at all**. Unit 9 took damage (80 → 60):
 
 ```
 sv(30) uv(0)                  // +30 sim frames; nothing died
@@ -380,7 +394,8 @@ uv(0)                         // nothing changed
 ## 7. `X` — the extra section
 
 Data the viewer does not render, kept for other consumers (build-progress
-display, economy graphs). Same chunk boundaries as `F`; per frame, the
+display, economy graphs). Same frame boundaries as the core codec, stored as
+a keyframe gzip stream + delta gzip stream per chunk (§5); per frame, the
 decompressed stream is:
 
 ```
@@ -404,8 +419,8 @@ changed test, §6.1).
 
 **`X` is not self-describing:** it has no unit counts or ids of its own — the
 column length, unit order, and the existed-in-previous-frame flags all come
-from decoding the same chunk of `F` first. Decode them together
-(`snapshot.ReadBRP` / `BRPFile.DecodeChunk` do).
+from decoding the corresponding core stream (keyframe or chunk deltas) first.
+Decode them together (`snapshot.ReadBRP` / `BRPFile.DecodeChunk` do).
 
 ## 8. Quantization and dropped fields
 
@@ -456,28 +471,42 @@ kinds can appear without a format change. Events are stored in capture order
 (non-decreasing frame), but the frame column is zigzag-coded so a
 non-monotonic stream still round-trips.
 
-## 10. The BRW wire container (how the viz server uses all this)
+## 10. The BRW wire container (how the replay is served)
 
 Not part of the file format, but specified here because it reuses the same
-framing and the same chunk bytes. `barreplay-viz` serves:
+framing and the same stored bytes. The Go viz server and the static/R2
+deployment (see `worker/`) share ONE URL scheme; `cmd/barreplay-static`
+precomputes the same responses as plain files:
 
-- **`GET /api/replay?file=<name>.brp`** → a container with magic **`BRW1`**,
-  version 3 (always equal to the file format version, since chunk bytes pass
-  through untouched), sections:
+- **`GET /replays/<id>.brw`** → a container with magic **`BRW1`**, version 4
+  (always equal to the file format version, since the data bytes pass through
+  untouched), sections:
   - `J`: gzip(JSON head) — a *viewer-shaped* projection of `M`: `gameId`,
     `engineVersion`, `gameVersion`, `mapName`, `sampleEvery`, `bounds`,
     `teams` (meta teams + `frameTeams` fill-ins), `unitDefs` (id→name only),
-    `unitIcons`, `footprints`, `frameCount`, and `chunks` — the index reduced
-    to `{frame, count, keyLen, len}` (the browser addresses chunks by ordinal,
-    so it needs the keyframe split point but not file offsets).
+    `unitIcons`, `footprints`, `players`, `frameCount`, and `chunks` — the
+    index reduced to `{frame, count, kLen, len}` (the browser addresses
+    chunks by ordinal and consumes the keys stream by cumulative `kLen`, so
+    it needs no file offsets).
   - `E`: the file's events section, **byte-for-byte**.
-- **`GET /api/replay/chunk?file=<name>.brp&i=<n>`** → the raw bytes
-  `F[fOff : fOff+fLen]` of chunk *n* — again byte-for-byte from the file; with
-  **`&key=1`**, only `F[fOff : fOff+fKeyLen]` (the keyframe stream).
+- **`GET /replays/<id>.keys`** → the `K` section payload **byte-for-byte**:
+  one gzip stream of every keyframe. The viewer fetches this immediately
+  after the head and decodes it progressively while it downloads
+  (`fetch` → `DecompressionStream` → slice at the head's cumulative `kLen`
+  boundaries), which is what makes the whole timeline scrubbable within the
+  first seconds.
+- **`GET /replays/<id>/c<n>`** → the raw delta bytes `F[fOff : fOff+fLen]` of
+  chunk *n* — again byte-for-byte from the file. Decoded seeded with keyframe
+  *n*. Not requested (and, in a static bundle, not even written) when
+  `len == 0`.
+- **`GET /replays/<id>.resources`** → per-frame team economy JSON (decoded
+  from `X` once, server-side/offline — the only endpoint that isn't a byte
+  copy, kept because browsers never fetch `X`).
 
-This zero-re-encoding property is the reason chunks are independently gzipped:
-the server's cost per request is a byte-range copy, and the storage format *is*
-the transfer format. The `X` section is never sent to the browser.
+This zero-re-encoding property is the reason the keyframes section and each
+chunk are independently gzipped: the server's cost per request is a byte-range
+copy, and the storage format *is* the transfer format — which is also what
+makes the no-server R2 deployment possible.
 
 ## 11. Guarantees and non-guarantees
 
@@ -485,7 +514,8 @@ Implementations may rely on:
 
 - **Determinism:** encoding the same capture (same meta, frames, events)
   produces a byte-identical file for a given writer version.
-- **Chunk independence:** any chunk decodes from its indexed byte range alone.
+- **Chunk independence:** any chunk decodes from its keyframe (its indexed
+  slice of K) plus its own delta byte range — nothing from any other chunk.
 - **Full-frame decode:** every decoded frame contains the complete live unit
   set, sorted by id — delta-frame skipping is an encoding detail, invisible in
   the decoded data.
@@ -499,7 +529,7 @@ Implementations may rely on:
   bump. Anything that changes how existing bytes must be *interpreted* —
   column set, column order, prediction rules, frame layout, chunk framing —
   requires incrementing the version byte, and readers reject versions they
-  don't know (exactly what v3 did over v2).
+  don't know (exactly what v3 did over v2, and v4 over v3).
 
 Explicitly **not** guaranteed:
 
@@ -512,20 +542,24 @@ Explicitly **not** guaranteed:
 ## 12. Reading a file, end to end
 
 ```
-1. Read 4-byte magic "BRP1"; read version byte; reject if != 3.
+1. Read 4-byte magic "BRP1"; read version byte; reject if != 4.
 2. Scan sections (tag, u32le length, payload) until EOF, remembering each
    payload's absolute offset. Skip unknown tags.
 3. gunzip M; parse JSON → meta, bounds, counts, chunk index.
-4. For whatever part of the timeline you need:
+4. gunzip K (once; or stream it, slicing keyframes at the kOff/kLen
+   boundaries as bytes arrive).
+5. For whatever part of the timeline you need:
    a. Pick chunk i from the index (its "frame"/"count" map sim time ranges
       to chunks; t = frame/30).
-   b. Slice F[fOff : fOff+fLen]. gunzip [0 : fKeyLen) and, if fLen > fKeyLen,
-      [fKeyLen : fLen); concatenate the decompressed bytes.
-   c. Decode frames per §6 with fresh prediction state: apply the dead list,
-      decode the changed units, advance every other live unit by its dv.
-   d. (Optional, for build/resources:) slice and gunzip the X ranges the
-      same way and decode per §7, driven by F's changed lists.
-5. gunzip E and decode per §9 when events are needed.
+   b. Decode keyframe i — K[kOff : kOff+kLen] — through a fresh codec (§6).
+      For skimming, stop here: that IS the chunk's first frame.
+   c. If fLen > 0: gunzip F[fOff : fOff+fLen] and decode it through the SAME
+      codec: apply each frame's dead list, decode its changed units, advance
+      every other live unit by its dv.
+   d. (Optional, for build/resources:) gunzip the X keyframe and delta
+      streams alongside their core counterparts and decode per §7, driven by
+      the core changed lists.
+6. gunzip E and decode per §9 when events are needed.
 ```
 
 Go entry points: `snapshot.ParseBRP` (steps 1–3, leaves sections compressed),
