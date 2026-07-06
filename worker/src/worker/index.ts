@@ -7,11 +7,15 @@
 //   /index.json                 the replay picker listing
 //   /replays/<id>.brw           one capture's head (meta, teams, icons, chunk index)
 //   /replays/<id>.resources     gzipped per-frame team economy
-//   /replays/<id>/c<n>          one frame chunk; a Range bytes=0-(keyLen-1) is the skim
+//   /replays/<id>.keys          every chunk's keyframe, one gzip stream — the viewer
+//                               streams this first, so the whole timeline is
+//                               scrubbable before any chunk arrives
+//   /replays/<id>/c<n>          one frame chunk's DELTA frames (absent when the
+//                               chunk is a single frame)
 //
-// These are served straight from R2 with Range support (the keyframe-skim path
-// needs it). The SPA, unit icons (/icons/*) and rank icons (/ranks/*) are fixed
-// static assets served by the ASSETS binding before the Worker even runs.
+// These are served straight from R2 (with Range support kept for good measure).
+// The SPA, unit icons (/icons/*) and rank icons (/ranks/*) are fixed static
+// assets served by the ASSETS binding before the Worker even runs.
 
 import { Hono } from "hono";
 
@@ -56,6 +60,8 @@ async function handleIndex(bucket: R2Bucket): Promise<Response> {
         replays.add(id); // the marker file for a valid replay
       } else if (rest.endsWith(".resources")) {
         id = rest.slice(0, -".resources".length);
+      } else if (rest.endsWith(".keys")) {
+        id = rest.slice(0, -".keys".length);
       } else {
         id = rest;
       }
@@ -122,13 +128,13 @@ function parseRange(header: string | null): R2Range | undefined {
 
 // setContentType fixes the few types the viewer relies on. .resources and
 // index.json are plain JSON (the platform applies transport compression itself);
-// .brw and chunk files are opaque binary the viewer gunzips internally, so they
-// stay application/octet-stream with no content-encoding.
+// .brw, .keys and chunk files are opaque binary the viewer gunzips internally,
+// so they stay application/octet-stream with no content-encoding.
 function setContentType(headers: Headers, key: string): void {
   if (key.endsWith(".resources") || key.endsWith(".json")) {
     headers.set("content-type", "application/json");
   } else {
-    // .brw head, or replays/<id>/c<n> — a raw gzip chunk stream the viewer
+    // .brw head, .keys, or replays/<id>/c<n> — a raw gzip stream the viewer
     // gunzips itself. Must not be served with Content-Encoding.
     headers.set("content-type", "application/octet-stream");
   }

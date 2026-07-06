@@ -151,13 +151,27 @@ precision multiplier. You'd spend ~1.2 MB to save ~45 KB.
 
 ---
 
-## Where v3 landed, and what's left
+## Keyframes-first layout (v4) — a streaming/UX restructure with a size bonus
+
+After v3 shipped, the keyframes (~8 % of the file, one per minute of game)
+moved out of the chunks into a single-gzip `K` section, downloaded FIRST by
+the viewer and decoded progressively while it streams — the whole timeline
+becomes scrubbable within seconds, before any chunk arrives, and chunks
+became delta-only so no byte is ever fetched twice. Not a compression
+optimization per se, but merging the near-duplicate adjacent keyframes into
+one gzip stream measured **12 % smaller keyframes** (626,619 → 549,899 bytes
+on the reference capture, ~77 KB off the file) because a shared compression
+window sees the previous keyframe's near-identical columns. File total:
+8,069,696 (v3) → **7,993,143 (v4)**.
+
+## Where v3/v4 landed, and what's left
 
 | | bytes | vs v2 |
 | --- | --- | --- |
-| v2 (shipped baseline) | 14 638 146 | 100 % |
-| v3 = opt1 + opt4 | **8 069 696** | **55.1 %** |
-| …with opt3 had it shipped | ~7.78 MB | ~53 % |
+| v2 (baseline) | 14 638 146 | 100 % |
+| v3 = opt1 + opt4 | 8 069 696 | 55.1 % |
+| v4 = v3 + merged keyframes section | **7 993 143** | **54.6 %** |
+| …with opt3 had it shipped | ~7.7 MB | ~53 % |
 
 Remaining levers, all measured or bounded during this work, none currently
 worth their cost:
@@ -166,9 +180,9 @@ worth their cost:
   in three decoders (above).
 - **±1-elmo position dead-band**: ~100–150 KB, at the price of positions no
   longer being exact to the elmo (~1.1 % of records become skippable).
-- **Keyframes** are now ~10 % of the file (0.76 MB, untouched by all of the
-  above); halving chunk size doubles seek granularity but adds keyframes,
-  and vice versa.
+- **Keyframes** are now ~7 % of the file (0.55 MB after the v4 merge);
+  halving chunk size doubles seek granularity but adds keyframes, and vice
+  versa.
 - **Entropy coding**: gzip is fixed by the serving model (browsers gunzip
   chunks natively via `DecompressionStream`); a stronger coder would break
   the zero-re-encoding chunk-serving contract.

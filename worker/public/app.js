@@ -2,15 +2,20 @@
 
 // barreplay viewer — vanilla JS canvas playback of a recorded capture.
 //
-// Wire format (see internal/viz/wire.go and snapshot/brp.go): /api/replay
-// returns a small binary "BRW1" container — the JSON head (meta, teams, icons,
-// bounds, and the CHUNK INDEX) plus the events section. Frame data arrives
-// separately, one chunk at a time, from /api/replay/chunk: each chunk is a
-// self-contained run of ~64 samples starting with a keyframe, sliced
-// byte-for-byte out of the .brp file. The viewer streams chunks around the
-// playhead (and sequentially in the background), so playback starts after the
-// first ~300 KB, seeking anywhere costs one chunk, and scrubbing an unloaded
-// region shows its keyframe (a ~10 KB fetch) immediately.
+// Wire format (see internal/viz/wire.go and snapshot/brp.go):
+// /replays/<id>.brw is a small binary "BRW1" container — the JSON head (meta,
+// teams, icons, bounds, and the CHUNK INDEX) plus the events section. Frame
+// data arrives in two tiers:
+//
+//   1. /replays/<id>.keys — EVERY chunk's keyframe, one gzip stream, fetched
+//      right after the head and decoded PROGRESSIVELY while it downloads
+//      (fetch body -> DecompressionStream -> keyframes sliced at the raw
+//      boundaries the head's chunk index gives). The first keyframe renders
+//      within the first network chunks, and the whole timeline becomes
+//      scrubbable in a few seconds, before any full chunk arrives.
+//   2. /replays/<id>/c<n> — chunk n's DELTA frames, fetched around the
+//      playhead (and sequentially in the background) and decoded seeded with
+//      keyframe n. No byte is ever downloaded twice.
 //
 // Frames unpack into a flat Int32Array `u` of stride 9:
 // [id, def, team, x, z, hp, maxHp, dvx, dvz]. We read it by index rather than
@@ -37,7 +42,7 @@ function parseContainer(buf) {
   for (let i = 0; i < magic.length; i++) {
     if (u8[i] !== magic.charCodeAt(i)) throw new Error('not a BRW payload (old server?)');
   }
-  if (u8[magic.length] !== 3) throw new Error('unsupported payload version ' + u8[magic.length]);
+  if (u8[magic.length] !== 4) throw new Error('unsupported payload version ' + u8[magic.length]);
   const dv = new DataView(buf);
   const secs = {};
   let off = magic.length + 1; // + version byte
@@ -50,7 +55,7 @@ function parseContainer(buf) {
   return secs;
 }
 
-// Frame decoding (.brp v3; mirrors snapshot/brp.go decodeFrames): per frame —
+// Frame decoding (mirrors snapshot/brp.go decodeFrames): per frame —
 // zigzag-varint frame delta, a DEAD id list (units that disappeared), a
 // CHANGED id list (new units + units with any column change), then 8 value
 // columns for the changed units only, delta-coded against the same unit in
@@ -59,7 +64,12 @@ function parseContainer(buf) {
 // was skipped by the encoder because it matched its prediction exactly, so
 // the decoder re-materialises it: position advances by dv, all else keeps.
 // The output frame is the FULL live unit set, sorted by id.
-function decodeFrames(b) {
+//
+// seed carries the prediction state INTO the stream: decoding a chunk's delta
+// file starts from its keyframe ({f, u} as previously decoded from the .keys
+// stream). Without a seed the stream must start with a keyframe (that is how
+// the keyframes themselves decode: each is one self-contained frame).
+function decodeFrames(b, seed) {
   let p = 0;
   const end = b.length;
   function uv() { // unsigned LEB128; falls back to float math past 28 bits
@@ -86,9 +96,12 @@ function decodeFrames(b) {
   }
 
   const frames = [];
-  let prevU = null;             // previous frame's Int32Array (sorted by id)
-  let prevMap = new Map();      // unit id -> base offset into prevU
-  let frame = 0;
+  let prevU = seed ? seed.u : null; // previous frame's Int32Array (sorted by id)
+  let prevMap = new Map();          // unit id -> base offset into prevU
+  let frame = seed ? seed.f : 0;
+  if (seed) {
+    for (let i = 0; i < seed.u.length; i += STRIDE) prevMap.set(seed.u[i], i);
+  }
   while (p < end) {
     frame += sv();
 
@@ -216,18 +229,24 @@ async function decodeHead(buf) {
 
 // ---- chunk streaming --------------------------------------------------------
 // data.chunks (from the head) indexes the fetchable chunks; chunkStartIdx[i] is
-// chunk i's first global frame index. Chunk states advance monotonically:
-//   0 none -> 1 keyframe requested -> 2 keyframe shown -> 3 full requested -> 4 full loaded
-// A small queue keeps at most MAX_INFLIGHT requests going, with playhead
-// requests jumping ahead of the background sequential download.
+// chunk i's first global frame index. The .keys stream delivers every chunk's
+// keyframe up front (streamKeys below); delta chunks are fetched by a small
+// queue that keeps at most MAX_INFLIGHT requests going, with playhead requests
+// jumping ahead of the background sequential download. Chunk states advance
+// monotonically:
+//   0 none -> 2 keyframe decoded -> 3 deltas requested -> 4 fully loaded
+// (a chunk's key can also arrive while its delta fetch is in flight, so 3 can
+// precede 2 in time; the number only ever grows).
 
 const MAX_INFLIGHT = 2;
 let chunkStartIdx = [];   // chunk i -> global index of its first frame
 let chunkState = [];      // per-chunk state (see above)
-let fetchQueue = [];      // pending {i, keyOnly}
+let keyFrames = [];       // chunk i -> decoded keyframe {f, t, n, u} (from .keys)
+let pendingDelta = [];    // chunk i -> gunzipped delta bytes that arrived before the key
+let fetchQueue = [];      // pending chunk indices
 let inflight = 0;
 let loadGen = 0;          // bumped per loadReplay; stale completions are dropped
-let currentFile = null;   // ?file= value for chunk URLs
+let currentFile = null;   // replay id for building /replays/ URLs
 
 // chunkOf returns the chunk containing global frame index gi.
 function chunkOf(gi) {
@@ -247,67 +266,107 @@ function frameNumAt(gi) {
   return data.chunks[c].frame + (gi - chunkStartIdx[c]) * data.sampleEvery;
 }
 
-// ensureChunk queues a fetch for chunk i unless it is already at (or heading
-// to) the needed level. urgent requests jump the queue (playhead beats the
-// background downloader).
+// streamKeys downloads /replays/<id>.keys — every chunk's keyframe as one
+// gzip stream — and decodes keyframes PROGRESSIVELY as bytes arrive: the
+// response body is piped through DecompressionStream and sliced at the raw
+// boundaries the head's chunk index provides (cumulative kLen), so keyframe 0
+// renders within the first network chunks and the whole timeline becomes
+// scrubbable while the stream is still downloading. Any delta chunk that
+// arrived before its keyframe is finished here.
+async function streamKeys(gen) {
+  const chunks = data.chunks;
+  let total = 0;
+  const bounds = chunks.map(c => (total += c.kLen)); // exclusive end of keyframe i
+  if (!total) return;
+  const buf = new Uint8Array(total);
+  let have = 0, ci = 0;
+  try {
+    const r = await fetch('/replays/' + encodeURIComponent(currentFile) + '.keys');
+    if (!r.ok) throw new Error(await r.text());
+    const reader = r.body.pipeThrough(new DecompressionStream('gzip')).getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (gen !== loadGen) { reader.cancel().catch(() => {}); return; }
+      if (value) {
+        if (have + value.length > total) throw new Error('keys stream longer than the index says');
+        buf.set(value, have);
+        have += value.length;
+      }
+      while (ci < chunks.length && have >= bounds[ci]) {
+        const start = ci === 0 ? 0 : bounds[ci - 1];
+        const kf = decodeFrames(buf.subarray(start, bounds[ci]))[0];
+        keyFrames[ci] = kf;
+        data.frames[chunkStartIdx[ci]] = kf;
+        // A single-frame chunk is complete once its keyframe is in.
+        chunkState[ci] = Math.max(chunkState[ci], chunks[ci].len === 0 ? 4 : 2);
+        if (pendingDelta[ci]) {
+          const raw = pendingDelta[ci];
+          pendingDelta[ci] = null;
+          applyDeltas(ci, raw);
+        }
+        onChunkArrived(ci);
+        ci++;
+      }
+      if (done) break;
+    }
+    if (ci < chunks.length) throw new Error('keys stream ended early (' + ci + '/' + chunks.length + ')');
+  } catch (err) {
+    if (gen === loadGen) console.error('keys stream failed:', err);
+  }
+}
+
+// ensureChunk queues a delta fetch for chunk i unless one is already underway
+// (or the chunk has no delta frames). urgent requests jump the queue (playhead
+// beats the background downloader).
 function ensureChunk(i, opts) {
   if (!data || i < 0 || i >= data.chunks.length) return;
-  const keyOnly = !!(opts && opts.keyOnly);
-  const st = chunkState[i];
-  if (st >= 3 || (keyOnly && st >= 1)) return; // full underway, or key already covered
-  chunkState[i] = keyOnly ? 1 : 3;
-  const item = { i, keyOnly };
-  if (opts && opts.urgent) fetchQueue.unshift(item); else fetchQueue.push(item);
+  if (chunkState[i] >= 3) return;
+  if (data.chunks[i].len === 0) { // single-frame chunk: the keyframe is everything
+    chunkState[i] = Math.max(chunkState[i], 3);
+    return;
+  }
+  chunkState[i] = 3;
+  if (opts && opts.urgent) fetchQueue.unshift(i); else fetchQueue.push(i);
   pumpFetches();
 }
 
 function pumpFetches() {
   while (inflight < MAX_INFLIGHT && fetchQueue.length) {
-    const item = fetchQueue.shift();
-    // A full fetch may have superseded a queued key fetch (or vice versa).
-    if (chunkState[item.i] >= 4 || (item.keyOnly && chunkState[item.i] >= 2)) continue;
+    const i = fetchQueue.shift();
+    if (chunkState[i] >= 4) continue;
     inflight++;
-    fetchChunk(item.i, item.keyOnly);
+    fetchChunk(i);
   }
 }
 
-async function fetchChunk(i, keyOnly) {
+// applyDeltas decodes chunk i's gunzipped delta bytes seeded with its
+// keyframe and fills the chunk's remaining frames.
+function applyDeltas(i, raw) {
+  const frames = decodeFrames(raw, keyFrames[i]);
+  const base = chunkStartIdx[i];
+  for (let k = 0; k < frames.length; k++) data.frames[base + 1 + k] = frames[k];
+  chunkState[i] = 4;
+}
+
+async function fetchChunk(i) {
   const gen = loadGen;
   try {
-    // Static R2 path: one file per chunk. The keyframe skim is a byte Range over
-    // the leading keyLen bytes (the standalone keyframe gzip stream) of that file.
-    const chunkUrl = '/replays/' + encodeURIComponent(currentFile) + '/c' + i;
-    const r = keyOnly
-      ? await fetch(chunkUrl, { headers: { Range: 'bytes=0-' + (data.chunks[i].keyLen - 1) } })
-      : await fetch(chunkUrl);
+    const r = await fetch('/replays/' + encodeURIComponent(currentFile) + '/c' + i);
     if (!r.ok) throw new Error(await r.text());
     const bytes = new Uint8Array(await r.arrayBuffer());
     if (gen !== loadGen) return; // a different replay was loaded meanwhile
-    const c = data.chunks[i];
-    let raw;
-    if (keyOnly) {
-      raw = await gunzipU8(bytes);
-    } else {
-      // The chunk is two gzip streams: keyframe [0, keyLen) + deltas.
-      const key = await gunzipU8(bytes.subarray(0, c.keyLen));
-      if (bytes.length > c.keyLen) {
-        const rest = await gunzipU8(bytes.subarray(c.keyLen));
-        raw = new Uint8Array(key.length + rest.length);
-        raw.set(key, 0);
-        raw.set(rest, key.length);
-      } else {
-        raw = key;
-      }
-    }
+    const raw = await gunzipU8(bytes);
     if (gen !== loadGen) return;
-    const frames = decodeFrames(raw);
-    const base = chunkStartIdx[i];
-    for (let k = 0; k < frames.length; k++) data.frames[base + k] = frames[k];
-    chunkState[i] = keyOnly ? Math.max(chunkState[i], 2) : 4;
+    if (keyFrames[i]) {
+      applyDeltas(i, raw);
+    } else {
+      // The keys stream hasn't reached this chunk yet; it will apply these.
+      pendingDelta[i] = raw;
+    }
   } catch (err) {
     if (gen !== loadGen) return;
-    chunkState[i] = 0; // allow a retry on the next ensure
-    console.error('chunk ' + i + (keyOnly ? ' (key)' : '') + ' failed:', err);
+    chunkState[i] = keyFrames[i] ? 2 : 0; // allow a retry on the next ensure
+    console.error('chunk ' + i + ' failed:', err);
   } finally {
     if (gen === loadGen) {
       inflight--;
@@ -349,7 +408,9 @@ function updateBuffBar() {
   const total = data.frameCount;
   const stops = ['transparent 0%'];
   for (let i = 0; i < data.chunks.length; i++) {
-    if (chunkState[i] < 2) continue;
+    // Dark = keyframe available (scrubbable), light = fully loaded. A delta
+    // request in flight (state 3) with no keyframe yet shows nothing.
+    if (chunkState[i] < 4 && !keyFrames[i]) continue;
     const a = (chunkStartIdx[i] / total * 100).toFixed(2) + '%';
     const b = ((chunkStartIdx[i] + data.chunks[i].count) / total * 100).toFixed(2) + '%';
     const col = chunkState[i] >= 4 ? '#5a9fd0' : '#3a5568';
@@ -1525,13 +1586,13 @@ function setPlayhead(pos, forceSidebar) {
 
 function show() { setPlayhead(idx, true); } // full refresh at the current keyframe
 
-// Jump to a whole keyframe (stepping / scrubbing): no interpolation. Scrubbing
-// an unloaded region grabs the chunk's keyframe right away (~10 KB) so the map
-// keeps up with the slider; the full chunk fetch starts once the user dwells.
+// Jump to a whole keyframe (stepping / scrubbing): no interpolation. The
+// chunk's keyframe is (almost always) already decoded from the .keys stream,
+// so the map keeps up with the slider; the chunk's delta fetch starts once
+// the user dwells.
 function go(i) {
   const target = Math.round(i);
   if (data && !data.frames[target]) {
-    ensureChunk(chunkOf(target), { keyOnly: true, urgent: true });
     clearTimeout(scrubTimer);
     scrubTimer = setTimeout(() => {
       const c = chunkOf(idx);
@@ -1684,6 +1745,8 @@ async function loadReplay(file) {
   data.frames = new Array(data.frameCount); // sparse: filled as chunks stream in
   chunkStartIdx = [];
   chunkState = new Array(data.chunks.length).fill(0);
+  keyFrames = new Array(data.chunks.length).fill(null);
+  pendingDelta = new Array(data.chunks.length).fill(null);
   let acc = 0;
   for (const c of data.chunks) { chunkStartIdx.push(acc); acc += c.count; }
   if (!data.frameCount) {
@@ -1710,8 +1773,10 @@ async function loadReplay(file) {
   resize();      // sets canvas size
   fitView();     // fit map to viewport
   updateBuffBar();
-  // Start streaming: the playhead's chunk first, then the rest sequentially in
-  // the background — the timeline fills in while the user is already watching.
+  // Start streaming: the keys stream first (all keyframes — the whole
+  // timeline becomes scrubbable within seconds), the playhead's delta chunk
+  // in parallel, then the rest sequentially in the background.
+  streamKeys(loadGen);
   ensureChunk(0, { urgent: true });
   ensureChunk(1);
   pumpBackground();

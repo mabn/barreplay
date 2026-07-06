@@ -10,19 +10,21 @@ import (
 )
 
 // The browser payload is binary, not JSON — a real capture holds millions of
-// unit records. /api/replay returns a small "BRW1" container (same section
+// unit records. /replays/<id>.brw is a small "BRW1" container (same section
 // framing as .brp, see snapshot/brp.go):
 //
 //	J  head JSON (this file's wireHead): meta, teams, icons, footprints,
 //	   bounds, and the CHUNK INDEX
 //	E  events — the .brp file's E section byte-for-byte
 //
-// The frame data itself is NOT in this payload: the browser fetches chunks
-// individually via /api/replay/chunk as the user plays/seeks/skims, and the
-// server slices each chunk's bytes straight out of the stored file (they are
-// independently gzipped exactly so that no re-encoding is ever needed). The
-// decoder lives in web/app.js and must mirror snapshot/brp.go's column layout
-// exactly — evolve them together.
+// The frame data itself is NOT in this payload: the browser streams
+// /replays/<id>.keys (every keyframe, one gzip stream — the whole timeline
+// becomes scrubbable while it downloads) and fetches each chunk's delta file
+// /replays/<id>/c<n> as the user plays/seeks. The server slices all of these
+// straight out of the stored file (they are independently gzipped exactly so
+// that no re-encoding is ever needed). The decoder lives in
+// worker/public/app.js and must mirror snapshot/brp.go's layout exactly —
+// evolve them together.
 
 // resourceStride is the number of ints packed per team in a resource record
 // (see /api/replay/resources): [team, metal, energy, metalStore, energyStore,
@@ -74,15 +76,16 @@ type wirePlayer struct {
 	Skill     float32 `json:"skill,omitempty"` // OpenSkill "OS" rating
 }
 
-// wireChunk describes one fetchable chunk to the browser. keyLen is where the
-// keyframe gzip stream ends within the chunk's bytes, so the client can split
-// a fetched chunk into its two gzip streams (and so it knows what a
-// keyframe-only response contains).
+// wireChunk describes one fetchable chunk to the browser. kLen is the RAW
+// (decompressed) byte length of this chunk's keyframe inside the .keys
+// stream — the cumulative kLen values are the boundaries the client uses to
+// consume the keys download progressively. len is the byte size of the
+// chunk's delta file (0 when the chunk is a single frame: nothing to fetch).
 type wireChunk struct {
-	Frame  int32 `json:"frame"` // sim frame of the chunk's first sample
-	Count  int   `json:"count"` // samples in this chunk
-	KeyLen int64 `json:"keyLen"`
-	Len    int64 `json:"len"`
+	Frame int32 `json:"frame"` // sim frame of the chunk's first sample
+	Count int   `json:"count"` // samples in this chunk
+	KLen  int64 `json:"kLen"`
+	Len   int64 `json:"len"`
 }
 
 // wireIcon is one unit type's icon in the payload: p = served bitmap path
@@ -206,7 +209,7 @@ func brpWirePayload(f *snapshot.BRPFile) ([]byte, error) {
 	head.FrameCount = f.FrameCount
 	head.Chunks = make([]wireChunk, len(f.Chunks))
 	for i, c := range f.Chunks {
-		head.Chunks[i] = wireChunk{Frame: c.Frame, Count: c.Count, KeyLen: c.FKeyLen, Len: c.FLen}
+		head.Chunks[i] = wireChunk{Frame: c.Frame, Count: c.Count, KLen: c.KLen, Len: c.FLen}
 	}
 
 	headJSON, err := json.Marshal(head)
