@@ -239,6 +239,18 @@ type wireResFrame struct {
 // chunk-by-chunk keeps peak memory bounded (frames are discarded after their
 // resources are copied out).
 func brpResourcesPayload(f *snapshot.BRPFile) ([]byte, error) {
+	js, err := brpResourcesJSON(f)
+	if err != nil {
+		return nil, err
+	}
+	return gzipBytes(js), nil
+}
+
+// brpResourcesJSON is the uncompressed resources body (the JSON array before
+// gzip). The static bundler stores this verbatim so the platform can apply its
+// own transport compression — storing a pre-gzipped body and declaring
+// Content-Encoding: gzip double-compresses on Cloudflare (workerd re-encodes it).
+func brpResourcesJSON(f *snapshot.BRPFile) ([]byte, error) {
 	out := make([]wireResFrame, 0, f.FrameCount)
 	for i := range f.Chunks {
 		frames, err := f.DecodeChunk(i)
@@ -261,11 +273,7 @@ func brpResourcesPayload(f *snapshot.BRPFile) ([]byte, error) {
 			out = append(out, wireResFrame{F: fr.Frame, R: r})
 		}
 	}
-	js, err := json.Marshal(out)
-	if err != nil {
-		return nil, err
-	}
-	return gzipBytes(js), nil
+	return json.Marshal(out)
 }
 
 func round(f float32) int32 { return int32(math.Round(float64(f))) }
