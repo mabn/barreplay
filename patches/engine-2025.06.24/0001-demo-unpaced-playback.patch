@@ -1,0 +1,45 @@
+From 7ef53b5b68276895803581d0a6589a6f3646b2d6 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 6 Jul 2026 23:49:19 +0000
+Subject: [PATCH] demo playback: release packets at client consumption rate,
+ not CPU-governor pace
+
+When a demo is being read and a local client is attached, advance
+modGameTime past the demo read position each server tick instead of
+pacing it by internalSpeed (which LagProtection steers toward a fixed
+60/75% client-CPU target, idling the sim and spinning draw frames when
+the packet queue runs dry). The existing GAME_SPEED-frames-behind gate
+stays as flow control. Pacing only; packet contents are untouched, so
+playback is deterministic (verified byte-identical snapshot streams on
+two replays).
+
+8v8 replay 6da7496a: sim wall 17m9s -> 12m43s (57 -> 77 fps, +35%),
+Draw 108s -> 2.6s, sim now 93% of wall.
+---
+ rts/Net/GameServer.cpp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/rts/Net/GameServer.cpp b/rts/Net/GameServer.cpp
+index cdfc902..a1ddee1 100644
+--- a/rts/Net/GameServer.cpp
++++ b/rts/Net/GameServer.cpp
+@@ -806,6 +806,16 @@ void CGameServer::Update()
+ 		// <modGameTime>
+ 		if (demoReader == nullptr || !HasLocalClient() || (serverFrameNum - players[localClientNumber].lastFrameResponse) < GAME_SPEED)
+ 			modGameTime += (tdif * internalSpeed);
++
++		// [barreplay] demo playback with a local client: release demo packets as
++		// fast as the client consumes them instead of pacing modGameTime by
++		// internalSpeed (which LagProtection() steers toward a fixed CPU-usage
++		// target, idling the sim by design). The <GAME_SPEED>-frames-behind gate
++		// above stays as flow control; each server tick (~5ms) opens a window a
++		// couple of game-seconds past the demo read position. Release *pacing*
++		// only - packet contents are untouched, so playback stays deterministic.
++		if (demoReader != nullptr && HasLocalClient() && (serverFrameNum - players[localClientNumber].lastFrameResponse) < GAME_SPEED)
++			modGameTime = std::max(modGameTime, demoReader->GetModGameTime() + 2.0f);
+ 	}
+ 
+ 	if (lastPlayerInfo < (spring_gettime() - playerInfoTime)) {
+-- 
+2.43.0
+
