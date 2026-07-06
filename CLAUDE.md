@@ -16,12 +16,14 @@ positions is to replay it in the engine and sample state from a read-only Lua wi
 go build ./cmd/barreplay        # build the capture CLI -> ./barreplay
 go build ./cmd/barreplay-viz    # build the visualization server -> ./barreplay-viz
 go build ./cmd/barreplay-pack   # build the .jsonl/.brsnap -> .brp converter
+go build ./cmd/barreplay-static # build the .brp -> static-hosting bundle packer (for worker/)
 go test ./...                   # all unit tests (no engine required)
 go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
 go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, no engine
 go run ./cmd/barreplay-viz -snapshots ./snapshots        # serve the viewer at 127.0.0.1:8080
 go run ./cmd/barreplay-pack ./snapshots/*.jsonl          # shrink legacy captures to .brp
 go run ./cmd/barreplay-pack ./caps/<gameId>.brsnap       # raw stream -> FULL .brp (fetches the demo for map/versions/players; -id overrides, -no-demo skips)
+go run ./cmd/barreplay-static -out ./static ./snapshots/*.brp   # pack .brp -> static bundle for R2 hosting (see worker/)
 ```
 
 Tests are hermetic: `barapi` uses a mock HTTP server, `demofile` tests against the
@@ -35,11 +37,14 @@ BAR API serving that same fixture. None of them launch the engine or touch the n
 cmd/barreplay/main.go     CLI: link/gameId/.sdfz -> full pipeline
 cmd/barreplay-viz/main.go CLI: serve the browser playback UI over a snapshots dir
 cmd/barreplay-pack/main.go CLI: convert legacy .jsonl/.brsnap captures to .brp
+cmd/barreplay-static/main.go CLI: pack .brp -> static-file bundle (index.json + replays/**) for R2 hosting
 internal/barapi/          resolve gameId via api.bar-rts.com; download .sdfz from OVH
 internal/demofile/        gunzip + parse packed header + TDF startscript
 internal/engine/          locate spring-headless/pr-downloader, provision, launch, stream stdout
 internal/capture/         parse the widget's BRSNAP stdout protocol -> snapshot records
 internal/viz/             serve embedded HTML/JS viewer + chunked binary wire API (.brp v2 only)
+internal/viz/static.go    pack a .brp into plain static files (byte-identical to the wire API) for serverless hosting
+worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as static files from R2 (no playback server)
 snapshot/                 PUBLIC data model + pluggable Writer (owns on-disk format; v2 .brp binary, legacy v1 JSONL)
 assets/lua/snapshot_widget.lua   embedded, read-only sampler (go:embed)
 ```
@@ -312,6 +317,24 @@ real HTTP handler and checks the head payload (bounds, teams incl. frame-only on
 footprints, chunk index) plus the pass-through contract: chunk and keyframe responses
 must be the stored file's exact byte ranges, and the listing shows only `.brp` files.
 No engine or browser needed.
+
+### Serverless static hosting (`internal/viz/static.go` + `cmd/barreplay-static` + `worker/`)
+
+Because the viz server never decodes a frame — the head is a pure function of the `.brp`
+meta and each chunk is an independently-gzipped byte range — the whole playback path can be
+served as **plain static files with no server**. `viz.WriteStaticBundle` precomputes, per
+capture: `replays/<id>.brw` (the `/api/replay` head), `replays/<id>.resources` (the economy
+JSON, stored **uncompressed** — a pre-gzipped body double-compresses on Cloudflare), and one
+`replays/<id>/c<n>` file per chunk (the `/api/replay/chunk` bytes; the `&key=1` keyframe skim
+becomes an HTTP `Range: bytes=0-(keyLen-1)` on that file). `WriteIndex` writes `index.json`.
+These are **byte-identical** to the dynamic server (guarded by `static_test.go`, which diffs
+the bundle against the real HTTP handler), so the same `web/app.js` decoder runs unchanged —
+it only swaps `/api/*` URLs for the static paths. `cmd/barreplay-static` is the CLI; the
+`worker/` Cloudflare project (Hono + Vite) serves the bundle from an R2 bucket (with Range
+support) and the SPA + vendored icons as static assets. Map terrain is fetched browser-side
+straight from `api.bar-rts.com`, so the worker has no map proxy and no playback logic.
+`static.go` shares the wire encoders (`brpWirePayload`/`brpResourcesJSON`), so it stays in
+lockstep with the codec automatically — the same three-way codec lockstep note applies.
 
 ## Running a real capture (needs the engine + content)
 

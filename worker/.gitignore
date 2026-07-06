@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+*.log
+# Vendored icons synced from internal/viz/bardata by tools/sync-assets.mjs.
+public/icons/
+public/ranks/
