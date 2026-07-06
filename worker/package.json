@@ -6,7 +6,6 @@
   "type": "module",
   "scripts": {
     "sync-assets": "node tools/sync-assets.mjs",
-    "upload": "node tools/upload.mjs",
     "predev": "npm run sync-assets",
     "dev": "vite",
     "prebuild": "npm run sync-assets",
