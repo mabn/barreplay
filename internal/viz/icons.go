@@ -2,8 +2,10 @@ package viz
 
 import (
 	"embed"
+	"encoding/json"
 	"io/fs"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -136,6 +138,40 @@ func loadIcons() {
 			iconByName[name+"_scav"] = iconInfo{Path: scav, Size: norm(ic.Size)}
 		}
 	}
+}
+
+// IconTableJSON returns the whole icontypes table as JSON: an object keyed by
+// icontype name (including the synthesised "<name>_scav" variants) with
+// {"p":"icons/foo.png","s":size}. It's the same name->icon data buildHead
+// resolves, dumped so a browser reading a .brp directly can resolve unit icons
+// itself (worker/public/icontypes.json). Deterministic key order for a stable
+// committed asset.
+func IconTableJSON() ([]byte, error) {
+	iconOnce.Do(loadIcons)
+	names := make([]string, 0, len(iconByName))
+	for k := range iconByName {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	type wireIconJSON struct {
+		P string  `json:"p"`
+		S float64 `json:"s"`
+	}
+	// Marshal via an ordered slice of key/value pairs to keep output stable.
+	var buf strings.Builder
+	buf.WriteByte('{')
+	for i, name := range names {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		key, _ := json.Marshal(name)
+		val, _ := json.Marshal(wireIconJSON{P: iconByName[name].Path, S: iconByName[name].Size})
+		buf.Write(key)
+		buf.WriteByte(':')
+		buf.Write(val)
+	}
+	buf.WriteByte('}')
+	return []byte(buf.String()), nil
 }
 
 // iconsSubFS returns the embedded icons directory rooted so files are served as
