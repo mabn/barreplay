@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "barreplay",
+  "name": "replay",
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-06-27",
   // Same Cloudflare account as the sibling claudebar/lavabalance worker.
