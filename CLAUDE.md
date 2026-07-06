@@ -285,6 +285,25 @@ legacy parsing; viz has none).
   it stays constant when zoomed out and fills the footprint when zoomed in; mobile units
   (no footprint) are unaffected. The icon is resolved by the unit-def's `iconType` key first
   (falling back to its name), so units whose iconType differs from their name still get an icon.
+- **WebGL icon renderer (`app.js` `initGL`/`glBuildInstances`/`glRender`)**: the default
+  icon path whenever WebGL2 with a *hardware* renderer is available. All grayscale icon
+  bitmaps pack into **one 2048² atlas texture** (uploaded as bitmaps arrive, mipmapped,
+  premultiplied alpha) that lives in GPU memory for the whole session; each animation
+  frame only writes a per-unit instance buffer `[center, size, uv rect, tint]` and issues
+  a **single instanced draw call**, with the team tint applied in the fragment shader
+  (`rgb * tint`, icon alpha — the same multiply+destination-in composite the 2D path
+  bakes into per-team glyph canvases, so the output matches visually). Icons draw on the
+  transparent overlay canvas `#glcv`; the 2D canvas keeps the base layer (map, grid,
+  footprints) and **skips repainting entirely** on ticks where only icons moved (a
+  `baseKey` of everything the base layer depends on). Software GL (SwiftShader/llvmpipe)
+  is refused — its frames reach the compositor via pixel readback, slower than the 2D
+  path — and everything falls back to the original per-unit `drawImage` loop, as it does
+  on any init/context failure (`?gl=1` forces GL on, `?gl=0` forces the 2D path). The 2D
+  path itself was also slimmed for unit-heavy replays: per-def icon/footprint tables
+  built once per load (`buildDefTables`) instead of two string-hash lookups per unit per
+  frame, per-draw def/glyph memos instead of per-unit `"path|color|px"` keys, an
+  allocation-free `interpPos` (shared scratch), throttled sidebar DOM rebuilds during
+  playback (200 ms min), and time-label/slider writes only when the value changed.
 - The **real map terrain** behind the units is loaded **entirely client-side** (`loadMap`
   in `app.js`): the browser takes the head's `mapName` (from the capture's meta),
   normalizes it to the API's file-name form (lowercase, spaces→`_`), and talks straight
