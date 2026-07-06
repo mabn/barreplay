@@ -1,7 +1,6 @@
 package viz
 
 import (
-	"embed"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,14 +13,15 @@ import (
 	"time"
 
 	"github.com/mabn/barreplay/snapshot"
+	webassets "github.com/mabn/barreplay/worker"
 )
 
-//go:embed web/index.html web/app.js web/style.css
-var webFS embed.FS
-
-// Server serves the playback UI and a small API over a directory of .brp
-// snapshot files. It supports the .brp v2 format ONLY — convert legacy
-// .jsonl/.brsnap captures once with barreplay-pack.
+// Server serves the playback UI and the replay data over a directory of .brp
+// snapshot files, using the SAME URL scheme as the static/R2 deployment (see
+// worker/): /index.json, /replays/<id>.brw, /replays/<id>.resources,
+// /replays/<id>.keys, /replays/<id>/c<n>. One front-end (worker/public,
+// embedded here) therefore works against both backends. It reads the current
+// .brp format ONLY — convert legacy captures once with barreplay-pack.
 type Server struct {
 	// Dir is the directory scanned for .brp snapshot files.
 	Dir string
@@ -48,10 +48,12 @@ type cacheEntry struct {
 	lastUse   time.Time
 }
 
-// replayInfo is one entry in the /api/replays listing.
+// replayInfo is one entry in the /index.json listing. File (== GameID, the
+// basename without .brp) is the key the viewer builds every replay URL from,
+// matching the R2 object naming.
 type replayInfo struct {
-	File   string `json:"file"`   // basename, used as the ?file= key
-	GameID string `json:"gameId"` // filename without extension
+	File   string `json:"file"`
+	GameID string `json:"gameId"`
 	Size   int64  `json:"size"`
 }
 
@@ -61,7 +63,7 @@ func (s *Server) Handler() http.Handler {
 
 	serveAsset := func(name, ctype string) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			b, err := webFS.ReadFile("web/" + name)
+			b, err := webassets.Assets.ReadFile(name)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -80,8 +82,8 @@ func (s *Server) Handler() http.Handler {
 		}
 		serveAsset("index.html", "text/html; charset=utf-8")(w, r)
 	})
-	mux.HandleFunc("/app.js", serveAsset("app.js", "text/javascript; charset=utf-8"))
-	mux.HandleFunc("/style.css", serveAsset("style.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("/app.js", serveAsset("public/app.js", "text/javascript; charset=utf-8"))
+	mux.HandleFunc("/style.css", serveAsset("public/style.css", "text/css; charset=utf-8"))
 	// The browser auto-requests a favicon; answer it so it isn't a 404 in logs.
 	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
@@ -95,11 +97,40 @@ func (s *Server) Handler() http.Handler {
 	if sub, err := ranksSubFS(); err == nil {
 		mux.Handle("/ranks/", http.StripPrefix("/ranks/", cacheForever(http.FileServer(http.FS(sub)))))
 	}
-	mux.HandleFunc("/api/replays", s.handleList)
-	mux.HandleFunc("/api/replay", s.handleReplay)
-	mux.HandleFunc("/api/replay/chunk", s.handleChunk)
-	mux.HandleFunc("/api/replay/resources", s.handleResources)
+	mux.HandleFunc("/index.json", s.handleList)
+	mux.HandleFunc("/replays/", s.handleReplays)
 	return mux
+}
+
+// handleReplays routes the static-shaped replay URLs:
+//
+//	/replays/<id>.brw        head payload (meta, teams, icons, chunk index)
+//	/replays/<id>.resources  per-frame team economy (gzipped JSON)
+//	/replays/<id>.keys       the K section byte-for-byte (all core keyframes)
+//	/replays/<id>/c<n>       chunk n's delta bytes, byte-for-byte
+//
+// <id> is the capture's basename without the .brp extension; the same paths
+// resolve to plain objects in the R2 deployment (see worker/).
+func (s *Server) handleReplays(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/replays/")
+	if id, n, ok := strings.Cut(rest, "/"); ok {
+		if !strings.HasPrefix(n, "c") {
+			http.NotFound(w, r)
+			return
+		}
+		s.handleChunk(w, r, id, n[1:])
+		return
+	}
+	switch {
+	case strings.HasSuffix(rest, ".brw"):
+		s.handleReplay(w, r, strings.TrimSuffix(rest, ".brw"))
+	case strings.HasSuffix(rest, ".resources"):
+		s.handleResources(w, r, strings.TrimSuffix(rest, ".resources"))
+	case strings.HasSuffix(rest, ".keys"):
+		s.handleKeys(w, r, strings.TrimSuffix(rest, ".keys"))
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 // handleList returns the snapshot files available in Dir.
@@ -112,10 +143,10 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, infos)
 }
 
-// get returns the parsed .brp for a validated basename, from cache when the
-// file hasn't changed.
+// get returns the parsed .brp for a validated id, from cache when the file
+// hasn't changed.
 func (s *Server) get(name string) (*cacheEntry, error) {
-	path := filepath.Join(s.Dir, name)
+	path := filepath.Join(s.Dir, name+".brp")
 	fi, err := os.Stat(path)
 	if err != nil {
 		return nil, err
@@ -165,11 +196,12 @@ func (s *Server) get(name string) (*cacheEntry, error) {
 	return e, nil
 }
 
-// validName confines ?file= to a bare .brp basename inside Dir.
-func validName(name string) bool {
-	return name != "" && name == filepath.Base(name) &&
-		!strings.Contains(name, string(filepath.Separator)) &&
-		strings.EqualFold(filepath.Ext(name), ".brp")
+// validID confines a /replays/<id>… path segment to a bare name that maps to
+// "<id>.brp" inside Dir (no separators, no traversal, no hidden files).
+func validID(id string) bool {
+	return id != "" && !strings.HasPrefix(id, ".") &&
+		id+".brp" == filepath.Base(id+".brp") &&
+		!strings.ContainsAny(id, "/\\")
 }
 
 // notModified handles ETag revalidation; chunk data is immutable for a given
@@ -184,17 +216,16 @@ func notModified(w http.ResponseWriter, r *http.Request, etag string) bool {
 	return false
 }
 
-// handleReplay returns one capture's head payload (?file=<basename>): the BRW1
-// container of head JSON (meta, teams, icons, bounds, chunk index) plus the
-// events section — small, so the page is interactive immediately. Frame data
-// is fetched per chunk via /api/replay/chunk.
-func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("file")
-	if !validName(name) {
-		http.Error(w, "missing or invalid ?file= (want a .brp basename)", http.StatusBadRequest)
+// handleReplay returns one capture's head payload (/replays/<id>.brw): the
+// BRW1 container of head JSON (meta, teams, icons, bounds, chunk index) plus
+// the events section — small, so the page is interactive immediately. Frame
+// data arrives via the .keys stream and the per-chunk delta files.
+func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request, id string) {
+	if !validID(id) {
+		http.Error(w, "invalid replay id", http.StatusBadRequest)
 		return
 	}
-	e, err := s.get(name)
+	e, err := s.get(id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -206,33 +237,28 @@ func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
 	w.Write(e.payload)
 }
 
-// handleChunk returns one chunk's bytes (?file=<basename>&i=<n>[&key=1]),
-// sliced straight out of the stored file — chunks are independently gzipped
-// exactly so this needs no re-encoding. &key=1 returns only the keyframe
-// stream (the cheap skim path).
-func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("file")
-	if !validName(name) {
-		http.Error(w, "missing or invalid ?file= (want a .brp basename)", http.StatusBadRequest)
+// handleChunk returns chunk n's DELTA bytes (/replays/<id>/c<n>), sliced
+// straight out of the stored file — chunks are independently gzipped exactly
+// so this needs no re-encoding. Keyframes are not here: they are served
+// together, as /replays/<id>.keys.
+func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request, id, num string) {
+	if !validID(id) {
+		http.Error(w, "invalid replay id", http.StatusBadRequest)
 		return
 	}
-	e, err := s.get(name)
+	e, err := s.get(id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	i, err := strconv.Atoi(r.URL.Query().Get("i"))
+	i, err := strconv.Atoi(num)
 	if err != nil || i < 0 || i >= len(e.brp.Chunks) {
-		http.Error(w, fmt.Sprintf("invalid ?i= (file has %d chunks)", len(e.brp.Chunks)), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("invalid chunk (file has %d chunks)", len(e.brp.Chunks)), http.StatusBadRequest)
 		return
 	}
 	c := e.brp.Chunks[i]
 	sec := e.brp.Sections[snapshot.SecFrames]
-	end := c.FOff + c.FLen
-	if r.URL.Query().Get("key") == "1" {
-		end = c.FOff + c.FKeyLen
-	}
-	if c.FOff < 0 || end > int64(len(sec)) {
+	if c.FOff < 0 || c.FOff+c.FLen > int64(len(sec)) {
 		http.Error(w, "chunk range outside frames section", http.StatusInternalServerError)
 		return
 	}
@@ -240,21 +266,48 @@ func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Write(sec[c.FOff:end])
+	w.Write(sec[c.FOff : c.FOff+c.FLen])
 }
 
-// handleResources returns the per-frame team economy for a capture (?file=), a
-// gzipped JSON array of {f, r} the sidebar player list turns into metal/energy
-// bars. Frame resources live in the .brp X stream, which the frame chunk path
-// never fetches, so this decodes them once and caches the compressed body on
-// the entry. Sent with Content-Encoding: gzip so the browser inflates it.
-func (s *Server) handleResources(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("file")
-	if !validName(name) {
-		http.Error(w, "missing or invalid ?file= (want a .brp basename)", http.StatusBadRequest)
+// handleKeys returns the file's K section byte-for-byte
+// (/replays/<id>.keys): every chunk's core keyframe as ONE gzip stream. The
+// viewer fetches this right after the head and decodes it progressively while
+// it downloads, which is what makes the whole timeline scrubbable within the
+// first seconds.
+func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request, id string) {
+	if !validID(id) {
+		http.Error(w, "invalid replay id", http.StatusBadRequest)
 		return
 	}
-	e, err := s.get(name)
+	e, err := s.get(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sec, ok := e.brp.Sections[snapshot.SecKeyframes]
+	if !ok {
+		http.Error(w, "capture has no keyframes section", http.StatusInternalServerError)
+		return
+	}
+	if notModified(w, r, e.etag) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Write(sec)
+}
+
+// handleResources returns the per-frame team economy for a capture
+// (/replays/<id>.resources), a gzipped JSON array of {f, r} the sidebar
+// player list turns into metal/energy bars. Frame resources live in the .brp
+// X stream, which the frame paths never fetch, so this decodes them once and
+// caches the compressed body on the entry. Sent with Content-Encoding: gzip
+// so the browser inflates it.
+func (s *Server) handleResources(w http.ResponseWriter, r *http.Request, id string) {
+	if !validID(id) {
+		http.Error(w, "invalid replay id", http.StatusBadRequest)
+		return
+	}
+	e, err := s.get(id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -295,11 +348,8 @@ func (s *Server) list() ([]replayInfo, error) {
 		if err != nil {
 			continue
 		}
-		infos = append(infos, replayInfo{
-			File:   e.Name(),
-			GameID: strings.TrimSuffix(e.Name(), filepath.Ext(e.Name())),
-			Size:   info.Size(),
-		})
+		id := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
+		infos = append(infos, replayInfo{File: id, GameID: id, Size: info.Size()})
 	}
 	sort.Slice(infos, func(i, j int) bool { return infos[i].File < infos[j].File })
 	return infos, nil

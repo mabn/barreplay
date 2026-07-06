@@ -222,27 +222,34 @@ func TestBRPParseSections(t *testing.T) {
 	if len(bf.FrameTeams) != 2 || bf.FrameTeams[0] != 0 || bf.FrameTeams[1] != 1 {
 		t.Errorf("frameTeams = %v", bf.FrameTeams)
 	}
-	for _, tag := range []byte{SecMeta, SecFrames, SecExtra, SecEvents} {
+	for _, tag := range []byte{SecMeta, SecKeyframes, SecFrames, SecExtra, SecEvents} {
 		if _, ok := bf.Sections[tag]; !ok {
 			t.Errorf("missing section %q", tag)
 		}
 	}
 
 	// 3 frames fit in one chunk; its index entry must describe the whole F/X
-	// payloads and start at the first frame.
+	// payloads, span the whole decompressed K, and start at the first frame.
 	if bf.ChunkFrames != defaultChunkFrames || len(bf.Chunks) != 1 {
 		t.Fatalf("chunkFrames=%d chunks=%+v", bf.ChunkFrames, bf.Chunks)
 	}
 	c := bf.Chunks[0]
-	if c.Frame != 30 || c.Count != 3 || c.FOff != 0 || c.XOff != 0 {
+	if c.Frame != 30 || c.Count != 3 || c.FOff != 0 || c.XOff != 0 || c.KOff != 0 {
 		t.Errorf("chunk = %+v", c)
 	}
 	if c.FLen != int64(len(bf.Sections[SecFrames])) || c.XLen != int64(len(bf.Sections[SecExtra])) {
 		t.Errorf("chunk lengths %d/%d don't span the sections (%d/%d)",
 			c.FLen, c.XLen, len(bf.Sections[SecFrames]), len(bf.Sections[SecExtra]))
 	}
-	if c.FKeyLen <= 0 || c.FKeyLen >= c.FLen {
-		t.Errorf("keyframe range [0,%d) of %d looks wrong", c.FKeyLen, c.FLen)
+	keys, err := bf.Keyframes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.KLen <= 0 || c.KLen != int64(len(keys)) {
+		t.Errorf("keyframe range [0,%d) doesn't span decompressed K (%d bytes)", c.KLen, len(keys))
+	}
+	if c.FLen <= 0 {
+		t.Errorf("chunk with 3 frames must have delta bytes, FLen = %d", c.FLen)
 	}
 }
 
@@ -494,5 +501,57 @@ func TestBRPSkipIdleUnits(t *testing.T) {
 	codec.encodeFrame(&varintWriter{w: &core3}, &varintWriter{w: io.Discard}, frames[2])
 	if core3.Len() != 4 {
 		t.Errorf("delta frame with only a death = %d core bytes, want 4", core3.Len())
+	}
+}
+
+// A chunk holding a single frame stores no delta stream at all (FLen == 0) —
+// its keyframe in K is the whole chunk. Consumers (static bundler, viewer)
+// rely on that to skip the chunk fetch entirely.
+func TestBRPSingleFrameChunk(t *testing.T) {
+	meta, _, _ := testCapture()
+	var frames []Frame
+	for i := 0; i < defaultChunkFrames+1; i++ { // 64 + 1
+		frames = append(frames, Frame{Frame: int32(30 * (i + 1)), Units: []UnitState{
+			{UnitID: 1, DefID: 1, Team: 0, Pos: Vec3{X: float32(i), Z: 5}, Health: 100, MaxHealth: 100},
+		}})
+	}
+	dir := t.TempDir()
+	w, err := NewBRPWriter(dir, meta.GameID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteMeta(meta); err != nil {
+		t.Fatal(err)
+	}
+	for _, fr := range frames {
+		if err := w.WriteFrame(fr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, meta.GameID+".brp")
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	bf, err := ParseBRP(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bf.Chunks) != 2 || bf.Chunks[1].Count != 1 {
+		t.Fatalf("chunks = %+v", bf.Chunks)
+	}
+	if bf.Chunks[1].FLen != 0 {
+		t.Errorf("single-frame chunk has FLen = %d, want 0", bf.Chunks[1].FLen)
+	}
+	last, err := bf.DecodeChunk(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(last) != 1 || last[0].Frame != frames[64].Frame || len(last[0].Units) != 1 {
+		t.Fatalf("decoded single-frame chunk = %+v", last)
 	}
 }

@@ -12,17 +12,20 @@ import (
 )
 
 // This file turns a .brp capture into a directory of plain static files so the
-// viewer can be hosted with no server on the playback path (see
-// docs/... / the worker/ Cloudflare project). The .brp format was designed for
-// exactly this: the /api/replay head is a pure function of the file's meta, and
-// each frame chunk is an independently-gzipped byte range — so serving is a byte
-// copy, not a re-encode. The artifacts below are byte-identical to what
-// internal/viz serves dynamically:
+// viewer can be hosted with no server on the playback path (see the worker/
+// Cloudflare project). The .brp format was designed for exactly this: the head
+// is a pure function of the file's meta, and the keyframes section and each
+// chunk's delta frames are independently-gzipped byte ranges — so serving is a
+// byte copy, not a re-encode. The artifacts below are byte-identical to what
+// internal/viz serves dynamically (the URL scheme is shared):
 //
-//	replays/<gameId>.brw        == GET /api/replay?file=<gameId>.brp
-//	replays/<gameId>.resources  == GET /api/replay/resources?file=<gameId>.brp
-//	replays/<gameId>/c<i>       == GET /api/replay/chunk?file=...&i=<i>   (full chunk)
-//	  and a Range bytes=0-(keyLen-1) on c<i> == the ...&key=1 keyframe skim.
+//	replays/<gameId>.brw        == GET /replays/<gameId>.brw
+//	replays/<gameId>.resources  == GET /replays/<gameId>.resources
+//	replays/<gameId>.keys       == GET /replays/<gameId>.keys   (the K section:
+//	                               every keyframe, one gzip stream, streamed
+//	                               keys-first by the viewer)
+//	replays/<gameId>/c<i>       == GET /replays/<gameId>/c<i>   (chunk i's delta
+//	                               frames; not written when the chunk has none)
 //
 // index.json lists every replay in the bundle (rebuilt from disk, so a growing
 // mirror stays correct). Unit and rank icons are NOT emitted here: they are a
@@ -79,14 +82,28 @@ func WriteStaticBundle(brpPath, outDir string) (string, error) {
 		return "", err
 	}
 
-	// One file per frame chunk: the frames-section slice [FOff, FOff+FLen).
-	// Chunks are independently gzipped, so this is a byte copy; the keyframe skim
-	// is a Range request bytes=0-(keyLen-1) against the same file.
+	// The keyframes section byte-for-byte: the viewer streams this one file to
+	// make the whole timeline scrubbable before any chunk arrives.
+	keys, ok := bf.Sections[snapshot.SecKeyframes]
+	if !ok {
+		return "", fmt.Errorf("%s has no keyframes section", gameID)
+	}
+	if err := os.WriteFile(filepath.Join(replaysDir, gameID+".keys"), keys, 0o644); err != nil {
+		return "", err
+	}
+
+	// One file per frame chunk: its DELTA frames, the frames-section slice
+	// [FOff, FOff+FLen). Independently gzipped, so this is a byte copy. A
+	// single-frame chunk has no delta bytes and gets no file (the index in the
+	// head says len == 0, so the viewer never asks).
 	sec := bf.Sections[snapshot.SecFrames]
 	for i, c := range bf.Chunks {
 		end := c.FOff + c.FLen
 		if c.FOff < 0 || end > int64(len(sec)) {
 			return "", fmt.Errorf("%s chunk %d range [%d,%d) outside frames section (%d bytes)", gameID, i, c.FOff, end, len(sec))
+		}
+		if c.FLen == 0 {
+			continue
 		}
 		p := filepath.Join(replaysDir, gameID, fmt.Sprintf("c%d", i))
 		if err := os.WriteFile(p, sec[c.FOff:end], 0o644); err != nil {
@@ -132,6 +149,7 @@ func replayBundleSize(replaysDir, id string) int64 {
 	}
 	add(filepath.Join(replaysDir, id+".brw"))
 	add(filepath.Join(replaysDir, id+".resources"))
+	add(filepath.Join(replaysDir, id+".keys"))
 	if chunks, err := os.ReadDir(filepath.Join(replaysDir, id)); err == nil {
 		for _, c := range chunks {
 			if fi, err := c.Info(); err == nil {

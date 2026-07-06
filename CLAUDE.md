@@ -42,10 +42,11 @@ internal/barapi/          resolve gameId via api.bar-rts.com; download .sdfz fro
 internal/demofile/        gunzip + parse packed header + TDF startscript
 internal/engine/          locate spring-headless/pr-downloader, provision, launch, stream stdout
 internal/capture/         parse the widget's BRSNAP stdout protocol -> snapshot records
-internal/viz/             serve embedded HTML/JS viewer + chunked binary wire API (.brp v2 only)
-internal/viz/static.go    pack a .brp into plain static files (byte-identical to the wire API) for serverless hosting
-worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as static files from R2 (no playback server)
-snapshot/                 PUBLIC data model + pluggable Writer (owns on-disk format; v2 .brp binary, legacy v1 JSONL)
+internal/viz/             serve the viewer (SPA embedded from worker/) + the static-shaped replay URLs
+internal/viz/static.go    pack a .brp into plain static files (byte-identical to the served URLs) for serverless hosting
+worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as static files from R2 (no playback server);
+                          worker/public + worker/index.html are THE front-end (embedded into barreplay-viz via assets.go)
+snapshot/                 PUBLIC data model + pluggable Writer (owns on-disk format; current .brp binary, legacy v1 JSONL)
 assets/lua/snapshot_widget.lua   embedded, read-only sampler (go:embed)
 ```
 
@@ -54,36 +55,42 @@ interface. To change it implement `snapshot.Writer`; nothing in `capture`/`engin
 changes. `capture.Consume(r, baseMeta, w)` is the seam between the engine's text
 output and the writer.
 
-### On-disk format v3: `.brp` (snapshot/brp.go)
+### On-disk format v4: `.brp` (snapshot/brp.go)
 
 Full byte-level spec: `docs/brp-format.md` — keep it in sync with any codec change
 (`docs/brp-optimizations.md` records the measured evaluation behind the format's
 design decisions). The default output (`-format brp`; `-format jsonl` keeps the
-legacy JSONL). A real 33-min 8v8 game is **476 MB of JSONL but ~8.1 MB of .brp
-(~59x)** (quantized once: whole elmos/hp, velocity as per-sample-interval
+legacy JSONL). A real 33-min 8v8 game is **476 MB of JSONL but ~8 MB of .brp
+(~62x)** (quantized once: whole elmos/hp, velocity as per-sample-interval
 displacement, build progress 1/255, resources 0.1; `t` is derived as `frame/30`,
 not stored; **y/dvy are not stored at all** — the viewer renders the x/z plane and
 ground-unit elevation is terrain noise, so decoded `Pos.Y`/`VelY` are 0). Container:
-`"BRP1" <ver u8 = 3>` then tagged sections `<tag u8><len u32le><payload>` — `M` meta
-JSON (Meta + precomputed bounds/frameTeams/counts + the **chunk index**), `F` core
-frame columns (id def team x z hp maxHp dvx dvz), `X` extra (build column + team
-resources — not sent to the browser), `E` events. Unknown tags are skipped, so
-sections can be added compatibly; any version byte other than 3 is rejected (v1/v2
-existed only pre-release; regenerate a .brp from its .brsnap with barreplay-pack).
+`"BRP1" <ver u8 = 4>` then tagged sections `<tag u8><len u32le><payload>` — `M` meta
+JSON (Meta + precomputed bounds/frameTeams/counts + the **chunk index**), `K` **all
+core keyframes as ONE gzip stream**, `F` core delta-frame chunks (columns: id def
+team x z hp maxHp dvx dvz), `X` extra (build column + team resources — not sent to
+the browser), `E` events. Unknown tags are skipped, so sections can be added
+compatibly; any version byte other than 4 is rejected (v1–v3 existed only
+pre-release; regenerate a .brp from its .brsnap with barreplay-pack).
 
-**Chunking (random access / streaming).** F and X are not single streams: frames are
-grouped into **chunks of 64 samples** (~1 min at 1 Hz), and the codec's prediction
-state resets at every chunk boundary, so each chunk's first frame encodes fully
-absolute — a keyframe — and any chunk decodes with zero bytes from outside it (the
-video-codec model). Each chunk is two standalone gzip streams — K (keyframe alone) +
-D (delta frames) — so a consumer can fetch/decode *just keyframes* to skim a capture
-(~10 KB per minute of game). The `M` record's `chunks` array indexes them (first sim
-frame, sample count, byte ranges relative to the section payload; `Section.Offset`
-from `ReadContainer` gives the absolute file position, enabling future HTTP-Range
-static hosting). Keyframe repetition + per-chunk gzip cost ~+8% file size (v3;
-keyframes always carry every live unit, so they weigh relatively more now that
-delta frames skip the unchanged ones). X chunks in lockstep with F (its build
-column covers exactly F's changed list) but is never fetched by the viewer.
+**Chunking (random access / streaming).** Frames are grouped into **chunks of 64
+samples** (~1 min at 1 Hz), and the codec's prediction state resets at every chunk
+boundary, so each chunk's first frame encodes fully absolute — a keyframe (the
+video-codec model). **Keyframes live OUTSIDE the chunks (v4): concatenated, in
+chunk order, into the single-gzip `K` section.** A viewer downloads `K` first (one
+request, ~0.5 MB for a 33-min game) and decodes it progressively while it streams —
+the whole timeline becomes scrubbable within seconds, before any chunk arrives —
+then fetches chunks, which now hold **only delta frames** (one gzip stream each; a
+single-frame chunk has none), so no byte is ever downloaded twice. Decoding a chunk
+requires seeding the codec with its keyframe first (`BRPFile.DecodeChunk` does).
+Merging the near-identical adjacent keyframes into one stream also compresses ~12%
+better than v3's per-chunk keyframe streams. The `M` record's `chunks` array
+indexes everything: first sim frame, sample count, the keyframe's RAW byte range in
+the decompressed `K` (`kOff`/`kLen` — the boundaries the streaming consumer slices
+at), and the delta byte ranges relative to the section payloads (`Section.Offset`
+from `ReadContainer` gives absolute file positions, enabling HTTP-Range static
+hosting). X keeps a keyframe+delta gzip pair per chunk (its build column covers
+exactly the core changed list) but is never fetched by the viewer.
 
 Why it's small: a delta frame stores only an explicit **dead-id list** and a
 **changed-unit list** (new units + units where any column differs from its
@@ -96,15 +103,17 @@ interpolation tangent the viewer uses), so constant-velocity movement is "no
 change" and skips too. Chunks gzip at DefaultCompression (BestCompression measured
 >10x slower for <2% size).
 
-Chunks are **independently** gzipped so the viz server can serve any chunk to the
-browser byte-for-byte. Three codec implementations must stay in lockstep: the encoder
-+ Go decoder in `snapshot/brp.go` and the JS decoder in `internal/viz/web/app.js`
-(`decodeFrames`/`decodeEvents`). The writer is deterministic (same capture →
-byte-identical file), which the "diff two runs to verify an optimization" workflow
-relies on. `snapshot.ReadBRP` fully decodes; `snapshot.ParseBRP` decodes only meta +
-index and hands back the raw sections; `BRPFile.DecodeChunk(i)` decodes one chunk
-standalone. A roundtrip loses unit order within a frame (sorted by id),
-sub-quantization precision, and y/dvy (decoded as 0) — nothing else.
+The K section and each chunk are **independently** gzipped so any server can hand
+them to the browser byte-for-byte. Three codec implementations must stay in
+lockstep: the encoder + Go decoder in `snapshot/brp.go` and the JS decoder in
+`worker/public/app.js` (`decodeFrames`/`decodeEvents`). The writer is deterministic
+(same capture → byte-identical file), which the "diff two runs to verify an
+optimization" workflow relies on. `snapshot.ReadBRP` fully decodes;
+`snapshot.ParseBRP` decodes only meta + index and hands back the raw sections;
+`BRPFile.Keyframes()` gunzips K once (cached); `BRPFile.DecodeChunk(i)` decodes one
+chunk (its K slice + its delta bytes). A roundtrip loses unit order within a frame
+(sorted by id), sub-quantization precision, and y/dvy (decoded as 0) — nothing
+else.
 
 ### Data flow
 
@@ -206,36 +215,46 @@ won't load without an extra dev flag. Widgets are the right injection point.
 
 A **separate, read-only** tool that serves a browser playback of a finished capture; it
 never touches the engine. `barreplay-viz -snapshots <dir> [-addr host:port]` scans the
-dir for `.brp` files and serves the viewer. **The viz tool supports .brp v2 only** —
-convert a legacy `.jsonl`/`.brsnap` once with `barreplay-pack` (the converter owns the
-legacy parsing; viz has none).
+dir for `.brp` files and serves the viewer. **The viz tool reads the current .brp
+version only** — convert a legacy `.jsonl`/`.brsnap` once with `barreplay-pack` (the
+converter owns the legacy parsing; viz has none). The viz server and the `worker/`
+static deployment share ONE URL scheme (`/index.json`, `/replays/<id>.brw`, `.keys`,
+`.resources`, `/replays/<id>/c<n>`), so the single front-end in `worker/public`
+works against both unchanged.
 
-- **`internal/viz/wire.go` + `server.go`** implement the streaming API:
-  `/api/replay?file=` returns a small binary **"BRW1" container** (same section framing
+- **`internal/viz/wire.go` + `server.go`** implement the serving side:
+  `/replays/<id>.brw` returns a small binary **"BRW1" container** (same section framing
   as `.brp`) of a gzipped `J` head JSON (meta, teams, unitDef names, icons, footprints,
-  bounds, `frameCount`, and the **chunk index** `{frame,count,keyLen,len}` per chunk)
+  players, bounds, `frameCount`, and the **chunk index** `{frame,count,kLen,len}` per
+  chunk — `kLen` is the keyframe's RAW length inside the decompressed keys stream)
   plus the file's `E` events section byte-for-byte — ~230 KB for a 33-min game, so the
-  page is interactive immediately. Frame data is served per chunk by
-  `/api/replay/chunk?file=&i=<n>[&key=1]`, **sliced straight out of the stored file**
-  (`&key=1` returns just the keyframe gzip stream — the skim path). The server never
-  decodes a frame: bounds/teams/index all come from the file's meta record
-  (`snapshot.ParseBRP`), and parsed files are cached in-memory (mtime-keyed, ~4
-  entries) with `ETag`/304 revalidation so chunk requests are cheap and re-visits
-  free. In the browser, `app.js` gunzips each chunk with the native
-  `DecompressionStream` and unpacks frames into the same flat stride-9 `Int32Array`
-  (`[id, def, team, x, z, hp, maxHp, dvx, dvz]`) the renderer always used.
-- **`app.js` chunk streaming**: `data.frames` is a **sparse array** filled as chunks
-  decode. A small fetch queue (2 in flight) serves the playhead first and otherwise
-  downloads chunks sequentially in the background, so the whole replay "arrives
-  gradually" (a buffered-ranges bar under the slider shows progress, video-player
-  style). Playback starts after head + chunk 0 (~260 KB, <1s at 5 Mbps); seeking to an
-  unloaded spot fetches that one chunk (playback shows "buffering…" and resumes when it
-  decodes); scrubbing an unloaded region immediately fetches the chunk's **keyframe
-  only** (~10 KB) and renders it (`dispIdx` falls back to the keyframe; the full chunk
-  fetch starts after a 250 ms dwell). Verified on the real capture at a throttled
-  5 Mbps: first frame in ~0.9 s, mid-game seek ~2.5 s with 26/31 chunks still absent,
-  and the completed download decodes to exactly the same 4.2M unit records as a full
-  `ReadBRP`. `dvx`/`dvz` are the unit's
+  page is interactive immediately. `/replays/<id>.keys` serves the `K` section
+  byte-for-byte (every keyframe, one gzip stream); `/replays/<id>/c<n>` serves chunk
+  n's delta bytes, **sliced straight out of the stored file**. The server never
+  decodes a frame (except `.resources`, decoded once and cached): bounds/teams/index
+  all come from the file's meta record (`snapshot.ParseBRP`), and parsed files are
+  cached in-memory (mtime-keyed, ~4 entries) with `ETag`/304 revalidation so requests
+  are cheap and re-visits free. In the browser, `app.js` gunzips each response with
+  the native `DecompressionStream` and unpacks frames into the same flat stride-9
+  `Int32Array` (`[id, def, team, x, z, hp, maxHp, dvx, dvz]`) the renderer always
+  used.
+- **`app.js` keys-first streaming**: right after the head, the viewer fetches
+  `.keys` and pipes the response body through `DecompressionStream`, slicing
+  keyframes out at the cumulative `kLen` boundaries as bytes arrive (`streamKeys`) —
+  the first keyframe renders within the first network chunks, and **every minute of
+  the timeline becomes scrubbable in a few seconds**, before any full chunk arrives.
+  `data.frames` is a **sparse array**: keyframes land at their chunk-start indices as
+  they decode, and a small fetch queue (2 in flight) then downloads each chunk's
+  **delta file**, decoded seeded with its keyframe (`decodeFrames(raw, keyFrames[i])`;
+  deltas that arrive before their keyframe wait in `pendingDelta`), playhead first,
+  sequential in the background — so the whole replay "arrives gradually" (a
+  buffered-ranges bar under the slider shows keyframe-only vs fully-loaded chunks,
+  video-player style). Scrubbing an unloaded region renders its keyframe instantly
+  (`dispIdx` falls back to it; the delta fetch starts after a 250 ms dwell), and
+  playback shows "buffering…" at an unloaded spot until its chunk decodes. Verified
+  headlessly (Playwright chromium) on the real capture: first keyframe at load, all
+  31 keyframes streamed, instant mid-game scrub, and the completed download decodes
+  to exactly the same 4.2M unit records as a full `ReadBRP`. `dvx`/`dvz` are the unit's
   **per-keyframe-interval velocity displacement**
   (`GetUnitVelocity` is per sim-frame, so the codec multiplies by `SampleEvery`) — used to
   **interpolate movement smoothly** between the 1 Hz samples rather than blinking. The
@@ -250,8 +269,8 @@ legacy parsing; viz has none).
   `playPos` (keyframe units), so **1× = real time** (1 game-second/second) and every speed
   interpolates.
   The column layout is defined by the `.brp` codec — `snapshot/brp.go` (Go encode+decode)
-  and `decodeFrames` in `web/app.js` (JS decode) must stay in lockstep, as must `STRIDE`
-  (JS). The head's `bounds` (viewport fit) and team roster (Meta.Teams plus any team id
+  and `decodeFrames` in `worker/public/app.js` (JS decode) must stay in lockstep, as must
+  `STRIDE` (JS). The head's `bounds` (viewport fit) and team roster (Meta.Teams plus any team id
   seen only in frames/events — `frameTeams` — so nothing renders colourless) come from
   the file's meta record. `buildHead` also fills `footprints`
   (name→`{w,h}` in elmos) for **structures only** (`!UnitDef.CanMove || UnitDef.IsBuilding`):
@@ -319,41 +338,44 @@ legacy parsing; viz has none).
   (only the demo startscript path does), so a `.brp` packed from a raw `.brsnap` with
   `barreplay-pack -no-demo` has an empty `mapName` and renders the plain background; the
   default pack fetches the demo by gameId and fills it in.
-- **`internal/viz/server.go`** embeds `web/{index.html,app.js,style.css}` via `go:embed` and
-  exposes `/api/replays` (the file list), `/api/replay?file=<basename>` (one capture's wire
-  payload), `/api/replay/chunk` (frame data), and `/icons/<file>` (the embedded icons,
-  cached). The `file` param is confined to the snapshots dir (basename only —
-  rejects any path separator / traversal). UI/JSON assets are served `no-store` so a changed
-  UI never serves stale.
-- **`internal/viz/web/`** is plain HTML/Canvas/vanilla-JS — **no framework, no build step**
-  (the prompt allowed Vite but it's unnecessary for a single embedded page). `app.js` reads the
-  flat unit arrays by index (no per-unit objects), batches dots by team colour, and does
-  timeline scrub / play / zoom / pan / hover-tooltip. Colours are assigned per ally-team (a base
-  hue per ally, lightness varied per team within it).
+- **`internal/viz/server.go`** embeds the SPA from **`worker/`** (`index.html` +
+  `public/{app.js,style.css}` via `worker/assets.go` — the single copy of the
+  front-end in the repo) and exposes `/index.json` (the replay list),
+  `/replays/<id>.brw|.keys|.resources`, `/replays/<id>/c<n>`, and `/icons/<file>` +
+  `/ranks/<n>.png` (the embedded icons, cached). The `<id>` segment is confined to
+  the snapshots dir (maps to `<id>.brp`, basename only — rejects any path separator /
+  traversal). UI/JSON assets are served `no-store` so a changed UI never serves stale.
+- **`worker/public/`** (+ `worker/index.html`) is plain HTML/Canvas/vanilla-JS — **no
+  framework, no build step for the app itself** (Vite only wraps it for the Cloudflare
+  deploy). `app.js` reads the flat unit arrays by index (no per-unit objects), renders
+  via WebGL instanced sprites (2D-canvas fallback), and does timeline scrub / play /
+  zoom / pan / hover-tooltip. Colours are assigned per ally-team (a base hue per ally,
+  lightness varied per team within it).
 
 Guarding the tool: `internal/viz/viz_test.go` serves a synthetic `.brp` through the
 real HTTP handler and checks the head payload (bounds, teams incl. frame-only ones,
-footprints, chunk index) plus the pass-through contract: chunk and keyframe responses
+footprints, chunk index) plus the pass-through contract: the keys and chunk responses
 must be the stored file's exact byte ranges, and the listing shows only `.brp` files.
 No engine or browser needed.
 
 ### Serverless static hosting (`internal/viz/static.go` + `cmd/barreplay-static` + `worker/`)
 
 Because the viz server never decodes a frame — the head is a pure function of the `.brp`
-meta and each chunk is an independently-gzipped byte range — the whole playback path can be
-served as **plain static files with no server**. `viz.WriteStaticBundle` precomputes, per
-capture: `replays/<id>.brw` (the `/api/replay` head), `replays/<id>.resources` (the economy
-JSON, stored **uncompressed** — a pre-gzipped body double-compresses on Cloudflare), and one
-`replays/<id>/c<n>` file per chunk (the `/api/replay/chunk` bytes; the `&key=1` keyframe skim
-becomes an HTTP `Range: bytes=0-(keyLen-1)` on that file). `WriteIndex` writes `index.json`.
-These are **byte-identical** to the dynamic server (guarded by `static_test.go`, which diffs
-the bundle against the real HTTP handler), so the same `web/app.js` decoder runs unchanged —
-it only swaps `/api/*` URLs for the static paths. `cmd/barreplay-static` is the CLI; the
-`worker/` Cloudflare project (Hono + Vite) serves the bundle from an R2 bucket (with Range
-support) and the SPA + vendored icons as static assets. Map terrain is fetched browser-side
-straight from `api.bar-rts.com`, so the worker has no map proxy and no playback logic.
-`static.go` shares the wire encoders (`brpWirePayload`/`brpResourcesJSON`), so it stays in
-lockstep with the codec automatically — the same three-way codec lockstep note applies.
+meta and the keys/chunk responses are independently-gzipped byte ranges — the whole
+playback path can be served as **plain static files with no server**.
+`viz.WriteStaticBundle` precomputes, per capture: `replays/<id>.brw` (the head),
+`replays/<id>.keys` (the `K` section), `replays/<id>.resources` (the economy JSON,
+stored **uncompressed** — a pre-gzipped body double-compresses on Cloudflare), and one
+`replays/<id>/c<n>` file per chunk with delta frames (single-frame chunks get no file).
+`WriteIndex` writes `index.json`. These are **byte-identical** to the dynamic server at
+the same URLs (guarded by `static_test.go`, which diffs the bundle against the real HTTP
+handler), so the same `worker/public/app.js` runs against both backends with no URL
+swapping at all. `cmd/barreplay-static` is the CLI; the `worker/` Cloudflare project
+(Hono + Vite) serves the bundle from an R2 bucket and the SPA + vendored icons as static
+assets. Map terrain is fetched browser-side straight from `api.bar-rts.com`, so the
+worker has no map proxy and no playback logic. `static.go` shares the wire encoders
+(`brpWirePayload`/`brpResourcesJSON`), so it stays in lockstep with the codec
+automatically — the same three-way codec lockstep note applies.
 
 ## Running a real capture (needs the engine + content)
 
@@ -569,7 +591,7 @@ never their content — and is the main remaining speed lever (~25-35% at the 60
 - The demo header is little-endian, byte-packed; layout verified in
   `internal/demofile/demofile.go` against the real sample (magic `spring demofile`,
   version 5, headerSize 352).
-- Output: `<out>/<gameId>.brp` (see "On-disk format v2"); read it back with
+- Output: `<out>/<gameId>.brp` (see "On-disk format v4"); read it back with
   `snapshot.ReadBRP`. `-format jsonl` writes the legacy `<gameId>.jsonl` (a `meta` line
   then interleaved `frame`/`event` lines; `snapshot.NewReader`). On completion the CLI
   prints the engine wall-time (split into load + sim, with sim fps/speed-up), the engine

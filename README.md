@@ -23,19 +23,20 @@ replay link / gameId / local .sdfz
         ▼  internal/engine      locate spring-headless, provision content, inject widget, launch
         ▼  assets/lua           snapshot_widget.lua samples units each N frames → writes BRSNAP lines to <gameId>.brsnap
         ▼  internal/capture     parse the BRSNAP file → snapshot records
-        ▼  snapshot             pluggable Writer persists them (v2: .brp compact binary; legacy JSONL)
+        ▼  snapshot             pluggable Writer persists them (.brp compact binary; legacy JSONL)
 ```
 
 ### Package layout
 
 | Package | Responsibility |
 | --- | --- |
-| `snapshot/` | **Public data model + pluggable `Writer`.** Owns the on-disk format. v2 (default) is `.brp`, a delta-coded columnar binary ~35x smaller than the v1 JSONL, which is still supported for reading and via `-format jsonl`. |
+| `snapshot/` | **Public data model + pluggable `Writer`.** Owns the on-disk format. The default is `.brp` (currently version 4), a delta-coded columnar binary ~60x smaller than the v1 JSONL, which is still supported for reading and via `-format jsonl`. |
 | `internal/barapi` | Resolve a gameId/URL via `api.bar-rts.com` and download the `.sdfz` from the OVH bucket. |
 | `internal/demofile` | Parse the `.sdfz` header (byte-packed, little-endian) and the embedded TDF startscript. |
 | `internal/engine` | Locate `spring-headless`/`pr-downloader`, provision missing content, write the widget (with its output-file path), build the playback startscript, launch the engine. |
 | `internal/capture` | Parse the widget's `BRSNAP` output file into `snapshot` records. |
-| `internal/viz` | Load `.brp`/`.jsonl`/`.brsnap` captures and serve the browser playback UI (embedded HTML/JS/CSS). |
+| `internal/viz` | Serve the browser playback UI over a dir of `.brp` captures, and pack captures into static-hosting bundles. The SPA itself lives in `worker/` (one copy, embedded into the Go binary). |
+| `worker/` | Cloudflare Worker (Hono + Vite) hosting the viewer as **static files from R2** — and the home of the front-end (`worker/public`, `worker/index.html`). |
 | `assets/lua` | The embedded, read-only Lua widget injected into the engine's write-dir. |
 
 ## Build
@@ -44,6 +45,7 @@ replay link / gameId / local .sdfz
 go build ./cmd/barreplay        # the capture CLI
 go build ./cmd/barreplay-viz    # the visualization server
 go build ./cmd/barreplay-pack   # converter: legacy .jsonl/.brsnap -> .brp
+go build ./cmd/barreplay-static # pack .brp captures into a static-hosting bundle (see worker/)
 go test ./...
 ```
 
@@ -59,7 +61,7 @@ Key flags:
 | --- | --- |
 | `-data <dir>` | BAR/Spring data directory (`engine/`, `games/`, `maps/`); also the engine `--write-dir`. Required to run the engine. (`$BAR_DATA_DIR` also works.) |
 | `-out <dir>` | Output directory for snapshot files (default `./snapshots`). |
-| `-format <fmt>` | Snapshot format: `brp` (compact binary, the default) or `jsonl` (legacy, human-readable, ~35x larger). |
+| `-format <fmt>` | Snapshot format: `brp` (compact binary, the default) or `jsonl` (legacy, human-readable, ~60x larger). |
 | `-every <frames>` | Sampling interval in sim frames (30 = 1 Hz, the default). |
 | `-engine <path>` | Path to `spring-headless` (overrides auto-location under `-data/engine/`). |
 | `-no-provision` | Assume engine/game/map are already installed; skip `pr-downloader`. |
@@ -92,31 +94,43 @@ barreplay -progress -data ~/.local/share/Beyond-All-Reason/data -out ./snaps \
 #   snapshot: 0.15 MB
 ```
 
-## Output format (v2: `.brp` compact binary)
+## Output format (`.brp` compact binary, version 4)
 
 The default output is `.brp` — a sectioned, gzip-compressed columnar binary owned
 by `snapshot/brp.go` and specified byte-for-byte in
-[`docs/brp-format.md`](./docs/brp-format.md). Unit state barely changes between 1 Hz samples, so each
-unit's values are stored as deltas against the same unit in the previous frame
-(positions additionally predicted by the unit's own velocity), zigzag-varint
-encoded column by column, then gzipped. On a real ~33-minute 8v8 game (4.2M unit
-records) this is **~14 MB where the v1 JSONL was 476 MB (~33x)**, with no loss
-beyond fixed quantization (whole elmos/hp, velocity per sample interval, build
-progress 1/255, resources 0.1).
+[`docs/brp-format.md`](./docs/brp-format.md) (the measured evaluation behind its
+design decisions is in [`docs/brp-optimizations.md`](./docs/brp-optimizations.md)).
+Unit state barely changes between 1 Hz samples, so a frame stores only the units
+that **changed** (plus an explicit dead list): a changed unit's values are deltas
+against its previous sample (positions additionally predicted by the unit's own
+velocity, so constant-velocity movement costs nothing), zigzag-varint encoded
+column by column, then gzipped; every unchanged unit — about two thirds of all
+records in a real game — costs zero bytes, and the decoder re-materializes it by
+dead reckoning. Unit elevation (y) is not stored at all: the viewer renders the
+x/z plane, and a ground unit's height is implied by the terrain. On a real
+~33-minute 8v8 game (4.2M unit records) this is **~8 MB where the v1 JSONL was
+476 MB (~60x)**, with no other loss beyond fixed quantization (whole elmos/hp,
+velocity per sample interval, build progress 1/255, resources 0.1).
 
-Frames are grouped into **self-contained chunks of 64 samples** (~1 minute of
-game each), every chunk starting with a keyframe and indexed in the file's meta
-— the video-codec model. That is what makes the viewer start instantly, seek to
-any timestamp, and skim a replay by fetching only keyframes, at a cost of ~4%
-extra size versus one monolithic stream.
+Frames are grouped into **chunks of 64 samples** (~1 minute of game each), with
+the codec's prediction state reset at every chunk boundary — the video-codec
+model. Every chunk's first frame (its **keyframe**, fully absolute) lives
+outside the chunks, in a dedicated section holding all keyframes as **one gzip
+stream**; chunks carry only the remaining delta frames. That is what makes the
+viewer start instantly and the whole timeline scrubbable within seconds: it
+downloads the keyframes section first (one request, decoded progressively while
+it streams), then fills in delta chunks around the playhead — and no byte is
+ever fetched twice.
 
-A `.brp` holds everything the JSONL did: full meta (unit-def table, teams,
-players), per-unit position/velocity/health/build progress, per-team economy,
-and lifecycle events, plus precomputed bounds so the viewer doesn't scan frames.
-Read it back with `snapshot.ReadBRP` (or one chunk at a time via
-`snapshot.ParseBRP` + `DecodeChunk`). Chunks are independently compressed **on
-purpose**: `barreplay-viz` serves each one to the browser byte-for-byte (no
-server-side re-encoding), and the browser gunzips them natively.
+A `.brp` holds everything the JSONL did except unit elevation: full meta
+(unit-def table, teams, players), per-unit position/velocity/health/build
+progress, per-team economy, and lifecycle events, plus precomputed bounds so
+the viewer doesn't scan frames. Read it back with `snapshot.ReadBRP` (or one
+chunk at a time via `snapshot.ParseBRP` + `DecodeChunk`). The keyframes section
+and each chunk are independently compressed **on purpose**: any server —
+`barreplay-viz`, or a dumb static host like R2 (see `worker/`) — hands them to
+the browser byte-for-byte (no server-side re-encoding), and the browser gunzips
+them natively.
 
 Legacy captures still load everywhere they did, and can be shrunk in place:
 
@@ -156,15 +170,17 @@ go build ./cmd/barreplay-viz
 | `-snapshots <dir>` | Directory of snapshot files to browse (default `./snapshots`). |
 | `-addr <host:port>` | Listen address (default `127.0.0.1:8080`). |
 
-It lists every `.brp` file in the directory in a picker (**only `.brp` is supported**;
-convert a legacy `.jsonl` or raw `.brsnap` once with `barreplay-pack`). The replay
-**streams**: the viewer fetches a small head (metadata, teams, icons, events, chunk
-index) and then chunk-sized pieces of frame data around the playhead while the rest
-downloads in the background — playback starts in under a second even on a slow
-connection, jumping to any timestamp costs one ~300 KB chunk, and dragging the
-timeline across not-yet-downloaded regions shows each minute's keyframe from a ~10 KB
-fetch. A bar under the timeline shows which ranges are downloaded, video-player
-style. The page renders each sampled frame as a
+It lists every `.brp` file in the directory in a picker (**only the current `.brp`
+version is supported**; convert a legacy `.jsonl` or raw `.brsnap` once with
+`barreplay-pack`, and regenerate any pre-v4 `.brp` the same way). The replay
+**streams, keyframes first**: the viewer fetches a small head (metadata, teams,
+icons, events, chunk index), then the keyframes stream — every minute's keyframe,
+one download, decoded progressively as it arrives — and then chunk-sized pieces of
+delta frame data around the playhead while the rest downloads in the background.
+Playback starts in under a second even on a slow connection, and within a few
+seconds the **whole timeline is scrubbable**: dragging it across regions whose
+chunks haven't downloaded yet shows each minute's keyframe instantly. A bar under
+the timeline shows keyframe-only vs fully-downloaded ranges, video-player style. The page renders each sampled frame as a
 top-down map, colouring units by team (grouped by ally-team), with:
 
 - the **real map terrain** behind the units (the browser loads it straight from the BAR
@@ -189,13 +205,18 @@ top-down map, colouring units by team (grouped by ally-team), with:
 - a live **sidebar**: game time / sim frame / unit count, per-team unit counts, and a
   lifecycle **event feed** (created/finished/destroyed) up to the current frame.
 
-The front-end is plain HTML/JS/Canvas (no framework, no build step) embedded into the
-binary via `go:embed`; the server exposes `/api/replays` (the file list),
-`/api/replay?file=<name>` (one capture's head: metadata + events + chunk index) and
-`/api/replay/chunk?file=<name>&i=<n>` (one chunk's frame data, sliced byte-for-byte
-from the stored file; `&key=1` returns just its keyframe — the browser decodes both
-with its native `DecompressionStream`, see `internal/viz/wire.go` and
-`snapshot/brp.go`), and `/icons/<file>` (the vendored unit icons). The
+The front-end is plain HTML/JS/Canvas — one copy for all deployments, living in
+`worker/public` and embedded into the Go binary via `go:embed`. The server exposes
+the same static-shaped URLs the R2/Cloudflare deployment serves (so the app can't
+tell them apart): `/index.json` (the replay list), `/replays/<id>.brw` (one
+capture's head: metadata + events + chunk index), `/replays/<id>.keys` (every
+keyframe, one gzip stream), `/replays/<id>/c<n>` (one chunk's delta frames, sliced
+byte-for-byte from the stored file — the browser decodes everything with its native
+`DecompressionStream`, see `internal/viz/wire.go` and `snapshot/brp.go`),
+`/replays/<id>.resources` (per-frame team economy), and `/icons/<file>` (the
+vendored unit icons). For hosting the same viewer with **no server at all**, pack
+captures with `barreplay-static` and serve the resulting file tree from any static
+host — see [`worker/README.md`](./worker/README.md). The
 icon set and BAR's `icontypes.lua` name→bitmap table are vendored under
 `internal/viz/bardata/` (see its README); the mapping is parsed directly in Go,
 so no Lua VM / third-party dependency is added. The map terrain is fetched by the

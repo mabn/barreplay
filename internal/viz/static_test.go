@@ -11,10 +11,10 @@ import (
 	"testing"
 )
 
-// The static bundle must be byte-for-byte what the dynamic server serves: the
-// .brw head == /api/replay, each c<i> == /api/replay/chunk?i=<i>, a Range on
-// c<i> == the &key=1 skim, and .resources == /api/replay/resources. That
-// equivalence is the whole point — the viewer can't tell R2 from the Go server.
+// The static bundle must be byte-for-byte what the dynamic server serves at
+// the same URLs: .brw head, .keys, each delta chunk c<i>, and .resources.
+// That equivalence is the whole point — the viewer can't tell R2 from the Go
+// server.
 func TestStaticBundleMatchesServer(t *testing.T) {
 	dir := t.TempDir()
 	brp := writeBRP(t, dir, "g")
@@ -61,31 +61,36 @@ func TestStaticBundleMatchesServer(t *testing.T) {
 		return b
 	}
 
-	// Head and resources: byte-identical to the server.
-	if !bytes.Equal(read("replays/g.brw"), get("/api/replay?file=g.brp")) {
-		t.Error("g.brw != /api/replay")
+	// Head, resources and keys: byte-identical to the server (the URL scheme is
+	// shared, so the static object IS the endpoint's response body).
+	if !bytes.Equal(read("replays/g.brw"), get("/replays/g.brw")) {
+		t.Error("g.brw != /replays/g.brw")
 	}
 	// The stored .resources is plain JSON (the host compresses it in transit); the
 	// server sends it gzipped with Content-Encoding: gzip, which Go's HTTP client
 	// auto-inflates — so both decode to the same bytes.
-	if !bytes.Equal(read("replays/g.resources"), get("/api/replay/resources?file=g.brp")) {
-		t.Error("g.resources != /api/replay/resources")
+	if !bytes.Equal(read("replays/g.resources"), get("/replays/g.resources")) {
+		t.Error("g.resources != /replays/g.resources")
+	}
+	if !bytes.Equal(read("replays/g.keys"), get("/replays/g.keys")) {
+		t.Error("g.keys != /replays/g.keys")
 	}
 
-	// One chunk file per chunk; full == chunk endpoint, and its leading keyLen
-	// bytes == the keyframe skim.
+	// One chunk file per chunk with delta bytes; file == chunk endpoint.
 	head, _ := parseWire(t, read("replays/g.brw"))
 	if len(head.Chunks) == 0 {
 		t.Fatal("head has no chunks")
 	}
 	for i, c := range head.Chunks {
-		cf := read(filepath.Join("replays", "g", "c"+itoa(i)))
-		if !bytes.Equal(cf, get("/api/replay/chunk?file=g.brp&i="+itoa(i))) {
-			t.Errorf("c%d != chunk endpoint", i)
+		if c.Len == 0 {
+			if _, err := os.Stat(filepath.Join(out, "replays", "g", "c"+itoa(i))); !os.IsNotExist(err) {
+				t.Errorf("c%d: single-frame chunk must have no delta file", i)
+			}
+			continue
 		}
-		// The keyframe skim is a Range bytes=0-(keyLen-1) on the same file.
-		if !bytes.Equal(cf[:c.KeyLen], get("/api/replay/chunk?file=g.brp&i="+itoa(i)+"&key=1")) {
-			t.Errorf("c%d[:keyLen] != keyframe skim", i)
+		cf := read(filepath.Join("replays", "g", "c"+itoa(i)))
+		if !bytes.Equal(cf, get("/replays/g/c"+itoa(i))) {
+			t.Errorf("c%d != chunk endpoint", i)
 		}
 	}
 

@@ -6,7 +6,7 @@
 //   node tools/upload.mjs <bundleDir> [replayId] [--local] [--preview]
 //
 //   <bundleDir>   the -out dir you passed to barreplay-static (default ../static)
-//   [replayId]    upload just this one replay (replays/<id>.brw, .resources, /c*).
+//   [replayId]    upload just this one replay (replays/<id>.brw, .resources, .keys, /c*).
 //                 Omit to upload every replay in the dir.
 //   --local       target the local (miniflare) R2 used by `npm run dev`
 //                 (default is REAL R2 — `wrangler r2 object put --remote`)
@@ -34,7 +34,7 @@ function replayFiles(root, id) {
   const out = [];
   const replays = join(root, "replays");
   if (id) {
-    for (const f of [join(replays, `${id}.brw`), join(replays, `${id}.resources`)]) {
+    for (const f of [join(replays, `${id}.brw`), join(replays, `${id}.resources`), join(replays, `${id}.keys`)]) {
       if (existsSync(f)) out.push(f);
     }
     walk(join(replays, id), out); // chunk files
