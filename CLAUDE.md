@@ -42,7 +42,7 @@ internal/barapi/          resolve gameId via api.bar-rts.com; download .sdfz fro
 internal/demofile/        gunzip + parse packed header + TDF startscript
 internal/engine/          locate spring-headless/pr-downloader, provision, launch, stream stdout
 internal/capture/         parse the widget's BRSNAP stdout protocol -> snapshot records
-internal/viz/             serve embedded HTML/JS viewer + chunked binary wire API (local barreplay-viz tool)
+internal/viz/             local barreplay-viz tool: lists a dir of .brp and streams each with Range; the browser reads them directly (same web/app.js as worker/)
 worker/                   Cloudflare Worker (Hono + Vite): serves each replay as one raw .brp from R2; the browser reads it via HTTP Range (no playback server)
 snapshot/                 PUBLIC data model + pluggable Writer (owns on-disk format; v2 .brp binary, legacy v1 JSONL)
 assets/lua/snapshot_widget.lua   embedded, read-only sampler (go:embed)
@@ -344,7 +344,9 @@ browser reads it with HTTP **Range** requests. This works because the `.brp` is 
 — the `M` meta block (front of the file) holds everything the head needs plus the chunk index
 (each chunk's byte ranges within `F`/`X`), and every chunk is an independently-gzipped stream.
 
-`worker/public/app.js` (a fork of `internal/viz/web/app.js`, diverged for this path):
+`worker/public/app.js` (a byte-identical copy of `internal/viz/web/app.js` — the local
+`barreplay-viz` server serves the very same viewer over a local `.brp` directory; keep them in
+sync):
 `openBRP()` Range-reads the container headers to locate `M`/`F`/`X`/`E`, decodes the meta block
 + events, and returns the absolute offsets of the `F`/`X` payloads; `buildHead()` derives the
 head client-side from the meta (teams, `unitDefs`, footprints from the def flags, icons from
@@ -358,9 +360,10 @@ The Worker (`src/worker/index.ts`) only lists the bucket's `*.brp` for the picke
 a frame. The SPA, vendored icons (`/icons/*`, `/ranks/*`) and the icon table are static assets.
 Map terrain is fetched browser-side straight from `api.bar-rts.com`. Uploading a replay is just
 `wrangler r2 object put barreplay-replays/<id>.brp --remote --file <id>.brp` (wrangler's
-`r2 object put` **defaults to local** — pass `--remote` to actually hit R2). The three-way codec
-lockstep still applies: `snapshot/brp.go` (Go), `internal/viz/web/app.js` (local viz tool), and
-`worker/public/app.js` (the Range reader) must all decode frames identically.
+`r2 object put` **defaults to local** — pass `--remote` to actually hit R2). Codec lockstep: the
+Go encoder/decoder in `snapshot/brp.go` and the JS decoder in `internal/viz/web/app.js` (copied
+verbatim to `worker/public/app.js`) must decode frames identically — the two app.js copies are
+byte-for-byte the same file, so edit one and mirror it.
 
 ## Running a real capture (needs the engine + content)
 

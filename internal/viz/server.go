@@ -3,55 +3,31 @@ package viz
 import (
 	"embed"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
-	"sync"
-	"time"
-
-	"github.com/mabn/barreplay/snapshot"
 )
 
 //go:embed web/index.html web/app.js web/style.css
 var webFS embed.FS
 
-// Server serves the playback UI and a small API over a directory of .brp
-// snapshot files. It supports the .brp v2 format ONLY — convert legacy
-// .jsonl/.brsnap captures once with barreplay-pack.
+// Server serves the browser viewer over a directory of .brp captures. It is the
+// local counterpart of the worker/ Cloudflare host and runs the SAME viewer
+// (web/app.js): the browser reads each .brp directly with HTTP Range requests.
+// The server only lists the directory, streams the .brp files (with Range), and
+// serves the vendored icons + icon table. It never decodes a frame.
 type Server struct {
-	// Dir is the directory scanned for .brp snapshot files.
+	// Dir is the directory scanned for .brp captures.
 	Dir string
-
-	// mu guards cache: parsed .brp files keyed by basename, so a play session's
-	// many chunk requests don't re-read/re-parse the file each time. Entries are
-	// invalidated by mtime+size and the cache is kept small (a viewer looks at
-	// one or two replays at a time).
-	mu    sync.Mutex
-	cache map[string]*cacheEntry
 }
 
-const cacheMaxEntries = 4
-
-type cacheEntry struct {
-	mtime   time.Time
-	size    int64
-	brp     *snapshot.BRPFile
-	payload []byte // the /api/replay head payload, built once
-	// resources is the gzipped /api/replay/resources body, built lazily on the
-	// first request (decoding every chunk's economy) and reused thereafter.
-	resources []byte
-	etag      string
-	lastUse   time.Time
-}
-
-// replayInfo is one entry in the /api/replays listing.
+// replayInfo is one entry in the /index.json listing. File is the gameId (the
+// picker key); the browser fetches /replays/<file>.brp.
 type replayInfo struct {
-	File   string `json:"file"`   // basename, used as the ?file= key
-	GameID string `json:"gameId"` // filename without extension
+	File   string `json:"file"`
+	GameID string `json:"gameId"`
 	Size   int64  `json:"size"`
 }
 
@@ -86,8 +62,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
-	// Vendored BAR unit icons, served at /icons/<file> to match the bitmap paths
-	// in the wire payload. Icons are immutable, so let the browser cache them.
+	// Vendored BAR unit icons, served at /icons/<file> to match the "icons/..."
+	// paths in the icon table. Immutable, so let the browser cache them.
 	if sub, err := iconsSubFS(); err == nil {
 		mux.Handle("/icons/", http.StripPrefix("/icons/", cacheForever(http.FileServer(http.FS(sub)))))
 	}
@@ -95,227 +71,90 @@ func (s *Server) Handler() http.Handler {
 	if sub, err := ranksSubFS(); err == nil {
 		mux.Handle("/ranks/", http.StripPrefix("/ranks/", cacheForever(http.FileServer(http.FS(sub)))))
 	}
-	mux.HandleFunc("/api/replays", s.handleList)
-	mux.HandleFunc("/api/replay", s.handleReplay)
-	mux.HandleFunc("/api/replay/chunk", s.handleChunk)
-	mux.HandleFunc("/api/replay/resources", s.handleResources)
+	// The icon table the browser uses to resolve unit icons when building the head.
+	mux.HandleFunc("/icontypes.json", s.handleIconTypes)
+	// The replay listing and the captures themselves.
+	mux.HandleFunc("/index.json", s.handleIndex)
+	mux.HandleFunc("/replays/", s.handleReplay)
 	return mux
 }
 
-// handleList returns the snapshot files available in Dir.
-func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
-	infos, err := s.list()
+// handleIconTypes serves the unit-icon table (name -> {p,s}); same data the
+// worker ships as a static asset.
+func (s *Server) handleIconTypes(w http.ResponseWriter, r *http.Request) {
+	b, err := IconTableJSON()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, infos)
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(b)
 }
 
-// get returns the parsed .brp for a validated basename, from cache when the
-// file hasn't changed.
-func (s *Server) get(name string) (*cacheEntry, error) {
-	path := filepath.Join(s.Dir, name)
-	fi, err := os.Stat(path)
+// handleIndex lists the .brp captures in Dir (one entry per file); the browser
+// turns each into a picker option and fetches /replays/<file>.brp.
+func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	entries, err := os.ReadDir(s.Dir)
 	if err != nil {
-		return nil, err
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cache == nil {
-		s.cache = map[string]*cacheEntry{}
-	}
-	if e, ok := s.cache[name]; ok && e.mtime.Equal(fi.ModTime()) && e.size == fi.Size() {
-		e.lastUse = time.Now()
-		return e, nil
-	}
-
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	bf, perr := snapshot.ParseBRP(f)
-	f.Close()
-	if perr != nil {
-		return nil, perr
-	}
-	payload, err := brpWirePayload(bf)
-	if err != nil {
-		return nil, err
-	}
-	e := &cacheEntry{
-		mtime:   fi.ModTime(),
-		size:    fi.Size(),
-		brp:     bf,
-		payload: payload,
-		etag:    fmt.Sprintf(`"%x-%x"`, fi.Size(), fi.ModTime().UnixNano()),
-		lastUse: time.Now(),
-	}
-	s.cache[name] = e
-	for len(s.cache) > cacheMaxEntries {
-		oldest, oldestT := "", time.Now().Add(time.Hour)
-		for k, v := range s.cache {
-			if k != name && v.lastUse.Before(oldestT) {
-				oldest, oldestT = k, v.lastUse
-			}
+	infos := []replayInfo{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".brp") {
+			continue
 		}
-		delete(s.cache, oldest)
+		id := strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
+		var size int64
+		if fi, err := e.Info(); err == nil {
+			size = fi.Size()
+		}
+		infos = append(infos, replayInfo{File: id, GameID: id, Size: size})
 	}
-	return e, nil
+	sort.Slice(infos, func(i, j int) bool { return infos[i].File < infos[j].File })
+	w.Header().Set("Cache-Control", "no-store, must-revalidate")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(infos)
 }
 
-// validName confines ?file= to a bare .brp basename inside Dir.
+// handleReplay streams /replays/<id>.brp out of Dir with Range support (via
+// http.ServeContent, which also handles conditional requests and HEAD). The
+// browser Range-reads the meta block and each chunk out of this one file.
+func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/replays/")
+	if !validName(name) {
+		http.Error(w, "invalid replay name (want a .brp basename)", http.StatusBadRequest)
+		return
+	}
+	f, err := os.Open(filepath.Join(s.Dir, name))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	http.ServeContent(w, r, name, fi.ModTime(), f)
+}
+
+// validName confines a replay name to a bare .brp basename inside Dir.
 func validName(name string) bool {
 	return name != "" && name == filepath.Base(name) &&
 		!strings.Contains(name, string(filepath.Separator)) &&
 		strings.EqualFold(filepath.Ext(name), ".brp")
 }
 
-// notModified handles ETag revalidation; chunk data is immutable for a given
-// file version, so a match saves the transfer entirely.
-func notModified(w http.ResponseWriter, r *http.Request, etag string) bool {
-	w.Header().Set("ETag", etag)
-	w.Header().Set("Cache-Control", "no-cache") // always revalidate, 304 when unchanged
-	if r.Header.Get("If-None-Match") == etag {
-		w.WriteHeader(http.StatusNotModified)
-		return true
-	}
-	return false
-}
-
-// handleReplay returns one capture's head payload (?file=<basename>): the BRW1
-// container of head JSON (meta, teams, icons, bounds, chunk index) plus the
-// events section — small, so the page is interactive immediately. Frame data
-// is fetched per chunk via /api/replay/chunk.
-func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("file")
-	if !validName(name) {
-		http.Error(w, "missing or invalid ?file= (want a .brp basename)", http.StatusBadRequest)
-		return
-	}
-	e, err := s.get(name)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if notModified(w, r, e.etag) {
-		return
-	}
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Write(e.payload)
-}
-
-// handleChunk returns one chunk's bytes (?file=<basename>&i=<n>[&key=1]),
-// sliced straight out of the stored file — chunks are independently gzipped
-// exactly so this needs no re-encoding. &key=1 returns only the keyframe
-// stream (the cheap skim path).
-func (s *Server) handleChunk(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("file")
-	if !validName(name) {
-		http.Error(w, "missing or invalid ?file= (want a .brp basename)", http.StatusBadRequest)
-		return
-	}
-	e, err := s.get(name)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	i, err := strconv.Atoi(r.URL.Query().Get("i"))
-	if err != nil || i < 0 || i >= len(e.brp.Chunks) {
-		http.Error(w, fmt.Sprintf("invalid ?i= (file has %d chunks)", len(e.brp.Chunks)), http.StatusBadRequest)
-		return
-	}
-	c := e.brp.Chunks[i]
-	sec := e.brp.Sections[snapshot.SecFrames]
-	end := c.FOff + c.FLen
-	if r.URL.Query().Get("key") == "1" {
-		end = c.FOff + c.FKeyLen
-	}
-	if c.FOff < 0 || end > int64(len(sec)) {
-		http.Error(w, "chunk range outside frames section", http.StatusInternalServerError)
-		return
-	}
-	if notModified(w, r, e.etag) {
-		return
-	}
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Write(sec[c.FOff:end])
-}
-
-// handleResources returns the per-frame team economy for a capture (?file=), a
-// gzipped JSON array of {f, r} the sidebar player list turns into metal/energy
-// bars. Frame resources live in the .brp X stream, which the frame chunk path
-// never fetches, so this decodes them once and caches the compressed body on
-// the entry. Sent with Content-Encoding: gzip so the browser inflates it.
-func (s *Server) handleResources(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Query().Get("file")
-	if !validName(name) {
-		http.Error(w, "missing or invalid ?file= (want a .brp basename)", http.StatusBadRequest)
-		return
-	}
-	e, err := s.get(name)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	s.mu.Lock()
-	body := e.resources
-	if body == nil {
-		body, err = brpResourcesPayload(e.brp)
-		if err == nil {
-			e.resources = body
-		}
-	}
-	s.mu.Unlock()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if notModified(w, r, e.etag) {
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Encoding", "gzip")
-	w.Write(body)
-}
-
-// list scans Dir for .brp files.
-func (s *Server) list() ([]replayInfo, error) {
-	entries, err := os.ReadDir(s.Dir)
-	if err != nil {
-		return nil, fmt.Errorf("viz: reading snapshots dir %q: %w", s.Dir, err)
-	}
-	var infos []replayInfo
-	for _, e := range entries {
-		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".brp") {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		infos = append(infos, replayInfo{
-			File:   e.Name(),
-			GameID: strings.TrimSuffix(e.Name(), filepath.Ext(e.Name())),
-			Size:   info.Size(),
-		})
-	}
-	sort.Slice(infos, func(i, j int) bool { return infos[i].File < infos[j].File })
-	return infos, nil
-}
-
-// cacheForever wraps a handler with a long-lived immutable cache header, for
-// the embedded icon assets (they never change for a given binary).
+// cacheForever wraps a handler with a long-lived immutable cache header, for the
+// embedded icon assets (they never change for a given binary).
 func cacheForever(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
 		h.ServeHTTP(w, r)
 	})
-}
-
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Cache-Control", "no-store, must-revalidate")
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
 }

@@ -51,31 +51,6 @@ var (
 	iconByName map[string]iconInfo // icontype key -> icon path (present on disk) + size
 )
 
-// unitIcon returns the icon path and size multiplier for an icontype key (the
-// top-level keys of icontypes.lua — usually, but not always, a unit's own name).
-// ok is false if there is no icon for it. The path is relative ("icons/foo.png")
-// and is served under /icons/, so the browser requests "/" + path. Size defaults
-// to 1 when the entry omits it.
-func unitIcon(key string) (path string, size float64, ok bool) {
-	iconOnce.Do(loadIcons)
-	ic, ok := iconByName[key]
-	return ic.Path, ic.Size, ok
-}
-
-// unitIconFor resolves a unit's icon by its icontype key first (the authoritative
-// icontypes.lua key the engine uses to pick the icon), falling back to its
-// internal name. The name fallback covers captures with no IconType and units
-// whose name is itself an icontype key (incl. the synthesised "<name>_scav"
-// variants). ok is false if neither resolves to an icon present on disk.
-func unitIconFor(iconType, name string) (path string, size float64, ok bool) {
-	if iconType != "" {
-		if path, size, ok = unitIcon(iconType); ok {
-			return path, size, true
-		}
-	}
-	return unitIcon(name)
-}
-
 // loadIcons parses icontypes.lua into a name->{bitmap,size} map, keeping only
 // entries whose bitmap file actually exists in the embedded FS (so the payload
 // never advertises a 404). The trailing Lua loop in the file synthesises
@@ -142,10 +117,9 @@ func loadIcons() {
 
 // IconTableJSON returns the whole icontypes table as JSON: an object keyed by
 // icontype name (including the synthesised "<name>_scav" variants) with
-// {"p":"icons/foo.png","s":size}. It's the same name->icon data buildHead
-// resolves, dumped so a browser reading a .brp directly can resolve unit icons
-// itself (worker/public/icontypes.json). Deterministic key order for a stable
-// committed asset.
+// {"p":"icons/foo.png","s":size}. The browser reads it (served at /icontypes.json,
+// or shipped as worker/public/icontypes.json) to resolve each unit's icon by its
+// iconType key then name. Deterministic key order for a stable committed asset.
 func IconTableJSON() ([]byte, error) {
 	iconOnce.Do(loadIcons)
 	names := make([]string, 0, len(iconByName))

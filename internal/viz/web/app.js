@@ -2,20 +2,23 @@
 
 // barreplay viewer — vanilla JS canvas playback of a recorded capture.
 //
-// Wire format (see internal/viz/wire.go and snapshot/brp.go): /api/replay
-// returns a small binary "BRW1" container — the JSON head (meta, teams, icons,
-// bounds, and the CHUNK INDEX) plus the events section. Frame data arrives
-// separately, one chunk at a time, from /api/replay/chunk: each chunk is a
-// self-contained run of ~64 samples starting with a keyframe, sliced
-// byte-for-byte out of the .brp file. The viewer streams chunks around the
-// playhead (and sequentially in the background), so playback starts after the
-// first ~300 KB, seeking anywhere costs one chunk, and scrubbing an unloaded
-// region shows its keyframe (a ~10 KB fetch) immediately.
+// This viewer reads a .brp capture DIRECTLY from object storage (R2) using HTTP
+// Range requests — there is no server-side packing. The .brp container is
+// "BRP1" <ver> then tagged sections M(meta) F(frames) X(economy) E(events); each
+// section is <tag><len u32le><payload> (see snapshot/brp.go). On open we
+// Range-read the small M block at the front to build the head (teams, unit
+// types, icons, bounds, and the CHUNK INDEX with each chunk's byte ranges), and
+// the E block for events. Then each frame chunk is fetched on demand as a byte
+// range of the F section (and its economy from the parallel X section). Chunks
+// are self-contained ~64-sample runs starting with a keyframe, so playback
+// starts after the first chunk, seeking costs one chunk, and scrubbing an
+// unloaded region shows its keyframe (a ~10 KB Range read) immediately.
 //
 // Frames unpack into a flat Int32Array `u` of stride 9:
 // [id, def, team, x, z, hp, maxHp, dvx, dvz]. We read it by index rather than
 // materialising per-unit objects — a replay can hold millions of unit records,
-// so avoiding the object churn keeps loading and playback smooth.
+// so avoiding the object churn keeps loading and playback smooth. Per-frame team
+// economy (for the player-list bars) rides alongside as `frame.res` (stride 7).
 
 const STRIDE = 9;
 const F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6, DVX: 7, DVZ: 8 };
@@ -30,24 +33,33 @@ async function gunzipU8(u8) {
   return new Uint8Array(await resp.arrayBuffer());
 }
 
-// Split a BRW container into its sections: {tag: Uint8Array (still gzipped)}.
-function parseContainer(buf) {
-  const u8 = new Uint8Array(buf);
-  const magic = 'BRW1';
-  for (let i = 0; i < magic.length; i++) {
-    if (u8[i] !== magic.charCodeAt(i)) throw new Error('not a BRW payload (old server?)');
-  }
-  if (u8[magic.length] !== 3) throw new Error('unsupported payload version ' + u8[magic.length]);
-  const dv = new DataView(buf);
-  const secs = {};
-  let off = magic.length + 1; // + version byte
-  while (off + 5 <= u8.length) {
-    const tag = String.fromCharCode(u8[off]);
-    const len = dv.getUint32(off + 1, true);
-    secs[tag] = u8.subarray(off + 5, off + 5 + len);
-    off += 5 + len;
-  }
-  return secs;
+// A chunk's section bytes are two standalone gzip streams: the keyframe [0,keyLen)
+// then the delta frames [keyLen,len). Inflate and concatenate (keyframe only when
+// keyOnly, or when there is no delta stream).
+async function inflateChunk(bytes, keyLen, keyOnly) {
+  const key = await gunzipU8(bytes.subarray(0, keyLen));
+  if (keyOnly || bytes.length <= keyLen) return key;
+  const rest = await gunzipU8(bytes.subarray(keyLen));
+  const out = new Uint8Array(key.length + rest.length);
+  out.set(key, 0);
+  out.set(rest, key.length);
+  return out;
+}
+
+// Read a byte range [start, endInclusive] of url. Returns {bytes, total} where
+// total is the object's full size (parsed from the Content-Range header, -1 if
+// the origin ignored the range and returned the whole body).
+async function readRange(url, start, endInclusive) {
+  const r = await fetch(url, { headers: { Range: `bytes=${start}-${endInclusive}` } });
+  if (r.status !== 206 && r.status !== 200) throw new Error(`range ${start}-${endInclusive}: HTTP ${r.status}`);
+  let total = -1;
+  const cr = r.headers.get('content-range'); // "bytes s-e/total"
+  if (cr) { const m = /\/(\d+)\s*$/.exec(cr); if (m) total = +m[1]; }
+  return { bytes: new Uint8Array(await r.arrayBuffer()), total };
+}
+
+function u32le(u8, off) {
+  return (u8[off] | (u8[off + 1] << 8) | (u8[off + 2] << 16) | (u8[off + 3] << 24)) >>> 0;
 }
 
 // Frame decoding (.brp v3; mirrors snapshot/brp.go decodeFrames): per frame —
@@ -59,9 +71,21 @@ function parseContainer(buf) {
 // was skipped by the encoder because it matched its prediction exactly, so
 // the decoder re-materialises it: position advances by dv, all else keeps.
 // The output frame is the FULL live unit set, sorted by id.
-function decodeFrames(b) {
+// decodeFrames reconstructs full frames from the F (core) bytes and, when
+// provided, the X (economy) bytes — the two streams a chunk carries. X cannot be
+// decoded standalone: per frame it holds the build column for F's changed units
+// (consumed and discarded — the viewer ignores build) followed by the per-team
+// resource deltas, so it must be walked in lockstep with F's changed count.
+function decodeFrames(b, xb) {
   let p = 0;
   const end = b.length;
+  // X-stream reader (small values; the simple loop form is plenty). prevRes
+  // accumulates each team's quantised economy across the chunk (reset per chunk,
+  // which is why a chunk decodes standalone).
+  let xp = 0;
+  const prevRes = xb ? new Map() : null; // team -> [m,e,ms,es,mi,ei] (tenths)
+  function xuv() { let x = 0, mul = 1; for (;;) { const c = xb[xp++]; x += (c & 0x7f) * mul; if (c < 0x80) return x; mul *= 128; } }
+  function xsv() { const u = xuv(); return u % 2 === 0 ? u / 2 : -(u + 1) / 2; }
   function uv() { // unsigned LEB128; falls back to float math past 28 bits
     let c = b[p++];
     if (c < 0x80) return c;
@@ -158,7 +182,27 @@ function decodeFrames(b) {
     prevMap = new Map();
     for (let m = 0; m < n; m++) prevMap.set(u[m * STRIDE], m * STRIDE);
     prevU = u;
-    frames.push({ f: frame, t: frame / 30, n, u });
+
+    // Economy (X stream): the build column for the nCh changed units (discarded),
+    // then this frame's per-team resources, delta-coded against prevRes. Result is
+    // a flat stride-7 array [team, metal, energy, mStore, eStore, mInc, eInc]
+    // (dequantised from tenths), matching resourcesByTeam's RSTRIDE layout.
+    let res = null;
+    if (xb) {
+      for (let i = 0; i < nCh; i++) xsv(); // build column, unused by the viewer
+      const nr = xuv();
+      res = [];
+      for (let r = 0; r < nr; r++) {
+        const team = xsv();
+        const pr = prevRes.get(team) || [0, 0, 0, 0, 0, 0];
+        const dm = xsv(), de = xsv(), dms = xsv(), des = xsv(), dmi = xsv(), dei = xsv();
+        const cur = [pr[0] + dm, pr[1] + de, pr[2] + dms, pr[3] + des, pr[4] + dmi, pr[5] + dei];
+        prevRes.set(team, cur);
+        res.push(team, cur[0] / 10, cur[1] / 10, cur[2] / 10, cur[3] / 10, cur[4] / 10, cur[5] / 10);
+      }
+    }
+
+    frames.push({ f: frame, t: frame / 30, n, u, res });
   }
   return frames;
 }
@@ -201,16 +245,89 @@ function decodeEvents(b) {
   return evs;
 }
 
-// Decode the /api/replay head payload: the head JSON's fields plus events
-// [{f,k,id,def,team}]. Frames stream in separately per chunk.
-async function decodeHead(buf) {
+// openBRP reads a .brp's container framing over HTTP Range: it locates the M, F,
+// X and E sections (walking the tiny section headers, which sit between the huge
+// F/X payloads), decodes the meta block and events, and returns the absolute
+// byte offsets of the F and X section payloads so chunks can be Range-read later.
+// Only meta + events are downloaded here (a few small requests); frame/economy
+// bytes are fetched per chunk on demand.
+async function openBRP(url) {
   if (typeof DecompressionStream === 'undefined') {
     throw new Error('this browser lacks DecompressionStream (needed to read the capture)');
   }
-  const secs = parseContainer(buf);
-  if (!secs.J) throw new Error('payload has no head section');
-  const head = JSON.parse(new TextDecoder().decode(await gunzipU8(secs.J)));
-  head.events = secs.E ? decodeEvents(await gunzipU8(secs.E)) : [];
+  const td = new TextDecoder();
+  // magic(4) "BRP1" + version(1) + first section header (tag + u32 len) = 10 bytes.
+  const head = await readRange(url, 0, 9);
+  const total = head.total;
+  const hb = head.bytes;
+  if (String.fromCharCode(hb[0], hb[1], hb[2], hb[3]) !== 'BRP1') throw new Error('not a .brp file');
+  if (hb[4] !== 3) throw new Error('unsupported .brp version ' + hb[4]);
+  if (String.fromCharCode(hb[5]) !== 'M') throw new Error('expected M section first');
+  const lenM = u32le(hb, 6);
+
+  // M payload + the following F header, in one read.
+  const mAndF = (await readRange(url, 10, 10 + lenM + 5 - 1)).bytes;
+  const rec = JSON.parse(td.decode(await gunzipU8(mAndF.subarray(0, lenM))));
+  const fHdr = mAndF.subarray(lenM, lenM + 5);
+  if (String.fromCharCode(fHdr[0]) !== 'F') throw new Error('expected F section');
+  const lenF = u32le(fHdr, 1);
+  const fBase = 10 + lenM + 5;
+
+  // Walk the remaining section headers (X, E) that sit after the F/X payloads.
+  let xBase = -1, events = [];
+  let pos = fBase + lenF; // next section header
+  while (pos + 5 <= (total < 0 ? pos + 5 : total)) {
+    const h = (await readRange(url, pos, pos + 4)).bytes;
+    const tag = String.fromCharCode(h[0]);
+    const len = u32le(h, 1);
+    const payloadStart = pos + 5;
+    if (tag === 'X') {
+      xBase = payloadStart;
+    } else if (tag === 'E') {
+      if (len > 0) events = decodeEvents(await gunzipU8((await readRange(url, payloadStart, payloadStart + len - 1)).bytes));
+    }
+    pos = payloadStart + len;
+    if (total < 0) break; // origin ignored Range: can't safely walk further
+  }
+  return { rec, fBase, xBase, events };
+}
+
+// buildHead turns the .brp meta record into the head the viewer renders — the
+// same shape the Go server's buildHead produced. Icons are resolved client-side
+// from the shipped icon table (iconTable), by iconType key then unit name.
+function buildHead(rec) {
+  const m = rec.meta || {};
+  const defs = m.unitDefs || {};
+  const head = {
+    gameId: m.gameId, engineVersion: m.engineVersion, gameVersion: m.gameVersion,
+    mapName: m.mapName, sampleEvery: m.sampleEvery || 30,
+    bounds: rec.bounds || { minX: 0, maxX: 1024, minZ: 0, maxZ: 1024 },
+    frameCount: rec.frames || 0,
+    chunks: rec.chunks || [],
+    unitDefs: {}, unitIcons: {}, footprints: {}, teams: [], players: [],
+  };
+  for (const id in defs) {
+    const d = defs[id];
+    head.unitDefs[id] = d.name;
+    const ic = (d.iconType && iconTable[d.iconType]) || iconTable[d.name];
+    if (ic) head.unitIcons[d.name] = ic;
+    // Footprints for structures only: immobile (!canMove) OR a building, xsize>0.
+    // XSize/ZSize are in 8-elmo squares.
+    if ((!d.canMove || d.isBuilding) && (d.xsize | 0) > 0) {
+      head.footprints[d.name] = { w: (d.xsize | 0) * 8, h: (d.zsize | 0) * 8 };
+    }
+  }
+  const seen = new Set();
+  for (const t of (m.teams || [])) {
+    head.teams.push({ team: t.teamId, ally: t.allyTeam, side: t.side, player: t.player, color: t.color });
+    seen.add(t.teamId);
+  }
+  for (const id of (rec.frameTeams || [])) {
+    if (!seen.has(id)) { seen.add(id); head.teams.push({ team: id, ally: id }); }
+  }
+  for (const p of (m.players || [])) {
+    head.players.push({ id: p.id, name: p.name, team: p.team, spec: p.spectator, country: p.country, rank: p.rank, skill: p.skill });
+  }
   return head;
 }
 
@@ -227,7 +344,10 @@ let chunkState = [];      // per-chunk state (see above)
 let fetchQueue = [];      // pending {i, keyOnly}
 let inflight = 0;
 let loadGen = 0;          // bumped per loadReplay; stale completions are dropped
-let currentFile = null;   // ?file= value for chunk URLs
+let currentFile = null;   // selected replay id (the ?replay= value)
+let brpUrl = null;        // /replays/<id>.brp — the object we Range-read
+let brp = null;           // openBRP() result: { rec, fBase, xBase, events }
+let iconTable = {};       // icontypes.json: name -> {p,s}; loaded once at init
 
 // chunkOf returns the chunk containing global frame index gi.
 function chunkOf(gi) {
@@ -274,29 +394,22 @@ function pumpFetches() {
 async function fetchChunk(i, keyOnly) {
   const gen = loadGen;
   try {
-    const url = '/api/replay/chunk?file=' + encodeURIComponent(currentFile) + '&i=' + i + (keyOnly ? '&key=1' : '');
-    const r = await fetch(url);
-    if (!r.ok) throw new Error(await r.text());
-    const bytes = new Uint8Array(await r.arrayBuffer());
-    if (gen !== loadGen) return; // a different replay was loaded meanwhile
+    // Range-read the chunk's F bytes out of the single .brp. The keyframe skim is
+    // just the leading fKeyLen bytes (the keyframe's standalone gzip stream).
     const c = data.chunks[i];
-    let raw;
-    if (keyOnly) {
-      raw = await gunzipU8(bytes);
-    } else {
-      // The chunk is two gzip streams: keyframe [0, keyLen) + deltas.
-      const key = await gunzipU8(bytes.subarray(0, c.keyLen));
-      if (bytes.length > c.keyLen) {
-        const rest = await gunzipU8(bytes.subarray(c.keyLen));
-        raw = new Uint8Array(key.length + rest.length);
-        raw.set(key, 0);
-        raw.set(rest, key.length);
-      } else {
-        raw = key;
-      }
+    const fEnd = keyOnly ? c.fKeyLen : c.fLen;
+    const fbytes = (await readRange(brpUrl, brp.fBase + c.fOff, brp.fBase + c.fOff + fEnd - 1)).bytes;
+    if (gen !== loadGen) return; // a different replay was loaded meanwhile
+    const fraw = await inflateChunk(fbytes, c.fKeyLen, keyOnly);
+    // Economy (X) — full fetches only, and only when the file has an X section.
+    let xraw = null;
+    if (!keyOnly && brp.xBase >= 0 && c.xLen > 0) {
+      const xbytes = (await readRange(brpUrl, brp.xBase + c.xOff, brp.xBase + c.xOff + c.xLen - 1)).bytes;
+      if (gen !== loadGen) return;
+      xraw = await inflateChunk(xbytes, c.xKeyLen, false);
     }
     if (gen !== loadGen) return;
-    const frames = decodeFrames(raw);
+    const frames = decodeFrames(fraw, xraw);
     const base = chunkStartIdx[i];
     for (let k = 0; k < frames.length; k++) data.frames[base + k] = frames[k];
     chunkState[i] = keyOnly ? Math.max(chunkState[i], 2) : 4;
@@ -1228,42 +1341,18 @@ function teamNameById(id) {
 
 // ---- sidebar --------------------------------------------------------------
 
-// Resource stride in the /api/replay/resources records (see wire.go
-// resourceStride): [team, metal, energy, metalStore, energyStore, metalIncome,
-// energyIncome].
+// Resource stride in a decoded frame's `res` array (see decodeFrames): [team,
+// metal, energy, metalStore, energyStore, metalIncome, energyIncome].
 const RSTRIDE = 7;
 const R = { TEAM: 0, METAL: 1, ENERGY: 2, MSTORE: 3, ESTORE: 4, MINC: 5, EINC: 6 };
 
-// resByFrame maps a sim frame number -> its flat per-team economy array (stride
-// RSTRIDE). Team economy lives in the .brp X stream, which the frame chunk path
-// never fetches, so the player list pulls the whole (small) timeline once from
-// /api/replay/resources. Null until that fetch lands.
-let resByFrame = null;
-
-// loadResources fetches the economy timeline for the current replay and keys it
-// by sim frame, then refreshes the sidebar so the bars fill in. Best-effort: a
-// failure (or a capture with no resources) just leaves the bars off.
-async function loadResources(file, gen) {
-  resByFrame = null;
-  try {
-    const r = await fetch('/api/replay/resources?file=' + encodeURIComponent(file));
-    if (!r.ok) return;
-    const arr = await r.json(); // [{f, r:[...]}]
-    if (gen !== loadGen) return; // a newer replay load superseded this one
-    const m = new Map();
-    for (const e of arr) m.set(e.f, e.r);
-    resByFrame = m;
-    if (data) updateSidebar();
-  } catch (_) { /* offline / no resources: bars simply stay empty */ }
-}
-
-// resourcesByTeam builds team id -> economy object for one sim frame, from the
-// fetched timeline. Returns {} until the timeline has loaded or when the frame
-// carries no economy.
-function resourcesByTeam(simFrame) {
+// resourcesByTeam builds team id -> economy object from one decoded frame's `res`
+// array (decoded from the .brp X stream alongside the frame). Returns {} for a
+// frame with no economy or whose chunk hasn't streamed in yet.
+function resourcesByTeam(fr) {
   const out = {};
-  const r = resByFrame && resByFrame.get(simFrame);
-  if (!r) return out;
+  const r = fr && fr.res;
+  if (!r || !r.length) return out;
   for (let i = 0; i < r.length; i += RSTRIDE) {
     out[r[i + R.TEAM]] = {
       metal: r[i + R.METAL], energy: r[i + R.ENERGY],
@@ -1320,7 +1409,7 @@ function renderPlayers() {
     return;
   }
   const fr = dispIdx >= 0 ? data.frames[dispIdx] : null;
-  const res = resourcesByTeam(fr ? fr.f : -1);
+  const res = resourcesByTeam(fr);
   const allyOf = {};
   (data.teams || []).forEach(t => { allyOf[t.team] = t.ally; });
 
@@ -1666,10 +1755,11 @@ async function loadReplay(file) {
   inflight = 0;
   clearTimeout(scrubTimer);
   currentFile = file;
+  brpUrl = '/replays/' + encodeURIComponent(file) + '.brp';
   try {
-    const r = await fetch('/api/replay?file=' + encodeURIComponent(file));
-    if (!r.ok) throw new Error(await r.text());
-    data = await decodeHead(await r.arrayBuffer());
+    brp = await openBRP(brpUrl);        // meta + section offsets + events (few small Range reads)
+    data = buildHead(brp.rec);          // head derived client-side from the meta block
+    data.events = brp.events;
   } catch (err) {
     setEmpty('Failed to load ' + file + ': ' + err.message);
     data = null;
@@ -1711,7 +1801,6 @@ async function loadReplay(file) {
   ensureChunk(0, { urgent: true });
   ensureChunk(1);
   pumpBackground();
-  loadResources(file, loadGen); // economy timeline for the player-list bars (async)
   show();
 }
 
@@ -1803,9 +1892,13 @@ async function init() {
   // Optional render-smoothness overlay, gated on ?debug=true.
   if (params.get('debug') === 'true') startFpsMonitor();
 
+  // Icon table (name -> {p,s}); the viewer resolves unit icons from it when
+  // building the head. Best-effort: without it, units fall back to coloured dots.
+  try { iconTable = await (await fetch('/icontypes.json')).json(); } catch (_) { iconTable = {}; }
+
   let list = [];
   try {
-    const r = await fetch('/api/replays');
+    const r = await fetch('/index.json');
     list = await r.json();
   } catch (err) {
     setEmpty('Could not list snapshots: ' + err.message);
