@@ -203,7 +203,7 @@ local function emitProfileTotals()
 		return
 	end
 	local lines = {}
-	for i = 1, math.min(#recs, 40) do
+	for i = 1, math.min(#recs, 80) do
 		lines[i] = string.format("BRSNAP PROF %.1f %s", recs[i].ms, recs[i].name)
 	end
 	writeChunk(table.concat(lines, "\n"))
@@ -683,7 +683,7 @@ function widget:GameFrame(frame)
 		local recs = profilerTotals()
 		if recs and recs[1] then
 			local parts = {}
-			for i = 1, math.min(5, #recs) do
+			for i = 1, math.min(8, #recs) do
 				parts[i] = string.format("%s=%.0fms", recs[i].name, recs[i].ms)
 			end
 			Echo("[barreplay] prof " .. table.concat(parts, " "))
@@ -692,7 +692,7 @@ function widget:GameFrame(frame)
 			-- into per-interval deltas and reports which scopes grow with unit count.
 			if profileMode then
 				local lines = {}
-				for i = 1, math.min(15, #recs) do
+				for i = 1, math.min(30, #recs) do
 					lines[i] = string.format("BRSNAP PROFD %d %d %.1f %s", frame, n, recs[i].ms, recs[i].name)
 				end
 				writeChunk(table.concat(lines, "\n"))

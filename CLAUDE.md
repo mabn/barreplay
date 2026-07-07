@@ -2077,9 +2077,9 @@ For *what inside the sim* is expensive, the widget dumps the engine's **internal
 profiler** (the `/debug` overlay data) via `Spring.GetProfilerRecordNames()` /
 `Spring.GetProfilerTimeRecord(name)`:
 
-- every heartbeat: a `[barreplay] prof Sim=…ms Lua=…ms …` line (top 5, infolog only) —
+- every heartbeat: a `[barreplay] prof Sim=…ms Lua=…ms …` line (top 8, infolog only) —
   shows whether per-frame cost drifts as unit count grows;
-- at game over: `BRSNAP PROF <totalMs> <name>` lines (top 40) written into the stream
+- at game over: `BRSNAP PROF <totalMs> <name>` lines (top 80) written into the stream
   file, which `capture` collects into `capture.Stats.Profile` and the CLI prints as a
   sorted table with % of wall time.
 
@@ -2091,7 +2091,7 @@ GC) always record. The detailed scopes (`Sim::Unit::{MoveType,SlowUpdate,Update,
 `-profile` substitutes `__PROFILE__` so the widget runs `Spring.SendCommands("debug 1 0")`
 in `Initialize`: arg 1 (`drawDebug`) enables profiler collection, arg 2 (`draw4Real=0`)
 keeps the ProfileDrawer overlay off (nothing to draw headless). In this mode the widget
-also writes `BRSNAP PROFD <frame> <units> <totalMs> <name>` samples (top 15 scopes) each
+also writes `BRSNAP PROFD <frame> <units> <totalMs> <name>` samples (top 30 scopes) each
 heartbeat, and the CLI prints a **growth table**: per-scope ms/sim-frame over the first vs
 last third of the game, with the unit-count range — the direct answer to "what gets
 expensive as the unit count grows". Profiling overhead is visible in the table itself as
