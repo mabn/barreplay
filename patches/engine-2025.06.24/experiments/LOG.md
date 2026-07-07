@@ -61,11 +61,13 @@ noise floor (H4–H6 method). Skip/approximate levers are exhausted (remaining
 big blocks are synced-untouchable or non-idempotent-must-reproduce, see H14).
 Diminishing returns acknowledged; continuing per directive.
 
-1. **H21 — COB dispatch switch → computed-goto.** [ACTIVE] `CCobThread::Tick`
-   3.5% main self; labels-as-values gives per-opcode indirect branches
-   (better BTB) vs the switch's shared one. Value-identical.
-2. **H23 — TickAllAnims dispatch.** Replace `std::invoke(member-ptr)` per anim
-   with `switch(animType)` — fewer indirect calls, same math. Main-thread.
+1. **H25 — CMoveMath::RangeIsBlockedHashedMt cache.** [ACTIVE] per-thread
+   `unordered_map<CSolidObject*,BlockType>` → flat/open-addressed cache, same
+   hit/miss semantics. Value-identical (gate-checkable); real ceiling on a hot
+   pathfinding path (partly main-thread).
+2. **H21 — COB dispatch densification.** `CCobThread::Tick` sparse-opcode
+   switch is a ~6-cmp tree; a load-time opcode→dense-id remap enables a jump
+   table. Higher value but needs bytecode-walk at load — risky, deferred.
 3. **H24 — QTPFS UpdateNeighborCache micro.** 2% main self; hunt redundant
    recompute / container churn in the edge walks. Value-identical only.
 4. **H25 — CMoveMath::RangeIsBlockedHashedMt cache.** Per-thread
@@ -427,3 +429,19 @@ inside. **Only effects >~4% are verifiable on this box** (matches: H4–H6's
   written + byte-identical-validated) — excluded from this loop by user
   instruction. It is the highest-value remaining move and needs only a
   go-ahead.
+
+### H23 — TickAllAnims switch dispatch — KEPT (value-identical, byte-identity-gated)
+
+Byte-identical on small+medium (gate ✓). Replaces the per-anim
+`std::invoke` on a runtime-indexed member-fn-pointer with a direct
+`switch(animType)` so the small Tick*Anim bodies inline. Timing delta is
+below this box's ~3% noise (unresolvable), so KEPT on the byte-identity +
+value-identical-by-construction basis (same rationale as H3), not a measured
+speedup. Kept stack now 0001+H1–H6+H23 (recoil `ce29d3b`).
+
+**Operating model going forward (given the H28 noise ceiling):** value-
+identical micros are verified by the byte-identity gate (which is reliable)
+and banked if identical; per-item timing interleaves are skipped (they can't
+resolve <4%); one aggregate interleave is run when a bundle is plausibly >4%
+or on request. This keeps producing *safe* patches without wasting compute on
+unresolvable measurements.
