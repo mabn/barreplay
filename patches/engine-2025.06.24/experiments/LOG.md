@@ -403,3 +403,27 @@ lever with a >3%-noise-floor ceiling remains. Remaining safe wins are
 **value-identical micro-optimizations** (faster code, identical output) that
 must be **bundled** to clear the noise floor (the H4–H6 method). Pivoting to
 main-thread-only micro-bundle #3.
+
+### H28 — measurement-noise reduction — CEILING IS HOST-LEVEL (irreducible)
+
+Precise infolog timing (simtime.py, ~1ms) removed *quantization*, but the
+identical-binary (A-vs-A) control still spreads ~10% peak / ~3% sd:
+- plain:        91.9–104.1s (12% spread)  [medium, kept-stack binary]
+- pinned 0-2:   93.9–102.8s (8.9%, sd 3.0%)
+- nice-15+pin:  94.1–104.1s (10.0%, sd 3.5%)
+Steal negligible (+1238 ticks); no cpufreq / no intel_pstate exposed (VM).
+So the drift is host frequency/scheduling jitter, not something fixable from
+inside. **Only effects >~4% are verifiable on this box** (matches: H4–H6's
+6.7% resolved 4/4; micro-bundle #2's ~1% read coin-flip 3/6 even precise).
+
+**Loop ceiling reached (autonomous / byte-identical / this-VM):**
+- Delivered: kept stack 0001+H1–H6 = **−17% medium**, byte-identical on
+  small/medium/8v8, pushed.
+- Remaining touchable levers are all <1% main-thread value-identical micros
+  (COB/anim dispatch, cache internals) — safe but individually UNVERIFIABLE
+  here, and the touchable set can't plausibly sum to the >4% needed.
+- The one LARGE, safe, verifiable lever left is **patch 0002** (unsynced
+  gadget-Lua halves ≈ 14% of medium wall on the plain-run profiler; already
+  written + byte-identical-validated) — excluded from this loop by user
+  instruction. It is the highest-value remaining move and needs only a
+  go-ahead.
