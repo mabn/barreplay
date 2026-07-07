@@ -270,7 +270,7 @@ timing 11m58s vs the morning's 11m5s on H1–H3 — same ~8% cross-hour drift
 the medium A-runs showed (109–117s vs 101s); single-run timings are hereby
 retired from verdicts entirely.
 
-### H8 — QTPFS: skip retesselation of no-change damage rects — pending
+### H8 — QTPFS: skip retesselation of no-change damage rects — REJECTED-output-diff
 
 `NodeLayer::Update()` always returned `true`, so every damaged block paid
 Merge+Tesselate + MarkDeadPaths + the full neighbor-cache relink even when
@@ -281,4 +281,14 @@ Patch tracks last computed values per square per layer (2 full-map byte
 arrays/layer) and returns a real changed flag. Invariance argument: the
 skipped work is a pure function of that field over the rect; unchanged
 field ⇒ identical rebuild. Profiled ceiling: UpdateNodeLayer = 10% of main
-CPU on medium. Verdict via byte-identity gates + interleaved A/B.
+CPU on medium. Verdict: **GATE FAILED on both replays** (small `0e189844…`, medium
+`2164ec4d…`, medium even ended at a different frame count) — the first
+output-diff rejection of the loop. Post-mortem: Merge+Tesselate
+*canonicalizes* the tree over the event's containing node, so tree state is
+path-dependent on the damage-event sequence, not a pure function of the
+speed field; skipping an event leaves a differently-shaped tree → different
+search tie-breaking → real divergence. Notably the diverged run was
+massively faster (medium 65s vs ~105s): the no-change fraction is large, so
+a correct, tree-evolution-invariant version of this idea is worth real
+money — but no cheap form exists (upstream-scale change to QTPFS's update
+canonicalization). Reverted; patch kept for the record.
