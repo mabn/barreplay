@@ -81,3 +81,21 @@ AnimFinished call order are bit-identical.
 | medium | 109s / 219 fps | 101s / 235 fps | **−7.3%** | identical ✓ |
 
 Patch: `H2-tickallanims-sort-skip-bfs-scratch.patch` (recoil commit `8110b6f`).
+
+### H3 — ThreadPool: no clock reads on empty polls — KEPT (neutral)
+
+`DoTask` wrapped its whole body (incl. the empty-queue no-op path) in
+`SCOPED_MT_TIMER(ThreadPool::RunTask)` = 2 `clock_gettime` per call, and the
+worker spin + `WaitForFinished` help-spin call it millions of times/s while
+queues are dry (5.4% of mid-game CPU sat in `__vdso_clock_gettime`). Timer
+now wraps only real task execution; WaitFor's 500 ms anti-hang deadline is
+polled every 64th empty iteration.
+
+**Measured neutral, as it (in hindsight) had to be**: the removed reads were
+on threads that were *spinning anyway* — they now just spin tighter. small
+25s→24s, medium 101s→107s: opposite signs, both inside the ±10% noise floor.
+Kept because `ThreadPool::RunTask` profiler totals are no longer inflated by
+empty polls (the CLAUDE.md caveat), making subsequent `-profile` readings in
+this loop trustworthy. Output identical on both replays ✓.
+
+Patch: `H3-threadpool-clock-storm.patch` (recoil commit `c955686`).
