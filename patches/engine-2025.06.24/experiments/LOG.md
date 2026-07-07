@@ -445,3 +445,11 @@ and banked if identical; per-item timing interleaves are skipped (they can't
 resolve <4%); one aggregate interleave is run when a bundle is plausibly >4%
 or on request. This keeps producing *safe* patches without wasting compute on
 unresolvable measurements.
+
+### 0002 — FOLDED INTO KEPT STACK (user-authorized 2026-07-08)
+
+`git am 0002` onto ce29d3b → recoil `699d918`. Byte-identical on both
+replays (small 98b23c23…, medium 99838ad4… — match refs). Kept stack now
+0001+H1–H6+H23+0002. Timing to be measured with the new CPU-time bench
+harness (single-run wall was noise-dominated: a 120s medium run landed
+during heavy neighbour load).
