@@ -453,3 +453,24 @@ replays (small 98b23c23…, medium 99838ad4… — match refs). Kept stack now
 0001+H1–H6+H23+0002. Timing to be measured with the new CPU-time bench
 harness (single-run wall was noise-dominated: a 120s medium run landed
 during heavy neighbour load).
+
+### Bench harness validated + 0002 measured (2026-07-08)
+
+Harness (`tools/bench-harness.patch`, `tools/measure.sh`): perf-counter
+instruction count over sim window [6000,9000), `-worker-threads 1` (no
+spin-wait → deterministic). **Instructions are stable to ~0.02–0.35%**
+(min-of-N), vs 5–15% for wall/cycles (host freq scaling + neighbour memory
+contention). This is a precise, fast (~4 min/candidate) detector of
+value-identical **synced** optimizations.
+
+Baseline (kept stack 0001+H1–H6+H23+0002): **min_instr ≈ 40.389e9** over 3000
+medium frames.
+
+**0002 measured: +0.00% synced instructions** (40388632118 without → 40388866383
+with; identical). Correct: 0002 cuts only *unsynced* gadget callins, outside
+the SimFrame window. Corollary: 0002's benefit is **not** the 14% profiler
+`Lua::Callins::Unsynced` figure — that share is dominated by the snapshot
+widget (kept), not the gadget halves 0002 removes. 0002 stays folded (byte-
+identical, harmless) but is a small win, matching RESULTS.md's original
+"within noise". The bench does NOT measure unsynced cuts (throttle-draw
+suppresses the unsynced update to ~1/s); use profiler/wall for those.
