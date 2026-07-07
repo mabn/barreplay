@@ -42,39 +42,41 @@ output-safe; bundled and judged together via interleaved A/B (the H4–H6
 lesson). "safe" = touches only unsynced/draw/dead state OR provably
 value-identical synced computation.
 
-1. **H9 — LOS readmap-event skip (headless)** [BUILT, gates ✓, interleaving].
-   `AddRaycast`'s `updateUnsyncedHeightMap` branch only feeds
-   `readMap->UpdateLOS` (unsynced); synced `losmap += amount` runs identically.
-2. **H10 — COB unsynced sound skip (headless)** [BUILT, gates ✓, interleaving].
-   `PlayUnitSound` is fire-and-forget unsynced (NullSound); no synced write.
-3. **H12 — bounding-volume recalc skip (headless)** [SOURCE COMMITTED, awaiting
-   build]. `localModel.UpdateBoundingVolume` recomputes the DRAW bounding
-   volume (GetDrawRadius=unsynced culling, GetMdlDrawMidPos=draw); the synced
-   midPos/collision-volume are separate. Verified no synced reader; gated out.
-4. **H13 — CobEngine per-tick scheduler overhead.** `WakeSleepingThreads` /
+1. **H12 — bounding-volume recalc skip (headless)** [SOURCE COMMITTED,
+   building]. `localModel.UpdateBoundingVolume` recomputes the DRAW bounding
+   volume (GetDrawRadius=unsynced culling, GetMdlDrawMidPos=draw); synced
+   midPos/collision-volume are separate. No synced reader; gated out. Being
+   built into the H9+H10+H12 bundle and interleaved next.
+2. **H13 — CobEngine per-tick scheduler overhead.** `WakeSleepingThreads` /
    `ProcessQueuedThreads` touch containers every tick even when empty;
-   order-preserving early-out when queues are empty.
-5. **H14 — deep QTPFS order-invariant update.** Make node-layer tesselation
+   order-preserving early-out when queues are empty. (Low ceiling — the loops
+   already iterate only non-empty vectors; likely thin.)
+3. **H14 — deep QTPFS order-invariant update.** Make node-layer tesselation
    canonicalization independent of the damage-event *sequence* so H8's
    no-change skip becomes byte-safe (~40% ceiling seen on the broken H8).
-   Large / upstream-scale.
-6. **H15 — LosHandler::UpdateUnit recompute skip.** Skip a unit's LOS re-stamp
+   Large / upstream-scale. **Highest ceiling remaining.**
+4. **H15 — LosHandler::UpdateUnit recompute skip.** Skip a unit's LOS re-stamp
    when its (pos-square, radius, height) are unchanged. LOS is SYNCED → needs a
    hard invariance proof; high risk.
-7. **H16 — QuadField MovedUnit churn.** `UpdateCollisionMap` re-inserts a unit
+5. **H16 — QuadField MovedUnit churn.** `UpdateCollisionMap` re-inserts a unit
    on any position delta; skip remove+add when the occupied quad set is
    unchanged (synced container, order-sensitive — prove identity).
-8. **H18 — feature SlowUpdate / draw-side feature recalc skip (headless).**
-   Analogue of H12 for CFeatureHandler; features rarely move, likely small.
-9. **H19 — Lua synced GC cadence.** `CollectGarbage` runs tied to sim-speed;
+6. **H19 — Lua synced GC cadence.** `CollectGarbage` runs tied to sim-speed;
    probe whether the synced-Lua GC step size is retunable without changing
    observable synced behavior (GC timing ≠ synced values). Needs care.
-10. **H20 — Sim::Los per-allyteam skip.** Ally-teams with no live units/enemies
-    to reveal still iterate LOS; investigate skipping fully-decided allyteams.
-    SYNCED — high risk, parked pending proof.
+7. **H20 — Sim::Los per-allyteam skip.** Ally-teams with no live units/enemies
+   to reveal still iterate LOS; skip fully-decided allyteams. SYNCED — high
+   risk, parked pending proof.
+8. **H21 — COB opcode dispatch: switch → computed-goto.** `CCobThread::Tick`
+   3.5% self; a label-table dispatch may beat the switch. Same computation,
+   provably value-identical. Micro, safe.
+9. **H22 — QTPFS damage-queue coalescing (H14 stepping-stone).** Dedup/merge
+   overlapping damage rects per frame before tesselating, so repeated craters
+   on one block collapse — a safe *subset* of H14 if made order-canonical.
 
-_(H11 struck: QuadField already pools result vectors via QueryVectorCache — no
-allocation to remove. H17 parked: no bit-identical cheaper quaternion form.)_
+_(Struck: H9/H10 → interleaved NO-GAIN, on record. H11 → QuadField already
+pools query vectors. H17 → no bit-identical cheaper quaternion. H18 → no
+feature-side bounding-volume loop exists.)_
 
 ## Hypotheses
 
@@ -333,3 +335,24 @@ massively faster (medium 65s vs ~105s): the no-change fraction is large, so
 a correct, tree-evolution-invariant version of this idea is worth real
 money — but no cheap form exists (upstream-scale change to QTPFS's update
 canonicalization). Reverted; patch kept for the record.
+
+### H9+H10 — LOS readmap-event + COB sound skip — interleave: NO GAIN (folding into a wider bundle)
+
+Both byte-identical (gates ✓, 8/8 interleaved runs OK). Timing (medium,
+interleaved 4×A/B, A=H7 stack, B=+H9+H10):
+
+| round | A | B(+H9H10) |
+|---|---|---|
+| 1 | 107 | 110 |
+| 2 | 102 | 106 |
+| 3 | 99  | 100 |
+| 4 | 106 | 112 |
+| mean | 103.5 | 107.0 (+3.4%) |
+
+B lost all 4 — but these patches can only *remove* work, so this is drift,
+read as **no measurable gain**: the LOS unsynced-heightmap path is already
+skipped by the spectator gate (`UpdateLOS` early-returns under
+`spectatingFullView`) and COB sound events are infrequent in this replay.
+Kept on record; folding in **H12** (draw bounding-volume skip, the member
+with real profile ceiling in `Sim::Unit::SlowUpdateMT`) and re-judging the
+H9+H10+H12 bundle in one interleave. Queue refreshed below.
