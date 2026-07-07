@@ -262,3 +262,10 @@ the three rejected micro-patches with interleaved A/B on a quieter machine,
 (3) deep QTPFS/COB surgery, (4) upstream H1/H2 — they are not
 replay-specific and benefit live BAR too (H2 outright, H1's gate could
 widen to "no draw consumers").
+
+### 8v8 gate for the H7 bundle stack
+
+`6da7496a…` on 0001+H1–H6: **byte-identical** (`8cb2b931…`) ✓. Single-run
+timing 11m58s vs the morning's 11m5s on H1–H3 — same ~8% cross-hour drift
+the medium A-runs showed (109–117s vs 101s); single-run timings are hereby
+retired from verdicts entirely.
