@@ -269,3 +269,16 @@ widen to "no draw consumers").
 timing 11m58s vs the morning's 11m5s on H1–H3 — same ~8% cross-hour drift
 the medium A-runs showed (109–117s vs 101s); single-run timings are hereby
 retired from verdicts entirely.
+
+### H8 — QTPFS: skip retesselation of no-change damage rects — pending
+
+`NodeLayer::Update()` always returned `true`, so every damaged block paid
+Merge+Tesselate + MarkDeadPaths + the full neighbor-cache relink even when
+the recomputed (speedMod, speedBin) field was identical — common under
+repeated cratering and footprint-padded rects, × one update per move-def
+layer. The `needTesselation` branch in `UpdateNodeLayer` existed all along.
+Patch tracks last computed values per square per layer (2 full-map byte
+arrays/layer) and returns a real changed flag. Invariance argument: the
+skipped work is a pure function of that field over the rect; unchanged
+field ⇒ identical rebuild. Profiled ceiling: UpdateNodeLayer = 10% of main
+CPU on medium. Verdict via byte-identity gates + interleaved A/B.
