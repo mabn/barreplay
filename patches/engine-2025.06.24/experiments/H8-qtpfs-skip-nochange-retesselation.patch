@@ -1,0 +1,124 @@
+From c0138ab7505f224ad3e02327de8acde889f13668 Mon Sep 17 00:00:00 2001
+From: Claude <claude@example.com>
+Date: Tue, 7 Jul 2026 16:50:43 +0200
+Subject: [PATCH] QTPFS: skip retesselation when a damage rect changed nothing
+
+NodeLayer::Update() unconditionally returned true, so every damaged
+block paid Merge+Tesselate, MarkDeadPaths (forcing repaths that produce
+identical results) and the full neighbor-cache relink even when the
+recomputed (speedMod, speedBin) field is identical to what the tree was
+built from - common under repeated cratering of the same area and the
+footprint-padded damage rects, and multiplied by one update per move-def
+layer. UpdateNodeLayer's needTesselation branch existed all along; it
+just never received anything but true.
+
+Track the last computed (speedMod, speedBin) per square per layer
+(two full-map byte arrays, ~2 MB per layer) and return whether any
+square in the rect actually differed. Tesselation, dead-path marking
+and the relink are pure functions of this field over the rect -
+everything else they read comes from the node tree, which only changes
+through them - so an unchanged field means the rebuild would recreate
+the identical tree and the skip is behavior-invariant. First touch of
+any square reports changed (bin sentinel 0xFF), which keeps the initial
+full-map tesselation intact.
+
+Profiled (H7 stack, medium mid-game): QTPFS::PathManager::UpdateNodeLayer
+= 10% of main-thread CPU (NodeLayer::Update 3.4 + neighbor-cache relink
+3.3 + Tesselate 2.6); the skippable share depends on the no-change block
+fraction. Output verified byte-identical via the snapshot-diff gate.
+---
+ rts/Sim/Path/QTPFS/NodeLayer.cpp | 31 +++++++++++++++++++++++++++++--
+ rts/Sim/Path/QTPFS/NodeLayer.h   | 10 ++++++++++
+ 2 files changed, 39 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Sim/Path/QTPFS/NodeLayer.cpp b/rts/Sim/Path/QTPFS/NodeLayer.cpp
+index fce87d9..9d1bada 100644
+--- a/rts/Sim/Path/QTPFS/NodeLayer.cpp
++++ b/rts/Sim/Path/QTPFS/NodeLayer.cpp
+@@ -75,6 +75,13 @@ void QTPFS::NodeLayer::Init(unsigned int layerNum) {
+ 	curSpeedMods.resize(QTPFS_MAX_NODE_SIZE*QTPFS_MAX_NODE_SIZE,  0);
+ 	curSpeedBins.resize(QTPFS_MAX_NODE_SIZE*QTPFS_MAX_NODE_SIZE, -1);
+ 
++	// [barreplay] change-detection field; bin 0xFF = "never computed", so the
++	// first update of any square always reports changed (see header)
++	prevSpeedMods.clear();
++	prevSpeedMods.resize(xsize * zsize, 0);
++	prevSpeedBins.clear();
++	prevSpeedBins.resize(xsize * zsize, 0xFF);
++
+ 	MoveDef* md = moveDefHandler.GetMoveDefByPathType(layerNum);
+ 	useShortestPath = md->preferShortestPath;
+ }
+@@ -83,6 +90,8 @@ void QTPFS::NodeLayer::Clear() {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	curSpeedMods.clear();
+ 	curSpeedBins.clear();
++	prevSpeedMods.clear();
++	prevSpeedBins.clear();
+ }
+ 
+ 
+@@ -92,6 +101,17 @@ bool QTPFS::NodeLayer::Update(UpdateThreadData& threadData) {
+ 
+ 	unsigned int numClosedSquares = 0;
+ 
++	// [barreplay] whether any square's (speedMod, speedBin) differs from the
++	// last value computed for it. Tesselation, dead-path marking and the
++	// neighbor-cache relink are pure functions of this field over the rect
++	// (everything else they read comes from the node tree itself, which only
++	// changes through them) - so when nothing changed, the Merge+Tesselate
++	// would rebuild the identical tree and the whole block is redundant.
++	// The caller (UpdateNodeLayer) already branches on our return value; it
++	// just never got anything but `true` before.
++	bool fieldChanged = false;
++	assert(NUM_SPEEDMOD_BINS + 1 < 0xFF); // 0xFF stays an impossible bin
++
+ 	// areaUpdated is always 16x16 squares. areaRelinkedInner could be bigger; this doesn't happen as often and once the
+ 	// nodes have divided they will never again grow larger than 16x16 squares in a match.
+ 	const SRectangle& r = threadData.areaRelinkedInner;
+@@ -188,12 +208,19 @@ bool QTPFS::NodeLayer::Update(UpdateThreadData& threadData) {
+ 			numClosedSquares += int(newSpeedModBin == QTPFS::NodeLayer::NUM_SPEEDMOD_BINS);
+ 
+ 			// need to keep track of these for Tesselate
+-			curSpeedMods[recIdx] = newRelSpeedMod * float(MaxSpeedModTypeValue());
++			const SpeedModType newSpeedMod = newRelSpeedMod * float(MaxSpeedModTypeValue());
++			curSpeedMods[recIdx] = newSpeedMod;
+ 			curSpeedBins[recIdx] = newSpeedModBin;
++
++			// [barreplay] compare against the last computed value for this square
++			const unsigned int mapIdx = hmz * xsize + hmx;
++			fieldChanged |= (prevSpeedBins[mapIdx] != newSpeedModBin) | (prevSpeedMods[mapIdx] != newSpeedMod);
++			prevSpeedMods[mapIdx] = newSpeedMod;
++			prevSpeedBins[mapIdx] = newSpeedModBin;
+ 		}
+ 	}
+ 
+-	return true;
++	return fieldChanged;
+ }
+ 
+ 
+diff --git a/rts/Sim/Path/QTPFS/NodeLayer.h b/rts/Sim/Path/QTPFS/NodeLayer.h
+index 467aab0..22881fe 100644
+--- a/rts/Sim/Path/QTPFS/NodeLayer.h
++++ b/rts/Sim/Path/QTPFS/NodeLayer.h
+@@ -175,6 +175,16 @@ namespace QTPFS {
+ 		std::vector<SpeedModType> curSpeedMods;
+ 		std::vector<SpeedBinType> curSpeedBins;
+ 
++		// [barreplay] full-map copy of the last (speedMod, speedBin) computed for
++		// every square, so Update() can report whether a damage rect actually
++		// changed anything. Tesselation/relink/dead-path-marking are pure
++		// functions of this field over the rect - when no square changed, the
++		// rebuild is redundant and UpdateNodeLayer skips it (the needTesselation
++		// branch existed; Update just always returned true). prevSpeedBins is
++		// initialized to 0xFF (an impossible bin), so first touch reports changed.
++		std::vector<SpeedModType> prevSpeedMods;
++		std::vector<SpeedBinType> prevSpeedBins;
++
+ public:
+ 		static constexpr unsigned int NUM_POOL_CHUNKS = sizeof(poolNodes) / sizeof(poolNodes[0]);
+ 		static constexpr unsigned int POOL_TOTAL_SIZE = (1024 * 1024) / 2;
+-- 
+2.47.3
+
