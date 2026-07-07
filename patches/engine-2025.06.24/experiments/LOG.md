@@ -118,3 +118,21 @@ on replays dominated by idle animating structures, re-testable on the 8v8.
 Also learned this iteration (perf callgraph on a plain run): the `-profile`
 scope table's `Update` = 16.7s is a profiler artifact — real cost <2%; and
 perf symbolization needs the exact binary preserved next to perf.data.
+
+### H5 — for_mt guided batch claiming — REJECTED-no-gain
+
+Hypothesis: `ForTaskGroup::ExecuteStep` claims ONE index per call (two
+contended atomic RMWs per element, thousands of elements/frame across every
+for_mt in the sim; main thread showed 4.4% CPU in WaitForFinished during
+ground-move phases). Changed to guided batches (~remaining/4·threads,
+clamped [1,64]) — each index still runs exactly once, only the
+(already-arbitrary, machine-varying) thread-to-index assignment shifts.
+
+Result: **byte-identical output on both replays** (confirming
+thread-assignment invariance) but timing flat/noise: small 25s, medium 105s
+vs the 101–107s band. Atomic contention evidently isn't binding at 3
+threads. Reverted; patch kept as `H5-REJECTED-formt-batch-claiming.patch` —
+worth re-testing on hosts with more workers.
+
+Medium sim history across the loop so far: 113 (0001) → 109 (H1) → 101 (H2)
+→ 107/101/105 (H3/H4/H5 runs — noise band σ≈3s around ~104).

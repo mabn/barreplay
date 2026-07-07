@@ -1,0 +1,79 @@
+From 9d20f34b536c9fbcb9f7036b5764bda65606b829 Mon Sep 17 00:00:00 2001
+From: Claude <claude@example.com>
+Date: Tue, 7 Jul 2026 08:01:36 +0200
+Subject: [PATCH] thread pool: guided batch claiming in for_mt slice tasks
+
+ForTaskGroup::ExecuteStep claimed ONE index per call: every element of
+every for_mt paid two contended atomic RMWs (ctr fetch_add,
+remainingTasks decrement) on cache lines shared by all participating
+threads. for_mt fans out thousands of elements per sim frame
+(ground-move phases, LOS, weapon vectors, script anims), and the perf
+callgraph showed the main thread spending 4.4% of CPU in
+WaitForFinished during the ground-move phases alone.
+
+Claim a batch per step instead, sized to ~1/(4*threads) of the
+remaining work (clamped to [1, 64]), so batches decay toward 1 as the
+range drains: ~40 atomic claims instead of ~2000 for a 1000-element
+range, with tail imbalance bounded by the final single-index batches.
+
+Each index still executes exactly once with unchanged per-index work;
+only the thread-to-index assignment shifts, which the engine's MT
+contract already requires to be result-invariant (it varies with
+worker count and timing on every machine). Verified byte-identical
+output via the snapshot-diff gate.
+---
+ rts/System/Threading/ThreadPool.h | 36 +++++++++++++++++++++++++------
+ 1 file changed, 29 insertions(+), 7 deletions(-)
+
+diff --git a/rts/System/Threading/ThreadPool.h b/rts/System/Threading/ThreadPool.h
+index a773882..e53a28e 100644
+--- a/rts/System/Threading/ThreadPool.h
++++ b/rts/System/Threading/ThreadPool.h
+@@ -653,15 +653,37 @@ public:
+ 	bool IsSliceTask() const override { return true; }
+ 	bool ExecuteStep() override
+ 	{
+-		const int i = from + (step * ctr.fetch_add(1, std::memory_order_relaxed));
+-
+-		if (i < to) {
+-			func(i);
+-			remainingTasks -= 1;
+-			return true;
++		// [barreplay] claim a guided-size batch of slices per step instead of a
++		// single index: the one-index-per-claim scheme paid two contended atomic
++		// RMWs (ctr, remainingTasks) per element, and for_mt fans out thousands
++		// of elements per sim frame across every subsystem (move-types, LOS,
++		// weapon vectors, script anims). Batch size decays with the remaining
++		// work (~4 batches in flight per thread) so tail imbalance stays small.
++		// Each index still executes exactly once with unchanged per-index work -
++		// only the (already arbitrary) thread-to-index assignment shifts, which
++		// the engine's MT contract requires to be result-invariant anyway.
++		const int total = (step == 1) ? (to - from) : ((to - from + step - 1) / step);
++		const int nThreads = ThreadPool::GetNumThreads();
++		const int batch = std::clamp((total - ctr.load(std::memory_order_relaxed)) / (4 * nThreads), 1, 64);
++		const int first = ctr.fetch_add(batch, std::memory_order_relaxed);
++
++		int executed = 0;
++
++		for (int k = 0; k < batch; ++k) {
++			const int slice = first + k;
++
++			if (slice >= total)
++				break;
++
++			func(from + step * slice);
++			executed += 1;
+ 		}
+ 
+-		return false;
++		if (executed == 0)
++			return false;
++
++		remainingTasks -= executed;
++		return true;
+ 	}
+ 
+ private:
+-- 
+2.47.3
+
