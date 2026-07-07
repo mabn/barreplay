@@ -1,0 +1,112 @@
+From b3d6577a187261f112695513b2576942964f83ca Mon Sep 17 00:00:00 2001
+From: Claude <claude@mabn.pl>
+Date: Tue, 7 Jul 2026 08:34:30 +0200
+Subject: [PATCH 1/2] headless: unchecked bytecode fetch in the COB interpreter
+
+GET_LONG_PC() goes through vector::at() (mantis #5981) so an
+out-of-bounds pc on a malformed script throws instead of UB - a
+user-facing-client concern. Every opcode and operand word of every COB
+script fetches through this macro (CCobThread::Tick, 3.7% self in a
+mid-game profile), paying a compare+branch and the exception path's
+optimization barrier per word. A headless demo re-sim only runs scripts
+that already executed during the live game being replayed, so use the
+unchecked [] fetch under HEADLESS. Integer fetches only; identical
+values for any valid script - output verified byte-identical via the
+snapshot-diff gate.
+---
+ rts/Sim/Units/Scripts/CobThread.cpp | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Sim/Units/Scripts/CobThread.cpp b/rts/Sim/Units/Scripts/CobThread.cpp
+index 696471b..13f23c5 100644
+--- a/rts/Sim/Units/Scripts/CobThread.cpp
++++ b/rts/Sim/Units/Scripts/CobThread.cpp
+@@ -227,7 +227,13 @@ void CCobThread::InitStack(unsigned int n, CCobThread* t)
+ 	}
+ }
+ 
+-#if 0
++#ifdef HEADLESS
++// [barreplay] the .at() below (mantis #5981) turns an out-of-bounds program
++// counter on a MALFORMED script into a catchable exception instead of UB - a
++// user-facing-client concern. A headless demo re-sim only runs scripts that
++// already executed during the live game, so skip the per-fetch bounds check
++// in the interpreter's hottest loop (every opcode + operand word goes through
++// this macro). Integer fetches only - identical values for any valid script.
+ #define GET_LONG_PC() (cobFile->code[pc++])
+ #else
+ // mantis #5981
+-- 
+2.47.3
+
+
+From c8c368f13306c56a1c7ea0c482e28e50d0aa700e Mon Sep 17 00:00:00 2001
+From: Claude <claude@mabn.pl>
+Date: Tue, 7 Jul 2026 20:43:01 +0200
+Subject: [PATCH 2/2] headless demo replay: skip LOS readmap-event stamping +
+ COB unit sounds
+
+Micro-bundle #2 (H9+H10), both HEADLESS-gated, both unsynced:
+
+- CLosMap::AddRaycast: force updateUnsyncedHeightMap=false. That branch
+  only calls readMap->UpdateLOS (unsynced heightmap re-shade event for
+  terrain rendering under newly-revealed LOS); the synced LOS counter
+  losmap[idx]+=amount is applied identically by the else branch, so no
+  synced state changes.
+
+- CCobInstance::PlayUnitSound: skip. Sound is fire-and-forget unsynced
+  output (headless runs NullSound / disabled channel); a COB script's
+  sound opcode writes no synced state.
+
+Output verified via the snapshot-diff gate.
+---
+ rts/Sim/Misc/LosMap.cpp               | 11 +++++++++++
+ rts/Sim/Units/Scripts/CobInstance.cpp |  8 ++++++++
+ 2 files changed, 19 insertions(+)
+
+diff --git a/rts/Sim/Misc/LosMap.cpp b/rts/Sim/Misc/LosMap.cpp
+index 57cc5d5..11ae60c 100644
+--- a/rts/Sim/Misc/LosMap.cpp
++++ b/rts/Sim/Misc/LosMap.cpp
+@@ -437,7 +437,18 @@ void CLosMap::AddRaycast(SLosInstance* instance, int amount)
+ 
+ 	// inform ReadMap when squares enter LoS
+ 	const bool visibleInstanceSquares = (instance->allyteam >= 0 && (instance->allyteam == gu->myAllyTeam || gu->spectatingFullView));
++#ifdef HEADLESS
++	// [barreplay] the (amount>0 && updateUnsyncedHeightMap) branch below exists
++	// only to feed readMap->UpdateLOS - an UNSYNCED heightmap event so terrain
++	// under newly-revealed LOS re-shades in the renderer. Nothing draws in a
++	// headless demo replay. The synced LOS coverage counter (losmap[idx] +=
++	// amount) is applied identically by the else branch, so forcing the cheap
++	// path changes no synced state.
++	[[maybe_unused]] const bool unusedVis = visibleInstanceSquares;
++	const bool updateUnsyncedHeightMap = false;
++#else
+ 	const bool updateUnsyncedHeightMap = sendReadmapEvents && visibleInstanceSquares;
++#endif
+ 
+ 	if ((amount > 0) && updateUnsyncedHeightMap) {
+ 		for (const SLosInstance::RLE rle: losSquares) {
+diff --git a/rts/Sim/Units/Scripts/CobInstance.cpp b/rts/Sim/Units/Scripts/CobInstance.cpp
+index f4028a8..36d3b1f 100644
+--- a/rts/Sim/Units/Scripts/CobInstance.cpp
++++ b/rts/Sim/Units/Scripts/CobInstance.cpp
+@@ -745,7 +745,15 @@ void CCobInstance::Signal(int signal)
+ void CCobInstance::PlayUnitSound(int snr, int attr)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++#ifdef HEADLESS
++	// [barreplay] sound is fire-and-forget UNSYNCED output (the headless build
++	// runs NullSound / a disabled channel, so PlaySample takes the sound mutex
++	// and returns). A COB script triggering this - EMIT_SFX sound opcodes, fire
++	// notes - writes no synced state, so skip it entirely in a headless replay.
++	return;
++#else
+ 	Channels::UnitReply->PlaySample(cobFile->sounds[snr], unit->pos, unit->speed, attr);
++#endif
+ }
+ 
+ 
+-- 
+2.47.3
+
