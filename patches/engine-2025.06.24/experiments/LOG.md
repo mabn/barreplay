@@ -61,3 +61,23 @@ CFeatureHandler::UpdatePreFrame 0.62% ≈ 4.3%.
 | medium | 113s / 210 fps | 109s / 219 fps | **−4%** (matches perf share) | identical ✓ |
 
 Patch: `H1-skip-prevframe-transform-save.patch` (recoil commit `ae02c4b`).
+
+### H2 — TickAllAnims: skip redundant per-tick sort + reuse BFS scratch — KEPT
+
+`CUnitScript::TickAllAnims` (8.6% self-time, runs per animating script per
+frame) paid a `std::sort(anims)` every tick and constructed a `std::deque`
+per call for the piece-tree BFS. Now: `animsDirty` flag (set on AddAnim
+append / RemoveAnim swap-erase, cleared by the sort; the done-anim erase
+became order-preserving `std::erase_if` so it keeps sorted order) skips the
+sort in the steady state, and the BFS uses a thread_local grow-only vector
+scanned by index — the deque's exact FIFO order, zero allocations after
+warmup. Identical iteration order by construction (unique (piece,type,axis)
+keys → unique sorted sequence), so anim checksum accumulation and
+AnimFinished call order are bit-identical.
+
+| replay | sim before (H1) | sim after | Δ | output |
+|---|---|---|---|---|
+| small | 25s / 1016 fps | 25s / 1013 fps | flat (few anims) | identical ✓ |
+| medium | 109s / 219 fps | 101s / 235 fps | **−7.3%** | identical ✓ |
+
+Patch: `H2-tickallanims-sort-skip-bfs-scratch.patch` (recoil commit `8110b6f`).
