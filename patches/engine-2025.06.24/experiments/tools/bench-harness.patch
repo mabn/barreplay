@@ -1,0 +1,144 @@
+From 33e8b7533dff9f140e2b31a9361650aa2b607454 Mon Sep 17 00:00:00 2001
+From: Claude <claude@mabn.pl>
+Date: Wed, 8 Jul 2026 00:31:35 +0200
+Subject: [PATCH] barreplay bench harness: perf-counter instruction/cycle
+ measurement over a fixed sim-frame window
+
+Inert unless BARREPLAY_BENCH_START/N are set (guard falls through to plain
+SimFrame(), so output is byte-identical and normal runs are unaffected).
+When set: over sim frames [START, START+N), accumulate per-SimFrame
+thread-CPU + wall, and open perf_event_open counters (core cycles +
+instructions retired), then print + _exit(0) so the run truncates right
+after the window (fast iteration).
+
+Measurement finding: run the bench with -worker-threads 1 (no worker pool ->
+no WaitForFinished spin-wait -> fully serial deterministic main-thread sim).
+Then INSTRUCTIONS retired over the window is deterministic to ~0.02-0.35%
+(vs ~5-15% for wall/cpu-time/cycles, which suffer host frequency scaling +
+neighbour memory-bandwidth contention on this cloud VM). Instructions is thus
+a precise, frequency/contention-immune detector of value-identical
+optimizations; take min-of-N to reject the occasional +0.8% outlier.
+-worker-threads is scheduling-only (cannot desync), so wt=1 measures the same
+deterministic sim, just serialized.
+---
+ rts/Net/NetCommands.cpp | 93 ++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 92 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Net/NetCommands.cpp b/rts/Net/NetCommands.cpp
+index 124d44b..b201865 100644
+--- a/rts/Net/NetCommands.cpp
++++ b/rts/Net/NetCommands.cpp
+@@ -1,10 +1,68 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include <cinttypes>
++#include <ctime>
++#include <cstdlib>
++#include <cstdio>
++#include <unistd.h>
++#include <cstring>
++#include <linux/perf_event.h>
++#include <sys/ioctl.h>
++#include <sys/syscall.h>
+ 
+ #include "Game/Game.h"
+ #include "GameServer.h"
+ 
++// [barreplay] CPU-time micro-benchmark of a fixed sim-frame window.
++// Env: BARREPLAY_BENCH_START=<frame> BARREPLAY_BENCH_N=<count>
++// Accumulates per-SimFrame() CLOCK_THREAD_CPUTIME_ID (immune to other-tenant
++// wall contention — counts only while the sim thread is on-CPU) and wall over
++// frames [START, START+N-1], prints to stderr, then _exit(0) — so the run is
++// truncated right after the window for fast iteration. Zero effect unless the
++// env vars are set; never touches synced state.
++namespace {
++	inline long long brNowNs(clockid_t c) {
++		struct timespec ts; clock_gettime(c, &ts);
++		return (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
++	}
++	inline int brPerfOpen(uint32_t type, uint64_t config) {
++		struct perf_event_attr pea;
++		memset(&pea, 0, sizeof(pea));
++		pea.type = type; pea.size = sizeof(pea); pea.config = config;
++		pea.disabled = 1; pea.exclude_kernel = 1; pea.exclude_hv = 1;
++		// pid=0 (this thread), cpu=-1 (any cpu it runs on)
++		return (int)syscall(SYS_perf_event_open, &pea, 0, -1, -1, 0);
++	}
++	inline long long brPerfRead(int fd) {
++		long long v = 0;
++		if (fd >= 0 && read(fd, &v, sizeof(v)) != sizeof(v)) v = -1;
++		return v;
++	}
++	struct BRBench {
++		int  start = -1, n = 0;
++		bool init = false;
++		const char* out = nullptr;
++		int  fdCyc = -1, fdIns = -1;
++		long long tcpu = 0, pcpu = 0, wall = 0; int seen = 0;
++		void ensure() {
++			if (init) return;
++			init = true;
++			if (const char* s = getenv("BARREPLAY_BENCH_START")) start = atoi(s);
++			if (const char* v = getenv("BARREPLAY_BENCH_N"))     n     = atoi(v);
++			out = getenv("BARREPLAY_BENCH_OUT");
++		}
++		void countersOn() {
++			// frequency-independent work counters (core cycles) + deterministic
++			// instruction count; enabled once at window start.
++			fdCyc = brPerfOpen(PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
++			fdIns = brPerfOpen(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
++			if (fdCyc >= 0) { ioctl(fdCyc, PERF_EVENT_IOC_RESET, 0); ioctl(fdCyc, PERF_EVENT_IOC_ENABLE, 0); }
++			if (fdIns >= 0) { ioctl(fdIns, PERF_EVENT_IOC_RESET, 0); ioctl(fdIns, PERF_EVENT_IOC_ENABLE, 0); }
++		}
++	};
++	BRBench g_brBench;
++}
++
+ #include "ExternalAI/EngineOutHandler.h"
+ #include "ExternalAI/SkirmishAIHandler.h"
+ #include "Game/ClientData.h"
+@@ -615,7 +673,40 @@ void CGame::ClientReadNet()
+ 				msgProcTimeLeft -= 1000.0f;
+ 				lastSimFrameNetPacketTime = spring_gettime();
+ 
+-				SimFrame();
++				g_brBench.ensure();
++				if (g_brBench.start >= 0) {
++					const int about = gs->frameNum + 1; // frame SimFrame() is about to run
++					if (about >= g_brBench.start && about < g_brBench.start + g_brBench.n) {
++						if (about == g_brBench.start)
++							g_brBench.countersOn();
++						const long long t0 = brNowNs(CLOCK_THREAD_CPUTIME_ID);
++						const long long w0 = brNowNs(CLOCK_MONOTONIC);
++						SimFrame();
++						g_brBench.tcpu += brNowNs(CLOCK_THREAD_CPUTIME_ID)  - t0;
++						g_brBench.wall += brNowNs(CLOCK_MONOTONIC)          - w0;
++						g_brBench.seen += 1;
++						if (about == g_brBench.start + g_brBench.n - 1) {
++							const long long cyc = brPerfRead(g_brBench.fdCyc);
++							const long long ins = brPerfRead(g_brBench.fdIns);
++							// cycles + instructions are frequency-independent /
++							// deterministic work measures (the trustworthy signal);
++							// thread_cpu/wall kept for reference only.
++							char line[320];
++							snprintf(line, sizeof(line),
++								"[BARREPLAY_BENCH] frames=%d cycles=%lld instructions=%lld thread_cpu_ms=%.3f wall_ms=%.3f\n",
++								g_brBench.seen, cyc, ins, g_brBench.tcpu / 1e6, g_brBench.wall / 1e6);
++							if (g_brBench.out) {
++								if (FILE* f = fopen(g_brBench.out, "a")) { fputs(line, f); fclose(f); }
++							}
++							fputs(line, stderr); fflush(stderr);
++							_exit(0);
++						}
++					} else {
++						SimFrame();
++					}
++				} else {
++					SimFrame();
++				}
+ 
+ #ifdef SYNCCHECK
+ 				// both NETMSG_SYNCRESPONSE and NETMSG_NEWFRAME are used for ping calculation by server
+-- 
+2.47.3
+
