@@ -163,3 +163,26 @@ Biggest *addressable* block left: ~18s unsynced gadget Lua on medium =
 patch 0002's first half (excluded from this loop by instruction; measured
 "within noise" on the other VM's 8v8 but looks like real money here).
 Beyond that: deep QTPFS / COB-VM surgery (10× effort, real desync risk).
+
+### H6 — unchecked COB bytecode fetch under HEADLESS — REJECTED-no-gain
+
+`GET_LONG_PC()` fetches every opcode/operand word through bounds-checked
+`vector::at()` (upstream mantis #5981, a malformed-script crash guard — a
+user-facing-client concern; a replay only runs scripts that already executed
+live). Switched to `[]` under HEADLESS. Integer-only, provably
+value-identical for valid scripts — and indeed **byte-identical output**,
+but timing flat (small 25s, medium 106s, noise band). The predicted ≤1% is
+below this VM's ~3% noise floor. Reverted; patch kept as
+`H6-REJECTED-cob-unchecked-fetch.patch`.
+
+## Conclusion of this loop phase
+
+H4, H5, H6 all landed byte-identical-but-flat: the safe-cut well is
+empirically dry at this VM's noise floor. Kept stack = **0001 + H1 + H2 +
+H3** (recoil `claude/perf-loop` @ `c955686`): medium −11%, small −17%,
+8v8 ≈ −13%, all byte-identical to pre-loop references. Next moves ranked by
+expected value: (1) fold in patch 0002 (user-gated), (2) bundle-remeasure
+the three rejected micro-patches with interleaved A/B on a quieter machine,
+(3) deep QTPFS/COB surgery, (4) upstream H1/H2 — they are not
+replay-specific and benefit live BAR too (H2 outright, H1's gate could
+widen to "no draw consumers").
