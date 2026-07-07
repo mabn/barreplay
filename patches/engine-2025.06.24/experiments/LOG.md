@@ -38,3 +38,26 @@ Draw 4%.
 ## Hypotheses
 
 (one section per hypothesis; verdicts: KEPT / REJECTED-no-gain / REJECTED-output-diff)
+
+### H1 — skip prev-frame transform save in headless demo replay — KEPT
+
+`CUnitHandler::UpdatePreFrame` + `CFeatureHandler::UpdatePreFrame` save every
+object's previous transform (matrix→quaternion per object) + every model
+piece's prev model-space transform, every sim frame — state read ONLY by
+draw-side interpolation (`Rendering/`: drawPos, model-transform upload).
+Gated out under `HEADLESS && gameSetup->hostDemo` (Game.cpp call site).
+Sync-safety: skipped fields are plain (not Synced*) types — no sync-checksum
+contribution; the lazy piece-transform refresh it triggered is idempotent
+(later synced readers recompute identical values); projectiles maintain their
+own `preFrameTra` (synced ground-collision reads it) elsewhere, untouched.
+
+perf (medium, mid-game, self-time): SavePrevModelSpaceTransform 1.63% +
+UpdatePrevFrameTransform 1.27% + CQuaternion::MakeFrom 0.80% +
+CFeatureHandler::UpdatePreFrame 0.62% ≈ 4.3%.
+
+| replay | sim before | sim after | Δ | output |
+|---|---|---|---|---|
+| small | 29s / 874 fps | 25s / 1016 fps | **−14%** | identical ✓ |
+| medium | 113s / 210 fps | 109s / 219 fps | **−4%** (matches perf share) | identical ✓ |
+
+Patch: `H1-skip-prevframe-transform-save.patch` (recoil commit `ae02c4b`).
