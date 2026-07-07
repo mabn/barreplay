@@ -1,0 +1,140 @@
+From fb3e8acd51c3a4a12a8cf2c9d82cbdf9eb4f5a73 Mon Sep 17 00:00:00 2001
+From: Claude <claude@mabn.pl>
+Date: Wed, 8 Jul 2026 01:20:18 +0200
+Subject: [PATCH] MoveMath collision cache: generation-stamped flat cache (was
+ unordered_map)
+
+RangeIsBlockedHashedMt + FloodFillRangeIsBlocked memoized ObjectBlockType per
+collidee via a per-thread unordered_map<CSolidObject*,BlockType> (pointer
+hashing + node alloc + rehash + clear()). Replace with a per-thread
+generation-stamped direct-mapped cache (1024 slots): a new batch bumps the
+generation instead of clearing, lookups are one masked index, no allocation.
+Evict-on-collision only recomputes ObjectBlockType (deterministic), so results
+are value-identical; relies on the same collider-constant-per-tempNum
+invariant the map already assumed (byte-identity gate confirms).
+
+Measured (bench, medium [6000,9000), wt=1, min-of-3): 34.995e9 -> 34.405e9
+instr = -1.69% (cumulative -14.82% with H29+H30), byte-identical.
+---
+ rts/Sim/MoveTypes/MoveMath/MoveMath.cpp | 72 ++++++++++++++++---------
+ 1 file changed, 46 insertions(+), 26 deletions(-)
+
+diff --git a/rts/Sim/MoveTypes/MoveMath/MoveMath.cpp b/rts/Sim/MoveTypes/MoveMath/MoveMath.cpp
+index ef13273..3211a3e 100644
+--- a/rts/Sim/MoveTypes/MoveMath/MoveMath.cpp
++++ b/rts/Sim/MoveTypes/MoveMath/MoveMath.cpp
+@@ -481,16 +481,47 @@ CMoveMath::BlockType CMoveMath::RangeIsBlockedHashedSt(int xmin, int xmax, int z
+ 	return ret;
+ }
+ 
+-static std::array<spring::unordered_map<CSolidObject*, CMoveMath::BlockType>, ThreadPool::MAX_THREADS> blockMaps;
+-static std::array<int, ThreadPool::MAX_THREADS> lastTempNums;
++// [barreplay] generation-stamped direct-mapped cache replacing a per-thread
++// unordered_map<CSolidObject*, BlockType>. Memoizes ObjectBlockType(collidee)
++// within a query batch; a new batch bumps the generation instead of clearing
++// (no node allocation, cache-friendly, no rehash). Direct-mapped with
++// evict-on-collision -> a slot may be recomputed, but the stored value is
++// always the deterministic ObjectBlockType, so results are value-identical to
++// the map. lastTempNum tracks batch changes for RangeIsBlockedHashedMt.
++namespace {
++	struct BlockTypeCache {
++		static constexpr uint32_t SIZE = 1024; // pow2
++		CSolidObject*        keys[SIZE] = {};
++		CMoveMath::BlockType vals[SIZE] = {};
++		uint32_t             slotGen[SIZE] = {};
++		uint32_t             gen = 0;
++		int                  lastTempNum = -1;
++
++		inline void newGeneration() {
++			if (++gen == 0) { // wraparound: invalidate all slots once
++				for (uint32_t i = 0; i < SIZE; ++i) slotGen[i] = 0;
++				gen = 1;
++			}
++		}
++		template<typename F>
++		inline CMoveMath::BlockType getOrCompute(CSolidObject* key, F&& compute) {
++			const uint32_t h = (uint32_t(uintptr_t(key) >> 4)) & (SIZE - 1);
++			if (slotGen[h] == gen && keys[h] == key)
++				return vals[h];
++			const CMoveMath::BlockType v = compute();
++			keys[h] = key; vals[h] = v; slotGen[h] = gen;
++			return v;
++		}
++	};
++	std::array<BlockTypeCache, ThreadPool::MAX_THREADS> blockCaches;
++}
+ 
+ // Called by GeneralMoveSystem::Init()
+ void CMoveMath::InitRangeIsBlockedHashes() {
+-	for (auto& blockMap : blockMaps) {
+-		blockMap.reserve(10);
+-	}
+-	for (auto& lastTempNum : lastTempNums) {
+-		lastTempNum = -1;
++	for (auto& c : blockCaches) {
++		c.gen = 0;
++		c.lastTempNum = -1;
++		for (uint32_t i = 0; i < BlockTypeCache::SIZE; ++i) c.slotGen[i] = 0;
+ 	}
+ }
+ 
+@@ -499,12 +530,11 @@ CMoveMath::BlockType CMoveMath::RangeIsBlockedHashedMt(int xmin, int xmax, int z
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	BlockType ret = BLOCK_NONE;
+ 
+-	spring::unordered_map<CSolidObject*, CMoveMath::BlockType>& blockMap = blockMaps[thread];
+-	int& lastTempNum = lastTempNums[thread];
++	BlockTypeCache& cache = blockCaches[thread];
+ 
+-	if (lastTempNum != tempNum){
+-		blockMap.clear();
+-		lastTempNum = tempNum;
++	if (cache.lastTempNum != tempNum){
++		cache.newGeneration();
++		cache.lastTempNum = tempNum;
+ 	}
+ 
+ 	// footprints are point-symmetric around <xSquare, zSquare>
+@@ -516,13 +546,8 @@ CMoveMath::BlockType CMoveMath::RangeIsBlockedHashedMt(int xmin, int xmax, int z
+ 
+ 			for (size_t i = 0, n = cell.size(); i < n; i++) {
+ 				CSolidObject* collidee = cell[i];
+-  
+-				auto blockMapResult = blockMap.find(collidee);
+-				if (blockMapResult == blockMap.end()) {
+-					blockMapResult = blockMap.emplace(collidee, ObjectBlockType(collidee, collider)).first;
+-				}
+ 
+-				ret |= blockMapResult->second;
++				ret |= cache.getOrCompute(collidee, [&]{ return ObjectBlockType(collidee, collider); });
+ 
+ 				if ((ret & BLOCK_STRUCTURE) == 0)
+ 					continue;
+@@ -538,8 +563,8 @@ CMoveMath::BlockType CMoveMath::RangeIsBlockedHashedMt(int xmin, int xmax, int z
+ void CMoveMath::FloodFillRangeIsBlocked(const MoveDef& moveDef, const CSolidObject* collider, const SRectangle& areaToSample, std::vector<std::uint8_t>& results, int thread)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	spring::unordered_map<CSolidObject*, CMoveMath::BlockType>& blockMap = blockMaps[thread];
+-	blockMap.clear();
++	BlockTypeCache& cache = blockCaches[thread];
++	cache.newGeneration();
+ 
+ 	results.clear();
+ 	results.reserve(areaToSample.GetArea());
+@@ -558,12 +583,7 @@ void CMoveMath::FloodFillRangeIsBlocked(const MoveDef& moveDef, const CSolidObje
+ 			for (size_t i = 0, n = cell.size(); i < n; i++) {
+ 				CSolidObject* collidee = cell[i];
+ 
+-				auto blockMapResult = blockMap.find(collidee);
+-				if (blockMapResult == blockMap.end()) {
+-					blockMapResult = blockMap.emplace(collidee, ObjectBlockType(collidee, &colliderInfo)).first;
+-				}
+-
+-				ret |= blockMapResult->second;
++				ret |= cache.getOrCompute(collidee, [&]{ return ObjectBlockType(collidee, &colliderInfo); });
+ 
+ 				if ((ret & BLOCK_STRUCTURE) != 0)
+ 					break;
+-- 
+2.47.3
+

@@ -504,3 +504,11 @@ scan. Conservative superset → value-identical. **Byte-identical; 37.210e9 →
 34.995e9 instr = −5.95%, cumulative −13.35% vs pre-H29 (40.389→34.995).**
 Yardmap vein now mined out. Next: RangeIsBlockedHashedMt cache (5.6%),
 tesselation internals (UpdateMoveCost/UpdateNeighborCache ~3.5% each).
+
+### H31 — MoveMath flat collision cache (was unordered_map) — KEPT, −1.69% (cum −14.82%)
+
+RangeIsBlockedHashedMt + FloodFillRangeIsBlocked: per-thread
+unordered_map<CSolidObject*,BlockType> → generation-stamped direct-mapped flat
+cache (1024 slots, no alloc/clear/rehash, evict-on-collision recomputes the
+deterministic value). Value-identical (same collider-per-tempNum invariant).
+**Byte-identical; 34.995e9 → 34.405e9 = −1.69%, cumulative −14.82%.**
