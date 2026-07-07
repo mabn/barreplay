@@ -42,32 +42,39 @@ output-safe; bundled and judged together via interleaved A/B (the H4–H6
 lesson). "safe" = touches only unsynced/draw/dead state OR provably
 value-identical synced computation.
 
-1. **H9 — LOS readmap-event skip (headless)** [IN PROGRESS]. `AddRaycast`'s
-   `updateUnsyncedHeightMap` branch only feeds `readMap->UpdateLOS` (unsynced
-   terrain re-shade); synced `losmap += amount` runs identically otherwise.
-2. **H10 — COB unsynced sound skip (headless)** [IN PROGRESS]. `PlayUnitSound`
-   is fire-and-forget unsynced (NullSound); writes no synced state.
-3. **H11 — QuadField query scratch reuse.** `GetUnitsExact`/`GetSolidsExact`
-   allocate a temp vector per query (hot in collision + LOS); thread_local
-   scratch → identical synced results, fewer allocations (H2 pattern).
-4. **H12 — bounding-volume recalc skip (headless).** `UpdateBoundingVolume`
-   feeds draw-culling radius only; verify no synced reader, then gate out.
-5. **H13 — CobEngine per-tick scheduler overhead.** `WakeSleepingThreads` /
+1. **H9 — LOS readmap-event skip (headless)** [BUILT, gates ✓, interleaving].
+   `AddRaycast`'s `updateUnsyncedHeightMap` branch only feeds
+   `readMap->UpdateLOS` (unsynced); synced `losmap += amount` runs identically.
+2. **H10 — COB unsynced sound skip (headless)** [BUILT, gates ✓, interleaving].
+   `PlayUnitSound` is fire-and-forget unsynced (NullSound); no synced write.
+3. **H12 — bounding-volume recalc skip (headless)** [SOURCE COMMITTED, awaiting
+   build]. `localModel.UpdateBoundingVolume` recomputes the DRAW bounding
+   volume (GetDrawRadius=unsynced culling, GetMdlDrawMidPos=draw); the synced
+   midPos/collision-volume are separate. Verified no synced reader; gated out.
+4. **H13 — CobEngine per-tick scheduler overhead.** `WakeSleepingThreads` /
    `ProcessQueuedThreads` touch containers every tick even when empty;
    order-preserving early-out when queues are empty.
-6. **H14 — deep QTPFS order-invariant update.** Make node-layer tesselation
+5. **H14 — deep QTPFS order-invariant update.** Make node-layer tesselation
    canonicalization independent of the damage-event *sequence* so H8's
    no-change skip becomes byte-safe (~40% ceiling seen on the broken H8).
    Large / upstream-scale.
-7. **H15 — LosHandler::UpdateUnit recompute skip.** Skip a unit's LOS
-   re-stamp when its (pos-square, radius, height) are unchanged since last
-   update. LOS is SYNCED → needs a hard invariance proof; high risk.
-8. **H16 — QuadField MovedUnit churn.** `UpdateCollisionMap` re-inserts a unit
+6. **H15 — LosHandler::UpdateUnit recompute skip.** Skip a unit's LOS re-stamp
+   when its (pos-square, radius, height) are unchanged. LOS is SYNCED → needs a
+   hard invariance proof; high risk.
+7. **H16 — QuadField MovedUnit churn.** `UpdateCollisionMap` re-inserts a unit
    on any position delta; skip remove+add when the occupied quad set is
    unchanged (synced container, order-sensitive — prove identity).
-9. **H17 — CQuaternion::Rotate / transform math.** Hot ~1.5%; seek a
-   bit-identical cheaper formulation (likely not bit-identical → parked, low
-   priority).
+8. **H18 — feature SlowUpdate / draw-side feature recalc skip (headless).**
+   Analogue of H12 for CFeatureHandler; features rarely move, likely small.
+9. **H19 — Lua synced GC cadence.** `CollectGarbage` runs tied to sim-speed;
+   probe whether the synced-Lua GC step size is retunable without changing
+   observable synced behavior (GC timing ≠ synced values). Needs care.
+10. **H20 — Sim::Los per-allyteam skip.** Ally-teams with no live units/enemies
+    to reveal still iterate LOS; investigate skipping fully-decided allyteams.
+    SYNCED — high risk, parked pending proof.
+
+_(H11 struck: QuadField already pools result vectors via QueryVectorCache — no
+allocation to remove. H17 parked: no bit-identical cheaper quaternion form.)_
 
 ## Hypotheses
 
