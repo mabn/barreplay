@@ -1,0 +1,91 @@
+From c9556864978a5392ba52f723ff1e683823dfabe8 Mon Sep 17 00:00:00 2001
+From: Claude <claude@mabn.pl>
+Date: Tue, 7 Jul 2026 06:08:20 +0200
+Subject: [PATCH] thread pool: no clock reads on empty polls, throttled spin
+ deadline check
+
+Two mechanical-sympathy fixes for the __vdso_clock_gettime storm (5%+ of
+mid-game CPU in a perf profile of a headless demo replay):
+
+- DoTask wrapped its ENTIRE body - including the no-op path when all task
+  queues are empty - in SCOPED_MT_TIMER(ThreadPool::RunTask), i.e. two
+  clock_gettime reads per call. The worker spin loop and WaitForFinished's
+  help-spin call DoTask millions of times per second while the queues are
+  dry, so most of those reads timed nothing. The timer now wraps only
+  actual task-group execution; RunTask profiler totals become more honest
+  (no longer inflated by empty polls) and empty polls cost zero clock
+  reads. No scheduling change.
+
+- WaitForFinished's help-spin read the clock once per empty iteration
+  solely to test a 500ms anti-hang deadline. Check it every 64th
+  iteration instead - worst case the fallback NotifyWorkerThreads fires
+  microseconds later.
+
+Wall-clock reads never feed the simulation (sim time is frame-counted),
+so neither change can affect replay output; verified byte-identical via
+the snapshot-diff gate.
+---
+ rts/System/Threading/ThreadPool.cpp | 25 +++++++++++++++++++++----
+ 1 file changed, 21 insertions(+), 4 deletions(-)
+
+diff --git a/rts/System/Threading/ThreadPool.cpp b/rts/System/Threading/ThreadPool.cpp
+index 0335f1d..a9b98dc 100644
+--- a/rts/System/Threading/ThreadPool.cpp
++++ b/rts/System/Threading/ThreadPool.cpp
+@@ -135,9 +135,12 @@ bool HasThreads() { return !workerThreads[false].empty(); }
+ 
+ static bool DoTask(int tid, bool async)
+ {
+-	#ifndef UNIT_TEST
+-	SCOPED_MT_TIMER("ThreadPool::RunTask");
+-	#endif
++	// [barreplay] the RunTask timer used to wrap the whole call, so every
++	// EMPTY poll paid two clock reads for nothing - and the worker spin loop
++	// plus WaitForFinished's spin call DoTask millions of times per second
++	// while the queues are dry (5%+ of CPU in __vdso_clock_gettime on a
++	// mid-game perf profile). Time actual task execution only (below);
++	// profiler-accounting change, no scheduling or sim-visible effect.
+ 
+ 	ITaskGroup* tg = nullptr;
+ 
+@@ -160,6 +163,10 @@ static bool DoTask(int tid, bool async)
+ 
+ 			assert(!async || tg->IsAsyncTask());
+ 
++			#ifndef UNIT_TEST
++			SCOPED_MT_TIMER("ThreadPool::RunTask");
++			#endif
++
+ 			#ifdef USE_TASK_STATS_TRACKING
+ 			const uint64_t wdt = tg->GetDeltaTime(spring_now());
+ 			const uint64_t edt = tg->ExecuteLoop(tid, false);
+@@ -183,6 +190,10 @@ static bool DoTask(int tid, bool async)
+ 		#endif
+ 			assert(!async || tg->IsAsyncTask());
+ 
++			#ifndef UNIT_TEST
++			SCOPED_MT_TIMER("ThreadPool::RunTask");
++			#endif
++
+ 			#ifdef USE_TASK_STATS_TRACKING
+ 			const uint64_t wdt = tg->GetDeltaTime(spring_now());
+ 			const uint64_t edt = tg->ExecuteLoop(tid, false);
+@@ -276,8 +287,14 @@ void WaitForFinished(std::shared_ptr<ITaskGroup>&& taskGroup)
+ 	do {
+ 		const auto spinlockEnd = spring_now() + spring_time::fromMilliSecs(500);
+ 
++		// [barreplay] the 500ms deadline is only an anti-hang fallback; reading
++		// the clock on every empty spin iteration made this loop a large share
++		// of the __vdso_clock_gettime storm. Checking it every 64th iteration
++		// delays the fallback by microseconds at most and changes nothing else.
++		unsigned spinIter = 0;
++
+ 		while (!DoTask(tid, false) && !taskGroup->IsFinished() && !exitFlags[tid]) {
+-			if (spring_now() < spinlockEnd)
++			if (((++spinIter & 63u) != 0) || spring_now() < spinlockEnd)
+ 				continue;
+ 
+ 			// avoid a hang if the task is still not finished
+-- 
+2.47.3
+
