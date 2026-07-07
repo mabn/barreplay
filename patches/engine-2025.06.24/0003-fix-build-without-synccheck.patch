@@ -1,0 +1,124 @@
+From 9de9c73a5501154638f2f6d0bc075680e17a106a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 7 Jul 2026 03:19:39 +0000
+Subject: [PATCH] fix building with -DSYNCCHECK=FALSE
+
+Nobody had compiled this configuration in a while:
+- add missing <cstdint>/<cassert> includes that SYNCCHECK headers used to
+  provide transitively (BuildingMaskMap.h, Serializer.h, UpdateList.cpp,
+  AILibraryManager.cpp, creg.cpp)
+- give plain float3 the bitExactEquals() SyncedFloat3 has, so call sites
+  compile whether or not SYNCCHECK aliases the types
+- only FORCE-enable SYNC_HISTORY when SYNCCHECK is on (it neither works
+  nor compiles without it)
+
+No behavior change for SYNCCHECK=TRUE builds.
+---
+ CMakeLists.txt                      | 8 +++++++-
+ rts/ExternalAI/AILibraryManager.cpp | 1 +
+ rts/Rendering/Common/UpdateList.cpp | 2 ++
+ rts/Sim/Misc/BuildingMaskMap.h      | 1 +
+ rts/System/creg/Serializer.h        | 1 +
+ rts/System/creg/creg.cpp            | 1 +
+ rts/System/float3.h                 | 6 ++++++
+ 7 files changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index a7f7772..793b0a3 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -246,7 +246,13 @@ if    (SYNCCHECK)
+ endif (SYNCCHECK)
+ 
+ option(SYNC_HISTORY "Save sync history (for semidebug builds)" FALSE)
+-set(SYNC_HISTORY ON CACHE BOOL "Force enable save sync history" FORCE)
++# [barreplay] the sync-history ring only makes sense (and only compiles) with
++# SYNCCHECK; keep the upstream force-enable in that case, drop it otherwise.
++if    (SYNCCHECK)
++	set(SYNC_HISTORY ON CACHE BOOL "Force enable save sync history" FORCE)
++else  (SYNCCHECK)
++	set(SYNC_HISTORY OFF CACHE BOOL "Sync history requires SYNCCHECK" FORCE)
++endif (SYNCCHECK)
+ if    (SYNC_HISTORY)
+ 	add_definitions(-DSYNC_HISTORY)
+ endif (SYNC_HISTORY)
+diff --git a/rts/ExternalAI/AILibraryManager.cpp b/rts/ExternalAI/AILibraryManager.cpp
+index 0ed039c..8c4a12e 100644
+--- a/rts/ExternalAI/AILibraryManager.cpp
++++ b/rts/ExternalAI/AILibraryManager.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "AILibraryManager.h"
++#include <cassert>
+ 
+ #include "Interface/aidefines.h"
+ #include "Interface/SAIInterfaceLibrary.h"
+diff --git a/rts/Rendering/Common/UpdateList.cpp b/rts/Rendering/Common/UpdateList.cpp
+index fb4de50..ec2db31 100644
+--- a/rts/Rendering/Common/UpdateList.cpp
++++ b/rts/Rendering/Common/UpdateList.cpp
+@@ -1,5 +1,7 @@
+ #include "UpdateList.h"
+ 
++#include <cassert>
++
+ CR_BIND(UpdateList, )
+ CR_REG_METADATA(UpdateList, (
+ 	CR_MEMBER(TypedTrue),
+diff --git a/rts/Sim/Misc/BuildingMaskMap.h b/rts/Sim/Misc/BuildingMaskMap.h
+index 89351a3..b06b30f 100644
+--- a/rts/Sim/Misc/BuildingMaskMap.h
++++ b/rts/Sim/Misc/BuildingMaskMap.h
+@@ -3,6 +3,7 @@
+ #ifndef BUILDINGMASKMAP_H
+ #define BUILDINGMASKMAP_H
+ 
++#include <cstdint>
+ #include <vector>
+ 
+ #include "System/creg/creg_cond.h"
+diff --git a/rts/System/creg/Serializer.h b/rts/System/creg/Serializer.h
+index 97334f0..e476db1 100644
+--- a/rts/System/creg/Serializer.h
++++ b/rts/System/creg/Serializer.h
+@@ -8,6 +8,7 @@
+ 
+ #ifdef USING_CREG
+ 
++#include <cstdint>
+ #include <map>
+ #include <vector>
+ #include <deque>
+diff --git a/rts/System/creg/creg.cpp b/rts/System/creg/creg.cpp
+index 679bf77..9253774 100644
+--- a/rts/System/creg/creg.cpp
++++ b/rts/System/creg/creg.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include <vector>
+ #include <string>
++#include <cassert>
+ #include <cstring>
+ 
+ #include "creg_cond.h"
+diff --git a/rts/System/float3.h b/rts/System/float3.h
+index f096c11..af57642 100644
+--- a/rts/System/float3.h
++++ b/rts/System/float3.h
+@@ -304,6 +304,12 @@ public:
+ 		return (!equals(f));
+ 	}
+ 
++	// For when bit level precision is necessary (same API as SyncedFloat3,
++	// so code compiles whether or not SYNCCHECK aliases the two types).
++	bool bitExactEquals(const float3& f) const {
++		return (x == f.x) && (y == f.y) && (z == f.z);
++	}
++
+ 
+ 	/**
+ 	 * @brief operator[]
+-- 
+2.43.0
+
