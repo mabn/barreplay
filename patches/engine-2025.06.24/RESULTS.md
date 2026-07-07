@@ -39,3 +39,21 @@ After the patch: `Draw` 108 s → 2.6 s, heartbeat `draws=` 1-2 per 10 game-sec
 
 Removes the need for the `SpeedControl=2` injection (`-throttle-draw`'s other
 half, `MinDrawFPS`/`MinSimDrawBalance`, stays useful for the load phase).
+
+## Iteration 2 findings (no engine patch)
+
+**Fine-grained profile** (`-profile` run of the 8v8 on the 0001 build; scopes
+nest and ThreadPool rows are inflated by profiling itself — see CLAUDE.md):
+`Sim::Unit::MoveType` 123 s (15%), `Sim::Script`/`CUnitScriptEngine::Tick`
+~105 s (13%), `Sim::Unit::UpdatePreFrame` 89 s (11%), `Sim::Unit::Update` 66 s,
+`SlowUpdate` 59 s, `Weapon`+`UpdateWeaponVectors` 79 s, `Sim::Path*` 71 s,
+`Sim::Los` 40 s, `Lua::Callins::Synced` 65 s, `Lua::Callins::Unsynced` 38 s.
+All the big rows are the deterministic sim itself — no single dominant
+removable scope, which points at whole-program levers (PGO/LTO) plus the
+worker-thread count.
+
+**Worker threads**: `ThreadPool::AddTask/WaitFor` volume suggested
+oversubscription on 4 cores. Small-replay sweep (sim wall): auto(-1) 41 s,
+wt=0 39 s, **wt=2 36 s**, wt=3 39 s. Policy going forward (user decision):
+**all benchmark sims run with `-worker-threads 2`**; no further tuning of this
+axis. Scheduling-only, cannot affect determinism.
