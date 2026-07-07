@@ -1,0 +1,135 @@
+From 8110b6f63916f680476d11d2d3789cb3bd3c0e03 Mon Sep 17 00:00:00 2001
+From: Claude <claude@example.com>
+Date: Tue, 7 Jul 2026 05:56:34 +0200
+Subject: [PATCH] unit script anims: skip redundant per-tick sort, reuse BFS
+ scratch buffer
+
+CUnitScript::TickAllAnims runs for every animating script every sim frame
+(8.6% self-time in a mid-game perf profile) and paid two mechanical costs:
+
+- std::sort of <anims> every tick, even though the (piece, animType, axis)
+  key is unique (FindAnim invariant) and the composition rarely changes.
+  Track dirtiness instead: set on AddAnim's append and RemoveAnim's
+  swap-erase, cleared by the sort; the done-anim erase becomes
+  order-preserving (std::erase_if, was swap-erase VectorEraseIfAll) so it
+  keeps a sorted vector sorted. A once-sorted vector re-sorts only after a
+  real mutation; iteration order - and with it the anim checksum
+  accumulation and AnimFinished call order - is bit-identical to sorting
+  every tick, because sorting an already-sorted unique-key vector is a
+  no-op.
+
+- a std::deque constructed per call for the piece-tree BFS. Replaced with
+  a thread_local grow-only vector scanned by index - the exact FIFO visit
+  order of the deque's push_front/pop_front/push_back - reused across
+  calls (TickAllAnims runs under for_mt; each thread has its own scratch).
+
+No behavioral change by construction; output byte-identity verified via
+the snapshot-diff gate.
+---
+ rts/Sim/Units/Scripts/UnitScript.cpp | 41 ++++++++++++++++++++--------
+ rts/Sim/Units/Scripts/UnitScript.h   |  7 +++++
+ 2 files changed, 37 insertions(+), 11 deletions(-)
+
+diff --git a/rts/Sim/Units/Scripts/UnitScript.cpp b/rts/Sim/Units/Scripts/UnitScript.cpp
+index 3122838..0af3ef8 100644
+--- a/rts/Sim/Units/Scripts/UnitScript.cpp
++++ b/rts/Sim/Units/Scripts/UnitScript.cpp
+@@ -60,6 +60,8 @@ CR_REG_METADATA(CUnitScript, (
+ 	CR_MEMBER(busy),
+ 	CR_MEMBER(anims),
+ 	CR_MEMBER(doneAnims),
++	// [barreplay] defaults to true, so a loaded script just re-sorts once
++	CR_IGNORED(animsDirty),
+ 
+ 	//Populated by children
+ 	CR_IGNORED(rootPiece),
+@@ -200,9 +202,18 @@ void CUnitScript::TickAllAnims(int deltaTime)
+ 	ZoneScoped;
+ 
+ 	// optimize the memory access patterns of the procedure below
+-	std::sort(anims.begin(), anims.end(), [](const auto& lhs, const auto& rhs) {
+-		return std::tie(lhs.piece, lhs.animType, lhs.axis) < std::tie(rhs.piece, rhs.animType, rhs.axis);
+-	});
++	// [barreplay] only when the composition changed since the last tick: the
++	// (piece, animType, axis) key is unique per anim (FindAnim invariant), so a
++	// once-sorted vector stays sorted until an append (AddAnim) or swap-erase
++	// (RemoveAnim) perturbs it - the done-anim erase below preserves order.
++	// Skipping the redundant sort cannot change iteration order, hence neither
++	// the checksum accumulation nor the AnimFinished call order.
++	if (animsDirty) {
++		std::sort(anims.begin(), anims.end(), [](const auto& lhs, const auto& rhs) {
++			return std::tie(lhs.piece, lhs.animType, lhs.axis) < std::tie(rhs.piece, rhs.animType, rhs.axis);
++		});
++		animsDirty = false;
++	}
+ 
+ 	// tick-functions; these never change address
+ 	static constexpr std::array<TickAnimFunc, ACount> TICK_ANIM_FUNCS = { &CUnitScript::TickTurnAnim, &CUnitScript::TickSpinAnim, &CUnitScript::TickMoveAnim, &CUnitScript::TickScaleAnim };
+@@ -221,16 +232,22 @@ void CUnitScript::TickAllAnims(int deltaTime)
+ 		checksum = spring::LiteHash(ai, checksum);
+ 	}
+ 
+-	spring::VectorEraseIfAll(anims, [](const auto& ai) { return ai.done; });
++	// [barreplay] order-preserving erase (was swap-erase VectorEraseIfAll), so a
++	// sorted <anims> stays sorted and the per-tick sort above can stay skipped
++	std::erase_if(anims, [](const auto& ai) { return ai.done; });
+ #if 1
+ 	// BFS pass
+-	std::deque<std::pair<LocalModelPiece*, Transform>> q;
+-	q.push_front({ rootPiece, Transform{} });
+-
+-	while (!q.empty()) {
+-		// copy
+-		auto [lmp, pTra] = q.front();
+-		q.pop_front();
++	// [barreplay] reuses a per-thread scratch buffer instead of constructing a
++	// std::deque per call (this runs for every animating script every frame).
++	// An index scan over a grow-only vector is the same FIFO visit order the
++	// deque's push_front/pop_front/push_back produced.
++	static thread_local std::vector<std::pair<LocalModelPiece*, Transform>> q;
++	q.clear();
++	q.emplace_back(rootPiece, Transform{});
++
++	for (size_t qi = 0; qi < q.size(); ++qi) {
++		// copy (the vector may reallocate when children are appended below)
++		auto [lmp, pTra] = q[qi];
+ 
+ 		if (lmp->GetDirty()) {
+ 			lmp->SetDirtyRaw(false);
+@@ -358,6 +375,7 @@ void CUnitScript::RemoveAnim(AnimType type, const AnimContainerTypeIt& animInfoI
+ 
+ 	ai = anims.back();
+ 	anims.pop_back();
++	animsDirty = true; // [barreplay] swap-erase above breaks sorted order
+ 
+ 	// If this was the last animation, remove from currently animating list
+ 	// FIXME: this could be done in a cleaner way
+@@ -437,6 +455,7 @@ void CUnitScript::AddAnim(AnimType type, int piece, int axis, float speed, float
+ 		ai->animType = type;
+ 		ai->axis = axis;
+ 		ai->piece = piece;
++		animsDirty = true; // [barreplay] append may break sorted order
+ 	} else {
+ 		ai = &(*animInfoIt);
+ 	}
+diff --git a/rts/Sim/Units/Scripts/UnitScript.h b/rts/Sim/Units/Scripts/UnitScript.h
+index 9b633ac..112462f 100644
+--- a/rts/Sim/Units/Scripts/UnitScript.h
++++ b/rts/Sim/Units/Scripts/UnitScript.h
+@@ -54,6 +54,13 @@ protected:
+ 	AnimContainerType anims;
+ 	AnimContainerType doneAnims;
+ 
++	// [barreplay] true when <anims> may be out of (piece, animType, axis) order:
++	// set by AddAnim's append and RemoveAnim's swap-erase, cleared by the sort
++	// in TickAllAnims. Lets the per-tick sort be skipped in the steady state;
++	// the erase of done anims is order-preserving (std::erase_if), so it never
++	// perturbs an already-sorted vector.
++	bool animsDirty = true;
++
+ 	bool busy;
+ 	bool hasSetSFXOccupy;
+ 	bool hasRockUnit;
+-- 
+2.47.3
+
