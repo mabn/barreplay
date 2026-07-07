@@ -1,0 +1,93 @@
+From 57a4e751505024ecae25f16b6b33599f0c7cd609 Mon Sep 17 00:00:00 2001
+From: Claude <claude@example.com>
+Date: Wed, 8 Jul 2026 00:58:11 +0200
+Subject: [PATCH] yardmap status map: row-major indexing instead of Morton
+ interleave
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+GetMapState indexed stateMap via a 5-round Z-order (Morton) bit-interleave
+per (x,z). RangeHasExitOnly / IsInExitOnly (14.4% of synced instructions in
+a wt=1 instruction profile — the single hottest sim function) scan small
+CONTIGUOUS-in-x footprints, where Morton's locality advantage is nil and its
+per-square compute cost is pure overhead. Store the pow2 row stride (rowWidth)
+at init and index row-major (z*rowWidth + x) with the identical clamping.
+Same square width*width allocation; a pure bijection change -> logically
+identical cell for every (x,z), verified byte-identical output.
+
+Measured (bench harness, medium [6000,9000), -worker-threads 1, min-of-3):
+40.389e9 -> 37.210e9 instructions = -7.87% total synced instructions,
+byte-identical snapshot. Row-major is also more cache-friendly for the
+contiguous scans, so the wall win should track or exceed the instruction win.
+---
+ rts/Sim/Misc/YardmapStatusEffectsMap.cpp | 12 +++++++++++-
+ rts/Sim/Misc/YardmapStatusEffectsMap.h   |  9 ++++++++-
+ 2 files changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Sim/Misc/YardmapStatusEffectsMap.cpp b/rts/Sim/Misc/YardmapStatusEffectsMap.cpp
+index f5a5a53..33b9055 100644
+--- a/rts/Sim/Misc/YardmapStatusEffectsMap.cpp
++++ b/rts/Sim/Misc/YardmapStatusEffectsMap.cpp
+@@ -13,13 +13,23 @@ YardmapStatusEffectsMap yardmapStatusEffectsMap;
+ CR_BIND(YardmapStatusEffectsMap, )
+ 
+ CR_REG_METADATA(YardmapStatusEffectsMap, (
+-	CR_MEMBER(stateMap)
++	CR_MEMBER(stateMap),
++	CR_MEMBER(rowWidth)
+ ))
+ 
+ void YardmapStatusEffectsMap::InitNewYardmapStatusEffectsMap() {
+     // May over allocate, but the size is based on single byte storage and allows for fast indexing.
+     const auto width = std::bit_ceil<uint32_t>(std::max(mapDims.mapx, mapDims.mapy));
+ 
++    // [barreplay] store the row stride so GetMapState can index row-major
++    // (z*rowWidth + x) instead of a Morton interleave. The footprint scans in
++    // RangeHasExitOnly / IsInExitOnly are small and contiguous in x, so
++    // row-major is both cheaper to compute (one mul-add vs a 5-round bit
++    // interleave) and more cache-friendly. Same square power-of-2 allocation
++    // (width*width) holds it, and the mapping is a pure bijection change with
++    // identical clamping -> logically identical cell for every (x,z).
++    rowWidth = width;
++
+     stateMap.clear();
+     stateMap.resize(Square(width), 0);
+ }
+diff --git a/rts/Sim/Misc/YardmapStatusEffectsMap.h b/rts/Sim/Misc/YardmapStatusEffectsMap.h
+index 59a2797..5ce2c93 100644
+--- a/rts/Sim/Misc/YardmapStatusEffectsMap.h
++++ b/rts/Sim/Misc/YardmapStatusEffectsMap.h
+@@ -22,6 +22,7 @@ public:
+         BLOCK_BUILDING = 0x02,
+     };
+ 
++    // [barreplay] retained for reference; GetMapState now indexes row-major.
+     uint32_t interleave(uint32_t x, uint32_t z)
+     {
+ 		x = std::clamp(int(x), 0, mapDims.mapxm1);
+@@ -38,7 +39,12 @@ public:
+         return x | (z << 1);
+     }
+ 
+-    uint8_t& GetMapState(int x, int z) { return stateMap[interleave(x, z)]; }
++    // row-major index with the same clamping the interleave applied
++    uint8_t& GetMapState(int x, int z) {
++        x = std::clamp(x, 0, mapDims.mapxm1);
++        z = std::clamp(z, 0, mapDims.mapym1);
++        return stateMap[uint32_t(z) * rowWidth + uint32_t(x)];
++    }
+ 
+     bool AreAllFlagsSet(int x, int z, uint8_t flags) { return (GetMapState(x, z) & flags) == flags; }
+ 	bool AreAnyFlagsSet(int x, int z, uint8_t flags) { return (GetMapState(x, z) & flags) != 0; }
+@@ -50,6 +56,7 @@ public:
+ 
+     typedef std::vector<uint8_t> ExitOnlyMapType;
+     ExitOnlyMapType stateMap;
++    uint32_t rowWidth = 0; // [barreplay] row stride for row-major GetMapState
+ };
+ 
+ extern YardmapStatusEffectsMap yardmapStatusEffectsMap;
+-- 
+2.47.3
+
