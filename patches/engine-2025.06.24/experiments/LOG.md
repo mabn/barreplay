@@ -136,3 +136,30 @@ worth re-testing on hosts with more workers.
 
 Medium sim history across the loop so far: 113 (0001) → 109 (H1) → 101 (H2)
 → 107/101/105 (H3/H4/H5 runs — noise band σ≈3s around ~104).
+
+## 8v8 validation of the kept stack (iteration 7)
+
+Large replay `6da7496a…` (58530 frames) on 0001+H1+H2+H3:
+**sim 11m5s / 88 fps / 2.9× realtime, PROF-stripped md5 = `8cb2b931…`** —
+byte-identical to the canonical reference from RESULTS.md (recorded before
+this loop existed). vs RESULTS.md's patch-0001 12m43s / 77 fps (different
+VM, indicative): ≈ −13%, consistent with medium's −11%; H2's anim win
+scales with unit count. Swap use stayed mild (560 MiB peak-ish), timing
+reasonably clean.
+
+## Where the safe-cut well stands after 7 iterations
+
+Remaining >1% blocks on medium all fall into frozen categories:
+1. **Float-semantic synced math** (CQuaternion::Rotate 2.4%, GetHeightReal,
+   MoveMath range queries ~6.8%, QTPFS netpoint math) — any rounding change
+   diverges from the recording engine; untouchable by definition.
+2. **Event-timing-sensitive machinery** (LOS deactivate-outside-batch
+   handling, synced Lua GC cadence, sync-checksum accumulation) — cadence
+   changes alter observable synced behavior.
+3. **Already-tight code** (QTPFS damage-block dedup, UpdateCollisionMap
+   staggering, event-dispatch client lists, COB pooled stacks).
+
+Biggest *addressable* block left: ~18s unsynced gadget Lua on medium =
+patch 0002's first half (excluded from this loop by instruction; measured
+"within noise" on the other VM's 8v8 but looks like real money here).
+Beyond that: deep QTPFS / COB-VM surgery (10× effort, real desync risk).
