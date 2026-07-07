@@ -223,16 +223,33 @@ patterns. SoA-batching with SIMD would require SoA as source of truth =
 upstream-rewrite scale (Recoil's entt migration is the vehicle for that,
 currently an ID list only). Measured, understood, closed without a patch.
 
-### H7 — bundle re-measurement of H4+H5+H6 (interleaved A/B) — pending
+### H7 — bundle re-measurement of H4+H5+H6 (interleaved A/B) — KEPT
 
-The three rejected micro-patches are each byte-identical and individually
-sub-noise. Hypothesis: together they sum to a resolvable delta. Method: apply
-all three onto the kept stack (binary B), interleave 4×A / 4×B plain medium
-runs (alternating, same flags), compare means; gate-check one B run's md5.
-This also probes whether interleaving beats the ±10% single-run noise floor
-on this VM (methodology result either way).
+The three "rejected" micro-patches are each byte-identical and individually
+sub-noise. Bundled onto the kept stack (binary B) and interleaved 4×A / 4×B
+plain medium runs:
 
-(results follow)
+| round | A (kept stack) | B (+bundle) | Δ |
+|---|---|---|---|
+| 1 | 117s | 104s | −13 |
+| 2 | 109s | 99s | −10 |
+| 3 | 110s | 106s | −4 |
+| 4 | 112s | 109s | −3 |
+| **mean** | **112.0s** | **104.5s** | **−7.5s = −6.7%** (paired-t p≈0.03) |
+
+B won all 4 pairs; all 8 runs byte-identical. **The individual REJECTED
+verdicts for H4/H5/H6 were false negatives** — the same afternoon's A-runs
+alone spanned 109–117s (the cross-hour drift RESULTS.md documents), which
+single-run comparisons cannot beat but interleaving resolves. Patches renamed
+(REJECTED dropped), bundle promoted into the kept stack; per-patch
+attribution within the −6.7% remains unresolved (would need 3 more interleave
+sessions; not worth the machine time — they are all output-safe).
+
+**Methodology rule going forward: every timing verdict uses interleaved
+paired runs; never judge a <10% lever from single runs on this VM.**
+
+New kept stack: 0001 + H1 + H2 + H3 + H4 + H5 + H6 (recoil `b3d6577`).
+Cumulative vs the 0001 baseline on medium: ~−17%.
 
 ## Conclusion of this loop phase
 
