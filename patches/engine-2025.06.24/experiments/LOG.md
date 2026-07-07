@@ -208,7 +208,20 @@ a latency-bound pointer-chasing profile. The premise is real.
   eats the SIMD win) — upstream-rewrite scale; Recoil's entt "ECS" currently
   stores only unitIds, an ID list, not a data layout.
 
-(cache-miss location sampling follows — see next entry)
+**Cache-miss location sampling (perf record -e cache-misses, medium
+mid-game):** the miss profile is FLAT — top source 4.2% (TickAllAnims,
+proportionate to its cycle share). Disproportionately miss-heavy:
+`CLosHandler::Update` stamping (5.4% of misses vs 2.3% of cycles) and
+`CGround::GetHeightReal` (2.4% vs 0.9%) — map-scale structures with
+algorithmically compulsory access patterns. QTPFS relinking did not even
+clear the 1% miss threshold (it is compute/branch-bound, not layout-bound).
+
+**Phase 2 verdict: no patch-scale data-layout win exists in this engine.**
+The unit-object layer is already arena-inlined and only ~5% of miss traffic;
+the diffuse remainder sits in sync-frozen or compulsory map-scale access
+patterns. SoA-batching with SIMD would require SoA as source of truth =
+upstream-rewrite scale (Recoil's entt migration is the vehicle for that,
+currently an ID list only). Measured, understood, closed without a patch.
 
 ## Conclusion of this loop phase
 
