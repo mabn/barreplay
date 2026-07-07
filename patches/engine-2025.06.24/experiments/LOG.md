@@ -223,6 +223,17 @@ patterns. SoA-batching with SIMD would require SoA as source of truth =
 upstream-rewrite scale (Recoil's entt migration is the vehicle for that,
 currently an ID list only). Measured, understood, closed without a patch.
 
+### H7 — bundle re-measurement of H4+H5+H6 (interleaved A/B) — pending
+
+The three rejected micro-patches are each byte-identical and individually
+sub-noise. Hypothesis: together they sum to a resolvable delta. Method: apply
+all three onto the kept stack (binary B), interleave 4×A / 4×B plain medium
+runs (alternating, same flags), compare means; gate-check one B run's md5.
+This also probes whether interleaving beats the ±10% single-run noise floor
+on this VM (methodology result either way).
+
+(results follow)
+
 ## Conclusion of this loop phase
 
 H4, H5, H6 all landed byte-identical-but-flat: the safe-cut well is
