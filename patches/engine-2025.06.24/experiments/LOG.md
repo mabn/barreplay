@@ -55,35 +55,37 @@ main CPU** — the one large, addressable main-thread block. That is why H14 is
 now the priority: H8 (its unsafe form) ran ~40% faster by cutting exactly
 this.
 
-1. **H14 — QTPFS order-invariant node-layer update.** [ACTIVE — priority]
-   Make `NodeLayer::Update`/tesselation/relink a pure function of the current
-   speed field over the rect, so H8's no-change skip becomes byte-safe. ~10%
-   of main-thread CPU is the target; ~40% wall was seen on the (unsafe) H8.
-   Large. Investigating the divergence mechanism now.
-2. **H13 — CobEngine per-tick scheduler overhead.** Early-out empty queues in
-   `WakeSleepingThreads`/`ProcessQueuedThreads`. Main-thread but low ceiling.
-3. **H15 — LosHandler::UpdateUnit recompute skip.** Skip a unit's LOS re-stamp
-   when (pos-square, radius, height) unchanged. Main-thread + MT mix; SYNCED →
-   hard invariance proof; high risk.
-4. **H16 — QuadField MovedUnit churn.** Skip remove+add when a moved unit's
-   occupied quad set is unchanged. Main-thread, synced container — prove
-   identity.
-5. **H19 — Lua synced GC cadence.** `CollectGarbage` tied to sim-speed; probe
-   retuning the synced-GC step without changing observable synced behavior.
-   Main-thread. Needs care.
-6. **H20 — Sim::Los per-allyteam skip.** Skip fully-decided allyteams. SYNCED,
-   high risk, parked pending proof.
-7. **H21 — COB opcode dispatch switch → computed-goto.** `CCobThread::Tick`
-   3.5% main-thread self; label-table dispatch may beat the switch. Same
-   computation, value-identical. Micro, safe — good if H14 stalls.
-8. **H22 — QTPFS per-frame damage coalescing.** Partially already done by the
-   engine's `damageMap[quad]` within-frame dedup; the residual (cross-frame)
-   is H14 proper. Kept as an H14 sub-task.
+**Micro-bundle #3 — main-thread, value-identical micro-optimizations only**
+(same output, faster code), bundled + interleaved together to clear the ~3%
+noise floor (H4–H6 method). Skip/approximate levers are exhausted (remaining
+big blocks are synced-untouchable or non-idempotent-must-reproduce, see H14).
+Diminishing returns acknowledged; continuing per directive.
 
-_(Struck: **H9/H10/H12 → interleaved NO-GAIN** (H9/H10 cold paths; H12 is
-MT-side, doesn't move the main-thread barrier) — patches on record. H11 →
-QuadField already pools query vectors. H17 → no bit-identical cheaper
-quaternion. H18 → no feature-side bounding-volume loop.)_
+1. **H21 — COB dispatch switch → computed-goto.** [ACTIVE] `CCobThread::Tick`
+   3.5% main self; labels-as-values gives per-opcode indirect branches
+   (better BTB) vs the switch's shared one. Value-identical.
+2. **H23 — TickAllAnims dispatch.** Replace `std::invoke(member-ptr)` per anim
+   with `switch(animType)` — fewer indirect calls, same math. Main-thread.
+3. **H24 — QTPFS UpdateNeighborCache micro.** 2% main self; hunt redundant
+   recompute / container churn in the edge walks. Value-identical only.
+4. **H25 — CMoveMath::RangeIsBlockedHashedMt cache.** Per-thread
+   `unordered_map<CSolidObject*,BlockType>` → flat/open-addressed cache, same
+   hit/miss semantics, cheaper. Main-thread, value-identical.
+5. **H13 — CobEngine per-tick scheduler early-outs.** Skip empty-queue work in
+   `WakeSleepingThreads`/`ProcessQueuedThreads`. Main-thread, low ceiling.
+6. **H16 — QuadField MovedUnit churn.** Skip remove+add when a moved unit's
+   occupied quad set is unchanged (main-thread, synced — prove identity).
+7. **H27 — event-dispatch marshalling.** `IterateEventClientList` /
+   `RunCallInTraceback` per-callin setup; reduce per-frame allocation without
+   changing Lua-visible args. Main-thread.
+8. **H28 — measurement-noise reduction (meta).** Sub-second sim timing + CPU
+   pinning so <3% levers become verifiable — unlocks the whole micro tier.
+   Harness/measurement change, not an engine patch.
+
+_(Closed: **H14** unsafe-by-construction (non-idempotent tesselation).
+**H9/H10/H12** interleaved NO-GAIN. H11/H17/H18 not applicable. H15/H19/H20
+parked — SYNCED skip/approximate, unsafe class per the H14 lesson. H22 folded
+into H14.)_
 
 ## Hypotheses
 
@@ -377,3 +379,27 @@ doesn't move wall time. Same lesson as H3/H5. Whole micro-bundle #2 reverted;
 kept stack stays 0001+H1–H6 (`b3d6577`). Patches:
 `H9-H10-los-event-and-cob-sound-skip.patch`,
 `H12-headless-skip-bounding-volume-recalc.patch` (on record).
+
+### H14 — QTPFS no-change skip — DETERMINED UNSAFE BY CONSTRUCTION (no patch)
+
+Source analysis (Node.cpp `Tesselate`/`UpdateMoveCost`): the split decision
+uses `numNewBinSquares` (squares that *changed* bin vs the node's prior
+state), not only `numDifBinSquares` (current-field diversity). And
+`PreTesselate` **Merges (collapses children) then re-Tesselates** the
+containing node on every event. So tesselation is **non-idempotent**:
+re-running it on an unchanged field yields a different-but-equivalent tree.
+H8 skipped only when the entire damage block was unchanged (and node ⊆
+block, so strictly conservative) yet still diverged — empirically confirming
+the baseline churns the tree on no-change events. Bit-matching the recording
+engine therefore *requires* reproducing that churn; the skip cannot be made
+byte-safe. H14's ~40% is unreachable safely.
+
+**Consequence for the whole loop:** the sim is main-thread-bound (H3/H5/H12),
+and its main-thread hot path is now fully classified — every large block is
+either synced-untouchable (gadget `luaV_execute`, `CCobThread::Tick`,
+`TickAllAnims` anim math feeding weapon aim, `CMoveMath` pathfinding) or
+non-idempotent-must-reproduce (QTPFS tesselation). No **skip/approximate**
+lever with a >3%-noise-floor ceiling remains. Remaining safe wins are
+**value-identical micro-optimizations** (faster code, identical output) that
+must be **bundled** to clear the noise floor (the H4–H6 method). Pivoting to
+main-thread-only micro-bundle #3.
