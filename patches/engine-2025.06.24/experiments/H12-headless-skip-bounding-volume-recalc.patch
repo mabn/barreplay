@@ -1,0 +1,44 @@
+From 63b01404ec63006fb537ad30f21cf066eba97d22 Mon Sep 17 00:00:00 2001
+From: Claude <claude@mabn.pl>
+Date: Tue, 7 Jul 2026 20:49:36 +0200
+Subject: [PATCH] headless demo replay: skip draw bounding-volume recalc
+
+localModel.UpdateBoundingVolume recomputes the model's DRAW bounding
+volume (localModel.boundingVolume), read only by GetDrawRadius (unsynced
+culling, field is commented 'unsynced') and GetMdlDrawMidPos (draw
+mid-pos). The synced unit midPos comes from unit->relMidPos and the
+collision volume is a separate CollisionVolume from the unit def - none
+of the synced-visible state derives from localModel's bounding volume.
+Under HEADLESS, skip the SlowUpdate gather + the MT UpdateBoundingVolume
+loop; needsBoundariesRecalc simply stays set (nothing else reads it).
+
+Micro-bundle #2 member (H12). Output verified via the snapshot-diff gate.
+---
+ rts/Sim/Units/UnitHandler.cpp | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 3de11a0..1bf530d 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -376,8 +376,17 @@ void CUnitHandler::SlowUpdateUnits()
+ 			unit->SlowUpdateWeapons();
+ 			unit->SanityCheck();
+ 
++#ifndef HEADLESS
++			// [barreplay] localModel.UpdateBoundingVolume recomputes the model's
++			// DRAW bounding volume (localModel.boundingVolume) - read only by
++			// GetDrawRadius (unsynced culling) and GetMdlDrawMidPos (draw). The
++			// synced midPos/collision volume are separate (unit->relMidPos + the
++			// unit's own colvol from the def). Skip the whole gather+recalc in a
++			// headless demo replay; the needsBoundariesRecalc flag just stays set
++			// (nothing else reads it).
+ 			if (!unit->isDead && unit->localModel.GetBoundariesNeedsRecalc())
+ 				updateBoundingVolumeList.emplace_back(unit);
++#endif
+ 		}
+ 	}
+ 	// Since the bounding volumes are calculated from the maximum piecematrix-offset piece vertices
+-- 
+2.47.3
+
