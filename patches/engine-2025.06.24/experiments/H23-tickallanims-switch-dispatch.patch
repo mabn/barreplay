@@ -1,0 +1,55 @@
+From ce29d3ba3e65313988b47c03807d465f790d8fa5 Mon Sep 17 00:00:00 2001
+From: Claude <claude@mabn.pl>
+Date: Tue, 7 Jul 2026 22:32:28 +0200
+Subject: [PATCH] TickAllAnims: direct switch dispatch instead of member-ptr
+ std::invoke
+
+The per-anim tick dispatched through std::invoke on a runtime-indexed
+member-function-pointer table (TICK_ANIM_FUNCS[ai.animType]) - an indirect
+call the compiler can't inline. Replace with a switch on ai.animType
+calling Tick{Turn,Spin,Move,Scale}Anim directly, letting each small body
+inline. Same function per animType (Turn/Spin/Move/Scale = 0/1/2/3, the old
+array order), so output is bit-identical - value-identical micro-optimization
+(micro-bundle #3 member). Awaits bundle build + snapshot-diff gate.
+---
+ rts/Sim/Units/Scripts/UnitScript.cpp | 20 +++++++++++++++-----
+ 1 file changed, 15 insertions(+), 5 deletions(-)
+
+diff --git a/rts/Sim/Units/Scripts/UnitScript.cpp b/rts/Sim/Units/Scripts/UnitScript.cpp
+index 3b0099d..86095d0 100644
+--- a/rts/Sim/Units/Scripts/UnitScript.cpp
++++ b/rts/Sim/Units/Scripts/UnitScript.cpp
+@@ -216,15 +216,25 @@ void CUnitScript::TickAllAnims(int deltaTime)
+ 		animsDirty = false;
+ 	}
+ 
+-	// tick-functions; these never change address
+-	static constexpr std::array<TickAnimFunc, ACount> TICK_ANIM_FUNCS = { &CUnitScript::TickTurnAnim, &CUnitScript::TickSpinAnim, &CUnitScript::TickMoveAnim, &CUnitScript::TickScaleAnim };
+-
+ 	const int tickRate = 1000 / deltaTime;
+ 
+ 	for (auto& ai : anims) {
+ 		LocalModelPiece& lmp = *pieces[ai.piece];
+-		const auto& currFunc = TICK_ANIM_FUNCS[ai.animType];
+-		if (ai.done |= std::invoke(currFunc, this, tickRate, lmp, ai)) {
++		// [barreplay] direct switch instead of std::invoke on a runtime-indexed
++		// member-function-pointer table: the target is a runtime value (ai.animType)
++		// so the pointer call cannot be devirtualized/inlined, but this switch lets
++		// the compiler inline each small Tick*Anim body. Same function per animType
++		// (order matches the old TICK_ANIM_FUNCS: Turn/Spin/Move/Scale = 0/1/2/3),
++		// so results and side effects are bit-identical.
++		bool finished = false;
++		switch (ai.animType) {
++			case ATurn:  finished = TickTurnAnim (tickRate, lmp, ai); break;
++			case ASpin:  finished = TickSpinAnim (tickRate, lmp, ai); break;
++			case AMove:  finished = TickMoveAnim (tickRate, lmp, ai); break;
++			case AScale: finished = TickScaleAnim(tickRate, lmp, ai); break;
++			default: assert(false); break;
++		}
++		if (ai.done |= finished) {
+ 			if (ai.hasWaiting)
+ 				doneAnims.emplace_back(ai);
+ 		}
+-- 
+2.47.3
+
