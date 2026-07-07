@@ -5,7 +5,7 @@ export PATH=/usr/local/go/bin:$PATH
 cd /home/mabn/dev/barreplay
 D=/home/mabn/dev/barreplay/.bardata/engine/2025.06.24
 GAME=$1; ATAG=$2; BTAG=$3; PAIRS=${4:-5}
-REF=$(grep -v "^BRSNAP PROF" /home/mabn/dev/perf-runs/${GAME}.ref.brsnap 2>/dev/null | md5sum | awk '{print $1}')
+REF=""
 [ -z "$REF" ] && REF=$(awk '{print $1}' /home/mabn/dev/perf-runs/$( [ "$GAME" = 68694c6a70bfb0d3fefdf8faf824d802 ] && echo medium || echo small)-ref.md5)
 run() { # $1=tag
   cp "/home/mabn/dev/perf-runs/spring-headless.$1" "$D/spring-headless"
