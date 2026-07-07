@@ -9,7 +9,7 @@ REF=""
 [ -z "$REF" ] && REF=$(awk '{print $1}' /home/mabn/dev/perf-runs/$( [ "$GAME" = 68694c6a70bfb0d3fefdf8faf824d802 ] && echo medium || echo small)-ref.md5)
 run() { # $1=tag
   cp "/home/mabn/dev/perf-runs/spring-headless.$1" "$D/spring-headless"
-  ./barreplay -data /home/mabn/dev/barreplay/.bardata -engine "$D/spring-headless" -out ./snaps -worker-threads 2 "$GAME" >/dev/null 2>&1
+  sudo nice -n -15 taskset -c 0-2 ./barreplay -data /home/mabn/dev/barreplay/.bardata -engine "$D/spring-headless" -out ./snaps -worker-threads 2 "$GAME" >/dev/null 2>&1
   local sim=$(python3 /home/mabn/dev/perf-runs/simtime.py "$D/../../infolog.txt" 2>/dev/null)
   [ -z "$sim" ] && sim=$(python3 /home/mabn/dev/perf-runs/simtime.py /home/mabn/dev/barreplay/.bardata/infolog.txt)
   local md5=$(grep -v "^BRSNAP PROF" "snaps/$GAME.brsnap" | md5sum | awk '{print $1}')
