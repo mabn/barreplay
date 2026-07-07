@@ -58,6 +58,25 @@ wt=0 39 s, **wt=2 36 s**, wt=3 39 s. Policy going forward (user decision):
 **all benchmark sims run with `-worker-threads 2`**; no further tuning of this
 axis. Scheduling-only, cannot affect determinism.
 
+## 0002-headless-replay-unsynced-cuts.patch (iteration 4)
+
+Two output-safe cuts, gated on `HEADLESS && gameSetup->hostDemo`:
+no event client for the unsynced halves of LuaRules/LuaGaia (gadget
+draw-side callins never run; `SendToUnsynced` is a direct call and keeps
+working; LuaUI/the widget registers elsewhere), and unsynced (render-only)
+projectiles expire on arrival (headless already has `MaxParticles=0` via
+`headlessValue`, but many spawn sites never check the budget — their
+particles previously ran `Sim::Projectiles::UpdateUnsyncedMT`, ~12 s per
+8v8, for nothing). **Byte-identical on both replays** (8v8 md5
+`8cb2b931…`).
+
+Timing: within this VM's noise. Measurement notes: the VM's throughput
+drifts ±10% across hours (same binary, same replay: small-replay sim
+35-40 s at different times; an 8v8 patch-0002 run read *slower* than
+patch-1 until a back-to-back A/B showed parity and a drifted machine).
+Levers below ~10% cannot be resolved individually here — they get bundled
+and the bundle measured with interleaved runs.
+
 ## Iteration 3: PGO — null result
 
 GCC PGO (`-fprofile-generate` → train → `-fprofile-use -fprofile-correction`,
