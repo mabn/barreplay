@@ -99,3 +99,22 @@ empty polls (the CLAUDE.md caveat), making subsequent `-profile` readings in
 this loop trustworthy. Output identical on both replays ✓.
 
 Patch: `H3-threadpool-clock-storm.patch` (recoil commit `c955686`).
+
+### H4 — skip eager piece-transform walk in TickAllAnims — REJECTED-no-gain
+
+Hypothesis: the BFS walk at the end of `TickAllAnims` (recomputes every dirty
+piece's transforms, sets wasUpdated/boundaries flags) is rendering plumbing;
+synced readers use the lazy `UpdateParentMatricesRec` path which computes
+identical values on demand. Gated it out under `HEADLESS && hostDemo`.
+
+Result: **byte-identical output on both replays** (the lazy/eager equivalence
+is real) but **timing flat** (small 24s, medium 101s — exactly the H2/H3
+numbers). In hindsight: combat units' weapons force the lazy path every frame
+anyway (`GetPiecePos` per weapon in `UpdateWeaponVectors`), so the walk's
+work shifted to the readers instead of disappearing. Reverted from the
+branch; patch kept as `H4-REJECTED-skip-eager-piece-walk.patch` — might pay
+on replays dominated by idle animating structures, re-testable on the 8v8.
+
+Also learned this iteration (perf callgraph on a plain run): the `-profile`
+scope table's `Update` = 16.7s is a profiler artifact — real cost <2%; and
+perf symbolization needs the exact binary preserved next to perf.data.
