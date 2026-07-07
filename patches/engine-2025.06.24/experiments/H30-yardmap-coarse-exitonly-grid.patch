@@ -1,0 +1,115 @@
+From 4c39ab2a2f96e10321ad4957a76310de090e4285 Mon Sep 17 00:00:00 2001
+From: Claude <claude@example.com>
+Date: Wed, 8 Jul 2026 01:11:54 +0200
+Subject: [PATCH] yardmap exit-only: coarse per-block presence grid to skip
+ footprint scans
+
+RangeHasExitOnly still cost ~7% of synced instructions after H29 (row-major):
+it scans a unit footprint for the EXIT_ONLY flag, which is set only by factory
+yardmaps -> sparse and localized. Maintain a coarse 16x16-square block grid of
+exit-only presence counts (updated in Set/ClearFlags on the EXIT_ONLY bit),
+and fast-reject in RangeHasExitOnly when no overlapping block holds an
+exit-only square. Conservative superset (block count>0 whenever any fine
+square in it is exit-only), so skipping is value-identical.
+
+Measured (bench, medium [6000,9000), wt=1, min-of-3): 37.210e9 -> 34.995e9
+instr = -5.95% (cumulative -13.35% with H29), byte-identical snapshot.
+---
+ rts/Sim/Misc/YardmapStatusEffectsMap.cpp |  9 +++++-
+ rts/Sim/Misc/YardmapStatusEffectsMap.h   | 37 ++++++++++++++++++++++--
+ rts/Sim/MoveTypes/MoveMath/MoveMath.cpp  |  5 ++++
+ 3 files changed, 48 insertions(+), 3 deletions(-)
+
+diff --git a/rts/Sim/Misc/YardmapStatusEffectsMap.cpp b/rts/Sim/Misc/YardmapStatusEffectsMap.cpp
+index 33b9055..736a98a 100644
+--- a/rts/Sim/Misc/YardmapStatusEffectsMap.cpp
++++ b/rts/Sim/Misc/YardmapStatusEffectsMap.cpp
+@@ -14,7 +14,9 @@ CR_BIND(YardmapStatusEffectsMap, )
+ 
+ CR_REG_METADATA(YardmapStatusEffectsMap, (
+ 	CR_MEMBER(stateMap),
+-	CR_MEMBER(rowWidth)
++	CR_MEMBER(rowWidth),
++	CR_MEMBER(blocksX),
++	CR_MEMBER(exitOnlyBlock)
+ ))
+ 
+ void YardmapStatusEffectsMap::InitNewYardmapStatusEffectsMap() {
+@@ -32,5 +34,10 @@ void YardmapStatusEffectsMap::InitNewYardmapStatusEffectsMap() {
+ 
+     stateMap.clear();
+     stateMap.resize(Square(width), 0);
++
++    // [barreplay] coarse exit-only presence grid (see header)
++    blocksX = ((mapDims.mapx - 1) >> EO_BLOCK_SHIFT) + 1;
++    const int blocksZ = ((mapDims.mapy - 1) >> EO_BLOCK_SHIFT) + 1;
++    exitOnlyBlock.assign(blocksX * blocksZ, 0);
+ }
+ 
+diff --git a/rts/Sim/Misc/YardmapStatusEffectsMap.h b/rts/Sim/Misc/YardmapStatusEffectsMap.h
+index 5ce2c93..ceb0eef 100644
+--- a/rts/Sim/Misc/YardmapStatusEffectsMap.h
++++ b/rts/Sim/Misc/YardmapStatusEffectsMap.h
+@@ -49,8 +49,41 @@ public:
+     bool AreAllFlagsSet(int x, int z, uint8_t flags) { return (GetMapState(x, z) & flags) == flags; }
+ 	bool AreAnyFlagsSet(int x, int z, uint8_t flags) { return (GetMapState(x, z) & flags) != 0; }
+ 	
+-    void SetFlags(int x, int z, uint8_t flags) { GetMapState(x, z) |= flags; }
+-    void ClearFlags(int x, int z, uint8_t flags) { GetMapState(x, z) &= ~flags; }
++    // [barreplay] coarse per-block presence count of EXIT_ONLY squares, so
++    // RangeMayHaveExitOnly() can reject footprint scans far from any exit-only
++    // zone (which is factory-localized and sparse) without touching stateMap.
++    static constexpr int EO_BLOCK_SHIFT = 4; // 16x16 squares per coarse block
++    int blocksX = 0;
++    std::vector<int32_t> exitOnlyBlock;
++
++    void SetFlags(int x, int z, uint8_t flags) {
++        const int cx = std::clamp(x, 0, mapDims.mapxm1);
++        const int cz = std::clamp(z, 0, mapDims.mapym1);
++        uint8_t& s = stateMap[uint32_t(cz) * rowWidth + uint32_t(cx)];
++        if ((flags & EXIT_ONLY) && !(s & EXIT_ONLY))
++            exitOnlyBlock[(cz >> EO_BLOCK_SHIFT) * blocksX + (cx >> EO_BLOCK_SHIFT)]++;
++        s |= flags;
++    }
++    void ClearFlags(int x, int z, uint8_t flags) {
++        const int cx = std::clamp(x, 0, mapDims.mapxm1);
++        const int cz = std::clamp(z, 0, mapDims.mapym1);
++        uint8_t& s = stateMap[uint32_t(cz) * rowWidth + uint32_t(cx)];
++        if ((flags & EXIT_ONLY) && (s & EXIT_ONLY))
++            exitOnlyBlock[(cz >> EO_BLOCK_SHIFT) * blocksX + (cx >> EO_BLOCK_SHIFT)]--;
++        s &= ~flags;
++    }
++
++    // conservative: true if ANY coarse block overlapping the (clamped) range
++    // holds an exit-only square. If false, no fine square in the range is
++    // exit-only, so callers can skip the exact scan (value-identical).
++    bool RangeMayHaveExitOnly(int xmin, int xmax, int zmin, int zmax) const {
++        xmin = std::clamp(xmin, 0, mapDims.mapxm1); xmax = std::clamp(xmax, 0, mapDims.mapxm1);
++        zmin = std::clamp(zmin, 0, mapDims.mapym1); zmax = std::clamp(zmax, 0, mapDims.mapym1);
++        for (int bz = (zmin >> EO_BLOCK_SHIFT); bz <= (zmax >> EO_BLOCK_SHIFT); ++bz)
++            for (int bx = (xmin >> EO_BLOCK_SHIFT); bx <= (xmax >> EO_BLOCK_SHIFT); ++bx)
++                if (exitOnlyBlock[bz * blocksX + bx] > 0) return true;
++        return false;
++    }
+ 
+     void InitNewYardmapStatusEffectsMap();
+ 
+diff --git a/rts/Sim/MoveTypes/MoveMath/MoveMath.cpp b/rts/Sim/MoveTypes/MoveMath/MoveMath.cpp
+index 75ac666..ef13273 100644
+--- a/rts/Sim/MoveTypes/MoveMath/MoveMath.cpp
++++ b/rts/Sim/MoveTypes/MoveMath/MoveMath.cpp
+@@ -574,6 +574,11 @@ void CMoveMath::FloodFillRangeIsBlocked(const MoveDef& moveDef, const CSolidObje
+ }
+ 
+ bool CMoveMath::RangeHasExitOnly(int xmin, int xmax, int zmin, int zmax, const ObjectCollisionMapHelper& object) {
++	// [barreplay] coarse reject: exit-only squares are factory-localized and
++	// sparse, so most footprints touch no exit-only block and skip the scan.
++	// Conservative superset -> value-identical.
++	if (!yardmapStatusEffectsMap.RangeMayHaveExitOnly(xmin, xmax, zmin, zmax))
++		return false;
+ 	for (int z = zmin; z <= zmax; z += FOOTPRINT_ZSTEP) {
+ 		for (int x = xmin; x <= xmax; x += FOOTPRINT_XSTEP)
+ 			if (object.IsExitOnlyAt(x, z)) return true;
+-- 
+2.47.3
+

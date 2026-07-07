@@ -493,3 +493,14 @@ medium frames. First win found via the instruction harness. Recoil `<hash>`.
 _Note: this reduces total synced work; at wt=2 RangeHasExitOnly runs partly on
 workers, so wt=2 wall gain may be < the instruction %, but it's strictly fewer
 instructions for identical output. Wall interleave TBD in a batch._
+
+### H30 — coarse exit-only block grid — KEPT, −5.95% instr (cumulative −13.35%) ★
+
+RangeHasExitOnly was still 7.2% after H29. Exit-only squares are factory-
+localized (set only at GroundBlockingObjectMap:86/134). Added a 16×16-square
+coarse block grid of exit-only counts (maintained in Set/ClearFlags) and a
+`RangeMayHaveExitOnly` fast-reject; footprints far from factories skip the fine
+scan. Conservative superset → value-identical. **Byte-identical; 37.210e9 →
+34.995e9 instr = −5.95%, cumulative −13.35% vs pre-H29 (40.389→34.995).**
+Yardmap vein now mined out. Next: RangeIsBlockedHashedMt cache (5.6%),
+tesselation internals (UpdateMoveCost/UpdateNeighborCache ~3.5% each).
