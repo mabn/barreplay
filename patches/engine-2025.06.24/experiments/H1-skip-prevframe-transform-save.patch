@@ -1,0 +1,61 @@
+From ae02c4b18f51813193d6831e4c57a863e1022bb0 Mon Sep 17 00:00:00 2001
+From: Claude <claude@example.com>
+Date: Tue, 7 Jul 2026 05:48:44 +0200
+Subject: [PATCH] headless demo replay: skip prev-frame transform save (draw
+ interpolation state)
+
+CUnitHandler::UpdatePreFrame + CFeatureHandler::UpdatePreFrame save, for
+every active unit/feature every sim frame, the previous-frame object
+transform (WorldObject::preFrameTra, a matrix->quaternion conversion per
+object) and every model piece's prev model-space transform - state whose
+only readers are draw-side interpolation (Rendering/: drawPos,
+ModelDrawerData transform upload). Headless demo replay draws ~1 fps and
+nothing reads the result, so gate both calls out under
+HEADLESS && gameSetup->hostDemo, the same output-safe pattern as the
+unsynced-cuts patch.
+
+Sync-safety: the pass only wrote draw-only fields (plain, not Synced*
+types - no sync-checksum contribution) and its lazy piece-transform
+refresh via GetModelSpaceTransform() is idempotent - later synced readers
+recompute identical values on demand. Projectiles maintain their own
+preFrameTra (used by synced ground collision) in CProjectile, untouched
+here.
+
+Profiled cost of the skipped pass (unpatched 8v8 58530-frame benchmark):
+Sim::Unit::UpdatePreFrame 73 s + Sim::Features::UpdatePreFrame 13 s of a
+1145 s sim (~7.5%); small replay ~10% of sim.
+---
+ rts/Game/Game.cpp | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/rts/Game/Game.cpp b/rts/Game/Game.cpp
+index 6da6bf2..3baba0b 100644
+--- a/rts/Game/Game.cpp
++++ b/rts/Game/Game.cpp
+@@ -1745,8 +1745,23 @@ void CGame::SimFrame() {
+ 
+ 		// Lua unit scripts change piece positions and orientations in eventHandler.GameFrame(gs->frameNum);
+ 		// so we need to save the previous unit state before it happened
++#ifdef HEADLESS
++		// [barreplay] the prev-frame transforms saved here (WorldObject::preFrameTra,
++		// LocalModelPiece::prevModelSpaceTra) exist only for draw-time interpolation:
++		// every reader lives under Rendering/ (drawPos, model-transform upload). In a
++		// headless demo replay nothing consumes them, so skip the whole per-object
++		// per-frame save pass. The lazy piece-transform refresh this pass triggered
++		// via GetModelSpaceTransform() is idempotent and deterministic - any later
++		// synced reader (weapon aim, script GetPiecePos) recomputes identical values,
++		// and none of the skipped state feeds the sync checksum.
++		if (gameSetup == nullptr || !gameSetup->hostDemo) {
++			unitHandler.UpdatePreFrame();
++			featureHandler.UpdatePreFrame();
++		}
++#else
+ 		unitHandler.UpdatePreFrame();
+ 		featureHandler.UpdatePreFrame();
++#endif
+ 
+ 		{
+ 			SCOPED_TIMER("Sim::GameFrame");
+-- 
+2.47.3
+
