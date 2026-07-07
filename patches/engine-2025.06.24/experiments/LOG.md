@@ -42,41 +42,48 @@ output-safe; bundled and judged together via interleaved A/B (the H4–H6
 lesson). "safe" = touches only unsynced/draw/dead state OR provably
 value-identical synced computation.
 
-1. **H12 — bounding-volume recalc skip (headless)** [SOURCE COMMITTED,
-   building]. `localModel.UpdateBoundingVolume` recomputes the DRAW bounding
-   volume (GetDrawRadius=unsynced culling, GetMdlDrawMidPos=draw); synced
-   midPos/collision-volume are separate. No synced reader; gated out. Being
-   built into the H9+H10+H12 bundle and interleaved next.
-2. **H13 — CobEngine per-tick scheduler overhead.** `WakeSleepingThreads` /
-   `ProcessQueuedThreads` touch containers every tick even when empty;
-   order-preserving early-out when queues are empty. (Low ceiling — the loops
-   already iterate only non-empty vectors; likely thin.)
-3. **H14 — deep QTPFS order-invariant update.** Make node-layer tesselation
-   canonicalization independent of the damage-event *sequence* so H8's
-   no-change skip becomes byte-safe (~40% ceiling seen on the broken H8).
-   Large / upstream-scale. **Highest ceiling remaining.**
-4. **H15 — LosHandler::UpdateUnit recompute skip.** Skip a unit's LOS re-stamp
-   when its (pos-square, radius, height) are unchanged. LOS is SYNCED → needs a
-   hard invariance proof; high risk.
-5. **H16 — QuadField MovedUnit churn.** `UpdateCollisionMap` re-inserts a unit
-   on any position delta; skip remove+add when the occupied quad set is
-   unchanged (synced container, order-sensitive — prove identity).
-6. **H19 — Lua synced GC cadence.** `CollectGarbage` runs tied to sim-speed;
-   probe whether the synced-Lua GC step size is retunable without changing
-   observable synced behavior (GC timing ≠ synced values). Needs care.
-7. **H20 — Sim::Los per-allyteam skip.** Ally-teams with no live units/enemies
-   to reveal still iterate LOS; skip fully-decided allyteams. SYNCED — high
-   risk, parked pending proof.
-8. **H21 — COB opcode dispatch: switch → computed-goto.** `CCobThread::Tick`
-   3.5% self; a label-table dispatch may beat the switch. Same computation,
-   provably value-identical. Micro, safe.
-9. **H22 — QTPFS damage-queue coalescing (H14 stepping-stone).** Dedup/merge
-   overlapping damage rects per frame before tesselating, so repeated craters
-   on one block collapse — a safe *subset* of H14 if made order-canonical.
+**Key structural finding (H3, H5, H12 converge on it): the sim is
+MAIN-THREAD-BOUND.** Removing/trimming worker-side (`for_mt` / `*MT`) or
+spin-side work yields no wall-clock gain — the main thread is the barrier.
+So a hypothesis only pays if it cuts **main-thread** work. Main-thread hot
+path (H7-stack flat profile, recoil-main self-time): synced gadget Lua
+(`luaV_execute` 2.8% + `luaH_get` 1.6% + `luaD_precall` 1.0% — untouchable),
+`CCobThread::Tick` 3.5% (synced interp), `TickAllAnims` 3.8% (H2 took the
+overhead; rest is synced anim math feeding weapon aim), `CMoveMath::Range*`
+(synced pathfinding), and **`QTPFS::PathManager::UpdateNodeLayer` ≈ 10% of
+main CPU** — the one large, addressable main-thread block. That is why H14 is
+now the priority: H8 (its unsafe form) ran ~40% faster by cutting exactly
+this.
 
-_(Struck: H9/H10 → interleaved NO-GAIN, on record. H11 → QuadField already
-pools query vectors. H17 → no bit-identical cheaper quaternion. H18 → no
-feature-side bounding-volume loop exists.)_
+1. **H14 — QTPFS order-invariant node-layer update.** [ACTIVE — priority]
+   Make `NodeLayer::Update`/tesselation/relink a pure function of the current
+   speed field over the rect, so H8's no-change skip becomes byte-safe. ~10%
+   of main-thread CPU is the target; ~40% wall was seen on the (unsafe) H8.
+   Large. Investigating the divergence mechanism now.
+2. **H13 — CobEngine per-tick scheduler overhead.** Early-out empty queues in
+   `WakeSleepingThreads`/`ProcessQueuedThreads`. Main-thread but low ceiling.
+3. **H15 — LosHandler::UpdateUnit recompute skip.** Skip a unit's LOS re-stamp
+   when (pos-square, radius, height) unchanged. Main-thread + MT mix; SYNCED →
+   hard invariance proof; high risk.
+4. **H16 — QuadField MovedUnit churn.** Skip remove+add when a moved unit's
+   occupied quad set is unchanged. Main-thread, synced container — prove
+   identity.
+5. **H19 — Lua synced GC cadence.** `CollectGarbage` tied to sim-speed; probe
+   retuning the synced-GC step without changing observable synced behavior.
+   Main-thread. Needs care.
+6. **H20 — Sim::Los per-allyteam skip.** Skip fully-decided allyteams. SYNCED,
+   high risk, parked pending proof.
+7. **H21 — COB opcode dispatch switch → computed-goto.** `CCobThread::Tick`
+   3.5% main-thread self; label-table dispatch may beat the switch. Same
+   computation, value-identical. Micro, safe — good if H14 stalls.
+8. **H22 — QTPFS per-frame damage coalescing.** Partially already done by the
+   engine's `damageMap[quad]` within-frame dedup; the residual (cross-frame)
+   is H14 proper. Kept as an H14 sub-task.
+
+_(Struck: **H9/H10/H12 → interleaved NO-GAIN** (H9/H10 cold paths; H12 is
+MT-side, doesn't move the main-thread barrier) — patches on record. H11 →
+QuadField already pools query vectors. H17 → no bit-identical cheaper
+quaternion. H18 → no feature-side bounding-volume loop.)_
 
 ## Hypotheses
 
@@ -356,3 +363,17 @@ skipped by the spectator gate (`UpdateLOS` early-returns under
 Kept on record; folding in **H12** (draw bounding-volume skip, the member
 with real profile ceiling in `Sim::Unit::SlowUpdateMT`) and re-judging the
 H9+H10+H12 bundle in one interleave. Queue refreshed below.
+
+### H12 (in H9+H10+H12 bundle) — draw bounding-volume skip — REJECTED-no-gain
+
+Bundle byte-identical on both replays (gates ✓). Interleaved medium (4×A/B,
+order-alternated): kept 105.75 vs bundle 103.5 = −2.1%, but noisy (B won 2,
+tied 1, lost 1). Interleaved small (5×A/B): kept ≈23.8 vs bundle ≈25.0 —
+*slower*, but at the CLI's 1-second print quantization (~±4% at 24s) that is
+pure noise. Net: indistinguishable from zero. Cause: H12's work is in
+`Sim::Unit::SlowUpdateMT` (worker side) — and the sim is main-thread-bound
+(see queue header), so removing worker work the main thread isn't blocked on
+doesn't move wall time. Same lesson as H3/H5. Whole micro-bundle #2 reverted;
+kept stack stays 0001+H1–H6 (`b3d6577`). Patches:
+`H9-H10-los-event-and-cob-sound-skip.patch`,
+`H12-headless-skip-bounding-volume-recalc.patch` (on record).
