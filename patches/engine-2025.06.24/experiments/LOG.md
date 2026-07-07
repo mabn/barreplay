@@ -175,6 +175,41 @@ but timing flat (small 25s, medium 106s, noise band). The predicted ≤1% is
 below this VM's ~3% noise floor. Reverted; patch kept as
 `H6-REJECTED-cob-unchecked-fetch.patch`.
 
+## Phase 2 — data layout & vectorization (user-directed)
+
+**Question:** can reorganizing memory (SoA) and batch/SIMD-processing units pay,
+under the byte-identical constraint?
+
+**Constraint analysis.** SIMD is not automatically banned: IEEE lane-wise ops
+give bit-identical per-unit results *if* per-unit operation order is preserved.
+The landmines: FMA contraction differences (a rewritten loop invites the
+compiler to contract `a*b+c` where it previously didn't → different rounding),
+transcendentals (streflop scalar impls can't be vectorized), cross-unit
+interactions/order-sensitive accumulation, and callbacks interleaved into
+every hot loop. Each vectorized loop is a separate proof obligation.
+
+**Measurements (medium, mid-game, perf stat):** IPC 1.16, LLC miss ratio 31%
+of cache-refs (~38M misses/s ≈ 2.4 GB/s), L1d miss 3.8%, branch miss 1.5% —
+a latency-bound pointer-chasing profile. The premise is real.
+
+**But pahole kills the unit-object theory:**
+- `CUnit` = 4320 B / 68 cachelines, effectively packed (pahole's "1200-byte
+  hole" is the `CSolidObject` base subobject; real padding ≈ 6 B).
+- The engine ALREADY inlines the hot satellites: `amtMemBuffer[616]`,
+  `caiMemBuffer[696]`, `smtMemBuffer[376]`, `usMemBuffer[352]` are placement-
+  new arenas — MoveType/CommandAI/script live *inside* the unit. The presumed
+  pointer-chase between unit and movetype does not exist.
+- Arithmetic: a full 68-line sweep of ~1000 units at 30 Hz ≈ 130 MB/s — only
+  ~5% of the measured miss traffic. **Unit sweeps are not where the misses
+  are.** They must live in map-scale structures (QTPFS node grids, LOS maps,
+  heightmap, Lua heap) — whose orderings are largely sync-frozen (e.g. QTPFS
+  node indices feed search tie-breaking).
+- True SoA batching would need SoA as the source of truth (else gather cost
+  eats the SIMD win) — upstream-rewrite scale; Recoil's entt "ECS" currently
+  stores only unitIds, an ID list, not a data layout.
+
+(cache-miss location sampling follows — see next entry)
+
 ## Conclusion of this loop phase
 
 H4, H5, H6 all landed byte-identical-but-flat: the safe-cut well is
