@@ -57,3 +57,18 @@ oversubscription on 4 cores. Small-replay sweep (sim wall): auto(-1) 41 s,
 wt=0 39 s, **wt=2 36 s**, wt=3 39 s. Policy going forward (user decision):
 **all benchmark sims run with `-worker-threads 2`**; no further tuning of this
 axis. Scheduling-only, cannot affect determinism.
+
+## Iteration 3: PGO — null result
+
+GCC PGO (`-fprofile-generate` → train → `-fprofile-use -fprofile-correction`,
+official flags otherwise, gold linker preserved via explicit
+`-fuse-ld=gold`): **no measurable gain** — small replay 36 s / 712-721 fps,
+same as the non-PGO patch-0001 binary (36 s / 721 fps). Output stayed
+byte-identical (also under instrumentation, which ran it at ~5x slower).
+Caveat: trained on the small replay only — every attempt at the ~2 h
+instrumented 8v8 training run was killed by container restarts, so
+8v8-trained PGO is unexplored. Not pursued further; build-level levers
+yield less than targeted engine cuts here. (Side observation: a git-dirty
+engine version string like `2025.06.24-1-g<sha> <branch>` still plays the
+demo and produces identical output — the exact-version requirement applies
+to the sync-relevant code, not the describe suffix.)
