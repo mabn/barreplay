@@ -61,7 +61,12 @@ noise floor (H4–H6 method). Skip/approximate levers are exhausted (remaining
 big blocks are synced-untouchable or non-idempotent-must-reproduce, see H14).
 Diminishing returns acknowledged; continuing per directive.
 
-1. **H25 — CMoveMath::RangeIsBlockedHashedMt cache.** [ACTIVE] per-thread
+1. **H30 — QTPFS NodeLayer::Update micro** (7.2% wt=1 instr). Value-identical
+   speedups in the per-square speed-bin loop (GetPosSpeedMod/GroundSpeedMod
+   1.6+1.4%; the rangeIsBlocked lambda). [ACTIVE — mine the same profile vein]
+2. **H31 — RangeIsBlockedHashedMt / FloodFillRangeIsBlocked** (4.8+1.8%): flat
+   collision cache + row-major-style index wins (same yardmap idea family).
+3. **H25 — CMoveMath::RangeIsBlockedHashedMt cache.** [ACTIVE] per-thread
    `unordered_map<CSolidObject*,BlockType>` → flat/open-addressed cache, same
    hit/miss semantics. Value-identical (gate-checkable); real ceiling on a hot
    pathfinding path (partly main-thread).
@@ -474,3 +479,17 @@ widget (kept), not the gadget halves 0002 removes. 0002 stays folded (byte-
 identical, harmless) but is a small win, matching RESULTS.md's original
 "within noise". The bench does NOT measure unsynced cuts (throttle-draw
 suppresses the unsynced update to ~1/s); use profiler/wall for those.
+
+### H29 — yardmap row-major indexing (was Morton) — KEPT, −7.87% instr ★
+
+Data-driven (wt=1 instruction profile: `CMoveMath::RangeHasExitOnly` = 14.4%,
+the hottest synced fn). `GetMapState` indexed `stateMap` via a 5-round Morton
+interleave per (x,z); the footprint scans are small + contiguous in x, so
+Morton's locality gain is nil and its compute is overhead. Row-major
+`z*rowWidth+x` (same clamping, same width*width buffer, pure bijection change).
+**Byte-identical (gate ✓); 40.389e9 → 37.210e9 instr = −7.87%** over 3000
+medium frames. First win found via the instruction harness. Recoil `<hash>`.
+
+_Note: this reduces total synced work; at wt=2 RangeHasExitOnly runs partly on
+workers, so wt=2 wall gain may be < the instruction %, but it's strictly fewer
+instructions for identical output. Wall interleave TBD in a batch._
