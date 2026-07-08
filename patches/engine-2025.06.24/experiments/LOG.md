@@ -512,3 +512,16 @@ unordered_map<CSolidObject*,BlockType> → generation-stamped direct-mapped flat
 cache (1024 slots, no alloc/clear/rehash, evict-on-collision recomputes the
 deterministic value). Value-identical (same collider-per-tempNum invariant).
 **Byte-identical; 34.995e9 → 34.405e9 = −1.69%, cumulative −14.82%.**
+
+### wt=2 wall check of H29+H30+H31 — INCONCLUSIVE (host noise)
+
+Interleaved wt=2 medium wall (pre-H29 vs H31, 8 pairs, nice-15+pinned):
+A=122.3s B=123.7s, B wins 4/8 — coin flip; individual runs 113–135s (±10%
+host drift). The wall is noise-dominated (same wall we couldn't resolve
+before — the reason the instruction meter exists), so this neither confirms
+nor refutes a wt=2 wall gain. The −14.82% **instructions** is real total-work
+reduction (byte-identical); at wt=2 the QTPFS/MoveMath work is worker-side, so
+the medium/2-worker wall benefit may be small, but it helps wt=1 and heavier
+workloads (8v8). **Policy: instruction count (wt=1, min-of-N) is the verified
+metric; wt=2 wall is not resolvable on this box.** Keep banking byte-identical
+instruction reductions.
