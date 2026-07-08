@@ -550,3 +550,11 @@ Caveat: wt=2 wall benefit of the QTPFS wins is unmeasurable (host noise) and
 likely small (worker-side at wt=2); they reduce total work and help wt=1 /
 heavy workloads. H21 (COB) would be main-thread → the first that could help
 wt=2, if pursued.
+
+### 8v8 safety validation of H29+H30+H31 — BYTE-IDENTICAL ✓
+
+Large replay 6da7496a on the H31 stack: PROF-stripped md5 = `8cb2b931…` =
+canonical reference. So H29+H30+H31 (and 0002+H23) are byte-identical on ALL
+three replays (small/medium/8v8). Wall 14m42s this run = heavy-load noise
+(earlier 8v8 was 11m5s; medium-equivalent load ~+25% concurrently), reconfirming
+wt=2 wall is unmeasurable here. Instruction count remains the verified metric.
