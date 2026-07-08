@@ -639,3 +639,42 @@ Root-caused H8's divergence cheaply instead of a multi-day rewrite:
   recording engine's exact per-event tree evolution.
 **H14 closed. No byte-identical no-change skip exists.** ~15 min of harness
 experiments avoided a multi-day dead-end rewrite.
+
+## H35 split into per-loop hypotheses + feasibility assessment
+
+Disassembly of the H31 binary shows the synced hot loops are NOT
+vectorizable-FP-bound: NodeLayer::Update is FP-light + already partly packed
+(gather/branch/integer bound); the hot FP (CQuaternion::Rotate 1.7%,
+ComposeTransform 1.35%, GroundSpeedMod 1.4%) is per-call float3/4 math, mostly
+SCALAR (Rotate float4 = 38 scalar-fp / 2 packed).
+
+**Core constraint:** value-identical SIMD of SYNCED FP cannot vectorize WITHIN
+an element (reorders ops → different rounding → desync). It must be LANE-WISE
+across N independent elements (each lane replicating the exact scalar
+op-sequence), which requires SoA gathering of scattered AoS fields. The units
+are AoS (big CUnit struct) → each per-loop SIMD win is a SoA rewrite with
+gather overhead that may negate it (matches the phase-2 layout finding: misses
+diffuse, unit objects arena-inlined).
+
+Per-loop candidates (each = SoA-batch + lane-wise scalar-replicated SIMD):
+- **H37 — piece-transform batch** (CQuaternion::Rotate/ComposeTransform in the
+  TickAllAnims BFS). Scalar + hot, but TREE-structured (siblings scattered) →
+  batching is hard. High effort.
+- **H38 — per-unit UpdateWeaponVectors batch.** Flatter (per-weapon transform),
+  but AoS gather across CUnit/CWeapon. Med-high effort.
+- **H39 — per-unit MoveType integration batch.** Position/vel update per unit;
+  AoS gather. Med-high effort.
+- **H40 — NodeLayer::Update speed-bin loop.** Per-square, but gather (map
+  lookups) + branch (speedModClass) → SIMD-hostile. Low feasibility.
+- **H41 — integer bulk loops** (LOS map stamping, blocking scans). Integer SIMD
+  is value-safe (no rounding), but these are small (~1-2%) and GCC likely
+  auto-vectorizes the flat ones already. Check-first, low ceiling.
+
+Assessment: H35's clean drop-in SIMD wins don't exist for this engine (memory/
+branch-bound synced code). Each per-loop item is a large SoA rewrite, uncertain
+payoff, must replicate scalar op-order exactly per lane (desync risk).
+
+**Evidence-based recommendation:** H21 (COB dispatch jump-table) is the
+realistic large win — disassembly-PROVEN headroom (GCC emits a comparison
+tree), value-identical, main-thread, ~150-250 lines, fully instr-verifiable.
+H14 impossible; H35 = large-uncertain SoA.
