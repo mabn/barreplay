@@ -622,3 +622,20 @@ relevance / desync-risk / effort:
 
 Recommendation: H21 = safe/certain/verifiable; H33 = real wt2 payoff but
 risky/unmeasurable; H14 = biggest number.
+
+### H14 — CONFIRMED IMPOSSIBLE byte-identically (decisive experiment)
+
+Root-caused H8's divergence cheaply instead of a multi-day rewrite:
+- nodeNumber is spatial (index-independent), BUT the QTPFS tree checksum
+  (childBaseIndex, a pool index) is fed into a `SyncedUint` (PathManager.cpp
+  ~436) — tree state incl. pool indices is formally synced.
+- Pool has rigid invariants (roots at 0..N; 4 children per Split CONTIGUOUS
+  via childBaseIndex+i) — index perturbation experiments both crashed,
+  showing indices are rigidly coupled to tree shape + allocation history.
+- **Decisive: calling PreTesselate TWICE per event (same field) → gate DIFF**
+  (ran fine, output diverged). So Merge+Tesselate is NON-IDEMPOTENT — it
+  mutates sync-relevant state every call regardless of field. Therefore
+  baseline (1× per event) ≠ H8 skip (0×): any skip diverges from the
+  recording engine's exact per-event tree evolution.
+**H14 closed. No byte-identical no-change skip exists.** ~15 min of harness
+experiments avoided a multi-day dead-end rewrite.
