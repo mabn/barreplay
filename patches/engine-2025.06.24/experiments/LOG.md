@@ -592,3 +592,33 @@ Every remaining hot function is now classified:
 - **H14 QTPFS skip** — unsafe (non-idempotent).
 Clean, low-risk autonomous wins are exhausted; further progress needs the H21
 rewrite effort or accepting Lua-internals risk.
+
+## Large-rewrite candidate queue (H-numbered)
+
+Big-ticket rewrites beyond the exhausted low-risk vein. Ceiling / wt2-wall
+relevance / desync-risk / effort:
+
+- **H21 — COB dispatch jump-table.** ~1–1.5% instr, MAIN-THREAD (helps wt2),
+  LOW risk (value-identical, gated), ~1 day. Disassembly-proven worthwhile
+  (GCC emits a comparison tree, no jump-table). Blocker: 4 scattered collision
+  groups to gather. **Safest large win; fully verifiable by instr meter.**
+- **H33 — sim parallelism / for_mt barrier restructure.** Up to ~25% WALL,
+  the ONLY option that directly targets the wt2 bottleneck (main thread waits
+  ~25% in WaitForFinished for the slowest worker per barrier). HIGH desync
+  risk (sim ordering = the byte-identity contract). Days, R&D. Verify by
+  byte-identity + reasoning; timing gain unmeasurable here (wt2 wall noise).
+- **H14 — QTPFS order-invariant tesselation.** ~15% instr / ~40% of QTPFS
+  (biggest raw ceiling). Worker-side (helps 8v8 wt2 more than medium). HIGH
+  risk: make tesselation canonical/order-independent so H8's no-change skip
+  becomes byte-safe (currently non-idempotent). Days, deep. Instr-verifiable.
+- **H34 — Lua string-lib (match/find) internals.** ~4% instr, synced =
+  MAIN-THREAD (helps wt2). Med–High risk (bundled Lua core). ~1–2 days.
+  Instr-verifiable.
+- **H35 — SoA / SIMD of synced hot loops.** ~3–7% instr, wt2 benefit
+  uncertain. Med risk (FP-contraction/reassociation → desync; per-loop
+  proofs). Days. Instr-verifiable.
+- **H36 — COB register-VM / bytecode pre-decode.** ~2–3% instr, MAIN-THREAD.
+  Med risk. Days. Bigger than H21 for a bit more. Instr-verifiable.
+
+Recommendation: H21 = safe/certain/verifiable; H33 = real wt2 payoff but
+risky/unmeasurable; H14 = biggest number.
