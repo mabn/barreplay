@@ -689,3 +689,14 @@ siblings could batch); NodeLayer/weapon loops are gather-heavy. The synced hot
 code is not SIMD-shaped → lane-wise batching needs expensive AoS→SoA gathers
 with no clean loop. H35 (H37-H41) shelved as not-tractable for clean
 value-identical wins. Proceeding to H21 (proven-feasible large win).
+
+### H21 — COB jump-table dispatch — KEPT, −0.46% (byte-identical, MAIN-THREAD) ★
+
+The large rewrite, done via a programmatic transformer (parse cases by
+brace-tracking → group by opcode>>12 → outer switch(opcode>>12) with 4 inner
+collision switches; fall-through + nested breaks preserved). Disassembly
+confirms GCC now emits a JUMP TABLE (1 indirect jmp, 0 opcode compares; was a
+13-cmp comparison tree). **Byte-identical; 34.405e9 → 34.245e9 = −0.46%.**
+Modest (dispatch < handlers in Tick) but it's the first MAIN-THREAD win
+(could help wt=2 wall). Only proven-feasible large rewrite of the H14/H21/H33/
+H35 set — H14 impossible, H35 intractable. Cumulative harness-phase: ~−15.2%.
