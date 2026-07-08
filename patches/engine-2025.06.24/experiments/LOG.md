@@ -525,3 +525,28 @@ the medium/2-worker wall benefit may be small, but it helps wt=1 and heavier
 workloads (8v8). **Policy: instruction count (wt=1, min-of-N) is the verified
 metric; wt=2 wall is not resolvable on this box.** Keep banking byte-identical
 instruction reductions.
+
+### H32 — ST collision flat cache — REJECTED-no-gain (byte-identical)
+
+Applied H31's flat cache to RangeIsBlockedHashedSt (the single-threaded
+variant, missed by H31). Byte-identical but +0.21% (no gain) — the St path
+isn't exercised in the [6000,9000) window (collision runs through the MT path
+during for_mt sections). Reverted. Kept stack stays H29+H30+H31 = −14.82%.
+
+## Status after the instruction-harness phase
+
+Kept stack `0001+H1–H6+H23+0002+H29+H30+H31`. Cumulative synced-instruction
+reduction from the harness phase: **−14.82%** (byte-identical, min-of-3,
+window [6000,9000)). The safe index/cache vein (H29 row-major, H30 exit-only
+grid, H31 flat cache) is mined out. Remaining touchable hot functions:
+- QTPFS speed-mod math (GetPosSpeedMod/GroundSpeedMod, UpdateMoveCost sums):
+  floating-point, **sync-locked** (reassociation → desync). Untouchable.
+- CCobThread::Tick 7.4% (main-thread interpreter): dispatch is a sparse-opcode
+  comparison tree; a jump-table dispatch (H21) is the last substantial safe
+  main-thread win but a careful 64-case rewrite. Candidate.
+- Lua internals (luaV_execute, luaH_get, string match ~4%): engine code but
+  high-risk to touch. Parked.
+Caveat: wt=2 wall benefit of the QTPFS wins is unmeasurable (host noise) and
+likely small (worker-side at wt=2); they reduce total work and help wt=1 /
+heavy workloads. H21 (COB) would be main-thread → the first that could help
+wt=2, if pursued.
