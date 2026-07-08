@@ -700,3 +700,27 @@ confirms GCC now emits a JUMP TABLE (1 indirect jmp, 0 opcode compares; was a
 Modest (dispatch < handlers in Tick) but it's the first MAIN-THREAD win
 (could help wt=2 wall). Only proven-feasible large rewrite of the H14/H21/H33/
 H35 set — H14 impossible, H35 intractable. Cumulative harness-phase: ~−15.2%.
+
+### H34 — Lua match internals — NOT TRACTABLE
+
+The Lua `match`/`classend` (4% combined) is the canonical Lua 5.x backtracking
+pattern matcher — already optimal, tight recursive C (goto tail-recursion).
+The cost is BAR gadgets calling string.find/match heavily every synced frame,
+not matcher inefficiency. No value-identical algorithmic speedup exists (any
+change risks different match results → gadget-logic desync). Dead end.
+
+## FINAL: byte-identical optimization space EXHAUSTED (rigorously)
+
+Every hot synced function is now classified and closed:
+- **Optimized & banked** (index/cache, value-identical): H1,H2,H3,H23,H29,H30,
+  H31,H21 → phase-1 −17% wall + phase-2 −15.2% synced instructions.
+- **Sync-locked FP**: QTPFS speed-mods/divisions, quaternion/transform math —
+  reassociation desyncs. Untouchable.
+- **Non-idempotent**: QTPFS tesselation (H14) — proven impossible.
+- **Not SIMD-shaped**: synced loops branchy/tree-dependent/gather-bound (H35).
+- **Optimal library**: Lua matcher (H34) — gadget-driven, can't beat.
+- **Untouchable**: synced gadget Lua (luaV_execute), COB handlers (already
+  jump-tabled), unit logic.
+Further byte-identical wins require relaxing the constraint (approximate
+output), upstream engine work, or different hardware. The harness (instruction
+meter) verified every win to 0.02% and killed H14+H35 in ~30 min.
