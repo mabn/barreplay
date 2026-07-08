@@ -558,3 +558,37 @@ canonical reference. So H29+H30+H31 (and 0002+H23) are byte-identical on ALL
 three replays (small/medium/8v8). Wall 14m42s this run = heavy-load noise
 (earlier 8v8 was 11m5s; medium-equivalent load ~+25% concurrently), reconfirming
 wt=2 wall is unmeasurable here. Instruction count remains the verified metric.
+
+### H21 — COB dispatch jump-table — PROVEN-WORTHWHILE, DEFERRED (large safe rewrite)
+
+Disassembly of the shipped `CCobThread::Tick` (objdump): the opcode switch
+compiles to a **comparison tree** (13 `cmp $0x1000xxxx` + range branches,
+**zero indirect jumps/jump-tables**) — so GCC does NOT optimize it, and a
+jump-table dispatch is a genuine ~1-1.5% main-thread instruction win (dispatch
+is ~40% of Tick's 7.4%). It is the one remaining lever that is MAIN-THREAD
+(could help wt=2, unlike the worker-side H29-31).
+
+Blocker: the dense key `(opcode>>12)-0x10001` (range 0..161, jump-table-able)
+has 4 collision groups — PUSH_CONSTANT/LOCAL_VAR/STATIC (0x10021),
+POP_LOCAL_VAR/STATIC (0x10023), DIV/MOD (0x10034), CALL/REAL_CALL/LUA_CALL/
+BATCH_LUA (0x10062) — whose case bodies are SCATTERED across the 516-line
+switch (lines 261/326/330/343/361/366/430/435/474/581/593). A correct
+jump-table dispatch must gather each group under one outer case with an inner
+`switch(opcode)`, i.e. move scattered bodies — large, error-prone (though the
+byte-identity gate arbitrates). Value-identical by construction (same handler
+per opcode). **Deferred as a bounded, evidence-backed task** — do when a
+careful multi-step rewrite is warranted.
+
+## AUTONOMOUS SAFE-WIN BOUNDARY REACHED
+
+Kept stack `0001+H1–H6+H23+0002+H29+H30+H31`: −17% wall (phase 1) + −14.82%
+synced instructions (harness phase), byte-identical on all 3 replays, pushed.
+Every remaining hot function is now classified:
+- **sync-locked FP** (QTPFS speed-mods/divisions, quaternion/transform math) —
+  untouchable (reassociation desyncs).
+- **H21 COB dispatch** — proven-worthwhile, large safe rewrite, deferred.
+- **Lua internals** (luaV_execute/luaH_get/string `match`, ~6%) — engine code,
+  high desync risk, needs explicit go-ahead.
+- **H14 QTPFS skip** — unsafe (non-idempotent).
+Clean, low-risk autonomous wins are exhausted; further progress needs the H21
+rewrite effort or accepting Lua-internals risk.
