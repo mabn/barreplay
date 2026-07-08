@@ -678,3 +678,14 @@ payoff, must replicate scalar op-order exactly per lane (desync risk).
 realistic large win — disassembly-PROVEN headroom (GCC emits a comparison
 tree), value-identical, main-thread, ~150-250 lines, fully instr-verifiable.
 H14 impossible; H35 = large-uncertain SoA.
+
+### H35 — EMPIRICALLY INTRACTABLE (loop structures examined)
+
+Examined the candidate loop bodies: none is a flat independent-element loop.
+UpdateUnitPosition (H39) is branchy (switch(setHeading)+conditionals);
+CQuaternion::Rotate is called in the piece-transform BFS which is
+TREE-DEPENDENT (child transform needs parent's result → only variable-count
+siblings could batch); NodeLayer/weapon loops are gather-heavy. The synced hot
+code is not SIMD-shaped → lane-wise batching needs expensive AoS→SoA gathers
+with no clean loop. H35 (H37-H41) shelved as not-tractable for clean
+value-identical wins. Proceeding to H21 (proven-feasible large win).
