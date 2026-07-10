@@ -775,3 +775,11 @@ byte-identical + several seconds off LOAD wall (not sim instructions).
 Measure: gate + before/after load seconds from the CLI summary.
 
 ### H43 — wt sweep on medium — RUNNING (first point: wt=1 sim=136.9s OK)
+
+### H43 — RESULT: wt=3 beats wt=2 by ~12% wall on medium ★ (config win)
+Rotation-interleaved 3×3 sweep, all 9 runs byte-identical (scheduling-only):
+wt=1 mean 134.7s | wt=2 mean 108.8s | wt=3 mean 96.2s (wins every paired
+round). The old wt=2 recommendation came from the SMALL replay; medium has
+enough parallel QTPFS/LOS work for a third worker. wt=4/auto sweep running.
+Pipeline recommendation: -worker-threads 3 on this 4-core box for real
+captures (gate runs in measure.sh stay wt=2 for continuity of the reference).
