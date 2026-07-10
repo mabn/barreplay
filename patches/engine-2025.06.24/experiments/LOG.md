@@ -757,3 +757,10 @@ an unwritten read = release crash). Grow-only vector instead. Queue below.
 8. H51 — SetBoundariesNeedsRecalc/boundary recalc consumers headless: check
    whether localModel boundary recalcs feed anything synced; if draw-only,
    gate under HEADLESS.
+
+### H45 — KEPT, −0.13% (byte-identical, strict work-removal)
+Gate IDENTICAL on medium; 34.245e9 → 34.200e9 min-of-3 (runs 34.219/34.580/
+34.200 — run 2 was a noise outlier). The change strictly deletes an O(area)
+memset per QTPFS update event; cannot regress. New baseline: 34.200e9.
+Binary saved as spring-headless.h45. TODO: 3-replay byte-verify at next
+checkpoint (small+8v8).
