@@ -1,15 +1,16 @@
-// Command barreplay-pack converts legacy captures (.jsonl or raw .brsnap)
-// into the compact binary .brp format — typically a ~35x size reduction, and
-// the only format the viewer serves. Use it once per legacy capture.
+// Command barreplay-pack converts raw captures (.jsonl, .brsnap, or the
+// Replay uploader widget's binary .brepstream) into the compact binary .brp
+// format — the only format the viewer serves. Use it once per capture.
 //
-// A raw .brsnap is just the widget's stream: it carries frames, unit defs and
-// teams, but no map name, versions, or player roster — those live in the demo
-// (.sdfz) the capture replayed. To still produce a FULL .brp without
+// A raw .brsnap/.brepstream is just the widget's stream: it carries frames,
+// unit defs and teams, but the player roster from the demo startscript is
+// richer (rank/OpenSkill/country). To still produce a FULL .brp without
 // re-running the simulation, pack takes the replay's gameId (from the input's
 // file name, which is how the pipeline names widget streams, or from -id),
 // downloads the demo from the BAR API, and seeds its startscript metadata
 // exactly like cmd/barreplay does. -no-demo skips that (offline; the .brp
-// then has no map/version/player metadata).
+// then keeps whatever metadata the stream itself carries — a .brepstream's
+// GAME line has map/version but no rich roster).
 //
 // Usage:
 //
@@ -42,11 +43,11 @@ import (
 func main() {
 	var (
 		outDir = flag.String("out", "", "output directory (default: next to each input)")
-		idArg  = flag.String("id", "", "replay gameId or link used to fetch the demo metadata for a .brsnap input (default: the input's file name; only valid with a single input)")
-		noDemo = flag.Bool("no-demo", false, "do not fetch the demo for .brsnap inputs; the .brp then has no map/version/player metadata")
+		idArg  = flag.String("id", "", "replay gameId or link used to fetch the demo metadata for a .brsnap/.brepstream input (default: the input's file name; only valid with a single input)")
+		noDemo = flag.Bool("no-demo", false, "do not fetch the demo for .brsnap/.brepstream inputs; the .brp then only has the metadata the stream itself carries")
 	)
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: barreplay-pack [flags] <capture.jsonl|capture.brsnap> [...]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: barreplay-pack [flags] <capture.jsonl|capture.brsnap|capture.brepstream> [...]\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -136,8 +137,12 @@ func load(path string, base snapshot.Meta) (*loaded, error) {
 		if err := capture.Consume(f, base, l); err != nil {
 			return nil, fmt.Errorf("parsing brsnap: %w", err)
 		}
+	case ".brepstream":
+		if err := capture.ConsumeBrep(f, base, l); err != nil {
+			return nil, fmt.Errorf("parsing brepstream: %w", err)
+		}
 	default:
-		return nil, fmt.Errorf("unsupported input type %q (want .jsonl or .brsnap)", filepath.Ext(path))
+		return nil, fmt.Errorf("unsupported input type %q (want .jsonl, .brsnap or .brepstream)", filepath.Ext(path))
 	}
 	return l, nil
 }
@@ -190,7 +195,8 @@ func inferSampleEvery(frames []snapshot.Frame) int32 {
 func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, noDemo bool) error {
 	gameID := strings.TrimSuffix(filepath.Base(in), filepath.Ext(in))
 	base := snapshot.Meta{GameID: gameID}
-	if strings.EqualFold(filepath.Ext(in), ".brsnap") && !noDemo {
+	ext := strings.ToLower(filepath.Ext(in))
+	if (ext == ".brsnap" || ext == ".brepstream") && !noDemo {
 		id := idArg
 		if id == "" {
 			id = gameID
