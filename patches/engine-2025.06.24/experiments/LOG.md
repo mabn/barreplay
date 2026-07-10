@@ -805,3 +805,20 @@ Test A: unmodified repack must gate byte-identical (packing fidelity + name
 resolution vs the removed .sdp). Test B: marker in gadgets.lua (reliable
 modification). Then: wrap-all profiler INSIDE the archive -> per-gadget hot
 list -> optimize top synced gadgets (12.4%-of-Sim ceiling).
+
+### H46 milestone: repack mechanism PROVEN + first per-gadget profile
+- Test A: unmodified full repack (18156 files, e169f2bc/test-30591 → 1983MB
+  .sdz, sdp moved aside, -no-provision) runs and gates BYTE-IDENTICAL. The
+  checksum mismatch is warn-only in demo playback (PreGame catches the
+  content_error). The gadget surface is now reliably modifiable.
+  (Also root-caused earlier override flakiness in part: bar-extract was from
+  the WRONG build — 30555 vs medium's 30591.)
+- In-archive wrap-all profiler (synced-timer prof binary): **synced GameFrame
+  gadget cost is only ~440ms per 100 game-sec** (top: Builder Priority 83ms,
+  Lua unit script framework 83ms, Energy Conversion 37ms). Killing the top 2
+  entirely ≈ 0.4% wall — GameFrame gadget optimization is a DEAD END.
+- ⇒ the 12.4% Lua::Callins::Synced lives in EVENT callins (UnitPreDamaged /
+  ProjectileCreated / AllowCommand / AllowWeaponTargetCheck fire per event,
+  thousands/frame in battles) and/or the engine-driven Lua UNIT-SCRIPT
+  closures (CLuaUnitScript → per-anim/weapon-event Lua calls that bypass the
+  gadget handler entirely). Per-callin profiler running to split it.
