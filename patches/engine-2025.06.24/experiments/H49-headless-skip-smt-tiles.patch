@@ -1,0 +1,65 @@
+From e4f0a7ab9e060d6b5b4fc4e27e40af76e6fd53e1 Mon Sep 17 00:00:00 2001
+From: Claude <claude@mabn.pl>
+Date: Fri, 10 Jul 2026 23:04:55 +0200
+Subject: [PATCH] headless: skip .smt tile payload decode and square-texture
+ extraction
+
+CSMFGroundTextures spent a fixed multi-second load cost LZMA-decoding every
+map tile out of the .sd7 and extracting/converting square textures - all of it
+pure draw-side texture data that the null-GL headless build never renders.
+Skip the per-tile payload reads (keeping the .smf header stream reads so the
+tileMap offset stays correct, and keeping tiles/tileMap/squares sized and
+zero-filled - the existing missing-file fallback proves dummy tile content is
+tolerated, and the runtime streaming path still works against zeroed data)
+and the LoadSquareTextures/ConvolveHeightMap calls (unsyncedHeightInfo is
+sized in ReadMap and is unsynced/draw-only). Sim never reads tile textures;
+output is byte-identical.
+---
+ rts/Map/SMF/SMFGroundTextures.cpp | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/rts/Map/SMF/SMFGroundTextures.cpp b/rts/Map/SMF/SMFGroundTextures.cpp
+index 646c80a..a9e98f2 100644
+--- a/rts/Map/SMF/SMFGroundTextures.cpp
++++ b/rts/Map/SMF/SMFGroundTextures.cpp
+@@ -78,12 +78,19 @@ CSMFGroundTextures::CSMFGroundTextures(CSMFReadMap* rm): smfMap(rm)
+ 	smfTextureLodBias = configHandler->GetFloat("SMFTextureLodBias");
+ 
+ 	LoadTiles(smfMap->GetMapFile());
++#ifndef HEADLESS
++	// [barreplay] null-GL headless never renders terrain: the square-texture
++	// extraction/upload and the height convolution feed only the (stubbed)
++	// draw path. unsyncedHeightInfo is sized in ReadMap and unsynced-only, and
++	// the runtime streaming path (DrawUpdate -> LoadSquareTexture) still works
++	// against the zero-filled tile data LoadTiles leaves behind.
+ 	if (smfTextureStreaming) {
+ 		LoadSquareTextures(3);
+ 		ConvolveHeightMap(mapDims.mapx, 1);
+ 	} else {
+ 		LoadSquareTexturesPersistent();
+ 	}
++#endif
+ }
+ 
+ CSMFGroundTextures::~CSMFGroundTextures()
+@@ -141,6 +148,17 @@ void CSMFGroundTextures::LoadTiles(CSMFMapFile& file)
+ 		ifs->ReadString(&fileNameBuffer[0], sizeof(char) * (sizeof(fileNameBuffer) - 1));
+ 		swabDWordInPlace(numSmallTiles);
+ 
++#ifdef HEADLESS
++		// [barreplay] skip decoding the .smt tile payload (pure draw-side
++		// texture data, LZMA-decoded out of the map archive - a fixed multi-
++		// second load cost). The missing-file fallback below shows dummy tile
++		// content is tolerated; keep the header stream reads above so the
++		// tileMap read after this loop stays at the right offset, and leave
++		// `tiles` zero-filled (sized) for the draw-side extraction paths.
++		curTile += numSmallTiles;
++		continue;
++#endif
++
+ 		std::string smtFileName = fileNameBuffer;
+ 		std::string smtFilePath = (!smtHeaderOverride)?
+ 			(smfDir + smtFileName):
+-- 
+2.47.3
+
