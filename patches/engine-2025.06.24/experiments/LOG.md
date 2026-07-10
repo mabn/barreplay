@@ -724,3 +724,36 @@ Every hot synced function is now classified and closed:
 Further byte-identical wins require relaxing the constraint (approximate
 output), upstream engine work, or different hardware. The harness (instruction
 meter) verified every win to 0.02% and killed H14+H35 in ~30 min.
+
+## Round: post-exhaustion re-sweep (fresh profile of current binary, 2026-07-10)
+
+Fresh perf profile of the H21 stack shifted the hot list. Steady-state top:
+TickAllAnims cluster ~11% (anim math is synced-value-bearing — piece matrices
+feed weapon aim/COB; dirty-caching already present, no redundancy found),
+Lua ~13% (blocked on gadget-override reliability), QTPFS UpdateNeighborCache
+3.0% + NodeLayer::Update 2.5% + GetNodesInArea 1.0%, MoveMath ~4%, COB 2.9%.
+
+### H45 — QTPFS relink grid: skip per-event O(area) nullptr re-init — TESTING
+relinkNodeGrid was cleared + nullptr-filled (O(relink area) memset) on every
+update event, but every cell the edge/corner walks read is written by the same
+event's fill loop first (tiling argument; readers deref with no null check, so
+an unwritten read = release crash). Grow-only vector instead. Queue below.
+
+### Queue (>=7)
+1. H45 (this) — relink grid re-init skip.
+2. H43 — worker-thread sweep wt=1/2/3 on medium (config, cannot desync,
+   never measured on medium; wall/sim-time metric).
+3. H46 — BAR gadget surface via ARCHIVE REPACK (12.4% of Sim proven;
+   write-dir override unreliable; repack is the reliable path).
+4. H47 — GetNodesInArea: quadtree walk per event; check for a cheaper
+   root-window iteration or reuse across the two per-event consumers.
+5. H48 — LosHandler::Update lambda 1.6%: check for skippable work under
+   full-view spectator (careful: LOS is synced).
+6. H49 — load-phase wall: LzmaDec+inflate+sha512 ~5% of profile is archive
+   scan at load; check VFS cache / checksum skip opportunities (wall-only).
+7. H50 — CCobThread::Tick handler bodies: PopDataStack bounds checks under
+   HEADLESS (same pattern as H6's GET_LONG_PC, value-identical for valid
+   scripts already executed live).
+8. H51 — SetBoundariesNeedsRecalc/boundary recalc consumers headless: check
+   whether localModel boundary recalcs feed anything synced; if draw-only,
+   gate under HEADLESS.

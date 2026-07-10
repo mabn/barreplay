@@ -1,0 +1,44 @@
+From 8f4a4bffe84285256441c64c5cf006c25a21bd1f Mon Sep 17 00:00:00 2001
+From: Claude <claude@mabn.pl>
+Date: Fri, 10 Jul 2026 22:54:52 +0200
+Subject: [PATCH] QTPFS relink grid: grow-only, skip per-event O(area) nullptr
+ re-init
+
+ExecNodeNeighborCacheUpdates cleared and nullptr-filled relinkNodeGrid
+(areaRelinked cells) on every node-layer update event. The grid's readers
+(UpdateNeighborCache edge walks + corner checks) only access cells that the
+same event's fill loop wrote: nodes tile the relink area, so the cell adjacent
+to a selected node's edge is the neighbouring leaf's own edge cell, which the
+fill pattern (full first/last row, x1/x2-1 in middle rows) always covers. All
+reads deref immediately with no null check, so an unwritten-cell read would be
+a nullptr crash in release. Keep the vector grow-only instead; stale pointers
+from earlier events are never read. Value-identical; verified byte-identical.
+---
+ rts/Sim/Path/QTPFS/NodeLayer.cpp | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Sim/Path/QTPFS/NodeLayer.cpp b/rts/Sim/Path/QTPFS/NodeLayer.cpp
+index fce87d9..25b4e62 100644
+--- a/rts/Sim/Path/QTPFS/NodeLayer.cpp
++++ b/rts/Sim/Path/QTPFS/NodeLayer.cpp
+@@ -227,8 +227,15 @@ void QTPFS::NodeLayer::ExecNodeNeighborCacheUpdates(const SRectangle& ur, Update
+ 	SRectangle searchArea(xmin, zmin, xmax, zmax);
+ 	GetNodesInArea(searchArea, selectedNodes);
+ 
+-	threadData.relinkNodeGrid.clear();
+-	threadData.relinkNodeGrid.resize(threadData.areaRelinked.GetArea(), nullptr);
++	// [barreplay] grow-only, no per-event nullptr re-init: every cell the edge
++	// and corner walks read is written by this event's fill loop first (nodes
++	// tile the area, so the cell adjacent to a selected node's edge is the
++	// neighbouring leaf's own edge cell, which the fill pattern covers). The
++	// walks deref the cell immediately with no null check, so an unwritten-cell
++	// read would be a nullptr crash in release - the per-event O(area) memset
++	// was pure initialization overhead. Stale pointers are never read.
++	if (threadData.relinkNodeGrid.size() < size_t(threadData.areaRelinked.GetArea()))
++		threadData.relinkNodeGrid.resize(threadData.areaRelinked.GetArea(), nullptr);
+ 
+ 	// Build grid with selected nodes.
+ 	std::for_each(selectedNodes.begin(), selectedNodes.end(), [&threadData](INode *curNode){
+-- 
+2.47.3
+
