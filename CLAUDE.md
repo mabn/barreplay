@@ -23,6 +23,7 @@ go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, 
 go run ./cmd/barreplay-viz -snapshots ./snapshots        # serve the viewer at 127.0.0.1:8080
 go run ./cmd/barreplay-pack ./snapshots/*.jsonl          # shrink legacy captures to .brp
 go run ./cmd/barreplay-pack ./caps/<gameId>.brsnap       # raw stream -> FULL .brp (fetches the demo for map/versions/players; -id overrides, -no-demo skips)
+go run ./cmd/barreplay-pack ./caps/<gameId>.brepstream   # same for the Replay uploader widget's binary stream
 go run ./cmd/barreplay-static -out ./static ./snapshots/*.brp   # pack .brp -> static bundle for R2 hosting (see worker/)
 ```
 
@@ -36,12 +37,13 @@ BAR API serving that same fixture. None of them launch the engine or touch the n
 ```
 cmd/barreplay/main.go     CLI: link/gameId/.sdfz -> full pipeline
 cmd/barreplay-viz/main.go CLI: serve the browser playback UI over a snapshots dir
-cmd/barreplay-pack/main.go CLI: convert legacy .jsonl/.brsnap captures to .brp
+cmd/barreplay-pack/main.go CLI: convert .jsonl/.brsnap/.brepstream captures to .brp
 cmd/barreplay-static/main.go CLI: pack .brp -> static-file bundle (index.json + replays/**) for R2 hosting
 internal/barapi/          resolve gameId via api.bar-rts.com; download .sdfz from OVH
 internal/demofile/        gunzip + parse packed header + TDF startscript
 internal/engine/          locate spring-headless/pr-downloader, provision, launch, stream stdout
-internal/capture/         parse the widget's BRSNAP stdout protocol -> snapshot records
+internal/capture/         parse the widgets' streams -> snapshot records (BRSNAP text in
+                          capture.go, binary .brepstream in brep.go, shared preamble in lines.go)
 internal/viz/             serve the viewer (SPA embedded from worker/) + the static-shaped replay URLs
 internal/viz/static.go    pack a .brp into plain static files (byte-identical to the served URLs) for serverless hosting
 worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as static files from R2 (no playback server);
@@ -50,9 +52,18 @@ snapshot/                 PUBLIC data model + pluggable Writer (owns on-disk for
 assets/lua/snapshot_widget.lua   embedded, read-only sampler (go:embed)
 assets/lua/replay_uploader.lua   player-installable live-game variant: constants only (no
                           substitution tokens), records the player's own ally team
-                          (LOS-filtered) to <write-dir>/<gameId>.brsnap, file named via
-                          the widget:GameID callin; NOT embedded/injected by the Go tool
-                          (crowd-sourced capture plan: docs/widget-remote-upload.md)
+                          (LOS-filtered) to <write-dir>/<gameId>.brepstream — a binary
+                          keyframe+delta stream (spec: docs/brepstream-format.md, decoder:
+                          internal/capture/brep.go, ~6.5x smaller and ~4x cheaper per sample
+                          than the text stream) — named via the widget:GameID callin; the
+                          writeText constant additionally emits the legacy .brsnap text
+                          stream (debug/reference; both formats from ONE game validate the
+                          binary encoder without re-simulating). NOT embedded/injected by
+                          the Go tool (crowd-sourced capture plan: docs/widget-remote-upload.md)
+tools/brep-harness/       stubbed-Spring Lua harness: runs the REAL uploader widget over a
+                          deterministic fake game to (re)generate the
+                          internal/capture/testdata fixtures that pin the Lua encoder <-> Go
+                          decoder lockstep (TestBrepstreamMatchesTextFixture); needs lua5.4
 ```
 
 Key design rule: **the on-disk format lives only in `snapshot/`** behind the `Writer`
