@@ -48,6 +48,11 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           worker/public + worker/index.html are THE front-end (embedded into barreplay-viz via assets.go)
 snapshot/                 PUBLIC data model + pluggable Writer (owns on-disk format; current .brp binary, legacy v1 JSONL)
 assets/lua/snapshot_widget.lua   embedded, read-only sampler (go:embed)
+assets/lua/replay_uploader.lua   player-installable live-game variant: constants only (no
+                          substitution tokens), records the player's own ally team
+                          (LOS-filtered) to <write-dir>/<gameId>.brsnap, file named via
+                          the widget:GameID callin; NOT embedded/injected by the Go tool
+                          (crowd-sourced capture plan: docs/widget-remote-upload.md)
 ```
 
 Key design rule: **the on-disk format lives only in `snapshot/`** behind the `Writer`
