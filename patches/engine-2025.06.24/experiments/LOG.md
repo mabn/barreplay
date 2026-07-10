@@ -783,3 +783,10 @@ round). The old wt=2 recommendation came from the SMALL replay; medium has
 enough parallel QTPFS/LOS work for a third worker. wt=4/auto sweep running.
 Pipeline recommendation: -worker-threads 3 on this 4-core box for real
 captures (gate runs in measure.sh stay wt=2 for continuity of the reference).
+
+### H43 — FINAL: wt∈{3,4,auto} tied at ~95-97s, all ~12% faster than wt=2
+4-core box. Auto (-1, the engine default) is optimal — the pipeline's
+habitual `-worker-threads 2` was the self-inflicted cost (picked on the small
+replay long ago). Recommendation: OMIT -worker-threads for real captures;
+keep wt=2 only for measure.sh gate continuity and wt=1 for the instruction
+bench. CLOSED (config, byte-identical by construction).
