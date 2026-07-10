@@ -822,3 +822,18 @@ list -> optimize top synced gadgets (12.4%-of-Sim ceiling).
   thousands/frame in battles) and/or the engine-driven Lua UNIT-SCRIPT
   closures (CLuaUnitScript → per-anim/weapon-event Lua calls that bypass the
   gadget handler entirely). Per-callin profiler running to split it.
+
+### H46 — CLOSED: BAR gadget surface measured, ceiling is ~1.4% (poor ROI)
+Dual in-archive profiler (per-gadget GameFrame + per-callin event totals,
+frames 6000-9000): synced GameFrame gadgets ≈ 440ms + ALL synced event
+callins ≈ 138ms (UnitCreated 44ms/247, AllowCommand 26ms/2676, UnitFinished
+24ms, AllowUnitCreation 16ms, UnitPreDamaged 15ms/796) = **~580ms per 100
+game-sec ≈ 1.4% of wall**, spread over dozens of gadgets, no item >0.3%.
+The 12.4% Lua::Callins::Synced scope is dominated by engine-driven Lua
+unit-script VM execution + GC — value-bearing synced computation, not
+optimizable dispatch. Optimizing BAR gadget Lua cannot pay for its effort.
+**The last big open target is now closed with data.** Repack tooling remains
+available (bar-full/ + zip recipe) if a future need arises.
+(Injection bug learned: gadgets.lua contains `function gadgetHandler:
+Initialize()` before the final `gadgetHandler:Initialize()` call — anchor
+replacements must use rfind/last occurrence.)
