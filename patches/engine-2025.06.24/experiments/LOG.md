@@ -790,3 +790,18 @@ habitual `-worker-threads 2` was the self-inflicted cost (picked on the small
 replay long ago). Recommendation: OMIT -worker-threads for real captures;
 keep wt=2 only for measure.sh gate continuity and wt=1 for the instruction
 bench. CLOSED (config, byte-identical by construction).
+
+### H49 — KEPT: −2s load (~16% of load wall), byte-identical, sim unchanged
+Gate IDENTICAL; instructions +0.05% (noise, load-phase change as designed).
+Interleaved load: h45 13s/12s vs h49 11s/10s. Binary saved as
+spring-headless.h49 (new pipeline binary).
+
+### H46 — BAR gadget surface via archive repack — IN PROGRESS
+Checksum unlock: PreGame CATCHES the CheckArchive content_error and only
+LOG_L(WARNING)s it in demo playback — a modified game archive runs without
+any engine patch. Full archive extracted from the rapid pool (18156 files,
+med game = e169f2bc / test-30591-f79033c) and repacked as a 1983MB .sdz.
+Test A: unmodified repack must gate byte-identical (packing fidelity + name
+resolution vs the removed .sdp). Test B: marker in gadgets.lua (reliable
+modification). Then: wrap-all profiler INSIDE the archive -> per-gadget hot
+list -> optimize top synced gadgets (12.4%-of-Sim ceiling).
