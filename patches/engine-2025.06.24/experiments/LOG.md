@@ -764,3 +764,14 @@ Gate IDENTICAL on medium; 34.245e9 → 34.200e9 min-of-3 (runs 34.219/34.580/
 memset per QTPFS update event; cannot regress. New baseline: 34.200e9.
 Binary saved as spring-headless.h45. TODO: 3-replay byte-verify at next
 checkpoint (small+8v8).
+
+### H49 — headless: skip .smt tile decode + square-texture extraction — TESTING
+Load-phase (~12-15s fixed per run) profile: LzmaDec 2%+ = map tile payload
+decoded from the .sd7 purely for terrain rendering (null-GL never draws it).
+Skip tile payload reads + LoadSquareTextures/ConvolveHeightMap under HEADLESS;
+tiles/tileMap/squares stay sized+zeroed (missing-file fallback proves dummy
+content tolerated; streaming draw path still valid). Sim untouched — expect
+byte-identical + several seconds off LOAD wall (not sim instructions).
+Measure: gate + before/after load seconds from the CLI summary.
+
+### H43 — wt sweep on medium — RUNNING (first point: wt=1 sim=136.9s OK)
