@@ -111,8 +111,19 @@ VFS = {
 	PackF32 = function(t) return pk("f", t) end,
 }
 
+-- The GameID rules param appears shortly after game start (BAR's game_id.lua
+-- gadget publishes it) — the harness delays it past the first sample so the
+-- widget's buffer-until-resolved path is exercised too.
+local rulesGameID = nil
+
 Spring = {
 	Echo = function(...) print(...) end,
+	GetGameRulesParam = function(k)
+		if k == "GameID" then
+			return rulesGameID
+		end
+		return nil
+	end,
 	GetAllUnits = function()
 		local out = {}
 		for i = 1, #order do
@@ -169,7 +180,6 @@ assert(nsub == 1, "could not enable writeText in " .. widgetPath)
 assert(load(patched, "@" .. widgetPath))()
 
 widget:Initialize()
-widget:GameID("FEED5EED00000000000000000000BEEF")
 
 -- Mid-game the player disables the widget for a few samples, then re-enables
 -- it: the handler shuts the instance down (saving its config) and later loads
@@ -183,6 +193,12 @@ for s = 0, SAMPLES - 1 do
 	curFrame = s * sampleEvery
 	if s > 0 then
 		advance()
+	end
+	if s == 1 then
+		-- game_id.lua has run by now; the first sample (s=0) was buffered
+		-- and must be drained into the files this opens. Uppercase: the
+		-- widget lowercases ids.
+		rulesGameID = "FEED5EED00000000000000000000BEEF"
 	end
 	if s == DISABLE_AT then
 		local saved = widget:GetConfigData()
