@@ -15,6 +15,7 @@ import (
 // win; GAME only fills blanks.
 type gameLine struct {
 	Protocol      int    `json:"protocol"`
+	WidgetVersion string `json:"widgetVersion"`
 	Mode          string `json:"mode"`
 	Map           string `json:"map"`
 	GameVersion   string `json:"gameVersion"`

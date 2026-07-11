@@ -50,11 +50,18 @@
 -- lines. Unknown tags are ignored by the parser, so GID/GAME/END are backward
 -- compatible.
 
+-- Widget version (semver). Bump on any user-visible or wire-visible change;
+-- it is reported in GetInfo, the load Echo, and the stream's GAME line, so
+-- every capture records which encoder produced it (the copy on a player's
+-- machine can be arbitrarily old — the server/decoder needs to know).
+local widgetVersion = "1.0.0"
+
 function widget:GetInfo()
 	return {
 		name    = "Replay uploader",
 		desc    = "Records unit snapshots of your team to <gameId>.brepstream for post-game replay visualization.",
 		author  = "barreplay",
+		version = widgetVersion,
 		date    = "2026",
 		license = "MIT",
 		layer   = 0,
@@ -364,6 +371,7 @@ local function buildPreamble()
 	local spec = spGetSpectatingState()
 	parts[#parts + 1] = "BRSNAP GAME " .. jsonObject({
 		{ "protocol", protocolVersion },
+		{ "widgetVersion", widgetVersion },
 		{ "mode", (Spring.IsReplay and Spring.IsReplay()) and "replay" or "live" },
 		{ "map", Game and Game.mapName or nil },
 		{ "gameVersion", Game and Game.gameVersion or nil },
@@ -633,7 +641,7 @@ function widget:Initialize()
 		removeSelf()
 		return
 	end
-	Echo("[replay-uploader] loaded (" ..
+	Echo("[replay-uploader] v" .. widgetVersion .. " loaded (" ..
 		(writeBinary and writeText and "binary+text" or writeBinary and "binary" or "text") ..
 		"); waiting for gameId (GameID callin)")
 end
