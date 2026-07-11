@@ -111,8 +111,9 @@ trivial.
 
 Identical line grammar to `.brsnap` so `internal/capture`'s parser is shared:
 `GID` (the 32-hex gameId, always the first line after the header), `GAME`
-(JSON: protocol, mode live/replay, map, game/engine versions, sampleEvery,
-gameSpeed, recording player id/allyTeam/spectator), `DEF` (full unit-def
+(JSON: protocol, widgetVersion (semver of the emitting widget), mode
+live/replay, map, game/engine versions, sampleEvery, gameSpeed, recording
+player id/allyTeam/spectator), `DEF` (full unit-def
 JSON), `T`, `P`, `READY`. The `GAME` line's `sampleEvery`/`gameSpeed` feed
 velocity de-quantization and frame timestamps (`t = frame/gameSpeed`);
 metadata seeded by the caller (e.g. from the demo) wins over `GAME` values.
