@@ -55,7 +55,9 @@ assets/lua/replay_uploader.lua   player-installable live-game variant: constants
                           (LOS-filtered) to <write-dir>/<gameId>.brepstream — a binary
                           keyframe+delta stream (spec: docs/brepstream-format.md, decoder:
                           internal/capture/brep.go, ~6.5x smaller and ~4x cheaper per sample
-                          than the text stream) — named via the widget:GameID callin; the
+                          than the text stream) — named via the "GameID" GameRulesParam
+                          (BAR's game_id.lua gadget; barwidgets.lua does NOT forward the
+                          engine's GameID callin to widgets); the
                           writeText constant additionally emits the legacy .brsnap text
                           stream (debug/reference; both formats from ONE game validate the
                           binary encoder without re-simulating). NOT embedded/injected by

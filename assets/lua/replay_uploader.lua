@@ -14,9 +14,13 @@
 -- Unlike the snapshotter this widget is NOT injected or configured by the Go
 -- tool: there are no __TOKEN__ substitutions, every knob is a constant below, so
 -- one copy of the file works for every game. The output file name is the game's
--- unique id: the engine delivers the 16-byte gameID via the widget:GameID callin
--- as a 32-char hex string — the same id stored in the .sdfz demo header and used
--- by api.bar-rts.com, so this capture self-correlates with the replay.
+-- unique id (32-hex, the same id stored in the .sdfz demo header and used by
+-- api.bar-rts.com, so this capture self-correlates with the replay), obtained
+-- from the "GameID" GameRulesParam that BAR's game_id.lua gadget publishes at
+-- game start — BAR's widget handler does NOT forward the engine's GameID
+-- callin to widgets, so the callin below is only a fallback for handlers that
+-- do. Sampling starts into memory buffers immediately; files open the moment
+-- the id resolves.
 --
 -- The widget is read-only (Get* calls and its own output files); it never issues
 -- orders or mutates state. In a live game it must be a polite guest: no speed
@@ -115,6 +119,7 @@ local spGetPlayerInfo   = Spring.GetPlayerInfo
 local spGetSpectatingState = Spring.GetSpectatingState
 local spGetMyAllyTeamID = Spring.GetMyAllyTeamID
 local spGetMyPlayerID   = Spring.GetMyPlayerID
+local spGetGameRulesParam = Spring.GetGameRulesParam
 
 local mathFloor = math.floor
 
@@ -621,6 +626,12 @@ local function sample(frame)
 end
 
 local function closeOut(reason)
+	-- Samples were buffered but no id ever resolved and the grace period had
+	-- not expired (e.g. the player quit early): save them under a fallback
+	-- name rather than dropping them.
+	if not gameId and ((pendingBin and #pendingBin > 0) or (pendingText and #pendingText > 0)) then
+		openOutputs(fallbackGameID())
+	end
 	if reason and (tout or bout) then
 		if tout then
 			writeChunk("BRSNAP END " .. reason)
@@ -718,13 +729,50 @@ function widget:SetConfigData(data)
 	end
 end
 
+-- resolveGameID tries every source for the 32-hex game id, most reliable
+-- first. BAR's widget handler (barwidgets.lua) does NOT forward the engine's
+-- GameID callin to widgets — only the gadget handler gets it — so the primary
+-- source is the rules param BAR's game_id.lua gadget publishes at game start
+-- ("Exposes GameID as a rules param for luaui reload"); Game.gameID is the
+-- community's future-proofing alias for it. The widget:GameID callin below
+-- still works under handlers that do forward it, and the config fallback
+-- covers a re-enable when neither is available.
+local function resolveGameID(frame)
+	local id = normalizeGameID(Game and Game.gameID or nil)
+	if id then
+		return id
+	end
+	if spGetGameRulesParam then
+		id = normalizeGameID(spGetGameRulesParam("GameID"))
+		if id then
+			return id
+		end
+	end
+	return configGameID(frame)
+end
+
+-- Samples recorded into the pre-open buffers while the game id is still
+-- unresolved; after this many, give up and open under a wall-clock name (the
+-- rules param appears within the first frames on BAR — this only triggers on
+-- games without the game_id gadget).
+local fallbackAfterSamples = 10
+local unresolvedSamples = 0
+
 function widget:GameFrame(frame)
-	-- Loaded mid-game (disable/enable cycle or /luaui reload): the GameID
-	-- callin is gone. Recover the id saved at disable time when it is
-	-- provably this game's; else fall back to a wall-clock name rather than
-	-- never writing anything.
+	-- The gameId is usually not known at Initialize (the GameID callin fires
+	-- ~game start, the rules param appears just after). Sampling starts
+	-- immediately into the pre-open buffers; the files open the moment a
+	-- source resolves, and only after a grace period under a fallback name.
 	if not gameId then
-		openOutputs(configGameID(frame) or fallbackGameID())
+		local id = resolveGameID(frame)
+		if id then
+			openOutputs(id)
+		elseif unresolvedSamples >= fallbackAfterSamples then
+			Echo("[replay-uploader] no game id after " .. unresolvedSamples .. " samples; using fallback file name")
+			openOutputs(fallbackGameID())
+		elseif frame % sampleEvery == 0 then
+			unresolvedSamples = unresolvedSamples + 1
+		end
 	end
 	local beat = (frame % heartbeatEvery == 0)
 	if frame % sampleEvery == 0 then
