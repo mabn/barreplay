@@ -35,6 +35,9 @@
 --   text preamble, same grammar as .brsnap (BRSNAP GID/GAME/DEF/T/P lines),
 --   terminated by "BRSNAP READY"
 --   then length-framed binary records: <tag u8> <len u32le> <payload>
+--   (the whole block may repeat: a widget re-enabled mid-game APPENDS a new
+--   segment — see openOutputs; a rejoining client re-simulates from frame 0
+--   and truncates instead)
 --     F  frame: header + columnar unit data (quantized exactly like .brp:
 --        whole elmos / whole hp / velocity as per-sample-interval displacement /
 --        build 1/255; y and vy are not stored at all). A keyframe (flag bit 0)
@@ -183,6 +186,14 @@ local bout = nil        -- binary output handle (writeBinary)
 local pendingText = {}  -- text lines buffered before open (nil once open/failed)
 local pendingBin = {}   -- binary byte-strings buffered before open
 
+-- Config persistence (widget:Get/SetConfigData): BAR's handler saves this on
+-- disable/shutdown and hands it back when the widget is re-enabled. The GameID
+-- callin fires only once at game start, so a re-enabled widget recovers the id
+-- from here (guarded, since the config also survives across games).
+local savedConfig = nil
+local lastSampledFrame = 0
+local gameEnded = false
+
 -- writeChunk appends s plus a newline to the text stream (buffer or file).
 local function writeChunk(s)
 	if tout then
@@ -246,21 +257,33 @@ local function fallbackGameID()
 end
 
 -- openOutputs opens the enabled output files and drains the pre-gameId buffers.
+--
+-- Open mode depends on when in the game this happens. Near frame 0 (game
+-- start, or a crashed player REJOINING — the rejoin re-simulates the whole
+-- game from the beginning, so the widget re-records everything) any existing
+-- <gameId> file is stale or superseded: TRUNCATE. Mid-game (the player
+-- re-enabled the widget, or enabled it late) the existing file holds the only
+-- copy of the earlier part of the game: APPEND a fresh self-contained segment
+-- (header + preamble + records; the decoder treats a "BREPSTREAM 1" line
+-- between records as a segment restart). Frames only move forward within a
+-- process, so appended segments never overlap the ones before them.
 local function openOutputs(id)
 	if gameId then
 		return
 	end
 	gameId = id
+	local frame = (spGetGameFrame and spGetGameFrame()) or 0
+	local append = frame > sampleEvery
 	local head = "BRSNAP GID " .. id .. "\n" .. (preambleStr or "")
 	if writeText then
 		local path = id .. ".brsnap"
-		tout = io.open(path, "w")
+		tout = io.open(path, append and "a" or "w")
 		if tout then
 			tout:write(head)
 			if pendingText and #pendingText > 0 then
 				tout:write(table.concat(pendingText, "\n"), "\n")
 			end
-			Echo("[replay-uploader] recording text to " .. path)
+			Echo("[replay-uploader] recording text to " .. path .. (append and " (appending)" or ""))
 		else
 			Echo("[replay-uploader] ERROR: could not open " .. path)
 		end
@@ -268,14 +291,14 @@ local function openOutputs(id)
 	pendingText = nil
 	if writeBinary then
 		local path = id .. ".brepstream"
-		bout = io.open(path, "wb")
+		bout = io.open(path, append and "ab" or "wb")
 		if bout then
 			bout:write("BREPSTREAM 1\n", head)
 			for i = 1, #pendingBin do
 				bout:write(pendingBin[i])
 			end
-			Echo(string.format("[replay-uploader] recording binary to %s (sampling every %d frames, keyframe every %d samples)",
-				path, sampleEvery, keyframeEvery))
+			Echo(string.format("[replay-uploader] recording binary to %s%s (sampling every %d frames, keyframe every %d samples)",
+				path, append and " (appending)" or "", sampleEvery, keyframeEvery))
 		else
 			Echo("[replay-uploader] ERROR: could not open " .. path)
 		end
@@ -593,6 +616,7 @@ local function sample(frame)
 			cid, cdef, cteam, cx, cz, chp, cmax, cdvx, cdvz, cb, dead, nR, rteam, rcols))
 	end
 	flushOut() -- durable if the game/engine dies mid-match
+	lastSampledFrame = frame
 	lastSampleTime = elapsedStr(t0)
 end
 
@@ -656,11 +680,51 @@ function widget:GameID(id)
 	end
 end
 
+-- configGameID recovers the gameId when the GameID callin was missed: the
+-- widget was disabled and re-enabled (or /luaui reloaded) mid-game, and the
+-- handler restored the config saved at disable time. The config outlives the
+-- game, so reuse is guarded: same map + game version, and the current frame
+-- must be past the last frame the previous instance sampled (a later game on
+-- the same map starts at frame 0 and is rejected). A same-map game that runs
+-- longer than the saved one AND reloads late can still mis-match — accepted,
+-- the window is narrow and the alternative is losing the id on every
+-- re-enable.
+local function configGameID(frame)
+	local sc = savedConfig
+	if sc and type(sc.gameId) == "string" and type(sc.frame) == "number"
+		and frame > sc.frame
+		and sc.map == (Game and Game.mapName)
+		and sc.gameVersion == (Game and Game.gameVersion) then
+		return sc.gameId
+	end
+	return nil
+end
+
+function widget:GetConfigData()
+	if gameEnded then
+		return {} -- a finished game must never be resumed into
+	end
+	return {
+		gameId = gameId,
+		frame = lastSampledFrame,
+		map = Game and Game.mapName or nil,
+		gameVersion = Game and Game.gameVersion or nil,
+	}
+end
+
+function widget:SetConfigData(data)
+	if type(data) == "table" then
+		savedConfig = data
+	end
+end
+
 function widget:GameFrame(frame)
-	-- Loaded mid-game (e.g. /luaui reload): the GameID callin is gone; fall
-	-- back to a wall-clock name rather than never writing anything.
+	-- Loaded mid-game (disable/enable cycle or /luaui reload): the GameID
+	-- callin is gone. Recover the id saved at disable time when it is
+	-- provably this game's; else fall back to a wall-clock name rather than
+	-- never writing anything.
 	if not gameId then
-		openOutputs(fallbackGameID())
+		openOutputs(configGameID(frame) or fallbackGameID())
 	end
 	local beat = (frame % heartbeatEvery == 0)
 	if frame % sampleEvery == 0 then
@@ -713,6 +777,7 @@ end
 
 function widget:GameOver()
 	Echo("[replay-uploader] game over; capture complete" .. (gameId and (": " .. gameId) or ""))
+	gameEnded = true
 	closeOut("gameover")
 end
 

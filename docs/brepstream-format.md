@@ -37,6 +37,28 @@ All integers little-endian. Record tags:
 A stream without an `X` record was cut short (crash/kill); everything read
 up to the truncation point is valid.
 
+## Segments (widget disable/enable, rejoin)
+
+A file may contain **multiple segments**, each a full `header line + preamble
++ records` block, concatenated. The header line read where a record tag is
+expected (first byte `B`, which is never a record tag) marks the restart; the
+decoder re-scans the preamble (picking up a possibly different
+`sampleEvery`/`gameSpeed` — the re-enabled widget can even be a newer
+version), resets all unit state, and continues. The first frame of a segment
+is always a keyframe (fresh encoder state).
+
+Why: a player can disable and re-enable the widget mid-game. The `GameID`
+callin fires only at game start, so the re-enabled instance recovers the id
+from its saved widget config (`Get/SetConfigData`, guarded by map + game
+version + a monotonic frame check) and **appends** a new segment — truncating
+would destroy the only copy of the earlier game. A **rejoining** client
+(crash, restart) instead re-simulates the whole game from frame 0 and
+re-records everything, so at open time the widget distinguishes the cases by
+the current frame: near zero → truncate (supersede the stale file), mid-game
+→ append. Segments written this way never overlap in frames; the decoder
+still guards (a frame ≤ the last emitted one is decoded for state but not
+emitted) so downstream writers always see a monotonic frame sequence.
+
 ## `F` record
 
 ```

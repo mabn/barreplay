@@ -81,32 +81,35 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 		base.UnitDefs = map[int32]snapshot.UnitDef{}
 	}
 	sampleEvery, gameSpeed := base.SampleEvery, int32(30)
-	for {
-		line, err = br.ReadString('\n')
-		if line != "" {
-			content, ok := strings.CutPrefix(strings.TrimRight(line, "\r\n"), Tag+" ")
-			if ok {
-				fields := strings.Fields(content)
-				if len(fields) > 0 {
-					if fields[0] == "READY" {
-						break
-					}
-					g, _ := applyPreambleLine(fields, content, &base)
-					if g != nil {
-						if g.SampleEvery > 0 {
-							sampleEvery = g.SampleEvery
+	scanPreamble := func(m *snapshot.Meta) {
+		for {
+			line, err := br.ReadString('\n')
+			if line != "" {
+				content, ok := strings.CutPrefix(strings.TrimRight(line, "\r\n"), Tag+" ")
+				if ok {
+					fields := strings.Fields(content)
+					if len(fields) > 0 {
+						if fields[0] == "READY" {
+							return
 						}
-						if g.GameSpeed > 0 {
-							gameSpeed = g.GameSpeed
+						g, _ := applyPreambleLine(fields, content, m)
+						if g != nil {
+							if g.SampleEvery > 0 {
+								sampleEvery = g.SampleEvery
+							}
+							if g.GameSpeed > 0 {
+								gameSpeed = g.GameSpeed
+							}
 						}
 					}
 				}
 			}
-		}
-		if err != nil {
-			break // EOF mid-preamble: still emit the meta we have
+			if err != nil {
+				return // EOF mid-preamble: still emit the meta we have
+			}
 		}
 	}
+	scanPreamble(&base)
 	if base.SampleEvery == 0 {
 		base.SampleEvery = sampleEvery
 	}
@@ -118,8 +121,16 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 		return err
 	}
 
-	// Binary record loop.
+	// Binary record loop. A widget disabled and re-enabled mid-game APPENDS a
+	// whole new self-contained segment (header line + preamble + records) to
+	// the file; the header line read at record position — its first byte 'B'
+	// where a tag would be — marks the restart. Segments never overlap in
+	// frames when written by the widget (rejoins truncate instead), but stale
+	// frames are guarded against anyway so a downstream writer always sees a
+	// monotonic frame sequence.
 	state := map[int32]*brepUnit{}
+	lastEmitted := int32(-1)
+	staleWarned := false
 	var hdr [5]byte
 	for {
 		if _, err := io.ReadFull(br, hdr[:1]); err != nil {
@@ -127,6 +138,22 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 				return nil
 			}
 			return fmt.Errorf("capture: reading record tag: %w", err)
+		}
+		if hdr[0] == 'B' { // "BREPSTREAM 1\n" between records: segment restart
+			rest, err := br.ReadString('\n')
+			if err != nil || strings.TrimRight(rest, "\r\n") != BrepHeader[1:] {
+				fmt.Fprintf(os.Stderr, "capture: malformed segment header after %d frames; stopping\n", stats.Frames)
+				return nil
+			}
+			// The segment repeats the preamble; meta is already written, so
+			// apply it to a scratch (only sampleEvery/gameSpeed may matter —
+			// the re-enabled widget could even be a newer version).
+			scratch := snapshot.Meta{UnitDefs: map[int32]snapshot.UnitDef{}}
+			scanPreamble(&scratch)
+			for id := range state {
+				delete(state, id)
+			}
+			continue
 		}
 		if _, err := io.ReadFull(br, hdr[1:5]); err != nil {
 			fmt.Fprintf(os.Stderr, "capture: brepstream truncated mid record header; keeping %d frames\n", stats.Frames)
@@ -148,6 +175,17 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 				fmt.Fprintf(os.Stderr, "capture: bad frame record: %v; keeping %d frames\n", err, stats.Frames)
 				return nil
 			}
+			if fr.Frame <= lastEmitted {
+				// Overlapping segment (should not happen: rejoins truncate).
+				// The decode above still updated state, keeping the segment
+				// self-consistent; just don't emit a non-monotonic frame.
+				if !staleWarned {
+					staleWarned = true
+					fmt.Fprintf(os.Stderr, "capture: brepstream segment overlaps frame %d <= %d; skipping stale frames\n", fr.Frame, lastEmitted)
+				}
+				continue
+			}
+			lastEmitted = fr.Frame
 			stats.Frames++
 			stats.LastFrame = fr.Frame
 			if err := w.WriteFrame(fr); err != nil {

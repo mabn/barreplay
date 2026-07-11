@@ -171,20 +171,44 @@ assert(load(patched, "@" .. widgetPath))()
 widget:Initialize()
 widget:GameID("FEED5EED00000000000000000000BEEF")
 
+-- Mid-game the player disables the widget for a few samples, then re-enables
+-- it: the handler shuts the instance down (saving its config) and later loads
+-- a FRESH instance, restoring the config. The GameID callin does not re-fire,
+-- so the new instance must recover the id from the config and APPEND a new
+-- stream segment. Both fixture files therefore contain two segments.
+local DISABLE_AT, ENABLE_AT = 70, 74
+local widgetActive = true
+
 for s = 0, SAMPLES - 1 do
 	curFrame = s * sampleEvery
 	if s > 0 then
 		advance()
 	end
-	-- Births and deaths (friendly only, so both emitters see them).
+	if s == DISABLE_AT then
+		local saved = widget:GetConfigData()
+		widget:Shutdown()
+		widgetActive = false
+		widget = {}
+		assert(load(patched, "@" .. widgetPath))()
+		widget:SetConfigData(saved)
+	elseif s == ENABLE_AT then
+		widget:Initialize() -- no GameID callin this time
+		widgetActive = true
+	end
+	-- Births and deaths (friendly only, so both emitters see them). The world
+	-- moves on while the widget is disabled; those events are simply lost.
 	if s % 7 == 3 then
 		local u = addUnit(0, true)
-		widget:UnitCreated(u.id, u.def, u.team)
+		if widgetActive then
+			widget:UnitCreated(u.id, u.def, u.team)
+		end
 	end
 	if s % 9 == 5 then
 		for _, id in ipairs(order) do
 			if allyOf[units[id].team] == 0 then
-				widget:UnitDestroyed(id, units[id].def, units[id].team)
+				if widgetActive then
+					widget:UnitDestroyed(id, units[id].def, units[id].team)
+				end
 				units[id] = nil
 				for i = 1, #order do
 					if order[i] == id then
@@ -196,7 +220,9 @@ for s = 0, SAMPLES - 1 do
 			end
 		end
 	end
-	widget:GameFrame(curFrame)
+	if widgetActive then
+		widget:GameFrame(curFrame)
+	end
 end
 widget:GameOver()
 widget:Shutdown()
