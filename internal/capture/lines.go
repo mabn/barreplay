@@ -106,6 +106,13 @@ func applyPreambleLine(fields []string, content string, base *snapshot.Meta) (*g
 			if len(fields) >= 5 && fields[4] != "-" {
 				ti.Color = fields[4]
 			}
+			// An appended stream segment (widget re-enabled mid-game) repeats
+			// the team table; keep the first entry per team id.
+			for _, have := range base.Teams {
+				if have.TeamID == ti.TeamID {
+					return nil, true
+				}
+			}
 			base.Teams = append(base.Teams, ti)
 		}
 	default:

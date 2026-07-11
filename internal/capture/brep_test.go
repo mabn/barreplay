@@ -239,6 +239,59 @@ func TestConsumeBrepKeyframeReset(t *testing.T) {
 	}
 }
 
+// TestConsumeBrepSegments: a widget disabled and re-enabled mid-game appends
+// a whole new segment (header + preamble + records). The decoder must reset
+// unit state at the boundary and keep the emitted frame sequence monotonic
+// even if a segment (anomalously) overlaps an earlier one.
+func TestConsumeBrepSegments(t *testing.T) {
+	e := newBrepEnc(brepPreamble)
+	e.record('F', frameRecord(30, true, []tu{
+		{id: 5, def: 1, team: 0, x: 100, z: 100, hp: 10, maxHp: 10, build: 255},
+		{id: 6, def: 1, team: 0, x: 200, z: 200, hp: 10, maxHp: 10, build: 255},
+	}, nil, nil))
+	e.record('F', frameRecord(60, false, nil, nil, nil))
+
+	// Re-enable: new segment, keyframe restates only unit 5 — unit 6 must be
+	// gone without a dead entry (decoder reset at the boundary).
+	e.buf.WriteString(BrepHeader + "\n" + brepPreamble)
+	e.record('F', frameRecord(2190, true, []tu{
+		{id: 5, def: 1, team: 0, x: 150, z: 150, hp: 8, maxHp: 10, build: 255},
+	}, nil, nil))
+
+	// Anomalous third segment overlapping already-emitted frames: its stale
+	// frames must not be emitted (monotonic output), but its state must still
+	// apply so the post-overlap frame is correct.
+	e.buf.WriteString(BrepHeader + "\n" + brepPreamble)
+	e.record('F', frameRecord(90, true, []tu{
+		{id: 9, def: 1, team: 0, x: 7, z: 7, hp: 5, maxHp: 5, build: 255},
+	}, nil, nil))
+	e.record('F', frameRecord(2220, false, nil, nil, nil))
+
+	var sink loadedSink
+	if err := ConsumeBrep(bytes.NewReader(e.buf.Bytes()), snapshot.Meta{}, &sink); err != nil {
+		t.Fatalf("ConsumeBrep: %v", err)
+	}
+	var frames []int32
+	for _, f := range sink.frames {
+		frames = append(frames, f.Frame)
+	}
+	if len(frames) != 4 || frames[0] != 30 || frames[1] != 60 || frames[2] != 2190 || frames[3] != 2220 {
+		t.Fatalf("frames = %v", frames)
+	}
+	f2 := sink.frames[2]
+	if len(f2.Units) != 1 || f2.Units[0].UnitID != 5 || f2.Units[0].Pos.X != 150 {
+		t.Fatalf("post-restart frame = %+v", f2.Units)
+	}
+	f3 := sink.frames[3]
+	if len(f3.Units) != 1 || f3.Units[0].UnitID != 9 {
+		t.Fatalf("post-overlap frame = %+v", f3.Units)
+	}
+	// The repeated preamble must not duplicate the team table.
+	if len(sink.meta.Teams) != 1 {
+		t.Fatalf("teams duplicated across segments: %+v", sink.meta.Teams)
+	}
+}
+
 func TestConsumeBrepTruncated(t *testing.T) {
 	e := newBrepEnc(brepPreamble)
 	e.record('F', frameRecord(30, true, []tu{
