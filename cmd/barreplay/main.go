@@ -14,7 +14,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -49,7 +48,6 @@ func run() error {
 	var (
 		dataDir      = flag.String("data", envOr("BAR_DATA_DIR", ""), "BAR/Spring data directory (engine/, games/, maps/); also used as --write-dir")
 		outDir       = flag.String("out", "./snapshots", "output directory for snapshot files")
-		format       = flag.String("format", "brp", "snapshot output format: brp (compact binary) or jsonl (legacy, ~40x larger)")
 		every        = flag.Int("every", 30, "snapshot sampling interval in sim frames (30 = 1s)")
 		engineBin    = flag.String("engine", "", "path to spring-headless (overrides auto-location)")
 		prdBin       = flag.String("pr-downloader", "", "path to pr-downloader (overrides auto-location)")
@@ -198,21 +196,11 @@ func run() error {
 	}
 
 	// 5. Open the snapshot writer (the snapshot package owns the on-disk format).
-	var w snapshot.Writer
-	var outPath string
-	switch *format {
-	case "brp":
-		w, err = snapshot.NewBRPWriter(*outDir, h.GameID)
-		outPath = filepath.Join(*outDir, h.GameID+".brp")
-	case "jsonl":
-		w, err = snapshot.NewJSONLWriter(*outDir, h.GameID)
-		outPath = filepath.Join(*outDir, h.GameID+".jsonl")
-	default:
-		return fmt.Errorf("unknown -format %q (want brp or jsonl)", *format)
-	}
+	w, err := snapshot.NewBRPWriter(*outDir, h.GameID)
 	if err != nil {
 		return err
 	}
+	outPath := filepath.Join(*outDir, h.GameID+".brp")
 
 	// 6. Launch the engine. The widget writes snapshots to rawPath directly; the
 	// engine's stdout only needs draining so its pipe never blocks the sim (the
@@ -293,12 +281,7 @@ func run() error {
 		fmt.Fprintf(os.Stderr, "  widget stream: %.2f MB (%s)\n", mb, rawPath)
 	}
 	if mb, ok := fileSizeMB(outPath); ok {
-		if *format == "jsonl" {
-			lines, _ := countLines(outPath)
-			fmt.Fprintf(os.Stderr, "  snapshot: %.2f MB, %d lines\n", mb, lines)
-		} else {
-			fmt.Fprintf(os.Stderr, "  snapshot: %.2f MB\n", mb)
-		}
+		fmt.Fprintf(os.Stderr, "  snapshot: %.2f MB\n", mb)
 	}
 	return nil
 }
@@ -462,27 +445,6 @@ func fileSizeMB(path string) (mb float64, ok bool) {
 		return 0, false
 	}
 	return float64(fi.Size()) / (1024 * 1024), true
-}
-
-// countLines counts newline-terminated lines in path.
-func countLines(path string) (int, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-	buf := make([]byte, 64*1024)
-	count := 0
-	for {
-		n, err := f.Read(buf)
-		count += bytes.Count(buf[:n], []byte{'\n'})
-		if err == io.EOF {
-			return count, nil
-		}
-		if err != nil {
-			return count, err
-		}
-	}
 }
 
 func isLocalSDFZ(s string) bool {

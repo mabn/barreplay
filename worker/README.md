@@ -44,7 +44,11 @@ worker/
   public/style.css
   public/icons, ranks/    synced from internal/viz/bardata by tools/sync-assets.mjs (gitignored)
   src/worker/index.ts     Hono app: serve R2 (index.json, replays/**) + SPA fallback
+  src/breps/split.ts      TS .brepstream splitter (raw stream -> static pieces, no transcode)
   tools/sync-assets.mjs   copies the vendored icons into public/ before dev/build
+  tools/r2put.ts          shared upload backend: parallel S3 PUTs (with R2 creds) or parallel wrangler
+  tools/upload.ts         upload a barreplay-static bundle (npm run upload)
+  tools/upload-brepstream.ts  split + upload a raw .brepstream (npm run upload-brep)
 ```
 
 ## Producing and uploading replay data
@@ -65,15 +69,64 @@ npm run upload -- ../static              # every replay in the dir, to real R2
 npm run upload -- ../static <id> --local # into the local dev simulator (for `npm run dev`)
 ```
 
-The default is **real R2** (`wrangler r2 object put --remote`). The bucket must exist first —
-`npx wrangler r2 bucket create barreplay-replays` — and you must be logged in
-(`npx wrangler login`) to the account in `wrangler.jsonc` (`account_id`).
+The default is **real R2**. The bucket must exist first — `npx wrangler r2 bucket create
+barreplay-replays` — and you need either R2 API credentials (fast path, below) or a
+wrangler login (`npx wrangler login`) to the account in `wrangler.jsonc` (`account_id`).
+
+### Upload speed: the S3 fast path
+
+Both upload tools go through `tools/r2put.ts`, which picks a transport:
+
+- **S3 API (fast).** Set `R2_ACCESS_KEY_ID` + `R2_SECRET_ACCESS_KEY` (create a token
+  under Cloudflare dash → R2 → *Manage R2 API Tokens*, "Object Read & Write" on the
+  bucket) and objects are PUT straight against
+  `https://<account_id>.r2.cloudflarestorage.com` with [`aws4fetch`](https://github.com/mhart/aws4fetch)
+  signing, 16 in flight in one process — a whole replay in a couple of seconds. The
+  account id comes from `wrangler.jsonc` (`CLOUDFLARE_ACCOUNT_ID` overrides).
+- **wrangler (fallback, and always for `--local`).** One `wrangler r2 object put` per
+  object, 8 in flight (the local simulator stays serial — concurrent processes against
+  the same miniflare state flake with 500s). Each spawn pays ~2 s of node+wrangler
+  startup, which is why the old serial upload was slow; parallelism hides most of it,
+  credentials stay wrangler's.
+
+Either way each replay's `.brw` head is uploaded **after all its other objects** (a
+completion barrier, not just ordering): the head is what the live listing keys on, so a
+half-uploaded replay never appears in the picker.
 
 Because the listing is built live, you upload **one replay at a time** —
 `npm run upload -- ../static <gameId>` pushes just that replay's `.brw`, `.resources`, and
 chunk files, and it shows up in the picker immediately. For a bulk import, `rclone`/`aws s3
-sync ./static/replays -> bucket/replays` against R2's S3 API works too (needs an R2 API
+sync ./static/replays -> bucket/replays` against R2's S3 API works too (same R2 API
 token).
+
+For a fresh capture there is a one-step shortcut: `cmd/pack` converts the raw stream
+AND uploads in the same run (it shells into these same tools, so the auth options are
+identical — export the R2 credentials to get the fast path):
+
+```sh
+# from the repo root:
+go run ./cmd/pack -upload r2 ./caps/<gameId>.brepstream      # convert + push to real R2
+go run ./cmd/pack -upload local ./caps/<gameId>.brepstream   # ...or seed the local dev simulator
+```
+
+## The .brepstream splitter (parked — the viewer serves .brp wire only)
+
+**Design decision:** the viewer downloads exactly one wire format, the version-4
+`.brp` pieces — the most compact encoding of the playback path. Raw `.brepstream`
+records are ~1.4×+ larger served (fixed-width absolute columns vs the `.brp`
+codec's varint deltas), so **nothing uploads brepstream-encoded chunks for
+playback**; a raw stream is always converted to `.brp` first (locally that's
+`pack -upload`, which does it in Go).
+
+`src/breps/split.ts` remains as the TypeScript half of that future story: it
+parses the stream's preamble and record framing (pinned by `npm test` against the
+same harness fixture as the Lua↔Go lockstep) and can slice a stream into
+version-5 pieces without transcoding. That parsing is the foundation for the
+planned **TS transcoder** (`brepstream → .brp-wire pieces`) that an in-worker
+upload API (drag & drop, widget streaming) will need, since the Worker deploys no
+Go. `npm run upload-brep` (with `--out` for inspection) still exercises it, but
+its version-5 output is deliberately rejected by the viewer — treat it as an
+experiment harness, not an upload path.
 
 ## Commands
 

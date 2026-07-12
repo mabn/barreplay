@@ -1,5 +1,5 @@
-// Command barreplay-pack converts raw captures (.jsonl, .brsnap, or the
-// Replay uploader widget's binary .brepstream) into the compact binary .brp
+// Command pack converts raw widget captures (.brsnap, or the Replay
+// uploader widget's binary .brepstream) into the compact binary .brp
 // format — the only format the viewer serves. Use it once per capture.
 //
 // A raw .brsnap/.brepstream is just the widget's stream: it carries frames,
@@ -14,21 +14,33 @@
 //
 // Usage:
 //
-//	barreplay-pack [flags] <capture.jsonl|capture.brsnap> [...]
-//	barreplay-pack -out ./snapshots ./snapshots/*.jsonl
-//	barreplay-pack -id 6da7496aca487581a12b7a6d5bd99bc0 ./renamed.brsnap
+//	pack [flags] <capture.brsnap|capture.brepstream> [...]
+//	pack -out ./snapshots ./caps/*.brsnap
+//	pack -id 6da7496aca487581a12b7a6d5bd99bc0 ./renamed.brsnap
+//	pack -upload r2 ./caps/<gameId>.brepstream
 //
 // Each input produces "<gameId>.brp" (gameId = the input's basename) in the
 // input's own directory, or in -out when set. Inputs are processed
 // independently; a failure on one is reported and the rest continue.
+//
+// -upload r2|local additionally uploads each input's packed .brp static-
+// hosting files (viz.WriteStaticBundle — the same bytes cmd/barreplay-static
+// writes) to the worker's R2 bucket, targeting the real bucket ("r2") or the
+// local `npm run dev` simulator ("local"). The viewer serves ONLY the .brp
+// wire format, so every input — including a raw .brepstream — is converted
+// first and uploads the efficient v4 pieces. No index.json is uploaded — the
+// Worker lists the bucket live. Needs the worker/ project on disk with
+// node_modules installed (-worker-dir if it is not ./worker) and, for "r2",
+// either R2 API credentials (R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY, the fast
+// S3 path) or wrangler auth (`npx wrangler login` / CLOUDFLARE_API_TOKEN).
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -37,17 +49,20 @@ import (
 	"github.com/mabn/barreplay/internal/barapi"
 	"github.com/mabn/barreplay/internal/capture"
 	"github.com/mabn/barreplay/internal/demofile"
+	"github.com/mabn/barreplay/internal/viz"
 	"github.com/mabn/barreplay/snapshot"
 )
 
 func main() {
 	var (
-		outDir = flag.String("out", "", "output directory (default: next to each input)")
-		idArg  = flag.String("id", "", "replay gameId or link used to fetch the demo metadata for a .brsnap/.brepstream input (default: the input's file name; only valid with a single input)")
-		noDemo = flag.Bool("no-demo", false, "do not fetch the demo for .brsnap/.brepstream inputs; the .brp then only has the metadata the stream itself carries")
+		outDir    = flag.String("out", "", "output directory (default: next to each input)")
+		idArg     = flag.String("id", "", "replay gameId or link used to fetch the demo metadata for a .brsnap/.brepstream input (default: the input's file name; only valid with a single input)")
+		noDemo    = flag.Bool("no-demo", false, "do not fetch the demo for .brsnap/.brepstream inputs; the .brp then only has the metadata the stream itself carries")
+		upload    = flag.String("upload", "", `after packing, upload the replay's static files to the worker's R2 bucket: "r2" (real bucket, needs wrangler auth) or "local" (the wrangler dev simulator)`)
+		workerDir = flag.String("worker-dir", "worker", "the Cloudflare worker project directory wrangler runs in (with -upload)")
 	)
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: barreplay-pack [flags] <capture.jsonl|capture.brsnap|capture.brepstream> [...]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: pack [flags] <capture.brsnap|capture.brepstream> [...]\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -56,7 +71,11 @@ func main() {
 		os.Exit(2)
 	}
 	if *idArg != "" && flag.NArg() > 1 {
-		fmt.Fprintln(os.Stderr, "barreplay-pack: -id applies to exactly one input")
+		fmt.Fprintln(os.Stderr, "pack: -id applies to exactly one input")
+		os.Exit(2)
+	}
+	if *upload != "" && *upload != "r2" && *upload != "local" {
+		fmt.Fprintf(os.Stderr, "pack: -upload must be \"r2\" or \"local\" (got %q)\n", *upload)
 		os.Exit(2)
 	}
 
@@ -66,8 +85,12 @@ func main() {
 	client := barapi.New()
 	failed := 0
 	for _, in := range flag.Args() {
-		if err := pack(ctx, client, in, *outDir, *idArg, *noDemo); err != nil {
-			fmt.Fprintf(os.Stderr, "barreplay-pack: %s: %v\n", in, err)
+		brpPath, err := pack(ctx, client, in, *outDir, *idArg, *noDemo)
+		if err == nil && *upload != "" {
+			err = uploadStatic(ctx, brpPath, *upload, *workerDir)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pack: %s: %v\n", in, err)
 			failed++
 		}
 	}
@@ -95,11 +118,10 @@ func (l *loaded) WriteEvent(e snapshot.Event) error {
 }
 func (l *loaded) Close() error { return nil }
 
-// load reads a legacy capture. .jsonl decodes through snapshot.NewReader (its
-// meta line is complete, so base is unused); .brsnap (the raw widget stream)
-// re-parses through internal/capture — the exact parser the capture pipeline
-// uses — seeded with base, which carries whatever demo metadata the caller
-// obtained.
+// load reads a raw capture stream. .brsnap (the text widget stream) re-parses
+// through internal/capture — the exact parser the capture pipeline uses —
+// seeded with base, which carries whatever demo metadata the caller obtained;
+// .brepstream is its binary sibling.
 func load(path string, base snapshot.Meta) (*loaded, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -109,30 +131,6 @@ func load(path string, base snapshot.Meta) (*loaded, error) {
 
 	l := &loaded{}
 	switch strings.ToLower(filepath.Ext(path)) {
-	case ".jsonl":
-		rd := snapshot.NewReader(f)
-		sawMeta := false
-		for {
-			meta, frame, event, err := rd.Next()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return nil, fmt.Errorf("reading jsonl: %w", err)
-			}
-			switch {
-			case meta != nil:
-				l.meta = *meta
-				sawMeta = true
-			case frame != nil:
-				l.frames = append(l.frames, *frame)
-			case event != nil:
-				l.events = append(l.events, *event)
-			}
-		}
-		if !sawMeta {
-			return nil, fmt.Errorf("no meta record found (is this a barreplay .jsonl?)")
-		}
 	case ".brsnap":
 		if err := capture.Consume(f, base, l); err != nil {
 			return nil, fmt.Errorf("parsing brsnap: %w", err)
@@ -142,7 +140,7 @@ func load(path string, base snapshot.Meta) (*loaded, error) {
 			return nil, fmt.Errorf("parsing brepstream: %w", err)
 		}
 	default:
-		return nil, fmt.Errorf("unsupported input type %q (want .jsonl, .brsnap or .brepstream)", filepath.Ext(path))
+		return nil, fmt.Errorf("unsupported input type %q (want .brsnap or .brepstream)", filepath.Ext(path))
 	}
 	return l, nil
 }
@@ -157,7 +155,7 @@ func demoMeta(ctx context.Context, client *barapi.Client, id string) (snapshot.M
 	if err != nil {
 		return snapshot.Meta{}, err
 	}
-	tmp, err := os.MkdirTemp("", "barreplay-pack-")
+	tmp, err := os.MkdirTemp("", "pack-demo-")
 	if err != nil {
 		return snapshot.Meta{}, err
 	}
@@ -192,7 +190,8 @@ func inferSampleEvery(frames []snapshot.Frame) int32 {
 	return best
 }
 
-func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, noDemo bool) error {
+// pack converts one input into <gameId>.brp and returns the written path.
+func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, noDemo bool) (string, error) {
 	gameID := strings.TrimSuffix(filepath.Base(in), filepath.Ext(in))
 	base := snapshot.Meta{GameID: gameID}
 	ext := strings.ToLower(filepath.Ext(in))
@@ -203,7 +202,7 @@ func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 		}
 		m, err := demoMeta(ctx, client, id)
 		if err != nil {
-			return fmt.Errorf("fetching demo metadata for %q: %w (pass -id <gameId|link> if the file name is not the gameId, or -no-demo to pack without map/version/player metadata)", id, err)
+			return "", fmt.Errorf("fetching demo metadata for %q: %w (pass -id <gameId|link> if the file name is not the gameId, or -no-demo to pack without map/version/player metadata)", id, err)
 		}
 		fmt.Fprintf(os.Stderr, "%s: demo metadata: map %q, game %q, engine %s, %d players\n",
 			in, m.MapName, m.GameVersion, m.EngineVersion, len(m.Players))
@@ -211,7 +210,7 @@ func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 	}
 	l, err := load(in, base)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if l.meta.GameID == "" {
 		l.meta.GameID = gameID
@@ -225,26 +224,26 @@ func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 	}
 	w, err := snapshot.NewBRPWriter(dir, gameID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := w.WriteMeta(l.meta); err != nil {
 		w.Close()
-		return err
+		return "", err
 	}
 	for _, fr := range l.frames {
 		if err := w.WriteFrame(fr); err != nil {
 			w.Close()
-			return err
+			return "", err
 		}
 	}
 	for _, e := range l.events {
 		if err := w.WriteEvent(e); err != nil {
 			w.Close()
-			return err
+			return "", err
 		}
 	}
 	if err := w.Close(); err != nil {
-		return err
+		return "", err
 	}
 
 	outPath := filepath.Join(dir, gameID+".brp")
@@ -255,6 +254,48 @@ func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 	}
 	fmt.Fprintf(os.Stderr, "%s (%.1f MB) -> %s (%.2f MB%s): %d frames, %d events\n",
 		in, mb(inSize), outPath, mb(outSize), ratio, len(l.frames), len(l.events))
+	return outPath, nil
+}
+
+// checkWorkerDir verifies workerDir holds the Cloudflare worker project the
+// upload paths shell into.
+func checkWorkerDir(workerDir string) error {
+	if _, err := os.Stat(filepath.Join(workerDir, "wrangler.jsonc")); err != nil {
+		return fmt.Errorf("-upload needs the Cloudflare worker project: %w (run from the repo root, or point -worker-dir at it)", err)
+	}
+	return nil
+}
+
+// uploadStatic uploads one packed replay's static files to the worker's R2
+// bucket: it writes the static bundle (viz.WriteStaticBundle — the same bytes
+// cmd/barreplay-static writes) into a temp dir and hands it to the worker's
+// uploader (npx tsx tools/upload.ts), which parallelizes the puts and uses
+// the R2 S3 API when R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY are set. target is
+// "r2" or "local".
+func uploadStatic(ctx context.Context, brpPath, target, workerDir string) error {
+	if err := checkWorkerDir(workerDir); err != nil {
+		return err
+	}
+	tmp, err := os.MkdirTemp("", "pack-upload-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	gameID, err := viz.WriteStaticBundle(brpPath, tmp)
+	if err != nil {
+		return err
+	}
+	args := []string{"tsx", "tools/upload.ts", tmp, gameID}
+	if target == "local" {
+		args = append(args, "--local")
+	}
+	cmd := exec.CommandContext(ctx, "npx", args...)
+	cmd.Dir = workerDir
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("uploading %s: %w (is the worker project installed? npm install in %s)", gameID, err, workerDir)
+	}
 	return nil
 }
 
