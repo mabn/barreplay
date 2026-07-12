@@ -212,7 +212,10 @@ full version under the same gameId.
    perceives them — appearing on LOS/radar detection, frozen at last-known
    state as immobile "ghosts" once visibility is lost (the delta codec's
    zero-byte predicted case, so ghosts are ~free on the wire), buried only on
-   a witnessed death. The v1 concerns became merge-side rules instead of an
+   a witnessed death. Burial is tombstoned (widget 1.1.1): the engine can keep
+   returning a dead enemy's id from GetAllUnits as a frozen radar-memory dot,
+   which must not resurrect the ghost — the id stays skipped until it is
+   demonstrably a new unit reusing it. The v1 concerns became merge-side rules instead of an
    exclusion: enemy records double-report units the owning side records
    exactly, so the merge must treat them as non-authoritative (see the merge
    property above); wobbled radar positions and unidentified contacts (def 0)
