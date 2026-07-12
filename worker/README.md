@@ -84,9 +84,10 @@ Both upload tools go through `tools/r2put.ts`, which picks a transport:
   signing, 16 in flight in one process — a whole replay in a couple of seconds. The
   account id comes from `wrangler.jsonc` (`CLOUDFLARE_ACCOUNT_ID` overrides).
 - **wrangler (fallback, and always for `--local`).** One `wrangler r2 object put` per
-  object, 8 in flight (2 for the local simulator — concurrent processes contend on its
-  sqlite state). Each spawn pays ~2 s of node+wrangler startup, which is why the old
-  serial upload was slow; parallelism hides most of it, credentials stay wrangler's.
+  object, 8 in flight (the local simulator stays serial — concurrent processes against
+  the same miniflare state flake with 500s). Each spawn pays ~2 s of node+wrangler
+  startup, which is why the old serial upload was slow; parallelism hides most of it,
+  credentials stay wrangler's.
 
 Either way each replay's `.brw` head is uploaded **after all its other objects** (a
 completion barrier, not just ordering): the head is what the live listing keys on, so a
@@ -108,30 +109,24 @@ go run ./cmd/pack -upload r2 ./caps/<gameId>.brepstream      # convert + push to
 go run ./cmd/pack -upload local ./caps/<gameId>.brepstream   # ...or seed the local dev simulator
 ```
 
-## Uploading raw .brepstream captures (the breps pipeline)
+## The .brepstream splitter (parked — the viewer serves .brp wire only)
 
-`src/breps/split.ts` slices a raw widget `.brepstream` into servable pieces **in
-TypeScript, without transcoding** — the stream's length-framed records and flagged
-keyframes let it produce the same keys-first shape as a `.brp` bundle by byte
-slicing: `replays/<id>.keys` (every keyframe record, one gzip stream),
-`replays/<id>/c<n>` (each chunk's delta records) and `replays/<id>.brw` (a BRW1
-head with **version byte 5**, one gzipped-JSON section: meta, teams, players, unit
-defs, events, bounds, chunk index). This is the exact pipeline a future in-worker
-upload API will run on POSTed streams; today it runs locally:
+**Design decision:** the viewer downloads exactly one wire format, the version-4
+`.brp` pieces — the most compact encoding of the playback path. Raw `.brepstream`
+records are ~1.4×+ larger served (fixed-width absolute columns vs the `.brp`
+codec's varint deltas), so **nothing uploads brepstream-encoded chunks for
+playback**; a raw stream is always converted to `.brp` first (locally that's
+`pack -upload`, which does it in Go).
 
-```sh
-npm run upload-brep -- /path/to/<gameId>.brepstream           # split + push to real R2
-npm run upload-brep -- /path/to/<gameId>.brepstream --local   # ...or the local dev simulator
-npm run upload-brep -- /path/to/<gameId>.brepstream --out ./x # just write the pieces (debug)
-go run ./cmd/pack -upload r2 <gameId>.brepstream              # what pack does for .brepstream inputs
-```
-
-The head is uploaded last (it is the object the live listing keys on), so a
-half-finished upload never appears in the picker. **The viewer cannot play these
-yet** — it decodes only the version-4 `.brp` wire, so a breps replay lists but
-fails with "unsupported payload version 5" until the front-end's breps decoder
-lands. `npm test` pins the splitter against the same harness fixture that pins
-the Lua encoder <-> Go decoder lockstep.
+`src/breps/split.ts` remains as the TypeScript half of that future story: it
+parses the stream's preamble and record framing (pinned by `npm test` against the
+same harness fixture as the Lua↔Go lockstep) and can slice a stream into
+version-5 pieces without transcoding. That parsing is the foundation for the
+planned **TS transcoder** (`brepstream → .brp-wire pieces`) that an in-worker
+upload API (drag & drop, widget streaming) will need, since the Worker deploys no
+Go. `npm run upload-brep` (with `--out` for inspection) still exercises it, but
+its version-5 output is deliberately rejected by the viewer — treat it as an
+experiment harness, not an upload path.
 
 ## Commands
 

@@ -11,8 +11,9 @@
 //   - wrangler (fallback, and always for --local): `wrangler r2 object put`
 //     per object, parallelized. Each spawn pays ~2s of node+wrangler startup,
 //     which is why serial uploads felt slow; concurrency hides most of it.
-//     The local dev simulator keeps low concurrency — concurrent wrangler
-//     processes contend on the same miniflare sqlite state.
+//     The local dev simulator stays SERIAL: concurrent wrangler processes
+//     against the same miniflare state flake with "put: Unspecified error"
+//     (workerd r2-rpc 500s) — observed at concurrency 2.
 //
 // The account id comes from CLOUDFLARE_ACCOUNT_ID or wrangler.jsonc. Callers
 // pass objects as bytes or file paths; file paths are only read when needed.
@@ -34,7 +35,7 @@ export interface UploadOptions {
   bucket: string;
   /** Target the local wrangler dev simulator instead of real R2. */
   local: boolean;
-  /** Max uploads in flight; defaults per transport (16 S3, 8 wrangler, 2 local). */
+  /** Max uploads in flight; defaults per transport (16 S3, 8 wrangler, 1 local). */
   concurrency?: number;
   /** Progress line per object (defaults to stderr). */
   log?: (line: string) => void;
@@ -72,10 +73,15 @@ export async function uploadObjects(objects: R2Object[], opts: UploadOptions): P
       }
       // Explicit --remote/--local: wrangler's own default for `r2 object put`
       // is LOCAL, so a bare put would silently write to disk, not R2.
-      await run("npx", ["wrangler", "r2", "object", "put", `${opts.bucket}/${o.key}`, "--file", file, opts.local ? "--local" : "--remote"]);
+      const args = ["wrangler", "r2", "object", "put", `${opts.bucket}/${o.key}`, "--file", file, opts.local ? "--local" : "--remote"];
+      try {
+        await run("npx", args);
+      } catch {
+        await run("npx", args); // one retry: transient network / simulator hiccups
+      }
       log(`  put ${o.key}`);
     };
-    const limit = opts.concurrency ?? (opts.local ? 2 : 8);
+    const limit = opts.concurrency ?? (opts.local ? 1 : 8);
     await pool(bodies, limit, put);
     await pool(heads, limit, put);
     return "wrangler";
