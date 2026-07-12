@@ -1861,6 +1861,96 @@ function startFpsMonitor() {
   requestAnimationFrame(tick);
 }
 
+// ---- replay list / home view ----------------------------------------------
+// The catalog: [{id, startUnix, durationSec, map, gameSize, sizeBytes}].
+// Served by GET /api/replays (the worker's Durable Object table, or the Go viz
+// server computing the same shape from the .brp files). /index.json (the live
+// bucket / directory listing) is merged in so a replay whose files exist but
+// which was never PUT into the catalog still shows up — and it is the whole
+// fallback when /api/replays doesn't exist (old deployment, plain static host).
+async function fetchReplayList() {
+  let catalog = [];
+  try {
+    const r = await fetch('/api/replays');
+    if (r.ok) catalog = await r.json();
+  } catch (_) { /* fall through to /index.json */ }
+  let files = [];
+  try {
+    const r = await fetch('/index.json');
+    if (r.ok) files = await r.json();
+  } catch (err) {
+    if (!catalog.length) throw err;
+  }
+  const seen = new Set(catalog.map(e => e.id));
+  for (const f of files) {
+    if (seen.has(f.file)) continue;
+    catalog.push({ id: f.file, startUnix: null, durationSec: null, map: null, gameSize: null, sizeBytes: f.size ?? null });
+  }
+  return catalog;
+}
+
+let replayList = [];
+
+function showHome() {
+  stopPlay();
+  document.body.classList.add('home');
+  document.getElementById('home').style.display = '';
+  document.getElementById('subtitle').textContent = 'replay state viewer';
+  renderHome();
+}
+
+function hideHome() {
+  document.body.classList.remove('home');
+  document.getElementById('home').style.display = 'none';
+}
+
+function renderHome(errMsg) {
+  const tbody = document.querySelector('#hometable tbody');
+  const msg = document.getElementById('homemsg');
+  tbody.textContent = '';
+  const cell = (tr, text, cls) => {
+    const td = document.createElement('td');
+    td.textContent = text ?? '—';
+    if (cls) td.className = cls;
+    if (text == null) td.classList.add('dim');
+    tr.appendChild(td);
+  };
+  for (const e of replayList) {
+    const tr = document.createElement('tr');
+    cell(tr, e.startUnix ? fmtDate(e.startUnix) : null);
+    cell(tr, e.durationSec != null ? fmtDuration(e.durationSec) : null);
+    cell(tr, e.map, 'map');
+    cell(tr, e.gameSize);
+    cell(tr, e.sizeBytes != null ? fmtSize(e.sizeBytes) : null, 'num');
+    tr.onclick = () => openReplay(e.id);
+    tbody.appendChild(tr);
+  }
+  const text = errMsg || (replayList.length ? '' :
+    'No replays yet. Upload one with: go run ./cmd/pack -upload r2 <capture>.');
+  msg.style.display = text ? '' : 'none';
+  msg.textContent = text;
+}
+
+// openReplay leaves the home view and starts playback of one replay.
+function openReplay(id) {
+  hideHome();
+  const sel = document.getElementById('file');
+  if (sel.value !== id) sel.value = id;
+  setReplayInUrl(id);
+  loadReplay(id);
+}
+
+// optionLabel is the dropdown text for one catalog entry: enough to tell
+// games apart (date, size spec, map) with the id as the fallback.
+function optionLabel(e) {
+  const parts = [];
+  if (e.startUnix) parts.push(new Date(e.startUnix * 1000).toISOString().slice(0, 10));
+  if (e.gameSize) parts.push(e.gameSize);
+  if (e.map) parts.push(e.map);
+  const label = parts.join(' · ') || e.id;
+  return e.sizeBytes != null ? `${label} (${fmtSize(e.sizeBytes)})` : label;
+}
+
 async function init() {
   initGL(); // one-time; a null result just means the 2D icon path is used
   // Restore icon size from the URL (?iconsize=) before the first paint.
@@ -1872,33 +1962,41 @@ async function init() {
   // Optional render-smoothness overlay, gated on ?debug=true.
   if (params.get('debug') === 'true') startFpsMonitor();
 
-  let list = [];
+  // The header title returns to the replay list without a page reload.
+  document.getElementById('homelink').onclick = (e) => {
+    e.preventDefault();
+    const u = new URL(location.href);
+    u.searchParams.delete('replay');
+    history.pushState(null, '', u);
+    showHome();
+  };
+
   try {
-    const r = await fetch('/index.json');
-    list = await r.json();
+    replayList = await fetchReplayList();
   } catch (err) {
-    setEmpty('Could not list snapshots: ' + err.message);
+    showHome();
+    renderHome('Could not list replays: ' + err.message);
     return;
   }
   const sel = document.getElementById('file');
-  if (!list || !list.length) {
-    setEmpty('No .brp files in the snapshots directory. Run a capture (or convert a raw .brsnap/.brepstream with pack), or point -snapshots at the right directory.');
-    return;
-  }
-  list.forEach(info => {
+  replayList.forEach(e => {
     const o = document.createElement('option');
-    o.value = info.file;
-    o.textContent = `${info.gameId} (${fmtSize(info.size)})`;
+    o.value = e.id;
+    o.textContent = optionLabel(e);
     sel.appendChild(o);
   });
-  sel.onchange = () => { setReplayInUrl(sel.value); loadReplay(sel.value); };
+  sel.onchange = () => openReplay(sel.value);
 
-  // Restore the replay named in the URL (?replay=<file>) so a refresh keeps it.
-  const wanted = new URLSearchParams(location.search).get('replay');
-  const initial = list.some(i => i.file === wanted) ? wanted : list[0].file;
-  sel.value = initial;
-  setReplayInUrl(initial);
-  await loadReplay(initial);
+  // ?replay=<id> opens that replay directly (refresh / shared link); without
+  // it the page is the replay list.
+  const wanted = params.get('replay');
+  if (wanted && replayList.some(e => e.id === wanted)) {
+    sel.value = wanted;
+    hideHome();
+    await loadReplay(wanted);
+  } else {
+    showHome();
+  }
 }
 
 // Persist a viewer setting in the URL without adding history entries, so a page
@@ -1910,13 +2008,21 @@ function setParam(key, val) {
 }
 function setReplayInUrl(file) { setParam('replay', file); }
 
-// Support browser back/forward and manual URL edits.
+// Support browser back/forward and manual URL edits: no ?replay= means the
+// replay list, anything else re-opens that replay.
 window.addEventListener('popstate', () => {
   const wanted = new URLSearchParams(location.search).get('replay');
   const sel = document.getElementById('file');
-  if (wanted && wanted !== sel.value && [...sel.options].some(o => o.value === wanted)) {
-    sel.value = wanted;
-    loadReplay(wanted);
+  if (!wanted) {
+    showHome();
+    return;
+  }
+  if ([...sel.options].some(o => o.value === wanted)) {
+    hideHome();
+    if (wanted !== sel.value || !data) {
+      sel.value = wanted;
+      loadReplay(wanted);
+    }
   }
 });
 
@@ -1924,6 +2030,20 @@ function fmtSize(n) {
   if (n >= 1e6) return (n / 1e6).toFixed(1) + ' MB';
   if (n >= 1e3) return (n / 1e3).toFixed(0) + ' KB';
   return n + ' B';
+}
+
+// fmtDate renders a game's start moment in the viewer's locale/timezone.
+function fmtDate(unix) {
+  return new Date(unix * 1000).toLocaleString(undefined,
+    { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+// fmtDuration renders a game length as m:ss / h:mm:ss.
+function fmtDuration(sec) {
+  sec = Math.round(sec);
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  const mm = h ? String(m).padStart(2, '0') : String(m);
+  return (h ? h + ':' : '') + mm + ':' + String(s).padStart(2, '0');
 }
 
 init();
