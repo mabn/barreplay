@@ -56,19 +56,26 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: #5a9fd0; }
    Toggled via body.home, which hides the playback chrome underneath. */
 body.home .controls, body.home #wrap { display: none; }
 #home { height: calc(100vh - 44px); overflow-y: auto; padding: 18px 24px; }
-#hometable { border-collapse: collapse; width: 100%; max-width: 860px; font-size: 13px; }
+#hometable { border-collapse: collapse; width: 100%; max-width: 860px; margin: 0 auto; font-size: 13px; }
 #hometable th {
   text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
   color: #6f87a0; font-weight: 600; padding: 4px 14px 6px 8px; border-bottom: 1px solid #2a323c;
 }
-#hometable td { padding: 6px 14px 6px 8px; border-bottom: 1px solid #202830; white-space: nowrap; }
+/* Each cell is filled by a block-level link (the row IS a link: middle/ctrl
+   click opens the replay in a new tab), so the cell padding lives on the <a>
+   to keep the whole row surface clickable. */
+#hometable td { padding: 0; border-bottom: 1px solid #202830; white-space: nowrap; }
+#hometable td a {
+  display: block; padding: 6px 14px 6px 8px;
+  color: inherit; text-decoration: none;
+}
 #hometable td.map { white-space: normal; }
 #hometable th.num, #hometable td.num { text-align: right; }
 #hometable td { font-variant-numeric: tabular-nums; }
 #hometable tbody tr { cursor: pointer; }
 #hometable tbody tr:hover { background: #1b232c; }
 #hometable td.dim { color: #6a7785; }
-#homemsg { padding: 12px 8px; font-size: 13px; }
+#homemsg { padding: 12px 8px; font-size: 13px; max-width: 860px; margin: 0 auto; }
 
 #wrap { display: flex; height: calc(100vh - 92px); }
 #left { flex: 1; position: relative; }

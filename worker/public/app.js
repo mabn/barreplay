@@ -1908,21 +1908,35 @@ function renderHome(errMsg) {
   const tbody = document.querySelector('#hometable tbody');
   const msg = document.getElementById('homemsg');
   tbody.textContent = '';
-  const cell = (tr, text, cls) => {
-    const td = document.createElement('td');
-    td.textContent = text ?? '—';
-    if (cls) td.className = cls;
-    if (text == null) td.classList.add('dim');
-    tr.appendChild(td);
-  };
   for (const e of replayList) {
     const tr = document.createElement('tr');
-    cell(tr, e.startUnix ? fmtDate(e.startUnix) : null);
-    cell(tr, e.durationSec != null ? fmtDuration(e.durationSec) : null);
-    cell(tr, e.map, 'map');
-    cell(tr, e.gameSize);
-    cell(tr, e.sizeBytes != null ? fmtSize(e.sizeBytes) : null, 'num');
-    tr.onclick = () => openReplay(e.id);
+    // Every cell holds a real link to the replay's URL, so the row behaves
+    // like an <a>: middle/ctrl/cmd-click opens a new tab, right-click offers
+    // "open in new tab", and a plain click is intercepted below for SPA
+    // navigation (pushState, so the back button returns to this list).
+    const href = replayHref(e.id);
+    const cell = (text, cls) => {
+      const td = document.createElement('td');
+      if (cls) td.className = cls;
+      if (text == null) td.classList.add('dim');
+      const a = document.createElement('a');
+      a.href = href;
+      a.textContent = text ?? '—';
+      td.appendChild(a);
+      tr.appendChild(td);
+    };
+    cell(e.startUnix ? fmtDate(e.startUnix) : null);
+    cell(e.durationSec != null ? fmtDuration(e.durationSec) : null);
+    cell(e.map, 'map');
+    cell(e.gameSize);
+    cell(e.sizeBytes != null ? fmtSize(e.sizeBytes) : null, 'num');
+    tr.addEventListener('click', (ev) => {
+      // Only hijack a plain left-click; modified clicks keep the browser's
+      // native link behaviour (new tab / new window).
+      if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+      ev.preventDefault();
+      openReplay(e.id);
+    });
     tbody.appendChild(tr);
   }
   const text = errMsg || (replayList.length ? '' :
@@ -1931,12 +1945,24 @@ function renderHome(errMsg) {
   msg.textContent = text;
 }
 
-// openReplay leaves the home view and starts playback of one replay.
+// replayHref is the shareable URL for one replay: the current URL (so viewer
+// settings like ?iconsize= carry over) with ?replay= set.
+function replayHref(id) {
+  const u = new URL(location.href);
+  u.searchParams.set('replay', id);
+  return u.pathname + u.search;
+}
+
+// openReplay leaves the home view and starts playback of one replay,
+// PUSHING a history entry (navigation, not a tweak: back must return to
+// where the user was — the list, or the previously watched replay).
 function openReplay(id) {
   hideHome();
   const sel = document.getElementById('file');
   if (sel.value !== id) sel.value = id;
-  setReplayInUrl(id);
+  if (new URLSearchParams(location.search).get('replay') !== id) {
+    history.pushState(null, '', replayHref(id));
+  }
   loadReplay(id);
 }
 
@@ -2006,7 +2032,6 @@ function setParam(key, val) {
   u.searchParams.set(key, val);
   history.replaceState(null, '', u);
 }
-function setReplayInUrl(file) { setParam('replay', file); }
 
 // Support browser back/forward and manual URL edits: no ?replay= means the
 // replay list, anything else re-opens that replay.
