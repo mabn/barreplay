@@ -1882,7 +1882,7 @@ async function init() {
   }
   const sel = document.getElementById('file');
   if (!list || !list.length) {
-    setEmpty('No .brp files in the snapshots directory. Run a capture (or convert a legacy .jsonl/.brsnap with barreplay-pack), or point -snapshots at the right directory.');
+    setEmpty('No .brp files in the snapshots directory. Run a capture (or convert a raw .brsnap/.brepstream with pack), or point -snapshots at the right directory.');
     return;
   }
   list.forEach(info => {

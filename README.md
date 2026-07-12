@@ -23,7 +23,7 @@ replay link / gameId / local .sdfz
         ▼  internal/engine      locate spring-headless, provision content, inject widget, launch
         ▼  assets/lua           snapshot_widget.lua samples units each N frames → writes BRSNAP lines to <gameId>.brsnap
         ▼  internal/capture     parse the BRSNAP file → snapshot records
-        ▼  snapshot             pluggable Writer persists them (.brp compact binary; legacy JSONL)
+        ▼  snapshot             pluggable Writer persists them (.brp compact binary)
 ```
 
 ### Format flows
@@ -38,7 +38,6 @@ flowchart LR
     live["live game<br/>player runs<br/>replay_uploader.lua"]
     brsnap[".brsnap<br/>text widget stream"]
     breps[".brepstream<br/>binary widget stream"]
-    jsonl[".jsonl<br/>legacy v1 output"]
     brp[".brp v4<br/>packed capture"]
     bundle["static bundle<br/>.brw + .keys + chunks + .resources"]
     r2[("R2 bucket")]
@@ -51,7 +50,6 @@ flowchart LR
     live -.->|"writeText debug twin"| brsnap
     brsnap -->|"same barreplay run,<br/>or pack"| brp
     breps -->|"pack<br/>+ demo metadata fetch"| brp
-    jsonl -->|"pack"| brp
     brp -->|"barreplay-static<br/>or pack -upload"| bundle
     bundle -->|"upload.ts<br/>S3 fast path / wrangler"| r2
     r2 --> worker --> viewer
@@ -68,7 +66,7 @@ than v4) — it exists only as the parsing foundation for a future in-worker
 
 | Package | Responsibility |
 | --- | --- |
-| `snapshot/` | **Public data model + pluggable `Writer`.** Owns the on-disk format. The default is `.brp` (currently version 4), a delta-coded columnar binary ~60x smaller than the v1 JSONL, which is still supported for reading and via `-format jsonl`. |
+| `snapshot/` | **Public data model + pluggable `Writer`.** Owns the on-disk format. The format is `.brp` (currently version 4), a delta-coded columnar binary ~60x smaller than the retired v1 JSONL. |
 | `internal/barapi` | Resolve a gameId/URL via `api.bar-rts.com` and download the `.sdfz` from the OVH bucket. |
 | `internal/demofile` | Parse the `.sdfz` header (byte-packed, little-endian) and the embedded TDF startscript. |
 | `internal/engine` | Locate `spring-headless`/`pr-downloader`, provision missing content, write the widget (with its output-file path), build the playback startscript, launch the engine. |
@@ -82,7 +80,7 @@ than v4) — it exists only as the parsing foundation for a future in-worker
 ```sh
 go build ./cmd/barreplay        # the capture CLI
 go build ./cmd/barreplay-viz    # the visualization server
-go build ./cmd/pack   # converter: legacy .jsonl/.brsnap -> .brp
+go build ./cmd/pack   # converter: raw .brsnap/.brepstream -> .brp
 go build ./cmd/barreplay-static # pack .brp captures into a static-hosting bundle (see worker/)
 go test ./...
 ```
@@ -99,7 +97,6 @@ Key flags:
 | --- | --- |
 | `-data <dir>` | BAR/Spring data directory (`engine/`, `games/`, `maps/`); also the engine `--write-dir`. Required to run the engine. (`$BAR_DATA_DIR` also works.) |
 | `-out <dir>` | Output directory for snapshot files (default `./snapshots`). |
-| `-format <fmt>` | Snapshot format: `brp` (compact binary, the default) or `jsonl` (legacy, human-readable, ~60x larger). |
 | `-every <frames>` | Sampling interval in sim frames (30 = 1 Hz, the default). |
 | `-engine <path>` | Path to `spring-headless` (overrides auto-location under `-data/engine/`). |
 | `-no-provision` | Assume engine/game/map are already installed; skip `pr-downloader`. |
@@ -146,7 +143,7 @@ column by column, then gzipped; every unchanged unit — about two thirds of all
 records in a real game — costs zero bytes, and the decoder re-materializes it by
 dead reckoning. Unit elevation (y) is not stored at all: the viewer renders the
 x/z plane, and a ground unit's height is implied by the terrain. On a real
-~33-minute 8v8 game (4.2M unit records) this is **~8 MB where the v1 JSONL was
+~33-minute 8v8 game (4.2M unit records) this is **~8 MB where the retired v1 JSONL format was
 476 MB (~60x)**, with no other loss beyond fixed quantization (whole elmos/hp,
 velocity per sample interval, build progress 1/255, resources 0.1).
 
@@ -160,7 +157,7 @@ downloads the keyframes section first (one request, decoded progressively while
 it streams), then fills in delta chunks around the playhead — and no byte is
 ever fetched twice.
 
-A `.brp` holds everything the JSONL did except unit elevation: full meta
+A `.brp` holds everything the old JSONL format did except unit elevation: full meta
 (unit-def table, teams, players), per-unit position/velocity/health/build
 progress, per-team economy, and lifecycle events, plus precomputed bounds so
 the viewer doesn't scan frames. Read it back with `snapshot.ReadBRP` (or one
@@ -170,11 +167,11 @@ and each chunk are independently compressed **on purpose**: any server —
 the browser byte-for-byte (no server-side re-encoding), and the browser gunzips
 them natively.
 
-Legacy captures still load everywhere they did, and can be shrunk in place:
+Raw widget streams convert without re-running the simulation:
 
 ```sh
-pack ./snapshots/*.jsonl     # writes <gameId>.brp next to each input
-pack ./snapshots/*.brsnap    # raw widget streams work too (see below)
+pack ./caps/*.brsnap        # writes <gameId>.brp next to each input
+pack ./caps/*.brepstream    # the binary widget stream works the same way
 ```
 
 A raw `.brsnap` is just the widget's stream — it has no map name, versions, or
@@ -193,9 +190,6 @@ appears in the deployed viewer immediately, no redeploy needed. `-upload local`
 targets the local `npm run dev` simulator instead. Every input — including a raw
 `.brepstream` — is converted to `.brp` first: the viewer serves only the `.brp` wire
 format (it is the most compact encoding of the pieces it downloads).
-
-`-format jsonl` keeps writing the old line-delimited JSON (one tagged object per
-line — see `snapshot/jsonl.go`) if you want a human-inspectable capture.
 
 To change the persisted format, implement `snapshot.Writer` — nothing else changes.
 
@@ -216,7 +210,7 @@ go build ./cmd/barreplay-viz
 | `-addr <host:port>` | Listen address (default `127.0.0.1:8080`). |
 
 It lists every `.brp` file in the directory in a picker (**only the current `.brp`
-version is supported**; convert a legacy `.jsonl` or raw `.brsnap` once with
+version is supported**; convert a raw `.brsnap`/`.brepstream` once with
 `pack`, and regenerate any pre-v4 `.brp` the same way). The replay
 **streams, keyframes first**: the viewer fetches a small head (metadata, teams,
 icons, events, chunk index), then the keyframes stream — every minute's keyframe,
