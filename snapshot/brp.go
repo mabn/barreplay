@@ -108,7 +108,7 @@ const (
 	// BRPVersion is the only readable format version. v1 (unchunked), v2
 	// (every live unit re-encoded per frame, y/dvy columns) and v3 (keyframes
 	// inside the chunks) existed only pre-release and are not supported —
-	// regenerate a .brp from its source .brsnap/.jsonl with barreplay-pack.
+	// regenerate a .brp from its source .brsnap/.jsonl with pack.
 	BRPVersion byte = 4
 
 	SecMeta      byte = 'M' // .brp: meta JSON

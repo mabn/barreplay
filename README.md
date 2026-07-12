@@ -44,7 +44,7 @@ replay link / gameId / local .sdfz
 ```sh
 go build ./cmd/barreplay        # the capture CLI
 go build ./cmd/barreplay-viz    # the visualization server
-go build ./cmd/barreplay-pack   # converter: legacy .jsonl/.brsnap -> .brp
+go build ./cmd/pack   # converter: legacy .jsonl/.brsnap -> .brp
 go build ./cmd/barreplay-static # pack .brp captures into a static-hosting bundle (see worker/)
 go test ./...
 ```
@@ -135,19 +135,25 @@ them natively.
 Legacy captures still load everywhere they did, and can be shrunk in place:
 
 ```sh
-barreplay-pack ./snapshots/*.jsonl     # writes <gameId>.brp next to each input
-barreplay-pack ./snapshots/*.brsnap    # raw widget streams work too (see below)
+pack ./snapshots/*.jsonl     # writes <gameId>.brp next to each input
+pack ./snapshots/*.brsnap    # raw widget streams work too (see below)
 ```
 
 A raw `.brsnap` is just the widget's stream — it has no map name, versions, or
 player roster (those live in the demo the capture replayed). To still produce a
-**full** `.brp` without re-running the simulation, `barreplay-pack` takes the
+**full** `.brp` without re-running the simulation, `pack` takes the
 replay's gameId from the input's file name (the pipeline names streams
 `<gameId>.brsnap`; use `-id <gameId|link>` if yours is named differently),
 downloads the demo from the BAR API, and seeds its startscript metadata exactly
 like a capture run does. `-no-demo` skips the download (offline) at the cost of
 that metadata; the sampling interval is inferred from the stream's frame
 spacing either way.
+
+`-upload r2` additionally packs the fresh `.brp` into its static-hosting files and
+uploads them to the worker's R2 bucket (via `npx wrangler`, run in `-worker-dir`,
+default `./worker`) — the replay appears in the deployed viewer immediately, no
+worker redeploy needed. `-upload local` targets the local `npm run dev` simulator
+instead.
 
 `-format jsonl` keeps writing the old line-delimited JSON (one tagged object per
 line — see `snapshot/jsonl.go`) if you want a human-inspectable capture.
@@ -172,7 +178,7 @@ go build ./cmd/barreplay-viz
 
 It lists every `.brp` file in the directory in a picker (**only the current `.brp`
 version is supported**; convert a legacy `.jsonl` or raw `.brsnap` once with
-`barreplay-pack`, and regenerate any pre-v4 `.brp` the same way). The replay
+`pack`, and regenerate any pre-v4 `.brp` the same way). The replay
 **streams, keyframes first**: the viewer fetches a small head (metadata, teams,
 icons, events, chunk index), then the keyframes stream — every minute's keyframe,
 one download, decoded progressively as it arrives — and then chunk-sized pieces of

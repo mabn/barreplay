@@ -1,5 +1,5 @@
-// Command barreplay-pack converts raw captures (.jsonl, .brsnap, or the
-// Replay uploader widget's binary .brepstream) into the compact binary .brp
+// Command pack converts raw captures (.jsonl, .brsnap, or the Replay
+// uploader widget's binary .brepstream) into the compact binary .brp
 // format — the only format the viewer serves. Use it once per capture.
 //
 // A raw .brsnap/.brepstream is just the widget's stream: it carries frames,
@@ -14,13 +14,23 @@
 //
 // Usage:
 //
-//	barreplay-pack [flags] <capture.jsonl|capture.brsnap> [...]
-//	barreplay-pack -out ./snapshots ./snapshots/*.jsonl
-//	barreplay-pack -id 6da7496aca487581a12b7a6d5bd99bc0 ./renamed.brsnap
+//	pack [flags] <capture.jsonl|capture.brsnap> [...]
+//	pack -out ./snapshots ./snapshots/*.jsonl
+//	pack -id 6da7496aca487581a12b7a6d5bd99bc0 ./renamed.brsnap
+//	pack -upload r2 ./caps/<gameId>.brepstream
 //
 // Each input produces "<gameId>.brp" (gameId = the input's basename) in the
 // input's own directory, or in -out when set. Inputs are processed
 // independently; a failure on one is reported and the rest continue.
+//
+// -upload r2|local additionally packs each fresh .brp into its static-hosting
+// files (viz.WriteStaticBundle — the same bytes cmd/barreplay-static writes)
+// and puts them into the worker's R2 bucket via wrangler, so the replay shows
+// up in the deployed viewer immediately ("r2") or in the local `npm run dev`
+// simulator ("local"). No index.json is uploaded — the Worker lists the
+// bucket live. Needs the worker/ project on disk (npx wrangler runs there;
+// -worker-dir if it is not ./worker) and, for "r2", wrangler auth
+// (`npx wrangler login` or CLOUDFLARE_API_TOKEN).
 package main
 
 import (
@@ -28,26 +38,32 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
 	"github.com/mabn/barreplay/internal/barapi"
 	"github.com/mabn/barreplay/internal/capture"
 	"github.com/mabn/barreplay/internal/demofile"
+	"github.com/mabn/barreplay/internal/viz"
 	"github.com/mabn/barreplay/snapshot"
 )
 
 func main() {
 	var (
-		outDir = flag.String("out", "", "output directory (default: next to each input)")
-		idArg  = flag.String("id", "", "replay gameId or link used to fetch the demo metadata for a .brsnap/.brepstream input (default: the input's file name; only valid with a single input)")
-		noDemo = flag.Bool("no-demo", false, "do not fetch the demo for .brsnap/.brepstream inputs; the .brp then only has the metadata the stream itself carries")
+		outDir    = flag.String("out", "", "output directory (default: next to each input)")
+		idArg     = flag.String("id", "", "replay gameId or link used to fetch the demo metadata for a .brsnap/.brepstream input (default: the input's file name; only valid with a single input)")
+		noDemo    = flag.Bool("no-demo", false, "do not fetch the demo for .brsnap/.brepstream inputs; the .brp then only has the metadata the stream itself carries")
+		upload    = flag.String("upload", "", `after packing, upload the replay's static files to the worker's R2 bucket: "r2" (real bucket, needs wrangler auth) or "local" (the wrangler dev simulator)`)
+		workerDir = flag.String("worker-dir", "worker", "the Cloudflare worker project directory wrangler runs in (with -upload)")
 	)
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: barreplay-pack [flags] <capture.jsonl|capture.brsnap|capture.brepstream> [...]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: pack [flags] <capture.jsonl|capture.brsnap|capture.brepstream> [...]\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -56,7 +72,11 @@ func main() {
 		os.Exit(2)
 	}
 	if *idArg != "" && flag.NArg() > 1 {
-		fmt.Fprintln(os.Stderr, "barreplay-pack: -id applies to exactly one input")
+		fmt.Fprintln(os.Stderr, "pack: -id applies to exactly one input")
+		os.Exit(2)
+	}
+	if *upload != "" && *upload != "r2" && *upload != "local" {
+		fmt.Fprintf(os.Stderr, "pack: -upload must be \"r2\" or \"local\" (got %q)\n", *upload)
 		os.Exit(2)
 	}
 
@@ -66,8 +86,12 @@ func main() {
 	client := barapi.New()
 	failed := 0
 	for _, in := range flag.Args() {
-		if err := pack(ctx, client, in, *outDir, *idArg, *noDemo); err != nil {
-			fmt.Fprintf(os.Stderr, "barreplay-pack: %s: %v\n", in, err)
+		brpPath, err := pack(ctx, client, in, *outDir, *idArg, *noDemo)
+		if err == nil && *upload != "" {
+			err = uploadStatic(ctx, brpPath, *upload, *workerDir)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pack: %s: %v\n", in, err)
 			failed++
 		}
 	}
@@ -157,7 +181,7 @@ func demoMeta(ctx context.Context, client *barapi.Client, id string) (snapshot.M
 	if err != nil {
 		return snapshot.Meta{}, err
 	}
-	tmp, err := os.MkdirTemp("", "barreplay-pack-")
+	tmp, err := os.MkdirTemp("", "pack-demo-")
 	if err != nil {
 		return snapshot.Meta{}, err
 	}
@@ -192,7 +216,8 @@ func inferSampleEvery(frames []snapshot.Frame) int32 {
 	return best
 }
 
-func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, noDemo bool) error {
+// pack converts one input into <gameId>.brp and returns the written path.
+func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, noDemo bool) (string, error) {
 	gameID := strings.TrimSuffix(filepath.Base(in), filepath.Ext(in))
 	base := snapshot.Meta{GameID: gameID}
 	ext := strings.ToLower(filepath.Ext(in))
@@ -203,7 +228,7 @@ func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 		}
 		m, err := demoMeta(ctx, client, id)
 		if err != nil {
-			return fmt.Errorf("fetching demo metadata for %q: %w (pass -id <gameId|link> if the file name is not the gameId, or -no-demo to pack without map/version/player metadata)", id, err)
+			return "", fmt.Errorf("fetching demo metadata for %q: %w (pass -id <gameId|link> if the file name is not the gameId, or -no-demo to pack without map/version/player metadata)", id, err)
 		}
 		fmt.Fprintf(os.Stderr, "%s: demo metadata: map %q, game %q, engine %s, %d players\n",
 			in, m.MapName, m.GameVersion, m.EngineVersion, len(m.Players))
@@ -211,7 +236,7 @@ func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 	}
 	l, err := load(in, base)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if l.meta.GameID == "" {
 		l.meta.GameID = gameID
@@ -225,26 +250,26 @@ func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 	}
 	w, err := snapshot.NewBRPWriter(dir, gameID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := w.WriteMeta(l.meta); err != nil {
 		w.Close()
-		return err
+		return "", err
 	}
 	for _, fr := range l.frames {
 		if err := w.WriteFrame(fr); err != nil {
 			w.Close()
-			return err
+			return "", err
 		}
 	}
 	for _, e := range l.events {
 		if err := w.WriteEvent(e); err != nil {
 			w.Close()
-			return err
+			return "", err
 		}
 	}
 	if err := w.Close(); err != nil {
-		return err
+		return "", err
 	}
 
 	outPath := filepath.Join(dir, gameID+".brp")
@@ -255,6 +280,86 @@ func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 	}
 	fmt.Fprintf(os.Stderr, "%s (%.1f MB) -> %s (%.2f MB%s): %d frames, %d events\n",
 		in, mb(inSize), outPath, mb(outSize), ratio, len(l.frames), len(l.events))
+	return outPath, nil
+}
+
+// bucketName is the R2 bucket the worker binds (wrangler.jsonc); the same name
+// is used by the local dev simulator, matching worker/tools/upload.mjs.
+const bucketName = "barreplay-replays"
+
+// staticObjects packs brpPath's static-hosting files into dir (via the same
+// viz.WriteStaticBundle behind cmd/barreplay-static, so the bytes are
+// byte-identical to the dynamic server's) and returns the bucket keys to
+// upload, sorted, mapped to their local paths. index.json is deliberately
+// absent: the Worker builds the listing live from the bucket.
+func staticObjects(brpPath, dir string) (gameID string, objects map[string]string, err error) {
+	gameID, err = viz.WriteStaticBundle(brpPath, dir)
+	if err != nil {
+		return "", nil, err
+	}
+	objects = map[string]string{}
+	root := filepath.Join(dir, "replays")
+	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			return err
+		}
+		objects[filepath.ToSlash(rel)] = p
+		return nil
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	return gameID, objects, nil
+}
+
+// uploadStatic uploads one packed replay's static files to the worker's R2
+// bucket, one `npx wrangler r2 object put` per file (run inside workerDir, so
+// wrangler picks up the project's wrangler.jsonc, node_modules, and — for
+// "local" — the .wrangler dev-simulator state). target is "r2" or "local".
+func uploadStatic(ctx context.Context, brpPath, target, workerDir string) error {
+	if _, err := os.Stat(filepath.Join(workerDir, "wrangler.jsonc")); err != nil {
+		return fmt.Errorf("-upload needs the Cloudflare worker project: %w (run from the repo root, or point -worker-dir at it)", err)
+	}
+	tmp, err := os.MkdirTemp("", "pack-upload-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	gameID, objects, err := staticObjects(brpPath, tmp)
+	if err != nil {
+		return err
+	}
+	// Explicit --remote/--local: wrangler's own default for `r2 object put` is
+	// LOCAL, so a bare put would silently write to disk and never reach R2.
+	mode := "--remote"
+	where := "real R2"
+	if target == "local" {
+		mode = "--local"
+		where = "local wrangler dev simulator"
+	}
+	keys := make([]string, 0, len(objects))
+	for k := range objects {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	fmt.Fprintf(os.Stderr, "%s: uploading %d objects to %s (%s)\n", gameID, len(keys), bucketName, where)
+	for _, key := range keys {
+		file, err := filepath.Abs(objects[key])
+		if err != nil {
+			return err
+		}
+		cmd := exec.CommandContext(ctx, "npx", "wrangler", "r2", "object", "put", bucketName+"/"+key, "--file", file, mode)
+		cmd.Dir = workerDir
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("uploading %s: %w", key, err)
+		}
+		fmt.Fprintf(os.Stderr, "  put %s\n", key)
+	}
 	return nil
 }
 

@@ -98,7 +98,7 @@ offset  size  value
   re-encoded in every frame; y/dvy columns) and v3 (keyframes inside the
   chunks) existed only pre-release. Readers MUST reject any version byte other
   than 4. Older files cannot be converted in place; regenerate them from their
-  source `.brsnap`/`.jsonl` with `barreplay-pack`.
+  source `.brsnap`/`.jsonl` with `pack`.
 - Readers MUST skip sections with unknown tags (that is the format's
   forward-compatibility mechanism: new sections can be added without a version
   bump).
