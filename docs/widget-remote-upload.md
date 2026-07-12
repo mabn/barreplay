@@ -17,7 +17,7 @@ prerequisites turn out to already exist in Recoil:
 | Fixed constants (no per-game substitution) | **Works** | `sampleEvery` already falls back to 30; endpoint URL becomes a constant; the output-path substitution is simply not needed |
 | Compression | **Yes** | `VFS.ZlibCompress` is exposed to LuaUI |
 | Mergeable across players | **Yes, trivially** | Unit IDs are synced-sim state — identical on every client. Sampling at `frame % 30 == 0` aligns perfectly across uploaders, and synced reads at the same frame are bit-identical |
-| Live meta (map, versions) | **Yes** | `Game.mapName`, `Game.gameVersion`, `Engine.version` readable from Lua — no demo fetch needed (this even fixes the `barreplay-pack -no-demo` empty-mapName gap) |
+| Live meta (map, versions) | **Yes** | `Game.mapName`, `Game.gameVersion`, `Engine.version` readable from Lua — no demo fetch needed (this even fixes the `pack -no-demo` empty-mapName gap) |
 
 The two real constraints are **no TLS** (plain TCP/HTTP only — Recoil bundles
 vanilla LuaSocket, no luasec) and **LOS**: a playing player's widget can only see
@@ -115,7 +115,7 @@ Live-player mode must **not**: `spectatorfullview`, `setminspeed`/`setmaxspeed`,
 - keep the existing **local relative-path file write as a fallback journal**
   (LuaIO allows relative writes in live games too) so a dropped connection loses
   nothing — the file can be uploaded on reconnect or manually packed with
-  `barreplay-pack`;
+  `pack`;
 - pcall everything, bound the buffer (drop-oldest + tell the server), never let an
   error escape a callin (BAR unloads the widget on callin error).
 

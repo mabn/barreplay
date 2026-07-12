@@ -1,6 +1,6 @@
 // Command barreplay-viz serves an interactive browser playback of recorded
 // barreplay snapshots. It reads the .brp files a capture run wrote (convert
-// legacy .jsonl/.brsnap files once with barreplay-pack) and renders unit
+// legacy .jsonl/.brsnap files once with pack) and renders unit
 // positions, teams, and health over time on a top-down map with a timeline
 // scrubber. Frame data streams to the browser chunk by chunk, so playback
 // starts immediately and seeking anywhere is cheap.

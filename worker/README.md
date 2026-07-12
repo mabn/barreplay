@@ -75,6 +75,16 @@ chunk files, and it shows up in the picker immediately. For a bulk import, `rclo
 sync ./static/replays -> bucket/replays` against R2's S3 API works too (needs an R2 API
 token).
 
+For a fresh capture there is a one-step shortcut: `cmd/pack` converts the raw stream
+AND uploads in the same run (it shells out to the same `npx wrangler r2 object put`,
+so the auth requirements are identical):
+
+```sh
+# from the repo root:
+go run ./cmd/pack -upload r2 ./caps/<gameId>.brepstream      # convert + push to real R2
+go run ./cmd/pack -upload local ./caps/<gameId>.brepstream   # ...or seed the local dev simulator
+```
+
 ## Commands
 
 ```sh

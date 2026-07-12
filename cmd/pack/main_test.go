@@ -57,7 +57,7 @@ func TestPackBRSNAPWithDemoMeta(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := pack(context.Background(), mockBARClient(t), in, dir, "", false); err != nil {
+	if _, err := pack(context.Background(), mockBARClient(t), in, dir, "", false); err != nil {
 		t.Fatal(err)
 	}
 	meta, frames, events, err := readBRP(t, filepath.Join(dir, fixtureGameID+".brp"))
@@ -91,7 +91,7 @@ func TestPackBRSNAPWithIDFlag(t *testing.T) {
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := pack(context.Background(), mockBARClient(t), in, dir, fixtureGameID, false); err != nil {
+	if _, err := pack(context.Background(), mockBARClient(t), in, dir, fixtureGameID, false); err != nil {
 		t.Fatal(err)
 	}
 	meta, _, _, err := readBRP(t, filepath.Join(dir, "renamed-capture.brp"))
@@ -115,7 +115,7 @@ func TestPackBRSNAPBadNameErrors(t *testing.T) {
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := pack(context.Background(), mockBARClient(t), in, dir, "", false)
+	_, err := pack(context.Background(), mockBARClient(t), in, dir, "", false)
 	if err == nil || !strings.Contains(err.Error(), "-no-demo") {
 		t.Fatalf("err = %v, want a gameId error mentioning the -no-demo escape hatch", err)
 	}
@@ -128,7 +128,7 @@ func TestPackBRSNAPNoDemo(t *testing.T) {
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := pack(context.Background(), nil, in, dir, "", true); err != nil {
+	if _, err := pack(context.Background(), nil, in, dir, "", true); err != nil {
 		t.Fatal(err)
 	}
 	meta, _, _, err := readBRP(t, filepath.Join(dir, "not-a-game-id.brp"))
@@ -166,6 +166,44 @@ func TestInferSampleEvery(t *testing.T) {
 	} {
 		if got := inferSampleEvery(tc.frames); got != tc.want {
 			t.Errorf("inferSampleEvery(%v) = %d, want %d", tc.frames, got, tc.want)
+		}
+	}
+}
+
+// staticObjects (the -upload collection step) yields exactly the replay's
+// bucket keys — head, keys, resources, chunk files — and never index.json
+// (the Worker builds the listing live from the bucket).
+func TestStaticObjects(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "some-game.brsnap")
+	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	brpPath, err := pack(context.Background(), nil, in, dir, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	id, objects, err := staticObjects(brpPath, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "some-game" {
+		t.Errorf("gameID = %q", id)
+	}
+	for _, key := range []string{"replays/some-game.brw", "replays/some-game.keys", "replays/some-game.resources"} {
+		p, ok := objects[key]
+		if !ok {
+			t.Errorf("missing object %q (have %v)", key, objects)
+			continue
+		}
+		if fi, err := os.Stat(p); err != nil || fi.Size() == 0 {
+			t.Errorf("object %q file %q: err %v", key, p, err)
+		}
+	}
+	for key := range objects {
+		if !strings.HasPrefix(key, "replays/") {
+			t.Errorf("object %q outside replays/ (index.json must not be uploaded)", key)
 		}
 	}
 }

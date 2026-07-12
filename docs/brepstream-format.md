@@ -2,7 +2,7 @@
 
 The append-only stream `assets/lua/replay_uploader.lua` writes during a live
 game (`<write-dir>/<gameId>.brepstream`). Decoder: `internal/capture/brep.go`
-(`capture.ConsumeBrep`); `barreplay-pack` converts it to `.brp`. **Encoder
+(`capture.ConsumeBrep`); `pack` converts it to `.brp`. **Encoder
 (Lua) and decoder (Go) must evolve in lockstep**; the stream is versioned by
 its header line, and the widget copy on players' machines can never be
 force-updated — the decoder must keep accepting every version ever shipped.
