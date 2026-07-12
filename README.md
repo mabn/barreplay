@@ -26,6 +26,44 @@ replay link / gameId / local .sdfz
         ▼  snapshot             pluggable Writer persists them (.brp compact binary; legacy JSONL)
 ```
 
+### Format flows
+
+Every capture, whatever its origin, converges on the packed `.brp` — the **only**
+format the viewer is served (as the v4 wire pieces: `.brw` head + `.keys` +
+chunks + `.resources`):
+
+```mermaid
+flowchart LR
+    sdfz[".sdfz demo<br/>replay link / gameId"]
+    live["live game<br/>player runs<br/>replay_uploader.lua"]
+    brsnap[".brsnap<br/>text widget stream"]
+    breps[".brepstream<br/>binary widget stream"]
+    jsonl[".jsonl<br/>legacy v1 output"]
+    brp[".brp v4<br/>packed capture"]
+    bundle["static bundle<br/>.brw + .keys + chunks + .resources"]
+    r2[("R2 bucket")]
+    viz["barreplay-viz<br/>local server"]
+    worker["Cloudflare Worker"]
+    viewer["browser viewer<br/>worker/public app.js"]
+
+    sdfz -->|"barreplay re-sim<br/>spring-headless + widget"| brsnap
+    live -->|"own ally team, LOS-filtered"| breps
+    live -.->|"writeText debug twin"| brsnap
+    brsnap -->|"same barreplay run,<br/>or pack"| brp
+    breps -->|"pack<br/>+ demo metadata fetch"| brp
+    jsonl -->|"pack"| brp
+    brp -->|"barreplay-static<br/>or pack -upload"| bundle
+    bundle -->|"upload.ts<br/>S3 fast path / wrangler"| r2
+    r2 --> worker --> viewer
+    brp --> viz --> viewer
+```
+
+Not on the diagram on purpose: the parked TypeScript `.brepstream` splitter
+(`worker/src/breps/split.ts`) can slice a raw stream into version-5 wire pieces
+without transcoding, but the viewer deliberately rejects those (~1.4×+ larger
+than v4) — it exists only as the parsing foundation for a future in-worker
+`.brepstream → v4` transcoder.
+
 ### Package layout
 
 | Package | Responsibility |
