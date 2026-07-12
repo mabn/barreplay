@@ -23,7 +23,7 @@ go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, 
 go run ./cmd/barreplay-viz -snapshots ./snapshots        # serve the viewer at 127.0.0.1:8080
 go run ./cmd/pack ./caps/<gameId>.brsnap       # raw stream -> FULL .brp (fetches the demo for map/versions/players; -id overrides, -no-demo skips)
 go run ./cmd/pack ./caps/<gameId>.brepstream   # same for the Replay uploader widget's binary stream
-go run ./cmd/pack -upload r2 ./caps/<gameId>.brepstream   # ...and upload the packed .brp's static bundle ("local" targets the wrangler dev simulator)
+go run ./cmd/pack -upload r2 ./caps/<gameId>.brepstream   # ...and upload the packed .brp's static bundle ("local" targets the dev simulator) + register it in the worker's replay catalog (PUT /api/replays/<id>; -index-url or $BARREPLAY_INDEX_URL names the deployed worker, $REPLAY_PUT_TOKEN authenticates)
 go run ./cmd/barreplay-static -out ./static ./snapshots/*.brp   # pack .brp -> static bundle for R2 hosting (see worker/)
 ```
 
@@ -41,7 +41,13 @@ cmd/pack/main.go          CLI: convert .brsnap/.brepstream captures to .brp; -up
                           additionally uploads the packed .brp's static bundle (viz.WriteStaticBundle)
                           to the worker's R2 bucket via the worker project (run in -worker-dir,
                           default ./worker) so it appears in the deployed viewer with no redeploy —
-                          ALL inputs convert to .brp first; the viewer serves the .brp wire only
+                          ALL inputs convert to .brp first; the viewer serves the .brp wire only.
+                          After the upload it upserts the replay's stats into the worker's catalog
+                          (PUT <index-url>/api/replays/<id>, body from viz.BuildCatalogEntry;
+                          -index-url > $BARREPLAY_INDEX_URL > for "local" the vite dev URL, else
+                          skip with a warning; $REPLAY_PUT_TOKEN = bearer token when the worker
+                          guards writes). "local" uploads pass --local --preview because both dev
+                          servers (vite dev / wrangler dev) bind the PREVIEW bucket
 cmd/barreplay-static/main.go CLI: pack .brp -> static-file bundle (index.json + replays/**) for R2 hosting
 internal/barapi/          resolve gameId via api.bar-rts.com; download .sdfz from OVH
 internal/demofile/        gunzip + parse packed header + TDF startscript
@@ -51,7 +57,20 @@ internal/capture/         parse the widgets' streams -> snapshot records (BRSNAP
 internal/viz/             serve the viewer (SPA embedded from worker/) + the static-shaped replay URLs
 internal/viz/static.go    pack a .brp into plain static files (byte-identical to the served URLs) for serverless hosting
 worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as static files from R2 (no playback server);
-                          worker/public + worker/index.html are THE front-end (embedded into barreplay-viz via assets.go)
+                          worker/public + worker/index.html are THE front-end (embedded into barreplay-viz via assets.go).
+                          The replay CATALOG (per-game stats: start time, duration, map, team-size
+                          spec like "8v8", bundle bytes) lives in a SQLite table inside a Durable
+                          Object (src/worker/replayindex.ts, single instance, wrangler migration v1
+                          new_sqlite_classes): GET /api/replays lists it newest-game-first (null
+                          start times last), PUT /api/replays/<id> upserts (called by pack -upload;
+                          optionally guarded by the REPLAY_PUT_TOKEN wrangler secret as a bearer
+                          token). Row shape + PUT validation live in src/worker/replayentry.ts
+                          (pure, node-tested) and MUST stay in lockstep with internal/viz/catalog.go,
+                          which serves the same GET /api/replays computed live from .brp files so the
+                          shared front-end works against both backends. The front-end landing page
+                          (no ?replay= in the URL) renders the catalog as the replay list, merged
+                          with /index.json so an uploaded-but-unregistered replay still shows (stats
+                          dashed); picking a replay sets ?replay=, the header title returns to the list
 worker/src/breps/split.ts TypeScript .brepstream splitter (PARKED, not on any upload path): slices a
                           raw widget stream into static pieces without transcoding (BRW1 head with
                           VERSION BYTE 5 + keys + delta chunks). DECISION: the viewer serves the .brp
@@ -257,9 +276,12 @@ never touches the engine. `barreplay-viz -snapshots <dir> [-addr host:port]` sca
 dir for `.brp` files and serves the viewer. **The viz tool reads the current .brp
 version only** — convert a raw `.brsnap`/`.brepstream` once with `pack` (the
 converter owns the legacy parsing; viz has none). The viz server and the `worker/`
-static deployment share ONE URL scheme (`/index.json`, `/replays/<id>.brw`, `.keys`,
-`.resources`, `/replays/<id>/c<n>`), so the single front-end in `worker/public`
-works against both unchanged.
+static deployment share ONE URL scheme (`/index.json`, `/api/replays`,
+`/replays/<id>.brw`, `.keys`, `.resources`, `/replays/<id>/c<n>`), so the single
+front-end in `worker/public` works against both unchanged. `/api/replays` is the
+replay catalog (stats for the landing list — see the worker/ entry above): the
+worker serves it from its Durable Object table, the Go server computes the identical
+shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
 
 - **`internal/viz/wire.go` + `server.go`** implement the serving side:
   `/replays/<id>.brw` returns a small binary **"BRW1" container** (same section framing

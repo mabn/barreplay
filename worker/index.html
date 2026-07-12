@@ -8,12 +8,23 @@
 </head>
 <body>
 <header>
-  <h1>barreplay<span class="sub" id="subtitle">replay state viewer</span></h1>
+  <h1><a href="./" id="homelink" title="All replays">barreplay</a><span class="sub" id="subtitle">replay state viewer</span></h1>
   <div id="picker">
     <label for="file">Replay</label>
     <select id="file"></select>
   </div>
 </header>
+
+<!-- Landing view: the replay list (shown when no ?replay= is selected). -->
+<div id="home" style="display:none">
+  <table id="hometable">
+    <thead>
+      <tr><th>Started</th><th>Duration</th><th>Map</th><th>Size</th><th class="num">Data</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <div id="homemsg" class="hint" style="display:none"></div>
+</div>
 
 <div class="controls">
   <button id="first" title="First frame">⏮</button>

@@ -19,9 +19,45 @@
 
 import { Hono } from "hono";
 
+import { sanitizeEntry } from "./replayentry";
+import { ReplayIndex } from "./replayindex";
+
+export { ReplayIndex };
+
 const app = new Hono<{ Bindings: Env }>();
 
 app.get("/api/health", (c) => c.json({ status: "ok" }));
+
+// The replay catalog lives in the ReplayIndex Durable Object (one SQLite
+// table, single instance). GET lists every replay with its picker stats,
+// most recent game first; PUT is an upsert called by `pack -upload` right
+// after a replay's static files land in the bucket.
+const indexStub = (env: Env) => env.REPLAY_INDEX.get(env.REPLAY_INDEX.idFromName("index"));
+
+app.get("/api/replays", async (c) => {
+  const list = await indexStub(c.env).list();
+  return c.json(list, 200, { "cache-control": "no-cache" });
+});
+
+// Writes are guarded by a shared secret when the REPLAY_PUT_TOKEN secret is
+// configured on the Worker (`wrangler secret put REPLAY_PUT_TOKEN`); without
+// it (local dev) the endpoint is open.
+app.put("/api/replays/:id", async (c) => {
+  const token = c.env.REPLAY_PUT_TOKEN;
+  if (token && c.req.header("authorization") !== `Bearer ${token}`) {
+    return c.json({ error: "unauthorized" }, 401);
+  }
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "body must be JSON" }, 400);
+  }
+  const entry = sanitizeEntry(c.req.param("id"), body);
+  if (typeof entry === "string") return c.json({ error: entry }, 400);
+  await indexStub(c.env).upsert(entry);
+  return c.json({ ok: true });
+});
 
 // The replay listing is built live from the bucket (list the replays/ prefix), so
 // uploading a single replay's files makes it appear with no index.json to maintain.

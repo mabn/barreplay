@@ -32,6 +32,11 @@ type Server struct {
 	// one or two replays at a time).
 	mu    sync.Mutex
 	cache map[string]*cacheEntry
+
+	// catalog caches each file's /api/replays row (also mu-guarded,
+	// mtime+size-keyed). Separate from cache and unbounded: a row is a few
+	// dozen bytes, and the listing must not evict parsed playback files.
+	catalog map[string]*catalogCacheEntry
 }
 
 const cacheMaxEntries = 4
@@ -98,6 +103,7 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/ranks/", http.StripPrefix("/ranks/", cacheForever(http.FileServer(http.FS(sub)))))
 	}
 	mux.HandleFunc("/index.json", s.handleList)
+	mux.HandleFunc("/api/replays", s.handleCatalog)
 	mux.HandleFunc("/replays/", s.handleReplays)
 	return mux
 }
@@ -141,6 +147,80 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, infos)
+}
+
+type catalogCacheEntry struct {
+	mtime time.Time
+	size  int64
+	entry CatalogEntry
+}
+
+// handleCatalog returns the replay catalog (GET /api/replays): the same JSON
+// shape the Cloudflare worker serves from its Durable Object table, computed
+// live here from each .brp's meta — id, start time, duration, map, team-size
+// spec, byte size — most recently started game first.
+func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
+	files, err := s.list()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	entries := make([]CatalogEntry, 0, len(files))
+	for _, f := range files {
+		e, err := s.catalogEntry(f.File)
+		if err != nil {
+			continue // an unreadable/corrupt file just drops from the catalog
+		}
+		entries = append(entries, e)
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		a, b := entries[i].StartUnix, entries[j].StartUnix
+		switch {
+		case a != nil && b != nil && *a != *b:
+			return *a > *b // newest first
+		case (a != nil) != (b != nil):
+			return a != nil // rows without a start time sort last
+		default:
+			return entries[i].ID < entries[j].ID
+		}
+	})
+	writeJSON(w, entries)
+}
+
+// catalogEntry builds (or reuses) one file's catalog row. Cached by
+// mtime+size like the playback cache, but kept separately so listing many
+// replays cannot evict parsed playback files.
+func (s *Server) catalogEntry(name string) (CatalogEntry, error) {
+	path := filepath.Join(s.Dir, name+".brp")
+	fi, err := os.Stat(path)
+	if err != nil {
+		return CatalogEntry{}, err
+	}
+	s.mu.Lock()
+	if s.catalog == nil {
+		s.catalog = map[string]*catalogCacheEntry{}
+	}
+	if e, ok := s.catalog[name]; ok && e.mtime.Equal(fi.ModTime()) && e.size == fi.Size() {
+		s.mu.Unlock()
+		return e.entry, nil
+	}
+	s.mu.Unlock()
+
+	f, err := os.Open(path)
+	if err != nil {
+		return CatalogEntry{}, err
+	}
+	bf, perr := snapshot.ParseBRP(f)
+	f.Close()
+	if perr != nil {
+		return CatalogEntry{}, perr
+	}
+	entry := BuildCatalogEntry(name, bf, fi.Size())
+
+	s.mu.Lock()
+	s.catalog[name] = &catalogCacheEntry{mtime: fi.ModTime(), size: fi.Size(), entry: entry}
+	s.mu.Unlock()
+	return entry, nil
 }
 
 // get returns the parsed .brp for a validated id, from cache when the file
