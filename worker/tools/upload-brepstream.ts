@@ -1,7 +1,9 @@
-// Split a raw .brepstream capture into its static R2 pieces (src/breps/
-// split.ts) and upload them to the worker's bucket, one `wrangler r2 object
-// put` per piece — the brepstream twin of tools/upload.ts. `pack -upload`
-// shells out to this for .brepstream inputs.
+// EXPERIMENT HARNESS — not an upload path. Splits a raw .brepstream capture
+// into version-5 static pieces (src/breps/split.ts) and uploads them; the
+// viewer deliberately rejects version 5 (it serves the .brp wire only — see
+// the README's "parked" note). Kept for exercising the splitter (--out) and
+// as scaffolding for the planned TS transcoder. To publish a .brepstream,
+// convert it: `go run ./cmd/pack -upload r2 <file>.brepstream`.
 //
 //   npx tsx tools/upload-brepstream.ts <file.brepstream> [--local] [--out <dir>]
 //

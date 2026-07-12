@@ -1,5 +1,12 @@
 // .brepstream -> R2 static pieces, in TypeScript (no Go anywhere near a deploy).
 //
+// STATUS: PARKED. The viewer serves exactly one wire format — the version-4
+// .brp pieces — because brepstream-encoded chunks are ~1.4x+ larger served.
+// Nothing may upload this module's version-5 output for playback. The
+// preamble/record-framing parsing below is kept (and test-pinned) as the
+// foundation for the planned TS transcoder (brepstream -> .brp-wire pieces)
+// that an in-worker upload API will need.
+//
 // The Replay uploader widget's binary stream (spec: docs/brepstream-format.md)
 // was designed so a server can SPLIT it without transcoding: records are
 // length-framed (<tag u8><len u32le><payload>), keyframes are flagged at a

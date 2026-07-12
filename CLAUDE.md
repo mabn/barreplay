@@ -24,7 +24,7 @@ go run ./cmd/barreplay-viz -snapshots ./snapshots        # serve the viewer at 1
 go run ./cmd/pack ./snapshots/*.jsonl          # shrink legacy captures to .brp
 go run ./cmd/pack ./caps/<gameId>.brsnap       # raw stream -> FULL .brp (fetches the demo for map/versions/players; -id overrides, -no-demo skips)
 go run ./cmd/pack ./caps/<gameId>.brepstream   # same for the Replay uploader widget's binary stream
-go run ./cmd/pack -upload r2 ./caps/<gameId>.brepstream   # ...and upload the RAW stream, split into breps-format pieces by the worker's TS splitter ("local" targets the wrangler dev simulator; non-brepstream inputs upload the .brp static bundle instead)
+go run ./cmd/pack -upload r2 ./caps/<gameId>.brepstream   # ...and upload the packed .brp's static bundle ("local" targets the wrangler dev simulator)
 go run ./cmd/barreplay-static -out ./static ./snapshots/*.brp   # pack .brp -> static bundle for R2 hosting (see worker/)
 ```
 
@@ -39,11 +39,10 @@ BAR API serving that same fixture. None of them launch the engine or touch the n
 cmd/barreplay/main.go     CLI: link/gameId/.sdfz -> full pipeline
 cmd/barreplay-viz/main.go CLI: serve the browser playback UI over a snapshots dir
 cmd/pack/main.go          CLI: convert .jsonl/.brsnap/.brepstream captures to .brp; -upload r2|local
-                          additionally uploads to the worker's R2 bucket via the worker project (run
-                          in -worker-dir, default ./worker) so it appears in the deployed viewer with
-                          no redeploy: a .brepstream hands its RAW stream to the TS splitter
-                          (worker/src/breps/split.ts via tools/upload-brepstream.ts); other inputs
-                          upload the packed .brp's static bundle (viz.WriteStaticBundle + wrangler)
+                          additionally uploads the packed .brp's static bundle (viz.WriteStaticBundle)
+                          to the worker's R2 bucket via the worker project (run in -worker-dir,
+                          default ./worker) so it appears in the deployed viewer with no redeploy —
+                          ALL inputs convert to .brp first; the viewer serves the .brp wire only
 cmd/barreplay-static/main.go CLI: pack .brp -> static-file bundle (index.json + replays/**) for R2 hosting
 internal/barapi/          resolve gameId via api.bar-rts.com; download .sdfz from OVH
 internal/demofile/        gunzip + parse packed header + TDF startscript
@@ -54,19 +53,20 @@ internal/viz/             serve the viewer (SPA embedded from worker/) + the sta
 internal/viz/static.go    pack a .brp into plain static files (byte-identical to the served URLs) for serverless hosting
 worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as static files from R2 (no playback server);
                           worker/public + worker/index.html are THE front-end (embedded into barreplay-viz via assets.go)
-worker/src/breps/split.ts TypeScript .brepstream splitter: slices a raw widget stream into breps-format
-                          static pieces WITHOUT transcoding (keys stream + per-keyframe delta chunk
-                          files + a BRW1 head with VERSION BYTE 5 carrying gzipped JSON meta/events/
-                          bounds/chunk index) — third reader of the brepstream format after the Lua
-                          encoder and Go decoder; worker/tests/split.test.ts pins it to the same
-                          harness fixture (npm test = tsx --test). The viewer has NO breps decoder
-                          yet: uploaded breps replays list but fail with "unsupported payload
-                          version 5" until it lands. CLI: tools/upload-brepstream.ts (npm run
-                          upload-brep) splits + uploads to R2, head (.brw, the listing marker) last.
-                          Uploads (this + tools/upload.ts, ex-upload.mjs) go through tools/r2put.ts:
-                          parallel S3 PUTs when R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY are set (fast,
-                          aws4fetch), else parallel `wrangler r2 object put`; .brw heads upload after
-                          a completion barrier so a half-uploaded replay never lists
+worker/src/breps/split.ts TypeScript .brepstream splitter (PARKED, not on any upload path): slices a
+                          raw widget stream into static pieces without transcoding (BRW1 head with
+                          VERSION BYTE 5 + keys + delta chunks). DECISION: the viewer serves the .brp
+                          wire (v4) ONLY — brepstream chunks are ~1.4x+ larger served, so nothing may
+                          upload v5 pieces for playback. The module's preamble/record parsing is the
+                          foundation for the planned TS transcoder (.brepstream -> v4 pieces) that the
+                          future in-worker upload API needs; worker/tests/split.test.ts keeps it
+                          pinned to the same harness fixture as the Lua<->Go lockstep (npm test =
+                          tsx --test). CLI tools/upload-brepstream.ts (npm run upload-brep) still
+                          exists for experiments only. Uploads (tools/upload.ts, ex-upload.mjs) go
+                          through tools/r2put.ts: parallel S3 PUTs when R2_ACCESS_KEY_ID/
+                          R2_SECRET_ACCESS_KEY are set (fast, aws4fetch), else parallel `wrangler r2
+                          object put`; .brw heads upload after a completion barrier so a
+                          half-uploaded replay never lists
 snapshot/                 PUBLIC data model + pluggable Writer (owns on-disk format; current .brp binary, legacy v1 JSONL)
 assets/lua/snapshot_widget.lua   embedded, read-only sampler (go:embed)
 assets/lua/replay_uploader.lua   player-installable live-game variant: constants only (no
