@@ -69,8 +69,12 @@ worker/src/breps/split.ts TypeScript .brepstream splitter (PARKED, not on any up
 snapshot/                 PUBLIC data model + pluggable Writer (owns the on-disk format: the .brp binary)
 assets/lua/snapshot_widget.lua   embedded, read-only sampler (go:embed)
 assets/lua/replay_uploader.lua   player-installable live-game variant: constants only (no
-                          substitution tokens), records the player's own ally team
-                          (LOS-filtered) to <write-dir>/<gameId>.brepstream — a binary
+                          substitution tokens), records the player's own ally team plus, by
+                          default (recordEnemies const), enemy units while visible (LOS or
+                          radar; unidentified radar contacts carry def 0) with last-known
+                          "ghost" persistence after visibility loss — frozen, zero-byte in
+                          the delta codec, buried only on a witnessed death —
+                          to <write-dir>/<gameId>.brepstream — a binary
                           keyframe+delta stream (spec: docs/brepstream-format.md, decoder:
                           internal/capture/brep.go, ~6.5x smaller and ~4x cheaper per sample
                           than the text stream) — named via the "GameID" GameRulesParam

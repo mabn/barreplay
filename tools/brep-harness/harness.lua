@@ -1,7 +1,8 @@
 -- Harness for assets/lua/replay_uploader.lua: stubs the Spring/VFS API, runs
 -- the real widget with BOTH emitters enabled over a deterministic simulated
--- game (movers, stationary structures, births, deaths, damage, an enemy team
--- that must be filtered out), and leaves <gameId>.brsnap + <gameId>.brepstream
+-- game (movers, stationary structures, births, deaths, damage, and an enemy
+-- team with scripted LOS/radar visibility windows exercising enemy recording
+-- + ghost persistence), and leaves <gameId>.brsnap + <gameId>.brepstream
 -- in the current directory.
 --
 -- The pair is committed as internal/capture/testdata fixtures (text gzipped);
@@ -59,16 +60,57 @@ local function addUnit(team, mobile)
 end
 
 -- 40 friendly units (teams 0/2 -> ally 0; 60% stationary) + 12 enemy units
--- (team 1 -> ally 1) the widget must drop.
+-- (team 1 -> ally 1) with scripted visibility windows (below) that exercise
+-- the widget's enemy recording + ghost persistence.
 for i = 1, 40 do
 	addUnit((i % 2 == 0) and 2 or 0, rnd() > 0.6)
 end
+
+-- Enemy visibility schedules: ranges {fromSample, toSample, state}, hardcoded
+-- on purpose — stub call COUNTS depend on widget internals, so driving
+-- visibility or wobble from the shared LCG would couple fixture bytes to the
+-- widget beyond the codec. States: "los" (full data), "radar" (returned by
+-- GetAllUnits but def/health/velocity read back nil and the position wobbles;
+-- team stays readable, matching the live engine), no window = invisible.
+-- Context: keyframes land at samples 0/64 (segment 1) and 74/138 (segment 2);
+-- the widget is disabled for samples 70..73; two deaths are fired in view at
+-- s=44 and s=100 (see the main loop).
+local enemyVis = {
+	{ { 5, 999, "los" } },                                         -- id 123: in view until destroyed at s=100
+	{ { 10, 29, "los" }, { 30, 39, "radar" } },                    -- id 126: LOS -> radar -> ghost across keyframe 64
+	{ { 20, 34, "radar" } },                                       -- id 129: never typed (def 0), then untyped ghost
+	{ { 80, 94, "los" }, { 110, 124, "los" } },                    -- id 132: ghost -> live again -> ghost across keyframe 138
+	{ { 71, 73, "los" } },                                         -- id 135: visible only while the widget is disabled
+	{ { 0, 49, "los" } },                                          -- id 138: in the first keyframe, ghost until the segment restart
+	{ { 55, 63, "los" } },                                         -- id 141: vanishes exactly at keyframe 64
+	{ { 0, 999, "los" } },                                         -- id 144: plain live enemy across both segments
+	{ { 90, 999, "radar" } },                                      -- id 147: wobbling blip to the end
+	{ { 15, 24, "los" }, { 25, 44, "radar" }, { 45, 54, "los" } }, -- id 150: identity carried through radar
+	{ { 30, 44, "los" } },                                         -- id 153: destroyed in view at s=44 (segment 1)
+	{ { 0, 20, "los" }, { 40, 60, "los" } },                       -- id 156: ghost gap inside segment 1
+}
 for i = 1, 12 do
-	addUnit(1, true)
+	addUnit(1, true).vis = enemyVis[i]
 end
 
 local allyOf = { [0] = 0, [1] = 1, [2] = 0 }
 local curFrame = 0
+
+-- visState returns "los"/"radar"/nil for the CURRENT sample; friendlies (no
+-- schedule) are always in LOS.
+local function visState(u)
+	if not u.vis then
+		return "los"
+	end
+	local s = math.floor(curFrame / sampleEvery)
+	for i = 1, #u.vis do
+		local w = u.vis[i]
+		if s >= w[1] and s <= w[2] then
+			return w[3]
+		end
+	end
+	return nil
+end
 
 local function advance()
 	for _, id in ipairs(order) do
@@ -127,18 +169,42 @@ Spring = {
 	GetAllUnits = function()
 		local out = {}
 		for i = 1, #order do
-			out[i] = order[i]
+			if visState(units[order[i]]) ~= nil then
+				out[#out + 1] = order[i]
+			end
 		end
 		return out
 	end,
-	GetUnitPosition = function(id) local u = units[id]; return u.x, 25, u.z end,
-	GetUnitDefID = function(id) return units[id].def end,
-	GetUnitTeam = function(id) return units[id].team end,
+	GetUnitPosition = function(id)
+		local u = units[id]
+		if visState(u) == "radar" then
+			-- Deterministic wobble, LCG-free (see the enemyVis comment).
+			return u.x + ((id * 7919 + curFrame * 131) % 65) - 32, 25,
+				u.z + ((id * 104729 + curFrame * 37) % 65) - 32
+		end
+		return u.x, 25, u.z
+	end,
+	GetUnitDefID = function(id)
+		if visState(units[id]) == "radar" then
+			return nil -- untyped radar contact
+		end
+		return units[id].def
+	end,
+	GetUnitTeam = function(id) return units[id].team end, -- readable even on radar
 	GetUnitHealth = function(id)
 		local u = units[id]
+		if visState(u) == "radar" then
+			return nil
+		end
 		return u.hp, u.maxHp, 0, 0, u.build
 	end,
-	GetUnitVelocity = function(id) local u = units[id]; return u.vx, 0, u.vz end,
+	GetUnitVelocity = function(id)
+		local u = units[id]
+		if visState(u) == "radar" then
+			return nil
+		end
+		return u.vx, 0, u.vz
+	end,
 	GetGameSeconds = function() return curFrame / 30 end,
 	GetGameFrame = function() return curFrame end,
 	GetTeamList = function() return { 0, 1, 2 } end,
@@ -211,8 +277,33 @@ for s = 0, SAMPLES - 1 do
 		widget:Initialize() -- no GameID callin this time
 		widgetActive = true
 	end
-	-- Births and deaths (friendly only, so both emitters see them). The world
-	-- moves on while the widget is disabled; those events are simply lost.
+	-- Scripted enemy lifecycle: a mid-game enemy birth in view (s=85) and two
+	-- deaths witnessed in LOS (the widget must bury those units' ghosts).
+	-- Enemies that die out of view don't exist here — an invisible unit just
+	-- keeps (or ends) its window and its ghost persists.
+	if s == 85 then
+		local u = addUnit(1, true)
+		u.vis = { { 85, 99, "los" }, { 100, 109, "radar" } }
+		if widgetActive then
+			widget:UnitCreated(u.id, u.def, u.team)
+		end
+	end
+	if s == 44 or s == 100 then
+		local id = (s == 44) and 153 or 123
+		local u = units[id]
+		if widgetActive then
+			widget:UnitDestroyed(id, u.def, u.team)
+		end
+		units[id] = nil
+		for i = 1, #order do
+			if order[i] == id then
+				table.remove(order, i)
+				break
+			end
+		end
+	end
+	-- Births and deaths (friendly only). The world moves on while the widget
+	-- is disabled; those events are simply lost.
 	if s % 7 == 3 then
 		local u = addUnit(0, true)
 		if widgetActive then

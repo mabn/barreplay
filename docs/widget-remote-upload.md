@@ -71,8 +71,9 @@ with no correlation logic at all.
 - `UnitCreated/UnitFinished/UnitDestroyed` callins fire only for visible units.
 
 So the natural unit of contribution is: **one uploader covers one ally team,
-fully**. Enemy-LOS data is optional extra (see below), not needed for
-reconstruction.
+fully**. Enemy-LOS data is a bonus layer on top (recorded by default since
+widget 1.1.0 — see risk 6), useful on its own but not needed for
+reconstruction when every ally team has an uploader.
 
 **Key merge property:** because unit IDs, frame numbers, and all synced values are
 identical on every client, two uploaders on the *same* ally team (same widget
@@ -81,8 +82,15 @@ is therefore not a fuzzy-reconciliation problem:
 
 - same ally team → line-level dedupe (and any mismatch is a red flag: forged data
   or version skew);
-- different ally teams → per-frame union keyed by unitID (disjoint by
-  construction, since each side records only its own units).
+- different ally teams → per-frame union keyed by unitID. With the widget's
+  default `recordEnemies` (v1.1+) the sets are no longer disjoint: each stream
+  also carries the *other* side's units as this side perceived them (LOS/radar
+  readings, frozen "ghosts" after visibility loss — see the format doc). Those
+  records are best-effort views, not ground truth, so the union must prefer the
+  owning ally team's own records for any unit both sides report; the GAME
+  line's `recordEnemies` + `allyTeam` fields identify which records are
+  authoritative. Streams with `recordEnemies` false keep the old
+  disjoint-by-construction property.
 
 A full capture needs **≥1 uploader per ally team**. A spectator running the widget
 sees everything (specs bypass LOS) and is a complete capture on their own — the
@@ -199,10 +207,17 @@ full version under the same gameId.
    sampling at their join frame; a player alt-F4 truncates their stream. Per-frame
    union handles it naturally; coverage metadata should expose the gaps rather
    than hide them.
-6. **Enemy-LOS data.** Deliberately excluded from v1 (wobbled positions, nil
-   defIDs, flickering presence would fight the delta codec and double-report units
-   both sides see). If ever wanted for "what did this team know" views, it should
-   be a separate tagged line (`UE`), not merged into the ground-truth unit set.
+6. **Enemy-LOS data.** Recorded since widget 1.1.0 (the `recordEnemies`
+   constant, default on): enemy units are captured inline as this client
+   perceives them — appearing on LOS/radar detection, frozen at last-known
+   state as immobile "ghosts" once visibility is lost (the delta codec's
+   zero-byte predicted case, so ghosts are ~free on the wire), buried only on
+   a witnessed death. The v1 concerns became merge-side rules instead of an
+   exclusion: enemy records double-report units the owning side records
+   exactly, so the merge must treat them as non-authoritative (see the merge
+   property above); wobbled radar positions and unidentified contacts (def 0)
+   are recorded as-is — they are what the player actually knew. An enemy that
+   dies unseen stays a ghost for the rest of the stream.
 
 ## Alternatives considered (for contrast)
 

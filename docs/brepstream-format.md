@@ -132,12 +132,29 @@ win comes overwhelmingly from *omitting* predicted units (~2/3 of records in a
 real game), and absolute columns keep both the Lua encoder and the Go decoder
 trivial.
 
+## Enemy units and ghosts (widget ≥ 1.1, `recordEnemies`)
+
+Semantics only — the wire format above is unchanged, and no reader needs to
+know. When the emitting widget records enemy units (the `recordEnemies` GAME
+field, default on), a frame's unit set is *what the recording client knew*,
+not ground truth: enemy units appear while in LOS or on radar, and a unit that
+leaves visibility stays in the stream **frozen at its last-known state** with
+`dvx = dvz = 0` (a "ghost") — exactly the delta codec's zero-byte predicted
+case — until it is seen again or seen dying. Only witnessed deaths reach the
+dead list (`UnitDestroyed` fires only for visible units); an enemy that dies
+unseen remains a ghost to the end of the stream. `def` 0 means a radar
+contact never identified (there is no unit-def 0); once the unit is typed the
+def/team columns upgrade in place, and identity/health are carried over a
+later radar-only phase rather than degrading back to 0. Radar-only positions
+are the engine's wobbled readings.
+
 ## Preamble
 
 Identical line grammar to `.brsnap` so `internal/capture`'s parser is shared:
 `GID` (the 32-hex gameId, always the first line after the header), `GAME`
 (JSON: protocol, widgetVersion (semver of the emitting widget), mode
-live/replay, map, game/engine versions, sampleEvery, gameSpeed, recording
+live/replay, map, game/engine versions, sampleEvery, gameSpeed, recordEnemies
+(whether the stream carries enemy units/ghosts — see above), recording
 player id/allyTeam/spectator), `DEF` (full unit-def
 JSON), `T`, `P`, `READY`. The `GAME` line's `sampleEvery`/`gameSpeed` feed
 velocity de-quantization and frame timestamps (`t = frame/gameSpeed`);

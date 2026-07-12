@@ -2,7 +2,8 @@
 --
 -- A player-installable variant of the BAR Replay Snapshotter (snapshot_widget.lua):
 -- it runs during a LIVE game on a player's machine, samples the units the player
--- can legitimately see (their own ally team; everything when spectating with full
+-- can legitimately see (their own ally team fully; enemy units while in LOS or
+-- radar — see recordEnemies below; everything when spectating with full
 -- view), and records them to <write-dir>/<gameId>.brepstream — a compact binary
 -- stream (columnar VFS.Pack* frames, keyframe + changed-units-only delta). The
 -- legacy text stream (<gameId>.brsnap) is kept behind the writeText constant as
@@ -61,12 +62,12 @@
 -- it is reported in GetInfo, the load Echo, and the stream's GAME line, so
 -- every capture records which encoder produced it (the copy on a player's
 -- machine can be arbitrarily old — the server/decoder needs to know).
-local widgetVersion = "1.0.0"
+local widgetVersion = "1.1.0"
 
 function widget:GetInfo()
 	return {
 		name    = "Replay uploader",
-		desc    = "Records unit snapshots of your team to <gameId>.brepstream for post-game replay visualization.",
+		desc    = "Records unit snapshots (your team + visible enemies) to <gameId>.brepstream for post-game replay visualization.",
 		author  = "barreplay",
 		version = widgetVersion,
 		date    = "2026",
@@ -86,6 +87,19 @@ local protocolVersion = 2
 -- If the engine lacks VFS.Pack* the widget falls back to text automatically.
 local writeBinary = true
 local writeText = false
+
+-- Enemy recording: units of other ally teams are recorded while visible (in
+-- LOS or on radar — Spring.GetAllUnits already returns only what this client
+-- can see, so the engine is the visibility filter). A previously seen enemy
+-- that drops out of visibility is NOT marked dead: it stays in the stream as
+-- an immobile "ghost" frozen at its last-known state (velocity zero) until it
+-- is seen again or seen dying (UnitDestroyed only fires for deaths in view; a
+-- unit that dies unseen remains a ghost — the capture shows what this player
+-- knew). Radar-only contacts are recorded immediately: their position is the
+-- engine's wobbled radar reading, and unreadable columns fall back to the
+-- last-known value (def 0 = never identified). false restores the pre-1.1
+-- own-ally-team-only behavior.
+local recordEnemies = true
 
 -- Sampling interval in sim frames (30 = 1 Hz at BAR's 30 fps sim). A constant:
 -- every uploader in a game must sample at the same frames (frame % sampleEvery
@@ -373,11 +387,15 @@ local function defJSON(defID, ud)
 end
 
 -- ---------------------------------------------------------------------------
--- Visibility filter. A playing client's Get* calls are LOS-gated: own ally team
--- is fully readable, enemies flicker in and out with wobbled radar positions
--- and nil defIDs. Recording those would poison the merged capture, so a player
--- records ONLY units of their own ally team; a full-view spectator (LOS-free)
--- records everything. Team->allyteam is static, built once in the preamble.
+-- Visibility. A playing client's Get* calls are LOS-gated: the own ally team
+-- is fully readable; enemies flicker in and out of GetAllUnits with wobbled
+-- radar positions and nil defIDs (until identified). With recordEnemies the
+-- widget records enemies exactly as this client perceives them and freezes
+-- them as ghosts when they vanish (see the flag comment above); with it off, a
+-- player records ONLY units of their own ally team. A full-view spectator
+-- (LOS-free) always records everything — and there absence from GetAllUnits
+-- means the unit really died, so the ghost machinery is bypassed.
+-- Team->allyteam is static, built once in the preamble.
 
 local allyTeamOf = {} -- teamID -> allyTeam
 local myAllyTeam = -1
@@ -406,6 +424,7 @@ local function buildPreamble()
 		{ "engineVersion", Engine and (Engine.versionFull or Engine.version) or nil },
 		{ "sampleEvery", sampleEvery },
 		{ "gameSpeed", gameSpeed },
+		{ "recordEnemies", recordEnemies },
 		{ "playerID", spGetMyPlayerID and spGetMyPlayerID() or nil },
 		{ "allyTeam", spGetMyAllyTeamID and spGetMyAllyTeamID() or nil },
 		{ "spectator", spec and true or false },
@@ -444,6 +463,18 @@ end
 -- the sim frame the unit was last seen (dead detection without a second table).
 local prev = {}
 local sampleIdx = 0 -- samples emitted so far; every keyframeEvery-th is a keyframe
+
+-- Last-known QUANTIZED state of every enemy unit sampled (the ghost source,
+-- recordEnemies only). Unlike prev this survives the keyframe prev = {} reset
+-- — ghosts must be restated in every keyframe or the decoder drops them.
+-- g.f = sim frame the unit was last seen live. Entries are removed on a
+-- witnessed UnitDestroyed, when the id reappears as a non-enemy unit (the
+-- engine reuses unit ids), and wholesale under full view (absence = death).
+local ghosts = {}
+
+-- Wire team is u8 and 0 is a real team id, so an unknown team must not map to
+-- 0 (it would paint the unit as the recording player's). Real ids are 0..254.
+local unknownTeam = 255
 
 -- Reusable column buffers for the changed-unit list. Pack* reads the array
 -- part [1..n]; n is tracked explicitly and stale tails are never packed
@@ -506,6 +537,14 @@ local function sample(frame)
 		end
 	end
 
+	-- Under full view absence from GetAllUnits means the unit really died, so
+	-- ghost persistence must not apply. Also covers a player who died/resigned
+	-- into full view mid-game: their accumulated ghosts either reappear live
+	-- below or age into the dead list.
+	if all and next(ghosts) ~= nil then
+		ghosts = {}
+	end
+
 	-- Text lines (writeText) and binary changed-columns (writeBinary) are
 	-- filled in one pass so Spring.Get* runs once per unit either way.
 	local ulines = writeText and {} or nil
@@ -517,18 +556,40 @@ local function sample(frame)
 	for i = 1, total do
 		local unitID = units[i]
 		local team = spGetUnitTeam(unitID)
-		if all or (team ~= nil and allyTeamOf[team] == myAllyTeam) then
+		local isAlly = (team ~= nil and allyTeamOf[team] == myAllyTeam)
+		if all or isAlly or recordEnemies then
+			local isEnemy = recordEnemies and not all and not isAlly
+			local g = isEnemy and ghosts[unitID] or nil
 			recorded = recorded + 1
 			local x, y, z = spGetUnitPosition(unitID)
 			local defID = spGetUnitDefID(unitID)
 			local hp, maxHp, _, _, buildProgress = spGetUnitHealth(unitID)
 			local vx, vy, vz = spGetUnitVelocity(unitID)
+			-- Radar-only enemies read back nils (def/health unreadable, the
+			-- position wobbled): carry the last-known identity/health from the
+			-- ghost entry so a typed unit does not degrade to an untyped blip.
+			-- Both emitters use these effective values — the fixture test
+			-- cross-checks def/team between the two streams EXACTLY.
+			local edef = defID or (g and g.def) or 0
+			local eteam = team or (g and g.team) or (isEnemy and unknownTeam or 0)
+			local ehp, emaxHp, ebuild
+			if hp == nil and g ~= nil then
+				ehp, emaxHp, ebuild = g.hp, g.maxhp, g.b / 255
+			else
+				ehp, emaxHp, ebuild = hp or 0, maxHp or 0, buildProgress or 1
+			end
 			if ulines then
 				ulines[#ulines + 1] = string.format("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f %.2f %.2f %.2f %.3f",
-					unitID, defID or -1, team or -1, x or 0, y or 0, z or 0, hp or 0, maxHp or 0,
-					vx or 0, vy or 0, vz or 0, buildProgress or 1)
+					unitID, edef, eteam, x or 0, y or 0, z or 0, ehp, emaxHp,
+					vx or 0, vy or 0, vz or 0, ebuild)
 			end
-			if writeBinary then
+			if not isEnemy and recordEnemies and ghosts[unitID] ~= nil then
+				ghosts[unitID] = nil -- the engine reused a ghost's id for a non-enemy unit
+			end
+			-- Quantization also runs for enemies in the text-only fallback:
+			-- the ghost table stores quantized values so ghost emission is
+			-- identical in both formats.
+			if writeBinary or isEnemy then
 				-- All quantization inlined: function calls dominate this loop's
 				-- cost on Lua 5.1 (measured ~2x). floor(v+0.5) is fine for the
 				-- occasional slightly-negative off-map coordinate too.
@@ -536,40 +597,98 @@ local function sample(frame)
 				if qx > 32767 then qx = 32767 elseif qx < -32768 then qx = -32768 end
 				local qz = mathFloor((z or 0) + 0.5)
 				if qz > 32767 then qz = 32767 elseif qz < -32768 then qz = -32768 end
-				local qhp = mathFloor((hp or 0) + 0.5)
+				local qhp = mathFloor(ehp + 0.5)
 				if qhp < 0 then qhp = 0 end
-				local qmax = mathFloor((maxHp or 0) + 0.5)
+				local qmax = mathFloor(emaxHp + 0.5)
 				if qmax < 0 then qmax = 0 end
 				local qdvx = mathFloor((vx or 0) * sampleEvery + 0.5)
 				if qdvx > 32767 then qdvx = 32767 elseif qdvx < -32768 then qdvx = -32768 end
 				local qdvz = mathFloor((vz or 0) * sampleEvery + 0.5)
 				if qdvz > 32767 then qdvz = 32767 elseif qdvz < -32768 then qdvz = -32768 end
-				local qb = mathFloor((buildProgress or 1) * 255 + 0.5)
+				local qb = mathFloor(ebuild * 255 + 0.5)
 				if qb > 255 then qb = 255 elseif qb < 0 then qb = 0 end
-				local qdef = defID or 0
+				local qdef = edef
 				if qdef > 65535 or qdef < 0 then qdef = 0 end
-				local qteam = team or 0
-				if qteam > 255 or qteam < 0 then qteam = 0 end
-				local p = prev[unitID]
+				local qteam = eteam
+				if qteam > 255 or qteam < 0 then qteam = unknownTeam end
+				if isEnemy then
+					if g == nil then
+						g = {}
+						ghosts[unitID] = g
+					end
+					g.x, g.z, g.hp, g.maxhp = qx, qz, qhp, qmax
+					g.def, g.team, g.b, g.f = qdef, qteam, qb, frame
+				end
+				if writeBinary then
+					local p = prev[unitID]
+					if p ~= nil and not keyframe
+						and p.dvx == qdvx and p.dvz == qdvz
+						and p.x + qdvx == qx and p.z + qdvz == qz
+						and p.hp == qhp and p.maxhp == qmax and p.b == qb
+						and p.def == qdef and p.team == qteam then
+						-- Fully predicted: costs zero bytes. Advance to what the
+						-- decoder will compute.
+						p.x, p.z, p.f = qx, qz, frame
+					else
+						n = n + 1
+						cid[n], cdef[n], cteam[n] = unitID, qdef, qteam
+						cx[n], cz[n], chp[n], cmax[n] = qx, qz, qhp, qmax
+						cdvx[n], cdvz[n], cb[n] = qdvx, qdvz, qb
+						if p == nil then
+							prev[unitID] = { x = qx, z = qz, dvx = qdvx, dvz = qdvz,
+								hp = qhp, maxhp = qmax, def = qdef, team = qteam, b = qb, f = frame }
+						else
+							p.x, p.z, p.dvx, p.dvz = qx, qz, qdvx, qdvz
+							p.hp, p.maxhp, p.def, p.team, p.b, p.f = qhp, qmax, qdef, qteam, qb, frame
+						end
+					end
+				end
+			end
+		end
+	end
+
+	-- Ghost pass: enemies previously seen but absent from GetAllUnits this
+	-- sample stay in the stream frozen at their last-known state with zero
+	-- velocity. The sample a unit vanishes on emits one changed record (its
+	-- prediction still carried the last live velocity); after that a ghost is
+	-- fully predicted and costs zero bytes per delta frame, and every keyframe
+	-- restates it absolutely (prev was reset, so p == nil). Sorted ids keep
+	-- both emitters deterministic.
+	if recordEnemies and not all then
+		local gids = {}
+		for id, g in pairs(ghosts) do
+			if g.f ~= frame then
+				gids[#gids + 1] = id
+			end
+		end
+		table.sort(gids)
+		for k = 1, #gids do
+			local id = gids[k]
+			local g = ghosts[id]
+			recorded = recorded + 1
+			if ulines then
+				ulines[#ulines + 1] = string.format("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f %.2f %.2f %.2f %.3f",
+					id, g.def, g.team, g.x, 0, g.z, g.hp, g.maxhp, 0, 0, 0, g.b / 255)
+			end
+			if writeBinary then
+				local p = prev[id]
 				if p ~= nil and not keyframe
-					and p.dvx == qdvx and p.dvz == qdvz
-					and p.x + qdvx == qx and p.z + qdvz == qz
-					and p.hp == qhp and p.maxhp == qmax and p.b == qb
-					and p.def == qdef and p.team == qteam then
-					-- Fully predicted: costs zero bytes. Advance to what the
-					-- decoder will compute.
-					p.x, p.z, p.f = qx, qz, frame
+					and p.dvx == 0 and p.dvz == 0
+					and p.x == g.x and p.z == g.z
+					and p.hp == g.hp and p.maxhp == g.maxhp and p.b == g.b
+					and p.def == g.def and p.team == g.team then
+					p.f = frame -- fully predicted (dv = 0): zero bytes
 				else
 					n = n + 1
-					cid[n], cdef[n], cteam[n] = unitID, qdef, qteam
-					cx[n], cz[n], chp[n], cmax[n] = qx, qz, qhp, qmax
-					cdvx[n], cdvz[n], cb[n] = qdvx, qdvz, qb
+					cid[n], cdef[n], cteam[n] = id, g.def, g.team
+					cx[n], cz[n], chp[n], cmax[n] = g.x, g.z, g.hp, g.maxhp
+					cdvx[n], cdvz[n], cb[n] = 0, 0, g.b
 					if p == nil then
-						prev[unitID] = { x = qx, z = qz, dvx = qdvx, dvz = qdvz,
-							hp = qhp, maxhp = qmax, def = qdef, team = qteam, b = qb, f = frame }
+						prev[id] = { x = g.x, z = g.z, dvx = 0, dvz = 0,
+							hp = g.hp, maxhp = g.maxhp, def = g.def, team = g.team, b = g.b, f = frame }
 					else
-						p.x, p.z, p.dvx, p.dvz = qx, qz, qdvx, qdvz
-						p.hp, p.maxhp, p.def, p.team, p.b, p.f = qhp, qmax, qdef, qteam, qb, frame
+						p.x, p.z, p.dvx, p.dvz = g.x, g.z, 0, 0
+						p.hp, p.maxhp, p.def, p.team, p.b, p.f = g.hp, g.maxhp, g.def, g.team, g.b, frame
 					end
 				end
 			end
@@ -799,8 +918,10 @@ function widget:GameFrame(frame)
 	end
 end
 
+-- Lifecycle events. The engine only fires these callins for units this client
+-- can see, so with recordEnemies on no extra filtering is needed.
 local function event(kind, unitID, defID, team)
-	if not (recordAll() or (team ~= nil and allyTeamOf[team] == myAllyTeam)) then
+	if not (recordAll() or recordEnemies or (team ~= nil and allyTeamOf[team] == myAllyTeam)) then
 		return
 	end
 	local frame = spGetGameFrame()
@@ -820,6 +941,10 @@ function widget:UnitFinished(unitID, unitDefID, unitTeam)
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
+	-- A death in view buries the ghost: the next sample finds its prev entry
+	-- unrefreshed and emits it on the dead list. A death out of view never
+	-- fires this callin, so that ghost persists — by design.
+	ghosts[unitID] = nil
 	pcall(event, "destroyed", unitID, unitDefID, unitTeam)
 end
 
