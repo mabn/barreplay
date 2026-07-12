@@ -1,4 +1,4 @@
-// Command pack converts raw captures (.jsonl, .brsnap, or the Replay
+// Command pack converts raw widget captures (.brsnap, or the Replay
 // uploader widget's binary .brepstream) into the compact binary .brp
 // format — the only format the viewer serves. Use it once per capture.
 //
@@ -14,8 +14,8 @@
 //
 // Usage:
 //
-//	pack [flags] <capture.jsonl|capture.brsnap> [...]
-//	pack -out ./snapshots ./snapshots/*.jsonl
+//	pack [flags] <capture.brsnap|capture.brepstream> [...]
+//	pack -out ./snapshots ./caps/*.brsnap
 //	pack -id 6da7496aca487581a12b7a6d5bd99bc0 ./renamed.brsnap
 //	pack -upload r2 ./caps/<gameId>.brepstream
 //
@@ -39,7 +39,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -63,7 +62,7 @@ func main() {
 		workerDir = flag.String("worker-dir", "worker", "the Cloudflare worker project directory wrangler runs in (with -upload)")
 	)
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: pack [flags] <capture.jsonl|capture.brsnap|capture.brepstream> [...]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: pack [flags] <capture.brsnap|capture.brepstream> [...]\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -119,11 +118,10 @@ func (l *loaded) WriteEvent(e snapshot.Event) error {
 }
 func (l *loaded) Close() error { return nil }
 
-// load reads a legacy capture. .jsonl decodes through snapshot.NewReader (its
-// meta line is complete, so base is unused); .brsnap (the raw widget stream)
-// re-parses through internal/capture — the exact parser the capture pipeline
-// uses — seeded with base, which carries whatever demo metadata the caller
-// obtained.
+// load reads a raw capture stream. .brsnap (the text widget stream) re-parses
+// through internal/capture — the exact parser the capture pipeline uses —
+// seeded with base, which carries whatever demo metadata the caller obtained;
+// .brepstream is its binary sibling.
 func load(path string, base snapshot.Meta) (*loaded, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -133,30 +131,6 @@ func load(path string, base snapshot.Meta) (*loaded, error) {
 
 	l := &loaded{}
 	switch strings.ToLower(filepath.Ext(path)) {
-	case ".jsonl":
-		rd := snapshot.NewReader(f)
-		sawMeta := false
-		for {
-			meta, frame, event, err := rd.Next()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return nil, fmt.Errorf("reading jsonl: %w", err)
-			}
-			switch {
-			case meta != nil:
-				l.meta = *meta
-				sawMeta = true
-			case frame != nil:
-				l.frames = append(l.frames, *frame)
-			case event != nil:
-				l.events = append(l.events, *event)
-			}
-		}
-		if !sawMeta {
-			return nil, fmt.Errorf("no meta record found (is this a barreplay .jsonl?)")
-		}
 	case ".brsnap":
 		if err := capture.Consume(f, base, l); err != nil {
 			return nil, fmt.Errorf("parsing brsnap: %w", err)
@@ -166,7 +140,7 @@ func load(path string, base snapshot.Meta) (*loaded, error) {
 			return nil, fmt.Errorf("parsing brepstream: %w", err)
 		}
 	default:
-		return nil, fmt.Errorf("unsupported input type %q (want .jsonl, .brsnap or .brepstream)", filepath.Ext(path))
+		return nil, fmt.Errorf("unsupported input type %q (want .brsnap or .brepstream)", filepath.Ext(path))
 	}
 	return l, nil
 }
