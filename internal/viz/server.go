@@ -21,7 +21,7 @@ import (
 // worker/): /index.json, /replays/<id>.brw, /replays/<id>.resources,
 // /replays/<id>.keys, /replays/<id>/c<n>. One front-end (worker/public,
 // embedded here) therefore works against both backends. It reads the current
-// .brp format ONLY — convert legacy captures once with barreplay-pack.
+// .brp format ONLY — convert legacy captures once with pack.
 type Server struct {
 	// Dir is the directory scanned for .brp snapshot files.
 	Dir string

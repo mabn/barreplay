@@ -57,7 +57,7 @@ func TestPackBRSNAPWithDemoMeta(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := pack(context.Background(), mockBARClient(t), in, dir, "", false); err != nil {
+	if _, err := pack(context.Background(), mockBARClient(t), in, dir, "", false); err != nil {
 		t.Fatal(err)
 	}
 	meta, frames, events, err := readBRP(t, filepath.Join(dir, fixtureGameID+".brp"))
@@ -91,7 +91,7 @@ func TestPackBRSNAPWithIDFlag(t *testing.T) {
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := pack(context.Background(), mockBARClient(t), in, dir, fixtureGameID, false); err != nil {
+	if _, err := pack(context.Background(), mockBARClient(t), in, dir, fixtureGameID, false); err != nil {
 		t.Fatal(err)
 	}
 	meta, _, _, err := readBRP(t, filepath.Join(dir, "renamed-capture.brp"))
@@ -115,7 +115,7 @@ func TestPackBRSNAPBadNameErrors(t *testing.T) {
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := pack(context.Background(), mockBARClient(t), in, dir, "", false)
+	_, err := pack(context.Background(), mockBARClient(t), in, dir, "", false)
 	if err == nil || !strings.Contains(err.Error(), "-no-demo") {
 		t.Fatalf("err = %v, want a gameId error mentioning the -no-demo escape hatch", err)
 	}
@@ -128,7 +128,7 @@ func TestPackBRSNAPNoDemo(t *testing.T) {
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := pack(context.Background(), nil, in, dir, "", true); err != nil {
+	if _, err := pack(context.Background(), nil, in, dir, "", true); err != nil {
 		t.Fatal(err)
 	}
 	meta, _, _, err := readBRP(t, filepath.Join(dir, "not-a-game-id.brp"))

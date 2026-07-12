@@ -15,21 +15,21 @@ positions is to replay it in the engine and sample state from a read-only Lua wi
 ```sh
 go build ./cmd/barreplay        # build the capture CLI -> ./barreplay
 go build ./cmd/barreplay-viz    # build the visualization server -> ./barreplay-viz
-go build ./cmd/barreplay-pack   # build the .jsonl/.brsnap -> .brp converter
+go build ./cmd/pack             # build the .brsnap/.brepstream -> .brp converter -> ./pack
 go build ./cmd/barreplay-static # build the .brp -> static-hosting bundle packer (for worker/)
 go test ./...                   # all unit tests (no engine required)
 go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
 go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, no engine
 go run ./cmd/barreplay-viz -snapshots ./snapshots        # serve the viewer at 127.0.0.1:8080
-go run ./cmd/barreplay-pack ./snapshots/*.jsonl          # shrink legacy captures to .brp
-go run ./cmd/barreplay-pack ./caps/<gameId>.brsnap       # raw stream -> FULL .brp (fetches the demo for map/versions/players; -id overrides, -no-demo skips)
-go run ./cmd/barreplay-pack ./caps/<gameId>.brepstream   # same for the Replay uploader widget's binary stream
+go run ./cmd/pack ./caps/<gameId>.brsnap       # raw stream -> FULL .brp (fetches the demo for map/versions/players; -id overrides, -no-demo skips)
+go run ./cmd/pack ./caps/<gameId>.brepstream   # same for the Replay uploader widget's binary stream
+go run ./cmd/pack -upload r2 ./caps/<gameId>.brepstream   # ...and upload the packed .brp's static bundle ("local" targets the wrangler dev simulator)
 go run ./cmd/barreplay-static -out ./static ./snapshots/*.brp   # pack .brp -> static bundle for R2 hosting (see worker/)
 ```
 
 Tests are hermetic: `barapi` uses a mock HTTP server, `demofile` tests against the
 real fixture `internal/demofile/testdata/sample_header.sdfz`, `snapshot`/`capture`
-are pure, and `cmd/barreplay-pack` exercises its demo-metadata fetch against a mock
+are pure, and `cmd/pack` exercises its demo-metadata fetch against a mock
 BAR API serving that same fixture. None of them launch the engine or touch the network.
 
 ## Architecture (where things live)
@@ -37,7 +37,11 @@ BAR API serving that same fixture. None of them launch the engine or touch the n
 ```
 cmd/barreplay/main.go     CLI: link/gameId/.sdfz -> full pipeline
 cmd/barreplay-viz/main.go CLI: serve the browser playback UI over a snapshots dir
-cmd/barreplay-pack/main.go CLI: convert .jsonl/.brsnap/.brepstream captures to .brp
+cmd/pack/main.go          CLI: convert .brsnap/.brepstream captures to .brp; -upload r2|local
+                          additionally uploads the packed .brp's static bundle (viz.WriteStaticBundle)
+                          to the worker's R2 bucket via the worker project (run in -worker-dir,
+                          default ./worker) so it appears in the deployed viewer with no redeploy —
+                          ALL inputs convert to .brp first; the viewer serves the .brp wire only
 cmd/barreplay-static/main.go CLI: pack .brp -> static-file bundle (index.json + replays/**) for R2 hosting
 internal/barapi/          resolve gameId via api.bar-rts.com; download .sdfz from OVH
 internal/demofile/        gunzip + parse packed header + TDF startscript
@@ -48,7 +52,21 @@ internal/viz/             serve the viewer (SPA embedded from worker/) + the sta
 internal/viz/static.go    pack a .brp into plain static files (byte-identical to the served URLs) for serverless hosting
 worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as static files from R2 (no playback server);
                           worker/public + worker/index.html are THE front-end (embedded into barreplay-viz via assets.go)
-snapshot/                 PUBLIC data model + pluggable Writer (owns on-disk format; current .brp binary, legacy v1 JSONL)
+worker/src/breps/split.ts TypeScript .brepstream splitter (PARKED, not on any upload path): slices a
+                          raw widget stream into static pieces without transcoding (BRW1 head with
+                          VERSION BYTE 5 + keys + delta chunks). DECISION: the viewer serves the .brp
+                          wire (v4) ONLY — brepstream chunks are ~1.4x+ larger served, so nothing may
+                          upload v5 pieces for playback. The module's preamble/record parsing is the
+                          foundation for the planned TS transcoder (.brepstream -> v4 pieces) that the
+                          future in-worker upload API needs; worker/tests/split.test.ts keeps it
+                          pinned to the same harness fixture as the Lua<->Go lockstep (npm test =
+                          tsx --test). CLI tools/upload-brepstream.ts (npm run upload-brep) still
+                          exists for experiments only. Uploads (tools/upload.ts, ex-upload.mjs) go
+                          through tools/r2put.ts: parallel S3 PUTs when R2_ACCESS_KEY_ID/
+                          R2_SECRET_ACCESS_KEY are set (fast, aws4fetch), else parallel `wrangler r2
+                          object put`; .brw heads upload after a completion barrier so a
+                          half-uploaded replay never lists
+snapshot/                 PUBLIC data model + pluggable Writer (owns the on-disk format: the .brp binary)
 assets/lua/snapshot_widget.lua   embedded, read-only sampler (go:embed)
 assets/lua/replay_uploader.lua   player-installable live-game variant: constants only (no
                           substitution tokens), records the player's own ally team
@@ -77,9 +95,9 @@ output and the writer.
 
 Full byte-level spec: `docs/brp-format.md` — keep it in sync with any codec change
 (`docs/brp-optimizations.md` records the measured evaluation behind the format's
-design decisions). The default output (`-format brp`; `-format jsonl` keeps the
-legacy JSONL). A real 33-min 8v8 game is **476 MB of JSONL but ~8 MB of .brp
-(~62x)** (quantized once: whole elmos/hp, velocity as per-sample-interval
+design decisions). The only output format — the retired v1 JSONL measured a real
+33-min 8v8 game at **476 MB where the .brp is ~8 MB (~62x)**. Quantized once:
+whole elmos/hp, velocity as per-sample-interval
 displacement, build progress 1/255, resources 0.1; `t` is derived as `frame/30`,
 not stored; **y/dvy are not stored at all** — the viewer renders the x/z plane and
 ground-unit elevation is terrain noise, so decoded `Pos.Y`/`VelY` are 0). Container:
@@ -89,7 +107,7 @@ core keyframes as ONE gzip stream**, `F` core delta-frame chunks (columns: id de
 team x z hp maxHp dvx dvz), `X` extra (build column + team resources — not sent to
 the browser), `E` events. Unknown tags are skipped, so sections can be added
 compatibly; any version byte other than 4 is rejected (v1–v3 existed only
-pre-release; regenerate a .brp from its .brsnap with barreplay-pack).
+pre-release; regenerate a .brp from its .brsnap with pack).
 
 **Chunking (random access / streaming).** Frames are grouped into **chunks of 64
 samples** (~1 min at 1 Hz), and the codec's prediction state resets at every chunk
@@ -139,8 +157,7 @@ else.
 `engine.Locate` → `engine.EnsureContent` (pr-downloader) → `engine.WriteWidget`
 (substitutes the output-file path) → `engine.EnableWidget` (seed widget config) →
 `engine.BuildStartscript` → `engine.Run` (widget writes `<out>/<gameId>.brsnap`
-directly) → `capture.Consume` reads that file → `snapshot.NewBRPWriter` (or
-`NewJSONLWriter` with `-format jsonl`).
+directly) → `capture.Consume` reads that file → `snapshot.NewBRPWriter`.
 
 Note the widget writes its BRSNAP stream to its **own file** (path substituted from
 `Config.SnapshotStreamPath`), not to stdout: the tool drains the engine's stdout (watching
@@ -190,7 +207,7 @@ weaponCount), not just id→name — mods add
 and modify unit types, and the id space depends on the exact game build the replay pins.
 The legacy `D` line (id→name) is still parsed for old `.brsnap` files. **Players** are
 seeded from the **demo startscript** (`demofile.BaseMeta`, used by both `cmd/barreplay`
-and `barreplay-pack`'s demo fetch), the authoritative
+and `pack`'s demo fetch), the authoritative
 source for per-player metadata the live engine list lacks: country flag (`countrycode`),
 ladder rank, OpenSkill rating ("OS", the bracketed `skill`) + uncertainty, `accountid`, and
 `boss`. The widget's `P` line (name/team/spectator) is a fallback for a raw `.brsnap` with no
@@ -234,7 +251,7 @@ won't load without an extra dev flag. Widgets are the right injection point.
 A **separate, read-only** tool that serves a browser playback of a finished capture; it
 never touches the engine. `barreplay-viz -snapshots <dir> [-addr host:port]` scans the
 dir for `.brp` files and serves the viewer. **The viz tool reads the current .brp
-version only** — convert a legacy `.jsonl`/`.brsnap` once with `barreplay-pack` (the
+version only** — convert a raw `.brsnap`/`.brepstream` once with `pack` (the
 converter owns the legacy parsing; viz has none). The viz server and the `worker/`
 static deployment share ONE URL scheme (`/index.json`, `/replays/<id>.brw`, `.keys`,
 `.resources`, `/replays/<id>/c<n>`), so the single front-end in `worker/public`
@@ -354,7 +371,7 @@ works against both unchanged.
   positions the texture at world `(0,0)`–`(width,height)` so units overlay correctly;
   the **Map** checkbox toggles it. Caveat: the widget stream doesn't record the map name
   (only the demo startscript path does), so a `.brp` packed from a raw `.brsnap` with
-  `barreplay-pack -no-demo` has an empty `mapName` and renders the plain background; the
+  `pack -no-demo` has an empty `mapName` and renders the plain background; the
   default pack fetches the demo by gameId and fills it in.
 - **`internal/viz/server.go`** embeds the SPA from **`worker/`** (`index.html` +
   `public/{app.js,style.css}` via `worker/assets.go` — the single copy of the
@@ -610,8 +627,7 @@ never their content — and is the main remaining speed lever (~25-35% at the 60
   `internal/demofile/demofile.go` against the real sample (magic `spring demofile`,
   version 5, headerSize 352).
 - Output: `<out>/<gameId>.brp` (see "On-disk format v4"); read it back with
-  `snapshot.ReadBRP`. `-format jsonl` writes the legacy `<gameId>.jsonl` (a `meta` line
-  then interleaved `frame`/`event` lines; `snapshot.NewReader`). On completion the CLI
+  `snapshot.ReadBRP`. On completion the CLI
   prints the engine wall-time (split into load + sim, with sim fps/speed-up), the engine
   profiler totals (see "Profiling a run"), `infolog.txt` size, and the snapshot's size.
 - `-progress` (`cmd/barreplay` + `engine.WatchProgress`) polls the tail of

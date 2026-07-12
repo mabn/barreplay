@@ -4,7 +4,7 @@
 // The rest of the tool (engine launch, stdout capture) only ever talks to this
 // package through the Writer interface, so the persistence format can be swapped
 // for a columnar/binary representation later without touching the capture or
-// engine code. The v1 implementation is line-delimited JSON (see jsonl.go); it
+// engine code. The implementation is the .brp compact binary (see brp.go); it
 // is intentionally simple and human-inspectable.
 package snapshot
 

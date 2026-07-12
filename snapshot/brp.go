@@ -1,7 +1,7 @@
 package snapshot
 
-// The on-disk format: ".brp", a compact binary capture. It replaces JSONL as
-// the default because a real game is ~500 MB of JSONL but ~8 MB of .brp — unit
+// The on-disk format: ".brp", a compact binary capture. It replaced the
+// retired v1 JSONL, which stored a real game in ~500 MB vs ~8 MB of .brp — unit
 // state changes very little between 1 Hz samples, so per-unit temporal deltas
 // (with the unit's own velocity as the position predictor) shrink to near-zero
 // varints, delta frames skip unchanged units entirely, and gzip flattens what
@@ -108,7 +108,7 @@ const (
 	// BRPVersion is the only readable format version. v1 (unchunked), v2
 	// (every live unit re-encoded per frame, y/dvy columns) and v3 (keyframes
 	// inside the chunks) existed only pre-release and are not supported —
-	// regenerate a .brp from its source .brsnap/.jsonl with barreplay-pack.
+	// regenerate a .brp from its source .brsnap/.brepstream with pack.
 	BRPVersion byte = 4
 
 	SecMeta      byte = 'M' // .brp: meta JSON
