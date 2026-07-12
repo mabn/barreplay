@@ -23,12 +23,12 @@ const REF = {
   teams: 3,
   players: 2,
   frames: 136,
-  events: 34,
+  events: 37,
   firstFrame: 0,
   lastFrame: 4170,
   segments: 2,
   // Bounds of fully-decoded frames; restated-column bounds must sit inside.
-  decodedBounds: { minX: 0, maxX: 11953, minZ: 0, maxZ: 9125 },
+  decodedBounds: { minX: 0, maxX: 11580, minZ: 0, maxZ: 10794 },
 };
 
 async function gunzip(bytes: Uint8Array): Promise<Uint8Array> {
