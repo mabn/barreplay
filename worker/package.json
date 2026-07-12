@@ -7,6 +7,8 @@
   "scripts": {
     "sync-assets": "node tools/sync-assets.mjs",
     "upload": "node tools/upload.mjs",
+    "upload-brep": "tsx tools/upload-brepstream.ts",
+    "test": "tsx --test tests/*.test.ts",
     "predev": "npm run sync-assets",
     "dev": "vite",
     "prebuild": "npm run sync-assets",
@@ -21,6 +23,8 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.13.6",
+    "@types/node": "^22.15.0",
+    "tsx": "^4.19.0",
     "typescript": "^5.9.2",
     "vite": "^6.3.5",
     "wrangler": "^4.105.0"

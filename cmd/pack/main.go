@@ -23,14 +23,22 @@
 // input's own directory, or in -out when set. Inputs are processed
 // independently; a failure on one is reported and the rest continue.
 //
-// -upload r2|local additionally packs each fresh .brp into its static-hosting
-// files (viz.WriteStaticBundle — the same bytes cmd/barreplay-static writes)
-// and puts them into the worker's R2 bucket via wrangler, so the replay shows
-// up in the deployed viewer immediately ("r2") or in the local `npm run dev`
-// simulator ("local"). No index.json is uploaded — the Worker lists the
-// bucket live. Needs the worker/ project on disk (npx wrangler runs there;
-// -worker-dir if it is not ./worker) and, for "r2", wrangler auth
-// (`npx wrangler login` or CLOUDFLARE_API_TOKEN).
+// -upload r2|local additionally uploads each input to the worker's R2 bucket,
+// targeting the real bucket ("r2") or the local `npm run dev` simulator
+// ("local"). What is uploaded depends on the input:
+//
+//   - a .brepstream uploads its RAW stream, split into breps-format static
+//     pieces by the worker's TypeScript splitter (npx tsx
+//     tools/upload-brepstream.ts — the same code the future in-worker upload
+//     API runs). The deployed viewer cannot decode these until its breps
+//     decoder lands (they list, but loading reports version 5 unsupported).
+//   - anything else uploads the packed .brp's static-hosting files
+//     (viz.WriteStaticBundle — the same bytes cmd/barreplay-static writes).
+//
+// No index.json is uploaded — the Worker lists the bucket live. Needs the
+// worker/ project on disk with node_modules installed (-worker-dir if it is
+// not ./worker) and, for "r2", wrangler auth (`npx wrangler login` or
+// CLOUDFLARE_API_TOKEN).
 package main
 
 import (
@@ -88,7 +96,15 @@ func main() {
 	for _, in := range flag.Args() {
 		brpPath, err := pack(ctx, client, in, *outDir, *idArg, *noDemo)
 		if err == nil && *upload != "" {
-			err = uploadStatic(ctx, brpPath, *upload, *workerDir)
+			// A .brepstream uploads its RAW stream, split into breps-format
+			// pieces by the worker's TS splitter (the same code the future
+			// upload API runs); everything else uploads the packed .brp's
+			// static bundle.
+			if strings.EqualFold(filepath.Ext(in), ".brepstream") {
+				err = uploadBrepstream(ctx, in, *upload, *workerDir)
+			} else {
+				err = uploadStatic(ctx, brpPath, *upload, *workerDir)
+			}
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "pack: %s: %v\n", in, err)
@@ -287,6 +303,15 @@ func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 // is used by the local dev simulator, matching worker/tools/upload.mjs.
 const bucketName = "barreplay-replays"
 
+// checkWorkerDir verifies workerDir holds the Cloudflare worker project the
+// upload paths shell into.
+func checkWorkerDir(workerDir string) error {
+	if _, err := os.Stat(filepath.Join(workerDir, "wrangler.jsonc")); err != nil {
+		return fmt.Errorf("-upload needs the Cloudflare worker project: %w (run from the repo root, or point -worker-dir at it)", err)
+	}
+	return nil
+}
+
 // staticObjects packs brpPath's static-hosting files into dir (via the same
 // viz.WriteStaticBundle behind cmd/barreplay-static, so the bytes are
 // byte-identical to the dynamic server's) and returns the bucket keys to
@@ -316,13 +341,42 @@ func staticObjects(brpPath, dir string) (gameID string, objects map[string]strin
 	return gameID, objects, nil
 }
 
+// uploadBrepstream uploads a raw .brepstream capture by handing it to the
+// worker's TypeScript splitter+uploader (worker/tools/upload-brepstream.ts),
+// which slices the stream into its breps-format static pieces and puts them
+// into the R2 bucket — the exact pipeline the future in-worker upload API
+// runs, so a local upload and a browser upload produce identical objects.
+// NOTE: the deployed viewer decodes only the .brp wire (version 4) so far;
+// until its breps decoder lands these replays list but do not play.
+func uploadBrepstream(ctx context.Context, in, target, workerDir string) error {
+	if err := checkWorkerDir(workerDir); err != nil {
+		return err
+	}
+	abs, err := filepath.Abs(in)
+	if err != nil {
+		return err
+	}
+	args := []string{"tsx", "tools/upload-brepstream.ts", abs}
+	if target == "local" {
+		args = append(args, "--local")
+	}
+	cmd := exec.CommandContext(ctx, "npx", args...)
+	cmd.Dir = workerDir
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("splitting/uploading %s: %w (is the worker project installed? npm install in %s)", in, err, workerDir)
+	}
+	return nil
+}
+
 // uploadStatic uploads one packed replay's static files to the worker's R2
 // bucket, one `npx wrangler r2 object put` per file (run inside workerDir, so
 // wrangler picks up the project's wrangler.jsonc, node_modules, and — for
 // "local" — the .wrangler dev-simulator state). target is "r2" or "local".
 func uploadStatic(ctx context.Context, brpPath, target, workerDir string) error {
-	if _, err := os.Stat(filepath.Join(workerDir, "wrangler.jsonc")); err != nil {
-		return fmt.Errorf("-upload needs the Cloudflare worker project: %w (run from the repo root, or point -worker-dir at it)", err)
+	if err := checkWorkerDir(workerDir); err != nil {
+		return err
 	}
 	tmp, err := os.MkdirTemp("", "pack-upload-")
 	if err != nil {

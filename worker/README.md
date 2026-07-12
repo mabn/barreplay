@@ -85,6 +85,31 @@ go run ./cmd/pack -upload r2 ./caps/<gameId>.brepstream      # convert + push to
 go run ./cmd/pack -upload local ./caps/<gameId>.brepstream   # ...or seed the local dev simulator
 ```
 
+## Uploading raw .brepstream captures (the breps pipeline)
+
+`src/breps/split.ts` slices a raw widget `.brepstream` into servable pieces **in
+TypeScript, without transcoding** — the stream's length-framed records and flagged
+keyframes let it produce the same keys-first shape as a `.brp` bundle by byte
+slicing: `replays/<id>.keys` (every keyframe record, one gzip stream),
+`replays/<id>/c<n>` (each chunk's delta records) and `replays/<id>.brw` (a BRW1
+head with **version byte 5**, one gzipped-JSON section: meta, teams, players, unit
+defs, events, bounds, chunk index). This is the exact pipeline a future in-worker
+upload API will run on POSTed streams; today it runs locally:
+
+```sh
+npm run upload-brep -- /path/to/<gameId>.brepstream           # split + push to real R2
+npm run upload-brep -- /path/to/<gameId>.brepstream --local   # ...or the local dev simulator
+npm run upload-brep -- /path/to/<gameId>.brepstream --out ./x # just write the pieces (debug)
+go run ./cmd/pack -upload r2 <gameId>.brepstream              # what pack does for .brepstream inputs
+```
+
+The head is uploaded last (it is the object the live listing keys on), so a
+half-finished upload never appears in the picker. **The viewer cannot play these
+yet** — it decodes only the version-4 `.brp` wire, so a breps replay lists but
+fails with "unsupported payload version 5" until the front-end's breps decoder
+lands. `npm test` pins the splitter against the same harness fixture that pins
+the Lua encoder <-> Go decoder lockstep.
+
 ## Commands
 
 ```sh

@@ -149,11 +149,13 @@ like a capture run does. `-no-demo` skips the download (offline) at the cost of
 that metadata; the sampling interval is inferred from the stream's frame
 spacing either way.
 
-`-upload r2` additionally packs the fresh `.brp` into its static-hosting files and
-uploads them to the worker's R2 bucket (via `npx wrangler`, run in `-worker-dir`,
-default `./worker`) — the replay appears in the deployed viewer immediately, no
-worker redeploy needed. `-upload local` targets the local `npm run dev` simulator
-instead.
+`-upload r2` additionally uploads to the worker's R2 bucket (via the worker
+project in `-worker-dir`, default `./worker`) — the replay appears in the deployed
+viewer's listing immediately, no redeploy needed. `-upload local` targets the local
+`npm run dev` simulator instead. A `.brepstream` input uploads its **raw stream**,
+split into breps-format pieces by the worker's TypeScript splitter
+(`worker/src/breps/split.ts`; the viewer's decoder for this format is still
+pending); any other input uploads the packed `.brp`'s static bundle.
 
 `-format jsonl` keeps writing the old line-delimited JSON (one tagged object per
 line — see `snapshot/jsonl.go`) if you want a human-inspectable capture.
