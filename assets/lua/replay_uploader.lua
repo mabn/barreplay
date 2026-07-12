@@ -62,7 +62,7 @@
 -- it is reported in GetInfo, the load Echo, and the stream's GAME line, so
 -- every capture records which encoder produced it (the copy on a player's
 -- machine can be arbitrarily old — the server/decoder needs to know).
-local widgetVersion = "1.1.0"
+local widgetVersion = "1.1.1"
 
 function widget:GetInfo()
 	return {
@@ -93,9 +93,11 @@ local writeText = false
 -- can see, so the engine is the visibility filter). A previously seen enemy
 -- that drops out of visibility is NOT marked dead: it stays in the stream as
 -- an immobile "ghost" frozen at its last-known state (velocity zero) until it
--- is seen again or seen dying (UnitDestroyed only fires for deaths in view; a
--- unit that dies unseen remains a ghost — the capture shows what this player
--- knew). Radar-only contacts are recorded immediately: their position is the
+-- is seen again or seen dying. A witnessed death buries the unit for good —
+-- even though the engine may keep returning its id from GetAllUnits as a
+-- stale frozen radar-memory dot (see buried below). A unit that dies unseen
+-- remains a ghost — the capture shows what this player knew.
+-- Radar-only contacts are recorded immediately: their position is the
 -- engine's wobbled radar reading, and unreadable columns fall back to the
 -- last-known value (def 0 = never identified). false restores the pre-1.1
 -- own-ally-team-only behavior.
@@ -476,6 +478,43 @@ local ghosts = {}
 -- 0 (it would paint the unit as the recording player's). Real ids are 0..254.
 local unknownTeam = 255
 
+-- Tombstones for witnessed deaths: buried[unitID] = {x, z, def, team}, the
+-- dead unit's last-known fingerprint. Needed because the engine can KEEP
+-- RETURNING a dead enemy's id from GetAllUnits — a frozen radar-memory dot
+-- (or briefly the corpse) survives a death the player did not see in LOS —
+-- which would resurrect the ghost right after UnitDestroyed removed it
+-- (observed in a real capture: a morphed enemy commander's dot persisted for
+-- thousands of frames past its recorded destroyed event). A tombstoned id is
+-- skipped by the sample loop until it is demonstrably a NEW unit reusing the
+-- id (see unburied). Memory is bounded by total deaths — trivial.
+local buried = {}
+
+-- unburied decides whether a tombstoned id showing up in GetAllUnits is a NEW
+-- unit reusing the id (clear the tombstone, record it) or still the dead unit
+-- — a frozen radar-memory dot or lingering corpse (keep skipping it). Tells
+-- for a new unit: readable health (alive in LOS), a different def or team
+-- than the unit that died, or a position 48+ elmos from where it died (a
+-- stale dot sits frozen exactly at the death spot; a new unit spawns
+-- elsewhere). Called only for tombstoned ids, so the extra Get* reads are
+-- rare. Compares only when both sides are known — nil reads prove nothing.
+local function unburied(unitID, team)
+	local tomb = buried[unitID]
+	local hp = spGetUnitHealth(unitID)
+	if hp == nil then
+		local defID = spGetUnitDefID(unitID)
+		local x, _, z = spGetUnitPosition(unitID)
+		local moved = x ~= nil and tomb.x ~= nil
+			and (x - tomb.x) * (x - tomb.x) + (z - tomb.z) * (z - tomb.z) >= 2304 -- 48^2
+		if not ((defID ~= nil and tomb.def ~= nil and defID ~= tomb.def)
+			or (team ~= nil and tomb.team ~= nil and team ~= tomb.team)
+			or moved) then
+			return false
+		end
+	end
+	buried[unitID] = nil
+	return true
+end
+
 -- Reusable column buffers for the changed-unit list. Pack* reads the array
 -- part [1..n]; n is tracked explicitly and stale tails are never packed
 -- because a fresh table is sliced per pack call... instead we pass exact-size
@@ -557,7 +596,8 @@ local function sample(frame)
 		local unitID = units[i]
 		local team = spGetUnitTeam(unitID)
 		local isAlly = (team ~= nil and allyTeamOf[team] == myAllyTeam)
-		if all or isAlly or recordEnemies then
+		if (all or isAlly or recordEnemies)
+			and (buried[unitID] == nil or unburied(unitID, team)) then
 			local isEnemy = recordEnemies and not all and not isAlly
 			local g = isEnemy and ghosts[unitID] or nil
 			recorded = recorded + 1
@@ -933,6 +973,7 @@ local function event(kind, unitID, defID, team)
 end
 
 function widget:UnitCreated(unitID, unitDefID, unitTeam)
+	buried[unitID] = nil -- a new unit definitely owns this recycled id now
 	pcall(event, "created", unitID, unitDefID, unitTeam)
 end
 
@@ -941,9 +982,20 @@ function widget:UnitFinished(unitID, unitDefID, unitTeam)
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
-	-- A death in view buries the ghost: the next sample finds its prev entry
-	-- unrefreshed and emits it on the dead list. A death out of view never
-	-- fires this callin, so that ghost persists — by design.
+	-- A death in view buries the ghost AND tombstones the id — the engine may
+	-- keep returning it from GetAllUnits (stale radar-memory dot / lingering
+	-- corpse), which must not resurrect the unit. The next sample finds the
+	-- prev entry unrefreshed and emits the id on the dead list. A death out
+	-- of view never fires this callin, so that ghost persists — by design.
+	local src = ghosts[unitID] or prev[unitID]
+	local tx, tz
+	if src ~= nil then
+		tx, tz = src.x, src.z
+	else
+		local x, _, z = spGetUnitPosition(unitID)
+		tx, tz = x, z
+	end
+	buried[unitID] = { x = tx, z = tz, def = unitDefID, team = unitTeam }
 	ghosts[unitID] = nil
 	pcall(event, "destroyed", unitID, unitDefID, unitTeam)
 end

@@ -59,9 +59,9 @@ local function addUnit(team, mobile)
 	return u
 end
 
--- 40 friendly units (teams 0/2 -> ally 0; 60% stationary) + 12 enemy units
+-- 40 friendly units (teams 0/2 -> ally 0; 60% stationary) + 15 enemy units
 -- (team 1 -> ally 1) with scripted visibility windows (below) that exercise
--- the widget's enemy recording + ghost persistence.
+-- the widget's enemy recording, ghost persistence, and death tombstones.
 for i = 1, 40 do
 	addUnit((i % 2 == 0) and 2 or 0, rnd() > 0.6)
 end
@@ -71,10 +71,14 @@ end
 -- visibility or wobble from the shared LCG would couple fixture bytes to the
 -- widget beyond the codec. States: "los" (full data), "radar" (returned by
 -- GetAllUnits but def/health/velocity read back nil and the position wobbles;
--- team stays readable, matching the live engine), no window = invisible.
+-- team stays readable, matching the live engine), "dot" (the engine's frozen
+-- radar-MEMORY dot for an unseen unit: still returned by GetAllUnits, typed
+-- def + team readable, health/velocity nil, position frozen at where it was
+-- last seen — the dot SURVIVES the unit's death, which is how a real capture
+-- resurrected a tombstoned ghost), no window = invisible.
 -- Context: keyframes land at samples 0/64 (segment 1) and 74/138 (segment 2);
--- the widget is disabled for samples 70..73; two deaths are fired in view at
--- s=44 and s=100 (see the main loop).
+-- the widget is disabled for samples 70..73; scripted deaths/reuse happen at
+-- s=20/30/40/44/100 (see the main loop).
 local enemyVis = {
 	{ { 5, 999, "los" } },                                         -- id 123: in view until destroyed at s=100
 	{ { 10, 29, "los" }, { 30, 39, "radar" } },                    -- id 126: LOS -> radar -> ghost across keyframe 64
@@ -88,8 +92,11 @@ local enemyVis = {
 	{ { 15, 24, "los" }, { 25, 44, "radar" }, { 45, 54, "los" } }, -- id 150: identity carried through radar
 	{ { 30, 44, "los" } },                                         -- id 153: destroyed in view at s=44 (segment 1)
 	{ { 0, 20, "los" }, { 40, 60, "los" } },                       -- id 156: ghost gap inside segment 1
+	{ { 10, 24, "radar" }, { 25, 69, "dot" } },                    -- id 159: destroyed at s=40 while its dot persists (the resurrection bug)
+	{ { 10, 19, "los" }, { 20, 29, "dot" } },                      -- id 162: destroyed in view s=20, corpse-dot through 29, id REUSED at s=30
+	{ { 5, 19, "radar" }, { 20, 49, "dot" } },                     -- id 165: dies unseen at s=20; dot through 49, then our ghost to the end
 }
-for i = 1, 12 do
+for i = 1, #enemyVis do
 	addUnit(1, true).vis = enemyVis[i]
 end
 
@@ -115,6 +122,12 @@ end
 local function advance()
 	for _, id in ipairs(order) do
 		local u = units[id]
+		-- A unit entering its "dot" window freezes at the position it was
+		-- last seen — BEFORE this sample's movement (the engine's memory dot
+		-- shows where the player lost it, not where it secretly went).
+		if u.vis and u.frozen == nil and visState(u) == "dot" then
+			u.frozen = { u.x, u.z }
+		end
 		if u.mobile then
 			if rnd() < 0.15 then
 				u.vx, u.vz = (rnd() - 0.5) * 6, (rnd() - 0.5) * 6
@@ -177,30 +190,42 @@ Spring = {
 	end,
 	GetUnitPosition = function(id)
 		local u = units[id]
-		if visState(u) == "radar" then
+		local vs = visState(u)
+		if vs == "radar" then
 			-- Deterministic wobble, LCG-free (see the enemyVis comment).
 			return u.x + ((id * 7919 + curFrame * 131) % 65) - 32, 25,
 				u.z + ((id * 104729 + curFrame * 37) % 65) - 32
+		end
+		if vs == "dot" then
+			-- The engine's memory dot is frozen where the unit was last seen
+			-- (captured lazily at the first dot-state read); the real unit —
+			-- or nothing at all, if it died — keeps moving underneath.
+			if u.frozen == nil then
+				u.frozen = { u.x, u.z }
+			end
+			return u.frozen[1], 25, u.frozen[2]
 		end
 		return u.x, 25, u.z
 	end,
 	GetUnitDefID = function(id)
 		if visState(units[id]) == "radar" then
-			return nil -- untyped radar contact
+			return nil -- untyped radar contact; a memory dot stays typed
 		end
 		return units[id].def
 	end,
 	GetUnitTeam = function(id) return units[id].team end, -- readable even on radar
 	GetUnitHealth = function(id)
 		local u = units[id]
-		if visState(u) == "radar" then
+		local vs = visState(u)
+		if vs == "radar" or vs == "dot" then
 			return nil
 		end
 		return u.hp, u.maxHp, 0, 0, u.build
 	end,
 	GetUnitVelocity = function(id)
 		local u = units[id]
-		if visState(u) == "radar" then
+		local vs = visState(u)
+		if vs == "radar" or vs == "dot" then
 			return nil
 		end
 		return u.vx, 0, u.vz
@@ -281,6 +306,29 @@ for s = 0, SAMPLES - 1 do
 	-- deaths witnessed in LOS (the widget must bury those units' ghosts).
 	-- Enemies that die out of view don't exist here — an invisible unit just
 	-- keeps (or ends) its window and its ghost persists.
+	--
+	-- Tombstone scenarios: these two deaths fire UnitDestroyed WITHOUT
+	-- removing the unit — its "dot" window keeps it in GetAllUnits, exactly
+	-- the engine behavior that resurrected a buried ghost in a real capture.
+	if s == 40 then
+		widget:UnitDestroyed(159, units[159].def, units[159].team)
+	end
+	if s == 20 then
+		widget:UnitDestroyed(162, units[162].def, units[162].team)
+	end
+	if s == 30 then
+		-- The engine reuses ids: a NEW enemy unit takes id 162 (created out
+		-- of view, so no UnitCreated callin) and is in LOS from here — the
+		-- widget must notice the reuse (readable health) and un-tombstone it.
+		local u = units[162]
+		u.def, u.team = 20, 1
+		u.x, u.z = u.x + 2000, u.z + 2000
+		u.vx, u.vz = 0, 0
+		u.hp, u.maxHp = 900, 900
+		u.build = 1
+		u.frozen = nil
+		u.vis = { { 30, 999, "los" } }
+	end
 	if s == 85 then
 		local u = addUnit(1, true)
 		u.vis = { { 85, 99, "los" }, { 100, 109, "radar" } }
