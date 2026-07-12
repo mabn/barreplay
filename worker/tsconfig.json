@@ -4,7 +4,7 @@
     "module": "ES2022",
     "moduleResolution": "Bundler",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["./worker-configuration.d.ts", "vite/client"],
+    "types": ["./worker-configuration.d.ts", "vite/client", "node"],
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
@@ -16,5 +16,5 @@
     "verbatimModuleSyntax": true,
     "noEmit": true
   },
-  "include": ["src", "vite.config.ts", "worker-configuration.d.ts"]
+  "include": ["src", "tools/upload-brepstream.ts", "tests", "vite.config.ts", "worker-configuration.d.ts"]
 }
