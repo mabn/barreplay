@@ -27,6 +27,26 @@
     }
   ],
 
+  // The replay catalog (id + when/how-long/map/team-size stats shown by the
+  // picker) lives in a single SQLite-backed Durable Object instance; see
+  // src/worker/replayindex.ts. `pack -upload` upserts rows via
+  // PUT /api/replays/<id>. Optional write auth: `wrangler secret put
+  // REPLAY_PUT_TOKEN` (the uploader sends it as a bearer token).
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "REPLAY_INDEX",
+        "class_name": "ReplayIndex"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ReplayIndex"]
+    }
+  ],
+
   "observability": {
     "enabled": true
   }

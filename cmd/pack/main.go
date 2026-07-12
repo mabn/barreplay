@@ -36,9 +36,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -60,6 +65,7 @@ func main() {
 		noDemo    = flag.Bool("no-demo", false, "do not fetch the demo for .brsnap/.brepstream inputs; the .brp then only has the metadata the stream itself carries")
 		upload    = flag.String("upload", "", `after packing, upload the replay's static files to the worker's R2 bucket: "r2" (real bucket, needs wrangler auth) or "local" (the wrangler dev simulator)`)
 		workerDir = flag.String("worker-dir", "worker", "the Cloudflare worker project directory wrangler runs in (with -upload)")
+		indexURL  = flag.String("index-url", "", "base URL of the deployed worker, used to register the uploaded replay in the catalog via PUT /api/replays/<id> (default: $BARREPLAY_INDEX_URL; for -upload local, "+localIndexURL+"). Empty and no env var: skip with a warning")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: pack [flags] <capture.brsnap|capture.brepstream> [...]\n\n")
@@ -85,9 +91,9 @@ func main() {
 	client := barapi.New()
 	failed := 0
 	for _, in := range flag.Args() {
-		brpPath, err := pack(ctx, client, in, *outDir, *idArg, *noDemo)
+		brpPath, modOptions, err := pack(ctx, client, in, *outDir, *idArg, *noDemo)
 		if err == nil && *upload != "" {
-			err = uploadStatic(ctx, brpPath, *upload, *workerDir)
+			err = uploadStatic(ctx, brpPath, *upload, *workerDir, resolveIndexURL(*indexURL, *upload), modOptions)
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "pack: %s: %v\n", in, err)
@@ -150,30 +156,33 @@ func load(path string, base snapshot.Meta) (*loaded, error) {
 // capture metadata — the same seeding cmd/barreplay performs, minus the engine
 // run. The demo is only needed for its first few KB (header + startscript), but
 // the download is whole-file; a demo is a few MB, so this stays cheap.
-func demoMeta(ctx context.Context, client *barapi.Client, id string) (snapshot.Meta, error) {
+// The raw [modoptions] map is returned alongside: it is deliberately NOT part
+// of snapshot.Meta (never persisted in the .brp) — its only consumer is the
+// catalog PUT, which distills it into settings flags (viz.SettingsFlags).
+func demoMeta(ctx context.Context, client *barapi.Client, id string) (snapshot.Meta, map[string]string, error) {
 	r, err := client.Resolve(ctx, id)
 	if err != nil {
-		return snapshot.Meta{}, err
+		return snapshot.Meta{}, nil, err
 	}
 	tmp, err := os.MkdirTemp("", "pack-demo-")
 	if err != nil {
-		return snapshot.Meta{}, err
+		return snapshot.Meta{}, nil, err
 	}
 	defer os.RemoveAll(tmp)
 	p, err := client.Download(ctx, r, tmp)
 	if err != nil {
-		return snapshot.Meta{}, err
+		return snapshot.Meta{}, nil, err
 	}
 	f, err := os.Open(p)
 	if err != nil {
-		return snapshot.Meta{}, err
+		return snapshot.Meta{}, nil, err
 	}
 	demo, err := demofile.Parse(f)
 	f.Close()
 	if err != nil {
-		return snapshot.Meta{}, fmt.Errorf("parsing demo %s: %w", r.FileName, err)
+		return snapshot.Meta{}, nil, fmt.Errorf("parsing demo %s: %w", r.FileName, err)
 	}
-	return demofile.BaseMeta(demo), nil
+	return demofile.BaseMeta(demo), demo.Startscript.ModOptions, nil
 }
 
 // inferSampleEvery returns the sampling interval implied by the frame stream:
@@ -190,27 +199,30 @@ func inferSampleEvery(frames []snapshot.Frame) int32 {
 	return best
 }
 
-// pack converts one input into <gameId>.brp and returns the written path.
-func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, noDemo bool) (string, error) {
+// pack converts one input into <gameId>.brp and returns the written path plus
+// the demo's raw modoptions (nil with -no-demo) for the catalog upload.
+func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, noDemo bool) (string, map[string]string, error) {
 	gameID := strings.TrimSuffix(filepath.Base(in), filepath.Ext(in))
 	base := snapshot.Meta{GameID: gameID}
+	var modOptions map[string]string
 	ext := strings.ToLower(filepath.Ext(in))
 	if (ext == ".brsnap" || ext == ".brepstream") && !noDemo {
 		id := idArg
 		if id == "" {
 			id = gameID
 		}
-		m, err := demoMeta(ctx, client, id)
+		m, mo, err := demoMeta(ctx, client, id)
 		if err != nil {
-			return "", fmt.Errorf("fetching demo metadata for %q: %w (pass -id <gameId|link> if the file name is not the gameId, or -no-demo to pack without map/version/player metadata)", id, err)
+			return "", nil, fmt.Errorf("fetching demo metadata for %q: %w (pass -id <gameId|link> if the file name is not the gameId, or -no-demo to pack without map/version/player metadata)", id, err)
 		}
 		fmt.Fprintf(os.Stderr, "%s: demo metadata: map %q, game %q, engine %s, %d players\n",
 			in, m.MapName, m.GameVersion, m.EngineVersion, len(m.Players))
 		base = m
+		modOptions = mo
 	}
 	l, err := load(in, base)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if l.meta.GameID == "" {
 		l.meta.GameID = gameID
@@ -224,26 +236,26 @@ func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 	}
 	w, err := snapshot.NewBRPWriter(dir, gameID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if err := w.WriteMeta(l.meta); err != nil {
 		w.Close()
-		return "", err
+		return "", nil, err
 	}
 	for _, fr := range l.frames {
 		if err := w.WriteFrame(fr); err != nil {
 			w.Close()
-			return "", err
+			return "", nil, err
 		}
 	}
 	for _, e := range l.events {
 		if err := w.WriteEvent(e); err != nil {
 			w.Close()
-			return "", err
+			return "", nil, err
 		}
 	}
 	if err := w.Close(); err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	outPath := filepath.Join(dir, gameID+".brp")
@@ -254,7 +266,7 @@ func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 	}
 	fmt.Fprintf(os.Stderr, "%s (%.1f MB) -> %s (%.2f MB%s): %d frames, %d events\n",
 		in, mb(inSize), outPath, mb(outSize), ratio, len(l.frames), len(l.events))
-	return outPath, nil
+	return outPath, modOptions, nil
 }
 
 // checkWorkerDir verifies workerDir holds the Cloudflare worker project the
@@ -266,13 +278,37 @@ func checkWorkerDir(workerDir string) error {
 	return nil
 }
 
+// localIndexURL is where `npm run dev` (vite + the Cloudflare plugin) serves
+// the worker's API routes, the default catalog target for -upload local.
+const localIndexURL = "http://127.0.0.1:5173"
+
+// resolveIndexURL picks the catalog base URL: the -index-url flag, else the
+// BARREPLAY_INDEX_URL env var, else (local target only) the vite dev server.
+// Empty means "skip the catalog PUT" — uploadStatic warns about it.
+func resolveIndexURL(flagVal, target string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	if v := os.Getenv("BARREPLAY_INDEX_URL"); v != "" {
+		return v
+	}
+	if target == "local" {
+		return localIndexURL
+	}
+	return ""
+}
+
 // uploadStatic uploads one packed replay's static files to the worker's R2
 // bucket: it writes the static bundle (viz.WriteStaticBundle — the same bytes
 // cmd/barreplay-static writes) into a temp dir and hands it to the worker's
 // uploader (npx tsx tools/upload.ts), which parallelizes the puts and uses
 // the R2 S3 API when R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY are set. target is
-// "r2" or "local".
-func uploadStatic(ctx context.Context, brpPath, target, workerDir string) error {
+// "r2" or "local". After the upload it registers the replay in the worker's
+// catalog (the Durable Object SQLite table behind GET /api/replays) via
+// PUT <indexURL>/api/replays/<id>; indexURL == "" skips that with a warning.
+// modOptions (the demo startscript's raw [modoptions]; nil with -no-demo)
+// contributes the catalog's settings flags.
+func uploadStatic(ctx context.Context, brpPath, target, workerDir, indexURL string, modOptions map[string]string) error {
 	if err := checkWorkerDir(workerDir); err != nil {
 		return err
 	}
@@ -287,7 +323,9 @@ func uploadStatic(ctx context.Context, brpPath, target, workerDir string) error 
 	}
 	args := []string{"tsx", "tools/upload.ts", tmp, gameID}
 	if target == "local" {
-		args = append(args, "--local")
+		// --preview: the local dev servers (vite dev and wrangler dev) bind the
+		// preview bucket, so that is where a "local" upload must land to show up.
+		args = append(args, "--local", "--preview")
 	}
 	cmd := exec.CommandContext(ctx, "npx", args...)
 	cmd.Dir = workerDir
@@ -296,7 +334,72 @@ func uploadStatic(ctx context.Context, brpPath, target, workerDir string) error 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("uploading %s: %w (is the worker project installed? npm install in %s)", gameID, err, workerDir)
 	}
+	if indexURL == "" {
+		fmt.Fprintf(os.Stderr, "%s: uploaded, but NOT registered in the replay catalog: no index URL (pass -index-url or set BARREPLAY_INDEX_URL to the deployed worker)\n", gameID)
+		return nil
+	}
+	if err := putCatalogEntry(ctx, indexURL, gameID, brpPath, dirSize(tmp), modOptions); err != nil {
+		return fmt.Errorf("registering %s in the replay catalog at %s: %w", gameID, indexURL, err)
+	}
+	fmt.Fprintf(os.Stderr, "%s: registered in the replay catalog at %s\n", gameID, indexURL)
 	return nil
+}
+
+// putCatalogEntry upserts one replay's stats (start time, duration, map,
+// team-size spec, bundle byte size — derived from the packed .brp — plus the
+// settings flags distilled from the demo's modoptions) into the worker's
+// catalog. If the worker guards writes (its REPLAY_PUT_TOKEN secret), the
+// same-named env var supplies the bearer token.
+func putCatalogEntry(ctx context.Context, indexURL, gameID, brpPath string, sizeBytes int64, modOptions map[string]string) error {
+	f, err := os.Open(brpPath)
+	if err != nil {
+		return err
+	}
+	bf, err := snapshot.ParseBRP(f)
+	f.Close()
+	if err != nil {
+		return err
+	}
+	entry := viz.BuildCatalogEntry(gameID, bf, sizeBytes)
+	entry.Settings = viz.SettingsFlags(modOptions)
+	body, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	endpoint := strings.TrimSuffix(indexURL, "/") + "/api/replays/" + url.PathEscape(gameID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token := os.Getenv("REPLAY_PUT_TOKEN"); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
+		return fmt.Errorf("PUT %s: %s: %s", endpoint, resp.Status, strings.TrimSpace(string(msg)))
+	}
+	return nil
+}
+
+// dirSize sums every file under root — the static bundle's download
+// footprint, shown as the catalog's data size. Best-effort (errors count 0).
+func dirSize(root string) int64 {
+	var total int64
+	filepath.WalkDir(root, func(_ string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			if fi, err := d.Info(); err == nil {
+				total += fi.Size()
+			}
+		}
+		return nil
+	})
+	return total
 }
 
 func fileSize(path string) int64 {
