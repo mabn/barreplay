@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/mabn/barreplay/internal/barapi"
+	"github.com/mabn/barreplay/internal/viz"
 	"github.com/mabn/barreplay/snapshot"
 )
 
@@ -57,7 +58,8 @@ func TestPackBRSNAPWithDemoMeta(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := pack(context.Background(), mockBARClient(t), in, dir, "", false); err != nil {
+	_, modOptions, err := pack(context.Background(), mockBARClient(t), in, dir, "", false)
+	if err != nil {
 		t.Fatal(err)
 	}
 	meta, frames, events, err := readBRP(t, filepath.Join(dir, fixtureGameID+".brp"))
@@ -82,6 +84,15 @@ func TestPackBRSNAPWithDemoMeta(t *testing.T) {
 	if len(frames) != 2 || len(events) != 1 {
 		t.Errorf("frames/events = %d/%d, want 2/1", len(frames), len(events))
 	}
+	// The demo's raw modoptions ride back for the catalog PUT (never into the
+	// .brp). The real fixture is a ranked game with everything else default, so
+	// the derived settings are exactly {ranked: true}.
+	if len(modOptions) == 0 {
+		t.Fatal("modoptions not returned from the demo startscript")
+	}
+	if got := viz.SettingsFlags(modOptions); len(got) != 1 || got["ranked"] != true {
+		t.Errorf("SettingsFlags(fixture modoptions) = %v, want map[ranked:true]", got)
+	}
 }
 
 // -id overrides the file name as the gameId source.
@@ -91,7 +102,7 @@ func TestPackBRSNAPWithIDFlag(t *testing.T) {
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pack(context.Background(), mockBARClient(t), in, dir, fixtureGameID, false); err != nil {
+	if _, _, err := pack(context.Background(), mockBARClient(t), in, dir, fixtureGameID, false); err != nil {
 		t.Fatal(err)
 	}
 	meta, _, _, err := readBRP(t, filepath.Join(dir, "renamed-capture.brp"))
@@ -115,7 +126,7 @@ func TestPackBRSNAPBadNameErrors(t *testing.T) {
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := pack(context.Background(), mockBARClient(t), in, dir, "", false)
+	_, _, err := pack(context.Background(), mockBARClient(t), in, dir, "", false)
 	if err == nil || !strings.Contains(err.Error(), "-no-demo") {
 		t.Fatalf("err = %v, want a gameId error mentioning the -no-demo escape hatch", err)
 	}
@@ -128,7 +139,7 @@ func TestPackBRSNAPNoDemo(t *testing.T) {
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pack(context.Background(), nil, in, dir, "", true); err != nil {
+	if _, _, err := pack(context.Background(), nil, in, dir, "", true); err != nil {
 		t.Fatal(err)
 	}
 	meta, _, _, err := readBRP(t, filepath.Join(dir, "not-a-game-id.brp"))

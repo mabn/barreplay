@@ -418,3 +418,165 @@ func TestListBRPOnly(t *testing.T) {
 		t.Fatalf("got %+v, want just a and b", infos)
 	}
 }
+
+// The catalog endpoint must serve the same JSON shape as the worker's Durable
+// Object table (nullable stats, newest game first, no-start rows last) with
+// the stats derived from each .brp's meta record.
+func TestCatalog(t *testing.T) {
+	dir := t.TempDir()
+	writeBRP(t, dir, "nostart") // StartUnix 0 -> null start, sorts last
+
+	// A second capture WITH a start time and a 2v1 roster, sampled to frame 90.
+	w, err := snapshot.NewBRPWriter(dir, "recent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteMeta(snapshot.Meta{
+		GameID:      "recent",
+		MapName:     "Hooked 1.1.1",
+		StartUnix:   1_752_000_000,
+		SampleEvery: 30,
+		UnitDefs:    map[int32]snapshot.UnitDef{1: {DefID: 1, Name: "armcom"}},
+		Teams: []snapshot.TeamInfo{
+			{TeamID: 0, AllyTeam: 0},
+			{TeamID: 1, AllyTeam: 0},
+			{TeamID: 2, AllyTeam: 1},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, fr := range []int32{30, 60, 90} {
+		u := []snapshot.UnitState{{UnitID: 1, DefID: 1, Team: 0, Pos: snapshot.Vec3{X: 1}, Health: 1, MaxHealth: 1}}
+		if err := w.WriteFrame(snapshot.Frame{Frame: fr, TimeSec: float32(fr) / 30, Units: u}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer((&Server{Dir: dir}).Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/api/replays")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	var entries []CatalogEntry
+	if err := json.Unmarshal(body, &entries); err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 || entries[0].ID != "recent" || entries[1].ID != "nostart" {
+		t.Fatalf("want [recent nostart], got %+v", entries)
+	}
+
+	r := entries[0]
+	if r.StartUnix == nil || *r.StartUnix != 1_752_000_000 {
+		t.Errorf("recent startUnix = %v", r.StartUnix)
+	}
+	if r.Map == nil || *r.Map != "Hooked 1.1.1" {
+		t.Errorf("recent map = %v", r.Map)
+	}
+	if r.GameSize == nil || *r.GameSize != "2v1" {
+		t.Errorf("recent gameSize = %v", r.GameSize)
+	}
+	if r.DurationSec == nil || *r.DurationSec != 3 { // last frame 90 / 30 fps
+		t.Errorf("recent durationSec = %v", r.DurationSec)
+	}
+	if r.SizeBytes == nil || *r.SizeBytes <= 0 {
+		t.Errorf("recent sizeBytes = %v", r.SizeBytes)
+	}
+
+	n := entries[1]
+	if n.StartUnix != nil {
+		t.Errorf("nostart startUnix = %v, want null", *n.StartUnix)
+	}
+	if n.GameSize == nil || *n.GameSize != "1v1" {
+		t.Errorf("nostart gameSize = %v", n.GameSize)
+	}
+	if n.DurationSec == nil || *n.DurationSec != 2 { // last frame 60 / 30 fps
+		t.Errorf("nostart durationSec = %v", n.DurationSec)
+	}
+}
+
+func TestGameSizeSpec(t *testing.T) {
+	cases := []struct {
+		allies []int32
+		want   string
+	}{
+		{nil, ""},
+		{[]int32{0, 1}, "1v1"},
+		{[]int32{0, 0, 1, 1, 1}, "3v2"},
+		{[]int32{0, 1, 2}, "1v1v1"},
+	}
+	for _, c := range cases {
+		teams := make([]snapshot.TeamInfo, len(c.allies))
+		for i, a := range c.allies {
+			teams[i] = snapshot.TeamInfo{TeamID: int32(i), AllyTeam: a}
+		}
+		if got := GameSizeSpec(teams); got != c.want {
+			t.Errorf("GameSizeSpec(%v) = %q, want %q", c.allies, got, c.want)
+		}
+	}
+}
+
+// SettingsFlags emits only true / non-default values — a fully-default
+// modoptions bag (or nil) yields nil, and each tracked option maps to its
+// catalog key.
+func TestSettingsFlags(t *testing.T) {
+	if got := SettingsFlags(nil); got != nil {
+		t.Errorf("SettingsFlags(nil) = %v, want nil", got)
+	}
+	defaults := map[string]string{
+		"ranked_game": "0", "map_waterislava": "0", "scavunitsforplayers": "0",
+		"experimentalextraunits": "0", "unit_restrictions_nonukes": "0",
+		"unit_restrictions_noendgamelrpc": "0", "unit_restrictions_nolrpc": "0",
+		"unit_restrictions_noair": "0", "quick_start": "default",
+		"commanderbuildersenabled": "disabled",
+		"tweakdefs":                "", "tweakdefs1": "", "tweakunits": "", "tweakunits9": "",
+	}
+	if got := SettingsFlags(defaults); got != nil {
+		t.Errorf("all-default modoptions = %v, want nil", got)
+	}
+
+	cases := []struct {
+		mo   map[string]string
+		key  string
+		want any
+	}{
+		{map[string]string{"ranked_game": "1"}, "ranked", true},
+		{map[string]string{"map_waterislava": "1"}, "lava", true},
+		{map[string]string{"scavunitsforplayers": "1"}, "scavUnits", true},
+		{map[string]string{"experimentalextraunits": "1"}, "extraUnits", true},
+		{map[string]string{"unit_restrictions_nonukes": "1"}, "noNukes", true},
+		{map[string]string{"unit_restrictions_noendgamelrpc": "1"}, "noEndgameLrpc", true},
+		{map[string]string{"unit_restrictions_nolrpc": "1"}, "noLrpc", true},
+		{map[string]string{"unit_restrictions_noair": "1"}, "noAir", true},
+		{map[string]string{"tweakdefs": "Zm9v"}, "mods", true},
+		{map[string]string{"tweakdefs7": "Zm9v"}, "mods", true},
+		{map[string]string{"tweakunits": "Zm9v"}, "mods", true},
+		{map[string]string{"tweakunits3": "Zm9v"}, "mods", true},
+		{map[string]string{"quick_start": "enabled"}, "quickStart", "enabled"},
+		{map[string]string{"commanderbuildersenabled": "enabled_all"}, "comBuilders", "enabled_all"},
+	}
+	for _, c := range cases {
+		got := SettingsFlags(c.mo)
+		if len(got) != 1 || got[c.key] != c.want {
+			t.Errorf("SettingsFlags(%v) = %v, want {%s: %v}", c.mo, got, c.key, c.want)
+		}
+	}
+
+	// Combination: several flags at once, defaults still silent.
+	got := SettingsFlags(map[string]string{
+		"ranked_game": "1", "map_waterislava": "1", "tweakunits2": "x",
+		"quick_start": "disabled", "commanderbuildersenabled": "disabled",
+	})
+	want := map[string]any{"ranked": true, "lava": true, "mods": true}
+	if len(got) != len(want) || got["ranked"] != true || got["lava"] != true || got["mods"] != true {
+		t.Errorf("combined = %v, want %v", got, want)
+	}
+}

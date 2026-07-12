@@ -33,17 +33,61 @@ icons (`/icons/*`, `/ranks/*`) are fixed static assets bundled with the deploy. 
 is fetched **browser-side directly** from `api.bar-rts.com` (degrades gracefully if
 unreachable), so there is no map proxy.
 
+## The replay catalog (Durable Object + SQLite)
+
+The landing page (no `?replay=` in the URL) is a **replay list with per-game stats** —
+when the game started, how long it ran, which map, the team-size spec ("8v8"), and the
+download size — ordered most recent game first. Those stats live inside each `.brp`'s
+meta record, which a bucket listing can't see, so they are kept in a small SQLite table
+inside a **Durable Object** (`src/worker/replayindex.ts`, single instance, migration
+`v1: new_sqlite_classes`):
+
+| URL | What |
+| --- | --- |
+| `GET /api/replays` | the catalog, newest game first (rows with no start time last) — `[{id, startUnix, durationSec, map, gameSize, sizeBytes, settings}]`, nulls for unknown stats |
+| `PUT /api/replays/<id>` | upsert one row (same JSON shape, minus `id`); called by `pack -upload` after a replay's files land in the bucket |
+
+`settings` is a flat object of notable game-settings flags rendered as badges in the
+list — keys like `ranked`, `lava` (water-is-lava), `mods` (any tweakdefs*/tweakunits*
+set), `scavUnits`, `extraUnits`, `noAir`/`noNukes`/`noLrpc`/`noEndgameLrpc`, and the
+enum-valued `quickStart`/`comBuilders` — with boolean or short string values; only
+present flags are sent (a vanilla ranked game is `{"ranked": true}`). `pack` distills
+them from the demo startscript's `[modoptions]` (`viz.SettingsFlags` in Go — modoptions
+are NOT stored in the `.brp`, so this rides only the PUT); `pack -no-demo` uploads have
+`settings: null` and just show an empty cell.
+
+Writes can be guarded with a shared secret: `npx wrangler secret put REPLAY_PUT_TOKEN`
+makes the PUT require `Authorization: Bearer <token>`; `pack` sends the same-named env
+var. Without the secret (local dev) the endpoint is open.
+
+The front-end merges `GET /api/replays` with `/index.json`, so a replay whose files are
+in the bucket but was never registered still appears (with only its byte size). To
+(re-)register one replay by hand:
+
+```sh
+curl -X PUT https://<worker-host>/api/replays/<gameId> \
+  -H "authorization: Bearer $REPLAY_PUT_TOKEN" -H "content-type: application/json" \
+  -d '{"startUnix":1752000000,"durationSec":1987,"map":"Isidis crack 1.1","gameSize":"8v8","sizeBytes":8400000,"settings":{"ranked":true,"lava":true}}'
+```
+
+The Go viz server (`cmd/barreplay-viz`) serves the same `GET /api/replays` shape
+computed live from its `.brp` files (`internal/viz/catalog.go`), so the shared front-end
+works against both backends; the row shape must stay in lockstep with
+`src/worker/replayentry.ts`.
+
 ## Layout
 
 ```
 worker/
-  wrangler.jsonc          Worker config (name, main, account_id, assets + R2 binding)
+  wrangler.jsonc          Worker config (name, main, account_id, assets + R2 + DO bindings)
   vite.config.ts          Vite + @cloudflare/vite-plugin
   index.html              viewer page (Vite entry)
   public/app.js           viewer logic (copied from internal/viz/web, URLs point at R2)
   public/style.css
   public/icons, ranks/    synced from internal/viz/bardata by tools/sync-assets.mjs (gitignored)
-  src/worker/index.ts     Hono app: serve R2 (index.json, replays/**) + SPA fallback
+  src/worker/index.ts     Hono app: serve R2 (index.json, replays/**), /api/replays + SPA fallback
+  src/worker/replayindex.ts  the catalog Durable Object (SQLite table of replay stats)
+  src/worker/replayentry.ts  catalog row shape + PUT body validation (node-testable, no workerd)
   src/breps/split.ts      TS .brepstream splitter (raw stream -> static pieces, no transcode)
   tools/sync-assets.mjs   copies the vendored icons into public/ before dev/build
   tools/r2put.ts          shared upload backend: parallel S3 PUTs (with R2 creds) or parallel wrangler
@@ -101,13 +145,21 @@ token).
 
 For a fresh capture there is a one-step shortcut: `cmd/pack` converts the raw stream
 AND uploads in the same run (it shells into these same tools, so the auth options are
-identical — export the R2 credentials to get the fast path):
+identical — export the R2 credentials to get the fast path). It also registers the
+replay in the catalog (PUT /api/replays/<id>, see above) so it appears in the landing
+list with its stats — point it at the deployed worker with `-index-url` or
+`BARREPLAY_INDEX_URL` (for `-upload local` it defaults to the vite dev server):
 
 ```sh
 # from the repo root:
+BARREPLAY_INDEX_URL=https://<worker-host> \
 go run ./cmd/pack -upload r2 ./caps/<gameId>.brepstream      # convert + push to real R2
 go run ./cmd/pack -upload local ./caps/<gameId>.brepstream   # ...or seed the local dev simulator
 ```
+
+Note on local buckets: both dev servers (`npm run dev` and `npx wrangler dev`) bind the
+**preview** bucket, so seeding the simulator needs `--local --preview` with the upload
+tool (`pack -upload local` passes both automatically).
 
 ## The .brepstream splitter (parked — the viewer serves .brp wire only)
 
