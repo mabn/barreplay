@@ -1929,16 +1929,36 @@ function renderHome(errMsg) {
     cell(e.durationSec != null ? fmtDuration(e.durationSec) : null);
     cell(e.map, 'map');
     cell(e.gameSize);
+    // External links for this game (class "ext" exempts them from the row's
+    // SPA click handling — the browser follows them natively, in a new tab).
+    {
+      const td = document.createElement('td');
+      td.className = 'links';
+      const ext = [
+        ['gex', 'https://gex.honu.pw/match/' + encodeURIComponent(e.id)],
+        ['BAR', 'https://bar-rts.com/replays/' + encodeURIComponent(e.id)],
+      ];
+      for (const [label, url] of ext) {
+        const a = document.createElement('a');
+        a.className = 'ext';
+        a.href = url;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.textContent = label;
+        td.appendChild(a);
+      }
+      tr.appendChild(td);
+    }
     // Settings badges (empty cell — not a dash — when the entry has none).
     {
       const td = document.createElement('td');
       td.className = 'settings';
       const a = document.createElement('a');
       a.href = href;
-      for (const label of settingsBadges(e.settings)) {
+      for (const b of settingsBadges(e.settings)) {
         const s = document.createElement('span');
-        s.className = 'badge';
-        s.textContent = label;
+        s.className = 'badge badge-' + b.key.replace(/[^\w-]/g, '');
+        s.textContent = b.label;
         a.appendChild(s);
       }
       td.appendChild(a);
@@ -1946,6 +1966,8 @@ function renderHome(errMsg) {
     }
     cell(e.sizeBytes != null ? fmtSize(e.sizeBytes) : null, 'num');
     tr.addEventListener('click', (ev) => {
+      // External links keep their native behaviour entirely.
+      if (ev.target.closest && ev.target.closest('a.ext')) return;
       // Only hijack a plain left-click; modified clicks keep the browser's
       // native link behaviour (new tab / new window).
       if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
@@ -1969,37 +1991,40 @@ function replayHref(id) {
 }
 
 // The known settings flags (from the uploader's modoptions distillation) in
-// display order, with their badge labels. String-valued flags render as
-// "label: value"; unknown keys fall back to the raw key so a future flag is
-// never silently dropped.
+// display order, with their badge labels. A `true` third element renders the
+// label alone even for a string-valued flag (the value is a lobby detail the
+// list doesn't need); unknown keys fall back to "key: value" so a future flag
+// is never silently dropped. The key also becomes a badge-<key> CSS class for
+// per-flag colours (lava, mods).
 const SETTINGS_BADGES = [
   ['ranked', 'ranked'],
   ['lava', 'lava'],
   ['mods', 'mods'],
   ['scavUnits', 'scavs'],
   ['extraUnits', 'extra units'],
-  ['quickStart', 'quick start'],
-  ['comBuilders', 'com builders'],
+  ['quickStart', 'quick start', true],
+  ['comBuilders', 'base builder', true],
   ['noAir', 'no air'],
   ['noNukes', 'no nukes'],
   ['noLrpc', 'no lrpc'],
   ['noEndgameLrpc', 'no endgame lrpc'],
 ];
 
-// settingsBadges turns a catalog entry's settings object into badge labels.
+// settingsBadges turns a catalog entry's settings object into badges:
+// [{key, label}].
 function settingsBadges(settings) {
   if (!settings || typeof settings !== 'object') return [];
   const out = [];
   const seen = new Set();
-  for (const [key, label] of SETTINGS_BADGES) {
+  for (const [key, label, valueless] of SETTINGS_BADGES) {
     const v = settings[key];
     if (v === undefined || v === false) continue;
     seen.add(key);
-    out.push(v === true ? label : `${label}: ${v}`);
+    out.push({ key, label: v === true || valueless ? label : `${label}: ${v}` });
   }
   for (const [key, v] of Object.entries(settings)) {
     if (seen.has(key) || v === false || v === undefined) continue;
-    out.push(v === true ? key : `${key}: ${v}`);
+    out.push({ key, label: v === true ? key : `${key}: ${v}` });
   }
   return out;
 }
@@ -2009,23 +2034,10 @@ function settingsBadges(settings) {
 // where the user was — the list, or the previously watched replay).
 function openReplay(id) {
   hideHome();
-  const sel = document.getElementById('file');
-  if (sel.value !== id) sel.value = id;
   if (new URLSearchParams(location.search).get('replay') !== id) {
     history.pushState(null, '', replayHref(id));
   }
   loadReplay(id);
-}
-
-// optionLabel is the dropdown text for one catalog entry: enough to tell
-// games apart (date, size spec, map) with the id as the fallback.
-function optionLabel(e) {
-  const parts = [];
-  if (e.startUnix) parts.push(new Date(e.startUnix * 1000).toISOString().slice(0, 10));
-  if (e.gameSize) parts.push(e.gameSize);
-  if (e.map) parts.push(e.map);
-  const label = parts.join(' · ') || e.id;
-  return e.sizeBytes != null ? `${label} (${fmtSize(e.sizeBytes)})` : label;
 }
 
 async function init() {
@@ -2055,20 +2067,10 @@ async function init() {
     renderHome('Could not list replays: ' + err.message);
     return;
   }
-  const sel = document.getElementById('file');
-  replayList.forEach(e => {
-    const o = document.createElement('option');
-    o.value = e.id;
-    o.textContent = optionLabel(e);
-    sel.appendChild(o);
-  });
-  sel.onchange = () => openReplay(sel.value);
-
   // ?replay=<id> opens that replay directly (refresh / shared link); without
-  // it the page is the replay list.
+  // it the page is the replay list (the table IS the picker).
   const wanted = params.get('replay');
   if (wanted && replayList.some(e => e.id === wanted)) {
-    sel.value = wanted;
     hideHome();
     await loadReplay(wanted);
   } else {
@@ -2088,15 +2090,13 @@ function setParam(key, val) {
 // replay list, anything else re-opens that replay.
 window.addEventListener('popstate', () => {
   const wanted = new URLSearchParams(location.search).get('replay');
-  const sel = document.getElementById('file');
   if (!wanted) {
     showHome();
     return;
   }
-  if ([...sel.options].some(o => o.value === wanted)) {
+  if (replayList.some(e => e.id === wanted)) {
     hideHome();
-    if (wanted !== sel.value || !data) {
-      sel.value = wanted;
+    if (wanted !== currentFile || !data) {
       loadReplay(wanted);
     }
   }
