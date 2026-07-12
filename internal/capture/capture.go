@@ -21,7 +21,6 @@ package capture
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -100,20 +99,7 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 			return nil
 		}
 		metaWritten = true
-		// Backfill each team's display player from the roster (first non-spectator
-		// player controlling the team) so consumers that key on TeamInfo alone
-		// still get a name.
-		for i := range base.Teams {
-			if base.Teams[i].PlayerName != "" {
-				continue
-			}
-			for _, p := range base.Players {
-				if !p.Spectator && p.Team == base.Teams[i].TeamID {
-					base.Teams[i].PlayerName = p.Name
-					break
-				}
-			}
-		}
+		backfillTeamPlayers(&base)
 		return w.WriteMeta(base)
 	}
 	flushFrame := func() error {
@@ -146,55 +132,9 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 			continue
 		}
 		switch fields[0] {
-		case "D": // D <defID> <name> (legacy: id->name only)
-			if len(fields) >= 3 {
-				id := atoi32(fields[1])
-				def := base.UnitDefs[id]
-				def.DefID, def.Name = id, fields[2]
-				base.UnitDefs[id] = def
-			}
-		case "DEF": // DEF <json> (full unit def; humanName may contain spaces, so JSON)
-			var def snapshot.UnitDef
-			payload := strings.TrimSpace(content[len(fields[0]):])
-			if err := json.Unmarshal([]byte(payload), &def); err != nil {
-				fmt.Fprintf(os.Stderr, "capture: bad DEF record %q: %v\n", payload, err)
-			} else {
-				base.UnitDefs[def.DefID] = def
-			}
-		case "P": // P <playerID> <team> <spectator> <name...> (name last, may contain spaces)
-			if len(fields) >= 5 {
-				id := atoi32(fields[1])
-				// The startscript-seeded roster (base.Players) is richer than the
-				// widget's live P line (it carries flag/rank/OpenSkill), so only add
-				// a player the seed didn't already provide — e.g. when re-parsing a
-				// raw .brsnap with no startscript behind it.
-				seen := false
-				for _, p := range base.Players {
-					if p.PlayerID == id {
-						seen = true
-						break
-					}
-				}
-				if !seen {
-					base.Players = append(base.Players, snapshot.PlayerInfo{
-						PlayerID:  id,
-						Team:      atoi32(fields[2]),
-						Spectator: fields[3] == "1",
-						Name:      strings.Join(fields[4:], " "),
-					})
-				}
-			}
-		case "T": // T <teamID> <allyTeam> <side> <color> (side "_" = none; color optional)
-			if len(fields) >= 3 {
-				ti := snapshot.TeamInfo{TeamID: atoi32(fields[1]), AllyTeam: atoi32(fields[2])}
-				if len(fields) >= 4 && fields[3] != "_" {
-					ti.Side = fields[3]
-				}
-				if len(fields) >= 5 && fields[4] != "-" {
-					ti.Color = fields[4]
-				}
-				base.Teams = append(base.Teams, ti)
-			}
+		case "GID", "GAME", "D", "DEF", "P", "T":
+			// Preamble records shared with the binary .brepstream head.
+			applyPreambleLine(fields, content, &base)
 		case "READY":
 			if err := flushMeta(); err != nil {
 				return err
