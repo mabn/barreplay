@@ -27,6 +27,12 @@ type CatalogEntry struct {
 	Map         *string `json:"map"`
 	GameSize    *string `json:"gameSize"`
 	SizeBytes   *int64  `json:"sizeBytes"`
+	// Settings are the notable game-settings flags derived from the demo
+	// startscript's modoptions (SettingsFlags) — only true/non-default entries,
+	// so a vanilla game carries just {"ranked": true}. Modoptions are NOT
+	// persisted in the .brp, so this is set only by pack's demo-fetch path
+	// (uploaded via PUT); the Go server's locally-computed entries omit it.
+	Settings map[string]any `json:"settings,omitempty"`
 }
 
 // BuildCatalogEntry derives one replay's catalog row from its parsed .brp.
@@ -49,6 +55,59 @@ func BuildCatalogEntry(id string, bf *snapshot.BRPFile, sizeBytes int64) Catalog
 		e.DurationSec = &v
 	}
 	return e
+}
+
+// SettingsFlags distills a demo startscript's raw [modoptions] map into the
+// catalog's settings object. Only true / non-default values are emitted so the
+// common case stays tiny ({"ranked": true} for a vanilla ranked game) and the
+// UI renders a badge per present key. tweakdefs*/tweakunits* values are
+// base64-encoded Lua blobs — only their presence is recorded (`mods`), never
+// the content. Returns nil when nothing notable is set (or mo is nil), which
+// json-omits the field entirely.
+func SettingsFlags(mo map[string]string) map[string]any {
+	if len(mo) == 0 {
+		return nil
+	}
+	out := map[string]any{}
+	on := func(key, name string) {
+		if mo[key] == "1" {
+			out[name] = true
+		}
+	}
+	on("ranked_game", "ranked")
+	on("map_waterislava", "lava")
+	on("scavunitsforplayers", "scavUnits")
+	on("experimentalextraunits", "extraUnits")
+	on("unit_restrictions_nonukes", "noNukes")
+	on("unit_restrictions_noendgamelrpc", "noEndgameLrpc")
+	on("unit_restrictions_nolrpc", "noLrpc")
+	on("unit_restrictions_noair", "noAir")
+
+	// Any tweak slot set at all means the game ran modded unit/def tables.
+	for _, base := range []string{"tweakdefs", "tweakunits"} {
+		for i := 0; i <= 9 && out["mods"] == nil; i++ {
+			key := base
+			if i > 0 {
+				key += fmt.Sprint(i)
+			}
+			if mo[key] != "" {
+				out["mods"] = true
+			}
+		}
+	}
+
+	// Enum-valued options: notable unless off/default.
+	if v := mo["quick_start"]; v != "" && v != "default" && v != "disabled" {
+		out["quickStart"] = v
+	}
+	if v := mo["commanderbuildersenabled"]; v != "" && v != "disabled" {
+		out["comBuilders"] = v
+	}
+
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // GameSizeSpec renders a team roster as BAR's usual size spec: team counts

@@ -43,7 +43,11 @@ cmd/pack/main.go          CLI: convert .brsnap/.brepstream captures to .brp; -up
                           default ./worker) so it appears in the deployed viewer with no redeploy —
                           ALL inputs convert to .brp first; the viewer serves the .brp wire only.
                           After the upload it upserts the replay's stats into the worker's catalog
-                          (PUT <index-url>/api/replays/<id>, body from viz.BuildCatalogEntry;
+                          (PUT <index-url>/api/replays/<id>, body from viz.BuildCatalogEntry plus
+                          settings flags distilled from the demo startscript's [modoptions] via
+                          viz.SettingsFlags — ranked/lava/mods/scavUnits/extraUnits/quickStart/
+                          comBuilders/noAir/noNukes/noLrpc/noEndgameLrpc; modoptions are NOT stored
+                          in the .brp, they ride only this PUT, so -no-demo uploads carry none;
                           -index-url > $BARREPLAY_INDEX_URL > for "local" the vite dev URL, else
                           skip with a warning; $REPLAY_PUT_TOKEN = bearer token when the worker
                           guards writes). "local" uploads pass --local --preview because both dev
@@ -64,7 +68,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           new_sqlite_classes): GET /api/replays lists it newest-game-first (null
                           start times last), PUT /api/replays/<id> upserts (called by pack -upload;
                           optionally guarded by the REPLAY_PUT_TOKEN wrangler secret as a bearer
-                          token). Row shape + PUT validation live in src/worker/replayentry.ts
+                          token). Rows carry a nullable `settings` object (notable game-settings
+                          badges: ranked, lava, mods, …) sourced ONLY from pack's demo fetch — see
+                          the cmd/pack entry. Row shape + PUT validation live in
+                          src/worker/replayentry.ts
                           (pure, node-tested) and MUST stay in lockstep with internal/viz/catalog.go,
                           which serves the same GET /api/replays computed live from .brp files so the
                           shared front-end works against both backends. The front-end landing page

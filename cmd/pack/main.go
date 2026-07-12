@@ -91,9 +91,9 @@ func main() {
 	client := barapi.New()
 	failed := 0
 	for _, in := range flag.Args() {
-		brpPath, err := pack(ctx, client, in, *outDir, *idArg, *noDemo)
+		brpPath, modOptions, err := pack(ctx, client, in, *outDir, *idArg, *noDemo)
 		if err == nil && *upload != "" {
-			err = uploadStatic(ctx, brpPath, *upload, *workerDir, resolveIndexURL(*indexURL, *upload))
+			err = uploadStatic(ctx, brpPath, *upload, *workerDir, resolveIndexURL(*indexURL, *upload), modOptions)
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "pack: %s: %v\n", in, err)
@@ -156,30 +156,33 @@ func load(path string, base snapshot.Meta) (*loaded, error) {
 // capture metadata — the same seeding cmd/barreplay performs, minus the engine
 // run. The demo is only needed for its first few KB (header + startscript), but
 // the download is whole-file; a demo is a few MB, so this stays cheap.
-func demoMeta(ctx context.Context, client *barapi.Client, id string) (snapshot.Meta, error) {
+// The raw [modoptions] map is returned alongside: it is deliberately NOT part
+// of snapshot.Meta (never persisted in the .brp) — its only consumer is the
+// catalog PUT, which distills it into settings flags (viz.SettingsFlags).
+func demoMeta(ctx context.Context, client *barapi.Client, id string) (snapshot.Meta, map[string]string, error) {
 	r, err := client.Resolve(ctx, id)
 	if err != nil {
-		return snapshot.Meta{}, err
+		return snapshot.Meta{}, nil, err
 	}
 	tmp, err := os.MkdirTemp("", "pack-demo-")
 	if err != nil {
-		return snapshot.Meta{}, err
+		return snapshot.Meta{}, nil, err
 	}
 	defer os.RemoveAll(tmp)
 	p, err := client.Download(ctx, r, tmp)
 	if err != nil {
-		return snapshot.Meta{}, err
+		return snapshot.Meta{}, nil, err
 	}
 	f, err := os.Open(p)
 	if err != nil {
-		return snapshot.Meta{}, err
+		return snapshot.Meta{}, nil, err
 	}
 	demo, err := demofile.Parse(f)
 	f.Close()
 	if err != nil {
-		return snapshot.Meta{}, fmt.Errorf("parsing demo %s: %w", r.FileName, err)
+		return snapshot.Meta{}, nil, fmt.Errorf("parsing demo %s: %w", r.FileName, err)
 	}
-	return demofile.BaseMeta(demo), nil
+	return demofile.BaseMeta(demo), demo.Startscript.ModOptions, nil
 }
 
 // inferSampleEvery returns the sampling interval implied by the frame stream:
@@ -196,27 +199,30 @@ func inferSampleEvery(frames []snapshot.Frame) int32 {
 	return best
 }
 
-// pack converts one input into <gameId>.brp and returns the written path.
-func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, noDemo bool) (string, error) {
+// pack converts one input into <gameId>.brp and returns the written path plus
+// the demo's raw modoptions (nil with -no-demo) for the catalog upload.
+func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, noDemo bool) (string, map[string]string, error) {
 	gameID := strings.TrimSuffix(filepath.Base(in), filepath.Ext(in))
 	base := snapshot.Meta{GameID: gameID}
+	var modOptions map[string]string
 	ext := strings.ToLower(filepath.Ext(in))
 	if (ext == ".brsnap" || ext == ".brepstream") && !noDemo {
 		id := idArg
 		if id == "" {
 			id = gameID
 		}
-		m, err := demoMeta(ctx, client, id)
+		m, mo, err := demoMeta(ctx, client, id)
 		if err != nil {
-			return "", fmt.Errorf("fetching demo metadata for %q: %w (pass -id <gameId|link> if the file name is not the gameId, or -no-demo to pack without map/version/player metadata)", id, err)
+			return "", nil, fmt.Errorf("fetching demo metadata for %q: %w (pass -id <gameId|link> if the file name is not the gameId, or -no-demo to pack without map/version/player metadata)", id, err)
 		}
 		fmt.Fprintf(os.Stderr, "%s: demo metadata: map %q, game %q, engine %s, %d players\n",
 			in, m.MapName, m.GameVersion, m.EngineVersion, len(m.Players))
 		base = m
+		modOptions = mo
 	}
 	l, err := load(in, base)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if l.meta.GameID == "" {
 		l.meta.GameID = gameID
@@ -230,26 +236,26 @@ func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 	}
 	w, err := snapshot.NewBRPWriter(dir, gameID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if err := w.WriteMeta(l.meta); err != nil {
 		w.Close()
-		return "", err
+		return "", nil, err
 	}
 	for _, fr := range l.frames {
 		if err := w.WriteFrame(fr); err != nil {
 			w.Close()
-			return "", err
+			return "", nil, err
 		}
 	}
 	for _, e := range l.events {
 		if err := w.WriteEvent(e); err != nil {
 			w.Close()
-			return "", err
+			return "", nil, err
 		}
 	}
 	if err := w.Close(); err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	outPath := filepath.Join(dir, gameID+".brp")
@@ -260,7 +266,7 @@ func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 	}
 	fmt.Fprintf(os.Stderr, "%s (%.1f MB) -> %s (%.2f MB%s): %d frames, %d events\n",
 		in, mb(inSize), outPath, mb(outSize), ratio, len(l.frames), len(l.events))
-	return outPath, nil
+	return outPath, modOptions, nil
 }
 
 // checkWorkerDir verifies workerDir holds the Cloudflare worker project the
@@ -300,7 +306,9 @@ func resolveIndexURL(flagVal, target string) string {
 // "r2" or "local". After the upload it registers the replay in the worker's
 // catalog (the Durable Object SQLite table behind GET /api/replays) via
 // PUT <indexURL>/api/replays/<id>; indexURL == "" skips that with a warning.
-func uploadStatic(ctx context.Context, brpPath, target, workerDir, indexURL string) error {
+// modOptions (the demo startscript's raw [modoptions]; nil with -no-demo)
+// contributes the catalog's settings flags.
+func uploadStatic(ctx context.Context, brpPath, target, workerDir, indexURL string, modOptions map[string]string) error {
 	if err := checkWorkerDir(workerDir); err != nil {
 		return err
 	}
@@ -330,7 +338,7 @@ func uploadStatic(ctx context.Context, brpPath, target, workerDir, indexURL stri
 		fmt.Fprintf(os.Stderr, "%s: uploaded, but NOT registered in the replay catalog: no index URL (pass -index-url or set BARREPLAY_INDEX_URL to the deployed worker)\n", gameID)
 		return nil
 	}
-	if err := putCatalogEntry(ctx, indexURL, gameID, brpPath, dirSize(tmp)); err != nil {
+	if err := putCatalogEntry(ctx, indexURL, gameID, brpPath, dirSize(tmp), modOptions); err != nil {
 		return fmt.Errorf("registering %s in the replay catalog at %s: %w", gameID, indexURL, err)
 	}
 	fmt.Fprintf(os.Stderr, "%s: registered in the replay catalog at %s\n", gameID, indexURL)
@@ -338,10 +346,11 @@ func uploadStatic(ctx context.Context, brpPath, target, workerDir, indexURL stri
 }
 
 // putCatalogEntry upserts one replay's stats (start time, duration, map,
-// team-size spec, bundle byte size — derived from the packed .brp) into the
-// worker's catalog. If the worker guards writes (its REPLAY_PUT_TOKEN
-// secret), the same-named env var supplies the bearer token.
-func putCatalogEntry(ctx context.Context, indexURL, gameID, brpPath string, sizeBytes int64) error {
+// team-size spec, bundle byte size — derived from the packed .brp — plus the
+// settings flags distilled from the demo's modoptions) into the worker's
+// catalog. If the worker guards writes (its REPLAY_PUT_TOKEN secret), the
+// same-named env var supplies the bearer token.
+func putCatalogEntry(ctx context.Context, indexURL, gameID, brpPath string, sizeBytes int64, modOptions map[string]string) error {
 	f, err := os.Open(brpPath)
 	if err != nil {
 		return err
@@ -351,7 +360,9 @@ func putCatalogEntry(ctx context.Context, indexURL, gameID, brpPath string, size
 	if err != nil {
 		return err
 	}
-	body, err := json.Marshal(viz.BuildCatalogEntry(gameID, bf, sizeBytes))
+	entry := viz.BuildCatalogEntry(gameID, bf, sizeBytes)
+	entry.Settings = viz.SettingsFlags(modOptions)
+	body, err := json.Marshal(entry)
 	if err != nil {
 		return err
 	}
