@@ -62,7 +62,11 @@ worker/src/breps/split.ts TypeScript .brepstream splitter: slices a raw widget s
                           harness fixture (npm test = tsx --test). The viewer has NO breps decoder
                           yet: uploaded breps replays list but fail with "unsupported payload
                           version 5" until it lands. CLI: tools/upload-brepstream.ts (npm run
-                          upload-brep) splits + uploads to R2, head (.brw, the listing marker) last
+                          upload-brep) splits + uploads to R2, head (.brw, the listing marker) last.
+                          Uploads (this + tools/upload.ts, ex-upload.mjs) go through tools/r2put.ts:
+                          parallel S3 PUTs when R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY are set (fast,
+                          aws4fetch), else parallel `wrangler r2 object put`; .brw heads upload after
+                          a completion barrier so a half-uploaded replay never lists
 snapshot/                 PUBLIC data model + pluggable Writer (owns on-disk format; current .brp binary, legacy v1 JSONL)
 assets/lua/snapshot_widget.lua   embedded, read-only sampler (go:embed)
 assets/lua/replay_uploader.lua   player-installable live-game variant: constants only (no

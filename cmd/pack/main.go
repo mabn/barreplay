@@ -46,12 +46,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strings"
 	"syscall"
 
@@ -299,10 +297,6 @@ func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 	return outPath, nil
 }
 
-// bucketName is the R2 bucket the worker binds (wrangler.jsonc); the same name
-// is used by the local dev simulator, matching worker/tools/upload.mjs.
-const bucketName = "barreplay-replays"
-
 // checkWorkerDir verifies workerDir holds the Cloudflare worker project the
 // upload paths shell into.
 func checkWorkerDir(workerDir string) error {
@@ -310,35 +304,6 @@ func checkWorkerDir(workerDir string) error {
 		return fmt.Errorf("-upload needs the Cloudflare worker project: %w (run from the repo root, or point -worker-dir at it)", err)
 	}
 	return nil
-}
-
-// staticObjects packs brpPath's static-hosting files into dir (via the same
-// viz.WriteStaticBundle behind cmd/barreplay-static, so the bytes are
-// byte-identical to the dynamic server's) and returns the bucket keys to
-// upload, sorted, mapped to their local paths. index.json is deliberately
-// absent: the Worker builds the listing live from the bucket.
-func staticObjects(brpPath, dir string) (gameID string, objects map[string]string, err error) {
-	gameID, err = viz.WriteStaticBundle(brpPath, dir)
-	if err != nil {
-		return "", nil, err
-	}
-	objects = map[string]string{}
-	root := filepath.Join(dir, "replays")
-	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		rel, err := filepath.Rel(dir, p)
-		if err != nil {
-			return err
-		}
-		objects[filepath.ToSlash(rel)] = p
-		return nil
-	})
-	if err != nil {
-		return "", nil, err
-	}
-	return gameID, objects, nil
 }
 
 // uploadBrepstream uploads a raw .brepstream capture by handing it to the
@@ -371,9 +336,11 @@ func uploadBrepstream(ctx context.Context, in, target, workerDir string) error {
 }
 
 // uploadStatic uploads one packed replay's static files to the worker's R2
-// bucket, one `npx wrangler r2 object put` per file (run inside workerDir, so
-// wrangler picks up the project's wrangler.jsonc, node_modules, and — for
-// "local" — the .wrangler dev-simulator state). target is "r2" or "local".
+// bucket: it writes the static bundle (viz.WriteStaticBundle — the same bytes
+// cmd/barreplay-static writes) into a temp dir and hands it to the worker's
+// uploader (npx tsx tools/upload.ts), which parallelizes the puts and uses
+// the R2 S3 API when R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY are set. target is
+// "r2" or "local".
 func uploadStatic(ctx context.Context, brpPath, target, workerDir string) error {
 	if err := checkWorkerDir(workerDir); err != nil {
 		return err
@@ -383,36 +350,20 @@ func uploadStatic(ctx context.Context, brpPath, target, workerDir string) error 
 		return err
 	}
 	defer os.RemoveAll(tmp)
-	gameID, objects, err := staticObjects(brpPath, tmp)
+	gameID, err := viz.WriteStaticBundle(brpPath, tmp)
 	if err != nil {
 		return err
 	}
-	// Explicit --remote/--local: wrangler's own default for `r2 object put` is
-	// LOCAL, so a bare put would silently write to disk and never reach R2.
-	mode := "--remote"
-	where := "real R2"
+	args := []string{"tsx", "tools/upload.ts", tmp, gameID}
 	if target == "local" {
-		mode = "--local"
-		where = "local wrangler dev simulator"
+		args = append(args, "--local")
 	}
-	keys := make([]string, 0, len(objects))
-	for k := range objects {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	fmt.Fprintf(os.Stderr, "%s: uploading %d objects to %s (%s)\n", gameID, len(keys), bucketName, where)
-	for _, key := range keys {
-		file, err := filepath.Abs(objects[key])
-		if err != nil {
-			return err
-		}
-		cmd := exec.CommandContext(ctx, "npx", "wrangler", "r2", "object", "put", bucketName+"/"+key, "--file", file, mode)
-		cmd.Dir = workerDir
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("uploading %s: %w", key, err)
-		}
-		fmt.Fprintf(os.Stderr, "  put %s\n", key)
+	cmd := exec.CommandContext(ctx, "npx", args...)
+	cmd.Dir = workerDir
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("uploading %s: %w (is the worker project installed? npm install in %s)", gameID, err, workerDir)
 	}
 	return nil
 }

@@ -170,44 +170,6 @@ func TestInferSampleEvery(t *testing.T) {
 	}
 }
 
-// staticObjects (the -upload collection step) yields exactly the replay's
-// bucket keys — head, keys, resources, chunk files — and never index.json
-// (the Worker builds the listing live from the bucket).
-func TestStaticObjects(t *testing.T) {
-	dir := t.TempDir()
-	in := filepath.Join(dir, "some-game.brsnap")
-	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	brpPath, err := pack(context.Background(), nil, in, dir, "", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	id, objects, err := staticObjects(brpPath, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id != "some-game" {
-		t.Errorf("gameID = %q", id)
-	}
-	for _, key := range []string{"replays/some-game.brw", "replays/some-game.keys", "replays/some-game.resources"} {
-		p, ok := objects[key]
-		if !ok {
-			t.Errorf("missing object %q (have %v)", key, objects)
-			continue
-		}
-		if fi, err := os.Stat(p); err != nil || fi.Size() == 0 {
-			t.Errorf("object %q file %q: err %v", key, p, err)
-		}
-	}
-	for key := range objects {
-		if !strings.HasPrefix(key, "replays/") {
-			t.Errorf("object %q outside replays/ (index.json must not be uploaded)", key)
-		}
-	}
-}
-
 func readBRP(t *testing.T, path string) (snapshot.Meta, []snapshot.Frame, []snapshot.Event, error) {
 	t.Helper()
 	f, err := os.Open(path)
