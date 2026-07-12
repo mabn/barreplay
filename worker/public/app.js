@@ -1929,6 +1929,21 @@ function renderHome(errMsg) {
     cell(e.durationSec != null ? fmtDuration(e.durationSec) : null);
     cell(e.map, 'map');
     cell(e.gameSize);
+    // Settings badges (empty cell — not a dash — when the entry has none).
+    {
+      const td = document.createElement('td');
+      td.className = 'settings';
+      const a = document.createElement('a');
+      a.href = href;
+      for (const label of settingsBadges(e.settings)) {
+        const s = document.createElement('span');
+        s.className = 'badge';
+        s.textContent = label;
+        a.appendChild(s);
+      }
+      td.appendChild(a);
+      tr.appendChild(td);
+    }
     cell(e.sizeBytes != null ? fmtSize(e.sizeBytes) : null, 'num');
     tr.addEventListener('click', (ev) => {
       // Only hijack a plain left-click; modified clicks keep the browser's
@@ -1951,6 +1966,42 @@ function replayHref(id) {
   const u = new URL(location.href);
   u.searchParams.set('replay', id);
   return u.pathname + u.search;
+}
+
+// The known settings flags (from the uploader's modoptions distillation) in
+// display order, with their badge labels. String-valued flags render as
+// "label: value"; unknown keys fall back to the raw key so a future flag is
+// never silently dropped.
+const SETTINGS_BADGES = [
+  ['ranked', 'ranked'],
+  ['lava', 'lava'],
+  ['mods', 'mods'],
+  ['scavUnits', 'scavs'],
+  ['extraUnits', 'extra units'],
+  ['quickStart', 'quick start'],
+  ['comBuilders', 'com builders'],
+  ['noAir', 'no air'],
+  ['noNukes', 'no nukes'],
+  ['noLrpc', 'no lrpc'],
+  ['noEndgameLrpc', 'no endgame lrpc'],
+];
+
+// settingsBadges turns a catalog entry's settings object into badge labels.
+function settingsBadges(settings) {
+  if (!settings || typeof settings !== 'object') return [];
+  const out = [];
+  const seen = new Set();
+  for (const [key, label] of SETTINGS_BADGES) {
+    const v = settings[key];
+    if (v === undefined || v === false) continue;
+    seen.add(key);
+    out.push(v === true ? label : `${label}: ${v}`);
+  }
+  for (const [key, v] of Object.entries(settings)) {
+    if (seen.has(key) || v === false || v === undefined) continue;
+    out.push(v === true ? key : `${key}: ${v}`);
+  }
+  return out;
 }
 
 // openReplay leaves the home view and starts playback of one replay,

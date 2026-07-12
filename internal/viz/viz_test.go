@@ -523,3 +523,60 @@ func TestGameSizeSpec(t *testing.T) {
 		}
 	}
 }
+
+// SettingsFlags emits only true / non-default values — a fully-default
+// modoptions bag (or nil) yields nil, and each tracked option maps to its
+// catalog key.
+func TestSettingsFlags(t *testing.T) {
+	if got := SettingsFlags(nil); got != nil {
+		t.Errorf("SettingsFlags(nil) = %v, want nil", got)
+	}
+	defaults := map[string]string{
+		"ranked_game": "0", "map_waterislava": "0", "scavunitsforplayers": "0",
+		"experimentalextraunits": "0", "unit_restrictions_nonukes": "0",
+		"unit_restrictions_noendgamelrpc": "0", "unit_restrictions_nolrpc": "0",
+		"unit_restrictions_noair": "0", "quick_start": "default",
+		"commanderbuildersenabled": "disabled",
+		"tweakdefs":                "", "tweakdefs1": "", "tweakunits": "", "tweakunits9": "",
+	}
+	if got := SettingsFlags(defaults); got != nil {
+		t.Errorf("all-default modoptions = %v, want nil", got)
+	}
+
+	cases := []struct {
+		mo   map[string]string
+		key  string
+		want any
+	}{
+		{map[string]string{"ranked_game": "1"}, "ranked", true},
+		{map[string]string{"map_waterislava": "1"}, "lava", true},
+		{map[string]string{"scavunitsforplayers": "1"}, "scavUnits", true},
+		{map[string]string{"experimentalextraunits": "1"}, "extraUnits", true},
+		{map[string]string{"unit_restrictions_nonukes": "1"}, "noNukes", true},
+		{map[string]string{"unit_restrictions_noendgamelrpc": "1"}, "noEndgameLrpc", true},
+		{map[string]string{"unit_restrictions_nolrpc": "1"}, "noLrpc", true},
+		{map[string]string{"unit_restrictions_noair": "1"}, "noAir", true},
+		{map[string]string{"tweakdefs": "Zm9v"}, "mods", true},
+		{map[string]string{"tweakdefs7": "Zm9v"}, "mods", true},
+		{map[string]string{"tweakunits": "Zm9v"}, "mods", true},
+		{map[string]string{"tweakunits3": "Zm9v"}, "mods", true},
+		{map[string]string{"quick_start": "enabled"}, "quickStart", "enabled"},
+		{map[string]string{"commanderbuildersenabled": "enabled_all"}, "comBuilders", "enabled_all"},
+	}
+	for _, c := range cases {
+		got := SettingsFlags(c.mo)
+		if len(got) != 1 || got[c.key] != c.want {
+			t.Errorf("SettingsFlags(%v) = %v, want {%s: %v}", c.mo, got, c.key, c.want)
+		}
+	}
+
+	// Combination: several flags at once, defaults still silent.
+	got := SettingsFlags(map[string]string{
+		"ranked_game": "1", "map_waterislava": "1", "tweakunits2": "x",
+		"quick_start": "disabled", "commanderbuildersenabled": "disabled",
+	})
+	want := map[string]any{"ranked": true, "lava": true, "mods": true}
+	if len(got) != len(want) || got["ranked"] != true || got["lava"] != true || got["mods"] != true {
+		t.Errorf("combined = %v, want %v", got, want)
+	}
+}

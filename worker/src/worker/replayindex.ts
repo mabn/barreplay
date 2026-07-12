@@ -20,23 +20,33 @@ export class ReplayIndex extends DurableObject<Env> {
         map          TEXT,
         game_size    TEXT,
         size_bytes   INTEGER,
+        settings     TEXT,
         updated_unix INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS replays_start ON replays (start_unix DESC);
     `);
+    // In-place upgrade for a table created before the settings column existed
+    // (SQLite has no ADD COLUMN IF NOT EXISTS; a duplicate-column error just
+    // means the schema is already current).
+    try {
+      ctx.storage.sql.exec(`ALTER TABLE replays ADD COLUMN settings TEXT`);
+    } catch (e) {
+      if (!String(e).includes("duplicate column")) throw e;
+    }
   }
 
   /** upsert inserts or fully replaces one replay's catalog row. */
   upsert(e: ReplayEntry): void {
     this.ctx.storage.sql.exec(
-      `INSERT INTO replays (id, start_unix, duration_sec, map, game_size, size_bytes, updated_unix)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO replays (id, start_unix, duration_sec, map, game_size, size_bytes, settings, updated_unix)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          start_unix = excluded.start_unix,
          duration_sec = excluded.duration_sec,
          map = excluded.map,
          game_size = excluded.game_size,
          size_bytes = excluded.size_bytes,
+         settings = excluded.settings,
          updated_unix = excluded.updated_unix`,
       e.id,
       e.startUnix,
@@ -44,6 +54,7 @@ export class ReplayIndex extends DurableObject<Env> {
       e.map,
       e.gameSize,
       e.sizeBytes,
+      e.settings === null ? null : JSON.stringify(e.settings),
       Math.floor(Date.now() / 1000),
     );
   }
@@ -53,7 +64,7 @@ export class ReplayIndex extends DurableObject<Env> {
   list(): ReplayEntry[] {
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT id, start_unix, duration_sec, map, game_size, size_bytes
+        `SELECT id, start_unix, duration_sec, map, game_size, size_bytes, settings
          FROM replays
          ORDER BY start_unix IS NULL, start_unix DESC, id`,
       )
@@ -65,6 +76,7 @@ export class ReplayIndex extends DurableObject<Env> {
       map: r.map as string | null,
       gameSize: r.game_size as string | null,
       sizeBytes: r.size_bytes as number | null,
+      settings: r.settings == null ? null : JSON.parse(r.settings as string),
     }));
   }
 }

@@ -44,8 +44,17 @@ inside a **Durable Object** (`src/worker/replayindex.ts`, single instance, migra
 
 | URL | What |
 | --- | --- |
-| `GET /api/replays` | the catalog, newest game first (rows with no start time last) — `[{id, startUnix, durationSec, map, gameSize, sizeBytes}]`, nulls for unknown stats |
+| `GET /api/replays` | the catalog, newest game first (rows with no start time last) — `[{id, startUnix, durationSec, map, gameSize, sizeBytes, settings}]`, nulls for unknown stats |
 | `PUT /api/replays/<id>` | upsert one row (same JSON shape, minus `id`); called by `pack -upload` after a replay's files land in the bucket |
+
+`settings` is a flat object of notable game-settings flags rendered as badges in the
+list — keys like `ranked`, `lava` (water-is-lava), `mods` (any tweakdefs*/tweakunits*
+set), `scavUnits`, `extraUnits`, `noAir`/`noNukes`/`noLrpc`/`noEndgameLrpc`, and the
+enum-valued `quickStart`/`comBuilders` — with boolean or short string values; only
+present flags are sent (a vanilla ranked game is `{"ranked": true}`). `pack` distills
+them from the demo startscript's `[modoptions]` (`viz.SettingsFlags` in Go — modoptions
+are NOT stored in the `.brp`, so this rides only the PUT); `pack -no-demo` uploads have
+`settings: null` and just show an empty cell.
 
 Writes can be guarded with a shared secret: `npx wrangler secret put REPLAY_PUT_TOKEN`
 makes the PUT require `Authorization: Bearer <token>`; `pack` sends the same-named env
@@ -58,7 +67,7 @@ in the bucket but was never registered still appears (with only its byte size). 
 ```sh
 curl -X PUT https://<worker-host>/api/replays/<gameId> \
   -H "authorization: Bearer $REPLAY_PUT_TOKEN" -H "content-type: application/json" \
-  -d '{"startUnix":1752000000,"durationSec":1987,"map":"Isidis crack 1.1","gameSize":"8v8","sizeBytes":8400000}'
+  -d '{"startUnix":1752000000,"durationSec":1987,"map":"Isidis crack 1.1","gameSize":"8v8","sizeBytes":8400000,"settings":{"ranked":true,"lava":true}}'
 ```
 
 The Go viz server (`cmd/barreplay-viz`) serves the same `GET /api/replays` shape

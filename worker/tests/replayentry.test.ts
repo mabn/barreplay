@@ -13,6 +13,7 @@ test("full entry passes through", () => {
     map: "Isidis crack 1.1",
     gameSize: "8v8",
     sizeBytes: 8_400_000,
+    settings: { ranked: true, lava: true, quickStart: "enabled" },
   });
   assert.deepEqual(e, {
     id: "abc123",
@@ -21,6 +22,7 @@ test("full entry passes through", () => {
     map: "Isidis crack 1.1",
     gameSize: "8v8",
     sizeBytes: 8_400_000,
+    settings: { ranked: true, lava: true, quickStart: "enabled" },
   });
 });
 
@@ -33,7 +35,21 @@ test("missing stats become null, unknown fields are dropped", () => {
     map: "Hooked 1.1.1",
     gameSize: null,
     sizeBytes: null,
+    settings: null,
   });
+});
+
+test("settings: empty object becomes null, bad shapes are rejected", () => {
+  const empty = sanitizeEntry("abc", { settings: {} });
+  assert.ok(typeof empty === "object" && empty.settings === null);
+  assert.equal(sanitizeEntry("abc", { settings: [1] }), "settings must be a JSON object");
+  assert.equal(sanitizeEntry("abc", { settings: "ranked" }), "settings must be a JSON object");
+  assert.equal(sanitizeEntry("abc", { settings: { ranked: 1 } }), "settings.ranked must be a boolean or string");
+  assert.equal(sanitizeEntry("abc", { settings: { nested: { a: 1 } } }), "settings.nested must be a boolean or string");
+  const manyKeys = Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`k${i}`, true]));
+  assert.equal(sanitizeEntry("abc", { settings: manyKeys }), "settings must have at most 32 keys");
+  const huge = { blob: "x".repeat(3000) };
+  assert.equal(sanitizeEntry("abc", { settings: huge }), "settings must serialize to at most 2048 bytes");
 });
 
 test("oversized strings are truncated, not rejected", () => {
