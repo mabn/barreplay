@@ -24,6 +24,7 @@ go run ./cmd/barreplay-viz -snapshots ./snapshots        # serve the viewer at 1
 go run ./cmd/pack ./caps/<gameId>.brsnap       # raw stream -> FULL .brp (fetches the demo for map/versions/players; -id overrides, -no-demo skips)
 go run ./cmd/pack ./caps/<gameId>.brepstream   # same for the Replay uploader widget's binary stream
 go run ./cmd/pack -upload r2 ./caps/<gameId>.brepstream   # ...and upload the packed .brp's static bundle ("local" targets the dev simulator) + register it in the worker's replay catalog (PUT /api/replays/<id>; -index-url or $BARREPLAY_INDEX_URL names the deployed worker, $REPLAY_PUT_TOKEN authenticates)
+go run ./cmd/pack -stats ./snapshots/<gameId>.brp   # .brp size breakdown: per-section sizes + top-10 unit defs by encoded bytes with per-instance cost (snapshot.ComputeBRPStats, self-checked against the codec; raw captures pack first, then report)
 go run ./cmd/barreplay-static -out ./static ./snapshots/*.brp   # pack .brp -> static bundle for R2 hosting (see worker/)
 ```
 
@@ -37,7 +38,9 @@ BAR API serving that same fixture. None of them launch the engine or touch the n
 ```
 cmd/barreplay/main.go     CLI: link/gameId/.sdfz -> full pipeline
 cmd/barreplay-viz/main.go CLI: serve the browser playback UI over a snapshots dir
-cmd/pack/main.go          CLI: convert .brsnap/.brepstream captures to .brp; -upload r2|local
+cmd/pack/main.go          CLI: convert .brsnap/.brepstream captures to .brp; -stats prints the
+                          size breakdown (sections + per-unit-def bytes, snapshot/brpstats.go —
+                          a .brp input is analyzed directly, never repacked); -upload r2|local
                           additionally uploads the packed .brp's static bundle (viz.WriteStaticBundle)
                           to the worker's R2 bucket via the worker project (run in -worker-dir,
                           default ./worker) so it appears in the deployed viewer with no redeploy —
