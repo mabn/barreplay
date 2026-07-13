@@ -181,6 +181,38 @@ func TestInferSampleEvery(t *testing.T) {
 	}
 }
 
+// -stats on a packed .brp prints the section table and the per-def breakdown,
+// with unit names resolved from the meta.
+func TestPrintStats(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "not-a-game-id.brsnap")
+	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	brpPath, _, err := pack(context.Background(), nil, in, dir, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf strings.Builder
+	if err := printStats(&buf, brpPath); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"section",
+		"K keyframes",
+		"F frames",
+		"top 1 unit defs",
+		"armcom (Armada Commander)",
+		"frame framing overhead",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stats output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func readBRP(t *testing.T, path string) (snapshot.Meta, []snapshot.Frame, []snapshot.Event, error) {
 	t.Helper()
 	f, err := os.Open(path)
