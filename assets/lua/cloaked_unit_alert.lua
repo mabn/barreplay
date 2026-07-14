@@ -33,7 +33,7 @@
 -- pcall-guarded so an error cannot get it unloaded mid-game; after repeated
 -- failures it removes itself politely.
 
-local widgetVersion = "1.0.1"
+local widgetVersion = "1.1.0"
 
 function widget:GetInfo()
 	return {
@@ -64,7 +64,7 @@ local expandRadius = 400    -- elmos: its final size
 local blipRadius   = 120    -- elmos: minimap blip half-size
 local textDuration = 4      -- s: on-screen "Cloaked unit detected" duration
 local echoAlerts   = false  -- also print a console line per new contact
-local alertWhenSpectating = false -- spectators see every ally team's pings; keep them quiet by default
+local alertWhenSpectating = true -- spectators (fullview) get every team's pings; contact merging + the sound cooldown keep that sane. Set false to silence the widget while spectating
 -- First existing file wins (all three ship with BAR).
 local soundCandidates = {
 	"sounds/ui/warning2.wav",
@@ -76,7 +76,6 @@ local soundCandidates = {
 -- State
 --------------------------------------------------------------------------------
 
-local spGetMyAllyTeamID  = Spring.GetMyAllyTeamID
 local spGetSpectating    = Spring.GetSpectatingState
 local spGetGroundHeight  = Spring.GetGroundHeight
 local spPlaySoundFile    = Spring.PlaySoundFile
@@ -142,15 +141,15 @@ widget.Update = guard(function(dt)
 	end
 end)
 
--- allyTeam/unitID/unitDefID may all be nil for a normal player; the engine
--- already delivers only pings your ally team's sensors picked up, so the
--- allyTeam check below is just a belt-and-braces skip of own-side pings
--- when the id happens to be visible (fullview spectating, cheats).
+-- allyTeam here is the DETECTING ally team (the engine emits one event per
+-- sensing team), NOT the pinging unit's team — see BAR's sfx_notifications
+-- gadget for the same reading. It and unitID/unitDefID arrive only with
+-- fullread access (spectator fullview); a normal player gets just
+-- x/y/z/strength. Either way the engine only delivers pings the watched
+-- side legitimately sensed, so no team filtering is needed or possible.
 widget.UnitSeismicPing = guard(function(x, y, z, strength, allyTeam, unitID, unitDefID)
 	if not (x and z) then return end
-	local spectating = spGetSpectating()
-	if spectating and not alertWhenSpectating then return end
-	if allyTeam and allyTeam == spGetMyAllyTeamID() then return end
+	if not alertWhenSpectating and spGetSpectating() then return end
 
 	-- merge into a nearby live contact so one walking spy is one ring, not thirty
 	local contact
@@ -175,7 +174,7 @@ widget.UnitSeismicPing = guard(function(x, y, z, strength, allyTeam, unitID, uni
 
 	if fresh then
 		lastAlert = now
-		if soundFile and (now - lastSound >= soundCooldown) and not spectating then
+		if soundFile and (now - lastSound >= soundCooldown) then
 			spPlaySoundFile(soundFile, soundVolume, 'ui')
 			lastSound = now
 		end
