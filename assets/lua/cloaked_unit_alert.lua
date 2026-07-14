@@ -33,7 +33,7 @@
 -- pcall-guarded so an error cannot get it unloaded mid-game; after repeated
 -- failures it removes itself politely.
 
-local widgetVersion = "1.0.0"
+local widgetVersion = "1.0.1"
 
 function widget:GetInfo()
 	return {
@@ -95,8 +95,10 @@ local ALERT_TEXT  = "\255\255\80\80Cloaked unit detected"
 
 -- BAR's handler unloads a widget whose callin raises; guard every body so a
 -- surprise (nil args on an odd engine build, GL quirk) degrades gracefully.
+-- Callins are invoked as METHOD calls (w:Update(dt)), so the wrapper must
+-- drop the leading self before forwarding the real arguments.
 local function guard(fn)
-	return function(...)
+	return function(_, ...)
 		local ok, err = pcall(fn, ...)
 		if ok then return end
 		errorCount = errorCount + 1
@@ -123,8 +125,10 @@ widget.Initialize = guard(function()
 	spEcho("[CloakAlert] v" .. widgetVersion .. " loaded, sound: " .. (soundFile or "none found"))
 end)
 
-widget.ViewResize = guard(function(w, h)
-	vsx, vsy = w, h
+-- arg shapes vary across handler versions (w,h vs a geometry table); the
+-- engine query is always right, so just re-ask it
+widget.ViewResize = guard(function()
+	vsx, vsy = Spring.GetViewGeometry()
 end)
 
 widget.Update = guard(function(dt)
