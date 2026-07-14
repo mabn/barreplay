@@ -113,6 +113,16 @@ assets/lua/replay_uploader.lua   player-installable live-game variant: constants
                           stream (debug/reference; both formats from ONE game validate the
                           binary encoder without re-simulating). NOT embedded/injected by
                           the Go tool (crowd-sourced capture plan: docs/widget-remote-upload.md)
+assets/lua/cloaked_unit_alert.lua   player-installable QoL widget, unrelated to capture: turns the
+                          engine's tiny red seismic-ping dots (ICM buildings — armsd/corsd/legsd,
+                          pure seismicdistance sensors) into a real alert via the unsynced
+                          widget:UnitSeismicPing(x,y,z,strength,allyTeam,unitID,unitDefID)
+                          callin: UI sound (VFS-checked candidate list, cooldown), pulsing +
+                          expanding ground rings that follow the contact (pings within mergeDist
+                          refresh one contact), minimap blips, on-screen text. Read-only,
+                          pcall-guarded, NOT embedded; only fires while the cloaked unit MOVES
+                          (game mechanic). Smoke-testable under plain lua5.4 with a stubbed
+                          Spring env (see tools/brep-harness for the pattern)
 tools/brep-harness/       stubbed-Spring Lua harness: runs the REAL uploader widget over a
                           deterministic fake game to (re)generate the
                           internal/capture/testdata fixtures that pin the Lua encoder <-> Go
