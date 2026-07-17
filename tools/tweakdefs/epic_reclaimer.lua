@@ -26,7 +26,7 @@
 --
 -- Usage: base64-encode this file (URL-safe) and set it as the `tweakdefs`
 -- modoption (`!bset tweakdefs <base64>` in a lobby). The unit is buildable
--- from the Advanced Aircraft Plants, or spawn one directly with cheats:
+-- from the T1 and Advanced Aircraft Plants, or spawn one directly with cheats:
 -- /cheat, then /give epicreclaimer
 
 local UNITNAME      = "epicreclaimer"
@@ -36,7 +36,10 @@ local HEALTH        = 1500
 local METAL_COST    = 2600
 local ENERGY_COST   = 42000
 local BUILD_TIME    = 52000
-local BUILT_BY      = { "armaap", "coraap", "legaap" } -- adv. aircraft plants
+local BUILT_BY      = { -- T1 + advanced aircraft plants
+	"armap", "corap", "legap",
+	"armaap", "coraap", "legaap",
+}
 
 local function deepcopy(t)
 	local out = {}
