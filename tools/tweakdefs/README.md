@@ -19,8 +19,9 @@ Adds `epicreclaimer` — a flying, reclaim-only unit:
   terraform.
 - Strategic icon: `air_t1_rez`; in-game name via the `i18n_en_humanname`
   customparam.
-- Buildable from the Advanced Aircraft Plants (`armaap`/`coraap`/`legaap`),
-  or `/cheat` + `/give epicreclaimer`.
+- Buildable from the T1 Aircraft Plants (`armap`/`corap`/`legap`) and the
+  Advanced Aircraft Plants (`armaap`/`coraap`/`legaap`), or `/cheat` +
+  `/give epicreclaimer`.
 
 ## Applying a tweak
 
