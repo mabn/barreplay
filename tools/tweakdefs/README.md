@@ -23,15 +23,24 @@ Adds `epicreclaimer` — a flying, reclaim-only unit:
   Advanced Aircraft Plants (`armaap`/`coraap`/`legaap`), or `/cheat` +
   `/give epicreclaimer`.
 
+`epic_reclaimer.min.lua` is the same script hand-minified to one line
+(~1.5 KB base64 instead of ~6 KB) for paths with tight message limits; it is
+kept in behavioral lockstep with the full version (same stub test runs both).
+
 ## Applying a tweak
 
 Base64-encode the script (URL-safe) and set it as the modoption:
 
 ```sh
-basenc --base64url -w0 epic_reclaimer.lua   # or: base64 -w0 file | tr '+/' '-_'
+basenc --base64url -w0 epic_reclaimer.min.lua   # or: base64 -w0 file | tr '+/' '-_'
 ```
 
-Then in a lobby: `!bset tweakdefs <encoded>` (or paste into the tweakdefs
-field of a local skirmish's advanced options). Numbered slots
-`tweakdefs1`..`tweakdefs9` work the same way. Errors are echoed to the
-infolog with the decoded source, so check there if the unit doesn't appear.
+Prefer pasting the encoded string into the **lobby's tweakdefs field**
+(advanced options UI) — the lobby batches long values. Sending it as a
+single `!bset tweakdefs <encoded>` chat line can silently truncate it
+(flood protection / message length caps), which decodes to Lua that ends
+mid-statement and fails with `'<something>' expected near '<eof>'`.
+Numbered slots `tweakdefs1`..`tweakdefs9` run as separate chunks, sorted by
+index. The game echoes each decoded tweak to the infolog before running
+it — if the unit doesn't appear, check there that the source arrived
+complete and error-free.
