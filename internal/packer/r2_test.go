@@ -284,6 +284,92 @@ func TestUploadStaticNative(t *testing.T) {
 	}
 }
 
+// The "local" target publishes through the dev worker's PUT /replays/* route
+// — concurrent HTTP, no wrangler spawns (the nonexistent worker dir proves no
+// node tooling ran) — and still PUTs the catalog row with the rid.
+func TestUploadStaticLocalWorkerRoute(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "somegameid.brsnap")
+	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	brpPath, _, err := Pack(context.Background(), nil, in, dir, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var putKeys []string
+	var catalogBody string
+	var sawAuth bool
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/replays/"):
+			mu.Lock()
+			putKeys = append(putKeys, strings.TrimPrefix(r.URL.Path, "/"))
+			sawAuth = sawAuth || r.Header.Get("Authorization") == "Bearer tok"
+			mu.Unlock()
+			w.Write([]byte(`{"ok":true}`))
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/replays/"):
+			b, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			catalogBody = string(b)
+			mu.Unlock()
+			w.Write([]byte(`{"ok":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(worker.Close)
+
+	t.Setenv("R2_ACCESS_KEY_ID", "")
+	t.Setenv("R2_SECRET_ACCESS_KEY", "")
+	t.Setenv("REPLAY_PUT_TOKEN", "tok")
+	err = UploadStatic(context.Background(), brpPath, UploadOptions{
+		Target:    "local",
+		WorkerDir: filepath.Join(dir, "does-not-exist"),
+		IndexURL:  worker.URL,
+		Rev:       "1a2b3c4d",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(putKeys) == 0 || putKeys[len(putKeys)-1] != "replays/somegameid-1a2b3c4d.brw" {
+		t.Errorf("piece PUTs = %v, want the revisioned keys with the .brw last", putKeys)
+	}
+	if !sawAuth {
+		t.Error("piece PUTs did not carry the bearer token")
+	}
+	if !strings.Contains(catalogBody, `"rid":"somegameid-1a2b3c4d"`) {
+		t.Errorf("catalog PUT body lacks the rid: %s", catalogBody)
+	}
+}
+
+// A local publish with no reachable dev worker falls back toward the wrangler
+// tooling (which surfaces the worker-project requirement).
+func TestUploadStaticLocalFallsBack(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "somegameid.brsnap")
+	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	brpPath, _, err := Pack(context.Background(), nil, in, dir, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("R2_ACCESS_KEY_ID", "")
+	t.Setenv("R2_SECRET_ACCESS_KEY", "")
+	err = UploadStatic(context.Background(), brpPath, UploadOptions{
+		Target:    "local",
+		WorkerDir: filepath.Join(dir, "does-not-exist"),
+		IndexURL:  "http://127.0.0.1:1", // nothing listens here
+		Rev:       "1a2b3c4d",
+	})
+	if err == nil || !strings.Contains(err.Error(), "worker project") {
+		t.Fatalf("err = %v, want the wrangler-fallback worker-project error", err)
+	}
+}
+
 // The pool cancels promptly: after the first failure no new work starts.
 func TestPutPoolFailFast(t *testing.T) {
 	var started atomic.Int32

@@ -134,9 +134,12 @@ Go publishers (`pack -upload r2`, the ingest daemon) upload **natively** when
 `R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY` are set: a minimal SigV4 signer in
 `internal/packer/r2.go` (pinned against aws4fetch's signatures) PUTs 16
 objects in flight against `https://<account>.r2.cloudflarestorage.com` — no
-node process involved. Without credentials they shell into the TS tooling
-below; `-upload local` always does (only wrangler can write the dev
-simulator's bucket state).
+node process involved. `-upload local` PUTs each piece through the running
+dev worker's bearer-guarded `PUT /replays/*` route instead (the dev server
+binds the simulator's bucket; a whole replay lands in milliseconds, vs ~1s of
+node+wrangler startup **per object** through `wrangler r2 object put`). Only
+the fallbacks — r2 without credentials, or local with the dev server not
+running — shell into the TS tooling below.
 
 The TS upload tools go through `tools/r2put.ts`, which picks a transport:
 

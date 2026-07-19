@@ -56,9 +56,12 @@ internal/packer/          the capture-to-published-replay pipeline: Pack (stream
                           aws4fetch fixture, the signer the TS path uses against R2 — with 16
                           concurrent PUTs, one retry on 5xx, and the .brw-heads-last barrier;
                           account/bucket from CLOUDFLARE_ACCOUNT_ID/R2_BUCKET or the worker
-                          dir's wrangler.jsonc, R2_ENDPOINT overrides). Without credentials, or
-                          for "local" (only wrangler can write the dev simulator), it shells the
-                          worker project's upload tooling (npx in -worker-dir, default ./worker).
+                          dir's wrangler.jsonc, R2_ENDPOINT overrides). "local" PUTs each piece
+                          through the dev worker's bearer-guarded PUT /replays/* route (the dev
+                          server binds the simulator bucket; wrangler spawns cost ~1s EACH, the
+                          route is milliseconds). Only the fallbacks (r2 without credentials;
+                          local with the dev server down) shell the worker project's upload
+                          tooling (npx in -worker-dir, default ./worker).
                           ALL inputs convert to .brp first; the viewer serves the .brp wire only. Revisioned by default: pieces land under
                           <gameId>-<rev>, append-only (identical bytes re-land on the same keys;
                           NOTHING in the bucket is ever overwritten or deleted — that keeps the
