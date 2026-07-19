@@ -21,7 +21,13 @@ import (
 // carry is null, never a guessed zero — the JSON shape (nullable fields,
 // camelCase keys) must stay in lockstep with worker/src/worker/replayentry.ts.
 type CatalogEntry struct {
-	ID          string  `json:"id"`
+	ID string `json:"id"`
+	// Rid is the revision the replay's pieces are actually served under
+	// (`<gameId>-<rev>`, rev = first 8 hex of the source stream's SHA-256).
+	// Revisioned publishes are append-only — a re-upload lands under a fresh
+	// rid and the row moves — so the front-end fetches pieces at `rid ?? id`.
+	// The Go viz server's files are unrevisioned, so it leaves this nil.
+	Rid         *string `json:"rid,omitempty"`
 	StartUnix   *int64  `json:"startUnix"`
 	DurationSec *int64  `json:"durationSec"`
 	Map         *string `json:"map"`
