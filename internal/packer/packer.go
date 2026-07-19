@@ -244,14 +244,25 @@ type UploadOptions struct {
 
 // UploadStatic uploads one packed replay's static files to the worker's R2
 // bucket: it writes the static bundle (viz.WriteStaticBundle — the same bytes
-// cmd/barreplay-static writes) into a temp dir and hands it to the worker's
-// uploader (npx tsx tools/upload.ts), which parallelizes the puts and uses
-// the R2 S3 API when R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY are set. After the
-// upload it registers the replay in the worker's catalog (the Durable Object
-// SQLite table behind GET /api/replays) via PUT <IndexURL>/api/replays/<id>.
+// cmd/barreplay-static writes) into a temp dir and uploads it. For "r2" with
+// R2 API credentials in the environment (R2_ACCESS_KEY_ID +
+// R2_SECRET_ACCESS_KEY) the upload is NATIVE Go — concurrent SigV4 PUTs
+// straight against the bucket's S3 endpoint (r2.go), no node tooling
+// involved. Otherwise (no credentials, or the "local" dev simulator, which
+// only wrangler can write) it shells into the worker's uploader (npx tsx
+// tools/upload.ts). After the upload it registers the replay in the worker's
+// catalog (the Durable Object SQLite table behind GET /api/replays) via
+// PUT <IndexURL>/api/replays/<id>.
 func UploadStatic(ctx context.Context, brpPath string, o UploadOptions) error {
-	if err := checkWorkerDir(o.WorkerDir); err != nil {
-		return err
+	var native *R2Client
+	if o.Target == "r2" {
+		native = r2ClientFromEnv(o.WorkerDir)
+	}
+	if native == nil {
+		// The node-tooling path needs the worker project on disk.
+		if err := checkWorkerDir(o.WorkerDir); err != nil {
+			return err
+		}
 	}
 	gameID := strings.TrimSuffix(filepath.Base(brpPath), filepath.Ext(brpPath))
 	tmp, err := os.MkdirTemp("", "pack-upload-")
@@ -275,18 +286,26 @@ func UploadStatic(ctx context.Context, brpPath string, o UploadOptions) error {
 		return err
 	}
 
-	args := []string{"tsx", "tools/upload.ts", bundleDir, uploadID}
-	if o.Target == "local" {
-		// --preview: the local dev servers (vite dev and wrangler dev) bind the
-		// preview bucket, so that is where a "local" upload must land to show up.
-		args = append(args, "--local", "--preview")
-	}
-	cmd := exec.CommandContext(ctx, "npx", args...)
-	cmd.Dir = o.WorkerDir
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("uploading %s: %w (is the worker project installed? npm install in %s)", uploadID, err, o.WorkerDir)
+	if native != nil {
+		fmt.Fprintf(os.Stderr, "uploading %q to %s/%s (native S3, %d in flight)\n",
+			uploadID, native.Endpoint, native.Bucket, uploadConcurrency)
+		if err := native.UploadBundle(ctx, bundleDir); err != nil {
+			return fmt.Errorf("uploading %s: %w", uploadID, err)
+		}
+	} else {
+		args := []string{"tsx", "tools/upload.ts", bundleDir, uploadID}
+		if o.Target == "local" {
+			// --preview: the local dev servers (vite dev and wrangler dev) bind the
+			// preview bucket, so that is where a "local" upload must land to show up.
+			args = append(args, "--local", "--preview")
+		}
+		cmd := exec.CommandContext(ctx, "npx", args...)
+		cmd.Dir = o.WorkerDir
+		cmd.Stdout = os.Stderr
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("uploading %s: %w (is the worker project installed? npm install in %s)", uploadID, err, o.WorkerDir)
+		}
 	}
 	if o.IndexURL == "" {
 		fmt.Fprintf(os.Stderr, "%s: uploaded, but NOT registered in the replay catalog: no index URL (pass -index-url or set BARREPLAY_INDEX_URL to the deployed worker)\n", uploadID)
