@@ -50,19 +50,26 @@
 --        carries only units that moved off their own prediction (x+dvx, z+dvz,
 --        other columns unchanged) plus an explicit dead-id list. Every
 --        keyframeEvery-th sample is a keyframe.
+--     C  command state (protocol 3, recordCommands): columnar rows of
+--        <id, zigzag cmd, target unit, target x/z, buildee> for units whose
+--        command tuple changed (keyframes restate every non-idle unit; a
+--        cleared-id list returns units to idle). Emitted immediately BEFORE
+--        the paired F record. Enemy queues are unreadable, so only own-ally
+--        units (everything when full-view spectating) carry command state.
 --     E  unit lifecycle event, text payload "<frame> <kind> <id> <def> <team>"
 --     X  end of stream, text payload = reason (gameover|shutdown|error)
 --
--- .brsnap text format (writeText; see internal/capture/capture.go): unchanged
--- from the snapshotter — GID/GAME/DEF/T/P/READY preamble then F/U/R/EV/END
--- lines. Unknown tags are ignored by the parser, so GID/GAME/END are backward
--- compatible.
+-- .brsnap text format (writeText; see internal/capture/capture.go): the
+-- snapshotter's format plus per-frame command lines — GID/GAME/DEF/T/P/READY
+-- preamble then F/U/C/R/EV/END lines ("C <id> <cmd> <tgt> <tx> <tz> <bt>",
+-- the CURRENT state of every non-idle unit, no deltas). Unknown tags are
+-- ignored by the parser, so GID/GAME/C/END are backward compatible.
 
 -- Widget version (semver). Bump on any user-visible or wire-visible change;
 -- it is reported in GetInfo, the load Echo, and the stream's GAME line, so
 -- every capture records which encoder produced it (the copy on a player's
 -- machine can be arbitrarily old — the server/decoder needs to know).
-local widgetVersion = "1.1.0"
+local widgetVersion = "1.2.0"
 
 function widget:GetInfo()
 	return {
@@ -78,7 +85,8 @@ function widget:GetInfo()
 end
 
 -- Protocol version of the GAME line / capture stream semantics.
-local protocolVersion = 2
+-- 3: per-sample command state ('C' records / BRSNAP C lines, recordCommands).
+local protocolVersion = 3
 
 -- Output format selection. writeBinary emits <gameId>.brepstream (the real
 -- output); writeText additionally emits the legacy <gameId>.brsnap text stream
@@ -101,6 +109,18 @@ local writeText = false
 -- own-ally-team-only behavior.
 local recordEnemies = true
 
+-- Command recording (protocol 3): each sample also captures, for every unit
+-- whose command queue is readable (own ally team; every unit under full-view
+-- spectating — never enemies/ghosts, their queues read back nil), the front of
+-- its command queue (raw engine cmd id + unit target or position target, from
+-- GetUnitCurrentCommand's parameter shape) and the unit it is currently
+-- nanolathing (GetUnitIsBuilding — also catches a nano turret auto-assisting
+-- with an empty queue). A unit with an empty queue and no buildee is idle and
+-- costs zero bytes; delta records restate only units whose command state
+-- changed, keyframes restate every non-idle unit (same discipline as the unit
+-- codec). Disabled automatically when the engine lacks GetUnitCurrentCommand.
+local recordCommands = true
+
 -- Sampling interval in sim frames (30 = 1 Hz at BAR's 30 fps sim). A constant:
 -- every uploader in a game must sample at the same frames (frame % sampleEvery
 -- == 0) so the server can merge streams by exact frame number.
@@ -122,6 +142,8 @@ local spGetUnitDefID    = Spring.GetUnitDefID
 local spGetUnitTeam     = Spring.GetUnitTeam
 local spGetUnitHealth   = Spring.GetUnitHealth
 local spGetUnitVelocity = Spring.GetUnitVelocity
+local spGetUnitCurrentCommand = Spring.GetUnitCurrentCommand
+local spGetUnitIsBuilding     = Spring.GetUnitIsBuilding
 local spGetGameSeconds  = Spring.GetGameSeconds
 local spGetGameFrame    = Spring.GetGameFrame
 local spGetTeamList     = Spring.GetTeamList
@@ -425,6 +447,7 @@ local function buildPreamble()
 		{ "sampleEvery", sampleEvery },
 		{ "gameSpeed", gameSpeed },
 		{ "recordEnemies", recordEnemies },
+		{ "recordCommands", recordCommands },
 		{ "playerID", spGetMyPlayerID and spGetMyPlayerID() or nil },
 		{ "allyTeam", spGetMyAllyTeamID and spGetMyAllyTeamID() or nil },
 		{ "spectator", spec and true or false },
@@ -463,6 +486,13 @@ end
 -- the sim frame the unit was last seen (dead detection without a second table).
 local prev = {}
 local sampleIdx = 0 -- samples emitted so far; every keyframeEvery-th is a keyframe
+
+-- Command-state mirror for the binary emitter (protocol 3): cmdPrev[id] holds
+-- the QUANTIZED command tuple the decoder currently has for that unit. Only
+-- non-idle units have entries; a unit going idle emits one cleared-id entry
+-- and drops out. Reset at every keyframe alongside prev (the keyframe 'C'
+-- record restates every non-idle unit absolutely).
+local cmdPrev = {}
 
 -- Last-known QUANTIZED state of every enemy unit sampled (the ghost source,
 -- recordEnemies only). Unlike prev this survives the keyframe prev = {} reset
@@ -514,6 +544,31 @@ local function packFrameRecord(frame, keyframe, n, cid, cdef, cteam, cx, cz, chp
 	return table.concat(parts)
 end
 
+-- packCommandRecord frames one 'C' payload (protocol 3). Columnar like the 'F'
+-- record; cmd ids are zigzag-encoded (negative = build order) so PackU32
+-- suffices. Emitted immediately BEFORE the paired 'F' record so the decoder
+-- can attach command state to the frame it is about to emit.
+local function packCommandRecord(frame, keyframe, nC, kid, kcmd, ktgt, ktx, ktz, kbt, clear)
+	local parts = {
+		PackU32({ frame }),
+		PackU8({ keyframe and 1 or 0 }),
+		PackU16({ nC }),
+		PackU16({ #clear }),
+	}
+	if nC > 0 then
+		parts[#parts + 1] = PackU16(kid)
+		parts[#parts + 1] = PackU32(kcmd)
+		parts[#parts + 1] = PackU16(ktgt)
+		parts[#parts + 1] = PackS16(ktx)
+		parts[#parts + 1] = PackS16(ktz)
+		parts[#parts + 1] = PackU16(kbt)
+	end
+	if #clear > 0 then
+		parts[#parts + 1] = PackU16(clear)
+	end
+	return table.concat(parts)
+end
+
 -- ---------------------------------------------------------------------------
 -- Sampling. The body is pcall-guarded from widget:GameFrame; after a few
 -- consecutive failures the widget closes its files and removes itself rather
@@ -534,6 +589,7 @@ local function sample(frame)
 		sampleIdx = sampleIdx + 1
 		if keyframe then
 			prev = {} -- decoder state resets at a keyframe; mirror it
+			cmdPrev = {}
 		end
 	end
 
@@ -552,6 +608,12 @@ local function sample(frame)
 	local cid, cdef, cteam, cx, cz, chp, cmax, cdvx, cdvz, cb =
 		{}, {}, {}, {}, {}, {}, {}, {}, {}, {}
 	local recorded = 0
+
+	-- Command columns (protocol 3): restated rows + cleared-to-idle ids.
+	local doCmds = recordCommands
+	local nC = 0
+	local kid, kcmd, ktgt, ktx, ktz, kbt = {}, {}, {}, {}, {}, {}
+	local cmdClear = {}
 
 	for i = 1, total do
 		local unitID = units[i]
@@ -644,6 +706,54 @@ local function sample(frame)
 					end
 				end
 			end
+			-- Command state (protocol 3): the front of the unit's queue plus
+			-- the current buildee. Enemy queues read back nil, so ghosts and
+			-- radar contacts never get entries (isEnemy is false under full
+			-- view, where every queue is readable). Target interpretation by
+			-- parameter shape: one param = unit target, three-plus = position.
+			if doCmds and not isEnemy then
+				local ccmd, _, _, cp1, cp2, cp3 = spGetUnitCurrentCommand(unitID)
+				local cbt = spGetUnitIsBuilding and spGetUnitIsBuilding(unitID) or nil
+				if ccmd ~= nil or cbt ~= nil then
+					local qcmd = mathFloor((ccmd or 0) + 0.5)
+					local qtgt, qtx, qtz = 0, 0, 0
+					if ccmd ~= nil and cp1 ~= nil then
+						if cp2 == nil then
+							qtgt = mathFloor(cp1 + 0.5)
+							if qtgt < 0 or qtgt > 65535 then qtgt = 0 end
+						elseif cp3 ~= nil then
+							qtx = mathFloor(cp1 + 0.5)
+							if qtx > 32767 then qtx = 32767 elseif qtx < -32768 then qtx = -32768 end
+							qtz = mathFloor(cp3 + 0.5)
+							if qtz > 32767 then qtz = 32767 elseif qtz < -32768 then qtz = -32768 end
+						end
+					end
+					local qbt = cbt and mathFloor(cbt + 0.5) or 0
+					if qbt < 0 or qbt > 65535 then qbt = 0 end
+					if ulines then
+						ulines[#ulines + 1] = string.format("BRSNAP C %d %d %d %d %d %d",
+							unitID, qcmd, qtgt, qtx, qtz, qbt)
+					end
+					if writeBinary then
+						local cp = cmdPrev[unitID]
+						if cp == nil or cp.cmd ~= qcmd or cp.tgt ~= qtgt
+							or cp.tx ~= qtx or cp.tz ~= qtz or cp.bt ~= qbt then
+							nC = nC + 1
+							kid[nC], ktgt[nC], ktx[nC], ktz[nC], kbt[nC] = unitID, qtgt, qtx, qtz, qbt
+							kcmd[nC] = (qcmd < 0) and (-2 * qcmd - 1) or (2 * qcmd) -- zigzag
+							if cp == nil then
+								cmdPrev[unitID] = { cmd = qcmd, tgt = qtgt, tx = qtx, tz = qtz, bt = qbt }
+							else
+								cp.cmd, cp.tgt, cp.tx, cp.tz, cp.bt = qcmd, qtgt, qtx, qtz, qbt
+							end
+						end
+					end
+				elseif writeBinary and cmdPrev[unitID] ~= nil then
+					-- Went idle: one cleared-id entry, then zero bytes.
+					cmdClear[#cmdClear + 1] = unitID
+					cmdPrev[unitID] = nil
+				end
+			end
 		end
 	end
 
@@ -704,6 +814,7 @@ local function sample(frame)
 			if p.f ~= frame then
 				dead[#dead + 1] = id
 				prev[id] = nil
+				cmdPrev[id] = nil -- the decoder drops dead units' command state too
 			end
 		end
 	end
@@ -736,6 +847,12 @@ local function sample(frame)
 		writeChunk(table.concat(ulines, "\n"))
 	end
 	if writeBinary then
+		if doCmds then
+			-- 'C' precedes its 'F' so the decoder attaches command state to
+			-- the frame it is about to emit.
+			writeRecord("C", packCommandRecord(frame, keyframe, nC,
+				kid, kcmd, ktgt, ktx, ktz, kbt, cmdClear))
+		end
 		writeRecord("F", packFrameRecord(frame, keyframe, n,
 			cid, cdef, cteam, cx, cz, chp, cmax, cdvx, cdvz, cb, dead, nR, rteam, rcols))
 	end
@@ -788,6 +905,10 @@ function widget:Initialize()
 		Echo("[replay-uploader] VFS.Pack* unavailable; falling back to text output")
 		writeBinary = false
 		writeText = true
+	end
+	if recordCommands and spGetUnitCurrentCommand == nil then
+		Echo("[replay-uploader] GetUnitCurrentCommand unavailable; command recording off")
+		recordCommands = false -- before buildPreamble: the GAME line reports the effective value
 	end
 	local ok, err = pcall(function() preambleStr = buildPreamble() end)
 	if not ok then
