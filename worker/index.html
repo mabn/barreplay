@@ -13,6 +13,14 @@
 
 <!-- Landing view: the replay list (shown when no ?replay= is selected). -->
 <div id="home" style="display:none">
+  <!-- Drag&drop publishing: a .brepstream (the Replay uploader widget's
+       capture) POSTs to /api/upload; the worker archives it and the ingest
+       daemon publishes it. Hidden with a note on hosts without the API. -->
+  <div id="dropzone">
+    <span id="droplabel">Drop a <code>.brepstream</code> capture here to publish it —
+      or <label class="browse">browse<input type="file" id="dropfile" accept=".brepstream" hidden></label></span>
+    <div id="dropstatus" style="display:none"></div>
+  </div>
   <table id="hometable">
     <thead>
       <tr><th>Started</th><th>Duration</th><th>Map</th><th>Size</th><th>Links</th><th>Settings</th><th class="num">Data</th></tr>

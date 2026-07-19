@@ -1887,7 +1887,7 @@ function startFpsMonitor() {
 }
 
 // ---- replay list / home view ----------------------------------------------
-// The catalog: [{id, startUnix, durationSec, map, gameSize, sizeBytes}].
+// The catalog: [{id, rid, startUnix, durationSec, map, gameSize, sizeBytes}].
 // Served by GET /api/replays (the worker's Durable Object table, or the Go viz
 // server computing the same shape from the .brp files). /index.json (the live
 // bucket / directory listing) is merged in so a replay whose files exist but
@@ -1906,12 +1906,40 @@ async function fetchReplayList() {
   } catch (err) {
     if (!catalog.length) throw err;
   }
-  const seen = new Set(catalog.map(e => e.id));
+  // Revisioned publishes are append-only, so the bucket accumulates every
+  // <gameId>-<8 hex> revision ever uploaded; the catalog's rid names the
+  // current one. Hide the listing's other revisions of a cataloged game —
+  // an uncataloged upload (no row at all) still shows as a stub.
+  const seen = new Set();
+  const ids = new Set();
+  for (const e of catalog) {
+    seen.add(e.id);
+    ids.add(e.id);
+    if (e.rid) seen.add(e.rid);
+  }
   for (const f of files) {
     if (seen.has(f.file)) continue;
-    catalog.push({ id: f.file, startUnix: null, durationSec: null, map: null, gameSize: null, sizeBytes: f.size ?? null });
+    const m = /^(.+)-[0-9a-f]{8}$/.exec(f.file);
+    if (m && ids.has(m[1])) continue; // a superseded revision, not its own replay
+    catalog.push({ id: f.file, rid: null, startUnix: null, durationSec: null, map: null, gameSize: null, sizeBytes: f.size ?? null });
   }
   return catalog;
+}
+
+// urlId is the id a replay's pieces are actually served under: the catalog
+// row's current revision when it has one, the bare id otherwise.
+function urlId(e) {
+  return e.rid || e.id;
+}
+
+// knownReplayURL says whether a ?replay= value is worth loading: a listed
+// replay, or any <gameId>-<8 hex> revision of a cataloged game — superseded
+// revisions are hidden from the list but never deleted, so an old shared
+// link keeps playing.
+function knownReplayURL(wanted) {
+  if (replayList.some(e => e.id === wanted || e.rid === wanted)) return true;
+  const m = /^(.+)-[0-9a-f]{8}$/.exec(wanted);
+  return !!m && replayList.some(e => e.id === m[1]);
 }
 
 let replayList = [];
@@ -1939,7 +1967,7 @@ function renderHome(errMsg) {
     // like an <a>: middle/ctrl/cmd-click opens a new tab, right-click offers
     // "open in new tab", and a plain click is intercepted below for SPA
     // navigation (pushState, so the back button returns to this list).
-    const href = replayHref(e.id);
+    const href = replayHref(urlId(e));
     const cell = (text, cls) => {
       const td = document.createElement('td');
       if (cls) td.className = cls;
@@ -1997,12 +2025,12 @@ function renderHome(errMsg) {
       // native link behaviour (new tab / new window).
       if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
       ev.preventDefault();
-      openReplay(e.id);
+      openReplay(urlId(e));
     });
     tbody.appendChild(tr);
   }
   const text = errMsg || (replayList.length ? '' :
-    'No replays yet. Upload one with: go run ./cmd/pack -upload r2 <capture>.');
+    'No replays yet. Drop a .brepstream above, or upload one with: go run ./cmd/pack -upload r2 <capture>.');
   msg.style.display = text ? '' : 'none';
   msg.textContent = text;
 }
@@ -2054,6 +2082,118 @@ function settingsBadges(settings) {
   return out;
 }
 
+// ---- drag&drop publishing --------------------------------------------------
+// A dropped .brepstream POSTs to /api/upload; the worker archives it and
+// records an ingest job, the Go daemon publishes it, and we poll the job
+// until the replay is ready to open. The same front-end also runs against
+// backends without the upload API (the Go viz server, a plain static host) —
+// there the attempt fails with a clear message.
+const MAX_UPLOAD_BYTES = 64 << 20; // mirrors the worker's /api/upload cap
+
+function initUpload() {
+  const zone = document.getElementById('dropzone');
+  const input = document.getElementById('dropfile');
+  if (!zone || !input) return;
+
+  // Neutralize the browser's default file-drop navigation everywhere, and
+  // light the dropzone up while a drag is anywhere over the window.
+  let depth = 0;
+  window.addEventListener('dragover', (e) => e.preventDefault());
+  window.addEventListener('dragenter', (e) => {
+    e.preventDefault();
+    if (++depth === 1 && document.body.classList.contains('home')) zone.classList.add('drag');
+  });
+  window.addEventListener('dragleave', () => {
+    if (--depth <= 0) { depth = 0; zone.classList.remove('drag'); }
+  });
+  window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    depth = 0;
+    zone.classList.remove('drag');
+    if (!document.body.classList.contains('home')) return;
+    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (file) uploadStream(file);
+  });
+  input.addEventListener('change', () => {
+    if (input.files[0]) uploadStream(input.files[0]);
+    input.value = '';
+  });
+}
+
+function uploadStatus(text, cls) {
+  const el = document.getElementById('dropstatus');
+  el.style.display = text ? '' : 'none';
+  el.className = cls || '';
+  el.textContent = text || '';
+}
+
+function uploadStream(file) {
+  if (file.size > MAX_UPLOAD_BYTES) {
+    uploadStatus(`${file.name} is too large (${fmtSize(file.size)}; the limit is ${fmtSize(MAX_UPLOAD_BYTES)})`, 'error');
+    return;
+  }
+  // Wrong extensions still go through — the server sniffs the actual header.
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/upload');
+  xhr.responseType = 'json';
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) uploadStatus(`uploading ${file.name}… ${Math.round(100 * e.loaded / e.total)}%`);
+  };
+  xhr.onerror = () => uploadStatus('upload failed: network error', 'error');
+  xhr.onload = () => {
+    if (xhr.status === 404 || xhr.status === 405) {
+      uploadStatus('this server does not accept uploads — publish with: go run ./cmd/pack -upload r2 <capture>', 'error');
+      return;
+    }
+    const resp = xhr.response || {};
+    if (xhr.status !== 200) {
+      uploadStatus('upload rejected: ' + (resp.error || `HTTP ${xhr.status}`), 'error');
+      return;
+    }
+    uploadStatus('uploaded — queued for processing…');
+    pollUploadJob(resp.job, resp.gameId);
+  };
+  uploadStatus(`uploading ${file.name}…`);
+  xhr.send(file);
+}
+
+// pollUploadJob follows the ingest job until the daemon reports done/error,
+// then refreshes the list and opens the freshly published replay.
+async function pollUploadJob(job, gameId) {
+  const started = Date.now();
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 2000));
+    let j;
+    try {
+      const r = await fetch('/api/jobs/' + encodeURIComponent(job));
+      if (!r.ok) continue;
+      j = await r.json();
+    } catch (_) {
+      continue;
+    }
+    if (j.state === 'error') {
+      uploadStatus('processing failed: ' + (j.error || 'unknown error'), 'error');
+      return;
+    }
+    if (j.state === 'done') {
+      uploadStatus('published', 'ok');
+      try {
+        replayList = await fetchReplayList();
+        renderHome();
+      } catch (_) { /* the replay still published; the list just didn't refresh */ }
+      const e = replayList.find((x) => x.id === gameId) ||
+        replayList.find((x) => x.id.startsWith(gameId + '-'));
+      if (e) openReplay(urlId(e));
+      return;
+    }
+    if (j.state === 'processing') {
+      uploadStatus('processing…');
+    } else if (Date.now() - started > 60_000) {
+      uploadStatus('queued — waiting for the ingest daemon (the upload is safe and will be processed when it runs)…');
+    }
+  }
+}
+
 // openReplay leaves the home view and starts playback of one replay,
 // PUSHING a history entry (navigation, not a tweak: back must return to
 // where the user was — the list, or the previously watched replay).
@@ -2067,6 +2207,7 @@ function openReplay(id) {
 
 async function init() {
   initGL(); // one-time; a null result just means the 2D icon path is used
+  initUpload(); // wired before the list fetch so the dropzone works regardless
   // Restore icon size from the URL (?iconsize=) before the first paint.
   const params = new URLSearchParams(location.search);
   const isz = parseInt(params.get('iconsize'), 10);
@@ -2095,7 +2236,7 @@ async function init() {
   // ?replay=<id> opens that replay directly (refresh / shared link); without
   // it the page is the replay list (the table IS the picker).
   const wanted = params.get('replay');
-  if (wanted && replayList.some(e => e.id === wanted)) {
+  if (wanted && knownReplayURL(wanted)) {
     hideHome();
     await loadReplay(wanted);
   } else {
@@ -2119,7 +2260,7 @@ window.addEventListener('popstate', () => {
     showHome();
     return;
   }
-  if (replayList.some(e => e.id === wanted)) {
+  if (knownReplayURL(wanted)) {
     hideHome();
     if (wanted !== currentFile || !data) {
       loadReplay(wanted);
