@@ -1,4 +1,4 @@
-// Shared R2 upload backend for the tools/ CLIs (upload.ts, upload-brepstream.ts)
+// Shared R2 upload backend for the tools/ CLIs (upload.ts)
 // and, through them, `pack -upload`. Two transports, picked automatically:
 //
 //   - S3 API (fast path): when R2 API credentials are in the environment
