@@ -49,10 +49,17 @@ cmd/pack/main.go          CLI: convert .brsnap/.brepstream captures to .brp; -st
 internal/packer/          the capture-to-published-replay pipeline: Pack (stream parse + demo
                           metadata fetch -> .brp), StreamRev (sha256[:8] revision id), and
                           UploadStatic — writes the static bundle (viz.WriteStaticBundle) and
-                          uploads it to the worker's R2 bucket via the worker project (run in
-                          -worker-dir, default ./worker) so it appears in the deployed viewer
-                          with no redeploy — ALL inputs convert to .brp first; the viewer serves
-                          the .brp wire only. Revisioned by default: pieces land under
+                          uploads it to the worker's R2 bucket so it appears in the deployed
+                          viewer with no redeploy. For "r2" with R2 API credentials in the env
+                          (R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY) the upload is NATIVE Go
+                          (r2.go: a minimal SigV4 signer — pinned byte-for-byte against an
+                          aws4fetch fixture, the signer the TS path uses against R2 — with 16
+                          concurrent PUTs, one retry on 5xx, and the .brw-heads-last barrier;
+                          account/bucket from CLOUDFLARE_ACCOUNT_ID/R2_BUCKET or the worker
+                          dir's wrangler.jsonc, R2_ENDPOINT overrides). Without credentials, or
+                          for "local" (only wrangler can write the dev simulator), it shells the
+                          worker project's upload tooling (npx in -worker-dir, default ./worker).
+                          ALL inputs convert to .brp first; the viewer serves the .brp wire only. Revisioned by default: pieces land under
                           <gameId>-<rev>, append-only (identical bytes re-land on the same keys;
                           NOTHING in the bucket is ever overwritten or deleted — that keeps the
                           /replays/* immutable cache-control sound; superseded revisions stay

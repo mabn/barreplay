@@ -130,7 +130,15 @@ wrangler login (`npx wrangler login`) to the account in `wrangler.jsonc` (`accou
 
 ### Upload speed: the S3 fast path
 
-Both upload tools go through `tools/r2put.ts`, which picks a transport:
+Go publishers (`pack -upload r2`, the ingest daemon) upload **natively** when
+`R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY` are set: a minimal SigV4 signer in
+`internal/packer/r2.go` (pinned against aws4fetch's signatures) PUTs 16
+objects in flight against `https://<account>.r2.cloudflarestorage.com` — no
+node process involved. Without credentials they shell into the TS tooling
+below; `-upload local` always does (only wrangler can write the dev
+simulator's bucket state).
+
+The TS upload tools go through `tools/r2put.ts`, which picks a transport:
 
 - **S3 API (fast).** Set `R2_ACCESS_KEY_ID` + `R2_SECRET_ACCESS_KEY` (create a token
   under Cloudflare dash → R2 → *Manage R2 API Tokens*, "Object Read & Write" on the
@@ -192,11 +200,13 @@ The daemon polls, claims a job, downloads the stream, and publishes it through
 the same `internal/packer` pipeline as `pack -upload`: demo fetch from the BAR
 API for the rich metadata (falling back to the stream's own GAME preamble when
 the API doesn't know the game), `.brp` conversion, revisioned static-bundle
-upload (via these same tools — export the R2 credentials on the VM for the S3
-fast path), catalog PUT, then reports `done`. The browser's dropzone follows
-along and opens the replay when it lands. Uploads are accepted while the daemon
-is down — jobs wait as `pending`, and a `processing` job whose daemon died is
-re-offered after 15 minutes.
+upload, catalog PUT, then reports `done`. With the R2 credentials exported
+(the intended deployment) the upload is **native Go** — concurrent SigV4 PUTs
+straight against the bucket's S3 endpoint, so the host needs no node at all;
+without them it falls back to shelling these tools via npx. The browser's
+dropzone follows along and opens the replay when it lands. Uploads are
+accepted while the daemon is down — jobs wait as `pending`, and a
+`processing` job whose daemon died is re-offered after 15 minutes.
 
 ```sh
 # on the VM / wherever the repo + worker/node_modules live:

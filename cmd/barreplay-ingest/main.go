@@ -16,9 +16,13 @@
 // bearer secret — no inbound connectivity to this host is ever needed, so it
 // runs happily behind NAT and the worker keeps accepting uploads while it is
 // down (jobs wait as pending; a "processing" job whose daemon died is
-// re-offered after a timeout). The R2 puts go through the worker project's
-// upload tooling exactly like `pack -upload` (npx tsx tools/upload.ts; the
-// R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY env vars pick the fast S3 path).
+// re-offered after a timeout). With R2 API credentials in the environment
+// (R2_ACCESS_KEY_ID + R2_SECRET_ACCESS_KEY — set them: this is the intended
+// deployment) the R2 puts are NATIVE Go, concurrent SigV4 PUTs against the
+// bucket's S3 endpoint (internal/packer/r2.go) — no node on the host at all;
+// without credentials it falls back to the worker project's upload tooling
+// (npx tsx tools/upload.ts), which is also what -upload local always uses
+// (only wrangler can write the dev simulator's bucket).
 //
 // A demo-fetch failure (the BAR API does not know the game — private lobby,
 // not yet indexed) degrades to a -no-demo pack instead of failing the job:
