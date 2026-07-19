@@ -129,6 +129,15 @@ app.post("/api/jobs/:id", async (c) => {
   return c.json({ ok: true });
 });
 
+// Archived raw streams for the ingest daemon (which speaks only HTTP to the
+// worker — no S3 credentials needed on the read side). Guarded: the archive
+// is not public, unlike the published replay pieces.
+app.get("/api/streams/:gameId/:file", async (c) => {
+  if (!authorized(c)) return c.json({ error: "unauthorized" }, 401);
+  const key = `streams/${c.req.param("gameId")}/${c.req.param("file")}`;
+  return serveR2(c.env.BUCKET, key, c.req.raw, false);
+});
+
 // The replay listing is built live from the bucket (list the replays/ prefix), so
 // uploading a single replay's files makes it appear with no index.json to maintain.
 app.get("/index.json", (c) => handleIndex(c.env.BUCKET));

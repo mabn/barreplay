@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,6 +28,13 @@ import (
 	"github.com/mabn/barreplay/internal/viz"
 	"github.com/mabn/barreplay/snapshot"
 )
+
+// ErrDemoUnavailable marks a Pack failure caused by the demo lookup/download
+// (the BAR API doesn't know the game, network trouble, …) rather than the
+// stream itself. Callers that can degrade — like the ingest daemon — retry
+// with noDemo and publish the stream's own metadata instead of failing the
+// upload outright.
+var ErrDemoUnavailable = errors.New("demo metadata unavailable")
 
 // loaded is an in-memory capture; it doubles as the snapshot.Writer sink when
 // re-parsing a raw .brsnap through internal/capture.
@@ -138,7 +146,7 @@ func Pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 		}
 		m, mo, err := demoMeta(ctx, client, id)
 		if err != nil {
-			return "", nil, fmt.Errorf("fetching demo metadata for %q: %w (pass -id <gameId|link> if the file name is not the gameId, or -no-demo to pack without map/version/player metadata)", id, err)
+			return "", nil, fmt.Errorf("fetching demo metadata for %q: %w: %v (pass -id <gameId|link> if the file name is not the gameId, or -no-demo to pack without map/version/player metadata)", id, ErrDemoUnavailable, err)
 		}
 		fmt.Fprintf(os.Stderr, "%s: demo metadata: map %q, game %q, engine %s, %d players\n",
 			in, m.MapName, m.GameVersion, m.EngineVersion, len(m.Players))

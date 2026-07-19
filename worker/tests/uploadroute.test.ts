@@ -56,6 +56,11 @@ class FakeBucket {
       truncated: false,
     };
   }
+  async get(key: string): Promise<unknown> {
+    const v = this.objects.get(key);
+    if (!v) return null;
+    return { size: v.length, httpEtag: '"test"', writeHttpMetadata: () => {}, body: v, range: undefined };
+  }
 }
 
 function makeEnv(token?: string): { env: Env; index: FakeIndex; bucket: FakeBucket } {
@@ -181,6 +186,21 @@ test("daemon queue and transitions are bearer-guarded when a token is set", asyn
     env,
   );
   assert.equal(unknown.status, 404);
+});
+
+test("the daemon can download the archived stream, guarded", async () => {
+  const { env } = makeEnv("s3cret");
+  const up = await app.request("/api/upload", { method: "POST", body: fixture() }, env);
+  const { streamKey } = await asJson(up);
+
+  const path = `/api/${streamKey}`; // streams/<gameId>/<file> nests under /api/
+  assert.equal((await app.request(path, {}, env)).status, 401);
+  const res = await app.request(path, { headers: { authorization: "Bearer s3cret" } }, env);
+  assert.equal(res.status, 200);
+  assert.deepEqual(new Uint8Array(await res.arrayBuffer()), fixture());
+
+  const missing = await app.request(`/api/streams/${GAME_ID}/nope.brepstream`, { headers: { authorization: "Bearer s3cret" } }, env);
+  assert.equal(missing.status, 404);
 });
 
 test("failed jobs carry their error to the poller", async () => {
