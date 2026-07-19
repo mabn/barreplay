@@ -8,6 +8,7 @@ import { sanitizeEntry } from "../src/worker/replayentry";
 
 test("full entry passes through", () => {
   const e = sanitizeEntry("abc123", {
+    rid: "abc123-1a2b3c4d",
     startUnix: 1_752_000_000,
     durationSec: 1987,
     map: "Isidis crack 1.1",
@@ -17,6 +18,7 @@ test("full entry passes through", () => {
   });
   assert.deepEqual(e, {
     id: "abc123",
+    rid: "abc123-1a2b3c4d",
     startUnix: 1_752_000_000,
     durationSec: 1987,
     map: "Isidis crack 1.1",
@@ -30,6 +32,7 @@ test("missing stats become null, unknown fields are dropped", () => {
   const e = sanitizeEntry("abc", { map: "Hooked 1.1.1", bogus: 42 });
   assert.deepEqual(e, {
     id: "abc",
+    rid: null,
     startUnix: null,
     durationSec: null,
     map: "Hooked 1.1.1",
@@ -37,6 +40,14 @@ test("missing stats become null, unknown fields are dropped", () => {
     sizeBytes: null,
     settings: null,
   });
+});
+
+test("rid is validated like an id", () => {
+  assert.equal(sanitizeEntry("abc", { rid: "a/b" }), "invalid rid");
+  assert.equal(sanitizeEntry("abc", { rid: 7 }), "invalid rid");
+  assert.equal(sanitizeEntry("abc", { rid: "" }), "invalid rid");
+  const e = sanitizeEntry("abc", { rid: null });
+  assert.ok(typeof e === "object" && e.rid === null);
 });
 
 test("settings: empty object becomes null, bad shapes are rejected", () => {
