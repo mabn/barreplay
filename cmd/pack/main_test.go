@@ -58,7 +58,7 @@ func TestPackBRSNAPWithDemoMeta(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, modOptions, err := pack(context.Background(), mockBARClient(t), in, dir, "", false)
+	_, modOptions, err := pack(context.Background(), mockBARClient(t), in, dir, "", false, defaultTestPackOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestPackBRSNAPWithIDFlag(t *testing.T) {
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := pack(context.Background(), mockBARClient(t), in, dir, fixtureGameID, false); err != nil {
+	if _, _, err := pack(context.Background(), mockBARClient(t), in, dir, fixtureGameID, false, defaultTestPackOptions()); err != nil {
 		t.Fatal(err)
 	}
 	meta, _, _, err := readBRP(t, filepath.Join(dir, "renamed-capture.brp"))
@@ -126,7 +126,7 @@ func TestPackBRSNAPBadNameErrors(t *testing.T) {
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := pack(context.Background(), mockBARClient(t), in, dir, "", false)
+	_, _, err := pack(context.Background(), mockBARClient(t), in, dir, "", false, defaultTestPackOptions())
 	if err == nil || !strings.Contains(err.Error(), "-no-demo") {
 		t.Fatalf("err = %v, want a gameId error mentioning the -no-demo escape hatch", err)
 	}
@@ -139,7 +139,7 @@ func TestPackBRSNAPNoDemo(t *testing.T) {
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := pack(context.Background(), nil, in, dir, "", true); err != nil {
+	if _, _, err := pack(context.Background(), nil, in, dir, "", true, defaultTestPackOptions()); err != nil {
 		t.Fatal(err)
 	}
 	meta, _, _, err := readBRP(t, filepath.Join(dir, "not-a-game-id.brp"))
@@ -189,7 +189,7 @@ func TestPrintStats(t *testing.T) {
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	brpPath, _, err := pack(context.Background(), nil, in, dir, "", true)
+	brpPath, _, err := pack(context.Background(), nil, in, dir, "", true, defaultTestPackOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,4 +221,9 @@ func readBRP(t *testing.T, path string) (snapshot.Meta, []snapshot.Frame, []snap
 	}
 	defer f.Close()
 	return snapshot.ReadBRP(f)
+}
+
+// defaultTestPackOptions mirrors the CLI's flag defaults.
+func defaultTestPackOptions() packOptions {
+	return packOptions{commandsMode: "build"}
 }

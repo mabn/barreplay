@@ -116,6 +116,7 @@ const (
 	SecFrames    byte = 'F' // core delta frames, chunked
 	SecExtra     byte = 'X' // extra frame columns (not sent to the browser)
 	SecEvents    byte = 'E' // lifecycle events
+	SecCommands  byte = 'C' // per-unit command state, chunked (optional; absent when the capture has none)
 	SecHead      byte = 'J' // wire payload: head JSON (viz-specific)
 )
 
@@ -228,6 +229,14 @@ type BRPChunk struct {
 	XOff    int64 `json:"xOff"`
 	XKeyLen int64 `json:"xKeyLen"`
 	XLen    int64 `json:"xLen"`
+	// COff/CKeyLen/CLen locate the chunk's command state in the optional C
+	// section, in the same keyframe+delta gzip-pair shape as X. All zero (and
+	// omitted from the JSON) when the capture carries no commands — the C
+	// section is then absent and files stay byte-identical to pre-command
+	// output.
+	COff    int64 `json:"cOff,omitempty"`
+	CKeyLen int64 `json:"cKeyLen,omitempty"`
+	CLen    int64 `json:"cLen,omitempty"`
 }
 
 // brpMetaRecord is the JSON stored in the M section: the capture Meta plus
@@ -771,6 +780,142 @@ func gunzip(b []byte) ([]byte, error) {
 }
 
 // ---------------------------------------------------------------------------
+// command codec (the optional C section)
+//
+// Commands don't move, so the codec is simpler than the frame codec: the
+// state is one tuple per non-idle unit, carried unchanged unless the frame
+// restates it. Per frame: a cleared-id list (units whose state ends — went
+// idle or died), a changed-id list, then the changed units' columns as
+// ABSOLUTE values (the tuples are small and repeat; delta-coding them against
+// themselves bought nothing measurable). A chunk's first frame encodes against
+// empty state — the command keyframe — mirroring the core codec's chunk
+// discipline, so DecodeChunk stays self-contained.
+
+// encodeCmdFrame appends one frame's command state to vw, mutating prev (the
+// shared encoder/decoder state) to exactly what a decoder reconstructs.
+func encodeCmdFrame(vw *varintWriter, prev map[int32]UnitCommand, cmds []UnitCommand) {
+	cur := make(map[int32]UnitCommand, len(cmds))
+	ids := make([]int64, 0, len(cmds))
+	for _, c := range cmds {
+		cur[c.UnitID] = c
+		ids = append(ids, int64(c.UnitID))
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	var cleared []int64
+	for id := range prev {
+		if _, ok := cur[id]; !ok {
+			cleared = append(cleared, int64(id))
+		}
+	}
+	sort.Slice(cleared, func(i, j int) bool { return cleared[i] < cleared[j] })
+	vw.uv(uint64(len(cleared)))
+	last := int64(0)
+	for _, id := range cleared {
+		vw.sv(id - last)
+		last = id
+		delete(prev, int32(id))
+	}
+
+	changed := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if p, ok := prev[int32(id)]; !ok || p != cur[int32(id)] {
+			changed = append(changed, id)
+		}
+	}
+	vw.uv(uint64(len(changed)))
+	last = 0
+	for _, id := range changed {
+		vw.sv(id - last)
+		last = id
+	}
+	for _, col := range []func(*UnitCommand) int64{
+		func(c *UnitCommand) int64 { return int64(c.Cmd) },
+		func(c *UnitCommand) int64 { return int64(c.TargetID) },
+		func(c *UnitCommand) int64 { return int64(c.TX) },
+		func(c *UnitCommand) int64 { return int64(c.TZ) },
+		func(c *UnitCommand) int64 { return int64(c.Buildee) },
+	} {
+		for _, id := range changed {
+			c := cur[int32(id)]
+			vw.sv(col(&c))
+		}
+	}
+	for _, id := range changed {
+		prev[int32(id)] = cur[int32(id)]
+	}
+}
+
+// decodeCmdFrames decodes n frames' command state from b, carrying prev across
+// frames, and returns each frame's full (reconstructed) sorted command list.
+func decodeCmdFrames(b []byte, prev map[int32]UnitCommand, n int) ([][]UnitCommand, error) {
+	vr := &varintReader{b: b}
+	readIDs := func() ([]int32, error) {
+		cnt, err := vr.uv()
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]int32, cnt)
+		last := int64(0)
+		for i := range ids {
+			d, err := vr.sv()
+			if err != nil {
+				return nil, err
+			}
+			last += d
+			ids[i] = int32(last)
+		}
+		return ids, nil
+	}
+	out := make([][]UnitCommand, 0, n)
+	for k := 0; k < n; k++ {
+		cleared, err := readIDs()
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range cleared {
+			delete(prev, id)
+		}
+		changed, err := readIDs()
+		if err != nil {
+			return nil, err
+		}
+		rows := make([]UnitCommand, len(changed))
+		for i, id := range changed {
+			rows[i].UnitID = id
+		}
+		for _, col := range []func(*UnitCommand, int32){
+			func(c *UnitCommand, v int32) { c.Cmd = v },
+			func(c *UnitCommand, v int32) { c.TargetID = v },
+			func(c *UnitCommand, v int32) { c.TX = v },
+			func(c *UnitCommand, v int32) { c.TZ = v },
+			func(c *UnitCommand, v int32) { c.Buildee = v },
+		} {
+			for i := range rows {
+				v, err := vr.sv()
+				if err != nil {
+					return nil, err
+				}
+				col(&rows[i], int32(v))
+			}
+		}
+		for _, r := range rows {
+			prev[r.UnitID] = r
+		}
+		frame := make([]UnitCommand, 0, len(prev))
+		for _, c := range prev {
+			frame = append(frame, c)
+		}
+		sort.Slice(frame, func(i, j int) bool { return frame[i].UnitID < frame[j].UnitID })
+		if len(frame) == 0 {
+			frame = nil
+		}
+		out = append(out, frame)
+	}
+	return out, nil
+}
+
+// ---------------------------------------------------------------------------
 // writer
 
 // brpWriter implements Writer: frames buffer until a chunk fills, each chunk
@@ -786,6 +931,8 @@ type brpWriter struct {
 	pending           []Frame      // frames of the not-yet-flushed chunk
 	keysBuf           bytes.Buffer // raw concatenated core keyframes -> K
 	coreBuf, extraBuf bytes.Buffer
+	cmdBuf            bytes.Buffer // command keyframe+delta gzip pairs -> C
+	anyCommands       bool         // any frame carried commands; false at Close drops C
 	chunks            []BRPChunk
 
 	events      []Event
@@ -850,6 +997,23 @@ func (w *brpWriter) flushChunk() {
 		encode(&coreRest, &extraRest, fr)
 	}
 
+	// Command state: fresh codec per chunk (the first frame is the command
+	// keyframe), same keyframe+delta gzip-pair shape as X. Always encoded —
+	// an empty pair is ~50 bytes — but the whole section (and these chunk
+	// fields) is dropped at Close when no frame ever carried commands.
+	cmdCodec := map[int32]UnitCommand{}
+	var cmdKey, cmdRest bytes.Buffer
+	encodeCmdFrame(&varintWriter{w: &cmdKey}, cmdCodec, w.pending[0].Commands)
+	for _, fr := range w.pending[1:] {
+		encodeCmdFrame(&varintWriter{w: &cmdRest}, cmdCodec, fr.Commands)
+	}
+	for _, fr := range w.pending {
+		if len(fr.Commands) > 0 {
+			w.anyCommands = true
+			break
+		}
+	}
+
 	c := BRPChunk{
 		Frame: w.pending[0].Frame,
 		Count: len(w.pending),
@@ -857,16 +1021,21 @@ func (w *brpWriter) flushChunk() {
 		KLen:  int64(coreKey.Len()),
 		FOff:  int64(w.coreBuf.Len()),
 		XOff:  int64(w.extraBuf.Len()),
+		COff:  int64(w.cmdBuf.Len()),
 	}
 	w.keysBuf.Write(coreKey.Bytes())
 	w.extraBuf.Write(gzipCompress(extraKey.Bytes()))
 	c.XKeyLen = int64(w.extraBuf.Len()) - c.XOff
+	w.cmdBuf.Write(gzipCompress(cmdKey.Bytes()))
+	c.CKeyLen = int64(w.cmdBuf.Len()) - c.COff
 	if len(w.pending) > 1 {
 		w.coreBuf.Write(gzipCompress(coreRest.Bytes()))
 		w.extraBuf.Write(gzipCompress(extraRest.Bytes()))
+		w.cmdBuf.Write(gzipCompress(cmdRest.Bytes()))
 	}
 	c.FLen = int64(w.coreBuf.Len()) - c.FOff
 	c.XLen = int64(w.extraBuf.Len()) - c.XOff
+	c.CLen = int64(w.cmdBuf.Len()) - c.COff
 
 	w.chunks = append(w.chunks, c)
 	w.frames += len(w.pending)
@@ -881,6 +1050,15 @@ func (w *brpWriter) WriteEvent(e Event) error {
 
 func (w *brpWriter) Close() error {
 	w.flushChunk()
+
+	// A capture with no commands writes no C section and no cOff/cKeyLen/cLen
+	// fields (omitempty) — byte-identical to pre-command output.
+	if !w.anyCommands {
+		w.cmdBuf.Reset()
+		for i := range w.chunks {
+			w.chunks[i].COff, w.chunks[i].CKeyLen, w.chunks[i].CLen = 0, 0, 0
+		}
+	}
 
 	rec := brpMetaRecord{
 		Meta:        w.meta,
@@ -916,6 +1094,9 @@ func (w *brpWriter) Close() error {
 		{Tag: SecFrames, Payload: w.coreBuf.Bytes()},
 		{Tag: SecExtra, Payload: w.extraBuf.Bytes()},
 		{Tag: SecEvents, Payload: gzipCompress(encodeEvents(w.events))},
+	}
+	if w.anyCommands {
+		sections = append(sections, Section{Tag: SecCommands, Payload: w.cmdBuf.Bytes()})
 	}
 	if err := WriteContainer(f, BRPMagic, BRPVersion, sections); err != nil {
 		f.Close()
@@ -1055,6 +1236,36 @@ func (f *BRPFile) DecodeChunk(i int) ([]Frame, error) {
 	}
 	if len(frames) != c.Count {
 		return nil, fmt.Errorf("snapshot: chunk %d decoded %d frames, index says %d", i, len(frames), c.Count)
+	}
+
+	// Command state (optional C section, same keyframe+delta pair shape as X).
+	if csec, ok := f.Sections[SecCommands]; ok && c.CLen > 0 {
+		cmdKey, err := chunkSlice(csec, c.COff, c.CKeyLen, "chunk command keyframe")
+		if err != nil {
+			return nil, err
+		}
+		cmdState := map[int32]UnitCommand{}
+		cmds, err := decodeCmdFrames(cmdKey, cmdState, 1)
+		if err != nil {
+			return nil, err
+		}
+		if c.CLen > c.CKeyLen {
+			cmdDeltas, err := chunkSlice(csec, c.COff+c.CKeyLen, c.CLen-c.CKeyLen, "chunk command deltas")
+			if err != nil {
+				return nil, err
+			}
+			rest, err := decodeCmdFrames(cmdDeltas, cmdState, c.Count-1)
+			if err != nil {
+				return nil, err
+			}
+			cmds = append(cmds, rest...)
+		}
+		if len(cmds) != len(frames) {
+			return nil, fmt.Errorf("snapshot: chunk %d decoded %d command frames, want %d", i, len(cmds), len(frames))
+		}
+		for k := range frames {
+			frames[k].Commands = cmds[k]
+		}
 	}
 	return frames, nil
 }

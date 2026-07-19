@@ -74,6 +74,8 @@ func main() {
 		workerDir = flag.String("worker-dir", "worker", "the Cloudflare worker project directory wrangler runs in (with -upload)")
 		indexURL  = flag.String("index-url", "", "base URL of the deployed worker, used to register the uploaded replay in the catalog via PUT /api/replays/<id> (default: $BARREPLAY_INDEX_URL; for -upload local, "+localIndexURL+"). Empty and no env var: skip with a warning")
 		stats     = flag.Bool("stats", false, "print size statistics for each resulting .brp (per-section sizes + the top unit defs by encoded bytes); a .brp input is analyzed directly without repacking")
+
+		commandsMode = flag.String("commands", "build", `which command rows (protocol 3 captures) to store in the .brp's C section: "build" (build/repair/reclaim/resurrect/capture/restore orders + anything nanolathing), "all", or "none"`)
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: pack [flags] <capture.brsnap|capture.brepstream> [...]\n\n")
@@ -92,6 +94,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "pack: -upload must be \"r2\" or \"local\" (got %q)\n", *upload)
 		os.Exit(2)
 	}
+	if *commandsMode != "build" && *commandsMode != "all" && *commandsMode != "none" {
+		fmt.Fprintf(os.Stderr, "pack: -commands must be \"build\", \"all\" or \"none\" (got %q)\n", *commandsMode)
+		os.Exit(2)
+	}
+	opts := packOptions{commandsMode: *commandsMode}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -109,7 +116,7 @@ func main() {
 				err = fmt.Errorf("input is already a .brp (use -stats to analyze it, or pass the raw .brsnap/.brepstream to pack)")
 			}
 		} else {
-			brpPath, modOptions, err = pack(ctx, client, in, *outDir, *idArg, *noDemo)
+			brpPath, modOptions, err = pack(ctx, client, in, *outDir, *idArg, *noDemo, opts)
 		}
 		if err == nil && *stats {
 			err = printStats(os.Stdout, brpPath)
@@ -221,9 +228,63 @@ func inferSampleEvery(frames []snapshot.Frame) int32 {
 	return best
 }
 
+// packOptions carries the packing-policy flags: which command rows the .brp
+// keeps.
+type packOptions struct {
+	commandsMode string // "build" | "all" | "none"
+}
+
+// keepCommand reports whether a command row survives -commands=build: build
+// orders (negative cmd), repair/reclaim/restore/resurrect/capture, and any
+// unit actively nanolathing something (Buildee). Engine command ids from
+// rts/Sim/Units/CommandAI/Command.h.
+func keepCommand(c snapshot.UnitCommand) bool {
+	if c.Buildee != 0 || c.Cmd < 0 {
+		return true
+	}
+	switch c.Cmd {
+	case 40, 90, 110, 125, 130: // REPAIR, RECLAIM, RESTORE, RESURRECT, CAPTURE
+		return true
+	}
+	return false
+}
+
+// cmdFilterWriter drops command rows the .brp should not store.
+type cmdFilterWriter struct {
+	next snapshot.Writer
+	mode string
+}
+
+func (w *cmdFilterWriter) WriteMeta(m snapshot.Meta) error   { return w.next.WriteMeta(m) }
+func (w *cmdFilterWriter) WriteEvent(e snapshot.Event) error { return w.next.WriteEvent(e) }
+func (w *cmdFilterWriter) Close() error                      { return w.next.Close() }
+func (w *cmdFilterWriter) WriteFrame(f snapshot.Frame) error {
+	switch w.mode {
+	case "none":
+		f.Commands = nil
+	case "build":
+		kept := 0
+		for _, c := range f.Commands {
+			if keepCommand(c) {
+				kept++
+			}
+		}
+		if kept < len(f.Commands) {
+			out := make([]snapshot.UnitCommand, 0, kept)
+			for _, c := range f.Commands {
+				if keepCommand(c) {
+					out = append(out, c)
+				}
+			}
+			f.Commands = out
+		}
+	}
+	return w.next.WriteFrame(f)
+}
+
 // pack converts one input into <gameId>.brp and returns the written path plus
 // the demo's raw modoptions (nil with -no-demo) for the catalog upload.
-func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, noDemo bool) (string, map[string]string, error) {
+func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, noDemo bool, opts packOptions) (string, map[string]string, error) {
 	gameID := strings.TrimSuffix(filepath.Base(in), filepath.Ext(in))
 	base := snapshot.Meta{GameID: gameID}
 	var modOptions map[string]string
@@ -256,10 +317,11 @@ func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 	if dir == "" {
 		dir = filepath.Dir(in)
 	}
-	w, err := snapshot.NewBRPWriter(dir, gameID)
+	bw, err := snapshot.NewBRPWriter(dir, gameID)
 	if err != nil {
 		return "", nil, err
 	}
+	var w snapshot.Writer = &cmdFilterWriter{next: bw, mode: opts.commandsMode}
 	if err := w.WriteMeta(l.meta); err != nil {
 		w.Close()
 		return "", nil, err

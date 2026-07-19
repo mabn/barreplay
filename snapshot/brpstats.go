@@ -85,6 +85,7 @@ func ComputeBRPStats(f *BRPFile) (*BRPStats, error) {
 		{SecFrames, "frames"},
 		{SecExtra, "extra"},
 		{SecEvents, "events"},
+		{SecCommands, "commands"},
 	} {
 		payload, ok := f.Sections[s.tag]
 		if !ok {
