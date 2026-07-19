@@ -70,6 +70,7 @@ function makeEnv(token?: string): { env: Env; index: FakeIndex; bucket: FakeBuck
     REPLAY_PUT_TOKEN: token,
     BUCKET: bucket,
     REPLAY_INDEX: { idFromName: () => ({}), get: () => index },
+    ASSETS: { fetch: async () => new Response("not found", { status: 404 }) },
   } as unknown as Env;
   return { env, index, bucket };
 }
@@ -215,6 +216,41 @@ test("failed jobs carry their error to the poller", async () => {
   const j = await asJson(await app.request(`/api/jobs/${job}`, {}, env));
   assert.equal(j.state, "error");
   assert.equal(j.error, "demo not found");
+});
+
+test("trusted piece writes: PUT /replays/<key> stores the object, guarded", async () => {
+  const { env, bucket } = makeEnv("s3cret");
+  const auth = { authorization: "Bearer s3cret" };
+  const key = `replays/${GAME_ID}-1a2b3c4d/c0`;
+
+  assert.equal((await app.request(`/${key}`, { method: "PUT", body: "bytes" }, env)).status, 401);
+  const ok = await app.request(`/${key}`, { method: "PUT", headers: auth, body: "bytes" }, env);
+  assert.equal(ok.status, 200);
+  assert.deepEqual(bucket.objects.get(key), new TextEncoder().encode("bytes"));
+
+  // Key hygiene: bad shapes are rejected by the route, and a traversal is
+  // normalized away by the URL layer before routing (it never reaches the
+  // bucket either way).
+  for (const bad of ["replays//x", "replays/a b"]) {
+    const res = await app.request(`/${bad}`, { method: "PUT", headers: auth, body: "x" }, env);
+    assert.equal(res.status, 400, bad);
+  }
+  const before = bucket.objects.size;
+  await app.request("/replays/../streams/x", { method: "PUT", headers: auth, body: "x" }, env);
+  assert.equal(bucket.objects.size, before, "traversal must not write");
+  assert.ok(!bucket.objects.has("streams/x"));
+
+  const huge = await app.request(`/${key}`, {
+    method: "PUT",
+    headers: { ...auth, "content-length": String(65 << 20) },
+    body: "x",
+  }, env);
+  assert.equal(huge.status, 413);
+
+  // Open without a configured token (local dev), like the other write APIs.
+  const { env: openEnv, bucket: openBucket } = makeEnv();
+  assert.equal((await app.request(`/${key}`, { method: "PUT", body: "b" }, openEnv)).status, 200);
+  assert.ok(openBucket.objects.has(key));
 });
 
 test("PUT /api/replays carries rid into the catalog", async () => {

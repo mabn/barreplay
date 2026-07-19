@@ -146,6 +146,26 @@ app.on(["GET", "HEAD"], "/replays/*", (c) => {
   return serveR2(c.env.BUCKET, key, c.req.raw, true);
 });
 
+// Trusted piece writes: PUT the exact key the viewer will GET. This is how
+// `pack -upload local` and the ingest daemon's local mode seed the dev
+// simulator's bucket quickly (it is otherwise only writable via `wrangler r2
+// object put` — one ~1s node startup per object, serially); it works against
+// a deployed worker too when the bearer secret authorizes it. The publisher
+// remains responsible for the .brw-last ordering (the listing barrier).
+app.put("/replays/*", async (c) => {
+  if (!authorized(c)) return c.json({ error: "unauthorized" }, 401);
+  const key = c.req.path.slice(1);
+  if (!/^replays\/[A-Za-z0-9_\-.]+(\/[A-Za-z0-9_\-.]+)*$/.test(key) || key.includes("..")) {
+    return c.json({ error: "invalid key" }, 400);
+  }
+  const declared = parseInt(c.req.header("content-length") ?? "", 10);
+  if (declared > MAX_UPLOAD) return c.json({ error: `object exceeds ${MAX_UPLOAD} bytes` }, 413);
+  const body = new Uint8Array(await c.req.arrayBuffer());
+  if (body.length > MAX_UPLOAD) return c.json({ error: `object exceeds ${MAX_UPLOAD} bytes` }, 413);
+  await c.env.BUCKET.put(key, body);
+  return c.json({ ok: true });
+});
+
 // Non-R2, non-API requests reach the Worker only when no static asset matched.
 // Hand them to the SPA fallback.
 app.all("*", (c) => c.env.ASSETS.fetch(c.req.raw));

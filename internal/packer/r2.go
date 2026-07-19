@@ -98,11 +98,17 @@ func wranglerConfigValue(workerDir, key string) string {
 }
 
 // UploadBundle uploads every file under bundleDir (a WriteStaticBundle
-// output: replays/** keys mirror R2 keys) in two waves — everything else
-// first, then every .brw head. The barrier matters: the head is the object
-// the Worker's live listing keys on, so a replay can never appear in the
-// picker before the rest of its files exist.
+// output: replays/** keys mirror R2 keys) via c.Put — see uploadBundle for
+// the wave/barrier semantics.
 func (c *R2Client) UploadBundle(ctx context.Context, bundleDir string) error {
+	return uploadBundle(ctx, bundleDir, c.Put)
+}
+
+// uploadBundle uploads every file under bundleDir through put in two waves —
+// everything else first, then every .brw head. The barrier matters: the head
+// is the object the Worker's live listing keys on, so a replay can never
+// appear in the picker before the rest of its files exist.
+func uploadBundle(ctx context.Context, bundleDir string, put func(ctx context.Context, key string, body []byte) error) error {
 	var bodies, heads []string // bundle-relative keys
 	err := filepath.WalkDir(bundleDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -119,21 +125,57 @@ func (c *R2Client) UploadBundle(ctx context.Context, bundleDir string) error {
 	if err != nil {
 		return err
 	}
-	put := func(ctx context.Context, key string) error {
+	putFile := func(ctx context.Context, key string) error {
 		body, err := os.ReadFile(filepath.Join(bundleDir, filepath.FromSlash(key)))
 		if err != nil {
 			return err
 		}
-		if err := c.Put(ctx, key, body); err != nil {
+		if err := put(ctx, key, body); err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "  put %s\n", key)
 		return nil
 	}
-	if err := putPool(ctx, bodies, put); err != nil {
+	if err := putPool(ctx, bodies, putFile); err != nil {
 		return err
 	}
-	return putPool(ctx, heads, put)
+	return putPool(ctx, heads, putFile)
+}
+
+// workerPut PUTs one object through the worker's bearer-guarded
+// PUT /replays/<key> route — the transport for the "local" target, where the
+// dev server binds the simulator's bucket (wrangler spawns cost ~1s each;
+// this is plain fast HTTP). One retry on transient failures, like R2Client.
+func workerPut(ctx context.Context, indexURL, key string, body []byte) error {
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut,
+			strings.TrimSuffix(indexURL, "/")+"/"+uriEncodePath(key), bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		if token := os.Getenv("REPLAY_PUT_TOKEN"); token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			lastErr = err
+			if ctx.Err() != nil {
+				return err
+			}
+			continue
+		}
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
+		resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil
+		}
+		lastErr = fmt.Errorf("PUT %s: %s: %s", key, resp.Status, strings.TrimSpace(string(msg)))
+		if resp.StatusCode < 500 {
+			return lastErr
+		}
+	}
+	return lastErr
 }
 
 // Put uploads one object, retrying once on a transient failure (5xx or a

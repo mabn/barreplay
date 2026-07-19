@@ -244,25 +244,26 @@ type UploadOptions struct {
 
 // UploadStatic uploads one packed replay's static files to the worker's R2
 // bucket: it writes the static bundle (viz.WriteStaticBundle — the same bytes
-// cmd/barreplay-static writes) into a temp dir and uploads it. For "r2" with
-// R2 API credentials in the environment (R2_ACCESS_KEY_ID +
-// R2_SECRET_ACCESS_KEY) the upload is NATIVE Go — concurrent SigV4 PUTs
-// straight against the bucket's S3 endpoint (r2.go), no node tooling
-// involved. Otherwise (no credentials, or the "local" dev simulator, which
-// only wrangler can write) it shells into the worker's uploader (npx tsx
-// tools/upload.ts). After the upload it registers the replay in the worker's
-// catalog (the Durable Object SQLite table behind GET /api/replays) via
+// cmd/barreplay-static writes) into a temp dir and uploads it. Transports,
+// fastest first:
+//
+//   - "r2" with R2 API credentials in the environment (R2_ACCESS_KEY_ID +
+//     R2_SECRET_ACCESS_KEY): NATIVE Go — concurrent SigV4 PUTs straight
+//     against the bucket's S3 endpoint (r2.go), no node tooling involved.
+//   - "local": concurrent PUTs through the dev worker's own bearer-guarded
+//     PUT /replays/* route (the vite/wrangler dev server binds the simulator
+//     bucket) — milliseconds, vs ~1s of node startup per object through
+//     `wrangler r2 object put`.
+//   - fallback (r2 without credentials, or the local dev server not
+//     reachable): shell the worker's uploader (npx tsx tools/upload.ts).
+//
+// After the upload it registers the replay in the worker's catalog (the
+// Durable Object SQLite table behind GET /api/replays) via
 // PUT <IndexURL>/api/replays/<id>.
 func UploadStatic(ctx context.Context, brpPath string, o UploadOptions) error {
 	var native *R2Client
 	if o.Target == "r2" {
 		native = r2ClientFromEnv(o.WorkerDir)
-	}
-	if native == nil {
-		// The node-tooling path needs the worker project on disk.
-		if err := checkWorkerDir(o.WorkerDir); err != nil {
-			return err
-		}
 	}
 	gameID := strings.TrimSuffix(filepath.Base(brpPath), filepath.Ext(brpPath))
 	tmp, err := os.MkdirTemp("", "pack-upload-")
@@ -286,13 +287,34 @@ func UploadStatic(ctx context.Context, brpPath string, o UploadOptions) error {
 		return err
 	}
 
+	uploaded := false
 	if native != nil {
 		fmt.Fprintf(os.Stderr, "uploading %q to %s/%s (native S3, %d in flight)\n",
 			uploadID, native.Endpoint, native.Bucket, uploadConcurrency)
 		if err := native.UploadBundle(ctx, bundleDir); err != nil {
 			return fmt.Errorf("uploading %s: %w", uploadID, err)
 		}
-	} else {
+		uploaded = true
+	} else if o.Target == "local" && o.IndexURL != "" {
+		fmt.Fprintf(os.Stderr, "uploading %q via the dev worker at %s\n", uploadID, o.IndexURL)
+		err := uploadBundle(ctx, bundleDir, func(ctx context.Context, key string, body []byte) error {
+			return workerPut(ctx, o.IndexURL, key, body)
+		})
+		if err == nil {
+			uploaded = true
+		} else if ctx.Err() != nil {
+			return err
+		} else {
+			// Dev server down or an older worker without the route: the wrangler
+			// path writes the simulator's state directly, so fall through to it.
+			fmt.Fprintf(os.Stderr, "worker-route upload failed (%v); falling back to wrangler\n", err)
+		}
+	}
+	if !uploaded {
+		// The node-tooling path needs the worker project on disk.
+		if err := checkWorkerDir(o.WorkerDir); err != nil {
+			return err
+		}
 		args := []string{"tsx", "tools/upload.ts", bundleDir, uploadID}
 		if o.Target == "local" {
 			// --preview: the local dev servers (vite dev and wrangler dev) bind the
