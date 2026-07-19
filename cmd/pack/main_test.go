@@ -225,5 +225,5 @@ func readBRP(t *testing.T, path string) (snapshot.Meta, []snapshot.Frame, []snap
 
 // defaultTestPackOptions mirrors the CLI's flag defaults.
 func defaultTestPackOptions() packOptions {
-	return packOptions{commandsMode: "build"}
+	return packOptions{airIdle: true, airIdleRadius: 700, airIdleSecs: 6, commandsMode: "build"}
 }

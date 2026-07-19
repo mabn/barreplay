@@ -22,8 +22,14 @@ go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
 go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, no engine
 go run ./cmd/barreplay-viz -snapshots ./snapshots        # serve the viewer at 127.0.0.1:8080
 go run ./cmd/pack ./caps/<gameId>.brsnap       # raw stream -> FULL .brp (fetches the demo for map/versions/players; -id overrides, -no-demo skips).
-                                               # -commands build|all|none picks which protocol-3 command rows land in the .brp's C section
-                                               # (default build: build/repair/reclaim/restore/resurrect/capture + buildees)
+                                               # Default-on LOSSY optimization: -air-idle freezes idle aircraft (near one spot, no hp loss, no active
+                                               # command, for -air-idle-secs, default 6) at their orbit centroid so they cost zero delta bytes, with
+                                               # GLIDED transitions (capped at 2x def speed; the emitted path never teleports — raw-data jumps like
+                                               # ghost re-spots pass through as recorded) — measured -38% file size on a fighter-heavy 8v8
+                                               # (16.6->10.2 MB) at the default -air-idle-radius 700 (bounds the position error, elmos), and verified
+                                               # to introduce ZERO discontinuities on a real capture (experiments/air-idle-continuity);
+                                               # -air-idle=false for a faithful pack. -commands build|all|none picks which protocol-3 command
+                                               # rows land in the .brp's C section (default build: build/repair/reclaim/restore/resurrect/capture + buildees)
 go run ./cmd/pack ./caps/<gameId>.brepstream   # same for the Replay uploader widget's binary stream
 go run ./cmd/pack -upload r2 ./caps/<gameId>.brepstream   # ...and upload the packed .brp's static bundle ("local" targets the dev simulator) + register it in the worker's replay catalog (PUT /api/replays/<id>; -index-url or $BARREPLAY_INDEX_URL names the deployed worker, $REPLAY_PUT_TOKEN authenticates)
 go run ./cmd/pack -stats ./snapshots/<gameId>.brp   # .brp size breakdown: per-section sizes + top-10 unit defs by encoded bytes with per-instance cost (snapshot.ComputeBRPStats, self-checked against the codec; raw captures pack first, then report)

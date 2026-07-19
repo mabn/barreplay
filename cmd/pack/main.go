@@ -75,7 +75,10 @@ func main() {
 		indexURL  = flag.String("index-url", "", "base URL of the deployed worker, used to register the uploaded replay in the catalog via PUT /api/replays/<id> (default: $BARREPLAY_INDEX_URL; for -upload local, "+localIndexURL+"). Empty and no env var: skip with a warning")
 		stats     = flag.Bool("stats", false, "print size statistics for each resulting .brp (per-section sizes + the top unit defs by encoded bytes); a .brp input is analyzed directly without repacking")
 
-		commandsMode = flag.String("commands", "build", `which command rows (protocol 3 captures) to store in the .brp's C section: "build" (build/repair/reclaim/resurrect/capture/restore orders + anything nanolathing), "all", or "none"`)
+		airIdle       = flag.Bool("air-idle", true, "freeze idle aircraft (circling near one spot, no health loss, no active command) at an anchor point so they cost zero delta bytes; lossy: an idle plane renders parked instead of circling, with glided (never teleporting) transitions")
+		airIdleRadius = flag.Float64("air-idle-radius", 700, "idle-aircraft anchor tolerance in elmos (with -air-idle); also bounds a frozen plane's position error")
+		airIdleSecs   = flag.Float64("air-idle-secs", 6, "seconds an aircraft must qualify before freezing (with -air-idle)")
+		commandsMode  = flag.String("commands", "build", `which command rows (protocol 3 captures) to store in the .brp's C section: "build" (build/repair/reclaim/resurrect/capture/restore orders + anything nanolathing), "all", or "none"`)
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: pack [flags] <capture.brsnap|capture.brepstream> [...]\n\n")
@@ -98,7 +101,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "pack: -commands must be \"build\", \"all\" or \"none\" (got %q)\n", *commandsMode)
 		os.Exit(2)
 	}
-	opts := packOptions{commandsMode: *commandsMode}
+	opts := packOptions{
+		airIdle:       *airIdle,
+		airIdleRadius: *airIdleRadius,
+		airIdleSecs:   *airIdleSecs,
+		commandsMode:  *commandsMode,
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -228,10 +236,13 @@ func inferSampleEvery(frames []snapshot.Frame) int32 {
 	return best
 }
 
-// packOptions carries the packing-policy flags: which command rows the .brp
-// keeps.
+// packOptions carries the packing-policy flags: the lossy idle-aircraft
+// transform and which command rows the .brp keeps.
 type packOptions struct {
-	commandsMode string // "build" | "all" | "none"
+	airIdle       bool
+	airIdleRadius float64
+	airIdleSecs   float64
+	commandsMode  string // "build" | "all" | "none"
 }
 
 // keepCommand reports whether a command row survives -commands=build: build
@@ -249,7 +260,9 @@ func keepCommand(c snapshot.UnitCommand) bool {
 	return false
 }
 
-// cmdFilterWriter drops command rows the .brp should not store.
+// cmdFilterWriter drops command rows the .brp should not store. It sits AFTER
+// the air-idle transform in the writer chain, so idleness detection always
+// sees the capture's full command data.
 type cmdFilterWriter struct {
 	next snapshot.Writer
 	mode string
@@ -321,7 +334,23 @@ func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 	if err != nil {
 		return "", nil, err
 	}
+	// Writer chain: air-idle transform -> command filter -> .brp writer. The
+	// transform runs first so idleness detection sees the full command data
+	// regardless of what the file keeps.
 	var w snapshot.Writer = &cmdFilterWriter{next: bw, mode: opts.commandsMode}
+	var aiw *snapshot.AirIdleWriter
+	if opts.airIdle {
+		sampleEvery := l.meta.SampleEvery
+		if sampleEvery <= 0 {
+			sampleEvery = 30
+		}
+		idleSamples := int(opts.airIdleSecs*30/float64(sampleEvery) + 0.5)
+		aiw = snapshot.NewAirIdleWriter(w, snapshot.AirIdleOptions{
+			Radius:      opts.airIdleRadius,
+			IdleSamples: idleSamples,
+		})
+		w = aiw
+	}
 	if err := w.WriteMeta(l.meta); err != nil {
 		w.Close()
 		return "", nil, err
@@ -348,8 +377,14 @@ func pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 	if outSize > 0 {
 		ratio = fmt.Sprintf(", %.0fx smaller", float64(inSize)/float64(outSize))
 	}
-	fmt.Fprintf(os.Stderr, "%s (%.1f MB) -> %s (%.2f MB%s): %d frames, %d events\n",
-		in, mb(inSize), outPath, mb(outSize), ratio, len(l.frames), len(l.events))
+	airNote := ""
+	if aiw != nil {
+		if aircraft, rewritten := aiw.Stats(); aircraft > 0 {
+			airNote = fmt.Sprintf(", %.0f%% of %d aircraft records rewritten (parked/gliding)", 100*float64(rewritten)/float64(aircraft), aircraft)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "%s (%.1f MB) -> %s (%.2f MB%s): %d frames, %d events%s\n",
+		in, mb(inSize), outPath, mb(outSize), ratio, len(l.frames), len(l.events), airNote)
 	return outPath, modOptions, nil
 }
 
