@@ -56,11 +56,11 @@ flowchart LR
     brp --> viz --> viewer
 ```
 
-Not on the diagram on purpose: the parked TypeScript `.brepstream` splitter
-(`worker/src/breps/split.ts`) can slice a raw stream into version-5 wire pieces
-without transcoding, but the viewer deliberately rejects those (~1.4×+ larger
-than v4) — it exists only as the parsing foundation for a future in-worker
-`.brepstream → v4` transcoder.
+A raw `.brepstream` can also enter the pipeline through the **browser**: the
+worker's landing page accepts a drag&dropped capture (`POST /api/upload`
+archives it in R2 and records a job), and the `cmd/barreplay-ingest` daemon —
+running wherever the repo lives — publishes it through the same `pack`
+pipeline. See `worker/README.md`.
 
 ### Package layout
 
