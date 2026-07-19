@@ -103,7 +103,16 @@ assets/lua/replay_uploader.lua   player-installable live-game variant: constants
                           radar; unidentified radar contacts carry def 0) with last-known
                           "ghost" persistence after visibility loss — frozen, zero-byte in
                           the delta codec, buried only on a witnessed death —
-                          to <write-dir>/<gameId>.brepstream — a binary
+                          and, by default (recordCommands const, protocol 3), per-sample
+                          command state for every queue-readable unit (own ally team;
+                          everything under full-view spectating — never enemies): queue
+                          front from GetUnitCurrentCommand (raw cmd id, unit target or
+                          x/z target by parameter shape) + current buildee from
+                          GetUnitIsBuilding, as 'C' records under the same keyframe/delta
+                          discipline (idle units and unchanged tuples cost zero bytes;
+                          old readers skip the tag). Decoded into snapshot.Frame.Commands;
+                          NOT yet stored in the .brp (the writer ignores it).
+                          Output: <write-dir>/<gameId>.brepstream — a binary
                           keyframe+delta stream (spec: docs/brepstream-format.md, decoder:
                           internal/capture/brep.go, ~6.5x smaller and ~4x cheaper per sample
                           than the text stream) — named via the "GameID" GameRulesParam

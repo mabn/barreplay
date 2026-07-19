@@ -87,6 +87,20 @@ func TestBrepstreamMatchesTextFixture(t *testing.T) {
 			// build quantizes to 1/255 (+ text %.3f).
 			near(t, fb.Frame, ub.UnitID, "build", ub.BuildProgress, ut.BuildProgress, 0.5/255+0.0006)
 		}
+		// Command state (protocol 3): the text stream dumps the full non-idle
+		// set each frame while the binary reconstructs it from keyframe+delta
+		// records — the tuples must match EXACTLY (all-integer, quantized
+		// identically by the widget before both emitters).
+		tc := append([]snapshot.UnitCommand(nil), ft.Commands...)
+		sort.Slice(tc, func(a, b int) bool { return tc[a].UnitID < tc[b].UnitID })
+		if len(fb.Commands) != len(tc) {
+			t.Fatalf("frame %d: commands bin %d text %d", fb.Frame, len(fb.Commands), len(tc))
+		}
+		for j := range fb.Commands {
+			if fb.Commands[j] != tc[j] {
+				t.Fatalf("frame %d command %d: bin %+v text %+v", fb.Frame, j, fb.Commands[j], tc[j])
+			}
+		}
 		if len(fb.Resources) != len(ft.Resources) {
 			t.Fatalf("frame %d: resources bin %d text %d", fb.Frame, len(fb.Resources), len(ft.Resources))
 		}

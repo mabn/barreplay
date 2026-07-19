@@ -48,13 +48,38 @@ type TeamResource struct {
 	EnergyIncome  float32 `json:"energyIncome"` // per game-second
 }
 
+// UnitCommand is the sampled command state of one unit (brepstream protocol 3+;
+// readable only for the recorder's own ally team, or everything under full-view
+// spectating). Cmd is the raw engine command id at the front of the unit's queue
+// (negative = build order for unit-def -Cmd; 0 = empty queue, present only when
+// Buildee is set). Exactly one of TargetID / (TX,TZ) is meaningful, decided by
+// the command's parameter shape at capture time: TargetID for single-parameter
+// unit-target commands (guard/repair/attack-unit/...), TX/TZ (whole elmos, like
+// UnitState positions) for positional ones (move/patrol/fight/build/...).
+// Buildee is the unit currently being nanolathed (built/repaired/assisted, from
+// GetUnitIsBuilding) — it also covers a nano turret auto-assisting with an empty
+// queue. A unit with an empty queue and no buildee is idle and carries no
+// UnitCommand at all.
+type UnitCommand struct {
+	UnitID   int32 `json:"id"`
+	Cmd      int32 `json:"cmd"`
+	TargetID int32 `json:"tgt,omitempty"`
+	TX       int32 `json:"tx,omitempty"`
+	TZ       int32 `json:"tz,omitempty"`
+	Buildee  int32 `json:"bt,omitempty"`
+}
+
 // Frame is one periodic snapshot of the whole game: the position/health of every
 // visible unit, plus each team's economy, at a given simulation frame.
+// Commands (when the capture recorded them) lists the non-idle units' command
+// state, sorted by unit id; it is carried through the pipeline but NOT yet
+// stored in the .brp (the writer ignores it).
 type Frame struct {
 	Frame     int32          `json:"frame"`
 	TimeSec   float32        `json:"t"`
 	Units     []UnitState    `json:"units"`
 	Resources []TeamResource `json:"resources,omitempty"`
+	Commands  []UnitCommand  `json:"commands,omitempty"`
 }
 
 // EventKind enumerates the discrete unit lifecycle events recorded between frames.

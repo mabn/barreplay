@@ -32,6 +32,7 @@ All integers little-endian. Record tags:
 
 | tag | payload |
 |-----|---------|
+| `C` | command state (protocol 3+, below); precedes its `F` record |
 | `F` | one sampled frame (below) |
 | `E` | unit lifecycle event, text: `<frame> <kind> <id> <def> <team>` |
 | `X` | end of stream, text: reason (`gameover`/`shutdown`/`error`) |
@@ -132,6 +133,59 @@ win comes overwhelmingly from *omitting* predicted units (~2/3 of records in a
 real game), and absolute columns keep both the Lua encoder and the Go decoder
 trivial.
 
+## `C` record — command state (protocol 3, widget ≥ 1.2, `recordCommands`)
+
+Each sample the widget also captures, for every unit whose command queue is
+readable — the recorder's own ally team, or everything under full-view
+spectating; **never** enemies/ghosts, their queues read back nil — the front of
+the unit's command queue (`Spring.GetUnitCurrentCommand`) and the unit it is
+currently nanolathing (`Spring.GetUnitIsBuilding`, which also catches a nano
+turret auto-assisting on an empty queue). The `C` record is emitted immediately
+**before** its paired `F` record (same `frame`), so a decoder attaches command
+state to the frame it is about to emit. Old readers skip the unknown tag; the
+header line stays `BREPSTREAM 1`.
+
+```
+u32  frame          sim frame (same as the paired F record)
+u8   flags          bit 0: keyframe (mirrors the paired F)
+u16  nCmd           command rows restated
+u16  nClear         ids cleared to idle (0 in keyframes)
+```
+
+Then columns of `nCmd` values, then `u16[nClear]` cleared ids:
+
+```
+u16[]  id           unit id
+u32[]  cmd          zigzag-encoded engine command id ((cmd<<1)^(cmd>>31));
+                    negative = build order for unit-def -cmd; 0 = empty queue
+                    (a buildee-only row)
+u16[]  tgt          target unit id (0 = none)
+s16[]  tx           target position, whole elmos (0 when none)
+s16[]  tz
+u16[]  bt           current buildee unit id (0 = none)
+```
+
+Exactly one of `tgt` / (`tx`,`tz`) is meaningful, decided by the command's
+parameter shape at capture time: one parameter → `tgt` (guard/repair/
+attack-unit/...), three or more → `tx`/`tz` from params 1 and 3 (move/patrol/
+fight/build/area commands). The decoder keeps one tuple per **non-idle** unit
+under the same discipline as the unit codec: a keyframe `C` discards all
+command state and restates every non-idle unit; a delta `C` removes the
+cleared ids, upserts the restated rows, and every unmentioned unit carries its
+tuple unchanged (commands don't move — an unchanged command costs zero bytes).
+A unit with an empty queue and no buildee is idle and has no state at all. A
+unit on the `F` dead list drops its command state with it. The widget emits a
+row only when the unit's whole quantized tuple changed (always at keyframes).
+
+The text stream's equivalent is one `BRSNAP C <id> <cmd> <tgt> <tx> <tz> <bt>`
+line per non-idle unit per sampled frame — the **full current state**, no
+deltas (text is the stateless debug/reference format). The fixture test
+cross-checks the reconstructed binary state against that dump exactly (the
+tuples are all-integer, quantized identically before both emitters).
+
+`worker/src/breps/split.ts` (parked) skips `C` records, so split pieces drop
+command data; extend it alongside the planned transcoder if that path revives.
+
 ## Enemy units and ghosts (widget ≥ 1.1, `recordEnemies`)
 
 Semantics only — the wire format above is unchanged, and no reader needs to
@@ -152,9 +206,11 @@ are the engine's wobbled readings.
 
 Identical line grammar to `.brsnap` so `internal/capture`'s parser is shared:
 `GID` (the 32-hex gameId, always the first line after the header), `GAME`
-(JSON: protocol, widgetVersion (semver of the emitting widget), mode
+(JSON: protocol (3 = command state recorded, see the `C` record), widgetVersion
+(semver of the emitting widget), mode
 live/replay, map, game/engine versions, sampleEvery, gameSpeed, recordEnemies
-(whether the stream carries enemy units/ghosts — see above), recording
+(whether the stream carries enemy units/ghosts — see above), recordCommands
+(whether `C` records are present), recording
 player id/allyTeam/spectator), `DEF` (full unit-def
 JSON), `T`, `P`, `READY`. The `GAME` line's `sampleEvery`/`gameSpeed` feed
 velocity de-quantization and frame timestamps (`t = frame/gameSpeed`);

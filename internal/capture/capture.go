@@ -11,6 +11,7 @@
 //	BRSNAP READY                                  end of preamble (optional)
 //	BRSNAP F <frame> <timeSec> <count>            start of a periodic snapshot
 //	BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp> [<vx> <vy> <vz> <build>]   one unit (follows an F line)
+//	BRSNAP C <id> <cmd> <tgt> <tx> <tz> <bt>      command state of one non-idle unit (follows an F line)
 //	BRSNAP R <teamID> <metal> <energy> <mStore> <eStore> <mIncome> <eIncome>   team economy (follows an F line)
 //	BRSNAP EV <frame> <kind> <id> <def> <team>    unit lifecycle event
 //	BRSNAP PROF <totalMs> <name>                  engine time-profiler record (at game over)
@@ -178,6 +179,17 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 					us.BuildProgress = atof32(fields[12])
 				}
 				pending.Units = append(pending.Units, us)
+			}
+		case "C": // C <id> <cmd> <tgt> <tx> <tz> <bt> — command state of one non-idle unit (follows an F line)
+			if pending != nil && len(fields) >= 7 {
+				pending.Commands = append(pending.Commands, snapshot.UnitCommand{
+					UnitID:   atoi32(fields[1]),
+					Cmd:      atoi32(fields[2]),
+					TargetID: atoi32(fields[3]),
+					TX:       atoi32(fields[4]),
+					TZ:       atoi32(fields[5]),
+					Buildee:  atoi32(fields[6]),
+				})
 			}
 		case "R": // R <teamID> <metal> <energy> <mStore> <eStore> <mIncome> <eIncome>
 			if pending != nil && len(fields) >= 8 {

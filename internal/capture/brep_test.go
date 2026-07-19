@@ -313,6 +313,110 @@ func TestConsumeBrepTruncated(t *testing.T) {
 	}
 }
 
+// tc is one command row in a test 'C' record.
+type tc struct {
+	id, cmd, tgt, tx, tz, bt int
+}
+
+func commandRecord(frame int, keyframe bool, rows []tc, cleared []int) []byte {
+	var b bytes.Buffer
+	w16 := func(v int) { var s [2]byte; binary.LittleEndian.PutUint16(s[:], uint16(v)); b.Write(s[:]) }
+	w32 := func(v uint32) { var s [4]byte; binary.LittleEndian.PutUint32(s[:], v); b.Write(s[:]) }
+	w32(uint32(frame))
+	if keyframe {
+		b.WriteByte(1)
+	} else {
+		b.WriteByte(0)
+	}
+	w16(len(rows))
+	w16(len(cleared))
+	for _, r := range rows {
+		w16(r.id)
+	}
+	for _, r := range rows {
+		c := int32(r.cmd)
+		w32(uint32((c << 1) ^ (c >> 31))) // zigzag
+	}
+	for _, r := range rows {
+		w16(r.tgt)
+	}
+	for _, r := range rows {
+		w16(r.tx)
+	}
+	for _, r := range rows {
+		w16(r.tz)
+	}
+	for _, r := range rows {
+		w16(r.bt)
+	}
+	for _, id := range cleared {
+		w16(id)
+	}
+	return b.Bytes()
+}
+
+// TestConsumeBrepCommands covers the protocol-3 'C' record semantics: keyframe
+// restate, zero-byte carry-over across delta frames, the cleared-to-idle list,
+// zigzag-negative build orders, dead-unit pruning, and the guard against
+// command rows for units that are not in the world.
+func TestConsumeBrepCommands(t *testing.T) {
+	e := newBrepEnc(brepPreamble)
+	units := []tu{
+		{id: 5, def: 1, team: 0, x: 100, z: 100, hp: 900, maxHp: 900, build: 255},
+		{id: 7, def: 1, team: 0, x: 200, z: 200, hp: 800, maxHp: 900, build: 255},
+		{id: 9, def: 1, team: 0, x: 300, z: 300, hp: 700, maxHp: 900, build: 255},
+	}
+	// Keyframe: 5 moving to a position, 7 guarding unit 9; row for id 99 (not
+	// in the world) must be dropped by the attach guard.
+	e.record('C', commandRecord(0, true, []tc{
+		{id: 5, cmd: 10, tx: 512, tz: 768},
+		{id: 7, cmd: 25, tgt: 9},
+		{id: 99, cmd: 10, tx: 1, tz: 1},
+	}, nil))
+	e.record('F', frameRecord(0, true, units, nil, nil))
+	// Delta with no command rows: both command states carry over unchanged.
+	e.record('C', commandRecord(30, false, nil, nil))
+	e.record('F', frameRecord(30, false, nil, nil, nil))
+	// 7 goes idle (cleared), 5 switches to a build order with a buildee; 9 dies
+	// (its absence from command state must not matter, and dead ids drop any).
+	e.record('C', commandRecord(60, false, []tc{
+		{id: 5, cmd: -42, tx: 640, tz: 640, bt: 7},
+	}, []int{7}))
+	e.record('F', frameRecord(60, false, nil, []int{9}, nil))
+	e.record('X', []byte("gameover"))
+
+	var sink loadedSink
+	if err := ConsumeBrep(bytes.NewReader(e.buf.Bytes()), snapshot.Meta{}, &sink); err != nil {
+		t.Fatalf("ConsumeBrep: %v", err)
+	}
+	if len(sink.frames) != 3 {
+		t.Fatalf("frames = %d, want 3", len(sink.frames))
+	}
+	want0 := []snapshot.UnitCommand{
+		{UnitID: 5, Cmd: 10, TX: 512, TZ: 768},
+		{UnitID: 7, Cmd: 25, TargetID: 9},
+	}
+	for i := 0; i < 2; i++ { // keyframe and the carry-over delta
+		got := sink.frames[i].Commands
+		if len(got) != len(want0) {
+			t.Fatalf("frame %d commands = %+v, want %+v", i, got, want0)
+		}
+		for j := range got {
+			if got[j] != want0[j] {
+				t.Fatalf("frame %d command %d = %+v, want %+v", i, j, got[j], want0[j])
+			}
+		}
+	}
+	got := sink.frames[2].Commands
+	want2 := []snapshot.UnitCommand{{UnitID: 5, Cmd: -42, TX: 640, TZ: 640, Buildee: 7}}
+	if len(got) != 1 || got[0] != want2[0] {
+		t.Fatalf("frame 2 commands = %+v, want %+v", got, want2)
+	}
+	if len(sink.frames[2].Units) != 2 {
+		t.Fatalf("frame 2 units = %d, want 2 (9 died)", len(sink.frames[2].Units))
+	}
+}
+
 func TestConsumeBrepRejectsNonBrep(t *testing.T) {
 	var sink loadedSink
 	err := ConsumeBrep(strings.NewReader("BRSNAP READY\n"), snapshot.Meta{}, &sink)

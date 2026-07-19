@@ -205,6 +205,41 @@ Spring = {
 		end
 		return u.vx, 0, u.vz
 	end,
+	-- Command state (protocol 3). LOS-gated like the live engine: enemy queues
+	-- read back nil even in LOS. Deterministic pure functions of (id, sample) —
+	-- LCG-free like the radar wobble (see the enemyVis comment) — cycling
+	-- through idle / unit-target / position / build phases so keyframe restate,
+	-- delta change, and cleared-to-idle paths are all exercised (phase length 5
+	-- samples ≈ several transitions per keyframe interval).
+	GetUnitCurrentCommand = function(id)
+		local u = units[id]
+		if not u or allyOf[u.team] ~= 0 then
+			return nil
+		end
+		local s = math.floor(curFrame / sampleEvery)
+		local phase = (id * 31 + math.floor(s / 5)) % 7
+		if phase == 0 or phase == 1 then
+			return nil -- idle (empty queue)
+		elseif phase == 2 then
+			return 25, 0, 1, (id % 50) + 3 -- guard: one param = unit target
+		elseif phase == 3 then
+			return -u.def, 16, 1, u.x + 96, 25, u.z - 64, 1 -- build order (negative id)
+		elseif phase == 4 then
+			return 34923, 0, 1, (id % 60) + 2 -- large custom cmd id (unit target)
+		end
+		return 10, 0, 1, u.x + 500.4, 25, u.z + 250.6 -- move: position target
+	end,
+	GetUnitIsBuilding = function(id)
+		local u = units[id]
+		if not u or allyOf[u.team] ~= 0 then
+			return nil
+		end
+		local s = math.floor(curFrame / sampleEvery)
+		if (id * 13 + math.floor(s / 4)) % 5 == 0 then
+			return (id % 40) + 5 -- nanolathing some unit (also fires while idle)
+		end
+		return nil
+	end,
 	GetGameSeconds = function() return curFrame / 30 end,
 	GetGameFrame = function() return curFrame end,
 	GetTeamList = function() return { 0, 1, 2 } end,

@@ -9,6 +9,7 @@
 //	text preamble, same grammar as .brsnap (BRSNAP GID/GAME/DEF/T/P lines),
 //	terminated by the "BRSNAP READY" line
 //	then length-framed binary records: <tag u8> <len u32le> <payload>
+//	  'C'  command state (protocol 3+, see decodeCommandRecord); precedes its 'F'
 //	  'F'  frame (see decodeFrameRecord)
 //	  'E'  unit lifecycle event, text payload "<frame> <kind> <id> <def> <team>"
 //	  'X'  end of stream, text payload = reason
@@ -60,6 +61,15 @@ type brepUnit struct {
 	def, team        int32
 	x, z, dvx, dvz   int32
 	hp, maxHp, build int32
+}
+
+// brepCmd is the decoder's tracked command state for one non-idle unit
+// (protocol 3+, 'C' records). Same keyframe/delta discipline as brepUnit:
+// a keyframe restates every non-idle unit and resets the map, a delta record
+// carries only changed units plus an explicit cleared-id list, and an
+// unmentioned unit carries its state unchanged (commands don't move).
+type brepCmd struct {
+	cmd, tgt, tx, tz, bt int32
 }
 
 // ConsumeBrepStats is ConsumeBrep, additionally filling stats (which may be
@@ -129,6 +139,7 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 	// frames are guarded against anyway so a downstream writer always sees a
 	// monotonic frame sequence.
 	state := map[int32]*brepUnit{}
+	cmdState := map[int32]*brepCmd{}
 	lastEmitted := int32(-1)
 	staleWarned := false
 	var hdr [5]byte
@@ -153,6 +164,9 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 			for id := range state {
 				delete(state, id)
 			}
+			for id := range cmdState {
+				delete(cmdState, id)
+			}
 			continue
 		}
 		if _, err := io.ReadFull(br, hdr[1:5]); err != nil {
@@ -169,8 +183,13 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 			return nil
 		}
 		switch hdr[0] {
+		case 'C':
+			if err := decodeCommandRecord(payload, cmdState); err != nil {
+				fmt.Fprintf(os.Stderr, "capture: bad command record: %v; keeping %d frames\n", err, stats.Frames)
+				return nil
+			}
 		case 'F':
-			fr, err := decodeFrameRecord(payload, state, sampleEvery, gameSpeed)
+			fr, err := decodeFrameRecord(payload, state, cmdState, sampleEvery, gameSpeed)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "capture: bad frame record: %v; keeping %d frames\n", err, stats.Frames)
 				return nil
@@ -272,9 +291,85 @@ func (c *cursor) f32() float32 {
 	return math.Float32frombits(binary.LittleEndian.Uint32(s))
 }
 
-// decodeFrameRecord decodes one 'F' payload, mutating state, and returns the
-// reconstructed full frame.
-func decodeFrameRecord(payload []byte, state map[int32]*brepUnit, sampleEvery, gameSpeed int32) (snapshot.Frame, error) {
+// decodeCommandRecord decodes one 'C' payload (protocol 3+), mutating cmdState.
+// Layout (little-endian, columnar like 'F'):
+//
+//	u32  frame        sim frame (same as the 'F' record this precedes)
+//	u8   flags        bit 0: keyframe (mirrors the paired 'F')
+//	u16  nCmd         command rows restated
+//	u16  nClear       ids cleared to idle (0 in keyframes)
+//	u16[nCmd]  id
+//	u32[nCmd]  cmd    zigzag-encoded engine command id (negative = build -defID)
+//	u16[nCmd]  tgt    target unit id (0 = none)
+//	s16[nCmd]  tx     target position, whole elmos (0 when none)
+//	s16[nCmd]  tz
+//	u16[nCmd]  bt     current buildee unit id (0 = none)
+//	u16[nClear] cleared ids
+func decodeCommandRecord(payload []byte, cmdState map[int32]*brepCmd) error {
+	c := &cursor{b: payload}
+	_ = c.u32() // frame: informational, the paired 'F' record is authoritative
+	flags := c.u8()
+	nCmd := int(c.u16())
+	nClear := int(c.u16())
+
+	ids := make([]int32, nCmd)
+	for i := range ids {
+		ids[i] = c.u16()
+	}
+	cmds := make([]int32, nCmd)
+	for i := range cmds {
+		u := uint32(c.u32())
+		cmds[i] = int32(u>>1) ^ -int32(u&1) // zigzag decode
+	}
+	tgts := make([]int32, nCmd)
+	for i := range tgts {
+		tgts[i] = c.u16()
+	}
+	txs := make([]int32, nCmd)
+	for i := range txs {
+		txs[i] = c.s16()
+	}
+	tzs := make([]int32, nCmd)
+	for i := range tzs {
+		tzs[i] = c.s16()
+	}
+	bts := make([]int32, nCmd)
+	for i := range bts {
+		bts[i] = c.u16()
+	}
+	cleared := make([]int32, nClear)
+	for i := range cleared {
+		cleared[i] = c.u16()
+	}
+	if c.err != nil {
+		return c.err
+	}
+
+	if flags&1 != 0 {
+		// Keyframe: restates every non-idle unit; everything else is idle.
+		for id := range cmdState {
+			delete(cmdState, id)
+		}
+	} else {
+		for _, id := range cleared {
+			delete(cmdState, id)
+		}
+	}
+	for i := 0; i < nCmd; i++ {
+		u := cmdState[ids[i]]
+		if u == nil {
+			u = &brepCmd{}
+			cmdState[ids[i]] = u
+		}
+		u.cmd, u.tgt, u.tx, u.tz, u.bt = cmds[i], tgts[i], txs[i], tzs[i], bts[i]
+	}
+	return nil
+}
+
+// decodeFrameRecord decodes one 'F' payload, mutating state (and pruning
+// cmdState entries for units that leave the world), and returns the
+// reconstructed full frame with the current command state attached.
+func decodeFrameRecord(payload []byte, state map[int32]*brepUnit, cmdState map[int32]*brepCmd, sampleEvery, gameSpeed int32) (snapshot.Frame, error) {
 	c := &cursor{b: payload}
 	frame := int32(c.u32())
 	flags := c.u8()
@@ -352,6 +447,7 @@ func decodeFrameRecord(payload []byte, state map[int32]*brepUnit, sampleEvery, g
 	} else {
 		for _, id := range dead {
 			delete(state, id)
+			delete(cmdState, id) // a dead unit's command state goes with it
 		}
 		// Advance every unit NOT restated in this record by its own prediction.
 		changed := make(map[int32]bool, nUnits)
@@ -396,6 +492,27 @@ func decodeFrameRecord(payload []byte, state map[int32]*brepUnit, sampleEvery, g
 		})
 	}
 	sort.Slice(fr.Units, func(i, j int) bool { return fr.Units[i].UnitID < fr.Units[j].UnitID })
+	if len(cmdState) > 0 {
+		// Attach the current command state (protocol 3+; empty map for older
+		// streams). Guard against stale entries for units no longer in the
+		// world — the widget shouldn't emit them, but a keyframe 'C' paired
+		// with a keyframe 'F' that dropped a unit must not resurrect it.
+		for id, u := range cmdState {
+			if state[id] == nil {
+				delete(cmdState, id)
+				continue
+			}
+			fr.Commands = append(fr.Commands, snapshot.UnitCommand{
+				UnitID:   id,
+				Cmd:      u.cmd,
+				TargetID: u.tgt,
+				TX:       u.tx,
+				TZ:       u.tz,
+				Buildee:  u.bt,
+			})
+		}
+		sort.Slice(fr.Commands, func(i, j int) bool { return fr.Commands[i].UnitID < fr.Commands[j].UnitID })
+	}
 	for i := 0; i < nRes; i++ {
 		fr.Resources = append(fr.Resources, snapshot.TeamResource{
 			Team:          resTeams[i],
