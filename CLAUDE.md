@@ -21,7 +21,9 @@ go test ./...                   # all unit tests (no engine required)
 go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
 go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, no engine
 go run ./cmd/barreplay-viz -snapshots ./snapshots        # serve the viewer at 127.0.0.1:8080
-go run ./cmd/pack ./caps/<gameId>.brsnap       # raw stream -> FULL .brp (fetches the demo for map/versions/players; -id overrides, -no-demo skips)
+go run ./cmd/pack ./caps/<gameId>.brsnap       # raw stream -> FULL .brp (fetches the demo for map/versions/players; -id overrides, -no-demo skips).
+                                               # -commands build|all|none picks which protocol-3 command rows land in the .brp's C section
+                                               # (default build: build/repair/reclaim/restore/resurrect/capture + buildees)
 go run ./cmd/pack ./caps/<gameId>.brepstream   # same for the Replay uploader widget's binary stream
 go run ./cmd/pack -upload r2 ./caps/<gameId>.brepstream   # ...and upload the packed .brp's static bundle ("local" targets the dev simulator) + register it in the worker's replay catalog (PUT /api/replays/<id>; -index-url or $BARREPLAY_INDEX_URL names the deployed worker, $REPLAY_PUT_TOKEN authenticates)
 go run ./cmd/pack -stats ./snapshots/<gameId>.brp   # .brp size breakdown: per-section sizes + top-10 unit defs by encoded bytes with per-instance cost (snapshot.ComputeBRPStats, self-checked against the codec; raw captures pack first, then report)
@@ -110,8 +112,9 @@ assets/lua/replay_uploader.lua   player-installable live-game variant: constants
                           x/z target by parameter shape) + current buildee from
                           GetUnitIsBuilding, as 'C' records under the same keyframe/delta
                           discipline (idle units and unchanged tuples cost zero bytes;
-                          old readers skip the tag). Decoded into snapshot.Frame.Commands;
-                          NOT yet stored in the .brp (the writer ignores it).
+                          old readers skip the tag). Decoded into snapshot.Frame.Commands
+                          and stored in the .brp's optional C section (pack filters
+                          which rows survive via -commands, default "build").
                           Output: <write-dir>/<gameId>.brepstream — a binary
                           keyframe+delta stream (spec: docs/brepstream-format.md, decoder:
                           internal/capture/brep.go, ~6.5x smaller and ~4x cheaper per sample
@@ -147,8 +150,12 @@ ground-unit elevation is terrain noise, so decoded `Pos.Y`/`VelY` are 0). Contai
 JSON (Meta + precomputed bounds/frameTeams/counts + the **chunk index**), `K` **all
 core keyframes as ONE gzip stream**, `F` core delta-frame chunks (columns: id def
 team x z hp maxHp dvx dvz), `X` extra (build column + team resources — not sent to
-the browser), `E` events. Unknown tags are skipped, so sections can be added
-compatibly; any version byte other than 4 is rejected (v1–v3 existed only
+the browser), `E` events, and an OPTIONAL `C` commands section (chunked
+keyframe+delta pairs like X; per non-idle unit: raw cmd id, unit target, x/z target,
+buildee — spec §10 of docs/brp-format.md; absent when the capture recorded no
+commands, and then the file is byte-identical to pre-command output — the
+cOff/cKeyLen/cLen chunk-index fields appear only alongside the section). Unknown
+tags are skipped, so sections can be added compatibly; any version byte other than 4 is rejected (v1–v3 existed only
 pre-release; regenerate a .brp from its .brsnap with pack).
 
 **Chunking (random access / streaming).** Frames are grouped into **chunks of 64

@@ -113,8 +113,9 @@ offset  size  value
 | `K` (0x4B) | keyframes | **one gzip stream**: every chunk's core keyframe, concatenated in chunk order | the keys-first download; also the prediction base every chunk's deltas decode from |
 | `F` (0x46) | frames | concatenated **chunks** (§5): each chunk's DELTA frames as one gzip stream | core per-unit columns — everything the viewer renders |
 | `X` (0x58) | extra | concatenated chunks, same frame boundaries as `F` (keyframe gzip + delta gzip per chunk) | extras: build progress, team economy |
-| `E` (0x45) | events | one gzip stream (§7) | unit lifecycle events |
-| `J` (0x4A) | head | one gzip stream of JSON | **not used in files** — reserved for the viz wire container (§10) |
+| `E` (0x45) | events | one gzip stream (§9) | unit lifecycle events |
+| `C` (0x43) | commands | concatenated chunks, same frame boundaries as `F` (keyframe gzip + delta gzip per chunk) | **optional** (§10): per-unit command state (protocol-3 captures); absent when the capture carries none |
+| `J` (0x4A) | head | one gzip stream of JSON | **not used in files** — reserved for the viz wire container (§11) |
 
 ## 4. `M` — the meta section
 
@@ -187,7 +188,10 @@ Each entry of `chunks` locates one chunk (§5) inside the `F` and `X` sections:
   "fLen":    321657, //   (fLen == 0 when count == 1: no delta frames at all)
   "xOff":    150114, // the X section pieces: keyframe gzip [xOff, xOff+xKeyLen)
   "xKeyLen": 3021,   //   then delta gzip up to xOff+xLen
-  "xLen":    99852
+  "xLen":    99852,
+  "cOff":    8010,   // the C section pieces, same shape as X (keyframe gzip +
+  "cKeyLen": 402,    //   delta gzip); present ONLY when the file has a C
+  "cLen":    1966    //   section (§10) — a command-less capture writes none
 }
 ```
 
@@ -471,7 +475,43 @@ kinds can appear without a format change. Events are stored in capture order
 (non-decreasing frame), but the frame column is zigzag-coded so a
 non-monotonic stream still round-trips.
 
-## 10. The BRW wire container (how the replay is served)
+## 10. `C` — the commands section (optional)
+
+Per-unit command state, recorded by protocol-3 captures (the Replay uploader
+widget's `recordCommands`, decoded into `snapshot.Frame.Commands`). The
+section is **optional**: a capture with no command data writes no `C` section
+and no `cOff`/`cKeyLen`/`cLen` index fields, keeping its bytes identical to
+pre-command output; readers treat the missing section as "no commands".
+`pack` filters what is stored via `-commands` (default `build`: build orders,
+repair/reclaim/restore/resurrect/capture, and any unit with a live buildee —
+`all` and `none` are the alternatives).
+
+Chunked exactly like `X`: per chunk a keyframe gzip stream
+(`[cOff, cOff+cKeyLen)`) then a delta gzip stream (up to `cOff+cLen`), with
+the same frame boundaries as `F`. Commands don't move, so the codec has no
+prediction — state is one tuple per non-idle unit, carried unchanged unless a
+frame restates it. Each frame in the decompressed stream is:
+
+```
+uvarint  nCleared                // units whose command state ends (idle/died)
+nCleared × svarint               // their ids, ascending, delta-coded
+uvarint  nChanged                // units restated this frame
+nChanged × svarint               // their ids, ascending, delta-coded
+nChanged × svarint  cmd          // then the value columns, ABSOLUTE:
+nChanged × svarint  targetId     //   raw engine command id (negative = build
+nChanged × svarint  tx           //   order for unit-def -cmd; 0 = empty queue,
+nChanged × svarint  tz           //   a buildee-only row), unit target, target
+nChanged × svarint  buildee      //   x/z in whole elmos, current buildee id
+```
+
+The chunk's first frame — the command keyframe — encodes against empty state
+(everything restated, `nCleared` 0), so `DecodeChunk` needs nothing outside
+the chunk. A decoded frame's command list is the reconstructed FULL state,
+sorted by unit id. The values mirror the brepstream `C` record
+(docs/brepstream-format.md): exactly one of `targetId` / (`tx`,`tz`) is
+meaningful, by the source command's parameter shape.
+
+## 11. The BRW wire container (how the replay is served)
 
 Not part of the file format, but specified here because it reuses the same
 framing and the same stored bytes. The Go viz server and the static/R2
@@ -508,7 +548,7 @@ chunk are independently gzipped: the server's cost per request is a byte-range
 copy, and the storage format *is* the transfer format — which is also what
 makes the no-server R2 deployment possible.
 
-## 11. Guarantees and non-guarantees
+## 12. Guarantees and non-guarantees
 
 Implementations may rely on:
 
@@ -539,7 +579,7 @@ Explicitly **not** guaranteed:
 - Any particular gzip compression level in files being read.
 - Section order within the container.
 
-## 12. Reading a file, end to end
+## 13. Reading a file, end to end
 
 ```
 1. Read 4-byte magic "BRP1"; read version byte; reject if != 4.
