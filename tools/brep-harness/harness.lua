@@ -1,9 +1,9 @@
 -- Harness for assets/lua/replay_uploader.lua: stubs the Spring/VFS API, runs
 -- the real widget with BOTH emitters enabled over a deterministic simulated
 -- game (movers, stationary structures, births, deaths, damage, and an enemy
--- team with scripted LOS/radar visibility windows exercising enemy recording
--- + ghost persistence), and leaves <gameId>.brsnap + <gameId>.brepstream
--- in the current directory.
+-- team with scripted LOS/radar visibility windows exercising enemy recording,
+-- visibility-driven dropping, and death tombstones), and leaves
+-- <gameId>.brsnap + <gameId>.brepstream in the current directory.
 --
 -- The pair is committed as internal/capture/testdata fixtures (text gzipped);
 -- TestBrepstreamMatchesTextFixture cross-checks that the Go .brepstream
@@ -61,7 +61,8 @@ end
 
 -- 40 friendly units (teams 0/2 -> ally 0; 60% stationary) + 19 enemy units
 -- (team 1 -> ally 1) with scripted visibility windows (below) that exercise
--- the widget's enemy recording, ghost persistence, and death tombstones.
+-- the widget's enemy recording, visibility-driven dropping, and death
+-- tombstones.
 for i = 1, 40 do
 	addUnit((i % 2 == 0) and 2 or 0, rnd() > 0.6)
 end
@@ -85,32 +86,30 @@ end
 -- s=20/30/40/44/71/100 (see the main loop).
 local enemyVis = {
 	{ { 5, 999, "los" } },                                         -- id 123: in view until destroyed at s=100
-	{ { 10, 29, "los" }, { 30, 39, "radar" } },                    -- id 126: LOS -> radar -> ghost across keyframe 64
-	{ { 20, 34, "radar" } },                                       -- id 129: never typed (def 0), then untyped ghost
-	{ { 80, 94, "los" }, { 110, 124, "los" } },                    -- id 132: ghost -> live again -> ghost across keyframe 138
+	{ { 10, 29, "los" }, { 30, 39, "radar" } },                    -- id 126: LOS -> radar -> dropped from s=40 (unlisted)
+	{ { 20, 34, "radar" } },                                       -- id 129: never typed (def 0), dropped from s=35
+	{ { 80, 94, "los" }, { 110, 124, "los" } },                    -- id 132: visibility gap 95..109, re-recorded across keyframe 138
 	{ { 71, 73, "los" } },                                         -- id 135: visible only while the widget is disabled
-	{ { 0, 49, "los" } },                                          -- id 138: in the first keyframe, ghost until the segment restart
+	{ { 0, 49, "los" } },                                          -- id 138: in the first keyframe, dropped from s=50
 	{ { 55, 63, "los" } },                                         -- id 141: vanishes exactly at keyframe 64
 	{ { 0, 999, "los" } },                                         -- id 144: plain live enemy across both segments
 	{ { 90, 999, "radar" } },                                      -- id 147: wobbling blip to the end
 	{ { 15, 24, "los" }, { 25, 44, "radar" }, { 45, 54, "los" } }, -- id 150: identity carried through radar
 	{ { 30, 44, "los" } },                                         -- id 153: destroyed in view at s=44 (segment 1)
-	{ { 0, 20, "los" }, { 40, 60, "los" } },                       -- id 156: ghost gap inside segment 1
+	{ { 0, 20, "los" }, { 40, 60, "los" } },                       -- id 156: visibility gap 21..39 inside segment 1
 	{ { 10, 24, "radar" }, { 25, 69, "dot" } },                    -- id 159: destroyed at s=40 while its dot persists (the resurrection bug)
 	{ { 10, 19, "los" }, { 20, 29, "dot" } },                      -- id 162: destroyed in view s=20, corpse-dot through 29, id REUSED at s=30
-	{ { 5, 19, "radar" }, { 20, 49, "dot" } },                     -- id 165: dies unseen at s=20; dot through 49, then our ghost to the end
+	{ { 5, 19, "radar" }, { 20, 49, "dot" } },                     -- id 165: dies unseen at s=20; its dot is recorded through 49, dropped from s=50
 	{ { 10, 29, "los" }, { 30, 33, "dying" } },                    -- id 168: killed in LOS at s=30, still readable (hp 0) through 33
 	{ { 60, 69, "los" }, { 71, 76, "dying" } },                    -- id 171: killed at s=71 while the widget is DISABLED — no callin ever fires
-	{ { 10, 24, "los" } },                                         -- id 174: ghost from s=25; its spot is SCOUTED empty at s=40 (see scoutWindows)
-	{ { 10, 30, "los" } },                                         -- id 177: damaged on its LAST visible sample (s=30), spot scouted s=31..33 — the grace sample delays the drop to s=32
+	{ { 10, 24, "los" } },                                         -- id 174: dropped the moment it goes unlisted (s=25)
+	{ { 10, 30, "los" } },                                         -- id 177: damaged on its LAST visible sample (s=30), dropped from s=31
 }
 for i = 1, #enemyVis do
 	addUnit(1, true).vis = enemyVis[i]
 end
--- ids 174/177 must be STATIONARY: they "die" unseen where they stood, so the
--- scouted circle (centred on the unit's position in the IsPosInLos stub)
--- coincides with the ghost's frozen spot. A mobile unit would keep drifting
--- invisibly and the scout would sweep the wrong place.
+-- Kept stationary since the pre-1.5.0 scout-check fixtures so regenerated
+-- streams stay comparable across widget versions.
 units[174].mobile = false
 units[177].mobile = false
 
@@ -214,13 +213,12 @@ local rulesGameID = nil
 
 -- Scouted areas driving the IsPosInLos stub: {fromSample, toSample, unitID} —
 -- during the window, everything within 64 elmos of that unit's current (or
--- frozen) position is in LOS. Targeted at specific units on purpose, so the
--- other ghost scenarios are never accidentally scouted.
+-- frozen) position is in LOS. Widget >= 1.5.0 no longer runs the ghost scout
+-- check, so IsPosInLos goes uncalled — the stub (and these windows) stay so
+-- the harness still runs a pre-1.5.0 widget for fixture archaeology.
 local scoutWindows = {
-	{ 40, 42, 174 }, -- id 174's ghost spot observed empty -> the widget must drop it
-	{ 31, 33, 177 }, -- covers id 177's spot from the sample it vanishes: the
-	-- widget saw its state change at s=30, so the scout check skips it at
-	-- s=31 (grace) and drops it at s=32
+	{ 40, 42, 174 },
+	{ 31, 33, 177 },
 }
 
 Spring = {
@@ -392,9 +390,9 @@ for s = 0, SAMPLES - 1 do
 		widgetActive = true
 	end
 	-- Scripted enemy lifecycle: a mid-game enemy birth in view (s=85) and two
-	-- deaths witnessed in LOS (the widget must bury those units' ghosts).
+	-- deaths witnessed in LOS (the widget must tombstone those units).
 	-- Enemies that die out of view don't exist here — an invisible unit just
-	-- keeps (or ends) its window and its ghost persists.
+	-- keeps (or ends) its window; unlisted means unrecorded.
 	--
 	-- Tombstone scenarios: these two deaths fire UnitDestroyed WITHOUT
 	-- removing the unit — its "dot" window keeps it in GetAllUnits, exactly
@@ -416,10 +414,8 @@ for s = 0, SAMPLES - 1 do
 		units[168].dead = true
 		widget:UnitDestroyed(168, units[168].def, units[168].team)
 	end
-	-- id 177 takes damage on its LAST visible sample: the widget records the
-	-- changed hp at s=30, so when the unit vanishes and its spot is already
-	-- scouted (scoutWindows 31..33) the recent change grants one sample of
-	-- grace before the LOS check may drop the ghost.
+	-- id 177 takes damage on its LAST visible sample: the changed hp is
+	-- recorded at s=30 and the unit vanishes from the stream at s=31.
 	if s == 30 then
 		units[177].hp = units[177].hp - 100
 	end
