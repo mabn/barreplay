@@ -390,7 +390,7 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   buffered-ranges bar under the slider shows keyframe-only vs fully-loaded chunks,
   video-player style). Scrubbing an unloaded region renders its keyframe instantly
   (`dispIdx` falls back to it; the delta fetch starts after a 250 ms dwell), and
-  playback shows "buffering…" at an unloaded spot until its chunk decodes. Verified
+  playback holds on the keyframe at an unloaded spot until its chunk decodes. Verified
   headlessly (Playwright chromium) on the real capture: first keyframe at load, all
   31 keyframes streamed, instant mid-game scrub, and the completed download decodes
   to exactly the same 4.2M unit records as a full `ReadBRP`. `dvx`/`dvz` are the unit's
@@ -438,7 +438,7 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   UI slider (`iconScale`, persisted as `?iconsize=`); the Icons checkbox switches to plain
   dots. A unit with no/loading icon shows a coloured dot so it is never invisible. The
   selected replay and icon size are both kept in the URL, so a refresh/shared link restores them.
-  The **Fit icons** checkbox (`growIcons`, default on) makes a *building's* icon grow to 90%
+  Icon fitting (`growIcons`, always on) makes a *building's* icon grow to 90%
   of its footprint (`0.9 * min(fpW,fpH) * scale`) once that exceeds the constant size — i.e.
   it stays constant when zoomed out and fills the footprint when zoomed in; mobile units
   (no footprint) are unaffected. The icon is resolved by the unit-def's `iconType` key first
@@ -478,10 +478,10 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   `mapName`) its terrain back. The API sends `access-control-allow-origin: *`, and the image is loaded
   with `crossOrigin="anonymous"` so the canvas stays untainted. The viz server has **no
   map code at all**. Best-effort: no name in the meta, an unknown map, or no outbound
-  network just yields a plain background (the Map checkbox enables only once the texture
-  loads, and the field extent falls back to the sampled unit bounds). The front-end
-  positions the texture at world `(0,0)`–`(width,height)` so units overlay correctly;
-  the **Map** checkbox toggles it. Caveat: the widget stream doesn't record the map name
+  network just yields a plain background (and the field extent falls back to the
+  sampled unit bounds). The front-end positions the texture at world
+  `(0,0)`–`(width,height)` so units overlay correctly; the terrain layer is always
+  on (no toggle). Caveat: the widget stream doesn't record the map name
   (only the demo startscript path does), so a `.brp` packed from a raw `.brsnap` with
   `pack -no-demo` has an empty `mapName` and renders the plain background; the
   default pack fetches the demo by gameId and fills it in.

@@ -1655,9 +1655,6 @@ function resolveDisplay() {
     else if (!(prev >= 0 && data.frames[prev])) dispIdx = -1;
     renderFrac = 0; // no interpolation on a stand-in frame
   }
-  const buffering = dispIdx !== idx;
-  const el = document.getElementById('buffering');
-  if (el) el.style.display = buffering ? '' : 'none';
 }
 
 // Move the continuous playhead (in keyframe units). idx = floor(playPos) is the
@@ -1801,11 +1798,9 @@ document.getElementById('play').onclick = togglePlay;
 // Speed is read live inside the play loop, so a change takes effect immediately.
 document.getElementById('speed').onchange = () => {};
 document.getElementById('icons').onchange = e => { showIcons = e.target.checked; draw(); };
-document.getElementById('maptex').onchange = e => { showTexture = e.target.checked; draw(); };
 document.getElementById('grid').onchange = e => { showGrid = e.target.checked; draw(); };
 document.getElementById('footprints').onchange = e => { showFootprints = e.target.checked; draw(); };
 document.getElementById('buildlines').onchange = e => { showBuildLines = e.target.checked; draw(); };
-document.getElementById('growicons').onchange = e => { growIcons = e.target.checked; draw(); };
 document.getElementById('teamcolors').onchange = e => {
   autoTeamColors = e.target.checked;
   if (!data) return;
@@ -1941,8 +1936,6 @@ async function loadMap(name, gameId) {
   const gen = loadGen; // ignore responses if the user switched replays mid-fetch
   mapW = mapH = 0;
   mapTex = null;
-  const maptexEl = document.getElementById('maptex');
-  maptexEl.disabled = true; // enabled once the texture actually loads
   let file = mapFileGuess(name);
   try {
     const info = await resolveMapFile(name, gameId);
@@ -1956,8 +1949,8 @@ async function loadMap(name, gameId) {
   if (gen !== loadGen || !file) return;
   const img = new Image();
   img.crossOrigin = 'anonymous'; // the API sends CORS headers; keeps the canvas untainted
-  img.onload = () => { if (gen !== loadGen) return; mapTex = img; maptexEl.disabled = false; draw(); };
-  img.onerror = () => { /* no texture for this map: checkbox stays disabled */ };
+  img.onload = () => { if (gen !== loadGen) return; mapTex = img; draw(); };
+  img.onerror = () => { /* no texture for this map: keep the plain background */ };
   img.src = MAP_API + '/maps/' + encodeURIComponent(file) + '/texture-mq.jpg';
   draw(); // reflect the (possibly updated) map extent immediately
 }
