@@ -147,9 +147,13 @@ assets/lua/replay_uploader.lua   player-installable live-game variant: constants
                           default (recordEnemies const), enemy units while visible (LOS or
                           radar; unidentified radar contacts carry def 0) with last-known
                           "ghost" persistence after visibility loss — frozen, zero-byte in
-                          the delta codec, buried only on a witnessed death (tombstoned:
-                          the engine keeps returning a dead unseen enemy's id as a frozen
-                          radar-memory dot, which must not resurrect it) —
+                          the delta codec, buried on a witnessed death (tombstoned: the
+                          engine keeps returning a dead enemy's id, both as a frozen
+                          radar-memory dot and — until its death sequence finishes — as the
+                          killed unit itself, and neither may resurrect it; a health read of
+                          0 or Spring.GetUnitIsDead is a death even with no UnitDestroyed
+                          callin). internal/capture repairs pre-1.2.0 captures at decode
+                          time (capture.graveyard) —
                           to <write-dir>/<gameId>.brepstream — a binary
                           keyframe+delta stream (spec: docs/brepstream-format.md, decoder:
                           internal/capture/brep.go, ~6.5x smaller and ~4x cheaper per sample

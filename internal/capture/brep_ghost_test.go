@@ -89,6 +89,33 @@ func TestBrepGhostSemantics(t *testing.T) {
 	}
 	// The segment restart at s=74 legitimately forgets it (fresh instance).
 
+	// id 168: killed in LOS at s=30, and the
+	// engine keeps returning the killed unit itself (not a dot) through s=33
+	// — in LOS, everything readable, health 0. That hp-0 read must not be
+	// mistaken for "alive, so the id was reused": it is the exact shape that
+	// left 57 dead units standing at 0 hp in a real 8v8 capture.
+	if at(29, 168) == nil {
+		t.Errorf("168 should be live at s=29")
+	}
+	for _, smp := range []int{30, 33, 64, 139} { // 33 = last dying sample, 64 = keyframe
+		if u := at(smp, 168); u != nil {
+			t.Errorf("168 killed at s=30 must stay buried, but present at s=%d (%+v)", smp, u)
+		}
+	}
+
+	// id 171: killed at s=71, while the widget is disabled (70..73), so no
+	// UnitDestroyed ever reaches it. The fresh instance meets the corpse in
+	// LOS at s=74..76 with no tombstone at all — health 0 is the only
+	// evidence, and it has to be enough.
+	if at(69, 171) == nil {
+		t.Errorf("171 should be live at s=69 (before the widget is disabled)")
+	}
+	for _, smp := range []int{74, 76, 100, 139} { // 74 = segment-2 keyframe
+		if u := at(smp, 171); u != nil {
+			t.Errorf("171 killed unwitnessed at s=71 must never be recorded, but present at s=%d (%+v)", smp, u)
+		}
+	}
+
 	// id 126 (regression guard for the good case): LOS 10..29, radar 30..39,
 	// then OUR ghost — frozen across the s=64 keyframe until the segment
 	// ends, and absent from segment 2.

@@ -59,7 +59,7 @@ local function addUnit(team, mobile)
 	return u
 end
 
--- 40 friendly units (teams 0/2 -> ally 0; 60% stationary) + 15 enemy units
+-- 40 friendly units (teams 0/2 -> ally 0; 60% stationary) + 17 enemy units
 -- (team 1 -> ally 1) with scripted visibility windows (below) that exercise
 -- the widget's enemy recording, ghost persistence, and death tombstones.
 for i = 1, 40 do
@@ -75,10 +75,14 @@ end
 -- radar-MEMORY dot for an unseen unit: still returned by GetAllUnits, typed
 -- def + team readable, health/velocity nil, position frozen at where it was
 -- last seen — the dot SURVIVES the unit's death, which is how a real capture
--- resurrected a tombstoned ghost), no window = invisible.
+-- resurrected a tombstoned ghost), "dying" (the KILLED unit itself, in LOS
+-- and not yet deleted while its death sequence runs: everything reads back
+-- normally except health, which is 0, and GetUnitIsDead says true — the
+-- second way a real capture resurrected a tombstoned ghost), no window =
+-- invisible.
 -- Context: keyframes land at samples 0/64 (segment 1) and 74/138 (segment 2);
 -- the widget is disabled for samples 70..73; scripted deaths/reuse happen at
--- s=20/30/40/44/100 (see the main loop).
+-- s=20/30/40/44/71/100 (see the main loop).
 local enemyVis = {
 	{ { 5, 999, "los" } },                                         -- id 123: in view until destroyed at s=100
 	{ { 10, 29, "los" }, { 30, 39, "radar" } },                    -- id 126: LOS -> radar -> ghost across keyframe 64
@@ -95,6 +99,8 @@ local enemyVis = {
 	{ { 10, 24, "radar" }, { 25, 69, "dot" } },                    -- id 159: destroyed at s=40 while its dot persists (the resurrection bug)
 	{ { 10, 19, "los" }, { 20, 29, "dot" } },                      -- id 162: destroyed in view s=20, corpse-dot through 29, id REUSED at s=30
 	{ { 5, 19, "radar" }, { 20, 49, "dot" } },                     -- id 165: dies unseen at s=20; dot through 49, then our ghost to the end
+	{ { 10, 29, "los" }, { 30, 33, "dying" } },                    -- id 168: killed in LOS at s=30, still readable (hp 0) through 33
+	{ { 60, 69, "los" }, { 71, 76, "dying" } },                    -- id 171: killed at s=71 while the widget is DISABLED — no callin ever fires
 }
 for i = 1, #enemyVis do
 	addUnit(1, true).vis = enemyVis[i]
@@ -125,7 +131,8 @@ local function advance()
 		-- A unit entering its "dot" window freezes at the position it was
 		-- last seen — BEFORE this sample's movement (the engine's memory dot
 		-- shows where the player lost it, not where it secretly went).
-		if u.vis and u.frozen == nil and visState(u) == "dot" then
+		local vs = u.vis and visState(u) or nil
+		if u.frozen == nil and (vs == "dot" or vs == "dying") then
 			u.frozen = { u.x, u.z }
 		end
 		if u.mobile then
@@ -196,10 +203,11 @@ Spring = {
 			return u.x + ((id * 7919 + curFrame * 131) % 65) - 32, 25,
 				u.z + ((id * 104729 + curFrame * 37) % 65) - 32
 		end
-		if vs == "dot" then
+		if vs == "dot" or vs == "dying" then
 			-- The engine's memory dot is frozen where the unit was last seen
 			-- (captured lazily at the first dot-state read); the real unit —
-			-- or nothing at all, if it died — keeps moving underneath.
+			-- or nothing at all, if it died — keeps moving underneath. A
+			-- "dying" unit stops where it was killed.
 			if u.frozen == nil then
 				u.frozen = { u.x, u.z }
 			end
@@ -220,7 +228,21 @@ Spring = {
 		if vs == "radar" or vs == "dot" then
 			return nil
 		end
+		if vs == "dying" then
+			return 0, u.maxHp, 0, 0, u.build -- killed, not deleted yet
+		end
 		return u.hp, u.maxHp, 0, 0, u.build
+	end,
+	-- Engine truth about a unit the client can currently sense. A memory dot
+	-- is remembered, not sensed, so it reads back nil like every other
+	-- LOS-gated getter.
+	GetUnitIsDead = function(id)
+		local u = units[id]
+		local vs = u and visState(u)
+		if vs == nil or vs == "dot" then
+			return nil
+		end
+		return u.dead == true
 	end,
 	GetUnitVelocity = function(id)
 		local u = units[id]
@@ -311,10 +333,27 @@ for s = 0, SAMPLES - 1 do
 	-- removing the unit — its "dot" window keeps it in GetAllUnits, exactly
 	-- the engine behavior that resurrected a buried ghost in a real capture.
 	if s == 40 then
+		units[159].dead = true
 		widget:UnitDestroyed(159, units[159].def, units[159].team)
 	end
 	if s == 20 then
+		units[162].dead = true
 		widget:UnitDestroyed(162, units[162].def, units[162].team)
+		units[165].dead = true -- dies out of view: no callin, only a memory dot
+	end
+	-- Killed in LOS: the callin fires AND the killed unit is still returned by
+	-- GetAllUnits for a few samples (its "dying" window) reading hp 0. Trusting
+	-- that read to mean "alive, so a new unit reused the id" is what left 57
+	-- dead units standing in a real capture.
+	if s == 30 then
+		units[168].dead = true
+		widget:UnitDestroyed(168, units[168].def, units[168].team)
+	end
+	-- Killed while the widget is DISABLED (samples 70..73): the fresh instance
+	-- never sees a UnitDestroyed for it and has no tombstone — the hp 0 read is
+	-- the only evidence it is dead.
+	if s == 71 then
+		units[171].dead = true
 	end
 	if s == 30 then
 		-- The engine reuses ids: a NEW enemy unit takes id 162 (created out
@@ -326,7 +365,7 @@ for s = 0, SAMPLES - 1 do
 		u.vx, u.vz = 0, 0
 		u.hp, u.maxHp = 900, 900
 		u.build = 1
-		u.frozen = nil
+		u.frozen, u.dead = nil, nil
 		u.vis = { { 30, 999, "los" } }
 	end
 	if s == 85 then
