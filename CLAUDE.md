@@ -398,10 +398,18 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   playback (200 ms min), and time-label/slider writes only when the value changed.
 - The **real map terrain** behind the units is loaded **entirely client-side** (`loadMap`
   in `app.js`): the browser takes the head's `mapName` (from the capture's meta),
-  normalizes it to the API's file-name form (lowercase, spaces→`_`), and talks straight
-  to BAR's maps API — `https://api.bar-rts.com/maps/<name>` for the world extent in
+  resolves it to the API's **file name** (see below), and talks straight
+  to BAR's maps API — `https://api.bar-rts.com/maps/<file>` for the world extent in
   elmos (the API's width/height are map units × 512) and `…/texture-mq.jpg` for the
-  terrain image. The API sends `access-control-allow-origin: *`, and the image is loaded
+  terrain image. **Resolving the file name is not a string transform** (non-obvious):
+  the API keys maps on the archive file the map's author uploaded, so
+  `mapFileGuess` (lowercase, spaces→`_`) is right for only ~85% of BAR's map list —
+  `Frozen_Ford_V2` keeps its capitals (`frozen_ford_v2` 404s), `Eye Of Horus 1.6` is
+  stored as `Eye Of Horus_1.6` (spaces and all), `Desolation v1` is just `desolation`.
+  So `resolveMapFile` tries the guess and, on any non-200, falls back to
+  `…/replays/<gameId>`, whose `Map` object carries the authoritative
+  `{fileName,width,height}` — which also gives a `pack -no-demo` capture (empty
+  `mapName`) its terrain back. The API sends `access-control-allow-origin: *`, and the image is loaded
   with `crossOrigin="anonymous"` so the canvas stays untainted. The viz server has **no
   map code at all**. Best-effort: no name in the meta, an unknown map, or no outbound
   network just yields a plain background (the Map checkbox enables only once the texture
