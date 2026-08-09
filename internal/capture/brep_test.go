@@ -177,7 +177,10 @@ func TestConsumeBrep(t *testing.T) {
 	if f0.TimeSec != 1 {
 		t.Errorf("TimeSec = %v", f0.TimeSec)
 	}
-	if len(f0.Resources) != 1 || f0.Resources[0].Metal != 100.5 || f0.Resources[0].EnergyIncome != 81 {
+	// Protocol 2 preamble: the over-scaled income is divided back by gameSpeed
+	// at decode time (see repairIncome); the other columns pass through raw.
+	if len(f0.Resources) != 1 || f0.Resources[0].Metal != 100.5 ||
+		f0.Resources[0].MetalIncome != float32(27)/30 || f0.Resources[0].EnergyIncome != float32(81)/30 {
 		t.Errorf("resources = %+v", f0.Resources)
 	}
 
@@ -310,6 +313,26 @@ func TestConsumeBrepTruncated(t *testing.T) {
 	}
 	if len(sink.frames) != 1 || sink.frames[0].Frame != 30 {
 		t.Fatalf("truncated stream: frames = %+v", sink.frames)
+	}
+}
+
+// Protocol >= 3 streams write income as the engine reports it (already per
+// game-second); the legacy repair must NOT touch it.
+func TestConsumeBrepProtocol3IncomeUnscaled(t *testing.T) {
+	preamble := strings.Replace(brepPreamble, `"protocol":2`, `"protocol":3`, 1)
+	e := newBrepEnc(preamble)
+	e.record('F', frameRecord(30, true, nil, nil,
+		[]tr{{team: 0, m: 100, en: 900, ms: 500, es: 1000, mi: 2, ei: 45}}))
+
+	var sink loadedSink
+	if err := ConsumeBrep(bytes.NewReader(e.buf.Bytes()), snapshot.Meta{}, &sink); err != nil {
+		t.Fatalf("ConsumeBrep: %v", err)
+	}
+	if len(sink.frames) != 1 || len(sink.frames[0].Resources) != 1 {
+		t.Fatalf("frames = %+v", sink.frames)
+	}
+	if r := sink.frames[0].Resources[0]; r.MetalIncome != 2 || r.EnergyIncome != 45 {
+		t.Errorf("protocol 3 income must pass through unscaled: %+v", r)
 	}
 }
 

@@ -81,6 +81,7 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 		base.UnitDefs = map[int32]snapshot.UnitDef{}
 	}
 	sampleEvery, gameSpeed := base.SampleEvery, int32(30)
+	protocol := 0 // GAME line's stream-semantics version (0 = none seen)
 	scanPreamble := func(m *snapshot.Meta) {
 		for {
 			line, err := br.ReadString('\n')
@@ -94,6 +95,7 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 						}
 						g, _ := applyPreambleLine(fields, content, m)
 						if g != nil {
+							protocol = g.Protocol
 							if g.SampleEvery > 0 {
 								sampleEvery = g.SampleEvery
 							}
@@ -187,6 +189,13 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 				continue
 			}
 			lastEmitted = fr.Frame
+			// Legacy streams (protocol <= 2) carry income over-scaled by
+			// gameSpeed; see repairIncome. Per-segment: a re-enabled widget
+			// appending to an old file could be a newer version.
+			for i := range fr.Resources {
+				fr.Resources[i].MetalIncome = repairIncome(fr.Resources[i].MetalIncome, protocol, gameSpeed)
+				fr.Resources[i].EnergyIncome = repairIncome(fr.Resources[i].EnergyIncome, protocol, gameSpeed)
+			}
 			stats.Frames++
 			stats.LastFrame = fr.Frame
 			if err := w.WriteFrame(fr); err != nil {

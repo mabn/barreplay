@@ -17,6 +17,7 @@
 -- seeds LuaUI/Config/BYAR.lua to enable this widget (see internal/engine).
 --
 -- File format (see internal/capture/capture.go):
+--   BRSNAP GAME <json>                         stream semantics marker (protocol; preamble)
 --   BRSNAP DEF <json>                          full unit-def (JSON; preamble)
 --   BRSNAP T <teamID> <allyTeam> <side> <color>   team info (side "_" = none)
 --   BRSNAP P <playerID> <team> <spectator> <name...>   player info (preamble)
@@ -90,9 +91,18 @@ local spGetTeamResources = Spring.GetTeamResources
 local spGetPlayerList  = Spring.GetPlayerList
 local spGetPlayerInfo  = Spring.GetPlayerInfo
 
--- Sim frames per game-second (30 in BAR). Used to turn the engine's per-frame
--- resource income into a per-second rate for the snapshot.
+-- Sim frames per game-second (30 in BAR). Reported in the GAME preamble line
+-- (the stream-semantics marker; see protocolVersion below).
 local gameSpeed = (Game and Game.gameSpeed) or 30
+
+-- Protocol version of the GAME line / capture stream semantics (shared with
+-- the Replay uploader widget — see internal/capture).
+-- 3: resource income is written as the engine reports it (already per
+--    game-second — GetTeamResources' income accumulates over
+--    TEAM_SLOWUPDATE_RATE = 30 sim frames = 1 game-second). Streams without a
+--    GAME line (this widget pre-protocol-3) or with protocol <= 2 wrongly
+--    multiplied it by gameSpeed; the decoder divides it back out.
+local protocolVersion = 3
 
 -- High-resolution timing for the per-sample processing cost. Spring.GetTimer /
 -- DiffTimers give sub-millisecond precision (reported as microseconds); on an
@@ -306,6 +316,11 @@ end
 
 local function emitPreamble()
 	local parts = {}
+	-- Stream-semantics marker (protocol 3 = income already per game-second);
+	-- the caller's demo-seeded metadata wins over the other fields.
+	parts[#parts + 1] = string.format(
+		'BRSNAP GAME {"protocol":%d,"mode":"replay","sampleEvery":%d,"gameSpeed":%d}',
+		protocolVersion, sampleEvery, gameSpeed)
 	-- Full unit-def table (stable for the whole game). Mods add/modify units, so
 	-- the whole definition is dumped, not just id->name.
 	for defID, ud in pairs(UnitDefs) do
@@ -401,15 +416,16 @@ function widget:GameFrame(frame)
 				vx or 0, vy or 0, vz or 0, buildProgress or 1)
 		end
 		-- Per-team economy at this frame. GetTeamResources returns
-		-- current, storage, pull, income, ... — income is per sim frame, so scale
-		-- it to a per-second rate. The widget spectates full-view, so it can read
-		-- every team's resources.
+		-- current, storage, pull, income, ... — income is already per
+		-- game-second (accumulated over TEAM_SLOWUPDATE_RATE = 30 sim frames),
+		-- so it is written as-is. The widget spectates full-view, so it can
+		-- read every team's resources.
 		for _, teamID in ipairs(spGetTeamList()) do
 			local m, mStore, _, mInc = spGetTeamResources(teamID, "metal")
 			local e, eStore, _, eInc = spGetTeamResources(teamID, "energy")
 			lines[#lines + 1] = string.format("BRSNAP R %d %.1f %.1f %.1f %.1f %.2f %.2f",
 				teamID, m or 0, e or 0, mStore or 0, eStore or 0,
-				(mInc or 0) * gameSpeed, (eInc or 0) * gameSpeed)
+				mInc or 0, eInc or 0)
 		end
 		writeChunk(table.concat(lines, "\n"))
 		if out then

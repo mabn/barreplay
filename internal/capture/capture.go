@@ -95,6 +95,8 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 	pendingCount := int32(-1)   // unit count the F line declared (-1 = unknown)
 	pendingParsed := int32(0)   // U lines seen for it (kept or dropped)
 	graves := graveyard{}       // ids the stream reported destroyed (see lines.go)
+	protocol := 0               // GAME line's stream-semantics version (0 = none seen)
+	gameSpeed := int32(30)      // sim frames per game-second (from the GAME line)
 
 	flushMeta := func() error {
 		if metaWritten {
@@ -139,7 +141,12 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 		switch fields[0] {
 		case "GID", "GAME", "D", "DEF", "P", "T":
 			// Preamble records shared with the binary .brepstream head.
-			applyPreambleLine(fields, content, &base)
+			if g, _ := applyPreambleLine(fields, content, &base); g != nil {
+				protocol = g.Protocol
+				if g.GameSpeed > 0 {
+					gameSpeed = g.GameSpeed
+				}
+			}
 		case "READY":
 			if err := flushMeta(); err != nil {
 				return err
@@ -198,8 +205,8 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 					Energy:        atof32(fields[3]),
 					MetalStorage:  atof32(fields[4]),
 					EnergyStorage: atof32(fields[5]),
-					MetalIncome:   atof32(fields[6]),
-					EnergyIncome:  atof32(fields[7]),
+					MetalIncome:   repairIncome(atof32(fields[6]), protocol, gameSpeed),
+					EnergyIncome:  repairIncome(atof32(fields[7]), protocol, gameSpeed),
 				})
 			}
 		case "PROF": // PROF <totalMs> <name> (name is last; profiler names may contain anything)

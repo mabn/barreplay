@@ -62,7 +62,7 @@
 -- it is reported in GetInfo, the load Echo, and the stream's GAME line, so
 -- every capture records which encoder produced it (the copy on a player's
 -- machine can be arbitrarily old — the server/decoder needs to know).
-local widgetVersion = "1.3.0"
+local widgetVersion = "1.4.0"
 
 function widget:GetInfo()
 	return {
@@ -78,7 +78,12 @@ function widget:GetInfo()
 end
 
 -- Protocol version of the GAME line / capture stream semantics.
-local protocolVersion = 2
+-- 3: resource income is written as the engine reports it (already per
+--    game-second — GetTeamResources' income accumulates over
+--    TEAM_SLOWUPDATE_RATE = 30 sim frames = 1 game-second). Protocol <= 2
+--    widgets wrongly multiplied it by gameSpeed (30x too high); the decoder
+--    repairs those streams by dividing it back out.
+local protocolVersion = 3
 
 -- Output format selection. writeBinary emits <gameId>.brepstream (the real
 -- output); writeText additionally emits the legacy <gameId>.brsnap text stream
@@ -162,8 +167,9 @@ local spGetGameRulesParam = Spring.GetGameRulesParam
 
 local mathFloor = math.floor
 
--- Sim frames per game-second (30 in BAR); turns per-frame resource income into
--- a per-second rate.
+-- Sim frames per game-second (30 in BAR). Reported in the GAME line: the
+-- decoder derives frame timestamps (t = frame/gameSpeed) from it, and uses it
+-- to repair the over-scaled income of protocol <= 2 streams.
 local gameSpeed = (Game and Game.gameSpeed) or 30
 
 -- High-resolution timing for the heartbeat's per-sample cost report.
@@ -853,6 +859,8 @@ local function sample(frame)
 
 	-- Economy: readable only for the player's own ally team (all teams when
 	-- spectating full view) — GetTeamResources returns nil for the rest.
+	-- The income return is already per game-second (the engine accumulates it
+	-- over TEAM_SLOWUPDATE_RATE = 30 sim frames), so it is written as-is.
 	local nR = 0
 	local rteam = {}
 	local rcols = { {}, {}, {}, {}, {}, {} } -- metal, energy, mStore, eStore, mInc, eInc
@@ -865,11 +873,11 @@ local function sample(frame)
 			rteam[nR] = clamp(teamID, 0, 255)
 			rcols[1][nR], rcols[2][nR] = m or 0, e or 0
 			rcols[3][nR], rcols[4][nR] = mStore or 0, eStore or 0
-			rcols[5][nR], rcols[6][nR] = (mInc or 0) * gameSpeed, (eInc or 0) * gameSpeed
+			rcols[5][nR], rcols[6][nR] = mInc or 0, eInc or 0
 			if rlines then
 				rlines[#rlines + 1] = string.format("BRSNAP R %d %.1f %.1f %.1f %.1f %.2f %.2f",
 					teamID, m or 0, e or 0, mStore or 0, eStore or 0,
-					(mInc or 0) * gameSpeed, (eInc or 0) * gameSpeed)
+					mInc or 0, eInc or 0)
 			end
 		end
 	end
