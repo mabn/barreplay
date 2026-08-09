@@ -152,13 +152,13 @@ assets/lua/replay_uploader.lua   player-installable live-game variant: constants
                           radar-memory dot and — until its death sequence finishes — as the
                           killed unit itself, and neither may resurrect it; a health read of
                           0 or Spring.GetUnitIsDead is a death even with no UnitDestroyed
-                          callin). internal/capture repairs pre-1.2.0 captures at decode
-                          time (capture.graveyard) and expires STALE ghosts: an enemy
-                          whose sampled state is completely frozen for 60 game-seconds
-                          (capture.ghostExpiry) is hidden until anything changes —
-                          buildings exempt (BAR's own ghost-building convention), radar
-                          wobble counts as live confirmation; the raw stream keeps every
-                          ghost, so re-packing can change the policy —
+                          callin; a ghost whose spot comes back into LOS while its id is
+                          absent from GetAllUnits is observably not there and is dropped
+                          — the engine's own ghost-building rule, budgeted at
+                          ghostLosChecksPerSample=64 IsPosInLos probes per sample so the
+                          cost stays bounded however many ghosts accumulate).
+                          internal/capture repairs pre-1.2.0 captures at decode time
+                          (capture.graveyard) —
                           to <write-dir>/<gameId>.brepstream — a binary
                           keyframe+delta stream (spec: docs/brepstream-format.md, decoder:
                           internal/capture/brep.go, ~6.5x smaller and ~4x cheaper per sample

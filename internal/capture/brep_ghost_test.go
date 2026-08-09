@@ -116,6 +116,28 @@ func TestBrepGhostSemantics(t *testing.T) {
 		}
 	}
 
+	// id 174: in LOS 10..24, then gone unseen — a ghost from s=25. At s=40
+	// the player scouts its spot (the harness scoutWindows entry): the
+	// position is in LOS while the id is absent from GetAllUnits, so the
+	// ghost is disproven by observation and must be dead-listed — the
+	// engine's own ghost-building rule, applied by the widget's budgeted
+	// IsPosInLos check.
+	if at(24, 174) == nil {
+		t.Errorf("174 should be live at s=24")
+	}
+	g25, g39 := at(25, 174), at(39, 174)
+	if g25 == nil || g39 == nil {
+		t.Fatalf("174 must persist as a ghost s=25..39 (s=25: %v, s=39: %v)", g25, g39)
+	}
+	if g25.Pos != g39.Pos || g39.VelX != 0 || g39.VelZ != 0 {
+		t.Errorf("174 ghost must stay frozen: s=25 %+v vs s=39 %+v", g25, g39)
+	}
+	for _, smp := range []int{40, 41, 64, 69} { // 64 = segment-1 keyframe
+		if u := at(smp, 174); u != nil {
+			t.Errorf("174's spot was scouted empty at s=40, but it is present at s=%d (%+v)", smp, u)
+		}
+	}
+
 	// id 126 (regression guard for the good case): LOS 10..29, radar 30..39,
 	// then OUR ghost — frozen across the s=64 keyframe until the segment
 	// ends, and absent from segment 2.
