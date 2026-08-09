@@ -59,7 +59,7 @@ local function addUnit(team, mobile)
 	return u
 end
 
--- 40 friendly units (teams 0/2 -> ally 0; 60% stationary) + 18 enemy units
+-- 40 friendly units (teams 0/2 -> ally 0; 60% stationary) + 19 enemy units
 -- (team 1 -> ally 1) with scripted visibility windows (below) that exercise
 -- the widget's enemy recording, ghost persistence, and death tombstones.
 for i = 1, 40 do
@@ -102,15 +102,17 @@ local enemyVis = {
 	{ { 10, 29, "los" }, { 30, 33, "dying" } },                    -- id 168: killed in LOS at s=30, still readable (hp 0) through 33
 	{ { 60, 69, "los" }, { 71, 76, "dying" } },                    -- id 171: killed at s=71 while the widget is DISABLED — no callin ever fires
 	{ { 10, 24, "los" } },                                         -- id 174: ghost from s=25; its spot is SCOUTED empty at s=40 (see scoutWindows)
+	{ { 10, 30, "los" } },                                         -- id 177: damaged on its LAST visible sample (s=30), spot scouted s=31..33 — the grace sample delays the drop to s=32
 }
 for i = 1, #enemyVis do
 	addUnit(1, true).vis = enemyVis[i]
 end
--- id 174 must be STATIONARY: it "dies" unseen where it stood, so the scouted
--- circle (centred on the unit's position in the IsPosInLos stub) coincides
--- with the ghost's frozen spot. A mobile unit would keep drifting invisibly
--- and the scout would sweep the wrong place.
+-- ids 174/177 must be STATIONARY: they "die" unseen where they stood, so the
+-- scouted circle (centred on the unit's position in the IsPosInLos stub)
+-- coincides with the ghost's frozen spot. A mobile unit would keep drifting
+-- invisibly and the scout would sweep the wrong place.
 units[174].mobile = false
+units[177].mobile = false
 
 local allyOf = { [0] = 0, [1] = 1, [2] = 0 }
 local curFrame = 0
@@ -190,6 +192,9 @@ local rulesGameID = nil
 -- other ghost scenarios are never accidentally scouted.
 local scoutWindows = {
 	{ 40, 42, 174 }, -- id 174's ghost spot observed empty -> the widget must drop it
+	{ 31, 33, 177 }, -- covers id 177's spot from the sample it vanishes: the
+	-- widget saw its state change at s=30, so the scout check skips it at
+	-- s=31 (grace) and drops it at s=32
 }
 
 Spring = {
@@ -383,6 +388,13 @@ for s = 0, SAMPLES - 1 do
 	if s == 30 then
 		units[168].dead = true
 		widget:UnitDestroyed(168, units[168].def, units[168].team)
+	end
+	-- id 177 takes damage on its LAST visible sample: the widget records the
+	-- changed hp at s=30, so when the unit vanishes and its spot is already
+	-- scouted (scoutWindows 31..33) the recent change grants one sample of
+	-- grace before the LOS check may drop the ghost.
+	if s == 30 then
+		units[177].hp = units[177].hp - 100
 	end
 	-- Killed while the widget is DISABLED (samples 70..73): the fresh instance
 	-- never sees a UnitDestroyed for it and has no tombstone — the hp 0 read is

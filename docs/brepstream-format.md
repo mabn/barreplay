@@ -152,10 +152,13 @@ goes on that frame's dead list (no `destroyed` event; no death was witnessed,
 and a unit re-spotted later is simply recorded afresh). LOS only, never
 radar: stealthy units and jammers make the absence of a radar return prove
 nothing, and a cloaked unit's ghost may be dropped too — which still matches
-what the player's own screen showed. The checks are budgeted
-(`ghostLosChecksPerSample`, 64 per sample round-robin over the sorted ghost
-ids) so the per-sample cost stays bounded no matter how many ghosts
-accumulate. Only witnessed deaths reach the dead list otherwise
+what the player's own screen showed. A ghost whose unit changed state as
+recently as the previous sample is skipped — it was in flux moments ago,
+typically having just walked out of view with its spot still inside LOS, so
+it gets one sample of grace before the check may disprove it. The checks are
+budgeted (`ghostLosChecksPerSample`, 64 probes per sample round-robin over
+the sorted ghost ids; skips are free) so the per-sample cost stays bounded no
+matter how many ghosts accumulate. Only witnessed deaths reach the dead list otherwise
 (`UnitDestroyed` fires only for visible units); an enemy that dies in fog
 nobody revisits remains a ghost to the end of the stream — the capture shows
 what this player knew. A witnessed death buries the

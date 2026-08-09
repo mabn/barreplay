@@ -706,9 +706,18 @@ local function sample(frame)
 					local qteam = eteam
 					if qteam > 255 or qteam < 0 then qteam = unknownTeam end
 					if isEnemy then
+						-- g.c = frame of the last OBSERVED state change (new
+						-- contact, movement, wobble, damage, identification).
+						-- State can only change while the unit is visible, so
+						-- a ghost's g.c is final — the scout check reads it to
+						-- give freshly-changed units a sample of grace.
 						if g == nil then
-							g = {}
+							g = { c = frame }
 							ghosts[unitID] = g
+						elseif g.x ~= qx or g.z ~= qz or g.hp ~= qhp
+							or g.maxhp ~= qmax or g.def ~= qdef
+							or g.team ~= qteam or g.b ~= qb then
+							g.c = frame
 						end
 						g.x, g.z, g.hp, g.maxhp = qx, qz, qhp, qmax
 						g.def, g.team, g.b, g.f = qdef, qteam, qb, frame
@@ -763,11 +772,14 @@ local function sample(frame)
 		-- id on this frame's dead list, exactly like a witnessed death; no
 		-- destroyed event is written (no death was seen — the unit may be
 		-- alive elsewhere, and if re-spotted it is simply recorded afresh).
+		-- A ghost whose unit changed state as recently as the previous
+		-- sample (g.c) is skipped for free: it was in flux moments ago —
+		-- typically it just walked out of view, with its last-known spot
+		-- still inside LOS — so it gets one sample of grace before its spot
+		-- can disprove it. The lap is bounded to one pass over gids; only
+		-- actual IsPosInLos probes spend budget.
 		if spIsPosInLos ~= nil and #gids > 0 then
 			local budget = ghostLosChecksPerSample
-			if budget > #gids then
-				budget = #gids
-			end
 			local start = 1
 			for k = 1, #gids do
 				if gids[k] > losCursor then
@@ -775,12 +787,18 @@ local function sample(frame)
 					break
 				end
 			end
-			for step = 0, budget - 1 do
+			for step = 0, #gids - 1 do
+				if budget <= 0 then
+					break
+				end
 				local id = gids[(start + step - 1) % #gids + 1]
 				local g = ghosts[id]
-				local gy = spGetGroundHeight ~= nil and spGetGroundHeight(g.x, g.z) or 0
-				if spIsPosInLos(g.x, gy or 0, g.z) then
-					ghosts[id] = nil
+				if frame - (g.c or 0) > sampleEvery then
+					budget = budget - 1
+					local gy = spGetGroundHeight ~= nil and spGetGroundHeight(g.x, g.z) or 0
+					if spIsPosInLos(g.x, gy or 0, g.z) then
+						ghosts[id] = nil
+					end
 				end
 				losCursor = id
 			end

@@ -156,7 +156,9 @@ assets/lua/replay_uploader.lua   player-installable live-game variant: constants
                           absent from GetAllUnits is observably not there and is dropped
                           — the engine's own ghost-building rule, budgeted at
                           ghostLosChecksPerSample=64 IsPosInLos probes per sample so the
-                          cost stays bounded however many ghosts accumulate).
+                          cost stays bounded however many ghosts accumulate; a ghost
+                          whose state changed within the last sample gets one sample of
+                          grace before the check applies).
                           internal/capture repairs pre-1.2.0 captures at decode time
                           (capture.graveyard) —
                           to <write-dir>/<gameId>.brepstream — a binary
