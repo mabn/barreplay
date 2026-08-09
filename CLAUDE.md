@@ -306,7 +306,11 @@ startscript behind it — `capture` merges it by player id so a seeded player is
 duplicated. **Team colours** ride the `T` line; `capture` backfills each `TeamInfo.PlayerName`
 from the first non-spectator player on that team.
 Each sampled frame also emits one `R` line per team with its current metal/energy, storage
-caps, and per-game-second income (the engine's per-frame income × the 30 fps sim rate).
+caps, and per-game-second income — `GetTeamResources`' income return is ALREADY per
+game-second (the engine accumulates it over `TEAM_SLOWUPDATE_RATE` = 30 sim frames), so
+protocol >= 3 widgets write it as-is. Widgets before that wrongly multiplied it by 30;
+`capture` repairs those streams at decode time (`repairIncome` in lines.go: any stream
+without a `GAME` line declaring `protocol >= 3` gets its income divided by gameSpeed).
 Each `U` line carries, besides position and health, the unit's velocity (`vx/vy/vz`) and
 `buildProgress` (1 = finished, <1 = under construction; from `GetUnitHealth`'s 5th return).
 Both are appended after `maxHp`, so pre-velocity `.brsnap` streams still parse (capture reads

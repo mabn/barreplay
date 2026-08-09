@@ -121,6 +121,21 @@ func applyPreambleLine(fields []string, content string, base *snapshot.Meta) (*g
 	return nil, true
 }
 
+// repairIncome fixes the resource-income scale of legacy streams. The engine's
+// GetTeamResources income return is already per game-second (accumulated over
+// TEAM_SLOWUPDATE_RATE = 30 sim frames = 1 game-second), but every widget
+// before stream protocol 3 multiplied it by gameSpeed on the assumption it was
+// per sim frame, baking in a 30x-too-high rate. A GAME line with protocol >= 3
+// marks a stream whose income is written as the engine reports it; anything
+// older (protocol <= 2, or a .brsnap with no GAME line at all) gets the bogus
+// factor divided back out.
+func repairIncome(v float32, protocol int, gameSpeed int32) float32 {
+	if protocol >= 3 || gameSpeed <= 0 {
+		return v
+	}
+	return v / float32(gameSpeed)
+}
+
 // graveyard remembers the unit ids a stream reported destroyed, so a capture
 // can be decoded into a world without dead units standing in it even when the
 // recorder kept sampling them. Both stream parsers consult it.

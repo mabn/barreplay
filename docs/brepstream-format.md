@@ -96,9 +96,18 @@ f32[nRes]  metal      (raw, unquantized; 6 columns in this order)
 f32[nRes]  energy
 f32[nRes]  metalStorage
 f32[nRes]  energyStorage
-f32[nRes]  metalIncome    (per game-second)
+f32[nRes]  metalIncome    (per game-second; see the protocol note below)
 f32[nRes]  energyIncome
 ```
+
+Income semantics are versioned by the `GAME` line's `protocol` field: the
+engine's `GetTeamResources` income return is already per game-second (it
+accumulates over `TEAM_SLOWUPDATE_RATE` = 30 sim frames = 1 game-second), and
+**protocol >= 3** streams write it as-is. Protocol <= 2 widgets multiplied it
+by `gameSpeed` on the wrong assumption it was per sim frame, so their stored
+income is 30x too high; the decoder repairs those streams (and `.brsnap`
+streams with no `GAME` line at all) by dividing the factor back out
+(`repairIncome` in `internal/capture/lines.go`).
 
 Quantization matches `.brp`'s storage precision (whole elmos/hp, per-interval
 velocity displacement, build 1/255); `y`/`vy` are not stored at all, exactly
@@ -196,5 +205,8 @@ live/replay, map, game/engine versions, sampleEvery, gameSpeed, recordEnemies
 (whether the stream carries enemy units/ghosts — see above), recording
 player id/allyTeam/spectator), `DEF` (full unit-def
 JSON), `T`, `P`, `READY`. The `GAME` line's `sampleEvery`/`gameSpeed` feed
-velocity de-quantization and frame timestamps (`t = frame/gameSpeed`);
-metadata seeded by the caller (e.g. from the demo) wins over `GAME` values.
+velocity de-quantization and frame timestamps (`t = frame/gameSpeed`), and its
+`protocol` selects the resource-income semantics (>= 3: written as the engine
+reports it; <= 2 or absent: over-scaled by gameSpeed, repaired at decode — see
+the frame-record section); metadata seeded by the caller (e.g. from the demo)
+wins over `GAME` values.
