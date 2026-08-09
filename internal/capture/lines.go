@@ -22,6 +22,7 @@ type gameLine struct {
 	EngineVersion string `json:"engineVersion"`
 	SampleEvery   int32  `json:"sampleEvery"`
 	GameSpeed     int32  `json:"gameSpeed"`
+	RecordEnemies bool   `json:"recordEnemies"`
 	PlayerID      int32  `json:"playerID"`
 	AllyTeam      int32  `json:"allyTeam"`
 	Spectator     bool   `json:"spectator"`
@@ -157,6 +158,115 @@ func (g graveyard) drop(id int32, health float64, restated bool) bool {
 		return false
 	}
 	return true
+}
+
+// staleGhostTTLSecs is how long a stale enemy ghost survives in DECODED
+// output. The uploader widget records enemies as the player perceived them: a
+// unit that leaves visibility stays in the stream frozen at its last-known
+// state, forever ("the capture shows what this player knew"). For buildings
+// that matches BAR's own ghost-building convention, but a MOBILE unit frozen
+// mid-field for minutes is almost always a unit that died unseen — the game
+// itself shows no such ghost — and a long game accumulates hundreds of them
+// (the reported 8v8 ended with ~120 stale mobile ghosts and unidentified
+// blips standing). So decoding applies a policy the stream itself does not
+// carry: an enemy unit whose sampled state has not changed at all for this
+// long is hidden until something about it changes again. The raw stream keeps
+// full fidelity (nothing is lost for the future multi-stream merge; re-pack
+// to re-apply a different policy).
+const staleGhostTTLSecs = 60
+
+// ghostSig is the part of a unit's sampled state whose complete stillness
+// marks a stale ghost. Values are quantized by both stream formats, so exact
+// float comparison is sound.
+type ghostSig struct {
+	def, team              int32
+	x, z, hp, maxHp, build float32
+}
+
+// ghostExpiry hides stale enemy ghosts from decoded frames (see
+// staleGhostTTLSecs). Liveness is "anything changed": real movement, radar
+// wobble (the engine wobbles only a live radar return, so jitter IS
+// confirmation), damage, identification. Building defs are exempt — their
+// ghosts legitimately persist — as is everything on the recording player's
+// ally team (fully visible; a parked own unit is not a ghost). A nil
+// *ghostExpiry filters nothing: the policy only applies to live-game enemy
+// captures (GAME line with recordEnemies and not spectating) — a resim or
+// full-view capture has no ghosts to expire.
+type ghostExpiry struct {
+	ttlFrames int32
+	myAlly    int32
+	allyOf    map[int32]int32
+	exempt    map[int32]bool // building unit defs (ghosts persist)
+	streaks   map[int32]*ghostStreak
+}
+
+// ghostStreak tracks one unit's current run of identical samples.
+type ghostStreak struct {
+	sig   ghostSig
+	since int32 // frame the run started
+}
+
+func newGhostExpiry(base *snapshot.Meta, g *gameLine) *ghostExpiry {
+	if g == nil || !g.RecordEnemies || g.Spectator {
+		return nil
+	}
+	gs := g.GameSpeed
+	if gs <= 0 {
+		gs = 30
+	}
+	e := &ghostExpiry{
+		ttlFrames: staleGhostTTLSecs * gs,
+		myAlly:    g.AllyTeam,
+		allyOf:    make(map[int32]int32, len(base.Teams)),
+		exempt:    map[int32]bool{},
+		streaks:   map[int32]*ghostStreak{},
+	}
+	for _, t := range base.Teams {
+		e.allyOf[t.TeamID] = t.AllyTeam
+	}
+	// Same structure-vs-mobile rule as the viewer's footprint map: neither
+	// flag alone is enough (nano turrets are immobile builders, some
+	// factories report CanMove).
+	for id, d := range base.UnitDefs {
+		if !d.CanMove || d.IsBuilding {
+			e.exempt[id] = true
+		}
+	}
+	return e
+}
+
+// filter drops the stale ghosts from one decoded frame, in place.
+func (e *ghostExpiry) filter(fr *snapshot.Frame) {
+	if e == nil {
+		return
+	}
+	kept := fr.Units[:0]
+	for _, u := range fr.Units {
+		if !e.stale(fr.Frame, u) {
+			kept = append(kept, u)
+		}
+	}
+	fr.Units = kept
+}
+
+func (e *ghostExpiry) stale(frame int32, u snapshot.UnitState) bool {
+	if ally, ok := e.allyOf[u.Team]; ok && ally == e.myAlly {
+		return false // own ally team: fully visible, never a ghost
+	}
+	if e.exempt[u.DefID] {
+		return false // building ghosts persist (an unknown def 0 does not)
+	}
+	if u.VelX != 0 || u.VelZ != 0 {
+		delete(e.streaks, u.UnitID) // moving: alive by definition
+		return false
+	}
+	sig := ghostSig{u.DefID, u.Team, u.Pos.X, u.Pos.Z, u.Health, u.MaxHealth, u.BuildProgress}
+	st := e.streaks[u.UnitID]
+	if st == nil || st.sig != sig {
+		e.streaks[u.UnitID] = &ghostStreak{sig: sig, since: frame}
+		return false
+	}
+	return frame-st.since > e.ttlFrames
 }
 
 // backfillTeamPlayers fills each team's display player from the roster (first

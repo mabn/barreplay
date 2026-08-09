@@ -143,7 +143,19 @@ leaves visibility stays in the stream **frozen at its last-known state** with
 `dvx = dvz = 0` (a "ghost") — exactly the delta codec's zero-byte predicted
 case — until it is seen again or seen dying. Only witnessed deaths reach the
 dead list (`UnitDestroyed` fires only for visible units); an enemy that dies
-unseen remains a ghost to the end of the stream. A witnessed death buries the
+unseen remains a ghost to the end of the stream. **The stream keeps every
+ghost; decoding expires the stale ones.** BAR itself shows persistent ghosts
+only for buildings — a mobile unit that leaves radar disappears from the
+player's view — so a mobile unit (or unidentified blip) frozen mid-field for
+minutes is almost always a unit that died unseen. `internal/capture` hides an
+enemy unit from decoded frames once its sampled state has been completely
+unchanged for `staleGhostTTLSecs` (60 game-seconds), reviving it the moment
+anything changes — real movement, radar wobble (the engine wobbles only a
+live radar return, so jitter is confirmation), damage, or identification.
+Building defs are exempt (their ghosts persist, matching the game), as is the
+recorder's own ally team; the policy runs only for live enemy captures (GAME
+line: `recordEnemies` and not `spectator`). Since the raw stream is
+unchanged, re-packing can re-apply a different policy at any time. A witnessed death buries the
 id for good (widget ≥ 1.1.1): the engine can keep returning a dead enemy's id
 from `GetAllUnits` — a frozen radar-memory dot survives a death the player
 did not see in LOS — so the widget tombstones the id at `UnitDestroyed` and
