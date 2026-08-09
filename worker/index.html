@@ -56,6 +56,9 @@
   <label style="font-size:12px;color:#9fb0bf;display:flex;align-items:center;gap:4px;" title="Show building footprints">
     <input type="checkbox" id="footprints"> Footprints
   </label>
+  <label style="font-size:12px;color:#9fb0bf;display:flex;align-items:center;gap:4px;" title="Connect each construction unit to the unit it is building or assisting">
+    <input type="checkbox" id="buildlines" checked> Build lines
+  </label>
   <label style="font-size:12px;color:#9fb0bf;display:flex;align-items:center;gap:4px;" title="Checked: distinct auto colours per team. Unchecked: each team's real in-game colour from the replay.">
     <input type="checkbox" id="teamcolors"> Team colors
   </label>
@@ -79,6 +82,7 @@
   <div id="left">
     <canvas id="cv"></canvas>
     <canvas id="glcv"></canvas>
+    <canvas id="ovcv"></canvas>
     <div id="tooltip"></div>
     <div id="zoomlabel"></div>
     <div id="empty" style="display:none"></div>

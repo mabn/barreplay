@@ -26,7 +26,9 @@ type BRPSectionStat struct {
 
 // BRPDefStat attributes encoded frame-stream bytes to one unit def.
 // CoreBytes counts the def's raw bytes in the K+F streams (changed-id deltas,
-// the 8 core columns, dead-id deltas); ExtraBytes its build column in X.
+// the 10 core columns, dead-id deltas). ExtraBytes is always 0 since v5 moved
+// the build column into the core stream (X carries only team resources, which
+// no def owns); the field stays for the report's shape.
 // Records is how many sampled unit states carry the def; Instances how many
 // distinct unit lifetimes did (a unit id appearing, living, then dying is one
 // instance — the divisor for "does this def cost a lot per unit, or are there
@@ -195,14 +197,6 @@ func ComputeBRPStats(f *BRPFile) (*BRPStats, error) {
 					defAgg(fr.Units[i].DefID).CoreBytes += svLen(*col(&q[i]) - base)
 				}
 			}
-			for _, i := range changed {
-				base := int64(0)
-				if p, ok := codec.prev[fr.Units[i].UnitID]; ok {
-					base = p.build
-				}
-				defAgg(fr.Units[i].DefID).ExtraBytes += svLen(q[i].build - base)
-			}
-
 			res := make([]TeamResource, len(fr.Resources))
 			copy(res, fr.Resources)
 			sort.Slice(res, func(i, j int) bool { return res[i].Team < res[j].Team })

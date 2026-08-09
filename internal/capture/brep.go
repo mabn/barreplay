@@ -57,9 +57,9 @@ func ConsumeBrep(r io.Reader, base snapshot.Meta, w snapshot.Writer) error {
 // brepUnit is the decoder's tracked state for one live unit, in the stream's
 // quantized integer domain.
 type brepUnit struct {
-	def, team        int32
-	x, z, dvx, dvz   int32
-	hp, maxHp, build int32
+	def, team                int32
+	x, z, dvx, dvz           int32
+	hp, maxHp, build, target int32
 }
 
 // ConsumeBrepStats is ConsumeBrep, additionally filling stats (which may be
@@ -294,6 +294,7 @@ func decodeFrameRecord(payload []byte, state map[int32]*brepUnit, graves graveya
 	nDead := int(c.u16())
 	nRes := int(c.u8())
 	keyframe := flags&1 != 0
+	hasTarget := flags&2 != 0 // widget >= 1.4.0 appends the build-target column
 
 	// Columns (present only when nUnits > 0, but reading 0-length columns is a
 	// no-op either way).
@@ -336,6 +337,12 @@ func decodeFrameRecord(payload []byte, state map[int32]*brepUnit, graves graveya
 	builds := make([]int32, nUnits)
 	for i := range builds {
 		builds[i] = c.u8()
+	}
+	targets := make([]int32, nUnits)
+	if hasTarget {
+		for i := range targets {
+			targets[i] = c.u16()
+		}
 	}
 	dead := make([]int32, nDead)
 	for i := range dead {
@@ -386,6 +393,7 @@ func decodeFrameRecord(payload []byte, state map[int32]*brepUnit, graves graveya
 		u.def, u.team = defs[i], teams[i]
 		u.x, u.z = xs[i], zs[i]
 		u.hp, u.maxHp, u.build = hps[i], maxHps[i], builds[i]
+		u.target = targets[i]
 		u.dvx, u.dvz = dvxs[i], dvzs[i]
 	}
 
@@ -423,6 +431,7 @@ func decodeFrameRecord(payload []byte, state map[int32]*brepUnit, graves graveya
 			VelX:          float32(u.dvx) / float32(sampleEvery),
 			VelZ:          float32(u.dvz) / float32(sampleEvery),
 			BuildProgress: float32(u.build) / 255,
+			TargetID:      u.target,
 		})
 	}
 	sort.Slice(fr.Units, func(i, j int) bool { return fr.Units[i].UnitID < fr.Units[j].UnitID })

@@ -68,6 +68,7 @@ emitted) so downstream writers always see a monotonic frame sequence.
 ```
 u32  frame          sim frame (30/s)
 u8   flags          bit 0: keyframe
+                    bit 1: the target column is present (widget >= 1.4.0)
 u16  nUnits         units restated in this record
 u16  nDead          dead-list length (0 in keyframes)
 u8   nRes           team-resource rows
@@ -86,6 +87,9 @@ u32[]  maxHp
 s16[]  dvx         velocity as displacement per sample interval:
 s16[]  dvz         round(vel * sampleEvery) — same as .brp
 u8[]   build       build progress, round(build * 255)
+u16[]  target      unit id being built/assisted (GetUnitIsBuilding; 0 = none)
+                   — present only when flags bit 1 is set; older streams
+                   decode with every target = 0
 ```
 
 Then `u16[nDead]` dead unit ids, then resources (absent when `nRes` is 0):
@@ -130,7 +134,7 @@ The decoder keeps one record per live unit (the quantized columns above).
   units with their absolute column values (a new id is a new unit).
 
 A unit is omitted by the encoder iff **all** columns match its prediction:
-same def/team/hp/maxHp/dvx/dvz/build and `x == prev.x + dvx`,
+same def/team/hp/maxHp/dvx/dvz/build/target and `x == prev.x + dvx`,
 `z == prev.z + dvz` — in the quantized domain. The encoder then advances its
 own mirror state by the same rule, so encoder and decoder states are equal by
 construction and cannot drift; there is no accumulated error, and a restated
