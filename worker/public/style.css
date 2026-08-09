@@ -195,3 +195,16 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   text-align: center; color: #6a7785; font-size: 14px; padding: 24px;
 }
+
+/* Drag&drop publishing (the landing view's dropzone). */
+#dropzone {
+  max-width: 1100px; margin: 0 auto 14px; padding: 14px 18px;
+  border: 1px dashed #3a4856; border-radius: 6px;
+  font-size: 12px; color: #8a98a6; text-align: center;
+}
+#dropzone code { color: #a9bac9; }
+#dropzone.drag { border-color: #8fd3ff; background: #16202a; color: #c7d3de; }
+#dropzone .browse { color: #8fd3ff; cursor: pointer; text-decoration: underline; }
+#dropstatus { margin-top: 8px; font-size: 12px; color: #c7d3de; }
+#dropstatus.error { color: #e2785b; }
+#dropstatus.ok { color: #6fd07f; }

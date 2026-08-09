@@ -1,9 +1,17 @@
 # Analysis: live widget → remote upload (crowd-sourced capture)
 
-Status: analysis only, nothing implemented. Explores replacing (or complementing)
-the post-game headless re-simulation with a widget that **any player can install**,
-which samples game state live and uploads it to a remote ingest server during the
-match. The server combines uploads from multiple players into one capture.
+Status: analysis; the **manual half is implemented**. A player can drag&drop
+their `<gameId>.brepstream` (the widget's local file) onto the worker's landing
+page: `POST /api/upload` archives the raw stream in R2 under
+`streams/<gameId>/<ts>-a<allyTeam>.brepstream` (append-only — every original is
+kept, keyed by gameId with the recorder's ally team, exactly the merge
+substrate this doc anticipates) and `cmd/bringest` publishes it. What
+remains from this doc is the live path (the widget uploading during the match)
+and the multi-uploader merge. The rest of this doc explores replacing (or
+complementing) the post-game headless re-simulation with a widget that **any
+player can install**, which samples game state live and uploads it to a remote
+ingest server during the match. The server combines uploads from multiple
+players into one capture.
 
 ## TL;DR — verdict
 
@@ -153,7 +161,7 @@ update").
 
 ## Server side (new component)
 
-A small Go ingest+merge service (`cmd/barreplay-ingest`, say) — the repo's
+A small Go ingest+merge service (`cmd/bringest`, say) — the repo's
 existing seams do most of the work:
 
 1. **Ingest**: append each `(gameId, playerId)` chunk stream to disk. Zero

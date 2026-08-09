@@ -7,7 +7,6 @@
   "scripts": {
     "sync-assets": "node tools/sync-assets.mjs",
     "upload": "tsx tools/upload.ts",
-    "upload-brep": "tsx tools/upload-brepstream.ts",
     "test": "tsx --test tests/*.test.ts",
     "predev": "npm run sync-assets",
     "dev": "vite",
