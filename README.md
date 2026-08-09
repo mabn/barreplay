@@ -58,7 +58,7 @@ flowchart LR
 
 A raw `.brepstream` can also enter the pipeline through the **browser**: the
 worker's landing page accepts a drag&dropped capture (`POST /api/upload`
-archives it in R2 and records a job), and the `cmd/barreplay-ingest` daemon —
+archives it in R2 and records a job), and the `cmd/bringest` daemon —
 running wherever the repo lives — publishes it through the same `pack`
 pipeline. See `worker/README.md`.
 

@@ -76,7 +76,7 @@ app.put("/api/replays/:id", async (c) => {
 // produced by the Go pipeline). It validates the stream's preamble, archives
 // the raw bytes under streams/<gameId>/ — a prefix /index.json never lists and
 // /replays/* never serves, and from which nothing is ever deleted — and
-// records a pending job for the ingest daemon (cmd/barreplay-ingest), which
+// records a pending job for the ingest daemon (cmd/bringest), which
 // polls, transcodes, publishes the pieces under a fresh revision id, and
 // reports back. The browser polls GET /api/jobs/<id> to follow along.
 app.post("/api/upload", async (c) => {

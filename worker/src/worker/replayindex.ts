@@ -6,7 +6,7 @@
 // the team-size spec like "8v8"), which the bucket listing cannot provide
 // because it lives inside each .brp's meta record. The jobs table tracks
 // drag&drop uploads through the ingest pipeline: POST /api/upload archives the
-// raw stream and inserts a pending row; the Go daemon (cmd/barreplay-ingest)
+// raw stream and inserts a pending row; the Go daemon (cmd/bringest)
 // polls pending rows, publishes the replay, and reports done/error; the
 // front-end polls its job row to know when to open the replay.
 import { DurableObject } from "cloudflare:workers";
