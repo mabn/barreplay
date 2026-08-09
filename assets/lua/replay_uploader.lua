@@ -64,7 +64,7 @@
 -- it is reported in GetInfo, the load Echo, and the stream's GAME line, so
 -- every capture records which encoder produced it (the copy on a player's
 -- machine can be arbitrarily old — the server/decoder needs to know).
-local widgetVersion = "1.4.0"
+local widgetVersion = "1.5.0"
 
 function widget:GetInfo()
 	return {
@@ -97,21 +97,19 @@ local writeText = false
 
 -- Enemy recording: units of other ally teams are recorded while visible (in
 -- LOS or on radar — Spring.GetAllUnits already returns only what this client
--- can see, so the engine is the visibility filter). A previously seen enemy
--- that drops out of visibility is NOT marked dead: it stays in the stream as
--- an immobile "ghost" frozen at its last-known state (velocity zero) until it
--- is seen again, seen dying, or its last-known spot is OBSERVED EMPTY: when
--- the ghost's position comes back into LOS while the unit is absent from
--- GetAllUnits, the player is looking at bare ground where the ghost stands —
--- the engine's own ghost-building rule — so the ghost is dropped (see the
--- ghost pass; the checks are budgeted, ghostLosChecksPerSample). A death the
--- player could see buries the unit for good — whether it arrived as a
--- UnitDestroyed callin or simply as a health read of 0 — even though the
--- engine may keep returning its id from GetAllUnits afterwards, as a stale
--- frozen radar-memory dot or as the killed unit itself, still undeleted while
--- its death sequence runs (see buried and unburied below). A unit that dies
--- unseen in fog nobody revisits remains a ghost — the capture shows what
--- this player knew.
+-- can see, so the engine is the visibility filter). The engine's listing IS
+-- the record: an enemy that drops out of it (no LOS, no radar signature)
+-- disappears from the stream on that very sample — dropped, not marked dead
+-- (no destroyed event; it may well be alive in fog) — and is simply recorded
+-- afresh if it is ever listed again. Widgets before 1.5.0 instead froze such
+-- units into the stream as immobile "ghosts" at their last-known state; that
+-- persistence is gone — the capture now shows exactly what this player's
+-- sensors report each sample.
+-- A death the player could see still buries the unit for good — whether it
+-- arrived as a UnitDestroyed callin or simply as a health read of 0 — even
+-- though the engine may keep returning its id from GetAllUnits afterwards,
+-- as a stale frozen radar-memory dot or as the killed unit itself, still
+-- undeleted while its death sequence runs (see buried and unburied below).
 -- Radar-only contacts are recorded immediately: their position is the
 -- engine's wobbled radar reading, and unreadable columns fall back to the
 -- last-known value (def 0 = never identified). false restores the pre-1.1
@@ -132,18 +130,6 @@ local keyframeEvery = 64
 -- proving the widget is alive and how cheap each sample was.
 local heartbeatEvery = 300
 
--- Ghost scout-check budget per sample. Visibility is per UNIT, not per
--- position: if a ghost's unit were alive anywhere in sensor range it would be
--- in GetAllUnits by its id — so the ghost's only remaining claim is "it is
--- still standing at (x, z), which I cannot see". The moment that spot is in
--- LOS while the id stays absent, the claim is disproven by observation and
--- the ghost is dropped. To keep the widget's frame cost bounded no matter how
--- many ghosts accumulate, at most this many ghosts pay the two C calls
--- (GetGroundHeight + IsPosInLos) per sample, round-robin over the sorted
--- ghost ids — at 64 checks and ~300 ghosts every ghost is re-visited about
--- every 5 samples, so a scouted ghost disappears within a few seconds.
-local ghostLosChecksPerSample = 64
-
 local Echo = Spring.Echo
 local spGetAllUnits     = Spring.GetAllUnits
 local spGetUnitPosition = Spring.GetUnitPosition
@@ -153,8 +139,6 @@ local spGetUnitHealth   = Spring.GetUnitHealth
 local spGetUnitIsDead   = Spring.GetUnitIsDead -- may be absent on old engines
 local spGetUnitVelocity = Spring.GetUnitVelocity
 local spGetUnitIsBuilding = Spring.GetUnitIsBuilding
-local spIsPosInLos      = Spring.IsPosInLos -- may be absent on old engines
-local spGetGroundHeight = Spring.GetGroundHeight
 local spGetGameSeconds  = Spring.GetGameSeconds
 local spGetGameFrame    = Spring.GetGameFrame
 local spGetTeamList     = Spring.GetTeamList
@@ -424,11 +408,10 @@ end
 -- Visibility. A playing client's Get* calls are LOS-gated: the own ally team
 -- is fully readable; enemies flicker in and out of GetAllUnits with wobbled
 -- radar positions and nil defIDs (until identified). With recordEnemies the
--- widget records enemies exactly as this client perceives them and freezes
--- them as ghosts when they vanish (see the flag comment above); with it off, a
--- player records ONLY units of their own ally team. A full-view spectator
--- (LOS-free) always records everything — and there absence from GetAllUnits
--- means the unit really died, so the ghost machinery is bypassed.
+-- widget records enemies exactly as this client perceives them, sample by
+-- sample (see the flag comment above); with it off, a player records ONLY
+-- units of their own ally team. A full-view spectator (LOS-free) always
+-- records everything.
 -- Team->allyteam is static, built once in the preamble.
 
 local allyTeamOf = {} -- teamID -> allyTeam
@@ -498,19 +481,16 @@ end
 local prev = {}
 local sampleIdx = 0 -- samples emitted so far; every keyframeEvery-th is a keyframe
 
--- Last-known QUANTIZED state of every enemy unit sampled (the ghost source,
--- recordEnemies only). Unlike prev this survives the keyframe prev = {} reset
--- — ghosts must be restated in every keyframe or the decoder drops them.
--- g.f = sim frame the unit was last seen live. Entries are removed on a
--- witnessed UnitDestroyed, when the id reappears as a non-enemy unit (the
--- engine reuses unit ids), and wholesale under full view (absence = death).
-local ghosts = {}
-
--- Round-robin watermark for the ghost scout checks (see
--- ghostLosChecksPerSample): the last ghost id checked, so each sample resumes
--- where the previous one stopped. An id watermark (not an array index) stays
--- stable as ghosts come and go between samples.
-local losCursor = -1
+-- Last-known QUANTIZED state of every enemy unit sampled (recordEnemies
+-- only): the identity/health fallback for radar-only reads, which return nil
+-- for columns the sensors cannot resolve — so an enemy once identified in LOS
+-- keeps its def/health across later radar-only contacts instead of degrading
+-- to an untyped blip. Purely a read-side cache: a unit absent from
+-- GetAllUnits is NOT emitted from here (pre-1.5.0 "ghost" persistence is
+-- gone). Entries are removed on a witnessed UnitDestroyed, when the id
+-- reappears as a non-enemy unit (the engine reuses unit ids), and wholesale
+-- under full view (nothing is LOS-gated there).
+local lastKnown = {}
 
 -- Wire team is u8 and 0 is a real team id, so an unknown team must not map to
 -- 0 (it would paint the unit as the recording player's). Real ids are 0..254.
@@ -520,7 +500,7 @@ local unknownTeam = 255
 -- dead unit's last-known fingerprint. Needed because the engine can KEEP
 -- RETURNING a dead enemy's id from GetAllUnits — a frozen radar-memory dot
 -- (or briefly the corpse) survives a death the player did not see in LOS —
--- which would resurrect the ghost right after UnitDestroyed removed it
+-- which would re-record the dead unit right after UnitDestroyed removed it
 -- (observed in a real capture: a morphed enemy commander's dot persisted for
 -- thousands of frames past its recorded destroyed event). A tombstoned id is
 -- skipped by the sample loop until it is demonstrably a NEW unit reusing the
@@ -541,7 +521,7 @@ local buried = {}
 -- unit still exists (the engine deletes it only after its death sequence, and
 -- a morph/Spring.DestroyUnit kills it outright at full health), so the very
 -- next sample can still read it out of GetAllUnits — with health 0, or even
--- intact. Trusting that read cleared the tombstone and re-ghosted the corpse
+-- intact. Trusting that read cleared the tombstone and re-recorded the corpse
 -- for the rest of the game: a real 8v8 capture ended with 57 dead units still
 -- standing at 0 hp. isDead answers it directly where the engine offers it;
 -- hp <= 0 covers the rest (a live unit never reads <= 0 — the engine kills it
@@ -631,12 +611,11 @@ local function sample(frame)
 		end
 	end
 
-	-- Under full view absence from GetAllUnits means the unit really died, so
-	-- ghost persistence must not apply. Also covers a player who died/resigned
-	-- into full view mid-game: their accumulated ghosts either reappear live
-	-- below or age into the dead list.
-	if all and next(ghosts) ~= nil then
-		ghosts = {}
+	-- Under full view nothing is LOS-gated, so the read-side fallback cache
+	-- has no purpose (and a stale entry could linger from before a mid-game
+	-- switch to full view — a death/resign): drop it wholesale.
+	if all and next(lastKnown) ~= nil then
+		lastKnown = {}
 	end
 
 	-- Text lines (writeText) and binary changed-columns (writeBinary) are
@@ -654,7 +633,7 @@ local function sample(frame)
 		if (all or isAlly or recordEnemies)
 			and (buried[unitID] == nil or unburied(unitID, team)) then
 			local isEnemy = recordEnemies and not all and not isAlly
-			local g = isEnemy and ghosts[unitID] or nil
+			local g = isEnemy and lastKnown[unitID] or nil
 			local x, y, z = spGetUnitPosition(unitID)
 			local defID = spGetUnitDefID(unitID)
 			local hp, maxHp, _, _, buildProgress = spGetUnitHealth(unitID)
@@ -663,11 +642,10 @@ local function sample(frame)
 				-- death sequence. Bury it here rather than waiting for the
 				-- UnitDestroyed callin — which may already have fired (the sample
 				-- lands inside the death window) or may never fire at all (the
-				-- widget was reloaded across it). Recording it would freeze a
-				-- 0 hp ghost into every later frame; the stale prev entry instead
-				-- puts the id on this frame's dead list. See unburied above.
+				-- widget was reloaded across it). The stale prev entry puts the
+				-- id on this frame's dead list. See unburied above.
 				buried[unitID] = { x = x, z = z, def = defID, team = team }
-				ghosts[unitID] = nil
+				lastKnown[unitID] = nil
 			else
 				local vx, vy, vz = spGetUnitVelocity(unitID)
 				-- Build/assist/repair target (nil for non-builders, idle
@@ -675,8 +653,8 @@ local function sample(frame)
 				local tgt = spGetUnitIsBuilding ~= nil and spGetUnitIsBuilding(unitID) or nil
 				recorded = recorded + 1
 				-- Radar-only enemies read back nils (def/health unreadable, the
-				-- position wobbled): carry the last-known identity/health from the
-				-- ghost entry so a typed unit does not degrade to an untyped blip.
+				-- position wobbled): carry the last-known identity/health from
+				-- the cache so a typed unit does not degrade to an untyped blip.
 				-- Both emitters use these effective values — the fixture test
 				-- cross-checks def/team between the two streams EXACTLY.
 				local edef = defID or (g and g.def) or 0
@@ -692,11 +670,11 @@ local function sample(frame)
 						unitID, edef, eteam, x or 0, y or 0, z or 0, ehp, emaxHp,
 						vx or 0, vy or 0, vz or 0, ebuild, tgt or 0)
 				end
-				if not isEnemy and recordEnemies and ghosts[unitID] ~= nil then
-					ghosts[unitID] = nil -- the engine reused a ghost's id for a non-enemy unit
+				if not isEnemy and recordEnemies and lastKnown[unitID] ~= nil then
+					lastKnown[unitID] = nil -- the engine reused the id for a non-enemy unit
 				end
 				-- Quantization also runs for enemies in the text-only fallback:
-				-- the ghost table stores quantized values so ghost emission is
+				-- the cache stores quantized values so the radar fallback is
 				-- identical in both formats.
 				if writeBinary or isEnemy then
 					-- All quantization inlined: function calls dominate this loop's
@@ -723,21 +701,13 @@ local function sample(frame)
 					local qt = tgt or 0
 					if qt > 65535 or qt < 0 then qt = 0 end
 					if isEnemy then
-						-- g.c = frame of the last OBSERVED state change (new
-						-- contact, movement, wobble, damage, identification).
-						-- State can only change while the unit is visible, so
-						-- a ghost's g.c is final — the scout check reads it to
-						-- give freshly-changed units a sample of grace.
 						if g == nil then
-							g = { c = frame }
-							ghosts[unitID] = g
-						elseif g.x ~= qx or g.z ~= qz or g.hp ~= qhp
-							or g.maxhp ~= qmax or g.def ~= qdef
-							or g.team ~= qteam or g.b ~= qb then
-							g.c = frame
+							g = {}
+							lastKnown[unitID] = g
 						end
+						-- x/z feed the UnitDestroyed tombstone fingerprint.
 						g.x, g.z, g.hp, g.maxhp = qx, qz, qhp, qmax
-						g.def, g.team, g.b, g.f = qdef, qteam, qb, frame
+						g.def, g.team, g.b = qdef, qteam, qb
 					end
 					if writeBinary then
 						local p = prev[unitID]
@@ -768,92 +738,11 @@ local function sample(frame)
 		end
 	end
 
-	-- Ghost pass: enemies previously seen but absent from GetAllUnits this
-	-- sample stay in the stream frozen at their last-known state with zero
-	-- velocity. The sample a unit vanishes on emits one changed record (its
-	-- prediction still carried the last live velocity); after that a ghost is
-	-- fully predicted and costs zero bytes per delta frame, and every keyframe
-	-- restates it absolutely (prev was reset, so p == nil). Sorted ids keep
-	-- both emitters deterministic.
-	if recordEnemies and not all then
-		local gids = {}
-		for id, g in pairs(ghosts) do
-			if g.f ~= frame then
-				gids[#gids + 1] = id
-			end
-		end
-		table.sort(gids)
-		-- Scout check (budgeted, see ghostLosChecksPerSample): a ghost whose
-		-- spot is back in LOS while its id is absent from GetAllUnits is
-		-- observably not there — drop it. The stale prev entry then puts the
-		-- id on this frame's dead list, exactly like a witnessed death; no
-		-- destroyed event is written (no death was seen — the unit may be
-		-- alive elsewhere, and if re-spotted it is simply recorded afresh).
-		-- A ghost whose unit changed state as recently as the previous
-		-- sample (g.c) is skipped for free: it was in flux moments ago —
-		-- typically it just walked out of view, with its last-known spot
-		-- still inside LOS — so it gets one sample of grace before its spot
-		-- can disprove it. The lap is bounded to one pass over gids; only
-		-- actual IsPosInLos probes spend budget.
-		if spIsPosInLos ~= nil and #gids > 0 then
-			local budget = ghostLosChecksPerSample
-			local start = 1
-			for k = 1, #gids do
-				if gids[k] > losCursor then
-					start = k
-					break
-				end
-			end
-			for step = 0, #gids - 1 do
-				if budget <= 0 then
-					break
-				end
-				local id = gids[(start + step - 1) % #gids + 1]
-				local g = ghosts[id]
-				if frame - (g.c or 0) > sampleEvery then
-					budget = budget - 1
-					local gy = spGetGroundHeight ~= nil and spGetGroundHeight(g.x, g.z) or 0
-					if spIsPosInLos(g.x, gy or 0, g.z) then
-						ghosts[id] = nil
-					end
-				end
-				losCursor = id
-			end
-		end
-		for k = 1, #gids do
-			local id = gids[k]
-			local g = ghosts[id]
-			if g ~= nil then
-				recorded = recorded + 1
-				if ulines then
-					ulines[#ulines + 1] = string.format("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f %.2f %.2f %.2f %.3f %d",
-						id, g.def, g.team, g.x, 0, g.z, g.hp, g.maxhp, 0, 0, 0, g.b / 255, 0)
-				end
-				if writeBinary then
-					local p = prev[id]
-					if p ~= nil and not keyframe
-						and p.dvx == 0 and p.dvz == 0
-						and p.x == g.x and p.z == g.z
-						and p.hp == g.hp and p.maxhp == g.maxhp and p.b == g.b
-						and p.def == g.def and p.team == g.team and (p.t or 0) == 0 then
-						p.f = frame -- fully predicted (dv = 0): zero bytes
-					else
-						n = n + 1
-						cid[n], cdef[n], cteam[n] = id, g.def, g.team
-						cx[n], cz[n], chp[n], cmax[n] = g.x, g.z, g.hp, g.maxhp
-						cdvx[n], cdvz[n], cb[n], ct[n] = 0, 0, g.b, 0
-						if p == nil then
-							prev[id] = { x = g.x, z = g.z, dvx = 0, dvz = 0,
-								hp = g.hp, maxhp = g.maxhp, def = g.def, team = g.team, b = g.b, t = 0, f = frame }
-						else
-							p.x, p.z, p.dvx, p.dvz = g.x, g.z, 0, 0
-							p.hp, p.maxhp, p.def, p.team, p.b, p.t, p.f = g.hp, g.maxhp, g.def, g.team, g.b, 0, frame
-						end
-					end
-				end
-			end
-		end
-	end
+	-- No persistence for the unlisted: an enemy absent from GetAllUnits this
+	-- sample (no LOS, no radar signature, no engine memory dot) is simply not
+	-- recorded — its stale prev entry puts the id on this frame's dead list
+	-- below, so it leaves the stream without a destroyed event (it may well be
+	-- alive in fog; if re-spotted it is recorded afresh under the same id).
 	lastUnitCount = recorded
 
 	-- Dead list: every predictor entry not seen this sample. (After a keyframe
@@ -1104,12 +993,11 @@ function widget:UnitFinished(unitID, unitDefID, unitTeam)
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
-	-- A death in view buries the ghost AND tombstones the id — the engine may
-	-- keep returning it from GetAllUnits (stale radar-memory dot / lingering
-	-- corpse), which must not resurrect the unit. The next sample finds the
-	-- prev entry unrefreshed and emits the id on the dead list. A death out
-	-- of view never fires this callin, so that ghost persists — by design.
-	local src = ghosts[unitID] or prev[unitID]
+	-- A death in view tombstones the id — the engine may keep returning it
+	-- from GetAllUnits (stale radar-memory dot / lingering corpse), which
+	-- must not be recorded as a live unit. The next sample finds the prev
+	-- entry unrefreshed and emits the id on the dead list.
+	local src = lastKnown[unitID] or prev[unitID]
 	local tx, tz
 	if src ~= nil then
 		tx, tz = src.x, src.z
@@ -1118,7 +1006,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
 		tx, tz = x, z
 	end
 	buried[unitID] = { x = tx, z = tz, def = unitDefID, team = unitTeam }
-	ghosts[unitID] = nil
+	lastKnown[unitID] = nil
 	pcall(event, "destroyed", unitID, unitDefID, unitTeam)
 end
 

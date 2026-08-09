@@ -144,23 +144,23 @@ snapshot/                 PUBLIC data model + pluggable Writer (owns the on-disk
 assets/lua/snapshot_widget.lua   embedded, read-only sampler (go:embed)
 assets/lua/replay_uploader.lua   player-installable live-game variant: constants only (no
                           substitution tokens), records the player's own ally team plus, by
-                          default (recordEnemies const), enemy units while visible (LOS or
-                          radar; unidentified radar contacts carry def 0) with last-known
-                          — plus each unit's build/assist target (GetUnitIsBuilding,
-                          the frame record's target column, flags bit 1) —
-                          "ghost" persistence after visibility loss — frozen, zero-byte in
-                          the delta codec, buried on a witnessed death (tombstoned: the
+                          default (recordEnemies const), enemy units while the engine lists
+                          them in GetAllUnits (LOS, radar, or the engine's radar-memory dot;
+                          unidentified radar contacts carry def 0, identity/health carried
+                          from the last LOS reading) — plus each unit's build/assist target
+                          (GetUnitIsBuilding, the frame record's target column, flags bit 1).
+                          An enemy the engine stops listing DISAPPEARS from the stream that
+                          sample (dead-listed in the delta codec, no destroyed event — not a
+                          death, it may be alive in fog; re-listed later = recorded afresh
+                          under the same id). Widgets 1.1–1.4 instead froze such units as
+                          "ghosts" (with an IsPosInLos scout-check to drop them);
+                          that persistence was removed in 1.5.0 — old streams still decode
+                          unchanged. Witnessed deaths are tombstoned: the
                           engine keeps returning a dead enemy's id, both as a frozen
                           radar-memory dot and — until its death sequence finishes — as the
                           killed unit itself, and neither may resurrect it; a health read of
                           0 or Spring.GetUnitIsDead is a death even with no UnitDestroyed
-                          callin; a ghost whose spot comes back into LOS while its id is
-                          absent from GetAllUnits is observably not there and is dropped
-                          — the engine's own ghost-building rule, budgeted at
-                          ghostLosChecksPerSample=64 IsPosInLos probes per sample so the
-                          cost stays bounded however many ghosts accumulate; a ghost
-                          whose state changed within the last sample gets one sample of
-                          grace before the check applies).
+                          callin.
                           internal/capture repairs pre-1.2.0 captures at decode time
                           (capture.graveyard) —
                           to <write-dir>/<gameId>.brepstream — a binary

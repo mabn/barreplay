@@ -146,35 +146,26 @@ win comes overwhelmingly from *omitting* predicted units (~2/3 of records in a
 real game), and absolute columns keep both the Lua encoder and the Go decoder
 trivial.
 
-## Enemy units and ghosts (widget ≥ 1.1, `recordEnemies`)
+## Enemy units (widget ≥ 1.1, `recordEnemies`)
 
 Semantics only — the wire format above is unchanged, and no reader needs to
 know. When the emitting widget records enemy units (the `recordEnemies` GAME
-field, default on), a frame's unit set is *what the recording client knew*,
-not ground truth: enemy units appear while in LOS or on radar, and a unit that
-leaves visibility stays in the stream **frozen at its last-known state** with
-`dvx = dvz = 0` (a "ghost") — exactly the delta codec's zero-byte predicted
-case — until it is seen again, seen dying, or **its spot is scouted empty**
-(widget ≥ 1.3.0). Visibility is per unit, not per position: if the ghost's
-unit were alive anywhere in sensor range it would be in `GetAllUnits` by its
-id, so the ghost's only remaining claim is "still standing at (x, z), which I
-cannot see". The moment that position comes back into LOS while the id stays
-absent, the player is looking at bare ground where the ghost stands — the
-engine's own ghost-building removal rule — and the widget drops it: the id
-goes on that frame's dead list (no `destroyed` event; no death was witnessed,
-and a unit re-spotted later is simply recorded afresh). LOS only, never
-radar: stealthy units and jammers make the absence of a radar return prove
-nothing, and a cloaked unit's ghost may be dropped too — which still matches
-what the player's own screen showed. A ghost whose unit changed state as
-recently as the previous sample is skipped — it was in flux moments ago,
-typically having just walked out of view with its spot still inside LOS, so
-it gets one sample of grace before the check may disprove it. The checks are
-budgeted (`ghostLosChecksPerSample`, 64 probes per sample round-robin over
-the sorted ghost ids; skips are free) so the per-sample cost stays bounded no
-matter how many ghosts accumulate. Only witnessed deaths reach the dead list otherwise
-(`UnitDestroyed` fires only for visible units); an enemy that dies in fog
-nobody revisits remains a ghost to the end of the stream — the capture shows
-what this player knew. A witnessed death buries the
+field, default on), a frame's unit set is *what the recording client's
+sensors report that sample*, not ground truth: enemy units appear while the
+engine lists them in `GetAllUnits` (LOS, radar, or the engine's own
+radar-memory dot), and a unit the engine stops listing **disappears from the
+stream on that very sample** — its id goes on the frame's dead list with no
+`destroyed` event (no death was witnessed; the unit may be alive in fog) and
+it is simply recorded afresh under the same id if it is ever listed again.
+
+Widgets 1.1–1.4 instead kept a vanished enemy in the stream **frozen at its
+last-known state** with `dvx = dvz = 0` (a "ghost"), dropped only when seen
+dying or its spot was scouted empty (a budgeted `IsPosInLos` check, widget
+≥ 1.3.0); an enemy that died in fog nobody revisited stayed a ghost to the
+end of the stream. Streams from those widgets still decode unchanged — the
+persistence was baked into the frames by the emitter, not the format.
+
+A witnessed death buries the
 id for good (widget ≥ 1.1.1): the engine can keep returning a dead enemy's id
 from `GetAllUnits` — a frozen radar-memory dot survives a death the player
 did not see in LOS — so the widget tombstones the id at `UnitDestroyed` and
@@ -206,7 +197,7 @@ Identical line grammar to `.brsnap` so `internal/capture`'s parser is shared:
 `GID` (the 32-hex gameId, always the first line after the header), `GAME`
 (JSON: protocol, widgetVersion (semver of the emitting widget), mode
 live/replay, map, game/engine versions, sampleEvery, gameSpeed, recordEnemies
-(whether the stream carries enemy units/ghosts — see above), recording
+(whether the stream carries enemy units — see above), recording
 player id/allyTeam/spectator), `DEF` (full unit-def
 JSON), `T`, `P`, `READY`. The `GAME` line's `sampleEvery`/`gameSpeed` feed
 velocity de-quantization and frame timestamps (`t = frame/gameSpeed`), and its

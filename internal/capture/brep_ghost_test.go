@@ -7,15 +7,20 @@ import (
 	"github.com/mabn/barreplay/snapshot"
 )
 
-// TestBrepGhostSemantics pins the uploader widget's enemy-ghost and death-
-// tombstone semantics against the harness storyline (the enemyVis table and
-// scripted lifecycle in tools/brep-harness/harness.lua — unit ids and sample
-// windows here must stay in sync with it). The binary-vs-text cross-check
-// cannot catch this bug class: a widget that wrongly keeps a dead unit alive
-// emits perfectly self-consistent streams in BOTH formats. That happened in a
-// real capture — the engine kept returning a morphed (destroyed) enemy
-// commander's id from GetAllUnits as a frozen radar-memory dot, and the
-// sample loop resurrected the ghost right after UnitDestroyed buried it.
+// TestBrepGhostSemantics pins the uploader widget's enemy-visibility and
+// death-tombstone semantics against the harness storyline (the enemyVis table
+// and scripted lifecycle in tools/brep-harness/harness.lua — unit ids and
+// sample windows here must stay in sync with it). The binary-vs-text
+// cross-check cannot catch this bug class: a widget that wrongly keeps a dead
+// unit alive emits perfectly self-consistent streams in BOTH formats.
+//
+// Widget >= 1.5.0: the engine's GetAllUnits listing IS the record. An enemy
+// the engine stops listing (no LOS, no radar signature, no memory dot)
+// disappears from the stream that sample — dropped, not marked dead — and is
+// recorded afresh if listed again. The pre-1.5.0 frozen-"ghost" persistence
+// (and its LOS scout check) is gone. Death tombstones remain: the engine can
+// keep returning a killed unit's id (stale radar-memory dot / lingering
+// corpse), which must not be recorded as a live unit.
 func TestBrepGhostSemantics(t *testing.T) {
 	f, err := os.Open("testdata/harness.brepstream")
 	if err != nil {
@@ -77,17 +82,18 @@ func TestBrepGhostSemantics(t *testing.T) {
 		t.Errorf("reused 162 should carry the new def 20, got %d", u.DefID)
 	}
 
-	// id 165: dies unseen at s=20 (no UnitDestroyed); its dot is recorded
-	// through s=49, then the widget's own ghost takes over — frozen at the
-	// dot position, never dead-listed, alive at the final sample (139).
-	a, b := at(49, 165), at(69, 165)
-	if a == nil || b == nil {
-		t.Fatalf("165 must persist as dot+ghost (s=49: %v, s=69: %v)", a, b)
+	// id 165: dies unseen at s=20 (no UnitDestroyed); the engine's memory dot
+	// keeps it listed through s=49, so it stays recorded — the capture shows
+	// what the player's sensors report. From s=50 the engine stops listing it
+	// and it must vanish from the stream (no frozen ghost).
+	if at(49, 165) == nil {
+		t.Errorf("165 must be recorded while its memory dot is listed (s=49)")
 	}
-	if a.Pos != b.Pos || b.VelX != 0 || b.VelZ != 0 {
-		t.Errorf("165 ghost must stay frozen: s=49 %+v vs s=69 %+v", a, b)
+	for _, smp := range []int{50, 55, 64, 69, 139} { // 64 = segment-1 keyframe
+		if u := at(smp, 165); u != nil {
+			t.Errorf("165 unlisted from s=50 must be dropped, but present at s=%d (%+v)", smp, u)
+		}
 	}
-	// The segment restart at s=74 legitimately forgets it (fresh instance).
 
 	// id 168: killed in LOS at s=30, and the
 	// engine keeps returning the killed unit itself (not a dot) through s=33
@@ -116,53 +122,56 @@ func TestBrepGhostSemantics(t *testing.T) {
 		}
 	}
 
-	// id 174: in LOS 10..24, then gone unseen — a ghost from s=25. At s=40
-	// the player scouts its spot (the harness scoutWindows entry): the
-	// position is in LOS while the id is absent from GetAllUnits, so the
-	// ghost is disproven by observation and must be dead-listed — the
-	// engine's own ghost-building rule, applied by the widget's budgeted
-	// IsPosInLos check.
+	// id 174: in LOS 10..24, then unlisted — it must vanish from the stream
+	// on the very sample the engine stops listing it (s=25), with no
+	// destroyed event and no lingering ghost.
 	if at(24, 174) == nil {
 		t.Errorf("174 should be live at s=24")
 	}
-	g25, g39 := at(25, 174), at(39, 174)
-	if g25 == nil || g39 == nil {
-		t.Fatalf("174 must persist as a ghost s=25..39 (s=25: %v, s=39: %v)", g25, g39)
-	}
-	if g25.Pos != g39.Pos || g39.VelX != 0 || g39.VelZ != 0 {
-		t.Errorf("174 ghost must stay frozen: s=25 %+v vs s=39 %+v", g25, g39)
-	}
-	for _, smp := range []int{40, 41, 64, 69} { // 64 = segment-1 keyframe
+	for _, smp := range []int{25, 39, 40, 64, 69} { // 64 = segment-1 keyframe
 		if u := at(smp, 174); u != nil {
-			t.Errorf("174's spot was scouted empty at s=40, but it is present at s=%d (%+v)", smp, u)
+			t.Errorf("174 unlisted from s=25 must be dropped, but present at s=%d (%+v)", smp, u)
 		}
 	}
 
-	// id 177: damaged on its LAST visible sample (s=30), gone from s=31 with
-	// its spot ALREADY in LOS (harness scoutWindows 31..33). A unit whose
-	// state changed as recently as the previous sample gets one sample of
-	// grace before the scout check may disprove its ghost — so the ghost
-	// survives s=31 and is dropped at s=32, not instantly.
+	// id 177: damaged on its LAST visible sample (s=30) — the changed hp is
+	// recorded — then unlisted and dropped immediately at s=31 (no grace, no
+	// scout check: those existed only for ghost persistence).
 	if at(30, 177) == nil {
 		t.Errorf("177 should be live at s=30")
 	}
-	if at(31, 177) == nil {
-		t.Errorf("177 changed state at s=30 and must keep its ghost through the s=31 grace sample")
-	}
-	for _, smp := range []int{32, 33, 40, 64} { // 64 = segment-1 keyframe
+	for _, smp := range []int{31, 32, 40, 64} { // 64 = segment-1 keyframe
 		if u := at(smp, 177); u != nil {
-			t.Errorf("177's spot was scouted empty, ghost must be gone from s=32 on, but present at s=%d (%+v)", smp, u)
+			t.Errorf("177 unlisted from s=31 must be dropped, but present at s=%d (%+v)", smp, u)
 		}
 	}
 
-	// id 126 (regression guard for the good case): LOS 10..29, radar 30..39,
-	// then OUR ghost — frozen across the s=64 keyframe until the segment
-	// ends, and absent from segment 2.
-	ga, gb := at(45, 126), at(69, 126)
-	if ga == nil || gb == nil || ga.Pos != gb.Pos {
-		t.Errorf("126 ghost must stay frozen s=45..69 (got %+v vs %+v)", ga, gb)
+	// id 126: LOS 10..29, radar 30..39, then unlisted — recorded through the
+	// radar window, gone from s=40 on (and absent from segment 2).
+	if at(39, 126) == nil {
+		t.Errorf("126 should be recorded (radar) at s=39")
 	}
-	if at(74, 126) != nil {
-		t.Errorf("126 must be absent after the segment restart")
+	for _, smp := range []int{40, 45, 64, 69, 74} { // 74 = segment-2 keyframe
+		if u := at(smp, 126); u != nil {
+			t.Errorf("126 unlisted from s=40 must be dropped, but present at s=%d (%+v)", smp, u)
+		}
+	}
+
+	// id 156: LOS 0..20, a visibility gap 21..39, LOS again 40..60 — gone for
+	// exactly the unlisted stretch, recorded afresh on re-contact, then gone
+	// again after s=60. The drop is not a death: the same id simply returns.
+	if at(20, 156) == nil {
+		t.Errorf("156 should be live at s=20")
+	}
+	for _, smp := range []int{21, 30, 39} {
+		if u := at(smp, 156); u != nil {
+			t.Errorf("156 unlisted s=21..39 must be dropped, but present at s=%d (%+v)", smp, u)
+		}
+	}
+	if at(40, 156) == nil || at(60, 156) == nil {
+		t.Errorf("156 re-listed at s=40..60 must be recorded again")
+	}
+	if at(61, 156) != nil {
+		t.Errorf("156 unlisted again from s=61 must be dropped")
 	}
 }
