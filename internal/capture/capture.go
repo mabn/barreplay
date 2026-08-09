@@ -95,6 +95,8 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 	pendingCount := int32(-1)   // unit count the F line declared (-1 = unknown)
 	pendingParsed := int32(0)   // U lines seen for it (kept or dropped)
 	graves := graveyard{}       // ids the stream reported destroyed (see lines.go)
+	var game *gameLine          // last GAME record seen
+	var expiry *ghostExpiry     // stale-ghost policy, built at flushMeta (nil = no-op)
 
 	flushMeta := func() error {
 		if metaWritten {
@@ -102,6 +104,7 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 		}
 		metaWritten = true
 		backfillTeamPlayers(&base)
+		expiry = newGhostExpiry(&base, game)
 		return w.WriteMeta(base)
 	}
 	flushFrame := func() error {
@@ -121,6 +124,7 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 		pending = nil
 		pendingCount = -1
 		pendingParsed = 0
+		expiry.filter(&fr)
 		return w.WriteFrame(fr)
 	}
 
@@ -139,7 +143,9 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 		switch fields[0] {
 		case "GID", "GAME", "D", "DEF", "P", "T":
 			// Preamble records shared with the binary .brepstream head.
-			applyPreambleLine(fields, content, &base)
+			if g, _ := applyPreambleLine(fields, content, &base); g != nil {
+				game = g
+			}
 		case "READY":
 			if err := flushMeta(); err != nil {
 				return err

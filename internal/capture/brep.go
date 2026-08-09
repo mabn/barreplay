@@ -81,6 +81,7 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 		base.UnitDefs = map[int32]snapshot.UnitDef{}
 	}
 	sampleEvery, gameSpeed := base.SampleEvery, int32(30)
+	var game *gameLine // last GAME record seen (feeds the ghost-expiry policy)
 	scanPreamble := func(m *snapshot.Meta) {
 		for {
 			line, err := br.ReadString('\n')
@@ -94,6 +95,7 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 						}
 						g, _ := applyPreambleLine(fields, content, m)
 						if g != nil {
+							game = g
 							if g.SampleEvery > 0 {
 								sampleEvery = g.SampleEvery
 							}
@@ -120,6 +122,7 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 	if err := w.WriteMeta(base); err != nil {
 		return err
 	}
+	expiry := newGhostExpiry(&base, game) // nil (no-op) unless a live enemy capture
 
 	// Binary record loop. A widget disabled and re-enabled mid-game APPENDS a
 	// whole new self-contained segment (header line + preamble + records) to
@@ -189,6 +192,7 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 			lastEmitted = fr.Frame
 			stats.Frames++
 			stats.LastFrame = fr.Frame
+			expiry.filter(&fr)
 			if err := w.WriteFrame(fr); err != nil {
 				return err
 			}
