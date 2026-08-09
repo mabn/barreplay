@@ -1769,7 +1769,7 @@ async function loadReplay(file) {
   // Pre-warm the icon set (only a few dozen distinct unit types per replay) so
   // they're ready on the first paint.
   Object.values(data.unitIcons || {}).forEach(info => getImage(info.p));
-  loadMap(data.mapName);
+  loadMap(data.mapName, data.gameId);
   resize();      // sets canvas size
   fitView();     // fit map to viewport
   updateBuffBar();
@@ -1785,43 +1785,68 @@ async function loadReplay(file) {
 }
 
 // The BAR maps API. The browser talks to it directly (the API allows
-// cross-origin use): /maps/<name> gives the map's extent, and
-// /maps/<name>/texture-mq.jpg is the terrain image drawn behind the units.
+// cross-origin use): /maps/<file> gives the map's extent, and
+// /maps/<file>/texture-mq.jpg is the terrain image drawn behind the units.
 const MAP_API = 'https://api.bar-rts.com';
 // The API reports map width/height in map units; 1 map unit = 512 elmos.
 const MAP_ELMOS_PER_UNIT = 512;
 
-// normalizeMapName turns the capture's display map name ("Supreme Isthmus
-// v2.1") into the API's file-name form ("supreme_isthmus_v2.1").
-function normalizeMapName(display) {
+// mapFileGuess turns the capture's map name ("Supreme Isthmus v2.1") into the
+// API's file-name form ("supreme_isthmus_v2.1").
+//
+// It is only a guess: the API keys maps on the *archive file name* the map's
+// author uploaded, and that is not a function of the name in the startscript.
+// It usually is the lowercased, underscored name (~85% of BAR's map list), but
+// "Frozen_Ford_V2" keeps its capitals (`frozen_ford_v2` 404s), "Eye Of Horus
+// 1.6" is stored as "Eye Of Horus_1.6" (spaces and all), and "Desolation v1" is
+// just "desolation". resolveMapFile covers everything this can't spell.
+function mapFileGuess(display) {
   return (display || '').trim().toLowerCase().replace(/ /g, '_');
+}
+
+// resolveMapFile returns the API's map record ({fileName,width,height,…}) for
+// this replay, or null. It tries the cheap name guess first, and falls back to
+// the map record embedded in the replay's own metadata (…/replays/<gameId>
+// carries `Map`), which is authoritative — and also covers a capture with no
+// map name at all (a `.brp` packed with `pack -no-demo`).
+async function resolveMapFile(name, gameId) {
+  const guess = mapFileGuess(name);
+  if (guess) {
+    const res = await fetch(MAP_API + '/maps/' + encodeURIComponent(guess));
+    if (res.ok) return await res.json();
+  }
+  if (!gameId) return null;
+  const res = await fetch(MAP_API + '/replays/' + encodeURIComponent(gameId));
+  if (!res.ok) return null;
+  return (await res.json()).Map || null;
 }
 
 // Fetch this replay's map extent + terrain texture straight from the BAR maps
 // API, using the map name stored in the capture's meta. Best-effort: if the
 // map is unknown or the API unreachable, the viewer just keeps the plain
 // background (and falls back to unit bounds for the field extent).
-async function loadMap(name) {
+async function loadMap(name, gameId) {
   const gen = loadGen; // ignore responses if the user switched replays mid-fetch
   mapW = mapH = 0;
   mapTex = null;
   const maptexEl = document.getElementById('maptex');
   maptexEl.disabled = true; // enabled once the texture actually loads
-  const norm = normalizeMapName(name);
-  if (!norm) return;
-  const base = MAP_API + '/maps/' + encodeURIComponent(norm);
+  let file = mapFileGuess(name);
   try {
-    const info = await (await fetch(base)).json();
+    const info = await resolveMapFile(name, gameId);
     if (gen !== loadGen) return;
-    mapW = (info.width || 0) * MAP_ELMOS_PER_UNIT;
-    mapH = (info.height || 0) * MAP_ELMOS_PER_UNIT;
+    if (info) {
+      file = info.fileName || file;
+      mapW = (info.width || 0) * MAP_ELMOS_PER_UNIT;
+      mapH = (info.height || 0) * MAP_ELMOS_PER_UNIT;
+    }
   } catch (_) { /* offline/unknown: keep unit-bounds extent, still try the texture */ }
-  if (gen !== loadGen) return;
+  if (gen !== loadGen || !file) return;
   const img = new Image();
   img.crossOrigin = 'anonymous'; // the API sends CORS headers; keeps the canvas untainted
   img.onload = () => { if (gen !== loadGen) return; mapTex = img; maptexEl.disabled = false; draw(); };
   img.onerror = () => { /* no texture for this map: checkbox stays disabled */ };
-  img.src = base + '/texture-mq.jpg';
+  img.src = MAP_API + '/maps/' + encodeURIComponent(file) + '/texture-mq.jpg';
   draw(); // reflect the (possibly updated) map extent immediately
 }
 
