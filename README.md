@@ -260,9 +260,9 @@ icon set and BAR's `icontypes.lua` name→bitmap table are vendored under
 `internal/viz/bardata/` (see its README); the mapping is parsed directly in Go,
 so no Lua VM / third-party dependency is added. The map terrain is fetched by the
 **browser directly** from the BAR maps API (`api.bar-rts.com`) using the capture's map
-name — the viz server never proxies it; if the API is unreachable (or the capture has
-no map name, e.g. one packed from a raw `.brsnap` with `-no-demo`) the viewer just
-falls back to a plain background.
+name (falling back to the map record on the replay's own API entry when the API's
+file name for the map isn't a plain lowercasing of that name) — the viz server never
+proxies it; if the API is unreachable the viewer just falls back to a plain background.
 
 ## Requirements for a real run
 
