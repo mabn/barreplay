@@ -1,5 +1,5 @@
-// Command barreplay-ingest is the drag&drop upload daemon: it turns raw
-// .brepstream files uploaded through the worker GUI (POST /api/upload) into
+// Command bringest is the drag&drop upload daemon: it turns raw .brepstream
+// files uploaded through the worker GUI (POST /api/upload) into
 // published, viewable replays. The worker only archives the stream and
 // records a pending job — this daemon, running wherever Go and the worker
 // tooling live (a VM, a workstation), does the actual work through the same
@@ -20,9 +20,10 @@
 // (R2_ACCESS_KEY_ID + R2_SECRET_ACCESS_KEY — set them: this is the intended
 // deployment) the R2 puts are NATIVE Go, concurrent SigV4 PUTs against the
 // bucket's S3 endpoint (internal/packer/r2.go) — no node on the host at all;
-// without credentials it falls back to the worker project's upload tooling
-// (npx tsx tools/upload.ts), which is also what -upload local always uses
-// (only wrangler can write the dev simulator's bucket).
+// -upload local instead PUTs the pieces through the dev worker's own guarded
+// /replays/* route. Only when neither is available (no credentials, or a
+// local run with no dev server up) does it fall back to the worker project's
+// upload tooling (npx tsx tools/upload.ts).
 //
 // A demo-fetch failure (the BAR API does not know the game — private lobby,
 // not yet indexed) degrades to a -no-demo pack instead of failing the job:
@@ -30,8 +31,8 @@
 //
 // Usage:
 //
-//	barreplay-ingest -index-url https://replays.example.workers.dev
-//	barreplay-ingest -once            # drain the backlog and exit
+//	bringest -index-url https://replays.example.workers.dev
+//	bringest -once            # drain the backlog and exit
 package main
 
 import (
@@ -65,11 +66,11 @@ func main() {
 	)
 	flag.Parse()
 	if *indexURL == "" {
-		fmt.Fprintln(os.Stderr, "barreplay-ingest: -index-url (or $BARREPLAY_INDEX_URL) is required")
+		fmt.Fprintln(os.Stderr, "bringest: -index-url (or $BARREPLAY_INDEX_URL) is required")
 		os.Exit(2)
 	}
 	if *target != "r2" && *target != "local" {
-		fmt.Fprintf(os.Stderr, "barreplay-ingest: -upload must be \"r2\" or \"local\" (got %q)\n", *target)
+		fmt.Fprintf(os.Stderr, "bringest: -upload must be \"r2\" or \"local\" (got %q)\n", *target)
 		os.Exit(2)
 	}
 
@@ -88,17 +89,17 @@ func main() {
 
 	if *once {
 		if _, err := d.runOnce(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "barreplay-ingest: %v\n", err)
+			fmt.Fprintf(os.Stderr, "bringest: %v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
-	fmt.Fprintf(os.Stderr, "barreplay-ingest: polling %s every %s\n", d.indexURL, *poll)
+	fmt.Fprintf(os.Stderr, "bringest: polling %s every %s\n", d.indexURL, *poll)
 	ticker := time.NewTicker(*poll)
 	defer ticker.Stop()
 	for {
 		if _, err := d.runOnce(ctx); err != nil && ctx.Err() == nil {
-			fmt.Fprintf(os.Stderr, "barreplay-ingest: %v\n", err)
+			fmt.Fprintf(os.Stderr, "bringest: %v\n", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -140,10 +141,10 @@ func (d *daemon) runOnce(ctx context.Context) (int, error) {
 			return 0, ctx.Err()
 		}
 		if err := d.handle(ctx, j); err != nil {
-			fmt.Fprintf(os.Stderr, "barreplay-ingest: job %s (%s): %v\n", j.ID, j.GameID, err)
+			fmt.Fprintf(os.Stderr, "bringest: job %s (%s): %v\n", j.ID, j.GameID, err)
 			d.report(ctx, j.ID, "error", err.Error())
 		} else {
-			fmt.Fprintf(os.Stderr, "barreplay-ingest: job %s (%s): published\n", j.ID, j.GameID)
+			fmt.Fprintf(os.Stderr, "bringest: job %s (%s): published\n", j.ID, j.GameID)
 			d.report(ctx, j.ID, "done", "")
 		}
 	}
@@ -157,7 +158,7 @@ func (d *daemon) handle(ctx context.Context, j ingestJob) error {
 	if err := d.report(ctx, j.ID, "processing", ""); err != nil {
 		return fmt.Errorf("claiming: %w", err)
 	}
-	tmp, err := os.MkdirTemp("", "barreplay-ingest-")
+	tmp, err := os.MkdirTemp("", "bringest-")
 	if err != nil {
 		return err
 	}
@@ -261,7 +262,7 @@ func processStream(ctx context.Context, client *barapi.Client, streamPath, targe
 	}
 	brpPath, modOptions, err := packer.Pack(ctx, client, streamPath, filepath.Dir(streamPath), "", false)
 	if errors.Is(err, packer.ErrDemoUnavailable) {
-		fmt.Fprintf(os.Stderr, "barreplay-ingest: %v; publishing with the stream's own metadata\n", err)
+		fmt.Fprintf(os.Stderr, "bringest: %v; publishing with the stream's own metadata\n", err)
 		brpPath, modOptions, err = packer.Pack(ctx, client, streamPath, filepath.Dir(streamPath), "", true)
 	}
 	if err != nil {

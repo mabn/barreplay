@@ -1,5 +1,5 @@
 // Package packer is the capture-to-published-replay pipeline shared by
-// cmd/pack (manual/CLI use) and cmd/barreplay-ingest (the drag&drop upload
+// cmd/pack (manual/CLI use) and cmd/bringest (the drag&drop upload
 // daemon): parse a raw widget stream (.brsnap/.brepstream), enrich it with
 // the demo's startscript metadata from the BAR API, write the .brp, and
 // optionally upload the static-hosting pieces to the worker's R2 bucket and

@@ -17,7 +17,7 @@ go build ./cmd/barreplay        # build the capture CLI -> ./barreplay
 go build ./cmd/barreplay-viz    # build the visualization server -> ./barreplay-viz
 go build ./cmd/pack             # build the .brsnap/.brepstream -> .brp converter -> ./pack
 go build ./cmd/barreplay-static # build the .brp -> static-hosting bundle packer (for worker/)
-go build ./cmd/barreplay-ingest # build the drag&drop upload daemon (polls the worker's job queue)
+go build ./cmd/bringest         # build the drag&drop upload daemon (polls the worker's job queue)
 go test ./...                   # all unit tests (no engine required)
 go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
 go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, no engine
@@ -27,13 +27,13 @@ go run ./cmd/pack ./caps/<gameId>.brepstream   # same for the Replay uploader wi
 go run ./cmd/pack -upload r2 ./caps/<gameId>.brepstream   # ...and upload the packed .brp's static bundle ("local" targets the dev simulator) + register it in the worker's replay catalog (PUT /api/replays/<id>; -index-url or $BARREPLAY_INDEX_URL names the deployed worker, $REPLAY_PUT_TOKEN authenticates). Publishes are REVISIONED by default: pieces land at replays/<gameId>-<rev> (rev = sha256[:8] of the input) and the catalog row's rid points at the current one — append-only, nothing in the bucket is ever overwritten or deleted (-rev=false uses the bare id)
 go run ./cmd/pack -stats ./snapshots/<gameId>.brp   # .brp size breakdown: per-section sizes + top-10 unit defs by encoded bytes with per-instance cost (snapshot.ComputeBRPStats, self-checked against the codec; raw captures pack first, then report)
 go run ./cmd/barreplay-static -out ./static ./snapshots/*.brp   # pack .brp -> static bundle for R2 hosting (see worker/)
-go run ./cmd/barreplay-ingest -index-url <worker-url>   # drag&drop upload daemon: poll the worker's job queue and publish uploaded .brepstreams (-once drains and exits; -upload local targets the dev simulator)
+go run ./cmd/bringest -index-url <worker-url>   # drag&drop upload daemon: poll the worker's job queue and publish uploaded .brepstreams (-once drains and exits; -upload local targets the dev simulator)
 ```
 
 Tests are hermetic: `barapi` uses a mock HTTP server, `demofile` tests against the
 real fixture `internal/demofile/testdata/sample_header.sdfz`, `snapshot`/`capture`
 are pure, `internal/packer` exercises its demo-metadata fetch against a mock
-BAR API serving that same fixture, and `cmd/barreplay-ingest` runs its loop
+BAR API serving that same fixture, and `cmd/bringest` runs its loop
 against a mock worker API. None of them launch the engine or touch the network.
 
 ## Architecture (where things live)
@@ -80,7 +80,7 @@ internal/packer/          the capture-to-published-replay pipeline: Pack (stream
                           servers (vite dev / wrangler dev) bind the PREVIEW bucket.
                           Pack wraps a demo-fetch failure in ErrDemoUnavailable so callers can
                           degrade to a no-demo pack (the ingest daemon does).
-cmd/barreplay-ingest/main.go CLI: the drag&drop upload daemon. Polls the worker's job queue
+cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's job queue
                           (GET /api/jobs, bearer $REPLAY_PUT_TOKEN), claims each job (POST
                           /api/jobs/<id> state=processing), downloads the archived stream over
                           the guarded GET /api/streams/<gameId>/<file> route (daemon->worker is
@@ -131,7 +131,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           archives the raw bytes at streams/<gameId>/<ts>-a<ally>.brepstream
                           (append-only prefix, never listed by /index.json, never served publicly;
                           the substrate for the future multi-player merge), and inserts a job row in
-                          the DO's jobs table. cmd/barreplay-ingest (see its entry) polls
+                          the DO's jobs table. cmd/bringest (see its entry) polls
                           GET /api/jobs, downloads via GET /api/streams/<gameId>/<file> (both
                           bearer-guarded), publishes, and POSTs done/error; the browser polls the
                           open GET /api/jobs/<id> and auto-opens the replay on done.

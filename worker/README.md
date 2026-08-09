@@ -189,7 +189,7 @@ The landing page accepts a dropped `.brepstream` (the Replay uploader widget's
 capture). The viewer serves exactly one wire format — the version-4 `.brp`
 pieces — and the Worker deploys no Go and no transcoder, so the intake is split
 between the Worker (cheap validation + storage) and a **Go daemon** running
-wherever the repo lives (`cmd/barreplay-ingest`, e.g. a VM):
+wherever the repo lives (`cmd/bringest`, e.g. a VM):
 
 | URL | What |
 | --- | --- |
@@ -216,9 +216,9 @@ accepted while the daemon is down — jobs wait as `pending`, and a
 export BARREPLAY_INDEX_URL=https://<worker-host>
 export REPLAY_PUT_TOKEN=...                # if the worker guards writes
 export R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=...   # S3 fast path for the puts
-go run ./cmd/barreplay-ingest              # poll every 10s, forever
-go run ./cmd/barreplay-ingest -once        # drain the backlog and exit
-go run ./cmd/barreplay-ingest -upload local -index-url http://127.0.0.1:5173  # against `npm run dev`
+go run ./cmd/bringest              # poll every 10s, forever
+go run ./cmd/bringest -once        # drain the backlog and exit
+go run ./cmd/bringest -upload local -index-url http://127.0.0.1:5173  # against `npm run dev`
 ```
 
 The raw archives under `streams/` accumulate on purpose (nothing in the bucket
