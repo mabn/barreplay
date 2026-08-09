@@ -147,8 +147,23 @@ unseen remains a ghost to the end of the stream. A witnessed death buries the
 id for good (widget ≥ 1.1.1): the engine can keep returning a dead enemy's id
 from `GetAllUnits` — a frozen radar-memory dot survives a death the player
 did not see in LOS — so the widget tombstones the id at `UnitDestroyed` and
-skips it until it is demonstrably a NEW unit reusing the id (readable health,
-changed def/team, or a position away from the death spot). `def` 0 means a radar
+skips it until it is demonstrably a NEW unit reusing the id (readable
+**positive** health, changed def/team, or a position away from the death
+spot).
+
+A killed unit is also readable *as itself* for a moment (widget ≥ 1.2.0): the
+engine deletes it only once its death sequence finishes, and a morph kills it
+at full health, so the sample right after `UnitDestroyed` can still find it in
+`GetAllUnits`. Treating that read as "alive, so the id was reused" un-buried
+the corpse and froze it into every later frame at 0 hp — a real 8v8 capture
+ended with 57 dead units standing, one of them six minutes past its own
+recorded death. So health of 0 no longer counts as proof of life (a live unit
+never reads ≤ 0), `Spring.GetUnitIsDead` is consulted where the engine offers
+it, and a unit sampled at 0 hp is buried on the spot even if no `UnitDestroyed`
+ever arrived (the widget can be reloaded across a death). Streams written by
+older widgets are repaired at decode time: `internal/capture` buries every id
+the stream's own `destroyed` events name and drops its later records unless one
+restates it with positive health (`graveyard`, lines.go). `def` 0 means a radar
 contact never identified (there is no unit-def 0); once the unit is typed the
 def/team columns upgrade in place, and identity/health are carried over a
 later radar-only phase rather than degrading back to 0. Radar-only positions

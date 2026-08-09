@@ -121,6 +121,44 @@ func applyPreambleLine(fields []string, content string, base *snapshot.Meta) (*g
 	return nil, true
 }
 
+// graveyard remembers the unit ids a stream reported destroyed, so a capture
+// can be decoded into a world without dead units standing in it even when the
+// recorder kept sampling them. Both stream parsers consult it.
+//
+// This is a repair pass for captures already in the wild: the uploader widget
+// before 1.2.0 could mistake the engine's still-undeleted killed unit for a
+// new unit reusing the id, un-tombstone it, and freeze it into every later
+// frame as a 0 hp ghost (a real 8v8 capture ended with 57 of them, one
+// standing 6 minutes past its own recorded death). Widget >= 1.2.0 never
+// emits those records, and then this pass finds nothing to drop.
+type graveyard map[int32]struct{}
+
+// note applies a lifecycle event: a death buries the id, a creation frees it
+// (the engine recycles unit ids, so the same id can legitimately come back).
+func (g graveyard) note(kind snapshot.EventKind, id int32) {
+	switch kind {
+	case snapshot.EventDestroyed:
+		g[id] = struct{}{}
+	case snapshot.EventCreated:
+		delete(g, id)
+	}
+}
+
+// drop reports whether a sampled unit record belongs to a unit the stream
+// already buried. A record restated with POSITIVE health is the one proof of
+// a new unit reusing the id — the same test the widget itself applies — and
+// frees the grave; a carried-forward or 0 hp record is the dead one.
+func (g graveyard) drop(id int32, health float64, restated bool) bool {
+	if _, dead := g[id]; !dead {
+		return false
+	}
+	if restated && health > 0 {
+		delete(g, id)
+		return false
+	}
+	return true
+}
+
 // backfillTeamPlayers fills each team's display player from the roster (first
 // non-spectator player controlling the team) so consumers that key on TeamInfo
 // alone still get a name.

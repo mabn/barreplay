@@ -129,6 +129,7 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 	// frames are guarded against anyway so a downstream writer always sees a
 	// monotonic frame sequence.
 	state := map[int32]*brepUnit{}
+	graves := graveyard{}
 	lastEmitted := int32(-1)
 	staleWarned := false
 	var hdr [5]byte
@@ -170,7 +171,7 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 		}
 		switch hdr[0] {
 		case 'F':
-			fr, err := decodeFrameRecord(payload, state, sampleEvery, gameSpeed)
+			fr, err := decodeFrameRecord(payload, state, graves, sampleEvery, gameSpeed)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "capture: bad frame record: %v; keeping %d frames\n", err, stats.Frames)
 				return nil
@@ -194,13 +195,15 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 		case 'E': // "<frame> <kind> <id> <def> <team>"
 			f := strings.Fields(string(payload))
 			if len(f) >= 5 {
-				if err := w.WriteEvent(snapshot.Event{
+				ev := snapshot.Event{
 					Frame:  atoi32(f[0]),
 					Kind:   snapshot.EventKind(f[1]),
 					UnitID: atoi32(f[2]),
 					DefID:  atoi32(f[3]),
 					Team:   atoi32(f[4]),
-				}); err != nil {
+				}
+				graves.note(ev.Kind, ev.UnitID)
+				if err := w.WriteEvent(ev); err != nil {
 					return err
 				}
 			}
@@ -274,7 +277,7 @@ func (c *cursor) f32() float32 {
 
 // decodeFrameRecord decodes one 'F' payload, mutating state, and returns the
 // reconstructed full frame.
-func decodeFrameRecord(payload []byte, state map[int32]*brepUnit, sampleEvery, gameSpeed int32) (snapshot.Frame, error) {
+func decodeFrameRecord(payload []byte, state map[int32]*brepUnit, graves graveyard, sampleEvery, gameSpeed int32) (snapshot.Frame, error) {
 	c := &cursor{b: payload}
 	frame := int32(c.u32())
 	flags := c.u8()
@@ -375,6 +378,24 @@ func decodeFrameRecord(payload []byte, state map[int32]*brepUnit, sampleEvery, g
 		u.x, u.z = xs[i], zs[i]
 		u.hp, u.maxHp, u.build = hps[i], maxHps[i], builds[i]
 		u.dvx, u.dvz = dvxs[i], dvzs[i]
+	}
+
+	// Drop anything the stream itself already reported destroyed (see
+	// graveyard): an old widget could keep restating a killed unit forever.
+	if len(graves) > 0 {
+		restated := make(map[int32]bool, nUnits)
+		for _, id := range ids {
+			restated[id] = true
+		}
+		for id := range graves {
+			u := state[id]
+			if u == nil {
+				continue
+			}
+			if graves.drop(id, float64(u.hp), restated[id]) {
+				delete(state, id)
+			}
+		}
 	}
 
 	fr := snapshot.Frame{

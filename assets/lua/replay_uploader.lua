@@ -62,7 +62,7 @@
 -- it is reported in GetInfo, the load Echo, and the stream's GAME line, so
 -- every capture records which encoder produced it (the copy on a player's
 -- machine can be arbitrarily old — the server/decoder needs to know).
-local widgetVersion = "1.1.1"
+local widgetVersion = "1.2.0"
 
 function widget:GetInfo()
 	return {
@@ -93,10 +93,13 @@ local writeText = false
 -- can see, so the engine is the visibility filter). A previously seen enemy
 -- that drops out of visibility is NOT marked dead: it stays in the stream as
 -- an immobile "ghost" frozen at its last-known state (velocity zero) until it
--- is seen again or seen dying. A witnessed death buries the unit for good —
--- even though the engine may keep returning its id from GetAllUnits as a
--- stale frozen radar-memory dot (see buried below). A unit that dies unseen
--- remains a ghost — the capture shows what this player knew.
+-- is seen again or seen dying. A death the player could see buries the unit
+-- for good — whether it arrived as a UnitDestroyed callin or simply as a
+-- health read of 0 — even though the engine may keep returning its id from
+-- GetAllUnits afterwards, as a stale frozen radar-memory dot or as the killed
+-- unit itself, still undeleted while its death sequence runs (see buried and
+-- unburied below). A unit that dies unseen remains a ghost — the capture
+-- shows what this player knew.
 -- Radar-only contacts are recorded immediately: their position is the
 -- engine's wobbled radar reading, and unreadable columns fall back to the
 -- last-known value (def 0 = never identified). false restores the pre-1.1
@@ -123,6 +126,7 @@ local spGetUnitPosition = Spring.GetUnitPosition
 local spGetUnitDefID    = Spring.GetUnitDefID
 local spGetUnitTeam     = Spring.GetUnitTeam
 local spGetUnitHealth   = Spring.GetUnitHealth
+local spGetUnitIsDead   = Spring.GetUnitIsDead -- may be absent on old engines
 local spGetUnitVelocity = Spring.GetUnitVelocity
 local spGetGameSeconds  = Spring.GetGameSeconds
 local spGetGameFrame    = Spring.GetGameFrame
@@ -491,16 +495,30 @@ local buried = {}
 
 -- unburied decides whether a tombstoned id showing up in GetAllUnits is a NEW
 -- unit reusing the id (clear the tombstone, record it) or still the dead unit
--- — a frozen radar-memory dot or lingering corpse (keep skipping it). Tells
--- for a new unit: readable health (alive in LOS), a different def or team
--- than the unit that died, or a position 48+ elmos from where it died (a
--- stale dot sits frozen exactly at the death spot; a new unit spawns
--- elsewhere). Called only for tombstoned ids, so the extra Get* reads are
--- rare. Compares only when both sides are known — nil reads prove nothing.
+-- — a frozen radar-memory dot or a unit the engine has killed but not yet
+-- deleted (keep skipping it). Tells for a new unit: readable POSITIVE health
+-- (alive in LOS), a different def or team than the unit that died, or a
+-- position 48+ elmos from where it died (a stale dot sits frozen exactly at
+-- the death spot; a new unit spawns elsewhere). Called only for tombstoned
+-- ids, so the extra Get* reads are rare. Compares only when both sides are
+-- known — nil reads prove nothing.
+--
+-- Readable health alone is NOT proof of life: UnitDestroyed fires while the
+-- unit still exists (the engine deletes it only after its death sequence, and
+-- a morph/Spring.DestroyUnit kills it outright at full health), so the very
+-- next sample can still read it out of GetAllUnits — with health 0, or even
+-- intact. Trusting that read cleared the tombstone and re-ghosted the corpse
+-- for the rest of the game: a real 8v8 capture ended with 57 dead units still
+-- standing at 0 hp. isDead answers it directly where the engine offers it;
+-- hp <= 0 covers the rest (a live unit never reads <= 0 — the engine kills it
+-- the moment it does, and even a fresh nanoframe starts positive).
 local function unburied(unitID, team)
 	local tomb = buried[unitID]
+	if spGetUnitIsDead ~= nil and spGetUnitIsDead(unitID) then
+		return false -- killed, just not deleted yet
+	end
 	local hp = spGetUnitHealth(unitID)
-	if hp == nil then
+	if hp == nil or hp <= 0 then
 		local defID = spGetUnitDefID(unitID)
 		local x, _, z = spGetUnitPosition(unitID)
 		local moved = x ~= nil and tomb.x ~= nil
@@ -600,86 +618,98 @@ local function sample(frame)
 			and (buried[unitID] == nil or unburied(unitID, team)) then
 			local isEnemy = recordEnemies and not all and not isAlly
 			local g = isEnemy and ghosts[unitID] or nil
-			recorded = recorded + 1
 			local x, y, z = spGetUnitPosition(unitID)
 			local defID = spGetUnitDefID(unitID)
 			local hp, maxHp, _, _, buildProgress = spGetUnitHealth(unitID)
-			local vx, vy, vz = spGetUnitVelocity(unitID)
-			-- Radar-only enemies read back nils (def/health unreadable, the
-			-- position wobbled): carry the last-known identity/health from the
-			-- ghost entry so a typed unit does not degrade to an untyped blip.
-			-- Both emitters use these effective values — the fixture test
-			-- cross-checks def/team between the two streams EXACTLY.
-			local edef = defID or (g and g.def) or 0
-			local eteam = team or (g and g.team) or (isEnemy and unknownTeam or 0)
-			local ehp, emaxHp, ebuild
-			if hp == nil and g ~= nil then
-				ehp, emaxHp, ebuild = g.hp, g.maxhp, g.b / 255
+			if hp ~= nil and hp <= 0 then
+				-- Readable but dead: the engine still holds a killed unit for its
+				-- death sequence. Bury it here rather than waiting for the
+				-- UnitDestroyed callin — which may already have fired (the sample
+				-- lands inside the death window) or may never fire at all (the
+				-- widget was reloaded across it). Recording it would freeze a
+				-- 0 hp ghost into every later frame; the stale prev entry instead
+				-- puts the id on this frame's dead list. See unburied above.
+				buried[unitID] = { x = x, z = z, def = defID, team = team }
+				ghosts[unitID] = nil
 			else
-				ehp, emaxHp, ebuild = hp or 0, maxHp or 0, buildProgress or 1
-			end
-			if ulines then
-				ulines[#ulines + 1] = string.format("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f %.2f %.2f %.2f %.3f",
-					unitID, edef, eteam, x or 0, y or 0, z or 0, ehp, emaxHp,
-					vx or 0, vy or 0, vz or 0, ebuild)
-			end
-			if not isEnemy and recordEnemies and ghosts[unitID] ~= nil then
-				ghosts[unitID] = nil -- the engine reused a ghost's id for a non-enemy unit
-			end
-			-- Quantization also runs for enemies in the text-only fallback:
-			-- the ghost table stores quantized values so ghost emission is
-			-- identical in both formats.
-			if writeBinary or isEnemy then
-				-- All quantization inlined: function calls dominate this loop's
-				-- cost on Lua 5.1 (measured ~2x). floor(v+0.5) is fine for the
-				-- occasional slightly-negative off-map coordinate too.
-				local qx = mathFloor((x or 0) + 0.5)
-				if qx > 32767 then qx = 32767 elseif qx < -32768 then qx = -32768 end
-				local qz = mathFloor((z or 0) + 0.5)
-				if qz > 32767 then qz = 32767 elseif qz < -32768 then qz = -32768 end
-				local qhp = mathFloor(ehp + 0.5)
-				if qhp < 0 then qhp = 0 end
-				local qmax = mathFloor(emaxHp + 0.5)
-				if qmax < 0 then qmax = 0 end
-				local qdvx = mathFloor((vx or 0) * sampleEvery + 0.5)
-				if qdvx > 32767 then qdvx = 32767 elseif qdvx < -32768 then qdvx = -32768 end
-				local qdvz = mathFloor((vz or 0) * sampleEvery + 0.5)
-				if qdvz > 32767 then qdvz = 32767 elseif qdvz < -32768 then qdvz = -32768 end
-				local qb = mathFloor(ebuild * 255 + 0.5)
-				if qb > 255 then qb = 255 elseif qb < 0 then qb = 0 end
-				local qdef = edef
-				if qdef > 65535 or qdef < 0 then qdef = 0 end
-				local qteam = eteam
-				if qteam > 255 or qteam < 0 then qteam = unknownTeam end
-				if isEnemy then
-					if g == nil then
-						g = {}
-						ghosts[unitID] = g
-					end
-					g.x, g.z, g.hp, g.maxhp = qx, qz, qhp, qmax
-					g.def, g.team, g.b, g.f = qdef, qteam, qb, frame
+				local vx, vy, vz = spGetUnitVelocity(unitID)
+				recorded = recorded + 1
+				-- Radar-only enemies read back nils (def/health unreadable, the
+				-- position wobbled): carry the last-known identity/health from the
+				-- ghost entry so a typed unit does not degrade to an untyped blip.
+				-- Both emitters use these effective values — the fixture test
+				-- cross-checks def/team between the two streams EXACTLY.
+				local edef = defID or (g and g.def) or 0
+				local eteam = team or (g and g.team) or (isEnemy and unknownTeam or 0)
+				local ehp, emaxHp, ebuild
+				if hp == nil and g ~= nil then
+					ehp, emaxHp, ebuild = g.hp, g.maxhp, g.b / 255
+				else
+					ehp, emaxHp, ebuild = hp or 0, maxHp or 0, buildProgress or 1
 				end
-				if writeBinary then
-					local p = prev[unitID]
-					if p ~= nil and not keyframe
-						and p.dvx == qdvx and p.dvz == qdvz
-						and p.x + qdvx == qx and p.z + qdvz == qz
-						and p.hp == qhp and p.maxhp == qmax and p.b == qb
-						and p.def == qdef and p.team == qteam then
-						-- Fully predicted: costs zero bytes. Advance to what the
-						-- decoder will compute.
-						p.x, p.z, p.f = qx, qz, frame
-					else
-						n = n + 1
-						cid[n], cdef[n], cteam[n] = unitID, qdef, qteam
-						cx[n], cz[n], chp[n], cmax[n] = qx, qz, qhp, qmax
-						cdvx[n], cdvz[n], cb[n] = qdvx, qdvz, qb
-						if p == nil then
-							prev[unitID] = { x = qx, z = qz, dvx = qdvx, dvz = qdvz,
-								hp = qhp, maxhp = qmax, def = qdef, team = qteam, b = qb, f = frame }
+				if ulines then
+					ulines[#ulines + 1] = string.format("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f %.2f %.2f %.2f %.3f",
+						unitID, edef, eteam, x or 0, y or 0, z or 0, ehp, emaxHp,
+						vx or 0, vy or 0, vz or 0, ebuild)
+				end
+				if not isEnemy and recordEnemies and ghosts[unitID] ~= nil then
+					ghosts[unitID] = nil -- the engine reused a ghost's id for a non-enemy unit
+				end
+				-- Quantization also runs for enemies in the text-only fallback:
+				-- the ghost table stores quantized values so ghost emission is
+				-- identical in both formats.
+				if writeBinary or isEnemy then
+					-- All quantization inlined: function calls dominate this loop's
+					-- cost on Lua 5.1 (measured ~2x). floor(v+0.5) is fine for the
+					-- occasional slightly-negative off-map coordinate too.
+					local qx = mathFloor((x or 0) + 0.5)
+					if qx > 32767 then qx = 32767 elseif qx < -32768 then qx = -32768 end
+					local qz = mathFloor((z or 0) + 0.5)
+					if qz > 32767 then qz = 32767 elseif qz < -32768 then qz = -32768 end
+					local qhp = mathFloor(ehp + 0.5)
+					if qhp < 0 then qhp = 0 end
+					local qmax = mathFloor(emaxHp + 0.5)
+					if qmax < 0 then qmax = 0 end
+					local qdvx = mathFloor((vx or 0) * sampleEvery + 0.5)
+					if qdvx > 32767 then qdvx = 32767 elseif qdvx < -32768 then qdvx = -32768 end
+					local qdvz = mathFloor((vz or 0) * sampleEvery + 0.5)
+					if qdvz > 32767 then qdvz = 32767 elseif qdvz < -32768 then qdvz = -32768 end
+					local qb = mathFloor(ebuild * 255 + 0.5)
+					if qb > 255 then qb = 255 elseif qb < 0 then qb = 0 end
+					local qdef = edef
+					if qdef > 65535 or qdef < 0 then qdef = 0 end
+					local qteam = eteam
+					if qteam > 255 or qteam < 0 then qteam = unknownTeam end
+					if isEnemy then
+						if g == nil then
+							g = {}
+							ghosts[unitID] = g
+						end
+						g.x, g.z, g.hp, g.maxhp = qx, qz, qhp, qmax
+						g.def, g.team, g.b, g.f = qdef, qteam, qb, frame
+					end
+					if writeBinary then
+						local p = prev[unitID]
+						if p ~= nil and not keyframe
+							and p.dvx == qdvx and p.dvz == qdvz
+							and p.x + qdvx == qx and p.z + qdvz == qz
+							and p.hp == qhp and p.maxhp == qmax and p.b == qb
+							and p.def == qdef and p.team == qteam then
+							-- Fully predicted: costs zero bytes. Advance to what the
+							-- decoder will compute.
+							p.x, p.z, p.f = qx, qz, frame
 						else
-							p.x, p.z, p.dvx, p.dvz = qx, qz, qdvx, qdvz
-							p.hp, p.maxhp, p.def, p.team, p.b, p.f = qhp, qmax, qdef, qteam, qb, frame
+							n = n + 1
+							cid[n], cdef[n], cteam[n] = unitID, qdef, qteam
+							cx[n], cz[n], chp[n], cmax[n] = qx, qz, qhp, qmax
+							cdvx[n], cdvz[n], cb[n] = qdvx, qdvz, qb
+							if p == nil then
+								prev[unitID] = { x = qx, z = qz, dvx = qdvx, dvz = qdvz,
+									hp = qhp, maxhp = qmax, def = qdef, team = qteam, b = qb, f = frame }
+							else
+								p.x, p.z, p.dvx, p.dvz = qx, qz, qdvx, qdvz
+								p.hp, p.maxhp, p.def, p.team, p.b, p.f = qhp, qmax, qdef, qteam, qb, frame
+							end
 						end
 					end
 				end
