@@ -876,6 +876,8 @@ function drawOverlay(u) {
   octx.clearRect(0, 0, viewW, viewH);
   if (!u) return;
 
+  drawFlashes(u);
+
   // Cheap scan first: most frames have far fewer builders/under-construction
   // units than units, and many replays (v4) have none at all.
   let anyLine = false, anyBar = false;
@@ -928,6 +930,39 @@ function drawOverlay(u) {
       octx.fillRect(x, y, w * (b / BUILD_DONE), h);
     }
   }
+}
+
+// drawFlashes paints the damage flash (see noteDamage): a translucent red
+// disc + ring under each recently-hit unit, sized to its icon and fading out
+// over FLASH_MS. Lives on the every-tick overlay canvas so it works
+// identically over the GL and 2D icon paths without touching their caches.
+// While any flash is live it keeps scheduling redraws, so the fade animates
+// even when playback is paused (e.g. single-stepping with →).
+function drawFlashes(u) {
+  if (damageFlash.size === 0) return;
+  const now = performance.now();
+  for (const [id, t] of damageFlash) {
+    if (now - t >= FLASH_MS) damageFlash.delete(id);
+  }
+  if (damageFlash.size === 0) return;
+  for (let i = 0; i < u.length; i += STRIDE) {
+    const t = damageFlash.get(u[i + F.ID]);
+    if (t === undefined) continue;
+    const k = 1 - (now - t) / FLASH_MS; // 1 -> 0 over the flash lifetime
+    const p = interpPos(u, i);
+    const sx = viewW / 2 + (p[0] - center.x) * scale;
+    const sy = viewH / 2 + (p[1] - center.z) * scale;
+    const r = Math.max(5, iconPxFor(u[i + F.DEF]) * 0.65);
+    if (sx + r < 0 || sy + r < 0 || sx - r > viewW || sy - r > viewH) continue;
+    octx.beginPath();
+    octx.arc(sx, sy, r, 0, 7);
+    octx.fillStyle = `rgba(255, 58, 40, ${(0.38 * k).toFixed(3)})`;
+    octx.fill();
+    octx.lineWidth = 1.5;
+    octx.strokeStyle = `rgba(255, 80, 60, ${(0.9 * k).toFixed(3)})`;
+    octx.stroke();
+  }
+  scheduleDraw(); // animate the fade until every flash has expired
 }
 
 // Per-def render info, resolved ONCE per replay load. The draw loops touch this
@@ -1640,6 +1675,33 @@ function updateTimeLabel() {
   }
 }
 
+// Damage flash: a unit whose hp dropped since the previous sampled frame is
+// briefly highlighted red on the overlay canvas (drawFlashes). Detection runs
+// only when the DISPLAYED frame advances by exactly one sample — normal
+// playback and single-stepping — so a scrub jump doesn't light up everything
+// that happens to be lower than wherever you came from. The flash fades over
+// FLASH_MS of REAL time (independent of playback speed).
+const FLASH_MS = 180;
+let damageFlash = new Map(); // unit id -> performance.now() when the drop was first displayed
+let flashSeenIdx = -1;       // dispIdx the detector last processed
+const _flashPrevHp = new Map(); // scratch: id -> hp in the previous frame
+function noteDamage() {
+  if (dispIdx === flashSeenIdx) return;
+  const prevIdx = flashSeenIdx;
+  flashSeenIdx = dispIdx;
+  if (dispIdx !== prevIdx + 1) return; // jump/scrub/first frame: no comparison
+  const pf = data.frames[prevIdx], cf = data.frames[dispIdx];
+  if (!pf || !cf) return;
+  const pu = pf.u, cu = cf.u;
+  _flashPrevHp.clear();
+  for (let i = 0; i < pu.length; i += STRIDE) _flashPrevHp.set(pu[i + F.ID], pu[i + F.HP]);
+  const now = performance.now();
+  for (let i = 0; i < cu.length; i += STRIDE) {
+    const ph = _flashPrevHp.get(cu[i + F.ID]);
+    if (ph !== undefined && cu[i + F.HP] < ph) damageFlash.set(cu[i + F.ID], now);
+  }
+}
+
 // resolveDisplay picks the frame to render for the current idx: the exact
 // frame when its chunk has streamed in, else the chunk's keyframe (fetched
 // cheaply while skimming), else whatever was shown last. Interpolation only
@@ -1655,6 +1717,7 @@ function resolveDisplay() {
     else if (!(prev >= 0 && data.frames[prev])) dispIdx = -1;
     renderFrac = 0; // no interpolation on a stand-in frame
   }
+  noteDamage();
 }
 
 // Move the continuous playhead (in keyframe units). idx = floor(playPos) is the
@@ -1836,6 +1899,8 @@ async function loadReplay(file) {
   fetchQueue = [];
   inflight = 0;
   clearTimeout(scrubTimer);
+  damageFlash.clear();
+  flashSeenIdx = -1;
   currentFile = file;
   try {
     const r = await fetch('/replays/' + encodeURIComponent(file) + '.brw');
