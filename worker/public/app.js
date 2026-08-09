@@ -17,13 +17,23 @@
 //      playhead (and sequentially in the background) and decoded seeded with
 //      keyframe n. No byte is ever downloaded twice.
 //
-// Frames unpack into a flat Int32Array `u` of stride 9:
-// [id, def, team, x, z, hp, maxHp, dvx, dvz]. We read it by index rather than
-// materialising per-unit objects — a replay can hold millions of unit records,
-// so avoiding the object churn keeps loading and playback smooth.
+// Frames unpack into a flat Int32Array `u` of stride 11:
+// [id, def, team, x, z, hp, maxHp, dvx, dvz, build, target]. We read it by
+// index rather than materialising per-unit objects — a replay can hold
+// millions of unit records, so avoiding the object churn keeps loading and
+// playback smooth. build is quantized 0..255 (255 = finished); target is the
+// unit id this one is constructing/assisting (0 = none). Both columns exist
+// only in codec v5 streams — a v4 replay decodes with build=255/target=0
+// (see codecVer below), so no bars or lines draw for it.
 
-const STRIDE = 9;
-const F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6, DVX: 7, DVZ: 8 };
+const STRIDE = 11;
+const F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6, DVX: 7, DVZ: 8, BUILD: 9, TARGET: 10 };
+const BUILD_DONE = 255; // quantized "construction finished"
+
+// The .brw container's version byte == the .brp codec version the frame
+// streams were encoded with: 4 (8 columns) or 5 (adds build + target).
+// Set when the head loads, read by decodeFrames.
+let codecVer = 5;
 
 // ---- wire payload decoding --------------------------------------------------
 // Mirrors the encoder in snapshot/brp.go exactly; evolve them together.
@@ -42,9 +52,10 @@ function parseContainer(buf) {
   for (let i = 0; i < magic.length; i++) {
     if (u8[i] !== magic.charCodeAt(i)) throw new Error('not a BRW payload (old server?)');
   }
-  if (u8[magic.length] !== 4) throw new Error('unsupported payload version ' + u8[magic.length]);
+  const ver = u8[magic.length];
+  if (ver !== 4 && ver !== 5) throw new Error('unsupported payload version ' + ver);
   const dv = new DataView(buf);
-  const secs = {};
+  const secs = { _ver: ver };
   let off = magic.length + 1; // + version byte
   while (off + 5 <= u8.length) {
     const tag = String.fromCharCode(u8[off]);
@@ -57,10 +68,11 @@ function parseContainer(buf) {
 
 // Frame decoding (mirrors snapshot/brp.go decodeFrames): per frame —
 // zigzag-varint frame delta, a DEAD id list (units that disappeared), a
-// CHANGED id list (new units + units with any column change), then 8 value
-// columns for the changed units only, delta-coded against the same unit in
-// the previous frame (absolute when the id is new); x/z predict with the
-// previous frame's velocity displacement. Every other previously-live unit
+// CHANGED id list (new units + units with any column change), then the value
+// columns (10 in codec v5, 8 in v4 — no build/target) for the changed units
+// only, delta-coded against the same unit in the previous frame (absolute
+// when the id is new); x/z predict with the previous frame's velocity
+// displacement. Every other previously-live unit
 // was skipped by the encoder because it matched its prediction exactly, so
 // the decoder re-materialises it: position advances by dv, all else keeps.
 // The output frame is the FULL live unit set, sorted by id.
@@ -124,10 +136,12 @@ function decodeFrames(b, seed) {
       if (prev === undefined) { pidx[i] = -1; } else { pidx[i] = prev; nChExisting++; }
     }
 
-    // Decode the changed units' columns against prevU.
+    // Decode the changed units' columns against prevU. Stream column order
+    // matches the array layout (def..dvz, then build/target in v5).
+    const nCols = codecVer >= 5 ? F.TARGET : F.DVZ;
     const ch = new Int32Array(nCh * STRIDE);
     for (let i = 0; i < nCh; i++) ch[i * STRIDE] = chIds[i];
-    for (let c = 1; c < STRIDE; c++) {
+    for (let c = 1; c <= nCols; c++) {
       for (let i = 0, o = c; i < nCh; i++, o += STRIDE) {
         const d = sv();
         const j = pidx[i];
@@ -136,6 +150,15 @@ function decodeFrames(b, seed) {
         if (c === F.X) base += prevU[j + F.DVX];
         else if (c === F.Z) base += prevU[j + F.DVZ];
         ch[o] = base + d;
+      }
+    }
+    if (nCols < F.TARGET) {
+      // v4 stream: no build/target columns. Carry them for existing units
+      // (always BUILD_DONE/0 in practice) and default new units to finished.
+      for (let i = 0; i < nCh; i++) {
+        const o = i * STRIDE, j = pidx[i];
+        ch[o + F.BUILD] = j < 0 ? BUILD_DONE : prevU[j + F.BUILD];
+        ch[o + F.TARGET] = j < 0 ? 0 : prevU[j + F.TARGET];
       }
     }
 
@@ -164,6 +187,8 @@ function decodeFrames(b, seed) {
         u[t + F.MAXHP] = prevU[o + F.MAXHP];
         u[t + F.DVX] = prevU[o + F.DVX];
         u[t + F.DVZ] = prevU[o + F.DVZ];
+        u[t + F.BUILD] = prevU[o + F.BUILD];
+        u[t + F.TARGET] = prevU[o + F.TARGET];
         i++; k++;
       }
     }
@@ -224,6 +249,7 @@ async function decodeHead(buf) {
   if (!secs.J) throw new Error('payload has no head section');
   const head = JSON.parse(new TextDecoder().decode(await gunzipU8(secs.J)));
   head.events = secs.E ? decodeEvents(await gunzipU8(secs.E)) : [];
+  head.codecVer = secs._ver;
   return head;
 }
 
@@ -488,6 +514,12 @@ function interpPos(u, i) {
 
 const cv = document.getElementById('cv');
 const ctx = cv.getContext('2d');
+// #ovcv sits above both the 2D base layer and the GL icon canvas: the
+// build-lines + construction-progress overlay redraws every tick (it follows
+// interpolated unit positions), so it lives on its own canvas to keep the
+// base layer's repaint-skip optimization intact.
+const ovcv = document.getElementById('ovcv');
+const octx = ovcv ? ovcv.getContext('2d') : null;
 const tooltip = document.getElementById('tooltip');
 const emptyEl = document.getElementById('empty');
 
@@ -510,6 +542,7 @@ let showIcons = true;      // draw BAR unit icons (vs plain dots)
 let showTexture = true;    // draw the map terrain texture behind everything
 let showGrid = false;      // draw the build/small/large grid
 let showFootprints = false;// draw build-footprint rectangles for buildings
+let showBuildLines = true; // connect builders to their construction targets
 let growIcons = true;      // grow a building's icon toward its footprint when zoomed in
 let autoTeamColors = false; // true: distinct auto colours per team; false: the real in-game team colours from the replay
 let mapW = 0, mapH = 0;    // map world extent in elmos (0 if unknown)
@@ -668,6 +701,12 @@ function resize() {
     glcv.style.width = viewW + 'px';
     glcv.style.height = viewH + 'px';
   }
+  if (ovcv) {
+    ovcv.width = Math.round(viewW * DPR);
+    ovcv.height = Math.round(viewH * DPR);
+    ovcv.style.width = viewW + 'px';
+    ovcv.style.height = viewH + 'px';
+  }
   draw();
 }
 window.addEventListener('resize', resize);
@@ -712,6 +751,10 @@ function draw() {
   let glFallback = null;
   if (glActive) glFallback = glBuildInstances(u);
   if (glr) glRender(glActive);
+
+  // Build lines + construction bars: every tick, before the base layer's
+  // repaint-skip below (they animate even when the base layer doesn't).
+  drawOverlay(u);
 
   const dynamic2D = !glActive || glFallback !== null;
   if (!dynamic2D) {
@@ -816,6 +859,73 @@ function drawIcons2D(u) {
       ctx.beginPath();
       ctx.arc(sx, sy, Math.max(1.5, r * 0.5), 0, 7);
       ctx.fill();
+    }
+  }
+}
+
+// ---- build-lines + construction-progress overlay ---------------------------
+// Yellow lines from each construction unit (cons, commander, nano turret,
+// factory, ...) to the unit it is currently building or assisting (the frame
+// array's TARGET column), plus a small progress bar under every unit whose
+// BUILD column is below finished. Both endpoints interpolate with the units,
+// so this redraws on every animation tick — on #ovcv, above the icon layers.
+// Empty for codec v4 replays (their columns decode to finished/none).
+function drawOverlay(u) {
+  if (!octx) return;
+  octx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  octx.clearRect(0, 0, viewW, viewH);
+  if (!u) return;
+
+  // Cheap scan first: most frames have far fewer builders/under-construction
+  // units than units, and many replays (v4) have none at all.
+  let anyLine = false, anyBar = false;
+  for (let i = 0; i < u.length; i += STRIDE) {
+    if (u[i + F.TARGET] !== 0) anyLine = true;
+    if (u[i + F.BUILD] < BUILD_DONE) anyBar = true;
+    if (anyLine && anyBar) break;
+  }
+
+  if (showBuildLines && anyLine) {
+    // id -> base offset in u, to look the target's position up.
+    const off = new Map();
+    for (let i = 0; i < u.length; i += STRIDE) off.set(u[i + F.ID], i);
+    octx.strokeStyle = 'rgba(255, 214, 0, 0.8)';
+    octx.lineWidth = 1.2;
+    octx.beginPath();
+    for (let i = 0; i < u.length; i += STRIDE) {
+      const tid = u[i + F.TARGET];
+      if (tid === 0) continue;
+      const j = off.get(tid);
+      if (j === undefined) continue; // target not in this frame (died/unseen)
+      let p = interpPos(u, i); // shared scratch: copy before the second call
+      const ax = viewW / 2 + (p[0] - center.x) * scale;
+      const ay = viewH / 2 + (p[1] - center.z) * scale;
+      p = interpPos(u, j);
+      const bx = viewW / 2 + (p[0] - center.x) * scale;
+      const by = viewH / 2 + (p[1] - center.z) * scale;
+      if ((ax < 0 && bx < 0) || (ay < 0 && by < 0) ||
+        (ax > viewW && bx > viewW) || (ay > viewH && by > viewH)) continue;
+      octx.moveTo(ax, ay);
+      octx.lineTo(bx, by);
+    }
+    octx.stroke();
+  }
+
+  if (anyBar) {
+    for (let i = 0; i < u.length; i += STRIDE) {
+      const b = u[i + F.BUILD];
+      if (b >= BUILD_DONE) continue;
+      const p = interpPos(u, i);
+      const sx = viewW / 2 + (p[0] - center.x) * scale;
+      const sy = viewH / 2 + (p[1] - center.z) * scale;
+      const px = iconPxFor(u[i + F.DEF]); // bar tracks the icon's screen size
+      const w = Math.max(10, px * 0.9), h = 3;
+      const x = sx - w / 2, y = sy + px / 2 + 2;
+      if (x + w < 0 || y + h < 0 || x > viewW || y > viewH) continue;
+      octx.fillStyle = 'rgba(8, 12, 16, 0.7)';
+      octx.fillRect(x, y, w, h);
+      octx.fillStyle = '#5ad35a';
+      octx.fillRect(x, y, w * (b / BUILD_DONE), h);
     }
   }
 }
@@ -1694,6 +1804,7 @@ document.getElementById('icons').onchange = e => { showIcons = e.target.checked;
 document.getElementById('maptex').onchange = e => { showTexture = e.target.checked; draw(); };
 document.getElementById('grid').onchange = e => { showGrid = e.target.checked; draw(); };
 document.getElementById('footprints').onchange = e => { showFootprints = e.target.checked; draw(); };
+document.getElementById('buildlines').onchange = e => { showBuildLines = e.target.checked; draw(); };
 document.getElementById('growicons').onchange = e => { growIcons = e.target.checked; draw(); };
 document.getElementById('teamcolors').onchange = e => {
   autoTeamColors = e.target.checked;
@@ -1740,6 +1851,7 @@ async function loadReplay(file) {
     data = null;
     return;
   }
+  codecVer = data.codecVer || 4; // published v4 bundles keep playing
   data.chunks = data.chunks || [];
   data.frameCount = data.frameCount || 0;
   data.frames = new Array(data.frameCount); // sparse: filled as chunks stream in

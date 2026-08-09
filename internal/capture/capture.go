@@ -10,7 +10,7 @@
 //	BRSNAP P <playerID> <team> <spectator> <name...>   player info (preamble)
 //	BRSNAP READY                                  end of preamble (optional)
 //	BRSNAP F <frame> <timeSec> <count>            start of a periodic snapshot
-//	BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp> [<vx> <vy> <vz> <build>]   one unit (follows an F line)
+//	BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp> [<vx> <vy> <vz> <build> [<target>]]   one unit (follows an F line)
 //	BRSNAP R <teamID> <metal> <energy> <mStore> <eStore> <mIncome> <eIncome>   team economy (follows an F line)
 //	BRSNAP EV <frame> <kind> <id> <def> <team>    unit lifecycle event
 //	BRSNAP PROF <totalMs> <name>                  engine time-profiler record (at game over)
@@ -95,6 +95,8 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 	pendingCount := int32(-1)   // unit count the F line declared (-1 = unknown)
 	pendingParsed := int32(0)   // U lines seen for it (kept or dropped)
 	graves := graveyard{}       // ids the stream reported destroyed (see lines.go)
+	protocol := 0               // GAME line's stream-semantics version (0 = none seen)
+	gameSpeed := int32(30)      // sim frames per game-second (from the GAME line)
 
 	flushMeta := func() error {
 		if metaWritten {
@@ -139,7 +141,12 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 		switch fields[0] {
 		case "GID", "GAME", "D", "DEF", "P", "T":
 			// Preamble records shared with the binary .brepstream head.
-			applyPreambleLine(fields, content, &base)
+			if g, _ := applyPreambleLine(fields, content, &base); g != nil {
+				protocol = g.Protocol
+				if g.GameSpeed > 0 {
+					gameSpeed = g.GameSpeed
+				}
+			}
 		case "READY":
 			if err := flushMeta(); err != nil {
 				return err
@@ -165,7 +172,7 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 				}
 				pending = &fr
 			}
-		case "U": // U <id> <def> <team> <x> <y> <z> <hp> <maxHp> [<vx> <vy> <vz> <build>]
+		case "U": // U <id> <def> <team> <x> <y> <z> <hp> <maxHp> [<vx> <vy> <vz> <build> [<target>]]
 			if pending != nil && len(fields) >= 9 {
 				us := snapshot.UnitState{
 					UnitID:    atoi32(fields[1]),
@@ -183,6 +190,10 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 					us.VelZ = atof32(fields[11])
 					us.BuildProgress = atof32(fields[12])
 				}
+				// Build/assist target, appended by newer widgets (0 = none).
+				if len(fields) >= 14 {
+					us.TargetID = atoi32(fields[13])
+				}
 				pendingParsed++
 				// Every U line restates its unit, so a buried id survives only
 				// by reappearing alive (id reuse).
@@ -198,8 +209,8 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 					Energy:        atof32(fields[3]),
 					MetalStorage:  atof32(fields[4]),
 					EnergyStorage: atof32(fields[5]),
-					MetalIncome:   atof32(fields[6]),
-					EnergyIncome:  atof32(fields[7]),
+					MetalIncome:   repairIncome(atof32(fields[6]), protocol, gameSpeed),
+					EnergyIncome:  repairIncome(atof32(fields[7]), protocol, gameSpeed),
 				})
 			}
 		case "PROF": // PROF <totalMs> <name> (name is last; profiler names may contain anything)

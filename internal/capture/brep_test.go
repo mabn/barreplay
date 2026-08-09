@@ -33,7 +33,7 @@ func (e *brepEnc) record(tag byte, payload []byte) {
 
 // tu is one changed/keyframe unit in a test frame record.
 type tu struct {
-	id, def, team, x, z, hp, maxHp, dvx, dvz, build int
+	id, def, team, x, z, hp, maxHp, dvx, dvz, build, target int
 }
 
 // tr is one team resource row.
@@ -47,10 +47,12 @@ func frameRecord(frame int, keyframe bool, units []tu, dead []int, res []tr) []b
 	w16 := func(v int) { var s [2]byte; binary.LittleEndian.PutUint16(s[:], uint16(v)); b.Write(s[:]) }
 	w32 := func(v uint32) { var s [4]byte; binary.LittleEndian.PutUint32(s[:], v); b.Write(s[:]) }
 	w32(uint32(frame))
+	// Flags bit 1: the target column is present (the current widget always
+	// writes it; the no-target legacy path is pinned by the harness fixture).
 	if keyframe {
-		b.WriteByte(1)
+		b.WriteByte(3)
 	} else {
-		b.WriteByte(0)
+		b.WriteByte(2)
 	}
 	w16(len(units))
 	w16(len(dead))
@@ -85,6 +87,9 @@ func frameRecord(frame int, keyframe bool, units []tu, dead []int, res []tr) []b
 	for _, u := range units {
 		b.WriteByte(byte(u.build))
 	}
+	for _, u := range units {
+		w16(u.target)
+	}
 	for _, id := range dead {
 		w16(id)
 	}
@@ -115,7 +120,7 @@ func TestConsumeBrep(t *testing.T) {
 	e := newBrepEnc(brepPreamble)
 	// Keyframe: two units. Unit 5 moves at dv=(30,-15); unit 9 stationary.
 	e.record('F', frameRecord(30, true, []tu{
-		{id: 5, def: 1, team: 0, x: 1000, z: 2000, hp: 900, maxHp: 1000, dvx: 30, dvz: -15, build: 255},
+		{id: 5, def: 1, team: 0, x: 1000, z: 2000, hp: 900, maxHp: 1000, dvx: 30, dvz: -15, build: 255, target: 9},
 		{id: 9, def: 1, team: 0, x: 50, z: 60, hp: 3700, maxHp: 3700, build: 128},
 	}, nil, []tr{{team: 0, m: 100.5, en: 900, ms: 500, es: 1000, mi: 27, ei: 81}}))
 	// Delta with NO restated units: 5 must advance by prediction, 9 stays.
@@ -168,6 +173,9 @@ func TestConsumeBrep(t *testing.T) {
 	if u5.Pos.X != 1000 || u5.Pos.Z != 2000 || u5.Health != 900 || u5.VelX != 1 || u5.VelZ != -0.5 {
 		t.Errorf("unit 5 @30 = %+v", u5)
 	}
+	if u5.TargetID != 9 || f0.Units[1].TargetID != 0 {
+		t.Errorf("targets @30 = %d, %d (want 9, 0)", u5.TargetID, f0.Units[1].TargetID)
+	}
 	if u5.BuildProgress != 1 {
 		t.Errorf("unit 5 build = %v", u5.BuildProgress)
 	}
@@ -177,7 +185,10 @@ func TestConsumeBrep(t *testing.T) {
 	if f0.TimeSec != 1 {
 		t.Errorf("TimeSec = %v", f0.TimeSec)
 	}
-	if len(f0.Resources) != 1 || f0.Resources[0].Metal != 100.5 || f0.Resources[0].EnergyIncome != 81 {
+	// Protocol 2 preamble: the over-scaled income is divided back by gameSpeed
+	// at decode time (see repairIncome); the other columns pass through raw.
+	if len(f0.Resources) != 1 || f0.Resources[0].Metal != 100.5 ||
+		f0.Resources[0].MetalIncome != float32(27)/30 || f0.Resources[0].EnergyIncome != float32(81)/30 {
 		t.Errorf("resources = %+v", f0.Resources)
 	}
 
@@ -310,6 +321,26 @@ func TestConsumeBrepTruncated(t *testing.T) {
 	}
 	if len(sink.frames) != 1 || sink.frames[0].Frame != 30 {
 		t.Fatalf("truncated stream: frames = %+v", sink.frames)
+	}
+}
+
+// Protocol >= 3 streams write income as the engine reports it (already per
+// game-second); the legacy repair must NOT touch it.
+func TestConsumeBrepProtocol3IncomeUnscaled(t *testing.T) {
+	preamble := strings.Replace(brepPreamble, `"protocol":2`, `"protocol":3`, 1)
+	e := newBrepEnc(preamble)
+	e.record('F', frameRecord(30, true, nil, nil,
+		[]tr{{team: 0, m: 100, en: 900, ms: 500, es: 1000, mi: 2, ei: 45}}))
+
+	var sink loadedSink
+	if err := ConsumeBrep(bytes.NewReader(e.buf.Bytes()), snapshot.Meta{}, &sink); err != nil {
+		t.Fatalf("ConsumeBrep: %v", err)
+	}
+	if len(sink.frames) != 1 || len(sink.frames[0].Resources) != 1 {
+		t.Fatalf("frames = %+v", sink.frames)
+	}
+	if r := sink.frames[0].Resources[0]; r.MetalIncome != 2 || r.EnergyIncome != 45 {
+		t.Errorf("protocol 3 income must pass through unscaled: %+v", r)
 	}
 }
 

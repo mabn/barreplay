@@ -115,7 +115,9 @@ func TestConsume(t *testing.T) {
 	if len(w.frames[0].Resources) != 2 {
 		t.Fatalf("frame0 resources = %d, want 2", len(w.frames[0].Resources))
 	}
-	if r := w.frames[0].Resources[0]; r.Team != 0 || r.Metal != 500 || r.EnergyStorage != 5000 || r.MetalIncome != 45.6 {
+	// No GAME line = legacy stream: the over-scaled income is divided back by
+	// the default gameSpeed (30) at decode time (see repairIncome).
+	if r := w.frames[0].Resources[0]; r.Team != 0 || r.Metal != 500 || r.EnergyStorage != 5000 || r.MetalIncome != float32(45.6)/30 {
 		t.Errorf("frame0 resource0 = %+v", r)
 	}
 	if len(w.frames[1].Resources) != 0 {
@@ -202,6 +204,27 @@ func TestConsumeKeepsSeededPlayers(t *testing.T) {
 	}
 	if w.meta.Players[1].Name != "Newcomer" {
 		t.Errorf("newcomer not appended: %+v", w.meta.Players)
+	}
+}
+
+// Protocol >= 3 streams write income as the engine reports it (already per
+// game-second); the legacy repair must NOT touch it.
+func TestConsumeProtocol3IncomeUnscaled(t *testing.T) {
+	stream := strings.Join([]string{
+		`BRSNAP GAME {"protocol":3,"sampleEvery":30,"gameSpeed":30}`,
+		"BRSNAP READY",
+		"BRSNAP F 30 1.000 0",
+		"BRSNAP R 0 500.0 1200.0 1000.0 5000.0 2.00 45.00",
+	}, "\n")
+	w := &recordingWriter{}
+	if err := Consume(strings.NewReader(stream), snapshot.Meta{}, w); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.frames) != 1 || len(w.frames[0].Resources) != 1 {
+		t.Fatalf("frames = %+v", w.frames)
+	}
+	if r := w.frames[0].Resources[0]; r.MetalIncome != 2 || r.EnergyIncome != 45 {
+		t.Errorf("protocol 3 income must pass through unscaled: %+v", r)
 	}
 }
 

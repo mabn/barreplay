@@ -117,6 +117,32 @@ units[177].mobile = false
 local allyOf = { [0] = 0, [1] = 1, [2] = 0 }
 local curFrame = 0
 
+-- building maps builderID -> the id it is constructing/assisting this sample
+-- (the GetUnitIsBuilding stub). Recomputed each sample from the deterministic
+-- state: every friendly under-construction unit is assigned one finished
+-- friendly unit as its builder, in id order — so targets appear, follow their
+-- construction for ~16 samples (build += 0.05), and vanish when it finishes,
+-- exercising the target column across keyframes and restatements.
+local building = {}
+local function assignBuilders()
+	building = {}
+	local taken = {}
+	for _, id in ipairs(order) do
+		local u = units[id]
+		if allyOf[u.team] == 0 and u.build < 1 then
+			for _, bid in ipairs(order) do
+				local b = units[bid]
+				if bid ~= id and allyOf[b.team] == 0 and b.build >= 1
+					and taken[bid] == nil then
+					building[bid] = id
+					taken[bid] = true
+					break
+				end
+			end
+		end
+	end
+end
+
 -- visState returns "los"/"radar"/nil for the CURRENT sample; friendlies (no
 -- schedule) are always in LOS.
 local function visState(u)
@@ -284,6 +310,7 @@ Spring = {
 		end
 		return u.dead == true
 	end,
+	GetUnitIsBuilding = function(id) return building[id] end,
 	GetUnitVelocity = function(id)
 		local u = units[id]
 		local vs = visState(u)
@@ -461,6 +488,7 @@ for s = 0, SAMPLES - 1 do
 			end
 		end
 	end
+	assignBuilders()
 	if widgetActive then
 		widget:GameFrame(curFrame)
 	end
