@@ -486,7 +486,21 @@ function interpPos(u, i) {
   _pos[0] = bx; _pos[1] = bz;
   if (renderFrac === 0) return _pos;
   const m0x = u[i + F.DVX], m0z = u[i + F.DVZ];        // tangent at A (frame-A velocity)
-  if (m0x === 0 && m0z === 0) return _pos;             // zero velocity: stationary, don't animate
+  if (m0x === 0 && m0z === 0) {
+    // Zero velocity at this sample. Usually genuinely stationary — but a
+    // radar-only contact reads velocity nil (recorded as 0) while its wobbled
+    // position still moves every sample, which made it sit still and JUMP at
+    // each frame boundary. When the next sample also has zero velocity but a
+    // different position, glide linearly between the two points; a truly
+    // stationary unit hits the identity lerp (same position) and stays put.
+    const j0 = nextPosMap ? nextPosMap.get(u[i + F.ID]) : undefined;
+    if (j0 !== undefined && nextU
+      && nextU[j0 + F.DVX] === 0 && nextU[j0 + F.DVZ] === 0) {
+      _pos[0] = bx + (nextU[j0 + F.X] - bx) * renderFrac;
+      _pos[1] = bz + (nextU[j0 + F.Z] - bz) * renderFrac;
+    }
+    return _pos;
+  }
   const j = nextPosMap ? nextPosMap.get(u[i + F.ID]) : undefined;
   if (j === undefined || !nextU) {
     // No next sample (unit gone, or that frame not streamed in yet): fall back

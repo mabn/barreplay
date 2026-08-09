@@ -403,7 +403,10 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   velocity and arrives at P1 at its frame-B velocity, curving naturally and C1-continuous
   across samples (no boundary kink). Constant-velocity motion reduces to a straight line;
   tangents are length-capped (`TANGENT_CAP`× the chord) so an inconsistent velocity can't bend
-  the path into a loop. A stationary unit (`dvx==dvz==0`) stays put; a unit absent from the
+  the path into a loop. A stationary unit (`dvx==dvz==0`) stays put — unless the next sample
+  also has zero velocity but a DIFFERENT position (a radar-only contact: velocity reads nil,
+  recorded as 0, while the wobbled position moves every sample), which glides linearly between
+  the two points instead of jumping at the frame boundary. A unit absent from the
   next sample falls back to plain velocity extrapolation. Playback is a `requestAnimationFrame` loop over a continuous
   `playPos` (keyframe units), so **1× = real time** (1 game-second/second) and every speed
   interpolates.
