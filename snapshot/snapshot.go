@@ -33,11 +33,15 @@ type UnitState struct {
 	VelY          float32 `json:"vy,omitempty"`
 	VelZ          float32 `json:"vz,omitempty"`
 	BuildProgress float32 `json:"build,omitempty"`
+	// TargetID is the unit this one is currently constructing, assisting or
+	// repairing (Spring.GetUnitIsBuilding); 0 = none.
+	TargetID int32 `json:"target,omitempty"`
 }
 
 // TeamResource is one team's economy at a sampled frame: current metal/energy,
-// their storage caps, and income per second. Metal and energy income are reported
-// per game-second (the engine's per-frame income scaled by the 30 fps sim rate).
+// their storage caps, and income per second. Metal and energy income are per
+// game-second, exactly as the engine reports them (GetTeamResources' income
+// accumulates over TEAM_SLOWUPDATE_RATE = 30 sim frames = 1 game-second).
 type TeamResource struct {
 	Team          int32   `json:"team"`
 	Metal         float32 `json:"metal"`

@@ -75,6 +75,9 @@ func TestBrepstreamMatchesTextFixture(t *testing.T) {
 			if ub.UnitID != ut.UnitID || ub.DefID != ut.DefID || ub.Team != ut.Team {
 				t.Fatalf("frame %d unit %d: identity bin %+v text %+v", fb.Frame, j, ub, ut)
 			}
+			if ub.TargetID != ut.TargetID {
+				t.Fatalf("frame %d unit %d: target bin %d text %d", fb.Frame, ub.UnitID, ub.TargetID, ut.TargetID)
+			}
 			// Text carries 0.1-precision floats; binary quantizes to whole
 			// units, so they may differ by up to 0.5 (+0.05 text rounding).
 			near(t, fb.Frame, ub.UnitID, "x", ub.Pos.X, ut.Pos.X, 0.56)

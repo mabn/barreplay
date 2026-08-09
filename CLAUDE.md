@@ -126,7 +126,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           /api/upload (open endpoint; the Hono app lives in src/worker/app.ts, kept
                           free of workerd imports so worker/tests drive the real routes; index.ts is
                           the wrangler entry re-exporting the DO class). The worker never transcodes
-                          (viewer serves .brp v4 wire only; the Go pipeline produces it): it scans
+                          (viewer serves the .brp wire only; the Go pipeline produces it): it scans
                           the preamble (src/worker/preamble.ts — gameId + recorder's ally team),
                           archives the raw bytes at streams/<gameId>/<ts>-a<ally>.brepstream
                           (append-only prefix, never listed by /index.json, never served publicly;
@@ -146,6 +146,8 @@ assets/lua/replay_uploader.lua   player-installable live-game variant: constants
                           substitution tokens), records the player's own ally team plus, by
                           default (recordEnemies const), enemy units while visible (LOS or
                           radar; unidentified radar contacts carry def 0) with last-known
+                          — plus each unit's build/assist target (GetUnitIsBuilding,
+                          the frame record's target column, flags bit 1) —
                           "ghost" persistence after visibility loss — frozen, zero-byte in
                           the delta codec, buried on a witnessed death (tombstoned: the
                           engine keeps returning a dead enemy's id, both as a frozen
@@ -182,7 +184,7 @@ interface. To change it implement `snapshot.Writer`; nothing in `capture`/`engin
 changes. `capture.Consume(r, baseMeta, w)` is the seam between the engine's text
 output and the writer.
 
-### On-disk format v4: `.brp` (snapshot/brp.go)
+### On-disk format v5: `.brp` (snapshot/brp.go)
 
 Full byte-level spec: `docs/brp-format.md` — keep it in sync with any codec change
 (`docs/brp-optimizations.md` records the measured evaluation behind the format's
@@ -192,13 +194,17 @@ whole elmos/hp, velocity as per-sample-interval
 displacement, build progress 1/255, resources 0.1; `t` is derived as `frame/30`,
 not stored; **y/dvy are not stored at all** — the viewer renders the x/z plane and
 ground-unit elevation is terrain noise, so decoded `Pos.Y`/`VelY` are 0). Container:
-`"BRP1" <ver u8 = 4>` then tagged sections `<tag u8><len u32le><payload>` — `M` meta
+`"BRP1" <ver u8 = 5>` then tagged sections `<tag u8><len u32le><payload>` — `M` meta
 JSON (Meta + precomputed bounds/frameTeams/counts + the **chunk index**), `K` **all
 core keyframes as ONE gzip stream**, `F` core delta-frame chunks (columns: id def
-team x z hp maxHp dvx dvz), `X` extra (build column + team resources — not sent to
-the browser), `E` events. Unknown tags are skipped, so sections can be added
-compatibly; any version byte other than 4 is rejected (v1–v3 existed only
-pre-release; regenerate a .brp from its .brsnap with pack).
+team x z hp maxHp dvx dvz build target — build + the build/assist target moved into
+the core in v5 so the browser can draw construction bars and builder→target lines),
+`X` extra (team resources — not sent to the browser), `E` events. Unknown tags are
+skipped, so sections can be added compatibly; any version byte other than 5 is
+rejected in Go (v1–v3 existed only pre-release, v4 shipped without build/target in
+core; regenerate a .brp from its .brsnap/.brepstream with pack). The JS decoder
+keys its column count off the .brw container's version byte and still plays
+published v4 bundles (their units decode as build=finished/target=none).
 
 **Chunking (random access / streaming).** Frames are grouped into **chunks of 64
 samples** (~1 min at 1 Hz), and the codec's prediction state resets at every chunk
@@ -216,8 +222,8 @@ indexes everything: first sim frame, sample count, the keyframe's RAW byte range
 the decompressed `K` (`kOff`/`kLen` — the boundaries the streaming consumer slices
 at), and the delta byte ranges relative to the section payloads (`Section.Offset`
 from `ReadContainer` gives absolute file positions, enabling HTTP-Range static
-hosting). X keeps a keyframe+delta gzip pair per chunk (its build column covers
-exactly the core changed list) but is never fetched by the viewer.
+hosting). X keeps a keyframe+delta gzip pair per chunk but is never fetched by the
+viewer.
 
 Why it's small: a delta frame stores only an explicit **dead-id list** and a
 **changed-unit list** (new units + units where any column differs from its
@@ -285,7 +291,7 @@ BRSNAP T <teamID> <allyTeam> <side> <color>    team info (preamble; side "_" = n
 BRSNAP P <playerID> <team> <spectator> <name...>   player info (preamble; name last, may have spaces)
 BRSNAP READY                                   end of preamble
 BRSNAP F <frame> <timeSec> <count>             start of a periodic snapshot
-BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp> <vx> <vy> <vz> <build>   one unit (follows an F line)
+BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp> <vx> <vy> <vz> <build> <target>   one unit (follows an F line)
 BRSNAP R <teamID> <metal> <energy> <mStore> <eStore> <mIncome> <eIncome>   team economy (follows an F line)
 BRSNAP EV <frame> <kind> <id> <def> <team>     unit lifecycle event
 BRSNAP PROF <totalMs> <name>                   engine time-profiler record (once, at game over)
@@ -306,7 +312,11 @@ startscript behind it — `capture` merges it by player id so a seeded player is
 duplicated. **Team colours** ride the `T` line; `capture` backfills each `TeamInfo.PlayerName`
 from the first non-spectator player on that team.
 Each sampled frame also emits one `R` line per team with its current metal/energy, storage
-caps, and per-game-second income (the engine's per-frame income × the 30 fps sim rate).
+caps, and per-game-second income — `GetTeamResources`' income return is ALREADY per
+game-second (the engine accumulates it over `TEAM_SLOWUPDATE_RATE` = 30 sim frames), so
+protocol >= 3 widgets write it as-is. Widgets before that wrongly multiplied it by 30;
+`capture` repairs those streams at decode time (`repairIncome` in lines.go: any stream
+without a `GAME` line declaring `protocol >= 3` gets its income divided by gameSpeed).
 Each `U` line carries, besides position and health, the unit's velocity (`vx/vy/vz`) and
 `buildProgress` (1 = finished, <1 = under construction; from `GetUnitHealth`'s 5th return).
 Both are appended after `maxHp`, so pre-velocity `.brsnap` streams still parse (capture reads
@@ -728,7 +738,7 @@ never their content — and is the main remaining speed lever (~25-35% at the 60
 - The demo header is little-endian, byte-packed; layout verified in
   `internal/demofile/demofile.go` against the real sample (magic `spring demofile`,
   version 5, headerSize 352).
-- Output: `<out>/<gameId>.brp` (see "On-disk format v4"); read it back with
+- Output: `<out>/<gameId>.brp` (see "On-disk format v5"); read it back with
   `snapshot.ReadBRP`. On completion the CLI
   prints the engine wall-time (split into load + sim, with sim fps/speed-up), the engine
   profiler totals (see "Profiling a run"), `infolog.txt` size, and the snapshot's size.
