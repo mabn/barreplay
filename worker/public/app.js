@@ -745,6 +745,15 @@ function draw() {
   const fr = data && dispIdx >= 0 ? data.frames[dispIdx] : null;
   const u = fr ? fr.u : null;
 
+  // Damage flashes tint the icons themselves (GL: per-instance tint; 2D: a
+  // red glyph blended over). Prune expired ones first, and keep redraws
+  // coming while any are pending/fading — staggered starts fire and fades
+  // animate even if playback pauses mid-interval. Free when the map is empty.
+  if (damageFlash.size > 0) {
+    pruneFlashes(performance.now());
+    if (damageFlash.size > 0) scheduleDraw();
+  }
+
   // GL icon pass first: it reports which units still need the 2D dot fallback
   // (bitmaps not in the atlas yet), which the base layer below must paint.
   const glActive = !!(glr && showIcons && u);
@@ -831,6 +840,11 @@ function drawDots(u) {
 function drawIcons2D(u) {
   const pxMemo = new Map();     // def -> rounded CSS px this draw
   const glyphMemo = new Map();  // def*4096+team -> canvas or null
+  // Damage flash: a red-tinted copy of the glyph (renderIcon caches it like
+  // any team glyph) blended over the icon at the flash intensity. Team ids
+  // are u8, so pseudo-team 4095 is a free memo slot for the red variant.
+  const fNow = damageFlash.size > 0 ? performance.now() : 0;
+  const FLASH_MEMO_TEAM = 4095;
   for (let i = 0; i < u.length; i += STRIDE) {
     const def = u[i + F.DEF], team = u[i + F.TEAM];
     let px = pxMemo.get(def);
@@ -854,6 +868,23 @@ function drawIcons2D(u) {
       const dx = Math.round((sx - r) * DPR) / DPR;
       const dy = Math.round((sy - r) * DPR) / DPR;
       ctx.drawImage(glyph, dx, dy, px, px);
+      if (fNow) {
+        const k = flashK(u[i + F.ID], fNow);
+        if (k > 0) {
+          const fk = def * 4096 + FLASH_MEMO_TEAM;
+          let red = glyphMemo.get(fk);
+          if (red === undefined) {
+            const info = defIcon.get(def);
+            red = info ? renderIcon(info.p, FLASH_CSS, px) : null;
+            glyphMemo.set(fk, red);
+          }
+          if (red) {
+            ctx.globalAlpha = FLASH_STRENGTH * k;
+            ctx.drawImage(red, dx, dy, px, px);
+            ctx.globalAlpha = 1;
+          }
+        }
+      }
     } else {
       ctx.fillStyle = color;
       ctx.beginPath();
@@ -875,8 +906,6 @@ function drawOverlay(u) {
   octx.setTransform(DPR, 0, 0, DPR, 0, 0);
   octx.clearRect(0, 0, viewW, viewH);
   if (!u) return;
-
-  drawFlashes(u);
 
   // Cheap scan first: most frames have far fewer builders/under-construction
   // units than units, and many replays (v4) have none at all.
@@ -930,40 +959,6 @@ function drawOverlay(u) {
       octx.fillRect(x, y, w * (b / BUILD_DONE), h);
     }
   }
-}
-
-// drawFlashes paints the damage flash (see noteDamage): a translucent red
-// disc + ring under each recently-hit unit, sized to its icon and fading out
-// over FLASH_MS. Lives on the every-tick overlay canvas so it works
-// identically over the GL and 2D icon paths without touching their caches.
-// While any flash is pending or live it keeps scheduling redraws, so
-// staggered start times fire and fades animate even if playback pauses
-// mid-interval.
-function drawFlashes(u) {
-  if (damageFlash.size === 0) return;
-  const now = performance.now();
-  for (const [id, t] of damageFlash) {
-    if (now - t >= FLASH_MS) damageFlash.delete(id);
-  }
-  if (damageFlash.size === 0) return;
-  for (let i = 0; i < u.length; i += STRIDE) {
-    const t = damageFlash.get(u[i + F.ID]);
-    if (t === undefined || now < t) continue; // absent, or not yet started (staggered)
-    const k = 1 - (now - t) / FLASH_MS; // 1 -> 0 over the flash lifetime
-    const p = interpPos(u, i);
-    const sx = viewW / 2 + (p[0] - center.x) * scale;
-    const sy = viewH / 2 + (p[1] - center.z) * scale;
-    const r = Math.max(5, iconPxFor(u[i + F.DEF]) * 0.65);
-    if (sx + r < 0 || sy + r < 0 || sx - r > viewW || sy - r > viewH) continue;
-    octx.beginPath();
-    octx.arc(sx, sy, r, 0, 7);
-    octx.fillStyle = `rgba(255, 58, 40, ${(0.38 * k).toFixed(3)})`;
-    octx.fill();
-    octx.lineWidth = 1.5;
-    octx.strokeStyle = `rgba(255, 80, 60, ${(0.9 * k).toFixed(3)})`;
-    octx.stroke();
-  }
-  scheduleDraw(); // animate the fade until every flash has expired
 }
 
 // Per-def render info, resolved ONCE per replay load. The draw loops touch this
@@ -1266,6 +1261,9 @@ function glBuildInstances(u) {
   let inst = glr.inst;
   const needed = (u.length / STRIDE) * INST_FLOATS;
   if (inst.length < needed) inst = glr.inst = new Float32Array(needed * 2);
+  // Damage flash rides the per-instance tint (free — the floats are written
+  // every frame anyway): a flashing unit's tint blends toward FLASH_TINT.
+  const fNow = damageFlash.size > 0 ? performance.now() : 0;
   let n = 0;
   let fb = null;
   for (let i = 0; i < u.length; i += STRIDE) {
@@ -1284,10 +1282,19 @@ function glBuildInstances(u) {
     const rect = m.rect;
     if (!rect) { (fb ||= []).push(i, sx, sy, px); continue; }
     const tint = teamTint.get(u[i + F.TEAM]) || GRAY_TINT;
+    let tr = tint[0], tg = tint[1], tb = tint[2];
+    if (fNow) {
+      const k = flashK(u[i + F.ID], fNow) * FLASH_STRENGTH;
+      if (k > 0) {
+        tr += (FLASH_TINT[0] - tr) * k;
+        tg += (FLASH_TINT[1] - tg) * k;
+        tb += (FLASH_TINT[2] - tb) * k;
+      }
+    }
     const o = n * INST_FLOATS;
     inst[o] = sx * DPR; inst[o + 1] = sy * DPR; inst[o + 2] = px * DPR;
     inst[o + 3] = rect.u0; inst[o + 4] = rect.v0; inst[o + 5] = rect.u1; inst[o + 6] = rect.v1;
-    inst[o + 7] = tint[0]; inst[o + 8] = tint[1]; inst[o + 9] = tint[2];
+    inst[o + 7] = tr; inst[o + 8] = tg; inst[o + 9] = tb;
     n++;
   }
   glr.n = n;
@@ -1686,8 +1693,27 @@ function updateTimeLabel() {
 // every frame start. The flash then fades over FLASH_MS of REAL time
 // (independent of playback speed).
 const FLASH_MS = 180;
+const FLASH_TINT = [1.0, 0.16, 0.12]; // GL: the red the team tint blends toward
+const FLASH_CSS = '#ff291f';          // 2D: red glyph colour — keep in sync with FLASH_TINT
+const FLASH_STRENGTH = 0.8;           // peak blend toward red (1 = fully red)
 let damageFlash = new Map(); // unit id -> performance.now() the flash STARTS (may be in the future)
 let flashSeenIdx = -1;       // dispIdx the detector last processed
+
+// flashK: the flash intensity for a unit right now — 1 at the (possibly
+// staggered) start, fading linearly to 0 over FLASH_MS; 0 when absent or not
+// yet started. Callers skip the lookup entirely while the map is empty.
+function flashK(id, now) {
+  const t = damageFlash.get(id);
+  if (t === undefined) return 0;
+  const dt = now - t;
+  if (dt < 0 || dt >= FLASH_MS) return 0;
+  return 1 - dt / FLASH_MS;
+}
+function pruneFlashes(now) {
+  for (const [id, t] of damageFlash) {
+    if (now - t >= FLASH_MS) damageFlash.delete(id);
+  }
+}
 const _flashPrevHp = new Map(); // scratch: id -> hp in the previous frame
 function noteDamage() {
   if (dispIdx === flashSeenIdx) return;
