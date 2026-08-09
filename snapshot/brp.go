@@ -9,12 +9,12 @@ package snapshot
 //
 // Layout: a magic + version header, then tagged sections:
 //
-//	"BRP1" <version u8 = 4> then per section: <tag u8> <len u32le> <payload>
+//	"BRP1" <version u8 = 5> then per section: <tag u8> <len u32le> <payload>
 //
 //	M  meta JSON: {"meta": <Meta>, "bounds", "frameTeams", "chunks" index, counts}
 //	K  ALL core keyframes, one gzip stream (keys-first streaming + skimming)
-//	F  core delta frames, chunked: id def team x z hp maxHp dvx dvz
-//	X  extra: build + team resources (keyframe+delta per chunk; never sent to a browser)
+//	F  core delta frames, chunked: id def team x z hp maxHp dvx dvz build target
+//	X  extra: team resources (keyframe+delta per chunk; never sent to a browser)
 //	E  lifecycle events
 //
 // The M, K and E payloads are single gzip streams. The F and X payloads are a
@@ -68,8 +68,8 @@ package snapshot
 //	  sv idDelta…   (ascending, delta-coded from 0)
 //	uv nChanged   new ids + ids with ≥1 non-zero column delta
 //	  sv idDelta…   (ascending, delta-coded from 0)
-//	8 core columns × nChanged   def team x z hp maxHp dvx dvz
-//	(X stream) build × nChanged, then team resources
+//	10 core columns × nChanged   def team x z hp maxHp dvx dvz build target
+//	(X stream) team resources
 //
 // A unit absent from BOTH lists is implicitly unchanged: the decoder keeps it
 // alive and advances its position by its velocity displacement (x += dvx,
@@ -80,10 +80,12 @@ package snapshot
 // Column values are deltas against the SAME unit in the previous sampled
 // frame (absolute if the id is new); x/z additionally add the previous
 // frame's dvx/dvz to the prediction, so constant-velocity movement encodes
-// as zero. "Changed" is judged across all stored columns including build, so
-// the X stream's build column always covers exactly the F stream's changed
-// list. Decoders must mirror this exactly; the JS decoder lives in
-// worker/public/app.js — evolve them together.
+// as zero. "Changed" is judged across all stored columns, so a build-progress
+// or build-target change alone restates the unit. build (1/255) and target
+// (the unit id being constructed/assisted, 0 = none) moved from X into the
+// core columns in v5 so the browser gets them: the viewer draws construction
+// progress bars and builder->target lines. Decoders must mirror this exactly;
+// the JS decoder lives in worker/public/app.js — evolve them together.
 
 import (
 	"bytes"
@@ -106,10 +108,12 @@ const (
 	BRWMagic = "BRW1"
 
 	// BRPVersion is the only readable format version. v1 (unchunked), v2
-	// (every live unit re-encoded per frame, y/dvy columns) and v3 (keyframes
-	// inside the chunks) existed only pre-release and are not supported —
-	// regenerate a .brp from its source .brsnap/.brepstream with pack.
-	BRPVersion byte = 4
+	// (every live unit re-encoded per frame, y/dvy columns), v3 (keyframes
+	// inside the chunks) and v4 (build in X, no target column) are not
+	// supported — regenerate a .brp from its source .brsnap/.brepstream with
+	// pack. (The JS decoder still plays published v4 bundles; only the Go
+	// reader is single-version.)
+	BRPVersion byte = 5
 
 	SecMeta      byte = 'M' // .brp: meta JSON
 	SecKeyframes byte = 'K' // all core keyframes, one gzip stream
@@ -315,7 +319,7 @@ func (vr *varintReader) sv() (int64, error) {
 // sampled frame, in quantized units.
 type prevUnitState struct {
 	def, team, x, z, hp, maxHp, dvx, dvz int64
-	build                                int64
+	build, target                        int64
 }
 
 // advance returns the state an unchanged unit reaches one sample later: the
@@ -360,11 +364,11 @@ func (c *frameCodec) quantize(u UnitState) prevUnitState {
 		x: roundq(u.Pos.X), z: roundq(u.Pos.Z),
 		hp: roundq(u.Health), maxHp: roundq(u.MaxHealth),
 		dvx: roundq(u.VelX * se), dvz: roundq(u.VelZ * se),
-		build: roundq(u.BuildProgress * buildScale),
+		build: roundq(u.BuildProgress * buildScale), target: int64(u.TargetID),
 	}
 }
 
-// coreColumns defines the 8 core columns' accessors in stream order. The
+// coreColumns defines the 10 core columns' accessors in stream order. The
 // predictor for every column is the same: the corresponding field of
 // prev.advance() — see prevUnitState.advance.
 var coreColumns = []func(*prevUnitState) *int64{
@@ -376,6 +380,8 @@ var coreColumns = []func(*prevUnitState) *int64{
 	func(s *prevUnitState) *int64 { return &s.maxHp },
 	func(s *prevUnitState) *int64 { return &s.dvx },
 	func(s *prevUnitState) *int64 { return &s.dvz },
+	func(s *prevUnitState) *int64 { return &s.build },
+	func(s *prevUnitState) *int64 { return &s.target },
 }
 
 // encodeFrame appends one frame to the core (F) and extra (X) streams (see
@@ -442,15 +448,6 @@ func (c *frameCodec) encodeFrame(core, extra *varintWriter, fr Frame) []prevUnit
 			core.sv(*col(&q[i]) - base)
 		}
 	}
-	// Extra stream: the build column for the same changed set.
-	for _, i := range changed {
-		base := int64(0)
-		if p, ok := c.prev[units[i].UnitID]; ok {
-			base = p.build
-		}
-		extra.sv(q[i].build - base)
-	}
-
 	// Team resources ride the extra stream, delta-coded per team.
 	res := make([]TeamResource, len(fr.Resources))
 	copy(res, fr.Resources)
@@ -557,17 +554,6 @@ func decodeFrames(c *frameCodec, core, extra []byte) ([]Frame, error) {
 		fr := Frame{Frame: int32(frame), TimeSec: float32(frame) / simFPS}
 
 		if xr != nil {
-			for i := 0; i < n; i++ {
-				d, err := xr.sv()
-				if err != nil {
-					return nil, err
-				}
-				base := int64(0)
-				if exists[i] {
-					base = preds[i].build
-				}
-				q[i].build = base + d
-			}
 			nr, err := xr.uv()
 			if err != nil {
 				return nil, err
@@ -628,6 +614,7 @@ func decodeFrames(c *frameCodec, core, extra []byte) ([]Frame, error) {
 				Health: float32(s.hp), MaxHealth: float32(s.maxHp),
 				VelX: float32(s.dvx) / se, VelZ: float32(s.dvz) / se,
 				BuildProgress: float32(s.build) / buildScale,
+				TargetID:      int32(s.target),
 			}
 		}
 		frames = append(frames, fr)

@@ -49,7 +49,9 @@
 --        carries every visible unit and resets decoder state; a delta frame
 --        carries only units that moved off their own prediction (x+dvx, z+dvz,
 --        other columns unchanged) plus an explicit dead-id list. Every
---        keyframeEvery-th sample is a keyframe.
+--        keyframeEvery-th sample is a keyframe. Flag bit 1 marks the target
+--        column (the unit id this one is building/assisting, 0 = none;
+--        widget >= 1.4.0).
 --     E  unit lifecycle event, text payload "<frame> <kind> <id> <def> <team>"
 --     X  end of stream, text payload = reason (gameover|shutdown|error)
 --
@@ -150,6 +152,7 @@ local spGetUnitTeam     = Spring.GetUnitTeam
 local spGetUnitHealth   = Spring.GetUnitHealth
 local spGetUnitIsDead   = Spring.GetUnitIsDead -- may be absent on old engines
 local spGetUnitVelocity = Spring.GetUnitVelocity
+local spGetUnitIsBuilding = Spring.GetUnitIsBuilding
 local spIsPosInLos      = Spring.IsPosInLos -- may be absent on old engines
 local spGetGroundHeight = Spring.GetGroundHeight
 local spGetGameSeconds  = Spring.GetGameSeconds
@@ -570,10 +573,12 @@ end
 -- tables: buffers are rebuilt each sample (a handful of table allocations, not
 -- thousands of strings).
 
-local function packFrameRecord(frame, keyframe, n, cid, cdef, cteam, cx, cz, chp, cmax, cdvx, cdvz, cb, dead, nR, rteam, rcols)
+local function packFrameRecord(frame, keyframe, n, cid, cdef, cteam, cx, cz, chp, cmax, cdvx, cdvz, cb, ct, dead, nR, rteam, rcols)
+	-- flags bit 1 marks the target column's presence (widget >= 1.4.0); the
+	-- decoder reads streams with and without it.
 	local parts = {
 		PackU32({ frame }),
-		PackU8({ keyframe and 1 or 0 }),
+		PackU8({ 2 + (keyframe and 1 or 0) }),
 		PackU16({ n }),
 		PackU16({ #dead }),
 		PackU8({ nR }),
@@ -589,6 +594,7 @@ local function packFrameRecord(frame, keyframe, n, cid, cdef, cteam, cx, cz, chp
 		parts[#parts + 1] = PackS16(cdvx)
 		parts[#parts + 1] = PackS16(cdvz)
 		parts[#parts + 1] = PackU8(cb)
+		parts[#parts + 1] = PackU16(ct)
 	end
 	if #dead > 0 then
 		parts[#parts + 1] = PackU16(dead)
@@ -637,8 +643,8 @@ local function sample(frame)
 	-- filled in one pass so Spring.Get* runs once per unit either way.
 	local ulines = writeText and {} or nil
 	local n = 0
-	local cid, cdef, cteam, cx, cz, chp, cmax, cdvx, cdvz, cb =
-		{}, {}, {}, {}, {}, {}, {}, {}, {}, {}
+	local cid, cdef, cteam, cx, cz, chp, cmax, cdvx, cdvz, cb, ct =
+		{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
 	local recorded = 0
 
 	for i = 1, total do
@@ -664,6 +670,9 @@ local function sample(frame)
 				ghosts[unitID] = nil
 			else
 				local vx, vy, vz = spGetUnitVelocity(unitID)
+				-- Build/assist/repair target (nil for non-builders, idle
+				-- builders, and units the widget cannot read).
+				local tgt = spGetUnitIsBuilding ~= nil and spGetUnitIsBuilding(unitID) or nil
 				recorded = recorded + 1
 				-- Radar-only enemies read back nils (def/health unreadable, the
 				-- position wobbled): carry the last-known identity/health from the
@@ -679,9 +688,9 @@ local function sample(frame)
 					ehp, emaxHp, ebuild = hp or 0, maxHp or 0, buildProgress or 1
 				end
 				if ulines then
-					ulines[#ulines + 1] = string.format("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f %.2f %.2f %.2f %.3f",
+					ulines[#ulines + 1] = string.format("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f %.2f %.2f %.2f %.3f %d",
 						unitID, edef, eteam, x or 0, y or 0, z or 0, ehp, emaxHp,
-						vx or 0, vy or 0, vz or 0, ebuild)
+						vx or 0, vy or 0, vz or 0, ebuild, tgt or 0)
 				end
 				if not isEnemy and recordEnemies and ghosts[unitID] ~= nil then
 					ghosts[unitID] = nil -- the engine reused a ghost's id for a non-enemy unit
@@ -711,6 +720,8 @@ local function sample(frame)
 					if qdef > 65535 or qdef < 0 then qdef = 0 end
 					local qteam = eteam
 					if qteam > 255 or qteam < 0 then qteam = unknownTeam end
+					local qt = tgt or 0
+					if qt > 65535 or qt < 0 then qt = 0 end
 					if isEnemy then
 						-- g.c = frame of the last OBSERVED state change (new
 						-- contact, movement, wobble, damage, identification).
@@ -734,7 +745,7 @@ local function sample(frame)
 							and p.dvx == qdvx and p.dvz == qdvz
 							and p.x + qdvx == qx and p.z + qdvz == qz
 							and p.hp == qhp and p.maxhp == qmax and p.b == qb
-							and p.def == qdef and p.team == qteam then
+							and p.def == qdef and p.team == qteam and p.t == qt then
 							-- Fully predicted: costs zero bytes. Advance to what the
 							-- decoder will compute.
 							p.x, p.z, p.f = qx, qz, frame
@@ -742,13 +753,13 @@ local function sample(frame)
 							n = n + 1
 							cid[n], cdef[n], cteam[n] = unitID, qdef, qteam
 							cx[n], cz[n], chp[n], cmax[n] = qx, qz, qhp, qmax
-							cdvx[n], cdvz[n], cb[n] = qdvx, qdvz, qb
+							cdvx[n], cdvz[n], cb[n], ct[n] = qdvx, qdvz, qb, qt
 							if p == nil then
 								prev[unitID] = { x = qx, z = qz, dvx = qdvx, dvz = qdvz,
-									hp = qhp, maxhp = qmax, def = qdef, team = qteam, b = qb, f = frame }
+									hp = qhp, maxhp = qmax, def = qdef, team = qteam, b = qb, t = qt, f = frame }
 							else
 								p.x, p.z, p.dvx, p.dvz = qx, qz, qdvx, qdvz
-								p.hp, p.maxhp, p.def, p.team, p.b, p.f = qhp, qmax, qdef, qteam, qb, frame
+								p.hp, p.maxhp, p.def, p.team, p.b, p.t, p.f = qhp, qmax, qdef, qteam, qb, qt, frame
 							end
 						end
 					end
@@ -815,8 +826,8 @@ local function sample(frame)
 			if g ~= nil then
 				recorded = recorded + 1
 				if ulines then
-					ulines[#ulines + 1] = string.format("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f %.2f %.2f %.2f %.3f",
-						id, g.def, g.team, g.x, 0, g.z, g.hp, g.maxhp, 0, 0, 0, g.b / 255)
+					ulines[#ulines + 1] = string.format("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f %.2f %.2f %.2f %.3f %d",
+						id, g.def, g.team, g.x, 0, g.z, g.hp, g.maxhp, 0, 0, 0, g.b / 255, 0)
 				end
 				if writeBinary then
 					local p = prev[id]
@@ -824,19 +835,19 @@ local function sample(frame)
 						and p.dvx == 0 and p.dvz == 0
 						and p.x == g.x and p.z == g.z
 						and p.hp == g.hp and p.maxhp == g.maxhp and p.b == g.b
-						and p.def == g.def and p.team == g.team then
+						and p.def == g.def and p.team == g.team and (p.t or 0) == 0 then
 						p.f = frame -- fully predicted (dv = 0): zero bytes
 					else
 						n = n + 1
 						cid[n], cdef[n], cteam[n] = id, g.def, g.team
 						cx[n], cz[n], chp[n], cmax[n] = g.x, g.z, g.hp, g.maxhp
-						cdvx[n], cdvz[n], cb[n] = 0, 0, g.b
+						cdvx[n], cdvz[n], cb[n], ct[n] = 0, 0, g.b, 0
 						if p == nil then
 							prev[id] = { x = g.x, z = g.z, dvx = 0, dvz = 0,
-								hp = g.hp, maxhp = g.maxhp, def = g.def, team = g.team, b = g.b, f = frame }
+								hp = g.hp, maxhp = g.maxhp, def = g.def, team = g.team, b = g.b, t = 0, f = frame }
 						else
 							p.x, p.z, p.dvx, p.dvz = g.x, g.z, 0, 0
-							p.hp, p.maxhp, p.def, p.team, p.b, p.f = g.hp, g.maxhp, g.def, g.team, g.b, frame
+							p.hp, p.maxhp, p.def, p.team, p.b, p.t, p.f = g.hp, g.maxhp, g.def, g.team, g.b, 0, frame
 						end
 					end
 				end
@@ -888,7 +899,7 @@ local function sample(frame)
 	end
 	if writeBinary then
 		writeRecord("F", packFrameRecord(frame, keyframe, n,
-			cid, cdef, cteam, cx, cz, chp, cmax, cdvx, cdvz, cb, dead, nR, rteam, rcols))
+			cid, cdef, cteam, cx, cz, chp, cmax, cdvx, cdvz, cb, ct, dead, nR, rteam, rcols))
 	end
 	flushOut() -- durable if the game/engine dies mid-match
 	lastSampledFrame = frame

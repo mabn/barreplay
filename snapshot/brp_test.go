@@ -34,14 +34,16 @@ func testCapture() (Meta, []Frame, []Event) {
 		{Frame: 30, TimeSec: 1, Units: []UnitState{
 			// deliberately unsorted by id: the writer sorts
 			{UnitID: 200, DefID: 2, Team: 1, Pos: Vec3{X: -50, Y: 12, Z: 80}, Health: 400, MaxHealth: 800, BuildProgress: 0.5},
-			{UnitID: 100, DefID: 1, Team: 0, Pos: Vec3{X: 10, Y: 5, Z: 20}, Health: 3000, MaxHealth: 3000, VelX: 2, VelZ: -1, BuildProgress: 1},
+			// the commander is building unit 200
+			{UnitID: 100, DefID: 1, Team: 0, Pos: Vec3{X: 10, Y: 5, Z: 20}, Health: 3000, MaxHealth: 3000, VelX: 2, VelZ: -1, BuildProgress: 1, TargetID: 200},
 		}, Resources: []TeamResource{
 			{Team: 0, Metal: 1000.25, Energy: 500, MetalStorage: 1500, EnergyStorage: 6000, MetalIncome: 2.3, EnergyIncome: 105.7},
 			{Team: 1, Metal: 900, Energy: 400, MetalStorage: 1500, EnergyStorage: 6000, MetalIncome: 1.9, EnergyIncome: 90},
 		}},
 		{Frame: 60, TimeSec: 2, Units: []UnitState{
 			// unit 100 moved by its velocity (perfect prediction), 200 finished building
-			{UnitID: 100, DefID: 1, Team: 0, Pos: Vec3{X: 70, Y: 5, Z: -10}, Health: 2500, MaxHealth: 3000, VelX: 2, VelZ: -1, BuildProgress: 1},
+			// (the build-target change alone restates unit 100)
+			{UnitID: 100, DefID: 1, Team: 0, Pos: Vec3{X: 70, Y: 5, Z: -10}, Health: 2500, MaxHealth: 3000, VelX: 2, VelZ: -1, BuildProgress: 1, TargetID: 300},
 			{UnitID: 200, DefID: 2, Team: 1, Pos: Vec3{X: -50, Y: 12, Z: 80}, Health: 800, MaxHealth: 800, BuildProgress: 1},
 			// a new unit appears
 			{UnitID: 300, DefID: 2, Team: 1, Pos: Vec3{X: 1000, Y: 0, Z: 2000}, Health: 100, MaxHealth: 800, BuildProgress: 0.1},
@@ -146,6 +148,9 @@ func TestBRPRoundTrip(t *testing.T) {
 			}
 			if gu.DefID != wu.DefID || gu.Team != wu.Team {
 				t.Errorf("frame[%d] unit %d: def/team %d/%d want %d/%d", fi, gu.UnitID, gu.DefID, gu.Team, wu.DefID, wu.Team)
+			}
+			if gu.TargetID != wu.TargetID {
+				t.Errorf("frame[%d] unit %d: target %d want %d", fi, gu.UnitID, gu.TargetID, wu.TargetID)
 			}
 			checks := []struct {
 				name      string
@@ -487,15 +492,15 @@ func TestBRPSkipIdleUnits(t *testing.T) {
 
 	// The size contract: encode the frames directly and check the idle units
 	// truly cost nothing. Frame 2 changes only unit 3's hp -> frameDelta +
-	// nDead(0) + nChanged(1) + id + 8 column deltas (hp's -100 zigzags to a
-	// 2-byte varint) = 13 core bytes; frame 3 is one death and nothing else
+	// nDead(0) + nChanged(1) + id + 10 column deltas (hp's -100 zigzags to a
+	// 2-byte varint) = 15 core bytes; frame 3 is one death and nothing else
 	// -> 4 core bytes.
 	codec := newFrameCodec(30)
 	var core2, extra2 bytes.Buffer
 	codec.encodeFrame(&varintWriter{w: io.Discard}, &varintWriter{w: io.Discard}, frames[0])
 	codec.encodeFrame(&varintWriter{w: &core2}, &varintWriter{w: &extra2}, frames[1])
-	if core2.Len() != 13 {
-		t.Errorf("delta frame with 1 changed of 3 units = %d core bytes, want 13", core2.Len())
+	if core2.Len() != 15 {
+		t.Errorf("delta frame with 1 changed of 3 units = %d core bytes, want 15", core2.Len())
 	}
 	var core3 bytes.Buffer
 	codec.encodeFrame(&varintWriter{w: &core3}, &varintWriter{w: io.Discard}, frames[2])
