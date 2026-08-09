@@ -2,15 +2,16 @@
 
 The append-only stream `assets/lua/replay_uploader.lua` writes during a live
 game (`<write-dir>/<gameId>.brepstream`). Decoder: `internal/capture/brep.go`
-(`capture.ConsumeBrep`); `pack` converts it to `.brp`. A third reader,
-`worker/src/breps/split.ts`, slices the stream into static R2 pieces without
-decoding frame semantics (it walks the record framing and the text preamble
-only). **The Lua encoder, Go decoder, and TS splitter must evolve in
-lockstep**; the stream is versioned by its header line, and the widget copy
-on players' machines can never be force-updated — readers must keep accepting
-every version ever shipped. `tools/brep-harness/harness.lua` +
-`TestBrepstreamMatchesTextFixture` (Go) + `worker/tests/split.test.ts` (TS)
-pin the lockstep against one shared fixture.
+(`capture.ConsumeBrep`); `pack` converts it to `.brp`. A third, minimal
+reader, `worker/src/worker/preamble.ts`, scans only the text preamble (header
+line + GID/GAME) so the worker's `POST /api/upload` can validate and file a
+dropped stream without decoding it. **The Lua encoder and Go decoder must
+evolve in lockstep** (and the preamble scan with the preamble grammar); the
+stream is versioned by its header line, and the widget copy on players'
+machines can never be force-updated — readers must keep accepting every
+version ever shipped. `tools/brep-harness/harness.lua` +
+`TestBrepstreamMatchesTextFixture` (Go) + `worker/tests/preamble.test.ts` (TS)
+pin the readers against one shared fixture.
 
 Design goals, in order: cheap to write from Lua mid-game (no per-unit
 `string.format`, a handful of `VFS.Pack*` C calls per sample), small (delta

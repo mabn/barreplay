@@ -6,6 +6,12 @@
  * an uploader that doesn't know a field sends null and the UI shows a dash. */
 export interface ReplayEntry {
   id: string;
+  /** The revision the pieces are actually served under (`<gameId>-<rev>`,
+   * rev = first 8 hex of the source stream's SHA-256). Publishes are
+   * append-only — a re-upload lands under a fresh rid and this field moves,
+   * so `/replays/*`'s immutable caching is always sound. Null for replays
+   * uploaded pre-revisioning (pieces live under the bare id). */
+  rid: string | null;
   /** Unix seconds when the game started (demo header UnixTime). */
   startUnix: number | null;
   /** Game length in seconds (sampled range of the capture). */
@@ -37,6 +43,12 @@ export function sanitizeEntry(id: string, body: unknown): ReplayEntry | string {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return "body must be a JSON object";
   const b = body as Record<string, unknown>;
 
+  let rid: string | null = null;
+  if (b.rid !== undefined && b.rid !== null) {
+    if (typeof b.rid !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(b.rid)) return "invalid rid";
+    rid = b.rid;
+  }
+
   const nums: Record<string, number | null> = {};
   for (const k of ["startUnix", "durationSec", "sizeBytes"]) {
     const v = b[k];
@@ -55,6 +67,7 @@ export function sanitizeEntry(id: string, body: unknown): ReplayEntry | string {
   if (typeof settings === "string") return settings;
   return {
     id,
+    rid,
     startUnix: nums.startUnix,
     durationSec: nums.durationSec,
     sizeBytes: nums.sizeBytes,

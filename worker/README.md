@@ -44,8 +44,18 @@ inside a **Durable Object** (`src/worker/replayindex.ts`, single instance, migra
 
 | URL | What |
 | --- | --- |
-| `GET /api/replays` | the catalog, newest game first (rows with no start time last) — `[{id, startUnix, durationSec, map, gameSize, sizeBytes, settings}]`, nulls for unknown stats |
-| `PUT /api/replays/<id>` | upsert one row (same JSON shape, minus `id`); called by `pack -upload` after a replay's files land in the bucket |
+| `GET /api/replays` | the catalog, newest game first (rows with no start time last) — `[{id, rid, startUnix, durationSec, map, gameSize, sizeBytes, settings}]`, nulls for unknown stats |
+| `PUT /api/replays/<id>` | upsert one row (same JSON shape, minus `id`); called by `pack -upload` / the ingest daemon after a replay's files land in the bucket |
+
+`rid` is the **revision** the replay's pieces are actually served under:
+publishes are append-only — `pack -upload` (and the ingest daemon) put the
+pieces at `replays/<gameId>-<rev>…` where `rev` is the first 8 hex of the
+source stream's SHA-256, and the catalog row (still keyed by the bare gameId)
+points at the current revision. No served object is ever overwritten or
+deleted, which is what makes the `/replays/*` `immutable` cache-control sound:
+a re-upload lands under a fresh rid and the row moves, superseded revisions
+stay servable (old shared links keep playing) but are hidden from the landing
+list. `rid: null` means a pre-revisioning upload living under the bare id.
 
 `settings` is a flat object of notable game-settings flags rendered as badges in the
 list — keys like `ranked`, `lava` (water-is-lava), `mods` (any tweakdefs*/tweakunits*
@@ -85,14 +95,15 @@ worker/
   public/app.js           viewer logic (copied from internal/viz/web, URLs point at R2)
   public/style.css
   public/icons, ranks/    synced from internal/viz/bardata by tools/sync-assets.mjs (gitignored)
-  src/worker/index.ts     Hono app: serve R2 (index.json, replays/**), /api/replays + SPA fallback
-  src/worker/replayindex.ts  the catalog Durable Object (SQLite table of replay stats)
+  src/worker/index.ts     wrangler entry: re-exports the app + the Durable Object class
+  src/worker/app.ts       Hono app: serve R2 (index.json, replays/**), /api/replays,
+                          /api/upload + jobs, SPA fallback (no workerd imports — node-testable)
+  src/worker/replayindex.ts  the catalog + ingest-jobs Durable Object (SQLite)
   src/worker/replayentry.ts  catalog row shape + PUT body validation (node-testable, no workerd)
-  src/breps/split.ts      TS .brepstream splitter (raw stream -> static pieces, no transcode)
+  src/worker/preamble.ts  minimal .brepstream preamble scan for /api/upload (gameId, ally team)
   tools/sync-assets.mjs   copies the vendored icons into public/ before dev/build
   tools/r2put.ts          shared upload backend: parallel S3 PUTs (with R2 creds) or parallel wrangler
   tools/upload.ts         upload a barreplay-static bundle (npm run upload)
-  tools/upload-brepstream.ts  split + upload a raw .brepstream (npm run upload-brep)
 ```
 
 ## Producing and uploading replay data
@@ -119,7 +130,18 @@ wrangler login (`npx wrangler login`) to the account in `wrangler.jsonc` (`accou
 
 ### Upload speed: the S3 fast path
 
-Both upload tools go through `tools/r2put.ts`, which picks a transport:
+Go publishers (`pack -upload r2`, the ingest daemon) upload **natively** when
+`R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY` are set: a minimal SigV4 signer in
+`internal/packer/r2.go` (pinned against aws4fetch's signatures) PUTs 16
+objects in flight against `https://<account>.r2.cloudflarestorage.com` — no
+node process involved. `-upload local` PUTs each piece through the running
+dev worker's bearer-guarded `PUT /replays/*` route instead (the dev server
+binds the simulator's bucket; a whole replay lands in milliseconds, vs ~1s of
+node+wrangler startup **per object** through `wrangler r2 object put`). Only
+the fallbacks — r2 without credentials, or local with the dev server not
+running — shell into the TS tooling below.
+
+The TS upload tools go through `tools/r2put.ts`, which picks a transport:
 
 - **S3 API (fast).** Set `R2_ACCESS_KEY_ID` + `R2_SECRET_ACCESS_KEY` (create a token
   under Cloudflare dash → R2 → *Manage R2 API Tokens*, "Object Read & Write" on the
@@ -161,24 +183,48 @@ Note on local buckets: both dev servers (`npm run dev` and `npx wrangler dev`) b
 **preview** bucket, so seeding the simulator needs `--local --preview` with the upload
 tool (`pack -upload local` passes both automatically).
 
-## The .brepstream splitter (parked — the viewer serves .brp wire only)
+## Drag & drop uploads (the ingest pipeline)
 
-**Design decision:** the viewer downloads exactly one wire format, the version-4
-`.brp` pieces — the most compact encoding of the playback path. Raw `.brepstream`
-records are ~1.4×+ larger served (fixed-width absolute columns vs the `.brp`
-codec's varint deltas), so **nothing uploads brepstream-encoded chunks for
-playback**; a raw stream is always converted to `.brp` first (locally that's
-`pack -upload`, which does it in Go).
+The landing page accepts a dropped `.brepstream` (the Replay uploader widget's
+capture). The viewer serves exactly one wire format — the version-4 `.brp`
+pieces — and the Worker deploys no Go and no transcoder, so the intake is split
+between the Worker (cheap validation + storage) and a **Go daemon** running
+wherever the repo lives (`cmd/bringest`, e.g. a VM):
 
-`src/breps/split.ts` remains as the TypeScript half of that future story: it
-parses the stream's preamble and record framing (pinned by `npm test` against the
-same harness fixture as the Lua↔Go lockstep) and can slice a stream into
-version-5 pieces without transcoding. That parsing is the foundation for the
-planned **TS transcoder** (`brepstream → .brp-wire pieces`) that an in-worker
-upload API (drag & drop, widget streaming) will need, since the Worker deploys no
-Go. `npm run upload-brep` (with `--out` for inspection) still exercises it, but
-its version-5 output is deliberately rejected by the viewer — treat it as an
-experiment harness, not an upload path.
+| URL | What |
+| --- | --- |
+| `POST /api/upload` | open; validates the stream's preamble (`src/worker/preamble.ts`), archives the raw bytes at `streams/<gameId>/<ts>-a<ally>.brepstream` (append-only, never listed, never served publicly), inserts a pending job, returns `{job, gameId, streamKey}` |
+| `GET /api/jobs/<id>` | open; the job's state for the uploading browser's poll (`pending → processing → done \| error`) |
+| `GET /api/jobs` | bearer-guarded; the daemon's work queue (pending + stalled-processing jobs, oldest first) |
+| `POST /api/jobs/<id>` | bearer-guarded; daemon transitions (`processing`, `done`, `error` + message) |
+| `GET /api/streams/<gameId>/<file>` | bearer-guarded; the daemon downloads the archived stream (it speaks only HTTPS to the Worker — no S3 reads, no inbound connectivity) |
+
+The daemon polls, claims a job, downloads the stream, and publishes it through
+the same `internal/packer` pipeline as `pack -upload`: demo fetch from the BAR
+API for the rich metadata (falling back to the stream's own GAME preamble when
+the API doesn't know the game), `.brp` conversion, revisioned static-bundle
+upload, catalog PUT, then reports `done`. With the R2 credentials exported
+(the intended deployment) the upload is **native Go** — concurrent SigV4 PUTs
+straight against the bucket's S3 endpoint, so the host needs no node at all;
+without them it falls back to shelling these tools via npx. The browser's
+dropzone follows along and opens the replay when it lands. Uploads are
+accepted while the daemon is down — jobs wait as `pending`, and a
+`processing` job whose daemon died is re-offered after 15 minutes.
+
+```sh
+# on the VM / wherever the repo + worker/node_modules live:
+export BARREPLAY_INDEX_URL=https://<worker-host>
+export REPLAY_PUT_TOKEN=...                # if the worker guards writes
+export R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=...   # S3 fast path for the puts
+go run ./cmd/bringest              # poll every 10s, forever
+go run ./cmd/bringest -once        # drain the backlog and exit
+go run ./cmd/bringest -upload local -index-url http://127.0.0.1:5173  # against `npm run dev`
+```
+
+The raw archives under `streams/` accumulate on purpose (nothing in the bucket
+is ever deleted): they are the substrate for the planned multi-player merge
+(docs/widget-remote-upload.md), keyed by gameId with the recorder's ally team
+(`-a<n>`, `-spec` for spectators) in the name.
 
 ## Commands
 
