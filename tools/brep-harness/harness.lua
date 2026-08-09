@@ -59,7 +59,7 @@ local function addUnit(team, mobile)
 	return u
 end
 
--- 40 friendly units (teams 0/2 -> ally 0; 60% stationary) + 17 enemy units
+-- 40 friendly units (teams 0/2 -> ally 0; 60% stationary) + 18 enemy units
 -- (team 1 -> ally 1) with scripted visibility windows (below) that exercise
 -- the widget's enemy recording, ghost persistence, and death tombstones.
 for i = 1, 40 do
@@ -101,10 +101,16 @@ local enemyVis = {
 	{ { 5, 19, "radar" }, { 20, 49, "dot" } },                     -- id 165: dies unseen at s=20; dot through 49, then our ghost to the end
 	{ { 10, 29, "los" }, { 30, 33, "dying" } },                    -- id 168: killed in LOS at s=30, still readable (hp 0) through 33
 	{ { 60, 69, "los" }, { 71, 76, "dying" } },                    -- id 171: killed at s=71 while the widget is DISABLED — no callin ever fires
+	{ { 10, 24, "los" } },                                         -- id 174: ghost from s=25; its spot is SCOUTED empty at s=40 (see scoutWindows)
 }
 for i = 1, #enemyVis do
 	addUnit(1, true).vis = enemyVis[i]
 end
+-- id 174 must be STATIONARY: it "dies" unseen where it stood, so the scouted
+-- circle (centred on the unit's position in the IsPosInLos stub) coincides
+-- with the ghost's frozen spot. A mobile unit would keep drifting invisibly
+-- and the scout would sweep the wrong place.
+units[174].mobile = false
 
 local allyOf = { [0] = 0, [1] = 1, [2] = 0 }
 local curFrame = 0
@@ -178,6 +184,14 @@ VFS = {
 -- widget's buffer-until-resolved path is exercised too.
 local rulesGameID = nil
 
+-- Scouted areas driving the IsPosInLos stub: {fromSample, toSample, unitID} —
+-- during the window, everything within 64 elmos of that unit's current (or
+-- frozen) position is in LOS. Targeted at specific units on purpose, so the
+-- other ghost scenarios are never accidentally scouted.
+local scoutWindows = {
+	{ 40, 42, 174 }, -- id 174's ghost spot observed empty -> the widget must drop it
+}
+
 Spring = {
 	Echo = function(...) print(...) end,
 	GetGameRulesParam = function(k)
@@ -232,6 +246,27 @@ Spring = {
 			return 0, u.maxHp, 0, 0, u.build -- killed, not deleted yet
 		end
 		return u.hp, u.maxHp, 0, 0, u.build
+	end,
+	GetGroundHeight = function(x, z) return 25 end,
+	-- Position-level LOS for the ghost scout check. True only inside an
+	-- active scoutWindows entry, near its target unit's frozen (or live)
+	-- position — everywhere else the fog stays shut.
+	IsPosInLos = function(x, y, z)
+		local smp = math.floor(curFrame / sampleEvery)
+		for i = 1, #scoutWindows do
+			local w = scoutWindows[i]
+			if smp >= w[1] and smp <= w[2] then
+				local u = units[w[3]]
+				if u ~= nil then
+					local ux = (u.frozen and u.frozen[1]) or u.x
+					local uz = (u.frozen and u.frozen[2]) or u.z
+					if (x - ux) * (x - ux) + (z - uz) * (z - uz) <= 4096 then -- 64^2
+						return true
+					end
+				end
+			end
+		end
+		return false
 	end,
 	-- Engine truth about a unit the client can currently sense. A memory dot
 	-- is remembered, not sensed, so it reads back nil like every other
