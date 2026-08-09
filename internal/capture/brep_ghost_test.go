@@ -138,6 +138,23 @@ func TestBrepGhostSemantics(t *testing.T) {
 		}
 	}
 
+	// id 177: damaged on its LAST visible sample (s=30), gone from s=31 with
+	// its spot ALREADY in LOS (harness scoutWindows 31..33). A unit whose
+	// state changed as recently as the previous sample gets one sample of
+	// grace before the scout check may disprove its ghost — so the ghost
+	// survives s=31 and is dropped at s=32, not instantly.
+	if at(30, 177) == nil {
+		t.Errorf("177 should be live at s=30")
+	}
+	if at(31, 177) == nil {
+		t.Errorf("177 changed state at s=30 and must keep its ghost through the s=31 grace sample")
+	}
+	for _, smp := range []int{32, 33, 40, 64} { // 64 = segment-1 keyframe
+		if u := at(smp, 177); u != nil {
+			t.Errorf("177's spot was scouted empty, ghost must be gone from s=32 on, but present at s=%d (%+v)", smp, u)
+		}
+	}
+
 	// id 126 (regression guard for the good case): LOS 10..29, radar 30..39,
 	// then OUR ghost — frozen across the s=64 keyframe until the segment
 	// ends, and absent from segment 2.
