@@ -141,14 +141,47 @@ field, default on), a frame's unit set is *what the recording client knew*,
 not ground truth: enemy units appear while in LOS or on radar, and a unit that
 leaves visibility stays in the stream **frozen at its last-known state** with
 `dvx = dvz = 0` (a "ghost") — exactly the delta codec's zero-byte predicted
-case — until it is seen again or seen dying. Only witnessed deaths reach the
-dead list (`UnitDestroyed` fires only for visible units); an enemy that dies
-unseen remains a ghost to the end of the stream. A witnessed death buries the
+case — until it is seen again, seen dying, or **its spot is scouted empty**
+(widget ≥ 1.3.0). Visibility is per unit, not per position: if the ghost's
+unit were alive anywhere in sensor range it would be in `GetAllUnits` by its
+id, so the ghost's only remaining claim is "still standing at (x, z), which I
+cannot see". The moment that position comes back into LOS while the id stays
+absent, the player is looking at bare ground where the ghost stands — the
+engine's own ghost-building removal rule — and the widget drops it: the id
+goes on that frame's dead list (no `destroyed` event; no death was witnessed,
+and a unit re-spotted later is simply recorded afresh). LOS only, never
+radar: stealthy units and jammers make the absence of a radar return prove
+nothing, and a cloaked unit's ghost may be dropped too — which still matches
+what the player's own screen showed. A ghost whose unit changed state as
+recently as the previous sample is skipped — it was in flux moments ago,
+typically having just walked out of view with its spot still inside LOS, so
+it gets one sample of grace before the check may disprove it. The checks are
+budgeted (`ghostLosChecksPerSample`, 64 probes per sample round-robin over
+the sorted ghost ids; skips are free) so the per-sample cost stays bounded no
+matter how many ghosts accumulate. Only witnessed deaths reach the dead list otherwise
+(`UnitDestroyed` fires only for visible units); an enemy that dies in fog
+nobody revisits remains a ghost to the end of the stream — the capture shows
+what this player knew. A witnessed death buries the
 id for good (widget ≥ 1.1.1): the engine can keep returning a dead enemy's id
 from `GetAllUnits` — a frozen radar-memory dot survives a death the player
 did not see in LOS — so the widget tombstones the id at `UnitDestroyed` and
-skips it until it is demonstrably a NEW unit reusing the id (readable health,
-changed def/team, or a position away from the death spot). `def` 0 means a radar
+skips it until it is demonstrably a NEW unit reusing the id (readable
+**positive** health, changed def/team, or a position away from the death
+spot).
+
+A killed unit is also readable *as itself* for a moment (widget ≥ 1.2.0): the
+engine deletes it only once its death sequence finishes, and a morph kills it
+at full health, so the sample right after `UnitDestroyed` can still find it in
+`GetAllUnits`. Treating that read as "alive, so the id was reused" un-buried
+the corpse and froze it into every later frame at 0 hp — a real 8v8 capture
+ended with 57 dead units standing, one of them six minutes past its own
+recorded death. So health of 0 no longer counts as proof of life (a live unit
+never reads ≤ 0), `Spring.GetUnitIsDead` is consulted where the engine offers
+it, and a unit sampled at 0 hp is buried on the spot even if no `UnitDestroyed`
+ever arrived (the widget can be reloaded across a death). Streams written by
+older widgets are repaired at decode time: `internal/capture` buries every id
+the stream's own `destroyed` events name and drops its later records unless one
+restates it with positive health (`graveyard`, lines.go). `def` 0 means a radar
 contact never identified (there is no unit-def 0); once the unit is typed the
 def/team columns upgrade in place, and identity/health are carried over a
 later radar-only phase rather than degrading back to 0. Radar-only positions

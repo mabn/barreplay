@@ -147,9 +147,20 @@ assets/lua/replay_uploader.lua   player-installable live-game variant: constants
                           default (recordEnemies const), enemy units while visible (LOS or
                           radar; unidentified radar contacts carry def 0) with last-known
                           "ghost" persistence after visibility loss — frozen, zero-byte in
-                          the delta codec, buried only on a witnessed death (tombstoned:
-                          the engine keeps returning a dead unseen enemy's id as a frozen
-                          radar-memory dot, which must not resurrect it) —
+                          the delta codec, buried on a witnessed death (tombstoned: the
+                          engine keeps returning a dead enemy's id, both as a frozen
+                          radar-memory dot and — until its death sequence finishes — as the
+                          killed unit itself, and neither may resurrect it; a health read of
+                          0 or Spring.GetUnitIsDead is a death even with no UnitDestroyed
+                          callin; a ghost whose spot comes back into LOS while its id is
+                          absent from GetAllUnits is observably not there and is dropped
+                          — the engine's own ghost-building rule, budgeted at
+                          ghostLosChecksPerSample=64 IsPosInLos probes per sample so the
+                          cost stays bounded however many ghosts accumulate; a ghost
+                          whose state changed within the last sample gets one sample of
+                          grace before the check applies).
+                          internal/capture repairs pre-1.2.0 captures at decode time
+                          (capture.graveyard) —
                           to <write-dir>/<gameId>.brepstream — a binary
                           keyframe+delta stream (spec: docs/brepstream-format.md, decoder:
                           internal/capture/brep.go, ~6.5x smaller and ~4x cheaper per sample
