@@ -936,8 +936,9 @@ function drawOverlay(u) {
 // disc + ring under each recently-hit unit, sized to its icon and fading out
 // over FLASH_MS. Lives on the every-tick overlay canvas so it works
 // identically over the GL and 2D icon paths without touching their caches.
-// While any flash is live it keeps scheduling redraws, so the fade animates
-// even when playback is paused (e.g. single-stepping with →).
+// While any flash is pending or live it keeps scheduling redraws, so
+// staggered start times fire and fades animate even if playback pauses
+// mid-interval.
 function drawFlashes(u) {
   if (damageFlash.size === 0) return;
   const now = performance.now();
@@ -947,7 +948,7 @@ function drawFlashes(u) {
   if (damageFlash.size === 0) return;
   for (let i = 0; i < u.length; i += STRIDE) {
     const t = damageFlash.get(u[i + F.ID]);
-    if (t === undefined) continue;
+    if (t === undefined || now < t) continue; // absent, or not yet started (staggered)
     const k = 1 - (now - t) / FLASH_MS; // 1 -> 0 over the flash lifetime
     const p = interpPos(u, i);
     const sx = viewW / 2 + (p[0] - center.x) * scale;
@@ -1677,18 +1678,22 @@ function updateTimeLabel() {
 
 // Damage flash: a unit whose hp dropped since the previous sampled frame is
 // briefly highlighted red on the overlay canvas (drawFlashes). Detection runs
-// only when the DISPLAYED frame advances by exactly one sample — normal
-// playback and single-stepping — so a scrub jump doesn't light up everything
-// that happens to be lower than wherever you came from. The flash fades over
-// FLASH_MS of REAL time (independent of playback speed).
+// only during PLAYBACK, and only when the displayed frame advances by exactly
+// one sample — stepping and scrubbing never flash. The hp drop happened
+// somewhere inside the sampled interval, not at its boundary, so each unit's
+// flash is scheduled at a RANDOM real-time offset within the interval:
+// simultaneous hits stagger organically instead of pulsing in lockstep at
+// every frame start. The flash then fades over FLASH_MS of REAL time
+// (independent of playback speed).
 const FLASH_MS = 180;
-let damageFlash = new Map(); // unit id -> performance.now() when the drop was first displayed
+let damageFlash = new Map(); // unit id -> performance.now() the flash STARTS (may be in the future)
 let flashSeenIdx = -1;       // dispIdx the detector last processed
 const _flashPrevHp = new Map(); // scratch: id -> hp in the previous frame
 function noteDamage() {
   if (dispIdx === flashSeenIdx) return;
   const prevIdx = flashSeenIdx;
   flashSeenIdx = dispIdx;
+  if (!playRAF) return;                // flash only while actually playing
   if (dispIdx !== prevIdx + 1) return; // jump/scrub/first frame: no comparison
   const pf = data.frames[prevIdx], cf = data.frames[dispIdx];
   if (!pf || !cf) return;
@@ -1696,9 +1701,13 @@ function noteDamage() {
   _flashPrevHp.clear();
   for (let i = 0; i < pu.length; i += STRIDE) _flashPrevHp.set(pu[i + F.ID], pu[i + F.HP]);
   const now = performance.now();
+  const speed = +document.getElementById('speed').value || 1;
+  const intervalMs = (secPerFrame / speed) * 1000; // real duration of one sample interval
   for (let i = 0; i < cu.length; i += STRIDE) {
     const ph = _flashPrevHp.get(cu[i + F.ID]);
-    if (ph !== undefined && cu[i + F.HP] < ph) damageFlash.set(cu[i + F.ID], now);
+    if (ph !== undefined && cu[i + F.HP] < ph) {
+      damageFlash.set(cu[i + F.ID], now + Math.random() * intervalMs);
+    }
   }
 }
 
