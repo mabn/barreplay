@@ -142,7 +142,12 @@ leaves visibility stays in the stream **frozen at its last-known state** with
 `dvx = dvz = 0` (a "ghost") — exactly the delta codec's zero-byte predicted
 case — until it is seen again or seen dying. Only witnessed deaths reach the
 dead list (`UnitDestroyed` fires only for visible units); an enemy that dies
-unseen remains a ghost to the end of the stream. `def` 0 means a radar
+unseen remains a ghost to the end of the stream. A witnessed death buries the
+id for good (widget ≥ 1.1.1): the engine can keep returning a dead enemy's id
+from `GetAllUnits` — a frozen radar-memory dot survives a death the player
+did not see in LOS — so the widget tombstones the id at `UnitDestroyed` and
+skips it until it is demonstrably a NEW unit reusing the id (readable health,
+changed def/team, or a position away from the death spot). `def` 0 means a radar
 contact never identified (there is no unit-def 0); once the unit is typed the
 def/team columns upgrade in place, and identity/health are carried over a
 later radar-only phase rather than degrading back to 0. Radar-only positions
