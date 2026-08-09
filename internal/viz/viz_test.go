@@ -438,9 +438,10 @@ func TestCatalog(t *testing.T) {
 		SampleEvery: 30,
 		UnitDefs:    map[int32]snapshot.UnitDef{1: {DefID: 1, Name: "armcom"}},
 		Teams: []snapshot.TeamInfo{
-			{TeamID: 0, AllyTeam: 0},
-			{TeamID: 1, AllyTeam: 0},
-			{TeamID: 2, AllyTeam: 1},
+			{TeamID: 0, AllyTeam: 0, Side: "armada"},
+			{TeamID: 1, AllyTeam: 0, Side: "cortex"},
+			{TeamID: 2, AllyTeam: 1, Side: "armada"},
+			{TeamID: 3, AllyTeam: 2}, // Gaia: no side, no player -> not a playing slot
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -506,20 +507,28 @@ func TestCatalog(t *testing.T) {
 func TestGameSizeSpec(t *testing.T) {
 	cases := []struct {
 		allies []int32
+		gaia   bool // append a Gaia-like team (no side, no player) in its own ally team
 		want   string
 	}{
-		{nil, ""},
-		{[]int32{0, 1}, "1v1"},
-		{[]int32{0, 0, 1, 1, 1}, "3v2"},
-		{[]int32{0, 1, 2}, "1v1v1"},
+		{nil, false, ""},
+		{[]int32{0, 1}, false, "1v1"},
+		{[]int32{0, 0, 1, 1, 1}, false, "3v2"},
+		{[]int32{0, 1, 2}, false, "1v1v1"},
+		// The engine's neutral Gaia team must never surface as an extra "v1".
+		{[]int32{0, 1}, true, "1v1"},
+		{[]int32{0, 0, 1, 1, 1}, true, "3v2"},
+		{nil, true, ""},
 	}
 	for _, c := range cases {
 		teams := make([]snapshot.TeamInfo, len(c.allies))
 		for i, a := range c.allies {
-			teams[i] = snapshot.TeamInfo{TeamID: int32(i), AllyTeam: a}
+			teams[i] = snapshot.TeamInfo{TeamID: int32(i), AllyTeam: a, Side: "armada"}
+		}
+		if c.gaia {
+			teams = append(teams, snapshot.TeamInfo{TeamID: int32(len(teams)), AllyTeam: 99})
 		}
 		if got := GameSizeSpec(teams); got != c.want {
-			t.Errorf("GameSizeSpec(%v) = %q, want %q", c.allies, got, c.want)
+			t.Errorf("GameSizeSpec(%v, gaia=%v) = %q, want %q", c.allies, c.gaia, got, c.want)
 		}
 	}
 }
