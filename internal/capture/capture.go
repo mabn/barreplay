@@ -93,6 +93,8 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 	metaWritten := false
 	var pending *snapshot.Frame // frame currently being assembled from U/R lines
 	pendingCount := int32(-1)   // unit count the F line declared (-1 = unknown)
+	pendingParsed := int32(0)   // U lines seen for it (kept or dropped)
+	graves := graveyard{}       // ids the stream reported destroyed (see lines.go)
 
 	flushMeta := func() error {
 		if metaWritten {
@@ -109,13 +111,16 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 		// The widget emits a whole frame in one Echo; if the engine's log ever
 		// truncated that write, we'd see fewer U lines than the F line declared.
 		// Surface it rather than silently persisting a short frame.
-		if pendingCount >= 0 && int(pendingCount) != len(pending.Units) {
+		// Counted against the U lines PARSED, not the units kept: the
+		// graveyard pass legitimately drops some (see lines.go).
+		if pendingCount >= 0 && pendingCount != pendingParsed {
 			fmt.Fprintf(os.Stderr, "capture: frame %d declared %d units but parsed %d (truncated log line?)\n",
-				pending.Frame, pendingCount, len(pending.Units))
+				pending.Frame, pendingCount, pendingParsed)
 		}
 		fr := *pending
 		pending = nil
 		pendingCount = -1
+		pendingParsed = 0
 		return w.WriteFrame(fr)
 	}
 
@@ -151,6 +156,7 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 				stats.Frames++
 				stats.LastFrame = fr.Frame
 				pendingCount = -1
+				pendingParsed = 0
 				if len(fields) >= 4 {
 					pendingCount = atoi32(fields[3])
 					if pendingCount > 0 {
@@ -177,7 +183,12 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 					us.VelZ = atof32(fields[11])
 					us.BuildProgress = atof32(fields[12])
 				}
-				pending.Units = append(pending.Units, us)
+				pendingParsed++
+				// Every U line restates its unit, so a buried id survives only
+				// by reappearing alive (id reuse).
+				if !graves.drop(us.UnitID, float64(us.Health), true) {
+					pending.Units = append(pending.Units, us)
+				}
 			}
 		case "R": // R <teamID> <metal> <energy> <mStore> <eStore> <mIncome> <eIncome>
 			if pending != nil && len(fields) >= 8 {
@@ -215,13 +226,15 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 				return err
 			}
 			if len(fields) >= 6 {
-				if err := w.WriteEvent(snapshot.Event{
+				ev := snapshot.Event{
 					Frame:  atoi32(fields[1]),
 					Kind:   snapshot.EventKind(fields[2]),
 					UnitID: atoi32(fields[3]),
 					DefID:  atoi32(fields[4]),
 					Team:   atoi32(fields[5]),
-				}); err != nil {
+				}
+				graves.note(ev.Kind, ev.UnitID)
+				if err := w.WriteEvent(ev); err != nil {
 					return err
 				}
 			}
