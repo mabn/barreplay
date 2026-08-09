@@ -664,11 +664,92 @@ function cssToTint(css) {
   ];
 }
 
+// ---- damage flash ----------------------------------------------------------
+// A unit whose hp dropped since the previous sampled frame briefly flashes:
+// its icon blends toward the flash colour and fades back (GL: per-instance
+// tint; 2D: a flash-coloured glyph drawn over). Detection (noteDamage) runs
+// only during PLAYBACK, and only when the displayed frame advances by exactly
+// one sample — stepping and scrubbing never flash. The hp drop happened
+// somewhere inside the sampled interval, not at its boundary, so each unit's
+// flash is scheduled at a RANDOM real-time offset within the interval:
+// simultaneous hits stagger organically instead of pulsing in lockstep at
+// every frame start. The flash then fades over FLASH_MS of REAL time
+// (independent of playback speed). This block must precede applyTeamColors,
+// which assigns flashTargetOf at load time.
+const FLASH_MS = 180;
+const FLASH_STRENGTH = 0.8;           // peak blend toward the flash target (1 = fully there)
+// Flash targets, [r,g,b] for the GL tint blend + the matching css for the 2D
+// glyph. Red is the default, but on a red/pink/orange team colour a red flash
+// is invisible — those teams flash toward white instead, and LIGHT red-ish
+// colours (pink), where white is also weak, flash toward dark. Which target a
+// team uses is decided once per palette (applyTeamColors), not per frame.
+const FLASH_TARGETS = [
+  { tint: [1.0, 0.16, 0.12], css: '#ff291f' }, // red (default)
+  { tint: [1.0, 1.0, 1.0], css: '#ffffff' },   // white (red-ish team colours)
+  { tint: [0.08, 0.08, 0.08], css: '#141414' },// dark (light red-ish, e.g. pink)
+];
+let flashTargetOf = new Map(); // team id -> index into FLASH_TARGETS
+// flashTargetFor picks the target for one team tint: red unless the colour
+// itself is red-dominant (red/orange/pink), where the branch on luminance
+// sends dark-to-mid colours to white and light ones to dark.
+function flashTargetFor(tint) {
+  const r = tint[0], g = tint[1], b = tint[2];
+  const reddish = r > 0.5 && r - g >= 0.15 && r - b >= 0.12;
+  if (!reddish) return 0;
+  const luma = 0.3 * r + 0.59 * g + 0.11 * b;
+  return luma > 0.72 ? 2 : 1;
+}
+let damageFlash = new Map(); // unit id -> performance.now() the flash STARTS (may be in the future)
+let flashSeenIdx = -1;       // dispIdx the detector last processed
+
+// flashK: the flash intensity for a unit right now — 1 at the (possibly
+// staggered) start, fading linearly to 0 over FLASH_MS; 0 when absent or not
+// yet started. Callers skip the lookup entirely while the map is empty.
+function flashK(id, now) {
+  const t = damageFlash.get(id);
+  if (t === undefined) return 0;
+  const dt = now - t;
+  if (dt < 0 || dt >= FLASH_MS) return 0;
+  return 1 - dt / FLASH_MS;
+}
+function pruneFlashes(now) {
+  for (const [id, t] of damageFlash) {
+    if (now - t >= FLASH_MS) damageFlash.delete(id);
+  }
+}
+const _flashPrevHp = new Map(); // scratch: id -> hp in the previous frame
+function noteDamage() {
+  if (dispIdx === flashSeenIdx) return;
+  const prevIdx = flashSeenIdx;
+  flashSeenIdx = dispIdx;
+  if (!playRAF) return;                // flash only while actually playing
+  if (dispIdx !== prevIdx + 1) return; // jump/scrub/first frame: no comparison
+  const pf = data.frames[prevIdx], cf = data.frames[dispIdx];
+  if (!pf || !cf) return;
+  const pu = pf.u, cu = cf.u;
+  _flashPrevHp.clear();
+  for (let i = 0; i < pu.length; i += STRIDE) _flashPrevHp.set(pu[i + F.ID], pu[i + F.HP]);
+  const now = performance.now();
+  const speed = +document.getElementById('speed').value || 1;
+  const intervalMs = (secPerFrame / speed) * 1000; // real duration of one sample interval
+  for (let i = 0; i < cu.length; i += STRIDE) {
+    const ph = _flashPrevHp.get(cu[i + F.ID]);
+    if (ph !== undefined && cu[i + F.HP] < ph) {
+      damageFlash.set(cu[i + F.ID], now + Math.random() * intervalMs);
+    }
+  }
+}
+
 // applyTeamColors (re)derives everything that hangs off the team palette.
 function applyTeamColors() {
   teamColor = computeTeamColors();
   teamTint = new Map();
-  for (const id in teamColor) teamTint.set(+id, cssToTint(teamColor[id]));
+  flashTargetOf = new Map();
+  for (const id in teamColor) {
+    const tint = cssToTint(teamColor[id]);
+    teamTint.set(+id, tint);
+    flashTargetOf.set(+id, flashTargetFor(tint));
+  }
   colorGen++;
 }
 
@@ -840,11 +921,11 @@ function drawDots(u) {
 function drawIcons2D(u) {
   const pxMemo = new Map();     // def -> rounded CSS px this draw
   const glyphMemo = new Map();  // def*4096+team -> canvas or null
-  // Damage flash: a red-tinted copy of the glyph (renderIcon caches it like
-  // any team glyph) blended over the icon at the flash intensity. Team ids
-  // are u8, so pseudo-team 4095 is a free memo slot for the red variant.
+  // Damage flash: a flash-coloured copy of the glyph (renderIcon caches it
+  // like any team glyph) blended over the icon at the flash intensity. Team
+  // ids are u8, so pseudo-teams 4095/4094/4093 are free memo slots for the
+  // red/white/dark variants (indexed by the team's FLASH_TARGETS entry).
   const fNow = damageFlash.size > 0 ? performance.now() : 0;
-  const FLASH_MEMO_TEAM = 4095;
   for (let i = 0; i < u.length; i += STRIDE) {
     const def = u[i + F.DEF], team = u[i + F.TEAM];
     let px = pxMemo.get(def);
@@ -871,16 +952,17 @@ function drawIcons2D(u) {
       if (fNow) {
         const k = flashK(u[i + F.ID], fNow);
         if (k > 0) {
-          const fk = def * 4096 + FLASH_MEMO_TEAM;
-          let red = glyphMemo.get(fk);
-          if (red === undefined) {
+          const target = flashTargetOf.get(team) || 0;
+          const fk = def * 4096 + (4095 - target);
+          let fg = glyphMemo.get(fk);
+          if (fg === undefined) {
             const info = defIcon.get(def);
-            red = info ? renderIcon(info.p, FLASH_CSS, px) : null;
-            glyphMemo.set(fk, red);
+            fg = info ? renderIcon(info.p, FLASH_TARGETS[target].css, px) : null;
+            glyphMemo.set(fk, fg);
           }
-          if (red) {
+          if (fg) {
             ctx.globalAlpha = FLASH_STRENGTH * k;
-            ctx.drawImage(red, dx, dy, px, px);
+            ctx.drawImage(fg, dx, dy, px, px);
             ctx.globalAlpha = 1;
           }
         }
@@ -1286,9 +1368,10 @@ function glBuildInstances(u) {
     if (fNow) {
       const k = flashK(u[i + F.ID], fNow) * FLASH_STRENGTH;
       if (k > 0) {
-        tr += (FLASH_TINT[0] - tr) * k;
-        tg += (FLASH_TINT[1] - tg) * k;
-        tb += (FLASH_TINT[2] - tb) * k;
+        const ft = FLASH_TARGETS[flashTargetOf.get(u[i + F.TEAM]) || 0].tint;
+        tr += (ft[0] - tr) * k;
+        tg += (ft[1] - tg) * k;
+        tb += (ft[2] - tb) * k;
       }
     }
     const o = n * INST_FLOATS;
@@ -1680,60 +1763,6 @@ function updateTimeLabel() {
   if (idx !== lastSliderIdx) {
     lastSliderIdx = idx;
     document.getElementById('slider').value = idx;
-  }
-}
-
-// Damage flash: a unit whose hp dropped since the previous sampled frame is
-// briefly highlighted red on the overlay canvas (drawFlashes). Detection runs
-// only during PLAYBACK, and only when the displayed frame advances by exactly
-// one sample — stepping and scrubbing never flash. The hp drop happened
-// somewhere inside the sampled interval, not at its boundary, so each unit's
-// flash is scheduled at a RANDOM real-time offset within the interval:
-// simultaneous hits stagger organically instead of pulsing in lockstep at
-// every frame start. The flash then fades over FLASH_MS of REAL time
-// (independent of playback speed).
-const FLASH_MS = 180;
-const FLASH_TINT = [1.0, 0.16, 0.12]; // GL: the red the team tint blends toward
-const FLASH_CSS = '#ff291f';          // 2D: red glyph colour — keep in sync with FLASH_TINT
-const FLASH_STRENGTH = 0.8;           // peak blend toward red (1 = fully red)
-let damageFlash = new Map(); // unit id -> performance.now() the flash STARTS (may be in the future)
-let flashSeenIdx = -1;       // dispIdx the detector last processed
-
-// flashK: the flash intensity for a unit right now — 1 at the (possibly
-// staggered) start, fading linearly to 0 over FLASH_MS; 0 when absent or not
-// yet started. Callers skip the lookup entirely while the map is empty.
-function flashK(id, now) {
-  const t = damageFlash.get(id);
-  if (t === undefined) return 0;
-  const dt = now - t;
-  if (dt < 0 || dt >= FLASH_MS) return 0;
-  return 1 - dt / FLASH_MS;
-}
-function pruneFlashes(now) {
-  for (const [id, t] of damageFlash) {
-    if (now - t >= FLASH_MS) damageFlash.delete(id);
-  }
-}
-const _flashPrevHp = new Map(); // scratch: id -> hp in the previous frame
-function noteDamage() {
-  if (dispIdx === flashSeenIdx) return;
-  const prevIdx = flashSeenIdx;
-  flashSeenIdx = dispIdx;
-  if (!playRAF) return;                // flash only while actually playing
-  if (dispIdx !== prevIdx + 1) return; // jump/scrub/first frame: no comparison
-  const pf = data.frames[prevIdx], cf = data.frames[dispIdx];
-  if (!pf || !cf) return;
-  const pu = pf.u, cu = cf.u;
-  _flashPrevHp.clear();
-  for (let i = 0; i < pu.length; i += STRIDE) _flashPrevHp.set(pu[i + F.ID], pu[i + F.HP]);
-  const now = performance.now();
-  const speed = +document.getElementById('speed').value || 1;
-  const intervalMs = (secPerFrame / speed) * 1000; // real duration of one sample interval
-  for (let i = 0; i < cu.length; i += STRIDE) {
-    const ph = _flashPrevHp.get(cu[i + F.ID]);
-    if (ph !== undefined && cu[i + F.HP] < ph) {
-      damageFlash.set(cu[i + F.ID], now + Math.random() * intervalMs);
-    }
   }
 }
 
