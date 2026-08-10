@@ -4,7 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>barreplay viewer</title>
-<link rel="stylesheet" href="/style.css">
+<!-- __ASSET_REV__ is replaced with a content hash of app.js+style.css (Vite
+     plugin at build/dev; the Go viz server at startup), so a deployed UI
+     change busts the browser cache by itself — only index.html must
+     revalidate, and both servers send it with a no-cache header. -->
+<link rel="stylesheet" href="/style.css?v=__ASSET_REV__">
 </head>
 <body>
 <header>
@@ -106,6 +110,6 @@
   <span class="timelabel" id="timelabel">—</span>
 </div>
 
-<script src="/app.js"></script>
+<script src="/app.js?v=__ASSET_REV__"></script>
 </body>
 </html>

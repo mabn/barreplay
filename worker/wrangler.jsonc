@@ -12,7 +12,13 @@
   // unmatched non-API navigations so client-side routing works.
   "assets": {
     "binding": "ASSETS",
-    "not_found_handling": "single-page-application"
+    "not_found_handling": "single-page-application",
+    // The SPA entry goes THROUGH the Worker so it is served no-cache (the
+    // Hono app adds the header): index.html carries content-hashed
+    // /app.js?v=… subresource URLs, so a fresh index.html is all a UI deploy
+    // needs to propagate — no hard refresh. Every other asset (js/css/icons)
+    // stays on the fast direct-asset path.
+    "run_worker_first": ["/", "/index.html"]
   },
 
   // The growing set of replay data (index.json + per-capture head/chunks/resources)

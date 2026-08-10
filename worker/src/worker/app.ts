@@ -166,6 +166,20 @@ app.put("/replays/*", async (c) => {
   return c.json({ ok: true });
 });
 
+// The SPA entry is routed through the Worker (assets.run_worker_first in
+// wrangler.jsonc) so it is served no-cache: its subresource URLs carry a
+// content hash (/app.js?v=…, stamped by the Vite asset-rev plugin), so a
+// revalidated index.html is all a UI deploy needs to reach every browser —
+// the hashed js/css URLs change and get refetched automatically.
+const serveEntry = async (c: { env: Env; req: { raw: Request } }) => {
+  const r = await c.env.ASSETS.fetch(c.req.raw);
+  const h = new Headers(r.headers);
+  h.set("cache-control", "no-cache");
+  return new Response(r.body, { status: r.status, headers: h });
+};
+app.get("/", serveEntry);
+app.get("/index.html", serveEntry);
+
 // Non-R2, non-API requests reach the Worker only when no static asset matched.
 // Hand them to the SPA fallback.
 app.all("*", (c) => c.env.ASSETS.fetch(c.req.raw));

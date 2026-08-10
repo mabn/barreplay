@@ -101,6 +101,14 @@ internal/viz/             serve the viewer (SPA embedded from worker/) + the sta
 internal/viz/static.go    pack a .brp into plain static files (byte-identical to the served URLs) for serverless hosting
 worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as static files from R2 (no playback server);
                           worker/public + worker/index.html are THE front-end (embedded into barreplay-viz via assets.go).
+                          UI CACHE-BUSTING: index.html references /app.js?v=__ASSET_REV__ /
+                          /style.css?v=__ASSET_REV__ — the token is stamped with
+                          sha256(app.js+style.css)[:8] by the Vite asset-rev plugin
+                          (vite.config.ts, build AND dev) and by the Go viz server at startup
+                          (viz.assetRev), and index.html itself is served no-cache (the Hono
+                          serveEntry route via assets.run_worker_first ["/", "/index.html"];
+                          the Go server serves all UI no-store) — so a UI deploy propagates on
+                          a plain reload, no hard refresh.
                           The replay CATALOG (per-game stats: start time, duration, map, team-size
                           spec like "8v8", bundle bytes) lives in a SQLite table inside a Durable
                           Object (src/worker/replayindex.ts, single instance, wrangler migration v1
