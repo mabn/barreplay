@@ -323,6 +323,7 @@ async function streamKeys(gen) {
         const kf = decodeFrames(buf.subarray(start, bounds[ci]))[0];
         keyFrames[ci] = kf;
         data.frames[chunkStartIdx[ci]] = kf;
+        indexGhostSightings(kf);
         // A single-frame chunk is complete once its keyframe is in.
         chunkState[ci] = Math.max(chunkState[ci], chunks[ci].len === 0 ? 4 : 2);
         if (pendingDelta[ci]) {
@@ -735,17 +736,21 @@ function pruneFlashes(now) {
 // An enemy STRUCTURE that drops out of the capture (widget >= 1.5.0 drops
 // unlisted units) is not gone — buildings don't move, so its last-known state
 // keeps being true until someone actually sees it die. The viewer keeps such
-// buildings on the map as semi-transparent ghosts: a structure present in the
-// previous displayed frame but absent from the next one, with NO destroyed
-// event in between (a witnessed death rides the stream as an event even when
-// the unit vanishes the same sample), becomes a ghost at its last position; it
-// is dropped the moment its id is listed again (re-scouted or the id reused)
-// or a destroyed event for it goes by. Derived purely while the display frame
-// advances by exactly one sample (playing or stepping) — a scrub jump clears
-// the set, since ghost state is a function of the frames watched since.
-// Mobile units never ghost: they'd be somewhere else already.
+// buildings on the map as semi-transparent ghosts, and the ghost set is a
+// pure FUNCTION OF THE PLAYHEAD (like normal units — scrub anywhere and it is
+// correct, no watching-history required): a structure is a ghost at frame N
+// when it was sighted in some KEYFRAME at or before N, is absent from the
+// displayed frame, and has no destroyed event between that last sighting and
+// N (a witnessed death rides the stream as an event even when the unit
+// vanishes the same sample). Keyframes all stream in up front (.keys), so
+// sightings are indexed as they decode (indexGhostSightings) and the set is
+// recomputed on every display-frame change. Keyframe resolution (one per 64
+// samples) is the deliberate trade: a structure only ever seen BETWEEN two
+// keyframes leaves no sighting and casts no ghost. Mobile units never ghost:
+// they'd be somewhere else already.
 const GHOST_ALPHA = 0.45;
-let ghostBuildings = new Map(); // id -> {def, team, x, z}
+let ghostBuildings = new Map(); // id -> {f, def, team, x, z, hp, maxHp} (current ghost set)
+let ghostIndex = new Map();     // id -> [{f, def, team, x, z, hp, maxHp}] per keyframe sighting, f ascending
 let destroyedAt = new Map();    // id -> frames of its destroyed events (per load)
 function buildDestroyedIndex() {
   destroyedAt = new Map();
@@ -766,38 +771,63 @@ function diedBetween(id, f0, f1) {
   return false;
 }
 
+// indexGhostSightings records every structure in one decoded keyframe.
+// streamKeys decodes keyframes strictly in chunk order, so each id's sighting
+// list stays sorted by frame. ~dozens of structures x dozens of chunks: tiny.
+function indexGhostSightings(kf) {
+  const u = kf.u;
+  for (let i = 0; i < u.length; i += STRIDE) {
+    const def = u[i + F.DEF];
+    if (!defFp.get(def)) continue; // structures only (footprint = structure)
+    const id = u[i + F.ID];
+    let a = ghostIndex.get(id);
+    if (a === undefined) ghostIndex.set(id, a = []);
+    a.push({
+      f: kf.f, def, team: u[i + F.TEAM], x: u[i + F.X], z: u[i + F.Z],
+      hp: u[i + F.HP], maxHp: u[i + F.MAXHP],
+    });
+  }
+  recomputeGhosts(); // sightings near the playhead may have just arrived
+}
+
+const _curIds = new Set(); // scratch: ids in the displayed frame
+// recomputeGhosts rebuilds the ghost set for the currently displayed frame
+// from the sighting index — valid after any playhead move, forward or back.
+function recomputeGhosts() {
+  ghostBuildings.clear();
+  if (!data || dispIdx < 0) return;
+  const fr = data.frames[dispIdx];
+  if (!fr) return;
+  const curF = frameNumAt(dispIdx);
+  const cu = fr.u;
+  _curIds.clear();
+  for (let i = 0; i < cu.length; i += STRIDE) _curIds.add(cu[i + F.ID]);
+  for (const [id, sightings] of ghostIndex) {
+    if (_curIds.has(id)) continue;
+    let e = null; // latest sighting at or before the displayed frame
+    for (let k = sightings.length - 1; k >= 0; k--) {
+      if (sightings[k].f <= curF) { e = sightings[k]; break; }
+    }
+    if (e === null) continue;        // not seen yet at this point of the game
+    if (diedBetween(id, e.f, curF)) continue; // its death was witnessed
+    ghostBuildings.set(id, e);
+  }
+}
+
 const _flashPrevHp = new Map(); // scratch: id -> hp in the previous frame
-const _curIds = new Set();      // scratch: ids in the current frame
-// noteFrameAdvance runs whenever the DISPLAYED frame changes: ghost-building
-// bookkeeping on any single-sample advance, damage flashes only while playing.
+// noteFrameAdvance runs whenever the DISPLAYED frame changes: the ghost set
+// is recomputed for the new frame, damage flashes only on a single-sample
+// advance while playing.
 function noteFrameAdvance() {
   if (dispIdx === flashSeenIdx) return;
   const prevIdx = flashSeenIdx;
   flashSeenIdx = dispIdx;
-  if (dispIdx !== prevIdx + 1) { ghostBuildings.clear(); return; } // jump/scrub/first frame
+  recomputeGhosts();
+  if (!playRAF) return;                // flash only while actually playing
+  if (dispIdx !== prevIdx + 1) return; // jump/scrub/first frame: no comparison
   const pf = data.frames[prevIdx], cf = data.frames[dispIdx];
-  if (!pf || !cf) { ghostBuildings.clear(); return; }
+  if (!pf || !cf) return;
   const pu = pf.u, cu = cf.u;
-
-  const prevF = frameNumAt(prevIdx), curF = frameNumAt(dispIdx);
-  _curIds.clear();
-  for (let i = 0; i < cu.length; i += STRIDE) _curIds.add(cu[i + F.ID]);
-  for (const id of ghostBuildings.keys()) {
-    if (_curIds.has(id) || diedBetween(id, prevF, curF)) ghostBuildings.delete(id);
-  }
-  for (let i = 0; i < pu.length; i += STRIDE) {
-    const id = pu[i + F.ID];
-    if (_curIds.has(id)) continue;
-    const def = pu[i + F.DEF];
-    if (!defFp.get(def)) continue; // structures only (footprint = structure)
-    if (diedBetween(id, prevF, curF)) continue;
-    ghostBuildings.set(id, {
-      def, team: pu[i + F.TEAM], x: pu[i + F.X], z: pu[i + F.Z],
-      hp: pu[i + F.HP], maxHp: pu[i + F.MAXHP], // last-known, for the tooltip
-    });
-  }
-
-  if (!playRAF) return; // flash only while actually playing
   _flashPrevHp.clear();
   for (let i = 0; i < pu.length; i += STRIDE) _flashPrevHp.set(pu[i + F.ID], pu[i + F.HP]);
   const now = performance.now();
@@ -2120,6 +2150,7 @@ async function loadReplay(file) {
   clearTimeout(scrubTimer);
   damageFlash.clear();
   ghostBuildings.clear();
+  ghostIndex = new Map();
   flashSeenIdx = -1;
   currentFile = file;
   try {
