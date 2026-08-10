@@ -93,7 +93,7 @@ is therefore not a fuzzy-reconciliation problem:
 - different ally teams → per-frame union keyed by unitID. With the widget's
   default `recordEnemies` (v1.1+) the sets are no longer disjoint: each stream
   also carries the *other* side's units as this side perceived them (LOS/radar
-  readings, frozen "ghosts" after visibility loss — see the format doc). Those
+  readings while the engine lists them — see the format doc). Those
   records are best-effort views, not ground truth, so the union must prefer the
   owning ally team's own records for any unit both sides report; the GAME
   line's `recordEnemies` + `allyTeam` fields identify which records are
@@ -217,18 +217,18 @@ full version under the same gameId.
    than hide them.
 6. **Enemy-LOS data.** Recorded since widget 1.1.0 (the `recordEnemies`
    constant, default on): enemy units are captured inline as this client
-   perceives them — appearing on LOS/radar detection, frozen at last-known
-   state as immobile "ghosts" once visibility is lost (the delta codec's
-   zero-byte predicted case, so ghosts are ~free on the wire), buried only on
-   a witnessed death. Burial is tombstoned (widget 1.1.1): the engine can keep
+   perceives them — present while the engine lists them (LOS, radar, or a
+   radar-memory dot), dropped from the stream the sample the engine stops
+   listing them (widget 1.5.0; 1.1–1.4 instead froze them as immobile
+   "ghosts"), and buried for good on a witnessed death. Burial is tombstoned
+   (widget 1.1.1): the engine can keep
    returning a dead enemy's id from GetAllUnits as a frozen radar-memory dot,
-   which must not resurrect the ghost — the id stays skipped until it is
+   which must not re-record the corpse — the id stays skipped until it is
    demonstrably a new unit reusing it. The v1 concerns became merge-side rules instead of an
    exclusion: enemy records double-report units the owning side records
    exactly, so the merge must treat them as non-authoritative (see the merge
    property above); wobbled radar positions and unidentified contacts (def 0)
-   are recorded as-is — they are what the player actually knew. An enemy that
-   dies unseen stays a ghost for the rest of the stream.
+   are recorded as-is — they are what the player actually knew.
 
 ## Alternatives considered (for contrast)
 

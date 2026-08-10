@@ -119,10 +119,25 @@ func SettingsFlags(mo map[string]string) map[string]any {
 // GameSizeSpec renders a team roster as BAR's usual size spec: team counts
 // per ally team, largest first, joined with "v" — "8v8", "1v1", "2v2v2".
 // Every TeamInfo is one playing slot (spectators are players, not teams).
+//
+// The engine always appends a neutral Gaia team (critters, map wildlife) to
+// the team list, alone in its own ally team — it is not a playing slot and
+// must not surface as a phantom extra "v1". There is no explicit marker in
+// the capture, but Gaia is the only team with no side and no controlling
+// player, so an ally team consisting solely of such teams is dropped.
 func GameSizeSpec(teams []snapshot.TeamInfo) string {
 	perAlly := map[int32]int{}
+	neutral := map[int32]int{}
 	for _, t := range teams {
 		perAlly[t.AllyTeam]++
+		if t.Side == "" && t.PlayerName == "" {
+			neutral[t.AllyTeam]++
+		}
+	}
+	for ally, n := range neutral {
+		if n == perAlly[ally] {
+			delete(perAlly, ally)
+		}
 	}
 	if len(perAlly) == 0 {
 		return ""
