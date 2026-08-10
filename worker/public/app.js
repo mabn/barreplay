@@ -791,7 +791,10 @@ function noteFrameAdvance() {
     const def = pu[i + F.DEF];
     if (!defFp.get(def)) continue; // structures only (footprint = structure)
     if (diedBetween(id, prevF, curF)) continue;
-    ghostBuildings.set(id, { def, team: pu[i + F.TEAM], x: pu[i + F.X], z: pu[i + F.Z] });
+    ghostBuildings.set(id, {
+      def, team: pu[i + F.TEAM], x: pu[i + F.X], z: pu[i + F.Z],
+      hp: pu[i + F.HP], maxHp: pu[i + F.MAXHP], // last-known, for the tooltip
+    });
   }
 
   if (!playRAF) return; // flash only while actually playing
@@ -1602,6 +1605,9 @@ function drawGrid(b, x0, y0, x1, y1, step, color) {
 }
 
 // ---- hit testing / tooltip ------------------------------------------------
+// Returns the base index of the closest live unit within the pick radius, a
+// {id, g} pair when the closest pick is a ghost building, or null. Ghosts
+// compete on the same distance, so whichever marker is actually nearer wins.
 function hitTest() {
   if (!mouse || !data || dispIdx < 0) return null;
   const fr = data.frames[dispIdx];
@@ -1616,7 +1622,16 @@ function hitTest() {
     const d = dx * dx + dy * dy;
     if (d < bestD) { bestD = d; best = i; }
   }
-  return best;
+  let bestGhost = null;
+  for (const [id, g] of ghostBuildings) {
+    const sx = viewW / 2 + (g.x - center.x) * scale;
+    const sy = viewH / 2 + (g.z - center.z) * scale;
+    const dx = sx - mouse.x, dy = sy - mouse.y;
+    const d = dx * dx + dy * dy;
+    if (d < bestD) { bestD = d; bestGhost = { id, g }; }
+  }
+  if (bestGhost) return bestGhost;
+  return best >= 0 ? best : null;
 }
 
 function defName(def) {
@@ -1625,21 +1640,32 @@ function defName(def) {
 
 function updateTooltip() {
   if (!mouse || drag) { tooltip.style.display = 'none'; return; }
-  const i = hitTest();
-  if (i === null || i < 0) { tooltip.style.display = 'none'; return; }
-  const u = data.frames[dispIdx].u;
-  const team = u[i + F.TEAM];
-  const hp = u[i + F.HP], maxHp = u[i + F.MAXHP];
+  const hit = hitTest();
+  if (hit === null) { tooltip.style.display = 'none'; return; }
+  let def, id, team, x, z, hp, maxHp, ghost = false;
+  if (typeof hit === 'object') {
+    // A ghost building: last-known state from when it slipped out of view.
+    const g = hit.g;
+    id = hit.id;
+    ({ def, team, x, z, hp, maxHp } = g);
+    ghost = true;
+  } else {
+    const u = data.frames[dispIdx].u;
+    def = u[hit + F.DEF]; id = u[hit + F.ID]; team = u[hit + F.TEAM];
+    x = u[hit + F.X]; z = u[hit + F.Z];
+    hp = u[hit + F.HP]; maxHp = u[hit + F.MAXHP];
+  }
   const frac = maxHp > 0 ? Math.max(0, Math.min(1, hp / maxHp)) : 1;
   const col = frac > 0.5 ? '#6fd07f' : (frac > 0.25 ? '#f2cf5b' : '#e2785b');
   tooltip.innerHTML =
-    `<h3>${defName(u[i + F.DEF])}</h3>` +
-    `<div class="row"><span class="label">Unit</span><span>#${u[i + F.ID]}</span></div>` +
+    `<h3>${defName(def)}</h3>` +
+    (ghost ? `<div class="row"><span class="label">Status</span><span style="color:#8a98a6">ghost — last seen state</span></div>` : '') +
+    `<div class="row"><span class="label">Unit</span><span>#${id}</span></div>` +
     `<div class="row"><span class="label">Team</span><span style="color:${teamColor[team] || '#fff'}">${teamNameById(team)}</span></div>` +
-    `<div class="row"><span class="label">Position</span><span>${u[i + F.X]}, ${u[i + F.Z]}</span></div>` +
+    `<div class="row"><span class="label">Position</span><span>${x}, ${z}</span></div>` +
     (maxHp > 0
       ? `<div class="row"><span class="label">Health</span><span>${hp} / ${maxHp}</span></div>` +
-        `<div class="bar"><div style="width:${(frac * 100).toFixed(0)}%;background:${col}"></div></div>`
+        `<div class="bar"><div style="width:${(frac * 100).toFixed(0)}%;background:${col};opacity:${ghost ? 0.55 : 1}"></div></div>`
       : '');
   tooltip.style.display = 'block';
   const parent = cv.parentElement.getBoundingClientRect();
