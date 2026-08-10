@@ -407,7 +407,15 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   also has zero velocity but a DIFFERENT position (a radar-only contact: velocity reads nil,
   recorded as 0, while the wobbled position moves every sample), which glides linearly between
   the two points instead of jumping at the frame boundary. A unit absent from the
-  next sample falls back to plain velocity extrapolation. Playback is a `requestAnimationFrame` loop over a continuous
+  next sample falls back to plain velocity extrapolation. GHOST BUILDINGS
+  (viewer-side, all captures): an enemy STRUCTURE that leaves the capture with no
+  destroyed event in between (widget >= 1.5.0 drops unlisted units; buildings
+  don't move, so the last-known state stays true) is kept on the map
+  semi-transparent (GHOST_ALPHA, per-instance alpha in the GL layout / a
+  globalAlpha pass in 2D) until its id is listed again or a destroyed event goes
+  by; mobile units never ghost. Tracked incrementally on single-sample display
+  advances (noteFrameAdvance, shared with the damage flash); a scrub jump clears
+  the set — ghost state is a function of the frames watched since. Playback is a `requestAnimationFrame` loop over a continuous
   `playPos` (keyframe units), so **1× = real time** (1 game-second/second) and every speed
   interpolates.
   The column layout is defined by the `.brp` codec — `snapshot/brp.go` (Go encode+decode)

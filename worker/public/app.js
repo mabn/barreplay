@@ -731,16 +731,70 @@ function pruneFlashes(now) {
     if (now - t >= FLASH_MS) damageFlash.delete(id);
   }
 }
+// ---- ghost buildings -------------------------------------------------------
+// An enemy STRUCTURE that drops out of the capture (widget >= 1.5.0 drops
+// unlisted units) is not gone — buildings don't move, so its last-known state
+// keeps being true until someone actually sees it die. The viewer keeps such
+// buildings on the map as semi-transparent ghosts: a structure present in the
+// previous displayed frame but absent from the next one, with NO destroyed
+// event in between (a witnessed death rides the stream as an event even when
+// the unit vanishes the same sample), becomes a ghost at its last position; it
+// is dropped the moment its id is listed again (re-scouted or the id reused)
+// or a destroyed event for it goes by. Derived purely while the display frame
+// advances by exactly one sample (playing or stepping) — a scrub jump clears
+// the set, since ghost state is a function of the frames watched since.
+// Mobile units never ghost: they'd be somewhere else already.
+const GHOST_ALPHA = 0.45;
+let ghostBuildings = new Map(); // id -> {def, team, x, z}
+let destroyedAt = new Map();    // id -> frames of its destroyed events (per load)
+function buildDestroyedIndex() {
+  destroyedAt = new Map();
+  for (const e of data.events || []) {
+    if (e.k !== 'destroyed') continue;
+    let a = destroyedAt.get(e.id);
+    if (a === undefined) destroyedAt.set(e.id, a = []);
+    a.push(e.f);
+  }
+}
+// diedBetween: a destroyed event for id in sim-frame range (f0, f1].
+function diedBetween(id, f0, f1) {
+  const a = destroyedAt.get(id);
+  if (a === undefined) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] > f0 && a[i] <= f1) return true;
+  }
+  return false;
+}
+
 const _flashPrevHp = new Map(); // scratch: id -> hp in the previous frame
-function noteDamage() {
+const _curIds = new Set();      // scratch: ids in the current frame
+// noteFrameAdvance runs whenever the DISPLAYED frame changes: ghost-building
+// bookkeeping on any single-sample advance, damage flashes only while playing.
+function noteFrameAdvance() {
   if (dispIdx === flashSeenIdx) return;
   const prevIdx = flashSeenIdx;
   flashSeenIdx = dispIdx;
-  if (!playRAF) return;                // flash only while actually playing
-  if (dispIdx !== prevIdx + 1) return; // jump/scrub/first frame: no comparison
+  if (dispIdx !== prevIdx + 1) { ghostBuildings.clear(); return; } // jump/scrub/first frame
   const pf = data.frames[prevIdx], cf = data.frames[dispIdx];
-  if (!pf || !cf) return;
+  if (!pf || !cf) { ghostBuildings.clear(); return; }
   const pu = pf.u, cu = cf.u;
+
+  const prevF = frameNumAt(prevIdx), curF = frameNumAt(dispIdx);
+  _curIds.clear();
+  for (let i = 0; i < cu.length; i += STRIDE) _curIds.add(cu[i + F.ID]);
+  for (const id of ghostBuildings.keys()) {
+    if (_curIds.has(id) || diedBetween(id, prevF, curF)) ghostBuildings.delete(id);
+  }
+  for (let i = 0; i < pu.length; i += STRIDE) {
+    const id = pu[i + F.ID];
+    if (_curIds.has(id)) continue;
+    const def = pu[i + F.DEF];
+    if (!defFp.get(def)) continue; // structures only (footprint = structure)
+    if (diedBetween(id, prevF, curF)) continue;
+    ghostBuildings.set(id, { def, team: pu[i + F.TEAM], x: pu[i + F.X], z: pu[i + F.Z] });
+  }
+
+  if (!playRAF) return; // flash only while actually playing
   _flashPrevHp.clear();
   for (let i = 0; i < pu.length; i += STRIDE) _flashPrevHp.set(pu[i + F.ID], pu[i + F.HP]);
   const now = performance.now();
@@ -898,6 +952,19 @@ function draw() {
 // icon layer is toggled off.
 function drawDots(u) {
   const rad = Math.max(1.6, Math.min(5, scale * 8));
+  if (ghostBuildings.size > 0) {
+    ctx.globalAlpha = GHOST_ALPHA;
+    for (const g of ghostBuildings.values()) {
+      const sx = viewW / 2 + (g.x - center.x) * scale;
+      const sy = viewH / 2 + (g.z - center.z) * scale;
+      if (sx < -8 || sy < -8 || sx > viewW + 8 || sy > viewH + 8) continue;
+      ctx.fillStyle = teamColor[g.team] || '#9aa6b2';
+      ctx.beginPath();
+      ctx.arc(sx, sy, rad, 0, 7);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
   const byColor = {};
   for (let i = 0; i < u.length; i += STRIDE) {
     const c = teamColor[u[i + F.TEAM]] || '#9aa6b2';
@@ -932,7 +999,30 @@ function drawDots(u) {
 // per-draw def memo: an icon's glyph and pixel size are constant per def within
 // one draw, so resolving them once per def (instead of once per unit, with a
 // per-unit "path|color|px" string key) removes most of the lookup cost.
+// Ghost buildings for the 2D path: the normal team-tinted glyph at
+// GHOST_ALPHA, drawn before the live units so they sit underneath.
+function drawGhosts2D() {
+  if (ghostBuildings.size === 0) return;
+  ctx.globalAlpha = GHOST_ALPHA;
+  for (const g of ghostBuildings.values()) {
+    const info = defIcon.get(g.def);
+    if (!info) continue;
+    const px = Math.round(iconPxFor(g.def));
+    const r = px / 2;
+    const sx = viewW / 2 + (g.x - center.x) * scale;
+    const sy = viewH / 2 + (g.z - center.z) * scale;
+    if (sx < -px || sy < -px || sx > viewW + px || sy > viewH + px) continue;
+    const glyph = renderIcon(info.p, teamColor[g.team] || '#9aa6b2', px);
+    if (!glyph) continue;
+    const dx = Math.round((sx - r) * DPR) / DPR;
+    const dy = Math.round((sy - r) * DPR) / DPR;
+    ctx.drawImage(glyph, dx, dy, px, px);
+  }
+  ctx.globalAlpha = 1;
+}
+
 function drawIcons2D(u) {
+  drawGhosts2D();
   const pxMemo = new Map();     // def -> rounded CSS px this draw
   const glyphMemo = new Map();  // def*4096+team -> canvas or null
   // Damage flash: a flash-coloured copy of the glyph (renderIcon caches it
@@ -1180,7 +1270,7 @@ let glr = null; // GL state, or null -> 2D fallback path
 
 const ATLAS_SIZE = 2048; // px; power of two so the mip chain is clean
 const ATLAS_PAD = 16;    // gap between packed icons: keeps mip levels 0-4 from bleeding
-const INST_FLOATS = 10;  // per instance: cx cy size u0 v0 u1 v1 r g b
+const INST_FLOATS = 11;  // per instance: cx cy size u0 v0 u1 v1 r g b alpha
 
 function initGL() {
   if (!glcv || glr) return;
@@ -1210,24 +1300,30 @@ layout(location=1) in vec2 center;   // instance: icon centre, device px
 layout(location=2) in float size;    // instance: icon size, device px
 layout(location=3) in vec4 uvRect;   // instance: atlas u0 v0 u1 v1
 layout(location=4) in vec3 tint;     // instance: team colour
+layout(location=5) in float alpha;   // instance: opacity (ghost buildings < 1)
 uniform vec2 viewSize;               // canvas size, device px
 out vec2 uv;
 out vec3 vTint;
+out float vAlpha;
 void main() {
   vec2 p = center + corner * size;
   gl_Position = vec4(p.x / viewSize.x * 2.0 - 1.0, 1.0 - p.y / viewSize.y * 2.0, 0.0, 1.0);
   uv = mix(uvRect.xy, uvRect.zw, corner + 0.5);
   vTint = tint;
+  vAlpha = alpha;
 }`;
   const fs = `#version 300 es
 precision mediump float;
 in vec2 uv;
 in vec3 vTint;
+in float vAlpha;
 uniform sampler2D tex;
 out vec4 o;
 void main() {
   vec4 t = texture(tex, uv);
-  o = vec4(t.rgb * vTint, t.a); // atlas is premultiplied: rgb already carries alpha
+  // atlas is premultiplied: rgb already carries alpha, so the instance
+  // opacity scales rgb and a together.
+  o = vec4(t.rgb * vTint, t.a) * vAlpha;
 }`;
 
   let prog;
@@ -1267,7 +1363,7 @@ void main() {
     gl.vertexAttribPointer(loc, n, gl.FLOAT, false, stride, off * 4);
     gl.vertexAttribDivisor(loc, 1);
   };
-  attr(1, 2, 0); attr(2, 1, 2); attr(3, 4, 3); attr(4, 3, 7);
+  attr(1, 2, 0); attr(2, 1, 2); attr(3, 4, 3); attr(4, 3, 7); attr(5, 1, 10);
   gl.bindVertexArray(null);
 
   const ac = document.createElement('canvas');
@@ -1355,13 +1451,31 @@ function uploadAtlas() {
 function glBuildInstances(u) {
   const memo = new Map(); // def -> {px, rect}; both constant per def per draw
   let inst = glr.inst;
-  const needed = (u.length / STRIDE) * INST_FLOATS;
+  const needed = (u.length / STRIDE + ghostBuildings.size) * INST_FLOATS;
   if (inst.length < needed) inst = glr.inst = new Float32Array(needed * 2);
   // Damage flash rides the per-instance tint (free — the floats are written
   // every frame anyway): a flashing unit's tint blends toward FLASH_TINT.
   const fNow = damageFlash.size > 0 ? performance.now() : 0;
   let n = 0;
   let fb = null;
+  // Ghost buildings first, so live icons draw over them. No dot fallback for
+  // a ghost whose bitmap isn't in the atlas yet — it appears a beat later.
+  for (const g of ghostBuildings.values()) {
+    const info = defIcon.get(g.def);
+    const rect = info ? atlasSlot(info.p) : null;
+    if (!rect) continue;
+    const px = iconPxFor(g.def);
+    const sx = viewW / 2 + (g.x - center.x) * scale;
+    const sy = viewH / 2 + (g.z - center.z) * scale;
+    if (sx < -px || sy < -px || sx > viewW + px || sy > viewH + px) continue;
+    const tint = teamTint.get(g.team) || GRAY_TINT;
+    const o = n * INST_FLOATS;
+    inst[o] = sx * DPR; inst[o + 1] = sy * DPR; inst[o + 2] = px * DPR;
+    inst[o + 3] = rect.u0; inst[o + 4] = rect.v0; inst[o + 5] = rect.u1; inst[o + 6] = rect.v1;
+    inst[o + 7] = tint[0]; inst[o + 8] = tint[1]; inst[o + 9] = tint[2];
+    inst[o + 10] = GHOST_ALPHA;
+    n++;
+  }
   for (let i = 0; i < u.length; i += STRIDE) {
     const def = u[i + F.DEF];
     let m = memo.get(def);
@@ -1392,6 +1506,7 @@ function glBuildInstances(u) {
     inst[o] = sx * DPR; inst[o + 1] = sy * DPR; inst[o + 2] = px * DPR;
     inst[o + 3] = rect.u0; inst[o + 4] = rect.v0; inst[o + 5] = rect.u1; inst[o + 6] = rect.v1;
     inst[o + 7] = tr; inst[o + 8] = tg; inst[o + 9] = tb;
+    inst[o + 10] = 1;
     n++;
   }
   glr.n = n;
@@ -1795,7 +1910,7 @@ function resolveDisplay() {
     else if (!(prev >= 0 && data.frames[prev])) dispIdx = -1;
     renderFrac = 0; // no interpolation on a stand-in frame
   }
-  noteDamage();
+  noteFrameAdvance();
 }
 
 // Move the continuous playhead (in keyframe units). idx = floor(playPos) is the
@@ -1978,6 +2093,7 @@ async function loadReplay(file) {
   inflight = 0;
   clearTimeout(scrubTimer);
   damageFlash.clear();
+  ghostBuildings.clear();
   flashSeenIdx = -1;
   currentFile = file;
   try {
@@ -2006,6 +2122,7 @@ async function loadReplay(file) {
     setEmpty('');
   }
   buildDefTables();
+  buildDestroyedIndex();
   applyTeamColors();
   lastTimeText = null;
   lastSliderIdx = -1;
