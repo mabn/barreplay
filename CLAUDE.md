@@ -101,6 +101,14 @@ internal/viz/             serve the viewer (SPA embedded from worker/) + the sta
 internal/viz/static.go    pack a .brp into plain static files (byte-identical to the served URLs) for serverless hosting
 worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as static files from R2 (no playback server);
                           worker/public + worker/index.html are THE front-end (embedded into barreplay-viz via assets.go).
+                          UI CACHE-BUSTING: index.html references /app.js?v=__ASSET_REV__ /
+                          /style.css?v=__ASSET_REV__ — the token is stamped with
+                          sha256(app.js+style.css)[:8] by the Vite asset-rev plugin
+                          (vite.config.ts, build AND dev) and by the Go viz server at startup
+                          (viz.assetRev), and index.html itself is served no-cache (the Hono
+                          serveEntry route via assets.run_worker_first ["/", "/index.html"];
+                          the Go server serves all UI no-store) — so a UI deploy propagates on
+                          a plain reload, no hard refresh.
                           The replay CATALOG (per-game stats: start time, duration, map, team-size
                           spec like "8v8", bundle bytes) lives in a SQLite table inside a Durable
                           Object (src/worker/replayindex.ts, single instance, wrangler migration v1
@@ -144,23 +152,23 @@ snapshot/                 PUBLIC data model + pluggable Writer (owns the on-disk
 assets/lua/snapshot_widget.lua   embedded, read-only sampler (go:embed)
 assets/lua/replay_uploader.lua   player-installable live-game variant: constants only (no
                           substitution tokens), records the player's own ally team plus, by
-                          default (recordEnemies const), enemy units while visible (LOS or
-                          radar; unidentified radar contacts carry def 0) with last-known
-                          — plus each unit's build/assist target (GetUnitIsBuilding,
-                          the frame record's target column, flags bit 1) —
-                          "ghost" persistence after visibility loss — frozen, zero-byte in
-                          the delta codec, buried on a witnessed death (tombstoned: the
+                          default (recordEnemies const), enemy units while the engine lists
+                          them in GetAllUnits (LOS, radar, or the engine's radar-memory dot;
+                          unidentified radar contacts carry def 0, identity/health carried
+                          from the last LOS reading) — plus each unit's build/assist target
+                          (GetUnitIsBuilding, the frame record's target column, flags bit 1).
+                          An enemy the engine stops listing DISAPPEARS from the stream that
+                          sample (dead-listed in the delta codec, no destroyed event — not a
+                          death, it may be alive in fog; re-listed later = recorded afresh
+                          under the same id). Widgets 1.1–1.4 instead froze such units as
+                          "ghosts" (with an IsPosInLos scout-check to drop them);
+                          that persistence was removed in 1.5.0 — old streams still decode
+                          unchanged. Witnessed deaths are tombstoned: the
                           engine keeps returning a dead enemy's id, both as a frozen
                           radar-memory dot and — until its death sequence finishes — as the
                           killed unit itself, and neither may resurrect it; a health read of
                           0 or Spring.GetUnitIsDead is a death even with no UnitDestroyed
-                          callin; a ghost whose spot comes back into LOS while its id is
-                          absent from GetAllUnits is observably not there and is dropped
-                          — the engine's own ghost-building rule, budgeted at
-                          ghostLosChecksPerSample=64 IsPosInLos probes per sample so the
-                          cost stays bounded however many ghosts accumulate; a ghost
-                          whose state changed within the last sample gets one sample of
-                          grace before the check applies).
+                          callin.
                           internal/capture repairs pre-1.2.0 captures at decode time
                           (capture.graveyard) —
                           to <write-dir>/<gameId>.brepstream — a binary
@@ -390,7 +398,7 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   buffered-ranges bar under the slider shows keyframe-only vs fully-loaded chunks,
   video-player style). Scrubbing an unloaded region renders its keyframe instantly
   (`dispIdx` falls back to it; the delta fetch starts after a 250 ms dwell), and
-  playback shows "buffering…" at an unloaded spot until its chunk decodes. Verified
+  playback holds on the keyframe at an unloaded spot until its chunk decodes. Verified
   headlessly (Playwright chromium) on the real capture: first keyframe at load, all
   31 keyframes streamed, instant mid-game scrub, and the completed download decodes
   to exactly the same 4.2M unit records as a full `ReadBRP`. `dvx`/`dvz` are the unit's
@@ -403,8 +411,23 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   velocity and arrives at P1 at its frame-B velocity, curving naturally and C1-continuous
   across samples (no boundary kink). Constant-velocity motion reduces to a straight line;
   tangents are length-capped (`TANGENT_CAP`× the chord) so an inconsistent velocity can't bend
-  the path into a loop. A stationary unit (`dvx==dvz==0`) stays put; a unit absent from the
-  next sample falls back to plain velocity extrapolation. Playback is a `requestAnimationFrame` loop over a continuous
+  the path into a loop. A stationary unit (`dvx==dvz==0`) stays put — unless the next sample
+  also has zero velocity but a DIFFERENT position (a radar-only contact: velocity reads nil,
+  recorded as 0, while the wobbled position moves every sample), which glides linearly between
+  the two points instead of jumping at the frame boundary. A unit absent from the
+  next sample falls back to plain velocity extrapolation. GHOST BUILDINGS
+  (viewer-side, all captures): an enemy STRUCTURE that leaves the capture with no
+  destroyed event since its last sighting (widget >= 1.5.0 drops unlisted units;
+  buildings don't move, so the last-known state stays true) is kept on the map
+  semi-transparent (GHOST_ALPHA, per-instance alpha in the GL layout / a
+  globalAlpha pass in 2D) and hoverable (last-known stats in the tooltip);
+  mobile units never ghost. The ghost set is a pure function of the playhead —
+  every keyframe indexes its structures as sightings as the .keys stream decodes
+  (indexGhostSightings), and recomputeGhosts rebuilds the set on any
+  display-frame change, so scrubbing in either direction shows the correct
+  ghosts without watching the frames in between. Keyframe resolution (one per 64
+  samples) is the deliberate trade: a structure only ever seen between two
+  keyframes casts no ghost. Playback is a `requestAnimationFrame` loop over a continuous
   `playPos` (keyframe units), so **1× = real time** (1 game-second/second) and every speed
   interpolates.
   The column layout is defined by the `.brp` codec — `snapshot/brp.go` (Go encode+decode)
@@ -438,7 +461,7 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   UI slider (`iconScale`, persisted as `?iconsize=`); the Icons checkbox switches to plain
   dots. A unit with no/loading icon shows a coloured dot so it is never invisible. The
   selected replay and icon size are both kept in the URL, so a refresh/shared link restores them.
-  The **Fit icons** checkbox (`growIcons`, default on) makes a *building's* icon grow to 90%
+  Icon fitting (`growIcons`, always on) makes a *building's* icon grow to 90%
   of its footprint (`0.9 * min(fpW,fpH) * scale`) once that exceeds the constant size — i.e.
   it stays constant when zoomed out and fills the footprint when zoomed in; mobile units
   (no footprint) are unaffected. The icon is resolved by the unit-def's `iconType` key first
@@ -478,10 +501,10 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   `mapName`) its terrain back. The API sends `access-control-allow-origin: *`, and the image is loaded
   with `crossOrigin="anonymous"` so the canvas stays untainted. The viz server has **no
   map code at all**. Best-effort: no name in the meta, an unknown map, or no outbound
-  network just yields a plain background (the Map checkbox enables only once the texture
-  loads, and the field extent falls back to the sampled unit bounds). The front-end
-  positions the texture at world `(0,0)`–`(width,height)` so units overlay correctly;
-  the **Map** checkbox toggles it. Caveat: the widget stream doesn't record the map name
+  network just yields a plain background (and the field extent falls back to the
+  sampled unit bounds). The front-end positions the texture at world
+  `(0,0)`–`(width,height)` so units overlay correctly; the terrain layer is always
+  on (no toggle). Caveat: the widget stream doesn't record the map name
   (only the demo startscript path does), so a `.brp` packed from a raw `.brsnap` with
   `pack -no-demo` has an empty `mapName` and renders the plain background; the
   default pack fetches the demo by gameId and fills it in.

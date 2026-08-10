@@ -4,7 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>barreplay viewer</title>
-<link rel="stylesheet" href="/style.css">
+<!-- __ASSET_REV__ is replaced with a content hash of app.js+style.css (Vite
+     plugin at build/dev; the Go viz server at startup), so a deployed UI
+     change busts the browser cache by itself — only index.html must
+     revalidate, and both servers send it with a no-cache header. -->
+<link rel="stylesheet" href="/style.css?v=__ASSET_REV__">
 </head>
 <body>
 <header>
@@ -31,25 +35,6 @@
 </div>
 
 <div class="controls">
-  <button id="first" title="First frame">⏮</button>
-  <button id="prev" title="Previous frame (←)">◀</button>
-  <button id="play" title="Play / pause (space)">▶ Play</button>
-  <button id="next" title="Next frame (→)">▶</button>
-  <button id="last" title="Last frame">⏭</button>
-  <label style="font-size:12px;color:#9fb0bf;">Speed
-    <select id="speed">
-      <option value="1">1× (real time)</option>
-      <option value="2">2×</option>
-      <option value="4">4×</option>
-      <option value="8">8×</option>
-      <option value="16" selected>16×</option>
-      <option value="30">30×</option>
-      <option value="60">60×</option>
-    </select>
-  </label>
-  <label style="font-size:12px;color:#9fb0bf;display:flex;align-items:center;gap:4px;" title="Show the map terrain texture">
-    <input type="checkbox" id="maptex" checked> Map
-  </label>
   <label style="font-size:12px;color:#9fb0bf;display:flex;align-items:center;gap:4px;" title="Show the build grid">
     <input type="checkbox" id="grid"> Grid
   </label>
@@ -67,15 +52,6 @@
     <input type="range" id="iconsize" min="4" max="60" step="1" value="12"
            style="flex:0 0 auto;width:80px;" title="Icon size">
   </label>
-  <label style="font-size:12px;color:#9fb0bf;display:flex;align-items:center;gap:4px;" title="When zoomed in, grow a building's icon to 90% of its footprint instead of a constant size">
-    <input type="checkbox" id="growicons" checked> Fit icons
-  </label>
-  <div id="timeline">
-    <input type="range" id="slider" min="0" max="0" value="0">
-    <div id="buffbar" title="Downloaded ranges"></div>
-  </div>
-  <span id="buffering" style="display:none" title="Waiting for this part of the replay to download">buffering…</span>
-  <span class="timelabel" id="timelabel">—</span>
 </div>
 
 <div id="wrap">
@@ -110,6 +86,30 @@
   </div>
 </div>
 
-<script src="/app.js"></script>
+<div class="controls" id="bottombar">
+  <button id="first" title="First frame">⏮</button>
+  <button id="prev" title="Previous frame (←)">◀</button>
+  <button id="play" title="Play / pause (space)">▶ Play</button>
+  <button id="next" title="Next frame (→)">▶</button>
+  <button id="last" title="Last frame">⏭</button>
+  <label style="font-size:12px;color:#9fb0bf;">Speed
+    <select id="speed">
+      <option value="1">1× (real time)</option>
+      <option value="2">2×</option>
+      <option value="4">4×</option>
+      <option value="8">8×</option>
+      <option value="16" selected>16×</option>
+      <option value="30">30×</option>
+      <option value="60">60×</option>
+    </select>
+  </label>
+  <div id="timeline">
+    <input type="range" id="slider" min="0" max="0" value="0">
+    <div id="buffbar" title="Downloaded ranges"></div>
+  </div>
+  <span class="timelabel" id="timelabel">—</span>
+</div>
+
+<script src="/app.js?v=__ASSET_REV__"></script>
 </body>
 </html>

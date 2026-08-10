@@ -12,7 +12,16 @@
   // unmatched non-API navigations so client-side routing works.
   "assets": {
     "binding": "ASSETS",
-    "not_found_handling": "single-page-application"
+    "not_found_handling": "single-page-application",
+    // EVERY request goes through the Worker (the Hono catch-all proxies
+    // non-API paths to this ASSETS binding), for two reasons: the SPA entry
+    // must be served no-cache (the serveEntry route adds the header —
+    // index.html carries content-hashed /app.js?v=… subresource URLs, so a
+    // revalidated index.html is all a UI deploy needs to propagate), and a
+    // PATTERN LIST here is a trap — routes not on the list are answered by
+    // the asset layer alone, whose single-page-application fallback serves
+    // index.html for /api/* instead of falling through to the Worker.
+    "run_worker_first": true
   },
 
   // The growing set of replay data (index.json + per-capture head/chunks/resources)
