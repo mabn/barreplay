@@ -1,6 +1,9 @@
 package viz
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -62,6 +65,19 @@ type replayInfo struct {
 	Size   int64  `json:"size"`
 }
 
+// assetRev is a short content hash of the SPA's subresources. index.html
+// references them as /app.js?v=<rev> (the __ASSET_REV__ token, substituted
+// here and, for the Cloudflare deploy, by the Vite asset-rev plugin), so a UI
+// change busts browser caches through the URL alone.
+func assetRev() string {
+	h := sha256.New()
+	for _, name := range []string{"public/app.js", "public/style.css"} {
+		b, _ := webassets.Assets.ReadFile(name)
+		h.Write(b)
+	}
+	return hex.EncodeToString(h.Sum(nil))[:8]
+}
+
 // Handler returns the HTTP handler for the viewer.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -80,12 +96,20 @@ func (s *Server) Handler() http.Handler {
 		}
 	}
 
+	rev := []byte(assetRev())
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
-		serveAsset("index.html", "text/html; charset=utf-8")(w, r)
+		b, err := webassets.Assets.ReadFile("index.html")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store, must-revalidate")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(bytes.ReplaceAll(b, []byte("__ASSET_REV__"), rev))
 	})
 	mux.HandleFunc("/app.js", serveAsset("public/app.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("/style.css", serveAsset("public/style.css", "text/css; charset=utf-8"))
