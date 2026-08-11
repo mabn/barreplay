@@ -35,6 +35,7 @@ All integers little-endian. Record tags:
 |-----|---------|
 | `F` | one sampled frame (below) |
 | `E` | unit lifecycle event, text: `<frame> <kind> <id> <def> <team>` |
+| `J` | EXPERIMENT (widget ≥ 1.6.0, `recordProjectiles`): weapon projectiles in flight at a sampled frame. Text payload of newline-separated lines, same grammar as the snapshotter's `.brsnap` experiment: `PJDEF <wdefID> <name>` (first sighting of a weapon def) and `PJ <frame> <id> <wdef> <owner> <team> <x> <y> <z> <vx> <vy> <vz> <ttype> <tid> <tx> <ty> <tz>` (`ttype` = target char `u`/`g`/`p`/`f` or `-`; unit targets fill `tid`, ground aims `tx/ty/tz`). Piece/debris projectiles excluded. `capture` currently skips it. |
 | `X` | end of stream, text: reason (`gameover`/`shutdown`/`error`) |
 | other | reserved; readers skip unknown tags |
 
