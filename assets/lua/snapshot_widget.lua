@@ -26,6 +26,9 @@
 --   BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp> <vx> <vy> <vz> <build> <target>
 --   BRSNAP R <teamID> <metal> <energy> <mStore> <eStore> <mIncome> <eIncome>   team economy
 --   BRSNAP EV <frame> <kind> <id> <def> <team>
+--   BRSNAP PJDEF <wdefID> <name>               weapon-def id -> name, on first sighting (experiment)
+--   BRSNAP PJ <frame> <id> <wdef> <owner> <team> <x> <y> <z> <vx> <vy> <vz> <ttype> <tid> <tx> <ty> <tz>
+--                                              one in-flight weapon projectile (experiment; sampled frames only)
 --   BRSNAP PROF <totalMs> <name>               engine time-profiler record (at game over)
 --   BRSNAP PROFD <frame> <units> <totalMs> <name>   per-heartbeat profiler sample (-profile only)
 -- Plain "[barreplay] ..." heartbeat lines are also echoed for infolog visibility;
@@ -91,6 +94,17 @@ local spGetTeamColor   = Spring.GetTeamColor
 local spGetTeamResources = Spring.GetTeamResources
 local spGetPlayerList  = Spring.GetPlayerList
 local spGetPlayerInfo  = Spring.GetPlayerInfo
+
+-- EXPERIMENT: projectile sampling (PJ/PJDEF lines). Read-only APIs; the whole
+-- sampler is pcall-guarded because projectile API availability varies across
+-- engine builds and an escaping error would unload the widget.
+local spGetProjectilesInRectangle = Spring.GetProjectilesInRectangle
+local spGetProjectilePosition     = Spring.GetProjectilePosition
+local spGetProjectileVelocity     = Spring.GetProjectileVelocity
+local spGetProjectileDefID        = Spring.GetProjectileDefID
+local spGetProjectileOwnerID      = Spring.GetProjectileOwnerID
+local spGetProjectileTeamID       = Spring.GetProjectileTeamID
+local spGetProjectileTarget       = Spring.GetProjectileTarget
 
 -- Sim frames per game-second (30 in BAR). Reported in the GAME preamble line
 -- (the stream-semantics marker; see protocolVersion below).
@@ -377,6 +391,59 @@ function widget:Initialize()
 	emitPreamble()
 end
 
+-- EXPERIMENT: sampleProjectiles appends one "BRSNAP PJ ..." line per weapon
+-- projectile currently in flight (piece/debris projectiles excluded — they are
+-- cosmetic wreckage fragments) and returns the count. Runs only on sampled
+-- frames, from the same write as the frame's U/R lines. The first time a
+-- weapon-def id is seen it also emits a PJDEF id->name line, so the (large)
+-- WeaponDefs table is never dumped wholesale. Each PJ line carries the frame
+-- so the stream is grep-analyzable standalone. May raise; call via pcall
+-- (see the projBroken guard in GameFrame).
+local mapSizeX = (Game and Game.mapSizeX) or 0
+local mapSizeZ = (Game and Game.mapSizeZ) or 0
+local seenWeaponDefs = {}
+local function sampleProjectiles(lines, frame)
+	local projs = spGetProjectilesInRectangle(0, 0, mapSizeX, mapSizeZ, false, true)
+	local np = #projs
+	for i = 1, np do
+		local pid = projs[i]
+		local wdef = spGetProjectileDefID(pid) or -1
+		if wdef >= 0 and not seenWeaponDefs[wdef] then
+			seenWeaponDefs[wdef] = true
+			local wd = WeaponDefs and WeaponDefs[wdef]
+			lines[#lines + 1] = string.format("BRSNAP PJDEF %d %s", wdef, (wd and wd.name) or "?")
+		end
+		local px, py, pz = spGetProjectilePosition(pid)
+		local vx, vy, vz = spGetProjectileVelocity(pid)
+		local owner = spGetProjectileOwnerID(pid) or -1
+		local team = (spGetProjectileTeamID and spGetProjectileTeamID(pid)) or -1
+		-- Target: ttype is a char code ('u' unit, 'g' ground, 'p' projectile,
+		-- 'f' feature; "-" = none/unavailable); the payload is a unit id or a
+		-- position table depending on the type.
+		local tc, tid, tx, ty, tz = "-", 0, 0, 0, 0
+		if spGetProjectileTarget then
+			local ttype, tgt = spGetProjectileTarget(pid)
+			if ttype then
+				tc = string.char(ttype)
+				if type(tgt) == "table" then
+					tx, ty, tz = tgt[1] or 0, tgt[2] or 0, tgt[3] or 0
+				elseif type(tgt) == "number" then
+					tid = tgt
+				end
+			end
+		end
+		lines[#lines + 1] = string.format(
+			"BRSNAP PJ %d %d %d %d %d %.1f %.1f %.1f %.2f %.2f %.2f %s %d %.1f %.1f %.1f",
+			frame, pid, wdef, owner, team, px or 0, py or 0, pz or 0,
+			vx or 0, vy or 0, vz or 0, tc, tid, tx, ty, tz)
+	end
+	return np
+end
+
+local projBroken = false
+local lastProjCount = nil
+local lastProjTime = nil
+
 function widget:GameFrame(frame)
 	if disableWidgets and not widgetsDisabled then
 		local ok, err = pcall(disableOtherWidgets)
@@ -430,6 +497,20 @@ function widget:GameFrame(frame)
 				teamID, m or 0, e or 0, mStore or 0, eStore or 0,
 				mInc or 0, eInc or 0)
 		end
+		-- EXPERIMENT: all in-flight weapon projectiles at this sample, timed
+		-- separately so the heartbeat can report what the poll costs.
+		lastProjCount, lastProjTime = nil, nil
+		if not projBroken and spGetProjectilesInRectangle and spGetProjectilePosition then
+			local tp0 = startClock()
+			local ok, np = pcall(sampleProjectiles, lines, frame)
+			if ok then
+				lastProjCount = np
+				lastProjTime = elapsedStr(tp0)
+			else
+				projBroken = true
+				Echo("[barreplay] projectile sampling failed (" .. tostring(np) .. "); disabling PJ output")
+			end
+		end
 		writeChunk(table.concat(lines, "\n"))
 		if out then
 			out:flush() -- flush every sample so the file is durable if the run is cut short
@@ -447,6 +528,9 @@ function widget:GameFrame(frame)
 			frame, spGetGameSeconds(), n, draws, activeWidgetCount())
 		if sampleTime then
 			line = line .. " sample_time=" .. sampleTime
+		end
+		if lastProjCount then
+			line = line .. string.format(" projectiles=%d proj_time=%s", lastProjCount, lastProjTime)
 		end
 		Echo(line)
 		-- Top profiler scopes so far (infolog only): shows whether the frame cost
