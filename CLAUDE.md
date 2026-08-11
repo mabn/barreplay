@@ -168,7 +168,10 @@ assets/lua/replay_uploader.lua   player-installable live-game variant: constants
                           radar-memory dot and — until its death sequence finishes — as the
                           killed unit itself, and neither may resurrect it; a health read of
                           0 or Spring.GetUnitIsDead is a death even with no UnitDestroyed
-                          callin.
+                          callin. Widget >= 1.6.0 also records in-flight weapon projectiles
+                          each sample as `J` records (EXPERIMENT, recordProjectiles const;
+                          text PJDEF/PJ payload — see docs/brepstream-format.md; existing
+                          decoders skip the tag).
                           internal/capture repairs pre-1.2.0 captures at decode time
                           (capture.graveyard) —
                           to <write-dir>/<gameId>.brepstream — a binary

@@ -53,6 +53,10 @@
 --        column (the unit id this one is building/assisting, 0 = none;
 --        widget >= 1.4.0).
 --     E  unit lifecycle event, text payload "<frame> <kind> <id> <def> <team>"
+--     J  in-flight weapon projectiles at a sampled frame (EXPERIMENT, widget
+--        >= 1.6.0, recordProjectiles): text payload of newline-separated
+--        PJDEF/PJ lines, same grammar as the snapshotter's .brsnap experiment.
+--        Readers that do not know the tag skip it (forward compatibility).
 --     X  end of stream, text payload = reason (gameover|shutdown|error)
 --
 -- .brsnap text format (writeText; see internal/capture/capture.go): unchanged
@@ -64,7 +68,7 @@
 -- it is reported in GetInfo, the load Echo, and the stream's GAME line, so
 -- every capture records which encoder produced it (the copy on a player's
 -- machine can be arbitrarily old — the server/decoder needs to know).
-local widgetVersion = "1.5.0"
+local widgetVersion = "1.6.0"
 
 function widget:GetInfo()
 	return {
@@ -116,6 +120,14 @@ local writeText = false
 -- own-ally-team-only behavior.
 local recordEnemies = true
 
+-- EXPERIMENT: record every weapon projectile this client can see at each
+-- sampled frame (piece/debris projectiles excluded) as a `J` binary record /
+-- PJ text lines. Groundwork for showing nukes and other ordnance in the
+-- viewer; existing decoders skip the record. Self-disables on the first
+-- error (see projBroken) so an engine without the projectile read API
+-- cannot break the capture.
+local recordProjectiles = true
+
 -- Sampling interval in sim frames (30 = 1 Hz at BAR's 30 fps sim). A constant:
 -- every uploader in a game must sample at the same frames (frame % sampleEvery
 -- == 0) so the server can merge streams by exact frame number.
@@ -151,6 +163,16 @@ local spGetSpectatingState = Spring.GetSpectatingState
 local spGetMyAllyTeamID = Spring.GetMyAllyTeamID
 local spGetMyPlayerID   = Spring.GetMyPlayerID
 local spGetGameRulesParam = Spring.GetGameRulesParam
+
+-- EXPERIMENT: projectile read API (recordProjectiles). Availability varies
+-- across engine builds; the sampler is guarded and self-disabling.
+local spGetProjectilesInRectangle = Spring.GetProjectilesInRectangle
+local spGetProjectilePosition     = Spring.GetProjectilePosition
+local spGetProjectileVelocity     = Spring.GetProjectileVelocity
+local spGetProjectileDefID        = Spring.GetProjectileDefID
+local spGetProjectileOwnerID      = Spring.GetProjectileOwnerID
+local spGetProjectileTeamID       = Spring.GetProjectileTeamID
+local spGetProjectileTarget       = Spring.GetProjectileTarget
 
 local mathFloor = math.floor
 
@@ -596,6 +618,62 @@ end
 local lastSampleTime = nil
 local lastUnitCount = 0
 
+-- EXPERIMENT (recordProjectiles): sampleProjectiles returns the count of
+-- weapon projectiles currently visible to this client plus one PJDEF/PJ text
+-- line each (nil when none) — the same grammar as the snapshotter widget's
+-- experiment, so one analyzer reads both. Piece/debris projectiles are
+-- excluded (cosmetic wreckage). The first time a weapon-def id is seen a
+-- PJDEF id->name line precedes it, so the WeaponDefs table is never dumped
+-- wholesale. Target: ttype is a char ('u' unit, 'g' ground, 'p' projectile,
+-- 'f' feature, "-" none/unavailable); unit targets fill tid, ground aims
+-- fill tx/ty/tz — for a stockpile shot that is the impact point at launch.
+-- May raise; called via pcall with the projBroken self-disable guard.
+local mapSizeX = (Game and Game.mapSizeX) or 0
+local mapSizeZ = (Game and Game.mapSizeZ) or 0
+local seenWeaponDefs = {}
+local projBroken = false
+local lastProjCount = nil
+local lastProjTime = nil
+
+local function sampleProjectiles(frame)
+	local projs = spGetProjectilesInRectangle(0, 0, mapSizeX, mapSizeZ, false, true)
+	local np = #projs
+	if np == 0 then
+		return 0, nil
+	end
+	local lines = {}
+	for i = 1, np do
+		local pid = projs[i]
+		local wdef = spGetProjectileDefID(pid) or -1
+		if wdef >= 0 and not seenWeaponDefs[wdef] then
+			seenWeaponDefs[wdef] = true
+			local wd = WeaponDefs and WeaponDefs[wdef]
+			lines[#lines + 1] = string.format("BRSNAP PJDEF %d %s", wdef, (wd and wd.name) or "?")
+		end
+		local px, py, pz = spGetProjectilePosition(pid)
+		local vx, vy, vz = spGetProjectileVelocity(pid)
+		local owner = spGetProjectileOwnerID(pid) or -1
+		local team = (spGetProjectileTeamID and spGetProjectileTeamID(pid)) or -1
+		local tc, tid, tx, ty, tz = "-", 0, 0, 0, 0
+		if spGetProjectileTarget then
+			local ttype, tgt = spGetProjectileTarget(pid)
+			if ttype then
+				tc = string.char(ttype)
+				if type(tgt) == "table" then
+					tx, ty, tz = tgt[1] or 0, tgt[2] or 0, tgt[3] or 0
+				elseif type(tgt) == "number" then
+					tid = tgt
+				end
+			end
+		end
+		lines[#lines + 1] = string.format(
+			"BRSNAP PJ %d %d %d %d %d %.1f %.1f %.1f %.2f %.2f %.2f %s %d %.1f %.1f %.1f",
+			frame, pid, wdef, owner, team, px or 0, py or 0, pz or 0,
+			vx or 0, vy or 0, vz or 0, tc, tid, tx, ty, tz)
+	end
+	return np, lines
+end
+
 local function sample(frame)
 	local t0 = startClock()
 	local all = recordAll()
@@ -782,13 +860,36 @@ local function sample(frame)
 		end
 	end
 
+	-- EXPERIMENT: weapon projectiles in flight this sample (recordProjectiles),
+	-- timed separately so the heartbeat can report what the poll costs.
+	local plines = nil
+	lastProjCount, lastProjTime = nil, nil
+	if recordProjectiles and not projBroken
+		and spGetProjectilesInRectangle and spGetProjectilePosition then
+		local tp0 = startClock()
+		local ok, np, ls = pcall(sampleProjectiles, frame)
+		if ok then
+			lastProjCount, plines = np, ls
+			lastProjTime = elapsedStr(tp0)
+		else
+			projBroken = true
+			Echo("[replay-uploader] projectile sampling failed (" .. tostring(np) .. "); disabling PJ output")
+		end
+	end
+
 	if ulines then
 		writeChunk(string.format("BRSNAP F %d %.3f %d", frame, spGetGameSeconds(), recorded))
 		writeChunk(table.concat(ulines, "\n"))
+		if plines then
+			writeChunk(table.concat(plines, "\n"))
+		end
 	end
 	if writeBinary then
 		writeRecord("F", packFrameRecord(frame, keyframe, n,
 			cid, cdef, cteam, cx, cz, chp, cmax, cdvx, cdvz, cb, ct, dead, nR, rteam, rcols))
+		if plines then
+			writeRecord("J", table.concat(plines, "\n"))
+		end
 	end
 	flushOut() -- durable if the game/engine dies mid-match
 	lastSampledFrame = frame
@@ -964,6 +1065,9 @@ function widget:GameFrame(frame)
 			frame, spGetGameSeconds(), lastUnitCount)
 		if lastSampleTime then
 			line = line .. " sample_time=" .. lastSampleTime
+		end
+		if lastProjCount then
+			line = line .. string.format(" projectiles=%d proj_time=%s", lastProjCount, lastProjTime)
 		end
 		Echo(line)
 	end
