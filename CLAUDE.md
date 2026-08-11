@@ -168,7 +168,10 @@ assets/lua/replay_uploader.lua   player-installable live-game variant: constants
                           radar-memory dot and — until its death sequence finishes — as the
                           killed unit itself, and neither may resurrect it; a health read of
                           0 or Spring.GetUnitIsDead is a death even with no UnitDestroyed
-                          callin.
+                          callin. Widget >= 1.6.0 also records in-flight weapon projectiles
+                          each sample as `J` records (EXPERIMENT, recordProjectiles const;
+                          text PJDEF/PJ payload — see docs/brepstream-format.md; existing
+                          decoders skip the tag).
                           internal/capture repairs pre-1.2.0 captures at decode time
                           (capture.graveyard) —
                           to <write-dir>/<gameId>.brepstream — a binary
@@ -302,6 +305,13 @@ BRSNAP F <frame> <timeSec> <count>             start of a periodic snapshot
 BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp> <vx> <vy> <vz> <build> <target>   one unit (follows an F line)
 BRSNAP R <teamID> <metal> <energy> <mStore> <eStore> <mIncome> <eIncome>   team economy (follows an F line)
 BRSNAP EV <frame> <kind> <id> <def> <team>     unit lifecycle event
+BRSNAP PJDEF <wdefID> <name>                   weapon-def id -> name, emitted on first sighting (EXPERIMENT)
+BRSNAP PJ <frame> <id> <wdef> <owner> <team> <x> <y> <z> <vx> <vy> <vz> <ttype> <tid> <tx> <ty> <tz>
+                                               one in-flight weapon projectile per sampled frame (EXPERIMENT:
+                                               capture ignores these; ttype = target char 'u'/'g'/'p'/'f' or "-",
+                                               tid = target unit id, tx/ty/tz = target position for ground aims;
+                                               piece/debris projectiles excluded; heartbeat reports
+                                               projectiles=<n> proj_time=<t> for the poll's cost)
 BRSNAP PROF <totalMs> <name>                   engine time-profiler record (once, at game over)
 BRSNAP PROFD <frame> <units> <totalMs> <name>  per-heartbeat profiler sample (-profile only)
 ```
