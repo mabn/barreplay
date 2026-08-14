@@ -2428,6 +2428,9 @@ function renderHome(errMsg) {
           }
           const s = document.createElement('span');
           s.className = 'side';
+          // Same per-ally colour family the viewer assigns (assignColors):
+          // side i gets ALLY_HUES[i], groups being ally-ascending like there.
+          s.style.color = `hsl(${ALLY_HUES[i % ALLY_HUES.length]} 62% 62%)`;
           const shown = (g.players || []).slice(0, per);
           let text = shown.map(p => p.name).join(', ');
           if (g.count > shown.length) text += ` +${g.count - shown.length}`;
@@ -2496,7 +2499,7 @@ function renderHome(errMsg) {
       td.appendChild(a);
       tr.appendChild(td);
     }
-    cell(e.sizeBytes != null ? fmtSize(e.sizeBytes) : null, 'num');
+    cell(e.sizeBytes != null ? fmtSize(e.sizeBytes) : null, 'num data');
     // Admin column (?admin=true only): re-derive the row's settings badges
     // from the BAR API's stored modoptions, no repack/re-upload needed.
     {
