@@ -443,6 +443,13 @@ func TestCatalog(t *testing.T) {
 			{TeamID: 2, AllyTeam: 1, Side: "armada"},
 			{TeamID: 3, AllyTeam: 2}, // Gaia: no side, no player -> not a playing slot
 		},
+		Players: []snapshot.PlayerInfo{
+			{PlayerID: 0, Name: "low", Team: 0, Skill: 12.5},
+			{PlayerID: 1, Name: "high", Team: 1, Skill: 30},
+			{PlayerID: 2, Name: "solo", Team: 2, Skill: 20},
+			{PlayerID: 3, Name: "watcher", Team: 0, Spectator: true},
+		},
+		Recorder: &snapshot.RecorderInfo{PlayerID: 2, AllyTeam: 1},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -490,6 +497,16 @@ func TestCatalog(t *testing.T) {
 	}
 	if r.SizeBytes == nil || *r.SizeBytes <= 0 {
 		t.Errorf("recent sizeBytes = %v", r.SizeBytes)
+	}
+	// Players: per ally team, best OS first, spectators excluded.
+	if len(r.Players) != 2 ||
+		r.Players[0].Ally != 0 || r.Players[0].Count != 2 ||
+		len(r.Players[0].Players) != 2 || r.Players[0].Players[0].Name != "high" || r.Players[0].Players[1].Name != "low" ||
+		r.Players[1].Ally != 1 || r.Players[1].Count != 1 || len(r.Players[1].Players) != 1 || r.Players[1].Players[0].Name != "solo" {
+		t.Errorf("recent players = %+v", r.Players)
+	}
+	if r.UploaderAlly == nil || *r.UploaderAlly != 1 {
+		t.Errorf("recent uploaderAlly = %v, want 1", r.UploaderAlly)
 	}
 
 	n := entries[1]
@@ -541,12 +558,13 @@ func TestSettingsFlags(t *testing.T) {
 		t.Errorf("SettingsFlags(nil) = %v, want nil", got)
 	}
 	defaults := map[string]string{
-		"ranked_game": "0", "map_waterislava": "0", "scavunitsforplayers": "0",
+		"map_waterislava": "0", "scavunitsforplayers": "0",
 		"experimentalextraunits": "0", "unit_restrictions_nonukes": "0",
 		"unit_restrictions_noendgamelrpc": "0", "unit_restrictions_nolrpc": "0",
 		"unit_restrictions_noair": "0", "quick_start": "default",
 		"commanderbuildersenabled": "disabled",
-		"tweakdefs":                "", "tweakdefs1": "", "tweakunits": "", "tweakunits9": "",
+		"zombies":                  "disabled", "ruins": "scav_only",
+		"tweakdefs": "", "tweakdefs1": "", "tweakunits": "", "tweakunits9": "",
 	}
 	if got := SettingsFlags(defaults); got != nil {
 		t.Errorf("all-default modoptions = %v, want nil", got)
@@ -571,6 +589,13 @@ func TestSettingsFlags(t *testing.T) {
 		{map[string]string{"tweakunits3": "Zm9v"}, "mods", true},
 		{map[string]string{"quick_start": "enabled"}, "quickStart", "enabled"},
 		{map[string]string{"commanderbuildersenabled": "enabled_all"}, "comBuilders", "enabled_all"},
+		// An explicitly unranked lobby is the one "off" worth a badge.
+		{map[string]string{"ranked_game": "0"}, "unranked", true},
+		// zombies: "normal" is the plain on-state, harder tiers keep the name.
+		{map[string]string{"zombies": "normal"}, "zombies", true},
+		{map[string]string{"zombies": "nightmare"}, "zombies", "nightmare"},
+		// ruins: "scav_only" is the lobby default, only "enabled" is notable.
+		{map[string]string{"ruins": "enabled"}, "ruins", true},
 	}
 	for _, c := range cases {
 		got := SettingsFlags(c.mo)

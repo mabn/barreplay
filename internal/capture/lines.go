@@ -58,6 +58,17 @@ func applyPreambleLine(fields []string, content string, base *snapshot.Meta) (*g
 		if base.SampleEvery == 0 {
 			base.SampleEvery = g.SampleEvery
 		}
+		// A live capture records one client's point of view; remember whose.
+		// (mode "replay" is the re-sim widget, which sees the whole game and
+		// carries no player identity.) An appended segment repeats GAME —
+		// keep the first identity.
+		if g.Mode == "live" && base.Recorder == nil {
+			base.Recorder = &snapshot.RecorderInfo{
+				PlayerID:  g.PlayerID,
+				AllyTeam:  g.AllyTeam,
+				Spectator: g.Spectator,
+			}
+		}
 		return &g, true
 	case "D": // D <defID> <name> (legacy: id->name only)
 		if len(fields) >= 3 {

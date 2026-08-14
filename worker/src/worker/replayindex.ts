@@ -11,7 +11,8 @@
 // front-end polls its job row to know when to open the replay.
 import { DurableObject } from "cloudflare:workers";
 
-import type { ReplayEntry } from "./replayentry";
+import { mergeUploads } from "./replayentry";
+import type { ReplayEntry, UploadRef } from "./replayentry";
 
 /** One drag&drop upload's trip through the ingest pipeline. */
 export interface IngestJob {
@@ -61,7 +62,7 @@ export class ReplayIndex extends DurableObject<Env> {
     // In-place upgrades for tables created before a column existed (SQLite has
     // no ADD COLUMN IF NOT EXISTS; a duplicate-column error just means the
     // schema is already current).
-    for (const col of ["settings TEXT", "rid TEXT"]) {
+    for (const col of ["settings TEXT", "rid TEXT", "players TEXT", "uploader_ally INTEGER", "uploads TEXT"]) {
       try {
         ctx.storage.sql.exec(`ALTER TABLE replays ADD COLUMN ${col}`);
       } catch (e) {
@@ -70,11 +71,20 @@ export class ReplayIndex extends DurableObject<Env> {
     }
   }
 
-  /** upsert inserts or fully replaces one replay's catalog row. */
+  /** upsert inserts or fully replaces one replay's catalog row — except the
+   * uploads list, which accumulates: each revisioned PUT appends its
+   * {rid, uploaderAlly} so the row remembers every published upload of the
+   * game, not just the current one. */
   upsert(e: ReplayEntry): void {
+    const prior = this.ctx.storage.sql
+      .exec(`SELECT uploads FROM replays WHERE id = ?`, e.id)
+      .toArray();
+    const before: UploadRef[] | null =
+      prior.length > 0 && prior[0].uploads != null ? JSON.parse(prior[0].uploads as string) : null;
+    const uploads = mergeUploads(before, e.rid, e.uploaderAlly);
     this.ctx.storage.sql.exec(
-      `INSERT INTO replays (id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, updated_unix)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO replays (id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, uploader_ally, uploads, updated_unix)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          rid = excluded.rid,
          start_unix = excluded.start_unix,
@@ -83,6 +93,9 @@ export class ReplayIndex extends DurableObject<Env> {
          game_size = excluded.game_size,
          size_bytes = excluded.size_bytes,
          settings = excluded.settings,
+         players = excluded.players,
+         uploader_ally = excluded.uploader_ally,
+         uploads = excluded.uploads,
          updated_unix = excluded.updated_unix`,
       e.id,
       e.rid,
@@ -92,6 +105,9 @@ export class ReplayIndex extends DurableObject<Env> {
       e.gameSize,
       e.sizeBytes,
       e.settings === null ? null : JSON.stringify(e.settings),
+      e.players === null ? null : JSON.stringify(e.players),
+      e.uploaderAlly,
+      uploads === null ? null : JSON.stringify(uploads),
       Math.floor(Date.now() / 1000),
     );
   }
@@ -101,7 +117,7 @@ export class ReplayIndex extends DurableObject<Env> {
   list(): ReplayEntry[] {
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings
+        `SELECT id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, uploader_ally, uploads
          FROM replays
          ORDER BY start_unix IS NULL, start_unix DESC, id`,
       )
@@ -115,7 +131,23 @@ export class ReplayIndex extends DurableObject<Env> {
       gameSize: r.game_size as string | null,
       sizeBytes: r.size_bytes as number | null,
       settings: r.settings == null ? null : JSON.parse(r.settings as string),
+      players: r.players == null ? null : JSON.parse(r.players as string),
+      uploaderAlly: r.uploader_ally as number | null,
+      uploads: r.uploads == null ? null : JSON.parse(r.uploads as string),
     }));
+  }
+
+  /** updateSettings replaces one row's settings object (the admin
+   * settings-refresh: re-derived from the BAR API's modoptions without
+   * repacking the replay). Returns false when the id has no catalog row. */
+  updateSettings(id: string, settings: Record<string, boolean | string> | null): boolean {
+    const cur = this.ctx.storage.sql.exec(
+      `UPDATE replays SET settings = ?, updated_unix = ? WHERE id = ?`,
+      settings === null ? null : JSON.stringify(settings),
+      Math.floor(Date.now() / 1000),
+      id,
+    );
+    return cur.rowsWritten > 0;
   }
 
   /** jobInsert records a fresh upload as a pending ingest job. */

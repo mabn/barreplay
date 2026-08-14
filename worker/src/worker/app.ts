@@ -25,7 +25,7 @@
 import { Hono } from "hono";
 
 import { archiveSuffix, scanStreamPreamble } from "./preamble";
-import { sanitizeEntry } from "./replayentry";
+import { sanitizeEntry, settingsFlags } from "./replayentry";
 
 /** Upload size cap: keeps a whole raw stream comfortably inside Worker memory
  * and under every plan's request-body limit. Real streams are single-digit MB
@@ -70,6 +70,37 @@ app.put("/api/replays/:id", async (c) => {
   if (typeof entry === "string") return c.json({ error: entry }, 400);
   await indexStub(c.env).upsert(entry);
   return c.json({ ok: true });
+});
+
+// Admin settings-refresh: re-derive one catalog row's settings badges from
+// the BAR API's stored modoptions (its replay detail carries the demo's
+// gameSettings verbatim), without repacking or re-uploading the replay —
+// useful when the badge distillation gains a new flag after a replay was
+// published, or when the original upload ran demo-less. The endpoint is
+// deliberately open: it can only write values derived from the public
+// authoritative API for the row's own game id, so there is nothing to forge.
+app.post("/api/replays/:id/refresh-settings", async (c) => {
+  const id = c.req.param("id");
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) return c.json({ error: "invalid replay id" }, 400);
+  let detail: { gameSettings?: Record<string, unknown> };
+  try {
+    const r = await fetch(`https://api.bar-rts.com/replays/${encodeURIComponent(id)}`);
+    if (r.status === 404) return c.json({ error: "the BAR API does not know this game" }, 404);
+    if (!r.ok) return c.json({ error: `BAR API: ${r.status}` }, 502);
+    detail = await r.json();
+  } catch (e) {
+    return c.json({ error: `fetching the BAR API: ${e}` }, 502);
+  }
+  if (typeof detail?.gameSettings !== "object" || detail.gameSettings === null) {
+    return c.json({ error: "the BAR API reply carries no gameSettings" }, 502);
+  }
+  // The API serves modoption values as strings; coerce defensively.
+  const mo: Record<string, string> = {};
+  for (const [k, v] of Object.entries(detail.gameSettings)) mo[k] = String(v);
+  const settings = settingsFlags(mo);
+  const ok = await indexStub(c.env).updateSettings(id, settings);
+  if (!ok) return c.json({ error: "no catalog row for this replay" }, 404);
+  return c.json({ ok: true, settings });
 });
 
 // Drag&drop upload: the Worker does NOT transcode (the viewer's .brp wire is

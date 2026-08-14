@@ -2404,6 +2404,49 @@ function renderHome(errMsg) {
     cell(e.durationSec != null ? fmtDuration(e.durationSec) : null);
     cell(e.map, 'map');
     cell(e.gameSize);
+    // Players: each side's top names by OS — three per side for a two-team
+    // game, one when there are more sides. The side whose client recorded
+    // the current upload is marked; the full known roster (with OS) rides
+    // each side's tooltip.
+    {
+      const td = document.createElement('td');
+      td.className = 'players';
+      const a = document.createElement('a');
+      a.href = href;
+      const groups = Array.isArray(e.players) ? e.players : [];
+      if (!groups.length) {
+        td.classList.add('dim');
+        a.textContent = '—';
+      } else {
+        const per = groups.length === 2 ? 3 : 1;
+        groups.forEach((g, i) => {
+          if (i) {
+            const sep = document.createElement('span');
+            sep.className = 'vs';
+            sep.textContent = 'v';
+            a.appendChild(sep);
+          }
+          const s = document.createElement('span');
+          s.className = 'side';
+          const shown = (g.players || []).slice(0, per);
+          let text = shown.map(p => p.name).join(', ');
+          if (g.count > shown.length) text += ` +${g.count - shown.length}`;
+          s.textContent = text;
+          let tip = (g.players || [])
+            .map(p => (p.os != null ? `${p.name} (${p.os.toFixed(1)})` : p.name))
+            .join('\n');
+          if (g.count > (g.players || []).length) tip += `\n+${g.count - g.players.length} more`;
+          if (e.uploaderAlly != null && e.uploaderAlly === g.ally) {
+            s.classList.add('uploader');
+            tip += '\n◉ this side recorded the replay';
+          }
+          s.title = tip;
+          a.appendChild(s);
+        });
+      }
+      td.appendChild(a);
+      tr.appendChild(td);
+    }
     // External links for this game (class "ext" exempts them from the row's
     // SPA click handling — the browser follows them natively, in a new tab).
     {
@@ -2420,6 +2463,20 @@ function renderHome(errMsg) {
         a.target = '_blank';
         a.rel = 'noopener';
         a.textContent = label;
+        td.appendChild(a);
+      }
+      // Other uploads of this game: every published revision except the
+      // current one keeps playing at its own ?replay= (nothing is ever
+      // deleted), labelled by the side that recorded it. Internal links —
+      // the row click handler routes them through the SPA.
+      const cur = urlId(e);
+      for (const u of (e.uploads || [])) {
+        if (!u.rid || u.rid === cur) continue;
+        const a = document.createElement('a');
+        a.className = 'alt';
+        a.href = replayHref(u.rid);
+        a.textContent = u.ally != null ? `alt·T${u.ally + 1}` : 'alt';
+        a.title = 'another upload of this game' + (u.ally != null ? ` (recorded by team ${u.ally + 1})` : '');
         td.appendChild(a);
       }
       tr.appendChild(td);
@@ -2440,21 +2497,67 @@ function renderHome(errMsg) {
       tr.appendChild(td);
     }
     cell(e.sizeBytes != null ? fmtSize(e.sizeBytes) : null, 'num');
+    // Admin column (?admin=true only): re-derive the row's settings badges
+    // from the BAR API's stored modoptions, no repack/re-upload needed.
+    {
+      const td = document.createElement('td');
+      td.className = 'admin';
+      if (adminMode()) {
+        const btn = document.createElement('button');
+        btn.className = 'refresh';
+        btn.textContent = '⟳';
+        btn.title = 're-fetch game settings from the BAR API';
+        btn.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          btn.disabled = true;
+          btn.textContent = '…';
+          try {
+            const r = await fetch(`/api/replays/${encodeURIComponent(e.id)}/refresh-settings`, { method: 'POST' });
+            const body = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+            e.settings = body.settings;
+            renderHome();
+          } catch (err) {
+            btn.disabled = false;
+            btn.textContent = '⟳';
+            renderHome(`settings refresh for ${e.id} failed: ${err.message || err}`);
+          }
+        });
+        td.appendChild(btn);
+      }
+      tr.appendChild(td);
+    }
     tr.addEventListener('click', (ev) => {
-      // External links keep their native behaviour entirely.
-      if (ev.target.closest && ev.target.closest('a.ext')) return;
+      // External links keep their native behaviour entirely; so does the
+      // admin refresh button (its own handler stops propagation, this is
+      // just belt and braces).
+      if (ev.target.closest && ev.target.closest('a.ext, button.refresh')) return;
       // Only hijack a plain left-click; modified clicks keep the browser's
       // native link behaviour (new tab / new window).
       if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
       ev.preventDefault();
+      // An alternate-upload link opens ITS revision instead of the row's.
+      const alt = ev.target.closest && ev.target.closest('a.alt');
+      if (alt) {
+        openReplay(new URL(alt.href, location.href).searchParams.get('replay'));
+        return;
+      }
       openReplay(urlId(e));
     });
     tbody.appendChild(tr);
   }
+  document.body.classList.toggle('admin-mode', adminMode());
   const text = errMsg || (replayList.length ? '' :
     'No replays yet. Drop a .brepstream above, or upload one with: go run ./cmd/pack -upload r2 <capture>.');
   msg.style.display = text ? '' : 'none';
   msg.textContent = text;
+}
+
+// adminMode: ?admin=true unlocks the per-row maintenance controls (the
+// settings-refresh button). Purely a UI gate — the endpoints behind it are
+// their own authority.
+function adminMode() {
+  return new URLSearchParams(location.search).get('admin') === 'true';
 }
 
 // replayHref is the shareable URL for one replay: the current URL (so viewer
@@ -2473,8 +2576,11 @@ function replayHref(id) {
 // per-flag colours (lava, mods).
 const SETTINGS_BADGES = [
   ['ranked', 'ranked'],
+  ['unranked', 'unranked'],
   ['lava', 'lava'],
   ['mods', 'mods'],
+  ['zombies', 'zombies'],
+  ['ruins', 'ruins'],
   ['scavUnits', 'scavs'],
   ['extraUnits', 'extra units'],
   ['quickStart', 'quick start', true],

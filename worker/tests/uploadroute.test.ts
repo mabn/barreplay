@@ -25,6 +25,12 @@ class FakeIndex {
   list(): ReplayEntry[] {
     return [...this.entries.values()];
   }
+  updateSettings(id: string, settings: Record<string, boolean | string> | null): boolean {
+    const e = this.entries.get(id);
+    if (!e) return false;
+    e.settings = settings;
+    return true;
+  }
   jobInsert(id: string, streamKey: string, gameId: string): void {
     this.jobs.set(id, { id, streamKey, gameId, state: "pending", error: null, createdUnix: 0, updatedUnix: 0 });
   }
@@ -262,4 +268,40 @@ test("PUT /api/replays carries rid into the catalog", async () => {
   );
   assert.equal(res.status, 200);
   assert.equal(index.entries.get(GAME_ID)?.rid, `${GAME_ID}-1a2b3c4d`);
+});
+
+// The admin settings-refresh re-derives one row's badges from the BAR API's
+// stored modoptions (no repack/re-upload). The API call is stubbed out.
+test("POST /api/replays/:id/refresh-settings updates the row from the BAR API", async (t) => {
+  const { env, index } = makeEnv();
+  await app.request(
+    `/api/replays/${GAME_ID}`,
+    { method: "PUT", body: JSON.stringify({ durationSec: 60, settings: { ranked: true } }) },
+    env,
+  );
+
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  let fetched = "";
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    fetched = String(input);
+    if (fetched.includes("unknown0000")) return new Response("not found", { status: 404 });
+    return Response.json({
+      gameSettings: { ranked_game: "0", zombies: "nightmare", ruins: "enabled" },
+    });
+  }) as typeof fetch;
+
+  const res = await app.request(`/api/replays/${GAME_ID}/refresh-settings`, { method: "POST" }, env);
+  assert.equal(res.status, 200);
+  const body = await asJson(res);
+  assert.deepEqual(body.settings, { unranked: true, zombies: "nightmare", ruins: true });
+  assert.equal(fetched, `https://api.bar-rts.com/replays/${GAME_ID}`);
+  assert.deepEqual(index.entries.get(GAME_ID)?.settings, { unranked: true, zombies: "nightmare", ruins: true });
+
+  // A game the BAR API doesn't know, and a game with no catalog row: 404.
+  const unknownApi = await app.request(`/api/replays/unknown0000/refresh-settings`, { method: "POST" }, env);
+  assert.equal(unknownApi.status, 404);
+  globalThis.fetch = (async () => Response.json({ gameSettings: {} })) as typeof fetch;
+  const noRow = await app.request(`/api/replays/norow11111/refresh-settings`, { method: "POST" }, env);
+  assert.equal(noRow.status, 404);
 });

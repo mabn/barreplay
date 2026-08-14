@@ -131,6 +131,16 @@ type UnitDef struct {
 	WeaponCount int32   `json:"weaponCount,omitempty"`
 }
 
+// RecorderInfo identifies the client that captured a live-game stream (the
+// uploader widget's GAME preamble line): whose point of view the capture
+// records. A spectator recorder sees everything; a playing recorder sees its
+// own ally team plus whatever the engine listed as visible enemies.
+type RecorderInfo struct {
+	PlayerID  int32 `json:"playerId"`
+	AllyTeam  int32 `json:"allyTeam"`
+	Spectator bool  `json:"spectator,omitempty"`
+}
+
 // Meta is written once at the start of a capture and describes the replay and
 // the static data needed to interpret the frames: notably the full unit-def
 // table (stable for the duration of a single game) and the player roster.
@@ -144,6 +154,9 @@ type Meta struct {
 	UnitDefs      map[int32]UnitDef `json:"unitDefs"`
 	Teams         []TeamInfo        `json:"teams"`
 	Players       []PlayerInfo      `json:"players,omitempty"`
+	// Recorder is set for live-game captures (the uploader widget); nil for
+	// the engine re-sim pipeline, which sees the whole game.
+	Recorder *RecorderInfo `json:"recorder,omitempty"`
 }
 
 // Writer is the pluggable persistence boundary. Callers must call WriteMeta

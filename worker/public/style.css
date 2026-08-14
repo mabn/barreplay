@@ -76,9 +76,34 @@ body.home .controls, body.home #wrap { display: none; }
   white-space: nowrap;
 }
 /* Per-flag badge colours: lava glows orange, mods (tweaked unit/def tables)
-   warns yellow — the same yellow family as the energy bars. */
+   warns yellow — the same yellow family as the energy bars; zombies rise in
+   purple, ruins moss over in green, an explicitly unranked lobby cools blue. */
 #hometable .badge-lava { color: #ff9a3c; border-color: #7a4a26; background: #3a2415; }
 #hometable .badge-mods { color: #e3c34a; border-color: #6e5c1e; background: #332b10; }
+#hometable .badge-zombies { color: #c58aff; border-color: #5e3d85; background: #2a1a40; }
+#hometable .badge-ruins { color: #7fd58a; border-color: #33663c; background: #16311b; }
+#hometable .badge-unranked { color: #7fb2ff; border-color: #2f4d7a; background: #16243a; }
+/* Players column: one span per side, "v" separators; the side that recorded
+   the current upload gets a viewpoint dot. Full roster in the tooltip. */
+#hometable td.players { white-space: normal; }
+#hometable td.players .vs { color: #6f87a0; padding: 0 6px; font-size: 11px; }
+#hometable td.players .side.uploader::before { content: '◉ '; color: #8fd3ff; }
+/* Alternate uploads of the same game (superseded revisions keep playing). */
+#hometable td.links a.alt {
+  display: inline-block; padding: 6px 5px; font-size: 11px;
+  color: #7fa6c4; text-decoration: none;
+}
+#hometable td.links a.alt:hover { text-decoration: underline; color: #8fd3ff; }
+/* Admin column (?admin=true): hidden unless the page is in admin mode. */
+#hometable th.admin, #hometable td.admin { display: none; }
+body.admin-mode #hometable th.admin, body.admin-mode #hometable td.admin { display: table-cell; }
+#hometable td.admin button.refresh {
+  font: inherit; font-size: 13px; line-height: 1; padding: 4px 7px; margin: 2px 4px;
+  color: #9fb0bf; background: #232e39; border: 1px solid #33404d; border-radius: 6px;
+  cursor: pointer;
+}
+#hometable td.admin button.refresh:hover:enabled { color: #cfe3f5; border-color: #4a5a6c; }
+#hometable td.admin button.refresh:disabled { opacity: .6; cursor: default; }
 /* External per-game links (gex, BAR): real links, visually distinct from the
    invisible row-link anchors filling the other cells. */
 #hometable td.links a.ext {
