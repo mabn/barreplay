@@ -2506,7 +2506,7 @@ function renderHome(errMsg) {
         const btn = document.createElement('button');
         btn.className = 'refresh';
         btn.textContent = '⟳';
-        btn.title = 're-fetch game settings from the BAR API';
+        btn.title = 're-fetch game settings & players from the BAR API';
         btn.addEventListener('click', async (ev) => {
           ev.stopPropagation();
           btn.disabled = true;
@@ -2516,6 +2516,9 @@ function renderHome(errMsg) {
             const body = await r.json().catch(() => ({}));
             if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
             e.settings = body.settings;
+            // players stays untouched when the API named nobody (the server
+            // keeps the stored roster too).
+            if (body.players) e.players = body.players;
             renderHome();
           } catch (err) {
             btn.disabled = false;
@@ -2581,25 +2584,32 @@ const SETTINGS_BADGES = [
   ['mods', 'mods'],
   ['zombies', 'zombies'],
   ['ruins', 'ruins'],
-  ['scavUnits', 'scavs'],
-  ['extraUnits', 'extra units'],
   ['quickStart', 'quick start', true],
   ['comBuilders', 'base builder', true],
-  ['noAir', 'no air'],
   ['noNukes', 'no nukes'],
   ['noLrpc', 'no lrpc'],
   ['noEndgameLrpc', 'no endgame lrpc'],
 ];
 
+// Flags the catalog records but the list deliberately doesn't badge (too
+// common to be news). Kept in the data so this stays a display choice.
+const HIDDEN_SETTINGS = new Set(['scavUnits', 'extraUnits', 'noAir']);
+
 // settingsBadges turns a catalog entry's settings object into badges:
-// [{key, label}].
+// [{key, label}]. Suppressions: the HIDDEN_SETTINGS flags never show, and
+// `mods` is implied noise next to lava/zombies (those game modes ship as
+// tweak blobs, which is exactly what `mods` detects).
 function settingsBadges(settings) {
   if (!settings || typeof settings !== 'object') return [];
   const out = [];
-  const seen = new Set();
+  const seen = new Set(HIDDEN_SETTINGS);
   for (const [key, label, valueless] of SETTINGS_BADGES) {
     const v = settings[key];
     if (v === undefined || v === false) continue;
+    if (key === 'mods' && (settings.lava || settings.zombies)) {
+      seen.add(key); // suppressed, not unknown — keep it out of the fallback
+      continue;
+    }
     seen.add(key);
     out.push({ key, label: v === true || valueless ? label : `${label}: ${v}` });
   }

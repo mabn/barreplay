@@ -198,6 +198,48 @@ export function settingsFlags(mo: Record<string, string>): Record<string, boolea
   return Object.keys(out).length === 0 ? null : out;
 }
 
+/** playersFromApi rebuilds the catalog's players column from the BAR API's
+ * replay-detail AllyTeams array (its stored copy of the demo's roster) — the
+ * admin refresh route's counterpart to viz.BuildCatalogEntry's .brp-derived
+ * roster: same shape, same top-5-per-ally-by-OS cap. Human players sort
+ * best-OS-first; AI slots (Raptors, BARb bots — no rating) follow after.
+ * Null when the reply names nobody. */
+export function playersFromApi(allyTeams: unknown): CatalogTeam[] | null {
+  if (!Array.isArray(allyTeams)) return null;
+  const groups: CatalogTeam[] = [];
+  for (const at of allyTeams) {
+    if (typeof at !== "object" || at === null) continue;
+    const a = at as Record<string, unknown>;
+    if (typeof a.allyTeamId !== "number" || !Number.isInteger(a.allyTeamId)) continue;
+    const ps: CatalogTeam["players"] = [];
+    for (const p of Array.isArray(a.Players) ? a.Players : []) {
+      const name = (p as Record<string, unknown>)?.name;
+      if (typeof name !== "string" || name === "") continue;
+      const os = parseSkill((p as Record<string, unknown>).skill);
+      ps.push(os === null ? { name } : { name, os });
+    }
+    ps.sort((x, y) => (y.os ?? -Infinity) - (x.os ?? -Infinity));
+    for (const b of Array.isArray(a.AIs) ? a.AIs : []) {
+      const bot = b as Record<string, unknown>;
+      const name = typeof bot?.shortName === "string" && bot.shortName ? bot.shortName : bot?.name;
+      if (typeof name === "string" && name !== "") ps.push({ name });
+    }
+    if (ps.length === 0) continue;
+    groups.push({ ally: a.allyTeamId, count: ps.length, players: ps.slice(0, 5) });
+  }
+  groups.sort((x, y) => x.ally - y.ally);
+  return groups.length ? groups : null;
+}
+
+// parseSkill reads the API's OpenSkill value: a bracketed string like
+// "[16.67]" (the demo startscript form) or occasionally a plain number.
+function parseSkill(v: unknown): number | null {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v !== "string") return null;
+  const n = parseFloat(v.replace(/[[\]]/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
 /** mergeUploads folds one PUT's revision into a row's accumulated uploads
  * list: appends {rid, ally} when the rid is new, refreshes the recorded ally
  * when the same rid is re-published with one (identical bytes always land on

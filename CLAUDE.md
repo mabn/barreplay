@@ -142,10 +142,16 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           accumulated across PUTs via mergeUploads — never accepted from a PUT
                           body) remembering every revision ever published for the game.
                           POST /api/replays/<id>/refresh-settings (open; admin UI) re-derives one
-                          row's settings from the BAR API's stored gameSettings (its replay detail
-                          carries the demo modoptions verbatim) via settingsFlags in replayentry.ts
-                          — the TypeScript twin of viz.SettingsFlags, the two MUST stay in lockstep
-                          — so badges can be refreshed without repacking/re-uploading.
+                          row's settings AND players from the BAR API's stored demo metadata (its
+                          replay detail carries the demo modoptions verbatim as gameSettings, plus
+                          the AllyTeams roster) via settingsFlags + playersFromApi in replayentry.ts
+                          — settingsFlags is the TypeScript twin of viz.SettingsFlags, the two MUST
+                          stay in lockstep — so badges/rosters refresh without repacking/
+                          re-uploading (players are only overwritten when the API names anyone).
+                          The front-end deliberately hides some recorded flags (HIDDEN_SETTINGS in
+                          app.js: scavUnits/extraUnits/noAir — too common to badge) and suppresses
+                          `mods` next to lava/zombies (those modes ship as tweak blobs, which is
+                          what `mods` detects) — display choices only, the data stays in the rows.
                           Row shape + PUT validation live in src/worker/replayentry.ts
                           (pure, node-tested) and MUST stay in lockstep with internal/viz/catalog.go,
                           which serves the same GET /api/replays computed live from .brp files so the

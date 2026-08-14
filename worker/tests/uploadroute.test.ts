@@ -25,10 +25,15 @@ class FakeIndex {
   list(): ReplayEntry[] {
     return [...this.entries.values()];
   }
-  updateSettings(id: string, settings: Record<string, boolean | string> | null): boolean {
+  refreshFromApi(
+    id: string,
+    settings: Record<string, boolean | string> | null,
+    players: ReplayEntry["players"],
+  ): boolean {
     const e = this.entries.get(id);
     if (!e) return false;
     e.settings = settings;
+    if (players !== null) e.players = players; // COALESCE in the real DO
     return true;
   }
   jobInsert(id: string, streamKey: string, gameId: string): void {
@@ -270,8 +275,9 @@ test("PUT /api/replays carries rid into the catalog", async () => {
   assert.equal(index.entries.get(GAME_ID)?.rid, `${GAME_ID}-1a2b3c4d`);
 });
 
-// The admin settings-refresh re-derives one row's badges from the BAR API's
-// stored modoptions (no repack/re-upload). The API call is stubbed out.
+// The admin settings-refresh re-derives one row's badges AND players roster
+// from the BAR API's stored demo metadata (no repack/re-upload). The API
+// call is stubbed out.
 test("POST /api/replays/:id/refresh-settings updates the row from the BAR API", async (t) => {
   const { env, index } = makeEnv();
   await app.request(
@@ -288,6 +294,18 @@ test("POST /api/replays/:id/refresh-settings updates the row from the BAR API", 
     if (fetched.includes("unknown0000")) return new Response("not found", { status: 404 });
     return Response.json({
       gameSettings: { ranked_game: "0", zombies: "nightmare", ruins: "enabled" },
+      AllyTeams: [
+        {
+          allyTeamId: 1,
+          Players: [{ name: "solo", skill: "[20.00]" }],
+          AIs: [{ shortName: "BARb", name: "BARb(1)" }],
+        },
+        {
+          allyTeamId: 0,
+          Players: [{ name: "low", skill: "[12.50]" }, { name: "high", skill: "[30.00]" }],
+          AIs: [],
+        },
+      ],
     });
   }) as typeof fetch;
 
@@ -296,7 +314,14 @@ test("POST /api/replays/:id/refresh-settings updates the row from the BAR API", 
   const body = await asJson(res);
   assert.deepEqual(body.settings, { unranked: true, zombies: "nightmare", ruins: true });
   assert.equal(fetched, `https://api.bar-rts.com/replays/${GAME_ID}`);
-  assert.deepEqual(index.entries.get(GAME_ID)?.settings, { unranked: true, zombies: "nightmare", ruins: true });
+  const row = index.entries.get(GAME_ID);
+  assert.deepEqual(row?.settings, { unranked: true, zombies: "nightmare", ruins: true });
+  // Allies ascending, humans best-OS-first, AI slots after, counts included.
+  assert.deepEqual(row?.players, [
+    { ally: 0, count: 2, players: [{ name: "high", os: 30 }, { name: "low", os: 12.5 }] },
+    { ally: 1, count: 2, players: [{ name: "solo", os: 20 }, { name: "BARb" }] },
+  ]);
+  assert.deepEqual(body.players, row?.players);
 
   // A game the BAR API doesn't know, and a game with no catalog row: 404.
   const unknownApi = await app.request(`/api/replays/unknown0000/refresh-settings`, { method: "POST" }, env);

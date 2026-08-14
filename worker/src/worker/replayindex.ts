@@ -12,7 +12,7 @@
 import { DurableObject } from "cloudflare:workers";
 
 import { mergeUploads } from "./replayentry";
-import type { ReplayEntry, UploadRef } from "./replayentry";
+import type { CatalogTeam, ReplayEntry, UploadRef } from "./replayentry";
 
 /** One drag&drop upload's trip through the ingest pipeline. */
 export interface IngestJob {
@@ -137,13 +137,20 @@ export class ReplayIndex extends DurableObject<Env> {
     }));
   }
 
-  /** updateSettings replaces one row's settings object (the admin
-   * settings-refresh: re-derived from the BAR API's modoptions without
-   * repacking the replay). Returns false when the id has no catalog row. */
-  updateSettings(id: string, settings: Record<string, boolean | string> | null): boolean {
+  /** refreshFromApi replaces one row's settings badges and players roster
+   * with values re-derived from the BAR API's stored demo metadata (the
+   * admin refresh — no repack/re-upload). A null players keeps whatever the
+   * row already has (the API not knowing the roster must never erase one).
+   * Returns false when the id has no catalog row. */
+  refreshFromApi(
+    id: string,
+    settings: Record<string, boolean | string> | null,
+    players: CatalogTeam[] | null,
+  ): boolean {
     const cur = this.ctx.storage.sql.exec(
-      `UPDATE replays SET settings = ?, updated_unix = ? WHERE id = ?`,
+      `UPDATE replays SET settings = ?, players = COALESCE(?, players), updated_unix = ? WHERE id = ?`,
       settings === null ? null : JSON.stringify(settings),
+      players === null ? null : JSON.stringify(players),
       Math.floor(Date.now() / 1000),
       id,
     );
