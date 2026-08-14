@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mergeUploads, sanitizeEntry, settingsFlags } from "../src/worker/replayentry";
+import { mergeUploads, playersFromApi, sanitizeEntry, settingsFlags } from "../src/worker/replayentry";
 
 test("full entry passes through", () => {
   const e = sanitizeEntry("abc123", {
@@ -158,6 +158,40 @@ test("settingsFlags mirrors the Go distillation", () => {
   for (const [mo, key, want] of cases) {
     assert.deepEqual(settingsFlags(mo), { [key]: want }, JSON.stringify(mo));
   }
+});
+
+// playersFromApi rebuilds the players column from the BAR API's AllyTeams:
+// same shape and top-5 cap as viz.BuildCatalogEntry's .brp-derived roster.
+test("playersFromApi: allies ascend, humans sort by OS, AIs follow, cap holds", () => {
+  assert.equal(playersFromApi(undefined), null);
+  assert.equal(playersFromApi([]), null);
+  assert.equal(playersFromApi([{ allyTeamId: 0, Players: [], AIs: [] }]), null);
+
+  const got = playersFromApi([
+    {
+      allyTeamId: 1,
+      Players: [
+        { name: "f", skill: "[10.00]" }, { name: "e", skill: "[50.00]" },
+        { name: "d", skill: "[20.00]" }, { name: "c", skill: "[30.00]" },
+        { name: "b", skill: null }, { name: "a", skill: "[40.00]" },
+      ],
+      AIs: [],
+    },
+    { allyTeamId: 0, Players: [{ name: "human", skill: 25 }], AIs: [{ shortName: "RaptorsAI", name: "RaptorsDefenseAI(1)" }] },
+    { allyTeamId: "bogus", Players: [{ name: "dropped" }] },
+  ]);
+  assert.deepEqual(got, [
+    // Six slots on ally 1 -> count 6, top 5 kept; the unrated player sorts last (dropped by the cap).
+    { ally: 0, count: 2, players: [{ name: "human", os: 25 }, { name: "RaptorsAI" }] },
+    {
+      ally: 1,
+      count: 6,
+      players: [
+        { name: "e", os: 50 }, { name: "a", os: 40 }, { name: "c", os: 30 },
+        { name: "d", os: 20 }, { name: "f", os: 10 },
+      ],
+    },
+  ]);
 });
 
 test("ids are confined to a bare token", () => {
