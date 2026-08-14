@@ -79,35 +79,11 @@ body.home .controls, body.home #wrap { display: none; }
    warns yellow — the same yellow family as the energy bars; zombies rise in
    purple, ruins moss over in green, an explicitly unranked lobby cools blue. */
 #hometable .badge-lava {
-  position: relative;
-  color: #ffb066; border-color: #8a4a1e;
-  background: linear-gradient(180deg, #4a1c08, #2a1006);
-  box-shadow: 0 0 7px rgba(255, 110, 20, .3), inset 0 -3px 6px rgba(255, 90, 0, .25);
-  overflow: visible;
-}
-/* Two CSS flames licking up from the pill's top edge (teardrops: one round
-   corner squared off, rotated 45° so the point aims up), gently flickering
-   out of phase. Pure CSS — no emoji-font dependency. */
-#hometable .badge-lava::before, #hometable .badge-lava::after {
-  content: '';
-  position: absolute; top: -6px;
-  /* teardrop: three round corners, the sharp top-left one rotated to point up */
-  border-radius: 5% 55% 55% 55%;
-  transform: rotate(45deg);
-  animation: lava-flicker 0.9s ease-in-out infinite alternate;
-}
-#hometable .badge-lava::before {
-  left: 7px; width: 7px; height: 7px;
-  background: radial-gradient(circle at 65% 75%, #ffe08a 0 25%, #ff9a2e 55%, #e04a00 100%);
-}
-#hometable .badge-lava::after {
-  right: 9px; width: 5px; height: 5px; top: -4px;
-  background: radial-gradient(circle at 65% 75%, #ffd54a 0 30%, #ff8a1e 60%, #d03a00 100%);
-  animation-delay: -0.45s; animation-duration: 0.7s;
-}
-@keyframes lava-flicker {
-  from { transform: rotate(45deg) scale(1); filter: brightness(1); }
-  to   { transform: rotate(41deg) scale(1.25); filter: brightness(1.3); }
+  color: #ffc46a; border-color: #b85c1a;
+  /* ember gradient: hot orange rim fading into deep red coals */
+  background: linear-gradient(180deg, #7a2606, #4a1204 55%, #38150a);
+  text-shadow: 0 0 4px rgba(255, 140, 30, .5);
+  box-shadow: 0 0 8px rgba(255, 110, 20, .35), inset 0 1px 3px rgba(255, 150, 40, .35), inset 0 -3px 6px rgba(230, 60, 0, .4);
 }
 #hometable .badge-mods { color: #e3c34a; border-color: #6e5c1e; background: #332b10; }
 #hometable .badge-zombies { color: #c58aff; border-color: #5e3d85; background: #2a1a40; }
