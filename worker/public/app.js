@@ -2599,9 +2599,10 @@ const SETTINGS_BADGES = [
 const HIDDEN_SETTINGS = new Set(['scavUnits', 'extraUnits', 'noAir']);
 
 // settingsBadges turns a catalog entry's settings object into badges:
-// [{key, label}]. Suppressions: the HIDDEN_SETTINGS flags never show, and
+// [{key, label}]. Suppressions: the HIDDEN_SETTINGS flags never show,
 // `mods` is implied noise next to lava/zombies (those game modes ship as
-// tweak blobs, which is exactly what `mods` detects).
+// tweak blobs, which is exactly what `mods` detects), and akumu zombies
+// imply the lava — its badge already says it all.
 function settingsBadges(settings) {
   if (!settings || typeof settings !== 'object') return [];
   const out = [];
@@ -2609,7 +2610,10 @@ function settingsBadges(settings) {
   for (const [key, label, valueless] of SETTINGS_BADGES) {
     const v = settings[key];
     if (v === undefined || v === false) continue;
-    if (key === 'mods' && (settings.lava || settings.zombies)) {
+    const suppressed =
+      (key === 'mods' && (settings.lava || settings.zombies)) ||
+      (key === 'lava' && settings.zombies === 'akumu');
+    if (suppressed) {
       seen.add(key); // suppressed, not unknown — keep it out of the fallback
       continue;
     }
