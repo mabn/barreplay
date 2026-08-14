@@ -162,6 +162,7 @@ This is the `snapshot.Meta` structure, unchanged from the data model:
 | Unit definitions | `unitDefs` | object keyed by def id (as a string), values below |
 | Teams | `teams` | array of team info, below |
 | Players | `players` | array of player info, below (optional) |
+| Recorder | `recorder` | live-capture point of view, below (optional) |
 
 `unitDefs` values (`snapshot.UnitDef`; every field after `name` is optional):
 `id`, `name` (internal name, e.g. `armcom`), `humanName`, `metalCost`,
@@ -178,6 +179,11 @@ modify unit types and the id space depends on the exact game build.
 `players` entries (`snapshot.PlayerInfo`): `id`, `name`, `team`, `spectator`,
 `country`, `rank`, `skill` (OpenSkill "OS"), `skillUncertainty`, `accountId`,
 `boss` — the richer fields come from the demo startscript when available.
+
+`recorder` (`snapshot.RecorderInfo`, optional): `playerId`, `allyTeam`,
+`spectator` — the client whose point of view a live-game capture records
+(from the uploader widget's `GAME` preamble line). Absent for the engine
+re-sim pipeline, which sees the whole game.
 
 ### 4.2 The chunk index
 

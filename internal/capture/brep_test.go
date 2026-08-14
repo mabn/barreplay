@@ -157,6 +157,10 @@ func TestConsumeBrep(t *testing.T) {
 	if len(sink.meta.Teams) != 1 || sink.meta.Teams[0].PlayerName != "Player Zero" {
 		t.Errorf("teams (want backfilled player) = %+v", sink.meta.Teams)
 	}
+	// A live-mode GAME line identifies whose point of view the capture is.
+	if r := sink.meta.Recorder; r == nil || r.PlayerID != 0 || r.AllyTeam != 0 || r.Spectator {
+		t.Errorf("recorder = %+v, want live player 0 / ally 0", sink.meta.Recorder)
+	}
 
 	if stats.Frames != 4 || stats.LastFrame != 120 {
 		t.Fatalf("stats = %+v", stats)

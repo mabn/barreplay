@@ -132,9 +132,21 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           secret as a bearer token). Rows are keyed by the BARE gameId and carry a
                           nullable `rid` (the <gameId>-<rev> revision the pieces are actually served
                           under — see the internal/packer entry; the front-end fetches at rid ?? id)
-                          plus a nullable `settings` object (notable game-settings badges: ranked,
-                          lava, mods, …) sourced ONLY from the demo fetch — see the internal/packer
-                          entry. Row shape + PUT validation live in src/worker/replayentry.ts
+                          plus a nullable `settings` object (notable game-settings badges: ranked/
+                          unranked, lava, mods, zombies, ruins, …) sourced from the demo fetch — see
+                          the internal/packer entry — plus `players` (per-ally roster slices, top 5
+                          by OS with the ally's true count, from viz.BuildCatalogEntry), a nullable
+                          `uploaderAlly` (the recording client's side, from the .brp meta's
+                          `recorder` — the live uploader widget's GAME line; null for re-sim/
+                          spectator captures), and a server-owned `uploads` list ([{rid, ally}],
+                          accumulated across PUTs via mergeUploads — never accepted from a PUT
+                          body) remembering every revision ever published for the game.
+                          POST /api/replays/<id>/refresh-settings (open; admin UI) re-derives one
+                          row's settings from the BAR API's stored gameSettings (its replay detail
+                          carries the demo modoptions verbatim) via settingsFlags in replayentry.ts
+                          — the TypeScript twin of viz.SettingsFlags, the two MUST stay in lockstep
+                          — so badges can be refreshed without repacking/re-uploading.
+                          Row shape + PUT validation live in src/worker/replayentry.ts
                           (pure, node-tested) and MUST stay in lockstep with internal/viz/catalog.go,
                           which serves the same GET /api/replays computed live from .brp files so the
                           shared front-end works against both backends (the Go server leaves rid
@@ -143,7 +155,12 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           with /index.json so an uploaded-but-unregistered replay still shows (stats
                           dashed) while superseded revisions of cataloged games are hidden (their
                           direct ?replay= links keep playing — nothing is deleted); picking a replay
-                          sets ?replay=, the header title returns to the list.
+                          sets ?replay=, the header title returns to the list. The list's Players
+                          column shows each side's top names by OS (3 per side for a two-team game,
+                          1 when there are more sides; full roster + OS in the tooltip) with a ◉ on
+                          the side that recorded the current upload, the Links cell adds an alt·T<n>
+                          SPA link per other uploaded revision (from the row's `uploads`), and
+                          ?admin=true reveals a per-row ⟳ button calling the refresh-settings route.
                           DRAG&DROP UPLOADS: the landing page's dropzone POSTs a raw .brepstream to
                           /api/upload (open endpoint; the Hono app lives in src/worker/app.ts, kept
                           free of workerd imports so worker/tests drive the real routes; index.ts is

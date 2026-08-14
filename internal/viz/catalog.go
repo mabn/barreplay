@@ -39,7 +39,49 @@ type CatalogEntry struct {
 	// persisted in the .brp, so this is set only by pack's demo-fetch path
 	// (uploaded via PUT); the Go server's locally-computed entries omit it.
 	Settings map[string]any `json:"settings,omitempty"`
+	// Players is the roster the landing list shows: one group per ally team
+	// (ascending ally id), each holding the ally's top players by OpenSkill
+	// rating, capped at catalogPlayersPerAlly (Count keeps the full size).
+	Players []CatalogTeam `json:"players,omitempty"`
+	// UploaderAlly is the ally team whose client recorded the capture behind
+	// the current revision (Meta.Recorder) — which side's point of view the
+	// replay shows. Nil for engine re-sim captures and spectator recordings,
+	// which see the whole game.
+	UploaderAlly *int32 `json:"uploaderAlly,omitempty"`
+	// Uploads lists every revision ever published for this game with the side
+	// that recorded it, oldest first. Accumulated PUT-by-PUT in the worker's
+	// catalog (revisions are append-only, so every entry keeps playing at
+	// ?replay=<rid>); the Go viz server's files are unrevisioned, so it leaves
+	// this nil.
+	Uploads []CatalogUpload `json:"uploads,omitempty"`
 }
+
+// CatalogTeam is one ally team's roster slice in a catalog row.
+type CatalogTeam struct {
+	Ally    int32           `json:"ally"`
+	Count   int             `json:"count"` // total players on the ally team
+	Players []CatalogPlayer `json:"players"`
+}
+
+// CatalogPlayer is one player in a CatalogTeam, best first.
+type CatalogPlayer struct {
+	Name string `json:"name"`
+	// Skill is the OpenSkill rating ("OS") from the demo startscript;
+	// 0 (omitted) when the capture has no startscript behind it.
+	Skill float32 `json:"os,omitempty"`
+}
+
+// CatalogUpload is one published revision of a game: its rid and the ally
+// team of the recorder (nil for a spectator or unknown point of view).
+type CatalogUpload struct {
+	Rid  string `json:"rid"`
+	Ally *int32 `json:"ally"`
+}
+
+// catalogPlayersPerAlly caps each ally team's roster slice in the catalog:
+// enough for the landing list to show three names per side of a team game
+// (plus headroom) without a 25v25's full roster bloating every listing.
+const catalogPlayersPerAlly = 5
 
 // BuildCatalogEntry derives one replay's catalog row from its parsed .brp.
 // sizeBytes is supplied by the caller because it depends on the hosting shape
@@ -60,7 +102,59 @@ func BuildCatalogEntry(id string, bf *snapshot.BRPFile, sizeBytes int64) Catalog
 	if v, ok := captureDurationSec(bf); ok {
 		e.DurationSec = &v
 	}
+	e.Players = catalogPlayers(bf.Meta)
+	if r := bf.Meta.Recorder; r != nil && !r.Spectator {
+		for _, t := range bf.Meta.Teams {
+			// Trust the recorded ally only if it exists in the team table.
+			if t.AllyTeam == r.AllyTeam {
+				v := r.AllyTeam
+				e.UploaderAlly = &v
+				break
+			}
+		}
+	}
 	return e
+}
+
+// catalogPlayers distills the capture's roster into the catalog's players
+// column: non-spectator players grouped by ally team (ascending ally id),
+// each group sorted best-OS-first and capped at catalogPlayersPerAlly with
+// Count keeping the ally's true size. Nil when the capture names no players.
+func catalogPlayers(meta snapshot.Meta) []CatalogTeam {
+	teamAlly := map[int32]int32{}
+	for _, t := range meta.Teams {
+		teamAlly[t.TeamID] = t.AllyTeam
+	}
+	perAlly := map[int32][]CatalogPlayer{}
+	for _, p := range meta.Players {
+		if p.Spectator || p.Name == "" {
+			continue
+		}
+		ally, ok := teamAlly[p.Team]
+		if !ok {
+			continue
+		}
+		perAlly[ally] = append(perAlly[ally], CatalogPlayer{Name: p.Name, Skill: p.Skill})
+	}
+	if len(perAlly) == 0 {
+		return nil
+	}
+	allies := make([]int32, 0, len(perAlly))
+	for a := range perAlly {
+		allies = append(allies, a)
+	}
+	sort.Slice(allies, func(i, j int) bool { return allies[i] < allies[j] })
+	out := make([]CatalogTeam, 0, len(allies))
+	for _, a := range allies {
+		ps := perAlly[a]
+		sort.SliceStable(ps, func(i, j int) bool { return ps[i].Skill > ps[j].Skill })
+		n := len(ps)
+		if len(ps) > catalogPlayersPerAlly {
+			ps = ps[:catalogPlayersPerAlly]
+		}
+		out = append(out, CatalogTeam{Ally: a, Count: n, Players: ps})
+	}
+	return out
 }
 
 // SettingsFlags distills a demo startscript's raw [modoptions] map into the
@@ -69,7 +163,10 @@ func BuildCatalogEntry(id string, bf *snapshot.BRPFile, sizeBytes int64) Catalog
 // UI renders a badge per present key. tweakdefs*/tweakunits* values are
 // base64-encoded Lua blobs — only their presence is recorded (`mods`), never
 // the content. Returns nil when nothing notable is set (or mo is nil), which
-// json-omits the field entirely.
+// json-omits the field entirely. The worker's admin settings-refresh route
+// runs the TypeScript twin of this function (settingsFlags in
+// worker/src/worker/replayentry.ts) over the BAR API's gameSettings — the two
+// MUST stay in lockstep.
 func SettingsFlags(mo map[string]string) map[string]any {
 	if len(mo) == 0 {
 		return nil
@@ -81,6 +178,11 @@ func SettingsFlags(mo map[string]string) map[string]any {
 		}
 	}
 	on("ranked_game", "ranked")
+	// The one "off is the news" flag: an explicitly unranked lobby gets its
+	// own badge (absent key = unknown, e.g. no demo behind the capture).
+	if mo["ranked_game"] == "0" {
+		out["unranked"] = true
+	}
 	on("map_waterislava", "lava")
 	on("scavunitsforplayers", "scavUnits")
 	on("experimentalextraunits", "extraUnits")
@@ -108,6 +210,20 @@ func SettingsFlags(mo map[string]string) map[string]any {
 	}
 	if v := mo["commanderbuildersenabled"]; v != "" && v != "disabled" {
 		out["comBuilders"] = v
+	}
+	// zombies defaults to "disabled"; "normal" is the plain on-state (badge
+	// alone), the harder tiers (hard/nightmare/akumu) keep their name.
+	if v := mo["zombies"]; v != "" && v != "disabled" {
+		if v == "normal" {
+			out["zombies"] = true
+		} else {
+			out["zombies"] = v
+		}
+	}
+	// ruins defaults to "scav_only" (present only in Scavengers games, which
+	// this catalog can't detect), so only an explicit "enabled" is notable.
+	if v := mo["ruins"]; v == "enabled" {
+		out["ruins"] = true
 	}
 
 	if len(out) == 0 {

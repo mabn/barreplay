@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { sanitizeEntry } from "../src/worker/replayentry";
+import { mergeUploads, sanitizeEntry, settingsFlags } from "../src/worker/replayentry";
 
 test("full entry passes through", () => {
   const e = sanitizeEntry("abc123", {
@@ -15,6 +15,11 @@ test("full entry passes through", () => {
     gameSize: "8v8",
     sizeBytes: 8_400_000,
     settings: { ranked: true, lava: true, quickStart: "enabled" },
+    players: [
+      { ally: 0, count: 8, players: [{ name: "alpha", os: 35.2 }, { name: "beta" }] },
+      { ally: 1, count: 8, players: [{ name: "gamma", os: 28 }] },
+    ],
+    uploaderAlly: 1,
   });
   assert.deepEqual(e, {
     id: "abc123",
@@ -25,6 +30,12 @@ test("full entry passes through", () => {
     gameSize: "8v8",
     sizeBytes: 8_400_000,
     settings: { ranked: true, lava: true, quickStart: "enabled" },
+    players: [
+      { ally: 0, count: 8, players: [{ name: "alpha", os: 35.2 }, { name: "beta" }] },
+      { ally: 1, count: 8, players: [{ name: "gamma", os: 28 }] },
+    ],
+    uploaderAlly: 1,
+    uploads: null,
   });
 });
 
@@ -39,6 +50,9 @@ test("missing stats become null, unknown fields are dropped", () => {
     gameSize: null,
     sizeBytes: null,
     settings: null,
+    players: null,
+    uploaderAlly: null,
+    uploads: null,
   });
 });
 
@@ -74,6 +88,76 @@ test("wrong types and bad bodies are rejected with a reason", () => {
   assert.equal(sanitizeEntry("abc", { map: 7 }), "map must be a string");
   assert.equal(sanitizeEntry("abc", [1]), "body must be a JSON object");
   assert.equal(sanitizeEntry("abc", null), "body must be a JSON object");
+});
+
+test("players roster: empty becomes null, bad shapes are rejected, caps hold", () => {
+  const empty = sanitizeEntry("abc", { players: [] });
+  assert.ok(typeof empty === "object" && empty.players === null);
+  assert.equal(sanitizeEntry("abc", { players: {} }), "players must be an array");
+  assert.equal(sanitizeEntry("abc", { players: [7] }), "players entries must be objects");
+  assert.equal(sanitizeEntry("abc", { players: [{ ally: "x", count: 1, players: [] }] }), "players[].ally must be an integer");
+  assert.equal(sanitizeEntry("abc", { players: [{ ally: 0, count: 1, players: [{ name: "" }] }] }), "player name must be a non-empty string");
+  assert.equal(sanitizeEntry("abc", { players: [{ ally: 0, count: 1, players: [{ name: "a", os: "35" }] }] }), "player os must be a finite number");
+  const nineDeep = [{ ally: 0, count: 9, players: Array.from({ length: 9 }, (_, i) => ({ name: `p${i}` })) }];
+  assert.equal(sanitizeEntry("abc", { players: nineDeep }), "players[].players must be an array of at most 8");
+  const manyAllies = Array.from({ length: 17 }, (_, i) => ({ ally: i, count: 1, players: [{ name: "p" }] }));
+  assert.equal(sanitizeEntry("abc", { players: manyAllies }), "players must have at most 16 ally teams");
+});
+
+test("uploaderAlly must be an integer; uploads from the body are ignored", () => {
+  assert.equal(sanitizeEntry("abc", { uploaderAlly: 1.5 }), "uploaderAlly must be an integer");
+  assert.equal(sanitizeEntry("abc", { uploaderAlly: "0" }), "uploaderAlly must be an integer");
+  const e = sanitizeEntry("abc", { uploaderAlly: 0, uploads: [{ rid: "forged-00000000", ally: 3 }] });
+  assert.ok(typeof e === "object" && e.uploaderAlly === 0 && e.uploads === null);
+});
+
+test("mergeUploads accumulates revisions oldest-first, idempotently", () => {
+  assert.equal(mergeUploads(null, null, 1), null);
+  assert.deepEqual(mergeUploads(null, "g-11111111", 0), [{ rid: "g-11111111", ally: 0 }]);
+  const two = mergeUploads([{ rid: "g-11111111", ally: 0 }], "g-22222222", 1);
+  assert.deepEqual(two, [
+    { rid: "g-11111111", ally: 0 },
+    { rid: "g-22222222", ally: 1 },
+  ]);
+  // Re-publishing the same rid does not duplicate; a now-known ally refreshes.
+  assert.deepEqual(mergeUploads(two, "g-22222222", null), two);
+  assert.deepEqual(mergeUploads([{ rid: "g-11111111", ally: null }], "g-11111111", 2), [{ rid: "g-11111111", ally: 2 }]);
+});
+
+// The TypeScript twin of viz.SettingsFlags (internal/viz/catalog.go): the
+// same defaults stay silent and the same notable values map to the same keys.
+test("settingsFlags mirrors the Go distillation", () => {
+  assert.equal(settingsFlags({}), null);
+  assert.equal(
+    settingsFlags({
+      map_waterislava: "0", scavunitsforplayers: "0", experimentalextraunits: "0",
+      unit_restrictions_nonukes: "0", unit_restrictions_noair: "0",
+      quick_start: "default", commanderbuildersenabled: "disabled",
+      zombies: "disabled", ruins: "scav_only", tweakdefs: "", tweakunits9: "",
+    }),
+    null,
+  );
+  const cases: [Record<string, string>, string, boolean | string][] = [
+    [{ ranked_game: "1" }, "ranked", true],
+    [{ ranked_game: "0" }, "unranked", true],
+    [{ map_waterislava: "1" }, "lava", true],
+    [{ scavunitsforplayers: "1" }, "scavUnits", true],
+    [{ experimentalextraunits: "1" }, "extraUnits", true],
+    [{ unit_restrictions_nonukes: "1" }, "noNukes", true],
+    [{ unit_restrictions_noendgamelrpc: "1" }, "noEndgameLrpc", true],
+    [{ unit_restrictions_nolrpc: "1" }, "noLrpc", true],
+    [{ unit_restrictions_noair: "1" }, "noAir", true],
+    [{ tweakdefs: "Zm9v" }, "mods", true],
+    [{ tweakunits3: "Zm9v" }, "mods", true],
+    [{ quick_start: "enabled" }, "quickStart", "enabled"],
+    [{ commanderbuildersenabled: "enabled_all" }, "comBuilders", "enabled_all"],
+    [{ zombies: "normal" }, "zombies", true],
+    [{ zombies: "nightmare" }, "zombies", "nightmare"],
+    [{ ruins: "enabled" }, "ruins", true],
+  ];
+  for (const [mo, key, want] of cases) {
+    assert.deepEqual(settingsFlags(mo), { [key]: want }, JSON.stringify(mo));
+  }
 });
 
 test("ids are confined to a bare token", () => {
