@@ -7,12 +7,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
-
-	"github.com/mabn/barreplay/snapshot"
 )
 
 // mockWorker fakes the worker's job/stream API surface: one pending job whose
@@ -127,34 +124,65 @@ func TestRunOnceProcessesJob(t *testing.T) {
 	}
 }
 
-// One-sided means: the capture's meta names a PLAYING recorder. Spectator
-// recordings and re-sim captures (no recorder at all) are full-view already.
-func TestCaptureIsOneSided(t *testing.T) {
-	write := func(t *testing.T, rec *snapshot.RecorderInfo) string {
-		dir := t.TempDir()
-		w, err := snapshot.NewBRPWriter(dir, "g")
-		if err != nil {
-			t.Fatal(err)
+// The -resim worker's candidate selection and failure memory, driven through
+// a mock catalog. A game is re-simulated only while its current upload is
+// one-sided and no full-view (ally-null) revision exists; a failed game is
+// skipped on later rounds.
+func TestResimDaemonRunOnce(t *testing.T) {
+	// Catalog: "onesided" needs a resim; "spect" (no uploaderAlly) and
+	// "hasfull" (an ally-null revision exists) don't; "broken" will fail.
+	catalog := []map[string]any{
+		{"id": "onesided", "uploaderAlly": 1, "uploads": []map[string]any{{"rid": "onesided-11111111", "ally": 1}}},
+		{"id": "spect", "uploaderAlly": nil, "uploads": []map[string]any{{"rid": "spect-11111111", "ally": nil}}},
+		{"id": "hasfull", "uploaderAlly": 0, "uploads": []map[string]any{
+			{"rid": "hasfull-11111111", "ally": 0}, {"rid": "hasfull-22222222", "ally": nil},
+		}},
+		{"id": "broken", "uploaderAlly": 0, "uploads": []map[string]any{{"rid": "broken-11111111", "ally": 0}}},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/replays" {
+			http.NotFound(w, r)
+			return
 		}
-		if err := w.WriteMeta(snapshot.Meta{GameID: "g", SampleEvery: 30, Recorder: rec}); err != nil {
-			t.Fatal(err)
-		}
-		if err := w.Close(); err != nil {
-			t.Fatal(err)
-		}
-		return filepath.Join(dir, "g.brp")
+		json.NewEncoder(w).Encode(catalog)
+	}))
+	t.Cleanup(srv.Close)
+
+	var ran []string
+	r := &resimDaemon{
+		indexURL: srv.URL,
+		client:   http.DefaultClient,
+		failed:   map[string]bool{},
+		resim: func(_ context.Context, gameID string) error {
+			ran = append(ran, gameID)
+			if gameID == "broken" {
+				return errors.New("no engine")
+			}
+			// A successful publish retires the candidate in the real catalog;
+			// mirror that so the next round sees it done.
+			for _, row := range catalog {
+				if row["id"] == gameID {
+					row["uploads"] = append(row["uploads"].([]map[string]any),
+						map[string]any{"rid": gameID + "-fefefefe", "ally": nil})
+				}
+			}
+			return nil
+		},
 	}
-	if !captureIsOneSided(write(t, &snapshot.RecorderInfo{PlayerID: 3, AllyTeam: 1})) {
-		t.Error("playing recorder: want one-sided")
+	n, err := r.runOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if captureIsOneSided(write(t, &snapshot.RecorderInfo{PlayerID: 3, Spectator: true})) {
-		t.Error("spectator recorder: want full view")
+	if n != 2 || strings.Join(ran, ",") != "onesided,broken" {
+		t.Fatalf("round 1: attempted %d (%v), want onesided,broken", n, ran)
 	}
-	if captureIsOneSided(write(t, nil)) {
-		t.Error("no recorder (re-sim): want full view")
+	// Round 2: onesided is retired by its publish, broken is remembered.
+	ran = nil
+	if n, err = r.runOnce(context.Background()); err != nil {
+		t.Fatal(err)
 	}
-	if captureIsOneSided(filepath.Join(t.TempDir(), "missing.brp")) {
-		t.Error("unreadable file: want false")
+	if n != 0 || len(ran) != 0 {
+		t.Fatalf("round 2: attempted %d (%v), want none", n, ran)
 	}
 }
 
