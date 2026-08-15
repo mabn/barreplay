@@ -91,12 +91,7 @@ func newMock(t *testing.T) *mockWorker {
 }
 
 func newDaemon(url, token string, process func(ctx context.Context, streamPath string) error) *daemon {
-	return &daemon{
-		indexURL: url, token: token, client: http.DefaultClient,
-		process: func(ctx context.Context, streamPath string) (bool, error) {
-			return false, process(ctx, streamPath)
-		},
-	}
+	return &daemon{indexURL: url, token: token, client: http.DefaultClient, process: process}
 }
 
 // The happy path: claim -> download -> process -> done, with the bearer token
@@ -129,66 +124,6 @@ func TestRunOnceProcessesJob(t *testing.T) {
 	}
 	if got := strings.Join(m.transitions, ","); got != "processing,done" {
 		t.Errorf("transitions = %q, want processing,done", got)
-	}
-}
-
-// -resim wiring: a one-sided publish triggers the resim hook AFTER the done
-// report; a resim failure stays a log line (the job is already done). A
-// process reporting oneSided=false, or a daemon without the hook, never
-// resims.
-func TestRunOnceResim(t *testing.T) {
-	cases := []struct {
-		name      string
-		oneSided  bool
-		resimErr  error
-		hook      bool
-		wantResim bool
-	}{
-		{"one-sided with hook", true, nil, true, true},
-		{"one-sided, resim fails", true, errors.New("no engine"), true, true},
-		{"full-view capture", false, nil, true, false},
-		{"no hook (flag off)", true, nil, false, false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			m := newMock(t)
-			srv := httptest.NewServer(m.handler(""))
-			t.Cleanup(srv.Close)
-
-			var resimGame string
-			var doneBeforeResim bool
-			d := &daemon{
-				indexURL: srv.URL, client: http.DefaultClient,
-				process: func(context.Context, string) (bool, error) { return c.oneSided, nil },
-			}
-			if c.hook {
-				d.resim = func(_ context.Context, gameID string) error {
-					resimGame = gameID
-					m.mu.Lock()
-					doneBeforeResim = len(m.transitions) == 2 && m.transitions[1] == "done"
-					m.mu.Unlock()
-					return c.resimErr
-				}
-			}
-			if _, err := d.runOnce(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-			if got := resimGame != ""; got != c.wantResim {
-				t.Fatalf("resim ran = %v, want %v", got, c.wantResim)
-			}
-			if c.wantResim {
-				if resimGame != m.job.GameID {
-					t.Errorf("resim gameID = %q, want %q", resimGame, m.job.GameID)
-				}
-				if !doneBeforeResim {
-					t.Errorf("resim ran before the done report (transitions %v)", m.transitions)
-				}
-			}
-			// The job outcome is done in every case — resim never fails a job.
-			if got := strings.Join(m.transitions, ","); got != "processing,done" {
-				t.Errorf("transitions = %q, want processing,done", got)
-			}
-		})
 	}
 }
 
