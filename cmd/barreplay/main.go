@@ -153,6 +153,21 @@ func run() error {
 	if *workerThr != workerThreadsUnset {
 		engCfg.WorkerThreads = workerThr
 	}
+	// Runs share mutable state inside the data dir, so only one at a time.
+	unlock, err := engine.LockDataDir(*dataDir)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if uerr := unlock(); uerr != nil {
+			fmt.Fprintf(os.Stderr, "barreplay: warning: releasing data-dir lock: %v\n", uerr)
+		}
+	}()
+
+	// Before Locate, which now refuses a build that does not match the demo.
+	if err := engine.EnsureEngine(ctx, engCfg, h.EngineVersion); err != nil {
+		return err
+	}
 	eng, err := engine.Locate(engCfg, h.EngineVersion)
 	if err != nil {
 		return err

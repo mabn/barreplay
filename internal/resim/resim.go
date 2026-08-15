@@ -16,11 +16,14 @@ package resim
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mabn/barreplay/internal/barapi"
@@ -46,6 +49,11 @@ type Options struct {
 	PRDownloaderBinary string
 	// SkipProvision assumes engine/game/map content is already installed.
 	SkipProvision bool
+	// ProgressEvery prints the same frame/ETA line cmd/barreplay's -progress
+	// does, polled off the engine's infolog, this often. 0 disables it. A
+	// re-sim of a long game runs for many minutes with no other output, so a
+	// daemon wants this on.
+	ProgressEvery time.Duration
 }
 
 // Run downloads the demo for gameID via the BAR API, re-simulates it with
@@ -95,6 +103,25 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 		return "", nil, err
 	}
 
+	// Runs share mutable state inside the data dir, so only one at a time.
+	unlock, err := engine.LockDataDir(o.DataDir)
+	if err != nil {
+		return "", nil, err
+	}
+	defer func() {
+		if uerr := unlock(); uerr != nil {
+			fmt.Fprintf(os.Stderr, "resim: warning: releasing data-dir lock: %v\n", uerr)
+		}
+	}()
+
+	// Before Locate, which now refuses a build that does not match the demo.
+	if err := engine.EnsureEngine(ctx, engine.Config{
+		DataDir:       o.DataDir,
+		EngineBinary:  o.EngineBinary,
+		SkipProvision: o.SkipProvision,
+	}, h.EngineVersion); err != nil {
+		return "", nil, err
+	}
 	eng, err := engine.Locate(engine.Config{
 		DataDir:            o.DataDir,
 		EngineBinary:       o.EngineBinary,
@@ -153,6 +180,13 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 		}
 		io.Copy(io.Discard, stdout)
 	}()
+	if o.ProgressEvery > 0 {
+		// Stopped before this function returns, so the watcher cannot outlive
+		// the run and print against the next game's infolog.
+		pctx, pcancel := context.WithCancel(ctx)
+		defer pcancel()
+		go engine.WatchProgress(pctx, eng.InfologPath(), int(h.GameTime), o.ProgressEvery, os.Stderr)
+	}
 	waitErr := wait()
 
 	var stats capture.Stats
@@ -169,13 +203,33 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 			return "", nil, e
 		}
 	}
-	// The engine exits via quitforce; a non-zero code there is not fatal.
+	// The engine exits via quitforce, so a non-zero exit code is normal and not
+	// on its own a failure. Being SIGNALLED is different: the run was cut short
+	// (Ctrl-C, the OOM killer, a crash) and the stream stops mid-game. Callers
+	// publish what this returns, so treating that as success silently replaces
+	// a complete replay with a truncated stub — a killed 55-minute re-sim once
+	// packed 347 of 100170 frames and went straight to uploading it.
 	if waitErr != nil {
+		if signalled(waitErr) {
+			return "", nil, fmt.Errorf("resim: engine was killed after %d of ~%d frames (%v); "+
+				"refusing to publish a truncated capture",
+				stats.Frames*o.sampleEvery(), int(h.GameTime)*gameSpeed, waitErr)
+		}
 		fmt.Fprintf(os.Stderr, "resim: engine exited: %v\n", waitErr)
+	}
+	// A short capture with no signal still means something went wrong mid-run
+	// (the engine gave up, the widget stopped) and must not masquerade as the
+	// full game.
+	if got, want := stats.Frames*o.sampleEvery(), int(h.GameTime)*gameSpeed; want > 0 && got < want*minCoveragePct/100 {
+		return "", nil, fmt.Errorf("resim: capture covers only %d of ~%d sim frames (%d%%); "+
+			"refusing to publish a truncated capture", got, want, 100*got/want)
 	}
 	// Keep the raw stream next to the output (best-effort; it lives in the
 	// data dir because the widget can only write inside the write-dir).
-	if merr := os.Rename(streamPath, filepath.Join(o.OutDir, h.GameID+".brsnap")); merr != nil {
+	// OutDir is routinely a temp dir on another filesystem, where rename fails
+	// with EXDEV — so fall back to a copy, otherwise every run leaks a
+	// multi-hundred-MB stream into the data dir.
+	if merr := moveFile(streamPath, filepath.Join(o.OutDir, h.GameID+".brsnap")); merr != nil {
 		fmt.Fprintf(os.Stderr, "resim: warning: could not move raw stream: %v\n", merr)
 	}
 	fmt.Fprintf(os.Stderr, "resim: %s: %d frames in %s -> %s\n",
@@ -186,4 +240,66 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 		fmt.Fprintf(os.Stderr, "resim: warning: demo gameId %s != requested %s\n", h.GameID, gameID)
 	}
 	return outPath, demo.Startscript.ModOptions, nil
+}
+
+const (
+	// gameSpeed is the engine's fixed sim rate: 30 frames per game-second.
+	gameSpeed = 30
+	// minCoveragePct is how much of the demo a capture must span to count as
+	// complete. Games end early (resign, mass quit) and the header's GameTime
+	// is the recorded length rather than an exact frame count, so this is
+	// deliberately loose — it exists to catch stubs, not to be precise.
+	minCoveragePct = 80
+)
+
+// sampleEvery is the widget's sampling interval in sim frames, mirroring the
+// default engine.Config applies when Every is unset.
+func (o Options) sampleEvery() int {
+	if o.Every > 0 {
+		return o.Every
+	}
+	return 30
+}
+
+// signalled reports whether the process died from a signal rather than exiting
+// on its own. exec reports this as an ExitError whose status has Signaled set;
+// the engine's normal quitforce path yields a plain non-zero code instead.
+func signalled(err error) bool {
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		return false
+	}
+	ws, ok := ee.Sys().(syscall.WaitStatus)
+	return ok && ws.Signaled()
+}
+
+// moveFile renames src to dst, falling back to copy+remove when they are on
+// different filesystems (os.Rename returns EXDEV, which is the common case
+// because OutDir is often a temp dir).
+func moveFile(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	} else if !errors.Is(err, syscall.EXDEV) {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(dst)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(dst)
+		return err
+	}
+	in.Close()
+	return os.Remove(src)
 }
