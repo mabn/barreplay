@@ -30,23 +30,25 @@
 // the stream's own GAME metadata still yields a playable replay.
 //
 // -resim (needs -data pointing at a BAR data dir on an engine-capable host —
-// see the GL caveat in CLAUDE.md) changes what gets published for ONE-SIDED
-// uploads (a playing client's point of view — meta recorder present, not a
-// spectator): instead of publishing the partial stream, the daemon
-// re-simulates the demo headlessly (internal/resim, the cmd/barreplay
-// pipeline) and publishes ONLY the resulting FULL-view capture, under the
-// resim .brp's own content-addressed revision. Spectator uploads (full view
-// already) and captures with no recorder publish exactly as without the
-// flag. The job reports done when the resim publish lands — minutes of
-// engine wall time — and a resim failure (engine missing, GPU-less host,
-// unknown demo) fails the job (nothing was published; the raw stream stays
-// archived).
+// see the GL caveat in CLAUDE.md) runs an INDEPENDENT worker instead of the
+// job loop: it polls the replay catalog (GET /api/replays) for games whose
+// current upload is ONE-SIDED (uploaderAlly set — a playing client's point
+// of view) and which have no full-view revision yet (no ally-null entry in
+// the row's uploads list), re-simulates each demo headlessly
+// (internal/resim, the cmd/barreplay pipeline) and publishes the full-view
+// capture as another revision of the same game. The publish itself
+// retires the candidate — the row's uploads list gains an ally-null entry
+// and its rid moves to the full view — so no extra queue state exists
+// anywhere; upload jobs are untouched and keep being served by plain
+// bringest runs. A game whose resim fails is remembered and skipped until
+// the daemon restarts.
 //
 // Usage:
 //
 //	bringest -index-url https://replays.example.workers.dev
 //	bringest -once            # drain the backlog and exit
-//	bringest -resim -data ~/bar-data   # publish one-sided uploads as full re-sims
+//	bringest -resim -data ~/bar-data        # the independent full-view re-sim worker
+//	bringest -resim -data ~/bar-data -once  # re-sim the current candidates and exit
 package main
 
 import (
@@ -70,7 +72,6 @@ import (
 	"github.com/mabn/barreplay/internal/envfile"
 	"github.com/mabn/barreplay/internal/packer"
 	"github.com/mabn/barreplay/internal/resim"
-	"github.com/mabn/barreplay/snapshot"
 )
 
 // envPath is the local secrets file loaded at startup (R2 keys, catalog
@@ -88,7 +89,7 @@ func main() {
 		target    = flag.String("upload", "r2", `where to publish: "r2" (real bucket) or "local" (the wrangler/vite dev simulator)`)
 		poll      = flag.Duration("poll", 10*time.Second, "how often to ask the worker for pending jobs")
 		once      = flag.Bool("once", false, "process the current backlog and exit instead of polling forever")
-		doResim   = flag.Bool("resim", false, "after publishing a ONE-SIDED upload, re-simulate the demo headlessly and publish the full-view capture as another revision (needs -data on an engine-capable host)")
+		doResim   = flag.Bool("resim", false, "run the independent re-sim worker instead of the job loop: find cataloged games whose only upload is one-sided, re-simulate them headlessly, and publish the full view as another revision (needs -data on an engine-capable host)")
 		dataDir   = flag.String("data", os.Getenv("BAR_DATA_DIR"), "BAR/Spring data directory for -resim (engine/, games/, maps/; also --write-dir; default: $BAR_DATA_DIR)")
 		skipProv  = flag.Bool("no-provision", false, "-resim: do not download engine/game/map content; assume already installed")
 	)
@@ -111,31 +112,47 @@ func main() {
 
 	client := barapi.New()
 	trimmedURL := strings.TrimSuffix(*indexURL, "/")
-	var resimOpts *resim.Options
-	if *doResim {
-		resimOpts = &resim.Options{DataDir: *dataDir, SkipProvision: *skipProv}
+
+	// -resim runs the independent re-sim worker; everything else is the
+	// normal upload-job loop. The two share nothing but the worker URL.
+	var loop interface {
+		runOnce(context.Context) (int, error)
 	}
-	d := &daemon{
-		indexURL: trimmedURL,
-		token:    os.Getenv("REPLAY_PUT_TOKEN"),
-		client:   &http.Client{Timeout: 5 * time.Minute},
-		process: func(ctx context.Context, streamPath string) error {
-			return processStream(ctx, client, streamPath, *target, *workerDir, trimmedURL, resimOpts)
-		},
+	what := "pending jobs"
+	if *doResim {
+		ro := resim.Options{DataDir: *dataDir, SkipProvision: *skipProv}
+		loop = &resimDaemon{
+			indexURL: trimmedURL,
+			client:   &http.Client{Timeout: 1 * time.Minute},
+			failed:   map[string]bool{},
+			resim: func(ctx context.Context, gameID string) error {
+				return resimPublish(ctx, client, gameID, ro, *target, *workerDir, trimmedURL)
+			},
+		}
+		what = "one-sided replays to re-simulate"
+	} else {
+		loop = &daemon{
+			indexURL: trimmedURL,
+			token:    os.Getenv("REPLAY_PUT_TOKEN"),
+			client:   &http.Client{Timeout: 5 * time.Minute},
+			process: func(ctx context.Context, streamPath string) error {
+				return processStream(ctx, client, streamPath, *target, *workerDir, trimmedURL)
+			},
+		}
 	}
 
 	if *once {
-		if _, err := d.runOnce(ctx); err != nil {
+		if _, err := loop.runOnce(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "bringest: %v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
-	fmt.Fprintf(os.Stderr, "bringest: polling %s every %s\n", d.indexURL, *poll)
+	fmt.Fprintf(os.Stderr, "bringest: polling %s every %s for %s\n", trimmedURL, *poll, what)
 	ticker := time.NewTicker(*poll)
 	defer ticker.Stop()
 	for {
-		if _, err := d.runOnce(ctx); err != nil && ctx.Err() == nil {
+		if _, err := loop.runOnce(ctx); err != nil && ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "bringest: %v\n", err)
 		}
 		select {
@@ -322,13 +339,7 @@ func (d *daemon) auth(req *http.Request) {
 // BAR API knows the game, the stream's own metadata otherwise) and publish it
 // under its content-addressed revision. Idempotent: the same stream re-lands
 // on the same keys and catalog row.
-//
-// With resimOpts set (-resim) a ONE-SIDED capture — recorded from a playing
-// client's point of view (meta recorder present, not a spectator) — is not
-// published at all; the demo is re-simulated headlessly instead and only the
-// full-view result is published. Full-view uploads (spectator recordings,
-// captures with no recorder) publish as without the flag.
-func processStream(ctx context.Context, client *barapi.Client, streamPath, target, workerDir, indexURL string, resimOpts *resim.Options) error {
+func processStream(ctx context.Context, client *barapi.Client, streamPath, target, workerDir, indexURL string) error {
 	rev, err := packer.StreamRev(streamPath)
 	if err != nil {
 		return err
@@ -341,11 +352,6 @@ func processStream(ctx context.Context, client *barapi.Client, streamPath, targe
 	if err != nil {
 		return err
 	}
-	if resimOpts != nil && captureIsOneSided(brpPath) {
-		gameID := strings.TrimSuffix(filepath.Base(streamPath), filepath.Ext(streamPath))
-		fmt.Fprintf(os.Stderr, "bringest: %s: one-sided capture, publishing a full re-simulation instead\n", gameID)
-		return resimPublish(ctx, client, gameID, *resimOpts, target, workerDir, indexURL)
-	}
 	return packer.UploadStatic(ctx, brpPath, packer.UploadOptions{
 		Target:     target,
 		WorkerDir:  workerDir,
@@ -355,20 +361,93 @@ func processStream(ctx context.Context, client *barapi.Client, streamPath, targe
 	})
 }
 
-// captureIsOneSided reports whether the packed capture records a single
-// playing client's point of view (best-effort: an unreadable meta is just
-// "no").
-func captureIsOneSided(brpPath string) bool {
-	f, err := os.Open(brpPath)
+// ---- the -resim worker ------------------------------------------------------
+
+// catalogRow is the slice of a GET /api/replays row the re-sim worker reads:
+// enough to decide whether a game's published state is one-sided with no
+// full-view revision yet.
+type catalogRow struct {
+	ID           string `json:"id"`
+	UploaderAlly *int   `json:"uploaderAlly"`
+	Uploads      []struct {
+		Rid  string `json:"rid"`
+		Ally *int   `json:"ally"`
+	} `json:"uploads"`
+}
+
+// resimDaemon is the independent -resim worker: no job queue, no worker-side
+// state. Its work list is a pure function of the public catalog — a game is
+// a candidate while its current upload is one-sided (uploaderAlly set) and
+// its uploads list holds no full-view revision (an entry with a null ally:
+// spectator uploads and re-sim captures PUT with no uploaderAlly). The
+// publish itself retires the candidate, so completion needs no marking.
+type resimDaemon struct {
+	indexURL string
+	client   *http.Client
+	resim    func(ctx context.Context, gameID string) error
+	// failed remembers games whose resim errored (engine missing, unknown
+	// demo, desync); they are skipped until the process restarts so one bad
+	// game cannot wedge the loop into retrying forever.
+	failed map[string]bool
+}
+
+// runOnce lists the catalog and re-simulates every candidate sequentially
+// (each is minutes of engine wall time). Returns how many it attempted; the
+// error covers the catalog listing only — per-game failures are logged and
+// remembered.
+func (r *resimDaemon) runOnce(ctx context.Context) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.indexURL+"/api/replays", nil)
 	if err != nil {
+		return 0, err
+	}
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("listing the catalog: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("GET /api/replays: %s", resp.Status)
+	}
+	var rows []catalogRow
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		return 0, fmt.Errorf("decoding the catalog: %w", err)
+	}
+
+	attempted := 0
+	for _, row := range rows {
+		if ctx.Err() != nil {
+			return attempted, ctx.Err()
+		}
+		if !row.needsResim() || r.failed[row.ID] {
+			continue
+		}
+		attempted++
+		fmt.Fprintf(os.Stderr, "bringest: %s: one-sided only, re-simulating for the full view\n", row.ID)
+		if err := r.resim(ctx, row.ID); err != nil {
+			if ctx.Err() != nil {
+				return attempted, ctx.Err()
+			}
+			fmt.Fprintf(os.Stderr, "bringest: %s: resim failed (skipping until restart): %v\n", row.ID, err)
+			r.failed[row.ID] = true
+		} else {
+			fmt.Fprintf(os.Stderr, "bringest: %s: full view published\n", row.ID)
+		}
+	}
+	return attempted, nil
+}
+
+// needsResim: the current upload is a playing client's point of view and no
+// revision of the game is a full view yet.
+func (row catalogRow) needsResim() bool {
+	if row.UploaderAlly == nil {
 		return false
 	}
-	defer f.Close()
-	bf, err := snapshot.ParseBRP(f)
-	if err != nil {
-		return false
+	for _, u := range row.Uploads {
+		if u.Ally == nil {
+			return false
+		}
 	}
-	return bf.Meta.Recorder != nil && !bf.Meta.Recorder.Spectator
+	return true
 }
 
 // resimPublish re-simulates the demo headlessly (internal/resim — minutes of
