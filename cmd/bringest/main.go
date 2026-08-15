@@ -30,22 +30,23 @@
 // the stream's own GAME metadata still yields a playable replay.
 //
 // -resim (needs -data pointing at a BAR data dir on an engine-capable host —
-// see the GL caveat in CLAUDE.md): after a ONE-SIDED upload is published and
-// its job reported done (so the uploader gets their replay immediately), the
-// daemon additionally re-simulates the demo headlessly (internal/resim, the
-// cmd/barreplay pipeline) and publishes the resulting FULL-view capture as
-// another revision of the same game. The resim revision becomes the catalog
-// row's current rid (its PUT lands last) and the one-sided original stays
-// reachable via the row's uploads list. Spectator uploads and re-sim
-// captures already see everything, so they never trigger it; a resim
-// failure (engine missing, GPU-less host, unknown demo) is logged, never
-// fails the job.
+// see the GL caveat in CLAUDE.md) changes what gets published for ONE-SIDED
+// uploads (a playing client's point of view — meta recorder present, not a
+// spectator): instead of publishing the partial stream, the daemon
+// re-simulates the demo headlessly (internal/resim, the cmd/barreplay
+// pipeline) and publishes ONLY the resulting FULL-view capture, under the
+// resim .brp's own content-addressed revision. Spectator uploads (full view
+// already) and captures with no recorder publish exactly as without the
+// flag. The job reports done when the resim publish lands — minutes of
+// engine wall time — and a resim failure (engine missing, GPU-less host,
+// unknown demo) fails the job (nothing was published; the raw stream stays
+// archived).
 //
 // Usage:
 //
 //	bringest -index-url https://replays.example.workers.dev
 //	bringest -once            # drain the backlog and exit
-//	bringest -resim -data ~/bar-data   # + full re-sim of one-sided uploads
+//	bringest -resim -data ~/bar-data   # publish one-sided uploads as full re-sims
 package main
 
 import (
@@ -110,19 +111,17 @@ func main() {
 
 	client := barapi.New()
 	trimmedURL := strings.TrimSuffix(*indexURL, "/")
+	var resimOpts *resim.Options
+	if *doResim {
+		resimOpts = &resim.Options{DataDir: *dataDir, SkipProvision: *skipProv}
+	}
 	d := &daemon{
 		indexURL: trimmedURL,
 		token:    os.Getenv("REPLAY_PUT_TOKEN"),
 		client:   &http.Client{Timeout: 5 * time.Minute},
-		process: func(ctx context.Context, streamPath string) (bool, error) {
-			return processStream(ctx, client, streamPath, *target, *workerDir, trimmedURL)
+		process: func(ctx context.Context, streamPath string) error {
+			return processStream(ctx, client, streamPath, *target, *workerDir, trimmedURL, resimOpts)
 		},
-	}
-	if *doResim {
-		d.resim = func(ctx context.Context, gameID string) error {
-			return resimPublish(ctx, client, gameID, resim.Options{DataDir: *dataDir, SkipProvision: *skipProv},
-				*target, *workerDir, trimmedURL)
-		}
 	}
 
 	if *once {
@@ -185,19 +184,14 @@ type ingestJob struct {
 	State     string `json:"state"`
 }
 
-// daemon holds the polling loop's wiring. process and resim are injectable
-// so the loop (claim -> download -> process -> report -> optional resim)
-// tests hermetically without the packer's npx/network machinery or a real
-// engine. process reports whether the published capture was one-sided (a
-// playing recorder's point of view); resim, when non-nil, then upgrades it
-// with a full-view re-simulation AFTER the job is reported done — its
-// failure is logged, never a job error (the upload already published).
+// daemon holds the polling loop's wiring. process is injectable so the loop
+// (claim -> download -> process -> report) tests hermetically without the
+// packer's npx/network machinery or a real engine.
 type daemon struct {
 	indexURL string
 	token    string
 	client   *http.Client
-	process  func(ctx context.Context, streamPath string) (oneSided bool, err error)
-	resim    func(ctx context.Context, gameID string) error
+	process  func(ctx context.Context, streamPath string) error
 }
 
 // runOnce fetches the pending queue and works through it sequentially,
@@ -213,22 +207,12 @@ func (d *daemon) runOnce(ctx context.Context) (int, error) {
 		if ctx.Err() != nil {
 			return 0, ctx.Err()
 		}
-		oneSided, err := d.handle(ctx, j)
-		if err != nil {
+		if err := d.handle(ctx, j); err != nil {
 			fmt.Fprintf(os.Stderr, "bringest: job %s (%s): %v\n", j.ID, j.GameID, err)
 			d.report(ctx, j.ID, "error", err.Error())
-			continue
-		}
-		fmt.Fprintf(os.Stderr, "bringest: job %s (%s): published\n", j.ID, j.GameID)
-		d.report(ctx, j.ID, "done", "")
-		// One-sided upload + -resim: upgrade it with a full-view re-simulation,
-		// published as another revision — after the done report, so the
-		// uploader is not kept waiting on minutes of engine time.
-		if oneSided && d.resim != nil {
-			fmt.Fprintf(os.Stderr, "bringest: job %s (%s): one-sided capture, re-simulating for the full view\n", j.ID, j.GameID)
-			if err := d.resim(ctx, j.GameID); err != nil {
-				fmt.Fprintf(os.Stderr, "bringest: job %s (%s): resim failed (the one-sided upload stays published): %v\n", j.ID, j.GameID, err)
-			}
+		} else {
+			fmt.Fprintf(os.Stderr, "bringest: job %s (%s): published\n", j.ID, j.GameID)
+			d.report(ctx, j.ID, "done", "")
 		}
 	}
 	return len(jobs), nil
@@ -236,20 +220,19 @@ func (d *daemon) runOnce(ctx context.Context) (int, error) {
 
 // handle runs one job: claim it, download the archived stream to a temp file
 // named after the gameId (packer.Pack keys the replay off the basename), and
-// hand it to the pipeline. Also reports whether the published capture was
-// one-sided (the resim trigger).
-func (d *daemon) handle(ctx context.Context, j ingestJob) (bool, error) {
+// hand it to the pipeline.
+func (d *daemon) handle(ctx context.Context, j ingestJob) error {
 	if err := d.report(ctx, j.ID, "processing", ""); err != nil {
-		return false, fmt.Errorf("claiming: %w", err)
+		return fmt.Errorf("claiming: %w", err)
 	}
 	tmp, err := os.MkdirTemp("", "bringest-")
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer os.RemoveAll(tmp)
 	streamPath := filepath.Join(tmp, j.GameID+".brepstream")
 	if err := d.download(ctx, j.StreamKey, streamPath); err != nil {
-		return false, fmt.Errorf("downloading %s: %w", j.StreamKey, err)
+		return fmt.Errorf("downloading %s: %w", j.StreamKey, err)
 	}
 	return d.process(ctx, streamPath)
 }
@@ -338,13 +321,17 @@ func (d *daemon) auth(req *http.Request) {
 // processStream is the real pipeline: pack the stream (demo-enriched when the
 // BAR API knows the game, the stream's own metadata otherwise) and publish it
 // under its content-addressed revision. Idempotent: the same stream re-lands
-// on the same keys and catalog row. Reports whether the capture was one-sided
-// — recorded from a playing client's point of view (meta recorder present,
-// not a spectator) — which is what makes a follow-up resim worthwhile.
-func processStream(ctx context.Context, client *barapi.Client, streamPath, target, workerDir, indexURL string) (bool, error) {
+// on the same keys and catalog row.
+//
+// With resimOpts set (-resim) a ONE-SIDED capture — recorded from a playing
+// client's point of view (meta recorder present, not a spectator) — is not
+// published at all; the demo is re-simulated headlessly instead and only the
+// full-view result is published. Full-view uploads (spectator recordings,
+// captures with no recorder) publish as without the flag.
+func processStream(ctx context.Context, client *barapi.Client, streamPath, target, workerDir, indexURL string, resimOpts *resim.Options) error {
 	rev, err := packer.StreamRev(streamPath)
 	if err != nil {
-		return false, err
+		return err
 	}
 	brpPath, modOptions, err := packer.Pack(ctx, client, streamPath, filepath.Dir(streamPath), "", false)
 	if errors.Is(err, packer.ErrDemoUnavailable) {
@@ -352,18 +339,20 @@ func processStream(ctx context.Context, client *barapi.Client, streamPath, targe
 		brpPath, modOptions, err = packer.Pack(ctx, client, streamPath, filepath.Dir(streamPath), "", true)
 	}
 	if err != nil {
-		return false, err
+		return err
 	}
-	if err := packer.UploadStatic(ctx, brpPath, packer.UploadOptions{
+	if resimOpts != nil && captureIsOneSided(brpPath) {
+		gameID := strings.TrimSuffix(filepath.Base(streamPath), filepath.Ext(streamPath))
+		fmt.Fprintf(os.Stderr, "bringest: %s: one-sided capture, publishing a full re-simulation instead\n", gameID)
+		return resimPublish(ctx, client, gameID, *resimOpts, target, workerDir, indexURL)
+	}
+	return packer.UploadStatic(ctx, brpPath, packer.UploadOptions{
 		Target:     target,
 		WorkerDir:  workerDir,
 		IndexURL:   indexURL,
 		Rev:        rev,
 		ModOptions: modOptions,
-	}); err != nil {
-		return false, err
-	}
-	return captureIsOneSided(brpPath), nil
+	})
 }
 
 // captureIsOneSided reports whether the packed capture records a single
@@ -382,13 +371,10 @@ func captureIsOneSided(brpPath string) bool {
 	return bf.Meta.Recorder != nil && !bf.Meta.Recorder.Spectator
 }
 
-// resimPublish is -resim's follow-up: re-simulate the demo headlessly
-// (internal/resim — minutes of engine wall time) and publish the resulting
-// full-view .brp as another revision of the same game, content-addressed off
-// the .brp bytes (deterministic writer: the same sim re-lands on the same
-// revision). Its catalog PUT lands after the one-sided upload's, so the full
-// view becomes the row's current rid and the original stays in the row's
-// uploads list.
+// resimPublish re-simulates the demo headlessly (internal/resim — minutes of
+// engine wall time) and publishes the resulting full-view .brp,
+// content-addressed off the .brp bytes (deterministic writer: the same sim
+// re-lands on the same revision).
 func resimPublish(ctx context.Context, client *barapi.Client, gameID string, ro resim.Options, target, workerDir, indexURL string) error {
 	tmp, err := os.MkdirTemp("", "bringest-resim-")
 	if err != nil {

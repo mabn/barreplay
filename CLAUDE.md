@@ -27,7 +27,7 @@ go run ./cmd/pack ./caps/<gameId>.brepstream   # same for the Replay uploader wi
 go run ./cmd/pack -upload r2 ./caps/<gameId>.brepstream   # ...and upload the packed .brp's static bundle ("local" targets the dev simulator) + register it in the worker's replay catalog (PUT /api/replays/<id>; -index-url or $BARREPLAY_INDEX_URL names the deployed worker, $REPLAY_PUT_TOKEN authenticates). Publishes are REVISIONED by default: pieces land at replays/<gameId>-<rev> (rev = sha256[:8] of the input) and the catalog row's rid points at the current one — append-only, nothing in the bucket is ever overwritten or deleted (-rev=false uses the bare id)
 go run ./cmd/pack -stats ./snapshots/<gameId>.brp   # .brp size breakdown: per-section sizes + top-10 unit defs by encoded bytes with per-instance cost (snapshot.ComputeBRPStats, self-checked against the codec; raw captures pack first, then report)
 go run ./cmd/barreplay-static -out ./static ./snapshots/*.brp   # pack .brp -> static bundle for R2 hosting (see worker/)
-go run ./cmd/bringest -index-url <worker-url>   # drag&drop upload daemon: poll the worker's job queue and publish uploaded .brepstreams (-once drains and exits; -upload local targets the dev simulator; -resim -data <BARdata> additionally re-simulates one-sided uploads into a full-view revision)
+go run ./cmd/bringest -index-url <worker-url>   # drag&drop upload daemon: poll the worker's job queue and publish uploaded .brepstreams (-once drains and exits; -upload local targets the dev simulator; -resim -data <BARdata> publishes one-sided uploads as full re-simulations instead of the partial stream)
 ```
 
 Tests are hermetic: `barapi` uses a mock HTTP server, `demofile` tests against the
@@ -90,16 +90,17 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           when the BAR API doesn't know the game), and reports done/error for
                           the browser to poll. -once drains the backlog and exits; jobs survive
                           daemon downtime as pending, stalled "processing" jobs are re-offered
-                          after 15 min. -resim (needs -data on an engine-capable host): after a
-                          ONE-SIDED upload (meta recorder present, not spectator) is published
-                          and its job reported done, additionally re-simulate the demo headlessly
-                          via internal/resim (the cmd/barreplay pipeline packaged as one call:
-                          demo download -> provision -> widget inject -> engine run -> .brp) and
-                          publish the FULL-view capture as another revision of the same game —
-                          its later catalog PUT makes it the row's current rid, the one-sided
-                          original stays in the row's uploads list; resim failure is logged,
-                          never a job error. Loop is hermetically tested against a mock worker
-                          API.
+                          after 15 min. -resim (needs -data on an engine-capable host) changes
+                          what a ONE-SIDED upload (meta recorder present, not spectator)
+                          publishes: the partial stream is NOT uploaded — the demo is
+                          re-simulated headlessly via internal/resim (the cmd/barreplay pipeline
+                          packaged as one call: demo download -> provision -> widget inject ->
+                          engine run -> .brp) and ONLY the full-view capture is published, under
+                          the resim .brp's own content-addressed revision (the raw stream stays
+                          archived in the bucket regardless). Spectator/full-view uploads
+                          publish exactly as without the flag; a resim failure fails the job
+                          (nothing was published), and the done report waits on the engine run
+                          (minutes). Loop is hermetically tested against a mock worker API.
                           At startup it loads ./.env (internal/envfile) into the environment
                           BEFORE the flag defaults are evaluated, so the R2 keys and
                           $BARREPLAY_INDEX_URL work without `source .env` — read from the
