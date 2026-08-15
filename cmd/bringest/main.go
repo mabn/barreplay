@@ -53,10 +53,19 @@ import (
 	"time"
 
 	"github.com/mabn/barreplay/internal/barapi"
+	"github.com/mabn/barreplay/internal/envfile"
 	"github.com/mabn/barreplay/internal/packer"
 )
 
+// envPath is the local secrets file loaded at startup (R2 keys, catalog
+// token). Relative, so it resolves against the working directory — normally
+// the repo root, which is also where -worker-dir's default "worker" points.
+const envPath = ".env"
+
 func main() {
+	// Before the flags below, whose defaults read the environment.
+	loadEnvFile()
+
 	var (
 		indexURL  = flag.String("index-url", os.Getenv("BARREPLAY_INDEX_URL"), "base URL of the deployed worker (default: $BARREPLAY_INDEX_URL)")
 		workerDir = flag.String("worker-dir", "worker", "the Cloudflare worker project directory whose upload tooling performs the R2 puts")
@@ -107,6 +116,36 @@ func main() {
 		case <-ticker.C:
 		}
 	}
+}
+
+// loadEnvFile seeds the environment from ./.env. It reports what it did
+// because the failure it exists to prevent is silent: without the R2
+// credentials the upload falls back to the worker's wrangler tooling, which
+// fails with an unrelated-looking CLOUDFLARE_API_TOKEN error, so "did my
+// secrets actually get loaded?" must be answerable from the log alone.
+// Names only — never values, which are secrets.
+func loadEnvFile() {
+	n, err := envfile.Load(envPath)
+	switch {
+	case err != nil:
+		// Not fatal: the environment may already carry everything needed.
+		fmt.Fprintf(os.Stderr, "bringest: ignoring %s: %v\n", envPath, err)
+	case n > 0:
+		fmt.Fprintf(os.Stderr, "bringest: loaded %d var(s) from %s\n", n, envPath)
+	}
+	if os.Getenv("R2_ACCESS_KEY_ID") == "" || os.Getenv("R2_SECRET_ACCESS_KEY") == "" {
+		fmt.Fprintf(os.Stderr, "bringest: warning: R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY not set"+
+			" (no %s in %s?); -upload r2 will fall back to the worker's wrangler tooling\n",
+			envPath, mustGetwd())
+	}
+}
+
+func mustGetwd() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "the working directory"
+	}
+	return wd
 }
 
 // ingestJob mirrors the worker's job row (worker/src/worker/replayindex.ts).

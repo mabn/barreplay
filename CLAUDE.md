@@ -91,6 +91,20 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           the browser to poll. -once drains the backlog and exits; jobs survive
                           daemon downtime as pending, stalled "processing" jobs are re-offered
                           after 15 min. Loop is hermetically tested against a mock worker API.
+                          At startup it loads ./.env (internal/envfile) into the environment
+                          BEFORE the flag defaults are evaluated, so the R2 keys and
+                          $BARREPLAY_INDEX_URL work without `source .env` — read from the
+                          WORKING DIR, so run it from the repo root. It logs the var COUNT
+                          (never values) and warns when R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY
+                          are still absent, because otherwise that failure surfaces only as an
+                          unrelated-looking CLOUDFLARE_API_TOKEN error out of the wrangler
+                          fallback. Only bringest auto-loads; pack/barreplay still need a source.
+internal/envfile/         tiny stdlib KEY=VALUE loader for ./.env. Accepts the bash-sourceable
+                          subset (`export FOO=bar`, # comments, optional surrounding quotes) so
+                          ONE file works both auto-loaded and sourced. Already-set vars WIN (the
+                          file is a default, never an override); a missing file is a no-op; a
+                          '#' in an unquoted value is kept, since secrets contain them and a
+                          silently truncated key is worse than requiring quotes.
 cmd/barreplay-static/main.go CLI: pack .brp -> static-file bundle (index.json + replays/**) for R2 hosting
 internal/barapi/          resolve gameId via api.bar-rts.com; download .sdfz from OVH
 internal/demofile/        gunzip + parse packed header + TDF startscript
