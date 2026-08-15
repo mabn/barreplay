@@ -837,3 +837,15 @@ available (bar-full/ + zip recipe) if a future need arises.
 (Injection bug learned: gadgets.lua contains `function gadgetHandler:
 Initialize()` before the final `gadgetHandler:Initialize()` call — anchor
 replacements must use rfind/last occurrence.)
+
+## Resume (2026-08-15): stale-reference alarm resolved; final H45+H49 coverage
+A month of main-branch barreplay development changed the wire format (U-lines
+12→15 fields incl. build targets, new GAME line, 30x income fix), so the
+old small/8v8 reference md5s no longer gate ANY engine binary — fresh runs
+"DIFF" against them through the new serializer regardless of engine. NOT an
+engine regression (medium had re-verified OK with the old binary just before
+the format changed). Coverage logic: the h21 stack was 3-replay-verified on
+the old format; only H45+H49 lack small/8v8 coverage → running h21-vs-h49
+A/B with the CURRENT barreplay on small + 8v8; a match transfers the old
+verification to the full stack. Old refs retired; medium-on-current-format
+reference should be regenerated after this check.
