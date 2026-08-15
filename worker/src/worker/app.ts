@@ -25,7 +25,7 @@
 import { Hono } from "hono";
 
 import { archiveSuffix, scanStreamPreamble } from "./preamble";
-import { playersFromApi, sanitizeEntry, settingsFlags } from "./replayentry";
+import { parseViewRequest, playersFromApi, sanitizeEntry, settingsFlags } from "./replayentry";
 
 /** Upload size cap: keeps a whole raw stream comfortably inside Worker memory
  * and under every plan's request-body limit. Real streams are single-digit MB
@@ -80,6 +80,27 @@ app.put("/api/replays/:id", async (c) => {
 // original upload ran demo-less. The endpoint is deliberately open: it can
 // only write values derived from the public authoritative API for the row's
 // own game id, so there is nothing to forge.
+// Hand-mark whose point of view a replay was recorded from. Most rows carry no
+// recorder provenance — their captures predate the GAME record's recorder
+// fields — and nothing can derive it after the fact, so the viewer offers this
+// as an explicit marking. Open like refresh-settings above: it writes only a
+// three-valued label plus an ally id onto the row's own game, nothing forgeable.
+app.post("/api/replays/:id/view", async (c) => {
+  const id = c.req.param("id");
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) return c.json({ error: "invalid replay id" }, 400);
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "body must be JSON" }, 400);
+  }
+  const parsed = parseViewRequest(body);
+  if (typeof parsed === "string") return c.json({ error: parsed }, 400);
+  const ok = await indexStub(c.env).setView(id, parsed.view, parsed.ally);
+  if (!ok) return c.json({ error: "no catalog row for this replay" }, 404);
+  return c.json({ ok: true, view: parsed.view, ally: parsed.ally });
+});
+
 app.post("/api/replays/:id/refresh-settings", async (c) => {
   const id = c.req.param("id");
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) return c.json({ error: "invalid replay id" }, 400);

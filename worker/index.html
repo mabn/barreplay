@@ -13,6 +13,15 @@
 <body>
 <header>
   <h1><a href="./" id="homelink" title="All replays">barreplay</a><span class="sub" id="subtitle">replay state viewer</span></h1>
+  <!-- Point-of-view marking. Most catalog rows carry no recorder provenance
+       (their captures predate the GAME record's recorder fields) and it cannot
+       be derived after the fact, so it is marked by hand here. -->
+  <div id="viewmark" style="display:none"
+       title="Whose point of view this capture is from. A spectator recording sees every team; a player's recording only sees their own side plus what it scouted.">
+    <label for="viewsel">POV</label>
+    <select id="viewsel"></select>
+    <span id="viewstatus"></span>
+  </div>
 </header>
 
 <!-- Landing view: the replay list (shown when no ?replay= is selected). -->

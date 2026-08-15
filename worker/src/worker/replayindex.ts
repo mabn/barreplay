@@ -62,7 +62,7 @@ export class ReplayIndex extends DurableObject<Env> {
     // In-place upgrades for tables created before a column existed (SQLite has
     // no ADD COLUMN IF NOT EXISTS; a duplicate-column error just means the
     // schema is already current).
-    for (const col of ["settings TEXT", "rid TEXT", "players TEXT", "uploader_ally INTEGER", "uploads TEXT"]) {
+    for (const col of ["settings TEXT", "rid TEXT", "players TEXT", "uploader_ally INTEGER", "uploads TEXT", "view TEXT"]) {
       try {
         ctx.storage.sql.exec(`ALTER TABLE replays ADD COLUMN ${col}`);
       } catch (e) {
@@ -83,8 +83,8 @@ export class ReplayIndex extends DurableObject<Env> {
       prior.length > 0 && prior[0].uploads != null ? JSON.parse(prior[0].uploads as string) : null;
     const uploads = mergeUploads(before, e.rid, e.uploaderAlly);
     this.ctx.storage.sql.exec(
-      `INSERT INTO replays (id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, uploader_ally, uploads, updated_unix)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO replays (id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, uploader_ally, uploads, view, updated_unix)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          rid = excluded.rid,
          start_unix = excluded.start_unix,
@@ -96,6 +96,11 @@ export class ReplayIndex extends DurableObject<Env> {
          players = excluded.players,
          uploader_ally = excluded.uploader_ally,
          uploads = excluded.uploads,
+         -- STICKY, unlike uploader_ally above: view is hand-set through
+         -- setView for rows whose capture carries no recorder provenance, and
+         -- a later pipeline PUT knows nothing about it. Overwriting it the way
+         -- uploader_ally is overwritten would silently undo the marking.
+         view = COALESCE(excluded.view, view),
          updated_unix = excluded.updated_unix`,
       e.id,
       e.rid,
@@ -108,8 +113,48 @@ export class ReplayIndex extends DurableObject<Env> {
       e.players === null ? null : JSON.stringify(e.players),
       e.uploaderAlly,
       uploads === null ? null : JSON.stringify(uploads),
+      e.view,
       Math.floor(Date.now() / 1000),
     );
+  }
+
+  /** setView records, by hand, whose point of view a replay was recorded from
+   * — the admin marking behind the viewer's header control. It exists because
+   * most rows carry no recorder provenance at all: their captures predate the
+   * GAME record's recorder fields, so nothing can derive this, and a null
+   * uploader_ally is ambiguous between "spectator saw everything", "re-sim",
+   * and "we have no idea". view states that explicitly.
+   *
+   * "full" clears uploader_ally (a spectator has no side). "ally" stores the
+   * team as well, and refreshes the current revision's uploads entry so the
+   * per-revision history agrees with the marking. Returns false for an
+   * unknown id. */
+  setView(id: string, view: "full" | "ally" | "unknown", ally: number | null): boolean {
+    const rows = this.ctx.storage.sql.exec(`SELECT rid, uploads FROM replays WHERE id = ?`, id).toArray();
+    if (rows.length === 0) return false;
+    const effAlly = view === "ally" ? ally : null;
+    const rid = (rows[0].rid as string | null) ?? null;
+    const before: UploadRef[] | null = rows[0].uploads != null ? JSON.parse(rows[0].uploads as string) : null;
+    // Re-stamp the current revision so uploads[] matches the marking. Marking
+    // a game "full" must clear the recorded ally, which mergeUploads cannot do
+    // (it deliberately preserves a known ally against a null), so rewrite the
+    // entry for this rid directly.
+    let uploads = before;
+    if (rid !== null) {
+      const prior = before ?? [];
+      uploads = prior.some((u) => u.rid === rid)
+        ? prior.map((u) => (u.rid === rid ? { rid: u.rid, ally: effAlly } : u))
+        : [...prior, { rid, ally: effAlly }];
+    }
+    this.ctx.storage.sql.exec(
+      `UPDATE replays SET view = ?, uploader_ally = ?, uploads = ?, updated_unix = ? WHERE id = ?`,
+      view,
+      effAlly,
+      uploads === null ? null : JSON.stringify(uploads),
+      Math.floor(Date.now() / 1000),
+      id,
+    );
+    return true;
   }
 
   /** list returns every replay, most recently started first (rows with no
@@ -117,7 +162,7 @@ export class ReplayIndex extends DurableObject<Env> {
   list(): ReplayEntry[] {
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, uploader_ally, uploads
+        `SELECT id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, uploader_ally, uploads, view
          FROM replays
          ORDER BY start_unix IS NULL, start_unix DESC, id`,
       )
@@ -134,6 +179,7 @@ export class ReplayIndex extends DurableObject<Env> {
       players: r.players == null ? null : JSON.parse(r.players as string),
       uploaderAlly: r.uploader_ally as number | null,
       uploads: r.uploads == null ? null : JSON.parse(r.uploads as string),
+      view: (r.view as ReplayEntry["view"]) ?? null,
     }));
   }
 

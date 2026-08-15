@@ -2186,6 +2186,7 @@ async function loadReplay(file) {
   secPerFrame = data.sampleEvery > 0 ? data.sampleEvery / 30 : 1;
   document.getElementById('subtitle').textContent =
     [data.gameId, data.mapName, data.gameVersion].filter(Boolean).join(' · ') || 'replay state viewer';
+  initViewMark(data.gameId);   // best-effort, never blocks playback
   document.getElementById('slider').max = Math.max(0, data.frameCount - 1);
   idx = 0;
   playPos = 0;
@@ -2371,7 +2372,95 @@ function showHome() {
   document.body.classList.add('home');
   document.getElementById('home').style.display = '';
   document.getElementById('subtitle').textContent = 'replay state viewer';
+  document.getElementById('viewmark').style.display = 'none';
   renderHome();
+}
+
+// ---- point-of-view marking -------------------------------------------------
+// A capture is either a spectator's (every team visible) or one player's (their
+// side plus whatever it scouted). The .brp records this only for captures made
+// by widget versions that write the recorder fields; for everything else it is
+// unknowable after the fact, so the header offers an explicit marking. The
+// control writes POST /api/replays/<id>/view, which only the Worker backend
+// implements — the Go dev server serves the same catalog read-only, so a
+// missing route disables the control rather than looking broken.
+
+function viewLabel(view, ally) {
+  if (view === 'full') return 'sees all teams';
+  if (view === 'ally') return 'ally ' + ally;
+  if (view === 'unknown') return 'unknown';
+  return 'not marked';
+}
+
+// initViewMark fills the select from the replay's own ally teams and shows the
+// current marking. gameId is the BARE catalog id (rows are keyed by it, not by
+// the revisioned id the pieces are served under).
+async function initViewMark(gameId) {
+  const box = document.getElementById('viewmark');
+  const sel = document.getElementById('viewsel');
+  const status = document.getElementById('viewstatus');
+  box.style.display = '';
+  status.className = '';
+  status.textContent = '';
+
+  const allies = [...new Set((data.teams || []).map(t => t.ally))].sort((a, b) => a - b);
+  sel.innerHTML = '';
+  const opt = (value, text) => {
+    const o = document.createElement('option');
+    o.value = value;
+    o.textContent = text;
+    sel.appendChild(o);
+  };
+  opt('', '— not marked —');
+  opt('full', 'Spectator — sees all teams');
+  allies.forEach(a => opt('ally:' + a, 'One side — ally ' + a));
+  opt('unknown', 'Unknown');
+
+  let row = null;
+  try {
+    const r = await fetch('/api/replays');
+    if (r.ok) row = (await r.json()).find(e => e.id === gameId) || null;
+  } catch { /* offline or no catalog: leave the control at "not marked" */ }
+
+  if (!row) {
+    // No catalog row means nothing to write to (an uploaded-but-unregistered
+    // replay), so offer nothing rather than a control that always 404s.
+    box.style.display = 'none';
+    return;
+  }
+  sel.value = row.view === 'ally' ? 'ally:' + row.uploaderAlly : (row.view || '');
+  status.textContent = sel.value === '' ? '' : '✓';
+
+  sel.onchange = async () => {
+    const v = sel.value;
+    if (v === '') return;                       // the placeholder is not a marking
+    const body = v.startsWith('ally:')
+      ? { view: 'ally', ally: Number(v.slice(5)) }
+      : { view: v };
+    status.className = '';
+    status.textContent = 'saving…';
+    sel.disabled = true;
+    try {
+      const r = await fetch(`/api/replays/${encodeURIComponent(gameId)}/view`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (r.ok) {
+        status.className = 'ok';
+        status.textContent = '✓ ' + viewLabel(body.view, body.ally);
+      } else {
+        const e = await r.json().catch(() => ({}));
+        status.className = 'err';
+        status.textContent = r.status === 404 ? 'not supported here' : (e.error || `HTTP ${r.status}`);
+      }
+    } catch (err) {
+      status.className = 'err';
+      status.textContent = String(err);
+    } finally {
+      sel.disabled = false;
+    }
+  };
 }
 
 function hideHome() {

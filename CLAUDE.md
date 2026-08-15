@@ -168,6 +168,21 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           spectator captures), and a server-owned `uploads` list ([{rid, ally}],
                           accumulated across PUTs via mergeUploads — never accepted from a PUT
                           body) remembering every revision ever published for the game.
+                          `view` ("full"|"ally"|"unknown"|null) states WHOSE POINT OF VIEW the
+                          capture is from, because `uploaderAlly` alone cannot: null there is
+                          ambiguous between a spectator (saw everything), a re-sim, and a row
+                          predating the recorder fields — and most rows are the last case, which
+                          nothing can derive after the fact. So it is HAND-SET via
+                          POST /api/replays/<id>/view (open, like refresh-settings; body
+                          {view, ally}, validated by parseViewRequest) from the viewer header's
+                          POV dropdown, and setView also re-stamps the current rid's uploads
+                          entry so the per-revision history agrees. upsert COALESCEs it
+                          (`view = COALESCE(excluded.view, view)`) — deliberately UNLIKE
+                          uploader_ally, which upsert overwrites unconditionally and which a
+                          later recorder-less PUT therefore nulls while mergeUploads preserves
+                          the truth in uploads[]; that asymmetry is why every deployed row read
+                          uploaderAlly=null. viz.BuildCatalogEntry fills view from the .brp's
+                          Meta.Recorder ("full" when Spectator, else "ally").
                           POST /api/replays/<id>/refresh-settings (open; admin UI) re-derives one
                           row's settings AND players from the BAR API's stored demo metadata (its
                           replay detail carries the demo modoptions verbatim as gameSettings, plus
