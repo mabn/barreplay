@@ -4,7 +4,15 @@
 /barreplay-static
 /static/
 /snapshots/
+/snaps/
 *.part
+
+# capture outputs and the local BAR data dir (engine, game archives, maps —
+# tens of GB, all re-downloadable by pr-downloader)
+/.bardata/
+
+# local secrets: R2 keys etc, auto-loaded by bringest (never commit)
+/.env
 
 # stray scratch scripts (never commit)
 /shot*.js
