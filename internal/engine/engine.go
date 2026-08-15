@@ -109,12 +109,54 @@ func Locate(cfg Config, engineVersion string) (*Engine, error) {
 	if cfg.SampleEvery <= 0 {
 		cfg.SampleEvery = 30
 	}
+	// Absolute from here on. Run pins the engine's working directory to DataDir
+	// (the widget can only write a relative path, resolved against the
+	// write-dir), so a relative DataDir would be re-resolved against ITSELF by
+	// the child: `-data .bardata` made exec look for .bardata/.bardata/engine/…
+	// and fail with a "no such file or directory" naming a path that plainly
+	// exists, because the existence check here runs against the parent's cwd.
+	// The same doubling hit the --write-dir argument.
+	absData, err := filepath.Abs(cfg.DataDir)
+	if err != nil {
+		return nil, fmt.Errorf("engine: resolve data dir %q: %w", cfg.DataDir, err)
+	}
+	cfg.DataDir = absData
 	e := &Engine{cfg: cfg}
 
-	var err error
 	e.headlessPath, err = findBinary(cfg.EngineBinary, cfg.DataDir, engineVersion, headlessName())
 	if err != nil {
 		return nil, fmt.Errorf("engine: locate %s: %w", headlessName(), err)
+	}
+	// findBinary falls back to any engine dir / $PATH, which is right for an
+	// install that suffixes the version ("<ver> bar") but wrong when the build
+	// simply is not there: the re-sim is deterministic only against the engine
+	// the demo was recorded on, so running the wrong one desyncs within seconds
+	// and yields a capture that looks fine and describes a game that never
+	// happened. Refuse instead. An explicit -engine is the operator's call, so
+	// it only warns.
+	if engineVersion != "" {
+		banner, verr := engineBannerVersion(e.headlessPath)
+		got, parsed := parseEngineVersion(banner)
+		switch {
+		case verr != nil:
+			fmt.Fprintf(os.Stderr, "engine: warning: could not check %s version (%v); assuming it matches %s\n",
+				e.headlessPath, verr, engineVersion)
+		case !parsed:
+			// An unfamiliar banner is not evidence of a mismatch.
+			fmt.Fprintf(os.Stderr, "engine: warning: no version in %s --version output; assuming it matches %s\n",
+				e.headlessPath, engineVersion)
+		case engineVersionMatches(got, engineVersion):
+			// Match.
+		case cfg.EngineBinary != "":
+			fmt.Fprintf(os.Stderr, "engine: WARNING: -engine %s is %s but the demo needs %s; the re-sim will desync\n",
+				e.headlessPath, got, engineVersion)
+		default:
+			return nil, fmt.Errorf("engine: %s is %s but this replay needs exactly %s — "+
+				"re-simulating on a different build desyncs and produces a capture of a game that never happened; "+
+				"install it under %s (provisioning does this automatically unless -no-provision is set)",
+				e.headlessPath, got, engineVersion,
+				filepath.Join(cfg.DataDir, "engine", engineVersion))
+		}
 	}
 	if !cfg.SkipProvision {
 		// pr-downloader usually sits beside the engine binary.
@@ -125,11 +167,14 @@ func Locate(cfg Config, engineVersion string) (*Engine, error) {
 	return e, nil
 }
 
-// findBinary applies the search order described on Locate.
+// findBinary applies the search order described on Locate. Every path it
+// returns is absolute — see the note in Locate: the child runs with its
+// working directory set to DataDir, so a relative binary path would be
+// resolved against that instead of the cwd this function checked it under.
 func findBinary(override, dataDir, version, name string) (string, error) {
 	if override != "" {
 		if fileExists(override) {
-			return override, nil
+			return filepath.Abs(override)
 		}
 		return "", fmt.Errorf("override %q not found", override)
 	}
@@ -146,11 +191,11 @@ func findBinary(override, dataDir, version, name string) (string, error) {
 	}
 	for _, c := range candidates {
 		if fileExists(c) {
-			return c, nil
+			return filepath.Abs(c)
 		}
 	}
 	if p, err := exec.LookPath(name); err == nil {
-		return p, nil
+		return filepath.Abs(p)
 	}
 	return "", fmt.Errorf("not found under %s/engine or $PATH", dataDir)
 }

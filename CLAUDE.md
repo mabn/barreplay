@@ -102,6 +102,15 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           queue state anywhere; upload jobs are untouched (run a plain bringest
                           alongside), and a game whose resim fails is skipped until the process
                           restarts. Both loops are hermetically tested against mock worker APIs.
+                          resim REFUSES to return a truncated capture — a signalled engine
+                          (Ctrl-C/OOM/crash; a plain non-zero exit is normal, the engine leaves
+                          via quitforce) or a capture spanning under minCoveragePct of the demo
+                          is an error, never a value — because the caller publishes what it
+                          returns: a killed 55-min re-sim once packed 347 of 100170 frames and
+                          went straight to uploading them over the real replay. It also moves the
+                          raw stream with copy+remove on EXDEV (OutDir is usually a temp dir on
+                          another filesystem, so a plain os.Rename leaked a ~100-160 MB stream
+                          into the data dir every run).
                           At startup it loads ./.env (internal/envfile) into the environment
                           BEFORE the flag defaults are evaluated, so the R2 keys and
                           $BARREPLAY_INDEX_URL work without `source .env` — read from the
@@ -110,6 +119,13 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           are still absent, because otherwise that failure surfaces only as an
                           unrelated-looking CLOUDFLARE_API_TOKEN error out of the wrangler
                           fallback. Only bringest auto-loads; pack/barreplay still need a source.
+                          -progress (DEFAULT ON) prints cmd/barreplay's frame/ETA line during a
+                          re-sim; -log (default ./bringest.log) APPENDS everything printed to a
+                          file as well as stderr. The tee swaps os.Stderr for a pipe rather than
+                          threading a writer around, so it also captures what internal/resim and
+                          internal/packer print; main is os.Exit(run()) so the deferred flush
+                          runs on every exit path, and loadEnvFile RETURNS its lines (it must run
+                          before the flags that name the log file) so they land in it too.
 internal/envfile/         tiny stdlib KEY=VALUE loader for ./.env. Accepts the bash-sourceable
                           subset (`export FOO=bar`, # comments, optional surrounding quotes) so
                           ONE file works both auto-loaded and sourced. Already-set vars WIN (the
@@ -339,6 +355,14 @@ against the engine's working directory. `engine.Run` sets `cmd.Dir` to the write
 passes the widget a relative `barreplay/<gameId>.brsnap` (`Config.SnapshotStreamPath`);
 the tool reads it from `<data>/barreplay/<gameId>.brsnap` after the run and moves it to
 `<out>/<gameId>.brsnap`. An absolute path makes `io.open` return nil → no file at all.
+
+Because that `cmd.Dir` is the data dir, **`engine.Locate` absolutizes `Config.DataDir` and
+every binary path it resolves** (`filepath.Abs`) — otherwise a relative `-data .bardata`
+gets re-resolved against *itself* by the child: exec looked for
+`.bardata/.bardata/engine/<ver>/spring-headless` and failed with a "no such file or
+directory" naming a binary that plainly exists (the lookup had checked it against the
+parent's cwd), and `--write-dir` doubled the same way. Regression test:
+`TestLocateAbsolutizesRelativeDataDir`.
 
 ```
 BRSNAP DEF <json>                              full unit-def as JSON (preamble)
@@ -602,14 +626,44 @@ automatically — the same three-way codec lockstep note applies.
 `spring-headless`. For that to work the host needs:
 
 - `spring-headless` **matching the replay's engine version exactly** (sync-version must
-  match or the re-sim desyncs). Point `-engine` at it or place it under
-  `<BARdata>/engine/<version>/`.
+  match or the re-sim desyncs). `engine.EnsureEngine` (`internal/engine/enginedl.go`)
+  now **downloads it automatically** into `<BARdata>/engine/<version>/` when it is
+  missing — callers run it just before `Locate` — so normally nothing to do. It needs
+  `7z`/`7za` on `$PATH` (the release is a 7z and the stdlib cannot read one; install
+  `p7zip-full`). `-no-provision` or `-engine` opts out.
 - The game archive and map (auto-fetched by `pr-downloader` when a copy is found and
   `-no-provision` is not set; override identifiers with `-game`/`-map`).
 
+**One run per data dir (non-obvious).** A run is NOT isolated within its data dir: it
+rewrites shared state there — the widget order config (`EnableWidget` backs the user's
+up and *restores* it afterwards), `_barreplay_script.txt`, the merged springsettings,
+`infolog.txt`, and the widget's stream under `barreplay/`. Two concurrent runs corrupt
+each other, and the symptom is remote from the cause: run B's teardown restores the
+widget config out from under run A, whose widget then never loads, so A fails minutes
+later with `open widget output ...: no such file or directory` and no hint another
+process was involved (observed: it killed a re-sim 17% in). `engine.LockDataDir`
+(`internal/engine/lock.go`) therefore takes an advisory `<data>/.barreplay.lock`
+holding the pid + command line; `cmd/barreplay` and `internal/resim` acquire it before
+any engine work and release it on return. A lock whose pid is dead is stale and gets
+taken over, so a crash or `kill -9` never wedges the dir. To run two captures at once,
+give them separate `-data` dirs (the engine auto-download will populate the new one).
+
+**Version mismatch is now a hard error, not a fallback (non-obvious).** `findBinary`
+searches `<data>/engine/*` and `$PATH`, which is right for an install that suffixes
+the version (`"<ver> bar"`) but was catastrophic when the required build was simply
+absent: it silently ran whatever was installed, the demo desynced within ~60 frames,
+and the capture looked completely normal while describing a game that never happened
+(observed: a 2026.07.04 replay re-simulated on 2025.06.24 produced 10k desync
+warnings and was nearly published). `Locate` therefore runs `--version` on whatever it
+found and refuses a mismatch. An explicit `-engine` only warns (operator's call), and
+an *unparseable* banner also only warns — refusing on an unrecognized format would
+break custom builds. Guard: `TestLocateRejectsMismatchedEngineVersion`.
+
 ### Provisioning the engine + content manually (validated recipe)
 
-The Recoil engine is on GitHub Releases (`beyond-all-reason/RecoilEngine`). The
+Only needed with `-no-provision`, or to pin a custom build — `EnsureEngine` above does
+this automatically otherwise. The Recoil engine is on GitHub Releases
+(`beyond-all-reason/RecoilEngine`). The
 `recoil_<ver>_amd64-linux.7z` asset (~31 MB) bundles `spring`, `spring-headless`,
 `spring-dedicated`, and `pr-downloader`. Extract it into a data dir (`7z x`); use that
 dir as both the engine location and `--write-dir`.

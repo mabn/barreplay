@@ -186,6 +186,38 @@ func TestLocateFindsHeadlessInEngineDir(t *testing.T) {
 	}
 }
 
+// A relative -data must still resolve to absolute paths. Run pins the engine's
+// working directory to DataDir, so anything left relative gets re-resolved
+// against DataDir by the child: `-data .bardata` had exec looking for
+// .bardata/.bardata/engine/... and failing with "no such file or directory"
+// naming a binary that plainly exists, because the lookup here had checked it
+// against the parent's cwd. The --write-dir argument doubled the same way.
+func TestLocateAbsolutizesRelativeDataDir(t *testing.T) {
+	root := t.TempDir()
+	engDir := filepath.Join(root, "bardata", "engine", "2025.06.24")
+	if err := os.MkdirAll(engDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(engDir, headlessName()), []byte("#!/bin/true\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+
+	e, err := Locate(Config{DataDir: "bardata", SkipProvision: true}, "2025.06.24")
+	if err != nil {
+		t.Fatalf("Locate with a relative DataDir: %v", err)
+	}
+	if got := e.HeadlessPath(); !filepath.IsAbs(got) {
+		t.Errorf("HeadlessPath = %q, want an absolute path", got)
+	} else if !fileExists(got) {
+		t.Errorf("HeadlessPath = %q, which does not exist", got)
+	}
+	// The dir itself feeds --write-dir and cmd.Dir, so it must be absolute too.
+	if !filepath.IsAbs(e.cfg.DataDir) {
+		t.Errorf("cfg.DataDir = %q, want an absolute path", e.cfg.DataDir)
+	}
+}
+
 // TestWidgetHasRequiredCallins lints the embedded Lua statically (no luac in CI):
 // it must define the callins the capture protocol depends on and stay read-only.
 func TestWidgetHasRequiredCallins(t *testing.T) {

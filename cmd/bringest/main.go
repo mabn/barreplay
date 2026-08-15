@@ -79,9 +79,22 @@ import (
 // the repo root, which is also where -worker-dir's default "worker" points.
 const envPath = ".env"
 
-func main() {
-	// Before the flags below, whose defaults read the environment.
-	loadEnvFile()
+// defaultLogPath is where -log appends by default; progressEvery matches
+// cmd/barreplay's -progress cadence so the two read identically.
+const (
+	defaultLogPath = "bringest.log"
+	progressEvery  = 2 * time.Second
+)
+
+// main is a thin wrapper so run's deferred cleanup — notably flushing the tee'd
+// log — happens on every exit path; os.Exit inside run would skip it.
+func main() { os.Exit(run()) }
+
+func run() int {
+	// Before the flags below, whose defaults read the environment. Its report
+	// is held back so it lands in the log file too, which only opens once the
+	// flags naming it are parsed.
+	envMsgs := loadEnvFile()
 
 	var (
 		indexURL  = flag.String("index-url", os.Getenv("BARREPLAY_INDEX_URL"), "base URL of the deployed worker (default: $BARREPLAY_INDEX_URL)")
@@ -92,19 +105,34 @@ func main() {
 		doResim   = flag.Bool("resim", false, "run the independent re-sim worker instead of the job loop: find cataloged games whose only upload is one-sided, re-simulate them headlessly, and publish the full view as another revision (needs -data on an engine-capable host)")
 		dataDir   = flag.String("data", os.Getenv("BAR_DATA_DIR"), "BAR/Spring data directory for -resim (engine/, games/, maps/; also --write-dir; default: $BAR_DATA_DIR)")
 		skipProv  = flag.Bool("no-provision", false, "-resim: do not download engine/game/map content; assume already installed")
+		progress  = flag.Bool("progress", true, "-resim: print the frame/ETA progress line during a re-simulation, like cmd/barreplay's -progress")
+		logPath   = flag.String("log", defaultLogPath, "also append everything printed to this file (empty disables)")
 	)
 	flag.Parse()
+
+	if *logPath != "" {
+		stopTee, err := teeStderr(*logPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "bringest: %v\n", err)
+			return 2
+		}
+		defer stopTee()
+	}
+	for _, m := range envMsgs {
+		fmt.Fprintln(os.Stderr, m)
+	}
+
 	if *indexURL == "" {
 		fmt.Fprintln(os.Stderr, "bringest: -index-url (or $BARREPLAY_INDEX_URL) is required")
-		os.Exit(2)
+		return 2
 	}
 	if *target != "r2" && *target != "local" {
 		fmt.Fprintf(os.Stderr, "bringest: -upload must be \"r2\" or \"local\" (got %q)\n", *target)
-		os.Exit(2)
+		return 2
 	}
 	if *doResim && *dataDir == "" {
 		fmt.Fprintln(os.Stderr, "bringest: -resim needs -data (or $BAR_DATA_DIR) pointing at a BAR data directory")
-		os.Exit(2)
+		return 2
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -121,6 +149,9 @@ func main() {
 	what := "pending jobs"
 	if *doResim {
 		ro := resim.Options{DataDir: *dataDir, SkipProvision: *skipProv}
+		if *progress {
+			ro.ProgressEvery = progressEvery
+		}
 		loop = &resimDaemon{
 			indexURL: trimmedURL,
 			client:   &http.Client{Timeout: 1 * time.Minute},
@@ -144,9 +175,9 @@ func main() {
 	if *once {
 		if _, err := loop.runOnce(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "bringest: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
-		return
+		return 0
 	}
 	fmt.Fprintf(os.Stderr, "bringest: polling %s every %s for %s\n", trimmedURL, *poll, what)
 	ticker := time.NewTicker(*poll)
@@ -157,10 +188,41 @@ func main() {
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return 0
 		case <-ticker.C:
 		}
 	}
+}
+
+// teeStderr duplicates everything written to os.Stderr into path (appended, so
+// runs accumulate rather than clobbering each other). It swaps os.Stderr for a
+// pipe rather than threading a writer through the call graph, so it also
+// captures what internal/resim, internal/packer and inherited child processes
+// print — which is most of the interesting output. The returned stop drains
+// the pipe before returning, so nothing is lost at exit.
+func teeStderr(path string) (func(), error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open log %s: %w", path, err)
+	}
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	orig := os.Stderr
+	os.Stderr = pw
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		io.Copy(io.MultiWriter(orig, f), pr)
+	}()
+	return func() {
+		os.Stderr = orig
+		pw.Close()
+		<-done // drain what is still in flight before the process exits
+		f.Close()
+	}, nil
 }
 
 // loadEnvFile seeds the environment from ./.env. It reports what it did
@@ -169,20 +231,25 @@ func main() {
 // fails with an unrelated-looking CLOUDFLARE_API_TOKEN error, so "did my
 // secrets actually get loaded?" must be answerable from the log alone.
 // Names only — never values, which are secrets.
-func loadEnvFile() {
+// It returns its report rather than printing it: the log file that should also
+// receive these lines is named by a flag, and the flags cannot be parsed until
+// this has run (their defaults read the environment it populates).
+func loadEnvFile() []string {
+	var msgs []string
 	n, err := envfile.Load(envPath)
 	switch {
 	case err != nil:
 		// Not fatal: the environment may already carry everything needed.
-		fmt.Fprintf(os.Stderr, "bringest: ignoring %s: %v\n", envPath, err)
+		msgs = append(msgs, fmt.Sprintf("bringest: ignoring %s: %v", envPath, err))
 	case n > 0:
-		fmt.Fprintf(os.Stderr, "bringest: loaded %d var(s) from %s\n", n, envPath)
+		msgs = append(msgs, fmt.Sprintf("bringest: loaded %d var(s) from %s", n, envPath))
 	}
 	if os.Getenv("R2_ACCESS_KEY_ID") == "" || os.Getenv("R2_SECRET_ACCESS_KEY") == "" {
-		fmt.Fprintf(os.Stderr, "bringest: warning: R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY not set"+
-			" (no %s in %s?); -upload r2 will fall back to the worker's wrangler tooling\n",
-			envPath, mustGetwd())
+		msgs = append(msgs, fmt.Sprintf("bringest: warning: R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY not set"+
+			" (no %s in %s?); -upload r2 will fall back to the worker's wrangler tooling",
+			envPath, mustGetwd()))
 	}
+	return msgs
 }
 
 func mustGetwd() string {
