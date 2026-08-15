@@ -241,3 +241,21 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 #dropstatus { margin-top: 8px; font-size: 12px; color: #c7d3de; }
 #dropstatus.error { color: #e2785b; }
 #dropstatus.ok { color: #6fd07f; }
+
+/* Point-of-view marking in the header. Pushed to the right so it never
+   crowds the replay title, which is the thing being read. */
+#viewmark {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #9fb0bf;
+  white-space: nowrap;
+}
+#viewmark select { font-size: 12px; }
+/* Reserves its own width so the header does not reflow as the text changes
+   between "saving…" and a result. */
+#viewstatus { min-width: 8ch; font-size: 11px; color: #6f87a0; }
+#viewstatus.ok { color: #7fd18b; }
+#viewstatus.err { color: #ff9c8f; }

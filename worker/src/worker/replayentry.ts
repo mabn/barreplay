@@ -35,6 +35,15 @@ export interface ReplayEntry {
    * revision — which side's point of view the replay shows. Null for engine
    * re-sim captures and spectator recordings (they see the whole game). */
   uploaderAlly: number | null;
+  /** Whose point of view the capture is from, when known:
+   *  - "full"    a spectator (or a re-sim) — sees every team
+   *  - "ally"    one side only; uploaderAlly names it
+   *  - "unknown" explicitly marked as undetermined
+   *  - null      never marked
+   * uploaderAlly alone cannot express this: null there is ambiguous between
+   * "full", "unknown" and "legacy row". Set by hand via setView for the many
+   * rows whose captures predate the recorder fields. */
+  view: "full" | "ally" | "unknown" | null;
   /** Every revision ever published for this game with the side that recorded
    * it, oldest first. Server-owned: accumulated across PUTs (mergeUploads),
    * never accepted from a PUT body. Superseded revisions stay servable, so
@@ -113,6 +122,9 @@ export function sanitizeEntry(id: string, body: unknown): ReplayEntry | string {
     // Server-owned: the index accumulates this across PUTs (mergeUploads);
     // whatever a PUT body claims is ignored.
     uploads: null,
+    // Likewise not settable from a pipeline PUT: it is the hand-set marking,
+    // and upsert COALESCEs it so a re-publish cannot wipe it. Use setView.
+    view: null,
   };
 }
 
@@ -244,6 +256,27 @@ function parseSkill(v: unknown): number | null {
  * list: appends {rid, ally} when the rid is new, refreshes the recorded ally
  * when the same rid is re-published with one (identical bytes always land on
  * the same rid, so re-publishing is idempotent). Order stays oldest-first. */
+/** parseViewRequest validates a POST /api/replays/:id/view body. Returns the
+ * marking, or an error string. "ally" requires a non-negative integer ally id;
+ * any other view must not carry one, so a marking can never leave a stale team
+ * behind. */
+export function parseViewRequest(
+  b: unknown,
+): { view: "full" | "ally" | "unknown"; ally: number | null } | string {
+  if (typeof b !== "object" || b === null) return "body must be a JSON object";
+  const o = b as Record<string, unknown>;
+  if (o.view !== "full" && o.view !== "ally" && o.view !== "unknown") {
+    return `view must be one of "full", "ally", "unknown"`;
+  }
+  if (o.view !== "ally") {
+    return { view: o.view, ally: null };
+  }
+  if (typeof o.ally !== "number" || !Number.isInteger(o.ally) || o.ally < 0) {
+    return "ally must be a non-negative integer when view is \"ally\"";
+  }
+  return { view: "ally", ally: o.ally };
+}
+
 export function mergeUploads(existing: UploadRef[] | null, rid: string | null, ally: number | null): UploadRef[] | null {
   if (rid === null) return existing;
   const prior = existing ?? [];

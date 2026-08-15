@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mergeUploads, playersFromApi, sanitizeEntry, settingsFlags } from "../src/worker/replayentry";
+import { mergeUploads, parseViewRequest, playersFromApi, sanitizeEntry, settingsFlags } from "../src/worker/replayentry";
 
 test("full entry passes through", () => {
   const e = sanitizeEntry("abc123", {
@@ -36,6 +36,7 @@ test("full entry passes through", () => {
     ],
     uploaderAlly: 1,
     uploads: null,
+    view: null,
   });
 });
 
@@ -53,6 +54,7 @@ test("missing stats become null, unknown fields are dropped", () => {
     players: null,
     uploaderAlly: null,
     uploads: null,
+    view: null,
   });
 });
 
@@ -200,4 +202,34 @@ test("ids are confined to a bare token", () => {
   assert.equal(sanitizeEntry("..", {}), "invalid replay id");
   assert.equal(sanitizeEntry("a".repeat(129), {}), "invalid replay id");
   assert.ok(typeof sanitizeEntry("6da7496aca487581a12b7a6d5bd99bc0", {}) === "object");
+});
+
+// The POV marking body (POST /api/replays/<id>/view). "ally" is the only view
+// that carries a team, so the parser must reject the combinations that would
+// otherwise leave a row claiming a side it does not have.
+test("view request accepts the three markings", () => {
+  assert.deepEqual(parseViewRequest({ view: "full" }), { view: "full", ally: null });
+  assert.deepEqual(parseViewRequest({ view: "unknown" }), { view: "unknown", ally: null });
+  assert.deepEqual(parseViewRequest({ view: "ally", ally: 0 }), { view: "ally", ally: 0 });
+  assert.deepEqual(parseViewRequest({ view: "ally", ally: 3 }), { view: "ally", ally: 3 });
+});
+
+test("view request drops a team when the view is not one-sided", () => {
+  // Marking a game full-view must not leave the old ally behind.
+  assert.deepEqual(parseViewRequest({ view: "full", ally: 2 }), { view: "full", ally: null });
+});
+
+test("view request rejects malformed bodies", () => {
+  for (const bad of [
+    null,
+    "full",
+    {},
+    { view: "spectator" },      // not one of the three
+    { view: "ally" },           // one-sided with no team
+    { view: "ally", ally: -1 },
+    { view: "ally", ally: 1.5 },
+    { view: "ally", ally: "2" },
+  ]) {
+    assert.equal(typeof parseViewRequest(bad), "string", `should reject ${JSON.stringify(bad)}`);
+  }
 });

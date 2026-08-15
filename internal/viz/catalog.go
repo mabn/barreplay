@@ -48,6 +48,15 @@ type CatalogEntry struct {
 	// replay shows. Nil for engine re-sim captures and spectator recordings,
 	// which see the whole game.
 	UploaderAlly *int32 `json:"uploaderAlly,omitempty"`
+	// View states whose point of view the capture is from when it is known:
+	// "full" (a spectator or a re-sim — every team visible), "ally" (one side,
+	// named by UploaderAlly), or "unknown". UploaderAlly alone cannot express
+	// this, since nil there is ambiguous between "full", "unknown" and a row
+	// predating the recorder fields. In the worker it is a HAND-SET marking
+	// (POST /api/replays/<id>/view from the viewer's header control) which
+	// upserts deliberately preserve; the Go server derives it from the
+	// capture's own Meta.Recorder and leaves it empty when there is none.
+	View string `json:"view,omitempty"`
 	// Uploads lists every revision ever published for this game with the side
 	// that recorded it, oldest first. Accumulated PUT-by-PUT in the worker's
 	// catalog (revisions are append-only, so every entry keeps playing at
@@ -103,13 +112,20 @@ func BuildCatalogEntry(id string, bf *snapshot.BRPFile, sizeBytes int64) Catalog
 		e.DurationSec = &v
 	}
 	e.Players = catalogPlayers(bf.Meta)
-	if r := bf.Meta.Recorder; r != nil && !r.Spectator {
-		for _, t := range bf.Meta.Teams {
-			// Trust the recorded ally only if it exists in the team table.
-			if t.AllyTeam == r.AllyTeam {
-				v := r.AllyTeam
-				e.UploaderAlly = &v
-				break
+	if r := bf.Meta.Recorder; r != nil {
+		if r.Spectator {
+			// A spectator saw every team; that is a fact about the capture, so
+			// state it rather than leaving it to be inferred from a nil ally.
+			e.View = "full"
+		} else {
+			for _, t := range bf.Meta.Teams {
+				// Trust the recorded ally only if it exists in the team table.
+				if t.AllyTeam == r.AllyTeam {
+					v := r.AllyTeam
+					e.UploaderAlly = &v
+					e.View = "ally"
+					break
+				}
 			}
 		}
 	}

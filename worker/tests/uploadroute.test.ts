@@ -36,6 +36,13 @@ class FakeIndex {
     if (players !== null) e.players = players; // COALESCE in the real DO
     return true;
   }
+  setView(id: string, view: "full" | "ally" | "unknown", ally: number | null): boolean {
+    const e = this.entries.get(id);
+    if (!e) return false;
+    e.view = view;
+    e.uploaderAlly = view === "ally" ? ally : null;
+    return true;
+  }
   jobInsert(id: string, streamKey: string, gameId: string): void {
     this.jobs.set(id, { id, streamKey, gameId, state: "pending", error: null, createdUnix: 0, updatedUnix: 0 });
   }
