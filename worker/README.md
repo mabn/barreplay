@@ -97,14 +97,18 @@ worker/
   index.html              viewer page (Vite entry)
   public/app.js           viewer logic (copied from internal/viz/web, URLs point at R2)
   public/style.css
+  public/setup.html       the widget-install guide (/setup), self-contained: no fingerprinted
+                          subresources, since only index.html gets the hash substituted
   public/icons, ranks/    synced from internal/viz/bardata by tools/sync-assets.mjs (gitignored)
+  public/replay_uploader.lua  the widget /setup hands out, synced from assets/lua by the same
+                          script (gitignored — source of truth is assets/lua/replay_uploader.lua)
   src/worker/index.ts     wrangler entry: re-exports the app + the Durable Object class
   src/worker/app.ts       Hono app: serve R2 (index.json, replays/**), /api/replays,
                           /api/upload + jobs, SPA fallback (no workerd imports — node-testable)
   src/worker/replayindex.ts  the catalog + ingest-jobs Durable Object (SQLite)
   src/worker/replayentry.ts  catalog row shape + PUT body validation (node-testable, no workerd)
   src/worker/preamble.ts  minimal .brepstream preamble scan for /api/upload (gameId, ally team)
-  tools/sync-assets.mjs   copies the vendored icons into public/ before dev/build
+  tools/sync-assets.mjs   copies the vendored icons + the uploader widget into public/ before dev/build
   tools/r2put.ts          shared upload backend: parallel S3 PUTs (with R2 creds) or parallel wrangler
   tools/upload.ts         upload a barreplay-static bundle (npm run upload)
 ```
@@ -228,6 +232,27 @@ The raw archives under `streams/` accumulate on purpose (nothing in the bucket
 is ever deleted): they are the substrate for the planned multi-player merge
 (docs/widget-remote-upload.md), keyed by gameId with the recorder's ally team
 (`-a<n>`, `-spec` for spectators) in the name.
+
+### Where players get the widget (`/setup`)
+
+The dropzone only helps someone who already has a capture, so its banner links
+to **`/setup`** (`public/setup.html`): download `replay_uploader.lua`, drop it
+in `…\data\LuaUI\Widgets\`, enable it from F11, upload the `.brepstream` each
+game leaves in `…\data`. Three things make that page work:
+
+- `tools/sync-assets.mjs` copies `assets/lua/replay_uploader.lua` into
+  `public/` (gitignored, like the icons) so the repo keeps ONE copy of the
+  widget and the download can never go stale against the decoder.
+- `wrangler.jsonc` excludes `/replay_uploader.lua` from `run_worker_first`:
+  through the Worker its `public/_headers` `no-cache` rule would be dead, and
+  this is the one file whose bytes change under a stable URL.
+- `src/worker/app.ts` routes `GET /setup` to the `/setup.html` asset. Without
+  it the extensionless path reaches the catch-all, where the asset layer's
+  single-page-application handling answers with the viewer's `index.html`.
+
+The Go viz server serves the same page and widget from its embedded copies
+(`internal/viz/server.go`), so the relative link in `index.html` resolves on
+both backends.
 
 ## Commands
 

@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Record your games — barreplay</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="alternate icon" href="/favicon.ico" sizes="48x48 32x32 16x16">
+<!-- Deliberately SELF-CONTAINED: no /style.<rev>.css, no /app.<rev>.js. The
+     viewer's stylesheet is fingerprinted by the build (and by the Go viz
+     server at startup), and only index.html goes through the substitution
+     that stamps the hash in — a second page referencing it would have to be
+     taught to every substituter, for a static page that shares none of the
+     viewer's layout. Inline styles keep this page servable verbatim from the
+     asset layer, from `vite dev`, and from the Go server's embedded copy. -->
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #11151a;
+  color: #d7dee6;
+  line-height: 1.5;
+}
+header {
+  padding: 8px 16px;
+  background: #1a2027;
+  border-bottom: 1px solid #2a323c;
+  display: flex; align-items: center; gap: 14px;
+}
+header h1 { font-size: 15px; margin: 0; white-space: nowrap; }
+header h1 a { color: inherit; text-decoration: none; }
+header h1 a:hover { color: #8fd3ff; }
+header .sub { color: #6f87a0; font-weight: 400; font-size: 12px; margin-left: 8px; }
+main { max-width: 820px; margin: 0 auto; padding: 28px 20px 60px; }
+h2 { font-size: 24px; margin: 0 0 6px; }
+.lede { color: #9fb0bf; margin: 0 0 28px; }
+
+/* One step = a big number badge next to its instruction. The badge is what
+   makes the sequence scannable, so it stays the same size on every step. */
+.step {
+  display: flex; gap: 16px; align-items: flex-start;
+  padding: 18px 20px; margin-bottom: 14px;
+  background: #171d24; border: 1px solid #2a323c; border-radius: 8px;
+}
+.num {
+  flex: 0 0 auto;
+  width: 40px; height: 40px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 19px; font-weight: 700;
+  background: #24425c; color: #d6ecff; border: 1px solid #4a7fa8;
+}
+.body { min-width: 0; }
+.body h3 { margin: 6px 0 8px; font-size: 17px; }
+.body p { margin: 8px 0; }
+.note { color: #8a98a6; font-size: 13px; }
+code, .path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px; color: #d6ecff;
+  background: #0f141a; border: 1px solid #2a323c; border-radius: 4px;
+  padding: 1px 5px;
+}
+/* The install path is long; let it wrap instead of scrolling the page. */
+.path { display: inline-block; padding: 6px 9px; word-break: break-all; }
+kbd {
+  font-family: inherit; font-size: 12px; font-weight: 600;
+  background: #2a3742; border: 1px solid #4a5a6c; border-bottom-width: 2px;
+  border-radius: 4px; padding: 1px 6px;
+}
+a { color: #8fd3ff; }
+.dl {
+  display: inline-block; margin: 6px 0 2px;
+  padding: 10px 16px; border-radius: 6px;
+  background: #24425c; border: 1px solid #4a7fa8; color: #d6ecff;
+  font-size: 15px; font-weight: 600; text-decoration: none;
+}
+.dl:hover { background: #2d5273; }
+.back { margin-top: 26px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><a href="/" title="All replays">barreplay</a><span class="sub">record your games</span></h1>
+</header>
+
+<main>
+  <h2>Record your games</h2>
+  <p class="lede">The <b>Replay uploader</b> widget records what you see during a live game
+    into a <code>.brepstream</code> file. Upload it here and it becomes a replay anyone can watch.</p>
+
+  <div class="step">
+    <div class="num">1</div>
+    <div class="body">
+      <h3>Download the widget</h3>
+      <a class="dl" href="/replay_uploader.lua" download="replay_uploader.lua">Download replay_uploader.lua</a>
+      <p class="note">If your browser opens the file instead of saving it, right-click the button and choose “Save link as…”.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">2</div>
+    <div class="body">
+      <h3>Put it in your BAR installation</h3>
+      <p>Save it as:</p>
+      <p><span class="path">Beyond-All-Reason\data\LuaUI\Widgets\replay_uploader.lua</span></p>
+      <p class="note">If the <code>LuaUI\Widgets</code> directories don’t exist — create them.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">3</div>
+    <div class="body">
+      <h3>Enable it in game</h3>
+      <p>Start any game. In game press <kbd>F11</kbd>, find <b>Replay uploader</b> on the list
+        and click it to enable it.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">4</div>
+    <div class="body">
+      <h3>Play, then upload</h3>
+      <p>Play games, either as a spectator or a player. After each game you will find a
+        <code>.brepstream</code> file inside <code>Beyond-All-Reason\data</code>. Upload that file.</p>
+      <p class="note">Drop it on the dropzone at the top of the <a href="/">replay list</a>.
+        It is named after the game’s id, so the newest file is the game you just played.</p>
+    </div>
+  </div>
+
+  <p class="back"><a href="/">← Back to the replays</a></p>
+</main>
+</body>
+</html>

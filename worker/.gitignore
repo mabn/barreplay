@@ -6,3 +6,6 @@ dist/
 # Vendored icons synced from internal/viz/bardata by tools/sync-assets.mjs.
 public/icons/
 public/ranks/
+# The Replay uploader widget offered by /setup, synced from assets/lua by the
+# same script (source of truth is assets/lua/replay_uploader.lua).
+public/replay_uploader.lua

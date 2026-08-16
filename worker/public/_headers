@@ -29,6 +29,15 @@
 /ranks/*
   Cache-Control: public, max-age=604800
 
+# The Replay uploader widget offered by /setup (synced into public/ from
+# assets/lua by tools/sync-assets.mjs). Its URL is printed in a guide, so the
+# name cannot carry a content hash; revalidate instead, so a widget release
+# reaches players on their next visit rather than after a cache expiry. Like
+# the prefixes above it is excluded from run_worker_first, or this rule would
+# never run.
+/replay_uploader.lua
+  Cache-Control: no-cache
+
 # The favicon cannot be fingerprinted either: a browser will ask for it at a
 # fixed path of its own accord, with no markup to point elsewhere. A day is the
 # lag between changing the icon and a browser noticing it.

@@ -40,8 +40,12 @@
        capture) POSTs to /api/upload; the worker archives it and the ingest
        daemon publishes it. Hidden with a note on hosts without the API. -->
   <div id="dropzone">
+    <!-- The setup link is RELATIVE: it resolves to /setup on the deployed
+         worker (https://replay.fogofwar.dev/setup) and to the same page on the
+         Go viz server, which serves it from the same embedded file. -->
     <span id="droplabel">Drop a <code>.brepstream</code> capture here to publish it —
-      or <label class="browse">browse<input type="file" id="dropfile" accept=".brepstream" hidden></label></span>
+      or <label class="browse">browse<input type="file" id="dropfile" accept=".brepstream" hidden></label>.
+      Want to record your games? <a href="/setup">Click here!</a></span>
     <div id="dropstatus" style="display:none"></div>
   </div>
   <!-- Catalog filters. Hidden unless the backend answers GET
