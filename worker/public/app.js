@@ -2595,8 +2595,8 @@ function updateSidebar() {
   renderPlayers();
 }
 
-let lastTimeText = null; // skip the DOM writes below when nothing changed:
-let lastSliderIdx = -1;  // they run every animation tick and cost style/layout
+let lastTimeText = null; // skip the label write when nothing changed: it runs
+let lastSliderPos = -1;  // every animation tick and costs style/layout
 function updateTimeLabel() {
   const last = data.frameCount - 1;
   // Time derives from the index (uniform sampling), so the label tracks the
@@ -2607,9 +2607,17 @@ function updateTimeLabel() {
     lastTimeText = text;
     document.getElementById('timelabel').textContent = text;
   }
-  if (idx !== lastSliderIdx) {
-    lastSliderIdx = idx;
-    document.getElementById('slider').value = idx;
+  // The thumb tracks the CONTINUOUS playhead, not the sample index. Writing the
+  // index moved it once per SAMPLE — one wall-second apart at 1x, so the thumb
+  // ticked along like a clock hand however smoothly everything else animated.
+  // This does mean a DOM write per tick while playing, which the label above
+  // still avoids; that is the price of the motion, on one small element.
+  // Dragging is unaffected: the input handler rounds through go(), and this
+  // writes the rounded position straight back, so a drag still lands on a whole
+  // sample despite the slider's step="any".
+  if (playPos !== lastSliderPos) {
+    lastSliderPos = playPos;
+    document.getElementById('slider').value = playPos;
   }
 }
 
@@ -2774,8 +2782,13 @@ document.getElementById('speed').onchange = () => {};
 document.getElementById('slider').oninput = e => { stopPlay(); go(+e.target.value); };
 window.addEventListener('keydown', e => {
   if (e.target.tagName === 'SELECT') return;
-  if (e.key === 'ArrowLeft') { stopPlay(); go(idx - 1); }
-  else if (e.key === 'ArrowRight') { stopPlay(); go(idx + 1); }
+  // A FOCUSED slider would step natively on top of this, and since it carries
+  // step="any" (so the thumb can glide between samples during playback) the
+  // browser's own arrow step is a hundredth of the whole timeline rather than
+  // one frame. Suppressing it there leaves one frame per press, from here.
+  const onSlider = e.target.id === 'slider';
+  if (e.key === 'ArrowLeft') { stopPlay(); go(idx - 1); if (onSlider) e.preventDefault(); }
+  else if (e.key === 'ArrowRight') { stopPlay(); go(idx + 1); if (onSlider) e.preventDefault(); }
   else if (e.key === ' ') { e.preventDefault(); togglePlay(); }
 });
 
@@ -2835,7 +2848,7 @@ async function loadReplay(file) {
   buildCommIndex();
   renderChat();      // after applyTeamColors: rows are coloured by the author's team
   lastTimeText = null;
-  lastSliderIdx = -1;
+  lastSliderPos = -1;
   secPerFrame = data.sampleEvery > 0 ? data.sampleEvery / 30 : 1;
   document.getElementById('subtitle').textContent =
     [data.gameId, data.mapName, data.gameVersion].filter(Boolean).join(' · ') || 'replay state viewer';

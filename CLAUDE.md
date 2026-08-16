@@ -843,7 +843,16 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   built once per load (`buildDefTables`) instead of two string-hash lookups per unit per
   frame, per-draw def/glyph memos instead of per-unit `"path|color|px"` keys, an
   allocation-free `interpPos` (shared scratch), throttled sidebar DOM rebuilds during
-  playback (200 ms min), and time-label/slider writes only when the value changed.
+  playback (200 ms min), and time-label writes only when the text changed. The SLIDER
+  is the deliberate exception: it tracks the continuous `playPos` and so is written
+  every tick while playing, because writing the sample index moved the thumb once per
+  SAMPLE — a full wall-second apart at 1x, ticking like a clock hand while everything
+  else animated. That needs `step="any"` in the markup (a stepped range SNAPS a
+  fractional assignment, which is what made it step in the first place), and in turn
+  the arrow-key handler suppresses the slider's NATIVE stepping when it has focus:
+  under `step="any"` the browser's own arrow step is a hundredth of the timeline
+  rather than one frame. Dragging is unaffected — `go()` rounds, and the round-trip
+  writes the whole sample straight back.
 - The **real map terrain** behind the units is loaded **entirely client-side** (`loadMap`
   in `app.js`): the browser takes the head's `mapName` (from the capture's meta),
   resolves it to the API's **file name** (see below), and talks straight

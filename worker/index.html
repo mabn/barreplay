@@ -117,7 +117,9 @@
     </select>
   </label>
   <div id="timeline">
-    <input type="range" id="slider" min="0" max="0" value="0">
+    <!-- step="any" so the thumb can sit between samples while playing; a
+         DRAG still lands on a whole one, rounded by go(). -->
+    <input type="range" id="slider" min="0" max="0" value="0" step="any">
     <div id="buffbar" title="Downloaded ranges"></div>
   </div>
   <span class="timelabel" id="timelabel">—</span>

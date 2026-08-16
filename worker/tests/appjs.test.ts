@@ -300,3 +300,41 @@ test('build progress interpolates toward the next sample', () => {
   api.set(0.5, recycled, map);
   assert.equal(api.interpBuild(u, 0), 100, 'a recycled id must not rewind the bar');
 });
+
+// The timeline thumb tracks the continuous playhead, so it glides during
+// playback instead of ticking once per sample (one wall-second apart at 1x).
+test('the slider follows the continuous playhead, not the sample index', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('not found: ' + n);
+  };
+  const slider: any = { value: null };
+  const label: any = { textContent: null };
+  const document = { getElementById: (id: string) => id === 'slider' ? slider : label };
+  let idx = 0, playPos = 0, renderFrac = 0, secPerFrame = 1;
+  let lastTimeText: string | null = null, lastSliderPos = -1;
+  const data = { frameCount: 100, sampleEvery: 30, chunks: [{ frame: 0, count: 100 }] };
+  const frameNumAt = (i: number) => i * 30;
+  const fmtTime = (t: number) => String(Math.floor(t));
+
+  const api = eval(`(function(){
+    ${extract('updateTimeLabel')}
+    return { update: (i, p, f) => { idx = i; playPos = p; renderFrac = f; updateTimeLabel(); } };
+  })()`);
+
+  api.update(4, 4, 0);
+  assert.equal(slider.value, 4, 'on a whole sample the thumb is on it');
+  api.update(4, 4.25, 0.25);
+  assert.equal(slider.value, 4.25, 'a quarter into the interval the thumb is a quarter along');
+  api.update(4, 4.5, 0.5);
+  assert.equal(slider.value, 4.5, 'and it keeps moving without the index changing');
+
+  // The markup must permit it: a stepped range snaps a fractional assignment.
+  const html = readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
+  assert.match(html, /id="slider"[^>]*step="any"/, 'the slider needs step="any" to sit between samples');
+});
