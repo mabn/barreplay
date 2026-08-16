@@ -1328,6 +1328,14 @@ function fitBubbleText(raw, maxPx) {
   return hit;
 }
 
+// chatBody is the message as a bubble shows it. Talking to EVERYONE is marked,
+// because team chat is the norm during a game and public chat is the exception
+// worth noticing — an unmarked bubble is something said to that player's own
+// side.
+function chatBody(c) {
+  return (c.d === 'all' ? '[ALL] ' : '') + c.t;
+}
+
 // bubbleRuns splits a message into the coloured runs its bubble draws, each
 // with its measured width. A player's bubble is one run in the ink its team
 // colour calls for. A SPECTATOR's is two: the "(s) name:" prefix, always
@@ -1336,13 +1344,12 @@ function fitBubbleText(raw, maxPx) {
 // prefix is never trimmed; the message is fitted to whatever width it leaves.
 function bubbleRuns(c, isSpec, ink) {
   if (!isSpec) {
-    const [text, w] = fitBubbleText(c.t, BUBBLE_MAX_PX);
+    const [text, w] = fitBubbleText(chatBody(c), BUBBLE_MAX_PX);
     return [[text, ink, w]];
   }
   const [head, hw] = fitBubbleText(`(s) ${commName(c)}: `, BUBBLE_MAX_PX);
   const [body, bw] = fitBubbleText(
-    (c.d === 'all' ? '[ALL] ' : '') + c.t,
-    Math.max(BUBBLE_MIN_TEXT_PX, BUBBLE_MAX_PX - hw));
+    chatBody(c), Math.max(BUBBLE_MIN_TEXT_PX, BUBBLE_MAX_PX - hw));
   return [[head, SPEC_NAME_INK, hw], [body, c.d === 'spec' ? SPEC_NAME_INK : SPEC_ALL_INK, bw]];
 }
 

@@ -787,8 +787,11 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   units whose neighbourhood carries 2% of the peak, 27% of the way out to a corner.
   Sharing an anchor means sharing a stack (`SPEC_KEY`), which is why their bubbles name
   their author: black background, `(s) name:` always yellow, then the message — yellow
-  to the spectator channel, white and marked `[ALL]` to everyone (`bubbleRuns` returns
-  the coloured runs, laid left to right from the centred block). A battleroom relay, or
+  to the spectator channel, white to everyone (`bubbleRuns` returns the coloured runs,
+  laid left to right from the centred block). EVERY bubble, spectator or not, marks
+  public chat with an `[ALL]` prefix (`chatBody`): team chat is the norm during a game,
+  so an unmarked bubble is something said to that player's own side and the exception is
+  what earns the label. A battleroom relay, or
   a team with nothing left, gets no bubble and lives only in the sidebar. The whole
   layer switches off from the sidebar's "Hide chat bubbles" — one of the few view
   toggles that earns a control rather than a `const`, since bubbles sit on top of the
