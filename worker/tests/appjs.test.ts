@@ -221,6 +221,7 @@ test('chat bubbles fade smoothly and are not re-timed by a speed change', () => 
     ${extract('textColorOn')}
     ${extract('roundRectPath')}
     ${extract('fitBubbleText')}
+    ${extract('chatBody')}
     ${extract('bubbleRuns')}
     ${extract('drawChatBubbles')}
     return { draw: drawChatBubbles, setChat: c => { chatLines = c; }, setSpeed: v => { speedValue = v; },
@@ -428,6 +429,7 @@ test('spectator bubbles are formatted and coloured apart from players', () => {
     ${extract('textColorOn')}
     ${extract('roundRectPath')}
     ${extract('fitBubbleText')}
+    ${extract('chatBody')}
     ${extract('bubbleRuns')}
     ${extract('drawChatBubbles')}
     return { draw: drawChatBubbles, setChat: c => { chatLines = c; }, setShow: v => { showBubbles = v; } };
@@ -469,11 +471,17 @@ test('spectator bubbles are formatted and coloured apart from players', () => {
   r = drawn(10);
   assert.deepEqual(r.runs.map(x => x[0]), ['(s) huk5: ', 'one', '(s) huk6: ', 'two']);
 
-  // A player's bubble stays one run and keeps its team colour.
+  // A player's bubble stays one run and keeps its team colour. Team chat is the
+  // norm, so it is unmarked...
   api.setChat([{ f: 0, p: 1, t: 'push', d: 'ally' }]);
   r = drawn(10);
   assert.deepEqual(r.runs.map(x => x[0]), ['push']);
   assert.ok(r.bg.includes('#ff2020'), 'player bubbles use the team colour');
+
+  // ...while talking to everyone is marked, for players as much as spectators.
+  api.setChat([{ f: 0, p: 1, t: 'gg', d: 'all' }]);
+  r = drawn(10);
+  assert.deepEqual(r.runs.map(x => x[0]), ['[ALL] gg'], 'public chat is marked [ALL]');
 
   // The sidebar toggle switches the whole layer off.
   api.setShow(false);
