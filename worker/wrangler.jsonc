@@ -6,6 +6,27 @@
   // Same Cloudflare account as the sibling claudebar/lavabalance worker.
   "account_id": "9a1829e6502587e153ffa45b76de7ed3",
 
+  // The public hostname. `custom_domain` (as opposed to a plain route pattern)
+  // makes Cloudflare create the DNS record and provision the certificate for
+  // this exact hostname, so no wildcard cert is involved and no Advanced
+  // Certificate Manager subscription is needed.
+  //
+  // REQUIREMENT: the fogofwar.dev zone must live in the SAME Cloudflare
+  // account as account_id above. A Custom Domain cannot bind a zone held by
+  // another account, so if the registration sits elsewhere it has to be moved
+  // first (Registrar -> Manage Domain -> Configuration -> Start; the domain
+  // must be >10 days old) — or this worker redeployed into that account.
+  //
+  // The workers.dev hostname keeps working alongside this, so the switch is
+  // additive: nothing that already points at replay.bartools.workers.dev
+  // breaks when this lands.
+  "routes": [
+    {
+      "pattern": "replay.fogofwar.dev",
+      "custom_domain": true
+    }
+  ],
+
   // The Vite build (client bundle in dist/client) is served as static assets by the
   // runtime BEFORE the Worker runs. Requests that don't match an asset fall through to
   // the Hono app in src/worker/index.ts. `single-page-application` serves index.html for
