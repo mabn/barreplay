@@ -1079,14 +1079,21 @@ function drawMarks(f) {
 }
 
 // ---- chat log ---------------------------------------------------------------
-// The whole conversation, in the sidebar: everything said up to the playhead
-// plus a few lines of what is coming, so the panel reads as a transcript you
-// can scroll and click rather than a ticker that erases itself. A row's click
-// seeks to the frame it was said at.
+// The conversation SO FAR, in the sidebar: only what has been said by the
+// playhead is shown, and the box stays parked at the bottom so the newest line
+// is the one you are looking at. Nothing is spoiled by a message that has not
+// happened yet, and a row's click seeks back to when it was said.
+//
+// Parking is the usual stick-to-bottom rule: scroll away and the box stops
+// following, scroll back down to the bottom and it resumes. Our own scrolling
+// fires the same event and simply re-confirms the stick, so no suppress flag is
+// needed.
 
 const CHAT_DEST_TAG = { ally: 'ally', spec: 'spec', private: 'pm', lobby: 'lobby' };
-let chatBuilt = false;   // rows exist for the current replay
-let chatCursor = -1;     // index of the newest row at or before the playhead
+const CHAT_STICK_SLACK = 4; // px from the bottom still counted as "parked"
+let chatBuilt = false;      // rows exist for the current replay
+let chatCursor = -1;        // index of the newest row at or before the playhead
+let chatStick = true;       // follow the playhead (false once scrolled away)
 
 // ---- chat bubbles -----------------------------------------------------------
 // A message also pops up over its speaker on the map, the way it would have in
@@ -1266,6 +1273,60 @@ function drawChatBubbles(f, u) {
     });
   }
   octx.globalAlpha = 1;
+}
+
+function renderChat() {
+  const box = document.getElementById('chat');
+  const wrap = document.getElementById('chatwrap');
+  if (!box || !wrap) return;
+  wrap.style.display = chatLines.length ? '' : 'none';
+  box.innerHTML = '';
+  chatBuilt = chatLines.length > 0;
+  chatCursor = -1;
+  chatStick = true;
+  if (!chatBuilt) return;
+  chatLines.forEach(c => {
+    const row = document.createElement('div');
+    // Every row starts UNSENT, which the stylesheet hides; updateChat reveals
+    // them as the playhead reaches them. That is why chatCursor starts at -1.
+    row.className = 'chatrow future';
+    const tag = CHAT_DEST_TAG[c.d];
+    row.innerHTML =
+      `<span class="chattime">${escapeHtml(fmtTime(c.f / 30))}</span>` +
+      (tag ? `<span class="chattag">${escapeHtml(tag)}</span>` : '') +
+      `<b style="color:${escapeHtml(commColor(c.p))}">${escapeHtml(commName(c))}</b> ` +
+      `<span>${escapeHtml(c.t)}</span>`;
+    row.title = 'Jump to ' + fmtTime(c.f / 30);
+    row.addEventListener('click', () => {
+      if (data.sampleEvery > 0) go(Math.round(c.f / data.sampleEvery));
+    });
+    box.appendChild(row);
+  });
+  // Assignment rather than addEventListener: #chat outlives every replay load,
+  // and stacking a handler per load would be a slow leak.
+  box.onscroll = () => {
+    chatStick = box.scrollHeight - box.scrollTop - box.clientHeight <= CHAT_STICK_SLACK;
+  };
+}
+
+// updateChat reveals the rows the playhead has now reached and keeps the box
+// parked at the bottom. It runs on every playback tick, so it exits immediately
+// unless the boundary actually moved.
+function updateChat(f) {
+  if (!chatBuilt) return;
+  let cursor = -1;
+  for (let i = 0; i < chatLines.length && chatLines[i].f <= f; i++) cursor = i;
+  if (cursor === chatCursor) return;
+  const box = document.getElementById('chat');
+  const rows = box.children;
+  // Only the rows that changed side of the boundary need touching — scrubbing
+  // backwards hides them again just as cheaply.
+  const lo = Math.min(chatCursor, cursor) + 1, hi = Math.max(chatCursor, cursor);
+  for (let i = lo; i <= hi && i < rows.length; i++) {
+    rows[i].classList.toggle('future', i > cursor);
+  }
+  chatCursor = cursor;
+  if (chatStick) box.scrollTop = box.scrollHeight;
 }
 
 // ---- coordinate transforms ------------------------------------------------
