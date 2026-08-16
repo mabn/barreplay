@@ -468,6 +468,25 @@ export class ReplayIndex extends DurableObject<Env> {
       .map(jobRow);
   }
 
+  /** jobsRecent is the queue as a PERSON reads it (GET /api/queue): everything
+   * still in flight first — those are what the view exists to answer for —
+   * then the most recently finished jobs, newest first. Unlike jobsPending it
+   * does not hide a fresh "processing" job: a daemon working right now is
+   * exactly what the viewer wants to see, even though it is not work to hand
+   * out. Bounded by `limit`, since the table only grows. */
+  jobsRecent(limit: number): IngestJob[] {
+    return this.ctx.storage.sql
+      .exec(
+        `SELECT id, stream_key, game_id, state, error, created_unix, updated_unix FROM jobs
+         ORDER BY CASE WHEN state IN ('pending', 'processing') THEN 0 ELSE 1 END,
+                  updated_unix DESC, id
+         LIMIT ?`,
+        limit,
+      )
+      .toArray()
+      .map(jobRow);
+  }
+
   /** jobUpdate transitions a job's state (daemon claim / completion report).
    * Returns false when the job id is unknown. */
   jobUpdate(id: string, state: "processing" | "done" | "error", error: string | null): boolean {

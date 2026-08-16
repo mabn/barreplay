@@ -189,6 +189,28 @@ app.get("/api/jobs/:id", async (c) => {
   return c.json(job, 200, { "cache-control": "no-cache" });
 });
 
+// The queue as the landing page's "Queue" section shows it: unfinished jobs
+// first, then what recently finished. Open, like the per-job status the
+// uploading browser already polls, and for the same reason — it reports on
+// public replays and can change nothing. The archive KEY is deliberately not
+// in the reply: it is the one field of a job row that is not public (the
+// route serving those bytes is bearer-guarded), and the view has no use for
+// it.
+const QUEUE_LIMIT = 100;
+
+app.get("/api/queue", async (c) => {
+  const jobs = await indexStub(c.env).jobsRecent(QUEUE_LIMIT);
+  const list = jobs.map(({ id, gameId, state, error, createdUnix, updatedUnix }) => ({
+    id,
+    gameId,
+    state,
+    error,
+    createdUnix,
+    updatedUnix,
+  }));
+  return c.json(list, 200, { "cache-control": "no-cache" });
+});
+
 // The ingest daemon's work queue: pending jobs (plus stalled "processing"
 // ones), oldest first. Guarded like every other write-side API.
 app.get("/api/jobs", async (c) => {

@@ -33,9 +33,23 @@ icons (`/icons/*`, `/ranks/*`) are fixed static assets bundled with the deploy. 
 is fetched **browser-side directly** from `api.bar-rts.com` (degrades gracefully if
 unreachable), so there is no map proxy.
 
+## The landing page's sections
+
+The landing page (no `?replay=` in the URL) has a **left menu** with two sections:
+
+- **Replays** — the catalog list (below), the default.
+- **Queue** — the ingest jobs behind the drag&drop uploads (`GET /api/queue`), one
+  row per upload with its game, state, age and failure detail, refreshed every 5 s
+  while it is on screen. The menu entry carries a count of the jobs still in flight.
+  A backend without the route (the Go viz server, which runs no ingest pipeline)
+  says so instead of showing an empty table.
+
+The selection lives in the URL as `?tab=queue`, so it is shareable and survives a
+refresh, and opening a replay from a section returns there on `back`.
+
 ## The replay catalog (Durable Object + SQLite)
 
-The landing page (no `?replay=` in the URL) is a **replay list with per-game stats** —
+The **Replays** section is a **replay list with per-game stats** —
 when the game started, how long it ran, which map, the team-size spec ("8v8"), and the
 download size — ordered most recent game first. Those stats live inside each `.brp`'s
 meta record, which a bucket listing can't see, so they are kept in a small SQLite table
@@ -224,6 +238,7 @@ wherever the repo lives (`cmd/bringest`, e.g. a VM):
 | `POST /api/upload` | open; validates the stream's preamble (`src/worker/preamble.ts`), archives the raw bytes at `streams/<gameId>/<ts>-a<ally>.brepstream` (append-only, never listed, never served publicly), inserts a pending job, returns `{job, gameId, streamKey}` |
 | `GET /api/jobs/<id>` | open; the job's state for the uploading browser's poll (`pending → processing → done \| error`) |
 | `GET /api/jobs` | bearer-guarded; the daemon's work queue (pending + stalled-processing jobs, oldest first) |
+| `GET /api/queue` | open; the same jobs for the landing page's **Queue** section (unfinished first, then recently finished, capped at 100) — the archive key is left out, since those bytes are guarded |
 | `POST /api/jobs/<id>` | bearer-guarded; daemon transitions (`processing`, `done`, `error` + message) |
 | `GET /api/streams/<gameId>/<file>` | bearer-guarded; the daemon downloads the archived stream (it speaks only HTTPS to the Worker — no S3 reads, no inbound connectivity) |
 

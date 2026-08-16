@@ -3494,6 +3494,7 @@ function showHome() {
   document.getElementById('viewmark').style.display = 'none';
   renderHome();
   ensureHomeData();
+  applyHomeTab();
 }
 
 // ensureHomeData loads what only the replay TABLE needs — the catalog listing
@@ -3515,6 +3516,170 @@ function ensureHomeData() {
     homeDataPending = Promise.all([initFilters(), reloadList()]);
   }
   return homeDataPending;
+}
+
+// ---- home sections (the left menu) -----------------------------------------
+// The landing page holds more than the catalog now, so which section is shown
+// lives in the URL (?tab=) exactly like the filters do: a menu pick is then
+// shareable, survives a refresh, and replayHref carries it into a replay so
+// the back button returns to the section it was opened from. Unlike a filter
+// change this IS navigation between screens, so it pushes a history entry.
+const HOME_TABS = ['replays', 'queue'];
+
+function homeTab() {
+  const t = new URLSearchParams(location.search).get('tab');
+  return HOME_TABS.includes(t) ? t : 'replays';
+}
+
+function setHomeTab(tab) {
+  const u = new URL(location.href);
+  if (tab === 'replays') u.searchParams.delete('tab');
+  else u.searchParams.set('tab', tab);
+  if (u.href !== location.href) history.pushState(null, '', u);
+  applyHomeTab();
+}
+
+// applyHomeTab shows the selected section and marks its menu entry. It also
+// owns the queue's polling: a section that isn't on screen must not keep
+// asking the server for it.
+function applyHomeTab() {
+  const tab = homeTab();
+  for (const b of document.querySelectorAll('#homenav .navitem')) {
+    b.classList.toggle('on', b.dataset.tab === tab);
+  }
+  for (const name of HOME_TABS) {
+    document.getElementById('tab-' + name).style.display = name === tab ? '' : 'none';
+  }
+  if (tab === 'queue') {
+    startQueuePoll();
+  } else {
+    stopQueuePoll();
+    // One read anyway, so the menu's in-flight count is honest before the
+    // section has ever been opened. Skipped once a backend has 404'd it.
+    refreshQueue();
+  }
+}
+
+function initHomeNav() {
+  for (const b of document.querySelectorAll('#homenav .navitem')) {
+    b.addEventListener('click', () => setHomeTab(b.dataset.tab));
+  }
+}
+
+// ---- queue section ---------------------------------------------------------
+// The ingest queue: what happened to the drag&drop uploads. GET /api/queue is
+// the Worker's job table (pending/processing first, then what recently
+// finished); the Go viz server has no ingest pipeline at all, so a missing
+// route says so plainly rather than showing an empty table that looks like
+// "nothing is queued".
+const QUEUE_POLL_MS = 5000;
+const QUEUE_UNSUPPORTED =
+  'This server does not run an ingest queue — uploads are published from the command line with: go run ./cmd/pack -upload r2 <capture>.';
+let queueTimer = null;
+let queueJobs = null;      // last fetched rows, so a re-render needs no fetch
+let queueStates = new Map(); // job id -> last seen state, to spot transitions
+let queueSupported = true; // cleared by a 404: a backend won't grow the route
+
+function startQueuePoll() {
+  if (!queueSupported) { renderQueue(null, QUEUE_UNSUPPORTED); return; }
+  if (queueTimer !== null) return;
+  refreshQueue();
+  queueTimer = setInterval(refreshQueue, QUEUE_POLL_MS);
+}
+
+function stopQueuePoll() {
+  if (queueTimer === null) return;
+  clearInterval(queueTimer);
+  queueTimer = null;
+}
+
+async function refreshQueue() {
+  if (!queueSupported) return;
+  let jobs;
+  try {
+    const r = await fetch('/api/queue');
+    if (r.status === 404 || r.status === 405) {
+      // A backend without the endpoint will not grow one while the page is
+      // open, so stop asking instead of 404ing every few seconds.
+      queueSupported = false;
+      stopQueuePoll();
+      renderQueue(null, QUEUE_UNSUPPORTED);
+      return;
+    }
+    if (!r.ok) { renderQueue(null, `Could not read the queue: HTTP ${r.status}`); return; }
+    jobs = await r.json();
+    if (!Array.isArray(jobs)) throw new Error('unexpected reply');
+  } catch (err) {
+    renderQueue(null, 'Could not read the queue: ' + (err.message || err));
+    return;
+  }
+  // A job that just finished published a replay the catalog didn't have when
+  // this page loaded; refresh the list once per transition so its Game cell
+  // becomes a link (and the Replays section is up to date when switched to).
+  const finished = jobs.some(j => j.state === 'done' && queueStates.get(j.id) !== 'done' && queueStates.has(j.id));
+  queueStates = new Map(jobs.map(j => [j.id, j.state]));
+  renderQueue(jobs);
+  if (finished) reloadList().then(() => renderQueue()); // now with its replay link
+}
+
+function renderQueue(jobs, errMsg) {
+  if (jobs) queueJobs = jobs;
+  const rows = queueJobs || [];
+  const tbody = document.querySelector('#queuetable tbody');
+  const msg = document.getElementById('queuemsg');
+  tbody.textContent = '';
+  for (const j of rows) {
+    const tr = document.createElement('tr');
+    const cell = (text, cls) => {
+      const td = document.createElement('td');
+      if (cls) td.className = cls;
+      if (text == null) td.classList.add('dim');
+      td.textContent = text ?? '—';
+      tr.appendChild(td);
+      return td;
+    };
+    cell(j.createdUnix ? fmtDate(j.createdUnix) : null);
+    // The game: a link once its replay is in the catalog (the pieces are
+    // served under the revision id, so the row's rid is what plays).
+    {
+      const td = document.createElement('td');
+      td.className = 'game';
+      const e = replayList.find(x => x.id === j.gameId);
+      if (e) {
+        const a = document.createElement('a');
+        a.href = replayHref(urlId(e));
+        a.textContent = j.gameId;
+        a.addEventListener('click', (ev) => {
+          if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+          ev.preventDefault();
+          openReplay(urlId(e));
+        });
+        td.appendChild(a);
+      } else {
+        td.textContent = j.gameId;
+      }
+      tr.appendChild(td);
+    }
+    {
+      const td = document.createElement('td');
+      const s = document.createElement('span');
+      s.className = 'state state-' + String(j.state).replace(/[^\w-]/g, '');
+      s.textContent = j.state;
+      td.appendChild(s);
+      tr.appendChild(td);
+    }
+    cell(j.updatedUnix ? fmtAgo(j.updatedUnix) : null);
+    const detail = cell(j.error || null, 'detail');
+    if (j.error) detail.classList.add('error');
+    tbody.appendChild(tr);
+  }
+  const active = rows.filter(j => j.state === 'pending' || j.state === 'processing').length;
+  const badge = document.getElementById('navqueue');
+  if (badge) badge.textContent = active ? String(active) : '';
+  const text = errMsg || (rows.length ? '' :
+    'Nothing in the queue. Drop a .brepstream above and it shows up here until the ingest daemon has published it.');
+  msg.style.display = text ? '' : 'none';
+  msg.textContent = text;
 }
 
 // ---- point-of-view marking -------------------------------------------------
@@ -3610,6 +3775,7 @@ async function initViewMark(gameId) {
 function hideHome() {
   document.body.classList.remove('home');
   document.getElementById('home').style.display = 'none';
+  stopQueuePoll();
 }
 
 function renderHome(errMsg) {
@@ -3995,6 +4161,7 @@ function openReplay(id) {
 
 async function init() {
   initGL(); // one-time; a null result just means the 2D icon path is used
+  initHomeNav(); // the left menu; the section itself is applied by showHome
   initUpload(); // the dropzone works without the catalog being loaded
   const params = new URLSearchParams(location.search);
 
@@ -4050,6 +4217,16 @@ function fmtSize(n) {
 function fmtDate(unix) {
   return new Date(unix * 1000).toLocaleString(undefined,
     { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+// fmtAgo renders how long ago a unix moment was, for the queue's "last
+// touched" column — a job's age is what says whether it is moving.
+function fmtAgo(unix) {
+  const sec = Math.max(0, Math.round(Date.now() / 1000 - unix));
+  if (sec < 60) return sec + 's ago';
+  if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
+  if (sec < 86400) return Math.floor(sec / 3600) + 'h ago';
+  return Math.floor(sec / 86400) + 'd ago';
 }
 
 // fmtDuration renders a game length as m:ss / h:mm:ss.
