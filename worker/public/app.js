@@ -960,7 +960,6 @@ function teamLabel(t) {
 const MARK_LIFETIME = 60;   // game-seconds a drawing stays on the map
 const MARK_FADE = 8;        // game-seconds of fade-out at the end of that
 const MARK_ERASE_RADIUS = 100; // elmos; the engine's CInMapDrawModel constant
-const CHAT_CONTEXT = 12;    // chat rows kept visible past the playhead
 
 let marks = [];             // point/line comms in frame order, with erasedAt
 let chatLines = [];         // chat comms in frame order
@@ -1089,6 +1088,144 @@ const CHAT_DEST_TAG = { ally: 'ally', spec: 'spec', private: 'pm', lobby: 'lobby
 let chatBuilt = false;   // rows exist for the current replay
 let chatCursor = -1;     // index of the newest row at or before the playhead
 
+// ---- chat bubbles -----------------------------------------------------------
+// A message also pops up over its speaker on the map, the way it would have in
+// the game, so you can see WHERE the person calling the play is. The anchor is
+// the speaker's COMMANDER — a player's avatar, and the one unit that is theirs
+// alone. When it is dead (chat outlives commanders in a long game) the bubble
+// falls back to the centroid of whatever that team still owns, which keeps it
+// on their side of the map; a speaker with no units left, a spectator, or a
+// battleroom relay gets no bubble at all and lives only in the sidebar.
+
+const BUBBLE_LIFETIME = 9;  // game-seconds a bubble hovers over its speaker
+const BUBBLE_FADE = 3;      // game-seconds of fade-out at the end of that
+const BUBBLE_STACK = 3;     // most recent messages shown per speaker
+const BUBBLE_MAX_PX = 240;  // bubble width cap; longer text is ellipsized
+const BUBBLE_PAD = 5;
+const BUBBLE_LINE = 16;     // px between stacked bubbles
+
+// A commander's internal def name in BAR: <faction>com, plus the level variants
+// (armcomlvl3) and Legion's upgrade paths (legcomoff, legcomt2def). The prefix
+// match deliberately excludes DECOY commanders (armdecom/cordecom/legdecom),
+// which are fakes and can exist several at a time, and everything that merely
+// contains "com" (comeffigylvl2, dummycom, mission_command_tower); the boss
+// test drops the scavenger/AI commanders, which belong to no player.
+const COMMANDER_RE = /^(arm|cor|leg)com/;
+let defIsCom = new Map(); // def id -> is it a player's commander
+
+function buildCommanderDefs() {
+  defIsCom = new Map();
+  const defs = data.unitDefs || {};
+  for (const id in defs) {
+    const name = defs[id];
+    defIsCom.set(+id, COMMANDER_RE.test(name) && !name.includes('boss'));
+  }
+}
+
+// firstChatAt returns the index of the first chat line at or after frame f.
+function firstChatAt(f) {
+  let lo = 0, hi = chatLines.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (chatLines[mid].f < f) lo = mid + 1; else hi = mid;
+  }
+  return lo;
+}
+
+// textColorOn picks black or white for text drawn on a team colour, so a bubble
+// stays readable whichever end of the palette the team sits at.
+function textColorOn(css) {
+  const [r, g, b] = cssToTint(css);
+  return (0.299 * r + 0.587 * g + 0.114 * b) > 0.55 ? '#0b0e12' : '#ffffff';
+}
+
+function roundRectPath(c, x, y, w, h, r) {
+  if (c.roundRect) { c.beginPath(); c.roundRect(x, y, w, h, r); return; }
+  c.beginPath();
+  c.rect(x, y, w, h);
+}
+
+// drawChatBubbles paints the messages spoken within the last BUBBLE_LIFETIME
+// game-seconds over their speakers. u is the displayed frame's unit array.
+function drawChatBubbles(f, u) {
+  if (!chatLines.length || !u) return;
+  const window = BUBBLE_LIFETIME * 30, fade = BUBBLE_FADE * 30;
+
+  // Group the live messages by speaker, newest last, keeping only the teams we
+  // will actually need to locate.
+  const byTeam = new Map(); // team -> [{c, alpha}]
+  for (let i = firstChatAt(f - window); i < chatLines.length; i++) {
+    const c = chatLines[i];
+    if (c.f > f) break;
+    const team = commTeamOf.get(c.p);
+    if (team === undefined || team < 0) continue; // spectator / lobby relay
+    const left = c.f + window - f;
+    if (left <= 0) continue; // fully faded: don't let it hold a stack slot
+    const list = byTeam.get(team) || [];
+    list.push({ c, alpha: left < fade ? left / fade : 1 });
+    byTeam.set(team, list);
+  }
+  if (!byTeam.size) return;
+
+  // One pass over the frame to locate each speaking team: its commander if it
+  // still has one, else the centre of mass of everything it owns.
+  const com = new Map(), sum = new Map();
+  for (let i = 0; i < u.length; i += STRIDE) {
+    const t = u[i + F.TEAM];
+    if (!byTeam.has(t)) continue;
+    const s = sum.get(t);
+    if (s) { s[0] += u[i + F.X]; s[1] += u[i + F.Z]; s[2]++; }
+    else sum.set(t, [u[i + F.X], u[i + F.Z], 1]);
+    if (defIsCom.get(u[i + F.DEF]) && !com.has(t)) com.set(t, i);
+  }
+
+  octx.textAlign = 'center';
+  octx.textBaseline = 'middle';
+  octx.font = '12px system-ui, sans-serif';
+  for (const [team, list] of byTeam) {
+    let wx, wz;
+    const ci = com.get(team);
+    if (ci !== undefined) {
+      const p = interpPos(u, ci);
+      wx = p[0]; wz = p[1];
+    } else {
+      const s = sum.get(team);
+      if (!s) continue; // nothing of theirs left on the map
+      wx = s[0] / s[2]; wz = s[1] / s[2];
+    }
+    const sx = viewW / 2 + (wx - center.x) * scale;
+    const sy = viewH / 2 + (wz - center.z) * scale;
+    if (sx < -BUBBLE_MAX_PX || sy < -80 || sx > viewW + BUBBLE_MAX_PX || sy > viewH + 40) continue;
+
+    const fill = teamColor[team] || '#9aa6b2';
+    const ink = textColorOn(fill);
+    const shown = list.slice(-BUBBLE_STACK);
+    // Newest sits closest to the unit; older ones stack upward.
+    shown.forEach((b, k) => {
+      const y = sy - 22 - (shown.length - 1 - k) * BUBBLE_LINE;
+      let text = b.c.t;
+      let w = octx.measureText(text).width;
+      if (w > BUBBLE_MAX_PX) {
+        while (text.length > 1 && octx.measureText(text + '…').width > BUBBLE_MAX_PX) {
+          text = text.slice(0, -1);
+        }
+        text += '…';
+        w = octx.measureText(text).width;
+      }
+      octx.globalAlpha = b.alpha;
+      octx.fillStyle = fill;
+      roundRectPath(octx, sx - w / 2 - BUBBLE_PAD, y - 8, w + BUBBLE_PAD * 2, 16, 4);
+      octx.fill();
+      octx.strokeStyle = 'rgba(8, 12, 16, 0.55)';
+      octx.lineWidth = 1;
+      octx.stroke();
+      octx.fillStyle = ink;
+      octx.fillText(text, sx, y);
+    });
+  }
+  octx.globalAlpha = 1;
+}
+
 function renderChat() {
   const box = document.getElementById('chat');
   const wrap = document.getElementById('chatwrap');
@@ -1133,10 +1270,12 @@ function updateChat(f) {
     rows[i].classList.toggle('future', i > cursor);
   }
   chatCursor = cursor;
-  // Follow the playhead, but only when it has left the visible window —
-  // scrolling on every new line would fight a user reading back through the
-  // log while the replay plays on.
-  const anchor = rows[Math.min(rows.length - 1, cursor + CHAT_CONTEXT)];
+  // Rest the NEWEST SAID line on the bottom edge, so the transcript reads like
+  // a chat window: everything above has been said, anything below is still to
+  // come. Only when that line has left the visible window, though — scrolling
+  // on every message would fight a user reading back through the log while the
+  // replay plays on.
+  const anchor = rows[cursor];
   if (!anchor) return;
   const top = anchor.offsetTop, bottom = top + anchor.offsetHeight;
   if (bottom > box.scrollTop + box.clientHeight || top < box.scrollTop) {
@@ -1412,7 +1551,8 @@ function drawOverlay(u) {
   // fade out and get erased), so they repaint with the build lines rather than
   // with the cached base layer. They exist independently of the frame data, so
   // they draw even while a chunk is still streaming in.
-  if (marks.length) drawMarks(frameNumAt(idx));
+  const simFrame = frameNumAt(idx);
+  if (marks.length) drawMarks(simFrame);
   if (!u) return;
 
   // Cheap scan first: most frames have far fewer builders/under-construction
@@ -1467,6 +1607,9 @@ function drawOverlay(u) {
       octx.fillRect(x, y, w * (b / BUILD_DONE), h);
     }
   }
+
+  // Speech last: nothing should paint over a message.
+  drawChatBubbles(simFrame, u);
 }
 
 // Per-def render info, resolved ONCE per replay load. The draw loops touch this
@@ -2590,6 +2733,7 @@ async function loadReplay(file) {
     setEmpty('');
   }
   buildDefTables();
+  buildCommanderDefs();
   buildDestroyedIndex();
   applyTeamColors();
   buildCommIndex();

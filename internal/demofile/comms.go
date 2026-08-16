@@ -84,6 +84,24 @@ const maxDrawCoord = 1 << 20
 // not recorded.
 var lobbyRelay = regexp.MustCompile(`^<([^>]{1,64})> (.*)$`)
 
+// machineChat marks a message BAR's own UI sent on the chat channel rather than
+// a person typing: the player-list's "I need energy" / "gave 2186 energy to
+// c0y" buttons publish an i18n KEY for the receiving client to localize, and it
+// travels as an ordinary chat packet from that player.
+//
+// They must be dropped, and by volume this is not a detail — one real 8v8 sent
+// 133 of them against 91 typed messages, so keeping them would leave a
+// transcript that is 58% raw key paths like
+// "> :ui.playersList.chat.giveEnergy:amount=2186:name=c0y". Dropping them also
+// makes the demo agree exactly with what the widgets record: their console
+// parser already rejects these, since after the "> " the line begins with ':'
+// rather than a speaker.
+//
+// Deliberately NOT dropped: "!forcestart", "!cv resign" and friends. Those are
+// autohost commands, but a person typed them, and reading them is often how a
+// game's ending makes sense.
+const machineChatPrefix = "> :"
+
 // scanComms walks the packet stream and returns everything players wrote and
 // drew, in stream order (non-decreasing frame).
 //
@@ -140,7 +158,7 @@ func chatComm(pkt []byte, frame int32) (snapshot.Comm, bool) {
 	}
 	from, dest := pkt[2], pkt[3]
 	text := strings.TrimRight(cstr(pkt[4:]), " ")
-	if text == "" {
+	if text == "" || strings.HasPrefix(text, machineChatPrefix) {
 		return snapshot.Comm{}, false
 	}
 	c := snapshot.Comm{Frame: frame, Kind: snapshot.CommChat, PlayerID: int32(from)}
