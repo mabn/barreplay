@@ -8,7 +8,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const bardata = join(here, "..", "..", "internal", "viz", "bardata");
+const repo = join(here, "..", "..");
+const bardata = join(repo, "internal", "viz", "bardata");
 const publicDir = join(here, "..", "public");
 
 for (const name of ["icons", "ranks"]) {
@@ -18,3 +19,12 @@ for (const name of ["icons", "ranks"]) {
   await cp(src, dst, { recursive: true });
   console.log(`synced ${name} -> public/${name}`);
 }
+
+// The Replay uploader widget, offered for download by /setup. Copied from
+// assets/lua for the same reason as the icons: the repo keeps ONE copy, so a
+// widget edit cannot leave a stale file here for players to install. Not
+// fingerprinted (its URL is printed in a guide and must stay stable), so
+// public/_headers keeps it revalidating.
+const widget = "replay_uploader.lua";
+await cp(join(repo, "assets", "lua", widget), join(publicDir, widget));
+console.log(`synced ${widget} -> public/${widget}`);

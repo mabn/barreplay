@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mabn/barreplay/assets"
 	"github.com/mabn/barreplay/snapshot"
 )
 
@@ -753,5 +754,51 @@ func TestFavicon(t *testing.T) {
 		if !strings.Contains(string(html), want) {
 			t.Errorf("index.html does not reference %s", want)
 		}
+	}
+}
+
+// TestSetupPage guards the widget-install guide the landing page links to. The
+// link in index.html is relative, so it must resolve on THIS server too, not
+// only on the Cloudflare deployment — and the widget it offers has to be the
+// embedded assets/lua copy, byte for byte.
+func TestSetupPage(t *testing.T) {
+	srv := httptest.NewServer((&Server{Dir: t.TempDir()}).Handler())
+	defer srv.Close()
+
+	get := func(path string) (*http.Response, string) {
+		t.Helper()
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("GET %s: status %d", path, resp.StatusCode)
+		}
+		return resp, string(b)
+	}
+
+	_, home := get("/")
+	if !strings.Contains(home, `href="/setup"`) {
+		t.Error("the dropzone banner does not link to /setup")
+	}
+
+	resp, page := get("/setup")
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/html") {
+		t.Errorf("/setup content-type = %q", got)
+	}
+	if !strings.Contains(page, `href="/replay_uploader.lua"`) {
+		t.Error("/setup does not offer the widget download")
+	}
+	// The page is deliberately self-contained: it must not reference the
+	// fingerprinted subresources, whose hash only index.html gets substituted.
+	if strings.Contains(page, "__ASSET_REV__") {
+		t.Error("/setup references an unsubstituted fingerprinted asset")
+	}
+
+	_, widget := get("/replay_uploader.lua")
+	if widget != assets.ReplayUploaderLua {
+		t.Error("/replay_uploader.lua is not the embedded widget")
 	}
 }

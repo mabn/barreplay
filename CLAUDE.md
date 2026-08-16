@@ -424,6 +424,24 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           GET /api/jobs, downloads via GET /api/streams/<gameId>/<file> (both
                           bearer-guarded), publishes, and POSTs done/error; the browser polls the
                           open GET /api/jobs/<id> and auto-opens the replay on done.
+                          WIDGET-INSTALL GUIDE: the dropzone banner links (relatively, so it
+                          resolves on both backends) to /setup — public/setup.html, four numbered
+                          steps ending in a drag&drop upload. The page is deliberately
+                          SELF-CONTAINED (inline CSS, no /style.<rev>.css): only index.html goes
+                          through the __ASSET_REV__ substitution, so a second page referencing the
+                          fingerprinted subresources would have to be taught to every substituter.
+                          Its step 1 serves assets/lua/replay_uploader.lua, copied into public/ by
+                          tools/sync-assets.mjs exactly like the vendored icons (gitignored — ONE
+                          copy of the widget in the repo, so the download cannot drift from the
+                          decoder) and, like them, EXCLUDED from run_worker_first: routed through
+                          the worker its public/_headers no-cache rule would be silently dead, and
+                          it is the one asset whose bytes change under a stable URL (its URL is
+                          printed in a guide, so it cannot be fingerprinted). /setup itself needs
+                          the app.ts route: extensionless, it would otherwise reach the catch-all
+                          and be answered with the viewer's index.html by the asset layer's
+                          single-page-application handling. The Go viz server serves the same page
+                          and the same widget from its embedded copies (worker/assets.go embeds
+                          public/setup.html; assets.ReplayUploaderLua is the widget).
                           Uploads (tools/upload.ts) go
                           through tools/r2put.ts: parallel S3 PUTs when R2_ACCESS_KEY_ID/
                           R2_SECRET_ACCESS_KEY are set (fast, aws4fetch), else parallel `wrangler r2
@@ -967,9 +985,13 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   `public/{app.js,style.css}` via `worker/assets.go` — the single copy of the
   front-end in the repo) and exposes `/index.json` (the replay list),
   `/replays/<id>.brw|.keys|.resources`, `/replays/<id>/c<n>`, and `/icons/<file>` +
-  `/ranks/<n>.png` (the embedded icons, cached). The `<id>` segment is confined to
-  the snapshots dir (maps to `<id>.brp`, basename only — rejects any path separator /
-  traversal). UI/JSON assets are served `no-store` so a changed UI never serves stale.
+  `/ranks/<n>.png` (the embedded icons, cached). It also serves the widget-install
+  guide the landing banner links to — `/setup` (`public/setup.html`, embedded too)
+  and `/replay_uploader.lua` (`assets.ReplayUploaderLua`) — so the relative link
+  works here and not only on the Cloudflare deployment. The `<id>` segment is
+  confined to the snapshots dir (maps to `<id>.brp`, basename only — rejects any
+  path separator / traversal). UI/JSON assets are served `no-store` so a changed UI
+  never serves stale.
 - **`worker/public/`** (+ `worker/index.html`) is plain HTML/Canvas/vanilla-JS — **no
   framework, no build step for the app itself** (Vite only wraps it for the Cloudflare
   deploy). `app.js` reads the flat unit arrays by index (no per-unit objects), renders

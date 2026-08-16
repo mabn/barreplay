@@ -10,3 +10,11 @@ import _ "embed"
 //
 //go:embed lua/snapshot_widget.lua
 var SnapshotWidgetLua string
+
+// ReplayUploaderLua is the player-installable live-game widget. Nothing in the
+// pipeline injects it (players drop it into their own LuaUI/Widgets), but the
+// viz server offers it for download from its /setup guide — the same file the
+// Cloudflare worker emits, so both hosts hand out identical bytes.
+//
+//go:embed lua/replay_uploader.lua
+var ReplayUploaderLua string
