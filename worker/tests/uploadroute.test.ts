@@ -438,22 +438,22 @@ test("uploads of the same game from the same side get distinct keys", async () =
   assert.deepEqual(bucket.objects.get(again.streamKey), full);
 });
 
-// There is no favicon.ico — the tab icon is an SVG. Without an explicit route
-// this path reaches the catch-all, where the asset layer's
+// The favicons are served by the ASSET LAYER, not by these routes: wrangler.jsonc
+// excludes them from run_worker_first so public/_headers can set their
+// cache-control. That makes their presence on disk the thing worth guarding —
+// if either file goes missing, the request falls to the catch-all, where the
 // single-page-application handling answers it with index.html: a 200 carrying
-// the whole HTML document as the tab icon. That is what it did before, so this
-// is a regression test, not a hypothetical.
-test("/favicon.ico is answered empty, never with the SPA entry", async () => {
-  const { env } = makeEnv();
-  // The stand-in ASSETS binding returns 404; the real one would return
-  // index.html here, which is precisely the failure being excluded.
-  for (const method of ["GET", "HEAD"]) {
-    const res = await app.request("/favicon.ico", { method }, env);
-    assert.equal(res.status, 204, method);
-    assert.equal(await res.text(), "", `${method} body is empty`);
-    assert.ok(
-      !(res.headers.get("content-type") ?? "").includes("text/html"),
-      `${method} must not be answered with HTML`,
-    );
+// the whole HTML document, labelled text/html, as the tab icon. That is what
+// /favicon.ico actually did before the file existed.
+test("both favicon files exist for the asset layer to serve", () => {
+  for (const [name, magic] of [["favicon.svg", "<svg"], ["favicon.ico", "\x00\x00\x01\x00"]] as const) {
+    const b = readFileSync(new URL(`../public/${name}`, import.meta.url));
+    assert.ok(b.length > 100, `${name} is suspiciously small (${b.length} bytes)`);
+    assert.equal(b.subarray(0, magic.length).toString("binary"), magic, `${name} magic`);
   }
+
+  // index.html must reference both, or the fallback ships dead.
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  assert.match(html, /href="\/favicon\.svg"/);
+  assert.match(html, /href="\/favicon\.ico"/);
 });

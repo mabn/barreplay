@@ -49,8 +49,15 @@
     // the asset layer they are cached on Cloudflare's network instead. And
     // public/_headers only applies to what the ASSET LAYER serves — a Worker
     // response ignores it — so without these exclusions the cache-control
-    // rules for /icons/* and /ranks/* would be silently dead.
-    "run_worker_first": ["/*", "!/icons/*", "!/ranks/*"]
+    // rules for those prefixes would be silently dead.
+    //
+    // The favicons are named individually rather than matched: they are two
+    // fixed files, and /favicon.ico in particular must resolve to the real
+    // object. Left to the Worker it reached the catch-all, where the asset
+    // layer's single-page-application handling answered it with index.html —
+    // a 200 carrying the whole HTML document, labelled text/html, as the tab
+    // icon.
+    "run_worker_first": ["/*", "!/icons/*", "!/ranks/*", "!/favicon.ico", "!/favicon.svg"]
   },
 
   // The growing set of replay data (index.json + per-capture head/chunks/resources)
