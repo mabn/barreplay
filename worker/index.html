@@ -36,11 +36,15 @@
 
 <!-- Landing view: the left menu and the section it selects (shown when no
      ?replay= is selected). The selected section lives in the URL as ?tab=,
-     so a menu pick is shareable and survives a refresh. -->
+     so a menu pick is shareable and survives a refresh.
+     Queue is admin-only (?admin=true), like the row refresh button and the
+     POV dropdown: it is the pipeline's state — everyone's uploads and their
+     failure messages — which is maintenance, not something a visitor came
+     to look at. -->
 <div id="home" style="display:none">
   <nav id="homenav">
     <button type="button" class="navitem" data-tab="replays">Replays</button>
-    <button type="button" class="navitem" data-tab="queue">Queue<span class="badge" id="navqueue"></span></button>
+    <button type="button" class="navitem admin" data-tab="queue">Queue<span class="badge" id="navqueue"></span></button>
   </nav>
   <div id="homemain">
     <!-- Drag&drop publishing: a .brepstream (the Replay uploader widget's

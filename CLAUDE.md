@@ -390,7 +390,13 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           what builds the roster the worker stores). The front-end landing page
                           (no ?replay= in the URL) is a LEFT MENU (app.js homeTab/applyHomeTab,
                           #homenav) over two sections: "Replays" (the catalog list, the default)
-                          and "Queue" (the ingest jobs, below). Which one is shown lives in the
+                          and "Queue" (the ingest jobs, below), which is ADMIN-ONLY — the entry is
+                          hidden without ?admin=true (CSS, like the row refresh button) and
+                          homeTab() maps the tab back to "replays" for everyone else, so a shared
+                          ?tab=queue link cannot walk past the hidden entry and refreshQueue never
+                          fires. It is the pipeline's state — every uploader's jobs and their
+                          failure messages — which is maintenance, not something a visitor came for.
+                          Which section is shown lives in the
                           URL as ?tab=, like the filters, so a pick is shareable and survives a
                           refresh — but it PUSHES a history entry, because switching section is
                           navigation, not a narrowing of what is listed; replayHref carries the
