@@ -1911,8 +1911,38 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 
-// Player list: rank, flag, OS (skill), name — then per-resource storage bars and
-// income/s — grouped by ally team. Economy comes from the current frame's per-team
+// INCOME_WINDOW_SEC: the income meters scale against the largest income ANY team
+// reached in this many game-seconds up to the playhead, rather than against the
+// current frame's largest. A frame-local maximum re-scales every bar whenever the
+// leader stalls for a sample, which is exactly the flicker that makes a list of
+// bars unreadable; a trailing window still tracks the game's growth from a few
+// metal/s in the opening to hundreds late on.
+const INCOME_WINDOW_SEC = 60;
+
+// incomePeaks returns {m, e} — the largest metal and energy income any team
+// reached over that window ending at simFrame. Metal and energy scale
+// SEPARATELY: they differ by an order of magnitude, so one shared maximum would
+// flatten every metal bar to nothing. Walks the sampled frames backwards through
+// resByFrame; at one record per sample that is ~60 lookups on a render already
+// throttled to 5 Hz during playback.
+function incomePeaks(simFrame) {
+  const peak = { m: 0, e: 0 };
+  if (!resByFrame || simFrame < 0) return peak;
+  const step = data.sampleEvery > 0 ? data.sampleEvery : 30;
+  const samples = Math.max(1, Math.round(INCOME_WINDOW_SEC * 30 / step));
+  for (let k = 0, f = simFrame; k < samples && f >= 0; k++, f -= step) {
+    const r = resByFrame.get(f);
+    if (!r) continue;
+    for (let i = 0; i < r.length; i += RSTRIDE) {
+      if (r[i + R.MINC] > peak.m) peak.m = r[i + R.MINC];
+      if (r[i + R.EINC] > peak.e) peak.e = r[i + R.EINC];
+    }
+  }
+  return peak;
+}
+
+// Player list: rank, flag, OS (skill), name — then a metal and an energy income
+// meter — grouped by ally team. Economy comes from the current frame's per-team
 // resources (a player controls one team). Spectators have no economy and are
 // listed dimmed at the end. Player-leaving isn't tracked yet, so everyone shows
 // for the whole replay.
@@ -1926,6 +1956,7 @@ function renderPlayers() {
   }
   const fr = dispIdx >= 0 ? data.frames[dispIdx] : null;
   const res = resourcesByTeam(fr ? fr.f : -1);
+  const peaks = incomePeaks(fr ? fr.f : -1);
   const allyOf = {};
   (data.teams || []).forEach(t => { allyOf[t.team] = t.ally; });
 
@@ -1947,7 +1978,7 @@ function renderPlayers() {
       root.appendChild(group);
       lastAlly = ally;
     }
-    group.appendChild(playerRow(p, res[p.team]));
+    group.appendChild(playerRow(p, res[p.team], peaks));
   });
 
   if (specs.length) {
@@ -1959,7 +1990,7 @@ function renderPlayers() {
   }
 }
 
-function playerRow(p, r) {
+function playerRow(p, r, peaks) {
   const row = document.createElement('div');
   row.className = 'prow';
   const color = teamColor[p.team] || '#c7d0d9';
@@ -1971,24 +2002,30 @@ function playerRow(p, r) {
     `<span class="pname" style="color:${color}">${escapeHtml(p.name)}</span></div>`;
   if (r) {
     html += '<div class="pres">' +
-      resBar('metal', r.metal, r.mStore, r.mInc) +
-      resBar('energy', r.energy, r.eStore, r.eInc) +
+      resRow('metal', r.metal, r.mStore, r.mInc, peaks.m) +
+      resRow('energy', r.energy, r.eStore, r.eInc, peaks.e) +
       '</div>';
   }
   row.innerHTML = html;
   return row;
 }
 
-// One resource line: a storage-fill bar (current / storage), the current amount,
-// and the per-second income.
-function resBar(kind, cur, store, inc) {
-  const frac = store > 0 ? Math.max(0, Math.min(1, cur / store)) : 0;
-  const incStr = (inc >= 0 ? '+' : '') + fmtNum(inc);
+// One resource line: the per-second income, printed over a bar as wide as that
+// income is against `peak` (the largest any team reached recently — see
+// incomePeaks), so reading down the list ranks the economies without reading a
+// single number. The current stock and the storage cap ride along hidden and
+// take the number's place while the row is hovered (`.prow:hover` in style.css):
+// they answer a different question — am I banking or stalling — and a permanent
+// storage-fill bar per resource, which is what this row used to be, crowded out
+// the comparison that a player list is usually being scanned for.
+function resRow(kind, cur, store, inc, peak) {
+  const frac = peak > 0 ? Math.max(0, Math.min(1, inc / peak)) : 0;
+  const incStr = (inc >= 0 ? '+' : '') + fmtNum(inc) + '/s';
   return `<div class="resrow ${kind}">` +
-    `<div class="rbar"><div style="width:${(frac * 100).toFixed(0)}%"></div></div>` +
-    `<span class="rval">${fmtNum(cur)}</span>` +
-    `<span class="rinc">${incStr}/s</span>` +
-    '</div>';
+    `<span class="rmeter"><i style="width:${(frac * 100).toFixed(1)}%"></i>` +
+    `<b class="rinc">${incStr}</b>` +
+    `<b class="rstore">${fmtNum(cur)} / ${fmtNum(store)}</b>` +
+    '</span></div>';
 }
 
 // ---- playback -------------------------------------------------------------
