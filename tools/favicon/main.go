@@ -13,9 +13,8 @@
 //	go run ./tools/favicon worker/public/icons/air_t2.png worker/public
 //
 // The vendored bitmap is the source of truth; there is deliberately no second,
-// hand-traced copy of the shape to keep in sync with it. Output is the .ico
-// (16/32/48, PNG payloads) a browser requests on its own from /favicon.ico,
-// plus a 180px .png for apple-touch-icon.
+// hand-traced copy of the shape to keep in sync with it. Output is a 32x32
+// .ico (the path a browser requests on its own) and the same image as a .png.
 package main
 
 import (
@@ -27,6 +26,12 @@ import (
 	"math"
 	"os"
 )
+
+// iconSize is the favicon's one and only pixel size. A browser scaling 32 down
+// to the 16 it draws in a tab does a better job than a second, separately
+// rendered 16x16 would: the shapes are the same, and one image cannot disagree
+// with itself.
+const iconSize = 32
 
 const radius = 7.0 // in 32-unit space
 
@@ -159,10 +164,10 @@ func main() {
 	out := os.Args[2]
 
 	var b bytes.Buffer
-	png.Encode(&b, render(180))
+	png.Encode(&b, render(iconSize))
 	os.WriteFile(out+"/favicon.png", b.Bytes(), 0o644)
 
-	sizes := []int{16, 32, 48}
+	sizes := []int{iconSize}
 	var payloads [][]byte
 	for _, s := range sizes {
 		var buf bytes.Buffer
