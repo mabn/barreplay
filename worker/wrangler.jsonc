@@ -34,15 +34,23 @@
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    // EVERY request goes through the Worker (the Hono catch-all proxies
-    // non-API paths to this ASSETS binding), for two reasons: the SPA entry
-    // must be served no-cache (the serveEntry route adds the header —
-    // index.html carries content-hashed /app.js?v=… subresource URLs, so a
-    // revalidated index.html is all a UI deploy needs to propagate), and a
-    // PATTERN LIST here is a trap — routes not on the list are answered by
-    // the asset layer alone, whose single-page-application fallback serves
-    // index.html for /api/* instead of falling through to the Worker.
-    "run_worker_first": true
+    // Everything still goes through the Worker EXCEPT the two prefixes that
+    // are plain vendored files. "/*" keeps the original guarantee — the SPA
+    // entry is served no-cache by the serveEntry route (index.html carries
+    // content-hashed subresource URLs, so a revalidated entry is all a UI
+    // deploy needs to propagate), and no route can fall through to the asset
+    // layer's single-page-application handling, which would answer /api/*
+    // with index.html. That trap is why this is "/*" plus exclusions rather
+    // than a list of the paths the Worker wants: the list form is
+    // deny-by-default in exactly the wrong direction.
+    //
+    // The exclusions matter twice over. A cold replay load requests 300-650
+    // unit icons; through the Worker each one is an invocation, and served by
+    // the asset layer they are cached on Cloudflare's network instead. And
+    // public/_headers only applies to what the ASSET LAYER serves — a Worker
+    // response ignores it — so without these exclusions the cache-control
+    // rules for /icons/* and /ranks/* would be silently dead.
+    "run_worker_first": ["/*", "!/icons/*", "!/ranks/*"]
   },
 
   // The growing set of replay data (index.json + per-capture head/chunks/resources)

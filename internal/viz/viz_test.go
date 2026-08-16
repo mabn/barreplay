@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -671,6 +672,43 @@ func TestIndexHTMLDataOrigin(t *testing.T) {
 	for _, tok := range []string{"__DATA_ORIGIN__", "__ASSET_REV__"} {
 		if strings.Contains(html, tok) {
 			t.Errorf("served index.html still contains the unsubstituted placeholder %s", tok)
+		}
+	}
+}
+
+// TestFingerprintedAssets pins the contract between index.html and this server:
+// the entry references its subresources by their content-hashed names, so those
+// exact URLs must resolve. A mismatch would leave the viewer with no script and
+// no stylesheet — a blank page, not a degraded one.
+func TestFingerprintedAssets(t *testing.T) {
+	srv := httptest.NewServer((&Server{Dir: t.TempDir()}).Handler())
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// Pull the URLs the entry actually asks for rather than reconstructing
+	// them, so this fails if either side's naming scheme moves.
+	refs := regexp.MustCompile(`/(?:app|style)\.[0-9a-f]{8}\.(?:js|css)`).FindAllString(string(b), -1)
+	if len(refs) != 2 {
+		t.Fatalf("index.html references %d fingerprinted subresources, want 2: %v", len(refs), refs)
+	}
+	for _, ref := range refs {
+		r, err := http.Get(srv.URL + ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+		if r.StatusCode != 200 {
+			t.Errorf("GET %s: status %d", ref, r.StatusCode)
+		}
+		if len(body) == 0 {
+			t.Errorf("GET %s: empty body", ref)
 		}
 	}
 }

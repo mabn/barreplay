@@ -118,8 +118,18 @@ func (s *Server) Handler() http.Handler {
 		b = bytes.ReplaceAll(b, []byte("__DATA_ORIGIN__"), nil)
 		w.Write(b)
 	})
-	mux.HandleFunc("/app.js", serveAsset("public/app.js", "text/javascript; charset=utf-8"))
-	mux.HandleFunc("/style.css", serveAsset("public/style.css", "text/css; charset=utf-8"))
+	// index.html now references the subresources by their FINGERPRINTED names
+	// (/app.<rev>.js, /style.<rev>.css — the hash is in the name so the URL of
+	// a given byte sequence never changes). This server has no build step to
+	// emit those files, so it registers the hashed routes for the rev it just
+	// computed and serves the embedded originals through them. The plain names
+	// stay registered too: they are what `vite dev` serves, and a stale
+	// bookmark or a hand-typed URL should not 404.
+	const jsType, cssType = "text/javascript; charset=utf-8", "text/css; charset=utf-8"
+	mux.HandleFunc("/app.js", serveAsset("public/app.js", jsType))
+	mux.HandleFunc("/style.css", serveAsset("public/style.css", cssType))
+	mux.HandleFunc("/app."+string(rev)+".js", serveAsset("public/app.js", jsType))
+	mux.HandleFunc("/style."+string(rev)+".css", serveAsset("public/style.css", cssType))
 	// The browser auto-requests a favicon; answer it so it isn't a 404 in logs.
 	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
