@@ -121,7 +121,10 @@ func main() {
 		if err == nil && *upload != "" {
 			revID := ""
 			if *rev {
-				revID, err = packer.StreamRev(in)
+				// The PACKED file, not the input: two packs of one stream can
+				// differ (a codec change, -no-demo vs the demo fetch) and must
+				// not land on the same immutable keys.
+				revID, err = packer.ContentRev(brpPath)
 			}
 			if err == nil {
 				err = packer.UploadStatic(ctx, brpPath, packer.UploadOptions{

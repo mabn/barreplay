@@ -192,30 +192,30 @@ func readBRP(t *testing.T, path string) (snapshot.Meta, []snapshot.Frame, []snap
 	return snapshot.ReadBRP(f)
 }
 
-// StreamRev is content-addressed: stable for identical bytes, fresh for any
+// ContentRev is content-addressed: stable for identical bytes, fresh for any
 // change — the property the append-only revisioned publish relies on.
-func TestStreamRev(t *testing.T) {
+func TestContentRev(t *testing.T) {
 	dir := t.TempDir()
 	a := filepath.Join(dir, "a.brepstream")
 	if err := os.WriteFile(a, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r1, err := StreamRev(a)
+	r1, err := ContentRev(a)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(r1) != 8 || strings.Trim(r1, "0123456789abcdef") != "" {
-		t.Errorf("StreamRev = %q, want 8 lowercase hex chars", r1)
+		t.Errorf("ContentRev = %q, want 8 lowercase hex chars", r1)
 	}
-	r2, _ := StreamRev(a)
+	r2, _ := ContentRev(a)
 	if r1 != r2 {
-		t.Errorf("StreamRev not stable: %q vs %q", r1, r2)
+		t.Errorf("ContentRev not stable: %q vs %q", r1, r2)
 	}
 	if err := os.WriteFile(a, []byte(testStream+"x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if r3, _ := StreamRev(a); r3 == r1 {
-		t.Errorf("StreamRev unchanged after content change: %q", r3)
+	if r3, _ := ContentRev(a); r3 == r1 {
+		t.Errorf("ContentRev unchanged after content change: %q", r3)
 	}
 }
 

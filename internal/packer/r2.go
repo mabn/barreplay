@@ -209,7 +209,7 @@ func objectHTTPMeta(key string) (contentType, cacheControl string) {
 		contentType = "application/octet-stream"
 	}
 	// Per-replay pieces are published under a content-addressed revision and
-	// never rewritten (see StreamRev), so they are safely immutable. A listing
+	// never rewritten (see ContentRev), so they are safely immutable. A listing
 	// changes whenever anything is published, so it only ever revalidates.
 	if key == "index.json" || strings.HasSuffix(key, "/index.json") {
 		return contentType, "no-cache"

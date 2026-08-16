@@ -31,7 +31,10 @@ go run ./cmd/pack -upload local ./caps/<gameId>.brepstream   # ...to the dev sim
 # possible to upload pieces to one deployment and register the row in the other, which nothing downstream
 # can detect. Adding a destination to that one map makes it valid, documented and usable in both CLIs.
 # $REPLAY_PUT_TOKEN authenticates the PUT.
-# Publishes are REVISIONED by default: pieces land at replays/<gameId>-<rev> (rev = sha256[:8] of the input)
+# Publishes are REVISIONED by default: pieces land at replays/<gameId>-<rev> (rev = sha256[:8] of the PACKED
+# .brp, NOT of the input stream: two packs of one capture can differ — a codec change, or -no-demo vs the
+# demo fetch — and hashing the input gave them the SAME immutable keys, so the second silently overwrote
+# the first. The .brp writer is deterministic, so an unchanged republish still re-lands on the same keys)
 # and the catalog row's rid points at the current one — append-only, nothing in the bucket is ever
 # overwritten or deleted (-rev=false uses the bare id). -stats prints a .brp size breakdown: per-section
 # sizes + top-10 unit defs by encoded bytes with per-instance cost (snapshot.ComputeBRPStats, self-checked
@@ -61,7 +64,8 @@ cmd/pack/main.go          CLI: convert .brsnap/.brepstream captures to .brp; -st
                           bare `pack <capture>` packs, reports and publishes; -upload= opts out
                           of the publish, which is also the way to analyze a .brp in place.
 internal/packer/          the capture-to-published-replay pipeline: Pack (stream parse + demo
-                          metadata fetch -> .brp), StreamRev (sha256[:8] revision id),
+                          metadata fetch -> .brp), ContentRev (sha256[:8] of a file; publishers
+                          hash the PACKED .brp so a repack cannot overwrite served pieces),
                           LookupTarget/TargetHelp/TargetList (targets.go: the ONE table of
                           publishing destinations, each pairing a bucket with the worker that
                           serves and catalogs it — both CLIs validate -upload against it and
@@ -388,7 +392,13 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the wrangler entry re-exporting the DO class). The worker never transcodes
                           (viewer serves the .brp wire only; the Go pipeline produces it): it scans
                           the preamble (src/worker/preamble.ts — gameId + recorder's ally team),
-                          archives the raw bytes at streams/<gameId>/<ts>-a<ally>.brepstream
+                          archives the raw bytes at streams/<gameId>/<ts>-<hash8>-a<ally>.brepstream
+                          (the hash is sha256[:4 bytes] of the body and is what makes the key unique:
+                          gameId and the a<ally> suffix are equal for two teammates uploading the same
+                          game, or for a halfway capture and the full one, and Workers clamp Date.now()
+                          to the last I/O so it does not advance within a request — concurrent uploads
+                          collided and the second overwrote the first. Timestamp stays first so the
+                          prefix sorts oldest-first, so identical bytes are re-archived, not deduped)
                           (append-only prefix, never listed by /index.json, never served publicly;
                           the substrate for the future multi-player merge), and inserts a job row in
                           the DO's jobs table. cmd/bringest (see its entry) polls
