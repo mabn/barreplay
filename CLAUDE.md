@@ -758,7 +758,13 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   second on screen. `bubbleSpeedFactor` multiplies it by the speed while PLAYING (paused,
   the playhead does not move and nothing expires anyway; scrubbing is at the reader's own
   pace), capped at `BUBBLE_SPEED_CAP` = 16 — past that the bubbles linger long enough to
-  bury the battle they are about. The anchor is the speaker's
+  bury the battle they are about. The factor is applied ONCE and the expiry frozen in
+  `bubbleExpiry`: re-deriving the window from the current speed each frame measures it
+  backwards from NOW, so touching the speed control popped old bubbles back in (window
+  widens) and killed live ones (window narrows). The overlay is also fed a FRACTIONAL sim
+  frame (`frameNumAt(idx) + renderFrac * sampleEvery`) — with the integer sample frame the
+  fade stepped once per game-SECOND, the sampling rate, which at 1x reads as a stutter
+  rather than a fade. The anchor is the speaker's
   COMMANDER — `COMMANDER_RE` = `^(arm|cor|leg)com` minus `boss`, which on a real BAR def
   table matches all 38 real commanders (including the `lvlN` and Legion upgrade paths)
   and rejects all 39 near-misses: DECOY commanders (`armdecom`), `comeffigylvl2`,
