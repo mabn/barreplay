@@ -41,16 +41,61 @@ func inRoundRect(x, y float64) bool {
 
 var src image.Image
 
-// sample returns the rotated icon's (luminance, alpha) at 32-space coords,
-// with `inset` units of padding around it.
+// Margins around the icon, in 32-unit space. The LEFT one is deliberately the
+// largest: the shape is a triangle pointing right, so its area sits toward the
+// flat left edge while its silhouette reaches furthest right. Centring the
+// bounding box therefore looks left-heavy, and the fix is to give the flat
+// side more room than the point.
+const (
+	marginL = 5.4
+	marginR = 3.2
+	marginY = 3.6
+)
+
+// Content bounds of the rotated icon, in normalized 0..1 rotated coordinates.
+// Taken from what is actually opaque rather than assumed: the source bitmaps
+// carry their own transparent padding, and a fixed inset centres that padding
+// instead of the aircraft.
+var u0, u1, v0, v1 float64
+
+// placement is where those bounds land in 32-space, scaled uniformly (never
+// stretched) to fit between the margins.
+var boxX, boxY, boxW, boxH float64
+
+func measure() {
+	b := src.Bounds()
+	minX, minY, maxX, maxY := b.Max.X, b.Max.Y, b.Min.X, b.Min.Y
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			if _, _, _, a := src.At(x, y).RGBA(); a > 0x2000 {
+				minX, minY = min(minX, x), min(minY, y)
+				maxX, maxY = max(maxX, x), max(maxY, y)
+			}
+		}
+	}
+	fx := func(x int) float64 { return float64(x-b.Min.X) / float64(b.Dx()-1) }
+	fy := func(y int) float64 { return float64(y-b.Min.Y) / float64(b.Dy()-1) }
+	// Rotate 90° CW: dst u = 1 - srcY, dst v = srcX.
+	u0, u1 = 1-fy(maxY), 1-fy(minY)
+	v0, v1 = fx(minX), fx(maxX)
+
+	availW, availH := 32-marginL-marginR, 32-2*marginY
+	// Aspect of the content in dst orientation, in source pixels.
+	cw, ch := float64(maxY-minY+1), float64(maxX-minX+1)
+	scale := math.Min(availW/cw, availH/ch)
+	boxW, boxH = cw*scale, ch*scale
+	boxX = marginL + (availW-boxW)/2
+	boxY = marginY + (availH-boxH)/2
+}
+
+// sample returns the rotated icon's (luminance, alpha) at 32-space coords.
 func sample(x, y float64) (float64, float64) {
-	const inset = 3.0
-	span := 32.0 - 2*inset
-	u := (x - inset) / span // 0..1 across the icon
-	v := (y - inset) / span
-	if u < 0 || u > 1 || v < 0 || v > 1 {
+	fu, fv := (x-boxX)/boxW, (y-boxY)/boxH
+	if fu < 0 || fu > 1 || fv < 0 || fv > 1 {
 		return 0, 0
 	}
+	u := u0 + fu*(u1-u0)
+	v := v0 + fv*(v1-v0)
 	b := src.Bounds()
 	// Rotate 90° CW: dst(u,v) <- src(u' = v, v' = 1-u)
 	sx := b.Min.X + int(v*float64(b.Dx()-1)+0.5)
@@ -62,7 +107,7 @@ func sample(x, y float64) (float64, float64) {
 
 func render(size int) *image.NRGBA {
 	const ss = 6
-	accent := [3]float64{0x8f, 0xd3, 0xff}
+	accent := [3]float64{0xff, 0x10, 0x05}
 	ground := [3]float64{0x11, 0x15, 0x1a}
 	img := image.NewNRGBA(image.Rect(0, 0, size, size))
 	scale := 32.0 / float64(size)
@@ -110,6 +155,7 @@ func main() {
 		panic(err)
 	}
 	f.Close()
+	measure()
 	out := os.Args[2]
 
 	var b bytes.Buffer
