@@ -592,7 +592,11 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   screen size** (`ICON_PX_PER_SIZE * size`, independent of zoom, like BAR's minimap — so icons
   spread apart when zoomed in and overlap when zoomed out). The base px-per-size-unit is a
   UI slider (`iconScale`, persisted as `?iconsize=`); the Icons checkbox switches to plain
-  dots. A unit with no/loading icon shows a coloured dot so it is never invisible. The
+  dots. A unit with no/loading icon shows a coloured dot so it is never invisible — and
+  since a replay requests all 300-650 of its icons in one burst at load, a dropped
+  response is routine, so `getImage` RETRIES a failed path (3 attempts, 2 s apart)
+  instead of caching the failure; caching it dotted that unit type until the page was
+  reloaded. The
   selected replay and icon size are both kept in the URL, so a refresh/shared link restores them.
   Icon fitting (`growIcons`, always on) makes a *building's* icon grow to 90%
   of its footprint (`0.9 * min(fpW,fpH) * scale`) once that exceeds the constant size — i.e.
@@ -601,8 +605,18 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   (falling back to its name), so units whose iconType differs from their name still get an icon.
 - **WebGL icon renderer (`app.js` `initGL`/`glBuildInstances`/`glRender`)**: the default
   icon path whenever WebGL2 with a *hardware* renderer is available. All grayscale icon
-  bitmaps pack into **one 2048² atlas texture** (uploaded as bitmaps arrive, mipmapped,
-  premultiplied alpha) that lives in GPU memory for the whole session; each animation
+  bitmaps pack into **one atlas texture** (uploaded as bitmaps arrive, mipmapped,
+  premultiplied alpha) that lives in GPU memory for the whole session. It starts at
+  2048² and **GROWS to 4096² (`ATLAS_MAX`, capped by `MAX_TEXTURE_SIZE`) the first time a
+  replay runs out of slots**, re-packing everything already in it (uv rects are
+  normalized by the atlas size, so a resize invalidates all of them — `growAtlas` bumps
+  a generation counter and `glBuildInstances` rebuilds the frame when it changes
+  mid-build). This is not a corner case: BAR's icons are 128px, so 2048² holds ~181,
+  while a modded game (scavengers/extra units) references **300-650 distinct bitmaps** —
+  every deployed replay measured needs the growth, and before it, everything past the
+  ceiling drew as a coloured dot for the rest of the session. Oversized bitmaps pack
+  DOWNSCALED to `ATLAS_CELL` (128): four of BAR's icons are 256px, and packed native each
+  one turns a shelf row 256 tall and costs ~150 slots. Each animation
   frame only writes a per-unit instance buffer `[center, size, uv rect, tint]` and issues
   a **single instanced draw call**, with the team tint applied in the fragment shader
   (`rgb * tint`, icon alpha — the same multiply+destination-in composite the 2D path
