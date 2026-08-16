@@ -205,6 +205,7 @@ test('chat bubbles fade smoothly and are not re-timed by a speed change', () => 
   const interpPos = (u: any, i: number) => [u[i + F.X], u[i + F.Z]];
   const cssToTint = () => [1, 0.125, 0.125];
   let chatLines: any[] = [], bubbleAnchor = new Map(), bubbleExpiry = new Map();
+  const bubbleText = new Map();
   let playRAF: any = 1, speedValue = 1;
   const document = { getElementById: () => ({ value: String(speedValue) }) };
 
@@ -214,6 +215,7 @@ test('chat bubbles fade smoothly and are not re-timed by a speed change', () => 
     ${extract('firstChatAt')}
     ${extract('textColorOn')}
     ${extract('roundRectPath')}
+    ${extract('fitBubbleText')}
     ${extract('drawChatBubbles')}
     return { draw: drawChatBubbles, setChat: c => { chatLines = c; }, setSpeed: v => { speedValue = v; } };
   })()`);
@@ -337,4 +339,39 @@ test('the slider follows the continuous playhead, not the sample index', () => {
   // The markup must permit it: a stepped range snaps a fractional assignment.
   const html = readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
   assert.match(html, /id="slider"[^>]*step="any"/, 'the slider needs step="any" to sit between samples');
+});
+
+// Bubble text is trimmed to a width cap with an ellipsis, and the answer is
+// memoized — the trim drops one character at a time, so without the cache it
+// re-measured the whole tail of every long message on every rendered frame.
+test('bubble text is fitted to the cap once and reused', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('not found: ' + n);
+  };
+  const BUBBLE_MAX_PX = Number(APP.match(/const BUBBLE_MAX_PX = (\d+);/)![1]);
+  const PX_PER_CHAR = 6;
+  let measures = 0;
+  const octx = { measureText: (s: string) => { measures++; return { width: s.length * PX_PER_CHAR }; } };
+  const bubbleText = new Map();
+  const fit = eval(`(function(){ ${extract('fitBubbleText')} return fitBubbleText; })()`);
+
+  const fits = 'x'.repeat(Math.floor(BUBBLE_MAX_PX / PX_PER_CHAR));
+  assert.deepEqual(fit(fits), [fits, BUBBLE_MAX_PX], 'text at exactly the cap is untouched');
+
+  const long = 'y'.repeat(Math.floor(BUBBLE_MAX_PX / PX_PER_CHAR) * 3);
+  const [text, w] = fit(long);
+  assert.ok(text.endsWith('…'), 'overlong text gets an ellipsis');
+  assert.ok(w <= BUBBLE_MAX_PX, `fitted width ${w} must not exceed the cap ${BUBBLE_MAX_PX}`);
+  assert.ok(text.length < long.length, 'and is actually shorter');
+
+  measures = 0;
+  const again = fit(long);
+  assert.equal(measures, 0, 'a repeat fit must not measure again');
+  assert.equal(again[0], text, 'and returns the same result');
 });
