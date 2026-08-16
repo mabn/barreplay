@@ -502,7 +502,11 @@ precomputes the same responses as plain files:
   accepts 4 so published v4 bundles keep playing), sections:
   - `J`: gzip(JSON head) — a *viewer-shaped* projection of `M`: `gameId`,
     `engineVersion`, `gameVersion`, `mapName`, `sampleEvery`, `bounds`,
-    `teams` (meta teams + `frameTeams` fill-ins), `unitDefs` (id→name only),
+    `teams` (meta teams + `frameTeams` fill-ins), `unitDefs` (id→internal
+    name only — the icon/footprint lookup key), `unitNames` (id→human name,
+    what the viewer labels units with; omitted per def when the capture
+    recorded none, and absent entirely from pre-existing bundles, so the
+    front-end falls back to `unitDefs`),
     `unitIcons`, `footprints`, `players`, `frameCount`, and `chunks` — the
     index reduced to `{frame, count, kLen, len}` (the browser addresses
     chunks by ordinal and consumes the keys stream by cumulative `kLen`, so

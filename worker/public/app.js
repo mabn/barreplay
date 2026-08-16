@@ -1664,7 +1664,16 @@ function hitTest() {
   return best >= 0 ? best : null;
 }
 
+// A unit's display label: the human-readable name ("Construction Bot") when the
+// capture recorded one, else the internal name ("armck"). Older bundles carry no
+// unitNames map at all, so the fallback chain is the whole compatibility story.
 function defName(def) {
+  return (data.unitNames && data.unitNames[def]) || defCode(def);
+}
+
+// The internal def name — the icon/footprint lookup key, and the tooltip's
+// secondary line for anyone who thinks in unit codes.
+function defCode(def) {
   return (data.unitDefs && data.unitDefs[def]) || `def ${def}`;
 }
 
@@ -1687,8 +1696,12 @@ function updateTooltip() {
   }
   const frac = maxHp > 0 ? Math.max(0, Math.min(1, hp / maxHp)) : 1;
   const col = frac > 0.5 ? '#6fd07f' : (frac > 0.25 ? '#f2cf5b' : '#e2785b');
+  // The heading names the unit, keeping the internal code beside it (dimmed) —
+  // it is what BAR's own wiki/balance talk uses, and it is dropped when it is
+  // the name (an old bundle with no human names at all).
+  const name = defName(def), code = defCode(def);
   tooltip.innerHTML =
-    `<h3>${defName(def)}</h3>` +
+    `<h3>${name}${code !== name ? `<span class="code">${code}</span>` : ''}</h3>` +
     (ghost ? `<div class="row"><span class="label">Status</span><span style="color:#8a98a6">ghost — last seen state</span></div>` : '') +
     `<div class="row"><span class="label">Unit</span><span>#${id}</span></div>` +
     `<div class="row"><span class="label">Team</span><span style="color:${teamColor[team] || '#fff'}">${teamNameById(team)}</span></div>` +

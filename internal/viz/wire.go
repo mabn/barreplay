@@ -44,6 +44,13 @@ type wireHead struct {
 	Bounds        wireBounds       `json:"bounds"`
 	Teams         []wireTeam       `json:"teams"`
 	UnitDefs      map[int32]string `json:"unitDefs"`
+	// UnitNames maps a def id to its HUMAN-READABLE name ("Construction Bot"),
+	// which is what the viewer labels units with; UnitDefs' internal name
+	// ("armck") stays the lookup key for icons/footprints and the tooltip's
+	// secondary line. Only defs whose capture recorded a human name that differs
+	// from the internal one get an entry, so a capture predating the full DEF
+	// dump simply has none and the front-end falls back to the internal name.
+	UnitNames map[int32]string `json:"unitNames,omitempty"`
 	// UnitIcons maps a unit's internal name to its icon (served path + BAR size
 	// multiplier), limited to the def names present in this replay. The browser
 	// looks a unit up by name (via UnitDefs) and requests "/" + path.
@@ -136,8 +143,12 @@ func buildHead(meta snapshot.Meta, b wireBounds, extraTeams []int32) wireHead {
 	// The browser only needs id->name for icon lookup and tooltips; the full unit
 	// defs stay in the capture file.
 	h.UnitDefs = make(map[int32]string, len(meta.UnitDefs))
+	h.UnitNames = map[int32]string{}
 	for id, d := range meta.UnitDefs {
 		h.UnitDefs[id] = d.Name
+		if d.HumanName != "" && d.HumanName != d.Name {
+			h.UnitNames[id] = d.HumanName
+		}
 	}
 
 	seen := map[int32]bool{}

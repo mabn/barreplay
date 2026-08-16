@@ -55,7 +55,7 @@ func writeBRP(t *testing.T, dir, gameID string) string {
 		MapName:     "Test Map",
 		SampleEvery: 30,
 		UnitDefs: map[int32]snapshot.UnitDef{
-			1: {DefID: 1, Name: "armcom", CanMove: true},                                       // mobile: no footprint
+			1: {DefID: 1, Name: "armcom", HumanName: "Armada Commander", CanMove: true},        // mobile: no footprint
 			2: {DefID: 2, Name: "corllt", XSize: 2, ZSize: 3, IsBuilding: true},                // building: 16x24 elmos
 			3: {DefID: 3, Name: "armnanotct3", XSize: 12, ZSize: 12, IsBuilder: true},          // immobile builder (nano turret): footprint despite not IsBuilding
 			4: {DefID: 4, Name: "armlab", XSize: 5, ZSize: 5, IsBuilding: true, CanMove: true}, // factory: reports CanMove but IsBuilding -> footprint
@@ -142,6 +142,15 @@ func TestServeBRP(t *testing.T) {
 	}
 	if head.UnitDefs[1] != "armcom" {
 		t.Errorf("unitDefs = %+v", head.UnitDefs)
+	}
+	// Human names ride alongside the internal ones (the viewer labels units with
+	// them); a def whose capture recorded none is simply absent, so the front-end
+	// falls back to the internal name.
+	if head.UnitNames[1] != "Armada Commander" {
+		t.Errorf("unitNames[1] = %q, want %q", head.UnitNames[1], "Armada Commander")
+	}
+	if _, ok := head.UnitNames[2]; ok {
+		t.Errorf("unitNames = %+v, want no entry for a def with no human name", head.UnitNames)
 	}
 	// Bounds cover both frames' units: x in [-50, 500], z in [20, 600].
 	if head.Bounds.MinX != -50 || head.Bounds.MaxX != 500 || head.Bounds.MinZ != 20 || head.Bounds.MaxZ != 600 {

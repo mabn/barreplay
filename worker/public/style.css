@@ -211,6 +211,8 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
   max-width: 240px; z-index: 10; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
 }
 #tooltip h3 { margin: 0 0 3px; font-size: 12px; color: #fff; }
+/* The internal def name next to the human one ("Construction Bot armck"). */
+#tooltip h3 .code { color: #7c8b99; font-weight: normal; margin-left: 5px; }
 #tooltip .row { display: flex; justify-content: space-between; gap: 12px; }
 #tooltip .label { color: #8a98a6; }
 #tooltip .bar { height: 5px; background: #222c36; border-radius: 3px; margin: 3px 0 1px; overflow: hidden; }

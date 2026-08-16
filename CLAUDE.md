@@ -494,7 +494,13 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
 
 - **`internal/viz/wire.go` + `server.go`** implement the serving side:
   `/replays/<id>.brw` returns a small binary **"BRW1" container** (same section framing
-  as `.brp`) of a gzipped `J` head JSON (meta, teams, unitDef names, icons, footprints,
+  as `.brp`) of a gzipped `J` head JSON (meta, teams, unitDef names — BOTH the internal
+  one (`unitDefs`, the icon/footprint lookup key) and the human-readable one
+  (`unitNames`, "Construction Bot", which is what the viewer LABELS units with in the
+  tooltip and event log; per-def absent when the capture recorded none, and absent
+  wholesale from bundles published before it existed, so `app.js` `defName` falls back
+  to `unitDefs` — a deployed replay keeps showing codes until it is republished),
+  icons, footprints,
   players, bounds, `frameCount`, and the **chunk index** `{frame,count,kLen,len}` per
   chunk — `kLen` is the keyframe's RAW length inside the decompressed keys stream)
   plus the file's `E` events section byte-for-byte — ~230 KB for a 33-min game, so the
