@@ -164,8 +164,8 @@ func printStats(w io.Writer, path string) error {
 		return err
 	}
 
-	fmt.Fprintf(w, "%s: %s, %d frames, %d events, %d unit records, %d chunks\n\n",
-		path, fmtBytes(fileSize(path)), bf.FrameCount, bf.EventCount, bf.UnitRecords, len(bf.Chunks))
+	fmt.Fprintf(w, "%s: %s, %d frames, %d events, %d comms, %d unit records, %d chunks\n\n",
+		path, fmtBytes(fileSize(path)), bf.FrameCount, bf.EventCount, bf.CommCount, bf.UnitRecords, len(bf.Chunks))
 
 	fmt.Fprintf(w, "%-14s %10s %10s %6s %7s\n", "section", "stored", "raw", "gzip", "file%")
 	var stored, coreStored, extraStored int64

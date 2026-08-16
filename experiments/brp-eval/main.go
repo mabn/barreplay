@@ -1053,6 +1053,7 @@ func (c *collector) WriteFrame(f snapshot.Frame) error {
 	return nil
 }
 func (c *collector) WriteEvent(snapshot.Event) error { return nil }
+func (c *collector) WriteComm(snapshot.Comm) error   { return nil }
 func (c *collector) Close() error                    { return nil }
 
 // runOpt5 evaluates opt1+4 (scale 1) and opt5 dv-precision scales on frames

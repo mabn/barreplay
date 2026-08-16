@@ -13,6 +13,7 @@
 //	BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp> [<vx> <vy> <vz> <build> [<target>]]   one unit (follows an F line)
 //	BRSNAP R <teamID> <metal> <energy> <mStore> <eStore> <mIncome> <eIncome>   team economy (follows an F line)
 //	BRSNAP EV <frame> <kind> <id> <def> <team>    unit lifecycle event
+//	BRSNAP COMM <json>                            chat message / map drawing (see parseComm)
 //	BRSNAP PROF <totalMs> <name>                  engine time-profiler record (at game over)
 //
 // The format is internal and evolves in lockstep with assets/lua/snapshot_widget.lua.
@@ -40,6 +41,10 @@ type Stats struct {
 	// Frames counts sampled frames; LastFrame is the sim frame of the newest one.
 	Frames    int
 	LastFrame int32
+	// Comms counts recorded chat messages and map drawings. Worth reporting
+	// because zero is ambiguous — a quiet game and a widget too old to record
+	// them look the same in the output file.
+	Comms int
 	// Profile holds the engine's internal time-profiler records (PROF lines,
 	// emitted once at game over), largest first. Profiler scopes nest (e.g.
 	// "Sim::Path" is also inside "Sim"), so entries overlap and do not sum to
@@ -228,6 +233,16 @@ func ConsumeStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats *Sta
 					Ms:    atof64(fields[3]),
 					Name:  strings.Join(fields[4:], " "),
 				})
+			}
+		case "COMM": // COMM <json> (chat message or map drawing)
+			if err := flushMeta(); err != nil {
+				return err
+			}
+			if c, ok := parseComm(strings.TrimSpace(content[len(fields[0]):])); ok {
+				stats.Comms++
+				if err := w.WriteComm(c); err != nil {
+					return err
+				}
 			}
 		case "EV": // EV <frame> <kind> <id> <def> <team>
 			if err := flushFrame(); err != nil {

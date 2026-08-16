@@ -53,18 +53,20 @@
 --        column (the unit id this one is building/assisting, 0 = none;
 --        widget >= 1.4.0).
 --     E  unit lifecycle event, text payload "<frame> <kind> <id> <def> <team>"
+--     C  a player comm — chat message or map drawing — JSON payload
+--        (widget >= 1.6.0; see the comms section below)
 --     X  end of stream, text payload = reason (gameover|shutdown|error)
 --
--- .brsnap text format (writeText; see internal/capture/capture.go): unchanged
--- from the snapshotter — GID/GAME/DEF/T/P/READY preamble then F/U/R/EV/END
--- lines. Unknown tags are ignored by the parser, so GID/GAME/END are backward
--- compatible.
+-- .brsnap text format (writeText; see internal/capture/capture.go): the same
+-- as the snapshotter's — GID/GAME/DEF/T/P/READY preamble then F/U/R/EV/COMM/END
+-- lines. Unknown tags are ignored by the parser, so GID/GAME/COMM/END are
+-- backward compatible.
 
 -- Widget version (semver). Bump on any user-visible or wire-visible change;
 -- it is reported in GetInfo, the load Echo, and the stream's GAME line, so
 -- every capture records which encoder produced it (the copy on a player's
 -- machine can be arbitrarily old — the server/decoder needs to know).
-local widgetVersion = "1.5.0"
+local widgetVersion = "1.6.0"
 
 function widget:GetInfo()
 	return {
@@ -417,6 +419,20 @@ end
 local allyTeamOf = {} -- teamID -> allyTeam
 local myAllyTeam = -1
 
+-- playerIDByName maps a player's ENGINE name to its id. Chat arrives as a
+-- console display string naming its speaker (see the comms section below), and
+-- this is what turns that name back into the roster entry the stream already
+-- carries. Seeded with the preamble, kept current from PlayerAdded/
+-- PlayerChanged so a late joiner's messages still resolve.
+local playerIDByName = {}
+
+local function notePlayer(playerID)
+	local name = spGetPlayerInfo(playerID, false)
+	if name and name ~= "" then
+		playerIDByName[name] = playerID
+	end
+end
+
 -- recordAll returns true when every unit GetAllUnits returns is fair game
 -- (spectating with full view — also the case after death/resign, so a player
 -- who stays to watch keeps contributing, with wider coverage).
@@ -467,6 +483,9 @@ local function buildPreamble()
 		local name, _, spectator, teamID = spGetPlayerInfo(playerID, false)
 		parts[#parts + 1] = string.format("BRSNAP P %d %d %d %s",
 			playerID, teamID or -1, (spectator and 1) or 0, name or "")
+		if name and name ~= "" then
+			playerIDByName[name] = playerID
+		end
 	end
 	parts[#parts + 1] = "BRSNAP READY"
 	return table.concat(parts, "\n") .. "\n"
@@ -1008,6 +1027,211 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
 	buried[unitID] = { x = tx, z = tz, def = unitDefID, team = unitTeam }
 	lastKnown[unitID] = nil
 	pcall(event, "destroyed", unitID, unitDefID, unitTeam)
+end
+
+-- ---------------------------------------------------------------------------
+-- Player comms: what people write and draw. Recorded as "COMM <json>" text
+-- lines / 'C' binary records, one per message or drawing command; the payload
+-- is JSON because chat text and marker labels are free-form (spaces, quotes,
+-- UTF-8), like the DEF and GAME records.
+--
+--   {"f":<frame>,"k":"chat","p":<playerID>,"d":"all|ally|spec|private|lobby","t":"<text>"}
+--   {"f":<frame>,"k":"point","p":<playerID>,"x":<x>,"z":<z>,"t":"<label>"}
+--   {"f":<frame>,"k":"line","p":<playerID>,"x":<x>,"z":<z>,"x2":<x2>,"z2":<z2>}
+--   {"f":<frame>,"k":"erase","p":<playerID>,"x":<x>,"z":<z>}
+-- "n" carries the speaker's name only when "p" is -1 (unresolvable); otherwise
+-- the roster in the preamble names them.
+--
+-- DRAWINGS come from MapDrawCmd, which is structured — playerID and world
+-- coordinates, no parsing. The engine fires it only for marks this client may
+-- see (its own ally team's while playing, everyone's when spectating), so the
+-- drawings in a capture are point-of-view-limited exactly like its units.
+--
+-- CHAT has no such callin: BAR's widget handler does not forward GotChatMsg
+-- (actions.lua consumes it for chat actions), so the only source is
+-- AddConsoleLine — the console's DISPLAY string. CGame::HandleChatMsg builds
+-- it with a fixed grammar, which splitSpeaker reverses:
+--   "<Name> body"                             a player
+--   "[Name] body" / "[Name (replay)] body"    a spectator
+--   "> <Name> body"                           relayed from the battleroom
+-- with the channel as a prefix of the body ("Allies: ", "Spectators: ",
+-- "Private: ", or " whispered <who>: " for a replay-visible whisper). A
+-- bracketed line only counts as chat when the name belongs to a player this
+-- game knows — the same disambiguation BAR's own chat widget applies, and what
+-- keeps ordinary console output (this widget's own "[replay-uploader] ..."
+-- heartbeats included) out of the record. "<Name> added point: <label>" lines
+-- are ignored on purpose: that marker already arrived via MapDrawCmd, with
+-- coordinates.
+
+-- Cap on recorded comms. The engine already rate-limits drawing (at most one
+-- segment per 50 ms per player, and the server drops a burst past 25), but the
+-- viewer downloads the whole comm set before playback, so a long game full of
+-- enthusiastic drawers must not be able to grow it without bound.
+local maxComms = 20000
+local commCount = 0
+
+-- stripMarkup removes Spring's inline colour codes (a 0xFF byte plus three RGB
+-- bytes, and the 0x08 reset) and flattens the remaining control characters, so
+-- the recorded text is plain and the JSON stays valid UTF-8.
+local function stripMarkup(s)
+	s = string.gsub(s, "\255...", "")
+	s = string.gsub(s, "%c", " ")
+	return (string.gsub(s, "^%s*(.-)%s*$", "%1"))
+end
+
+local function writeComm(fields)
+	if commCount >= maxComms then
+		return
+	end
+	commCount = commCount + 1
+	if commCount == maxComms then
+		Echo("[replay-uploader] comm limit reached (" .. maxComms .. "); no more chat/drawings recorded")
+	end
+	local payload = jsonObject(fields)
+	if tout or (writeText and pendingText) then
+		writeChunk("BRSNAP COMM " .. payload)
+	end
+	writeRecord("C", payload)
+end
+
+-- commFrame is the sim frame a comm is stamped with, clamped at 0: chat can
+-- arrive during loading, when the engine reports a negative frame.
+local function commFrame()
+	local f = spGetGameFrame()
+	if not f or f < 0 then
+		return 0
+	end
+	return f
+end
+
+-- Channel prefixes the engine puts in front of a message body, in the form
+-- HandleChatMsg writes them.
+local chatChannels = {
+	{ "Allies: ", "ally" },
+	{ "Spectators: ", "spec" },
+	{ "Private: ", "private" },
+}
+
+-- splitSpeaker returns name, body, fromLobby for a console line that looks like
+-- chat, or nil for anything else.
+local function splitSpeaker(line)
+	-- Some engine builds prefix console lines with the sim frame.
+	line = string.match(line, "^%[f=[-%d]+%]%s(.*)$") or line
+	local lobby = false
+	if string.sub(line, 1, 2) == "> " then
+		-- The autohost relays battleroom chat as a server message whose body is
+		-- itself a "<Name> text" line; a bare "> ..." is a server announcement.
+		line = string.sub(line, 3)
+		lobby = true
+	end
+	local first = string.sub(line, 1, 1)
+	if first == "<" then
+		local i = string.find(line, "> ", 2, true)
+		if i then
+			return string.sub(line, 2, i - 1), string.sub(line, i + 2), lobby
+		end
+	elseif first == "[" and not lobby then
+		local i = string.find(line, "] ", 2, true)
+		if i then
+			-- A spectator watching a demo is labelled "[Name (replay)]".
+			local name = string.gsub(string.sub(line, 2, i - 1), " %(replay%)$", "")
+			return name, string.sub(line, i + 2), false
+		end
+	end
+	return nil
+end
+
+local function recordChat(line)
+	local name, body, lobby = splitSpeaker(line)
+	if not name or not body then
+		return
+	end
+	local playerID = playerIDByName[name]
+	if playerID == nil and not lobby then
+		return -- ordinary console output that happens to be bracketed
+	end
+	local dest = "all"
+	if lobby then
+		dest = "lobby"
+	else
+		for i = 1, #chatChannels do
+			local prefix = chatChannels[i][1]
+			if string.sub(body, 1, #prefix) == prefix then
+				body, dest = string.sub(body, #prefix + 1), chatChannels[i][2]
+				break
+			end
+		end
+		if dest == "all" then
+			-- Whispers are readable in a replay: "<Name>  whispered <who>: text"
+			-- (the label already ends in a space, hence the leading one here).
+			local rest = string.match(body, "^ whispered [^:]*: (.*)$")
+			if rest then
+				body, dest = rest, "private"
+			end
+		end
+	end
+	body = stripMarkup(body)
+	if body == "" then
+		return
+	end
+	writeComm({
+		{ "f", commFrame() },
+		{ "k", "chat" },
+		{ "p", playerID or -1 },
+		{ "n", playerID == nil and name or nil },
+		{ "d", dest },
+		{ "t", body },
+	})
+end
+
+-- One callin can carry several newline-joined lines. Failures are swallowed
+-- SILENTLY on purpose: an Echo here would come straight back through this same
+-- callin.
+function widget:AddConsoleLine(lines, priority)
+	if type(lines) ~= "string" then
+		return
+	end
+	for line in string.gmatch(lines, "[^\n]+") do
+		pcall(recordChat, line)
+	end
+end
+
+local function recordDraw(playerID, cmdType, px, pz, a, _, c)
+	if cmdType == "point" then
+		local label = type(a) == "string" and stripMarkup(a) or ""
+		writeComm({
+			{ "f", commFrame() }, { "k", "point" }, { "p", playerID or -1 },
+			{ "x", px }, { "z", pz },
+			{ "t", label ~= "" and label or nil },
+		})
+	elseif cmdType == "line" then
+		writeComm({
+			{ "f", commFrame() }, { "k", "line" }, { "p", playerID or -1 },
+			{ "x", px }, { "z", pz }, { "x2", a }, { "z2", c },
+		})
+	elseif cmdType == "erase" then
+		writeComm({
+			{ "f", commFrame() }, { "k", "erase" }, { "p", playerID or -1 },
+			{ "x", px }, { "z", pz },
+		})
+	end
+end
+
+-- Point: a is the label. Line: a/b/c are the far end. Erase: a is the radius
+-- (always the engine's constant 100, so it is not recorded).
+--
+-- Returning a truthy value would TAKE the event — the engine would never draw
+-- the mark and no later widget would see it — so this returns nothing, always.
+function widget:MapDrawCmd(playerID, cmdType, px, py, pz, a, b, c)
+	pcall(recordDraw, playerID, cmdType, px, pz, a, b, c)
+end
+
+function widget:PlayerAdded(playerID)
+	pcall(notePlayer, playerID)
+end
+
+function widget:PlayerChanged(playerID)
+	pcall(notePlayer, playerID)
 end
 
 function widget:GameOver()

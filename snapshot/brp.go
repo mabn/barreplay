@@ -101,8 +101,8 @@ import (
 )
 
 // Container framing shared by .brp files ("BRP1") and the viz wire payload
-// ("BRW1"). Section order in a file is fixed (M, F, X, E) but readers accept
-// any order and skip unknown tags.
+// ("BRW1"). Section order in a file is fixed (M, K, F, X, E, C) but readers
+// accept any order and skip unknown tags.
 const (
 	BRPMagic = "BRP1"
 	BRWMagic = "BRW1"
@@ -120,6 +120,7 @@ const (
 	SecFrames    byte = 'F' // core delta frames, chunked
 	SecExtra     byte = 'X' // extra frame columns (not sent to the browser)
 	SecEvents    byte = 'E' // lifecycle events
+	SecComms     byte = 'C' // player chat + map drawings
 	SecHead      byte = 'J' // wire payload: head JSON (viz-specific)
 )
 
@@ -245,6 +246,7 @@ type brpMetaRecord struct {
 	FrameTeams  []int32    `json:"frameTeams,omitempty"`
 	Frames      int        `json:"frames"`
 	Events      int        `json:"events"`
+	Comms       int        `json:"comms,omitempty"`
 	UnitRecords int64      `json:"unitRecords"`
 	ChunkFrames int        `json:"chunkFrames"` // samples per chunk (last may be short)
 	Chunks      []BRPChunk `json:"chunks,omitempty"`
@@ -259,6 +261,7 @@ type BRPFile struct {
 	FrameTeams  []int32
 	FrameCount  int
 	EventCount  int
+	CommCount   int
 	UnitRecords int64
 	ChunkFrames int
 	Chunks      []BRPChunk
@@ -735,6 +738,203 @@ func decodeEvents(b []byte) ([]Event, error) {
 }
 
 // ---------------------------------------------------------------------------
+// comm codec
+//
+// Same columnar shape as the events codec — a count, string tables for the two
+// small enumerations (kind, chat destination), then one column at a time — with
+// two differences that matter for the volume: positions are quantized to whole
+// elmos (a map mark needs no sub-elmo precision) and DELTA-coded against the
+// previous comm, and a line's far end is delta-coded against its OWN near end.
+// Freehand drawing is the bulk of any real capture and arrives as runs of short
+// segments walking across the map, so both deltas are tiny there; a chat
+// message or a lone marker pays a few bytes for the position columns it does
+// not use.
+
+// commStrings writes a length-prefixed string table.
+func writeStringTable(vw *varintWriter, buf *bytes.Buffer, vals []string) {
+	vw.uv(uint64(len(vals)))
+	for _, s := range vals {
+		vw.uv(uint64(len(s)))
+		buf.WriteString(s)
+	}
+}
+
+func readStringTable(vr *varintReader) ([]string, error) {
+	n, err := vr.uv()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, n)
+	for i := range out {
+		l, err := vr.uv()
+		if err != nil {
+			return nil, err
+		}
+		if vr.p+int(l) > len(vr.b) {
+			return nil, fmt.Errorf("snapshot: truncated string table")
+		}
+		out[i] = string(vr.b[vr.p : vr.p+int(l)])
+		vr.p += int(l)
+	}
+	return out, nil
+}
+
+// intern adds s to tab/idx if new and returns its index.
+func intern(idx map[string]uint64, tab *[]string, s string) uint64 {
+	if i, ok := idx[s]; ok {
+		return i
+	}
+	i := uint64(len(*tab))
+	idx[s] = i
+	*tab = append(*tab, s)
+	return i
+}
+
+func encodeComms(comms []Comm) []byte {
+	var buf bytes.Buffer
+	vw := &varintWriter{w: &buf}
+	vw.uv(uint64(len(comms)))
+
+	kindIdx, destIdx := map[string]uint64{}, map[string]uint64{}
+	var kinds, dests []string
+	kindOf := make([]uint64, len(comms))
+	destOf := make([]uint64, len(comms))
+	for i, c := range comms {
+		kindOf[i] = intern(kindIdx, &kinds, string(c.Kind))
+		destOf[i] = intern(destIdx, &dests, c.Dest)
+	}
+	writeStringTable(vw, &buf, kinds)
+	writeStringTable(vw, &buf, dests)
+
+	prevFrame := int64(0)
+	for _, c := range comms {
+		vw.sv(int64(c.Frame) - prevFrame)
+		prevFrame = int64(c.Frame)
+	}
+	for _, k := range kindOf {
+		vw.uv(k)
+	}
+	for _, d := range destOf {
+		vw.uv(d)
+	}
+	for _, c := range comms {
+		vw.sv(int64(c.PlayerID))
+	}
+	prevX, prevZ := int64(0), int64(0)
+	for _, c := range comms {
+		x, z := roundq(c.X), roundq(c.Z)
+		vw.sv(x - prevX)
+		vw.sv(z - prevZ)
+		vw.sv(roundq(c.X2) - x)
+		vw.sv(roundq(c.Z2) - z)
+		prevX, prevZ = x, z
+	}
+	for _, c := range comms {
+		vw.uv(uint64(len(c.Text)))
+		buf.WriteString(c.Text)
+	}
+	for _, c := range comms {
+		vw.uv(uint64(len(c.Name)))
+		buf.WriteString(c.Name)
+	}
+	return buf.Bytes()
+}
+
+func decodeComms(b []byte) ([]Comm, error) {
+	vr := &varintReader{b: b}
+	n64, err := vr.uv()
+	if err != nil {
+		return nil, err
+	}
+	n := int(n64)
+	kinds, err := readStringTable(vr)
+	if err != nil {
+		return nil, err
+	}
+	dests, err := readStringTable(vr)
+	if err != nil {
+		return nil, err
+	}
+	comms := make([]Comm, n)
+	prev := int64(0)
+	for i := 0; i < n; i++ {
+		d, err := vr.sv()
+		if err != nil {
+			return nil, err
+		}
+		prev += d
+		comms[i].Frame = int32(prev)
+	}
+	for i := 0; i < n; i++ {
+		k, err := vr.uv()
+		if err != nil {
+			return nil, err
+		}
+		if int(k) >= len(kinds) {
+			return nil, fmt.Errorf("snapshot: comm kind index %d out of range", k)
+		}
+		comms[i].Kind = CommKind(kinds[k])
+	}
+	for i := 0; i < n; i++ {
+		d, err := vr.uv()
+		if err != nil {
+			return nil, err
+		}
+		if int(d) >= len(dests) {
+			return nil, fmt.Errorf("snapshot: comm dest index %d out of range", d)
+		}
+		comms[i].Dest = dests[d]
+	}
+	for i := 0; i < n; i++ {
+		v, err := vr.sv()
+		if err != nil {
+			return nil, err
+		}
+		comms[i].PlayerID = int32(v)
+	}
+	prevX, prevZ := int64(0), int64(0)
+	for i := 0; i < n; i++ {
+		dx, err := vr.sv()
+		if err != nil {
+			return nil, err
+		}
+		dz, err := vr.sv()
+		if err != nil {
+			return nil, err
+		}
+		dx2, err := vr.sv()
+		if err != nil {
+			return nil, err
+		}
+		dz2, err := vr.sv()
+		if err != nil {
+			return nil, err
+		}
+		x, z := prevX+dx, prevZ+dz
+		comms[i].X, comms[i].Z = float32(x), float32(z)
+		comms[i].X2, comms[i].Z2 = float32(x+dx2), float32(z+dz2)
+		prevX, prevZ = x, z
+	}
+	for _, col := range []func(i int, s string){
+		func(i int, s string) { comms[i].Text = s },
+		func(i int, s string) { comms[i].Name = s },
+	} {
+		for i := 0; i < n; i++ {
+			l, err := vr.uv()
+			if err != nil {
+				return nil, err
+			}
+			if vr.p+int(l) > len(vr.b) {
+				return nil, fmt.Errorf("snapshot: truncated comm string column")
+			}
+			col(i, string(vr.b[vr.p:vr.p+int(l)]))
+			vr.p += int(l)
+		}
+	}
+	return comms, nil
+}
+
+// ---------------------------------------------------------------------------
 // gzip helpers
 
 // Sections compress at gzip's default level: on real capture data
@@ -776,6 +976,7 @@ type brpWriter struct {
 	chunks            []BRPChunk
 
 	events      []Event
+	comms       []Comm
 	bounds      BRPBounds
 	anyUnit     bool
 	frameTeams  map[int32]bool
@@ -866,6 +1067,15 @@ func (w *brpWriter) WriteEvent(e Event) error {
 	return nil
 }
 
+// WriteComm records one chat message or map drawing. Comms carry no team id of
+// their own (the author's player record supplies it), so they never widen
+// frameTeams, and they are not part of any chunk — the whole set is one small
+// section written at Close.
+func (w *brpWriter) WriteComm(c Comm) error {
+	w.comms = append(w.comms, c)
+	return nil
+}
+
 func (w *brpWriter) Close() error {
 	w.flushChunk()
 
@@ -873,6 +1083,7 @@ func (w *brpWriter) Close() error {
 		Meta:        w.meta,
 		Frames:      w.frames,
 		Events:      len(w.events),
+		Comms:       len(w.comms),
 		UnitRecords: w.unitRecords,
 		ChunkFrames: w.chunkFrames,
 		Chunks:      w.chunks,
@@ -903,6 +1114,12 @@ func (w *brpWriter) Close() error {
 		{Tag: SecFrames, Payload: w.coreBuf.Bytes()},
 		{Tag: SecExtra, Payload: w.extraBuf.Bytes()},
 		{Tag: SecEvents, Payload: gzipCompress(encodeEvents(w.events))},
+	}
+	// Comms are optional: a capture from a widget that never recorded them (or
+	// a game where nobody spoke or drew) writes no section at all, which is
+	// also what every .brp published before v5 gained one looks like.
+	if len(w.comms) > 0 {
+		sections = append(sections, Section{Tag: SecComms, Payload: gzipCompress(encodeComms(w.comms))})
 	}
 	if err := WriteContainer(f, BRPMagic, BRPVersion, sections); err != nil {
 		f.Close()
@@ -946,6 +1163,7 @@ func ParseBRP(r io.Reader) (*BRPFile, error) {
 	f.FrameTeams = rec.FrameTeams
 	f.FrameCount = rec.Frames
 	f.EventCount = rec.Events
+	f.CommCount = rec.Comms
 	f.UnitRecords = rec.UnitRecords
 	f.ChunkFrames = rec.ChunkFrames
 	f.Chunks = rec.Chunks
@@ -1046,7 +1264,25 @@ func (f *BRPFile) DecodeChunk(i int) ([]Frame, error) {
 	return frames, nil
 }
 
-// ReadBRP fully decodes a .brp capture by decoding every chunk in order.
+// Comms decodes the C section: everything the capture's players wrote or drew.
+// Absent section (an older capture, or a game with none) yields nil, not an
+// error. It is deliberately NOT part of ReadBRP's return: comms are a small
+// side channel most consumers of the frame data have no use for.
+func (f *BRPFile) Comms() ([]Comm, error) {
+	sec, ok := f.Sections[SecComms]
+	if !ok {
+		return nil, nil
+	}
+	b, err := gunzip(sec)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot: comms section: %w", err)
+	}
+	return decodeComms(b)
+}
+
+// ReadBRP decodes a .brp capture's meta, frames (every chunk in order) and
+// events. Chat and map drawings are read separately, via
+// ParseBRP(...).Comms().
 func ReadBRP(r io.Reader) (Meta, []Frame, []Event, error) {
 	f, err := ParseBRP(r)
 	if err != nil {

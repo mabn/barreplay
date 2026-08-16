@@ -112,6 +112,29 @@ func TestBrepstreamMatchesTextFixture(t *testing.T) {
 			t.Fatalf("event %d: bin %+v text %+v", i, bin.events[i], text.events[i])
 		}
 	}
+
+	// Comms ride both streams as the same JSON payload, so they must match
+	// EXACTLY — no quantization to allow for.
+	if len(bin.comms) == 0 || len(bin.comms) != len(text.comms) {
+		t.Fatalf("comms: bin %d text %d", len(bin.comms), len(text.comms))
+	}
+	for i := range bin.comms {
+		if bin.comms[i] != text.comms[i] {
+			t.Fatalf("comm %d: bin %+v text %+v", i, bin.comms[i], text.comms[i])
+		}
+	}
+	// The harness scripts console lines that must NOT be recorded (engine
+	// noise, the widget's own heartbeat echo, an unknown speaker, and the
+	// "added point" line duplicating a MapDrawCmd), so a parser that got
+	// greedier would show up as extra comms here.
+	kinds := map[snapshot.CommKind]int{}
+	for _, c := range text.comms {
+		kinds[c.Kind]++
+	}
+	if kinds[snapshot.CommChat] != 9 || kinds[snapshot.CommPoint] != 3 ||
+		kinds[snapshot.CommLine] != 2 || kinds[snapshot.CommErase] != 1 {
+		t.Errorf("comm kinds: %v", kinds)
+	}
 }
 
 func near(t *testing.T, frame, id int32, what string, got, want, tol float32) {

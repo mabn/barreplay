@@ -16,6 +16,8 @@ import (
 //	J  head JSON (this file's wireHead): meta, teams, icons, footprints,
 //	   bounds, and the CHUNK INDEX
 //	E  events — the .brp file's E section byte-for-byte
+//	C  chat + map drawings — the .brp file's C section byte-for-byte (absent
+//	   when the capture recorded none)
 //
 // The frame data itself is NOT in this payload: the browser streams
 // /replays/<id>.keys (every keyframe, one gzip stream — the whole timeline
@@ -230,6 +232,9 @@ func brpWirePayload(f *snapshot.BRPFile) ([]byte, error) {
 	sections := []snapshot.Section{{Tag: snapshot.SecHead, Payload: gzipBytes(headJSON)}}
 	if e, ok := f.Sections[snapshot.SecEvents]; ok {
 		sections = append(sections, snapshot.Section{Tag: snapshot.SecEvents, Payload: e})
+	}
+	if c, ok := f.Sections[snapshot.SecComms]; ok {
+		sections = append(sections, snapshot.Section{Tag: snapshot.SecComms, Payload: c})
 	}
 	var buf bytes.Buffer
 	if err := snapshot.WriteContainer(&buf, snapshot.BRWMagic, snapshot.BRPVersion, sections); err != nil {

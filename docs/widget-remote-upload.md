@@ -229,6 +229,17 @@ full version under the same gameId.
    exactly, so the merge must treat them as non-authoritative (see the merge
    property above); wobbled radar positions and unidentified contacts (def 0)
    are recorded as-is — they are what the player actually knew.
+7. **Chat and map drawings.** Recorded since widget 1.6.0 as `C` records (see
+   `docs/brepstream-format.md`), and point-of-view-limited in exactly the same
+   way as unit visibility: the engine hands a client only the chat channels it
+   receives and only the marks it may see. Two consequences for the merge: a
+   message or mark shows up in several players' streams (deduplicate on
+   frame + author + payload, not on arrival), and each side's `ally` chat and
+   marks exist only in that side's uploads — so the union of live uploads
+   covers strictly more than any single one. Unlike unit visibility, though,
+   this is one area where a re-simulation is already complete: a demo is
+   watched by a spectating client, and the engine hands a spectator every
+   channel and every mark.
 
 ## Alternatives considered (for contrast)
 

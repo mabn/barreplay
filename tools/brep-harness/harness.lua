@@ -221,6 +221,35 @@ local scoutWindows = {
 	{ 31, 33, 177 },
 }
 
+-- Scripted player comms: {sample, callin, args...}. "console" drives
+-- widget:AddConsoleLine with a raw engine console line, "draw" drives
+-- widget:MapDrawCmd. Between them these cover every branch of the widget's
+-- comm recording: each chat channel and speaker shape, colour-code stripping,
+-- a multi-line console payload, all three draw command types — and the lines
+-- that must NOT be recorded (engine noise, the widget's own heartbeat echo, and
+-- the "added point" console line that duplicates a MapDrawCmd already seen).
+-- GetPlayerInfo below names the two players "Player 0" and "Player 1".
+local commScript = {
+	{ 2, "console", "<Player 0> hello team" },
+	{ 3, "console", "[f=0000090] <Player 1> Allies: pushing north" },
+	{ 5, "console", "[Player 1] Spectators: nice game" },
+	{ 6, "console", "> <LobbyOnly> from the battleroom" },
+	{ 8, "console", "<Player 0>  whispered Player 1: psst" },
+	{ 9, "console", "<Player 1> \255\255\000\000red\bnormal" },
+	{ 11, "console", "<Player 0> line one\n<Player 1> line two" },
+	{ 12, "console", "Player 0 added point: here" },   -- MapDrawCmd already has it
+	{ 12, "console", "[replay-uploader] heartbeat frame=360" }, -- our own echo
+	{ 12, "console", "Game will start in 5 seconds" }, -- engine noise
+	{ 12, "console", "<NotAPlayer> unknown speaker" }, -- no such player
+	{ 12, "draw", 0, "point", 1200.5, 80, 3400.25, "here" },
+	{ 13, "draw", 1, "point", 5000, 80, 5000, "" },    -- unlabelled marker
+	{ 14, "draw", 0, "line", 1200, 80, 3400, 1260, 80, 3450 },
+	{ 15, "draw", 0, "line", 1260, 80, 3450, 1330, 80, 3505 },
+	{ 16, "draw", 1, "erase", 5000, 80, 5000, 100 },
+	{ 90, "console", "<Player 0> gg" },
+	{ 91, "draw", 0, "point", -20, 80, 9000, "off-map" }, -- negative coordinate
+}
+
 Spring = {
 	Echo = function(...) print(...) end,
 	GetGameRulesParam = function(k)
@@ -481,6 +510,17 @@ for s = 0, SAMPLES - 1 do
 					end
 				end
 				break
+			end
+		end
+	end
+	if widgetActive then
+		for _, c in ipairs(commScript) do
+			if c[1] == s then
+				if c[2] == "console" then
+					widget:AddConsoleLine(c[3], 0)
+				else
+					widget:MapDrawCmd(c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10])
+				end
 			end
 		end
 	end

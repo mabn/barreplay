@@ -232,8 +232,8 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 	if merr := moveFile(streamPath, filepath.Join(o.OutDir, h.GameID+".brsnap")); merr != nil {
 		fmt.Fprintf(os.Stderr, "resim: warning: could not move raw stream: %v\n", merr)
 	}
-	fmt.Fprintf(os.Stderr, "resim: %s: %d frames in %s -> %s\n",
-		h.GameID, stats.Frames, time.Since(runStart).Round(time.Second), outPath)
+	fmt.Fprintf(os.Stderr, "resim: %s: %d frames, %d comms in %s -> %s\n",
+		h.GameID, stats.Frames, stats.Comms, time.Since(runStart).Round(time.Second), outPath)
 
 	// Sanity: the produced capture must be the requested game.
 	if !strings.EqualFold(h.GameID, gameID) {

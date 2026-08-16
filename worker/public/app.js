@@ -239,8 +239,64 @@ function decodeEvents(b) {
   return evs;
 }
 
+// Comms (what players wrote and drew): count, a kind string table, a chat
+// destination string table, then one column at a time. Positions are whole
+// elmos delta-coded against the previous comm — freehand drawing is a run of
+// short segments walking across the map, so those deltas are tiny — and a
+// line's far end is delta-coded against its own near end.
+function decodeComms(b) {
+  let p = 0;
+  function uv() {
+    let x = 0, mul = 1;
+    for (;;) {
+      const c = b[p++];
+      x += (c & 0x7f) * mul;
+      if (c < 0x80) return x;
+      mul *= 128;
+    }
+  }
+  function sv() {
+    const u = uv();
+    return u % 2 === 0 ? u / 2 : -(u + 1) / 2;
+  }
+  const td = new TextDecoder();
+  function str() {
+    const l = uv();
+    const s = td.decode(b.subarray(p, p + l));
+    p += l;
+    return s;
+  }
+  function table() {
+    const n = uv(), out = [];
+    for (let i = 0; i < n; i++) out.push(str());
+    return out;
+  }
+  const n = uv();
+  const kinds = table();
+  const dests = table();
+  const cs = new Array(n);
+  for (let i = 0; i < n; i++) cs[i] = { f: 0, k: '', p: -1, n: '', d: '', t: '', x: 0, z: 0, x2: 0, z2: 0 };
+  let acc = 0;
+  for (let i = 0; i < n; i++) { acc += sv(); cs[i].f = acc; }
+  for (let i = 0; i < n; i++) cs[i].k = kinds[uv()];
+  for (let i = 0; i < n; i++) cs[i].d = dests[uv()];
+  for (let i = 0; i < n; i++) cs[i].p = sv();
+  let px = 0, pz = 0;
+  for (let i = 0; i < n; i++) {
+    const x = px + sv(), z = pz + sv();
+    cs[i].x = x; cs[i].z = z;
+    cs[i].x2 = x + sv(); cs[i].z2 = z + sv();
+    px = x; pz = z;
+  }
+  for (let i = 0; i < n; i++) cs[i].t = str();
+  for (let i = 0; i < n; i++) cs[i].n = str();
+  return cs;
+}
+
 // Decode the /api/replay head payload: the head JSON's fields plus events
-// [{f,k,id,def,team}]. Frames stream in separately per chunk.
+// [{f,k,id,def,team}] and comms [{f,k,p,n,d,t,x,z,x2,z2}]. Frames stream in
+// separately per chunk. Both extra sections are optional — a capture whose
+// widget never recorded comms simply has none.
 async function decodeHead(buf) {
   if (typeof DecompressionStream === 'undefined') {
     throw new Error('this browser lacks DecompressionStream (needed to read the capture)');
@@ -249,6 +305,7 @@ async function decodeHead(buf) {
   if (!secs.J) throw new Error('payload has no head section');
   const head = JSON.parse(new TextDecoder().decode(await gunzipU8(secs.J)));
   head.events = secs.E ? decodeEvents(await gunzipU8(secs.E)) : [];
+  head.comms = secs.C ? decodeComms(await gunzipU8(secs.C)) : [];
   head.codecVer = secs._ver;
   return head;
 }
@@ -888,6 +945,205 @@ function teamLabel(t) {
   return `Team ${t.team}${side}`;
 }
 
+// ---- player comms: chat + map drawings -------------------------------------
+// data.comms is everything the capture's players wrote or drew, in frame order
+// (see decodeComms). It splits into two consumers: the map marks (points,
+// lines, erases) drawn in world space on the overlay canvas, and the chat log
+// in the sidebar.
+//
+// LIFETIME: a mark stays on the map for MARK_LIFETIME game-seconds, matching
+// BAR's own "Auto mapmark eraser" widget — the marks a replay shows are then
+// the ones the players actually had in front of them. The engine itself never
+// expires a mark; only an explicit erase removes it, which is why erasedAt
+// below is precomputed rather than the lifetime being the whole story.
+
+const MARK_LIFETIME = 60;   // game-seconds a drawing stays on the map
+const MARK_FADE = 8;        // game-seconds of fade-out at the end of that
+const MARK_ERASE_RADIUS = 100; // elmos; the engine's CInMapDrawModel constant
+const CHAT_CONTEXT = 12;    // chat rows kept visible past the playhead
+
+let marks = [];             // point/line comms in frame order, with erasedAt
+let chatLines = [];         // chat comms in frame order
+let commTeamOf = new Map(); // playerID -> team id (-1 for spectators)
+
+// buildCommIndex splits data.comms into the two views and resolves, for every
+// mark, the frame an erase removed it at (Infinity when none did).
+//
+// An erase clears every mark ANCHORED within MARK_ERASE_RADIUS of it (a
+// point's position, a line's first end) — the engine's own rule. Resolving it
+// once here rather than per animation tick keeps drawing O(marks on screen):
+// the backwards scan stops at the lifetime horizon, since a mark older than
+// that is already gone and cannot be erased again.
+function buildCommIndex() {
+  marks = [];
+  chatLines = [];
+  commTeamOf = new Map();
+  for (const p of data.players || []) commTeamOf.set(p.id, p.spec ? -1 : p.team);
+  const comms = data.comms || [];
+  const lifetime = MARK_LIFETIME * 30;
+  for (const c of comms) {
+    if (c.k === 'chat') { chatLines.push(c); continue; }
+    if (c.k === 'point' || c.k === 'line') { marks.push({ c, erasedAt: Infinity }); continue; }
+    if (c.k !== 'erase') continue;
+    const r2 = MARK_ERASE_RADIUS * MARK_ERASE_RADIUS;
+    for (let i = marks.length - 1; i >= 0; i--) {
+      const m = marks[i];
+      if (c.f - m.c.f > lifetime) break; // older than the horizon: already gone
+      if (m.erasedAt !== Infinity) continue;
+      const dx = m.c.x - c.x, dz = m.c.z - c.z;
+      if (dx * dx + dz * dz < r2) m.erasedAt = c.f;
+    }
+  }
+}
+
+// firstMarkAt returns the index of the first mark whose frame is >= f.
+function firstMarkAt(f) {
+  let lo = 0, hi = marks.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (marks[mid].c.f < f) lo = mid + 1; else hi = mid;
+  }
+  return lo;
+}
+
+// commColor is the author's team colour; spectators and unresolved authors get
+// the neutral unknown-team grey, so a mark is never invisible.
+function commColor(playerID) {
+  const team = commTeamOf.get(playerID);
+  return (team !== undefined && team >= 0 && teamColor[team]) || '#9aa6b2';
+}
+
+function commName(c) {
+  if (c.n) return c.n;
+  for (const p of data.players || []) if (p.id === c.p) return p.name;
+  return c.p >= 0 ? 'player ' + c.p : '?';
+}
+
+// drawMarks paints the map drawings visible at sim frame f onto the overlay
+// canvas, in world space (they scale and pan with the map, unlike the icons).
+// Points are a diamond plus their label; lines are the segment they were drawn
+// as, so a freehand scribble comes back as the shape its author traced.
+function drawMarks(f) {
+  const lifetime = MARK_LIFETIME * 30, fade = MARK_FADE * 30;
+  let i = firstMarkAt(f - lifetime);
+  let labels = null;
+  for (; i < marks.length; i++) {
+    const m = marks[i];
+    if (m.c.f > f) break;
+    const end = Math.min(m.c.f + lifetime, m.erasedAt);
+    if (f >= end) continue;
+    const left = end - f;
+    octx.globalAlpha = left < fade ? left / fade : 1;
+    octx.strokeStyle = commColor(m.c.p);
+    const sx = viewW / 2 + (m.c.x - center.x) * scale;
+    const sy = viewH / 2 + (m.c.z - center.z) * scale;
+    if (m.c.k === 'line') {
+      const ex = viewW / 2 + (m.c.x2 - center.x) * scale;
+      const ey = viewH / 2 + (m.c.z2 - center.z) * scale;
+      if ((sx < 0 && ex < 0) || (sy < 0 && ey < 0) ||
+        (sx > viewW && ex > viewW) || (sy > viewH && ey > viewH)) continue;
+      octx.lineWidth = 2;
+      octx.beginPath();
+      octx.moveTo(sx, sy);
+      octx.lineTo(ex, ey);
+      octx.stroke();
+      continue;
+    }
+    if (sx < -20 || sy < -20 || sx > viewW + 20 || sy > viewH + 20) continue;
+    // A marker: a diamond, drawn at constant screen size like the unit icons.
+    const r = 7;
+    octx.lineWidth = 2;
+    octx.beginPath();
+    octx.moveTo(sx, sy - r);
+    octx.lineTo(sx + r, sy);
+    octx.lineTo(sx, sy + r);
+    octx.lineTo(sx - r, sy);
+    octx.closePath();
+    octx.stroke();
+    if (m.c.t) (labels || (labels = [])).push([sx, sy, m.c.t, octx.strokeStyle, octx.globalAlpha]);
+  }
+  // Labels last, so no later mark's stroke crosses one.
+  if (labels) {
+    octx.textAlign = 'center';
+    octx.textBaseline = 'bottom';
+    octx.font = '12px system-ui, sans-serif';
+    octx.lineWidth = 3;
+    octx.strokeStyle = 'rgba(8, 12, 16, 0.85)';
+    for (const [x, y, text, color, alpha] of labels) {
+      octx.globalAlpha = alpha;
+      octx.strokeText(text, x, y - 10);
+      octx.fillStyle = color;
+      octx.fillText(text, x, y - 10);
+    }
+  }
+  octx.globalAlpha = 1;
+}
+
+// ---- chat log ---------------------------------------------------------------
+// The whole conversation, in the sidebar: everything said up to the playhead
+// plus a few lines of what is coming, so the panel reads as a transcript you
+// can scroll and click rather than a ticker that erases itself. A row's click
+// seeks to the frame it was said at.
+
+const CHAT_DEST_TAG = { ally: 'ally', spec: 'spec', private: 'pm', lobby: 'lobby' };
+let chatBuilt = false;   // rows exist for the current replay
+let chatCursor = -1;     // index of the newest row at or before the playhead
+
+function renderChat() {
+  const box = document.getElementById('chat');
+  const wrap = document.getElementById('chatwrap');
+  if (!box || !wrap) return;
+  wrap.style.display = chatLines.length ? '' : 'none';
+  box.innerHTML = '';
+  chatBuilt = chatLines.length > 0;
+  chatCursor = -1;
+  if (!chatBuilt) return;
+  chatLines.forEach((c, i) => {
+    const row = document.createElement('div');
+    // Every row starts "not yet said"; updateChat clears the flag as the
+    // playhead passes each one, which is why chatCursor starts at -1.
+    row.className = 'chatrow future';
+    const tag = CHAT_DEST_TAG[c.d];
+    row.innerHTML =
+      `<span class="chattime">${escapeHtml(fmtTime(c.f / 30))}</span>` +
+      (tag ? `<span class="chattag">${escapeHtml(tag)}</span>` : '') +
+      `<b style="color:${escapeHtml(commColor(c.p))}">${escapeHtml(commName(c))}</b> ` +
+      `<span>${escapeHtml(c.t)}</span>`;
+    row.title = 'Jump to ' + fmtTime(c.f / 30);
+    row.addEventListener('click', () => {
+      if (data.sampleEvery > 0) go(Math.round(c.f / data.sampleEvery));
+    });
+    box.appendChild(row);
+  });
+}
+
+// updateChat marks which rows have already been said at the current playhead
+// and keeps the newest of them in view. It runs on every playback tick, so it
+// exits immediately unless the boundary actually moved.
+function updateChat(f) {
+  if (!chatBuilt) return;
+  let cursor = -1;
+  for (let i = 0; i < chatLines.length && chatLines[i].f <= f; i++) cursor = i;
+  if (cursor === chatCursor) return;
+  const box = document.getElementById('chat');
+  const rows = box.children;
+  // Only the rows that changed side of the boundary need touching.
+  const lo = Math.min(chatCursor, cursor) + 1, hi = Math.max(chatCursor, cursor);
+  for (let i = lo; i <= hi && i < rows.length; i++) {
+    rows[i].classList.toggle('future', i > cursor);
+  }
+  chatCursor = cursor;
+  // Follow the playhead, but only when it has left the visible window —
+  // scrolling on every new line would fight a user reading back through the
+  // log while the replay plays on.
+  const anchor = rows[Math.min(rows.length - 1, cursor + CHAT_CONTEXT)];
+  if (!anchor) return;
+  const top = anchor.offsetTop, bottom = top + anchor.offsetHeight;
+  if (bottom > box.scrollTop + box.clientHeight || top < box.scrollTop) {
+    box.scrollTop = Math.max(0, bottom - box.clientHeight);
+  }
+}
+
 // ---- coordinate transforms ------------------------------------------------
 function w2s(x, z) {
   return [viewW / 2 + (x - center.x) * scale, viewH / 2 + (z - center.z) * scale];
@@ -1152,6 +1408,11 @@ function drawOverlay(u) {
   if (!octx) return;
   octx.setTransform(DPR, 0, 0, DPR, 0, 0);
   octx.clearRect(0, 0, viewW, viewH);
+  // Map drawings live here too: they are world-space and time-dependent (marks
+  // fade out and get erased), so they repaint with the build lines rather than
+  // with the cached base layer. They exist independently of the frame data, so
+  // they draw even while a chunk is still streaming in.
+  if (marks.length) drawMarks(frameNumAt(idx));
   if (!u) return;
 
   // Cheap scan first: most frames have far fewer builders/under-construction
@@ -2162,7 +2423,7 @@ function setPlayhead(pos, forceSidebar) {
   const changed = newIdx !== idx || forceSidebar;
   idx = newIdx;
   resolveDisplay();
-  if (changed) { maybeUpdateSidebar(forceSidebar); buildNextPosMap(); }
+  if (changed) { maybeUpdateSidebar(forceSidebar); buildNextPosMap(); updateChat(frameNumAt(idx)); }
   updateTimeLabel();
   draw();
 }
@@ -2298,6 +2559,9 @@ async function loadReplay(file) {
   damageFlash.clear();
   ghostBuildings.clear();
   ghostIndex = new Map();
+  marks = [];
+  chatLines = [];
+  chatBuilt = false;
   flashSeenIdx = -1;
   currentFile = file;
   try {
@@ -2328,6 +2592,8 @@ async function loadReplay(file) {
   buildDefTables();
   buildDestroyedIndex();
   applyTeamColors();
+  buildCommIndex();
+  renderChat();      // after applyTeamColors: rows are coloured by the author's team
   lastTimeText = null;
   lastSliderIdx = -1;
   secPerFrame = data.sampleEvery > 0 ? data.sampleEvery / 30 : 1;

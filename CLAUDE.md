@@ -163,7 +163,12 @@ internal/barapi/          resolve gameId via api.bar-rts.com; download .sdfz fro
 internal/demofile/        gunzip + parse packed header + TDF startscript
 internal/engine/          locate spring-headless/pr-downloader, provision, launch, stream stdout
 internal/capture/         parse the widgets' streams -> snapshot records (BRSNAP text in
-                          capture.go, binary .brepstream in brep.go, shared preamble in lines.go)
+                          capture.go, binary .brepstream in brep.go, shared preamble +
+                          comm-record parsing in lines.go). COMM records (text) / 'C'
+                          records (binary) carry one JSON payload each — a chat message or
+                          a map drawing — through the SAME parser (parseComm), whose
+                          sanitizeCommText length-caps the player-authored text and strips
+                          control characters before it can reach a browser.
 internal/viz/             serve the viewer (SPA embedded from worker/) + the static-shaped replay URLs
 internal/viz/static.go    pack a .brp into plain static files (byte-identical to the served URLs) for serverless hosting
 worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as static files from R2 (no playback server);
@@ -333,7 +338,9 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           R2_SECRET_ACCESS_KEY are set (fast, aws4fetch), else parallel `wrangler r2
                           object put`; .brw heads upload after a completion barrier so a
                           half-uploaded replay never lists
-snapshot/                 PUBLIC data model + pluggable Writer (owns the on-disk format: the .brp binary)
+snapshot/                 PUBLIC data model + pluggable Writer (owns the on-disk format: the .brp binary).
+                          The Writer's four record types are Meta, Frame, Event and Comm
+                          (snapshot.Comm = one thing a player wrote or drew).
 assets/lua/snapshot_widget.lua   embedded, read-only sampler (go:embed)
 assets/lua/replay_uploader.lua   player-installable live-game variant: constants only (no
                           substitution tokens), records the player's own ally team plus, by
@@ -364,12 +371,20 @@ assets/lua/replay_uploader.lua   player-installable live-game variant: constants
                           engine's GameID callin to widgets); the
                           writeText constant additionally emits the legacy .brsnap text
                           stream (debug/reference; both formats from ONE game validate the
-                          binary encoder without re-simulating). NOT embedded/injected by
+                          binary encoder without re-simulating). Since 1.6.0 it also
+                          records what players WRITE and DRAW (COMM/'C' records — see the
+                          chat/drawings note under the wire protocol below). NOT
+                          embedded/injected by
                           the Go tool (crowd-sourced capture plan: docs/widget-remote-upload.md)
 tools/brep-harness/       stubbed-Spring Lua harness: runs the REAL uploader widget over a
                           deterministic fake game to (re)generate the
                           internal/capture/testdata fixtures that pin the Lua encoder <-> Go
-                          decoder lockstep (TestBrepstreamMatchesTextFixture); needs lua5.4
+                          decoder lockstep (TestBrepstreamMatchesTextFixture); needs lua5.4.
+                          Its commScript drives AddConsoleLine/MapDrawCmd over every chat
+                          shape and draw type — INCLUDING the console lines that must NOT be
+                          recorded (engine noise, the widget's own heartbeat echo, an unknown
+                          speaker, the "added point" line duplicating a MapDrawCmd), so a
+                          parser that got greedier shows up as extra comms in the fixture test
 ```
 
 Key design rule: **the on-disk format lives only in `snapshot/`** behind the `Writer`
@@ -392,7 +407,13 @@ JSON (Meta + precomputed bounds/frameTeams/counts + the **chunk index**), `K` **
 core keyframes as ONE gzip stream**, `F` core delta-frame chunks (columns: id def
 team x z hp maxHp dvx dvz build target — build + the build/assist target moved into
 the core in v5 so the browser can draw construction bars and builder→target lines),
-`X` extra (team resources — not sent to the browser), `E` events. Unknown tags are
+`X` extra (team resources — not sent to the browser), `E` events, `C` **comms**
+(everything the players wrote or drew: chat + map points/lines/erases, columnar
+like `E` with two string tables and whole-elmo positions delta-coded against the
+previous comm — freehand drawing is a run of short segments, so those deltas are
+1-2 bytes; OMITTED entirely when a capture has none, which is every .brp packed
+from a pre-1.6.0 widget stream, so readers must treat a missing `C` as "none").
+Unknown tags are
 skipped, so sections can be added compatibly; any version byte other than 5 is
 rejected in Go (v1–v3 existed only pre-release, v4 shipped without build/target in
 core; regenerate a .brp from its .brsnap/.brepstream with pack). The JS decoder
@@ -495,6 +516,7 @@ BRSNAP F <frame> <timeSec> <count>             start of a periodic snapshot
 BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp> <vx> <vy> <vz> <build> <target>   one unit (follows an F line)
 BRSNAP R <teamID> <metal> <energy> <mStore> <eStore> <mIncome> <eIncome>   team economy (follows an F line)
 BRSNAP EV <frame> <kind> <id> <def> <team>     unit lifecycle event
+BRSNAP COMM <json>                             one player comm: chat message or map drawing
 BRSNAP PROF <totalMs> <name>                   engine time-profiler record (once, at game over)
 BRSNAP PROFD <frame> <units> <totalMs> <name>  per-heartbeat profiler sample (-profile only)
 ```
@@ -522,6 +544,31 @@ Each `U` line carries, besides position and health, the unit's velocity (`vx/vy/
 `buildProgress` (1 = finished, <1 = under construction; from `GetUnitHealth`'s 5th return).
 Both are appended after `maxHp`, so pre-velocity `.brsnap` streams still parse (capture reads
 them only when the line has all 12 fields).
+
+**Chat and map drawings (`COMM` / `C` records; both widgets, uploader >= 1.6.0).**
+Recorded at the exact frame they happen, as one JSON payload per message or drawing
+command (`chat`/`point`/`line`/`erase`; see docs/brepstream-format.md). Drawings come
+from the `MapDrawCmd` callin, which is structured — author playerID + world
+coordinates — and must return NOTHING: a truthy return TAKES the event, so the engine
+would never draw the mark. Chat has no such callin: BAR's widget handler does not
+forward `GotChatMsg` (`luaui/actions.lua` consumes it for chat actions), so the only
+source is `AddConsoleLine` and the widget reverses the console grammar
+`CGame::HandleChatMsg` prints — `<Name> body` (player), `[Name] body` /
+`[Name (replay)] body` (spectator), `> <Name> body` (autohost relaying the
+battleroom), with the channel as a body prefix (`Allies: `, `Spectators: `,
+`Private: `, ` whispered <who>: `). A bracketed line counts as chat only when the name
+is a player of THIS game (the same disambiguation BAR's own gui_chat applies) — which
+is what keeps engine noise, and the widgets' own `[barreplay]`/`[replay-uploader]`
+heartbeat echoes, out of the record. `<Name> added point:` console lines are dropped on
+purpose: `MapDrawCmd` already delivered that marker, with coordinates. Both callins are
+pcall-guarded and their failures are swallowed SILENTLY — an Echo inside
+`AddConsoleLine` comes straight back through the same callin.
+Comms are POINT-OF-VIEW-LIMITED exactly like unit visibility (the engine fires the
+draw callin only for marks a client may see and delivers only the chat channels it
+receives), with one asymmetry worth remembering: a demo re-simulation watches as a
+spectator, so unlike its unit data its COMM data is already complete. Volume is capped
+at 20000 records per capture (`maxComms`) because the viewer downloads the whole set
+before playback.
 
 The widget never touches synced state (only `Get*` reads, unsynced console commands, its
 own output file, and unsynced widget-handler calls) so it cannot desync the replay. `__SAMPLE_EVERY__` is substituted at write time (`-every`, default 30 = 1 Hz).
@@ -573,8 +620,8 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   icons, footprints,
   players, bounds, `frameCount`, and the **chunk index** `{frame,count,kLen,len}` per
   chunk — `kLen` is the keyframe's RAW length inside the decompressed keys stream)
-  plus the file's `E` events section byte-for-byte — ~230 KB for a 33-min game, so the
-  page is interactive immediately. `/replays/<id>.keys` serves the `K` section
+  plus the file's `E` events and `C` comms sections byte-for-byte — ~230 KB for a
+  33-min game, so the page is interactive immediately. `/replays/<id>.keys` serves the `K` section
   byte-for-byte (every keyframe, one gzip stream); `/replays/<id>/c<n>` serves chunk
   n's delta bytes, **sliced straight out of the stored file**. The server never
   decodes a frame (except `.resources`, decoded once and cached): bounds/teams/index
@@ -644,6 +691,22 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   footprints; the layer is off by default (`showFootprints`). Unlike icons, footprints are drawn
   in world space, so they scale with zoom and are centred on the unit position (the footprint
   centre).
+- **Chat + map drawings in the viewer (`app.js` `buildCommIndex`/`drawMarks`/
+  `renderChat`)**: the head's `C` section decodes into `data.comms`, which splits two
+  ways. MARKS (points, lines) draw in WORLD space on the overlay canvas — so a
+  freehand scribble comes back as the shape its author traced — for
+  `MARK_LIFETIME` = 60 game-seconds, matching BAR's own "Auto mapmark eraser" widget,
+  fading over the last 8. The engine itself never expires a mark (only an explicit
+  erase removes one), so the lifetime is a viewer choice; the ERASES are real and
+  resolved once at load (`buildCommIndex` walks each erase backwards over the marks
+  still inside the lifetime horizon and stamps `erasedAt` on those within 100 elmos of
+  it — the engine's `CInMapDrawModel::EraseNear` radius, mirrored as
+  `snapshot.CommEraseRadius`), which keeps drawing O(marks on screen) instead of
+  O(marks × erases) per animation tick. CHAT is a sidebar TRANSCRIPT, not a ticker:
+  every line is listed, lines past the playhead stay visible but dimmed, the box
+  auto-scrolls to follow playback, and clicking a line seeks to when it was said. The
+  panel hides itself when the capture recorded no chat — which is what every replay
+  published before the `C` section looks like.
 - **`internal/viz/icons.go`** renders **real BAR unit icons**. It embeds the vendored icon
   PNGs and BAR's `icontypes.lua` (a unit-name→bitmap gamedata table) under `bardata/`, and
   **parses the Lua data table directly in Go** (a small line/brace scanner, no `gopher-lua`)
