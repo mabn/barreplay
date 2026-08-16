@@ -207,7 +207,11 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           which the row would keep the marking of the one-sided upload it just
                           superseded. Everything else is HAND-SET via POST /api/replays/<id>/view
                           (open, like refresh-settings; body {view, ally}, validated by
-                          parseViewRequest) from the viewer header's POV dropdown, and setView
+                          parseViewRequest) from the viewer header's POV dropdown — which, also
+                          like refresh-settings, appears only under ?admin=true (app.js
+                          adminMode(), carried into the replay view by replayHref; it edits a row
+                          every visitor reads, so it is maintenance, not a viewing preference) —
+                          and setView
                           also re-stamps the current rid's uploads entry so the per-revision
                           history agrees. upsert COALESCEs it (`view = COALESCE(excluded.view,
                           view)`): a PUT that states a view wins (it describes the revision the

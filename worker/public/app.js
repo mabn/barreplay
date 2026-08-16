@@ -2407,11 +2407,14 @@ function viewLabel(view, ally) {
 
 // initViewMark fills the select from the replay's own ally teams and shows the
 // current marking. gameId is the BARE catalog id (rows are keyed by it, not by
-// the revisioned id the pieces are served under).
+// the revisioned id the pieces are served under). Admin-only (?admin=true),
+// like the list's settings-refresh button: it rewrites a row every viewer
+// shares, so it is maintenance, not a per-visitor viewing preference.
 async function initViewMark(gameId) {
   const box = document.getElementById('viewmark');
   const sel = document.getElementById('viewsel');
   const status = document.getElementById('viewstatus');
+  if (!adminMode()) { box.style.display = 'none'; return; }
   box.style.display = '';
   status.className = '';
   status.textContent = '';
@@ -2661,9 +2664,10 @@ function renderHome(errMsg) {
   msg.textContent = text;
 }
 
-// adminMode: ?admin=true unlocks the per-row maintenance controls (the
-// settings-refresh button). Purely a UI gate — the endpoints behind it are
-// their own authority.
+// adminMode: ?admin=true unlocks the maintenance controls — the list's
+// settings-refresh button and the viewer header's POV marking, both of which
+// edit a catalog row everyone else reads. Purely a UI gate — the endpoints
+// behind it are their own authority.
 function adminMode() {
   return new URLSearchParams(location.search).get('admin') === 'true';
 }
