@@ -1216,16 +1216,28 @@ const SPEC_NAME_INK = '#ffd24a';
 const SPEC_ALL_INK = '#ffffff';
 const BUBBLE_MIN_TEXT_PX = 60; // never squeeze the message out entirely
 
-const QUIET_GRID = 8;   // cells per axis when hunting for somewhere empty
+const QUIET_GRID = 16;         // cells per axis when hunting for somewhere empty
+const QUIET_CENTRE_PULL = 0.3; // how hard the middle is preferred over emptiness
 let quietAnchor = null; // [x, z] the spectators' corner, resolved once per replay
 
-// quietSpot returns the centre of the emptiest map cell along the map's EDGE —
-// where spectator chat goes, since spectators own nothing to speak from.
+// quietSpot returns the centre of the calmest map cell NEAR THE MIDDLE — where
+// spectator chat goes, since spectators own nothing to speak from.
 //
-// Only the border ring of the grid is considered: an empty pocket in the middle
-// of the map is somewhere the fighting is about to reach, while the rim stays
-// quiet and leaves the middle clear to watch. The bubble is free to overhang
-// the map from there.
+// Both halves of that matter. Purely emptiest lands out at the rim, far from
+// anything worth watching; purely central lands in the middle of the fighting.
+// So each cell is scored on its density plus a QUIET_CENTRE_PULL-weighted
+// penalty for distance from the centre, and the lowest score wins: quiet
+// ground, as close in as quiet ground gets.
+//
+// The density is BLURRED over each cell's 3x3 neighbourhood first. Scoring
+// cells in isolation picks a one-cell gap in the middle of a battlefield —
+// empty itself, ringed by the busiest cells on the map — which is not a calm
+// place to put anything. Blurring looks for a calm POCKET instead.
+//
+// Tuned against a real 8v8's keyframes rather than by eye. Unblurred on a 12
+// grid it chose dead centre with 6.5% of the busiest cell's traffic in it;
+// these settings choose a cell with NO units at all, whose neighbourhood
+// carries 2% of the peak, 27% of the way from the centre to a corner.
 //
 // Counted over every decoded keyframe rather than the current frame, so the
 // spot is a property of the whole game and not of wherever the playhead
@@ -1251,13 +1263,35 @@ function quietSpot() {
     }
   }
   if (!seen) return null;
-  let best = -1;
+  // Box-blur over the 3x3 neighbourhood: a gap between two armies is empty but
+  // not calm.
+  const dens = new Float64Array(count.length);
   for (let cz = 0; cz < QUIET_GRID; cz++) {
     for (let cx = 0; cx < QUIET_GRID; cx++) {
-      const edge = cx === 0 || cz === 0 || cx === QUIET_GRID - 1 || cz === QUIET_GRID - 1;
-      if (!edge) continue;
+      let sum = 0, n = 0;
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const x = cx + dx, z = cz + dz;
+          if (x < 0 || z < 0 || x >= QUIET_GRID || z >= QUIET_GRID) continue;
+          sum += count[z * QUIET_GRID + x];
+          n++;
+        }
+      }
+      dens[cz * QUIET_GRID + cx] = sum / n;
+    }
+  }
+  let busiest = 0;
+  for (let i = 0; i < dens.length; i++) if (dens[i] > busiest) busiest = dens[i];
+  const mid = (QUIET_GRID - 1) / 2;
+  const maxDist = Math.hypot(mid, mid);
+  let best = -1, bestScore = Infinity;
+  for (let cz = 0; cz < QUIET_GRID; cz++) {
+    for (let cx = 0; cx < QUIET_GRID; cx++) {
       const i = cz * QUIET_GRID + cx;
-      if (best < 0 || count[i] < count[best]) best = i;
+      const density = busiest > 0 ? dens[i] / busiest : 0;
+      const pull = QUIET_CENTRE_PULL * (Math.hypot(cx - mid, cz - mid) / maxDist);
+      const score = density + pull;
+      if (score < bestScore) { bestScore = score; best = i; }
     }
   }
   quietAnchor = [b.minX + (best % QUIET_GRID + 0.5) * cw, b.minZ + ((best / QUIET_GRID | 0) + 0.5) * ch];

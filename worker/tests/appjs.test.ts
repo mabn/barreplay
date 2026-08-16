@@ -479,9 +479,10 @@ test('spectator bubbles are formatted and coloured apart from players', () => {
   assert.equal(drawn(10).runs.length, 1, 'and back on again');
 });
 
-// The spectators' spot: the emptiest cell ALONG THE EDGE, counted over every
-// decoded keyframe, and resolved once so it never wanders.
-test('spectator chat anchors to a quiet cell on the map edge', () => {
+// The spectators' spot: quiet ground as close to the middle as quiet ground
+// gets. Both halves have to hold — the rim is too far from the action, and a
+// one-cell gap between two armies is empty without being calm.
+test('spectator chat anchors to a calm pocket near the middle', () => {
   const extract = (n: string) => {
     const start = APP.indexOf(`function ${n}(`);
     let depth = 0;
@@ -492,42 +493,54 @@ test('spectator chat anchors to a quiet cell on the map edge', () => {
     throw new Error('not found: ' + n);
   };
   const QUIET_GRID = Number(APP.match(/const QUIET_GRID = (\d+);/)![1]);
+  const QUIET_CENTRE_PULL = Number(APP.match(/const QUIET_CENTRE_PULL = ([\d.]+);/)![1]);
   const STRIDE = 11;
   const F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6, DVX: 7, DVZ: 8, BUILD: 9, TARGET: 10 };
-  const SIZE = 8000, CELL = SIZE / QUIET_GRID;
+  const SIZE = 8000, CELL = SIZE / QUIET_GRID, MID = (QUIET_GRID - 1) / 2;
   const data = { bounds: { minX: 0, maxX: SIZE, minZ: 0, maxZ: SIZE } };
   let keyFrames: any[] = [], quietAnchor: any = null;
 
   const api = eval(`(function(){
     ${extract('quietSpot')}
-    return { spot: quietSpot, setKeys: k => { keyFrames = k; quietAnchor = null; }, reset: () => { quietAnchor = null; } };
+    return { spot: quietSpot, setKeys: k => { keyFrames = k; quietAnchor = null; } };
   })()`);
 
   assert.equal(api.spot(), null, 'no keyframe decoded yet: retry later, do not guess');
 
-  // Fill every cell, leaving one MIDDLE cell and one EDGE cell empty. The edge
-  // one must win even though both are equally empty — and even though the
-  // middle one is emptier.
-  const cellCentre = (cx: number, cz: number) => [(cx + 0.5) * CELL, (cz + 0.5) * CELL];
+  // A busy map with three candidates: a calm 3x3 pocket off to one side of the
+  // middle, an equally calm pocket out at the rim, and a single empty cell dead
+  // centre ringed by the heaviest fighting on the map.
+  const POCKET = [10, 9], RIM = [1, 1], LONE_GAP = [8, 8];
+  const near = (c: number[], x: number, z: number) => Math.abs(x - c[0]) <= 1 && Math.abs(z - c[1]) <= 1;
   const units: number[] = [];
-  const emptyEdge = [0, 3], emptyMiddle = [3, 3];
   for (let cz = 0; cz < QUIET_GRID; cz++) {
     for (let cx = 0; cx < QUIET_GRID; cx++) {
-      if (cx === emptyMiddle[0] && cz === emptyMiddle[1]) continue;
-      const n = (cx === emptyEdge[0] && cz === emptyEdge[1]) ? 1 : 20; // edge cell: sparse but not empty
-      const [x, z] = cellCentre(cx, cz);
+      let n = 20;                                     // ordinary traffic
+      if (near(POCKET, cx, cz) || near(RIM, cx, cz)) n = 0;
+      else if (near(LONE_GAP, cx, cz)) n = 200;       // the ring around the gap
+      if (cx === LONE_GAP[0] && cz === LONE_GAP[1]) n = 0;
+      const x = (cx + 0.5) * CELL, z = (cz + 0.5) * CELL;
       for (let k = 0; k < n; k++) units.push(0, 0, 0, x, z, 0, 0, 0, 0, 0, 0);
     }
   }
-  api.setKeys([{ u: new Int32Array(units) }]);
-  const spot = api.spot();
-  assert.deepEqual(spot, cellCentre(emptyEdge[0], emptyEdge[1]),
-    'the quietest EDGE cell wins, not the emptier one in the middle');
+  const frame = { u: new Int32Array(units) };
+  api.setKeys([frame]);
+  const spot = api.spot()!;
+  const cx = Math.floor(spot[0] / CELL), cz = Math.floor(spot[1] / CELL);
 
-  // Resolved once: later keyframes must not move it.
-  api.setKeys([{ u: new Int32Array(units) }]);
-  api.spot();
-  const again = eval(`(function(){ ${extract('quietSpot')} return quietSpot; })()`);
-  assert.deepEqual(api.spot(), spot, 'the spot is stable for the replay');
-  assert.ok(typeof again === 'function');
+  // Count what is actually in and around the cell it chose.
+  const at = (x: number, z: number) => units.filter((_, i) =>
+    i % STRIDE === 0 && Math.floor(frame.u[i + F.X] / CELL) === x && Math.floor(frame.u[i + F.Z] / CELL) === z).length;
+  assert.equal(at(cx, cz), 0, 'the chosen cell holds no units');
+  assert.ok(near(POCKET, cx, cz), `expected the calm pocket near the middle, got cell ${cx},${cz}`);
+
+  const dist = (c: number[]) => Math.hypot(c[0] - MID, c[1] - MID);
+  assert.ok(dist([cx, cz]) < dist(RIM), 'closer to the middle than the rim pocket');
+  assert.ok(!(cx === LONE_GAP[0] && cz === LONE_GAP[1]),
+    'a one-cell gap ringed by fighting is empty but not calm, and must lose');
+  assert.ok(QUIET_CENTRE_PULL > 0, 'the middle has to be preferred at all');
+
+  // Resolved once: a later keyframe must not move it.
+  const again = api.spot();
+  assert.deepEqual(again, spot, 'the spot is stable for the replay');
 });
