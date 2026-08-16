@@ -414,15 +414,20 @@ func (d *daemon) auth(req *http.Request) {
 // under its content-addressed revision. Idempotent: the same stream re-lands
 // on the same keys and catalog row.
 func processStream(ctx context.Context, client *barapi.Client, streamPath, target, workerDir, indexURL string) error {
-	rev, err := packer.StreamRev(streamPath)
-	if err != nil {
-		return err
-	}
 	brpPath, modOptions, err := packer.Pack(ctx, client, streamPath, filepath.Dir(streamPath), "", false)
 	if errors.Is(err, packer.ErrDemoUnavailable) {
 		fmt.Fprintf(os.Stderr, "bringest: %v; publishing with the stream's own metadata\n", err)
 		brpPath, modOptions, err = packer.Pack(ctx, client, streamPath, filepath.Dir(streamPath), "", true)
 	}
+	if err != nil {
+		return err
+	}
+	// AFTER the pack, and from the packed file: the fallback just above is
+	// exactly the case a stream hash gets wrong. The same stream published once
+	// with the demo metadata and once without produces different .brp bytes,
+	// and hashing the stream gave both the same revision — so the second
+	// publish overwrote pieces already served as immutable.
+	rev, err := packer.ContentRev(brpPath)
 	if err != nil {
 		return err
 	}
@@ -539,7 +544,7 @@ func resimPublish(ctx context.Context, client *barapi.Client, gameID string, ro 
 	if err != nil {
 		return err
 	}
-	rev, err := packer.StreamRev(brpPath) // content hash of any file; here the .brp
+	rev, err := packer.ContentRev(brpPath) // content hash of any file; here the .brp
 	if err != nil {
 		return err
 	}

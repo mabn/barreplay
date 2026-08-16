@@ -113,7 +113,7 @@ test("upload archives the stream and records a pending job", async () => {
   assert.equal(res.status, 200);
   const body = await asJson(res);
   assert.equal(body.gameId, GAME_ID);
-  assert.match(body.streamKey, new RegExp(`^streams/${GAME_ID}/\\d+-a0\\.brepstream$`));
+  assert.match(body.streamKey, new RegExp(`^streams/${GAME_ID}/\\d+-[0-9a-f]{8}-a0\\.brepstream$`));
 
   const archived = bucket.objects.get(body.streamKey);
   assert.ok(archived, "raw stream archived");
@@ -392,4 +392,48 @@ test("GET /replays/<key> sets the same content-type and cache-control", async ()
   assert.equal(chunk.headers.get("content-type"), "application/octet-stream");
   // Never Content-Encoding: the viewer gunzips these itself.
   assert.equal(chunk.headers.get("content-encoding"), null);
+});
+
+// Two captures of the SAME game from the SAME side must not collide. gameId
+// and archiveSuffix are equal for both, and Date.now() in Workers is clamped
+// to the last I/O — it does not advance during a request — so the timestamp
+// alone does not separate them. Before the key carried a content hash the
+// second PUT overwrote the first, and both jobs pointed at one key holding
+// only one player's bytes.
+//
+// This is the real shape of it: two players on one ally team uploading the
+// same game, or one player uploading a half-game capture and later the full
+// one (a longer stream with an identical preamble).
+test("uploads of the same game from the same side get distinct keys", async () => {
+  const { env, bucket, index } = makeEnv();
+
+  const full = fixture();
+  const halfway = full.slice(0, Math.floor(full.length * 0.6)); // a shorter capture, same preamble
+
+  const a = await asJson(await app.request("/api/upload", { method: "POST", body: full }, env));
+  const b = await asJson(await app.request("/api/upload", { method: "POST", body: halfway }, env));
+
+  assert.equal(a.gameId, b.gameId, "same game");
+  assert.notEqual(a.streamKey, b.streamKey, "different bytes must not share a key");
+  assert.equal(bucket.objects.size, 2, "both uploads survive");
+  assert.deepEqual(bucket.objects.get(a.streamKey), full);
+  assert.deepEqual(bucket.objects.get(b.streamKey), halfway);
+
+  // Each upload gets its own job, pointing at its own bytes.
+  assert.notEqual(a.job, b.job);
+  assert.equal(index.jobs.get(a.job)!.streamKey, a.streamKey);
+  assert.equal(index.jobs.get(b.job)!.streamKey, b.streamKey);
+
+  // The hash is what actually separates them: the two keys differ in that
+  // component, not merely in their timestamps.
+  const hashOf = (key: string) => /-([0-9a-f]{8})-/.exec(key)![1];
+  assert.notEqual(hashOf(a.streamKey), hashOf(b.streamKey));
+
+  // Re-uploading identical bytes archives them again under a fresh timestamp
+  // rather than deduplicating — the key is timestamped first so the prefix
+  // still sorts oldest-first. Harmless: the hash component is unchanged, so
+  // nothing is ever overwritten and no capture is lost.
+  const again = await asJson(await app.request("/api/upload", { method: "POST", body: full }, env));
+  assert.equal(hashOf(again.streamKey), hashOf(a.streamKey), "same bytes, same hash component");
+  assert.deepEqual(bucket.objects.get(again.streamKey), full);
 });

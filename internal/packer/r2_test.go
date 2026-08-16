@@ -231,7 +231,7 @@ func TestUploadStaticNative(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rev, err := StreamRev(in)
+	rev, err := ContentRev(in)
 	if err != nil {
 		t.Fatal(err)
 	}

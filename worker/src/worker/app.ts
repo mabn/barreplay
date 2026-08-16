@@ -155,7 +155,26 @@ app.post("/api/upload", async (c) => {
   const p = scanStreamPreamble(body);
   if (typeof p === "string") return c.json({ error: p }, 400);
 
-  const streamKey = `streams/${p.gameId}/${Date.now()}-${archiveSuffix(p)}.brepstream`;
+  // The key carries a hash of the BYTES, because nothing else in it is unique.
+  // Two players on the same ally team uploading the same game — or one player
+  // uploading a half-game capture and then the full one — agree on gameId and
+  // on archiveSuffix, leaving only the timestamp to separate them. In Workers
+  // Date.now() is clamped to the time of the last I/O and does not advance
+  // during a request, so concurrent uploads genuinely collide: the second PUT
+  // overwrote the first, and both jobs then pointed at one key holding one
+  // player's bytes while the other's were silently gone.
+  //
+  // The timestamp stays first so the prefix still sorts oldest-first, which
+  // means this is NOT full content addressing: re-uploading identical bytes
+  // archives them again rather than deduplicating. That is the deliberate
+  // trade — the hash is here to guarantee distinctness, not to collapse
+  // duplicates, and a duplicate costs one object while a collision costs
+  // somebody's capture.
+  const digest = await crypto.subtle.digest("SHA-256", body as BufferSource);
+  const hash = [...new Uint8Array(digest).slice(0, 4)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  const streamKey = `streams/${p.gameId}/${Date.now()}-${hash}-${archiveSuffix(p)}.brepstream`;
   await c.env.BUCKET.put(streamKey, body);
 
   const job = crypto.randomUUID();
