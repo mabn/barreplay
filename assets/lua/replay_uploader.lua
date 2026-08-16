@@ -1042,6 +1042,14 @@ end
 -- "n" carries the speaker's name only when "p" is -1 (unresolvable); otherwise
 -- the roster in the preamble names them.
 --
+--
+-- NOTE: this is the FALLBACK source. Whenever a demo file is available the
+-- pipeline replaces these records with the demo's packet stream, which holds
+-- every side's chat on every channel and stamps each comm with the frame it
+-- truly landed on (internal/demofile/comms.go). What is recorded here is what
+-- a capture with no demo behind it still gets — and its frame stamps are
+-- approximate, because the engine flushes console lines from its unsynced
+-- update rather than when the chat arrives.
 -- DRAWINGS come from MapDrawCmd, which is structured — playerID and world
 -- coordinates, no parsing. The engine fires it only for marks this client may
 -- see (its own ally team's while playing, everyone's when spectating), so the
@@ -1115,7 +1123,10 @@ local chatChannels = {
 -- splitSpeaker returns name, body, fromLobby for a console line that looks like
 -- chat, or nil for anything else.
 local function splitSpeaker(line)
-	-- Some engine builds prefix console lines with the sim frame.
+	-- Defensive, and only that: the "[f=…]" prefix is added by the FILE and
+	-- CONSOLE log sinks (System/Log/FramePrefixer), while the sink feeding
+	-- AddConsoleLine gets DefaultFormatter's output, which has no frame in it.
+	-- Kept because BAR's own gui_chat strips it too and it costs one match.
 	line = string.match(line, "^%[f=[-%d]+%]%s(.*)$") or line
 	local lobby = false
 	if string.sub(line, 1, 2) == "> " then

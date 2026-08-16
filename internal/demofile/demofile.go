@@ -8,10 +8,12 @@
 //	[demo packet stream]                 the deterministic input log
 //	[player stats][team stats][winners]
 //
-// We only need the header (for engine version + gameID) and the startscript (a
-// TDF document describing map, game/mod, players and teams). We deliberately do
-// NOT parse the packet stream: unit positions are recovered by re-simulating the
-// replay in the engine, not by reading the demo.
+// We need the header (for engine version + gameID), the startscript (a TDF
+// document describing map, game/mod, players and teams), and — from the packet
+// stream — the chat and map drawings (see comms.go). Unit positions are
+// deliberately NOT read from the stream: they are recovered by re-simulating
+// the replay in the engine. Comms are the exception because the stream is the
+// only place they exist at all, and there they are complete and exactly framed.
 package demofile
 
 import (
@@ -21,6 +23,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+
+	"github.com/mabn/barreplay/snapshot"
 )
 
 const magicString = "spring demofile"
@@ -38,11 +42,16 @@ type Header struct {
 	GameTime       int32 // total game-time seconds
 }
 
-// Demo bundles the parsed header and startscript.
+// Demo bundles the parsed header and startscript, plus the player comms
+// recovered from the packet stream.
 type Demo struct {
 	Header      Header
 	ScriptRaw   string
 	Startscript *Startscript
+	// Comms is everything the players wrote and drew, in frame order — the
+	// authoritative record of it (see comms.go). Empty for a demo whose stream
+	// is absent or truncated, which is not an error.
+	Comms []snapshot.Comm
 }
 
 // rawHeader mirrors the on-disk packed layout for binary.Read. Field order and
@@ -128,5 +137,18 @@ func Parse(r io.Reader) (*Demo, error) {
 		return nil, fmt.Errorf("demofile: parse startscript: %w", err)
 	}
 
-	return &Demo{Header: h, ScriptRaw: scriptRaw, Startscript: ss}, nil
+	// The packet stream follows the script. Unit positions are NOT read from it
+	// (that is what the engine re-simulation is for), but chat and map drawings
+	// are only in here — and here they are complete and exactly framed, which
+	// no client-side capture can be. Bounded by the declared stream size when
+	// the header carries one; a demo cut short by a crash may not have had its
+	// header rewritten, in which case the scan runs to EOF and stops itself on
+	// the first chunk that does not parse.
+	var stream io.Reader = gz
+	if h.DemoStreamSize > 0 {
+		stream = io.LimitReader(gz, int64(h.DemoStreamSize))
+	}
+	comms := scanComms(stream)
+
+	return &Demo{Header: h, ScriptRaw: scriptRaw, Startscript: ss, Comms: comms}, nil
 }

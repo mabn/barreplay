@@ -87,38 +87,51 @@ func load(path string, base snapshot.Meta) (*loaded, error) {
 	return l, nil
 }
 
+// demoInfo is everything a pack takes from the demo file.
+type demoInfo struct {
+	Meta snapshot.Meta
+	// Comms is the demo's chat + map drawings, which SUPERSEDE the capture
+	// stream's own (see capture.ReplaceComms for why).
+	Comms []snapshot.Comm
+	// ModOptions is the raw [modoptions] map. Deliberately NOT part of
+	// snapshot.Meta (never persisted in the .brp) — its only consumer is the
+	// catalog PUT, which distills it into settings flags (viz.SettingsFlags).
+	ModOptions map[string]string
+}
+
 // demoMeta resolves id (a gameId or replay link) via the BAR API, downloads the
-// .sdfz demo to a temp dir, and parses its header + startscript into the base
-// capture metadata — the same seeding cmd/barreplay performs, minus the engine
-// run. The demo is only needed for its first few KB (header + startscript), but
-// the download is whole-file; a demo is a few MB, so this stays cheap.
-// The raw [modoptions] map is returned alongside: it is deliberately NOT part
-// of snapshot.Meta (never persisted in the .brp) — its only consumer is the
-// catalog PUT, which distills it into settings flags (viz.SettingsFlags).
-func demoMeta(ctx context.Context, client *barapi.Client, id string) (snapshot.Meta, map[string]string, error) {
+// .sdfz demo to a temp dir, and parses it into the base capture metadata — the
+// same seeding cmd/barreplay performs, minus the engine run — plus the chat and
+// drawings out of its packet stream. The download is whole-file; a demo is a
+// few MB, so this stays cheap.
+func demoMeta(ctx context.Context, client *barapi.Client, id string) (demoInfo, error) {
 	r, err := client.Resolve(ctx, id)
 	if err != nil {
-		return snapshot.Meta{}, nil, err
+		return demoInfo{}, err
 	}
 	tmp, err := os.MkdirTemp("", "pack-demo-")
 	if err != nil {
-		return snapshot.Meta{}, nil, err
+		return demoInfo{}, err
 	}
 	defer os.RemoveAll(tmp)
 	p, err := client.Download(ctx, r, tmp)
 	if err != nil {
-		return snapshot.Meta{}, nil, err
+		return demoInfo{}, err
 	}
 	f, err := os.Open(p)
 	if err != nil {
-		return snapshot.Meta{}, nil, err
+		return demoInfo{}, err
 	}
 	demo, err := demofile.Parse(f)
 	f.Close()
 	if err != nil {
-		return snapshot.Meta{}, nil, fmt.Errorf("parsing demo %s: %w", r.FileName, err)
+		return demoInfo{}, fmt.Errorf("parsing demo %s: %w", r.FileName, err)
 	}
-	return demofile.BaseMeta(demo), demo.Startscript.ModOptions, nil
+	return demoInfo{
+		Meta:       demofile.BaseMeta(demo),
+		Comms:      demo.Comms,
+		ModOptions: demo.Startscript.ModOptions,
+	}, nil
 }
 
 // inferSampleEvery returns the sampling interval implied by the frame stream:
@@ -143,24 +156,32 @@ func Pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 	gameID := strings.TrimSuffix(filepath.Base(in), filepath.Ext(in))
 	base := snapshot.Meta{GameID: gameID}
 	var modOptions map[string]string
+	var demoComms []snapshot.Comm
 	ext := strings.ToLower(filepath.Ext(in))
 	if (ext == ".brsnap" || ext == ".brepstream") && !noDemo {
 		id := idArg
 		if id == "" {
 			id = gameID
 		}
-		m, mo, err := demoMeta(ctx, client, id)
+		d, err := demoMeta(ctx, client, id)
 		if err != nil {
 			return "", nil, fmt.Errorf("fetching demo metadata for %q: %w: %v (pass -id <gameId|link> if the file name is not the gameId, or -no-demo to pack without map/version/player metadata)", id, ErrDemoUnavailable, err)
 		}
-		fmt.Fprintf(os.Stderr, "%s: demo metadata: map %q, game %q, engine %s, %d players\n",
-			in, m.MapName, m.GameVersion, m.EngineVersion, len(m.Players))
-		base = m
-		modOptions = mo
+		fmt.Fprintf(os.Stderr, "%s: demo metadata: map %q, game %q, engine %s, %d players, %d comms\n",
+			in, d.Meta.MapName, d.Meta.GameVersion, d.Meta.EngineVersion, len(d.Meta.Players), len(d.Comms))
+		base = d.Meta
+		modOptions = d.ModOptions
+		demoComms = d.Comms
 	}
 	l, err := load(in, base)
 	if err != nil {
 		return "", nil, err
+	}
+	// The demo's chat and drawings supersede the stream's: complete, and framed
+	// exactly (capture.ReplaceComms explains why). Only when it yielded some —
+	// an empty result cannot be told apart from a truncated packet stream.
+	if len(demoComms) > 0 {
+		l.comms = demoComms
 	}
 	if l.meta.GameID == "" {
 		l.meta.GameID = gameID

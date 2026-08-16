@@ -302,3 +302,45 @@ func TestSanitizeCommText(t *testing.T) {
 		}
 	}
 }
+
+// The demo is the authoritative source for comms, so when a caller has them
+// they replace whatever the capture stream recorded — but only when the demo
+// actually yielded some, since an empty result also means "truncated stream".
+func TestReplaceComms(t *testing.T) {
+	stream := strings.Join([]string{
+		"BRSNAP READY",
+		`BRSNAP COMM {"f":60,"k":"chat","p":0,"d":"all","t":"from the widget"}`,
+	}, "\n")
+	demo := []snapshot.Comm{
+		{Frame: 61, Kind: snapshot.CommChat, PlayerID: 1, Dest: snapshot.DestAlly, Text: "from the demo"},
+	}
+
+	t.Run("replaces", func(t *testing.T) {
+		w := &recordingWriter{}
+		// Consume never closes the writer; the caller does, and that is when the
+		// replacement comms are written.
+		rc := ReplaceComms(w, demo)
+		if err := Consume(strings.NewReader(stream), snapshot.Meta{}, rc); err != nil {
+			t.Fatal(err)
+		}
+		if err := rc.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if len(w.comms) != 1 || w.comms[0] != demo[0] {
+			t.Errorf("comms = %+v, want the demo's", w.comms)
+		}
+		if !w.closed {
+			t.Error("Close must reach the wrapped writer")
+		}
+	})
+
+	t.Run("empty keeps the stream's", func(t *testing.T) {
+		w := &recordingWriter{}
+		if err := Consume(strings.NewReader(stream), snapshot.Meta{}, ReplaceComms(w, nil)); err != nil {
+			t.Fatal(err)
+		}
+		if len(w.comms) != 1 || w.comms[0].Text != "from the widget" {
+			t.Errorf("comms = %+v, want the stream's", w.comms)
+		}
+	})
+}

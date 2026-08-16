@@ -337,6 +337,14 @@ end
 -- EVERY side's chat and drawings — unlike a live player's capture, which sees
 -- only what its own client was allowed to.
 --
+--
+-- NOTE: this is the FALLBACK source. Whenever a demo file is available the
+-- pipeline replaces these records with the demo's packet stream, which holds
+-- every side's chat on every channel and stamps each comm with the frame it
+-- truly landed on (internal/demofile/comms.go). What is recorded here is what
+-- a capture with no demo behind it still gets — and its frame stamps are
+-- approximate, because the engine flushes console lines from its unsynced
+-- update rather than when the chat arrives.
 -- DRAWINGS come from MapDrawCmd, which is structured (playerID + world
 -- coordinates). CHAT has none: BAR's widget handler does not forward
 -- GotChatMsg, so the only source is AddConsoleLine — the console's DISPLAY
@@ -414,6 +422,10 @@ local chatChannels = {
 -- splitSpeaker returns name, body, fromLobby for a console line that looks like
 -- chat, or nil for anything else.
 local function splitSpeaker(line)
+	-- Defensive, and only that: the "[f=…]" prefix is added by the FILE and
+	-- CONSOLE log sinks (System/Log/FramePrefixer), while the sink feeding
+	-- AddConsoleLine gets DefaultFormatter's output, which has no frame in it.
+	-- Kept because BAR's own gui_chat strips it too and it costs one match.
 	line = string.match(line, "^%[f=[-%d]+%]%s(.*)$") or line
 	local lobby = false
 	if string.sub(line, 1, 2) == "> " then
