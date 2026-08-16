@@ -388,7 +388,16 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           exactly what keeps the filter bar off there. The one Go-side piece the
                           filters DO depend on is catalogPlayersPerAlly, because BuildCatalogEntry is
                           what builds the roster the worker stores). The front-end landing page
-                          (no ?replay= in the URL) renders the catalog as the replay list, with
+                          (no ?replay= in the URL) is a LEFT MENU (app.js homeTab/applyHomeTab,
+                          #homenav) over two sections: "Replays" (the catalog list, the default)
+                          and "Queue" (the ingest jobs, below). Which one is shown lives in the
+                          URL as ?tab=, like the filters, so a pick is shareable and survives a
+                          refresh — but it PUSHES a history entry, because switching section is
+                          navigation, not a narrowing of what is listed; replayHref carries the
+                          param into a replay so back returns to the section it was opened from.
+                          The dropzone sits above both sections (a drop is accepted from either,
+                          and its progress line stays visible while the Queue is watched).
+                          "Replays" renders the catalog with
                           superseded revisions of cataloged games hidden (their
                           direct ?replay= links keep playing — nothing is deleted); picking a replay
                           sets ?replay=, the header title returns to the list. The list's Players
@@ -487,6 +496,21 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           downstream can recover it afterwards. typecheck is
                           deliberately NOT in the chain: it reports pre-existing noUnusedLocals
                           errors in tests/, so wiring it in would block every deploy.
+                          QUEUE SECTION (app.js renderQueue): the landing page's second menu entry
+                          shows those jobs — one row per upload with its game, state, age and
+                          failure detail, a link to the replay once the catalog has it, and a
+                          count of the jobs in flight on the menu entry itself. It reads GET
+                          /api/queue (ReplayIndex.jobsRecent: unfinished jobs first, then the
+                          most recently finished, capped at QUEUE_LIMIT), polling every 5 s while
+                          that section is on screen and never otherwise. The route is OPEN, like
+                          the per-job status the uploading browser already polls, but it omits
+                          the row's streamKey — the archive bytes are behind the bearer-guarded
+                          /api/streams route and the view has no use for the key. It is distinct
+                          from the daemon's GET /api/jobs, which is a WORK QUEUE (guarded, and
+                          it deliberately hides a healthy "processing" job — precisely the row a
+                          person watching wants to see). The Go viz server has no ingest pipeline
+                          and 404s the route; the section then says so rather than showing an
+                          empty table that would read as "nothing is queued", and stops polling.
                           Uploads (tools/upload.ts) go
                           through tools/r2put.ts: parallel S3 PUTs when R2_ACCESS_KEY_ID/
                           R2_SECRET_ACCESS_KEY are set (fast, aws4fetch), else parallel `wrangler r2

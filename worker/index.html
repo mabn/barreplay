@@ -34,47 +34,73 @@
   </div>
 </header>
 
-<!-- Landing view: the replay list (shown when no ?replay= is selected). -->
+<!-- Landing view: the left menu and the section it selects (shown when no
+     ?replay= is selected). The selected section lives in the URL as ?tab=,
+     so a menu pick is shareable and survives a refresh. -->
 <div id="home" style="display:none">
-  <!-- Drag&drop publishing: a .brepstream (the Replay uploader widget's
-       capture) POSTs to /api/upload; the worker archives it and the ingest
-       daemon publishes it. Hidden with a note on hosts without the API. -->
-  <div id="dropzone">
-    <!-- The setup link is RELATIVE: it resolves to /setup on the deployed
-         worker (https://replay.fogofwar.dev/setup) and to the same page on the
-         Go viz server, which serves it from the same embedded file. -->
-    <span id="droplabel">Drop a <code>.brepstream</code> capture here to publish it —
-      or <label class="browse">browse<input type="file" id="dropfile" accept=".brepstream" hidden></label>.
-      Want to record your games? <a href="/setup">Click here!</a></span>
-    <div id="dropstatus" style="display:none"></div>
+  <nav id="homenav">
+    <button type="button" class="navitem" data-tab="replays">Replays</button>
+    <button type="button" class="navitem" data-tab="queue">Queue<span class="badge" id="navqueue"></span></button>
+  </nav>
+  <div id="homemain">
+    <!-- Drag&drop publishing: a .brepstream (the Replay uploader widget's
+         capture) POSTs to /api/upload; the worker archives it and the ingest
+         daemon publishes it. Hidden with a note on hosts without the API.
+         Outside the sections: a drop is accepted from either of them, and its
+         progress line stays put while the Queue section is watched. -->
+    <div id="dropzone">
+      <!-- The setup link is RELATIVE: it resolves to /setup on the deployed
+           worker (https://replay.fogofwar.dev/setup) and to the same page on the
+           Go viz server, which serves it from the same embedded file. -->
+      <span id="droplabel">Drop a <code>.brepstream</code> capture here to publish it —
+        or <label class="browse">browse<input type="file" id="dropfile" accept=".brepstream" hidden></label>.
+        Want to record your games? <a href="/setup">Click here!</a></span>
+      <div id="dropstatus" style="display:none"></div>
+    </div>
+
+    <section id="tab-replays">
+      <!-- Catalog filters. Hidden unless the backend answers GET
+           /api/replays/facets: filtering is a SQL feature of the Worker's catalog,
+           and the Go viz server (which serves the same list from local files)
+           has none, so the bar appears only where it works. -->
+      <div id="filters" style="display:none">
+        <label>From <input type="date" id="f_from"></label>
+        <label>To <input type="date" id="f_to"></label>
+        <label>Map <select id="f_map"></select></label>
+        <label>Players <select id="f_size"></select></label>
+        <label>Player <input type="search" id="f_player" list="f_players" placeholder="name" autocomplete="off"></label>
+        <datalist id="f_players"></datalist>
+        <span id="f_settings" class="chips"></span>
+        <button type="button" id="f_clear" title="Clear all filters">Clear</button>
+        <!-- Admin-only, and deliberately a BUTTON: listing unregistered uploads
+             means scanning the whole bucket (~1.5 s), which is not something to
+             spend on every page load just because ?admin=true is set. -->
+        <button type="button" id="f_orphans" class="admin"
+                title="Scan the bucket for uploads that were never registered in the catalog (slow: reads every object)">Unregistered</button>
+        <span id="f_count" class="hint"></span>
+      </div>
+      <table id="hometable">
+        <thead>
+          <tr><th>Started</th><th>Duration</th><th>Map</th><th>Size</th><th>Players</th><th>Links</th><th>Settings</th><th class="num data">Data</th><th class="admin"></th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id="homemsg" class="hint" style="display:none"></div>
+    </section>
+
+    <!-- Ingest queue: every uploaded stream still waiting for (or being
+         published by) the ingest daemon, plus the recently finished ones.
+         Read from GET /api/queue, which only the Worker backend implements. -->
+    <section id="tab-queue" style="display:none">
+      <table id="queuetable">
+        <thead>
+          <tr><th>Uploaded</th><th>Game</th><th>State</th><th>Updated</th><th>Detail</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id="queuemsg" class="hint" style="display:none"></div>
+    </section>
   </div>
-  <!-- Catalog filters. Hidden unless the backend answers GET
-       /api/replays/facets: filtering is a SQL feature of the Worker's catalog,
-       and the Go viz server (which serves the same list from local files)
-       has none, so the bar appears only where it works. -->
-  <div id="filters" style="display:none">
-    <label>From <input type="date" id="f_from"></label>
-    <label>To <input type="date" id="f_to"></label>
-    <label>Map <select id="f_map"></select></label>
-    <label>Players <select id="f_size"></select></label>
-    <label>Player <input type="search" id="f_player" list="f_players" placeholder="name" autocomplete="off"></label>
-    <datalist id="f_players"></datalist>
-    <span id="f_settings" class="chips"></span>
-    <button type="button" id="f_clear" title="Clear all filters">Clear</button>
-    <!-- Admin-only, and deliberately a BUTTON: listing unregistered uploads
-         means scanning the whole bucket (~1.5 s), which is not something to
-         spend on every page load just because ?admin=true is set. -->
-    <button type="button" id="f_orphans" class="admin"
-            title="Scan the bucket for uploads that were never registered in the catalog (slow: reads every object)">Unregistered</button>
-    <span id="f_count" class="hint"></span>
-  </div>
-  <table id="hometable">
-    <thead>
-      <tr><th>Started</th><th>Duration</th><th>Map</th><th>Size</th><th>Players</th><th>Links</th><th>Settings</th><th class="num data">Data</th><th class="admin"></th></tr>
-    </thead>
-    <tbody></tbody>
-  </table>
-  <div id="homemsg" class="hint" style="display:none"></div>
 </div>
 
 <div id="wrap">

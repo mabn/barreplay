@@ -52,6 +52,10 @@ class FakeIndex {
   jobsPending(): IngestJob[] {
     return [...this.jobs.values()].filter((j) => j.state === "pending");
   }
+  jobsRecent(limit: number): IngestJob[] {
+    const rank = (j: IngestJob) => (j.state === "pending" || j.state === "processing" ? 0 : 1);
+    return [...this.jobs.values()].sort((a, b) => rank(a) - rank(b)).slice(0, limit);
+  }
   jobUpdate(id: string, state: "processing" | "done" | "error", error: string | null): boolean {
     const j = this.jobs.get(id);
     if (!j) return false;
@@ -214,6 +218,32 @@ test("daemon queue and transitions are bearer-guarded when a token is set", asyn
     env,
   );
   assert.equal(unknown.status, 404);
+});
+
+// The landing page's Queue section: open (it reports on public replays), and
+// it must not hand out the archive key — those bytes are behind the guarded
+// /api/streams route.
+test("GET /api/queue lists jobs for the viewer without the archive key", async () => {
+  const { env } = makeEnv("s3cret");
+  const up = await app.request("/api/upload", { method: "POST", body: fixture() }, env);
+  const { job, streamKey } = await asJson(up);
+
+  const res = await app.request("/api/queue", {}, env);
+  assert.equal(res.status, 200, "open even though a token is configured");
+  const list = await asJson(res);
+  assert.deepEqual(list, [
+    { id: job, gameId: GAME_ID, state: "pending", error: null, createdUnix: 0, updatedUnix: 0 },
+  ]);
+  assert.ok(!JSON.stringify(list).includes(streamKey), "archive key stays out of the reply");
+
+  await app.request(
+    `/api/jobs/${job}`,
+    { method: "POST", headers: { authorization: "Bearer s3cret" }, body: JSON.stringify({ state: "error", error: "demo not found" }) },
+    env,
+  );
+  const after = await asJson(await app.request("/api/queue", {}, env));
+  assert.equal(after[0].state, "error");
+  assert.equal(after[0].error, "demo not found");
 });
 
 test("the daemon can download the archived stream, guarded", async () => {
