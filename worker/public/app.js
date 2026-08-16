@@ -553,13 +553,16 @@ let playLastTs = 0;        // timestamp of the previous animation tick
 let playPos = 0;           // continuous playhead in keyframe units (idx = floor)
 let renderFrac = 0;        // sub-frame fraction [0,1) within the current interval
 let secPerFrame = 1;       // game seconds per keyframe interval (sampleEvery/30)
-let showIcons = true;      // draw BAR unit icons (vs plain dots)
-let showTexture = true;    // draw the map terrain texture behind everything
-let showGrid = false;      // draw the build/small/large grid
-let showFootprints = false;// draw build-footprint rectangles for buildings
-let showBuildLines = true; // connect builders to their construction targets
-let growIcons = true;      // grow a building's icon toward its footprint when zoomed in
-let autoTeamColors = false; // true: distinct auto colours per team; false: the real in-game team colours from the replay
+// What the renderer draws. These were checkboxes above the canvas; the viewer
+// now just draws the settings that were right anyway, so they are fixed here —
+// the draw paths still read them, and flipping one is an edit, not a UI state.
+const showIcons = true;      // draw BAR unit icons (vs plain dots)
+const showTexture = true;    // draw the map terrain texture behind everything
+const showGrid = false;      // draw the build/small/large grid
+const showFootprints = false;// draw build-footprint rectangles for buildings
+const showBuildLines = true; // connect builders to their construction targets
+const growIcons = true;      // grow a building's icon toward its footprint when zoomed in
+const autoTeamColors = false; // true: distinct auto colours per team; false: the real in-game team colours from the replay
 let mapW = 0, mapH = 0;    // map world extent in elmos (0 if unknown)
 let mapTex = null;         // HTMLImageElement of the terrain texture, or null
 // Viewport in CSS pixels + the device-pixel ratio. The canvas backing store is
@@ -572,10 +575,10 @@ let viewW = 0, viewH = 0, DPR = 1;
 // multiplier (from icontypes.lua: ~0.8 for a mex, ~1.8 for a commander), clamped
 // to [ICON_MIN_PX, ICON_MAX_PX]. Because the size is fixed in pixels, icons
 // naturally spread apart when you zoom in and overlap when you zoom out.
-// iconScale is the base px-per-size-unit, adjustable via the UI slider (and the
-// ?iconsize= URL param).
-let iconScale = 12;
-const ICON_SCALE_MIN = 4, ICON_SCALE_MAX = 60;
+// iconScale is the base px-per-size-unit — fixed, like the draw toggles above:
+// it used to be a slider persisted as ?iconsize=, and 12 is the default that
+// setting always came back to.
+const iconScale = 12;
 const ICON_MIN_PX = 3;
 const ICON_MAX_PX = 200;
 
@@ -2181,23 +2184,6 @@ document.getElementById('last').onclick = () => { stopPlay(); go(data.frameCount
 document.getElementById('play').onclick = togglePlay;
 // Speed is read live inside the play loop, so a change takes effect immediately.
 document.getElementById('speed').onchange = () => {};
-document.getElementById('icons').onchange = e => { showIcons = e.target.checked; draw(); };
-document.getElementById('grid').onchange = e => { showGrid = e.target.checked; draw(); };
-document.getElementById('footprints').onchange = e => { showFootprints = e.target.checked; draw(); };
-document.getElementById('buildlines').onchange = e => { showBuildLines = e.target.checked; draw(); };
-document.getElementById('teamcolors').onchange = e => {
-  autoTeamColors = e.target.checked;
-  if (!data) return;
-  // Icon tint/render caches key on the colour string, so a colour change just
-  // produces fresh entries — no need to clear them.
-  applyTeamColors();
-  renderPlayers(); draw();
-};
-document.getElementById('iconsize').oninput = e => {
-  iconScale = +e.target.value;
-  setParam('iconsize', iconScale);
-  draw();
-};
 document.getElementById('slider').oninput = e => { stopPlay(); go(+e.target.value); };
 window.addEventListener('keydown', e => {
   if (e.target.tagName === 'SELECT') return;
@@ -2731,8 +2717,8 @@ function adminMode() {
   return new URLSearchParams(location.search).get('admin') === 'true';
 }
 
-// replayHref is the shareable URL for one replay: the current URL (so viewer
-// settings like ?iconsize= carry over) with ?replay= set.
+// replayHref is the shareable URL for one replay: the current URL (so params
+// like ?admin= and ?gl= carry over) with ?replay= set.
 function replayHref(id) {
   const u = new URL(location.href);
   u.searchParams.set('replay', id);
@@ -2918,11 +2904,7 @@ function openReplay(id) {
 async function init() {
   initGL(); // one-time; a null result just means the 2D icon path is used
   initUpload(); // wired before the list fetch so the dropzone works regardless
-  // Restore icon size from the URL (?iconsize=) before the first paint.
   const params = new URLSearchParams(location.search);
-  const isz = parseInt(params.get('iconsize'), 10);
-  if (isz >= ICON_SCALE_MIN && isz <= ICON_SCALE_MAX) iconScale = isz;
-  document.getElementById('iconsize').value = iconScale;
 
   // Optional render-smoothness overlay, gated on ?debug=true.
   if (params.get('debug') === 'true') startFpsMonitor();
@@ -2952,14 +2934,6 @@ async function init() {
   } else {
     showHome();
   }
-}
-
-// Persist a viewer setting in the URL without adding history entries, so a page
-// refresh (or a shared link) restores it.
-function setParam(key, val) {
-  const u = new URL(location.href);
-  u.searchParams.set(key, val);
-  history.replaceState(null, '', u);
 }
 
 // Support browser back/forward and manual URL edits: no ?replay= means the
