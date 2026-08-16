@@ -1112,7 +1112,7 @@ let chatStick = true;       // follow the playhead (false once scrolled away)
 // player says, once the stack has cleared, is placed wherever they are then.
 
 const BUBBLE_LIFETIME = 9;  // game-seconds a bubble hovers, at 1x playback
-const BUBBLE_FADE = 3;      // game-seconds of fade-out at the end of that
+const BUBBLE_FADE = 2;      // game-seconds of fade-out at the end of that
 const BUBBLE_STACK = 3;     // most recent messages shown per speaker
 const BUBBLE_MAX_PX = 240;  // bubble width cap; longer text is ellipsized
 const BUBBLE_PAD = 5;
@@ -1125,6 +1125,12 @@ const BUBBLE_LINE = 16;     // px between stacked bubbles
 // past that the bubbles linger long enough to bury the battle they are about.
 // Only while PLAYING: paused, the playhead does not move and a bubble never
 // expires anyway, and scrubbing is at the reader's own pace.
+//
+// The factor is applied ONCE, when a bubble appears, and its expiry frozen in
+// bubbleExpiry. Re-deriving the window from the current speed every frame
+// measures it backwards from NOW, so changing speed mid-playback resurrects
+// old messages (window widens) or kills live ones (window narrows) — bubbles
+// visibly popping in and out for no reason but the speed control.
 const BUBBLE_SPEED_CAP = 16;
 
 function bubbleSpeedFactor() {
@@ -1141,6 +1147,7 @@ function bubbleSpeedFactor() {
 const COMMANDER_RE = /^(arm|cor|leg)com/;
 let defIsCom = new Map();     // def id -> is it a player's commander
 let bubbleAnchor = new Map(); // playerID -> [x, z, team] held while they are on screen
+let bubbleExpiry = new Map(); // chat index -> [expireFrame, fadeFrames], frozen when it appears
 
 function buildCommanderDefs() {
   defIsCom = new Map();
@@ -1179,17 +1186,35 @@ function roundRectPath(c, x, y, w, h, r) {
 function drawChatBubbles(f, u) {
   if (!chatLines.length || !u) return;
   const scaleT = bubbleSpeedFactor();
-  const window = BUBBLE_LIFETIME * 30 * scaleT, fade = BUBBLE_FADE * 30 * scaleT;
+  // Scan against the WIDEST window any bubble could have been given, then let
+  // each one's own frozen expiry decide — the speed in force now must not
+  // reach back and re-time bubbles that are already up.
+  const start = firstChatAt(f - BUBBLE_LIFETIME * 30 * BUBBLE_SPEED_CAP);
+  for (const i of bubbleExpiry.keys()) {
+    // Forget anything past the widest window, or that the playhead has scrubbed
+    // back before, so a rewatch is timed at whatever speed it is rewatched.
+    if (i < start || chatLines[i].f > f) bubbleExpiry.delete(i);
+  }
 
   // Live messages, grouped by speaker and oldest first.
   const byPlayer = new Map(); // playerID -> [{c, alpha}]
-  for (let i = firstChatAt(f - window); i < chatLines.length; i++) {
+  for (let i = start; i < chatLines.length; i++) {
     const c = chatLines[i];
     if (c.f > f) break;
-    const left = c.f + window - f;
+    let t = bubbleExpiry.get(i);
+    if (t === undefined) {
+      // Freeze the timing the moment the bubble appears, at the speed then in
+      // force. Reaching for the speed on every frame instead is what made a
+      // mid-playback speed change pop bubbles in and out: the window it
+      // multiplies is measured backwards from NOW, so widening it resurrects
+      // old messages and narrowing it kills live ones.
+      t = [c.f + BUBBLE_LIFETIME * 30 * scaleT, BUBBLE_FADE * 30 * scaleT];
+      bubbleExpiry.set(i, t);
+    }
+    const left = t[0] - f;
     if (left <= 0) continue; // fully faded: don't let it hold a stack slot
     const list = byPlayer.get(c.p) || [];
-    list.push({ c, alpha: left < fade ? left / fade : 1 });
+    list.push({ c, alpha: left < t[1] ? left / t[1] : 1 });
     byPlayer.set(c.p, list);
   }
   // A speaker whose stack has cleared releases their anchor, so their next
@@ -1597,7 +1622,11 @@ function drawOverlay(u) {
   // fade out and get erased), so they repaint with the build lines rather than
   // with the cached base layer. They exist independently of the frame data, so
   // they draw even while a chunk is still streaming in.
-  const simFrame = frameNumAt(idx);
+  // Fractional: renderFrac is the sub-sample position the units are already
+  // interpolated to. Passing the integer sample frame made every fade step
+  // once per SECOND of game time (the sampling rate) instead of per rendered
+  // frame, which at 1x is a visible stutter rather than a fade.
+  const simFrame = frameNumAt(idx) + renderFrac * (data.sampleEvery || 30);
   if (marks.length) drawMarks(simFrame);
   if (!u) return;
 
@@ -2752,6 +2781,7 @@ async function loadReplay(file) {
   chatLines = [];
   chatBuilt = false;
   bubbleAnchor = new Map();
+  bubbleExpiry = new Map();
   flashSeenIdx = -1;
   currentFile = file;
   try {

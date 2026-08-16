@@ -176,3 +176,80 @@ test('chat log shows only sent lines and sticks to the bottom', () => {
   assert.equal(api.shown(), 4, 'scrubbing back re-hides later lines');
   assert.ok(CHAT_STICK_SLACK >= 0);
 });
+
+// Chat bubbles: the timing rules, which took three passes to get right and are
+// invisible to every other check. Lifted out and run against a recording
+// context stub, since app.js has no module system.
+test('chat bubbles fade smoothly and are not re-timed by a speed change', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('not found: ' + n);
+  };
+  const consts = APP.match(/^const BUBBLE_[A-Z_]+ = .*$/gm)!.join('\n');
+
+  const calls: any[] = [];
+  const octx: any = new Proxy({}, {
+    get: (_t, k) => k === 'measureText' ? ((s: string) => ({ width: s.length * 6 })) : ((...a: any[]) => calls.push([k, ...a])),
+    set: (_t, k, v) => { calls.push(['set:' + String(k), v]); return true; },
+  });
+  const STRIDE = 11, F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6, DVX: 7, DVZ: 8, BUILD: 9, TARGET: 10 };
+  const viewW = 800, viewH = 600, scale = 0.1, center = { x: 0, z: 0 };
+  const teamColor: any = { 0: '#ff2020' };
+  const commTeamOf = new Map([[1, 0]]);
+  const defIsCom = new Map([[58, true]]);
+  const interpPos = (u: any, i: number) => [u[i + F.X], u[i + F.Z]];
+  const cssToTint = () => [1, 0.125, 0.125];
+  let chatLines: any[] = [], bubbleAnchor = new Map(), bubbleExpiry = new Map();
+  let playRAF: any = 1, speedValue = 1;
+  const document = { getElementById: () => ({ value: String(speedValue) }) };
+
+  const api = eval(`(function(){
+    ${consts}
+    ${extract('bubbleSpeedFactor')}
+    ${extract('firstChatAt')}
+    ${extract('textColorOn')}
+    ${extract('roundRectPath')}
+    ${extract('drawChatBubbles')}
+    return { draw: drawChatBubbles, setChat: c => { chatLines = c; }, setSpeed: v => { speedValue = v; } };
+  })()`);
+
+  const u = new Int32Array([100, 58, 0, 1000, 2000, 9, 9, 0, 0, 255, 0]);
+  const alphasAt = (f: number) => {
+    calls.length = 0;
+    api.draw(f, u);
+    const texts = calls.filter(c => c[0] === 'fillText').length;
+    const a = calls.filter(c => c[0] === 'set:globalAlpha').map(c => c[1]);
+    return { texts, alpha: a.length ? a[0] : null };
+  };
+
+  // FRACTIONAL frames must move the alpha. Passing whole sample frames is what
+  // made the fade step once per game-second instead of animating.
+  api.setChat([{ f: 0, p: 1, t: 'x', d: 'all' }]);
+  bubbleExpiry.clear(); bubbleAnchor.clear();
+  const lifetime = Number(APP.match(/const BUBBLE_LIFETIME = (\d+);/)![1]) * 30;
+  const fade = Number(APP.match(/const BUBBLE_FADE = (\d+);/)![1]) * 30;
+  const mid = lifetime - fade / 2;                 // halfway through the fade
+  const a1 = alphasAt(mid).alpha, a2 = alphasAt(mid + 7.5).alpha;
+  assert.ok(a1! > a2!, 'alpha must decrease within a single sample interval');
+  assert.ok(a1! < 1 && a2! > 0, `mid-fade alphas should be strictly between 0 and 1, got ${a1} and ${a2}`);
+  assert.equal(alphasAt(lifetime - 0.001).texts, 1, 'still up just before expiry');
+  assert.equal(alphasAt(lifetime).texts, 0, 'gone at expiry');
+
+  // A SPEED CHANGE must not re-time a bubble already on screen.
+  bubbleExpiry.clear(); bubbleAnchor.clear();
+  api.setSpeed(1);
+  assert.equal(alphasAt(10).texts, 1, 'bubble is up at 1x');
+  api.setSpeed(16);                                  // user hits 16x mid-playback
+  assert.equal(alphasAt(lifetime + 60).texts, 0, 'speeding up must not resurrect it');
+  // ...and the reverse: a bubble born at 16x keeps its long life when slowed.
+  bubbleExpiry.clear(); bubbleAnchor.clear();
+  api.setChat([{ f: 1000, p: 1, t: 'x', d: 'all' }]);
+  assert.equal(alphasAt(1010).texts, 1, 'born at 16x');
+  api.setSpeed(1);
+  assert.equal(alphasAt(1000 + lifetime + 60).texts, 1, 'slowing down must not cut it short');
+});
