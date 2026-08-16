@@ -130,25 +130,22 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/style.css", serveAsset("public/style.css", cssType))
 	mux.HandleFunc("/app."+string(rev)+".js", serveAsset("public/app.js", jsType))
 	mux.HandleFunc("/style."+string(rev)+".css", serveAsset("public/style.css", cssType))
-	// The favicon. /favicon.ico is the one a browser requests on its own with
-	// no markup telling it to, which is why these three keep fixed names while
-	// the SPA's other subresources are fingerprinted.
-	favicon := func(name, ctype string) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			b, err := webassets.Assets.ReadFile(name)
-			if err != nil {
-				http.NotFound(w, r)
-				return
-			}
-			// A day: the name cannot carry a content hash, so this is the lag
-			// between changing the icon and a browser noticing.
-			w.Header().Set("Cache-Control", "public, max-age=86400")
-			w.Header().Set("Content-Type", ctype)
-			w.Write(b)
+	// The tab icon. index.html points at the SVG; /favicon.ico is what a
+	// browser asks for on its own when it does not take one, and there is no
+	// .ico to give it — answer it so it is not a 404 in the logs.
+	mux.HandleFunc("/favicon.svg", func(w http.ResponseWriter, r *http.Request) {
+		b, err := webassets.Assets.ReadFile("public/favicon.svg")
+		if err != nil {
+			http.NotFound(w, r)
+			return
 		}
-	}
-	mux.HandleFunc("/favicon.ico", favicon("public/favicon.ico", "image/x-icon"))
-	mux.HandleFunc("/favicon.png", favicon("public/favicon.png", "image/png"))
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Write(b)
+	})
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 	// Vendored BAR unit icons, served at /icons/<file> to match the bitmap paths
 	// in the wire payload. Icons are immutable, so let the browser cache them.
 	if sub, err := iconsSubFS(); err == nil {

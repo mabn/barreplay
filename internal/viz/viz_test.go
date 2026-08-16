@@ -3,7 +3,6 @@ package viz
 import (
 	"bytes"
 	"compress/gzip"
-	"encoding/binary"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -15,7 +14,6 @@ import (
 	"testing"
 
 	"github.com/mabn/barreplay/snapshot"
-	webassets "github.com/mabn/barreplay/worker"
 )
 
 // parseWire splits a BRW payload into tag->payload and decodes the head.
@@ -715,58 +713,37 @@ func TestFingerprintedAssets(t *testing.T) {
 	}
 }
 
-// TestFavicon covers the two fixed-name icon routes. /favicon.ico matters
-// most: browsers request it with no markup pointing at it, and on the Worker
-// that request previously fell into the SPA fallback and came back as
-// index.html — a 3.7 kB HTML document served as the tab icon.
+// TestFavicon guards the tab icon's plumbing: the embed pattern in
+// worker/assets.go and the route that serves it. A missing embed is the easy
+// mistake here and shows up only as a 404 in a browser tab nobody is watching.
 func TestFavicon(t *testing.T) {
 	srv := httptest.NewServer((&Server{Dir: t.TempDir()}).Handler())
 	defer srv.Close()
 
-	for _, tc := range []struct{ path, ctype, magic string }{
-		{"/favicon.ico", "image/x-icon", "\x00\x00\x01\x00"}, // ICONDIR
-		{"/favicon.png", "image/png", "\x89PNG"},
-	} {
-		resp, err := http.Get(srv.URL + tc.path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		b, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != 200 {
-			t.Errorf("GET %s: status %d", tc.path, resp.StatusCode)
-			continue
-		}
-		if got := resp.Header.Get("Content-Type"); got != tc.ctype {
-			t.Errorf("GET %s: content-type = %q, want %q", tc.path, got, tc.ctype)
-		}
-		if !strings.HasPrefix(string(b), tc.magic) {
-			t.Errorf("GET %s: body is not %s (starts %q)", tc.path, tc.ctype, string(b[:min(8, len(b))]))
-		}
-	}
-
-	// One 32x32 entry, declared as such in the ICONDIR: a browser scales that
-	// down for the 16px it draws in a tab, which beats shipping a second image
-	// that could disagree with this one.
-	ico, err := webassets.Assets.ReadFile("public/favicon.ico")
+	resp, err := http.Get(srv.URL + "/favicon.svg")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := binary.LittleEndian.Uint16(ico[4:6]); n != 1 {
-		t.Errorf("favicon.ico holds %d images, want 1", n)
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET /favicon.svg: status %d", resp.StatusCode)
 	}
-	if ico[6] != 32 || ico[7] != 32 {
-		t.Errorf("favicon.ico entry is %dx%d, want 32x32", ico[6], ico[7])
+	if got := resp.Header.Get("Content-Type"); got != "image/svg+xml" {
+		t.Errorf("content-type = %q, want image/svg+xml", got)
+	}
+	if !strings.HasPrefix(string(b), "<svg") {
+		t.Errorf("body is not an SVG (starts %q)", string(b[:min(8, len(b))]))
 	}
 
-	// The entry must actually point at them, or only the implicit /favicon.ico
-	// is ever used and the PNG ships dead.
-	resp, _ := http.Get(srv.URL + "/")
-	html, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	for _, want := range []string{`href="/favicon.ico"`, `href="/favicon.png"`} {
-		if !strings.Contains(string(html), want) {
-			t.Errorf("index.html does not reference %s", want)
-		}
+	// index.html must actually reference it, or the file ships dead.
+	page, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html, _ := io.ReadAll(page.Body)
+	page.Body.Close()
+	if !strings.Contains(string(html), `href="/favicon.svg"`) {
+		t.Error("index.html does not reference /favicon.svg")
 	}
 }
