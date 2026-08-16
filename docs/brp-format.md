@@ -108,7 +108,7 @@ offset  size  value
 - Readers MUST skip sections with unknown tags (that is the format's
   forward-compatibility mechanism: new sections can be added without a version
   bump).
-- The writer emits sections in the order `M K F X E`; readers MUST NOT rely
+- The writer emits sections in the order `M K F X E C`; readers MUST NOT rely
   on order.
 
 ### Section tags
@@ -119,7 +119,8 @@ offset  size  value
 | `K` (0x4B) | keyframes | **one gzip stream**: every chunk's core keyframe, concatenated in chunk order | the keys-first download; also the prediction base every chunk's deltas decode from |
 | `F` (0x46) | frames | concatenated **chunks** (§5): each chunk's DELTA frames as one gzip stream | core per-unit columns — everything the viewer renders |
 | `X` (0x58) | extra | concatenated chunks, same frame boundaries as `F` (keyframe gzip + delta gzip per chunk) | extras: team economy |
-| `E` (0x45) | events | one gzip stream (§7) | unit lifecycle events |
+| `E` (0x45) | events | one gzip stream (§9) | unit lifecycle events |
+| `C` (0x43) | comms | one gzip stream (§9.1) | player chat + map drawings; **omitted entirely** when the capture recorded none |
 | `J` (0x4A) | head | one gzip stream of JSON | **not used in files** — reserved for the viz wire container (§10) |
 
 ## 4. `M` — the meta section
@@ -489,6 +490,60 @@ kinds can appear without a format change. Events are stored in capture order
 (non-decreasing frame), but the frame column is zigzag-coded so a
 non-monotonic stream still round-trips.
 
+### 9.1 `C` — the comms section
+
+Everything the capture's players **wrote or drew**: chat messages and map
+drawings, one record each, in capture order (non-decreasing frame). One gzip
+stream for the whole capture, like `E`, and like `E` it is served to the
+browser inside the head payload — the viewer needs the lot upfront to render
+the chat transcript and to know which marks are on the map at any playhead.
+
+The section is **absent** when a capture has no comms, which is what every
+`.brp` packed from a pre-1.6.0 widget stream looks like. Readers must treat a
+missing `C` as "none", never as an error.
+
+```
+uvarint  count
+uvarint  nk                      // kind string-table size
+nk × { uvarint len; len bytes }  // kind names, in order of first appearance
+uvarint  nd                      // destination string-table size
+nd × { uvarint len; len bytes }  // destination names (chat channels; "" for drawings)
+count × svarint                  // frame:    delta vs previous comm's frame (from 0)
+count × uvarint                  // kind:     index into the kind table
+count × uvarint                  // dest:     index into the destination table
+count × svarint                  // playerId: absolute (-1 = unresolved author)
+count × {                        // positions, in WHOLE ELMOS:
+  svarint                        //   x:  delta vs the previous comm's x (from 0)
+  svarint                        //   z:  delta vs the previous comm's z (from 0)
+  svarint                        //   x2: delta vs THIS comm's x
+  svarint                        //   z2: delta vs THIS comm's z
+}
+count × { uvarint len; len bytes }   // text: message body / marker label, UTF-8
+count × { uvarint len; len bytes }   // name: author's name, "" unless playerId is -1
+```
+
+Kinds are `chat`, `point`, `line` and `erase`; destinations (chat only) are
+`all`, `ally`, `spec`, `private` and `lobby`. The string tables mean new ones
+can appear without a format change.
+
+Both position deltas exist for the same reason: **freehand drawing dominates**
+the record count. Dragging the mouse emits a run of short `line` segments
+walking across the map (the engine caps them at one per 50 ms), so both the
+step from one segment to the next and the span of a single segment are small
+numbers — one or two varint bytes each. A `chat` record, which uses no
+positions at all, pays a handful of bytes for the columns it leaves at zero;
+that is the deliberate trade, since chat is the rare record type.
+
+Positions round to whole elmos: a map mark has no meaningful sub-elmo
+precision. Everything else round-trips exactly.
+
+**`erase` semantics.** An erase is recorded as an event, not applied at capture
+time: it clears every mark whose ANCHOR (a `point`'s position, a `line`'s first
+end) lies within **100 elmos** of it — `snapshot.CommEraseRadius`, the engine's
+own hardcoded `CInMapDrawModel::EraseNear` radius. Consumers resolve it
+themselves, which keeps the record faithful to what happened rather than to one
+reader's idea of what should still be visible.
+
 ## 10. The BRW wire container (how the replay is served)
 
 Not part of the file format, but specified here because it reuses the same
@@ -512,6 +567,9 @@ precomputes the same responses as plain files:
     chunks by ordinal and consumes the keys stream by cumulative `kLen`, so
     it needs no file offsets).
   - `E`: the file's events section, **byte-for-byte**.
+  - `C`: the file's comms section, **byte-for-byte** — absent when the file
+    has none, which is what the front-end reads as "this capture recorded no
+    chat or drawings" (it then hides the chat panel entirely).
 - **`GET /replays/<id>.keys`** → the `K` section payload **byte-for-byte**:
   one gzip stream of every keyframe. The viewer fetches this immediately
   after the head and decodes it progressively while it downloads

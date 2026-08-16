@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/mabn/barreplay/snapshot"
 )
@@ -130,6 +131,113 @@ func applyPreambleLine(fields []string, content string, base *snapshot.Meta) (*g
 		return nil, false
 	}
 	return nil, true
+}
+
+// commRecord is the widget's COMM payload: one thing a player wrote or drew.
+// JSON rather than positional fields because chat text and marker labels are
+// free-form (spaces, quotes, UTF-8 — the same reason DEF and GAME are JSON).
+// PlayerID is a pointer so a record missing it decodes as "unknown" (-1)
+// rather than as player 0.
+type commRecord struct {
+	Frame    int32   `json:"f"`
+	Kind     string  `json:"k"`
+	PlayerID *int32  `json:"p"`
+	Name     string  `json:"n"`
+	Dest     string  `json:"d"`
+	Text     string  `json:"t"`
+	X        float32 `json:"x"`
+	Z        float32 `json:"z"`
+	X2       float32 `json:"x2"`
+	Z2       float32 `json:"z2"`
+}
+
+// maxCommText caps a recorded message/label. The text comes from arbitrary
+// players and is displayed verbatim in the viewer; the engine itself caps chat
+// well below this, so the limit only ever bites on a malformed stream.
+const maxCommText = 512
+
+// parseComm decodes one COMM payload into a snapshot.Comm. An unparseable
+// record, or one whose kind the model does not define, is dropped with a
+// warning — a capture is worth keeping even when one line of it is junk.
+func parseComm(payload string) (snapshot.Comm, bool) {
+	var r commRecord
+	if err := json.Unmarshal([]byte(payload), &r); err != nil {
+		fmt.Fprintf(os.Stderr, "capture: bad COMM record %q: %v\n", payload, err)
+		return snapshot.Comm{}, false
+	}
+	kind := snapshot.CommKind(r.Kind)
+	switch kind {
+	case snapshot.CommChat, snapshot.CommPoint, snapshot.CommLine, snapshot.CommErase:
+	default:
+		fmt.Fprintf(os.Stderr, "capture: unknown COMM kind %q; dropping\n", r.Kind)
+		return snapshot.Comm{}, false
+	}
+	id := int32(-1)
+	if r.PlayerID != nil {
+		id = *r.PlayerID
+	}
+	return snapshot.Comm{
+		Frame:    r.Frame,
+		Kind:     kind,
+		PlayerID: id,
+		Name:     sanitizeCommText(r.Name),
+		Dest:     r.Dest,
+		Text:     sanitizeCommText(r.Text),
+		X:        r.X,
+		Z:        r.Z,
+		X2:       r.X2,
+		Z2:       r.Z2,
+	}, true
+}
+
+// sanitizeCommText makes player-authored text safe to store and display: it
+// drops Spring's inline colour codes (a 0xFF byte followed by three RGB bytes,
+// and the 0x08 reset), flattens any remaining control characters to spaces,
+// replaces invalid UTF-8, and truncates to maxCommText.
+//
+// Colour codes are stripped by the WIDGETS, before the text ever reaches the
+// stream — they have to be, since a raw 0xFF byte cannot survive the JSON hop
+// (json.Unmarshal turns invalid UTF-8 into U+FFFD, so this pass would never
+// see the marker). What it does catch on the stream path is escaped control
+// characters, stray whitespace and length; the colour-code branch keeps the
+// function correct for text handed to it directly.
+func sanitizeCommText(s string) string {
+	if s == "" {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		c := s[i]
+		switch {
+		case c == 0xFF: // colour code: 0xFF <r> <g> <b>
+			i += 4
+		case c < 0x20 || c == 0x7F:
+			b.WriteByte(' ')
+			i++
+		case c < utf8.RuneSelf:
+			b.WriteByte(c)
+			i++
+		default:
+			r, n := utf8.DecodeRuneInString(s[i:])
+			if r == utf8.RuneError && n <= 1 {
+				b.WriteRune(utf8.RuneError)
+				i++
+			} else {
+				b.WriteString(s[i : i+n])
+				i += n
+			}
+		}
+	}
+	out := strings.TrimSpace(b.String())
+	if len(out) > maxCommText {
+		// Trim back to a rune boundary so the result stays valid UTF-8.
+		out = out[:maxCommText]
+		for len(out) > 0 && !utf8.ValidString(out) {
+			out = out[:len(out)-1]
+		}
+	}
+	return out
 }
 
 // repairIncome fixes the resource-income scale of legacy streams. The engine's

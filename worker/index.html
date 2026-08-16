@@ -83,6 +83,14 @@
     <h2>Players</h2>
     <div id="players"></div>
 
+    <!-- Chat transcript. Hidden when the capture recorded no messages — a
+         re-simulated demo sees every channel, but a live player's upload only
+         holds the chat their own client received. -->
+    <div id="chatwrap" style="display:none">
+      <h2>Chat</h2>
+      <div id="chat" title="Click a line to jump to when it was said"></div>
+    </div>
+
     <h2>Controls</h2>
     <div class="hint">
       Scroll to zoom · middle-drag to pan · hover a unit for details.<br>

@@ -226,6 +226,27 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
   font-variant-numeric: tabular-nums; z-index: 5;
 }
 
+/* ---- chat transcript ----
+   The whole conversation, not a ticker: lines past the playhead stay listed but
+   dimmed, so the panel reads as a transcript you can scroll and click (a click
+   seeks to when the line was said). It scrolls itself to keep the playhead in
+   view during playback. */
+#chat {
+  max-height: 240px; overflow-y: auto; overscroll-behavior: contain;
+  border-top: 1px solid #2a323c; font-size: 12px; line-height: 1.4;
+}
+.chatrow { padding: 2px 0; cursor: pointer; word-break: break-word; }
+.chatrow:hover { background: #1d242c; }
+.chatrow.future { opacity: .35; }
+.chattime {
+  color: #6a7785; font-variant-numeric: tabular-nums; margin-right: 5px;
+  font-size: 11px;
+}
+.chattag {
+  color: #9fb0bf; background: #232b34; border-radius: 3px; padding: 0 4px;
+  margin-right: 4px; font-size: 10px; text-transform: uppercase;
+}
+
 .hint { font-size: 11px; color: #6a7785; line-height: 1.5; }
 #empty {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;

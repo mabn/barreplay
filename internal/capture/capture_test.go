@@ -12,6 +12,7 @@ type recordingWriter struct {
 	meta   *snapshot.Meta
 	frames []snapshot.Frame
 	events []snapshot.Event
+	comms  []snapshot.Comm
 	closed bool
 }
 
@@ -22,6 +23,10 @@ func (r *recordingWriter) WriteFrame(f snapshot.Frame) error {
 }
 func (r *recordingWriter) WriteEvent(e snapshot.Event) error {
 	r.events = append(r.events, e)
+	return nil
+}
+func (r *recordingWriter) WriteComm(c snapshot.Comm) error {
+	r.comms = append(r.comms, c)
 	return nil
 }
 func (r *recordingWriter) Close() error { r.closed = true; return nil }
@@ -235,5 +240,65 @@ func TestConsumeEmptyStillWritesMeta(t *testing.T) {
 	}
 	if w.meta == nil {
 		t.Error("meta should be written even for empty capture")
+	}
+}
+
+// COMM records carry chat and drawings. The text they hold comes from
+// arbitrary players, so the parser must sanitize it; a record it cannot make
+// sense of is dropped without taking the rest of the capture with it.
+func TestConsumeComms(t *testing.T) {
+	stream := strings.Join([]string{
+		"BRSNAP READY",
+		`BRSNAP COMM {"f":60,"k":"chat","p":0,"d":"ally","t":"go north"}`,
+		`BRSNAP COMM {"f":90,"k":"chat","p":-1,"n":"LobbyOnly","d":"lobby","t":"gl hf"}`,
+		`BRSNAP COMM {"f":120,"k":"point","p":1,"x":1200.5,"z":3400.25,"t":"here"}`,
+		`BRSNAP COMM {"f":150,"k":"line","p":1,"x":1200,"z":3400,"x2":1260,"z2":3450}`,
+		`BRSNAP COMM {"f":180,"k":"erase","p":1,"x":1200,"z":3400}`,
+		// Control characters (JSON can only carry them escaped) are flattened
+		// to spaces and the result trimmed.
+		`BRSNAP COMM {"f":210,"k":"chat","p":0,"d":"all","t":"tab\u0009and\u0008reset  "}`,
+		// Junk: unparseable JSON, and a kind the model does not define.
+		"BRSNAP COMM not json at all",
+		`BRSNAP COMM {"f":240,"k":"telepathy","p":0,"t":"?"}`,
+		// No player id at all: unknown, not player 0.
+		`BRSNAP COMM {"f":270,"k":"chat","d":"all","t":"who said that"}`,
+	}, "\n")
+	w := &recordingWriter{}
+	if err := Consume(strings.NewReader(stream), snapshot.Meta{}, w); err != nil {
+		t.Fatal(err)
+	}
+	want := []snapshot.Comm{
+		{Frame: 60, Kind: snapshot.CommChat, PlayerID: 0, Dest: "ally", Text: "go north"},
+		{Frame: 90, Kind: snapshot.CommChat, PlayerID: -1, Name: "LobbyOnly", Dest: "lobby", Text: "gl hf"},
+		{Frame: 120, Kind: snapshot.CommPoint, PlayerID: 1, X: 1200.5, Z: 3400.25, Text: "here"},
+		{Frame: 150, Kind: snapshot.CommLine, PlayerID: 1, X: 1200, Z: 3400, X2: 1260, Z2: 3450},
+		{Frame: 180, Kind: snapshot.CommErase, PlayerID: 1, X: 1200, Z: 3400},
+		{Frame: 210, Kind: snapshot.CommChat, PlayerID: 0, Dest: "all", Text: "tab and reset"},
+		{Frame: 270, Kind: snapshot.CommChat, PlayerID: -1, Dest: "all", Text: "who said that"},
+	}
+	if len(w.comms) != len(want) {
+		t.Fatalf("comms = %+v", w.comms)
+	}
+	for i := range want {
+		if w.comms[i] != want[i] {
+			t.Errorf("comm[%d] = %+v, want %+v", i, w.comms[i], want[i])
+		}
+	}
+}
+
+func TestSanitizeCommText(t *testing.T) {
+	long := strings.Repeat("é", maxCommText) // 2 bytes per rune: must cut cleanly
+	for _, tc := range []struct{ in, want string }{
+		{"plain", "plain"},
+		{"\xff\x10\x20\x30coloured", "coloured"}, // colour code + RGB
+		{"a\bb", "a b"},                          // reset byte
+		{"  trimmed\t\n", "trimmed"},             // control chars -> space, then trimmed
+		{"caf\xc3\xa9", "café"},                  // valid UTF-8 survives
+		{"bad\xc3", "bad�"},                      // truncated sequence
+		{long, long[:maxCommText]},               // truncated at a rune boundary
+	} {
+		if got := sanitizeCommText(tc.in); got != tc.want {
+			t.Errorf("sanitizeCommText(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }

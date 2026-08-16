@@ -80,6 +80,69 @@ type Event struct {
 	Team   int32     `json:"team"`
 }
 
+// CommKind enumerates the things a player puts into a game besides orders:
+// what they wrote, and what they drew on the map.
+type CommKind string
+
+const (
+	// CommChat is a typed message. Dest names the channel it went to and Text
+	// is what was said; the position fields are unused.
+	CommChat CommKind = "chat"
+	// CommPoint is a map marker dropped at X/Z; Text is its label (frequently
+	// empty — the engine's middle-click marker carries none).
+	CommPoint CommKind = "point"
+	// CommLine is one drawn line segment, X/Z -> X2/Z2. Freehand drawing
+	// arrives as a run of these (the engine emits at most one per 50 ms of
+	// dragging), so they dominate a capture's comm count.
+	CommLine CommKind = "line"
+	// CommErase clears every mark anchored within CommEraseRadius of X/Z.
+	CommErase CommKind = "erase"
+)
+
+// Chat destinations (Comm.Dest), as the engine's console formatting reveals
+// them: DestAll is public, DestAlly the "Allies:" channel, DestSpec the
+// "Spectators:" one, DestPrivate a whisper (the recipient is not recoverable
+// from the console line, so it is not recorded), and DestLobby a message the
+// autohost relayed in from the battleroom.
+const (
+	DestAll     = "all"
+	DestAlly    = "ally"
+	DestSpec    = "spec"
+	DestPrivate = "private"
+	DestLobby   = "lobby"
+)
+
+// CommEraseRadius is the world radius a CommErase clears, matching the engine's
+// hardcoded CInMapDrawModel::EraseNear radius — a mark is erased when its
+// ANCHOR (a point's position, a line's first end) lies inside it.
+const CommEraseRadius = 100
+
+// Comm is one thing a player wrote or drew, recorded at the exact frame it
+// happened (independent of the periodic sampling interval).
+//
+// What a capture holds is what its recorder was allowed to perceive, exactly
+// like unit visibility: the engine delivers chat only on channels the client
+// receives, and fires the map-draw callin only for marks it may see (its own
+// ally team's, or everyone's when spectating). A re-simulated demo is watched
+// by a full-view spectator, so it records every side.
+type Comm struct {
+	Frame int32    `json:"frame"`
+	Kind  CommKind `json:"kind"`
+	// PlayerID is the author; -1 when the author could not be resolved to a
+	// player in the roster (a battleroom relay, a player who left), in which
+	// case Name carries whatever the engine printed.
+	PlayerID int32  `json:"playerId"`
+	Name     string `json:"name,omitempty"`
+	Dest     string `json:"dest,omitempty"` // chat only
+	// Text is the message body for CommChat and the marker label for
+	// CommPoint; empty otherwise.
+	Text string  `json:"text,omitempty"`
+	X    float32 `json:"x,omitempty"`
+	Z    float32 `json:"z,omitempty"`
+	X2   float32 `json:"x2,omitempty"` // CommLine: the segment's other end
+	Z2   float32 `json:"z2,omitempty"`
+}
+
 // TeamInfo describes a team present in the replay.
 type TeamInfo struct {
 	TeamID     int32  `json:"teamId"`
@@ -160,11 +223,12 @@ type Meta struct {
 }
 
 // Writer is the pluggable persistence boundary. Callers must call WriteMeta
-// exactly once before any WriteFrame/WriteEvent, and Close exactly once at the
-// end. Implementations need not be safe for concurrent use.
+// exactly once before any WriteFrame/WriteEvent/WriteComm, and Close exactly
+// once at the end. Implementations need not be safe for concurrent use.
 type Writer interface {
 	WriteMeta(Meta) error
 	WriteFrame(Frame) error
 	WriteEvent(Event) error
+	WriteComm(Comm) error
 	Close() error
 }

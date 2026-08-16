@@ -86,6 +86,14 @@ func writeBRP(t *testing.T, dir, gameID string) string {
 	if err := w.WriteEvent(snapshot.Event{Frame: 45, Kind: snapshot.EventDestroyed, UnitID: 200, DefID: 2, Team: 1}); err != nil {
 		t.Fatal(err)
 	}
+	for _, c := range []snapshot.Comm{
+		{Frame: 33, Kind: snapshot.CommChat, PlayerID: 0, Dest: snapshot.DestAlly, Text: "push"},
+		{Frame: 40, Kind: snapshot.CommPoint, PlayerID: 1, X: 500, Z: 600, Text: "here"},
+	} {
+		if err := w.WriteComm(c); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -193,9 +201,16 @@ func TestServeBRP(t *testing.T) {
 		t.Errorf("wire chunk = %+v, file chunk = %+v", head.Chunks[0], bf.Chunks[0])
 	}
 
-	// E section passes through byte-for-byte; no frame data in the head payload.
+	// E and C sections pass through byte-for-byte; no frame data in the head
+	// payload.
 	if !bytes.Equal(secs[snapshot.SecEvents], bf.Sections[snapshot.SecEvents]) {
 		t.Errorf("served E section is not the stored one")
+	}
+	if len(bf.Sections[snapshot.SecComms]) == 0 {
+		t.Fatal("stored file has no comms section")
+	}
+	if !bytes.Equal(secs[snapshot.SecComms], bf.Sections[snapshot.SecComms]) {
+		t.Errorf("served C section is not the stored one")
 	}
 	if _, ok := secs[snapshot.SecFrames]; ok {
 		t.Errorf("head payload must not contain a frames section")

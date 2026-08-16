@@ -35,11 +35,48 @@ All integers little-endian. Record tags:
 |-----|---------|
 | `F` | one sampled frame (below) |
 | `E` | unit lifecycle event, text: `<frame> <kind> <id> <def> <team>` |
+| `C` | a player comm — chat message or map drawing — JSON (widget ≥ 1.6.0; below) |
 | `X` | end of stream, text: reason (`gameover`/`shutdown`/`error`) |
 | other | reserved; readers skip unknown tags |
 
 A stream without an `X` record was cut short (crash/kill); everything read
 up to the truncation point is valid.
+
+## `C` record — chat and map drawings
+
+JSON, not columns: comms are rare (hundreds per game against millions of unit
+records) and their text is free-form, so the encoding that pays off everywhere
+else buys nothing here. The same payload rides the `.brsnap` text stream as a
+`BRSNAP COMM <json>` line, which is why one parser
+(`capture.parseComm`) reads both.
+
+```
+{"f":<frame>,"k":"chat","p":<playerID>,"d":"all|ally|spec|private|lobby","t":"<text>"}
+{"f":<frame>,"k":"point","p":<playerID>,"x":<x>,"z":<z>,"t":"<label>"}
+{"f":<frame>,"k":"line","p":<playerID>,"x":<x>,"z":<z>,"x2":<x2>,"z2":<z2>}
+{"f":<frame>,"k":"erase","p":<playerID>,"x":<x>,"z":<z>}
+```
+
+`p` is `-1` when the author is not a player of this game (a battleroom relay),
+and only then does `n` carry their name — otherwise the preamble's `P` lines
+name them. Absent keys default to zero/empty; `t` is omitted for an unlabelled
+marker. Coordinates are world elmos, floats as the engine reported them (the
+`.brp` codec rounds them to whole elmos later).
+
+**Point of view.** Comms are as recorder-limited as unit visibility. The engine
+fires the map-draw callin only for marks the client may see — its own ally
+team's while playing, everyone's when spectating — and delivers chat only on
+the channels the client receives. A re-simulated demo is watched by a full-view
+spectator and therefore records every side; one player's live upload does not.
+
+**Where the text comes from.** BAR's widget handler does not forward
+`GotChatMsg`, so chat has no structured callin: the widget reads
+`AddConsoleLine` and reverses the console grammar `CGame::HandleChatMsg`
+prints (`<Name> …` / `[Name] …` / `> <Name> …`, channel as a body prefix),
+accepting a line only when the name belongs to a player of this game. Inline
+colour codes are stripped before writing; `capture.sanitizeCommText`
+re-sanitizes and length-caps on the way in, since the text is player-authored
+and ends up in a browser.
 
 ## Segments (widget disable/enable, rejoin)
 

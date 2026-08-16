@@ -42,6 +42,7 @@ type loaded struct {
 	meta   snapshot.Meta
 	frames []snapshot.Frame
 	events []snapshot.Event
+	comms  []snapshot.Comm
 }
 
 func (l *loaded) WriteMeta(m snapshot.Meta) error { l.meta = m; return nil }
@@ -51,6 +52,10 @@ func (l *loaded) WriteFrame(f snapshot.Frame) error {
 }
 func (l *loaded) WriteEvent(e snapshot.Event) error {
 	l.events = append(l.events, e)
+	return nil
+}
+func (l *loaded) WriteComm(c snapshot.Comm) error {
+	l.comms = append(l.comms, c)
 	return nil
 }
 func (l *loaded) Close() error { return nil }
@@ -187,6 +192,12 @@ func Pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 			return "", nil, err
 		}
 	}
+	for _, c := range l.comms {
+		if err := w.WriteComm(c); err != nil {
+			w.Close()
+			return "", nil, err
+		}
+	}
 	if err := w.Close(); err != nil {
 		return "", nil, err
 	}
@@ -197,8 +208,8 @@ func Pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 	if outSize > 0 {
 		ratio = fmt.Sprintf(", %.0fx smaller", float64(inSize)/float64(outSize))
 	}
-	fmt.Fprintf(os.Stderr, "%s (%.1f MB) -> %s (%.2f MB%s): %d frames, %d events\n",
-		in, mb(inSize), outPath, mb(outSize), ratio, len(l.frames), len(l.events))
+	fmt.Fprintf(os.Stderr, "%s (%.1f MB) -> %s (%.2f MB%s): %d frames, %d events, %d comms\n",
+		in, mb(inSize), outPath, mb(outSize), ratio, len(l.frames), len(l.events), len(l.comms))
 	return outPath, modOptions, nil
 }
 

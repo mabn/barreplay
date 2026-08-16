@@ -560,3 +560,93 @@ func TestBRPSingleFrameChunk(t *testing.T) {
 		t.Fatalf("decoded single-frame chunk = %+v", last)
 	}
 }
+
+// Comms round-trip through the writer and the C section's codec: the string
+// tables, the frame/position delta chains, and the "no section at all when the
+// capture recorded none" case.
+func TestBRPComms(t *testing.T) {
+	meta, frames, _ := testCapture()
+	comms := []Comm{
+		{Frame: 30, Kind: CommChat, PlayerID: 0, Dest: DestAll, Text: "hello"},
+		{Frame: 30, Kind: CommChat, PlayerID: 1, Dest: DestAlly, Text: "attack the north lab"},
+		{Frame: 45, Kind: CommPoint, PlayerID: 1, X: 1200.4, Z: 3400.6, Text: "here"},
+		{Frame: 46, Kind: CommLine, PlayerID: 1, X: 1200, Z: 3400, X2: 1260, Z2: 3450},
+		{Frame: 47, Kind: CommLine, PlayerID: 1, X: 1260, Z: 3450, X2: 1330, Z2: 3505},
+		{Frame: 60, Kind: CommErase, PlayerID: 1, X: -20, Z: 9000},
+		// Unresolvable speaker: the name rides the record instead.
+		{Frame: 90, Kind: CommChat, PlayerID: -1, Name: "LobbyOnly", Dest: DestLobby, Text: "gl hf"},
+	}
+
+	dir := t.TempDir()
+	w, err := NewBRPWriter(dir, meta.GameID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteMeta(meta); err != nil {
+		t.Fatal(err)
+	}
+	for _, fr := range frames {
+		if err := w.WriteFrame(fr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range comms {
+		if err := w.WriteComm(c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := os.Open(filepath.Join(dir, meta.GameID+".brp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	bf, err := ParseBRP(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bf.CommCount != len(comms) {
+		t.Errorf("CommCount = %d, want %d", bf.CommCount, len(comms))
+	}
+	got, err := bf.Comms()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(comms) {
+		t.Fatalf("comms: got %d want %d", len(got), len(comms))
+	}
+	for i, want := range comms {
+		// Positions store as whole elmos, everything else exactly.
+		want.X, want.Z = float32(roundq(want.X)), float32(roundq(want.Z))
+		want.X2, want.Z2 = float32(roundq(want.X2)), float32(roundq(want.Z2))
+		if got[i] != want {
+			t.Errorf("comm[%d] = %+v, want %+v", i, got[i], want)
+		}
+	}
+}
+
+// A capture with no comms writes no C section, so files from a widget that
+// never recorded any stay exactly as they were.
+func TestBRPNoCommsSection(t *testing.T) {
+	meta, frames, events := testCapture()
+	path := writeBRP(t, t.TempDir(), meta, frames, events)
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	bf, err := ParseBRP(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := bf.Sections[SecComms]; ok {
+		t.Error("comm-less capture wrote a C section")
+	}
+	got, err := bf.Comms()
+	if err != nil || got != nil {
+		t.Errorf("Comms() = %v, %v; want nil, nil", got, err)
+	}
+}

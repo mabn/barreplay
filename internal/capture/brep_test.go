@@ -361,9 +361,11 @@ type loadedSink struct {
 	meta   snapshot.Meta
 	frames []snapshot.Frame
 	events []snapshot.Event
+	comms  []snapshot.Comm
 }
 
 func (l *loadedSink) WriteMeta(m snapshot.Meta) error   { l.meta = m; return nil }
 func (l *loadedSink) WriteFrame(f snapshot.Frame) error { l.frames = append(l.frames, f); return nil }
 func (l *loadedSink) WriteEvent(e snapshot.Event) error { l.events = append(l.events, e); return nil }
+func (l *loadedSink) WriteComm(c snapshot.Comm) error   { l.comms = append(l.comms, c); return nil }
 func (l *loadedSink) Close() error                      { return nil }

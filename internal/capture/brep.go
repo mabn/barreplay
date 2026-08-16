@@ -11,6 +11,7 @@
 //	then length-framed binary records: <tag u8> <len u32le> <payload>
 //	  'F'  frame (see decodeFrameRecord)
 //	  'E'  unit lifecycle event, text payload "<frame> <kind> <id> <def> <team>"
+//	  'C'  chat message or map drawing, JSON payload (see parseComm)
 //	  'X'  end of stream, text payload = reason
 //	  anything else: skipped (forward compatibility)
 //
@@ -213,6 +214,13 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 				}
 				graves.note(ev.Kind, ev.UnitID)
 				if err := w.WriteEvent(ev); err != nil {
+					return err
+				}
+			}
+		case 'C': // chat message or map drawing, JSON payload (see parseComm)
+			if c, ok := parseComm(string(payload)); ok {
+				stats.Comms++
+				if err := w.WriteComm(c); err != nil {
 					return err
 				}
 			}
