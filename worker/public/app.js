@@ -1096,13 +1096,34 @@ let chatCursor = -1;     // index of the newest row at or before the playhead
 // falls back to the centroid of whatever that team still owns, which keeps it
 // on their side of the map; a speaker with no units left, a spectator, or a
 // battleroom relay gets no bubble at all and lives only in the sidebar.
+//
+// A bubble does NOT follow its anchor once it is up. The position is resolved
+// when a speaker's first live message appears and then held for as long as any
+// of their messages is showing (bubbleAnchor), so a burst reads as one stable
+// stack and a commander wandering off — or a centroid drifting as the team
+// builds and dies — cannot drag the words across the map. The next thing that
+// player says, once the stack has cleared, is placed wherever they are then.
 
-const BUBBLE_LIFETIME = 9;  // game-seconds a bubble hovers over its speaker
+const BUBBLE_LIFETIME = 9;  // game-seconds a bubble hovers, at 1x playback
 const BUBBLE_FADE = 3;      // game-seconds of fade-out at the end of that
 const BUBBLE_STACK = 3;     // most recent messages shown per speaker
 const BUBBLE_MAX_PX = 240;  // bubble width cap; longer text is ellipsized
 const BUBBLE_PAD = 5;
 const BUBBLE_LINE = 16;     // px between stacked bubbles
+
+// Lifetime is measured in GAME time but read in WALL time, so playback speed
+// has to stretch it: at 16x a 9-game-second bubble is on screen for half a
+// second, far too short to read. Scaling by the speed factor keeps the
+// wall-clock duration constant instead — capped at BUBBLE_SPEED_CAP, because
+// past that the bubbles linger long enough to bury the battle they are about.
+// Only while PLAYING: paused, the playhead does not move and a bubble never
+// expires anyway, and scrubbing is at the reader's own pace.
+const BUBBLE_SPEED_CAP = 16;
+
+function bubbleSpeedFactor() {
+  if (!playRAF) return 1;
+  return Math.min(+document.getElementById('speed').value || 1, BUBBLE_SPEED_CAP);
+}
 
 // A commander's internal def name in BAR: <faction>com, plus the level variants
 // (armcomlvl3) and Legion's upgrade paths (legcomoff, legcomt2def). The prefix
@@ -1111,7 +1132,8 @@ const BUBBLE_LINE = 16;     // px between stacked bubbles
 // contains "com" (comeffigylvl2, dummycom, mission_command_tower); the boss
 // test drops the scavenger/AI commanders, which belong to no player.
 const COMMANDER_RE = /^(arm|cor|leg)com/;
-let defIsCom = new Map(); // def id -> is it a player's commander
+let defIsCom = new Map();     // def id -> is it a player's commander
+let bubbleAnchor = new Map(); // playerID -> [x, z, team] held while they are on screen
 
 function buildCommanderDefs() {
   defIsCom = new Map();
@@ -1145,59 +1167,79 @@ function roundRectPath(c, x, y, w, h, r) {
   c.rect(x, y, w, h);
 }
 
-// drawChatBubbles paints the messages spoken within the last BUBBLE_LIFETIME
-// game-seconds over their speakers. u is the displayed frame's unit array.
+// drawChatBubbles paints the messages spoken within the (speed-scaled) bubble
+// lifetime over their speakers. u is the displayed frame's unit array.
 function drawChatBubbles(f, u) {
   if (!chatLines.length || !u) return;
-  const window = BUBBLE_LIFETIME * 30, fade = BUBBLE_FADE * 30;
+  const scaleT = bubbleSpeedFactor();
+  const window = BUBBLE_LIFETIME * 30 * scaleT, fade = BUBBLE_FADE * 30 * scaleT;
 
-  // Group the live messages by speaker, newest last, keeping only the teams we
-  // will actually need to locate.
-  const byTeam = new Map(); // team -> [{c, alpha}]
+  // Live messages, grouped by speaker and oldest first.
+  const byPlayer = new Map(); // playerID -> [{c, alpha}]
   for (let i = firstChatAt(f - window); i < chatLines.length; i++) {
     const c = chatLines[i];
     if (c.f > f) break;
-    const team = commTeamOf.get(c.p);
-    if (team === undefined || team < 0) continue; // spectator / lobby relay
     const left = c.f + window - f;
     if (left <= 0) continue; // fully faded: don't let it hold a stack slot
-    const list = byTeam.get(team) || [];
+    const list = byPlayer.get(c.p) || [];
     list.push({ c, alpha: left < fade ? left / fade : 1 });
-    byTeam.set(team, list);
+    byPlayer.set(c.p, list);
   }
-  if (!byTeam.size) return;
+  // A speaker whose stack has cleared releases their anchor, so their next
+  // message is placed wherever they are by then.
+  for (const p of bubbleAnchor.keys()) {
+    if (!byPlayer.has(p)) bubbleAnchor.delete(p);
+  }
+  if (!byPlayer.size) return;
 
-  // One pass over the frame to locate each speaking team: its commander if it
-  // still has one, else the centre of mass of everything it owns.
-  const com = new Map(), sum = new Map();
-  for (let i = 0; i < u.length; i += STRIDE) {
-    const t = u[i + F.TEAM];
-    if (!byTeam.has(t)) continue;
-    const s = sum.get(t);
-    if (s) { s[0] += u[i + F.X]; s[1] += u[i + F.Z]; s[2]++; }
-    else sum.set(t, [u[i + F.X], u[i + F.Z], 1]);
-    if (defIsCom.get(u[i + F.DEF]) && !com.has(t)) com.set(t, i);
+  // Anchor whoever has just started speaking. Everyone already on screen keeps
+  // the position they were given, so this pass over the frame only happens on
+  // the frames where a new speaker appears — most ticks do no work at all.
+  const fresh = new Map(); // team -> [playerID]
+  for (const p of byPlayer.keys()) {
+    if (bubbleAnchor.has(p)) continue;
+    const team = commTeamOf.get(p);
+    if (team === undefined || team < 0) { // spectator / lobby relay: never anchored
+      bubbleAnchor.set(p, null);
+      continue;
+    }
+    fresh.set(team, (fresh.get(team) || []).concat(p));
+  }
+  if (fresh.size) {
+    const com = new Map(), sum = new Map();
+    for (let i = 0; i < u.length; i += STRIDE) {
+      const t = u[i + F.TEAM];
+      if (!fresh.has(t)) continue;
+      const acc = sum.get(t);
+      if (acc) { acc[0] += u[i + F.X]; acc[1] += u[i + F.Z]; acc[2]++; }
+      else sum.set(t, [u[i + F.X], u[i + F.Z], 1]);
+      if (defIsCom.get(u[i + F.DEF]) && !com.has(t)) com.set(t, i);
+    }
+    for (const [team, players] of fresh) {
+      let at = null;
+      const ci = com.get(team);
+      if (ci !== undefined) {
+        const q = interpPos(u, ci);
+        at = [q[0], q[1], team];
+      } else {
+        const acc = sum.get(team);
+        if (acc) at = [acc[0] / acc[2], acc[1] / acc[2], team];
+      }
+      for (const p of players) bubbleAnchor.set(p, at);
+    }
   }
 
   octx.textAlign = 'center';
   octx.textBaseline = 'middle';
   octx.font = '12px system-ui, sans-serif';
-  for (const [team, list] of byTeam) {
-    let wx, wz;
-    const ci = com.get(team);
-    if (ci !== undefined) {
-      const p = interpPos(u, ci);
-      wx = p[0]; wz = p[1];
-    } else {
-      const s = sum.get(team);
-      if (!s) continue; // nothing of theirs left on the map
-      wx = s[0] / s[2]; wz = s[1] / s[2];
-    }
-    const sx = viewW / 2 + (wx - center.x) * scale;
-    const sy = viewH / 2 + (wz - center.z) * scale;
+  for (const [p, list] of byPlayer) {
+    const at = bubbleAnchor.get(p);
+    if (!at) continue; // nothing of theirs was on the map when they spoke
+    const sx = viewW / 2 + (at[0] - center.x) * scale;
+    const sy = viewH / 2 + (at[1] - center.z) * scale;
     if (sx < -BUBBLE_MAX_PX || sy < -80 || sx > viewW + BUBBLE_MAX_PX || sy > viewH + 40) continue;
 
-    const fill = teamColor[team] || '#9aa6b2';
+    const fill = teamColor[at[2]] || '#9aa6b2';
     const ink = textColorOn(fill);
     const shown = list.slice(-BUBBLE_STACK);
     // Newest sits closest to the unit; older ones stack upward.
@@ -1206,10 +1248,10 @@ function drawChatBubbles(f, u) {
       let text = b.c.t;
       let w = octx.measureText(text).width;
       if (w > BUBBLE_MAX_PX) {
-        while (text.length > 1 && octx.measureText(text + '…').width > BUBBLE_MAX_PX) {
+        while (text.length > 1 && octx.measureText(text + '\u2026').width > BUBBLE_MAX_PX) {
           text = text.slice(0, -1);
         }
-        text += '…';
+        text += '\u2026';
         w = octx.measureText(text).width;
       }
       octx.globalAlpha = b.alpha;
@@ -1224,63 +1266,6 @@ function drawChatBubbles(f, u) {
     });
   }
   octx.globalAlpha = 1;
-}
-
-function renderChat() {
-  const box = document.getElementById('chat');
-  const wrap = document.getElementById('chatwrap');
-  if (!box || !wrap) return;
-  wrap.style.display = chatLines.length ? '' : 'none';
-  box.innerHTML = '';
-  chatBuilt = chatLines.length > 0;
-  chatCursor = -1;
-  if (!chatBuilt) return;
-  chatLines.forEach((c, i) => {
-    const row = document.createElement('div');
-    // Every row starts "not yet said"; updateChat clears the flag as the
-    // playhead passes each one, which is why chatCursor starts at -1.
-    row.className = 'chatrow future';
-    const tag = CHAT_DEST_TAG[c.d];
-    row.innerHTML =
-      `<span class="chattime">${escapeHtml(fmtTime(c.f / 30))}</span>` +
-      (tag ? `<span class="chattag">${escapeHtml(tag)}</span>` : '') +
-      `<b style="color:${escapeHtml(commColor(c.p))}">${escapeHtml(commName(c))}</b> ` +
-      `<span>${escapeHtml(c.t)}</span>`;
-    row.title = 'Jump to ' + fmtTime(c.f / 30);
-    row.addEventListener('click', () => {
-      if (data.sampleEvery > 0) go(Math.round(c.f / data.sampleEvery));
-    });
-    box.appendChild(row);
-  });
-}
-
-// updateChat marks which rows have already been said at the current playhead
-// and keeps the newest of them in view. It runs on every playback tick, so it
-// exits immediately unless the boundary actually moved.
-function updateChat(f) {
-  if (!chatBuilt) return;
-  let cursor = -1;
-  for (let i = 0; i < chatLines.length && chatLines[i].f <= f; i++) cursor = i;
-  if (cursor === chatCursor) return;
-  const box = document.getElementById('chat');
-  const rows = box.children;
-  // Only the rows that changed side of the boundary need touching.
-  const lo = Math.min(chatCursor, cursor) + 1, hi = Math.max(chatCursor, cursor);
-  for (let i = lo; i <= hi && i < rows.length; i++) {
-    rows[i].classList.toggle('future', i > cursor);
-  }
-  chatCursor = cursor;
-  // Rest the NEWEST SAID line on the bottom edge, so the transcript reads like
-  // a chat window: everything above has been said, anything below is still to
-  // come. Only when that line has left the visible window, though — scrolling
-  // on every message would fight a user reading back through the log while the
-  // replay plays on.
-  const anchor = rows[cursor];
-  if (!anchor) return;
-  const top = anchor.offsetTop, bottom = top + anchor.offsetHeight;
-  if (bottom > box.scrollTop + box.clientHeight || top < box.scrollTop) {
-    box.scrollTop = Math.max(0, bottom - box.clientHeight);
-  }
 }
 
 // ---- coordinate transforms ------------------------------------------------
@@ -2705,6 +2690,7 @@ async function loadReplay(file) {
   marks = [];
   chatLines = [];
   chatBuilt = false;
+  bubbleAnchor = new Map();
   flashSeenIdx = -1;
   currentFile = file;
   try {

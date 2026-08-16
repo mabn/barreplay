@@ -751,17 +751,27 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   NEWEST SAID line on its bottom edge (and only when that line has scrolled out, so it
   does not fight someone reading back). The map shows the same message as a BUBBLE over
   its speaker, in team colour with black or white text picked by the colour's luminance
-  (`textColorOn`), for `BUBBLE_LIFETIME` = 9 game-seconds. The anchor is the speaker's
+  (`textColorOn`), for `BUBBLE_LIFETIME` = 9 game-seconds — SCALED BY PLAYBACK SPEED,
+  because that lifetime is game time but is read in wall time: at 16x it would be half a
+  second on screen. `bubbleSpeedFactor` multiplies it by the speed while PLAYING (paused,
+  the playhead does not move and nothing expires anyway; scrubbing is at the reader's own
+  pace), capped at `BUBBLE_SPEED_CAP` = 16 — past that the bubbles linger long enough to
+  bury the battle they are about. The anchor is the speaker's
   COMMANDER — `COMMANDER_RE` = `^(arm|cor|leg)com` minus `boss`, which on a real BAR def
   table matches all 38 real commanders (including the `lvlN` and Legion upgrade paths)
   and rejects all 39 near-misses: DECOY commanders (`armdecom`), `comeffigylvl2`,
   `dummycom`, `mission_command_tower`, the scavenger bosses. Commanders die, so the
   fallback matters and is not rare: measured on a real full-view 8v8, 16/16 teams have
   one at t=0 but only 3/16 by t=20min, after which the bubble anchors to the centroid of
-  whatever the team still owns. A spectator, a battleroom relay, or a team with nothing
-  left gets no bubble and lives only in the sidebar. The panel hides itself when the
-  capture recorded no chat — which is what every replay published before the `C` section
-  looks like.
+  whatever the team still owns. A bubble never MOVES once it is up: `bubbleAnchor` freezes
+  the position when a speaker's first live message appears and holds it until their whole
+  stack has cleared, so neither a wandering commander nor a centroid drifting as the team
+  builds and dies can drag the words across the map — and the next thing that player says
+  is placed wherever they are by then. Freezing also makes the frame scan rare: it runs
+  only on ticks where somebody NEW starts speaking. A spectator, a battleroom relay, or a
+  team with nothing left gets no bubble and lives only in the sidebar. The panel hides
+  itself when the capture recorded no chat — which is what every replay published before
+  the `C` section looks like.
 - **`internal/viz/icons.go`** renders **real BAR unit icons**. It embeds the vendored icon
   PNGs and BAR's `icontypes.lua` (a unit-name→bitmap gamedata table) under `bardata/`, and
   **parses the Lua data table directly in Go** (a small line/brace scanner, no `gopher-lua`)
