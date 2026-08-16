@@ -240,6 +240,13 @@ type UploadOptions struct {
 	// ModOptions is the demo startscript's raw [modoptions] map (nil when
 	// packed with noDemo); it contributes the catalog's settings flags.
 	ModOptions map[string]string
+	// View overrides the point of view the catalog records for this publish
+	// ("full", "ally" or "unknown"; empty leaves it to the capture). Only a
+	// LIVE capture states its own provenance — the widget's recorder record,
+	// which viz.BuildCatalogEntry reads — so a re-simulated capture, which by
+	// construction saw every team, has to declare "full" here. Without it the
+	// row would keep the marking of the one-sided upload it just superseded.
+	View string
 }
 
 // UploadStatic uploads one packed replay's static files to the worker's R2
@@ -330,14 +337,17 @@ func UploadStatic(ctx context.Context, brpPath string, o UploadOptions) error {
 		}
 	}
 	if o.IndexURL == "" {
-		fmt.Fprintf(os.Stderr, "%s: uploaded, but NOT registered in the replay catalog: no index URL (pass -index-url or set BARREPLAY_INDEX_URL to the deployed worker)\n", uploadID)
+		// Unreachable from the CLIs, which resolve IndexURL from -upload via
+		// LookupTarget and so always have one; kept for a caller that builds
+		// UploadOptions by hand and leaves it empty.
+		fmt.Fprintf(os.Stderr, "%s: uploaded, but NOT registered in the replay catalog: the caller set no IndexURL\n", uploadID)
 		return nil
 	}
 	rid := ""
 	if o.Rev != "" {
 		rid = uploadID
 	}
-	if err := putCatalogEntry(ctx, o.IndexURL, gameID, rid, brpPath, dirSize(bundleDir), o.ModOptions); err != nil {
+	if err := putCatalogEntry(ctx, o.IndexURL, gameID, rid, brpPath, dirSize(bundleDir), o.ModOptions, o.View); err != nil {
 		return fmt.Errorf("registering %s in the replay catalog at %s: %w", gameID, o.IndexURL, err)
 	}
 	fmt.Fprintf(os.Stderr, "%s: registered in the replay catalog at %s\n", gameID, o.IndexURL)
@@ -359,7 +369,11 @@ func checkWorkerDir(workerDir string) error {
 // catalog, keyed by the bare gameId with rid naming the served revision. If
 // the worker guards writes (its REPLAY_PUT_TOKEN secret), the same-named env
 // var supplies the bearer token.
-func putCatalogEntry(ctx context.Context, indexURL, gameID, rid, brpPath string, sizeBytes int64, modOptions map[string]string) error {
+//
+// view overrides the capture's own point of view (UploadOptions.View); empty
+// keeps whatever the .brp's recorder record implies, and an entry with no view
+// at all leaves the row's existing marking alone (the worker COALESCEs it).
+func putCatalogEntry(ctx context.Context, indexURL, gameID, rid, brpPath string, sizeBytes int64, modOptions map[string]string, view string) error {
 	f, err := os.Open(brpPath)
 	if err != nil {
 		return err
@@ -374,6 +388,14 @@ func putCatalogEntry(ctx context.Context, indexURL, gameID, rid, brpPath string,
 		entry.Rid = &rid
 	}
 	entry.Settings = viz.SettingsFlags(modOptions)
+	if view != "" {
+		entry.View = view
+		// "ally" is the only view that names a side, so any other override is
+		// also a statement that no single side recorded this revision.
+		if view != "ally" {
+			entry.UploaderAlly = nil
+		}
+	}
 	body, err := json.Marshal(entry)
 	if err != nil {
 		return err

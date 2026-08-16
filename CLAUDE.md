@@ -22,12 +22,22 @@ go test ./...                   # all unit tests (no engine required)
 go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
 go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, no engine
 go run ./cmd/barreplay-viz -snapshots ./snapshots        # serve the viewer at 127.0.0.1:8080
-go run ./cmd/pack ./caps/<gameId>.brsnap       # raw stream -> FULL .brp (fetches the demo for map/versions/players; -id overrides, -no-demo skips)
-go run ./cmd/pack ./caps/<gameId>.brepstream   # same for the Replay uploader widget's binary stream
-go run ./cmd/pack -upload r2 ./caps/<gameId>.brepstream   # ...and upload the packed .brp's static bundle ("local" targets the dev simulator) + register it in the worker's replay catalog (PUT /api/replays/<id>; -index-url or $BARREPLAY_INDEX_URL names the deployed worker, $REPLAY_PUT_TOKEN authenticates). Publishes are REVISIONED by default: pieces land at replays/<gameId>-<rev> (rev = sha256[:8] of the input) and the catalog row's rid points at the current one — append-only, nothing in the bucket is ever overwritten or deleted (-rev=false uses the bare id)
-go run ./cmd/pack -stats ./snapshots/<gameId>.brp   # .brp size breakdown: per-section sizes + top-10 unit defs by encoded bytes with per-instance cost (snapshot.ComputeBRPStats, self-checked against the codec; raw captures pack first, then report)
+go run ./cmd/pack ./caps/<gameId>.brepstream   # THE default publish: raw stream -> FULL .brp (fetches the demo for map/versions/players; -id overrides, -no-demo skips) -> stats -> upload to R2 + register in the deployed worker's catalog, revisioned. -upload, -stats and -rev all default ON, so the bare command does the whole job; a .brsnap input works the same
+go run ./cmd/pack -upload= ./caps/<gameId>.brsnap   # pack + stats only, publish NOTHING (also how to analyze an existing .brp without republishing it)
+go run ./cmd/pack -upload local ./caps/<gameId>.brepstream   # ...to the dev simulator instead
+# -upload names a whole DESTINATION: the bucket AND the worker that serves+catalogs it, paired in
+# internal/packer/targets.go ("r2" -> https://replay.bartools.workers.dev, "local" -> http://127.0.0.1:5173)
+# and shared with bringest. NEITHER CLI has an index-URL flag: naming the two halves separately made it
+# possible to upload pieces to one deployment and register the row in the other, which nothing downstream
+# can detect. Adding a destination to that one map makes it valid, documented and usable in both CLIs.
+# $REPLAY_PUT_TOKEN authenticates the PUT.
+# Publishes are REVISIONED by default: pieces land at replays/<gameId>-<rev> (rev = sha256[:8] of the input)
+# and the catalog row's rid points at the current one — append-only, nothing in the bucket is ever
+# overwritten or deleted (-rev=false uses the bare id). -stats prints a .brp size breakdown: per-section
+# sizes + top-10 unit defs by encoded bytes with per-instance cost (snapshot.ComputeBRPStats, self-checked
+# against the codec; raw captures pack first, then report).
 go run ./cmd/barreplay-static -out ./static ./snapshots/*.brp   # pack .brp -> static bundle for R2 hosting (see worker/)
-go run ./cmd/bringest -index-url <worker-url>   # drag&drop upload daemon: poll the worker's job queue and publish uploaded .brepstreams (-once drains and exits; -upload local targets the dev simulator; -resim -data <BARdata> runs the independent re-sim worker instead: catalog games with only a one-sided upload get a full-view re-simulation published as another revision)
+go run ./cmd/bringest   # drag&drop upload daemon: poll the deployed worker's job queue and publish uploaded .brepstreams (-once drains and exits; -upload local targets the dev simulator — one flag picks the queue, bucket and catalog together; -resim -data <BARdata> runs the independent re-sim worker instead: catalog games with only a one-sided upload get a full-view re-simulation published as another revision)
 ```
 
 Tests are hermetic: `barapi` uses a mock HTTP server, `demofile` tests against the
@@ -45,9 +55,17 @@ cmd/pack/main.go          CLI: convert .brsnap/.brepstream captures to .brp; -st
                           size breakdown (sections + per-unit-def bytes, snapshot/brpstats.go —
                           a .brp input is analyzed directly, never repacked). The pack/upload
                           PIPELINE itself lives in internal/packer (shared with the ingest
-                          daemon); cmd/pack is the flags + stats reporting.
+                          daemon); cmd/pack is the flags + stats reporting + the indexURLs map
+                          that turns -upload into a full destination (bucket + catalog worker).
+                          Its defaults are the everyday publish (-upload r2 -stats -rev), so a
+                          bare `pack <capture>` packs, reports and publishes; -upload= opts out
+                          of the publish, which is also the way to analyze a .brp in place.
 internal/packer/          the capture-to-published-replay pipeline: Pack (stream parse + demo
-                          metadata fetch -> .brp), StreamRev (sha256[:8] revision id), and
+                          metadata fetch -> .brp), StreamRev (sha256[:8] revision id),
+                          LookupTarget/TargetHelp/TargetList (targets.go: the ONE table of
+                          publishing destinations, each pairing a bucket with the worker that
+                          serves and catalogs it — both CLIs validate -upload against it and
+                          derive the URL from it, so the two halves cannot disagree), and
                           UploadStatic — writes the static bundle (viz.WriteStaticBundle) and
                           uploads it to the worker's R2 bucket so it appears in the deployed
                           viewer with no redeploy. For "r2" with R2 API credentials in the env
@@ -74,10 +92,16 @@ internal/packer/          the capture-to-published-replay pipeline: Pack (stream
                           viz.SettingsFlags — ranked/lava/mods/scavUnits/extraUnits/quickStart/
                           comBuilders/noAir/noNukes/noLrpc/noEndgameLrpc; modoptions are NOT stored
                           in the .brp, they ride only this PUT, so -no-demo uploads carry none;
-                          -index-url > $BARREPLAY_INDEX_URL > for "local" the vite dev URL, else
-                          skip with a warning; $REPLAY_PUT_TOKEN = bearer token when the worker
-                          guards writes). "local" uploads pass --local --preview because both dev
-                          servers (vite dev / wrangler dev) bind the PREVIEW bucket.
+                          the IndexURL comes from the -upload target via packer.LookupTarget
+                          (targets.go) in BOTH CLIs — bucket and catalog are ONE destination and
+                          neither can be named on its own; an empty IndexURL (only reachable by
+                          a hand-built UploadOptions) skips the PUT with a warning.
+                          $REPLAY_PUT_TOKEN = bearer token when the
+                          worker guards writes). UploadOptions.View overrides the point of view
+                          the row records ("full" from bringest -resim, whose capture has no
+                          recorder record of its own). "local" uploads pass --local --preview
+                          because both dev servers (vite dev / wrangler dev) bind the PREVIEW
+                          bucket.
                           Pack wraps a demo-fetch failure in ErrDemoUnavailable so callers can
                           degrade to a no-demo pack (the ingest daemon does).
 cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's job queue
@@ -112,8 +136,10 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           another filesystem, so a plain os.Rename leaked a ~100-160 MB stream
                           into the data dir every run).
                           At startup it loads ./.env (internal/envfile) into the environment
-                          BEFORE the flag defaults are evaluated, so the R2 keys and
-                          $BARREPLAY_INDEX_URL work without `source .env` — read from the
+                          BEFORE the flag defaults are evaluated (still true of $BAR_DATA_DIR;
+                          the worker URL no longer reads the environment at all, it comes from
+                          -upload), so the R2 keys and $REPLAY_PUT_TOKEN work without
+                          `source .env` — read from the
                           WORKING DIR, so run it from the repo root. It logs the var COUNT
                           (never values) and warns when R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY
                           are still absent, because otherwise that failure surfaces only as an
@@ -172,17 +198,27 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           capture is from, because `uploaderAlly` alone cannot: null there is
                           ambiguous between a spectator (saw everything), a re-sim, and a row
                           predating the recorder fields — and most rows are the last case, which
-                          nothing can derive after the fact. So it is HAND-SET via
-                          POST /api/replays/<id>/view (open, like refresh-settings; body
-                          {view, ally}, validated by parseViewRequest) from the viewer header's
-                          POV dropdown, and setView also re-stamps the current rid's uploads
-                          entry so the per-revision history agrees. upsert COALESCEs it
-                          (`view = COALESCE(excluded.view, view)`) — deliberately UNLIKE
+                          nothing can derive after the fact. It is set two ways. A PUBLISHING
+                          PUT states it when the capture knows: viz.BuildCatalogEntry fills it
+                          from the .brp's Meta.Recorder ("full" when Spectator, else "ally" +
+                          uploaderAlly), and a re-sim — whose capture has no recorder record at
+                          all, since only the live uploader widget writes one — declares "full"
+                          through packer.UploadOptions.View (set by bringest -resim), without
+                          which the row would keep the marking of the one-sided upload it just
+                          superseded. Everything else is HAND-SET via POST /api/replays/<id>/view
+                          (open, like refresh-settings; body {view, ally}, validated by
+                          parseViewRequest) from the viewer header's POV dropdown, and setView
+                          also re-stamps the current rid's uploads entry so the per-revision
+                          history agrees. upsert COALESCEs it (`view = COALESCE(excluded.view,
+                          view)`): a PUT that states a view wins (it describes the revision the
+                          row now points at), silence keeps what is there — deliberately UNLIKE
                           uploader_ally, which upsert overwrites unconditionally and which a
                           later recorder-less PUT therefore nulls while mergeUploads preserves
                           the truth in uploads[]; that asymmetry is why every deployed row read
-                          uploaderAlly=null. viz.BuildCatalogEntry fills view from the .brp's
-                          Meta.Recorder ("full" when Spectator, else "ally").
+                          uploaderAlly=null. sanitizeEntry ACCEPTS view from the PUT body (only
+                          `uploads` is server-owned) — refusing it, so that setView alone could
+                          write the column, is what made every fresh upload arrive unmarked even
+                          though its stream named the recording side.
                           POST /api/replays/<id>/refresh-settings (open; admin UI) re-derives one
                           row's settings AND players from the BAR API's stored demo metadata (its
                           replay detail carries the demo modoptions verbatim as gameSettings, plus
@@ -882,7 +918,9 @@ never their content — and is the main remaining speed lever (~25-35% at the 60
   `snapshot.ReadBRP`. On completion the CLI
   prints the engine wall-time (split into load + sim, with sim fps/speed-up), the engine
   profiler totals (see "Profiling a run"), `infolog.txt` size, and the snapshot's size.
-- `-progress` (`cmd/barreplay` + `engine.WatchProgress`) polls the tail of
+- `-progress` (`cmd/barreplay` + `engine.WatchProgress`; **default on**, matching
+  `bringest -progress` — a re-sim runs for tens of minutes, so a silent one is the
+  surprising case; `-progress=false` opts out) polls the tail of
   `<data>/infolog.txt` every 2s, parses the newest `[f=<frame>]` marker, and prints
   frame/total, in-game time, %, processing fps, speed-up (fps/30), and ETA. Total game
   length comes from the demo header `GameTime`; the engine sims at 30 frames/game-second.

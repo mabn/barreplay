@@ -96,10 +96,13 @@ export class ReplayIndex extends DurableObject<Env> {
          players = excluded.players,
          uploader_ally = excluded.uploader_ally,
          uploads = excluded.uploads,
-         -- STICKY, unlike uploader_ally above: view is hand-set through
-         -- setView for rows whose capture carries no recorder provenance, and
-         -- a later pipeline PUT knows nothing about it. Overwriting it the way
-         -- uploader_ally is overwritten would silently undo the marking.
+         -- Overwritten by a PUT that states a view, KEPT when one doesn't --
+         -- unlike uploader_ally above, which a provenance-less re-publish
+         -- nulls. A publisher states it only when the capture actually knows
+         -- (a live upload's recorder record, or the re-sim declaring "full"),
+         -- and that describes the revision the row now points at, so it must
+         -- win; silence means "nothing to say", which must never wipe a
+         -- hand-marking made through setView.
          view = COALESCE(excluded.view, view),
          updated_unix = excluded.updated_unix`,
       e.id,
