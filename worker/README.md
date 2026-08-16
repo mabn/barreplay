@@ -109,6 +109,8 @@ worker/
   src/worker/replayentry.ts  catalog row shape + PUT body validation (node-testable, no workerd)
   src/worker/preamble.ts  minimal .brepstream preamble scan for /api/upload (gameId, ally team)
   tools/sync-assets.mjs   copies the vendored icons + the uploader widget into public/ before dev/build
+  tools/smoke.mjs         boots the BUILT worker (vite preview -> workerd + the real asset
+                          layer) and checks what it serves; `npm run deploy` gates on it
   tools/r2put.ts          shared upload backend: parallel S3 PUTs (with R2 creds) or parallel wrangler
   tools/upload.ts         upload a barreplay-static bundle (npm run upload)
 ```
@@ -259,12 +261,44 @@ both backends.
 ```sh
 npm install
 npm run dev         # vite dev — runs the Worker in workerd + HMR (needs a local R2, see below)
-npm run build       # sync icons, build client bundle + Worker into dist/
+npm run build       # sync icons + widget, build client bundle + Worker into dist/
 npm run preview     # preview the production build
+npm run test        # node tests over the real Hono routes (fake bindings, no workerd)
+npm run smoke       # boot the BUILT worker in workerd and check what it actually serves
 npm run typecheck   # tsc --noEmit
 npm run cf-typegen  # regenerate worker-configuration.d.ts from wrangler.jsonc
-npm run deploy      # build, then wrangler deploy (needs Cloudflare auth)
+npm run deploy      # test → sync+build → smoke → wrangler deploy (needs Cloudflare auth)
 ```
+
+`npm run deploy` is the whole deploy: nothing has to be run before or after it.
+The chain is spelled out in `package.json` rather than hidden in hooks —
+
+1. `npm test` — the route-level node tests.
+2. `npm run build` — whose `prebuild` syncs the vendored icons **and the
+   uploader widget** into `public/` (both gitignored, so a build is the only
+   thing that puts them there) and stamps the asset hash + data origin.
+3. `npm run smoke` (`tools/smoke.mjs`) — boots the built Worker under
+   `vite preview` and asserts what it really serves.
+4. `wrangler deploy`.
+
+Step 3 exists because steps 1 and 2 cannot see the **asset layer**, which is
+where this project's deploy bugs live. The node tests use a fake `ASSETS`
+binding that answers any path it is handed, and `vite dev` serves `public/`
+through plain static middleware. Only the real asset server redirects `.html`
+URLs to their extensionless form, answers unmatched paths with `index.html`,
+and applies `public/_headers`. All three have already shipped something that
+passed every local check: `/favicon.ico` as the whole HTML document, and
+`/setup` as an infinite redirect loop (the route rewrote it to `/setup.html`,
+which the asset layer bounced straight back). The smoke checks are those
+failure modes, one per line of output — including that the served
+`replay_uploader.lua` is byte-for-byte the repo's copy.
+
+`npm run typecheck` is deliberately **not** in the chain: it currently reports
+pre-existing `noUnusedLocals` errors in `tests/`, so wiring it in would block
+every deploy on unrelated cleanup.
+
+To ship without the guards (a hotfix, or when `wrangler` is the only step that
+matters), call the last step directly: `npm run build && npx wrangler deploy`.
 
 For local dev, seed the local R2 with a packed bundle (`wrangler dev` binds the
 `preview_bucket_name`):

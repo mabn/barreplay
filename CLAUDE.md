@@ -436,12 +436,32 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           decoder) and, like them, EXCLUDED from run_worker_first: routed through
                           the worker its public/_headers no-cache rule would be silently dead, and
                           it is the one asset whose bytes change under a stable URL (its URL is
-                          printed in a guide, so it cannot be fingerprinted). /setup itself needs
-                          the app.ts route: extensionless, it would otherwise reach the catch-all
-                          and be answered with the viewer's index.html by the asset layer's
-                          single-page-application handling. The Go viz server serves the same page
+                          printed in a guide, so it cannot be fingerprinted). The /setup route in
+                          app.ts exists only to serve the page no-cache; it hands the request to
+                          ASSETS UNCHANGED, because the asset layer resolves the extensionless
+                          path itself and its default HTML handling (auto-trailing-slash) answers
+                          a /setup.html URL with a 307 to /setup — so rewriting the path fed that
+                          bounce back into the same route and shipped /setup as an INFINITE
+                          REDIRECT LOOP. The Go viz server serves the same page
                           and the same widget from its embedded copies (worker/assets.go embeds
                           public/setup.html; assets.ReplayUploaderLua is the widget).
+                          DEPLOYING: `npm run deploy` is the whole thing — test -> build (whose
+                          prebuild syncs the icons AND the widget into the gitignored public/
+                          copies) -> smoke -> wrangler deploy, spelled out in package.json rather
+                          than hidden in npm hooks. The smoke step (tools/smoke.mjs) boots the
+                          BUILT worker under `vite preview` — workerd plus the REAL asset layer —
+                          and checks what it actually serves. It is not redundant with
+                          worker/tests: those drive the Hono routes with a fake ASSETS binding
+                          that answers whatever path it is handed, and `vite dev` serves public/
+                          through plain static middleware, so NEITHER can see the three asset-layer
+                          behaviours that have each already shipped a broken page — the .html
+                          redirect above, single-page-application answering an unmatched path with
+                          index.html (/favicon.ico once served the whole HTML document), and
+                          public/_headers applying only to asset-layer responses. Every request in
+                          the smoke uses redirect:"manual", since the loop was a chain of 307s that
+                          curl -L and a browser both reported as something else. typecheck is
+                          deliberately NOT in the chain: it reports pre-existing noUnusedLocals
+                          errors in tests/, so wiring it in would block every deploy.
                           Uploads (tools/upload.ts) go
                           through tools/r2put.ts: parallel S3 PUTs when R2_ACCESS_KEY_ID/
                           R2_SECRET_ACCESS_KEY are set (fast, aws4fetch), else parallel `wrangler r2
