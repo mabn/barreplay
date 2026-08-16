@@ -2466,23 +2466,33 @@ function startFpsMonitor() {
 async function fetchReplayList() {
   const query = filterQuery();
   let catalog = [];
+  let haveCatalog = false;
   try {
     const r = await fetch('/api/replays' + (query ? '?' + query : ''));
-    if (r.ok) catalog = await r.json();
+    if (r.ok) { catalog = await r.json(); haveCatalog = true; }
   } catch (_) { /* fall through to /index.json */ }
+
+  // /index.json is NOT a file — the worker builds it per request by paging the
+  // bucket's whole replays/ prefix (~3.4k objects: every head, keys, resources
+  // and 64-sample chunk of every published revision, 1000 per round trip). It
+  // costs ~1.5 s against the catalog's ~90 ms, and all it adds is replays whose
+  // FILES exist but which were never registered in the catalog. So fetch it
+  // only when it can change what is shown:
+  //   - no catalog: it is the whole listing (old deployment / plain static host)
+  //   - admin mode: orphaned uploads are precisely what an admin is looking for
+  // and never under a filter — a stub has no map, size, roster or settings, so
+  // no filter can be true of it, and answering "8v8 on Supreme Isthmus" with
+  // rows that are neither would be a lie.
+  const wantFiles = !haveCatalog || (adminMode() && query === '');
   let files = [];
-  try {
-    const r = await fetch('/index.json');
-    if (r.ok) files = await r.json();
-  } catch (err) {
-    if (!catalog.length) throw err;
+  if (wantFiles) {
+    try {
+      const r = await fetch('/index.json');
+      if (r.ok) files = await r.json();
+    } catch (err) {
+      if (!catalog.length) throw err;
+    }
   }
-  // A filtered list is a claim about what matches, so the uncataloged stubs
-  // below are left out while a filter is active: they have no map, size,
-  // roster or settings, so no filter could ever be true of them, and showing
-  // them anyway would mean answering "8v8 games on Supreme Isthmus" with rows
-  // that are neither.
-  if (query) files = [];
   // Revisioned publishes are append-only, so the bucket accumulates every
   // <gameId>-<8 hex> revision ever uploaded; the catalog's rid names the
   // current one. Hide the listing's other revisions of a cataloged game —
@@ -2679,10 +2689,18 @@ function urlId(e) {
 // replay, or any <gameId>-<8 hex> revision of a cataloged game — superseded
 // revisions are hidden from the list but never deleted, so an old shared
 // link keeps playing.
+//
+// replayList is no longer the whole catalog — it is what the current FILTERS
+// matched, and it omits the uncataloged stubs unless something asked for them —
+// so a miss here is not evidence that the replay does not exist. A well-formed
+// id is therefore worth trying on its own: loadReplay fetches one head and
+// reports a real failure if the bytes are not there, which beats silently
+// dropping the visitor on the list with no explanation.
 function knownReplayURL(wanted) {
   if (replayList.some(e => e.id === wanted || e.rid === wanted)) return true;
   const m = /^(.+)-[0-9a-f]{8}$/.exec(wanted);
-  return !!m && replayList.some(e => e.id === m[1]);
+  if (m && replayList.some(e => e.id === m[1])) return true;
+  return /^[A-Za-z0-9_-]{1,128}$/.test(wanted);
 }
 
 let replayList = [];
