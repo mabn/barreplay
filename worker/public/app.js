@@ -1972,8 +1972,9 @@ function incomePeaks(simFrame) {
   return peak;
 }
 
-// Player list: rank, flag, OS (skill), name — then a metal and an energy income
-// meter — grouped by ally team. Economy comes from the current frame's per-team
+// Player list: rank, flag, OS (skill), name — then the metal and energy meters
+// side by side, one line per player — grouped by ally team. Economy comes from
+// the current frame's per-team
 // resources (a player controls one team). Spectators have no economy and are
 // listed dimmed at the end. Player-leaving isn't tracked yet, so everyone shows
 // for the whole replay.
@@ -2030,7 +2031,9 @@ function playerRow(p, r, peaks) {
   const os = `<span class="os">${p.skill ? p.skill.toFixed(1) : ''}</span>`;
   let html =
     `<div class="phead">${rank}${flag}${os}` +
-    `<span class="pname" style="color:${color}">${escapeHtml(p.name)}</span></div>`;
+    // Two meters on one line leave the name ~70px, so it ellipsizes often —
+    // the title keeps the full name reachable.
+    `<span class="pname" title="${escapeHtml(p.name)}" style="color:${color}">${escapeHtml(p.name)}</span></div>`;
   if (r) {
     html += '<div class="pres">' +
       resRow('metal', r.metal, r.mStore, r.mInc, peaks.m) +
@@ -2059,7 +2062,7 @@ function resRow(kind, cur, store, inc, peak) {
     `<i class="binc" style="width:${(incFrac * 100).toFixed(1)}%"></i>` +
     `<i class="bstore" style="width:${(storeFrac * 100).toFixed(1)}%"></i>` +
     `<b class="rinc">${incStr}</b>` +
-    `<b class="rstore">${fmtNum(cur)} / ${fmtNum(store)}</b>` +
+    `<b class="rstore">${fmtNum(cur)}/${fmtNum(store)}</b>` +
     '</span></div>';
 }
 
