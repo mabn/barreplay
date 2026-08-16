@@ -25,7 +25,7 @@
 import { Hono } from "hono";
 
 import { archiveSuffix, scanStreamPreamble } from "./preamble";
-import { parseViewRequest, playersFromApi, sanitizeEntry, settingsFlags } from "./replayentry";
+import { parseReplayFilter, parseViewRequest, playersFromApi, sanitizeEntry, settingsFlags } from "./replayentry";
 
 /** Upload size cap: keeps a whole raw stream comfortably inside Worker memory
  * and under every plan's request-body limit. Real streams are single-digit MB
@@ -50,9 +50,22 @@ const authorized = (c: { env: Env; req: { header(name: string): string | undefin
 // after a replay's static files land in the bucket.
 const indexStub = (env: Env) => env.REPLAY_INDEX.get(env.REPLAY_INDEX.idFromName("index"));
 
+// Query params narrow the listing (parseReplayFilter documents them); no
+// params means the whole catalog, so an older front-end sees no change. The
+// filtering is SQL, not a pass over the JSON, because the list is the one
+// endpoint whose cost grows with the archive.
 app.get("/api/replays", async (c) => {
-  const list = await indexStub(c.env).list();
+  const filter = parseReplayFilter(new URL(c.req.url).searchParams);
+  if (typeof filter === "string") return c.json({ error: filter }, 400);
+  const list = await indexStub(c.env).list(filter);
   return c.json(list, 200, { "cache-control": "no-cache" });
+});
+
+// The distinct values present in the catalog, for the filter bar's choices.
+// Deliberately unfiltered — see ReplayIndex.facets.
+app.get("/api/replays/facets", async (c) => {
+  const facets = await indexStub(c.env).facets();
+  return c.json(facets, 200, { "cache-control": "no-cache" });
 });
 
 // Writes are guarded by a shared secret when the REPLAY_PUT_TOKEN secret is

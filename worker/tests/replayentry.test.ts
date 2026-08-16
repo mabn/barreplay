@@ -34,6 +34,8 @@ test("full entry passes through", () => {
       { ally: 0, count: 8, players: [{ name: "alpha", os: 35.2 }, { name: "beta" }] },
       { ally: 1, count: 8, players: [{ name: "gamma", os: 28 }] },
     ],
+    // Derived from the roster's counts, not read from the body.
+    playerCount: 16,
     uploaderAlly: 1,
     uploads: null,
     view: null,
@@ -52,6 +54,7 @@ test("missing stats become null, unknown fields are dropped", () => {
     sizeBytes: null,
     settings: null,
     players: null,
+    playerCount: null, // no roster and no size spec to count from
     uploaderAlly: null,
     uploads: null,
     view: null,
@@ -100,8 +103,13 @@ test("players roster: empty becomes null, bad shapes are rejected, caps hold", (
   assert.equal(sanitizeEntry("abc", { players: [{ ally: "x", count: 1, players: [] }] }), "players[].ally must be an integer");
   assert.equal(sanitizeEntry("abc", { players: [{ ally: 0, count: 1, players: [{ name: "" }] }] }), "player name must be a non-empty string");
   assert.equal(sanitizeEntry("abc", { players: [{ ally: 0, count: 1, players: [{ name: "a", os: "35" }] }] }), "player os must be a finite number");
-  const nineDeep = [{ ally: 0, count: 9, players: Array.from({ length: 9 }, (_, i) => ({ name: `p${i}` })) }];
-  assert.equal(sanitizeEntry("abc", { players: nineDeep }), "players[].players must be an array of at most 8");
+  // The per-ally cap is a FILTER limit (a name not stored cannot be filtered
+  // on), so it sits above the largest side BAR fields rather than at the
+  // handful of names the list prints.
+  const tooDeep = [{ ally: 0, count: 33, players: Array.from({ length: 33 }, (_, i) => ({ name: `p${i}` })) }];
+  assert.equal(sanitizeEntry("abc", { players: tooDeep }), "players[].players must be an array of at most 32");
+  const bigSide = [{ ally: 0, count: 25, players: Array.from({ length: 25 }, (_, i) => ({ name: `p${i}` })) }];
+  assert.ok(typeof sanitizeEntry("abc", { players: bigSide }) === "object", "a 25v25 side must fit");
   const manyAllies = Array.from({ length: 17 }, (_, i) => ({ ally: i, count: 1, players: [{ name: "p" }] }));
   assert.equal(sanitizeEntry("abc", { players: manyAllies }), "players must have at most 16 ally teams");
 });
@@ -183,8 +191,10 @@ test("settingsFlags mirrors the Go distillation", () => {
 });
 
 // playersFromApi rebuilds the players column from the BAR API's AllyTeams:
-// same shape and top-5 cap as viz.BuildCatalogEntry's .brp-derived roster.
-test("playersFromApi: allies ascend, humans sort by OS, AIs follow, cap holds", () => {
+// same shape and same CATALOG_PLAYERS_PER_ALLY cap as viz.BuildCatalogEntry's
+// .brp-derived roster. This route is also the backfill for rows published
+// under the old cap of 5, so it must keep EVERY name the API reports.
+test("playersFromApi: allies ascend, humans sort by OS, AIs follow", () => {
   assert.equal(playersFromApi(undefined), null);
   assert.equal(playersFromApi([]), null);
   assert.equal(playersFromApi([{ allyTeamId: 0, Players: [], AIs: [] }]), null);
@@ -203,14 +213,15 @@ test("playersFromApi: allies ascend, humans sort by OS, AIs follow, cap holds", 
     { allyTeamId: "bogus", Players: [{ name: "dropped" }] },
   ]);
   assert.deepEqual(got, [
-    // Six slots on ally 1 -> count 6, top 5 kept; the unrated player sorts last (dropped by the cap).
+    // Six slots on ally 1 -> count 6 and all six kept; the unrated player
+    // sorts last but is still stored, so the list can be filtered by them.
     { ally: 0, count: 2, players: [{ name: "human", os: 25 }, { name: "RaptorsAI" }] },
     {
       ally: 1,
       count: 6,
       players: [
         { name: "e", os: 50 }, { name: "a", os: 40 }, { name: "c", os: 30 },
-        { name: "d", os: 20 }, { name: "f", os: 10 },
+        { name: "d", os: 20 }, { name: "f", os: 10 }, { name: "b" },
       ],
     },
   ]);

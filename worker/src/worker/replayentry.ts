@@ -27,10 +27,18 @@ export interface ReplayEntry {
    * so a vanilla ranked game is just {ranked: true}. Null when the uploader
    * had no demo to read (pack -no-demo). */
   settings: Record<string, boolean | string> | null;
-  /** Roster for the landing list: one group per ally team (ascending ally
-   * id), each carrying the ally's top players by OpenSkill ("os") with count
-   * keeping the ally's true size (viz.BuildCatalogEntry caps the slice). */
+  /** Roster for the landing list AND the list's player filter: one group per
+   * ally team (ascending ally id), each carrying the ally's players sorted by
+   * OpenSkill ("os") with count keeping the ally's true size. The slice is
+   * capped at CATALOG_PLAYERS_PER_ALLY, which is why that cap is generous
+   * rather than display-sized — a name missing from here cannot be filtered
+   * on, and at the old cap of 5 an 8v8 hid three players per side. */
   players: CatalogTeam[] | null;
+  /** Total players in the game, Gaia/scavenger teams excluded — the "size"
+   * the list filters on. DERIVED (derivePlayerCount), never read from a PUT
+   * body: it is the roster's summed counts, falling back to the gameSize spec
+   * when a row has no roster at all. Null when neither is available. */
+  playerCount: number | null;
   /** Ally team of the client that recorded the capture behind the current
    * revision — which side's point of view the replay shows. Null for engine
    * re-sim captures and spectator recordings (they see the whole game). */
@@ -65,6 +73,122 @@ export interface UploadRef {
   rid: string;
   ally: number | null;
 }
+
+/** ReplayFilter narrows GET /api/replays. Every field is independent and
+ * ANDed; a null (or empty settings) means "don't restrict on this". The same
+ * shape is applied by the Durable Object in SQL and by the Go viz server over
+ * its computed list (internal/viz/catalog.go), so the one front-end filters
+ * identically against either backend. */
+export interface ReplayFilter {
+  /** Inclusive bounds on startUnix (unix seconds). */
+  from: number | null;
+  to: number | null;
+  /** Exact map name. */
+  map: string | null;
+  /** Inclusive bounds on playerCount (Gaia excluded — see derivePlayerCount). */
+  minPlayers: number | null;
+  maxPlayers: number | null;
+  /** Case-insensitive PREFIX of a player's name; the row matches when any
+   * player in its roster matches. A prefix rather than a substring because it
+   * answers to an index range scan, and because the UI offers the known names
+   * as completions anyway. */
+  player: string | null;
+  /** Settings flags that must ALL be present on the row (the list's badges). */
+  settings: string[];
+}
+
+/** The empty filter: matches every row. */
+export function emptyFilter(): ReplayFilter {
+  return { from: null, to: null, map: null, minPlayers: null, maxPlayers: null, player: null, settings: [] };
+}
+
+const FILTER_MAX_SETTINGS = 16;
+
+/** parseReplayFilter reads a ReplayFilter off a GET /api/replays query string,
+ * or returns a string describing what was malformed. Dates accept either unix
+ * seconds or YYYY-MM-DD; a YYYY-MM-DD `to` covers the WHOLE day (a date range
+ * that silently excluded its last day would be a quiet lie about the result).
+ * Unknown params are ignored, so an older front-end and a newer worker keep
+ * working together. */
+export function parseReplayFilter(params: URLSearchParams): ReplayFilter | string {
+  const f = emptyFilter();
+
+  const date = (key: string, endOfDay: boolean): number | null | string => {
+    const raw = (params.get(key) ?? "").trim();
+    if (raw === "") return null;
+    if (/^-?\d+$/.test(raw)) return Number(raw);
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+    if (!m) return `${key} must be unix seconds or YYYY-MM-DD`;
+    const t = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) / 1000;
+    if (!Number.isFinite(t)) return `${key} is not a valid date`;
+    return endOfDay ? t + 86399 : t;
+  };
+  const from = date("from", false);
+  if (typeof from === "string") return from;
+  const to = date("to", true);
+  if (typeof to === "string") return to;
+  f.from = from;
+  f.to = to;
+
+  const int = (key: string): number | null | string => {
+    const raw = (params.get(key) ?? "").trim();
+    if (raw === "") return null;
+    if (!/^\d{1,4}$/.test(raw)) return `${key} must be a non-negative integer`;
+    return Number(raw);
+  };
+  const minP = int("minPlayers");
+  if (typeof minP === "string") return minP;
+  const maxP = int("maxPlayers");
+  if (typeof maxP === "string") return maxP;
+  f.minPlayers = minP;
+  f.maxPlayers = maxP;
+
+  const map = (params.get("map") ?? "").trim();
+  if (map !== "") f.map = map.slice(0, 200);
+  const player = (params.get("player") ?? "").trim();
+  if (player !== "") f.player = player.slice(0, 64).toLowerCase();
+
+  const settings = (params.get("settings") ?? "").trim();
+  if (settings !== "") {
+    const flags = [...new Set(settings.split(",").map((s) => s.trim()).filter(Boolean))];
+    if (flags.length > FILTER_MAX_SETTINGS) return `at most ${FILTER_MAX_SETTINGS} settings flags`;
+    for (const flag of flags) {
+      if (!/^[A-Za-z0-9_]{1,40}$/.test(flag)) return `invalid settings flag ${JSON.stringify(flag)}`;
+    }
+    f.settings = flags;
+  }
+  return f;
+}
+
+/** filterIsEmpty reports whether a filter restricts anything at all. */
+export function filterIsEmpty(f: ReplayFilter): boolean {
+  return (
+    f.from === null && f.to === null && f.map === null &&
+    f.minPlayers === null && f.maxPlayers === null &&
+    f.player === null && f.settings.length === 0
+  );
+}
+
+/** ReplayFacets are the distinct values present in the catalog, so the filter
+ * UI can offer real choices instead of free text. Served by
+ * GET /api/replays/facets by both backends. */
+export interface ReplayFacets {
+  maps: string[];
+  /** Distinct playerCount values, ascending. */
+  sizes: number[];
+  /** Distinct player names (display spelling), capped — see FACET_PLAYERS_MAX. */
+  players: string[];
+  /** Distinct settings flags present on some row. */
+  settings: string[];
+  /** Oldest and newest start time in the catalog, for the date inputs. */
+  from: number | null;
+  to: number | null;
+}
+
+/** FACET_PLAYERS_MAX bounds the name list a facets reply carries. The names
+ * are only completions — the filter itself matches server-side against the
+ * full index — so truncating the list costs discoverability, never results. */
+export const FACET_PLAYERS_MAX = 2000;
 
 // Guardrails for the settings object: it is stored verbatim (a JSON column),
 // so cap how much an uploader can stuff into it.
@@ -136,6 +260,9 @@ export function sanitizeEntry(id: string, body: unknown): ReplayEntry | string {
     gameSize: strs.gameSize,
     settings,
     players,
+    // Derived here rather than accepted, so every writer (publish PUT, admin
+    // refresh, backfill) counts a game the same way.
+    playerCount: derivePlayerCount(players, strs.gameSize),
     uploaderAlly,
     // Server-owned: the index accumulates this across PUTs (mergeUploads);
     // whatever a PUT body claims is ignored.
@@ -144,10 +271,44 @@ export function sanitizeEntry(id: string, body: unknown): ReplayEntry | string {
   };
 }
 
+/** derivePlayerCount totals a game's players with Gaia/scavengers excluded.
+ *
+ * The roster is the authority: catalogPlayers only groups allies that have
+ * players, so summing its counts already drops the neutral team. gameSize is
+ * the fallback for a row with no roster, and only a fallback — it is built
+ * from the TEAM list, where a scavenger ally survives the Gaia rule (that team
+ * carries a side/name), so an 8v8-with-scavengers reads "8v8v1" there while
+ * its roster correctly totals 16. Null when neither source can answer. */
+export function derivePlayerCount(
+  players: CatalogTeam[] | null,
+  gameSize: string | null,
+): number | null {
+  if (players !== null && players.length > 0) {
+    let n = 0;
+    for (const g of players) n += g.count;
+    return n;
+  }
+  if (gameSize !== null && /^\d+(v\d+)*$/.test(gameSize)) {
+    let n = 0;
+    for (const part of gameSize.split("v")) n += Number(part);
+    return n;
+  }
+  return null;
+}
+
 // Guardrails for the players roster (stored verbatim as a JSON column).
+//
+// CATALOG_PLAYERS_PER_ALLY is the roster cap, and it is a FILTER limit, not a
+// display one: the list's "player was in the game" filter can only match names
+// the row actually stores, so anyone trimmed here is unfindable. It was 5 —
+// enough for the three names the list prints per side — which left every 8v8
+// storing 5 of 8 players and a 25v25 storing 5 of 25. 32 covers the largest
+// games BAR runs; the twin cap lives in viz.catalogPlayersPerAlly (Go) and the
+// two must stay in lockstep.
+export const CATALOG_PLAYERS_PER_ALLY = 32;
 const PLAYERS_MAX_ALLIES = 16;
-const PLAYERS_MAX_PER_ALLY = 8;
-const PLAYERS_MAX_JSON = 8192;
+const PLAYERS_MAX_PER_ALLY = CATALOG_PLAYERS_PER_ALLY;
+const PLAYERS_MAX_JSON = 32768;
 
 // sanitizePlayers validates the players roster: an array of ally-team groups
 // {ally, count, players: [{name, os?}]}, matching viz.BuildCatalogEntry's
@@ -229,9 +390,13 @@ export function settingsFlags(mo: Record<string, string>): Record<string, boolea
 /** playersFromApi rebuilds the catalog's players column from the BAR API's
  * replay-detail AllyTeams array (its stored copy of the demo's roster) — the
  * admin refresh route's counterpart to viz.BuildCatalogEntry's .brp-derived
- * roster: same shape, same top-5-per-ally-by-OS cap. Human players sort
+ * roster: same shape, same CATALOG_PLAYERS_PER_ALLY cap. Human players sort
  * best-OS-first; AI slots (Raptors, BARb bots — no rating) follow after.
- * Null when the reply names nobody. */
+ * Null when the reply names nobody.
+ *
+ * This route is also how rows published under the old cap of 5 get their full
+ * roster back — the API keeps the demo's whole AllyTeams list, so a refresh
+ * re-derives every name without repacking or re-uploading anything. */
 export function playersFromApi(allyTeams: unknown): CatalogTeam[] | null {
   if (!Array.isArray(allyTeams)) return null;
   const groups: CatalogTeam[] = [];
@@ -253,7 +418,7 @@ export function playersFromApi(allyTeams: unknown): CatalogTeam[] | null {
       if (typeof name === "string" && name !== "") ps.push({ name });
     }
     if (ps.length === 0) continue;
-    groups.push({ ally: a.allyTeamId, count: ps.length, players: ps.slice(0, 5) });
+    groups.push({ ally: a.allyTeamId, count: ps.length, players: ps.slice(0, CATALOG_PLAYERS_PER_ALLY) });
   }
   groups.sort((x, y) => x.ally - y.ally);
   return groups.length ? groups : null;

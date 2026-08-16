@@ -180,15 +180,48 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           spec like "8v8", bundle bytes) lives in a SQLite table inside a Durable
                           Object (src/worker/replayindex.ts, single instance, wrangler migration v1
                           new_sqlite_classes): GET /api/replays lists it newest-game-first (null
-                          start times last), PUT /api/replays/<id> upserts (called by pack -upload
+                          start times last), FILTERED by its query params (parseReplayFilter:
+                          from/to — unix seconds or YYYY-MM-DD, where a YYYY-MM-DD `to` covers the
+                          whole day — map, minPlayers/maxPlayers, player = a case-insensitive name
+                          PREFIX, settings = comma-separated flags that must ALL be present; no
+                          params = the whole catalog, unknown params ignored so an older front-end
+                          still works). Filtering is SQL, not a pass over the JSON: name and flag
+                          predicates hit the derived tables replay_players(replay_id, name_lower,
+                          name) and replay_settings(replay_id, flag), which are DELETED and rebuilt
+                          from the row on every write (upsert, refreshFromApi) so they cannot drift
+                          and so a re-publish that drops a player stops matching them; every
+                          predicate is index-backed (replays_start / replays_map / replays_count and
+                          the two derived tables' covering indexes — verified with EXPLAIN QUERY
+                          PLAN, no sequential scans). The prefix match is a >= / < RANGE rather than
+                          LIKE, since SQLite's case-insensitive LIKE cannot use an index. The WHERE
+                          clause is built from the predicates actually set, NOT a fixed
+                          `(? IS NULL OR col = ?)` chain, which hides the column behind an OR and
+                          forces a scan. schema_meta.derived_version (DERIVED_VERSION) triggers a
+                          one-time rebuild of playerCount + both tables on the next wake when it is
+                          bumped, which is also how rows predating them were backfilled.
+                          GET /api/replays/facets serves the distinct maps/sizes/player names/flags
+                          plus the catalog's date span, so the filter bar offers only choices that
+                          match something; it is computed over the WHOLE catalog, never the current
+                          result set (options that vanish as you filter cannot be used to change
+                          your mind). PUT /api/replays/<id> upserts (called by pack -upload
                           and the ingest daemon; optionally guarded by the REPLAY_PUT_TOKEN wrangler
                           secret as a bearer token). Rows are keyed by the BARE gameId and carry a
                           nullable `rid` (the <gameId>-<rev> revision the pieces are actually served
                           under — see the internal/packer entry; the front-end fetches at rid ?? id)
                           plus a nullable `settings` object (notable game-settings badges: ranked/
                           unranked, lava, mods, zombies, ruins, …) sourced from the demo fetch — see
-                          the internal/packer entry — plus `players` (per-ally roster slices, top 5
-                          by OS with the ally's true count, from viz.BuildCatalogEntry), a nullable
+                          the internal/packer entry — plus `players` (per-ally rosters by OS with the
+                          ally's true count, from viz.BuildCatalogEntry, capped at
+                          catalogPlayersPerAlly / CATALOG_PLAYERS_PER_ALLY = 32 — a FILTER limit, not
+                          a display one: the list filters by "was this player in the game" and can
+                          only match names a row stores, so the old cap of 5 left every 8v8 hiding
+                          three players a side; rows published under it get their full roster back
+                          from the admin refresh-settings route, which re-derives from the BAR API),
+                          a derived `playerCount` (total players, Gaia/scavengers excluded — the
+                          size the list filters on: derivePlayerCount sums the ROSTER's counts and
+                          only falls back to the gameSize spec, because gameSize is built from the
+                          TEAM list where a scavenger ally survives, rendering an 8v8-with-scavs as
+                          "8v8v1"), a nullable
                           `uploaderAlly` (the recording client's side, from the .brp meta's
                           `recorder` — the live uploader widget's GAME line; null for re-sim/
                           spectator captures), and a server-owned `uploads` list ([{rid, ally}],
@@ -234,11 +267,16 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           app.js: scavUnits/extraUnits/noAir — too common to badge) and suppresses
                           `mods` next to lava/zombies (those modes ship as tweak blobs, which is
                           what `mods` detects) — display choices only, the data stays in the rows.
-                          Row shape + PUT validation live in src/worker/replayentry.ts
+                          Row shape + PUT validation + the filter/facet contract live in
+                          src/worker/replayentry.ts
                           (pure, node-tested) and MUST stay in lockstep with internal/viz/catalog.go,
                           which serves the same GET /api/replays computed live from .brp files so the
                           shared front-end works against both backends (the Go server leaves rid
-                          null — its files are unrevisioned). The front-end landing page
+                          null — its files are unrevisioned — and implements NO filtering: it lists a
+                          local directory, so it ignores the query params and 404s /facets, which is
+                          exactly what keeps the filter bar off there. The one Go-side piece the
+                          filters DO depend on is catalogPlayersPerAlly, because BuildCatalogEntry is
+                          what builds the roster the worker stores). The front-end landing page
                           (no ?replay= in the URL) renders the catalog as the replay list, merged
                           with /index.json so an uploaded-but-unregistered replay still shows (stats
                           dashed) while superseded revisions of cataloged games are hidden (their
@@ -249,6 +287,20 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the side that recorded the current upload, the Links cell adds an alt·T<n>
                           SPA link per other uploaded revision (from the row's `uploads`), and
                           ?admin=true reveals a per-row ⟳ button calling the refresh-settings route.
+                          FILTER BAR (app.js initFilters, above the table): date from/to, map, exact
+                          player count, player name (a datalist of the known names, debounced 300 ms)
+                          and one toggle chip per settings flag. Every control writes a URL param and
+                          re-queries GET /api/replays — the filtering is the server's, so the count it
+                          reports is the true number of matches, not what happened to be fetched. The
+                          state lives in the URL (history.replaceState, so filtering is not
+                          navigation and the back button leaves the list rather than stepping through
+                          keystrokes), which makes a filtered list shareable and survive a refresh,
+                          and replayHref carries it into a replay so returning lands on the same list.
+                          While any filter is active the /index.json-only stubs are dropped: they have
+                          no map, size, roster or settings, so no filter could be true of them. The
+                          bar stays HIDDEN unless GET /api/replays/facets answers — the Go viz server
+                          serves the same catalog shape from local files with no filtering behind it,
+                          and a filter bar that silently does nothing is worse than none.
                           DRAG&DROP UPLOADS: the landing page's dropzone POSTs a raw .brepstream to
                           /api/upload (open endpoint; the Hono app lives in src/worker/app.ts, kept
                           free of workerd imports so worker/tests drive the real routes; index.ts is

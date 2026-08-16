@@ -44,7 +44,8 @@ inside a **Durable Object** (`src/worker/replayindex.ts`, single instance, migra
 
 | URL | What |
 | --- | --- |
-| `GET /api/replays` | the catalog, newest game first (rows with no start time last) — `[{id, rid, startUnix, durationSec, map, gameSize, sizeBytes, settings}]`, nulls for unknown stats |
+| `GET /api/replays` | the catalog, newest game first (rows with no start time last) — `[{id, rid, startUnix, durationSec, map, gameSize, sizeBytes, settings, players, playerCount}]`, nulls for unknown stats. Filterable: `?from=&to=` (unix seconds or `YYYY-MM-DD`, `to` covers the whole day), `?map=`, `?minPlayers=&maxPlayers=` (Gaia excluded), `?player=` (case-insensitive name prefix), `?settings=lava,zombies` (all must be present). No params = everything; unknown params are ignored |
+| `GET /api/replays/facets` | the distinct `{maps, sizes, players, settings, from, to}` in the catalog, so the filter bar only offers choices that match something. Computed over the whole catalog, not the filtered result |
 | `PUT /api/replays/<id>` | upsert one row (same JSON shape, minus `id`); called by `pack -upload` / the ingest daemon after a replay's files land in the bucket |
 
 `rid` is the **revision** the replay's pieces are actually served under:
@@ -83,7 +84,9 @@ curl -X PUT https://<worker-host>/api/replays/<gameId> \
 The Go viz server (`cmd/barreplay-viz`) serves the same `GET /api/replays` shape
 computed live from its `.brp` files (`internal/viz/catalog.go`), so the shared front-end
 works against both backends; the row shape must stay in lockstep with
-`src/worker/replayentry.ts`.
+`src/worker/replayentry.ts`. It does **not** implement the filters — it lists a local
+directory of a few captures — so it ignores the query params and has no `/facets`
+route, and the front-end hides the filter bar when that route is missing.
 
 ## Layout
 
