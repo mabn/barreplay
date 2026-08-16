@@ -575,7 +575,7 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   8. Presence in the map == it's a structure, so the front-end draws a footprint rectangle
   only for those (mobile units carry no entry). This is
   best-effort — a capture predating the unit-def footprint dump has empty `XSize`, so no
-  footprints; the **Footprints** checkbox toggles the layer. Unlike icons, footprints are drawn
+  footprints; the layer is off by default (`showFootprints`). Unlike icons, footprints are drawn
   in world space, so they scale with zoom and are centred on the unit position (the footprint
   centre).
 - **`internal/viz/icons.go`** renders **real BAR unit icons**. It embeds the vendored icon
@@ -590,14 +590,17 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   into a team-colour field then clipped to its own alpha, preserving the internal detail;
   cached per icon×team) at a **constant
   screen size** (`ICON_PX_PER_SIZE * size`, independent of zoom, like BAR's minimap — so icons
-  spread apart when zoomed in and overlap when zoomed out). The base px-per-size-unit is a
-  UI slider (`iconScale`, persisted as `?iconsize=`); the Icons checkbox switches to plain
-  dots. A unit with no/loading icon shows a coloured dot so it is never invisible — and
+  spread apart when zoomed in and overlap when zoomed out). The base px-per-size-unit is
+  `iconScale`, FIXED at 12 — it and the render toggles (icons/grid/footprints/build
+  lines/team colours) were a checkbox row above the canvas, now deleted along with the
+  `?iconsize=` param that persisted the slider: they are plain `const`s at the top of
+  app.js, so changing one is an edit rather than a UI state every draw path has to carry.
+  A unit with no/loading icon shows a coloured dot so it is never invisible — and
   since a replay requests all 300-650 of its icons in one burst at load, a dropped
   response is routine, so `getImage` RETRIES a failed path (3 attempts, 2 s apart)
   instead of caching the failure; caching it dotted that unit type until the page was
   reloaded. The
-  selected replay and icon size are both kept in the URL, so a refresh/shared link restores them.
+  selected replay is kept in the URL, so a refresh/shared link restores it.
   Icon fitting (`growIcons`, always on) makes a *building's* icon grow to 90%
   of its footprint (`0.9 * min(fpW,fpH) * scale`) once that exceeds the constant size — i.e.
   it stays constant when zoomed out and fills the footprint when zoomed in; mobile units
