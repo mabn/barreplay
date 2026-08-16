@@ -2464,9 +2464,10 @@ function startFpsMonitor() {
 // which was never PUT into the catalog still shows up — and it is the whole
 // fallback when /api/replays doesn't exist (old deployment, plain static host).
 async function fetchReplayList() {
+  const query = filterQuery();
   let catalog = [];
   try {
-    const r = await fetch('/api/replays');
+    const r = await fetch('/api/replays' + (query ? '?' + query : ''));
     if (r.ok) catalog = await r.json();
   } catch (_) { /* fall through to /index.json */ }
   let files = [];
@@ -2476,6 +2477,12 @@ async function fetchReplayList() {
   } catch (err) {
     if (!catalog.length) throw err;
   }
+  // A filtered list is a claim about what matches, so the uncataloged stubs
+  // below are left out while a filter is active: they have no map, size,
+  // roster or settings, so no filter could ever be true of them, and showing
+  // them anyway would mean answering "8v8 games on Supreme Isthmus" with rows
+  // that are neither.
+  if (query) files = [];
   // Revisioned publishes are append-only, so the bucket accumulates every
   // <gameId>-<8 hex> revision ever uploaded; the catalog's rid names the
   // current one. Hide the listing's other revisions of a cataloged game —
@@ -2494,6 +2501,172 @@ async function fetchReplayList() {
     catalog.push({ id: f.file, rid: null, startUnix: null, durationSec: null, map: null, gameSize: null, sizeBytes: f.size ?? null });
   }
   return catalog;
+}
+
+// ---- catalog filters -------------------------------------------------------
+// The filter bar narrows GET /api/replays server-side (the Worker's catalog is
+// SQLite, indexed on each of these), so the list stays honest as the archive
+// grows past what a page can hold. The controls' state lives in the PAGE URL —
+// a filtered list is then shareable and survives a refresh, and openReplay's
+// replayHref carries it into a replay so the back button returns to the same
+// filtered list.
+//
+// The bar is shown only once /api/replays/facets answers: the Go viz server
+// serves the same catalog shape from local files with no filtering behind it,
+// and a filter bar that silently does nothing is worse than none.
+const FILTER_KEYS = ['from', 'to', 'map', 'minPlayers', 'maxPlayers', 'player', 'settings'];
+let facets = null;
+
+// filterQuery renders the active filters as a query string (empty when none
+// are set). Read from the URL, so it is the same source the controls restore
+// from and there is no second copy of the state to drift.
+function filterQuery() {
+  const cur = new URLSearchParams(location.search);
+  const out = new URLSearchParams();
+  for (const k of FILTER_KEYS) {
+    const v = (cur.get(k) ?? '').trim();
+    if (v) out.set(k, v);
+  }
+  return out.toString();
+}
+
+// setFilter writes one control's value into the URL without a history entry
+// (filtering is not navigation — the back button should leave the list, not
+// step through every keystroke) and reloads the list.
+function setFilter(key, value) {
+  const u = new URL(location.href);
+  if (value === '' || value === null || value === undefined) u.searchParams.delete(key);
+  else u.searchParams.set(key, value);
+  history.replaceState(null, '', u);
+  reloadList();
+}
+
+let reloadSeq = 0;
+async function reloadList() {
+  const seq = ++reloadSeq;
+  try {
+    const list = await fetchReplayList();
+    if (seq !== reloadSeq) return; // a newer filter change already went out
+    replayList = list;
+    renderHome();
+  } catch (err) {
+    if (seq !== reloadSeq) return;
+    renderHome('Could not list replays: ' + err.message);
+  }
+}
+
+// initFilters builds the bar from the catalog's facets (so every option offered
+// matches at least one replay) and restores the controls from the URL. A
+// backend without the endpoint leaves the bar hidden.
+async function initFilters() {
+  try {
+    const r = await fetch('/api/replays/facets');
+    if (!r.ok) return;
+    facets = await r.json();
+  } catch (_) { return; }
+
+  const box = document.getElementById('filters');
+  const cur = new URLSearchParams(location.search);
+  const el = (id) => document.getElementById(id);
+
+  const opt = (sel, value, text) => {
+    const o = document.createElement('option');
+    o.value = value; o.textContent = text;
+    sel.appendChild(o);
+  };
+  const mapSel = el('f_map');
+  mapSel.innerHTML = '';
+  opt(mapSel, '', 'any');
+  (facets.maps || []).forEach(m => opt(mapSel, m, m));
+  mapSel.value = cur.get('map') ?? '';
+  mapSel.onchange = () => setFilter('map', mapSel.value);
+
+  // Size is one exact player count rather than a range: the sizes present are
+  // few and far apart (8, 12, 16, 32, 50), so a range would mostly be a
+  // clumsier way to pick one of them. The API keeps min/max, so a range stays
+  // available to anyone who edits the URL.
+  const sizeSel = el('f_size');
+  sizeSel.innerHTML = '';
+  opt(sizeSel, '', 'any');
+  (facets.sizes || []).forEach(n => opt(sizeSel, String(n), `${n} players`));
+  sizeSel.value = cur.get('minPlayers') ?? '';
+  sizeSel.onchange = () => {
+    const v = sizeSel.value;
+    // Both bounds together: exactly this many players.
+    const u = new URL(location.href);
+    if (v === '') { u.searchParams.delete('minPlayers'); u.searchParams.delete('maxPlayers'); }
+    else { u.searchParams.set('minPlayers', v); u.searchParams.set('maxPlayers', v); }
+    history.replaceState(null, '', u);
+    reloadList();
+  };
+
+  const from = el('f_from'), to = el('f_to');
+  from.value = ymd(cur.get('from'), facets.from);
+  to.value = ymd(cur.get('to'), facets.to);
+  from.onchange = () => setFilter('from', from.value);
+  to.onchange = () => setFilter('to', to.value);
+
+  const player = el('f_player');
+  player.value = cur.get('player') ?? '';
+  const names = document.getElementById('f_players');
+  names.innerHTML = '';
+  (facets.players || []).forEach(n => {
+    const o = document.createElement('option');
+    o.value = n;
+    names.appendChild(o);
+  });
+  // Typing filters on every keystroke, so debounce: each change is a query.
+  let typing = null;
+  player.oninput = () => {
+    clearTimeout(typing);
+    typing = setTimeout(() => setFilter('player', player.value.trim()), 300);
+  };
+
+  const chips = el('f_settings');
+  chips.innerHTML = '';
+  const active = new Set((cur.get('settings') ?? '').split(',').filter(Boolean));
+  for (const flag of facets.settings || []) {
+    // Hidden badges stay hidden here too: filtering by a flag the list never
+    // shows would be filtering by something invisible.
+    if (HIDDEN_SETTINGS.has(flag)) continue;
+    const chip = document.createElement('span');
+    chip.className = 'chip' + (active.has(flag) ? ' on' : '');
+    chip.textContent = settingsLabel(flag);
+    chip.onclick = () => {
+      if (active.has(flag)) active.delete(flag); else active.add(flag);
+      chip.classList.toggle('on');
+      setFilter('settings', [...active].join(','));
+    };
+    chips.appendChild(chip);
+  }
+
+  el('f_clear').onclick = () => {
+    const u = new URL(location.href);
+    FILTER_KEYS.forEach(k => u.searchParams.delete(k));
+    history.replaceState(null, '', u);
+    initFilters();   // rebuild the controls from the now-empty URL
+    reloadList();
+  };
+
+  box.style.display = '';
+}
+
+// ymd renders a filter date for an <input type=date>: the URL value when it is
+// already YYYY-MM-DD, else nothing. `fallback` (a facet bound, in unix
+// seconds) is deliberately NOT used as a value — prefilling the inputs with
+// the catalog's own span would make every visit look filtered.
+function ymd(urlValue, fallback) {
+  const v = (urlValue ?? '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+  if (/^\d+$/.test(v)) return new Date(Number(v) * 1000).toISOString().slice(0, 10);
+  return '';
+}
+
+// settingsLabel is the badge text for a settings flag, so a chip and the row
+// badge it matches read the same.
+function settingsLabel(flag) {
+  const known = SETTINGS_BADGES.find(b => b[0] === flag);
+  return known ? known[1] : flag;
 }
 
 // urlId is the id a replay's pieces are actually served under: the catalog
@@ -2792,8 +2965,12 @@ function renderHome(errMsg) {
     tbody.appendChild(tr);
   }
   document.body.classList.toggle('admin-mode', adminMode());
-  const text = errMsg || (replayList.length ? '' :
-    'No replays yet. Drop a .brepstream above, or upload one with: go run ./cmd/pack -upload r2 <capture>.');
+  const filtered = filterQuery() !== '';
+  const count = document.getElementById('f_count');
+  if (count) count.textContent = `${replayList.length} ${filtered ? 'matching' : 'replays'}`;
+  const text = errMsg || (replayList.length ? '' : (filtered
+    ? 'No replays match these filters.'
+    : 'No replays yet. Drop a .brepstream above, or upload one with: go run ./cmd/pack -upload r2 <capture>.'));
   msg.style.display = text ? '' : 'none';
   msg.textContent = text;
 }
@@ -2993,6 +3170,7 @@ function openReplay(id) {
 async function init() {
   initGL(); // one-time; a null result just means the 2D icon path is used
   initUpload(); // wired before the list fetch so the dropzone works regardless
+  initFilters(); // best-effort and independent: the list below reads the URL
   const params = new URLSearchParams(location.search);
 
   // Optional render-smoothness overlay, gated on ?debug=true.

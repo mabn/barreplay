@@ -36,6 +36,21 @@
       or <label class="browse">browse<input type="file" id="dropfile" accept=".brepstream" hidden></label></span>
     <div id="dropstatus" style="display:none"></div>
   </div>
+  <!-- Catalog filters. Hidden unless the backend answers GET
+       /api/replays/facets: filtering is a SQL feature of the Worker's catalog,
+       and the Go viz server (which serves the same list from local files)
+       has none, so the bar appears only where it works. -->
+  <div id="filters" style="display:none">
+    <label>From <input type="date" id="f_from"></label>
+    <label>To <input type="date" id="f_to"></label>
+    <label>Map <select id="f_map"></select></label>
+    <label>Players <select id="f_size"></select></label>
+    <label>Player <input type="search" id="f_player" list="f_players" placeholder="name" autocomplete="off"></label>
+    <datalist id="f_players"></datalist>
+    <span id="f_settings" class="chips"></span>
+    <button type="button" id="f_clear" title="Clear all filters">Clear</button>
+    <span id="f_count" class="hint"></span>
+  </div>
   <table id="hometable">
     <thead>
       <tr><th>Started</th><th>Duration</th><th>Map</th><th>Size</th><th>Players</th><th>Links</th><th>Settings</th><th class="num data">Data</th><th class="admin"></th></tr>

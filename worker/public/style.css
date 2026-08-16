@@ -232,6 +232,40 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
   text-align: center; color: #6a7785; font-size: 14px; padding: 24px;
 }
 
+/* Catalog filters above the list. One wrapping row of controls, sized to the
+   table it filters; every control narrows the SQL query behind GET
+   /api/replays rather than hiding rows client-side, so the count reported at
+   the end is the true number of matching replays, not what fits on a page. */
+#filters {
+  max-width: 1650px; margin: 0 auto 10px; padding: 8px 12px;
+  border: 1px solid #2a323c; border-radius: 6px; background: #141a20;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+  font-size: 12px; color: #8a98a6;
+}
+#filters label { display: flex; align-items: center; gap: 5px; }
+#filters input, #filters select {
+  background: #0f141a; color: #c7d3de; border: 1px solid #2f3947;
+  border-radius: 4px; padding: 3px 5px; font-size: 12px; font-family: inherit;
+}
+#filters input:focus, #filters select:focus { outline: none; border-color: #4a7fa8; }
+#filters input[type=search] { width: 130px; }
+#filters #f_map { max-width: 200px; }
+#filters button {
+  background: #1b232c; color: #9fb0bf; border: 1px solid #2f3947;
+  border-radius: 4px; padding: 3px 9px; font-size: 12px; cursor: pointer;
+}
+#filters button:hover { color: #cfe3f5; border-color: #4a5a6c; }
+#filters #f_count { margin-left: auto; }
+/* Settings filters reuse the row badges' look, but as toggles: dim until
+   picked, so the bar reads as "nothing selected" at a glance. */
+#filters .chips { display: flex; flex-wrap: wrap; gap: 5px; }
+#filters .chip {
+  padding: 2px 7px; border-radius: 9px; font-size: 11px; cursor: pointer;
+  border: 1px solid #2f3947; background: #0f141a; color: #7d8b99; user-select: none;
+}
+#filters .chip:hover { color: #c7d3de; border-color: #4a5a6c; }
+#filters .chip.on { background: #24425c; border-color: #4a7fa8; color: #d6ecff; }
+
 /* Drag&drop publishing (the landing view's dropzone). */
 #dropzone {
   max-width: 1650px; margin: 0 auto 14px; padding: 14px 18px;

@@ -39,9 +39,10 @@ type CatalogEntry struct {
 	// persisted in the .brp, so this is set only by pack's demo-fetch path
 	// (uploaded via PUT); the Go server's locally-computed entries omit it.
 	Settings map[string]any `json:"settings,omitempty"`
-	// Players is the roster the landing list shows: one group per ally team
-	// (ascending ally id), each holding the ally's top players by OpenSkill
-	// rating, capped at catalogPlayersPerAlly (Count keeps the full size).
+	// Players is the roster the landing list shows AND the list's player
+	// filter matches against: one group per ally team (ascending ally id),
+	// each holding the ally's players by OpenSkill rating, capped at
+	// catalogPlayersPerAlly (Count keeps the full size).
 	Players []CatalogTeam `json:"players,omitempty"`
 	// UploaderAlly is the ally team whose client recorded the capture behind
 	// the current revision (Meta.Recorder) — which side's point of view the
@@ -87,10 +88,14 @@ type CatalogUpload struct {
 	Ally *int32 `json:"ally"`
 }
 
-// catalogPlayersPerAlly caps each ally team's roster slice in the catalog:
-// enough for the landing list to show three names per side of a team game
-// (plus headroom) without a 25v25's full roster bloating every listing.
-const catalogPlayersPerAlly = 5
+// catalogPlayersPerAlly caps each ally team's roster slice in the catalog. It
+// is a FILTER limit, not a display one: the landing list filters by "was this
+// player in the game", which can only match names the row stores, so anyone
+// trimmed here is unfindable. It was 5 — enough for the three names the list
+// prints per side — which left every 8v8 storing 5 of its 8 players a side.
+// Its twin is CATALOG_PLAYERS_PER_ALLY in worker/src/worker/replayentry.ts and
+// the two must stay in lockstep.
+const catalogPlayersPerAlly = 32
 
 // BuildCatalogEntry derives one replay's catalog row from its parsed .brp.
 // sizeBytes is supplied by the caller because it depends on the hosting shape
