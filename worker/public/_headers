@@ -28,3 +28,9 @@
   Cache-Control: public, max-age=604800
 /ranks/*
   Cache-Control: public, max-age=604800
+
+# The favicon cannot be fingerprinted either: /favicon.ico is requested by the
+# browser on its own, at that fixed path, with no markup to point elsewhere. A
+# day is the lag between changing the icon and a browser noticing it.
+/favicon.*
+  Cache-Control: public, max-age=86400
