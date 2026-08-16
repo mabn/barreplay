@@ -3311,9 +3311,11 @@ async function reloadList() {
     const list = await fetchReplayList();
     if (seq !== reloadSeq) return; // a newer filter change already went out
     replayList = list;
+    homeDataLoaded = true;
     renderHome();
   } catch (err) {
     if (seq !== reloadSeq) return;
+    homeDataLoaded = true;
     renderHome('Could not list replays: ' + err.message);
   }
 }
@@ -3491,6 +3493,28 @@ function showHome() {
   document.getElementById('subtitle').textContent = 'replay state viewer';
   document.getElementById('viewmark').style.display = 'none';
   renderHome();
+  ensureHomeData();
+}
+
+// ensureHomeData loads what only the replay TABLE needs — the catalog listing
+// and the facets the filter bar is built from — the first time the list view is
+// shown, and never again (filter changes go through reloadList).
+//
+// It is deliberately not part of startup. Opening ?replay=<id> directly needs
+// neither: loadReplay fetches that replay's own pieces, and knownReplayURL
+// accepts any well-formed id without consulting the list. Fetching them up
+// front made every shared link pay for /api/replays and /api/replays/facets
+// before it could start on the replay itself — two requests feeding a table
+// that visit never renders.
+let homeDataPending = null;
+let homeDataLoaded = false; // false = the listing has not come back yet
+function ensureHomeData() {
+  if (!homeDataPending) {
+    // Independent of each other: a backend with no /facets simply leaves the
+    // filter bar hidden, which must not stop the listing from loading.
+    homeDataPending = Promise.all([initFilters(), reloadList()]);
+  }
+  return homeDataPending;
 }
 
 // ---- point-of-view marking -------------------------------------------------
@@ -3766,9 +3790,13 @@ function renderHome(errMsg) {
   const filtered = filterQuery() !== '';
   const count = document.getElementById('f_count');
   if (count) count.textContent = `${replayList.length} ${filtered ? 'matching' : 'replays'}`;
-  const text = errMsg || (replayList.length ? '' : (filtered
-    ? 'No replays match these filters.'
-    : 'No replays yet. Drop a .brepstream above, or upload one with: go run ./cmd/pack -upload r2 <capture>.'));
+  // The listing is fetched only when this view is first shown, so an empty
+  // table before it arrives means "still loading", not "nothing to show".
+  const text = errMsg || (replayList.length ? '' : (!homeDataLoaded
+    ? 'Loading replays…'
+    : filtered
+      ? 'No replays match these filters.'
+      : 'No replays yet. Drop a .brepstream above, or upload one with: go run ./cmd/pack -upload r2 <capture>.'));
   msg.style.display = text ? '' : 'none';
   msg.textContent = text;
 }
@@ -3967,8 +3995,7 @@ function openReplay(id) {
 
 async function init() {
   initGL(); // one-time; a null result just means the 2D icon path is used
-  initUpload(); // wired before the list fetch so the dropzone works regardless
-  initFilters(); // best-effort and independent: the list below reads the URL
+  initUpload(); // the dropzone works without the catalog being loaded
   const params = new URLSearchParams(location.search);
 
   // Optional render-smoothness overlay, gated on ?debug=true.
@@ -3983,15 +4010,11 @@ async function init() {
     showHome();
   };
 
-  try {
-    replayList = await fetchReplayList();
-  } catch (err) {
-    showHome();
-    renderHome('Could not list replays: ' + err.message);
-    return;
-  }
   // ?replay=<id> opens that replay directly (refresh / shared link); without
-  // it the page is the replay list (the table IS the picker).
+  // it the page is the replay list (the table IS the picker), and showHome
+  // fetches the catalog it needs. A direct link asks for NOTHING the table
+  // would have used — knownReplayURL accepts a well-formed id on its own, and
+  // loadReplay reports a real failure if the pieces are not there.
   const wanted = params.get('replay');
   if (wanted && knownReplayURL(wanted)) {
     hideHome();
