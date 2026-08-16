@@ -2479,11 +2479,11 @@ async function fetchReplayList() {
   // FILES exist but which were never registered in the catalog. So fetch it
   // only when it can change what is shown:
   //   - no catalog: it is the whole listing (old deployment / plain static host)
-  //   - admin mode: orphaned uploads are precisely what an admin is looking for
+  //   - ?orphans=true: the admin bar's "Unregistered" button, an explicit ask
   // and never under a filter — a stub has no map, size, roster or settings, so
   // no filter can be true of it, and answering "8v8 on Supreme Isthmus" with
   // rows that are neither would be a lie.
-  const wantFiles = !haveCatalog || (adminMode() && query === '');
+  const wantFiles = !haveCatalog || (orphanMode() && query === '');
   let files = [];
   if (wantFiles) {
     try {
@@ -2658,7 +2658,33 @@ async function initFilters() {
     reloadList();
   };
 
+  // "Unregistered" toggles ?orphans=true, which is what makes the list pay for
+  // the bucket scan (see fetchReplayList). It is NOT a filter param — the
+  // server never sees it — so it stays out of FILTER_KEYS and out of the query.
+  el('f_orphans').onclick = () => setFilter('orphans', orphanMode() ? '' : 'true');
+  syncOrphanButton();
+
   box.style.display = '';
+}
+
+// orphanMode: ?orphans=true asks the list to include uploads that never made it
+// into the catalog, at the cost of a full bucket listing.
+function orphanMode() {
+  return new URLSearchParams(location.search).get('orphans') === 'true';
+}
+
+// syncOrphanButton reflects the toggle's state, and disables it while a filter
+// is active: an unregistered upload carries no metadata, so it could not match
+// a filter anyway and the button would silently do nothing.
+function syncOrphanButton() {
+  const b = document.getElementById('f_orphans');
+  if (!b) return;
+  const filtered = filterQuery() !== '';
+  b.classList.toggle('on', orphanMode());
+  b.disabled = filtered;
+  b.title = filtered
+    ? 'Clear the filters first — an unregistered upload has no map, size or settings to match'
+    : 'Scan the bucket for uploads that were never registered in the catalog (slow: reads every object)';
 }
 
 // ymd renders a filter date for an <input type=date>: the URL value when it is
@@ -2983,6 +3009,7 @@ function renderHome(errMsg) {
     tbody.appendChild(tr);
   }
   document.body.classList.toggle('admin-mode', adminMode());
+  syncOrphanButton();
   const filtered = filterQuery() !== '';
   const count = document.getElementById('f_count');
   if (count) count.textContent = `${replayList.length} ${filtered ? 'matching' : 'replays'}`;

@@ -49,6 +49,11 @@
     <datalist id="f_players"></datalist>
     <span id="f_settings" class="chips"></span>
     <button type="button" id="f_clear" title="Clear all filters">Clear</button>
+    <!-- Admin-only, and deliberately a BUTTON: listing unregistered uploads
+         means scanning the whole bucket (~1.5 s), which is not something to
+         spend on every page load just because ?admin=true is set. -->
+    <button type="button" id="f_orphans" class="admin"
+            title="Scan the bucket for uploads that were never registered in the catalog (slow: reads every object)">Unregistered</button>
     <span id="f_count" class="hint"></span>
   </div>
   <table id="hometable">

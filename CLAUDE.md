@@ -277,9 +277,8 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           exactly what keeps the filter bar off there. The one Go-side piece the
                           filters DO depend on is catalogPlayersPerAlly, because BuildCatalogEntry is
                           what builds the roster the worker stores). The front-end landing page
-                          (no ?replay= in the URL) renders the catalog as the replay list, merged
-                          with /index.json so an uploaded-but-unregistered replay still shows (stats
-                          dashed) while superseded revisions of cataloged games are hidden (their
+                          (no ?replay= in the URL) renders the catalog as the replay list, with
+                          superseded revisions of cataloged games hidden (their
                           direct ?replay= links keep playing — nothing is deleted); picking a replay
                           sets ?replay=, the header title returns to the list. The list's Players
                           column shows each side's top names by OS (3 per side for a two-team game,
@@ -301,6 +300,21 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           bar stays HIDDEN unless GET /api/replays/facets answers — the Go viz server
                           serves the same catalog shape from local files with no filtering behind it,
                           and a filter bar that silently does nothing is worse than none.
+                          /index.json is NOT merged into the list by default, because it is not a
+                          file: the worker BUILDS it per request by paging the bucket's whole
+                          replays/ prefix (~3.4k objects — every head/keys/resources and 64-sample
+                          chunk of every published revision, 1000 per round trip), measured at ~1.5 s
+                          against the catalog's ~90 ms. All it adds is uploads whose files exist but
+                          which were never registered, so it is fetched only when it can change what
+                          is shown: when /api/replays is unavailable (it is then the WHOLE listing —
+                          an old deployment or a plain static host) or on ?orphans=true, the admin
+                          bar's "Unregistered" button (a button, not something ?admin=true does to
+                          every page load; disabled while a filter is active, since a stub has no
+                          metadata any filter could match). Consequence: an unregistered upload is
+                          invisible until someone asks for it. knownReplayURL therefore no longer
+                          treats replayList as the catalog — it is a filtered subset that also omits
+                          stubs, so any well-formed id is attempted and loadReplay reports a real
+                          failure rather than silently bouncing a shared ?replay= link to the list.
                           DRAG&DROP UPLOADS: the landing page's dropzone POSTs a raw .brepstream to
                           /api/upload (open endpoint; the Hono app lives in src/worker/app.ts, kept
                           free of workerd imports so worker/tests drive the real routes; index.ts is
