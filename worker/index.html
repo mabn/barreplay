@@ -9,8 +9,7 @@
      16/32/48 and is also what a browser fetches on its own from /favicon.ico
      without being told to; deliberately NOT fingerprinted, since that implicit
      request is for a fixed path no markup can redirect. -->
-<link rel="icon" href="/favicon.ico" sizes="32x32">
-<link rel="icon" type="image/png" href="/favicon.png" sizes="32x32">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <!-- __ASSET_REV__ is replaced with a content hash of app.js+style.css (Vite
      plugin at build/dev; the Go viz server at startup). The hash is in the
      FILENAME, not a ?v= query, so a given byte sequence has a URL that never
