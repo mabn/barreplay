@@ -26,7 +26,7 @@ go run ./cmd/pack ./caps/<gameId>.brepstream   # THE default publish: raw stream
 go run ./cmd/pack -upload= ./caps/<gameId>.brsnap   # pack + stats only, publish NOTHING (also how to analyze an existing .brp without republishing it)
 go run ./cmd/pack -upload local ./caps/<gameId>.brepstream   # ...to the dev simulator instead
 # -upload names a whole DESTINATION: the bucket AND the worker that serves+catalogs it, paired in
-# internal/packer/targets.go ("r2" -> https://replay.bartools.workers.dev, "local" -> http://127.0.0.1:5173)
+# internal/packer/targets.go ("r2" -> https://replay.fogofwar.dev, "local" -> http://127.0.0.1:5173)
 # and shared with bringest. NEITHER CLI has an index-URL flag: naming the two halves separately made it
 # possible to upload pieces to one deployment and register the row in the other, which nothing downstream
 # can detect. Adding a destination to that one map makes it valid, documented and usable in both CLIs.
