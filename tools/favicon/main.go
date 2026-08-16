@@ -37,9 +37,28 @@ import (
 	"strings"
 )
 
-// renderPx is the size the SVG is rasterized at before downsampling; the window
-// is larger because Chromium will not lay out into a viewport this tight.
+// renderPx is the size the SVG is rasterized at before downsampling.
 const renderPx = 192
+
+// windowPx is the browser window --headless=new is given. It is much larger
+// than renderPx on purpose: the new headless mode reserves vertical space for
+// browser chrome, so the LAYOUT VIEWPORT is meaningfully shorter than the
+// window while the screenshot canvas is the full window size. At renderPx+64
+// the viewport came out ~169px tall and the bottom of a 192px render was
+// simply missing from the capture — with no error, and no clue in the output
+// beyond a circle that was 176 wide and 161 tall. checkFits below turns that
+// into a failure rather than a quietly clipped icon.
+const windowPx = renderPx * 2
+
+// sentinelCSS is the fit marker's colour; nearSentinel recognises it after the
+// round trip through PNG.
+const sentinelCSS = "#f0f"
+
+func nearSentinel(r, g, b uint32) bool {
+	return r > 0xC000 && g < 0x4000 && b > 0xC000
+}
+
+func itoa(n int) string { return fmt.Sprintf("%d", n) }
 
 // sizes are the images packed into the .ico, largest first.
 var sizes = []int{48, 32, 16}
@@ -94,15 +113,22 @@ func shoot(chrome, tmp string, svg []byte, bg, tag string) (image.Image, error) 
 	s = regexp.MustCompile(`width="\d+"`).ReplaceAllString(s, fmt.Sprintf(`width="%d"`, renderPx))
 	s = regexp.MustCompile(`height="\d+"`).ReplaceAllString(s, fmt.Sprintf(`height="%d"`, renderPx))
 	html := filepath.Join(tmp, tag+".html")
+	// A sentinel one pixel PAST the crop. The page background fills the whole
+	// screenshot canvas even where nothing was laid out, so background colour
+	// proves nothing about how far the viewport actually reached — but an
+	// element only paints if it did. Outside the crop, so it cannot pollute the
+	// icon.
 	page := "<!doctype html><meta charset=\"utf-8\"><style>html,body{margin:0;padding:0;background:" +
-		bg + "}svg{display:block}</style>" + strings.TrimSpace(s)
+		bg + "}svg{display:block}#fit{position:absolute;left:" + itoa(renderPx) +
+		"px;top:" + itoa(renderPx) + "px;width:1px;height:1px;background:" + sentinelCSS + "}</style>" +
+		strings.TrimSpace(s) + "<div id=\"fit\"></div>"
 	if err := os.WriteFile(html, []byte(page), 0o644); err != nil {
 		return nil, err
 	}
 	shot := filepath.Join(tmp, tag+".png")
 	cmd := exec.Command(chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
 		"--hide-scrollbars", "--force-device-scale-factor=1",
-		fmt.Sprintf("--window-size=%d,%d", renderPx+64, renderPx+64),
+		fmt.Sprintf("--window-size=%d,%d", windowPx, windowPx),
 		"--screenshot="+shot, "file://"+html)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("chromium: %w: %s", err, out)
@@ -117,6 +143,14 @@ func shoot(chrome, tmp string, svg []byte, bg, tag string) (image.Image, error) 
 		return nil, err
 	}
 	b := img.Bounds()
+	if b.Dx() <= renderPx || b.Dy() <= renderPx {
+		return nil, fmt.Errorf("%s capture is %dx%d, too small for the %dpx render", tag, b.Dx(), b.Dy(), renderPx)
+	}
+	if r, g, bb, _ := img.At(b.Min.X+renderPx, b.Min.Y+renderPx).RGBA(); !nearSentinel(r, g, bb) {
+		return nil, fmt.Errorf("the %dpx render did not fit the viewport: --headless=new reserves space for browser chrome, "+
+			"so the layout viewport is shorter than --window-size and the bottom of the icon is missing from the capture. Raise windowPx (now %d)",
+			renderPx, windowPx)
+	}
 	return img.(interface {
 		SubImage(image.Rectangle) image.Image
 	}).SubImage(image.Rect(b.Min.X, b.Min.Y, b.Min.X+renderPx, b.Min.Y+renderPx)), nil
