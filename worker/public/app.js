@@ -1918,24 +1918,55 @@ function escapeHtml(s) {
 // bars unreadable; a trailing window still tracks the game's growth from a few
 // metal/s in the opening to hundreds late on.
 const INCOME_WINDOW_SEC = 60;
+// Samples in the per-team sliding MINIMUM that despikes the peak. A one-sample
+// burst is not an economy: reclaiming a fusion pays out ~3500 metal/s for a
+// single frame against a 195/s income, and as a raw maximum that one frame
+// became the scale for every player's bar for the next minute, squashing the
+// whole column to slivers. A sliding minimum cannot be lifted by any burst
+// shorter than its own length, so 3 samples (~3 s at 1 Hz) discards the reclaim
+// pop while a real economy — which holds its rate across samples — passes
+// through untouched.
+const DESPIKE_SAMPLES = 3;
 
 // incomePeaks returns {m, e} — the largest metal and energy income any team
-// reached over that window ending at simFrame. Metal and energy scale
+// SUSTAINED over the window ending at simFrame. Metal and energy scale
 // SEPARATELY: they differ by an order of magnitude, so one shared maximum would
-// flatten every metal bar to nothing. Walks the sampled frames backwards through
-// resByFrame; at one record per sample that is ~60 lookups on a render already
-// throttled to 5 Hz during playback.
+// flatten every metal bar to nothing. Only the SCALE is despiked; the number on
+// each row stays the raw current income, so a burst still shows itself (with its
+// bar clamped to full) instead of being hidden.
+//
+// Walks the window oldest -> newest, keeping each team's last DESPIKE_SAMPLES
+// incomes so the minimum slides with it — and PRIMING that slide with the
+// DESPIKE_SAMPLES-1 samples immediately before the window. The priming is not a
+// detail: without it the window's first samples take the minimum of a partial
+// history, so a spike survives while it sits at the leading edge — the same
+// squashed column as before, appearing a minute after the burst as it ages into
+// that position. Only samples inside the window contribute to the peak. At the
+// very start of a replay there is nothing to prime with, and a partial minimum
+// is then right anyway: nothing yet distinguishes a spike from an economy.
 function incomePeaks(simFrame) {
   const peak = { m: 0, e: 0 };
   if (!resByFrame || simFrame < 0) return peak;
   const step = data.sampleEvery > 0 ? data.sampleEvery : 30;
   const samples = Math.max(1, Math.round(INCOME_WINDOW_SEC * 30 / step));
-  for (let k = 0, f = simFrame; k < samples && f >= 0; k++, f -= step) {
+  const hist = new Map(); // team -> {m: [...], e: [...]}, oldest first
+  for (let k = samples - 1 + (DESPIKE_SAMPLES - 1); k >= 0; k--) {
+    const f = simFrame - k * step;
+    if (f < 0) continue;
     const r = resByFrame.get(f);
     if (!r) continue;
+    const priming = k > samples - 1;
     for (let i = 0; i < r.length; i += RSTRIDE) {
-      if (r[i + R.MINC] > peak.m) peak.m = r[i + R.MINC];
-      if (r[i + R.EINC] > peak.e) peak.e = r[i + R.EINC];
+      const team = r[i + R.TEAM];
+      let h = hist.get(team);
+      if (h === undefined) hist.set(team, h = { m: [], e: [] });
+      h.m.push(r[i + R.MINC]);
+      h.e.push(r[i + R.EINC]);
+      if (h.m.length > DESPIKE_SAMPLES) { h.m.shift(); h.e.shift(); }
+      if (priming) continue;
+      const m = Math.min(...h.m), e = Math.min(...h.e);
+      if (m > peak.m) peak.m = m;
+      if (e > peak.e) peak.e = e;
     }
   }
   return peak;
