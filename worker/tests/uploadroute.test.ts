@@ -52,9 +52,16 @@ class FakeIndex {
   jobsPending(): IngestJob[] {
     return [...this.jobs.values()].filter((j) => j.state === "pending");
   }
-  jobsRecent(limit: number): IngestJob[] {
+  lastQueueQuery: { limit: number; offset: number } | null = null;
+  queuePage(limit: number, offset: number): { jobs: IngestJob[]; total: number; active: number } {
+    this.lastQueueQuery = { limit, offset };
     const rank = (j: IngestJob) => (j.state === "pending" || j.state === "processing" ? 0 : 1);
-    return [...this.jobs.values()].sort((a, b) => rank(a) - rank(b)).slice(0, limit);
+    const all = [...this.jobs.values()].sort((a, b) => rank(a) - rank(b));
+    return {
+      jobs: all.slice(offset, offset + limit),
+      total: all.length,
+      active: all.filter((j) => rank(j) === 0).length,
+    };
   }
   jobUpdate(id: string, state: "processing" | "done" | "error", error: string | null): boolean {
     const j = this.jobs.get(id);
@@ -230,11 +237,14 @@ test("GET /api/queue lists jobs for the viewer without the archive key", async (
 
   const res = await app.request("/api/queue", {}, env);
   assert.equal(res.status, 200, "open even though a token is configured");
-  const list = await asJson(res);
-  assert.deepEqual(list, [
-    { id: job, gameId: GAME_ID, state: "pending", error: null, createdUnix: 0, updatedUnix: 0 },
-  ]);
-  assert.ok(!JSON.stringify(list).includes(streamKey), "archive key stays out of the reply");
+  const page = await asJson(res);
+  assert.deepEqual(page, {
+    jobs: [{ id: job, gameId: GAME_ID, state: "pending", error: null, createdUnix: 0, updatedUnix: 0 }],
+    total: 1,
+    active: 1,
+    offset: 0,
+  });
+  assert.ok(!JSON.stringify(page).includes(streamKey), "archive key stays out of the reply");
 
   await app.request(
     `/api/jobs/${job}`,
@@ -242,8 +252,48 @@ test("GET /api/queue lists jobs for the viewer without the archive key", async (
     env,
   );
   const after = await asJson(await app.request("/api/queue", {}, env));
-  assert.equal(after[0].state, "error");
-  assert.equal(after[0].error, "demo not found");
+  assert.equal(after.jobs[0].state, "error");
+  assert.equal(after.jobs[0].error, "demo not found");
+  assert.equal(after.active, 0, "a finished job is no longer in flight");
+});
+
+// Paging: the page is a window, but total/active describe the WHOLE table —
+// that is what lets a 5-row page state how much it is paging through.
+test("GET /api/queue pages with ?offset= and ?limit=", async () => {
+  const { env, index } = makeEnv();
+  for (let i = 0; i < 7; i++) {
+    index.jobInsert(`job-${i}`, `streams/g${i}/x.brepstream`, `game-${i}`);
+    if (i < 4) index.jobUpdate(`job-${i}`, "done", null); // 4 finished, 3 pending
+  }
+
+  const first = await asJson(await app.request("/api/queue?limit=5&offset=0", {}, env));
+  assert.equal(first.jobs.length, 5);
+  assert.equal(first.total, 7);
+  assert.equal(first.active, 3);
+  assert.deepEqual(first.jobs.slice(0, 3).map((j: IngestJob) => j.state), ["pending", "pending", "pending"]);
+
+  const second = await asJson(await app.request("/api/queue?limit=5&offset=5", {}, env));
+  assert.equal(second.jobs.length, 2, "the tail page holds what is left");
+  assert.equal(second.offset, 5);
+  assert.equal(second.total, 7, "counts stay whole-table, not per page");
+  const ids = new Set([...first.jobs, ...second.jobs].map((j: IngestJob) => j.id));
+  assert.equal(ids.size, 7, "the two pages together are the whole table, no repeats");
+
+  const past = await asJson(await app.request("/api/queue?limit=5&offset=99", {}, env));
+  assert.deepEqual(past.jobs, [], "an offset past the end is empty, not an error");
+  assert.equal(past.total, 7);
+
+  // The cap keeps a hand-written limit from asking for the whole table, and
+  // an omitted limit still bounds the read.
+  assert.equal((await app.request("/api/queue?limit=1000", {}, env)).status, 200);
+  assert.equal(index.lastQueueQuery?.limit, 100);
+  await app.request("/api/queue", {}, env);
+  assert.deepEqual(index.lastQueueQuery, { limit: 25, offset: 0 });
+
+  for (const bad of ["limit=-1", "limit=abc", "offset=1.5"]) {
+    const res = await app.request(`/api/queue?${bad}`, {}, env);
+    assert.equal(res.status, 400, bad);
+  }
 });
 
 test("the daemon can download the archived stream, guarded", async () => {

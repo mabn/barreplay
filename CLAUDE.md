@@ -500,9 +500,20 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           shows those jobs — one row per upload with its game, state, age and
                           failure detail, a link to the replay once the catalog has it, and a
                           count of the jobs in flight on the menu entry itself. It reads GET
-                          /api/queue (ReplayIndex.jobsRecent: unfinished jobs first, then the
-                          most recently finished, capped at QUEUE_LIMIT), polling every 5 s while
-                          that section is on screen and never otherwise. The route is OPEN, like
+                          /api/queue (ReplayIndex.queuePage: unfinished jobs first, then the most
+                          recently finished; ?offset=/?limit=, limit capped at QUEUE_LIMIT_MAX),
+                          QUEUE_PAGE = 5 rows at a time with a Prev/Next pager. It NEVER refreshes
+                          itself: every read is an explicit act — opening the landing page, paging,
+                          the Reload button, or this browser's own upload landing/failing — so the
+                          pager states the CLOCK time of the read (a relative "12s ago" would
+                          freeze there and become false with nothing re-rendering it; the rows'
+                          ages are as-of that read, with the exact moment in each cell's tooltip).
+                          The reply's `total`/`active` are counted over the WHOLE jobs table, not
+                          the page, so the pager and the menu's in-flight count stay true on any
+                          page — a 5-row window cannot say how many jobs are queued. The page
+                          number is deliberately NOT in the URL (unlike ?tab= and the filters):
+                          "page 3 of the queue" describes a moment in a pipeline, not a set of
+                          replays, so there is nothing to share or restore. The route is OPEN, like
                           the per-job status the uploading browser already polls, but it omits
                           the row's streamKey — the archive bytes are behind the bearer-guarded
                           /api/streams route and the view has no use for the key. It is distinct
@@ -510,7 +521,8 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           it deliberately hides a healthy "processing" job — precisely the row a
                           person watching wants to see). The Go viz server has no ingest pipeline
                           and 404s the route; the section then says so rather than showing an
-                          empty table that would read as "nothing is queued", and stops polling.
+                          empty table that would read as "nothing is queued", and asks it nothing
+                          further.
                           Uploads (tools/upload.ts) go
                           through tools/r2put.ts: parallel S3 PUTs when R2_ACCESS_KEY_ID/
                           R2_SECRET_ACCESS_KEY are set (fast, aws4fetch), else parallel `wrangler r2

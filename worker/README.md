@@ -39,10 +39,13 @@ The landing page (no `?replay=` in the URL) has a **left menu** with two section
 
 - **Replays** — the catalog list (below), the default.
 - **Queue** — the ingest jobs behind the drag&drop uploads (`GET /api/queue`), one
-  row per upload with its game, state, age and failure detail, refreshed every 5 s
-  while it is on screen. The menu entry carries a count of the jobs still in flight.
-  A backend without the route (the Go viz server, which runs no ingest pipeline)
-  says so instead of showing an empty table.
+  row per upload with its game, state, age and failure detail, **5 per page** with a
+  Prev/Next pager. It never refreshes itself: reads happen when the landing page
+  opens, when you page, when you press **Reload**, and when your own upload lands or
+  fails — so the pager stamps the clock time of the read. The menu entry carries a
+  count of the jobs still in flight (counted server-side over the whole table, so it
+  is true on any page). A backend without the route (the Go viz server, which runs no
+  ingest pipeline) says so instead of showing an empty table.
 
 The selection lives in the URL as `?tab=queue`, so it is shareable and survives a
 refresh, and opening a replay from a section returns there on `back`.
@@ -238,7 +241,7 @@ wherever the repo lives (`cmd/bringest`, e.g. a VM):
 | `POST /api/upload` | open; validates the stream's preamble (`src/worker/preamble.ts`), archives the raw bytes at `streams/<gameId>/<ts>-a<ally>.brepstream` (append-only, never listed, never served publicly), inserts a pending job, returns `{job, gameId, streamKey}` |
 | `GET /api/jobs/<id>` | open; the job's state for the uploading browser's poll (`pending → processing → done \| error`) |
 | `GET /api/jobs` | bearer-guarded; the daemon's work queue (pending + stalled-processing jobs, oldest first) |
-| `GET /api/queue` | open; the same jobs for the landing page's **Queue** section (unfinished first, then recently finished, capped at 100) — the archive key is left out, since those bytes are guarded |
+| `GET /api/queue` | open; the same jobs for the landing page's **Queue** section, paged — `?offset=&limit=` (default 25, capped at 100) → `{jobs, total, active, offset}`, unfinished first then recently finished. `total`/`active` count the whole table, not the page. The archive key is left out, since those bytes are guarded |
 | `POST /api/jobs/<id>` | bearer-guarded; daemon transitions (`processing`, `done`, `error` + message) |
 | `GET /api/streams/<gameId>/<file>` | bearer-guarded; the daemon downloads the archived stream (it speaks only HTTPS to the Worker — no S3 reads, no inbound connectivity) |
 

@@ -90,7 +90,9 @@
 
     <!-- Ingest queue: every uploaded stream still waiting for (or being
          published by) the ingest daemon, plus the recently finished ones.
-         Read from GET /api/queue, which only the Worker backend implements. -->
+         Read from GET /api/queue, which only the Worker backend implements.
+         Read on demand only — the section never refreshes itself, so the
+         Reload button is how a job's state moves on screen. -->
     <section id="tab-queue" style="display:none">
       <table id="queuetable">
         <thead>
@@ -98,6 +100,12 @@
         </thead>
         <tbody></tbody>
       </table>
+      <div id="queuepager" style="display:none">
+        <button type="button" id="q_prev" title="Newer / still-running jobs">‹ Prev</button>
+        <button type="button" id="q_next" title="Older jobs">Next ›</button>
+        <span id="q_range" class="hint"></span>
+        <button type="button" id="q_reload" title="Re-read the queue">Reload</button>
+      </div>
       <div id="queuemsg" class="hint" style="display:none"></div>
     </section>
   </div>
