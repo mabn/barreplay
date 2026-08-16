@@ -109,14 +109,45 @@ func (s *Server) Handler() http.Handler {
 		}
 		w.Header().Set("Cache-Control", "no-store, must-revalidate")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(bytes.ReplaceAll(b, []byte("__ASSET_REV__"), rev))
+		b = bytes.ReplaceAll(b, []byte("__ASSET_REV__"), rev)
+		// __DATA_ORIGIN__ is where the deployed viewer fetches replay pieces
+		// from (the R2 bucket's own hostname, so those reads hit Cloudflare's
+		// cache rather than the Worker). This server IS the origin for its
+		// files, so it blanks the placeholder — app.js reads an empty value as
+		// "same origin" and its URLs are unchanged.
+		b = bytes.ReplaceAll(b, []byte("__DATA_ORIGIN__"), nil)
+		w.Write(b)
 	})
-	mux.HandleFunc("/app.js", serveAsset("public/app.js", "text/javascript; charset=utf-8"))
-	mux.HandleFunc("/style.css", serveAsset("public/style.css", "text/css; charset=utf-8"))
-	// The browser auto-requests a favicon; answer it so it isn't a 404 in logs.
-	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	})
+	// index.html now references the subresources by their FINGERPRINTED names
+	// (/app.<rev>.js, /style.<rev>.css — the hash is in the name so the URL of
+	// a given byte sequence never changes). This server has no build step to
+	// emit those files, so it registers the hashed routes for the rev it just
+	// computed and serves the embedded originals through them. The plain names
+	// stay registered too: they are what `vite dev` serves, and a stale
+	// bookmark or a hand-typed URL should not 404.
+	const jsType, cssType = "text/javascript; charset=utf-8", "text/css; charset=utf-8"
+	mux.HandleFunc("/app.js", serveAsset("public/app.js", jsType))
+	mux.HandleFunc("/style.css", serveAsset("public/style.css", cssType))
+	mux.HandleFunc("/app."+string(rev)+".js", serveAsset("public/app.js", jsType))
+	mux.HandleFunc("/style."+string(rev)+".css", serveAsset("public/style.css", cssType))
+	// The tab icon: the SVG wherever it is taken, the .ico rasterized from it
+	// (tools/favicon) for the rest and for anything that asks for that fixed
+	// path without reading any markup. Neither can be fingerprinted, so both
+	// get a day rather than the subresources' year.
+	icon := func(name, ctype string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			b, err := webassets.Assets.ReadFile(name)
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+			w.Header().Set("Content-Type", ctype)
+			w.Write(b)
+		}
+	}
+	mux.HandleFunc("/favicon.svg", icon("public/favicon.svg", "image/svg+xml"))
+	mux.HandleFunc("/favicon.ico", icon("public/favicon.ico", "image/x-icon"))
 	// Vendored BAR unit icons, served at /icons/<file> to match the bitmap paths
 	// in the wire payload. Icons are immutable, so let the browser cache them.
 	if sub, err := iconsSubFS(); err == nil {

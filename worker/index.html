@@ -4,11 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>barreplay viewer</title>
+<!-- Deliberately NOT fingerprinted, unlike the subresources below: a browser
+     asks for the tab icon at a fixed path of its own accord, so the name
+     cannot carry a content hash (public/_headers caps it at a day instead). -->
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="alternate icon" href="/favicon.ico" sizes="48x48 32x32 16x16">
 <!-- __ASSET_REV__ is replaced with a content hash of app.js+style.css (Vite
-     plugin at build/dev; the Go viz server at startup), so a deployed UI
-     change busts the browser cache by itself — only index.html must
-     revalidate, and both servers send it with a no-cache header. -->
-<link rel="stylesheet" href="/style.css?v=__ASSET_REV__">
+     plugin at build/dev; the Go viz server at startup). The hash is in the
+     FILENAME, not a ?v= query, so a given byte sequence has a URL that never
+     changes and the file can be served immutable for a year (public/_headers).
+     Only index.html revalidates — both servers send it no-cache — and because
+     a UI change moves these URLs, browsers refetch exactly the files that
+     changed, with no hard refresh. -->
+<link rel="stylesheet" href="/style.__ASSET_REV__.css">
 </head>
 <body>
 <header>
@@ -127,6 +135,21 @@
   <span class="timelabel" id="timelabel">—</span>
 </div>
 
-<script src="/app.js?v=__ASSET_REV__"></script>
+<!-- The ORIGIN the bulk replay data (heads, keyframes, chunk deltas, resources)
+     is fetched from: the R2 bucket's own hostname, so those reads are answered
+     by Cloudflare's cache instead of costing a billed R2 GetObject through the
+     Worker. The placeholder below is filled in only by a production
+     `vite build`; `vite dev` and the Go viz server both blank it, which means
+     "same origin" and keeps them serving their own files. app.js ignores any
+     value that is not an absolute http(s) origin, so an unsubstituted
+     placeholder degrades to same-origin rather than breaking.
+
+     The placeholder token deliberately differs from the global's name and
+     occurs exactly ONCE, in the value position: both substituters do a plain
+     textual replace, so a token that also appeared in the identifier would be
+     rewritten into `window.https://... =` — invalid JS that no build step
+     would flag. -->
+<script>window.__DATA_BASE__ = "__DATA_ORIGIN__";</script>
+<script src="/app.__ASSET_REV__.js"></script>
 </body>
 </html>

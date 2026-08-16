@@ -601,3 +601,62 @@ test('a wiped-out team speaks from where it was last seen', () => {
   // A team that was never on the map has nowhere to speak from.
   assert.equal(api.at(4), null, 'no history: no bubble rather than a wrong one');
 });
+
+// Opening ?replay=<id> directly must not fetch the replay TABLE's data. The
+// catalog listing and the filter facets feed a table that visit never renders,
+// and paying for them first delayed the replay every shared link is actually
+// for. They now load when the list view is first shown, and only then.
+test('the catalog is fetched for the list view, not for a direct replay link', async () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    // `async` sits before the match; keep it or an awaiting body will not parse.
+    const async = APP.slice(Math.max(0, start - 6), start).trim() === 'async' ? 'async ' : '';
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return async + APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+
+  const boot = (search: string) => eval(`(function(){
+    let homeDataPending = null, homeDataLoaded = false;
+    let filters = 0, lists = 0, opened = null, renders = 0;
+    const el = () => ({ style: {}, textContent: '', onclick: null, classList: { add(){}, remove(){}, toggle(){} } });
+    const document = { getElementById: el, body: { classList: { add(){}, remove(){}, toggle(){} } } };
+    const location = { href: 'https://x/' + ${JSON.stringify(search)}, search: ${JSON.stringify(search)} };
+    const history = { pushState(){}, replaceState(){} };
+    const initGL = () => {}, initUpload = () => {}, startFpsMonitor = () => {}, stopPlay = () => {};
+    const hideHome = () => {};
+    const knownReplayURL = () => true;
+    const initFilters = async () => { filters++; };
+    const reloadList = async () => { lists++; };
+    const renderHome = () => { renders++; };
+    const loadReplay = async (id) => { opened = id; };
+    ${extract('showHome')}
+    ${extract('ensureHomeData')}
+    ${extract('init')}
+    return { init, ensureHomeData, stats: () => ({ filters, lists, opened, renders }) };
+  })()`);
+
+  // A direct replay link: the replay loads, and nothing the table needs is
+  // requested. This is the assertion that matters.
+  const direct = boot('?replay=f8e5816a04505f9c2b5b69a6a458b696-9942e3d8');
+  await direct.init();
+  let s = direct.stats();
+  assert.equal(s.opened, 'f8e5816a04505f9c2b5b69a6a458b696-9942e3d8', 'the replay is opened');
+  assert.equal(s.lists, 0, 'no catalog listing fetched for a direct link');
+  assert.equal(s.filters, 0, 'no facets fetched for a direct link');
+
+  // The list view still loads both, exactly once however often it is shown
+  // (returning from a replay re-renders but must not re-fetch).
+  const home = boot('');
+  await home.init();
+  await home.ensureHomeData();
+  await home.ensureHomeData();
+  s = home.stats();
+  assert.equal(s.lists, 1, 'catalog fetched once for the list view');
+  assert.equal(s.filters, 1, 'facets fetched once for the list view');
+  assert.ok(s.renders >= 1, 'the table is rendered');
+});

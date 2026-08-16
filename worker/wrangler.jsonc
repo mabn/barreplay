@@ -6,6 +6,27 @@
   // Same Cloudflare account as the sibling claudebar/lavabalance worker.
   "account_id": "9a1829e6502587e153ffa45b76de7ed3",
 
+  // The public hostname. `custom_domain` (as opposed to a plain route pattern)
+  // makes Cloudflare create the DNS record and provision the certificate for
+  // this exact hostname, so no wildcard cert is involved and no Advanced
+  // Certificate Manager subscription is needed.
+  //
+  // REQUIREMENT: the fogofwar.dev zone must live in the SAME Cloudflare
+  // account as account_id above. A Custom Domain cannot bind a zone held by
+  // another account, so if the registration sits elsewhere it has to be moved
+  // first (Registrar -> Manage Domain -> Configuration -> Start; the domain
+  // must be >10 days old) — or this worker redeployed into that account.
+  //
+  // The workers.dev hostname keeps working alongside this, so the switch is
+  // additive: nothing that already points at replay.bartools.workers.dev
+  // breaks when this lands.
+  "routes": [
+    {
+      "pattern": "replay.fogofwar.dev",
+      "custom_domain": true
+    }
+  ],
+
   // The Vite build (client bundle in dist/client) is served as static assets by the
   // runtime BEFORE the Worker runs. Requests that don't match an asset fall through to
   // the Hono app in src/worker/index.ts. `single-page-application` serves index.html for
@@ -13,15 +34,30 @@
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    // EVERY request goes through the Worker (the Hono catch-all proxies
-    // non-API paths to this ASSETS binding), for two reasons: the SPA entry
-    // must be served no-cache (the serveEntry route adds the header —
-    // index.html carries content-hashed /app.js?v=… subresource URLs, so a
-    // revalidated index.html is all a UI deploy needs to propagate), and a
-    // PATTERN LIST here is a trap — routes not on the list are answered by
-    // the asset layer alone, whose single-page-application fallback serves
-    // index.html for /api/* instead of falling through to the Worker.
-    "run_worker_first": true
+    // Everything still goes through the Worker EXCEPT the two prefixes that
+    // are plain vendored files. "/*" keeps the original guarantee — the SPA
+    // entry is served no-cache by the serveEntry route (index.html carries
+    // content-hashed subresource URLs, so a revalidated entry is all a UI
+    // deploy needs to propagate), and no route can fall through to the asset
+    // layer's single-page-application handling, which would answer /api/*
+    // with index.html. That trap is why this is "/*" plus exclusions rather
+    // than a list of the paths the Worker wants: the list form is
+    // deny-by-default in exactly the wrong direction.
+    //
+    // The exclusions matter twice over. A cold replay load requests 300-650
+    // unit icons; through the Worker each one is an invocation, and served by
+    // the asset layer they are cached on Cloudflare's network instead. And
+    // public/_headers only applies to what the ASSET LAYER serves — a Worker
+    // response ignores it — so without these exclusions the cache-control
+    // rules for those prefixes would be silently dead.
+    //
+    // The favicons are named individually rather than matched: they are two
+    // fixed files, and /favicon.ico in particular must resolve to the real
+    // object. Left to the Worker it reached the catch-all, where the asset
+    // layer's single-page-application handling answered it with index.html —
+    // a 200 carrying the whole HTML document, labelled text/html, as the tab
+    // icon.
+    "run_worker_first": ["/*", "!/icons/*", "!/ranks/*", "!/favicon.ico", "!/favicon.svg"]
   },
 
   // The growing set of replay data (index.json + per-capture head/chunks/resources)

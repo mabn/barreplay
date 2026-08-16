@@ -64,9 +64,18 @@ class FakeIndex {
 // Just enough R2Bucket for the routes under test (put + the listing's list).
 class FakeBucket {
   objects = new Map<string, Uint8Array>();
+  // The HTTP metadata stored alongside each object. It is not incidental: the
+  // bucket is also published at its own hostname, where R2 replies with
+  // exactly this and no Worker gets to fix it up.
+  meta = new Map<string, { contentType?: string; cacheControl?: string }>();
 
-  async put(key: string, value: Uint8Array): Promise<void> {
+  async put(
+    key: string,
+    value: Uint8Array,
+    opts?: { httpMetadata?: { contentType?: string; cacheControl?: string } },
+  ): Promise<void> {
     this.objects.set(key, value);
+    this.meta.set(key, opts?.httpMetadata ?? {});
   }
   async list(): Promise<{ objects: { key: string; size: number }[]; truncated: boolean }> {
     return {
@@ -104,7 +113,7 @@ test("upload archives the stream and records a pending job", async () => {
   assert.equal(res.status, 200);
   const body = await asJson(res);
   assert.equal(body.gameId, GAME_ID);
-  assert.match(body.streamKey, new RegExp(`^streams/${GAME_ID}/\\d+-a0\\.brepstream$`));
+  assert.match(body.streamKey, new RegExp(`^streams/${GAME_ID}/\\d+-[0-9a-f]{8}-a0\\.brepstream$`));
 
   const archived = bucket.objects.get(body.streamKey);
   assert.ok(archived, "raw stream archived");
@@ -336,4 +345,115 @@ test("POST /api/replays/:id/refresh-settings updates the row from the BAR API", 
   globalThis.fetch = (async () => Response.json({ gameSettings: {} })) as typeof fetch;
   const noRow = await app.request(`/api/replays/norow11111/refresh-settings`, { method: "POST" }, env);
   assert.equal(noRow.status, 404);
+});
+
+// Uploaded pieces must carry their own Content-Type and Cache-Control. The
+// bucket is served BOTH through this Worker and directly at its own hostname
+// (cdn-bar.fogofwar.dev), and on the direct path R2 replies with the stored
+// metadata alone. A piece stored without Cache-Control is not held by
+// Cloudflare's cache, so every read of it becomes a billed R2 GetObject —
+// which is the whole reason for serving the bucket directly.
+test("PUT /replays/<key> stores cache-control and content-type on the object", async () => {
+  const { env, bucket } = makeEnv();
+  const rid = `${GAME_ID}-1a2b3c4d`;
+  const immutable = "public, max-age=31536000, immutable";
+
+  const cases: [key: string, contentType: string, cacheControl: string][] = [
+    [`replays/${rid}/c0`, "application/octet-stream", immutable],
+    [`replays/${rid}.brw`, "application/octet-stream", immutable],
+    [`replays/${rid}.keys`, "application/octet-stream", immutable],
+    // .resources is real JSON the browser parses...
+    [`replays/${rid}.resources`, "application/json", immutable],
+    // ...while a listing changes on every publish, so it only revalidates.
+    ["replays/index.json", "application/json", "no-cache"],
+  ];
+
+  for (const [key, contentType, cacheControl] of cases) {
+    const res = await app.request(`/${key}`, { method: "PUT", body: "bytes" }, env);
+    assert.equal(res.status, 200, key);
+    assert.deepEqual(bucket.meta.get(key), { contentType, cacheControl }, key);
+  }
+});
+
+// The same derivation is applied when this Worker serves the object on its own
+// hostname, so objects uploaded before upload-time metadata existed still get
+// correct headers without a re-upload.
+test("GET /replays/<key> sets the same content-type and cache-control", async () => {
+  const { env, bucket } = makeEnv();
+  const rid = `${GAME_ID}-1a2b3c4d`;
+  await bucket.put(`replays/${rid}.resources`, new TextEncoder().encode("{}"));
+  await bucket.put(`replays/${rid}/c0`, new TextEncoder().encode("bytes"));
+
+  const res = await app.request(`/replays/${rid}.resources`, {}, env);
+  assert.equal(res.headers.get("content-type"), "application/json");
+  assert.equal(res.headers.get("cache-control"), "public, max-age=31536000, immutable");
+
+  const chunk = await app.request(`/replays/${rid}/c0`, {}, env);
+  assert.equal(chunk.headers.get("content-type"), "application/octet-stream");
+  // Never Content-Encoding: the viewer gunzips these itself.
+  assert.equal(chunk.headers.get("content-encoding"), null);
+});
+
+// Two captures of the SAME game from the SAME side must not collide. gameId
+// and archiveSuffix are equal for both, and Date.now() in Workers is clamped
+// to the last I/O — it does not advance during a request — so the timestamp
+// alone does not separate them. Before the key carried a content hash the
+// second PUT overwrote the first, and both jobs pointed at one key holding
+// only one player's bytes.
+//
+// This is the real shape of it: two players on one ally team uploading the
+// same game, or one player uploading a half-game capture and later the full
+// one (a longer stream with an identical preamble).
+test("uploads of the same game from the same side get distinct keys", async () => {
+  const { env, bucket, index } = makeEnv();
+
+  const full = fixture();
+  const halfway = full.slice(0, Math.floor(full.length * 0.6)); // a shorter capture, same preamble
+
+  const a = await asJson(await app.request("/api/upload", { method: "POST", body: full }, env));
+  const b = await asJson(await app.request("/api/upload", { method: "POST", body: halfway }, env));
+
+  assert.equal(a.gameId, b.gameId, "same game");
+  assert.notEqual(a.streamKey, b.streamKey, "different bytes must not share a key");
+  assert.equal(bucket.objects.size, 2, "both uploads survive");
+  assert.deepEqual(bucket.objects.get(a.streamKey), full);
+  assert.deepEqual(bucket.objects.get(b.streamKey), halfway);
+
+  // Each upload gets its own job, pointing at its own bytes.
+  assert.notEqual(a.job, b.job);
+  assert.equal(index.jobs.get(a.job)!.streamKey, a.streamKey);
+  assert.equal(index.jobs.get(b.job)!.streamKey, b.streamKey);
+
+  // The hash is what actually separates them: the two keys differ in that
+  // component, not merely in their timestamps.
+  const hashOf = (key: string) => /-([0-9a-f]{8})-/.exec(key)![1];
+  assert.notEqual(hashOf(a.streamKey), hashOf(b.streamKey));
+
+  // Re-uploading identical bytes archives them again under a fresh timestamp
+  // rather than deduplicating — the key is timestamped first so the prefix
+  // still sorts oldest-first. Harmless: the hash component is unchanged, so
+  // nothing is ever overwritten and no capture is lost.
+  const again = await asJson(await app.request("/api/upload", { method: "POST", body: full }, env));
+  assert.equal(hashOf(again.streamKey), hashOf(a.streamKey), "same bytes, same hash component");
+  assert.deepEqual(bucket.objects.get(again.streamKey), full);
+});
+
+// The favicons are served by the ASSET LAYER, not by these routes: wrangler.jsonc
+// excludes them from run_worker_first so public/_headers can set their
+// cache-control. That makes their presence on disk the thing worth guarding —
+// if either file goes missing, the request falls to the catch-all, where the
+// single-page-application handling answers it with index.html: a 200 carrying
+// the whole HTML document, labelled text/html, as the tab icon. That is what
+// /favicon.ico actually did before the file existed.
+test("both favicon files exist for the asset layer to serve", () => {
+  for (const [name, magic] of [["favicon.svg", "<svg"], ["favicon.ico", "\x00\x00\x01\x00"]] as const) {
+    const b = readFileSync(new URL(`../public/${name}`, import.meta.url));
+    assert.ok(b.length > 100, `${name} is suspiciously small (${b.length} bytes)`);
+    assert.equal(b.subarray(0, magic.length).toString("binary"), magic, `${name} magic`);
+  }
+
+  // index.html must reference both, or the fallback ships dead.
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  assert.match(html, /href="\/favicon\.svg"/);
+  assert.match(html, /href="\/favicon\.ico"/);
 });
