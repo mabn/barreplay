@@ -458,22 +458,31 @@ test("both favicon files exist for the asset layer to serve", () => {
   assert.match(html, /href="\/favicon\.ico"/);
 });
 
-// The widget-install guide. /setup has no extension, so without an explicit
-// route the asset layer's single-page-application handling answers it with the
-// viewer's index.html — a 200 that looks fine and shows the wrong page.
-test("/setup serves the guide page, not the SPA entry", async () => {
+// The widget-install guide. The route hands the request to the asset layer
+// UNCHANGED: it resolves /setup to setup.html itself, and its default HTML
+// handling (auto-trailing-slash) answers a /setup.html URL with a 307 back to
+// /setup. Rewriting the path therefore fed that redirect into this same route
+// — an infinite loop in production that no local test could see, because the
+// fake ASSETS below happily answers whatever path it is handed.
+test("/setup serves the guide page without rewriting the path", async () => {
   const { env } = makeEnv();
   const asked: string[] = [];
   (env as unknown as { ASSETS: { fetch(r: Request): Promise<Response> } }).ASSETS = {
     async fetch(r: Request) {
-      asked.push(new URL(r.url).pathname);
+      const path = new URL(r.url).pathname;
+      asked.push(path);
+      // Stand in for auto-trailing-slash: the .html form is a redirect, never
+      // a page, so a route that asks for it can only ever return the bounce.
+      if (path.endsWith(".html") && path !== "/index.html") {
+        return new Response(null, { status: 307, headers: { location: path.slice(0, -".html".length) } });
+      }
       return new Response("<!DOCTYPE html>", { headers: { "content-type": "text/html" } });
     },
   };
 
   const res = await app.request("/setup", {}, env);
-  assert.equal(res.status, 200);
-  assert.deepEqual(asked, ["/setup.html"], "the route rewrites to the real asset");
+  assert.deepEqual(asked, ["/setup"], "the asset layer resolves the extensionless path itself");
+  assert.equal(res.status, 200, "a 3xx here is the redirect loop");
   // Like the SPA entry: revalidated, so a guide edit reaches everyone on reload.
   assert.equal(res.headers.get("cache-control"), "no-cache");
 });
