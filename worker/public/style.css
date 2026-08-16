@@ -254,7 +254,13 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
   background: #1b232c; color: #9fb0bf; border: 1px solid #2f3947;
   border-radius: 4px; padding: 3px 9px; font-size: 12px; cursor: pointer;
 }
-#filters button:hover { color: #cfe3f5; border-color: #4a5a6c; }
+#filters button:hover:enabled { color: #cfe3f5; border-color: #4a5a6c; }
+#filters button:disabled { opacity: .45; cursor: default; }
+#filters button.on { background: #24425c; border-color: #4a7fa8; color: #d6ecff; }
+/* Admin-only controls in the bar (?admin=true), same gate as the list's
+   per-row refresh button. */
+#filters .admin { display: none; }
+body.admin-mode #filters .admin { display: inline-block; }
 #filters #f_count { margin-left: auto; }
 /* Settings filters reuse the row badges' look, but as toggles: dim until
    picked, so the bar reads as "nothing selected" at a glance. */
