@@ -200,13 +200,18 @@ test('chat bubbles fade smoothly and are not re-timed by a speed change', () => 
   const STRIDE = 11, F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6, DVX: 7, DVZ: 8, BUILD: 9, TARGET: 10 };
   const viewW = 800, viewH = 600, scale = 0.1, center = { x: 0, z: 0 };
   const teamColor: any = { 0: '#ff2020' };
-  const commTeamOf = new Map([[1, 0]]);
+  const commTeamOf = new Map([[1, 0], [5, -1], [6, -1]]); // 5 and 6 are spectators
   const defIsCom = new Map([[58, true]]);
   const interpPos = (u: any, i: number) => [u[i + F.X], u[i + F.Z]];
   const cssToTint = () => [1, 0.125, 0.125];
+  const SPEC_KEY = 'spec';
+  const SPEC_BG = '#0b0e12', SPEC_NAME_INK = '#ffd24a', SPEC_ALL_INK = '#ffffff';
+  const BUBBLE_MIN_TEXT_PX = 60;
+  const quietSpot = () => [7000, 7000];
+  const commName = (c: any) => 'huk' + c.p;
   let chatLines: any[] = [], bubbleAnchor = new Map(), bubbleExpiry = new Map();
   const bubbleText = new Map();
-  let playRAF: any = 1, speedValue = 1;
+  let playRAF: any = 1, speedValue = 1, showBubbles = true;
   const document = { getElementById: () => ({ value: String(speedValue) }) };
 
   const api = eval(`(function(){
@@ -216,8 +221,10 @@ test('chat bubbles fade smoothly and are not re-timed by a speed change', () => 
     ${extract('textColorOn')}
     ${extract('roundRectPath')}
     ${extract('fitBubbleText')}
+    ${extract('bubbleRuns')}
     ${extract('drawChatBubbles')}
-    return { draw: drawChatBubbles, setChat: c => { chatLines = c; }, setSpeed: v => { speedValue = v; } };
+    return { draw: drawChatBubbles, setChat: c => { chatLines = c; }, setSpeed: v => { speedValue = v; },
+      setShow: v => { showBubbles = v; } };
   })()`);
 
   const u = new Int32Array([100, 58, 0, 1000, 2000, 9, 9, 0, 0, 255, 0]);
@@ -359,7 +366,8 @@ test('bubble text is fitted to the cap once and reused', () => {
   let measures = 0;
   const octx = { measureText: (s: string) => { measures++; return { width: s.length * PX_PER_CHAR }; } };
   const bubbleText = new Map();
-  const fit = eval(`(function(){ ${extract('fitBubbleText')} return fitBubbleText; })()`);
+  const fit0 = eval(`(function(){ ${extract('fitBubbleText')} return fitBubbleText; })()`);
+  const fit = (raw: string) => fit0(raw, BUBBLE_MAX_PX);
 
   const fits = 'x'.repeat(Math.floor(BUBBLE_MAX_PX / PX_PER_CHAR));
   assert.deepEqual(fit(fits), [fits, BUBBLE_MAX_PX], 'text at exactly the cap is untouched');
@@ -374,4 +382,152 @@ test('bubble text is fitted to the cap once and reused', () => {
   const again = fit(long);
   assert.equal(measures, 0, 'a repeat fit must not measure again');
   assert.equal(again[0], text, 'and returns the same result');
+});
+
+// Spectator bubbles: black, two-tone, sharing one stack on borrowed ground —
+// and the whole layer switchable from the sidebar.
+test('spectator bubbles are formatted and coloured apart from players', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('not found: ' + n);
+  };
+  const consts = APP.match(/^const (?:BUBBLE|SPEC|QUIET)_[A-Z_]+ = .*$/gm)!.join('\n');
+
+  const calls: any[] = [];
+  const octx: any = new Proxy({}, {
+    get: (_t, k) => k === 'measureText' ? ((s: string) => ({ width: s.length * 6 })) : ((...a: any[]) => calls.push([k, ...a])),
+    set: (_t, k, v) => { calls.push(['set:' + String(k), v]); return true; },
+  });
+  const STRIDE = 11;
+  const F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6, DVX: 7, DVZ: 8, BUILD: 9, TARGET: 10 };
+  const viewW = 800, viewH = 600, scale = 0.1, center = { x: 7000, z: 7000 };
+  const teamColor: any = { 0: '#ff2020' };
+  const commTeamOf = new Map([[1, 0], [5, -1], [6, -1]]);
+  const defIsCom = new Map([[58, true]]);
+  const interpPos = (u: any, i: number) => [u[i + F.X], u[i + F.Z]];
+  const cssToTint = () => [1, 1, 1];
+  const quietSpot = () => [7000, 7000];
+  const commName = (c: any) => 'huk' + c.p;
+  let chatLines: any[] = [], bubbleAnchor = new Map(), bubbleExpiry = new Map();
+  const bubbleText = new Map();
+  let playRAF: any = null, speedValue = 1, showBubbles = true;
+  const document = { getElementById: () => ({ value: String(speedValue) }) };
+
+  const api = eval(`(function(){
+    ${consts}
+    ${extract('bubbleSpeedFactor')}
+    ${extract('firstChatAt')}
+    ${extract('textColorOn')}
+    ${extract('roundRectPath')}
+    ${extract('fitBubbleText')}
+    ${extract('bubbleRuns')}
+    ${extract('drawChatBubbles')}
+    return { draw: drawChatBubbles, setChat: c => { chatLines = c; }, setShow: v => { showBubbles = v; } };
+  })()`);
+
+  // Commander parked at the same place the stubbed quiet spot returns, so
+  // player and spectator bubbles are both on screen for one viewport.
+  const u = new Int32Array([100, 58, 0, 7000, 7000, 9, 9, 0, 0, 255, 0]);
+  const drawn = (frame: number) => {
+    calls.length = 0;
+    bubbleAnchor.clear(); bubbleExpiry.clear();
+    api.draw(frame, u);
+    const runs: [string, string][] = [];
+    let ink = '';
+    for (const c of calls) {
+      if (c[0] === 'set:fillStyle') ink = c[1];
+      else if (c[0] === 'fillText') runs.push([c[1], ink]);
+    }
+    return { runs, bg: calls.filter(c => c[0] === 'set:fillStyle').map(c => c[1]) };
+  };
+
+  // Talking to the spectator channel: name and message both yellow, no [ALL].
+  api.setChat([{ f: 0, p: 5, t: 'asd', d: 'spec' }]);
+  let r = drawn(10);
+  assert.deepEqual(r.runs, [['(s) huk5: ', '#ffd24a'], ['asd', '#ffd24a']]);
+  assert.ok(r.bg.includes('#0b0e12'), 'spectator bubbles are black');
+
+  // Talking to everyone: yellow name, white message, carrying [ALL].
+  api.setChat([{ f: 0, p: 5, t: 'hello', d: 'all' }]);
+  r = drawn(10);
+  assert.deepEqual(r.runs, [['(s) huk5: ', '#ffd24a'], ['[ALL] hello', '#ffffff']]);
+
+  // Two spectators share one stack rather than drawing over each other, and
+  // each line still names its own author.
+  api.setChat([
+    { f: 0, p: 5, t: 'one', d: 'spec' },
+    { f: 1, p: 6, t: 'two', d: 'spec' },
+  ]);
+  r = drawn(10);
+  assert.deepEqual(r.runs.map(x => x[0]), ['(s) huk5: ', 'one', '(s) huk6: ', 'two']);
+
+  // A player's bubble stays one run and keeps its team colour.
+  api.setChat([{ f: 0, p: 1, t: 'push', d: 'ally' }]);
+  r = drawn(10);
+  assert.deepEqual(r.runs.map(x => x[0]), ['push']);
+  assert.ok(r.bg.includes('#ff2020'), 'player bubbles use the team colour');
+
+  // The sidebar toggle switches the whole layer off.
+  api.setShow(false);
+  assert.deepEqual(drawn(10).runs, [], 'hidden means nothing is drawn');
+  api.setShow(true);
+  assert.equal(drawn(10).runs.length, 1, 'and back on again');
+});
+
+// The spectators' spot: the emptiest cell ALONG THE EDGE, counted over every
+// decoded keyframe, and resolved once so it never wanders.
+test('spectator chat anchors to a quiet cell on the map edge', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('not found: ' + n);
+  };
+  const QUIET_GRID = Number(APP.match(/const QUIET_GRID = (\d+);/)![1]);
+  const STRIDE = 11;
+  const F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6, DVX: 7, DVZ: 8, BUILD: 9, TARGET: 10 };
+  const SIZE = 8000, CELL = SIZE / QUIET_GRID;
+  const data = { bounds: { minX: 0, maxX: SIZE, minZ: 0, maxZ: SIZE } };
+  let keyFrames: any[] = [], quietAnchor: any = null;
+
+  const api = eval(`(function(){
+    ${extract('quietSpot')}
+    return { spot: quietSpot, setKeys: k => { keyFrames = k; quietAnchor = null; }, reset: () => { quietAnchor = null; } };
+  })()`);
+
+  assert.equal(api.spot(), null, 'no keyframe decoded yet: retry later, do not guess');
+
+  // Fill every cell, leaving one MIDDLE cell and one EDGE cell empty. The edge
+  // one must win even though both are equally empty — and even though the
+  // middle one is emptier.
+  const cellCentre = (cx: number, cz: number) => [(cx + 0.5) * CELL, (cz + 0.5) * CELL];
+  const units: number[] = [];
+  const emptyEdge = [0, 3], emptyMiddle = [3, 3];
+  for (let cz = 0; cz < QUIET_GRID; cz++) {
+    for (let cx = 0; cx < QUIET_GRID; cx++) {
+      if (cx === emptyMiddle[0] && cz === emptyMiddle[1]) continue;
+      const n = (cx === emptyEdge[0] && cz === emptyEdge[1]) ? 1 : 20; // edge cell: sparse but not empty
+      const [x, z] = cellCentre(cx, cz);
+      for (let k = 0; k < n; k++) units.push(0, 0, 0, x, z, 0, 0, 0, 0, 0, 0);
+    }
+  }
+  api.setKeys([{ u: new Int32Array(units) }]);
+  const spot = api.spot();
+  assert.deepEqual(spot, cellCentre(emptyEdge[0], emptyEdge[1]),
+    'the quietest EDGE cell wins, not the emptier one in the middle');
+
+  // Resolved once: later keyframes must not move it.
+  api.setKeys([{ u: new Int32Array(units) }]);
+  api.spot();
+  const again = eval(`(function(){ ${extract('quietSpot')} return quietSpot; })()`);
+  assert.deepEqual(api.spot(), spot, 'the spot is stable for the replay');
+  assert.ok(typeof again === 'function');
 });
