@@ -158,10 +158,13 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 		return "", nil, err
 	}
 
+	// The demo's own chat and drawings take precedence over anything the widget
+	// records: they are complete and exactly framed (capture.ReplaceComms).
 	w, err := snapshot.NewBRPWriter(o.OutDir, h.GameID)
 	if err != nil {
 		return "", nil, err
 	}
+	w = capture.ReplaceComms(w, demo.Comms)
 	outPath := filepath.Join(o.OutDir, h.GameID+".brp")
 
 	fmt.Fprintf(os.Stderr, "resim: %s: engine %s, %ds of game time — launching headless replay\n",

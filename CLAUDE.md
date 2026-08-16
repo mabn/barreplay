@@ -160,7 +160,24 @@ internal/envfile/         tiny stdlib KEY=VALUE loader for ./.env. Accepts the b
                           silently truncated key is worse than requiring quotes.
 cmd/barreplay-static/main.go CLI: pack .brp -> static-file bundle (index.json + replays/**) for R2 hosting
 internal/barapi/          resolve gameId via api.bar-rts.com; download .sdfz from OVH
-internal/demofile/        gunzip + parse packed header + TDF startscript
+internal/demofile/        gunzip + parse packed header + TDF startscript + the packet
+                          stream's CHAT and MAP DRAWINGS (comms.go -> Demo.Comms). The
+                          stream is what the SERVER broadcast, which makes it the
+                          AUTHORITATIVE comm source and the one every pipeline prefers
+                          (capture.ReplaceComms): chat is broadcast unfiltered — each
+                          client filters for display — so it holds every side's ally
+                          chat, the spectator channel and whispers with the sender's own
+                          destination byte, and it is framed EXACTLY because the
+                          KEYFRAME/NEWFRAME packets sit in the same stream (one per sim
+                          frame; keyframes carry the number, so counting them is exact).
+                          Unit positions are still NOT read from it — that is what the
+                          re-simulation is for. Only three packet types are decoded
+                          (chat 7, mapdraw 32, the two frame packets); everything else is
+                          skipped by its chunk length, since a demo chunk holds exactly
+                          one packet — which is what keeps the scan robust across engine
+                          versions. Best-effort: a demo cut short by a crash (whose
+                          header may not even declare a stream size) keeps whatever was
+                          recovered before the break.
 internal/engine/          locate spring-headless/pr-downloader, provision, launch, stream stdout
 internal/capture/         parse the widgets' streams -> snapshot records (BRSNAP text in
                           capture.go, binary .brepstream in brep.go, shared preamble +
@@ -464,11 +481,13 @@ else.
 
 ### Data flow
 
-`barapi.Resolve/Download` → `demofile.Parse` (versions/map/gameId) →
-`engine.Locate` → `engine.EnsureContent` (pr-downloader) → `engine.WriteWidget`
-(substitutes the output-file path) → `engine.EnableWidget` (seed widget config) →
-`engine.BuildStartscript` → `engine.Run` (widget writes `<out>/<gameId>.brsnap`
-directly) → `capture.Consume` reads that file → `snapshot.NewBRPWriter`.
+`barapi.Resolve/Download` → `demofile.Parse` (versions/map/gameId, **and the chat +
+drawings out of the packet stream**) → `engine.Locate` → `engine.EnsureContent`
+(pr-downloader) → `engine.WriteWidget` (substitutes the output-file path) →
+`engine.EnableWidget` (seed widget config) → `engine.BuildStartscript` →
+`engine.Run` (widget writes `<out>/<gameId>.brsnap` directly) → `capture.Consume`
+reads that file → `capture.ReplaceComms` (the demo's comms win over the widget's) →
+`snapshot.NewBRPWriter`.
 
 Note the widget writes its BRSNAP stream to its **own file** (path substituted from
 `Config.SnapshotStreamPath`), not to stdout: the tool drains the engine's stdout (watching
@@ -546,6 +565,13 @@ Both are appended after `maxHp`, so pre-velocity `.brsnap` streams still parse (
 them only when the line has all 12 fields).
 
 **Chat and map drawings (`COMM` / `C` records; both widgets, uploader >= 1.6.0).**
+THE WIDGET PATH IS THE FALLBACK — whenever a demo is available its comms replace
+these wholesale (`capture.ReplaceComms`, wired into cmd/barreplay, internal/resim
+and internal/packer), because the demo has every channel and exact frames. The
+widget capture is what a `pack -no-demo` or a game the BAR API does not know still
+gets, and it is the only source for a live game not yet published. The replacement
+is skipped when the demo yielded NO comms, since that is indistinguishable from a
+truncated packet stream.
 Recorded at the exact frame they happen, as one JSON payload per message or drawing
 command (`chat`/`point`/`line`/`erase`; see docs/brepstream-format.md). Drawings come
 from the `MapDrawCmd` callin, which is structured — author playerID + world
@@ -563,12 +589,19 @@ heartbeat echoes, out of the record. `<Name> added point:` console lines are dro
 purpose: `MapDrawCmd` already delivered that marker, with coordinates. Both callins are
 pcall-guarded and their failures are swallowed SILENTLY — an Echo inside
 `AddConsoleLine` comes straight back through the same callin.
-Comms are POINT-OF-VIEW-LIMITED exactly like unit visibility (the engine fires the
-draw callin only for marks a client may see and delivers only the chat channels it
-receives), with one asymmetry worth remembering: a demo re-simulation watches as a
-spectator, so unlike its unit data its COMM data is already complete. Volume is capped
-at 20000 records per capture (`maxComms`) because the viewer downloads the whole set
-before playback.
+Comms captured this way are POINT-OF-VIEW-LIMITED exactly like unit visibility (the
+engine fires the draw callin only for marks a client may see and delivers only the
+chat channels it receives), and their FRAME STAMPS ARE APPROXIMATE: the engine does
+not hand chat to Lua when it arrives, it flushes the console from
+`CGame::UpdateUnsynced` — the draw-side chain `-throttle-draw` deliberately starves.
+Measured on a real re-sim infolog, the widget's own `draws=` heartbeat counter IS
+that flush rate: a median of 375 flushes per 300 sim frames (sub-frame accuracy) but
+1-6 over the first ~2 minutes of game time, i.e. a stamp up to ~10 game-seconds late
+exactly when people say "glhf". Nothing in the Lua console API carries a frame or a
+timestamp (checked `Spring.GetConsoleBuffer` and the engine's `RawLine`), so this is
+a floor for the widget path, not an oversight — and it is the reason the demo is
+preferred wherever one exists. Volume is capped at 20000 records per capture
+(`maxComms`) because the viewer downloads the whole set before playback.
 
 The widget never touches synced state (only `Get*` reads, unsynced console commands, its
 own output file, and unsynced widget-handler calls) so it cannot desync the replay. `__SAMPLE_EVERY__` is substituted at write time (`-every`, default 30 = 1 Hz).

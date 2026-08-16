@@ -497,6 +497,12 @@ drawings, one record each, in capture order (non-decreasing frame). One gzip
 stream for the whole capture, like `E`, and like `E` it is served to the
 browser inside the head payload — the viewer needs the lot upfront to render
 the chat transcript and to know which marks are on the map at any playhead.
+Cheap: a real 33-minute 8v8 with 336 comms spends 3.8 KB, 0.2% of its file.
+
+The source is normally the **demo's own packet stream** (see
+`internal/demofile/comms.go`), which holds every side's chat on every channel
+with exact frames; the capture stream's own records are the fallback when
+there is no demo behind the pack.
 
 The section is **absent** when a capture has no comms, which is what every
 `.brp` packed from a pre-1.6.0 widget stream looks like. Readers must treat a

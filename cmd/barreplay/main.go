@@ -211,10 +211,13 @@ func run() error {
 	}
 
 	// 5. Open the snapshot writer (the snapshot package owns the on-disk format).
+	// The demo's own chat and drawings take precedence over anything the widget
+	// records: they are complete and exactly framed (capture.ReplaceComms).
 	w, err := snapshot.NewBRPWriter(*outDir, h.GameID)
 	if err != nil {
 		return err
 	}
+	w = capture.ReplaceComms(w, demo.Comms)
 	outPath := filepath.Join(*outDir, h.GameID+".brp")
 
 	// 6. Launch the engine. The widget writes snapshots to rawPath directly; the

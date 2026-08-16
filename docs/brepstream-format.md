@@ -44,6 +44,13 @@ up to the truncation point is valid.
 
 ## `C` record — chat and map drawings
 
+**This is the fallback source.** When a demo is available its packet stream
+supersedes these records wholesale (`capture.ReplaceComms`), because the stream
+is what the server broadcast: every channel of every side, framed exactly. See
+`internal/demofile/comms.go`. What follows is what a capture with no demo
+behind it — `pack -no-demo`, or a game the BAR API does not know — still gets,
+and it is the only source for a live game before it is published.
+
 JSON, not columns: comms are rare (hundreds per game against millions of unit
 records) and their text is free-form, so the encoding that pays off everywhere
 else buys nothing here. The same payload rides the `.brsnap` text stream as a
@@ -69,14 +76,25 @@ team's while playing, everyone's when spectating — and delivers chat only on
 the channels the client receives. A re-simulated demo is watched by a full-view
 spectator and therefore records every side; one player's live upload does not.
 
-**Where the text comes from.** BAR's widget handler does not forward
-`GotChatMsg`, so chat has no structured callin: the widget reads
-`AddConsoleLine` and reverses the console grammar `CGame::HandleChatMsg`
-prints (`<Name> …` / `[Name] …` / `> <Name> …`, channel as a body prefix),
-accepting a line only when the name belongs to a player of this game. Inline
-colour codes are stripped before writing; `capture.sanitizeCommText`
-re-sanitizes and length-caps on the way in, since the text is player-authored
-and ends up in a browser.
+**Where the text comes from, and why the frame is approximate.** BAR's widget
+handler does not forward `GotChatMsg`, so chat has no structured callin: the
+widget reads `AddConsoleLine` and reverses the console grammar
+`CGame::HandleChatMsg` prints (`<Name> …` / `[Name] …` / `> <Name> …`, channel
+as a body prefix), accepting a line only when the name belongs to a player of
+this game. Inline colour codes are stripped before writing;
+`capture.sanitizeCommText` re-sanitizes and length-caps on the way in, since
+the text is player-authored and ends up in a browser.
+
+That callin does not fire when the chat arrives, either: the engine buffers
+console lines and flushes them from `CGame::UpdateUnsynced`, the draw-side
+chain a re-sim starves with `-throttle-draw`. The widget can only stamp the
+frame it was handed the line on, and nothing in the Lua console API carries a
+frame or timestamp (`Spring.GetConsoleBuffer` exposes text and level only).
+Measured on a real re-sim, the flush rate — which the widget's own `draws=`
+heartbeat counter reports — is a median 375 per 300 sim frames, but 1-6 over
+the first couple of minutes of game time, so an early message can be stamped
+several game-seconds late. Ordering is never wrong. This is the main reason
+the demo is preferred wherever one exists.
 
 ## Segments (widget disable/enable, rejoin)
 
