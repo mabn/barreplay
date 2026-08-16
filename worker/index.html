@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>barreplay viewer</title>
-<!-- SVG first for browsers that take it (one file, crisp at every size); the
-     .ico is the fallback and is also what a browser fetches on its own from
-     /favicon.ico without being told to. Deliberately NOT fingerprinted: that
-     implicit request is for a fixed path, so the name cannot carry a hash. -->
-<link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<link rel="alternate icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+<!-- BAR's T2 air icon turned 90° clockwise — a play button that is still a
+     unit icon. Regenerate with `go run ./tools/favicon`. The .ico carries
+     16/32/48 and is also what a browser fetches on its own from /favicon.ico
+     without being told to; deliberately NOT fingerprinted, since that implicit
+     request is for a fixed path no markup can redirect. -->
+<link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
 <link rel="apple-touch-icon" href="/favicon.png">
 <!-- __ASSET_REV__ is replaced with a content hash of app.js+style.css (Vite
      plugin at build/dev; the Go viz server at startup). The hash is in the

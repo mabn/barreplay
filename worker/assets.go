@@ -9,5 +9,5 @@ package worker
 import "embed"
 
 //go:embed index.html public/app.js public/style.css
-//go:embed public/favicon.svg public/favicon.ico public/favicon.png
+//go:embed public/favicon.ico public/favicon.png
 var Assets embed.FS

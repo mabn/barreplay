@@ -723,7 +723,6 @@ func TestFavicon(t *testing.T) {
 
 	for _, tc := range []struct{ path, ctype, magic string }{
 		{"/favicon.ico", "image/x-icon", "\x00\x00\x01\x00"}, // ICONDIR
-		{"/favicon.svg", "image/svg+xml", "<svg"},
 		{"/favicon.png", "image/png", "\x89PNG"},
 	} {
 		resp, err := http.Get(srv.URL + tc.path)
@@ -749,7 +748,7 @@ func TestFavicon(t *testing.T) {
 	resp, _ := http.Get(srv.URL + "/")
 	html, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	for _, want := range []string{`href="/favicon.svg"`, `href="/favicon.ico"`} {
+	for _, want := range []string{`href="/favicon.ico"`, `href="/favicon.png"`} {
 		if !strings.Contains(string(html), want) {
 			t.Errorf("index.html does not reference %s", want)
 		}
