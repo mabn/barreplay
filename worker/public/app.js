@@ -3625,9 +3625,17 @@ async function refreshQueue() {
   queueReadAt = Date.now();
   renderQueue();
 
-  // A finished job published a replay the catalog didn't have when this page
-  // loaded, so its Game cell has no link yet. Re-list once per such game (the
-  // set keeps a never-registered upload from re-listing on every read).
+  // The Game cells link to the catalog, which loads lazily (ensureHomeData) and
+  // may not be here yet — every job would look unregistered. Its arrival, not a
+  // second fetch, is what fills those links in; ensureHomeData is memoized, so
+  // this just waits on the load showHome already started.
+  if (!homeDataLoaded) {
+    ensureHomeData().then(() => renderQueue());
+    return;
+  }
+  // A job that finished AFTER that load published a replay the list has never
+  // seen, so re-list once per such game (the set keeps a never-registered
+  // upload from re-listing on every read).
   const fresh = page.jobs.filter(j => j.state === 'done' &&
     !queueRelisted.has(j.gameId) && !replayList.some(e => e.id === j.gameId));
   if (fresh.length) {
