@@ -148,7 +148,6 @@ func (s *Server) Handler() http.Handler {
 		}
 	}
 	mux.HandleFunc("/favicon.ico", favicon("public/favicon.ico", "image/x-icon"))
-	mux.HandleFunc("/favicon.svg", favicon("public/favicon.svg", "image/svg+xml"))
 	mux.HandleFunc("/favicon.png", favicon("public/favicon.png", "image/png"))
 	// Vendored BAR unit icons, served at /icons/<file> to match the bitmap paths
 	// in the wire payload. Icons are immutable, so let the browser cache them.
