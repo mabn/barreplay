@@ -369,8 +369,11 @@ test('bubble text is fitted to the cap once and reused', () => {
   const fit0 = eval(`(function(){ ${extract('fitBubbleText')} return fitBubbleText; })()`);
   const fit = (raw: string) => fit0(raw, BUBBLE_MAX_PX);
 
+  // The widest string that still fits. Its width is its own, not the cap —
+  // the cap need not be a whole number of characters wide.
   const fits = 'x'.repeat(Math.floor(BUBBLE_MAX_PX / PX_PER_CHAR));
-  assert.deepEqual(fit(fits), [fits, BUBBLE_MAX_PX], 'text at exactly the cap is untouched');
+  assert.deepEqual(fit(fits), [fits, fits.length * PX_PER_CHAR], 'text within the cap is untouched');
+  assert.ok(fits.length * PX_PER_CHAR <= BUBBLE_MAX_PX, 'and it really does fit');
 
   const long = 'y'.repeat(Math.floor(BUBBLE_MAX_PX / PX_PER_CHAR) * 3);
   const [text, w] = fit(long);

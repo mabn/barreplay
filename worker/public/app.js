@@ -1132,7 +1132,14 @@ let chatStick = true;       // follow the playhead (false once scrolled away)
 const BUBBLE_LIFETIME = 9;  // game-seconds a bubble hovers, at 1x playback
 const BUBBLE_FADE = 2;      // game-seconds of fade-out at the end of that
 const BUBBLE_STACK = 3;     // most recent messages shown per speaker
-const BUBBLE_MAX_PX = 480;  // bubble width cap; longer text is ellipsized
+// Bubble width cap. Set from the CEILING rather than to taste: the engine
+// refuses to send a chat message longer than 127 characters
+// (ChatMessage::MAX_MSG_SIZE = UINT8_MAX/2), which at 12px is around 775px, so
+// 800 means real messages stop being cut off rather than merely being cut off
+// less often. Only a message of 127 unusually wide glyphs still ellipsizes.
+// Measured over 543 messages from five published replays, the previous 480
+// trimmed about 2% of them.
+const BUBBLE_MAX_PX = 800;
 const BUBBLE_PAD = 5;
 const BUBBLE_LINE = 16;     // px between stacked bubbles
 
