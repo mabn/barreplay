@@ -274,6 +274,15 @@ const serveEntry = async (c: { env: Env; req: { raw: Request } }) => {
 app.get("/", serveEntry);
 app.get("/index.html", serveEntry);
 
+// The tab icon is an SVG (index.html points at it) and there is no .ico. A
+// browser that does not take SVG favicons asks for this path anyway, unasked,
+// as do crawlers and feed readers — and without this route it falls to the
+// catch-all below, where the asset layer's single-page-application handling
+// answers it with index.html: a 200 carrying the whole HTML document, labelled
+// text/html, as the tab icon. Say "nothing here" instead, matching the Go viz
+// server's own stub for the same path.
+app.on(["GET", "HEAD"], "/favicon.ico", (c) => c.body(null, 204));
+
 // Non-R2, non-API requests reach the Worker only when no static asset matched.
 // Hand them to the SPA fallback.
 app.all("*", (c) => c.env.ASSETS.fetch(c.req.raw));
