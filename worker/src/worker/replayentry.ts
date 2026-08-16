@@ -58,6 +58,24 @@ export interface ReplayEntry {
    * never accepted from a PUT body. Superseded revisions stay servable, so
    * each entry keeps playing at ?replay=<rid>. */
   uploads: UploadRef[] | null;
+  /** The uploader-widget build that produced the capture behind the CURRENT
+   * revision, read out of the stream's GAME line by the publisher:
+   *  - widgetVersion  semver of the release, e.g. "1.7.0"
+   *  - widgetSha      git SHA of the exact file, stamped into the copy players
+   *                   download (worker/tools/sync-assets.mjs). Null when a
+   *                   player installed the widget straight from the repo, so
+   *                   it was never stamped
+   *  - widgetDate     when that release was cut (the widget bumps it with the
+   *                   version)
+   * Version+date say which release; the SHA says which bytes of it — the
+   * distinction that matters for a file served unchanged in name for weeks.
+   * All null for a re-sim revision (no uploader widget involved) and for the
+   * many rows whose captures predate the fields. Per-revision provenance is
+   * not lost when a game is re-published: each entry in `uploads` carries the
+   * same trio for its own revision. */
+  widgetVersion: string | null;
+  widgetSha: string | null;
+  widgetDate: string | null;
 }
 
 /** One ally team's roster slice in a catalog row. */
@@ -72,6 +90,19 @@ export interface CatalogTeam {
 export interface UploadRef {
   rid: string;
   ally: number | null;
+  /** The widget build behind THIS revision (see the row's widget* fields).
+   * The row's copy describes only the revision it currently points at, so a
+   * re-publish would otherwise erase what produced the earlier upload —
+   * exactly the data this is here to keep. Absent for revisions published
+   * before the fields existed, and for re-sim revisions. */
+  widget?: WidgetRef;
+}
+
+/** The uploader-widget build that produced one capture. */
+export interface WidgetRef {
+  version?: string;
+  sha?: string;
+  date?: string;
 }
 
 /** ReplayFilter narrows GET /api/replays. Every field is independent and
@@ -224,6 +255,8 @@ export function sanitizeEntry(id: string, body: unknown): ReplayEntry | string {
     else if (typeof v !== "string") return `${k} must be a string`;
     else strs[k] = v.slice(0, max);
   }
+  const widget = sanitizeWidget(b);
+  if (typeof widget === "string") return widget;
   const settings = sanitizeSettings(b.settings);
   if (typeof settings === "string") return settings;
   const players = sanitizePlayers(b.players);
@@ -268,7 +301,39 @@ export function sanitizeEntry(id: string, body: unknown): ReplayEntry | string {
     // whatever a PUT body claims is ignored.
     uploads: null,
     view,
+    widgetVersion: widget.version ?? null,
+    widgetSha: widget.sha ?? null,
+    widgetDate: widget.date ?? null,
   };
+}
+
+/** Longest accepted widget version/date string. Both are short constants the
+ * widget declares ("1.7.0", "2026-08-16"); the cap is only here so a
+ * malformed publisher cannot grow a row. */
+const WIDGET_FIELD_MAX = 40;
+
+/** sanitizeWidget validates the widget-provenance trio off a PUT body.
+ *
+ * The SHA is shape-checked (hex, 7-64) rather than merely capped: it is the
+ * one field meant to be compared against a git history, so a value that could
+ * never match one is a bug worth rejecting at the door — and the widget itself
+ * only ever emits a full 40-hex SHA or nothing at all. Version and date are
+ * free-form, since they are whatever constants the widget was cut with. */
+function sanitizeWidget(b: Record<string, unknown>): WidgetRef | string {
+  const out: WidgetRef = {};
+  for (const k of ["version", "date"] as const) {
+    const v = b[k === "version" ? "widgetVersion" : "widgetDate"];
+    if (v === undefined || v === null) continue;
+    if (typeof v !== "string") return `widget${k[0].toUpperCase()}${k.slice(1)} must be a string`;
+    if (v !== "") out[k] = v.slice(0, WIDGET_FIELD_MAX);
+  }
+  const sha = b.widgetSha;
+  if (sha !== undefined && sha !== null && sha !== "") {
+    if (typeof sha !== "string") return "widgetSha must be a string";
+    if (!/^[0-9a-f]{7,64}$/.test(sha)) return "widgetSha must be a lowercase hex git SHA";
+    out.sha = sha;
+  }
+  return out;
 }
 
 /** derivePlayerCount totals a game's players with Gaia/scavengers excluded.
@@ -458,11 +523,27 @@ export function parseViewRequest(
   return { view: "ally", ally: o.ally };
 }
 
-export function mergeUploads(existing: UploadRef[] | null, rid: string | null, ally: number | null): UploadRef[] | null {
+export function mergeUploads(
+  existing: UploadRef[] | null,
+  rid: string | null,
+  ally: number | null,
+  widget?: WidgetRef | null,
+): UploadRef[] | null {
   if (rid === null) return existing;
+  // Only carry a widget that says something, so an entry never grows an empty
+  // object, and a re-publish that knows nothing cannot blank one that did.
+  const w = widget && (widget.version || widget.sha || widget.date) ? widget : undefined;
   const prior = existing ?? [];
-  const out = prior.map((u) => (u.rid === rid && ally !== null ? { rid: u.rid, ally } : u));
-  if (!prior.some((u) => u.rid === rid)) out.push({ rid, ally });
+  const out = prior.map((u) => {
+    if (u.rid !== rid) return u;
+    // Same rid re-published (identical bytes always land on the same one): let
+    // it refresh what it knows, keep what it doesn't.
+    const merged: UploadRef = { rid: u.rid, ally: ally ?? u.ally };
+    const keep = w ?? u.widget;
+    if (keep) merged.widget = keep;
+    return merged;
+  });
+  if (!prior.some((u) => u.rid === rid)) out.push(w ? { rid, ally, widget: w } : { rid, ally });
   return out;
 }
 

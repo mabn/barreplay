@@ -62,11 +62,37 @@
 -- lines. Unknown tags are ignored by the parser, so GID/GAME/COMM/END are
 -- backward compatible.
 
--- Widget version (semver). Bump on any user-visible or wire-visible change;
--- it is reported in GetInfo, the load Echo, and the stream's GAME line, so
--- every capture records which encoder produced it (the copy on a player's
--- machine can be arbitrarily old — the server/decoder needs to know).
-local widgetVersion = "1.6.0"
+-- Widget version (semver) and the date that version was cut. Bump BOTH on any
+-- user-visible or wire-visible change; they are reported in GetInfo, the load
+-- Echo, and the stream's GAME line, so every capture records which encoder
+-- produced it (the copy on a player's machine can be arbitrarily old — the
+-- server/decoder needs to know, and the catalog stores it per replay).
+local widgetVersion = "1.7.0"
+local widgetDate = "2026-08-16"
+
+-- Git SHA of this exact file, stamped when the widget is published for
+-- download: worker/tools/sync-assets.mjs replaces the token below with the SHA
+-- of the last commit that touched this file as it copies it into the worker's
+-- public/. Version+date say which release a capture came from; the SHA says
+-- which bytes, which is the difference between "1.7.0" and "the 1.7.0 that was
+-- actually being served that week".
+--
+-- A copy taken straight from the repo (or from a working tree with local
+-- edits, which the sync refuses to stamp) keeps the token, and the token is
+-- not 40 hex, so stampedSha below reports nothing rather than a lie.
+local widgetSha = "__WIDGET_SHA__"
+
+-- stampedSha returns the SHA when this copy carries a real one, else nil (the
+-- GAME line then omits the field). Deliberately a shape test rather than a
+-- comparison against the token: the substituter does a plain textual replace,
+-- so a second literal token here would be replaced too and the guard would
+-- report every stamped widget as unstamped.
+local function stampedSha()
+	if #widgetSha == 40 and widgetSha:match("^%x+$") then
+		return widgetSha
+	end
+	return nil
+end
 
 function widget:GetInfo()
 	return {
@@ -74,7 +100,7 @@ function widget:GetInfo()
 		desc    = "Records unit snapshots (your team + visible enemies) to <gameId>.brepstream for post-game replay visualization.",
 		author  = "barreplay",
 		version = widgetVersion,
-		date    = "2026",
+		date    = widgetDate,
 		license = "MIT",
 		layer   = 0,
 		enabled = true,
@@ -451,6 +477,8 @@ local function buildPreamble()
 	parts[#parts + 1] = "BRSNAP GAME " .. jsonObject({
 		{ "protocol", protocolVersion },
 		{ "widgetVersion", widgetVersion },
+		{ "widgetDate", widgetDate },
+		{ "widgetSha", stampedSha() },
 		{ "mode", (Spring.IsReplay and Spring.IsReplay()) and "replay" or "live" },
 		{ "map", Game and Game.mapName or nil },
 		{ "gameVersion", Game and Game.gameVersion or nil },
@@ -865,7 +893,8 @@ function widget:Initialize()
 		removeSelf()
 		return
 	end
-	Echo("[replay-uploader] v" .. widgetVersion .. " loaded (" ..
+	Echo("[replay-uploader] v" .. widgetVersion ..
+		" (" .. widgetDate .. (stampedSha() and " " .. widgetSha:sub(1, 8) or " unstamped") .. ") loaded (" ..
 		(writeBinary and writeText and "binary+text" or writeBinary and "binary" or "text") ..
 		"); waiting for gameId (GameID callin)")
 end

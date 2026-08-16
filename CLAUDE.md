@@ -314,9 +314,30 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           "8v8v1"), a nullable
                           `uploaderAlly` (the recording client's side, from the .brp meta's
                           `recorder` — the live uploader widget's GAME line; null for re-sim/
-                          spectator captures), and a server-owned `uploads` list ([{rid, ally}],
+                          spectator captures), the WIDGET-PROVENANCE trio widgetVersion/
+                          widgetSha/widgetDate, and a server-owned `uploads` list
+                          ([{rid, ally, widget?}],
                           accumulated across PUTs via mergeUploads — never accepted from a PUT
                           body) remembering every revision ever published for the game.
+                          The widget trio records WHICH BUILD of the uploader widget produced
+                          the capture behind the current revision: version+date are the
+                          constants the widget bumps together and has to (a player's installed
+                          copy can be arbitrarily old, so the stream is the only place this can
+                          be learned), and the sha is the git commit of the exact file, stamped
+                          into the published download by worker/tools/sync-assets.mjs — the
+                          difference between "1.7.0" and "the 1.7.0 that was being served that
+                          week". THREE COLUMNS, not one JSON blob, because the point is to be
+                          able to ask "which builds are in the wild" / "which replays came from
+                          the build with that bug" in SQL without opening a blob per row.
+                          sanitizeEntry shape-checks the sha (lowercase hex 7-64) since it is
+                          the one field meant to be matched against a git history; version/date
+                          are free-form and length-capped. All three are COALESCEd by the
+                          upsert exactly like `view`: an unstamped widget (installed from the
+                          repo), a re-sim revision and a pre-1.7.0 stream all state nothing,
+                          and silence must not erase what an earlier publish knew. Since the
+                          row describes only the CURRENT revision, per-revision provenance
+                          lives in the uploads entries, each of which carries the build that
+                          produced that upload.
                           `view` ("full"|"ally"|"unknown"|null) states WHOSE POINT OF VIEW the
                           capture is from, because `uploaderAlly` alone cannot: null there is
                           ambiguous between a spectator (saw everything), a re-sim, and a row
@@ -459,7 +480,11 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           index.html (/favicon.ico once served the whole HTML document), and
                           public/_headers applying only to asset-layer responses. Every request in
                           the smoke uses redirect:"manual", since the loop was a chain of 307s that
-                          curl -L and a browser both reported as something else. typecheck is
+                          curl -L and a browser both reported as something else. It also
+                          refuses to ship an UNSTAMPED widget (sync-assets leaves the SHA token
+                          in place when the widget has uncommitted changes): every capture
+                          recorded with that copy would carry no provenance, and nothing
+                          downstream can recover it afterwards. typecheck is
                           deliberately NOT in the chain: it reports pre-existing noUnusedLocals
                           errors in tests/, so wiring it in would block every deploy.
                           Uploads (tools/upload.ts) go
@@ -471,8 +496,13 @@ snapshot/                 PUBLIC data model + pluggable Writer (owns the on-disk
                           The Writer's four record types are Meta, Frame, Event and Comm
                           (snapshot.Comm = one thing a player wrote or drew).
 assets/lua/snapshot_widget.lua   embedded, read-only sampler (go:embed)
-assets/lua/replay_uploader.lua   player-installable live-game variant: constants only (no
-                          substitution tokens), records the player's own ally team plus, by
+assets/lua/replay_uploader.lua   player-installable live-game variant: constants only, with
+                          ONE substitution token (__WIDGET_SHA__, stamped by
+                          worker/tools/sync-assets.mjs when the widget is published for
+                          download — see the widget-provenance note under worker/ below;
+                          an unstamped copy reports no SHA rather than the token, guarded by
+                          a hex/length test rather than a comparison against the token, which
+                          the substituter would itself replace). It records the player's own ally team plus, by
                           default (recordEnemies const), enemy units while the engine lists
                           them in GetAllUnits (LOS, radar, or the engine's radar-memory dot;
                           unidentified radar contacts carry def 0, identity/health carried

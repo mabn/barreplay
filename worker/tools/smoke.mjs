@@ -22,6 +22,9 @@ import { fileURLToPath } from "node:url";
 
 const here = new URL(".", import.meta.url);
 const widgetSrc = readFileSync(new URL("../../assets/lua/replay_uploader.lua", here), "utf8");
+/** The placeholder the repo's widget carries where its git SHA is stamped in
+ * (worker/tools/sync-assets.mjs). */
+const SHA_TOKEN = "__WIDGET_SHA__";
 
 const BOOT_TIMEOUT_MS = 90_000;
 
@@ -125,9 +128,21 @@ try {
 
   // The widget the guide hands out: the bytes players install, so they have to
   // be the repo's copy — a stale public/ sync is exactly what this catches.
+  // The published copy differs from the repo's in exactly one way: its
+  // __WIDGET_SHA__ token is stamped with the widget's git SHA (sync-assets),
+  // which is what lets a capture name the exact bytes that produced it.
   const widget = await get(base, "/replay_uploader.lua");
   check("GET /replay_uploader.lua", widget.status === 200, String(widget.status));
-  check("the served widget is assets/lua/replay_uploader.lua", widget.body === widgetSrc);
+  const stamp = /^local widgetSha = "([^"]*)"$/m.exec(widget.body)?.[1];
+  check("the served widget is assets/lua/replay_uploader.lua, stamped",
+    stamp !== undefined && widget.body === widgetSrc.replaceAll(SHA_TOKEN, stamp),
+    "the published copy differs from the repo by more than its SHA stamp");
+  // A deploy that publishes an unstamped widget loses the provenance for every
+  // capture recorded with it, and nothing downstream can recover it. The sync
+  // refuses to stamp a widget with uncommitted changes, so this means: commit
+  // the widget first.
+  check("the published widget carries its git SHA", /^[0-9a-f]{40}$/.test(stamp ?? ""),
+    `widgetSha = ${JSON.stringify(stamp)} — commit assets/lua/replay_uploader.lua, then re-run the sync`);
   // Served by the ASSET LAYER (excluded from run_worker_first), which is the
   // only way public/_headers applies to it at all.
   check("the widget revalidates (public/_headers applied)",

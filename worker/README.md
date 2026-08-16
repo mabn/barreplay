@@ -44,7 +44,7 @@ inside a **Durable Object** (`src/worker/replayindex.ts`, single instance, migra
 
 | URL | What |
 | --- | --- |
-| `GET /api/replays` | the catalog, newest game first (rows with no start time last) — `[{id, rid, startUnix, durationSec, map, gameSize, sizeBytes, settings, players, playerCount}]`, nulls for unknown stats. Filterable: `?from=&to=` (unix seconds or `YYYY-MM-DD`, `to` covers the whole day), `?map=`, `?minPlayers=&maxPlayers=` (Gaia excluded), `?player=` (case-insensitive name prefix), `?settings=lava,zombies` (all must be present). No params = everything; unknown params are ignored |
+| `GET /api/replays` | the catalog, newest game first (rows with no start time last) — `[{id, rid, startUnix, durationSec, map, gameSize, sizeBytes, settings, players, playerCount, widgetVersion, widgetSha, widgetDate}]`, nulls for unknown stats. Filterable: `?from=&to=` (unix seconds or `YYYY-MM-DD`, `to` covers the whole day), `?map=`, `?minPlayers=&maxPlayers=` (Gaia excluded), `?player=` (case-insensitive name prefix), `?settings=lava,zombies` (all must be present). No params = everything; unknown params are ignored |
 | `GET /api/replays/facets` | the distinct `{maps, sizes, players, settings, from, to}` in the catalog, so the filter bar only offers choices that match something. Computed over the whole catalog, not the filtered result |
 | `PUT /api/replays/<id>` | upsert one row (same JSON shape, minus `id`); called by `pack -upload` / the ingest daemon after a replay's files land in the bucket |
 
@@ -66,6 +66,25 @@ present flags are sent (a vanilla ranked game is `{"ranked": true}`). `pack` dis
 them from the demo startscript's `[modoptions]` (`viz.SettingsFlags` in Go — modoptions
 are NOT stored in the `.brp`, so this rides only the PUT); `pack -no-demo` uploads have
 `settings: null` and just show an empty cell.
+
+`widgetVersion` / `widgetSha` / `widgetDate` record **which build of the
+Replay uploader widget produced the capture** behind the current revision. The
+widget writes all three into its stream's `GAME` line and the publisher carries
+them into the PUT, because a player's installed copy can be arbitrarily old and
+nothing else in the system knows what it was. Version and date are the
+constants the widget bumps together (`1.7.0`, `2026-08-16`); the SHA is the git
+commit of the exact file, stamped into the copy served at `/replay_uploader.lua`
+when it is published (`tools/sync-assets.mjs`) — so it identifies the bytes,
+not just the release name, which is the distinction that matters for a file
+that keeps the same version for weeks. They are three plain columns rather than
+one JSON blob so "which builds are in the wild" is a SQL question.
+
+A widget installed straight from the repo was never stamped and reports no SHA;
+a re-sim revision has no uploader widget at all. Both send nothing, and the
+upsert `COALESCE`s these columns (like `view`), so a later publish that knows
+nothing cannot erase a build a previous one recorded. The row describes the
+current revision, so per-revision provenance lives in `uploads[]`: each entry
+is `{rid, ally, widget?}` and keeps the build that produced *that* upload.
 
 Writes can be guarded with a shared secret: `npx wrangler secret put REPLAY_PUT_TOKEN`
 makes the PUT require `Authorization: Bearer <token>`; `pack` sends the same-named env
@@ -244,7 +263,12 @@ game leaves in `…\data`. Three things make that page work:
 
 - `tools/sync-assets.mjs` copies `assets/lua/replay_uploader.lua` into
   `public/` (gitignored, like the icons) so the repo keeps ONE copy of the
-  widget and the download can never go stale against the decoder.
+  widget and the download can never go stale against the decoder. It also
+  STAMPS the copy: `__WIDGET_SHA__` becomes the SHA of the last commit that
+  touched the widget, which is how a capture can later name the exact bytes
+  that produced it (see the catalog's `widgetSha`). A widget with uncommitted
+  changes is published unstamped — and `npm run smoke`, and so `npm run
+  deploy`, fails on that rather than shipping captures with no provenance.
 - `wrangler.jsonc` excludes `/replay_uploader.lua` from `run_worker_first`:
   through the Worker its `public/_headers` `no-cache` rule would be dead, and
   this is the one file whose bytes change under a stable URL.
