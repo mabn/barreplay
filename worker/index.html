@@ -4,11 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>barreplay viewer</title>
-<!-- BAR's T2 air icon turned 90° clockwise — a play button that is still a
-     unit icon. Regenerate with `go run ./tools/favicon`. The .ico carries
-     16/32/48 and is also what a browser fetches on its own from /favicon.ico
-     without being told to; deliberately NOT fingerprinted, since that implicit
-     request is for a fixed path no markup can redirect. -->
+<!-- Deliberately NOT fingerprinted, unlike the subresources below: a browser
+     asks for the tab icon at a fixed path of its own accord, so the name
+     cannot carry a content hash (public/_headers caps it at a day instead). -->
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <!-- __ASSET_REV__ is replaced with a content hash of app.js+style.css (Vite
      plugin at build/dev; the Go viz server at startup). The hash is in the
