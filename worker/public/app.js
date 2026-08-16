@@ -2041,19 +2041,23 @@ function playerRow(p, r, peaks) {
   return row;
 }
 
-// One resource line: the per-second income, printed over a bar as wide as that
-// income is against `peak` (the largest any team reached recently — see
-// incomePeaks), so reading down the list ranks the economies without reading a
-// single number. The current stock and the storage cap ride along hidden and
-// take the number's place while the row is hovered (`.prow:hover` in style.css):
-// they answer a different question — am I banking or stalling — and a permanent
-// storage-fill bar per resource, which is what this row used to be, crowded out
-// the comparison that a player list is usually being scanned for.
+// One resource line, holding BOTH readings of a resource in one slot: by default
+// the per-second income over a bar as wide as that income is against `peak` (the
+// largest any team sustained recently — see incomePeaks), so reading down the
+// list ranks the economies without reading a single number; while the row is
+// hovered, this player's current stock over their own storage cap, bar and
+// number alike (`.prow:hover` in style.css swaps both halves together, so the
+// bar never describes something the number doesn't). Banking-or-stalling is a
+// real question, just not the one a player list is usually scanned for, which is
+// why it costs a hover rather than the row's whole width.
 function resRow(kind, cur, store, inc, peak) {
-  const frac = peak > 0 ? Math.max(0, Math.min(1, inc / peak)) : 0;
+  const incFrac = peak > 0 ? Math.max(0, Math.min(1, inc / peak)) : 0;
+  const storeFrac = store > 0 ? Math.max(0, Math.min(1, cur / store)) : 0;
   const incStr = (inc >= 0 ? '+' : '') + fmtNum(inc) + '/s';
   return `<div class="resrow ${kind}">` +
-    `<span class="rmeter"><i style="width:${(frac * 100).toFixed(1)}%"></i>` +
+    '<span class="rmeter">' +
+    `<i class="binc" style="width:${(incFrac * 100).toFixed(1)}%"></i>` +
+    `<i class="bstore" style="width:${(storeFrac * 100).toFixed(1)}%"></i>` +
     `<b class="rinc">${incStr}</b>` +
     `<b class="rstore">${fmtNum(cur)} / ${fmtNum(store)}</b>` +
     '</span></div>';
