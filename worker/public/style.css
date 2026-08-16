@@ -174,11 +174,13 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
   flex: 1; min-width: 0; font-weight: 600;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-/* right block: two stacked income meters (metal over energy). The number sits ON
-   its own bar — width = this player's income against the largest any team
-   reached in the last minute — so scanning the column ranks the economies at a
-   glance. Hovering the row swaps every number for that resource's current stock
-   and storage cap, which is why both live in the same fixed-width slot. */
+/* right block: two stacked resource meters (metal over energy). The number sits
+   ON its own bar — width = this player's income against the largest any team
+   sustained in the last minute — so scanning the column ranks the economies at a
+   glance. Hovering the row swaps BOTH halves at once to that resource's stock
+   against the player's own storage cap, so the bar and the number under the
+   cursor always mean the same thing; that is why all four elements share one
+   fixed-width slot. */
 .pres { flex: 0 0 auto; display: flex; flex-direction: column; gap: 3px; }
 .resrow { display: flex; align-items: center; font-size: 10px; line-height: 1; }
 .rmeter {
@@ -188,8 +190,12 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 }
 .rmeter > i { position: absolute; inset: 0 auto 0 0; opacity: .32; } /* the bar */
 .rmeter > b { position: relative; font-weight: 600; } /* above the bar */
-.rstore { display: none; }
-.prow:hover .rinc { display: none; }
+/* Income bar + income number by default; stock bar + stock number on hover. The
+   pairs are swapped together — a storage fill under an income figure would read
+   as one measurement and be neither. */
+.bstore, .rstore { display: none; }
+.prow:hover .binc, .prow:hover .rinc { display: none; }
+.prow:hover .bstore { display: block; }
 .prow:hover .rstore { display: inline; }
 /* Numbers follow the bar colour: metal white/silver, energy yellow. */
 .resrow.metal .rmeter > i { background: #cfd6dd; }
