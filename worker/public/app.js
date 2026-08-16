@@ -1928,12 +1928,21 @@ const INCOME_WINDOW_SEC = 60;
 // through untouched.
 const DESPIKE_SAMPLES = 3;
 
-// incomePeaks returns {m, e} — the largest metal and energy income any team
-// SUSTAINED over the window ending at simFrame. Metal and energy scale
+// incomePeaks returns {m, e} — the largest metal and energy income any team in
+// `teams` SUSTAINED over the window ending at simFrame. Metal and energy scale
 // SEPARATELY: they differ by an order of magnitude, so one shared maximum would
 // flatten every metal bar to nothing. Only the SCALE is despiked; the number on
 // each row stays the raw current income, so a burst still shows itself (with its
 // bar clamped to full) instead of being hidden.
+//
+// `teams` is the set of teams that actually get a row, and passing it is not
+// defensive tidiness: the economy records also carry BAR's Gaia/scavenger team,
+// which runs a hardcoded 1,000,000 metal AND energy per second (its stock reads
+// 1000000/1000000 all game). Scaling against every team in the record therefore
+// measured real 8v8 economies against an infinite one and drew every player a
+// bar ~0.02% wide, in exactly those games that have such a team — which is why
+// it looked intermittent. The scale must come from the same set of players the
+// bars are drawn for, so the leader among them always reads full.
 //
 // Walks the window oldest -> newest, keeping each team's last DESPIKE_SAMPLES
 // incomes so the minimum slides with it — and PRIMING that slide with the
@@ -1944,9 +1953,9 @@ const DESPIKE_SAMPLES = 3;
 // that position. Only samples inside the window contribute to the peak. At the
 // very start of a replay there is nothing to prime with, and a partial minimum
 // is then right anyway: nothing yet distinguishes a spike from an economy.
-function incomePeaks(simFrame) {
+function incomePeaks(simFrame, teams) {
   const peak = { m: 0, e: 0 };
-  if (!resByFrame || simFrame < 0) return peak;
+  if (!resByFrame || simFrame < 0 || !teams || !teams.size) return peak;
   const step = data.sampleEvery > 0 ? data.sampleEvery : 30;
   const samples = Math.max(1, Math.round(INCOME_WINDOW_SEC * 30 / step));
   const hist = new Map(); // team -> {m: [...], e: [...]}, oldest first
@@ -1958,6 +1967,7 @@ function incomePeaks(simFrame) {
     const priming = k > samples - 1;
     for (let i = 0; i < r.length; i += RSTRIDE) {
       const team = r[i + R.TEAM];
+      if (!teams.has(team)) continue;
       let h = hist.get(team);
       if (h === undefined) hist.set(team, h = { m: [], e: [] });
       h.m.push(r[i + R.MINC]);
@@ -1988,12 +1998,16 @@ function renderPlayers() {
   }
   const fr = dispIdx >= 0 ? data.frames[dispIdx] : null;
   const res = resourcesByTeam(fr ? fr.f : -1);
-  const peaks = incomePeaks(fr ? fr.f : -1);
   const allyOf = {};
   (data.teams || []).forEach(t => { allyOf[t.team] = t.ally; });
 
   const playing = players.filter(p => !p.spec);
   const specs = players.filter(p => p.spec);
+
+  // The meters scale among the rows that exist, so the peak is taken over
+  // exactly the teams below and no others (see incomePeaks: the records also
+  // carry Gaia/scavengers, on an infinite economy).
+  const peaks = incomePeaks(fr ? fr.f : -1, new Set(playing.map(p => p.team)));
 
   // Group by ally; within an ally sort by skill (desc), then team.
   playing.sort((a, b) =>
