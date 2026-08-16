@@ -1132,7 +1132,7 @@ let chatStick = true;       // follow the playhead (false once scrolled away)
 const BUBBLE_LIFETIME = 9;  // game-seconds a bubble hovers, at 1x playback
 const BUBBLE_FADE = 2;      // game-seconds of fade-out at the end of that
 const BUBBLE_STACK = 3;     // most recent messages shown per speaker
-const BUBBLE_MAX_PX = 240;  // bubble width cap; longer text is ellipsized
+const BUBBLE_MAX_PX = 480;  // bubble width cap; longer text is ellipsized
 const BUBBLE_PAD = 5;
 const BUBBLE_LINE = 16;     // px between stacked bubbles
 
@@ -1166,6 +1166,7 @@ const COMMANDER_RE = /^(arm|cor|leg)com/;
 let defIsCom = new Map();     // def id -> is it a player's commander
 let bubbleAnchor = new Map(); // playerID -> [x, z, team] held while they are on screen
 let bubbleExpiry = new Map(); // chat index -> [expireFrame, fadeFrames], frozen when it appears
+let bubbleText = new Map();   // message text -> [fitted text, width]; see fitBubbleText
 
 function buildCommanderDefs() {
   defIsCom = new Map();
@@ -1197,6 +1198,28 @@ function roundRectPath(c, x, y, w, h, r) {
   if (c.roundRect) { c.beginPath(); c.roundRect(x, y, w, h, r); return; }
   c.beginPath();
   c.rect(x, y, w, h);
+}
+
+// fitBubbleText returns [text, width] for a message, trimmed with an ellipsis
+// if it would overrun BUBBLE_MAX_PX. Memoized on the text because the font and
+// the cap are constants, so the answer never changes — and without that the
+// trim ran a measureText per dropped character, per bubble, on every rendered
+// frame.
+function fitBubbleText(raw) {
+  let hit = bubbleText.get(raw);
+  if (hit) return hit;
+  let text = raw;
+  let w = octx.measureText(text).width;
+  if (w > BUBBLE_MAX_PX) {
+    while (text.length > 1 && octx.measureText(text + '\u2026').width > BUBBLE_MAX_PX) {
+      text = text.slice(0, -1);
+    }
+    text += '\u2026';
+    w = octx.measureText(text).width;
+  }
+  hit = [text, w];
+  bubbleText.set(raw, hit);
+  return hit;
 }
 
 // drawChatBubbles paints the messages spoken within the (speed-scaled) bubble
@@ -1295,15 +1318,7 @@ function drawChatBubbles(f, u) {
     // Newest sits closest to the unit; older ones stack upward.
     shown.forEach((b, k) => {
       const y = sy - 22 - (shown.length - 1 - k) * BUBBLE_LINE;
-      let text = b.c.t;
-      let w = octx.measureText(text).width;
-      if (w > BUBBLE_MAX_PX) {
-        while (text.length > 1 && octx.measureText(text + '\u2026').width > BUBBLE_MAX_PX) {
-          text = text.slice(0, -1);
-        }
-        text += '\u2026';
-        w = octx.measureText(text).width;
-      }
+      const [text, w] = fitBubbleText(b.c.t);
       octx.globalAlpha = b.alpha;
       octx.fillStyle = fill;
       roundRectPath(octx, sx - w / 2 - BUBBLE_PAD, y - 8, w + BUBBLE_PAD * 2, 16, 4);
@@ -2814,6 +2829,7 @@ async function loadReplay(file) {
   chatBuilt = false;
   bubbleAnchor = new Map();
   bubbleExpiry = new Map();
+  bubbleText = new Map();
   flashSeenIdx = -1;
   currentFile = file;
   try {
