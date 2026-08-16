@@ -193,17 +193,6 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 .resrow.energy .rbar > div { background: #e3c34a; }
 .resrow.energy .rval, .resrow.energy .rinc { color: #e3c34a; }
 
-.teamrow { display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: 12px; }
-.teamrow .sw { width: 11px; height: 11px; border-radius: 3px; flex: 0 0 auto; }
-.teamrow .nm { flex: 1; color: #b9c4cf; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.teamrow .ct { color: #9fb0bf; font-variant-numeric: tabular-nums; }
-
-#events { list-style: none; padding: 0; margin: 0; max-height: 220px; overflow-y: auto; }
-#events li { font-size: 11px; padding: 1px 0; color: #9fb0bf; font-variant-numeric: tabular-nums; }
-#events .created { color: #6fd07f; }
-#events .destroyed { color: #e2785b; }
-#events .finished { color: #8fd3ff; }
-
 #tooltip {
   position: absolute; pointer-events: none; display: none;
   background: rgba(20,26,33,0.96); border: 1px solid #3a4856; border-radius: 4px;

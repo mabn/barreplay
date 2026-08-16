@@ -1988,48 +1988,6 @@ function resBar(kind, cur, store, inc) {
     '</div>';
 }
 
-function renderTeams() {
-  const root = document.getElementById('teams');
-  root.innerHTML = '';
-  const counts = {};
-  const fr = dispIdx >= 0 ? data.frames[dispIdx] : null;
-  if (fr) for (let i = 0; i < fr.u.length; i += STRIDE) {
-    const t = fr.u[i + F.TEAM];
-    counts[t] = (counts[t] || 0) + 1;
-  }
-  const teams = (data.teams || []).slice().sort((a, b) => a.ally - b.ally || a.team - b.team);
-  teams.forEach(t => {
-    const row = document.createElement('div');
-    row.className = 'teamrow';
-    row.innerHTML =
-      `<span class="sw" style="background:${teamColor[t.team]}"></span>` +
-      `<span class="nm">${teamLabel(t)}</span>` +
-      `<span class="ct">${counts[t.team] || 0}</span>`;
-    root.appendChild(row);
-  });
-}
-
-// Show the most recent lifecycle events up to the current sim frame.
-function renderEvents() {
-  const ul = document.getElementById('events');
-  ul.innerHTML = '';
-  const evs = data.events || [];
-  const simFrame = frameNumAt(idx); // derived from the index: works while buffering
-  const recent = [];
-  for (let i = evs.length - 1; i >= 0 && recent.length < 40; i--) {
-    if (evs[i].f <= simFrame) recent.push(evs[i]);
-  }
-  recent.forEach(e => {
-    const li = document.createElement('li');
-    li.className = e.k;
-    const t = fmtTime(e.f / 30);
-    const verb = { created: '+', finished: '✓', destroyed: '×' }[e.k] || '·';
-    li.textContent = `${t}  ${verb} ${defName(e.def)} #${e.id}`;
-    ul.appendChild(li);
-  });
-  if (!recent.length) ul.innerHTML = '<li style="color:#5a6875">none yet</li>';
-}
-
 // ---- playback -------------------------------------------------------------
 function fmtTime(sec) {
   sec = Math.max(0, Math.round(sec));
@@ -2037,16 +1995,14 @@ function fmtTime(sec) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-// The heavy sidebar (per-team counts + event feed) only depends on the integer
-// keyframe, so it refreshes when idx changes, not every animation tick.
+// The heavy sidebar (the player list and its economy bars) only depends on the
+// integer keyframe, so it refreshes when idx changes, not every animation tick.
 function updateSidebar() {
   const fr = dispIdx >= 0 ? data.frames[dispIdx] : null;
   document.getElementById('s_time').textContent = fr ? fmtTime(fr.t) : '—';
   document.getElementById('s_frame').textContent = fr ? fr.f : '—';
   document.getElementById('s_units').textContent = fr ? fr.n : '—';
   renderPlayers();
-  renderTeams();
-  renderEvents();
 }
 
 let lastTimeText = null; // skip the DOM writes below when nothing changed:
@@ -2235,7 +2191,7 @@ document.getElementById('teamcolors').onchange = e => {
   // Icon tint/render caches key on the colour string, so a colour change just
   // produces fresh entries — no need to clear them.
   applyTeamColors();
-  renderPlayers(); renderTeams(); draw();
+  renderPlayers(); draw();
 };
 document.getElementById('iconsize').oninput = e => {
   iconScale = +e.target.value;
