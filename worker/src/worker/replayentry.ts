@@ -41,7 +41,8 @@ export interface ReplayEntry {
    *  - "unknown" explicitly marked as undetermined
    *  - null      never marked
    * uploaderAlly alone cannot express this: null there is ambiguous between
-   * "full", "unknown" and "legacy row". Set by hand via setView for the many
+   * "full", "unknown" and "legacy row". Set by the publishing PUT when the
+   * capture knows its own provenance, and by hand via setView for the many
    * rows whose captures predate the recorder fields. */
   view: "full" | "ally" | "unknown" | null;
   /** Every revision ever published for this game with the side that recorded
@@ -108,6 +109,23 @@ export function sanitizeEntry(id: string, body: unknown): ReplayEntry | string {
     if (typeof b.uploaderAlly !== "number" || !Number.isInteger(b.uploaderAlly)) return "uploaderAlly must be an integer";
     uploaderAlly = b.uploaderAlly;
   }
+  // The point of view of the capture BEING PUBLISHED, when the publisher knows
+  // it: a live upload's stream names the ally its recorder played on, and the
+  // re-sim publisher declares "full". Accepting it here is what spares a fresh
+  // upload from having to be marked by hand — the alternative, refusing it so
+  // only setView could write the column, threw away provenance the capture
+  // carried. Omitting it still leaves any existing marking untouched (upsert
+  // COALESCEs), so a publisher with nothing to say cannot wipe one.
+  let view: ReplayEntry["view"] = null;
+  if (b.view !== undefined && b.view !== null) {
+    if (b.view !== "full" && b.view !== "ally" && b.view !== "unknown") {
+      return `view must be one of "full", "ally", "unknown"`;
+    }
+    // "ally" is only meaningful alongside the side it names; a row carrying one
+    // without the other is the contradiction the view column exists to prevent.
+    if (b.view === "ally" && uploaderAlly === null) return `view "ally" requires uploaderAlly`;
+    view = b.view;
+  }
   return {
     id,
     rid,
@@ -122,9 +140,7 @@ export function sanitizeEntry(id: string, body: unknown): ReplayEntry | string {
     // Server-owned: the index accumulates this across PUTs (mergeUploads);
     // whatever a PUT body claims is ignored.
     uploads: null,
-    // Likewise not settable from a pipeline PUT: it is the hand-set marking,
-    // and upsert COALESCEs it so a re-publish cannot wipe it. Use setView.
-    view: null,
+    view,
   };
 }
 

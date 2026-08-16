@@ -45,10 +45,16 @@
 //
 // Usage:
 //
-//	bringest -index-url https://replays.example.workers.dev
+//	bringest                  # serve the deployed worker's upload queue
+//	bringest -upload local    # ...the dev simulator's instead
 //	bringest -once            # drain the backlog and exit
 //	bringest -resim -data ~/bar-data        # the independent full-view re-sim worker
 //	bringest -resim -data ~/bar-data -once  # re-sim the current candidates and exit
+//
+// -upload names the whole deployment, not just a bucket: the job queue, the
+// stream downloads, the R2 pieces and the catalog row all belong to one worker
+// (packer.LookupTarget), so a run cannot claim a job on one deployment and
+// publish it into another.
 package main
 
 import (
@@ -97,9 +103,8 @@ func run() int {
 	envMsgs := loadEnvFile()
 
 	var (
-		indexURL  = flag.String("index-url", os.Getenv("BARREPLAY_INDEX_URL"), "base URL of the deployed worker (default: $BARREPLAY_INDEX_URL)")
 		workerDir = flag.String("worker-dir", "worker", "the Cloudflare worker project directory whose upload tooling performs the R2 puts")
-		target    = flag.String("upload", "r2", `where to publish: "r2" (real bucket) or "local" (the wrangler/vite dev simulator)`)
+		target    = flag.String("upload", "r2", "which deployment to work off and publish to: "+packer.TargetHelp())
 		poll      = flag.Duration("poll", 10*time.Second, "how often to ask the worker for pending jobs")
 		once      = flag.Bool("once", false, "process the current backlog and exit instead of polling forever")
 		doResim   = flag.Bool("resim", false, "run the independent re-sim worker instead of the job loop: find cataloged games whose only upload is one-sided, re-simulate them headlessly, and publish the full view as another revision (needs -data on an engine-capable host)")
@@ -122,12 +127,14 @@ func run() int {
 		fmt.Fprintln(os.Stderr, m)
 	}
 
-	if *indexURL == "" {
-		fmt.Fprintln(os.Stderr, "bringest: -index-url (or $BARREPLAY_INDEX_URL) is required")
-		return 2
-	}
-	if *target != "r2" && *target != "local" {
-		fmt.Fprintf(os.Stderr, "bringest: -upload must be \"r2\" or \"local\" (got %q)\n", *target)
+	// One flag names the whole deployment: the daemon's job queue, the stream
+	// downloads, the bucket and the catalog are all the same worker, so there
+	// is nothing to point at each other wrongly (see internal/packer/targets.go
+	// — a queue on one deployment publishing into another was reachable when
+	// the URL and the bucket were separate flags).
+	dest, ok := packer.LookupTarget(*target)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "bringest: -upload must be %s (got %q)\n", packer.TargetList(), *target)
 		return 2
 	}
 	if *doResim && *dataDir == "" {
@@ -139,7 +146,7 @@ func run() int {
 	defer stop()
 
 	client := barapi.New()
-	trimmedURL := strings.TrimSuffix(*indexURL, "/")
+	indexURL := dest.IndexURL
 
 	// -resim runs the independent re-sim worker; everything else is the
 	// normal upload-job loop. The two share nothing but the worker URL.
@@ -153,21 +160,21 @@ func run() int {
 			ro.ProgressEvery = progressEvery
 		}
 		loop = &resimDaemon{
-			indexURL: trimmedURL,
+			indexURL: indexURL,
 			client:   &http.Client{Timeout: 1 * time.Minute},
 			failed:   map[string]bool{},
 			resim: func(ctx context.Context, gameID string) error {
-				return resimPublish(ctx, client, gameID, ro, *target, *workerDir, trimmedURL)
+				return resimPublish(ctx, client, gameID, ro, *target, *workerDir, indexURL)
 			},
 		}
 		what = "one-sided replays to re-simulate"
 	} else {
 		loop = &daemon{
-			indexURL: trimmedURL,
+			indexURL: indexURL,
 			token:    os.Getenv("REPLAY_PUT_TOKEN"),
 			client:   &http.Client{Timeout: 5 * time.Minute},
 			process: func(ctx context.Context, streamPath string) error {
-				return processStream(ctx, client, streamPath, *target, *workerDir, trimmedURL)
+				return processStream(ctx, client, streamPath, *target, *workerDir, indexURL)
 			},
 		}
 	}
@@ -179,7 +186,7 @@ func run() int {
 		}
 		return 0
 	}
-	fmt.Fprintf(os.Stderr, "bringest: polling %s every %s for %s\n", trimmedURL, *poll, what)
+	fmt.Fprintf(os.Stderr, "bringest: polling %s every %s for %s\n", indexURL, *poll, what)
 	ticker := time.NewTicker(*poll)
 	defer ticker.Stop()
 	for {
@@ -542,5 +549,9 @@ func resimPublish(ctx context.Context, client *barapi.Client, gameID string, ro 
 		IndexURL:   indexURL,
 		Rev:        rev,
 		ModOptions: modOptions,
+		// A re-sim watched the whole game, but its capture carries no recorder
+		// record to say so (only live uploads do), so state it explicitly —
+		// otherwise the row keeps the superseded one-sided upload's marking.
+		View: "full",
 	})
 }

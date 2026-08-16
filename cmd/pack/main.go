@@ -15,10 +15,12 @@
 // Usage:
 //
 //	pack [flags] <capture.brsnap|capture.brepstream> [...]
+//	pack ./caps/<gameId>.brepstream          # pack, print stats, publish to r2
+//	pack -upload local ./caps/*.brepstream   # ...to the dev simulator instead
+//	pack -upload= ./caps/*.brsnap            # pack only, publish nothing
 //	pack -out ./snapshots ./caps/*.brsnap
 //	pack -id 6da7496aca487581a12b7a6d5bd99bc0 ./renamed.brsnap
-//	pack -upload r2 ./caps/<gameId>.brepstream
-//	pack -stats ./snapshots/<gameId>.brp
+//	pack -upload= ./snapshots/<gameId>.brp   # analyze an already-packed file
 //
 // -stats prints a size breakdown of each resulting .brp — per-section sizes
 // and the top unit defs by encoded bytes (snapshot.ComputeBRPStats), with
@@ -30,16 +32,23 @@
 // input's own directory, or in -out when set. Inputs are processed
 // independently; a failure on one is reported and the rest continue.
 //
-// -upload r2|local additionally uploads each input's packed .brp static-
-// hosting files (viz.WriteStaticBundle — the same bytes cmd/barreplay-static
-// writes) to the worker's R2 bucket, targeting the real bucket ("r2") or the
-// local `npm run dev` simulator ("local"). The viewer serves ONLY the .brp
-// wire format, so every input — including a raw .brepstream — is converted
-// first and uploads the efficient v4 pieces. No index.json is uploaded — the
-// Worker lists the bucket live. Needs the worker/ project on disk with
-// node_modules installed (-worker-dir if it is not ./worker) and, for "r2",
-// either R2 API credentials (R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY, the fast
-// S3 path) or wrangler auth (`npx wrangler login` / CLOUDFLARE_API_TOKEN).
+// -upload names where to PUBLISH, and defaults to "r2" — the whole point of
+// packing a capture is to serve it, so the plain invocation does the whole
+// job. It uploads each input's packed .brp static-hosting files
+// (viz.WriteStaticBundle — the same bytes cmd/barreplay-static writes) to the
+// worker's R2 bucket and registers the replay in that worker's catalog; the
+// two halves of a destination are chosen together (packer.LookupTarget), never
+// separately. "local" targets the `npm run dev` simulator and its dev-server
+// catalog; -upload= (empty) packs and reports without publishing anything,
+// which is also how to analyze an existing .brp without republishing it.
+//
+// The viewer serves ONLY the .brp wire format, so every input — including a
+// raw .brepstream — is converted first and uploads the efficient v5 pieces. No
+// index.json is uploaded — the Worker lists the bucket live. Needs the worker/
+// project on disk with node_modules installed (-worker-dir if it is not
+// ./worker) and, for "r2", either R2 API credentials (R2_ACCESS_KEY_ID/
+// R2_SECRET_ACCESS_KEY, the fast S3 path) or wrangler auth (`npx wrangler
+// login` / CLOUDFLARE_API_TOKEN).
 package main
 
 import (
@@ -63,10 +72,9 @@ func main() {
 		outDir    = flag.String("out", "", "output directory (default: next to each input)")
 		idArg     = flag.String("id", "", "replay gameId or link used to fetch the demo metadata for a .brsnap/.brepstream input (default: the input's file name; only valid with a single input)")
 		noDemo    = flag.Bool("no-demo", false, "do not fetch the demo for .brsnap/.brepstream inputs; the .brp then only has the metadata the stream itself carries")
-		upload    = flag.String("upload", "", `after packing, upload the replay's static files to the worker's R2 bucket: "r2" (real bucket, needs wrangler auth) or "local" (the wrangler dev simulator)`)
+		upload    = flag.String("upload", "r2", "after packing, publish the replay to "+packer.TargetHelp()+". Empty packs only, uploading nothing")
 		workerDir = flag.String("worker-dir", "worker", "the Cloudflare worker project directory wrangler runs in (with -upload)")
-		indexURL  = flag.String("index-url", "", "base URL of the deployed worker, used to register the uploaded replay in the catalog via PUT /api/replays/<id> (default: $BARREPLAY_INDEX_URL; for -upload local, "+localIndexURL+"). Empty and no env var: skip with a warning")
-		stats     = flag.Bool("stats", false, "print size statistics for each resulting .brp (per-section sizes + the top unit defs by encoded bytes); a .brp input is analyzed directly without repacking")
+		stats     = flag.Bool("stats", true, "print size statistics for each resulting .brp (per-section sizes + the top unit defs by encoded bytes); a .brp input is analyzed directly without repacking")
 		rev       = flag.Bool("rev", true, "with -upload: publish under a content-addressed revision id <gameId>-<sha256[:8] of the input> so no served object is ever overwritten (the catalog row's rid tracks the current revision); -rev=false uses the bare gameId")
 	)
 	flag.Usage = func() {
@@ -82,8 +90,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pack: -id applies to exactly one input")
 		os.Exit(2)
 	}
-	if *upload != "" && *upload != "r2" && *upload != "local" {
-		fmt.Fprintf(os.Stderr, "pack: -upload must be \"r2\" or \"local\" (got %q)\n", *upload)
+	dest, ok := packer.LookupTarget(*upload)
+	if !ok && *upload != "" {
+		fmt.Fprintf(os.Stderr, "pack: -upload must be %s, or \"\" to pack without publishing (got %q)\n",
+			packer.TargetList(), *upload)
 		os.Exit(2)
 	}
 
@@ -117,7 +127,7 @@ func main() {
 				err = packer.UploadStatic(ctx, brpPath, packer.UploadOptions{
 					Target:     *upload,
 					WorkerDir:  *workerDir,
-					IndexURL:   resolveIndexURL(*indexURL, *upload),
+					IndexURL:   dest.IndexURL,
 					Rev:        revID,
 					ModOptions: modOptions,
 				})
@@ -131,26 +141,6 @@ func main() {
 	if failed > 0 {
 		os.Exit(1)
 	}
-}
-
-// localIndexURL is where `npm run dev` (vite + the Cloudflare plugin) serves
-// the worker's API routes, the default catalog target for -upload local.
-const localIndexURL = "http://127.0.0.1:5173"
-
-// resolveIndexURL picks the catalog base URL: the -index-url flag, else the
-// BARREPLAY_INDEX_URL env var, else (local target only) the vite dev server.
-// Empty means "skip the catalog PUT" — uploadStatic warns about it.
-func resolveIndexURL(flagVal, target string) string {
-	if flagVal != "" {
-		return flagVal
-	}
-	if v := os.Getenv("BARREPLAY_INDEX_URL"); v != "" {
-		return v
-	}
-	if target == "local" {
-		return localIndexURL
-	}
-	return ""
 }
 
 // printStats writes the -stats report for one .brp: totals, per-section

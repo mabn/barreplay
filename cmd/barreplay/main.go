@@ -57,7 +57,7 @@ func run() error {
 		mapOverride  = flag.String("map", "", "pr-downloader map identifier override")
 		rapidRepo    = flag.String("rapid-repo", "", "pr-downloader rapid master repo URL (default: BAR's repo)")
 		noRun        = flag.Bool("no-run", false, "download + parse only; do not launch the engine")
-		progress     = flag.Bool("progress", false, "poll infolog.txt every 2s and print replay progress (time, %, ETA, fps)")
+		progress     = flag.Bool("progress", true, "poll infolog.txt every 2s and print replay progress (time, %, ETA, fps); =false for a silent run")
 		profile      = flag.Bool("profile", false, "enable the engine's internal time profiler for a fine-grained Sim breakdown and a unit-count growth table (small overhead)")
 		disWidgets   = flag.Bool("disable-widgets", true, "disable BAR's default widget suite during the replay (pure unsynced overhead; cannot affect the sim); =false to keep it")
 		throttleDraw = flag.Bool("throttle-draw", true, "throttle the headless draw loop to ~1 fps via MinDrawFPS/MinSimDrawBalance; =false for engine defaults")

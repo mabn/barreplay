@@ -113,6 +113,26 @@ test("uploaderAlly must be an integer; uploads from the body are ignored", () =>
   assert.ok(typeof e === "object" && e.uploaderAlly === 0 && e.uploads === null);
 });
 
+// A live upload's own stream names the side that recorded it, so the publish
+// PUT carries the marking and the viewer's POV control shows it filled in
+// without anyone touching it. Refusing view here (leaving it to setView alone)
+// is what forced every fresh upload to be marked by hand.
+test("view is taken from the publishing PUT when it states one", () => {
+  const live = sanitizeEntry("abc", { uploaderAlly: 2, view: "ally" });
+  assert.ok(typeof live === "object" && live.view === "ally" && live.uploaderAlly === 2);
+  const resim = sanitizeEntry("abc", { view: "full" });
+  assert.ok(typeof resim === "object" && resim.view === "full" && resim.uploaderAlly === null);
+  // Silence is "nothing to say" — upsert COALESCEs, so it keeps any marking.
+  const quiet = sanitizeEntry("abc", {});
+  assert.ok(typeof quiet === "object" && quiet.view === null);
+});
+
+test("view rejects unknown values and an ally view with no side", () => {
+  assert.equal(sanitizeEntry("abc", { view: "spectator" }), `view must be one of "full", "ally", "unknown"`);
+  assert.equal(sanitizeEntry("abc", { view: 1 }), `view must be one of "full", "ally", "unknown"`);
+  assert.equal(sanitizeEntry("abc", { view: "ally" }), `view "ally" requires uploaderAlly`);
+});
+
 test("mergeUploads accumulates revisions oldest-first, idempotently", () => {
   assert.equal(mergeUploads(null, null, 1), null);
   assert.deepEqual(mergeUploads(null, "g-11111111", 0), [{ rid: "g-11111111", ally: 0 }]);
