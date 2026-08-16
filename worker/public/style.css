@@ -173,6 +173,20 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
 #queuetable .state-processing { color: #8fd3ff; border-color: #2f5878; background: #16293a; }
 #queuetable .state-done { color: #7fd18b; border-color: #33663c; background: #16311b; }
 #queuetable .state-error { color: #ff9c8f; border-color: #7a3428; background: #34160f; }
+/* Pager + the read stamp. The section never refreshes itself, so "read at
+   <clock>" is part of the contract, not decoration: it says how old what you
+   are looking at is, and Reload is how it moves. */
+#queuepager {
+  max-width: 1650px; margin: 10px auto 0; padding: 0 8px;
+  display: flex; align-items: center; gap: 8px;
+}
+#queuepager button {
+  background: #1b232c; color: #9fb0bf; border: 1px solid #2f3947;
+  border-radius: 4px; padding: 3px 9px; font-size: 12px; cursor: pointer;
+}
+#queuepager button:hover:enabled { color: #cfe3f5; border-color: #4a5a6c; }
+#queuepager button:disabled { opacity: .45; cursor: default; }
+#queuepager #q_range { margin-right: auto; }
 #queuemsg { padding: 12px 8px; font-size: 13px; max-width: 1650px; margin: 0 auto; }
 
 #wrap { display: flex; flex: 1; min-height: 0; }
