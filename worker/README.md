@@ -248,8 +248,73 @@ For local dev, seed the local R2 with a packed bundle (`wrangler dev` binds the
 npm run upload -- ../static --local
 ```
 
-## Alternative: public R2 domain
+## Serving replay data straight from the bucket (`cdn-bar.fogofwar.dev`)
 
-Instead of the Worker proxying R2, you can expose the bucket on a public R2 custom domain
-and point the viewer's fetch base at it — then the Worker only serves the SPA. The
-pass-through route is used here so the project is self-contained and testable.
+The Worker runs **before** Cloudflare's cache, not behind it. So a `/replays/*`
+request served through the Worker is an R2 `GetObject` — a billed Class B
+operation — **every time**, no matter what `cache-control` the response carries;
+that header only ever helps a browser that already has the file. Binding the
+bucket to its own hostname puts the cache in front of R2 instead: a cache hit is
+answered at the edge, never becomes a `GetObject`, and so costs nothing.
+
+The viewer therefore fetches the four bulk per-replay pieces (`.brw`, `.keys`,
+`/c<n>`, `.resources`) from `cdn-bar.fogofwar.dev`, and everything else —
+`/index.json`, `/api/*` — from the Worker, because the Worker *builds* those
+(a bucket scan, the catalog Durable Object); they are not objects a bucket
+could serve.
+
+`replay.fogofwar.dev` (Worker)      SPA, /api/*, /index.json, uploads
+`cdn-bar.fogofwar.dev` (R2 direct)  replays/** — cached at the edge
+
+### One-time setup
+
+```sh
+# 1. bind the bucket to its hostname (--zone-id from the fogofwar.dev zone's
+#    dashboard overview). The zone must be in the same account as the bucket.
+npx wrangler r2 bucket domain add barreplay-replays \
+  --domain cdn-bar.fogofwar.dev --zone-id <ZONE_ID> --min-tls 1.2
+
+# 2. allow the viewer's origin to read it cross-origin. Without this the
+#    browser blocks every replay fetch — the Worker path was same-origin and
+#    needed none.
+npx wrangler r2 bucket cors set barreplay-replays --file r2-cors.json
+npx wrangler r2 bucket cors list barreplay-replays   # verify it took
+```
+
+**3. Add a Cache Rule** for `cdn-bar.fogofwar.dev` in the dashboard
+(Caching → Cache Rules): match `Hostname equals cdn-bar.fogofwar.dev`, action
+**Eligible for cache**. This step is not optional and is easy to skip: by
+default Cloudflare caches only a fixed list of file extensions, and **none of
+these files qualify** — `.brw`, `.keys` and the extensionless `c0`, `c1`, … are
+all unrecognised. Without the rule the hostname works, looks fine, and still
+bills a Class B operation on every single read.
+
+Verify with `curl -sI https://cdn-bar.fogofwar.dev/replays/<id>.brw` twice and
+look for `cf-cache-status: HIT` on the second call.
+
+### What the code does for this
+
+- **`vite.config.ts`** stamps the origin into `index.html`'s `__DATA_ORIGIN__`
+  placeholder at build time (`$DATA_BASE` overrides; an empty value pins the
+  viewer back to same-origin). `vite dev` and the Go viz server blank it, so
+  both keep serving their own files — that is why `app.js` routes those four
+  URLs through `dataURL()` rather than hardcoding a host.
+- **Uploads store `content-type` and `cache-control` on the object.** R2 replies
+  with stored metadata verbatim on the direct path, so it can no longer be a
+  serve-time fixup. The derivation is `objectHTTPMeta`, duplicated in
+  `internal/packer/r2.go`, `tools/r2put.ts` and `src/worker/app.ts` — all three
+  write into this bucket, so all three must agree.
+
+### Backfilling replays published before this
+
+Objects uploaded earlier carry no `cache-control`, so the edge will not hold
+them and they keep costing a Class B read each. Re-uploading them fixes it —
+`pack` is content-addressed and append-only, so re-publishing lands on the same
+keys — or copy each object onto itself with the new metadata. Until then those
+replays simply stay as expensive as they were; nothing breaks.
+
+### Rolling it back
+
+Set `DATA_BASE=` for the build and redeploy. The viewer goes back to
+same-origin, the Worker serves everything again, and the bucket hostname can
+stay bound — nothing else references it.

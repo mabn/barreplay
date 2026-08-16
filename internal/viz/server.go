@@ -109,7 +109,14 @@ func (s *Server) Handler() http.Handler {
 		}
 		w.Header().Set("Cache-Control", "no-store, must-revalidate")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(bytes.ReplaceAll(b, []byte("__ASSET_REV__"), rev))
+		b = bytes.ReplaceAll(b, []byte("__ASSET_REV__"), rev)
+		// __DATA_ORIGIN__ is where the deployed viewer fetches replay pieces
+		// from (the R2 bucket's own hostname, so those reads hit Cloudflare's
+		// cache rather than the Worker). This server IS the origin for its
+		// files, so it blanks the placeholder — app.js reads an empty value as
+		// "same origin" and its URLs are unchanged.
+		b = bytes.ReplaceAll(b, []byte("__DATA_ORIGIN__"), nil)
+		w.Write(b)
 	})
 	mux.HandleFunc("/app.js", serveAsset("public/app.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("/style.css", serveAsset("public/style.css", "text/css; charset=utf-8"))

@@ -388,3 +388,35 @@ func TestPutPoolFailFast(t *testing.T) {
 		t.Errorf("%d puts started after a failure, want at most %d", n, uploadConcurrency)
 	}
 }
+
+// TestObjectHTTPMeta pins the metadata stored on uploaded objects. It is not a
+// cosmetic detail: the bucket is served directly at its own hostname, where R2
+// replies with the stored metadata and nothing else. A piece stored without a
+// Cache-Control the edge honours is re-fetched from R2 on every request, so it
+// costs a Class B operation each time — defeating the point of serving the
+// bucket directly.
+//
+// The same table exists in worker/src/worker/app.ts and worker/tools/r2put.ts;
+// all three must agree, since all three write into the same bucket.
+func TestObjectHTTPMeta(t *testing.T) {
+	const immutable = "public, max-age=31536000, immutable"
+	for _, tc := range []struct{ key, ctype, cache string }{
+		{"replays/g-1a2b3c4d.brw", "application/octet-stream", immutable},
+		{"replays/g-1a2b3c4d.keys", "application/octet-stream", immutable},
+		{"replays/g-1a2b3c4d/c0", "application/octet-stream", immutable},
+		{"replays/g-1a2b3c4d/c12", "application/octet-stream", immutable},
+		{"replays/g-1a2b3c4d.resources", "application/json", immutable},
+		// A listing changes whenever anything is published, so it revalidates
+		// rather than being cached for a year.
+		{"index.json", "application/json", "no-cache"},
+		{"replays/index.json", "application/json", "no-cache"},
+	} {
+		ctype, cache := objectHTTPMeta(tc.key)
+		if ctype != tc.ctype {
+			t.Errorf("%s: content-type = %q, want %q", tc.key, ctype, tc.ctype)
+		}
+		if cache != tc.cache {
+			t.Errorf("%s: cache-control = %q, want %q", tc.key, cache, tc.cache)
+		}
+	}
+}

@@ -208,6 +208,41 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           serveEntry route via assets.run_worker_first ["/", "/index.html"];
                           the Go server serves all UI no-store) — so a UI deploy propagates on
                           a plain reload, no hard refresh.
+                          HOSTNAMES: the worker is served from replay.fogofwar.dev (a wrangler
+                          Custom Domain — a PER-HOSTNAME cert, so no wildcard and no Advanced
+                          Certificate Manager; the zone must live in the worker's own account).
+                          The BULK replay pieces (.brw/.keys/c<n>/.resources) are NOT fetched
+                          from it: they come from cdn-bar.fogofwar.dev, the R2 bucket bound
+                          directly to a hostname. A Worker runs BEFORE Cloudflare's cache, so
+                          every /replays/* read through it is a billed Class B GetObject no
+                          matter what cache-control it sets; served straight from the bucket a
+                          cache HIT never reaches R2 and costs nothing. /index.json and /api/*
+                          stay on the worker because it BUILDS them (bucket scan, catalog DO).
+                          app.js routes exactly those four URLs through dataURL(), whose origin
+                          comes from index.html's __DATA_ORIGIN__ placeholder: stamped by the
+                          Vite dataBase plugin on a BUILD only ($DATA_BASE overrides), BLANKED
+                          by `vite dev` and by the Go viz server (which is the origin for its
+                          own files) — empty means same-origin, and app.js ignores any value
+                          that is not an absolute http(s) origin, so an unsubstituted
+                          placeholder degrades rather than breaks. The placeholder token is
+                          deliberately NOT the global's name (window.__DATA_BASE__): both
+                          substituters do a plain textual replace, and a token that also
+                          matched the identifier rewrote it into `window.https://... =`.
+                          Two things are external setup, not code, and BOTH are silent when
+                          missing: an R2 CORS policy (worker/r2-cors.json — the fetches are
+                          cross-origin now; without it the browser blocks every piece) and a
+                          Cache Rule making the hostname eligible for cache — Cloudflare's
+                          default cache list is by file extension and matches NONE of .brw,
+                          .keys or the extensionless c<n>, so without the rule everything still
+                          bills Class B while looking perfectly healthy. See worker/README.md
+                          for the runbook. Consequence for uploads: content-type and
+                          cache-control are STORED on each object (objectHTTPMeta, duplicated
+                          in internal/packer/r2.go, worker/tools/r2put.ts and
+                          worker/src/worker/app.ts — all three write this bucket, so all three
+                          must agree), because R2 serves stored metadata verbatim on the direct
+                          path and no worker is there to fix it up. Objects published before
+                          that carry none: they still serve (the worker recomputes on its own
+                          hostname) but are uncacheable at the edge until re-uploaded.
                           The replay CATALOG (per-game stats: start time, duration, map, team-size
                           spec like "8v8", bundle bytes) lives in a SQLite table inside a Durable
                           Object (src/worker/replayindex.ts, single instance, wrangler migration v1

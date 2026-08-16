@@ -26,6 +26,27 @@
 // only in codec v5 streams — a v4 replay decodes with build=255/target=0
 // (see codecVer below), so no bars or lines draw for it.
 
+// The origin the four replay-data URLs above are fetched from. Empty means
+// same-origin, which is what the Go viz server (internal/viz) and `vite dev`
+// both stamp into index.html; a production build stamps the R2 bucket's own
+// hostname, so those reads are answered from Cloudflare's cache instead of
+// costing a billed R2 GetObject through the Worker.
+//
+// Only the bulk per-replay pieces move. /index.json and /api/* stay
+// same-origin: the Worker BUILDS them (a bucket scan, the catalog Durable
+// Object), so they are not objects the bucket could serve.
+//
+// Anything that is not an absolute http(s) origin is read as same-origin, so
+// an unsubstituted "__DATA_BASE__" token degrades instead of breaking.
+const DATA_BASE = (() => {
+  const v = typeof window !== 'undefined' ? window.__DATA_BASE__ : '';
+  return typeof v === 'string' && /^https?:\/\//.test(v) ? v.replace(/\/+$/, '') : '';
+})();
+
+// dataURL builds one replay-piece URL. Every fetch of a bucket object goes
+// through here so the origin is decided in exactly one place.
+function dataURL(path) { return DATA_BASE + path; }
+
 const STRIDE = 11;
 const F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6, DVX: 7, DVZ: 8, BUILD: 9, TARGET: 10 };
 const BUILD_DONE = 255; // quantized "construction finished"
@@ -364,7 +385,7 @@ async function streamKeys(gen) {
   const buf = new Uint8Array(total);
   let have = 0, ci = 0;
   try {
-    const r = await fetch('/replays/' + encodeURIComponent(currentFile) + '.keys');
+    const r = await fetch(dataURL('/replays/' + encodeURIComponent(currentFile) + '.keys'));
     if (!r.ok) throw new Error(await r.text());
     const reader = r.body.pipeThrough(new DecompressionStream('gzip')).getReader();
     for (;;) {
@@ -435,7 +456,7 @@ function applyDeltas(i, raw) {
 async function fetchChunk(i) {
   const gen = loadGen;
   try {
-    const r = await fetch('/replays/' + encodeURIComponent(currentFile) + '/c' + i);
+    const r = await fetch(dataURL('/replays/' + encodeURIComponent(currentFile) + '/c' + i));
     if (!r.ok) throw new Error(await r.text());
     const bytes = new Uint8Array(await r.arrayBuffer());
     if (gen !== loadGen) return; // a different replay was loaded meanwhile
@@ -2554,7 +2575,7 @@ let resByFrame = null;
 async function loadResources(file, gen) {
   resByFrame = null;
   try {
-    const r = await fetch('/replays/' + encodeURIComponent(file) + '.resources');
+    const r = await fetch(dataURL('/replays/' + encodeURIComponent(file) + '.resources'));
     if (!r.ok) return;
     const arr = await r.json(); // [{f, r:[...]}]
     if (gen !== loadGen) return; // a newer replay load superseded this one
@@ -3030,7 +3051,7 @@ async function loadReplay(file) {
   flashSeenIdx = -1;
   currentFile = file;
   try {
-    const r = await fetch('/replays/' + encodeURIComponent(file) + '.brw');
+    const r = await fetch(dataURL('/replays/' + encodeURIComponent(file) + '.brw'));
     if (!r.ok) throw new Error(await r.text());
     data = await decodeHead(await r.arrayBuffer());
   } catch (err) {

@@ -127,6 +127,21 @@
   <span class="timelabel" id="timelabel">—</span>
 </div>
 
+<!-- The ORIGIN the bulk replay data (heads, keyframes, chunk deltas, resources)
+     is fetched from: the R2 bucket's own hostname, so those reads are answered
+     by Cloudflare's cache instead of costing a billed R2 GetObject through the
+     Worker. The placeholder below is filled in only by a production
+     `vite build`; `vite dev` and the Go viz server both blank it, which means
+     "same origin" and keeps them serving their own files. app.js ignores any
+     value that is not an absolute http(s) origin, so an unsubstituted
+     placeholder degrades to same-origin rather than breaking.
+
+     The placeholder token deliberately differs from the global's name and
+     occurs exactly ONCE, in the value position: both substituters do a plain
+     textual replace, so a token that also appeared in the identifier would be
+     rewritten into `window.https://... =` — invalid JS that no build step
+     would flag. -->
+<script>window.__DATA_BASE__ = "__DATA_ORIGIN__";</script>
 <script src="/app.js?v=__ASSET_REV__"></script>
 </body>
 </html>

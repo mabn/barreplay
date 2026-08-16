@@ -73,7 +73,13 @@ export async function uploadObjects(objects: R2Object[], opts: UploadOptions): P
       }
       // Explicit --remote/--local: wrangler's own default for `r2 object put`
       // is LOCAL, so a bare put would silently write to disk, not R2.
-      const args = ["wrangler", "r2", "object", "put", `${opts.bucket}/${o.key}`, "--file", file, opts.local ? "--local" : "--remote"];
+      // --content-type/--cache-control keep this transport's objects identical
+      // to the S3 one's; the bucket is served directly at its own hostname,
+      // where stored metadata is all a reader gets.
+      const meta = objectHTTPMeta(o.key);
+      const args = ["wrangler", "r2", "object", "put", `${opts.bucket}/${o.key}`, "--file", file,
+        "--content-type", meta.contentType, "--cache-control", meta.cacheControl,
+        opts.local ? "--local" : "--remote"];
       try {
         await run("npx", args);
       } catch {
@@ -88,6 +94,27 @@ export async function uploadObjects(objects: R2Object[], opts: UploadOptions): P
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+}
+
+// objectHTTPMeta derives the Content-Type and Cache-Control to STORE on an
+// object from its key. The bucket is published directly at its own hostname
+// (cdn-bar.fogofwar.dev) as well as through the Worker, and R2 serves stored
+// metadata verbatim: a piece with no Cache-Control is not held by the edge, so
+// every read of it becomes a billed R2 GetObject.
+//
+// Must stay in lockstep with objectHTTPMeta in internal/packer/r2.go and
+// worker/src/worker/app.ts.
+function objectHTTPMeta(key: string): { contentType: string; cacheControl: string } {
+  const contentType =
+    key.endsWith(".resources") || key.endsWith(".json")
+      ? "application/json"
+      : // Raw gzip streams the viewer gunzips itself — never Content-Encoding.
+        "application/octet-stream";
+  const cacheControl =
+    key === "index.json" || key.endsWith("/index.json")
+      ? "no-cache"
+      : "public, max-age=31536000, immutable";
+  return { contentType, cacheControl };
 }
 
 // s3Client returns a signing client when R2 API credentials and an account id
@@ -119,10 +146,15 @@ function accountFromWranglerConfig(): string | null {
 async function s3Put(s3: { aws: AwsClient; endpoint: string }, bucket: string, o: R2Object): Promise<void> {
   const body = o.bytes ?? new Uint8Array(readFileSync(o.file!));
   const url = `${s3.endpoint}/${bucket}/${o.key.split("/").map(encodeURIComponent).join("/")}`;
+  const meta = objectHTTPMeta(o.key);
   // One retry for transient 5xx/network hiccups; anything else is a real error.
   for (let attempt = 0; ; attempt++) {
     try {
-      const res = await s3.aws.fetch(url, { method: "PUT", body: body as BodyInit });
+      const res = await s3.aws.fetch(url, {
+        method: "PUT",
+        body: body as BodyInit,
+        headers: { "content-type": meta.contentType, "cache-control": meta.cacheControl },
+      });
       if (res.ok) return;
       const text = (await res.text()).slice(0, 300);
       if (res.status >= 500 && attempt === 0) continue;

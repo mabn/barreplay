@@ -229,7 +229,15 @@ app.put("/replays/*", async (c) => {
   if (declared > MAX_UPLOAD) return c.json({ error: `object exceeds ${MAX_UPLOAD} bytes` }, 413);
   const body = new Uint8Array(await c.req.arrayBuffer());
   if (body.length > MAX_UPLOAD) return c.json({ error: `object exceeds ${MAX_UPLOAD} bytes` }, 413);
-  await c.env.BUCKET.put(key, body);
+  // Store the HTTP metadata rather than relying on serveR2 to add it: the
+  // bucket is also read through its OWN hostname (cdn-bar.fogofwar.dev), where
+  // R2 replies with exactly what is stored and no Worker gets to fix it up.
+  // Derived from the key, not from the request headers, so every transport
+  // (S3, wrangler, this route) leaves the bucket in the same state.
+  const meta = objectHTTPMeta(key);
+  await c.env.BUCKET.put(key, body, {
+    httpMetadata: { contentType: meta.contentType, cacheControl: meta.cacheControl },
+  });
   return c.json({ ok: true });
 });
 
@@ -305,11 +313,13 @@ async function serveR2(bucket: R2Bucket, key: string, req: Request, immutable: b
   obj.writeHttpMetadata(headers); // content-type/-encoding stored at upload time
   headers.set("etag", obj.httpEtag);
   headers.set("accept-ranges", "bytes");
-  headers.set(
-    "cache-control",
-    immutable ? "public, max-age=31536000, immutable" : "no-cache",
-  );
-  setContentType(headers, key);
+  // Recomputed rather than trusted from storage, so objects uploaded before
+  // upload-time metadata existed still serve correctly on this hostname.
+  // `immutable` distinguishes the published pieces from the guarded stream
+  // archive, which is re-read by the ingest daemon and must revalidate.
+  const meta = objectHTTPMeta(key);
+  headers.set("cache-control", immutable ? meta.cacheControl : "no-cache");
+  headers.set("content-type", meta.contentType);
 
   const body = "body" in obj ? obj.body : null;
   if (req.method === "HEAD") {
@@ -342,16 +352,33 @@ function parseRange(header: string | null): R2Range | undefined {
   return { offset: start, length: end - start + 1 };
 }
 
-// setContentType fixes the few types the viewer relies on. .resources and
-// index.json are plain JSON (the platform applies transport compression itself);
-// .brw, .keys and chunk files are opaque binary the viewer gunzips internally,
-// so they stay application/octet-stream with no content-encoding.
-function setContentType(headers: Headers, key: string): void {
-  if (key.endsWith(".resources") || key.endsWith(".json")) {
-    headers.set("content-type", "application/json");
-  } else {
-    // .brw head, .keys, or replays/<id>/c<n> — a raw gzip stream the viewer
-    // gunzips itself. Must not be served with Content-Encoding.
-    headers.set("content-type", "application/octet-stream");
-  }
+// objectHTTPMeta derives an object's Content-Type and Cache-Control from its
+// key. It is applied in TWO places, which is why it is one function: stored on
+// the object at upload time (the PUT route above), and set on the response
+// when this Worker serves the object on its own hostname.
+//
+// Storing it matters because the bucket is ALSO published directly at
+// cdn-bar.fogofwar.dev, where R2 answers from stored metadata alone — a cache
+// hit there never reaches R2 and so costs no Class B operation, but only if
+// the object actually carries a Cache-Control the edge will honour.
+//
+// Must stay in lockstep with objectHTTPMeta in internal/packer/r2.go and
+// worker/tools/r2put.ts.
+export function objectHTTPMeta(key: string): { contentType: string; cacheControl: string } {
+  // .resources and index.json are plain JSON (the platform applies transport
+  // compression itself); .brw, .keys and chunk files are opaque binary the
+  // viewer gunzips internally, so they stay application/octet-stream with no
+  // content-encoding — labelling them gzip would make the browser inflate them
+  // and hand the decoder already-decompressed bytes.
+  const contentType =
+    key.endsWith(".resources") || key.endsWith(".json")
+      ? "application/json"
+      : "application/octet-stream";
+  // Per-replay pieces are published under a content-addressed revision and
+  // never rewritten, so they are safely immutable; a listing revalidates.
+  const cacheControl =
+    key === "index.json" || key.endsWith("/index.json")
+      ? "no-cache"
+      : "public, max-age=31536000, immutable";
+  return { contentType, cacheControl };
 }
