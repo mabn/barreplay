@@ -579,17 +579,42 @@ const ICON_SCALE_MIN = 4, ICON_SCALE_MAX = 60;
 const ICON_MIN_PX = 3;
 const ICON_MAX_PX = 200;
 
-// imageCache: served icon path -> HTMLImageElement (may still be loading) or
-// null once it has failed to load (so we don't retry).
+// imageCache: served icon path -> HTMLImageElement (may still be loading), or
+// null while the path is in a FAILED state — which is not final. A replay
+// requests every icon it references in one burst at load (300+ paths in a
+// modded game), so a single dropped or throttled response is entirely normal,
+// and treating it as permanent left that unit type drawing as a coloured dot
+// for the whole session, healed only by reloading the page. A failed path is
+// retried up to IMAGE_RETRIES times, spaced by IMAGE_RETRY_MS; callers already
+// read null as "no bitmap right now" and ask again on the next draw, so the
+// retry rides their polling instead of scheduling timers of its own.
 const imageCache = {};
-function getImage(path) {
-  if (path in imageCache) return imageCache[path];
+const imageFails = new Map(); // path -> {tries, at} while the path is failed
+const IMAGE_RETRIES = 3;
+const IMAGE_RETRY_MS = 2000;
+
+function loadImage(path) {
   const img = new Image();
-  img.onload = scheduleDraw;      // redraw once the bitmap arrives
-  img.onerror = () => { imageCache[path] = null; };
+  img.onload = () => { imageFails.delete(path); scheduleDraw(); };
+  img.onerror = () => {
+    const f = imageFails.get(path) || { tries: 0, at: 0 };
+    f.tries++;
+    f.at = performance.now();
+    imageFails.set(path, f);
+    imageCache[path] = null;
+  };
   img.src = '/' + path;
   imageCache[path] = img;
   return img;
+}
+
+function getImage(path) {
+  const cached = imageCache[path];
+  if (cached === undefined) return loadImage(path);
+  if (cached !== null) return cached;
+  const f = imageFails.get(path);
+  if (!f || f.tries >= IMAGE_RETRIES || performance.now() - f.at < IMAGE_RETRY_MS) return null;
+  return loadImage(path); // retry with a fresh element; the failed one is dropped
 }
 
 // tintCache: "path|color" -> offscreen canvas of the icon tinted to a team
@@ -1302,6 +1327,21 @@ const glcv = document.getElementById('glcv');
 let glr = null; // GL state, or null -> 2D fallback path
 
 const ATLAS_SIZE = 2048; // px; power of two so the mip chain is clean
+// Growth ceiling. BAR's icons are 128px, so a 2048 atlas holds ~181 of them
+// (144px cells) — plenty for a stock game, far short of a modded one, where the
+// scavenger/extra-unit def tables push a replay to 300-650 distinct bitmaps.
+// Doubling to 4096 holds ~784 and covers every replay measured, at 4x the VRAM
+// (~67 MB plus the capped mip chain), which is why the atlas starts small and
+// only grows when a replay actually runs out of slots. 8192 is not offered: a
+// quarter-gigabyte texture is a worse answer than a few dots.
+const ATLAS_MAX = 4096;
+// Largest cell an icon may occupy: oversized bitmaps pack DOWNSCALED. Four of
+// BAR's icons are 256px where the other 820 are 128; packed native they turn a
+// whole shelf row 256 tall and cost ~150 slots, which buys detail nothing can
+// see — an icon draws at ICON_MAX_PX (200) at the very largest, and every other
+// icon in the game is already a 128px source at that size. Capping also keeps
+// the shelf a uniform grid, so capacity no longer depends on packing order.
+const ATLAS_CELL = 128;
 const ATLAS_PAD = 16;    // gap between packed icons: keeps mip levels 0-4 from bleeding
 const INST_FLOATS = 11;  // per instance: cx cy size u0 v0 u1 v1 r g b alpha
 
@@ -1405,10 +1445,15 @@ void main() {
     canvas: ac,
     ctx: ac.getContext('2d'),
     tex: gl.createTexture(),
-    slots: new Map(), // icon path -> {u0,v0,u1,v1}, or null (load failed / atlas full)
+    size: ATLAS_SIZE,
+    // Never grow past what this GPU accepts; WebGL2 only guarantees 2048, in
+    // which case the atlas simply cannot grow.
+    max: Math.min(ATLAS_MAX, gl.getParameter(gl.MAX_TEXTURE_SIZE)),
+    slots: new Map(), // icon path -> {u0,v0,u1,v1}, or null (atlas full at max size)
     x: ATLAS_PAD, y: ATLAS_PAD, rowH: 0,
     dirty: false,
     full: false,
+    gen: 0, // bumped by growAtlas; every uv rect handed out before it is stale
   };
   gl.bindTexture(gl.TEXTURE_2D, atlas.tex);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
@@ -1440,33 +1485,79 @@ if (glcv) {
   glcv.addEventListener('webglcontextrestored', () => { initGL(); scheduleDraw(); });
 }
 
-// atlasSlot returns the atlas uv rect for an icon path: undefined while the
-// bitmap is still loading (the caller falls back to a dot, exactly like the 2D
-// path), null if it can never be packed (load failed, or the atlas is full).
-// Icons pack at their native bitmap size on a simple shelf layout; the atlas
-// canvas re-uploads (with fresh mipmaps) on the draw after new icons land —
-// a handful of times right after load, then never again.
-function atlasSlot(path) {
-  const a = glr.atlas;
-  let s = a.slots.get(path);
-  if (s !== undefined) return s;
-  const img = getImage(path);
-  if (img === null) { a.slots.set(path, null); return null; }
-  if (!img.complete || !img.naturalWidth) return undefined;
-  const w = img.naturalWidth, h = img.naturalHeight;
-  if (a.x + w + ATLAS_PAD > ATLAS_SIZE) { a.x = ATLAS_PAD; a.y += a.rowH + ATLAS_PAD; a.rowH = 0; }
-  if (a.y + h + ATLAS_PAD > ATLAS_SIZE || w + 2 * ATLAS_PAD > ATLAS_SIZE) {
-    if (!a.full) { a.full = true; console.warn('icon atlas full; overflow icons draw as dots'); }
-    a.slots.set(path, null);
-    return null;
-  }
-  a.ctx.drawImage(img, a.x, a.y);
-  s = { u0: a.x / ATLAS_SIZE, v0: a.y / ATLAS_SIZE, u1: (a.x + w) / ATLAS_SIZE, v1: (a.y + h) / ATLAS_SIZE };
+// atlasPlace packs one loaded bitmap onto the current shelf, returning its uv
+// rect — or null when the atlas has no room left at its present size. Rects are
+// normalized by that size, so every one of them is invalidated by a resize (see
+// growAtlas).
+function atlasPlace(a, img) {
+  const k = Math.min(1, ATLAS_CELL / Math.max(img.naturalWidth, img.naturalHeight));
+  const w = Math.round(img.naturalWidth * k), h = Math.round(img.naturalHeight * k);
+  if (a.x + w + ATLAS_PAD > a.size) { a.x = ATLAS_PAD; a.y += a.rowH + ATLAS_PAD; a.rowH = 0; }
+  if (a.y + h + ATLAS_PAD > a.size || w + 2 * ATLAS_PAD > a.size) return null;
+  a.ctx.drawImage(img, a.x, a.y, w, h);
+  const s = { u0: a.x / a.size, v0: a.y / a.size, u1: (a.x + w) / a.size, v1: (a.y + h) / a.size };
   a.x += w + ATLAS_PAD;
   if (h > a.rowH) a.rowH = h;
-  a.slots.set(path, s);
   a.dirty = true;
   return s;
+}
+
+// growAtlas doubles the atlas and re-packs everything already in it, returning
+// false once the ceiling (ATLAS_MAX, or this GPU's limit) is reached. Every
+// existing uv rect is normalized by the old size, so growing MUST recompute all
+// of them — hence the full re-pack rather than a copy of the old canvas.
+// Previously-overflowed paths are re-packed too: their slots hold null, and
+// clearing the map gives them the room that was missing. Costs one canvas
+// resize plus ~200 drawImages, once, on the first replay that needs it.
+function growAtlas(a) {
+  if (a.size >= a.max) return false;
+  a.size *= 2;
+  a.canvas.width = a.canvas.height = a.size; // resizing also clears the canvas
+  a.x = ATLAS_PAD; a.y = ATLAS_PAD; a.rowH = 0;
+  a.full = false;
+  const paths = [...a.slots.keys()];
+  a.slots.clear();
+  for (const p of paths) {
+    const img = getImage(p);
+    // A path whose bitmap is gone (still loading, or failed and awaiting a
+    // retry) is simply left out; it packs itself when it next draws.
+    if (img === null || !img.complete || !img.naturalWidth) continue;
+    const s = atlasPlace(a, img);
+    if (s) a.slots.set(p, s);
+  }
+  a.dirty = true;
+  a.gen++;
+  console.info(`icon atlas grown to ${a.size}px (${a.slots.size} icons re-packed)`);
+  return true;
+}
+
+// atlasSlot returns the atlas uv rect for an icon path: undefined while the
+// bitmap is unavailable (still loading, or failed and awaiting a retry — the
+// caller falls back to a dot for those frames, exactly like the 2D path), null
+// once it is known it can never be packed (the atlas is full at its maximum
+// size). Icons pack on a simple shelf layout at up to ATLAS_CELL; the atlas
+// canvas re-uploads (with fresh mipmaps) on the draw after new icons land — a
+// handful of times right after load, then never again.
+//
+// Slots are NOT cleared between replays: it is one BAR icon set, so switching
+// replays mostly re-uses what is already packed. The ceiling is therefore the
+// union of every icon seen this session (784 slots against 828 icons in the
+// whole game) — reachable only by browsing many replays with disjoint unit
+// sets, and it announces itself in the console if it ever happens.
+function atlasSlot(path) {
+  const a = glr.atlas;
+  const s = a.slots.get(path);
+  if (s !== undefined) return s;
+  const img = getImage(path);
+  if (img === null || !img.complete || !img.naturalWidth) return undefined;
+  let rect = atlasPlace(a, img);
+  if (!rect && growAtlas(a)) rect = atlasPlace(a, img);
+  if (!rect && !a.full) {
+    a.full = true;
+    console.warn(`icon atlas full at ${a.size}px; overflow icons draw as dots`);
+  }
+  a.slots.set(path, rect || null);
+  return rect || null;
 }
 
 function uploadAtlas() {
@@ -1481,7 +1572,19 @@ function uploadAtlas() {
 // glBuildInstances fills the instance buffer for one frame. Returns the units
 // that still need the 2D dot fallback (bitmap not in the atlas yet) as a flat
 // [unitBase, sx, sy, px] list, or null when every unit had an atlas glyph.
+//
+// Packing happens lazily inside the build, so the atlas can GROW halfway
+// through one — which renormalizes every uv rect and invalidates the ones
+// already written into the buffer (and memoized) above the growth point. The
+// generation counter catches that and rebuilds the frame from scratch; growth
+// is a once-per-session event, so the repeat costs nothing in practice.
 function glBuildInstances(u) {
+  const gen = glr.atlas.gen;
+  const fb = buildInstances(u);
+  return glr.atlas.gen === gen ? fb : buildInstances(u);
+}
+
+function buildInstances(u) {
   const memo = new Map(); // def -> {px, rect}; both constant per def per draw
   let inst = glr.inst;
   const needed = (u.length / STRIDE + ghostBuildings.size) * INST_FLOATS;
