@@ -68,6 +68,11 @@ body.home .controls, body.home #wrap { display: none; }
 }
 #homenav .navitem:hover { background: #1d252e; color: #cfe3f5; }
 #homenav .navitem.on { background: #24425c; border-color: #4a7fa8; color: #d6ecff; }
+/* Admin-only entries (?admin=true), same gate as the list's refresh button.
+   homeTab() enforces it too, so a shared ?tab= link can't reach the section
+   past the hidden menu entry. */
+#homenav .navitem.admin { display: none; }
+body.admin-mode #homenav .navitem.admin { display: flex; }
 /* Count of jobs still in flight; empty (and invisible) when there are none. */
 #homenav .badge {
   margin-left: auto; font-size: 10px; line-height: 1; padding: 3px 6px;

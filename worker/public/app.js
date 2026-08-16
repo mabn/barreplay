@@ -3525,10 +3525,14 @@ function ensureHomeData() {
 // the back button returns to the section it was opened from. Unlike a filter
 // change this IS navigation between screens, so it pushes a history entry.
 const HOME_TABS = ['replays', 'queue'];
+// Sections only an admin may see. The menu entry is hidden by CSS; this is
+// what keeps a shared ?tab=queue link from opening the section anyway.
+const ADMIN_TABS = new Set(['queue']);
 
 function homeTab() {
   const t = new URLSearchParams(location.search).get('tab');
-  return HOME_TABS.includes(t) ? t : 'replays';
+  if (!HOME_TABS.includes(t)) return 'replays';
+  return ADMIN_TABS.has(t) && !adminMode() ? 'replays' : t;
 }
 
 function setHomeTab(tab) {
@@ -3550,10 +3554,11 @@ function applyHomeTab() {
   for (const name of HOME_TABS) {
     document.getElementById('tab-' + name).style.display = name === tab ? '' : 'none';
   }
-  // One read when the landing page is shown, whichever section it is: opening
-  // the Queue must show something, and the menu's in-flight count is worth
-  // having before the section has ever been opened. It stays a single read —
-  // the Reload button is what asks again.
+  // One read when an ADMIN's landing page is shown, whichever section it is:
+  // opening the Queue must show something, and the menu's in-flight count is
+  // worth having before the section has ever been opened. It stays a single
+  // read — the Reload button is what asks again — and refreshQueue itself is
+  // the no-op for everyone else.
   refreshQueue();
 }
 
@@ -3586,6 +3591,9 @@ const queueRelisted = new Set(); // games we already re-listed the catalog for
 // refreshQueue reads one page. Every caller is an explicit action; there is no
 // timer behind it.
 async function refreshQueue() {
+  // Nobody but an admin can see the section, so nobody else asks for it —
+  // which also keeps the landing page's one read off an ordinary visit.
+  if (!adminMode()) return;
   if (!queueSupported) { renderQueue(QUEUE_UNSUPPORTED); return; }
   const seq = ++queueSeq;
   let page;

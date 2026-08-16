@@ -38,17 +38,21 @@ unreachable), so there is no map proxy.
 The landing page (no `?replay=` in the URL) has a **left menu** with two sections:
 
 - **Replays** — the catalog list (below), the default.
-- **Queue** — the ingest jobs behind the drag&drop uploads (`GET /api/queue`), one
-  row per upload with its game, state, age and failure detail, **5 per page** with a
-  Prev/Next pager. It never refreshes itself: reads happen when the landing page
-  opens, when you page, when you press **Reload**, and when your own upload lands or
-  fails — so the pager stamps the clock time of the read. The menu entry carries a
-  count of the jobs still in flight (counted server-side over the whole table, so it
-  is true on any page). A backend without the route (the Go viz server, which runs no
-  ingest pipeline) says so instead of showing an empty table.
+- **Queue** — **admin-only** (`?admin=true`): the ingest jobs behind the drag&drop
+  uploads (`GET /api/queue`), one row per upload with its game, state, age and
+  failure detail, **5 per page** with a Prev/Next pager. It never refreshes itself:
+  reads happen when the landing page opens, when you page, when you press **Reload**,
+  and when your own upload lands or fails — so the pager stamps the clock time of the
+  read. The menu entry carries a count of the jobs still in flight (counted
+  server-side over the whole table, so it is true on any page). A backend without the
+  route (the Go viz server, which runs no ingest pipeline) says so instead of showing
+  an empty table.
 
 The selection lives in the URL as `?tab=queue`, so it is shareable and survives a
-refresh, and opening a replay from a section returns there on `back`.
+refresh, and opening a replay from a section returns there on `back`. Without
+`?admin=true` the Queue entry is hidden and `?tab=queue` falls back to Replays, so
+the section is not reachable by URL alone — the route itself stays open, like the
+per-job status the uploading browser polls.
 
 ## The replay catalog (Durable Object + SQLite)
 
