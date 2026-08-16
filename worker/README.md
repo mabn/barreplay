@@ -289,8 +289,27 @@ these files qualify** — `.brw`, `.keys` and the extensionless `c0`, `c1`, … 
 all unrecognised. Without the rule the hostname works, looks fine, and still
 bills a Class B operation on every single read.
 
-Verify with `curl -sI https://cdn-bar.fogofwar.dev/replays/<id>.brw` twice and
-look for `cf-cache-status: HIT` on the second call.
+Verify by requesting the same piece twice and watching `cf-cache-status` go
+`MISS` then `HIT`:
+
+```sh
+URL=https://cdn-bar.fogofwar.dev/replays/<id>.brw
+curl -s -o /dev/null -D - "$URL" | grep -i cf-cache-status
+curl -s -o /dev/null -D - "$URL" | grep -i cf-cache-status   # want HIT
+```
+
+Use a **GET**, not `curl -I`. Cloudflare never serves HEAD requests from
+cache and answers every one of them `DYNAMIC`, so `curl -I` reports a
+perfectly healthy hostname as uncached and sends you hunting for a
+misconfiguration that is not there. `-o /dev/null -D -` is a real GET with the
+body discarded.
+
+Read the three statuses as: `DYNAMIC` = not eligible for cache (the Cache Rule
+is missing or not matching), `MISS` = eligible but not in this datacenter yet,
+`HIT` = served from the edge, never reached R2, no Class B operation. The cache
+is per-datacenter, so the first request from any region is always a `MISS`.
+A browser may also answer from its own cache without asking Cloudflare at all,
+which is why this check uses curl.
 
 ### What the code does for this
 
