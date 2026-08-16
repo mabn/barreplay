@@ -777,9 +777,14 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   builds and dies can drag the words across the map — and the next thing that player says
   is placed wherever they are by then. Freezing also makes the frame scan rare: it runs
   only on ticks where somebody NEW starts speaking. SPECTATORS own no units to speak from, so they
-  all share one anchor — the emptiest cell along the map EDGE, counted over every
-  decoded keyframe (`quietSpot`; the rim stays quiet where an empty pocket mid-map is
-  just where the fighting has not reached yet) and resolved once so it never wanders.
+  all share one anchor — quiet ground as close to the MIDDLE as quiet ground gets
+  (`quietSpot`), counted over every decoded keyframe and resolved once so it never
+  wanders. Each cell scores its density plus a `QUIET_CENTRE_PULL`-weighted penalty for
+  distance from centre, and the density is BLURRED over its 3x3 neighbourhood first —
+  scoring cells alone picks a one-cell gap between two armies, empty but not calm.
+  Tuned against a real 8v8's keyframes: unblurred on a 12 grid it chose dead centre with
+  6.5% of the peak cell's traffic in it, where 16/0.3/blurred chooses a cell with NO
+  units whose neighbourhood carries 2% of the peak, 27% of the way out to a corner.
   Sharing an anchor means sharing a stack (`SPEC_KEY`), which is why their bubbles name
   their author: black background, `(s) name:` always yellow, then the message — yellow
   to the spectator channel, white and marked `[ALL]` to everyone (`bubbleRuns` returns
