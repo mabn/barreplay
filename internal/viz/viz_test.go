@@ -477,6 +477,7 @@ func TestCatalog(t *testing.T) {
 			{PlayerID: 3, Name: "watcher", Team: 0, Spectator: true},
 		},
 		Recorder: &snapshot.RecorderInfo{PlayerID: 2, AllyTeam: 1},
+		Widget:   &snapshot.WidgetInfo{Version: "1.7.0", Sha: widgetSHA, Date: "2026-08-16"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -535,6 +536,13 @@ func TestCatalog(t *testing.T) {
 	if r.UploaderAlly == nil || *r.UploaderAlly != 1 {
 		t.Errorf("recent uploaderAlly = %v, want 1", r.UploaderAlly)
 	}
+	// The widget build that recorded the capture, carried from the stream's
+	// GAME line through Meta into the row the catalog stores.
+	if r.WidgetVersion == nil || *r.WidgetVersion != "1.7.0" ||
+		r.WidgetSha == nil || *r.WidgetSha != widgetSHA ||
+		r.WidgetDate == nil || *r.WidgetDate != "2026-08-16" {
+		t.Errorf("recent widget = %v/%v/%v", str(r.WidgetVersion), str(r.WidgetSha), str(r.WidgetDate))
+	}
 
 	n := entries[1]
 	if n.StartUnix != nil {
@@ -546,6 +554,23 @@ func TestCatalog(t *testing.T) {
 	if n.DurationSec == nil || *n.DurationSec != 2 { // last frame 60 / 30 fps
 		t.Errorf("nostart durationSec = %v", n.DurationSec)
 	}
+	// A capture whose stream named no widget must send nothing rather than
+	// empty strings: the worker's upsert COALESCEs these columns, so a blank
+	// would overwrite a known build with one that never existed.
+	if n.WidgetVersion != nil || n.WidgetSha != nil || n.WidgetDate != nil {
+		t.Errorf("nostart widget = %v/%v/%v, want all nil", str(n.WidgetVersion), str(n.WidgetSha), str(n.WidgetDate))
+	}
+}
+
+// widgetSHA is a plausible git SHA for the catalog's widget-provenance fields.
+const widgetSHA = "0f1e2d3c4b5a69788796a5b4c3d2e1f009182736"
+
+// str renders a nullable catalog string for a failure message.
+func str(p *string) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return *p
 }
 
 func TestGameSizeSpec(t *testing.T) {

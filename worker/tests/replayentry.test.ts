@@ -20,6 +20,9 @@ test("full entry passes through", () => {
       { ally: 1, count: 8, players: [{ name: "gamma", os: 28 }] },
     ],
     uploaderAlly: 1,
+    widgetVersion: "1.7.0",
+    widgetSha: "0f1e2d3c4b5a69788796a5b4c3d2e1f009182736",
+    widgetDate: "2026-08-16",
   });
   assert.deepEqual(e, {
     id: "abc123",
@@ -39,6 +42,10 @@ test("full entry passes through", () => {
     uploaderAlly: 1,
     uploads: null,
     view: null,
+    // The widget build that produced the capture, straight off its GAME line.
+    widgetVersion: "1.7.0",
+    widgetSha: "0f1e2d3c4b5a69788796a5b4c3d2e1f009182736",
+    widgetDate: "2026-08-16",
   });
 });
 
@@ -58,6 +65,9 @@ test("missing stats become null, unknown fields are dropped", () => {
     uploaderAlly: null,
     uploads: null,
     view: null,
+    widgetVersion: null,
+    widgetSha: null,
+    widgetDate: null,
   });
 });
 
@@ -152,6 +162,68 @@ test("mergeUploads accumulates revisions oldest-first, idempotently", () => {
   // Re-publishing the same rid does not duplicate; a now-known ally refreshes.
   assert.deepEqual(mergeUploads(two, "g-22222222", null), two);
   assert.deepEqual(mergeUploads([{ rid: "g-11111111", ally: null }], "g-11111111", 2), [{ rid: "g-11111111", ally: 2 }]);
+});
+
+// The row's widget columns describe only the revision it currently points at,
+// so the per-revision history has to live here: a game re-published from
+// another capture (a re-sim, a teammate's upload) must not take the earlier
+// upload's widget down with it.
+test("mergeUploads keeps each revision's widget build", () => {
+  const w = { version: "1.7.0", sha: "0f1e2d3c4b5a69788796a5b4c3d2e1f009182736", date: "2026-08-16" };
+  const first = mergeUploads(null, "g-11111111", 0, w);
+  assert.deepEqual(first, [{ rid: "g-11111111", ally: 0, widget: w }]);
+
+  // A re-sim revision knows no widget: it appends bare and leaves the earlier
+  // entry's provenance alone.
+  const resim = mergeUploads(first, "g-22222222", null, {});
+  assert.deepEqual(resim, [
+    { rid: "g-11111111", ally: 0, widget: w },
+    { rid: "g-22222222", ally: null },
+  ]);
+
+  // Re-publishing a revision refreshes what it now knows and keeps the rest.
+  const older = { version: "1.6.0" };
+  assert.deepEqual(mergeUploads([{ rid: "g-33333333", ally: 1, widget: older }], "g-33333333", 1, w), [
+    { rid: "g-33333333", ally: 1, widget: w },
+  ]);
+  assert.deepEqual(mergeUploads([{ rid: "g-33333333", ally: 1, widget: older }], "g-33333333", 1, null), [
+    { rid: "g-33333333", ally: 1, widget: older },
+  ]);
+});
+
+test("the widget build rides the publishing PUT", () => {
+  const sha = "0f1e2d3c4b5a69788796a5b4c3d2e1f009182736";
+  const e = sanitizeEntry("abc", { widgetVersion: "1.7.0", widgetSha: sha, widgetDate: "2026-08-16" });
+  assert.ok(typeof e === "object");
+  assert.equal(e.widgetVersion, "1.7.0");
+  assert.equal(e.widgetSha, sha);
+  assert.equal(e.widgetDate, "2026-08-16");
+
+  // An unstamped widget (installed from the repo, never published) simply has
+  // no SHA — that must stay a publishable capture, not a rejected one.
+  const unstamped = sanitizeEntry("abc", { widgetVersion: "1.7.0", widgetDate: "2026-08-16" });
+  assert.ok(typeof unstamped === "object" && unstamped.widgetSha === null && unstamped.widgetVersion === "1.7.0");
+
+  // Silence keeps whatever the row has (upsert COALESCEs these three).
+  const quiet = sanitizeEntry("abc", {});
+  assert.ok(typeof quiet === "object" && quiet.widgetVersion === null && quiet.widgetDate === null);
+  // An empty string is silence too, not a value that would blank the column.
+  const blank = sanitizeEntry("abc", { widgetVersion: "", widgetSha: "", widgetDate: "" });
+  assert.ok(typeof blank === "object" && blank.widgetVersion === null && blank.widgetSha === null);
+});
+
+// The SHA is the one field meant to be matched against a git history, so a
+// value that could never match one is rejected rather than stored.
+test("widgetSha must look like a git SHA", () => {
+  assert.equal(sanitizeEntry("abc", { widgetSha: "not-a-sha" }), "widgetSha must be a lowercase hex git SHA");
+  assert.equal(sanitizeEntry("abc", { widgetSha: "__WIDGET_SHA__" }), "widgetSha must be a lowercase hex git SHA");
+  assert.equal(sanitizeEntry("abc", { widgetSha: "0F1E2D3C4B5A69788796A5B4C3D2E1F009182736" }),
+    "widgetSha must be a lowercase hex git SHA");
+  assert.equal(sanitizeEntry("abc", { widgetSha: 7 }), "widgetSha must be a string");
+  assert.equal(sanitizeEntry("abc", { widgetVersion: 7 }), "widgetVersion must be a string");
+  // A short-but-plausible SHA is fine: `git describe`-style prefixes exist.
+  const short = sanitizeEntry("abc", { widgetSha: "0f1e2d3" });
+  assert.ok(typeof short === "object" && short.widgetSha === "0f1e2d3");
 });
 
 // The TypeScript twin of viz.SettingsFlags (internal/viz/catalog.go): the
