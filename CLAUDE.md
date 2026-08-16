@@ -771,7 +771,12 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   `dummycom`, `mission_command_tower`, the scavenger bosses. Commanders die, so the
   fallback matters and is not rare: measured on a real full-view 8v8, 16/16 teams have
   one at t=0 but only 3/16 by t=20min, after which the bubble anchors to the centroid of
-  whatever the team still owns. A bubble never MOVES once it is up: `bubbleAnchor` freezes
+  whatever the team still owns — and once it owns NOTHING, to where it was last seen
+  (`lastSeenOf` walks keyframes back from the playhead to the newest one still holding
+  any of its units, preferring a commander there over the centroid, cached per team
+  since only a wiped-out team ever asks). Being wiped out is exactly when people have
+  something to say, so without that the messages most wanting a place on the map had
+  none. A bubble never MOVES once it is up: `bubbleAnchor` freezes
   the position when a speaker's first live message appears and holds it until their whole
   stack has cleared, so neither a wandering commander nor a centroid drifting as the team
   builds and dies can drag the words across the map — and the next thing that player says

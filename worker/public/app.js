@@ -1174,6 +1174,7 @@ let defIsCom = new Map();     // def id -> is it a player's commander
 let bubbleAnchor = new Map(); // playerID -> [x, z, team] held while they are on screen
 let bubbleExpiry = new Map(); // chat index -> [expireFrame, fadeFrames], frozen when it appears
 let bubbleText = new Map();   // message text -> [fitted text, width]; see fitBubbleText
+let teamLastSeen = new Map(); // team -> [x, z] where it was last seen holding anything
 
 function buildCommanderDefs() {
   defIsCom = new Map();
@@ -1328,6 +1329,36 @@ function fitBubbleText(raw, maxPx) {
   return hit;
 }
 
+// lastSeenOf finds where a team was last on the map: the newest keyframe at or
+// before the playhead that still held any of its units, taking its commander's
+// position if it had one and the centre of mass otherwise.
+//
+// This is where a wiped-out player's chat goes — and losing everything is
+// exactly when people have something to say, so without it the messages that
+// most want a place on the map were the ones that had none. Cached per team,
+// which is safe because it is only ever consulted for a team that has nothing
+// left: one that still owns units is placed from the live frame instead.
+function lastSeenOf(team) {
+  const hit = teamLastSeen.get(team);
+  if (hit) return hit;
+  for (let c = chunkOf(idx); c >= 0; c--) {
+    const kf = keyFrames[c];
+    if (!kf) continue;
+    const ku = kf.u;
+    let cx = 0, cz = 0, n = 0, com = -1;
+    for (let i = 0; i < ku.length; i += STRIDE) {
+      if (ku[i + F.TEAM] !== team) continue;
+      cx += ku[i + F.X]; cz += ku[i + F.Z]; n++;
+      if (com < 0 && defIsCom.get(ku[i + F.DEF])) com = i;
+    }
+    if (!n) continue;
+    const at = com >= 0 ? [ku[com + F.X], ku[com + F.Z]] : [cx / n, cz / n];
+    teamLastSeen.set(team, at);
+    return at;
+  }
+  return null;
+}
+
 // chatBody is the message as a bubble shows it. Talking to EVERYONE is marked,
 // because team chat is the norm during a game and public chat is the exception
 // worth noticing — an unmarked bubble is something said to that player's own
@@ -1440,6 +1471,11 @@ function drawChatBubbles(f, u) {
       } else {
         const acc = sum.get(team);
         if (acc) at = [acc[0] / acc[2], acc[1] / acc[2], team];
+        else {
+          // Nothing of theirs is left: speak from where they were wiped out.
+          const last = lastSeenOf(team);
+          if (last) at = [last[0], last[1], team];
+        }
       }
       for (const key of players) bubbleAnchor.set(key, at);
     }
@@ -2989,6 +3025,7 @@ async function loadReplay(file) {
   bubbleAnchor = new Map();
   bubbleExpiry = new Map();
   bubbleText = new Map();
+  teamLastSeen = new Map();
   quietAnchor = null;
   flashSeenIdx = -1;
   currentFile = file;

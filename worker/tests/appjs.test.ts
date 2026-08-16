@@ -555,3 +555,49 @@ test('spectator chat anchors to a calm pocket near the middle', () => {
   const again = api.spot();
   assert.deepEqual(again, spot, 'the spot is stable for the replay');
 });
+
+// A player who has lost everything still gets a bubble: at the last place their
+// team was seen on the map, which is exactly when people have something to say.
+test('a wiped-out team speaks from where it was last seen', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('not found: ' + n);
+  };
+  const STRIDE = 11;
+  const F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6, DVX: 7, DVZ: 8, BUILD: 9, TARGET: 10 };
+  const defIsCom = new Map([[58, true], [77, false]]);
+  const unit = (id: number, def: number, team: number, x: number, z: number) =>
+    [id, def, team, x, z, 9, 9, 0, 0, 255, 0];
+
+  // Team 3 holds ground early, is down to one commander later, and is gone by
+  // the newest keyframe. Team 4 never existed.
+  // Team 5 only ever appears in the first keyframe, with no commander.
+  const keyFrames = [
+    { u: new Int32Array([...unit(1, 77, 3, 100, 100), ...unit(2, 77, 3, 300, 300),
+                         ...unit(4, 77, 5, 200, 600), ...unit(5, 77, 5, 400, 800)]) },
+    { u: new Int32Array([...unit(1, 77, 3, 500, 500), ...unit(3, 58, 3, 900, 900)]) },
+    { u: new Int32Array([...unit(9, 77, 0, 5000, 5000)]) },
+  ];
+  let idx = 2, teamLastSeen = new Map();
+  const chunkOf = () => 2;
+  const api = eval(`(function(){
+    ${extract('lastSeenOf')}
+    return { at: lastSeenOf, cache: () => teamLastSeen, seek: i => { idx = i; } };
+  })()`);
+
+  // Newest keyframe with any of team 3 is the middle one, where it had a
+  // COMMANDER — that wins over the centre of mass.
+  assert.deepEqual(api.at(3), [900, 900], 'the commander it died with, not the centroid');
+  assert.deepEqual(api.cache().get(3), [900, 900], 'and it is remembered');
+
+  // With no commander in that last sighting, the centre of mass stands in.
+  assert.deepEqual(api.at(5), [300, 700], 'centroid of what it still had');
+
+  // A team that was never on the map has nowhere to speak from.
+  assert.equal(api.at(4), null, 'no history: no bubble rather than a wrong one');
+});
