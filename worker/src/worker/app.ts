@@ -155,7 +155,26 @@ app.post("/api/upload", async (c) => {
   const p = scanStreamPreamble(body);
   if (typeof p === "string") return c.json({ error: p }, 400);
 
-  const streamKey = `streams/${p.gameId}/${Date.now()}-${archiveSuffix(p)}.brepstream`;
+  // The key carries a hash of the BYTES, because nothing else in it is unique.
+  // Two players on the same ally team uploading the same game — or one player
+  // uploading a half-game capture and then the full one — agree on gameId and
+  // on archiveSuffix, leaving only the timestamp to separate them. In Workers
+  // Date.now() is clamped to the time of the last I/O and does not advance
+  // during a request, so concurrent uploads genuinely collide: the second PUT
+  // overwrote the first, and both jobs then pointed at one key holding one
+  // player's bytes while the other's were silently gone.
+  //
+  // The timestamp stays first so the prefix still sorts oldest-first, which
+  // means this is NOT full content addressing: re-uploading identical bytes
+  // archives them again rather than deduplicating. That is the deliberate
+  // trade — the hash is here to guarantee distinctness, not to collapse
+  // duplicates, and a duplicate costs one object while a collision costs
+  // somebody's capture.
+  const digest = await crypto.subtle.digest("SHA-256", body as BufferSource);
+  const hash = [...new Uint8Array(digest).slice(0, 4)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  const streamKey = `streams/${p.gameId}/${Date.now()}-${hash}-${archiveSuffix(p)}.brepstream`;
   await c.env.BUCKET.put(streamKey, body);
 
   const job = crypto.randomUUID();
@@ -229,7 +248,15 @@ app.put("/replays/*", async (c) => {
   if (declared > MAX_UPLOAD) return c.json({ error: `object exceeds ${MAX_UPLOAD} bytes` }, 413);
   const body = new Uint8Array(await c.req.arrayBuffer());
   if (body.length > MAX_UPLOAD) return c.json({ error: `object exceeds ${MAX_UPLOAD} bytes` }, 413);
-  await c.env.BUCKET.put(key, body);
+  // Store the HTTP metadata rather than relying on serveR2 to add it: the
+  // bucket is also read through its OWN hostname (cdn-bar.fogofwar.dev), where
+  // R2 replies with exactly what is stored and no Worker gets to fix it up.
+  // Derived from the key, not from the request headers, so every transport
+  // (S3, wrangler, this route) leaves the bucket in the same state.
+  const meta = objectHTTPMeta(key);
+  await c.env.BUCKET.put(key, body, {
+    httpMetadata: { contentType: meta.contentType, cacheControl: meta.cacheControl },
+  });
   return c.json({ ok: true });
 });
 
@@ -305,11 +332,13 @@ async function serveR2(bucket: R2Bucket, key: string, req: Request, immutable: b
   obj.writeHttpMetadata(headers); // content-type/-encoding stored at upload time
   headers.set("etag", obj.httpEtag);
   headers.set("accept-ranges", "bytes");
-  headers.set(
-    "cache-control",
-    immutable ? "public, max-age=31536000, immutable" : "no-cache",
-  );
-  setContentType(headers, key);
+  // Recomputed rather than trusted from storage, so objects uploaded before
+  // upload-time metadata existed still serve correctly on this hostname.
+  // `immutable` distinguishes the published pieces from the guarded stream
+  // archive, which is re-read by the ingest daemon and must revalidate.
+  const meta = objectHTTPMeta(key);
+  headers.set("cache-control", immutable ? meta.cacheControl : "no-cache");
+  headers.set("content-type", meta.contentType);
 
   const body = "body" in obj ? obj.body : null;
   if (req.method === "HEAD") {
@@ -342,16 +371,33 @@ function parseRange(header: string | null): R2Range | undefined {
   return { offset: start, length: end - start + 1 };
 }
 
-// setContentType fixes the few types the viewer relies on. .resources and
-// index.json are plain JSON (the platform applies transport compression itself);
-// .brw, .keys and chunk files are opaque binary the viewer gunzips internally,
-// so they stay application/octet-stream with no content-encoding.
-function setContentType(headers: Headers, key: string): void {
-  if (key.endsWith(".resources") || key.endsWith(".json")) {
-    headers.set("content-type", "application/json");
-  } else {
-    // .brw head, .keys, or replays/<id>/c<n> — a raw gzip stream the viewer
-    // gunzips itself. Must not be served with Content-Encoding.
-    headers.set("content-type", "application/octet-stream");
-  }
+// objectHTTPMeta derives an object's Content-Type and Cache-Control from its
+// key. It is applied in TWO places, which is why it is one function: stored on
+// the object at upload time (the PUT route above), and set on the response
+// when this Worker serves the object on its own hostname.
+//
+// Storing it matters because the bucket is ALSO published directly at
+// cdn-bar.fogofwar.dev, where R2 answers from stored metadata alone — a cache
+// hit there never reaches R2 and so costs no Class B operation, but only if
+// the object actually carries a Cache-Control the edge will honour.
+//
+// Must stay in lockstep with objectHTTPMeta in internal/packer/r2.go and
+// worker/tools/r2put.ts.
+export function objectHTTPMeta(key: string): { contentType: string; cacheControl: string } {
+  // .resources and index.json are plain JSON (the platform applies transport
+  // compression itself); .brw, .keys and chunk files are opaque binary the
+  // viewer gunzips internally, so they stay application/octet-stream with no
+  // content-encoding — labelling them gzip would make the browser inflate them
+  // and hand the decoder already-decompressed bytes.
+  const contentType =
+    key.endsWith(".resources") || key.endsWith(".json")
+      ? "application/json"
+      : "application/octet-stream";
+  // Per-replay pieces are published under a content-addressed revision and
+  // never rewritten, so they are safely immutable; a listing revalidates.
+  const cacheControl =
+    key === "index.json" || key.endsWith("/index.json")
+      ? "no-cache"
+      : "public, max-age=31536000, immutable";
+  return { contentType, cacheControl };
 }

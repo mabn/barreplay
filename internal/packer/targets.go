@@ -31,7 +31,11 @@ type UploadTarget struct {
 }
 
 var uploadTargets = map[string]UploadTarget{
-	"r2":    {Name: "r2", IndexURL: "https://replay.bartools.workers.dev", What: "the real bucket"},
+	// The worker answers on its workers.dev hostname too, but publishes name
+	// the custom domain: it is the one that survives a rename of the worker or
+	// of the account's workers.dev subdomain, and it is what the catalog rows
+	// are shared as.
+	"r2":    {Name: "r2", IndexURL: "https://replay.fogofwar.dev", What: "the real bucket"},
 	"local": {Name: "local", IndexURL: "http://127.0.0.1:5173", What: "the vite/wrangler dev simulator"},
 }
 

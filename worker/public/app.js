@@ -26,6 +26,27 @@
 // only in codec v5 streams — a v4 replay decodes with build=255/target=0
 // (see codecVer below), so no bars or lines draw for it.
 
+// The origin the four replay-data URLs above are fetched from. Empty means
+// same-origin, which is what the Go viz server (internal/viz) and `vite dev`
+// both stamp into index.html; a production build stamps the R2 bucket's own
+// hostname, so those reads are answered from Cloudflare's cache instead of
+// costing a billed R2 GetObject through the Worker.
+//
+// Only the bulk per-replay pieces move. /index.json and /api/* stay
+// same-origin: the Worker BUILDS them (a bucket scan, the catalog Durable
+// Object), so they are not objects the bucket could serve.
+//
+// Anything that is not an absolute http(s) origin is read as same-origin, so
+// an unsubstituted "__DATA_BASE__" token degrades instead of breaking.
+const DATA_BASE = (() => {
+  const v = typeof window !== 'undefined' ? window.__DATA_BASE__ : '';
+  return typeof v === 'string' && /^https?:\/\//.test(v) ? v.replace(/\/+$/, '') : '';
+})();
+
+// dataURL builds one replay-piece URL. Every fetch of a bucket object goes
+// through here so the origin is decided in exactly one place.
+function dataURL(path) { return DATA_BASE + path; }
+
 const STRIDE = 11;
 const F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6, DVX: 7, DVZ: 8, BUILD: 9, TARGET: 10 };
 const BUILD_DONE = 255; // quantized "construction finished"
@@ -364,7 +385,7 @@ async function streamKeys(gen) {
   const buf = new Uint8Array(total);
   let have = 0, ci = 0;
   try {
-    const r = await fetch('/replays/' + encodeURIComponent(currentFile) + '.keys');
+    const r = await fetch(dataURL('/replays/' + encodeURIComponent(currentFile) + '.keys'));
     if (!r.ok) throw new Error(await r.text());
     const reader = r.body.pipeThrough(new DecompressionStream('gzip')).getReader();
     for (;;) {
@@ -435,7 +456,7 @@ function applyDeltas(i, raw) {
 async function fetchChunk(i) {
   const gen = loadGen;
   try {
-    const r = await fetch('/replays/' + encodeURIComponent(currentFile) + '/c' + i);
+    const r = await fetch(dataURL('/replays/' + encodeURIComponent(currentFile) + '/c' + i));
     if (!r.ok) throw new Error(await r.text());
     const bytes = new Uint8Array(await r.arrayBuffer());
     if (gen !== loadGen) return; // a different replay was loaded meanwhile
@@ -2554,7 +2575,7 @@ let resByFrame = null;
 async function loadResources(file, gen) {
   resByFrame = null;
   try {
-    const r = await fetch('/replays/' + encodeURIComponent(file) + '.resources');
+    const r = await fetch(dataURL('/replays/' + encodeURIComponent(file) + '.resources'));
     if (!r.ok) return;
     const arr = await r.json(); // [{f, r:[...]}]
     if (gen !== loadGen) return; // a newer replay load superseded this one
@@ -3030,7 +3051,7 @@ async function loadReplay(file) {
   flashSeenIdx = -1;
   currentFile = file;
   try {
-    const r = await fetch('/replays/' + encodeURIComponent(file) + '.brw');
+    const r = await fetch(dataURL('/replays/' + encodeURIComponent(file) + '.brw'));
     if (!r.ok) throw new Error(await r.text());
     data = await decodeHead(await r.arrayBuffer());
   } catch (err) {
@@ -3290,9 +3311,11 @@ async function reloadList() {
     const list = await fetchReplayList();
     if (seq !== reloadSeq) return; // a newer filter change already went out
     replayList = list;
+    homeDataLoaded = true;
     renderHome();
   } catch (err) {
     if (seq !== reloadSeq) return;
+    homeDataLoaded = true;
     renderHome('Could not list replays: ' + err.message);
   }
 }
@@ -3470,6 +3493,28 @@ function showHome() {
   document.getElementById('subtitle').textContent = 'replay state viewer';
   document.getElementById('viewmark').style.display = 'none';
   renderHome();
+  ensureHomeData();
+}
+
+// ensureHomeData loads what only the replay TABLE needs — the catalog listing
+// and the facets the filter bar is built from — the first time the list view is
+// shown, and never again (filter changes go through reloadList).
+//
+// It is deliberately not part of startup. Opening ?replay=<id> directly needs
+// neither: loadReplay fetches that replay's own pieces, and knownReplayURL
+// accepts any well-formed id without consulting the list. Fetching them up
+// front made every shared link pay for /api/replays and /api/replays/facets
+// before it could start on the replay itself — two requests feeding a table
+// that visit never renders.
+let homeDataPending = null;
+let homeDataLoaded = false; // false = the listing has not come back yet
+function ensureHomeData() {
+  if (!homeDataPending) {
+    // Independent of each other: a backend with no /facets simply leaves the
+    // filter bar hidden, which must not stop the listing from loading.
+    homeDataPending = Promise.all([initFilters(), reloadList()]);
+  }
+  return homeDataPending;
 }
 
 // ---- point-of-view marking -------------------------------------------------
@@ -3745,9 +3790,13 @@ function renderHome(errMsg) {
   const filtered = filterQuery() !== '';
   const count = document.getElementById('f_count');
   if (count) count.textContent = `${replayList.length} ${filtered ? 'matching' : 'replays'}`;
-  const text = errMsg || (replayList.length ? '' : (filtered
-    ? 'No replays match these filters.'
-    : 'No replays yet. Drop a .brepstream above, or upload one with: go run ./cmd/pack -upload r2 <capture>.'));
+  // The listing is fetched only when this view is first shown, so an empty
+  // table before it arrives means "still loading", not "nothing to show".
+  const text = errMsg || (replayList.length ? '' : (!homeDataLoaded
+    ? 'Loading replays…'
+    : filtered
+      ? 'No replays match these filters.'
+      : 'No replays yet. Drop a .brepstream above, or upload one with: go run ./cmd/pack -upload r2 <capture>.'));
   msg.style.display = text ? '' : 'none';
   msg.textContent = text;
 }
@@ -3946,8 +3995,7 @@ function openReplay(id) {
 
 async function init() {
   initGL(); // one-time; a null result just means the 2D icon path is used
-  initUpload(); // wired before the list fetch so the dropzone works regardless
-  initFilters(); // best-effort and independent: the list below reads the URL
+  initUpload(); // the dropzone works without the catalog being loaded
   const params = new URLSearchParams(location.search);
 
   // Optional render-smoothness overlay, gated on ?debug=true.
@@ -3962,15 +4010,11 @@ async function init() {
     showHome();
   };
 
-  try {
-    replayList = await fetchReplayList();
-  } catch (err) {
-    showHome();
-    renderHome('Could not list replays: ' + err.message);
-    return;
-  }
   // ?replay=<id> opens that replay directly (refresh / shared link); without
-  // it the page is the replay list (the table IS the picker).
+  // it the page is the replay list (the table IS the picker), and showHome
+  // fetches the catalog it needs. A direct link asks for NOTHING the table
+  // would have used — knownReplayURL accepts a well-formed id on its own, and
+  // loadReplay reports a real failure if the pieces are not there.
   const wanted = params.get('replay');
   if (wanted && knownReplayURL(wanted)) {
     hideHome();

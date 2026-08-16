@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/mabn/barreplay/snapshot"
@@ -636,5 +638,120 @@ func TestSettingsFlags(t *testing.T) {
 	want := map[string]any{"ranked": true, "lava": true, "mods": true}
 	if len(got) != len(want) || got["ranked"] != true || got["lava"] != true || got["mods"] != true {
 		t.Errorf("combined = %v, want %v", got, want)
+	}
+}
+
+// TestIndexHTMLDataOrigin pins the __DATA_ORIGIN__ contract this server shares
+// with the Vite build. The deployed viewer fetches replay pieces from the R2
+// bucket's own hostname (stamped into the placeholder at build time); this
+// server IS the origin for its files, so it must blank the placeholder — an
+// unsubstituted one would send the viewer looking for a literal host.
+//
+// It also guards the shape of the emitted line. Both substituters do a plain
+// textual replace, so a placeholder token that collided with the global's name
+// would be rewritten into `window.https://... =`: invalid JS that nothing else
+// in the build or the test suite would notice.
+func TestIndexHTMLDataOrigin(t *testing.T) {
+	srv := httptest.NewServer((&Server{Dir: t.TempDir()}).Handler())
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(b)
+
+	if want := `window.__DATA_BASE__ = "";`; !strings.Contains(html, want) {
+		t.Errorf("served index.html does not assign an empty data origin (want %q)", want)
+	}
+	for _, tok := range []string{"__DATA_ORIGIN__", "__ASSET_REV__"} {
+		if strings.Contains(html, tok) {
+			t.Errorf("served index.html still contains the unsubstituted placeholder %s", tok)
+		}
+	}
+}
+
+// TestFingerprintedAssets pins the contract between index.html and this server:
+// the entry references its subresources by their content-hashed names, so those
+// exact URLs must resolve. A mismatch would leave the viewer with no script and
+// no stylesheet — a blank page, not a degraded one.
+func TestFingerprintedAssets(t *testing.T) {
+	srv := httptest.NewServer((&Server{Dir: t.TempDir()}).Handler())
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// Pull the URLs the entry actually asks for rather than reconstructing
+	// them, so this fails if either side's naming scheme moves.
+	refs := regexp.MustCompile(`/(?:app|style)\.[0-9a-f]{8}\.(?:js|css)`).FindAllString(string(b), -1)
+	if len(refs) != 2 {
+		t.Fatalf("index.html references %d fingerprinted subresources, want 2: %v", len(refs), refs)
+	}
+	for _, ref := range refs {
+		r, err := http.Get(srv.URL + ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+		if r.StatusCode != 200 {
+			t.Errorf("GET %s: status %d", ref, r.StatusCode)
+		}
+		if len(body) == 0 {
+			t.Errorf("GET %s: empty body", ref)
+		}
+	}
+}
+
+// TestFavicon guards the tab icon's plumbing: the embed pattern in
+// worker/assets.go and the route that serves it. A missing embed is the easy
+// mistake here and shows up only as a 404 in a browser tab nobody is watching.
+func TestFavicon(t *testing.T) {
+	srv := httptest.NewServer((&Server{Dir: t.TempDir()}).Handler())
+	defer srv.Close()
+
+	for _, tc := range []struct{ path, ctype, magic string }{
+		{"/favicon.svg", "image/svg+xml", "<svg"},
+		{"/favicon.ico", "image/x-icon", "\x00\x00\x01\x00"}, // ICONDIR
+	} {
+		resp, err := http.Get(srv.URL + tc.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Errorf("GET %s: status %d", tc.path, resp.StatusCode)
+			continue
+		}
+		if got := resp.Header.Get("Content-Type"); got != tc.ctype {
+			t.Errorf("GET %s: content-type = %q, want %q", tc.path, got, tc.ctype)
+		}
+		if !strings.HasPrefix(string(b), tc.magic) {
+			t.Errorf("GET %s: wrong file (starts %q)", tc.path, string(b[:min(8, len(b))]))
+		}
+	}
+
+	// index.html must actually reference them, or a fallback ships dead.
+	page, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html, _ := io.ReadAll(page.Body)
+	page.Body.Close()
+	for _, want := range []string{`href="/favicon.svg"`, `href="/favicon.ico"`} {
+		if !strings.Contains(string(html), want) {
+			t.Errorf("index.html does not reference %s", want)
+		}
 	}
 }

@@ -234,12 +234,24 @@ func Pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 	return outPath, modOptions, nil
 }
 
-// StreamRev derives a capture's revision id: the first 8 hex chars of the raw
-// stream file's SHA-256. Content-addressed, so re-publishing the same bytes
-// lands under the same revision (idempotent) while any change gets a fresh
-// one — which is what lets /replays/* stay immutable-cacheable: revisioned
-// publishes never overwrite a served object.
-func StreamRev(path string) (string, error) {
+// ContentRev derives a revision id: the first 8 hex chars of a file's SHA-256.
+//
+// Publishers hash the PACKED .brp, not the capture stream it came from, and
+// the difference is the whole point. The stream identifies the recording; the
+// .brp identifies the BYTES the viewer will actually fetch. Keying on the
+// stream meant re-packing an unchanged capture — a codec change, a packer fix,
+// or the same stream packed once with the demo metadata and once with
+// -no-demo — produced different pieces under the SAME keys, silently
+// overwriting objects that /replays/* serves as immutable. Behind an edge
+// cache that is not a cosmetic problem: the stale bytes are then served for a
+// year.
+//
+// The .brp writer is deterministic (same capture + same packer = byte-identical
+// file), so this keeps re-publishing idempotent — an unchanged republish still
+// lands on the same keys — while anything that actually changes the bytes gets
+// a fresh revision and leaves the old one untouched. That is what makes the
+// immutable cache-control on /replays/* truthful rather than a hazard.
+func ContentRev(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -264,7 +276,7 @@ type UploadOptions struct {
 	// empty skips the registration with a warning.
 	IndexURL string
 	// Rev, when non-empty, publishes the pieces under the revisioned id
-	// "<gameId>-<rev>" (see StreamRev) and records it as the catalog row's
+	// "<gameId>-<rev>" (see ContentRev) and records it as the catalog row's
 	// rid. Empty publishes under the bare gameId (the pre-revisioning
 	// layout). Nothing is ever deleted either way — superseded revisions
 	// stay servable.

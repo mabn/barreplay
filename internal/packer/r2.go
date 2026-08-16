@@ -157,6 +157,11 @@ func workerPut(ctx context.Context, indexURL, key string, body []byte) error {
 		if token := os.Getenv("REPLAY_PUT_TOKEN"); token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
+		// The worker's PUT route stores these on the object, so this transport
+		// leaves the bucket in the same state the S3 one does.
+		ct, cc := objectHTTPMeta(key)
+		req.Header.Set("Content-Type", ct)
+		req.Header.Set("Cache-Control", cc)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			lastErr = err
@@ -178,6 +183,40 @@ func workerPut(ctx context.Context, indexURL, key string, body []byte) error {
 	return lastErr
 }
 
+// objectHTTPMeta returns the Content-Type and Cache-Control to STORE on an
+// uploaded object.
+//
+// These were a serve-time concern for as long as the Worker was the only
+// reader: serveR2 set both on every response, so whatever the bucket held was
+// irrelevant. Binding the bucket to its own hostname removes that rewrite —
+// R2 answers with the object's stored metadata and nothing else — so wrong
+// values here are not cosmetic. Without Cache-Control the edge will not hold
+// the object, which is the entire point of serving from the bucket; without
+// the right Content-Type the browser mis-handles the body.
+//
+// Three implementations must agree: this one, objectHTTPMeta in
+// worker/tools/r2put.ts, and objectHTTPMeta in worker/src/worker/app.ts
+// (which both stores it on the guarded PUT route and still applies it when
+// the Worker serves the same object on its own hostname).
+func objectHTTPMeta(key string) (contentType, cacheControl string) {
+	if strings.HasSuffix(key, ".resources") || strings.HasSuffix(key, ".json") {
+		contentType = "application/json"
+	} else {
+		// .brw head, .keys, or replays/<id>/c<n>: a raw gzip stream the viewer
+		// gunzips ITSELF. It must not be labelled Content-Encoding: gzip, or
+		// the browser would transparently inflate it and the decoder would be
+		// handed already-decompressed bytes.
+		contentType = "application/octet-stream"
+	}
+	// Per-replay pieces are published under a content-addressed revision and
+	// never rewritten (see ContentRev), so they are safely immutable. A listing
+	// changes whenever anything is published, so it only ever revalidates.
+	if key == "index.json" || strings.HasSuffix(key, "/index.json") {
+		return contentType, "no-cache"
+	}
+	return contentType, "public, max-age=31536000, immutable"
+}
+
 // Put uploads one object, retrying once on a transient failure (5xx or a
 // transport error) like the TS s3Put.
 func (c *R2Client) Put(ctx context.Context, key string, body []byte) error {
@@ -188,6 +227,14 @@ func (c *R2Client) Put(ctx context.Context, key string, body []byte) error {
 			return err
 		}
 		req.ContentLength = int64(len(body))
+		// Stored as the object's HTTP metadata, which is what R2 replies with
+		// when the bucket is read through its own hostname. Set before signing
+		// but deliberately NOT signed: sign covers exactly
+		// host;x-amz-content-sha256;x-amz-date (pinned against an aws4fetch
+		// fixture), and SigV4 only verifies the headers it lists.
+		ct, cc := objectHTTPMeta(key)
+		req.Header.Set("Content-Type", ct)
+		req.Header.Set("Cache-Control", cc)
 		c.sign(req)
 		client := c.HTTPClient
 		if client == nil {
