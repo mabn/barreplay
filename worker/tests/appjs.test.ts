@@ -253,3 +253,50 @@ test('chat bubbles fade smoothly and are not re-timed by a speed change', () => 
   api.setSpeed(1);
   assert.equal(alphasAt(1000 + lifetime + 60).texts, 1, 'slowing down must not cut it short');
 });
+
+// Build progress bars advance between samples rather than stepping once per
+// sample, and do not rewind when the engine recycles a unit id.
+test('build progress interpolates toward the next sample', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('not found: ' + n);
+  };
+  const STRIDE = 11;
+  const F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6, DVX: 7, DVZ: 8, BUILD: 9, TARGET: 10 };
+  let renderFrac = 0, nextU: Int32Array | null = null, nextPosMap: Map<number, number> | null = null;
+
+  const api = eval(`(function(){
+    ${extract('interpBuild')}
+    return { interpBuild,
+      set: (frac, nu, map) => { renderFrac = frac; nextU = nu; nextPosMap = map; } };
+  })()`);
+
+  //                id   def team  x  z  hp max dvx dvz build target
+  const u = new Int32Array([7, 3, 0, 0, 0, 9, 9, 0, 0, 100, 0]);
+  const next = new Int32Array([7, 3, 0, 0, 0, 9, 9, 0, 0, 200, 0]);
+  const map = new Map([[7, 0]]);
+
+  api.set(0, next, map);
+  assert.equal(api.interpBuild(u, 0), 100, 'no sub-sample offset: the stored value');
+  api.set(0.5, next, map);
+  assert.equal(api.interpBuild(u, 0), 150, 'halfway between the two samples');
+  api.set(0.25, next, map);
+  assert.equal(api.interpBuild(u, 0), 125, 'and it is a plain lerp, not a step');
+
+  // Next sample not streamed in yet, or the unit is gone from it.
+  api.set(0.5, null, null);
+  assert.equal(api.interpBuild(u, 0), 100, 'no next sample: hold the stored value');
+  api.set(0.5, next, new Map());
+  assert.equal(api.interpBuild(u, 0), 100, 'unit absent from the next sample: hold');
+
+  // Recycled id: same id, different def. Must NOT animate toward a stranger's
+  // progress, which would show as a bar rewinding.
+  const recycled = new Int32Array([7, 99, 0, 0, 0, 9, 9, 0, 0, 5, 0]);
+  api.set(0.5, recycled, map);
+  assert.equal(api.interpBuild(u, 0), 100, 'a recycled id must not rewind the bar');
+});

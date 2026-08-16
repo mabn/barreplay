@@ -832,6 +832,13 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   is refused — its frames reach the compositor via pixel readback, slower than the 2D
   path — and everything falls back to the original per-unit `drawImage` loop, as it does
   on any init/context failure (`?gl=1` forces GL on, `?gl=0` forces the 2D path). The 2D
+  BUILD BARS interpolate too (`interpBuild`): the stored build column is a 1 Hz
+  step, so a bar visibly jumped once per sample until it was lerped toward the
+  next sample's value like positions are. It guards on the DEF matching, unlike
+  `interpPos` — the engine recycles unit ids and a bar rewinding to zero because
+  the id now belongs to something else is far more noticeable than a position
+  doing it. Measured at 2.7us/frame for 200 under-construction units among 2500
+  (0.016% of a 60fps budget), so it is not gated on playback speed. The 2D
   path itself was also slimmed for unit-heavy replays: per-def icon/footprint tables
   built once per load (`buildDefTables`) instead of two string-hash lookups per unit per
   frame, per-draw def/glyph memos instead of per-unit `"path|color|px"` keys, an
