@@ -174,24 +174,28 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
   flex: 1; min-width: 0; font-weight: 600;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-/* right block: two small stacked resource bars (metal over energy) */
+/* right block: two stacked income meters (metal over energy). The number sits ON
+   its own bar — width = this player's income against the largest any team
+   reached in the last minute — so scanning the column ranks the economies at a
+   glance. Hovering the row swaps every number for that resource's current stock
+   and storage cap, which is why both live in the same fixed-width slot. */
 .pres { flex: 0 0 auto; display: flex; flex-direction: column; gap: 3px; }
-.resrow { display: flex; align-items: center; gap: 5px; font-size: 10px; line-height: 1; }
-.resrow .rbar {
-  flex: 0 0 auto; width: 46px; height: 4px;
+.resrow { display: flex; align-items: center; font-size: 10px; line-height: 1; }
+.rmeter {
+  position: relative; display: block; width: 96px; padding: 3px 5px;
   background: #222c36; border-radius: 3px; overflow: hidden;
+  text-align: right; font-variant-numeric: tabular-nums;
 }
-.resrow .rbar > div { height: 100%; }
-.resrow .rval, .resrow .rinc {
-  flex: 0 0 auto; text-align: right; font-variant-numeric: tabular-nums;
-}
-.resrow .rval { min-width: 34px; }
-.resrow .rinc { min-width: 42px; }
+.rmeter > i { position: absolute; inset: 0 auto 0 0; opacity: .32; } /* the bar */
+.rmeter > b { position: relative; font-weight: 600; } /* above the bar */
+.rstore { display: none; }
+.prow:hover .rinc { display: none; }
+.prow:hover .rstore { display: inline; }
 /* Numbers follow the bar colour: metal white/silver, energy yellow. */
-.resrow.metal .rbar > div { background: #cfd6dd; }
-.resrow.metal .rval, .resrow.metal .rinc { color: #cfd6dd; }
-.resrow.energy .rbar > div { background: #e3c34a; }
-.resrow.energy .rval, .resrow.energy .rinc { color: #e3c34a; }
+.resrow.metal .rmeter > i { background: #cfd6dd; }
+.resrow.metal .rmeter > b { color: #cfd6dd; }
+.resrow.energy .rmeter > i { background: #e3c34a; }
+.resrow.energy .rmeter > b { color: #e3c34a; }
 
 #tooltip {
   position: absolute; pointer-events: none; display: none;
