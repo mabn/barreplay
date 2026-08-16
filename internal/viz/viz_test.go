@@ -720,30 +720,38 @@ func TestFavicon(t *testing.T) {
 	srv := httptest.NewServer((&Server{Dir: t.TempDir()}).Handler())
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/favicon.svg")
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("GET /favicon.svg: status %d", resp.StatusCode)
-	}
-	if got := resp.Header.Get("Content-Type"); got != "image/svg+xml" {
-		t.Errorf("content-type = %q, want image/svg+xml", got)
-	}
-	if !strings.HasPrefix(string(b), "<svg") {
-		t.Errorf("body is not an SVG (starts %q)", string(b[:min(8, len(b))]))
+	for _, tc := range []struct{ path, ctype, magic string }{
+		{"/favicon.svg", "image/svg+xml", "<svg"},
+		{"/favicon.ico", "image/x-icon", "\x00\x00\x01\x00"}, // ICONDIR
+	} {
+		resp, err := http.Get(srv.URL + tc.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Errorf("GET %s: status %d", tc.path, resp.StatusCode)
+			continue
+		}
+		if got := resp.Header.Get("Content-Type"); got != tc.ctype {
+			t.Errorf("GET %s: content-type = %q, want %q", tc.path, got, tc.ctype)
+		}
+		if !strings.HasPrefix(string(b), tc.magic) {
+			t.Errorf("GET %s: wrong file (starts %q)", tc.path, string(b[:min(8, len(b))]))
+		}
 	}
 
-	// index.html must actually reference it, or the file ships dead.
+	// index.html must actually reference them, or a fallback ships dead.
 	page, err := http.Get(srv.URL + "/")
 	if err != nil {
 		t.Fatal(err)
 	}
 	html, _ := io.ReadAll(page.Body)
 	page.Body.Close()
-	if !strings.Contains(string(html), `href="/favicon.svg"`) {
-		t.Error("index.html does not reference /favicon.svg")
+	for _, want := range []string{`href="/favicon.svg"`, `href="/favicon.ico"`} {
+		if !strings.Contains(string(html), want) {
+			t.Errorf("index.html does not reference %s", want)
+		}
 	}
 }
