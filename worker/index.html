@@ -5,10 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>barreplay viewer</title>
 <!-- __ASSET_REV__ is replaced with a content hash of app.js+style.css (Vite
-     plugin at build/dev; the Go viz server at startup), so a deployed UI
-     change busts the browser cache by itself — only index.html must
-     revalidate, and both servers send it with a no-cache header. -->
-<link rel="stylesheet" href="/style.css?v=__ASSET_REV__">
+     plugin at build/dev; the Go viz server at startup). The hash is in the
+     FILENAME, not a ?v= query, so a given byte sequence has a URL that never
+     changes and the file can be served immutable for a year (public/_headers).
+     Only index.html revalidates — both servers send it no-cache — and because
+     a UI change moves these URLs, browsers refetch exactly the files that
+     changed, with no hard refresh. -->
+<link rel="stylesheet" href="/style.__ASSET_REV__.css">
 </head>
 <body>
 <header>
@@ -142,6 +145,6 @@
      rewritten into `window.https://... =` — invalid JS that no build step
      would flag. -->
 <script>window.__DATA_BASE__ = "__DATA_ORIGIN__";</script>
-<script src="/app.js?v=__ASSET_REV__"></script>
+<script src="/app.__ASSET_REV__.js"></script>
 </body>
 </html>

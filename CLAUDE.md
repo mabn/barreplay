@@ -204,14 +204,33 @@ internal/viz/             serve the viewer (SPA embedded from worker/) + the sta
 internal/viz/static.go    pack a .brp into plain static files (byte-identical to the served URLs) for serverless hosting
 worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as static files from R2 (no playback server);
                           worker/public + worker/index.html are THE front-end (embedded into barreplay-viz via assets.go).
-                          UI CACHE-BUSTING: index.html references /app.js?v=__ASSET_REV__ /
-                          /style.css?v=__ASSET_REV__ — the token is stamped with
+                          UI CACHE-BUSTING: index.html references /app.<rev>.js /
+                          /style.<rev>.css — the hash is in the FILENAME, not a ?v= query, so a
+                          given byte sequence's URL never changes and public/_headers serves it
+                          immutable for a year. __ASSET_REV__ is stamped with
                           sha256(app.js+style.css)[:8] by the Vite asset-rev plugin
                           (vite.config.ts, build AND dev) and by the Go viz server at startup
                           (viz.assetRev), and index.html itself is served no-cache (the Hono
-                          serveEntry route via assets.run_worker_first ["/", "/index.html"];
-                          the Go server serves all UI no-store) — so a UI deploy propagates on
-                          a plain reload, no hard refresh.
+                          serveEntry route; the Go server serves all UI no-store) — so a UI
+                          deploy propagates on a plain reload, no hard refresh. Vite copies
+                          public/ VERBATIM and fingerprints nothing, so the plugin emits the
+                          hashed copies itself (generateBundle) and rewrites the hashed URL back
+                          to the plain file under `vite dev`; the Go server, which has no build
+                          step, registers the hashed routes for the rev it computed.
+                          STATIC ASSET CACHING: run_worker_first is ["/*", "!/icons/*",
+                          "!/ranks/*"]. The "/*" preserves the original guarantee (no route
+                          falls through to the asset layer's single-page-application handling,
+                          which would answer /api/* with index.html — the reason a plain LIST of
+                          worker paths is a trap). The exclusions hand the two vendored prefixes
+                          to the asset layer, which matters twice: a cold replay load requests
+                          300-650 unit icons, each an invocation when routed through the Worker,
+                          and public/_headers applies ONLY to asset-layer responses — through the
+                          Worker its cache-control rules are silently dead. Icons are NOT
+                          fingerprinted and cannot be: each icon's path is baked into the
+                          unitIcons map of every published .brw (internal/viz/icons.go writes
+                          "icons/<file>"), so renaming would 404 the icons of every replay
+                          already published — hence a week's max-age rather than immutable, and
+                          purge the zone after re-syncing the vendored bitmaps.
                           HOSTNAMES: the worker is served from replay.fogofwar.dev (a wrangler
                           Custom Domain — a PER-HOSTNAME cert, so no wildcard and no Advanced
                           Certificate Manager; the zone must live in the worker's own account).
