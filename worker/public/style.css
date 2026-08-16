@@ -226,6 +226,10 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
   font-variant-numeric: tabular-nums; z-index: 5;
 }
 
+/* A full-width sidebar button, for the handful of view toggles that earn a
+   control rather than a constant at the top of app.js. */
+.sidebtn { width: 100%; margin-bottom: 8px; font-size: 12px; }
+
 /* ---- chat transcript ----
    The whole conversation, not a ticker: lines past the playhead stay listed but
    dimmed, so the panel reads as a transcript you can scroll and click (a click

@@ -1200,32 +1200,115 @@ function roundRectPath(c, x, y, w, h, r) {
   c.rect(x, y, w, h);
 }
 
+// SPEC_KEY groups every spectator's chat into one stack: they have no units, so
+// they all share one anchor and would otherwise draw on top of each other. A
+// string cannot collide with the numeric player ids used for everyone else.
+const SPEC_KEY = 'spec';
+
+// Bubbles can be switched off from the sidebar — they sit on top of the map,
+// which is sometimes exactly what you are trying to look at.
+let showBubbles = true;
+
+// Spectator bubbles are their own thing: black, so they never read as a team's
+// colour, with the speaker's name always in yellow.
+const SPEC_BG = '#0b0e12';
+const SPEC_NAME_INK = '#ffd24a';
+const SPEC_ALL_INK = '#ffffff';
+const BUBBLE_MIN_TEXT_PX = 60; // never squeeze the message out entirely
+
+const QUIET_GRID = 8;   // cells per axis when hunting for somewhere empty
+let quietAnchor = null; // [x, z] the spectators' corner, resolved once per replay
+
+// quietSpot returns the centre of the emptiest map cell along the map's EDGE —
+// where spectator chat goes, since spectators own nothing to speak from.
+//
+// Only the border ring of the grid is considered: an empty pocket in the middle
+// of the map is somewhere the fighting is about to reach, while the rim stays
+// quiet and leaves the middle clear to watch. The bubble is free to overhang
+// the map from there.
+//
+// Counted over every decoded keyframe rather than the current frame, so the
+// spot is a property of the whole game and not of wherever the playhead
+// happened to be when the first spectator spoke; and resolved ONCE, so
+// spectator chat always appears in the same place instead of wandering.
+// Returns null while no keyframe has decoded yet, leaving the caller to retry.
+function quietSpot() {
+  if (quietAnchor) return quietAnchor;
+  const b = data && data.bounds;
+  if (!b) return null;
+  const cw = (b.maxX - b.minX) / QUIET_GRID, ch = (b.maxZ - b.minZ) / QUIET_GRID;
+  if (!(cw > 0 && ch > 0)) return null;
+  const count = new Float64Array(QUIET_GRID * QUIET_GRID);
+  let seen = 0;
+  for (const kf of keyFrames) {
+    if (!kf) continue;
+    seen++;
+    const ku = kf.u;
+    for (let i = 0; i < ku.length; i += STRIDE) {
+      const cx = Math.min(QUIET_GRID - 1, Math.max(0, Math.floor((ku[i + F.X] - b.minX) / cw)));
+      const cz = Math.min(QUIET_GRID - 1, Math.max(0, Math.floor((ku[i + F.Z] - b.minZ) / ch)));
+      count[cz * QUIET_GRID + cx]++;
+    }
+  }
+  if (!seen) return null;
+  let best = -1;
+  for (let cz = 0; cz < QUIET_GRID; cz++) {
+    for (let cx = 0; cx < QUIET_GRID; cx++) {
+      const edge = cx === 0 || cz === 0 || cx === QUIET_GRID - 1 || cz === QUIET_GRID - 1;
+      if (!edge) continue;
+      const i = cz * QUIET_GRID + cx;
+      if (best < 0 || count[i] < count[best]) best = i;
+    }
+  }
+  quietAnchor = [b.minX + (best % QUIET_GRID + 0.5) * cw, b.minZ + ((best / QUIET_GRID | 0) + 0.5) * ch];
+  return quietAnchor;
+}
+
 // fitBubbleText returns [text, width] for a message, trimmed with an ellipsis
 // if it would overrun BUBBLE_MAX_PX. Memoized on the text because the font and
 // the cap are constants, so the answer never changes — and without that the
 // trim ran a measureText per dropped character, per bubble, on every rendered
 // frame.
-function fitBubbleText(raw) {
-  let hit = bubbleText.get(raw);
+function fitBubbleText(raw, maxPx) {
+  const key = maxPx + '|' + raw;
+  let hit = bubbleText.get(key);
   if (hit) return hit;
   let text = raw;
   let w = octx.measureText(text).width;
-  if (w > BUBBLE_MAX_PX) {
-    while (text.length > 1 && octx.measureText(text + '\u2026').width > BUBBLE_MAX_PX) {
+  if (w > maxPx) {
+    while (text.length > 1 && octx.measureText(text + '\u2026').width > maxPx) {
       text = text.slice(0, -1);
     }
     text += '\u2026';
     w = octx.measureText(text).width;
   }
   hit = [text, w];
-  bubbleText.set(raw, hit);
+  bubbleText.set(key, hit);
   return hit;
+}
+
+// bubbleRuns splits a message into the coloured runs its bubble draws, each
+// with its measured width. A player's bubble is one run in the ink its team
+// colour calls for. A SPECTATOR's is two: the "(s) name:" prefix, always
+// yellow, then the message — yellow when it went to the spectator channel,
+// white when it went to everyone, where it also carries an [ALL] marker. The
+// prefix is never trimmed; the message is fitted to whatever width it leaves.
+function bubbleRuns(c, isSpec, ink) {
+  if (!isSpec) {
+    const [text, w] = fitBubbleText(c.t, BUBBLE_MAX_PX);
+    return [[text, ink, w]];
+  }
+  const [head, hw] = fitBubbleText(`(s) ${commName(c)}: `, BUBBLE_MAX_PX);
+  const [body, bw] = fitBubbleText(
+    (c.d === 'all' ? '[ALL] ' : '') + c.t,
+    Math.max(BUBBLE_MIN_TEXT_PX, BUBBLE_MAX_PX - hw));
+  return [[head, SPEC_NAME_INK, hw], [body, c.d === 'spec' ? SPEC_NAME_INK : SPEC_ALL_INK, bw]];
 }
 
 // drawChatBubbles paints the messages spoken within the (speed-scaled) bubble
 // lifetime over their speakers. u is the displayed frame's unit array.
 function drawChatBubbles(f, u) {
-  if (!chatLines.length || !u) return;
+  if (!showBubbles || !chatLines.length || !u) return;
   const scaleT = bubbleSpeedFactor();
   // Scan against the WIDEST window any bubble could have been given, then let
   // each one's own frozen expiry decide — the speed in force now must not
@@ -1237,8 +1320,11 @@ function drawChatBubbles(f, u) {
     if (i < start || chatLines[i].f > f) bubbleExpiry.delete(i);
   }
 
-  // Live messages, grouped by speaker and oldest first.
-  const byPlayer = new Map(); // playerID -> [{c, alpha}]
+  // Live messages, grouped by speaker and oldest first. SPECTATORS share one
+  // key: they share one anchor, so keeping them apart would stack their bubbles
+  // on top of each other at the same spot. Merged, they read as one
+  // conversation — each line names its own author.
+  const byPlayer = new Map(); // playerID | SPEC_KEY -> [{c, alpha}]
   for (let i = start; i < chatLines.length; i++) {
     const c = chatLines[i];
     if (c.f > f) break;
@@ -1254,9 +1340,10 @@ function drawChatBubbles(f, u) {
     }
     const left = t[0] - f;
     if (left <= 0) continue; // fully faded: don't let it hold a stack slot
-    const list = byPlayer.get(c.p) || [];
+    const key = commTeamOf.get(c.p) === -1 ? SPEC_KEY : c.p;
+    const list = byPlayer.get(key) || [];
     list.push({ c, alpha: left < t[1] ? left / t[1] : 1 });
-    byPlayer.set(c.p, list);
+    byPlayer.set(key, list);
   }
   // A speaker whose stack has cleared releases their anchor, so their next
   // message is placed wherever they are by then.
@@ -1268,15 +1355,23 @@ function drawChatBubbles(f, u) {
   // Anchor whoever has just started speaking. Everyone already on screen keeps
   // the position they were given, so this pass over the frame only happens on
   // the frames where a new speaker appears — most ticks do no work at all.
-  const fresh = new Map(); // team -> [playerID]
-  for (const p of byPlayer.keys()) {
-    if (bubbleAnchor.has(p)) continue;
-    const team = commTeamOf.get(p);
-    if (team === undefined || team < 0) { // spectator / lobby relay: never anchored
-      bubbleAnchor.set(p, null);
+  const fresh = new Map(); // team -> [key]
+  for (const key of byPlayer.keys()) {
+    if (bubbleAnchor.has(key)) continue;
+    if (key === SPEC_KEY) {
+      // Spectators own no units, so they get the quietest ground on the map.
+      // Left unset when that cannot be computed yet (no keyframe decoded), so
+      // the next tick tries again rather than blanking them for good.
+      const at = quietSpot();
+      if (at) bubbleAnchor.set(key, [at[0], at[1], -1]);
       continue;
     }
-    fresh.set(team, (fresh.get(team) || []).concat(p));
+    const team = commTeamOf.get(key);
+    if (team === undefined || team < 0) { // lobby relay: nobody on the map to point at
+      bubbleAnchor.set(key, null);
+      continue;
+    }
+    fresh.set(team, (fresh.get(team) || []).concat(key));
   }
   if (fresh.size) {
     const com = new Map(), sum = new Map();
@@ -1298,36 +1393,47 @@ function drawChatBubbles(f, u) {
         const acc = sum.get(team);
         if (acc) at = [acc[0] / acc[2], acc[1] / acc[2], team];
       }
-      for (const p of players) bubbleAnchor.set(p, at);
+      for (const key of players) bubbleAnchor.set(key, at);
     }
   }
 
-  octx.textAlign = 'center';
+  octx.textAlign = 'left';   // runs are positioned by hand (see bubbleRuns)
   octx.textBaseline = 'middle';
   octx.font = '12px system-ui, sans-serif';
-  for (const [p, list] of byPlayer) {
-    const at = bubbleAnchor.get(p);
+  for (const [key, list] of byPlayer) {
+    const at = bubbleAnchor.get(key);
     if (!at) continue; // nothing of theirs was on the map when they spoke
     const sx = viewW / 2 + (at[0] - center.x) * scale;
     const sy = viewH / 2 + (at[1] - center.z) * scale;
     if (sx < -BUBBLE_MAX_PX || sy < -80 || sx > viewW + BUBBLE_MAX_PX || sy > viewH + 40) continue;
 
-    const fill = teamColor[at[2]] || '#9aa6b2';
+    const isSpec = key === SPEC_KEY;
+    const fill = isSpec ? SPEC_BG : (teamColor[at[2]] || '#9aa6b2');
     const ink = textColorOn(fill);
     const shown = list.slice(-BUBBLE_STACK);
     // Newest sits closest to the unit; older ones stack upward.
     shown.forEach((b, k) => {
       const y = sy - 22 - (shown.length - 1 - k) * BUBBLE_LINE;
-      const [text, w] = fitBubbleText(b.c.t);
+      const runs = bubbleRuns(b.c, isSpec, ink);
+      let total = 0;
+      for (const r of runs) total += r[2];
       octx.globalAlpha = b.alpha;
       octx.fillStyle = fill;
-      roundRectPath(octx, sx - w / 2 - BUBBLE_PAD, y - 8, w + BUBBLE_PAD * 2, 16, 4);
+      roundRectPath(octx, sx - total / 2 - BUBBLE_PAD, y - 8, total + BUBBLE_PAD * 2, 16, 4);
       octx.fill();
-      octx.strokeStyle = 'rgba(8, 12, 16, 0.55)';
+      // A dark outline vanishes on the spectators' black, so they get a dim
+      // version of their own yellow instead.
+      octx.strokeStyle = isSpec ? 'rgba(255, 210, 74, 0.45)' : 'rgba(8, 12, 16, 0.55)';
       octx.lineWidth = 1;
       octx.stroke();
-      octx.fillStyle = ink;
-      octx.fillText(text, sx, y);
+      // Runs are laid left to right from the centred block, so a two-tone
+      // bubble stays centred on its anchor like a one-tone one.
+      let x = sx - total / 2;
+      for (const [text, color, w] of runs) {
+        octx.fillStyle = color;
+        octx.fillText(text, x, y);
+        x += w;
+      }
     });
   }
   octx.globalAlpha = 1;
@@ -2795,6 +2901,11 @@ document.getElementById('play').onclick = togglePlay;
 // Speed is read live inside the play loop, so a change takes effect immediately.
 document.getElementById('speed').onchange = () => {};
 document.getElementById('slider').oninput = e => { stopPlay(); go(+e.target.value); };
+document.getElementById('togglebubbles').onclick = e => {
+  showBubbles = !showBubbles;
+  e.target.textContent = showBubbles ? 'Hide chat bubbles' : 'Show chat bubbles';
+  scheduleDraw(); // the overlay is only repainted on a draw; force one now
+};
 window.addEventListener('keydown', e => {
   if (e.target.tagName === 'SELECT') return;
   // A FOCUSED slider would step natively on top of this, and since it carries
@@ -2830,6 +2941,7 @@ async function loadReplay(file) {
   bubbleAnchor = new Map();
   bubbleExpiry = new Map();
   bubbleText = new Map();
+  quietAnchor = null;
   flashSeenIdx = -1;
   currentFile = file;
   try {

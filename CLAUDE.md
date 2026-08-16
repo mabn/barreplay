@@ -776,8 +776,18 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   stack has cleared, so neither a wandering commander nor a centroid drifting as the team
   builds and dies can drag the words across the map — and the next thing that player says
   is placed wherever they are by then. Freezing also makes the frame scan rare: it runs
-  only on ticks where somebody NEW starts speaking. A spectator, a battleroom relay, or a
-  team with nothing left gets no bubble and lives only in the sidebar. The panel hides
+  only on ticks where somebody NEW starts speaking. SPECTATORS own no units to speak from, so they
+  all share one anchor — the emptiest cell along the map EDGE, counted over every
+  decoded keyframe (`quietSpot`; the rim stays quiet where an empty pocket mid-map is
+  just where the fighting has not reached yet) and resolved once so it never wanders.
+  Sharing an anchor means sharing a stack (`SPEC_KEY`), which is why their bubbles name
+  their author: black background, `(s) name:` always yellow, then the message — yellow
+  to the spectator channel, white and marked `[ALL]` to everyone (`bubbleRuns` returns
+  the coloured runs, laid left to right from the centred block). A battleroom relay, or
+  a team with nothing left, gets no bubble and lives only in the sidebar. The whole
+  layer switches off from the sidebar's "Hide chat bubbles" — one of the few view
+  toggles that earns a control rather than a `const`, since bubbles sit on top of the
+  map you may be trying to read. The panel hides
   itself when the capture recorded no chat — which is what every replay published before
   the `C` section looks like.
 - **`internal/viz/icons.go`** renders **real BAR unit icons**. It embeds the vendored icon
