@@ -14,8 +14,8 @@
 # local secrets: R2 keys etc, auto-loaded by bringest (never commit)
 /.env
 
-# bringest's tee'd run log (-log)
-/bringest.log
+# bringest's tee'd run log (-log), whatever the run was named
+/bringest*.log
 
 # stray scratch scripts (never commit)
 /shot*.js
