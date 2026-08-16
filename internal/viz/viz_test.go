@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mabn/barreplay/snapshot"
@@ -636,5 +637,40 @@ func TestSettingsFlags(t *testing.T) {
 	want := map[string]any{"ranked": true, "lava": true, "mods": true}
 	if len(got) != len(want) || got["ranked"] != true || got["lava"] != true || got["mods"] != true {
 		t.Errorf("combined = %v, want %v", got, want)
+	}
+}
+
+// TestIndexHTMLDataOrigin pins the __DATA_ORIGIN__ contract this server shares
+// with the Vite build. The deployed viewer fetches replay pieces from the R2
+// bucket's own hostname (stamped into the placeholder at build time); this
+// server IS the origin for its files, so it must blank the placeholder — an
+// unsubstituted one would send the viewer looking for a literal host.
+//
+// It also guards the shape of the emitted line. Both substituters do a plain
+// textual replace, so a placeholder token that collided with the global's name
+// would be rewritten into `window.https://... =`: invalid JS that nothing else
+// in the build or the test suite would notice.
+func TestIndexHTMLDataOrigin(t *testing.T) {
+	srv := httptest.NewServer((&Server{Dir: t.TempDir()}).Handler())
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(b)
+
+	if want := `window.__DATA_BASE__ = "";`; !strings.Contains(html, want) {
+		t.Errorf("served index.html does not assign an empty data origin (want %q)", want)
+	}
+	for _, tok := range []string{"__DATA_ORIGIN__", "__ASSET_REV__"} {
+		if strings.Contains(html, tok) {
+			t.Errorf("served index.html still contains the unsubstituted placeholder %s", tok)
+		}
 	}
 }

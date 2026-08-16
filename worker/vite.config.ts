@@ -24,9 +24,36 @@ function assetRev(): Plugin {
   };
 }
 
+// The origin the deployed viewer fetches replay DATA from: the R2 bucket bound
+// to its own hostname. Serving those objects straight from the bucket puts
+// Cloudflare's cache in front of R2 — a cache hit never becomes a GetObject,
+// so it costs no Class B operation — whereas a Worker runs BEFORE the cache,
+// making every read a billed GetObject no matter what cache-control it sets.
+//
+// $DATA_BASE overrides it (an empty value pins the viewer back to same-origin,
+// which is the escape hatch if the bucket hostname ever misbehaves).
+const DATA_BASE = process.env.DATA_BASE ?? "https://cdn-bar.fogofwar.dev";
+
+// dataBase stamps index.html's __DATA_ORIGIN__ placeholder. Only a BUILD gets the real
+// origin: under `vite dev` the local worker serves the preview bucket's pieces
+// itself, and pointing dev at the production hostname would silently play
+// production data against a locally-edited UI.
+function dataBase(): Plugin {
+  let isBuild = false;
+  return {
+    name: "data-base",
+    configResolved(cfg) {
+      isBuild = cfg.command === "build";
+    },
+    transformIndexHtml(html) {
+      return html.replaceAll("__DATA_ORIGIN__", isBuild ? DATA_BASE : "");
+    },
+  };
+}
+
 // The Cloudflare plugin runs the Worker (src/worker/index.ts, per wrangler.jsonc) inside
 // the real workerd runtime during `vite dev`, and builds both the client bundle and the
 // Worker on `vite build`. No React/JSX plugin: the UI is plain TypeScript + Canvas/DOM.
 export default defineConfig({
-  plugins: [assetRev(), cloudflare()],
+  plugins: [assetRev(), dataBase(), cloudflare()],
 });
