@@ -3,6 +3,7 @@ package viz
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/mabn/barreplay/snapshot"
+	webassets "github.com/mabn/barreplay/worker"
 )
 
 // parseWire splits a BRW payload into tag->payload and decodes the head.
@@ -713,7 +715,7 @@ func TestFingerprintedAssets(t *testing.T) {
 	}
 }
 
-// TestFavicon covers the three fixed-name icon routes. /favicon.ico matters
+// TestFavicon covers the two fixed-name icon routes. /favicon.ico matters
 // most: browsers request it with no markup pointing at it, and on the Worker
 // that request previously fell into the SPA fallback and came back as
 // index.html — a 3.7 kB HTML document served as the tab icon.
@@ -743,8 +745,22 @@ func TestFavicon(t *testing.T) {
 		}
 	}
 
+	// One 32x32 entry, declared as such in the ICONDIR: a browser scales that
+	// down for the 16px it draws in a tab, which beats shipping a second image
+	// that could disagree with this one.
+	ico, err := webassets.Assets.ReadFile("public/favicon.ico")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := binary.LittleEndian.Uint16(ico[4:6]); n != 1 {
+		t.Errorf("favicon.ico holds %d images, want 1", n)
+	}
+	if ico[6] != 32 || ico[7] != 32 {
+		t.Errorf("favicon.ico entry is %dx%d, want 32x32", ico[6], ico[7])
+	}
+
 	// The entry must actually point at them, or only the implicit /favicon.ico
-	// is ever used and the SVG ships dead.
+	// is ever used and the PNG ships dead.
 	resp, _ := http.Get(srv.URL + "/")
 	html, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
