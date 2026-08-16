@@ -40,7 +40,7 @@ go run ./cmd/pack -upload local ./caps/<gameId>.brepstream   # ...to the dev sim
 # sizes + top-10 unit defs by encoded bytes with per-instance cost (snapshot.ComputeBRPStats, self-checked
 # against the codec; raw captures pack first, then report).
 go run ./cmd/barreplay-static -out ./static ./snapshots/*.brp   # pack .brp -> static bundle for R2 hosting (see worker/)
-go run ./cmd/bringest   # drag&drop upload daemon: poll the deployed worker's job queue and publish uploaded .brepstreams (-once drains and exits; -upload local targets the dev simulator — one flag picks the queue, bucket and catalog together; -resim -data <BARdata> runs the independent re-sim worker instead: catalog games with only a one-sided upload get a full-view re-simulation published as another revision)
+go run ./cmd/bringest   # drag&drop upload daemon: poll the deployed worker's job queue and publish uploaded .brepstreams, printing each one's .brp size breakdown like pack -stats (-stats=false quiets it; -once drains and exits; -upload local targets the dev simulator — one flag picks the queue, bucket and catalog together; -resim -data <BARdata> runs the independent re-sim worker instead: catalog games with only a one-sided upload get a full-view re-simulation published as another revision)
 ```
 
 Tests are hermetic: `barapi` uses a mock HTTP server, `demofile` tests against the
@@ -55,10 +55,12 @@ against a mock worker API. None of them launch the engine or touch the network.
 cmd/barreplay/main.go     CLI: link/gameId/.sdfz -> full pipeline
 cmd/barreplay-viz/main.go CLI: serve the browser playback UI over a snapshots dir
 cmd/pack/main.go          CLI: convert .brsnap/.brepstream captures to .brp; -stats prints the
-                          size breakdown (sections + per-unit-def bytes, snapshot/brpstats.go —
+                          size breakdown (sections + per-unit-def bytes, measured by
+                          snapshot/brpstats.go and rendered by packer.ReportStats —
                           a .brp input is analyzed directly, never repacked). The pack/upload
                           PIPELINE itself lives in internal/packer (shared with the ingest
-                          daemon); cmd/pack is the flags + stats reporting + the indexURLs map
+                          daemon, which prints the SAME report for every replay it publishes);
+                          cmd/pack is the flags + the indexURLs map
                           that turns -upload into a full destination (bucket + catalog worker).
                           Its defaults are the everyday publish (-upload r2 -stats -rev), so a
                           bare `pack <capture>` packs, reports and publishes; -upload= opts out
@@ -69,7 +71,10 @@ internal/packer/          the capture-to-published-replay pipeline: Pack (stream
                           LookupTarget/TargetHelp/TargetList (targets.go: the ONE table of
                           publishing destinations, each pairing a bucket with the worker that
                           serves and catalogs it — both CLIs validate -upload against it and
-                          derive the URL from it, so the two halves cannot disagree), and
+                          derive the URL from it, so the two halves cannot disagree),
+                          ReportStats (stats.go: the .brp size report — it only RENDERS,
+                          snapshot.ComputeBRPStats measures — shared so `pack -stats` and
+                          every bringest publish print the identical breakdown), and
                           UploadStatic — writes the static bundle (viz.WriteStaticBundle) and
                           uploads it to the worker's R2 bucket so it appears in the deployed
                           viewer with no redeploy. For "r2" with R2 API credentials in the env
@@ -149,6 +154,11 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           are still absent, because otherwise that failure surfaces only as an
                           unrelated-looking CLOUDFLARE_API_TOKEN error out of the wrangler
                           fallback. Only bringest auto-loads; pack/barreplay still need a source.
+                          -stats (DEFAULT ON, both loops) prints the packed .brp's size
+                          breakdown — the same packer.ReportStats report as `pack -stats` —
+                          after each publish, to STDERR so the -log file keeps it; a
+                          measuring failure is a warning, never a lost publish (the bytes
+                          are already packed and about to be uploaded by then).
                           -progress (DEFAULT ON) prints cmd/barreplay's frame/ETA line during a
                           re-sim; -log (default ./bringest.log) APPENDS everything printed to a
                           file as well as stderr. The tee swaps os.Stderr for a pipe rather than
