@@ -174,17 +174,19 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
   flex: 1; min-width: 0; font-weight: 600;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-/* right block: two stacked resource meters (metal over energy). The number sits
-   ON its own bar — width = this player's income against the largest any team
-   sustained in the last minute — so scanning the column ranks the economies at a
-   glance. Hovering the row swaps BOTH halves at once to that resource's stock
-   against the player's own storage cap, so the bar and the number under the
-   cursor always mean the same thing; that is why all four elements share one
-   fixed-width slot. */
-.pres { flex: 0 0 auto; display: flex; flex-direction: column; gap: 3px; }
+/* right block: the two resource meters, metal then energy, SIDE BY SIDE — one
+   line per player, since stacking them made the list twice as tall as the roster
+   it lists. The number sits ON its own bar — width = this player's income
+   against the largest any team sustained in the last minute — so scanning the
+   column ranks the economies at a glance. Hovering the row swaps BOTH halves at
+   once to that resource's stock against the player's own storage cap, so the bar
+   and the number under the cursor always mean the same thing; that is why all
+   four elements share one fixed-width slot. Metal is silver, energy yellow (as
+   in game), which is what tells the two meters apart on one line. */
+.pres { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; }
 .resrow { display: flex; align-items: center; font-size: 10px; line-height: 1; }
 .rmeter {
-  position: relative; display: block; width: 96px; padding: 3px 5px;
+  position: relative; display: block; width: 70px; padding: 3px 4px;
   background: #222c36; border-radius: 3px; overflow: hidden;
   text-align: right; font-variant-numeric: tabular-nums;
 }
