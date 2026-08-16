@@ -177,7 +177,17 @@ internal/demofile/        gunzip + parse packed header + TDF startscript + the p
                           one packet — which is what keeps the scan robust across engine
                           versions. Best-effort: a demo cut short by a crash (whose
                           header may not even declare a stream size) keeps whatever was
-                          recovered before the break.
+                          recovered before the break. It also DROPS the messages BAR's
+                          own UI publishes on the chat channel — the player list's
+                          "I need energy" buttons send an i18n KEY ("> :ui.playersList.
+                          chat.giveEnergy:amount=2186:name=c0y") as an ordinary chat
+                          packet from that player. Not a detail by volume: one real 8v8
+                          sent 133 of them against 91 typed messages. Dropping them also
+                          makes the demo agree EXACTLY with the widgets (whose console
+                          parser already rejected them) — the two independent sources
+                          then both report 98 messages for that game, which is the
+                          cross-check that the packet decoding is right. Typed autohost
+                          commands ("!cv resign") are kept: a person wrote those.
 internal/engine/          locate spring-headless/pr-downloader, provision, launch, stream stdout
 internal/capture/         parse the widgets' streams -> snapshot records (BRSNAP text in
                           capture.go, binary .brepstream in brep.go, shared preamble +
@@ -735,11 +745,23 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   still inside the lifetime horizon and stamps `erasedAt` on those within 100 elmos of
   it — the engine's `CInMapDrawModel::EraseNear` radius, mirrored as
   `snapshot.CommEraseRadius`), which keeps drawing O(marks on screen) instead of
-  O(marks × erases) per animation tick. CHAT is a sidebar TRANSCRIPT, not a ticker:
-  every line is listed, lines past the playhead stay visible but dimmed, the box
-  auto-scrolls to follow playback, and clicking a line seeks to when it was said. The
-  panel hides itself when the capture recorded no chat — which is what every replay
-  published before the `C` section looks like.
+  O(marks × erases) per animation tick. CHAT lands in two places. The sidebar holds a
+  TRANSCRIPT, not a ticker: every line is listed, lines past the playhead stay visible
+  but dimmed, clicking one seeks to when it was said, and the box scrolls to rest the
+  NEWEST SAID line on its bottom edge (and only when that line has scrolled out, so it
+  does not fight someone reading back). The map shows the same message as a BUBBLE over
+  its speaker, in team colour with black or white text picked by the colour's luminance
+  (`textColorOn`), for `BUBBLE_LIFETIME` = 9 game-seconds. The anchor is the speaker's
+  COMMANDER — `COMMANDER_RE` = `^(arm|cor|leg)com` minus `boss`, which on a real BAR def
+  table matches all 38 real commanders (including the `lvlN` and Legion upgrade paths)
+  and rejects all 39 near-misses: DECOY commanders (`armdecom`), `comeffigylvl2`,
+  `dummycom`, `mission_command_tower`, the scavenger bosses. Commanders die, so the
+  fallback matters and is not rare: measured on a real full-view 8v8, 16/16 teams have
+  one at t=0 but only 3/16 by t=20min, after which the bubble anchors to the centroid of
+  whatever the team still owns. A spectator, a battleroom relay, or a team with nothing
+  left gets no bubble and lives only in the sidebar. The panel hides itself when the
+  capture recorded no chat — which is what every replay published before the `C` section
+  looks like.
 - **`internal/viz/icons.go`** renders **real BAR unit icons**. It embeds the vendored icon
   PNGs and BAR's `icontypes.lua` (a unit-name→bitmap gamedata table) under `bardata/`, and
   **parses the Lua data table directly in Go** (a small line/brace scanner, no `gopher-lua`)

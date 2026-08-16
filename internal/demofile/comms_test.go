@@ -93,6 +93,11 @@ func TestScanComms(t *testing.T) {
 	packet(&s, chatPkt(255, 254, "> not a relay, a server announcement"))
 	packet(&s, chatPkt(255, 254, "<LobbyOnly> relayed from the battleroom"))
 	packet(&s, chatPkt(1, chatToEveryone, "")) // empty: dropped
+	// BAR's player-list buttons publish i18n KEYS on the chat channel; a real
+	// 8v8 sent 133 of these against 91 typed messages, so they must not reach
+	// the transcript. A typed autohost command must still survive.
+	packet(&s, chatPkt(4, chatToAllies, "> :ui.playersList.chat.giveEnergy:amount=2186:name=c0y"))
+	packet(&s, chatPkt(4, chatToEveryone, "!cv resign"))
 	// Two sim frames.
 	packet(&s, []byte{netNewframe})
 	packet(&s, []byte{netNewframe})
@@ -118,6 +123,7 @@ func TestScanComms(t *testing.T) {
 	want := []snapshot.Comm{
 		{Frame: 0, Kind: snapshot.CommChat, PlayerID: 3, Dest: snapshot.DestAll, Text: "glhf"},
 		{Frame: 0, Kind: snapshot.CommChat, PlayerID: -1, Name: "LobbyOnly", Dest: snapshot.DestLobby, Text: "relayed from the battleroom"},
+		{Frame: 0, Kind: snapshot.CommChat, PlayerID: 4, Dest: snapshot.DestAll, Text: "!cv resign"},
 		{Frame: 2, Kind: snapshot.CommChat, PlayerID: 4, Dest: snapshot.DestAlly, Text: "push north"},
 		{Frame: 2, Kind: snapshot.CommPoint, PlayerID: 4, X: 1200, Z: 3400, Text: "here"},
 		{Frame: 900, Kind: snapshot.CommChat, PlayerID: 5, Dest: snapshot.DestSpec, Text: "nice game"},
