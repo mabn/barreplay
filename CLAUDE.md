@@ -745,11 +745,13 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   still inside the lifetime horizon and stamps `erasedAt` on those within 100 elmos of
   it — the engine's `CInMapDrawModel::EraseNear` radius, mirrored as
   `snapshot.CommEraseRadius`), which keeps drawing O(marks on screen) instead of
-  O(marks × erases) per animation tick. CHAT lands in two places. The sidebar holds a
-  TRANSCRIPT, not a ticker: every line is listed, lines past the playhead stay visible
-  but dimmed, clicking one seeks to when it was said, and the box scrolls to rest the
-  NEWEST SAID line on its bottom edge (and only when that line has scrolled out, so it
-  does not fight someone reading back). The map shows the same message as a BUBBLE over
+  O(marks × erases) per animation tick. CHAT lands in two places. The sidebar holds the
+  conversation SO FAR: only lines already said at the playhead are shown (`.chatrow.future`
+  is `display:none`, so the log never spoils what has not happened), clicking one seeks
+  back to when it was said, and the box STICKS TO THE BOTTOM — scroll away and it stops
+  following, scroll back down and it resumes (`chatStick`, re-evaluated from the box's own
+  scroll event, which our own scrolling also fires and simply re-confirms, so no suppress
+  flag is needed). The map shows the same message as a BUBBLE over
   its speaker, in team colour with black or white text picked by the colour's luminance
   (`textColorOn`), for `BUBBLE_LIFETIME` = 9 game-seconds — SCALED BY PLAYBACK SPEED,
   because that lifetime is game time but is read in wall time: at 16x it would be half a

@@ -237,7 +237,9 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 }
 .chatrow { padding: 2px 0; cursor: pointer; word-break: break-word; }
 .chatrow:hover { background: #1d242c; }
-.chatrow.future { opacity: .35; }
+/* Not said yet at the playhead: not shown at all, so the log never spoils
+   what is about to happen and the newest line is always the last one. */
+.chatrow.future { display: none; }
 .chattime {
   color: #6a7785; font-variant-numeric: tabular-nums; margin-right: 5px;
   font-size: 11px;
