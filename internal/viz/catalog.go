@@ -58,6 +58,15 @@ type CatalogEntry struct {
 	// upserts deliberately preserve; the Go server derives it from the
 	// capture's own Meta.Recorder and leaves it empty when there is none.
 	View string `json:"view,omitempty"`
+	// WidgetVersion/WidgetSha/WidgetDate identify the uploader-widget build
+	// that produced the capture behind the current revision (snapshot.Meta's
+	// Widget, from the stream's GAME line): which release, which exact bytes
+	// (the git SHA stamped into the published copy — absent when a player
+	// installed the widget straight from the repo), and when that release was
+	// cut. All nil for re-sim captures and for streams predating the fields.
+	WidgetVersion *string `json:"widgetVersion,omitempty"`
+	WidgetSha     *string `json:"widgetSha,omitempty"`
+	WidgetDate    *string `json:"widgetDate,omitempty"`
 	// Uploads lists every revision ever published for this game with the side
 	// that recorded it, oldest first. Accumulated PUT-by-PUT in the worker's
 	// catalog (revisions are append-only, so every entry keeps playing at
@@ -117,6 +126,24 @@ func BuildCatalogEntry(id string, bf *snapshot.BRPFile, sizeBytes int64) Catalog
 		e.DurationSec = &v
 	}
 	e.Players = catalogPlayers(bf.Meta)
+	if w := bf.Meta.Widget; w != nil {
+		// Each field is sent only when the capture actually carries it: an
+		// unstamped widget has no SHA, and a pre-1.7.0 stream has no date.
+		// The row keeps whatever a publisher does not state, so sending an
+		// empty string would overwrite a known value with a blank one.
+		if w.Version != "" {
+			v := w.Version
+			e.WidgetVersion = &v
+		}
+		if w.Sha != "" {
+			v := w.Sha
+			e.WidgetSha = &v
+		}
+		if w.Date != "" {
+			v := w.Date
+			e.WidgetDate = &v
+		}
+	}
 	if r := bf.Meta.Recorder; r != nil {
 		if r.Spectator {
 			// A spectator saw every team; that is a fact about the capture, so

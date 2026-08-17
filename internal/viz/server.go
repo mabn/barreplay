@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mabn/barreplay/assets"
 	"github.com/mabn/barreplay/snapshot"
 	webassets "github.com/mabn/barreplay/worker"
 )
@@ -148,6 +150,18 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.HandleFunc("/favicon.svg", icon("public/favicon.svg", "image/svg+xml"))
 	mux.HandleFunc("/favicon.ico", icon("public/favicon.ico", "image/x-icon"))
+	// The widget-install guide the landing page links to, plus the widget it
+	// hands out. Both exist on the Cloudflare deployment too (a /setup route
+	// over public/setup.html; the widget emitted from assets/lua by the Vite
+	// widget-download plugin), so the shared front-end's link works on either
+	// backend. The page is self-contained HTML — it references no
+	// fingerprinted subresource, so there is nothing to substitute here.
+	mux.HandleFunc("/setup", serveAsset("public/setup.html", "text/html; charset=utf-8"))
+	mux.HandleFunc("/replay_uploader.lua", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store, must-revalidate")
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		io.WriteString(w, assets.ReplayUploaderLua)
+	})
 	// Vendored BAR unit icons, served at /icons/<file> to match the bitmap paths
 	// in the wire payload. Icons are immutable, so let the browser cache them.
 	if sub, err := iconsSubFS(); err == nil {

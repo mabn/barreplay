@@ -57,7 +57,19 @@
     // layer's single-page-application handling answered it with index.html —
     // a 200 carrying the whole HTML document, labelled text/html, as the tab
     // icon.
-    "run_worker_first": ["/*", "!/icons/*", "!/ranks/*", "!/favicon.ico", "!/favicon.svg"]
+    //
+    // The widget download (/setup's step 1, synced into public/ from
+    // assets/lua by tools/sync-assets.mjs) is excluded for the _headers
+    // reason: routed through the Worker its no-cache rule would be dead, and
+    // it is the one file here whose bytes change under a stable URL.
+    "run_worker_first": [
+      "/*",
+      "!/icons/*",
+      "!/ranks/*",
+      "!/favicon.ico",
+      "!/favicon.svg",
+      "!/replay_uploader.lua"
+    ]
   },
 
   // The growing set of replay data (index.json + per-capture head/chunks/resources)

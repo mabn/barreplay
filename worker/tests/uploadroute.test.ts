@@ -457,3 +457,59 @@ test("both favicon files exist for the asset layer to serve", () => {
   assert.match(html, /href="\/favicon\.svg"/);
   assert.match(html, /href="\/favicon\.ico"/);
 });
+
+// The widget-install guide. The route hands the request to the asset layer
+// UNCHANGED: it resolves /setup to setup.html itself, and its default HTML
+// handling (auto-trailing-slash) answers a /setup.html URL with a 307 back to
+// /setup. Rewriting the path therefore fed that redirect into this same route
+// — an infinite loop in production that no local test could see, because the
+// fake ASSETS below happily answers whatever path it is handed.
+test("/setup serves the guide page without rewriting the path", async () => {
+  const { env } = makeEnv();
+  const asked: string[] = [];
+  (env as unknown as { ASSETS: { fetch(r: Request): Promise<Response> } }).ASSETS = {
+    async fetch(r: Request) {
+      const path = new URL(r.url).pathname;
+      asked.push(path);
+      // Stand in for auto-trailing-slash: the .html form is a redirect, never
+      // a page, so a route that asks for it can only ever return the bounce.
+      if (path.endsWith(".html") && path !== "/index.html") {
+        return new Response(null, { status: 307, headers: { location: path.slice(0, -".html".length) } });
+      }
+      return new Response("<!DOCTYPE html>", { headers: { "content-type": "text/html" } });
+    },
+  };
+
+  const res = await app.request("/setup", {}, env);
+  assert.deepEqual(asked, ["/setup"], "the asset layer resolves the extensionless path itself");
+  assert.equal(res.status, 200, "a 3xx here is the redirect loop");
+  // Like the SPA entry: revalidated, so a guide edit reaches everyone on reload.
+  assert.equal(res.headers.get("cache-control"), "no-cache");
+});
+
+// The three halves of the install flow must agree: the landing page links to
+// the guide, the guide offers the widget at a URL, and tools/sync-assets.mjs
+// is what puts that file in public/ (it is gitignored — the source of truth is
+// assets/lua/replay_uploader.lua, so nothing here can be checked by presence).
+test("the setup guide is wired to the banner and to the widget", () => {
+  const at = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
+
+  assert.match(at("../index.html"), /href="\/setup"/, "the dropzone banner links to the guide");
+
+  const guide = at("../public/setup.html");
+  assert.match(guide, /href="\/replay_uploader\.lua" download/, "the guide offers the widget");
+  assert.match(guide, /LuaUI\\Widgets\\replay_uploader\.lua/, "the guide names the install path");
+
+  assert.match(at("../tools/sync-assets.mjs"), /"replay_uploader\.lua"/, "the sync copies the widget");
+  // The widget must reach the browser from the ASSET LAYER: routed through the
+  // Worker, public/_headers (its only cache-control) is silently ignored.
+  assert.match(at("../wrangler.jsonc"), /"!\/replay_uploader\.lua"/, "excluded from run_worker_first");
+  assert.match(at("../public/_headers"), /^\/replay_uploader\.lua$/m, "and has a cache rule");
+  assert.ok(
+    readFileSync(new URL("../../assets/lua/replay_uploader.lua", import.meta.url), "utf8").includes(
+      'name    = "Replay uploader"',
+    ),
+    "the widget's F11 name is the one the guide tells players to look for",
+  );
+  assert.match(guide, /Replay uploader/);
+});

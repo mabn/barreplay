@@ -274,6 +274,22 @@ const serveEntry = async (c: { env: Env; req: { raw: Request } }) => {
 app.get("/", serveEntry);
 app.get("/index.html", serveEntry);
 
+// The widget-install guide (public/setup.html), linked from the landing page's
+// dropzone. The asset layer resolves the extensionless /setup to setup.html on
+// its own; this route exists only to serve it no-cache, like the SPA entry
+// above, so an edit to the guide reaches everyone on a plain reload.
+//
+// It must NOT rewrite the path to /setup.html. The asset layer's default HTML
+// handling (auto-trailing-slash) answers a .html URL with a 307 to the
+// extensionless form — which comes straight back here, so the rewrite made
+// /setup an infinite redirect loop while every local test still passed.
+app.get("/setup", async (c) => {
+  const r = await c.env.ASSETS.fetch(c.req.raw);
+  const h = new Headers(r.headers);
+  h.set("cache-control", "no-cache");
+  return new Response(r.body, { status: r.status, headers: h });
+});
+
 // Non-R2, non-API requests reach the Worker only when no static asset matched.
 // Hand them to the SPA fallback.
 app.all("*", (c) => c.env.ASSETS.fetch(c.req.raw));

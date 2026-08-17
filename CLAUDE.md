@@ -314,9 +314,30 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           "8v8v1"), a nullable
                           `uploaderAlly` (the recording client's side, from the .brp meta's
                           `recorder` — the live uploader widget's GAME line; null for re-sim/
-                          spectator captures), and a server-owned `uploads` list ([{rid, ally}],
+                          spectator captures), the WIDGET-PROVENANCE trio widgetVersion/
+                          widgetSha/widgetDate, and a server-owned `uploads` list
+                          ([{rid, ally, widget?}],
                           accumulated across PUTs via mergeUploads — never accepted from a PUT
                           body) remembering every revision ever published for the game.
+                          The widget trio records WHICH BUILD of the uploader widget produced
+                          the capture behind the current revision: version+date are the
+                          constants the widget bumps together and has to (a player's installed
+                          copy can be arbitrarily old, so the stream is the only place this can
+                          be learned), and the sha is the git commit of the exact file, stamped
+                          into the published download by worker/tools/sync-assets.mjs — the
+                          difference between "1.7.0" and "the 1.7.0 that was being served that
+                          week". THREE COLUMNS, not one JSON blob, because the point is to be
+                          able to ask "which builds are in the wild" / "which replays came from
+                          the build with that bug" in SQL without opening a blob per row.
+                          sanitizeEntry shape-checks the sha (lowercase hex 7-64) since it is
+                          the one field meant to be matched against a git history; version/date
+                          are free-form and length-capped. All three are COALESCEd by the
+                          upsert exactly like `view`: an unstamped widget (installed from the
+                          repo), a re-sim revision and a pre-1.7.0 stream all state nothing,
+                          and silence must not erase what an earlier publish knew. Since the
+                          row describes only the CURRENT revision, per-revision provenance
+                          lives in the uploads entries, each of which carries the build that
+                          produced that upload.
                           `view` ("full"|"ally"|"unknown"|null) states WHOSE POINT OF VIEW the
                           capture is from, because `uploaderAlly` alone cannot: null there is
                           ambiguous between a spectator (saw everything), a re-sim, and a row
@@ -424,6 +445,48 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           GET /api/jobs, downloads via GET /api/streams/<gameId>/<file> (both
                           bearer-guarded), publishes, and POSTs done/error; the browser polls the
                           open GET /api/jobs/<id> and auto-opens the replay on done.
+                          WIDGET-INSTALL GUIDE: the dropzone banner links (relatively, so it
+                          resolves on both backends) to /setup — public/setup.html, four numbered
+                          steps ending in a drag&drop upload. The page is deliberately
+                          SELF-CONTAINED (inline CSS, no /style.<rev>.css): only index.html goes
+                          through the __ASSET_REV__ substitution, so a second page referencing the
+                          fingerprinted subresources would have to be taught to every substituter.
+                          Its step 1 serves assets/lua/replay_uploader.lua, copied into public/ by
+                          tools/sync-assets.mjs exactly like the vendored icons (gitignored — ONE
+                          copy of the widget in the repo, so the download cannot drift from the
+                          decoder) and, like them, EXCLUDED from run_worker_first: routed through
+                          the worker its public/_headers no-cache rule would be silently dead, and
+                          it is the one asset whose bytes change under a stable URL (its URL is
+                          printed in a guide, so it cannot be fingerprinted). The /setup route in
+                          app.ts exists only to serve the page no-cache; it hands the request to
+                          ASSETS UNCHANGED, because the asset layer resolves the extensionless
+                          path itself and its default HTML handling (auto-trailing-slash) answers
+                          a /setup.html URL with a 307 to /setup — so rewriting the path fed that
+                          bounce back into the same route and shipped /setup as an INFINITE
+                          REDIRECT LOOP. The Go viz server serves the same page
+                          and the same widget from its embedded copies (worker/assets.go embeds
+                          public/setup.html; assets.ReplayUploaderLua is the widget).
+                          DEPLOYING: `npm run deploy` is the whole thing — test -> build (whose
+                          prebuild syncs the icons AND the widget into the gitignored public/
+                          copies) -> smoke -> wrangler deploy, spelled out in package.json rather
+                          than hidden in npm hooks. The smoke step (tools/smoke.mjs) boots the
+                          BUILT worker under `vite preview` — workerd plus the REAL asset layer —
+                          and checks what it actually serves. It is not redundant with
+                          worker/tests: those drive the Hono routes with a fake ASSETS binding
+                          that answers whatever path it is handed, and `vite dev` serves public/
+                          through plain static middleware, so NEITHER can see the three asset-layer
+                          behaviours that have each already shipped a broken page — the .html
+                          redirect above, single-page-application answering an unmatched path with
+                          index.html (/favicon.ico once served the whole HTML document), and
+                          public/_headers applying only to asset-layer responses. Every request in
+                          the smoke uses redirect:"manual", since the loop was a chain of 307s that
+                          curl -L and a browser both reported as something else. It also
+                          refuses to ship an UNSTAMPED widget (sync-assets leaves the SHA token
+                          in place when the widget has uncommitted changes): every capture
+                          recorded with that copy would carry no provenance, and nothing
+                          downstream can recover it afterwards. typecheck is
+                          deliberately NOT in the chain: it reports pre-existing noUnusedLocals
+                          errors in tests/, so wiring it in would block every deploy.
                           Uploads (tools/upload.ts) go
                           through tools/r2put.ts: parallel S3 PUTs when R2_ACCESS_KEY_ID/
                           R2_SECRET_ACCESS_KEY are set (fast, aws4fetch), else parallel `wrangler r2
@@ -433,8 +496,13 @@ snapshot/                 PUBLIC data model + pluggable Writer (owns the on-disk
                           The Writer's four record types are Meta, Frame, Event and Comm
                           (snapshot.Comm = one thing a player wrote or drew).
 assets/lua/snapshot_widget.lua   embedded, read-only sampler (go:embed)
-assets/lua/replay_uploader.lua   player-installable live-game variant: constants only (no
-                          substitution tokens), records the player's own ally team plus, by
+assets/lua/replay_uploader.lua   player-installable live-game variant: constants only, with
+                          ONE substitution token (__WIDGET_SHA__, stamped by
+                          worker/tools/sync-assets.mjs when the widget is published for
+                          download — see the widget-provenance note under worker/ below;
+                          an unstamped copy reports no SHA rather than the token, guarded by
+                          a hex/length test rather than a comparison against the token, which
+                          the substituter would itself replace). It records the player's own ally team plus, by
                           default (recordEnemies const), enemy units while the engine lists
                           them in GetAllUnits (LOS, radar, or the engine's radar-memory dot;
                           unidentified radar contacts carry def 0, identity/health carried
@@ -967,9 +1035,13 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   `public/{app.js,style.css}` via `worker/assets.go` — the single copy of the
   front-end in the repo) and exposes `/index.json` (the replay list),
   `/replays/<id>.brw|.keys|.resources`, `/replays/<id>/c<n>`, and `/icons/<file>` +
-  `/ranks/<n>.png` (the embedded icons, cached). The `<id>` segment is confined to
-  the snapshots dir (maps to `<id>.brp`, basename only — rejects any path separator /
-  traversal). UI/JSON assets are served `no-store` so a changed UI never serves stale.
+  `/ranks/<n>.png` (the embedded icons, cached). It also serves the widget-install
+  guide the landing banner links to — `/setup` (`public/setup.html`, embedded too)
+  and `/replay_uploader.lua` (`assets.ReplayUploaderLua`) — so the relative link
+  works here and not only on the Cloudflare deployment. The `<id>` segment is
+  confined to the snapshots dir (maps to `<id>.brp`, basename only — rejects any
+  path separator / traversal). UI/JSON assets are served `no-store` so a changed UI
+  never serves stale.
 - **`worker/public/`** (+ `worker/index.html`) is plain HTML/Canvas/vanilla-JS — **no
   framework, no build step for the app itself** (Vite only wraps it for the Cloudflare
   deploy). `app.js` reads the flat unit arrays by index (no per-unit objects), renders

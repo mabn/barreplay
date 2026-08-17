@@ -17,6 +17,12 @@ import (
 type gameLine struct {
 	Protocol      int    `json:"protocol"`
 	WidgetVersion string `json:"widgetVersion"`
+	// WidgetDate is the date the widget release was cut (bumped with the
+	// version); WidgetSha the git SHA stamped into the published copy, absent
+	// from a widget installed straight from the repo. Uploader widget only —
+	// the re-sim sampler is injected by this tool.
+	WidgetDate    string `json:"widgetDate"`
+	WidgetSha     string `json:"widgetSha"`
 	Mode          string `json:"mode"`
 	Map           string `json:"map"`
 	GameVersion   string `json:"gameVersion"`
@@ -58,6 +64,18 @@ func applyPreambleLine(fields []string, content string, base *snapshot.Meta) (*g
 		}
 		if base.SampleEvery == 0 {
 			base.SampleEvery = g.SampleEvery
+		}
+		// Which widget build produced this stream. Like Recorder below, the
+		// FIRST GAME record wins: a widget re-enabled mid-game appends a new
+		// segment with its own preamble, and the capture is named after what
+		// started it. Recorded whenever the stream says anything at all, so a
+		// pre-widgetDate capture still keeps its version.
+		if base.Widget == nil && (g.WidgetVersion != "" || g.WidgetSha != "" || g.WidgetDate != "") {
+			base.Widget = &snapshot.WidgetInfo{
+				Version: g.WidgetVersion,
+				Sha:     g.WidgetSha,
+				Date:    g.WidgetDate,
+			}
 		}
 		// A live capture records one client's point of view; remember whose.
 		// (mode "replay" is the re-sim widget, which sees the whole game and
