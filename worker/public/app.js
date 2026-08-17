@@ -3569,7 +3569,8 @@ function initHomeNav() {
 }
 
 // ---- queue section ---------------------------------------------------------
-// The ingest queue: what happened to the drag&drop uploads. GET /api/queue is
+// The ingest queue: what happened to the drag&drop uploads and to the re-sims
+// requested from the box above the table. GET /api/queue is
 // the Worker's job table (pending/processing first, then what recently
 // finished); the Go viz server has no ingest pipeline at all, so a missing
 // route says so plainly rather than showing an empty table that looks like
@@ -3578,7 +3579,7 @@ function initHomeNav() {
 // and one's own upload landing. Nothing here refreshes itself on a timer: a
 // job's state changes on the scale of minutes, and a table that rewrites
 // itself under the cursor is worse than a button that says when it was read.
-const QUEUE_PAGE = 5;          // rows per page
+const QUEUE_PAGE = 25;         // rows per page (the worker caps a page at QUEUE_LIMIT_MAX = 100)
 const QUEUE_UNSUPPORTED =
   'This server does not run an ingest queue — uploads are published from the command line with: go run ./cmd/pack -upload r2 <capture>.';
 let queuePage = null;      // last fetched {jobs, total, active}, so a re-render needs no fetch
@@ -3587,6 +3588,7 @@ let queueReadAt = 0;       // when that page was read (the pager says so)
 let queueSeq = 0;          // ignore a reply overtaken by a newer request
 let queueSupported = true; // cleared by a 404: a backend won't grow the route
 const queueRelisted = new Set(); // games we already re-listed the catalog for
+const queueOpen = new Set();     // job ids whose processing details are expanded
 
 // refreshQueue reads one page. Every caller is an explicit action; there is no
 // timer behind it.
@@ -3644,6 +3646,92 @@ async function refreshQueue() {
   }
 }
 
+// ---- a job's processing record ---------------------------------------------
+// What the daemon measured while it worked (cmd/bringest's jobStats). The
+// table shows the one number worth scanning a column for — how long it took —
+// and everything else expands on click: a re-sim's load/sim split and speed,
+// what its engine log said, and the .brp size breakdown `pack -stats` prints,
+// which otherwise only exists in the daemon's own log on some other machine.
+
+// fmtDur renders a duration in seconds the way a person reads a wait: seconds
+// under a minute, minutes and seconds under an hour, hours and minutes above.
+function fmtDur(sec) {
+  const s = Math.round(sec);
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm ' + String(s % 60).padStart(2, '0') + 's';
+  return Math.floor(s / 3600) + 'h ' + String(Math.floor((s % 3600) / 60)).padStart(2, '0') + 'm';
+}
+
+// statsLines turns the record into label/value pairs, skipping what this job
+// did not measure — an upload has no engine run, an old daemon reports less,
+// and a failed job reports only what it got to.
+function statsLines(j, s) {
+  const out = [];
+  const add = (k, v) => { if (v) out.push([k, v]); };
+  if (s.resimSec) {
+    let engine = fmtDur(s.resimSec);
+    if (s.loadSec) engine += ` (load ${fmtDur(s.loadSec)} + sim ${fmtDur(s.simSec || s.resimSec - s.loadSec)})`;
+    add('Engine', engine);
+  }
+  if (s.frames) {
+    let sim = s.frames.toLocaleString() + ' frames';
+    if (s.gameSec) sim += ` of ~${(s.gameSec * 30).toLocaleString()}`;
+    if (s.samples) sim += `, ${s.samples.toLocaleString()} sampled`;
+    if (s.speedUp) sim += `, ${s.speedUp.toFixed(1)}× realtime`;
+    add('Simulated', sim);
+  }
+  add('Engine version', s.engineVersion);
+  if (s.infolog) {
+    const i = s.infolog;
+    const bits = [];
+    if (i.bytes) bits.push(fmtSize(i.bytes));
+    if (i.lastFrame) bits.push('last frame ' + i.lastFrame.toLocaleString());
+    // Always stated, including the zero: "no desyncs" is the reassurance, and
+    // a re-sim that desynced describes a game that never happened.
+    const d = i.desyncs || 0;
+    bits.push(d.toLocaleString() + ' desync' + (d === 1 ? '' : 's'));
+    if (i.warnings) bits.push(i.warnings.toLocaleString() + ' warnings');
+    add('Engine log', bits.join(' · '));
+  }
+  add('Packed in', s.packSec ? fmtDur(s.packSec) : null);
+  add('Uploaded in', s.uploadSec ? fmtDur(s.uploadSec) : null);
+  add('.brp', s.brpBytes ? fmtSize(s.brpBytes) : null);
+  add('Total', s.tookSec ? fmtDur(s.tookSec) : null);
+  return out;
+}
+
+function statsTooltip(j, s) {
+  return statsLines(j, s).map(([k, v]) => k + ': ' + v).join('\n') || 'no processing details';
+}
+
+// statsRow is the expanded detail: the measured figures, then the size report
+// verbatim (it is a fixed-width table, so it stays one).
+function statsRow(j) {
+  const tr = document.createElement('tr');
+  tr.className = 'statsrow';
+  const td = document.createElement('td');
+  td.colSpan = 7;
+  const dl = document.createElement('div');
+  dl.className = 'statsgrid';
+  for (const [k, v] of statsLines(j, j.stats)) {
+    const key = document.createElement('span');
+    key.className = 'k';
+    key.textContent = k;
+    const val = document.createElement('span');
+    val.textContent = v;
+    dl.append(key, val);
+  }
+  td.appendChild(dl);
+  if (j.stats.sizeReport) {
+    const pre = document.createElement('pre');
+    pre.className = 'sizereport';
+    pre.textContent = j.stats.sizeReport.trimEnd();
+    td.appendChild(pre);
+  }
+  tr.appendChild(td);
+  return tr;
+}
+
 // setQueueOffset pages the table. The page is deliberately NOT in the URL:
 // unlike a filtered replay list, "page 3 of the queue" describes a moment in a
 // pipeline, not a set of replays, so it is nothing to share or restore.
@@ -3675,24 +3763,42 @@ function renderQueue(errMsg) {
     };
     cell(j.createdUnix ? fmtDate(j.createdUnix) : null);
     // The game: a link once its replay is in the catalog (the pieces are
-    // served under the revision id, so the row's rid is what plays).
+    // served under the revision id, so the row's rid is what plays). Until
+    // then, out to BAR's own page for it — which for a queued re-sim is the
+    // whole point of the row and is where the link was pasted from.
     {
       const td = document.createElement('td');
       td.className = 'game';
       const e = replayList.find(x => x.id === j.gameId);
+      const a = document.createElement('a');
+      a.textContent = j.gameId;
       if (e) {
-        const a = document.createElement('a');
         a.href = replayHref(urlId(e));
-        a.textContent = j.gameId;
         a.addEventListener('click', (ev) => {
           if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
           ev.preventDefault();
           openReplay(urlId(e));
         });
-        td.appendChild(a);
       } else {
-        td.textContent = j.gameId;
+        a.href = 'https://bar-rts.com/replays/' + encodeURIComponent(j.gameId);
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.title = 'Not published here (yet) — open it on bar-rts.com';
       }
+      td.appendChild(a);
+      tr.appendChild(td);
+    }
+    // What the job IS: an uploaded capture, or a re-simulation this site is
+    // running itself. They wait on different daemons, so a queue that does not
+    // say which is which cannot explain why one kind is moving and the other
+    // is not.
+    {
+      const td = document.createElement('td');
+      const k = document.createElement('span');
+      const kind = j.kind || 'upload';
+      k.className = 'kind kind-' + String(kind).replace(/[^\w-]/g, '');
+      k.textContent = kind === 'resim' ? 're-sim' : kind;
+      td.appendChild(k);
       tr.appendChild(td);
     }
     {
@@ -3703,6 +3809,21 @@ function renderQueue(errMsg) {
       td.appendChild(s);
       tr.appendChild(td);
     }
+    // What the work cost. For a re-sim that is the engine's own wall time,
+    // which is the whole story — the pack and the upload after it are rounding
+    // error against forty minutes of simulation. Everything else the daemon
+    // measured is one click away rather than seven more columns.
+    {
+      const s = j.stats || null;
+      const headline = s ? (s.resimSec || s.tookSec || 0) : 0;
+      const td = cell(headline ? fmtDur(headline) : null, 'took');
+      if (s) {
+        td.title = statsTooltip(j, s);
+        td.classList.add('expand');
+        td.textContent = (queueOpen.has(j.id) ? '▾ ' : '▸ ') + (headline ? fmtDur(headline) : '—');
+        td.classList.remove('dim');
+      }
+    }
     // Age as of the READ, which the pager timestamps — nothing re-renders this
     // on its own, so the exact moment rides the tooltip.
     const upd = cell(j.updatedUnix ? fmtAgo(j.updatedUnix) : null);
@@ -3710,10 +3831,23 @@ function renderQueue(errMsg) {
     const detail = cell(j.error || null, 'detail');
     if (j.error) detail.classList.add('error');
     tbody.appendChild(tr);
+
+    // The details row, only while expanded. Clicking anywhere on the job's
+    // row toggles it — except on a link, which is there to be followed.
+    if (j.stats) {
+      tr.classList.add('hasstats');
+      tr.addEventListener('click', (ev) => {
+        if (ev.target.closest('a')) return;
+        if (queueOpen.has(j.id)) queueOpen.delete(j.id);
+        else queueOpen.add(j.id);
+        renderQueue(errMsg);
+      });
+      if (queueOpen.has(j.id)) tbody.appendChild(statsRow(j));
+    }
   }
-  // Counts come from the server, over the whole table — a page of 5 cannot
-  // say how many jobs are in flight, and claiming otherwise from what fits on
-  // screen is exactly the lie the pager exists to avoid.
+  // Counts come from the server, over the whole table — one window of rows
+  // cannot say how many jobs are in flight, and claiming otherwise from what
+  // fits on screen is exactly the lie the pager exists to avoid.
   const total = queuePage ? queuePage.total : 0;
   const active = queuePage ? queuePage.active : 0;
   const badge = document.getElementById('navqueue');
@@ -3734,7 +3868,7 @@ function renderQueue(errMsg) {
   }
 
   const text = errMsg || (rows.length ? '' :
-    'Nothing in the queue. Drop a .brepstream above and it shows up here until the ingest daemon has published it.');
+    'Nothing in the queue. Drop a .brepstream above, or paste a replay link to re-simulate one nobody uploaded, and it shows up here until a daemon has published it.');
   msg.style.display = text ? '' : 'none';
   msg.textContent = text;
 }
@@ -4162,18 +4296,31 @@ function uploadStream(file) {
     }
     uploadStatus('uploaded — queued for processing…');
     refreshQueue(); // the job this page just created; still an event, not a timer
-    pollUploadJob(resp.job, resp.gameId);
+    pollJob(resp.job, resp.gameId, uploadStatus, {
+      waiting: 'queued — waiting for the ingest daemon (the upload is safe and will be processed when it runs)…',
+    });
   };
   uploadStatus(`uploading ${file.name}…`);
   xhr.send(file);
 }
 
-// pollUploadJob follows the ingest job until the daemon reports done/error,
-// then refreshes the list and opens the freshly published replay.
-async function pollUploadJob(job, gameId) {
+// pollJob follows one ingest job until the daemon reports done/error, writing
+// what it sees through `status` (the dropzone's line, or the re-sim box's).
+//
+// The pacing is the caller's because the two jobs live on completely different
+// clocks. An upload is packed in seconds and you are sitting there waiting to
+// watch it, so it polls fast and OPENS the replay when it lands. A re-sim runs
+// the engine for the better part of an hour: at the same 2s that would be well
+// over a thousand requests, and being thrown into playback long after you
+// queued a batch is not what you asked for — so it backs off and just says it
+// published.
+async function pollJob(job, gameId, status, opts) {
+  const o = opts || {};
+  const fast = o.intervalMs || 2000;
+  const slow = o.slowIntervalMs || fast;
   const started = Date.now();
   for (;;) {
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, Date.now() - started > 60_000 ? slow : fast));
     let j;
     try {
       const r = await fetch('/api/jobs/' + encodeURIComponent(job));
@@ -4183,27 +4330,106 @@ async function pollUploadJob(job, gameId) {
       continue;
     }
     if (j.state === 'error') {
-      uploadStatus('processing failed: ' + (j.error || 'unknown error'), 'error');
+      status('processing failed: ' + (j.error || 'unknown error'), 'error');
       refreshQueue(); // the failure is now on the row too
       return;
     }
     if (j.state === 'done') {
-      uploadStatus('published', 'ok');
+      status(o.published || 'published', 'ok');
       try {
         replayList = await fetchReplayList();
         renderHome();
       } catch (_) { /* the replay still published; the list just didn't refresh */ }
       const e = replayList.find((x) => x.id === gameId) ||
         replayList.find((x) => x.id.startsWith(gameId + '-'));
-      if (e) openReplay(urlId(e));
+      if (e && o.autoOpen !== false) openReplay(urlId(e));
       return;
     }
     if (j.state === 'processing') {
-      uploadStatus('processing…');
+      status(o.processing || 'processing…');
     } else if (Date.now() - started > 60_000) {
-      uploadStatus('queued — waiting for the ingest daemon (the upload is safe and will be processed when it runs)…');
+      status(o.waiting || 'queued — waiting for a daemon…');
     }
   }
+}
+
+// ---- re-sim requests -------------------------------------------------------
+// The other way into the pipeline, for a game NOBODY recorded: paste its replay
+// link and the engine host re-simulates it. `bringest -resim` otherwise finds
+// its own work by scanning the catalog for one-sided uploads, which by
+// construction cannot see a game that was never uploaded at all.
+//
+// The box lives in the admin-only Queue section, because a request costs
+// somebody's machine the better part of an hour; the route behind it is open,
+// like the row-refresh and point-of-view controls next to it.
+function resimStatus(text, cls) {
+  const el = document.getElementById('resimstatus');
+  if (!el) return;
+  el.style.display = text ? '' : 'none';
+  el.className = cls || '';
+  el.textContent = text || '';
+}
+
+function initResim() {
+  const input = document.getElementById('resimlink');
+  const go = document.getElementById('resimgo');
+  if (!input || !go) return;
+  go.addEventListener('click', () => submitResim());
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submitResim(); }
+  });
+}
+
+async function submitResim() {
+  const input = document.getElementById('resimlink');
+  const go = document.getElementById('resimgo');
+  const link = (input.value || '').trim();
+  if (!link) { resimStatus('Paste a replay link first.', 'error'); return; }
+  go.disabled = true;
+  resimStatus('requesting…');
+  let r, resp;
+  try {
+    r = await fetch('/api/resim', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ link }),
+    });
+    resp = await r.json().catch(() => ({}));
+  } catch (err) {
+    go.disabled = false;
+    resimStatus('request failed: ' + (err.message || err), 'error');
+    return;
+  }
+  go.disabled = false;
+  if (r.status === 404 || r.status === 405) {
+    // Same reflex as the queue's own missing-route handling: a backend without
+    // the endpoint will not grow one while the page is open.
+    if (resp && resp.error && resp.gameId) {
+      resimStatus(resp.error, 'error'); // the BAR API not knowing the game, not a missing route
+    } else {
+      const box = document.getElementById('resimbox');
+      if (box) box.style.display = 'none';
+    }
+    return;
+  }
+  if (!r.ok) {
+    resimStatus(resp.error || `request rejected: HTTP ${r.status}`, 'error');
+    return;
+  }
+  input.value = '';
+  resimStatus(resp.status === 'duplicate'
+    ? `${resp.gameId} is already queued — following that request.`
+    : `${resp.gameId} queued for re-simulation — this takes the engine host a while.`, 'ok');
+  refreshQueue();
+  // No auto-open: a re-sim lands tens of minutes later, by which time being
+  // thrown into playback is an interruption rather than the thing asked for.
+  pollJob(resp.job, resp.gameId, resimStatus, {
+    slowIntervalMs: 30_000,
+    autoOpen: false,
+    processing: `${resp.gameId}: re-simulating…`,
+    waiting: `${resp.gameId}: queued — waiting for an engine host to pick it up…`,
+    published: `${resp.gameId} published — it is in the replay list now.`,
+  });
 }
 
 // openReplay leaves the home view and starts playback of one replay,
@@ -4221,6 +4447,7 @@ async function init() {
   initGL(); // one-time; a null result just means the 2D icon path is used
   initHomeNav(); // the left menu; the section itself is applied by showHome
   initQueue();   // the queue's pager buttons (it reads on demand only)
+  initResim();   // the queue's "re-simulate this replay" box
   initUpload(); // the dropzone works without the catalog being loaded
   const params = new URLSearchParams(location.search);
 

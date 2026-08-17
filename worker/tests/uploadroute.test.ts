@@ -8,8 +8,9 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import app from "../src/worker/app";
+import { MAX_JOB_STATS_BYTES } from "../src/worker/jobs";
+import type { IngestJob, JobKind, JobStats } from "../src/worker/jobs";
 import type { ReplayEntry } from "../src/worker/replayentry";
-import type { IngestJob } from "../src/worker/replayindex";
 
 const FIXTURE = new URL("../../internal/capture/testdata/harness.brepstream", import.meta.url);
 const GAME_ID = "feed5eed00000000000000000000beef";
@@ -43,14 +44,42 @@ class FakeIndex {
     e.uploaderAlly = view === "ally" ? ally : null;
     return true;
   }
-  jobInsert(id: string, streamKey: string, gameId: string): void {
-    this.jobs.set(id, { id, streamKey, gameId, state: "pending", error: null, createdUnix: 0, updatedUnix: 0 });
+  jobInsert(id: string, streamKey: string, gameId: string, kind: JobKind = "upload"): void {
+    this.jobs.set(id, {
+      id,
+      streamKey,
+      gameId,
+      kind,
+      state: "pending",
+      error: null,
+      stats: null,
+      createdUnix: 0,
+      updatedUnix: 0,
+    });
+  }
+  // Both refusals plus the insert, in one call, exactly as the real DO does
+  // them — it is single-threaded, which is what makes them atomic there.
+  resimEnqueue(id: string, gameId: string): { status: "queued" | "in-catalog" | "duplicate"; job: IngestJob | null } {
+    if (this.entries.has(gameId)) return { status: "in-catalog", job: null };
+    const active = [...this.jobs.values()].find(
+      (j) => j.gameId === gameId && j.kind === "resim" && (j.state === "pending" || j.state === "processing"),
+    );
+    if (active) return { status: "duplicate", job: active };
+    this.jobInsert(id, "", gameId, "resim");
+    return { status: "queued", job: this.jobs.get(id) ?? null };
   }
   jobGet(id: string): IngestJob | null {
     return this.jobs.get(id) ?? null;
   }
-  jobsPending(): IngestJob[] {
-    return [...this.jobs.values()].filter((j) => j.state === "pending");
+  jobsPending(kind: JobKind): IngestJob[] {
+    return [...this.jobs.values()].filter((j) => j.kind === kind && j.state === "pending");
+  }
+  jobClaim(id: string): boolean {
+    const j = this.jobs.get(id);
+    if (!j || j.state !== "pending") return false; // stale-processing needs a clock; not modelled
+    j.state = "processing";
+    j.error = null;
+    return true;
   }
   lastQueueQuery: { limit: number; offset: number } | null = null;
   queuePage(limit: number, offset: number): { jobs: IngestJob[]; total: number; active: number } {
@@ -63,11 +92,17 @@ class FakeIndex {
       active: all.filter((j) => rank(j) === 0).length,
     };
   }
-  jobUpdate(id: string, state: "processing" | "done" | "error", error: string | null): boolean {
+  jobUpdate(
+    id: string,
+    state: "processing" | "done" | "error",
+    error: string | null,
+    stats: JobStats | null = null,
+  ): boolean {
     const j = this.jobs.get(id);
     if (!j) return false;
     j.state = state;
     j.error = error;
+    if (stats !== null) j.stats = stats; // COALESCE in the real DO
     return true;
   }
 }
@@ -239,7 +274,9 @@ test("GET /api/queue lists jobs for the viewer without the archive key", async (
   assert.equal(res.status, 200, "open even though a token is configured");
   const page = await asJson(res);
   assert.deepEqual(page, {
-    jobs: [{ id: job, gameId: GAME_ID, state: "pending", error: null, createdUnix: 0, updatedUnix: 0 }],
+    jobs: [
+      { id: job, gameId: GAME_ID, kind: "upload", state: "pending", error: null, stats: null, createdUnix: 0, updatedUnix: 0 },
+    ],
     total: 1,
     active: 1,
     offset: 0,
@@ -425,6 +462,192 @@ test("POST /api/replays/:id/refresh-settings updates the row from the BAR API", 
   globalThis.fetch = (async () => Response.json({ gameSettings: {} })) as typeof fetch;
   const noRow = await app.request(`/api/replays/norow11111/refresh-settings`, { method: "POST" }, env);
   assert.equal(noRow.status, 404);
+});
+
+// ---- re-sim requests -------------------------------------------------------
+// POST /api/resim is the pipeline's other door: a game NOBODY uploaded, queued
+// from a pasted link. Every refusal below exists because the work behind an
+// accepted request is the better part of an hour of somebody's engine time.
+
+const RESIM_ID = "836d486a5480a9e830be54db7d2c7be9";
+
+// Stub the BAR API lookup the route makes before it accepts anything, the same
+// way the refresh-settings test does. `known` is the set of ids it recognizes.
+function stubBarApi(t: { after(fn: () => void): void }, known: Set<string>): { urls: string[] } {
+  const realFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = realFetch;
+  });
+  const urls: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    urls.push(url);
+    return [...known].some((id) => url.endsWith(id))
+      ? Response.json({ id: "x", fileName: "x.sdfz" })
+      : new Response("not found", { status: 404 });
+  }) as typeof fetch;
+  return { urls };
+}
+
+test("POST /api/resim queues a re-sim from a pasted replay link", async (t) => {
+  const { env, index } = makeEnv();
+  const { urls } = stubBarApi(t, new Set([RESIM_ID]));
+
+  const res = await app.request(
+    "/api/resim",
+    { method: "POST", body: JSON.stringify({ link: `https://gex.honu.pw/match/${RESIM_ID}` }) },
+    env,
+  );
+  assert.equal(res.status, 200);
+  const body = await asJson(res);
+  assert.equal(body.gameId, RESIM_ID);
+  assert.equal(body.status, "queued");
+  assert.deepEqual(urls, [`https://api.bar-rts.com/replays/${RESIM_ID}`]);
+
+  const job = index.jobs.get(body.job);
+  assert.equal(job?.kind, "resim");
+  assert.equal(job?.state, "pending");
+  assert.equal(job?.streamKey, "", "a re-sim has no archived stream behind it");
+});
+
+test("POST /api/resim refuses what it cannot or should not run", async (t) => {
+  const { env, index } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+
+  // Not a link to anything.
+  const junk = await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: "yesterday's 8v8" }) }, env);
+  assert.equal(junk.status, 400);
+
+  // A well-formed id the BAR API has never heard of: there is no demo to
+  // re-simulate, and a re-sim cannot degrade past that the way an upload can.
+  const unknown = "0000000000000000000000000000dead";
+  const miss = await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: unknown }) }, env);
+  assert.equal(miss.status, 404);
+
+  // Already published: re-simulating would mostly repeat a capture that exists.
+  await app.request(`/api/replays/${RESIM_ID}`, { method: "PUT", body: JSON.stringify({ durationSec: 60 }) }, env);
+  const dup = await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env);
+  assert.equal(dup.status, 409);
+  assert.equal((await asJson(dup)).gameId, RESIM_ID);
+
+  assert.equal(index.jobs.size, 0, "no refusal may leave a job behind");
+});
+
+test("POST /api/resim is idempotent: the same link twice is one job", async (t) => {
+  const { env, index } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+
+  const first = await asJson(
+    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+  );
+  const again = await asJson(
+    await app.request(
+      "/api/resim",
+      { method: "POST", body: JSON.stringify({ link: `https://bar-rts.com/replays/${RESIM_ID}` }) },
+      env,
+    ),
+  );
+  assert.equal(again.status, "duplicate");
+  assert.equal(again.job, first.job, "the caller follows the request already in flight");
+  assert.equal(index.jobs.size, 1);
+});
+
+// The compatibility hinge. A deployed bringest asks without ?kind= and must
+// never be handed a re-sim: it has no engine, no BAR data dir, and no stream
+// to download.
+test("GET /api/jobs serves one kind, defaulting to upload", async (t) => {
+  const { env, index } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  await app.request("/api/upload", { method: "POST", body: fixture() }, env);
+  const resim = await asJson(
+    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+  );
+
+  const byDefault = await asJson(await app.request("/api/jobs", {}, env));
+  assert.deepEqual(byDefault.map((j: IngestJob) => j.gameId), [GAME_ID]);
+
+  const uploads = await asJson(await app.request("/api/jobs?kind=upload", {}, env));
+  assert.deepEqual(uploads.map((j: IngestJob) => j.gameId), [GAME_ID]);
+
+  const resims = await asJson(await app.request("/api/jobs?kind=resim", {}, env));
+  assert.deepEqual(resims.map((j: IngestJob) => j.id), [resim.job]);
+
+  assert.equal((await app.request("/api/jobs?kind=nonsense", {}, env)).status, 400);
+  assert.equal(index.jobs.size, 2);
+});
+
+// Claiming can fail, which is the point of it: two daemons polling the same
+// round must not both run an hour of engine work. A plain "processing" report
+// (the heartbeat) keeps succeeding, since the holder sends it repeatedly.
+test("a job can only be claimed once, but heartbeats keep working", async (t) => {
+  const { env } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  const { job } = await asJson(
+    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+  );
+  const post = (body: unknown) =>
+    app.request(`/api/jobs/${job}`, { method: "POST", body: JSON.stringify(body) }, env);
+
+  assert.equal((await post({ state: "processing", claim: true, kind: "resim" })).status, 200);
+  assert.equal((await post({ state: "processing", claim: true, kind: "resim" })).status, 409, "a second daemon is told no");
+  assert.equal((await post({ state: "processing" })).status, 200, "the holder's heartbeat");
+  assert.equal((await post({ state: "done", claim: true })).status, 400, "claim only makes sense with processing");
+  assert.equal((await post({ state: "done" })).status, 200);
+});
+
+// The daemon's processing record rides the terminal report and comes back out
+// on both job views. It is what the queue page shows: the duration in the
+// table, everything else on click.
+test("a job's processing stats round-trip through the report", async (t) => {
+  const { env } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  const { job } = await asJson(
+    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+  );
+  const stats = {
+    tookSec: 2483,
+    resimSec: 2431,
+    loadSec: 41,
+    simSec: 2390,
+    frames: 100170,
+    speedUp: 1.4,
+    engineVersion: "2026.07.04",
+    infolog: { bytes: 50331648, lastFrame: 100170, desyncs: 0, warnings: 118 },
+    sizeReport: "sections:\n  M   1234\n",
+  };
+  const post = (body: unknown) =>
+    app.request(`/api/jobs/${job}`, { method: "POST", body: JSON.stringify(body) }, env);
+
+  // A heartbeat carries none, and must not erase what is stored.
+  assert.equal((await post({ state: "processing", stats })).status, 200);
+  assert.equal((await post({ state: "processing" })).status, 200);
+  assert.equal((await post({ state: "done" })).status, 200);
+
+  const polled = await asJson(await app.request(`/api/jobs/${job}`, {}, env));
+  assert.deepEqual(polled.stats, stats, "the poll sees it");
+  const page = await asJson(await app.request("/api/queue", {}, env));
+  assert.deepEqual(page.jobs[0].stats, stats, "and so does the queue page");
+});
+
+// Stats that cannot be stored are dropped, never a 400: they describe work
+// that already happened, and refusing the report would lose the state
+// transition with them.
+test("unusable stats are dropped without losing the report", async (t) => {
+  const { env } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  const { job } = await asJson(
+    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+  );
+  const post = (body: unknown) =>
+    app.request(`/api/jobs/${job}`, { method: "POST", body: JSON.stringify(body) }, env);
+
+  for (const bad of ["a string", 42, [1, 2], { sizeReport: "x".repeat(MAX_JOB_STATS_BYTES + 1) }]) {
+    assert.equal((await post({ state: "error", error: "boom", stats: bad })).status, 200);
+  }
+  const polled = await asJson(await app.request(`/api/jobs/${job}`, {}, env));
+  assert.equal(polled.state, "error");
+  assert.equal(polled.error, "boom", "the transition survived every one of them");
+  assert.equal(polled.stats, null);
 });
 
 // Uploaded pieces must carry their own Content-Type and Cache-Control. The
