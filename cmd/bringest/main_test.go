@@ -12,20 +12,25 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mabn/barreplay/internal/packer"
 )
 
-// mockWorker fakes the worker's job/stream API surface: one pending job whose
-// archived stream it serves, recording every state transition.
+// mockWorker fakes the worker's job/stream API surface: one pending upload job
+// whose archived stream it serves, any number of queued re-sims, and a record
+// of every state transition. GET /api/jobs serves ONE kind, like the real
+// route, so a daemon asking for the wrong one gets nothing.
 type mockWorker struct {
 	t       *testing.T
 	job     ingestJob
+	resim   []ingestJob // queued re-sim jobs, served under ?kind=resim
 	stream  []byte
-	drained bool // pending queue empties after the first list
+	drained bool // the upload queue empties after the first list
 
 	mu          sync.Mutex
-	transitions []string // "<state>[:<error>]"
+	transitions []string        // "<state>[:<error>]", or "claim"
+	claimed     map[string]bool // job id -> taken (a second claim is a 409)
 }
 
 func (m *mockWorker) handler(token string) http.Handler {
@@ -38,14 +43,23 @@ func (m *mockWorker) handler(token string) http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		m.mu.Lock()
-		drained := m.drained
-		m.drained = true
-		m.mu.Unlock()
+		kind := r.URL.Query().Get("kind")
+		if kind == "" {
+			kind = kindUpload
+		}
 		jobs := []ingestJob{}
-		if !drained {
+		m.mu.Lock()
+		if kind == kindResim {
+			for _, j := range m.resim {
+				if !m.claimed[j.ID] {
+					jobs = append(jobs, j)
+				}
+			}
+		} else if !m.drained {
+			m.drained = true
 			jobs = append(jobs, m.job)
 		}
+		m.mu.Unlock()
 		json.NewEncoder(w).Encode(jobs)
 	})
 	mux.HandleFunc("POST /api/jobs/", func(w http.ResponseWriter, r *http.Request) {
@@ -53,9 +67,28 @@ func (m *mockWorker) handler(token string) http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		var body struct{ State, Error string }
+		var body struct {
+			State, Error string
+			Claim        bool
+		}
 		json.NewDecoder(r.Body).Decode(&body)
+		id := strings.TrimPrefix(r.URL.Path, "/api/jobs/")
 		m.mu.Lock()
+		if body.Claim {
+			if m.claimed[id] {
+				m.mu.Unlock()
+				http.Error(w, "job already claimed", http.StatusConflict)
+				return
+			}
+			if m.claimed == nil {
+				m.claimed = map[string]bool{}
+			}
+			m.claimed[id] = true
+			m.transitions = append(m.transitions, "claim")
+			m.mu.Unlock()
+			w.Write([]byte(`{"ok":true}`))
+			return
+		}
 		tr := body.State
 		if body.Error != "" {
 			tr += ":" + body.Error
@@ -85,14 +118,19 @@ func newMock(t *testing.T) *mockWorker {
 			ID:        "job-1",
 			GameID:    "feed5eed00000000000000000000beef",
 			StreamKey: "streams/feed5eed00000000000000000000beef/1700000000000-a0.brepstream",
+			Kind:      kindUpload,
 			State:     "pending",
 		},
-		stream: []byte("BREPSTREAM 1\nBRSNAP GID feed5eed00000000000000000000beef\nBRSNAP READY\n"),
+		stream:  []byte("BREPSTREAM 1\nBRSNAP GID feed5eed00000000000000000000beef\nBRSNAP READY\n"),
+		claimed: map[string]bool{},
 	}
 }
 
 func newDaemon(url, token string, process func(ctx context.Context, streamPath string) error) *daemon {
-	return &daemon{indexURL: url, token: token, client: http.DefaultClient, process: process}
+	return &daemon{
+		workerAPI: workerAPI{indexURL: url, token: token, client: http.DefaultClient},
+		process:   process,
+	}
 }
 
 // The happy path: claim -> download -> process -> done, with the bearer token
@@ -144,19 +182,21 @@ func TestResimDaemonRunOnce(t *testing.T) {
 		{"id": "broken", "uploaderAlly": 0, "uploads": []map[string]any{{"rid": "broken-11111111", "ally": 0}}},
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/replays" {
+		switch r.URL.Path {
+		case "/api/replays":
+			json.NewEncoder(w).Encode(catalog)
+		case "/api/jobs": // nothing requested by hand; the scan is all there is
+			json.NewEncoder(w).Encode([]ingestJob{})
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		json.NewEncoder(w).Encode(catalog)
 	}))
 	t.Cleanup(srv.Close)
 
 	var ran []string
 	r := &resimDaemon{
-		indexURL: srv.URL,
-		client:   http.DefaultClient,
-		failed:   map[string]bool{},
+		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
+		failed:    map[string]bool{},
 		resim: func(_ context.Context, gameID string) error {
 			ran = append(ran, gameID)
 			if gameID == "broken" {
@@ -187,6 +227,159 @@ func TestResimDaemonRunOnce(t *testing.T) {
 	}
 	if n != 0 || len(ran) != 0 {
 		t.Fatalf("round 2: attempted %d (%v), want none", n, ran)
+	}
+}
+
+// A re-sim requested by hand (the landing page's paste box) is claimed, run
+// and reported done — and the catalog scan still happens in the same round, so
+// a queued request does not starve the automatic candidates.
+func TestResimDaemonDrainsQueue(t *testing.T) {
+	m := newMock(t)
+	m.resim = []ingestJob{{ID: "rj-1", GameID: "aaaa0000000000000000000000000001", Kind: kindResim, State: "pending"}}
+	catalog := []map[string]any{
+		{"id": "onesided", "uploaderAlly": 1, "uploads": []map[string]any{{"rid": "onesided-11111111", "ally": 1}}},
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/api/jobs", m.handler(""))
+	mux.Handle("/api/jobs/", m.handler(""))
+	mux.HandleFunc("/api/replays", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(catalog)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	var ran []string
+	r := &resimDaemon{
+		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
+		failed:    map[string]bool{},
+		resim: func(_ context.Context, gameID string) error {
+			ran = append(ran, gameID)
+			return nil
+		},
+	}
+	n, err := r.runOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 || strings.Join(ran, ",") != "aaaa0000000000000000000000000001,onesided" {
+		t.Fatalf("attempted %d (%v), want the queued game first then the scan", n, ran)
+	}
+	if got := strings.Join(m.transitions, ","); got != "claim,done" {
+		t.Errorf("transitions = %q, want claim,done", got)
+	}
+}
+
+// A queued re-sim that fails reports the message onto its own job row — that
+// is what the requester reads on the queue page — and does NOT go into the
+// catalog scan's failure memory, so re-requesting it retries.
+func TestResimDaemonQueuedFailure(t *testing.T) {
+	m := newMock(t)
+	m.resim = []ingestJob{{ID: "rj-1", GameID: "aaaa0000000000000000000000000001", Kind: kindResim, State: "pending"}}
+	mux := http.NewServeMux()
+	mux.Handle("/api/jobs", m.handler(""))
+	mux.Handle("/api/jobs/", m.handler(""))
+	mux.HandleFunc("/api/replays", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode([]map[string]any{})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	r := &resimDaemon{
+		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
+		failed:    map[string]bool{},
+		resim:     func(context.Context, string) error { return errors.New("no engine") },
+	}
+	if _, err := r.runOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(m.transitions, ","); got != "claim,error:no engine" {
+		t.Errorf("transitions = %q, want claim,error:no engine", got)
+	}
+	if len(r.failed) != 0 {
+		t.Errorf("failed = %v, want empty (the job row carries the failure)", r.failed)
+	}
+}
+
+// A worker too old to filter by kind hands every pending job to whoever asks.
+// The upload loop must leave a re-sim alone — untouched, not failed, so the
+// daemon that can actually run it still finds it pending.
+func TestUploadDaemonSkipsResimJobs(t *testing.T) {
+	m := newMock(t)
+	m.job = ingestJob{ID: "rj-1", GameID: "aaaa0000000000000000000000000001", Kind: kindResim, State: "pending"}
+	srv := httptest.NewServer(m.handler(""))
+	t.Cleanup(srv.Close)
+
+	processed := false
+	d := newDaemon(srv.URL, "", func(context.Context, string) error {
+		processed = true
+		return nil
+	})
+	n, err := d.runOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed || n != 0 {
+		t.Errorf("attempted %d, processed=%v; want the resim job left alone", n, processed)
+	}
+	if len(m.transitions) != 0 {
+		t.Errorf("transitions = %v, want none — the job must stay pending", m.transitions)
+	}
+}
+
+// A re-sim runs for far longer than the worker's stale window, so it
+// heartbeats. The terminal report must be the LAST word: a beat still in
+// flight when done lands would put the row back to processing forever.
+func TestResimDaemonHeartbeats(t *testing.T) {
+	old := heartbeatEvery
+	heartbeatEvery = 5 * time.Millisecond
+	t.Cleanup(func() { heartbeatEvery = old })
+
+	m := newMock(t)
+	m.resim = []ingestJob{{ID: "rj-1", GameID: "aaaa0000000000000000000000000001", Kind: kindResim, State: "pending"}}
+	mux := http.NewServeMux()
+	mux.Handle("/api/jobs", m.handler(""))
+	mux.Handle("/api/jobs/", m.handler(""))
+	mux.HandleFunc("/api/replays", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode([]map[string]any{})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	r := &resimDaemon{
+		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
+		failed:    map[string]bool{},
+		resim: func(ctx context.Context, _ string) error {
+			// Hold the "engine run" until the beats are visibly flowing.
+			for {
+				m.mu.Lock()
+				beats := 0
+				for _, tr := range m.transitions {
+					if tr == "processing" {
+						beats++
+					}
+				}
+				m.mu.Unlock()
+				if beats >= 2 {
+					return nil
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(time.Millisecond):
+				}
+			}
+		},
+	}
+	if _, err := r.runOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.transitions) < 4 || m.transitions[0] != "claim" {
+		t.Fatalf("transitions = %v, want claim then beats then done", m.transitions)
+	}
+	if last := m.transitions[len(m.transitions)-1]; last != "done" {
+		t.Errorf("last transition = %q, want done — a late heartbeat undid the report", last)
 	}
 }
 
