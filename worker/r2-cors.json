@@ -4,7 +4,7 @@
       "allowed": {
         "origins": [
           "https://replay.fogofwar.dev",
-          "https://staging-replay.bartools.workers.dev",
+          "https://replay-staging.fogofwar.dev",
           "http://127.0.0.1:5173",
           "http://localhost:5173"
         ],

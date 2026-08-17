@@ -14,8 +14,7 @@
     "prebuild": "npm run sync-assets",
     "build": "vite build",
     "preview": "vite preview",
-    "preview:upload": "npm test && npm run build && npm run smoke && wrangler versions upload --preview-alias staging",
-    "preview:promote": "wrangler versions deploy",
+    "deploy:staging": "npm test && CLOUDFLARE_ENV=staging npm run build && npm run smoke && wrangler deploy",
     "deploy": "npm test && npm run build && npm run smoke && wrangler deploy",
     "typecheck": "tsc --noEmit",
     "cf-typegen": "wrangler types"

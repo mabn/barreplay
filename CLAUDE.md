@@ -234,20 +234,26 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           HOSTNAMES: the worker is served from replay.fogofwar.dev (a wrangler
                           Custom Domain — a PER-HOSTNAME cert, so no wildcard and no Advanced
                           Certificate Manager; the zone must live in the worker's own account).
-                          PREVIEWS (workers_dev + preview_urls in wrangler.jsonc, `npm run
-                          preview:upload` -> `wrangler versions upload --preview-alias staging`):
-                          a build goes live at staging-replay.bartools.workers.dev with NO
-                          traffic routed to it, and `npm run preview:promote` (versions deploy)
-                          is what makes it production; plain `npm run deploy` still does both.
-                          The ALIAS is load-bearing — each upload also mints a
-                          <version-prefix>-replay.… URL, but the viewer reads the replay pieces
-                          cross-origin from the bucket hostname and R2 matches CORS origins
-                          EXACTLY, so only the stable alias can be listed in r2-cors.json (on a
-                          per-version URL the page loads and every replay silently fails). A
-                          preview shares production's BINDINGS: same bucket, same catalog/jobs
-                          DO — reads are the real data, and an upload dropped on it enters the
-                          real queue. Preview URLs cannot live on the custom domain, which is
-                          why the workers.dev hostname stays enabled.
+                          STAGING (env.staging in wrangler.jsonc, `npm run deploy:staging`):
+                          a SEPARATE Worker, replay-staging, at replay-staging.fogofwar.dev —
+                          NOT a Workers preview URL, because previews are never generated for
+                          Workers that implement a Durable Object (hard platform limitation;
+                          this one implements ReplayIndex — no toggle or wrangler flag changes
+                          that, which was learned the hard way). The env is selected at BUILD
+                          time (CLOUDFLARE_ENV=staging vite build flattens it into the dist
+                          config; the deployed name is <top-level>-<env>). Its DO binding
+                          reaches PRODUCTION's ReplayIndex via script_name (binding another
+                          Worker's DO is fine, only implementing one blocks previews) and
+                          env.staging sets migrations:[] DELIBERATELY — migrations inherit,
+                          and inheriting new_sqlite_classes would give staging an own, empty,
+                          never-read ReplayIndex namespace next to that binding. Same bucket.
+                          So staging is production's data behind a different hostname: reads
+                          are real, an upload dropped on it enters the REAL queue, and its
+                          write routes reach the real bucket/catalog — which is why the
+                          REPLAY_PUT_TOKEN secret must be set PER-WORKER
+                          (`wrangler secret put REPLAY_PUT_TOKEN -e staging`; a missing token
+                          reads as local dev and leaves them open). The hostname is listed in
+                          r2-cors.json (R2 matches CORS origins exactly).
                           The BULK replay pieces (.brw/.keys/c<n>/.resources) are NOT fetched
                           from it: they come from cdn-bar.fogofwar.dev, the R2 bucket bound
                           directly to a hostname. A Worker runs BEFORE Cloudflare's cache, so
