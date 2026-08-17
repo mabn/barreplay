@@ -13,11 +13,12 @@
 // its job row to know when it landed.
 import { DurableObject } from "cloudflare:workers";
 
-import type { IngestJob, JobKind } from "./jobs";
+import { parseJobStats } from "./jobs";
+import type { IngestJob, JobKind, JobStats } from "./jobs";
 import { FACET_PLAYERS_MAX, derivePlayerCount, mergeUploads } from "./replayentry";
 import type { CatalogTeam, ReplayEntry, ReplayFacets, ReplayFilter, UploadRef } from "./replayentry";
 
-export type { IngestJob, JobKind } from "./jobs";
+export type { IngestJob, JobKind, JobStats } from "./jobs";
 
 /** A "processing" job untouched for this long is presumed crashed and is
  * offered to the daemon again alongside the pending ones. This is why a
@@ -33,7 +34,7 @@ const STALE_PROCESSING_SEC = 15 * 60;
 const STALE_PROCESSING_RESIM_SEC = 90 * 60;
 
 /** Columns every jobs SELECT reads, in the order jobRow expects. */
-const JOB_COLS = "id, stream_key, game_id, kind, state, error, created_unix, updated_unix";
+const JOB_COLS = "id, stream_key, game_id, kind, state, error, stats, created_unix, updated_unix";
 
 /** Version of the DERIVED data (player_count + the replay_players and
  * replay_settings index tables). Rows carry no derivation of their own — it is
@@ -64,6 +65,7 @@ export class ReplayIndex extends DurableObject<Env> {
         kind         TEXT NOT NULL DEFAULT 'upload',
         state        TEXT NOT NULL,
         error        TEXT,
+        stats        TEXT,
         created_unix INTEGER NOT NULL,
         updated_unix INTEGER NOT NULL
       );
@@ -107,6 +109,9 @@ export class ReplayIndex extends DurableObject<Env> {
     // uploads; the DEFAULT is what says so, for the existing rows and for
     // every daemon that still POSTs without naming a kind.
     addColumn("jobs", "kind TEXT NOT NULL DEFAULT 'upload'");
+    // Nullable, unlike kind: a job finished before the daemon reported stats
+    // has none, and there is nothing to infer.
+    addColumn("jobs", "stats TEXT");
     for (const col of [
       "settings TEXT",
       "rid TEXT",
@@ -567,11 +572,22 @@ export class ReplayIndex extends DurableObject<Env> {
   }
 
   /** jobUpdate transitions a job's state (daemon heartbeat / completion
-   * report). Returns false when the job id is unknown. */
-  jobUpdate(id: string, state: "processing" | "done" | "error", error: string | null): boolean {
-    const cur = this.ctx.storage.sql.exec(`UPDATE jobs SET state = ?, error = ?, updated_unix = ? WHERE id = ?`,
+   * report). Returns false when the job id is unknown.
+   *
+   * `stats` is COALESCEd, unlike error: a heartbeat reports none and must not
+   * wipe what a previous report recorded, and there is nothing a daemon could
+   * usefully mean by "the stats are now nothing". */
+  jobUpdate(
+    id: string,
+    state: "processing" | "done" | "error",
+    error: string | null,
+    stats: JobStats | null = null,
+  ): boolean {
+    const cur = this.ctx.storage.sql.exec(
+      `UPDATE jobs SET state = ?, error = ?, stats = COALESCE(?, stats), updated_unix = ? WHERE id = ?`,
       state,
       error,
+      stats === null ? null : JSON.stringify(stats),
       Math.floor(Date.now() / 1000),
       id,
     );
@@ -590,7 +606,20 @@ function jobRow(r: Record<string, unknown>): IngestJob {
     kind: ((r.kind as JobKind | null) ?? "upload") as JobKind,
     state: r.state as IngestJob["state"],
     error: r.error as string | null,
+    // Stored as JSON text. A row written before the column, or one whose
+    // daemon never reported, has none — and a blob that somehow does not parse
+    // is not worth failing a queue read over.
+    stats: parseStoredStats(r.stats as string | null),
     createdUnix: r.created_unix as number,
     updatedUnix: r.updated_unix as number,
   };
+}
+
+function parseStoredStats(raw: string | null): JobStats | null {
+  if (raw == null) return null;
+  try {
+    return parseJobStats(JSON.parse(raw));
+  } catch {
+    return null;
+  }
 }

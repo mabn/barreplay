@@ -3588,6 +3588,7 @@ let queueReadAt = 0;       // when that page was read (the pager says so)
 let queueSeq = 0;          // ignore a reply overtaken by a newer request
 let queueSupported = true; // cleared by a 404: a backend won't grow the route
 const queueRelisted = new Set(); // games we already re-listed the catalog for
+const queueOpen = new Set();     // job ids whose processing details are expanded
 
 // refreshQueue reads one page. Every caller is an explicit action; there is no
 // timer behind it.
@@ -3643,6 +3644,92 @@ async function refreshQueue() {
     fresh.forEach(j => queueRelisted.add(j.gameId));
     reloadList().then(() => renderQueue()); // now with its replay link
   }
+}
+
+// ---- a job's processing record ---------------------------------------------
+// What the daemon measured while it worked (cmd/bringest's jobStats). The
+// table shows the one number worth scanning a column for — how long it took —
+// and everything else expands on click: a re-sim's load/sim split and speed,
+// what its engine log said, and the .brp size breakdown `pack -stats` prints,
+// which otherwise only exists in the daemon's own log on some other machine.
+
+// fmtDur renders a duration in seconds the way a person reads a wait: seconds
+// under a minute, minutes and seconds under an hour, hours and minutes above.
+function fmtDur(sec) {
+  const s = Math.round(sec);
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm ' + String(s % 60).padStart(2, '0') + 's';
+  return Math.floor(s / 3600) + 'h ' + String(Math.floor((s % 3600) / 60)).padStart(2, '0') + 'm';
+}
+
+// statsLines turns the record into label/value pairs, skipping what this job
+// did not measure — an upload has no engine run, an old daemon reports less,
+// and a failed job reports only what it got to.
+function statsLines(j, s) {
+  const out = [];
+  const add = (k, v) => { if (v) out.push([k, v]); };
+  if (s.resimSec) {
+    let engine = fmtDur(s.resimSec);
+    if (s.loadSec) engine += ` (load ${fmtDur(s.loadSec)} + sim ${fmtDur(s.simSec || s.resimSec - s.loadSec)})`;
+    add('Engine', engine);
+  }
+  if (s.frames) {
+    let sim = s.frames.toLocaleString() + ' frames';
+    if (s.gameSec) sim += ` of ~${(s.gameSec * 30).toLocaleString()}`;
+    if (s.samples) sim += `, ${s.samples.toLocaleString()} sampled`;
+    if (s.speedUp) sim += `, ${s.speedUp.toFixed(1)}× realtime`;
+    add('Simulated', sim);
+  }
+  add('Engine version', s.engineVersion);
+  if (s.infolog) {
+    const i = s.infolog;
+    const bits = [];
+    if (i.bytes) bits.push(fmtSize(i.bytes));
+    if (i.lastFrame) bits.push('last frame ' + i.lastFrame.toLocaleString());
+    // Always stated, including the zero: "no desyncs" is the reassurance, and
+    // a re-sim that desynced describes a game that never happened.
+    const d = i.desyncs || 0;
+    bits.push(d.toLocaleString() + ' desync' + (d === 1 ? '' : 's'));
+    if (i.warnings) bits.push(i.warnings.toLocaleString() + ' warnings');
+    add('Engine log', bits.join(' · '));
+  }
+  add('Packed in', s.packSec ? fmtDur(s.packSec) : null);
+  add('Uploaded in', s.uploadSec ? fmtDur(s.uploadSec) : null);
+  add('.brp', s.brpBytes ? fmtSize(s.brpBytes) : null);
+  add('Total', s.tookSec ? fmtDur(s.tookSec) : null);
+  return out;
+}
+
+function statsTooltip(j, s) {
+  return statsLines(j, s).map(([k, v]) => k + ': ' + v).join('\n') || 'no processing details';
+}
+
+// statsRow is the expanded detail: the measured figures, then the size report
+// verbatim (it is a fixed-width table, so it stays one).
+function statsRow(j) {
+  const tr = document.createElement('tr');
+  tr.className = 'statsrow';
+  const td = document.createElement('td');
+  td.colSpan = 7;
+  const dl = document.createElement('div');
+  dl.className = 'statsgrid';
+  for (const [k, v] of statsLines(j, j.stats)) {
+    const key = document.createElement('span');
+    key.className = 'k';
+    key.textContent = k;
+    const val = document.createElement('span');
+    val.textContent = v;
+    dl.append(key, val);
+  }
+  td.appendChild(dl);
+  if (j.stats.sizeReport) {
+    const pre = document.createElement('pre');
+    pre.className = 'sizereport';
+    pre.textContent = j.stats.sizeReport.trimEnd();
+    td.appendChild(pre);
+  }
+  tr.appendChild(td);
+  return tr;
 }
 
 // setQueueOffset pages the table. The page is deliberately NOT in the URL:
@@ -3722,6 +3809,21 @@ function renderQueue(errMsg) {
       td.appendChild(s);
       tr.appendChild(td);
     }
+    // What the work cost. For a re-sim that is the engine's own wall time,
+    // which is the whole story — the pack and the upload after it are rounding
+    // error against forty minutes of simulation. Everything else the daemon
+    // measured is one click away rather than seven more columns.
+    {
+      const s = j.stats || null;
+      const headline = s ? (s.resimSec || s.tookSec || 0) : 0;
+      const td = cell(headline ? fmtDur(headline) : null, 'took');
+      if (s) {
+        td.title = statsTooltip(j, s);
+        td.classList.add('expand');
+        td.textContent = (queueOpen.has(j.id) ? '▾ ' : '▸ ') + (headline ? fmtDur(headline) : '—');
+        td.classList.remove('dim');
+      }
+    }
     // Age as of the READ, which the pager timestamps — nothing re-renders this
     // on its own, so the exact moment rides the tooltip.
     const upd = cell(j.updatedUnix ? fmtAgo(j.updatedUnix) : null);
@@ -3729,10 +3831,23 @@ function renderQueue(errMsg) {
     const detail = cell(j.error || null, 'detail');
     if (j.error) detail.classList.add('error');
     tbody.appendChild(tr);
+
+    // The details row, only while expanded. Clicking anywhere on the job's
+    // row toggles it — except on a link, which is there to be followed.
+    if (j.stats) {
+      tr.classList.add('hasstats');
+      tr.addEventListener('click', (ev) => {
+        if (ev.target.closest('a')) return;
+        if (queueOpen.has(j.id)) queueOpen.delete(j.id);
+        else queueOpen.add(j.id);
+        renderQueue(errMsg);
+      });
+      if (queueOpen.has(j.id)) tbody.appendChild(statsRow(j));
+    }
   }
-  // Counts come from the server, over the whole table — a page of 5 cannot
-  // say how many jobs are in flight, and claiming otherwise from what fits on
-  // screen is exactly the lie the pager exists to avoid.
+  // Counts come from the server, over the whole table — one window of rows
+  // cannot say how many jobs are in flight, and claiming otherwise from what
+  // fits on screen is exactly the lie the pager exists to avoid.
   const total = queuePage ? queuePage.total : 0;
   const active = queuePage ? queuePage.active : 0;
   const badge = document.getElementById('navqueue');

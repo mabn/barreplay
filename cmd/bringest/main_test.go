@@ -14,7 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mabn/barreplay/internal/engine"
 	"github.com/mabn/barreplay/internal/packer"
+	"github.com/mabn/barreplay/internal/resim"
 )
 
 // mockWorker fakes the worker's job/stream API surface: one pending upload job
@@ -31,6 +33,7 @@ type mockWorker struct {
 	mu          sync.Mutex
 	transitions []string        // "<state>[:<error>]", or "claim"
 	claimed     map[string]bool // job id -> taken (a second claim is a 409)
+	statsSeen   []jobStats      // the processing record of every report that carried one
 }
 
 func (m *mockWorker) handler(token string) http.Handler {
@@ -70,6 +73,7 @@ func (m *mockWorker) handler(token string) http.Handler {
 		var body struct {
 			State, Error string
 			Claim        bool
+			Stats        *jobStats
 		}
 		json.NewDecoder(r.Body).Decode(&body)
 		id := strings.TrimPrefix(r.URL.Path, "/api/jobs/")
@@ -94,6 +98,9 @@ func (m *mockWorker) handler(token string) http.Handler {
 			tr += ":" + body.Error
 		}
 		m.transitions = append(m.transitions, tr)
+		if body.Stats != nil {
+			m.statsSeen = append(m.statsSeen, *body.Stats)
+		}
 		m.mu.Unlock()
 		w.Write([]byte(`{"ok":true}`))
 	})
@@ -126,7 +133,7 @@ func newMock(t *testing.T) *mockWorker {
 	}
 }
 
-func newDaemon(url, token string, process func(ctx context.Context, streamPath string) error) *daemon {
+func newDaemon(url, token string, process func(ctx context.Context, streamPath string, st *jobStats) error) *daemon {
 	return &daemon{
 		workerAPI: workerAPI{indexURL: url, token: token, client: http.DefaultClient},
 		process:   process,
@@ -142,7 +149,7 @@ func TestRunOnceProcessesJob(t *testing.T) {
 
 	var gotPath string
 	var gotBytes []byte
-	d := newDaemon(srv.URL, "s3cret", func(_ context.Context, streamPath string) error {
+	d := newDaemon(srv.URL, "s3cret", func(_ context.Context, streamPath string, _ *jobStats) error {
 		gotPath = streamPath
 		b, err := os.ReadFile(streamPath)
 		gotBytes = b
@@ -197,7 +204,7 @@ func TestResimDaemonRunOnce(t *testing.T) {
 	r := &resimDaemon{
 		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
 		failed:    map[string]bool{},
-		resim: func(_ context.Context, gameID string) error {
+		resim: func(_ context.Context, gameID string, _ *jobStats) error {
 			ran = append(ran, gameID)
 			if gameID == "broken" {
 				return errors.New("no engine")
@@ -252,7 +259,7 @@ func TestResimDaemonDrainsQueue(t *testing.T) {
 	r := &resimDaemon{
 		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
 		failed:    map[string]bool{},
-		resim: func(_ context.Context, gameID string) error {
+		resim: func(_ context.Context, gameID string, _ *jobStats) error {
 			ran = append(ran, gameID)
 			return nil
 		},
@@ -266,6 +273,71 @@ func TestResimDaemonDrainsQueue(t *testing.T) {
 	}
 	if got := strings.Join(m.transitions, ","); got != "claim,done" {
 		t.Errorf("transitions = %q, want claim,done", got)
+	}
+}
+
+// The processing record rides the terminal report — on SUCCESS and on FAILURE
+// alike. Forty minutes of engine time that ended badly is the run whose
+// timings and engine log are most worth keeping.
+func TestResimDaemonReportsStats(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		rerr  error
+		state string
+	}{
+		{"published", nil, "done"},
+		{"failed", errors.New("desynced"), "error:desynced"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newMock(t)
+			m.resim = []ingestJob{{ID: "rj-1", GameID: "aaaa0000000000000000000000000001", Kind: kindResim, State: "pending"}}
+			mux := http.NewServeMux()
+			mux.Handle("/api/jobs", m.handler(""))
+			mux.Handle("/api/jobs/", m.handler(""))
+			mux.HandleFunc("/api/replays", func(w http.ResponseWriter, _ *http.Request) {
+				json.NewEncoder(w).Encode([]map[string]any{})
+			})
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+
+			r := &resimDaemon{
+				workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
+				failed:    map[string]bool{},
+				resim: func(_ context.Context, _ string, st *jobStats) error {
+					// What resimPublish copies out of resim.RunStats.
+					st.fromRunStats(resim.RunStats{
+						EngineSec: 2431, LoadSec: 41, SimSec: 2390,
+						Frames: 100170, Samples: 3339, SpeedUp: 1.4,
+						GameSec: 3339, EngineVersion: "2026.07.04",
+						Infolog: engine.InfologSummary{Bytes: 48 << 20, LastFrame: 100170, Desyncs: 0, Warnings: 118},
+					})
+					st.SizeReport = "sections: ...\n"
+					return tc.rerr
+				},
+			}
+			if _, err := r.runOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(m.transitions, ","); got != "claim,"+tc.state {
+				t.Fatalf("transitions = %q, want claim,%s", got, tc.state)
+			}
+			if len(m.statsSeen) != 1 {
+				t.Fatalf("reports carrying stats = %d, want 1", len(m.statsSeen))
+			}
+			s := m.statsSeen[0]
+			if s.ResimSec != 2431 || s.LoadSec != 41 || s.Frames != 100170 || s.EngineVersion != "2026.07.04" {
+				t.Errorf("stats = %+v, want the run's own figures", s)
+			}
+			if s.Infolog == nil || s.Infolog.Warnings != 118 || s.Infolog.Desyncs != 0 {
+				t.Errorf("infolog = %+v, want the engine log summary (zero desyncs included)", s.Infolog)
+			}
+			if s.SizeReport == "" {
+				t.Error("the size report did not ride along")
+			}
+			if s.TookSec <= 0 {
+				t.Error("TookSec was not measured")
+			}
+		})
 	}
 }
 
@@ -287,7 +359,7 @@ func TestResimDaemonQueuedFailure(t *testing.T) {
 	r := &resimDaemon{
 		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
 		failed:    map[string]bool{},
-		resim:     func(context.Context, string) error { return errors.New("no engine") },
+		resim:     func(context.Context, string, *jobStats) error { return errors.New("no engine") },
 	}
 	if _, err := r.runOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -310,7 +382,7 @@ func TestUploadDaemonSkipsResimJobs(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	processed := false
-	d := newDaemon(srv.URL, "", func(context.Context, string) error {
+	d := newDaemon(srv.URL, "", func(context.Context, string, *jobStats) error {
 		processed = true
 		return nil
 	})
@@ -348,7 +420,7 @@ func TestResimDaemonHeartbeats(t *testing.T) {
 	r := &resimDaemon{
 		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
 		failed:    map[string]bool{},
-		resim: func(ctx context.Context, _ string) error {
+		resim: func(ctx context.Context, _ string, _ *jobStats) error {
 			// Hold the "engine run" until the beats are visibly flowing.
 			for {
 				m.mu.Lock()
@@ -389,7 +461,7 @@ func TestRunOnceReportsFailure(t *testing.T) {
 	srv := httptest.NewServer(m.handler(""))
 	t.Cleanup(srv.Close)
 
-	d := newDaemon(srv.URL, "", func(context.Context, string) error {
+	d := newDaemon(srv.URL, "", func(context.Context, string, *jobStats) error {
 		return errors.New("demo exploded")
 	})
 	if _, err := d.runOnce(context.Background()); err != nil {
@@ -409,7 +481,7 @@ func TestRunOnceDownloadFailure(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	processed := false
-	d := newDaemon(srv.URL, "", func(context.Context, string) error {
+	d := newDaemon(srv.URL, "", func(context.Context, string, *jobStats) error {
 		processed = true
 		return nil
 	})
@@ -431,7 +503,7 @@ func TestRunOnceUnauthorized(t *testing.T) {
 	srv := httptest.NewServer(m.handler("s3cret"))
 	t.Cleanup(srv.Close)
 
-	d := newDaemon(srv.URL, "wrong", func(context.Context, string) error { return nil })
+	d := newDaemon(srv.URL, "wrong", func(context.Context, string, *jobStats) error { return nil })
 	if _, err := d.runOnce(context.Background()); err == nil || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("err = %v, want a 401 listing error", err)
 	}

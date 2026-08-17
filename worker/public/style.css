@@ -185,6 +185,25 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
   background: #1b232c; border: 1px solid #2f3947; color: #8a98a6;
 }
 #queuetable .kind-resim { color: #d3b98f; border-color: #5c4a2f; background: #2b2417; }
+/* The processing record: how long it took in the row, the rest expanded from
+   it. The whole row is the toggle, so it advertises itself with a cursor. */
+#queuetable tr.hasstats { cursor: pointer; }
+#queuetable tr.hasstats:hover { background: #161c23; }
+#queuetable td.took.expand { color: #c7d3de; }
+#queuetable tr.statsrow > td { padding: 2px 8px 14px 22px; border-bottom: 1px solid #202830; }
+#queuetable tr.statsrow:hover { background: none; }
+.statsgrid {
+  display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px;
+  font-size: 12px; color: #c7d3de; max-width: 900px;
+}
+.statsgrid .k { color: #6f87a0; }
+/* The size report is a fixed-width table `pack -stats` formats with spaces;
+   it scrolls inside itself rather than widening the page. */
+pre.sizereport {
+  margin: 10px 0 0; padding: 10px 12px; background: #12181e; border: 1px solid #202830;
+  border-radius: 4px; font-size: 11px; line-height: 1.45; color: #9fb0bf;
+  overflow-x: auto; max-height: 420px; overflow-y: auto; white-space: pre;
+}
 /* Pager + the read stamp. The section never refreshes itself, so "read at
    <clock>" is part of the contract, not decoration: it says how old what you
    are looking at is, and Reload is how it moves. */

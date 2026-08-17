@@ -25,7 +25,7 @@
 import { Hono } from "hono";
 
 import { parseGameId } from "./gameid";
-import { JOB_KINDS } from "./jobs";
+import { JOB_KINDS, parseJobStats } from "./jobs";
 import type { JobKind } from "./jobs";
 import { archiveSuffix, scanStreamPreamble } from "./preamble";
 import { parseReplayFilter, parseViewRequest, playersFromApi, sanitizeEntry, settingsFlags } from "./replayentry";
@@ -238,8 +238,8 @@ app.post("/api/resim", async (c) => {
 app.get("/api/jobs/:id", async (c) => {
   const job = await indexStub(c.env).jobGet(c.req.param("id"));
   if (!job) return c.json({ error: "unknown job" }, 404);
-  const { id, gameId, kind, state, error, createdUnix, updatedUnix } = job;
-  return c.json({ id, gameId, kind, state, error, createdUnix, updatedUnix }, 200, {
+  const { id, gameId, kind, state, error, stats, createdUnix, updatedUnix } = job;
+  return c.json({ id, gameId, kind, state, error, stats, createdUnix, updatedUnix }, 200, {
     "cache-control": "no-cache",
   });
 });
@@ -273,12 +273,13 @@ app.get("/api/queue", async (c) => {
   const page = await indexStub(c.env).queuePage(Math.min(Math.max(limit, 1), QUEUE_LIMIT_MAX), offset);
   return c.json(
     {
-      jobs: page.jobs.map(({ id, gameId, kind, state, error, createdUnix, updatedUnix }) => ({
+      jobs: page.jobs.map(({ id, gameId, kind, state, error, stats, createdUnix, updatedUnix }) => ({
         id,
         gameId,
         kind,
         state,
         error,
+        stats,
         createdUnix,
         updatedUnix,
       })),
@@ -327,7 +328,7 @@ app.post("/api/jobs/:id", async (c) => {
   } catch {
     return c.json({ error: "body must be JSON" }, 400);
   }
-  const b = body as { state?: unknown; error?: unknown; claim?: unknown; kind?: unknown };
+  const b = body as { state?: unknown; error?: unknown; claim?: unknown; kind?: unknown; stats?: unknown };
   if (b.state !== "processing" && b.state !== "done" && b.state !== "error") {
     return c.json({ error: "state must be processing, done or error" }, 400);
   }
@@ -342,7 +343,11 @@ app.post("/api/jobs/:id", async (c) => {
     return c.json({ ok: true });
   }
   const detail = typeof b.error === "string" ? b.error.slice(0, 2000) : null;
-  const ok = await indexStub(c.env).jobUpdate(c.req.param("id"), b.state, detail);
+  // Rejected stats are dropped, not a 400: they are a record of work that has
+  // already happened, and refusing the report over them would lose the state
+  // transition too.
+  const stats = parseJobStats(b.stats);
+  const ok = await indexStub(c.env).jobUpdate(c.req.param("id"), b.state, detail, stats);
   if (!ok) return c.json({ error: "unknown job" }, 404);
   return c.json({ ok: true });
 });

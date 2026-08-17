@@ -188,8 +188,8 @@ func run() int {
 				client:   &http.Client{Timeout: 1 * time.Minute},
 			},
 			failed: map[string]bool{},
-			resim: func(ctx context.Context, gameID string) error {
-				return resimPublish(ctx, client, gameID, ro, *target, *workerDir, indexURL, *stats)
+			resim: func(ctx context.Context, gameID string, st *jobStats) error {
+				return resimPublish(ctx, client, gameID, ro, *target, *workerDir, indexURL, *stats, st)
 			},
 		}
 		what = "requested and one-sided replays to re-simulate"
@@ -200,8 +200,8 @@ func run() int {
 				token:    os.Getenv("REPLAY_PUT_TOKEN"),
 				client:   &http.Client{Timeout: 5 * time.Minute},
 			},
-			process: func(ctx context.Context, streamPath string) error {
-				return processStream(ctx, client, streamPath, *target, *workerDir, indexURL, *stats)
+			process: func(ctx context.Context, streamPath string, st *jobStats) error {
+				return processStream(ctx, client, streamPath, *target, *workerDir, indexURL, *stats, st)
 			},
 		}
 	}
@@ -311,6 +311,70 @@ const (
 	kindResim  = "resim"
 )
 
+// jobStats is one job's processing record, reported alongside its terminal
+// state and kept on the job row as a single JSON blob (the worker's jobs.stats
+// column). One blob rather than a column per number because nothing queries
+// these — the queue page shows the headline figure and expands the rest on
+// click — and because the two kinds of job have little in common: an upload
+// records what packing and uploading cost, a re-sim adds most of an hour of
+// engine time and what the engine's own log said about it.
+//
+// It is reported on FAILURE too. A re-sim that dies at minute forty is exactly
+// the one worth having the timings and the infolog for.
+type jobStats struct {
+	TookSec   float64 `json:"tookSec"`
+	PackSec   float64 `json:"packSec,omitempty"`
+	UploadSec float64 `json:"uploadSec,omitempty"`
+	BrpBytes  int64   `json:"brpBytes,omitempty"`
+
+	// Re-sim only, from resim.RunStats.
+	ResimSec      float64 `json:"resimSec,omitempty"`
+	LoadSec       float64 `json:"loadSec,omitempty"`
+	SimSec        float64 `json:"simSec,omitempty"`
+	Frames        int32   `json:"frames,omitempty"`
+	Samples       int     `json:"samples,omitempty"`
+	SpeedUp       float64 `json:"speedUp,omitempty"`
+	GameSec       int32   `json:"gameSec,omitempty"`
+	EngineVersion string  `json:"engineVersion,omitempty"`
+
+	Infolog *infologStats `json:"infolog,omitempty"`
+
+	// SizeReport is packer.ReportStats' output verbatim — the per-section and
+	// per-unit-def breakdown `pack -stats` prints. It is text rather than
+	// numbers on purpose: it is read, not queried, and keeping it whole means
+	// the queue page shows exactly what the terminal would have.
+	SizeReport string `json:"sizeReport,omitempty"`
+}
+
+type infologStats struct {
+	Bytes     int64 `json:"bytes"`
+	Lines     int   `json:"lines,omitempty"`
+	LastFrame int32 `json:"lastFrame,omitempty"`
+	Desyncs   int   `json:"desyncs"`
+	Warnings  int   `json:"warnings,omitempty"`
+}
+
+// maxSizeReport caps the stored report. The real thing is 2-3 KB; the cap is
+// only here so a pathological capture cannot push an unbounded string into
+// every read of the queue page.
+const maxSizeReport = 16 << 10
+
+// fromRunStats copies what a finished (or failed) re-simulation measured.
+func (s *jobStats) fromRunStats(r resim.RunStats) {
+	s.ResimSec, s.LoadSec, s.SimSec = r.EngineSec, r.LoadSec, r.SimSec
+	s.Frames, s.Samples, s.SpeedUp = r.Frames, r.Samples, r.SpeedUp
+	s.GameSec, s.EngineVersion = r.GameSec, r.EngineVersion
+	if r.Infolog.Bytes > 0 {
+		s.Infolog = &infologStats{
+			Bytes:     r.Infolog.Bytes,
+			Lines:     r.Infolog.Lines,
+			LastFrame: r.Infolog.LastFrame,
+			Desyncs:   r.Infolog.Desyncs,
+			Warnings:  r.Infolog.Warnings,
+		}
+	}
+}
+
 // heartbeatEvery is how often a daemon re-reports "processing" while a job is
 // still running. The worker offers a "processing" job to somebody else once it
 // has been silent for its kind's stale window, which exists to recover from a
@@ -331,7 +395,7 @@ type workerAPI struct {
 // packer's npx/network machinery or a real engine.
 type daemon struct {
 	workerAPI
-	process func(ctx context.Context, streamPath string) error
+	process func(ctx context.Context, streamPath string, st *jobStats) error
 }
 
 // runOnce fetches the pending queue and works through it sequentially,
@@ -356,12 +420,13 @@ func (d *daemon) runOnce(ctx context.Context) (int, error) {
 			continue
 		}
 		attempted++
-		if err := d.handle(ctx, j); err != nil {
+		st, err := d.handle(ctx, j)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "bringest: job %s (%s): %v\n", j.ID, j.GameID, err)
-			d.report(ctx, j.ID, "error", err.Error())
+			d.report(ctx, j.ID, "error", err.Error(), st)
 		} else {
 			fmt.Fprintf(os.Stderr, "bringest: job %s (%s): published\n", j.ID, j.GameID)
-			d.report(ctx, j.ID, "done", "")
+			d.report(ctx, j.ID, "done", "", st)
 		}
 	}
 	return attempted, nil
@@ -369,21 +434,26 @@ func (d *daemon) runOnce(ctx context.Context) (int, error) {
 
 // handle runs one job: claim it, download the archived stream to a temp file
 // named after the gameId (packer.Pack keys the replay off the basename), and
-// hand it to the pipeline.
-func (d *daemon) handle(ctx context.Context, j ingestJob) error {
-	if err := d.report(ctx, j.ID, "processing", ""); err != nil {
-		return fmt.Errorf("claiming: %w", err)
+// hand it to the pipeline. The stats come back on the failure path too, so a
+// job that died carries what it managed to measure.
+func (d *daemon) handle(ctx context.Context, j ingestJob) (*jobStats, error) {
+	started := time.Now()
+	st := &jobStats{}
+	defer func() { st.TookSec = time.Since(started).Seconds() }()
+
+	if err := d.report(ctx, j.ID, "processing", "", nil); err != nil {
+		return st, fmt.Errorf("claiming: %w", err)
 	}
 	tmp, err := os.MkdirTemp("", "bringest-")
 	if err != nil {
-		return err
+		return st, err
 	}
 	defer os.RemoveAll(tmp)
 	streamPath := filepath.Join(tmp, j.GameID+".brepstream")
 	if err := d.download(ctx, j.StreamKey, streamPath); err != nil {
-		return fmt.Errorf("downloading %s: %w", j.StreamKey, err)
+		return st, fmt.Errorf("downloading %s: %w", j.StreamKey, err)
 	}
-	return d.process(ctx, streamPath)
+	return st, d.process(ctx, streamPath, st)
 }
 
 // download streams one archived upload from the worker (GET /api/<streamKey>,
@@ -428,11 +498,15 @@ func (d *workerAPI) pendingJobs(ctx context.Context, kind string) ([]ingestJob, 
 	return jobs, nil
 }
 
-// report posts a job state transition; errMsg rides along for "error".
-func (d *workerAPI) report(ctx context.Context, jobID, state, errMsg string) error {
-	body := map[string]string{"state": state}
+// report posts a job state transition; errMsg rides along for "error" and st,
+// when non-nil, is the processing record the queue page shows.
+func (d *workerAPI) report(ctx context.Context, jobID, state, errMsg string, st *jobStats) error {
+	body := map[string]any{"state": state}
 	if errMsg != "" {
 		body["error"] = errMsg
+	}
+	if st != nil {
+		body["stats"] = st
 	}
 	return d.api(ctx, http.MethodPost, "/api/jobs/"+url.PathEscape(jobID), body, nil)
 }
@@ -464,7 +538,7 @@ func (d *workerAPI) heartbeat(ctx context.Context, jobID string) (stop func()) {
 			case <-hctx.Done():
 				return
 			case <-t.C:
-				if err := d.report(hctx, jobID, "processing", ""); err != nil && hctx.Err() == nil {
+				if err := d.report(hctx, jobID, "processing", "", nil); err != nil && hctx.Err() == nil {
 					fmt.Fprintf(os.Stderr, "bringest: job %s: heartbeat: %v\n", jobID, err)
 				}
 			}
@@ -519,7 +593,8 @@ func (d *workerAPI) auth(req *http.Request) {
 // BAR API knows the game, the stream's own metadata otherwise) and publish it
 // under its content-addressed revision. Idempotent: the same stream re-lands
 // on the same keys and catalog row.
-func processStream(ctx context.Context, client *barapi.Client, streamPath, target, workerDir, indexURL string, stats bool) error {
+func processStream(ctx context.Context, client *barapi.Client, streamPath, target, workerDir, indexURL string, stats bool, st *jobStats) error {
+	packStart := time.Now()
 	brpPath, modOptions, err := packer.Pack(ctx, client, streamPath, filepath.Dir(streamPath), "", false)
 	if errors.Is(err, packer.ErrDemoUnavailable) {
 		fmt.Fprintf(os.Stderr, "bringest: %v; publishing with the stream's own metadata\n", err)
@@ -528,9 +603,10 @@ func processStream(ctx context.Context, client *barapi.Client, streamPath, targe
 	if err != nil {
 		return err
 	}
-	if stats {
-		reportStats(brpPath)
+	if st != nil {
+		st.PackSec = time.Since(packStart).Seconds()
 	}
+	recordBRP(st, brpPath, stats)
 	// AFTER the pack, and from the packed file: the fallback just above is
 	// exactly the case a stream hash gets wrong. The same stream published once
 	// with the demo metadata and once without produces different .brp bytes,
@@ -540,13 +616,43 @@ func processStream(ctx context.Context, client *barapi.Client, streamPath, targe
 	if err != nil {
 		return err
 	}
-	return packer.UploadStatic(ctx, brpPath, packer.UploadOptions{
+	uploadStart := time.Now()
+	err = packer.UploadStatic(ctx, brpPath, packer.UploadOptions{
 		Target:     target,
 		WorkerDir:  workerDir,
 		IndexURL:   indexURL,
 		Rev:        rev,
 		ModOptions: modOptions,
 	})
+	if st != nil {
+		st.UploadSec = time.Since(uploadStart).Seconds()
+	}
+	return err
+}
+
+// recordBRP measures the finished .brp and — when the size report is wanted —
+// prints it and keeps a copy on the job's record. Called from both publish
+// paths: an upload packs its stream, a re-sim's engine run wrote the file
+// directly, but either way this is the same file and the same report.
+func recordBRP(st *jobStats, brpPath string, wantReport bool) {
+	report := ""
+	if wantReport {
+		report = reportStats(brpPath)
+	}
+	if st == nil {
+		return
+	}
+	if fi, err := os.Stat(brpPath); err == nil {
+		st.BrpBytes = fi.Size()
+	}
+	// The report names the file it measured, which here is a temp path on this
+	// machine — gone by the time anyone reads the queue page, and nobody
+	// else's business. The basename is the part that means anything.
+	report = strings.Replace(report, brpPath, filepath.Base(brpPath), 1)
+	if len(report) > maxSizeReport {
+		report = report[:maxSizeReport]
+	}
+	st.SizeReport = report
 }
 
 // reportStats prints the freshly packed .brp's size breakdown — the same
@@ -557,11 +663,17 @@ func processStream(ctx context.Context, client *barapi.Client, streamPath, targe
 // never costs an otherwise finished publish.
 //
 // It writes to os.Stderr like everything else here, which teeStderr also
-// copies into the log file.
-func reportStats(brpPath string) {
-	if err := packer.ReportStats(os.Stderr, brpPath); err != nil {
+// copies into the log file, and RETURNS the same text so it can ride the job's
+// record to the queue page — where it is the only place the numbers are
+// visible to somebody who is not reading the daemon's log.
+func reportStats(brpPath string) string {
+	var buf bytes.Buffer
+	if err := packer.ReportStats(&buf, brpPath); err != nil {
 		fmt.Fprintf(os.Stderr, "bringest: stats for %s: %v\n", brpPath, err)
+		return ""
 	}
+	os.Stderr.Write(buf.Bytes())
+	return buf.String()
 }
 
 // ---- the -resim worker ------------------------------------------------------
@@ -594,7 +706,7 @@ type catalogRow struct {
 // catalog, and a scanned one is in it by definition.
 type resimDaemon struct {
 	workerAPI
-	resim func(ctx context.Context, gameID string) error
+	resim func(ctx context.Context, gameID string, st *jobStats) error
 	// failed remembers games whose resim errored (engine missing, unknown
 	// demo, desync); they are skipped until the process restarts so one bad
 	// game cannot wedge the loop into retrying forever. Only the catalog scan
@@ -642,7 +754,9 @@ func (r *resimDaemon) runOnce(ctx context.Context) (int, error) {
 		}
 		attempted++
 		fmt.Fprintf(os.Stderr, "bringest: %s: one-sided only, re-simulating for the full view\n", row.ID)
-		if err := r.resim(ctx, row.ID); err != nil {
+		// No job row to report onto: this half of the work list is derived
+		// from the catalog, so the stats have nowhere to go but the log.
+		if err := r.resim(ctx, row.ID, nil); err != nil {
 			if ctx.Err() != nil {
 				return attempted, ctx.Err()
 			}
@@ -681,19 +795,24 @@ func (r *resimDaemon) runQueued(ctx context.Context) (int, error) {
 		}
 		attempted++
 		fmt.Fprintf(os.Stderr, "bringest: %s: re-sim requested, re-simulating\n", j.GameID)
+		started := time.Now()
 		stop := r.heartbeat(ctx, j.ID)
-		rerr := r.resim(ctx, j.GameID)
+		st := &jobStats{}
+		rerr := r.resim(ctx, j.GameID, st)
+		st.TookSec = time.Since(started).Seconds()
 		stop() // before the terminal report, or a late beat undoes it
 		if rerr != nil {
 			if ctx.Err() != nil {
 				return attempted, ctx.Err()
 			}
 			fmt.Fprintf(os.Stderr, "bringest: %s: resim failed: %v\n", j.GameID, rerr)
-			r.report(ctx, j.ID, "error", rerr.Error())
+			// With the stats: forty minutes of engine time that ended badly is
+			// the record most worth keeping, not the one to throw away.
+			r.report(ctx, j.ID, "error", rerr.Error(), st)
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "bringest: %s: full view published\n", j.GameID)
-		r.report(ctx, j.ID, "done", "")
+		r.report(ctx, j.ID, "done", "", st)
 	}
 	return attempted, nil
 }
@@ -716,25 +835,33 @@ func (row catalogRow) needsResim() bool {
 // engine wall time) and publishes the resulting full-view .brp,
 // content-addressed off the .brp bytes (deterministic writer: the same sim
 // re-lands on the same revision).
-func resimPublish(ctx context.Context, client *barapi.Client, gameID string, ro resim.Options, target, workerDir, indexURL string, stats bool) error {
+func resimPublish(ctx context.Context, client *barapi.Client, gameID string, ro resim.Options, target, workerDir, indexURL string, stats bool, st *jobStats) error {
 	tmp, err := os.MkdirTemp("", "bringest-resim-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmp)
 	ro.OutDir = tmp
-	brpPath, modOptions, err := resim.Run(ctx, client, gameID, ro)
-	if err != nil {
-		return err
+	// Run fills this in as it goes, so a failure below still carries how far
+	// the engine got and what its log said.
+	var run resim.RunStats
+	ro.Stats = &run
+	brpPath, modOptions, rerr := resim.Run(ctx, client, gameID, ro)
+	if st != nil {
+		st.fromRunStats(run)
 	}
-	if stats {
-		reportStats(brpPath)
+	if rerr != nil {
+		return rerr
 	}
+	// No PackSec here: a re-sim has no separate pack step — resim.Run's engine
+	// writes the .brp itself, and that cost is ResimSec.
+	recordBRP(st, brpPath, stats)
 	rev, err := packer.ContentRev(brpPath) // content hash of any file; here the .brp
 	if err != nil {
 		return err
 	}
-	return packer.UploadStatic(ctx, brpPath, packer.UploadOptions{
+	uploadStart := time.Now()
+	err = packer.UploadStatic(ctx, brpPath, packer.UploadOptions{
 		Target:     target,
 		WorkerDir:  workerDir,
 		IndexURL:   indexURL,
@@ -745,4 +872,8 @@ func resimPublish(ctx context.Context, client *barapi.Client, gameID string, ro 
 		// otherwise the row keeps the superseded one-sided upload's marking.
 		View: "full",
 	})
+	if st != nil {
+		st.UploadSec = time.Since(uploadStart).Seconds()
+	}
+	return err
 }

@@ -43,7 +43,13 @@ The landing page (no `?replay=` in the URL) has a **left menu** with two section
   page** with a Prev/Next pager. Two kinds appear here: an `upload` is a dropped
   `.brepstream` waiting for a plain `bringest`, a `re-sim` is a game **nobody
   uploaded**, requested from the paste box above the table (below) and waiting for
-  an engine host running `bringest -resim`. It never refreshes itself:
+  an engine host running `bringest -resim`. A finished job also shows what the
+  work **took** — for a re-sim that is the engine's own wall time — and clicking
+  the row expands the rest of the daemon's processing record: the load/sim
+  split, how much faster than realtime it simulated, what its engine log said
+  (**desyncs above all**: a re-simulation that desynced describes a game that
+  never happened and looks perfectly normal on disk), and the `.brp` size
+  breakdown `pack -stats` prints. It never refreshes itself:
   reads happen when the landing page opens, when you page, when you press **Reload**,
   and when your own upload lands or fails — so the pager stamps the clock time of the
   read. The menu entry carries a count of the jobs still in flight (counted
@@ -254,7 +260,7 @@ wherever the repo lives (`cmd/bringest`, e.g. a VM):
 | `GET /api/jobs/<id>` | open; the job's state for the requesting browser's poll (`pending → processing → done \| error`) |
 | `GET /api/jobs` | bearer-guarded; a daemon's work queue (pending + stalled-processing jobs of ONE kind, oldest first). `?kind=upload` (**the default**, so a deployed daemon is never handed work it cannot run) or `?kind=resim` |
 | `GET /api/queue` | open; the same jobs for the landing page's **Queue** section, paged — `?offset=&limit=` (default 25, capped at 100) → `{jobs, total, active, offset}`, unfinished first then recently finished. `total`/`active` count the whole table, not the page. The archive key is left out, since those bytes are guarded |
-| `POST /api/jobs/<id>` | bearer-guarded; daemon transitions (`processing`, `done`, `error` + message). `{state:"processing", claim:true, kind}` is a **claim**, which fails with 409 when another daemon already holds the job; a plain `processing` is the heartbeat a long job sends to keep the stale-job rule from offering it away |
+| `POST /api/jobs/<id>` | bearer-guarded; daemon transitions (`processing`, `done`, `error` + message, `stats`). `{state:"processing", claim:true, kind}` is a **claim**, which fails with 409 when another daemon already holds the job; a plain `processing` is the heartbeat a long job sends to keep the stale-job rule from offering it away |
 | `GET /api/streams/<gameId>/<file>` | bearer-guarded; the daemon downloads the archived stream (it speaks only HTTPS to the Worker — no S3 reads, no inbound connectivity) |
 
 The daemon polls, claims a job, downloads the stream, and publishes it through

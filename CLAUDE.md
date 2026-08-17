@@ -185,6 +185,21 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           after each publish, to STDERR so the -log file keeps it; a
                           measuring failure is a warning, never a lost publish (the bytes
                           are already packed and about to be uploaded by then).
+                          PROCESSING STATS (jobStats): every JOB-backed publish also reports
+                          what it cost onto the job row (the worker's jobs.stats JSON column),
+                          which is the only place a person not reading this daemon's log can
+                          see it. An upload records pack/upload seconds and the .brp size; a
+                          re-sim adds resim.RunStats — engine wall time split into load and
+                          sim (the split comes from watching the engine's stdout for the
+                          widget's first "[barreplay]" line, exactly as cmd/barreplay does it),
+                          frames against the demo's length, speed-up, engine version, and
+                          engine.SummarizeInfolog's read of infolog.txt. The size report rides
+                          along as text, with the daemon's TEMP PATH rewritten to the basename
+                          first — it is gone by the time anyone reads the page and is nobody
+                          else's business. Reported on FAILURE too: resim.Run fills its
+                          Options.Stats in AS IT GOES precisely so a run that dies at minute
+                          forty still says how far it got and what its log said. The catalog-scan
+                          half has no job row, so its stats go only to the log.
                           -progress (DEFAULT ON) prints cmd/barreplay's frame/ETA line during a
                           re-sim; -log (default ./bringest.log) APPENDS everything printed to a
                           file as well as stderr. The tee swaps os.Stderr for a pipe rather than
@@ -228,7 +243,14 @@ internal/demofile/        gunzip + parse packed header + TDF startscript + the p
                           then both report 98 messages for that game, which is the
                           cross-check that the packet decoding is right. Typed autohost
                           commands ("!cv resign") are kept: a person wrote those.
-internal/engine/          locate spring-headless/pr-downloader, provision, launch, stream stdout
+internal/engine/          locate spring-headless/pr-downloader, provision, launch, stream stdout.
+                          SummarizeInfolog (infolog.go) reduces a finished run's infolog.txt to
+                          size/lines/last frame plus DESYNC and warning counts — substring
+                          heuristics, not a parse of a grammar the engine promises, and the
+                          desync count is the point: a re-simulation that desynced describes a
+                          game that never happened and is indistinguishable from a good capture
+                          on disk. Best-effort like everything reading the engine's leavings —
+                          a missing log yields a zero summary, never an error.
 internal/capture/         parse the widgets' streams -> snapshot records (BRSNAP text in
                           capture.go, binary .brepstream in brep.go, shared preamble +
                           comm-record parsing in lines.go). COMM records (text) / 'C'
@@ -549,6 +571,20 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           legitimately holds it and mark it failed. A resim's stale window is
                           90 min rather than 15 (STALE_PROCESSING_RESIM_SEC), the backstop for a
                           daemon too old to heartbeat.
+                          JOB STATS: jobs.stats is ONE nullable JSON column (JobStats in jobs.ts,
+                          cmd/bringest's jobStats struct the other half of the contract), not a
+                          column per number — nothing queries these, the queue page just reads
+                          them, and the two kinds barely overlap (an upload records what packing
+                          and uploading cost, a re-sim adds an hour of engine time and its
+                          infolog summary). Reported with the TERMINAL state, on FAILURE as well
+                          as success — forty minutes that ended badly is the record most worth
+                          having — and COALESCEd by jobUpdate so a heartbeat, which carries none,
+                          cannot erase it. Every field is optional: an older daemon simply sends
+                          less, and a failed job sends only what it got as far as measuring.
+                          parseJobStats shape-checks only that it is a plain object under
+                          MAX_JOB_STATS_BYTES (32 KB, nearly all of it the size report); anything
+                          else is DROPPED rather than 400ing, since the stats describe work that
+                          already happened and refusing them would lose the state transition too.
                           WIDGET-INSTALL GUIDE: the dropzone banner links (relatively, so it
                           resolves on both backends) to /setup — public/setup.html, four numbered
                           steps ending in a drag&drop upload. The page is deliberately
@@ -592,14 +628,25 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           deliberately NOT in the chain: it reports pre-existing noUnusedLocals
                           errors in tests/, so wiring it in would block every deploy.
                           QUEUE SECTION (app.js renderQueue): the landing page's second menu entry
-                          shows those jobs — one row per job with its game, KIND, state, age and
-                          failure detail, a link to the replay once the catalog has it (and out
+                          shows those jobs — one row per job with its game, KIND, state, what the
+                          work TOOK, age and failure detail, a link to the replay once the
+                          catalog has it (and out
                           to bar-rts.com until then, which for a queued re-sim is the whole point
                           of the row), and a count of the jobs in flight on the menu entry
                           itself. Above the table sits the re-sim paste box (app.js initResim/
                           submitResim, #resimbox), the intake described under the worker routes
                           above; the two doors of the pipeline therefore bracket the section, the
-                          dropzone above it and this inside it. It reads GET
+                          dropzone above it and this inside it. The Took cell carries the one
+                          number worth a column — the engine's own wall time for a re-sim, the
+                          whole job's otherwise — and CLICKING THE ROW expands the rest of the
+                          daemon's record (statsRow/statsLines): the load/sim split, frames
+                          against the demo's length, speed-up, the engine-log summary, and the
+                          .brp size breakdown verbatim in a scrolling <pre>. The row is the
+                          toggle rather than a control of its own, minus clicks on a link, which
+                          is there to be followed; which rows are open is plain component state
+                          (queueOpen), NOT in the URL — unlike ?tab= and the filters, "the third
+                          job's timings were expanded" is not a thing to share or restore.
+                          It reads GET
                           /api/queue (ReplayIndex.queuePage: unfinished jobs first, then the most
                           recently finished; ?offset=/?limit=, limit capped at QUEUE_LIMIT_MAX),
                           QUEUE_PAGE = 25 rows at a time with a Prev/Next pager. It NEVER refreshes
