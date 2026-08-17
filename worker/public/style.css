@@ -178,6 +178,13 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
 #queuetable .state-processing { color: #8fd3ff; border-color: #2f5878; background: #16293a; }
 #queuetable .state-done { color: #7fd18b; border-color: #33663c; background: #16311b; }
 #queuetable .state-error { color: #ff9c8f; border-color: #7a3428; background: #34160f; }
+/* Which daemon a job waits on. Deliberately quieter than the state chips: the
+   kind explains a row, the state is what you scan the column for. */
+#queuetable .kind {
+  font-size: 10px; line-height: 1; padding: 3px 7px; border-radius: 8px;
+  background: #1b232c; border: 1px solid #2f3947; color: #8a98a6;
+}
+#queuetable .kind-resim { color: #d3b98f; border-color: #5c4a2f; background: #2b2417; }
 /* Pager + the read stamp. The section never refreshes itself, so "read at
    <clock>" is part of the contract, not decoration: it says how old what you
    are looking at is, and Reload is how it moves. */
@@ -193,6 +200,28 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
 #queuepager button:disabled { opacity: .45; cursor: default; }
 #queuepager #q_range { margin-right: auto; }
 #queuemsg { padding: 12px 8px; font-size: 13px; max-width: 1650px; margin: 0 auto; }
+/* Re-sim request box: the queue's own intake, for a game nobody uploaded.
+   Framed like the dropzone above it — the two are the pipeline's two doors. */
+#resimbox {
+  max-width: 1650px; margin: 0 auto 14px; padding: 12px 14px;
+  border: 1px solid #2a323c; border-radius: 6px; font-size: 12px; color: #8a98a6;
+}
+#resimbox label { display: block; margin-bottom: 7px; }
+#resimbox .row { display: flex; gap: 8px; }
+#resimbox input {
+  flex: 1; min-width: 0; background: #12181e; color: #cfe3f5;
+  border: 1px solid #2f3947; border-radius: 4px; padding: 4px 8px; font-size: 12px;
+}
+#resimbox input:focus { outline: none; border-color: #4a7fa8; }
+#resimbox button {
+  background: #1b232c; color: #9fb0bf; border: 1px solid #2f3947;
+  border-radius: 4px; padding: 4px 11px; font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+#resimbox button:hover:enabled { color: #cfe3f5; border-color: #4a5a6c; }
+#resimbox button:disabled { opacity: .45; cursor: default; }
+#resimstatus { margin-top: 8px; font-size: 12px; color: #c7d3de; }
+#resimstatus.error { color: #e2785b; }
+#resimstatus.ok { color: #6fd07f; }
 
 #wrap { display: flex; flex: 1; min-height: 0; }
 #left { flex: 1; position: relative; }

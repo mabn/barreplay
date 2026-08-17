@@ -5,7 +5,7 @@
 // tooling live (a VM, a workstation), does the actual work through the same
 // pipeline as `pack -upload` (internal/packer):
 //
-//	poll GET  <worker>/api/jobs            pending (and stalled) jobs
+//	poll GET  <worker>/api/jobs?kind=upload   pending (and stalled) jobs
 //	     POST <worker>/api/jobs/<id>       claim: state=processing
 //	     GET  <worker>/api/<streamKey>     download the archived stream
 //	     pack: demo fetch -> .brp -> static bundle -> R2 upload (revisioned)
@@ -35,18 +35,31 @@
 // in the log next to everything else. -stats=false turns it off.
 //
 // -resim (needs -data pointing at a BAR data dir on an engine-capable host —
-// see the GL caveat in CLAUDE.md) runs an INDEPENDENT worker instead of the
-// job loop: it polls the replay catalog (GET /api/replays) for games whose
-// current upload is ONE-SIDED (uploaderAlly set — a playing client's point
-// of view) and which have no full-view revision yet (no ally-null entry in
-// the row's uploads list), re-simulates each demo headlessly
-// (internal/resim, the cmd/barreplay pipeline) and publishes the full-view
-// capture as another revision of the same game. The publish itself
-// retires the candidate — the row's uploads list gains an ally-null entry
-// and its rid moves to the full view — so no extra queue state exists
-// anywhere; upload jobs are untouched and keep being served by plain
-// bringest runs. A game whose resim fails is remembered and skipped until
-// the daemon restarts.
+// see the GL caveat in CLAUDE.md) runs a SEPARATE worker instead of the upload
+// job loop, re-simulating demos headlessly (internal/resim, the cmd/barreplay
+// pipeline) and publishing each full-view capture as another revision of its
+// game. It takes work from two places, in this order:
+//
+//  1. REQUESTED re-sims: GET /api/jobs?kind=resim, the queue behind the
+//     landing page's paste-a-replay-link box. These are claimed
+//     (POST state=processing claim=true, which the worker REFUSES if another
+//     daemon holds the job), heartbeated while the engine runs, and reported
+//     done/error so the requester sees the outcome — including the failure
+//     message — on the queue page. They are the only route into the pipeline
+//     for a game nobody uploaded at all.
+//  2. The CATALOG SCAN: GET /api/replays for games whose current upload is
+//     ONE-SIDED (uploaderAlly set — a playing client's point of view) and
+//     which have no full-view revision yet (no ally-null entry in the row's
+//     uploads list). This half needs no queue state anywhere: the publish
+//     itself retires the candidate — the row's uploads list gains an
+//     ally-null entry and its rid moves to the full view. A game whose resim
+//     fails here is remembered and skipped until the daemon restarts (a
+//     requested job records its failure on its own row instead, and
+//     re-requesting it is the retry).
+//
+// The two lists cannot overlap: a request is refused while its game is in the
+// catalog, and a scanned candidate is in it by definition. Upload jobs are
+// untouched either way and keep being served by plain bringest runs.
 //
 // Usage:
 //
@@ -54,7 +67,7 @@
 //	bringest -upload local    # ...the dev simulator's instead
 //	bringest -once            # drain the backlog and exit
 //	bringest -resim -data ~/bar-data        # the independent full-view re-sim worker
-//	bringest -resim -data ~/bar-data -once  # re-sim the current candidates and exit
+//	bringest -resim -data ~/bar-data -once  # re-sim the requested + current candidates and exit
 //
 // -upload names the whole deployment, not just a bucket: the job queue, the
 // stream downloads, the R2 pieces and the catalog row all belong to one worker
@@ -166,19 +179,27 @@ func run() int {
 			ro.ProgressEvery = progressEvery
 		}
 		loop = &resimDaemon{
-			indexURL: indexURL,
-			client:   &http.Client{Timeout: 1 * time.Minute},
-			failed:   map[string]bool{},
+			// The requested-re-sim queue is the same bearer-guarded job API
+			// the upload loop uses; the catalog listing it also reads is
+			// open, which is why this loop needed no token before.
+			workerAPI: workerAPI{
+				indexURL: indexURL,
+				token:    os.Getenv("REPLAY_PUT_TOKEN"),
+				client:   &http.Client{Timeout: 1 * time.Minute},
+			},
+			failed: map[string]bool{},
 			resim: func(ctx context.Context, gameID string) error {
 				return resimPublish(ctx, client, gameID, ro, *target, *workerDir, indexURL, *stats)
 			},
 		}
-		what = "one-sided replays to re-simulate"
+		what = "requested and one-sided replays to re-simulate"
 	} else {
 		loop = &daemon{
-			indexURL: indexURL,
-			token:    os.Getenv("REPLAY_PUT_TOKEN"),
-			client:   &http.Client{Timeout: 5 * time.Minute},
+			workerAPI: workerAPI{
+				indexURL: indexURL,
+				token:    os.Getenv("REPLAY_PUT_TOKEN"),
+				client:   &http.Client{Timeout: 5 * time.Minute},
+			},
 			process: func(ctx context.Context, streamPath string) error {
 				return processStream(ctx, client, streamPath, *target, *workerDir, indexURL, *stats)
 			},
@@ -273,22 +294,44 @@ func mustGetwd() string {
 	return wd
 }
 
-// ingestJob mirrors the worker's job row (worker/src/worker/replayindex.ts).
+// ingestJob mirrors the worker's job row (worker/src/worker/jobs.ts).
 type ingestJob struct {
 	ID        string `json:"id"`
 	StreamKey string `json:"streamKey"`
 	GameID    string `json:"gameId"`
+	Kind      string `json:"kind"`
 	State     string `json:"state"`
 }
 
-// daemon holds the polling loop's wiring. process is injectable so the loop
-// (claim -> download -> process -> report) tests hermetically without the
-// packer's npx/network machinery or a real engine.
-type daemon struct {
+// Job kinds, mirroring worker/src/worker/jobs.ts. Which kind a job is decides
+// which daemon serves it: an upload needs no engine, a re-sim needs a whole
+// BAR install and an hour.
+const (
+	kindUpload = "upload"
+	kindResim  = "resim"
+)
+
+// heartbeatEvery is how often a daemon re-reports "processing" while a job is
+// still running. The worker offers a "processing" job to somebody else once it
+// has been silent for its kind's stale window, which exists to recover from a
+// dead worker — a re-sim runs far longer than that window, so without this it
+// would hand live work away mid-run. A var so the test can beat faster.
+var heartbeatEvery = 60 * time.Second
+
+// workerAPI is the daemons' shared line to the worker: one JSON helper, the
+// bearer token, and the job transitions both loops need.
+type workerAPI struct {
 	indexURL string
 	token    string
 	client   *http.Client
-	process  func(ctx context.Context, streamPath string) error
+}
+
+// daemon holds the upload loop's wiring. process is injectable so the loop
+// (claim -> download -> process -> report) tests hermetically without the
+// packer's npx/network machinery or a real engine.
+type daemon struct {
+	workerAPI
+	process func(ctx context.Context, streamPath string) error
 }
 
 // runOnce fetches the pending queue and works through it sequentially,
@@ -296,14 +339,23 @@ type daemon struct {
 // attempted; the returned error covers queue-level failures only (a single
 // job's failure is reported to its job row and does not stop the rest).
 func (d *daemon) runOnce(ctx context.Context) (int, error) {
-	var jobs []ingestJob
-	if err := d.api(ctx, http.MethodGet, "/api/jobs", nil, &jobs); err != nil {
+	jobs, err := d.pendingJobs(ctx, kindUpload)
+	if err != nil {
 		return 0, fmt.Errorf("listing pending jobs: %w", err)
 	}
+	attempted := 0
 	for _, j := range jobs {
 		if ctx.Err() != nil {
 			return 0, ctx.Err()
 		}
+		// A worker too old to filter by kind serves every pending job. Leave
+		// anything that is not ours alone — untouched, not failed: the daemon
+		// that can run it has to still find it pending.
+		if j.Kind == kindResim || (j.Kind == "" && j.StreamKey == "") {
+			fmt.Fprintf(os.Stderr, "bringest: job %s (%s): not an upload job, leaving it for -resim\n", j.ID, j.GameID)
+			continue
+		}
+		attempted++
 		if err := d.handle(ctx, j); err != nil {
 			fmt.Fprintf(os.Stderr, "bringest: job %s (%s): %v\n", j.ID, j.GameID, err)
 			d.report(ctx, j.ID, "error", err.Error())
@@ -312,7 +364,7 @@ func (d *daemon) runOnce(ctx context.Context) (int, error) {
 			d.report(ctx, j.ID, "done", "")
 		}
 	}
-	return len(jobs), nil
+	return attempted, nil
 }
 
 // handle runs one job: claim it, download the archived stream to a temp file
@@ -336,7 +388,7 @@ func (d *daemon) handle(ctx context.Context, j ingestJob) error {
 
 // download streams one archived upload from the worker (GET /api/<streamKey>,
 // bearer-guarded) into path.
-func (d *daemon) download(ctx context.Context, streamKey, path string) error {
+func (d *workerAPI) download(ctx context.Context, streamKey, path string) error {
 	// The archive key is streams/<gameId>/<file>; the worker serves it under
 	// /api/ with each segment escaped.
 	parts := strings.Split(streamKey, "/")
@@ -367,8 +419,17 @@ func (d *daemon) download(ctx context.Context, streamKey, path string) error {
 	return f.Close()
 }
 
+// pendingJobs lists the worker's pending (and stalled) jobs of one kind.
+func (d *workerAPI) pendingJobs(ctx context.Context, kind string) ([]ingestJob, error) {
+	var jobs []ingestJob
+	if err := d.api(ctx, http.MethodGet, "/api/jobs?kind="+url.QueryEscape(kind), nil, &jobs); err != nil {
+		return nil, err
+	}
+	return jobs, nil
+}
+
 // report posts a job state transition; errMsg rides along for "error".
-func (d *daemon) report(ctx context.Context, jobID, state, errMsg string) error {
+func (d *workerAPI) report(ctx context.Context, jobID, state, errMsg string) error {
 	body := map[string]string{"state": state}
 	if errMsg != "" {
 		body["error"] = errMsg
@@ -376,8 +437,47 @@ func (d *daemon) report(ctx context.Context, jobID, state, errMsg string) error 
 	return d.api(ctx, http.MethodPost, "/api/jobs/"+url.PathEscape(jobID), body, nil)
 }
 
+// claim takes a job, and unlike report it can legitimately FAIL: the worker
+// only allows the transition from pending (or from a processing gone stale),
+// so a second daemon polling the same round is told no rather than running the
+// same hour of engine work in parallel. The flag is opt-in precisely because
+// the upload loop's plain "processing" report must keep succeeding.
+func (d *workerAPI) claim(ctx context.Context, jobID, kind string) error {
+	return d.api(ctx, http.MethodPost, "/api/jobs/"+url.PathEscape(jobID),
+		map[string]any{"state": "processing", "claim": true, "kind": kind}, nil)
+}
+
+// heartbeat re-reports "processing" until the returned stop is called, so a
+// job that runs for longer than the worker's stale window is not offered to
+// somebody else while it is alive. stop WAITS for the goroutine to finish:
+// a heartbeat still in flight when the terminal done/error lands would
+// overwrite it and leave the row processing forever.
+func (d *workerAPI) heartbeat(ctx context.Context, jobID string) (stop func()) {
+	hctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(heartbeatEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-hctx.Done():
+				return
+			case <-t.C:
+				if err := d.report(hctx, jobID, "processing", ""); err != nil && hctx.Err() == nil {
+					fmt.Fprintf(os.Stderr, "bringest: job %s: heartbeat: %v\n", jobID, err)
+				}
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
 // api performs one JSON request against the worker, bearer-authenticated.
-func (d *daemon) api(ctx context.Context, method, path string, body, out any) error {
+func (d *workerAPI) api(ctx context.Context, method, path string, body, out any) error {
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -409,7 +509,7 @@ func (d *daemon) api(ctx context.Context, method, path string, body, out any) er
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-func (d *daemon) auth(req *http.Request) {
+func (d *workerAPI) auth(req *http.Request) {
 	if d.token != "" {
 		req.Header.Set("Authorization", "Bearer "+d.token)
 	}
@@ -478,45 +578,61 @@ type catalogRow struct {
 	} `json:"uploads"`
 }
 
-// resimDaemon is the independent -resim worker: no job queue, no worker-side
-// state. Its work list is a pure function of the public catalog — a game is
-// a candidate while its current upload is one-sided (uploaderAlly set) and
-// its uploads list holds no full-view revision (an entry with a null ally:
-// spectator uploads and re-sim captures PUT with no uploaderAlly). The
-// publish itself retires the candidate, so completion needs no marking.
+// resimDaemon is the independent -resim worker. It takes work from two places,
+// in this order:
+//
+//   - REQUESTED re-sims, the queue behind the landing page's paste box
+//     (POST /api/resim -> a "resim" job). Someone asked for these by name, and
+//     they are the only way a game NOBODY uploaded gets published at all.
+//   - the CATALOG SCAN, which needs no queue state anywhere: a game is a
+//     candidate while its current upload is one-sided (uploaderAlly set) and
+//     its uploads list holds no full-view revision (an entry with a null ally:
+//     spectator uploads and re-sim captures PUT with no uploaderAlly). The
+//     publish itself retires the candidate, so completion needs no marking.
+//
+// The two lists cannot overlap: a requested game is refused while it is in the
+// catalog, and a scanned one is in it by definition.
 type resimDaemon struct {
-	indexURL string
-	client   *http.Client
-	resim    func(ctx context.Context, gameID string) error
+	workerAPI
+	resim func(ctx context.Context, gameID string) error
 	// failed remembers games whose resim errored (engine missing, unknown
 	// demo, desync); they are skipped until the process restarts so one bad
-	// game cannot wedge the loop into retrying forever.
+	// game cannot wedge the loop into retrying forever. Only the catalog scan
+	// needs it — a requested job records its failure on its own row and so
+	// leaves the queue by itself, and re-pasting the link is the retry.
 	failed map[string]bool
 }
 
-// runOnce lists the catalog and re-simulates every candidate sequentially
-// (each is minutes of engine wall time). Returns how many it attempted; the
-// error covers the catalog listing only — per-game failures are logged and
-// remembered.
+// runOnce drains the requested re-sims, then scans the catalog, re-simulating
+// every candidate sequentially (each is minutes of engine wall time). Returns
+// how many it attempted; the error covers the listings only — per-game
+// failures are reported and do not stop the round.
 func (r *resimDaemon) runOnce(ctx context.Context) (int, error) {
+	attempted, err := r.runQueued(ctx)
+	if err != nil {
+		return attempted, err
+	}
+	if ctx.Err() != nil {
+		return attempted, ctx.Err()
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.indexURL+"/api/replays", nil)
 	if err != nil {
-		return 0, err
+		return attempted, err
 	}
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("listing the catalog: %w", err)
+		return attempted, fmt.Errorf("listing the catalog: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("GET /api/replays: %s", resp.Status)
+		return attempted, fmt.Errorf("GET /api/replays: %s", resp.Status)
 	}
 	var rows []catalogRow
 	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
-		return 0, fmt.Errorf("decoding the catalog: %w", err)
+		return attempted, fmt.Errorf("decoding the catalog: %w", err)
 	}
 
-	attempted := 0
 	for _, row := range rows {
 		if ctx.Err() != nil {
 			return attempted, ctx.Err()
@@ -535,6 +651,49 @@ func (r *resimDaemon) runOnce(ctx context.Context) (int, error) {
 		} else {
 			fmt.Fprintf(os.Stderr, "bringest: %s: full view published\n", row.ID)
 		}
+	}
+	return attempted, nil
+}
+
+// runQueued works through the re-sims somebody explicitly requested. Unlike
+// the catalog scan these are worker-side state, so each one is claimed (the
+// worker refuses a job another daemon already holds), heartbeated while the
+// engine runs, and reported done or error — the failure message is what the
+// requester sees on the queue page.
+func (r *resimDaemon) runQueued(ctx context.Context) (int, error) {
+	jobs, err := r.pendingJobs(ctx, kindResim)
+	if err != nil {
+		return 0, fmt.Errorf("listing queued re-sims: %w", err)
+	}
+	attempted := 0
+	for _, j := range jobs {
+		if ctx.Err() != nil {
+			return attempted, ctx.Err()
+		}
+		// A worker too old to filter by kind serves every pending job; an
+		// upload is not ours to run, and taking it would strand it.
+		if j.Kind != kindResim {
+			continue
+		}
+		if err := r.claim(ctx, j.ID, kindResim); err != nil {
+			fmt.Fprintf(os.Stderr, "bringest: %s: could not claim job %s (%v); skipping\n", j.GameID, j.ID, err)
+			continue
+		}
+		attempted++
+		fmt.Fprintf(os.Stderr, "bringest: %s: re-sim requested, re-simulating\n", j.GameID)
+		stop := r.heartbeat(ctx, j.ID)
+		rerr := r.resim(ctx, j.GameID)
+		stop() // before the terminal report, or a late beat undoes it
+		if rerr != nil {
+			if ctx.Err() != nil {
+				return attempted, ctx.Err()
+			}
+			fmt.Fprintf(os.Stderr, "bringest: %s: resim failed: %v\n", j.GameID, rerr)
+			r.report(ctx, j.ID, "error", rerr.Error())
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "bringest: %s: full view published\n", j.GameID)
+		r.report(ctx, j.ID, "done", "")
 	}
 	return attempted, nil
 }

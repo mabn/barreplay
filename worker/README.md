@@ -38,9 +38,12 @@ unreachable), so there is no map proxy.
 The landing page (no `?replay=` in the URL) has a **left menu** with two sections:
 
 - **Replays** — the catalog list (below), the default.
-- **Queue** — **admin-only** (`?admin=true`): the ingest jobs behind the drag&drop
-  uploads (`GET /api/queue`), one row per upload with its game, state, age and
-  failure detail, **5 per page** with a Prev/Next pager. It never refreshes itself:
+- **Queue** — **admin-only** (`?admin=true`): the ingest jobs (`GET /api/queue`),
+  one row per job with its game, **kind**, state, age and failure detail, **5 per
+  page** with a Prev/Next pager. Two kinds appear here: an `upload` is a dropped
+  `.brepstream` waiting for a plain `bringest`, a `re-sim` is a game **nobody
+  uploaded**, requested from the paste box above the table (below) and waiting for
+  an engine host running `bringest -resim`. It never refreshes itself:
   reads happen when the landing page opens, when you page, when you press **Reload**,
   and when your own upload lands or fails — so the pager stamps the clock time of the
   read. The menu entry carries a count of the jobs still in flight (counted
@@ -147,6 +150,10 @@ worker/
                           /api/upload + jobs, SPA fallback (no workerd imports — node-testable)
   src/worker/replayindex.ts  the catalog + ingest-jobs Durable Object (SQLite)
   src/worker/replayentry.ts  catalog row shape + PUT body validation (node-testable, no workerd)
+  src/worker/jobs.ts      the ingest job contract (kind, state, row shape), shared by the DO
+                          and the routes — its own module because app.ts must import the kinds
+                          as VALUES and may not pull `cloudflare:workers` into its graph
+  src/worker/gameid.ts    pull a gameId out of a pasted replay link (twin of barapi.ParseGameID)
   src/worker/preamble.ts  minimal .brepstream preamble scan for /api/upload (gameId, ally team)
   tools/sync-assets.mjs   copies the vendored icons + the uploader widget into public/ before dev/build
   tools/smoke.mjs         boots the BUILT worker (vite preview -> workerd + the real asset
@@ -242,11 +249,12 @@ wherever the repo lives (`cmd/bringest`, e.g. a VM):
 
 | URL | What |
 | --- | --- |
-| `POST /api/upload` | open; validates the stream's preamble (`src/worker/preamble.ts`), archives the raw bytes at `streams/<gameId>/<ts>-a<ally>.brepstream` (append-only, never listed, never served publicly), inserts a pending job, returns `{job, gameId, streamKey}` |
-| `GET /api/jobs/<id>` | open; the job's state for the uploading browser's poll (`pending → processing → done \| error`) |
-| `GET /api/jobs` | bearer-guarded; the daemon's work queue (pending + stalled-processing jobs, oldest first) |
+| `POST /api/upload` | open; validates the stream's preamble (`src/worker/preamble.ts`), archives the raw bytes at `streams/<gameId>/<ts>-a<ally>.brepstream` (append-only, never listed, never served publicly), inserts a pending `upload` job, returns `{job, gameId, streamKey}` |
+| `POST /api/resim` | open; `{link}` → a pending `resim` job for a game **nobody uploaded** (see below) |
+| `GET /api/jobs/<id>` | open; the job's state for the requesting browser's poll (`pending → processing → done \| error`) |
+| `GET /api/jobs` | bearer-guarded; a daemon's work queue (pending + stalled-processing jobs of ONE kind, oldest first). `?kind=upload` (**the default**, so a deployed daemon is never handed work it cannot run) or `?kind=resim` |
 | `GET /api/queue` | open; the same jobs for the landing page's **Queue** section, paged — `?offset=&limit=` (default 25, capped at 100) → `{jobs, total, active, offset}`, unfinished first then recently finished. `total`/`active` count the whole table, not the page. The archive key is left out, since those bytes are guarded |
-| `POST /api/jobs/<id>` | bearer-guarded; daemon transitions (`processing`, `done`, `error` + message) |
+| `POST /api/jobs/<id>` | bearer-guarded; daemon transitions (`processing`, `done`, `error` + message). `{state:"processing", claim:true, kind}` is a **claim**, which fails with 409 when another daemon already holds the job; a plain `processing` is the heartbeat a long job sends to keep the stale-job rule from offering it away |
 | `GET /api/streams/<gameId>/<file>` | bearer-guarded; the daemon downloads the archived stream (it speaks only HTTPS to the Worker — no S3 reads, no inbound connectivity) |
 
 The daemon polls, claims a job, downloads the stream, and publishes it through
@@ -275,6 +283,53 @@ The raw archives under `streams/` accumulate on purpose (nothing in the bucket
 is ever deleted): they are the substrate for the planned multi-player merge
 (docs/widget-remote-upload.md), keyed by gameId with the recorder's ally team
 (`-a<n>`, `-spec` for spectators) in the name.
+
+### Re-simulating a replay nobody uploaded
+
+A game with no `.brepstream` behind it has no way into the pipeline above, and
+`bringest -resim` cannot find it either: that loop's work list is a scan of the
+catalog for one-sided uploads, which by construction cannot see a game that was
+never uploaded at all. The Queue section's paste box is that missing door — put
+in a link from any site that shows BAR replays and the engine host publishes it:
+
+```
+https://gex.honu.pw/match/<gameId>
+https://bar-rts.com/replays/<gameId>
+https://www.beyondallreason.info/replays?gameId=<gameId>
+<gameId>                                    # the bare 32 hex chars
+```
+
+`src/worker/gameid.ts` pulls the id out (the TypeScript twin of
+`barapi.ParseGameID` — the two must stay in lockstep, since the Go side is what
+eventually looks the game up). `POST /api/resim` then refuses everything it
+should, before an hour of somebody's engine time is spent:
+
+- the id has to parse;
+- **`api.bar-rts.com` has to know the game.** Unlike an upload, a re-sim cannot
+  degrade past a missing demo — the demo *is* the simulation input;
+- the game must **not already be in the catalog**;
+- a game already queued or running returns *that* job, so re-pasting a link is
+  harmless rather than a second hour of work.
+
+The box is admin-only, like the Queue section it sits in; the route itself is
+open, like the row-refresh and point-of-view controls (the browser holds no
+bearer token, and the refusals above are what keeps it cheap to expose).
+
+A re-sim runs for far longer than the 15 minutes after which a silent
+`processing` job is presumed dead and offered to somebody else, so the daemon
+**heartbeats** — it re-reports `processing` every 60 s, which is also what makes
+the queue row's *Updated* cell move while the engine works. The claim itself
+(`claim:true`) is refusable, so two daemons polling the same round cannot both
+run the same game.
+
+```sh
+# on the engine host (needs spring-headless + working GL — see CLAUDE.md):
+go run ./cmd/bringest -resim -data ~/bar-data
+```
+
+That one process serves both halves: the requests first, then its catalog scan
+for one-sided uploads. Upload jobs are untouched — run a plain `bringest`
+alongside, on any host, with no engine at all.
 
 ### Where players get the widget (`/setup`)
 

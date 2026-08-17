@@ -40,7 +40,7 @@ go run ./cmd/pack -upload local ./caps/<gameId>.brepstream   # ...to the dev sim
 # sizes + top-10 unit defs by encoded bytes with per-instance cost (snapshot.ComputeBRPStats, self-checked
 # against the codec; raw captures pack first, then report).
 go run ./cmd/barreplay-static -out ./static ./snapshots/*.brp   # pack .brp -> static bundle for R2 hosting (see worker/)
-go run ./cmd/bringest   # drag&drop upload daemon: poll the deployed worker's job queue and publish uploaded .brepstreams, printing each one's .brp size breakdown like pack -stats (-stats=false quiets it; -once drains and exits; -upload local targets the dev simulator — one flag picks the queue, bucket and catalog together; -resim -data <BARdata> runs the independent re-sim worker instead: catalog games with only a one-sided upload get a full-view re-simulation published as another revision)
+go run ./cmd/bringest   # drag&drop upload daemon: poll the deployed worker's job queue and publish uploaded .brepstreams, printing each one's .brp size breakdown like pack -stats (-stats=false quiets it; -once drains and exits; -upload local targets the dev simulator — one flag picks the queue, bucket and catalog together; -resim -data <BARdata> runs the re-sim worker instead: it drains the re-sims REQUESTED from the queue page's paste box, then scans the catalog for games with only a one-sided upload, publishing each full view as another revision)
 ```
 
 Tests are hermetic: `barapi` uses a mock HTTP server, `demofile` tests against the
@@ -123,18 +123,44 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           when the BAR API doesn't know the game), and reports done/error for
                           the browser to poll. -once drains the backlog and exits; jobs survive
                           daemon downtime as pending, stalled "processing" jobs are re-offered
-                          after 15 min. -resim (needs -data on an engine-capable host) runs an
-                          INDEPENDENT worker instead of the job loop: it polls GET /api/replays
+                          after 15 min. It asks for ?kind=upload and additionally SKIPS anything
+                          that is not one: the daemon and the worker deploy independently, so a
+                          worker too old to filter still serves it re-sims, which it must leave
+                          PENDING (not fail) for the host that can run them.
+                          -resim (needs -data on an engine-capable host) runs a DIFFERENT worker
+                          instead of the upload loop, taking work from two places in order.
+                          First the REQUESTED re-sims — GET /api/jobs?kind=resim, the queue
+                          behind the landing page's paste-a-replay-link box, and the only route
+                          into the pipeline for a game NOBODY uploaded. Each is CLAIMED (POST
+                          state=processing claim=true, which the worker refuses with 409 if
+                          another daemon holds it), HEARTBEATED every 60s while the engine runs
+                          — a re-sim outlives the 15-min stale window several times over, so
+                          without that the worker would offer live work away mid-run, and the
+                          beat is also what moves the queue row's Updated cell — and reported
+                          done or error, that message being what the requester reads on the
+                          queue page. The heartbeat is cancelled AND JOINED before the terminal
+                          report, since a beat still in flight would flip a finished row back to
+                          processing forever. Then the CATALOG SCAN, as before: GET /api/replays
                           for games whose current upload is one-sided (uploaderAlly set) with no
-                          full-view revision yet (no ally-null entry in the row's uploads list),
-                          re-simulates each demo headlessly via internal/resim (the cmd/barreplay
-                          pipeline packaged as one call: demo download -> provision -> widget
-                          inject -> engine run -> .brp) and publishes the full-view capture as
-                          another revision of the same game. The publish itself retires the
-                          candidate (the uploads list gains an ally-null entry) so there is no
-                          queue state anywhere; upload jobs are untouched (run a plain bringest
-                          alongside), and a game whose resim fails is skipped until the process
-                          restarts. Both loops are hermetically tested against mock worker APIs.
+                          full-view revision yet (no ally-null entry in the row's uploads list).
+                          Either way it re-simulates the demo headlessly via internal/resim (the
+                          cmd/barreplay pipeline packaged as one call: demo download -> provision
+                          -> widget inject -> engine run -> .brp) and publishes the full-view
+                          capture as another revision of the same game. The scan half still needs
+                          no queue state at all — the publish itself retires the candidate (the
+                          uploads list gains an ally-null entry) — which is why only IT keeps the
+                          in-process failed-game memory; a requested job records its failure on
+                          its own row and so leaves the queue by itself, making a re-paste the
+                          retry. The two work lists cannot overlap: a request is refused while
+                          its game is in the catalog, and a scanned candidate is in it by
+                          definition. Upload jobs are untouched (run a plain bringest alongside,
+                          on any host, with no engine).
+                          Both loops share one workerAPI (the JSON helper, the bearer token, the
+                          job transitions), which is why -resim now needs $REPLAY_PUT_TOKEN where
+                          it did not before: its old single call, GET /api/replays, is open, and
+                          the job routes are not. No new configuration in practice — packer
+                          already reads that same var for the catalog PUT.
+                          Both loops are hermetically tested against mock worker APIs.
                           resim REFUSES to return a truncated capture — a signalled engine
                           (Ctrl-C/OOM/crash; a plain non-zero exit is normal, the engine leaves
                           via quitforce) or a capture spanning under minCoveragePct of the demo
@@ -469,6 +495,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           (viewer serves the .brp wire only; the Go pipeline produces it): it scans
                           the preamble (src/worker/preamble.ts — gameId + recorder's ally team),
                           archives the raw bytes at streams/<gameId>/<ts>-<hash8>-a<ally>.brepstream
+                          (job KIND "upload"; see the resim door below for the other kind)
                           (the hash is sha256[:4 bytes] of the body and is what makes the key unique:
                           gameId and the a<ally> suffix are equal for two teammates uploading the same
                           game, or for a halfway capture and the full one, and Workers clamp Date.now()
@@ -481,6 +508,47 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           GET /api/jobs, downloads via GET /api/streams/<gameId>/<file> (both
                           bearer-guarded), publishes, and POSTs done/error; the browser polls the
                           open GET /api/jobs/<id> and auto-opens the replay on done.
+                          RE-SIM REQUESTS: the pipeline's OTHER door, for a game nobody uploaded
+                          — which is invisible to bringest -resim's catalog scan, since that
+                          looks for one-sided UPLOADS. The Queue section's paste box POSTs a
+                          replay link to the open POST /api/resim, which parses the gameId out of
+                          it (src/worker/gameid.ts — accepts gex.honu.pw/match/<id>,
+                          bar-rts.com/replays/<id>, ...info/replays?gameId=<id> and a bare id;
+                          the TS twin of barapi.ParseGameID, which the two MUST stay in lockstep
+                          on since Go is what looks the game up. It splits the URL BY HAND rather
+                          than with `new URL`, which throws on a scheme-less paste — routine in a
+                          copy-pasted link — where Go's url.Parse reads it as a path and finds
+                          the id) and inserts a "resim" job. Everything it refuses, it refuses
+                          BEFORE an hour of engine time is committed: an unparseable link (400);
+                          a game api.bar-rts.com does not know (404 — unlike an upload a re-sim
+                          cannot degrade past a missing demo, the demo IS the simulation input;
+                          the fetch copies /refresh-settings' handling and lives in the ROUTE,
+                          not the DO, so the node tests can stub globalThis.fetch); a game
+                          already in the catalog (409); and a game already queued or running,
+                          which returns THAT job (so re-pasting a link is harmless rather than a
+                          second hour of work). The catalog check, the duplicate check and the
+                          insert are ONE DO call (resimEnqueue) — the DO is single-threaded, so
+                          that is atomic for free, where three round trips would let two pastes
+                          of the same link both insert.
+                          JOB KINDS: jobs.kind is "upload" | "resim", a KIND rather than a fifth
+                          state because the four states describe both equally well — what
+                          differs is the work, not the progress. The contract (JobKind,
+                          JOB_KINDS, IngestJob) lives in its own src/worker/jobs.ts because
+                          app.ts needs the kinds as VALUES and may not pull `cloudflare:workers`
+                          into its module graph, which importing them from replayindex.ts would.
+                          A resim row stores stream_key = '' (the column stays NOT NULL; SQLite
+                          cannot drop that without a table rebuild, and the daemon branches on
+                          the kind anyway). GET /api/jobs serves ONE kind and DEFAULTS TO
+                          "upload" — load-bearing, since a deployed bringest asks without the
+                          param and cannot run a re-sim. POST /api/jobs/<id> gained an opt-in
+                          {claim:true}: it transitions only from pending or a stale processing
+                          (jobClaim), so two daemons in one poll round cannot both take an hour
+                          of work, while a plain "processing" stays unconditional because that
+                          is the heartbeat AND because the upload daemon treats a failed
+                          transition as a job error — it would take the job from whoever
+                          legitimately holds it and mark it failed. A resim's stale window is
+                          90 min rather than 15 (STALE_PROCESSING_RESIM_SEC), the backstop for a
+                          daemon too old to heartbeat.
                           WIDGET-INSTALL GUIDE: the dropzone banner links (relatively, so it
                           resolves on both backends) to /setup — public/setup.html, four numbered
                           steps ending in a drag&drop upload. The page is deliberately
@@ -524,9 +592,14 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           deliberately NOT in the chain: it reports pre-existing noUnusedLocals
                           errors in tests/, so wiring it in would block every deploy.
                           QUEUE SECTION (app.js renderQueue): the landing page's second menu entry
-                          shows those jobs — one row per upload with its game, state, age and
-                          failure detail, a link to the replay once the catalog has it, and a
-                          count of the jobs in flight on the menu entry itself. It reads GET
+                          shows those jobs — one row per job with its game, KIND, state, age and
+                          failure detail, a link to the replay once the catalog has it (and out
+                          to bar-rts.com until then, which for a queued re-sim is the whole point
+                          of the row), and a count of the jobs in flight on the menu entry
+                          itself. Above the table sits the re-sim paste box (app.js initResim/
+                          submitResim, #resimbox), the intake described under the worker routes
+                          above; the two doors of the pipeline therefore bracket the section, the
+                          dropzone above it and this inside it. It reads GET
                           /api/queue (ReplayIndex.queuePage: unfinished jobs first, then the most
                           recently finished; ?offset=/?limit=, limit capped at QUEUE_LIMIT_MAX),
                           QUEUE_PAGE = 5 rows at a time with a Prev/Next pager. It NEVER refreshes
@@ -543,10 +616,13 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           replays, so there is nothing to share or restore. The route is OPEN, like
                           the per-job status the uploading browser already polls, but it omits
                           the row's streamKey — the archive bytes are behind the bearer-guarded
-                          /api/streams route and the view has no use for the key. It is distinct
-                          from the daemon's GET /api/jobs, which is a WORK QUEUE (guarded, and
-                          it deliberately hides a healthy "processing" job — precisely the row a
-                          person watching wants to see). The Go viz server has no ingest pipeline
+                          /api/streams route and the view has no use for the key (GET
+                          /api/jobs/<id>, the poll, answers with the same subset for the same
+                          reason). It is distinct
+                          from the daemon's GET /api/jobs, which is a WORK QUEUE (guarded, ONE
+                          kind at a time, and it deliberately hides a healthy "processing" job —
+                          precisely the row a person watching wants to see). The Go viz server
+                          has no ingest pipeline
                           and 404s the route; the section then says so rather than showing an
                           empty table that would read as "nothing is queued", and asks it nothing
                           further.

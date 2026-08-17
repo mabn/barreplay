@@ -25,6 +25,12 @@ func TestParseGameID(t *testing.T) {
 		"836D486A5480A9E830BE54DB7D2C7BE9",
 		"https://www.beyondallreason.info/replays?gameId=" + want,
 		"https://api.bar-rts.com/replays/" + want,
+		"https://bar-rts.com/replays/" + want,
+		"https://gex.honu.pw/match/" + want,
+		// A copy-pasted link routinely loses its scheme; url.Parse reads the
+		// whole thing as a path, and the last segment is still the id.
+		"bar-rts.com/replays/" + want,
+		"  " + want + "  ",
 	}
 	for _, in := range cases {
 		got, err := ParseGameID(in)

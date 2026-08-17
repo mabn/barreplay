@@ -92,15 +92,28 @@
       <div id="homemsg" class="hint" style="display:none"></div>
     </section>
 
-    <!-- Ingest queue: every uploaded stream still waiting for (or being
-         published by) the ingest daemon, plus the recently finished ones.
+    <!-- Ingest queue: every uploaded stream and every requested re-simulation
+         still waiting for (or being published by) a daemon, plus the recently
+         finished ones.
          Read from GET /api/queue, which only the Worker backend implements.
          Read on demand only — the section never refreshes itself, so the
          Reload button is how a job's state moves on screen. -->
     <section id="tab-queue" style="display:none">
+      <!-- Request a re-simulation of a game NOBODY uploaded: paste its replay
+           link and the engine host publishes it. The only entry point for a
+           game with no .brepstream behind it. -->
+      <div id="resimbox">
+        <label for="resimlink">Re-simulate a replay nobody uploaded — paste its link:</label>
+        <div class="row">
+          <input type="text" id="resimlink" spellcheck="false" autocomplete="off"
+                 placeholder="https://bar-rts.com/replays/… · https://gex.honu.pw/match/… · …/replays?gameId=…">
+          <button type="button" id="resimgo">Queue re-sim</button>
+        </div>
+        <div id="resimstatus" style="display:none"></div>
+      </div>
       <table id="queuetable">
         <thead>
-          <tr><th>Uploaded</th><th>Game</th><th>State</th><th>Updated</th><th>Detail</th></tr>
+          <tr><th>Queued</th><th>Game</th><th>Kind</th><th>State</th><th>Updated</th><th>Detail</th></tr>
         </thead>
         <tbody></tbody>
       </table>
