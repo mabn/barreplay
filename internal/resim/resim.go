@@ -54,6 +54,35 @@ type Options struct {
 	// re-sim of a long game runs for many minutes with no other output, so a
 	// daemon wants this on.
 	ProgressEvery time.Duration
+
+	// Stats, when non-nil, receives what the run cost and how it went. Run
+	// fills it in AS IT GOES, including on its error paths: a re-sim that
+	// fails after forty minutes is precisely the one whose timings and
+	// infolog are worth keeping, and returning them only on success would
+	// throw away the record of every failure.
+	Stats *RunStats
+}
+
+// RunStats is one re-simulation's processing record.
+type RunStats struct {
+	// EngineSec is the engine's wall time, launch to exit; LoadSec is the part
+	// of it before the widget announced itself (VFS scan, map load, icon
+	// atlas) and SimSec is the rest. LoadSec is 0 when the widget never
+	// announced itself, which also means the run produced nothing.
+	EngineSec float64
+	LoadSec   float64
+	SimSec    float64
+	// Frames is the newest sim frame captured and Samples how many frames were
+	// written; SpeedUp is sim frames per wall second over the baseline 30, i.e.
+	// how much faster than realtime the re-simulation ran.
+	Frames  int32
+	Samples int
+	SpeedUp float64
+	// GameSec is the demo's own length, which is what Frames is short against
+	// when a run is cut off.
+	GameSec       int32
+	EngineVersion string
+	Infolog       engine.InfologSummary
 }
 
 // Run downloads the demo for gameID via the BAR API, re-simulates it with
@@ -175,13 +204,21 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 		w.Close()
 		return "", nil, err
 	}
-	// Drain stdout so the engine's pipe never blocks the sim.
+	// Drain stdout so the engine's pipe never blocks the sim, watching on the
+	// way past for the widget's first "[barreplay]" line: the widget
+	// initializes exactly when loading ends, so its timestamp is what splits
+	// the engine's wall time into a load phase and a sim phase.
+	widgetLoaded := make(chan time.Time, 1)
 	go func() {
 		sc := bufio.NewScanner(stdout)
 		sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 		for sc.Scan() {
+			if strings.Contains(sc.Text(), "[barreplay]") {
+				widgetLoaded <- time.Now()
+				break
+			}
 		}
-		io.Copy(io.Discard, stdout)
+		io.Copy(io.Discard, stdout) // keep draining (also covers a scanner error)
 	}()
 	if o.ProgressEvery > 0 {
 		// Stopped before this function returns, so the watcher cannot outlive
@@ -192,6 +229,22 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 	}
 	waitErr := wait()
 
+	// Record the timings before anything below can return: an error path is
+	// exactly where a caller most wants to know how long the run got and what
+	// the log said.
+	if o.Stats != nil {
+		o.Stats.EngineSec = time.Since(runStart).Seconds()
+		select {
+		case t := <-widgetLoaded:
+			o.Stats.LoadSec = t.Sub(runStart).Seconds()
+			o.Stats.SimSec = o.Stats.EngineSec - o.Stats.LoadSec
+		default: // the widget never announced itself; no split to report
+		}
+		o.Stats.GameSec = h.GameTime
+		o.Stats.EngineVersion = h.EngineVersion
+		o.Stats.Infolog = engine.SummarizeInfolog(eng.InfologPath())
+	}
+
 	var stats capture.Stats
 	var consumeErr error
 	if raw, oerr := os.Open(streamPath); oerr != nil {
@@ -201,6 +254,12 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 		raw.Close()
 	}
 	closeErr := w.Close()
+	if o.Stats != nil {
+		o.Stats.Frames, o.Stats.Samples = stats.LastFrame, stats.Frames
+		if o.Stats.SimSec > 0 && stats.LastFrame > 0 {
+			o.Stats.SpeedUp = float64(stats.LastFrame) / o.Stats.SimSec / gameSpeed
+		}
+	}
 	for _, e := range []error{consumeErr, closeErr} {
 		if e != nil {
 			return "", nil, e
@@ -237,6 +296,11 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 	}
 	fmt.Fprintf(os.Stderr, "resim: %s: %d frames, %d comms in %s -> %s\n",
 		h.GameID, stats.Frames, stats.Comms, time.Since(runStart).Round(time.Second), outPath)
+	if o.Stats != nil {
+		// The desync count is the reason this line exists: a capture of a game
+		// that never happened is indistinguishable from a good one on disk.
+		fmt.Fprintf(os.Stderr, "resim: %s: infolog %s\n", h.GameID, o.Stats.Infolog)
+	}
 
 	// Sanity: the produced capture must be the requested game.
 	if !strings.EqualFold(h.GameID, gameID) {

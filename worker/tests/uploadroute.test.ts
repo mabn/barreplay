@@ -8,7 +8,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import app from "../src/worker/app";
-import type { IngestJob, JobKind } from "../src/worker/jobs";
+import { MAX_JOB_STATS_BYTES } from "../src/worker/jobs";
+import type { IngestJob, JobKind, JobStats } from "../src/worker/jobs";
 import type { ReplayEntry } from "../src/worker/replayentry";
 
 const FIXTURE = new URL("../../internal/capture/testdata/harness.brepstream", import.meta.url);
@@ -51,6 +52,7 @@ class FakeIndex {
       kind,
       state: "pending",
       error: null,
+      stats: null,
       createdUnix: 0,
       updatedUnix: 0,
     });
@@ -90,11 +92,17 @@ class FakeIndex {
       active: all.filter((j) => rank(j) === 0).length,
     };
   }
-  jobUpdate(id: string, state: "processing" | "done" | "error", error: string | null): boolean {
+  jobUpdate(
+    id: string,
+    state: "processing" | "done" | "error",
+    error: string | null,
+    stats: JobStats | null = null,
+  ): boolean {
     const j = this.jobs.get(id);
     if (!j) return false;
     j.state = state;
     j.error = error;
+    if (stats !== null) j.stats = stats; // COALESCE in the real DO
     return true;
   }
 }
@@ -266,7 +274,9 @@ test("GET /api/queue lists jobs for the viewer without the archive key", async (
   assert.equal(res.status, 200, "open even though a token is configured");
   const page = await asJson(res);
   assert.deepEqual(page, {
-    jobs: [{ id: job, gameId: GAME_ID, kind: "upload", state: "pending", error: null, createdUnix: 0, updatedUnix: 0 }],
+    jobs: [
+      { id: job, gameId: GAME_ID, kind: "upload", state: "pending", error: null, stats: null, createdUnix: 0, updatedUnix: 0 },
+    ],
     total: 1,
     active: 1,
     offset: 0,
@@ -583,6 +593,61 @@ test("a job can only be claimed once, but heartbeats keep working", async (t) =>
   assert.equal((await post({ state: "processing" })).status, 200, "the holder's heartbeat");
   assert.equal((await post({ state: "done", claim: true })).status, 400, "claim only makes sense with processing");
   assert.equal((await post({ state: "done" })).status, 200);
+});
+
+// The daemon's processing record rides the terminal report and comes back out
+// on both job views. It is what the queue page shows: the duration in the
+// table, everything else on click.
+test("a job's processing stats round-trip through the report", async (t) => {
+  const { env } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  const { job } = await asJson(
+    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+  );
+  const stats = {
+    tookSec: 2483,
+    resimSec: 2431,
+    loadSec: 41,
+    simSec: 2390,
+    frames: 100170,
+    speedUp: 1.4,
+    engineVersion: "2026.07.04",
+    infolog: { bytes: 50331648, lastFrame: 100170, desyncs: 0, warnings: 118 },
+    sizeReport: "sections:\n  M   1234\n",
+  };
+  const post = (body: unknown) =>
+    app.request(`/api/jobs/${job}`, { method: "POST", body: JSON.stringify(body) }, env);
+
+  // A heartbeat carries none, and must not erase what is stored.
+  assert.equal((await post({ state: "processing", stats })).status, 200);
+  assert.equal((await post({ state: "processing" })).status, 200);
+  assert.equal((await post({ state: "done" })).status, 200);
+
+  const polled = await asJson(await app.request(`/api/jobs/${job}`, {}, env));
+  assert.deepEqual(polled.stats, stats, "the poll sees it");
+  const page = await asJson(await app.request("/api/queue", {}, env));
+  assert.deepEqual(page.jobs[0].stats, stats, "and so does the queue page");
+});
+
+// Stats that cannot be stored are dropped, never a 400: they describe work
+// that already happened, and refusing the report would lose the state
+// transition with them.
+test("unusable stats are dropped without losing the report", async (t) => {
+  const { env } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  const { job } = await asJson(
+    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+  );
+  const post = (body: unknown) =>
+    app.request(`/api/jobs/${job}`, { method: "POST", body: JSON.stringify(body) }, env);
+
+  for (const bad of ["a string", 42, [1, 2], { sizeReport: "x".repeat(MAX_JOB_STATS_BYTES + 1) }]) {
+    assert.equal((await post({ state: "error", error: "boom", stats: bad })).status, 200);
+  }
+  const polled = await asJson(await app.request(`/api/jobs/${job}`, {}, env));
+  assert.equal(polled.state, "error");
+  assert.equal(polled.error, "boom", "the transition survived every one of them");
+  assert.equal(polled.stats, null);
 });
 
 // Uploaded pieces must carry their own Content-Type and Cache-Control. The
