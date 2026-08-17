@@ -189,6 +189,52 @@ app.get("/api/jobs/:id", async (c) => {
   return c.json(job, 200, { "cache-control": "no-cache" });
 });
 
+// The queue as the landing page's "Queue" section shows it: unfinished jobs
+// first, then what recently finished. Open, like the per-job status the
+// uploading browser already polls, and for the same reason — it reports on
+// public replays and can change nothing. The archive KEY is deliberately not
+// in the reply: it is the one field of a job row that is not public (the
+// route serving those bytes is bearer-guarded), and the view has no use for
+// it.
+// Paged, because the table only grows and the view shows a handful at a time:
+// ?offset= and ?limit= (capped), with `total` and `active` counted over the
+// whole table so the pager and the menu's in-flight count are true on any page.
+const QUEUE_LIMIT_MAX = 100;
+const QUEUE_LIMIT_DEFAULT = 25;
+
+app.get("/api/queue", async (c) => {
+  const params = new URL(c.req.url).searchParams;
+  const num = (name: string, fallback: number): number | string => {
+    const raw = params.get(name);
+    if (raw === null || raw === "") return fallback;
+    if (!/^\d+$/.test(raw)) return `${name} must be a non-negative integer`;
+    return parseInt(raw, 10);
+  };
+  const limit = num("limit", QUEUE_LIMIT_DEFAULT);
+  if (typeof limit === "string") return c.json({ error: limit }, 400);
+  const offset = num("offset", 0);
+  if (typeof offset === "string") return c.json({ error: offset }, 400);
+
+  const page = await indexStub(c.env).queuePage(Math.min(Math.max(limit, 1), QUEUE_LIMIT_MAX), offset);
+  return c.json(
+    {
+      jobs: page.jobs.map(({ id, gameId, state, error, createdUnix, updatedUnix }) => ({
+        id,
+        gameId,
+        state,
+        error,
+        createdUnix,
+        updatedUnix,
+      })),
+      total: page.total,
+      active: page.active,
+      offset,
+    },
+    200,
+    { "cache-control": "no-cache" },
+  );
+});
+
 // The ingest daemon's work queue: pending jobs (plus stalled "processing"
 // ones), oldest first. Guarded like every other write-side API.
 app.get("/api/jobs", async (c) => {

@@ -49,10 +49,36 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: #5a9fd0; }
   font-variant-numeric: tabular-nums; color: #9fb0bf;
 }
 
-/* ---- home view: the replay list shown when no replay is selected ----
-   Toggled via body.home, which hides the playback chrome underneath. */
+/* ---- home view: the left menu and the section it selects, shown when no
+   replay is selected. Toggled via body.home, which hides the playback chrome
+   underneath. The menu is a fixed rail; only the section next to it scrolls,
+   so the menu stays reachable in a long list. */
 body.home .controls, body.home #wrap { display: none; }
-#home { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 24px; }
+#home { flex: 1; min-height: 0; display: flex; }
+#homemain { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; padding: 18px 24px; }
+#homenav {
+  flex: 0 0 auto; width: 150px; padding: 18px 8px;
+  background: #161b21; border-right: 1px solid #2a323c;
+  display: flex; flex-direction: column; gap: 2px;
+}
+#homenav .navitem {
+  display: flex; align-items: center; gap: 6px;
+  background: transparent; border: 1px solid transparent; border-radius: 5px;
+  padding: 7px 10px; text-align: left; font-size: 13px; color: #9fb0bf;
+}
+#homenav .navitem:hover { background: #1d252e; color: #cfe3f5; }
+#homenav .navitem.on { background: #24425c; border-color: #4a7fa8; color: #d6ecff; }
+/* Admin-only entries (?admin=true), same gate as the list's refresh button.
+   homeTab() enforces it too, so a shared ?tab= link can't reach the section
+   past the hidden menu entry. */
+#homenav .navitem.admin { display: none; }
+body.admin-mode #homenav .navitem.admin { display: flex; }
+/* Count of jobs still in flight; empty (and invisible) when there are none. */
+#homenav .badge {
+  margin-left: auto; font-size: 10px; line-height: 1; padding: 3px 6px;
+  border-radius: 8px; background: #2a3742; color: #9fb0bf;
+}
+#homenav .badge:empty { display: none; }
 #hometable { border-collapse: collapse; width: 100%; max-width: 1650px; margin: 0 auto; font-size: 13px; }
 #hometable th {
   text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
@@ -126,6 +152,47 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
 #hometable tbody tr:hover { background: #1b232c; }
 #hometable td.dim { color: #6a7785; }
 #homemsg { padding: 12px 8px; font-size: 13px; max-width: 1650px; margin: 0 auto; }
+
+/* ---- queue section: the ingest jobs behind the drag&drop uploads ----
+   Same table look as the replay list; only the state cell is coloured, since
+   "is anything stuck" is the question this view answers. */
+#queuetable { border-collapse: collapse; width: 100%; max-width: 1650px; margin: 0 auto; font-size: 13px; }
+#queuetable th {
+  text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+  color: #6f87a0; font-weight: 600; padding: 4px 14px 6px 8px; border-bottom: 1px solid #2a323c;
+}
+#queuetable td {
+  padding: 6px 14px 6px 8px; border-bottom: 1px solid #202830;
+  white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+#queuetable td.dim { color: #6a7785; }
+/* The failure detail is the one cell that may be long: let it wrap. */
+#queuetable td.detail { white-space: normal; color: #9fb0bf; max-width: 640px; }
+#queuetable td.detail.error { color: #e2785b; }
+#queuetable td.game a { color: #8fd3ff; text-decoration: none; }
+#queuetable td.game a:hover { text-decoration: underline; }
+#queuetable .state {
+  font-size: 10px; line-height: 1; padding: 3px 7px; border-radius: 8px;
+  background: #232e39; border: 1px solid #33404d; color: #9fb0bf;
+}
+#queuetable .state-processing { color: #8fd3ff; border-color: #2f5878; background: #16293a; }
+#queuetable .state-done { color: #7fd18b; border-color: #33663c; background: #16311b; }
+#queuetable .state-error { color: #ff9c8f; border-color: #7a3428; background: #34160f; }
+/* Pager + the read stamp. The section never refreshes itself, so "read at
+   <clock>" is part of the contract, not decoration: it says how old what you
+   are looking at is, and Reload is how it moves. */
+#queuepager {
+  max-width: 1650px; margin: 10px auto 0; padding: 0 8px;
+  display: flex; align-items: center; gap: 8px;
+}
+#queuepager button {
+  background: #1b232c; color: #9fb0bf; border: 1px solid #2f3947;
+  border-radius: 4px; padding: 3px 9px; font-size: 12px; cursor: pointer;
+}
+#queuepager button:hover:enabled { color: #cfe3f5; border-color: #4a5a6c; }
+#queuepager button:disabled { opacity: .45; cursor: default; }
+#queuepager #q_range { margin-right: auto; }
+#queuemsg { padding: 12px 8px; font-size: 13px; max-width: 1650px; margin: 0 auto; }
 
 #wrap { display: flex; flex: 1; min-height: 0; }
 #left { flex: 1; position: relative; }
