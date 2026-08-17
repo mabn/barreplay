@@ -24,6 +24,9 @@
 // fake Env.
 import { Hono } from "hono";
 
+import { parseGameId } from "./gameid";
+import { JOB_KINDS, parseJobStats } from "./jobs";
+import type { JobKind } from "./jobs";
 import { archiveSuffix, scanStreamPreamble } from "./preamble";
 import { parseReplayFilter, parseViewRequest, playersFromApi, sanitizeEntry, settingsFlags } from "./replayentry";
 
@@ -178,15 +181,67 @@ app.post("/api/upload", async (c) => {
   await c.env.BUCKET.put(streamKey, body);
 
   const job = crypto.randomUUID();
-  await indexStub(c.env).jobInsert(job, streamKey, p.gameId);
+  await indexStub(c.env).jobInsert(job, streamKey, p.gameId, "upload");
   return c.json({ job, gameId: p.gameId, streamKey });
 });
 
-// Job status for the uploading browser: pending -> processing -> done|error.
+// Queue a game NOBODY RECORDED for headless re-simulation, from a pasted
+// replay link. This is the only way into the pipeline for a game with no
+// .brepstream behind it: `bringest -resim` otherwise finds work by scanning
+// the catalog for one-sided uploads, which by construction cannot see a game
+// that was never uploaded at all.
+//
+// Open, like /view and /refresh-settings, because the browser holds no bearer
+// token and the section it is reached from is admin-gated in the UI. What
+// keeps it from being a way to burn somebody else's machine time is the
+// checks: the id has to parse, the BAR API has to know the game (a re-sim
+// cannot degrade past a missing demo the way an upload can — the demo IS the
+// simulation input), the game must not already be published, and a second
+// request for a game already queued returns the job that exists rather than
+// making another.
+app.post("/api/resim", async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "body must be JSON" }, 400);
+  }
+  const link = (body as { link?: unknown })?.link;
+  if (typeof link !== "string" || link.length > 2048) {
+    return c.json({ error: "link must be a string" }, 400);
+  }
+  const gameId = parseGameId(link);
+  if (!gameId) return c.json({ error: "no gameId in that link" }, 400);
+
+  // Same handling as refresh-settings above: an id the BAR API does not know
+  // has no demo to re-simulate, and there is no point queueing an hour of
+  // engine time to discover that.
+  try {
+    const r = await fetch(`https://api.bar-rts.com/replays/${encodeURIComponent(gameId)}`);
+    if (r.status === 404) return c.json({ error: "the BAR API does not know this game", gameId }, 404);
+    if (!r.ok) return c.json({ error: `BAR API: ${r.status}`, gameId }, 502);
+  } catch (e) {
+    return c.json({ error: `fetching the BAR API: ${e}`, gameId }, 502);
+  }
+
+  const res = await indexStub(c.env).resimEnqueue(crypto.randomUUID(), gameId);
+  if (res.status === "in-catalog") {
+    return c.json({ error: "this game is already published", gameId, status: res.status }, 409);
+  }
+  return c.json({ job: res.job?.id, gameId, status: res.status });
+});
+
+// Job status for the browser that created it — a dropped stream or a pasted
+// re-sim link: pending -> processing -> done|error. Open, so like /api/queue
+// it answers with a subset of the row rather than the row: the archive key is
+// the one field of a job that is not public.
 app.get("/api/jobs/:id", async (c) => {
   const job = await indexStub(c.env).jobGet(c.req.param("id"));
   if (!job) return c.json({ error: "unknown job" }, 404);
-  return c.json(job, 200, { "cache-control": "no-cache" });
+  const { id, gameId, kind, state, error, stats, createdUnix, updatedUnix } = job;
+  return c.json({ id, gameId, kind, state, error, stats, createdUnix, updatedUnix }, 200, {
+    "cache-control": "no-cache",
+  });
 });
 
 // The queue as the landing page's "Queue" section shows it: unfinished jobs
@@ -218,11 +273,13 @@ app.get("/api/queue", async (c) => {
   const page = await indexStub(c.env).queuePage(Math.min(Math.max(limit, 1), QUEUE_LIMIT_MAX), offset);
   return c.json(
     {
-      jobs: page.jobs.map(({ id, gameId, state, error, createdUnix, updatedUnix }) => ({
+      jobs: page.jobs.map(({ id, gameId, kind, state, error, stats, createdUnix, updatedUnix }) => ({
         id,
         gameId,
+        kind,
         state,
         error,
+        stats,
         createdUnix,
         updatedUnix,
       })),
@@ -235,14 +292,34 @@ app.get("/api/queue", async (c) => {
   );
 });
 
-// The ingest daemon's work queue: pending jobs (plus stalled "processing"
-// ones), oldest first. Guarded like every other write-side API.
+// The ingest daemon's work queue: pending jobs of ONE kind (plus stalled
+// "processing" ones), oldest first. Guarded like every other write-side API.
+//
+// ?kind= defaults to "upload", and that default is load-bearing: a plain
+// bringest needs no engine and asks without the param, so anything else would
+// hand a deployed daemon a re-sim it cannot run. The daemon and the worker
+// deploy independently, so the Go side skips a job of the wrong kind too
+// rather than trusting this filter.
 app.get("/api/jobs", async (c) => {
   if (!authorized(c)) return c.json({ error: "unauthorized" }, 401);
-  return c.json(await indexStub(c.env).jobsPending(), 200, { "cache-control": "no-cache" });
+  const kind = new URL(c.req.url).searchParams.get("kind") ?? "upload";
+  if (!JOB_KINDS.includes(kind as JobKind)) {
+    return c.json({ error: `kind must be one of ${JOB_KINDS.join(", ")}` }, 400);
+  }
+  return c.json(await indexStub(c.env).jobsPending(kind as JobKind), 200, { "cache-control": "no-cache" });
 });
 
-// Daemon state transitions: claim (processing) and completion (done/error).
+// Daemon state transitions: claim (processing + claim:true), heartbeat
+// (processing), and completion (done/error).
+//
+// A claim is a separate thing from a plain "processing" report because it can
+// FAIL: it transitions only from pending (or a stale processing), so two
+// daemons in the same poll round cannot both run the same job. It is opt-in
+// via the flag rather than being how "processing" always behaves, because the
+// upload daemon treats a failed transition as a job error — it would take the
+// job from whoever legitimately holds it and mark it failed. A long-running
+// job re-reports "processing" without the flag as a heartbeat, which keeps
+// updated_unix fresh so the stale-job rule does not offer live work away.
 app.post("/api/jobs/:id", async (c) => {
   if (!authorized(c)) return c.json({ error: "unauthorized" }, 401);
   let body: unknown;
@@ -251,12 +328,26 @@ app.post("/api/jobs/:id", async (c) => {
   } catch {
     return c.json({ error: "body must be JSON" }, 400);
   }
-  const b = body as { state?: unknown; error?: unknown };
+  const b = body as { state?: unknown; error?: unknown; claim?: unknown; kind?: unknown; stats?: unknown };
   if (b.state !== "processing" && b.state !== "done" && b.state !== "error") {
     return c.json({ error: "state must be processing, done or error" }, 400);
   }
+  if (b.claim === true) {
+    if (b.state !== "processing") return c.json({ error: "claim is only valid with state=processing" }, 400);
+    const kind = b.kind === undefined ? "upload" : b.kind;
+    if (!JOB_KINDS.includes(kind as JobKind)) {
+      return c.json({ error: `kind must be one of ${JOB_KINDS.join(", ")}` }, 400);
+    }
+    const took = await indexStub(c.env).jobClaim(c.req.param("id"), kind as JobKind);
+    if (!took) return c.json({ error: "job already claimed" }, 409);
+    return c.json({ ok: true });
+  }
   const detail = typeof b.error === "string" ? b.error.slice(0, 2000) : null;
-  const ok = await indexStub(c.env).jobUpdate(c.req.param("id"), b.state, detail);
+  // Rejected stats are dropped, not a 400: they are a record of work that has
+  // already happened, and refusing the report over them would lose the state
+  // transition too.
+  const stats = parseJobStats(b.stats);
+  const ok = await indexStub(c.env).jobUpdate(c.req.param("id"), b.state, detail, stats);
   if (!ok) return c.json({ error: "unknown job" }, 404);
   return c.json({ ok: true });
 });

@@ -631,7 +631,7 @@ test('the catalog is fetched for the list view, not for a direct replay link', a
     // The left menu: wiring the nav and the queue's pager, and picking the
     // section to show. None of it touches the catalog, which is what this
     // test counts.
-    const initHomeNav = () => {}, initQueue = () => {}, applyHomeTab = () => {};
+    const initHomeNav = () => {}, initQueue = () => {}, initResim = () => {}, applyHomeTab = () => {};
     const hideHome = () => {};
     const knownReplayURL = () => true;
     const initFilters = async () => { filters++; };

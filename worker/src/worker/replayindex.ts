@@ -4,34 +4,37 @@
 // The R2 bucket remains the source of the replay DATA — the replays table is
 // only the picker metadata (when the game started, how long it ran, which map,
 // the team-size spec like "8v8"), which the bucket listing cannot provide
-// because it lives inside each .brp's meta record. The jobs table tracks
-// drag&drop uploads through the ingest pipeline: POST /api/upload archives the
-// raw stream and inserts a pending row; the Go daemon (cmd/bringest)
-// polls pending rows, publishes the replay, and reports done/error; the
-// front-end polls its job row to know when to open the replay.
+// because it lives inside each .brp's meta record. The jobs table tracks work
+// through the ingest pipeline, of two kinds: POST /api/upload archives a
+// dropped .brepstream and inserts a pending "upload" row, and POST /api/resim
+// inserts a pending "resim" row for a game nobody recorded, to be re-simulated
+// from its demo. A Go daemon (cmd/bringest, plain or -resim) polls the rows of
+// its kind, publishes the replay, and reports done/error; the front-end polls
+// its job row to know when it landed.
 import { DurableObject } from "cloudflare:workers";
 
+import { parseJobStats } from "./jobs";
+import type { IngestJob, JobKind, JobStats } from "./jobs";
 import { FACET_PLAYERS_MAX, derivePlayerCount, mergeUploads } from "./replayentry";
 import type { CatalogTeam, ReplayEntry, ReplayFacets, ReplayFilter, UploadRef } from "./replayentry";
 
-/** One drag&drop upload's trip through the ingest pipeline. */
-export interface IngestJob {
-  id: string;
-  /** R2 key of the archived raw stream (streams/<gameId>/<ts>-<who>.brepstream). */
-  streamKey: string;
-  gameId: string;
-  state: "pending" | "processing" | "done" | "error";
-  /** Failure detail when state is "error". */
-  error: string | null;
-  createdUnix: number;
-  updatedUnix: number;
-}
-
-export const JOB_STATES = ["pending", "processing", "done", "error"] as const;
+export type { IngestJob, JobKind, JobStats } from "./jobs";
 
 /** A "processing" job untouched for this long is presumed crashed and is
- * offered to the daemon again alongside the pending ones. */
+ * offered to the daemon again alongside the pending ones. This is why a
+ * re-sim — which runs far longer than 15 minutes — HEARTBEATS: the daemon
+ * re-reports "processing" on a ticker, so silence for this long keeps meaning
+ * "the worker died" rather than "the worker is busy". */
 const STALE_PROCESSING_SEC = 15 * 60;
+
+/** The same, for a re-sim. The heartbeat is what really keeps a live job out
+ * of the work list; this is the backstop for a daemon too old to send one,
+ * and it is generous because the thing it must not interrupt is an hour of
+ * engine time that would simply be run twice. */
+const STALE_PROCESSING_RESIM_SEC = 90 * 60;
+
+/** Columns every jobs SELECT reads, in the order jobRow expects. */
+const JOB_COLS = "id, stream_key, game_id, kind, state, error, stats, created_unix, updated_unix";
 
 /** Version of the DERIVED data (player_count + the replay_players and
  * replay_settings index tables). Rows carry no derivation of their own — it is
@@ -59,8 +62,10 @@ export class ReplayIndex extends DurableObject<Env> {
         id           TEXT PRIMARY KEY,
         stream_key   TEXT NOT NULL,
         game_id      TEXT NOT NULL,
+        kind         TEXT NOT NULL DEFAULT 'upload',
         state        TEXT NOT NULL,
         error        TEXT,
+        stats        TEXT,
         created_unix INTEGER NOT NULL,
         updated_unix INTEGER NOT NULL
       );
@@ -93,6 +98,20 @@ export class ReplayIndex extends DurableObject<Env> {
     // In-place upgrades for tables created before a column existed (SQLite has
     // no ADD COLUMN IF NOT EXISTS; a duplicate-column error just means the
     // schema is already current).
+    const addColumn = (table: string, col: string): void => {
+      try {
+        ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`);
+      } catch (e) {
+        if (!String(e).includes("duplicate column")) throw e;
+      }
+    };
+    // The jobs table predates the re-sim requests, so its rows are all
+    // uploads; the DEFAULT is what says so, for the existing rows and for
+    // every daemon that still POSTs without naming a kind.
+    addColumn("jobs", "kind TEXT NOT NULL DEFAULT 'upload'");
+    // Nullable, unlike kind: a job finished before the daemon reported stats
+    // has none, and there is nothing to infer.
+    addColumn("jobs", "stats TEXT");
     for (const col of [
       "settings TEXT",
       "rid TEXT",
@@ -110,17 +129,14 @@ export class ReplayIndex extends DurableObject<Env> {
       "widget_sha TEXT",
       "widget_date TEXT",
     ]) {
-      try {
-        ctx.storage.sql.exec(`ALTER TABLE replays ADD COLUMN ${col}`);
-      } catch (e) {
-        if (!String(e).includes("duplicate column")) throw e;
-      }
+      addColumn("replays", col);
     }
     // Filter indexes. Created after the ALTERs because one of them indexes a
     // column the ALTERs may have just added.
     ctx.storage.sql.exec(`
       CREATE INDEX IF NOT EXISTS replays_map   ON replays (map);
       CREATE INDEX IF NOT EXISTS replays_count ON replays (player_count);
+      CREATE INDEX IF NOT EXISTS jobs_kind     ON jobs (kind, state, updated_unix);
     `);
 
     const have = ctx.storage.sql
@@ -431,37 +447,71 @@ export class ReplayIndex extends DurableObject<Env> {
     return true;
   }
 
-  /** jobInsert records a fresh upload as a pending ingest job. */
-  jobInsert(id: string, streamKey: string, gameId: string): void {
+  /** jobInsert records fresh work as a pending ingest job. A "resim" carries
+   * no streamKey (pass ""); it is queued through resimEnqueue below, which is
+   * where the refusals live. */
+  jobInsert(id: string, streamKey: string, gameId: string, kind: JobKind = "upload"): void {
     const now = Math.floor(Date.now() / 1000);
     this.ctx.storage.sql.exec(
-      `INSERT INTO jobs (id, stream_key, game_id, state, error, created_unix, updated_unix)
-       VALUES (?, ?, ?, 'pending', NULL, ?, ?)`,
+      `INSERT INTO jobs (id, stream_key, game_id, kind, state, error, created_unix, updated_unix)
+       VALUES (?, ?, ?, ?, 'pending', NULL, ?, ?)`,
       id,
       streamKey,
       gameId,
+      kind,
       now,
       now,
     );
   }
 
+  /** resimEnqueue takes a re-simulation request for one game, refusing it when
+   * there is nothing to gain. Both checks and the insert happen in here, in one
+   * RPC, so two people pasting the same link at the same moment cannot both
+   * queue an hour of engine time.
+   *
+   * "in-catalog": the game is already published, so re-simulating it would
+   * replace a capture that exists with one that mostly repeats it.
+   * "duplicate": a re-sim of this game is already queued or running — the
+   * caller gets that job back, which makes re-pasting a link harmless. */
+  resimEnqueue(id: string, gameId: string): { status: "queued" | "in-catalog" | "duplicate"; job: IngestJob | null } {
+    const known = this.ctx.storage.sql.exec(`SELECT 1 FROM replays WHERE id = ?`, gameId).toArray();
+    if (known.length > 0) return { status: "in-catalog", job: null };
+    const active = this.ctx.storage.sql
+      .exec(
+        `SELECT ${JOB_COLS} FROM jobs
+         WHERE game_id = ? AND kind = 'resim' AND state IN ('pending', 'processing')
+         ORDER BY created_unix, id LIMIT 1`,
+        gameId,
+      )
+      .toArray();
+    if (active.length > 0) return { status: "duplicate", job: jobRow(active[0]) };
+    this.jobInsert(id, "", gameId, "resim");
+    return { status: "queued", job: this.jobGet(id) };
+  }
+
   jobGet(id: string): IngestJob | null {
     const rows = this.ctx.storage.sql
-      .exec(`SELECT id, stream_key, game_id, state, error, created_unix, updated_unix FROM jobs WHERE id = ?`, id)
+      .exec(`SELECT ${JOB_COLS} FROM jobs WHERE id = ?`, id)
       .toArray();
     return rows.length === 0 ? null : jobRow(rows[0]);
   }
 
-  /** jobsPending lists what the ingest daemon should work on: every pending
-   * job, plus "processing" jobs whose worker apparently died (no update for
-   * STALE_PROCESSING_SEC), oldest first. */
-  jobsPending(): IngestJob[] {
-    const staleBefore = Math.floor(Date.now() / 1000) - STALE_PROCESSING_SEC;
+  /** jobsPending lists what a daemon of this kind should work on: every
+   * pending job of that kind, plus "processing" ones whose worker apparently
+   * died (no update for the kind's stale window), oldest first.
+   *
+   * The kind is required rather than defaulted because the two daemons are
+   * different machines — a plain bringest needs no engine and could not run a
+   * re-sim if it were handed one. */
+  jobsPending(kind: JobKind): IngestJob[] {
+    const window = kind === "resim" ? STALE_PROCESSING_RESIM_SEC : STALE_PROCESSING_SEC;
+    const staleBefore = Math.floor(Date.now() / 1000) - window;
     return this.ctx.storage.sql
       .exec(
-        `SELECT id, stream_key, game_id, state, error, created_unix, updated_unix FROM jobs
-         WHERE state = 'pending' OR (state = 'processing' AND updated_unix < ?)
+        `SELECT ${JOB_COLS} FROM jobs
+         WHERE kind = ? AND (state = 'pending' OR (state = 'processing' AND updated_unix < ?))
          ORDER BY created_unix, id`,
+        kind,
         staleBefore,
       )
       .toArray()
@@ -481,7 +531,7 @@ export class ReplayIndex extends DurableObject<Env> {
   queuePage(limit: number, offset: number): { jobs: IngestJob[]; total: number; active: number } {
     const jobs = this.ctx.storage.sql
       .exec(
-        `SELECT id, stream_key, game_id, state, error, created_unix, updated_unix FROM jobs
+        `SELECT ${JOB_COLS} FROM jobs
          ORDER BY CASE WHEN state IN ('pending', 'processing') THEN 0 ELSE 1 END,
                   updated_unix DESC, id
          LIMIT ? OFFSET ?`,
@@ -501,12 +551,43 @@ export class ReplayIndex extends DurableObject<Env> {
     return { jobs, total: Number(counts.total), active: Number(counts.active) };
   }
 
-  /** jobUpdate transitions a job's state (daemon claim / completion report).
-   * Returns false when the job id is unknown. */
-  jobUpdate(id: string, state: "processing" | "done" | "error", error: string | null): boolean {
-    const cur = this.ctx.storage.sql.exec(`UPDATE jobs SET state = ?, error = ?, updated_unix = ? WHERE id = ?`,
+  /** jobClaim takes a job for a worker, refusing when someone else already
+   * holds it: it transitions only from "pending", or from a "processing" that
+   * has gone stale (the same predicate jobsPending hands work out on).
+   *
+   * jobUpdate below would do the transition unconditionally, which is right
+   * for a completion report and for a heartbeat but not for taking work worth
+   * an hour of engine time — two daemons polling the same round would both
+   * think they had it. Returns false when the job is unknown or already held. */
+  jobClaim(id: string, kind: JobKind): boolean {
+    const window = kind === "resim" ? STALE_PROCESSING_RESIM_SEC : STALE_PROCESSING_SEC;
+    const cur = this.ctx.storage.sql.exec(
+      `UPDATE jobs SET state = 'processing', error = NULL, updated_unix = ?
+       WHERE id = ? AND (state = 'pending' OR (state = 'processing' AND updated_unix < ?))`,
+      Math.floor(Date.now() / 1000),
+      id,
+      Math.floor(Date.now() / 1000) - window,
+    );
+    return cur.rowsWritten > 0;
+  }
+
+  /** jobUpdate transitions a job's state (daemon heartbeat / completion
+   * report). Returns false when the job id is unknown.
+   *
+   * `stats` is COALESCEd, unlike error: a heartbeat reports none and must not
+   * wipe what a previous report recorded, and there is nothing a daemon could
+   * usefully mean by "the stats are now nothing". */
+  jobUpdate(
+    id: string,
+    state: "processing" | "done" | "error",
+    error: string | null,
+    stats: JobStats | null = null,
+  ): boolean {
+    const cur = this.ctx.storage.sql.exec(
+      `UPDATE jobs SET state = ?, error = ?, stats = COALESCE(?, stats), updated_unix = ? WHERE id = ?`,
       state,
       error,
+      stats === null ? null : JSON.stringify(stats),
       Math.floor(Date.now() / 1000),
       id,
     );
@@ -519,9 +600,26 @@ function jobRow(r: Record<string, unknown>): IngestJob {
     id: r.id as string,
     streamKey: r.stream_key as string,
     gameId: r.game_id as string,
+    // The ALTER backfills every pre-existing row to 'upload', so this is
+    // belt-and-braces — but a job read as kind-less would be handed to the
+    // wrong daemon, which is not a failure worth leaving to the schema.
+    kind: ((r.kind as JobKind | null) ?? "upload") as JobKind,
     state: r.state as IngestJob["state"],
     error: r.error as string | null,
+    // Stored as JSON text. A row written before the column, or one whose
+    // daemon never reported, has none — and a blob that somehow does not parse
+    // is not worth failing a queue read over.
+    stats: parseStoredStats(r.stats as string | null),
     createdUnix: r.created_unix as number,
     updatedUnix: r.updated_unix as number,
   };
+}
+
+function parseStoredStats(raw: string | null): JobStats | null {
+  if (raw == null) return null;
+  try {
+    return parseJobStats(JSON.parse(raw));
+  } catch {
+    return null;
+  }
 }
