@@ -29,6 +29,11 @@
 // not yet indexed) degrades to a -no-demo pack instead of failing the job:
 // the stream's own GAME metadata still yields a playable replay.
 //
+// Every published replay — from either loop — is followed by the same size
+// report `pack -stats` prints (packer.ReportStats: per-section sizes and the
+// top unit defs by encoded bytes), so the sizes of unattended publishes end up
+// in the log next to everything else. -stats=false turns it off.
+//
 // -resim (needs -data pointing at a BAR data dir on an engine-capable host —
 // see the GL caveat in CLAUDE.md) runs an INDEPENDENT worker instead of the
 // job loop: it polls the replay catalog (GET /api/replays) for games whose
@@ -111,6 +116,7 @@ func run() int {
 		dataDir   = flag.String("data", os.Getenv("BAR_DATA_DIR"), "BAR/Spring data directory for -resim (engine/, games/, maps/; also --write-dir; default: $BAR_DATA_DIR)")
 		skipProv  = flag.Bool("no-provision", false, "-resim: do not download engine/game/map content; assume already installed")
 		progress  = flag.Bool("progress", true, "-resim: print the frame/ETA progress line during a re-simulation, like cmd/barreplay's -progress")
+		stats     = flag.Bool("stats", true, "print the packed .brp's size breakdown (per-section sizes + the top unit defs by encoded bytes) for each replay published, like pack -stats")
 		logPath   = flag.String("log", defaultLogPath, "also append everything printed to this file (empty disables)")
 	)
 	flag.Parse()
@@ -164,7 +170,7 @@ func run() int {
 			client:   &http.Client{Timeout: 1 * time.Minute},
 			failed:   map[string]bool{},
 			resim: func(ctx context.Context, gameID string) error {
-				return resimPublish(ctx, client, gameID, ro, *target, *workerDir, indexURL)
+				return resimPublish(ctx, client, gameID, ro, *target, *workerDir, indexURL, *stats)
 			},
 		}
 		what = "one-sided replays to re-simulate"
@@ -174,7 +180,7 @@ func run() int {
 			token:    os.Getenv("REPLAY_PUT_TOKEN"),
 			client:   &http.Client{Timeout: 5 * time.Minute},
 			process: func(ctx context.Context, streamPath string) error {
-				return processStream(ctx, client, streamPath, *target, *workerDir, indexURL)
+				return processStream(ctx, client, streamPath, *target, *workerDir, indexURL, *stats)
 			},
 		}
 	}
@@ -413,7 +419,7 @@ func (d *daemon) auth(req *http.Request) {
 // BAR API knows the game, the stream's own metadata otherwise) and publish it
 // under its content-addressed revision. Idempotent: the same stream re-lands
 // on the same keys and catalog row.
-func processStream(ctx context.Context, client *barapi.Client, streamPath, target, workerDir, indexURL string) error {
+func processStream(ctx context.Context, client *barapi.Client, streamPath, target, workerDir, indexURL string, stats bool) error {
 	brpPath, modOptions, err := packer.Pack(ctx, client, streamPath, filepath.Dir(streamPath), "", false)
 	if errors.Is(err, packer.ErrDemoUnavailable) {
 		fmt.Fprintf(os.Stderr, "bringest: %v; publishing with the stream's own metadata\n", err)
@@ -421,6 +427,9 @@ func processStream(ctx context.Context, client *barapi.Client, streamPath, targe
 	}
 	if err != nil {
 		return err
+	}
+	if stats {
+		reportStats(brpPath)
 	}
 	// AFTER the pack, and from the packed file: the fallback just above is
 	// exactly the case a stream hash gets wrong. The same stream published once
@@ -438,6 +447,21 @@ func processStream(ctx context.Context, client *barapi.Client, streamPath, targe
 		Rev:        rev,
 		ModOptions: modOptions,
 	})
+}
+
+// reportStats prints the freshly packed .brp's size breakdown — the same
+// report as `pack -stats`, so an unattended publish leaves the same record in
+// the log a manual one leaves on the terminal (which is where the sizes get
+// compared across replays and codec changes). Best-effort: a measuring failure
+// says something about the codec, not about the replay, so it is a warning and
+// never costs an otherwise finished publish.
+//
+// It writes to os.Stderr like everything else here, which teeStderr also
+// copies into the log file.
+func reportStats(brpPath string) {
+	if err := packer.ReportStats(os.Stderr, brpPath); err != nil {
+		fmt.Fprintf(os.Stderr, "bringest: stats for %s: %v\n", brpPath, err)
+	}
 }
 
 // ---- the -resim worker ------------------------------------------------------
@@ -533,7 +557,7 @@ func (row catalogRow) needsResim() bool {
 // engine wall time) and publishes the resulting full-view .brp,
 // content-addressed off the .brp bytes (deterministic writer: the same sim
 // re-lands on the same revision).
-func resimPublish(ctx context.Context, client *barapi.Client, gameID string, ro resim.Options, target, workerDir, indexURL string) error {
+func resimPublish(ctx context.Context, client *barapi.Client, gameID string, ro resim.Options, target, workerDir, indexURL string, stats bool) error {
 	tmp, err := os.MkdirTemp("", "bringest-resim-")
 	if err != nil {
 		return err
@@ -543,6 +567,9 @@ func resimPublish(ctx context.Context, client *barapi.Client, gameID string, ro 
 	brpPath, modOptions, err := resim.Run(ctx, client, gameID, ro)
 	if err != nil {
 		return err
+	}
+	if stats {
+		reportStats(brpPath)
 	}
 	rev, err := packer.ContentRev(brpPath) // content hash of any file; here the .brp
 	if err != nil {
