@@ -308,11 +308,13 @@ both backends.
 npm install
 npm run dev         # vite dev — runs the Worker in workerd + HMR (needs a local R2, see below)
 npm run build       # sync icons + widget, build client bundle + Worker into dist/
-npm run preview     # preview the production build
+npm run preview     # vite preview — the client bundle alone, no Worker behind it
 npm run test        # node tests over the real Hono routes (fake bindings, no workerd)
 npm run smoke       # boot the BUILT worker in workerd and check what it actually serves
 npm run typecheck   # tsc --noEmit
 npm run cf-typegen  # regenerate worker-configuration.d.ts from wrangler.jsonc
+npm run preview:upload   # same chain as deploy, but live at the PREVIEW URL only
+npm run preview:promote  # promote an uploaded version to production
 npm run deploy      # test → sync+build → smoke → wrangler deploy (needs Cloudflare auth)
 ```
 
@@ -353,6 +355,39 @@ For local dev, seed the local R2 with a packed bundle (`wrangler dev` binds the
 npm run upload -- ../static --local
 ```
 
+## Trying a build before it becomes the live Worker
+
+`npm run preview:upload` builds and uploads a **version** without routing any
+traffic to it, and prints a URL serving exactly that build:
+
+```
+https://staging-replay.bartools.workers.dev
+```
+
+Production (`replay.fogofwar.dev`) keeps serving whatever was deployed before.
+When the preview looks right:
+
+```sh
+npm run preview:promote      # wrangler versions deploy — pick the version, confirm
+```
+
+`npm run deploy` still does both at once, for changes that need no look first.
+
+Three things worth knowing:
+
+- **The alias is the URL to use.** Every upload also mints a per-version URL
+  (`<version-prefix>-replay.…`), but the viewer fetches replay pieces
+  cross-origin from `cdn-bar.fogofwar.dev`, and R2 matches CORS origins
+  *exactly* — only the stable `staging-` alias is listed in `r2-cors.json`, so
+  replays load there and silently fail to load on a per-version hostname.
+  (`--preview-alias` is what pins it; the npm script passes it.)
+- **A preview shares production's data.** Same R2 bucket, same catalog and jobs
+  Durable Object — reading is the real thing, and a `.brepstream` dropped on the
+  preview enters the real ingest queue.
+- **Preview URLs only exist on `workers.dev`**, never on the custom domain,
+  which is why `workers_dev` stays enabled in `wrangler.jsonc` alongside the
+  `replay.fogofwar.dev` route.
+
 ## Serving replay data straight from the bucket (`cdn-bar.fogofwar.dev`)
 
 The Worker runs **before** Cloudflare's cache, not behind it. So a `/replays/*`
@@ -379,9 +414,10 @@ could serve.
 npx wrangler r2 bucket domain add barreplay-replays \
   --domain cdn-bar.fogofwar.dev --zone-id <ZONE_ID> --min-tls 1.2
 
-# 2. allow the viewer's origin to read it cross-origin. Without this the
+# 2. allow the viewer's origins to read it cross-origin. Without this the
 #    browser blocks every replay fetch — the Worker path was same-origin and
-#    needed none.
+#    needed none. The list covers production, the staging PREVIEW alias and
+#    local dev; re-run this after editing r2-cors.json.
 npx wrangler r2 bucket cors set barreplay-replays --file r2-cors.json
 npx wrangler r2 bucket cors list barreplay-replays   # verify it took
 ```

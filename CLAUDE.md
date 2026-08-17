@@ -234,6 +234,20 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           HOSTNAMES: the worker is served from replay.fogofwar.dev (a wrangler
                           Custom Domain — a PER-HOSTNAME cert, so no wildcard and no Advanced
                           Certificate Manager; the zone must live in the worker's own account).
+                          PREVIEWS (workers_dev + preview_urls in wrangler.jsonc, `npm run
+                          preview:upload` -> `wrangler versions upload --preview-alias staging`):
+                          a build goes live at staging-replay.bartools.workers.dev with NO
+                          traffic routed to it, and `npm run preview:promote` (versions deploy)
+                          is what makes it production; plain `npm run deploy` still does both.
+                          The ALIAS is load-bearing — each upload also mints a
+                          <version-prefix>-replay.… URL, but the viewer reads the replay pieces
+                          cross-origin from the bucket hostname and R2 matches CORS origins
+                          EXACTLY, so only the stable alias can be listed in r2-cors.json (on a
+                          per-version URL the page loads and every replay silently fails). A
+                          preview shares production's BINDINGS: same bucket, same catalog/jobs
+                          DO — reads are the real data, and an upload dropped on it enters the
+                          real queue. Preview URLs cannot live on the custom domain, which is
+                          why the workers.dev hostname stays enabled.
                           The BULK replay pieces (.brw/.keys/c<n>/.resources) are NOT fetched
                           from it: they come from cdn-bar.fogofwar.dev, the R2 bucket bound
                           directly to a hostname. A Worker runs BEFORE Cloudflare's cache, so
