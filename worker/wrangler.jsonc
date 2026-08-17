@@ -27,14 +27,6 @@
     }
   ],
 
-  // STAGING (env.staging at the bottom of this file): a SEPARATE Worker named
-  // replay-staging at https://replay-staging.fogofwar.dev, for trying a build
-  // before deploying it to production. A separate Worker, not a Workers
-  // "preview URL": preview URLs are never generated for Workers that
-  // implement a Durable Object — a hard platform limitation that no toggle
-  // changes — and this one implements ReplayIndex.
-  // `npm run deploy:staging` deploys it; production is untouched.
-
   // The Vite build (client bundle in dist/client) is served as static assets by the
   // runtime BEFORE the Worker runs. Requests that don't match an asset fall through to
   // the Hono app in src/worker/index.ts. `single-page-application` serves index.html for
@@ -114,60 +106,5 @@
 
   "observability": {
     "enabled": true
-  },
-
-  // The staging Worker (see the STAGING note up top). Selected at BUILD time:
-  // `CLOUDFLARE_ENV=staging vite build` flattens this env into the generated
-  // dist config, and the wrangler deploy that follows deploys replay-staging
-  // (the name is <top-level-name>-<env>). Bindings are NON-INHERITABLE, so
-  // both are restated here — and that restatement is the design:
-  //
-  //  - The Durable Object binding points at PRODUCTION's ReplayIndex via
-  //    script_name (binding another Worker's DO is supported; only
-  //    IMPLEMENTING one forecloses preview URLs). No migrations here —
-  //    staging owns no DO class, it calls the live one, so it reads the real
-  //    catalog and jobs exactly as production does.
-  //  - Same bucket. Staging IS production's data behind a different hostname;
-  //    what it tests is the code.
-  //
-  // Consequences to respect:
-  //  - An upload dropped on staging enters the REAL ingest queue.
-  //  - Secrets are per-Worker: run
-  //      npx wrangler secret put REPLAY_PUT_TOKEN -e staging
-  //    once (same value as production), or staging's write routes — which
-  //    reach the production bucket and catalog through these bindings — are
-  //    OPEN, because the guard treats a missing token as local dev.
-  //  - The hostname must be listed in r2-cors.json (it is) and the policy
-  //    re-applied to the bucket for the cross-origin replay fetches to work.
-  "env": {
-    "staging": {
-      // Empty ON PURPOSE, to beat inheritance: migrations inherit from the
-      // top level, and inheriting new_sqlite_classes would make staging
-      // create an OWN (empty, never-read) ReplayIndex namespace next to the
-      // script_name binding that points at production's.
-      "migrations": [],
-      "routes": [
-        {
-          "pattern": "replay-staging.fogofwar.dev",
-          "custom_domain": true
-        }
-      ],
-      "durable_objects": {
-        "bindings": [
-          {
-            "name": "REPLAY_INDEX",
-            "class_name": "ReplayIndex",
-            "script_name": "replay"
-          }
-        ]
-      },
-      "r2_buckets": [
-        {
-          "binding": "BUCKET",
-          "bucket_name": "barreplay-replays",
-          "preview_bucket_name": "barreplay-replays-preview"
-        }
-      ]
-    }
   }
 }

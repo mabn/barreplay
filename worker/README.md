@@ -313,7 +313,6 @@ npm run test        # node tests over the real Hono routes (fake bindings, no wo
 npm run smoke       # boot the BUILT worker in workerd and check what it actually serves
 npm run typecheck   # tsc --noEmit
 npm run cf-typegen  # regenerate worker-configuration.d.ts from wrangler.jsonc
-npm run deploy:staging   # same chain as deploy, but to replay-staging.fogofwar.dev
 npm run deploy      # test → sync+build → smoke → wrangler deploy (needs Cloudflare auth)
 ```
 
@@ -354,50 +353,6 @@ For local dev, seed the local R2 with a packed bundle (`wrangler dev` binds the
 npm run upload -- ../static --local
 ```
 
-## Trying a build before it becomes the live Worker (`replay-staging`)
-
-Staging is a **separate Worker**, not a Workers "preview URL": preview URLs are
-never generated for Workers that implement a Durable Object (a hard platform
-limitation), and this one implements `ReplayIndex`. So `env.staging` in
-`wrangler.jsonc` deploys the same code as its own Worker, `replay-staging`, at:
-
-```
-https://replay-staging.fogofwar.dev
-```
-
-```sh
-npm run deploy:staging   # test → staging build → smoke → deploy replay-staging
-# look at it, then ship the same tree to production:
-npm run deploy
-```
-
-Production (`replay.fogofwar.dev`) is untouched by a staging deploy — they are
-different Workers on different hostnames.
-
-Staging runs against **production's data by design**: its Durable Object
-binding points at production's `ReplayIndex` via `script_name` (staging owns no
-DO of its own — `migrations` is emptied in the env to beat inheritance), and it
-binds the same bucket. What staging isolates is the *code*. Consequences:
-
-- Reading is the real thing — the real catalog, the real jobs, the real
-  replay pieces.
-- A `.brepstream` dropped on staging enters the **real** ingest queue.
-- The custom domain is provisioned automatically on first deploy (same
-  mechanism as production's; the zone requirement is already met).
-
-### One-time setup
-
-```sh
-# Secrets are per-Worker. Without this, staging's write routes — which reach
-# the PRODUCTION bucket and catalog through its bindings — are open, because
-# the guard treats a missing token as local dev:
-npx wrangler secret put REPLAY_PUT_TOKEN -e staging
-
-# The staging origin must be allowed to read the bucket cross-origin
-# (it is listed in r2-cors.json; apply the policy to the bucket):
-npx wrangler r2 bucket cors set barreplay-replays --file r2-cors.json
-```
-
 ## Serving replay data straight from the bucket (`cdn-bar.fogofwar.dev`)
 
 The Worker runs **before** Cloudflare's cache, not behind it. So a `/replays/*`
@@ -424,10 +379,9 @@ could serve.
 npx wrangler r2 bucket domain add barreplay-replays \
   --domain cdn-bar.fogofwar.dev --zone-id <ZONE_ID> --min-tls 1.2
 
-# 2. allow the viewer's origins to read it cross-origin. Without this the
+# 2. allow the viewer's origin to read it cross-origin. Without this the
 #    browser blocks every replay fetch — the Worker path was same-origin and
-#    needed none. The list covers production, the staging Worker and
-#    local dev; re-run this after editing r2-cors.json.
+#    needed none.
 npx wrangler r2 bucket cors set barreplay-replays --file r2-cors.json
 npx wrangler r2 bucket cors list barreplay-replays   # verify it took
 ```
