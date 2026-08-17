@@ -27,6 +27,26 @@
     }
   ],
 
+  // PREVIEWS. `wrangler versions upload` uploads a build WITHOUT routing any
+  // traffic to it and hands back a URL to try it on; `wrangler versions deploy`
+  // is what later promotes one to production. Preview URLs can only live on
+  // workers.dev (never on the custom domain), which is why the workers.dev
+  // hostname stays enabled here.
+  //
+  // Each upload also mints a versioned URL of its own
+  // (<version-prefix>-replay.bartools.workers.dev), but PREFER THE ALIAS
+  // (`--preview-alias staging` -> staging-replay.bartools.workers.dev, wired
+  // into the npm scripts): the replay pieces are fetched cross-origin from the
+  // bucket hostname, so the origin has to be named in the bucket's CORS policy
+  // (r2-cors.json), and R2 matches origins exactly — a per-version hostname
+  // could never be listed there, and its replays would silently fail to load.
+  //
+  // A preview shares production's BINDINGS — the same R2 bucket and the same
+  // catalog/jobs Durable Object. Reading is therefore the real thing; writing
+  // (an upload dropped on the preview) also lands in the real queue.
+  "workers_dev": true,
+  "preview_urls": true,
+
   // The Vite build (client bundle in dist/client) is served as static assets by the
   // runtime BEFORE the Worker runs. Requests that don't match an asset fall through to
   // the Hono app in src/worker/index.ts. `single-page-application` serves index.html for
