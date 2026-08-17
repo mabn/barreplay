@@ -250,7 +250,10 @@ are the engine's wobbled readings.
 
 Identical line grammar to `.brsnap` so `internal/capture`'s parser is shared:
 `GID` (the 32-hex gameId, always the first line after the header), `GAME`
-(JSON: protocol, widgetVersion (semver of the emitting widget), mode
+(JSON: protocol, widgetVersion (semver of the emitting widget), widgetDate
+(when that version was cut) and widgetSha (git SHA of the exact widget file,
+stamped into the copy published for download — absent from a widget installed
+straight from the repo; both widget >= 1.7.0), mode
 live/replay, map, game/engine versions, sampleEvery, gameSpeed, recordEnemies
 (whether the stream carries enemy units — see above), recording
 player id/allyTeam/spectator), `DEF` (full unit-def

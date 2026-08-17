@@ -164,6 +164,7 @@ This is the `snapshot.Meta` structure, unchanged from the data model:
 | Teams | `teams` | array of team info, below |
 | Players | `players` | array of player info, below (optional) |
 | Recorder | `recorder` | live-capture point of view, below (optional) |
+| Widget | `widget` | the uploader-widget build that produced the capture, below (optional) |
 
 `unitDefs` values (`snapshot.UnitDef`; every field after `name` is optional):
 `id`, `name` (internal name, e.g. `armcom`), `humanName`, `metalCost`,
@@ -185,6 +186,16 @@ modify unit types and the id space depends on the exact game build.
 `spectator` — the client whose point of view a live-game capture records
 (from the uploader widget's `GAME` preamble line). Absent for the engine
 re-sim pipeline, which sees the whole game.
+
+`widget` (`snapshot.WidgetInfo`, optional): `version`, `date`, `sha` — which
+build of the uploader widget wrote the stream, also from its `GAME` line. A
+player's installed copy can be arbitrarily old, so the capture is the only
+place this can be learned. `version`/`date` are the constants the widget bumps
+together; `sha` is the git SHA stamped into the copy served for download
+(worker/tools/sync-assets.mjs) and is absent when a player installed the widget
+straight from the repo. Absent wholesale for re-sim captures (whose sampler is
+injected by this tool) and for streams written before widget >= 1.7.0 — except
+`version`, which the widget has always reported.
 
 ### 4.2 The chunk index
 

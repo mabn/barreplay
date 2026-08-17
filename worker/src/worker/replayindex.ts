@@ -93,7 +93,23 @@ export class ReplayIndex extends DurableObject<Env> {
     // In-place upgrades for tables created before a column existed (SQLite has
     // no ADD COLUMN IF NOT EXISTS; a duplicate-column error just means the
     // schema is already current).
-    for (const col of ["settings TEXT", "rid TEXT", "players TEXT", "uploader_ally INTEGER", "uploads TEXT", "view TEXT", "player_count INTEGER"]) {
+    for (const col of [
+      "settings TEXT",
+      "rid TEXT",
+      "players TEXT",
+      "uploader_ally INTEGER",
+      "uploads TEXT",
+      "view TEXT",
+      "player_count INTEGER",
+      // The uploader-widget build behind the current revision. Three columns
+      // rather than one JSON blob because the whole point is to be able to ask
+      // "which widget builds are in the wild" / "which replays came from the
+      // build with that bug" in SQL, over the catalog, without opening a blob
+      // per row. The per-revision history lives in uploads[] (mergeUploads).
+      "widget_version TEXT",
+      "widget_sha TEXT",
+      "widget_date TEXT",
+    ]) {
       try {
         ctx.storage.sql.exec(`ALTER TABLE replays ADD COLUMN ${col}`);
       } catch (e) {
@@ -186,10 +202,14 @@ export class ReplayIndex extends DurableObject<Env> {
       .toArray();
     const before: UploadRef[] | null =
       prior.length > 0 && prior[0].uploads != null ? JSON.parse(prior[0].uploads as string) : null;
-    const uploads = mergeUploads(before, e.rid, e.uploaderAlly);
+    const uploads = mergeUploads(before, e.rid, e.uploaderAlly, {
+      version: e.widgetVersion ?? undefined,
+      sha: e.widgetSha ?? undefined,
+      date: e.widgetDate ?? undefined,
+    });
     this.ctx.storage.sql.exec(
-      `INSERT INTO replays (id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, updated_unix)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO replays (id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date, updated_unix)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          rid = excluded.rid,
          start_unix = excluded.start_unix,
@@ -210,6 +230,16 @@ export class ReplayIndex extends DurableObject<Env> {
          -- win; silence means "nothing to say", which must never wipe a
          -- hand-marking made through setView.
          view = COALESCE(excluded.view, view),
+         -- Like view, and for the same reason: these describe the capture the
+         -- row now points at, so a publisher that KNOWS its widget wins, while
+         -- one that says nothing must not erase what is there. Silence means
+         -- "not an uploader-widget capture, or too old to say" — a re-sim
+         -- publish, or a pre-1.7.0 stream — and neither is grounds for
+         -- forgetting which widget the game was actually recorded with. The
+         -- per-revision truth is kept in uploads[] regardless.
+         widget_version = COALESCE(excluded.widget_version, widget_version),
+         widget_sha = COALESCE(excluded.widget_sha, widget_sha),
+         widget_date = COALESCE(excluded.widget_date, widget_date),
          updated_unix = excluded.updated_unix`,
       e.id,
       e.rid,
@@ -224,6 +254,9 @@ export class ReplayIndex extends DurableObject<Env> {
       e.uploaderAlly,
       uploads === null ? null : JSON.stringify(uploads),
       e.view,
+      e.widgetVersion,
+      e.widgetSha,
+      e.widgetDate,
       Math.floor(Date.now() / 1000),
     );
     this.indexRow(e.id, e.players, e.settings);
@@ -304,7 +337,7 @@ export class ReplayIndex extends DurableObject<Env> {
     }
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view
+        `SELECT id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date
          FROM replays
          ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
          ORDER BY start_unix IS NULL, start_unix DESC, id`,
@@ -325,6 +358,9 @@ export class ReplayIndex extends DurableObject<Env> {
       uploaderAlly: r.uploader_ally as number | null,
       uploads: r.uploads == null ? null : JSON.parse(r.uploads as string),
       view: (r.view as ReplayEntry["view"]) ?? null,
+      widgetVersion: (r.widget_version as string | null) ?? null,
+      widgetSha: (r.widget_sha as string | null) ?? null,
+      widgetDate: (r.widget_date as string | null) ?? null,
     }));
   }
 

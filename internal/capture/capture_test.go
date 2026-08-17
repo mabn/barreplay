@@ -233,6 +233,58 @@ func TestConsumeProtocol3IncomeUnscaled(t *testing.T) {
 	}
 }
 
+// The GAME line names the widget build that produced the stream. A player's
+// installed copy can be arbitrarily old, so this is the only place it can be
+// learned — the catalog stores it per replay, and a bad capture is traced back
+// through it.
+func TestConsumeRecordsWidgetBuild(t *testing.T) {
+	const sha = "0f1e2d3c4b5a69788796a5b4c3d2e1f009182736"
+	stream := strings.Join([]string{
+		`BRSNAP GAME {"protocol":3,"widgetVersion":"1.7.0","widgetDate":"2026-08-16","widgetSha":"` + sha + `","mode":"live"}`,
+		// A widget re-enabled mid-game appends a segment with its own
+		// preamble; the capture is named after the build that started it.
+		`BRSNAP GAME {"protocol":3,"widgetVersion":"9.9.9","mode":"live"}`,
+		"BRSNAP READY",
+	}, "\n")
+	w := &recordingWriter{}
+	if err := Consume(strings.NewReader(stream), snapshot.Meta{}, w); err != nil {
+		t.Fatal(err)
+	}
+	got := w.meta.Widget
+	if got == nil {
+		t.Fatal("Meta.Widget not recorded")
+	}
+	if want := (snapshot.WidgetInfo{Version: "1.7.0", Sha: sha, Date: "2026-08-16"}); *got != want {
+		t.Errorf("Meta.Widget = %+v, want %+v", *got, want)
+	}
+}
+
+// An older widget reports only a version, and one installed straight from the
+// repo was never SHA-stamped. Both must still record what they do know.
+func TestConsumeWidgetBuildPartialAndAbsent(t *testing.T) {
+	unstamped := &recordingWriter{}
+	if err := Consume(strings.NewReader(
+		`BRSNAP GAME {"protocol":3,"widgetVersion":"1.6.0","mode":"live"}`+"\nBRSNAP READY",
+	), snapshot.Meta{}, unstamped); err != nil {
+		t.Fatal(err)
+	}
+	if w := unstamped.meta.Widget; w == nil || w.Version != "1.6.0" || w.Sha != "" || w.Date != "" {
+		t.Errorf("partial widget info = %+v, want version only", w)
+	}
+
+	// A re-sim capture's GAME line names no widget at all: nothing to record,
+	// and inventing an empty struct would make the catalog claim otherwise.
+	resim := &recordingWriter{}
+	if err := Consume(strings.NewReader(
+		`BRSNAP GAME {"protocol":3,"mode":"replay"}`+"\nBRSNAP READY",
+	), snapshot.Meta{}, resim); err != nil {
+		t.Fatal(err)
+	}
+	if resim.meta.Widget != nil {
+		t.Errorf("Meta.Widget = %+v, want nil for a capture that names none", resim.meta.Widget)
+	}
+}
+
 func TestConsumeEmptyStillWritesMeta(t *testing.T) {
 	w := &recordingWriter{}
 	if err := Consume(strings.NewReader("no snapshot data here\n"), snapshot.Meta{GameID: "x"}, w); err != nil {

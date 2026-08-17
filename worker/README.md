@@ -44,7 +44,7 @@ inside a **Durable Object** (`src/worker/replayindex.ts`, single instance, migra
 
 | URL | What |
 | --- | --- |
-| `GET /api/replays` | the catalog, newest game first (rows with no start time last) — `[{id, rid, startUnix, durationSec, map, gameSize, sizeBytes, settings, players, playerCount}]`, nulls for unknown stats. Filterable: `?from=&to=` (unix seconds or `YYYY-MM-DD`, `to` covers the whole day), `?map=`, `?minPlayers=&maxPlayers=` (Gaia excluded), `?player=` (case-insensitive name prefix), `?settings=lava,zombies` (all must be present). No params = everything; unknown params are ignored |
+| `GET /api/replays` | the catalog, newest game first (rows with no start time last) — `[{id, rid, startUnix, durationSec, map, gameSize, sizeBytes, settings, players, playerCount, widgetVersion, widgetSha, widgetDate}]`, nulls for unknown stats. Filterable: `?from=&to=` (unix seconds or `YYYY-MM-DD`, `to` covers the whole day), `?map=`, `?minPlayers=&maxPlayers=` (Gaia excluded), `?player=` (case-insensitive name prefix), `?settings=lava,zombies` (all must be present). No params = everything; unknown params are ignored |
 | `GET /api/replays/facets` | the distinct `{maps, sizes, players, settings, from, to}` in the catalog, so the filter bar only offers choices that match something. Computed over the whole catalog, not the filtered result |
 | `PUT /api/replays/<id>` | upsert one row (same JSON shape, minus `id`); called by `pack -upload` / the ingest daemon after a replay's files land in the bucket |
 
@@ -66,6 +66,25 @@ present flags are sent (a vanilla ranked game is `{"ranked": true}`). `pack` dis
 them from the demo startscript's `[modoptions]` (`viz.SettingsFlags` in Go — modoptions
 are NOT stored in the `.brp`, so this rides only the PUT); `pack -no-demo` uploads have
 `settings: null` and just show an empty cell.
+
+`widgetVersion` / `widgetSha` / `widgetDate` record **which build of the
+Replay uploader widget produced the capture** behind the current revision. The
+widget writes all three into its stream's `GAME` line and the publisher carries
+them into the PUT, because a player's installed copy can be arbitrarily old and
+nothing else in the system knows what it was. Version and date are the
+constants the widget bumps together (`1.7.0`, `2026-08-16`); the SHA is the git
+commit of the exact file, stamped into the copy served at `/replay_uploader.lua`
+when it is published (`tools/sync-assets.mjs`) — so it identifies the bytes,
+not just the release name, which is the distinction that matters for a file
+that keeps the same version for weeks. They are three plain columns rather than
+one JSON blob so "which builds are in the wild" is a SQL question.
+
+A widget installed straight from the repo was never stamped and reports no SHA;
+a re-sim revision has no uploader widget at all. Both send nothing, and the
+upsert `COALESCE`s these columns (like `view`), so a later publish that knows
+nothing cannot erase a build a previous one recorded. The row describes the
+current revision, so per-revision provenance lives in `uploads[]`: each entry
+is `{rid, ally, widget?}` and keeps the build that produced *that* upload.
 
 Writes can be guarded with a shared secret: `npx wrangler secret put REPLAY_PUT_TOKEN`
 makes the PUT require `Authorization: Bearer <token>`; `pack` sends the same-named env
@@ -97,14 +116,20 @@ worker/
   index.html              viewer page (Vite entry)
   public/app.js           viewer logic (copied from internal/viz/web, URLs point at R2)
   public/style.css
+  public/setup.html       the widget-install guide (/setup), self-contained: no fingerprinted
+                          subresources, since only index.html gets the hash substituted
   public/icons, ranks/    synced from internal/viz/bardata by tools/sync-assets.mjs (gitignored)
+  public/replay_uploader.lua  the widget /setup hands out, synced from assets/lua by the same
+                          script (gitignored — source of truth is assets/lua/replay_uploader.lua)
   src/worker/index.ts     wrangler entry: re-exports the app + the Durable Object class
   src/worker/app.ts       Hono app: serve R2 (index.json, replays/**), /api/replays,
                           /api/upload + jobs, SPA fallback (no workerd imports — node-testable)
   src/worker/replayindex.ts  the catalog + ingest-jobs Durable Object (SQLite)
   src/worker/replayentry.ts  catalog row shape + PUT body validation (node-testable, no workerd)
   src/worker/preamble.ts  minimal .brepstream preamble scan for /api/upload (gameId, ally team)
-  tools/sync-assets.mjs   copies the vendored icons into public/ before dev/build
+  tools/sync-assets.mjs   copies the vendored icons + the uploader widget into public/ before dev/build
+  tools/smoke.mjs         boots the BUILT worker (vite preview -> workerd + the real asset
+                          layer) and checks what it serves; `npm run deploy` gates on it
   tools/r2put.ts          shared upload backend: parallel S3 PUTs (with R2 creds) or parallel wrangler
   tools/upload.ts         upload a barreplay-static bundle (npm run upload)
 ```
@@ -229,17 +254,75 @@ is ever deleted): they are the substrate for the planned multi-player merge
 (docs/widget-remote-upload.md), keyed by gameId with the recorder's ally team
 (`-a<n>`, `-spec` for spectators) in the name.
 
+### Where players get the widget (`/setup`)
+
+The dropzone only helps someone who already has a capture, so its banner links
+to **`/setup`** (`public/setup.html`): download `replay_uploader.lua`, drop it
+in `…\data\LuaUI\Widgets\`, enable it from F11, upload the `.brepstream` each
+game leaves in `…\data`. Three things make that page work:
+
+- `tools/sync-assets.mjs` copies `assets/lua/replay_uploader.lua` into
+  `public/` (gitignored, like the icons) so the repo keeps ONE copy of the
+  widget and the download can never go stale against the decoder. It also
+  STAMPS the copy: `__WIDGET_SHA__` becomes the SHA of the last commit that
+  touched the widget, which is how a capture can later name the exact bytes
+  that produced it (see the catalog's `widgetSha`). A widget with uncommitted
+  changes is published unstamped — and `npm run smoke`, and so `npm run
+  deploy`, fails on that rather than shipping captures with no provenance.
+- `wrangler.jsonc` excludes `/replay_uploader.lua` from `run_worker_first`:
+  through the Worker its `public/_headers` `no-cache` rule would be dead, and
+  this is the one file whose bytes change under a stable URL.
+- `src/worker/app.ts` routes `GET /setup` to the `/setup.html` asset. Without
+  it the extensionless path reaches the catch-all, where the asset layer's
+  single-page-application handling answers with the viewer's `index.html`.
+
+The Go viz server serves the same page and widget from its embedded copies
+(`internal/viz/server.go`), so the relative link in `index.html` resolves on
+both backends.
+
 ## Commands
 
 ```sh
 npm install
 npm run dev         # vite dev — runs the Worker in workerd + HMR (needs a local R2, see below)
-npm run build       # sync icons, build client bundle + Worker into dist/
+npm run build       # sync icons + widget, build client bundle + Worker into dist/
 npm run preview     # preview the production build
+npm run test        # node tests over the real Hono routes (fake bindings, no workerd)
+npm run smoke       # boot the BUILT worker in workerd and check what it actually serves
 npm run typecheck   # tsc --noEmit
 npm run cf-typegen  # regenerate worker-configuration.d.ts from wrangler.jsonc
-npm run deploy      # build, then wrangler deploy (needs Cloudflare auth)
+npm run deploy      # test → sync+build → smoke → wrangler deploy (needs Cloudflare auth)
 ```
+
+`npm run deploy` is the whole deploy: nothing has to be run before or after it.
+The chain is spelled out in `package.json` rather than hidden in hooks —
+
+1. `npm test` — the route-level node tests.
+2. `npm run build` — whose `prebuild` syncs the vendored icons **and the
+   uploader widget** into `public/` (both gitignored, so a build is the only
+   thing that puts them there) and stamps the asset hash + data origin.
+3. `npm run smoke` (`tools/smoke.mjs`) — boots the built Worker under
+   `vite preview` and asserts what it really serves.
+4. `wrangler deploy`.
+
+Step 3 exists because steps 1 and 2 cannot see the **asset layer**, which is
+where this project's deploy bugs live. The node tests use a fake `ASSETS`
+binding that answers any path it is handed, and `vite dev` serves `public/`
+through plain static middleware. Only the real asset server redirects `.html`
+URLs to their extensionless form, answers unmatched paths with `index.html`,
+and applies `public/_headers`. All three have already shipped something that
+passed every local check: `/favicon.ico` as the whole HTML document, and
+`/setup` as an infinite redirect loop (the route rewrote it to `/setup.html`,
+which the asset layer bounced straight back). The smoke checks are those
+failure modes, one per line of output — including that the served
+`replay_uploader.lua` is byte-for-byte the repo's copy.
+
+`npm run typecheck` is deliberately **not** in the chain: it currently reports
+pre-existing `noUnusedLocals` errors in `tests/`, so wiring it in would block
+every deploy on unrelated cleanup.
+
+To ship without the guards (a hotfix, or when `wrangler` is the only step that
+matters), call the last step directly: `npm run build && npx wrangler deploy`.
 
 For local dev, seed the local R2 with a packed bundle (`wrangler dev` binds the
 `preview_bucket_name`):

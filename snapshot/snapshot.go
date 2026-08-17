@@ -204,6 +204,23 @@ type RecorderInfo struct {
 	Spectator bool  `json:"spectator,omitempty"`
 }
 
+// WidgetInfo identifies the widget build that produced a capture: which
+// release (Version + Date, both constants the widget bumps together) and which
+// bytes (Sha, the git SHA stamped into the copy players download — see
+// worker/tools/sync-assets.mjs). A player's installed copy can be arbitrarily
+// old, so a stream is the only place this can be learned; the catalog stores
+// it per replay.
+//
+// Sha is empty for a widget taken straight from the repo rather than from the
+// download — the stamp is applied when the file is published, and an unstamped
+// copy reports nothing rather than an SHA it cannot vouch for. Version/Date
+// are empty for captures predating the fields (Date) or the whole GAME line.
+type WidgetInfo struct {
+	Version string `json:"version,omitempty"`
+	Sha     string `json:"sha,omitempty"`
+	Date    string `json:"date,omitempty"`
+}
+
 // Meta is written once at the start of a capture and describes the replay and
 // the static data needed to interpret the frames: notably the full unit-def
 // table (stable for the duration of a single game) and the player roster.
@@ -220,6 +237,11 @@ type Meta struct {
 	// Recorder is set for live-game captures (the uploader widget); nil for
 	// the engine re-sim pipeline, which sees the whole game.
 	Recorder *RecorderInfo `json:"recorder,omitempty"`
+	// Widget is the build of the uploader widget that produced the capture,
+	// from the stream's GAME line. Nil for the engine re-sim pipeline (whose
+	// sampler is injected by this tool, so its build is the tool's own) and
+	// for streams written before the widget reported it.
+	Widget *WidgetInfo `json:"widget,omitempty"`
 }
 
 // Writer is the pluggable persistence boundary. Callers must call WriteMeta

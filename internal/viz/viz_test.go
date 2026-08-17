@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mabn/barreplay/assets"
 	"github.com/mabn/barreplay/snapshot"
 )
 
@@ -476,6 +477,7 @@ func TestCatalog(t *testing.T) {
 			{PlayerID: 3, Name: "watcher", Team: 0, Spectator: true},
 		},
 		Recorder: &snapshot.RecorderInfo{PlayerID: 2, AllyTeam: 1},
+		Widget:   &snapshot.WidgetInfo{Version: "1.7.0", Sha: widgetSHA, Date: "2026-08-16"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -534,6 +536,13 @@ func TestCatalog(t *testing.T) {
 	if r.UploaderAlly == nil || *r.UploaderAlly != 1 {
 		t.Errorf("recent uploaderAlly = %v, want 1", r.UploaderAlly)
 	}
+	// The widget build that recorded the capture, carried from the stream's
+	// GAME line through Meta into the row the catalog stores.
+	if r.WidgetVersion == nil || *r.WidgetVersion != "1.7.0" ||
+		r.WidgetSha == nil || *r.WidgetSha != widgetSHA ||
+		r.WidgetDate == nil || *r.WidgetDate != "2026-08-16" {
+		t.Errorf("recent widget = %v/%v/%v", str(r.WidgetVersion), str(r.WidgetSha), str(r.WidgetDate))
+	}
 
 	n := entries[1]
 	if n.StartUnix != nil {
@@ -545,6 +554,23 @@ func TestCatalog(t *testing.T) {
 	if n.DurationSec == nil || *n.DurationSec != 2 { // last frame 60 / 30 fps
 		t.Errorf("nostart durationSec = %v", n.DurationSec)
 	}
+	// A capture whose stream named no widget must send nothing rather than
+	// empty strings: the worker's upsert COALESCEs these columns, so a blank
+	// would overwrite a known build with one that never existed.
+	if n.WidgetVersion != nil || n.WidgetSha != nil || n.WidgetDate != nil {
+		t.Errorf("nostart widget = %v/%v/%v, want all nil", str(n.WidgetVersion), str(n.WidgetSha), str(n.WidgetDate))
+	}
+}
+
+// widgetSHA is a plausible git SHA for the catalog's widget-provenance fields.
+const widgetSHA = "0f1e2d3c4b5a69788796a5b4c3d2e1f009182736"
+
+// str renders a nullable catalog string for a failure message.
+func str(p *string) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return *p
 }
 
 func TestGameSizeSpec(t *testing.T) {
@@ -753,5 +779,51 @@ func TestFavicon(t *testing.T) {
 		if !strings.Contains(string(html), want) {
 			t.Errorf("index.html does not reference %s", want)
 		}
+	}
+}
+
+// TestSetupPage guards the widget-install guide the landing page links to. The
+// link in index.html is relative, so it must resolve on THIS server too, not
+// only on the Cloudflare deployment — and the widget it offers has to be the
+// embedded assets/lua copy, byte for byte.
+func TestSetupPage(t *testing.T) {
+	srv := httptest.NewServer((&Server{Dir: t.TempDir()}).Handler())
+	defer srv.Close()
+
+	get := func(path string) (*http.Response, string) {
+		t.Helper()
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("GET %s: status %d", path, resp.StatusCode)
+		}
+		return resp, string(b)
+	}
+
+	_, home := get("/")
+	if !strings.Contains(home, `href="/setup"`) {
+		t.Error("the dropzone banner does not link to /setup")
+	}
+
+	resp, page := get("/setup")
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/html") {
+		t.Errorf("/setup content-type = %q", got)
+	}
+	if !strings.Contains(page, `href="/replay_uploader.lua"`) {
+		t.Error("/setup does not offer the widget download")
+	}
+	// The page is deliberately self-contained: it must not reference the
+	// fingerprinted subresources, whose hash only index.html gets substituted.
+	if strings.Contains(page, "__ASSET_REV__") {
+		t.Error("/setup references an unsubstituted fingerprinted asset")
+	}
+
+	_, widget := get("/replay_uploader.lua")
+	if widget != assets.ReplayUploaderLua {
+		t.Error("/replay_uploader.lua is not the embedded widget")
 	}
 }
