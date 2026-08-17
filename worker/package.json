@@ -24,12 +24,12 @@
     "hono": "^4.12.27"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.13.6",
+    "@cloudflare/vite-plugin": "^1.52.1",
     "@types/node": "^22.15.0",
     "aws4fetch": "^1.0.20",
     "tsx": "^4.19.0",
     "typescript": "^5.9.2",
     "vite": "^6.3.5",
-    "wrangler": "^4.105.0"
+    "wrangler": "^4.123.0"
   }
 }

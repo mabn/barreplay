@@ -373,6 +373,23 @@ npm run preview:promote      # wrangler versions deploy — pick the version, co
 
 `npm run deploy` still does both at once, for changes that need no look first.
 
+### Enabling it (once)
+
+`workers_dev` and `preview_urls` in `wrangler.jsonc` are **trigger settings**, not
+versioned ones: a `versions upload` never applies them, so until they are pushed
+once, uploads print no preview URL and the hostname answers Cloudflare's "There
+is nothing here yet". Push them without touching what serves production:
+
+```sh
+npm run build && npx wrangler triggers deploy
+```
+
+(It reapplies only routes/domains — for this config, the custom domain that is
+already live plus the workers.dev subdomain. It reads the config the Vite build
+generates under `dist/`, which is why the build comes first; wrangler before
+4.123 could not find it and failed with "the `assets` property … is missing the
+required `directory` property".)
+
 Three things worth knowing:
 
 - **The alias is the URL to use.** Every upload also mints a per-version URL
