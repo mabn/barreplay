@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/mabn/barreplay/internal/packer"
 )
 
 // mockWorker fakes the worker's job/stream API surface: one pending job whose
@@ -241,4 +245,58 @@ func TestRunOnceUnauthorized(t *testing.T) {
 	if len(m.transitions) != 0 {
 		t.Errorf("transitions = %v, want none", m.transitions)
 	}
+}
+
+// A published replay is followed by the same size report `pack -stats`
+// prints, and it goes to stderr so the tee'd log file keeps it. A .brp that
+// cannot be measured is a warning, never a failure — the publish it belongs to
+// has already succeeded by then.
+func TestReportStats(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "abc123.brsnap")
+	if err := os.WriteFile(in, []byte(statsCapture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	brpPath, _, err := packer.Pack(context.Background(), nil, in, dir, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if out := captureStderr(t, func() { reportStats(brpPath) }); !strings.Contains(out, "armcom") ||
+		!strings.Contains(out, "top 1 unit defs") {
+		t.Errorf("stats report missing the per-def breakdown:\n%s", out)
+	}
+	if out := captureStderr(t, func() { reportStats(filepath.Join(dir, "gone.brp")) }); !strings.Contains(out, "stats for") {
+		t.Errorf("an unreadable .brp should warn, got %q", out)
+	}
+}
+
+const statsCapture = `BRSNAP DEF {"id":1,"name":"armcom","humanName":"Armada Commander","maxHealth":3000}
+BRSNAP T 0 0 armada #ff0000
+BRSNAP READY
+BRSNAP F 30 1.000 1
+BRSNAP U 100 1 0 512.0 80.0 1024.0 3000.0 3000.0
+BRSNAP F 60 2.000 1
+BRSNAP U 100 1 0 512.0 80.0 1030.0 2900.0 3000.0
+`
+
+// captureStderr runs fn with os.Stderr redirected into a pipe and returns what
+// it wrote — the same swap teeStderr performs in production.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		done <- string(b)
+	}()
+	fn()
+	os.Stderr = orig
+	w.Close()
+	return <-done
 }
