@@ -39,7 +39,7 @@ The landing page (no `?replay=` in the URL) has a **left menu** with two section
 
 - **Replays** — the catalog list (below), the default.
 - **Queue** — **admin-only** (`?admin=true`): the ingest jobs (`GET /api/queue`),
-  one row per job with its game, **kind**, state, age and failure detail, **5 per
+  one row per job with its game, **kind**, state, age and failure detail, **25 per
   page** with a Prev/Next pager. Two kinds appear here: an `upload` is a dropped
   `.brepstream` waiting for a plain `bringest`, a `re-sim` is a game **nobody
   uploaded**, requested from the paste box above the table (below) and waiting for

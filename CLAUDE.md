@@ -602,7 +602,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           dropzone above it and this inside it. It reads GET
                           /api/queue (ReplayIndex.queuePage: unfinished jobs first, then the most
                           recently finished; ?offset=/?limit=, limit capped at QUEUE_LIMIT_MAX),
-                          QUEUE_PAGE = 5 rows at a time with a Prev/Next pager. It NEVER refreshes
+                          QUEUE_PAGE = 25 rows at a time with a Prev/Next pager. It NEVER refreshes
                           itself: every read is an explicit act — opening the landing page, paging,
                           the Reload button, or this browser's own upload landing/failing — so the
                           pager states the CLOCK time of the read (a relative "12s ago" would
@@ -610,7 +610,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           ages are as-of that read, with the exact moment in each cell's tooltip).
                           The reply's `total`/`active` are counted over the WHOLE jobs table, not
                           the page, so the pager and the menu's in-flight count stay true on any
-                          page — a 5-row window cannot say how many jobs are queued. The page
+                          page — one window of rows cannot say how many jobs are queued. The page
                           number is deliberately NOT in the URL (unlike ?tab= and the filters):
                           "page 3 of the queue" describes a moment in a pipeline, not a set of
                           replays, so there is nothing to share or restore. The route is OPEN, like

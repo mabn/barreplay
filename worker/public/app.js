@@ -3579,7 +3579,7 @@ function initHomeNav() {
 // and one's own upload landing. Nothing here refreshes itself on a timer: a
 // job's state changes on the scale of minutes, and a table that rewrites
 // itself under the cursor is worse than a button that says when it was read.
-const QUEUE_PAGE = 5;          // rows per page
+const QUEUE_PAGE = 25;         // rows per page (the worker caps a page at QUEUE_LIMIT_MAX = 100)
 const QUEUE_UNSUPPORTED =
   'This server does not run an ingest queue — uploads are published from the command line with: go run ./cmd/pack -upload r2 <capture>.';
 let queuePage = null;      // last fetched {jobs, total, active}, so a re-render needs no fetch
