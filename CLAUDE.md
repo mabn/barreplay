@@ -234,6 +234,17 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           HOSTNAMES: the worker is served from replay.fogofwar.dev (a wrangler
                           Custom Domain — a PER-HOSTNAME cert, so no wildcard and no Advanced
                           Certificate Manager; the zone must live in the worker's own account).
+                          NO STAGING/PREVIEW deployment exists, and Workers preview URLs
+                          CANNOT work here: previews are never generated for Workers that
+                          implement a Durable Object (hard platform limitation; this one
+                          implements ReplayIndex — no toggle or wrangler flag changes that,
+                          which was learned the hard way). A separate staging Worker was
+                          tried and scrapped: binding production's DO via script_name runs
+                          production's DEPLOYED DO code, so any branch adding a DO method
+                          500s on staging (observed with queuePage), and an own-DO staging
+                          tests against an empty catalog — neither serves pre-prod testing.
+                          Verify changes with worker/tests + `npm run smoke` + `vite dev`,
+                          then deploy.
                           The BULK replay pieces (.brw/.keys/c<n>/.resources) are NOT fetched
                           from it: they come from cdn-bar.fogofwar.dev, the R2 bucket bound
                           directly to a hostname. A Worker runs BEFORE Cloudflare's cache, so
@@ -388,7 +399,22 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           exactly what keeps the filter bar off there. The one Go-side piece the
                           filters DO depend on is catalogPlayersPerAlly, because BuildCatalogEntry is
                           what builds the roster the worker stores). The front-end landing page
-                          (no ?replay= in the URL) renders the catalog as the replay list, with
+                          (no ?replay= in the URL) is a LEFT MENU (app.js homeTab/applyHomeTab,
+                          #homenav) over two sections: "Replays" (the catalog list, the default)
+                          and "Queue" (the ingest jobs, below), which is ADMIN-ONLY — the entry is
+                          hidden without ?admin=true (CSS, like the row refresh button) and
+                          homeTab() maps the tab back to "replays" for everyone else, so a shared
+                          ?tab=queue link cannot walk past the hidden entry and refreshQueue never
+                          fires. It is the pipeline's state — every uploader's jobs and their
+                          failure messages — which is maintenance, not something a visitor came for.
+                          Which section is shown lives in the
+                          URL as ?tab=, like the filters, so a pick is shareable and survives a
+                          refresh — but it PUSHES a history entry, because switching section is
+                          navigation, not a narrowing of what is listed; replayHref carries the
+                          param into a replay so back returns to the section it was opened from.
+                          The dropzone sits above both sections (a drop is accepted from either,
+                          and its progress line stays visible while the Queue is watched).
+                          "Replays" renders the catalog with
                           superseded revisions of cataloged games hidden (their
                           direct ?replay= links keep playing — nothing is deleted); picking a replay
                           sets ?replay=, the header title returns to the list. The list's Players
@@ -487,6 +513,33 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           downstream can recover it afterwards. typecheck is
                           deliberately NOT in the chain: it reports pre-existing noUnusedLocals
                           errors in tests/, so wiring it in would block every deploy.
+                          QUEUE SECTION (app.js renderQueue): the landing page's second menu entry
+                          shows those jobs — one row per upload with its game, state, age and
+                          failure detail, a link to the replay once the catalog has it, and a
+                          count of the jobs in flight on the menu entry itself. It reads GET
+                          /api/queue (ReplayIndex.queuePage: unfinished jobs first, then the most
+                          recently finished; ?offset=/?limit=, limit capped at QUEUE_LIMIT_MAX),
+                          QUEUE_PAGE = 5 rows at a time with a Prev/Next pager. It NEVER refreshes
+                          itself: every read is an explicit act — opening the landing page, paging,
+                          the Reload button, or this browser's own upload landing/failing — so the
+                          pager states the CLOCK time of the read (a relative "12s ago" would
+                          freeze there and become false with nothing re-rendering it; the rows'
+                          ages are as-of that read, with the exact moment in each cell's tooltip).
+                          The reply's `total`/`active` are counted over the WHOLE jobs table, not
+                          the page, so the pager and the menu's in-flight count stay true on any
+                          page — a 5-row window cannot say how many jobs are queued. The page
+                          number is deliberately NOT in the URL (unlike ?tab= and the filters):
+                          "page 3 of the queue" describes a moment in a pipeline, not a set of
+                          replays, so there is nothing to share or restore. The route is OPEN, like
+                          the per-job status the uploading browser already polls, but it omits
+                          the row's streamKey — the archive bytes are behind the bearer-guarded
+                          /api/streams route and the view has no use for the key. It is distinct
+                          from the daemon's GET /api/jobs, which is a WORK QUEUE (guarded, and
+                          it deliberately hides a healthy "processing" job — precisely the row a
+                          person watching wants to see). The Go viz server has no ingest pipeline
+                          and 404s the route; the section then says so rather than showing an
+                          empty table that would read as "nothing is queued", and asks it nothing
+                          further.
                           Uploads (tools/upload.ts) go
                           through tools/r2put.ts: parallel S3 PUTs when R2_ACCESS_KEY_ID/
                           R2_SECRET_ACCESS_KEY are set (fast, aws4fetch), else parallel `wrangler r2

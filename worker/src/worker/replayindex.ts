@@ -468,6 +468,39 @@ export class ReplayIndex extends DurableObject<Env> {
       .map(jobRow);
   }
 
+  /** queuePage is the queue as a PERSON reads it (GET /api/queue): one page of
+   * jobs, everything still in flight first — those are what the view exists to
+   * answer for — then the most recently finished, newest first. Unlike
+   * jobsPending it does not hide a fresh "processing" job: a daemon working
+   * right now is exactly what the viewer wants to see, even though it is not
+   * work to hand out.
+   *
+   * `total` and `active` are counted over the WHOLE table, not the page, so a
+   * pager can say how much it is paging through and the menu's in-flight count
+   * stays true on any page. */
+  queuePage(limit: number, offset: number): { jobs: IngestJob[]; total: number; active: number } {
+    const jobs = this.ctx.storage.sql
+      .exec(
+        `SELECT id, stream_key, game_id, state, error, created_unix, updated_unix FROM jobs
+         ORDER BY CASE WHEN state IN ('pending', 'processing') THEN 0 ELSE 1 END,
+                  updated_unix DESC, id
+         LIMIT ? OFFSET ?`,
+        limit,
+        offset,
+      )
+      .toArray()
+      .map(jobRow);
+    // SUM over no rows is NULL, hence the coalesce.
+    const counts = this.ctx.storage.sql
+      .exec(
+        `SELECT COUNT(*) AS total,
+                COALESCE(SUM(CASE WHEN state IN ('pending', 'processing') THEN 1 ELSE 0 END), 0) AS active
+         FROM jobs`,
+      )
+      .toArray()[0];
+    return { jobs, total: Number(counts.total), active: Number(counts.active) };
+  }
+
   /** jobUpdate transitions a job's state (daemon claim / completion report).
    * Returns false when the job id is unknown. */
   jobUpdate(id: string, state: "processing" | "done" | "error", error: string | null): boolean {
