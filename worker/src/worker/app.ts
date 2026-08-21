@@ -51,7 +51,7 @@ const authorized = (c: { env: Env; req: { header(name: string): string | undefin
 // table, single instance). GET lists every replay with its picker stats,
 // most recent game first; PUT is an upsert called by `pack -upload` right
 // after a replay's static files land in the bucket.
-const indexStub = (env: Env) => env.REPLAY_INDEX.get(env.REPLAY_INDEX.idFromName("index"));
+export const indexStub = (env: Env) => env.REPLAY_INDEX.get(env.REPLAY_INDEX.idFromName("index"));
 
 // Query params narrow the listing (parseReplayFilter documents them); no
 // params means the whole catalog, so an older front-end sees no change. The

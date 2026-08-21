@@ -1,6 +1,7 @@
 // The replay index: a SQLite-backed Durable Object that owns the catalog of
-// uploaded replays. One instance (idFromName("index")) holds two small
-// tables; the Worker's /api routes are thin wrappers over its RPC methods.
+// uploaded replays. One instance (idFromName("index")) holds a handful of
+// small tables; the Worker's /api routes are thin wrappers over its RPC
+// methods.
 // The R2 bucket remains the source of the replay DATA — the replays table is
 // only the picker metadata (when the game started, how long it ran, which map,
 // the team-size spec like "8v8"), which the bucket listing cannot provide
@@ -11,8 +12,14 @@
 // from its demo. A Go daemon (cmd/bringest, plain or -resim) polls the rows of
 // its kind, publishes the replay, and reports done/error; the front-end polls
 // its job row to know when it landed.
+//
+// The games table is the mirror of BAR's own history (src/worker/games.ts,
+// filled by the every-minute cron): the games that were PLAYED, as opposed to
+// the ones somebody captured. Nothing serves it yet — it is the work list the
+// re-sim side will pick from.
 import { DurableObject } from "cloudflare:workers";
 
+import type { GameEntry } from "./games";
 import { parseJobStats } from "./jobs";
 import type { IngestJob, JobKind, JobStats } from "./jobs";
 import { FACET_PLAYERS_MAX, derivePlayerCount, mergeUploads } from "./replayentry";
@@ -94,6 +101,35 @@ export class ReplayIndex extends DurableObject<Env> {
         key   TEXT PRIMARY KEY,
         value INTEGER NOT NULL
       );
+
+      -- Every game BAR published that this worker has seen, captured or not
+      -- (the cron in index.ts, via games.ts). Keyed by the SAME gameId as
+      -- replays, so a row here and a row there are two views of one game:
+      -- what was played, and what was captured of it. The columns deliberately
+      -- echo the catalog's vocabulary (map/size/roster/settings) so the two
+      -- can be compared without translating, and the JSON columns are kept so
+      -- the derived tables below can be rebuilt without re-reading the API.
+      CREATE TABLE IF NOT EXISTS games (
+        id             TEXT PRIMARY KEY,
+        start_unix     INTEGER,
+        duration_sec   INTEGER,
+        map            TEXT,
+        map_file       TEXT,
+        game_size      TEXT,
+        -- BAR's own bucket for the game: "duel" / "team" / "ffa".
+        preset         TEXT,
+        player_count   INTEGER,
+        players        TEXT,
+        settings       TEXT,
+        engine_version TEXT,
+        game_version   TEXT,
+        synced_unix    INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS games_start ON games (start_unix DESC);
+      -- Nothing reads this yet. It is here because the query the mirror exists
+      -- to answer is "the newest games of this kind", and adding it now costs
+      -- one line where adding it to a full table later costs a rebuild.
+      CREATE INDEX IF NOT EXISTS games_preset ON games (preset, start_unix DESC);
     `);
     // In-place upgrades for tables created before a column existed (SQLite has
     // no ADD COLUMN IF NOT EXISTS; a duplicate-column error just means the
@@ -170,12 +206,33 @@ export class ReplayIndex extends DurableObject<Env> {
       this.ctx.storage.sql.exec(`UPDATE replays SET player_count = ? WHERE id = ?`, count, r.id as string);
       this.indexRow(r.id as string, players, settings);
     }
+    // The mirrored games index into the same two tables, so a rebuild has to
+    // cover them or their entries would be left at whatever an older
+    // derivation produced. Only the ones no catalog row owns (see indexRow):
+    // an id in both was just rebuilt above, from the capture's own roster.
+    const games = this.ctx.storage.sql
+      .exec(`SELECT id, settings, players FROM games WHERE id NOT IN (SELECT id FROM replays)`)
+      .toArray();
+    for (const g of games) {
+      this.indexRow(
+        g.id as string,
+        g.players == null ? null : JSON.parse(g.players as string),
+        g.settings == null ? null : JSON.parse(g.settings as string),
+      );
+    }
   }
 
-  /** indexRow replaces one replay's rows in the two derived tables. Delete
-   * then insert (not upsert) so a roster or settings change can REMOVE an
-   * entry — a re-publish that drops a player must not leave the old name
-   * matching the filter. */
+  /** indexRow replaces one game's rows in the two derived tables. Delete then
+   * insert (not upsert) so a roster or settings change can REMOVE an entry — a
+   * re-publish that drops a player must not leave the old name matching the
+   * filter.
+   *
+   * Both the catalog and the games mirror index into these tables, under the
+   * same gameId, so exactly ONE of them owns an id's entries: the catalog row
+   * if there is one (its roster comes from the capture that was actually
+   * published), the games row otherwise. gamesInsert enforces that by not
+   * touching an id the catalog holds — without it, the two would take turns
+   * deleting each other's entries. */
   private indexRow(
     id: string,
     players: CatalogTeam[] | null,
@@ -396,11 +453,23 @@ export class ReplayIndex extends DurableObject<Env> {
       ),
       // MIN(name) so a name that two rows spell differently in case still
       // yields one completion; ordered case-insensitively for the datalist.
+      //
+      // Restricted to ids the CATALOG holds, because the two derived tables
+      // also carry the games mirror — thousands of games nothing has published.
+      // Those names and flags match no listable replay, and an option that
+      // filters to an empty list is worse than an absent one; this endpoint
+      // exists precisely to avoid offering them.
       players: col<string>(
-        `SELECT MIN(name) AS name FROM replay_players GROUP BY name_lower ORDER BY name_lower LIMIT ${FACET_PLAYERS_MAX}`,
+        `SELECT MIN(name) AS name FROM replay_players
+         WHERE replay_id IN (SELECT id FROM replays)
+         GROUP BY name_lower ORDER BY name_lower LIMIT ${FACET_PLAYERS_MAX}`,
         "name",
       ),
-      settings: col<string>(`SELECT DISTINCT flag FROM replay_settings ORDER BY flag`, "flag"),
+      settings: col<string>(
+        `SELECT DISTINCT flag FROM replay_settings
+         WHERE replay_id IN (SELECT id FROM replays) ORDER BY flag`,
+        "flag",
+      ),
       from: span.length ? ((span[0].lo as number | null) ?? null) : null,
       to: span.length ? ((span[0].hi as number | null) ?? null) : null,
     };
@@ -445,6 +514,73 @@ export class ReplayIndex extends DurableObject<Env> {
     );
     this.indexRow(id, storedPlayers, storedSettings);
     return true;
+  }
+
+  /** gamesUnknown answers which of `ids` the mirror has never recorded — the
+   * question the cron asks before spending a detail fetch on any of them. It
+   * is deliberately the games table alone: "known" means "already mirrored",
+   * and an id the catalog happens to hold still needs its row here, or every
+   * run would re-fetch it forever.
+   *
+   * One statement with one bound parameter per id; the caller passes a single
+   * API page (24), so the list is small by construction. */
+  gamesUnknown(ids: string[]): string[] {
+    if (ids.length === 0) return [];
+    const known = new Set(
+      this.ctx.storage.sql
+        .exec(`SELECT id FROM games WHERE id IN (${ids.map(() => "?").join(",")})`, ...ids)
+        .toArray()
+        .map((r) => r.id as string),
+    );
+    return ids.filter((id) => !known.has(id));
+  }
+
+  /** gamesInsert records mirrored games and indexes their players and settings
+   * into the two derived tables. Upsert rather than plain insert so re-syncing
+   * a game (a backfill, a later re-read) refreshes it instead of failing.
+   *
+   * The derived rows are written only for ids the CATALOG does not hold — see
+   * indexRow: a published replay's entries are rebuilt from the capture that
+   * was actually published, and a mirror row must not overwrite them with the
+   * API's account of the same game. Returns the number of rows written. */
+  gamesInsert(games: GameEntry[]): number {
+    const sql = this.ctx.storage.sql;
+    const now = Math.floor(Date.now() / 1000);
+    for (const g of games) {
+      sql.exec(
+        `INSERT INTO games (id, start_unix, duration_sec, map, map_file, game_size, preset, player_count, players, settings, engine_version, game_version, synced_unix)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           start_unix = excluded.start_unix,
+           duration_sec = excluded.duration_sec,
+           map = excluded.map,
+           map_file = excluded.map_file,
+           game_size = excluded.game_size,
+           preset = excluded.preset,
+           player_count = excluded.player_count,
+           players = excluded.players,
+           settings = excluded.settings,
+           engine_version = excluded.engine_version,
+           game_version = excluded.game_version,
+           synced_unix = excluded.synced_unix`,
+        g.id,
+        g.startUnix,
+        g.durationSec,
+        g.map,
+        g.mapFile,
+        g.gameSize,
+        g.preset,
+        g.playerCount,
+        g.players === null ? null : JSON.stringify(g.players),
+        g.settings === null ? null : JSON.stringify(g.settings),
+        g.engineVersion,
+        g.gameVersion,
+        now,
+      );
+      const owned = sql.exec(`SELECT 1 FROM replays WHERE id = ?`, g.id).toArray().length > 0;
+      if (!owned) this.indexRow(g.id, g.players, g.settings);
+    }
+    return games.length;
   }
 
   /** jobInsert records fresh work as a pending ingest job. A "resim" carries

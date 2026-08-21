@@ -313,7 +313,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           production's DEPLOYED DO code, so any branch adding a DO method
                           500s on staging (observed with queuePage), and an own-DO staging
                           tests against an empty catalog — neither serves pre-prod testing.
-                          Verify changes with worker/tests + `npm run smoke` + `vite dev`,
+                          Verify changes with worker/tests (`npm test` = the node runner over
+                          the routes and pure modules, PLUS vitest-in-workerd over tests/do —
+                          the Durable Object, whose behaviour is its SQL and which plain node
+                          cannot import) + `npm run smoke` + `vite dev`,
                           then deploy.
                           The BULK replay pieces (.brw/.keys/c<n>/.resources) are NOT fetched
                           from it: they come from cdn-bar.fogofwar.dev, the R2 bucket bound
@@ -597,6 +600,62 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           MAX_JOB_STATS_BYTES (32 KB, nearly all of it the size report); anything
                           else is DROPPED rather than 400ing, since the stats describe work that
                           already happened and refusing them would lose the state transition too.
+                          GAMES MIRROR (games table + src/worker/games.ts + the cron in
+                          index.ts): every minute a scheduled handler reads ONE page of
+                          api.bar-rts.com's replay listing —
+                          /replays?page=1&limit=24&hasBots=false&endedNormally=true, the query
+                          verbatim in GAMES_QUERY — and records the games this worker has not
+                          seen. It is the OTHER half of the picture: `replays` is what somebody
+                          captured, `games` is what was PLAYED, keyed by the same gameId, so the
+                          two are views of one game and a row in `games` with none in `replays`
+                          is a re-sim candidate nobody has to paste a link for. Nothing serves it
+                          yet — there is no route and no UI, by request.
+                          The columns deliberately echo the catalog's vocabulary (start_unix,
+                          duration_sec, map, game_size, player_count, players, settings) plus
+                          what only the API knows: map_file (what BAR's maps API keys on),
+                          preset (duel/team/ffa, stored verbatim so a value the API adds later
+                          survives), and engine_version/game_version — the two builds a re-sim
+                          must run and nothing else.
+                          One page, never a second: at a run a minute, page 1 covers far more
+                          than a minute of BAR's game rate, so a gap closes itself and no run
+                          walks history (a real backfill would be a different job). The LISTING
+                          carries no modoptions, so each genuinely NEW id costs one
+                          /replays/<id> detail fetch — 4 at a time, once per game, never again —
+                          which is where settings and the roster come from, through the same
+                          settingsFlags/playersFromApi the admin refresh route uses, so a
+                          mirrored game and a refreshed catalog row read identically. Known ids
+                          cost nothing: a steady-state tick is ONE request (gamesUnknown filters
+                          the page first). A detail that fails is simply not recorded, so the
+                          next tick retries it; a failing LISTING throws (that is the run), and
+                          the handler logs rather than rethrows, since a minute-by-minute stream
+                          of failed crons is worse signal than one self-healing blip. Nothing is
+                          logged on a tick that changed nothing.
+                          Mirrored games index into the SAME replay_players/replay_settings
+                          tables as the catalog, which makes ownership the one rule to keep:
+                          exactly one row owns an id's derived entries — the catalog row if there
+                          is one (its roster is the capture that was published), the games row
+                          otherwise — enforced by gamesInsert skipping an id `replays` holds, and
+                          honoured by rebuildDerived. The consequence for the filter bar is that
+                          /api/replays/facets now restricts both derived reads to ids present in
+                          `replays`: the mirror is thousands of games nothing has published, and
+                          a filter option matching no listable replay is exactly what that
+                          endpoint exists to avoid.
+                          index.ts therefore exports `{ fetch, scheduled }` rather than the Hono
+                          app itself — a cron handler cannot live in app.ts, which stays free of
+                          workerd imports so the node tests can drive it. games.ts keeps that
+                          same freedom (it takes the index and `fetch` as arguments), so
+                          tests/games.test.ts drives the whole sync against a fake API. The SQL
+                          half — the table, gamesUnknown's dedupe, the ownership rule, the
+                          facets restriction — is tests/do/replayindex.test.ts, running INSIDE
+                          workerd under @cloudflare/vitest-pool-workers (vitest.config.ts,
+                          bindings read from wrangler.jsonc, so the test worker cannot diverge
+                          from the deployed one; `npm test` runs both suites). That version of
+                          the pool has NO per-test storage isolation to configure — vitest-3's
+                          isolatedStorage is not among its options — so each test addresses its
+                          own DO instance rather than the production idFromName("index").
+                          End-to-end was checked once by hand:
+                          curl /cdn-cgi/handler/scheduled against `vite dev` mirrored 24 real
+                          games, and the second call added none.
                           WIDGET-INSTALL GUIDE: the dropzone banner links (relatively, so it
                           resolves on both backends) to /setup — public/setup.html, four numbered
                           steps ending in a drag&drop upload. The page is deliberately

@@ -137,11 +137,65 @@ works against both backends; the row shape must stay in lockstep with
 directory of a few captures — so it ignores the query params and has no `/facets`
 route, and the front-end hides the filter bar when that route is missing.
 
+## The games mirror (cron)
+
+A **cron trigger runs every minute** (`triggers.crons` in `wrangler.jsonc`, handler in
+`src/worker/index.ts`, logic in `src/worker/games.ts`) and records the newest games BAR
+published into a second DO table, `games`:
+
+```
+GET https://api.bar-rts.com/replays?page=1&limit=24&hasBots=false&endedNormally=true
+```
+
+`replays` is what somebody **captured**; `games` is what was **played**, keyed by the same
+gameId — so a `games` row with no `replays` row is a re-sim candidate nobody had to paste a
+link for. Nothing serves it yet: there is **no route and no UI** for the table.
+
+A run reads that one page (never a second — at a run a minute it covers far more than a
+minute of BAR's game rate), asks the DO which of the 24 ids are new, and spends one
+`/replays/<id>` detail fetch on each new game — the listing carries no modoptions, so that
+is where `settings` comes from, via the same `settingsFlags`/`playersFromApi` the admin
+refresh route uses. A tick that finds nothing new is a **single** request and logs nothing.
+A detail that fails is simply not recorded and is retried next tick.
+
+| Column | From |
+| --- | --- |
+| `start_unix`, `duration_sec`, `map`, `game_size`, `player_count`, `players`, `settings` | the same vocabulary a catalog row uses, so the two compare without translating |
+| `map_file` | the map's archive name — what BAR's maps API keys on |
+| `preset` | `duel` / `team` / `ffa`, stored verbatim |
+| `engine_version`, `game_version` | the exact builds a re-simulation has to run |
+
+Mirrored games index into the **same** `replay_players` / `replay_settings` tables as the
+catalog, so exactly one row owns an id's entries: the catalog row if there is one, the
+`games` row otherwise (`gamesInsert` skips an id `replays` holds). `GET
+/api/replays/facets` therefore restricts both reads to ids present in `replays` — the
+mirror is thousands of games nothing has published, and the filter bar must not offer
+options that match no listable replay.
+
+Trigger it by hand against `vite dev` — this really calls the BAR API and writes
+to the local DO:
+
+```sh
+curl http://127.0.0.1:5173/cdn-cgi/handler/scheduled
+```
+
+### Testing it
+
+The sync's logic (which URLs, which games earn a detail fetch, what a row holds) is
+`tests/games.test.ts` under the node runner, against a fake API. The **DO half** — the
+`games` table, `gamesUnknown`'s dedupe, and the ownership rule over the derived tables —
+is `tests/do/replayindex.test.ts`, which runs **inside workerd** via
+`@cloudflare/vitest-pool-workers` (`vitest.config.ts`, bindings read from
+`wrangler.jsonc`) because `replayindex.ts` imports `cloudflare:workers` and its
+behaviour *is* its SQL. Note there is no per-test storage isolation to configure in this
+version of the pool, so each test addresses its own DO instance; see the helper at the
+top of that file.
+
 ## Layout
 
 ```
 worker/
-  wrangler.jsonc          Worker config (name, main, account_id, assets + R2 + DO bindings)
+  wrangler.jsonc          Worker config (name, main, account_id, assets + R2 + DO bindings, cron trigger)
   vite.config.ts          Vite + @cloudflare/vite-plugin
   index.html              viewer page (Vite entry)
   public/app.js           viewer logic (copied from internal/viz/web, URLs point at R2)
@@ -370,7 +424,9 @@ npm install
 npm run dev         # vite dev — runs the Worker in workerd + HMR (needs a local R2, see below)
 npm run build       # sync icons + widget, build client bundle + Worker into dist/
 npm run preview     # vite preview — the client bundle alone, no Worker behind it
-npm run test        # node tests over the real Hono routes (fake bindings, no workerd)
+npm run test        # both suites below
+npm run test:node   # node tests over the real Hono routes + pure modules (fake bindings, no workerd)
+npm run test:do     # vitest in workerd (@cloudflare/vitest-pool-workers): the Durable Object's SQL
 npm run smoke       # boot the BUILT worker in workerd and check what it actually serves
 npm run typecheck   # tsc --noEmit
 npm run cf-typegen  # regenerate worker-configuration.d.ts from wrangler.jsonc
@@ -380,7 +436,7 @@ npm run deploy      # test → sync+build → smoke → wrangler deploy (needs C
 `npm run deploy` is the whole deploy: nothing has to be run before or after it.
 The chain is spelled out in `package.json` rather than hidden in hooks —
 
-1. `npm test` — the route-level node tests.
+1. `npm test` — the route-level node tests **and** the Durable Object tests.
 2. `npm run build` — whose `prebuild` syncs the vendored icons **and the
    uploader widget** into `public/` (both gitignored, so a build is the only
    thing that puts them there) and stamps the asset hash + data origin.
