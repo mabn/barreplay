@@ -88,7 +88,19 @@ console.log(`smoke: booting the built worker on ${base}`);
 
 const child = spawn(
   process.execPath,
-  [fileURLToPath(new URL("../node_modules/vite/bin/vite.js", here)), "preview", "--port", String(port), "--strictPort"],
+  // --host pins the interface the checks below actually probe. Left to
+  // itself vite preview binds "localhost", which on a host whose /etc/hosts
+  // resolves that to ::1 first is an IPv6-ONLY listener — the server boots,
+  // prints its URL, and every 127.0.0.1 request in this file fails to
+  // connect, which surfaces as the boot timeout rather than as an address
+  // mismatch.
+  [
+    fileURLToPath(new URL("../node_modules/vite/bin/vite.js", here)),
+    "preview",
+    "--port", String(port),
+    "--strictPort",
+    "--host", "127.0.0.1",
+  ],
   { cwd: fileURLToPath(new URL("..", here)), stdio: ["ignore", "pipe", "pipe"], detached: true },
 );
 const log = [];
