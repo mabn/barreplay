@@ -22,7 +22,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { GameEntry } from "./games";
 import { parseJobStats } from "./jobs";
 import type { IngestJob, JobKind, JobStats } from "./jobs";
-import { FACET_PLAYERS_MAX, derivePlayerCount, mergeUploads } from "./replayentry";
+import { FACET_PLAYERS_MAX, SETTINGS_MODS_FLAG, derivePlayerCount, mergeUploads } from "./replayentry";
 import type { CatalogTeam, ReplayEntry, ReplayFacets, ReplayFilter, UploadRef } from "./replayentry";
 
 export type { IngestJob, JobKind, JobStats } from "./jobs";
@@ -674,6 +674,12 @@ export class ReplayIndex extends DurableObject<Env> {
    * force a retry by pasting its link, which is exactly the existing story for
    * a failed request.
    *
+   * It must also be UNMODDED: no tweakdefs/tweakunits slot set, which is
+   * exactly what the settings' `mods` flag records. Note this rules out the
+   * game modes that SHIP as tweak blobs — lava, zombies — which is the same
+   * thing said twice, not an accident. A person who wants one of those
+   * re-simulated can still paste its link; nothing refuses that.
+   *
    * It backfills only into an EMPTY pending list, so at most one auto-queued
    * job is ever waiting: the next poll finds that job rather than making
    * another. The check and the insert are one RPC — the DO is single-threaded,
@@ -691,8 +697,14 @@ export class ReplayIndex extends DurableObject<Env> {
         `SELECT g.id AS id FROM games g
          WHERE NOT EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id)
            AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = g.id)
+           AND NOT EXISTS (SELECT 1 FROM replay_settings s WHERE s.replay_id = g.id AND s.flag = ?)
          ORDER BY g.start_unix IS NULL, g.start_unix DESC, g.id
          LIMIT 1`,
+        // Read from the derived table rather than the row's settings JSON: the
+        // flag index (flag, replay_id) makes it a seek, and a mirrored game
+        // always owns its own entries there — a game the catalog owns instead
+        // is excluded by the first clause anyway.
+        SETTINGS_MODS_FLAG,
       )
       .toArray();
     if (candidate.length === 0) return [];

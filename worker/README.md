@@ -191,6 +191,10 @@ for somebody to paste a link.
 - A candidate must have **no job row at all**, finished and failed ones included —
   otherwise a game that cannot re-simulate comes back every poll, an hour of engine time
   at a time. Pasting its link is still the retry.
+- A candidate must be **unmodded**: no `tweakdefs`/`tweakunits` slot set, which is exactly
+  what the settings' `mods` flag records. That also excludes the modes shipping as tweak
+  blobs (lava, zombies) — they are modded games. A game whose settings the API never gave
+  stays eligible; unknown is not the same as modded.
 - The backfill fires only into an **empty** pending list, so at most one auto-queued job
   is ever waiting; check and insert are one DO call, so two daemons cannot both take it.
 

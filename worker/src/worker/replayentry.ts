@@ -407,6 +407,14 @@ function sanitizePlayers(v: unknown): CatalogTeam[] | null | string {
   return out;
 }
 
+/** The flag settingsFlags emits for a game that ran with any tweakdefs or
+ * tweakunits slot set. Named because it is not only a badge: the re-sim
+ * backfill (ReplayIndex.jobsOffer) refuses a game carrying it, and that
+ * refusal is a string match in SQL — renaming the flag here without the query
+ * would disable the restriction silently rather than break anything. The Go
+ * twin viz.SettingsFlags emits the same literal. */
+export const SETTINGS_MODS_FLAG = "mods";
+
 /** settingsFlags distills a game's raw modoptions map (string-valued, as the
  * BAR API's gameSettings serves it) into the catalog's settings object — the
  * TypeScript twin of viz.SettingsFlags in internal/viz/catalog.go, used by
@@ -431,8 +439,8 @@ export function settingsFlags(mo: Record<string, string>): Record<string, boolea
 
   // Any tweak slot set at all means the game ran modded unit/def tables.
   for (const base of ["tweakdefs", "tweakunits"]) {
-    for (let i = 0; i <= 9 && out["mods"] === undefined; i++) {
-      if (mo[i === 0 ? base : base + i]) out["mods"] = true;
+    for (let i = 0; i <= 9 && out[SETTINGS_MODS_FLAG] === undefined; i++) {
+      if (mo[i === 0 ? base : base + i]) out[SETTINGS_MODS_FLAG] = true;
     }
   }
 
