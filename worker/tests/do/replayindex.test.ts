@@ -191,3 +191,91 @@ test("the catalog list is blind to the mirror", async () => {
     expect(index.list({ from: null, to: null, map: null, minPlayers: null, maxPlayers: null, player: "rouben", settings: [] })).toEqual([]);
   });
 });
+
+// --- the idle re-sim poll: work invented from the games mirror --------------
+
+/** jobsOffer needs a job id from its caller (the route passes a UUID); these
+ * pass a readable one so a test can name the job it expects back. */
+const OFFER = "job-1";
+
+test("an idle re-sim poll queues the newest game nothing has published", async () => {
+  await inIndex((index, sql) => {
+    index.gamesInsert([
+      game("older", { startUnix: 1000 }),
+      game("newest", { startUnix: 3000 }),
+      game("middle", { startUnix: 2000 }),
+    ]);
+
+    const offered = index.jobsOffer("resim", OFFER);
+
+    expect(offered).toHaveLength(1);
+    expect(offered[0]).toMatchObject({ id: OFFER, gameId: "newest", kind: "resim", state: "pending" });
+    // A re-sim has no archived stream to point at — the demo is the input.
+    expect(offered[0].streamKey).toBe("");
+    expect(rows(sql, `SELECT COUNT(*) AS n FROM jobs`)).toEqual([{ n: 1 }]);
+  });
+});
+
+test("the backfill passes over games that are already published", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([game("published", { startUnix: 3000 }), game("bare", { startUnix: 2000 })]);
+    index.upsert(replay("published"));
+
+    // Re-simulating a game the catalog already holds would replace a capture
+    // that exists with one that mostly repeats it.
+    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "bare" });
+  });
+});
+
+test("the backfill passes over a game that already has a job, failed ones included", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([game("tried", { startUnix: 3000 }), game("fresh", { startUnix: 2000 })]);
+    index.jobInsert("old-job", "", "tried", "resim");
+    index.jobUpdate("old-job", "error", "engine died at frame 400");
+
+    // The whole point of excluding finished jobs and not just live ones: a
+    // game that cannot be re-simulated must not come back every poll, an hour
+    // of engine time at a time. Pasting its link is still a retry.
+    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "fresh" });
+  });
+});
+
+test("a poll with pending work is left alone", async () => {
+  await inIndex((index, sql) => {
+    index.gamesInsert([game("candidate")]);
+    index.jobInsert("requested", "", "somegame", "resim");
+
+    expect(index.jobsOffer("resim", OFFER)).toEqual([expect.objectContaining({ id: "requested" })]);
+    expect(rows(sql, `SELECT COUNT(*) AS n FROM jobs`)).toEqual([{ n: 1 }]);
+  });
+});
+
+test("at most one auto-queued job is ever waiting", async () => {
+  await inIndex((index, sql) => {
+    index.gamesInsert([game("a", { startUnix: 3000 }), game("b", { startUnix: 2000 })]);
+
+    const first = index.jobsOffer("resim", "job-1");
+    const second = index.jobsOffer("resim", "job-2");
+
+    // The second poll finds the job the first one made, rather than making
+    // another — the backfill only fires into an empty pending list.
+    expect(second).toEqual(first);
+    expect(rows(sql, `SELECT COUNT(*) AS n FROM jobs`)).toEqual([{ n: 1 }]);
+  });
+});
+
+test("an upload poll is never backfilled", async () => {
+  await inIndex((index, sql) => {
+    index.gamesInsert([game("candidate")]);
+    // There is no stream to invent for a game nobody uploaded, so an idle
+    // upload daemon stays idle.
+    expect(index.jobsOffer("upload", OFFER)).toEqual([]);
+    expect(rows(sql, `SELECT COUNT(*) AS n FROM jobs`)).toEqual([{ n: 0 }]);
+  });
+});
+
+test("an idle poll with nothing to mirror returns nothing", async () => {
+  await inIndex((index) => {
+    expect(index.jobsOffer("resim", OFFER)).toEqual([]);
+  });
+});

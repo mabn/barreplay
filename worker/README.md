@@ -179,6 +179,25 @@ to the local DO:
 curl http://127.0.0.1:5173/cdn-cgi/handler/scheduled
 ```
 
+### Feeding the re-sim daemon
+
+`GET /api/jobs?kind=resim` (the daemon's poll) does not come back empty while the mirror
+holds games nothing has published: with no pending job it **queues one** — the newest
+`games` row with no `replays` row — and returns it, so an engine host never idles waiting
+for somebody to paste a link.
+
+- Only for `kind=resim`. An upload job is bytes somebody sent; there is no stream to
+  invent for a game nobody uploaded.
+- A candidate must have **no job row at all**, finished and failed ones included —
+  otherwise a game that cannot re-simulate comes back every poll, an hour of engine time
+  at a time. Pasting its link is still the retry.
+- The backfill fires only into an **empty** pending list, so at most one auto-queued job
+  is ever waiting; check and insert are one DO call, so two daemons cannot both take it.
+
+Consequence worth knowing: `bringest -resim`'s **catalog scan** (games with a one-sided
+upload and no full-view revision) only runs when the queue is empty, which now is rarely.
+Those games get picked up more slowly than before.
+
 ### Testing it
 
 The sync's logic (which URLs, which games earn a detail fetch, what a row holds) is
