@@ -219,6 +219,58 @@ test("an idle re-sim poll queues the newest game nothing has published", async (
   });
 });
 
+test("the backfill takes the biggest game among the newest candidates", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([
+      game("duel", { startUnix: 5000, gameSize: "1v1", playerCount: 2 }),
+      game("team", { startUnix: 4000, gameSize: "8v8", playerCount: 16 }),
+      game("small", { startUnix: 3000, gameSize: "2v2", playerCount: 4 }),
+    ]);
+
+    // Not the newest: an hour of engine time buys the 8v8 as cheaply as the
+    // duel that happened to finish later.
+    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "team" });
+  });
+});
+
+test("the size preference is bounded by the recency window", async () => {
+  await inIndex((index) => {
+    // A 30v30 well outside the newest 20 candidates, and 20 duels in front of
+    // it. The window is what keeps the daemon on recent games instead of
+    // walking the whole archive biggest-first.
+    index.gamesInsert([
+      game("ancient-huge", { startUnix: 1000, playerCount: 60 }),
+      ...Array.from({ length: 20 }, (_, i) => game(`recent-${i}`, { startUnix: 5000 + i, playerCount: 2 })),
+    ]);
+
+    // The 30v30 is out of the window entirely; among the 20 duels that are in
+    // it, the tie goes to the newest.
+    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "recent-19" });
+  });
+});
+
+test("games of equal size are taken newest first", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([
+      game("older", { startUnix: 4000, playerCount: 16 }),
+      game("newer", { startUnix: 5000, playerCount: 16 }),
+    ]);
+    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "newer" });
+  });
+});
+
+test("a game with no roster is taken last, not first", async () => {
+  await inIndex((index) => {
+    // playerCount is null when the API's reply named nobody. Unknown must not
+    // outrank a known 8v8 — nor be refused outright, since it is still a game.
+    index.gamesInsert([
+      game("unknown-size", { startUnix: 5000, playerCount: null, players: null }),
+      game("known", { startUnix: 4000, playerCount: 16 }),
+    ]);
+    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "known" });
+  });
+});
+
 test("the backfill passes over games that are already published", async () => {
   await inIndex((index) => {
     index.gamesInsert([game("published", { startUnix: 3000 }), game("bare", { startUnix: 2000 })]);

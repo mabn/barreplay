@@ -201,9 +201,15 @@ curl http://127.0.0.1:5173/cdn-cgi/handler/scheduled
 ### Feeding the re-sim daemon
 
 `GET /api/jobs?kind=resim` (the daemon's poll) does not come back empty while the mirror
-holds games nothing has published: with no pending job it **queues one** — the newest
-`games` row with no `replays` row — and returns it, so an engine host never idles waiting
-for somebody to paste a link.
+holds games nothing has published: with no pending job it **queues one** and returns it,
+so an engine host never idles waiting for somebody to paste a link.
+
+Which game: of the **20 newest eligible** ones, the one with the **most players**. An hour
+of engine time buys an 8v8 as cheaply as the duel that finished a minute later, so within
+a window of games that are all recent, size decides (ties go to the newer game; an unknown
+roster sorts last but is not refused). The window counts *candidates*, not the mirror's
+last 20 rows — every game handed out gains a job row and stops being eligible, so a window
+over raw recency would be permanently empty after twenty of them.
 
 - Only for `kind=resim`. An upload job is bytes somebody sent; there is no stream to
   invent for a game nobody uploaded.
