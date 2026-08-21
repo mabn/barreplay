@@ -76,6 +76,24 @@ export interface ReplayEntry {
   widgetVersion: string | null;
   widgetSha: string | null;
   widgetDate: string | null;
+  /** True while this row exists ONLY because the pipeline is working on the
+   * game: a job entered "processing" and nothing has been published yet. It
+   * is the row's way of saying there is nothing to play, which is what the
+   * viewer refuses to open — a missing rid could not carry that meaning, since
+   * the Go server's rows have none and play fine. A publish clears it, and a
+   * job that ends with nothing published removes the row.
+   *
+   * Server-owned, like `uploads`: a PUT body cannot set it. Absent from the Go
+   * server's catalog, which has no pipeline behind it, so the front-end must
+   * read a missing value as false. */
+  placeholder: boolean;
+  /** True while some job for this game is in "processing" — the badge the list
+   * shows. DERIVED from the jobs table on every read rather than stored, so
+   * nothing has to remember to clear it: it stops being true the moment the
+   * job stops running, whether it finished, failed, or its daemon vanished.
+   * Server-owned and absent from the Go server's catalog, exactly like
+   * `placeholder`. */
+  processing: boolean;
 }
 
 /** One ally team's roster slice in a catalog row. */
@@ -304,6 +322,12 @@ export function sanitizeEntry(id: string, body: unknown): ReplayEntry | string {
     widgetVersion: widget.version ?? null,
     widgetSha: widget.sha ?? null,
     widgetDate: widget.date ?? null,
+    // Server-owned like `uploads`. A PUT is a PUBLISH, which is the one event
+    // that ends both states, so there is nothing a body could mean by them:
+    // upsert writes placeholder = 0 unconditionally, and `processing` is read
+    // back from the jobs table, never written at all.
+    placeholder: false,
+    processing: false,
   };
 }
 

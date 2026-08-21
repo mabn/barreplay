@@ -46,6 +46,10 @@ test("full entry passes through", () => {
     widgetVersion: "1.7.0",
     widgetSha: "0f1e2d3c4b5a69788796a5b4c3d2e1f009182736",
     widgetDate: "2026-08-16",
+    // Server-owned, like uploads: a PUT is a publish, which is precisely what
+    // ends both states.
+    placeholder: false,
+    processing: false,
   });
 });
 
@@ -68,6 +72,8 @@ test("missing stats become null, unknown fields are dropped", () => {
     widgetVersion: null,
     widgetSha: null,
     widgetDate: null,
+    placeholder: false,
+    processing: false,
   });
 });
 

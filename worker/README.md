@@ -78,6 +78,25 @@ inside a **Durable Object** (`src/worker/replayindex.ts`, single instance, migra
 | `GET /api/replays/facets` | the distinct `{maps, sizes, players, settings, from, to}` in the catalog, so the filter bar only offers choices that match something. Computed over the whole catalog, not the filtered result |
 | `PUT /api/replays/<id>` | upsert one row (same JSON shape, minus `id`); called by `pack -upload` / the ingest daemon after a replay's files land in the bucket |
 
+Two fields on a row are **server-owned and never accepted from a PUT**, both about work
+in flight rather than about the replay:
+
+- `processing` — some job for this game is in `processing`. Computed on every read as an
+  `EXISTS` over the jobs table, never stored, so nothing has to remember to clear it: it
+  goes false the moment the job stops running, however it stopped. The list shows it as a
+  **pill at the head of the Settings cell** — filled and pulsing among the muted setting
+  badges, because it is not a setting, it is why the row is there.
+- `placeholder` — the row exists *only* because a job is working on the game; nothing has
+  been published. The DO inserts one whenever a job enters `processing` (seeded from the
+  games mirror, so it shows the map and roster), and the viewer refuses to open it — a
+  placeholder row is rendered with no internal links at all. Publishing clears the mark;
+  a job that ends **without** publishing deletes the row, so a failed re-sim leaves no
+  dead entry behind.
+
+A game that was already published and is being re-simulated gets the pill but stays
+openable — there is a revision to play. The Go viz server has no pipeline and sends
+neither field; the front-end reads a missing value as false.
+
 `rid` is the **revision** the replay's pieces are actually served under:
 publishes are append-only — `pack -upload` (and the ingest daemon) put the
 pieces at `replays/<gameId>-<rev>…` where `rev` is the first 8 hex of the

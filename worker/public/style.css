@@ -88,14 +88,15 @@ body.admin-mode #homenav .navitem.admin { display: flex; }
    click opens the replay in a new tab), so the cell padding lives on the <a>
    to keep the whole row surface clickable. */
 #hometable td { padding: 0; border-bottom: 1px solid #202830; white-space: nowrap; }
-#hometable td a {
+#hometable td a,
+#hometable td > span {
   display: block; padding: 6px 14px 6px 8px;
   color: inherit; text-decoration: none;
 }
 #hometable td.map { white-space: normal; }
 /* Settings badges: small muted pills, wrapping within the row's link. */
 #hometable td.settings { white-space: normal; }
-#hometable td.settings a { display: flex; flex-wrap: wrap; gap: 4px; }
+#hometable td.settings a, #hometable td.settings > span { display: flex; flex-wrap: wrap; gap: 4px; }
 #hometable .badge {
   font-size: 10px; line-height: 1; padding: 3px 6px; border-radius: 8px;
   background: #232e39; border: 1px solid #33404d; color: #9fb0bf;
@@ -115,6 +116,26 @@ body.admin-mode #homenav .navitem.admin { display: flex; }
 #hometable .badge-zombies { color: #c58aff; border-color: #5e3d85; background: #2a1a40; }
 #hometable .badge-ruins { color: #7fd58a; border-color: #33663c; background: #16311b; }
 #hometable .badge-unranked { color: #7fb2ff; border-color: #2f4d7a; background: #16243a; }
+/* "processing": not a game setting at all — the pipeline is working on this
+   game right now — so it leads the cell and is the one FILLED pill in a row
+   of dark muted ones. Bright ground against the table's near-black is what
+   makes it findable while skimming; the pulse is what makes it read as
+   something happening rather than another label. Reduced motion keeps the
+   colour and drops the animation, which loses nothing but the movement. */
+#hometable .badge-processing {
+  color: #06231a; border-color: #7bf5c0;
+  background: linear-gradient(180deg, #2ee79b, #14c47c);
+  font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+  box-shadow: 0 0 0 1px rgba(46, 231, 155, .35), 0 0 10px rgba(46, 231, 155, .45);
+  animation: badgepulse 1.6s ease-in-out infinite;
+}
+@keyframes badgepulse {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(46, 231, 155, .35), 0 0 6px rgba(46, 231, 155, .30); }
+  50%      { box-shadow: 0 0 0 1px rgba(46, 231, 155, .60), 0 0 16px rgba(46, 231, 155, .75); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #hometable .badge-processing { animation: none; }
+}
 /* Players column: one span per side, "v" separators; the side that recorded
    the current upload gets a viewpoint dot. Full roster in the tooltip. */
 #hometable td.players { white-space: normal; }
@@ -150,6 +171,11 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
 #hometable td { font-variant-numeric: tabular-nums; }
 #hometable tbody tr { cursor: pointer; }
 #hometable tbody tr:hover { background: #1b232c; }
+/* A row with nothing published yet: no link, so nothing about it should
+   behave like one — no pointer, and the hover highlight that promises a click
+   is replaced by a flat tint. */
+#hometable tbody tr.unopenable { cursor: default; }
+#hometable tbody tr.unopenable:hover { background: #161d24; }
 #hometable td.dim { color: #6a7785; }
 #homemsg { padding: 12px 8px; font-size: 13px; max-width: 1650px; margin: 0 auto; }
 

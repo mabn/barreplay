@@ -504,6 +504,33 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the side that recorded the current upload, the Links cell adds an alt·T<n>
                           SPA link per other uploaded revision (from the row's `uploads`), and
                           ?admin=true reveals a per-row ⟳ button calling the refresh-settings route.
+                          WORK IN PROGRESS (rows the pipeline owns): a game with a job in
+                          "processing" is in this list too, so the work is visible while it runs
+                          rather than only once it lands — the DO inserts a PLACEHOLDER catalog
+                          row when any job enters that state (ensureCatalogPlaceholder, from
+                          jobClaim and from a jobUpdate reporting processing), seeded from the
+                          games mirror so it shows the map and roster instead of five dashes.
+                          Such a row is NOT OPENABLE: there is nothing published, so app.js gives
+                          it no internal links at all (a `linkish()` span in place of every cell's
+                          <a>, class `unopenable` on the tr, no pointer, no click) — the row's
+                          `placeholder` flag is what says so, since a null rid cannot: the Go
+                          server's rows have none and play fine. Its Settings cell LEADS with a
+                          `processing` pill (the one filled, pulsing badge among the muted ones —
+                          it is not a game setting but the reason the row exists, so it must not
+                          be hunted for among them). A row that WAS already published and is being
+                          re-simulated gets the same pill and stays openable, since a revision
+                          exists to play. Both flags are server-owned and neither is stored as
+                          state to maintain: `processing` is an EXISTS over the jobs table
+                          computed per read (jobs_game index), so it clears itself the moment the
+                          job stops running — no path can leave a row saying "processing"
+                          forever; `placeholder` is cleared by the publishing upsert, and a job
+                          that ends WITHOUT publishing deletes the row (dropCatalogPlaceholder),
+                          so a failed re-sim leaves no dead entry in a list of playable things.
+                          The derived tables are deliberately left alone by that delete: their
+                          entries were copied from the games row, which still describes the game.
+                          Consequence elsewhere: resimEnqueue's "already published" check reads
+                          `placeholder = 0`, or pasting the link of a game being worked on would
+                          be refused as published instead of answered with the job doing it.
                           FILTER BAR (app.js initFilters, above the table): date from/to, map, exact
                           player count, player name (a datalist of the known names, debounced 300 ms)
                           and one toggle chip per settings flag. Every control writes a URL param and

@@ -3974,17 +3974,32 @@ function renderHome(errMsg) {
   tbody.textContent = '';
   for (const e of replayList) {
     const tr = document.createElement('tr');
+    // A PLACEHOLDER row is a game the pipeline is working on: it is in the
+    // list so the work is visible, but there is nothing published to open
+    // yet. Such a row gets no links at all — not a dead one, not one that
+    // 404s — so nothing about it invites a click. `placeholder` is absent
+    // from the Go server's catalog, which has no pipeline, hence the
+    // truthiness test rather than a comparison.
+    const openable = !e.placeholder;
+    if (!openable) tr.className = 'unopenable';
     // Every cell holds a real link to the replay's URL, so the row behaves
     // like an <a>: middle/ctrl/cmd-click opens a new tab, right-click offers
     // "open in new tab", and a plain click is intercepted below for SPA
     // navigation (pushState, so the back button returns to this list).
-    const href = replayHref(urlId(e));
+    const href = openable ? replayHref(urlId(e)) : null;
+    // linkish is that <a> — or a plain <span> when the row has nowhere to go,
+    // so every cell below keeps its markup shape without caring which it is.
+    const linkish = () => {
+      if (!openable) return document.createElement('span');
+      const a = document.createElement('a');
+      a.href = href;
+      return a;
+    };
     const cell = (text, cls) => {
       const td = document.createElement('td');
       if (cls) td.className = cls;
       if (text == null) td.classList.add('dim');
-      const a = document.createElement('a');
-      a.href = href;
+      const a = linkish();
       a.textContent = text ?? '—';
       td.appendChild(a);
       tr.appendChild(td);
@@ -4000,8 +4015,7 @@ function renderHome(errMsg) {
     {
       const td = document.createElement('td');
       td.className = 'players';
-      const a = document.createElement('a');
-      a.href = href;
+      const a = linkish();
       const groups = Array.isArray(e.players) ? e.players : [];
       if (!groups.length) {
         td.classList.add('dim');
@@ -4077,8 +4091,20 @@ function renderHome(errMsg) {
     {
       const td = document.createElement('td');
       td.className = 'settings';
-      const a = document.createElement('a');
-      a.href = href;
+      const a = linkish();
+      // FIRST, ahead of every game-settings badge: the pipeline is working on
+      // this game right now. It is not a setting — it is why the row is here
+      // at all, or why an existing replay is about to gain a revision — so it
+      // leads, and it is styled to be impossible to skim past. Derived from
+      // the jobs table on the server, so it disappears by itself the moment
+      // the job stops running.
+      if (e.processing) {
+        const s = document.createElement('span');
+        s.className = 'badge badge-processing';
+        s.textContent = 'processing';
+        s.title = 'a job is re-simulating or packing this game right now';
+        a.appendChild(s);
+      }
       for (const b of settingsBadges(e.settings)) {
         const s = document.createElement('span');
         s.className = 'badge badge-' + b.key.replace(/[^\w-]/g, '');
@@ -4137,6 +4163,10 @@ function renderHome(errMsg) {
         openReplay(new URL(alt.href, location.href).searchParams.get('replay'));
         return;
       }
+      // Nothing to open: the row is a game being worked on. (Its alt links,
+      // if it somehow had any, are handled above — a published revision is
+      // always openable.)
+      if (!openable) return;
       openReplay(urlId(e));
     });
     tbody.appendChild(tr);
