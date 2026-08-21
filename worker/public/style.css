@@ -417,6 +417,51 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 }
 #filters input:focus, #filters select:focus { outline: none; border-color: #4a7fa8; }
 #filters input[type=search] { width: 130px; }
+/* Players: two range inputs stacked over one track, so a single strip carries
+   both bounds. The inputs are stripped bare (no native track, no background,
+   the box-model padding above undone) and made transparent to the pointer —
+   only their THUMBS take presses, which is what lets the track and the
+   selected span below show through, and what makes two separate thumbs
+   grabbable on one strip. */
+#filters .dualrange {
+  position: relative; width: 132px; height: 18px; flex: none;
+}
+#filters .dualrange .rangetrack {
+  position: absolute; left: 0; right: 0; top: 50%; height: 4px; margin-top: -2px;
+  background: #0f141a; border: 1px solid #2f3947; border-radius: 3px;
+}
+/* The selected span. Dim while it spans everything (that is not a filter) and
+   lit once either thumb has narrowed it, so "am I filtering" is answerable
+   from across the bar. */
+#filters .dualrange .rangefill {
+  position: absolute; top: 0; bottom: 0; background: #33414f; border-radius: 3px;
+}
+#filters .dualrange.narrowed .rangefill { background: #4a7fa8; }
+#filters .dualrange input[type=range] {
+  position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+  margin: 0; padding: 0; border: none; background: transparent;
+  -webkit-appearance: none; appearance: none; pointer-events: none;
+}
+#filters .dualrange input[type=range]::-webkit-slider-runnable-track { background: transparent; border: none; }
+#filters .dualrange input[type=range]::-moz-range-track { background: transparent; border: none; }
+#filters .dualrange input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; pointer-events: auto; cursor: ew-resize;
+  width: 13px; height: 13px; border-radius: 50%;
+  background: #cfe3f5; border: 1px solid #16202a; box-shadow: 0 1px 2px rgba(0, 0, 0, .6);
+}
+#filters .dualrange input[type=range]::-moz-range-thumb {
+  pointer-events: auto; cursor: ew-resize;
+  width: 13px; height: 13px; border-radius: 50%; border: 1px solid #16202a;
+  background: #cfe3f5; box-shadow: 0 1px 2px rgba(0, 0, 0, .6);
+}
+#filters .dualrange input[type=range]:focus { outline: none; }
+#filters .dualrange input[type=range]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px rgba(74, 127, 168, .8); }
+#filters .dualrange input[type=range]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 3px rgba(74, 127, 168, .8); }
+/* The chosen bounds, in the label. Fixed width so the bar does not shuffle
+   sideways as the numbers change while dragging. */
+#filters #f_sizeout {
+  min-width: 44px; font-variant-numeric: tabular-nums; color: #c7d3de;
+}
 #filters #f_map { max-width: 200px; }
 #filters button {
   background: #1b232c; color: #9fb0bf; border: 1px solid #2f3947;

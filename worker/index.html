@@ -71,7 +71,20 @@
         <label>From <input type="date" id="f_from"></label>
         <label>To <input type="date" id="f_to"></label>
         <label>Map <select id="f_map"></select></label>
-        <label>Players <select id="f_size"></select></label>
+        <!-- Players: a two-thumb range (min thumb / max thumb) over the sizes
+             the catalog holds. Two stacked <input type=range> rather than a
+             widget: real inputs come with keyboard support and focus rings for
+             free, and only their thumbs take pointer events, so the track
+             below shows through. app.js hides the whole label when the catalog
+             has fewer than two distinct sizes — nothing to slide between. -->
+        <label id="f_sizefilter">Players
+          <span class="dualrange" id="f_sizerange">
+            <span class="rangetrack"><span class="rangefill" id="f_sizefill"></span></span>
+            <input type="range" id="f_smin" aria-label="fewest players">
+            <input type="range" id="f_smax" aria-label="most players">
+          </span>
+          <output id="f_sizeout" for="f_smin f_smax"></output>
+        </label>
         <label>Player <input type="search" id="f_player" list="f_players" placeholder="name" autocomplete="off"></label>
         <datalist id="f_players"></datalist>
         <span id="f_settings" class="chips"></span>
