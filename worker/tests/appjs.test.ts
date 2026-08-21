@@ -674,9 +674,13 @@ function fakeDom() {
       tag, children: [] as any[], style: {}, title: '', href: undefined as string | undefined,
       className: '', _text: '',
       classList: {
-        add(c: string) { n.className = (n.className + ' ' + c).trim(); },
-        remove() {}, toggle() {},
+        add(c: string) { if (!n.classList.contains(c)) n.className = (n.className + ' ' + c).trim(); },
+        remove(c: string) { n.className = n.className.split(/\s+/).filter((x: string) => x !== c).join(' '); },
         contains: (c: string) => n.className.split(/\s+/).includes(c),
+        toggle(c: string, on?: boolean) {
+          const want = on === undefined ? !n.classList.contains(c) : on;
+          if (want) n.classList.add(c); else n.classList.remove(c);
+        },
       },
       appendChild(c: any) { n.children.push(c); return c; },
       addEventListener() {},
@@ -775,4 +779,119 @@ test('a game being processed is listed, badged first, and cannot be opened', () 
   assert.equal(internalLinks(trs[2]), 0, 'a row with nothing to play links nowhere');
   assert.ok(trs[2].className.includes('unopenable'), 'and says so to the stylesheet');
   assert.ok(!trs[1].className.includes('unopenable'));
+});
+
+test('the players filter is a two-ended range over the sizes present', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+
+  const boot = (query: string, sizes: number[]) => {
+    const dom = fakeDom();
+    const state = { href: 'https://x/' + query, reloads: 0 };
+    const run = eval(`(function(){
+      const document = dom.document;
+      const location = { get href() { return state.href; } };
+      const history = { replaceState: (_a, _b, u) => { state.href = String(u); } };
+      const reloadList = () => { state.reloads++; };
+      ${extract('initSizeRange')}
+      return initSizeRange;
+    })()`);
+    run(new URLSearchParams(query), sizes);
+    const id = (x: string) => dom.document.getElementById(x);
+    return { dom, state, id, params: () => new URL(state.href).searchParams };
+  };
+
+  // Restored from the URL, and the domain is the catalog's own span.
+  {
+    const b = boot('?minPlayers=4&maxPlayers=8', [2, 4, 8, 16]);
+    assert.equal(b.id('f_smin').min, '2');
+    assert.equal(b.id('f_smax').max, '16');
+    assert.equal(b.id('f_smin').value, '4');
+    assert.equal(b.id('f_smax').value, '8');
+    assert.equal(b.id('f_sizeout').textContent, '4–8');
+    assert.ok(b.id('f_sizerange').classList.contains('narrowed'));
+  }
+
+  // No params: both thumbs at their ends, and the label says so rather than
+  // showing a range that happens to match everything.
+  {
+    const b = boot('', [2, 16]);
+    assert.equal(b.id('f_smin').value, '2');
+    assert.equal(b.id('f_smax').value, '16');
+    assert.equal(b.id('f_sizeout').textContent, 'any');
+    assert.ok(!b.id('f_sizerange').classList.contains('narrowed'));
+  }
+
+  // Dragging the left thumb writes only the bound it changed: a thumb parked
+  // at its end is not a filter, so the other param stays absent.
+  {
+    const b = boot('', [2, 16]);
+    b.id('f_smin').value = '8';
+    b.id('f_smin').oninput();
+    b.id('f_smin').onchange();
+    assert.equal(b.params().get('minPlayers'), '8');
+    assert.equal(b.params().get('maxPlayers'), null, 'the untouched end is not a filter');
+    assert.equal(b.id('f_sizeout').textContent, '8–16');
+
+    // ...and sliding it back clears it again, so the URL returns to unfiltered.
+    b.id('f_smin').value = '2';
+    b.id('f_smin').oninput();
+    b.id('f_smin').onchange();
+    assert.equal(b.params().get('minPlayers'), null);
+    assert.equal(b.id('f_sizeout').textContent, 'any');
+  }
+
+  // The thumbs push rather than cross: the max cannot be dragged below the
+  // min, which would be a range matching nothing.
+  {
+    const b = boot('?minPlayers=8', [2, 16]);
+    b.id('f_smax').value = '4';
+    b.id('f_smax').oninput();
+    b.id('f_smax').onchange();
+    assert.equal(b.id('f_smax').value, '8');
+    assert.equal(b.id('f_sizeout').textContent, '8', 'both ends on one size reads as that size');
+    assert.equal(b.params().get('maxPlayers'), '8');
+  }
+
+  // A hand-edited URL with the bounds crossed is straightened out rather than
+  // shown as thumbs that have swapped places.
+  {
+    const b = boot('?minPlayers=12&maxPlayers=4', [2, 16]);
+    assert.equal(b.id('f_smin').value, '4');
+    assert.equal(b.id('f_smax').value, '4');
+  }
+
+  // Values outside the catalog's span are clamped into it.
+  {
+    const b = boot('?minPlayers=1&maxPlayers=99', [2, 16]);
+    assert.equal(b.id('f_smin').value, '2');
+    assert.equal(b.id('f_smax').value, '16');
+  }
+
+  // One distinct size is nothing to slide between, so the control is left out.
+  {
+    const b = boot('', [8]);
+    assert.equal(b.id('f_sizefilter').style.display, 'none');
+    assert.equal(boot('', []).id('f_sizefilter').style.display, 'none');
+  }
+
+  // Overlapping thumbs stay separable: the side of them the pointer is on
+  // decides which one a press will grab.
+  {
+    const b = boot('?minPlayers=8&maxPlayers=8', [0, 16]);
+    const rail = b.id('f_sizerange');
+    rail.getBoundingClientRect = () => ({ left: 0, width: 160 });
+    rail.onpointerdown({ clientX: 40, buttons: 0 });   // left of the pair
+    assert.ok(+b.id('f_smin').style.zIndex > +b.id('f_smax').style.zIndex);
+    rail.onpointerdown({ clientX: 120, buttons: 0 });  // right of it
+    assert.ok(+b.id('f_smax').style.zIndex > +b.id('f_smin').style.zIndex);
+  }
 });

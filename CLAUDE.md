@@ -531,9 +531,21 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           Consequence elsewhere: resimEnqueue's "already published" check reads
                           `placeholder = 0`, or pasting the link of a game being worked on would
                           be refused as published instead of answered with the job doing it.
-                          FILTER BAR (app.js initFilters, above the table): date from/to, map, exact
-                          player count, player name (a datalist of the known names, debounced 300 ms)
-                          and one toggle chip per settings flag. Every control writes a URL param and
+                          FILTER BAR (app.js initFilters, above the table): date from/to, map, a
+                          player-count RANGE, player name (a datalist of the known names,
+                          debounced 300 ms) and one toggle chip per settings flag. The range
+                          (initSizeRange) is two <input type=range> stacked over one track — real
+                          inputs, so keyboard and focus rings come free — spanning the facets'
+                          own min..max; a thumb parked at its end writes NO param, so the full
+                          span is genuinely unfiltered rather than a filter matching everything.
+                          The thumbs push instead of crossing, dragging paints every frame but
+                          only queries after a 250 ms pause (a drag is otherwise a query per
+                          pixel), and because both inputs are full-width and stacked, which thumb
+                          a press grabs is settled on HOVER — hit testing happens before the
+                          press — by whichever is nearer, with the pointer's side of an
+                          exactly-overlapping pair breaking the tie. It replaced an exact-count
+                          <select>, which could only ask for one size at a time; the API took
+                          min/max all along. Every control writes a URL param and
                           re-queries GET /api/replays — the filtering is the server's, so the count it
                           reports is the true number of matches, not what happened to be fetched. The
                           state lives in the URL (history.replaceState, so filtering is not

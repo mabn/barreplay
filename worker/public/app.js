@@ -3346,24 +3346,12 @@ async function initFilters() {
   mapSel.value = cur.get('map') ?? '';
   mapSel.onchange = () => setFilter('map', mapSel.value);
 
-  // Size is one exact player count rather than a range: the sizes present are
-  // few and far apart (8, 12, 16, 32, 50), so a range would mostly be a
-  // clumsier way to pick one of them. The API keeps min/max, so a range stays
-  // available to anyone who edits the URL.
-  const sizeSel = el('f_size');
-  sizeSel.innerHTML = '';
-  opt(sizeSel, '', 'any');
-  (facets.sizes || []).forEach(n => opt(sizeSel, String(n), `${n} players`));
-  sizeSel.value = cur.get('minPlayers') ?? '';
-  sizeSel.onchange = () => {
-    const v = sizeSel.value;
-    // Both bounds together: exactly this many players.
-    const u = new URL(location.href);
-    if (v === '') { u.searchParams.delete('minPlayers'); u.searchParams.delete('maxPlayers'); }
-    else { u.searchParams.set('minPlayers', v); u.searchParams.set('maxPlayers', v); }
-    history.replaceState(null, '', u);
-    reloadList();
-  };
+  // Players: a range with two thumbs, spanning the sizes the catalog actually
+  // holds. Both bounds are one gesture — drag the left thumb for the fewest,
+  // the right for the most — where the exact-count select it replaces could
+  // only ever ask for one size at a time, so "everything bigger than a duel"
+  // meant editing the URL by hand. The API took min/max all along.
+  initSizeRange(cur, facets.sizes || []);
 
   const from = el('f_from'), to = el('f_to');
   from.value = ymd(cur.get('from'), facets.from);
@@ -3420,6 +3408,115 @@ async function initFilters() {
   syncOrphanButton();
 
   box.style.display = '';
+}
+
+// initSizeRange wires the Players filter: two <input type=range> stacked over
+// one track, the left thumb writing ?minPlayers and the right ?maxPlayers.
+// Both are cleared when a thumb sits at its end of the domain, so the full
+// span is "no filter" rather than a filter that happens to match everything —
+// which is what keeps a fresh visit's URL clean and the Unregistered button
+// usable.
+//
+// The domain is the facets' own min..max, so the ends are always reachable
+// sizes; the step is 1 because the counts in between are simply the sizes no
+// game has, and the server's >= / <= do not care.
+function initSizeRange(cur, sizes) {
+  const box = document.getElementById('f_sizefilter');
+  const rail = document.getElementById('f_sizerange');
+  const smin = document.getElementById('f_smin');
+  const smax = document.getElementById('f_smax');
+  const fill = document.getElementById('f_sizefill');
+  const out = document.getElementById('f_sizeout');
+  if (!box || !rail || !smin || !smax) return;
+
+  const known = sizes.filter(n => Number.isFinite(n));
+  const lo = known.length ? Math.min(...known) : 0;
+  const hi = known.length ? Math.max(...known) : 0;
+  // A slider needs somewhere to slide. One distinct size (or none) means
+  // there is nothing to choose, so the control is left out rather than shown
+  // inert — the same reason the whole bar hides without facets.
+  box.style.display = hi > lo ? '' : 'none';
+  if (hi <= lo) return;
+
+  const bound = (raw, dflt) => {
+    const n = parseInt(raw ?? '', 10);
+    return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt;
+  };
+  for (const inp of [smin, smax]) {
+    inp.min = String(lo);
+    inp.max = String(hi);
+    inp.step = '1';
+  }
+  smin.value = String(bound(cur.get('minPlayers'), lo));
+  smax.value = String(bound(cur.get('maxPlayers'), hi));
+  // A hand-edited URL can name a min above its max; the filter would then
+  // match nothing while the thumbs looked crossed.
+  if (+smin.value > +smax.value) smin.value = smax.value;
+
+  const paint = () => {
+    const a = +smin.value, b = +smax.value, span = hi - lo;
+    fill.style.left = ((a - lo) / span) * 100 + '%';
+    fill.style.right = ((hi - b) / span) * 100 + '%';
+    out.textContent = a === lo && b === hi ? 'any' : a === b ? String(a) : `${a}–${b}`;
+    rail.classList.toggle('narrowed', !(a === lo && b === hi));
+  };
+
+  let timer = null;
+  let applied = smin.value + '-' + smax.value;
+  const apply = () => {
+    clearTimeout(timer);
+    timer = null;
+    const key = smin.value + '-' + smax.value;
+    // A drag ends with a change event after the debounce has already sent the
+    // same bounds; without this that lands as a second identical query.
+    if (key === applied) return;
+    applied = key;
+    const a = +smin.value, b = +smax.value;
+    const u = new URL(location.href);
+    if (a > lo) u.searchParams.set('minPlayers', String(a)); else u.searchParams.delete('minPlayers');
+    if (b < hi) u.searchParams.set('maxPlayers', String(b)); else u.searchParams.delete('maxPlayers');
+    history.replaceState(null, '', u);
+    reloadList();
+  };
+  // Dragging fires input continuously, and each apply is a query: paint every
+  // frame, ask the server on a pause. `change` (drag end, keyboard commit)
+  // skips the wait.
+  const nudge = () => {
+    clearTimeout(timer);
+    timer = setTimeout(apply, 250);
+  };
+  smin.oninput = () => {
+    if (+smin.value > +smax.value) smin.value = smax.value;  // thumbs push, never cross
+    paint();
+    nudge();
+  };
+  smax.oninput = () => {
+    if (+smax.value < +smin.value) smax.value = smin.value;
+    paint();
+    nudge();
+  };
+  smin.onchange = smax.onchange = apply;
+
+  // The two inputs are full-width and stacked, so which thumb a press grabs is
+  // decided by paint order, not by which one the pointer is nearest. Hit
+  // testing happens before the press is dispatched, so the layering has to be
+  // settled on HOVER: the nearer thumb goes on top — and when the two sit on
+  // the same value, where they overlap exactly, the side of them the pointer
+  // is on says which one is meant. A touch has no hover, so it settles the
+  // layering for the NEXT press; the keyboard moves either thumb regardless.
+  const priority = (clientX) => {
+    const r = rail.getBoundingClientRect();
+    if (!r.width) return;
+    const at = lo + ((clientX - r.left) / r.width) * (hi - lo);
+    const a = +smin.value, b = +smax.value;
+    const wantMin = a === b ? at < a : Math.abs(at - a) <= Math.abs(at - b);
+    smin.style.zIndex = wantMin ? '4' : '3';
+    smax.style.zIndex = wantMin ? '3' : '4';
+  };
+  rail.onpointermove = (ev) => { if (ev.buttons === 0) priority(ev.clientX); };
+  rail.onpointerdown = (ev) => priority(ev.clientX);
+
+  paint();
 }
 
 // orphanMode: ?orphans=true asks the list to include uploads that never made it
