@@ -654,6 +654,53 @@ export class ReplayIndex extends DurableObject<Env> {
       .map(jobRow);
   }
 
+  /** jobsOffer is what the daemon's poll actually gets: the pending work of
+   * its kind and, when a re-sim daemon would otherwise go home empty-handed,
+   * one job queued on the spot from the games mirror.
+   *
+   * The mirror knows thousands of games nobody has captured (see the games
+   * table), and the re-sim daemon's other two work sources cannot reach them:
+   * a requested job needs a person to paste a link, and the catalog scan looks
+   * for one-sided UPLOADS, which by construction a never-uploaded game has
+   * none of. So an idle poll picks the newest such game instead of idling.
+   *
+   * Only for "resim": an upload job is bytes somebody sent, and there is no
+   * stream to invent for a game that was never uploaded.
+   *
+   * A candidate is a mirrored game with no catalog row AND NO JOB ROW AT ALL —
+   * not merely no live one. Excluding done and errored jobs too is what stops
+   * a game that fails to re-simulate from being handed out again on the very
+   * next poll, forever, an hour of engine time at a time; a person can still
+   * force a retry by pasting its link, which is exactly the existing story for
+   * a failed request.
+   *
+   * It backfills only into an EMPTY pending list, so at most one auto-queued
+   * job is ever waiting: the next poll finds that job rather than making
+   * another. The check and the insert are one RPC — the DO is single-threaded,
+   * so two daemons polling together cannot both queue the same game.
+   *
+   * This makes a GET write, which is the deliberate cost of leaving the
+   * daemon's protocol alone: a poll that returns a job it just created is
+   * indistinguishable, to the daemon, from one that returns a job a person
+   * queued a minute ago. */
+  jobsOffer(kind: JobKind, newJobId: string): IngestJob[] {
+    const pending = this.jobsPending(kind);
+    if (pending.length > 0 || kind !== "resim") return pending;
+    const candidate = this.ctx.storage.sql
+      .exec(
+        `SELECT g.id AS id FROM games g
+         WHERE NOT EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id)
+           AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = g.id)
+         ORDER BY g.start_unix IS NULL, g.start_unix DESC, g.id
+         LIMIT 1`,
+      )
+      .toArray();
+    if (candidate.length === 0) return [];
+    this.jobInsert(newJobId, "", candidate[0].id as string, "resim");
+    const job = this.jobGet(newJobId);
+    return job === null ? [] : [job];
+  }
+
   /** queuePage is the queue as a PERSON reads it (GET /api/queue): one page of
    * jobs, everything still in flight first — those are what the view exists to
    * answer for — then the most recently finished, newest first. Unlike

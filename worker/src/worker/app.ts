@@ -300,13 +300,20 @@ app.get("/api/queue", async (c) => {
 // hand a deployed daemon a re-sim it cannot run. The daemon and the worker
 // deploy independently, so the Go side skips a job of the wrong kind too
 // rather than trusting this filter.
+//
+// A re-sim poll that finds nothing pending does not come back empty: it
+// queues the newest mirrored game nothing has published yet and returns THAT
+// (ReplayIndex.jobsOffer, which is where the rules are). So this GET can
+// write — the id it would need is generated here, like the other two job
+// creators, rather than inside the Durable Object.
 app.get("/api/jobs", async (c) => {
   if (!authorized(c)) return c.json({ error: "unauthorized" }, 401);
   const kind = new URL(c.req.url).searchParams.get("kind") ?? "upload";
   if (!JOB_KINDS.includes(kind as JobKind)) {
     return c.json({ error: `kind must be one of ${JOB_KINDS.join(", ")}` }, 400);
   }
-  return c.json(await indexStub(c.env).jobsPending(kind as JobKind), 200, { "cache-control": "no-cache" });
+  const jobs = await indexStub(c.env).jobsOffer(kind as JobKind, crypto.randomUUID());
+  return c.json(jobs, 200, { "cache-control": "no-cache" });
 });
 
 // Daemon state transitions: claim (processing + claim:true), heartbeat

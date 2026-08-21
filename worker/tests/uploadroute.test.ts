@@ -74,6 +74,12 @@ class FakeIndex {
   jobsPending(kind: JobKind): IngestJob[] {
     return [...this.jobs.values()].filter((j) => j.kind === kind && j.state === "pending");
   }
+  // What the route actually calls. The mirror backfill behind it is SQL over
+  // three tables and is tested against the real Durable Object (tests/do);
+  // here the job is only to hand back the pending work.
+  jobsOffer(kind: JobKind): IngestJob[] {
+    return this.jobsPending(kind);
+  }
   jobClaim(id: string): boolean {
     const j = this.jobs.get(id);
     if (!j || j.state !== "pending") return false; // stale-processing needs a clock; not modelled

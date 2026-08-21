@@ -129,9 +129,16 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           PENDING (not fail) for the host that can run them.
                           -resim (needs -data on an engine-capable host) runs a DIFFERENT worker
                           instead of the upload loop, taking work from two places in order.
-                          First the REQUESTED re-sims — GET /api/jobs?kind=resim, the queue
-                          behind the landing page's paste-a-replay-link box, and the only route
-                          into the pipeline for a game NOBODY uploaded. Each is CLAIMED (POST
+                          First the QUEUED re-sims — GET /api/jobs?kind=resim, which serves
+                          two things the daemon cannot tell apart and does not need to: the jobs
+                          behind the landing page's paste-a-replay-link box, and, when there are
+                          none pending, one the WORKER queues on the spot out of the games mirror
+                          (ReplayIndex.jobsOffer — see the worker/ entry). So this list is
+                          effectively never empty while any mirrored game is unpublished, and the
+                          CATALOG SCAN below, which used to be the daemon's steady diet, now runs
+                          only when it is: one-sided uploads are no longer picked up promptly.
+                          That is the trade — an engine host that never idles, against a
+                          slower path for the games somebody actually recorded half of. Each is CLAIMED (POST
                           state=processing claim=true, which the worker refuses with 409 if
                           another daemon holds it), HEARTBEATED every 60s while the engine runs
                           — a re-sim outlives the 15-min stale window several times over, so
@@ -151,9 +158,10 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           uploads list gains an ally-null entry) — which is why only IT keeps the
                           in-process failed-game memory; a requested job records its failure on
                           its own row and so leaves the queue by itself, making a re-paste the
-                          retry. The two work lists cannot overlap: a request is refused while
-                          its game is in the catalog, and a scanned candidate is in it by
-                          definition. Upload jobs are untouched (run a plain bringest alongside,
+                          retry. The work lists cannot overlap: a request is refused while its
+                          game is in the catalog, a scanned candidate is in it by definition, and
+                          the mirror backfill takes only games with no catalog row AND no job
+                          row of any state. Upload jobs are untouched (run a plain bringest alongside,
                           on any host, with no engine).
                           Both loops share one workerAPI (the JSON helper, the bearer token, the
                           job transitions), which is why -resim now needs $REPLAY_PUT_TOKEN where
@@ -739,7 +747,24 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           reason). It is distinct
                           from the daemon's GET /api/jobs, which is a WORK QUEUE (guarded, ONE
                           kind at a time, and it deliberately hides a healthy "processing" job —
-                          precisely the row a person watching wants to see). The Go viz server
+                          precisely the row a person watching wants to see), and which also
+                          MAKES work: a "resim" poll with nothing pending queues the newest
+                          mirrored game nothing has published and returns that
+                          (ReplayIndex.jobsOffer). The rules are all about not repeating
+                          work: only for kind=resim (an upload job is bytes somebody sent, and
+                          there is no stream to invent); only a game with no catalog row and NO
+                          JOB ROW AT ALL — finished and FAILED ones included, or a game that
+                          cannot re-simulate would be handed out again every poll, an hour of
+                          engine time at a time (pasting its link is still a retry, exactly as
+                          for a failed request); and only into an EMPTY pending list, so at most
+                          one auto-queued job ever waits — the next poll finds THAT one instead
+                          of making another. Check and insert are one RPC, so two daemons
+                          polling together cannot both take the same game. It makes a GET write,
+                          which is the price of leaving the daemon's protocol untouched: a
+                          backfilled job is indistinguishable from one a person queued a minute
+                          earlier, so no deployed daemon needs to know this happens. The job id
+                          comes from the ROUTE (crypto.randomUUID, like the other two job
+                          creators), which is also what keeps the DO deterministic under test. The Go viz server
                           has no ingest pipeline
                           and 404s the route; the section then says so rather than showing an
                           empty table that would read as "nothing is queued", and asks it nothing
