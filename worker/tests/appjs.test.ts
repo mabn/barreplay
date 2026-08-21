@@ -664,3 +664,115 @@ test('the catalog is fetched for the list view, not for a direct replay link', a
   assert.equal(s.filters, 1, 'facets fetched once for the list view');
   assert.ok(s.renders >= 1, 'the table is rendered');
 });
+
+// A DOM small enough to render one table into and read back: renderHome only
+// creates elements, sets text/class, and appends. Kept out of the eval string
+// (which a direct eval lets it reach) so the harness below stays readable.
+function fakeDom() {
+  const node = (tag: string): any => {
+    const n: any = {
+      tag, children: [] as any[], style: {}, title: '', href: undefined as string | undefined,
+      className: '', _text: '',
+      classList: {
+        add(c: string) { n.className = (n.className + ' ' + c).trim(); },
+        remove() {}, toggle() {},
+        contains: (c: string) => n.className.split(/\s+/).includes(c),
+      },
+      appendChild(c: any) { n.children.push(c); return c; },
+      addEventListener() {},
+    };
+    Object.defineProperty(n, 'textContent', {
+      get: () => n._text,
+      set: (v: string) => { n._text = v; if (v === '') n.children = []; },
+    });
+    return n;
+  };
+  const tbody = node('tbody');
+  const byId: Record<string, any> = {};
+  const document = {
+    createElement: node,
+    querySelector: () => tbody,
+    getElementById: (id: string) => (byId[id] ??= node('div')),
+    body: { classList: { add() {}, remove() {}, toggle() {} } },
+  };
+  return { document, tbody };
+}
+
+/** Every element in the subtree, so a cell's contents can be asked about
+ * without knowing which nesting produced them. */
+function walk(n: any, out: any[] = []): any[] {
+  for (const c of n.children ?? []) { out.push(c); walk(c, out); }
+  return out;
+}
+
+test('a game being processed is listed, badged first, and cannot be opened', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+
+  const dom = fakeDom();
+  const rows = [
+    // Published and idle: an ordinary row.
+    { id: 'plain', rid: 'plain-1', startUnix: 1787349909, durationSec: 217, map: 'Isidis crack 1.1',
+      gameSize: '1v1', sizeBytes: 100, players: [], settings: { lava: true }, uploads: [] },
+    // Published AND being re-simulated: badged, but still openable — an older
+    // revision is there to play.
+    { id: 'again', rid: 'again-1', startUnix: 1787349000, durationSec: 300, map: 'X', gameSize: '8v8',
+      sizeBytes: 200, players: [], settings: { lava: true }, uploads: [], processing: true },
+    // Nothing published yet: badged and not openable.
+    { id: 'fresh', rid: null, startUnix: 1787348000, durationSec: null, map: 'Y', gameSize: '1v1',
+      sizeBytes: null, players: [], settings: null, uploads: [], processing: true, placeholder: true },
+  ];
+
+  const render = eval(`(function(){
+    const document = dom.document;
+    const replayList = rows;
+    const homeDataLoaded = true;
+    const ALLY_HUES = [0, 120];
+    const urlId = (e) => e.rid || e.id;
+    const replayHref = (id) => '/?replay=' + id;
+    const fmtDate = () => 'date', fmtDuration = () => 'dur', fmtSize = () => 'size';
+    // The real one is exercised by its own tests; here it only has to produce
+    // a badge for the pill to be ahead of.
+    const settingsBadges = (s) => (s ? [{ key: 'lava', label: 'lava' }] : []);
+    const adminMode = () => false, syncOrphanButton = () => {}, filterQuery = () => '';
+    ${extract('renderHome')}
+    return renderHome;
+  })()`);
+
+  render();
+
+  const trs = dom.tbody.children;
+  assert.equal(trs.length, 3, 'every row is listed, including the one with nothing to play');
+
+  const pillOf = (tr: any) => walk(tr).find((n) => n.className.includes('badge-processing'));
+  assert.equal(pillOf(trs[0]), undefined, 'an idle row carries no processing pill');
+  assert.ok(pillOf(trs[1]), 'a game being worked on is badged');
+  assert.ok(pillOf(trs[2]), 'so is one with nothing published yet');
+  assert.equal(pillOf(trs[1]).textContent, 'processing');
+
+  // The pill LEADS the settings cell: it is why the row is there, not one
+  // more game setting, so it must not be hunted for among them.
+  const settingsCell = (tr: any) => tr.children.find((td: any) => td.className === 'settings');
+  const badges = settingsCell(trs[1]).children[0].children;
+  assert.equal(badges[0].className, 'badge badge-processing');
+  assert.equal(badges[1].textContent, 'lava', 'the game settings follow it');
+
+  // Openability: an internal link exists on the two published rows and on
+  // neither cell of the third. Only the external links (class "ext") remain,
+  // and those point at other sites, not at a replay this worker cannot serve.
+  const internalLinks = (tr: any) =>
+    walk(tr).filter((n) => n.tag === 'a' && !n.className.includes('ext')).length;
+  assert.ok(internalLinks(trs[0]) > 0, 'a published row is a link');
+  assert.ok(internalLinks(trs[1]) > 0, 'so is one being re-simulated');
+  assert.equal(internalLinks(trs[2]), 0, 'a row with nothing to play links nowhere');
+  assert.ok(trs[2].className.includes('unopenable'), 'and says so to the stylesheet');
+  assert.ok(!trs[1].className.includes('unopenable'));
+});

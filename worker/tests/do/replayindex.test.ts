@@ -70,6 +70,9 @@ function replay(id: string, over: Partial<ReplayEntry> = {}): ReplayEntry {
     widgetVersion: null,
     widgetSha: null,
     widgetDate: null,
+    // Server-owned; a publisher's entry never carries them.
+    placeholder: false,
+    processing: false,
     ...over,
   };
 }
@@ -303,5 +306,123 @@ test("an upload poll is never backfilled", async () => {
 test("an idle poll with nothing to mirror returns nothing", async () => {
   await inIndex((index) => {
     expect(index.jobsOffer("resim", OFFER)).toEqual([]);
+  });
+});
+
+// --- the catalog follows the pipeline: placeholder rows and the pill --------
+
+test("claiming a job puts the game in the catalog, seeded from the mirror", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([game("busy")]);
+    index.jobInsert("j", "", "busy", "resim");
+
+    expect(index.list()).toEqual([]);
+    expect(index.jobClaim("j", "resim")).toBe(true);
+
+    const [row] = index.list();
+    // In the list while the work runs — and showing what the mirror knows,
+    // rather than a row of dashes.
+    expect(row).toMatchObject({
+      id: "busy",
+      map: "Great Divide V1",
+      gameSize: "1v1",
+      playerCount: 2,
+      placeholder: true,
+      processing: true,
+    });
+    expect(row.players).toHaveLength(2);
+  });
+});
+
+test("reporting processing without claiming creates the row too", async () => {
+  await inIndex((index) => {
+    index.jobInsert("j", "streams/x", "uploading", "upload");
+    index.jobUpdate("j", "processing", null);
+
+    // No mirror row behind this one: an upload can be of a game the mirror has
+    // never seen, and the row is worth having anyway.
+    expect(index.list()).toMatchObject([{ id: "uploading", placeholder: true, processing: true, map: null }]);
+  });
+});
+
+test("a heartbeat does not pile up rows", async () => {
+  await inIndex((index) => {
+    index.jobInsert("j", "", "busy", "resim");
+    index.jobUpdate("j", "processing", null);
+    index.jobUpdate("j", "processing", null);
+    index.jobUpdate("j", "processing", null);
+    expect(index.list()).toHaveLength(1);
+  });
+});
+
+test("a published replay keeps its row and never becomes a placeholder", async () => {
+  await inIndex((index) => {
+    index.upsert(replay("real"));
+    index.jobInsert("j", "", "real", "resim");
+    index.jobClaim("j", "resim");
+
+    // The row it already had, marked as being worked on — a re-sim of a game
+    // with a one-sided upload stays openable the whole time.
+    expect(index.list()).toMatchObject([{ id: "real", rid: "real-abcd1234", placeholder: false, processing: true }]);
+  });
+});
+
+test("publishing turns the placeholder into an ordinary row", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([game("done")]);
+    index.jobInsert("j", "", "done", "resim");
+    index.jobClaim("j", "resim");
+    // The daemon publishes first and only then reports done, which is what
+    // makes this the normal ending.
+    index.upsert(replay("done"));
+    index.jobUpdate("j", "done", null);
+
+    expect(index.list()).toMatchObject([{ id: "done", placeholder: false, processing: false }]);
+  });
+});
+
+test("a job that fails without publishing takes its row away again", async () => {
+  await inIndex((index, sql) => {
+    index.gamesInsert([game("doomed")]);
+    index.jobInsert("j", "", "doomed", "resim");
+    index.jobClaim("j", "resim");
+    expect(index.list()).toHaveLength(1);
+
+    index.jobUpdate("j", "error", "engine died at frame 400");
+
+    // Otherwise every failed re-sim would leave a permanent dead entry in a
+    // list of things you can play.
+    expect(index.list()).toEqual([]);
+    // The mirror row is untouched, and so are the derived entries it owns.
+    expect(rows(sql, `SELECT COUNT(*) AS n FROM games`)).toEqual([{ n: 1 }]);
+    expect(rows(sql, `SELECT COUNT(*) AS n FROM replay_players WHERE replay_id = 'doomed'`)).toEqual([{ n: 2 }]);
+  });
+});
+
+test("the pill goes out with the job, whatever it was doing", async () => {
+  await inIndex((index) => {
+    index.upsert(replay("real"));
+    index.jobInsert("j", "", "real", "resim");
+    index.jobClaim("j", "resim");
+    expect(index.list()[0].processing).toBe(true);
+
+    index.jobUpdate("j", "error", "no");
+
+    // Derived from the jobs table, so nothing had to remember to clear it.
+    expect(index.list()[0]).toMatchObject({ id: "real", processing: false, placeholder: false });
+  });
+});
+
+test("a game being worked on is not 'already published' to a re-sim request", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([game("busy")]);
+    index.jobInsert("existing", "", "busy", "resim");
+    index.jobClaim("existing", "resim");
+
+    // The placeholder row must not make this look published: the honest
+    // answer is the job already doing the work.
+    const res = index.resimEnqueue("new", "busy");
+    expect(res.status).toBe("duplicate");
+    expect(res.job?.id).toBe("existing");
   });
 });

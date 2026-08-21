@@ -164,6 +164,11 @@ export class ReplayIndex extends DurableObject<Env> {
       "widget_version TEXT",
       "widget_sha TEXT",
       "widget_date TEXT",
+      // 1 = this row is a PIPELINE placeholder: it exists so a game being
+      // worked on shows up in the list, and nothing has been published for it
+      // yet. It is what makes a row un-openable in the viewer, and the only
+      // kind of row the pipeline ever deletes.
+      "placeholder INTEGER NOT NULL DEFAULT 0",
     ]) {
       addColumn("replays", col);
     }
@@ -173,6 +178,8 @@ export class ReplayIndex extends DurableObject<Env> {
       CREATE INDEX IF NOT EXISTS replays_map   ON replays (map);
       CREATE INDEX IF NOT EXISTS replays_count ON replays (player_count);
       CREATE INDEX IF NOT EXISTS jobs_kind     ON jobs (kind, state, updated_unix);
+      -- Every catalog read asks "is a job processing this game", once per row.
+      CREATE INDEX IF NOT EXISTS jobs_game     ON jobs (game_id, state);
     `);
 
     const have = ctx.storage.sql
@@ -281,10 +288,14 @@ export class ReplayIndex extends DurableObject<Env> {
       date: e.widgetDate ?? undefined,
     });
     this.ctx.storage.sql.exec(
-      `INSERT INTO replays (id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date, updated_unix)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO replays (id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date, placeholder, updated_unix)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
        ON CONFLICT(id) DO UPDATE SET
          rid = excluded.rid,
+         -- A publish is exactly what a placeholder was waiting for: there are
+         -- bytes now, so the row becomes an ordinary, openable catalog entry
+         -- and stops being something the pipeline may delete.
+         placeholder = 0,
          start_unix = excluded.start_unix,
          duration_sec = excluded.duration_sec,
          map = excluded.map,
@@ -410,7 +421,8 @@ export class ReplayIndex extends DurableObject<Env> {
     }
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date
+        `SELECT id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date, placeholder,
+                EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = replays.id AND j.state = 'processing') AS processing
          FROM replays
          ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
          ORDER BY start_unix IS NULL, start_unix DESC, id`,
@@ -434,6 +446,13 @@ export class ReplayIndex extends DurableObject<Env> {
       widgetVersion: (r.widget_version as string | null) ?? null,
       widgetSha: (r.widget_sha as string | null) ?? null,
       widgetDate: (r.widget_date as string | null) ?? null,
+      placeholder: r.placeholder === 1,
+      // DERIVED, never stored: a flag would have to be cleared by whoever
+      // finishes the job, and every path that forgets — a crash, a stale
+      // daemon, a job deleted by hand — would leave a row saying "processing"
+      // forever. Asked of the jobs table it is simply true while a job is
+      // running and false the moment one is not.
+      processing: r.processing === 1,
     }));
   }
 
@@ -610,7 +629,13 @@ export class ReplayIndex extends DurableObject<Env> {
    * "duplicate": a re-sim of this game is already queued or running — the
    * caller gets that job back, which makes re-pasting a link harmless. */
   resimEnqueue(id: string, gameId: string): { status: "queued" | "in-catalog" | "duplicate"; job: IngestJob | null } {
-    const known = this.ctx.storage.sql.exec(`SELECT 1 FROM replays WHERE id = ?`, gameId).toArray();
+    // `placeholder = 0`: a row that only exists because the game is being
+    // worked on right now is not a reason to refuse — "already published" would
+    // be a lie, and the duplicate check just below is the honest answer, which
+    // hands back the job doing the work.
+    const known = this.ctx.storage.sql
+      .exec(`SELECT 1 FROM replays WHERE id = ? AND placeholder = 0`, gameId)
+      .toArray();
     if (known.length > 0) return { status: "in-catalog", job: null };
     const active = this.ctx.storage.sql
       .exec(
@@ -652,6 +677,75 @@ export class ReplayIndex extends DurableObject<Env> {
       )
       .toArray()
       .map(jobRow);
+  }
+
+  /** ensureCatalogPlaceholder puts a game that is being WORKED ON into the
+   * catalog, so the list shows it while the work runs rather than only after
+   * it lands. Called whenever a job enters "processing", by any route in.
+   *
+   * The row is marked `placeholder`, which says the obvious thing: there is
+   * nothing to play yet. That is what the viewer keys "not openable" off —
+   * inferring it from a missing rid would be wrong, since the Go server's own
+   * rows have none and are perfectly playable. A publish clears the mark
+   * (upsert writes placeholder = 0), and a job that ends without one takes the
+   * row away again, so a failed re-sim leaves no dead entry behind.
+   *
+   * It seeds what it can from the games mirror — a row showing the map and the
+   * players beats one showing five dashes — and re-indexes the derived tables
+   * from that same data, because the catalog row it just made now OWNS those
+   * entries (see indexRow). With nothing to seed from it indexes nothing: the
+   * alternative, indexing null, would DELETE whatever the mirror had put there. */
+  private ensureCatalogPlaceholder(gameId: string): void {
+    const sql = this.ctx.storage.sql;
+    if (sql.exec(`SELECT 1 FROM replays WHERE id = ?`, gameId).toArray().length > 0) return;
+    const seed = sql
+      .exec(
+        `SELECT start_unix, duration_sec, map, game_size, player_count, players, settings
+         FROM games WHERE id = ?`,
+        gameId,
+      )
+      .toArray();
+    const g = seed.length > 0 ? seed[0] : null;
+    sql.exec(
+      `INSERT INTO replays (id, start_unix, duration_sec, map, game_size, player_count, players, settings, placeholder, updated_unix)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+      gameId,
+      (g?.start_unix as number | null) ?? null,
+      (g?.duration_sec as number | null) ?? null,
+      (g?.map as string | null) ?? null,
+      (g?.game_size as string | null) ?? null,
+      (g?.player_count as number | null) ?? null,
+      (g?.players as string | null) ?? null,
+      (g?.settings as string | null) ?? null,
+      Math.floor(Date.now() / 1000),
+    );
+    if (g !== null) {
+      this.indexRow(
+        gameId,
+        g.players == null ? null : JSON.parse(g.players as string),
+        g.settings == null ? null : JSON.parse(g.settings as string),
+      );
+    }
+  }
+
+  /** dropCatalogPlaceholder removes the row again when the work ends without
+   * anything published — a failed re-sim, an upload that could not be packed.
+   * A row a publisher has since written is not a placeholder any more and is
+   * left alone, which is the normal ending: the daemon publishes (upsert
+   * clears the mark) and only then reports done.
+   *
+   * The derived entries are deliberately NOT deleted with it: they were
+   * copied from the games row, which is still there and still describes the
+   * same game, so removing them would only make the mirror's own entries
+   * disappear. */
+  private dropCatalogPlaceholder(gameId: string): void {
+    this.ctx.storage.sql.exec(
+      `DELETE FROM replays
+       WHERE id = ? AND placeholder = 1
+         AND NOT EXISTS (SELECT 1 FROM jobs WHERE game_id = ? AND state = 'processing')`,
+      gameId,
+      gameId,
+    );
   }
 
   /** jobsOffer is what the daemon's poll actually gets: the pending work of
@@ -763,7 +857,10 @@ export class ReplayIndex extends DurableObject<Env> {
       id,
       Math.floor(Date.now() / 1000) - window,
     );
-    return cur.rowsWritten > 0;
+    if (cur.rowsWritten === 0) return false;
+    const job = this.jobGet(id);
+    if (job !== null) this.ensureCatalogPlaceholder(job.gameId);
+    return true;
   }
 
   /** jobUpdate transitions a job's state (daemon heartbeat / completion
@@ -786,7 +883,18 @@ export class ReplayIndex extends DurableObject<Env> {
       Math.floor(Date.now() / 1000),
       id,
     );
-    return cur.rowsWritten > 0;
+    if (cur.rowsWritten === 0) return false;
+    // The catalog follows the job either way: into the list when work starts
+    // (this is the other door into "processing" — a daemon that reports it
+    // without claiming, and every heartbeat, which is harmless since the row
+    // is only ever created once), and out of it when work ends with nothing
+    // published.
+    const job = this.jobGet(id);
+    if (job !== null) {
+      if (state === "processing") this.ensureCatalogPlaceholder(job.gameId);
+      else this.dropCatalogPlaceholder(job.gameId);
+    }
+    return true;
   }
 }
 
