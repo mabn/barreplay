@@ -240,6 +240,32 @@ test("the backfill passes over a game that already has a job, failed ones includ
   });
 });
 
+test("the backfill passes over a modded game", async () => {
+  await inIndex((index, sql) => {
+    index.gamesInsert([
+      game("modded", { startUnix: 3000, settings: { mods: true, ranked: true } }),
+      // The modes that ship AS tweak blobs carry the same flag, so they are
+      // out too — deliberately, since they are modded games.
+      game("lava", { startUnix: 2500, settings: { lava: true, mods: true } }),
+      game("vanilla", { startUnix: 2000, settings: { ranked: true } }),
+    ]);
+
+    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "vanilla" });
+    // Nothing was queued for the modded ones, then or later.
+    expect(rows(sql, `SELECT game_id FROM jobs`)).toEqual([{ game_id: "vanilla" }]);
+  });
+});
+
+test("a game with no settings recorded at all is still eligible", async () => {
+  await inIndex((index) => {
+    // settings is null when the API's reply carried no gameSettings. There is
+    // nothing to refuse it on, and treating unknown as modded would empty the
+    // work list on a bad day at the API.
+    index.gamesInsert([game("unknown", { settings: null })]);
+    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "unknown" });
+  });
+});
+
 test("a poll with pending work is left alone", async () => {
   await inIndex((index, sql) => {
     index.gamesInsert([game("candidate")]);
