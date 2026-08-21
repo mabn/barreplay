@@ -214,7 +214,19 @@ internal/envfile/         tiny stdlib KEY=VALUE loader for ./.env. Accepts the b
                           '#' in an unquoted value is kept, since secrets contain them and a
                           silently truncated key is worse than requiring quotes.
 cmd/barreplay-static/main.go CLI: pack .brp -> static-file bundle (index.json + replays/**) for R2 hosting
-internal/barapi/          resolve gameId via api.bar-rts.com; download .sdfz from OVH
+internal/barapi/          resolve gameId via api.bar-rts.com; download .sdfz from OVH.
+                          That API is github.com/beyond-all-reason/bar-db (BAR's infra docs:
+                          "effectively https://api.bar-rts.com/"; the site half is the separate
+                          Jazcash/bar-live-services) — the source of truth for the response shapes
+                          this package, packer's demo fetch and the worker's /refresh-settings all
+                          decode, and for the OVH demo path, which the API itself never returns.
+                          Its GET /replays SEARCHES the ~2.7M-game history (filters: preset=
+                          team|duel|ffa, players, maps, date, durationRangeMins, tsRange,
+                          endedNormally, hasBots, reported; limit<=100, computeTotalResults=true
+                          or totalResults is -1) — unused by this repo, but it is how you find
+                          games to feed the re-sim queue. Multi-valued filters REPEAT the key
+                          (players=a&players=b); the players[]= form is silently dropped and
+                          answers unfiltered. See the package doc for the details.
 internal/demofile/        gunzip + parse packed header + TDF startscript + the packet
                           stream's CHAT and MAP DRAWINGS (comms.go -> Demo.Comms). The
                           stream is what the SERVER broadcast, which makes it the

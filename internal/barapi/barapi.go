@@ -5,6 +5,30 @@
 // backend is api.bar-rts.com. The metadata JSON does NOT contain a download URL
 // for the demo -- it is built by convention from the returned fileName against
 // the OVH object-storage bucket the project uploads replays to.
+//
+// That backend is open source: github.com/beyond-all-reason/bar-db (TypeScript,
+// Postgres+Redis; a "processor" that ingests replays/maps and a REST API serving
+// them -- BAR's own infrastructure docs call it "effectively
+// https://api.bar-rts.com/"). Read it when a response shape here is unclear: the
+// /replays/{id} JSON below and the demo bucket path above are ITS conventions,
+// and the bucket path in particular is one this API never states.
+//
+// It also SEARCHES the whole replay history (~2.7M games), which this package
+// does not use but which is how you find games to feed the pipeline:
+//
+//	GET /replays?page=1&limit=24&computeTotalResults=true
+//	    &preset=team|duel|ffa  &players=<name>  &maps=<scriptName>
+//	    &date=<YYYY-MM-DD>[&date=<YYYY-MM-DD>]  &durationRangeMins=5&durationRangeMins=60
+//	    &tsRange=<min>&tsRange=<max>  &endedNormally=  &hasBots=  &reported=
+//
+// Rows are newest-first {id, startTime, durationMs, Map{fileName,scriptName},
+// AllyTeams[{winningTeam, Players[{name}], AIs}]} -- that id IS the gameId
+// Resolve takes. limit defaults to 24 and caps at 100; totalResults is -1
+// unless computeTotalResults=true. Two gotchas, both silent: a REPEATED key is
+// how you pass a multi-valued filter (players=a&players=b; a lone value coerces
+// to a one-element array), while the players[]= bracket form is dropped as an
+// unknown param and answers with the UNFILTERED newest games -- no error. A bad
+// preset does 400, so filters that look ignored are usually spelled that way.
 package barapi
 
 import (

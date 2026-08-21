@@ -67,7 +67,7 @@ pipeline. See `worker/README.md`.
 | Package | Responsibility |
 | --- | --- |
 | `snapshot/` | **Public data model + pluggable `Writer`.** Owns the on-disk format. The format is `.brp` (currently version 4), a delta-coded columnar binary ~60x smaller than the retired v1 JSONL. |
-| `internal/barapi` | Resolve a gameId/URL via `api.bar-rts.com` and download the `.sdfz` from the OVH bucket. |
+| `internal/barapi` | Resolve a gameId/URL via `api.bar-rts.com` and download the `.sdfz` from the OVH bucket. (That API is open source: [`beyond-all-reason/bar-db`](https://github.com/beyond-all-reason/bar-db).) |
 | `internal/demofile` | Parse the `.sdfz` header (byte-packed, little-endian) and the embedded TDF startscript. |
 | `internal/engine` | Locate `spring-headless`/`pr-downloader`, provision missing content, write the widget (with its output-file path), build the playback startscript, launch the engine. |
 | `internal/capture` | Parse the widget's `BRSNAP` output file into `snapshot` records. |
