@@ -40,6 +40,17 @@ const STALE_PROCESSING_SEC = 15 * 60;
  * engine time that would simply be run twice. */
 const STALE_PROCESSING_RESIM_SEC = 90 * 60;
 
+/** How many of the newest ELIGIBLE mirrored games the backfill chooses from.
+ * It picks the biggest game in that window, not the newest one: an 8v8 is
+ * worth far more to have than the 1v1 that happened to finish a minute later,
+ * and re-simulating either costs the same hour of somebody's machine.
+ *
+ * The window is over CANDIDATES, not over the mirror's last 20 rows. Those
+ * would drain: every game handed out gains a job row and stops being eligible,
+ * so after twenty of them a window over raw recency would be permanently empty
+ * and the daemon would idle with thousands of games still to do. */
+const BACKFILL_WINDOW = 20;
+
 /** Columns every jobs SELECT reads, in the order jobRow expects. */
 const JOB_COLS = "id, stream_key, game_id, kind, state, error, stats, created_unix, updated_unix";
 
@@ -752,6 +763,10 @@ export class ReplayIndex extends DurableObject<Env> {
    * its kind and, when a re-sim daemon would otherwise go home empty-handed,
    * one job queued on the spot from the games mirror.
    *
+   * Of the BACKFILL_WINDOW newest candidates it takes the one with the MOST
+   * PLAYERS: an hour of engine time buys an 8v8 as cheaply as a duel, so
+   * within a window of games that are all recent, size is what decides.
+   *
    * The mirror knows thousands of games nobody has captured (see the games
    * table), and the re-sim daemon's other two work sources cannot reach them:
    * a requested job needs a person to paste a link, and the catalog scan looks
@@ -788,11 +803,18 @@ export class ReplayIndex extends DurableObject<Env> {
     if (pending.length > 0 || kind !== "resim") return pending;
     const candidate = this.ctx.storage.sql
       .exec(
-        `SELECT g.id AS id FROM games g
-         WHERE NOT EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id)
-           AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = g.id)
-           AND NOT EXISTS (SELECT 1 FROM replay_settings s WHERE s.replay_id = g.id AND s.flag = ?)
-         ORDER BY g.start_unix IS NULL, g.start_unix DESC, g.id
+        `SELECT id FROM (
+           SELECT g.id AS id, g.player_count AS player_count, g.start_unix AS start_unix
+           FROM games g
+           WHERE NOT EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id)
+             AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = g.id)
+             AND NOT EXISTS (SELECT 1 FROM replay_settings s WHERE s.replay_id = g.id AND s.flag = ?)
+           ORDER BY g.start_unix IS NULL, g.start_unix DESC, g.id
+           LIMIT ${BACKFILL_WINDOW}
+         )
+         -- Biggest game in that window; a game whose roster the API never gave
+         -- goes last, and an exact tie goes to the newer one.
+         ORDER BY player_count IS NULL, player_count DESC, start_unix DESC, id
          LIMIT 1`,
         // Read from the derived table rather than the row's settings JSON: the
         // flag index (flag, replay_id) makes it a seek, and a mirrored game

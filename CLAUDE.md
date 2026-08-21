@@ -775,9 +775,17 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           from the daemon's GET /api/jobs, which is a WORK QUEUE (guarded, ONE
                           kind at a time, and it deliberately hides a healthy "processing" job —
                           precisely the row a person watching wants to see), and which also
-                          MAKES work: a "resim" poll with nothing pending queues the newest
-                          mirrored game nothing has published and returns that
-                          (ReplayIndex.jobsOffer). The rules are all about not repeating
+                          MAKES work: a "resim" poll with nothing pending queues a mirrored
+                          game nothing has published and returns that (ReplayIndex.jobsOffer).
+                          WHICH game: of the BACKFILL_WINDOW=20 newest eligible ones, the one
+                          with the MOST PLAYERS — an hour of engine time buys an 8v8 as cheaply
+                          as the duel that happened to finish a minute later, so within a window
+                          of games that are all recent, size decides (ties go to the newer, an
+                          unknown roster goes last but is not refused). The window is over
+                          CANDIDATES, not over the mirror's last 20 rows: every game handed out
+                          gains a job row and stops being eligible, so a window over raw recency
+                          would be permanently empty after twenty of them and the daemon would
+                          idle with thousands of games left. The rules are all about not repeating
                           work: only for kind=resim (an upload job is bytes somebody sent, and
                           there is no stream to invent); only a game with no catalog row and NO
                           JOB ROW AT ALL — finished and FAILED ones included, or a game that
