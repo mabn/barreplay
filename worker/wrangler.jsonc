@@ -104,6 +104,16 @@
     }
   ],
 
+  // The games mirror (src/worker/games.ts, driven by index.ts's scheduled
+  // handler): once a minute, read page 1 of api.bar-rts.com's replay listing
+  // and record the games this worker has not seen. Every minute rather than
+  // something slower because the sync only ever reads ONE page — a longer gap
+  // would eventually let a busy hour scroll games off page 1 before they were
+  // ever seen, and page 2 is deliberately not an option.
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+
   "observability": {
     "enabled": true
   }
