@@ -180,7 +180,11 @@ func run() int {
 	}
 	what := "pending jobs"
 	if *doResim {
-		ro := resim.Options{DataDir: *dataDir, SkipProvision: *skipProv}
+		// One Forecaster for the whole daemon, so what each re-sim cost teaches
+		// the next one's pre-simulation ETA. ro is copied per job, but the
+		// pointer is shared, which is the point: a lone Forecaster per run
+		// would never learn anything.
+		ro := resim.Options{DataDir: *dataDir, SkipProvision: *skipProv, Forecaster: &resim.Forecaster{}}
 		// 0 on the command line means "no guard"; resim reads 0 as "use the
 		// default", so the two are translated here rather than making the flag
 		// lie about what 0 does.

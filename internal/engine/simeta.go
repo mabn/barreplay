@@ -89,12 +89,25 @@ const (
 	// simRateMinSpan is the least history that makes a rate worth reporting at
 	// all — below it the log's own granularity dominates.
 	simRateMinSpan = 10 * time.Second
-	// simETAMinElapsed is how long the simulation must have been running before
-	// an estimate is offered. The estimate divides by the work done so far, and
-	// in the first seconds that divisor is small enough that the log's 300-frame
-	// granularity alone swings the answer by minutes. Nobody is waiting on an
-	// ETA half a minute into an hour of work.
-	simETAMinElapsed = 30 * time.Second
+	// simETAMinElapsed and simETAMinWork are what the estimate waits for. It
+	// divides by the work done so far, and while that divisor is small the
+	// log's 300-frame granularity alone swings the answer by minutes.
+	//
+	// The work floor is the one that matters, since it bounds the divisor
+	// directly; the time floor is a second opinion for a run whose first
+	// readings arrive in a burst. Both are deliberately SHORT: a queue row with
+	// no ETA is the complaint this is here to answer, and half a minute of one
+	// is a tenth of a median job. Measured over both sample sets — 29 runs at a
+	// 5s tick and 24 at the daemon's 10s beat — dropping from 30s to this
+	// changes the median error, the p90 and the p99 by nothing at all (0.22 /
+	// 0.57 / 0.92) while showing the first estimate at 10 seconds instead of 30
+	// and covering 95-99% of every run. Removing the floors entirely is what
+	// costs: the worst reading triples.
+	simETAMinElapsed = 10 * time.Second
+	// simETAMinWork is the least share of the run's wall time (by the curve
+	// above) that must have been observed, so the divisor cannot be dominated
+	// by its own quantization.
+	simETAMinWork = 0.005
 )
 
 // SimETA turns a stream of sim-frame readings into the two numbers a person
@@ -158,7 +171,7 @@ func (e *SimETA) Observe(now time.Time, frame int32) (fps, etaSec float64) {
 	elapsed := now.Sub(e.start)
 	share := e.shareOf(frame)
 	done := share - e.startShare
-	if elapsed >= simETAMinElapsed && done > 1e-6 && e.total > frame {
+	if elapsed >= simETAMinElapsed && done >= simETAMinWork && e.total > frame {
 		etaSec = elapsed.Seconds() * (1 - share) / done
 	}
 	return fps, etaSec

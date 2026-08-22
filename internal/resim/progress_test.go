@@ -3,6 +3,7 @@ package resim
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -205,4 +206,61 @@ func TestAbandonedStreamIsRemoved(t *testing.T) {
 	// A stream that never appeared (the widget never ran) is not a warning.
 	var err error = errors.New("boom")
 	removeAbandonedStream(filepath.Join(t.TempDir(), "absent.brsnap"), &err)
+}
+
+// The complaint this answers: a job that has been claimed shows nothing but
+// "loading" for the first half-minute, which is a tenth of a median run and
+// most of a short one. A forecast fills that in, counting down as it goes, and
+// stands down the moment the simulation can speak for itself.
+func TestForecastCarriesTheETAUntilTheSimCan(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	p := &Progress{now: func() time.Time { return now }}
+
+	p.SetPhase(PhaseFetchingDemo)
+	if got := p.Snapshot().ETASec; got != 0 {
+		t.Errorf("ETA before any forecast = %v, want none", got)
+	}
+	p.SetForecast(10 * time.Minute)
+	if got := p.Snapshot().ETASec; math.Abs(got-600) > 0.001 {
+		t.Errorf("ETA = %v, want the whole forecast", got)
+	}
+
+	// It counts down with the clock, and survives the phases the run moves
+	// through on the way to simulating — which is exactly where it is needed.
+	now = now.Add(2 * time.Minute)
+	p.SetPhase(PhaseProvisioning)
+	p.SetPhase(PhaseLoading)
+	if got := p.Snapshot().ETASec; math.Abs(got-480) > 0.001 {
+		t.Errorf("ETA after two minutes of loading = %v, want 480", got)
+	}
+
+	// The first real measurement retires it for good.
+	p.setSim(3000, 60000, 120, 900)
+	if got := p.Snapshot().ETASec; got != 900 {
+		t.Errorf("ETA = %v, want the measurement to win over the forecast", got)
+	}
+	// Including across the phase change that clears the sim numbers: a forecast
+	// still ticking down would otherwise reappear as the packing's ETA, and a
+	// run that beat its forecast would claim minutes of work it has finished.
+	p.SetPhase("packing")
+	if got := p.Snapshot().ETASec; got != 0 {
+		t.Errorf("ETA while packing = %v, want none", got)
+	}
+	p.SetForecast(10 * time.Minute)
+	if got := p.Snapshot().ETASec; got != 0 {
+		t.Errorf("a forecast was accepted after the run measured itself: %v", got)
+	}
+}
+
+// A forecast that runs out while the simulation still has not reported must go
+// quiet rather than sit at "0s left" — a guess that has been overtaken has
+// nothing left to say.
+func TestExpiredForecastSaysNothing(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	p := &Progress{now: func() time.Time { return now }}
+	p.SetForecast(time.Minute)
+	now = now.Add(90 * time.Second)
+	if got := p.Snapshot().ETASec; got != 0 {
+		t.Errorf("expired forecast reports %v, want none", got)
+	}
 }
