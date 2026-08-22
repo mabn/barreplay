@@ -62,11 +62,16 @@ class FakeIndex {
   // them — it is single-threaded, which is what makes them atomic there.
   resimEnqueue(id: string, gameId: string): { status: "queued" | "in-catalog" | "duplicate"; job: IngestJob | null } {
     if (this.entries.has(gameId)) return { status: "in-catalog", job: null };
+    return this.jobAnnounce(id, gameId, "resim");
+  }
+  // The same thing WITHOUT the catalog refusal: work the daemon found for
+  // itself, every candidate of which is in the catalog by definition.
+  jobAnnounce(id: string, gameId: string, kind: JobKind): { status: "queued" | "duplicate"; job: IngestJob | null } {
     const active = [...this.jobs.values()].find(
-      (j) => j.gameId === gameId && j.kind === "resim" && (j.state === "pending" || j.state === "processing"),
+      (j) => j.gameId === gameId && j.kind === kind && (j.state === "pending" || j.state === "processing"),
     );
     if (active) return { status: "duplicate", job: active };
-    this.jobInsert(id, "", gameId, "resim");
+    this.jobInsert(id, "", gameId, kind);
     return { status: "queued", job: this.jobs.get(id) ?? null };
   }
   jobGet(id: string): IngestJob | null {
@@ -952,4 +957,48 @@ test("a job's healthcheck history is served on its own route", async (t) => {
   index.jobInsert("plain", "streams/x", "gid");
   assert.deepEqual((await asJson(await app.request("/api/jobs/plain/samples", {}, env))).samples, []);
   assert.deepEqual((await asJson(await app.request("/api/jobs/nope/samples", {}, env))).samples, []);
+});
+
+// The daemon's catalog scan re-simulates games whose only upload is one-sided.
+// Every one of those is already IN the catalog, so /api/resim refuses them all
+// — right for a person pasting a link, wrong for work that is already running.
+// Announcing is the door for it, and it is guarded because it is the one path
+// into the job table with no refusals behind it.
+test("a daemon can announce work it found itself, which /api/resim would refuse", async (t) => {
+  const { env, index } = makeEnv("s3cret");
+  const auth = { Authorization: "Bearer s3cret" };
+  const post = (body: unknown, headers = auth) =>
+    app.request("/api/jobs", { method: "POST", headers, body: JSON.stringify(body) }, env);
+
+  // The game is published, one-sided: exactly a scan candidate.
+  index.upsert({ id: RESIM_ID, uploaderAlly: 1 } as ReplayEntry);
+  stubBarApi(t, new Set([RESIM_ID]));
+  assert.equal(
+    (await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env)).status,
+    409,
+    "the open door refuses it as published",
+  );
+
+  assert.equal((await post({ gameId: RESIM_ID }, {} as never)).status, 401, "and this one needs the token");
+
+  const first = await asJson(await post({ gameId: RESIM_ID }));
+  assert.equal(first.status, "queued");
+  assert.ok(first.job, "with a row to report onto");
+  assert.equal(index.jobGet(first.job)?.kind, "resim");
+
+  // Two daemons scanning the same catalog get the same row, so only one of
+  // them can claim it — the other does not spend an hour on the same game.
+  const second = await asJson(await post({ gameId: RESIM_ID }));
+  assert.equal(second.status, "duplicate");
+  assert.equal(second.job, first.job);
+
+  // A finished job does not block a fresh one: re-announcing is how a scan
+  // retries a game whose link nobody can paste.
+  index.jobUpdate(first.job, "error", "desynced");
+  assert.equal((await asJson(await post({ gameId: RESIM_ID }))).status, "queued");
+
+  // Rejections: only a real game id, and only the kind that has no stream.
+  assert.equal((await post({ gameId: "not-a-game" })).status, 400);
+  assert.equal((await post({})).status, 400);
+  assert.equal((await post({ gameId: RESIM_ID, kind: "upload" })).status, 400);
 });

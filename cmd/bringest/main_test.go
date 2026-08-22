@@ -35,6 +35,9 @@ type mockWorker struct {
 	claimed      map[string]bool // job id -> taken (a second claim is a 409)
 	statsSeen    []jobStats      // the processing record of every report that carried one
 	progressSeen []jobProgress   // the live reading of every healthcheck that carried one
+	announced    []string        // gameIds the daemon asked for a job row for
+	noAnnounce   bool            // a worker too old to have the route
+	announceDup  bool            // another daemon already holds the game
 }
 
 func (m *mockWorker) handler(token string) http.Handler {
@@ -108,6 +111,27 @@ func (m *mockWorker) handler(token string) http.Handler {
 		}
 		m.mu.Unlock()
 		w.Write([]byte(`{"ok":true}`))
+	})
+	mux.HandleFunc("POST /api/jobs", func(w http.ResponseWriter, r *http.Request) {
+		if !authed(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var body struct{ GameId, Kind string }
+		json.NewDecoder(r.Body).Decode(&body)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.noAnnounce {
+			http.Error(w, "unknown route", http.StatusNotFound)
+			return
+		}
+		m.announced = append(m.announced, body.GameId)
+		if m.announceDup {
+			json.NewEncoder(w).Encode(map[string]any{"status": "duplicate", "job": "someone-elses"})
+			return
+		}
+		id := "announced-" + body.GameId
+		json.NewEncoder(w).Encode(map[string]any{"status": "queued", "job": id})
 	})
 	mux.HandleFunc("GET /api/streams/", func(w http.ResponseWriter, r *http.Request) {
 		if !authed(r) {
@@ -197,8 +221,14 @@ func TestResimDaemonRunOnce(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/replays":
 			json.NewEncoder(w).Encode(catalog)
-		case "/api/jobs": // nothing requested by hand; the scan is all there is
-			json.NewEncoder(w).Encode([]ingestJob{})
+		case "/api/jobs":
+			if r.Method == http.MethodPost { // the scan announcing its work
+				json.NewEncoder(w).Encode(map[string]any{"status": "queued", "job": "announced"})
+				return
+			}
+			json.NewEncoder(w).Encode([]ingestJob{}) // nothing requested by hand
+		case "/api/jobs/announced": // claim, healthchecks and the terminal report
+			w.Write([]byte(`{"ok":true}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -276,8 +306,14 @@ func TestResimDaemonDrainsQueue(t *testing.T) {
 	if n != 2 || strings.Join(ran, ",") != "aaaa0000000000000000000000000001,onesided" {
 		t.Fatalf("attempted %d (%v), want the queued game first then the scan", n, ran)
 	}
-	if got := strings.Join(m.transitions, ","); got != "claim,done" {
-		t.Errorf("transitions = %q, want claim,done", got)
+	// BOTH runs report: the requested one onto the row somebody queued, the
+	// scanned one onto a row the daemon announced for itself. A re-simulation
+	// that shows up nowhere is the thing this pairing exists to prevent.
+	if got := strings.Join(m.transitions, ","); got != "claim,done,claim,done" {
+		t.Errorf("transitions = %q, want a claim and a report for each run", got)
+	}
+	if got := strings.Join(m.announced, ","); got != "onesided" {
+		t.Errorf("announced = %q, want the scanned game only — the queued one already has a row", got)
 	}
 }
 
@@ -675,4 +711,148 @@ func captureStderr(t *testing.T, fn func()) string {
 	os.Stderr = orig
 	w.Close()
 	return <-done
+}
+
+// A game the CATALOG SCAN found is announced onto a job row and then reported
+// on exactly like a requested one: claimed, healthchecked while the engine
+// runs, and finished with its stats. Before this it was an hour of engine time
+// that appeared nowhere and whose timings lived only in this daemon's log.
+func TestResimDaemonReportsScannedGames(t *testing.T) {
+	old := healthcheckEvery
+	healthcheckEvery = 5 * time.Millisecond
+	t.Cleanup(func() { healthcheckEvery = old })
+
+	m := newMock(t)
+	srv := httptest.NewServer(scanMux(m, oneSidedCatalog("onesided")))
+	t.Cleanup(srv.Close)
+
+	r := &resimDaemon{
+		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
+		failed:    map[string]bool{},
+		resim: func(ctx context.Context, _ string, st *jobStats, pr *resim.Progress) error {
+			pr.SetPhase(resim.PhaseSimulating)
+			st.fromRunStats(resim.RunStats{EngineSec: 2431, Frames: 100170})
+			waitForBeats(ctx, m, 2) // the queue page must see it move
+			return nil
+		},
+	}
+	if _, err := r.runOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if got := strings.Join(m.announced, ","); got != "onesided" {
+		t.Fatalf("announced = %q, want the scanned game", got)
+	}
+	if m.transitions[0] != "claim" || m.transitions[len(m.transitions)-1] != "done" {
+		t.Fatalf("transitions = %v, want claim first and done last", m.transitions)
+	}
+	if len(m.progressSeen) == 0 || m.progressSeen[0].State != resim.PhaseSimulating {
+		t.Errorf("progress reports = %v, want the live phase on the row", m.progressSeen)
+	}
+	if len(m.statsSeen) != 1 || m.statsSeen[0].ResimSec != 2431 || m.statsSeen[0].Frames != 100170 {
+		t.Errorf("stats = %+v, want the run's record on the row", m.statsSeen)
+	}
+}
+
+// A scanned game that fails records the failure on its row — the message is
+// what a person reads on the queue page — and is still remembered in-process,
+// since nothing else stops the next round from picking the same candidate.
+func TestResimDaemonReportsScannedFailure(t *testing.T) {
+	m := newMock(t)
+	srv := httptest.NewServer(scanMux(m, oneSidedCatalog("onesided")))
+	t.Cleanup(srv.Close)
+
+	r := &resimDaemon{
+		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
+		failed:    map[string]bool{},
+		resim: func(context.Context, string, *jobStats, *resim.Progress) error {
+			return errors.New("desynced")
+		},
+	}
+	if _, err := r.runOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(m.transitions, ","); got != "claim,error:desynced" {
+		t.Errorf("transitions = %q, want the failure on the row", got)
+	}
+	if !r.failed["onesided"] {
+		t.Error("a failed scan candidate must still be skipped until the daemon restarts")
+	}
+}
+
+// The announce is BOOKKEEPING, not the work: a worker too old to have the route
+// still gets its re-simulation, unreported — exactly as every catalog-scan
+// re-sim behaved before the row existed. The daemon and the worker deploy
+// independently, so this is the normal case during a rollout, not a corner.
+func TestResimDaemonRunsWithoutAJobRow(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*mockWorker)
+		want  string
+	}{
+		{"a worker with no announce route", func(m *mockWorker) { m.noAnnounce = true }, ""},
+		// A row somebody else holds is different: that engine is running, and
+		// this one must NOT also spend an hour on the same game.
+		{"a game another daemon holds", func(m *mockWorker) { m.announceDup = true }, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newMock(t)
+			tc.setup(m)
+			srv := httptest.NewServer(scanMux(m, oneSidedCatalog("onesided")))
+			t.Cleanup(srv.Close)
+
+			var ran []string
+			r := &resimDaemon{
+				workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
+				failed:    map[string]bool{},
+				resim: func(_ context.Context, gameID string, _ *jobStats, _ *resim.Progress) error {
+					ran = append(ran, gameID)
+					return nil
+				},
+			}
+			if _, err := r.runOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			if got := strings.Join(m.transitions, ","); got != tc.want {
+				t.Errorf("transitions = %q, want %q", got, tc.want)
+			}
+			// The work still happens without a row; it just goes unreported.
+			if m.noAnnounce && strings.Join(ran, ",") != "onesided" {
+				t.Errorf("ran = %v, want the game re-simulated anyway", ran)
+			}
+			// ...but a game somebody else is already on is skipped entirely.
+			if m.announceDup && len(ran) != 0 {
+				t.Errorf("ran = %v, want none — another daemon holds it", ran)
+			}
+		})
+	}
+}
+
+// oneSidedCatalog is a catalog of games whose only upload is one-sided, i.e.
+// exactly what the scan looks for.
+func oneSidedCatalog(ids ...string) []map[string]any {
+	rows := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		rows = append(rows, map[string]any{
+			"id": id, "uploaderAlly": 1,
+			"uploads": []map[string]any{{"rid": id + "-11111111", "ally": 1}},
+		})
+	}
+	return rows
+}
+
+// scanMux serves the catalog plus the mock's job API, which is everything the
+// scan half of the daemon talks to.
+func scanMux(m *mockWorker, catalog []map[string]any) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/api/jobs", m.handler(""))
+	mux.Handle("/api/jobs/", m.handler(""))
+	mux.HandleFunc("/api/replays", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(catalog)
+	})
+	return mux
 }

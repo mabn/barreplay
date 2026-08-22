@@ -50,12 +50,17 @@
 //  2. The CATALOG SCAN: GET /api/replays for games whose current upload is
 //     ONE-SIDED (uploaderAlly set — a playing client's point of view) and
 //     which have no full-view revision yet (no ally-null entry in the row's
-//     uploads list). This half needs no queue state anywhere: the publish
-//     itself retires the candidate — the row's uploads list gains an
-//     ally-null entry and its rid moves to the full view. A game whose resim
-//     fails here is remembered and skipped until the daemon restarts (a
-//     requested job records its failure on its own row instead, and
-//     re-requesting it is the retry).
+//     uploads list). Finding this work needs no queue state: the publish
+//     itself retires the candidate — the row's uploads list gains an ally-null
+//     entry and its rid moves to the full view. But the work is ANNOUNCED
+//     (POST /api/jobs) so it gets a job row like any other, and is then
+//     claimed, healthchecked and reported exactly like a requested one; before
+//     that it was an hour of engine time visible nowhere, whose progress and
+//     timings lived only in this daemon's log on a machine nobody else can
+//     reach. A game whose resim fails here is ALSO remembered in-process and
+//     skipped until the daemon restarts — the announced row records the
+//     failure for a person to read, but re-announcing after a restart is what
+//     retries it, since a scan candidate has no link for anyone to re-paste.
 //
 // The two lists cannot overlap: a request is refused while its game is in the
 // catalog, and a scanned candidate is in it by definition. Upload jobs are
@@ -582,6 +587,36 @@ func (d *workerAPI) report(ctx context.Context, jobID, state, errMsg string, st 
 	return d.api(ctx, http.MethodPost, "/api/jobs/"+url.PathEscape(jobID), body, nil)
 }
 
+// announce asks the worker for a job row to report a self-found game onto (the
+// catalog scan's work: a game whose only upload is one-sided). It answers two
+// separate questions, which is why it returns two things:
+//
+//	jobID != "", mine       report onto this row
+//	jobID == "", mine       nobody recorded it; do the work anyway, unreported
+//	           , !mine      another daemon holds this game; leave it alone
+//
+// The distinction is the difference between an hour of engine time going
+// unlogged and two machines spending an hour each on the same game. A FAILED
+// announce is only bookkeeping lost — the daemon and the worker deploy
+// independently, so a worker too old to have the route is routine during a
+// rollout, and the re-simulation still has to happen. A DUPLICATE is a
+// different statement: somebody else's engine is already on it.
+func (d *workerAPI) announce(ctx context.Context, gameID string) (jobID string, mine bool) {
+	var out struct {
+		Job    string `json:"job"`
+		Status string `json:"status"`
+	}
+	if err := d.api(ctx, http.MethodPost, "/api/jobs",
+		map[string]any{"gameId": gameID, "kind": kindResim}, &out); err != nil {
+		fmt.Fprintf(os.Stderr, "bringest: %s: could not announce the job (%v); re-simulating unreported\n", gameID, err)
+		return "", true
+	}
+	if out.Status == "duplicate" {
+		return "", false
+	}
+	return out.Job, true
+}
+
 // claim takes a job, and unlike report it can legitimately FAIL: the worker
 // only allows the transition from pending (or from a processing gone stale),
 // so a second daemon polling the same round is told no rather than running the
@@ -791,11 +826,13 @@ type catalogRow struct {
 //   - REQUESTED re-sims, the queue behind the landing page's paste box
 //     (POST /api/resim -> a "resim" job). Someone asked for these by name, and
 //     they are the only way a game NOBODY uploaded gets published at all.
-//   - the CATALOG SCAN, which needs no queue state anywhere: a game is a
-//     candidate while its current upload is one-sided (uploaderAlly set) and
-//     its uploads list holds no full-view revision (an entry with a null ally:
-//     spectator uploads and re-sim captures PUT with no uploaderAlly). The
-//     publish itself retires the candidate, so completion needs no marking.
+//   - the CATALOG SCAN: a game is a candidate while its current upload is
+//     one-sided (uploaderAlly set) and its uploads list holds no full-view
+//     revision (an entry with a null ally: spectator uploads and re-sim
+//     captures PUT with no uploaderAlly). Finding the work needs no queue
+//     state — the publish itself retires the candidate — but the run is
+//     announced onto a job row so it is visible and reports its progress and
+//     stats like the requested ones (runScanned).
 //
 // The two lists cannot overlap: a requested game is refused while it is in the
 // catalog, and a scanned one is in it by definition.
@@ -808,8 +845,11 @@ type resimDaemon struct {
 	// failed remembers games whose resim errored (engine missing, unknown
 	// demo, desync); they are skipped until the process restarts so one bad
 	// game cannot wedge the loop into retrying forever. Only the catalog scan
-	// needs it — a requested job records its failure on its own row and so
-	// leaves the queue by itself, and re-pasting the link is the retry.
+	// needs it: a requested job leaves the queue by itself once it fails, and
+	// re-pasting the link is the retry, whereas a scanned game stays a
+	// candidate for as long as its only upload is one-sided — the announced
+	// job row records what went wrong for a person to read, but it is not what
+	// stops the next round from trying again.
 	failed map[string]bool
 }
 
@@ -852,10 +892,7 @@ func (r *resimDaemon) runOnce(ctx context.Context) (int, error) {
 		}
 		attempted++
 		fmt.Fprintf(os.Stderr, "bringest: %s: one-sided only, re-simulating for the full view\n", row.ID)
-		// No job row to report onto: this half of the work list is derived
-		// from the catalog, so neither the stats nor the live progress have
-		// anywhere to go but the log.
-		if err := r.resim(ctx, row.ID, nil, nil); err != nil {
+		if err := r.runScanned(ctx, row.ID); err != nil {
 			if ctx.Err() != nil {
 				return attempted, ctx.Err()
 			}
@@ -866,6 +903,51 @@ func (r *resimDaemon) runOnce(ctx context.Context) (int, error) {
 		}
 	}
 	return attempted, nil
+}
+
+// runScanned re-simulates a game the CATALOG SCAN found and reports on it the
+// same way a requested one is reported: a job row to be seen in the queue, a
+// healthcheck carrying the live phase/progress/engine load while the engine
+// runs, and the timings and size report on the terminal state.
+//
+// The row is ANNOUNCED rather than queued (workerAPI.announce): the work is
+// already being done, and POST /api/resim would refuse the game anyway — it is
+// in the catalog, which is exactly what makes it a scan candidate. Without a
+// row this was an hour of engine time that showed up nowhere and whose stats
+// existed only in this daemon's log, on a machine nobody else can reach.
+//
+// A worker that will not give a row is not a reason to skip the game: the
+// re-simulation runs unreported, which is what this whole path did before.
+func (r *resimDaemon) runScanned(ctx context.Context, gameID string) error {
+	jobID, mine := r.announce(ctx, gameID)
+	if !mine {
+		fmt.Fprintf(os.Stderr, "bringest: %s: another daemon is already re-simulating it; skipping\n", gameID)
+		return nil
+	}
+	if jobID == "" {
+		return r.resim(ctx, gameID, nil, nil)
+	}
+	if err := r.claim(ctx, jobID, kindResim); err != nil {
+		// Somebody else took the row between announcing and claiming it. Their
+		// engine, not ours.
+		fmt.Fprintf(os.Stderr, "bringest: %s: could not claim job %s (%v); skipping\n", gameID, jobID, err)
+		return nil
+	}
+	started := time.Now()
+	pr := &resim.Progress{}
+	stop := r.healthcheck(ctx, jobID, func() *jobProgress { return resimProgress(pr) })
+	st := &jobStats{}
+	err := r.resim(ctx, gameID, st, pr)
+	st.TookSec = time.Since(started).Seconds()
+	stop() // before the terminal report, or a late beat undoes it
+	if err != nil {
+		// With the stats, like the queued path: forty minutes that ended badly
+		// is the record most worth keeping.
+		r.report(ctx, jobID, "error", err.Error(), st)
+		return err
+	}
+	r.report(ctx, jobID, "done", "", st)
+	return nil
 }
 
 // runQueued works through the re-sims somebody explicitly requested. Unlike
