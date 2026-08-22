@@ -242,37 +242,6 @@ func run() int {
 	}
 }
 
-// teeStderr duplicates everything written to os.Stderr into path (appended, so
-// runs accumulate rather than clobbering each other). It swaps os.Stderr for a
-// pipe rather than threading a writer through the call graph, so it also
-// captures what internal/resim, internal/packer and inherited child processes
-// print — which is most of the interesting output. The returned stop drains
-// the pipe before returning, so nothing is lost at exit.
-func teeStderr(path string) (func(), error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return nil, fmt.Errorf("open log %s: %w", path, err)
-	}
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		f.Close()
-		return nil, err
-	}
-	orig := os.Stderr
-	os.Stderr = pw
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		io.Copy(io.MultiWriter(orig, f), pr)
-	}()
-	return func() {
-		os.Stderr = orig
-		pw.Close()
-		<-done // drain what is still in flight before the process exits
-		f.Close()
-	}, nil
-}
-
 // loadEnvFile seeds the environment from ./.env. It reports what it did
 // because the failure it exists to prevent is silent: without the R2
 // credentials the upload falls back to the worker's wrangler tooling, which
