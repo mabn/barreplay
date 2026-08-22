@@ -950,7 +950,14 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           Best candidate WINS ties (smaller time delta) — a name on the row
                           beats abstaining — one-to-one both ways, and the name lands in
                           games.lobby_name (+lobby_id), which is deliberately OUTSIDE
-                          gamesInsert's upsert list so a re-sync cannot erase it. Matched
+                          gamesInsert's upsert list so a re-sync cannot erase it. A match
+                          also RETIRES its observation (ended_unix): the matched game has
+                          certainly ended even if the lobby never left the in-progress set
+                          (back-to-back games inside one cron gap), so the next tick opens a
+                          FRESH observation for the game the lobby is running by now — one
+                          lobby names game after game, one `lobbies` row per game (the
+                          composite key (lobby_id, started_unix); name/map/roster are all
+                          per-game, so renames between games record correctly). Matched
                           observations prune after 48h; unmatched ones are kept forever as
                           the record of why a game has no name. SERVED: the DO's list JOINS
                           lobby_name per read (a scalar subselect on games' primary key), so
