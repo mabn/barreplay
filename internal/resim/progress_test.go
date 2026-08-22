@@ -82,13 +82,18 @@ func TestWatchProgressReadsTheInfolog(t *testing.T) {
 	if got := p.Snapshot(); got.Percent != 25 || got.TotalFrames != 6000 {
 		t.Errorf("snapshot = %+v, want 25%% of 6000", got)
 	}
-	// A second reading is what makes a rate, and a rate is what makes an ETA.
 	appendLine(t, log, "[f=0003000] more\n")
-	if !eventually(func() bool { return p.Snapshot().ETASec > 0 }, 2*time.Second) {
-		t.Fatalf("no ETA after a second sample: %+v", p.Snapshot())
+	if !eventually(func() bool { return p.Snapshot().Frame == 3000 }, 2*time.Second) {
+		t.Fatalf("the second frame never showed up: %+v", p.Snapshot())
 	}
-	if got := p.Snapshot(); got.SimFPS <= 0 || got.Percent != 50 {
-		t.Errorf("snapshot = %+v, want 50%% and a positive frame rate", got)
+	if got := p.Snapshot(); got.Percent != 50 {
+		t.Errorf("snapshot = %+v, want 50%%", got)
+	}
+	// And no ETA out of a run that has been going for milliseconds: the
+	// estimate is a share of elapsed work, and there is not enough of either
+	// yet to divide by. engine.SimETA is where the arithmetic is tested.
+	if got := p.Snapshot(); got.ETASec != 0 {
+		t.Errorf("ETA = %v seconds a moment into the run, want none offered yet", got.ETASec)
 	}
 }
 

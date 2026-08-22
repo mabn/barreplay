@@ -46,11 +46,14 @@ type ProgressState struct {
 	// SIMULATION, not through the job: it stays 0 through the download and the
 	// engine's load phase, which are minutes of their own.
 	Percent float64
-	// ETASec is how many seconds of wall time the simulation still needs, at
-	// the rate it has recently been running. 0 while there is nothing to
-	// estimate from.
+	// ETASec is how many seconds of wall time the simulation still needs. It
+	// is NOT the remaining frames over SimFPS: a sim frame gets several times
+	// more expensive as the game it describes grows, so that number reads
+	// "nearly done" through the whole first half of a run. See engine.SimETA.
+	// 0 while there is nothing to estimate from.
 	ETASec float64
-	// SimFPS is that rate: sim frames processed per wall second (30 = realtime).
+	// SimFPS is the rate the last minute of simulation ran at: sim frames
+	// processed per wall second (30 = realtime).
 	SimFPS float64
 	// RSSBytes and CPUPercent are the engine process's resident memory and its
 	// CPU use over the last sample window, as a percentage of one core — so a
@@ -166,25 +169,17 @@ func (g *memGuard) reading() (avail, rss int64, tripped bool) {
 	return g.avail, g.rss, g.tripped
 }
 
-const (
-	// progressSampleEvery is how often the watcher below re-reads the infolog
-	// and /proc. Well under the ingest daemon's 10-second reporting interval,
-	// so a report is never stale by more than a fraction of it, and far above
-	// the cost of two small file reads.
-	progressSampleEvery = 5 * time.Second
-	// fpsSmoothing is the weight a fresh frame-rate measurement carries in the
-	// running average behind the ETA. The instantaneous rate swings hard — the
-	// engine's own pacing governor idles it in bursts (see CLAUDE.md) — and an
-	// ETA computed from one window jumps around by minutes; averaging over
-	// roughly the last handful of samples still tracks the real slowdown as
-	// unit counts grow, which is what makes a late-game ETA honest.
-	fpsSmoothing = 0.3
-)
+// progressSampleEvery is how often the watcher below re-reads the infolog and
+// /proc. Well under the ingest daemon's 10-second reporting interval, so a
+// report is never stale by more than a fraction of it, and far above the cost
+// of two small file reads.
+const progressSampleEvery = 5 * time.Second
 
 // watchProgress keeps p up to date while the engine runs: the sim frame from
-// the engine's own log (the only progress a headless replay emits) and the
-// process's memory and CPU from /proc. It returns when ctx is cancelled, which
-// Run does before it returns.
+// the engine's own log (the only progress a headless replay emits), turned into
+// a rate and a time-remaining by engine.SimETA, and the process's memory and CPU
+// from /proc. It returns when ctx is cancelled, which Run does before it
+// returns.
 //
 // Everything here is best-effort. A sample that cannot be read is skipped, not
 // reported as zero — a run whose infolog has not appeared yet is normal for the
@@ -195,11 +190,9 @@ func watchProgress(ctx context.Context, p *Progress, infologPath string, pid int
 	defer t.Stop()
 
 	var (
-		prevFrame = int32(-1)
-		prevTime  time.Time
-		avgFPS    float64
-		prevProc  engine.ProcSample
-		haveProc  bool
+		est      = engine.NewSimETA(totalFrames)
+		prevProc engine.ProcSample
+		haveProc bool
 	)
 	for {
 		select {
@@ -218,22 +211,14 @@ func watchProgress(ctx context.Context, p *Progress, infologPath string, pid int
 			if !ok || frame < 0 {
 				continue // pregame: the engine logs [f=-1] until the game starts
 			}
-			if prevFrame >= 0 {
-				if dt := now.Sub(prevTime).Seconds(); dt > 0 {
-					fps := float64(frame-prevFrame) / dt
-					if avgFPS == 0 {
-						avgFPS = fps
-					} else {
-						avgFPS += fpsSmoothing * (fps - avgFPS)
-					}
-				}
+			fps, eta := est.Observe(now, frame)
+			if fps < 0 {
+				// Not measurable yet. ProgressState says nothing with a 0,
+				// which is also what a genuinely stalled engine reports — a
+				// distinction nobody reading a queue page needs.
+				fps = 0
 			}
-			prevFrame, prevTime = frame, now
-			eta := 0.0
-			if avgFPS > 0 && totalFrames > frame {
-				eta = float64(totalFrames-frame) / avgFPS
-			}
-			p.setSim(frame, totalFrames, avgFPS, eta)
+			p.setSim(frame, totalFrames, fps, eta)
 		}
 	}
 }
