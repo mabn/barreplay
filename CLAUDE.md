@@ -951,12 +951,26 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           deliberately NOT in the chain: it reports pre-existing noUnusedLocals
                           errors in tests/, so wiring it in would block every deploy.
                           QUEUE SECTION (app.js renderQueue): the landing page's second menu entry
-                          shows those jobs — one row per job with its game, KIND, state, what the
+                          shows those jobs — one row per job with its game, its SIZE and
+                          DURATION, a gex link, the KIND, state, what the
                           work TOOK, age and failure detail, a link to the replay once the
                           catalog has it (and out
                           to bar-rts.com until then, which for a queued re-sim is the whole point
                           of the row), and a count of the jobs in flight on the menu entry
-                          itself. Above the table sits the re-sim paste box (app.js initResim/
+                          itself. Size and duration are JOINED ON by the worker
+                          (ReplayIndex.queuePage), not stored on the job: the jobs table knows a
+                          gameId and nothing else, and a queue of bare ids cannot answer the
+                          first question anyone has about an hour of engine time — is this an
+                          8v8 worth it, or a three-minute duel? The catalog is preferred (it
+                          describes what was actually captured) and the games mirror is the
+                          fallback, which is what covers a re-sim of a game nobody has uploaded,
+                          i.e. most of this queue; a game NEITHER knows (a drag&drop upload from
+                          a private lobby) lists with an empty `game` and dashes. That query is
+                          the one place three tables meet, and every column in its ORDER BY is
+                          qualified because `id` is in all three and `updated_unix` in two — an
+                          unqualified one there is an ambiguous-column ERROR, not a wrong answer.
+                          The gex link is always present, unlike the Game cell's bar-rts
+                          fallback, which is only there while the game is unpublished here. Above the table sits the re-sim paste box (app.js initResim/
                           submitResim, #resimbox), the intake described under the worker routes
                           above; the two doors of the pipeline therefore bracket the section, the
                           dropzone above it and this inside it. The Took cell carries the one

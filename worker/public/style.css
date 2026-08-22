@@ -195,6 +195,11 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
 /* The failure detail is the one cell that may be long: let it wrap. */
 #queuetable td.detail { white-space: normal; color: #9fb0bf; max-width: 640px; }
 #queuetable td.detail.error { color: #e2785b; }
+/* The game's own facts, joined on beside the job's. Quieter than the state
+   and detail columns: they say WHICH game, not what is happening to it. */
+#queuetable td.size, #queuetable td.dur { color: #9fb0bf; }
+#queuetable td.links a.ext { color: #7f8fa0; text-decoration: none; font-size: 12px; }
+#queuetable td.links a.ext:hover { color: #8fd3ff; text-decoration: underline; }
 #queuetable td.game a { color: #8fd3ff; text-decoration: none; }
 #queuetable td.game a:hover { text-decoration: underline; }
 #queuetable .state {

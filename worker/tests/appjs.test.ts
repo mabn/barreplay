@@ -1089,6 +1089,7 @@ test('a running job shows its live progress instead of an empty row', () => {
     {
       id: 'running', gameId: 'aaa', kind: 'resim', state: 'processing', error: null, stats: null,
       createdUnix: 1787349000, updatedUnix: 1787349900, disabled: false,
+      game: { durationSec: 2417, gameSize: '8v8' },
       progress: {
         state: 'simulating', frame: 43000, totalFrames: 100170, percent: 42.9,
         etaSec: 840, simFps: 68.2, rssBytes: 3221225472, cpuPct: 612.5,
@@ -1100,6 +1101,8 @@ test('a running job shows its live progress instead of an empty row', () => {
     {
       id: 'loading', gameId: 'bbb', kind: 'resim', state: 'processing', error: null, stats: null,
       createdUnix: 1787349000, updatedUnix: 1787349900, disabled: false,
+      // Neither the catalog nor the mirror knows this one.
+      game: null,
       progress: { state: 'starting engine', rssBytes: 1048576 },
     },
     // Finished badly: the worker cleared the progress when the job ended, so
@@ -1107,6 +1110,7 @@ test('a running job shows its live progress instead of an empty row', () => {
     {
       id: 'failed', gameId: 'ccc', kind: 'resim', state: 'error', error: 'no engine',
       stats: null, progress: null, disabled: false,
+      game: { durationSec: 217, gameSize: '1v1' },
       createdUnix: 1787349000, updatedUnix: 1787349900,
     },
   ];
@@ -1127,6 +1131,7 @@ test('a running job shows its live progress instead of an empty row', () => {
     ${extract('statsTooltip')}
     ${extract('fillProgressCell')}
     ${extract('disableCell')}
+    ${extract('fmtDuration')}
     ${extract('renderQueue')}
     return renderQueue;
   })()`);
@@ -1169,6 +1174,23 @@ test('a running job shows its live progress instead of an empty row', () => {
   assert.equal(btnOf(trs[0]).textContent, 'Disable', 'a running job can be held back');
   assert.equal(btnOf(trs[1]).textContent, 'Disable');
   assert.equal(btnOf(trs[2]), undefined, 'a failed job has nothing to hold back');
+
+  // The game's own facts, joined on by the worker: a queue of bare ids cannot
+  // say whether an hour of engine time is buying an 8v8 or a duel.
+  const cellOf = (tr: any, cls: string) => tr.children.find((td: any) => td.className.includes(cls));
+  assert.equal(cellOf(trs[0], 'size').textContent, '8v8');
+  assert.equal(cellOf(trs[0], 'dur').textContent, '40:17');
+  assert.equal(cellOf(trs[2], 'size').textContent, '1v1');
+  // A game neither table knows still lists; it just has nothing to say.
+  assert.equal(cellOf(trs[1], 'size').textContent, '—');
+  assert.ok(cellOf(trs[1], 'size').className.includes('dim'));
+
+  // gex is always reachable, unlike the Game cell's bar-rts link, which is
+  // only there while the game is unpublished here.
+  const gex = (tr: any) => walk(tr).find((n: any) => n.tag === 'a' && String(n.href).includes('gex.honu.pw'));
+  assert.equal(gex(trs[0]).href, 'https://gex.honu.pw/match/aaa');
+  assert.equal(gex(trs[0]).className, 'ext', 'external, so the SPA click handler leaves it alone');
+  assert.ok(gex(trs[2]), 'including on a job that failed');
 });
 
 // A held-back row says so where the eye goes — the state column — rather than
@@ -1187,7 +1209,8 @@ test('a disabled job reads as disabled and offers the way back', () => {
   const dom = fakeDom();
   const jobs = [{
     id: 'held', gameId: 'aaa', kind: 'resim', state: 'pending', error: null, stats: null,
-    progress: null, disabled: true, createdUnix: 1787349000, updatedUnix: 1787349900,
+    progress: null, disabled: true, game: null,
+    createdUnix: 1787349000, updatedUnix: 1787349900,
   }];
   eval(`(function(){
     const document = dom.document;
@@ -1199,7 +1222,8 @@ test('a disabled job reads as disabled and offers the way back', () => {
     const replayHref = (id) => '/?replay=' + id, urlId = (e) => e.id, openReplay = () => {};
     ${extract('fmtDur')} ${extract('statsLines')} ${extract('progressLines')}
     ${extract('progressText')} ${extract('statsTooltip')} ${extract('fillProgressCell')}
-    ${extract('fmtSize')} ${extract('disableCell')} ${extract('renderQueue')}
+    ${extract('fmtSize')} ${extract('disableCell')} ${extract('fmtDuration')}
+    ${extract('renderQueue')}
     return renderQueue;
   })()`)();
 
