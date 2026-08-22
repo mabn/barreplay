@@ -386,7 +386,39 @@ internal/resim/           the cmd/barreplay pipeline packaged as one call (Run: 
                           engine.SimETA for the percentage, the rate and the time remaining (see
                           the internal/engine entry — the ETA is NOT remaining frames over the
                           current rate, which reads "nearly done" through the whole first half
-                          of a run), and engine.SampleProcess for the engine's RSS and CPU. A phase change
+                          of a run), and engine.SampleProcess for the engine's RSS and CPU.
+                          Before the engine has simulated a frame there is nothing to measure,
+                          and that is the first 20s of every job (median over 29 phase-stamped
+                          runs; p90 30s) — a tenth of a median job and most of a short one, in
+                          which the row could only say "loading". Options.Forecaster
+                          (forecast.go) fills it: a guess at the whole run's length from the one
+                          fact known before any work happens, the demo's duration, which
+                          barapi.Resolve returns BEFORE the download so the ETA is there from
+                          the job's first beat. Progress reports what is LEFT of it, counting
+                          down with the clock across the fetch/provision/load phases, and
+                          RETIRES it for good the moment the simulation reports (Progress.
+                          measured) — a forecast that outlived its measurement would reappear
+                          as the packing's ETA, and a run that beat its forecast would claim
+                          minutes of work it had finished; an expired one goes quiet rather
+                          than sitting at "0s left". It is a GUESS and is much rougher than
+                          what replaces it: sim time grows as roughly the SQUARE of game time
+                          (same reason as the cost curve — each frame costs more than the last),
+                          but a 20-minute game can be a duel or a 16-player slugfest and the
+                          demo's length does not say which, so even fitted to one host the
+                          median error is 24-43%. Worth showing anyway, because it answers "is
+                          this three minutes or an hour", which a blank cell cannot. THE SCALE
+                          IS PER-HOST, which is why the Forecaster LEARNS rather than shipping
+                          a constant: the exponent is a property of BAR, the multiplier in front
+                          of it is a property of the machine, and the two hosts measured here
+                          differ by 3x — enough that one's constant is out by a factor of two on
+                          the other. Each finished run is Observed (outside the Stats block, so
+                          a run that fails on the way out still teaches what it spent) and the
+                          scale is the median of the last 20, which converges in a handful of
+                          jobs. A restart forgets it — the first job after one uses the shipped
+                          default and every job after that is calibrated, which beats a state
+                          file whose staleness nobody would notice. cmd/bringest holds ONE
+                          across the whole daemon (ro is copied per job, the pointer is shared);
+                          a nil one is inert and simply means no ETA until the engine simulates. A phase change
                           clears the sim numbers (they described the phase that ended) but keeps
                           the process reading (the process did not).
                           Options.MinFreeBytes is the MEMORY GUARD (0 = engine.
