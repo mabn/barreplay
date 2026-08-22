@@ -606,6 +606,45 @@ test("the pill goes out with the job, whatever it was doing", async () => {
   });
 });
 
+// The catalog scan's door into the job table: the same dedupe resimEnqueue
+// does, without the catalog refusal that would reject every one of its
+// candidates (they are all published — that is what makes them candidates).
+test("announcing takes a game the catalog already holds", async () => {
+  await inIndex((index) => {
+    index.upsert(replay("onesided", { uploaderAlly: 1 }));
+    // The open door refuses it, which is right for a person pasting a link.
+    expect(index.resimEnqueue("a", "onesided").status).toBe("in-catalog");
+
+    const first = index.jobAnnounce("b", "onesided", "resim");
+    expect(first.status).toBe("queued");
+    expect(first.job?.kind).toBe("resim");
+    // Claiming it marks the existing catalog row as being worked on WITHOUT
+    // turning it into a placeholder: a revision exists, so it stays openable.
+    expect(index.jobClaim("b", "resim")).toBe(true);
+    expect(index.list()).toMatchObject([{ id: "onesided", placeholder: false, processing: true }]);
+
+    // A second daemon scanning the same catalog gets the same row back rather
+    // than a second hour of engine time.
+    expect(index.jobAnnounce("c", "onesided", "resim")).toMatchObject({ status: "duplicate", job: { id: "b" } });
+    expect(index.jobClaim("c", "resim")).toBe(false);
+  });
+});
+
+// A failed scan re-sim must not wedge the game: nothing else can retry it,
+// since a scan candidate has no link for anyone to paste.
+test("announcing again after a failure is how a scanned game is retried", async () => {
+  await inIndex((index) => {
+    index.upsert(replay("onesided", { uploaderAlly: 1 }));
+    index.jobAnnounce("a", "onesided", "resim");
+    index.jobUpdate("a", "error", "desynced");
+    // The failure stays on its own row for a person to read...
+    expect(index.jobGet("a")).toMatchObject({ state: "error", error: "desynced" });
+    // ...and the published row it was upgrading is untouched by the failure.
+    expect(index.list()).toMatchObject([{ id: "onesided", placeholder: false, processing: false }]);
+    expect(index.jobAnnounce("b", "onesided", "resim").status).toBe("queued");
+  });
+});
+
 test("a game being worked on is not 'already published' to a re-sim request", async () => {
   await inIndex((index) => {
     index.gamesInsert([game("busy")]);

@@ -160,8 +160,7 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           anyone has onto the host doing the work, which is somebody's machine
                           behind NAT. The healthcheck is cancelled AND JOINED before the terminal
                           report, since a beat still in flight would flip a finished row back to
-                          processing forever. The CATALOG SCAN half gets none of this: it has no
-                          job row to report onto (its resim call is passed a nil Progress).
+                          processing forever.
                           Then the CATALOG SCAN, as before: GET /api/replays
                           for games whose current upload is one-sided (uploaderAlly set) with no
                           full-view revision yet (no ally-null entry in the row's uploads list).
@@ -173,7 +172,25 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           uploads list gains an ally-null entry) — which is why only IT keeps the
                           in-process failed-game memory; a requested job records its failure on
                           its own row and so leaves the queue by itself, making a re-paste the
-                          retry. The work lists cannot overlap: a request is refused while its
+                          retry.
+                          But FINDING the work without queue state is not the same as DOING it
+                          without a row: runScanned ANNOUNCES each scanned game (POST /api/jobs,
+                          see the worker entry) and then claims, healthchecks and reports it
+                          exactly like a requested one, so its progress, its charts, its timings
+                          and its failure message all reach the queue page. Before that it was
+                          an hour of engine time that appeared nowhere and whose stats existed
+                          only in this daemon's log, on a machine nobody else can reach — which
+                          is the whole reason the announce door exists, since POST /api/resim
+                          refuses every scan candidate as already published (that is what makes
+                          it a candidate). The announce returns TWO things and the difference
+                          matters: a FAILED announce (a worker too old to have the route — the
+                          two deploy independently) loses only the bookkeeping and the re-sim
+                          still runs, unreported; a DUPLICATE means another daemon already holds
+                          the game and this one must not spend an hour on it too. The in-process
+                          failed map stays either way: the announced row records what went wrong
+                          for a person to read, but a scanned game has no link to re-paste, so
+                          re-announcing after a restart is what retries it.
+                          The work lists cannot overlap: a request is refused while its
                           game is in the catalog, a scanned candidate is in it by definition, and
                           the mirror backfill takes only games with no catalog row AND no job
                           row of any state. Upload jobs are untouched (run a plain bringest alongside,
@@ -695,6 +712,27 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           insert are ONE DO call (resimEnqueue) — the DO is single-threaded, so
                           that is atomic for free, where three round trips would let two pastes
                           of the same link both insert.
+                          ANNOUNCED WORK (POST /api/jobs -> ReplayIndex.jobAnnounce): the
+                          daemon's OTHER way to get a job row — for work it found itself rather
+                          than work it was given. It is resimEnqueue without the catalog
+                          refusal, which is the entire difference: the catalog scan looks for
+                          games whose only upload is one-sided, every one of which is IN the
+                          catalog, so the open /api/resim door refuses all of them (correctly —
+                          that answer is right for a person pasting a link). It still dedupes on
+                          an ACTIVE job for the game, so two daemons scanning the same catalog
+                          get the same row back and only one can claim it; a finished or failed
+                          job does not block a fresh one, which is what lets a scan retry a game
+                          whose link nobody can paste. GUARDED, unlike /api/resim: this is the
+                          one door into the jobs table with no refusals behind it, and those
+                          refusals are what keep the open one from being a way to spend somebody
+                          else's hour of engine time. Only kind "resim" — an upload job is bytes
+                          somebody sent, and there is no stream to invent. The gameId goes
+                          through the same parseGameId a pasted link does, since the route
+                          cannot tell the daemon from any other caller holding the token.
+                          Claiming an announced job marks the game's EXISTING catalog row
+                          processing without turning it into a placeholder (a revision exists,
+                          so it stays openable), and a failure leaves that row untouched —
+                          dropCatalogPlaceholder only ever deletes placeholder = 1.
                           JOB KINDS: jobs.kind is "upload" | "resim", a KIND rather than a fifth
                           state because the four states describe both equally well — what
                           differs is the work, not the progress. The contract (JobKind,

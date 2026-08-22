@@ -707,16 +707,38 @@ export class ReplayIndex extends DurableObject<Env> {
       .exec(`SELECT 1 FROM replays WHERE id = ? AND placeholder = 0`, gameId)
       .toArray();
     if (known.length > 0) return { status: "in-catalog", job: null };
+    return this.jobAnnounce(id, gameId, "resim");
+  }
+
+  /** jobAnnounce records work a DAEMON found for itself, so that it has a job
+   * row to be seen and reported on. It is resimEnqueue without the catalog
+   * refusal, which is the whole difference and the reason it exists.
+   *
+   * The daemon's catalog scan looks for games whose only upload is one-sided —
+   * a playing client's point of view — and re-simulates them for the full view.
+   * Every one of those is IN the catalog by definition, so resimEnqueue would
+   * refuse all of them; without this the work simply happened invisibly, an
+   * hour at a time, with its progress and its timings going nowhere but the
+   * daemon's own log on some other machine.
+   *
+   * Announcing is not queueing: the daemon is already doing this work, and the
+   * row exists to carry its progress, its stats and its outcome. It still
+   * dedupes on an ACTIVE job for the game, so two daemons scanning the same
+   * catalog hand back the same row and the loser's claim is refused. A job that
+   * already finished or failed does not block a fresh one — re-announcing is
+   * how a scan retries a game after the daemon restarts. */
+  jobAnnounce(id: string, gameId: string, kind: JobKind): { status: "queued" | "duplicate"; job: IngestJob | null } {
     const active = this.ctx.storage.sql
       .exec(
         `SELECT ${JOB_COLS} FROM jobs
-         WHERE game_id = ? AND kind = 'resim' AND state IN ('pending', 'processing')
+         WHERE game_id = ? AND kind = ? AND state IN ('pending', 'processing')
          ORDER BY created_unix, id LIMIT 1`,
         gameId,
+        kind,
       )
       .toArray();
     if (active.length > 0) return { status: "duplicate", job: jobRow(active[0]) };
-    this.jobInsert(id, "", gameId, "resim");
+    this.jobInsert(id, "", gameId, kind);
     return { status: "queued", job: this.jobGet(id) };
   }
 

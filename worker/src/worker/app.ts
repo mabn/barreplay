@@ -319,6 +319,42 @@ app.get("/api/queue", async (c) => {
   );
 });
 
+// Work the DAEMON found for itself, announced so that it is visible while it
+// runs and has somewhere to report onto.
+//
+// The re-sim daemon does not only take queued work: it also scans the catalog
+// for games whose only upload is one-sided (a player's point of view, no full
+// view yet) and re-simulates those. Every such game is already in the catalog,
+// so POST /api/resim refuses it as published — which is the right answer to a
+// PERSON pasting a link and the wrong one here, where the work is already
+// happening. Announcing creates the row for it.
+//
+// GUARDED, unlike /api/resim: this is the one door into the job table with no
+// refusals behind it, and the refusals are what keep the open one from being a
+// way to spend somebody else's hour of engine time. Only "resim" — an upload
+// job is bytes somebody sent, and there is no stream to invent for one nobody
+// uploaded.
+app.post("/api/jobs", async (c) => {
+  if (!authorized(c)) return c.json({ error: "unauthorized" }, 401);
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "body must be JSON" }, 400);
+  }
+  const b = body as { gameId?: unknown; kind?: unknown };
+  // Through the same parser a pasted link goes through, which for a bare id is
+  // a shape check and a lowercasing — the daemon read this out of the catalog,
+  // but the route cannot tell that from any other caller with the token.
+  const gameId = typeof b.gameId === "string" ? parseGameId(b.gameId) : null;
+  if (!gameId) return c.json({ error: "gameId must be a BAR game id" }, 400);
+  if (b.kind !== undefined && b.kind !== "resim") {
+    return c.json({ error: "only resim jobs can be announced" }, 400);
+  }
+  const res = await indexStub(c.env).jobAnnounce(crypto.randomUUID(), gameId, "resim");
+  return c.json({ job: res.job?.id, gameId, status: res.status });
+});
+
 // The ingest daemon's work queue: pending jobs of ONE kind (plus stalled
 // "processing" ones), oldest first. Guarded like every other write-side API.
 //
