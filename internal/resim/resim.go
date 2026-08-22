@@ -100,12 +100,21 @@ type RunStats struct {
 	Infolog       engine.InfologSummary
 }
 
+// ErrOutOfMemory is what Run returns when the memory guard stopped the run
+// (engine.WatchMemory). Callers match it with errors.Is to tell "this host is
+// too small for this game" apart from every other way a re-simulation fails —
+// the ingest daemon marks the job with it, so a queue full of failures says
+// which of them are the machine's fault rather than the game's.
+var ErrOutOfMemory = errors.New("host ran out of memory")
+
 // Run downloads the demo for gameID via the BAR API, re-simulates it with
 // the snapshot widget injected, and writes <OutDir>/<gameId>.brp seeded with
 // the demo startscript's metadata. Returns the .brp path and the demo's raw
 // [modoptions] map (the catalog PUT's settings source, exactly like
 // packer.Pack's demo fetch).
-func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (string, map[string]string, error) {
+func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
+	brpPath string, modOptions map[string]string, retErr error,
+) {
 	if o.DataDir == "" {
 		return "", nil, fmt.Errorf("resim: DataDir is required")
 	}
@@ -147,6 +156,13 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 	if err := os.MkdirAll(filepath.Dir(streamPath), 0o755); err != nil {
 		return "", nil, err
 	}
+	// A run that ends in an error has no use for the widget's raw stream, and
+	// leaving it behind is not free: it lives in the DATA DIR (the Lua sandbox
+	// forces that, see the note above), it is hundreds of megabytes, and a
+	// daemon that keeps failing — a host too small for the games it is being
+	// handed, say — accumulates one per game until the disk is the next thing
+	// to go. The success path moves it out; this is every other path.
+	defer removeAbandonedStream(streamPath, &retErr)
 
 	// Runs share mutable state inside the data dir, so only one at a time.
 	unlock, err := engine.LockDataDir(o.DataDir)
@@ -325,9 +341,9 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 			"(the engine had %s resident, and %d of ~%d sim frames were captured): "+
 			"re-simulating this game needs more memory than this machine has. "+
 			"Nothing was published; run it on a bigger host, or pass -min-free 0 to let the kernel's "+
-			"OOM killer have it instead",
+			"OOM killer have it instead: %w",
 			engine.FormatBytes(avail), engine.FormatBytes(rss),
-			stats.Frames*o.sampleEvery(), int(h.GameTime)*gameSpeed)
+			stats.Frames*o.sampleEvery(), int(h.GameTime)*gameSpeed, ErrOutOfMemory)
 	}
 	for _, e := range []error{consumeErr, closeErr} {
 		if e != nil {
@@ -387,6 +403,21 @@ const (
 	// deliberately loose — it exists to catch stubs, not to be precise.
 	minCoveragePct = 80
 )
+
+// removeAbandonedStream drops the widget's raw stream when a run ended badly.
+// Takes the error by pointer because it is deferred at the top of Run, long
+// before there is an outcome to look at. A stream that was never written is not
+// a problem, and one that will not delete is a warning: the run has already
+// failed, and there is nothing better to report than what failed first.
+func removeAbandonedStream(streamPath string, retErr *error) {
+	if *retErr == nil {
+		return // the success path moves it out to the capture directory
+	}
+	if err := os.Remove(streamPath); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "resim: warning: could not remove the abandoned stream %s: %v\n",
+			streamPath, err)
+	}
+}
 
 // minFree resolves Options.MinFreeBytes: 0 takes the package default, negative
 // disables the guard (engine.WatchMemory treats <= 0 as off).

@@ -216,6 +216,12 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
   background: #1b232c; border: 1px solid #2f3947; color: #8a98a6;
 }
 #queuetable .kind-resim { color: #d3b98f; border-color: #5c4a2f; background: #2b2417; }
+/* Why a job failed, beside the state that says it did. Same weight as the kind
+   chip — it explains a row, it is not what you scan the column for. */
+#queuetable .errkind {
+  margin-left: 5px; font-size: 10px; line-height: 1; padding: 3px 7px; border-radius: 8px;
+  color: #e0b070; border: 1px solid #6b4f2a; background: #2e2415;
+}
 /* Held back by hand: nothing will pick this job up. Deliberately the quietest
    of the state chips — it is a row that is NOT going anywhere, so it should not
    compete with the ones that are. */

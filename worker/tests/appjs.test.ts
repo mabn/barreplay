@@ -1088,7 +1088,7 @@ test('a running job shows its live progress instead of an empty row', () => {
     // Mid-simulation: every number the daemon can report.
     {
       id: 'running', gameId: 'aaa', kind: 'resim', state: 'processing', error: null, stats: null,
-      createdUnix: 1787349000, updatedUnix: 1787349900, disabled: false,
+      createdUnix: 1787349000, updatedUnix: 1787349900, disabled: false, errorKind: null,
       game: { durationSec: 2417, gameSize: '8v8' },
       progress: {
         state: 'simulating', frame: 43000, totalFrames: 100170, percent: 42.9,
@@ -1100,7 +1100,7 @@ test('a running job shows its live progress instead of an empty row', () => {
     // job that is stuck rather than one that is working.
     {
       id: 'loading', gameId: 'bbb', kind: 'resim', state: 'processing', error: null, stats: null,
-      createdUnix: 1787349000, updatedUnix: 1787349900, disabled: false,
+      createdUnix: 1787349000, updatedUnix: 1787349900, disabled: false, errorKind: null,
       // Neither the catalog nor the mirror knows this one.
       game: null,
       progress: { state: 'starting engine', rssBytes: 1048576, swapBytes: 268435456 },
@@ -1108,7 +1108,8 @@ test('a running job shows its live progress instead of an empty row', () => {
     // Finished badly: the worker cleared the progress when the job ended, so
     // the same cell carries the failure.
     {
-      id: 'failed', gameId: 'ccc', kind: 'resim', state: 'error', error: 'no engine',
+      id: 'failed', gameId: 'ccc', kind: 'resim', state: 'error',
+      error: 'host ran out of memory', errorKind: 'oom',
       stats: null, progress: null, disabled: false,
       game: { durationSec: 217, gameSize: '1v1' },
       createdUnix: 1787349000, updatedUnix: 1787349900,
@@ -1132,6 +1133,7 @@ test('a running job shows its live progress instead of an empty row', () => {
     ${extract('fillProgressCell')}
     ${extract('disableCell')}
     ${extract('fmtDuration')}
+    ${APP.slice(APP.indexOf('const ERROR_KIND_LABELS'), APP.indexOf('const QUEUE_PAGE'))}
     ${extract('renderQueue')}
     return renderQueue;
   })()`);
@@ -1161,7 +1163,7 @@ test('a running job shows its live progress instead of an empty row', () => {
 
   // The failure keeps the cell it always had; the two never collide because
   // the worker clears progress at exactly the moment an error appears.
-  assert.equal(detailOf(trs[2]).textContent, 'no engine');
+  assert.equal(detailOf(trs[2]).textContent, 'host ran out of memory');
   assert.ok(detailOf(trs[2]).className.includes('error'));
 
   // The Took column has no cost to report on a running job, so it answers the
@@ -1191,6 +1193,14 @@ test('a running job shows its live progress instead of an empty row', () => {
 
   // gex is always reachable, unlike the Game cell's bar-rts link, which is
   // only there while the game is unpublished here.
+  // WHY it failed, beside the state that says it did — the one failure worth
+  // spotting down a column of red rows is the one that is about the machine
+  // rather than the replay.
+  const kindOf = (tr: any) => walk(tr).find((n: any) => n.className === 'errkind');
+  assert.equal(kindOf(trs[2]).textContent, 'out of memory');
+  assert.match(kindOf(trs[2]).title, /MACHINE, not the replay/);
+  assert.equal(kindOf(trs[0]), undefined, 'a running job carries no failure marking');
+
   const gex = (tr: any) => walk(tr).find((n: any) => n.tag === 'a' && String(n.href).includes('gex.honu.pw'));
   assert.equal(gex(trs[0]).href, 'https://gex.honu.pw/match/aaa');
   assert.equal(gex(trs[0]).className, 'ext', 'external, so the SPA click handler leaves it alone');
@@ -1213,7 +1223,7 @@ test('a disabled job reads as disabled and offers the way back', () => {
   const dom = fakeDom();
   const jobs = [{
     id: 'held', gameId: 'aaa', kind: 'resim', state: 'pending', error: null, stats: null,
-    progress: null, disabled: true, game: null,
+    progress: null, disabled: true, game: null, errorKind: null,
     createdUnix: 1787349000, updatedUnix: 1787349900,
   }];
   eval(`(function(){
@@ -1227,6 +1237,7 @@ test('a disabled job reads as disabled and offers the way back', () => {
     ${extract('fmtDur')} ${extract('statsLines')} ${extract('progressLines')}
     ${extract('progressText')} ${extract('statsTooltip')} ${extract('fillProgressCell')}
     ${extract('fmtSize')} ${extract('disableCell')} ${extract('fmtDuration')}
+    ${APP.slice(APP.indexOf('const ERROR_KIND_LABELS'), APP.indexOf('const QUEUE_PAGE'))}
     ${extract('renderQueue')}
     return renderQueue;
   })()`)();
