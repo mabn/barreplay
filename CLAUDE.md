@@ -593,7 +593,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           <a>, class `unopenable` on the tr, no pointer, no click) — the row's
                           `placeholder` flag is what says so, since a null rid cannot: the Go
                           server's rows have none and play fine. Its Settings cell LEADS with a
-                          `processing` pill (the one filled, pulsing badge among the muted ones —
+                          `processing` pill (carrying the job's live percent when it
+                          reports one — "processing: 52%", via the row's processingPercent,
+                          read off the jobs row's progress JSON in the same list read;
+                          the one filled, pulsing badge among the muted ones —
                           it is not a game setting but the reason the row exists, so it must not
                           be hunted for among them). A row that WAS already published and is being
                           re-simulated gets the same pill and stays openable, since a revision
@@ -610,7 +613,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           `placeholder = 0`, or pasting the link of a game being worked on would
                           be refused as published instead of answered with the job doing it.
                           FILTER BAR (app.js initFilters, above the table), in TWO ROWS: the
-                          fields (date from/to, map, a player-count RANGE, a duration RANGE,
+                          fields (date from/to, map — a COMBOBOX over a datalist of the
+                          facet maps, so typing part of a name shrinks the list to the maps
+                          containing it; ?map= stays an exact match, applied when the text
+                          names exactly one map — a player-count RANGE, a duration RANGE,
                           player name — a datalist of the known names, debounced 300 ms), then
                           the settings chips with Clear/Unregistered/count pushed to the far end.
                           Two rows because one wrapped at some widths and not others, which moved
@@ -930,6 +936,68 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           End-to-end was checked once by hand:
                           curl /cdn-cgi/handler/scheduled against `vite dev` mirrored 24 real
                           games, and the second call added none.
+                          LOBBY NAMES (teiserver poll, src/worker/teiserver.ts + the same
+                          cron): the tick's second step, because a mirrored game carries no
+                          LOBBY NAME — that exists only while the lobby is alive, on
+                          teiserver's web UI (server4.beyondallreason.info/battle/lobbies, a
+                          Phoenix dead render scraped with small regexes; parsers and the
+                          cookie-jar CSRF login adapted from mabn/claudebar). The first tick a
+                          lobby is seen in progress opens an OBSERVATION in the DO's `lobbies`
+                          table — name, map, started_unix back-dated by the page's own running
+                          clock, and the NON-SPECTATOR roster from one show-page fetch
+                          (spectators churn; the roster is captured at the start, when it is
+                          most honest; a failed show fetch records the observation with a null
+                          roster rather than dropping it — that moment never comes back).
+                          When the finished game later reaches the rts-api mirror,
+                          ReplayIndex.lobbiesMatch pairs them: no shared id exists, so the
+                          match is same map (normalized) + started within [-60s,+300s] of the
+                          game's start + >=50% roster overlap (lowercase names; a null-roster
+                          observation passes on map+time but scores below any real roster).
+                          Best candidate WINS ties (smaller time delta) — a name on the row
+                          beats abstaining — one-to-one both ways, and the name lands in
+                          games.lobby_name (+lobby_id), which is deliberately OUTSIDE
+                          gamesInsert's upsert list so a re-sync cannot erase it. A match
+                          also RETIRES its observation (ended_unix): the matched game has
+                          certainly ended even if the lobby never left the in-progress set
+                          (back-to-back games inside one cron gap), so the next tick opens a
+                          FRESH observation for the game the lobby is running by now — one
+                          lobby names game after game, one `lobbies` row per game (the
+                          composite key (lobby_id, started_unix); name/map/roster are all
+                          per-game, so renames between games record correctly). Matched
+                          observations prune after 48h; unmatched ones are kept forever as
+                          the record of why a game has no name. SERVED: the DO's list JOINS
+                          lobby_name per read (a scalar subselect on games' primary key;
+                          games.map_file rides the same join into `mapFile` — the archive
+                          name behind the list's 18px map THUMBNAILS, fetched lazily from
+                          api.bar-rts.com/maps/<file>/texture-thumb.jpg; rows without a
+                          mirror row fall back to mapFileGuess and a wrong guess just 404s
+                          into no thumbnail via onerror), so
+                          GET /api/replays rows carry a `lobbyName` — never stored on the
+                          replays row, never accepted from a PUT, appearing the moment the
+                          match lands with no republish; the Go server omits the key
+                          entirely, which is how the front-end knows not to offer the
+                          column. In the LIST the Players column header is a SWITCH
+                          (app.js playersColumn): clicking it swaps the column between the
+                          rosters and the lobby name (dash when unmatched) — offered only
+                          when any row carries the key, since a toggle to a column of dashes
+                          on the Go backend would be worse than none. The choice lives in
+                          the URL (?col=lobby, replaceState like the filters, absent =
+                          players so a fresh URL stays clean; replayHref carries it into a
+                          replay), and on a backend without the field a ?col=lobby link
+                          degrades to players without touching the param, like ?tab=queue. The web SESSION (the Guardian
+                          cookie jar) persists in the one-row teiserver_session table, so the
+                          steady state is ONE authed GET per tick, no login (an expired
+                          session shows as a redirect to /login: drop the cookie, log in once,
+                          retry). Credentials are the TEISERVER_EMAIL/TEISERVER_PASSWORD
+                          wrangler secrets; without them the step is skipped entirely, its own
+                          try/catch keeps a teiserver outage from costing the games sync, and
+                          TEISERVER_BASE (dev only) points the poll at a mock. teiserver.ts is
+                          pure like games.ts (injected fetch, a narrowed LobbyIndex port), so
+                          tests/teiserver.test.ts drives parsers, session and sync against
+                          fixtures modelled on captured real pages; the SQL half lives with
+                          the DO tests. Note the workerd trap it dodges in webFetch: calling
+                          an injected global fetch as `this.fetchImpl(...)` binds `this` to
+                          the session and workerd throws "Illegal invocation" — detach first.
                           WIDGET-INSTALL GUIDE: the dropzone banner links (relatively, so it
                           resolves on both backends) to /setup — public/setup.html, four numbered
                           steps ending in a drag&drop upload. The page is deliberately

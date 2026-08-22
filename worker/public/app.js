@@ -3400,17 +3400,37 @@ async function initFilters() {
   const cur = new URLSearchParams(location.search);
   const el = (id) => document.getElementById(id);
 
-  const opt = (sel, value, text) => {
+  // Map: a combobox — an input over a datalist of the catalog's maps, so
+  // typing part of a name shrinks the list to the maps containing it (the
+  // browser's own substring matching does the shrinking). ?map= stays an
+  // EXACT match server-side, so free text applies once it names one map: the
+  // full name (case-insensitively, usually via a datalist pick, which fills
+  // the input) or a fragment that only one map contains — "glitters" filters
+  // without the pick. An ambiguous fragment changes nothing; the narrowing
+  // datalist is what resolves it. Debounced like the player field: every
+  // apply is a query.
+  const mapIn = el('f_map');
+  const mapList = document.getElementById('f_maps');
+  mapList.innerHTML = '';
+  (facets.maps || []).forEach(m => {
     const o = document.createElement('option');
-    o.value = value; o.textContent = text;
-    sel.appendChild(o);
+    o.value = m;
+    mapList.appendChild(o);
+  });
+  mapIn.value = cur.get('map') ?? '';
+  let mapTyping = null;
+  mapIn.oninput = () => {
+    clearTimeout(mapTyping);
+    mapTyping = setTimeout(() => {
+      const v = mapIn.value.trim().toLowerCase();
+      if (v === '') { setFilter('map', ''); return; }
+      const maps = facets.maps || [];
+      const exact = maps.find(m => m.toLowerCase() === v);
+      const holding = maps.filter(m => m.toLowerCase().includes(v));
+      const pick = exact ?? (holding.length === 1 ? holding[0] : null);
+      if (pick) setFilter('map', pick);
+    }, 300);
   };
-  const mapSel = el('f_map');
-  mapSel.innerHTML = '';
-  opt(mapSel, '', 'any');
-  (facets.maps || []).forEach(m => opt(mapSel, m, m));
-  mapSel.value = cur.get('map') ?? '';
-  mapSel.onchange = () => setFilter('map', mapSel.value);
 
   // Players: a range with two thumbs, spanning the sizes the catalog actually
   // holds. Both bounds are one gesture — drag the left thumb for the fewest,
@@ -3690,6 +3710,17 @@ function knownReplayURL(wanted) {
 }
 
 let replayList = [];
+
+// What the Players column shows: the rosters, or the LOBBY NAME the game was
+// played under (joined from the games mirror; only the worker backend has
+// one). Clicking the column header swaps them. The choice lives in the URL
+// (?col=lobby) like the filters — written with replaceState, so swapping is
+// not navigation — which makes it shareable and survive a refresh, and
+// replayHref carries it into a replay so back returns to the same view. The
+// default (players) writes NO param, keeping a fresh visit's URL clean.
+function playersColumn() {
+  return new URLSearchParams(location.search).get('col') === 'lobby' ? 'lobby' : 'players';
+}
 
 function showHome() {
   stopPlay();
@@ -4470,7 +4501,7 @@ function renderQueue(errMsg) {
       const g = j.game || {};
       const size = cell(g.gameSize || null, 'size');
       if (g.gameSize) size.title = g.gameSize + ' — the team spec BAR recorded';
-      const dur = cell(g.durationSec ? fmtDuration(g.durationSec) : null, 'dur');
+      const dur = cell(g.durationSec ? fmtGameDuration(g.durationSec) : null, 'dur');
       if (g.durationSec) dur.title = fmtDur(g.durationSec) + ' of game time';
     }
     // Out to gex, which is where a BAR game gets read properly. Always
@@ -4705,6 +4736,36 @@ function renderHome(errMsg) {
   const tbody = document.querySelector('#hometable tbody');
   const msg = document.getElementById('homemsg');
   tbody.textContent = '';
+  // The Players header doubles as a switch between the rosters and the lobby
+  // name (joined server-side from the games mirror). Only offered when the
+  // backend sends the field at all — the Go viz server omits it wholesale,
+  // and a header that toggles to a column of dashes is worse than none. The
+  // key is the tell, not the value: an unmatched game arrives as
+  // lobbyName:null, which still means the backend plays. A ?col=lobby URL on
+  // a backend without the field renders players and leaves the param alone,
+  // the same way ?tab=queue degrades — the link keeps meaning what it says
+  // where it can.
+  const hasLobby = replayList.some((e) => e.lobbyName !== undefined);
+  const colMode = hasLobby ? playersColumn() : 'players';
+  {
+    const th = document.getElementById('h_players');
+    th.classList.toggle('swappable', hasLobby);
+    if (hasLobby) {
+      th.textContent = colMode === 'players' ? 'Players ⇄' : 'Lobby ⇄';
+      th.title = colMode === 'players' ? 'show lobby names' : 'show players';
+      th.onclick = () => {
+        const u = new URL(location.href);
+        if (colMode === 'players') u.searchParams.set('col', 'lobby');
+        else u.searchParams.delete('col');
+        history.replaceState(null, '', u);
+        renderHome();
+      };
+    } else {
+      th.textContent = 'Players';
+      th.title = '';
+      th.onclick = null;
+    }
+  }
   for (const e of replayList) {
     const tr = document.createElement('tr');
     // A PLACEHOLDER row is a game the pipeline is working on: it is in the
@@ -4737,9 +4798,36 @@ function renderHome(errMsg) {
       td.appendChild(a);
       tr.appendChild(td);
     };
-    cell(e.startUnix ? fmtDate(e.startUnix) : null);
-    cell(e.durationSec != null ? fmtDuration(e.durationSec) : null);
-    cell(e.map, 'map');
+    cell(e.startUnix ? fmtDateShort(e.startUnix) : null);
+    cell(e.durationSec != null ? fmtGameDuration(e.durationSec) : null);
+    // Map: a small terrain thumbnail from BAR's maps API next to the name.
+    // The API keys on the map's ARCHIVE file name; rows the games mirror
+    // knows carry it (e.mapFile), the rest fall back to the same guess the
+    // viewer's terrain loader tries first (right for ~85% of maps) — and a
+    // wrong guess just 404s, which onerror turns into no thumbnail rather
+    // than a broken-image glyph. lazy, so a page of 50 rows doesn't fetch
+    // 50 images the moment it renders.
+    {
+      const td = document.createElement('td');
+      td.className = 'map';
+      if (e.map == null) td.classList.add('dim');
+      const a = linkish();
+      const file = e.mapFile ?? (e.map ? mapFileGuess(e.map) : null);
+      if (file) {
+        const img = document.createElement('img');
+        img.className = 'mapthumb';
+        img.loading = 'lazy';
+        img.alt = '';
+        img.onerror = () => { img.style.display = 'none'; };
+        img.src = `https://api.bar-rts.com/maps/${encodeURIComponent(file)}/texture-thumb.jpg`;
+        a.appendChild(img);
+      }
+      const s = document.createElement('span');
+      s.textContent = e.map ?? '—';
+      a.appendChild(s);
+      td.appendChild(a);
+      tr.appendChild(td);
+    }
     cell(e.gameSize);
     // Players: each side's top names by OS — three per side for a two-team
     // game, one when there are more sides. The side whose client recorded
@@ -4750,7 +4838,18 @@ function renderHome(errMsg) {
       td.className = 'players';
       const a = linkish();
       const groups = Array.isArray(e.players) ? e.players : [];
-      if (!groups.length) {
+      if (colMode === 'lobby') {
+        // The column's other face: the lobby name the game was played under.
+        // A dash is honest here — most rows predate the poll, and a name can
+        // only ever be observed live.
+        if (e.lobbyName == null) {
+          td.classList.add('dim');
+          a.textContent = '—';
+        } else {
+          a.textContent = e.lobbyName;
+          a.title = e.lobbyName;
+        }
+      } else if (!groups.length) {
         td.classList.add('dim');
         a.textContent = '—';
       } else {
@@ -4834,7 +4933,9 @@ function renderHome(errMsg) {
       if (e.processing) {
         const s = document.createElement('span');
         s.className = 'badge badge-processing';
-        s.textContent = 'processing';
+        // The job's live percent when it reports one (a re-sim mid-simulation);
+        // the bare word covers the phases with nothing to measure yet.
+        s.textContent = e.processingPercent != null ? `processing: ${e.processingPercent}%` : 'processing';
         s.title = 'a job is re-simulating or packing this game right now';
         a.appendChild(s);
       }
@@ -5005,7 +5106,7 @@ function settingsBadges(settings) {
 // until the replay is ready to open. The same front-end also runs against
 // backends without the upload API (the Go viz server, a plain static host) —
 // there the attempt fails with a clear message.
-const MAX_UPLOAD_BYTES = 64 << 20; // mirrors the worker's /api/upload cap
+const MAX_UPLOAD_BYTES = 150 << 20; // mirrors the worker's /api/upload cap (MAX_UPLOAD)
 
 function initUpload() {
   const zone = document.getElementById('dropzone');
@@ -5282,6 +5383,14 @@ function fmtDate(unix) {
     { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
+// fmtDateShort is the replay list's Started column: no year — the catalog is
+// read for recent games, and the year column-wide is noise. fmtDate keeps it
+// for the places that state an exact moment (tooltips, the queue).
+function fmtDateShort(unix) {
+  return new Date(unix * 1000).toLocaleString(undefined,
+    { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
 // fmtAgo renders how long ago a unix moment was, for the queue's "last
 // touched" column — a job's age is what says whether it is moving.
 function fmtAgo(unix) {
@@ -5298,6 +5407,17 @@ function fmtDuration(sec) {
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
   const mm = h ? String(m).padStart(2, '0') : String(m);
   return (h ? h + ':' : '') + mm + ':' + String(s).padStart(2, '0');
+}
+
+// fmtGameDuration renders a game's length: "1h 20m", or "20m" under an hour —
+// minutes precision, because nobody picks a replay by its seconds digit.
+// fmtDuration (mm:ss) stays for the places where seconds carry meaning: the
+// queue's engine timings and the charts' elapsed axes.
+function fmtGameDuration(sec) {
+  const m = Math.round(sec / 60);
+  if (m < 1) return '<1m';
+  const h = Math.floor(m / 60);
+  return h ? `${h}h ${m % 60}m` : `${m}m`;
 }
 
 init();

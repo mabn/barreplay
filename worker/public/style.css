@@ -94,6 +94,14 @@ body.admin-mode #homenav .navitem.admin { display: flex; }
   color: inherit; text-decoration: none;
 }
 #hometable td.map { white-space: normal; }
+/* Map cell: terrain thumbnail beside the name. The cell's link becomes a flex
+   row, and the thumb is capped at 18px — under the text line's own height, so
+   it cannot make the rows taller. */
+#hometable td.map a, #hometable td.map > span { display: flex; align-items: center; gap: 7px; }
+#hometable td.map .mapthumb {
+  width: 18px; height: 18px; object-fit: cover; border-radius: 3px;
+  flex: none; background: #232e39;
+}
 /* Settings badges: small muted pills, wrapping within the row's link. */
 #hometable td.settings { white-space: normal; }
 #hometable td.settings a, #hometable td.settings > span { display: flex; flex-wrap: wrap; gap: 4px; }
@@ -139,6 +147,10 @@ body.admin-mode #homenav .navitem.admin { display: flex; }
 /* Players column: one span per side, "v" separators; the side that recorded
    the current upload gets a viewpoint dot. Full roster in the tooltip. */
 #hometable td.players { white-space: normal; }
+/* The Players header is a switch (players ⇄ lobby name) when the backend
+   serves lobby names; the affordance is the cursor + a dotted underline. */
+#hometable th.swappable { cursor: pointer; text-decoration: underline dotted; user-select: none; }
+#hometable th.swappable:hover { color: #9fb6cc; }
 #hometable td.players .vs { color: #6f87a0; padding: 0 6px; font-size: 11px; }
 #hometable td.players .side.uploader::before { content: '◉ '; }
 /* Alternate uploads of the same game (superseded revisions keep playing). */
@@ -521,6 +533,8 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 }
 #filters input:focus, #filters select:focus { outline: none; border-color: #4a7fa8; }
 #filters input[type=search] { width: 130px; }
+/* Map names run long ("All That Glitters v2.2.3"); the combobox needs the room. */
+#filters #f_map { width: 200px; }
 /* Players: two range inputs stacked over one track, so a single strip carries
    both bounds. The inputs are stripped bare (no native track, no background,
    the box-model padding above undone) and made transparent to the pointer —

@@ -84,7 +84,10 @@ in flight rather than about the replay:
 - `processing` — some job for this game is in `processing`. Computed on every read as an
   `EXISTS` over the jobs table, never stored, so nothing has to remember to clear it: it
   goes false the moment the job stops running, however it stopped. The list shows it as a
-  **pill at the head of the Settings cell** — filled and pulsing among the muted setting
+  **pill at the head of the Settings cell** — "processing: 52%" once the job reports a
+  percentage (read off the jobs row's live progress at the same moment `processing` is
+  derived, as `processingPercent`), the bare word through the phases with nothing to
+  measure — filled and pulsing among the muted setting
   badges, because it is not a setting, it is why the row is there.
 - `placeholder` — the row exists *only* because a job is working on the game; nothing has
   been published. The DO inserts one whenever a job enters `processing` (seeded from the
@@ -208,6 +211,60 @@ to the local DO:
 ```sh
 curl http://127.0.0.1:5173/cdn-cgi/handler/scheduled
 ```
+
+### Lobby names (teiserver poll)
+
+The same cron tick also polls **teiserver's web UI** for the active lobbies
+(`src/worker/teiserver.ts` — parsers and session adapted from `mabn/claudebar`):
+
+```
+GET https://server4.beyondallreason.info/battle/lobbies
+```
+
+The point is the **lobby name** ("Chillmus most welcome | 8v8"), which exists nowhere in
+BAR's published history — it is only observable **live**, so the poll opens an observation
+(DO table `lobbies`) the first tick a lobby is seen in progress: name, map, `started_unix`
+back-dated by the page's own running clock, and the **non-spectator roster** from one
+`/battle/lobbies/show/<id>` fetch (spectators churn too much to be a signal; the roster is
+captured at the start, when it is most trustworthy). When the finished game later appears
+in the rts-api mirror, `ReplayIndex.lobbiesMatch` pairs observation and game — no shared
+id exists, so the match is heuristic: same **map** (normalized), **start time** within
+`[-60 s, +300 s]`, and ≥ 50% **roster overlap** (lowercased names; a roster-less
+observation matches on map+time alone but loses to any real roster). Best candidate wins
+ties (smaller Δt); each side matches at most once. The winner's name lands in
+`games.lobby_name` (+ `lobby_id`), which a later re-sync cannot erase — the column is
+deliberately outside `gamesInsert`'s upsert list. A match also **retires its
+observation**: the matched game has certainly ended, even when back-to-back games never
+let the lobby leave the in-progress set, so the next tick opens a fresh observation for
+the game now running — one lobby names game after game, one `lobbies` row per game
+(renames between games record per-game too). Matched observations are pruned after
+48 h; unmatched ones are kept as the record of why a game has no name.
+
+The name is **served, not copied**: `GET /api/replays` joins `games.lobby_name` per read
+into each row's `lobbyName`, so it appears the moment the match lands, with no republish.
+`games.map_file` rides the same join into `mapFile`, which is what the list's small map
+thumbnails key on (`api.bar-rts.com/maps/<file>/texture-thumb.jpg`, lazy-loaded; rows
+without a mirror row guess the file from the map name and hide the image on a 404).
+In the list, the **Players column header is a switch** — click it to swap the column
+between the rosters and the lobby name (a dash where no match exists). The choice lives
+in the URL as `?col=lobby` (absent = players), so it is shareable and survives a refresh
+and a round trip through a replay. The Go viz server has no games mirror, omits the
+field, and the header stays inert there — a `?col=lobby` link still lists players.
+
+The teiserver **web session** (the Guardian cookie jar) persists in the one-row DO table
+`teiserver_session`, so the steady state is **one authed GET per minute** — no re-login —
+plus one show-page fetch per newly started lobby (0-2 in practice). Login happens only
+when the stored session is missing or expired (a redirect back to `/login`).
+
+Credentials are secrets, and without them the step is **skipped entirely**:
+
+```sh
+npx wrangler secret put TEISERVER_EMAIL
+npx wrangler secret put TEISERVER_PASSWORD
+```
+
+For local dev put them in `.dev.vars`; `TEISERVER_BASE` there points the poll at a mock
+server instead of the real one (never set it in production).
 
 ### Feeding the re-sim daemon
 
