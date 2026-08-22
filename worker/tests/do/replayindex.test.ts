@@ -807,3 +807,155 @@ test("the duration filter bounds are inclusive, and unknown lengths match neithe
     expect(ids({})).toContain("unknown");
   });
 });
+
+// ---- The teiserver lobby poll's SQL half (teiserver.ts holds the logic) ----
+
+test("teiserver session jar round-trips through one row", async () => {
+  await inIndex((index, sql) => {
+    expect(index.teiserverCookies()).toBeNull();
+    index.teiserverCookiesPut({ guardian_default_token: "g1", _teiserver_key: "s1" });
+    expect(index.teiserverCookies()).toEqual({ guardian_default_token: "g1", _teiserver_key: "s1" });
+    // A later login replaces the jar wholesale — and stays ONE row.
+    index.teiserverCookiesPut({ guardian_default_token: "g2" });
+    expect(index.teiserverCookies()).toEqual({ guardian_default_token: "g2" });
+    expect(rows(sql, `SELECT COUNT(*) AS n FROM teiserver_session`)[0].n).toBe(1);
+  });
+});
+
+test("lobby observations open, back-date, close, and reuse the lobby id", async () => {
+  await inIndex((index, sql) => {
+    expect(index.lobbiesOpen()).toEqual([]);
+    index.lobbiesObserve([
+      { lobbyId: 7, name: "First Game", map: "Great Divide V1", players: ["A"], playerCount: 1, elapsedSec: 120 },
+    ]);
+    const open = index.lobbiesOpen();
+    expect(open.length).toBe(1);
+    expect(open[0].lobbyId).toBe(7);
+    // started_unix is back-dated by the page's running clock.
+    const now = Math.floor(Date.now() / 1000);
+    expect(now - open[0].startedUnix).toBeGreaterThanOrEqual(120);
+    expect(now - open[0].startedUnix).toBeLessThanOrEqual(125);
+    // Closing frees the id; a fresh game in the same lobby is a SECOND row.
+    index.lobbiesEnd([7]);
+    expect(index.lobbiesOpen()).toEqual([]);
+    index.lobbiesObserve([
+      { lobbyId: 7, name: "Second Game", map: "Great Divide V1", players: null, playerCount: 2, elapsedSec: 0 },
+    ]);
+    expect(index.lobbiesOpen().length).toBe(1);
+    expect(rows(sql, `SELECT COUNT(*) AS n FROM lobbies WHERE lobby_id = 7`)[0].n).toBe(2);
+    // Ending an id with no open observation is a no-op, not an error.
+    index.lobbiesEnd([7]);
+    index.lobbiesEnd([7]);
+    expect(rows(sql, `SELECT COUNT(*) AS n FROM lobbies WHERE ended_unix IS NULL`)[0].n).toBe(0);
+  });
+});
+
+test("lobbiesMatch names the game and survives a re-sync", async () => {
+  await inIndex((index, sql) => {
+    index.lobbiesObserve([
+      {
+        lobbyId: 42,
+        name: "Chillmus most welcome | 8v8",
+        map: "Great Divide V1",
+        players: ["ROUBEN", "laufendestahlwand"],
+        playerCount: 2,
+        elapsedSec: 30,
+      },
+    ]);
+    const started = rows(sql, `SELECT started_unix FROM lobbies WHERE lobby_id = 42`)[0].started_unix as number;
+    // The game as rts-api will eventually report it: started just before the
+    // observation, same map, same players (case differing).
+    index.gamesInsert([game("g42", { startUnix: started - 10 })]);
+    expect(index.lobbiesMatch()).toEqual({ matched: 1, pruned: 0 });
+    const g = rows(sql, `SELECT lobby_name, lobby_id FROM games WHERE id = 'g42'`)[0];
+    expect(g.lobby_name).toBe("Chillmus most welcome | 8v8");
+    expect(g.lobby_id).toBe(42);
+    expect(rows(sql, `SELECT matched_game_id FROM lobbies WHERE lobby_id = 42`)[0].matched_game_id).toBe("g42");
+    // Matching RETIRES the observation even though the page diff never closed
+    // it (the lobby may be running its next game already): it leaves the open
+    // set, so the next sync tick opens a FRESH entry for the same lobby id —
+    // one lobby names game after game, one row per game.
+    expect(index.lobbiesOpen()).toEqual([]);
+    expect(rows(sql, `SELECT ended_unix FROM lobbies WHERE lobby_id = 42`)[0].ended_unix).not.toBeNull();
+    index.lobbiesObserve([
+      { lobbyId: 42, name: "Chillmus renamed", map: "Otago 1.43", players: null, playerCount: 16, elapsedSec: 0 },
+    ]);
+    expect(index.lobbiesOpen().length).toBe(1);
+    expect(rows(sql, `SELECT COUNT(*) AS n FROM lobbies WHERE lobby_id = 42`)[0].n).toBe(2);
+    // Nothing left to match (the fresh observation has no candidate game);
+    // the write is not repeated.
+    expect(index.lobbiesMatch()).toEqual({ matched: 0, pruned: 0 });
+    // A later re-sync of the game (regression: lobby_name is NOT in the
+    // upsert's column list) keeps the name the match wrote.
+    index.gamesInsert([game("g42", { startUnix: started - 10 })]);
+    expect(rows(sql, `SELECT lobby_name FROM games WHERE id = 'g42'`)[0].lobby_name).toBe(
+      "Chillmus most welcome | 8v8",
+    );
+  });
+});
+
+test("lobbiesMatch leaves an already-named game and a wrong-map lobby alone", async () => {
+  await inIndex((index, sql) => {
+    index.lobbiesObserve([
+      { lobbyId: 1, name: "Wrong Map Lobby", map: "Otago 1.43", players: ["Rouben"], playerCount: 1, elapsedSec: 0 },
+    ]);
+    const started = rows(sql, `SELECT started_unix FROM lobbies WHERE lobby_id = 1`)[0].started_unix as number;
+    index.gamesInsert([game("named", { startUnix: started - 5 })]);
+    sql.exec(`UPDATE games SET lobby_name = 'Existing Name', lobby_id = 99 WHERE id = 'named'`);
+    expect(index.lobbiesMatch()).toEqual({ matched: 0, pruned: 0 });
+    expect(rows(sql, `SELECT lobby_name FROM games WHERE id = 'named'`)[0].lobby_name).toBe("Existing Name");
+    expect(rows(sql, `SELECT matched_game_id FROM lobbies WHERE lobby_id = 1`)[0].matched_game_id).toBeNull();
+  });
+});
+
+test("lobbiesMatch prunes old matched observations and keeps unmatched ones forever", async () => {
+  await inIndex((index, sql) => {
+    const old = Math.floor(Date.now() / 1000) - 49 * 3600;
+    sql.exec(
+      `INSERT INTO lobbies (lobby_id, started_unix, name, map, players, player_count, ended_unix, matched_game_id)
+       VALUES (1, ?, 'old matched', 'M', NULL, NULL, ?, 'gX'),
+              (2, ?, 'old unmatched', 'M', NULL, NULL, ?, NULL)`,
+      old,
+      old + 60,
+      old,
+      old + 60,
+    );
+    expect(index.lobbiesMatch()).toEqual({ matched: 0, pruned: 1 });
+    expect(rows(sql, `SELECT name FROM lobbies ORDER BY lobby_id`).map((r) => r.name)).toEqual(["old unmatched"]);
+  });
+});
+
+test("list joins the lobby name from the games mirror", async () => {
+  await inIndex((index, sql) => {
+    index.upsert(replay("both"));
+    index.upsert(replay("alone"));
+    // The teiserver poll matched "both"'s game and named it.
+    index.gamesInsert([game("both")]);
+    sql.exec(`UPDATE games SET lobby_name = 'Chillmus | 8v8' WHERE id = 'both'`);
+    const byId = new Map(index.list().map((e) => [e.id, e]));
+    expect(byId.get("both")?.lobbyName).toBe("Chillmus | 8v8");
+    // map_file rides the same join: the archive name behind the list's
+    // terrain thumbnails, known only to the mirror.
+    expect(byId.get("both")?.mapFile).toBe("great_divide_v1");
+    // A replay with no mirror row (or an unnamed one) reads null, not absent —
+    // the key's presence is how the front-end tells this backend from the Go
+    // server, which omits it wholesale.
+    expect(byId.get("alone")?.lobbyName).toBeNull();
+    expect(byId.get("alone")?.mapFile).toBeNull();
+  });
+});
+
+test("list surfaces the processing job's live percent for the pill", async () => {
+  await inIndex((index) => {
+    index.upsert(replay("busy"));
+    index.jobInsert("j", "", "busy", "resim");
+    index.jobUpdate("j", "processing", null);
+    // Processing but nothing measurable yet (download, provisioning, load).
+    expect(index.list()).toMatchObject([{ id: "busy", processing: true, processingPercent: null }]);
+    index.jobUpdate("j", "processing", null, null, { state: "simulating", percent: 52.4 });
+    expect(index.list()).toMatchObject([{ id: "busy", processing: true, processingPercent: 52 }]);
+    // The job ending clears both: processing is derived, progress is wiped.
+    index.jobUpdate("j", "done", null);
+    expect(index.list()).toMatchObject([{ id: "busy", processing: false, processingPercent: null }]);
+  });
+});

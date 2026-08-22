@@ -94,6 +94,27 @@ export interface ReplayEntry {
    * Server-owned and absent from the Go server's catalog, exactly like
    * `placeholder`. */
   processing: boolean;
+  /** The processing job's live percent (0-100), when it reports one — read
+   * off the jobs row's progress JSON at the same moment `processing` is
+   * derived, so the list's pill can say "processing: 52%" instead of just
+   * that something is happening. Null while the job is in a phase with
+   * nothing to measure (download, provisioning, load). Server-owned and
+   * optional like lobbyName. */
+  processingPercent?: number | null;
+  /** The name of the lobby the game was played under, JOINED at read time
+   * from the games mirror's lobby_name (the teiserver poll wrote it there —
+   * see teiserver.ts). Never stored on the replays row and never accepted
+   * from a PUT — the join is the single source, so the name appears the
+   * moment the match lands with no republish. Optional because only the DO's
+   * list fills it; the Go server's catalog has no games mirror and omits it,
+   * and the front-end reads a missing value as null. */
+  lobbyName?: string | null;
+  /** The map's ARCHIVE file name ("all_that_glitters_v2.2.3") — what BAR's
+   * maps API keys on, and what the list's terrain thumbnail needs. Joined at
+   * read time from the games mirror exactly like lobbyName (same ownership,
+   * same optionality); rows without a mirror row read null and the front-end
+   * falls back to guessing the file from the display name. */
+  mapFile?: string | null;
 }
 
 /** One ally team's roster slice in a catalog row. */

@@ -738,7 +738,8 @@ test('a game being processed is listed, badged first, and cannot be opened', () 
       sizeBytes: 200, players: [], settings: { lava: true }, uploads: [], processing: true },
     // Nothing published yet: badged and not openable.
     { id: 'fresh', rid: null, startUnix: 1787348000, durationSec: null, map: 'Y', gameSize: '1v1',
-      sizeBytes: null, players: [], settings: null, uploads: [], processing: true, placeholder: true },
+      sizeBytes: null, players: [], settings: null, uploads: [], processing: true, placeholder: true,
+      processingPercent: 52 },
   ];
 
   const render = eval(`(function(){
@@ -748,7 +749,7 @@ test('a game being processed is listed, badged first, and cannot be opened', () 
     const ALLY_HUES = [0, 120];
     const urlId = (e) => e.rid || e.id;
     const replayHref = (id) => '/?replay=' + id;
-    const fmtDate = () => 'date', fmtDuration = () => 'dur', fmtSize = () => 'size';
+    const fmtDate = () => 'date', fmtDateShort = () => 'date', fmtDuration = () => 'dur', fmtGameDuration = () => 'dur', fmtSize = () => 'size';
     // The real one is exercised by its own tests; here it only has to produce
     // a badge for the pill to be ahead of.
     const settingsBadges = (s) => (s ? [{ key: 'lava', label: 'lava' }] : []);
@@ -756,6 +757,9 @@ test('a game being processed is listed, badged first, and cannot be opened', () 
     // Paging state: this test is about the rows, so one page holds them all.
     const PAGE_SIZE = 50; let homePage = 0, homeHasNext = false;
     const goPage = () => {};
+    // The Players column shows rosters here; its lobby-name face has its own test.
+    const playersColumn = () => 'players';
+    ${extract('mapFileGuess')}
     ${extract('renderPager')}
     ${extract('renderHome')}
     return renderHome;
@@ -771,6 +775,8 @@ test('a game being processed is listed, badged first, and cannot be opened', () 
   assert.ok(pillOf(trs[1]), 'a game being worked on is badged');
   assert.ok(pillOf(trs[2]), 'so is one with nothing published yet');
   assert.equal(pillOf(trs[1]).textContent, 'processing');
+  // A job that reports a percentage shows it on the pill.
+  assert.equal(pillOf(trs[2]).textContent, 'processing: 52%');
 
   // The pill LEADS the settings cell: it is why the row is there, not one
   // more game setting, so it must not be hunted for among them.
@@ -789,6 +795,83 @@ test('a game being processed is listed, badged first, and cannot be opened', () 
   assert.equal(internalLinks(trs[2]), 0, 'a row with nothing to play links nowhere');
   assert.ok(trs[2].className.includes('unopenable'), 'and says so to the stylesheet');
   assert.ok(!trs[1].className.includes('unopenable'));
+});
+
+test('the Players header swaps the column to lobby names and back', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+
+  const dom = fakeDom();
+  // The column choice lives in the URL (?col=lobby, replaceState) — this pair
+  // stands in for the browser's, so the test drives the REAL playersColumn.
+  const state = { href: 'https://x/' };
+  const rows = [
+    // Named by the teiserver poll's match.
+    { id: 'named', rid: 'named-1', startUnix: 1, durationSec: 1, map: 'M', gameSize: '8v8', sizeBytes: 1,
+      players: [{ ally: 0, count: 1, players: [{ name: 'Rouben' }] }], settings: null, uploads: [],
+      lobbyName: 'Chillmus most welcome | 8v8' },
+    // Worker backend but nothing matched (yet, or ever): key present, null.
+    { id: 'unnamed', rid: 'unnamed-1', startUnix: 2, durationSec: 1, map: 'M', gameSize: '1v1', sizeBytes: 1,
+      players: [{ ally: 0, count: 1, players: [{ name: 'Adzek' }] }], settings: null, uploads: [],
+      lobbyName: null },
+  ];
+  const render = eval(`(function(){
+    const document = dom.document;
+    const replayList = rows;
+    const location = { get href() { return state.href; }, get search() { return new URL(state.href).search; } };
+    const history = { replaceState: (_a, _b, u) => { state.href = String(u); } };
+    const ALLY_HUES = [0, 120];
+    const urlId = (e) => e.rid || e.id;
+    const replayHref = (id) => '/?replay=' + id;
+    const fmtDate = () => 'date', fmtDateShort = () => 'date', fmtDuration = () => 'dur', fmtGameDuration = () => 'dur', fmtSize = () => 'size';
+    const settingsBadges = () => [];
+    const adminMode = () => false, syncOrphanButton = () => {}, filterQuery = () => '';
+    const PAGE_SIZE = 50; let homePage = 0, homeHasNext = false;
+    const goPage = () => {};
+    ${extract('playersColumn')}
+    ${extract('mapFileGuess')}
+    ${extract('renderPager')}
+    ${extract('renderHome')}
+    return renderHome;
+  })()`);
+
+  render();
+  const th = dom.document.getElementById('h_players');
+  assert.ok(th.className.includes('swappable'), 'a list carrying the field offers the swap');
+  assert.ok(th.textContent.startsWith('Players'));
+  const playerCell = (i: number) => dom.tbody.children[i].children.find((td: any) => td.className.includes('players'));
+  assert.ok(walk(playerCell(0)).some((n) => n.textContent === 'Rouben'), 'rosters first');
+
+  // Click the header: the same column now shows the lobby name; a game the
+  // poll never named shows a dash, not a blank. The choice lands in the URL
+  // (?col=lobby via replaceState) so it is shareable and survives a refresh.
+  th.onclick();
+  assert.equal(new URL(state.href).searchParams.get('col'), 'lobby');
+  assert.ok(dom.document.getElementById('h_players').textContent.startsWith('Lobby'));
+  assert.ok(walk(playerCell(0)).some((n) => n.textContent === 'Chillmus most welcome | 8v8'));
+  assert.ok(walk(playerCell(1)).some((n) => n.textContent === '—'));
+  assert.ok(playerCell(1).className.includes('dim'));
+
+  // And back — the default writes NO param, keeping the URL clean.
+  th.onclick();
+  assert.equal(new URL(state.href).searchParams.get('col'), null);
+  assert.ok(walk(playerCell(0)).some((n) => n.textContent === 'Rouben'));
+
+  // Against the Go server (no lobbyName key anywhere) the header is inert.
+  rows.forEach((r: any) => delete r.lobbyName);
+  render();
+  const plain = dom.document.getElementById('h_players');
+  assert.ok(!plain.className.includes('swappable'));
+  assert.equal(plain.textContent, 'Players');
+  assert.equal(plain.onclick, null);
 });
 
 test('the players filter is a two-ended range over the sizes present', () => {
@@ -1132,7 +1215,7 @@ test('a running job shows its live progress instead of an empty row', () => {
     ${extract('statsTooltip')}
     ${extract('fillProgressCell')}
     ${extract('disableCell')}
-    ${extract('fmtDuration')}
+    ${extract('fmtDuration')} ${extract('fmtGameDuration')}
     ${APP.slice(APP.indexOf('const ERROR_KIND_LABELS'), APP.indexOf('const QUEUE_PAGE'))}
     ${extract('renderQueue')}
     return renderQueue;
@@ -1185,7 +1268,7 @@ test('a running job shows its live progress instead of an empty row', () => {
   // say whether an hour of engine time is buying an 8v8 or a duel.
   const cellOf = (tr: any, cls: string) => tr.children.find((td: any) => td.className.includes(cls));
   assert.equal(cellOf(trs[0], 'size').textContent, '8v8');
-  assert.equal(cellOf(trs[0], 'dur').textContent, '40:17');
+  assert.equal(cellOf(trs[0], 'dur').textContent, '40m');
   assert.equal(cellOf(trs[2], 'size').textContent, '1v1');
   // A game neither table knows still lists; it just has nothing to say.
   assert.equal(cellOf(trs[1], 'size').textContent, '—');
@@ -1236,7 +1319,7 @@ test('a disabled job reads as disabled and offers the way back', () => {
     const replayHref = (id) => '/?replay=' + id, urlId = (e) => e.id, openReplay = () => {};
     ${extract('fmtDur')} ${extract('statsLines')} ${extract('progressLines')}
     ${extract('progressText')} ${extract('statsTooltip')} ${extract('fillProgressCell')}
-    ${extract('fmtSize')} ${extract('disableCell')} ${extract('fmtDuration')}
+    ${extract('fmtSize')} ${extract('disableCell')} ${extract('fmtDuration')} ${extract('fmtGameDuration')}
     ${APP.slice(APP.indexOf('const ERROR_KIND_LABELS'), APP.indexOf('const QUEUE_PAGE'))}
     ${extract('renderQueue')}
     return renderQueue;
@@ -1383,4 +1466,31 @@ test('the swap reading distinguishes "none" from "not measured"', () => {
   assert.equal(lines({ state: 'simulating', swapBytes: 0 })['Engine swap'], 'none');
   assert.equal(lines({ state: 'simulating', swapBytes: 268435456 })['Engine swap'], '268.4 MB');
   assert.equal('Engine swap' in lines({ state: 'simulating' }), false, 'an older daemon says nothing');
+});
+
+test('game durations render minutes-precision, started dates drop the year', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+  const fns = eval(`(function(){
+    ${extract('fmtGameDuration')}
+    ${extract('fmtDateShort')}
+    return { fmtGameDuration, fmtDateShort };
+  })()`);
+  assert.equal(fns.fmtGameDuration(20 * 60), '20m');
+  assert.equal(fns.fmtGameDuration(80 * 60), '1h 20m');
+  assert.equal(fns.fmtGameDuration(3600), '1h 0m');
+  // Seconds round to the nearest minute; a sub-minute game still says something.
+  assert.equal(fns.fmtGameDuration(19 * 60 + 40), '20m');
+  assert.equal(fns.fmtGameDuration(20), '<1m');
+  // Locale decides the exact rendering, so pin only what the change is about:
+  // the year digits are gone (1787349909 is a 2026 timestamp).
+  assert.ok(!fns.fmtDateShort(1787349909).includes('2026'));
 });
