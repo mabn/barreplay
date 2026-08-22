@@ -757,7 +757,7 @@ test('a game being processed is listed, badged first, and cannot be opened', () 
     const PAGE_SIZE = 50; let homePage = 0, homeHasNext = false;
     const goPage = () => {};
     // The Players column shows rosters here; its lobby-name face has its own test.
-    let playersColumn = 'players';
+    const playersColumn = () => 'players';
     ${extract('renderPager')}
     ${extract('renderHome')}
     return renderHome;
@@ -806,6 +806,9 @@ test('the Players header swaps the column to lobby names and back', () => {
   };
 
   const dom = fakeDom();
+  // The column choice lives in the URL (?col=lobby, replaceState) — this pair
+  // stands in for the browser's, so the test drives the REAL playersColumn.
+  const state = { href: 'https://x/' };
   const rows = [
     // Named by the teiserver poll's match.
     { id: 'named', rid: 'named-1', startUnix: 1, durationSec: 1, map: 'M', gameSize: '8v8', sizeBytes: 1,
@@ -819,6 +822,8 @@ test('the Players header swaps the column to lobby names and back', () => {
   const render = eval(`(function(){
     const document = dom.document;
     const replayList = rows;
+    const location = { get href() { return state.href; }, get search() { return new URL(state.href).search; } };
+    const history = { replaceState: (_a, _b, u) => { state.href = String(u); } };
     const ALLY_HUES = [0, 120];
     const urlId = (e) => e.rid || e.id;
     const replayHref = (id) => '/?replay=' + id;
@@ -827,7 +832,7 @@ test('the Players header swaps the column to lobby names and back', () => {
     const adminMode = () => false, syncOrphanButton = () => {}, filterQuery = () => '';
     const PAGE_SIZE = 50; let homePage = 0, homeHasNext = false;
     const goPage = () => {};
-    let playersColumn = 'players';
+    ${extract('playersColumn')}
     ${extract('renderPager')}
     ${extract('renderHome')}
     return renderHome;
@@ -841,15 +846,18 @@ test('the Players header swaps the column to lobby names and back', () => {
   assert.ok(walk(playerCell(0)).some((n) => n.textContent === 'Rouben'), 'rosters first');
 
   // Click the header: the same column now shows the lobby name; a game the
-  // poll never named shows a dash, not a blank.
+  // poll never named shows a dash, not a blank. The choice lands in the URL
+  // (?col=lobby via replaceState) so it is shareable and survives a refresh.
   th.onclick();
+  assert.equal(new URL(state.href).searchParams.get('col'), 'lobby');
   assert.ok(dom.document.getElementById('h_players').textContent.startsWith('Lobby'));
   assert.ok(walk(playerCell(0)).some((n) => n.textContent === 'Chillmus most welcome | 8v8'));
   assert.ok(walk(playerCell(1)).some((n) => n.textContent === '—'));
   assert.ok(playerCell(1).className.includes('dim'));
 
-  // And back.
+  // And back — the default writes NO param, keeping the URL clean.
   th.onclick();
+  assert.equal(new URL(state.href).searchParams.get('col'), null);
   assert.ok(walk(playerCell(0)).some((n) => n.textContent === 'Rouben'));
 
   // Against the Go server (no lobbyName key anywhere) the header is inert.

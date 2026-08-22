@@ -3693,10 +3693,14 @@ let replayList = [];
 
 // What the Players column shows: the rosters, or the LOBBY NAME the game was
 // played under (joined from the games mirror; only the worker backend has
-// one). Clicking the column header swaps them. Plain view state, like the
-// queue's expanded rows — not in the URL: which face of one column is showing
-// is not a thing to share or restore.
-let playersColumn = 'players';
+// one). Clicking the column header swaps them. The choice lives in the URL
+// (?col=lobby) like the filters — written with replaceState, so swapping is
+// not navigation — which makes it shareable and survive a refresh, and
+// replayHref carries it into a replay so back returns to the same view. The
+// default (players) writes NO param, keeping a fresh visit's URL clean.
+function playersColumn() {
+  return new URLSearchParams(location.search).get('col') === 'lobby' ? 'lobby' : 'players';
+}
 
 function showHome() {
   stopPlay();
@@ -4717,17 +4721,23 @@ function renderHome(errMsg) {
   // backend sends the field at all — the Go viz server omits it wholesale,
   // and a header that toggles to a column of dashes is worse than none. The
   // key is the tell, not the value: an unmatched game arrives as
-  // lobbyName:null, which still means the backend plays.
+  // lobbyName:null, which still means the backend plays. A ?col=lobby URL on
+  // a backend without the field renders players and leaves the param alone,
+  // the same way ?tab=queue degrades — the link keeps meaning what it says
+  // where it can.
+  const hasLobby = replayList.some((e) => e.lobbyName !== undefined);
+  const colMode = hasLobby ? playersColumn() : 'players';
   {
     const th = document.getElementById('h_players');
-    const hasLobby = replayList.some((e) => e.lobbyName !== undefined);
-    if (!hasLobby) playersColumn = 'players';
     th.classList.toggle('swappable', hasLobby);
     if (hasLobby) {
-      th.textContent = playersColumn === 'players' ? 'Players ⇄' : 'Lobby ⇄';
-      th.title = playersColumn === 'players' ? 'show lobby names' : 'show players';
+      th.textContent = colMode === 'players' ? 'Players ⇄' : 'Lobby ⇄';
+      th.title = colMode === 'players' ? 'show lobby names' : 'show players';
       th.onclick = () => {
-        playersColumn = playersColumn === 'players' ? 'lobby' : 'players';
+        const u = new URL(location.href);
+        if (colMode === 'players') u.searchParams.set('col', 'lobby');
+        else u.searchParams.delete('col');
+        history.replaceState(null, '', u);
         renderHome();
       };
     } else {
@@ -4781,7 +4791,7 @@ function renderHome(errMsg) {
       td.className = 'players';
       const a = linkish();
       const groups = Array.isArray(e.players) ? e.players : [];
-      if (playersColumn === 'lobby') {
+      if (colMode === 'lobby') {
         // The column's other face: the lobby name the game was played under.
         // A dash is honest here — most rows predate the poll, and a name can
         // only ever be observed live.
