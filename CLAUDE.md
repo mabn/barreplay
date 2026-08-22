@@ -140,14 +140,28 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           That is the trade — an engine host that never idles, against a
                           slower path for the games somebody actually recorded half of. Each is CLAIMED (POST
                           state=processing claim=true, which the worker refuses with 409 if
-                          another daemon holds it), HEARTBEATED every 60s while the engine runs
-                          — a re-sim outlives the 15-min stale window several times over, so
-                          without that the worker would offer live work away mid-run, and the
-                          beat is also what moves the queue row's Updated cell — and reported
+                          another daemon holds it), HEALTHCHECKED every 10s while the engine
+                          runs, and reported
                           done or error, that message being what the requester reads on the
-                          queue page. The heartbeat is cancelled AND JOINED before the terminal
+                          queue page. The HEALTHCHECK (POST state=processing, carrying
+                          `progress`) is two things in one request. It is the old heartbeat: a
+                          re-sim outlives the 90-min stale window, so without a beat the worker
+                          would offer live work away mid-run, and the beat is also what moves
+                          the queue row's Updated cell. And it is the run's LIVE SELF-REPORT —
+                          resim.Progress, read fresh at each tick (a pull, so the cadence stays
+                          the daemon's; see internal/resim) and converted by progressOf: the
+                          phase in words ("fetching demo", "provisioning content", "starting
+                          engine", "loading", "simulating", then the daemon's own "packing" /
+                          "uploading"), the sim frame against the demo's length as a percentage,
+                          an ETA, and the ENGINE PROCESS's RSS and CPU. Ten seconds because that
+                          second job sets the pace: a re-sim is otherwise an hour in which the
+                          row says nothing but "processing", which is indistinguishable from a
+                          daemon that died — and the engine's memory/CPU are the only window
+                          anyone has onto the host doing the work, which is somebody's machine
+                          behind NAT. The healthcheck is cancelled AND JOINED before the terminal
                           report, since a beat still in flight would flip a finished row back to
-                          processing forever. Then the CATALOG SCAN, as before: GET /api/replays
+                          processing forever.
+                          Then the CATALOG SCAN, as before: GET /api/replays
                           for games whose current upload is one-sided (uploaderAlly set) with no
                           full-view revision yet (no ally-null entry in the row's uploads list).
                           Either way it re-simulates the demo headlessly via internal/resim (the
@@ -158,7 +172,25 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           uploads list gains an ally-null entry) — which is why only IT keeps the
                           in-process failed-game memory; a requested job records its failure on
                           its own row and so leaves the queue by itself, making a re-paste the
-                          retry. The work lists cannot overlap: a request is refused while its
+                          retry.
+                          But FINDING the work without queue state is not the same as DOING it
+                          without a row: runScanned ANNOUNCES each scanned game (POST /api/jobs,
+                          see the worker entry) and then claims, healthchecks and reports it
+                          exactly like a requested one, so its progress, its charts, its timings
+                          and its failure message all reach the queue page. Before that it was
+                          an hour of engine time that appeared nowhere and whose stats existed
+                          only in this daemon's log, on a machine nobody else can reach — which
+                          is the whole reason the announce door exists, since POST /api/resim
+                          refuses every scan candidate as already published (that is what makes
+                          it a candidate). The announce returns TWO things and the difference
+                          matters: a FAILED announce (a worker too old to have the route — the
+                          two deploy independently) loses only the bookkeeping and the re-sim
+                          still runs, unreported; a DUPLICATE means another daemon already holds
+                          the game and this one must not spend an hour on it too. The in-process
+                          failed map stays either way: the announced row records what went wrong
+                          for a person to read, but a scanned game has no link to re-paste, so
+                          re-announcing after a restart is what retries it.
+                          The work lists cannot overlap: a request is refused while its
                           game is in the catalog, a scanned candidate is in it by definition, and
                           the mirror backfill takes only games with no catalog row AND no job
                           row of any state. Upload jobs are untouched (run a plain bringest alongside,
@@ -264,6 +296,19 @@ internal/demofile/        gunzip + parse packed header + TDF startscript + the p
                           cross-check that the packet decoding is right. Typed autohost
                           commands ("!cv resign") are kept: a person wrote those.
 internal/engine/          locate spring-headless/pr-downloader, provision, launch, stream stdout.
+                          Run records the child's pid (Engine.Pid) so a caller can watch the
+                          run's resource use without Run growing a fourth return value — one
+                          run per data dir (LockDataDir) means there is never a second live
+                          process to confuse it with. SampleProcess/CPUPercent (procstat.go)
+                          read /proc/<pid>/stat for RSS and cumulative CPU: indexed from the
+                          LAST ')' because comm is the executable name in parentheses and may
+                          contain spaces and parens, USER_HZ hardcoded at 100 (a sysconf call,
+                          and this repo is cgo-free; a wrong value would only scale the
+                          percentage), and best-effort like everything else that reads the
+                          engine's leavings — a process that just exited is ok=false, never an
+                          error. LastLoggedFrame exposes what WatchProgress polls (the newest
+                          "[f=]" marker in the infolog), which is the ONLY running-progress
+                          signal a headless replay emits.
                           SummarizeInfolog (infolog.go) reduces a finished run's infolog.txt to
                           size/lines/last frame plus DESYNC and warning counts — substring
                           heuristics, not a parse of a grammar the engine promises, and the
@@ -271,6 +316,27 @@ internal/engine/          locate spring-headless/pr-downloader, provision, launc
                           game that never happened and is indistinguishable from a good capture
                           on disk. Best-effort like everything reading the engine's leavings —
                           a missing log yields a zero summary, never an error.
+internal/resim/           the cmd/barreplay pipeline packaged as one call (Run: demo download
+                          -> provision -> widget inject -> engine run -> .brp), for the ingest
+                          daemon's -resim mode. Options.Stats is the record read AFTERWARDS
+                          (filled in as it goes, so a run that dies at minute forty still says
+                          how far it got); Options.Progress (progress.go) is the LIVE view read
+                          from another goroutine WHILE it runs, which is how a job that will not
+                          return for an hour reports in. Progress is a PULL — Snapshot under a
+                          mutex, not a callback — so the reporting cadence stays the reporter's
+                          (the daemon beats every 10s); a nil one is inert, which is what every
+                          caller that does not want it passes. Run stamps the phase as it moves
+                          (PhaseFetchingDemo/Provisioning/StartingEngine/Loading/Simulating/
+                          Capturing — Simulating set from the stdout scanner's first
+                          "[barreplay]" line, the same boundary that splits LoadSec from
+                          SimSec), and SetPhase is exported because the phases after Run returns
+                          belong to the caller. watchProgress samples every 5s while the engine
+                          lives: engine.LastLoggedFrame for the sim frame (percent + an ETA off
+                          an EWMA of the frame rate — the instantaneous rate swings hard,
+                          because the engine's pacing governor idles it in bursts) and
+                          engine.SampleProcess for the engine's RSS and CPU. A phase change
+                          clears the sim numbers (they described the phase that ended) but keeps
+                          the process reading (the process did not).
 internal/capture/         parse the widgets' streams -> snapshot records (BRSNAP text in
                           capture.go, binary .brepstream in brep.go, shared preamble +
                           comm-record parsing in lines.go). COMM records (text) / 'C'
@@ -646,6 +712,60 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           insert are ONE DO call (resimEnqueue) — the DO is single-threaded, so
                           that is atomic for free, where three round trips would let two pastes
                           of the same link both insert.
+                          ANNOUNCED WORK (POST /api/jobs -> ReplayIndex.jobAnnounce): the
+                          daemon's OTHER way to get a job row — for work it found itself rather
+                          than work it was given. It is resimEnqueue without the catalog
+                          refusal, which is the entire difference: the catalog scan looks for
+                          games whose only upload is one-sided, every one of which is IN the
+                          catalog, so the open /api/resim door refuses all of them (correctly —
+                          that answer is right for a person pasting a link). It still dedupes on
+                          an ACTIVE job for the game, so two daemons scanning the same catalog
+                          get the same row back and only one can claim it; a finished or failed
+                          job does not block a fresh one, which is what lets a scan retry a game
+                          whose link nobody can paste. GUARDED, unlike /api/resim: this is the
+                          one door into the jobs table with no refusals behind it, and those
+                          refusals are what keep the open one from being a way to spend somebody
+                          else's hour of engine time. Only kind "resim" — an upload job is bytes
+                          somebody sent, and there is no stream to invent. The gameId goes
+                          through the same parseGameId a pasted link does, since the route
+                          cannot tell the daemon from any other caller holding the token.
+                          Claiming an announced job marks the game's EXISTING catalog row
+                          processing without turning it into a placeholder (a revision exists,
+                          so it stays openable), and a failure leaves that row untouched —
+                          dropCatalogPlaceholder only ever deletes placeholder = 1.
+                          DISABLING A JOB (jobs.disabled + POST /api/jobs/<id>/disabled +
+                          ReplayIndex.jobSetDisabled): the queue page's per-row switch. A COLUMN,
+                          not a fifth state — the four states describe how far the WORK got, and
+                          being held back is not a stage of that; it is also reversible, which a
+                          state would make awkward. It does two things. Nothing is OFFERED the
+                          job (jobsPending, jobClaim and, because the mirror backfill takes only
+                          games with NO job row of any state, the auto-queue for its game too —
+                          which is the durable way to say "never re-simulate this one"), and a
+                          "processing" row is RESET to pending with its live progress cleared.
+                          The reset is not cosmetic: nothing here can reach into a daemon on
+                          somebody else's machine and stop its engine, so a row left claimed
+                          would simply be handed out again once its stale window expired. For the
+                          same reason a still-running daemon's HEARTBEATS are ignored on a
+                          disabled job (jobUpdate returns early) — they would put it straight
+                          back into "processing" a second after the reset — while its TERMINAL
+                          report is still taken, since the work happened and what came of it is
+                          worth recording. Disabling also drops the game's catalog PLACEHOLDER
+                          (nothing is being worked on and nothing was published, so the replay
+                          list must not keep an un-openable row), but leaves a real published row
+                          alone, and KEEPS the job's samples — they are the record of work that
+                          really happened, and the charts are the reason to look at a job you had
+                          to turn off. A disabled job still BLOCKS a new one for its game
+                          (walking around it with a fresh row is exactly what "will not be picked
+                          up" rules out), which is why jobAnnounce/resimEnqueue report a distinct
+                          "disabled" status: the paste box can then say why nothing will happen,
+                          and a daemon treats anything but "queued" as not-its-work either way.
+                          queuePage's unfinished-first ordering and its `active` count both
+                          exclude disabled rows, so a held-back job does not sit at the top of
+                          the queue forever nor inflate the menu's in-flight badge. The route is
+                          OPEN, like the other two maintenance routes the admin UI drives
+                          (/refresh-settings and /view) and for the same reason: the browser has
+                          no bearer token and the Queue section is only reachable with
+                          ?admin=true, so guarding it would mean the button could not exist.
                           JOB KINDS: jobs.kind is "upload" | "resim", a KIND rather than a fifth
                           state because the four states describe both equally well — what
                           differs is the work, not the progress. The contract (JobKind,
@@ -660,11 +780,11 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           {claim:true}: it transitions only from pending or a stale processing
                           (jobClaim), so two daemons in one poll round cannot both take an hour
                           of work, while a plain "processing" stays unconditional because that
-                          is the heartbeat AND because the upload daemon treats a failed
+                          is the healthcheck AND because the upload daemon treats a failed
                           transition as a job error — it would take the job from whoever
                           legitimately holds it and mark it failed. A resim's stale window is
                           90 min rather than 15 (STALE_PROCESSING_RESIM_SEC), the backstop for a
-                          daemon too old to heartbeat.
+                          daemon too old to beat.
                           JOB STATS: jobs.stats is ONE nullable JSON column (JobStats in jobs.ts,
                           cmd/bringest's jobStats struct the other half of the contract), not a
                           column per number — nothing queries these, the queue page just reads
@@ -679,8 +799,61 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           MAX_JOB_STATS_BYTES (32 KB, nearly all of it the size report); anything
                           else is DROPPED rather than 400ing, since the stats describe work that
                           already happened and refusing them would lose the state transition too.
+                          JOB PROGRESS: jobs.progress is the OTHER nullable JSON column
+                          (JobProgress in jobs.ts, cmd/bringest's jobProgress struct the other
+                          half), and is the stats' mirror image in every way that decides how it
+                          is handled. Stats say what the work COST, are written once at the end
+                          and kept forever; progress says what the work IS DOING, is overwritten
+                          by every 10-second healthcheck, and is CLEARED by jobUpdate the moment
+                          a job reaches a terminal state — a finished row still reading
+                          "simulating, 43%, 12 minutes left" would be worse than one reading
+                          nothing (`progress = CASE WHEN ? = 'processing' THEN COALESCE(?,
+                          progress) ELSE NULL END`, so a beat that carries none keeps the last
+                          reading and an older daemon simply reports less). jobClaim clears it
+                          too: taking over a stale job must not inherit the dead daemon's last
+                          percentage. Fields: state (the phase in words — the only one that
+                          means anything in every phase), frame/totalFrames/percent/etaSec/
+                          simFps, and the engine process's rssBytes/cpuPct (percent of ONE core,
+                          so a threaded engine exceeds 100). parseJobProgress shape-checks it
+                          exactly as parseJobStats does, under MAX_JOB_PROGRESS_BYTES (2 KB —
+                          it is a dozen small numbers), and drops rather than 400s for the same
+                          reason. It rides the OPEN reads (/api/jobs/<id>, /api/queue) like the
+                          stats do.
+                          JOB SAMPLES (job_samples table + GET /api/jobs/<id>/samples): every
+                          healthcheck is ALSO kept as its own row, which is what the queue page's
+                          charts are drawn from. progress is the newest reading and is cleared
+                          when the job ends; this is the SERIES, and it deliberately OUTLIVES the
+                          job — the memory curve of a run that died at minute forty is exactly
+                          the reading nobody has otherwise, because the live one is gone by then.
+                          Written by jobUpdate at the same `now` the row's updated_unix gets, so
+                          a point and its row agree, and stamped with the WORKER's clock so a
+                          daemon with a skewed one cannot bend the time axis. Keyed (job_id,
+                          at_unix) with an upsert, so a beat retried inside one second is the
+                          same reading rather than a second point. Every field is COERCED on the
+                          way in (`finite`): unlike everything previously done with a
+                          JobProgress these land in typed SQL columns, and parseJobProgress is
+                          shallow because its fields were only ever displayed — `{frame:{}}`
+                          would otherwise throw inside the bind and 500 the healthcheck. eta_sec
+                          was added after the others (the estimate was always reported and only
+                          ever overwritten in place), so rows written before it chart as a gap.
+                          Past
+                          MAX_JOB_SAMPLES = 720 (two hours of beats) jobSampleThin HALVES the
+                          series in place, keeping its first and last sample and every other one
+                          between: the chart keeps its full span at half resolution, where
+                          dropping the oldest would lose the load phase and refusing to record
+                          would lose the end — the part that says how it died. Retention is the
+                          cron's job (index.ts, its own try so it cannot take the mirror down):
+                          jobSamplePrune drops the samples of jobs finished more than
+                          JOB_SAMPLE_RETENTION_SEC = 30 days ago and of any job row that is gone,
+                          which is the only rule stopping the one table here that grows on its
+                          own. The route is OPEN like the rest of the queue reads and is fetched
+                          PER EXPANDED ROW, not with the queue page — 25 rows would otherwise
+                          carry thousands of points nobody looked at; an unknown job answers with
+                          an empty series rather than a 404, since a job that never beat and one
+                          that does not exist are the same thing to the view.
                           GAMES MIRROR (games table + src/worker/games.ts + the cron in
-                          index.ts): every minute a scheduled handler reads ONE page of
+                          index.ts): every minute a scheduled handler (which also prunes job_samples —
+                          see JOB SAMPLES above) reads ONE page of
                           api.bar-rts.com's replay listing —
                           /replays?page=1&limit=24&hasBots=false&endedNormally=true, the query
                           verbatim in GAMES_QUERY — and records the games this worker has not
@@ -778,12 +951,26 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           deliberately NOT in the chain: it reports pre-existing noUnusedLocals
                           errors in tests/, so wiring it in would block every deploy.
                           QUEUE SECTION (app.js renderQueue): the landing page's second menu entry
-                          shows those jobs — one row per job with its game, KIND, state, what the
+                          shows those jobs — one row per job with its game, its SIZE and
+                          DURATION, a gex link, the KIND, state, what the
                           work TOOK, age and failure detail, a link to the replay once the
                           catalog has it (and out
                           to bar-rts.com until then, which for a queued re-sim is the whole point
                           of the row), and a count of the jobs in flight on the menu entry
-                          itself. Above the table sits the re-sim paste box (app.js initResim/
+                          itself. Size and duration are JOINED ON by the worker
+                          (ReplayIndex.queuePage), not stored on the job: the jobs table knows a
+                          gameId and nothing else, and a queue of bare ids cannot answer the
+                          first question anyone has about an hour of engine time — is this an
+                          8v8 worth it, or a three-minute duel? The catalog is preferred (it
+                          describes what was actually captured) and the games mirror is the
+                          fallback, which is what covers a re-sim of a game nobody has uploaded,
+                          i.e. most of this queue; a game NEITHER knows (a drag&drop upload from
+                          a private lobby) lists with an empty `game` and dashes. That query is
+                          the one place three tables meet, and every column in its ORDER BY is
+                          qualified because `id` is in all three and `updated_unix` in two — an
+                          unqualified one there is an ambiguous-column ERROR, not a wrong answer.
+                          The gex link is always present, unlike the Game cell's bar-rts
+                          fallback, which is only there while the game is unpublished here. Above the table sits the re-sim paste box (app.js initResim/
                           submitResim, #resimbox), the intake described under the worker routes
                           above; the two doors of the pipeline therefore bracket the section, the
                           dropzone above it and this inside it. The Took cell carries the one
@@ -796,6 +983,82 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           is there to be followed; which rows are open is plain component state
                           (queueOpen), NOT in the URL — unlike ?tab= and the filters, "the third
                           job's timings were expanded" is not a thing to share or restore.
+                          A RUNNING job has no stats — those are written when the work ends — so
+                          both of those cells answer from the live `progress` instead
+                          (progressLines/progressText/fillProgressCell). Took shows how much
+                          LONGER ("~14m 00s left"), since a job that has not finished has no
+                          cost to report but does raise exactly that question; the Detail cell —
+                          the same one a finished job puts its failure in, which cannot collide
+                          because the worker clears progress at the moment an error appears —
+                          gets a thin bar plus the words ("simulating · 43% · 14m 00s left ·
+                          3.2 GB · 613% CPU"), and the expansion adds the frame counts, the sim
+                          rate and the engine's memory and CPU. The BAR is drawn only once there
+                          is a percentage, i.e. once the engine is simulating: the minutes before
+                          that (demo download, provisioning, the engine's own load) have nothing
+                          to measure, and a bar pinned at zero through them reads as a job that
+                          is stuck rather than one that is working. The Updated cell doubles as
+                          the liveness signal — the daemon beats every 10s, so an age of minutes
+                          on a "processing" row means nobody is home.
+                          The row's last cell is the HOLD-BACK switch (disableCell/
+                          setJobDisabled -> POST /api/jobs/<id>/disabled, see the worker entry).
+                          It is offered only on a pending or running job — a finished one is
+                          already never handed out, so a switch there would do nothing — and it
+                          stopPropagations, since the row itself is an expand toggle. A held-back
+                          row reads "disabled" in the STATE column rather than "pending", which
+                          would be the misleading half of the truth on something nothing will
+                          ever pick up (the real state rides the tooltip); the button is ghosted
+                          until the row is hovered, except on a disabled row where it stays lit,
+                          since that is the row somebody is looking for.
+                          CHARTS (app.js jobCharts/buildChart, styles .jobcharts/.chart*): the
+                          expansion also draws the job's whole healthcheck history, fetched then
+                          and only then (loadJobSamples, cached per job and dropped by an
+                          explicit re-read so a fresh page never sits beside a stale curve).
+                          FOUR SEPARATE PLOTS — engine memory, engine CPU, simulation, and the
+                          estimated time left (the one series that should be going DOWN: a
+                          stretch where it climbs is the run getting slower faster than it is
+                          getting on, which no other chart states outright) — never
+                          one with four scales: bytes, percent-of-a-core and percent-of-a-game
+                          share no axis, and overlaying them would invent a correlation that is
+                          not in the data. They share an X (the same beats), which is what lets
+                          ONE crosshair read all four at a moment, with one tooltip listing
+                          every measure plus the phase (what explains a flat stretch); the same
+                          readings come from keyboard focus + arrows, so no value is behind a
+                          pointer. ONE hue for all three (#4b90c4, the same blue the collapsed
+                          row's bar is filled with, validated against the #12181e surface): each
+                          chart has a single series, so colour carries no information and the
+                          title is what says what is plotted — and a single series needs no
+                          legend. Marks are 2px lines over a 10% wash with hairline SOLID grid
+                          one step off the surface. The line BREAKS over a gap rather than
+                          drawing through zero (an engine that had not started is missing, not
+                          idle), and a measure the run never reported gets no plot at all, since
+                          an empty axis would claim a reading of zero. Exactly one direct mark
+                          per chart (spec.mark), chosen to say what the axis cannot: on an
+                          autoscaled chart the top tick IS the peak, so 'peak' draws a bare dot
+                          (WHEN it happened); 'last' labels where the run ENDED UP, which is what
+                          simulation and the ETA need since their axes say nothing about this
+                          particular run — for the ETA that is "how much was left when it stopped
+                          reporting", the whole story of one that died. simulation additionally
+                          fixes its domain 0-100 because the whole is known; autoscaling would
+                          draw a stalled run exactly like a finished one.
+                          SWAP is the exception that skips itself (spec.skipIfZero): zero is the
+                          healthy answer and very nearly always the answer, and a flat line along
+                          the baseline of an axis reading "1 B" is worse than no chart — so it is
+                          drawn only when the engine actually swapped, and its APPEARING is the
+                          signal. The zero case is still stated in words in the grid above
+                          ("Engine swap: none"), which is where it belongs: a line that showed up
+                          only in the bad case would leave every healthy run silent about the one
+                          thing being watched for. The one-line Detail summary is the opposite —
+                          it carries swap only when there IS some, being already five readings
+                          long.
+                          Both formatters exist for a reason —
+                          `tick` must fit the 46px gutter, `fmt` has a tooltip line to explain
+                          itself, and using one for both put "650% of one core" through the left
+                          edge of the figure. For BYTE scales the tick is fmtSizeShort, not
+                          fmtSize, for exactly the same reason one step further: "846.0 MB" is
+                          nine characters and runs off the edge where "846 MB" does not, and a
+                          tick is meant to be a round number anyway (the precise value is on the
+                          direct label and in the tooltip). X labels are ELAPSED time, not clock
+                          time: "it spiked at minute 32" is the reading.
                           It reads GET
                           /api/queue (ReplayIndex.queuePage: unfinished jobs first, then the most
                           recently finished; ?offset=/?limit=, limit capped at QUEUE_LIMIT_MAX),

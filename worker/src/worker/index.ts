@@ -4,7 +4,7 @@
 // handler, which is the one thing that cannot live in a Hono app.
 import app, { indexStub } from "./app";
 import { syncGames } from "./games";
-import { ReplayIndex } from "./replayindex";
+import { JOB_SAMPLE_RETENTION_SEC, ReplayIndex } from "./replayindex";
 
 export { ReplayIndex };
 
@@ -29,6 +29,18 @@ export default {
       }
     } catch (e) {
       console.error(`games sync failed: ${e}`);
+    }
+    // The job_samples table is the one thing here that would otherwise grow
+    // without a rule: a finished job's healthcheck history deliberately
+    // outlives it (that curve is the point), so something has to age it out,
+    // and the cron is the worker's only periodic hook. Its own try, so a
+    // failure cannot take the mirror down with it.
+    try {
+      const cutoff = Math.floor(Date.now() / 1000) - JOB_SAMPLE_RETENTION_SEC;
+      const dropped = await indexStub(env).jobSamplePrune(cutoff);
+      if (dropped > 0) console.log(`job samples pruned: ${dropped}`);
+    } catch (e) {
+      console.error(`job sample prune failed: ${e}`);
     }
   },
 } satisfies ExportedHandler<Env>;

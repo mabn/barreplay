@@ -683,6 +683,10 @@ function fakeDom() {
         },
       },
       appendChild(c: any) { n.children.push(c); return c; },
+      append(...cs: any[]) { n.children.push(...cs); },
+      attrs: {} as Record<string, string>,
+      setAttribute(k: string, v: unknown) { n.attrs[k] = String(v); },
+      getAttribute(k: string) { return n.attrs[k]; },
       addEventListener() {},
     };
     Object.defineProperty(n, 'textContent', {
@@ -695,6 +699,8 @@ function fakeDom() {
   const byId: Record<string, any> = {};
   const document = {
     createElement: node,
+    // The job charts are SVG, which only createElementNS can make.
+    createElementNS: (_ns: string, tag: string) => node(tag),
     querySelector: () => tbody,
     getElementById: (id: string) => (byId[id] ??= node('div')),
     body: { classList: { add() {}, remove() {}, toggle() {} } },
@@ -1058,4 +1064,312 @@ test('the pager offers Prev/Next and a range, never a page count', () => {
     assert.equal(b.id('p_prev').disabled, false);
     assert.equal(b.id('p_range').textContent, '151–157');
   }
+});
+
+// The queue row of a job that is still RUNNING. It has no stats — those are
+// written when the work ends — so everything a person can learn about it comes
+// from the live progress the daemon healthchecks in with, and the row has to
+// actually show it: the phase, how far along, and what the engine is costing
+// the machine doing the work.
+test('a running job shows its live progress instead of an empty row', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+
+  const dom = fakeDom();
+  const jobs = [
+    // Mid-simulation: every number the daemon can report.
+    {
+      id: 'running', gameId: 'aaa', kind: 'resim', state: 'processing', error: null, stats: null,
+      createdUnix: 1787349000, updatedUnix: 1787349900, disabled: false,
+      game: { durationSec: 2417, gameSize: '8v8' },
+      progress: {
+        state: 'simulating', frame: 43000, totalFrames: 100170, percent: 42.9,
+        etaSec: 840, simFps: 68.2, rssBytes: 3221225472, swapBytes: 0, cpuPct: 612.5,
+      },
+    },
+    // Still loading: a phase with nothing to measure. It must still say what
+    // it is doing, and must NOT draw a bar pinned at zero, which reads as a
+    // job that is stuck rather than one that is working.
+    {
+      id: 'loading', gameId: 'bbb', kind: 'resim', state: 'processing', error: null, stats: null,
+      createdUnix: 1787349000, updatedUnix: 1787349900, disabled: false,
+      // Neither the catalog nor the mirror knows this one.
+      game: null,
+      progress: { state: 'starting engine', rssBytes: 1048576, swapBytes: 268435456 },
+    },
+    // Finished badly: the worker cleared the progress when the job ended, so
+    // the same cell carries the failure.
+    {
+      id: 'failed', gameId: 'ccc', kind: 'resim', state: 'error', error: 'no engine',
+      stats: null, progress: null, disabled: false,
+      game: { durationSec: 217, gameSize: '1v1' },
+      createdUnix: 1787349000, updatedUnix: 1787349900,
+    },
+  ];
+
+  const render = eval(`(function(){
+    const document = dom.document;
+    const replayList = [];
+    const queuePage = { jobs, total: jobs.length, active: 2 };
+    const queueOffset = 0, queueReadAt = 0;
+    const queueOpen = new Set();
+    const fmtDate = () => 'date', fmtAgo = () => 'ago';
+    const replayHref = (id) => '/?replay=' + id, urlId = (e) => e.id, openReplay = () => {};
+    ${extract('fmtDur')}
+    ${extract('fmtSize')}
+    ${extract('statsLines')}
+    ${extract('progressLines')}
+    ${extract('progressText')}
+    ${extract('statsTooltip')}
+    ${extract('fillProgressCell')}
+    ${extract('disableCell')}
+    ${extract('fmtDuration')}
+    ${extract('renderQueue')}
+    return renderQueue;
+  })()`);
+
+  render();
+
+  const trs = dom.tbody.children;
+  assert.equal(trs.length, 3);
+  const detailOf = (tr: any) => tr.children.find((td: any) => td.className.includes('detail'));
+
+  const running = detailOf(trs[0]);
+  const bar = walk(running).find((n) => n.className === 'jobprog');
+  assert.ok(bar, 'a measurable phase draws a bar');
+  assert.equal(bar.children[0].style.width, '42.9%');
+  const text = walk(running).find((n) => n.className === 'jobprogtext').textContent;
+  // No swap in the one-liner when there is none: the line is already five
+  // readings long and "0 B swap" is the least interesting of them.
+  assert.match(text, /^simulating · 43% · 14m 00s left · 3\.2 GB · 613% CPU$/);
+
+  const loading = detailOf(trs[1]);
+  assert.equal(walk(loading).find((n) => n.className === 'jobprog'), undefined,
+    'nothing to measure yet: words, but no bar pinned at zero');
+  // ...but it leads with it when the engine IS swapping, which is the whole
+  // reason to look at this row.
+  assert.equal(walk(loading).find((n) => n.className === 'jobprogtext').textContent,
+    'starting engine · 1.0 MB · 268.4 MB swap');
+
+  // The failure keeps the cell it always had; the two never collide because
+  // the worker clears progress at exactly the moment an error appears.
+  assert.equal(detailOf(trs[2]).textContent, 'no engine');
+  assert.ok(detailOf(trs[2]).className.includes('error'));
+
+  // The Took column has no cost to report on a running job, so it answers the
+  // question that row actually raises: how much longer.
+  const tookOf = (tr: any) => tr.children.find((td: any) => td.className.includes('took'));
+  assert.equal(tookOf(trs[0]).textContent, '▸ ~14m 00s left');
+  assert.match(tookOf(trs[0]).title, /Now: simulating/);
+  assert.ok(trs[0].className.includes('hasstats'), 'and the row expands for the rest');
+
+  // The hold-back control, offered only where it can change anything: a
+  // finished job is already never handed out, so a switch on it would be a
+  // control that does nothing.
+  const btnOf = (tr: any) => walk(tr).find((n: any) => n.tag === 'button');
+  assert.equal(btnOf(trs[0]).textContent, 'Disable', 'a running job can be held back');
+  assert.equal(btnOf(trs[1]).textContent, 'Disable');
+  assert.equal(btnOf(trs[2]), undefined, 'a failed job has nothing to hold back');
+
+  // The game's own facts, joined on by the worker: a queue of bare ids cannot
+  // say whether an hour of engine time is buying an 8v8 or a duel.
+  const cellOf = (tr: any, cls: string) => tr.children.find((td: any) => td.className.includes(cls));
+  assert.equal(cellOf(trs[0], 'size').textContent, '8v8');
+  assert.equal(cellOf(trs[0], 'dur').textContent, '40:17');
+  assert.equal(cellOf(trs[2], 'size').textContent, '1v1');
+  // A game neither table knows still lists; it just has nothing to say.
+  assert.equal(cellOf(trs[1], 'size').textContent, '—');
+  assert.ok(cellOf(trs[1], 'size').className.includes('dim'));
+
+  // gex is always reachable, unlike the Game cell's bar-rts link, which is
+  // only there while the game is unpublished here.
+  const gex = (tr: any) => walk(tr).find((n: any) => n.tag === 'a' && String(n.href).includes('gex.honu.pw'));
+  assert.equal(gex(trs[0]).href, 'https://gex.honu.pw/match/aaa');
+  assert.equal(gex(trs[0]).className, 'ext', 'external, so the SPA click handler leaves it alone');
+  assert.ok(gex(trs[2]), 'including on a job that failed');
+});
+
+// A held-back row says so where the eye goes — the state column — rather than
+// showing "pending" on something nothing will ever pick up.
+test('a disabled job reads as disabled and offers the way back', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+  const dom = fakeDom();
+  const jobs = [{
+    id: 'held', gameId: 'aaa', kind: 'resim', state: 'pending', error: null, stats: null,
+    progress: null, disabled: true, game: null,
+    createdUnix: 1787349000, updatedUnix: 1787349900,
+  }];
+  eval(`(function(){
+    const document = dom.document;
+    const replayList = [];
+    const queuePage = { jobs, total: 1, active: 0 };
+    const queueOffset = 0, queueReadAt = 0;
+    const queueOpen = new Set();
+    const fmtDate = () => 'date', fmtAgo = () => 'ago';
+    const replayHref = (id) => '/?replay=' + id, urlId = (e) => e.id, openReplay = () => {};
+    ${extract('fmtDur')} ${extract('statsLines')} ${extract('progressLines')}
+    ${extract('progressText')} ${extract('statsTooltip')} ${extract('fillProgressCell')}
+    ${extract('fmtSize')} ${extract('disableCell')} ${extract('fmtDuration')}
+    ${extract('renderQueue')}
+    return renderQueue;
+  })()`)();
+
+  const tr = dom.tbody.children[0];
+  const state = walk(tr).find((n: any) => n.className.startsWith('state '));
+  assert.equal(state.textContent, 'disabled', 'not "pending" on a row nothing will pick up');
+  assert.ok(state.className.includes('state-disabled'));
+  assert.match(state.title, /Underlying state: pending/, 'the real state stays available');
+
+  const btn = walk(tr).find((n: any) => n.tag === 'button');
+  assert.equal(btn.textContent, 'Enable');
+  assert.ok(btn.className.includes('on'), 'and it stays lit rather than waiting for a hover');
+});
+
+// The healthcheck history, drawn. Three separate plots, never one with three
+// scales: bytes, percent-of-a-core and percent-of-a-game share no axis, and
+// overlaying them would invent a correlation the data does not contain.
+test('a job\'s healthcheck history is drawn as one chart per measure', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+  const consts = APP.slice(APP.indexOf('const SVGNS ='), APP.indexOf('// Fetched per expanded row'));
+
+  const dom = fakeDom();
+  // A load phase that reports memory but no simulation, then a run.
+  const rows = [
+    { atUnix: 1000, state: 'loading', frame: null, percent: null, etaSec: null, rssBytes: 1e9, swapBytes: 0, cpuPct: 120 },
+    { atUnix: 1010, state: 'simulating', frame: 300, percent: 10, etaSec: 900, rssBytes: 2e9, swapBytes: 0, cpuPct: 500 },
+    { atUnix: 1020, state: 'simulating', frame: 600, percent: 20, etaSec: 800, rssBytes: 4e9, swapBytes: 0, cpuPct: 610 },
+    { atUnix: 1030, state: 'simulating', frame: 900, percent: 30, etaSec: 700, rssBytes: 3e9, swapBytes: 0, cpuPct: 400 },
+  ];
+
+  const api = eval(`(function(){
+    const document = dom.document;
+    ${consts}
+    ${extract('svgEl')} ${extract('lastIndexWithValue')} ${extract('nearestSample')}
+    ${extract('buildChart')} ${extract('showTip')} ${extract('jobCharts')}
+    ${extract('fmtSize')} ${extract('fmtDuration')} ${extract('fmtDur')}
+    return { jobCharts, nearestSample, JOB_CHARTS, CH_W, CH_L, CH_R };
+  })()`);
+
+  const fig = api.jobCharts(rows);
+  const svgs = walk(fig).filter((n: any) => n.tag === 'svg');
+  // Four, not five: this run never swapped, and swap draws nothing when every
+  // reading is zero — a flat line along the baseline of an axis reading "1 B"
+  // is worse than no chart. Its APPEARING is the signal.
+  assert.equal(svgs.length, 4, 'one chart per measure, never one plot with several scales');
+
+  const texts = (svg: any) => walk(svg).filter((n: any) => n.tag === 'text');
+  const cls = (svg: any, c: string) => walk(svg).filter((n: any) => n.attrs.class === c);
+
+  // Autoscaled charts: the top tick IS the peak, so the peak carries a dot and
+  // no text — a label repeating a tick is noise.
+  const mem = svgs[0];
+  assert.equal(texts(mem).find((t: any) => t.attrs.class === 'chtick')._text, '4.0 GB');
+  assert.equal(cls(mem, 'chlabel').length, 0, 'no label duplicating the top tick');
+  assert.equal(cls(mem, 'chpeak').length, 1, 'but a dot saying WHEN it peaked');
+
+  // Fixed domain: the axis says nothing about this run, so the END value is
+  // labelled — the number the reader came for.
+  const sim = svgs[2];
+  assert.equal(texts(sim).find((t: any) => t.attrs.class === 'chtick')._text, '100%');
+  assert.equal(cls(sim, 'chlabel')[0]._text, '30.0%');
+
+  // Every label must FIT: a tick too long for its 46px gutter runs off the
+  // figure, which an anchor-only check cannot see.
+  for (const svg of svgs) {
+    for (const t of texts(svg)) {
+      const w = t._text.length * 5.6;
+      const x = Number(t.attrs.x);
+      const anchor = t.attrs['text-anchor'] || 'end';
+      assert.ok(x - (anchor === 'end' ? w : 0) >= 0, `"${t._text}" runs off the left edge`);
+      assert.ok(x + (anchor === 'end' ? 0 : w) <= api.CH_W, `"${t._text}" runs off the right edge`);
+    }
+    // The line breaks over a gap rather than drawing through zero: an engine
+    // that had not started is missing, not idle.
+    for (const p of walk(svg).filter((n: any) => n.tag === 'path')) {
+      assert.doesNotMatch(p.attrs.d, /NaN|undefined|Infinity/, 'the path is real coordinates');
+    }
+  }
+  // Simulation has one null at the head, so its line starts at the second beat.
+  const simLine = cls(sim, 'chline');
+  assert.equal(simLine.length, 1, 'one unbroken run after the gap');
+  assert.ok(Number(simLine[0].attrs.d.match(/^M([\d.]+)/)[1]) > api.CH_L, 'and it starts after the gap, not at the axis');
+
+  // The ETA is the one series that should be going DOWN, and its axis says
+  // nothing about this run, so it labels where it ended up — "how much was
+  // left when it stopped reporting", which for a run that died is the story.
+  const eta = svgs[3];
+  assert.equal(texts(eta).find((t: any) => t.attrs.class === 'chtick')._text, '15:00', 'the axis tops at the first estimate');
+  assert.equal(cls(eta, 'chlabel')[0]._text, '11m 40s left', 'the last estimate, not the biggest');
+
+  // ...and it DOES draw once the engine actually swapped.
+  const swapped = rows.map((r, i) => ({ ...r, swapBytes: i === 2 ? 512e6 : 0 }));
+  const swapSvgs = walk(api.jobCharts(swapped)).filter((n: any) => n.tag === 'svg');
+  assert.equal(swapSvgs.length, 5);
+  // The tick is the COMPACT form: "512.0 MB" is nine characters and runs off
+  // the left of the figure, which is a bug the geometry check below catches.
+  assert.equal(texts(swapSvgs[4]).find((t: any) => t.attrs.class === 'chtick')._text, '512 MB');
+
+  // A measure the run never reported gets no plot at all: an empty axis would
+  // claim a reading of zero, which is a different statement.
+  const noEngine = rows.map((r) => ({ ...r, rssBytes: null, cpuPct: null }));
+  assert.equal(walk(api.jobCharts(noEngine)).filter((n: any) => n.tag === 'svg').length, 2);
+
+  // The crosshair finds the X: the reader aims at a moment, not at a 2px line.
+  assert.equal(api.nearestSample(api.CH_L, 4), 0);
+  assert.equal(api.nearestSample(api.CH_W - api.CH_R, 4), 3);
+  assert.equal(api.nearestSample(-999, 4), 0, 'and is clamped, never out of range');
+  assert.equal(api.nearestSample(9999, 4), 3);
+});
+
+// Swap is stated even at zero in the expanded grid, and that is deliberate:
+// "none" is the reassurance and it is the usual answer, so a line that only
+// appeared in the bad case would leave every healthy run silent about the one
+// thing being watched for. Absent entirely is a different claim — a daemon too
+// old to measure it.
+test('the swap reading distinguishes "none" from "not measured"', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+  const api = eval(`(function(){
+    ${extract('fmtDur')} ${extract('fmtSize')} ${extract('progressLines')}
+    return { progressLines };
+  })()`);
+  const lines = (p: unknown) => Object.fromEntries(api.progressLines(p));
+
+  assert.equal(lines({ state: 'simulating', swapBytes: 0 })['Engine swap'], 'none');
+  assert.equal(lines({ state: 'simulating', swapBytes: 268435456 })['Engine swap'], '268.4 MB');
+  assert.equal('Engine swap' in lines({ state: 'simulating' }), false, 'an older daemon says nothing');
 });

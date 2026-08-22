@@ -25,7 +25,7 @@
 import { Hono } from "hono";
 
 import { parseGameId } from "./gameid";
-import { JOB_KINDS, parseJobStats } from "./jobs";
+import { JOB_KINDS, parseJobProgress, parseJobStats } from "./jobs";
 import type { JobKind } from "./jobs";
 import { archiveSuffix, scanStreamPreamble } from "./preamble";
 import { parseReplayFilter, parseViewRequest, playersFromApi, sanitizeEntry, settingsFlags } from "./replayentry";
@@ -240,6 +240,12 @@ app.post("/api/resim", async (c) => {
   if (res.status === "in-catalog") {
     return c.json({ error: "this game is already published", gameId, status: res.status }, 409);
   }
+  if (res.status === "disabled") {
+    return c.json(
+      { error: "this game's job has been disabled; re-enable it on the queue page", gameId, status: res.status },
+      409,
+    );
+  }
   return c.json({ job: res.job?.id, gameId, status: res.status });
 });
 
@@ -250,10 +256,24 @@ app.post("/api/resim", async (c) => {
 app.get("/api/jobs/:id", async (c) => {
   const job = await indexStub(c.env).jobGet(c.req.param("id"));
   if (!job) return c.json({ error: "unknown job" }, 404);
-  const { id, gameId, kind, state, error, stats, createdUnix, updatedUnix } = job;
-  return c.json({ id, gameId, kind, state, error, stats, createdUnix, updatedUnix }, 200, {
+  const { id, gameId, kind, state, error, stats, progress, disabled, createdUnix, updatedUnix } = job;
+  return c.json({ id, gameId, kind, state, error, stats, progress, disabled, createdUnix, updatedUnix }, 200, {
     "cache-control": "no-cache",
   });
+});
+
+// One job's healthcheck HISTORY: the series behind the queue page's charts,
+// fetched only when a row is expanded rather than riding every queue read (a
+// page of 25 rows would otherwise carry thousands of points nobody asked for).
+// Open, like the per-job status and the queue itself, and for the same reason:
+// it reports on public replays and can change nothing.
+//
+// An unknown job is an empty series, not a 404 — a job that never healthchecked
+// (an upload, or anything from a daemon older than the beat) is indistinguishable
+// from one that does not exist, and the view says the same thing about both.
+app.get("/api/jobs/:id/samples", async (c) => {
+  const samples = await indexStub(c.env).jobSamples(c.req.param("id"));
+  return c.json({ samples }, 200, { "cache-control": "no-cache" });
 });
 
 // The queue as the landing page's "Queue" section shows it: unfinished jobs
@@ -285,16 +305,24 @@ app.get("/api/queue", async (c) => {
   const page = await indexStub(c.env).queuePage(Math.min(Math.max(limit, 1), QUEUE_LIMIT_MAX), offset);
   return c.json(
     {
-      jobs: page.jobs.map(({ id, gameId, kind, state, error, stats, createdUnix, updatedUnix }) => ({
-        id,
-        gameId,
-        kind,
-        state,
-        error,
-        stats,
-        createdUnix,
-        updatedUnix,
-      })),
+      jobs: page.jobs.map(
+        ({ id, gameId, kind, state, error, stats, progress, disabled, game, createdUnix, updatedUnix }) => ({
+          id,
+          gameId,
+          kind,
+          state,
+          error,
+          stats,
+          progress,
+          disabled,
+          // What the game IS, joined on by the DO — the jobs table itself knows
+          // only an id, and a queue of bare ids says nothing about what the
+          // pipeline is actually spending its hour on.
+          game,
+          createdUnix,
+          updatedUnix,
+        }),
+      ),
       total: page.total,
       active: page.active,
       offset,
@@ -302,6 +330,42 @@ app.get("/api/queue", async (c) => {
     200,
     { "cache-control": "no-cache" },
   );
+});
+
+// Work the DAEMON found for itself, announced so that it is visible while it
+// runs and has somewhere to report onto.
+//
+// The re-sim daemon does not only take queued work: it also scans the catalog
+// for games whose only upload is one-sided (a player's point of view, no full
+// view yet) and re-simulates those. Every such game is already in the catalog,
+// so POST /api/resim refuses it as published — which is the right answer to a
+// PERSON pasting a link and the wrong one here, where the work is already
+// happening. Announcing creates the row for it.
+//
+// GUARDED, unlike /api/resim: this is the one door into the job table with no
+// refusals behind it, and the refusals are what keep the open one from being a
+// way to spend somebody else's hour of engine time. Only "resim" — an upload
+// job is bytes somebody sent, and there is no stream to invent for one nobody
+// uploaded.
+app.post("/api/jobs", async (c) => {
+  if (!authorized(c)) return c.json({ error: "unauthorized" }, 401);
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "body must be JSON" }, 400);
+  }
+  const b = body as { gameId?: unknown; kind?: unknown };
+  // Through the same parser a pasted link goes through, which for a bare id is
+  // a shape check and a lowercasing — the daemon read this out of the catalog,
+  // but the route cannot tell that from any other caller with the token.
+  const gameId = typeof b.gameId === "string" ? parseGameId(b.gameId) : null;
+  if (!gameId) return c.json({ error: "gameId must be a BAR game id" }, 400);
+  if (b.kind !== undefined && b.kind !== "resim") {
+    return c.json({ error: "only resim jobs can be announced" }, 400);
+  }
+  const res = await indexStub(c.env).jobAnnounce(crypto.randomUUID(), gameId, "resim");
+  return c.json({ job: res.job?.id, gameId, status: res.status });
 });
 
 // The ingest daemon's work queue: pending jobs of ONE kind (plus stalled
@@ -337,8 +401,10 @@ app.get("/api/jobs", async (c) => {
 // via the flag rather than being how "processing" always behaves, because the
 // upload daemon treats a failed transition as a job error — it would take the
 // job from whoever legitimately holds it and mark it failed. A long-running
-// job re-reports "processing" without the flag as a heartbeat, which keeps
-// updated_unix fresh so the stale-job rule does not offer live work away.
+// job re-reports "processing" without the flag as a healthcheck, which keeps
+// updated_unix fresh so the stale-job rule does not offer live work away — and
+// carries the run's live `progress` (JobProgress), which is what the queue page
+// shows instead of an hour of undifferentiated "processing".
 app.post("/api/jobs/:id", async (c) => {
   if (!authorized(c)) return c.json({ error: "unauthorized" }, 401);
   let body: unknown;
@@ -347,7 +413,14 @@ app.post("/api/jobs/:id", async (c) => {
   } catch {
     return c.json({ error: "body must be JSON" }, 400);
   }
-  const b = body as { state?: unknown; error?: unknown; claim?: unknown; kind?: unknown; stats?: unknown };
+  const b = body as {
+    state?: unknown;
+    error?: unknown;
+    claim?: unknown;
+    kind?: unknown;
+    stats?: unknown;
+    progress?: unknown;
+  };
   if (b.state !== "processing" && b.state !== "done" && b.state !== "error") {
     return c.json({ error: "state must be processing, done or error" }, 400);
   }
@@ -366,9 +439,40 @@ app.post("/api/jobs/:id", async (c) => {
   // already happened, and refusing the report over them would lose the state
   // transition too.
   const stats = parseJobStats(b.stats);
-  const ok = await indexStub(c.env).jobUpdate(c.req.param("id"), b.state, detail, stats);
+  // Same handling for the same reason: a healthcheck's reading is a snapshot of
+  // work already under way, and a state transition is worth more than it.
+  const progress = parseJobProgress(b.progress);
+  const ok = await indexStub(c.env).jobUpdate(c.req.param("id"), b.state, detail, stats, progress);
   if (!ok) return c.json({ error: "unknown job" }, 404);
   return c.json({ ok: true });
+});
+
+// Hold a job back, or let it go again: the queue page's per-row switch.
+//
+// Disabling does NOT reach out and stop an engine that is already running —
+// nothing here can, the daemon is on somebody else's machine behind NAT. It
+// stops the job being handed out (or handed out AGAIN, which for a re-sim of a
+// mirrored game is the thing worth preventing: the backfill's "no job row at
+// all" rule means a disabled row keeps its game out of the auto-queue for
+// good), and it resets a "processing" row to pending, since leaving it claimed
+// would only mean waiting out the stale window before it was re-offered.
+//
+// Open, like the other two maintenance routes the admin UI drives
+// (/refresh-settings and /view): the browser has no bearer token, and the
+// Queue section that shows the control is itself only reachable with
+// ?admin=true. Guarding it would mean the button could not exist.
+app.post("/api/jobs/:id/disabled", async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "body must be JSON" }, 400);
+  }
+  const disabled = (body as { disabled?: unknown }).disabled;
+  if (typeof disabled !== "boolean") return c.json({ error: "disabled must be a boolean" }, 400);
+  const ok = await indexStub(c.env).jobSetDisabled(c.req.param("id"), disabled);
+  if (!ok) return c.json({ error: "unknown job" }, 404);
+  return c.json({ ok: true, disabled });
 });
 
 // Archived raw streams for the ingest daemon (which speaks only HTTP to the

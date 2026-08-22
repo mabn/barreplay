@@ -20,12 +20,12 @@
 import { DurableObject } from "cloudflare:workers";
 
 import type { GameEntry } from "./games";
-import { parseJobStats } from "./jobs";
-import type { IngestJob, JobKind, JobStats } from "./jobs";
+import { parseJobProgress, parseJobStats } from "./jobs";
+import type { IngestJob, JobKind, JobProgress, JobSample, JobStats, QueueGame, QueueJob } from "./jobs";
 import { FACET_PLAYERS_MAX, SETTINGS_MODS_FLAG, derivePlayerCount, mergeUploads } from "./replayentry";
 import type { CatalogTeam, ReplayEntry, ReplayFacets, ReplayFilter, UploadRef } from "./replayentry";
 
-export type { IngestJob, JobKind, JobStats } from "./jobs";
+export type { IngestJob, JobKind, JobProgress, JobSample, JobStats, QueueGame, QueueJob } from "./jobs";
 
 /** A "processing" job untouched for this long is presumed crashed and is
  * offered to the daemon again alongside the pending ones. This is why a
@@ -51,8 +51,41 @@ const STALE_PROCESSING_RESIM_SEC = 90 * 60;
  * and the daemon would idle with thousands of games still to do. */
 const BACKFILL_WINDOW = 20;
 
+/** How many healthchecks one job keeps. At the daemon's 10-second beat that is
+ * two hours at full resolution, comfortably past any real re-simulation.
+ *
+ * Going over does not stop recording and does not drop the start of the run —
+ * both would lose the part of the curve worth having. jobSampleThin halves the
+ * series instead, keeping its first and last sample and every other one
+ * between, so the chart keeps its full time span at half the resolution and
+ * the cap cannot be hit again for another half-cap beats. */
+const MAX_JOB_SAMPLES = 720;
+
+/** How long a finished job's samples outlive it. They exist to be read AFTER
+ * the fact — the memory curve of a run that died is the whole point — so they
+ * are not cleared with the live progress; they age out instead. */
+export const JOB_SAMPLE_RETENTION_SEC = 30 * 24 * 60 * 60;
+
 /** Columns every jobs SELECT reads, in the order jobRow expects. */
-const JOB_COLS = "id, stream_key, game_id, kind, state, error, stats, created_unix, updated_unix";
+const JOB_COLS =
+  "id, stream_key, game_id, kind, state, error, stats, progress, disabled, created_unix, updated_unix";
+
+/** The same columns qualified to `j`, for the one query that joins the jobs
+ * table against the two that know anything about a game. Derived from JOB_COLS
+ * rather than written out again, so the two cannot drift — and SQLite names a
+ * result column after the column, not the qualifier, so jobRow still finds
+ * every one of them. */
+const JOB_COLS_J = JOB_COLS.split(", ")
+  .map((c) => `j.${c}`)
+  .join(", ");
+
+/** What came of asking for a job: a fresh row, the one that already covers the
+ * game, or a refusal. "disabled" and "in-catalog" are both "nothing will
+ * happen", said precisely enough for the caller to explain it. */
+export type JobEnqueue = {
+  status: "queued" | "duplicate" | "disabled" | "in-catalog";
+  job: IngestJob | null;
+};
 
 /** Version of the DERIVED data (player_count + the replay_players and
  * replay_settings index tables). Rows carry no derivation of their own — it is
@@ -84,10 +117,32 @@ export class ReplayIndex extends DurableObject<Env> {
         state        TEXT NOT NULL,
         error        TEXT,
         stats        TEXT,
+        progress     TEXT,
         created_unix INTEGER NOT NULL,
         updated_unix INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS jobs_state ON jobs (state, updated_unix);
+
+      -- Every healthcheck a running job sent, kept as history. The jobs row's
+      -- progress column holds only the newest reading and is cleared when the
+      -- job ends; this is the series behind the queue page's charts, and it
+      -- deliberately OUTLIVES the job (see JOB_SAMPLE_RETENTION_SEC): what the
+      -- engine's memory was doing before a run died is worth having precisely
+      -- when the live reading is gone.
+      -- Keyed by (job, time) so a beat retried inside the same second is the
+      -- same reading rather than a second point on the chart.
+      CREATE TABLE IF NOT EXISTS job_samples (
+        job_id    TEXT NOT NULL,
+        at_unix   INTEGER NOT NULL,
+        state     TEXT,
+        frame     INTEGER,
+        percent   REAL,
+        eta_sec   REAL,
+        rss_bytes INTEGER,
+        swap_bytes INTEGER,
+        cpu_pct   REAL,
+        PRIMARY KEY (job_id, at_unix)
+      );
 
       -- Derived index tables behind the list filters. Both are rebuilt from
       -- the replays row on every write (and by rebuildDerived), never edited
@@ -159,6 +214,21 @@ export class ReplayIndex extends DurableObject<Env> {
     // Nullable, unlike kind: a job finished before the daemon reported stats
     // has none, and there is nothing to infer.
     addColumn("jobs", "stats TEXT");
+    // The running job's live self-report. Nullable and, unlike stats,
+    // deliberately EMPTY most of the time: jobUpdate clears it the moment the
+    // job reaches a terminal state, because progress describes work in flight
+    // and a finished row showing "simulating, 43%" would be a lie.
+    addColumn("jobs", "progress TEXT");
+    // Held back by hand from the queue page. NOT NULL with a default, so every
+    // row that predates it reads as enabled, which is what they all were.
+    addColumn("jobs", "disabled INTEGER NOT NULL DEFAULT 0");
+    // Added after the other sample columns: a run's remaining-time estimate was
+    // reported from the start but only ever overwritten in place, so the rows
+    // written before this have none and chart as a gap.
+    addColumn("job_samples", "eta_sec REAL");
+    // Same story: reported from the start of the healthcheck but only ever
+    // shown live, so rows written before this chart as a gap.
+    addColumn("job_samples", "swap_bytes INTEGER");
     for (const col of [
       "settings TEXT",
       "rid TEXT",
@@ -658,7 +728,7 @@ export class ReplayIndex extends DurableObject<Env> {
    * replace a capture that exists with one that mostly repeats it.
    * "duplicate": a re-sim of this game is already queued or running — the
    * caller gets that job back, which makes re-pasting a link harmless. */
-  resimEnqueue(id: string, gameId: string): { status: "queued" | "in-catalog" | "duplicate"; job: IngestJob | null } {
+  resimEnqueue(id: string, gameId: string): JobEnqueue {
     // `placeholder = 0`: a row that only exists because the game is being
     // worked on right now is not a reason to refuse — "already published" would
     // be a lie, and the duplicate check just below is the honest answer, which
@@ -667,16 +737,45 @@ export class ReplayIndex extends DurableObject<Env> {
       .exec(`SELECT 1 FROM replays WHERE id = ? AND placeholder = 0`, gameId)
       .toArray();
     if (known.length > 0) return { status: "in-catalog", job: null };
+    return this.jobAnnounce(id, gameId, "resim");
+  }
+
+  /** jobAnnounce records work a DAEMON found for itself, so that it has a job
+   * row to be seen and reported on. It is resimEnqueue without the catalog
+   * refusal, which is the whole difference and the reason it exists.
+   *
+   * The daemon's catalog scan looks for games whose only upload is one-sided —
+   * a playing client's point of view — and re-simulates them for the full view.
+   * Every one of those is IN the catalog by definition, so resimEnqueue would
+   * refuse all of them; without this the work simply happened invisibly, an
+   * hour at a time, with its progress and its timings going nowhere but the
+   * daemon's own log on some other machine.
+   *
+   * Announcing is not queueing: the daemon is already doing this work, and the
+   * row exists to carry its progress, its stats and its outcome. It still
+   * dedupes on an ACTIVE job for the game, so two daemons scanning the same
+   * catalog hand back the same row and the loser's claim is refused. A job that
+   * already finished or failed does not block a fresh one — re-announcing is
+   * how a scan retries a game after the daemon restarts. */
+  jobAnnounce(id: string, gameId: string, kind: JobKind): JobEnqueue {
     const active = this.ctx.storage.sql
       .exec(
         `SELECT ${JOB_COLS} FROM jobs
-         WHERE game_id = ? AND kind = 'resim' AND state IN ('pending', 'processing')
+         WHERE game_id = ? AND kind = ? AND state IN ('pending', 'processing')
          ORDER BY created_unix, id LIMIT 1`,
         gameId,
+        kind,
       )
       .toArray();
-    if (active.length > 0) return { status: "duplicate", job: jobRow(active[0]) };
-    this.jobInsert(id, "", gameId, "resim");
+    // A held-back job still blocks a new one — that is exactly what "will not
+    // be picked up" means, and inserting a fresh row would walk straight around
+    // it. It gets its own status so the paste box can say WHY nothing will
+    // happen; a daemon treats anything but "queued" as not-its-work either way.
+    if (active.length > 0) {
+      const job = jobRow(active[0]);
+      return { status: job.disabled ? "disabled" : "duplicate", job };
+    }
+    this.jobInsert(id, "", gameId, kind);
     return { status: "queued", job: this.jobGet(id) };
   }
 
@@ -700,7 +799,8 @@ export class ReplayIndex extends DurableObject<Env> {
     return this.ctx.storage.sql
       .exec(
         `SELECT ${JOB_COLS} FROM jobs
-         WHERE kind = ? AND (state = 'pending' OR (state = 'processing' AND updated_unix < ?))
+         WHERE kind = ? AND disabled = 0
+           AND (state = 'pending' OR (state = 'processing' AND updated_unix < ?))
          ORDER BY created_unix, id`,
         kind,
         staleBefore,
@@ -858,23 +958,38 @@ export class ReplayIndex extends DurableObject<Env> {
    * `total` and `active` are counted over the WHOLE table, not the page, so a
    * pager can say how much it is paging through and the menu's in-flight count
    * stays true on any page. */
-  queuePage(limit: number, offset: number): { jobs: IngestJob[]; total: number; active: number } {
+  queuePage(limit: number, offset: number): { jobs: QueueJob[]; total: number; active: number } {
     const jobs = this.ctx.storage.sql
       .exec(
-        `SELECT ${JOB_COLS} FROM jobs
-         ORDER BY CASE WHEN state IN ('pending', 'processing') THEN 0 ELSE 1 END,
-                  updated_unix DESC, id
+        // The jobs table knows a gameId and nothing else about the game, so the
+        // duration and the team spec are joined on from whichever table knows
+        // them: the catalog first (what was captured), the games mirror second
+        // (what BAR published), which is what covers the re-sim of a game
+        // nobody has uploaded — most of this queue.
+        //
+        // EVERY column in the ORDER BY is qualified, and has to be: `id` is in
+        // all three tables and `updated_unix` is in two of them, so an
+        // unqualified one is an ambiguous-column error rather than a wrong
+        // answer.
+        `SELECT ${JOB_COLS_J},
+                COALESCE(r.duration_sec, g.duration_sec) AS game_duration_sec,
+                COALESCE(r.game_size, g.game_size)       AS game_size
+         FROM jobs j
+         LEFT JOIN replays r ON r.id = j.game_id
+         LEFT JOIN games   g ON g.id = j.game_id
+         ORDER BY CASE WHEN j.state IN ('pending', 'processing') AND j.disabled = 0 THEN 0 ELSE 1 END,
+                  j.updated_unix DESC, j.id
          LIMIT ? OFFSET ?`,
         limit,
         offset,
       )
       .toArray()
-      .map(jobRow);
+      .map(queueJobRow);
     // SUM over no rows is NULL, hence the coalesce.
     const counts = this.ctx.storage.sql
       .exec(
         `SELECT COUNT(*) AS total,
-                COALESCE(SUM(CASE WHEN state IN ('pending', 'processing') THEN 1 ELSE 0 END), 0) AS active
+                COALESCE(SUM(CASE WHEN state IN ('pending', 'processing') AND disabled = 0 THEN 1 ELSE 0 END), 0) AS active
          FROM jobs`,
       )
       .toArray()[0];
@@ -891,9 +1006,13 @@ export class ReplayIndex extends DurableObject<Env> {
    * think they had it. Returns false when the job is unknown or already held. */
   jobClaim(id: string, kind: JobKind): boolean {
     const window = kind === "resim" ? STALE_PROCESSING_RESIM_SEC : STALE_PROCESSING_SEC;
+    // progress is cleared with the claim: whatever it says was reported by the
+    // previous holder, and taking a stale job over means its last reading — a
+    // percentage from a daemon that died — must not be shown as this run's.
     const cur = this.ctx.storage.sql.exec(
-      `UPDATE jobs SET state = 'processing', error = NULL, updated_unix = ?
-       WHERE id = ? AND (state = 'pending' OR (state = 'processing' AND updated_unix < ?))`,
+      `UPDATE jobs SET state = 'processing', error = NULL, progress = NULL, updated_unix = ?
+       WHERE id = ? AND disabled = 0
+         AND (state = 'pending' OR (state = 'processing' AND updated_unix < ?))`,
       Math.floor(Date.now() / 1000),
       id,
       Math.floor(Date.now() / 1000) - window,
@@ -904,27 +1023,190 @@ export class ReplayIndex extends DurableObject<Env> {
     return true;
   }
 
-  /** jobUpdate transitions a job's state (daemon heartbeat / completion
+  /** jobSamples is one job's whole healthcheck history, oldest first — the
+   * series behind the queue page's charts. Empty for a job that never reported
+   * (an upload, or anything from a daemon older than the healthcheck). */
+  jobSamples(jobId: string): JobSample[] {
+    return this.ctx.storage.sql
+      .exec(
+        `SELECT at_unix, state, frame, percent, eta_sec, rss_bytes, swap_bytes, cpu_pct
+         FROM job_samples WHERE job_id = ? ORDER BY at_unix`,
+        jobId,
+      )
+      .toArray()
+      .map((r) => ({
+        atUnix: r.at_unix as number,
+        state: r.state as string | null,
+        frame: r.frame as number | null,
+        percent: r.percent as number | null,
+        etaSec: r.eta_sec as number | null,
+        rssBytes: r.rss_bytes as number | null,
+        swapBytes: r.swap_bytes as number | null,
+        cpuPct: r.cpu_pct as number | null,
+      }));
+  }
+
+  /** jobSampleRecord appends one healthcheck to the job's history.
+   *
+   * Every field is COERCED on the way in, which is not belt-and-braces: unlike
+   * everything else that has ever been done with a JobProgress, these land in
+   * typed SQL columns, and parseJobProgress is deliberately shallow because its
+   * fields were only ever displayed. A daemon (or anything else that can reach
+   * the open-ish job route) sending `{frame: {}}` would otherwise throw inside
+   * the bind and turn a healthcheck into a 500.
+   *
+   * `at` is the WORKER's clock, taken from the same now the state transition
+   * uses, so the time axis cannot be bent by a daemon with a skewed clock. */
+  private jobSampleRecord(jobId: string, at: number, p: JobProgress): void {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO job_samples (job_id, at_unix, state, frame, percent, eta_sec, rss_bytes, swap_bytes, cpu_pct)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(job_id, at_unix) DO UPDATE SET
+         state = excluded.state, frame = excluded.frame, percent = excluded.percent,
+         eta_sec = excluded.eta_sec, rss_bytes = excluded.rss_bytes,
+         swap_bytes = excluded.swap_bytes, cpu_pct = excluded.cpu_pct`,
+      jobId,
+      at,
+      typeof p.state === "string" ? p.state.slice(0, 64) : null,
+      finite(p.frame),
+      finite(p.percent),
+      finite(p.etaSec),
+      finite(p.rssBytes),
+      finite(p.swapBytes),
+      finite(p.cpuPct),
+    );
+    const n = this.ctx.storage.sql
+      .exec(`SELECT COUNT(*) AS n FROM job_samples WHERE job_id = ?`, jobId)
+      .toArray()[0].n as number;
+    if (n > MAX_JOB_SAMPLES) this.jobSampleThin(jobId);
+  }
+
+  /** jobSampleThin halves a job's series in place, keeping the first and last
+   * sample and every other one between. The chart keeps its full time span at
+   * half the resolution — which is the right thing to lose, unlike the start of
+   * the run (dropping the oldest) or the end of it (refusing to record). */
+  private jobSampleThin(jobId: string): void {
+    this.ctx.storage.sql.exec(
+      `DELETE FROM job_samples WHERE job_id = ? AND at_unix IN (
+         SELECT at_unix FROM (
+           SELECT at_unix, ROW_NUMBER() OVER (ORDER BY at_unix) AS rn,
+                  COUNT(*) OVER () AS total
+           FROM job_samples WHERE job_id = ?
+         ) WHERE rn % 2 = 0 AND rn <> total
+       )`,
+      jobId,
+      jobId,
+    );
+  }
+
+  /** jobSamplePrune drops the history of jobs that finished before `before`,
+   * and of any job row that is gone entirely. Called from the cron, which is
+   * the worker's only periodic hook; the table would otherwise be the one thing
+   * here that grows without a rule. Returns how many rows it removed. */
+  jobSamplePrune(before: number): number {
+    const cur = this.ctx.storage.sql.exec(
+      `DELETE FROM job_samples WHERE job_id IN (
+         SELECT s.job_id FROM (SELECT DISTINCT job_id FROM job_samples) s
+         LEFT JOIN jobs j ON j.id = s.job_id
+         WHERE j.id IS NULL OR (j.state IN ('done', 'error') AND j.updated_unix < ?)
+       )`,
+      before,
+    );
+    return cur.rowsWritten;
+  }
+
+  private jobIsDisabled(id: string): boolean {
+    const r = this.ctx.storage.sql.exec(`SELECT disabled FROM jobs WHERE id = ?`, id).toArray();
+    return r.length > 0 && r[0].disabled === 1;
+  }
+
+  /** jobSetDisabled holds a job back, or lets it go again. Returns false when
+   * the id is unknown.
+   *
+   * Disabling does two things, and the second is the one that is easy to miss:
+   * nothing will be OFFERED the job (jobsPending, jobClaim and the mirror
+   * backfill all skip it, and the backfill's "no job row at all" rule means the
+   * game behind it stays out of the auto-queue for good), and a job that was
+   * "processing" is RESET to pending. It has to be: disabling cannot reach into
+   * a daemon on somebody else's machine and stop its engine, so the row would
+   * otherwise sit at "processing" until the stale window expired and then be
+   * handed straight back out. Its progress goes with it — a reading from a run
+   * nobody is watching for any more describes nothing.
+   *
+   * The samples are deliberately kept: they are the record of work that really
+   * did happen, and the charts are the reason anyone would look at a job they
+   * had to turn off. */
+  jobSetDisabled(id: string, disabled: boolean): boolean {
+    const cur = this.ctx.storage.sql.exec(
+      `UPDATE jobs SET disabled = ?,
+              state = CASE WHEN ? = 1 AND state = 'processing' THEN 'pending' ELSE state END,
+              progress = CASE WHEN ? = 1 THEN NULL ELSE progress END,
+              updated_unix = ?
+       WHERE id = ?`,
+      disabled ? 1 : 0,
+      disabled ? 1 : 0,
+      disabled ? 1 : 0,
+      Math.floor(Date.now() / 1000),
+      id,
+    );
+    if (cur.rowsWritten === 0) return false;
+    // A placeholder row exists only because a game is being worked on; with the
+    // job stopped there is nothing being worked on and nothing published, so it
+    // must not be left in the replay list as an un-openable entry. (The guard
+    // inside checks no OTHER job is processing the same game.)
+    const job = this.jobGet(id);
+    if (job !== null && disabled) this.dropCatalogPlaceholder(job.gameId);
+    return true;
+  }
+
+  /** jobUpdate transitions a job's state (daemon healthcheck / completion
    * report). Returns false when the job id is unknown.
    *
-   * `stats` is COALESCEd, unlike error: a heartbeat reports none and must not
+   * `stats` is COALESCEd, unlike error: a healthcheck reports none and must not
    * wipe what a previous report recorded, and there is nothing a daemon could
-   * usefully mean by "the stats are now nothing". */
+   * usefully mean by "the stats are now nothing".
+   *
+   * `progress` is COALESCEd the same way WHILE the job runs — an older daemon,
+   * or a bare claim, simply carries none — and then CLEARED by the terminal
+   * state, which is the one place its meaning inverts: progress describes work
+   * in flight, so a finished row keeping its last reading would show "43%,
+   * 12 minutes left" forever. From then on the stats are the record. */
   jobUpdate(
     id: string,
     state: "processing" | "done" | "error",
     error: string | null,
     stats: JobStats | null = null,
+    progress: JobProgress | null = null,
   ): boolean {
+    // One clock reading for the row and its sample, so a beat's point on the
+    // chart is stamped with the same moment the row says it was updated.
+    const now = Math.floor(Date.now() / 1000);
+    // A daemon that was mid-run when the job was disabled keeps beating for as
+    // long as its engine runs — disabling does not (and cannot) stop it. Its
+    // HEARTBEATS are ignored, or they would put the row straight back into
+    // "processing" and undo the reset a second after it happened. Its terminal
+    // report is still taken: the work happened, and what came of it is worth
+    // recording even though nobody wanted it any more.
+    if (state === "processing" && this.jobIsDisabled(id)) return true;
     const cur = this.ctx.storage.sql.exec(
-      `UPDATE jobs SET state = ?, error = ?, stats = COALESCE(?, stats), updated_unix = ? WHERE id = ?`,
+      `UPDATE jobs SET state = ?, error = ?, stats = COALESCE(?, stats),
+              progress = CASE WHEN ? = 'processing' THEN COALESCE(?, progress) ELSE NULL END,
+              updated_unix = ?
+       WHERE id = ?`,
       state,
       error,
       stats === null ? null : JSON.stringify(stats),
-      Math.floor(Date.now() / 1000),
+      state,
+      progress === null ? null : JSON.stringify(progress),
+      now,
       id,
     );
     if (cur.rowsWritten === 0) return false;
+    // The live reading is overwritten in place above; here it is also KEPT, so
+    // the run has a history to chart afterwards. Only while the job is running,
+    // and only when there is something to record — a terminal report carries no
+    // progress, and the beats already recorded are the run's record.
+    if (state === "processing" && progress !== null) this.jobSampleRecord(id, now, progress);
     // The catalog follows the job either way: into the list when work starts
     // (this is the other door into "processing" — a daemon that reports it
     // without claiming, and every heartbeat, which is harmless since the row
@@ -937,6 +1219,17 @@ export class ReplayIndex extends DurableObject<Env> {
     }
     return true;
   }
+}
+
+/** queueJobRow is jobRow plus what the join found out about the game. The
+ * `game` field is null only when NEITHER table knows the id — a drag&drop
+ * upload of a private lobby the BAR API never indexed, say. */
+function queueJobRow(r: Record<string, unknown>): QueueJob {
+  const durationSec = (r.game_duration_sec as number | null) ?? null;
+  const gameSize = (r.game_size as string | null) ?? null;
+  const game: QueueGame | null =
+    durationSec === null && gameSize === null ? null : { durationSec, gameSize };
+  return { ...jobRow(r), game };
 }
 
 function jobRow(r: Record<string, unknown>): IngestJob {
@@ -953,16 +1246,32 @@ function jobRow(r: Record<string, unknown>): IngestJob {
     // Stored as JSON text. A row written before the column, or one whose
     // daemon never reported, has none — and a blob that somehow does not parse
     // is not worth failing a queue read over.
-    stats: parseStoredStats(r.stats as string | null),
+    stats: parseStored(r.stats as string | null, parseJobStats),
+    // Only ever set while the job is running (jobUpdate clears it on the
+    // terminal state), so null here is the normal case, not a gap.
+    progress: parseStored(r.progress as string | null, parseJobProgress),
+    disabled: (r.disabled as number | null) === 1,
     createdUnix: r.created_unix as number,
     updatedUnix: r.updated_unix as number,
   };
 }
 
-function parseStoredStats(raw: string | null): JobStats | null {
+/** finite coerces one wire-supplied field to something a numeric SQL column
+ * will accept. Anything that is not a real number — a string, an object, NaN,
+ * a missing field — becomes NULL, which is exactly what "the daemon did not
+ * measure this" already means everywhere else here. */
+function finite(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/** parseStored re-reads one of the jobs table's JSON columns through the same
+ * validator the wire goes through. A column that is null, or holds a blob that
+ * somehow does not parse, yields null rather than failing the read: these are
+ * shown, not computed with, and a queue page is not worth losing over one. */
+function parseStored<T>(raw: string | null, parse: (v: unknown) => T | null): T | null {
   if (raw == null) return null;
   try {
-    return parseJobStats(JSON.parse(raw));
+    return parse(JSON.parse(raw));
   } catch {
     return null;
   }
