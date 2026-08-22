@@ -279,3 +279,58 @@ Two structural questions were asked and answered rather than assumed:
 
 Remaining candidates are the queue above, all ~1-3% and each needing the
 instruction meter to see at all.
+
+## H30 upstream submission + a fourth replay (2026-08-22)
+
+H30 was prepared for upstream as two branches in the recoil clone
+(`perf/yardmap-exit-only-patch`, the change alone; `perf/yardmap-exit-only-grid`,
+plus the harness and a `BENCHMARKING.md`), and re-measured **on its own** rather
+than on top of the stack. A fourth replay was added for it:
+
+| name | gameId | game | frames |
+|---|---|---|---|
+| isthmus | 6122896ac3328104d12093d975c61214 | 8v8, Supreme Isthmus v2.1, 27:31 | 49380 |
+
+Reference (release binary): `92d96a13d4743928d45ac7331df28d7d`, sim 8m05s,
+102 fps, 275 MB widget stream — the heaviest workload in the set.
+
+**H30 alone, whole run, wt=1, min-of-3:**
+
+| | medium (13:25) | isthmus (27:31) |
+|---|---|---|
+| instructions | 623.6e9 -> 525.1e9 (**-15.8%**) | 2118.9e9 -> 1884.3e9 (**-11.1%**) |
+| wall, default workers, interleaved | 125.8s -> 120.2s (-4.4%, 3/4) | 496.3s -> 481.3s (-3.0%, 3/3) |
+
+Byte-identical on all four replays with H30 alone.
+
+**The gain SHRINKS on the bigger game** — the opposite of the "more units, more
+collision queries" intuition that motivated the hypothesis. Stock IPC is 1.02 on
+isthmus against 1.46 on medium: the larger game is much more memory-bound
+overall, so the same removed work is a smaller share of a simulation that spends
+more of its time stalled. Worth remembering when the next hypothesis is
+justified by "it should scale with unit count".
+
+### Measurement correction: cycles and CPU time are NOT resolvable here
+
+Chasing that difference exposed an error in the first draft of the submission,
+which claimed **-21.6% CPU in SimFrame** and explained that "cycles fall further
+than instructions because the skipped scans are memory-latency-bound". Both came
+from **n=1** measurements. At n=3:
+
+| counter | run-to-run spread, ONE unchanged binary |
+|---|---|
+| instructions | 1-3% whole run (0.1-0.6% over a 3000-frame window) |
+| cycles | 2-15% |
+| CPU time in SimFrame | 2-15% |
+
+On medium that spread is *wider than the effect*, and the cycles claim reversed
+sign once averaged (-11.7%, i.e. LESS than instructions' -15.8%). Both claims
+were removed from the commit messages and `BENCHMARKING.md` now reports the
+spreads instead of the numbers.
+
+This is the round-1 lesson again, one metric further in: the instruction meter
+was adopted precisely because wall time drifts here, and then cycles and
+thread-CPU — which come off the same `perf_event_open` call and *look* like
+hardware truth — were quoted from single runs anyway. `tools/summarize.py`
+aggregates the bench files into min-of-N with the per-binary spread; run it
+before quoting any counter.

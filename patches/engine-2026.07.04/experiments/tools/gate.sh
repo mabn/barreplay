@@ -9,6 +9,7 @@ case "${1:?name}" in
   small)  ID=d53f896a4c7276e66540d53d13f3a31e ;;
   medium) ID=4936896a8b258d038cbd28f55eb15ed2 ;;
   large)  ID=d03a896a204dd8f8a4b4c488cfaec73e ;;
+  isthmus) ID=6122896ac3328104d12093d975c61214 ;;
   *) echo "unknown replay $1"; exit 2 ;;
 esac
 NAME=$1; shift
