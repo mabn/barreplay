@@ -336,3 +336,108 @@ func firstLineWith(s, sub string) string {
 	}
 	return ""
 }
+
+// writeEngineDir lays out <data>/engine/<version>/ with the named binaries.
+func writeEngineDir(t *testing.T, data, version string, names ...string) string {
+	t.Helper()
+	dir := filepath.Join(data, "engine", version)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range names {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("#!/bin/true\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+func TestLocatePrefersPatchedEngineWhenAsked(t *testing.T) {
+	data := t.TempDir()
+	dir := writeEngineDir(t, data, "2026.07.04", headlessName(), patchedHeadlessName())
+
+	e, err := Locate(Config{DataDir: data, SkipProvision: true, PatchedEngine: true}, "2026.07.04")
+	if err != nil {
+		t.Fatalf("Locate: %v", err)
+	}
+	if want := filepath.Join(dir, patchedHeadlessName()); e.HeadlessPath() != want {
+		t.Errorf("HeadlessPath = %q, want the patched build %q", e.HeadlessPath(), want)
+	}
+	if !e.Patched() {
+		t.Error("Patched() = false, want true")
+	}
+}
+
+func TestLocateIgnoresPatchedEngineByDefault(t *testing.T) {
+	data := t.TempDir()
+	dir := writeEngineDir(t, data, "2026.07.04", headlessName(), patchedHeadlessName())
+
+	e, err := Locate(Config{DataDir: data, SkipProvision: true}, "2026.07.04")
+	if err != nil {
+		t.Fatalf("Locate: %v", err)
+	}
+	if want := filepath.Join(dir, headlessName()); e.HeadlessPath() != want {
+		t.Errorf("HeadlessPath = %q, want the stock build %q", e.HeadlessPath(), want)
+	}
+	if e.Patched() {
+		t.Error("Patched() = true without Config.PatchedEngine")
+	}
+}
+
+// No patched build for this version is a fallback, not a failure: nothing
+// downloads one, so a host will routinely meet versions nobody has patched.
+func TestLocateFallsBackToStockWithoutPatchedBuild(t *testing.T) {
+	data := t.TempDir()
+	dir := writeEngineDir(t, data, "2026.07.04", headlessName())
+
+	e, err := Locate(Config{DataDir: data, SkipProvision: true, PatchedEngine: true}, "2026.07.04")
+	if err != nil {
+		t.Fatalf("Locate: %v", err)
+	}
+	if want := filepath.Join(dir, headlessName()); e.HeadlessPath() != want {
+		t.Errorf("HeadlessPath = %q, want the stock build %q", e.HeadlessPath(), want)
+	}
+	if e.Patched() {
+		t.Error("Patched() = true, but no patched build was installed")
+	}
+}
+
+// The patched lookup must not wander to another version. findBinary's wildcard
+// scan would hand back 2026.06.11's patched binary for a 2026.07.04 replay, and
+// because Locate hard-errors on a version mismatch it did not choose, one
+// patched build on the host would then fail every job for every other version.
+func TestLocateDoesNotBorrowAnotherVersionsPatchedBuild(t *testing.T) {
+	data := t.TempDir()
+	writeEngineDir(t, data, "2026.06.11", patchedHeadlessName())
+	dir := writeEngineDir(t, data, "2026.07.04", headlessName())
+
+	e, err := Locate(Config{DataDir: data, SkipProvision: true, PatchedEngine: true}, "2026.07.04")
+	if err != nil {
+		t.Fatalf("Locate: %v", err)
+	}
+	if want := filepath.Join(dir, headlessName()); e.HeadlessPath() != want {
+		t.Errorf("HeadlessPath = %q, want this version's stock build %q", e.HeadlessPath(), want)
+	}
+	if e.Patched() {
+		t.Error("Patched() = true, but the only patched build is another version's")
+	}
+}
+
+// An explicit -engine is the operator naming a binary; the patched preference
+// must not override it.
+func TestLocateExplicitBinaryBeatsPatchedPreference(t *testing.T) {
+	data := t.TempDir()
+	dir := writeEngineDir(t, data, "2026.07.04", headlessName(), patchedHeadlessName())
+	pick := filepath.Join(dir, headlessName())
+
+	e, err := Locate(Config{DataDir: data, SkipProvision: true, PatchedEngine: true, EngineBinary: pick}, "2026.07.04")
+	if err != nil {
+		t.Fatalf("Locate: %v", err)
+	}
+	if e.HeadlessPath() != pick {
+		t.Errorf("HeadlessPath = %q, want the explicitly named %q", e.HeadlessPath(), pick)
+	}
+	if e.Patched() {
+		t.Error("Patched() = true, but -engine named the stock binary")
+	}
+}
