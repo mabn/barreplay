@@ -209,6 +209,45 @@ to the local DO:
 curl http://127.0.0.1:5173/cdn-cgi/handler/scheduled
 ```
 
+### Lobby names (teiserver poll)
+
+The same cron tick also polls **teiserver's web UI** for the active lobbies
+(`src/worker/teiserver.ts` — parsers and session adapted from `mabn/claudebar`):
+
+```
+GET https://server4.beyondallreason.info/battle/lobbies
+```
+
+The point is the **lobby name** ("Chillmus most welcome | 8v8"), which exists nowhere in
+BAR's published history — it is only observable **live**, so the poll opens an observation
+(DO table `lobbies`) the first tick a lobby is seen in progress: name, map, `started_unix`
+back-dated by the page's own running clock, and the **non-spectator roster** from one
+`/battle/lobbies/show/<id>` fetch (spectators churn too much to be a signal; the roster is
+captured at the start, when it is most trustworthy). When the finished game later appears
+in the rts-api mirror, `ReplayIndex.lobbiesMatch` pairs observation and game — no shared
+id exists, so the match is heuristic: same **map** (normalized), **start time** within
+`[-60 s, +300 s]`, and ≥ 50% **roster overlap** (lowercased names; a roster-less
+observation matches on map+time alone but loses to any real roster). Best candidate wins
+ties (smaller Δt); each side matches at most once. The winner's name lands in
+`games.lobby_name` (+ `lobby_id`), which a later re-sync cannot erase — the column is
+deliberately outside `gamesInsert`'s upsert list. Matched observations are pruned after
+48 h; unmatched ones are kept as the record of why a game has no name.
+
+The teiserver **web session** (the Guardian cookie jar) persists in the one-row DO table
+`teiserver_session`, so the steady state is **one authed GET per minute** — no re-login —
+plus one show-page fetch per newly started lobby (0-2 in practice). Login happens only
+when the stored session is missing or expired (a redirect back to `/login`).
+
+Credentials are secrets, and without them the step is **skipped entirely**:
+
+```sh
+npx wrangler secret put TEISERVER_EMAIL
+npx wrangler secret put TEISERVER_PASSWORD
+```
+
+For local dev put them in `.dev.vars`; `TEISERVER_BASE` there points the poll at a mock
+server instead of the real one (never set it in production).
+
 ### Feeding the re-sim daemon
 
 `GET /api/jobs?kind=resim` (the daemon's poll) does not come back empty while the mirror
