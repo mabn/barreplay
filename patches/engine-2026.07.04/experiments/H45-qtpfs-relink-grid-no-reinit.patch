@@ -1,0 +1,37 @@
+From 79133fb41ed3f134907417a7a06357d88e87b460 Mon Sep 17 00:00:00 2001
+From: Claude <claude@mabn.pl>
+Date: Sat, 22 Aug 2026 10:54:52 +0200
+Subject: [PATCH 14/15] QTPFS relink grid: grow-only, skip per-event O(area)
+ nullptr re-init
+
+Re-authored for 2026.07.04 (the clear()+resize() pair round-1's patch matched
+is now a single assign()).
+---
+ rts/Sim/Path/QTPFS/NodeLayer.cpp | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Sim/Path/QTPFS/NodeLayer.cpp b/rts/Sim/Path/QTPFS/NodeLayer.cpp
+index e64ec11..a6edb8e 100644
+--- a/rts/Sim/Path/QTPFS/NodeLayer.cpp
++++ b/rts/Sim/Path/QTPFS/NodeLayer.cpp
+@@ -271,7 +271,16 @@ void QTPFS::NodeLayer::ExecNodeNeighborCacheUpdates(const SRectangle& ur, Update
+ 	SRectangle searchArea(xmin, zmin, xmax, zmax);
+ 	GetNodesInArea(searchArea, selectedNodes);
+ 
+-	threadData.relinkNodeGrid.assign(threadData.areaRelinked.GetArea(), nullptr);
++	// [barreplay H45] grow-only, no per-event nullptr re-init: every cell the
++	// edge and corner walks read is written by THIS event's fill loop first
++	// (nodes tile the area, so the cell adjacent to a selected node's edge is
++	// the neighbouring leaf's own edge cell, which the fill pattern covers).
++	// The walks dereference the cell immediately with no null check, so an
++	// unwritten-cell read would already be a nullptr crash in release — the
++	// per-event O(area) memset was pure initialisation overhead, and no stale
++	// pointer is ever read.
++	if (threadData.relinkNodeGrid.size() < size_t(threadData.areaRelinked.GetArea()))
++		threadData.relinkNodeGrid.resize(threadData.areaRelinked.GetArea(), nullptr);
+ 
+ 	// Build grid with selected nodes.
+ 	std::for_each(selectedNodes.begin(), selectedNodes.end(), [&threadData](INode *curNode){
+-- 
+2.47.3
+

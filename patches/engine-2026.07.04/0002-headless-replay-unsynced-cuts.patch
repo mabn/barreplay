@@ -1,0 +1,101 @@
+From c835644fce9e78b3bf24b2d86b65b0751946c6e0 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 7 Jul 2026 02:49:56 +0000
+Subject: [PATCH 03/15] headless demo replay: silence unsynced gadget callins,
+ expire unsynced projectiles
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two output-safe cuts, both gated on HEADLESS && gameSetup->hostDemo:
+
+- CUnsyncedLuaHandle::Init: register no event client, so the unsynced
+  halves of LuaRules/LuaGaia (game gadget draw-side) receive no per-frame
+  callins. They stay loaded and SendToUnsynced->RecvFromSynced still works
+  (direct cross-state call, not an event). Unsynced Lua cannot write
+  synced state, so the sim input/output is unaffected. LuaUI (the
+  snapshot widget) registers elsewhere and is untouched.
+
+- CProjectileHandler::AddProjectile: mark unsynced (render-only)
+  projectiles deleteMe on arrival. Headless already runs with
+  MaxParticles=0/MaxNanoParticles=0 (headlessValue), but many spawn sites
+  never consult the budget; their particles previously lived their full
+  lifetime in Sim::Projectiles::UpdateUnsyncedMT (~12 s/8v8 profiled).
+  Spawn cost was already paid before this change; only the per-frame
+  updates disappear.
+
+Output verified byte-identical on both benchmark replays. Timing: within
+this VM's ±10% noise floor (small-replay A/B parity); bundled with later
+patches for a paired final measurement.
+---
+ rts/Lua/LuaHandleSynced.cpp               | 12 ++++++++++++
+ rts/Sim/Projectiles/ProjectileHandler.cpp | 15 +++++++++++++--
+ 2 files changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Lua/LuaHandleSynced.cpp b/rts/Lua/LuaHandleSynced.cpp
+index 9ae6a0f..a1ea095 100644
+--- a/rts/Lua/LuaHandleSynced.cpp
++++ b/rts/Lua/LuaHandleSynced.cpp
+@@ -34,6 +34,7 @@
+ #include "LuaZip.h"
+ 
+ #include "Game/Game.h"
++#include "Game/GameSetup.h"
+ #include "Game/WordCompletion.h"
+ #include "Sim/Misc/GlobalSynced.h"
+ #include "Sim/Misc/TeamHandler.h"
+@@ -159,7 +160,18 @@ bool CUnsyncedLuaHandle::Init(std::string code, const std::string& file)
+ 	}
+ 
+ 	lua_settop(L, 0);
++#ifdef HEADLESS
++	// [barreplay] in a headless demo replay the unsynced halves of LuaRules /
++	// LuaGaia only feed rendering. Leave them loaded (cross-state setup and
++	// SendToUnsynced->RecvFromSynced still work - that is a direct call, not
++	// an event) but register no event client, so their per-frame callins
++	// (GameFrame, Update, Draw*) never run. Unsynced Lua cannot write synced
++	// state, so the simulation is unaffected.
++	if (gameSetup == nullptr || !gameSetup->hostDemo)
++		eventHandler.AddClient(this);
++#else
+ 	eventHandler.AddClient(this);
++#endif
+ 	return true;
+ }
+ 
+diff --git a/rts/Sim/Projectiles/ProjectileHandler.cpp b/rts/Sim/Projectiles/ProjectileHandler.cpp
+index aa4ff0c..9933a76 100644
+--- a/rts/Sim/Projectiles/ProjectileHandler.cpp
++++ b/rts/Sim/Projectiles/ProjectileHandler.cpp
+@@ -5,6 +5,7 @@
+ #include "Projectile.h"
+ #include "ProjectileHandler.h"
+ #include "ProjectileMemPool.h"
++#include "Game/GameSetup.h"
+ #include "Game/GlobalUnsynced.h"
+ #include "Game/TraceRay.h"
+ #include "Map/Ground.h"
+@@ -368,8 +369,18 @@ void CProjectileHandler::AddProjectile(CProjectile* p)
+ 
+ 	if (p->synced)
+ 		p->id = static_cast<int>(projectiles[true ].Add(p, rngFuncs[true]));
+-	else
+-		p->id = static_cast<int>(projectiles[false].Add(p)); //don't bother with shuffling unsynced ids 
++	else {
++		p->id = static_cast<int>(projectiles[false].Add(p)); //don't bother with shuffling unsynced ids
++#ifdef HEADLESS
++		// [barreplay] unsynced projectiles are render-only decoration (nano
++		// spray, smoke, flying pieces); in a headless demo replay nothing ever
++		// draws them, so expire them on arrival - the regular deletion sweep
++		// frees them and the unsynced update loop stays empty. Synced code
++		// never reads the unsynced container, so the sim is unaffected.
++		if (gameSetup != nullptr && gameSetup->hostDemo)
++			p->deleteMe = true;
++#endif
++	}
+ 
+ 	if (p->synced) {
+ 		ASSERT_SYNCED(freeIDs.size());
+-- 
+2.47.3
+

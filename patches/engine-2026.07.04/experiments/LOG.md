@@ -81,3 +81,67 @@ Diffing the round-1 patch targets across the two tags, before testing anything:
 3. Re-test each round-1 hypothesis in order, each gated + measured on the new
    engine, dropping the ones upstream absorbed.
 4. Fresh profile of the new engine, then new hypotheses.
+
+---
+
+# Round 2 results
+
+## Foundation
+
+**Source build == release binary.** Unpatched 2026.07.04 built in the pinned
+image gates IDENTICAL against the release-binary references on small AND
+medium. (Two false alarms on the way, both worth recording:)
+
+1. `-engine` pointed at a loose binary outside `<data>/engine/<ver>/` — the
+   engine looks for `base/springcontent.sdz` NEXT TO ITS OWN BINARY, so the run
+   died with "failed to open archive 'Spring content v1'" and wrote an empty
+   capture that the gate faithfully reported as a DIFF. The harness now swaps
+   the binary INSIDE the engine dir, which is what round 1 did.
+2. A real determinism bug in barreplay, fixed on the branch: `parseStartscript`
+   collected the roster by ranging a Go MAP, so player order was per-process
+   random and the meta record differed between two runs of ONE binary while
+   every frame/event/comm section matched byte for byte. The .brp writer's
+   "same capture -> byte-identical file" guarantee is the whole verification
+   method here, so this had to be fixed before anything could be measured.
+
+**Measurement.** Instruction meter re-validated: spread 0.12–0.61% over
+min-of-3 (round 1 saw 0.02–0.35%), so the same rule holds — instructions decide,
+wall only above ~4%. `kernel.perf_event_paranoid` must be <= 1 or
+`perf_event_open` silently returns 0 counters (it defaults to 3 after a reboot;
+the harness reads instructions=0 and the min-of-N divides by zero).
+
+Baseline: **56.606e9 instructions** over medium frames [6000,9000) at wt=1,
+sim 2m1s / 200 fps, load 12s.
+
+## Per-hypothesis results (each gated byte-identical on medium)
+
+| # | verdict | instructions | note |
+|---|---|---|---|
+| 0001 unpaced playback | **KEPT** | n/a (pacing) | **wall 200 -> 235 fps (-15%)**; Sim share 42% -> 63%, Draw 8% -> 3% |
+| 0002 unsynced cuts | KEPT (flat) | +0.37% | as round 1: the Unsynced scope barely moves (22330 -> 22227 ms) because it is the SNAPSHOT WIDGET, not the gadget halves |
+| H1 prev-frame transform | **KEPT** | **-3.68%** | round 1 measured -4% wall on medium; holds |
+| H2 anim sort/BFS scratch | KEPT | -0.67% | much smaller than round 1's -7.3% |
+| H3 threadpool clock storm | KEPT | flat (cycles -2.2%) | re-authored; worker-side, invisible to a wt=1 meter by construction |
+| H4 eager piece walk | KEPT | -0.04% | flat, as round 1 |
+| H5 for_mt batch claiming | KEPT | -0.37% | |
+| H6 COB unchecked fetch | KEPT | +0.08% | flat, as round 1 |
+| H23 anim switch dispatch | KEPT | -0.08% | re-authored; value-identical by construction |
+| H31 flat collision cache | **KEPT** | **-1.08%** | round 1: -1.69% |
+| H30 coarse exit-only grid | **KEPT** | **-16.3%** ★ | round 1: -5.95%. Re-authored onto the tiled yardmap — and it is now by far the biggest single win |
+| H21 COB jump table | **KEPT** | **-0.76%** | round 1: -0.46% |
+| H45 QTPFS relink grid | KEPT | -0.34% | re-authored; round 1: -0.13% |
+| H49 skip .smt tiles | **KEPT** | n/a (load) | **load 12s -> 9s (-25%)** |
+| H29 yardmap row-major | **DROPPED** | — | upstream: 2026.07.04 tiles the map 8x8 per cache line |
+
+Four of the fifteen needed re-authoring rather than re-applying (H3, H23, H30,
+H45); H30 needed a genuine rewrite because round 1 had built it on H29.
+
+## Where round 2 stands
+
+Cumulative on medium, all byte-identical: **56.606e9 -> 44.428e9 instructions
+= -21.5%**, wall **200 -> 239 fps (sim 2m1s -> 1m41s, -16%)**, load **12s -> 9s**.
+
+The shape of the win moved: round 1's biggest instruction lever (H29) is
+upstream, and the yardmap fast-reject that was worth -6% there is worth -16%
+here — the same hypothesis, a different engine, a different answer. That is the
+argument for re-running the whole set rather than porting the kept stack.

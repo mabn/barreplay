@@ -1,0 +1,55 @@
+From 59fe3a1c6dc58259c6c1e7ea35ff670b929f6e3b Mon Sep 17 00:00:00 2001
+From: Claude <claude@mabn.pl>
+Date: Sat, 22 Aug 2026 10:31:52 +0200
+Subject: [PATCH 10/15] TickAllAnims: direct switch dispatch instead of
+ member-ptr table
+
+Re-authored for 2026.07.04 (the call site gained a doneAnims.clear() and an
+extra paren pair, so round-1's H23 patch no longer applies).
+
+Value-identical by construction: same function per animType, same order.
+---
+ rts/Sim/Units/Scripts/UnitScript.cpp | 20 +++++++++++++++-----
+ 1 file changed, 15 insertions(+), 5 deletions(-)
+
+diff --git a/rts/Sim/Units/Scripts/UnitScript.cpp b/rts/Sim/Units/Scripts/UnitScript.cpp
+index 95086a4..fb2f4a9 100644
+--- a/rts/Sim/Units/Scripts/UnitScript.cpp
++++ b/rts/Sim/Units/Scripts/UnitScript.cpp
+@@ -217,9 +217,6 @@ void CUnitScript::TickAllAnims(int deltaTime)
+ 		animsDirty = false;
+ 	}
+ 
+-	// tick-functions; these never change address
+-	static constexpr std::array<TickAnimFunc, ACount> TICK_ANIM_FUNCS = { &CUnitScript::TickTurnAnim, &CUnitScript::TickSpinAnim, &CUnitScript::TickMoveAnim, &CUnitScript::TickScaleAnim };
+-
+ 	const int tickRate = 1000 / deltaTime;
+ 
+ 	// clear doneAnims here to preserve them for DumpState
+@@ -227,8 +224,21 @@ void CUnitScript::TickAllAnims(int deltaTime)
+ 
+ 	for (auto& ai : anims) {
+ 		LocalModelPiece& lmp = *pieces[ai.piece];
+-		const auto& currFunc = TICK_ANIM_FUNCS[ai.animType];
+-		if ((ai.done |= std::invoke(currFunc, this, tickRate, lmp, ai))) {
++		// [barreplay H23] direct switch instead of std::invoke on a
++		// runtime-indexed member-function-pointer table: the target is a runtime
++		// value (ai.animType), so the pointer call can never be devirtualized,
++		// while this switch lets the compiler inline each small Tick*Anim body.
++		// Same function per animType (the order the table had: Turn/Spin/Move/
++		// Scale = 0/1/2/3), so results and side effects are bit-identical.
++		bool finished = false;
++		switch (ai.animType) {
++			case ATurn:  finished = TickTurnAnim (tickRate, lmp, ai); break;
++			case ASpin:  finished = TickSpinAnim (tickRate, lmp, ai); break;
++			case AMove:  finished = TickMoveAnim (tickRate, lmp, ai); break;
++			case AScale: finished = TickScaleAnim(tickRate, lmp, ai); break;
++			default: assert(false); break;
++		}
++		if ((ai.done |= finished)) {
+ 			if (ai.hasWaiting)
+ 				doneAnims.emplace_back(ai);
+ 		}
+-- 
+2.47.3
+

@@ -1,0 +1,15 @@
+base   | (release==source, small+medium IDENTICAL) | base: min_instr=56606204989
+h0001  | medium: IDENTICAL sim 1m43s 235fps (was 200) | small: IDENTICAL 472fps (was 444) | wall -15% medium
+h0002 | medium: IDENTICAL  sim 1m49s (24150 frames, 222 fps | h0002: min_instr=56814145510 n=3 spread=0.120% min_cycles=28720748359
+h1 | medium: IDENTICAL  sim 1m39s (24150 frames, 245 fps | h1: min_instr=54723101363 n=3 spread=0.326% min_cycles=27924748983
+h2 | medium: IDENTICAL  sim 1m44s (24150 frames, 233 fps | h2: min_instr=54355025928 n=3 spread=0.203% min_cycles=27487465285
+h3 | medium: IDENTICAL  sim 1m40s (24150 frames, 242 fps | h3: min_instr=54376600363 n=3 spread=0.131% min_cycles=26874266741
+h4 | medium: IDENTICAL  sim 1m43s (24150 frames, 235 fps | h4: min_instr=54354062018 n=3 spread=0.182% min_cycles=26834950831
+h5 | medium: IDENTICAL  sim 1m40s (24150 frames, 242 fps | h5: min_instr=54154889242 n=3 spread=0.612% min_cycles=27989369714
+h6 | medium: IDENTICAL  sim 1m42s (24150 frames, 236 fps | h6: min_instr=54199910653 n=3 spread=0.482% min_cycles=26877001356
+h23 | medium: IDENTICAL  sim 1m43s (24150 frames, 235 fps | h23: min_instr=54156538301 n=3 spread=0.477% min_cycles=27290049239
+h31 | medium: IDENTICAL  sim 1m41s (24150 frames, 240 fps | h31: min_instr=53573837295 n=3 spread=0.493% min_cycles=26234130098
+h30 | medium: IDENTICAL  sim 1m43s (24150 frames, 234 fps | h30: min_instr=44831458083 n=3 spread=0.403% min_cycles=23787095465
+h21 | medium: IDENTICAL  sim 1m38s (24150 frames, 245 fps | h21: min_instr=44489831569 n=3 spread=0.256% min_cycles=24265481172
+h45 | medium: IDENTICAL  sim 1m39s (24150 frames, 244 fps | h45: min_instr=44336928250 n=3 spread=0.568% min_cycles=23980005354
+h49 | medium: IDENTICAL  sim 1m41s (24150 frames, 239 fps | h49: min_instr=44428157569 n=3 spread=0.161% min_cycles=24746495628
