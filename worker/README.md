@@ -84,7 +84,10 @@ in flight rather than about the replay:
 - `processing` — some job for this game is in `processing`. Computed on every read as an
   `EXISTS` over the jobs table, never stored, so nothing has to remember to clear it: it
   goes false the moment the job stops running, however it stopped. The list shows it as a
-  **pill at the head of the Settings cell** — filled and pulsing among the muted setting
+  **pill at the head of the Settings cell** — "processing: 52%" once the job reports a
+  percentage (read off the jobs row's live progress at the same moment `processing` is
+  derived, as `processingPercent`), the bare word through the phases with nothing to
+  measure — filled and pulsing among the muted setting
   badges, because it is not a setting, it is why the row is there.
 - `placeholder` — the row exists *only* because a job is working on the game; nothing has
   been published. The DO inserts one whenever a job enters `processing` (seeded from the

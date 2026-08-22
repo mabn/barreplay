@@ -4501,7 +4501,7 @@ function renderQueue(errMsg) {
       const g = j.game || {};
       const size = cell(g.gameSize || null, 'size');
       if (g.gameSize) size.title = g.gameSize + ' — the team spec BAR recorded';
-      const dur = cell(g.durationSec ? fmtDuration(g.durationSec) : null, 'dur');
+      const dur = cell(g.durationSec ? fmtGameDuration(g.durationSec) : null, 'dur');
       if (g.durationSec) dur.title = fmtDur(g.durationSec) + ' of game time';
     }
     // Out to gex, which is where a BAR game gets read properly. Always
@@ -4798,8 +4798,8 @@ function renderHome(errMsg) {
       td.appendChild(a);
       tr.appendChild(td);
     };
-    cell(e.startUnix ? fmtDate(e.startUnix) : null);
-    cell(e.durationSec != null ? fmtDuration(e.durationSec) : null);
+    cell(e.startUnix ? fmtDateShort(e.startUnix) : null);
+    cell(e.durationSec != null ? fmtGameDuration(e.durationSec) : null);
     // Map: a small terrain thumbnail from BAR's maps API next to the name.
     // The API keys on the map's ARCHIVE file name; rows the games mirror
     // knows carry it (e.mapFile), the rest fall back to the same guess the
@@ -4933,7 +4933,9 @@ function renderHome(errMsg) {
       if (e.processing) {
         const s = document.createElement('span');
         s.className = 'badge badge-processing';
-        s.textContent = 'processing';
+        // The job's live percent when it reports one (a re-sim mid-simulation);
+        // the bare word covers the phases with nothing to measure yet.
+        s.textContent = e.processingPercent != null ? `processing: ${e.processingPercent}%` : 'processing';
         s.title = 'a job is re-simulating or packing this game right now';
         a.appendChild(s);
       }
@@ -5381,6 +5383,14 @@ function fmtDate(unix) {
     { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
+// fmtDateShort is the replay list's Started column: no year — the catalog is
+// read for recent games, and the year column-wide is noise. fmtDate keeps it
+// for the places that state an exact moment (tooltips, the queue).
+function fmtDateShort(unix) {
+  return new Date(unix * 1000).toLocaleString(undefined,
+    { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
 // fmtAgo renders how long ago a unix moment was, for the queue's "last
 // touched" column — a job's age is what says whether it is moving.
 function fmtAgo(unix) {
@@ -5397,6 +5407,17 @@ function fmtDuration(sec) {
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
   const mm = h ? String(m).padStart(2, '0') : String(m);
   return (h ? h + ':' : '') + mm + ':' + String(s).padStart(2, '0');
+}
+
+// fmtGameDuration renders a game's length: "1h 20m", or "20m" under an hour —
+// minutes precision, because nobody picks a replay by its seconds digit.
+// fmtDuration (mm:ss) stays for the places where seconds carry meaning: the
+// queue's engine timings and the charts' elapsed axes.
+function fmtGameDuration(sec) {
+  const m = Math.round(sec / 60);
+  if (m < 1) return '<1m';
+  const h = Math.floor(m / 60);
+  return h ? `${h}h ${m % 60}m` : `${m}m`;
 }
 
 init();

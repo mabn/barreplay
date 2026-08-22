@@ -116,6 +116,22 @@ export type JobEnqueue = {
  * not the expected wait. */
 const LOBBY_MATCHED_KEEP_SEC = 48 * 3600;
 
+/** progressPercent reads a whole-number 0-100 out of a jobs row's progress
+ * JSON, for the catalog pill. Anything else — no progress reported yet, a
+ * phase with nothing to measure, malformed JSON — is null, never a guess:
+ * the pill then says "processing" without a number. */
+function progressPercent(progressJSON: unknown): number | null {
+  if (typeof progressJSON !== "string") return null;
+  try {
+    const p = JSON.parse(progressJSON) as { percent?: unknown };
+    return typeof p.percent === "number" && Number.isFinite(p.percent)
+      ? Math.max(0, Math.min(100, Math.round(p.percent)))
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Version of the DERIVED data (player_count + the replay_players and
  * replay_settings index tables). Rows carry no derivation of their own — it is
  * recomputed from the replays row — so bumping this rebuilds every row's
@@ -601,6 +617,8 @@ export class ReplayIndex extends DurableObject<Env> {
       .exec(
         `SELECT id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date, placeholder,
                 EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = replays.id AND j.state = 'processing') AS processing,
+                (SELECT j.progress FROM jobs j WHERE j.game_id = replays.id AND j.state = 'processing'
+                 ORDER BY j.updated_unix DESC LIMIT 1) AS processing_progress,
                 (SELECT lobby_name FROM games g WHERE g.id = replays.id) AS lobby_name,
                 (SELECT map_file FROM games g WHERE g.id = replays.id) AS map_file
          FROM replays
@@ -641,6 +659,7 @@ export class ReplayIndex extends DurableObject<Env> {
       // forever. Asked of the jobs table it is simply true while a job is
       // running and false the moment one is not.
       processing: r.processing === 1,
+      processingPercent: progressPercent(r.processing_progress),
     }));
   }
 
