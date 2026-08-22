@@ -183,21 +183,55 @@ Lua; perf and the wall clock agree with each other and are what this round uses.
 
 ## H52 — the capture widget's own cost (barreplay side, not the engine)
 
-Turning sampling off entirely takes medium's sim from **1m41s to 1m34s**, so the
-widget costs ~7% of the re-simulation. That is our code, and anything that keeps
-the recorded bytes identical keeps the .brp identical by construction.
+Single runs said turning sampling off took medium's sim from 1m41s to 1m34s —
+7% — and a three-way bisect (drop the per-unit `string.format`; drop the
+`table.concat`+`write`+`flush`; drop only the per-sample `out:flush()`) put
+essentially all of it on the FLUSH, each variant landing at 1m34–1m35s.
 
-Bisected it with three throwaway builds, each removing one layer:
+**All of that was noise, and interleaving says so.** Round 1's rule — never
+judge a sub-10% wall delta from single runs on this box — applies to barreplay's
+own code exactly as it does to the engine's:
 
-| variant | medium sim |
-|---|---|
-| full sampling | 1m41s |
-| engine queries kept, per-unit `string.format` removed | 1m34s |
-| formatting kept, `table.concat` + `out:write` + `out:flush` removed | **1m34s** |
-| everything kept, only the per-sample `out:flush()` removed | **1m35s** |
-| no sampling at all | 1m34s |
+| A/B (4 interleaved pairs, medium) | A | B | verdict |
+|---|---|---|---|
+| flush kept vs flush removed | 96.2s | 96.2s | **+0.00%, B wins 2/4 — nothing** |
+| sampling at 1 Hz vs sampling off | 100.2s | 97.2s | **-2.99%, B wins 4/4** |
 
-So neither the ~6 engine queries per unit nor the per-unit formatting cost
-anything measurable — **the per-sample flush is nearly the whole 7%**. (A
-separate, free change went in first: `string.format`/`table.concat` were looked
-up through `_ENV` inside the per-unit loop and are now locals.)
+So the widget's ENTIRE cost is ~3% of sim wall, not 7%, and the flush is no part
+of it. The bisect had been reading the same ±5% run-to-run drift four times and
+calling it a discovery.
+
+What that leaves: a 3% ceiling for the whole capture path, of which any
+realistic optimization could take maybe half — and the only ways to take it
+(fewer formatted fields, a delta text format, the binary .brepstream encoder)
+change what the widget writes, which is exactly what must not change. One free
+piece landed anyway: `string.format`/`table.concat` were `_ENV` lookups inside
+the per-unit loop and are now locals, byte-identical by construction.
+
+**Closed at 3%.** The engine is where the remaining time is.
+
+## Queue (>=7)
+
+1. **H53 — COB VM fetch**: cache `cobFile->code.data()` in a local for the
+   dispatch loop; `GET_LONG_PC` currently walks `this -> cobFile -> code` per
+   opcode AND per operand word. Value-identical. `CCobThread::Tick` is 10.6% of
+   the main thread, the largest single block left.
+2. **H54 — `CLosHandler::Update` lambda (1.75%) + `InLos` (1.04%)**: look for
+   work that is dead when every ally is fully visible (a re-sim spectates).
+3. **H55 — `CQuadField::GetUnitsExact` (1.0%)**: query-shape / container churn.
+4. **H56 — QTPFS `IncrementalUpdate` (1.7%) + `UpdateNeighborCache` (0.79%)**:
+   the vein H45 opened; look for more per-event O(area) bookkeeping.
+5. **H57 — anim/piece transform cluster (~8.5%)**: `LocalModelPiece::SetDirty`
+   (0.79%) propagates through the piece tree; check for redundant propagation.
+   The FP math around it is sync-locked, the bookkeeping is not.
+6. **H58 — `CUnit::Update`/`UpdatePhysicalState` (1.7% together)**.
+7. **H59 — `CGroundMoveType::UpdatePreCollisions` (0.67%)**.
+8. **H56b — `CSyncChecker::Sync` (2.6%)**: NOT TAKEN, and worth recording why.
+   The checksum is a pure observer (nothing synced reads it — `GetChecksum` is
+   only consumed by the net response and, under `TRACE_SYNC`, by logging), so
+   skipping it is output-safe by construction. But in demo playback the local
+   server compares our per-frame checksum against the RECORDED players' — that
+   is the mechanism behind the desync warnings `engine.SummarizeInfolog` counts,
+   and it is the only automatic detector of a re-sim that silently diverged.
+   Trading it for 2.6% is a bad deal for a pipeline that publishes captures
+   nobody re-verifies.
