@@ -733,6 +733,39 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           processing without turning it into a placeholder (a revision exists,
                           so it stays openable), and a failure leaves that row untouched —
                           dropCatalogPlaceholder only ever deletes placeholder = 1.
+                          DISABLING A JOB (jobs.disabled + POST /api/jobs/<id>/disabled +
+                          ReplayIndex.jobSetDisabled): the queue page's per-row switch. A COLUMN,
+                          not a fifth state — the four states describe how far the WORK got, and
+                          being held back is not a stage of that; it is also reversible, which a
+                          state would make awkward. It does two things. Nothing is OFFERED the
+                          job (jobsPending, jobClaim and, because the mirror backfill takes only
+                          games with NO job row of any state, the auto-queue for its game too —
+                          which is the durable way to say "never re-simulate this one"), and a
+                          "processing" row is RESET to pending with its live progress cleared.
+                          The reset is not cosmetic: nothing here can reach into a daemon on
+                          somebody else's machine and stop its engine, so a row left claimed
+                          would simply be handed out again once its stale window expired. For the
+                          same reason a still-running daemon's HEARTBEATS are ignored on a
+                          disabled job (jobUpdate returns early) — they would put it straight
+                          back into "processing" a second after the reset — while its TERMINAL
+                          report is still taken, since the work happened and what came of it is
+                          worth recording. Disabling also drops the game's catalog PLACEHOLDER
+                          (nothing is being worked on and nothing was published, so the replay
+                          list must not keep an un-openable row), but leaves a real published row
+                          alone, and KEEPS the job's samples — they are the record of work that
+                          really happened, and the charts are the reason to look at a job you had
+                          to turn off. A disabled job still BLOCKS a new one for its game
+                          (walking around it with a fresh row is exactly what "will not be picked
+                          up" rules out), which is why jobAnnounce/resimEnqueue report a distinct
+                          "disabled" status: the paste box can then say why nothing will happen,
+                          and a daemon treats anything but "queued" as not-its-work either way.
+                          queuePage's unfinished-first ordering and its `active` count both
+                          exclude disabled rows, so a held-back job does not sit at the top of
+                          the queue forever nor inflate the menu's in-flight badge. The route is
+                          OPEN, like the other two maintenance routes the admin UI drives
+                          (/refresh-settings and /view) and for the same reason: the browser has
+                          no bearer token and the Queue section is only reachable with
+                          ?admin=true, so guarding it would mean the button could not exist.
                           JOB KINDS: jobs.kind is "upload" | "resim", a KIND rather than a fifth
                           state because the four states describe both equally well — what
                           differs is the work, not the progress. The contract (JobKind,
@@ -800,7 +833,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           way in (`finite`): unlike everything previously done with a
                           JobProgress these land in typed SQL columns, and parseJobProgress is
                           shallow because its fields were only ever displayed — `{frame:{}}`
-                          would otherwise throw inside the bind and 500 the healthcheck. Past
+                          would otherwise throw inside the bind and 500 the healthcheck. eta_sec
+                          was added after the others (the estimate was always reported and only
+                          ever overwritten in place), so rows written before it chart as a gap.
+                          Past
                           MAX_JOB_SAMPLES = 720 (two hours of beats) jobSampleThin HALVES the
                           series in place, keeping its first and last sample and every other one
                           between: the chart keeps its full span at half resolution, where
@@ -949,15 +985,28 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           is stuck rather than one that is working. The Updated cell doubles as
                           the liveness signal — the daemon beats every 10s, so an age of minutes
                           on a "processing" row means nobody is home.
+                          The row's last cell is the HOLD-BACK switch (disableCell/
+                          setJobDisabled -> POST /api/jobs/<id>/disabled, see the worker entry).
+                          It is offered only on a pending or running job — a finished one is
+                          already never handed out, so a switch there would do nothing — and it
+                          stopPropagations, since the row itself is an expand toggle. A held-back
+                          row reads "disabled" in the STATE column rather than "pending", which
+                          would be the misleading half of the truth on something nothing will
+                          ever pick up (the real state rides the tooltip); the button is ghosted
+                          until the row is hovered, except on a disabled row where it stays lit,
+                          since that is the row somebody is looking for.
                           CHARTS (app.js jobCharts/buildChart, styles .jobcharts/.chart*): the
                           expansion also draws the job's whole healthcheck history, fetched then
                           and only then (loadJobSamples, cached per job and dropped by an
                           explicit re-read so a fresh page never sits beside a stale curve).
-                          THREE SEPARATE PLOTS — engine memory, engine CPU, simulation — never
-                          one with three scales: bytes, percent-of-a-core and percent-of-a-game
+                          FOUR SEPARATE PLOTS — engine memory, engine CPU, simulation, and the
+                          estimated time left (the one series that should be going DOWN: a
+                          stretch where it climbs is the run getting slower faster than it is
+                          getting on, which no other chart states outright) — never
+                          one with four scales: bytes, percent-of-a-core and percent-of-a-game
                           share no axis, and overlaying them would invent a correlation that is
                           not in the data. They share an X (the same beats), which is what lets
-                          ONE crosshair read all three at a moment, with one tooltip listing
+                          ONE crosshair read all four at a moment, with one tooltip listing
                           every measure plus the phase (what explains a flat stretch); the same
                           readings come from keyboard focus + arrows, so no value is behind a
                           pointer. ONE hue for all three (#4b90c4, the same blue the collapsed
@@ -969,11 +1018,14 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           drawing through zero (an engine that had not started is missing, not
                           idle), and a measure the run never reported gets no plot at all, since
                           an empty axis would claim a reading of zero. Exactly one direct mark
-                          per chart, chosen to say what the axis cannot: an autoscaled chart's
-                          top tick IS its peak, so the peak gets a bare dot (WHEN it happened);
-                          the fixed-domain one (simulation, 0-100 because the whole is known —
-                          autoscaling would draw a stalled run exactly like a finished one)
-                          labels its END value instead. Both formatters exist for a reason —
+                          per chart (spec.mark), chosen to say what the axis cannot: on an
+                          autoscaled chart the top tick IS the peak, so 'peak' draws a bare dot
+                          (WHEN it happened); 'last' labels where the run ENDED UP, which is what
+                          simulation and the ETA need since their axes say nothing about this
+                          particular run — for the ETA that is "how much was left when it stopped
+                          reporting", the whole story of one that died. simulation additionally
+                          fixes its domain 0-100 because the whole is known; autoscaling would
+                          draw a stalled run exactly like a finished one. Both formatters exist for a reason —
                           `tick` must fit a 46px gutter, `fmt` has a tooltip line to explain
                           itself, and using one for both put "650% of one core" through the left
                           edge of the figure. X labels are ELAPSED time, not clock time: "it

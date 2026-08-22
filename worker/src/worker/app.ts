@@ -240,6 +240,12 @@ app.post("/api/resim", async (c) => {
   if (res.status === "in-catalog") {
     return c.json({ error: "this game is already published", gameId, status: res.status }, 409);
   }
+  if (res.status === "disabled") {
+    return c.json(
+      { error: "this game's job has been disabled; re-enable it on the queue page", gameId, status: res.status },
+      409,
+    );
+  }
   return c.json({ job: res.job?.id, gameId, status: res.status });
 });
 
@@ -250,8 +256,8 @@ app.post("/api/resim", async (c) => {
 app.get("/api/jobs/:id", async (c) => {
   const job = await indexStub(c.env).jobGet(c.req.param("id"));
   if (!job) return c.json({ error: "unknown job" }, 404);
-  const { id, gameId, kind, state, error, stats, progress, createdUnix, updatedUnix } = job;
-  return c.json({ id, gameId, kind, state, error, stats, progress, createdUnix, updatedUnix }, 200, {
+  const { id, gameId, kind, state, error, stats, progress, disabled, createdUnix, updatedUnix } = job;
+  return c.json({ id, gameId, kind, state, error, stats, progress, disabled, createdUnix, updatedUnix }, 200, {
     "cache-control": "no-cache",
   });
 });
@@ -299,7 +305,7 @@ app.get("/api/queue", async (c) => {
   const page = await indexStub(c.env).queuePage(Math.min(Math.max(limit, 1), QUEUE_LIMIT_MAX), offset);
   return c.json(
     {
-      jobs: page.jobs.map(({ id, gameId, kind, state, error, stats, progress, createdUnix, updatedUnix }) => ({
+      jobs: page.jobs.map(({ id, gameId, kind, state, error, stats, progress, disabled, createdUnix, updatedUnix }) => ({
         id,
         gameId,
         kind,
@@ -307,6 +313,7 @@ app.get("/api/queue", async (c) => {
         error,
         stats,
         progress,
+        disabled,
         createdUnix,
         updatedUnix,
       })),
@@ -432,6 +439,34 @@ app.post("/api/jobs/:id", async (c) => {
   const ok = await indexStub(c.env).jobUpdate(c.req.param("id"), b.state, detail, stats, progress);
   if (!ok) return c.json({ error: "unknown job" }, 404);
   return c.json({ ok: true });
+});
+
+// Hold a job back, or let it go again: the queue page's per-row switch.
+//
+// Disabling does NOT reach out and stop an engine that is already running —
+// nothing here can, the daemon is on somebody else's machine behind NAT. It
+// stops the job being handed out (or handed out AGAIN, which for a re-sim of a
+// mirrored game is the thing worth preventing: the backfill's "no job row at
+// all" rule means a disabled row keeps its game out of the auto-queue for
+// good), and it resets a "processing" row to pending, since leaving it claimed
+// would only mean waiting out the stale window before it was re-offered.
+//
+// Open, like the other two maintenance routes the admin UI drives
+// (/refresh-settings and /view): the browser has no bearer token, and the
+// Queue section that shows the control is itself only reachable with
+// ?admin=true. Guarding it would mean the button could not exist.
+app.post("/api/jobs/:id/disabled", async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "body must be JSON" }, 400);
+  }
+  const disabled = (body as { disabled?: unknown }).disabled;
+  if (typeof disabled !== "boolean") return c.json({ error: "disabled must be a boolean" }, 400);
+  const ok = await indexStub(c.env).jobSetDisabled(c.req.param("id"), disabled);
+  if (!ok) return c.json({ error: "unknown job" }, 404);
+  return c.json({ ok: true, disabled });
 });
 
 // Archived raw streams for the ingest daemon (which speaks only HTTP to the

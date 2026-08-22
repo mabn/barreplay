@@ -548,6 +548,65 @@ test("pruning drops the samples of long-finished and vanished jobs", async () =>
   });
 });
 
+// Holding a job back. The half that is easy to miss: a RUNNING job has to be
+// reset, because nothing here can stop the daemon — leaving the row claimed
+// would just mean waiting out the stale window before it was handed out again.
+test("disabling a job stops it being offered and resets a running one", async () => {
+  await inIndex((index) => {
+    index.jobInsert("j", "", "busy", "resim");
+    index.jobClaim("j", "resim");
+    index.jobUpdate("j", "processing", null, null, { state: "simulating", percent: 20 });
+    expect(index.list()).toMatchObject([{ id: "busy", processing: true, placeholder: true }]);
+
+    expect(index.jobSetDisabled("j", true)).toBe(true);
+    const j = index.jobGet("j");
+    expect(j).toMatchObject({ disabled: true, state: "pending", progress: null });
+    expect(index.jobsPending("resim")).toEqual([]);
+    expect(index.jobClaim("j", "resim")).toBe(false);
+    // Nothing is being worked on, and nothing was published: the row that only
+    // existed to show the work must not linger in the replay list.
+    expect(index.list()).toEqual([]);
+    // The samples stay — they are the record of work that really happened, and
+    // the charts are the reason to look at a job you had to turn off.
+    expect(index.jobSamples("j")).toHaveLength(1);
+
+    expect(index.jobSetDisabled("j", false)).toBe(true);
+    expect(index.jobsPending("resim")).toHaveLength(1);
+    expect(index.jobSetDisabled("nope", true)).toBe(false);
+  });
+});
+
+// A daemon that was mid-run keeps beating until its engine stops. Those beats
+// must not put the row back into "processing" a second after it was reset —
+// but the outcome, when it finally lands, is still worth recording.
+test("a disabled job ignores heartbeats but still records how it ended", async () => {
+  await inIndex((index) => {
+    index.jobInsert("j", "", "busy", "resim");
+    index.jobClaim("j", "resim");
+    index.jobSetDisabled("j", true);
+
+    index.jobUpdate("j", "processing", null, null, { state: "simulating", percent: 55 });
+    expect(index.jobGet("j")).toMatchObject({ state: "pending", progress: null });
+    expect(index.jobSamples("j")).toHaveLength(0);
+
+    index.jobUpdate("j", "done", null, { tookSec: 2400 });
+    expect(index.jobGet("j")).toMatchObject({ state: "done", stats: { tookSec: 2400 } });
+  });
+});
+
+// The mirror backfill hands out games with no job row of ANY state, so a
+// disabled row is what keeps a game it names out of the auto-queue for good.
+test("a disabled job keeps its game out of the mirror backfill", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([game("keepout"), game("fine")]);
+    index.jobInsert("j", "", "keepout", "resim");
+    index.jobSetDisabled("j", true);
+    const offered = index.jobsOffer("resim", "new-1");
+    expect(offered).toHaveLength(1);
+    expect(offered[0].gameId).toBe("fine");
+  });
+});
+
 test("a published replay keeps its row and never becomes a placeholder", async () => {
   await inIndex((index) => {
     index.upsert(replay("real"));
