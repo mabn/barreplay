@@ -24,13 +24,19 @@ image is public on ghcr.io; only `docker` is needed on the host.
 #    "engineVersion"). Clone that tag; skip the AI bots (CircuitAI is huge).
 git clone --branch 2025.06.24 --depth 1 https://github.com/beyond-all-reason/RecoilEngine.git recoil
 cd recoil
+# THE SUBMODULE SET IS ALSO PER TAG: this list is what 2025.06.24 needed, and
+# 2026.07.04 additionally requires fmt, mimalloc, nowide, streflop, sse2neon and
+# tools/unitsync/python (without them configure fails with "does not contain a
+# CMakeLists.txt file", naming one at a time). When in doubt initialise
+# everything except AI/Skirmish/* — CircuitAI is the only genuinely huge one.
 git submodule update --init --recursive --depth 1 \
     rts/lib/RmlUi rts/lib/cereal rts/lib/entt rts/lib/fastgltf rts/lib/gflags \
     rts/lib/lunasvg rts/lib/simdjson rts/lib/tracy tools/pr-downloader
 # keep the tree clean or `git describe` taints the version string the engine
 # reports (must equal the tag, e.g. "2025.06.24", for the demo to match)
 
-# 2. Pull the pinned build image (digest in docker-build-v2/images_versions.sh).
+# 2. Pull the pinned build image. THE DIGEST IS PER TAG — read it from the tag
+#    you just checked out, never from a previous build's notes.
 source docker-build-v2/images_versions.sh
 IMG="ghcr.io/beyond-all-reason/recoil-build-amd64-linux@${image_version[amd64-linux]}"
 docker pull "$IMG"
@@ -60,6 +66,11 @@ cp build-linux/spring-headless build-linux/tools/pr-downloader/src/pr-downloader
 cp -r build-linux/base cont/fonts "$D"
 
 "$D"/spring-headless --version   # must print exactly "spring-headless version 2025.06.24 (Headless)"
+
+# NOTE: keep the binary INSIDE that dir. The engine resolves base/springcontent.sdz
+# relative to its own executable, so running a build from somewhere else via
+# -engine dies with "failed to open archive 'Spring content v1'" — and barreplay
+# then reports a missing widget output, which looks like a widget problem.
 ```
 
 Then a normal run picks it up automatically:
