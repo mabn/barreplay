@@ -78,6 +78,13 @@ local outputPath = "__OUTPUT_PATH__"
 local out = nil
 
 local Echo = Spring.Echo
+-- string.format and table.concat are looked up through _ENV on every call, and
+-- the per-unit sample loop calls format once per unit per sample — two hash
+-- lookups each, for hundreds of units at 1 Hz over a whole game. Localise them
+-- (measured: the per-unit formatting, not the engine queries, is ~7% of the
+-- re-sim's sim wall; the engine calls are free by comparison).
+local sformat = string.format
+local tconcat = table.concat
 local spGetAllUnits    = Spring.GetAllUnits
 local spGetUnitPosition = Spring.GetUnitPosition
 local spGetUnitDefID   = Spring.GetUnitDefID
@@ -127,9 +134,9 @@ local function elapsedStr(t0)
 		-- DiffTimers returns SECONDS unless returnMs=true is passed — omitting it
 		-- once made 2ms samples display as "2us".
 		local ms = spDiffTimers(spGetTimer(), t0, true) -- milliseconds (float)
-		return string.format("%.0fus", ms * 1000)
+		return sformat("%.0fus", ms * 1000)
 	end
-	return string.format("%.1fms", (os.clock() - t0) * 1000)
+	return sformat("%.1fms", (os.clock() - t0) * 1000)
 end
 
 local function forceMaxSpeed()
@@ -204,9 +211,9 @@ local function emitProfileTotals()
 	end
 	local lines = {}
 	for i = 1, math.min(#recs, 80) do
-		lines[i] = string.format("BRSNAP PROF %.1f %s", recs[i].ms, recs[i].name)
+		lines[i] = sformat("BRSNAP PROF %.1f %s", recs[i].ms, recs[i].name)
 	end
-	writeChunk(table.concat(lines, "\n"))
+	writeChunk(tconcat(lines, "\n"))
 end
 
 -- Draw-frame counter: widget:Update fires exactly once per draw frame, so the
@@ -252,7 +259,7 @@ local function disableOtherWidgets()
 			n = n + 1
 		end
 	end
-	Echo(string.format("[barreplay] disabling %d default widgets (unsynced overhead only)", n))
+	Echo(sformat("[barreplay] disabling %d default widgets (unsynced overhead only)", n))
 end
 
 -- jsonEscape escapes the characters JSON forbids raw in a string. Unit-def
@@ -277,9 +284,9 @@ local function jsonValue(v)
 		return v and "true" or "false"
 	elseif t == "number" then
 		if v == math.floor(v) and math.abs(v) < 1e15 then
-			return string.format("%d", v)
+			return sformat("%d", v)
 		end
-		return string.format("%.3f", v)
+		return sformat("%.3f", v)
 	end
 	return "null"
 end
@@ -293,7 +300,7 @@ local function jsonObject(fields)
 			parts[#parts + 1] = '"' .. kv[1] .. '":' .. jsonValue(kv[2])
 		end
 	end
-	return "{" .. table.concat(parts, ",") .. "}"
+	return "{" .. tconcat(parts, ",") .. "}"
 end
 
 -- defJSON serialises one unit def as a compact JSON object. Fields are listed in
@@ -545,7 +552,7 @@ local function emitPreamble()
 	local parts = {}
 	-- Stream-semantics marker (protocol 3 = income already per game-second);
 	-- the caller's demo-seeded metadata wins over the other fields.
-	parts[#parts + 1] = string.format(
+	parts[#parts + 1] = sformat(
 		'BRSNAP GAME {"protocol":%d,"mode":"replay","sampleEvery":%d,"gameSpeed":%d}',
 		protocolVersion, sampleEvery, gameSpeed)
 	-- Full unit-def table (stable for the whole game). Mods add/modify units, so
@@ -560,25 +567,25 @@ local function emitPreamble()
 		local r, g, b = spGetTeamColor(teamID)
 		local color = "-"
 		if r then
-			color = string.format("#%02x%02x%02x",
+			color = sformat("#%02x%02x%02x",
 				math.floor(r * 255 + 0.5), math.floor(g * 255 + 0.5), math.floor(b * 255 + 0.5))
 		end
 		if side == nil or side == "" then
 			side = "_"
 		end
-		parts[#parts + 1] = string.format("BRSNAP T %d %d %s %s", teamID, allyTeam or -1, side, color)
+		parts[#parts + 1] = sformat("BRSNAP T %d %d %s %s", teamID, allyTeam or -1, side, color)
 	end
 	-- Players: name (last, may contain spaces), controlling team, spectator flag.
 	for _, playerID in ipairs(spGetPlayerList()) do
 		local name, _, spectator, teamID = spGetPlayerInfo(playerID, false)
-		parts[#parts + 1] = string.format("BRSNAP P %d %d %d %s",
+		parts[#parts + 1] = sformat("BRSNAP P %d %d %d %s",
 			playerID, teamID or -1, (spectator and 1) or 0, name or "")
 		if name and name ~= "" then
 			playerIDByName[name] = playerID
 		end
 	end
 	parts[#parts + 1] = "BRSNAP READY"
-	writeChunk(table.concat(parts, "\n"))
+	writeChunk(tconcat(parts, "\n"))
 	if out then
 		out:flush()
 	end
@@ -598,7 +605,7 @@ function widget:Initialize()
 	end
 	out = io.open(outputPath, "w")
 	if out then
-		Echo(string.format("[barreplay] snapshot widget loaded: writing %s, sampling every %d frames, heartbeat every %d, speed %d",
+		Echo(sformat("[barreplay] snapshot widget loaded: writing %s, sampling every %d frames, heartbeat every %d, speed %d",
 			outputPath, sampleEvery, heartbeatEvery, playbackSpeed))
 	else
 		Echo("[barreplay] ERROR: could not open output file: " .. tostring(outputPath))
@@ -631,7 +638,7 @@ function widget:GameFrame(frame)
 	-- on every call, so this scales to thousands of units — unlike Spring.Echo.
 	local sampleTime
 	if sample then
-		local lines = { string.format("BRSNAP F %d %.3f %d", frame, spGetGameSeconds(), n) }
+		local lines = { sformat("BRSNAP F %d %.3f %d", frame, spGetGameSeconds(), n) }
 		for i = 1, n do
 			local unitID = units[i]
 			local x, y, z = spGetUnitPosition(unitID)
@@ -643,7 +650,7 @@ function widget:GameFrame(frame)
 			local vx, vy, vz = spGetUnitVelocity(unitID)
 			-- Build/assist/repair target (nil for non-builders and idle builders).
 			local tgt = spGetUnitIsBuilding ~= nil and spGetUnitIsBuilding(unitID) or nil
-			lines[i + 1] = string.format("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f %.2f %.2f %.2f %.3f %d",
+			lines[i + 1] = sformat("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f %.2f %.2f %.2f %.3f %d",
 				unitID, defID or -1, team or -1, x or 0, y or 0, z or 0, hp or 0, maxHp or 0,
 				vx or 0, vy or 0, vz or 0, buildProgress or 1, tgt or 0)
 		end
@@ -655,11 +662,11 @@ function widget:GameFrame(frame)
 		for _, teamID in ipairs(spGetTeamList()) do
 			local m, mStore, _, mInc = spGetTeamResources(teamID, "metal")
 			local e, eStore, _, eInc = spGetTeamResources(teamID, "energy")
-			lines[#lines + 1] = string.format("BRSNAP R %d %.1f %.1f %.1f %.1f %.2f %.2f",
+			lines[#lines + 1] = sformat("BRSNAP R %d %.1f %.1f %.1f %.1f %.2f %.2f",
 				teamID, m or 0, e or 0, mStore or 0, eStore or 0,
 				mInc or 0, eInc or 0)
 		end
-		writeChunk(table.concat(lines, "\n"))
+		writeChunk(tconcat(lines, "\n"))
 		if out then
 			out:flush() -- flush every sample so the file is durable if the run is cut short
 		end
@@ -672,7 +679,7 @@ function widget:GameFrame(frame)
 		forceMaxSpeed()
 		local draws = drawFrames - lastDrawFrames
 		lastDrawFrames = drawFrames
-		local line = string.format("[barreplay] heartbeat frame=%d t=%.0fs units=%d draws=%d widgets=%s",
+		local line = sformat("[barreplay] heartbeat frame=%d t=%.0fs units=%d draws=%d widgets=%s",
 			frame, spGetGameSeconds(), n, draws, activeWidgetCount())
 		if sampleTime then
 			line = line .. " sample_time=" .. sampleTime
@@ -684,25 +691,25 @@ function widget:GameFrame(frame)
 		if recs and recs[1] then
 			local parts = {}
 			for i = 1, math.min(8, #recs) do
-				parts[i] = string.format("%s=%.0fms", recs[i].name, recs[i].ms)
+				parts[i] = sformat("%s=%.0fms", recs[i].name, recs[i].ms)
 			end
-			Echo("[barreplay] prof " .. table.concat(parts, " "))
+			Echo("[barreplay] prof " .. tconcat(parts, " "))
 			-- In profile mode, also record per-scope cumulative totals with the
 			-- current unit count into the stream: the CLI turns consecutive samples
 			-- into per-interval deltas and reports which scopes grow with unit count.
 			if profileMode then
 				local lines = {}
 				for i = 1, math.min(30, #recs) do
-					lines[i] = string.format("BRSNAP PROFD %d %d %.1f %s", frame, n, recs[i].ms, recs[i].name)
+					lines[i] = sformat("BRSNAP PROFD %d %d %.1f %s", frame, n, recs[i].ms, recs[i].name)
 				end
-				writeChunk(table.concat(lines, "\n"))
+				writeChunk(tconcat(lines, "\n"))
 			end
 		end
 	end
 end
 
 local function event(kind, unitID, defID, team)
-	writeChunk(string.format("BRSNAP EV %d %s %d %d %d",
+	writeChunk(sformat("BRSNAP EV %d %s %d %d %d",
 		Spring.GetGameFrame(), kind, unitID, defID or -1, team or -1))
 end
 

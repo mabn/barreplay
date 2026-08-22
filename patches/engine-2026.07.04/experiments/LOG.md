@@ -145,3 +145,59 @@ The shape of the win moved: round 1's biggest instruction lever (H29) is
 upstream, and the yardmap fast-reject that was worth -6% there is worth -16%
 here — the same hypothesis, a different engine, a different answer. That is the
 argument for re-running the whole set rather than porting the kept stack.
+
+## Fresh profile of the ported stack (2026-08-22)
+
+`perf record` needs the **software `cpu-clock` event** on this VM: hardware
+`cycles` COUNTS fine (that is what the instruction meter uses) but SAMPLES
+almost nothing, and `perf annotate` segfaults on the 800 MB debug binary, so
+this round works from flat self-time only. Call graphs are useless too (release
+build, no frame pointers).
+
+Thread shares over a mid-game window: `recoil-main` 24.1%, workers 9.1/6.1/4.8,
+idle 53.8% — i.e. the main thread is pinned at ~100% of one core and the sim is
+still **main-thread-bound**, exactly as round 1 found. Only main-thread work
+counts.
+
+Main-thread self-time (normalised to the main thread):
+
+| block | share | note |
+|---|---|---|
+| `CCobThread::Tick` | 10.6% | the COB VM. H21 already jump-tabled its dispatch; what is left is the handlers |
+| Lua interpreter (all `lua*` symbols) | 12.8% | synced gadget Lua — round 1 closed this as value-bearing |
+| anim / piece transforms (`TickAllAnims`, `CQuaternion::*`, `ComposeTransform`, `SetDirty`) | ~8.5% | mostly sync-locked FP |
+| `CSyncChecker::Sync` | 2.6% | pure observation |
+| LOS (`CLosHandler::Update` lambda + `InLos`) | 2.8% | |
+| QTPFS (`IncrementalUpdate`, `UpdateNeighborCache`) | 2.5% | |
+| `CMoveMath::RangeIsBlockedHashedMt` | 1.2% | post-H31 |
+| `CQuadField::GetUnitsExact` | 1.0% | |
+
+Everything below that is a long flat tail — the same shape round 1 ended at.
+
+**Do not trust the engine's own profiler for this.** It reports
+`Lua::Callins::Unsynced` at 19–20% of wall, and that number survives turning the
+widget's sampling off entirely (`-every 100000`: 20669 ms, versus 22227 ms with
+sampling at 1 Hz) while perf puts the whole Lua interpreter at 12.8% of the main
+thread. The scope is measuring something other than wall time spent in unsynced
+Lua; perf and the wall clock agree with each other and are what this round uses.
+
+## H52 — the capture widget's own cost (barreplay side, not the engine)
+
+Turning sampling off entirely takes medium's sim from **1m41s to 1m34s**, so the
+widget costs ~7% of the re-simulation. That is our code, and anything that keeps
+the recorded bytes identical keeps the .brp identical by construction.
+
+Bisected it with three throwaway builds, each removing one layer:
+
+| variant | medium sim |
+|---|---|
+| full sampling | 1m41s |
+| engine queries kept, per-unit `string.format` removed | 1m34s |
+| formatting kept, `table.concat` + `out:write` + `out:flush` removed | **1m34s** |
+| everything kept, only the per-sample `out:flush()` removed | **1m35s** |
+| no sampling at all | 1m34s |
+
+So neither the ~6 engine queries per unit nor the per-unit formatting cost
+anything measurable — **the per-sample flush is nearly the whole 7%**. (A
+separate, free change went in first: `string.format`/`table.concat` were looked
+up through `_ENV` inside the per-unit loop and are now locals.)
