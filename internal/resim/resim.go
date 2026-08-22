@@ -62,6 +62,13 @@ type Options struct {
 	// throw away the record of every failure.
 	Stats *RunStats
 
+	// MinFreeBytes is how little memory the host may have left before the run
+	// is stopped rather than waiting for the kernel to kill it (engine.
+	// WatchMemory). 0 uses engine.DefaultMinFreeBytes; negative disables the
+	// guard, which means accepting a global OOM and whatever systemd tears
+	// down around it.
+	MinFreeBytes int64
+
 	// Progress, when non-nil, is kept up to date WHILE the run happens: the
 	// phase it is in, how far into the simulation it is, and what the engine
 	// process is costing (progress.go). Unlike Stats, which is a record read
@@ -210,11 +217,35 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 	fmt.Fprintf(os.Stderr, "resim: %s: engine %s, %ds of game time — launching headless replay\n",
 		h.GameID, h.EngineVersion, h.GameTime)
 	runStart := time.Now()
-	stdout, wait, err := eng.Run(ctx, scriptPath)
+	// The engine runs under a context of its own so the memory guard below can
+	// end it: cancelling is what kills the process, and the guard must be able
+	// to do that without cancelling the caller's ctx.
+	runCtx, killEngine := context.WithCancel(ctx)
+	defer killEngine()
+	stdout, wait, err := eng.Run(runCtx, scriptPath)
 	if err != nil {
 		w.Close()
 		return "", nil, err
 	}
+	// Stop before the kernel does. A re-simulation of a big game can want more
+	// memory than a small host has, and letting that end in a global OOM costs
+	// more than the run: systemd stops whole units whose OOMPolicy is "stop"
+	// when a member is OOM-killed, which is the default for the scopes a user
+	// manager creates — so an OOM-killed engine takes the tmux pane it was
+	// started from with it. Stopping first turns that into an ordinary failed
+	// job with a message saying what happened.
+	var lowMem memGuard
+	go engine.WatchMemory(runCtx, o.minFree(), memCheckEvery, func(avail int64) {
+		rss := int64(0)
+		if s, ok := engine.SampleProcess(eng.Pid()); ok {
+			rss = s.RSSBytes
+		}
+		lowMem.trip(avail, rss)
+		fmt.Fprintf(os.Stderr, "resim: %s: only %s of memory left on this host (engine %s) — "+
+			"stopping the engine before the kernel does\n",
+			h.GameID, engine.FormatBytes(avail), engine.FormatBytes(rss))
+		killEngine()
+	})
 	// Drain stdout so the engine's pipe never blocks the sim, watching on the
 	// way past for the widget's first "[barreplay]" line: the widget
 	// initializes exactly when loading ends, so its timestamp is what splits
@@ -284,6 +315,20 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 			o.Stats.SpeedUp = float64(stats.LastFrame) / o.Stats.SimSec / gameSpeed
 		}
 	}
+	// FIRST, ahead of every other explanation this function can give. We sent
+	// that signal, so the two answers below are both true and both useless: the
+	// stream stops mid-write, so it may well fail to parse, and the engine was
+	// indeed "killed" — by us. What a person needs to read is that the machine
+	// ran out of memory.
+	if avail, rss, tripped := lowMem.reading(); tripped {
+		return "", nil, fmt.Errorf("resim: stopped the engine with only %s of memory left on this host "+
+			"(the engine had %s resident, and %d of ~%d sim frames were captured): "+
+			"re-simulating this game needs more memory than this machine has. "+
+			"Nothing was published; run it on a bigger host, or pass -min-free 0 to let the kernel's "+
+			"OOM killer have it instead",
+			engine.FormatBytes(avail), engine.FormatBytes(rss),
+			stats.Frames*o.sampleEvery(), int(h.GameTime)*gameSpeed)
+	}
 	for _, e := range []error{consumeErr, closeErr} {
 		if e != nil {
 			return "", nil, e
@@ -342,6 +387,15 @@ const (
 	// deliberately loose — it exists to catch stubs, not to be precise.
 	minCoveragePct = 80
 )
+
+// minFree resolves Options.MinFreeBytes: 0 takes the package default, negative
+// disables the guard (engine.WatchMemory treats <= 0 as off).
+func (o Options) minFree() int64 {
+	if o.MinFreeBytes == 0 {
+		return engine.DefaultMinFreeBytes
+	}
+	return o.MinFreeBytes
+}
 
 // sampleEvery is the widget's sampling interval in sim frames, mirroring the
 // default engine.Config applies when Every is unset.

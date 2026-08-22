@@ -134,6 +134,7 @@ func run() int {
 		dataDir   = flag.String("data", os.Getenv("BAR_DATA_DIR"), "BAR/Spring data directory for -resim (engine/, games/, maps/; also --write-dir; default: $BAR_DATA_DIR)")
 		skipProv  = flag.Bool("no-provision", false, "-resim: do not download engine/game/map content; assume already installed")
 		progress  = flag.Bool("progress", true, "-resim: print the frame/ETA progress line during a re-simulation, like cmd/barreplay's -progress")
+		minFree   = flag.Int("min-free", 512, "-resim: stop the engine when the host has less than this many MiB of memory left, instead of waiting for the kernel's OOM killer (0 disables)")
 		stats     = flag.Bool("stats", true, "print the packed .brp's size breakdown (per-section sizes + the top unit defs by encoded bytes) for each replay published, like pack -stats")
 		logPath   = flag.String("log", defaultLogPath, "also append everything printed to this file (empty disables)")
 	)
@@ -180,6 +181,14 @@ func run() int {
 	what := "pending jobs"
 	if *doResim {
 		ro := resim.Options{DataDir: *dataDir, SkipProvision: *skipProv}
+		// 0 on the command line means "no guard"; resim reads 0 as "use the
+		// default", so the two are translated here rather than making the flag
+		// lie about what 0 does.
+		if *minFree <= 0 {
+			ro.MinFreeBytes = -1
+		} else {
+			ro.MinFreeBytes = int64(*minFree) << 20
+		}
 		if *progress {
 			ro.ProgressEvery = progressEvery
 		}
