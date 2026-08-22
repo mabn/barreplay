@@ -610,7 +610,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           `placeholder = 0`, or pasting the link of a game being worked on would
                           be refused as published instead of answered with the job doing it.
                           FILTER BAR (app.js initFilters, above the table), in TWO ROWS: the
-                          fields (date from/to, map, a player-count RANGE, a duration RANGE,
+                          fields (date from/to, map — a COMBOBOX over a datalist of the
+                          facet maps, so typing part of a name shrinks the list to the maps
+                          containing it; ?map= stays an exact match, applied when the text
+                          names exactly one map — a player-count RANGE, a duration RANGE,
                           player name — a datalist of the known names, debounced 300 ms), then
                           the settings chips with Clear/Unregistered/count pushed to the far end.
                           Two rows because one wrapped at some widths and not others, which moved

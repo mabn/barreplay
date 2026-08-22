@@ -75,7 +75,12 @@
         <div class="filterrow">
         <label>From <input type="date" id="f_from"></label>
         <label>To <input type="date" id="f_to"></label>
-        <label>Map <select id="f_map"></select></label>
+        <!-- Map: a combobox, not a <select> — type part of a name and the
+             datalist shrinks to the maps containing it (the browser's own
+             substring matching); picking an entry, or typing enough that only
+             one map fits, applies the filter. -->
+        <label>Map <input type="search" id="f_map" list="f_maps" placeholder="any" autocomplete="off"></label>
+        <datalist id="f_maps"></datalist>
         <!-- Players: a two-thumb range (min thumb / max thumb) over the sizes
              the catalog holds. Two stacked <input type=range> rather than a
              widget: real inputs come with keyboard support and focus rings for

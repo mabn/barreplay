@@ -3400,17 +3400,37 @@ async function initFilters() {
   const cur = new URLSearchParams(location.search);
   const el = (id) => document.getElementById(id);
 
-  const opt = (sel, value, text) => {
+  // Map: a combobox — an input over a datalist of the catalog's maps, so
+  // typing part of a name shrinks the list to the maps containing it (the
+  // browser's own substring matching does the shrinking). ?map= stays an
+  // EXACT match server-side, so free text applies once it names one map: the
+  // full name (case-insensitively, usually via a datalist pick, which fills
+  // the input) or a fragment that only one map contains — "glitters" filters
+  // without the pick. An ambiguous fragment changes nothing; the narrowing
+  // datalist is what resolves it. Debounced like the player field: every
+  // apply is a query.
+  const mapIn = el('f_map');
+  const mapList = document.getElementById('f_maps');
+  mapList.innerHTML = '';
+  (facets.maps || []).forEach(m => {
     const o = document.createElement('option');
-    o.value = value; o.textContent = text;
-    sel.appendChild(o);
+    o.value = m;
+    mapList.appendChild(o);
+  });
+  mapIn.value = cur.get('map') ?? '';
+  let mapTyping = null;
+  mapIn.oninput = () => {
+    clearTimeout(mapTyping);
+    mapTyping = setTimeout(() => {
+      const v = mapIn.value.trim().toLowerCase();
+      if (v === '') { setFilter('map', ''); return; }
+      const maps = facets.maps || [];
+      const exact = maps.find(m => m.toLowerCase() === v);
+      const holding = maps.filter(m => m.toLowerCase().includes(v));
+      const pick = exact ?? (holding.length === 1 ? holding[0] : null);
+      if (pick) setFilter('map', pick);
+    }, 300);
   };
-  const mapSel = el('f_map');
-  mapSel.innerHTML = '';
-  opt(mapSel, '', 'any');
-  (facets.maps || []).forEach(m => opt(mapSel, m, m));
-  mapSel.value = cur.get('map') ?? '';
-  mapSel.onchange = () => setFilter('map', mapSel.value);
 
   // Players: a range with two thumbs, spanning the sizes the catalog actually
   // holds. Both bounds are one gesture — drag the left thumb for the fewest,
