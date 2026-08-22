@@ -235,3 +235,47 @@ the per-unit loop and are now locals, byte-identical by construction.
    and it is the only automatic detector of a re-sim that silently diverged.
    Trading it for 2.6% is a bad deal for a pipeline that publishes captures
    nobody re-verifies.
+
+## H53 — hoist the COB code pointer out of the fetch — REJECTED-no-gain
+
+`GET_LONG_PC()` walks `this -> cobFile -> code` for every opcode and operand
+word, and `CCobThread::Tick` is the biggest single main-thread block, so caching
+the array's data pointer per call looked like free money. Byte-identical, and
+**+0.002% instructions** — GCC was already hoisting it (the vector is provably
+loop-invariant there). Reverted rather than kept: it removes no work, so it
+would be source noise in the series. Recorded so nobody tries it again.
+
+## Where round 2 ends
+
+The wt=1 profile (which is what the instruction meter sees, so it is the guide
+for further instruction cuts) after the full stack:
+
+| block | share of main thread |
+|---|---|
+| `CCobThread::Tick` | 8.6% |
+| anim / piece transforms (`TickAllAnims`, `CQuaternion::*`, `Transform::operator*`, `ComposeTransform`, `SetDirty`, `TickSpinAnim`) | ~15% |
+| Lua interpreter | ~7.6% |
+| QTPFS (`IncrementalUpdate` + `UpdateNeighborCache`) | 4.7% |
+| `CLosHandler::Update` lambda + `InLos` | 3.8% |
+| MoveMath (`RangeIsBlockedHashedMt`, `RangeHasExitOnly`, `FloodFill`, `GetPosSpeedMod`) | 5.0% |
+| `LocalModel::UpdateBoundingVolume` | 1.3% |
+
+This is the same wall round 1 reached, and the same classification applies: the
+COB VM and the Lua interpreter are executing BAR's own scripts (value-bearing),
+the transform/quaternion math is sync-locked FP, and the LOS and
+bounding-volume work is `for_mt` — worker-side in production, so it inflates
+this wt=1 view and is not what the main thread waits on. What was left loose in
+the index/cache vein has been taken (H30, H31, H45).
+
+Two structural questions were asked and answered rather than assumed:
+
+- **Is time going somewhere other than the simulation?** No. The bench harness
+  was extended to report the wall between sim frames as well as inside them:
+  over a whole medium run at wt=1, 85.5s of 89.3s is inside `SimFrame` —
+  **4.3% outside**. (A first, sloppier comparison — the CLI's "sim" phase
+  against summed SimFrame CPU — suggested 25%, but the CLI's clock starts at the
+  widget's first heartbeat, which is during loading, and ends after teardown.)
+- **Is the capture itself expensive?** No: 3%, and not where it looked (H52).
+
+Remaining candidates are the queue above, all ~1-3% and each needing the
+instruction meter to see at all.
