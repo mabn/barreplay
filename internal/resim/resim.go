@@ -55,6 +55,13 @@ type Options struct {
 	// daemon wants this on.
 	ProgressEvery time.Duration
 
+	// Forecaster, when non-nil, supplies the ETA for the minutes before the
+	// simulation can measure one for itself, and is taught what each finished
+	// run cost so the next guess is about THIS machine. Share one across a
+	// daemon's runs; a nil one simply means no ETA until the engine is
+	// simulating.
+	Forecaster *Forecaster
+
 	// Stats, when non-nil, receives what the run cost and how it went. Run
 	// fills it in AS IT GOES, including on its error paths: a re-sim that
 	// fails after forty minutes is precisely the one whose timings and
@@ -132,6 +139,11 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 	if err != nil {
 		return "", nil, err
 	}
+	// The listing already carries the game's length, which is the only thing
+	// anything can be predicted from and is known before the demo is even
+	// downloaded — so the queue row has an ETA from its first beat rather than
+	// from the first simulated frame, a good half-minute later.
+	o.Progress.SetForecast(o.Forecaster.Estimate(float64(r.DurationMs) / 1000))
 	demoPath, err := client.Download(ctx, r, filepath.Join(o.DataDir, "demos"))
 	if err != nil {
 		return "", nil, err
@@ -303,14 +315,21 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 	// Record the timings before anything below can return: an error path is
 	// exactly where a caller most wants to know how long the run got and what
 	// the log said.
+	engineSec := time.Since(runStart).Seconds()
+	var loadSec, simSec float64
+	select {
+	case t := <-widgetLoaded:
+		loadSec = t.Sub(runStart).Seconds()
+		simSec = engineSec - loadSec
+	default: // the widget never announced itself; no split to report
+	}
+	// What this run cost is what the NEXT one's forecast is made of. Taught
+	// here rather than after the capture, and outside the Stats block, so a run
+	// that fails on the way out — or one whose caller wants no record — still
+	// contributes the sim time it genuinely spent.
+	o.Forecaster.Observe(float64(h.GameTime), simSec)
 	if o.Stats != nil {
-		o.Stats.EngineSec = time.Since(runStart).Seconds()
-		select {
-		case t := <-widgetLoaded:
-			o.Stats.LoadSec = t.Sub(runStart).Seconds()
-			o.Stats.SimSec = o.Stats.EngineSec - o.Stats.LoadSec
-		default: // the widget never announced itself; no split to report
-		}
+		o.Stats.EngineSec, o.Stats.LoadSec, o.Stats.SimSec = engineSec, loadSec, simSec
 		o.Stats.GameSec = h.GameTime
 		o.Stats.EngineVersion = h.EngineVersion
 		o.Stats.Infolog = engine.SummarizeInfolog(eng.InfologPath())
