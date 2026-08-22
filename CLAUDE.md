@@ -593,7 +593,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           <a>, class `unopenable` on the tr, no pointer, no click) — the row's
                           `placeholder` flag is what says so, since a null rid cannot: the Go
                           server's rows have none and play fine. Its Settings cell LEADS with a
-                          `processing` pill (the one filled, pulsing badge among the muted ones —
+                          `processing` pill (carrying the job's live percent when it
+                          reports one — "processing: 52%", via the row's processingPercent,
+                          read off the jobs row's progress JSON in the same list read;
+                          the one filled, pulsing badge among the muted ones —
                           it is not a game setting but the reason the row exists, so it must not
                           be hunted for among them). A row that WAS already published and is being
                           re-simulated gets the same pill and stays openable, since a revision

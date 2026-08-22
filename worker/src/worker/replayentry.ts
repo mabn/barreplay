@@ -94,6 +94,13 @@ export interface ReplayEntry {
    * Server-owned and absent from the Go server's catalog, exactly like
    * `placeholder`. */
   processing: boolean;
+  /** The processing job's live percent (0-100), when it reports one — read
+   * off the jobs row's progress JSON at the same moment `processing` is
+   * derived, so the list's pill can say "processing: 52%" instead of just
+   * that something is happening. Null while the job is in a phase with
+   * nothing to measure (download, provisioning, load). Server-owned and
+   * optional like lobbyName. */
+  processingPercent?: number | null;
   /** The name of the lobby the game was played under, JOINED at read time
    * from the games mirror's lobby_name (the teiserver poll wrote it there —
    * see teiserver.ts). Never stored on the replays row and never accepted

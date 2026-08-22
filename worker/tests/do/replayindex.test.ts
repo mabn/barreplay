@@ -944,3 +944,18 @@ test("list joins the lobby name from the games mirror", async () => {
     expect(byId.get("alone")?.mapFile).toBeNull();
   });
 });
+
+test("list surfaces the processing job's live percent for the pill", async () => {
+  await inIndex((index) => {
+    index.upsert(replay("busy"));
+    index.jobInsert("j", "", "busy", "resim");
+    index.jobUpdate("j", "processing", null);
+    // Processing but nothing measurable yet (download, provisioning, load).
+    expect(index.list()).toMatchObject([{ id: "busy", processing: true, processingPercent: null }]);
+    index.jobUpdate("j", "processing", null, null, { state: "simulating", percent: 52.4 });
+    expect(index.list()).toMatchObject([{ id: "busy", processing: true, processingPercent: 52 }]);
+    // The job ending clears both: processing is derived, progress is wiped.
+    index.jobUpdate("j", "done", null);
+    expect(index.list()).toMatchObject([{ id: "busy", processing: false, processingPercent: null }]);
+  });
+});
