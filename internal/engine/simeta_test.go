@@ -118,6 +118,12 @@ func TestSimETAReportsTheRate(t *testing.T) {
 	if fps, eta := est.Observe(start, 0); fps >= 0 || eta != 0 {
 		t.Errorf("first reading = (%v, %v), want no rate and no ETA", fps, eta)
 	}
+	// The floors are short on purpose — a queue row with no ETA is the
+	// complaint — but they are not zero: an estimate off a divisor this small
+	// is dominated by the log's own 300-frame granularity.
+	if _, eta := est.Observe(start.Add(5*time.Second), 900); eta != 0 {
+		t.Errorf("ETA 5s in = %v, want it withheld until there is work to divide by", eta)
+	}
 	if fps, _ := est.Observe(start.Add(5*time.Second), 900); fps >= 0 {
 		t.Errorf("rate after 5s = %v, want it withheld until there is enough history", fps)
 	}

@@ -46,11 +46,16 @@ type ProgressState struct {
 	// SIMULATION, not through the job: it stays 0 through the download and the
 	// engine's load phase, which are minutes of their own.
 	Percent float64
-	// ETASec is how many seconds of wall time the simulation still needs. It
-	// is NOT the remaining frames over SimFPS: a sim frame gets several times
-	// more expensive as the game it describes grows, so that number reads
-	// "nearly done" through the whole first half of a run. See engine.SimETA.
-	// 0 while there is nothing to estimate from.
+	// ETASec is how many seconds of wall time the run still needs. It is NOT
+	// the remaining frames over SimFPS: a sim frame gets several times more
+	// expensive as the game it describes grows, so that number reads "nearly
+	// done" through the whole first half of a run. See engine.SimETA.
+	//
+	// Until the simulation has produced a measurement — which covers the demo
+	// fetch, the content check and the engine's boot — this is the Forecaster's
+	// guess from the demo's length, counting down with the clock. It is much
+	// rougher than what replaces it (see Forecaster), and it is replaced the
+	// moment there is anything better. 0 when there is neither.
 	ETASec float64
 	// SimFPS is the rate the last minute of simulation ran at: sim frames
 	// processed per wall second (30 = realtime).
@@ -78,6 +83,54 @@ type ProgressState struct {
 type Progress struct {
 	mu sync.Mutex
 	st ProgressState
+	// forecast is the pre-simulation guess (Forecaster.Estimate) and
+	// forecastAt when it was made, so what is reported is what is LEFT of it.
+	// Retired for good once the simulation reports anything: a forecast that
+	// outlived its measurement would come back as the ETA during packing, and
+	// a run that beat its forecast would then claim minutes of work left.
+	forecast   time.Duration
+	forecastAt time.Time
+	measured   bool
+	// now is the clock, injectable for tests.
+	now func() time.Time
+}
+
+func (p *Progress) clock() time.Time {
+	if p.now != nil {
+		return p.now()
+	}
+	return time.Now()
+}
+
+// SetForecast records a first guess at how long the whole re-simulation will
+// take, made before there is anything to measure. Ignored once the simulation
+// has reported for itself, and a zero or negative estimate simply clears it.
+func (p *Progress) SetForecast(d time.Duration) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.measured {
+		return
+	}
+	p.forecast, p.forecastAt = d, p.clock()
+}
+
+// etaLocked is what the run currently believes it has left: its own measurement
+// where there is one, the forecast counting down otherwise. Caller holds p.mu.
+func (p *Progress) etaLocked() float64 {
+	if p.measured || p.forecast <= 0 {
+		return p.st.ETASec
+	}
+	left := p.forecast.Seconds() - p.clock().Sub(p.forecastAt).Seconds()
+	if left < 0 {
+		// The forecast has run out and the simulation still has not reported.
+		// Saying "0 left" would be a lie the row keeps telling; saying nothing
+		// is what a guess that has been overtaken deserves.
+		return 0
+	}
+	return left
 }
 
 // Snapshot returns the current reading. Safe to call at any time, including
@@ -88,7 +141,9 @@ func (p *Progress) Snapshot() ProgressState {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.st
+	st := p.st
+	st.ETASec = p.etaLocked()
+	return st
 }
 
 // SetPhase records what the run is doing now. Exported because the useful
@@ -117,6 +172,12 @@ func (p *Progress) setSim(frame, total int32, fps, eta float64) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if eta > 0 {
+		// The simulation can speak for itself now, so the guess is done for
+		// good — including across the phase changes that clear ETASec, where a
+		// forecast still ticking down would reappear as the packing's ETA.
+		p.measured, p.forecast = true, 0
+	}
 	p.st.Frame, p.st.TotalFrames, p.st.SimFPS, p.st.ETASec = frame, total, fps, eta
 	if total > 0 {
 		p.st.Percent = 100 * float64(frame) / float64(total)
