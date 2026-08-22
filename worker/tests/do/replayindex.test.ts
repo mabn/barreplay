@@ -912,3 +912,19 @@ test("lobbiesMatch prunes old matched observations and keeps unmatched ones fore
     expect(rows(sql, `SELECT name FROM lobbies ORDER BY lobby_id`).map((r) => r.name)).toEqual(["old unmatched"]);
   });
 });
+
+test("list joins the lobby name from the games mirror", async () => {
+  await inIndex((index, sql) => {
+    index.upsert(replay("both"));
+    index.upsert(replay("alone"));
+    // The teiserver poll matched "both"'s game and named it.
+    index.gamesInsert([game("both")]);
+    sql.exec(`UPDATE games SET lobby_name = 'Chillmus | 8v8' WHERE id = 'both'`);
+    const byId = new Map(index.list().map((e) => [e.id, e]));
+    expect(byId.get("both")?.lobbyName).toBe("Chillmus | 8v8");
+    // A replay with no mirror row (or an unnamed one) reads null, not absent —
+    // the key's presence is how the front-end tells this backend from the Go
+    // server, which omits it wholesale.
+    expect(byId.get("alone")?.lobbyName).toBeNull();
+  });
+});
