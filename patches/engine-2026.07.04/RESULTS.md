@@ -21,8 +21,19 @@ capture from the **release** binary.
 | + full patch stack | **1m41s** | **239** | **9s** | **44.428e9** | identical |
 | | **−16%** | **+19%** | **−25%** | **−21.5%** | |
 
-Same stack on the small replay (duel, 15:31): sim 1m03s → 55s (**+14% fps**),
-load 15s → 10s, byte-identical.
+Across all three replays, every one byte-identical to its release-binary
+reference — and the win GROWS with the size of the game, which is the case that
+matters, since a 30-minute 16-player game is what actually costs an hour of
+somebody's machine:
+
+| replay | stock sim | patched sim | fps | Δ |
+|---|---|---|---|---|
+| small (duel, 15:31) | 1m03s | 55s | 444 → 508 | +14% |
+| medium (16p, 13:25) | 2m01s | 1m41s | 200 → 239 | +19% |
+| **large (16p, 30:46)** | **7m33s** | **5m12s** | **122 → 177** | **+45%** |
+
+Load time is −25% on top of that (12s → 9s), which a short replay feels more
+than a long one.
 
 ## The stack, in apply order
 
