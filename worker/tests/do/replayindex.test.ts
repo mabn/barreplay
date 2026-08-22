@@ -871,7 +871,19 @@ test("lobbiesMatch names the game and survives a re-sync", async () => {
     expect(g.lobby_name).toBe("Chillmus most welcome | 8v8");
     expect(g.lobby_id).toBe(42);
     expect(rows(sql, `SELECT matched_game_id FROM lobbies WHERE lobby_id = 42`)[0].matched_game_id).toBe("g42");
-    // Nothing left to match; the write is not repeated.
+    // Matching RETIRES the observation even though the page diff never closed
+    // it (the lobby may be running its next game already): it leaves the open
+    // set, so the next sync tick opens a FRESH entry for the same lobby id —
+    // one lobby names game after game, one row per game.
+    expect(index.lobbiesOpen()).toEqual([]);
+    expect(rows(sql, `SELECT ended_unix FROM lobbies WHERE lobby_id = 42`)[0].ended_unix).not.toBeNull();
+    index.lobbiesObserve([
+      { lobbyId: 42, name: "Chillmus renamed", map: "Otago 1.43", players: null, playerCount: 16, elapsedSec: 0 },
+    ]);
+    expect(index.lobbiesOpen().length).toBe(1);
+    expect(rows(sql, `SELECT COUNT(*) AS n FROM lobbies WHERE lobby_id = 42`)[0].n).toBe(2);
+    // Nothing left to match (the fresh observation has no candidate game);
+    // the write is not repeated.
     expect(index.lobbiesMatch()).toEqual({ matched: 0, pruned: 0 });
     // A later re-sync of the game (regression: lobby_name is NOT in the
     // upsert's column list) keeps the name the match wrote.

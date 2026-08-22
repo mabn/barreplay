@@ -239,11 +239,18 @@ export class ReplayIndex extends DurableObject<Env> {
       );
       -- One row per OBSERVED lobby-game: opened the first tick a lobby is
       -- seen in progress (started_unix back-dated by the page's running
-      -- clock), closed when it stops being, and eventually matched to the
-      -- rts-api game it was — which is the only place a lobby NAME can come
-      -- from, since BAR's published history does not carry one. Keyed by
+      -- clock), closed when it stops being — OR when it matches, whichever
+      -- comes first: a matched game has certainly ended, and retiring the row
+      -- then is what lets the next tick open a fresh one for the game the
+      -- lobby is running by now, even when back-to-back games never let it
+      -- leave the in-progress set. Eventually each row matches the rts-api
+      -- game it was — which is the only place a lobby NAME can come from,
+      -- since BAR's published history does not carry one. Keyed by
       -- (lobby_id, started_unix) because lobby ids are reused game after
-      -- game. players holds the non-spectator roster captured at the start
+      -- game: the row is the GAME as this lobby hosted it, so name, map,
+      -- roster and matched_game_id are all per-game, and a lobby renamed
+      -- between games contributes each game's then-current name.
+      -- players holds the non-spectator roster captured at the start
       -- (spectators churn too much to be a matching signal); NULL means the
       -- roster page could not be fetched at that moment, which never comes
       -- back.
@@ -900,9 +907,20 @@ export class ReplayIndex extends DurableObject<Env> {
           m.lobbyId,
           m.gameId,
         );
+        // Matching also RETIRES the observation (ended_unix, if the page diff
+        // had not closed it already): the matched game has certainly ended,
+        // even when the lobby never left the in-progress set — the
+        // back-to-back-games case, where the next game started inside one
+        // cron gap. With the old observation retired, the next sync tick sees
+        // the lobby in progress with no open entry and opens a FRESH
+        // observation for the game now running (started back-dated by the
+        // page's own clock), which is what lets one lobby name game after
+        // game.
         sql.exec(
-          `UPDATE lobbies SET matched_game_id = ? WHERE lobby_id = ? AND started_unix = ?`,
+          `UPDATE lobbies SET matched_game_id = ?, ended_unix = COALESCE(ended_unix, ?)
+           WHERE lobby_id = ? AND started_unix = ?`,
           m.gameId,
+          now,
           m.lobbyId,
           m.startedUnix,
         );

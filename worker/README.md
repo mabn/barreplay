@@ -230,7 +230,11 @@ id exists, so the match is heuristic: same **map** (normalized), **start time** 
 observation matches on map+time alone but loses to any real roster). Best candidate wins
 ties (smaller Δt); each side matches at most once. The winner's name lands in
 `games.lobby_name` (+ `lobby_id`), which a later re-sync cannot erase — the column is
-deliberately outside `gamesInsert`'s upsert list. Matched observations are pruned after
+deliberately outside `gamesInsert`'s upsert list. A match also **retires its
+observation**: the matched game has certainly ended, even when back-to-back games never
+let the lobby leave the in-progress set, so the next tick opens a fresh observation for
+the game now running — one lobby names game after game, one `lobbies` row per game
+(renames between games record per-game too). Matched observations are pruned after
 48 h; unmatched ones are kept as the record of why a game has no name.
 
 The name is **served, not copied**: `GET /api/replays` joins `games.lobby_name` per read
