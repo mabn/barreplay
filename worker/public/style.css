@@ -211,6 +211,17 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
   background: #1b232c; border: 1px solid #2f3947; color: #8a98a6;
 }
 #queuetable .kind-resim { color: #d3b98f; border-color: #5c4a2f; background: #2b2417; }
+/* A running job's live self-report, in the same cell a finished one puts its
+   failure detail — the two never coexist (the worker clears progress when a job
+   reaches a terminal state). The bar is deliberately thin and unlabelled: the
+   numbers are spelled out on the line under it, and the bar is only there to be
+   read at a glance down a column of rows. */
+#queuetable .jobprog {
+  height: 4px; border-radius: 2px; background: #202830; overflow: hidden;
+  margin: 0 0 4px; max-width: 260px;
+}
+#queuetable .jobprog > span { display: block; height: 100%; background: #4b90c4; }
+#queuetable .jobprogtext { color: #8fd3ff; font-size: 12px; }
 /* The processing record: how long it took in the row, the rest expanded from
    it. The whole row is the toggle, so it advertises itself with a cursor. */
 #queuetable tr.hasstats { cursor: pointer; }
@@ -223,6 +234,52 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
   font-size: 12px; color: #c7d3de; max-width: 900px;
 }
 .statsgrid .k { color: #6f87a0; }
+/* A job's healthcheck history: three small multiples of the same run, sharing
+   an X (the beats) and nothing else. Never one plot with three scales — bytes,
+   percent-of-a-core and percent-of-a-game have no common axis, and overlaying
+   them would invent a correlation the data does not contain.
+   One hue for all three: each chart has a single series, so colour carries no
+   information and the title is what says what is plotted. The value is
+   validated against this surface (dataviz six checks, dark, #12181e). */
+.jobcharts {
+  display: flex; flex-wrap: wrap; gap: 14px; margin: 12px 0 0; position: relative;
+  padding: 10px 12px; background: #12181e; border: 1px solid #202830; border-radius: 4px;
+  width: max-content; max-width: 100%; outline: none;
+}
+.jobcharts:focus-visible { border-color: #3a5670; }
+.charttitle { color: #6f87a0; font-size: 11px; margin: 0 0 2px 2px; }
+.chartnote { color: #6a7785; font-size: 12px; margin: 12px 0 0; }
+svg.chart { display: block; touch-action: none; }
+/* Chrome stays recessive: solid hairlines one step off the surface, never
+   dashed — dashing reads as "threshold" when it is only a grid. */
+svg.chart .chgrid { stroke: #202830; stroke-width: 1; }
+svg.chart .chtick {
+  fill: #6a7785; font-size: 9px; font-variant-numeric: tabular-nums; text-anchor: end;
+}
+svg.chart .chline { fill: none; stroke: #4b90c4; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+/* A wash, never a saturated block. */
+svg.chart .charea { fill: #4b90c4; fill-opacity: .10; stroke: none; }
+/* The peak, labelled on the chart so the number is readable without hovering.
+   The ring is the surface colour, so the mark stays legible over its own line. */
+svg.chart .chpeak { fill: #4b90c4; stroke: #12181e; stroke-width: 2; }
+svg.chart .chlabel { fill: #c7d3de; font-size: 10px; font-variant-numeric: tabular-nums; }
+svg.chart .chhair { stroke: #55677a; stroke-width: 1; display: none; }
+svg.chart .chdot { fill: #4b90c4; stroke: #12181e; stroke-width: 2; display: none; }
+/* One tooltip for all three charts: the reader aims at a moment, not a line. */
+.charttip {
+  display: none; position: absolute; top: 8px; z-index: 2; pointer-events: none;
+  background: #1a2027; border: 1px solid #2f3947; border-radius: 4px;
+  padding: 6px 9px; font-size: 11px; color: #9fb0bf; min-width: 150px;
+}
+.charttip .tiphead { color: #c7d3de; margin-bottom: 3px; }
+.charttip .tiprow { display: flex; align-items: baseline; gap: 6px; }
+/* A short stroke of the series colour keys the row; at this density a filled
+   box is data-weight ink doing a label's job. */
+.charttip .tipkey {
+  width: 10px; height: 2px; border-radius: 1px; background: #4b90c4; flex: none;
+  transform: translateY(-3px);
+}
+.charttip strong { color: #e6eef6; font-weight: 600; font-variant-numeric: tabular-nums; }
 /* The size report is a fixed-width table `pack -stats` formats with spaces;
    it scrolls inside itself rather than widening the page. */
 pre.sizereport {

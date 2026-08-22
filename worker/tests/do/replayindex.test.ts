@@ -408,6 +408,146 @@ test("a heartbeat does not pile up rows", async () => {
   });
 });
 
+// The live progress column, whose whole behaviour is the CASE in jobUpdate's
+// UPDATE: kept and refreshed while the job runs, kept when a beat carries none,
+// and cleared by the terminal state.
+test("progress follows the running job and goes out with it", async () => {
+  await inIndex((index) => {
+    index.jobInsert("j", "", "busy", "resim");
+    index.jobUpdate("j", "processing", null, null, { state: "loading" });
+    expect(index.jobGet("j")?.progress).toEqual({ state: "loading" });
+
+    index.jobUpdate("j", "processing", null, null, { state: "simulating", percent: 12.5 });
+    expect(index.jobGet("j")?.progress).toEqual({ state: "simulating", percent: 12.5 });
+
+    // A beat with nothing to say keeps the last reading.
+    index.jobUpdate("j", "processing", null);
+    expect(index.jobGet("j")?.progress).toEqual({ state: "simulating", percent: 12.5 });
+
+    // ...and finishing drops it, while the stats reported with it stay.
+    index.jobUpdate("j", "done", null, { tookSec: 12 });
+    expect(index.jobGet("j")?.progress).toBe(null);
+    expect(index.jobGet("j")?.stats).toEqual({ tookSec: 12 });
+  });
+});
+
+// Taking over a stale job must not inherit the dead daemon's last reading:
+// "43%, 12 minutes left" from a run that is gone describes nothing.
+test("claiming a job clears the previous holder's progress", async () => {
+  await inIndex((index, sql) => {
+    index.jobInsert("j", "", "busy", "resim");
+    index.jobUpdate("j", "processing", null, null, { state: "simulating", percent: 43 });
+    // Age it past the resim stale window so the claim is allowed.
+    sql.exec(`UPDATE jobs SET updated_unix = updated_unix - ? WHERE id = 'j'`, 100 * 60);
+
+    expect(index.jobClaim("j", "resim")).toBe(true);
+    expect(index.jobGet("j")?.progress).toBe(null);
+  });
+});
+
+// The healthcheck HISTORY: one row per beat, kept after the job ends (unlike
+// the live progress, which is cleared) because a dead run's memory curve is
+// exactly what nobody has otherwise.
+test("every healthcheck is kept as a sample, and outlives the job", async () => {
+  await inIndex((index, sql) => {
+    index.jobInsert("j", "", "busy", "resim");
+    for (let i = 0; i < 3; i++) {
+      index.jobUpdate("j", "processing", null, null, {
+        state: "simulating", frame: 1000 * i, percent: i, rssBytes: 1e9 + i, cpuPct: 500 + i,
+      });
+      // The worker stamps each beat with its own clock, and all three land in
+      // the same second here. Age everything already recorded by a second so
+      // the next beat has its own slot — otherwise they are one point, since
+      // the (job, time) key makes a same-second beat an update.
+      sql.exec(`UPDATE job_samples SET at_unix = at_unix - 1 WHERE job_id = 'j'`);
+    }
+    expect(index.jobSamples("j")).toHaveLength(3);
+
+    index.jobUpdate("j", "error", "engine died", { tookSec: 2400 });
+    expect(index.jobGet("j")?.progress).toBe(null);
+    const kept = index.jobSamples("j");
+    expect(kept).toHaveLength(3);
+    expect(kept[0]).toMatchObject({ state: "simulating", frame: 0, rssBytes: 1e9 });
+    expect(kept[2]).toMatchObject({ frame: 2000, cpuPct: 502 });
+  });
+});
+
+// A beat retried inside the same second is the same reading, not a second
+// point: the (job, time) key makes the insert idempotent.
+test("a repeated beat in one second updates its sample instead of adding one", async () => {
+  await inIndex((index) => {
+    index.jobInsert("j", "", "busy", "resim");
+    index.jobUpdate("j", "processing", null, null, { state: "loading", cpuPct: 1 });
+    index.jobUpdate("j", "processing", null, null, { state: "simulating", cpuPct: 2 });
+    const s = index.jobSamples("j");
+    expect(s).toHaveLength(1);
+    expect(s[0]).toMatchObject({ state: "simulating", cpuPct: 2 });
+  });
+});
+
+// parseJobProgress is shallow on purpose — its fields were only ever displayed
+// — but these land in typed SQL columns, so a field of the wrong type must
+// become NULL rather than throw inside the bind and 500 the healthcheck.
+test("a sample coerces wire junk to null instead of failing the beat", async () => {
+  await inIndex((index) => {
+    index.jobInsert("j", "", "busy", "resim");
+    const bad = { state: 42, frame: {}, percent: "43", rssBytes: NaN, cpuPct: [1] };
+    expect(index.jobUpdate("j", "processing", null, null, bad as never)).toBe(true);
+    expect(index.jobSamples("j")[0]).toMatchObject({
+      state: null, frame: null, percent: null, rssBytes: null, cpuPct: null,
+    });
+  });
+});
+
+// Past the cap the series is HALVED, not truncated: a run that beats for hours
+// keeps its whole span (first and last sample survive) at half the resolution,
+// where dropping the oldest would lose the load phase and refusing to record
+// would lose the end — the part that says how it died.
+test("a series past the cap is thinned, keeping its span", async () => {
+  await inIndex((index, sql) => {
+    index.jobInsert("j", "", "busy", "resim");
+    // Seed just under the cap directly; driving 720 beats through jobUpdate
+    // would be 720 catalog-placeholder writes as well.
+    for (let i = 0; i < 720; i++) {
+      sql.exec(`INSERT INTO job_samples (job_id, at_unix, percent) VALUES ('j', ?, ?)`, 1000 + i, i);
+    }
+    expect(index.jobSamples("j")).toHaveLength(720);
+
+    index.jobUpdate("j", "processing", null, null, { state: "simulating", percent: 99 });
+    const after = index.jobSamples("j");
+    expect(after.length).toBeLessThan(400);
+    expect(after.length).toBeGreaterThan(300);
+    expect(after[0].atUnix).toBe(1000);
+    expect(after[after.length - 1].percent).toBe(99);
+  });
+});
+
+// The history outlives its job, so something has to age it out. Nothing else
+// here grows without a rule.
+test("pruning drops the samples of long-finished and vanished jobs", async () => {
+  await inIndex((index, sql) => {
+    index.jobInsert("old", "", "a", "resim");
+    index.jobInsert("recent", "", "b", "resim");
+    index.jobInsert("live", "", "c", "resim");
+    for (const id of ["old", "recent", "live"]) {
+      index.jobUpdate(id, "processing", null, null, { state: "simulating" });
+    }
+    index.jobUpdate("old", "done", null);
+    index.jobUpdate("recent", "done", null);
+    // Orphaned samples: a job row that is simply not there.
+    sql.exec(`INSERT INTO job_samples (job_id, at_unix) VALUES ('gone', 1)`);
+
+    const now = Math.floor(Date.now() / 1000);
+    sql.exec(`UPDATE jobs SET updated_unix = ? WHERE id = 'old'`, now - 40 * 24 * 3600);
+
+    expect(index.jobSamplePrune(now - 30 * 24 * 3600)).toBeGreaterThan(0);
+    expect(index.jobSamples("old")).toHaveLength(0);
+    expect(index.jobSamples("gone")).toHaveLength(0);
+    expect(index.jobSamples("recent")).toHaveLength(1);
+    expect(index.jobSamples("live")).toHaveLength(1);
+  });
+});
+
 test("a published replay keeps its row and never becomes a placeholder", async () => {
   await inIndex((index) => {
     index.upsert(replay("real"));
