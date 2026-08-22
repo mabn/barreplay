@@ -94,6 +94,14 @@ export interface ReplayEntry {
    * Server-owned and absent from the Go server's catalog, exactly like
    * `placeholder`. */
   processing: boolean;
+  /** The name of the lobby the game was played under, JOINED at read time
+   * from the games mirror's lobby_name (the teiserver poll wrote it there —
+   * see teiserver.ts). Never stored on the replays row and never accepted
+   * from a PUT — the join is the single source, so the name appears the
+   * moment the match lands with no republish. Optional because only the DO's
+   * list fills it; the Go server's catalog has no games mirror and omits it,
+   * and the front-end reads a missing value as null. */
+  lobbyName?: string | null;
 }
 
 /** One ally team's roster slice in a catalog row. */

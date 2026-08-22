@@ -952,7 +952,18 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           games.lobby_name (+lobby_id), which is deliberately OUTSIDE
                           gamesInsert's upsert list so a re-sync cannot erase it. Matched
                           observations prune after 48h; unmatched ones are kept forever as
-                          the record of why a game has no name. The web SESSION (the Guardian
+                          the record of why a game has no name. SERVED: the DO's list JOINS
+                          lobby_name per read (a scalar subselect on games' primary key), so
+                          GET /api/replays rows carry a `lobbyName` — never stored on the
+                          replays row, never accepted from a PUT, appearing the moment the
+                          match lands with no republish; the Go server omits the key
+                          entirely, which is how the front-end knows not to offer the
+                          column. In the LIST the Players column header is a SWITCH
+                          (app.js playersColumn): clicking it swaps the column between the
+                          rosters and the lobby name (dash when unmatched) — offered only
+                          when any row carries the key, since a toggle to a column of dashes
+                          on the Go backend would be worse than none. Plain view state, like
+                          queueOpen — not in the URL. The web SESSION (the Guardian
                           cookie jar) persists in the one-row teiserver_session table, so the
                           steady state is ONE authed GET per tick, no login (an expired
                           session shows as a redirect to /login: drop the cookie, log in once,

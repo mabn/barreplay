@@ -593,7 +593,8 @@ export class ReplayIndex extends DurableObject<Env> {
     const rows = this.ctx.storage.sql
       .exec(
         `SELECT id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date, placeholder,
-                EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = replays.id AND j.state = 'processing') AS processing
+                EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = replays.id AND j.state = 'processing') AS processing,
+                (SELECT lobby_name FROM games g WHERE g.id = replays.id) AS lobby_name
          FROM replays
          ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
          ORDER BY start_unix IS NULL, start_unix DESC, id
@@ -619,6 +620,10 @@ export class ReplayIndex extends DurableObject<Env> {
       widgetSha: (r.widget_sha as string | null) ?? null,
       widgetDate: (r.widget_date as string | null) ?? null,
       placeholder: r.placeholder === 1,
+      // JOINED per read from the games mirror (the teiserver poll's landing
+      // spot), so a name that arrives after the replay was published shows
+      // up without anyone touching the replays row.
+      lobbyName: (r.lobby_name as string | null) ?? null,
       // DERIVED, never stored: a flag would have to be cleared by whoever
       // finishes the job, and every path that forgets — a crash, a stale
       // daemon, a job deleted by hand — would leave a row saying "processing"

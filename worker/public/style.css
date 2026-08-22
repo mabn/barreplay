@@ -139,6 +139,10 @@ body.admin-mode #homenav .navitem.admin { display: flex; }
 /* Players column: one span per side, "v" separators; the side that recorded
    the current upload gets a viewpoint dot. Full roster in the tooltip. */
 #hometable td.players { white-space: normal; }
+/* The Players header is a switch (players ⇄ lobby name) when the backend
+   serves lobby names; the affordance is the cursor + a dotted underline. */
+#hometable th.swappable { cursor: pointer; text-decoration: underline dotted; user-select: none; }
+#hometable th.swappable:hover { color: #9fb6cc; }
 #hometable td.players .vs { color: #6f87a0; padding: 0 6px; font-size: 11px; }
 #hometable td.players .side.uploader::before { content: '◉ '; }
 /* Alternate uploads of the same game (superseded revisions keep playing). */

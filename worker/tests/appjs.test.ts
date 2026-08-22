@@ -756,6 +756,8 @@ test('a game being processed is listed, badged first, and cannot be opened', () 
     // Paging state: this test is about the rows, so one page holds them all.
     const PAGE_SIZE = 50; let homePage = 0, homeHasNext = false;
     const goPage = () => {};
+    // The Players column shows rosters here; its lobby-name face has its own test.
+    let playersColumn = 'players';
     ${extract('renderPager')}
     ${extract('renderHome')}
     return renderHome;
@@ -789,6 +791,74 @@ test('a game being processed is listed, badged first, and cannot be opened', () 
   assert.equal(internalLinks(trs[2]), 0, 'a row with nothing to play links nowhere');
   assert.ok(trs[2].className.includes('unopenable'), 'and says so to the stylesheet');
   assert.ok(!trs[1].className.includes('unopenable'));
+});
+
+test('the Players header swaps the column to lobby names and back', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+
+  const dom = fakeDom();
+  const rows = [
+    // Named by the teiserver poll's match.
+    { id: 'named', rid: 'named-1', startUnix: 1, durationSec: 1, map: 'M', gameSize: '8v8', sizeBytes: 1,
+      players: [{ ally: 0, count: 1, players: [{ name: 'Rouben' }] }], settings: null, uploads: [],
+      lobbyName: 'Chillmus most welcome | 8v8' },
+    // Worker backend but nothing matched (yet, or ever): key present, null.
+    { id: 'unnamed', rid: 'unnamed-1', startUnix: 2, durationSec: 1, map: 'M', gameSize: '1v1', sizeBytes: 1,
+      players: [{ ally: 0, count: 1, players: [{ name: 'Adzek' }] }], settings: null, uploads: [],
+      lobbyName: null },
+  ];
+  const render = eval(`(function(){
+    const document = dom.document;
+    const replayList = rows;
+    const ALLY_HUES = [0, 120];
+    const urlId = (e) => e.rid || e.id;
+    const replayHref = (id) => '/?replay=' + id;
+    const fmtDate = () => 'date', fmtDuration = () => 'dur', fmtSize = () => 'size';
+    const settingsBadges = () => [];
+    const adminMode = () => false, syncOrphanButton = () => {}, filterQuery = () => '';
+    const PAGE_SIZE = 50; let homePage = 0, homeHasNext = false;
+    const goPage = () => {};
+    let playersColumn = 'players';
+    ${extract('renderPager')}
+    ${extract('renderHome')}
+    return renderHome;
+  })()`);
+
+  render();
+  const th = dom.document.getElementById('h_players');
+  assert.ok(th.className.includes('swappable'), 'a list carrying the field offers the swap');
+  assert.ok(th.textContent.startsWith('Players'));
+  const playerCell = (i: number) => dom.tbody.children[i].children.find((td: any) => td.className.includes('players'));
+  assert.ok(walk(playerCell(0)).some((n) => n.textContent === 'Rouben'), 'rosters first');
+
+  // Click the header: the same column now shows the lobby name; a game the
+  // poll never named shows a dash, not a blank.
+  th.onclick();
+  assert.ok(dom.document.getElementById('h_players').textContent.startsWith('Lobby'));
+  assert.ok(walk(playerCell(0)).some((n) => n.textContent === 'Chillmus most welcome | 8v8'));
+  assert.ok(walk(playerCell(1)).some((n) => n.textContent === '—'));
+  assert.ok(playerCell(1).className.includes('dim'));
+
+  // And back.
+  th.onclick();
+  assert.ok(walk(playerCell(0)).some((n) => n.textContent === 'Rouben'));
+
+  // Against the Go server (no lobbyName key anywhere) the header is inert.
+  rows.forEach((r: any) => delete r.lobbyName);
+  render();
+  const plain = dom.document.getElementById('h_players');
+  assert.ok(!plain.className.includes('swappable'));
+  assert.equal(plain.textContent, 'Players');
+  assert.equal(plain.onclick, null);
 });
 
 test('the players filter is a two-ended range over the sizes present', () => {
