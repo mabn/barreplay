@@ -533,6 +533,8 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 }
 #filters input:focus, #filters select:focus { outline: none; border-color: #4a7fa8; }
 #filters input[type=search] { width: 130px; }
+/* Map names run long ("All That Glitters v2.2.3"); the combobox needs the room. */
+#filters #f_map { width: 200px; }
 /* Players: two range inputs stacked over one track, so a single strip carries
    both bounds. The inputs are stripped bare (no native track, no background,
    the box-model padding above undone) and made transparent to the pointer —
