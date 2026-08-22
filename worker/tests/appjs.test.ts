@@ -1092,7 +1092,7 @@ test('a running job shows its live progress instead of an empty row', () => {
       game: { durationSec: 2417, gameSize: '8v8' },
       progress: {
         state: 'simulating', frame: 43000, totalFrames: 100170, percent: 42.9,
-        etaSec: 840, simFps: 68.2, rssBytes: 3221225472, cpuPct: 612.5,
+        etaSec: 840, simFps: 68.2, rssBytes: 3221225472, swapBytes: 0, cpuPct: 612.5,
       },
     },
     // Still loading: a phase with nothing to measure. It must still say what
@@ -1103,7 +1103,7 @@ test('a running job shows its live progress instead of an empty row', () => {
       createdUnix: 1787349000, updatedUnix: 1787349900, disabled: false,
       // Neither the catalog nor the mirror knows this one.
       game: null,
-      progress: { state: 'starting engine', rssBytes: 1048576 },
+      progress: { state: 'starting engine', rssBytes: 1048576, swapBytes: 268435456 },
     },
     // Finished badly: the worker cleared the progress when the job ended, so
     // the same cell carries the failure.
@@ -1147,13 +1147,17 @@ test('a running job shows its live progress instead of an empty row', () => {
   assert.ok(bar, 'a measurable phase draws a bar');
   assert.equal(bar.children[0].style.width, '42.9%');
   const text = walk(running).find((n) => n.className === 'jobprogtext').textContent;
+  // No swap in the one-liner when there is none: the line is already five
+  // readings long and "0 B swap" is the least interesting of them.
   assert.match(text, /^simulating · 43% · 14m 00s left · 3\.2 GB · 613% CPU$/);
 
   const loading = detailOf(trs[1]);
   assert.equal(walk(loading).find((n) => n.className === 'jobprog'), undefined,
     'nothing to measure yet: words, but no bar pinned at zero');
+  // ...but it leads with it when the engine IS swapping, which is the whole
+  // reason to look at this row.
   assert.equal(walk(loading).find((n) => n.className === 'jobprogtext').textContent,
-    'starting engine · 1.0 MB');
+    'starting engine · 1.0 MB · 268.4 MB swap');
 
   // The failure keeps the cell it always had; the two never collide because
   // the worker clears progress at exactly the moment an error appears.
@@ -1257,10 +1261,10 @@ test('a job\'s healthcheck history is drawn as one chart per measure', () => {
   const dom = fakeDom();
   // A load phase that reports memory but no simulation, then a run.
   const rows = [
-    { atUnix: 1000, state: 'loading', frame: null, percent: null, etaSec: null, rssBytes: 1e9, cpuPct: 120 },
-    { atUnix: 1010, state: 'simulating', frame: 300, percent: 10, etaSec: 900, rssBytes: 2e9, cpuPct: 500 },
-    { atUnix: 1020, state: 'simulating', frame: 600, percent: 20, etaSec: 800, rssBytes: 4e9, cpuPct: 610 },
-    { atUnix: 1030, state: 'simulating', frame: 900, percent: 30, etaSec: 700, rssBytes: 3e9, cpuPct: 400 },
+    { atUnix: 1000, state: 'loading', frame: null, percent: null, etaSec: null, rssBytes: 1e9, swapBytes: 0, cpuPct: 120 },
+    { atUnix: 1010, state: 'simulating', frame: 300, percent: 10, etaSec: 900, rssBytes: 2e9, swapBytes: 0, cpuPct: 500 },
+    { atUnix: 1020, state: 'simulating', frame: 600, percent: 20, etaSec: 800, rssBytes: 4e9, swapBytes: 0, cpuPct: 610 },
+    { atUnix: 1030, state: 'simulating', frame: 900, percent: 30, etaSec: 700, rssBytes: 3e9, swapBytes: 0, cpuPct: 400 },
   ];
 
   const api = eval(`(function(){
@@ -1274,6 +1278,9 @@ test('a job\'s healthcheck history is drawn as one chart per measure', () => {
 
   const fig = api.jobCharts(rows);
   const svgs = walk(fig).filter((n: any) => n.tag === 'svg');
+  // Four, not five: this run never swapped, and swap draws nothing when every
+  // reading is zero — a flat line along the baseline of an axis reading "1 B"
+  // is worse than no chart. Its APPEARING is the signal.
   assert.equal(svgs.length, 4, 'one chart per measure, never one plot with several scales');
 
   const texts = (svg: any) => walk(svg).filter((n: any) => n.tag === 'text');
@@ -1320,6 +1327,14 @@ test('a job\'s healthcheck history is drawn as one chart per measure', () => {
   assert.equal(texts(eta).find((t: any) => t.attrs.class === 'chtick')._text, '15:00', 'the axis tops at the first estimate');
   assert.equal(cls(eta, 'chlabel')[0]._text, '11m 40s left', 'the last estimate, not the biggest');
 
+  // ...and it DOES draw once the engine actually swapped.
+  const swapped = rows.map((r, i) => ({ ...r, swapBytes: i === 2 ? 512e6 : 0 }));
+  const swapSvgs = walk(api.jobCharts(swapped)).filter((n: any) => n.tag === 'svg');
+  assert.equal(swapSvgs.length, 5);
+  // The tick is the COMPACT form: "512.0 MB" is nine characters and runs off
+  // the left of the figure, which is a bug the geometry check below catches.
+  assert.equal(texts(swapSvgs[4]).find((t: any) => t.attrs.class === 'chtick')._text, '512 MB');
+
   // A measure the run never reported gets no plot at all: an empty axis would
   // claim a reading of zero, which is a different statement.
   const noEngine = rows.map((r) => ({ ...r, rssBytes: null, cpuPct: null }));
@@ -1330,4 +1345,31 @@ test('a job\'s healthcheck history is drawn as one chart per measure', () => {
   assert.equal(api.nearestSample(api.CH_W - api.CH_R, 4), 3);
   assert.equal(api.nearestSample(-999, 4), 0, 'and is clamped, never out of range');
   assert.equal(api.nearestSample(9999, 4), 3);
+});
+
+// Swap is stated even at zero in the expanded grid, and that is deliberate:
+// "none" is the reassurance and it is the usual answer, so a line that only
+// appeared in the bad case would leave every healthy run silent about the one
+// thing being watched for. Absent entirely is a different claim — a daemon too
+// old to measure it.
+test('the swap reading distinguishes "none" from "not measured"', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+  const api = eval(`(function(){
+    ${extract('fmtDur')} ${extract('fmtSize')} ${extract('progressLines')}
+    return { progressLines };
+  })()`);
+  const lines = (p: unknown) => Object.fromEntries(api.progressLines(p));
+
+  assert.equal(lines({ state: 'simulating', swapBytes: 0 })['Engine swap'], 'none');
+  assert.equal(lines({ state: 'simulating', swapBytes: 268435456 })['Engine swap'], '268.4 MB');
+  assert.equal('Engine swap' in lines({ state: 'simulating' }), false, 'an older daemon says nothing');
 });

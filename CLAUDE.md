@@ -1039,11 +1039,26 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           particular run — for the ETA that is "how much was left when it stopped
                           reporting", the whole story of one that died. simulation additionally
                           fixes its domain 0-100 because the whole is known; autoscaling would
-                          draw a stalled run exactly like a finished one. Both formatters exist for a reason —
-                          `tick` must fit a 46px gutter, `fmt` has a tooltip line to explain
+                          draw a stalled run exactly like a finished one.
+                          SWAP is the exception that skips itself (spec.skipIfZero): zero is the
+                          healthy answer and very nearly always the answer, and a flat line along
+                          the baseline of an axis reading "1 B" is worse than no chart — so it is
+                          drawn only when the engine actually swapped, and its APPEARING is the
+                          signal. The zero case is still stated in words in the grid above
+                          ("Engine swap: none"), which is where it belongs: a line that showed up
+                          only in the bad case would leave every healthy run silent about the one
+                          thing being watched for. The one-line Detail summary is the opposite —
+                          it carries swap only when there IS some, being already five readings
+                          long.
+                          Both formatters exist for a reason —
+                          `tick` must fit the 46px gutter, `fmt` has a tooltip line to explain
                           itself, and using one for both put "650% of one core" through the left
-                          edge of the figure. X labels are ELAPSED time, not clock time: "it
-                          spiked at minute 32" is the reading.
+                          edge of the figure. For BYTE scales the tick is fmtSizeShort, not
+                          fmtSize, for exactly the same reason one step further: "846.0 MB" is
+                          nine characters and runs off the edge where "846 MB" does not, and a
+                          tick is meant to be a round number anyway (the precise value is on the
+                          direct label and in the tooltip). X labels are ELAPSED time, not clock
+                          time: "it spiked at minute 32" is the reading.
                           It reads GET
                           /api/queue (ReplayIndex.queuePage: unfinished jobs first, then the most
                           recently finished; ?offset=/?limit=, limit capped at QUEUE_LIMIT_MAX),

@@ -453,7 +453,8 @@ test("every healthcheck is kept as a sample, and outlives the job", async () => 
     index.jobInsert("j", "", "busy", "resim");
     for (let i = 0; i < 3; i++) {
       index.jobUpdate("j", "processing", null, null, {
-        state: "simulating", frame: 1000 * i, percent: i, rssBytes: 1e9 + i, cpuPct: 500 + i,
+        state: "simulating", frame: 1000 * i, percent: i,
+        rssBytes: 1e9 + i, swapBytes: i * 1024, cpuPct: 500 + i,
       });
       // The worker stamps each beat with its own clock, and all three land in
       // the same second here. Age everything already recorded by a second so
@@ -468,7 +469,7 @@ test("every healthcheck is kept as a sample, and outlives the job", async () => 
     const kept = index.jobSamples("j");
     expect(kept).toHaveLength(3);
     expect(kept[0]).toMatchObject({ state: "simulating", frame: 0, rssBytes: 1e9 });
-    expect(kept[2]).toMatchObject({ frame: 2000, cpuPct: 502 });
+    expect(kept[2]).toMatchObject({ frame: 2000, cpuPct: 502, swapBytes: 2048 });
   });
 });
 
@@ -491,10 +492,10 @@ test("a repeated beat in one second updates its sample instead of adding one", a
 test("a sample coerces wire junk to null instead of failing the beat", async () => {
   await inIndex((index) => {
     index.jobInsert("j", "", "busy", "resim");
-    const bad = { state: 42, frame: {}, percent: "43", rssBytes: NaN, cpuPct: [1] };
+    const bad = { state: 42, frame: {}, percent: "43", rssBytes: NaN, swapBytes: "lots", cpuPct: [1] };
     expect(index.jobUpdate("j", "processing", null, null, bad as never)).toBe(true);
     expect(index.jobSamples("j")[0]).toMatchObject({
-      state: null, frame: null, percent: null, rssBytes: null, cpuPct: null,
+      state: null, frame: null, percent: null, rssBytes: null, swapBytes: null, cpuPct: null,
     });
   });
 });

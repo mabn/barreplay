@@ -420,6 +420,12 @@ type jobProgress struct {
 	// log is the only other place this exists.
 	RssBytes int64   `json:"rssBytes,omitempty"`
 	CpuPct   float64 `json:"cpuPct,omitempty"`
+	// SwapBytes is how much of the engine has been pushed out to swap.
+	// DELIBERATELY not omitempty, unlike everything above it: zero is the
+	// healthy answer and saying so is the point, so "the engine is not
+	// swapping" and "this daemon is too old to know" must not arrive as the
+	// same absent field.
+	SwapBytes int64 `json:"swapBytes"`
 }
 
 // resimProgress reads a live re-simulation and converts the reading to the wire
@@ -443,6 +449,7 @@ func progressOf(s resim.ProgressState) *jobProgress {
 		EtaSec:      float64(int64(s.ETASec)),
 		SimFps:      round1(s.SimFPS),
 		RssBytes:    s.RSSBytes,
+		SwapBytes:   s.SwapBytes,
 		CpuPct:      round1(s.CPUPercent),
 	}
 }

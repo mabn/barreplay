@@ -54,8 +54,12 @@ type ProgressState struct {
 	SimFPS float64
 	// RSSBytes and CPUPercent are the engine process's resident memory and its
 	// CPU use over the last sample window, as a percentage of one core — so a
-	// busy multi-threaded engine reports well over 100.
+	// busy multi-threaded engine reports well over 100. SwapBytes is how much
+	// of the engine has been pushed out to swap: zero is both the healthy
+	// answer and the usual one, and anything else is the direct explanation
+	// for a run that has gone slow.
 	RSSBytes   int64
+	SwapBytes  int64
 	CPUPercent float64
 }
 
@@ -117,13 +121,13 @@ func (p *Progress) setSim(frame, total int32, fps, eta float64) {
 }
 
 // setProc records one reading of the engine process's resource use.
-func (p *Progress) setProc(rss int64, cpuPct float64) {
+func (p *Progress) setProc(rss, swap int64, cpuPct float64) {
 	if p == nil {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.st.RSSBytes, p.st.CPUPercent = rss, cpuPct
+	p.st.RSSBytes, p.st.SwapBytes, p.st.CPUPercent = rss, swap, cpuPct
 }
 
 const (
@@ -171,7 +175,7 @@ func watchProgress(ctx context.Context, p *Progress, infologPath string, pid int
 				if haveProc {
 					cpu = engine.CPUPercent(prevProc, s)
 				}
-				p.setProc(s.RSSBytes, cpu)
+				p.setProc(s.RSSBytes, s.SwapBytes, cpu)
 				prevProc, haveProc = s, true
 			}
 			frame, ok := engine.LastLoggedFrame(infologPath)

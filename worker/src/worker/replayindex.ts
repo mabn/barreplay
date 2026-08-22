@@ -139,6 +139,7 @@ export class ReplayIndex extends DurableObject<Env> {
         percent   REAL,
         eta_sec   REAL,
         rss_bytes INTEGER,
+        swap_bytes INTEGER,
         cpu_pct   REAL,
         PRIMARY KEY (job_id, at_unix)
       );
@@ -225,6 +226,9 @@ export class ReplayIndex extends DurableObject<Env> {
     // reported from the start but only ever overwritten in place, so the rows
     // written before this have none and chart as a gap.
     addColumn("job_samples", "eta_sec REAL");
+    // Same story: reported from the start of the healthcheck but only ever
+    // shown live, so rows written before this chart as a gap.
+    addColumn("job_samples", "swap_bytes INTEGER");
     for (const col of [
       "settings TEXT",
       "rid TEXT",
@@ -1025,7 +1029,7 @@ export class ReplayIndex extends DurableObject<Env> {
   jobSamples(jobId: string): JobSample[] {
     return this.ctx.storage.sql
       .exec(
-        `SELECT at_unix, state, frame, percent, eta_sec, rss_bytes, cpu_pct
+        `SELECT at_unix, state, frame, percent, eta_sec, rss_bytes, swap_bytes, cpu_pct
          FROM job_samples WHERE job_id = ? ORDER BY at_unix`,
         jobId,
       )
@@ -1037,6 +1041,7 @@ export class ReplayIndex extends DurableObject<Env> {
         percent: r.percent as number | null,
         etaSec: r.eta_sec as number | null,
         rssBytes: r.rss_bytes as number | null,
+        swapBytes: r.swap_bytes as number | null,
         cpuPct: r.cpu_pct as number | null,
       }));
   }
@@ -1054,11 +1059,12 @@ export class ReplayIndex extends DurableObject<Env> {
    * uses, so the time axis cannot be bent by a daemon with a skewed clock. */
   private jobSampleRecord(jobId: string, at: number, p: JobProgress): void {
     this.ctx.storage.sql.exec(
-      `INSERT INTO job_samples (job_id, at_unix, state, frame, percent, eta_sec, rss_bytes, cpu_pct)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO job_samples (job_id, at_unix, state, frame, percent, eta_sec, rss_bytes, swap_bytes, cpu_pct)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(job_id, at_unix) DO UPDATE SET
          state = excluded.state, frame = excluded.frame, percent = excluded.percent,
-         eta_sec = excluded.eta_sec, rss_bytes = excluded.rss_bytes, cpu_pct = excluded.cpu_pct`,
+         eta_sec = excluded.eta_sec, rss_bytes = excluded.rss_bytes,
+         swap_bytes = excluded.swap_bytes, cpu_pct = excluded.cpu_pct`,
       jobId,
       at,
       typeof p.state === "string" ? p.state.slice(0, 64) : null,
@@ -1066,6 +1072,7 @@ export class ReplayIndex extends DurableObject<Env> {
       finite(p.percent),
       finite(p.etaSec),
       finite(p.rssBytes),
+      finite(p.swapBytes),
       finite(p.cpuPct),
     );
     const n = this.ctx.storage.sql

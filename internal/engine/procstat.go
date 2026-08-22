@@ -23,6 +23,13 @@ type ProcSample struct {
 	// actually holding, which for the engine is dominated by the map, the unit
 	// models it never draws, and the sim state.
 	RSSBytes int64
+	// SwapBytes is how much of the process has been pushed OUT to swap. Zero is
+	// the healthy answer and the usual one; anything else is the direct
+	// explanation for a re-simulation that has gone slow, since a sim frame
+	// that has to fault its own state back in is doing disk I/O per frame.
+	// Also zero on a host with no swap configured, which reads the same and
+	// means the same thing for the run.
+	SwapBytes int64
 	// CPUSec is user+system CPU time consumed since the process started. The
 	// engine is threaded, so this grows faster than wall time when its worker
 	// pool is busy.
@@ -55,11 +62,46 @@ func SampleProcess(pid int) (ProcSample, bool) {
 	if pid <= 0 {
 		return ProcSample{}, false
 	}
-	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	dir := "/proc/" + strconv.Itoa(pid)
+	b, err := os.ReadFile(dir + "/stat")
 	if err != nil {
 		return ProcSample{}, false
 	}
-	return parseProcStat(string(b), time.Now())
+	s, ok := parseProcStat(string(b), time.Now())
+	if !ok {
+		return ProcSample{}, false
+	}
+	// Swap lives in the OTHER file: /proc/<pid>/stat has no field for it, and
+	// status is the only place the kernel publishes it per process. Its absence
+	// is not a failure — a kernel built without swap support has no VmSwap line
+	// at all — so a missing reading is zero, which is also what it would say.
+	if st, serr := os.ReadFile(dir + "/status"); serr == nil {
+		s.SwapBytes = parseProcStatusSwap(string(st))
+	}
+	return s, true
+}
+
+// parseProcStatusSwap pulls the VmSwap line out of /proc/<pid>/status, in
+// bytes. The file is "Key:\t<n> kB" lines; the unit is always kB for the Vm*
+// entries, which is why it is multiplied rather than parsed. Returns 0 for a
+// missing or unreadable line — see the note at the call site.
+func parseProcStatusSwap(status string) int64 {
+	for _, line := range strings.Split(status, "\n") {
+		rest, ok := strings.CutPrefix(line, "VmSwap:")
+		if !ok {
+			continue
+		}
+		f := strings.Fields(rest)
+		if len(f) == 0 {
+			return 0
+		}
+		kb, err := strconv.ParseInt(f[0], 10, 64)
+		if err != nil || kb < 0 {
+			return 0
+		}
+		return kb * 1024
+	}
+	return 0
 }
 
 // parseProcStat pulls RSS and CPU time out of one /proc/<pid>/stat line.
