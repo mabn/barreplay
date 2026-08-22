@@ -3218,10 +3218,24 @@ function startFpsMonitor() {
 // fallback when /api/replays doesn't exist (old deployment, plain static host).
 async function fetchReplayList() {
   const query = filterQuery();
+  // Paged on the SERVER, except in orphan mode: merging in the unregistered
+  // uploads means recognising which of them a catalog row already covers, and
+  // one page of rows cannot answer that for the whole bucket. That mode is
+  // the slow admin path anyway (it reads every object), so there it takes the
+  // whole catalog and pages in the browser.
+  const serverPaged = !orphanMode();
+  const params = new URLSearchParams(query);
+  if (serverPaged) {
+    // One row MORE than a page: whether it came back is the entire answer to
+    // "is there a next page", and it costs no count query.
+    params.set('limit', String(PAGE_SIZE + 1));
+    params.set('offset', String(homePage * PAGE_SIZE));
+  }
   let catalog = [];
   let haveCatalog = false;
   try {
-    const r = await fetch('/api/replays' + (query ? '?' + query : ''));
+    const qs = params.toString();
+    const r = await fetch('/api/replays' + (qs ? '?' + qs : ''));
     if (r.ok) { catalog = await r.json(); haveCatalog = true; }
   } catch (_) { /* fall through to /index.json */ }
 
@@ -3263,7 +3277,15 @@ async function fetchReplayList() {
     if (m && ids.has(m[1])) continue; // a superseded revision, not its own replay
     catalog.push({ id: f.file, rid: null, startUnix: null, durationSec: null, map: null, gameSize: null, sizeBytes: f.size ?? null });
   }
-  return catalog;
+  // Whoever did not page above pages here: a backend that ignored the params
+  // (the Go server, a plain static host) and orphan mode, which asked for
+  // everything on purpose.
+  if (!serverPaged || !haveCatalog) {
+    const start = homePage * PAGE_SIZE;
+    catalog = catalog.slice(start, start + PAGE_SIZE + 1);
+  }
+  const hasNext = catalog.length > PAGE_SIZE;
+  return { rows: hasNext ? catalog.slice(0, PAGE_SIZE) : catalog, hasNext };
 }
 
 // ---- catalog filters -------------------------------------------------------
@@ -3277,7 +3299,7 @@ async function fetchReplayList() {
 // The bar is shown only once /api/replays/facets answers: the Go viz server
 // serves the same catalog shape from local files with no filtering behind it,
 // and a filter bar that silently does nothing is worse than none.
-const FILTER_KEYS = ['from', 'to', 'map', 'minPlayers', 'maxPlayers', 'player', 'settings'];
+const FILTER_KEYS = ['from', 'to', 'map', 'minPlayers', 'maxPlayers', 'minDuration', 'maxDuration', 'player', 'settings'];
 let facets = null;
 
 // filterQuery renders the active filters as a query string (empty when none
@@ -3305,12 +3327,17 @@ function setFilter(key, value) {
 }
 
 let reloadSeq = 0;
-async function reloadList() {
+// keepPage is for the pager itself; every other caller is a filter change,
+// and staying on page 4 of a listing that just became something else would
+// show an empty table for no visible reason.
+async function reloadList(keepPage) {
+  if (!keepPage) homePage = 0;
   const seq = ++reloadSeq;
   try {
-    const list = await fetchReplayList();
+    const page = await fetchReplayList();
     if (seq !== reloadSeq) return; // a newer filter change already went out
-    replayList = list;
+    replayList = page.rows;
+    homeHasNext = page.hasNext;
     homeDataLoaded = true;
     renderHome();
   } catch (err) {
@@ -3318,6 +3345,45 @@ async function reloadList() {
     homeDataLoaded = true;
     renderHome('Could not list replays: ' + err.message);
   }
+}
+
+/** Rows per page. The list is one screenful of a growing archive, not the
+ * archive. */
+const PAGE_SIZE = 50;
+let homePage = 0;
+let homeHasNext = false;
+
+// goPage steps the listing. Bounded below at the first page; above, by
+// homeHasNext — the pager cannot offer a page that was never shown to exist.
+function goPage(delta) {
+  const next = Math.max(0, homePage + delta);
+  if (next === homePage || (delta > 0 && !homeHasNext)) return;
+  homePage = next;
+  reloadList(true);
+  // Paging is a new screenful of rows: read it from the top, as with any
+  // other page of results.
+  window.scrollTo({ top: 0 });
+}
+
+// renderPager updates the Prev/Next controls above the table. It shows the
+// RANGE, never a page count: counting the pages would mean counting the whole
+// catalog on every listing, and "51–100" answers the only question the number
+// was for — where am I.
+function renderPager() {
+  const box = document.getElementById('homepager');
+  if (!box) return;
+  const prev = document.getElementById('p_prev');
+  const next = document.getElementById('p_next');
+  const range = document.getElementById('p_range');
+  const paged = homePage > 0 || homeHasNext;
+  box.style.display = paged ? '' : 'none';
+  if (!paged) return;
+  prev.disabled = homePage === 0;
+  next.disabled = !homeHasNext;
+  prev.onclick = () => goPage(-1);
+  next.onclick = () => goPage(1);
+  const first = homePage * PAGE_SIZE + 1;
+  range.textContent = replayList.length ? `${first}–${first + replayList.length - 1}` : '—';
 }
 
 // initFilters builds the bar from the catalog's facets (so every option offered
@@ -3352,6 +3418,9 @@ async function initFilters() {
   // only ever ask for one size at a time, so "everything bigger than a duel"
   // meant editing the URL by hand. The API took min/max all along.
   initSizeRange(cur, facets.sizes || []);
+  // Duration is the same control over a fixed 0..1h domain — see
+  // DURATION_MAX_SEC for why it is fixed and what its top end means.
+  initDurationRange(cur);
 
   const from = el('f_from'), to = el('f_to');
   from.value = ymd(cur.get('from'), facets.from);
@@ -3410,29 +3479,27 @@ async function initFilters() {
   box.style.display = '';
 }
 
-// initSizeRange wires the Players filter: two <input type=range> stacked over
-// one track, the left thumb writing ?minPlayers and the right ?maxPlayers.
-// Both are cleared when a thumb sits at its end of the domain, so the full
-// span is "no filter" rather than a filter that happens to match everything —
-// which is what keeps a fresh visit's URL clean and the Unregistered button
-// usable.
+// initDualRange wires one two-thumb filter: two <input type=range> stacked
+// over a single track, the left thumb writing `o.minParam` and the right
+// `o.maxParam`. Both filters in the bar are this function; only the domain,
+// the step and the wording differ.
 //
-// The domain is the facets' own min..max, so the ends are always reachable
-// sizes; the step is 1 because the counts in between are simply the sizes no
-// game has, and the server's >= / <= do not care.
-function initSizeRange(cur, sizes) {
-  const box = document.getElementById('f_sizefilter');
-  const rail = document.getElementById('f_sizerange');
-  const smin = document.getElementById('f_smin');
-  const smax = document.getElementById('f_smax');
-  const fill = document.getElementById('f_sizefill');
-  const out = document.getElementById('f_sizeout');
+// A thumb parked at its END writes NO param. That is what makes the full span
+// "no filter" rather than a filter matching everything — it keeps a fresh
+// visit's URL clean and the Unregistered button usable — and it is also what
+// gives the duration filter its open top end: the max thumb at 1h simply
+// stops restricting, so every longer game is included.
+function initDualRange(o) {
+  const box = document.getElementById(o.boxId);
+  const rail = document.getElementById(o.railId);
+  const smin = document.getElementById(o.minId);
+  const smax = document.getElementById(o.maxId);
+  const fill = document.getElementById(o.fillId);
+  const out = document.getElementById(o.outId);
   if (!box || !rail || !smin || !smax) return;
 
-  const known = sizes.filter(n => Number.isFinite(n));
-  const lo = known.length ? Math.min(...known) : 0;
-  const hi = known.length ? Math.max(...known) : 0;
-  // A slider needs somewhere to slide. One distinct size (or none) means
+  const lo = o.lo, hi = o.hi;
+  // A slider needs somewhere to slide: an empty or single-valued domain means
   // there is nothing to choose, so the control is left out rather than shown
   // inert — the same reason the whole bar hides without facets.
   box.style.display = hi > lo ? '' : 'none';
@@ -3445,10 +3512,10 @@ function initSizeRange(cur, sizes) {
   for (const inp of [smin, smax]) {
     inp.min = String(lo);
     inp.max = String(hi);
-    inp.step = '1';
+    inp.step = String(o.step);
   }
-  smin.value = String(bound(cur.get('minPlayers'), lo));
-  smax.value = String(bound(cur.get('maxPlayers'), hi));
+  smin.value = String(bound(o.cur.get(o.minParam), lo));
+  smax.value = String(bound(o.cur.get(o.maxParam), hi));
   // A hand-edited URL can name a min above its max; the filter would then
   // match nothing while the thumbs looked crossed.
   if (+smin.value > +smax.value) smin.value = smax.value;
@@ -3457,7 +3524,10 @@ function initSizeRange(cur, sizes) {
     const a = +smin.value, b = +smax.value, span = hi - lo;
     fill.style.left = ((a - lo) / span) * 100 + '%';
     fill.style.right = ((hi - b) / span) * 100 + '%';
-    out.textContent = a === lo && b === hi ? 'any' : a === b ? String(a) : `${a}–${b}`;
+    // "any" is the mechanism speaking, not the wording: a span reaching both
+    // ends writes no params at all, so it is not a filter and must not read
+    // like one. Only the narrowed cases are the caller's to phrase.
+    out.textContent = a === lo && b === hi ? 'any' : o.format(a, b);
     rail.classList.toggle('narrowed', !(a === lo && b === hi));
   };
 
@@ -3473,8 +3543,8 @@ function initSizeRange(cur, sizes) {
     applied = key;
     const a = +smin.value, b = +smax.value;
     const u = new URL(location.href);
-    if (a > lo) u.searchParams.set('minPlayers', String(a)); else u.searchParams.delete('minPlayers');
-    if (b < hi) u.searchParams.set('maxPlayers', String(b)); else u.searchParams.delete('maxPlayers');
+    if (a > lo) u.searchParams.set(o.minParam, String(a)); else u.searchParams.delete(o.minParam);
+    if (b < hi) u.searchParams.set(o.maxParam, String(b)); else u.searchParams.delete(o.maxParam);
     history.replaceState(null, '', u);
     reloadList();
   };
@@ -3517,6 +3587,44 @@ function initSizeRange(cur, sizes) {
   rail.onpointerdown = (ev) => priority(ev.clientX);
 
   paint();
+}
+
+// initSizeRange is the Players filter: a range over the sizes the catalog
+// actually holds, so both ends are always reachable counts. The step is 1
+// because the counts in between are simply sizes no game has, and the
+// server's >= / <= do not care.
+function initSizeRange(cur, sizes) {
+  const known = sizes.filter(n => Number.isFinite(n));
+  initDualRange({
+    boxId: 'f_sizefilter', railId: 'f_sizerange', minId: 'f_smin', maxId: 'f_smax',
+    fillId: 'f_sizefill', outId: 'f_sizeout',
+    lo: known.length ? Math.min(...known) : 0,
+    hi: known.length ? Math.max(...known) : 0,
+    step: 1, minParam: 'minPlayers', maxParam: 'maxPlayers', cur,
+    format: (a, b) => (a === b ? String(a) : `${a}–${b}`),
+  });
+}
+
+/** The duration filter's top end, in seconds. Unlike the player range there
+ * is no facet behind this: game length is continuous, and a domain drawn from
+ * the catalog's longest game would put most of the track past where anyone
+ * wants to point. An hour covers all but the outliers, and the top thumb
+ * there means "and longer" — it writes no bound at all, so nothing is cut
+ * off; see initDualRange. */
+const DURATION_MAX_SEC = 3600;
+
+// initDurationRange is the Duration filter: 0 to DURATION_MAX_SEC in minutes.
+function initDurationRange(cur) {
+  const mins = (s) => (s === DURATION_MAX_SEC ? '1h' : `${Math.round(s / 60)}m`);
+  initDualRange({
+    boxId: 'f_durfilter', railId: 'f_durrange', minId: 'f_dmin', maxId: 'f_dmax',
+    fillId: 'f_durfill', outId: 'f_durout',
+    lo: 0, hi: DURATION_MAX_SEC, step: 60,
+    minParam: 'minDuration', maxParam: 'maxDuration', cur,
+    // The top end reads "20m+" rather than "20m–1h", because that is what it
+    // filters: a game of any length at all, as long as it ran 20 minutes.
+    format: (a, b) => (b === DURATION_MAX_SEC ? `${mins(a)}+` : a === 0 ? `≤${mins(b)}` : `${mins(a)}–${mins(b)}`),
+  });
 }
 
 // orphanMode: ?orphans=true asks the list to include uploads that never made it
@@ -4270,16 +4378,26 @@ function renderHome(errMsg) {
   }
   document.body.classList.toggle('admin-mode', adminMode());
   syncOrphanButton();
+  renderPager();
   const filtered = filterQuery() !== '';
   const count = document.getElementById('f_count');
-  if (count) count.textContent = `${replayList.length} ${filtered ? 'matching' : 'replays'}`;
+  // A total only when the listing IS the total: once it is paged, the rows in
+  // hand are one page and saying "50 replays" would be a plain untruth. The
+  // pager's range says where you are instead.
+  if (count) {
+    count.textContent = homePage === 0 && !homeHasNext
+      ? `${replayList.length} ${filtered ? 'matching' : 'replays'}`
+      : '';
+  }
   // The listing is fetched only when this view is first shown, so an empty
   // table before it arrives means "still loading", not "nothing to show".
   const text = errMsg || (replayList.length ? '' : (!homeDataLoaded
     ? 'Loading replays…'
-    : filtered
-      ? 'No replays match these filters.'
-      : 'No replays yet. Drop a .brepstream above, or upload one with: go run ./cmd/pack -upload r2 <capture>.'));
+    : homePage > 0
+      ? 'Nothing on this page any more — go back a page.'
+      : filtered
+        ? 'No replays match these filters.'
+        : 'No replays yet. Drop a .brepstream above, or upload one with: go run ./cmd/pack -upload r2 <capture>.'));
   msg.style.display = text ? '' : 'none';
   msg.textContent = text;
 }
@@ -4464,8 +4582,9 @@ async function pollJob(job, gameId, status, opts) {
     if (j.state === 'done') {
       status(o.published || 'published', 'ok');
       try {
-        replayList = await fetchReplayList();
-        renderHome();
+        // reloadList assigns and renders — and returns to the first page,
+        // which is where a just-published replay is.
+        await reloadList();
       } catch (_) { /* the replay still published; the list just didn't refresh */ }
       const e = replayList.find((x) => x.id === gameId) ||
         replayList.find((x) => x.id.startsWith(gameId + '-'));

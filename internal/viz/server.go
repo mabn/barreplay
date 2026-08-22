@@ -253,7 +253,39 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 			return entries[i].ID < entries[j].ID
 		}
 	})
+	// ?limit=&offset= page the listing, the one query param this server does
+	// honour. The FILTERS it deliberately ignores (it lists a directory, and
+	// the front-end hides the filter bar here because /facets 404s), but
+	// paging is not a filter: the shared front-end asks every backend for one
+	// page and reads "there is a next page" off getting one row more than it
+	// asked to show. Ignoring that here would make its Next button lie.
+	entries = pageEntries(entries, intParam(r, "offset"), intParam(r, "limit"))
 	writeJSON(w, entries)
+}
+
+// intParam reads a non-negative integer query param; anything else is 0,
+// which every caller reads as "unset".
+func intParam(r *http.Request, key string) int {
+	n, err := strconv.Atoi(r.URL.Query().Get(key))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// pageEntries applies offset/limit to a sorted listing. A zero limit means
+// the whole thing (no param, or a front-end too old to page), and an offset
+// past the end is an empty page rather than an error — the listing shrinks
+// between requests, and a stale Next click is not a failure.
+func pageEntries(entries []CatalogEntry, offset, limit int) []CatalogEntry {
+	if offset >= len(entries) {
+		return []CatalogEntry{}
+	}
+	entries = entries[offset:]
+	if limit > 0 && limit < len(entries) {
+		entries = entries[:limit]
+	}
+	return entries
 }
 
 // catalogEntry builds (or reuses) one file's catalog row. Cached by

@@ -12,7 +12,8 @@ import { assert, expect, test } from "vitest";
 
 import type { GameEntry } from "../../src/worker/games";
 import type { ReplayIndex } from "../../src/worker/replayindex";
-import type { ReplayEntry } from "../../src/worker/replayentry";
+import { emptyFilter } from "../../src/worker/replayentry";
+import type { ReplayEntry, ReplayFilter } from "../../src/worker/replayentry";
 
 /** Run a block inside a ReplayIndex instance, with its SQL to hand.
  *
@@ -476,5 +477,58 @@ test("a game being worked on is not 'already published' to a re-sim request", as
     const res = index.resimEnqueue("new", "busy");
     expect(res.status).toBe("duplicate");
     expect(res.job?.id).toBe("existing");
+  });
+});
+
+// --- paging and the duration filter ----------------------------------------
+
+test("list pages with limit/offset over the ordered listing", async () => {
+  await inIndex((index) => {
+    for (let i = 0; i < 7; i++) index.upsert(replay(`r${i}`, { startUnix: 1000 + i }));
+
+    // Newest first, as the listing always is.
+    expect(index.list(undefined, 3, 0).map((e) => e.id)).toEqual(["r6", "r5", "r4"]);
+    expect(index.list(undefined, 3, 3).map((e) => e.id)).toEqual(["r3", "r2", "r1"]);
+    // The front-end asks for one row MORE than it shows; a short answer is how
+    // it learns there is no next page.
+    expect(index.list(undefined, 3, 6).map((e) => e.id)).toEqual(["r0"]);
+    expect(index.list(undefined, 3, 99)).toEqual([]);
+    // No limit is the whole listing — what bringest's catalog scan asks for.
+    expect(index.list()).toHaveLength(7);
+    expect(index.list(undefined, 0, 0)).toHaveLength(7);
+  });
+});
+
+test("paging applies to the filtered listing, not to the catalog", async () => {
+  await inIndex((index) => {
+    for (let i = 0; i < 6; i++) {
+      index.upsert(replay(`m${i}`, { startUnix: 2000 + i, map: i % 2 ? "Wanted" : "Other" }));
+    }
+    const filter = { ...emptyFilter(), map: "Wanted" };
+    // Three match; a page of two then leaves exactly one.
+    expect(index.list(filter, 2, 0).map((e) => e.id)).toEqual(["m5", "m3"]);
+    expect(index.list(filter, 2, 2).map((e) => e.id)).toEqual(["m1"]);
+  });
+});
+
+test("the duration filter bounds are inclusive, and unknown lengths match neither", async () => {
+  await inIndex((index) => {
+    index.upsert(replay("short", { durationSec: 300 }));
+    index.upsert(replay("medium", { durationSec: 1800 }));
+    index.upsert(replay("long", { durationSec: 5400 }));
+    index.upsert(replay("unknown", { durationSec: null }));
+
+    const ids = (f: Partial<ReplayFilter>) =>
+      index.list({ ...emptyFilter(), ...f }).map((e) => e.id).sort();
+
+    expect(ids({ minDuration: 1800 })).toEqual(["long", "medium"]);
+    expect(ids({ maxDuration: 1800 })).toEqual(["medium", "short"]);
+    expect(ids({ minDuration: 600, maxDuration: 3600 })).toEqual(["medium"]);
+    // An open top end is simply no maxDuration — which is what the slider
+    // writes when its right thumb sits at an hour, so the 90-minute game is in.
+    expect(ids({ minDuration: 1200 })).toEqual(["long", "medium"]);
+    // A row that never recorded a length cannot be claimed to fall inside one.
+    expect(ids({ minDuration: 0 })).not.toContain("unknown");
+    expect(ids({})).toContain("unknown");
   });
 });

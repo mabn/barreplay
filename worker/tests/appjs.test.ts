@@ -747,6 +747,10 @@ test('a game being processed is listed, badged first, and cannot be opened', () 
     // a badge for the pill to be ahead of.
     const settingsBadges = (s) => (s ? [{ key: 'lava', label: 'lava' }] : []);
     const adminMode = () => false, syncOrphanButton = () => {}, filterQuery = () => '';
+    // Paging state: this test is about the rows, so one page holds them all.
+    const PAGE_SIZE = 50; let homePage = 0, homeHasNext = false;
+    const goPage = () => {};
+    ${extract('renderPager')}
     ${extract('renderHome')}
     return renderHome;
   })()`);
@@ -801,6 +805,7 @@ test('the players filter is a two-ended range over the sizes present', () => {
       const location = { get href() { return state.href; } };
       const history = { replaceState: (_a, _b, u) => { state.href = String(u); } };
       const reloadList = () => { state.reloads++; };
+      ${extract('initDualRange')}
       ${extract('initSizeRange')}
       return initSizeRange;
     })()`);
@@ -893,5 +898,164 @@ test('the players filter is a two-ended range over the sizes present', () => {
     assert.ok(+b.id('f_smin').style.zIndex > +b.id('f_smax').style.zIndex);
     rail.onpointerdown({ clientX: 120, buttons: 0 });  // right of it
     assert.ok(+b.id('f_smax').style.zIndex > +b.id('f_smin').style.zIndex);
+  }
+});
+
+test('the duration filter ends at an hour, and that end means "and longer"', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+  // Taken from the source rather than restated, so the test cannot claim an
+  // hour while the page offers something else.
+  const capLine = /const DURATION_MAX_SEC = (\d+);/.exec(APP);
+  assert.ok(capLine, 'DURATION_MAX_SEC is declared');
+  const CAP = Number(capLine![1]);
+  assert.equal(CAP, 3600, 'the range tops out at one hour');
+
+  const boot = (query: string) => {
+    const dom = fakeDom();
+    const state = { href: 'https://x/' + query, reloads: 0 };
+    const run = eval(`(function(){
+      const document = dom.document;
+      const location = { get href() { return state.href; } };
+      const history = { replaceState: (_a, _b, u) => { state.href = String(u); } };
+      const reloadList = () => { state.reloads++; };
+      const DURATION_MAX_SEC = ${CAP};
+      ${extract('initDualRange')}
+      ${extract('initDurationRange')}
+      return initDurationRange;
+    })()`);
+    run(new URLSearchParams(query));
+    const id = (x: string) => dom.document.getElementById(x);
+    return { state, id, params: () => new URL(state.href).searchParams };
+  };
+
+  // Untouched: the whole span, in seconds, and no params.
+  {
+    const b = boot('');
+    assert.equal(b.id('f_dmin').min, '0');
+    assert.equal(b.id('f_dmax').max, String(CAP));
+    assert.equal(b.id('f_dmin').step, '60', 'a minute at a time');
+    assert.equal(b.id('f_durout').textContent, 'any');
+  }
+
+  // The top thumb left where it is: the filter is a floor, and the label says
+  // so rather than pretending there is a ceiling at an hour.
+  {
+    const b = boot('');
+    b.id('f_dmin').value = '1200';
+    b.id('f_dmin').oninput();
+    b.id('f_dmin').onchange();
+    assert.equal(b.id('f_durout').textContent, '20m+');
+    assert.equal(b.params().get('minDuration'), '1200');
+    assert.equal(b.params().get('maxDuration'), null, 'an hour means "and longer", so no upper bound is sent');
+  }
+
+  // Bringing the top thumb down is what actually caps the length.
+  {
+    const b = boot('');
+    b.id('f_dmax').value = '1800';
+    b.id('f_dmax').oninput();
+    b.id('f_dmax').onchange();
+    assert.equal(b.id('f_durout').textContent, '≤30m');
+    assert.equal(b.params().get('maxDuration'), '1800');
+
+    // ...and pushing it back to the top removes the cap again.
+    b.id('f_dmax').value = String(CAP);
+    b.id('f_dmax').oninput();
+    b.id('f_dmax').onchange();
+    assert.equal(b.params().get('maxDuration'), null);
+    assert.equal(b.id('f_durout').textContent, 'any');
+  }
+
+  // Both ends moved: a closed range, labelled as one.
+  {
+    const b = boot('?minDuration=600&maxDuration=2400');
+    assert.equal(b.id('f_dmin').value, '600');
+    assert.equal(b.id('f_dmax').value, '2400');
+    assert.equal(b.id('f_durout').textContent, '10m–40m');
+  }
+
+  // A URL asking for longer than the slider can show is clamped to its top —
+  // which filters for the same games, since that end is open.
+  {
+    const b = boot('?minDuration=7200');
+    assert.equal(b.id('f_dmin').value, String(CAP));
+    assert.equal(b.id('f_durout').textContent, '1h+');
+  }
+});
+
+test('the pager offers Prev/Next and a range, never a page count', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+  const sizeLine = /const PAGE_SIZE = (\d+);/.exec(APP);
+  assert.ok(sizeLine, 'PAGE_SIZE is declared');
+  assert.equal(Number(sizeLine![1]), 50, 'a page is 50 rows');
+
+  const boot = (page: number, rows: number, hasNext: boolean) => {
+    const dom = fakeDom();
+    const steps: number[] = [];
+    const run = eval(`(function(){
+      const document = dom.document;
+      const PAGE_SIZE = ${Number(sizeLine![1])};
+      const homePage = ${page};
+      const homeHasNext = ${hasNext};
+      const replayList = new Array(${rows}).fill(0);
+      const goPage = (d) => { steps.push(d); };
+      ${extract('renderPager')}
+      return renderPager;
+    })()`);
+    run();
+    const id = (x: string) => dom.document.getElementById(x);
+    return { id, steps };
+  };
+
+  // One page holds everything: no pager at all, so a small catalog looks
+  // exactly as it did before paging existed.
+  assert.equal(boot(0, 12, false).id('homepager').style.display, 'none');
+
+  // First page of more: Prev is dead, Next is live, and the label says where
+  // you are — not how many pages there are, which nothing counts.
+  {
+    const b = boot(0, 50, true);
+    assert.equal(b.id('homepager').style.display, '');
+    assert.equal(b.id('p_prev').disabled, true);
+    assert.equal(b.id('p_next').disabled, false);
+    assert.equal(b.id('p_range').textContent, '1–50');
+    b.id('p_next').onclick();
+    assert.deepEqual(b.steps, [1]);
+  }
+
+  // A middle page: both live, and the range is offset by the pages before it.
+  {
+    const b = boot(2, 50, true);
+    assert.equal(b.id('p_prev').disabled, false);
+    assert.equal(b.id('p_range').textContent, '101–150');
+    b.id('p_prev').onclick();
+    assert.deepEqual(b.steps, [-1]);
+  }
+
+  // The last page: Next is dead, and a short page is labelled by what it
+  // actually holds.
+  {
+    const b = boot(3, 7, false);
+    assert.equal(b.id('p_next').disabled, true);
+    assert.equal(b.id('p_prev').disabled, false);
+    assert.equal(b.id('p_range').textContent, '151–157');
   }
 });

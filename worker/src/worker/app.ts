@@ -57,10 +57,22 @@ export const indexStub = (env: Env) => env.REPLAY_INDEX.get(env.REPLAY_INDEX.idF
 // params means the whole catalog, so an older front-end sees no change. The
 // filtering is SQL, not a pass over the JSON, because the list is the one
 // endpoint whose cost grows with the archive.
+/** Most rows one listing will hand out. The page is 50; the front-end asks
+ * for 51 so the extra row can say "there is more". */
+const CATALOG_LIMIT_MAX = 200;
+
 app.get("/api/replays", async (c) => {
-  const filter = parseReplayFilter(new URL(c.req.url).searchParams);
+  const params = new URL(c.req.url).searchParams;
+  const filter = parseReplayFilter(params);
   if (typeof filter === "string") return c.json({ error: filter }, 400);
-  const list = await indexStub(c.env).list(filter);
+  // ?limit=&offset= page the listing. Absent limit = the whole thing, which
+  // is what bringest's catalog scan and any pre-paging front-end ask for.
+  const num = (key: string): number => {
+    const n = parseInt(params.get(key) ?? "", 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
+  const limit = Math.min(num("limit"), CATALOG_LIMIT_MAX);
+  const list = await indexStub(c.env).list(filter, limit, num("offset"));
   return c.json(list, 200, { "cache-control": "no-cache" });
 });
 
