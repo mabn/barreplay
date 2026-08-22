@@ -10,6 +10,7 @@ case "$NAME" in
   small)  ID=d53f896a4c7276e66540d53d13f3a31e ;;
   medium) ID=4936896a8b258d038cbd28f55eb15ed2 ;;
   large)  ID=d03a896a204dd8f8a4b4c488cfaec73e ;;
+  isthmus) ID=6122896ac3328104d12093d975c61214 ;;
 esac
 # the engine finds base/springcontent.sdz + cont/fonts NEXT TO ITS OWN BINARY,
 # so a build is tested by swapping the file INSIDE the engine dir, never by
