@@ -2,6 +2,7 @@ package demofile
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -71,6 +72,15 @@ func ParseStartscript(s string) (*Startscript, error) {
 	if mo := game.Subsections["modoptions"]; mo != nil {
 		out.ModOptions = mo.Values
 	}
+	// Subsections is a map, so ranging it visits the player/allyteam sections in
+	// a per-process RANDOM order — and that order reached the capture's player
+	// roster verbatim, which made the .brp writer's "same capture -> byte-
+	// identical file" guarantee false: two runs of ONE engine binary over ONE
+	// demo produced .brp files differing in the meta record's player list. That
+	// is invisible day to day (nothing reads the roster positionally) and fatal
+	// to any byte-comparison of two captures, which is how engine changes are
+	// verified to be output-safe. Collect, then sort by the index the section
+	// name carries, which is the startscript's own order.
 	for name, sub := range game.Subsections {
 		switch {
 		case strings.HasPrefix(name, "player"):
@@ -95,6 +105,8 @@ func ParseStartscript(s string) (*Startscript, error) {
 			out.AllyTeams = append(out.AllyTeams, AllyTeam{Index: idx})
 		}
 	}
+	sort.Slice(out.Players, func(i, j int) bool { return out.Players[i].Index < out.Players[j].Index })
+	sort.Slice(out.AllyTeams, func(i, j int) bool { return out.AllyTeams[i].Index < out.AllyTeams[j].Index })
 	return out, nil
 }
 
