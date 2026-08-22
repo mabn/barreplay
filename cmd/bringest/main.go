@@ -126,17 +126,18 @@ func run() int {
 	envMsgs := loadEnvFile()
 
 	var (
-		workerDir = flag.String("worker-dir", "worker", "the Cloudflare worker project directory whose upload tooling performs the R2 puts")
-		target    = flag.String("upload", "r2", "which deployment to work off and publish to: "+packer.TargetHelp())
-		poll      = flag.Duration("poll", 10*time.Second, "how often to ask the worker for pending jobs")
-		once      = flag.Bool("once", false, "process the current backlog and exit instead of polling forever")
-		doResim   = flag.Bool("resim", false, "run the independent re-sim worker instead of the job loop: find cataloged games whose only upload is one-sided, re-simulate them headlessly, and publish the full view as another revision (needs -data on an engine-capable host)")
-		dataDir   = flag.String("data", os.Getenv("BAR_DATA_DIR"), "BAR/Spring data directory for -resim (engine/, games/, maps/; also --write-dir; default: $BAR_DATA_DIR)")
-		skipProv  = flag.Bool("no-provision", false, "-resim: do not download engine/game/map content; assume already installed")
-		progress  = flag.Bool("progress", true, "-resim: print the frame/ETA progress line during a re-simulation, like cmd/barreplay's -progress")
-		minFree   = flag.Int("min-free", 512, "-resim: stop the engine when the host has less than this many MiB of memory left, instead of waiting for the kernel's OOM killer (0 disables)")
-		stats     = flag.Bool("stats", true, "print the packed .brp's size breakdown (per-section sizes + the top unit defs by encoded bytes) for each replay published, like pack -stats")
-		logPath   = flag.String("log", defaultLogPath, "also append everything printed to this file (empty disables)")
+		workerDir  = flag.String("worker-dir", "worker", "the Cloudflare worker project directory whose upload tooling performs the R2 puts")
+		target     = flag.String("upload", "r2", "which deployment to work off and publish to: "+packer.TargetHelp())
+		poll       = flag.Duration("poll", 10*time.Second, "how often to ask the worker for pending jobs")
+		once       = flag.Bool("once", false, "process the current backlog and exit instead of polling forever")
+		doResim    = flag.Bool("resim", false, "run the independent re-sim worker instead of the job loop: find cataloged games whose only upload is one-sided, re-simulate them headlessly, and publish the full view as another revision (needs -data on an engine-capable host)")
+		dataDir    = flag.String("data", os.Getenv("BAR_DATA_DIR"), "BAR/Spring data directory for -resim (engine/, games/, maps/; also --write-dir; default: $BAR_DATA_DIR)")
+		skipProv   = flag.Bool("no-provision", false, "-resim: do not download engine/game/map content; assume already installed")
+		patchedEng = flag.Bool("patched-engine", true, "-resim: prefer a locally built patched engine (spring-headless-patched beside the stock binary in <data>/engine/<version>/) when one is installed for the replay's version; its speed patches are output-safe, so captures are unchanged. Falls back to the stock engine with a warning when there is no patched build for that version")
+		progress   = flag.Bool("progress", true, "-resim: print the frame/ETA progress line during a re-simulation, like cmd/barreplay's -progress")
+		minFree    = flag.Int("min-free", 512, "-resim: stop the engine when the host has less than this many MiB of memory left, instead of waiting for the kernel's OOM killer (0 disables)")
+		stats      = flag.Bool("stats", true, "print the packed .brp's size breakdown (per-section sizes + the top unit defs by encoded bytes) for each replay published, like pack -stats")
+		logPath    = flag.String("log", defaultLogPath, "also append everything printed to this file (empty disables)")
 	)
 	flag.Parse()
 
@@ -184,7 +185,7 @@ func run() int {
 		// the next one's pre-simulation ETA. ro is copied per job, but the
 		// pointer is shared, which is the point: a lone Forecaster per run
 		// would never learn anything.
-		ro := resim.Options{DataDir: *dataDir, SkipProvision: *skipProv, Forecaster: &resim.Forecaster{}}
+		ro := resim.Options{DataDir: *dataDir, SkipProvision: *skipProv, PatchedEngine: *patchedEng, Forecaster: &resim.Forecaster{}}
 		// 0 on the command line means "no guard"; resim reads 0 as "use the
 		// default", so the two are translated here rather than making the flag
 		// lie about what 0 does.
@@ -323,6 +324,11 @@ type jobStats struct {
 	SpeedUp       float64 `json:"speedUp,omitempty"`
 	GameSec       int32   `json:"gameSec,omitempty"`
 	EngineVersion string  `json:"engineVersion,omitempty"`
+	// EnginePatched says the run used the patched engine build. Timings from a
+	// patched and a stock host are not comparable, and the capture cannot say
+	// which produced it (that is what byte-identical means), so the job row is
+	// the only place it can be recorded.
+	EnginePatched bool `json:"enginePatched,omitempty"`
 
 	Infolog *infologStats `json:"infolog,omitempty"`
 
@@ -351,6 +357,7 @@ func (s *jobStats) fromRunStats(r resim.RunStats) {
 	s.ResimSec, s.LoadSec, s.SimSec = r.EngineSec, r.LoadSec, r.SimSec
 	s.Frames, s.Samples, s.SpeedUp = r.Frames, r.Samples, r.SpeedUp
 	s.GameSec, s.EngineVersion = r.GameSec, r.EngineVersion
+	s.EnginePatched = r.EnginePatched
 	if r.Infolog.Bytes > 0 {
 		s.Infolog = &infologStats{
 			Bytes:     r.Infolog.Bytes,

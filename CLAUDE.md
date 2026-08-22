@@ -220,6 +220,31 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           are still absent, because otherwise that failure surfaces only as an
                           unrelated-looking CLOUDFLARE_API_TOKEN error out of the wrangler
                           fallback. Only bringest auto-loads; pack/barreplay still need a source.
+                          -patched-engine (DEFAULT ON, -resim only) prefers a locally
+                          built PATCHED engine for the replay's version:
+                          `spring-headless-patched` sitting BESIDE the stock binary in
+                          <data>/engine/<version>/ (engine.Config.PatchedEngine, resolved
+                          by engine.Locate). Those are the byte-identical speed patches in
+                          patches/engine-<version>/ — a re-sim on one produces the SAME
+                          .brp, faster (measured 200 -> 248 fps on a 16-player 13-minute
+                          game), which is why preferring it can be the default and why the
+                          capture cannot record which build made it. It lives beside the
+                          stock binary rather than in its own <version>-patched dir because
+                          the engine resolves base/springcontent.sdz relative to its own
+                          executable, so a separate dir would duplicate the whole base/ +
+                          fonts payload per version. The lookup is STRICTLY that one path:
+                          findBinary's usual wildcard-then-$PATH search would hand back
+                          ANOTHER version's patched binary whenever this version has none,
+                          and since a version mismatch Locate did not choose is a hard
+                          error, one patched build on the host would then fail every job
+                          for every other version. Missing is a WARNING, not a failure —
+                          nothing downloads these, so a daemon routinely meets versions
+                          nobody has patched and must still run them at stock speed. An
+                          explicit -engine wins over the preference (the operator named a
+                          binary). The chosen build is logged once and recorded on the job
+                          row as jobStats.enginePatched, since timings from a patched and a
+                          stock host are not comparable and the capture is silent by
+                          design.
                           -stats (DEFAULT ON, both loops) prints the packed .brp's size
                           breakdown — the same packer.ReportStats report as `pack -stats` —
                           after each publish, to STDERR so the -log file keeps it; a
