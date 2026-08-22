@@ -3803,6 +3803,10 @@ async function refreshQueue() {
   if (!adminMode()) return;
   if (!queueSupported) { renderQueue(QUEUE_UNSUPPORTED); return; }
   const seq = ++queueSeq;
+  // Every read here is an explicit act, and a running job's curve grows — so
+  // drop the cached series with it rather than showing a fresh page beside a
+  // stale chart.
+  queueSamples.clear();
   let page;
   try {
     const r = await fetch(`/api/queue?offset=${queueOffset}&limit=${QUEUE_PAGE}`);
@@ -3905,20 +3909,73 @@ function statsLines(j, s) {
   return out;
 }
 
-function statsTooltip(j, s) {
-  return statsLines(j, s).map(([k, v]) => k + ': ' + v).join('\n') || 'no processing details';
+// progressLines is the same idea for a job that is still RUNNING: what the
+// daemon said it was doing at its last healthcheck. The two sets never overlap
+// — progress is cleared when a job reaches a terminal state and the stats are
+// written at the same moment — so an expanded row shows one or the other, and
+// briefly both when a heartbeat and a completion race.
+function progressLines(p) {
+  const out = [];
+  const add = (k, v) => { if (v) out.push([k, v]); };
+  add('Now', p.state);
+  if (p.frame) {
+    let sim = p.frame.toLocaleString();
+    if (p.totalFrames) sim += ' / ' + p.totalFrames.toLocaleString();
+    sim += ' frames';
+    if (p.percent) sim += ` (${p.percent.toFixed(1)}%)`;
+    if (p.simFps) sim += ` · ${p.simFps.toFixed(0)} sim-fps (${(p.simFps / 30).toFixed(1)}× realtime)`;
+    add('Simulated', sim);
+  }
+  add('Remaining', p.etaSec ? fmtDur(p.etaSec) : null);
+  // The engine's own footprint on whichever machine is running it — the only
+  // window anybody has onto that host, which is somebody's workstation behind
+  // NAT and reachable from here in no other way.
+  add('Engine memory', p.rssBytes ? fmtSize(p.rssBytes) : null);
+  // Stated even when it is zero — "none" is the reassurance, and it is the
+  // usual answer, so a swap line that only appeared in the bad case would
+  // leave every healthy run silent about the one thing being watched for.
+  // Absent entirely means a daemon too old to report it, which is different.
+  if (p.swapBytes !== undefined && p.swapBytes !== null) {
+    out.push(['Engine swap', p.swapBytes ? fmtSize(p.swapBytes) : 'none']);
+  }
+  add('Engine CPU', p.cpuPct ? p.cpuPct.toFixed(0) + '% of one core' : null);
+  return out;
 }
 
-// statsRow is the expanded detail: the measured figures, then the size report
-// verbatim (it is a fixed-width table, so it stays one).
+// progressText is the one-line version for the Detail cell of a running job:
+// the phase first, because it is the only part that is always there.
+function progressText(p) {
+  const bits = [];
+  if (p.state) bits.push(p.state);
+  if (p.percent) bits.push(p.percent.toFixed(0) + '%');
+  if (p.etaSec) bits.push(fmtDur(p.etaSec) + ' left');
+  if (p.rssBytes) bits.push(fmtSize(p.rssBytes));
+  // Only when there IS swap: the one-liner is already five readings long, and
+  // "0 B swap" on every healthy job is the least interesting of them. The
+  // expanded grid states the zero case.
+  if (p.swapBytes) bits.push(fmtSize(p.swapBytes) + ' swap');
+  if (p.cpuPct) bits.push(p.cpuPct.toFixed(0) + '% CPU');
+  return bits.join(' · ');
+}
+
+function statsTooltip(j, s, p) {
+  const lines = [...(p ? progressLines(p) : []), ...(s ? statsLines(j, s) : [])];
+  return lines.map(([k, v]) => k + ': ' + v).join('\n') || 'no processing details';
+}
+
+// statsRow is the expanded detail: what the run is doing right now (while it
+// is), then the measured figures, then the size report verbatim (it is a
+// fixed-width table, so it stays one).
 function statsRow(j) {
   const tr = document.createElement('tr');
   tr.className = 'statsrow';
   const td = document.createElement('td');
-  td.colSpan = 7;
+  td.colSpan = 11;
   const dl = document.createElement('div');
   dl.className = 'statsgrid';
-  for (const [k, v] of statsLines(j, j.stats)) {
+  const lines = [...(j.progress ? progressLines(j.progress) : []),
+                 ...(j.stats ? statsLines(j, j.stats) : [])];
+  for (const [k, v] of lines) {
     const key = document.createElement('span');
     key.className = 'k';
     key.textContent = k;
@@ -3927,7 +3984,12 @@ function statsRow(j) {
     dl.append(key, val);
   }
   td.appendChild(dl);
-  if (j.stats.sizeReport) {
+  // Then the run's shape over time. The grid above is the newest reading (or
+  // the final one); these are every reading, which is the only way to see a
+  // memory climb or a stall — and they outlive the job, so a run that died at
+  // minute forty still has its curve.
+  td.appendChild(jobChartsFor(j));
+  if (j.stats && j.stats.sizeReport) {
     const pre = document.createElement('pre');
     pre.className = 'sizereport';
     pre.textContent = j.stats.sizeReport.trimEnd();
@@ -3935,6 +3997,326 @@ function statsRow(j) {
   }
   tr.appendChild(td);
   return tr;
+}
+
+// ---- a job's healthcheck history, as charts -------------------------------
+// The daemon beats every 10s while it works and the worker keeps every beat
+// (job_samples). The collapsed row shows only the newest reading; expanding one
+// asks for the whole series and draws it.
+//
+// Three SEPARATE charts, never one with three scales: bytes, percent-of-a-core
+// and percent-of-a-game share no axis, and overlaying them on one would invent
+// a correlation that is not in the data. They do share an X (the same beats),
+// which is what lets one crosshair read all three at once.
+
+const SVGNS = 'http://www.w3.org/2000/svg';
+// The data hue, and the only colour in these charts. One series per chart, so
+// colour carries no information and must not vary: the title says what is
+// plotted. It is the same blue the collapsed row's progress bar is filled with.
+const CHART_HUE = '#4b90c4';
+const CHART_SURFACE = '#12181e';
+// Plot box. The height INCLUDES the x-axis band, so the labels are inside the
+// figure rather than in a scrollbar under it.
+const CH_W = 340, CH_H = 84, CH_L = 52, CH_R = 6, CH_T = 12, CH_B = 16;
+
+// What gets plotted, in reading order: the two the machine is spending, then
+// what it bought.
+//
+// `max` fixes the domain where the whole is known — a percentage of the game is
+// 0-100 whatever this run reached, and letting it autoscale would draw a
+// stalled run exactly like a finished one.
+//
+// Two formatters, because an axis tick and a readout want different things: the
+// tick has a 40px gutter and must stay in it, the tooltip has a line and can
+// say what the number means.
+// `max` fixes the domain where the whole is known — a percentage of the game is
+// 0-100 whatever this run reached, and letting it autoscale would draw a
+// stalled run exactly like a finished one.
+//
+// `mark` picks the one point that gets a direct label, and it differs because
+// the axis already says different things. On an autoscaled chart the top tick
+// IS the peak, so 'peak' draws a bare dot: WHEN it happened, which no tick can
+// say. On the others the axis says nothing about this particular run, so 'last'
+// labels where it ended up — for the ETA that is "how much was left when it
+// stopped reporting", which for a run that died is the whole story.
+// fmtSizeShort is fmtSize for an AXIS TICK, which lives in a 46px gutter: no
+// decimal below a gigabyte, because "846.0 MB" is nine characters and runs off
+// the left edge of the figure where "846 MB" does not. The precise value is on
+// the direct label and in the tooltip, and a tick is supposed to be a round
+// number anyway.
+function fmtSizeShort(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + ' GB';
+  if (n >= 1e6) return Math.round(n / 1e6) + ' MB';
+  if (n >= 1e3) return Math.round(n / 1e3) + ' KB';
+  return n + ' B';
+}
+
+const JOB_CHARTS = [
+  { key: 'rssBytes', title: 'Engine memory', tick: (v) => fmtSizeShort(v), fmt: (v) => fmtSize(v), mark: 'peak' },
+  { key: 'cpuPct', title: 'Engine CPU', tick: (v) => Math.round(v) + '%', fmt: (v) => Math.round(v) + '% of one core', mark: 'peak' },
+  { key: 'percent', title: 'Simulation', tick: (v) => Math.round(v) + '%', fmt: (v) => v.toFixed(1) + '%', max: 100, mark: 'last' },
+  // Time REMAINING, which is the only series here that should be going down.
+  // A healthy run walks it towards zero at roughly the rate the clock moves;
+  // a stretch where it climbs is the run getting slower faster than it is
+  // getting on, which no other chart states outright.
+  { key: 'etaSec', title: 'Estimated time left', tick: (v) => fmtDuration(v), fmt: (v) => fmtDur(v) + ' left', mark: 'last' },
+  // Swap is the exception that skips itself. Zero is the healthy answer and
+  // very nearly always the answer, and a flat line along the baseline of an
+  // axis reading "1 B" is worse than no chart at all — so this one is drawn
+  // only when the engine actually swapped, and its APPEARING is itself the
+  // signal. The zero case is still stated in words in the grid above.
+  { key: 'swapBytes', title: 'Engine swap', tick: (v) => fmtSizeShort(v), fmt: (v) => fmtSize(v) + ' swapped out', mark: 'peak', skipIfZero: true },
+];
+
+// Fetched per expanded row rather than with the queue page: 25 rows would
+// otherwise carry thousands of points nobody looked at. Cleared by an explicit
+// re-read (refreshQueue), so a running job's curve grows when the page is
+// reloaded and not silently under the cursor.
+const queueSamples = new Map(); // job id -> { state: 'loading' | 'ok', rows }
+
+function loadJobSamples(id) {
+  if (queueSamples.has(id)) return;
+  queueSamples.set(id, { state: 'loading', rows: [] });
+  fetch('/api/jobs/' + encodeURIComponent(id) + '/samples')
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null)
+    // A backend without the route (the Go dev server) simply has no charts;
+    // an empty series and a failed fetch say the same thing to the view.
+    .then((j) => {
+      queueSamples.set(id, { state: 'ok', rows: (j && Array.isArray(j.samples)) ? j.samples : [] });
+      renderQueue();
+    });
+}
+
+// jobChartsFor returns whatever the expanded row should show where the charts
+// go: the figure, a note while it loads, or a note saying there is nothing to
+// plot. It also KICKS OFF the fetch — expanding the row is the request.
+function jobChartsFor(j) {
+  loadJobSamples(j.id);
+  const got = queueSamples.get(j.id);
+  if (got && got.state === 'ok' && got.rows.length) {
+    const fig = jobCharts(got.rows);
+    if (fig) return fig;
+  }
+  const note = document.createElement('div');
+  note.className = 'chartnote';
+  note.textContent = !got || got.state === 'loading'
+    ? 'Loading the healthcheck history…'
+    // Three ways to get here, and the row cannot tell them apart: an upload
+    // job (no engine to watch), a job from a daemon older than the beat, and a
+    // backend with no ingest pipeline at all.
+    : 'No healthchecks recorded for this job.';
+  return note;
+}
+
+function svgEl(tag, attrs) {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  return n;
+}
+
+// jobCharts builds the whole figure for one job: the three plots and the one
+// crosshair that reads across them.
+function jobCharts(rows) {
+  const box = document.createElement('div');
+  box.className = 'jobcharts';
+  const tip = document.createElement('div');
+  tip.className = 'charttip';
+  const t0 = rows[0].atUnix;
+  const readouts = [];
+
+  for (const spec of JOB_CHARTS) {
+    const vals = rows.map((r) => (typeof r[spec.key] === 'number' ? r[spec.key] : null));
+    const seen = vals.filter((v) => v !== null);
+    // A measure this run never reported gets no plot at all. An upload job has
+    // no engine, and a re-sim's first minutes have no simulation — an empty
+    // axis would suggest a reading of zero, which is a different claim.
+    if (!seen.length) continue;
+    // ...and a measure whose every reading IS zero gets none either, where the
+    // spec says so: see the swap entry in JOB_CHARTS.
+    if (spec.skipIfZero && !seen.some((v) => v > 0)) continue;
+    readouts.push(buildChart(box, spec, rows, vals, t0));
+  }
+  if (!readouts.length) return null;
+
+  // One crosshair, every chart: the reader aims at a moment, not at a line,
+  // and gets all three values for it.
+  const move = (i) => { for (const r of readouts) r(i); showTip(tip, box, rows, t0, i); };
+  const clear = () => { for (const r of readouts) r(null); tip.style.display = 'none'; };
+  let at = -1;
+  box.addEventListener('pointermove', (ev) => {
+    const plot = ev.target.closest ? ev.target.closest('svg') : null;
+    if (!plot) return;
+    const r = plot.getBoundingClientRect();
+    const x = (ev.clientX - r.left) * (CH_W / (r.width || CH_W));
+    at = nearestSample(x, rows.length);
+    move(at);
+  });
+  box.addEventListener('pointerleave', clear);
+  // The same readings on keyboard focus as on hover, so the values are not
+  // behind a pointer.
+  box.tabIndex = 0;
+  box.addEventListener('keydown', (ev) => {
+    const step = ev.key === 'ArrowRight' ? 1 : ev.key === 'ArrowLeft' ? -1 : 0;
+    if (step) {
+      at = Math.max(0, Math.min(rows.length - 1, (at < 0 ? 0 : at) + step));
+      move(at);
+      ev.preventDefault();
+    } else if (ev.key === 'Escape') { at = -1; clear(); }
+  });
+  box.addEventListener('blur', clear);
+  box.appendChild(tip);
+  return box;
+}
+
+function lastIndexWithValue(vals) {
+  for (let i = vals.length - 1; i >= 0; i--) if (vals[i] !== null) return i;
+  return -1;
+}
+
+function nearestSample(x, n) {
+  if (n < 2) return 0;
+  const f = (x - CH_L) / (CH_W - CH_L - CH_R);
+  return Math.max(0, Math.min(n - 1, Math.round(f * (n - 1))));
+}
+
+// buildChart draws one measure and returns the function that moves its
+// crosshair (null hides it).
+function buildChart(box, spec, rows, vals, t0) {
+  const card = document.createElement('div');
+  card.className = 'chartcard';
+  const h = document.createElement('div');
+  h.className = 'charttitle';
+  h.textContent = spec.title;
+  card.appendChild(h);
+
+  const top = spec.max || Math.max(...vals.filter((v) => v !== null)) || 1;
+  const n = rows.length;
+  const px = (i) => CH_L + (n < 2 ? 0 : (i / (n - 1)) * (CH_W - CH_L - CH_R));
+  const py = (v) => CH_H - CH_B - (v / top) * (CH_H - CH_B - CH_T);
+  const base = CH_H - CH_B;
+
+  const svg = svgEl('svg', {
+    width: CH_W, height: CH_H, class: 'chart', role: 'img',
+    'aria-label': `${spec.title} over the run, peaking at ${spec.fmt(Math.max(...vals.filter((v) => v !== null)))}`,
+  });
+
+  // Recessive chrome first: hairline, solid, one step off the surface.
+  for (const y of [CH_T, base]) {
+    svg.appendChild(svgEl('line', { x1: CH_L, x2: CH_W - CH_R, y1: y, y2: y, class: 'chgrid' }));
+  }
+  const tick = (y, text) => {
+    const t = svgEl('text', { x: CH_L - 6, y: y + 3, class: 'chtick' });
+    t.textContent = text;
+    svg.appendChild(t);
+  };
+  // On an autoscaled chart the top of the axis IS the peak, so this tick is
+  // already the extreme's direct label — which is why the peak below gets a
+  // dot (where it happened, which the axis cannot say) and no text.
+  tick(CH_T, spec.tick(top));
+  tick(base, '0');
+
+  // The measure: a 10% wash under a 2px line, broken wherever the daemon
+  // reported nothing (an unstarted engine is a gap, not a zero).
+  const runs = [];
+  let cur = null;
+  vals.forEach((v, i) => {
+    if (v === null) { cur = null; return; }
+    if (!cur) { cur = []; runs.push(cur); }
+    cur.push(i);
+  });
+  for (const run of runs) {
+    const pts = run.map((i) => `${px(i).toFixed(1)} ${py(vals[i]).toFixed(1)}`);
+    svg.appendChild(svgEl('path', {
+      d: `M${px(run[0]).toFixed(1)} ${base} L${pts.join(' L')} L${px(run[run.length - 1]).toFixed(1)} ${base} Z`,
+      class: 'charea',
+    }));
+    svg.appendChild(svgEl('path', { d: `M${pts.join(' L')}`, class: 'chline' }));
+  }
+
+  // One direct mark, chosen so it says something the axis does not — because a
+  // label that repeats a tick is noise, and a number on every point is chaos.
+  //
+  // Autoscaled: a bare dot at the peak. The top tick already gives its value;
+  // the dot gives WHEN, which no tick can.
+  // Fixed domain: the axis says nothing about this run, so the END value is
+  // labelled — "it got to 87%" is the whole story of a re-sim that stopped.
+  let hi = 0;
+  vals.forEach((v, i) => { if (v !== null && v > (vals[hi] ?? -Infinity)) hi = i; });
+  const at = spec.mark === 'last' ? lastIndexWithValue(vals) : hi;
+  if (at >= 0) {
+    const x = px(at), y = py(vals[at]);
+    svg.appendChild(svgEl('circle', { cx: x, cy: y, r: 4, class: 'chpeak' }));
+    if (spec.mark === 'last') {
+      // Anchored inward from the right edge it sits on, and dropped below the
+      // mark when it would otherwise ride out of the top of the plot.
+      const lab = svgEl('text', {
+        x: x - 7, y: y < CH_T + 10 ? y + 12 : y - 7,
+        class: 'chlabel', 'text-anchor': 'end',
+      });
+      lab.textContent = spec.fmt(vals[at]);
+      svg.appendChild(lab);
+    }
+  }
+
+  // Elapsed time, not clock time: "it spiked at minute 32" is the reading, and
+  // a wall clock makes that arithmetic.
+  const xlab = (i, x, anchor) => {
+    const t = svgEl('text', { x, y: CH_H - 4, class: 'chtick', 'text-anchor': anchor });
+    t.textContent = fmtDuration(Math.max(0, rows[i].atUnix - t0));
+    svg.appendChild(t);
+  };
+  xlab(0, CH_L, 'start');
+  if (n > 1) xlab(n - 1, CH_W - CH_R, 'end');
+
+  const hair = svgEl('line', { y1: CH_T, y2: base, class: 'chhair' });
+  const dot = svgEl('circle', { r: 4, class: 'chdot' });
+  svg.append(hair, dot);
+  card.appendChild(svg);
+  box.appendChild(card);
+
+  return (i) => {
+    const v = i === null ? null : vals[i];
+    const on = v !== null && v !== undefined;
+    hair.style.display = i === null ? 'none' : '';
+    dot.style.display = on ? '' : 'none';
+    if (i === null) return;
+    hair.setAttribute('x1', px(i));
+    hair.setAttribute('x2', px(i));
+    if (on) { dot.setAttribute('cx', px(i)); dot.setAttribute('cy', py(v)); }
+  };
+}
+
+// showTip lists every measure at the hovered moment, plus what the run was
+// doing then — which is what explains a flat stretch.
+function showTip(tip, box, rows, t0, i) {
+  const r = rows[i];
+  tip.textContent = '';
+  const head = document.createElement('div');
+  head.className = 'tiphead';
+  head.textContent = fmtDuration(Math.max(0, r.atUnix - t0)) + (r.state ? ' · ' + r.state : '');
+  tip.appendChild(head);
+  for (const spec of JOB_CHARTS) {
+    const v = r[spec.key];
+    if (typeof v !== 'number') continue;
+    const row = document.createElement('div');
+    row.className = 'tiprow';
+    const key = document.createElement('span');
+    key.className = 'tipkey';
+    const val = document.createElement('strong');
+    // Value first in weight, label second: the reader already knows which
+    // series they are on and wants the number.
+    val.textContent = spec.fmt(v);
+    const name = document.createElement('span');
+    name.textContent = spec.title;
+    row.append(key, val, name);
+    tip.appendChild(row);
+  }
+  tip.style.display = '';
+  // Kept on the side of the figure the pointer is not, so it never covers the
+  // stretch being read.
+  tip.style.left = i > rows.length / 2 ? '8px' : 'auto';
+  tip.style.right = i > rows.length / 2 ? 'auto' : '8px';
 }
 
 // setQueueOffset pages the table. The page is deliberately NOT in the URL:
@@ -3949,6 +4331,79 @@ function initQueue() {
   document.getElementById('q_prev').onclick = () => setQueueOffset(queueOffset - QUEUE_PAGE);
   document.getElementById('q_next').onclick = () => setQueueOffset(queueOffset + QUEUE_PAGE);
   document.getElementById('q_reload').onclick = () => refreshQueue();
+}
+
+// fillProgressCell renders a running job's live self-report into the Detail
+// cell: a bar for the part that can be measured, and always the words.
+//
+// The bar appears only once there IS a percentage — i.e. once the engine is
+// simulating. The minutes before that (demo download, content provisioning, the
+// engine's own load) have nothing to measure, and a bar pinned at zero through
+// them reads as a job that is stuck rather than one that is working.
+function fillProgressCell(td, p) {
+  td.textContent = '';
+  td.classList.remove('dim');
+  if (p.percent > 0) {
+    const bar = document.createElement('div');
+    bar.className = 'jobprog';
+    const fill = document.createElement('span');
+    fill.style.width = Math.min(100, p.percent) + '%';
+    bar.appendChild(fill);
+    td.appendChild(bar);
+  }
+  const line = document.createElement('div');
+  line.className = 'jobprogtext';
+  line.textContent = progressText(p) || 'working';
+  td.appendChild(line);
+}
+
+// disableCell is the row's one control: hold this job back, or let it go again.
+//
+// Only offered where it can change anything — a job that is pending or running.
+// A finished or failed job is already never handed out, so a switch on it would
+// be a control that does nothing; and the row for a game whose job errored
+// still keeps that game out of the mirror's auto-queue, which is the effect
+// somebody would be reaching for.
+function disableCell(j) {
+  const td = document.createElement('td');
+  td.className = 'act';
+  const live = j.state === 'pending' || j.state === 'processing';
+  if (!live && !j.disabled) return td;
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'jobbtn' + (j.disabled ? ' on' : '');
+  b.textContent = j.disabled ? 'Enable' : 'Disable';
+  b.title = j.disabled
+    ? 'Let daemons pick this job up again'
+    : 'Hold this job back. It will not be offered to any daemon, and the game stays out of the '
+      + 'auto-queue while the row exists. A run already under way is NOT stopped — nothing here can '
+      + 'reach that machine — but the row is reset so it is not simply re-offered later.';
+  b.onclick = (ev) => {
+    ev.stopPropagation(); // the row is an expand toggle; this is not that
+    setJobDisabled(j, !j.disabled, b);
+  };
+  td.appendChild(b);
+  return td;
+}
+
+// setJobDisabled flips one job and re-reads the page, so what is shown is what
+// the worker actually did rather than what the click assumed.
+async function setJobDisabled(j, disabled, btn) {
+  btn.disabled = true;
+  btn.textContent = '…';
+  try {
+    const r = await fetch('/api/jobs/' + encodeURIComponent(j.id) + '/disabled', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ disabled }),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+  } catch (err) {
+    btn.disabled = false;
+    renderQueue('Could not ' + (disabled ? 'disable' : 'enable') + ' that job: ' + (err.message || err));
+    return;
+  }
+  refreshQueue();
 }
 
 function renderQueue(errMsg) {
@@ -3993,6 +4448,34 @@ function renderQueue(errMsg) {
       td.appendChild(a);
       tr.appendChild(td);
     }
+    // What the game IS, not what the job is doing with it. Joined on by the
+    // worker from the catalog or the games mirror, because the jobs table
+    // itself knows only an id — and a queue of bare ids cannot answer the
+    // first question anyone has about a re-sim that will run for an hour:
+    // is this an 8v8 worth the machine time, or a three-minute duel?
+    {
+      const g = j.game || {};
+      const size = cell(g.gameSize || null, 'size');
+      if (g.gameSize) size.title = g.gameSize + ' — the team spec BAR recorded';
+      const dur = cell(g.durationSec ? fmtDuration(g.durationSec) : null, 'dur');
+      if (g.durationSec) dur.title = fmtDur(g.durationSec) + ' of game time';
+    }
+    // Out to gex, which is where a BAR game gets read properly. Always
+    // present, unlike the Game cell's bar-rts link, which is only there while
+    // the game is unpublished here.
+    {
+      const td = document.createElement('td');
+      td.className = 'links';
+      const a = document.createElement('a');
+      a.className = 'ext';
+      a.href = 'https://gex.honu.pw/match/' + encodeURIComponent(j.gameId);
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.textContent = 'gex';
+      a.title = 'Open this game on gex.honu.pw';
+      td.appendChild(a);
+      tr.appendChild(td);
+    }
     // What the job IS: an uploaded capture, or a re-simulation this site is
     // running itself. They wait on different daemons, so a queue that does not
     // say which is which cannot explain why one kind is moving and the other
@@ -4009,40 +4492,59 @@ function renderQueue(errMsg) {
     {
       const td = document.createElement('td');
       const s = document.createElement('span');
-      s.className = 'state state-' + String(j.state).replace(/[^\w-]/g, '');
-      s.textContent = j.state;
+      // Held back reads as a state here even though it is stored beside one:
+      // "pending" on a row nothing will ever pick up is the misleading half of
+      // the truth, and the state column is what gets scanned down.
+      const held = j.disabled;
+      s.className = 'state state-' + (held ? 'disabled' : String(j.state).replace(/[^\w-]/g, ''));
+      s.textContent = held ? 'disabled' : j.state;
+      if (held) s.title = 'Held back — no daemon will pick this up. Underlying state: ' + j.state;
       td.appendChild(s);
       tr.appendChild(td);
     }
     // What the work cost. For a re-sim that is the engine's own wall time,
     // which is the whole story — the pack and the upload after it are rounding
     // error against forty minutes of simulation. Everything else the daemon
-    // measured is one click away rather than seven more columns.
+    // measured is one click away rather than seven more columns. A job still
+    // RUNNING has no cost yet, so the cell answers the question a person
+    // actually has about it instead: how much longer.
     {
       const s = j.stats || null;
+      const p = j.progress || null;
       const headline = s ? (s.resimSec || s.tookSec || 0) : 0;
       const td = cell(headline ? fmtDur(headline) : null, 'took');
-      if (s) {
-        td.title = statsTooltip(j, s);
+      if (s || p) {
+        td.title = statsTooltip(j, s, p);
         td.classList.add('expand');
-        td.textContent = (queueOpen.has(j.id) ? '▾ ' : '▸ ') + (headline ? fmtDur(headline) : '—');
+        const label = headline ? fmtDur(headline)
+          : (p && p.etaSec ? '~' + fmtDur(p.etaSec) + ' left' : '—');
+        td.textContent = (queueOpen.has(j.id) ? '▾ ' : '▸ ') + label;
         td.classList.remove('dim');
       }
     }
     // Age as of the READ, which the pager timestamps — nothing re-renders this
-    // on its own, so the exact moment rides the tooltip.
+    // on its own, so the exact moment rides the tooltip. For a running job it
+    // doubles as the liveness signal: the daemon healthchecks every 10 seconds,
+    // so an age of minutes on a "processing" row means nobody is home.
     const upd = cell(j.updatedUnix ? fmtAgo(j.updatedUnix) : null);
     if (j.updatedUnix) upd.title = fmtDate(j.updatedUnix);
+    // Detail says what went wrong, or — while the job is alive — what it is
+    // doing. The two cannot collide: progress is cleared the moment a job
+    // reaches a terminal state, which is the same moment an error appears.
     const detail = cell(j.error || null, 'detail');
     if (j.error) detail.classList.add('error');
+    else if (j.progress) fillProgressCell(detail, j.progress);
+    tr.appendChild(disableCell(j));
     tbody.appendChild(tr);
 
     // The details row, only while expanded. Clicking anywhere on the job's
     // row toggles it — except on a link, which is there to be followed.
-    if (j.stats) {
+    if (j.stats || j.progress) {
       tr.classList.add('hasstats');
       tr.addEventListener('click', (ev) => {
-        if (ev.target.closest('a')) return;
+        // Links are there to be followed and the control is there to be
+        // clicked; neither is a request to expand the row.
+        if (ev.target.closest('a') || ev.target.closest('button')) return;
         if (queueOpen.has(j.id)) queueOpen.delete(j.id);
         else queueOpen.add(j.id);
         renderQueue(errMsg);
@@ -4740,6 +5242,9 @@ window.addEventListener('popstate', () => {
 });
 
 function fmtSize(n) {
+  // GB matters since a running job reports the engine's resident memory, which
+  // is single-digit gigabytes: "3221.2 MB" is a number you have to divide.
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + ' GB';
   if (n >= 1e6) return (n / 1e6).toFixed(1) + ' MB';
   if (n >= 1e3) return (n / 1e3).toFixed(0) + ' KB';
   return n + ' B';

@@ -8,8 +8,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import app from "../src/worker/app";
-import { MAX_JOB_STATS_BYTES } from "../src/worker/jobs";
-import type { IngestJob, JobKind, JobStats } from "../src/worker/jobs";
+import { MAX_JOB_PROGRESS_BYTES, MAX_JOB_STATS_BYTES } from "../src/worker/jobs";
+import type { IngestJob, JobKind, JobProgress, JobSample, JobStats, QueueJob } from "../src/worker/jobs";
 import type { ReplayEntry } from "../src/worker/replayentry";
 
 const FIXTURE = new URL("../../internal/capture/testdata/harness.brepstream", import.meta.url);
@@ -53,26 +53,43 @@ class FakeIndex {
       state: "pending",
       error: null,
       stats: null,
+      progress: null,
+      disabled: false,
       createdUnix: 0,
       updatedUnix: 0,
     });
   }
   // Both refusals plus the insert, in one call, exactly as the real DO does
   // them — it is single-threaded, which is what makes them atomic there.
-  resimEnqueue(id: string, gameId: string): { status: "queued" | "in-catalog" | "duplicate"; job: IngestJob | null } {
+  resimEnqueue(id: string, gameId: string): { status: string; job: IngestJob | null } {
     if (this.entries.has(gameId)) return { status: "in-catalog", job: null };
+    return this.jobAnnounce(id, gameId, "resim");
+  }
+  // The same thing WITHOUT the catalog refusal: work the daemon found for
+  // itself, every candidate of which is in the catalog by definition.
+  jobAnnounce(id: string, gameId: string, kind: JobKind): { status: string; job: IngestJob | null } {
     const active = [...this.jobs.values()].find(
-      (j) => j.gameId === gameId && j.kind === "resim" && (j.state === "pending" || j.state === "processing"),
+      (j) => j.gameId === gameId && j.kind === kind && (j.state === "pending" || j.state === "processing"),
     );
-    if (active) return { status: "duplicate", job: active };
-    this.jobInsert(id, "", gameId, "resim");
+    if (active) return { status: active.disabled ? "disabled" : "duplicate", job: active };
+    this.jobInsert(id, "", gameId, kind);
     return { status: "queued", job: this.jobs.get(id) ?? null };
   }
   jobGet(id: string): IngestJob | null {
     return this.jobs.get(id) ?? null;
   }
   jobsPending(kind: JobKind): IngestJob[] {
-    return [...this.jobs.values()].filter((j) => j.kind === kind && j.state === "pending");
+    return [...this.jobs.values()].filter((j) => j.kind === kind && j.state === "pending" && !j.disabled);
+  }
+  jobSetDisabled(id: string, disabled: boolean): boolean {
+    const j = this.jobs.get(id);
+    if (!j) return false;
+    j.disabled = disabled;
+    // Reset a claimed job: disabling cannot stop a daemon, so the row must not
+    // be left looking claimed. The real DO does this in the UPDATE's CASE.
+    if (disabled && j.state === "processing") j.state = "pending";
+    if (disabled) j.progress = null;
+    return true;
   }
   // What the route actually calls. The mirror backfill behind it is SQL over
   // three tables and is tested against the real Durable Object (tests/do);
@@ -82,18 +99,29 @@ class FakeIndex {
   }
   jobClaim(id: string): boolean {
     const j = this.jobs.get(id);
-    if (!j || j.state !== "pending") return false; // stale-processing needs a clock; not modelled
+    if (!j || j.disabled || j.state !== "pending") return false; // stale-processing needs a clock; not modelled
     j.state = "processing";
     j.error = null;
+    j.progress = null; // a claim starts fresh; the previous holder's reading is not ours
     return true;
   }
   lastQueueQuery: { limit: number; offset: number } | null = null;
-  queuePage(limit: number, offset: number): { jobs: IngestJob[]; total: number; active: number } {
+  queuePage(limit: number, offset: number): { jobs: QueueJob[]; total: number; active: number } {
     this.lastQueueQuery = { limit, offset };
-    const rank = (j: IngestJob) => (j.state === "pending" || j.state === "processing" ? 0 : 1);
+    const rank = (j: IngestJob) => (j.state === "pending" || j.state === "processing") && !j.disabled ? 0 : 1;
     const all = [...this.jobs.values()].sort((a, b) => rank(a) - rank(b));
+    // The real DO joins this off the catalog and the games mirror; here the
+    // catalog stand-in is the only source, which is enough to prove the route
+    // passes it through (the join itself is tested against real SQL).
+    const withGame = (j: IngestJob): QueueJob => {
+      const e = this.entries.get(j.gameId);
+      return {
+        ...j,
+        game: e ? { durationSec: e.durationSec ?? null, gameSize: e.gameSize ?? null } : null,
+      };
+    };
     return {
-      jobs: all.slice(offset, offset + limit),
+      jobs: all.slice(offset, offset + limit).map(withGame),
       total: all.length,
       active: all.filter((j) => rank(j) === 0).length,
     };
@@ -103,13 +131,37 @@ class FakeIndex {
     state: "processing" | "done" | "error",
     error: string | null,
     stats: JobStats | null = null,
+    progress: JobProgress | null = null,
   ): boolean {
     const j = this.jobs.get(id);
     if (!j) return false;
     j.state = state;
     j.error = error;
     if (stats !== null) j.stats = stats; // COALESCE in the real DO
+    // Kept while the job runs, cleared when it stops — the real DO does this in
+    // the UPDATE's CASE expression.
+    j.progress = state === "processing" ? (progress ?? j.progress) : null;
+    // ...and kept as history either way. The real thing coerces each field and
+    // caps the series (tests/do covers both); here it only has to accumulate.
+    if (state === "processing" && progress !== null) {
+      const s = this.samples.get(id) ?? [];
+      s.push({
+        atUnix: s.length,
+        state: (progress.state as string) ?? null,
+        frame: progress.frame ?? null,
+        percent: progress.percent ?? null,
+        etaSec: progress.etaSec ?? null,
+        rssBytes: progress.rssBytes ?? null,
+        swapBytes: progress.swapBytes ?? null,
+        cpuPct: progress.cpuPct ?? null,
+      });
+      this.samples.set(id, s);
+    }
     return true;
+  }
+  samples = new Map<string, JobSample[]>();
+  jobSamples(id: string): JobSample[] {
+    return this.samples.get(id) ?? [];
   }
 }
 
@@ -281,7 +333,21 @@ test("GET /api/queue lists jobs for the viewer without the archive key", async (
   const page = await asJson(res);
   assert.deepEqual(page, {
     jobs: [
-      { id: job, gameId: GAME_ID, kind: "upload", state: "pending", error: null, stats: null, createdUnix: 0, updatedUnix: 0 },
+      {
+        id: job,
+        gameId: GAME_ID,
+        kind: "upload",
+        state: "pending",
+        error: null,
+        stats: null,
+        progress: null,
+        disabled: false,
+        // Neither the catalog nor the mirror knows this id in the fake, which
+        // is what a private-lobby upload looks like.
+        game: null,
+        createdUnix: 0,
+        updatedUnix: 0,
+      },
     ],
     total: 1,
     active: 1,
@@ -821,4 +887,205 @@ test("the setup guide is wired to the banner and to the widget", () => {
     "the widget's F11 name is the one the guide tells players to look for",
   );
   assert.match(guide, /Replay uploader/);
+});
+
+// A running job's live self-report: it rides the healthcheck, comes back out on
+// both job views, survives a beat that carries none, and is CLEARED the moment
+// the job stops running — a finished row still saying "simulating, 43%" would
+// be worse than saying nothing.
+test("a running job's progress round-trips and is cleared when it ends", async (t) => {
+  const { env } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  const { job } = await asJson(
+    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+  );
+  const progress = {
+    state: "simulating",
+    frame: 43000,
+    totalFrames: 100170,
+    percent: 42.9,
+    etaSec: 840,
+    simFps: 68.2,
+    rssBytes: 3221225472,
+    cpuPct: 612.5,
+  };
+  const post = (body: unknown) =>
+    app.request(`/api/jobs/${job}`, { method: "POST", body: JSON.stringify(body) }, env);
+
+  assert.equal((await post({ state: "processing", claim: true, kind: "resim" })).status, 200);
+  assert.equal((await post({ state: "processing", progress })).status, 200);
+
+  const polled = await asJson(await app.request(`/api/jobs/${job}`, {}, env));
+  assert.deepEqual(polled.progress, progress, "the poll sees it");
+  const page = await asJson(await app.request("/api/queue", {}, env));
+  assert.deepEqual(page.jobs[0].progress, progress, "and so does the queue page");
+
+  // A beat with no reading keeps the last one — an older daemon simply sends
+  // less, and blanking on silence would make the page flicker.
+  assert.equal((await post({ state: "processing" })).status, 200);
+  assert.deepEqual((await asJson(await app.request(`/api/jobs/${job}`, {}, env))).progress, progress);
+
+  assert.equal((await post({ state: "done" })).status, 200);
+  const done = await asJson(await app.request(`/api/jobs/${job}`, {}, env));
+  assert.equal(done.progress, null, "progress describes work in flight, and there is none now");
+});
+
+// Same rule as the stats: a reading that cannot be stored is dropped, never a
+// 400 — the state transition it rides is worth more than it.
+test("unusable progress is dropped without losing the healthcheck", async (t) => {
+  const { env } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  const { job } = await asJson(
+    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+  );
+  const post = (body: unknown) =>
+    app.request(`/api/jobs/${job}`, { method: "POST", body: JSON.stringify(body) }, env);
+
+  for (const bad of ["simulating", 42, ["simulating"], { state: "x".repeat(MAX_JOB_PROGRESS_BYTES + 1) }]) {
+    assert.equal((await post({ state: "processing", progress: bad })).status, 200);
+  }
+  const polled = await asJson(await app.request(`/api/jobs/${job}`, {}, env));
+  assert.equal(polled.state, "processing", "the transition still landed");
+  assert.equal(polled.progress, null);
+});
+
+// The healthcheck HISTORY behind the queue page's charts. It is its own route
+// because it is fetched per expanded row, not with every queue read — a page of
+// 25 rows would otherwise carry thousands of points nobody looked at.
+test("a job's healthcheck history is served on its own route", async (t) => {
+  const { env, index } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  const { job } = await asJson(
+    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+  );
+  const post = (body: unknown) =>
+    app.request(`/api/jobs/${job}`, { method: "POST", body: JSON.stringify(body) }, env);
+
+  for (const p of [
+    { state: "loading" },
+    { state: "simulating", percent: 12, rssBytes: 2e9, swapBytes: 0, cpuPct: 480 },
+    { state: "simulating", percent: 43, rssBytes: 3e9, swapBytes: 0, cpuPct: 610 },
+  ]) {
+    assert.equal((await post({ state: "processing", progress: p })).status, 200);
+  }
+
+  const { samples } = await asJson(await app.request(`/api/jobs/${job}/samples`, {}, env));
+  assert.equal(samples.length, 3, 'every beat is a point');
+  assert.deepEqual(samples[2], {
+    atUnix: 2, state: "simulating", percent: 43, frame: null, etaSec: null,
+    // Reported even at zero: "the engine is not swapping" is the reassurance,
+    // and it must not read the same as a daemon too old to measure it.
+    rssBytes: 3e9, swapBytes: 0, cpuPct: 610,
+  });
+
+  // The series survives the job: the curve of a run that died is the whole
+  // reason to keep it, and the live progress is gone by then.
+  assert.equal((await post({ state: "error", error: "engine died" })).status, 200);
+  assert.equal((await asJson(await app.request(`/api/jobs/${job}`, {}, env))).progress, null);
+  assert.equal((await asJson(await app.request(`/api/jobs/${job}/samples`, {}, env))).samples.length, 3);
+
+  // A job that never beat — an upload, or an older daemon — is an empty series
+  // rather than a 404: the view says the same thing about both.
+  index.jobInsert("plain", "streams/x", "gid");
+  assert.deepEqual((await asJson(await app.request("/api/jobs/plain/samples", {}, env))).samples, []);
+  assert.deepEqual((await asJson(await app.request("/api/jobs/nope/samples", {}, env))).samples, []);
+});
+
+// The daemon's catalog scan re-simulates games whose only upload is one-sided.
+// Every one of those is already IN the catalog, so /api/resim refuses them all
+// — right for a person pasting a link, wrong for work that is already running.
+// Announcing is the door for it, and it is guarded because it is the one path
+// into the job table with no refusals behind it.
+test("a daemon can announce work it found itself, which /api/resim would refuse", async (t) => {
+  const { env, index } = makeEnv("s3cret");
+  const auth = { Authorization: "Bearer s3cret" };
+  const post = (body: unknown, headers = auth) =>
+    app.request("/api/jobs", { method: "POST", headers, body: JSON.stringify(body) }, env);
+
+  // The game is published, one-sided: exactly a scan candidate.
+  index.upsert({ id: RESIM_ID, uploaderAlly: 1 } as ReplayEntry);
+  stubBarApi(t, new Set([RESIM_ID]));
+  assert.equal(
+    (await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env)).status,
+    409,
+    "the open door refuses it as published",
+  );
+
+  assert.equal((await post({ gameId: RESIM_ID }, {} as never)).status, 401, "and this one needs the token");
+
+  const first = await asJson(await post({ gameId: RESIM_ID }));
+  assert.equal(first.status, "queued");
+  assert.ok(first.job, "with a row to report onto");
+  assert.equal(index.jobGet(first.job)?.kind, "resim");
+
+  // Two daemons scanning the same catalog get the same row, so only one of
+  // them can claim it — the other does not spend an hour on the same game.
+  const second = await asJson(await post({ gameId: RESIM_ID }));
+  assert.equal(second.status, "duplicate");
+  assert.equal(second.job, first.job);
+
+  // A finished job does not block a fresh one: re-announcing is how a scan
+  // retries a game whose link nobody can paste.
+  index.jobUpdate(first.job, "error", "desynced");
+  assert.equal((await asJson(await post({ gameId: RESIM_ID }))).status, "queued");
+
+  // Rejections: only a real game id, and only the kind that has no stream.
+  assert.equal((await post({ gameId: "not-a-game" })).status, 400);
+  assert.equal((await post({})).status, 400);
+  assert.equal((await post({ gameId: RESIM_ID, kind: "upload" })).status, 400);
+});
+
+// The queue page's per-row switch. Disabling cannot reach out and stop an
+// engine on somebody else's machine, so what it does is stop the job being
+// HANDED OUT and reset a claimed row that would otherwise just be re-offered
+// once its stale window expired.
+test("a job can be held back from the queue page, and let go again", async (t) => {
+  const { env, index } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  const { job } = await asJson(
+    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+  );
+  const flip = (disabled: unknown, id = job) =>
+    app.request(`/api/jobs/${id}/disabled`, { method: "POST", body: JSON.stringify({ disabled }) }, env);
+
+  assert.equal((await asJson(await flip(true))).disabled, true);
+  assert.equal(index.jobGet(job)?.disabled, true);
+  assert.deepEqual(index.jobsPending("resim"), [], "and nothing is offered it");
+  assert.equal(index.jobClaim(job), false, "nor can a daemon that knows the id take it");
+
+  // It rides both open job reads, so the row can say so.
+  assert.equal((await asJson(await app.request(`/api/jobs/${job}`, {}, env))).disabled, true);
+  assert.equal((await asJson(await app.request("/api/queue", {}, env))).jobs[0].disabled, true);
+
+  // A held-back job still BLOCKS a new one for the same game — walking around
+  // it with a fresh row is exactly what "will not be picked up" rules out —
+  // and the paste box is told why rather than "already queued".
+  const again = await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env);
+  assert.equal(again.status, 409);
+  assert.equal((await asJson(again)).status, "disabled");
+
+  assert.equal((await asJson(await flip(false))).disabled, false);
+  assert.equal(index.jobsPending("resim").length, 1, "and it is work again");
+
+  assert.equal((await flip("yes")).status, 400);
+  assert.equal((await flip(true, "nope")).status, 404);
+});
+
+// A queue of bare game ids cannot answer the first question anyone has about a
+// re-sim that will run for an hour — is this an 8v8 worth the machine time, or
+// a three-minute duel? The jobs table knows only an id, so the worker joins the
+// game's own facts onto each row.
+test("queue rows carry the game's size and duration", async (t) => {
+  const { env, index } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  index.upsert({ id: RESIM_ID, durationSec: 2417, gameSize: "8v8" } as ReplayEntry);
+  index.jobInsert("known", "", RESIM_ID, "resim");
+  // A game neither the catalog nor the mirror has heard of: a drag&drop upload
+  // from a private lobby. The row still lists, it just has nothing to say.
+  index.jobInsert("stranger", "streams/x", "ffffffffffffffffffffffffffffffff");
+
+  const page = await asJson(await app.request("/api/queue", {}, env));
+  const byId = Object.fromEntries(page.jobs.map((j: { id: string }) => [j.id, j]));
+  assert.deepEqual(byId.known.game, { durationSec: 2417, gameSize: "8v8" });
+  assert.equal(byId.stranger.game, null);
 });

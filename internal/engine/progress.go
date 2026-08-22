@@ -61,6 +61,15 @@ func lastFrameInTail(path string, tailBytes int64) (int32, bool) {
 	return lastFrameInBytes(buf)
 }
 
+// LastLoggedFrame is the newest sim frame the engine has written into its
+// infolog, which is the only running-progress signal a headless replay emits
+// (the widget's heartbeat keeps the "[f=]" markers flowing). Best-effort in the
+// same way WatchProgress is: ok=false while the log is unreadable or has no
+// frame marker yet, which is normal for the first seconds of a run.
+func LastLoggedFrame(infologPath string) (int32, bool) {
+	return lastFrameInTail(infologPath, 2048)
+}
+
 // WatchProgress polls the tail of infologPath every interval and prints replay
 // progress to out until ctx is cancelled. totalGameSec is the demo's full game
 // duration (from the header) and drives percent-complete and ETA; pass 0 if
@@ -80,7 +89,7 @@ func WatchProgress(ctx context.Context, infologPath string, totalGameSec int, in
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			frame, ok := lastFrameInTail(infologPath, 2048)
+			frame, ok := LastLoggedFrame(infologPath)
 			if !ok || frame < 0 {
 				continue
 			}

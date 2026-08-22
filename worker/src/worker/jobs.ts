@@ -32,11 +32,138 @@ export interface IngestJob {
   state: (typeof JOB_STATES)[number];
   /** Failure detail when state is "error". */
   error: string | null;
+  /** Held back: no daemon will be offered this job, and no game it names will
+   * be auto-queued while the row exists. Orthogonal to `state` rather than a
+   * fifth value of it — the four states describe how far the WORK got, and
+   * being held back is not a stage of that; it is also reversible, which a
+   * state would make awkward. Disabling a running job resets it to "pending"
+   * (nothing is working on it as far as this table is concerned) and its
+   * heartbeats stop moving it, though a daemon already mid-run may still
+   * report a terminal state, which is recorded. */
+  disabled: boolean;
   /** What the work cost, reported by the daemon with its terminal state — see
    * JobStats. Null until then (and for a job that predates the column). */
   stats: JobStats | null;
+  /** What the work is DOING, as of the daemon's last healthcheck — see
+   * JobProgress. Non-null only while the job is running. */
+  progress: JobProgress | null;
   createdUnix: number;
   updatedUnix: number;
+}
+
+/** JobProgress is a running job's live self-report, refreshed by every
+ * healthcheck the daemon sends (cmd/bringest, every 10 seconds) and dropped the
+ * moment the job stops running.
+ *
+ * The opposite of JobStats in every way that matters, which is why it is a
+ * separate column and a separate shape: stats say what the work COST and are
+ * written once, at the end, and kept; this says what the work IS DOING, is
+ * overwritten continuously, and is meaningless afterwards. It exists because a
+ * re-sim is the better part of an hour during which a job row would otherwise
+ * say nothing but "processing" — indistinguishable from a daemon that died.
+ *
+ * Every field is optional for the same reason JobStats' are: a phase with
+ * nothing to measure reports only its name, and an older daemon reports less. */
+export interface JobProgress {
+  /** The phase in words: "fetching demo", "provisioning content", "starting
+   * engine", "loading", "simulating", "packing", "uploading". The one field
+   * that means something in every phase, including the ones with no numbers. */
+  state?: string;
+  /** Position in the simulation, in sim frames (30 per game-second) — 0 outside
+   * the simulating phase, which is most of a run's first minutes. */
+  frame?: number;
+  totalFrames?: number;
+  /** frame against totalFrames, 0-100. Progress through the SIMULATION, not
+   * through the job: the demo download and the engine's load phase are minutes
+   * of their own and sit at 0. */
+  percent?: number;
+  /** Seconds of wall time the daemon thinks the simulation still needs, from
+   * the rate it has recently been running at. */
+  etaSec?: number;
+  /** That rate: sim frames per wall second (30 = realtime). */
+  simFps?: number;
+  /** The ENGINE process's resident memory. */
+  rssBytes?: number;
+  /** How much of the engine has been pushed out to SWAP. Zero is the healthy
+   * answer and the usual one, which is exactly why the daemon sends it even
+   * when it is zero: "the engine is not swapping" and "this daemon is too old
+   * to know" must not arrive as the same absent field. Anything above zero is
+   * the direct explanation for a run that has gone slow — a sim frame faulting
+   * its own state back in is doing disk I/O per frame. */
+  swapBytes?: number;
+  /** The engine's CPU use as a percentage of ONE core, so a busy multi-threaded
+   * engine reports well over 100. This and rssBytes are the only window anyone
+   * has onto the health of the machine actually doing the work — the daemon
+   * runs on somebody's workstation, behind NAT, and nothing else here can see
+   * it. */
+  cpuPct?: number;
+}
+
+/** Cap on the stored progress JSON. It is a dozen small numbers; the cap only
+ * exists so a malformed report cannot be written into every read of the queue
+ * page, the same reason MAX_JOB_STATS_BYTES does. */
+export const MAX_JOB_PROGRESS_BYTES = 2 * 1024;
+
+/** parseJobProgress validates a live progress report off the wire. Shallow,
+ * like parseJobStats and for the same reason — the fields are shown, never
+ * computed with. Returns null for "no usable progress", which callers treat as
+ * "do not touch what is stored": a beat that carries nothing must not blank a
+ * reading a previous beat did carry. */
+export function parseJobProgress(v: unknown): JobProgress | null {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
+  const json = JSON.stringify(v);
+  if (json === undefined || json.length > MAX_JOB_PROGRESS_BYTES) return null;
+  return v as JobProgress;
+}
+
+/** What the queue page shows about the GAME a job is working on, as opposed to
+ * about the job. It is not part of IngestJob because it is not part of a job:
+ * the jobs table knows a gameId and nothing else about the game, and these are
+ * joined on at read time from whichever table happens to know them.
+ *
+ * Two sources, in that order of preference: the catalog row if the game has one
+ * (what was actually captured), else the games mirror (what BAR published).
+ * The mirror is what covers a re-sim of a game nobody has uploaded — which is
+ * most of what sits in this queue — and the catalog covers an upload of a game
+ * the mirror never saw. Null when neither knows it. */
+export interface QueueGame {
+  durationSec: number | null;
+  /** The team spec, "8v8" / "1v1". */
+  gameSize: string | null;
+}
+
+/** One row of the queue page: the job, plus what is known about its game. */
+export type QueueJob = IngestJob & { game: QueueGame | null };
+
+/** JobSample is one healthcheck kept as HISTORY — the same reading JobProgress
+ * carries, plus the moment the worker recorded it, stored as its own row in
+ * job_samples rather than overwritten in place.
+ *
+ * The two are the same numbers answering different questions. `progress` on the
+ * job row answers "what is it doing now" and is what the collapsed queue row
+ * reads; this answers "what did it do" — the memory curve of a run that died at
+ * minute forty, which is exactly the reading nobody has when they most want it,
+ * because the live one is cleared the moment the job stops.
+ *
+ * The fields are typed here and typed in SQL, which is a real difference from
+ * JobProgress: parseJobProgress is deliberately shallow (its fields are only
+ * ever displayed), so the DO coerces each one on the way into a column. */
+export interface JobSample {
+  /** When the worker recorded the beat — its clock, not the daemon's, so a
+   * daemon with a skewed clock cannot bend the time axis. */
+  atUnix: number;
+  /** The phase, so the chart can say what a flat stretch was doing. */
+  state: string | null;
+  frame: number | null;
+  percent: number | null;
+  /** What the daemon thought was left, at that moment. Charted over time it is
+   * the one series that says whether the run is CONVERGING: a healthy re-sim
+   * walks it down towards zero, and a stretch where it climbs is the run
+   * getting slower than it is getting on. */
+  etaSec: number | null;
+  rssBytes: number | null;
+  swapBytes: number | null;
+  cpuPct: number | null;
 }
 
 /** One job's processing record, written by cmd/bringest (its jobStats struct

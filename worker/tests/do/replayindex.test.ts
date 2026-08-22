@@ -408,6 +408,242 @@ test("a heartbeat does not pile up rows", async () => {
   });
 });
 
+// The live progress column, whose whole behaviour is the CASE in jobUpdate's
+// UPDATE: kept and refreshed while the job runs, kept when a beat carries none,
+// and cleared by the terminal state.
+test("progress follows the running job and goes out with it", async () => {
+  await inIndex((index) => {
+    index.jobInsert("j", "", "busy", "resim");
+    index.jobUpdate("j", "processing", null, null, { state: "loading" });
+    expect(index.jobGet("j")?.progress).toEqual({ state: "loading" });
+
+    index.jobUpdate("j", "processing", null, null, { state: "simulating", percent: 12.5 });
+    expect(index.jobGet("j")?.progress).toEqual({ state: "simulating", percent: 12.5 });
+
+    // A beat with nothing to say keeps the last reading.
+    index.jobUpdate("j", "processing", null);
+    expect(index.jobGet("j")?.progress).toEqual({ state: "simulating", percent: 12.5 });
+
+    // ...and finishing drops it, while the stats reported with it stay.
+    index.jobUpdate("j", "done", null, { tookSec: 12 });
+    expect(index.jobGet("j")?.progress).toBe(null);
+    expect(index.jobGet("j")?.stats).toEqual({ tookSec: 12 });
+  });
+});
+
+// Taking over a stale job must not inherit the dead daemon's last reading:
+// "43%, 12 minutes left" from a run that is gone describes nothing.
+test("claiming a job clears the previous holder's progress", async () => {
+  await inIndex((index, sql) => {
+    index.jobInsert("j", "", "busy", "resim");
+    index.jobUpdate("j", "processing", null, null, { state: "simulating", percent: 43 });
+    // Age it past the resim stale window so the claim is allowed.
+    sql.exec(`UPDATE jobs SET updated_unix = updated_unix - ? WHERE id = 'j'`, 100 * 60);
+
+    expect(index.jobClaim("j", "resim")).toBe(true);
+    expect(index.jobGet("j")?.progress).toBe(null);
+  });
+});
+
+// The healthcheck HISTORY: one row per beat, kept after the job ends (unlike
+// the live progress, which is cleared) because a dead run's memory curve is
+// exactly what nobody has otherwise.
+test("every healthcheck is kept as a sample, and outlives the job", async () => {
+  await inIndex((index, sql) => {
+    index.jobInsert("j", "", "busy", "resim");
+    for (let i = 0; i < 3; i++) {
+      index.jobUpdate("j", "processing", null, null, {
+        state: "simulating", frame: 1000 * i, percent: i,
+        rssBytes: 1e9 + i, swapBytes: i * 1024, cpuPct: 500 + i,
+      });
+      // The worker stamps each beat with its own clock, and all three land in
+      // the same second here. Age everything already recorded by a second so
+      // the next beat has its own slot — otherwise they are one point, since
+      // the (job, time) key makes a same-second beat an update.
+      sql.exec(`UPDATE job_samples SET at_unix = at_unix - 1 WHERE job_id = 'j'`);
+    }
+    expect(index.jobSamples("j")).toHaveLength(3);
+
+    index.jobUpdate("j", "error", "engine died", { tookSec: 2400 });
+    expect(index.jobGet("j")?.progress).toBe(null);
+    const kept = index.jobSamples("j");
+    expect(kept).toHaveLength(3);
+    expect(kept[0]).toMatchObject({ state: "simulating", frame: 0, rssBytes: 1e9 });
+    expect(kept[2]).toMatchObject({ frame: 2000, cpuPct: 502, swapBytes: 2048 });
+  });
+});
+
+// A beat retried inside the same second is the same reading, not a second
+// point: the (job, time) key makes the insert idempotent.
+test("a repeated beat in one second updates its sample instead of adding one", async () => {
+  await inIndex((index) => {
+    index.jobInsert("j", "", "busy", "resim");
+    index.jobUpdate("j", "processing", null, null, { state: "loading", cpuPct: 1 });
+    index.jobUpdate("j", "processing", null, null, { state: "simulating", cpuPct: 2 });
+    const s = index.jobSamples("j");
+    expect(s).toHaveLength(1);
+    expect(s[0]).toMatchObject({ state: "simulating", cpuPct: 2 });
+  });
+});
+
+// parseJobProgress is shallow on purpose — its fields were only ever displayed
+// — but these land in typed SQL columns, so a field of the wrong type must
+// become NULL rather than throw inside the bind and 500 the healthcheck.
+test("a sample coerces wire junk to null instead of failing the beat", async () => {
+  await inIndex((index) => {
+    index.jobInsert("j", "", "busy", "resim");
+    const bad = { state: 42, frame: {}, percent: "43", rssBytes: NaN, swapBytes: "lots", cpuPct: [1] };
+    expect(index.jobUpdate("j", "processing", null, null, bad as never)).toBe(true);
+    expect(index.jobSamples("j")[0]).toMatchObject({
+      state: null, frame: null, percent: null, rssBytes: null, swapBytes: null, cpuPct: null,
+    });
+  });
+});
+
+// Past the cap the series is HALVED, not truncated: a run that beats for hours
+// keeps its whole span (first and last sample survive) at half the resolution,
+// where dropping the oldest would lose the load phase and refusing to record
+// would lose the end — the part that says how it died.
+test("a series past the cap is thinned, keeping its span", async () => {
+  await inIndex((index, sql) => {
+    index.jobInsert("j", "", "busy", "resim");
+    // Seed just under the cap directly; driving 720 beats through jobUpdate
+    // would be 720 catalog-placeholder writes as well.
+    for (let i = 0; i < 720; i++) {
+      sql.exec(`INSERT INTO job_samples (job_id, at_unix, percent) VALUES ('j', ?, ?)`, 1000 + i, i);
+    }
+    expect(index.jobSamples("j")).toHaveLength(720);
+
+    index.jobUpdate("j", "processing", null, null, { state: "simulating", percent: 99 });
+    const after = index.jobSamples("j");
+    expect(after.length).toBeLessThan(400);
+    expect(after.length).toBeGreaterThan(300);
+    expect(after[0].atUnix).toBe(1000);
+    expect(after[after.length - 1].percent).toBe(99);
+  });
+});
+
+// The history outlives its job, so something has to age it out. Nothing else
+// here grows without a rule.
+test("pruning drops the samples of long-finished and vanished jobs", async () => {
+  await inIndex((index, sql) => {
+    index.jobInsert("old", "", "a", "resim");
+    index.jobInsert("recent", "", "b", "resim");
+    index.jobInsert("live", "", "c", "resim");
+    for (const id of ["old", "recent", "live"]) {
+      index.jobUpdate(id, "processing", null, null, { state: "simulating" });
+    }
+    index.jobUpdate("old", "done", null);
+    index.jobUpdate("recent", "done", null);
+    // Orphaned samples: a job row that is simply not there.
+    sql.exec(`INSERT INTO job_samples (job_id, at_unix) VALUES ('gone', 1)`);
+
+    const now = Math.floor(Date.now() / 1000);
+    sql.exec(`UPDATE jobs SET updated_unix = ? WHERE id = 'old'`, now - 40 * 24 * 3600);
+
+    expect(index.jobSamplePrune(now - 30 * 24 * 3600)).toBeGreaterThan(0);
+    expect(index.jobSamples("old")).toHaveLength(0);
+    expect(index.jobSamples("gone")).toHaveLength(0);
+    expect(index.jobSamples("recent")).toHaveLength(1);
+    expect(index.jobSamples("live")).toHaveLength(1);
+  });
+});
+
+// Holding a job back. The half that is easy to miss: a RUNNING job has to be
+// reset, because nothing here can stop the daemon — leaving the row claimed
+// would just mean waiting out the stale window before it was handed out again.
+test("disabling a job stops it being offered and resets a running one", async () => {
+  await inIndex((index) => {
+    index.jobInsert("j", "", "busy", "resim");
+    index.jobClaim("j", "resim");
+    index.jobUpdate("j", "processing", null, null, { state: "simulating", percent: 20 });
+    expect(index.list()).toMatchObject([{ id: "busy", processing: true, placeholder: true }]);
+
+    expect(index.jobSetDisabled("j", true)).toBe(true);
+    const j = index.jobGet("j");
+    expect(j).toMatchObject({ disabled: true, state: "pending", progress: null });
+    expect(index.jobsPending("resim")).toEqual([]);
+    expect(index.jobClaim("j", "resim")).toBe(false);
+    // Nothing is being worked on, and nothing was published: the row that only
+    // existed to show the work must not linger in the replay list.
+    expect(index.list()).toEqual([]);
+    // The samples stay — they are the record of work that really happened, and
+    // the charts are the reason to look at a job you had to turn off.
+    expect(index.jobSamples("j")).toHaveLength(1);
+
+    expect(index.jobSetDisabled("j", false)).toBe(true);
+    expect(index.jobsPending("resim")).toHaveLength(1);
+    expect(index.jobSetDisabled("nope", true)).toBe(false);
+  });
+});
+
+// A daemon that was mid-run keeps beating until its engine stops. Those beats
+// must not put the row back into "processing" a second after it was reset —
+// but the outcome, when it finally lands, is still worth recording.
+test("a disabled job ignores heartbeats but still records how it ended", async () => {
+  await inIndex((index) => {
+    index.jobInsert("j", "", "busy", "resim");
+    index.jobClaim("j", "resim");
+    index.jobSetDisabled("j", true);
+
+    index.jobUpdate("j", "processing", null, null, { state: "simulating", percent: 55 });
+    expect(index.jobGet("j")).toMatchObject({ state: "pending", progress: null });
+    expect(index.jobSamples("j")).toHaveLength(0);
+
+    index.jobUpdate("j", "done", null, { tookSec: 2400 });
+    expect(index.jobGet("j")).toMatchObject({ state: "done", stats: { tookSec: 2400 } });
+  });
+});
+
+// The mirror backfill hands out games with no job row of ANY state, so a
+// disabled row is what keeps a game it names out of the auto-queue for good.
+test("a disabled job keeps its game out of the mirror backfill", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([game("keepout"), game("fine")]);
+    index.jobInsert("j", "", "keepout", "resim");
+    index.jobSetDisabled("j", true);
+    const offered = index.jobsOffer("resim", "new-1");
+    expect(offered).toHaveLength(1);
+    expect(offered[0].gameId).toBe("fine");
+  });
+});
+
+// The jobs table knows a gameId and nothing else about the game, so the queue
+// joins the duration and the team spec off whichever table knows them. This is
+// real SQL over three tables that all have an `id` and two of which have an
+// `updated_unix`, so it is also the test that the ORDER BY is qualified — an
+// unqualified column there is an ambiguous-column ERROR, not a wrong answer.
+test("queue rows join the game's size and duration from either table", async () => {
+  await inIndex((index) => {
+    // Published: the catalog knows it.
+    index.upsert(replay("captured", { durationSec: 2417, gameSize: "8v8" }));
+    index.jobInsert("j1", "", "captured", "resim");
+    // Never uploaded: only the mirror knows it, which is most of this queue.
+    index.gamesInsert([game("mirrored", { durationSec: 217, gameSize: "1v1" })]);
+    index.jobInsert("j2", "", "mirrored", "resim");
+    // Neither knows it: a drag&drop upload from a private lobby.
+    index.jobInsert("j3", "streams/x", "stranger");
+
+    const byId = Object.fromEntries(index.queuePage(25, 0).jobs.map((j) => [j.id, j]));
+    expect(byId.j1.game).toEqual({ durationSec: 2417, gameSize: "8v8" });
+    expect(byId.j2.game).toEqual({ durationSec: 217, gameSize: "1v1" });
+    expect(byId.j3.game).toBe(null);
+    // The job's own fields survive the join unqualified-name-for-unqualified-name.
+    expect(byId.j3).toMatchObject({ streamKey: "streams/x", kind: "upload", state: "pending" });
+  });
+});
+
+// A game the catalog and the mirror both hold: the catalog wins, because it
+// describes what was actually captured.
+test("the catalog's own numbers beat the mirror's", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([game("both", { durationSec: 100, gameSize: "1v1" })]);
+    index.upsert(replay("both", { durationSec: 2417, gameSize: "8v8" }));
+    index.jobInsert("j", "", "both", "resim");
+    expect(index.queuePage(25, 0).jobs[0].game).toEqual({ durationSec: 2417, gameSize: "8v8" });
+  });
+});
+
 test("a published replay keeps its row and never becomes a placeholder", async () => {
   await inIndex((index) => {
     index.upsert(replay("real"));
@@ -463,6 +699,45 @@ test("the pill goes out with the job, whatever it was doing", async () => {
 
     // Derived from the jobs table, so nothing had to remember to clear it.
     expect(index.list()[0]).toMatchObject({ id: "real", processing: false, placeholder: false });
+  });
+});
+
+// The catalog scan's door into the job table: the same dedupe resimEnqueue
+// does, without the catalog refusal that would reject every one of its
+// candidates (they are all published — that is what makes them candidates).
+test("announcing takes a game the catalog already holds", async () => {
+  await inIndex((index) => {
+    index.upsert(replay("onesided", { uploaderAlly: 1 }));
+    // The open door refuses it, which is right for a person pasting a link.
+    expect(index.resimEnqueue("a", "onesided").status).toBe("in-catalog");
+
+    const first = index.jobAnnounce("b", "onesided", "resim");
+    expect(first.status).toBe("queued");
+    expect(first.job?.kind).toBe("resim");
+    // Claiming it marks the existing catalog row as being worked on WITHOUT
+    // turning it into a placeholder: a revision exists, so it stays openable.
+    expect(index.jobClaim("b", "resim")).toBe(true);
+    expect(index.list()).toMatchObject([{ id: "onesided", placeholder: false, processing: true }]);
+
+    // A second daemon scanning the same catalog gets the same row back rather
+    // than a second hour of engine time.
+    expect(index.jobAnnounce("c", "onesided", "resim")).toMatchObject({ status: "duplicate", job: { id: "b" } });
+    expect(index.jobClaim("c", "resim")).toBe(false);
+  });
+});
+
+// A failed scan re-sim must not wedge the game: nothing else can retry it,
+// since a scan candidate has no link for anyone to paste.
+test("announcing again after a failure is how a scanned game is retried", async () => {
+  await inIndex((index) => {
+    index.upsert(replay("onesided", { uploaderAlly: 1 }));
+    index.jobAnnounce("a", "onesided", "resim");
+    index.jobUpdate("a", "error", "desynced");
+    // The failure stays on its own row for a person to read...
+    expect(index.jobGet("a")).toMatchObject({ state: "error", error: "desynced" });
+    // ...and the published row it was upgrading is untouched by the failure.
+    expect(index.list()).toMatchObject([{ id: "onesided", placeholder: false, processing: false }]);
+    expect(index.jobAnnounce("b", "onesided", "resim").status).toBe("queued");
   });
 });
 

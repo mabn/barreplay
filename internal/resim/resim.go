@@ -61,6 +61,14 @@ type Options struct {
 	// infolog are worth keeping, and returning them only on success would
 	// throw away the record of every failure.
 	Stats *RunStats
+
+	// Progress, when non-nil, is kept up to date WHILE the run happens: the
+	// phase it is in, how far into the simulation it is, and what the engine
+	// process is costing (progress.go). Unlike Stats, which is a record read
+	// afterwards, this is meant to be read from another goroutine as the run
+	// goes — it is how the ingest daemon reports a job that will not return
+	// for the better part of an hour.
+	Progress *Progress
 }
 
 // RunStats is one re-simulation's processing record.
@@ -103,6 +111,7 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 	}
 
 	// Demo: resolve + download by gameId, then parse header + startscript.
+	o.Progress.SetPhase(PhaseFetchingDemo)
 	r, err := client.Resolve(ctx, gameID)
 	if err != nil {
 		return "", nil, err
@@ -144,6 +153,7 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 	}()
 
 	// Before Locate, which now refuses a build that does not match the demo.
+	o.Progress.SetPhase(PhaseProvisioning)
 	if err := engine.EnsureEngine(ctx, engine.Config{
 		DataDir:       o.DataDir,
 		EngineBinary:  o.EngineBinary,
@@ -182,6 +192,7 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 			fmt.Fprintf(os.Stderr, "resim: warning: could not restore widget config: %v\n", rerr)
 		}
 	}()
+	o.Progress.SetPhase(PhaseStartingEngine)
 	scriptPath, err := eng.BuildStartscript(demoPath)
 	if err != nil {
 		return "", nil, err
@@ -209,17 +220,29 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 	// initializes exactly when loading ends, so its timestamp is what splits
 	// the engine's wall time into a load phase and a sim phase.
 	widgetLoaded := make(chan time.Time, 1)
+	o.Progress.SetPhase(PhaseLoading)
 	go func() {
 		sc := bufio.NewScanner(stdout)
 		sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 		for sc.Scan() {
 			if strings.Contains(sc.Text(), "[barreplay]") {
 				widgetLoaded <- time.Now()
+				// The widget initializes exactly when loading ends, so this
+				// line is also the boundary a watcher reports.
+				o.Progress.SetPhase(PhaseSimulating)
 				break
 			}
 		}
 		io.Copy(io.Discard, stdout) // keep draining (also covers a scanner error)
 	}()
+	if o.Progress != nil {
+		// Cancelled before this function returns, like the printer below: a
+		// watcher outliving the run would sample the next game's infolog and a
+		// pid that is gone or reused.
+		wctx, wcancel := context.WithCancel(ctx)
+		defer wcancel()
+		go watchProgress(wctx, o.Progress, eng.InfologPath(), eng.Pid(), h.GameTime*gameSpeed, progressSampleEvery)
+	}
 	if o.ProgressEvery > 0 {
 		// Stopped before this function returns, so the watcher cannot outlive
 		// the run and print against the next game's infolog.
@@ -228,6 +251,7 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 		go engine.WatchProgress(pctx, eng.InfologPath(), int(h.GameTime), o.ProgressEvery, os.Stderr)
 	}
 	waitErr := wait()
+	o.Progress.SetPhase(PhaseCapturing)
 
 	// Record the timings before anything below can return: an error path is
 	// exactly where a caller most wants to know how long the run got and what

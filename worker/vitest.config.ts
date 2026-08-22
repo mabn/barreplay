@@ -30,5 +30,12 @@ export default defineConfig({
   ],
   test: {
     include: ["tests/do/**/*.test.ts"],
+    // Well above vitest's 5s default, because what is being timed is not the
+    // test: these run inside workerd, and a cold or contended runtime has been
+    // measured taking the better part of a minute to get through the suite,
+    // failing whichever tests happened to run first with "timed out in 5000ms"
+    // and passing on a re-run. That flake gates `npm run deploy`, which runs
+    // `npm test` first. A genuinely hung test still fails, just later.
+    testTimeout: 30_000,
   },
 });

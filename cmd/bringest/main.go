@@ -50,12 +50,17 @@
 //  2. The CATALOG SCAN: GET /api/replays for games whose current upload is
 //     ONE-SIDED (uploaderAlly set — a playing client's point of view) and
 //     which have no full-view revision yet (no ally-null entry in the row's
-//     uploads list). This half needs no queue state anywhere: the publish
-//     itself retires the candidate — the row's uploads list gains an
-//     ally-null entry and its rid moves to the full view. A game whose resim
-//     fails here is remembered and skipped until the daemon restarts (a
-//     requested job records its failure on its own row instead, and
-//     re-requesting it is the retry).
+//     uploads list). Finding this work needs no queue state: the publish
+//     itself retires the candidate — the row's uploads list gains an ally-null
+//     entry and its rid moves to the full view. But the work is ANNOUNCED
+//     (POST /api/jobs) so it gets a job row like any other, and is then
+//     claimed, healthchecked and reported exactly like a requested one; before
+//     that it was an hour of engine time visible nowhere, whose progress and
+//     timings lived only in this daemon's log on a machine nobody else can
+//     reach. A game whose resim fails here is ALSO remembered in-process and
+//     skipped until the daemon restarts — the announced row records the
+//     failure for a person to read, but re-announcing after a restart is what
+//     retries it, since a scan candidate has no link for anyone to re-paste.
 //
 // The two lists cannot overlap: a request is refused while its game is in the
 // catalog, and a scanned candidate is in it by definition. Upload jobs are
@@ -188,8 +193,8 @@ func run() int {
 				client:   &http.Client{Timeout: 1 * time.Minute},
 			},
 			failed: map[string]bool{},
-			resim: func(ctx context.Context, gameID string, st *jobStats) error {
-				return resimPublish(ctx, client, gameID, ro, *target, *workerDir, indexURL, *stats, st)
+			resim: func(ctx context.Context, gameID string, st *jobStats, pr *resim.Progress) error {
+				return resimPublish(ctx, client, gameID, ro, *target, *workerDir, indexURL, *stats, st, pr)
 			},
 		}
 		what = "requested and one-sided replays to re-simulate"
@@ -375,12 +380,90 @@ func (s *jobStats) fromRunStats(r resim.RunStats) {
 	}
 }
 
-// heartbeatEvery is how often a daemon re-reports "processing" while a job is
-// still running. The worker offers a "processing" job to somebody else once it
-// has been silent for its kind's stale window, which exists to recover from a
-// dead worker — a re-sim runs far longer than that window, so without this it
-// would hand live work away mid-run. A var so the test can beat faster.
-var heartbeatEvery = 60 * time.Second
+// healthcheckEvery is how often a running job reports in. It does two jobs at
+// once, which is why it is one request: it keeps the job's updated_unix fresh
+// (the worker offers a "processing" job to somebody else once it has been
+// silent for its kind's stale window — a re-sim runs many times longer than
+// that window, so without a beat the worker would hand live work away mid-run),
+// and it carries the run's live progress to the queue page.
+//
+// Ten seconds because the second job is what sets the pace: a re-sim is an hour
+// of silence otherwise, and a progress line that is up to a minute stale reads
+// as a stuck job. The cost is one small SQL write per job per tick.
+// A var so the test can beat faster.
+var healthcheckEvery = 10 * time.Second
+
+// jobProgress is what a running job reports about ITSELF between state
+// transitions — the other half of the worker's JobProgress contract
+// (worker/src/worker/jobs.ts), exactly as jobStats is for the terminal record.
+//
+// It is deliberately a separate thing from jobStats: stats are what the work
+// COST, written once when it ends and kept forever; this is what the work is
+// DOING, overwritten every tick and dropped the moment the job stops running.
+type jobProgress struct {
+	// State is the phase in words ("simulating", "starting engine"): the one
+	// field that means something in every phase, including the ones with
+	// nothing to measure.
+	State string `json:"state,omitempty"`
+	// Frame/TotalFrames are the simulation's position in sim frames, Percent
+	// is the two as a percentage, and EtaSec how much wall time the daemon
+	// thinks is left. All zero outside the simulating phase.
+	Frame       int32   `json:"frame,omitempty"`
+	TotalFrames int32   `json:"totalFrames,omitempty"`
+	Percent     float64 `json:"percent,omitempty"`
+	EtaSec      float64 `json:"etaSec,omitempty"`
+	SimFps      float64 `json:"simFps,omitempty"`
+	// RssBytes and CpuPct are the ENGINE process's resident memory and CPU use
+	// (percent of one core, so a threaded engine exceeds 100). They are the
+	// answer to "is this host coping", which nothing else in the pipeline can
+	// report: the daemon runs on somebody's machine, behind NAT, and its own
+	// log is the only other place this exists.
+	RssBytes int64   `json:"rssBytes,omitempty"`
+	CpuPct   float64 `json:"cpuPct,omitempty"`
+	// SwapBytes is how much of the engine has been pushed out to swap.
+	// DELIBERATELY not omitempty, unlike everything above it: zero is the
+	// healthy answer and saying so is the point, so "the engine is not
+	// swapping" and "this daemon is too old to know" must not arrive as the
+	// same absent field.
+	SwapBytes int64 `json:"swapBytes"`
+}
+
+// resimProgress reads a live re-simulation and converts the reading to the wire
+// shape. Split from progressOf so the conversion — which is where the rounding
+// and the field mapping live — can be exercised without a running engine.
+func resimProgress(p *resim.Progress) *jobProgress {
+	if p == nil {
+		return nil
+	}
+	return progressOf(p.Snapshot())
+}
+
+// progressOf is the wire conversion. Rounded on the way out: these are shown to
+// a person, and a percentage with fourteen decimals only makes the JSON bigger.
+func progressOf(s resim.ProgressState) *jobProgress {
+	return &jobProgress{
+		State:       s.Phase,
+		Frame:       s.Frame,
+		TotalFrames: s.TotalFrames,
+		Percent:     round1(s.Percent),
+		EtaSec:      float64(int64(s.ETASec)),
+		SimFps:      round1(s.SimFPS),
+		RssBytes:    s.RSSBytes,
+		SwapBytes:   s.SwapBytes,
+		CpuPct:      round1(s.CPUPercent),
+	}
+}
+
+func round1(v float64) float64 { return float64(int64(v*10+0.5)) / 10 }
+
+// phaseUploading and phasePacking name the minutes AFTER the engine exits.
+// They are the caller's to name — internal/resim has no idea a publish happens
+// (see resim.Progress.SetPhase) — and without them a job spends its last
+// minutes still claiming to be simulating.
+const (
+	phasePacking   = "packing"
+	phaseUploading = "uploading"
+)
 
 // workerAPI is the daemons' shared line to the worker: one JSON helper, the
 // bearer token, and the job transitions both loops need.
@@ -511,6 +594,36 @@ func (d *workerAPI) report(ctx context.Context, jobID, state, errMsg string, st 
 	return d.api(ctx, http.MethodPost, "/api/jobs/"+url.PathEscape(jobID), body, nil)
 }
 
+// announce asks the worker for a job row to report a self-found game onto (the
+// catalog scan's work: a game whose only upload is one-sided). It answers two
+// separate questions, which is why it returns two things:
+//
+//	jobID != "", mine       report onto this row
+//	jobID == "", mine       nobody recorded it; do the work anyway, unreported
+//	           , !mine      another daemon holds this game; leave it alone
+//
+// The distinction is the difference between an hour of engine time going
+// unlogged and two machines spending an hour each on the same game. A FAILED
+// announce is only bookkeeping lost — the daemon and the worker deploy
+// independently, so a worker too old to have the route is routine during a
+// rollout, and the re-simulation still has to happen. A DUPLICATE is a
+// different statement: somebody else's engine is already on it.
+func (d *workerAPI) announce(ctx context.Context, gameID string) (jobID string, mine bool) {
+	var out struct {
+		Job    string `json:"job"`
+		Status string `json:"status"`
+	}
+	if err := d.api(ctx, http.MethodPost, "/api/jobs",
+		map[string]any{"gameId": gameID, "kind": kindResim}, &out); err != nil {
+		fmt.Fprintf(os.Stderr, "bringest: %s: could not announce the job (%v); re-simulating unreported\n", gameID, err)
+		return "", true
+	}
+	if out.Status == "duplicate" {
+		return "", false
+	}
+	return out.Job, true
+}
+
 // claim takes a job, and unlike report it can legitimately FAIL: the worker
 // only allows the transition from pending (or from a processing gone stale),
 // so a second daemon polling the same round is told no rather than running the
@@ -521,25 +634,49 @@ func (d *workerAPI) claim(ctx context.Context, jobID, kind string) error {
 		map[string]any{"state": "processing", "claim": true, "kind": kind}, nil)
 }
 
-// heartbeat re-reports "processing" until the returned stop is called, so a
-// job that runs for longer than the worker's stale window is not offered to
-// somebody else while it is alive. stop WAITS for the goroutine to finish:
-// a heartbeat still in flight when the terminal done/error lands would
-// overwrite it and leave the row processing forever.
-func (d *workerAPI) heartbeat(ctx context.Context, jobID string) (stop func()) {
+// beat posts one healthcheck: the "processing" state that keeps the job from
+// being offered away, plus — when the caller has a live reading to give — what
+// the run is doing right now. Separate from report because the shapes have
+// nothing in common: report carries an outcome and a permanent record, this
+// carries a snapshot that the next beat overwrites.
+func (d *workerAPI) beat(ctx context.Context, jobID string, p *jobProgress) error {
+	body := map[string]any{"state": "processing"}
+	if p != nil {
+		body["progress"] = p
+	}
+	return d.api(ctx, http.MethodPost, "/api/jobs/"+url.PathEscape(jobID), body, nil)
+}
+
+// healthcheck reports in every healthcheckEvery until the returned stop is
+// called, so a job that runs for longer than the worker's stale window is not
+// offered to somebody else while it is alive — and so the queue page can show
+// how far along it is rather than only that it started.
+//
+// progress is polled at each tick rather than passed once: the run updates its
+// reading continuously and this must send whatever is current, not whatever was
+// true when the loop began. Nil (or a nil reading) simply beats.
+//
+// stop WAITS for the goroutine to finish: a beat still in flight when the
+// terminal done/error lands would overwrite it and leave the row processing
+// forever.
+func (d *workerAPI) healthcheck(ctx context.Context, jobID string, progress func() *jobProgress) (stop func()) {
 	hctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		t := time.NewTicker(heartbeatEvery)
+		t := time.NewTicker(healthcheckEvery)
 		defer t.Stop()
 		for {
 			select {
 			case <-hctx.Done():
 				return
 			case <-t.C:
-				if err := d.report(hctx, jobID, "processing", "", nil); err != nil && hctx.Err() == nil {
-					fmt.Fprintf(os.Stderr, "bringest: job %s: heartbeat: %v\n", jobID, err)
+				var p *jobProgress
+				if progress != nil {
+					p = progress()
+				}
+				if err := d.beat(hctx, jobID, p); err != nil && hctx.Err() == nil {
+					fmt.Fprintf(os.Stderr, "bringest: job %s: healthcheck: %v\n", jobID, err)
 				}
 			}
 		}
@@ -696,22 +833,30 @@ type catalogRow struct {
 //   - REQUESTED re-sims, the queue behind the landing page's paste box
 //     (POST /api/resim -> a "resim" job). Someone asked for these by name, and
 //     they are the only way a game NOBODY uploaded gets published at all.
-//   - the CATALOG SCAN, which needs no queue state anywhere: a game is a
-//     candidate while its current upload is one-sided (uploaderAlly set) and
-//     its uploads list holds no full-view revision (an entry with a null ally:
-//     spectator uploads and re-sim captures PUT with no uploaderAlly). The
-//     publish itself retires the candidate, so completion needs no marking.
+//   - the CATALOG SCAN: a game is a candidate while its current upload is
+//     one-sided (uploaderAlly set) and its uploads list holds no full-view
+//     revision (an entry with a null ally: spectator uploads and re-sim
+//     captures PUT with no uploaderAlly). Finding the work needs no queue
+//     state — the publish itself retires the candidate — but the run is
+//     announced onto a job row so it is visible and reports its progress and
+//     stats like the requested ones (runScanned).
 //
 // The two lists cannot overlap: a requested game is refused while it is in the
 // catalog, and a scanned one is in it by definition.
 type resimDaemon struct {
 	workerAPI
-	resim func(ctx context.Context, gameID string, st *jobStats) error
+	// resim does the work. pr is non-nil only for a JOB-backed run — it is
+	// what the healthcheck reads to report progress, and the catalog scan has
+	// no job row to report onto.
+	resim func(ctx context.Context, gameID string, st *jobStats, pr *resim.Progress) error
 	// failed remembers games whose resim errored (engine missing, unknown
 	// demo, desync); they are skipped until the process restarts so one bad
 	// game cannot wedge the loop into retrying forever. Only the catalog scan
-	// needs it — a requested job records its failure on its own row and so
-	// leaves the queue by itself, and re-pasting the link is the retry.
+	// needs it: a requested job leaves the queue by itself once it fails, and
+	// re-pasting the link is the retry, whereas a scanned game stays a
+	// candidate for as long as its only upload is one-sided — the announced
+	// job row records what went wrong for a person to read, but it is not what
+	// stops the next round from trying again.
 	failed map[string]bool
 }
 
@@ -754,9 +899,7 @@ func (r *resimDaemon) runOnce(ctx context.Context) (int, error) {
 		}
 		attempted++
 		fmt.Fprintf(os.Stderr, "bringest: %s: one-sided only, re-simulating for the full view\n", row.ID)
-		// No job row to report onto: this half of the work list is derived
-		// from the catalog, so the stats have nowhere to go but the log.
-		if err := r.resim(ctx, row.ID, nil); err != nil {
+		if err := r.runScanned(ctx, row.ID); err != nil {
 			if ctx.Err() != nil {
 				return attempted, ctx.Err()
 			}
@@ -769,11 +912,57 @@ func (r *resimDaemon) runOnce(ctx context.Context) (int, error) {
 	return attempted, nil
 }
 
+// runScanned re-simulates a game the CATALOG SCAN found and reports on it the
+// same way a requested one is reported: a job row to be seen in the queue, a
+// healthcheck carrying the live phase/progress/engine load while the engine
+// runs, and the timings and size report on the terminal state.
+//
+// The row is ANNOUNCED rather than queued (workerAPI.announce): the work is
+// already being done, and POST /api/resim would refuse the game anyway — it is
+// in the catalog, which is exactly what makes it a scan candidate. Without a
+// row this was an hour of engine time that showed up nowhere and whose stats
+// existed only in this daemon's log, on a machine nobody else can reach.
+//
+// A worker that will not give a row is not a reason to skip the game: the
+// re-simulation runs unreported, which is what this whole path did before.
+func (r *resimDaemon) runScanned(ctx context.Context, gameID string) error {
+	jobID, mine := r.announce(ctx, gameID)
+	if !mine {
+		fmt.Fprintf(os.Stderr, "bringest: %s: another daemon is already re-simulating it; skipping\n", gameID)
+		return nil
+	}
+	if jobID == "" {
+		return r.resim(ctx, gameID, nil, nil)
+	}
+	if err := r.claim(ctx, jobID, kindResim); err != nil {
+		// Somebody else took the row between announcing and claiming it. Their
+		// engine, not ours.
+		fmt.Fprintf(os.Stderr, "bringest: %s: could not claim job %s (%v); skipping\n", gameID, jobID, err)
+		return nil
+	}
+	started := time.Now()
+	pr := &resim.Progress{}
+	stop := r.healthcheck(ctx, jobID, func() *jobProgress { return resimProgress(pr) })
+	st := &jobStats{}
+	err := r.resim(ctx, gameID, st, pr)
+	st.TookSec = time.Since(started).Seconds()
+	stop() // before the terminal report, or a late beat undoes it
+	if err != nil {
+		// With the stats, like the queued path: forty minutes that ended badly
+		// is the record most worth keeping.
+		r.report(ctx, jobID, "error", err.Error(), st)
+		return err
+	}
+	r.report(ctx, jobID, "done", "", st)
+	return nil
+}
+
 // runQueued works through the re-sims somebody explicitly requested. Unlike
 // the catalog scan these are worker-side state, so each one is claimed (the
-// worker refuses a job another daemon already holds), heartbeated while the
-// engine runs, and reported done or error — the failure message is what the
-// requester sees on the queue page.
+// worker refuses a job another daemon already holds), healthchecked while the
+// engine runs — which is both what keeps the job from being offered away and
+// what puts its progress on the queue page — and reported done or error, the
+// failure message being what the requester sees there.
 func (r *resimDaemon) runQueued(ctx context.Context) (int, error) {
 	jobs, err := r.pendingJobs(ctx, kindResim)
 	if err != nil {
@@ -796,9 +985,13 @@ func (r *resimDaemon) runQueued(ctx context.Context) (int, error) {
 		attempted++
 		fmt.Fprintf(os.Stderr, "bringest: %s: re-sim requested, re-simulating\n", j.GameID)
 		started := time.Now()
-		stop := r.heartbeat(ctx, j.ID)
+		// The run keeps this up to date as it goes; the healthcheck reads it
+		// every tick and posts it, which is the only window anyone but this
+		// daemon has into an hour of engine time.
+		pr := &resim.Progress{}
+		stop := r.healthcheck(ctx, j.ID, func() *jobProgress { return resimProgress(pr) })
 		st := &jobStats{}
-		rerr := r.resim(ctx, j.GameID, st)
+		rerr := r.resim(ctx, j.GameID, st, pr)
 		st.TookSec = time.Since(started).Seconds()
 		stop() // before the terminal report, or a late beat undoes it
 		if rerr != nil {
@@ -835,13 +1028,14 @@ func (row catalogRow) needsResim() bool {
 // engine wall time) and publishes the resulting full-view .brp,
 // content-addressed off the .brp bytes (deterministic writer: the same sim
 // re-lands on the same revision).
-func resimPublish(ctx context.Context, client *barapi.Client, gameID string, ro resim.Options, target, workerDir, indexURL string, stats bool, st *jobStats) error {
+func resimPublish(ctx context.Context, client *barapi.Client, gameID string, ro resim.Options, target, workerDir, indexURL string, stats bool, st *jobStats, pr *resim.Progress) error {
 	tmp, err := os.MkdirTemp("", "bringest-resim-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmp)
 	ro.OutDir = tmp
+	ro.Progress = pr
 	// Run fills this in as it goes, so a failure below still carries how far
 	// the engine got and what its log said.
 	var run resim.RunStats
@@ -855,11 +1049,13 @@ func resimPublish(ctx context.Context, client *barapi.Client, gameID string, ro 
 	}
 	// No PackSec here: a re-sim has no separate pack step — resim.Run's engine
 	// writes the .brp itself, and that cost is ResimSec.
+	pr.SetPhase(phasePacking)
 	recordBRP(st, brpPath, stats)
 	rev, err := packer.ContentRev(brpPath) // content hash of any file; here the .brp
 	if err != nil {
 		return err
 	}
+	pr.SetPhase(phaseUploading)
 	uploadStart := time.Now()
 	err = packer.UploadStatic(ctx, brpPath, packer.UploadOptions{
 		Target:     target,
