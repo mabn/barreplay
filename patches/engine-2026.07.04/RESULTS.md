@@ -30,10 +30,20 @@ somebody's machine:
 |---|---|---|---|---|
 | small (duel, 15:31) | 1m03s | 55s | 444 → 508 | +14% |
 | medium (16p, 13:25) | 2m01s | 1m41s | 200 → 239 | +19% |
-| **large (16p, 30:46)** | **7m33s** | **5m12s** | **122 → 177** | **+45%** |
+| **large (16p, 30:46)** | **7m33s** | **5m12s / 5m27s** | **122 → 177 / 169** | **+39–45%** |
 
-Load time is −25% on top of that (12s → 9s), which a short replay feels more
+(The large replay was measured twice on the final stack; both runs gate
+identical and the spread is this box's usual ±10% wall drift. Anything under
+~10% is not resolvable here without interleaved pairs — see `experiments/LOG.md`
+— which is why the per-patch verdicts use the instruction meter and only these
+whole-stack numbers are quoted from wall.)
+
+Load time is −25% on top of that (12s → 9-10s), which a short replay feels more
 than a long one.
+
+**The published series is verified to be what was measured**: applying these 15
+patches with `git am` to a clean `2026.07.04` checkout reproduces, byte for
+byte, the `rts/` tree of the build that produced every number above.
 
 ## The stack, in apply order
 
