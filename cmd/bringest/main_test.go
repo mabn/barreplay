@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -35,6 +36,7 @@ type mockWorker struct {
 	claimed      map[string]bool // job id -> taken (a second claim is a 409)
 	statsSeen    []jobStats      // the processing record of every report that carried one
 	progressSeen []jobProgress   // the live reading of every healthcheck that carried one
+	errorKinds   []string        // the classification of every failure reported
 	announced    []string        // gameIds the daemon asked for a job row for
 	noAnnounce   bool            // a worker too old to have the route
 	announceDup  bool            // another daemon already holds the game
@@ -76,6 +78,7 @@ func (m *mockWorker) handler(token string) http.Handler {
 		}
 		var body struct {
 			State, Error string
+			ErrorKind    string
 			Claim        bool
 			Stats        *jobStats
 			Progress     *jobProgress
@@ -108,6 +111,9 @@ func (m *mockWorker) handler(token string) http.Handler {
 		}
 		if body.Progress != nil {
 			m.progressSeen = append(m.progressSeen, *body.Progress)
+		}
+		if body.ErrorKind != "" {
+			m.errorKinds = append(m.errorKinds, body.ErrorKind)
 		}
 		m.mu.Unlock()
 		w.Write([]byte(`{"ok":true}`))
@@ -864,4 +870,68 @@ func scanMux(m *mockWorker, catalog []map[string]any) http.Handler {
 		json.NewEncoder(w).Encode(catalog)
 	})
 	return mux
+}
+
+// Running out of memory is a failure of the HOST, not of the queue: the job it
+// hit is abandoned and reported, and the daemon carries straight on to the next
+// one. A host too small for the games it is handed would otherwise stop dead on
+// the first big one.
+func TestResimDaemonCarriesOnAfterOOM(t *testing.T) {
+	m := newMock(t)
+	m.resim = []ingestJob{
+		{ID: "rj-1", GameID: "aaaa0000000000000000000000000001", Kind: kindResim, State: "pending"},
+		{ID: "rj-2", GameID: "aaaa0000000000000000000000000002", Kind: kindResim, State: "pending"},
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/api/jobs", m.handler(""))
+	mux.Handle("/api/jobs/", m.handler(""))
+	mux.HandleFunc("/api/replays", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(oneSidedCatalog("onesided"))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	var ran []string
+	r := &resimDaemon{
+		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
+		failed:    map[string]bool{},
+		resim: func(_ context.Context, gameID string, _ *jobStats, _ *resim.Progress) error {
+			ran = append(ran, gameID)
+			// The first queued game is too big for this host.
+			if strings.HasSuffix(gameID, "1") {
+				return fmt.Errorf("resim: stopped the engine with only 400 MB left: %w", resim.ErrOutOfMemory)
+			}
+			return nil
+		},
+	}
+	if _, err := r.runOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Everything after the OOM still ran: the second queued job AND the catalog
+	// scan behind it.
+	if got := strings.Join(ran, ","); got != "aaaa0000000000000000000000000001,aaaa0000000000000000000000000002,onesided" {
+		t.Errorf("ran = %q, want the OOM'd game abandoned and the rest attempted", got)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.errorKinds) != 1 || m.errorKinds[0] != errKindOOM {
+		t.Errorf("error kinds reported = %v, want exactly one %q", m.errorKinds, errKindOOM)
+	}
+}
+
+// Failures the daemon has no name for are reported without a kind rather than
+// guessed at: the queue page renders each kind specifically, so a wrong one is
+// worse than none.
+func TestErrorKind(t *testing.T) {
+	if got := errorKind(fmt.Errorf("wrapped: %w", resim.ErrOutOfMemory)); got != errKindOOM {
+		t.Errorf("errorKind(oom) = %q, want %q", got, errKindOOM)
+	}
+	for _, err := range []error{errors.New("no engine"), fmt.Errorf("desynced"), nil} {
+		if err == nil {
+			continue
+		}
+		if got := errorKind(err); got != "" {
+			t.Errorf("errorKind(%v) = %q, want none", err, got)
+		}
+	}
 }

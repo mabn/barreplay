@@ -9,7 +9,15 @@ import test from "node:test";
 
 import app from "../src/worker/app";
 import { MAX_JOB_PROGRESS_BYTES, MAX_JOB_STATS_BYTES } from "../src/worker/jobs";
-import type { IngestJob, JobKind, JobProgress, JobSample, JobStats, QueueJob } from "../src/worker/jobs";
+import type {
+  IngestJob,
+  JobErrorKind,
+  JobKind,
+  JobProgress,
+  JobSample,
+  JobStats,
+  QueueJob,
+} from "../src/worker/jobs";
 import type { ReplayEntry } from "../src/worker/replayentry";
 
 const FIXTURE = new URL("../../internal/capture/testdata/harness.brepstream", import.meta.url);
@@ -52,6 +60,7 @@ class FakeIndex {
       kind,
       state: "pending",
       error: null,
+      errorKind: null,
       stats: null,
       progress: null,
       disabled: false,
@@ -132,11 +141,13 @@ class FakeIndex {
     error: string | null,
     stats: JobStats | null = null,
     progress: JobProgress | null = null,
+    errorKind: JobErrorKind | null = null,
   ): boolean {
     const j = this.jobs.get(id);
     if (!j) return false;
     j.state = state;
     j.error = error;
+    j.errorKind = errorKind; // follows the message, never COALESCEd
     if (stats !== null) j.stats = stats; // COALESCE in the real DO
     // Kept while the job runs, cleared when it stops — the real DO does this in
     // the UPDATE's CASE expression.
@@ -339,6 +350,7 @@ test("GET /api/queue lists jobs for the viewer without the archive key", async (
         kind: "upload",
         state: "pending",
         error: null,
+        errorKind: null,
         stats: null,
         progress: null,
         disabled: false,
@@ -1088,4 +1100,40 @@ test("queue rows carry the game's size and duration", async (t) => {
   const byId = Object.fromEntries(page.jobs.map((j: { id: string }) => [j.id, j]));
   assert.deepEqual(byId.known.game, { durationSec: 2417, gameSize: "8v8" });
   assert.equal(byId.stranger.game, null);
+});
+
+// A queue full of red rows should say which failures are the MACHINE's fault
+// rather than the game's, without anyone parsing a sentence. The daemon
+// classifies what it can and the worker carries it, from a closed set — the
+// page renders each kind specifically, so an unknown one has nothing to render.
+test("a failure carries its kind, from a closed set", async (t) => {
+  const { env } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  const { job } = await asJson(
+    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+  );
+  const post = (body: unknown) =>
+    app.request(`/api/jobs/${job}`, { method: "POST", body: JSON.stringify(body) }, env);
+  const read = async () => await asJson(await app.request(`/api/jobs/${job}`, {}, env));
+
+  assert.equal((await post({ state: "error", error: "host ran out of memory", errorKind: "oom" })).status, 200);
+  let j = await read();
+  assert.equal(j.errorKind, "oom");
+  assert.equal((await asJson(await app.request("/api/queue", {}, env))).jobs[0].errorKind, "oom");
+
+  // A kind this worker does not know is DROPPED, never a 400: a daemon newer
+  // than the worker must still be able to report that its job failed.
+  assert.equal((await post({ state: "error", error: "something new", errorKind: "meteor" })).status, 200);
+  j = await read();
+  assert.equal(j.error, "something new", "the failure still landed");
+  assert.equal(j.errorKind, null);
+
+  // It follows the message rather than sticking: a job that goes on to succeed
+  // is not still classified by how it failed last time.
+  assert.equal((await post({ state: "error", error: "oom again", errorKind: "oom" })).status, 200);
+  assert.equal((await read()).errorKind, "oom");
+  assert.equal((await post({ state: "done" })).status, 200);
+  j = await read();
+  assert.equal(j.error, null);
+  assert.equal(j.errorKind, null, "a cleared message clears its classification");
 });

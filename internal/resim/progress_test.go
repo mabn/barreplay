@@ -2,6 +2,7 @@ package resim
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -160,4 +161,43 @@ func TestOptionsMinFree(t *testing.T) {
 	if got := (Options{MinFreeBytes: -1}).minFree(); got > 0 {
 		t.Errorf("minFree = %d, want the guard left disabled", got)
 	}
+}
+
+// A run that fails must not leave the widget's raw stream behind. It lives in
+// the DATA dir (the Lua sandbox forces that), it is hundreds of megabytes, and
+// a daemon handed games too big for its host would otherwise accumulate one per
+// abandoned game until the disk is the next thing to go.
+//
+// Run cannot be driven without an engine, so this exercises the cleanup the way
+// Run registers it: a deferred remove that fires only on the error path.
+func TestAbandonedStreamIsRemoved(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool // the stream should still be there afterwards
+	}{
+		{"a failed run drops it", errors.New("out of memory"), false},
+		// The success path MOVES it out to the capture directory, so the
+		// cleanup must keep its hands off.
+		{"a good run keeps it for the mover", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			stream := filepath.Join(dir, "game.brsnap")
+			if err := os.WriteFile(stream, []byte("BRSNAP"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			func() (retErr error) {
+				defer removeAbandonedStream(stream, &retErr)
+				return tc.err
+			}()
+			_, err := os.Stat(stream)
+			if got := err == nil; got != tc.want {
+				t.Errorf("stream present = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	// A stream that never appeared (the widget never ran) is not a warning.
+	var err error = errors.New("boom")
+	removeAbandonedStream(filepath.Join(t.TempDir(), "absent.brsnap"), &err)
 }

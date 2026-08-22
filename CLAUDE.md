@@ -776,6 +776,18 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           (/refresh-settings and /view) and for the same reason: the browser has
                           no bearer token and the Queue section is only reachable with
                           ?admin=true, so guarding it would mean the button could not exist.
+                          JOB ERROR KINDS: jobs.error_kind is a nullable classification OF the
+                          error message (JOB_ERROR_KINDS in jobs.ts — currently just "oom"),
+                          reported by the daemon alongside it. It exists because a queue full of
+                          red rows should say which failures are the MACHINE's fault rather than
+                          the game's, without anyone parsing a sentence: an "oom" job would have
+                          worked on a bigger box, and every other failure would not. A CLOSED
+                          set, because the queue page renders each kind specifically and an
+                          unknown one has nothing to render; parseJobErrorKind DROPS anything
+                          else rather than 400ing, so a daemon newer than the worker can still
+                          report that its job failed. It follows `error` exactly and is NOT
+                          COALESCEd like the stats — it is a property of that message, so a
+                          transition clearing the message clears the classification with it.
                           JOB KINDS: jobs.kind is "upload" | "resim", a KIND rather than a fifth
                           state because the four states describe both equally well — what
                           differs is the work, not the progress. The contract (JobKind,
@@ -1008,7 +1020,12 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           to measure, and a bar pinned at zero through them reads as a job that
                           is stuck rather than one that is working. The Updated cell doubles as
                           the liveness signal — the daemon beats every 10s, so an age of minutes
-                          on a "processing" row means nobody is home.
+                          on a "processing" row means nobody is home. A failure the daemon could
+                          NAME carries a chip beside the state (ERROR_KIND_LABELS in app.js, the
+                          front-end half of JOB_ERROR_KINDS): "out of memory" is the one worth
+                          spotting down a column of red rows, since it is a fact about the host
+                          rather than a verdict on the replay. A kind the page has no label for
+                          renders as a plain error, exactly as an unclassified failure does.
                           The row's last cell is the HOLD-BACK switch (disableCell/
                           setJobDisabled -> POST /api/jobs/<id>/disabled, see the worker entry).
                           It is offered only on a pending or running job — a finished one is
@@ -1855,6 +1872,16 @@ disabled, or an allocation spike outruns its 2s tick, the systemd behaviour abov
 is still in play; `OOMPolicy=continue` on the unit the daemon runs in (e.g.
 `systemd-run --user --scope -p OOMPolicy=continue`) contains the damage to the
 engine.
+
+Running out of memory ABANDONS one re-simulation, never the loop: `resim.Run`
+wraps `resim.ErrOutOfMemory`, the daemon reports the job failed with
+`errorKind: "oom"` (see JOB ERROR KINDS under worker/) and carries straight on to
+the next one — a host too small for the games it is handed would otherwise stop
+dead on the first big one. Abandoning is also CLEAN: `removeAbandonedStream`
+deletes the widget's raw stream on every error path, because it lives in the data
+dir (the Lua sandbox forces that), it is hundreds of megabytes, and a daemon that
+keeps failing would accumulate one per game until the disk was the next thing to
+go. Only the success path moves it out.
 
 ## GPU / headless caveat (important)
 

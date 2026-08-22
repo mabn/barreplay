@@ -19,6 +19,30 @@ export const JOB_KINDS: readonly JobKind[] = ["upload", "resim"];
 
 export const JOB_STATES = ["pending", "processing", "done", "error"] as const;
 
+/** Failures worth telling apart on the queue page.
+ *
+ * "oom": the host ran out of memory and the daemon stopped the engine rather
+ * than letting the kernel OOM-kill it. It is the one failure that is about the
+ * MACHINE rather than the game or the pipeline — the same replay on a bigger
+ * box would have worked — so a queue full of red rows should say which ones are
+ * that, without anyone parsing a sentence.
+ *
+ * A CLOSED set, validated on the way in: the queue page renders each kind
+ * specifically, so an unknown one would have nothing to render. A daemon that
+ * learns to recognise a new failure adds it here first. */
+export const JOB_ERROR_KINDS = ["oom"] as const;
+export type JobErrorKind = (typeof JOB_ERROR_KINDS)[number];
+
+/** parseJobErrorKind takes a kind off the wire, or null for anything that is
+ * not one of the known ones. Dropped rather than rejected, like the stats: a
+ * daemon newer than this worker must still be able to report that its job
+ * failed. */
+export function parseJobErrorKind(v: unknown): JobErrorKind | null {
+  return typeof v === "string" && (JOB_ERROR_KINDS as readonly string[]).includes(v)
+    ? (v as JobErrorKind)
+    : null;
+}
+
 /** One job's trip through the ingest pipeline: a drag&drop upload, or a
  * re-simulation requested by pasting a replay link. */
 export interface IngestJob {
@@ -32,6 +56,10 @@ export interface IngestJob {
   state: (typeof JOB_STATES)[number];
   /** Failure detail when state is "error". */
   error: string | null;
+  /** What KIND of failure, where the daemon could tell — see JOB_ERROR_KINDS.
+   * Null for a failure it has no name for (most of them), and for every job
+   * that did not fail. */
+  errorKind: JobErrorKind | null;
   /** Held back: no daemon will be offered this job, and no game it names will
    * be auto-queued while the row exists. Orthogonal to `state` rather than a
    * fifth value of it — the four states describe how far the WORK got, and
