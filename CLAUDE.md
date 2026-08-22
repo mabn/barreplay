@@ -242,11 +242,27 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           half has no job row, so its stats go only to the log.
                           -progress (DEFAULT ON) prints cmd/barreplay's frame/ETA line during a
                           re-sim; -log (default ./bringest.log) APPENDS everything printed to a
-                          file as well as stderr. The tee swaps os.Stderr for a pipe rather than
+                          file as well as stderr (log.go). The tee swaps os.Stderr for a pipe
+                          rather than
                           threading a writer around, so it also captures what internal/resim and
                           internal/packer print; main is os.Exit(run()) so the deferred flush
                           runs on every exit path, and loadEnvFile RETURNS its lines (it must run
                           before the flags that name the log file) so they land in it too.
+                          Every line in the FILE is prefixed with an RFC3339 local timestamp
+                          (stampWriter) — and only the file: the terminal is a live view, where
+                          the clock is redundant and 25 columns in front of every progress line
+                          are not, while the file is what gets read months later, when "how long
+                          did that take" has no other source. It was not always so: the
+                          simWallShare curve behind the ETA (see internal/engine) had to be
+                          measured off a log with no times in it at all, by leaning on
+                          -progress's fixed 2s tick to reconstruct one — which works only for
+                          runs of an unbroken progress line and tells you nothing about the
+                          minutes around them. Stamping cannot be line-at-a-time: what comes off
+                          the pipe is whatever chunk the reader got, splitting and joining lines
+                          arbitrarily, so stampWriter tracks whether it is mid-line and stamps at
+                          each line's START — which is also the more useful reading (when the run
+                          reported, not when the next one did). Nothing is held back waiting for
+                          a newline, so a process dying mid-print still leaves its half line.
 internal/envfile/         tiny stdlib KEY=VALUE loader for ./.env. Accepts the bash-sourceable
                           subset (`export FOO=bar`, # comments, optional surrounding quotes) so
                           ONE file works both auto-loaded and sourced. Already-set vars WIN (the
