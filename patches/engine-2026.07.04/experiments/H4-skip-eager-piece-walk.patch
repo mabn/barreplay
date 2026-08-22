@@ -1,0 +1,66 @@
+From 0fcd91a8d9c3f83b2b41597645e56061ba659738 Mon Sep 17 00:00:00 2001
+From: Claude <claude@mabn.pl>
+Date: Tue, 7 Jul 2026 07:54:48 +0200
+Subject: [PATCH 07/15] headless demo replay: skip eager piece-transform walk
+ in TickAllAnims
+
+The BFS pass at the end of TickAllAnims eagerly recomputes every dirty
+piece's piece-space/model-space transforms and sets the wasUpdated and
+(via SetFloat3's dirty-transition check) boundaries-recalc flags - all
+rendering plumbing. Synced consumers never depend on the eager walk:
+weapon aiming, script callouts and Lua GetUnitPiece* read through
+GetModelSpaceTransform()/GetModelSpaceMatrix(), whose lazy
+UpdateParentMatricesRec computes identical values on demand (the engine
+already relies on that equivalence - those readers run between walks all
+the time). Under HEADLESS && hostDemo, skip the walk entirely; dirty
+pieces get resolved lazily by whoever reads them, or never, if nothing
+does.
+
+Flag-level consequences (pieces staying dirty longer, wasUpdated not
+set, boundary recalcs firing on a different cadence) all land in
+draw-only state: every GetDrawRadius / boundingVolume / wasUpdated
+reader lives under Rendering/. Verified byte-identical output via the
+snapshot-diff gate.
+
+TickAllAnims was still 9.5% inclusive (main thread) post-H2, with the
+walk visiting every piece of every animating model every sim frame.
+---
+ rts/Sim/Units/Scripts/UnitScript.cpp | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/rts/Sim/Units/Scripts/UnitScript.cpp b/rts/Sim/Units/Scripts/UnitScript.cpp
+index ec52401..95086a4 100644
+--- a/rts/Sim/Units/Scripts/UnitScript.cpp
++++ b/rts/Sim/Units/Scripts/UnitScript.cpp
+@@ -12,6 +12,7 @@
+ #ifndef _CONSOLE
+ 
+ #include "Game/GameHelper.h"
++#include "Game/GameSetup.h"
+ #include "Game/GlobalUnsynced.h"
+ #include "Map/Ground.h"
+ #include "Sim/Misc/GlobalSynced.h"
+@@ -239,6 +240,20 @@ void CUnitScript::TickAllAnims(int deltaTime)
+ 	// [barreplay] order-preserving erase (was swap-erase VectorEraseIfAll), so a
+ 	// sorted <anims> stays sorted and the per-tick sort above can stay skipped
+ 	std::erase_if(anims, [](const auto& ai) { return ai.done; });
++
++#ifdef HEADLESS
++	// [barreplay] the walk below eagerly recomputes every dirty piece's
++	// transforms and sets the wasUpdated / boundaries-recalc flags - all of it
++	// for the benefit of rendering. Synced readers (weapon aim, script
++	// callouts, Lua GetUnitPiece*) never rely on it: they go through the lazy
++	// GetModelSpaceTransform()/GetModelSpaceMatrix() path, whose
++	// UpdateParentMatricesRec computes the exact same values on demand - the
++	// engine already depends on that equivalence, since those readers run
++	// between walks. In a headless demo replay nothing draws, so skip the
++	// eager walk; pieces stay dirty until a synced reader actually needs them.
++	if (gameSetup != nullptr && gameSetup->hostDemo)
++		return;
++#endif
+ #if 1
+ 	// BFS pass
+ 	// [barreplay] reuses a per-thread scratch buffer instead of constructing a
+-- 
+2.47.3
+

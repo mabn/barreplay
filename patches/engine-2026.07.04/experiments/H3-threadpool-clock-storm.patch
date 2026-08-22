@@ -1,0 +1,88 @@
+From b8ff16f9e5fa82720dade20fd2ebbc06e5083736 Mon Sep 17 00:00:00 2001
+From: Claude <claude@mabn.pl>
+Date: Sat, 22 Aug 2026 10:01:17 +0200
+Subject: [PATCH 06/15] thread pool: no clock reads on empty polls, throttled
+ spin deadline check
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Re-authored for 2026.07.04 (round-1's H3 patch no longer applies: DoTask grew
+the queue_background/tryDequeue split, and the two execution branches now order
+the reschedule flag and the async assert differently).
+
+DoTask wrapped its whole body — including the empty-queue no-op path — in
+SCOPED_MT_TIMER, i.e. two clock_gettime calls per call, and the worker spin plus
+WaitForFinished's help-spin call it millions of times a second while the queues
+are dry. Time only real task execution, and check WaitForFinished's 500ms
+anti-hang deadline every 64th spin instead of every one.
+
+Scheduling/profiling only: no sim-visible effect.
+---
+ rts/System/Threading/ThreadPool.cpp | 28 +++++++++++++++++++++++-----
+ 1 file changed, 23 insertions(+), 5 deletions(-)
+
+diff --git a/rts/System/Threading/ThreadPool.cpp b/rts/System/Threading/ThreadPool.cpp
+index a9b5dcd..5d9b1af 100644
+--- a/rts/System/Threading/ThreadPool.cpp
++++ b/rts/System/Threading/ThreadPool.cpp
+@@ -140,10 +140,14 @@ bool HasThreads() { return !workerThreads[false].empty(); }
+ 
+ static bool DoTask(int tid, bool async)
+ {
+-	#ifndef UNIT_TEST
+-	SCOPED_MT_TIMER("ThreadPool::RunTask");
+-	#endif
+-
++	// [barreplay H3] the RunTask timer used to wrap the whole call, so every
++	// EMPTY poll paid two clock reads for nothing — and the worker spin loop
++	// plus WaitForFinished's help-spin call DoTask millions of times per second
++	// while the queues are dry (5%+ of mid-game CPU sat in __vdso_clock_gettime).
++	// Time actual task execution only (below): a profiler-accounting change,
++	// with no scheduling or sim-visible effect. It also makes the
++	// ThreadPool::RunTask row in the engine's own profile MEAN something —
++	// previously it was mostly the cost of measuring idleness.
+ 	ITaskGroup* tg = nullptr;
+ 
+ 	// any external thread calling WaitForFinished will have
+@@ -182,6 +186,10 @@ static bool DoTask(int tid, bool async)
+ 
+ 			assert(!async || tg->IsAsyncTask());
+ 
++			#ifndef UNIT_TEST
++			SCOPED_MT_TIMER("ThreadPool::RunTask");
++			#endif
++
+ 			#ifdef USE_TASK_STATS_TRACKING
+ 			const uint64_t wdt = tg->GetDeltaTime(spring_now());
+ 			const uint64_t edt = tg->ExecuteLoop(tid, false);
+@@ -210,6 +218,10 @@ static bool DoTask(int tid, bool async)
+ 
+ 			bool reschedule = !tg->IsHighPriority() && !tg->SelfDelete() && tg->ShouldReschedule();
+ 
++			#ifndef UNIT_TEST
++			SCOPED_MT_TIMER("ThreadPool::RunTask");
++			#endif
++
+ 			#ifdef USE_TASK_STATS_TRACKING
+ 			const uint64_t wdt = tg->GetDeltaTime(spring_now());
+ 			const uint64_t edt = tg->ExecuteLoop(tid, false);
+@@ -307,8 +319,14 @@ void WaitForFinished(std::shared_ptr<ITaskGroup>&& taskGroup)
+ 	do {
+ 		const auto spinlockEnd = spring_now() + spring_time::fromMilliSecs(500);
+ 
++		// [barreplay H3] the 500ms deadline is only an anti-hang fallback, but
++		// reading the clock on every empty spin iteration made this loop a large
++		// part of the same clock storm. Check it every 64th iteration: the
++		// fallback fires microseconds later at worst, and nothing else changes.
++		unsigned spinIter = 0;
++
+ 		while (!DoTask(tid, false) && !taskGroup->IsFinished() && !exitFlags[tid]) {
+-			if (spring_now() < spinlockEnd)
++			if (((++spinIter & 63u) != 0) || spring_now() < spinlockEnd)
+ 				continue;
+ 
+ 			// avoid a hang if the task is still not finished
+-- 
+2.47.3
+

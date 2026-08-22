@@ -11,12 +11,18 @@ case "$NAME" in
   medium) ID=4936896a8b258d038cbd28f55eb15ed2 ;;
   large)  ID=d03a896a204dd8f8a4b4c488cfaec73e ;;
 esac
+# the engine finds base/springcontent.sdz + cont/fonts NEXT TO ITS OWN BINARY,
+# so a build is tested by swapping the file INSIDE the engine dir, never by
+# pointing -engine at a loose binary (that run dies with "failed to open
+# archive 'Spring content v1'" and writes an empty capture).
+ENGDIR=/home/mabn/dev/barreplay/.bardata/engine/2026.07.04
 ENGBIN=${ENGBIN:-$P/spring-headless.cur}
+cp "$ENGBIN" "$ENGDIR/spring-headless"
 f=$P/bench_$LABEL.txt; rm -f "$f"
 cd "$BR"
 for i in $(seq 1 $TRIALS); do
   BARREPLAY_BENCH_START=${BENCH_START:-6000} BARREPLAY_BENCH_N=${BENCH_N:-3000} BARREPLAY_BENCH_OUT="$f" \
-    ./barreplay -data "$BR/.bardata" -engine "$ENGBIN" -out "$P/out" -worker-threads 1 "$ID" >/dev/null 2>&1
+    ./barreplay -data "$BR/.bardata" -engine "$ENGDIR/spring-headless" -out "$P/out" -worker-threads 1 "$ID" >/dev/null 2>&1
 done
 python3 -c "
 import re,sys

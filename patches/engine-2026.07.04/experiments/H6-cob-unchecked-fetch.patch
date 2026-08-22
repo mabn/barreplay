@@ -1,0 +1,42 @@
+From b8a0cba43fca9f096ec6b846c583fb9718ed4ca8 Mon Sep 17 00:00:00 2001
+From: Claude <claude@mabn.pl>
+Date: Tue, 7 Jul 2026 08:34:30 +0200
+Subject: [PATCH 09/15] headless: unchecked bytecode fetch in the COB
+ interpreter
+
+GET_LONG_PC() goes through vector::at() (mantis #5981) so an
+out-of-bounds pc on a malformed script throws instead of UB - a
+user-facing-client concern. Every opcode and operand word of every COB
+script fetches through this macro (CCobThread::Tick, 3.7% self in a
+mid-game profile), paying a compare+branch and the exception path's
+optimization barrier per word. A headless demo re-sim only runs scripts
+that already executed during the live game being replayed, so use the
+unchecked [] fetch under HEADLESS. Integer fetches only; identical
+values for any valid script - output verified byte-identical via the
+snapshot-diff gate.
+---
+ rts/Sim/Units/Scripts/CobThread.cpp | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Sim/Units/Scripts/CobThread.cpp b/rts/Sim/Units/Scripts/CobThread.cpp
+index 696471b..13f23c5 100644
+--- a/rts/Sim/Units/Scripts/CobThread.cpp
++++ b/rts/Sim/Units/Scripts/CobThread.cpp
+@@ -227,7 +227,13 @@ void CCobThread::InitStack(unsigned int n, CCobThread* t)
+ 	}
+ }
+ 
+-#if 0
++#ifdef HEADLESS
++// [barreplay] the .at() below (mantis #5981) turns an out-of-bounds program
++// counter on a MALFORMED script into a catchable exception instead of UB - a
++// user-facing-client concern. A headless demo re-sim only runs scripts that
++// already executed during the live game, so skip the per-fetch bounds check
++// in the interpreter's hottest loop (every opcode + operand word goes through
++// this macro). Integer fetches only - identical values for any valid script.
+ #define GET_LONG_PC() (cobFile->code[pc++])
+ #else
+ // mantis #5981
+-- 
+2.47.3
+
