@@ -34,8 +34,11 @@ import "time"
 // difference. Leave-one-out over the 29 runs: a median error of 27%, 96% of all
 // readings within 2x, and no systematic bias at any point in a run.
 //
-// Worth regenerating (from a daemon's progress log, whose lines are one fixed
-// tick apart) if the engine's per-frame cost profile changes materially.
+// Worth regenerating from a daemon's progress log if the engine's per-frame
+// cost profile changes materially. The 29 runs behind it predate that log
+// carrying timestamps, so their wall times were reconstructed from -progress's
+// fixed 2s tick; the lines are stamped now (cmd/bringest/log.go), which is a
+// good deal less work and covers the phases either side of the simulation too.
 var simWallShare = [21]float64{
 	0.0000, // x = 0.00
 	0.0139, // x = 0.05
