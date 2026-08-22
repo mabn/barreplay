@@ -94,6 +94,14 @@ body.admin-mode #homenav .navitem.admin { display: flex; }
   color: inherit; text-decoration: none;
 }
 #hometable td.map { white-space: normal; }
+/* Map cell: terrain thumbnail beside the name. The cell's link becomes a flex
+   row, and the thumb is capped at 18px — under the text line's own height, so
+   it cannot make the rows taller. */
+#hometable td.map a, #hometable td.map > span { display: flex; align-items: center; gap: 7px; }
+#hometable td.map .mapthumb {
+  width: 18px; height: 18px; object-fit: cover; border-radius: 3px;
+  flex: none; background: #232e39;
+}
 /* Settings badges: small muted pills, wrapping within the row's link. */
 #hometable td.settings { white-space: normal; }
 #hometable td.settings a, #hometable td.settings > span { display: flex; flex-wrap: wrap; gap: 4px; }

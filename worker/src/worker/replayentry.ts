@@ -102,6 +102,12 @@ export interface ReplayEntry {
    * list fills it; the Go server's catalog has no games mirror and omits it,
    * and the front-end reads a missing value as null. */
   lobbyName?: string | null;
+  /** The map's ARCHIVE file name ("all_that_glitters_v2.2.3") — what BAR's
+   * maps API keys on, and what the list's terrain thumbnail needs. Joined at
+   * read time from the games mirror exactly like lobbyName (same ownership,
+   * same optionality); rows without a mirror row read null and the front-end
+   * falls back to guessing the file from the display name. */
+  mapFile?: string | null;
 }
 
 /** One ally team's roster slice in a catalog row. */

@@ -4780,7 +4780,34 @@ function renderHome(errMsg) {
     };
     cell(e.startUnix ? fmtDate(e.startUnix) : null);
     cell(e.durationSec != null ? fmtDuration(e.durationSec) : null);
-    cell(e.map, 'map');
+    // Map: a small terrain thumbnail from BAR's maps API next to the name.
+    // The API keys on the map's ARCHIVE file name; rows the games mirror
+    // knows carry it (e.mapFile), the rest fall back to the same guess the
+    // viewer's terrain loader tries first (right for ~85% of maps) — and a
+    // wrong guess just 404s, which onerror turns into no thumbnail rather
+    // than a broken-image glyph. lazy, so a page of 50 rows doesn't fetch
+    // 50 images the moment it renders.
+    {
+      const td = document.createElement('td');
+      td.className = 'map';
+      if (e.map == null) td.classList.add('dim');
+      const a = linkish();
+      const file = e.mapFile ?? (e.map ? mapFileGuess(e.map) : null);
+      if (file) {
+        const img = document.createElement('img');
+        img.className = 'mapthumb';
+        img.loading = 'lazy';
+        img.alt = '';
+        img.onerror = () => { img.style.display = 'none'; };
+        img.src = `https://api.bar-rts.com/maps/${encodeURIComponent(file)}/texture-thumb.jpg`;
+        a.appendChild(img);
+      }
+      const s = document.createElement('span');
+      s.textContent = e.map ?? '—';
+      a.appendChild(s);
+      td.appendChild(a);
+      tr.appendChild(td);
+    }
     cell(e.gameSize);
     // Players: each side's top names by OS — three per side for a two-team
     // game, one when there are more sides. The side whose client recorded

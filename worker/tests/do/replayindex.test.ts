@@ -934,9 +934,13 @@ test("list joins the lobby name from the games mirror", async () => {
     sql.exec(`UPDATE games SET lobby_name = 'Chillmus | 8v8' WHERE id = 'both'`);
     const byId = new Map(index.list().map((e) => [e.id, e]));
     expect(byId.get("both")?.lobbyName).toBe("Chillmus | 8v8");
+    // map_file rides the same join: the archive name behind the list's
+    // terrain thumbnails, known only to the mirror.
+    expect(byId.get("both")?.mapFile).toBe("great_divide_v1");
     // A replay with no mirror row (or an unnamed one) reads null, not absent —
     // the key's presence is how the front-end tells this backend from the Go
     // server, which omits it wholesale.
     expect(byId.get("alone")?.lobbyName).toBeNull();
+    expect(byId.get("alone")?.mapFile).toBeNull();
   });
 });
