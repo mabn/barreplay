@@ -205,8 +205,9 @@ async function fetchJSON(fetchImpl: typeof fetch, url: string): Promise<unknown>
   return await r.json();
 }
 
-/** pool runs `fn` over `items` with at most `limit` in flight. */
-async function pool<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+/** pool runs `fn` over `items` with at most `limit` in flight. Exported for
+ * the lobby sync (teiserver.ts), which bounds its show-page fetches with it. */
+export async function pool<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
   let next = 0;
   const worker = async (): Promise<void> => {
     for (;;) {

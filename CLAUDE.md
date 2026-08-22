@@ -930,6 +930,42 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           End-to-end was checked once by hand:
                           curl /cdn-cgi/handler/scheduled against `vite dev` mirrored 24 real
                           games, and the second call added none.
+                          LOBBY NAMES (teiserver poll, src/worker/teiserver.ts + the same
+                          cron): the tick's second step, because a mirrored game carries no
+                          LOBBY NAME — that exists only while the lobby is alive, on
+                          teiserver's web UI (server4.beyondallreason.info/battle/lobbies, a
+                          Phoenix dead render scraped with small regexes; parsers and the
+                          cookie-jar CSRF login adapted from mabn/claudebar). The first tick a
+                          lobby is seen in progress opens an OBSERVATION in the DO's `lobbies`
+                          table — name, map, started_unix back-dated by the page's own running
+                          clock, and the NON-SPECTATOR roster from one show-page fetch
+                          (spectators churn; the roster is captured at the start, when it is
+                          most honest; a failed show fetch records the observation with a null
+                          roster rather than dropping it — that moment never comes back).
+                          When the finished game later reaches the rts-api mirror,
+                          ReplayIndex.lobbiesMatch pairs them: no shared id exists, so the
+                          match is same map (normalized) + started within [-60s,+300s] of the
+                          game's start + >=50% roster overlap (lowercase names; a null-roster
+                          observation passes on map+time but scores below any real roster).
+                          Best candidate WINS ties (smaller time delta) — a name on the row
+                          beats abstaining — one-to-one both ways, and the name lands in
+                          games.lobby_name (+lobby_id), which is deliberately OUTSIDE
+                          gamesInsert's upsert list so a re-sync cannot erase it. Matched
+                          observations prune after 48h; unmatched ones are kept forever as
+                          the record of why a game has no name. The web SESSION (the Guardian
+                          cookie jar) persists in the one-row teiserver_session table, so the
+                          steady state is ONE authed GET per tick, no login (an expired
+                          session shows as a redirect to /login: drop the cookie, log in once,
+                          retry). Credentials are the TEISERVER_EMAIL/TEISERVER_PASSWORD
+                          wrangler secrets; without them the step is skipped entirely, its own
+                          try/catch keeps a teiserver outage from costing the games sync, and
+                          TEISERVER_BASE (dev only) points the poll at a mock. teiserver.ts is
+                          pure like games.ts (injected fetch, a narrowed LobbyIndex port), so
+                          tests/teiserver.test.ts drives parsers, session and sync against
+                          fixtures modelled on captured real pages; the SQL half lives with
+                          the DO tests. Note the workerd trap it dodges in webFetch: calling
+                          an injected global fetch as `this.fetchImpl(...)` binds `this` to
+                          the session and workerd throws "Illegal invocation" — detach first.
                           WIDGET-INSTALL GUIDE: the dropzone banner links (relatively, so it
                           resolves on both backends) to /setup — public/setup.html, four numbered
                           steps ending in a drag&drop upload. The page is deliberately

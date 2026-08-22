@@ -31,6 +31,8 @@ import type {
   QueueGame,
   QueueJob,
 } from "./jobs";
+import { LOBBY_MATCH_EARLY_SLACK_SEC, LOBBY_MATCH_WINDOW_SEC, pickLobbyMatches } from "./teiserver";
+import type { LobbyMatchResult, LobbyObservation, MatchGame, MatchLobby, OpenLobby } from "./teiserver";
 import { FACET_PLAYERS_MAX, SETTINGS_MODS_FLAG, derivePlayerCount, mergeUploads } from "./replayentry";
 import type { CatalogTeam, ReplayEntry, ReplayFacets, ReplayFilter, UploadRef } from "./replayentry";
 
@@ -105,6 +107,14 @@ export type JobEnqueue = {
   status: "queued" | "duplicate" | "disabled" | "in-catalog";
   job: IngestJob | null;
 };
+
+/** How long a MATCHED lobby observation is kept before pruning. Its payload
+ * — the name — lives on the games row by then, so the observation is only a
+ * record of how the match was made. Unmatched observations are kept forever,
+ * by request: they are the evidence for why a game never got its name. A
+ * game reaches rts-api within the hour of ending, so 48h is generous slack,
+ * not the expected wait. */
+const LOBBY_MATCHED_KEEP_SEC = 48 * 3600;
 
 /** Version of the DERIVED data (player_count + the replay_players and
  * replay_settings index tables). Rows carry no derivation of their own — it is
@@ -216,6 +226,39 @@ export class ReplayIndex extends DurableObject<Env> {
       -- to answer is "the newest games of this kind", and adding it now costs
       -- one line where adding it to a full table later costs a rebuild.
       CREATE INDEX IF NOT EXISTS games_preset ON games (preset, start_unix DESC);
+
+      -- The teiserver web session behind the lobby poll (teiserver.ts): the
+      -- cookie jar as JSON, exactly one row, so a cron tick reuses the
+      -- Guardian token instead of logging in every minute. The CREDENTIALS
+      -- are not here — they stay wrangler secrets; this is only the session
+      -- they buy, which teiserver invalidates on its own schedule.
+      CREATE TABLE IF NOT EXISTS teiserver_session (
+        id           INTEGER PRIMARY KEY CHECK (id = 1),
+        cookies      TEXT NOT NULL,
+        updated_unix INTEGER NOT NULL
+      );
+      -- One row per OBSERVED lobby-game: opened the first tick a lobby is
+      -- seen in progress (started_unix back-dated by the page's running
+      -- clock), closed when it stops being, and eventually matched to the
+      -- rts-api game it was — which is the only place a lobby NAME can come
+      -- from, since BAR's published history does not carry one. Keyed by
+      -- (lobby_id, started_unix) because lobby ids are reused game after
+      -- game. players holds the non-spectator roster captured at the start
+      -- (spectators churn too much to be a matching signal); NULL means the
+      -- roster page could not be fetched at that moment, which never comes
+      -- back.
+      CREATE TABLE IF NOT EXISTS lobbies (
+        lobby_id        INTEGER NOT NULL,
+        started_unix    INTEGER NOT NULL,
+        name            TEXT NOT NULL,
+        map             TEXT,
+        players         TEXT,
+        player_count    INTEGER,
+        ended_unix      INTEGER,
+        matched_game_id TEXT,
+        PRIMARY KEY (lobby_id, started_unix)
+      );
+      CREATE INDEX IF NOT EXISTS lobbies_started ON lobbies (started_unix);
     `);
     // In-place upgrades for tables created before a column existed (SQLite has
     // no ADD COLUMN IF NOT EXISTS; a duplicate-column error just means the
@@ -253,6 +296,11 @@ export class ReplayIndex extends DurableObject<Env> {
     // Same story: reported from the start of the healthcheck but only ever
     // shown live, so rows written before this chart as a gap.
     addColumn("job_samples", "swap_bytes INTEGER");
+    // The lobby the game was played under (lobbiesMatch below). Deliberately
+    // NOT in gamesInsert's upsert list: a later re-sync of the game knows
+    // nothing about lobbies and must not erase what the match wrote.
+    addColumn("games", "lobby_name TEXT");
+    addColumn("games", "lobby_id INTEGER");
     for (const col of [
       "settings TEXT",
       "rid TEXT",
@@ -724,6 +772,143 @@ export class ReplayIndex extends DurableObject<Env> {
       if (!owned) this.indexRow(g.id, g.players, g.settings);
     }
     return games.length;
+  }
+
+  /** teiserverCookies reads the persisted teiserver web-session jar, or null
+   * when no login has ever succeeded. The lobby sync seeds its session from
+   * this, which is what makes the steady state one authed GET per tick with
+   * no login round-trip. */
+  teiserverCookies(): Record<string, string> | null {
+    const rows = this.ctx.storage.sql.exec(`SELECT cookies FROM teiserver_session WHERE id = 1`).toArray();
+    return rows.length === 0 ? null : JSON.parse(rows[0].cookies as string);
+  }
+
+  /** teiserverCookiesPut persists the session jar (the whole jar, replacing
+   * what was stored — the caller's is always the newer one). One row by
+   * construction: the CHECK plus the fixed id make a second row impossible. */
+  teiserverCookiesPut(jar: Record<string, string>): void {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO teiserver_session (id, cookies, updated_unix) VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET cookies = excluded.cookies, updated_unix = excluded.updated_unix`,
+      JSON.stringify(jar),
+      Math.floor(Date.now() / 1000),
+    );
+  }
+
+  /** lobbiesOpen lists the observations still open — the lobbies that were in
+   * progress last tick. The sync diffs the current page against this to tell
+   * a game newly started (observe it) from one still running (nothing to do)
+   * from one finished (close it). */
+  lobbiesOpen(): OpenLobby[] {
+    return this.ctx.storage.sql
+      .exec(`SELECT lobby_id, started_unix FROM lobbies WHERE ended_unix IS NULL`)
+      .toArray()
+      .map((r) => ({ lobbyId: r.lobby_id as number, startedUnix: r.started_unix as number }));
+  }
+
+  /** lobbiesObserve opens an observation per newly started lobby-game.
+   * started_unix is back-dated by the page's own running clock (elapsedSec)
+   * so a game already minutes in when first seen — a fresh deployment, an
+   * outage — still records when it actually began, which is what the match's
+   * time gate compares against. DO NOTHING on conflict: the same second
+   * cannot hold two different games of one lobby. */
+  lobbiesObserve(obs: LobbyObservation[]): void {
+    const now = Math.floor(Date.now() / 1000);
+    for (const o of obs) {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO lobbies (lobby_id, started_unix, name, map, players, player_count, ended_unix, matched_game_id)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)
+         ON CONFLICT(lobby_id, started_unix) DO NOTHING`,
+        o.lobbyId,
+        now - Math.max(0, o.elapsedSec ?? 0),
+        o.name,
+        o.map,
+        o.players === null ? null : JSON.stringify(o.players),
+        o.playerCount,
+      );
+    }
+  }
+
+  /** lobbiesEnd closes the open observations of lobbies no longer in
+   * progress — which is what frees the lobby id to open a fresh observation
+   * for its next game. */
+  lobbiesEnd(lobbyIds: number[]): void {
+    if (lobbyIds.length === 0) return;
+    this.ctx.storage.sql.exec(
+      `UPDATE lobbies SET ended_unix = ?
+       WHERE ended_unix IS NULL AND lobby_id IN (${lobbyIds.map(() => "?").join(",")})`,
+      Math.floor(Date.now() / 1000),
+      ...lobbyIds,
+    );
+  }
+
+  /** lobbiesMatch pairs unmatched observations with mirrored games and writes
+   * the lobby name onto the games row. The signals and thresholds live in
+   * pickLobbyMatches (teiserver.ts); this method is the SQL around it: the
+   * candidate reads — games in the union of every observation's time window,
+   * still unnamed — the two writes per match, and the pruning of matched
+   * observations whose name has long since moved to its games row.
+   *
+   * A match usually lands tens of minutes after the observation: rts-api
+   * only learns a game when it ends, so every tick in between finds the same
+   * observation and no candidate, which costs one indexed SELECT. */
+  lobbiesMatch(): LobbyMatchResult {
+    const sql = this.ctx.storage.sql;
+    const now = Math.floor(Date.now() / 1000);
+    const lobbies: MatchLobby[] = sql
+      .exec(`SELECT lobby_id, started_unix, map, players FROM lobbies WHERE matched_game_id IS NULL`)
+      .toArray()
+      .map((r) => ({
+        lobbyId: r.lobby_id as number,
+        startedUnix: r.started_unix as number,
+        map: (r.map as string | null) ?? null,
+        players: r.players == null ? null : JSON.parse(r.players as string),
+      }));
+    let matched = 0;
+    if (lobbies.length > 0) {
+      const starts = lobbies.map((l) => l.startedUnix);
+      // The gate is startedUnix - startUnix in [-EARLY_SLACK, +WINDOW]; this
+      // is that inequality solved for start_unix, over all observations.
+      const games: MatchGame[] = sql
+        .exec(
+          `SELECT id, start_unix, map, players FROM games
+           WHERE lobby_name IS NULL AND start_unix IS NOT NULL AND start_unix BETWEEN ? AND ?`,
+          Math.min(...starts) - LOBBY_MATCH_WINDOW_SEC,
+          Math.max(...starts) + LOBBY_MATCH_EARLY_SLACK_SEC,
+        )
+        .toArray()
+        .map((r) => {
+          const teams: CatalogTeam[] = r.players == null ? [] : JSON.parse(r.players as string);
+          return {
+            id: r.id as string,
+            startUnix: r.start_unix as number,
+            map: (r.map as string | null) ?? null,
+            players: teams.flatMap((t) => t.players.map((p) => p.name)),
+          };
+        });
+      for (const m of pickLobbyMatches(lobbies, games)) {
+        sql.exec(
+          `UPDATE games SET lobby_name = (SELECT name FROM lobbies WHERE lobby_id = ? AND started_unix = ?), lobby_id = ?
+           WHERE id = ? AND lobby_name IS NULL`,
+          m.lobbyId,
+          m.startedUnix,
+          m.lobbyId,
+          m.gameId,
+        );
+        sql.exec(
+          `UPDATE lobbies SET matched_game_id = ? WHERE lobby_id = ? AND started_unix = ?`,
+          m.gameId,
+          m.lobbyId,
+          m.startedUnix,
+        );
+        matched++;
+      }
+    }
+    const pruned = sql.exec(
+      `DELETE FROM lobbies WHERE matched_game_id IS NOT NULL AND started_unix < ?`,
+      now - LOBBY_MATCHED_KEEP_SEC,
+    ).rowsWritten;
+    return { matched, pruned };
   }
 
   /** jobInsert records fresh work as a pending ingest job. A "resim" carries

@@ -5,6 +5,7 @@
 import app, { indexStub } from "./app";
 import { syncGames } from "./games";
 import { JOB_SAMPLE_RETENTION_SEC, ReplayIndex } from "./replayindex";
+import { syncLobbies } from "./teiserver";
 
 export { ReplayIndex };
 
@@ -41,6 +42,28 @@ export default {
       if (dropped > 0) console.log(`job samples pruned: ${dropped}`);
     } catch (e) {
       console.error(`job sample prune failed: ${e}`);
+    }
+
+    // Same tick, third step: poll teiserver's lobby list for the names
+    // the rts-api mirror can never carry (teiserver.ts). Its own try/catch,
+    // so a teiserver outage never costs the games mirror a run and vice
+    // versa; skipped entirely without the secrets, so local dev and forks
+    // run the games sync alone.
+    if (env.TEISERVER_EMAIL !== undefined && env.TEISERVER_PASSWORD !== undefined) {
+      try {
+        const r = await syncLobbies(indexStub(env), {
+          email: env.TEISERVER_EMAIL,
+          password: env.TEISERVER_PASSWORD,
+          base: env.TEISERVER_BASE,
+        });
+        if (r.started > 0 || r.ended > 0 || r.matched > 0 || r.failed > 0) {
+          console.log(
+            `lobby sync: active=${r.active} started=${r.started} ended=${r.ended} matched=${r.matched} failed=${r.failed}`,
+          );
+        }
+      } catch (e) {
+        console.error(`lobby sync failed: ${e}`);
+      }
     }
   },
 } satisfies ExportedHandler<Env>;
