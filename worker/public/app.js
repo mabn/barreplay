@@ -5106,7 +5106,7 @@ function settingsBadges(settings) {
 // until the replay is ready to open. The same front-end also runs against
 // backends without the upload API (the Go viz server, a plain static host) —
 // there the attempt fails with a clear message.
-const MAX_UPLOAD_BYTES = 64 << 20; // mirrors the worker's /api/upload cap
+const MAX_UPLOAD_BYTES = 150 << 20; // mirrors the worker's /api/upload cap (MAX_UPLOAD)
 
 function initUpload() {
   const zone = document.getElementById('dropzone');

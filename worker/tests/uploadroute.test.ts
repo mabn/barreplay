@@ -261,7 +261,7 @@ test("rejected uploads write nothing", async () => {
 
   const huge = await app.request(
     "/api/upload",
-    { method: "POST", body: "x", headers: { "content-length": String(65 << 20) } },
+    { method: "POST", body: "x", headers: { "content-length": String(151 << 20) } },
     env,
   );
   assert.equal(huge.status, 413);
@@ -470,7 +470,7 @@ test("trusted piece writes: PUT /replays/<key> stores the object, guarded", asyn
 
   const huge = await app.request(`/${key}`, {
     method: "PUT",
-    headers: { ...auth, "content-length": String(65 << 20) },
+    headers: { ...auth, "content-length": String(151 << 20) },
     body: "x",
   }, env);
   assert.equal(huge.status, 413);
