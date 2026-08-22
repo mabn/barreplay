@@ -8,8 +8,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import app from "../src/worker/app";
-import { MAX_JOB_STATS_BYTES } from "../src/worker/jobs";
-import type { IngestJob, JobKind, JobStats } from "../src/worker/jobs";
+import { MAX_JOB_PROGRESS_BYTES, MAX_JOB_STATS_BYTES } from "../src/worker/jobs";
+import type { IngestJob, JobKind, JobProgress, JobSample, JobStats } from "../src/worker/jobs";
 import type { ReplayEntry } from "../src/worker/replayentry";
 
 const FIXTURE = new URL("../../internal/capture/testdata/harness.brepstream", import.meta.url);
@@ -53,6 +53,7 @@ class FakeIndex {
       state: "pending",
       error: null,
       stats: null,
+      progress: null,
       createdUnix: 0,
       updatedUnix: 0,
     });
@@ -85,6 +86,7 @@ class FakeIndex {
     if (!j || j.state !== "pending") return false; // stale-processing needs a clock; not modelled
     j.state = "processing";
     j.error = null;
+    j.progress = null; // a claim starts fresh; the previous holder's reading is not ours
     return true;
   }
   lastQueueQuery: { limit: number; offset: number } | null = null;
@@ -103,13 +105,35 @@ class FakeIndex {
     state: "processing" | "done" | "error",
     error: string | null,
     stats: JobStats | null = null,
+    progress: JobProgress | null = null,
   ): boolean {
     const j = this.jobs.get(id);
     if (!j) return false;
     j.state = state;
     j.error = error;
     if (stats !== null) j.stats = stats; // COALESCE in the real DO
+    // Kept while the job runs, cleared when it stops — the real DO does this in
+    // the UPDATE's CASE expression.
+    j.progress = state === "processing" ? (progress ?? j.progress) : null;
+    // ...and kept as history either way. The real thing coerces each field and
+    // caps the series (tests/do covers both); here it only has to accumulate.
+    if (state === "processing" && progress !== null) {
+      const s = this.samples.get(id) ?? [];
+      s.push({
+        atUnix: s.length,
+        state: (progress.state as string) ?? null,
+        frame: progress.frame ?? null,
+        percent: progress.percent ?? null,
+        rssBytes: progress.rssBytes ?? null,
+        cpuPct: progress.cpuPct ?? null,
+      });
+      this.samples.set(id, s);
+    }
     return true;
+  }
+  samples = new Map<string, JobSample[]>();
+  jobSamples(id: string): JobSample[] {
+    return this.samples.get(id) ?? [];
   }
 }
 
@@ -281,7 +305,17 @@ test("GET /api/queue lists jobs for the viewer without the archive key", async (
   const page = await asJson(res);
   assert.deepEqual(page, {
     jobs: [
-      { id: job, gameId: GAME_ID, kind: "upload", state: "pending", error: null, stats: null, createdUnix: 0, updatedUnix: 0 },
+      {
+        id: job,
+        gameId: GAME_ID,
+        kind: "upload",
+        state: "pending",
+        error: null,
+        stats: null,
+        progress: null,
+        createdUnix: 0,
+        updatedUnix: 0,
+      },
     ],
     total: 1,
     active: 1,
@@ -821,4 +855,101 @@ test("the setup guide is wired to the banner and to the widget", () => {
     "the widget's F11 name is the one the guide tells players to look for",
   );
   assert.match(guide, /Replay uploader/);
+});
+
+// A running job's live self-report: it rides the healthcheck, comes back out on
+// both job views, survives a beat that carries none, and is CLEARED the moment
+// the job stops running — a finished row still saying "simulating, 43%" would
+// be worse than saying nothing.
+test("a running job's progress round-trips and is cleared when it ends", async (t) => {
+  const { env } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  const { job } = await asJson(
+    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+  );
+  const progress = {
+    state: "simulating",
+    frame: 43000,
+    totalFrames: 100170,
+    percent: 42.9,
+    etaSec: 840,
+    simFps: 68.2,
+    rssBytes: 3221225472,
+    cpuPct: 612.5,
+  };
+  const post = (body: unknown) =>
+    app.request(`/api/jobs/${job}`, { method: "POST", body: JSON.stringify(body) }, env);
+
+  assert.equal((await post({ state: "processing", claim: true, kind: "resim" })).status, 200);
+  assert.equal((await post({ state: "processing", progress })).status, 200);
+
+  const polled = await asJson(await app.request(`/api/jobs/${job}`, {}, env));
+  assert.deepEqual(polled.progress, progress, "the poll sees it");
+  const page = await asJson(await app.request("/api/queue", {}, env));
+  assert.deepEqual(page.jobs[0].progress, progress, "and so does the queue page");
+
+  // A beat with no reading keeps the last one — an older daemon simply sends
+  // less, and blanking on silence would make the page flicker.
+  assert.equal((await post({ state: "processing" })).status, 200);
+  assert.deepEqual((await asJson(await app.request(`/api/jobs/${job}`, {}, env))).progress, progress);
+
+  assert.equal((await post({ state: "done" })).status, 200);
+  const done = await asJson(await app.request(`/api/jobs/${job}`, {}, env));
+  assert.equal(done.progress, null, "progress describes work in flight, and there is none now");
+});
+
+// Same rule as the stats: a reading that cannot be stored is dropped, never a
+// 400 — the state transition it rides is worth more than it.
+test("unusable progress is dropped without losing the healthcheck", async (t) => {
+  const { env } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  const { job } = await asJson(
+    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+  );
+  const post = (body: unknown) =>
+    app.request(`/api/jobs/${job}`, { method: "POST", body: JSON.stringify(body) }, env);
+
+  for (const bad of ["simulating", 42, ["simulating"], { state: "x".repeat(MAX_JOB_PROGRESS_BYTES + 1) }]) {
+    assert.equal((await post({ state: "processing", progress: bad })).status, 200);
+  }
+  const polled = await asJson(await app.request(`/api/jobs/${job}`, {}, env));
+  assert.equal(polled.state, "processing", "the transition still landed");
+  assert.equal(polled.progress, null);
+});
+
+// The healthcheck HISTORY behind the queue page's charts. It is its own route
+// because it is fetched per expanded row, not with every queue read — a page of
+// 25 rows would otherwise carry thousands of points nobody looked at.
+test("a job's healthcheck history is served on its own route", async (t) => {
+  const { env, index } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  const { job } = await asJson(
+    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+  );
+  const post = (body: unknown) =>
+    app.request(`/api/jobs/${job}`, { method: "POST", body: JSON.stringify(body) }, env);
+
+  for (const p of [
+    { state: "loading" },
+    { state: "simulating", percent: 12, rssBytes: 2e9, cpuPct: 480 },
+    { state: "simulating", percent: 43, rssBytes: 3e9, cpuPct: 610 },
+  ]) {
+    assert.equal((await post({ state: "processing", progress: p })).status, 200);
+  }
+
+  const { samples } = await asJson(await app.request(`/api/jobs/${job}/samples`, {}, env));
+  assert.equal(samples.length, 3, 'every beat is a point');
+  assert.deepEqual(samples[2], { atUnix: 2, state: "simulating", percent: 43, frame: null, rssBytes: 3e9, cpuPct: 610 });
+
+  // The series survives the job: the curve of a run that died is the whole
+  // reason to keep it, and the live progress is gone by then.
+  assert.equal((await post({ state: "error", error: "engine died" })).status, 200);
+  assert.equal((await asJson(await app.request(`/api/jobs/${job}`, {}, env))).progress, null);
+  assert.equal((await asJson(await app.request(`/api/jobs/${job}/samples`, {}, env))).samples.length, 3);
+
+  // A job that never beat — an upload, or an older daemon — is an empty series
+  // rather than a 404: the view says the same thing about both.
+  index.jobInsert("plain", "streams/x", "gid");
+  assert.deepEqual((await asJson(await app.request("/api/jobs/plain/samples", {}, env))).samples, []);
+  assert.deepEqual((await asJson(await app.request("/api/jobs/nope/samples", {}, env))).samples, []);
 });

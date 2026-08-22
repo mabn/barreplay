@@ -683,6 +683,10 @@ function fakeDom() {
         },
       },
       appendChild(c: any) { n.children.push(c); return c; },
+      append(...cs: any[]) { n.children.push(...cs); },
+      attrs: {} as Record<string, string>,
+      setAttribute(k: string, v: unknown) { n.attrs[k] = String(v); },
+      getAttribute(k: string) { return n.attrs[k]; },
       addEventListener() {},
     };
     Object.defineProperty(n, 'textContent', {
@@ -695,6 +699,8 @@ function fakeDom() {
   const byId: Record<string, any> = {};
   const document = {
     createElement: node,
+    // The job charts are SVG, which only createElementNS can make.
+    createElementNS: (_ns: string, tag: string) => node(tag),
     querySelector: () => tbody,
     getElementById: (id: string) => (byId[id] ??= node('div')),
     body: { classList: { add() {}, remove() {}, toggle() {} } },
@@ -1058,4 +1064,186 @@ test('the pager offers Prev/Next and a range, never a page count', () => {
     assert.equal(b.id('p_prev').disabled, false);
     assert.equal(b.id('p_range').textContent, '151–157');
   }
+});
+
+// The queue row of a job that is still RUNNING. It has no stats — those are
+// written when the work ends — so everything a person can learn about it comes
+// from the live progress the daemon healthchecks in with, and the row has to
+// actually show it: the phase, how far along, and what the engine is costing
+// the machine doing the work.
+test('a running job shows its live progress instead of an empty row', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+
+  const dom = fakeDom();
+  const jobs = [
+    // Mid-simulation: every number the daemon can report.
+    {
+      id: 'running', gameId: 'aaa', kind: 'resim', state: 'processing', error: null, stats: null,
+      createdUnix: 1787349000, updatedUnix: 1787349900,
+      progress: {
+        state: 'simulating', frame: 43000, totalFrames: 100170, percent: 42.9,
+        etaSec: 840, simFps: 68.2, rssBytes: 3221225472, cpuPct: 612.5,
+      },
+    },
+    // Still loading: a phase with nothing to measure. It must still say what
+    // it is doing, and must NOT draw a bar pinned at zero, which reads as a
+    // job that is stuck rather than one that is working.
+    {
+      id: 'loading', gameId: 'bbb', kind: 'resim', state: 'processing', error: null, stats: null,
+      createdUnix: 1787349000, updatedUnix: 1787349900,
+      progress: { state: 'starting engine', rssBytes: 1048576 },
+    },
+    // Finished badly: the worker cleared the progress when the job ended, so
+    // the same cell carries the failure.
+    {
+      id: 'failed', gameId: 'ccc', kind: 'resim', state: 'error', error: 'no engine',
+      stats: null, progress: null, createdUnix: 1787349000, updatedUnix: 1787349900,
+    },
+  ];
+
+  const render = eval(`(function(){
+    const document = dom.document;
+    const replayList = [];
+    const queuePage = { jobs, total: jobs.length, active: 2 };
+    const queueOffset = 0, queueReadAt = 0;
+    const queueOpen = new Set();
+    const fmtDate = () => 'date', fmtAgo = () => 'ago';
+    const replayHref = (id) => '/?replay=' + id, urlId = (e) => e.id, openReplay = () => {};
+    ${extract('fmtDur')}
+    ${extract('fmtSize')}
+    ${extract('statsLines')}
+    ${extract('progressLines')}
+    ${extract('progressText')}
+    ${extract('statsTooltip')}
+    ${extract('fillProgressCell')}
+    ${extract('renderQueue')}
+    return renderQueue;
+  })()`);
+
+  render();
+
+  const trs = dom.tbody.children;
+  assert.equal(trs.length, 3);
+  const detailOf = (tr: any) => tr.children.find((td: any) => td.className.includes('detail'));
+
+  const running = detailOf(trs[0]);
+  const bar = walk(running).find((n) => n.className === 'jobprog');
+  assert.ok(bar, 'a measurable phase draws a bar');
+  assert.equal(bar.children[0].style.width, '42.9%');
+  const text = walk(running).find((n) => n.className === 'jobprogtext').textContent;
+  assert.match(text, /^simulating · 43% · 14m 00s left · 3\.2 GB · 613% CPU$/);
+
+  const loading = detailOf(trs[1]);
+  assert.equal(walk(loading).find((n) => n.className === 'jobprog'), undefined,
+    'nothing to measure yet: words, but no bar pinned at zero');
+  assert.equal(walk(loading).find((n) => n.className === 'jobprogtext').textContent,
+    'starting engine · 1.0 MB');
+
+  // The failure keeps the cell it always had; the two never collide because
+  // the worker clears progress at exactly the moment an error appears.
+  assert.equal(detailOf(trs[2]).textContent, 'no engine');
+  assert.ok(detailOf(trs[2]).className.includes('error'));
+
+  // The Took column has no cost to report on a running job, so it answers the
+  // question that row actually raises: how much longer.
+  const tookOf = (tr: any) => tr.children.find((td: any) => td.className.includes('took'));
+  assert.equal(tookOf(trs[0]).textContent, '▸ ~14m 00s left');
+  assert.match(tookOf(trs[0]).title, /Now: simulating/);
+  assert.ok(trs[0].className.includes('hasstats'), 'and the row expands for the rest');
+});
+
+// The healthcheck history, drawn. Three separate plots, never one with three
+// scales: bytes, percent-of-a-core and percent-of-a-game share no axis, and
+// overlaying them would invent a correlation the data does not contain.
+test('a job\'s healthcheck history is drawn as one chart per measure', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+  const consts = APP.slice(APP.indexOf('const SVGNS ='), APP.indexOf('// Fetched per expanded row'));
+
+  const dom = fakeDom();
+  // A load phase that reports memory but no simulation, then a run.
+  const rows = [
+    { atUnix: 1000, state: 'loading', frame: null, percent: null, rssBytes: 1e9, cpuPct: 120 },
+    { atUnix: 1010, state: 'simulating', frame: 300, percent: 10, rssBytes: 2e9, cpuPct: 500 },
+    { atUnix: 1020, state: 'simulating', frame: 600, percent: 20, rssBytes: 4e9, cpuPct: 610 },
+    { atUnix: 1030, state: 'simulating', frame: 900, percent: 30, rssBytes: 3e9, cpuPct: 400 },
+  ];
+
+  const api = eval(`(function(){
+    const document = dom.document;
+    ${consts}
+    ${extract('svgEl')} ${extract('lastIndexWithValue')} ${extract('nearestSample')}
+    ${extract('buildChart')} ${extract('showTip')} ${extract('jobCharts')}
+    ${extract('fmtSize')} ${extract('fmtDuration')}
+    return { jobCharts, nearestSample, JOB_CHARTS, CH_W, CH_L, CH_R };
+  })()`);
+
+  const fig = api.jobCharts(rows);
+  const svgs = walk(fig).filter((n: any) => n.tag === 'svg');
+  assert.equal(svgs.length, 3, 'one chart per measure, never one plot with three scales');
+
+  const texts = (svg: any) => walk(svg).filter((n: any) => n.tag === 'text');
+  const cls = (svg: any, c: string) => walk(svg).filter((n: any) => n.attrs.class === c);
+
+  // Autoscaled charts: the top tick IS the peak, so the peak carries a dot and
+  // no text — a label repeating a tick is noise.
+  const mem = svgs[0];
+  assert.equal(texts(mem).find((t: any) => t.attrs.class === 'chtick')._text, '4.0 GB');
+  assert.equal(cls(mem, 'chlabel').length, 0, 'no label duplicating the top tick');
+  assert.equal(cls(mem, 'chpeak').length, 1, 'but a dot saying WHEN it peaked');
+
+  // Fixed domain: the axis says nothing about this run, so the END value is
+  // labelled — the number the reader came for.
+  const sim = svgs[2];
+  assert.equal(texts(sim).find((t: any) => t.attrs.class === 'chtick')._text, '100%');
+  assert.equal(cls(sim, 'chlabel')[0]._text, '30.0%');
+
+  // Every label must FIT: a tick too long for its 46px gutter runs off the
+  // figure, which an anchor-only check cannot see.
+  for (const svg of svgs) {
+    for (const t of texts(svg)) {
+      const w = t._text.length * 5.6;
+      const x = Number(t.attrs.x);
+      const anchor = t.attrs['text-anchor'] || 'end';
+      assert.ok(x - (anchor === 'end' ? w : 0) >= 0, `"${t._text}" runs off the left edge`);
+      assert.ok(x + (anchor === 'end' ? 0 : w) <= api.CH_W, `"${t._text}" runs off the right edge`);
+    }
+    // The line breaks over a gap rather than drawing through zero: an engine
+    // that had not started is missing, not idle.
+    for (const p of walk(svg).filter((n: any) => n.tag === 'path')) {
+      assert.doesNotMatch(p.attrs.d, /NaN|undefined|Infinity/, 'the path is real coordinates');
+    }
+  }
+  // Simulation has one null at the head, so its line starts at the second beat.
+  const simLine = cls(sim, 'chline');
+  assert.equal(simLine.length, 1, 'one unbroken run after the gap');
+  assert.ok(Number(simLine[0].attrs.d.match(/^M([\d.]+)/)[1]) > api.CH_L, 'and it starts after the gap, not at the axis');
+
+  // A measure the run never reported gets no plot at all: an empty axis would
+  // claim a reading of zero, which is a different statement.
+  const noEngine = rows.map((r) => ({ ...r, rssBytes: null, cpuPct: null }));
+  assert.equal(walk(api.jobCharts(noEngine)).filter((n: any) => n.tag === 'svg').length, 1);
+
+  // The crosshair finds the X: the reader aims at a moment, not at a 2px line.
+  assert.equal(api.nearestSample(api.CH_L, 4), 0);
+  assert.equal(api.nearestSample(api.CH_W - api.CH_R, 4), 3);
+  assert.equal(api.nearestSample(-999, 4), 0, 'and is clamped, never out of range');
+  assert.equal(api.nearestSample(9999, 4), 3);
 });

@@ -82,6 +82,7 @@ type Engine struct {
 	headlessPath  string
 	prdPath       string
 	engineCfgPath string // set by WriteEngineConfig; passed to the engine as --config
+	pid           int    // set by Run; see Pid
 }
 
 func headlessName() string {
@@ -513,6 +514,7 @@ func (e *Engine) Run(ctx context.Context, scriptPath string) (io.Reader, func() 
 	// The parent must drop its copy of the write end so the reader can EOF once
 	// the child (the only remaining writer) exits.
 	pw.Close()
+	e.pid = cmd.Process.Pid
 
 	wait := func() error {
 		err := cmd.Wait()
@@ -524,3 +526,9 @@ func (e *Engine) Run(ctx context.Context, scriptPath string) (io.Reader, func() 
 
 // HeadlessPath reports the resolved engine binary (for logging).
 func (e *Engine) HeadlessPath() string { return e.headlessPath }
+
+// Pid is the process id of the engine Run started, or 0 before it has. It is
+// here so a caller can watch the run's resource use (SampleProcess) without Run
+// growing a fourth return value; a data dir takes only one run at a time
+// (LockDataDir), so there is never a second live process to confuse it with.
+func (e *Engine) Pid() int { return e.pid }

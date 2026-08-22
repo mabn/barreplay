@@ -25,7 +25,7 @@
 import { Hono } from "hono";
 
 import { parseGameId } from "./gameid";
-import { JOB_KINDS, parseJobStats } from "./jobs";
+import { JOB_KINDS, parseJobProgress, parseJobStats } from "./jobs";
 import type { JobKind } from "./jobs";
 import { archiveSuffix, scanStreamPreamble } from "./preamble";
 import { parseReplayFilter, parseViewRequest, playersFromApi, sanitizeEntry, settingsFlags } from "./replayentry";
@@ -250,10 +250,24 @@ app.post("/api/resim", async (c) => {
 app.get("/api/jobs/:id", async (c) => {
   const job = await indexStub(c.env).jobGet(c.req.param("id"));
   if (!job) return c.json({ error: "unknown job" }, 404);
-  const { id, gameId, kind, state, error, stats, createdUnix, updatedUnix } = job;
-  return c.json({ id, gameId, kind, state, error, stats, createdUnix, updatedUnix }, 200, {
+  const { id, gameId, kind, state, error, stats, progress, createdUnix, updatedUnix } = job;
+  return c.json({ id, gameId, kind, state, error, stats, progress, createdUnix, updatedUnix }, 200, {
     "cache-control": "no-cache",
   });
+});
+
+// One job's healthcheck HISTORY: the series behind the queue page's charts,
+// fetched only when a row is expanded rather than riding every queue read (a
+// page of 25 rows would otherwise carry thousands of points nobody asked for).
+// Open, like the per-job status and the queue itself, and for the same reason:
+// it reports on public replays and can change nothing.
+//
+// An unknown job is an empty series, not a 404 — a job that never healthchecked
+// (an upload, or anything from a daemon older than the beat) is indistinguishable
+// from one that does not exist, and the view says the same thing about both.
+app.get("/api/jobs/:id/samples", async (c) => {
+  const samples = await indexStub(c.env).jobSamples(c.req.param("id"));
+  return c.json({ samples }, 200, { "cache-control": "no-cache" });
 });
 
 // The queue as the landing page's "Queue" section shows it: unfinished jobs
@@ -285,13 +299,14 @@ app.get("/api/queue", async (c) => {
   const page = await indexStub(c.env).queuePage(Math.min(Math.max(limit, 1), QUEUE_LIMIT_MAX), offset);
   return c.json(
     {
-      jobs: page.jobs.map(({ id, gameId, kind, state, error, stats, createdUnix, updatedUnix }) => ({
+      jobs: page.jobs.map(({ id, gameId, kind, state, error, stats, progress, createdUnix, updatedUnix }) => ({
         id,
         gameId,
         kind,
         state,
         error,
         stats,
+        progress,
         createdUnix,
         updatedUnix,
       })),
@@ -337,8 +352,10 @@ app.get("/api/jobs", async (c) => {
 // via the flag rather than being how "processing" always behaves, because the
 // upload daemon treats a failed transition as a job error — it would take the
 // job from whoever legitimately holds it and mark it failed. A long-running
-// job re-reports "processing" without the flag as a heartbeat, which keeps
-// updated_unix fresh so the stale-job rule does not offer live work away.
+// job re-reports "processing" without the flag as a healthcheck, which keeps
+// updated_unix fresh so the stale-job rule does not offer live work away — and
+// carries the run's live `progress` (JobProgress), which is what the queue page
+// shows instead of an hour of undifferentiated "processing".
 app.post("/api/jobs/:id", async (c) => {
   if (!authorized(c)) return c.json({ error: "unauthorized" }, 401);
   let body: unknown;
@@ -347,7 +364,14 @@ app.post("/api/jobs/:id", async (c) => {
   } catch {
     return c.json({ error: "body must be JSON" }, 400);
   }
-  const b = body as { state?: unknown; error?: unknown; claim?: unknown; kind?: unknown; stats?: unknown };
+  const b = body as {
+    state?: unknown;
+    error?: unknown;
+    claim?: unknown;
+    kind?: unknown;
+    stats?: unknown;
+    progress?: unknown;
+  };
   if (b.state !== "processing" && b.state !== "done" && b.state !== "error") {
     return c.json({ error: "state must be processing, done or error" }, 400);
   }
@@ -366,7 +390,10 @@ app.post("/api/jobs/:id", async (c) => {
   // already happened, and refusing the report over them would lose the state
   // transition too.
   const stats = parseJobStats(b.stats);
-  const ok = await indexStub(c.env).jobUpdate(c.req.param("id"), b.state, detail, stats);
+  // Same handling for the same reason: a healthcheck's reading is a snapshot of
+  // work already under way, and a state transition is worth more than it.
+  const progress = parseJobProgress(b.progress);
+  const ok = await indexStub(c.env).jobUpdate(c.req.param("id"), b.state, detail, stats, progress);
   if (!ok) return c.json({ error: "unknown job" }, 404);
   return c.json({ ok: true });
 });

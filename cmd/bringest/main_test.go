@@ -30,10 +30,11 @@ type mockWorker struct {
 	stream  []byte
 	drained bool // the upload queue empties after the first list
 
-	mu          sync.Mutex
-	transitions []string        // "<state>[:<error>]", or "claim"
-	claimed     map[string]bool // job id -> taken (a second claim is a 409)
-	statsSeen   []jobStats      // the processing record of every report that carried one
+	mu           sync.Mutex
+	transitions  []string        // "<state>[:<error>]", or "claim"
+	claimed      map[string]bool // job id -> taken (a second claim is a 409)
+	statsSeen    []jobStats      // the processing record of every report that carried one
+	progressSeen []jobProgress   // the live reading of every healthcheck that carried one
 }
 
 func (m *mockWorker) handler(token string) http.Handler {
@@ -74,6 +75,7 @@ func (m *mockWorker) handler(token string) http.Handler {
 			State, Error string
 			Claim        bool
 			Stats        *jobStats
+			Progress     *jobProgress
 		}
 		json.NewDecoder(r.Body).Decode(&body)
 		id := strings.TrimPrefix(r.URL.Path, "/api/jobs/")
@@ -100,6 +102,9 @@ func (m *mockWorker) handler(token string) http.Handler {
 		m.transitions = append(m.transitions, tr)
 		if body.Stats != nil {
 			m.statsSeen = append(m.statsSeen, *body.Stats)
+		}
+		if body.Progress != nil {
+			m.progressSeen = append(m.progressSeen, *body.Progress)
 		}
 		m.mu.Unlock()
 		w.Write([]byte(`{"ok":true}`))
@@ -204,7 +209,7 @@ func TestResimDaemonRunOnce(t *testing.T) {
 	r := &resimDaemon{
 		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
 		failed:    map[string]bool{},
-		resim: func(_ context.Context, gameID string, _ *jobStats) error {
+		resim: func(_ context.Context, gameID string, _ *jobStats, _ *resim.Progress) error {
 			ran = append(ran, gameID)
 			if gameID == "broken" {
 				return errors.New("no engine")
@@ -259,7 +264,7 @@ func TestResimDaemonDrainsQueue(t *testing.T) {
 	r := &resimDaemon{
 		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
 		failed:    map[string]bool{},
-		resim: func(_ context.Context, gameID string, _ *jobStats) error {
+		resim: func(_ context.Context, gameID string, _ *jobStats, _ *resim.Progress) error {
 			ran = append(ran, gameID)
 			return nil
 		},
@@ -303,7 +308,7 @@ func TestResimDaemonReportsStats(t *testing.T) {
 			r := &resimDaemon{
 				workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
 				failed:    map[string]bool{},
-				resim: func(_ context.Context, _ string, st *jobStats) error {
+				resim: func(_ context.Context, _ string, st *jobStats, _ *resim.Progress) error {
 					// What resimPublish copies out of resim.RunStats.
 					st.fromRunStats(resim.RunStats{
 						EngineSec: 2431, LoadSec: 41, SimSec: 2390,
@@ -359,7 +364,9 @@ func TestResimDaemonQueuedFailure(t *testing.T) {
 	r := &resimDaemon{
 		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
 		failed:    map[string]bool{},
-		resim:     func(context.Context, string, *jobStats) error { return errors.New("no engine") },
+		resim: func(context.Context, string, *jobStats, *resim.Progress) error {
+			return errors.New("no engine")
+		},
 	}
 	if _, err := r.runOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -399,12 +406,12 @@ func TestUploadDaemonSkipsResimJobs(t *testing.T) {
 }
 
 // A re-sim runs for far longer than the worker's stale window, so it
-// heartbeats. The terminal report must be the LAST word: a beat still in
+// healthchecks. The terminal report must be the LAST word: a beat still in
 // flight when done lands would put the row back to processing forever.
 func TestResimDaemonHeartbeats(t *testing.T) {
-	old := heartbeatEvery
-	heartbeatEvery = 5 * time.Millisecond
-	t.Cleanup(func() { heartbeatEvery = old })
+	old := healthcheckEvery
+	healthcheckEvery = 5 * time.Millisecond
+	t.Cleanup(func() { healthcheckEvery = old })
 
 	m := newMock(t)
 	m.resim = []ingestJob{{ID: "rj-1", GameID: "aaaa0000000000000000000000000001", Kind: kindResim, State: "pending"}}
@@ -420,7 +427,7 @@ func TestResimDaemonHeartbeats(t *testing.T) {
 	r := &resimDaemon{
 		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
 		failed:    map[string]bool{},
-		resim: func(ctx context.Context, _ string, _ *jobStats) error {
+		resim: func(ctx context.Context, _ string, _ *jobStats, _ *resim.Progress) error {
 			// Hold the "engine run" until the beats are visibly flowing.
 			for {
 				m.mu.Lock()
@@ -452,6 +459,110 @@ func TestResimDaemonHeartbeats(t *testing.T) {
 	}
 	if last := m.transitions[len(m.transitions)-1]; last != "done" {
 		t.Errorf("last transition = %q, want done — a late heartbeat undid the report", last)
+	}
+}
+
+// Every healthcheck carries what the run is doing right now, read at the moment
+// the beat goes out rather than when the loop started — which is the whole
+// point: a re-sim reports the same job row for the better part of an hour, and
+// a snapshot taken once would freeze at "fetching demo".
+func TestResimDaemonHealthchecksCarryProgress(t *testing.T) {
+	old := healthcheckEvery
+	healthcheckEvery = 5 * time.Millisecond
+	t.Cleanup(func() { healthcheckEvery = old })
+
+	m := newMock(t)
+	m.resim = []ingestJob{{ID: "rj-1", GameID: "aaaa0000000000000000000000000001", Kind: kindResim, State: "pending"}}
+	mux := http.NewServeMux()
+	mux.Handle("/api/jobs", m.handler(""))
+	mux.Handle("/api/jobs/", m.handler(""))
+	mux.HandleFunc("/api/replays", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode([]map[string]any{})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	r := &resimDaemon{
+		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
+		failed:    map[string]bool{},
+		resim: func(ctx context.Context, _ string, _ *jobStats, pr *resim.Progress) error {
+			// Two readings, a phase apart: the beats must show the second one,
+			// not the first.
+			pr.SetPhase(resim.PhaseStartingEngine)
+			if !waitForBeats(ctx, m, 2) {
+				return ctx.Err()
+			}
+			pr.SetPhase(resim.PhaseSimulating)
+			if !waitForBeats(ctx, m, 5) {
+				return ctx.Err()
+			}
+			return nil
+		},
+	}
+	if _, err := r.runOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.progressSeen) < 3 {
+		t.Fatalf("progress reports = %d, want every beat to carry one", len(m.progressSeen))
+	}
+	if got := m.progressSeen[0].State; got != resim.PhaseStartingEngine {
+		t.Errorf("first beat's state = %q, want %q", got, resim.PhaseStartingEngine)
+	}
+	last := m.progressSeen[len(m.progressSeen)-1]
+	if last.State != resim.PhaseSimulating {
+		t.Errorf("last beat's state = %q, want %q — the beat re-reads the run",
+			last.State, resim.PhaseSimulating)
+	}
+}
+
+// The wire conversion, which is where the field mapping and the rounding live.
+// A percentage with fourteen decimals is bytes on every beat and reads no
+// better; the ETA goes to whole seconds for the same reason.
+func TestProgressOf(t *testing.T) {
+	got := progressOf(resim.ProgressState{
+		Phase: resim.PhaseSimulating, Frame: 43000, TotalFrames: 100170,
+		Percent: 42.926524, ETASec: 840.77, SimFPS: 68.249, RSSBytes: 3 << 30, CPUPercent: 612.51,
+	})
+	want := jobProgress{
+		State: resim.PhaseSimulating, Frame: 43000, TotalFrames: 100170,
+		Percent: 42.9, EtaSec: 840, SimFps: 68.2, RssBytes: 3 << 30, CpuPct: 612.5,
+	}
+	if *got != want {
+		t.Errorf("progressOf = %+v, want %+v", *got, want)
+	}
+	// A phase with nothing to measure reports its name and nothing else, which
+	// is what keeps the JSON (and the queue page) free of zeroes that would
+	// read as measurements.
+	if got := progressOf(resim.ProgressState{Phase: resim.PhaseFetchingDemo}); *got != (jobProgress{State: resim.PhaseFetchingDemo}) {
+		t.Errorf("progressOf(early phase) = %+v, want just the phase", *got)
+	}
+	if resimProgress(nil) != nil {
+		t.Error("resimProgress(nil) must be nil — the catalog scan has no job row to report onto")
+	}
+}
+
+// waitForBeats blocks until the mock has recorded n "processing" transitions.
+func waitForBeats(ctx context.Context, m *mockWorker, n int) bool {
+	for {
+		m.mu.Lock()
+		beats := 0
+		for _, tr := range m.transitions {
+			if tr == "processing" {
+				beats++
+			}
+		}
+		m.mu.Unlock()
+		if beats >= n {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(time.Millisecond):
+		}
 	}
 }
 

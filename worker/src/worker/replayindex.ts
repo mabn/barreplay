@@ -20,12 +20,12 @@
 import { DurableObject } from "cloudflare:workers";
 
 import type { GameEntry } from "./games";
-import { parseJobStats } from "./jobs";
-import type { IngestJob, JobKind, JobStats } from "./jobs";
+import { parseJobProgress, parseJobStats } from "./jobs";
+import type { IngestJob, JobKind, JobProgress, JobSample, JobStats } from "./jobs";
 import { FACET_PLAYERS_MAX, SETTINGS_MODS_FLAG, derivePlayerCount, mergeUploads } from "./replayentry";
 import type { CatalogTeam, ReplayEntry, ReplayFacets, ReplayFilter, UploadRef } from "./replayentry";
 
-export type { IngestJob, JobKind, JobStats } from "./jobs";
+export type { IngestJob, JobKind, JobProgress, JobSample, JobStats } from "./jobs";
 
 /** A "processing" job untouched for this long is presumed crashed and is
  * offered to the daemon again alongside the pending ones. This is why a
@@ -51,8 +51,23 @@ const STALE_PROCESSING_RESIM_SEC = 90 * 60;
  * and the daemon would idle with thousands of games still to do. */
 const BACKFILL_WINDOW = 20;
 
+/** How many healthchecks one job keeps. At the daemon's 10-second beat that is
+ * two hours at full resolution, comfortably past any real re-simulation.
+ *
+ * Going over does not stop recording and does not drop the start of the run —
+ * both would lose the part of the curve worth having. jobSampleThin halves the
+ * series instead, keeping its first and last sample and every other one
+ * between, so the chart keeps its full time span at half the resolution and
+ * the cap cannot be hit again for another half-cap beats. */
+const MAX_JOB_SAMPLES = 720;
+
+/** How long a finished job's samples outlive it. They exist to be read AFTER
+ * the fact — the memory curve of a run that died is the whole point — so they
+ * are not cleared with the live progress; they age out instead. */
+export const JOB_SAMPLE_RETENTION_SEC = 30 * 24 * 60 * 60;
+
 /** Columns every jobs SELECT reads, in the order jobRow expects. */
-const JOB_COLS = "id, stream_key, game_id, kind, state, error, stats, created_unix, updated_unix";
+const JOB_COLS = "id, stream_key, game_id, kind, state, error, stats, progress, created_unix, updated_unix";
 
 /** Version of the DERIVED data (player_count + the replay_players and
  * replay_settings index tables). Rows carry no derivation of their own — it is
@@ -84,10 +99,30 @@ export class ReplayIndex extends DurableObject<Env> {
         state        TEXT NOT NULL,
         error        TEXT,
         stats        TEXT,
+        progress     TEXT,
         created_unix INTEGER NOT NULL,
         updated_unix INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS jobs_state ON jobs (state, updated_unix);
+
+      -- Every healthcheck a running job sent, kept as history. The jobs row's
+      -- progress column holds only the newest reading and is cleared when the
+      -- job ends; this is the series behind the queue page's charts, and it
+      -- deliberately OUTLIVES the job (see JOB_SAMPLE_RETENTION_SEC): what the
+      -- engine's memory was doing before a run died is worth having precisely
+      -- when the live reading is gone.
+      -- Keyed by (job, time) so a beat retried inside the same second is the
+      -- same reading rather than a second point on the chart.
+      CREATE TABLE IF NOT EXISTS job_samples (
+        job_id    TEXT NOT NULL,
+        at_unix   INTEGER NOT NULL,
+        state     TEXT,
+        frame     INTEGER,
+        percent   REAL,
+        rss_bytes INTEGER,
+        cpu_pct   REAL,
+        PRIMARY KEY (job_id, at_unix)
+      );
 
       -- Derived index tables behind the list filters. Both are rebuilt from
       -- the replays row on every write (and by rebuildDerived), never edited
@@ -159,6 +194,11 @@ export class ReplayIndex extends DurableObject<Env> {
     // Nullable, unlike kind: a job finished before the daemon reported stats
     // has none, and there is nothing to infer.
     addColumn("jobs", "stats TEXT");
+    // The running job's live self-report. Nullable and, unlike stats,
+    // deliberately EMPTY most of the time: jobUpdate clears it the moment the
+    // job reaches a terminal state, because progress describes work in flight
+    // and a finished row showing "simulating, 43%" would be a lie.
+    addColumn("jobs", "progress TEXT");
     for (const col of [
       "settings TEXT",
       "rid TEXT",
@@ -891,8 +931,11 @@ export class ReplayIndex extends DurableObject<Env> {
    * think they had it. Returns false when the job is unknown or already held. */
   jobClaim(id: string, kind: JobKind): boolean {
     const window = kind === "resim" ? STALE_PROCESSING_RESIM_SEC : STALE_PROCESSING_SEC;
+    // progress is cleared with the claim: whatever it says was reported by the
+    // previous holder, and taking a stale job over means its last reading — a
+    // percentage from a daemon that died — must not be shown as this run's.
     const cur = this.ctx.storage.sql.exec(
-      `UPDATE jobs SET state = 'processing', error = NULL, updated_unix = ?
+      `UPDATE jobs SET state = 'processing', error = NULL, progress = NULL, updated_unix = ?
        WHERE id = ? AND (state = 'pending' OR (state = 'processing' AND updated_unix < ?))`,
       Math.floor(Date.now() / 1000),
       id,
@@ -904,27 +947,134 @@ export class ReplayIndex extends DurableObject<Env> {
     return true;
   }
 
-  /** jobUpdate transitions a job's state (daemon heartbeat / completion
+  /** jobSamples is one job's whole healthcheck history, oldest first — the
+   * series behind the queue page's charts. Empty for a job that never reported
+   * (an upload, or anything from a daemon older than the healthcheck). */
+  jobSamples(jobId: string): JobSample[] {
+    return this.ctx.storage.sql
+      .exec(
+        `SELECT at_unix, state, frame, percent, rss_bytes, cpu_pct
+         FROM job_samples WHERE job_id = ? ORDER BY at_unix`,
+        jobId,
+      )
+      .toArray()
+      .map((r) => ({
+        atUnix: r.at_unix as number,
+        state: r.state as string | null,
+        frame: r.frame as number | null,
+        percent: r.percent as number | null,
+        rssBytes: r.rss_bytes as number | null,
+        cpuPct: r.cpu_pct as number | null,
+      }));
+  }
+
+  /** jobSampleRecord appends one healthcheck to the job's history.
+   *
+   * Every field is COERCED on the way in, which is not belt-and-braces: unlike
+   * everything else that has ever been done with a JobProgress, these land in
+   * typed SQL columns, and parseJobProgress is deliberately shallow because its
+   * fields were only ever displayed. A daemon (or anything else that can reach
+   * the open-ish job route) sending `{frame: {}}` would otherwise throw inside
+   * the bind and turn a healthcheck into a 500.
+   *
+   * `at` is the WORKER's clock, taken from the same now the state transition
+   * uses, so the time axis cannot be bent by a daemon with a skewed clock. */
+  private jobSampleRecord(jobId: string, at: number, p: JobProgress): void {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO job_samples (job_id, at_unix, state, frame, percent, rss_bytes, cpu_pct)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(job_id, at_unix) DO UPDATE SET
+         state = excluded.state, frame = excluded.frame, percent = excluded.percent,
+         rss_bytes = excluded.rss_bytes, cpu_pct = excluded.cpu_pct`,
+      jobId,
+      at,
+      typeof p.state === "string" ? p.state.slice(0, 64) : null,
+      finite(p.frame),
+      finite(p.percent),
+      finite(p.rssBytes),
+      finite(p.cpuPct),
+    );
+    const n = this.ctx.storage.sql
+      .exec(`SELECT COUNT(*) AS n FROM job_samples WHERE job_id = ?`, jobId)
+      .toArray()[0].n as number;
+    if (n > MAX_JOB_SAMPLES) this.jobSampleThin(jobId);
+  }
+
+  /** jobSampleThin halves a job's series in place, keeping the first and last
+   * sample and every other one between. The chart keeps its full time span at
+   * half the resolution — which is the right thing to lose, unlike the start of
+   * the run (dropping the oldest) or the end of it (refusing to record). */
+  private jobSampleThin(jobId: string): void {
+    this.ctx.storage.sql.exec(
+      `DELETE FROM job_samples WHERE job_id = ? AND at_unix IN (
+         SELECT at_unix FROM (
+           SELECT at_unix, ROW_NUMBER() OVER (ORDER BY at_unix) AS rn,
+                  COUNT(*) OVER () AS total
+           FROM job_samples WHERE job_id = ?
+         ) WHERE rn % 2 = 0 AND rn <> total
+       )`,
+      jobId,
+      jobId,
+    );
+  }
+
+  /** jobSamplePrune drops the history of jobs that finished before `before`,
+   * and of any job row that is gone entirely. Called from the cron, which is
+   * the worker's only periodic hook; the table would otherwise be the one thing
+   * here that grows without a rule. Returns how many rows it removed. */
+  jobSamplePrune(before: number): number {
+    const cur = this.ctx.storage.sql.exec(
+      `DELETE FROM job_samples WHERE job_id IN (
+         SELECT s.job_id FROM (SELECT DISTINCT job_id FROM job_samples) s
+         LEFT JOIN jobs j ON j.id = s.job_id
+         WHERE j.id IS NULL OR (j.state IN ('done', 'error') AND j.updated_unix < ?)
+       )`,
+      before,
+    );
+    return cur.rowsWritten;
+  }
+
+  /** jobUpdate transitions a job's state (daemon healthcheck / completion
    * report). Returns false when the job id is unknown.
    *
-   * `stats` is COALESCEd, unlike error: a heartbeat reports none and must not
+   * `stats` is COALESCEd, unlike error: a healthcheck reports none and must not
    * wipe what a previous report recorded, and there is nothing a daemon could
-   * usefully mean by "the stats are now nothing". */
+   * usefully mean by "the stats are now nothing".
+   *
+   * `progress` is COALESCEd the same way WHILE the job runs — an older daemon,
+   * or a bare claim, simply carries none — and then CLEARED by the terminal
+   * state, which is the one place its meaning inverts: progress describes work
+   * in flight, so a finished row keeping its last reading would show "43%,
+   * 12 minutes left" forever. From then on the stats are the record. */
   jobUpdate(
     id: string,
     state: "processing" | "done" | "error",
     error: string | null,
     stats: JobStats | null = null,
+    progress: JobProgress | null = null,
   ): boolean {
+    // One clock reading for the row and its sample, so a beat's point on the
+    // chart is stamped with the same moment the row says it was updated.
+    const now = Math.floor(Date.now() / 1000);
     const cur = this.ctx.storage.sql.exec(
-      `UPDATE jobs SET state = ?, error = ?, stats = COALESCE(?, stats), updated_unix = ? WHERE id = ?`,
+      `UPDATE jobs SET state = ?, error = ?, stats = COALESCE(?, stats),
+              progress = CASE WHEN ? = 'processing' THEN COALESCE(?, progress) ELSE NULL END,
+              updated_unix = ?
+       WHERE id = ?`,
       state,
       error,
       stats === null ? null : JSON.stringify(stats),
-      Math.floor(Date.now() / 1000),
+      state,
+      progress === null ? null : JSON.stringify(progress),
+      now,
       id,
     );
     if (cur.rowsWritten === 0) return false;
+    // The live reading is overwritten in place above; here it is also KEPT, so
+    // the run has a history to chart afterwards. Only while the job is running,
+    // and only when there is something to record — a terminal report carries no
+    // progress, and the beats already recorded are the run's record.
+    if (state === "processing" && progress !== null) this.jobSampleRecord(id, now, progress);
     // The catalog follows the job either way: into the list when work starts
     // (this is the other door into "processing" — a daemon that reports it
     // without claiming, and every heartbeat, which is harmless since the row
@@ -953,16 +1103,31 @@ function jobRow(r: Record<string, unknown>): IngestJob {
     // Stored as JSON text. A row written before the column, or one whose
     // daemon never reported, has none — and a blob that somehow does not parse
     // is not worth failing a queue read over.
-    stats: parseStoredStats(r.stats as string | null),
+    stats: parseStored(r.stats as string | null, parseJobStats),
+    // Only ever set while the job is running (jobUpdate clears it on the
+    // terminal state), so null here is the normal case, not a gap.
+    progress: parseStored(r.progress as string | null, parseJobProgress),
     createdUnix: r.created_unix as number,
     updatedUnix: r.updated_unix as number,
   };
 }
 
-function parseStoredStats(raw: string | null): JobStats | null {
+/** finite coerces one wire-supplied field to something a numeric SQL column
+ * will accept. Anything that is not a real number — a string, an object, NaN,
+ * a missing field — becomes NULL, which is exactly what "the daemon did not
+ * measure this" already means everywhere else here. */
+function finite(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/** parseStored re-reads one of the jobs table's JSON columns through the same
+ * validator the wire goes through. A column that is null, or holds a blob that
+ * somehow does not parse, yields null rather than failing the read: these are
+ * shown, not computed with, and a queue page is not worth losing over one. */
+function parseStored<T>(raw: string | null, parse: (v: unknown) => T | null): T | null {
   if (raw == null) return null;
   try {
-    return parseJobStats(JSON.parse(raw));
+    return parse(JSON.parse(raw));
   } catch {
     return null;
   }
