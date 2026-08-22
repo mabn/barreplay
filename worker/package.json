@@ -7,7 +7,9 @@
   "scripts": {
     "sync-assets": "node tools/sync-assets.mjs",
     "upload": "tsx tools/upload.ts",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "npm run test:node && npm run test:do",
+    "test:node": "tsx --test tests/*.test.ts",
+    "test:do": "vitest run",
     "smoke": "node tools/smoke.mjs",
     "predev": "npm run sync-assets",
     "dev": "vite",
@@ -23,11 +25,13 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.52.1",
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@types/node": "^22.15.0",
     "aws4fetch": "^1.0.20",
     "tsx": "^4.19.0",
     "typescript": "^5.9.2",
     "vite": "^6.3.5",
+    "vitest": "^4.1.11",
     "wrangler": "^4.123.0"
   }
 }

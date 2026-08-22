@@ -68,13 +68,45 @@
            and the Go viz server (which serves the same list from local files)
            has none, so the bar appears only where it works. -->
       <div id="filters" style="display:none">
+        <!-- Row 1 is the fields, row 2 the settings chips and the actions.
+             One row could not hold both without wrapping at some widths and
+             not at others, which moved the Clear button around as the catalog
+             gained flags. -->
+        <div class="filterrow">
         <label>From <input type="date" id="f_from"></label>
         <label>To <input type="date" id="f_to"></label>
         <label>Map <select id="f_map"></select></label>
-        <label>Players <select id="f_size"></select></label>
+        <!-- Players: a two-thumb range (min thumb / max thumb) over the sizes
+             the catalog holds. Two stacked <input type=range> rather than a
+             widget: real inputs come with keyboard support and focus rings for
+             free, and only their thumbs take pointer events, so the track
+             below shows through. app.js hides the whole label when the catalog
+             has fewer than two distinct sizes — nothing to slide between. -->
+        <label id="f_sizefilter">Players
+          <span class="dualrange" id="f_sizerange">
+            <span class="rangetrack"><span class="rangefill" id="f_sizefill"></span></span>
+            <input type="range" id="f_smin" aria-label="fewest players">
+            <input type="range" id="f_smax" aria-label="most players">
+          </span>
+          <output id="f_sizeout" for="f_smin f_smax"></output>
+        </label>
+        <!-- Duration: the same two-thumb control over a fixed 0..1h domain.
+             The right thumb at 1h means "and longer" — it writes no upper
+             bound, so nothing is excluded above it. -->
+        <label id="f_durfilter">Duration
+          <span class="dualrange" id="f_durrange">
+            <span class="rangetrack"><span class="rangefill" id="f_durfill"></span></span>
+            <input type="range" id="f_dmin" aria-label="shortest game">
+            <input type="range" id="f_dmax" aria-label="longest game (top end includes anything longer)">
+          </span>
+          <output id="f_durout" for="f_dmin f_dmax"></output>
+        </label>
         <label>Player <input type="search" id="f_player" list="f_players" placeholder="name" autocomplete="off"></label>
         <datalist id="f_players"></datalist>
+        </div>
+        <div class="filterrow">
         <span id="f_settings" class="chips"></span>
+        <span class="filterfill"></span>
         <button type="button" id="f_clear" title="Clear all filters">Clear</button>
         <!-- Admin-only, and deliberately a BUTTON: listing unregistered uploads
              means scanning the whole bucket (~1.5 s), which is not something to
@@ -82,6 +114,17 @@
         <button type="button" id="f_orphans" class="admin"
                 title="Scan the bucket for uploads that were never registered in the catalog (slow: reads every object)">Unregistered</button>
         <span id="f_count" class="hint"></span>
+        </div>
+      </div>
+      <!-- Pager, above the table: Prev/Next only. There is deliberately no
+           page count — knowing how many pages exist would mean counting the
+           whole catalog on every listing, and the answer is not worth a query
+           whose cost grows with the archive. The list asks for one row more
+           than it shows, and that row's existence IS "there is a next page". -->
+      <div id="homepager" style="display:none">
+        <button type="button" id="p_prev" title="Previous page">‹ Prev</button>
+        <span id="p_range" class="hint"></span>
+        <button type="button" id="p_next" title="Next page">Next ›</button>
       </div>
       <table id="hometable">
         <thead>

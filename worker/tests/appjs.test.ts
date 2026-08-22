@@ -664,3 +664,398 @@ test('the catalog is fetched for the list view, not for a direct replay link', a
   assert.equal(s.filters, 1, 'facets fetched once for the list view');
   assert.ok(s.renders >= 1, 'the table is rendered');
 });
+
+// A DOM small enough to render one table into and read back: renderHome only
+// creates elements, sets text/class, and appends. Kept out of the eval string
+// (which a direct eval lets it reach) so the harness below stays readable.
+function fakeDom() {
+  const node = (tag: string): any => {
+    const n: any = {
+      tag, children: [] as any[], style: {}, title: '', href: undefined as string | undefined,
+      className: '', _text: '',
+      classList: {
+        add(c: string) { if (!n.classList.contains(c)) n.className = (n.className + ' ' + c).trim(); },
+        remove(c: string) { n.className = n.className.split(/\s+/).filter((x: string) => x !== c).join(' '); },
+        contains: (c: string) => n.className.split(/\s+/).includes(c),
+        toggle(c: string, on?: boolean) {
+          const want = on === undefined ? !n.classList.contains(c) : on;
+          if (want) n.classList.add(c); else n.classList.remove(c);
+        },
+      },
+      appendChild(c: any) { n.children.push(c); return c; },
+      addEventListener() {},
+    };
+    Object.defineProperty(n, 'textContent', {
+      get: () => n._text,
+      set: (v: string) => { n._text = v; if (v === '') n.children = []; },
+    });
+    return n;
+  };
+  const tbody = node('tbody');
+  const byId: Record<string, any> = {};
+  const document = {
+    createElement: node,
+    querySelector: () => tbody,
+    getElementById: (id: string) => (byId[id] ??= node('div')),
+    body: { classList: { add() {}, remove() {}, toggle() {} } },
+  };
+  return { document, tbody };
+}
+
+/** Every element in the subtree, so a cell's contents can be asked about
+ * without knowing which nesting produced them. */
+function walk(n: any, out: any[] = []): any[] {
+  for (const c of n.children ?? []) { out.push(c); walk(c, out); }
+  return out;
+}
+
+test('a game being processed is listed, badged first, and cannot be opened', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+
+  const dom = fakeDom();
+  const rows = [
+    // Published and idle: an ordinary row.
+    { id: 'plain', rid: 'plain-1', startUnix: 1787349909, durationSec: 217, map: 'Isidis crack 1.1',
+      gameSize: '1v1', sizeBytes: 100, players: [], settings: { lava: true }, uploads: [] },
+    // Published AND being re-simulated: badged, but still openable — an older
+    // revision is there to play.
+    { id: 'again', rid: 'again-1', startUnix: 1787349000, durationSec: 300, map: 'X', gameSize: '8v8',
+      sizeBytes: 200, players: [], settings: { lava: true }, uploads: [], processing: true },
+    // Nothing published yet: badged and not openable.
+    { id: 'fresh', rid: null, startUnix: 1787348000, durationSec: null, map: 'Y', gameSize: '1v1',
+      sizeBytes: null, players: [], settings: null, uploads: [], processing: true, placeholder: true },
+  ];
+
+  const render = eval(`(function(){
+    const document = dom.document;
+    const replayList = rows;
+    const homeDataLoaded = true;
+    const ALLY_HUES = [0, 120];
+    const urlId = (e) => e.rid || e.id;
+    const replayHref = (id) => '/?replay=' + id;
+    const fmtDate = () => 'date', fmtDuration = () => 'dur', fmtSize = () => 'size';
+    // The real one is exercised by its own tests; here it only has to produce
+    // a badge for the pill to be ahead of.
+    const settingsBadges = (s) => (s ? [{ key: 'lava', label: 'lava' }] : []);
+    const adminMode = () => false, syncOrphanButton = () => {}, filterQuery = () => '';
+    // Paging state: this test is about the rows, so one page holds them all.
+    const PAGE_SIZE = 50; let homePage = 0, homeHasNext = false;
+    const goPage = () => {};
+    ${extract('renderPager')}
+    ${extract('renderHome')}
+    return renderHome;
+  })()`);
+
+  render();
+
+  const trs = dom.tbody.children;
+  assert.equal(trs.length, 3, 'every row is listed, including the one with nothing to play');
+
+  const pillOf = (tr: any) => walk(tr).find((n) => n.className.includes('badge-processing'));
+  assert.equal(pillOf(trs[0]), undefined, 'an idle row carries no processing pill');
+  assert.ok(pillOf(trs[1]), 'a game being worked on is badged');
+  assert.ok(pillOf(trs[2]), 'so is one with nothing published yet');
+  assert.equal(pillOf(trs[1]).textContent, 'processing');
+
+  // The pill LEADS the settings cell: it is why the row is there, not one
+  // more game setting, so it must not be hunted for among them.
+  const settingsCell = (tr: any) => tr.children.find((td: any) => td.className === 'settings');
+  const badges = settingsCell(trs[1]).children[0].children;
+  assert.equal(badges[0].className, 'badge badge-processing');
+  assert.equal(badges[1].textContent, 'lava', 'the game settings follow it');
+
+  // Openability: an internal link exists on the two published rows and on
+  // neither cell of the third. Only the external links (class "ext") remain,
+  // and those point at other sites, not at a replay this worker cannot serve.
+  const internalLinks = (tr: any) =>
+    walk(tr).filter((n) => n.tag === 'a' && !n.className.includes('ext')).length;
+  assert.ok(internalLinks(trs[0]) > 0, 'a published row is a link');
+  assert.ok(internalLinks(trs[1]) > 0, 'so is one being re-simulated');
+  assert.equal(internalLinks(trs[2]), 0, 'a row with nothing to play links nowhere');
+  assert.ok(trs[2].className.includes('unopenable'), 'and says so to the stylesheet');
+  assert.ok(!trs[1].className.includes('unopenable'));
+});
+
+test('the players filter is a two-ended range over the sizes present', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+
+  const boot = (query: string, sizes: number[]) => {
+    const dom = fakeDom();
+    const state = { href: 'https://x/' + query, reloads: 0 };
+    const run = eval(`(function(){
+      const document = dom.document;
+      const location = { get href() { return state.href; } };
+      const history = { replaceState: (_a, _b, u) => { state.href = String(u); } };
+      const reloadList = () => { state.reloads++; };
+      ${extract('initDualRange')}
+      ${extract('initSizeRange')}
+      return initSizeRange;
+    })()`);
+    run(new URLSearchParams(query), sizes);
+    const id = (x: string) => dom.document.getElementById(x);
+    return { dom, state, id, params: () => new URL(state.href).searchParams };
+  };
+
+  // Restored from the URL, and the domain is the catalog's own span.
+  {
+    const b = boot('?minPlayers=4&maxPlayers=8', [2, 4, 8, 16]);
+    assert.equal(b.id('f_smin').min, '2');
+    assert.equal(b.id('f_smax').max, '16');
+    assert.equal(b.id('f_smin').value, '4');
+    assert.equal(b.id('f_smax').value, '8');
+    assert.equal(b.id('f_sizeout').textContent, '4–8');
+    assert.ok(b.id('f_sizerange').classList.contains('narrowed'));
+  }
+
+  // No params: both thumbs at their ends, and the label says so rather than
+  // showing a range that happens to match everything.
+  {
+    const b = boot('', [2, 16]);
+    assert.equal(b.id('f_smin').value, '2');
+    assert.equal(b.id('f_smax').value, '16');
+    assert.equal(b.id('f_sizeout').textContent, 'any');
+    assert.ok(!b.id('f_sizerange').classList.contains('narrowed'));
+  }
+
+  // Dragging the left thumb writes only the bound it changed: a thumb parked
+  // at its end is not a filter, so the other param stays absent.
+  {
+    const b = boot('', [2, 16]);
+    b.id('f_smin').value = '8';
+    b.id('f_smin').oninput();
+    b.id('f_smin').onchange();
+    assert.equal(b.params().get('minPlayers'), '8');
+    assert.equal(b.params().get('maxPlayers'), null, 'the untouched end is not a filter');
+    assert.equal(b.id('f_sizeout').textContent, '8–16');
+
+    // ...and sliding it back clears it again, so the URL returns to unfiltered.
+    b.id('f_smin').value = '2';
+    b.id('f_smin').oninput();
+    b.id('f_smin').onchange();
+    assert.equal(b.params().get('minPlayers'), null);
+    assert.equal(b.id('f_sizeout').textContent, 'any');
+  }
+
+  // The thumbs push rather than cross: the max cannot be dragged below the
+  // min, which would be a range matching nothing.
+  {
+    const b = boot('?minPlayers=8', [2, 16]);
+    b.id('f_smax').value = '4';
+    b.id('f_smax').oninput();
+    b.id('f_smax').onchange();
+    assert.equal(b.id('f_smax').value, '8');
+    assert.equal(b.id('f_sizeout').textContent, '8', 'both ends on one size reads as that size');
+    assert.equal(b.params().get('maxPlayers'), '8');
+  }
+
+  // A hand-edited URL with the bounds crossed is straightened out rather than
+  // shown as thumbs that have swapped places.
+  {
+    const b = boot('?minPlayers=12&maxPlayers=4', [2, 16]);
+    assert.equal(b.id('f_smin').value, '4');
+    assert.equal(b.id('f_smax').value, '4');
+  }
+
+  // Values outside the catalog's span are clamped into it.
+  {
+    const b = boot('?minPlayers=1&maxPlayers=99', [2, 16]);
+    assert.equal(b.id('f_smin').value, '2');
+    assert.equal(b.id('f_smax').value, '16');
+  }
+
+  // One distinct size is nothing to slide between, so the control is left out.
+  {
+    const b = boot('', [8]);
+    assert.equal(b.id('f_sizefilter').style.display, 'none');
+    assert.equal(boot('', []).id('f_sizefilter').style.display, 'none');
+  }
+
+  // Overlapping thumbs stay separable: the side of them the pointer is on
+  // decides which one a press will grab.
+  {
+    const b = boot('?minPlayers=8&maxPlayers=8', [0, 16]);
+    const rail = b.id('f_sizerange');
+    rail.getBoundingClientRect = () => ({ left: 0, width: 160 });
+    rail.onpointerdown({ clientX: 40, buttons: 0 });   // left of the pair
+    assert.ok(+b.id('f_smin').style.zIndex > +b.id('f_smax').style.zIndex);
+    rail.onpointerdown({ clientX: 120, buttons: 0 });  // right of it
+    assert.ok(+b.id('f_smax').style.zIndex > +b.id('f_smin').style.zIndex);
+  }
+});
+
+test('the duration filter ends at an hour, and that end means "and longer"', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+  // Taken from the source rather than restated, so the test cannot claim an
+  // hour while the page offers something else.
+  const capLine = /const DURATION_MAX_SEC = (\d+);/.exec(APP);
+  assert.ok(capLine, 'DURATION_MAX_SEC is declared');
+  const CAP = Number(capLine![1]);
+  assert.equal(CAP, 3600, 'the range tops out at one hour');
+
+  const boot = (query: string) => {
+    const dom = fakeDom();
+    const state = { href: 'https://x/' + query, reloads: 0 };
+    const run = eval(`(function(){
+      const document = dom.document;
+      const location = { get href() { return state.href; } };
+      const history = { replaceState: (_a, _b, u) => { state.href = String(u); } };
+      const reloadList = () => { state.reloads++; };
+      const DURATION_MAX_SEC = ${CAP};
+      ${extract('initDualRange')}
+      ${extract('initDurationRange')}
+      return initDurationRange;
+    })()`);
+    run(new URLSearchParams(query));
+    const id = (x: string) => dom.document.getElementById(x);
+    return { state, id, params: () => new URL(state.href).searchParams };
+  };
+
+  // Untouched: the whole span, in seconds, and no params.
+  {
+    const b = boot('');
+    assert.equal(b.id('f_dmin').min, '0');
+    assert.equal(b.id('f_dmax').max, String(CAP));
+    assert.equal(b.id('f_dmin').step, '60', 'a minute at a time');
+    assert.equal(b.id('f_durout').textContent, 'any');
+  }
+
+  // The top thumb left where it is: the filter is a floor, and the label says
+  // so rather than pretending there is a ceiling at an hour.
+  {
+    const b = boot('');
+    b.id('f_dmin').value = '1200';
+    b.id('f_dmin').oninput();
+    b.id('f_dmin').onchange();
+    assert.equal(b.id('f_durout').textContent, '20m+');
+    assert.equal(b.params().get('minDuration'), '1200');
+    assert.equal(b.params().get('maxDuration'), null, 'an hour means "and longer", so no upper bound is sent');
+  }
+
+  // Bringing the top thumb down is what actually caps the length.
+  {
+    const b = boot('');
+    b.id('f_dmax').value = '1800';
+    b.id('f_dmax').oninput();
+    b.id('f_dmax').onchange();
+    assert.equal(b.id('f_durout').textContent, '≤30m');
+    assert.equal(b.params().get('maxDuration'), '1800');
+
+    // ...and pushing it back to the top removes the cap again.
+    b.id('f_dmax').value = String(CAP);
+    b.id('f_dmax').oninput();
+    b.id('f_dmax').onchange();
+    assert.equal(b.params().get('maxDuration'), null);
+    assert.equal(b.id('f_durout').textContent, 'any');
+  }
+
+  // Both ends moved: a closed range, labelled as one.
+  {
+    const b = boot('?minDuration=600&maxDuration=2400');
+    assert.equal(b.id('f_dmin').value, '600');
+    assert.equal(b.id('f_dmax').value, '2400');
+    assert.equal(b.id('f_durout').textContent, '10m–40m');
+  }
+
+  // A URL asking for longer than the slider can show is clamped to its top —
+  // which filters for the same games, since that end is open.
+  {
+    const b = boot('?minDuration=7200');
+    assert.equal(b.id('f_dmin').value, String(CAP));
+    assert.equal(b.id('f_durout').textContent, '1h+');
+  }
+});
+
+test('the pager offers Prev/Next and a range, never a page count', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+  const sizeLine = /const PAGE_SIZE = (\d+);/.exec(APP);
+  assert.ok(sizeLine, 'PAGE_SIZE is declared');
+  assert.equal(Number(sizeLine![1]), 50, 'a page is 50 rows');
+
+  const boot = (page: number, rows: number, hasNext: boolean) => {
+    const dom = fakeDom();
+    const steps: number[] = [];
+    const run = eval(`(function(){
+      const document = dom.document;
+      const PAGE_SIZE = ${Number(sizeLine![1])};
+      const homePage = ${page};
+      const homeHasNext = ${hasNext};
+      const replayList = new Array(${rows}).fill(0);
+      const goPage = (d) => { steps.push(d); };
+      ${extract('renderPager')}
+      return renderPager;
+    })()`);
+    run();
+    const id = (x: string) => dom.document.getElementById(x);
+    return { id, steps };
+  };
+
+  // One page holds everything: no pager at all, so a small catalog looks
+  // exactly as it did before paging existed.
+  assert.equal(boot(0, 12, false).id('homepager').style.display, 'none');
+
+  // First page of more: Prev is dead, Next is live, and the label says where
+  // you are — not how many pages there are, which nothing counts.
+  {
+    const b = boot(0, 50, true);
+    assert.equal(b.id('homepager').style.display, '');
+    assert.equal(b.id('p_prev').disabled, true);
+    assert.equal(b.id('p_next').disabled, false);
+    assert.equal(b.id('p_range').textContent, '1–50');
+    b.id('p_next').onclick();
+    assert.deepEqual(b.steps, [1]);
+  }
+
+  // A middle page: both live, and the range is offset by the pages before it.
+  {
+    const b = boot(2, 50, true);
+    assert.equal(b.id('p_prev').disabled, false);
+    assert.equal(b.id('p_range').textContent, '101–150');
+    b.id('p_prev').onclick();
+    assert.deepEqual(b.steps, [-1]);
+  }
+
+  // The last page: Next is dead, and a short page is labelled by what it
+  // actually holds.
+  {
+    const b = boot(3, 7, false);
+    assert.equal(b.id('p_next').disabled, true);
+    assert.equal(b.id('p_prev').disabled, false);
+    assert.equal(b.id('p_range').textContent, '151–157');
+  }
+});
