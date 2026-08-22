@@ -240,8 +240,10 @@ the game now running — one lobby names game after game, one `lobbies` row per 
 The name is **served, not copied**: `GET /api/replays` joins `games.lobby_name` per read
 into each row's `lobbyName`, so it appears the moment the match lands, with no republish.
 In the list, the **Players column header is a switch** — click it to swap the column
-between the rosters and the lobby name (a dash where no match exists). The Go viz server
-has no games mirror, omits the field, and the header stays inert there.
+between the rosters and the lobby name (a dash where no match exists). The choice lives
+in the URL as `?col=lobby` (absent = players), so it is shareable and survives a refresh
+and a round trip through a replay. The Go viz server has no games mirror, omits the
+field, and the header stays inert there — a `?col=lobby` link still lists players.
 
 The teiserver **web session** (the Guardian cookie jar) persists in the one-row DO table
 `teiserver_session`, so the steady state is **one authed GET per minute** — no re-login —

@@ -969,8 +969,11 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           (app.js playersColumn): clicking it swaps the column between the
                           rosters and the lobby name (dash when unmatched) — offered only
                           when any row carries the key, since a toggle to a column of dashes
-                          on the Go backend would be worse than none. Plain view state, like
-                          queueOpen — not in the URL. The web SESSION (the Guardian
+                          on the Go backend would be worse than none. The choice lives in
+                          the URL (?col=lobby, replaceState like the filters, absent =
+                          players so a fresh URL stays clean; replayHref carries it into a
+                          replay), and on a backend without the field a ?col=lobby link
+                          degrades to players without touching the param, like ?tab=queue. The web SESSION (the Guardian
                           cookie jar) persists in the one-row teiserver_session table, so the
                           steady state is ONE authed GET per tick, no login (an expired
                           session shows as a redirect to /login: drop the cookie, log in once,
