@@ -2,10 +2,13 @@ package resim
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/mabn/barreplay/internal/engine"
 )
 
 // A phase change wipes the simulation numbers: they describe the simulating
@@ -125,4 +128,76 @@ func stays(cond func() bool, d time.Duration) bool {
 		time.Sleep(time.Millisecond)
 	}
 	return cond()
+}
+
+// The guard's reading is what explains a stopped run, so the FIRST one wins:
+// by the time the engine has actually died the host may well have recovered,
+// and a later, healthier-looking number would describe the recovery rather
+// than the decision.
+func TestMemGuardKeepsTheFirstReading(t *testing.T) {
+	var g memGuard
+	if _, _, tripped := g.reading(); tripped {
+		t.Fatal("a fresh guard reads as tripped")
+	}
+	g.trip(400<<20, 6<<30)
+	g.trip(3<<30, 1<<20) // the host recovering after the kill
+	avail, rss, tripped := g.reading()
+	if !tripped || avail != 400<<20 || rss != 6<<30 {
+		t.Errorf("reading = (%d, %d, %v), want the first one", avail, rss, tripped)
+	}
+}
+
+// minFree's three cases: unset takes the package default, a value is used as
+// given, and negative is the caller saying "let the kernel have it".
+func TestOptionsMinFree(t *testing.T) {
+	if got, want := (Options{}).minFree(), engine.DefaultMinFreeBytes; got != want {
+		t.Errorf("unset minFree = %d, want the default %d", got, want)
+	}
+	if got := (Options{MinFreeBytes: 256 << 20}).minFree(); got != 256<<20 {
+		t.Errorf("minFree = %d, want what was set", got)
+	}
+	// engine.WatchMemory treats <= 0 as off, so this must stay negative rather
+	// than being helpfully turned back into the default.
+	if got := (Options{MinFreeBytes: -1}).minFree(); got > 0 {
+		t.Errorf("minFree = %d, want the guard left disabled", got)
+	}
+}
+
+// A run that fails must not leave the widget's raw stream behind. It lives in
+// the DATA dir (the Lua sandbox forces that), it is hundreds of megabytes, and
+// a daemon handed games too big for its host would otherwise accumulate one per
+// abandoned game until the disk is the next thing to go.
+//
+// Run cannot be driven without an engine, so this exercises the cleanup the way
+// Run registers it: a deferred remove that fires only on the error path.
+func TestAbandonedStreamIsRemoved(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool // the stream should still be there afterwards
+	}{
+		{"a failed run drops it", errors.New("out of memory"), false},
+		// The success path MOVES it out to the capture directory, so the
+		// cleanup must keep its hands off.
+		{"a good run keeps it for the mover", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			stream := filepath.Join(dir, "game.brsnap")
+			if err := os.WriteFile(stream, []byte("BRSNAP"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			func() (retErr error) {
+				defer removeAbandonedStream(stream, &retErr)
+				return tc.err
+			}()
+			_, err := os.Stat(stream)
+			if got := err == nil; got != tc.want {
+				t.Errorf("stream present = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	// A stream that never appeared (the widget never ran) is not a warning.
+	var err error = errors.New("boom")
+	removeAbandonedStream(filepath.Join(t.TempDir(), "absent.brsnap"), &err)
 }

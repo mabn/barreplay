@@ -134,6 +134,7 @@ func run() int {
 		dataDir   = flag.String("data", os.Getenv("BAR_DATA_DIR"), "BAR/Spring data directory for -resim (engine/, games/, maps/; also --write-dir; default: $BAR_DATA_DIR)")
 		skipProv  = flag.Bool("no-provision", false, "-resim: do not download engine/game/map content; assume already installed")
 		progress  = flag.Bool("progress", true, "-resim: print the frame/ETA progress line during a re-simulation, like cmd/barreplay's -progress")
+		minFree   = flag.Int("min-free", 512, "-resim: stop the engine when the host has less than this many MiB of memory left, instead of waiting for the kernel's OOM killer (0 disables)")
 		stats     = flag.Bool("stats", true, "print the packed .brp's size breakdown (per-section sizes + the top unit defs by encoded bytes) for each replay published, like pack -stats")
 		logPath   = flag.String("log", defaultLogPath, "also append everything printed to this file (empty disables)")
 	)
@@ -180,6 +181,14 @@ func run() int {
 	what := "pending jobs"
 	if *doResim {
 		ro := resim.Options{DataDir: *dataDir, SkipProvision: *skipProv}
+		// 0 on the command line means "no guard"; resim reads 0 as "use the
+		// default", so the two are translated here rather than making the flag
+		// lie about what 0 does.
+		if *minFree <= 0 {
+			ro.MinFreeBytes = -1
+		} else {
+			ro.MinFreeBytes = int64(*minFree) << 20
+		}
 		if *progress {
 			ro.ProgressEvery = progressEvery
 		}
@@ -506,7 +515,7 @@ func (d *daemon) runOnce(ctx context.Context) (int, error) {
 		st, err := d.handle(ctx, j)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "bringest: job %s (%s): %v\n", j.ID, j.GameID, err)
-			d.report(ctx, j.ID, "error", err.Error(), st)
+			d.reportError(ctx, j.ID, err, st)
 		} else {
 			fmt.Fprintf(os.Stderr, "bringest: job %s (%s): published\n", j.ID, j.GameID)
 			d.report(ctx, j.ID, "done", "", st)
@@ -622,6 +631,37 @@ func (d *workerAPI) announce(ctx context.Context, gameID string) (jobID string, 
 		return "", false
 	}
 	return out.Job, true
+}
+
+// Failure kinds the daemon can recognise, reported alongside the message so the
+// queue page can tell them apart without parsing a sentence — and so a queue
+// full of failures says which of them are the MACHINE's fault rather than the
+// game's. The set is small on purpose: only what can be detected exactly, since
+// a guess here is worse than saying nothing.
+const errKindOOM = "oom"
+
+// errorKind classifies a job failure, or returns "" for one the daemon has no
+// name for — which is most of them, and which the worker renders as a plain
+// error exactly as before.
+func errorKind(err error) string {
+	if errors.Is(err, resim.ErrOutOfMemory) {
+		return errKindOOM
+	}
+	return ""
+}
+
+// reportError posts a job's failure with its message, its processing record and
+// — where the daemon can tell — what KIND of failure it was. Separate from
+// report because only this path has a cause to classify.
+func (d *workerAPI) reportError(ctx context.Context, jobID string, cause error, st *jobStats) error {
+	body := map[string]any{"state": "error", "error": cause.Error()}
+	if k := errorKind(cause); k != "" {
+		body["errorKind"] = k
+	}
+	if st != nil {
+		body["stats"] = st
+	}
+	return d.api(ctx, http.MethodPost, "/api/jobs/"+url.PathEscape(jobID), body, nil)
 }
 
 // claim takes a job, and unlike report it can legitimately FAIL: the worker
@@ -950,7 +990,7 @@ func (r *resimDaemon) runScanned(ctx context.Context, gameID string) error {
 	if err != nil {
 		// With the stats, like the queued path: forty minutes that ended badly
 		// is the record most worth keeping.
-		r.report(ctx, jobID, "error", err.Error(), st)
+		r.reportError(ctx, jobID, err, st)
 		return err
 	}
 	r.report(ctx, jobID, "done", "", st)
@@ -1001,7 +1041,7 @@ func (r *resimDaemon) runQueued(ctx context.Context) (int, error) {
 			fmt.Fprintf(os.Stderr, "bringest: %s: resim failed: %v\n", j.GameID, rerr)
 			// With the stats: forty minutes of engine time that ended badly is
 			// the record most worth keeping, not the one to throw away.
-			r.report(ctx, j.ID, "error", rerr.Error(), st)
+			r.reportError(ctx, j.ID, rerr, st)
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "bringest: %s: full view published\n", j.GameID)

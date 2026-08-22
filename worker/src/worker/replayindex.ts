@@ -20,12 +20,30 @@
 import { DurableObject } from "cloudflare:workers";
 
 import type { GameEntry } from "./games";
-import { parseJobProgress, parseJobStats } from "./jobs";
-import type { IngestJob, JobKind, JobProgress, JobSample, JobStats, QueueGame, QueueJob } from "./jobs";
+import { parseJobErrorKind, parseJobProgress, parseJobStats } from "./jobs";
+import type {
+  IngestJob,
+  JobErrorKind,
+  JobKind,
+  JobProgress,
+  JobSample,
+  JobStats,
+  QueueGame,
+  QueueJob,
+} from "./jobs";
 import { FACET_PLAYERS_MAX, SETTINGS_MODS_FLAG, derivePlayerCount, mergeUploads } from "./replayentry";
 import type { CatalogTeam, ReplayEntry, ReplayFacets, ReplayFilter, UploadRef } from "./replayentry";
 
-export type { IngestJob, JobKind, JobProgress, JobSample, JobStats, QueueGame, QueueJob } from "./jobs";
+export type {
+  IngestJob,
+  JobErrorKind,
+  JobKind,
+  JobProgress,
+  JobSample,
+  JobStats,
+  QueueGame,
+  QueueJob,
+} from "./jobs";
 
 /** A "processing" job untouched for this long is presumed crashed and is
  * offered to the daemon again alongside the pending ones. This is why a
@@ -68,7 +86,8 @@ export const JOB_SAMPLE_RETENTION_SEC = 30 * 24 * 60 * 60;
 
 /** Columns every jobs SELECT reads, in the order jobRow expects. */
 const JOB_COLS =
-  "id, stream_key, game_id, kind, state, error, stats, progress, disabled, created_unix, updated_unix";
+  "id, stream_key, game_id, kind, state, error, error_kind, stats, progress, disabled, " +
+  "created_unix, updated_unix";
 
 /** The same columns qualified to `j`, for the one query that joins the jobs
  * table against the two that know anything about a game. Derived from JOB_COLS
@@ -116,6 +135,7 @@ export class ReplayIndex extends DurableObject<Env> {
         kind         TEXT NOT NULL DEFAULT 'upload',
         state        TEXT NOT NULL,
         error        TEXT,
+        error_kind   TEXT,
         stats        TEXT,
         progress     TEXT,
         created_unix INTEGER NOT NULL,
@@ -222,6 +242,10 @@ export class ReplayIndex extends DurableObject<Env> {
     // Held back by hand from the queue page. NOT NULL with a default, so every
     // row that predates it reads as enabled, which is what they all were.
     addColumn("jobs", "disabled INTEGER NOT NULL DEFAULT 0");
+    // What kind of failure, for the failures the daemon can name. Nullable: it
+    // is null for every job that has not failed and for every failure with no
+    // name, which is most of them.
+    addColumn("jobs", "error_kind TEXT");
     // Added after the other sample columns: a run's remaining-time estimate was
     // reported from the start but only ever overwritten in place, so the rows
     // written before this have none and chart as a gap.
@@ -1177,6 +1201,7 @@ export class ReplayIndex extends DurableObject<Env> {
     error: string | null,
     stats: JobStats | null = null,
     progress: JobProgress | null = null,
+    errorKind: JobErrorKind | null = null,
   ): boolean {
     // One clock reading for the row and its sample, so a beat's point on the
     // chart is stamped with the same moment the row says it was updated.
@@ -1189,12 +1214,16 @@ export class ReplayIndex extends DurableObject<Env> {
     // recording even though nobody wanted it any more.
     if (state === "processing" && this.jobIsDisabled(id)) return true;
     const cur = this.ctx.storage.sql.exec(
-      `UPDATE jobs SET state = ?, error = ?, stats = COALESCE(?, stats),
+      `UPDATE jobs SET state = ?, error = ?, error_kind = ?, stats = COALESCE(?, stats),
               progress = CASE WHEN ? = 'processing' THEN COALESCE(?, progress) ELSE NULL END,
               updated_unix = ?
        WHERE id = ?`,
       state,
       error,
+      // Follows `error` exactly, not COALESCEd like the stats: it is a property
+      // OF that message, so a transition that clears the message and keeps its
+      // classification would be describing a failure that is no longer there.
+      errorKind,
       stats === null ? null : JSON.stringify(stats),
       state,
       progress === null ? null : JSON.stringify(progress),
@@ -1243,6 +1272,7 @@ function jobRow(r: Record<string, unknown>): IngestJob {
     kind: ((r.kind as JobKind | null) ?? "upload") as JobKind,
     state: r.state as IngestJob["state"],
     error: r.error as string | null,
+    errorKind: parseJobErrorKind(r.error_kind),
     // Stored as JSON text. A row written before the column, or one whose
     // daemon never reported, has none — and a blob that somehow does not parse
     // is not worth failing a queue read over.
