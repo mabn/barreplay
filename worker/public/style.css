@@ -211,6 +211,23 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
   background: #1b232c; border: 1px solid #2f3947; color: #8a98a6;
 }
 #queuetable .kind-resim { color: #d3b98f; border-color: #5c4a2f; background: #2b2417; }
+/* Held back by hand: nothing will pick this job up. Deliberately the quietest
+   of the state chips — it is a row that is NOT going anywhere, so it should not
+   compete with the ones that are. */
+#queuetable .state-disabled { color: #9a8fb0; border-color: #4a3f5c; background: #241f2e; }
+/* The row's one control. Ghosted until the row is hovered, so a column of them
+   does not read as the point of the table; the enabled-again variant stays lit,
+   since a held-back row is the one a person is looking for. */
+#queuetable td.act { text-align: right; padding-right: 10px; }
+#queuetable .jobbtn {
+  font: inherit; font-size: 11px; line-height: 1; padding: 4px 9px; border-radius: 4px;
+  color: #8a98a6; background: #1b232c; border: 1px solid #2f3947; cursor: pointer;
+  opacity: 0; transition: opacity .12s;
+}
+#queuetable tr:hover .jobbtn, #queuetable .jobbtn:focus-visible, #queuetable .jobbtn.on { opacity: 1; }
+#queuetable .jobbtn:hover { color: #cfe3f5; border-color: #3f4b5a; background: #222c37; }
+#queuetable .jobbtn.on { color: #b9a9d0; border-color: #4a3f5c; background: #241f2e; }
+#queuetable .jobbtn:disabled { cursor: default; opacity: .6; }
 /* A running job's live self-report, in the same cell a finished one puts its
    failure detail — the two never coexist (the worker clears progress when a job
    reaches a terminal state). The bar is deliberately thin and unlabelled: the

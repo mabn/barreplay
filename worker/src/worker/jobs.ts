@@ -32,6 +32,15 @@ export interface IngestJob {
   state: (typeof JOB_STATES)[number];
   /** Failure detail when state is "error". */
   error: string | null;
+  /** Held back: no daemon will be offered this job, and no game it names will
+   * be auto-queued while the row exists. Orthogonal to `state` rather than a
+   * fifth value of it — the four states describe how far the WORK got, and
+   * being held back is not a stage of that; it is also reversible, which a
+   * state would make awkward. Disabling a running job resets it to "pending"
+   * (nothing is working on it as far as this table is concerned) and its
+   * heartbeats stop moving it, though a daemon already mid-run may still
+   * report a terminal state, which is recorded. */
+  disabled: boolean;
   /** What the work cost, reported by the daemon with its terminal state — see
    * JobStats. Null until then (and for a job that predates the column). */
   stats: JobStats | null;
@@ -121,6 +130,11 @@ export interface JobSample {
   state: string | null;
   frame: number | null;
   percent: number | null;
+  /** What the daemon thought was left, at that moment. Charted over time it is
+   * the one series that says whether the run is CONVERGING: a healthy re-sim
+   * walks it down towards zero, and a stretch where it climbs is the run
+   * getting slower than it is getting on. */
+  etaSec: number | null;
   rssBytes: number | null;
   cpuPct: number | null;
 }

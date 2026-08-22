@@ -3959,7 +3959,7 @@ function statsRow(j) {
   const tr = document.createElement('tr');
   tr.className = 'statsrow';
   const td = document.createElement('td');
-  td.colSpan = 7;
+  td.colSpan = 8;
   const dl = document.createElement('div');
   dl.className = 'statsgrid';
   const lines = [...(j.progress ? progressLines(j.progress) : []),
@@ -4018,10 +4018,25 @@ const CH_W = 340, CH_H = 84, CH_L = 46, CH_R = 6, CH_T = 12, CH_B = 16;
 // Two formatters, because an axis tick and a readout want different things: the
 // tick has a 40px gutter and must stay in it, the tooltip has a line and can
 // say what the number means.
+// `max` fixes the domain where the whole is known — a percentage of the game is
+// 0-100 whatever this run reached, and letting it autoscale would draw a
+// stalled run exactly like a finished one.
+//
+// `mark` picks the one point that gets a direct label, and it differs because
+// the axis already says different things. On an autoscaled chart the top tick
+// IS the peak, so 'peak' draws a bare dot: WHEN it happened, which no tick can
+// say. On the others the axis says nothing about this particular run, so 'last'
+// labels where it ended up — for the ETA that is "how much was left when it
+// stopped reporting", which for a run that died is the whole story.
 const JOB_CHARTS = [
-  { key: 'rssBytes', title: 'Engine memory', tick: (v) => fmtSize(v), fmt: (v) => fmtSize(v) },
-  { key: 'cpuPct', title: 'Engine CPU', tick: (v) => Math.round(v) + '%', fmt: (v) => Math.round(v) + '% of one core' },
-  { key: 'percent', title: 'Simulation', tick: (v) => Math.round(v) + '%', fmt: (v) => v.toFixed(1) + '%', max: 100 },
+  { key: 'rssBytes', title: 'Engine memory', tick: (v) => fmtSize(v), fmt: (v) => fmtSize(v), mark: 'peak' },
+  { key: 'cpuPct', title: 'Engine CPU', tick: (v) => Math.round(v) + '%', fmt: (v) => Math.round(v) + '% of one core', mark: 'peak' },
+  { key: 'percent', title: 'Simulation', tick: (v) => Math.round(v) + '%', fmt: (v) => v.toFixed(1) + '%', max: 100, mark: 'last' },
+  // Time REMAINING, which is the only series here that should be going down.
+  // A healthy run walks it towards zero at roughly the rate the clock moves;
+  // a stretch where it climbs is the run getting slower faster than it is
+  // getting on, which no other chart states outright.
+  { key: 'etaSec', title: 'Estimated time left', tick: (v) => fmtDuration(v), fmt: (v) => fmtDur(v) + ' left', mark: 'last' },
 ];
 
 // Fetched per expanded row rather than with the queue page: 25 rows would
@@ -4196,11 +4211,11 @@ function buildChart(box, spec, rows, vals, t0) {
   // labelled — "it got to 87%" is the whole story of a re-sim that stopped.
   let hi = 0;
   vals.forEach((v, i) => { if (v !== null && v > (vals[hi] ?? -Infinity)) hi = i; });
-  const at = spec.max ? lastIndexWithValue(vals) : hi;
+  const at = spec.mark === 'last' ? lastIndexWithValue(vals) : hi;
   if (at >= 0) {
     const x = px(at), y = py(vals[at]);
     svg.appendChild(svgEl('circle', { cx: x, cy: y, r: 4, class: 'chpeak' }));
-    if (spec.max) {
+    if (spec.mark === 'last') {
       // Anchored inward from the right edge it sits on, and dropped below the
       // mark when it would otherwise ride out of the top of the plot.
       const lab = svgEl('text', {
@@ -4310,6 +4325,55 @@ function fillProgressCell(td, p) {
   td.appendChild(line);
 }
 
+// disableCell is the row's one control: hold this job back, or let it go again.
+//
+// Only offered where it can change anything — a job that is pending or running.
+// A finished or failed job is already never handed out, so a switch on it would
+// be a control that does nothing; and the row for a game whose job errored
+// still keeps that game out of the mirror's auto-queue, which is the effect
+// somebody would be reaching for.
+function disableCell(j) {
+  const td = document.createElement('td');
+  td.className = 'act';
+  const live = j.state === 'pending' || j.state === 'processing';
+  if (!live && !j.disabled) return td;
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'jobbtn' + (j.disabled ? ' on' : '');
+  b.textContent = j.disabled ? 'Enable' : 'Disable';
+  b.title = j.disabled
+    ? 'Let daemons pick this job up again'
+    : 'Hold this job back. It will not be offered to any daemon, and the game stays out of the '
+      + 'auto-queue while the row exists. A run already under way is NOT stopped — nothing here can '
+      + 'reach that machine — but the row is reset so it is not simply re-offered later.';
+  b.onclick = (ev) => {
+    ev.stopPropagation(); // the row is an expand toggle; this is not that
+    setJobDisabled(j, !j.disabled, b);
+  };
+  td.appendChild(b);
+  return td;
+}
+
+// setJobDisabled flips one job and re-reads the page, so what is shown is what
+// the worker actually did rather than what the click assumed.
+async function setJobDisabled(j, disabled, btn) {
+  btn.disabled = true;
+  btn.textContent = '…';
+  try {
+    const r = await fetch('/api/jobs/' + encodeURIComponent(j.id) + '/disabled', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ disabled }),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+  } catch (err) {
+    btn.disabled = false;
+    renderQueue('Could not ' + (disabled ? 'disable' : 'enable') + ' that job: ' + (err.message || err));
+    return;
+  }
+  refreshQueue();
+}
+
 function renderQueue(errMsg) {
   const rows = queuePage ? queuePage.jobs : [];
   const tbody = document.querySelector('#queuetable tbody');
@@ -4368,8 +4432,13 @@ function renderQueue(errMsg) {
     {
       const td = document.createElement('td');
       const s = document.createElement('span');
-      s.className = 'state state-' + String(j.state).replace(/[^\w-]/g, '');
-      s.textContent = j.state;
+      // Held back reads as a state here even though it is stored beside one:
+      // "pending" on a row nothing will ever pick up is the misleading half of
+      // the truth, and the state column is what gets scanned down.
+      const held = j.disabled;
+      s.className = 'state state-' + (held ? 'disabled' : String(j.state).replace(/[^\w-]/g, ''));
+      s.textContent = held ? 'disabled' : j.state;
+      if (held) s.title = 'Held back — no daemon will pick this up. Underlying state: ' + j.state;
       td.appendChild(s);
       tr.appendChild(td);
     }
@@ -4405,6 +4474,7 @@ function renderQueue(errMsg) {
     const detail = cell(j.error || null, 'detail');
     if (j.error) detail.classList.add('error');
     else if (j.progress) fillProgressCell(detail, j.progress);
+    tr.appendChild(disableCell(j));
     tbody.appendChild(tr);
 
     // The details row, only while expanded. Clicking anywhere on the job's
@@ -4412,7 +4482,9 @@ function renderQueue(errMsg) {
     if (j.stats || j.progress) {
       tr.classList.add('hasstats');
       tr.addEventListener('click', (ev) => {
-        if (ev.target.closest('a')) return;
+        // Links are there to be followed and the control is there to be
+        // clicked; neither is a request to expand the row.
+        if (ev.target.closest('a') || ev.target.closest('button')) return;
         if (queueOpen.has(j.id)) queueOpen.delete(j.id);
         else queueOpen.add(j.id);
         renderQueue(errMsg);

@@ -1088,7 +1088,7 @@ test('a running job shows its live progress instead of an empty row', () => {
     // Mid-simulation: every number the daemon can report.
     {
       id: 'running', gameId: 'aaa', kind: 'resim', state: 'processing', error: null, stats: null,
-      createdUnix: 1787349000, updatedUnix: 1787349900,
+      createdUnix: 1787349000, updatedUnix: 1787349900, disabled: false,
       progress: {
         state: 'simulating', frame: 43000, totalFrames: 100170, percent: 42.9,
         etaSec: 840, simFps: 68.2, rssBytes: 3221225472, cpuPct: 612.5,
@@ -1099,14 +1099,15 @@ test('a running job shows its live progress instead of an empty row', () => {
     // job that is stuck rather than one that is working.
     {
       id: 'loading', gameId: 'bbb', kind: 'resim', state: 'processing', error: null, stats: null,
-      createdUnix: 1787349000, updatedUnix: 1787349900,
+      createdUnix: 1787349000, updatedUnix: 1787349900, disabled: false,
       progress: { state: 'starting engine', rssBytes: 1048576 },
     },
     // Finished badly: the worker cleared the progress when the job ended, so
     // the same cell carries the failure.
     {
       id: 'failed', gameId: 'ccc', kind: 'resim', state: 'error', error: 'no engine',
-      stats: null, progress: null, createdUnix: 1787349000, updatedUnix: 1787349900,
+      stats: null, progress: null, disabled: false,
+      createdUnix: 1787349000, updatedUnix: 1787349900,
     },
   ];
 
@@ -1125,6 +1126,7 @@ test('a running job shows its live progress instead of an empty row', () => {
     ${extract('progressText')}
     ${extract('statsTooltip')}
     ${extract('fillProgressCell')}
+    ${extract('disableCell')}
     ${extract('renderQueue')}
     return renderQueue;
   })()`);
@@ -1159,6 +1161,57 @@ test('a running job shows its live progress instead of an empty row', () => {
   assert.equal(tookOf(trs[0]).textContent, '▸ ~14m 00s left');
   assert.match(tookOf(trs[0]).title, /Now: simulating/);
   assert.ok(trs[0].className.includes('hasstats'), 'and the row expands for the rest');
+
+  // The hold-back control, offered only where it can change anything: a
+  // finished job is already never handed out, so a switch on it would be a
+  // control that does nothing.
+  const btnOf = (tr: any) => walk(tr).find((n: any) => n.tag === 'button');
+  assert.equal(btnOf(trs[0]).textContent, 'Disable', 'a running job can be held back');
+  assert.equal(btnOf(trs[1]).textContent, 'Disable');
+  assert.equal(btnOf(trs[2]), undefined, 'a failed job has nothing to hold back');
+});
+
+// A held-back row says so where the eye goes — the state column — rather than
+// showing "pending" on something nothing will ever pick up.
+test('a disabled job reads as disabled and offers the way back', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+  const dom = fakeDom();
+  const jobs = [{
+    id: 'held', gameId: 'aaa', kind: 'resim', state: 'pending', error: null, stats: null,
+    progress: null, disabled: true, createdUnix: 1787349000, updatedUnix: 1787349900,
+  }];
+  eval(`(function(){
+    const document = dom.document;
+    const replayList = [];
+    const queuePage = { jobs, total: 1, active: 0 };
+    const queueOffset = 0, queueReadAt = 0;
+    const queueOpen = new Set();
+    const fmtDate = () => 'date', fmtAgo = () => 'ago';
+    const replayHref = (id) => '/?replay=' + id, urlId = (e) => e.id, openReplay = () => {};
+    ${extract('fmtDur')} ${extract('statsLines')} ${extract('progressLines')}
+    ${extract('progressText')} ${extract('statsTooltip')} ${extract('fillProgressCell')}
+    ${extract('fmtSize')} ${extract('disableCell')} ${extract('renderQueue')}
+    return renderQueue;
+  })()`)();
+
+  const tr = dom.tbody.children[0];
+  const state = walk(tr).find((n: any) => n.className.startsWith('state '));
+  assert.equal(state.textContent, 'disabled', 'not "pending" on a row nothing will pick up');
+  assert.ok(state.className.includes('state-disabled'));
+  assert.match(state.title, /Underlying state: pending/, 'the real state stays available');
+
+  const btn = walk(tr).find((n: any) => n.tag === 'button');
+  assert.equal(btn.textContent, 'Enable');
+  assert.ok(btn.className.includes('on'), 'and it stays lit rather than waiting for a hover');
 });
 
 // The healthcheck history, drawn. Three separate plots, never one with three
@@ -1180,10 +1233,10 @@ test('a job\'s healthcheck history is drawn as one chart per measure', () => {
   const dom = fakeDom();
   // A load phase that reports memory but no simulation, then a run.
   const rows = [
-    { atUnix: 1000, state: 'loading', frame: null, percent: null, rssBytes: 1e9, cpuPct: 120 },
-    { atUnix: 1010, state: 'simulating', frame: 300, percent: 10, rssBytes: 2e9, cpuPct: 500 },
-    { atUnix: 1020, state: 'simulating', frame: 600, percent: 20, rssBytes: 4e9, cpuPct: 610 },
-    { atUnix: 1030, state: 'simulating', frame: 900, percent: 30, rssBytes: 3e9, cpuPct: 400 },
+    { atUnix: 1000, state: 'loading', frame: null, percent: null, etaSec: null, rssBytes: 1e9, cpuPct: 120 },
+    { atUnix: 1010, state: 'simulating', frame: 300, percent: 10, etaSec: 900, rssBytes: 2e9, cpuPct: 500 },
+    { atUnix: 1020, state: 'simulating', frame: 600, percent: 20, etaSec: 800, rssBytes: 4e9, cpuPct: 610 },
+    { atUnix: 1030, state: 'simulating', frame: 900, percent: 30, etaSec: 700, rssBytes: 3e9, cpuPct: 400 },
   ];
 
   const api = eval(`(function(){
@@ -1191,13 +1244,13 @@ test('a job\'s healthcheck history is drawn as one chart per measure', () => {
     ${consts}
     ${extract('svgEl')} ${extract('lastIndexWithValue')} ${extract('nearestSample')}
     ${extract('buildChart')} ${extract('showTip')} ${extract('jobCharts')}
-    ${extract('fmtSize')} ${extract('fmtDuration')}
+    ${extract('fmtSize')} ${extract('fmtDuration')} ${extract('fmtDur')}
     return { jobCharts, nearestSample, JOB_CHARTS, CH_W, CH_L, CH_R };
   })()`);
 
   const fig = api.jobCharts(rows);
   const svgs = walk(fig).filter((n: any) => n.tag === 'svg');
-  assert.equal(svgs.length, 3, 'one chart per measure, never one plot with three scales');
+  assert.equal(svgs.length, 4, 'one chart per measure, never one plot with several scales');
 
   const texts = (svg: any) => walk(svg).filter((n: any) => n.tag === 'text');
   const cls = (svg: any, c: string) => walk(svg).filter((n: any) => n.attrs.class === c);
@@ -1236,10 +1289,17 @@ test('a job\'s healthcheck history is drawn as one chart per measure', () => {
   assert.equal(simLine.length, 1, 'one unbroken run after the gap');
   assert.ok(Number(simLine[0].attrs.d.match(/^M([\d.]+)/)[1]) > api.CH_L, 'and it starts after the gap, not at the axis');
 
+  // The ETA is the one series that should be going DOWN, and its axis says
+  // nothing about this run, so it labels where it ended up — "how much was
+  // left when it stopped reporting", which for a run that died is the story.
+  const eta = svgs[3];
+  assert.equal(texts(eta).find((t: any) => t.attrs.class === 'chtick')._text, '15:00', 'the axis tops at the first estimate');
+  assert.equal(cls(eta, 'chlabel')[0]._text, '11m 40s left', 'the last estimate, not the biggest');
+
   // A measure the run never reported gets no plot at all: an empty axis would
   // claim a reading of zero, which is a different statement.
   const noEngine = rows.map((r) => ({ ...r, rssBytes: null, cpuPct: null }));
-  assert.equal(walk(api.jobCharts(noEngine)).filter((n: any) => n.tag === 'svg').length, 1);
+  assert.equal(walk(api.jobCharts(noEngine)).filter((n: any) => n.tag === 'svg').length, 2);
 
   // The crosshair finds the X: the reader aims at a moment, not at a 2px line.
   assert.equal(api.nearestSample(api.CH_L, 4), 0);

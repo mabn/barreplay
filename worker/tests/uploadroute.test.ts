@@ -54,23 +54,24 @@ class FakeIndex {
       error: null,
       stats: null,
       progress: null,
+      disabled: false,
       createdUnix: 0,
       updatedUnix: 0,
     });
   }
   // Both refusals plus the insert, in one call, exactly as the real DO does
   // them — it is single-threaded, which is what makes them atomic there.
-  resimEnqueue(id: string, gameId: string): { status: "queued" | "in-catalog" | "duplicate"; job: IngestJob | null } {
+  resimEnqueue(id: string, gameId: string): { status: string; job: IngestJob | null } {
     if (this.entries.has(gameId)) return { status: "in-catalog", job: null };
     return this.jobAnnounce(id, gameId, "resim");
   }
   // The same thing WITHOUT the catalog refusal: work the daemon found for
   // itself, every candidate of which is in the catalog by definition.
-  jobAnnounce(id: string, gameId: string, kind: JobKind): { status: "queued" | "duplicate"; job: IngestJob | null } {
+  jobAnnounce(id: string, gameId: string, kind: JobKind): { status: string; job: IngestJob | null } {
     const active = [...this.jobs.values()].find(
       (j) => j.gameId === gameId && j.kind === kind && (j.state === "pending" || j.state === "processing"),
     );
-    if (active) return { status: "duplicate", job: active };
+    if (active) return { status: active.disabled ? "disabled" : "duplicate", job: active };
     this.jobInsert(id, "", gameId, kind);
     return { status: "queued", job: this.jobs.get(id) ?? null };
   }
@@ -78,7 +79,17 @@ class FakeIndex {
     return this.jobs.get(id) ?? null;
   }
   jobsPending(kind: JobKind): IngestJob[] {
-    return [...this.jobs.values()].filter((j) => j.kind === kind && j.state === "pending");
+    return [...this.jobs.values()].filter((j) => j.kind === kind && j.state === "pending" && !j.disabled);
+  }
+  jobSetDisabled(id: string, disabled: boolean): boolean {
+    const j = this.jobs.get(id);
+    if (!j) return false;
+    j.disabled = disabled;
+    // Reset a claimed job: disabling cannot stop a daemon, so the row must not
+    // be left looking claimed. The real DO does this in the UPDATE's CASE.
+    if (disabled && j.state === "processing") j.state = "pending";
+    if (disabled) j.progress = null;
+    return true;
   }
   // What the route actually calls. The mirror backfill behind it is SQL over
   // three tables and is tested against the real Durable Object (tests/do);
@@ -88,7 +99,7 @@ class FakeIndex {
   }
   jobClaim(id: string): boolean {
     const j = this.jobs.get(id);
-    if (!j || j.state !== "pending") return false; // stale-processing needs a clock; not modelled
+    if (!j || j.disabled || j.state !== "pending") return false; // stale-processing needs a clock; not modelled
     j.state = "processing";
     j.error = null;
     j.progress = null; // a claim starts fresh; the previous holder's reading is not ours
@@ -129,6 +140,7 @@ class FakeIndex {
         state: (progress.state as string) ?? null,
         frame: progress.frame ?? null,
         percent: progress.percent ?? null,
+        etaSec: progress.etaSec ?? null,
         rssBytes: progress.rssBytes ?? null,
         cpuPct: progress.cpuPct ?? null,
       });
@@ -318,6 +330,7 @@ test("GET /api/queue lists jobs for the viewer without the archive key", async (
         error: null,
         stats: null,
         progress: null,
+        disabled: false,
         createdUnix: 0,
         updatedUnix: 0,
       },
@@ -944,7 +957,8 @@ test("a job's healthcheck history is served on its own route", async (t) => {
 
   const { samples } = await asJson(await app.request(`/api/jobs/${job}/samples`, {}, env));
   assert.equal(samples.length, 3, 'every beat is a point');
-  assert.deepEqual(samples[2], { atUnix: 2, state: "simulating", percent: 43, frame: null, rssBytes: 3e9, cpuPct: 610 });
+  assert.deepEqual(samples[2],
+    { atUnix: 2, state: "simulating", percent: 43, frame: null, etaSec: null, rssBytes: 3e9, cpuPct: 610 });
 
   // The series survives the job: the curve of a run that died is the whole
   // reason to keep it, and the live progress is gone by then.
@@ -1001,4 +1015,40 @@ test("a daemon can announce work it found itself, which /api/resim would refuse"
   assert.equal((await post({ gameId: "not-a-game" })).status, 400);
   assert.equal((await post({})).status, 400);
   assert.equal((await post({ gameId: RESIM_ID, kind: "upload" })).status, 400);
+});
+
+// The queue page's per-row switch. Disabling cannot reach out and stop an
+// engine on somebody else's machine, so what it does is stop the job being
+// HANDED OUT and reset a claimed row that would otherwise just be re-offered
+// once its stale window expired.
+test("a job can be held back from the queue page, and let go again", async (t) => {
+  const { env, index } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  const { job } = await asJson(
+    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+  );
+  const flip = (disabled: unknown, id = job) =>
+    app.request(`/api/jobs/${id}/disabled`, { method: "POST", body: JSON.stringify({ disabled }) }, env);
+
+  assert.equal((await asJson(await flip(true))).disabled, true);
+  assert.equal(index.jobGet(job)?.disabled, true);
+  assert.deepEqual(index.jobsPending("resim"), [], "and nothing is offered it");
+  assert.equal(index.jobClaim(job), false, "nor can a daemon that knows the id take it");
+
+  // It rides both open job reads, so the row can say so.
+  assert.equal((await asJson(await app.request(`/api/jobs/${job}`, {}, env))).disabled, true);
+  assert.equal((await asJson(await app.request("/api/queue", {}, env))).jobs[0].disabled, true);
+
+  // A held-back job still BLOCKS a new one for the same game — walking around
+  // it with a fresh row is exactly what "will not be picked up" rules out —
+  // and the paste box is told why rather than "already queued".
+  const again = await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env);
+  assert.equal(again.status, 409);
+  assert.equal((await asJson(again)).status, "disabled");
+
+  assert.equal((await asJson(await flip(false))).disabled, false);
+  assert.equal(index.jobsPending("resim").length, 1, "and it is work again");
+
+  assert.equal((await flip("yes")).status, 400);
+  assert.equal((await flip(true, "nope")).status, 404);
 });
