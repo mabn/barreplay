@@ -30,10 +30,13 @@ import type { JobKind } from "./jobs";
 import { archiveSuffix, scanStreamPreamble } from "./preamble";
 import { parseReplayFilter, parseViewRequest, playersFromApi, sanitizeEntry, settingsFlags } from "./replayentry";
 
-/** Upload size cap: keeps a whole raw stream comfortably inside Worker memory
- * and under every plan's request-body limit. Real streams are single-digit MB
- * (~6.5x smaller than the text format), so this is generous. */
-const MAX_UPLOAD = 64 << 20;
+/** Upload size cap: keeps a whole raw stream inside Worker memory. Real
+ * streams are single-digit MB (~6.5x smaller than the text format), so this
+ * is very generous — sized for the outliers, like a full-view capture of a
+ * marathon game. Note Cloudflare's own request-body limit still applies in
+ * front of the Worker and follows the ZONE's plan (100 MB on Free/Pro): on
+ * such a zone the edge 413s anything past that before this cap is consulted. */
+const MAX_UPLOAD = 150 << 20;
 
 const app = new Hono<{ Bindings: Env }>();
 
