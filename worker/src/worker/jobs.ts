@@ -109,6 +109,25 @@ export function parseJobProgress(v: unknown): JobProgress | null {
   return v as JobProgress;
 }
 
+/** What the queue page shows about the GAME a job is working on, as opposed to
+ * about the job. It is not part of IngestJob because it is not part of a job:
+ * the jobs table knows a gameId and nothing else about the game, and these are
+ * joined on at read time from whichever table happens to know them.
+ *
+ * Two sources, in that order of preference: the catalog row if the game has one
+ * (what was actually captured), else the games mirror (what BAR published).
+ * The mirror is what covers a re-sim of a game nobody has uploaded — which is
+ * most of what sits in this queue — and the catalog covers an upload of a game
+ * the mirror never saw. Null when neither knows it. */
+export interface QueueGame {
+  durationSec: number | null;
+  /** The team spec, "8v8" / "1v1". */
+  gameSize: string | null;
+}
+
+/** One row of the queue page: the job, plus what is known about its game. */
+export type QueueJob = IngestJob & { game: QueueGame | null };
+
 /** JobSample is one healthcheck kept as HISTORY — the same reading JobProgress
  * carries, plus the moment the worker recorded it, stored as its own row in
  * job_samples rather than overwritten in place.

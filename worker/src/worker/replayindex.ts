@@ -21,11 +21,11 @@ import { DurableObject } from "cloudflare:workers";
 
 import type { GameEntry } from "./games";
 import { parseJobProgress, parseJobStats } from "./jobs";
-import type { IngestJob, JobKind, JobProgress, JobSample, JobStats } from "./jobs";
+import type { IngestJob, JobKind, JobProgress, JobSample, JobStats, QueueGame, QueueJob } from "./jobs";
 import { FACET_PLAYERS_MAX, SETTINGS_MODS_FLAG, derivePlayerCount, mergeUploads } from "./replayentry";
 import type { CatalogTeam, ReplayEntry, ReplayFacets, ReplayFilter, UploadRef } from "./replayentry";
 
-export type { IngestJob, JobKind, JobProgress, JobSample, JobStats } from "./jobs";
+export type { IngestJob, JobKind, JobProgress, JobSample, JobStats, QueueGame, QueueJob } from "./jobs";
 
 /** A "processing" job untouched for this long is presumed crashed and is
  * offered to the daemon again alongside the pending ones. This is why a
@@ -69,6 +69,15 @@ export const JOB_SAMPLE_RETENTION_SEC = 30 * 24 * 60 * 60;
 /** Columns every jobs SELECT reads, in the order jobRow expects. */
 const JOB_COLS =
   "id, stream_key, game_id, kind, state, error, stats, progress, disabled, created_unix, updated_unix";
+
+/** The same columns qualified to `j`, for the one query that joins the jobs
+ * table against the two that know anything about a game. Derived from JOB_COLS
+ * rather than written out again, so the two cannot drift — and SQLite names a
+ * result column after the column, not the qualifier, so jobRow still finds
+ * every one of them. */
+const JOB_COLS_J = JOB_COLS.split(", ")
+  .map((c) => `j.${c}`)
+  .join(", ");
 
 /** What came of asking for a job: a fresh row, the one that already covers the
  * game, or a refusal. "disabled" and "in-catalog" are both "nothing will
@@ -945,18 +954,33 @@ export class ReplayIndex extends DurableObject<Env> {
    * `total` and `active` are counted over the WHOLE table, not the page, so a
    * pager can say how much it is paging through and the menu's in-flight count
    * stays true on any page. */
-  queuePage(limit: number, offset: number): { jobs: IngestJob[]; total: number; active: number } {
+  queuePage(limit: number, offset: number): { jobs: QueueJob[]; total: number; active: number } {
     const jobs = this.ctx.storage.sql
       .exec(
-        `SELECT ${JOB_COLS} FROM jobs
-         ORDER BY CASE WHEN state IN ('pending', 'processing') AND disabled = 0 THEN 0 ELSE 1 END,
-                  updated_unix DESC, id
+        // The jobs table knows a gameId and nothing else about the game, so the
+        // duration and the team spec are joined on from whichever table knows
+        // them: the catalog first (what was captured), the games mirror second
+        // (what BAR published), which is what covers the re-sim of a game
+        // nobody has uploaded — most of this queue.
+        //
+        // EVERY column in the ORDER BY is qualified, and has to be: `id` is in
+        // all three tables and `updated_unix` is in two of them, so an
+        // unqualified one is an ambiguous-column error rather than a wrong
+        // answer.
+        `SELECT ${JOB_COLS_J},
+                COALESCE(r.duration_sec, g.duration_sec) AS game_duration_sec,
+                COALESCE(r.game_size, g.game_size)       AS game_size
+         FROM jobs j
+         LEFT JOIN replays r ON r.id = j.game_id
+         LEFT JOIN games   g ON g.id = j.game_id
+         ORDER BY CASE WHEN j.state IN ('pending', 'processing') AND j.disabled = 0 THEN 0 ELSE 1 END,
+                  j.updated_unix DESC, j.id
          LIMIT ? OFFSET ?`,
         limit,
         offset,
       )
       .toArray()
-      .map(jobRow);
+      .map(queueJobRow);
     // SUM over no rows is NULL, hence the coalesce.
     const counts = this.ctx.storage.sql
       .exec(
@@ -1188,6 +1212,17 @@ export class ReplayIndex extends DurableObject<Env> {
     }
     return true;
   }
+}
+
+/** queueJobRow is jobRow plus what the join found out about the game. The
+ * `game` field is null only when NEITHER table knows the id — a drag&drop
+ * upload of a private lobby the BAR API never indexed, say. */
+function queueJobRow(r: Record<string, unknown>): QueueJob {
+  const durationSec = (r.game_duration_sec as number | null) ?? null;
+  const gameSize = (r.game_size as string | null) ?? null;
+  const game: QueueGame | null =
+    durationSec === null && gameSize === null ? null : { durationSec, gameSize };
+  return { ...jobRow(r), game };
 }
 
 function jobRow(r: Record<string, unknown>): IngestJob {

@@ -9,7 +9,7 @@ import test from "node:test";
 
 import app from "../src/worker/app";
 import { MAX_JOB_PROGRESS_BYTES, MAX_JOB_STATS_BYTES } from "../src/worker/jobs";
-import type { IngestJob, JobKind, JobProgress, JobSample, JobStats } from "../src/worker/jobs";
+import type { IngestJob, JobKind, JobProgress, JobSample, JobStats, QueueJob } from "../src/worker/jobs";
 import type { ReplayEntry } from "../src/worker/replayentry";
 
 const FIXTURE = new URL("../../internal/capture/testdata/harness.brepstream", import.meta.url);
@@ -106,12 +106,22 @@ class FakeIndex {
     return true;
   }
   lastQueueQuery: { limit: number; offset: number } | null = null;
-  queuePage(limit: number, offset: number): { jobs: IngestJob[]; total: number; active: number } {
+  queuePage(limit: number, offset: number): { jobs: QueueJob[]; total: number; active: number } {
     this.lastQueueQuery = { limit, offset };
-    const rank = (j: IngestJob) => (j.state === "pending" || j.state === "processing" ? 0 : 1);
+    const rank = (j: IngestJob) => (j.state === "pending" || j.state === "processing") && !j.disabled ? 0 : 1;
     const all = [...this.jobs.values()].sort((a, b) => rank(a) - rank(b));
+    // The real DO joins this off the catalog and the games mirror; here the
+    // catalog stand-in is the only source, which is enough to prove the route
+    // passes it through (the join itself is tested against real SQL).
+    const withGame = (j: IngestJob): QueueJob => {
+      const e = this.entries.get(j.gameId);
+      return {
+        ...j,
+        game: e ? { durationSec: e.durationSec ?? null, gameSize: e.gameSize ?? null } : null,
+      };
+    };
     return {
-      jobs: all.slice(offset, offset + limit),
+      jobs: all.slice(offset, offset + limit).map(withGame),
       total: all.length,
       active: all.filter((j) => rank(j) === 0).length,
     };
@@ -331,6 +341,9 @@ test("GET /api/queue lists jobs for the viewer without the archive key", async (
         stats: null,
         progress: null,
         disabled: false,
+        // Neither the catalog nor the mirror knows this id in the fake, which
+        // is what a private-lobby upload looks like.
+        game: null,
         createdUnix: 0,
         updatedUnix: 0,
       },
@@ -1051,4 +1064,23 @@ test("a job can be held back from the queue page, and let go again", async (t) =
 
   assert.equal((await flip("yes")).status, 400);
   assert.equal((await flip(true, "nope")).status, 404);
+});
+
+// A queue of bare game ids cannot answer the first question anyone has about a
+// re-sim that will run for an hour — is this an 8v8 worth the machine time, or
+// a three-minute duel? The jobs table knows only an id, so the worker joins the
+// game's own facts onto each row.
+test("queue rows carry the game's size and duration", async (t) => {
+  const { env, index } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  index.upsert({ id: RESIM_ID, durationSec: 2417, gameSize: "8v8" } as ReplayEntry);
+  index.jobInsert("known", "", RESIM_ID, "resim");
+  // A game neither the catalog nor the mirror has heard of: a drag&drop upload
+  // from a private lobby. The row still lists, it just has nothing to say.
+  index.jobInsert("stranger", "streams/x", "ffffffffffffffffffffffffffffffff");
+
+  const page = await asJson(await app.request("/api/queue", {}, env));
+  const byId = Object.fromEntries(page.jobs.map((j: { id: string }) => [j.id, j]));
+  assert.deepEqual(byId.known.game, { durationSec: 2417, gameSize: "8v8" });
+  assert.equal(byId.stranger.game, null);
 });

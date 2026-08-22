@@ -607,6 +607,42 @@ test("a disabled job keeps its game out of the mirror backfill", async () => {
   });
 });
 
+// The jobs table knows a gameId and nothing else about the game, so the queue
+// joins the duration and the team spec off whichever table knows them. This is
+// real SQL over three tables that all have an `id` and two of which have an
+// `updated_unix`, so it is also the test that the ORDER BY is qualified — an
+// unqualified column there is an ambiguous-column ERROR, not a wrong answer.
+test("queue rows join the game's size and duration from either table", async () => {
+  await inIndex((index) => {
+    // Published: the catalog knows it.
+    index.upsert(replay("captured", { durationSec: 2417, gameSize: "8v8" }));
+    index.jobInsert("j1", "", "captured", "resim");
+    // Never uploaded: only the mirror knows it, which is most of this queue.
+    index.gamesInsert([game("mirrored", { durationSec: 217, gameSize: "1v1" })]);
+    index.jobInsert("j2", "", "mirrored", "resim");
+    // Neither knows it: a drag&drop upload from a private lobby.
+    index.jobInsert("j3", "streams/x", "stranger");
+
+    const byId = Object.fromEntries(index.queuePage(25, 0).jobs.map((j) => [j.id, j]));
+    expect(byId.j1.game).toEqual({ durationSec: 2417, gameSize: "8v8" });
+    expect(byId.j2.game).toEqual({ durationSec: 217, gameSize: "1v1" });
+    expect(byId.j3.game).toBe(null);
+    // The job's own fields survive the join unqualified-name-for-unqualified-name.
+    expect(byId.j3).toMatchObject({ streamKey: "streams/x", kind: "upload", state: "pending" });
+  });
+});
+
+// A game the catalog and the mirror both hold: the catalog wins, because it
+// describes what was actually captured.
+test("the catalog's own numbers beat the mirror's", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([game("both", { durationSec: 100, gameSize: "1v1" })]);
+    index.upsert(replay("both", { durationSec: 2417, gameSize: "8v8" }));
+    index.jobInsert("j", "", "both", "resim");
+    expect(index.queuePage(25, 0).jobs[0].game).toEqual({ durationSec: 2417, gameSize: "8v8" });
+  });
+});
+
 test("a published replay keeps its row and never becomes a placeholder", async () => {
   await inIndex((index) => {
     index.upsert(replay("real"));

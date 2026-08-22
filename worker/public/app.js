@@ -3959,7 +3959,7 @@ function statsRow(j) {
   const tr = document.createElement('tr');
   tr.className = 'statsrow';
   const td = document.createElement('td');
-  td.colSpan = 8;
+  td.colSpan = 11;
   const dl = document.createElement('div');
   dl.className = 'statsgrid';
   const lines = [...(j.progress ? progressLines(j.progress) : []),
@@ -4413,6 +4413,34 @@ function renderQueue(errMsg) {
         a.rel = 'noopener';
         a.title = 'Not published here (yet) — open it on bar-rts.com';
       }
+      td.appendChild(a);
+      tr.appendChild(td);
+    }
+    // What the game IS, not what the job is doing with it. Joined on by the
+    // worker from the catalog or the games mirror, because the jobs table
+    // itself knows only an id — and a queue of bare ids cannot answer the
+    // first question anyone has about a re-sim that will run for an hour:
+    // is this an 8v8 worth the machine time, or a three-minute duel?
+    {
+      const g = j.game || {};
+      const size = cell(g.gameSize || null, 'size');
+      if (g.gameSize) size.title = g.gameSize + ' — the team spec BAR recorded';
+      const dur = cell(g.durationSec ? fmtDuration(g.durationSec) : null, 'dur');
+      if (g.durationSec) dur.title = fmtDur(g.durationSec) + ' of game time';
+    }
+    // Out to gex, which is where a BAR game gets read properly. Always
+    // present, unlike the Game cell's bar-rts link, which is only there while
+    // the game is unpublished here.
+    {
+      const td = document.createElement('td');
+      td.className = 'links';
+      const a = document.createElement('a');
+      a.className = 'ext';
+      a.href = 'https://gex.honu.pw/match/' + encodeURIComponent(j.gameId);
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.textContent = 'gex';
+      a.title = 'Open this game on gex.honu.pw';
       td.appendChild(a);
       tr.appendChild(td);
     }

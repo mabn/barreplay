@@ -305,18 +305,24 @@ app.get("/api/queue", async (c) => {
   const page = await indexStub(c.env).queuePage(Math.min(Math.max(limit, 1), QUEUE_LIMIT_MAX), offset);
   return c.json(
     {
-      jobs: page.jobs.map(({ id, gameId, kind, state, error, stats, progress, disabled, createdUnix, updatedUnix }) => ({
-        id,
-        gameId,
-        kind,
-        state,
-        error,
-        stats,
-        progress,
-        disabled,
-        createdUnix,
-        updatedUnix,
-      })),
+      jobs: page.jobs.map(
+        ({ id, gameId, kind, state, error, stats, progress, disabled, game, createdUnix, updatedUnix }) => ({
+          id,
+          gameId,
+          kind,
+          state,
+          error,
+          stats,
+          progress,
+          disabled,
+          // What the game IS, joined on by the DO — the jobs table itself knows
+          // only an id, and a queue of bare ids says nothing about what the
+          // pipeline is actually spending its hour on.
+          game,
+          createdUnix,
+          updatedUnix,
+        }),
+      ),
       total: page.total,
       active: page.active,
       offset,
