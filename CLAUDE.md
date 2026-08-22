@@ -337,6 +337,16 @@ internal/resim/           the cmd/barreplay pipeline packaged as one call (Run: 
                           engine.SampleProcess for the engine's RSS and CPU. A phase change
                           clears the sim numbers (they described the phase that ended) but keeps
                           the process reading (the process did not).
+                          Options.MinFreeBytes is the MEMORY GUARD (0 = engine.
+                          DefaultMinFreeBytes, negative = off): the engine runs under a context
+                          of Run's own so engine.WatchMemory can end it when the HOST drops below
+                          the floor — see "Running out of memory" below for why stopping first
+                          matters. The reading is kept in a memGuard (first one wins: by the time
+                          the engine has died the host may have recovered, and a healthier number
+                          would describe the recovery rather than the decision) and its error
+                          BEATS every other explanation Run can give, deliberately: we sent that
+                          signal, so "the engine was killed" and whatever the truncated stream
+                          then failed to parse into are both true and both useless.
 internal/capture/         parse the widgets' streams -> snapshot records (BRSNAP text in
                           capture.go, binary .brepstream in brep.go, shared preamble +
                           comm-record parsing in lines.go). COMM records (text) / 'C'
@@ -766,6 +776,18 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           (/refresh-settings and /view) and for the same reason: the browser has
                           no bearer token and the Queue section is only reachable with
                           ?admin=true, so guarding it would mean the button could not exist.
+                          JOB ERROR KINDS: jobs.error_kind is a nullable classification OF the
+                          error message (JOB_ERROR_KINDS in jobs.ts — currently just "oom"),
+                          reported by the daemon alongside it. It exists because a queue full of
+                          red rows should say which failures are the MACHINE's fault rather than
+                          the game's, without anyone parsing a sentence: an "oom" job would have
+                          worked on a bigger box, and every other failure would not. A CLOSED
+                          set, because the queue page renders each kind specifically and an
+                          unknown one has nothing to render; parseJobErrorKind DROPS anything
+                          else rather than 400ing, so a daemon newer than the worker can still
+                          report that its job failed. It follows `error` exactly and is NOT
+                          COALESCEd like the stats — it is a property of that message, so a
+                          transition clearing the message clears the classification with it.
                           JOB KINDS: jobs.kind is "upload" | "resim", a KIND rather than a fifth
                           state because the four states describe both equally well — what
                           differs is the work, not the progress. The contract (JobKind,
@@ -998,7 +1020,12 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           to measure, and a bar pinned at zero through them reads as a job that
                           is stuck rather than one that is working. The Updated cell doubles as
                           the liveness signal — the daemon beats every 10s, so an age of minutes
-                          on a "processing" row means nobody is home.
+                          on a "processing" row means nobody is home. A failure the daemon could
+                          NAME carries a chip beside the state (ERROR_KIND_LABELS in app.js, the
+                          front-end half of JOB_ERROR_KINDS): "out of memory" is the one worth
+                          spotting down a column of red rows, since it is a fact about the host
+                          rather than a verdict on the replay. A kind the page has no label for
+                          renders as a plain error, exactly as an unclassified failure does.
                           The row's last cell is the HOLD-BACK switch (disableCell/
                           setJobDisabled -> POST /api/jobs/<id>/disabled, see the worker entry).
                           It is offered only on a pending or running job — a finished one is
@@ -1811,6 +1838,50 @@ versions URL is derived from `-rapid-repo` (`…/repos.gz` → `…/byar/version
 
 The wrapper startscript `barreplay` writes forces max speed:
 `[game]{ demofile=<abs path>; } [modoptions]{ MinSpeed=9999; MaxSpeed=9999; }`.
+
+## Running out of memory (why the engine is stopped, not killed)
+
+A re-simulation of a big game wants 7-10 GB resident, which is more than a small
+host has. Left alone that ends in a **global OOM kill**, and the cost is not
+limited to the run: systemd stops an entire unit when one of its processes is
+OOM-killed and the unit's `OOMPolicy` is `stop`, which is the DEFAULT for the
+scopes a user manager creates (`DefaultOOMPolicy=stop`) — so an OOM-killed engine
+takes the tmux pane it was started from, and everything else in it, with it.
+(System-level `session-N.scope` units default to `continue`, which is why the
+same crash sometimes costs only the engine and sometimes costs the window.)
+
+Two defences, and only the second prevents the above:
+
+- **`oom_score_adj = 1000`** on the engine (`engine.SetOOMScoreAdj`, applied by
+  `engine.Run`). This decides WHO dies, not WHETHER: the engine is already the
+  biggest process and so the kernel's usual pick, but "usually" is not a
+  guarantee — a run that has only just started is small, and the process killed
+  instead would be somebody's shell.
+- **`engine.WatchMemory`** stops the engine first. It polls `/proc/meminfo`'s
+  `MemAvailable` every 2s and, below the floor (`-min-free`, default 512 MiB;
+  0 disables), cancels the context the engine was launched with. No global OOM
+  means no systemd teardown and no collateral, and the run ends as an ordinary
+  failed job whose message says the machine was too small. It watches the HOST
+  rather than the engine on purpose: what matters is whether the machine is about
+  to run out, and the engine is the disposable thing on it either way. A reading
+  it cannot take is never a reason to stop a run — a net that fires on "I do not
+  know" would kill every run on a kernel that publishes no such number.
+
+Both `cmd/barreplay` and `bringest -resim` take `-min-free`. If the guard is
+disabled, or an allocation spike outruns its 2s tick, the systemd behaviour above
+is still in play; `OOMPolicy=continue` on the unit the daemon runs in (e.g.
+`systemd-run --user --scope -p OOMPolicy=continue`) contains the damage to the
+engine.
+
+Running out of memory ABANDONS one re-simulation, never the loop: `resim.Run`
+wraps `resim.ErrOutOfMemory`, the daemon reports the job failed with
+`errorKind: "oom"` (see JOB ERROR KINDS under worker/) and carries straight on to
+the next one — a host too small for the games it is handed would otherwise stop
+dead on the first big one. Abandoning is also CLEAN: `removeAbandonedStream`
+deletes the widget's raw stream on every error path, because it lives in the data
+dir (the Lua sandbox forces that), it is hundreds of megabytes, and a daemon that
+keeps failing would accumulate one per game until the disk was the next thing to
+go. Only the success path moves it out.
 
 ## GPU / headless caveat (important)
 

@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -58,6 +59,7 @@ func run() error {
 		rapidRepo    = flag.String("rapid-repo", "", "pr-downloader rapid master repo URL (default: BAR's repo)")
 		noRun        = flag.Bool("no-run", false, "download + parse only; do not launch the engine")
 		progress     = flag.Bool("progress", true, "poll infolog.txt every 2s and print replay progress (time, %, ETA, fps); =false for a silent run")
+		minFree      = flag.Int("min-free", 512, "stop the engine when the host has less than this many MiB of memory left, instead of waiting for the kernel's OOM killer (0 disables)")
 		profile      = flag.Bool("profile", false, "enable the engine's internal time profiler for a fine-grained Sim breakdown and a unit-count growth table (small overhead)")
 		disWidgets   = flag.Bool("disable-widgets", true, "disable BAR's default widget suite during the replay (pure unsynced overhead; cannot affect the sim); =false to keep it")
 		throttleDraw = flag.Bool("throttle-draw", true, "throttle the headless draw loop to ~1 fps via MinDrawFPS/MinSimDrawBalance; =false for engine defaults")
@@ -228,11 +230,26 @@ func run() error {
 	// wall time into a load phase and a sim phase.
 	fmt.Fprintln(os.Stderr, "launching headless replay...")
 	runStart := time.Now()
-	stdout, wait, err := eng.Run(ctx, scriptPath)
+	// The engine gets a context of its own so the memory guard below can end it
+	// without cancelling the caller's.
+	runCtx, killEngine := context.WithCancel(ctx)
+	defer killEngine()
+	stdout, wait, err := eng.Run(runCtx, scriptPath)
 	if err != nil {
 		w.Close()
 		return err
 	}
+	// Stop before the kernel does: a global OOM costs more than this run,
+	// because systemd stops whole units whose OOMPolicy is "stop" when a member
+	// is OOM-killed — the default for a user manager's scopes, so an OOM-killed
+	// engine takes the tmux pane it was started from with it.
+	var lowMemAt atomic.Int64
+	go engine.WatchMemory(runCtx, int64(*minFree)<<20, 2*time.Second, func(avail int64) {
+		lowMemAt.Store(avail)
+		fmt.Fprintf(os.Stderr, "\nonly %s of memory left on this host — stopping the engine "+
+			"before the kernel does\n", engine.FormatBytes(avail))
+		killEngine()
+	})
 	widgetLoaded := make(chan time.Time, 1)
 	go func() {
 		sc := bufio.NewScanner(stdout)
@@ -251,6 +268,11 @@ func run() error {
 		go engine.WatchProgress(pctx, eng.InfologPath(), int(h.GameTime), 2*time.Second, os.Stderr)
 	}
 	waitErr := wait()
+	if avail := lowMemAt.Load(); avail > 0 {
+		return fmt.Errorf("stopped the engine with only %s of memory left on this host: "+
+			"re-simulating this game needs more memory than this machine has "+
+			"(-min-free 0 lets the kernel's OOM killer have it instead)", engine.FormatBytes(avail))
+	}
 	engineDuration := time.Since(runStart)
 	var loadDuration time.Duration // 0 = widget never announced itself
 	select {

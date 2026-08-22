@@ -3784,6 +3784,19 @@ function initHomeNav() {
 // and one's own upload landing. Nothing here refreshes itself on a timer: a
 // job's state changes on the scale of minutes, and a table that rewrites
 // itself under the cursor is worse than a button that says when it was read.
+// The failure kinds the daemon can name (worker/src/worker/jobs.ts
+// JOB_ERROR_KINDS), and how the row says so. A closed set on both sides: the
+// worker drops a kind it does not know, and anything not listed here renders as
+// a plain error, which is what every unclassified failure already does.
+const ERROR_KIND_LABELS = {
+  oom: {
+    label: 'out of memory',
+    title: 'The host ran out of memory and the daemon stopped the engine before the kernel could '
+      + 'OOM-kill it. This is about the MACHINE, not the replay — the same game on a host with '
+      + 'more RAM would have worked.',
+  },
+};
+
 const QUEUE_PAGE = 25;         // rows per page (the worker caps a page at QUEUE_LIMIT_MAX = 100)
 const QUEUE_UNSUPPORTED =
   'This server does not run an ingest queue — uploads are published from the command line with: go run ./cmd/pack -upload r2 <capture>.';
@@ -4500,6 +4513,19 @@ function renderQueue(errMsg) {
       s.textContent = held ? 'disabled' : j.state;
       if (held) s.title = 'Held back — no daemon will pick this up. Underlying state: ' + j.state;
       td.appendChild(s);
+      // WHY it failed, where the daemon could tell. It rides beside the state
+      // rather than living in the message, because the one failure worth
+      // spotting down a column of red rows is the one that is about the
+      // MACHINE and not the game: the same replay on a bigger box would have
+      // worked, so it is a fact about the host, not a verdict on the replay.
+      const why = ERROR_KIND_LABELS[j.errorKind];
+      if (why && !held) {
+        const w = document.createElement('span');
+        w.className = 'errkind';
+        w.textContent = why.label;
+        w.title = why.title;
+        td.appendChild(w);
+      }
       tr.appendChild(td);
     }
     // What the work cost. For a re-sim that is the engine's own wall time,

@@ -25,7 +25,7 @@
 import { Hono } from "hono";
 
 import { parseGameId } from "./gameid";
-import { JOB_KINDS, parseJobProgress, parseJobStats } from "./jobs";
+import { JOB_KINDS, parseJobErrorKind, parseJobProgress, parseJobStats } from "./jobs";
 import type { JobKind } from "./jobs";
 import { archiveSuffix, scanStreamPreamble } from "./preamble";
 import { parseReplayFilter, parseViewRequest, playersFromApi, sanitizeEntry, settingsFlags } from "./replayentry";
@@ -256,10 +256,14 @@ app.post("/api/resim", async (c) => {
 app.get("/api/jobs/:id", async (c) => {
   const job = await indexStub(c.env).jobGet(c.req.param("id"));
   if (!job) return c.json({ error: "unknown job" }, 404);
-  const { id, gameId, kind, state, error, stats, progress, disabled, createdUnix, updatedUnix } = job;
-  return c.json({ id, gameId, kind, state, error, stats, progress, disabled, createdUnix, updatedUnix }, 200, {
-    "cache-control": "no-cache",
-  });
+  const { id, gameId, kind, state, error, errorKind, stats, progress, disabled, createdUnix, updatedUnix } = job;
+  return c.json(
+    { id, gameId, kind, state, error, errorKind, stats, progress, disabled, createdUnix, updatedUnix },
+    200,
+    {
+      "cache-control": "no-cache",
+    },
+  );
 });
 
 // One job's healthcheck HISTORY: the series behind the queue page's charts,
@@ -306,12 +310,13 @@ app.get("/api/queue", async (c) => {
   return c.json(
     {
       jobs: page.jobs.map(
-        ({ id, gameId, kind, state, error, stats, progress, disabled, game, createdUnix, updatedUnix }) => ({
+        ({ id, gameId, kind, state, error, errorKind, stats, progress, disabled, game, createdUnix, updatedUnix }) => ({
           id,
           gameId,
           kind,
           state,
           error,
+          errorKind,
           stats,
           progress,
           disabled,
@@ -420,6 +425,7 @@ app.post("/api/jobs/:id", async (c) => {
     kind?: unknown;
     stats?: unknown;
     progress?: unknown;
+    errorKind?: unknown;
   };
   if (b.state !== "processing" && b.state !== "done" && b.state !== "error") {
     return c.json({ error: "state must be processing, done or error" }, 400);
@@ -442,7 +448,10 @@ app.post("/api/jobs/:id", async (c) => {
   // Same handling for the same reason: a healthcheck's reading is a snapshot of
   // work already under way, and a state transition is worth more than it.
   const progress = parseJobProgress(b.progress);
-  const ok = await indexStub(c.env).jobUpdate(c.req.param("id"), b.state, detail, stats, progress);
+  // Dropped rather than 400'd, like the stats and the progress: a daemon newer
+  // than this worker must still be able to report that its job failed.
+  const errorKind = parseJobErrorKind(b.errorKind);
+  const ok = await indexStub(c.env).jobUpdate(c.req.param("id"), b.state, detail, stats, progress, errorKind);
   if (!ok) return c.json({ error: "unknown job" }, 404);
   return c.json({ ok: true });
 });

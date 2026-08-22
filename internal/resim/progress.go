@@ -130,6 +130,42 @@ func (p *Progress) setProc(rss, swap int64, cpuPct float64) {
 	p.st.RSSBytes, p.st.SwapBytes, p.st.CPUPercent = rss, swap, cpuPct
 }
 
+// memCheckEvery is how often the memory guard looks at the host. Faster than
+// the progress sampler: this one is racing an allocation, and every extra
+// second between checks is another second the engine has to reach the ceiling
+// the guard exists to stay under. Reading one small file is nothing.
+const memCheckEvery = 2 * time.Second
+
+// memGuard records the one moment the host ran short of memory, so the run can
+// end with that explanation rather than the generic "the engine was killed" —
+// which is technically true, since the guard is what killed it, and useless.
+//
+// Written once from the watcher goroutine and read once after the engine exits,
+// hence the mutex over the three fields together: a reading that reported the
+// available memory of one moment and the RSS of another would be worse than no
+// reading at all.
+type memGuard struct {
+	mu      sync.Mutex
+	tripped bool
+	avail   int64
+	rss     int64
+}
+
+func (g *memGuard) trip(avail, rss int64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.tripped {
+		return // the first reading is the one that describes the decision
+	}
+	g.tripped, g.avail, g.rss = true, avail, rss
+}
+
+func (g *memGuard) reading() (avail, rss int64, tripped bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.avail, g.rss, g.tripped
+}
+
 const (
 	// progressSampleEvery is how often the watcher below re-reads the infolog
 	// and /proc. Well under the ingest daemon's 10-second reporting interval,
