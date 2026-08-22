@@ -74,7 +74,7 @@ inside a **Durable Object** (`src/worker/replayindex.ts`, single instance, migra
 
 | URL | What |
 | --- | --- |
-| `GET /api/replays` | the catalog, newest game first (rows with no start time last) — `[{id, rid, startUnix, durationSec, map, gameSize, sizeBytes, settings, players, playerCount, widgetVersion, widgetSha, widgetDate}]`, nulls for unknown stats. Filterable: `?from=&to=` (unix seconds or `YYYY-MM-DD`, `to` covers the whole day), `?map=`, `?minPlayers=&maxPlayers=` (Gaia excluded), `?player=` (case-insensitive name prefix), `?settings=lava,zombies` (all must be present). No params = everything; unknown params are ignored |
+| `GET /api/replays` | the catalog, newest game first (rows with no start time last) — `[{id, rid, startUnix, durationSec, map, gameSize, sizeBytes, settings, players, playerCount, widgetVersion, widgetSha, widgetDate}]`, nulls for unknown stats. Filterable: `?from=&to=` (unix seconds or `YYYY-MM-DD`, `to` covers the whole day), `?map=`, `?minPlayers=&maxPlayers=` (Gaia excluded), `?minDuration=&maxDuration=` (seconds; a row with no recorded duration matches neither), `?player=` (case-insensitive name prefix), `?settings=lava,zombies` (all must be present). Paged by `?limit=&offset=` — absent limit means the whole listing. No params = everything; unknown params are ignored |
 | `GET /api/replays/facets` | the distinct `{maps, sizes, players, settings, from, to}` in the catalog, so the filter bar only offers choices that match something. Computed over the whole catalog, not the filtered result |
 | `PUT /api/replays/<id>` | upsert one row (same JSON shape, minus `id`); called by `pack -upload` / the ingest daemon after a replay's files land in the bucket |
 
@@ -153,8 +153,19 @@ The Go viz server (`cmd/barreplay-viz`) serves the same `GET /api/replays` shape
 computed live from its `.brp` files (`internal/viz/catalog.go`), so the shared front-end
 works against both backends; the row shape must stay in lockstep with
 `src/worker/replayentry.ts`. It does **not** implement the filters — it lists a local
-directory of a few captures — so it ignores the query params and has no `/facets`
-route, and the front-end hides the filter bar when that route is missing.
+directory of a few captures — so it ignores those query params and has no `/facets`
+route, and the front-end hides the filter bar when that route is missing. It *does*
+honour `?limit=&offset=`: paging is not a filter, and the shared front-end reads "there
+is a next page" off being handed one row more than it asked to show, so ignoring them
+would make its Next button lie.
+
+### The list is paged
+
+50 rows a page, Prev/Next above the table, **no page count** — counting the pages means
+counting the whole catalog on every listing. Instead the front-end asks for **51** rows
+and shows 50: whether the 51st came back is the entire answer to "is there a next page".
+The page lives in memory, not the URL (unlike the filters): "page 3" describes a moment
+in a growing list, not a set of replays. Changing any filter returns to the first page.
 
 ## The games mirror (cron)
 

@@ -137,6 +137,11 @@ export interface ReplayFilter {
   /** Inclusive bounds on playerCount (Gaia excluded — see derivePlayerCount). */
   minPlayers: number | null;
   maxPlayers: number | null;
+  /** Inclusive bounds on durationSec. A row whose duration is unknown matches
+   * NEITHER bound: there is nothing to compare, and counting an unknown as a
+   * match would put games of any length inside a range the user drew. */
+  minDuration: number | null;
+  maxDuration: number | null;
   /** Case-insensitive PREFIX of a player's name; the row matches when any
    * player in its roster matches. A prefix rather than a substring because it
    * answers to an index range scan, and because the UI offers the known names
@@ -148,7 +153,12 @@ export interface ReplayFilter {
 
 /** The empty filter: matches every row. */
 export function emptyFilter(): ReplayFilter {
-  return { from: null, to: null, map: null, minPlayers: null, maxPlayers: null, player: null, settings: [] };
+  return {
+    from: null, to: null, map: null,
+    minPlayers: null, maxPlayers: null,
+    minDuration: null, maxDuration: null,
+    player: null, settings: [],
+  };
 }
 
 const FILTER_MAX_SETTINGS = 16;
@@ -179,18 +189,30 @@ export function parseReplayFilter(params: URLSearchParams): ReplayFilter | strin
   f.from = from;
   f.to = to;
 
-  const int = (key: string): number | null | string => {
+  // digits caps the value implicitly, which is all these need: a bound is
+  // compared against a column, never used to size anything.
+  const int = (key: string, digits: number): number | null | string => {
     const raw = (params.get(key) ?? "").trim();
     if (raw === "") return null;
-    if (!/^\d{1,4}$/.test(raw)) return `${key} must be a non-negative integer`;
+    if (!new RegExp(`^\\d{1,${digits}}$`).test(raw)) return `${key} must be a non-negative integer`;
     return Number(raw);
   };
-  const minP = int("minPlayers");
+  const minP = int("minPlayers", 4);
   if (typeof minP === "string") return minP;
-  const maxP = int("maxPlayers");
+  const maxP = int("maxPlayers", 4);
   if (typeof maxP === "string") return maxP;
   f.minPlayers = minP;
   f.maxPlayers = maxP;
+
+  // Seconds, six digits: the slider only ever writes 0..3600 (its top end
+  // means "and longer", so it writes nothing at all), but a hand-written URL
+  // may reasonably ask for a three-hour game.
+  const minD = int("minDuration", 6);
+  if (typeof minD === "string") return minD;
+  const maxD = int("maxDuration", 6);
+  if (typeof maxD === "string") return maxD;
+  f.minDuration = minD;
+  f.maxDuration = maxD;
 
   const map = (params.get("map") ?? "").trim();
   if (map !== "") f.map = map.slice(0, 200);
@@ -214,6 +236,7 @@ export function filterIsEmpty(f: ReplayFilter): boolean {
   return (
     f.from === null && f.to === null && f.map === null &&
     f.minPlayers === null && f.maxPlayers === null &&
+    f.minDuration === null && f.maxDuration === null &&
     f.player === null && f.settings.length === 0
   );
 }

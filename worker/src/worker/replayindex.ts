@@ -188,6 +188,7 @@ export class ReplayIndex extends DurableObject<Env> {
     ctx.storage.sql.exec(`
       CREATE INDEX IF NOT EXISTS replays_map   ON replays (map);
       CREATE INDEX IF NOT EXISTS replays_count ON replays (player_count);
+      CREATE INDEX IF NOT EXISTS replays_dur   ON replays (duration_sec);
       CREATE INDEX IF NOT EXISTS jobs_kind     ON jobs (kind, state, updated_unix);
       -- Every catalog read asks "is a job processing this game", once per row.
       CREATE INDEX IF NOT EXISTS jobs_game     ON jobs (game_id, state);
@@ -406,7 +407,7 @@ export class ReplayIndex extends DurableObject<Env> {
    * index. Every branch below is index-backed: replays_start for the dates,
    * replays_map, replays_count, and an EXISTS-style IN over the two derived
    * tables' covering indexes for names and flags. */
-  list(filter?: ReplayFilter): ReplayEntry[] {
+  list(filter?: ReplayFilter, limit?: number, offset?: number): ReplayEntry[] {
     const where: string[] = [];
     const args: (string | number)[] = [];
     if (filter) {
@@ -415,6 +416,11 @@ export class ReplayIndex extends DurableObject<Env> {
       if (filter.map !== null) { where.push(`map = ?`); args.push(filter.map); }
       if (filter.minPlayers !== null) { where.push(`player_count >= ?`); args.push(filter.minPlayers); }
       if (filter.maxPlayers !== null) { where.push(`player_count <= ?`); args.push(filter.maxPlayers); }
+      // NULL duration compares false either way, which is the intent: a row
+      // that never recorded how long the game ran cannot be said to fall
+      // inside a length the user asked for.
+      if (filter.minDuration !== null) { where.push(`duration_sec >= ?`); args.push(filter.minDuration); }
+      if (filter.maxDuration !== null) { where.push(`duration_sec <= ?`); args.push(filter.maxDuration); }
       if (filter.player !== null) {
         // Prefix match as a RANGE, not LIKE: SQLite's LIKE is case-insensitive
         // by default, which disqualifies it from using the index. name_lower is
@@ -430,13 +436,26 @@ export class ReplayIndex extends DurableObject<Env> {
         args.push(flag);
       }
     }
+    // Paging is plain LIMIT/OFFSET over an ordered, indexed listing. The
+    // caller asks for one row more than it means to show and reads "there is
+    // a next page" off that row's existence, which is why nothing here counts
+    // anything: a COUNT over the whole catalog would be a second query whose
+    // cost grows with the archive, to answer a question the extra row already
+    // answers. An omitted limit means the whole listing (bringest's catalog
+    // scan, and any front-end too old to page).
+    let window = "";
+    if (limit !== undefined && limit > 0) {
+      window = `LIMIT ? OFFSET ?`;
+      args.push(limit, offset !== undefined && offset > 0 ? offset : 0);
+    }
     const rows = this.ctx.storage.sql
       .exec(
         `SELECT id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date, placeholder,
                 EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = replays.id AND j.state = 'processing') AS processing
          FROM replays
          ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
-         ORDER BY start_unix IS NULL, start_unix DESC, id`,
+         ORDER BY start_unix IS NULL, start_unix DESC, id
+         ${window}`,
         ...args,
       )
       .toArray();

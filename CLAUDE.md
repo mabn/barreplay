@@ -362,9 +362,11 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           spec like "8v8", bundle bytes) lives in a SQLite table inside a Durable
                           Object (src/worker/replayindex.ts, single instance, wrangler migration v1
                           new_sqlite_classes): GET /api/replays lists it newest-game-first (null
-                          start times last), FILTERED by its query params (parseReplayFilter:
+                          start times last), PAGED by ?limit=&offset= (absent limit = the whole
+                          listing) and FILTERED by its query params (parseReplayFilter:
                           from/to — unix seconds or YYYY-MM-DD, where a YYYY-MM-DD `to` covers the
-                          whole day — map, minPlayers/maxPlayers, player = a case-insensitive name
+                          whole day — map, minPlayers/maxPlayers, minDuration/maxDuration in
+                          seconds, player = a case-insensitive name
                           PREFIX, settings = comma-separated flags that must ALL be present; no
                           params = the whole catalog, unknown params ignored so an older front-end
                           still works). Filtering is SQL, not a pass over the JSON: name and flag
@@ -531,21 +533,51 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           Consequence elsewhere: resimEnqueue's "already published" check reads
                           `placeholder = 0`, or pasting the link of a game being worked on would
                           be refused as published instead of answered with the job doing it.
-                          FILTER BAR (app.js initFilters, above the table): date from/to, map, a
-                          player-count RANGE, player name (a datalist of the known names,
-                          debounced 300 ms) and one toggle chip per settings flag. The range
-                          (initSizeRange) is two <input type=range> stacked over one track — real
-                          inputs, so keyboard and focus rings come free — spanning the facets'
-                          own min..max; a thumb parked at its end writes NO param, so the full
-                          span is genuinely unfiltered rather than a filter matching everything.
-                          The thumbs push instead of crossing, dragging paints every frame but
-                          only queries after a 250 ms pause (a drag is otherwise a query per
-                          pixel), and because both inputs are full-width and stacked, which thumb
-                          a press grabs is settled on HOVER — hit testing happens before the
-                          press — by whichever is nearer, with the pointer's side of an
-                          exactly-overlapping pair breaking the tie. It replaced an exact-count
-                          <select>, which could only ask for one size at a time; the API took
-                          min/max all along. Every control writes a URL param and
+                          FILTER BAR (app.js initFilters, above the table), in TWO ROWS: the
+                          fields (date from/to, map, a player-count RANGE, a duration RANGE,
+                          player name — a datalist of the known names, debounced 300 ms), then
+                          the settings chips with Clear/Unregistered/count pushed to the far end.
+                          Two rows because one wrapped at some widths and not others, which moved
+                          the buttons around as the catalog gained flags.
+                          Both ranges are ONE function (initDualRange): two <input type=range>
+                          stacked over a single track — real inputs, so keyboard and focus rings
+                          come free — with only the domain, step and wording differing. A thumb
+                          parked at its END writes NO param, which is what makes the full span
+                          genuinely unfiltered rather than a filter matching everything, and is
+                          also what gives DURATION its open top end: 0..DURATION_MAX_SEC=1h in
+                          minutes, where the right thumb at 1h simply stops restricting, so
+                          every longer game is included ("20m+" rather than "20m–1h"). Players
+                          spans the facets' own min..max, step 1, and hides itself when the
+                          catalog holds fewer than two distinct sizes. The thumbs push instead of
+                          crossing, dragging paints every frame but only queries after a 250 ms
+                          pause (a drag is otherwise a query per pixel), and because both inputs
+                          are full-width and stacked, which thumb a press grabs is settled on
+                          HOVER — hit testing happens before the press — by whichever is nearer,
+                          with the pointer's side of an exactly-overlapping pair breaking the
+                          tie. Players replaced an exact-count <select> that could only ask for
+                          one size at a time; the API took min/max all along, and now takes
+                          minDuration/maxDuration in SECONDS (six digits, so a hand-written URL
+                          can ask for a three-hour game the slider cannot reach; a row with no
+                          recorded duration matches NEITHER bound, since there is nothing to
+                          compare).
+                          PAGING (app.js PAGE_SIZE=50, renderPager, #homepager above the table):
+                          Prev/Next and the range being shown ("101–150"), and deliberately NO
+                          page count — counting the pages means counting the whole catalog on
+                          every listing, and the range answers the question the number was for.
+                          The listing asks for one row MORE than it shows and reads "there is a
+                          next page" off that row's existence, so nothing counts anything.
+                          ?limit=&offset= are served by BOTH backends (the DO appends
+                          LIMIT/OFFSET to the ordered query; the Go server slices its sorted
+                          listing — it ignores the FILTER params, but ignoring these would make
+                          the shared Next button lie), and an absent limit still means the whole
+                          listing, which is what bringest's catalog scan asks for. The page is
+                          in-process state, NOT in the URL (like the queue's pager and unlike
+                          the filters): "page 3" describes a moment in a growing list, not a set
+                          of replays. Any filter change returns to the first page. Orphan mode
+                          is the exception that pages in the BROWSER: merging in unregistered
+                          uploads means knowing which of them a catalog row already covers,
+                          which one page of rows cannot answer — and that mode already reads the
+                          whole bucket. Every control writes a URL param and
                           re-queries GET /api/replays — the filtering is the server's, so the count it
                           reports is the true number of matches, not what happened to be fetched. The
                           state lives in the URL (history.replaceState, so filtering is not

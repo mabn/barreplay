@@ -21,17 +21,33 @@ test("unknown params are ignored", () => {
 });
 
 test("every filter parses", () => {
-  const f = parse("from=1752000000&to=1752086399&map=Isidis+crack+1.1&minPlayers=8&maxPlayers=16&player=Flash&settings=lava,zombies");
+  const f = parse("from=1752000000&to=1752086399&map=Isidis+crack+1.1&minPlayers=8&maxPlayers=16&minDuration=600&maxDuration=3600&player=Flash&settings=lava,zombies");
   assert.deepEqual(f, {
     from: 1_752_000_000,
     to: 1_752_086_399,
     map: "Isidis crack 1.1",
     minPlayers: 8,
+    minDuration: 600,
+    maxDuration: 3600,
     maxPlayers: 16,
     player: "flash", // folded: the index stores names lowercased
     settings: ["lava", "zombies"],
   });
   assert.equal(filterIsEmpty(f as never), false);
+});
+
+test("duration bounds are plain seconds, and a long one is allowed", () => {
+  // The slider only ever writes 0..3600 — its top thumb means "and longer",
+  // so it writes no upper bound at all — but a hand-written URL may reasonably
+  // ask for a three-hour game, which the players' 4-digit cap would refuse.
+  const f = parse("minDuration=3600&maxDuration=10800") as Exclude<ReturnType<typeof parse>, string>;
+  assert.equal(f.minDuration, 3600);
+  assert.equal(f.maxDuration, 10800);
+  assert.equal(filterIsEmpty(f as never), false);
+  // Absent bounds are what "any length" looks like, including the slider's own
+  // top end: no maxDuration means nothing is cut off above it.
+  const open = parse("minDuration=1200") as Exclude<ReturnType<typeof parse>, string>;
+  assert.equal(open.maxDuration, null);
 });
 
 test("YYYY-MM-DD dates bound whole UTC days", () => {
@@ -61,6 +77,9 @@ test("malformed params are rejected with a reason", () => {
     "minPlayers=-3",
     "minPlayers=1e3",
     "maxPlayers=abc",
+    "minDuration=-1",
+    "maxDuration=12.5",
+    "maxDuration=1234567",         // six digits is the cap; this is a week
     "settings=lava;zombies",       // ; is not a separator, so the flag is invalid
     "settings=" + Array.from({ length: 17 }, (_, i) => `f${i}`).join(","),
   ]) {
