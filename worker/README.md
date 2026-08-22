@@ -74,9 +74,28 @@ inside a **Durable Object** (`src/worker/replayindex.ts`, single instance, migra
 
 | URL | What |
 | --- | --- |
-| `GET /api/replays` | the catalog, newest game first (rows with no start time last) — `[{id, rid, startUnix, durationSec, map, gameSize, sizeBytes, settings, players, playerCount, widgetVersion, widgetSha, widgetDate}]`, nulls for unknown stats. Filterable: `?from=&to=` (unix seconds or `YYYY-MM-DD`, `to` covers the whole day), `?map=`, `?minPlayers=&maxPlayers=` (Gaia excluded), `?player=` (case-insensitive name prefix), `?settings=lava,zombies` (all must be present). No params = everything; unknown params are ignored |
+| `GET /api/replays` | the catalog, newest game first (rows with no start time last) — `[{id, rid, startUnix, durationSec, map, gameSize, sizeBytes, settings, players, playerCount, widgetVersion, widgetSha, widgetDate}]`, nulls for unknown stats. Filterable: `?from=&to=` (unix seconds or `YYYY-MM-DD`, `to` covers the whole day), `?map=`, `?minPlayers=&maxPlayers=` (Gaia excluded), `?minDuration=&maxDuration=` (seconds; a row with no recorded duration matches neither), `?player=` (case-insensitive name prefix), `?settings=lava,zombies` (all must be present). Paged by `?limit=&offset=` — absent limit means the whole listing. No params = everything; unknown params are ignored |
 | `GET /api/replays/facets` | the distinct `{maps, sizes, players, settings, from, to}` in the catalog, so the filter bar only offers choices that match something. Computed over the whole catalog, not the filtered result |
 | `PUT /api/replays/<id>` | upsert one row (same JSON shape, minus `id`); called by `pack -upload` / the ingest daemon after a replay's files land in the bucket |
+
+Two fields on a row are **server-owned and never accepted from a PUT**, both about work
+in flight rather than about the replay:
+
+- `processing` — some job for this game is in `processing`. Computed on every read as an
+  `EXISTS` over the jobs table, never stored, so nothing has to remember to clear it: it
+  goes false the moment the job stops running, however it stopped. The list shows it as a
+  **pill at the head of the Settings cell** — filled and pulsing among the muted setting
+  badges, because it is not a setting, it is why the row is there.
+- `placeholder` — the row exists *only* because a job is working on the game; nothing has
+  been published. The DO inserts one whenever a job enters `processing` (seeded from the
+  games mirror, so it shows the map and roster), and the viewer refuses to open it — a
+  placeholder row is rendered with no internal links at all. Publishing clears the mark;
+  a job that ends **without** publishing deletes the row, so a failed re-sim leaves no
+  dead entry behind.
+
+A game that was already published and is being re-simulated gets the pill but stays
+openable — there is a revision to play. The Go viz server has no pipeline and sends
+neither field; the front-end reads a missing value as false.
 
 `rid` is the **revision** the replay's pieces are actually served under:
 publishes are append-only — `pack -upload` (and the ingest daemon) put the
@@ -134,14 +153,108 @@ The Go viz server (`cmd/barreplay-viz`) serves the same `GET /api/replays` shape
 computed live from its `.brp` files (`internal/viz/catalog.go`), so the shared front-end
 works against both backends; the row shape must stay in lockstep with
 `src/worker/replayentry.ts`. It does **not** implement the filters — it lists a local
-directory of a few captures — so it ignores the query params and has no `/facets`
-route, and the front-end hides the filter bar when that route is missing.
+directory of a few captures — so it ignores those query params and has no `/facets`
+route, and the front-end hides the filter bar when that route is missing. It *does*
+honour `?limit=&offset=`: paging is not a filter, and the shared front-end reads "there
+is a next page" off being handed one row more than it asked to show, so ignoring them
+would make its Next button lie.
+
+### The list is paged
+
+50 rows a page, Prev/Next above the table, **no page count** — counting the pages means
+counting the whole catalog on every listing. Instead the front-end asks for **51** rows
+and shows 50: whether the 51st came back is the entire answer to "is there a next page".
+The page lives in memory, not the URL (unlike the filters): "page 3" describes a moment
+in a growing list, not a set of replays. Changing any filter returns to the first page.
+
+## The games mirror (cron)
+
+A **cron trigger runs every minute** (`triggers.crons` in `wrangler.jsonc`, handler in
+`src/worker/index.ts`, logic in `src/worker/games.ts`) and records the newest games BAR
+published into a second DO table, `games`:
+
+```
+GET https://api.bar-rts.com/replays?page=1&limit=24&hasBots=false&endedNormally=true
+```
+
+`replays` is what somebody **captured**; `games` is what was **played**, keyed by the same
+gameId — so a `games` row with no `replays` row is a re-sim candidate nobody had to paste a
+link for. Nothing serves it yet: there is **no route and no UI** for the table.
+
+A run reads that one page (never a second — at a run a minute it covers far more than a
+minute of BAR's game rate), asks the DO which of the 24 ids are new, and spends one
+`/replays/<id>` detail fetch on each new game — the listing carries no modoptions, so that
+is where `settings` comes from, via the same `settingsFlags`/`playersFromApi` the admin
+refresh route uses. A tick that finds nothing new is a **single** request and logs nothing.
+A detail that fails is simply not recorded and is retried next tick.
+
+| Column | From |
+| --- | --- |
+| `start_unix`, `duration_sec`, `map`, `game_size`, `player_count`, `players`, `settings` | the same vocabulary a catalog row uses, so the two compare without translating |
+| `map_file` | the map's archive name — what BAR's maps API keys on |
+| `preset` | `duel` / `team` / `ffa`, stored verbatim |
+| `engine_version`, `game_version` | the exact builds a re-simulation has to run |
+
+Mirrored games index into the **same** `replay_players` / `replay_settings` tables as the
+catalog, so exactly one row owns an id's entries: the catalog row if there is one, the
+`games` row otherwise (`gamesInsert` skips an id `replays` holds). `GET
+/api/replays/facets` therefore restricts both reads to ids present in `replays` — the
+mirror is thousands of games nothing has published, and the filter bar must not offer
+options that match no listable replay.
+
+Trigger it by hand against `vite dev` — this really calls the BAR API and writes
+to the local DO:
+
+```sh
+curl http://127.0.0.1:5173/cdn-cgi/handler/scheduled
+```
+
+### Feeding the re-sim daemon
+
+`GET /api/jobs?kind=resim` (the daemon's poll) does not come back empty while the mirror
+holds games nothing has published: with no pending job it **queues one** and returns it,
+so an engine host never idles waiting for somebody to paste a link.
+
+Which game: of the **20 newest eligible** ones, the one with the **most players**. An hour
+of engine time buys an 8v8 as cheaply as the duel that finished a minute later, so within
+a window of games that are all recent, size decides (ties go to the newer game; an unknown
+roster sorts last but is not refused). The window counts *candidates*, not the mirror's
+last 20 rows — every game handed out gains a job row and stops being eligible, so a window
+over raw recency would be permanently empty after twenty of them.
+
+- Only for `kind=resim`. An upload job is bytes somebody sent; there is no stream to
+  invent for a game nobody uploaded.
+- A candidate must have **no job row at all**, finished and failed ones included —
+  otherwise a game that cannot re-simulate comes back every poll, an hour of engine time
+  at a time. Pasting its link is still the retry.
+- A candidate must be **unmodded**: no `tweakdefs`/`tweakunits` slot set, which is exactly
+  what the settings' `mods` flag records. That also excludes the modes shipping as tweak
+  blobs (lava, zombies) — they are modded games. A game whose settings the API never gave
+  stays eligible; unknown is not the same as modded.
+- The backfill fires only into an **empty** pending list, so at most one auto-queued job
+  is ever waiting; check and insert are one DO call, so two daemons cannot both take it.
+
+Consequence worth knowing: `bringest -resim`'s **catalog scan** (games with a one-sided
+upload and no full-view revision) only runs when the queue is empty, which now is rarely.
+Those games get picked up more slowly than before.
+
+### Testing it
+
+The sync's logic (which URLs, which games earn a detail fetch, what a row holds) is
+`tests/games.test.ts` under the node runner, against a fake API. The **DO half** — the
+`games` table, `gamesUnknown`'s dedupe, and the ownership rule over the derived tables —
+is `tests/do/replayindex.test.ts`, which runs **inside workerd** via
+`@cloudflare/vitest-pool-workers` (`vitest.config.ts`, bindings read from
+`wrangler.jsonc`) because `replayindex.ts` imports `cloudflare:workers` and its
+behaviour *is* its SQL. Note there is no per-test storage isolation to configure in this
+version of the pool, so each test addresses its own DO instance; see the helper at the
+top of that file.
 
 ## Layout
 
 ```
 worker/
-  wrangler.jsonc          Worker config (name, main, account_id, assets + R2 + DO bindings)
+  wrangler.jsonc          Worker config (name, main, account_id, assets + R2 + DO bindings, cron trigger)
   vite.config.ts          Vite + @cloudflare/vite-plugin
   index.html              viewer page (Vite entry)
   public/app.js           viewer logic (copied from internal/viz/web, URLs point at R2)
@@ -370,7 +483,9 @@ npm install
 npm run dev         # vite dev — runs the Worker in workerd + HMR (needs a local R2, see below)
 npm run build       # sync icons + widget, build client bundle + Worker into dist/
 npm run preview     # vite preview — the client bundle alone, no Worker behind it
-npm run test        # node tests over the real Hono routes (fake bindings, no workerd)
+npm run test        # both suites below
+npm run test:node   # node tests over the real Hono routes + pure modules (fake bindings, no workerd)
+npm run test:do     # vitest in workerd (@cloudflare/vitest-pool-workers): the Durable Object's SQL
 npm run smoke       # boot the BUILT worker in workerd and check what it actually serves
 npm run typecheck   # tsc --noEmit
 npm run cf-typegen  # regenerate worker-configuration.d.ts from wrangler.jsonc
@@ -380,7 +495,7 @@ npm run deploy      # test → sync+build → smoke → wrangler deploy (needs C
 `npm run deploy` is the whole deploy: nothing has to be run before or after it.
 The chain is spelled out in `package.json` rather than hidden in hooks —
 
-1. `npm test` — the route-level node tests.
+1. `npm test` — the route-level node tests **and** the Durable Object tests.
 2. `npm run build` — whose `prebuild` syncs the vendored icons **and the
    uploader widget** into `public/` (both gitignored, so a build is the only
    thing that puts them there) and stamps the asset hash + data origin.

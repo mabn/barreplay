@@ -1,6 +1,7 @@
 // The replay index: a SQLite-backed Durable Object that owns the catalog of
-// uploaded replays. One instance (idFromName("index")) holds two small
-// tables; the Worker's /api routes are thin wrappers over its RPC methods.
+// uploaded replays. One instance (idFromName("index")) holds a handful of
+// small tables; the Worker's /api routes are thin wrappers over its RPC
+// methods.
 // The R2 bucket remains the source of the replay DATA — the replays table is
 // only the picker metadata (when the game started, how long it ran, which map,
 // the team-size spec like "8v8"), which the bucket listing cannot provide
@@ -11,11 +12,17 @@
 // from its demo. A Go daemon (cmd/bringest, plain or -resim) polls the rows of
 // its kind, publishes the replay, and reports done/error; the front-end polls
 // its job row to know when it landed.
+//
+// The games table is the mirror of BAR's own history (src/worker/games.ts,
+// filled by the every-minute cron): the games that were PLAYED, as opposed to
+// the ones somebody captured. Nothing serves it yet — it is the work list the
+// re-sim side will pick from.
 import { DurableObject } from "cloudflare:workers";
 
+import type { GameEntry } from "./games";
 import { parseJobStats } from "./jobs";
 import type { IngestJob, JobKind, JobStats } from "./jobs";
-import { FACET_PLAYERS_MAX, derivePlayerCount, mergeUploads } from "./replayentry";
+import { FACET_PLAYERS_MAX, SETTINGS_MODS_FLAG, derivePlayerCount, mergeUploads } from "./replayentry";
 import type { CatalogTeam, ReplayEntry, ReplayFacets, ReplayFilter, UploadRef } from "./replayentry";
 
 export type { IngestJob, JobKind, JobStats } from "./jobs";
@@ -32,6 +39,17 @@ const STALE_PROCESSING_SEC = 15 * 60;
  * and it is generous because the thing it must not interrupt is an hour of
  * engine time that would simply be run twice. */
 const STALE_PROCESSING_RESIM_SEC = 90 * 60;
+
+/** How many of the newest ELIGIBLE mirrored games the backfill chooses from.
+ * It picks the biggest game in that window, not the newest one: an 8v8 is
+ * worth far more to have than the 1v1 that happened to finish a minute later,
+ * and re-simulating either costs the same hour of somebody's machine.
+ *
+ * The window is over CANDIDATES, not over the mirror's last 20 rows. Those
+ * would drain: every game handed out gains a job row and stops being eligible,
+ * so after twenty of them a window over raw recency would be permanently empty
+ * and the daemon would idle with thousands of games still to do. */
+const BACKFILL_WINDOW = 20;
 
 /** Columns every jobs SELECT reads, in the order jobRow expects. */
 const JOB_COLS = "id, stream_key, game_id, kind, state, error, stats, created_unix, updated_unix";
@@ -94,6 +112,35 @@ export class ReplayIndex extends DurableObject<Env> {
         key   TEXT PRIMARY KEY,
         value INTEGER NOT NULL
       );
+
+      -- Every game BAR published that this worker has seen, captured or not
+      -- (the cron in index.ts, via games.ts). Keyed by the SAME gameId as
+      -- replays, so a row here and a row there are two views of one game:
+      -- what was played, and what was captured of it. The columns deliberately
+      -- echo the catalog's vocabulary (map/size/roster/settings) so the two
+      -- can be compared without translating, and the JSON columns are kept so
+      -- the derived tables below can be rebuilt without re-reading the API.
+      CREATE TABLE IF NOT EXISTS games (
+        id             TEXT PRIMARY KEY,
+        start_unix     INTEGER,
+        duration_sec   INTEGER,
+        map            TEXT,
+        map_file       TEXT,
+        game_size      TEXT,
+        -- BAR's own bucket for the game: "duel" / "team" / "ffa".
+        preset         TEXT,
+        player_count   INTEGER,
+        players        TEXT,
+        settings       TEXT,
+        engine_version TEXT,
+        game_version   TEXT,
+        synced_unix    INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS games_start ON games (start_unix DESC);
+      -- Nothing reads this yet. It is here because the query the mirror exists
+      -- to answer is "the newest games of this kind", and adding it now costs
+      -- one line where adding it to a full table later costs a rebuild.
+      CREATE INDEX IF NOT EXISTS games_preset ON games (preset, start_unix DESC);
     `);
     // In-place upgrades for tables created before a column existed (SQLite has
     // no ADD COLUMN IF NOT EXISTS; a duplicate-column error just means the
@@ -128,6 +175,11 @@ export class ReplayIndex extends DurableObject<Env> {
       "widget_version TEXT",
       "widget_sha TEXT",
       "widget_date TEXT",
+      // 1 = this row is a PIPELINE placeholder: it exists so a game being
+      // worked on shows up in the list, and nothing has been published for it
+      // yet. It is what makes a row un-openable in the viewer, and the only
+      // kind of row the pipeline ever deletes.
+      "placeholder INTEGER NOT NULL DEFAULT 0",
     ]) {
       addColumn("replays", col);
     }
@@ -136,7 +188,10 @@ export class ReplayIndex extends DurableObject<Env> {
     ctx.storage.sql.exec(`
       CREATE INDEX IF NOT EXISTS replays_map   ON replays (map);
       CREATE INDEX IF NOT EXISTS replays_count ON replays (player_count);
+      CREATE INDEX IF NOT EXISTS replays_dur   ON replays (duration_sec);
       CREATE INDEX IF NOT EXISTS jobs_kind     ON jobs (kind, state, updated_unix);
+      -- Every catalog read asks "is a job processing this game", once per row.
+      CREATE INDEX IF NOT EXISTS jobs_game     ON jobs (game_id, state);
     `);
 
     const have = ctx.storage.sql
@@ -170,12 +225,33 @@ export class ReplayIndex extends DurableObject<Env> {
       this.ctx.storage.sql.exec(`UPDATE replays SET player_count = ? WHERE id = ?`, count, r.id as string);
       this.indexRow(r.id as string, players, settings);
     }
+    // The mirrored games index into the same two tables, so a rebuild has to
+    // cover them or their entries would be left at whatever an older
+    // derivation produced. Only the ones no catalog row owns (see indexRow):
+    // an id in both was just rebuilt above, from the capture's own roster.
+    const games = this.ctx.storage.sql
+      .exec(`SELECT id, settings, players FROM games WHERE id NOT IN (SELECT id FROM replays)`)
+      .toArray();
+    for (const g of games) {
+      this.indexRow(
+        g.id as string,
+        g.players == null ? null : JSON.parse(g.players as string),
+        g.settings == null ? null : JSON.parse(g.settings as string),
+      );
+    }
   }
 
-  /** indexRow replaces one replay's rows in the two derived tables. Delete
-   * then insert (not upsert) so a roster or settings change can REMOVE an
-   * entry — a re-publish that drops a player must not leave the old name
-   * matching the filter. */
+  /** indexRow replaces one game's rows in the two derived tables. Delete then
+   * insert (not upsert) so a roster or settings change can REMOVE an entry — a
+   * re-publish that drops a player must not leave the old name matching the
+   * filter.
+   *
+   * Both the catalog and the games mirror index into these tables, under the
+   * same gameId, so exactly ONE of them owns an id's entries: the catalog row
+   * if there is one (its roster comes from the capture that was actually
+   * published), the games row otherwise. gamesInsert enforces that by not
+   * touching an id the catalog holds — without it, the two would take turns
+   * deleting each other's entries. */
   private indexRow(
     id: string,
     players: CatalogTeam[] | null,
@@ -224,10 +300,14 @@ export class ReplayIndex extends DurableObject<Env> {
       date: e.widgetDate ?? undefined,
     });
     this.ctx.storage.sql.exec(
-      `INSERT INTO replays (id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date, updated_unix)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO replays (id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date, placeholder, updated_unix)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
        ON CONFLICT(id) DO UPDATE SET
          rid = excluded.rid,
+         -- A publish is exactly what a placeholder was waiting for: there are
+         -- bytes now, so the row becomes an ordinary, openable catalog entry
+         -- and stops being something the pipeline may delete.
+         placeholder = 0,
          start_unix = excluded.start_unix,
          duration_sec = excluded.duration_sec,
          map = excluded.map,
@@ -327,7 +407,7 @@ export class ReplayIndex extends DurableObject<Env> {
    * index. Every branch below is index-backed: replays_start for the dates,
    * replays_map, replays_count, and an EXISTS-style IN over the two derived
    * tables' covering indexes for names and flags. */
-  list(filter?: ReplayFilter): ReplayEntry[] {
+  list(filter?: ReplayFilter, limit?: number, offset?: number): ReplayEntry[] {
     const where: string[] = [];
     const args: (string | number)[] = [];
     if (filter) {
@@ -336,6 +416,11 @@ export class ReplayIndex extends DurableObject<Env> {
       if (filter.map !== null) { where.push(`map = ?`); args.push(filter.map); }
       if (filter.minPlayers !== null) { where.push(`player_count >= ?`); args.push(filter.minPlayers); }
       if (filter.maxPlayers !== null) { where.push(`player_count <= ?`); args.push(filter.maxPlayers); }
+      // NULL duration compares false either way, which is the intent: a row
+      // that never recorded how long the game ran cannot be said to fall
+      // inside a length the user asked for.
+      if (filter.minDuration !== null) { where.push(`duration_sec >= ?`); args.push(filter.minDuration); }
+      if (filter.maxDuration !== null) { where.push(`duration_sec <= ?`); args.push(filter.maxDuration); }
       if (filter.player !== null) {
         // Prefix match as a RANGE, not LIKE: SQLite's LIKE is case-insensitive
         // by default, which disqualifies it from using the index. name_lower is
@@ -351,12 +436,26 @@ export class ReplayIndex extends DurableObject<Env> {
         args.push(flag);
       }
     }
+    // Paging is plain LIMIT/OFFSET over an ordered, indexed listing. The
+    // caller asks for one row more than it means to show and reads "there is
+    // a next page" off that row's existence, which is why nothing here counts
+    // anything: a COUNT over the whole catalog would be a second query whose
+    // cost grows with the archive, to answer a question the extra row already
+    // answers. An omitted limit means the whole listing (bringest's catalog
+    // scan, and any front-end too old to page).
+    let window = "";
+    if (limit !== undefined && limit > 0) {
+      window = `LIMIT ? OFFSET ?`;
+      args.push(limit, offset !== undefined && offset > 0 ? offset : 0);
+    }
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date
+        `SELECT id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date, placeholder,
+                EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = replays.id AND j.state = 'processing') AS processing
          FROM replays
          ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
-         ORDER BY start_unix IS NULL, start_unix DESC, id`,
+         ORDER BY start_unix IS NULL, start_unix DESC, id
+         ${window}`,
         ...args,
       )
       .toArray();
@@ -377,6 +476,13 @@ export class ReplayIndex extends DurableObject<Env> {
       widgetVersion: (r.widget_version as string | null) ?? null,
       widgetSha: (r.widget_sha as string | null) ?? null,
       widgetDate: (r.widget_date as string | null) ?? null,
+      placeholder: r.placeholder === 1,
+      // DERIVED, never stored: a flag would have to be cleared by whoever
+      // finishes the job, and every path that forgets — a crash, a stale
+      // daemon, a job deleted by hand — would leave a row saying "processing"
+      // forever. Asked of the jobs table it is simply true while a job is
+      // running and false the moment one is not.
+      processing: r.processing === 1,
     }));
   }
 
@@ -396,11 +502,23 @@ export class ReplayIndex extends DurableObject<Env> {
       ),
       // MIN(name) so a name that two rows spell differently in case still
       // yields one completion; ordered case-insensitively for the datalist.
+      //
+      // Restricted to ids the CATALOG holds, because the two derived tables
+      // also carry the games mirror — thousands of games nothing has published.
+      // Those names and flags match no listable replay, and an option that
+      // filters to an empty list is worse than an absent one; this endpoint
+      // exists precisely to avoid offering them.
       players: col<string>(
-        `SELECT MIN(name) AS name FROM replay_players GROUP BY name_lower ORDER BY name_lower LIMIT ${FACET_PLAYERS_MAX}`,
+        `SELECT MIN(name) AS name FROM replay_players
+         WHERE replay_id IN (SELECT id FROM replays)
+         GROUP BY name_lower ORDER BY name_lower LIMIT ${FACET_PLAYERS_MAX}`,
         "name",
       ),
-      settings: col<string>(`SELECT DISTINCT flag FROM replay_settings ORDER BY flag`, "flag"),
+      settings: col<string>(
+        `SELECT DISTINCT flag FROM replay_settings
+         WHERE replay_id IN (SELECT id FROM replays) ORDER BY flag`,
+        "flag",
+      ),
       from: span.length ? ((span[0].lo as number | null) ?? null) : null,
       to: span.length ? ((span[0].hi as number | null) ?? null) : null,
     };
@@ -447,6 +565,73 @@ export class ReplayIndex extends DurableObject<Env> {
     return true;
   }
 
+  /** gamesUnknown answers which of `ids` the mirror has never recorded — the
+   * question the cron asks before spending a detail fetch on any of them. It
+   * is deliberately the games table alone: "known" means "already mirrored",
+   * and an id the catalog happens to hold still needs its row here, or every
+   * run would re-fetch it forever.
+   *
+   * One statement with one bound parameter per id; the caller passes a single
+   * API page (24), so the list is small by construction. */
+  gamesUnknown(ids: string[]): string[] {
+    if (ids.length === 0) return [];
+    const known = new Set(
+      this.ctx.storage.sql
+        .exec(`SELECT id FROM games WHERE id IN (${ids.map(() => "?").join(",")})`, ...ids)
+        .toArray()
+        .map((r) => r.id as string),
+    );
+    return ids.filter((id) => !known.has(id));
+  }
+
+  /** gamesInsert records mirrored games and indexes their players and settings
+   * into the two derived tables. Upsert rather than plain insert so re-syncing
+   * a game (a backfill, a later re-read) refreshes it instead of failing.
+   *
+   * The derived rows are written only for ids the CATALOG does not hold — see
+   * indexRow: a published replay's entries are rebuilt from the capture that
+   * was actually published, and a mirror row must not overwrite them with the
+   * API's account of the same game. Returns the number of rows written. */
+  gamesInsert(games: GameEntry[]): number {
+    const sql = this.ctx.storage.sql;
+    const now = Math.floor(Date.now() / 1000);
+    for (const g of games) {
+      sql.exec(
+        `INSERT INTO games (id, start_unix, duration_sec, map, map_file, game_size, preset, player_count, players, settings, engine_version, game_version, synced_unix)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           start_unix = excluded.start_unix,
+           duration_sec = excluded.duration_sec,
+           map = excluded.map,
+           map_file = excluded.map_file,
+           game_size = excluded.game_size,
+           preset = excluded.preset,
+           player_count = excluded.player_count,
+           players = excluded.players,
+           settings = excluded.settings,
+           engine_version = excluded.engine_version,
+           game_version = excluded.game_version,
+           synced_unix = excluded.synced_unix`,
+        g.id,
+        g.startUnix,
+        g.durationSec,
+        g.map,
+        g.mapFile,
+        g.gameSize,
+        g.preset,
+        g.playerCount,
+        g.players === null ? null : JSON.stringify(g.players),
+        g.settings === null ? null : JSON.stringify(g.settings),
+        g.engineVersion,
+        g.gameVersion,
+        now,
+      );
+      const owned = sql.exec(`SELECT 1 FROM replays WHERE id = ?`, g.id).toArray().length > 0;
+      if (!owned) this.indexRow(g.id, g.players, g.settings);
+    }
+    return games.length;
+  }
+
   /** jobInsert records fresh work as a pending ingest job. A "resim" carries
    * no streamKey (pass ""); it is queued through resimEnqueue below, which is
    * where the refusals live. */
@@ -474,7 +659,13 @@ export class ReplayIndex extends DurableObject<Env> {
    * "duplicate": a re-sim of this game is already queued or running — the
    * caller gets that job back, which makes re-pasting a link harmless. */
   resimEnqueue(id: string, gameId: string): { status: "queued" | "in-catalog" | "duplicate"; job: IngestJob | null } {
-    const known = this.ctx.storage.sql.exec(`SELECT 1 FROM replays WHERE id = ?`, gameId).toArray();
+    // `placeholder = 0`: a row that only exists because the game is being
+    // worked on right now is not a reason to refuse — "already published" would
+    // be a lie, and the duplicate check just below is the honest answer, which
+    // hands back the job doing the work.
+    const known = this.ctx.storage.sql
+      .exec(`SELECT 1 FROM replays WHERE id = ? AND placeholder = 0`, gameId)
+      .toArray();
     if (known.length > 0) return { status: "in-catalog", job: null };
     const active = this.ctx.storage.sql
       .exec(
@@ -516,6 +707,145 @@ export class ReplayIndex extends DurableObject<Env> {
       )
       .toArray()
       .map(jobRow);
+  }
+
+  /** ensureCatalogPlaceholder puts a game that is being WORKED ON into the
+   * catalog, so the list shows it while the work runs rather than only after
+   * it lands. Called whenever a job enters "processing", by any route in.
+   *
+   * The row is marked `placeholder`, which says the obvious thing: there is
+   * nothing to play yet. That is what the viewer keys "not openable" off —
+   * inferring it from a missing rid would be wrong, since the Go server's own
+   * rows have none and are perfectly playable. A publish clears the mark
+   * (upsert writes placeholder = 0), and a job that ends without one takes the
+   * row away again, so a failed re-sim leaves no dead entry behind.
+   *
+   * It seeds what it can from the games mirror — a row showing the map and the
+   * players beats one showing five dashes — and re-indexes the derived tables
+   * from that same data, because the catalog row it just made now OWNS those
+   * entries (see indexRow). With nothing to seed from it indexes nothing: the
+   * alternative, indexing null, would DELETE whatever the mirror had put there. */
+  private ensureCatalogPlaceholder(gameId: string): void {
+    const sql = this.ctx.storage.sql;
+    if (sql.exec(`SELECT 1 FROM replays WHERE id = ?`, gameId).toArray().length > 0) return;
+    const seed = sql
+      .exec(
+        `SELECT start_unix, duration_sec, map, game_size, player_count, players, settings
+         FROM games WHERE id = ?`,
+        gameId,
+      )
+      .toArray();
+    const g = seed.length > 0 ? seed[0] : null;
+    sql.exec(
+      `INSERT INTO replays (id, start_unix, duration_sec, map, game_size, player_count, players, settings, placeholder, updated_unix)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+      gameId,
+      (g?.start_unix as number | null) ?? null,
+      (g?.duration_sec as number | null) ?? null,
+      (g?.map as string | null) ?? null,
+      (g?.game_size as string | null) ?? null,
+      (g?.player_count as number | null) ?? null,
+      (g?.players as string | null) ?? null,
+      (g?.settings as string | null) ?? null,
+      Math.floor(Date.now() / 1000),
+    );
+    if (g !== null) {
+      this.indexRow(
+        gameId,
+        g.players == null ? null : JSON.parse(g.players as string),
+        g.settings == null ? null : JSON.parse(g.settings as string),
+      );
+    }
+  }
+
+  /** dropCatalogPlaceholder removes the row again when the work ends without
+   * anything published — a failed re-sim, an upload that could not be packed.
+   * A row a publisher has since written is not a placeholder any more and is
+   * left alone, which is the normal ending: the daemon publishes (upsert
+   * clears the mark) and only then reports done.
+   *
+   * The derived entries are deliberately NOT deleted with it: they were
+   * copied from the games row, which is still there and still describes the
+   * same game, so removing them would only make the mirror's own entries
+   * disappear. */
+  private dropCatalogPlaceholder(gameId: string): void {
+    this.ctx.storage.sql.exec(
+      `DELETE FROM replays
+       WHERE id = ? AND placeholder = 1
+         AND NOT EXISTS (SELECT 1 FROM jobs WHERE game_id = ? AND state = 'processing')`,
+      gameId,
+      gameId,
+    );
+  }
+
+  /** jobsOffer is what the daemon's poll actually gets: the pending work of
+   * its kind and, when a re-sim daemon would otherwise go home empty-handed,
+   * one job queued on the spot from the games mirror.
+   *
+   * Of the BACKFILL_WINDOW newest candidates it takes the one with the MOST
+   * PLAYERS: an hour of engine time buys an 8v8 as cheaply as a duel, so
+   * within a window of games that are all recent, size is what decides.
+   *
+   * The mirror knows thousands of games nobody has captured (see the games
+   * table), and the re-sim daemon's other two work sources cannot reach them:
+   * a requested job needs a person to paste a link, and the catalog scan looks
+   * for one-sided UPLOADS, which by construction a never-uploaded game has
+   * none of. So an idle poll picks the newest such game instead of idling.
+   *
+   * Only for "resim": an upload job is bytes somebody sent, and there is no
+   * stream to invent for a game that was never uploaded.
+   *
+   * A candidate is a mirrored game with no catalog row AND NO JOB ROW AT ALL —
+   * not merely no live one. Excluding done and errored jobs too is what stops
+   * a game that fails to re-simulate from being handed out again on the very
+   * next poll, forever, an hour of engine time at a time; a person can still
+   * force a retry by pasting its link, which is exactly the existing story for
+   * a failed request.
+   *
+   * It must also be UNMODDED: no tweakdefs/tweakunits slot set, which is
+   * exactly what the settings' `mods` flag records. Note this rules out the
+   * game modes that SHIP as tweak blobs — lava, zombies — which is the same
+   * thing said twice, not an accident. A person who wants one of those
+   * re-simulated can still paste its link; nothing refuses that.
+   *
+   * It backfills only into an EMPTY pending list, so at most one auto-queued
+   * job is ever waiting: the next poll finds that job rather than making
+   * another. The check and the insert are one RPC — the DO is single-threaded,
+   * so two daemons polling together cannot both queue the same game.
+   *
+   * This makes a GET write, which is the deliberate cost of leaving the
+   * daemon's protocol alone: a poll that returns a job it just created is
+   * indistinguishable, to the daemon, from one that returns a job a person
+   * queued a minute ago. */
+  jobsOffer(kind: JobKind, newJobId: string): IngestJob[] {
+    const pending = this.jobsPending(kind);
+    if (pending.length > 0 || kind !== "resim") return pending;
+    const candidate = this.ctx.storage.sql
+      .exec(
+        `SELECT id FROM (
+           SELECT g.id AS id, g.player_count AS player_count, g.start_unix AS start_unix
+           FROM games g
+           WHERE NOT EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id)
+             AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = g.id)
+             AND NOT EXISTS (SELECT 1 FROM replay_settings s WHERE s.replay_id = g.id AND s.flag = ?)
+           ORDER BY g.start_unix IS NULL, g.start_unix DESC, g.id
+           LIMIT ${BACKFILL_WINDOW}
+         )
+         -- Biggest game in that window; a game whose roster the API never gave
+         -- goes last, and an exact tie goes to the newer one.
+         ORDER BY player_count IS NULL, player_count DESC, start_unix DESC, id
+         LIMIT 1`,
+        // Read from the derived table rather than the row's settings JSON: the
+        // flag index (flag, replay_id) makes it a seek, and a mirrored game
+        // always owns its own entries there — a game the catalog owns instead
+        // is excluded by the first clause anyway.
+        SETTINGS_MODS_FLAG,
+      )
+      .toArray();
+    if (candidate.length === 0) return [];
+    this.jobInsert(newJobId, "", candidate[0].id as string, "resim");
+    const job = this.jobGet(newJobId);
+    return job === null ? [] : [job];
   }
 
   /** queuePage is the queue as a PERSON reads it (GET /api/queue): one page of
@@ -568,7 +898,10 @@ export class ReplayIndex extends DurableObject<Env> {
       id,
       Math.floor(Date.now() / 1000) - window,
     );
-    return cur.rowsWritten > 0;
+    if (cur.rowsWritten === 0) return false;
+    const job = this.jobGet(id);
+    if (job !== null) this.ensureCatalogPlaceholder(job.gameId);
+    return true;
   }
 
   /** jobUpdate transitions a job's state (daemon heartbeat / completion
@@ -591,7 +924,18 @@ export class ReplayIndex extends DurableObject<Env> {
       Math.floor(Date.now() / 1000),
       id,
     );
-    return cur.rowsWritten > 0;
+    if (cur.rowsWritten === 0) return false;
+    // The catalog follows the job either way: into the list when work starts
+    // (this is the other door into "processing" — a daemon that reports it
+    // without claiming, and every heartbeat, which is harmless since the row
+    // is only ever created once), and out of it when work ends with nothing
+    // published.
+    const job = this.jobGet(id);
+    if (job !== null) {
+      if (state === "processing") this.ensureCatalogPlaceholder(job.gameId);
+      else this.dropCatalogPlaceholder(job.gameId);
+    }
+    return true;
   }
 }
 

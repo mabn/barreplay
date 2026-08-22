@@ -76,6 +76,24 @@ export interface ReplayEntry {
   widgetVersion: string | null;
   widgetSha: string | null;
   widgetDate: string | null;
+  /** True while this row exists ONLY because the pipeline is working on the
+   * game: a job entered "processing" and nothing has been published yet. It
+   * is the row's way of saying there is nothing to play, which is what the
+   * viewer refuses to open — a missing rid could not carry that meaning, since
+   * the Go server's rows have none and play fine. A publish clears it, and a
+   * job that ends with nothing published removes the row.
+   *
+   * Server-owned, like `uploads`: a PUT body cannot set it. Absent from the Go
+   * server's catalog, which has no pipeline behind it, so the front-end must
+   * read a missing value as false. */
+  placeholder: boolean;
+  /** True while some job for this game is in "processing" — the badge the list
+   * shows. DERIVED from the jobs table on every read rather than stored, so
+   * nothing has to remember to clear it: it stops being true the moment the
+   * job stops running, whether it finished, failed, or its daemon vanished.
+   * Server-owned and absent from the Go server's catalog, exactly like
+   * `placeholder`. */
+  processing: boolean;
 }
 
 /** One ally team's roster slice in a catalog row. */
@@ -119,6 +137,11 @@ export interface ReplayFilter {
   /** Inclusive bounds on playerCount (Gaia excluded — see derivePlayerCount). */
   minPlayers: number | null;
   maxPlayers: number | null;
+  /** Inclusive bounds on durationSec. A row whose duration is unknown matches
+   * NEITHER bound: there is nothing to compare, and counting an unknown as a
+   * match would put games of any length inside a range the user drew. */
+  minDuration: number | null;
+  maxDuration: number | null;
   /** Case-insensitive PREFIX of a player's name; the row matches when any
    * player in its roster matches. A prefix rather than a substring because it
    * answers to an index range scan, and because the UI offers the known names
@@ -130,7 +153,12 @@ export interface ReplayFilter {
 
 /** The empty filter: matches every row. */
 export function emptyFilter(): ReplayFilter {
-  return { from: null, to: null, map: null, minPlayers: null, maxPlayers: null, player: null, settings: [] };
+  return {
+    from: null, to: null, map: null,
+    minPlayers: null, maxPlayers: null,
+    minDuration: null, maxDuration: null,
+    player: null, settings: [],
+  };
 }
 
 const FILTER_MAX_SETTINGS = 16;
@@ -161,18 +189,30 @@ export function parseReplayFilter(params: URLSearchParams): ReplayFilter | strin
   f.from = from;
   f.to = to;
 
-  const int = (key: string): number | null | string => {
+  // digits caps the value implicitly, which is all these need: a bound is
+  // compared against a column, never used to size anything.
+  const int = (key: string, digits: number): number | null | string => {
     const raw = (params.get(key) ?? "").trim();
     if (raw === "") return null;
-    if (!/^\d{1,4}$/.test(raw)) return `${key} must be a non-negative integer`;
+    if (!new RegExp(`^\\d{1,${digits}}$`).test(raw)) return `${key} must be a non-negative integer`;
     return Number(raw);
   };
-  const minP = int("minPlayers");
+  const minP = int("minPlayers", 4);
   if (typeof minP === "string") return minP;
-  const maxP = int("maxPlayers");
+  const maxP = int("maxPlayers", 4);
   if (typeof maxP === "string") return maxP;
   f.minPlayers = minP;
   f.maxPlayers = maxP;
+
+  // Seconds, six digits: the slider only ever writes 0..3600 (its top end
+  // means "and longer", so it writes nothing at all), but a hand-written URL
+  // may reasonably ask for a three-hour game.
+  const minD = int("minDuration", 6);
+  if (typeof minD === "string") return minD;
+  const maxD = int("maxDuration", 6);
+  if (typeof maxD === "string") return maxD;
+  f.minDuration = minD;
+  f.maxDuration = maxD;
 
   const map = (params.get("map") ?? "").trim();
   if (map !== "") f.map = map.slice(0, 200);
@@ -196,6 +236,7 @@ export function filterIsEmpty(f: ReplayFilter): boolean {
   return (
     f.from === null && f.to === null && f.map === null &&
     f.minPlayers === null && f.maxPlayers === null &&
+    f.minDuration === null && f.maxDuration === null &&
     f.player === null && f.settings.length === 0
   );
 }
@@ -304,6 +345,12 @@ export function sanitizeEntry(id: string, body: unknown): ReplayEntry | string {
     widgetVersion: widget.version ?? null,
     widgetSha: widget.sha ?? null,
     widgetDate: widget.date ?? null,
+    // Server-owned like `uploads`. A PUT is a PUBLISH, which is the one event
+    // that ends both states, so there is nothing a body could mean by them:
+    // upsert writes placeholder = 0 unconditionally, and `processing` is read
+    // back from the jobs table, never written at all.
+    placeholder: false,
+    processing: false,
   };
 }
 
@@ -407,6 +454,14 @@ function sanitizePlayers(v: unknown): CatalogTeam[] | null | string {
   return out;
 }
 
+/** The flag settingsFlags emits for a game that ran with any tweakdefs or
+ * tweakunits slot set. Named because it is not only a badge: the re-sim
+ * backfill (ReplayIndex.jobsOffer) refuses a game carrying it, and that
+ * refusal is a string match in SQL — renaming the flag here without the query
+ * would disable the restriction silently rather than break anything. The Go
+ * twin viz.SettingsFlags emits the same literal. */
+export const SETTINGS_MODS_FLAG = "mods";
+
 /** settingsFlags distills a game's raw modoptions map (string-valued, as the
  * BAR API's gameSettings serves it) into the catalog's settings object — the
  * TypeScript twin of viz.SettingsFlags in internal/viz/catalog.go, used by
@@ -431,8 +486,8 @@ export function settingsFlags(mo: Record<string, string>): Record<string, boolea
 
   // Any tweak slot set at all means the game ran modded unit/def tables.
   for (const base of ["tweakdefs", "tweakunits"]) {
-    for (let i = 0; i <= 9 && out["mods"] === undefined; i++) {
-      if (mo[i === 0 ? base : base + i]) out["mods"] = true;
+    for (let i = 0; i <= 9 && out[SETTINGS_MODS_FLAG] === undefined; i++) {
+      if (mo[i === 0 ? base : base + i]) out[SETTINGS_MODS_FLAG] = true;
     }
   }
 

@@ -129,9 +129,16 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           PENDING (not fail) for the host that can run them.
                           -resim (needs -data on an engine-capable host) runs a DIFFERENT worker
                           instead of the upload loop, taking work from two places in order.
-                          First the REQUESTED re-sims — GET /api/jobs?kind=resim, the queue
-                          behind the landing page's paste-a-replay-link box, and the only route
-                          into the pipeline for a game NOBODY uploaded. Each is CLAIMED (POST
+                          First the QUEUED re-sims — GET /api/jobs?kind=resim, which serves
+                          two things the daemon cannot tell apart and does not need to: the jobs
+                          behind the landing page's paste-a-replay-link box, and, when there are
+                          none pending, one the WORKER queues on the spot out of the games mirror
+                          (ReplayIndex.jobsOffer — see the worker/ entry). So this list is
+                          effectively never empty while any mirrored game is unpublished, and the
+                          CATALOG SCAN below, which used to be the daemon's steady diet, now runs
+                          only when it is: one-sided uploads are no longer picked up promptly.
+                          That is the trade — an engine host that never idles, against a
+                          slower path for the games somebody actually recorded half of. Each is CLAIMED (POST
                           state=processing claim=true, which the worker refuses with 409 if
                           another daemon holds it), HEARTBEATED every 60s while the engine runs
                           — a re-sim outlives the 15-min stale window several times over, so
@@ -151,9 +158,10 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           uploads list gains an ally-null entry) — which is why only IT keeps the
                           in-process failed-game memory; a requested job records its failure on
                           its own row and so leaves the queue by itself, making a re-paste the
-                          retry. The two work lists cannot overlap: a request is refused while
-                          its game is in the catalog, and a scanned candidate is in it by
-                          definition. Upload jobs are untouched (run a plain bringest alongside,
+                          retry. The work lists cannot overlap: a request is refused while its
+                          game is in the catalog, a scanned candidate is in it by definition, and
+                          the mirror backfill takes only games with no catalog row AND no job
+                          row of any state. Upload jobs are untouched (run a plain bringest alongside,
                           on any host, with no engine).
                           Both loops share one workerAPI (the JSON helper, the bearer token, the
                           job transitions), which is why -resim now needs $REPLAY_PUT_TOKEN where
@@ -214,7 +222,19 @@ internal/envfile/         tiny stdlib KEY=VALUE loader for ./.env. Accepts the b
                           '#' in an unquoted value is kept, since secrets contain them and a
                           silently truncated key is worse than requiring quotes.
 cmd/barreplay-static/main.go CLI: pack .brp -> static-file bundle (index.json + replays/**) for R2 hosting
-internal/barapi/          resolve gameId via api.bar-rts.com; download .sdfz from OVH
+internal/barapi/          resolve gameId via api.bar-rts.com; download .sdfz from OVH.
+                          That API is github.com/beyond-all-reason/bar-db (BAR's infra docs:
+                          "effectively https://api.bar-rts.com/"; the site half is the separate
+                          Jazcash/bar-live-services) — the source of truth for the response shapes
+                          this package, packer's demo fetch and the worker's /refresh-settings all
+                          decode, and for the OVH demo path, which the API itself never returns.
+                          Its GET /replays SEARCHES the ~2.7M-game history (filters: preset=
+                          team|duel|ffa, players, maps, date, durationRangeMins, tsRange,
+                          endedNormally, hasBots, reported; limit<=100, computeTotalResults=true
+                          or totalResults is -1) — unused by this repo, but it is how you find
+                          games to feed the re-sim queue. Multi-valued filters REPEAT the key
+                          (players=a&players=b); the players[]= form is silently dropped and
+                          answers unfiltered. See the package doc for the details.
 internal/demofile/        gunzip + parse packed header + TDF startscript + the packet
                           stream's CHAT and MAP DRAWINGS (comms.go -> Demo.Comms). The
                           stream is what the SERVER broadcast, which makes it the
@@ -301,7 +321,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           production's DEPLOYED DO code, so any branch adding a DO method
                           500s on staging (observed with queuePage), and an own-DO staging
                           tests against an empty catalog — neither serves pre-prod testing.
-                          Verify changes with worker/tests + `npm run smoke` + `vite dev`,
+                          Verify changes with worker/tests (`npm test` = the node runner over
+                          the routes and pure modules, PLUS vitest-in-workerd over tests/do —
+                          the Durable Object, whose behaviour is its SQL and which plain node
+                          cannot import) + `npm run smoke` + `vite dev`,
                           then deploy.
                           The BULK replay pieces (.brw/.keys/c<n>/.resources) are NOT fetched
                           from it: they come from cdn-bar.fogofwar.dev, the R2 bucket bound
@@ -339,9 +362,11 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           spec like "8v8", bundle bytes) lives in a SQLite table inside a Durable
                           Object (src/worker/replayindex.ts, single instance, wrangler migration v1
                           new_sqlite_classes): GET /api/replays lists it newest-game-first (null
-                          start times last), FILTERED by its query params (parseReplayFilter:
+                          start times last), PAGED by ?limit=&offset= (absent limit = the whole
+                          listing) and FILTERED by its query params (parseReplayFilter:
                           from/to — unix seconds or YYYY-MM-DD, where a YYYY-MM-DD `to` covers the
-                          whole day — map, minPlayers/maxPlayers, player = a case-insensitive name
+                          whole day — map, minPlayers/maxPlayers, minDuration/maxDuration in
+                          seconds, player = a case-insensitive name
                           PREFIX, settings = comma-separated flags that must ALL be present; no
                           params = the whole catalog, unknown params ignored so an older front-end
                           still works). Filtering is SQL, not a pass over the JSON: name and flag
@@ -481,9 +506,78 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the side that recorded the current upload, the Links cell adds an alt·T<n>
                           SPA link per other uploaded revision (from the row's `uploads`), and
                           ?admin=true reveals a per-row ⟳ button calling the refresh-settings route.
-                          FILTER BAR (app.js initFilters, above the table): date from/to, map, exact
-                          player count, player name (a datalist of the known names, debounced 300 ms)
-                          and one toggle chip per settings flag. Every control writes a URL param and
+                          WORK IN PROGRESS (rows the pipeline owns): a game with a job in
+                          "processing" is in this list too, so the work is visible while it runs
+                          rather than only once it lands — the DO inserts a PLACEHOLDER catalog
+                          row when any job enters that state (ensureCatalogPlaceholder, from
+                          jobClaim and from a jobUpdate reporting processing), seeded from the
+                          games mirror so it shows the map and roster instead of five dashes.
+                          Such a row is NOT OPENABLE: there is nothing published, so app.js gives
+                          it no internal links at all (a `linkish()` span in place of every cell's
+                          <a>, class `unopenable` on the tr, no pointer, no click) — the row's
+                          `placeholder` flag is what says so, since a null rid cannot: the Go
+                          server's rows have none and play fine. Its Settings cell LEADS with a
+                          `processing` pill (the one filled, pulsing badge among the muted ones —
+                          it is not a game setting but the reason the row exists, so it must not
+                          be hunted for among them). A row that WAS already published and is being
+                          re-simulated gets the same pill and stays openable, since a revision
+                          exists to play. Both flags are server-owned and neither is stored as
+                          state to maintain: `processing` is an EXISTS over the jobs table
+                          computed per read (jobs_game index), so it clears itself the moment the
+                          job stops running — no path can leave a row saying "processing"
+                          forever; `placeholder` is cleared by the publishing upsert, and a job
+                          that ends WITHOUT publishing deletes the row (dropCatalogPlaceholder),
+                          so a failed re-sim leaves no dead entry in a list of playable things.
+                          The derived tables are deliberately left alone by that delete: their
+                          entries were copied from the games row, which still describes the game.
+                          Consequence elsewhere: resimEnqueue's "already published" check reads
+                          `placeholder = 0`, or pasting the link of a game being worked on would
+                          be refused as published instead of answered with the job doing it.
+                          FILTER BAR (app.js initFilters, above the table), in TWO ROWS: the
+                          fields (date from/to, map, a player-count RANGE, a duration RANGE,
+                          player name — a datalist of the known names, debounced 300 ms), then
+                          the settings chips with Clear/Unregistered/count pushed to the far end.
+                          Two rows because one wrapped at some widths and not others, which moved
+                          the buttons around as the catalog gained flags.
+                          Both ranges are ONE function (initDualRange): two <input type=range>
+                          stacked over a single track — real inputs, so keyboard and focus rings
+                          come free — with only the domain, step and wording differing. A thumb
+                          parked at its END writes NO param, which is what makes the full span
+                          genuinely unfiltered rather than a filter matching everything, and is
+                          also what gives DURATION its open top end: 0..DURATION_MAX_SEC=1h in
+                          minutes, where the right thumb at 1h simply stops restricting, so
+                          every longer game is included ("20m+" rather than "20m–1h"). Players
+                          spans the facets' own min..max, step 1, and hides itself when the
+                          catalog holds fewer than two distinct sizes. The thumbs push instead of
+                          crossing, dragging paints every frame but only queries after a 250 ms
+                          pause (a drag is otherwise a query per pixel), and because both inputs
+                          are full-width and stacked, which thumb a press grabs is settled on
+                          HOVER — hit testing happens before the press — by whichever is nearer,
+                          with the pointer's side of an exactly-overlapping pair breaking the
+                          tie. Players replaced an exact-count <select> that could only ask for
+                          one size at a time; the API took min/max all along, and now takes
+                          minDuration/maxDuration in SECONDS (six digits, so a hand-written URL
+                          can ask for a three-hour game the slider cannot reach; a row with no
+                          recorded duration matches NEITHER bound, since there is nothing to
+                          compare).
+                          PAGING (app.js PAGE_SIZE=50, renderPager, #homepager above the table):
+                          Prev/Next and the range being shown ("101–150"), and deliberately NO
+                          page count — counting the pages means counting the whole catalog on
+                          every listing, and the range answers the question the number was for.
+                          The listing asks for one row MORE than it shows and reads "there is a
+                          next page" off that row's existence, so nothing counts anything.
+                          ?limit=&offset= are served by BOTH backends (the DO appends
+                          LIMIT/OFFSET to the ordered query; the Go server slices its sorted
+                          listing — it ignores the FILTER params, but ignoring these would make
+                          the shared Next button lie), and an absent limit still means the whole
+                          listing, which is what bringest's catalog scan asks for. The page is
+                          in-process state, NOT in the URL (like the queue's pager and unlike
+                          the filters): "page 3" describes a moment in a growing list, not a set
+                          of replays. Any filter change returns to the first page. Orphan mode
+                          is the exception that pages in the BROWSER: merging in unregistered
+                          uploads means knowing which of them a catalog row already covers,
+                          which one page of rows cannot answer — and that mode already reads the
+                          whole bucket. Every control writes a URL param and
                           re-queries GET /api/replays — the filtering is the server's, so the count it
                           reports is the true number of matches, not what happened to be fetched. The
                           state lives in the URL (history.replaceState, so filtering is not
@@ -585,6 +679,62 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           MAX_JOB_STATS_BYTES (32 KB, nearly all of it the size report); anything
                           else is DROPPED rather than 400ing, since the stats describe work that
                           already happened and refusing them would lose the state transition too.
+                          GAMES MIRROR (games table + src/worker/games.ts + the cron in
+                          index.ts): every minute a scheduled handler reads ONE page of
+                          api.bar-rts.com's replay listing —
+                          /replays?page=1&limit=24&hasBots=false&endedNormally=true, the query
+                          verbatim in GAMES_QUERY — and records the games this worker has not
+                          seen. It is the OTHER half of the picture: `replays` is what somebody
+                          captured, `games` is what was PLAYED, keyed by the same gameId, so the
+                          two are views of one game and a row in `games` with none in `replays`
+                          is a re-sim candidate nobody has to paste a link for. Nothing serves it
+                          yet — there is no route and no UI, by request.
+                          The columns deliberately echo the catalog's vocabulary (start_unix,
+                          duration_sec, map, game_size, player_count, players, settings) plus
+                          what only the API knows: map_file (what BAR's maps API keys on),
+                          preset (duel/team/ffa, stored verbatim so a value the API adds later
+                          survives), and engine_version/game_version — the two builds a re-sim
+                          must run and nothing else.
+                          One page, never a second: at a run a minute, page 1 covers far more
+                          than a minute of BAR's game rate, so a gap closes itself and no run
+                          walks history (a real backfill would be a different job). The LISTING
+                          carries no modoptions, so each genuinely NEW id costs one
+                          /replays/<id> detail fetch — 4 at a time, once per game, never again —
+                          which is where settings and the roster come from, through the same
+                          settingsFlags/playersFromApi the admin refresh route uses, so a
+                          mirrored game and a refreshed catalog row read identically. Known ids
+                          cost nothing: a steady-state tick is ONE request (gamesUnknown filters
+                          the page first). A detail that fails is simply not recorded, so the
+                          next tick retries it; a failing LISTING throws (that is the run), and
+                          the handler logs rather than rethrows, since a minute-by-minute stream
+                          of failed crons is worse signal than one self-healing blip. Nothing is
+                          logged on a tick that changed nothing.
+                          Mirrored games index into the SAME replay_players/replay_settings
+                          tables as the catalog, which makes ownership the one rule to keep:
+                          exactly one row owns an id's derived entries — the catalog row if there
+                          is one (its roster is the capture that was published), the games row
+                          otherwise — enforced by gamesInsert skipping an id `replays` holds, and
+                          honoured by rebuildDerived. The consequence for the filter bar is that
+                          /api/replays/facets now restricts both derived reads to ids present in
+                          `replays`: the mirror is thousands of games nothing has published, and
+                          a filter option matching no listable replay is exactly what that
+                          endpoint exists to avoid.
+                          index.ts therefore exports `{ fetch, scheduled }` rather than the Hono
+                          app itself — a cron handler cannot live in app.ts, which stays free of
+                          workerd imports so the node tests can drive it. games.ts keeps that
+                          same freedom (it takes the index and `fetch` as arguments), so
+                          tests/games.test.ts drives the whole sync against a fake API. The SQL
+                          half — the table, gamesUnknown's dedupe, the ownership rule, the
+                          facets restriction — is tests/do/replayindex.test.ts, running INSIDE
+                          workerd under @cloudflare/vitest-pool-workers (vitest.config.ts,
+                          bindings read from wrangler.jsonc, so the test worker cannot diverge
+                          from the deployed one; `npm test` runs both suites). That version of
+                          the pool has NO per-test storage isolation to configure — vitest-3's
+                          isolatedStorage is not among its options — so each test addresses its
+                          own DO instance rather than the production idFromName("index").
+                          End-to-end was checked once by hand:
+                          curl /cdn-cgi/handler/scheduled against `vite dev` mirrored 24 real
+                          games, and the second call added none.
                           WIDGET-INSTALL GUIDE: the dropzone banner links (relatively, so it
                           resolves on both backends) to /setup — public/setup.html, four numbered
                           steps ending in a drag&drop upload. The page is deliberately
@@ -668,7 +818,41 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           reason). It is distinct
                           from the daemon's GET /api/jobs, which is a WORK QUEUE (guarded, ONE
                           kind at a time, and it deliberately hides a healthy "processing" job —
-                          precisely the row a person watching wants to see). The Go viz server
+                          precisely the row a person watching wants to see), and which also
+                          MAKES work: a "resim" poll with nothing pending queues a mirrored
+                          game nothing has published and returns that (ReplayIndex.jobsOffer).
+                          WHICH game: of the BACKFILL_WINDOW=20 newest eligible ones, the one
+                          with the MOST PLAYERS — an hour of engine time buys an 8v8 as cheaply
+                          as the duel that happened to finish a minute later, so within a window
+                          of games that are all recent, size decides (ties go to the newer, an
+                          unknown roster goes last but is not refused). The window is over
+                          CANDIDATES, not over the mirror's last 20 rows: every game handed out
+                          gains a job row and stops being eligible, so a window over raw recency
+                          would be permanently empty after twenty of them and the daemon would
+                          idle with thousands of games left. The rules are all about not repeating
+                          work: only for kind=resim (an upload job is bytes somebody sent, and
+                          there is no stream to invent); only a game with no catalog row and NO
+                          JOB ROW AT ALL — finished and FAILED ones included, or a game that
+                          cannot re-simulate would be handed out again every poll, an hour of
+                          engine time at a time (pasting its link is still a retry, exactly as
+                          for a failed request); only an UNMODDED game — no tweakdefs/tweakunits
+                          slot, which is precisely what the settings' `mods` flag records, so
+                          the refusal is an EXISTS over replay_settings' (flag, replay_id) index
+                          and the flag name is a shared constant (SETTINGS_MODS_FLAG) rather
+                          than a literal the query could silently stop matching; note this also
+                          rules out the modes that SHIP as tweak blobs, lava and zombies, which
+                          is the same statement twice rather than an oversight, and a game with
+                          NO settings recorded (the API gave none) stays eligible, since
+                          treating unknown as modded would empty the work list on a bad API
+                          day; and only into an EMPTY pending list, so at most
+                          one auto-queued job ever waits — the next poll finds THAT one instead
+                          of making another. Check and insert are one RPC, so two daemons
+                          polling together cannot both take the same game. It makes a GET write,
+                          which is the price of leaving the daemon's protocol untouched: a
+                          backfilled job is indistinguishable from one a person queued a minute
+                          earlier, so no deployed daemon needs to know this happens. The job id
+                          comes from the ROUTE (crypto.randomUUID, like the other two job
+                          creators), which is also what keeps the DO deterministic under test. The Go viz server
                           has no ingest pipeline
                           and 404s the route; the section then says so rather than showing an
                           empty table that would read as "nothing is queued", and asks it nothing

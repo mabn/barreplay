@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -449,6 +451,63 @@ func TestListBRPOnly(t *testing.T) {
 // The catalog endpoint must serve the same JSON shape as the worker's Durable
 // Object table (nullable stats, newest game first, no-start rows last) with
 // the stats derived from each .brp's meta record.
+// The shared front-end asks EVERY backend for one page and reads "there is a
+// next page" off getting one row more than it means to show. This server
+// ignores the filter params on purpose (it lists a directory), but ignoring
+// these would make that Next button lie.
+func TestCatalogPaging(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 5; i++ {
+		writeBRP(t, dir, fmt.Sprintf("r%d", i))
+	}
+	srv := httptest.NewServer((&Server{Dir: dir}).Handler())
+	defer srv.Close()
+
+	page := func(query string) []string {
+		resp, err := http.Get(srv.URL + "/api/replays" + query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		var entries []CatalogEntry
+		if err := json.Unmarshal(body, &entries); err != nil {
+			t.Fatalf("%s: %v (%s)", query, err, body)
+		}
+		ids := make([]string, len(entries))
+		for i, e := range entries {
+			ids[i] = e.ID
+		}
+		return ids
+	}
+
+	// These captures have no start time, so they sort by id.
+	all := page("")
+	if len(all) != 5 {
+		t.Fatalf("unpaged listing = %v, want 5 rows", all)
+	}
+	if got := page("?limit=2"); !reflect.DeepEqual(got, all[:2]) {
+		t.Errorf("?limit=2 = %v, want %v", got, all[:2])
+	}
+	if got := page("?limit=2&offset=2"); !reflect.DeepEqual(got, all[2:4]) {
+		t.Errorf("?limit=2&offset=2 = %v, want %v", got, all[2:4])
+	}
+	// A short page is how the front-end learns it is on the last one.
+	if got := page("?limit=2&offset=4"); !reflect.DeepEqual(got, all[4:]) {
+		t.Errorf("last page = %v, want %v", got, all[4:])
+	}
+	// Past the end is an empty page, not an error: the listing shrinks between
+	// requests, and a stale Next click is not a failure.
+	if got := page("?limit=2&offset=99"); len(got) != 0 {
+		t.Errorf("offset past the end = %v, want none", got)
+	}
+	// Junk is "unset", and no limit still means the whole listing — which is
+	// what a front-end too old to page, and bringest's scan, ask for.
+	if got := page("?limit=abc&offset=-3"); !reflect.DeepEqual(got, all) {
+		t.Errorf("junk params = %v, want the whole listing", got)
+	}
+}
+
 func TestCatalog(t *testing.T) {
 	dir := t.TempDir()
 	writeBRP(t, dir, "nostart") // StartUnix 0 -> null start, sorts last
