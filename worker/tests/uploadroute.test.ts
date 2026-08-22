@@ -152,6 +152,7 @@ class FakeIndex {
         percent: progress.percent ?? null,
         etaSec: progress.etaSec ?? null,
         rssBytes: progress.rssBytes ?? null,
+        swapBytes: progress.swapBytes ?? null,
         cpuPct: progress.cpuPct ?? null,
       });
       this.samples.set(id, s);
@@ -962,16 +963,20 @@ test("a job's healthcheck history is served on its own route", async (t) => {
 
   for (const p of [
     { state: "loading" },
-    { state: "simulating", percent: 12, rssBytes: 2e9, cpuPct: 480 },
-    { state: "simulating", percent: 43, rssBytes: 3e9, cpuPct: 610 },
+    { state: "simulating", percent: 12, rssBytes: 2e9, swapBytes: 0, cpuPct: 480 },
+    { state: "simulating", percent: 43, rssBytes: 3e9, swapBytes: 0, cpuPct: 610 },
   ]) {
     assert.equal((await post({ state: "processing", progress: p })).status, 200);
   }
 
   const { samples } = await asJson(await app.request(`/api/jobs/${job}/samples`, {}, env));
   assert.equal(samples.length, 3, 'every beat is a point');
-  assert.deepEqual(samples[2],
-    { atUnix: 2, state: "simulating", percent: 43, frame: null, etaSec: null, rssBytes: 3e9, cpuPct: 610 });
+  assert.deepEqual(samples[2], {
+    atUnix: 2, state: "simulating", percent: 43, frame: null, etaSec: null,
+    // Reported even at zero: "the engine is not swapping" is the reassurance,
+    // and it must not read the same as a daemon too old to measure it.
+    rssBytes: 3e9, swapBytes: 0, cpuPct: 610,
+  });
 
   // The series survives the job: the curve of a run that died is the whole
   // reason to keep it, and the live progress is gone by then.

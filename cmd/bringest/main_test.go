@@ -560,11 +560,13 @@ func TestResimDaemonHealthchecksCarryProgress(t *testing.T) {
 func TestProgressOf(t *testing.T) {
 	got := progressOf(resim.ProgressState{
 		Phase: resim.PhaseSimulating, Frame: 43000, TotalFrames: 100170,
-		Percent: 42.926524, ETASec: 840.77, SimFPS: 68.249, RSSBytes: 3 << 30, CPUPercent: 612.51,
+		Percent: 42.926524, ETASec: 840.77, SimFPS: 68.249,
+		RSSBytes: 3 << 30, SwapBytes: 512 << 20, CPUPercent: 612.51,
 	})
 	want := jobProgress{
 		State: resim.PhaseSimulating, Frame: 43000, TotalFrames: 100170,
-		Percent: 42.9, EtaSec: 840, SimFps: 68.2, RssBytes: 3 << 30, CpuPct: 612.5,
+		Percent: 42.9, EtaSec: 840, SimFps: 68.2,
+		RssBytes: 3 << 30, SwapBytes: 512 << 20, CpuPct: 612.5,
 	}
 	if *got != want {
 		t.Errorf("progressOf = %+v, want %+v", *got, want)
@@ -574,6 +576,13 @@ func TestProgressOf(t *testing.T) {
 	// read as measurements.
 	if got := progressOf(resim.ProgressState{Phase: resim.PhaseFetchingDemo}); *got != (jobProgress{State: resim.PhaseFetchingDemo}) {
 		t.Errorf("progressOf(early phase) = %+v, want just the phase", *got)
+	}
+	// ...except swap, which is sent even at zero, because zero IS the reading
+	// and must not arrive looking like "this daemon does not measure it".
+	if b, err := json.Marshal(progressOf(resim.ProgressState{Phase: resim.PhaseSimulating})); err != nil {
+		t.Fatal(err)
+	} else if !strings.Contains(string(b), `"swapBytes":0`) {
+		t.Errorf("progressOf JSON = %s, want an explicit zero swapBytes", b)
 	}
 	if resimProgress(nil) != nil {
 		t.Error("resimProgress(nil) must be nil — the catalog scan has no job row to report onto")

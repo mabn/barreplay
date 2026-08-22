@@ -15,7 +15,7 @@ func TestSetPhaseClearsSimMeasurements(t *testing.T) {
 	p := &Progress{}
 	p.SetPhase(PhaseSimulating)
 	p.setSim(3000, 6000, 60, 50)
-	p.setProc(1<<30, 400)
+	p.setProc(1<<30, 2<<20, 400)
 
 	if got := p.Snapshot(); got.Percent != 50 || got.ETASec != 50 {
 		t.Fatalf("mid-sim snapshot = %+v, want 50%% and a 50s ETA", got)
@@ -25,7 +25,7 @@ func TestSetPhaseClearsSimMeasurements(t *testing.T) {
 	if got.Phase != "packing" || got.Frame != 0 || got.Percent != 0 || got.ETASec != 0 || got.SimFPS != 0 {
 		t.Errorf("after the phase change = %+v, want the sim numbers cleared", got)
 	}
-	if got.RSSBytes != 1<<30 || got.CPUPercent != 400 {
+	if got.RSSBytes != 1<<30 || got.SwapBytes != 2<<20 || got.CPUPercent != 400 {
 		t.Errorf("after the phase change = %+v, want the process reading kept", got)
 	}
 	// Re-stating the SAME phase is not a change and must not clear anything —
@@ -43,7 +43,7 @@ func TestNilProgressIsInert(t *testing.T) {
 	var p *Progress
 	p.SetPhase(PhaseSimulating)
 	p.setSim(1, 2, 3, 4)
-	p.setProc(5, 6)
+	p.setProc(5, 6, 7)
 	if got := (p.Snapshot()); got != (ProgressState{}) {
 		t.Errorf("Snapshot of nil = %+v, want the zero state", got)
 	}

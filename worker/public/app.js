@@ -3931,6 +3931,13 @@ function progressLines(p) {
   // window anybody has onto that host, which is somebody's workstation behind
   // NAT and reachable from here in no other way.
   add('Engine memory', p.rssBytes ? fmtSize(p.rssBytes) : null);
+  // Stated even when it is zero — "none" is the reassurance, and it is the
+  // usual answer, so a swap line that only appeared in the bad case would
+  // leave every healthy run silent about the one thing being watched for.
+  // Absent entirely means a daemon too old to report it, which is different.
+  if (p.swapBytes !== undefined && p.swapBytes !== null) {
+    out.push(['Engine swap', p.swapBytes ? fmtSize(p.swapBytes) : 'none']);
+  }
   add('Engine CPU', p.cpuPct ? p.cpuPct.toFixed(0) + '% of one core' : null);
   return out;
 }
@@ -3943,6 +3950,10 @@ function progressText(p) {
   if (p.percent) bits.push(p.percent.toFixed(0) + '%');
   if (p.etaSec) bits.push(fmtDur(p.etaSec) + ' left');
   if (p.rssBytes) bits.push(fmtSize(p.rssBytes));
+  // Only when there IS swap: the one-liner is already five readings long, and
+  // "0 B swap" on every healthy job is the least interesting of them. The
+  // expanded grid states the zero case.
+  if (p.swapBytes) bits.push(fmtSize(p.swapBytes) + ' swap');
   if (p.cpuPct) bits.push(p.cpuPct.toFixed(0) + '% CPU');
   return bits.join(' · ');
 }
@@ -4006,7 +4017,7 @@ const CHART_HUE = '#4b90c4';
 const CHART_SURFACE = '#12181e';
 // Plot box. The height INCLUDES the x-axis band, so the labels are inside the
 // figure rather than in a scrollbar under it.
-const CH_W = 340, CH_H = 84, CH_L = 46, CH_R = 6, CH_T = 12, CH_B = 16;
+const CH_W = 340, CH_H = 84, CH_L = 52, CH_R = 6, CH_T = 12, CH_B = 16;
 
 // What gets plotted, in reading order: the two the machine is spending, then
 // what it bought.
@@ -4028,8 +4039,20 @@ const CH_W = 340, CH_H = 84, CH_L = 46, CH_R = 6, CH_T = 12, CH_B = 16;
 // say. On the others the axis says nothing about this particular run, so 'last'
 // labels where it ended up — for the ETA that is "how much was left when it
 // stopped reporting", which for a run that died is the whole story.
+// fmtSizeShort is fmtSize for an AXIS TICK, which lives in a 46px gutter: no
+// decimal below a gigabyte, because "846.0 MB" is nine characters and runs off
+// the left edge of the figure where "846 MB" does not. The precise value is on
+// the direct label and in the tooltip, and a tick is supposed to be a round
+// number anyway.
+function fmtSizeShort(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + ' GB';
+  if (n >= 1e6) return Math.round(n / 1e6) + ' MB';
+  if (n >= 1e3) return Math.round(n / 1e3) + ' KB';
+  return n + ' B';
+}
+
 const JOB_CHARTS = [
-  { key: 'rssBytes', title: 'Engine memory', tick: (v) => fmtSize(v), fmt: (v) => fmtSize(v), mark: 'peak' },
+  { key: 'rssBytes', title: 'Engine memory', tick: (v) => fmtSizeShort(v), fmt: (v) => fmtSize(v), mark: 'peak' },
   { key: 'cpuPct', title: 'Engine CPU', tick: (v) => Math.round(v) + '%', fmt: (v) => Math.round(v) + '% of one core', mark: 'peak' },
   { key: 'percent', title: 'Simulation', tick: (v) => Math.round(v) + '%', fmt: (v) => v.toFixed(1) + '%', max: 100, mark: 'last' },
   // Time REMAINING, which is the only series here that should be going down.
@@ -4037,6 +4060,12 @@ const JOB_CHARTS = [
   // a stretch where it climbs is the run getting slower faster than it is
   // getting on, which no other chart states outright.
   { key: 'etaSec', title: 'Estimated time left', tick: (v) => fmtDuration(v), fmt: (v) => fmtDur(v) + ' left', mark: 'last' },
+  // Swap is the exception that skips itself. Zero is the healthy answer and
+  // very nearly always the answer, and a flat line along the baseline of an
+  // axis reading "1 B" is worse than no chart at all — so this one is drawn
+  // only when the engine actually swapped, and its APPEARING is itself the
+  // signal. The zero case is still stated in words in the grid above.
+  { key: 'swapBytes', title: 'Engine swap', tick: (v) => fmtSizeShort(v), fmt: (v) => fmtSize(v) + ' swapped out', mark: 'peak', skipIfZero: true },
 ];
 
 // Fetched per expanded row rather than with the queue page: 25 rows would
@@ -4103,6 +4132,9 @@ function jobCharts(rows) {
     // no engine, and a re-sim's first minutes have no simulation — an empty
     // axis would suggest a reading of zero, which is a different claim.
     if (!seen.length) continue;
+    // ...and a measure whose every reading IS zero gets none either, where the
+    // spec says so: see the swap entry in JOB_CHARTS.
+    if (spec.skipIfZero && !seen.some((v) => v > 0)) continue;
     readouts.push(buildChart(box, spec, rows, vals, t0));
   }
   if (!readouts.length) return null;

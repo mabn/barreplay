@@ -84,6 +84,13 @@ export interface JobProgress {
   simFps?: number;
   /** The ENGINE process's resident memory. */
   rssBytes?: number;
+  /** How much of the engine has been pushed out to SWAP. Zero is the healthy
+   * answer and the usual one, which is exactly why the daemon sends it even
+   * when it is zero: "the engine is not swapping" and "this daemon is too old
+   * to know" must not arrive as the same absent field. Anything above zero is
+   * the direct explanation for a run that has gone slow — a sim frame faulting
+   * its own state back in is doing disk I/O per frame. */
+  swapBytes?: number;
   /** The engine's CPU use as a percentage of ONE core, so a busy multi-threaded
    * engine reports well over 100. This and rssBytes are the only window anyone
    * has onto the health of the machine actually doing the work — the daemon
@@ -155,6 +162,7 @@ export interface JobSample {
    * getting slower than it is getting on. */
   etaSec: number | null;
   rssBytes: number | null;
+  swapBytes: number | null;
   cpuPct: number | null;
 }
 

@@ -68,6 +68,29 @@ func TestParseProcStatRejectsJunk(t *testing.T) {
 	}
 }
 
+// The swap reading comes out of a DIFFERENT file from everything else, and its
+// absence is normal (a kernel with no swap support publishes no VmSwap line),
+// so a missing or malformed one must read as zero rather than break the sample.
+func TestParseProcStatusSwap(t *testing.T) {
+	const real = "Name:\tspring-headless\nState:\tS (sleeping)\n" +
+		"VmPeak:\t 8123456 kB\nVmRSS:\t  786432 kB\nVmSwap:\t  131072 kB\nThreads:\t9\n"
+	if got, want := parseProcStatusSwap(real), int64(131072)*1024; got != want {
+		t.Errorf("parseProcStatusSwap = %d, want %d", got, want)
+	}
+	for name, in := range map[string]string{
+		"no VmSwap line": "Name:\tx\nVmRSS:\t 100 kB\n",
+		"empty":          "",
+		"no value":       "VmSwap:\n",
+		"not a number":   "VmSwap:\t lots kB\n",
+		"negative":       "VmSwap:\t -1 kB\n",
+		"a prefix only":  "VmSwapiness:\t 60\n",
+	} {
+		if got := parseProcStatusSwap(in); got != 0 {
+			t.Errorf("parseProcStatusSwap(%s) = %d, want 0", name, got)
+		}
+	}
+}
+
 func TestCPUPercent(t *testing.T) {
 	t0 := time.Unix(1700000000, 0)
 	prev := ProcSample{CPUSec: 10, At: t0}
@@ -100,6 +123,12 @@ func TestSampleProcessSelf(t *testing.T) {
 	}
 	if s.CPUSec < 0 {
 		t.Errorf("CPUSec = %v, want >= 0", s.CPUSec)
+	}
+	// Not asserted non-zero: a healthy host swaps nothing, and this test's own
+	// machine may have no swap configured at all. What matters is that reading
+	// it did not fail the sample.
+	if s.SwapBytes < 0 {
+		t.Errorf("SwapBytes = %d, want >= 0", s.SwapBytes)
 	}
 }
 
