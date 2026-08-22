@@ -41,6 +41,20 @@ type Config struct {
 	PRDownloaderBinary string
 	// SampleEvery is the widget sampling interval in sim frames (default 30).
 	SampleEvery int
+	// PatchedEngine prefers a locally built patched engine — "spring-headless-
+	// patched" beside the stock binary in <DataDir>/engine/<version>/ — over
+	// the stock one, per version. The patches it carries are the byte-identical
+	// speed work in patches/engine-<version>/: a re-sim on such a build
+	// produces the same .brp, faster. There is nothing to download, so a
+	// version with no patched build simply falls back to stock with a warning
+	// rather than failing — a daemon must still process games whose engine
+	// nobody has patched.
+	//
+	// It lives BESIDE the stock binary rather than in its own <version>-patched
+	// directory because the engine resolves base/springcontent.sdz relative to
+	// its own executable: a separate directory would have to duplicate the
+	// whole base/ + fonts payload for every version.
+	PatchedEngine bool
 	// SkipProvision disables all pr-downloader calls (assume content present).
 	SkipProvision bool
 	// ForceProvision re-runs pr-downloader even for content already recorded in the
@@ -83,13 +97,30 @@ type Engine struct {
 	prdPath       string
 	engineCfgPath string // set by WriteEngineConfig; passed to the engine as --config
 	pid           int    // set by Run; see Pid
+	patched       bool   // resolved binary is the patched build (see Config.PatchedEngine)
 }
+
+// Patched reports whether the engine binary Locate settled on is the patched
+// build. Callers record it next to a run's timings: two runs of one replay are
+// only comparable when they used the same build, and the capture itself cannot
+// say — being byte-identical either way is the whole point of those patches.
+func (e *Engine) Patched() bool { return e.patched }
 
 func headlessName() string {
 	if runtime.GOOS == "windows" {
 		return "spring-headless.exe"
 	}
 	return "spring-headless"
+}
+
+// patchedHeadlessName is the stock name with a -patched suffix, before any
+// extension: "spring-headless-patched", "spring-headless-patched.exe".
+func patchedHeadlessName() string {
+	n := headlessName()
+	if ext := filepath.Ext(n); ext != "" {
+		return strings.TrimSuffix(n, ext) + "-patched" + ext
+	}
+	return n + "-patched"
 }
 
 func prdName() string {
@@ -124,9 +155,33 @@ func Locate(cfg Config, engineVersion string) (*Engine, error) {
 	cfg.DataDir = absData
 	e := &Engine{cfg: cfg}
 
-	e.headlessPath, err = findBinary(cfg.EngineBinary, cfg.DataDir, engineVersion, headlessName())
-	if err != nil {
-		return nil, fmt.Errorf("engine: locate %s: %w", headlessName(), err)
+	// A patched build is preferred per version when asked for, and its absence
+	// is a warning rather than an error: nothing downloads one, so a host will
+	// routinely meet a version nobody has patched, and refusing the job would
+	// be worse than running it at stock speed.
+	if cfg.PatchedEngine && cfg.EngineBinary == "" && engineVersion != "" {
+		// Deliberately an exact-path check rather than findBinary: that walks
+		// every engine subdir and then $PATH, which for a patched build would
+		// hand back ANOTHER version's binary whenever this version has none —
+		// and since the version check below hard-errors on a mismatch it did
+		// not choose, one patched build on the host would start failing every
+		// job for every other version. The strict lookup falls back to stock
+		// instead, which is the whole point.
+		if p := filepath.Join(cfg.DataDir, "engine", engineVersion, patchedHeadlessName()); fileExists(p) {
+			if abs, aerr := filepath.Abs(p); aerr == nil {
+				e.headlessPath, e.patched = abs, true
+			}
+		}
+		if !e.patched {
+			fmt.Fprintf(os.Stderr, "engine: no patched build for %s (looked for %s under %s); using the stock engine\n",
+				engineVersion, patchedHeadlessName(), filepath.Join(cfg.DataDir, "engine", engineVersion))
+		}
+	}
+	if e.headlessPath == "" {
+		e.headlessPath, err = findBinary(cfg.EngineBinary, cfg.DataDir, engineVersion, headlessName())
+		if err != nil {
+			return nil, fmt.Errorf("engine: locate %s: %w", headlessName(), err)
+		}
 	}
 	// findBinary falls back to any engine dir / $PATH, which is right for an
 	// install that suffixes the version ("<ver> bar") but wrong when the build
@@ -158,6 +213,12 @@ func Locate(cfg Config, engineVersion string) (*Engine, error) {
 				e.headlessPath, got, engineVersion,
 				filepath.Join(cfg.DataDir, "engine", engineVersion))
 		}
+	}
+	if e.patched {
+		// Say so once. The capture cannot record it — a patched run is
+		// byte-identical by construction — so the log is the only place the
+		// choice is visible when a run's timings are read later.
+		fmt.Fprintf(os.Stderr, "engine: using the patched build %s\n", e.headlessPath)
 	}
 	if !cfg.SkipProvision {
 		// pr-downloader usually sits beside the engine binary.

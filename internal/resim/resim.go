@@ -49,6 +49,12 @@ type Options struct {
 	PRDownloaderBinary string
 	// SkipProvision assumes engine/game/map content is already installed.
 	SkipProvision bool
+	// PatchedEngine prefers the locally built patched engine for the replay's
+	// version when one is installed (engine.Config.PatchedEngine). The patches
+	// are output-safe by construction, so this changes how long the run takes
+	// and nothing about what it produces; a version with no patched build
+	// quietly runs stock.
+	PatchedEngine bool
 	// ProgressEvery prints the same frame/ETA line cmd/barreplay's -progress
 	// does, polled off the engine's infolog, this often. 0 disables it. A
 	// re-sim of a long game runs for many minutes with no other output, so a
@@ -104,6 +110,10 @@ type RunStats struct {
 	// when a run is cut off.
 	GameSec       int32
 	EngineVersion string
+	// EnginePatched records that the run used the patched build. The capture
+	// cannot carry this — it is byte-identical either way — so without it a
+	// job's timings could not be compared against another host's.
+	EnginePatched bool
 	Infolog       engine.InfologSummary
 }
 
@@ -197,6 +207,7 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 		return "", nil, err
 	}
 	eng, err := engine.Locate(engine.Config{
+		PatchedEngine:      o.PatchedEngine,
 		DataDir:            o.DataDir,
 		EngineBinary:       o.EngineBinary,
 		PRDownloaderBinary: o.PRDownloaderBinary,
@@ -332,6 +343,7 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 		o.Stats.EngineSec, o.Stats.LoadSec, o.Stats.SimSec = engineSec, loadSec, simSec
 		o.Stats.GameSec = h.GameTime
 		o.Stats.EngineVersion = h.EngineVersion
+		o.Stats.EnginePatched = eng.Patched()
 		o.Stats.Infolog = engine.SummarizeInfolog(eng.InfologPath())
 	}
 
