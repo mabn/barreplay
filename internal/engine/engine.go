@@ -516,6 +516,17 @@ func (e *Engine) Run(ctx context.Context, scriptPath string) (io.Reader, func() 
 	pw.Close()
 	e.pid = cmd.Process.Pid
 
+	// Tell the OOM killer to take THIS process first. A re-simulation is batch
+	// work that can be run again; the shell, the daemon and sshd it shares the
+	// machine with are not. Best-effort — a preference, not a requirement — and
+	// deliberately after Start rather than before, since the value has to be
+	// written against the child's pid. The window before it lands is the
+	// engine's first milliseconds, when it has allocated nothing worth killing
+	// for. See oom.go for what this does NOT fix.
+	if err := SetOOMScoreAdj(e.pid, EngineOOMScoreAdj); err != nil {
+		fmt.Fprintf(os.Stderr, "engine: warning: could not mark the engine for the OOM killer: %v\n", err)
+	}
+
 	wait := func() error {
 		err := cmd.Wait()
 		pr.Close()

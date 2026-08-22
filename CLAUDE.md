@@ -337,6 +337,16 @@ internal/resim/           the cmd/barreplay pipeline packaged as one call (Run: 
                           engine.SampleProcess for the engine's RSS and CPU. A phase change
                           clears the sim numbers (they described the phase that ended) but keeps
                           the process reading (the process did not).
+                          Options.MinFreeBytes is the MEMORY GUARD (0 = engine.
+                          DefaultMinFreeBytes, negative = off): the engine runs under a context
+                          of Run's own so engine.WatchMemory can end it when the HOST drops below
+                          the floor — see "Running out of memory" below for why stopping first
+                          matters. The reading is kept in a memGuard (first one wins: by the time
+                          the engine has died the host may have recovered, and a healthier number
+                          would describe the recovery rather than the decision) and its error
+                          BEATS every other explanation Run can give, deliberately: we sent that
+                          signal, so "the engine was killed" and whatever the truncated stream
+                          then failed to parse into are both true and both useless.
 internal/capture/         parse the widgets' streams -> snapshot records (BRSNAP text in
                           capture.go, binary .brepstream in brep.go, shared preamble +
                           comm-record parsing in lines.go). COMM records (text) / 'C'
@@ -1811,6 +1821,40 @@ versions URL is derived from `-rapid-repo` (`…/repos.gz` → `…/byar/version
 
 The wrapper startscript `barreplay` writes forces max speed:
 `[game]{ demofile=<abs path>; } [modoptions]{ MinSpeed=9999; MaxSpeed=9999; }`.
+
+## Running out of memory (why the engine is stopped, not killed)
+
+A re-simulation of a big game wants 7-10 GB resident, which is more than a small
+host has. Left alone that ends in a **global OOM kill**, and the cost is not
+limited to the run: systemd stops an entire unit when one of its processes is
+OOM-killed and the unit's `OOMPolicy` is `stop`, which is the DEFAULT for the
+scopes a user manager creates (`DefaultOOMPolicy=stop`) — so an OOM-killed engine
+takes the tmux pane it was started from, and everything else in it, with it.
+(System-level `session-N.scope` units default to `continue`, which is why the
+same crash sometimes costs only the engine and sometimes costs the window.)
+
+Two defences, and only the second prevents the above:
+
+- **`oom_score_adj = 1000`** on the engine (`engine.SetOOMScoreAdj`, applied by
+  `engine.Run`). This decides WHO dies, not WHETHER: the engine is already the
+  biggest process and so the kernel's usual pick, but "usually" is not a
+  guarantee — a run that has only just started is small, and the process killed
+  instead would be somebody's shell.
+- **`engine.WatchMemory`** stops the engine first. It polls `/proc/meminfo`'s
+  `MemAvailable` every 2s and, below the floor (`-min-free`, default 512 MiB;
+  0 disables), cancels the context the engine was launched with. No global OOM
+  means no systemd teardown and no collateral, and the run ends as an ordinary
+  failed job whose message says the machine was too small. It watches the HOST
+  rather than the engine on purpose: what matters is whether the machine is about
+  to run out, and the engine is the disposable thing on it either way. A reading
+  it cannot take is never a reason to stop a run — a net that fires on "I do not
+  know" would kill every run on a kernel that publishes no such number.
+
+Both `cmd/barreplay` and `bringest -resim` take `-min-free`. If the guard is
+disabled, or an allocation spike outruns its 2s tick, the systemd behaviour above
+is still in play; `OOMPolicy=continue` on the unit the daemon runs in (e.g.
+`systemd-run --user --scope -p OOMPolicy=continue`) contains the damage to the
+engine.
 
 ## GPU / headless caveat (important)
 
