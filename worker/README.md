@@ -239,6 +239,9 @@ the game now running — one lobby names game after game, one `lobbies` row per 
 
 The name is **served, not copied**: `GET /api/replays` joins `games.lobby_name` per read
 into each row's `lobbyName`, so it appears the moment the match lands, with no republish.
+`games.map_file` rides the same join into `mapFile`, which is what the list's small map
+thumbnails key on (`api.bar-rts.com/maps/<file>/texture-thumb.jpg`, lazy-loaded; rows
+without a mirror row guess the file from the map name and hide the image on a 404).
 In the list, the **Players column header is a switch** — click it to swap the column
 between the rosters and the lobby name (a dash where no match exists). The choice lives
 in the URL as `?col=lobby` (absent = players), so it is shareable and survives a refresh

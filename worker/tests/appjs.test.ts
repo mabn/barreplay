@@ -758,6 +758,7 @@ test('a game being processed is listed, badged first, and cannot be opened', () 
     const goPage = () => {};
     // The Players column shows rosters here; its lobby-name face has its own test.
     const playersColumn = () => 'players';
+    ${extract('mapFileGuess')}
     ${extract('renderPager')}
     ${extract('renderHome')}
     return renderHome;
@@ -833,6 +834,7 @@ test('the Players header swaps the column to lobby names and back', () => {
     const PAGE_SIZE = 50; let homePage = 0, homeHasNext = false;
     const goPage = () => {};
     ${extract('playersColumn')}
+    ${extract('mapFileGuess')}
     ${extract('renderPager')}
     ${extract('renderHome')}
     return renderHome;

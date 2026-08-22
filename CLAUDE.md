@@ -960,7 +960,12 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           per-game, so renames between games record correctly). Matched
                           observations prune after 48h; unmatched ones are kept forever as
                           the record of why a game has no name. SERVED: the DO's list JOINS
-                          lobby_name per read (a scalar subselect on games' primary key), so
+                          lobby_name per read (a scalar subselect on games' primary key;
+                          games.map_file rides the same join into `mapFile` — the archive
+                          name behind the list's 18px map THUMBNAILS, fetched lazily from
+                          api.bar-rts.com/maps/<file>/texture-thumb.jpg; rows without a
+                          mirror row fall back to mapFileGuess and a wrong guess just 404s
+                          into no thumbnail via onerror), so
                           GET /api/replays rows carry a `lobbyName` — never stored on the
                           replays row, never accepted from a PUT, appearing the moment the
                           match lands with no republish; the Go server omits the key

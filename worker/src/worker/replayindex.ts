@@ -601,7 +601,8 @@ export class ReplayIndex extends DurableObject<Env> {
       .exec(
         `SELECT id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date, placeholder,
                 EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = replays.id AND j.state = 'processing') AS processing,
-                (SELECT lobby_name FROM games g WHERE g.id = replays.id) AS lobby_name
+                (SELECT lobby_name FROM games g WHERE g.id = replays.id) AS lobby_name,
+                (SELECT map_file FROM games g WHERE g.id = replays.id) AS map_file
          FROM replays
          ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
          ORDER BY start_unix IS NULL, start_unix DESC, id
@@ -629,8 +630,11 @@ export class ReplayIndex extends DurableObject<Env> {
       placeholder: r.placeholder === 1,
       // JOINED per read from the games mirror (the teiserver poll's landing
       // spot), so a name that arrives after the replay was published shows
-      // up without anyone touching the replays row.
+      // up without anyone touching the replays row. map_file rides the same
+      // join: the mirror is the one place the map's ARCHIVE name is known,
+      // and the list's terrain thumbnail keys on it.
       lobbyName: (r.lobby_name as string | null) ?? null,
+      mapFile: (r.map_file as string | null) ?? null,
       // DERIVED, never stored: a flag would have to be cleared by whoever
       // finishes the job, and every path that forgets — a crash, a stale
       // daemon, a job deleted by hand — would leave a row saying "processing"
