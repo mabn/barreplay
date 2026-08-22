@@ -309,6 +309,41 @@ internal/engine/          locate spring-headless/pr-downloader, provision, launc
                           error. LastLoggedFrame exposes what WatchProgress polls (the newest
                           "[f=]" marker in the infolog), which is the ONLY running-progress
                           signal a headless replay emits.
+                          SimETA (simeta.go) turns that stream of frame readings into the two
+                          numbers a person watching a re-sim wants, and is shared by
+                          WatchProgress (which prints them) and internal/resim's watcher (which
+                          reports them to a job), so the log and the queue page cannot disagree.
+                          Both are harder than they look because a sim frame is NOT a fixed
+                          amount of work: measured over 29 completed re-sims, the last third of
+                          a game's frames processes at a median of 0.29x the rate of the first
+                          third, since the thing being simulated grows. So remaining/rate — the
+                          obvious ETA, and what this used to do — announces "ETA 03:49" four
+                          minutes into a 55-minute run: over the first tenth of a game it
+                          predicted a MEDIAN of 0.23x the true time left, over the last tenth
+                          2.8x, and it landed within 2x of the truth only 37% of the time.
+                          The fix is the simWallShare curve: the share of a re-simulation's
+                          total wall time already spent by the time it reaches a given fraction
+                          of the demo's frames (the headline entry — half the FRAMES are done
+                          after 30% of the TIME), median-averaged over those 29 runs and
+                          interpolated between 5% steps. ETA = elapsed x (work ahead) / (work
+                          done), which divides the curve out against the run's OWN elapsed time
+                          — so a host of any speed and a demo of any length calibrate themselves
+                          after a couple of minutes, which is why ONE table covers everything
+                          (the shape correlates with neither game length, r=+0.27, nor host
+                          speed, r=-0.09). Leave-one-out over the 29: a median error of 27% and
+                          96% of readings within 2x, with no bias at any point in a run.
+                          The RATE is a plain average over a 60-second trailing window rather
+                          than an exponential average of consecutive readings, because the
+                          engine only logs one frame in 300: at a late-game 10 fps the infolog
+                          moves every ~30s, so consecutive readings are 0, 0, 0, 0, 0, 60 and
+                          the old average swung +-40% every tick. The window predicts the rate
+                          the next minute actually runs at to within 37% where the old one was
+                          off by 150%. A frame going BACKWARDS restarts the estimator: the
+                          infolog is per data dir, so a fresh run reads the tail of the previous
+                          one's until the engine truncates it, and that stale frame would
+                          otherwise be credited as work already done. Nothing is reported until
+                          there is something to say — no rate under 10s of history, no ETA under
+                          30s of run — since the log's own granularity dominates before that.
                           SummarizeInfolog (infolog.go) reduces a finished run's infolog.txt to
                           size/lines/last frame plus DESYNC and warning counts — substring
                           heuristics, not a parse of a grammar the engine promises, and the
@@ -331,10 +366,11 @@ internal/resim/           the cmd/barreplay pipeline packaged as one call (Run: 
                           "[barreplay]" line, the same boundary that splits LoadSec from
                           SimSec), and SetPhase is exported because the phases after Run returns
                           belong to the caller. watchProgress samples every 5s while the engine
-                          lives: engine.LastLoggedFrame for the sim frame (percent + an ETA off
-                          an EWMA of the frame rate — the instantaneous rate swings hard,
-                          because the engine's pacing governor idles it in bursts) and
-                          engine.SampleProcess for the engine's RSS and CPU. A phase change
+                          lives: engine.LastLoggedFrame for the sim frame, fed to an
+                          engine.SimETA for the percentage, the rate and the time remaining (see
+                          the internal/engine entry — the ETA is NOT remaining frames over the
+                          current rate, which reads "nearly done" through the whole first half
+                          of a run), and engine.SampleProcess for the engine's RSS and CPU. A phase change
                           clears the sim numbers (they described the phase that ended) but keeps
                           the process reading (the process did not).
                           Options.MinFreeBytes is the MEMORY GUARD (0 = engine.
@@ -2098,6 +2134,8 @@ never their content — and is the main remaining speed lever (~25-35% at the 60
   `bringest -progress` — a re-sim runs for tens of minutes, so a silent one is the
   surprising case; `-progress=false` opts out) polls the tail of
   `<data>/infolog.txt` every 2s, parses the newest `[f=<frame>]` marker, and prints
-  frame/total, in-game time, %, processing fps, speed-up (fps/30), and ETA. Total game
+  frame/total, in-game time, %, processing fps, speed-up (fps/30), and ETA — the last two
+  from `engine.SimETA`, which is also what the ingest daemon reports to a job, so the log
+  line and the queue page always agree. Total game
   length comes from the demo header `GameTime`; the engine sims at 30 frames/game-second.
 - Development happens on branch `claude/bar-replay-snapshots-g8jmfj`; `main` is the base.

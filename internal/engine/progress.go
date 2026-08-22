@@ -73,14 +73,11 @@ func LastLoggedFrame(infologPath string) (int32, bool) {
 // WatchProgress polls the tail of infologPath every interval and prints replay
 // progress to out until ctx is cancelled. totalGameSec is the demo's full game
 // duration (from the header) and drives percent-complete and ETA; pass 0 if
-// unknown to omit those. Processing speed (sim frames/real second) is measured
-// from the frame delta between consecutive peeks. It is best-effort: peeks that
-// can't be read or have no frame yet are skipped.
+// unknown to omit those. Speed and time-remaining both come from SimETA, so the
+// printed line and the one a daemon reports to a job say the same thing. It is
+// best-effort: peeks that can't be read or have no frame yet are skipped.
 func WatchProgress(ctx context.Context, infologPath string, totalGameSec int, interval time.Duration, out io.Writer) {
-	totalFrames := int32(totalGameSec * simFPS)
-
-	prevFrame := int32(-1)
-	var prevTime time.Time
+	est := NewSimETA(int32(totalGameSec * simFPS))
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -93,23 +90,17 @@ func WatchProgress(ctx context.Context, infologPath string, totalGameSec int, in
 			if !ok || frame < 0 {
 				continue
 			}
-
-			fps := -1.0
-			if prevFrame >= 0 {
-				if dt := now.Sub(prevTime).Seconds(); dt > 0 {
-					fps = float64(frame-prevFrame) / dt
-				}
-			}
-			fmt.Fprintln(out, formatProgress(frame, totalFrames, fps))
-			prevFrame, prevTime = frame, now
+			fps, eta := est.Observe(now, frame)
+			fmt.Fprintln(out, formatProgress(frame, est.total, fps, eta))
 		}
 	}
 }
 
-// formatProgress renders one progress line. totalFrames<=0 or an unknown fps
-// (<0) gracefully degrade to "--". Speed-up is fps relative to the baseline 30
-// sim frames/game-second (e.g. 45 fps -> 1.5x realtime).
-func formatProgress(frame, totalFrames int32, fps float64) string {
+// formatProgress renders one progress line. totalFrames<=0, an unknown fps (<0)
+// and an unavailable ETA (<=0) each gracefully degrade to "--". Speed-up is fps
+// relative to the baseline 30 sim frames/game-second (e.g. 45 fps -> 1.5x
+// realtime).
+func formatProgress(frame, totalFrames int32, fps, etaSec float64) string {
 	cur := mmss(float64(frame) / simFPS)
 
 	totalF, total, pct, eta := "--", "--:--", "--", "--:--"
@@ -117,9 +108,9 @@ func formatProgress(frame, totalFrames int32, fps float64) string {
 		totalF = strconv.FormatInt(int64(totalFrames), 10)
 		total = mmss(float64(totalFrames) / simFPS)
 		pct = fmt.Sprintf("%.1f%%", 100*float64(frame)/float64(totalFrames))
-		if fps > 0 {
-			eta = mmss(float64(totalFrames-frame) / fps)
-		}
+	}
+	if etaSec > 0 {
+		eta = mmss(etaSec)
 	}
 	speed, speedup := "--", "--"
 	if fps >= 0 {
