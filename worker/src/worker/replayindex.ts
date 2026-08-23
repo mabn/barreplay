@@ -462,43 +462,69 @@ export class ReplayIndex extends DurableObject<Env> {
     super(ctx, env);
     // The schema DDL is write-classified by the storage layer even when it
     // changes nothing (CREATE TABLE IF NOT EXISTS on an existing table), and
-    // this constructor runs for every request. Observed live: with the free
-    // plan's daily rows-written allowance spent, every route — reads included —
-    // died here with "Exceeded allowed rows written", because the first
-    // statement of any request was a write. So the DDL runs only when a
-    // read-only look at sqlite_master says something is actually missing; the
-    // steady-state constructor reads a few dozen rows and writes nothing.
+    // this constructor runs for every request — so the DDL runs only when a
+    // read-only look at sqlite_master says something is actually missing
+    // (ensureSchema); the steady-state constructor reads a few dozen rows and
+    // writes nothing. And no failure here may kill the request: the free
+    // tier's overage enforcement gates EVERY SQL statement once a daily
+    // budget is spent, reads included (observed live: the sqlite_master
+    // SELECT threw "Exceeded allowed rows written"), so a throwing
+    // constructor turns one exhausted budget into a dead object with an
+    // unattributable error. Both steps log their own failure with what they
+    // were doing and serve on; the request then fails — if it fails — in the
+    // route's own query, which is the error the worker log ties to a method
+    // and path.
     this.ensureSchema();
-    const have = ctx.storage.sql
-      .exec(`SELECT value FROM schema_meta WHERE key = 'derived_version'`)
-      .toArray();
-    if ((have.length > 0 ? (have[0].value as number) : 0) < DERIVED_VERSION) {
-      this.rebuildDerived();
-      ctx.storage.sql.exec(
-        `INSERT INTO schema_meta (key, value) VALUES ('derived_version', ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-        DERIVED_VERSION,
-      );
-    }
+    this.ensureDerived();
   }
 
   /** ensureSchema migrates when a read-only check says something is missing,
-   * and serves on regardless when the migration itself cannot run. The live
-   * case: with the free tier's daily rows-written allowance spent, creating
-   * an index over the whole games mirror is a real write and throws — but the
-   * previous schema still answers every query (at worst without the new
-   * index), so failing the construction would take every read down for a
-   * performance optimization. Logged loudly instead, and every fresh
-   * instantiation retries, so the migration lands on the first construction
-   * after the budget resets. A fresh database is the exception that cannot be
-   * served either way: with no tables at all the very next statement fails
-   * regardless, and its error is the more honest one. */
+   * and serves on regardless when the check or the migration cannot run. The
+   * live case for the migration: with the free tier's daily rows-written
+   * allowance spent, creating an index over the whole games mirror is a real
+   * write and throws — but the previous schema still answers every query (at
+   * worst without the new index), so failing the construction would take
+   * every read down for a performance optimization. Logged loudly instead,
+   * and every fresh instantiation retries, so the migration lands on the
+   * first construction after the budget resets. */
   private ensureSchema(): void {
-    if (this.schemaCurrent()) return;
+    let current: boolean;
+    try {
+      current = this.schemaCurrent();
+    } catch (e) {
+      // Even the read-only check can throw — the overage gate above spares
+      // no statement. Skip the migration rather than guess: an unmigrated
+      // schema serves, a half-guessed one might not.
+      console.error(`schema check failed, skipping migration: ${e}`);
+      return;
+    }
+    if (current) return;
     try {
       this.migrateSchema();
     } catch (e) {
       console.error(`schema migration failed, serving with the previous schema: ${e}`);
+    }
+  }
+
+  /** ensureDerived runs the one-time derived-table rebuild when
+   * DERIVED_VERSION says one is due, guarded exactly like the schema
+   * migration and for the same reason: the version row is only written after
+   * a rebuild that succeeded, so a failed one logs, serves on, and is retried
+   * on every construction until it lands. */
+  private ensureDerived(): void {
+    try {
+      const have = this.ctx.storage.sql
+        .exec(`SELECT value FROM schema_meta WHERE key = 'derived_version'`)
+        .toArray();
+      if ((have.length > 0 ? (have[0].value as number) : 0) >= DERIVED_VERSION) return;
+      this.rebuildDerived();
+      this.ctx.storage.sql.exec(
+        `INSERT INTO schema_meta (key, value) VALUES ('derived_version', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        DERIVED_VERSION,
+      );
+    } catch (e) {
+      console.error(`derived rebuild failed (version ${DERIVED_VERSION} pending): ${e}`);
     }
   }
 
