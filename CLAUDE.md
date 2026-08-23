@@ -254,6 +254,15 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           Options.Stats in AS IT GOES precisely so a run that dies at minute
                           forty still says how far it got and what its log said. The catalog-scan
                           half has no job row, so its stats go only to the log.
+                          An IDLE -resim daemon says so: one "nothing queued to re-simulate"
+                          when the queue first comes up empty, then a reminder every
+                          idleNoteEvery=10min carrying how long it has been. A process
+                          printing nothing is indistinguishable from a wedged one, and the
+                          empty answer covers every reason at once (no unpublished games left
+                          in the mirror, a backfill resting, another host holding the work) —
+                          the daemon cannot tell them apart, and they all mean the engine is
+                          not being used. A line per 10s poll would bury everything else in
+                          the log.
                           -progress (DEFAULT ON) prints cmd/barreplay's frame/ETA line during a
                           re-sim; -log (default ./bringest.log) APPENDS everything printed to a
                           file as well as stderr (log.go). The tee swaps os.Stderr for a pipe
