@@ -613,6 +613,68 @@ func captureStderr(t *testing.T, fn func()) string {
 	return <-done
 }
 
+// An idle daemon says so — once — and then keeps quiet. A process printing
+// nothing is indistinguishable from a wedged one, and a line every ten seconds
+// would bury the ones that mean something in a log read months later.
+func TestResimDaemonSaysWhenThereIsNothingToDo(t *testing.T) {
+	m := newMock(t)
+	srv := httptest.NewServer(m.handler(""))
+	t.Cleanup(srv.Close)
+	r := &resimDaemon{
+		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
+		resim: func(context.Context, string, *jobStats, *resim.Progress) error {
+			return errors.New("nothing should have been run")
+		},
+	}
+
+	out := captureStderr(t, func() {
+		if _, err := r.runOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "nothing queued to re-simulate") {
+		t.Errorf("first idle round printed %q, want it to say the queue is empty", out)
+	}
+	// The next round, ten seconds later, says nothing new.
+	out = captureStderr(t, func() {
+		if _, err := r.runOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if out != "" {
+		t.Errorf("second idle round printed %q, want silence until the reminder is due", out)
+	}
+	// ...until the reminder is due, which reports how long it has been.
+	r.idleNoted = time.Now().Add(-idleNoteEvery - time.Second)
+	r.idleSince = time.Now().Add(-42 * time.Minute)
+	out = captureStderr(t, func() {
+		if _, err := r.runOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "idle for 42m") {
+		t.Errorf("reminder printed %q, want it to carry how long the daemon has been idle", out)
+	}
+
+	// And work resets it: the next quiet spell is announced afresh.
+	m.resim = []ingestJob{{ID: "rj-1", GameID: "aaaa0000000000000000000000000001", Kind: kindResim, State: "pending"}}
+	r.resim = func(context.Context, string, *jobStats, *resim.Progress) error { return nil }
+	captureStderr(t, func() {
+		if _, err := r.runOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	m.resim = nil
+	out = captureStderr(t, func() {
+		if _, err := r.runOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "nothing queued to re-simulate") || strings.Contains(out, "idle for") {
+		t.Errorf("after working, idling printed %q, want the first-time line again", out)
+	}
+}
+
 // Running out of memory is a failure of the HOST, not of the queue: the job it
 // hit is abandoned and reported, and the daemon carries straight on to the next
 // one. A host too small for the games it is handed would otherwise stop dead on
