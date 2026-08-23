@@ -1147,3 +1147,33 @@ test("a failure carries its kind, from a closed set", async (t) => {
   assert.equal(j.error, null);
   assert.equal(j.errorKind, null, "a cleared message clears its classification");
 });
+
+test("an uncaught route error answers 500 and logs the message", async () => {
+  // The one live diagnostic for a Durable Object that fails on every call:
+  // Hono's default handler answered with a bare "Internal Server Error" and
+  // the log event kept only the stack FRAMES, so an outage's cause was
+  // unreadable. The onError hook must put the message itself in the log.
+  const { env } = makeEnv();
+  (env as unknown as { REPLAY_INDEX: unknown }).REPLAY_INDEX = {
+    idFromName: () => ({}),
+    get: () => ({
+      list: () => {
+        throw new Error("Exceeded allowed rows read");
+      },
+    }),
+  };
+
+  const logged: string[] = [];
+  const realError = console.error;
+  console.error = (...args: unknown[]) => logged.push(args.join(" "));
+  try {
+    const res = await app.request("/api/replays", {}, env);
+    assert.equal(res.status, 500);
+    assert.equal(await res.text(), "Internal Server Error", "the body stays generic — nothing internal leaks");
+  } finally {
+    console.error = realError;
+  }
+  const line = logged.join("\n");
+  assert.match(line, /Exceeded allowed rows read/, "the error's own message is in the log");
+  assert.match(line, /GET \/api\/replays/, "so is the request that hit it");
+});

@@ -40,6 +40,18 @@ const MAX_UPLOAD = 150 << 20;
 
 const app = new Hono<{ Bindings: Env }>();
 
+// Without this, Hono's default handler answers an uncaught error with a bare
+// "Internal Server Error" and the MESSAGE never reaches the logs: the
+// observability event keeps only the async stack frames, which is useless for
+// an error thrown inside the Durable Object (observed live — every DO route
+// 500ing with no way to read why). Log the whole story on one line — method,
+// path, message, stack — and keep the response the same generic 500 the
+// default sent, so nothing internal leaks to the caller.
+app.onError((err, c) => {
+  console.error(`unhandled error on ${c.req.method} ${c.req.path}: ${err.message}\n${err.stack ?? ""}`);
+  return c.text("Internal Server Error", 500);
+});
+
 app.get("/api/health", (c) => c.json({ status: "ok" }));
 
 // authorized checks the shared-secret guard used by every write API the
