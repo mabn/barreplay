@@ -525,7 +525,43 @@ test("a series past the cap is thinned, keeping its span", async () => {
 
 // The history outlives its job, so something has to age it out. Nothing else
 // here grows without a rule.
-test("pruning drops the samples of long-finished and vanished jobs", async () => {
+// The pipeline's third door, and the one nobody has to open: a publish that
+// leaves a game one-sided QUEUES its own re-simulation. This is what replaced
+// the re-sim daemon listing the whole catalog on a timer and applying the same
+// predicate to every row — same games, told once instead of hunted for.
+test("a one-sided publish queues the game's re-simulation", async () => {
+  await inIndex((index) => {
+    index.upsert(replay("onesided", { uploaderAlly: 1, view: "ally" }), "rj-1");
+    const queued = index.jobsPending("resim");
+    expect(queued.map((j) => [j.id, j.gameId, j.kind])).toEqual([["rj-1", "onesided", "resim"]]);
+
+    // A SECOND upload of the same game — the other teammate's — adds nothing:
+    // one hour of engine time answers both.
+    index.upsert(replay("onesided", { rid: "onesided-22222222", uploaderAlly: 0 }), "rj-2");
+    expect(index.jobsPending("resim").map((j) => j.id)).toEqual(["rj-1"]);
+
+    // And the re-simulation's OWN publish does not queue another: it declares
+    // the full view, which is what the game was missing.
+    index.upsert(replay("onesided", { rid: "onesided-fefefefe", uploaderAlly: null, view: "full" }), "rj-3");
+    expect(index.jobsPending("resim").map((j) => j.id)).toEqual(["rj-1"]);
+  });
+});
+
+test("a full-view publish queues nothing, and neither does a row that cannot say", async () => {
+  await inIndex((index) => {
+    // A spectator's upload: it saw everything already.
+    index.upsert(replay("spect", { uploaderAlly: null, view: "full" }), "rj-1");
+    // A publish with no recorder provenance at all — most of the catalog, from
+    // before the GAME record carried it. "Unknown" is not "ally": guessing here
+    // would spend an hour of engine time on a game that may not need it.
+    index.upsert(replay("silent", { uploaderAlly: null, view: null }), "rj-2");
+    // And a publisher that never wants a re-sim queued simply omits the id.
+    index.upsert(replay("noid", { uploaderAlly: 1 }));
+    expect(index.jobsPending("resim")).toEqual([]);
+  });
+});
+
+test("pruning drops the samples of long-finished jobs, once", async () => {
   await inIndex((index, sql) => {
     index.jobInsert("old", "", "a", "resim");
     index.jobInsert("recent", "", "b", "resim");
@@ -535,16 +571,22 @@ test("pruning drops the samples of long-finished and vanished jobs", async () =>
     }
     index.jobUpdate("old", "done", null);
     index.jobUpdate("recent", "done", null);
-    // Orphaned samples: a job row that is simply not there.
-    sql.exec(`INSERT INTO job_samples (job_id, at_unix) VALUES ('gone', 1)`);
 
     const now = Math.floor(Date.now() / 1000);
     sql.exec(`UPDATE jobs SET updated_unix = ? WHERE id = 'old'`, now - 40 * 24 * 3600);
 
     expect(index.jobSamplePrune(now - 30 * 24 * 3600)).toBeGreaterThan(0);
     expect(index.jobSamples("old")).toHaveLength(0);
-    expect(index.jobSamples("gone")).toHaveLength(0);
     expect(index.jobSamples("recent")).toHaveLength(1);
+    expect(index.jobSamples("live")).toHaveLength(1);
+    // The watermark: a second run over the same cutoff visits nothing, which
+    // is what keeps the sweep from re-probing every job it has ever pruned for
+    // the life of the deployment.
+    expect(index.jobSamplePrune(now - 30 * 24 * 3600)).toBe(0);
+    // A job is visited on the run whose cutoff crosses the moment it finished
+    // — which for `recent`, finished just now, is a cutoff a month from now.
+    expect(index.jobSamplePrune(now + 60)).toBeGreaterThan(0);
+    expect(index.jobSamples("recent")).toHaveLength(0);
     expect(index.jobSamples("live")).toHaveLength(1);
   });
 });
@@ -891,6 +933,32 @@ test("lobbiesMatch names the game and survives a re-sync", async () => {
     expect(rows(sql, `SELECT lobby_name FROM games WHERE id = 'g42'`)[0].lobby_name).toBe(
       "Chillmus most welcome | 8v8",
     );
+  });
+});
+
+// Matching is ARRIVAL-DRIVEN: a run considers the games mirrored since the
+// last one, not every unnamed game an observation could still reach. That is
+// the whole cost of the step (the alternative re-reads a slice of the mirror
+// as old as the oldest observation, every minute, forever), and it loses
+// nothing: the observation is always the older of the two — it is opened while
+// the lobby is still PLAYING the game, and the game reaches rts-api only once
+// it has ended — so a game that did not match on the tick it landed has
+// nothing new to match against on the next one.
+test("lobbiesMatch considers the games mirrored since its last run", async () => {
+  await inIndex((index, sql) => {
+    const now = Math.floor(Date.now() / 1000);
+    index.gamesInsert([game("g1", { startUnix: now })]);
+    // Mirrored ten minutes ago; the run below is what moves the watermark past
+    // it. (Ordering the other way round — the game first, its lobby seen
+    // afterwards — cannot happen for real; it is how the test says "this game
+    // is no longer an arrival".)
+    sql.exec(`UPDATE games SET synced_unix = ? WHERE id = 'g1'`, now - 600);
+    expect(index.lobbiesMatch()).toEqual({ matched: 0, pruned: 0 });
+    index.lobbiesObserve([
+      { lobbyId: 7, name: "Late observation", map: "Great Divide V1", players: null, playerCount: 8, elapsedSec: 0 },
+    ]);
+    expect(index.lobbiesMatch()).toEqual({ matched: 0, pruned: 0 });
+    expect(rows(sql, `SELECT lobby_name FROM games WHERE id = 'g1'`)[0].lobby_name).toBeNull();
   });
 });
 

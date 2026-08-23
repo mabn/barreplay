@@ -128,17 +128,25 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           worker too old to filter still serves it re-sims, which it must leave
                           PENDING (not fail) for the host that can run them.
                           -resim (needs -data on an engine-capable host) runs a DIFFERENT worker
-                          instead of the upload loop, taking work from two places in order.
-                          First the QUEUED re-sims — GET /api/jobs?kind=resim, which serves
-                          two things the daemon cannot tell apart and does not need to: the jobs
-                          behind the landing page's paste-a-replay-link box, and, when there are
-                          none pending, one the WORKER queues on the spot out of the games mirror
-                          (ReplayIndex.jobsOffer — see the worker/ entry). So this list is
-                          effectively never empty while any mirrored game is unpublished, and the
-                          CATALOG SCAN below, which used to be the daemon's steady diet, now runs
-                          only when it is: one-sided uploads are no longer picked up promptly.
-                          That is the trade — an engine host that never idles, against a
-                          slower path for the games somebody actually recorded half of. Each is CLAIMED (POST
+                          instead of the upload loop, over ONE work list: GET
+                          /api/jobs?kind=resim. That list is fed from three places the daemon
+                          cannot tell apart and does not need to — the landing page's
+                          paste-a-replay-link box; a publish that left a game ONE-SIDED, which
+                          announces its own re-simulation (ReplayIndex.upsert -> jobAnnounce);
+                          and, when nothing is pending, one game the WORKER queues on the spot
+                          out of the games mirror (ReplayIndex.jobsOffer). All three are in the
+                          queue, on a row, before any engine starts.
+                          It used to have a second half, a CATALOG SCAN: list every replay, keep
+                          the rows whose current upload is one-sided with no full-view revision
+                          beside it, re-simulate each. That searched for exactly the games the
+                          publish now announces — the same work, found by asking a question of
+                          every catalog row on a timer instead of being told once by the event
+                          that changes the answer. It was both expensive (the listing alone cost
+                          the worker's DO millions of row reads a day; see ROW BUDGET under
+                          worker/) and blind: until a daemon happened to look, nothing in the
+                          queue said the work existed. With it gone the daemon keeps no
+                          in-process state at all — no failed-game memory, nothing to forget on
+                          restart. Each job is CLAIMED (POST
                           state=processing claim=true, which the worker refuses with 409 if
                           another daemon holds it), HEALTHCHECKED every 10s while the engine
                           runs, and reported
@@ -161,45 +169,26 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           behind NAT. The healthcheck is cancelled AND JOINED before the terminal
                           report, since a beat still in flight would flip a finished row back to
                           processing forever.
-                          Then the CATALOG SCAN, as before: GET /api/replays
-                          for games whose current upload is one-sided (uploaderAlly set) with no
-                          full-view revision yet (no ally-null entry in the row's uploads list).
-                          Either way it re-simulates the demo headlessly via internal/resim (the
+                          Every job re-simulates the demo headlessly via internal/resim (the
                           cmd/barreplay pipeline packaged as one call: demo download -> provision
                           -> widget inject -> engine run -> .brp) and publishes the full-view
-                          capture as another revision of the same game. The scan half still needs
-                          no queue state at all — the publish itself retires the candidate (the
-                          uploads list gains an ally-null entry) — which is why only IT keeps the
-                          in-process failed-game memory; a requested job records its failure on
-                          its own row and so leaves the queue by itself, making a re-paste the
-                          retry.
-                          But FINDING the work without queue state is not the same as DOING it
-                          without a row: runScanned ANNOUNCES each scanned game (POST /api/jobs,
-                          see the worker entry) and then claims, healthchecks and reports it
-                          exactly like a requested one, so its progress, its charts, its timings
-                          and its failure message all reach the queue page. Before that it was
-                          an hour of engine time that appeared nowhere and whose stats existed
-                          only in this daemon's log, on a machine nobody else can reach — which
-                          is the whole reason the announce door exists, since POST /api/resim
-                          refuses every scan candidate as already published (that is what makes
-                          it a candidate). The announce returns TWO things and the difference
-                          matters: a FAILED announce (a worker too old to have the route — the
-                          two deploy independently) loses only the bookkeeping and the re-sim
-                          still runs, unreported; a DUPLICATE means another daemon already holds
-                          the game and this one must not spend an hour on it too. The in-process
-                          failed map stays either way: the announced row records what went wrong
-                          for a person to read, but a scanned game has no link to re-paste, so
-                          re-announcing after a restart is what retries it.
-                          The work lists cannot overlap: a request is refused while its
-                          game is in the catalog, a scanned candidate is in it by definition, and
-                          the mirror backfill takes only games with no catalog row AND no job
-                          row of any state. Upload jobs are untouched (run a plain bringest alongside,
-                          on any host, with no engine).
+                          capture as another revision of the same game — which is also what
+                          retires it: the row's uploads list gains an ally-null entry, so the
+                          publish-time predicate stops being true and nothing queues it again.
+                          A FAILED re-sim records the failure on its own row and leaves the
+                          queue; retrying it means asking again, by pasting the link (refused
+                          while the game is in the catalog — for those, POST /api/jobs is the
+                          door) or by publishing another upload of the game.
+                          The three feeders cannot produce the same job twice: a pasted
+                          request is refused while its game is in the catalog, an announce
+                          dedupes on an active job for the game, and the mirror backfill takes
+                          only games with no catalog row AND no job row of any state. Upload jobs
+                          are untouched (run a plain bringest alongside, on any host, with no
+                          engine).
                           Both loops share one workerAPI (the JSON helper, the bearer token, the
-                          job transitions), which is why -resim now needs $REPLAY_PUT_TOKEN where
-                          it did not before: its old single call, GET /api/replays, is open, and
-                          the job routes are not. No new configuration in practice — packer
-                          already reads that same var for the catalog PUT.
+                          job transitions), which is why -resim needs $REPLAY_PUT_TOKEN: the job
+                          routes are guarded. No new configuration in practice — packer already
+                          reads that same var for the catalog PUT.
                           Both loops are hermetically tested against mock worker APIs.
                           resim REFUSES to return a truncated capture — a signalled engine
                           (Ctrl-C/OOM/crash; a plain non-zero exit is normal, the engine leaves
@@ -574,7 +563,22 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           result set (options that vanish as you filter cannot be used to change
                           your mind). PUT /api/replays/<id> upserts (called by pack -upload
                           and the ingest daemon; optionally guarded by the REPLAY_PUT_TOKEN wrangler
-                          secret as a bearer token). Rows are keyed by the BARE gameId and carry a
+                          secret as a bearer token). A publish that leaves the game ONE-SIDED
+                          also QUEUES ITS RE-SIMULATION: upsert asks wantsFullView of the merged
+                          uploads list (replayentry.ts — recorded from inside, no full-view
+                          revision anywhere in it) and, when it is true, announces a "resim" job
+                          under an id the route generates. A capture from a playing client only
+                          ever saw its own side, so the game wants the spectator's view that
+                          only a re-simulation can produce — and a publish is the ONLY moment
+                          that can become true, which is why it is announced here rather than
+                          searched for. It replaced a catalog scan in the re-sim daemon that
+                          asked the same question of every row on a ten-second timer (see
+                          cmd/bringest and ROW BUDGET). jobAnnounce rather than resimEnqueue,
+                          because the game is in the catalog by definition here — this call is
+                          what puts it there — which resimEnqueue refuses; the announce still
+                          dedupes on an active job, so a second teammate's upload of the same
+                          game adds no second hour of engine time, and the re-sim's own publish
+                          (view "full") cannot re-queue itself. Rows are keyed by the BARE gameId and carry a
                           nullable `rid` (the <gameId>-<rev> revision the pieces are actually served
                           under — see the internal/packer entry; the front-end fetches at rid ?? id)
                           plus a nullable `settings` object (notable game-settings badges: ranked/
@@ -756,12 +760,20 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           page count — counting the pages means counting the whole catalog on
                           every listing, and the range answers the question the number was for.
                           The listing asks for one row MORE than it shows and reads "there is a
-                          next page" off that row's existence, so nothing counts anything.
+                          next page" off that row's existence, so nothing counts anything. For
+                          the DO half, a page is only cheap while its ORDER BY can be answered
+                          by replays_start: `start_unix DESC, id` walks the index and stops at
+                          the LIMIT, where the `start_unix IS NULL, ...` this used to lead with
+                          sorted the WHOLE catalog in a temp b-tree first and made the LIMIT
+                          decorative (3000 rows read to return 50, against 101). The expression
+                          was redundant anyway — NULL is smaller than every value, so DESC
+                          already puts those rows last.
                           ?limit=&offset= are served by BOTH backends (the DO appends
                           LIMIT/OFFSET to the ordered query; the Go server slices its sorted
                           listing — it ignores the FILTER params, but ignoring these would make
                           the shared Next button lie), and an absent limit still means the whole
-                          listing, which is what bringest's catalog scan asks for. The page is
+                          listing (nothing asks for it now that the re-sim daemon's catalog
+                          scan is gone, but a front-end too old to page still would). The page is
                           in-process state, NOT in the URL (like the queue's pager and unlike
                           the filters): "page 3" describes a moment in a growing list, not a set
                           of replays. Any filter change returns to the first page. Orphan mode
@@ -815,9 +827,9 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           GET /api/jobs, downloads via GET /api/streams/<gameId>/<file> (both
                           bearer-guarded), publishes, and POSTs done/error; the browser polls the
                           open GET /api/jobs/<id> and auto-opens the replay on done.
-                          RE-SIM REQUESTS: the pipeline's OTHER door, for a game nobody uploaded
-                          — which is invisible to bringest -resim's catalog scan, since that
-                          looks for one-sided UPLOADS. The Queue section's paste box POSTs a
+                          RE-SIM REQUESTS: the pipeline's OTHER door, for a game nobody
+                          uploaded — nothing else reaches those except the mirror backfill, and
+                          that picks its own. The Queue section's paste box POSTs a
                           replay link to the open POST /api/resim, which parses the gameId out of
                           it (src/worker/gameid.ts — accepts gex.honu.pw/match/<id>,
                           bar-rts.com/replays/<id>, ...info/replays?gameId=<id> and a bare id;
@@ -837,23 +849,23 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           insert are ONE DO call (resimEnqueue) — the DO is single-threaded, so
                           that is atomic for free, where three round trips would let two pastes
                           of the same link both insert.
-                          ANNOUNCED WORK (POST /api/jobs -> ReplayIndex.jobAnnounce): the
-                          daemon's OTHER way to get a job row — for work it found itself rather
-                          than work it was given. It is resimEnqueue without the catalog
-                          refusal, which is the entire difference: the catalog scan looks for
-                          games whose only upload is one-sided, every one of which is IN the
-                          catalog, so the open /api/resim door refuses all of them (correctly —
-                          that answer is right for a person pasting a link). It still dedupes on
-                          an ACTIVE job for the game, so two daemons scanning the same catalog
-                          get the same row back and only one can claim it; a finished or failed
-                          job does not block a fresh one, which is what lets a scan retry a game
-                          whose link nobody can paste. GUARDED, unlike /api/resim: this is the
-                          one door into the jobs table with no refusals behind it, and those
-                          refusals are what keep the open one from being a way to spend somebody
-                          else's hour of engine time. Only kind "resim" — an upload job is bytes
-                          somebody sent, and there is no stream to invent. The gameId goes
-                          through the same parseGameId a pasted link does, since the route
-                          cannot tell the daemon from any other caller holding the token.
+                          ANNOUNCED WORK (ReplayIndex.jobAnnounce, and POST /api/jobs on top
+                          of it): a job row for a game the OPEN door refuses because it is
+                          already in the catalog. That is resimEnqueue minus the catalog check,
+                          and it is the entire difference. Two things need it, and both are
+                          published games that still want a full view: the one-sided publish
+                          above (which calls the DO method directly — no HTTP hop, and atomic
+                          with the row it just wrote), and a re-sim that FAILED, whose game the
+                          paste box will now refuse forever and whose retry is this route. It
+                          dedupes on an ACTIVE job for the game, so two callers get the same row
+                          back and only one can claim it; a finished or failed job does not block
+                          a fresh one, which is exactly what makes the retry possible. GUARDED,
+                          unlike /api/resim: this is the one door into the jobs table with no
+                          refusals behind it, and those refusals are what keep the open one from
+                          being a way to spend somebody else's hour of engine time. Only kind
+                          "resim" — an upload job is bytes somebody sent, and there is no stream
+                          to invent. The gameId goes through the same parseGameId a pasted link
+                          does, since the route cannot tell one caller from another.
                           Claiming an announced job marks the game's EXISTING catalog row
                           processing without turning it into a placeholder (a revision exists,
                           so it stays openable), and a failure leaves that row untouched —
@@ -981,9 +993,17 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           would lose the end — the part that says how it died. Retention is the
                           cron's job (index.ts, its own try so it cannot take the mirror down):
                           jobSamplePrune drops the samples of jobs finished more than
-                          JOB_SAMPLE_RETENTION_SEC = 30 days ago and of any job row that is gone,
-                          which is the only rule stopping the one table here that grows on its
-                          own. The route is OPEN like the rest of the queue reads and is fetched
+                          JOB_SAMPLE_RETENTION_SEC = 30 days ago, which is the only rule stopping
+                          the one table here that grows on its own. It runs ONCE AN HOUR (the
+                          cron's PRUNE_MINUTE) and is driven from the JOBS table over a BAND of
+                          finishing times — the last cutoff to this one, remembered in
+                          schema_meta — so each finished job is visited exactly once, on the run
+                          after it ages out. Both narrowings are the ROW BUDGET (see below): the
+                          obvious query, `SELECT DISTINCT job_id FROM job_samples` every minute,
+                          reads every healthcheck ever recorded to name a few dozen job ids the
+                          jobs table can name from an index, and it was the single biggest
+                          consumer in this worker. Samples whose job row is GONE are no longer
+                          hunted for, because nothing here deletes a job row. The route is OPEN like the rest of the queue reads and is fetched
                           PER EXPANDED ROW, not with the queue page — 25 rows would otherwise
                           carry thousands of points nobody looked at; an unknown job answers with
                           an empty series rather than a 404, since a job that never beat and one
@@ -1062,6 +1082,20 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           match is same map (normalized) + started within [-60s,+300s] of the
                           game's start + >=50% roster overlap (lowercase names; a null-roster
                           observation passes on map+time but scores below any real roster).
+                          It is ARRIVAL-DRIVEN, from the games side: each run considers the
+                          games MIRRORED since the last one (games_synced index, watermark in
+                          schema_meta) and then the observations that started around THEM —
+                          not every unnamed game inside some open observation's window, which
+                          is the same set reached from the end that costs a slice of the
+                          mirror as old as the oldest observation, re-read every minute
+                          forever (see ROW BUDGET). Nothing is lost: the observation is always
+                          the older of the two — opened while the lobby was still PLAYING the
+                          game, where the game reaches rts-api only once it has ended — so a
+                          game that did not match on the tick it landed has nothing new to
+                          match against on the next one. The two questions asked of `lobbies`
+                          every minute (which observations are open, which matched ones are
+                          old enough to drop) each answer to a PARTIAL index, because the
+                          table keeps every unmatched observation forever.
                           Best candidate WINS ties (smaller time delta) — a name on the row
                           beats abstaining — one-to-one both ways, and the name lands in
                           games.lobby_name (+lobby_id), which is deliberately OUTSIDE
@@ -1128,6 +1162,34 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           REDIRECT LOOP. The Go viz server serves the same page
                           and the same widget from its embedded copies (worker/assets.go embeds
                           public/setup.html; assets.ReplayUploaderLua is the widget).
+                          ROW BUDGET (the constraint behind half the SQL above): the DO's
+                          SQLite is billed by ROWS READ — every row a query scans, index
+                          entries included — and the Workers Free plan allows 5 million a DAY
+                          (100k rows WRITTEN, 5 GB stored; paid is 25 billion reads/month).
+                          Three callers here are machines on a timer: the cron every minute,
+                          and an ingest daemon polling every 10s from each host running one.
+                          So a query whose cost is the size of a TABLE rather than the size of
+                          its ANSWER is not a slow query, it is an outage on a schedule — and
+                          it was one: a full scan of the games mirror per poll, the whole
+                          catalog listed per poll, and a `SELECT DISTINCT job_id FROM
+                          job_samples` per cron tick together read ~15x the daily allowance,
+                          after which EVERY route 500s ("Exceeded allowed rows read in
+                          Durable Objects free tier", thrown from the constructor, since that
+                          is where the first SQL of any request runs) until the counter resets
+                          at 00:00 UTC. The tables that make this bite all grow forever and
+                          none of them is bounded by anything a person does: the mirror gains
+                          ~2000 games a day, job_samples a point per running job per 10s.
+                          worker/tests/do/rowcost.test.ts is the guard — it seeds tables far
+                          bigger than the deployment's and asserts each polled and cron read
+                          stays SMALL, so a new scan fails the suite instead of the account.
+                          The rule for anything added to those paths: bound it in SIZE (an
+                          index, or an explicit window) and, if it cannot be, in RATE (a
+                          cooldown, a watermark, an hourly tick). Next in line, not yet a
+                          problem: queuePage's ORDER BY sorts the whole jobs table per read,
+                          and the games mirror's derived-table writes are ~2/3 of the free
+                          plan's daily WRITE allowance. (The third of the three, the re-sim
+                          daemon listing the whole catalog every ten seconds, is gone entirely:
+                          the publish announces that work now — see PUT /api/replays above.)
                           DEPLOYING: `npm run deploy` is the whole thing — test -> build (whose
                           prebuild syncs the icons AND the widget into the gitignored public/
                           copies) -> smoke -> wrangler deploy, spelled out in package.json rather
@@ -1314,7 +1376,16 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           day; and only into an EMPTY pending list, so at most
                           one auto-queued job ever waits — the next poll finds THAT one instead
                           of making another. Check and insert are one RPC, so two daemons
-                          polling together cannot both take the same game. It makes a GET write,
+                          polling together cannot both take the same game. And the scan is
+                          bounded twice over, in SIZE and RATE: it looks at the newest
+                          BACKFILL_INSPECT=200 mirrored games and then RESTS for
+                          BACKFILL_COOLDOWN_SEC=5min whether or not it found one (schema_meta
+                          again). It is the only query on the 10s poll path whose cost grows
+                          with the mirror — which grows ~2000 games a day forever — and an
+                          unbounded walk of it 8640 times a day is what first exhausted the
+                          account's daily rows-read allowance. The window cannot drain the way
+                          a window over raw recency would: one host consumes ~24 games a day
+                          against 2000 arriving, so it slides in far faster than it empties. It makes a GET write,
                           which is the price of leaving the daemon's protocol untouched: a
                           backfilled job is indistinguishable from one a person queued a minute
                           earlier, so no deployed daemon needs to know this happens. The job id

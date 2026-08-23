@@ -38,33 +38,30 @@
 // see the GL caveat in CLAUDE.md) runs a SEPARATE worker instead of the upload
 // job loop, re-simulating demos headlessly (internal/resim, the cmd/barreplay
 // pipeline) and publishing each full-view capture as another revision of its
-// game. It takes work from two places, in this order:
+// game. Its work is the QUEUE — GET /api/jobs?kind=resim — and nothing else.
+// Each job is claimed (POST state=processing claim=true, which the worker
+// REFUSES if another daemon holds it), heartbeated while the engine runs, and
+// reported done/error, so whoever asked sees the outcome — the failure message
+// included — on the queue page.
 //
-//  1. REQUESTED re-sims: GET /api/jobs?kind=resim, the queue behind the
-//     landing page's paste-a-replay-link box. These are claimed
-//     (POST state=processing claim=true, which the worker REFUSES if another
-//     daemon holds the job), heartbeated while the engine runs, and reported
-//     done/error so the requester sees the outcome — including the failure
-//     message — on the queue page. They are the only route into the pipeline
-//     for a game nobody uploaded at all.
-//  2. The CATALOG SCAN: GET /api/replays for games whose current upload is
-//     ONE-SIDED (uploaderAlly set — a playing client's point of view) and
-//     which have no full-view revision yet (no ally-null entry in the row's
-//     uploads list). Finding this work needs no queue state: the publish
-//     itself retires the candidate — the row's uploads list gains an ally-null
-//     entry and its rid moves to the full view. But the work is ANNOUNCED
-//     (POST /api/jobs) so it gets a job row like any other, and is then
-//     claimed, healthchecked and reported exactly like a requested one; before
-//     that it was an hour of engine time visible nowhere, whose progress and
-//     timings lived only in this daemon's log on a machine nobody else can
-//     reach. A game whose resim fails here is ALSO remembered in-process and
-//     skipped until the daemon restarts — the announced row records the
-//     failure for a person to read, but re-announcing after a restart is what
-//     retries it, since a scan candidate has no link for anyone to re-paste.
+// Three things put a job in that list, and the daemon cannot tell them apart:
 //
-// The two lists cannot overlap: a request is refused while its game is in the
-// catalog, and a scanned candidate is in it by definition. Upload jobs are
-// untouched either way and keep being served by plain bringest runs.
+//  1. Somebody PASTED a replay link into the queue page (POST /api/resim).
+//     The only route into the pipeline for a game nobody uploaded at all.
+//  2. A publish left a game ONE-SIDED — recorded from a playing client, which
+//     saw only its own side, with no full view of it published. The worker
+//     announces the re-simulation as part of writing the catalog row
+//     (ReplayIndex.upsert). This daemon used to FIND those itself, by listing
+//     the whole catalog every poll and applying the predicate to every row;
+//     being told once, by the publish that makes the answer change, is the
+//     same work without the search.
+//  3. Nothing was pending, so the worker queued a mirrored game nothing has
+//     published (ReplayIndex.jobsOffer) rather than let an engine host idle.
+//
+// So there is one work list, one shape of run, and no in-process state: every
+// re-sim has a row before it starts, a failure is recorded on that row, and a
+// failed game is retried only when somebody asks again. Upload jobs are
+// untouched and keep being served by plain bringest runs.
 //
 // Usage:
 //
@@ -130,7 +127,7 @@ func run() int {
 		target     = flag.String("upload", "r2", "which deployment to work off and publish to: "+packer.TargetHelp())
 		poll       = flag.Duration("poll", 10*time.Second, "how often to ask the worker for pending jobs")
 		once       = flag.Bool("once", false, "process the current backlog and exit instead of polling forever")
-		doResim    = flag.Bool("resim", false, "run the independent re-sim worker instead of the job loop: find cataloged games whose only upload is one-sided, re-simulate them headlessly, and publish the full view as another revision (needs -data on an engine-capable host)")
+		doResim    = flag.Bool("resim", false, "run the independent re-sim worker instead of the upload job loop: take queued re-sims (requested, announced by a one-sided publish, or back-filled from the games mirror), re-simulate them headlessly and publish the full view as another revision (needs -data on an engine-capable host)")
 		dataDir    = flag.String("data", os.Getenv("BAR_DATA_DIR"), "BAR/Spring data directory for -resim (engine/, games/, maps/; also --write-dir; default: $BAR_DATA_DIR)")
 		skipProv   = flag.Bool("no-provision", false, "-resim: do not download engine/game/map content; assume already installed")
 		patchedEng = flag.Bool("patched-engine", true, "-resim: prefer a locally built patched engine (spring-headless-patched beside the stock binary in <data>/engine/<version>/) when one is installed for the replay's version; its speed patches are output-safe, so captures are unchanged. Falls back to the stock engine with a warning when there is no patched build for that version")
@@ -206,12 +203,11 @@ func run() int {
 				token:    os.Getenv("REPLAY_PUT_TOKEN"),
 				client:   &http.Client{Timeout: 1 * time.Minute},
 			},
-			failed: map[string]bool{},
 			resim: func(ctx context.Context, gameID string, st *jobStats, pr *resim.Progress) error {
 				return resimPublish(ctx, client, gameID, ro, *target, *workerDir, indexURL, *stats, st, pr)
 			},
 		}
-		what = "requested and one-sided replays to re-simulate"
+		what = "queued replays to re-simulate"
 	} else {
 		loop = &daemon{
 			workerAPI: workerAPI{
@@ -583,36 +579,6 @@ func (d *workerAPI) report(ctx context.Context, jobID, state, errMsg string, st 
 	return d.api(ctx, http.MethodPost, "/api/jobs/"+url.PathEscape(jobID), body, nil)
 }
 
-// announce asks the worker for a job row to report a self-found game onto (the
-// catalog scan's work: a game whose only upload is one-sided). It answers two
-// separate questions, which is why it returns two things:
-//
-//	jobID != "", mine       report onto this row
-//	jobID == "", mine       nobody recorded it; do the work anyway, unreported
-//	           , !mine      another daemon holds this game; leave it alone
-//
-// The distinction is the difference between an hour of engine time going
-// unlogged and two machines spending an hour each on the same game. A FAILED
-// announce is only bookkeeping lost — the daemon and the worker deploy
-// independently, so a worker too old to have the route is routine during a
-// rollout, and the re-simulation still has to happen. A DUPLICATE is a
-// different statement: somebody else's engine is already on it.
-func (d *workerAPI) announce(ctx context.Context, gameID string) (jobID string, mine bool) {
-	var out struct {
-		Job    string `json:"job"`
-		Status string `json:"status"`
-	}
-	if err := d.api(ctx, http.MethodPost, "/api/jobs",
-		map[string]any{"gameId": gameID, "kind": kindResim}, &out); err != nil {
-		fmt.Fprintf(os.Stderr, "bringest: %s: could not announce the job (%v); re-simulating unreported\n", gameID, err)
-		return "", true
-	}
-	if out.Status == "duplicate" {
-		return "", false
-	}
-	return out.Job, true
-}
-
 // Failure kinds the daemon can recognise, reported alongside the message so the
 // queue page can tell them apart without parsing a sentence — and so a queue
 // full of failures says which of them are the MACHINE's fault rather than the
@@ -835,146 +801,38 @@ func reportStats(brpPath string) string {
 
 // ---- the -resim worker ------------------------------------------------------
 
-// catalogRow is the slice of a GET /api/replays row the re-sim worker reads:
-// enough to decide whether a game's published state is one-sided with no
-// full-view revision yet.
-type catalogRow struct {
-	ID           string `json:"id"`
-	UploaderAlly *int   `json:"uploaderAlly"`
-	Uploads      []struct {
-		Rid  string `json:"rid"`
-		Ally *int   `json:"ally"`
-	} `json:"uploads"`
-}
-
-// resimDaemon is the independent -resim worker. It takes work from two places,
-// in this order:
+// resimDaemon is the independent -resim worker. Its work is the QUEUE of
+// "resim" jobs and nothing else — the re-sims somebody asked for by pasting a
+// link, and the ones the worker queues on its own: a mirrored game nothing has
+// published (ReplayIndex.jobsOffer), and a game whose freshly published upload
+// is one-sided, announced by the publish itself (ReplayIndex.upsert).
 //
-//   - REQUESTED re-sims, the queue behind the landing page's paste box
-//     (POST /api/resim -> a "resim" job). Someone asked for these by name, and
-//     they are the only way a game NOBODY uploaded gets published at all.
-//   - the CATALOG SCAN: a game is a candidate while its current upload is
-//     one-sided (uploaderAlly set) and its uploads list holds no full-view
-//     revision (an entry with a null ally: spectator uploads and re-sim
-//     captures PUT with no uploaderAlly). Finding the work needs no queue
-//     state — the publish itself retires the candidate — but the run is
-//     announced onto a job row so it is visible and reports its progress and
-//     stats like the requested ones (runScanned).
+// That last one used to be this daemon's second job, and it was a SEARCH: list
+// the whole catalog, keep the rows whose current upload is a playing client's
+// view with no full-view revision beside it, re-simulate each. It found the
+// same games, but by asking a question of every row in the catalog on a timer
+// rather than being told once, by the publish that made the answer change —
+// which is both the expensive way round (it cost the worker's Durable Object
+// millions of row reads a day; see worker/tests/do/rowcost.test.ts) and the
+// blind one: nothing in the queue said the work existed until a daemon
+// happened to be looking.
 //
-// The two lists cannot overlap: a requested game is refused while it is in the
-// catalog, and a scanned one is in it by definition.
+// So there is one work list now, one shape of run, and no in-process memory of
+// anything: every re-sim has a job row before it starts, a failure is recorded
+// on that row, and a failed game is retried only when somebody asks again — by
+// pasting its link, or by publishing another upload of it.
 type resimDaemon struct {
 	workerAPI
-	// resim does the work. pr is non-nil only for a JOB-backed run — it is
-	// what the healthcheck reads to report progress, and the catalog scan has
-	// no job row to report onto.
+	// resim does the work. pr is what the healthcheck reads to report progress
+	// while the engine runs.
 	resim func(ctx context.Context, gameID string, st *jobStats, pr *resim.Progress) error
-	// failed remembers games whose resim errored (engine missing, unknown
-	// demo, desync); they are skipped until the process restarts so one bad
-	// game cannot wedge the loop into retrying forever. Only the catalog scan
-	// needs it: a requested job leaves the queue by itself once it fails, and
-	// re-pasting the link is the retry, whereas a scanned game stays a
-	// candidate for as long as its only upload is one-sided — the announced
-	// job row records what went wrong for a person to read, but it is not what
-	// stops the next round from trying again.
-	failed map[string]bool
 }
 
-// runOnce drains the requested re-sims, then scans the catalog, re-simulating
-// every candidate sequentially (each is minutes of engine wall time). Returns
-// how many it attempted; the error covers the listings only — per-game
-// failures are reported and do not stop the round.
+// runOnce works through the queued re-sims. Returns how many it attempted; the
+// error covers the listing only — per-game failures are reported onto their
+// rows and do not stop the round.
 func (r *resimDaemon) runOnce(ctx context.Context) (int, error) {
-	attempted, err := r.runQueued(ctx)
-	if err != nil {
-		return attempted, err
-	}
-	if ctx.Err() != nil {
-		return attempted, ctx.Err()
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.indexURL+"/api/replays", nil)
-	if err != nil {
-		return attempted, err
-	}
-	resp, err := r.client.Do(req)
-	if err != nil {
-		return attempted, fmt.Errorf("listing the catalog: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return attempted, fmt.Errorf("GET /api/replays: %s", resp.Status)
-	}
-	var rows []catalogRow
-	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
-		return attempted, fmt.Errorf("decoding the catalog: %w", err)
-	}
-
-	for _, row := range rows {
-		if ctx.Err() != nil {
-			return attempted, ctx.Err()
-		}
-		if !row.needsResim() || r.failed[row.ID] {
-			continue
-		}
-		attempted++
-		fmt.Fprintf(os.Stderr, "bringest: %s: one-sided only, re-simulating for the full view\n", row.ID)
-		if err := r.runScanned(ctx, row.ID); err != nil {
-			if ctx.Err() != nil {
-				return attempted, ctx.Err()
-			}
-			fmt.Fprintf(os.Stderr, "bringest: %s: resim failed (skipping until restart): %v\n", row.ID, err)
-			r.failed[row.ID] = true
-		} else {
-			fmt.Fprintf(os.Stderr, "bringest: %s: full view published\n", row.ID)
-		}
-	}
-	return attempted, nil
-}
-
-// runScanned re-simulates a game the CATALOG SCAN found and reports on it the
-// same way a requested one is reported: a job row to be seen in the queue, a
-// healthcheck carrying the live phase/progress/engine load while the engine
-// runs, and the timings and size report on the terminal state.
-//
-// The row is ANNOUNCED rather than queued (workerAPI.announce): the work is
-// already being done, and POST /api/resim would refuse the game anyway — it is
-// in the catalog, which is exactly what makes it a scan candidate. Without a
-// row this was an hour of engine time that showed up nowhere and whose stats
-// existed only in this daemon's log, on a machine nobody else can reach.
-//
-// A worker that will not give a row is not a reason to skip the game: the
-// re-simulation runs unreported, which is what this whole path did before.
-func (r *resimDaemon) runScanned(ctx context.Context, gameID string) error {
-	jobID, mine := r.announce(ctx, gameID)
-	if !mine {
-		fmt.Fprintf(os.Stderr, "bringest: %s: another daemon is already re-simulating it; skipping\n", gameID)
-		return nil
-	}
-	if jobID == "" {
-		return r.resim(ctx, gameID, nil, nil)
-	}
-	if err := r.claim(ctx, jobID, kindResim); err != nil {
-		// Somebody else took the row between announcing and claiming it. Their
-		// engine, not ours.
-		fmt.Fprintf(os.Stderr, "bringest: %s: could not claim job %s (%v); skipping\n", gameID, jobID, err)
-		return nil
-	}
-	started := time.Now()
-	pr := &resim.Progress{}
-	stop := r.healthcheck(ctx, jobID, func() *jobProgress { return resimProgress(pr) })
-	st := &jobStats{}
-	err := r.resim(ctx, gameID, st, pr)
-	st.TookSec = time.Since(started).Seconds()
-	stop() // before the terminal report, or a late beat undoes it
-	if err != nil {
-		// With the stats, like the queued path: forty minutes that ended badly
-		// is the record most worth keeping.
-		r.reportError(ctx, jobID, err, st)
-		return err
-	}
-	r.report(ctx, jobID, "done", "", st)
-	return nil
+	return r.runQueued(ctx)
 }
 
 // runQueued works through the re-sims somebody explicitly requested. Unlike
@@ -1028,20 +886,6 @@ func (r *resimDaemon) runQueued(ctx context.Context) (int, error) {
 		r.report(ctx, j.ID, "done", "", st)
 	}
 	return attempted, nil
-}
-
-// needsResim: the current upload is a playing client's point of view and no
-// revision of the game is a full view yet.
-func (row catalogRow) needsResim() bool {
-	if row.UploaderAlly == nil {
-		return false
-	}
-	for _, u := range row.Uploads {
-		if u.Ally == nil {
-			return false
-		}
-	}
-	return true
 }
 
 // resimPublish re-simulates the demo headlessly (internal/resim — minutes of
