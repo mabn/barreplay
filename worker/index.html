@@ -45,6 +45,7 @@
   <nav id="homenav">
     <button type="button" class="navitem" data-tab="replays">Replays</button>
     <button type="button" class="navitem admin" data-tab="queue">Queue<span class="badge" id="navqueue"></span></button>
+    <button type="button" class="navitem admin" data-tab="sqlstats">SQL</button>
   </nav>
   <div id="homemain">
     <!-- Drag&drop publishing: a .brepstream (the Replay uploader widget's
@@ -176,6 +177,27 @@
         <button type="button" id="q_reload" title="Re-read the queue">Reload</button>
       </div>
       <div id="queuemsg" class="hint" style="display:none"></div>
+    </section>
+
+    <!-- SQL cost accounting (admin-only, like the Queue): what each Durable
+         Object method has cost in SQLite rows — GET /api/sqlstats, the live
+         counterpart of the repo's rowcost test suite. The DO's storage is
+         billed by rows read/written with daily allowances on the free plan,
+         so the /day columns project each method's spend against those
+         budgets. Read on demand: opening the section, or Reload. -->
+    <section id="tab-sqlstats" style="display:none">
+      <div id="sqlstatshead" class="hint"></div>
+      <table id="sqlstatstable">
+        <thead>
+          <tr><th>Method</th><th>Calls</th><th>Rows read</th><th>Read/call</th><th>Read/day · budget</th><th>Rows written</th><th>Written/call</th><th>Written/day · budget</th></tr>
+        </thead>
+        <tbody></tbody>
+        <tfoot></tfoot>
+      </table>
+      <div id="sqlstatsbar">
+        <button type="button" id="sql_reload" title="Re-read the counters">Reload</button>
+      </div>
+      <div id="sqlstatsmsg" class="hint" style="display:none"></div>
     </section>
   </div>
 </div>

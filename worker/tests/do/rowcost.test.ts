@@ -40,25 +40,37 @@ const NOW = 1787000000;
  * once a cursor has been consumed, so the shim consumes it up front and hands
  * back the rows; every caller in the object either takes .toArray() or reads
  * .rowsWritten. */
-function measured<T>(fn: (index: ReplayIndex, tally: () => number) => T): Promise<T> {
+function measured<T>(
+  fn: (index: ReplayIndex, tally: () => number, written: () => number) => T,
+): Promise<T> {
   const name = expect.getState().currentTestName ?? "index";
   const stub = env.REPLAY_INDEX.get(env.REPLAY_INDEX.idFromName(name));
   return runInDurableObject(stub, (instance: ReplayIndex, state) => {
     const sql = state.storage.sql;
     const real = sql.exec.bind(sql);
     let read = 0;
+    let wrote = 0;
     (sql as unknown as { exec: unknown }).exec = (q: string, ...args: unknown[]) => {
       const cur = real(q, ...(args as string[]));
       const rows = cur.toArray();
       read += cur.rowsRead;
+      wrote += cur.rowsWritten;
       return { toArray: () => rows, rowsWritten: cur.rowsWritten, rowsRead: cur.rowsRead };
     };
     try {
-      return fn(instance, () => {
-        const n = read;
-        read = 0;
-        return n;
-      });
+      return fn(
+        instance,
+        () => {
+          const n = read;
+          read = 0;
+          return n;
+        },
+        () => {
+          const n = wrote;
+          wrote = 0;
+          return n;
+        },
+      );
     } finally {
       (sql as unknown as { exec: unknown }).exec = real;
     }
@@ -83,8 +95,6 @@ function seed(index: ReplayIndex): void {
     SELECT printf('g%06d', n), ${NOW} - n*40, 900, 'Map ' || (n % 40), '8v8', 8000000, 16,
            ${roster}, '{"ranked":true}', ${NOW}, 0
     FROM (${seq(REPLAYS)})`);
-  sql.exec(`INSERT INTO replay_players (replay_id, name_lower, name)
-    SELECT printf('g%06d', n), 'p' || n, 'p' || n FROM (${seq(GAMES)})`);
   sql.exec(`INSERT INTO replay_settings (replay_id, flag)
     SELECT printf('g%06d', n), 'ranked' FROM (${seq(GAMES)})`);
   sql.exec(`INSERT INTO jobs (id, stream_key, game_id, kind, state, created_unix, updated_unix)
@@ -178,4 +188,54 @@ test("the polled and cron reads do not scan the tables they read from", async ()
   // The first beat counts the job's samples; every beat after it is answered
   // from memory.
   expect(costs.healthcheckNext, report).toBeLessThan(50);
+});
+
+
+test("the recurring writes stay a handful of rows", async () => {
+  // The budget's other half: rows WRITTEN, 100k a day on the free plan, and
+  // the games mirror alone once spent it — 59 rows per mirrored game, ~48 of
+  // them roster entries nothing read, at ~2000 games a day (the outage of
+  // 2026-08-23). Index maintenance bills too (every index on a table is one
+  // more row written per insert), which is what makes these numbers
+  // non-obvious from the statements alone.
+  const costs = await measured((index, tally, written) => {
+    tally();
+    written();
+    const out: Record<string, number> = {};
+
+    index.gamesInsert([
+      {
+        id: "wg1",
+        startUnix: NOW,
+        durationSec: 1800,
+        map: "Map",
+        mapFile: "map",
+        gameSize: "8v8",
+        preset: "team",
+        playerCount: 16,
+        players: [
+          { ally: 0, count: 8, players: Array.from({ length: 8 }, (_, i) => ({ name: `a${i}`, os: 25 })) },
+          { ally: 1, count: 8, players: Array.from({ length: 8 }, (_, i) => ({ name: `b${i}`, os: 25 })) },
+        ],
+        settings: { ranked: true, lava: true },
+        engineVersion: "e",
+        gameVersion: "v",
+      },
+    ]);
+    out.gamesInsert = written();
+
+    index.jobAnnounce("wg1", "resim", "wj1");
+    out.jobAnnounce = written();
+    index.jobUpdate("wj1", "processing", null, null, { state: "simulating", percent: 10 });
+    out.healthcheck = written();
+    return out;
+  });
+
+  const report = JSON.stringify(costs, null, 2);
+  // One mirrored 16-player game: its row + index entries + a couple of
+  // settings rows. The roster is NOT indexed — at 16 names x 3 rows each it
+  // was the whole budget.
+  expect(costs.gamesInsert, report).toBeLessThan(20);
+  // A daemon heartbeat: the job row update + one sample row.
+  expect(costs.healthcheck, report).toBeLessThan(15);
 });

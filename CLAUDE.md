@@ -557,20 +557,30 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           id that is merely wrong), player = a case-insensitive name
                           PREFIX, settings = comma-separated flags that must ALL be present; no
                           params = the whole catalog, unknown params ignored so an older front-end
-                          still works). Filtering is SQL, not a pass over the JSON: name and flag
-                          predicates hit the derived tables replay_players(replay_id, name_lower,
-                          name) and replay_settings(replay_id, flag), which are DELETED and rebuilt
-                          from the row on every write (upsert, refreshFromApi) so they cannot drift
-                          and so a re-publish that drops a player stops matching them; every
-                          predicate is index-backed (replays_start / replays_map / replays_count and
-                          the two derived tables' covering indexes — verified with EXPLAIN QUERY
-                          PLAN, no sequential scans). The prefix match is a >= / < RANGE rather than
-                          LIKE, since SQLite's case-insensitive LIKE cannot use an index. The WHERE
+                          still works). Filtering is SQL: the flag predicate hits the derived
+                          table replay_settings(replay_id, flag), DELETED and rebuilt from the
+                          row on every write (upsert, refreshFromApi) so it cannot drift and a
+                          re-publish that drops a flag stops matching it; those predicates are
+                          index-backed (replays_start / replays_map / replays_count and the
+                          derived table's covering index — verified with EXPLAIN QUERY PLAN).
+                          The PLAYER predicate is the exception that reads the roster JSON on
+                          the rows directly (a LIKE over a JSON-encoded, LIKE-escaped needle):
+                          its old derived table replay_players cost ~48 rows written per
+                          mirrored game to maintain — the write half of the 2026-08-23 outage
+                          (see ROW BUDGET) — and a bounded scan of the small catalog on a
+                          human-initiated query costs nothing that matters. The WHERE
                           clause is built from the predicates actually set, NOT a fixed
                           `(? IS NULL OR col = ?)` chain, which hides the column behind an OR and
-                          forces a scan. schema_meta.derived_version (DERIVED_VERSION) triggers a
-                          one-time rebuild of playerCount + both tables on the next wake when it is
-                          bumped, which is also how rows predating them were backfilled.
+                          forces a scan. schema_meta.derived_version (DERIVED_VERSION) runs a
+                          one-time pass on the next wake when it is bumped (ensureDerived holds
+                          the current bump's work), which is how rows predating the derived
+                          data were backfilled; the SCHEMA itself is versioned separately —
+                          the schema_version table holds the stamp of the last COMPLETED
+                          migration, the constructor reads that one row (a missing table means
+                          a pre-stamp database and migrates), and the DDL runs only when the
+                          stamp is old, because CREATE TABLE IF NOT EXISTS is write-classified
+                          even as a no-op and the overage gate kills whole requests. BUMP
+                          SCHEMA_VERSION with any DDL change, or it never deploys.
                           GET /api/replays/facets serves the distinct maps/sizes/player names/flags
                           plus the catalog's date span, so the filter bar offers only choices that
                           match something; it is computed over the WHOLE catalog, never the current
@@ -1058,13 +1068,20 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the handler logs rather than rethrows, since a minute-by-minute stream
                           of failed crons is worse signal than one self-healing blip. Nothing is
                           logged on a tick that changed nothing.
-                          Mirrored games index into the SAME replay_players/replay_settings
-                          tables as the catalog, which makes ownership the one rule to keep:
-                          exactly one row owns an id's derived entries — the catalog row if there
-                          is one (its roster is the capture that was published), the games row
-                          otherwise — enforced by gamesInsert skipping an id `replays` holds, and
-                          honoured by rebuildDerived. The consequence for the filter bar is that
-                          /api/replays/facets now restricts both derived reads to ids present in
+                          Mirrored games index their SETTINGS into the SAME replay_settings
+                          table as the catalog — ROSTERS are indexed NOWHERE: replay_players
+                          is gone (the migration drops it), because keeping the mirror's
+                          rosters indexed cost ~48 rows written per game — 16 names, each a
+                          row plus two index entries, ~2000 games a day — which alone spent
+                          the free tier's 100k-rows-written daily allowance and took every
+                          route down (see ROW BUDGET); the player filter and the players
+                          facet read the roster JSON on the catalog rows directly instead.
+                          Ownership stays the one rule to keep:
+                          exactly one row owns an id's replay_settings entries — the catalog
+                          row if there is one (its flags are the capture that was published),
+                          the games row otherwise — enforced by gamesInsert skipping an id
+                          `replays` holds. The consequence for the filter bar is that
+                          /api/replays/facets restricts the flags read to ids present in
                           `replays`: the mirror is thousands of games nothing has published, and
                           a filter option matching no listable replay is exactly what that
                           endpoint exists to avoid.
@@ -1201,12 +1218,36 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           worker/tests/do/rowcost.test.ts is the guard — it seeds tables far
                           bigger than the deployment's and asserts each polled and cron read
                           stays SMALL, so a new scan fails the suite instead of the account.
+                          The WRITE allowance bites the same way and also did: the mirror's
+                          roster indexing wrote 59 rows per game (index maintenance bills a
+                          row per index per insert — non-obvious from the statements), which
+                          at ~2000 games/day exceeded 100k/day on its own; the fix was to stop
+                          indexing mirror rosters (see the games-mirror entry above), and
+                          rowcost.test.ts now bounds the recurring writes too. NOTE the
+                          overage enforcement gates EVERY SQL statement once either daily
+                          budget is spent — reads included, and a plain SELECT then throws
+                          the WRITE-overage error ("Exceeded allowed rows written") if that
+                          is the budget that ran out — so the ReplayIndex constructor never
+                          lets a failure escape: schema DDL runs only when the read-only
+                          schema_version stamp check (schemaCurrent) says it is due, and
+                          both the migration and the versioned derived rebuild log-and-serve
+                          on failure, retried on every construction until they land.
                           The rule for anything added to those paths: bound it in SIZE (an
                           index, or an explicit window) and, if it cannot be, in RATE (a
                           cooldown, a watermark, an hourly tick). Next in line, not yet a
-                          problem: queuePage's ORDER BY sorts the whole jobs table per read,
-                          and the games mirror's derived-table writes are ~2/3 of the free
-                          plan's daily WRITE allowance. (The third of the three, the re-sim
+                          problem: queuePage's ORDER BY sorts the whole jobs table per read.
+                          SQL STATS (GET /api/sqlstats): the LIVE counterpart of the rowcost
+                          suite — the DO bills every statement's rowsRead/rowsWritten to the
+                          public method running it (installSqlAccounting: an exec shim plus
+                          per-method wrappers, outermost method wins so helpers bill their
+                          caller) and serves the tally per method with `since`/`elapsedSec`,
+                          because the numbers mean nothing without their window. IN MEMORY —
+                          persisting a measurement of the write budget would spend it — so a
+                          deploy or eviction resets it (the cron keeps the instance warm
+                          between those). A single call past SQL_WARN_ROWS_READ/_WRITTEN
+                          logs itself, which is how a new scan announces itself in the live
+                          logs without an event per poll.
+                          (The third of the three read scans, the re-sim
                           daemon listing the whole catalog every ten seconds, is gone entirely:
                           the publish announces that work now — see PUT /api/replays above.)
                           DEPLOYING: `npm run deploy` is the whole thing — test -> build (whose
