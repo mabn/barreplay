@@ -34,13 +34,12 @@ import type {
 import { LOBBY_MATCH_EARLY_SLACK_SEC, LOBBY_MATCH_WINDOW_SEC, pickLobbyMatches } from "./teiserver";
 import type { LobbyMatchResult, LobbyObservation, MatchGame, MatchLobby, OpenLobby } from "./teiserver";
 import {
-  FACET_PLAYERS_MAX,
   SETTINGS_MODS_FLAG,
   derivePlayerCount,
   mergeUploads,
   wantsFullView,
 } from "./replayentry";
-import type { CatalogTeam, ReplayEntry, ReplayFacets, ReplayFilter, UploadRef } from "./replayentry";
+import type { CatalogTeam, ReplayEntry, ReplayFilter, UploadRef } from "./replayentry";
 
 export type {
   IngestJob,
@@ -187,16 +186,20 @@ function progressPercent(progressJSON: unknown): number | null {
  * table). Rows carry no derivation of their own — it is recomputed from the
  * replays row — so bumping this runs a one-time pass on the next wake
  * (ensureDerived holds the CURRENT bump's work; a new version replaces that
- * block with its own). v1 backfilled rows that predate the derived data;
- * every deployment has long since run it. */
-const DERIVED_VERSION = 1;
+ * block with its own — CUMULATIVELY, when the versions between never shipped
+ * separately, since a deployed database jumps straight from its stamp to the
+ * current one). v1 backfilled rows that predate the derived data; v2 seeded
+ * unique_values('maps') from the catalog's existing rows; v3 added the
+ * jobs_count seed (and re-runs the v2 seed, which never deployed on its own —
+ * both are idempotent recomputes). */
+const DERIVED_VERSION = 3;
 
 /** Version of the SCHEMA itself, stamped into the schema_version table by the
  * migration that produced it. schemaCurrent reads this one row to decide
  * whether the DDL needs to run at all — a read, where the DDL statements are
  * write-classified even as no-ops. BUMP THIS whenever SCHEMA_DDL, INDEX_DDL
  * or ADDED_COLUMNS change, or the change never reaches a deployed database. */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 3;
 
 /** Everything migrateSchema creates, split from the code so schemaCurrent can
  * scan the same text it executes (one source, nothing to drift). */
@@ -266,6 +269,17 @@ const SCHEMA_DDL = `
       CREATE TABLE IF NOT EXISTS schema_meta (
         key   TEXT PRIMARY KEY,
         value INTEGER NOT NULL
+      );
+      -- Small maintained lists, one row per kind, each value a JSON array.
+      -- The one row today is key='maps': every distinct map in the CATALOG
+      -- (mirror games deliberately excluded — their maps have nothing
+      -- listable behind them). Maintained by upsert as replays are published
+      -- and served by mapNames() behind a one-minute in-memory cache, so the
+      -- filter bar's combobox costs one row read a minute where the facets
+      -- endpoint it replaces ran DISTINCT over the whole catalog per call.
+      CREATE TABLE IF NOT EXISTS unique_values (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
       );
       -- One row: the SCHEMA_VERSION the last completed migration stamped.
       -- Its absence is itself the signal (schemaCurrent): a database from
@@ -391,6 +405,17 @@ const INDEX_DDL = `
       -- gone, and dropping it here (one schema statement) is what sheds the
       -- ~100k mirror roster rows a row-by-row DELETE could not afford.
       DROP TABLE IF EXISTS replay_players;
+      -- queuePage's settled half: every job no longer in flight, most
+      -- recently updated first. PARTIAL, and deliberately over exactly the
+      -- rows a heartbeat never touches: an active job's updated_unix moves
+      -- every 10 seconds, so indexing it here would cost an index rewrite
+      -- per beat, where a settled job lands in this index once, when it
+      -- ends. The settled query's WHERE must repeat this clause TEXTUALLY —
+      -- the planner only takes a partial index when the query's own WHERE
+      -- provably implies the index's, and an identical expression is the
+      -- proof it accepts (the rowcost test is the guard).
+      CREATE INDEX IF NOT EXISTS jobs_settled ON jobs (updated_unix DESC, id)
+        WHERE state NOT IN ('pending', 'processing') OR disabled != 0;
       -- PARTIAL indexes, because the two questions asked of the lobbies
       -- table every minute are about the handful of rows in a state, over
       -- a table that keeps every unmatched observation forever: which
@@ -461,25 +486,20 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   ["replays", "placeholder INTEGER NOT NULL DEFAULT 0"],
 ];
 
-/** The player-name facet: every distinct roster name in the catalog, deduped
- * case-insensitively (keeping the alphabetically first spelling), ordered by
- * the folded name, capped at FACET_PLAYERS_MAX. */
-function facetPlayers(sql: SqlStorage): string[] {
-  const byLower = new Map<string, string>();
-  for (const r of sql.exec(`SELECT players FROM replays WHERE players IS NOT NULL`).toArray()) {
-    for (const team of JSON.parse(r.players as string) as CatalogTeam[]) {
-      for (const p of team.players) {
-        const lower = p.name.toLowerCase();
-        const prev = byLower.get(lower);
-        if (prev === undefined || p.name < prev) byLower.set(lower, p.name);
-      }
-    }
-  }
-  return [...byLower.entries()]
-    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
-    .slice(0, FACET_PLAYERS_MAX)
-    .map(([, name]) => name);
-}
+/** How long mapNames' in-memory copy of the maps list is served before the
+ * unique_values row is read again. Every write path refreshes the copy, so
+ * the TTL is a backstop against anything else touching the table, not the
+ * consistency mechanism. */
+const MAPS_CACHE_MS = 60_000;
+
+/** The schema_meta key holding how many rows the jobs table has. Maintained —
+ * incremented by jobInsert, seeded once by the derived backfill — because a
+ * COUNT(*) is O(table) in rows read even over an index, the jobs table only
+ * grows (nothing ever deletes a job row; the dedupe rules depend on the
+ * history), and queuePage needs the number on every read. Sound precisely
+ * BECAUSE nothing deletes: the count is monotonic, so one seed plus an
+ * increment per insert can never drift. */
+const JOBS_COUNT_KEY = "jobs_count";
 
 /** Escape a string for use inside a LIKE pattern with ESCAPE '\\':
  * backslash first covers the escapes it is about to add, then the wildcards. */
@@ -503,6 +523,11 @@ export class ReplayIndex extends DurableObject<Env> {
    * row while this counts two), which is why crossing the cap re-counts for
    * real before thinning anything. Entries are dropped when the job ends. */
   private sampleCounts = new Map<string, number>();
+
+  /** mapNames' in-memory copy of the maps list (MAPS_CACHE_MS). Refreshed by
+   * every write to the row, so like sampleCounts it is a cache of something
+   * the table already knows and costs nothing to lose. */
+  private mapsCache: { at: number; maps: string[] } | null = null;
 
   /** What each method has cost in SQLite rows since this instance started —
    * the live counterpart of tests/do/rowcost.test.ts, served by
@@ -659,9 +684,16 @@ export class ReplayIndex extends DurableObject<Env> {
         .exec(`SELECT value FROM schema_meta WHERE key = 'derived_version'`)
         .toArray();
       if ((have.length > 0 ? (have[0].value as number) : 0) >= DERIVED_VERSION) return;
-      // v1's backfill ran everywhere long ago; a fresh database has nothing
-      // to derive (its rows arrive through upsert, which indexes as it
-      // writes). So the current bump's only work is stamping the version.
+      // v2+v3, together because neither shipped before the other: seed the
+      // maps list from the rows already in the catalog (upsert maintains it
+      // for every publish from here on), and seed the jobs counter from the
+      // table (jobInsert increments it from here on). Both are idempotent
+      // recomputes, so re-running them on a database that somehow ran one
+      // is harmless; a fresh database derives an empty list and a zero
+      // count, which is equally right.
+      this.rebuildMapsList();
+      const jobs = this.ctx.storage.sql.exec(`SELECT COUNT(*) AS n FROM jobs`).toArray();
+      this.metaPut(JOBS_COUNT_KEY, Number(jobs[0].n));
       this.ctx.storage.sql.exec(
         `INSERT INTO schema_meta (key, value) VALUES ('derived_version', ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
@@ -846,6 +878,7 @@ export class ReplayIndex extends DurableObject<Env> {
       Math.floor(Date.now() / 1000),
     );
     this.indexSettings(e.id, e.settings);
+    this.noteMap(e.map);
     if (resimJobId !== undefined && wantsFullView(e.uploaderAlly, uploads)) {
       this.jobAnnounce(resimJobId, e.id, "resim");
     }
@@ -957,8 +990,17 @@ export class ReplayIndex extends DurableObject<Env> {
     const rows = this.ctx.storage.sql
       .exec(
         `SELECT id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date, placeholder,
-                EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = replays.id AND j.state = 'processing') AS processing,
-                (SELECT j.progress FROM jobs j WHERE j.game_id = replays.id AND j.state = 'processing'
+                -- Both jobs subqueries are PINNED to the (game_id, state)
+                -- index: left to itself the planner answered the progress
+                -- subselect's ORDER BY from jobs_state instead, which reads
+                -- every processing job PER LISTED ROW — 50 rows x the number
+                -- of daemons at work, on every landing-page load (the rowcost
+                -- test's in-flight seed is what caught it). Seeked by game,
+                -- each costs the game's own jobs, i.e. almost always 0-1.
+                EXISTS (SELECT 1 FROM jobs j INDEXED BY jobs_game
+                        WHERE j.game_id = replays.id AND j.state = 'processing') AS processing,
+                (SELECT j.progress FROM jobs j INDEXED BY jobs_game
+                 WHERE j.game_id = replays.id AND j.state = 'processing'
                  ORDER BY j.updated_unix DESC LIMIT 1) AS processing_progress,
                 (SELECT lobby_name FROM games g WHERE g.id = replays.id) AS lobby_name,
                 (SELECT map_file FROM games g WHERE g.id = replays.id) AS map_file
@@ -1011,38 +1053,68 @@ export class ReplayIndex extends DurableObject<Env> {
     }));
   }
 
-  /** facets returns the distinct values the filter UI offers as choices, so a
-   * map or size that no replay has is never presented. Computed over the WHOLE
-   * catalog, not the current result set: a filter bar whose options shrink as
-   * you use it cannot be used to change your mind. */
-  facets(): ReplayFacets {
-    const sql = this.ctx.storage.sql;
-    const col = <T>(q: string, key: string): T[] => sql.exec(q).toArray().map((r) => r[key] as T);
-    const span = sql.exec(`SELECT MIN(start_unix) AS lo, MAX(start_unix) AS hi FROM replays`).toArray();
-    return {
-      maps: col<string>(`SELECT DISTINCT map FROM replays WHERE map IS NOT NULL ORDER BY map`, "map"),
-      sizes: col<number>(
-        `SELECT DISTINCT player_count FROM replays WHERE player_count IS NOT NULL ORDER BY player_count`,
-        "player_count",
-      ),
-      // The completion list, straight from the roster JSON on the catalog's
-      // own rows — one pass over a small table on a human-initiated read
-      // (replay_players, which used to serve this, is gone; see SCHEMA_DDL).
-      // Reading `replays` alone also keeps the mirror's thousands of
-      // unpublished games out, the restriction the old query spelled as a
-      // subselect over ids the catalog holds.
-      players: facetPlayers(sql),
-      // Restricted to ids the CATALOG holds, because replay_settings also
-      // carries the games mirror — thousands of games nothing has published,
-      // whose flags would be options that filter to an empty list.
-      settings: col<string>(
-        `SELECT DISTINCT flag FROM replay_settings
-         WHERE replay_id IN (SELECT id FROM replays) ORDER BY flag`,
-        "flag",
-      ),
-      from: span.length ? ((span[0].lo as number | null) ?? null) : null,
-      to: span.length ? ((span[0].hi as number | null) ?? null) : null,
-    };
+  /** mapNames serves the catalog's distinct map names, sorted — the choices
+   * behind the filter bar's map combobox, and the one filter list that cannot
+   * be hardcoded. It reads the maintained unique_values row (see SCHEMA_DDL)
+   * through a one-minute in-memory copy, so the recurring cost is one row a
+   * minute however often the landing page loads; the facets() this replaces
+   * ran DISTINCT scans over the whole catalog on every call. */
+  mapNames(): string[] {
+    if (this.mapsCache !== null && Date.now() - this.mapsCache.at < MAPS_CACHE_MS) {
+      return this.mapsCache.maps;
+    }
+    const maps = this.storedMaps();
+    this.mapsCache = { at: Date.now(), maps };
+    return maps;
+  }
+
+  /** storedMaps reads the maps list off its unique_values row: one row, or
+   * none on a database from before the table was seeded (an empty list — the
+   * next publish or the derived backfill fills it in). */
+  private storedMaps(): string[] {
+    const r = this.ctx.storage.sql
+      .exec(`SELECT value FROM unique_values WHERE key = 'maps'`)
+      .toArray();
+    if (r.length === 0) return [];
+    try {
+      const parsed = JSON.parse(r[0].value as string) as unknown;
+      return Array.isArray(parsed) ? parsed.filter((m): m is string => typeof m === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** noteMap folds one published replay's map into the maps list, if it is
+   * new: a membership check against the stored row (one read), a write only
+   * when the catalog actually gained a map — which is almost never, maps
+   * being a small fixed pool next to the games played on them. The in-memory
+   * copy is refreshed with the write, so a new map is offered immediately. */
+  private noteMap(map: string | null): void {
+    if (map === null || map === "") return;
+    const maps = this.storedMaps();
+    if (maps.includes(map)) return;
+    const next = [...maps, map].sort();
+    this.ctx.storage.sql.exec(
+      `INSERT INTO unique_values (key, value) VALUES ('maps', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      JSON.stringify(next),
+    );
+    this.mapsCache = { at: Date.now(), maps: next };
+  }
+
+  /** rebuildMapsList recomputes the maps row from the whole catalog — the
+   * derived backfill (one-time, see ensureDerived), never a serving path. */
+  private rebuildMapsList(): void {
+    const maps = this.ctx.storage.sql
+      .exec(`SELECT DISTINCT map FROM replays WHERE map IS NOT NULL ORDER BY map`)
+      .toArray()
+      .map((r) => r.map as string);
+    this.ctx.storage.sql.exec(
+      `INSERT INTO unique_values (key, value) VALUES ('maps', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      JSON.stringify(maps),
+    );
+    this.mapsCache = { at: Date.now(), maps };
   }
 
   /** refreshFromApi replaces one row's settings badges and players roster
@@ -1346,6 +1418,14 @@ export class ReplayIndex extends DurableObject<Env> {
       now,
       now,
     );
+    // The maintained table count queuePage's `total` reads (JOBS_COUNT_KEY):
+    // one meta row touched per insert, against the COUNT(*) per page view it
+    // replaces, whose cost was the table.
+    this.ctx.storage.sql.exec(
+      `INSERT INTO schema_meta (key, value) VALUES (?, 1)
+       ON CONFLICT(key) DO UPDATE SET value = value + 1`,
+      JOBS_COUNT_KEY,
+    );
   }
 
   /** resimEnqueue takes a re-simulation request for one game, refusing it when
@@ -1643,50 +1723,83 @@ export class ReplayIndex extends DurableObject<Env> {
 
   /** queuePage is the queue as a PERSON reads it (GET /api/queue): one page of
    * jobs, everything still in flight first — those are what the view exists to
-   * answer for — then the most recently finished, newest first. Unlike
+   * answer for — then the most recently settled, newest first. Unlike
    * jobsPending it does not hide a fresh "processing" job: a daemon working
    * right now is exactly what the viewer wants to see, even though it is not
    * work to hand out.
    *
    * `total` and `active` are counted over the WHOLE table, not the page, so a
    * pager can say how much it is paging through and the menu's in-flight count
-   * stays true on any page. */
+   * stays true on any page.
+   *
+   * TWO queries plus a meta row, assembled here, instead of the one query this
+   * used to be. That one led its ORDER BY with the unfinished-first CASE, which
+   * no index can satisfy, so every read joined and sorted the WHOLE jobs table
+   * into a temp b-tree and the LIMIT saved nothing — measured at 2122 rows to
+   * return one, on a 451-job table that only ever grows (the ROW BUDGET
+   * pattern this codebase keeps refusing, this time on an admin click instead
+   * of a timer). Split at exactly the CASE's boundary, each half is index
+   * work: the in-flight jobs come off jobs_state and are read IN FULL (bounded
+   * by work actually in flight, which drains — never by the table, which
+   * doesn't), the settled ones walk the jobs_settled partial index in display
+   * order and stop at the page edge, and the joins run only for rows actually
+   * paged. Deep pages still pay O(offset), like the catalog list. */
   queuePage(limit: number, offset: number): { jobs: QueueJob[]; total: number; active: number } {
-    const jobs = this.ctx.storage.sql
+    // The jobs table knows a gameId and nothing else about the game, so the
+    // duration and the team spec are joined on from whichever table knows
+    // them: the catalog first (what was captured), the games mirror second
+    // (what BAR published), which is what covers the re-sim of a game
+    // nobody has uploaded — most of this queue.
+    //
+    // EVERY column in the ORDER BY is qualified, and has to be: `id` is in
+    // all three tables and `updated_unix` is in two of them, so an
+    // unqualified one is an ambiguous-column error rather than a wrong
+    // answer.
+    const select = `
+      SELECT ${JOB_COLS_J},
+             COALESCE(r.duration_sec, g.duration_sec) AS game_duration_sec,
+             COALESCE(r.game_size, g.game_size)       AS game_size
+      FROM jobs j
+      LEFT JOIN replays r ON r.id = j.game_id
+      LEFT JOIN games   g ON g.id = j.game_id`;
+    const active = this.ctx.storage.sql
       .exec(
-        // The jobs table knows a gameId and nothing else about the game, so the
-        // duration and the team spec are joined on from whichever table knows
-        // them: the catalog first (what was captured), the games mirror second
-        // (what BAR published), which is what covers the re-sim of a game
-        // nobody has uploaded — most of this queue.
-        //
-        // EVERY column in the ORDER BY is qualified, and has to be: `id` is in
-        // all three tables and `updated_unix` is in two of them, so an
-        // unqualified one is an ambiguous-column error rather than a wrong
-        // answer.
-        `SELECT ${JOB_COLS_J},
-                COALESCE(r.duration_sec, g.duration_sec) AS game_duration_sec,
-                COALESCE(r.game_size, g.game_size)       AS game_size
-         FROM jobs j
-         LEFT JOIN replays r ON r.id = j.game_id
-         LEFT JOIN games   g ON g.id = j.game_id
-         ORDER BY CASE WHEN j.state IN ('pending', 'processing') AND j.disabled = 0 THEN 0 ELSE 1 END,
-                  j.updated_unix DESC, j.id
-         LIMIT ? OFFSET ?`,
-        limit,
-        offset,
+        `${select}
+         WHERE j.state IN ('pending', 'processing') AND j.disabled = 0
+         ORDER BY j.updated_unix DESC, j.id`,
       )
       .toArray()
       .map(queueJobRow);
-    // SUM over no rows is NULL, hence the coalesce.
-    const counts = this.ctx.storage.sql
-      .exec(
-        `SELECT COUNT(*) AS total,
-                COALESCE(SUM(CASE WHEN state IN ('pending', 'processing') AND disabled = 0 THEN 1 ELSE 0 END), 0) AS active
-         FROM jobs`,
-      )
-      .toArray()[0];
-    return { jobs, total: Number(counts.total), active: Number(counts.active) };
+    const fromActive = active.slice(offset, offset + limit);
+    // The settled half fills what the page has left, its offset shifted by
+    // the actives that precede it in the combined order. The WHERE repeats
+    // jobs_settled's clause TEXTUALLY — that identity is what lets the
+    // planner take the partial index, walk it in display order, and stop at
+    // the page edge instead of sorting the table (see INDEX_DDL).
+    let settled: QueueJob[] = [];
+    if (fromActive.length < limit) {
+      settled = this.ctx.storage.sql
+        .exec(
+          `${select}
+           WHERE j.state NOT IN ('pending', 'processing') OR j.disabled != 0
+           ORDER BY j.updated_unix DESC, j.id
+           LIMIT ? OFFSET ?`,
+          limit - fromActive.length,
+          Math.max(0, offset - active.length),
+        )
+        .toArray()
+        .map(queueJobRow);
+    }
+    // The maintained count (see JOBS_COUNT_KEY). The COUNT(*) fallback is
+    // only reachable while the derived seed has not landed — a database
+    // serving through a budget overage — and self-heals with the seed.
+    let total = this.metaGet(JOBS_COUNT_KEY);
+    if (total === null) {
+      total = Number(this.ctx.storage.sql.exec(`SELECT COUNT(*) AS n FROM jobs`).toArray()[0].n);
+    }
+    // `active` is the rows already in hand — reading them all is what made
+    // the count free.
+    return { jobs: [...fromActive, ...settled], total, active: active.length };
   }
 
   /** jobClaim takes a job for a worker, refusing when someone else already

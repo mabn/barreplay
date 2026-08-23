@@ -581,11 +581,17 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           stamp is old, because CREATE TABLE IF NOT EXISTS is write-classified
                           even as a no-op and the overage gate kills whole requests. BUMP
                           SCHEMA_VERSION with any DDL change, or it never deploys.
-                          GET /api/replays/facets serves the distinct maps/sizes/player names/flags
-                          plus the catalog's date span, so the filter bar offers only choices that
-                          match something; it is computed over the WHOLE catalog, never the current
-                          result set (options that vanish as you filter cannot be used to change
-                          your mind). PUT /api/replays/<id> upserts (called by pack -upload
+                          GET /api/replays/maps serves {maps: [...]}, the catalog's distinct map
+                          names — the filter bar's combobox choices, and the ONLY filter data the
+                          front-end fetches (the settings chips are a hardcoded vocabulary, the
+                          ranges have fixed domains, player/id are free text). It is a MAINTAINED
+                          list, not a scan: upsert folds a publish's map into the unique_values
+                          row (key='maps', value = a sorted JSON array) when it is new, and
+                          mapNames serves that one row behind a one-minute in-memory cache. It
+                          replaced GET /api/replays/facets, which ran DISTINCT scans plus a
+                          full roster walk over the whole catalog on every landing-page load —
+                          the single biggest rows-read line in /api/sqlstats (~4000 rows/call).
+                          PUT /api/replays/<id> upserts (called by pack -upload
                           and the ingest daemon; optionally guarded by the REPLAY_PUT_TOKEN wrangler
                           secret as a bearer token). A publish that leaves the game ONE-SIDED
                           also QUEUES ITS RE-SIMULATION: upsert asks wantsFullView of the merged
@@ -685,14 +691,15 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           app.js: scavUnits/extraUnits/noAir — too common to badge) and suppresses
                           `mods` next to lava/zombies (those modes ship as tweak blobs, which is
                           what `mods` detects) — display choices only, the data stays in the rows.
-                          Row shape + PUT validation + the filter/facet contract live in
+                          Row shape + PUT validation + the filter contract live in
                           src/worker/replayentry.ts
                           (pure, node-tested) and MUST stay in lockstep with internal/viz/catalog.go,
                           which serves the same GET /api/replays computed live from .brp files so the
                           shared front-end works against both backends (the Go server leaves rid
                           null — its files are unrevisioned — and implements NO filtering: it lists a
-                          local directory, so it ignores the query params and 404s /facets, which is
-                          exactly what keeps the filter bar off there. The one Go-side piece the
+                          local directory, so it ignores the query params and 404s
+                          /api/replays/maps, which is exactly what keeps the filter bar off
+                          there. The one Go-side piece the
                           filters DO depend on is catalogPlayersPerAlly, because BuildCatalogEntry is
                           what builds the roster the worker stores). The front-end landing page
                           (no ?replay= in the URL) is a LEFT MENU (app.js homeTab/applyHomeTab,
@@ -751,10 +758,13 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           be refused as published instead of answered with the job doing it.
                           FILTER BAR (app.js initFilters, above the table), in TWO ROWS: the
                           fields (date from/to, map — a COMBOBOX over a datalist of the
-                          facet maps, so typing part of a name shrinks the list to the maps
-                          containing it; ?map= stays an exact match, applied when the text
+                          catalog's maps (from /api/replays/maps), so typing part of a name
+                          shrinks the list to the maps containing it; ?map= stays an exact
+                          match, applied when the text
                           names exactly one map — a player-count RANGE, a duration RANGE,
-                          player name — a datalist of the known names, debounced 300 ms — and
+                          player name — free text, matched as a prefix server-side, debounced
+                          300 ms (its completion datalist is gone with the facets endpoint:
+                          offering one meant walking every roster in the catalog) — and
                           GAME ID, which is a paste target rather than something anyone
                           types: app.js gameIdIn takes the longest hex run out of whatever
                           arrives, so a gex or bar-rts link, a ?replay= URL or a log line all
@@ -771,8 +781,9 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           also what gives DURATION its open top end: 0..DURATION_MAX_SEC=1h in
                           minutes, where the right thumb at 1h simply stops restricting, so
                           every longer game is included ("20m+" rather than "20m–1h"). Players
-                          spans the facets' own min..max, step 1, and hides itself when the
-                          catalog holds fewer than two distinct sizes. The thumbs push instead of
+                          is the same shape over a fixed 2..32 domain (PLAYERS_MIN/MAX, step 1;
+                          it used to span a sizes facet), its right thumb at 32 equally open
+                          ("16+"). The thumbs push instead of
                           crossing, dragging paints every frame but only queries after a 250 ms
                           pause (a drag is otherwise a query per pixel), and because both inputs
                           are full-width and stacked, which thumb a press grabs is settled on
@@ -818,7 +829,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           and replayHref carries it into a replay so returning lands on the same list.
                           While any filter is active the /index.json-only stubs are dropped: they have
                           no map, size, roster or settings, so no filter could be true of them. The
-                          bar stays HIDDEN unless GET /api/replays/facets answers — the Go viz server
+                          bar stays HIDDEN unless GET /api/replays/maps answers — the Go viz server
                           serves the same catalog shape from local files with no filtering behind it,
                           and a filter bar that silently does nothing is worse than none.
                           /index.json is NOT merged into the list by default, because it is not a
@@ -1074,24 +1085,23 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           rosters indexed cost ~48 rows written per game — 16 names, each a
                           row plus two index entries, ~2000 games a day — which alone spent
                           the free tier's 100k-rows-written daily allowance and took every
-                          route down (see ROW BUDGET); the player filter and the players
-                          facet read the roster JSON on the catalog rows directly instead.
+                          route down (see ROW BUDGET); the player filter reads the roster
+                          JSON on the catalog rows directly instead.
                           Ownership stays the one rule to keep:
                           exactly one row owns an id's replay_settings entries — the catalog
                           row if there is one (its flags are the capture that was published),
                           the games row otherwise — enforced by gamesInsert skipping an id
-                          `replays` holds. The consequence for the filter bar is that
-                          /api/replays/facets restricts the flags read to ids present in
-                          `replays`: the mirror is thousands of games nothing has published, and
-                          a filter option matching no listable replay is exactly what that
-                          endpoint exists to avoid.
+                          `replays` holds. The same rule shapes the maps list: only upsert
+                          feeds unique_values('maps'), so a mirrored game's map — thousands of
+                          games nothing has published — never becomes a filter option that
+                          matches no listable replay.
                           index.ts therefore exports `{ fetch, scheduled }` rather than the Hono
                           app itself — a cron handler cannot live in app.ts, which stays free of
                           workerd imports so the node tests can drive it. games.ts keeps that
                           same freedom (it takes the index and `fetch` as arguments), so
                           tests/games.test.ts drives the whole sync against a fake API. The SQL
                           half — the table, gamesUnknown's dedupe, the ownership rule, the
-                          facets restriction — is tests/do/replayindex.test.ts, running INSIDE
+                          maps-list maintenance — is tests/do/replayindex.test.ts, running INSIDE
                           workerd under @cloudflare/vitest-pool-workers (vitest.config.ts,
                           bindings read from wrangler.jsonc, so the test worker cannot diverge
                           from the deployed one; `npm test` runs both suites). That version of
@@ -1234,8 +1244,19 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           on failure, retried on every construction until they land.
                           The rule for anything added to those paths: bound it in SIZE (an
                           index, or an explicit window) and, if it cannot be, in RATE (a
-                          cooldown, a watermark, an hourly tick). Next in line, not yet a
-                          problem: queuePage's ORDER BY sorts the whole jobs table per read.
+                          cooldown, a watermark, an hourly tick). queuePage was the latest
+                          to go: its unfinished-first CASE led the ORDER BY, which no index
+                          can satisfy, so every read joined and sorted the WHOLE jobs table
+                          (measured live: 2122 rows to return one, on 451 jobs that are never
+                          deleted). It is now two indexed queries assembled in the method —
+                          the in-flight set read whole off jobs_state (bounded by work in
+                          flight, which drains), the settled rows walked in display order off
+                          the jobs_settled PARTIAL index (over exactly the rows heartbeats
+                          never touch, so a beat costs it nothing) and stopped at the page
+                          edge — plus `total` from a maintained schema_meta counter
+                          (jobs_count, incremented by jobInsert, sound because nothing ever
+                          deletes a job row) and `active` free off the in-flight set already
+                          in hand.
                           SQL STATS (GET /api/sqlstats): the LIVE counterpart of the rowcost
                           suite — the DO bills every statement's rowsRead/rowsWritten to the
                           public method running it (installSqlAccounting: an exec shim plus

@@ -99,11 +99,17 @@ app.get("/api/replays", async (c) => {
   return c.json(list, 200, { "cache-control": "no-cache" });
 });
 
-// The distinct values present in the catalog, for the filter bar's choices.
-// Deliberately unfiltered — see ReplayIndex.facets.
-app.get("/api/replays/facets", async (c) => {
-  const facets = await indexStub(c.env).facets();
-  return c.json(facets, 200, { "cache-control": "no-cache" });
+// The catalog's distinct map names, for the filter bar's combobox — the one
+// filter whose choices cannot be hardcoded (the settings vocabulary is a
+// constant, the ranges need no list, the player field is free text). Served
+// from a maintained list behind a one-minute in-memory cache in the DO
+// (ReplayIndex.mapNames), so it costs one row read a minute where the facets
+// endpoint it replaces scanned the whole catalog per call. Doubles as the
+// front-end's probe for "does this backend filter at all": the Go viz server
+// 404s it and the filter bar stays hidden there.
+app.get("/api/replays/maps", async (c) => {
+  const maps = await indexStub(c.env).mapNames();
+  return c.json({ maps }, 200, { "cache-control": "no-cache" });
 });
 
 // Writes are guarded by a shared secret when the REPLAY_PUT_TOKEN secret is

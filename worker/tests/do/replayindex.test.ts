@@ -168,20 +168,36 @@ test("publishing a mirrored game takes ownership of its entries", async () => {
   });
 });
 
-test("the filter bar's facets ignore games nothing has published", async () => {
-  await inIndex((index) => {
-    index.upsert(replay("published"));
-    index.gamesInsert([game("mirrored")]);
-
-    const f = index.facets();
+test("the maps list is maintained by publishes, not scanned per read", async () => {
+  await inIndex((index, sql) => {
+    index.upsert(replay("a", { map: "Great Divide V1" }));
+    index.upsert(replay("b", { map: "All That Glitters v2" }));
+    // A second publish of a known map adds nothing.
+    index.upsert(replay("c", { map: "Great Divide V1" }));
     // The mirror is thousands of games with no listable replay behind them:
-    // offering their names and flags would be offering filters that can only
-    // produce an empty list.
-    expect(f.players).toEqual(["Uploader"]);
-    expect(f.settings).toEqual(["lava"]);
-    // The catalog's own facets are unaffected.
-    expect(f.maps).toEqual(["Great Divide V1"]);
-    expect(f.sizes).toEqual([1]);
+    // a mirrored game's map must not become a choice that filters to an
+    // empty list.
+    index.gamesInsert([game("mirrored", { map: "Mirror Only Map" })]);
+    // A publish with no map has nothing to add.
+    index.upsert(replay("d", { map: null }));
+
+    expect(index.mapNames()).toEqual(["All That Glitters v2", "Great Divide V1"]);
+    // The list is a maintained unique_values row, sorted, not a DISTINCT scan.
+    expect(rows(sql, `SELECT value FROM unique_values WHERE key = 'maps'`)).toEqual([
+      { value: JSON.stringify(["All That Glitters v2", "Great Divide V1"]) },
+    ]);
+  });
+});
+
+test("mapNames serves from memory between writes", async () => {
+  await inIndex((index, sql) => {
+    index.upsert(replay("a", { map: "Great Divide V1" }));
+    expect(index.mapNames()).toEqual(["Great Divide V1"]);
+    // Prove the cache answers: yank the table out from under it. (A minute's
+    // staleness is the accepted worst case after an eviction; every write
+    // path refreshes the copy, so a new map still shows up immediately.)
+    sql.exec(`DELETE FROM unique_values`);
+    expect(index.mapNames()).toEqual(["Great Divide V1"]);
   });
 });
 
@@ -776,6 +792,47 @@ test("the catalog's own numbers beat the mirror's", async () => {
   });
 });
 
+// The page order and counts now come from two indexed queries assembled in
+// the method (the single CASE-ordered query sorted the whole table per read),
+// so what the assembly must not get wrong is pinned here: the order across
+// the bucket boundary, paging that spans it, and totals that stay whole-table
+// numbers on any page.
+test("the queue lists in-flight work first, then the settled, newest first", async () => {
+  await inIndex((index, sql) => {
+    for (const [id, state, at, disabled] of [
+      ["j-done-old", "done", 100, 0],
+      ["j-done-new", "done", 300, 0],
+      ["j-error", "error", 250, 0],
+      ["j-run-old", "processing", 50, 0],
+      ["j-run-new", "pending", 200, 0],
+      // Held back: settled bucket despite being pending — nothing will pick
+      // it up, so it must not sit at the head of the queue forever — and out
+      // of the in-flight count for the same reason.
+      ["j-disabled", "pending", 400, 1],
+    ] as const) {
+      index.jobInsert(id, "", `g-${id}`);
+      sql.exec(`UPDATE jobs SET state = ?, updated_unix = ?, disabled = ? WHERE id = ?`, state, at, disabled, id);
+    }
+
+    const page = index.queuePage(25, 0);
+    expect(page.jobs.map((j) => j.id)).toEqual([
+      "j-run-new", "j-run-old", // in flight, newest update first
+      "j-disabled", "j-done-new", "j-error", "j-done-old", // settled, newest first
+    ]);
+    expect(page.total).toBe(6);
+    expect(page.active).toBe(2);
+
+    // A page spanning the bucket boundary reads as one continuous list, and
+    // the counts stay whole-table numbers however the window falls.
+    const spanning = index.queuePage(2, 1);
+    expect(spanning.jobs.map((j) => j.id)).toEqual(["j-run-old", "j-disabled"]);
+    expect(spanning.total).toBe(6);
+    expect(spanning.active).toBe(2);
+    const deep = index.queuePage(25, 4);
+    expect(deep.jobs.map((j) => j.id)).toEqual(["j-error", "j-done-old"]);
+  });
+});
+
 test("a published replay keeps its row and never becomes a placeholder", async () => {
   await inIndex((index) => {
     index.upsert(replay("real"));
@@ -1259,7 +1316,7 @@ test("a failing schema check or derived rebuild never kills construction", async
   });
 });
 
-test("player filter and facets read the roster JSON directly", async () => {
+test("the player filter reads the roster JSON directly", async () => {
   await inIndex((index) => {
     index.upsert(replay("r1"));
     index.gamesInsert([game("m1")]);
@@ -1268,7 +1325,6 @@ test("player filter and facets read the roster JSON directly", async () => {
     expect(index.list({ ...emptyFilter(), player: "nobody" })).toEqual([]);
     // A LIKE wildcard in the needle is a literal, not a wildcard.
     expect(index.list({ ...emptyFilter(), player: "%" })).toEqual([]);
-    expect(index.facets().players).toEqual(["Uploader"]);
   });
 });
 
