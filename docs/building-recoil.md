@@ -86,6 +86,60 @@ pr-downloader: query
 download the `mirrors[0]` URL into `<BARdata>/maps/` (the springfiles-compatible
 endpoint from CLAUDE.md; verify the `md5` field).
 
+## The PATCHED build the re-sim daemon prefers
+
+`bringest -resim` runs `spring-headless-patched` if it finds one beside the stock
+binary (`-patched-engine`, default on; `engine.Locate` looks at exactly that one
+path). That build is this same recipe with `patches/engine-<version>/` applied
+first — byte-identical output, faster and much smaller in memory, which is why
+preferring it can be a default. `RESULTS.md` and `MEMORY.md` in that directory
+carry the measurements; what follows is how to produce one.
+
+```sh
+# 1. Clean checkout of the tag, then the series, in this order. bench-harness
+#    first because the rest were authored on top of it; H31 before H30; the
+#    memory patch last. Nothing else in the series touches the file 0003 does,
+#    so only the speed patches are order-sensitive among themselves.
+P=<barreplay>/patches/engine-2026.07.04
+git checkout -b patched 2026.07.04
+git am "$P/experiments/tools/bench-harness.patch" \
+       "$P/0001-demo-unpaced-playback.patch" \
+       "$P/0002-headless-replay-unsynced-cuts.patch" \
+       "$P/experiments/H1-skip-prevframe-transform-save.patch" \
+       "$P/experiments/H2-tickallanims-sort-skip-bfs-scratch.patch" \
+       "$P/experiments/H3-threadpool-clock-storm.patch" \
+       "$P/experiments/H4-skip-eager-piece-walk.patch" \
+       "$P/experiments/H5-formt-batch-claiming.patch" \
+       "$P/experiments/H6-cob-unchecked-fetch.patch" \
+       "$P/experiments/H23-tickallanims-switch-dispatch.patch" \
+       "$P/experiments/H31-movemath-flat-collision-cache.patch" \
+       "$P/experiments/H30-yardmap-coarse-exitonly-grid.patch" \
+       "$P/experiments/H21-cob-jumptable-dispatch.patch" \
+       "$P/experiments/H45-qtpfs-relink-grid-no-reinit.patch" \
+       "$P/experiments/H49-headless-skip-smt-tiles.patch" \
+       "$P/0003-static-mempool-lazy-zeroing.patch"
+
+# 2. Build exactly as above (steps 2-4), then install BESIDE the stock binary,
+#    under the -patched name. Both live in the same dir on purpose: the engine
+#    resolves base/springcontent.sdz relative to its own executable, so a
+#    separate <version>-patched dir would duplicate the whole base/ + fonts
+#    payload per version.
+D=<BARdata>/engine/2026.07.04
+cp build-linux/spring-headless "$D/spring-headless-patched"
+
+# 3. GATE IT before letting the daemon publish from it. The contract is that a
+#    patched build produces the SAME .brp, so the check is an md5 against a
+#    capture from the stock binary (references in
+#    patches/engine-2026.07.04/experiments/tools/refs.txt).
+barreplay -data <BARdata> -engine "$D/spring-headless-patched" -out /tmp/out <gameId>
+md5sum /tmp/out/<gameId>.brp
+```
+
+A missing patched build is a warning, not a failure — nothing downloads these,
+so a daemon routinely meets engine versions nobody has patched and runs those at
+stock speed. Which build ran is recorded per job as `jobStats.enginePatched`,
+because the capture itself cannot say: being byte-identical is the whole point.
+
 ## Observations from the validated run
 
 - **GPU-less headless works on 2025.06.24.** The icon-atlas wall described in

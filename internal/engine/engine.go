@@ -450,12 +450,28 @@ func boolToken(b bool) string {
 // MinDrawFPS=1 + MinSimDrawBalance=0.001 give ~1 draw/s. Both are read once at
 // engine startup (CGlobalConfig), so a config file — not a runtime Lua call — is
 // the only way to set them.
+//
+// TextureMemPoolSize=0 is the one override that is not about speed: it is
+// always injected, because the engine's bitmap arena is half a gigabyte of
+// resident memory that a headless re-sim has no use for. See the override
+// itself for why.
 func (e *Engine) WriteEngineConfig() (string, error) {
 	existing, err := os.ReadFile(filepath.Join(e.cfg.DataDir, "springsettings.cfg"))
 	if err != nil && !os.IsNotExist(err) {
 		return "", err
 	}
-	overrides := map[string]string{}
+	overrides := map[string]string{
+		// The bitmap allocator is a single flat arena that Resize() ZEROES on
+		// startup, so its default 512 MB is 512 MB of resident memory from the
+		// first instant of the process — paid whether or not a headless replay
+		// ever decodes a texture, and it is exactly the memory the re-sim runs
+		// out of on a small host. 0 selects the engine's on-demand allocator
+		// instead (TexNoMemPool), which mallocs each bitmap and frees it again,
+		// so what a run actually holds is the few bitmaps alive at once rather
+		// than the high-water mark rounded up to half a gigabyte. Nothing in
+		// the sim reads a bitmap, so this cannot change the capture.
+		"TextureMemPoolSize": "0",
+	}
 	if e.cfg.ThrottleDraw {
 		overrides["MinDrawFPS"] = "1"
 		overrides["MinSimDrawBalance"] = "0.001"
