@@ -1058,13 +1058,19 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the handler logs rather than rethrows, since a minute-by-minute stream
                           of failed crons is worse signal than one self-healing blip. Nothing is
                           logged on a tick that changed nothing.
-                          Mirrored games index into the SAME replay_players/replay_settings
-                          tables as the catalog, which makes ownership the one rule to keep:
+                          Mirrored games index their SETTINGS into the SAME replay_settings
+                          table as the catalog — their ROSTERS deliberately stay JSON on the
+                          games row, unindexed: nothing reads a mirror game's replay_players
+                          rows (the list's player filter and the facets both restrict to
+                          catalog ids), and at ~48 rows written per game — 16 names, each a
+                          row plus two index entries, ~2000 games a day — they alone spent the
+                          free tier's 100k-rows-written daily allowance, which took every
+                          route down (see ROW BUDGET). Ownership stays the one rule to keep:
                           exactly one row owns an id's derived entries — the catalog row if there
                           is one (its roster is the capture that was published), the games row
-                          otherwise — enforced by gamesInsert skipping an id `replays` holds, and
-                          honoured by rebuildDerived. The consequence for the filter bar is that
-                          /api/replays/facets now restricts both derived reads to ids present in
+                          otherwise — enforced by gamesInsert skipping an id `replays` holds.
+                          The consequence for the filter bar is that
+                          /api/replays/facets restricts both derived reads to ids present in
                           `replays`: the mirror is thousands of games nothing has published, and
                           a filter option matching no listable replay is exactly what that
                           endpoint exists to avoid.
@@ -1201,12 +1207,25 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           worker/tests/do/rowcost.test.ts is the guard — it seeds tables far
                           bigger than the deployment's and asserts each polled and cron read
                           stays SMALL, so a new scan fails the suite instead of the account.
+                          The WRITE allowance bites the same way and also did: the mirror's
+                          roster indexing wrote 59 rows per game (index maintenance bills a
+                          row per index per insert — non-obvious from the statements), which
+                          at ~2000 games/day exceeded 100k/day on its own; the fix was to stop
+                          indexing mirror rosters (see the games-mirror entry above), and
+                          rowcost.test.ts now bounds the recurring writes too. NOTE the
+                          overage enforcement gates EVERY SQL statement once either daily
+                          budget is spent — reads included, and a plain SELECT then throws
+                          the WRITE-overage error ("Exceeded allowed rows written") if that
+                          is the budget that ran out — so the ReplayIndex constructor never
+                          lets a failure escape: schema DDL runs only when a read-only
+                          sqlite_master check (schemaCurrent) finds something missing, and
+                          both the migration and the versioned derived rebuild log-and-serve
+                          on failure, retried on every construction until they land.
                           The rule for anything added to those paths: bound it in SIZE (an
                           index, or an explicit window) and, if it cannot be, in RATE (a
                           cooldown, a watermark, an hourly tick). Next in line, not yet a
-                          problem: queuePage's ORDER BY sorts the whole jobs table per read,
-                          and the games mirror's derived-table writes are ~2/3 of the free
-                          plan's daily WRITE allowance. (The third of the three, the re-sim
+                          problem: queuePage's ORDER BY sorts the whole jobs table per read.
+                          (The third of the three read scans, the re-sim
                           daemon listing the whole catalog every ten seconds, is gone entirely:
                           the publish announces that work now — see PUT /api/replays above.)
                           DEPLOYING: `npm run deploy` is the whole thing — test -> build (whose
