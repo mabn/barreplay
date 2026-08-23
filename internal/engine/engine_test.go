@@ -123,7 +123,7 @@ func TestWriteEngineConfig(t *testing.T) {
 	}
 	b, _ := os.ReadFile(p)
 	s := string(b)
-	for _, want := range []string{"VSync = 0", "MinDrawFPS = 1", "MinSimDrawBalance = 0.001", "SpeedControl = 2"} {
+	for _, want := range []string{"VSync = 0", "MinDrawFPS = 1", "MinSimDrawBalance = 0.001", "SpeedControl = 2", "TextureMemPoolSize = 0"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("config missing %q:\n%s", want, s)
 		}
@@ -145,6 +145,12 @@ func TestWriteEngineConfig(t *testing.T) {
 	}
 	if strings.Contains(string(b2), "WorkerThreadCount") {
 		t.Errorf("unset WorkerThreads should not inject WorkerThreadCount:\n%s", b2)
+	}
+	// ...but the bitmap pool is a memory override, not a speed one: a re-sim
+	// never wants the engine's 512 MB pre-zeroed texture arena, whatever the
+	// draw throttle is doing.
+	if !strings.Contains(string(b2), "TextureMemPoolSize = 0") {
+		t.Errorf("TextureMemPoolSize should be injected regardless of ThrottleDraw:\n%s", b2)
 	}
 
 	// -worker-threads set: WorkerThreadCount is injected (0 is a real value).
