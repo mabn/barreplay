@@ -1370,10 +1370,15 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           MAKES work: a "resim" poll with nothing pending queues a mirrored
                           game nothing has published and returns that (ReplayIndex.jobsOffer).
                           WHICH game: of the BACKFILL_WINDOW=20 newest eligible ones, the one
-                          with the MOST PLAYERS — an hour of engine time buys an 8v8 as cheaply
-                          as the duel that happened to finish a minute later, so within a window
-                          of games that are all recent, size decides (ties go to the newer, an
-                          unknown roster goes last but is not refused). The window is over
+                          that is MODDED, and failing that the one with the MOST PLAYERS —
+                          an hour of engine time buys an 8v8 as cheaply as the duel that
+                          happened to finish a minute later, so within a window of games that
+                          are all recent, size decides (ties go to the newer, an unknown
+                          roster goes last but is not refused). Modded beats bigger because it
+                          is rarer and less replaceable: an 8v8 nobody re-simulates today is
+                          one of forty played this hour, where a game running somebody's
+                          tweakdefs is the only one of its kind, and those tweaks are most of
+                          what a spectator view of it is FOR. The window is over
                           CANDIDATES, not over the mirror's last 20 rows: every game handed out
                           gains a job row and stops being eligible, so a window over raw recency
                           would be permanently empty after twenty of them and the daemon would
@@ -1383,16 +1388,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           JOB ROW AT ALL — finished and FAILED ones included, or a game that
                           cannot re-simulate would be handed out again every poll, an hour of
                           engine time at a time (pasting its link is still a retry, exactly as
-                          for a failed request); only an UNMODDED game — no tweakdefs/tweakunits
-                          slot, which is precisely what the settings' `mods` flag records, so
-                          the refusal is an EXISTS over replay_settings' (flag, replay_id) index
-                          and the flag name is a shared constant (SETTINGS_MODS_FLAG) rather
-                          than a literal the query could silently stop matching; note this also
-                          rules out the modes that SHIP as tweak blobs, lava and zombies, which
-                          is the same statement twice rather than an oversight, and a game with
-                          NO settings recorded (the API gave none) stays eligible, since
-                          treating unknown as modded would empty the work list on a bad API
-                          day; and only into an EMPTY pending list, so at most
+                          for a failed request); and only into an EMPTY pending list, so at most
                           one auto-queued job ever waits — the next poll finds THAT one instead
                           of making another. Check and insert are one RPC, so two daemons
                           polling together cannot both take the same game. The MODS preference
