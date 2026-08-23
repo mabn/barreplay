@@ -1213,3 +1213,48 @@ test("a migration that cannot run leaves the previous schema serving", async () 
     expect(priv.schemaCurrent()).toBe(true);
   });
 });
+
+test("a failing schema check or derived rebuild never kills construction", async () => {
+  // The overage gate spares no statement — even schemaCurrent's read of
+  // sqlite_master threw "Exceeded allowed rows written" live. Every
+  // constructor step must log and serve on, so the request fails (if it
+  // fails) in the route's own query, which the worker log can attribute.
+  await inIndex((index, sql) => {
+    const priv = index as unknown as { ensureSchema(): void; ensureDerived(): void };
+    const proto = Object.getPrototypeOf(index) as Record<string, unknown>;
+    const logged: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => logged.push(args.join(" "));
+    try {
+      const realCurrent = proto.schemaCurrent;
+      proto.schemaCurrent = () => {
+        throw new Error("Exceeded allowed rows written in Durable Objects free tier.");
+      };
+      try {
+        priv.ensureSchema();
+      } finally {
+        proto.schemaCurrent = realCurrent;
+      }
+      expect(logged.join("\n")).toContain("schema check failed");
+
+      sql.exec(`DELETE FROM schema_meta WHERE key = 'derived_version'`);
+      const realRebuild = proto.rebuildDerived;
+      proto.rebuildDerived = () => {
+        throw new Error("Exceeded allowed rows written in Durable Objects free tier.");
+      };
+      try {
+        priv.ensureDerived();
+      } finally {
+        proto.rebuildDerived = realRebuild;
+      }
+      expect(logged.join("\n")).toContain("derived rebuild failed");
+      // The version row was not written, so the rebuild is retried — and
+      // lands once it can run.
+      expect(rows(sql, `SELECT value FROM schema_meta WHERE key = 'derived_version'`)).toEqual([]);
+      priv.ensureDerived();
+      expect(rows(sql, `SELECT value FROM schema_meta WHERE key = 'derived_version'`)).not.toEqual([]);
+    } finally {
+      console.error = realError;
+    }
+  });
+});
