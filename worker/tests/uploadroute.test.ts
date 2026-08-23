@@ -1177,3 +1177,12 @@ test("an uncaught route error answers 500 and logs the message", async () => {
   assert.match(line, /Exceeded allowed rows read/, "the error's own message is in the log");
   assert.match(line, /GET \/api\/replays/, "so is the request that hit it");
 });
+
+test("the sqlstats route serves the DO's tally as-is", async () => {
+  const { env, index } = makeEnv();
+  const report = { since: 123, elapsedSec: 45, ops: [], totals: { rowsRead: 0, rowsWritten: 0 } };
+  (index as unknown as { sqlStatsReport: () => unknown }).sqlStatsReport = () => report;
+  const res = await app.request("/api/sqlstats", {}, env);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await asJson(res), report);
+});
