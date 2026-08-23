@@ -525,6 +525,38 @@ test("a series past the cap is thinned, keeping its span", async () => {
 
 // The history outlives its job, so something has to age it out. Nothing else
 // here grows without a rule.
+// The backfill's pacing IS the host's pacing: a game it does not hand out is an
+// engine sitting idle. So it rests only when it has nothing — resting after a
+// successful queue put the deployment on a strict five-minute grid for jobs
+// that take ninety seconds, which is most of an engine host's day spent
+// waiting for a clock.
+test("the backfill hands out the next game at once, and rests only when empty", async () => {
+  await inIndex((index, sql) => {
+    for (const id of ["g1", "g2"]) {
+      index.gamesInsert([game(id, { startUnix: 1787349909 })]);
+    }
+    // One game, taken and finished, exactly as a daemon works through it.
+    expect(index.jobsOffer("resim", "j-1").map((j) => [j.id, j.gameId])).toEqual([["j-1", "g1"]]);
+    index.jobClaim("j-1", "resim");
+    index.jobUpdate("j-1", "done", null);
+
+    // The next poll gets the other game immediately — no cooldown was taken by
+    // a scan that found work, because the daemon stopped asking while it ran.
+    expect(index.jobsOffer("resim", "j-2").map((j) => j.gameId)).toEqual(["g2"]);
+    index.jobClaim("j-2", "resim");
+    index.jobUpdate("j-2", "done", null);
+
+    // Now the mirror is exhausted: THIS is the answer a poll would repeat
+    // every ten seconds forever, so it is the one that rests.
+    expect(index.jobsOffer("resim", "j-3")).toEqual([]);
+    index.gamesInsert([game("g3", { startUnix: 1787349909 })]);
+    expect(index.jobsOffer("resim", "j-4")).toEqual([]);
+    // ...until the rest is over.
+    sql.exec(`UPDATE schema_meta SET value = 0 WHERE key = 'backfill_after'`);
+    expect(index.jobsOffer("resim", "j-5").map((j) => j.gameId)).toEqual(["g3"]);
+  });
+});
+
 // The pipeline's third door, and the one nobody has to open: a publish that
 // leaves a game one-sided QUEUES its own re-simulation. This is what replaced
 // the re-sim daemon listing the whole catalog on a timer and applying the same

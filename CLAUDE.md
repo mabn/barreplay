@@ -1377,15 +1377,21 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           one auto-queued job ever waits — the next poll finds THAT one instead
                           of making another. Check and insert are one RPC, so two daemons
                           polling together cannot both take the same game. And the scan is
-                          bounded twice over, in SIZE and RATE: it looks at the newest
-                          BACKFILL_INSPECT=200 mirrored games and then RESTS for
-                          BACKFILL_COOLDOWN_SEC=5min whether or not it found one (schema_meta
-                          again). It is the only query on the 10s poll path whose cost grows
-                          with the mirror — which grows ~2000 games a day forever — and an
-                          unbounded walk of it 8640 times a day is what first exhausted the
-                          account's daily rows-read allowance. The window cannot drain the way
-                          a window over raw recency would: one host consumes ~24 games a day
-                          against 2000 arriving, so it slides in far faster than it empties. It makes a GET write,
+                          bounded in SIZE always — the newest BACKFILL_INSPECT=200 mirrored
+                          games, never the whole table — and in RATE only when it comes up
+                          EMPTY (BACKFILL_COOLDOWN_SEC=5min, in schema_meta). It is the one
+                          query on the 10s poll path whose cost grows with the mirror — which
+                          grows ~2000 games a day forever — and an unbounded walk of it 8640
+                          times a day is what first exhausted the account's daily rows-read
+                          allowance. Only the empty answer rests, because only it repeats: a
+                          scan that queues a game is followed by the daemon going away to run
+                          it, and every poll until it returns is answered by jobsPending out of
+                          an index. Resting after a SUCCESSFUL scan is the same bug seen from
+                          the other side — it put the deployment on a strict five-minute grid
+                          for jobs that took ninety seconds, an engine host idle most of the
+                          day. The window cannot drain the way one over raw recency would: a
+                          host consumes far fewer games a day than the ~2000 arriving, so it
+                          slides in faster than it empties. It makes a GET write,
                           which is the price of leaving the daemon's protocol untouched: a
                           backfilled job is indistinguishable from one a person queued a minute
                           earlier, so no deployed daemon needs to know this happens. The job id

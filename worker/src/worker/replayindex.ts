@@ -89,15 +89,20 @@ const BACKFILL_WINDOW = 20;
  * See BACKFILL_COOLDOWN_SEC for the other half of the bound. */
 const BACKFILL_INSPECT = 200;
 
-/** How long the backfill rests after an attempt. The daemon polls every 10
- * seconds and the backfill is the ONLY expensive thing on that path: it is
- * what keeps an engine host busy, so it is worth doing, but doing it 8640
- * times a day is worth nothing — each job it queues is an hour of work, so
- * five minutes of granularity is invisible.
+/** How long the backfill rests after coming up EMPTY. The daemon polls every
+ * 10 seconds and this scan is the only expensive thing on that path, so the
+ * state to bound is the one it can sit in indefinitely: nothing to hand out,
+ * asked again ten seconds later, with the mirror no different than it was.
  *
- * This is the lesson of the outage this constant was born in: the free tier
- * bills ROWS READ, and a scan is charged whether or not it finds anything.
- * Every recurring query here has to be bounded in both size and rate. */
+ * Only the empty answer rests. A scan that QUEUES a game is not repeated —
+ * the daemon takes the job and stops asking for the length of the run, and
+ * the polls in between are answered by jobsPending out of an index — so
+ * resting after one buys nothing and costs exactly what it saves: the host
+ * sits idle until the grid ticks. That was measured on the deployment, where
+ * jobs landing on a strict five-minute spacing each took ninety seconds; the
+ * assumption behind the first version of this — that a queued job is an hour
+ * of work, so five minutes of granularity is invisible — is not true of a
+ * host running the patched engine over ordinary games. */
 const BACKFILL_COOLDOWN_SEC = 5 * 60;
 
 /** How many healthchecks one job keeps. At the daemon's 10-second beat that is
@@ -1317,13 +1322,13 @@ export class ReplayIndex extends DurableObject<Env> {
    * another. The check and the insert are one RPC — the DO is single-threaded,
    * so two daemons polling together cannot both queue the same game.
    *
-   * And it is bounded twice over, in SIZE and in RATE — it looks at the newest
-   * BACKFILL_INSPECT games and then rests for BACKFILL_COOLDOWN_SEC, whether
-   * or not it found one. Both bounds are there for the same reason: this is
-   * the only query on a ten-second poll whose cost grows with the mirror,
-   * which grows by ~2000 games a day forever. Unbounded, it once read the
-   * whole table 8640 times a day and spent the account's entire daily
-   * rows-read budget on finding nothing.
+   * And it is bounded in SIZE always — it looks at the newest BACKFILL_INSPECT
+   * games, never the whole mirror — and in RATE when it comes up empty, which
+   * is the only outcome a poll can repeat. This is the only query on a
+   * ten-second poll whose cost grows with the mirror, which grows by ~2000
+   * games a day forever; unbounded, it read the whole table 8640 times a day
+   * and spent the account's entire daily rows-read budget on finding
+   * nothing.
    *
    * This makes a GET write, which is the deliberate cost of leaving the
    * daemon's protocol alone: a poll that returns a job it just created is
@@ -1332,17 +1337,15 @@ export class ReplayIndex extends DurableObject<Env> {
   jobsOffer(kind: JobKind, newJobId: string): IngestJob[] {
     const pending = this.jobsPending(kind);
     if (pending.length > 0 || kind !== "resim") return pending;
-    // The backfill RESTS between attempts. Everything above this line is a
-    // seek; the scan below is the one query on the poll path whose cost is
-    // measured in the size of the mirror, and an idle daemon asks 8640 times a
-    // day for work that takes an hour to do. The cooldown is taken whatever
-    // the outcome — a scan that finds nothing costs exactly as much as one
-    // that finds a game, and "nothing to do" is precisely the state a daemon
-    // sits in while polling.
+    // Everything above this line is a seek; the scan below is the one query on
+    // the poll path whose cost is measured in the size of the mirror, and an
+    // idle daemon asks 8640 times a day. So a scan that comes up EMPTY rests
+    // (at the bottom of this method) — that is the state a poll can repeat
+    // forever with nothing changing. A scan that finds a game does not: the
+    // daemon leaves with it and stops asking.
     const now = Math.floor(Date.now() / 1000);
     const restUntil = this.metaGet("backfill_after");
     if (restUntil !== null && now < restUntil) return [];
-    this.metaPut("backfill_after", now + BACKFILL_COOLDOWN_SEC);
     const candidate = this.ctx.storage.sql
       .exec(
         `SELECT id FROM (
@@ -1369,7 +1372,10 @@ export class ReplayIndex extends DurableObject<Env> {
         SETTINGS_MODS_FLAG,
       )
       .toArray();
-    if (candidate.length === 0) return [];
+    if (candidate.length === 0) {
+      this.metaPut("backfill_after", now + BACKFILL_COOLDOWN_SEC);
+      return [];
+    }
     this.jobInsert(newJobId, "", candidate[0].id as string, "resim");
     const job = this.jobGet(newJobId);
     return job === null ? [] : [job];
