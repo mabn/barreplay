@@ -66,16 +66,31 @@ const STALE_PROCESSING_SEC = 15 * 60;
  * engine time that would simply be run twice. */
 const STALE_PROCESSING_RESIM_SEC = 90 * 60;
 
-/** How many of the newest ELIGIBLE mirrored games the backfill chooses from.
- * It picks the biggest game in that window, not the newest one: an 8v8 is
- * worth far more to have than the 1v1 that happened to finish a minute later,
- * and re-simulating either costs the same hour of somebody's machine.
+/** How many of the most recently ENDED eligible mirrored games the backfill
+ * chooses from. It picks the best game in that window (modded first, then
+ * biggest), not the newest one: an 8v8 is worth far more to have than the 1v1
+ * that happened to finish a minute later, and re-simulating either costs the
+ * same hour of somebody's machine.
  *
- * The window is over CANDIDATES, not over the mirror's last 20 rows. Those
+ * END time, not start time, because a game can only be mirrored once it is
+ * over: ordered by start, an hour-long game entered the mirror already buried
+ * under everything that started after it — on BAR's rate that was ~80 games,
+ * which put a 59-minute modded 16-player FFA permanently outside a small
+ * window while three-minute duels sailed through it. Ordered by when they
+ * ended, every game is born at the head of the walk.
+ *
+ * 200 rather than 20 for the same reason: the preference ranking is only as
+ * good as the window it ranks over, and a daemon that finishes one job an
+ * hour faces ~80 new games each time it looks — a 20-game window meant "the
+ * last 15 minutes", which no rare game survives. 200 is a couple of hours of
+ * BAR's output: wide enough that a modded game stays electable for the whole
+ * gap between two polls, still a bounded walk (see the rowcost test).
+ *
+ * The window is over CANDIDATES, not over the mirror's last 200 rows. Those
  * would drain: every game handed out gains a job row and stops being eligible,
- * so after twenty of them a window over raw recency would be permanently empty
- * and the daemon would idle with thousands of games still to do. */
-const BACKFILL_WINDOW = 20;
+ * so after two hundred of them a window over raw recency would be permanently
+ * empty and the daemon would idle with thousands of games still to do. */
+const BACKFILL_WINDOW = 200;
 
 /** How long the backfill rests after coming up EMPTY. The daemon polls every
  * 10 seconds and this scan is the only expensive thing on that path, so the
@@ -413,19 +428,29 @@ export class ReplayIndex extends DurableObject<Env> {
       -- the games mirrored since the last run instead of every game inside the
       -- oldest open observation's time window.
       CREATE INDEX IF NOT EXISTS games_synced   ON games (synced_unix);
-      -- The re-sim backfill's walk (jobsOffer), COVERING it: newest-first is
-      -- the order it reads in, and id + player_count are the only other
-      -- columns it wants, so the walk never touches the games table itself and
-      -- the ORDER BY needs no temp b-tree for its id tiebreak. Measured over
-      -- 5000 mirrored games: 61 rows read down to 40 in the steady state, and
-      -- 861 to 840 when it has to step over the games it already took.
+      -- The re-sim backfill's walk (jobsOffer), COVERING it: most recently
+      -- ENDED first is the order it reads in — an EXPRESSION index, because
+      -- end time is start_unix + duration_sec and storing it as a column
+      -- would mean a migration UPDATE over the whole mirror for a number the
+      -- row already implies. The expression in jobsOffer's ORDER BY must
+      -- match this one TEXTUALLY or the planner sorts the whole mirror into
+      -- a temp b-tree (the rowcost test is the guard). COALESCE so a game
+      -- with no recorded duration still ranks by its start rather than
+      -- falling to the very end as NULL; a NULL start still sorts last (NULL
+      -- is smaller than every value, so DESC puts it there by itself).
+      -- id + player_count ride along so the walk never touches the games
+      -- table and the id tiebreak needs no sort.
       --
-      -- It REPLACES games_start (start_unix DESC), which is its first column
-      -- and nothing else: every query that index served this one serves at
-      -- least as well, and keeping both would cost a second index write per
-      -- mirrored game — ~2000 a day against a write budget that is already
-      -- two thirds spent.
-      CREATE INDEX IF NOT EXISTS games_backfill ON games (start_unix DESC, id, player_count);
+      -- It REPLACES games_backfill (start_unix DESC, id, player_count), which
+      -- ordered the walk by START time: a game only reaches the mirror once
+      -- it has ENDED, so a long game arrived pre-buried under every shorter
+      -- game that started after it — see BACKFILL_WINDOW. Dropped rather than
+      -- kept because nothing else ordered by it, and a second index is a
+      -- second write per mirrored game against a write budget already two
+      -- thirds spent.
+      CREATE INDEX IF NOT EXISTS games_backfill_end
+        ON games ((start_unix + COALESCE(duration_sec, 0)) DESC, id, player_count);
+      DROP INDEX IF EXISTS games_backfill;
       DROP INDEX IF EXISTS games_start;
       -- PARTIAL indexes, because the two questions asked of the lobbies
       -- table every minute are about the handful of rows in a state, over
@@ -1305,9 +1330,13 @@ export class ReplayIndex extends DurableObject<Env> {
    * its kind and, when a re-sim daemon would otherwise go home empty-handed,
    * one job queued on the spot from the games mirror.
    *
-   * Of the BACKFILL_WINDOW newest candidates it takes the one with the MOST
-   * PLAYERS: an hour of engine time buys an 8v8 as cheaply as a duel, so
-   * within a window of games that are all recent, size is what decides.
+   * Of the BACKFILL_WINDOW most recently ENDED candidates it takes the one
+   * with the MOST PLAYERS: an hour of engine time buys an 8v8 as cheaply as a
+   * duel, so within a window of games that are all recent, size is what
+   * decides. End time rather than start time because that is the order games
+   * ARRIVE in — a game is mirrored only once it is over, so ordering by start
+   * buried every long game under the shorter ones that started after it (see
+   * BACKFILL_WINDOW).
    *
    * The mirror knows thousands of games nobody has captured (see the games
    * table), and the re-sim daemon's other two work sources cannot reach them:
@@ -1344,10 +1373,10 @@ export class ReplayIndex extends DurableObject<Env> {
    * so two daemons polling together cannot both queue the same game.
    *
    * The scan is cheap because it STOPS EARLY, not because it looks at a slice:
-   * it walks games_backfill newest-first and quits at the 20th candidate, which
-   * on a mirror this daemon cannot keep up with is the first twenty rows it
-   * touches. That distinction is the whole design. A fixed window over the
-   * newest N games reads the same twenty rows in the good case and then LIES
+   * it walks games_backfill_end latest-ended-first and quits at the 200th
+   * candidate, which on a mirror this daemon cannot keep up with is the first
+   * two hundred rows it touches. That distinction is the whole design. A fixed
+   * window over the newest N games reads the same rows in the good case and then LIES
    * in the bad one — with the newest N all taken it reports an empty mirror
    * while thousands of older candidates sit behind the window, and the daemon
    * goes to sleep in front of a queue it cannot see. An empty answer here has
@@ -1379,7 +1408,8 @@ export class ReplayIndex extends DurableObject<Env> {
     const candidate = this.ctx.storage.sql
       .exec(
         `SELECT id FROM (
-           SELECT g.id AS id, g.player_count AS player_count, g.start_unix AS start_unix,
+           SELECT g.id AS id, g.player_count AS player_count,
+                  (g.start_unix + COALESCE(g.duration_sec, 0)) AS end_unix,
                   -- Ranked on below, not filtered on: a modded game is the
                   -- one this pipeline is most worth spending an hour of engine
                   -- time on, since it is the one nobody else can look at.
@@ -1391,25 +1421,26 @@ export class ReplayIndex extends DurableObject<Env> {
            FROM games g
            WHERE NOT EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id)
              AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = g.id)
-           -- Walks games_backfill newest-first and STOPS at the 20th candidate,
-           -- which is what makes the scan cost the size of its answer instead
-           -- of the size of the mirror. Both terms matter: a leading
-           -- start_unix-IS-NULL term is an expression, which disqualifies the
-           -- index and sorts all five thousand rows into a temp b-tree
-           -- (measured 10020 rows read against 861), and it says nothing extra
-           -- — NULL is smaller than every value, so DESC puts those rows last
-           -- by itself. The trailing id only block-sorts each equal-timestamp
-           -- group, so early termination survives it.
-           ORDER BY g.start_unix DESC, g.id
+           -- Walks games_backfill_end latest-ended-first and STOPS at the
+           -- BACKFILL_WINDOWth candidate, which is what makes the scan cost
+           -- the size of its answer instead of the size of the mirror. The
+           -- expression must match the index's TEXTUALLY (COALESCE included)
+           -- or the planner sorts the whole mirror into a temp b-tree; no
+           -- leading IS-NULL term for the same reason — NULL is smaller than
+           -- every value, so DESC puts the start-less rows last by itself.
+           -- The trailing id only block-sorts each equal-timestamp group, so
+           -- early termination survives it.
+           ORDER BY (g.start_unix + COALESCE(g.duration_sec, 0)) DESC, g.id
            LIMIT ${BACKFILL_WINDOW}
          )
          -- MODDED first, then the biggest; a game whose roster the API never
-         -- gave goes last, and an exact tie goes to the newer one. Modded
-         -- beats bigger because it is rarer and less replaceable: an 8v8 that
-         -- nobody re-simulates today is one of forty played this hour, where
-         -- the game with tweakdefs in it is the only one of its kind, and it
-         -- is the mode's own tweaks that a spectator view is worth having of.
-         ORDER BY modded DESC, player_count IS NULL, player_count DESC, start_unix DESC, id
+         -- gave goes last, and an exact tie goes to the latest-ended one.
+         -- Modded beats bigger because it is rarer and less replaceable: an
+         -- 8v8 that nobody re-simulates today is one of forty played this
+         -- hour, where the game with tweakdefs in it is the only one of its
+         -- kind, and it is the mode's own tweaks that a spectator view is
+         -- worth having of.
+         ORDER BY modded DESC, player_count IS NULL, player_count DESC, end_unix DESC, id
          LIMIT 1`,
         SETTINGS_MODS_FLAG,
       )

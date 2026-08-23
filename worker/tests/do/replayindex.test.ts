@@ -236,27 +236,56 @@ test("the backfill takes the biggest game among the newest candidates", async ()
 
 test("the size preference is bounded by the recency window", async () => {
   await inIndex((index) => {
-    // A 30v30 well outside the newest 20 candidates, and 20 duels in front of
-    // it. The window is what keeps the daemon on recent games instead of
-    // walking the whole archive biggest-first.
+    // A 30v30 well outside the 200 most recently ended candidates, and 200
+    // duels in front of it. The window is what keeps the daemon on recent
+    // games instead of walking the whole archive biggest-first.
     index.gamesInsert([
       game("ancient-huge", { startUnix: 1000, playerCount: 60 }),
-      ...Array.from({ length: 20 }, (_, i) => game(`recent-${i}`, { startUnix: 5000 + i, playerCount: 2 })),
+      ...Array.from({ length: 200 }, (_, i) => game(`recent-${i}`, { startUnix: 500000 + i, playerCount: 2 })),
     ]);
 
-    // The 30v30 is out of the window entirely; among the 20 duels that are in
-    // it, the tie goes to the newest.
-    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "recent-19" });
+    // The 30v30 is out of the window entirely; among the 200 duels that are
+    // in it, the tie goes to the latest-ended.
+    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "recent-199" });
   });
 });
 
-test("games of equal size are taken newest first", async () => {
+test("games of equal size are taken latest-ended first", async () => {
   await inIndex((index) => {
     index.gamesInsert([
       game("older", { startUnix: 4000, playerCount: 16 }),
       game("newer", { startUnix: 5000, playerCount: 16 }),
     ]);
     expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "newer" });
+  });
+});
+
+test("the window is ordered by when games ENDED, not when they started", async () => {
+  await inIndex((index) => {
+    // The mirror only learns a game once it is over, so end order is arrival
+    // order: an hour-long game that started first but ended last is the
+    // NEWEST thing in the mirror, not the oldest. Ordered by start it was
+    // born buried under every shorter game that started after it — which is
+    // exactly how an hour-long modded 16-player FFA kept losing to duels.
+    index.gamesInsert([
+      game("marathon", { startUnix: 1000, durationSec: 3600, playerCount: 2 }),
+      game("quick-late", { startUnix: 4000, durationSec: 200, playerCount: 2 }),
+    ]);
+    // marathon ends at 4600, quick-late at 4200.
+    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "marathon" });
+  });
+});
+
+test("a game with no recorded duration still ranks by its start", async () => {
+  await inIndex((index) => {
+    // durationSec is null when the API never said; end time then degrades to
+    // the start time instead of the row falling out of order entirely.
+    index.gamesInsert([
+      game("timed", { startUnix: 3000, durationSec: 500, playerCount: 2 }),
+      game("untimed", { startUnix: 5000, durationSec: null, playerCount: 2 }),
+    ]);
+    // untimed counts as ending at 5000, after timed's 3500.
+    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "untimed" });
   });
 });
 

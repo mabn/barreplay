@@ -1369,12 +1369,22 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           precisely the row a person watching wants to see), and which also
                           MAKES work: a "resim" poll with nothing pending queues a mirrored
                           game nothing has published and returns that (ReplayIndex.jobsOffer).
-                          WHICH game: of the BACKFILL_WINDOW=20 newest eligible ones, the one
+                          WHICH game: of the BACKFILL_WINDOW=200 most recently ENDED
+                          eligible ones, the one
                           that is MODDED, and failing that the one with the MOST PLAYERS —
                           an hour of engine time buys an 8v8 as cheaply as the duel that
                           happened to finish a minute later, so within a window of games that
-                          are all recent, size decides (ties go to the newer, an unknown
-                          roster goes last but is not refused). Modded beats bigger because it
+                          are all recent, size decides (ties go to the latest-ended, an unknown
+                          roster goes last but is not refused). END time (start_unix +
+                          duration_sec), not start time, because end order is ARRIVAL order:
+                          the mirror only learns a game once it is over, so ordered by start
+                          an hour-long game entered the walk already buried under the ~80
+                          shorter games that started after it — which is how a 59-minute
+                          modded 16-player FFA kept losing to fresh duels; and 200 rather
+                          than 20 because a daemon that surfaces once an hour faces ~80 new
+                          games each time, so a 20-game window meant "the last 15 minutes"
+                          and the modded preference never had anything rare to prefer.
+                          Modded beats bigger because it
                           is rarer and less replaceable: an 8v8 nobody re-simulates today is
                           one of forty played this hour, where a game running somebody's
                           tweakdefs is the only one of its kind, and those tweaks are most of
@@ -1402,13 +1412,16 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           none) is neither refused nor preferred; it ranks by size, as it did
                           before. And the scan is
                           cheap because it STOPS EARLY, not because it looks at a slice, and
-                          because games_backfill (start_unix DESC, id, player_count) COVERS
-                          exactly what the walk reads — so it never touches the games table
-                          and its id tiebreak needs no temp b-tree (61 rows read down to 40
-                          in the steady state over 5000 mirrored games; it replaced
-                          games_start, which was its first column and nothing more). It
-                          walks games_backfill newest-first and quits at the 20th candidate,
-                          which on a mirror no host can keep up with is the first twenty rows
+                          because games_backfill_end — an EXPRESSION index on
+                          ((start_unix + COALESCE(duration_sec, 0)) DESC, id, player_count),
+                          which the ORDER BY must match TEXTUALLY or the planner sorts the
+                          whole mirror into a temp b-tree (the rowcost test guards this) —
+                          COVERS exactly what the walk reads, so it never touches the games
+                          table and its id tiebreak needs no sort (it replaced the
+                          start-ordered games_backfill, which itself replaced games_start). It
+                          walks games_backfill_end latest-ended-first and quits at the 200th
+                          candidate, which on a mirror no host can keep up with is the first
+                          two hundred rows
                           it touches. The distinction is the design. A fixed window over the
                           newest N games costs the same in the good case and LIES in the bad
                           one — with those N all taken it reports an empty mirror while
