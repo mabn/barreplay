@@ -826,13 +826,60 @@ type resimDaemon struct {
 	// resim does the work. pr is what the healthcheck reads to report progress
 	// while the engine runs.
 	resim func(ctx context.Context, gameID string, st *jobStats, pr *resim.Progress) error
+	// idleSince is when the queue last came up empty, and idleNoted when that
+	// was last said out loud. An idle daemon is otherwise indistinguishable
+	// from a wedged one — it is a process printing nothing on somebody's
+	// machine — but saying so every ten seconds would bury the lines that mean
+	// something, in a log that is read months later. So: once on the way in,
+	// then a reminder every idleNoteEvery.
+	idleSince time.Time
+	idleNoted time.Time
 }
+
+// How often an idle daemon repeats itself. Long enough that a quiet night is a
+// handful of lines, short enough to answer "is it still alive" without
+// scrolling.
+const idleNoteEvery = 10 * time.Minute
 
 // runOnce works through the queued re-sims. Returns how many it attempted; the
 // error covers the listing only — per-game failures are reported onto their
 // rows and do not stop the round.
 func (r *resimDaemon) runOnce(ctx context.Context) (int, error) {
-	return r.runQueued(ctx)
+	n, err := r.runQueued(ctx)
+	if err == nil {
+		r.noteIdle(n)
+	}
+	return n, err
+}
+
+// noteIdle says, at most every idleNoteEvery, that there was nothing to do.
+//
+// "Nothing queued" is the whole of what this daemon can know: the worker
+// decides what to hand out, and an empty answer covers a mirror with no
+// unpublished games left, a backfill resting between scans, and every job for
+// this game already claimed by another host. All three look the same from
+// here, and all three mean the same thing to whoever is reading the log — the
+// engine is not being used.
+//
+// To STDERR like everything else here, which is what teeStderr copies into the
+// -log file; stdout is not tee'd, so a line printed there would be missing from
+// the record that outlives the terminal.
+func (r *resimDaemon) noteIdle(attempted int) {
+	if attempted > 0 {
+		r.idleSince, r.idleNoted = time.Time{}, time.Time{}
+		return
+	}
+	now := time.Now()
+	if r.idleSince.IsZero() {
+		r.idleSince, r.idleNoted = now, now
+		fmt.Fprintf(os.Stderr, "bringest: nothing queued to re-simulate\n")
+		return
+	}
+	if now.Sub(r.idleNoted) >= idleNoteEvery {
+		r.idleNoted = now
+		fmt.Fprintf(os.Stderr, "bringest: nothing queued to re-simulate (idle for %s)\n",
+			now.Sub(r.idleSince).Round(time.Second))
+	}
 }
 
 // runQueued works through the re-sims somebody explicitly requested. Unlike
