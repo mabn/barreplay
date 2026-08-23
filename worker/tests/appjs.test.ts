@@ -1494,3 +1494,33 @@ test('game durations render minutes-precision, started dates drop the year', () 
   // the year digits are gone (1787349909 is a 2026 timestamp).
   assert.ok(!fns.fmtDateShort(1787349909).includes('2026'));
 });
+
+// The id filter's input is a paste target, and what people paste is as often a
+// link as a bare id. gameIdIn is the bit with a decision in it, so it is worth
+// pinning against the real shapes: a gex link, a bar-rts link, the id on its
+// own, a half-typed prefix.
+test('the id filter lifts a game id out of whatever was pasted', () => {
+  const start = APP.indexOf('function gameIdIn(');
+  assert.ok(start >= 0, 'app.js must define gameIdIn()');
+  let depth = 0, end = start;
+  for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+    if (APP[j] === '{') depth++;
+    else if (APP[j] === '}' && --depth === 0) { end = j + 1; break; }
+  }
+  const gameIdIn = new Function(`${APP.slice(start, end)}; return gameIdIn;`)() as (s: string) => string;
+
+  const id = '92488a6a2807186a199996b9a0712fa5';
+  assert.equal(gameIdIn(id), id);
+  assert.equal(gameIdIn(`  ${id.toUpperCase()} `), id);
+  assert.equal(gameIdIn(`https://gex.honu.pw/match/${id}`), id);
+  assert.equal(gameIdIn(`https://www.beyondallreason.info/replays?gameId=${id}`), id);
+  assert.equal(gameIdIn(`https://replay.fogofwar.dev/?replay=${id}&tab=replays`), id);
+  // A prefix is a valid filter, so a half-finished paste narrows rather than
+  // resolving to nothing.
+  assert.equal(gameIdIn('92488a6a'), '92488a6a');
+  assert.equal(gameIdIn(''), '');
+  // Nothing id-shaped in there: hand it over as typed and let the server say
+  // so, rather than silently filtering by something else.
+  assert.equal(gameIdIn('Great Divide'), 'great divide');
+});
+

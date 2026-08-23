@@ -21,7 +21,7 @@ test("unknown params are ignored", () => {
 });
 
 test("every filter parses", () => {
-  const f = parse("from=1752000000&to=1752086399&map=Isidis+crack+1.1&minPlayers=8&maxPlayers=16&minDuration=600&maxDuration=3600&player=Flash&settings=lava,zombies");
+  const f = parse("from=1752000000&to=1752086399&map=Isidis+crack+1.1&minPlayers=8&maxPlayers=16&minDuration=600&maxDuration=3600&id=92488A6A&player=Flash&settings=lava,zombies");
   assert.deepEqual(f, {
     from: 1_752_000_000,
     to: 1_752_086_399,
@@ -30,6 +30,7 @@ test("every filter parses", () => {
     minDuration: 600,
     maxDuration: 3600,
     maxPlayers: 16,
+    id: "92488a6a", // folded, like the player name: both are byte ranges
     player: "flash", // folded: the index stores names lowercased
     settings: ["lava", "zombies"],
   });
@@ -110,3 +111,21 @@ test("player count is null when nothing can answer", () => {
   assert.equal(derivePlayerCount(null, "unknown"), null);
   assert.equal(derivePlayerCount(null, ""), null);
 });
+
+// The id filter is a PASTE target: a whole id, the start of one, or (once
+// app.js has lifted the hex out of a link) whatever that yielded.
+test("a replay id filters as a prefix, folded", () => {
+  const id = "92488a6a2807186a199996b9a0712fa5";
+  const got = (qs: string) => (parse(qs) as Exclude<ReturnType<typeof parse>, string>).id;
+  assert.equal(got(`id=${id}`), id);
+  // Uppercase happens (a copy out of a log, a spreadsheet). Ids are stored
+  // lowercase and this is a byte range, so it has to be folded.
+  assert.equal(got(`id=${id.toUpperCase()}`), id);
+  assert.equal(got("id=92488a6a"), "92488a6a");
+  assert.equal(got("id=%20%20"), null);
+  // Not hex, or longer than an id: both are a paste of the wrong thing, and
+  // saying so beats a list that looks like an archive missing the game.
+  assert.equal(typeof parse("id=not-an-id"), "string");
+  assert.equal(typeof parse(`id=${id}ff`), "string");
+});
+

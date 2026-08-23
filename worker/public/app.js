@@ -3299,7 +3299,7 @@ async function fetchReplayList() {
 // The bar is shown only once /api/replays/facets answers: the Go viz server
 // serves the same catalog shape from local files with no filtering behind it,
 // and a filter bar that silently does nothing is worse than none.
-const FILTER_KEYS = ['from', 'to', 'map', 'minPlayers', 'maxPlayers', 'minDuration', 'maxDuration', 'player', 'settings'];
+const FILTER_KEYS = ['from', 'to', 'map', 'minPlayers', 'maxPlayers', 'minDuration', 'maxDuration', 'id', 'player', 'settings'];
 let facets = null;
 
 // filterQuery renders the active filters as a query string (empty when none
@@ -3386,6 +3386,23 @@ function renderPager() {
   range.textContent = replayList.length ? `${first}–${first + replayList.length - 1}` : '—';
 }
 
+// gameIdIn pulls a replay id out of whatever was pasted into the id filter: the
+// bare id, a link containing it, a log line. The rule is "the longest run of
+// hex in there", which is what an id is among URL punctuation, and it falls
+// back to the trimmed text so a half-typed prefix still filters (and so a
+// paste of something that is not an id at all reaches the server, which says
+// so — better than a silently empty list).
+//
+// Deliberately NOT the worker's parseGameId (src/worker/gameid.ts): that one
+// insists on a whole 32-character id because it feeds an hour of engine time,
+// where this only has to narrow a list.
+function gameIdIn(raw) {
+  const s = (raw ?? '').trim().toLowerCase();
+  if (/^[0-9a-f]*$/.test(s)) return s;
+  const runs = s.match(/[0-9a-f]{4,}/g);
+  return runs ? runs.reduce((a, b) => (b.length >= a.length ? b : a)) : s;
+}
+
 // initFilters builds the bar from the catalog's facets (so every option offered
 // matches at least one replay) and restores the controls from the URL. A
 // backend without the endpoint leaves the bar hidden.
@@ -3462,6 +3479,20 @@ async function initFilters() {
   player.oninput = () => {
     clearTimeout(typing);
     typing = setTimeout(() => setFilter('player', player.value.trim()), 300);
+  };
+
+  // Replay id. Nobody types 32 hex characters, so this field exists to be
+  // pasted into — and what gets pasted is as often a LINK (a gex or bar-rts
+  // URL, a line out of a log) as the bare id. gameIdIn lifts the id out of
+  // whatever arrives, so all of those work and the server still only ever
+  // sees hex. Debounced like the others; a prefix is a valid filter, so it
+  // narrows as the paste is trimmed by hand.
+  const idIn = el('f_id');
+  idIn.value = cur.get('id') ?? '';
+  let idTyping = null;
+  idIn.oninput = () => {
+    clearTimeout(idTyping);
+    idTyping = setTimeout(() => setFilter('id', gameIdIn(idIn.value)), 300);
   };
 
   const chips = el('f_settings');
