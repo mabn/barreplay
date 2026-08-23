@@ -213,11 +213,12 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           built PATCHED engine for the replay's version:
                           `spring-headless-patched` sitting BESIDE the stock binary in
                           <data>/engine/<version>/ (engine.Config.PatchedEngine, resolved
-                          by engine.Locate). Those are the byte-identical speed patches in
+                          by engine.Locate). Those are the byte-identical patches in
                           patches/engine-<version>/ — a re-sim on one produces the SAME
                           .brp, faster (measured 200 -> 248 fps on a 16-player 13-minute
-                          game), which is why preferring it can be the default and why the
-                          capture cannot record which build made it. It lives beside the
+                          game) and in ~1.5 GB less memory (RESULTS.md and MEMORY.md have
+                          the two axes), which is why preferring it can be the default and
+                          why the capture cannot record which build made it. It lives beside the
                           stock binary rather than in its own <version>-patched dir because
                           the engine resolves base/springcontent.sdz relative to its own
                           executable, so a separate dir would duplicate the whole base/ +

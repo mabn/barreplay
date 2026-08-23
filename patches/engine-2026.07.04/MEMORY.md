@@ -120,6 +120,20 @@ no options, so `MIMALLOC_PURGE_DELAY=0` / `MIMALLOC_PURGE_DECOMMITS=1` /
 variable. Its arenas are five 1 GiB mappings holding 2.7 GB resident mid-game;
 how much of that is free-but-unreturned is not known.
 
+## Deploying it
+
+`0003` is part of the stack the re-sim daemon runs: build the 16-patch series
+and install it as `spring-headless-patched` beside the stock binary in
+`<data>/engine/2026.07.04/`, which is where `bringest -resim` looks
+(`-patched-engine`, default on). The full recipe — apply order, build, install,
+gate — is in `docs/building-recoil.md`, "The PATCHED build the re-sim daemon
+prefers". Applying the 16 patch files to a clean `2026.07.04` checkout is
+verified to reproduce the deployed build's `rts/` tree byte for byte.
+
+The barreplay half needs nothing installed: `TextureMemPoolSize = 0` is written
+into `_barreplay_springsettings.cfg` by `engine.WriteEngineConfig` on every run,
+so it applies to a stock engine too — and on its own it is worth ~380 MiB.
+
 ## How these were measured
 
 `scratchpad/rsswatch.py`-style sampling of `/proc/<pid>/VmHWM` 4×/s while
