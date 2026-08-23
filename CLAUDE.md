@@ -1401,8 +1401,13 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           not interchangeable. A game with NO settings recorded (the API gave
                           none) is neither refused nor preferred; it ranks by size, as it did
                           before. And the scan is
-                          cheap because it STOPS EARLY, not because it looks at a slice: it
-                          walks games_start newest-first and quits at the 20th candidate,
+                          cheap because it STOPS EARLY, not because it looks at a slice, and
+                          because games_backfill (start_unix DESC, id, player_count) COVERS
+                          exactly what the walk reads — so it never touches the games table
+                          and its id tiebreak needs no temp b-tree (61 rows read down to 40
+                          in the steady state over 5000 mirrored games; it replaced
+                          games_start, which was its first column and nothing more). It
+                          walks games_backfill newest-first and quits at the 20th candidate,
                           which on a mirror no host can keep up with is the first twenty rows
                           it touches. The distinction is the design. A fixed window over the
                           newest N games costs the same in the good case and LIES in the bad
