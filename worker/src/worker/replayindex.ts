@@ -187,11 +187,31 @@ function progressPercent(progressJSON: unknown): number | null {
  * replay_settings index tables). Rows carry no derivation of their own — it is
  * recomputed from the replays row — so bumping this rebuilds every row's
  * derived data on the next wake. Bump it whenever what those tables hold
- * changes; a rebuild is a few writes per row, not a migration. */
-const DERIVED_VERSION = 1;
+ * changes; the block in ensureDerived implements the CURRENT bump, so a new
+ * version replaces that block with its own work.
+ *
+ * v2 sheds the mirror's roster rows from replay_players: they were ~48 of the
+ * 59 rows every mirrored game wrote (~2000 games/day against the free tier's
+ * 100k-rows-written allowance — the outage of 2026-08-23), and nothing reads
+ * them (the list's player filter and the facets both restrict to catalog
+ * ids). */
+const DERIVED_VERSION = 2;
 
 /** Everything migrateSchema creates, split from the code so schemaCurrent can
  * scan the same text it executes (one source, nothing to drift). */
+/** replay_players on its own, because ensureDerived's v2 step recreates the
+ * table from this exact text after dropping it — one source, so the recreated
+ * table cannot drift from what schemaCurrent expects to find. */
+const REPLAY_PLAYERS_DDL = `
+      CREATE TABLE IF NOT EXISTS replay_players (
+        replay_id  TEXT NOT NULL,
+        name_lower TEXT NOT NULL,
+        name       TEXT NOT NULL,
+        PRIMARY KEY (replay_id, name_lower)
+      );
+      CREATE INDEX IF NOT EXISTS replay_players_name ON replay_players (name_lower, replay_id);
+`;
+
 const SCHEMA_DDL = `
       CREATE TABLE IF NOT EXISTS replays (
         id           TEXT PRIMARY KEY,
@@ -241,18 +261,13 @@ const SCHEMA_DDL = `
       );
 
       -- Derived index tables behind the list filters. Both are rebuilt from
-      -- the replays row on every write (and by rebuildDerived), never edited
+      -- the replays row on every write (and by ensureDerived's versioned
+      -- rebuilds), never edited
       -- in place, so they cannot drift from the JSON columns they come from.
       -- Filtering on a name or a settings flag means "does this row have one",
       -- which is an EXISTS over these tables and answers to their index; the
       -- alternative, json_each over the stored blobs, has to open every row.
-      CREATE TABLE IF NOT EXISTS replay_players (
-        replay_id  TEXT NOT NULL,
-        name_lower TEXT NOT NULL,
-        name       TEXT NOT NULL,
-        PRIMARY KEY (replay_id, name_lower)
-      );
-      CREATE INDEX IF NOT EXISTS replay_players_name ON replay_players (name_lower, replay_id);
+      ${REPLAY_PLAYERS_DDL}
       CREATE TABLE IF NOT EXISTS replay_settings (
         replay_id TEXT NOT NULL,
         flag      TEXT NOT NULL,
@@ -517,7 +532,19 @@ export class ReplayIndex extends DurableObject<Env> {
         .exec(`SELECT value FROM schema_meta WHERE key = 'derived_version'`)
         .toArray();
       if ((have.length > 0 ? (have[0].value as number) : 0) >= DERIVED_VERSION) return;
-      this.rebuildDerived();
+      // The v2 step (see DERIVED_VERSION): shed the mirror's roster rows and
+      // repopulate from the catalog alone. DROP TABLE, because deleting the
+      // mirror's ~16 rows per game one game at a time would itself cost more
+      // than a day of the write allowance this version exists to protect —
+      // and nothing but the roster rows is touched: settings entries and
+      // player_count are correct as they stand, and re-deriving them for
+      // every mirrored game would be most of another day's budget.
+      const sql = this.ctx.storage.sql;
+      sql.exec(`DROP TABLE IF EXISTS replay_players`);
+      sql.exec(REPLAY_PLAYERS_DDL);
+      for (const r of sql.exec(`SELECT id, players FROM replays WHERE players IS NOT NULL`).toArray()) {
+        this.indexPlayers(r.id as string, JSON.parse(r.players as string) as CatalogTeam[]);
+      }
       this.ctx.storage.sql.exec(
         `INSERT INTO schema_meta (key, value) VALUES ('derived_version', ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
@@ -590,37 +617,23 @@ export class ReplayIndex extends DurableObject<Env> {
     );
   }
 
-  /** rebuildDerived recomputes player_count and the two index tables for every
-   * row from the JSON the row already holds. Runs once per DERIVED_VERSION
-   * bump (and so, once, for the rows that predate these tables). It cannot
-   * invent what the row never stored: a row published under the old 5-per-ally
-   * roster cap indexes the 5 names it has, and gets the rest only when it is
-   * re-published or refreshed from the BAR API. */
-  private rebuildDerived(): void {
-    const rows = this.ctx.storage.sql
-      .exec(`SELECT id, game_size, settings, players FROM replays`)
-      .toArray();
-    for (const r of rows) {
-      const players: CatalogTeam[] | null = r.players == null ? null : JSON.parse(r.players as string);
-      const settings: Record<string, boolean | string> | null =
-        r.settings == null ? null : JSON.parse(r.settings as string);
-      const count = derivePlayerCount(players, (r.game_size as string | null) ?? null);
-      this.ctx.storage.sql.exec(`UPDATE replays SET player_count = ? WHERE id = ?`, count, r.id as string);
-      this.indexRow(r.id as string, players, settings);
-    }
-    // The mirrored games index into the same two tables, so a rebuild has to
-    // cover them or their entries would be left at whatever an older
-    // derivation produced. Only the ones no catalog row owns (see indexRow):
-    // an id in both was just rebuilt above, from the capture's own roster.
-    const games = this.ctx.storage.sql
-      .exec(`SELECT id, settings, players FROM games WHERE id NOT IN (SELECT id FROM replays)`)
-      .toArray();
-    for (const g of games) {
-      this.indexRow(
-        g.id as string,
-        g.players == null ? null : JSON.parse(g.players as string),
-        g.settings == null ? null : JSON.parse(g.settings as string),
-      );
+
+  /** indexPlayers inserts one game's roster into replay_players (into a clean
+   * slate: indexRow deletes first, the v2 rebuild recreates the table). */
+  private indexPlayers(id: string, players: CatalogTeam[] | null): void {
+    const seen = new Set<string>();
+    for (const g of players ?? []) {
+      for (const p of g.players) {
+        const lower = p.name.toLowerCase();
+        // One row per distinct name: the same person can hold two slots in a
+        // game, and the primary key would reject the duplicate.
+        if (seen.has(lower)) continue;
+        seen.add(lower);
+        this.ctx.storage.sql.exec(
+          `INSERT INTO replay_players (replay_id, name_lower, name) VALUES (?, ?, ?)`,
+          id, lower, p.name,
+        );
+      }
     }
   }
 
@@ -643,20 +656,7 @@ export class ReplayIndex extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     sql.exec(`DELETE FROM replay_players WHERE replay_id = ?`, id);
     sql.exec(`DELETE FROM replay_settings WHERE replay_id = ?`, id);
-    const seen = new Set<string>();
-    for (const g of players ?? []) {
-      for (const p of g.players) {
-        const lower = p.name.toLowerCase();
-        // One row per distinct name: the same person can hold two slots in a
-        // game, and the primary key would reject the duplicate.
-        if (seen.has(lower)) continue;
-        seen.add(lower);
-        sql.exec(
-          `INSERT INTO replay_players (replay_id, name_lower, name) VALUES (?, ?, ?)`,
-          id, lower, p.name,
-        );
-      }
-    }
+    this.indexPlayers(id, players);
     for (const [flag, value] of Object.entries(settings ?? {})) {
       // A flag counts as set when it is true or a non-empty string: the
       // string-valued ones (zombies: "akumu") are badges too, and the UI
@@ -1016,9 +1016,10 @@ export class ReplayIndex extends DurableObject<Env> {
     return ids.filter((id) => !known.has(id));
   }
 
-  /** gamesInsert records mirrored games and indexes their players and settings
-   * into the two derived tables. Upsert rather than plain insert so re-syncing
-   * a game (a backfill, a later re-read) refreshes it instead of failing.
+  /** gamesInsert records mirrored games and indexes their settings into
+   * replay_settings (their rosters stay JSON on the row — see the note at the
+   * indexRow call). Upsert rather than plain insert so re-syncing a game (a
+   * backfill, a later re-read) refreshes it instead of failing.
    *
    * The derived rows are written only for ids the CATALOG does not hold — see
    * indexRow: a published replay's entries are rebuilt from the capture that
@@ -1059,7 +1060,15 @@ export class ReplayIndex extends DurableObject<Env> {
         now,
       );
       const owned = sql.exec(`SELECT 1 FROM replays WHERE id = ?`, g.id).toArray().length > 0;
-      if (!owned) this.indexRow(g.id, g.players, g.settings);
+      // Settings only, no roster: the mirror's replay_players rows were ~48 of
+      // the 59 rows a game cost to write (16 names, each a row plus two index
+      // entries, ~2000 games a day against the free tier's 100k-rows-written
+      // allowance) and nothing reads them — the list's player filter and the
+      // facets both restrict to catalog ids. The settings entries stay because
+      // the backfill's modded-first ranking reads them, and they are a couple
+      // of rows. The roster is still on the games row as JSON, so this is
+      // recoverable the day something wants it.
+      if (!owned) this.indexRow(g.id, null, g.settings);
     }
     return games.length;
   }
