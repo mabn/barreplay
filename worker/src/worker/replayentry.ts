@@ -163,6 +163,13 @@ export interface ReplayFilter {
    * match would put games of any length inside a range the user drew. */
   minDuration: number | null;
   maxDuration: number | null;
+  /** PREFIX of the replay's own game id, lowercase hex. A prefix rather than
+   * an exact match for one reason: the whole id is 32 characters of hex that
+   * nobody types, so what actually happens is a paste — of the id, or of the
+   * head of one out of a log line or a URL — and an exact match turns the
+   * second of those into an empty list. It is a range over the PRIMARY KEY,
+   * so a full id costs one seek. */
+  id: string | null;
   /** Case-insensitive PREFIX of a player's name; the row matches when any
    * player in its roster matches. A prefix rather than a substring because it
    * answers to an index range scan, and because the UI offers the known names
@@ -178,7 +185,7 @@ export function emptyFilter(): ReplayFilter {
     from: null, to: null, map: null,
     minPlayers: null, maxPlayers: null,
     minDuration: null, maxDuration: null,
-    player: null, settings: [],
+    id: null, player: null, settings: [],
   };
 }
 
@@ -237,6 +244,16 @@ export function parseReplayFilter(params: URLSearchParams): ReplayFilter | strin
 
   const map = (params.get("map") ?? "").trim();
   if (map !== "") f.map = map.slice(0, 200);
+  // A game id is lowercase hex, and a REFUSAL rather than a silent miss when
+  // it is not: unlike a map or a player name, there is no such thing as a
+  // partly-typed id that happens to be wrong — anything non-hex here is a
+  // paste of the wrong thing, and an empty list would look like an archive
+  // that does not have the game.
+  const id = (params.get("id") ?? "").trim().toLowerCase();
+  if (id !== "") {
+    if (!/^[0-9a-f]{1,32}$/.test(id)) return "id must be a replay id, or the start of one (hex)";
+    f.id = id;
+  }
   const player = (params.get("player") ?? "").trim();
   if (player !== "") f.player = player.slice(0, 64).toLowerCase();
 
@@ -258,7 +275,7 @@ export function filterIsEmpty(f: ReplayFilter): boolean {
     f.from === null && f.to === null && f.map === null &&
     f.minPlayers === null && f.maxPlayers === null &&
     f.minDuration === null && f.maxDuration === null &&
-    f.player === null && f.settings.length === 0
+    f.id === null && f.player === null && f.settings.length === 0
   );
 }
 

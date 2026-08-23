@@ -882,6 +882,26 @@ test("paging applies to the filtered listing, not to the catalog", async () => {
   });
 });
 
+// Searching by the game's own id: the whole thing, or the head of one out of a
+// link or a log line.
+test("the id filter matches a whole id and a prefix, and nothing else", async () => {
+  await inIndex((index) => {
+    const full = "92488a6a2807186a199996b9a0712fa5";
+    index.upsert(replay(full, { startUnix: 3000 }));
+    index.upsert(replay("92488a6a2807186a199996b9a0712fff", { startUnix: 2000 }));
+    index.upsert(replay("ffffffffffffffffffffffffffffffff", { startUnix: 1000 }));
+
+    const ids = (f: Partial<ReplayFilter>) => index.list({ ...emptyFilter(), ...f }).map((e) => e.id);
+    expect(ids({ id: full })).toEqual([full]);
+    // The shared head of the two, which is most of an id: both, newest first.
+    expect(ids({ id: "92488a6a2807186a199996b9a0712f" })).toEqual([full, "92488a6a2807186a199996b9a0712fff"]);
+    expect(ids({ id: "92" })).toEqual([full, "92488a6a2807186a199996b9a0712fff"]);
+    // The upper bound of the range must not swallow the rest of the catalog.
+    expect(ids({ id: "9" })).not.toContain("ffffffffffffffffffffffffffffffff");
+    expect(ids({ id: "0000" })).toEqual([]);
+  });
+});
+
 test("the duration filter bounds are inclusive, and unknown lengths match neither", async () => {
   await inIndex((index) => {
     index.upsert(replay("short", { durationSec: 300 }));

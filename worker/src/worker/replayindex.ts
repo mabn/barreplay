@@ -688,6 +688,12 @@ export class ReplayIndex extends DurableObject<Env> {
       if (filter.from !== null) { where.push(`start_unix >= ?`); args.push(filter.from); }
       if (filter.to !== null) { where.push(`start_unix <= ?`); args.push(filter.to); }
       if (filter.map !== null) { where.push(`map = ?`); args.push(filter.map); }
+      // The same >= / < range the player prefix uses, here over the primary
+      // key: a full id is a seek, a partial one reads only its own span.
+      if (filter.id !== null) {
+        where.push(`id >= ? AND id < ?`);
+        args.push(filter.id, filter.id + "\uffff");
+      }
       if (filter.minPlayers !== null) { where.push(`player_count >= ?`); args.push(filter.minPlayers); }
       if (filter.maxPlayers !== null) { where.push(`player_count <= ?`); args.push(filter.maxPlayers); }
       // NULL duration compares false either way, which is the intent: a row
