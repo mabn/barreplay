@@ -1177,3 +1177,39 @@ test("a current schema is detected read-only and a stale one still migrates", as
     expect(rows(sql, `SELECT name FROM sqlite_master WHERE name = 'games_backfill_end'`).length).toBe(1);
   });
 });
+
+test("a migration that cannot run leaves the previous schema serving", async () => {
+  // The live incident: with the write allowance spent, creating the new index
+  // was a real write and threw — and failing the construction took every READ
+  // down for a performance optimization. ensureSchema must log and serve on;
+  // the next instantiation retries.
+  await inIndex((index, sql) => {
+    const priv = index as unknown as {
+      ensureSchema(): void;
+      schemaCurrent(): boolean;
+      migrateSchema(): void;
+    };
+    sql.exec(`DROP INDEX games_backfill_end`);
+    const proto = Object.getPrototypeOf(index) as { migrateSchema(): void };
+    const realMigrate = proto.migrateSchema;
+    proto.migrateSchema = () => {
+      throw new Error("Exceeded allowed rows written in Durable Objects free tier.");
+    };
+    const realError = console.error;
+    const logged: string[] = [];
+    console.error = (...args: unknown[]) => logged.push(args.join(" "));
+    try {
+      priv.ensureSchema();
+    } finally {
+      proto.migrateSchema = realMigrate;
+      console.error = realError;
+    }
+    expect(logged.join("\n")).toContain("Exceeded allowed rows written");
+    // Reads still work on the previous schema…
+    expect(index.list(emptyFilter(), 10, 0)).toEqual([]);
+    // …and the retry brings it current once the migration can run.
+    expect(priv.schemaCurrent()).toBe(false);
+    priv.ensureSchema();
+    expect(priv.schemaCurrent()).toBe(true);
+  });
+});

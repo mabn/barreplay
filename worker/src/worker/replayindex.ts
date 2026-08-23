@@ -468,7 +468,7 @@ export class ReplayIndex extends DurableObject<Env> {
     // statement of any request was a write. So the DDL runs only when a
     // read-only look at sqlite_master says something is actually missing; the
     // steady-state constructor reads a few dozen rows and writes nothing.
-    if (!this.schemaCurrent()) this.migrateSchema();
+    this.ensureSchema();
     const have = ctx.storage.sql
       .exec(`SELECT value FROM schema_meta WHERE key = 'derived_version'`)
       .toArray();
@@ -479,6 +479,26 @@ export class ReplayIndex extends DurableObject<Env> {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
         DERIVED_VERSION,
       );
+    }
+  }
+
+  /** ensureSchema migrates when a read-only check says something is missing,
+   * and serves on regardless when the migration itself cannot run. The live
+   * case: with the free tier's daily rows-written allowance spent, creating
+   * an index over the whole games mirror is a real write and throws — but the
+   * previous schema still answers every query (at worst without the new
+   * index), so failing the construction would take every read down for a
+   * performance optimization. Logged loudly instead, and every fresh
+   * instantiation retries, so the migration lands on the first construction
+   * after the budget resets. A fresh database is the exception that cannot be
+   * served either way: with no tables at all the very next statement fails
+   * regardless, and its error is the more honest one. */
+  private ensureSchema(): void {
+    if (this.schemaCurrent()) return;
+    try {
+      this.migrateSchema();
+    } catch (e) {
+      console.error(`schema migration failed, serving with the previous schema: ${e}`);
     }
   }
 
