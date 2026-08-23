@@ -189,8 +189,6 @@ export function emptyFilter(): ReplayFilter {
   };
 }
 
-const FILTER_MAX_SETTINGS = 16;
-
 /** parseReplayFilter reads a ReplayFilter off a GET /api/replays query string,
  * or returns a string describing what was malformed. Dates accept either unix
  * seconds or YYYY-MM-DD; a YYYY-MM-DD `to` covers the WHOLE day (a date range
@@ -260,9 +258,12 @@ export function parseReplayFilter(params: URLSearchParams): ReplayFilter | strin
   const settings = (params.get("settings") ?? "").trim();
   if (settings !== "") {
     const flags = [...new Set(settings.split(",").map((s) => s.trim()).filter(Boolean))];
-    if (flags.length > FILTER_MAX_SETTINGS) return `at most ${FILTER_MAX_SETTINGS} settings flags`;
     for (const flag of flags) {
-      if (!/^[A-Za-z0-9_]{1,40}$/.test(flag)) return `invalid settings flag ${JSON.stringify(flag)}`;
+      // The vocabulary is CLOSED (see FILTER_SETTINGS_FLAGS), so an unknown
+      // flag is a paste of the wrong thing, not a choice this catalog lacks —
+      // and refusing it is what lets the UI hardcode its chips instead of
+      // asking the catalog what exists.
+      if (!FILTER_SETTINGS_SET.has(flag)) return `unknown settings flag ${JSON.stringify(flag)}`;
     }
     f.settings = flags;
   }
@@ -279,26 +280,20 @@ export function filterIsEmpty(f: ReplayFilter): boolean {
   );
 }
 
-/** ReplayFacets are the distinct values present in the catalog, so the filter
- * UI can offer real choices instead of free text. Served by
- * GET /api/replays/facets by both backends. */
-export interface ReplayFacets {
-  maps: string[];
-  /** Distinct playerCount values, ascending. */
-  sizes: number[];
-  /** Distinct player names (display spelling), capped — see FACET_PLAYERS_MAX. */
-  players: string[];
-  /** Distinct settings flags present on some row. */
-  settings: string[];
-  /** Oldest and newest start time in the catalog, for the date inputs. */
-  from: number | null;
-  to: number | null;
-}
+/** The settings flags the filter accepts — the whole vocabulary settingsFlags
+ * (and its Go twin viz.SettingsFlags) can emit, which is fixed at publish
+ * time, not a property of what happens to be in the catalog. The UI hardcodes
+ * its chips from (the visible subset of) this list and parseReplayFilter
+ * refuses anything outside it. This is what replaced the facets endpoint's
+ * settings list: computing a closed vocabulary from the whole catalog per
+ * page load answered a question this constant already answers. */
+export const FILTER_SETTINGS_FLAGS = [
+  "ranked", "unranked", "lava", "mods", "zombies", "ruins",
+  "quickStart", "comBuilders", "noNukes", "noLrpc", "noEndgameLrpc",
+  "scavUnits", "extraUnits", "noAir",
+] as const;
 
-/** FACET_PLAYERS_MAX bounds the name list a facets reply carries. The names
- * are only completions — the filter itself matches server-side against the
- * full index — so truncating the list costs discoverability, never results. */
-export const FACET_PLAYERS_MAX = 2000;
+const FILTER_SETTINGS_SET: ReadonlySet<string> = new Set(FILTER_SETTINGS_FLAGS);
 
 // Guardrails for the settings object: it is stored verbatim (a JSON column),
 // so cap how much an uploader can stuff into it.

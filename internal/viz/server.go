@@ -255,7 +255,8 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 	})
 	// ?limit=&offset= page the listing, the one query param this server does
 	// honour. The FILTERS it deliberately ignores (it lists a directory, and
-	// the front-end hides the filter bar here because /facets 404s), but
+	// the front-end hides the filter bar here because /api/replays/maps
+	// 404s), but
 	// paging is not a filter: the shared front-end asks every backend for one
 	// page and reads "there is a next page" off getting one row more than it
 	// asked to show. Ignoring that here would make its Next button lie.

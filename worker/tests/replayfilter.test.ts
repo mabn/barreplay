@@ -6,7 +6,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { derivePlayerCount, emptyFilter, filterIsEmpty, parseReplayFilter } from "../src/worker/replayentry";
+import {
+  FILTER_SETTINGS_FLAGS,
+  derivePlayerCount,
+  emptyFilter,
+  filterIsEmpty,
+  parseReplayFilter,
+} from "../src/worker/replayentry";
 
 const parse = (qs: string) => parseReplayFilter(new URLSearchParams(qs));
 
@@ -71,6 +77,20 @@ test("settings de-duplicate and keep their order", () => {
   assert.deepEqual(f.settings, ["lava", "zombies"]);
 });
 
+test("the settings vocabulary is closed", () => {
+  // Every flag the publishers can emit is accepted…
+  for (const flag of FILTER_SETTINGS_FLAGS) {
+    const f = parse(`settings=${flag}`);
+    assert.notEqual(typeof f, "string", `should accept ${flag}`);
+    assert.deepEqual((f as Exclude<typeof f, string>).settings, [flag]);
+  }
+  // …and anything else is refused: the UI hardcodes its chips from the same
+  // list, so an unknown flag is a paste of the wrong thing, not a choice
+  // this catalog happens to lack.
+  assert.equal(typeof parse("settings=notaflag"), "string");
+  assert.equal(typeof parse("settings=Ranked"), "string"); // case matters — the stored flags are exact
+});
+
 test("malformed params are rejected with a reason", () => {
   for (const qs of [
     "from=yesterday",
@@ -81,8 +101,7 @@ test("malformed params are rejected with a reason", () => {
     "minDuration=-1",
     "maxDuration=12.5",
     "maxDuration=1234567",         // six digits is the cap; this is a week
-    "settings=lava;zombies",       // ; is not a separator, so the flag is invalid
-    "settings=" + Array.from({ length: 17 }, (_, i) => `f${i}`).join(","),
+    "settings=lava;zombies",       // ; is not a separator, so "lava;zombies" is no flag
   ]) {
     assert.equal(typeof parse(qs), "string", `should reject ${qs}`);
   }

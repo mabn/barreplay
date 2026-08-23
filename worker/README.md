@@ -75,7 +75,7 @@ inside a **Durable Object** (`src/worker/replayindex.ts`, single instance, migra
 | URL | What |
 | --- | --- |
 | `GET /api/replays` | the catalog, newest game first (rows with no start time last) — `[{id, rid, startUnix, durationSec, map, gameSize, sizeBytes, settings, players, playerCount, widgetVersion, widgetSha, widgetDate}]`, nulls for unknown stats. Filterable: `?from=&to=` (unix seconds or `YYYY-MM-DD`, `to` covers the whole day), `?map=`, `?minPlayers=&maxPlayers=` (Gaia excluded), `?minDuration=&maxDuration=` (seconds; a row with no recorded duration matches neither), `?player=` (case-insensitive name prefix), `?settings=lava,zombies` (all must be present). Paged by `?limit=&offset=` — absent limit means the whole listing. No params = everything; unknown params are ignored |
-| `GET /api/replays/facets` | the distinct `{maps, sizes, players, settings, from, to}` in the catalog, so the filter bar only offers choices that match something. Computed over the whole catalog, not the filtered result |
+| `GET /api/replays/maps` | `{maps: [...]}` — the catalog's distinct map names, for the filter bar's combobox. A maintained list (the DO's `unique_values` table, updated as replays are published) behind a one-minute in-memory cache, not a scan of the catalog. The only filter data the front-end fetches: the settings chips are a hardcoded vocabulary, the ranges have fixed domains, the player and id fields are free text |
 | `PUT /api/replays/<id>` | upsert one row (same JSON shape, minus `id`); called by `pack -upload` / the ingest daemon after a replay's files land in the bucket |
 
 Two fields on a row are **server-owned and never accepted from a PUT**, both about work
@@ -156,8 +156,9 @@ The Go viz server (`cmd/barreplay-viz`) serves the same `GET /api/replays` shape
 computed live from its `.brp` files (`internal/viz/catalog.go`), so the shared front-end
 works against both backends; the row shape must stay in lockstep with
 `src/worker/replayentry.ts`. It does **not** implement the filters — it lists a local
-directory of a few captures — so it ignores those query params and has no `/facets`
-route, and the front-end hides the filter bar when that route is missing. It *does*
+directory of a few captures — so it ignores those query params and has no
+`/api/replays/maps` route, and the front-end hides the filter bar when that route is
+missing. It *does*
 honour `?limit=&offset=`: paging is not a filter, and the shared front-end reads "there
 is a next page" off being handed one row more than it asked to show, so ignoring them
 would make its Next button lie.
@@ -198,10 +199,10 @@ A detail that fails is simply not recorded and is retried next tick.
 | `preset` | `duel` / `team` / `ffa`, stored verbatim |
 | `engine_version`, `game_version` | the exact builds a re-simulation has to run |
 
-Mirrored games index into the **same** `replay_players` / `replay_settings` tables as the
-catalog, so exactly one row owns an id's entries: the catalog row if there is one, the
-`games` row otherwise (`gamesInsert` skips an id `replays` holds). `GET
-/api/replays/facets` therefore restricts both reads to ids present in `replays` — the
+Mirrored games index into the **same** `replay_settings` table as the catalog, so
+exactly one row owns an id's entries: the catalog row if there is one, the `games` row
+otherwise (`gamesInsert` skips an id `replays` holds). The maps list
+(`GET /api/replays/maps`) is likewise maintained only from published replays — the
 mirror is thousands of games nothing has published, and the filter bar must not offer
 options that match no listable replay.
 
