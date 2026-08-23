@@ -118,8 +118,15 @@ test("the polled and cron reads do not scan the tables they read from", async ()
     // second call does not scan at all — the first one queued a game, so this
     // one is answered by jobsPending out of an index, which is what every poll
     // for the length of the run would be.
-    index.jobsOffer("resim", "job-backfill-1");
+    // NOTE the seed above: the newest 200 mirrored games already have a job
+    // row, so this measures the case that matters — a daemon that has worked
+    // through the recent past and must be handed something older. It has to
+    // come back with a game, not just come back cheaply: a scan that reports
+    // an empty mirror while thousands of candidates sit behind it costs
+    // nothing to run and stops the pipeline dead.
+    const offered = index.jobsOffer("resim", "job-backfill-1");
     out.jobsOfferScan = tally();
+    expect(offered.length, "the backfill must reach past the games it has taken").toBe(1);
     index.jobsOffer("resim", "job-backfill-2");
     out.jobsOfferQueued = tally();
 
@@ -150,8 +157,9 @@ test("the polled and cron reads do not scan the tables they read from", async ()
   // A poll is answered out of an index, not out of the tables.
   expect(costs.jobsPendingUpload, report).toBeLessThan(50);
   expect(costs.jobsPendingResim, report).toBeLessThan(50);
-  // The backfill inspects a fixed window of the mirror (BACKFILL_INSPECT), so
-  // this is flat in GAMES; it was ~2x GAMES per poll.
+  // The backfill stops at its 20th candidate rather than reading the mirror:
+  // here that means stepping over the 200 newest games (which have job rows)
+  // and no further, where the unindexed ORDER BY read all 5000 twice over.
   expect(costs.jobsOfferScan, report).toBeLessThan(1500);
   expect(costs.jobsOfferQueued, report).toBeLessThan(50);
   // Partial index over the open observations, not a scan of every one ever
