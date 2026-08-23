@@ -110,13 +110,15 @@ test("gamesInsert stores the whole row", async () => {
   });
 });
 
-test("gamesInsert indexes players and settings for the filters", async () => {
+test("gamesInsert indexes settings; rosters stay JSON on the row", async () => {
   await inIndex((index, sql) => {
     index.gamesInsert([game("a1")]);
-    expect(rows(sql, `SELECT name, name_lower FROM replay_players WHERE replay_id = 'a1' ORDER BY name_lower`)).toEqual([
-      { name: "LaufendeStahlwand", name_lower: "laufendestahlwand" },
-      { name: "Rouben", name_lower: "rouben" },
-    ]);
+    // The settings entries feed the backfill's modded-first ranking. The
+    // roster is deliberately NOT indexed anywhere — replay_players is gone
+    // (indexing the mirror's rosters cost ~48 rows written per game, the
+    // write half of the 2026-08-23 outage); the player filter reads the
+    // roster JSON on the catalog rows directly.
+    expect(rows(sql, `SELECT name FROM sqlite_master WHERE name = 'replay_players'`)).toEqual([]);
     expect(rows(sql, `SELECT flag FROM replay_settings WHERE replay_id = 'a1'`)).toEqual([{ flag: "unranked" }]);
   });
 });
@@ -134,9 +136,8 @@ test("re-syncing a game refreshes it instead of failing or duplicating", async (
     ]);
     expect(rows(sql, `SELECT COUNT(*) AS n FROM games`)).toEqual([{ n: 1 }]);
     expect(rows(sql, `SELECT map, preset FROM games`)).toEqual([{ map: "Isidis crack 1.1", preset: "team" }]);
-    // The derived tables follow the row: the names and flags the game no
-    // longer has must stop matching, which is why indexRow deletes first.
-    expect(rows(sql, `SELECT name FROM replay_players WHERE replay_id = 'a1'`)).toEqual([{ name: "Someone" }]);
+    // The derived table follows the row: the flags the game no longer has
+    // must stop matching, which is why indexRow deletes first.
     expect(rows(sql, `SELECT flag FROM replay_settings WHERE replay_id = 'a1'`)).toEqual([{ flag: "lava" }]);
   });
 });
@@ -149,10 +150,9 @@ test("a mirrored game never overwrites a published replay's derived rows", async
     index.gamesInsert([game("dup")]);
 
     expect(rows(sql, `SELECT COUNT(*) AS n FROM games WHERE id = 'dup'`)).toEqual([{ n: 1 }]);
-    // The catalog owns the entries: the roster is the uploader's, not the
-    // API's, and the badge is the capture's. Without that rule the two would
-    // take turns deleting each other's rows.
-    expect(rows(sql, `SELECT name FROM replay_players WHERE replay_id = 'dup'`)).toEqual([{ name: "Uploader" }]);
+    // The catalog owns the entries: the badge is the capture's, not the
+    // API's. Without that rule the two would take turns deleting each
+    // other's rows.
     expect(rows(sql, `SELECT flag FROM replay_settings WHERE replay_id = 'dup'`)).toEqual([{ flag: "lava" }]);
   });
 });
@@ -160,11 +160,10 @@ test("a mirrored game never overwrites a published replay's derived rows", async
 test("publishing a mirrored game takes ownership of its entries", async () => {
   await inIndex((index, sql) => {
     index.gamesInsert([game("later")]);
-    expect(rows(sql, `SELECT COUNT(*) AS n FROM replay_players WHERE replay_id = 'later'`)).toEqual([{ n: 2 }]);
+    expect(rows(sql, `SELECT flag FROM replay_settings WHERE replay_id = 'later'`)).toEqual([{ flag: "unranked" }]);
 
     index.upsert(replay("later"));
 
-    expect(rows(sql, `SELECT name FROM replay_players WHERE replay_id = 'later'`)).toEqual([{ name: "Uploader" }]);
     expect(rows(sql, `SELECT flag FROM replay_settings WHERE replay_id = 'later'`)).toEqual([{ flag: "lava" }]);
   });
 });
@@ -817,7 +816,7 @@ test("a job that fails without publishing takes its row away again", async () =>
     expect(index.list()).toEqual([]);
     // The mirror row is untouched, and so are the derived entries it owns.
     expect(rows(sql, `SELECT COUNT(*) AS n FROM games`)).toEqual([{ n: 1 }]);
-    expect(rows(sql, `SELECT COUNT(*) AS n FROM replay_players WHERE replay_id = 'doomed'`)).toEqual([{ n: 2 }]);
+    expect(rows(sql, `SELECT flag FROM replay_settings WHERE replay_id = 'doomed'`)).toEqual([{ flag: "unranked" }]);
   });
 });
 
@@ -1137,4 +1136,175 @@ test("list surfaces the processing job's live percent for the pill", async () =>
     index.jobUpdate("j", "done", null);
     expect(index.list()).toMatchObject([{ id: "busy", processing: false, processingPercent: null }]);
   });
+});
+
+test("a current schema is detected read-only and a stale one still migrates", async () => {
+  // The constructor's DDL used to run unconditionally, and CREATE TABLE IF
+  // NOT EXISTS counts as a WRITE even when it changes nothing — so the day
+  // the free tier's rows-written allowance ran out, every route died in the
+  // constructor before its first read. The contract now: deciding "nothing
+  // to migrate" is ONE read of the schema_version stamp and zero writes; a
+  // stale or missing stamp is noticed and the migration restores it.
+  await inIndex((index, sql) => {
+    const priv = index as unknown as { schemaCurrent(): boolean; migrateSchema(): void };
+    expect(priv.schemaCurrent(), "a freshly constructed instance is current").toBe(true);
+
+    // The whole no-migration decision, as the constructor takes it, measured:
+    // reads only.
+    const real = sql.exec.bind(sql);
+    let written = 0;
+    (sql as unknown as { exec: unknown }).exec = (q: string, ...args: unknown[]) => {
+      const cur = real(q, ...(args as string[]));
+      const out = cur.toArray();
+      written += cur.rowsWritten;
+      return { toArray: () => out, rowsWritten: cur.rowsWritten, rowsRead: cur.rowsRead };
+    };
+    try {
+      expect(priv.schemaCurrent()).toBe(true);
+      expect(written, "deciding there is nothing to migrate must not write").toBe(0);
+    } finally {
+      (sql as unknown as { exec: unknown }).exec = real;
+    }
+
+    // An old stamp means migrate; so does no stamp at all — "no such table"
+    // is the signal a pre-stamp database gives, not an error.
+    sql.exec(`UPDATE schema_version SET version = 0`);
+    expect(priv.schemaCurrent(), "an old stamp must be noticed").toBe(false);
+    priv.migrateSchema();
+    expect(priv.schemaCurrent()).toBe(true);
+
+    sql.exec(`DROP TABLE schema_version`);
+    expect(priv.schemaCurrent(), "a missing stamp table means a pre-stamp database").toBe(false);
+    priv.migrateSchema();
+    expect(priv.schemaCurrent()).toBe(true);
+  });
+});
+
+test("a migration that cannot run leaves the previous schema serving", async () => {
+  // The live incident: with the write allowance spent, creating the new index
+  // was a real write and threw — and failing the construction took every READ
+  // down for a performance optimization. ensureSchema must log and serve on;
+  // the next instantiation retries.
+  await inIndex((index, sql) => {
+    const priv = index as unknown as {
+      ensureSchema(): void;
+      schemaCurrent(): boolean;
+      migrateSchema(): void;
+    };
+    sql.exec(`UPDATE schema_version SET version = 0`);
+    const proto = Object.getPrototypeOf(index) as { migrateSchema(): void };
+    const realMigrate = proto.migrateSchema;
+    proto.migrateSchema = () => {
+      throw new Error("Exceeded allowed rows written in Durable Objects free tier.");
+    };
+    const realError = console.error;
+    const logged: string[] = [];
+    console.error = (...args: unknown[]) => logged.push(args.join(" "));
+    try {
+      priv.ensureSchema();
+    } finally {
+      proto.migrateSchema = realMigrate;
+      console.error = realError;
+    }
+    expect(logged.join("\n")).toContain("Exceeded allowed rows written");
+    // Reads still work on the previous schema…
+    expect(index.list(emptyFilter(), 10, 0)).toEqual([]);
+    // …and the retry brings it current once the migration can run.
+    expect(priv.schemaCurrent()).toBe(false);
+    priv.ensureSchema();
+    expect(priv.schemaCurrent()).toBe(true);
+  });
+});
+
+test("a failing schema check or derived rebuild never kills construction", async () => {
+  // The overage gate spares no statement — even schemaCurrent's read of
+  // sqlite_master threw "Exceeded allowed rows written" live. Every
+  // constructor step must log and serve on, so the request fails (if it
+  // fails) in the route's own query, which the worker log can attribute.
+  await inIndex((index, sql) => {
+    const priv = index as unknown as { ensureSchema(): void; ensureDerived(): void };
+    const proto = Object.getPrototypeOf(index) as Record<string, unknown>;
+    const logged: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => logged.push(args.join(" "));
+    try {
+      const realCurrent = proto.schemaCurrent;
+      proto.schemaCurrent = () => {
+        throw new Error("Exceeded allowed rows written in Durable Objects free tier.");
+      };
+      try {
+        priv.ensureSchema();
+      } finally {
+        proto.schemaCurrent = realCurrent;
+      }
+      expect(logged.join("\n")).toContain("schema check failed");
+
+      // A derived rebuild that cannot even read its version row (the overage
+      // gate again) logs and serves on; once the world is back, the retry
+      // stamps the version.
+      sql.exec(`DELETE FROM schema_meta WHERE key = 'derived_version'`);
+      sql.exec(`ALTER TABLE schema_meta RENAME TO schema_meta_hidden`);
+      try {
+        priv.ensureDerived();
+      } finally {
+        sql.exec(`ALTER TABLE schema_meta_hidden RENAME TO schema_meta`);
+      }
+      expect(logged.join("\n")).toContain("derived rebuild failed");
+      expect(rows(sql, `SELECT value FROM schema_meta WHERE key = 'derived_version'`)).toEqual([]);
+      priv.ensureDerived();
+      expect(rows(sql, `SELECT value FROM schema_meta WHERE key = 'derived_version'`)).not.toEqual([]);
+    } finally {
+      console.error = realError;
+    }
+  });
+});
+
+test("player filter and facets read the roster JSON directly", async () => {
+  await inIndex((index) => {
+    index.upsert(replay("r1"));
+    index.gamesInsert([game("m1")]);
+    // Prefix, case-insensitively, like the old name_lower range did.
+    expect(index.list({ ...emptyFilter(), player: "upload" })).toHaveLength(1);
+    expect(index.list({ ...emptyFilter(), player: "nobody" })).toEqual([]);
+    // A LIKE wildcard in the needle is a literal, not a wildcard.
+    expect(index.list({ ...emptyFilter(), player: "%" })).toEqual([]);
+    expect(index.facets().players).toEqual(["Uploader"]);
+  });
+});
+
+test("sql accounting bills each row to the outermost public method", async () => {
+  await inIndex((index) => {
+    index.upsert(replay("s1"));
+    index.list({ ...emptyFilter() }, 10, 0);
+
+    const report = index.sqlStatsReport();
+    expect(report.since).toBeGreaterThan(0);
+    expect(report.elapsedSec).toBeGreaterThanOrEqual(0);
+    const ops = Object.fromEntries(report.ops.map((o) => [o.op, o]));
+    expect(ops.upsert.calls).toBe(1);
+    expect(ops.upsert.rowsWritten).toBeGreaterThan(0);
+    expect(ops.list.rowsRead).toBeGreaterThan(0);
+    // A helper a method calls bills its caller — the endpoint's-eye view.
+    expect(ops.indexSettings).toBeUndefined();
+    // The constructor's own steps are visible too.
+    expect(ops.ensureSchema).toBeDefined();
+
+    // Asking is free: the report itself writes nothing.
+    const written = index.sqlStatsReport().totals.rowsWritten;
+    expect(index.sqlStatsReport().totals.rowsWritten).toBe(written);
+  });
+});
+
+test("attribution holds over real RPC, not only direct calls", async () => {
+  // The first accounting version shadowed methods with instance properties:
+  // the deployed runtime refused those RPC calls outright ("The RPC receiver
+  // does not implement the method") while the local one silently bypassed
+  // them — two failures no direct-call test can see. So this one talks to
+  // the stub exactly like the worker does.
+  const stub = env.REPLAY_INDEX.get(env.REPLAY_INDEX.idFromName("rpc-attribution"));
+  await stub.list(emptyFilter(), 10, 0);
+  const report = await stub.sqlStatsReport();
+  const ops = Object.fromEntries(report.ops.map((o: { op: string }) => [o.op, o]));
+  expect(ops.list?.calls).toBe(1);
+  expect(ops["(outside any method)"], "every statement has a method to bill").toBeUndefined();
 });

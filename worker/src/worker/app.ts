@@ -40,7 +40,27 @@ const MAX_UPLOAD = 150 << 20;
 
 const app = new Hono<{ Bindings: Env }>();
 
+// Without this, Hono's default handler answers an uncaught error with a bare
+// "Internal Server Error" and the MESSAGE never reaches the logs: the
+// observability event keeps only the async stack frames, which is useless for
+// an error thrown inside the Durable Object (observed live — every DO route
+// 500ing with no way to read why). Log the whole story on one line — method,
+// path, message, stack — and keep the response the same generic 500 the
+// default sent, so nothing internal leaks to the caller.
+app.onError((err, c) => {
+  console.error(`unhandled error on ${c.req.method} ${c.req.path}: ${err.message}\n${err.stack ?? ""}`);
+  return c.text("Internal Server Error", 500);
+});
+
 app.get("/api/health", (c) => c.json({ status: "ok" }));
+
+// What each Durable Object method has cost in SQLite rows since its instance
+// started — the live counterpart of the rowcost test suite, for asking "which
+// endpoint is spending the daily row budgets" of the running deployment
+// instead of the code. Open like the other admin reads: counts leak nothing.
+// The window is the instance's lifetime (`since`/`elapsedSec` in the reply);
+// a deploy or eviction resets it.
+app.get("/api/sqlstats", async (c) => c.json(await indexStub(c.env).sqlStatsReport()));
 
 // authorized checks the shared-secret guard used by every write API the
 // ingest daemon / pack talk to. When the REPLAY_PUT_TOKEN secret is not
