@@ -95,8 +95,6 @@ function seed(index: ReplayIndex): void {
     SELECT printf('g%06d', n), ${NOW} - n*40, 900, 'Map ' || (n % 40), '8v8', 8000000, 16,
            ${roster}, '{"ranked":true}', ${NOW}, 0
     FROM (${seq(REPLAYS)})`);
-  sql.exec(`INSERT INTO replay_players (replay_id, name_lower, name)
-    SELECT printf('g%06d', n), 'p' || n, 'p' || n FROM (${seq(GAMES)})`);
   sql.exec(`INSERT INTO replay_settings (replay_id, flag)
     SELECT printf('g%06d', n), 'ranked' FROM (${seq(GAMES)})`);
   sql.exec(`INSERT INTO jobs (id, stream_key, game_id, kind, state, created_unix, updated_unix)

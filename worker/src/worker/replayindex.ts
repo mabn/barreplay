@@ -183,35 +183,23 @@ function progressPercent(progressJSON: unknown): number | null {
   }
 }
 
-/** Version of the DERIVED data (player_count + the replay_players and
- * replay_settings index tables). Rows carry no derivation of their own — it is
- * recomputed from the replays row — so bumping this rebuilds every row's
- * derived data on the next wake. Bump it whenever what those tables hold
- * changes; the block in ensureDerived implements the CURRENT bump, so a new
- * version replaces that block with its own work.
- *
- * v2 sheds the mirror's roster rows from replay_players: they were ~48 of the
- * 59 rows every mirrored game wrote (~2000 games/day against the free tier's
- * 100k-rows-written allowance — the outage of 2026-08-23), and nothing reads
- * them (the list's player filter and the facets both restrict to catalog
- * ids). */
-const DERIVED_VERSION = 2;
+/** Version of the DERIVED data (player_count + the replay_settings index
+ * table). Rows carry no derivation of their own — it is recomputed from the
+ * replays row — so bumping this runs a one-time pass on the next wake
+ * (ensureDerived holds the CURRENT bump's work; a new version replaces that
+ * block with its own). v1 backfilled rows that predate the derived data;
+ * every deployment has long since run it. */
+const DERIVED_VERSION = 1;
+
+/** Version of the SCHEMA itself, stamped into the schema_version table by the
+ * migration that produced it. schemaCurrent reads this one row to decide
+ * whether the DDL needs to run at all — a read, where the DDL statements are
+ * write-classified even as no-ops. BUMP THIS whenever SCHEMA_DDL, INDEX_DDL
+ * or ADDED_COLUMNS change, or the change never reaches a deployed database. */
+const SCHEMA_VERSION = 1;
 
 /** Everything migrateSchema creates, split from the code so schemaCurrent can
  * scan the same text it executes (one source, nothing to drift). */
-/** replay_players on its own, because ensureDerived's v2 step recreates the
- * table from this exact text after dropping it — one source, so the recreated
- * table cannot drift from what schemaCurrent expects to find. */
-const REPLAY_PLAYERS_DDL = `
-      CREATE TABLE IF NOT EXISTS replay_players (
-        replay_id  TEXT NOT NULL,
-        name_lower TEXT NOT NULL,
-        name       TEXT NOT NULL,
-        PRIMARY KEY (replay_id, name_lower)
-      );
-      CREATE INDEX IF NOT EXISTS replay_players_name ON replay_players (name_lower, replay_id);
-`;
-
 const SCHEMA_DDL = `
       CREATE TABLE IF NOT EXISTS replays (
         id           TEXT PRIMARY KEY,
@@ -260,14 +248,15 @@ const SCHEMA_DDL = `
         PRIMARY KEY (job_id, at_unix)
       );
 
-      -- Derived index tables behind the list filters. Both are rebuilt from
-      -- the replays row on every write (and by ensureDerived's versioned
-      -- rebuilds), never edited
-      -- in place, so they cannot drift from the JSON columns they come from.
-      -- Filtering on a name or a settings flag means "does this row have one",
-      -- which is an EXISTS over these tables and answers to their index; the
-      -- alternative, json_each over the stored blobs, has to open every row.
-      ${REPLAY_PLAYERS_DDL}
+      -- Derived index table behind the settings filter. Rebuilt from the
+      -- replays row on every write, never edited in place, so it cannot
+      -- drift from the JSON column it comes from. Filtering on a flag means
+      -- "does this row have one", an EXISTS answered by its index. (Its
+      -- sibling replay_players is GONE: keeping the mirror's rosters indexed
+      -- cost ~48 rows written per mirrored game — the write half of the
+      -- 2026-08-23 outage — and the player filter and facets now read the
+      -- roster JSON on the catalog rows directly, a bounded scan of a small
+      -- table on a human-initiated query.)
       CREATE TABLE IF NOT EXISTS replay_settings (
         replay_id TEXT NOT NULL,
         flag      TEXT NOT NULL,
@@ -277,6 +266,14 @@ const SCHEMA_DDL = `
       CREATE TABLE IF NOT EXISTS schema_meta (
         key   TEXT PRIMARY KEY,
         value INTEGER NOT NULL
+      );
+      -- One row: the SCHEMA_VERSION the last completed migration stamped.
+      -- Its absence is itself the signal (schemaCurrent): a database from
+      -- before the stamp, or a fresh one, answers "no such table" to a read
+      -- and that means "migrate". Deliberately its own table rather than a
+      -- schema_meta key so that first read needs no other table to exist.
+      CREATE TABLE IF NOT EXISTS schema_version (
+        version INTEGER NOT NULL
       );
 
       -- Every game BAR published that this worker has seen, captured or not
@@ -390,6 +387,10 @@ const INDEX_DDL = `
         ON games ((start_unix + COALESCE(duration_sec, 0)) DESC, id, player_count);
       DROP INDEX IF EXISTS games_backfill;
       DROP INDEX IF EXISTS games_start;
+      -- See the replay_settings note in SCHEMA_DDL: the roster index table is
+      -- gone, and dropping it here (one schema statement) is what sheds the
+      -- ~100k mirror roster rows a row-by-row DELETE could not afford.
+      DROP TABLE IF EXISTS replay_players;
       -- PARTIAL indexes, because the two questions asked of the lobbies
       -- table every minute are about the handful of rows in a state, over
       -- a table that keeps every unmatched observation forever: which
@@ -459,6 +460,30 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   // kind of row the pipeline ever deletes.
   ["replays", "placeholder INTEGER NOT NULL DEFAULT 0"],
 ];
+
+/** The player-name facet: every distinct roster name in the catalog, deduped
+ * case-insensitively (keeping the alphabetically first spelling), ordered by
+ * the folded name, capped at FACET_PLAYERS_MAX. */
+function facetPlayers(sql: SqlStorage): string[] {
+  const byLower = new Map<string, string>();
+  for (const r of sql.exec(`SELECT players FROM replays WHERE players IS NOT NULL`).toArray()) {
+    for (const team of JSON.parse(r.players as string) as CatalogTeam[]) {
+      for (const p of team.players) {
+        const lower = p.name.toLowerCase();
+        const prev = byLower.get(lower);
+        if (prev === undefined || p.name < prev) byLower.set(lower, p.name);
+      }
+    }
+  }
+  return [...byLower.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .slice(0, FACET_PLAYERS_MAX)
+    .map(([, name]) => name);
+}
+
+/** Escape a string for use inside a LIKE pattern with ESCAPE '\\':
+ * backslash first covers the escapes it is about to add, then the wildcards. */
+const likeEscape = (s: string): string => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 
 export class ReplayIndex extends DurableObject<Env> {
   /** How many samples each live job has, so a healthcheck does not have to
@@ -532,19 +557,9 @@ export class ReplayIndex extends DurableObject<Env> {
         .exec(`SELECT value FROM schema_meta WHERE key = 'derived_version'`)
         .toArray();
       if ((have.length > 0 ? (have[0].value as number) : 0) >= DERIVED_VERSION) return;
-      // The v2 step (see DERIVED_VERSION): shed the mirror's roster rows and
-      // repopulate from the catalog alone. DROP TABLE, because deleting the
-      // mirror's ~16 rows per game one game at a time would itself cost more
-      // than a day of the write allowance this version exists to protect —
-      // and nothing but the roster rows is touched: settings entries and
-      // player_count are correct as they stand, and re-deriving them for
-      // every mirrored game would be most of another day's budget.
-      const sql = this.ctx.storage.sql;
-      sql.exec(`DROP TABLE IF EXISTS replay_players`);
-      sql.exec(REPLAY_PLAYERS_DDL);
-      for (const r of sql.exec(`SELECT id, players FROM replays WHERE players IS NOT NULL`).toArray()) {
-        this.indexPlayers(r.id as string, JSON.parse(r.players as string) as CatalogTeam[]);
-      }
+      // v1's backfill ran everywhere long ago; a fresh database has nothing
+      // to derive (its rows arrive through upsert, which indexes as it
+      // writes). So the current bump's only work is stamping the version.
       this.ctx.storage.sql.exec(
         `INSERT INTO schema_meta (key, value) VALUES ('derived_version', ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
@@ -555,36 +570,28 @@ export class ReplayIndex extends DurableObject<Env> {
     }
   }
 
-  /** schemaCurrent reports whether every table, index and late-added column
-   * the DDL would create is already present — reading only sqlite_master, so
-   * asking costs no writes. Dropped indexes still present, or a column still
-   * missing from its table's stored CREATE statement, mean a migration is due.
-   * A fresh database has none of the objects and reports false trivially. */
+  /** schemaCurrent reports whether the last completed migration stamped the
+   * current SCHEMA_VERSION — one row read, no writes. "No such table" is the
+   * answer, not an error: a database from before the stamp (and a fresh one)
+   * must migrate. Anything else a read can throw — the overage gate — is the
+   * caller's to log. */
   private schemaCurrent(): boolean {
-    const objects = new Map<string, string>();
-    for (const r of this.ctx.storage.sql
-      .exec(`SELECT name, sql FROM sqlite_master WHERE type IN ('table', 'index')`)
-      .toArray()) {
-      objects.set(r.name as string, (r.sql as string | null) ?? "");
+    try {
+      const r = this.ctx.storage.sql.exec(`SELECT version FROM schema_version`).toArray();
+      return r.length > 0 && (r[0].version as number) >= SCHEMA_VERSION;
+    } catch (e) {
+      if (String(e).includes("no such table")) return false;
+      throw e;
     }
-    for (const [, name] of (SCHEMA_DDL + INDEX_DDL).matchAll(/CREATE (?:TABLE|INDEX) IF NOT EXISTS (\w+)/g)) {
-      if (!objects.has(name)) return false;
-    }
-    for (const [, name] of INDEX_DDL.matchAll(/DROP INDEX IF EXISTS (\w+)/g)) {
-      if (objects.has(name)) return false;
-    }
-    for (const [table, col] of ADDED_COLUMNS) {
-      const create = objects.get(table);
-      if (create === undefined || !new RegExp(`\\b${col.split(/\s/)[0]}\\b`).test(create)) return false;
-    }
-    return true;
   }
 
   /** migrateSchema brings the database to the current schema: the base DDL,
    * the late-added columns, then the indexes (after the ALTERs, because one of
    * them indexes a column the ALTERs may have just added). Idempotent — every
    * statement tolerates what already exists — but never a no-op to the write
-   * meter, which is why the constructor gates it on schemaCurrent. */
+   * meter, which is why the constructor gates it on schemaCurrent. The
+   * version is stamped LAST, so a migration that died halfway is retried
+   * whole rather than believed. */
   private migrateSchema(): void {
     const sql = this.ctx.storage.sql;
     sql.exec(SCHEMA_DDL);
@@ -596,6 +603,8 @@ export class ReplayIndex extends DurableObject<Env> {
       }
     }
     sql.exec(INDEX_DDL);
+    sql.exec(`DELETE FROM schema_version`);
+    sql.exec(`INSERT INTO schema_version (version) VALUES (?)`, SCHEMA_VERSION);
   }
 
   /** metaGet / metaPut are the schema_meta table used as a scratchpad for the
@@ -618,45 +627,20 @@ export class ReplayIndex extends DurableObject<Env> {
   }
 
 
-  /** indexPlayers inserts one game's roster into replay_players (into a clean
-   * slate: indexRow deletes first, the v2 rebuild recreates the table). */
-  private indexPlayers(id: string, players: CatalogTeam[] | null): void {
-    const seen = new Set<string>();
-    for (const g of players ?? []) {
-      for (const p of g.players) {
-        const lower = p.name.toLowerCase();
-        // One row per distinct name: the same person can hold two slots in a
-        // game, and the primary key would reject the duplicate.
-        if (seen.has(lower)) continue;
-        seen.add(lower);
-        this.ctx.storage.sql.exec(
-          `INSERT INTO replay_players (replay_id, name_lower, name) VALUES (?, ?, ?)`,
-          id, lower, p.name,
-        );
-      }
-    }
-  }
 
-  /** indexRow replaces one game's rows in the two derived tables. Delete then
-   * insert (not upsert) so a roster or settings change can REMOVE an entry — a
-   * re-publish that drops a player must not leave the old name matching the
-   * filter.
+  /** indexSettings replaces one game's rows in replay_settings. Delete then
+   * insert (not upsert) so a settings change can REMOVE an entry — a
+   * re-publish that drops a flag must not leave it matching the filter.
    *
-   * Both the catalog and the games mirror index into these tables, under the
+   * Both the catalog and the games mirror index into this table, under the
    * same gameId, so exactly ONE of them owns an id's entries: the catalog row
-   * if there is one (its roster comes from the capture that was actually
+   * if there is one (its flags come from the capture that was actually
    * published), the games row otherwise. gamesInsert enforces that by not
    * touching an id the catalog holds — without it, the two would take turns
    * deleting each other's entries. */
-  private indexRow(
-    id: string,
-    players: CatalogTeam[] | null,
-    settings: Record<string, boolean | string> | null,
-  ): void {
+  private indexSettings(id: string, settings: Record<string, boolean | string> | null): void {
     const sql = this.ctx.storage.sql;
-    sql.exec(`DELETE FROM replay_players WHERE replay_id = ?`, id);
     sql.exec(`DELETE FROM replay_settings WHERE replay_id = ?`, id);
-    this.indexPlayers(id, players);
     for (const [flag, value] of Object.entries(settings ?? {})) {
       // A flag counts as set when it is true or a non-empty string: the
       // string-valued ones (zombies: "akumu") are badges too, and the UI
@@ -759,7 +743,7 @@ export class ReplayIndex extends DurableObject<Env> {
       e.widgetDate,
       Math.floor(Date.now() / 1000),
     );
-    this.indexRow(e.id, e.players, e.settings);
+    this.indexSettings(e.id, e.settings);
     if (resimJobId !== undefined && wantsFullView(e.uploaderAlly, uploads)) {
       this.jobAnnounce(resimJobId, e.id, "resim");
     }
@@ -835,12 +819,19 @@ export class ReplayIndex extends DurableObject<Env> {
       if (filter.minDuration !== null) { where.push(`duration_sec >= ?`); args.push(filter.minDuration); }
       if (filter.maxDuration !== null) { where.push(`duration_sec <= ?`); args.push(filter.maxDuration); }
       if (filter.player !== null) {
-        // Prefix match as a RANGE, not LIKE: SQLite's LIKE is case-insensitive
-        // by default, which disqualifies it from using the index. name_lower is
-        // stored folded and the needle arrives folded, so a plain >= / < pair
-        // over the covering index does the same job and can seek.
-        where.push(`id IN (SELECT replay_id FROM replay_players WHERE name_lower >= ? AND name_lower < ?)`);
-        args.push(filter.player, filter.player + "￿");
+        // Prefix match over the roster JSON the row already stores. The
+        // replay_players table this used to seek is gone (see SCHEMA_DDL):
+        // its upkeep was the write budget's biggest line, and a LIKE over
+        // the catalog's own rows reads at most the catalog — a few hundred
+        // rows, on a human-initiated query, never on a polled path. LIKE's
+        // ASCII case folding stands in for the old name_lower column. The
+        // needle is JSON-encoded exactly as the stored roster is (so a
+        // quote or backslash in a name matches its stored escape) and then
+        // LIKE-escaped (so a wildcard in a name cannot widen the match);
+        // JSON.stringify's opening quote is kept — it is the roster's own
+        // name delimiter.
+        where.push(`players LIKE ? ESCAPE '\\'`);
+        args.push(`%"name":${likeEscape(JSON.stringify(filter.player).slice(0, -1))}%`);
       }
       for (const flag of filter.settings) {
         // One IN per flag, so the row must carry ALL of them (a single
@@ -932,20 +923,16 @@ export class ReplayIndex extends DurableObject<Env> {
         `SELECT DISTINCT player_count FROM replays WHERE player_count IS NOT NULL ORDER BY player_count`,
         "player_count",
       ),
-      // MIN(name) so a name that two rows spell differently in case still
-      // yields one completion; ordered case-insensitively for the datalist.
-      //
-      // Restricted to ids the CATALOG holds, because the two derived tables
-      // also carry the games mirror — thousands of games nothing has published.
-      // Those names and flags match no listable replay, and an option that
-      // filters to an empty list is worse than an absent one; this endpoint
-      // exists precisely to avoid offering them.
-      players: col<string>(
-        `SELECT MIN(name) AS name FROM replay_players
-         WHERE replay_id IN (SELECT id FROM replays)
-         GROUP BY name_lower ORDER BY name_lower LIMIT ${FACET_PLAYERS_MAX}`,
-        "name",
-      ),
+      // The completion list, straight from the roster JSON on the catalog's
+      // own rows — one pass over a small table on a human-initiated read
+      // (replay_players, which used to serve this, is gone; see SCHEMA_DDL).
+      // Reading `replays` alone also keeps the mirror's thousands of
+      // unpublished games out, the restriction the old query spelled as a
+      // subselect over ids the catalog holds.
+      players: facetPlayers(sql),
+      // Restricted to ids the CATALOG holds, because replay_settings also
+      // carries the games mirror — thousands of games nothing has published,
+      // whose flags would be options that filter to an empty list.
       settings: col<string>(
         `SELECT DISTINCT flag FROM replay_settings
          WHERE replay_id IN (SELECT id FROM replays) ORDER BY flag`,
@@ -974,9 +961,10 @@ export class ReplayIndex extends DurableObject<Env> {
       id,
     );
     if (cur.rowsWritten === 0) return false;
-    // Both derived tables come from exactly the two columns this just
-    // rewrote, so they have to be rebuilt with them — otherwise the filters
-    // keep matching the roster and badges the refresh replaced. Re-read the
+    // The settings index comes from exactly the column this just rewrote, so
+    // it has to be rebuilt with it — otherwise the filter keeps matching the
+    // badges the refresh replaced (the roster needs no reindex: the player
+    // filter reads the JSON itself). Re-read the
     // row rather than trusting the arguments: a null players means "keep what
     // is there" (the COALESCE above), and the index must follow the stored
     // value, not the omission.
@@ -993,7 +981,7 @@ export class ReplayIndex extends DurableObject<Env> {
       derivePlayerCount(storedPlayers, (row[0].game_size as string | null) ?? null),
       id,
     );
-    this.indexRow(id, storedPlayers, storedSettings);
+    this.indexSettings(id, storedSettings);
     return true;
   }
 
@@ -1018,11 +1006,11 @@ export class ReplayIndex extends DurableObject<Env> {
 
   /** gamesInsert records mirrored games and indexes their settings into
    * replay_settings (their rosters stay JSON on the row — see the note at the
-   * indexRow call). Upsert rather than plain insert so re-syncing a game (a
+   * indexSettings call). Upsert rather than plain insert so re-syncing a game (a
    * backfill, a later re-read) refreshes it instead of failing.
    *
    * The derived rows are written only for ids the CATALOG does not hold — see
-   * indexRow: a published replay's entries are rebuilt from the capture that
+   * indexSettings: a published replay's entries are rebuilt from the capture that
    * was actually published, and a mirror row must not overwrite them with the
    * API's account of the same game. Returns the number of rows written. */
   gamesInsert(games: GameEntry[]): number {
@@ -1060,15 +1048,11 @@ export class ReplayIndex extends DurableObject<Env> {
         now,
       );
       const owned = sql.exec(`SELECT 1 FROM replays WHERE id = ?`, g.id).toArray().length > 0;
-      // Settings only, no roster: the mirror's replay_players rows were ~48 of
-      // the 59 rows a game cost to write (16 names, each a row plus two index
-      // entries, ~2000 games a day against the free tier's 100k-rows-written
-      // allowance) and nothing reads them — the list's player filter and the
-      // facets both restrict to catalog ids. The settings entries stay because
-      // the backfill's modded-first ranking reads them, and they are a couple
-      // of rows. The roster is still on the games row as JSON, so this is
-      // recoverable the day something wants it.
-      if (!owned) this.indexRow(g.id, null, g.settings);
+      // Settings only: the backfill's modded-first ranking reads them, and
+      // they are a couple of rows. The roster stays JSON on the games row —
+      // indexing it (48 rows written per game) is what once spent the whole
+      // write allowance; see the replay_settings note in SCHEMA_DDL.
+      if (!owned) this.indexSettings(g.id, g.settings);
     }
     return games.length;
   }
@@ -1375,8 +1359,9 @@ export class ReplayIndex extends DurableObject<Env> {
    * It seeds what it can from the games mirror — a row showing the map and the
    * players beats one showing five dashes — and re-indexes the derived tables
    * from that same data, because the catalog row it just made now OWNS those
-   * entries (see indexRow). With nothing to seed from it indexes nothing: the
-   * alternative, indexing null, would DELETE whatever the mirror had put there. */
+   * entries (see indexSettings). With nothing to seed from it indexes nothing:
+   * the alternative, indexing null, would DELETE whatever the mirror had put
+   * there. */
   private ensureCatalogPlaceholder(gameId: string): void {
     const sql = this.ctx.storage.sql;
     if (sql.exec(`SELECT 1 FROM replays WHERE id = ?`, gameId).toArray().length > 0) return;
@@ -1402,11 +1387,7 @@ export class ReplayIndex extends DurableObject<Env> {
       Math.floor(Date.now() / 1000),
     );
     if (g !== null) {
-      this.indexRow(
-        gameId,
-        g.players == null ? null : JSON.parse(g.players as string),
-        g.settings == null ? null : JSON.parse(g.settings as string),
-      );
+      this.indexSettings(gameId, g.settings == null ? null : JSON.parse(g.settings as string));
     }
   }
 

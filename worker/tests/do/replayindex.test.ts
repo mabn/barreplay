@@ -110,15 +110,15 @@ test("gamesInsert stores the whole row", async () => {
   });
 });
 
-test("gamesInsert indexes settings but not rosters", async () => {
+test("gamesInsert indexes settings; rosters stay JSON on the row", async () => {
   await inIndex((index, sql) => {
     index.gamesInsert([game("a1")]);
     // The settings entries feed the backfill's modded-first ranking. The
-    // roster stays JSON on the games row and is deliberately NOT indexed:
-    // nothing reads a mirror game's player rows, and at ~48 rows written per
-    // game they were the write budget's biggest spender (the outage of
-    // 2026-08-23).
-    expect(rows(sql, `SELECT COUNT(*) AS n FROM replay_players WHERE replay_id = 'a1'`)).toEqual([{ n: 0 }]);
+    // roster is deliberately NOT indexed anywhere — replay_players is gone
+    // (indexing the mirror's rosters cost ~48 rows written per game, the
+    // write half of the 2026-08-23 outage); the player filter reads the
+    // roster JSON on the catalog rows directly.
+    expect(rows(sql, `SELECT name FROM sqlite_master WHERE name = 'replay_players'`)).toEqual([]);
     expect(rows(sql, `SELECT flag FROM replay_settings WHERE replay_id = 'a1'`)).toEqual([{ flag: "unranked" }]);
   });
 });
@@ -150,10 +150,9 @@ test("a mirrored game never overwrites a published replay's derived rows", async
     index.gamesInsert([game("dup")]);
 
     expect(rows(sql, `SELECT COUNT(*) AS n FROM games WHERE id = 'dup'`)).toEqual([{ n: 1 }]);
-    // The catalog owns the entries: the roster is the uploader's, not the
-    // API's, and the badge is the capture's. Without that rule the two would
-    // take turns deleting each other's rows.
-    expect(rows(sql, `SELECT name FROM replay_players WHERE replay_id = 'dup'`)).toEqual([{ name: "Uploader" }]);
+    // The catalog owns the entries: the badge is the capture's, not the
+    // API's. Without that rule the two would take turns deleting each
+    // other's rows.
     expect(rows(sql, `SELECT flag FROM replay_settings WHERE replay_id = 'dup'`)).toEqual([{ flag: "lava" }]);
   });
 });
@@ -165,7 +164,6 @@ test("publishing a mirrored game takes ownership of its entries", async () => {
 
     index.upsert(replay("later"));
 
-    expect(rows(sql, `SELECT name FROM replay_players WHERE replay_id = 'later'`)).toEqual([{ name: "Uploader" }]);
     expect(rows(sql, `SELECT flag FROM replay_settings WHERE replay_id = 'later'`)).toEqual([{ flag: "lava" }]);
   });
 });
@@ -818,7 +816,7 @@ test("a job that fails without publishing takes its row away again", async () =>
     expect(index.list()).toEqual([]);
     // The mirror row is untouched, and so are the derived entries it owns.
     expect(rows(sql, `SELECT COUNT(*) AS n FROM games`)).toEqual([{ n: 1 }]);
-    expect(rows(sql, `SELECT COUNT(*) AS n FROM replay_players WHERE replay_id = 'doomed'`)).toEqual([{ n: 2 }]);
+    expect(rows(sql, `SELECT flag FROM replay_settings WHERE replay_id = 'doomed'`)).toEqual([{ flag: "unranked" }]);
   });
 });
 
@@ -1145,8 +1143,8 @@ test("a current schema is detected read-only and a stale one still migrates", as
   // NOT EXISTS counts as a WRITE even when it changes nothing — so the day
   // the free tier's rows-written allowance ran out, every route died in the
   // constructor before its first read. The contract now: deciding "nothing
-  // to migrate" writes zero rows, and a schema that really is missing
-  // something is still brought current.
+  // to migrate" is ONE read of the schema_version stamp and zero writes; a
+  // stale or missing stamp is noticed and the migration restores it.
   await inIndex((index, sql) => {
     const priv = index as unknown as { schemaCurrent(): boolean; migrateSchema(): void };
     expect(priv.schemaCurrent(), "a freshly constructed instance is current").toBe(true);
@@ -1168,14 +1166,17 @@ test("a current schema is detected read-only and a stale one still migrates", as
       (sql as unknown as { exec: unknown }).exec = real;
     }
 
-    // A missing index and a missing column are each noticed, and one
-    // migration pass repairs both.
-    sql.exec(`DROP INDEX games_backfill_end`);
-    sql.exec(`ALTER TABLE jobs DROP COLUMN error_kind`);
-    expect(priv.schemaCurrent(), "a stale schema must be noticed").toBe(false);
+    // An old stamp means migrate; so does no stamp at all — "no such table"
+    // is the signal a pre-stamp database gives, not an error.
+    sql.exec(`UPDATE schema_version SET version = 0`);
+    expect(priv.schemaCurrent(), "an old stamp must be noticed").toBe(false);
     priv.migrateSchema();
     expect(priv.schemaCurrent()).toBe(true);
-    expect(rows(sql, `SELECT name FROM sqlite_master WHERE name = 'games_backfill_end'`).length).toBe(1);
+
+    sql.exec(`DROP TABLE schema_version`);
+    expect(priv.schemaCurrent(), "a missing stamp table means a pre-stamp database").toBe(false);
+    priv.migrateSchema();
+    expect(priv.schemaCurrent()).toBe(true);
   });
 });
 
@@ -1190,7 +1191,7 @@ test("a migration that cannot run leaves the previous schema serving", async () 
       schemaCurrent(): boolean;
       migrateSchema(): void;
     };
-    sql.exec(`DROP INDEX games_backfill_end`);
+    sql.exec(`UPDATE schema_version SET version = 0`);
     const proto = Object.getPrototypeOf(index) as { migrateSchema(): void };
     const realMigrate = proto.migrateSchema;
     proto.migrateSchema = () => {
@@ -1238,20 +1239,17 @@ test("a failing schema check or derived rebuild never kills construction", async
       }
       expect(logged.join("\n")).toContain("schema check failed");
 
+      // A derived rebuild that cannot even read its version row (the overage
+      // gate again) logs and serves on; once the world is back, the retry
+      // stamps the version.
       sql.exec(`DELETE FROM schema_meta WHERE key = 'derived_version'`);
-      index.upsert(replay("seedrow"));
-      const realIndexPlayers = proto.indexPlayers;
-      proto.indexPlayers = () => {
-        throw new Error("Exceeded allowed rows written in Durable Objects free tier.");
-      };
+      sql.exec(`ALTER TABLE schema_meta RENAME TO schema_meta_hidden`);
       try {
         priv.ensureDerived();
       } finally {
-        proto.indexPlayers = realIndexPlayers;
+        sql.exec(`ALTER TABLE schema_meta_hidden RENAME TO schema_meta`);
       }
       expect(logged.join("\n")).toContain("derived rebuild failed");
-      // The version row was not written, so the rebuild is retried — and
-      // lands once it can run.
       expect(rows(sql, `SELECT value FROM schema_meta WHERE key = 'derived_version'`)).toEqual([]);
       priv.ensureDerived();
       expect(rows(sql, `SELECT value FROM schema_meta WHERE key = 'derived_version'`)).not.toEqual([]);
@@ -1261,20 +1259,15 @@ test("a failing schema check or derived rebuild never kills construction", async
   });
 });
 
-test("the v2 derived rebuild sheds mirror rosters and keeps the catalog's", async () => {
-  await inIndex((index, sql) => {
-    // Recreate the pre-v2 state: a mirror game whose roster an older build
-    // indexed, next to a published replay's legitimate entries.
-    index.upsert(replay("kept"));
-    index.gamesInsert([game("shed")]);
-    sql.exec(`INSERT INTO replay_players (replay_id, name_lower, name) VALUES ('shed', 'old', 'Old')`);
-    sql.exec(`DELETE FROM schema_meta WHERE key = 'derived_version'`);
-
-    (index as unknown as { ensureDerived(): void }).ensureDerived();
-
-    expect(rows(sql, `SELECT COUNT(*) AS n FROM replay_players WHERE replay_id = 'shed'`)).toEqual([{ n: 0 }]);
-    expect(rows(sql, `SELECT name FROM replay_players WHERE replay_id = 'kept'`)).toEqual([{ name: "Uploader" }]);
-    // The dropped-and-recreated table still satisfies the schema check.
-    expect((index as unknown as { schemaCurrent(): boolean }).schemaCurrent()).toBe(true);
+test("player filter and facets read the roster JSON directly", async () => {
+  await inIndex((index) => {
+    index.upsert(replay("r1"));
+    index.gamesInsert([game("m1")]);
+    // Prefix, case-insensitively, like the old name_lower range did.
+    expect(index.list({ ...emptyFilter(), player: "upload" })).toHaveLength(1);
+    expect(index.list({ ...emptyFilter(), player: "nobody" })).toEqual([]);
+    // A LIKE wildcard in the needle is a literal, not a wildcard.
+    expect(index.list({ ...emptyFilter(), player: "%" })).toEqual([]);
+    expect(index.facets().players).toEqual(["Uploader"]);
   });
 });
