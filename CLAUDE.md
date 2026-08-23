@@ -1386,11 +1386,23 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           one auto-queued job ever waits — the next poll finds THAT one instead
                           of making another. Check and insert are one RPC, so two daemons
                           polling together cannot both take the same game. And the scan is
-                          bounded in SIZE always — the newest BACKFILL_INSPECT=200 mirrored
-                          games, never the whole table — and in RATE only when it comes up
-                          EMPTY (BACKFILL_COOLDOWN_SEC=60s, in schema_meta — the cron's own
-                          period, since a new candidate can only appear when the mirror gains
-                          a game). It is the one
+                          cheap because it STOPS EARLY, not because it looks at a slice: it
+                          walks games_start newest-first and quits at the 20th candidate,
+                          which on a mirror no host can keep up with is the first twenty rows
+                          it touches. The distinction is the design. A fixed window over the
+                          newest N games costs the same in the good case and LIES in the bad
+                          one — with those N all taken it reports an empty mirror while
+                          thousands of older candidates sit behind it, and the daemon sleeps
+                          in front of a queue it cannot see (that shipped; the symptom was
+                          "bringest: nothing queued to re-simulate" on a host with a backlog
+                          of thousands). An empty answer must mean the MIRROR is empty. What a
+                          stale head costs instead is one index entry and one row per game
+                          stepped over — 861 rows to walk past 400 taken ones — and only once
+                          the daemon has published its way through the recent past, which is
+                          exactly when older work is the right answer. The RATE bound applies
+                          only to the genuinely-empty answer (BACKFILL_COOLDOWN_SEC=60s, in
+                          schema_meta — the cron's own period, since a new candidate can only
+                          appear when the mirror gains a game). It is the one
                           query on the 10s poll path whose cost grows with the mirror — which
                           grows ~2000 games a day forever — and an unbounded walk of it 8640
                           times a day is what first exhausted the account's daily rows-read
