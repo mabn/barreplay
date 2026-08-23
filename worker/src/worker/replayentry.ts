@@ -599,6 +599,36 @@ export function parseViewRequest(
   return { view: "ally", ally: o.ally };
 }
 
+/** wantsFullView: is this game one somebody recorded from INSIDE, with no
+ * full-view revision published for it yet? Which is to say: is a
+ * re-simulation the thing that would improve it?
+ *
+ * A one-sided capture only ever saw its own side — the widget records what its
+ * client could see — so the game has a fog of war in it that no upload can
+ * lift; re-simulating the demo headlessly produces the spectator's view of the
+ * same game and publishes it as another revision. This is the predicate that
+ * decides when that is worth an hour of somebody's engine time, and it is
+ * asked at the moment a publish makes it true (ReplayIndex.upsert), which is
+ * the only moment it CAN become true.
+ *
+ * It reads the uploads list rather than the row's uploader_ally alone, because
+ * the list is the durable record: a later provenance-less re-publish nulls the
+ * column (upsert overwrites it) while mergeUploads keeps what every revision
+ * was. `ally: null` in the list is a full view — a spectator's upload or a
+ * re-sim's — and one of those is enough to say the game is covered.
+ *
+ * It used to be `needsResim` in cmd/bringest, applied to every row of the
+ * catalog on a timer, which is how the daemon found this work; the answer is
+ * the same, it is just no longer hunted for. */
+export function wantsFullView(uploaderAlly: number | null, uploads: UploadRef[] | null): boolean {
+  const list = uploads ?? [];
+  // Something has to SAY the game was recorded from a playing client. A row
+  // that knows nothing about its own provenance — most of them, from before
+  // the recorder record existed — is not a candidate: "unknown" is not "ally".
+  if (uploaderAlly === null && !list.some((u) => u.ally !== null)) return false;
+  return list.every((u) => u.ally !== null);
+}
+
 export function mergeUploads(
   existing: UploadRef[] | null,
   rid: string | null,

@@ -9,6 +9,11 @@ import { syncLobbies } from "./teiserver";
 
 export { ReplayIndex };
 
+/** Which minute of the hour the sample sweep runs in. Any value does; not
+ * zero, only so it does not share the tick with whatever else the platform
+ * does on the hour. */
+const PRUNE_MINUTE = 17;
+
 export default {
   fetch: app.fetch,
 
@@ -20,7 +25,7 @@ export default {
   // is a minute away, so a BAR API blip resolves itself; letting it throw
   // would only turn a self-healing hiccup into a minute-by-minute stream of
   // failed cron invocations in the dashboard.
-  async scheduled(_controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+  async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
     try {
       const r = await syncGames(indexStub(env));
       // Quiet on a no-op tick: most runs find nothing new, and a line a minute
@@ -36,12 +41,23 @@ export default {
     // outlives it (that curve is the point), so something has to age it out,
     // and the cron is the worker's only periodic hook. Its own try, so a
     // failure cannot take the mirror down with it.
-    try {
-      const cutoff = Math.floor(Date.now() / 1000) - JOB_SAMPLE_RETENTION_SEC;
-      const dropped = await indexStub(env).jobSamplePrune(cutoff);
-      if (dropped > 0) console.log(`job samples pruned: ${dropped}`);
-    } catch (e) {
-      console.error(`job sample prune failed: ${e}`);
+    //
+    // ONCE AN HOUR, not once a minute: what it removes is a month old, so the
+    // minute it happens in is worth nothing, and the cron's only reason to run
+    // every minute is the mirror. (The sweep is cheap now — see
+    // ReplayIndex.jobSamplePrune — but "cheap" times 1440 is how this worker
+    // spent a day's rows-read budget on housekeeping in the first place.)
+    // The SCHEDULED time, not the clock: that is the minute the trigger was
+    // for, where a reading taken inside the handler is a firing that ran a
+    // second early away from ever matching.
+    if (new Date(controller.scheduledTime).getUTCMinutes() === PRUNE_MINUTE) {
+      try {
+        const cutoff = Math.floor(Date.now() / 1000) - JOB_SAMPLE_RETENTION_SEC;
+        const dropped = await indexStub(env).jobSamplePrune(cutoff);
+        if (dropped > 0) console.log(`job samples pruned: ${dropped}`);
+      } catch (e) {
+        console.error(`job sample prune failed: ${e}`);
+      }
     }
 
     // Same tick, third step: poll teiserver's lobby list for the names

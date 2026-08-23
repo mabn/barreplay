@@ -33,7 +33,13 @@ import type {
 } from "./jobs";
 import { LOBBY_MATCH_EARLY_SLACK_SEC, LOBBY_MATCH_WINDOW_SEC, pickLobbyMatches } from "./teiserver";
 import type { LobbyMatchResult, LobbyObservation, MatchGame, MatchLobby, OpenLobby } from "./teiserver";
-import { FACET_PLAYERS_MAX, SETTINGS_MODS_FLAG, derivePlayerCount, mergeUploads } from "./replayentry";
+import {
+  FACET_PLAYERS_MAX,
+  SETTINGS_MODS_FLAG,
+  derivePlayerCount,
+  mergeUploads,
+  wantsFullView,
+} from "./replayentry";
 import type { CatalogTeam, ReplayEntry, ReplayFacets, ReplayFilter, UploadRef } from "./replayentry";
 
 export type {
@@ -70,6 +76,29 @@ const STALE_PROCESSING_RESIM_SEC = 90 * 60;
  * so after twenty of them a window over raw recency would be permanently empty
  * and the daemon would idle with thousands of games still to do. */
 const BACKFILL_WINDOW = 20;
+
+/** How many of the newest mirrored games the backfill LOOKS AT to find those
+ * candidates. A hard bound on the scan, because the alternative — walk until
+ * 20 candidates are found — is a full table scan of the mirror whenever there
+ * are fewer than 20, and this runs on an idle daemon's poll. It cannot drain
+ * the way a window over raw recency would: BAR publishes ~2000 games a day
+ * into the mirror and one host re-simulates ~24, so the window slides in far
+ * faster than it is consumed, and the games it skips (modded, already tried)
+ * age out of it rather than accumulating in it.
+ *
+ * See BACKFILL_COOLDOWN_SEC for the other half of the bound. */
+const BACKFILL_INSPECT = 200;
+
+/** How long the backfill rests after an attempt. The daemon polls every 10
+ * seconds and the backfill is the ONLY expensive thing on that path: it is
+ * what keeps an engine host busy, so it is worth doing, but doing it 8640
+ * times a day is worth nothing — each job it queues is an hour of work, so
+ * five minutes of granularity is invisible.
+ *
+ * This is the lesson of the outage this constant was born in: the free tier
+ * bills ROWS READ, and a scan is charged whether or not it finds anything.
+ * Every recurring query here has to be bounded in both size and rate. */
+const BACKFILL_COOLDOWN_SEC = 5 * 60;
 
 /** How many healthchecks one job keeps. At the daemon's 10-second beat that is
  * two hours at full resolution, comfortably past any real re-simulation.
@@ -116,6 +145,13 @@ export type JobEnqueue = {
  * not the expected wait. */
 const LOBBY_MATCHED_KEEP_SEC = 48 * 3600;
 
+/** How far back the FIRST match run after a restart looks for arrivals. It
+ * exists only to give lobbiesMatch's watermark a starting value: with none, a
+ * fresh deployment would either consider the whole mirror or nothing at all.
+ * An hour is comfortably more than the minute the cron would have covered and
+ * far less than the window a full scan implies. */
+const LOBBY_MATCH_BACKLOG_SEC = 3600;
+
 /** progressPercent reads a whole-number 0-100 out of a jobs row's progress
  * JSON, for the catalog pill. Anything else — no progress reported yet, a
  * phase with nothing to measure, malformed JSON — is null, never a guess:
@@ -140,6 +176,18 @@ function progressPercent(progressJSON: unknown): number | null {
 const DERIVED_VERSION = 1;
 
 export class ReplayIndex extends DurableObject<Env> {
+  /** How many samples each live job has, so a healthcheck does not have to
+   * COUNT them to find out. IN MEMORY on purpose: it is a cache of something
+   * the table already knows, it costs nothing to lose (an evicted object
+   * counts once and carries on), and the thing it replaces — one COUNT(*) over
+   * a job's whole series, ten seconds apart, for an hour — reads several
+   * hundred rows a beat to answer "not yet" every single time.
+   *
+   * It is allowed to drift (a beat retried inside one second upserts the same
+   * row while this counts two), which is why crossing the cap re-counts for
+   * real before thinning anything. Entries are dropped when the job ends. */
+  private sampleCounts = new Map<string, number>();
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(`
@@ -357,6 +405,24 @@ export class ReplayIndex extends DurableObject<Env> {
       CREATE INDEX IF NOT EXISTS jobs_kind     ON jobs (kind, state, updated_unix);
       -- Every catalog read asks "is a job processing this game", once per row.
       CREATE INDEX IF NOT EXISTS jobs_game     ON jobs (game_id, state);
+
+      -- The cron's reads, all three of which used to be full table scans a
+      -- minute (see the note on BACKFILL_COOLDOWN_SEC: rows read are the
+      -- currency here, and these tables only grow).
+      --
+      -- games_synced is what makes the lobby match ARRIVAL-DRIVEN: it looks at
+      -- the games mirrored since the last run instead of every game inside the
+      -- oldest open observation's time window.
+      CREATE INDEX IF NOT EXISTS games_synced   ON games (synced_unix);
+      -- PARTIAL indexes, because the two questions asked of the lobbies
+      -- table every minute are about the handful of rows in a state, over
+      -- a table that keeps every unmatched observation forever: which
+      -- observations are still open, and which matched ones are old
+      -- enough to drop.
+      CREATE INDEX IF NOT EXISTS lobbies_open    ON lobbies (lobby_id, started_unix)
+        WHERE ended_unix IS NULL;
+      CREATE INDEX IF NOT EXISTS lobbies_matched ON lobbies (started_unix)
+        WHERE matched_game_id IS NOT NULL;
     `);
 
     const have = ctx.storage.sql
@@ -370,6 +436,25 @@ export class ReplayIndex extends DurableObject<Env> {
         DERIVED_VERSION,
       );
     }
+  }
+
+  /** metaGet / metaPut are the schema_meta table used as a scratchpad for the
+   * few numbers this object has to remember BETWEEN calls — the derived-table
+   * version, and the watermarks that keep the periodic sweeps from redoing
+   * work they already did. One indexed row each; the alternative, re-deriving
+   * them from the tables, is exactly the full scan they exist to avoid. */
+  private metaGet(key: string): number | null {
+    const r = this.ctx.storage.sql.exec(`SELECT value FROM schema_meta WHERE key = ?`, key).toArray();
+    return r.length === 0 ? null : (r[0].value as number);
+  }
+
+  private metaPut(key: string, value: number): void {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO schema_meta (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      key,
+      value,
+    );
   }
 
   /** rebuildDerived recomputes player_count and the two index tables for every
@@ -452,8 +537,29 @@ export class ReplayIndex extends DurableObject<Env> {
   /** upsert inserts or fully replaces one replay's catalog row — except the
    * uploads list, which accumulates: each revisioned PUT appends its
    * {rid, uploaderAlly} so the row remembers every published upload of the
-   * game, not just the current one. */
-  upsert(e: ReplayEntry): void {
+   * game, not just the current one.
+   *
+   * It also QUEUES THE GAME'S RE-SIMULATION when the publish leaves it
+   * one-sided (wantsFullView over the merged list) and the caller supplied an
+   * id for the job. A capture from a playing client only ever saw its own
+   * side, so the game is worth re-simulating headlessly for the spectator's
+   * view — and a publish is the only moment that can become true, which is why
+   * it is announced here rather than looked for. The re-sim daemon used to
+   * find these by listing the whole catalog every ten seconds and applying the
+   * same predicate to every row; this is that, done once, by the thing that
+   * knows.
+   *
+   * jobAnnounce rather than resimEnqueue: the game is IN the catalog by
+   * definition here (this call is what puts it there), which resimEnqueue
+   * refuses — rightly, for a person pasting a link. It dedupes on an active
+   * job, so a second teammate's upload of the same game adds nothing, and a
+   * held-back job is left held back. The publish is not rolled back if the
+   * announce finds nothing to do; there is simply no new row.
+   *
+   * The job id comes from the CALLER, like every other job creator here, so
+   * the object stays deterministic under test. Omitting it opts out entirely,
+   * which is what an internal caller with no re-sim intent does. */
+  upsert(e: ReplayEntry, resimJobId?: string): void {
     const prior = this.ctx.storage.sql
       .exec(`SELECT uploads FROM replays WHERE id = ?`, e.id)
       .toArray();
@@ -521,6 +627,9 @@ export class ReplayIndex extends DurableObject<Env> {
       Math.floor(Date.now() / 1000),
     );
     this.indexRow(e.id, e.players, e.settings);
+    if (resimJobId !== undefined && wantsFullView(e.uploaderAlly, uploads)) {
+      this.jobAnnounce(resimJobId, e.id, "resim");
+    }
   }
 
   /** setView records, by hand, whose point of view a replay was recorded from
@@ -623,7 +732,14 @@ export class ReplayIndex extends DurableObject<Env> {
                 (SELECT map_file FROM games g WHERE g.id = replays.id) AS map_file
          FROM replays
          ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
-         ORDER BY start_unix IS NULL, start_unix DESC, id
+         -- NULLs sort last here because SQL says so — NULL is smaller than
+         -- every value, so DESC puts them at the end — and NOT because of a
+         -- leading start_unix-IS-NULL term, which used to be written out and
+         -- said the same thing at a price: an EXPRESSION as the first sort key
+         -- disqualifies replays_start, so every listing sorted the whole table
+         -- in a temp b-tree and a LIMIT saved nothing. Measured over 3000 rows
+         -- asked for 50: 6000 rows read, against 101 with the index driving.
+         ORDER BY start_unix DESC, id
          ${window}`,
         ...args,
       )
@@ -880,47 +996,71 @@ export class ReplayIndex extends DurableObject<Env> {
   /** lobbiesMatch pairs unmatched observations with mirrored games and writes
    * the lobby name onto the games row. The signals and thresholds live in
    * pickLobbyMatches (teiserver.ts); this method is the SQL around it: the
-   * candidate reads — games in the union of every observation's time window,
-   * still unnamed — the two writes per match, and the pruning of matched
-   * observations whose name has long since moved to its games row.
+   * candidate reads — the games mirrored since the last run, and the
+   * observations that started around them — the two writes per match, and the
+   * pruning of matched observations whose name has long since moved to its
+   * games row.
    *
-   * A match usually lands tens of minutes after the observation: rts-api
-   * only learns a game when it ends, so every tick in between finds the same
-   * observation and no candidate, which costs one indexed SELECT. */
+   * A match usually lands tens of minutes after the observation: rts-api only
+   * learns a game when it ends, so every tick in between finds no arrival at
+   * all, which costs one indexed SELECT and stops there. */
   lobbiesMatch(): LobbyMatchResult {
     const sql = this.ctx.storage.sql;
     const now = Math.floor(Date.now() / 1000);
-    const lobbies: MatchLobby[] = sql
-      .exec(`SELECT lobby_id, started_unix, map, players FROM lobbies WHERE matched_game_id IS NULL`)
+    // ARRIVAL-DRIVEN, from the games side: the candidates are the games
+    // MIRRORED since the last run, not every unnamed game inside some open
+    // observation's window.
+    //
+    // The two are the same set, reached from opposite ends, and the difference
+    // is what they cost. A match becomes possible when the GAME arrives — the
+    // observation is always older, opened while the lobby was still playing
+    // it — so a game that failed to match on the tick it landed will not match
+    // on the next one either: nothing about either row changes afterwards.
+    // Re-asking every minute therefore re-read a widening slice of the mirror
+    // forever (the window is as old as the oldest observation, and unmatched
+    // observations are kept for good) to re-derive an answer that could not
+    // have changed. This reads the last minute's arrivals off games_synced,
+    // which on a normal tick is one or two rows.
+    const from = this.metaGet("lobby_match_synced") ?? now - LOBBY_MATCH_BACKLOG_SEC;
+    this.metaPut("lobby_match_synced", now);
+    const games: MatchGame[] = sql
+      .exec(
+        `SELECT id, start_unix, map, players FROM games
+         WHERE synced_unix >= ? AND lobby_name IS NULL AND start_unix IS NOT NULL`,
+        from,
+      )
       .toArray()
-      .map((r) => ({
-        lobbyId: r.lobby_id as number,
-        startedUnix: r.started_unix as number,
-        map: (r.map as string | null) ?? null,
-        players: r.players == null ? null : JSON.parse(r.players as string),
-      }));
+      .map((r) => {
+        const teams: CatalogTeam[] = r.players == null ? [] : JSON.parse(r.players as string);
+        return {
+          id: r.id as string,
+          startUnix: r.start_unix as number,
+          map: (r.map as string | null) ?? null,
+          players: teams.flatMap((t) => t.players.map((p) => p.name)),
+        };
+      });
     let matched = 0;
-    if (lobbies.length > 0) {
-      const starts = lobbies.map((l) => l.startedUnix);
+    // Non-null by the query's own predicate; flatMap rather than a cast so the
+    // guard below is the type narrowing too.
+    const starts = games.flatMap((g) => (g.startUnix === null ? [] : [g.startUnix]));
+    if (starts.length > 0) {
       // The gate is startedUnix - startUnix in [-EARLY_SLACK, +WINDOW]; this
-      // is that inequality solved for start_unix, over all observations.
-      const games: MatchGame[] = sql
+      // is that inequality solved for started_unix, over the arrivals — a few
+      // minutes of observations off lobbies_started.
+      const lobbies: MatchLobby[] = sql
         .exec(
-          `SELECT id, start_unix, map, players FROM games
-           WHERE lobby_name IS NULL AND start_unix IS NOT NULL AND start_unix BETWEEN ? AND ?`,
-          Math.min(...starts) - LOBBY_MATCH_WINDOW_SEC,
-          Math.max(...starts) + LOBBY_MATCH_EARLY_SLACK_SEC,
+          `SELECT lobby_id, started_unix, map, players FROM lobbies
+           WHERE matched_game_id IS NULL AND started_unix BETWEEN ? AND ?`,
+          Math.min(...starts) - LOBBY_MATCH_EARLY_SLACK_SEC,
+          Math.max(...starts) + LOBBY_MATCH_WINDOW_SEC,
         )
         .toArray()
-        .map((r) => {
-          const teams: CatalogTeam[] = r.players == null ? [] : JSON.parse(r.players as string);
-          return {
-            id: r.id as string,
-            startUnix: r.start_unix as number,
-            map: (r.map as string | null) ?? null,
-            players: teams.flatMap((t) => t.players.map((p) => p.name)),
-          };
-        });
+        .map((r) => ({
+          lobbyId: r.lobby_id as number,
+          startedUnix: r.started_unix as number,
+          map: (r.map as string | null) ?? null,
+          players: r.players == null ? null : JSON.parse(r.players as string),
+        }));
       for (const m of pickLobbyMatches(lobbies, games)) {
         sql.exec(
           `UPDATE games SET lobby_name = (SELECT name FROM lobbies WHERE lobby_id = ? AND started_unix = ?), lobby_id = ?
@@ -1051,12 +1191,21 @@ export class ReplayIndex extends DurableObject<Env> {
   jobsPending(kind: JobKind): IngestJob[] {
     const window = kind === "resim" ? STALE_PROCESSING_RESIM_SEC : STALE_PROCESSING_SEC;
     const staleBefore = Math.floor(Date.now() / 1000) - window;
+    // TWO branches over jobs_kind (kind, state, updated_unix) rather than one
+    // `state = 'pending' OR (state = 'processing' AND ...)`: the OR hides the
+    // state column and SQLite answers it by reading the whole jobs table —
+    // which two daemons poll every ten seconds, over a table that gains a row
+    // per upload and per re-sim and never loses one. Each branch here is a
+    // seek, so the read is the size of the ANSWER, not of the table.
     return this.ctx.storage.sql
       .exec(
         `SELECT ${JOB_COLS} FROM jobs
-         WHERE kind = ? AND disabled = 0
-           AND (state = 'pending' OR (state = 'processing' AND updated_unix < ?))
+           WHERE kind = ? AND state = 'pending' AND disabled = 0
+         UNION ALL
+         SELECT ${JOB_COLS} FROM jobs
+           WHERE kind = ? AND state = 'processing' AND disabled = 0 AND updated_unix < ?
          ORDER BY created_unix, id`,
+        kind,
         kind,
         staleBefore,
       )
@@ -1168,6 +1317,14 @@ export class ReplayIndex extends DurableObject<Env> {
    * another. The check and the insert are one RPC — the DO is single-threaded,
    * so two daemons polling together cannot both queue the same game.
    *
+   * And it is bounded twice over, in SIZE and in RATE — it looks at the newest
+   * BACKFILL_INSPECT games and then rests for BACKFILL_COOLDOWN_SEC, whether
+   * or not it found one. Both bounds are there for the same reason: this is
+   * the only query on a ten-second poll whose cost grows with the mirror,
+   * which grows by ~2000 games a day forever. Unbounded, it once read the
+   * whole table 8640 times a day and spent the account's entire daily
+   * rows-read budget on finding nothing.
+   *
    * This makes a GET write, which is the deliberate cost of leaving the
    * daemon's protocol alone: a poll that returns a job it just created is
    * indistinguishable, to the daemon, from one that returns a job a person
@@ -1175,11 +1332,25 @@ export class ReplayIndex extends DurableObject<Env> {
   jobsOffer(kind: JobKind, newJobId: string): IngestJob[] {
     const pending = this.jobsPending(kind);
     if (pending.length > 0 || kind !== "resim") return pending;
+    // The backfill RESTS between attempts. Everything above this line is a
+    // seek; the scan below is the one query on the poll path whose cost is
+    // measured in the size of the mirror, and an idle daemon asks 8640 times a
+    // day for work that takes an hour to do. The cooldown is taken whatever
+    // the outcome — a scan that finds nothing costs exactly as much as one
+    // that finds a game, and "nothing to do" is precisely the state a daemon
+    // sits in while polling.
+    const now = Math.floor(Date.now() / 1000);
+    const restUntil = this.metaGet("backfill_after");
+    if (restUntil !== null && now < restUntil) return [];
+    this.metaPut("backfill_after", now + BACKFILL_COOLDOWN_SEC);
     const candidate = this.ctx.storage.sql
       .exec(
         `SELECT id FROM (
            SELECT g.id AS id, g.player_count AS player_count, g.start_unix AS start_unix
-           FROM games g
+           -- The newest BACKFILL_INSPECT games, read off games_start: a bounded
+           -- walk, where filtering the whole table and stopping after 20
+           -- candidates reads every row whenever there are fewer than 20.
+           FROM (SELECT id, player_count, start_unix FROM games ORDER BY start_unix DESC LIMIT ?) g
            WHERE NOT EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id)
              AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = g.id)
              AND NOT EXISTS (SELECT 1 FROM replay_settings s WHERE s.replay_id = g.id AND s.flag = ?)
@@ -1190,6 +1361,7 @@ export class ReplayIndex extends DurableObject<Env> {
          -- goes last, and an exact tie goes to the newer one.
          ORDER BY player_count IS NULL, player_count DESC, start_unix DESC, id
          LIMIT 1`,
+        BACKFILL_INSPECT,
         // Read from the derived table rather than the row's settings JSON: the
         // flag index (flag, replay_id) makes it a seek, and a mirrored game
         // always owns its own entries there — a game the catalog owns instead
@@ -1330,10 +1502,28 @@ export class ReplayIndex extends DurableObject<Env> {
       finite(p.swapBytes),
       finite(p.cpuPct),
     );
-    const n = this.ctx.storage.sql
+    // The cap is checked against the CACHED count and confirmed against the
+    // table only when that count says the series is full — so the ordinary
+    // beat reads nothing at all, and the exact count is paid once per job (and
+    // once per thin), instead of once per beat.
+    const cached = this.sampleCounts.get(jobId);
+    const n = cached === undefined ? this.jobSampleCount(jobId) : cached + 1;
+    this.sampleCounts.set(jobId, n);
+    if (n > MAX_JOB_SAMPLES) {
+      const exact = this.jobSampleCount(jobId);
+      if (exact > MAX_JOB_SAMPLES) {
+        this.jobSampleThin(jobId);
+        this.sampleCounts.set(jobId, this.jobSampleCount(jobId));
+      } else {
+        this.sampleCounts.set(jobId, exact);
+      }
+    }
+  }
+
+  private jobSampleCount(jobId: string): number {
+    return this.ctx.storage.sql
       .exec(`SELECT COUNT(*) AS n FROM job_samples WHERE job_id = ?`, jobId)
       .toArray()[0].n as number;
-    if (n > MAX_JOB_SAMPLES) this.jobSampleThin(jobId);
   }
 
   /** jobSampleThin halves a job's series in place, keeping the first and last
@@ -1354,17 +1544,40 @@ export class ReplayIndex extends DurableObject<Env> {
     );
   }
 
-  /** jobSamplePrune drops the history of jobs that finished before `before`,
-   * and of any job row that is gone entirely. Called from the cron, which is
-   * the worker's only periodic hook; the table would otherwise be the one thing
-   * here that grows without a rule. Returns how many rows it removed. */
+  /** jobSamplePrune drops the history of the jobs that finished before
+   * `before`. Called from the cron; the table would otherwise be the one thing
+   * here that grows without a rule. Returns how many rows it removed.
+   *
+   * Driven from the JOBS table, over a BAND of finishing times, which is two
+   * deliberate narrowings of the obvious query.
+   *
+   * Jobs-first, because `SELECT DISTINCT job_id FROM job_samples` reads every
+   * sample ever recorded — tens of thousands of rows, every time it is asked,
+   * to name a few dozen jobs the jobs table can name from an index. (That also
+   * gives up finding samples whose job row is GONE: nothing in this worker
+   * deletes a job, so there are none, and hunting for them was the entire cost
+   * of the query.)
+   *
+   * The band, because a job that finished a year ago is 'done' forever: asked
+   * for everything older than the cutoff, this would re-probe every job it has
+   * already pruned, for as long as the deployment lives. The watermark is the
+   * cutoff of the last run, so each finished job is visited exactly once, on
+   * the run after it ages out. */
   jobSamplePrune(before: number): number {
+    const from = this.metaGet("samples_pruned_before") ?? 0;
+    this.metaPut("samples_pruned_before", before);
+    if (before <= from) return 0;
     const cur = this.ctx.storage.sql.exec(
+      // One branch per terminal state so both are seeks on jobs_state
+      // (state, updated_unix); `state IN (...)` over a range is not.
       `DELETE FROM job_samples WHERE job_id IN (
-         SELECT s.job_id FROM (SELECT DISTINCT job_id FROM job_samples) s
-         LEFT JOIN jobs j ON j.id = s.job_id
-         WHERE j.id IS NULL OR (j.state IN ('done', 'error') AND j.updated_unix < ?)
+         SELECT id FROM jobs WHERE state = 'done'  AND updated_unix >= ? AND updated_unix < ?
+         UNION ALL
+         SELECT id FROM jobs WHERE state = 'error' AND updated_unix >= ? AND updated_unix < ?
        )`,
+      from,
+      before,
+      from,
       before,
     );
     return cur.rowsWritten;
@@ -1467,6 +1680,11 @@ export class ReplayIndex extends DurableObject<Env> {
     // and only when there is something to record — a terminal report carries no
     // progress, and the beats already recorded are the run's record.
     if (state === "processing" && progress !== null) this.jobSampleRecord(id, now, progress);
+    // A finished job beats no more, so its cached sample count is dead weight
+    // (and would be wrong if the row were ever revived by a claim, which
+    // clears nothing here — the count is rebuilt from the table on the next
+    // beat either way).
+    else if (state !== "processing") this.sampleCounts.delete(id);
     // The catalog follows the job either way: into the list when work starts
     // (this is the other door into "processing" — a daemon that reports it
     // without claiming, and every heartbeat, which is harmless since the row

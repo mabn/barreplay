@@ -99,7 +99,11 @@ app.put("/api/replays/:id", async (c) => {
   }
   const entry = sanitizeEntry(c.req.param("id"), body);
   if (typeof entry === "string") return c.json({ error: entry }, 400);
-  await indexStub(c.env).upsert(entry);
+  // The id the row's re-simulation would be queued under, if this publish
+  // leaves the game one-sided (ReplayIndex.upsert decides; most publishes do
+  // not, and an unused uuid costs nothing). Generated HERE, like every other
+  // job id, so the Durable Object stays deterministic under test.
+  await indexStub(c.env).upsert(entry, crypto.randomUUID());
   return c.json({ ok: true });
 });
 
@@ -340,15 +344,17 @@ app.get("/api/queue", async (c) => {
   );
 });
 
-// Work the DAEMON found for itself, announced so that it is visible while it
-// runs and has somewhere to report onto.
+// Queue a re-sim for a game the OPEN door refuses: one that is already in the
+// catalog.
 //
-// The re-sim daemon does not only take queued work: it also scans the catalog
-// for games whose only upload is one-sided (a player's point of view, no full
-// view yet) and re-simulates those. Every such game is already in the catalog,
-// so POST /api/resim refuses it as published — which is the right answer to a
-// PERSON pasting a link and the wrong one here, where the work is already
-// happening. Announcing creates the row for it.
+// That refusal is right for a person pasting a link — the game is published,
+// there is something to watch — but it is not right for the two cases where a
+// published game still wants re-simulating: an upload that only ever saw one
+// side (the publish announces those itself, ReplayIndex.upsert -> jobAnnounce,
+// which is this route's own DO method), and a re-sim that FAILED, whose job row
+// is the record of the attempt and whose game the paste box will now refuse
+// forever. This is the door for the second one. It was the daemon's, back when
+// it searched the catalog for the first.
 //
 // GUARDED, unlike /api/resim: this is the one door into the job table with no
 // refusals behind it, and the refusals are what keep the open one from being a
