@@ -168,20 +168,36 @@ test("publishing a mirrored game takes ownership of its entries", async () => {
   });
 });
 
-test("the filter bar's facets ignore games nothing has published", async () => {
-  await inIndex((index) => {
-    index.upsert(replay("published"));
-    index.gamesInsert([game("mirrored")]);
-
-    const f = index.facets();
+test("the maps list is maintained by publishes, not scanned per read", async () => {
+  await inIndex((index, sql) => {
+    index.upsert(replay("a", { map: "Great Divide V1" }));
+    index.upsert(replay("b", { map: "All That Glitters v2" }));
+    // A second publish of a known map adds nothing.
+    index.upsert(replay("c", { map: "Great Divide V1" }));
     // The mirror is thousands of games with no listable replay behind them:
-    // offering their names and flags would be offering filters that can only
-    // produce an empty list.
-    expect(f.players).toEqual(["Uploader"]);
-    expect(f.settings).toEqual(["lava"]);
-    // The catalog's own facets are unaffected.
-    expect(f.maps).toEqual(["Great Divide V1"]);
-    expect(f.sizes).toEqual([1]);
+    // a mirrored game's map must not become a choice that filters to an
+    // empty list.
+    index.gamesInsert([game("mirrored", { map: "Mirror Only Map" })]);
+    // A publish with no map has nothing to add.
+    index.upsert(replay("d", { map: null }));
+
+    expect(index.mapNames()).toEqual(["All That Glitters v2", "Great Divide V1"]);
+    // The list is a maintained unique_values row, sorted, not a DISTINCT scan.
+    expect(rows(sql, `SELECT value FROM unique_values WHERE key = 'maps'`)).toEqual([
+      { value: JSON.stringify(["All That Glitters v2", "Great Divide V1"]) },
+    ]);
+  });
+});
+
+test("mapNames serves from memory between writes", async () => {
+  await inIndex((index, sql) => {
+    index.upsert(replay("a", { map: "Great Divide V1" }));
+    expect(index.mapNames()).toEqual(["Great Divide V1"]);
+    // Prove the cache answers: yank the table out from under it. (A minute's
+    // staleness is the accepted worst case after an eviction; every write
+    // path refreshes the copy, so a new map still shows up immediately.)
+    sql.exec(`DELETE FROM unique_values`);
+    expect(index.mapNames()).toEqual(["Great Divide V1"]);
   });
 });
 
@@ -1259,7 +1275,7 @@ test("a failing schema check or derived rebuild never kills construction", async
   });
 });
 
-test("player filter and facets read the roster JSON directly", async () => {
+test("the player filter reads the roster JSON directly", async () => {
   await inIndex((index) => {
     index.upsert(replay("r1"));
     index.gamesInsert([game("m1")]);
@@ -1268,7 +1284,6 @@ test("player filter and facets read the roster JSON directly", async () => {
     expect(index.list({ ...emptyFilter(), player: "nobody" })).toEqual([]);
     // A LIKE wildcard in the needle is a literal, not a wildcard.
     expect(index.list({ ...emptyFilter(), player: "%" })).toEqual([]);
-    expect(index.facets().players).toEqual(["Uploader"]);
   });
 });
 

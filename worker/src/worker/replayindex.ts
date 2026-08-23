@@ -34,13 +34,12 @@ import type {
 import { LOBBY_MATCH_EARLY_SLACK_SEC, LOBBY_MATCH_WINDOW_SEC, pickLobbyMatches } from "./teiserver";
 import type { LobbyMatchResult, LobbyObservation, MatchGame, MatchLobby, OpenLobby } from "./teiserver";
 import {
-  FACET_PLAYERS_MAX,
   SETTINGS_MODS_FLAG,
   derivePlayerCount,
   mergeUploads,
   wantsFullView,
 } from "./replayentry";
-import type { CatalogTeam, ReplayEntry, ReplayFacets, ReplayFilter, UploadRef } from "./replayentry";
+import type { CatalogTeam, ReplayEntry, ReplayFilter, UploadRef } from "./replayentry";
 
 export type {
   IngestJob,
@@ -188,15 +187,15 @@ function progressPercent(progressJSON: unknown): number | null {
  * replays row — so bumping this runs a one-time pass on the next wake
  * (ensureDerived holds the CURRENT bump's work; a new version replaces that
  * block with its own). v1 backfilled rows that predate the derived data;
- * every deployment has long since run it. */
-const DERIVED_VERSION = 1;
+ * v2 seeded unique_values('maps') from the catalog's existing rows. */
+const DERIVED_VERSION = 2;
 
 /** Version of the SCHEMA itself, stamped into the schema_version table by the
  * migration that produced it. schemaCurrent reads this one row to decide
  * whether the DDL needs to run at all — a read, where the DDL statements are
  * write-classified even as no-ops. BUMP THIS whenever SCHEMA_DDL, INDEX_DDL
  * or ADDED_COLUMNS change, or the change never reaches a deployed database. */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 /** Everything migrateSchema creates, split from the code so schemaCurrent can
  * scan the same text it executes (one source, nothing to drift). */
@@ -266,6 +265,17 @@ const SCHEMA_DDL = `
       CREATE TABLE IF NOT EXISTS schema_meta (
         key   TEXT PRIMARY KEY,
         value INTEGER NOT NULL
+      );
+      -- Small maintained lists, one row per kind, each value a JSON array.
+      -- The one row today is key='maps': every distinct map in the CATALOG
+      -- (mirror games deliberately excluded — their maps have nothing
+      -- listable behind them). Maintained by upsert as replays are published
+      -- and served by mapNames() behind a one-minute in-memory cache, so the
+      -- filter bar's combobox costs one row read a minute where the facets
+      -- endpoint it replaces ran DISTINCT over the whole catalog per call.
+      CREATE TABLE IF NOT EXISTS unique_values (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
       );
       -- One row: the SCHEMA_VERSION the last completed migration stamped.
       -- Its absence is itself the signal (schemaCurrent): a database from
@@ -461,25 +471,11 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   ["replays", "placeholder INTEGER NOT NULL DEFAULT 0"],
 ];
 
-/** The player-name facet: every distinct roster name in the catalog, deduped
- * case-insensitively (keeping the alphabetically first spelling), ordered by
- * the folded name, capped at FACET_PLAYERS_MAX. */
-function facetPlayers(sql: SqlStorage): string[] {
-  const byLower = new Map<string, string>();
-  for (const r of sql.exec(`SELECT players FROM replays WHERE players IS NOT NULL`).toArray()) {
-    for (const team of JSON.parse(r.players as string) as CatalogTeam[]) {
-      for (const p of team.players) {
-        const lower = p.name.toLowerCase();
-        const prev = byLower.get(lower);
-        if (prev === undefined || p.name < prev) byLower.set(lower, p.name);
-      }
-    }
-  }
-  return [...byLower.entries()]
-    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
-    .slice(0, FACET_PLAYERS_MAX)
-    .map(([, name]) => name);
-}
+/** How long mapNames' in-memory copy of the maps list is served before the
+ * unique_values row is read again. Every write path refreshes the copy, so
+ * the TTL is a backstop against anything else touching the table, not the
+ * consistency mechanism. */
+const MAPS_CACHE_MS = 60_000;
 
 /** Escape a string for use inside a LIKE pattern with ESCAPE '\\':
  * backslash first covers the escapes it is about to add, then the wildcards. */
@@ -503,6 +499,11 @@ export class ReplayIndex extends DurableObject<Env> {
    * row while this counts two), which is why crossing the cap re-counts for
    * real before thinning anything. Entries are dropped when the job ends. */
   private sampleCounts = new Map<string, number>();
+
+  /** mapNames' in-memory copy of the maps list (MAPS_CACHE_MS). Refreshed by
+   * every write to the row, so like sampleCounts it is a cache of something
+   * the table already knows and costs nothing to lose. */
+  private mapsCache: { at: number; maps: string[] } | null = null;
 
   /** What each method has cost in SQLite rows since this instance started —
    * the live counterpart of tests/do/rowcost.test.ts, served by
@@ -659,9 +660,11 @@ export class ReplayIndex extends DurableObject<Env> {
         .exec(`SELECT value FROM schema_meta WHERE key = 'derived_version'`)
         .toArray();
       if ((have.length > 0 ? (have[0].value as number) : 0) >= DERIVED_VERSION) return;
-      // v1's backfill ran everywhere long ago; a fresh database has nothing
-      // to derive (its rows arrive through upsert, which indexes as it
-      // writes). So the current bump's only work is stamping the version.
+      // v2: seed the maps list from the rows already in the catalog. Upsert
+      // maintains it for every publish from here on; this one pass is what
+      // hands the deployed rows their entry (a fresh database derives an
+      // empty list, which is equally right).
+      this.rebuildMapsList();
       this.ctx.storage.sql.exec(
         `INSERT INTO schema_meta (key, value) VALUES ('derived_version', ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
@@ -846,6 +849,7 @@ export class ReplayIndex extends DurableObject<Env> {
       Math.floor(Date.now() / 1000),
     );
     this.indexSettings(e.id, e.settings);
+    this.noteMap(e.map);
     if (resimJobId !== undefined && wantsFullView(e.uploaderAlly, uploads)) {
       this.jobAnnounce(resimJobId, e.id, "resim");
     }
@@ -1011,38 +1015,68 @@ export class ReplayIndex extends DurableObject<Env> {
     }));
   }
 
-  /** facets returns the distinct values the filter UI offers as choices, so a
-   * map or size that no replay has is never presented. Computed over the WHOLE
-   * catalog, not the current result set: a filter bar whose options shrink as
-   * you use it cannot be used to change your mind. */
-  facets(): ReplayFacets {
-    const sql = this.ctx.storage.sql;
-    const col = <T>(q: string, key: string): T[] => sql.exec(q).toArray().map((r) => r[key] as T);
-    const span = sql.exec(`SELECT MIN(start_unix) AS lo, MAX(start_unix) AS hi FROM replays`).toArray();
-    return {
-      maps: col<string>(`SELECT DISTINCT map FROM replays WHERE map IS NOT NULL ORDER BY map`, "map"),
-      sizes: col<number>(
-        `SELECT DISTINCT player_count FROM replays WHERE player_count IS NOT NULL ORDER BY player_count`,
-        "player_count",
-      ),
-      // The completion list, straight from the roster JSON on the catalog's
-      // own rows — one pass over a small table on a human-initiated read
-      // (replay_players, which used to serve this, is gone; see SCHEMA_DDL).
-      // Reading `replays` alone also keeps the mirror's thousands of
-      // unpublished games out, the restriction the old query spelled as a
-      // subselect over ids the catalog holds.
-      players: facetPlayers(sql),
-      // Restricted to ids the CATALOG holds, because replay_settings also
-      // carries the games mirror — thousands of games nothing has published,
-      // whose flags would be options that filter to an empty list.
-      settings: col<string>(
-        `SELECT DISTINCT flag FROM replay_settings
-         WHERE replay_id IN (SELECT id FROM replays) ORDER BY flag`,
-        "flag",
-      ),
-      from: span.length ? ((span[0].lo as number | null) ?? null) : null,
-      to: span.length ? ((span[0].hi as number | null) ?? null) : null,
-    };
+  /** mapNames serves the catalog's distinct map names, sorted — the choices
+   * behind the filter bar's map combobox, and the one filter list that cannot
+   * be hardcoded. It reads the maintained unique_values row (see SCHEMA_DDL)
+   * through a one-minute in-memory copy, so the recurring cost is one row a
+   * minute however often the landing page loads; the facets() this replaces
+   * ran DISTINCT scans over the whole catalog on every call. */
+  mapNames(): string[] {
+    if (this.mapsCache !== null && Date.now() - this.mapsCache.at < MAPS_CACHE_MS) {
+      return this.mapsCache.maps;
+    }
+    const maps = this.storedMaps();
+    this.mapsCache = { at: Date.now(), maps };
+    return maps;
+  }
+
+  /** storedMaps reads the maps list off its unique_values row: one row, or
+   * none on a database from before the table was seeded (an empty list — the
+   * next publish or the derived backfill fills it in). */
+  private storedMaps(): string[] {
+    const r = this.ctx.storage.sql
+      .exec(`SELECT value FROM unique_values WHERE key = 'maps'`)
+      .toArray();
+    if (r.length === 0) return [];
+    try {
+      const parsed = JSON.parse(r[0].value as string) as unknown;
+      return Array.isArray(parsed) ? parsed.filter((m): m is string => typeof m === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** noteMap folds one published replay's map into the maps list, if it is
+   * new: a membership check against the stored row (one read), a write only
+   * when the catalog actually gained a map — which is almost never, maps
+   * being a small fixed pool next to the games played on them. The in-memory
+   * copy is refreshed with the write, so a new map is offered immediately. */
+  private noteMap(map: string | null): void {
+    if (map === null || map === "") return;
+    const maps = this.storedMaps();
+    if (maps.includes(map)) return;
+    const next = [...maps, map].sort();
+    this.ctx.storage.sql.exec(
+      `INSERT INTO unique_values (key, value) VALUES ('maps', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      JSON.stringify(next),
+    );
+    this.mapsCache = { at: Date.now(), maps: next };
+  }
+
+  /** rebuildMapsList recomputes the maps row from the whole catalog — the
+   * derived backfill (one-time, see ensureDerived), never a serving path. */
+  private rebuildMapsList(): void {
+    const maps = this.ctx.storage.sql
+      .exec(`SELECT DISTINCT map FROM replays WHERE map IS NOT NULL ORDER BY map`)
+      .toArray()
+      .map((r) => r.map as string);
+    this.ctx.storage.sql.exec(
+      `INSERT INTO unique_values (key, value) VALUES ('maps', ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      JSON.stringify(maps),
+    );
+    this.mapsCache = { at: Date.now(), maps };
   }
 
   /** refreshFromApi replaces one row's settings badges and players roster

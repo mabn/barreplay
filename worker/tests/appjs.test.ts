@@ -603,7 +603,7 @@ test('a wiped-out team speaks from where it was last seen', () => {
 });
 
 // Opening ?replay=<id> directly must not fetch the replay TABLE's data. The
-// catalog listing and the filter facets feed a table that visit never renders,
+// catalog listing and the filter bar's map list feed a table that visit never renders,
 // and paying for them first delayed the replay every shared link is actually
 // for. They now load when the list view is first shown, and only then.
 test('the catalog is fetched for the list view, not for a direct replay link', async () => {
@@ -651,7 +651,7 @@ test('the catalog is fetched for the list view, not for a direct replay link', a
   let s = direct.stats();
   assert.equal(s.opened, 'f8e5816a04505f9c2b5b69a6a458b696-9942e3d8', 'the replay is opened');
   assert.equal(s.lists, 0, 'no catalog listing fetched for a direct link');
-  assert.equal(s.filters, 0, 'no facets fetched for a direct link');
+  assert.equal(s.filters, 0, 'no filter data fetched for a direct link');
 
   // The list view still loads both, exactly once however often it is shown
   // (returning from a replay re-renders but must not re-fetch).
@@ -661,7 +661,7 @@ test('the catalog is fetched for the list view, not for a direct replay link', a
   await home.ensureHomeData();
   s = home.stats();
   assert.equal(s.lists, 1, 'catalog fetched once for the list view');
-  assert.equal(s.filters, 1, 'facets fetched once for the list view');
+  assert.equal(s.filters, 1, 'filter data fetched once for the list view');
   assert.ok(s.renders >= 1, 'the table is rendered');
 });
 
@@ -874,7 +874,7 @@ test('the Players header swaps the column to lobby names and back', () => {
   assert.equal(plain.onclick, null);
 });
 
-test('the players filter is a two-ended range over the sizes present', () => {
+test('the players filter is a two-ended range over a fixed domain', () => {
   const extract = (n: string) => {
     const start = APP.indexOf(`function ${n}(`);
     if (start < 0) throw new Error('not found: ' + n);
@@ -885,8 +885,18 @@ test('the players filter is a two-ended range over the sizes present', () => {
     }
     throw new Error('unbalanced: ' + n);
   };
+  // Taken from the source rather than restated, so the test cannot claim a
+  // domain the page does not offer. Hardcoded (it used to be a facet computed
+  // from the catalog per page load), so it must cover every game BAR runs.
+  const loLine = /const PLAYERS_MIN = (\d+);/.exec(APP);
+  const hiLine = /const PLAYERS_MAX = (\d+);/.exec(APP);
+  assert.ok(loLine && hiLine, 'PLAYERS_MIN/PLAYERS_MAX are declared');
+  const LO = Number(loLine![1]);
+  const HI = Number(hiLine![1]);
+  assert.equal(LO, 2, 'the range starts at a duel');
+  assert.equal(HI, 32, 'the range tops out past the biggest real games');
 
-  const boot = (query: string, sizes: number[]) => {
+  const boot = (query: string) => {
     const dom = fakeDom();
     const state = { href: 'https://x/' + query, reloads: 0 };
     const run = eval(`(function(){
@@ -894,49 +904,52 @@ test('the players filter is a two-ended range over the sizes present', () => {
       const location = { get href() { return state.href; } };
       const history = { replaceState: (_a, _b, u) => { state.href = String(u); } };
       const reloadList = () => { state.reloads++; };
+      const PLAYERS_MIN = ${LO}, PLAYERS_MAX = ${HI};
       ${extract('initDualRange')}
       ${extract('initSizeRange')}
       return initSizeRange;
     })()`);
-    run(new URLSearchParams(query), sizes);
+    run(new URLSearchParams(query));
     const id = (x: string) => dom.document.getElementById(x);
     return { dom, state, id, params: () => new URL(state.href).searchParams };
   };
 
-  // Restored from the URL, and the domain is the catalog's own span.
+  // Restored from the URL, over the fixed domain.
   {
-    const b = boot('?minPlayers=4&maxPlayers=8', [2, 4, 8, 16]);
-    assert.equal(b.id('f_smin').min, '2');
-    assert.equal(b.id('f_smax').max, '16');
+    const b = boot('?minPlayers=4&maxPlayers=8');
+    assert.equal(b.id('f_smin').min, String(LO));
+    assert.equal(b.id('f_smax').max, String(HI));
     assert.equal(b.id('f_smin').value, '4');
     assert.equal(b.id('f_smax').value, '8');
     assert.equal(b.id('f_sizeout').textContent, '4–8');
     assert.ok(b.id('f_sizerange').classList.contains('narrowed'));
   }
 
-  // No params: both thumbs at their ends, and the label says so rather than
-  // showing a range that happens to match everything.
+  // No params: both thumbs at their ends, the control shown, and the label
+  // saying so rather than showing a range that happens to match everything.
   {
-    const b = boot('', [2, 16]);
-    assert.equal(b.id('f_smin').value, '2');
-    assert.equal(b.id('f_smax').value, '16');
+    const b = boot('');
+    assert.equal(b.id('f_sizefilter').style.display, '');
+    assert.equal(b.id('f_smin').value, String(LO));
+    assert.equal(b.id('f_smax').value, String(HI));
     assert.equal(b.id('f_sizeout').textContent, 'any');
     assert.ok(!b.id('f_sizerange').classList.contains('narrowed'));
   }
 
   // Dragging the left thumb writes only the bound it changed: a thumb parked
-  // at its end is not a filter, so the other param stays absent.
+  // at its end is not a filter, so the other param stays absent — which is
+  // also what gives the top end its "and bigger" reading.
   {
-    const b = boot('', [2, 16]);
+    const b = boot('');
     b.id('f_smin').value = '8';
     b.id('f_smin').oninput();
     b.id('f_smin').onchange();
     assert.equal(b.params().get('minPlayers'), '8');
     assert.equal(b.params().get('maxPlayers'), null, 'the untouched end is not a filter');
-    assert.equal(b.id('f_sizeout').textContent, '8–16');
+    assert.equal(b.id('f_sizeout').textContent, '8+', 'the open top end reads as a floor');
 
     // ...and sliding it back clears it again, so the URL returns to unfiltered.
-    b.id('f_smin').value = '2';
+    b.id('f_smin').value = String(LO);
     b.id('f_smin').oninput();
     b.id('f_smin').onchange();
     assert.equal(b.params().get('minPlayers'), null);
@@ -946,7 +959,7 @@ test('the players filter is a two-ended range over the sizes present', () => {
   // The thumbs push rather than cross: the max cannot be dragged below the
   // min, which would be a range matching nothing.
   {
-    const b = boot('?minPlayers=8', [2, 16]);
+    const b = boot('?minPlayers=8');
     b.id('f_smax').value = '4';
     b.id('f_smax').oninput();
     b.id('f_smax').onchange();
@@ -958,34 +971,27 @@ test('the players filter is a two-ended range over the sizes present', () => {
   // A hand-edited URL with the bounds crossed is straightened out rather than
   // shown as thumbs that have swapped places.
   {
-    const b = boot('?minPlayers=12&maxPlayers=4', [2, 16]);
+    const b = boot('?minPlayers=12&maxPlayers=4');
     assert.equal(b.id('f_smin').value, '4');
     assert.equal(b.id('f_smax').value, '4');
   }
 
-  // Values outside the catalog's span are clamped into it.
+  // Values outside the domain are clamped into it.
   {
-    const b = boot('?minPlayers=1&maxPlayers=99', [2, 16]);
-    assert.equal(b.id('f_smin').value, '2');
-    assert.equal(b.id('f_smax').value, '16');
-  }
-
-  // One distinct size is nothing to slide between, so the control is left out.
-  {
-    const b = boot('', [8]);
-    assert.equal(b.id('f_sizefilter').style.display, 'none');
-    assert.equal(boot('', []).id('f_sizefilter').style.display, 'none');
+    const b = boot('?minPlayers=1&maxPlayers=99');
+    assert.equal(b.id('f_smin').value, String(LO));
+    assert.equal(b.id('f_smax').value, String(HI));
   }
 
   // Overlapping thumbs stay separable: the side of them the pointer is on
   // decides which one a press will grab.
   {
-    const b = boot('?minPlayers=8&maxPlayers=8', [0, 16]);
+    const b = boot('?minPlayers=8&maxPlayers=8');
     const rail = b.id('f_sizerange');
     rail.getBoundingClientRect = () => ({ left: 0, width: 160 });
-    rail.onpointerdown({ clientX: 40, buttons: 0 });   // left of the pair
+    rail.onpointerdown({ clientX: 16, buttons: 0 });   // left of the pair (≈5 players)
     assert.ok(+b.id('f_smin').style.zIndex > +b.id('f_smax').style.zIndex);
-    rail.onpointerdown({ clientX: 120, buttons: 0 });  // right of it
+    rail.onpointerdown({ clientX: 120, buttons: 0 });  // right of it (≈24 players)
     assert.ok(+b.id('f_smax').style.zIndex > +b.id('f_smin').style.zIndex);
   }
 });

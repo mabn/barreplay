@@ -3296,11 +3296,16 @@ async function fetchReplayList() {
 // replayHref carries it into a replay so the back button returns to the same
 // filtered list.
 //
-// The bar is shown only once /api/replays/facets answers: the Go viz server
+// The bar is shown only once /api/replays/maps answers: the Go viz server
 // serves the same catalog shape from local files with no filtering behind it,
-// and a filter bar that silently does nothing is worse than none.
+// and a filter bar that silently does nothing is worse than none. That one
+// small request (a maintained list, cached a minute in the worker) is all the
+// bar needs from the server — every other control is hardcoded here: the
+// settings chips are a fixed vocabulary (SETTINGS_BADGES), the two ranges
+// have fixed domains, the player and id fields are free text. The facets
+// endpoint that used to feed them scanned the whole catalog per page load.
 const FILTER_KEYS = ['from', 'to', 'map', 'minPlayers', 'maxPlayers', 'minDuration', 'maxDuration', 'id', 'player', 'settings'];
-let facets = null;
+let knownMaps = [];
 
 // filterQuery renders the active filters as a query string (empty when none
 // are set). Read from the URL, so it is the same source the controls restore
@@ -3403,14 +3408,15 @@ function gameIdIn(raw) {
   return runs ? runs.reduce((a, b) => (b.length >= a.length ? b : a)) : s;
 }
 
-// initFilters builds the bar from the catalog's facets (so every option offered
-// matches at least one replay) and restores the controls from the URL. A
-// backend without the endpoint leaves the bar hidden.
+// initFilters builds the bar and restores the controls from the URL. The one
+// thing fetched is the map list (the combobox's choices, so every map offered
+// matches at least one replay); a backend without the endpoint leaves the bar
+// hidden.
 async function initFilters() {
   try {
-    const r = await fetch('/api/replays/facets');
+    const r = await fetch('/api/replays/maps');
     if (!r.ok) return;
-    facets = await r.json();
+    knownMaps = (await r.json()).maps || [];
   } catch (_) { return; }
 
   const box = document.getElementById('filters');
@@ -3429,7 +3435,7 @@ async function initFilters() {
   const mapIn = el('f_map');
   const mapList = document.getElementById('f_maps');
   mapList.innerHTML = '';
-  (facets.maps || []).forEach(m => {
+  knownMaps.forEach(m => {
     const o = document.createElement('option');
     o.value = m;
     mapList.appendChild(o);
@@ -3441,39 +3447,35 @@ async function initFilters() {
     mapTyping = setTimeout(() => {
       const v = mapIn.value.trim().toLowerCase();
       if (v === '') { setFilter('map', ''); return; }
-      const maps = facets.maps || [];
-      const exact = maps.find(m => m.toLowerCase() === v);
-      const holding = maps.filter(m => m.toLowerCase().includes(v));
+      const exact = knownMaps.find(m => m.toLowerCase() === v);
+      const holding = knownMaps.filter(m => m.toLowerCase().includes(v));
       const pick = exact ?? (holding.length === 1 ? holding[0] : null);
       if (pick) setFilter('map', pick);
     }, 300);
   };
 
-  // Players: a range with two thumbs, spanning the sizes the catalog actually
-  // holds. Both bounds are one gesture — drag the left thumb for the fewest,
-  // the right for the most — where the exact-count select it replaces could
-  // only ever ask for one size at a time, so "everything bigger than a duel"
-  // meant editing the URL by hand. The API took min/max all along.
-  initSizeRange(cur, facets.sizes || []);
+  // Players: a range with two thumbs. Both bounds are one gesture — drag the
+  // left thumb for the fewest, the right for the most — where the exact-count
+  // select it replaced could only ever ask for one size at a time, so
+  // "everything bigger than a duel" meant editing the URL by hand. The API
+  // took min/max all along.
+  initSizeRange(cur);
   // Duration is the same control over a fixed 0..1h domain — see
   // DURATION_MAX_SEC for why it is fixed and what its top end means.
   initDurationRange(cur);
 
   const from = el('f_from'), to = el('f_to');
-  from.value = ymd(cur.get('from'), facets.from);
-  to.value = ymd(cur.get('to'), facets.to);
+  from.value = ymd(cur.get('from'));
+  to.value = ymd(cur.get('to'));
   from.onchange = () => setFilter('from', from.value);
   to.onchange = () => setFilter('to', to.value);
 
+  // Player: free text, matched as a prefix server-side. There is no
+  // completion list behind it any more — the facets endpoint used to walk
+  // every roster in the catalog to offer one, which cost far more than an
+  // input box is worth.
   const player = el('f_player');
   player.value = cur.get('player') ?? '';
-  const names = document.getElementById('f_players');
-  names.innerHTML = '';
-  (facets.players || []).forEach(n => {
-    const o = document.createElement('option');
-    o.value = n;
-    names.appendChild(o);
-  });
   // Typing filters on every keystroke, so debounce: each change is a query.
   let typing = null;
   player.oninput = () => {
@@ -3495,13 +3497,15 @@ async function initFilters() {
     idTyping = setTimeout(() => setFilter('id', gameIdIn(idIn.value)), 300);
   };
 
+  // Settings chips: HARDCODED from the badge vocabulary rather than read off
+  // the catalog — the set of flags a publish can record is fixed (the server
+  // refuses anything else), so there is nothing to ask the server for. The
+  // HIDDEN_SETTINGS flags are simply not in SETTINGS_BADGES: filtering by a
+  // flag the list never shows would be filtering by something invisible.
   const chips = el('f_settings');
   chips.innerHTML = '';
   const active = new Set((cur.get('settings') ?? '').split(',').filter(Boolean));
-  for (const flag of facets.settings || []) {
-    // Hidden badges stay hidden here too: filtering by a flag the list never
-    // shows would be filtering by something invisible.
-    if (HIDDEN_SETTINGS.has(flag)) continue;
+  for (const [flag] of SETTINGS_BADGES) {
     const chip = document.createElement('span');
     chip.className = 'chip' + (active.has(flag) ? ' on' : '');
     chip.textContent = settingsLabel(flag);
@@ -3552,7 +3556,8 @@ function initDualRange(o) {
   const lo = o.lo, hi = o.hi;
   // A slider needs somewhere to slide: an empty or single-valued domain means
   // there is nothing to choose, so the control is left out rather than shown
-  // inert — the same reason the whole bar hides without facets.
+  // inert — the same reason the whole bar hides when the backend cannot
+  // filter.
   box.style.display = hi > lo ? '' : 'none';
   if (hi <= lo) return;
 
@@ -3640,28 +3645,33 @@ function initDualRange(o) {
   paint();
 }
 
-// initSizeRange is the Players filter: a range over the sizes the catalog
-// actually holds, so both ends are always reachable counts. The step is 1
-// because the counts in between are simply sizes no game has, and the
-// server's >= / <= do not care.
-function initSizeRange(cur, sizes) {
-  const known = sizes.filter(n => Number.isFinite(n));
+/** The player-count filter's domain. Hardcoded, like the duration's: it used
+ * to span the distinct sizes the catalog held (a facet computed server-side
+ * per page load), but 2..32 covers every game BAR runs, and a thumb parked at
+ * an end writes no bound at all — so the top end is open ("16+") and nothing
+ * larger is ever cut off. */
+const PLAYERS_MIN = 2;
+const PLAYERS_MAX = 32;
+
+// initSizeRange is the Players filter: a fixed 2..32 range, step 1, because
+// the server's >= / <= do not care which counts in between any game has.
+function initSizeRange(cur) {
   initDualRange({
     boxId: 'f_sizefilter', railId: 'f_sizerange', minId: 'f_smin', maxId: 'f_smax',
     fillId: 'f_sizefill', outId: 'f_sizeout',
-    lo: known.length ? Math.min(...known) : 0,
-    hi: known.length ? Math.max(...known) : 0,
+    lo: PLAYERS_MIN, hi: PLAYERS_MAX,
     step: 1, minParam: 'minPlayers', maxParam: 'maxPlayers', cur,
-    format: (a, b) => (a === b ? String(a) : `${a}–${b}`),
+    // The top end reads "16+" rather than "16–32": the max thumb parked at
+    // the end writes no bound, so bigger games are included, not capped.
+    format: (a, b) => (b === PLAYERS_MAX ? `${a}+` : a === b ? String(a) : `${a}–${b}`),
   });
 }
 
-/** The duration filter's top end, in seconds. Unlike the player range there
- * is no facet behind this: game length is continuous, and a domain drawn from
- * the catalog's longest game would put most of the track past where anyone
- * wants to point. An hour covers all but the outliers, and the top thumb
- * there means "and longer" — it writes no bound at all, so nothing is cut
- * off; see initDualRange. */
+/** The duration filter's top end, in seconds. Game length is continuous, and
+ * a domain drawn from the catalog's longest game would put most of the track
+ * past where anyone wants to point. An hour covers all but the outliers, and
+ * the top thumb there means "and longer" — it writes no bound at all, so
+ * nothing is cut off; see initDualRange. */
 const DURATION_MAX_SEC = 3600;
 
 // initDurationRange is the Duration filter: 0 to DURATION_MAX_SEC in minutes.
@@ -3699,10 +3709,10 @@ function syncOrphanButton() {
 }
 
 // ymd renders a filter date for an <input type=date>: the URL value when it is
-// already YYYY-MM-DD, else nothing. `fallback` (a facet bound, in unix
-// seconds) is deliberately NOT used as a value — prefilling the inputs with
-// the catalog's own span would make every visit look filtered.
-function ymd(urlValue, fallback) {
+// already YYYY-MM-DD, else nothing. An unfiltered visit's inputs stay empty on
+// purpose — prefilling them with anything would make every visit look
+// filtered.
+function ymd(urlValue) {
   const v = (urlValue ?? '').trim();
   if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
   if (/^\d+$/.test(v)) return new Date(Number(v) * 1000).toISOString().slice(0, 10);
@@ -3765,21 +3775,22 @@ function showHome() {
 }
 
 // ensureHomeData loads what only the replay TABLE needs — the catalog listing
-// and the facets the filter bar is built from — the first time the list view is
-// shown, and never again (filter changes go through reloadList).
+// and the filter bar's map list — the first time the list view is shown, and
+// never again (filter changes go through reloadList).
 //
 // It is deliberately not part of startup. Opening ?replay=<id> directly needs
 // neither: loadReplay fetches that replay's own pieces, and knownReplayURL
 // accepts any well-formed id without consulting the list. Fetching them up
-// front made every shared link pay for /api/replays and /api/replays/facets
+// front made every shared link pay for /api/replays and the filter data
 // before it could start on the replay itself — two requests feeding a table
 // that visit never renders.
 let homeDataPending = null;
 let homeDataLoaded = false; // false = the listing has not come back yet
 function ensureHomeData() {
   if (!homeDataPending) {
-    // Independent of each other: a backend with no /facets simply leaves the
-    // filter bar hidden, which must not stop the listing from loading.
+    // Independent of each other: a backend with no /api/replays/maps simply
+    // leaves the filter bar hidden, which must not stop the listing from
+    // loading.
     homeDataPending = Promise.all([initFilters(), reloadList()]);
   }
   return homeDataPending;
