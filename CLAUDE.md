@@ -2248,6 +2248,30 @@ is still in play; `OOMPolicy=continue` on the unit the daemon runs in (e.g.
 `systemd-run --user --scope -p OOMPolicy=continue`) contains the damage to the
 engine.
 
+**Cutting the footprint so the guard fires less** (patches/engine-2026.07.04/MEMORY.md
+has the measurements). The peak is a LOAD-time cost, not growth: on an 8v8 the
+engine is within 500 MB of its peak by the time the first sim frame runs, which is
+why the OOM'd jobs in the queue include 3v3s and 4v4s that never reached frame 0.
+Two things were most of it, and neither is the simulation:
+
+- **1.05 GiB of pre-zeroed `.bss`.** Recoil's `StaticMemPool` (weapon 758 MiB +
+  projectile 142 + unit 138 + feature 45) `memset`s its whole page array in a
+  constructor that runs before `main`, over memory the loader had already zeroed
+  — so every run held all of it resident whatever the game's size. Fixed by
+  `patches/engine-2026.07.04/0003-static-mempool-lazy-zeroing.patch`: zero only
+  the pages actually handed out. The pool's invariant ("an unallocated page reads
+  as zero") already guarantees the rest, so the sim cannot observe the change —
+  gated byte-identical. The stock RELEASE binary has the same `.bss`, so this is
+  upstream Recoil, not something the speed patches introduced.
+- **512 MB of pre-zeroed bitmap arena.** `TextureMemPoolSize` defaults to 512 and
+  `TexMemPool::Resize` fills it with zeroes at startup. `WriteEngineConfig` now
+  always writes `TextureMemPoolSize = 0`, which selects the engine's on-demand
+  bitmap allocator instead — a headless run then holds the few bitmaps alive at
+  once. Config only, no engine change.
+
+Measured together: medium replay peak RSS 5396 -> 3852 MiB, isthmus 8v8 ~5.9 ->
+4392 MiB, both gated byte-identical, sim wall unchanged.
+
 Running out of memory ABANDONS one re-simulation, never the loop: `resim.Run`
 wraps `resim.ErrOutOfMemory`, the daemon reports the job failed with
 `errorKind: "oom"` (see JOB ERROR KINDS under worker/) and carries straight on to

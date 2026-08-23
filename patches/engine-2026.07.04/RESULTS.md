@@ -1,5 +1,8 @@
 # Engine speed patches (engine 2026.07.04) — measured results
 
+(Memory is a separate axis with its own record: `MEMORY.md`, and the
+`0003-static-mempool-lazy-zeroing.patch` that goes with it.)
+
 Goal: make the headless re-sim significantly faster while the produced **`.brp`
 is byte-identical** to the one the stock engine produces.
 
