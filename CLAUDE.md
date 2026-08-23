@@ -1401,9 +1401,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the other side — it put the deployment on a strict five-minute grid
                           for jobs that took ninety seconds, an engine host idle most of the
                           day; a minute of rest on the empty answer is the whole of what is
-                          left. The window cannot drain the way one over raw recency would: a
-                          host consumes far fewer games a day than the ~2000 arriving, so it
-                          slides in faster than it empties. It makes a GET write,
+                          left. It makes a GET write,
                           which is the price of leaving the daemon's protocol untouched: a
                           backfilled job is indistinguishable from one a person queued a minute
                           earlier, so no deployed daemon needs to know this happens. The job id

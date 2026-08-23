@@ -525,6 +525,28 @@ test("a series past the cap is thinned, keeping its span", async () => {
 
 // The history outlives its job, so something has to age it out. Nothing else
 // here grows without a rule.
+// The invariant the whole backfill exists for: while ANY mirrored game is
+// unpublished, a poll gets one. It is not enough to be cheap — a scan that
+// looks only at the newest slice of the mirror is cheapest of all, and reports
+// an empty queue the moment the daemon has worked through that slice, with
+// thousands of older games behind it and an engine host sitting idle in front
+// of them.
+test("the backfill reaches past the games it has already taken", async () => {
+  await inIndex((index, sql) => {
+    const now = 1787349909;
+    for (let i = 0; i < 30; i++) {
+      index.gamesInsert([game(`g${String(i).padStart(3, "0")}`, { startUnix: now - i * 60 })]);
+    }
+    // The newest 25 have all been through the pipeline already.
+    for (let i = 0; i < 25; i++) {
+      index.jobInsert(`j${i}`, "", `g${String(i).padStart(3, "0")}`, "resim");
+      sql.exec(`UPDATE jobs SET state = 'done' WHERE id = ?`, `j${i}`);
+    }
+    // So the next one offered is the newest of what is LEFT, not nothing.
+    expect(index.jobsOffer("resim", "j-next").map((j) => j.gameId)).toEqual(["g025"]);
+  });
+});
+
 // The backfill's pacing IS the host's pacing: a game it does not hand out is an
 // engine sitting idle. So it rests only when it has nothing — resting after a
 // successful queue put the deployment on a strict five-minute grid for jobs

@@ -77,18 +77,6 @@ const STALE_PROCESSING_RESIM_SEC = 90 * 60;
  * and the daemon would idle with thousands of games still to do. */
 const BACKFILL_WINDOW = 20;
 
-/** How many of the newest mirrored games the backfill LOOKS AT to find those
- * candidates. A hard bound on the scan, because the alternative — walk until
- * 20 candidates are found — is a full table scan of the mirror whenever there
- * are fewer than 20, and this runs on an idle daemon's poll. It cannot drain
- * the way a window over raw recency would: BAR publishes ~2000 games a day
- * into the mirror and one host re-simulates ~24, so the window slides in far
- * faster than it is consumed, and the games it skips (modded, already tried)
- * age out of it rather than accumulating in it.
- *
- * See BACKFILL_COOLDOWN_SEC for the other half of the bound. */
-const BACKFILL_INSPECT = 200;
-
 /** How long the backfill rests after coming up EMPTY. The daemon polls every
  * 10 seconds and this scan is the only expensive thing on that path, so the
  * state to bound is the one it can sit in indefinitely: nothing to hand out,
@@ -1329,13 +1317,22 @@ export class ReplayIndex extends DurableObject<Env> {
    * another. The check and the insert are one RPC — the DO is single-threaded,
    * so two daemons polling together cannot both queue the same game.
    *
-   * And it is bounded in SIZE always — it looks at the newest BACKFILL_INSPECT
-   * games, never the whole mirror — and in RATE when it comes up empty, which
-   * is the only outcome a poll can repeat. This is the only query on a
-   * ten-second poll whose cost grows with the mirror, which grows by ~2000
-   * games a day forever; unbounded, it read the whole table 8640 times a day
-   * and spent the account's entire daily rows-read budget on finding
-   * nothing.
+   * The scan is cheap because it STOPS EARLY, not because it looks at a slice:
+   * it walks games_start newest-first and quits at the 20th candidate, which
+   * on a mirror this daemon cannot keep up with is the first twenty rows it
+   * touches. That distinction is the whole design. A fixed window over the
+   * newest N games reads the same twenty rows in the good case and then LIES
+   * in the bad one — with the newest N all taken it reports an empty mirror
+   * while thousands of older candidates sit behind the window, and the daemon
+   * goes to sleep in front of a queue it cannot see. An empty answer here has
+   * to mean the mirror is empty.
+   *
+   * What it costs when the head IS stale is one index entry and one row per
+   * game stepped over (measured: 861 rows to walk past 400 taken games), and
+   * that only happens after the daemon has published its way through the
+   * recent past — the state where being handed older work is exactly right.
+   * The RATE bound (BACKFILL_COOLDOWN_SEC) covers the genuinely-empty case,
+   * where this does scan the whole table before giving up.
    *
    * This makes a GET write, which is the deliberate cost of leaving the
    * daemon's protocol alone: a poll that returns a job it just created is
@@ -1357,21 +1354,26 @@ export class ReplayIndex extends DurableObject<Env> {
       .exec(
         `SELECT id FROM (
            SELECT g.id AS id, g.player_count AS player_count, g.start_unix AS start_unix
-           -- The newest BACKFILL_INSPECT games, read off games_start: a bounded
-           -- walk, where filtering the whole table and stopping after 20
-           -- candidates reads every row whenever there are fewer than 20.
-           FROM (SELECT id, player_count, start_unix FROM games ORDER BY start_unix DESC LIMIT ?) g
+           FROM games g
            WHERE NOT EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id)
              AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = g.id)
              AND NOT EXISTS (SELECT 1 FROM replay_settings s WHERE s.replay_id = g.id AND s.flag = ?)
-           ORDER BY g.start_unix IS NULL, g.start_unix DESC, g.id
+           -- Walks games_start newest-first and STOPS at the 20th candidate,
+           -- which is what makes the scan cost the size of its answer instead
+           -- of the size of the mirror. Both terms matter: a leading
+           -- start_unix-IS-NULL term is an expression, which disqualifies the
+           -- index and sorts all five thousand rows into a temp b-tree
+           -- (measured 10020 rows read against 861), and it says nothing extra
+           -- — NULL is smaller than every value, so DESC puts those rows last
+           -- by itself. The trailing id only block-sorts each equal-timestamp
+           -- group, so early termination survives it.
+           ORDER BY g.start_unix DESC, g.id
            LIMIT ${BACKFILL_WINDOW}
          )
          -- Biggest game in that window; a game whose roster the API never gave
          -- goes last, and an exact tie goes to the newer one.
          ORDER BY player_count IS NULL, player_count DESC, start_unix DESC, id
          LIMIT 1`,
-        BACKFILL_INSPECT,
         // Read from the derived table rather than the row's settings JSON: the
         // flag index (flag, replay_id) makes it a seek, and a mirrored game
         // always owns its own entries there — a game the catalog owns instead
