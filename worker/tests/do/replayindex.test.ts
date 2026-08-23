@@ -296,19 +296,27 @@ test("the backfill passes over a game that already has a job, failed ones includ
   });
 });
 
-test("the backfill passes over a modded game", async () => {
+test("the backfill takes a modded game first, ahead of a bigger one", async () => {
   await inIndex((index, sql) => {
     index.gamesInsert([
-      game("modded", { startUnix: 3000, settings: { mods: true, ranked: true } }),
-      // The modes that ship AS tweak blobs carry the same flag, so they are
-      // out too — deliberately, since they are modded games.
-      game("lava", { startUnix: 2500, settings: { lava: true, mods: true } }),
-      game("vanilla", { startUnix: 2000, settings: { ranked: true } }),
+      // The biggest game on offer, and the one that would win on size alone.
+      game("big", { startUnix: 3000, playerCount: 16, settings: { ranked: true } }),
+      // A quarter the size, and picked before it: an 8v8 is one of forty
+      // played this hour, where this is the only game of its kind today.
+      game("modded", { startUnix: 2500, playerCount: 4, settings: { mods: true } }),
+      // The modes that ship AS tweak blobs carry the same flag, so lava and
+      // zombies games are preferred by the same rule.
+      game("lava", { startUnix: 2000, playerCount: 2, settings: { lava: true, mods: true } }),
     ]);
 
-    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "vanilla" });
-    // Nothing was queued for the modded ones, then or later.
-    expect(rows(sql, `SELECT game_id FROM jobs`)).toEqual([{ game_id: "vanilla" }]);
+    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "modded" });
+    // Then the other modded one, still before the 8v8. (No rest to wait out:
+    // a scan that found something does not take the cooldown.)
+    sql.exec(`UPDATE jobs SET state = 'done'`);
+    expect(index.jobsOffer("resim", "offer-2")[0]).toMatchObject({ gameId: "lava" });
+    // And only once they are gone does size decide again.
+    sql.exec(`UPDATE jobs SET state = 'done'`);
+    expect(index.jobsOffer("resim", "offer-3")[0]).toMatchObject({ gameId: "big" });
   });
 });
 
