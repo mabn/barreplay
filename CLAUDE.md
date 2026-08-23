@@ -1395,7 +1395,16 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           day; and only into an EMPTY pending list, so at most
                           one auto-queued job ever waits — the next poll finds THAT one instead
                           of making another. Check and insert are one RPC, so two daemons
-                          polling together cannot both take the same game. And the scan is
+                          polling together cannot both take the same game. The MODS preference
+                          is an EXISTS over replay_settings' (flag, replay_id) index, selected
+                          as a column and RANKED on rather than filtered on, and the flag name
+                          is a shared constant (SETTINGS_MODS_FLAG) rather than a literal the
+                          query could silently stop matching. It was a refusal until it was
+                          measured — modded games are ~0 in 24 of BAR's output, so excluding
+                          them bought nothing and skipped the only games in the mirror that are
+                          not interchangeable. A game with NO settings recorded (the API gave
+                          none) is neither refused nor preferred; it ranks by size, as it did
+                          before. And the scan is
                           cheap because it STOPS EARLY, not because it looks at a slice: it
                           walks games_start newest-first and quits at the 20th candidate,
                           which on a mirror no host can keep up with is the first twenty rows
