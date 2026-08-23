@@ -1244,8 +1244,19 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           on failure, retried on every construction until they land.
                           The rule for anything added to those paths: bound it in SIZE (an
                           index, or an explicit window) and, if it cannot be, in RATE (a
-                          cooldown, a watermark, an hourly tick). Next in line, not yet a
-                          problem: queuePage's ORDER BY sorts the whole jobs table per read.
+                          cooldown, a watermark, an hourly tick). queuePage was the latest
+                          to go: its unfinished-first CASE led the ORDER BY, which no index
+                          can satisfy, so every read joined and sorted the WHOLE jobs table
+                          (measured live: 2122 rows to return one, on 451 jobs that are never
+                          deleted). It is now two indexed queries assembled in the method —
+                          the in-flight set read whole off jobs_state (bounded by work in
+                          flight, which drains), the settled rows walked in display order off
+                          the jobs_settled PARTIAL index (over exactly the rows heartbeats
+                          never touch, so a beat costs it nothing) and stopped at the page
+                          edge — plus `total` from a maintained schema_meta counter
+                          (jobs_count, incremented by jobInsert, sound because nothing ever
+                          deletes a job row) and `active` free off the in-flight set already
+                          in hand.
                           SQL STATS (GET /api/sqlstats): the LIVE counterpart of the rowcost
                           suite — the DO bills every statement's rowsRead/rowsWritten to the
                           public method running it (installSqlAccounting: an exec shim plus
