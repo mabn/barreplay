@@ -1236,6 +1236,17 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           index, or an explicit window) and, if it cannot be, in RATE (a
                           cooldown, a watermark, an hourly tick). Next in line, not yet a
                           problem: queuePage's ORDER BY sorts the whole jobs table per read.
+                          SQL STATS (GET /api/sqlstats): the LIVE counterpart of the rowcost
+                          suite — the DO bills every statement's rowsRead/rowsWritten to the
+                          public method running it (installSqlAccounting: an exec shim plus
+                          per-method wrappers, outermost method wins so helpers bill their
+                          caller) and serves the tally per method with `since`/`elapsedSec`,
+                          because the numbers mean nothing without their window. IN MEMORY —
+                          persisting a measurement of the write budget would spend it — so a
+                          deploy or eviction resets it (the cron keeps the instance warm
+                          between those). A single call past SQL_WARN_ROWS_READ/_WRITTEN
+                          logs itself, which is how a new scan announces itself in the live
+                          logs without an event per poll.
                           (The third of the three read scans, the re-sim
                           daemon listing the whole catalog every ten seconds, is gone entirely:
                           the publish announces that work now — see PUT /api/replays above.)

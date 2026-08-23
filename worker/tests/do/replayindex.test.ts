@@ -1271,3 +1271,26 @@ test("player filter and facets read the roster JSON directly", async () => {
     expect(index.facets().players).toEqual(["Uploader"]);
   });
 });
+
+test("sql accounting bills each row to the outermost public method", async () => {
+  await inIndex((index) => {
+    index.upsert(replay("s1"));
+    index.list({ ...emptyFilter() }, 10, 0);
+
+    const report = index.sqlStatsReport();
+    expect(report.since).toBeGreaterThan(0);
+    expect(report.elapsedSec).toBeGreaterThanOrEqual(0);
+    const ops = Object.fromEntries(report.ops.map((o) => [o.op, o]));
+    expect(ops.upsert.calls).toBe(1);
+    expect(ops.upsert.rowsWritten).toBeGreaterThan(0);
+    expect(ops.list.rowsRead).toBeGreaterThan(0);
+    // A helper a method calls bills its caller — the endpoint's-eye view.
+    expect(ops.indexSettings).toBeUndefined();
+    // The constructor's own steps are visible too.
+    expect(ops.ensureSchema).toBeDefined();
+
+    // Asking is free: the report itself writes nothing.
+    const written = index.sqlStatsReport().totals.rowsWritten;
+    expect(index.sqlStatsReport().totals.rowsWritten).toBe(written);
+  });
+});

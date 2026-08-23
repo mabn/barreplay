@@ -485,6 +485,12 @@ function facetPlayers(sql: SqlStorage): string[] {
  * backslash first covers the escapes it is about to add, then the wildcards. */
 const likeEscape = (s: string): string => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 
+/** A single call reading or writing more rows than this logs itself (see
+ * installSqlAccounting). Set well above every bound the rowcost test asserts,
+ * so a warning means a cost that suite would fail on — a new scan, live. */
+const SQL_WARN_ROWS_READ = 5000;
+const SQL_WARN_ROWS_WRITTEN = 200;
+
 export class ReplayIndex extends DurableObject<Env> {
   /** How many samples each live job has, so a healthcheck does not have to
    * COUNT them to find out. IN MEMORY on purpose: it is a cache of something
@@ -498,13 +504,27 @@ export class ReplayIndex extends DurableObject<Env> {
    * real before thinning anything. Entries are dropped when the job ends. */
   private sampleCounts = new Map<string, number>();
 
+  /** What each method has cost in SQLite rows since this instance started —
+   * the live counterpart of tests/do/rowcost.test.ts, served by
+   * sqlStatsReport (GET /api/sqlstats). IN MEMORY like sampleCounts, and
+   * doubly so: persisting a measurement of the write budget would spend it.
+   * The cron keeps the instance warm, so the tally spans hours to days;
+   * sqlStatsSince says how long, since a deploy or eviction resets both. */
+  private sqlStats = new Map<string, { calls: number; rowsRead: number; rowsWritten: number }>();
+  private readonly sqlStatsSince = Date.now();
+  /** The public method currently executing — what installSqlAccounting's exec
+   * shim attributes each statement to. Outermost wins: a helper a method
+   * calls bills its caller, which is the endpoint's-eye view. */
+  private sqlOp: string | null = null;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.installSqlAccounting();
     // The schema DDL is write-classified by the storage layer even when it
     // changes nothing (CREATE TABLE IF NOT EXISTS on an existing table), and
-    // this constructor runs for every request — so the DDL runs only when a
-    // read-only look at sqlite_master says something is actually missing
-    // (ensureSchema); the steady-state constructor reads a few dozen rows and
+    // this constructor runs for every request — so the DDL runs only when the
+    // read-only schema_version stamp says something is actually missing
+    // (ensureSchema); the steady-state constructor reads one row and
     // writes nothing. And no failure here may kill the request: the free
     // tier's overage enforcement gates EVERY SQL statement once a daily
     // budget is spent, reads included (observed live: the sqlite_master
@@ -516,6 +536,99 @@ export class ReplayIndex extends DurableObject<Env> {
     // and path.
     this.ensureSchema();
     this.ensureDerived();
+  }
+
+  /** installSqlAccounting makes every SQL statement bill itself to the public
+   * method running it, so GET /api/sqlstats can say which endpoint spends the
+   * row budgets. Two shims, both installed before the constructor runs any
+   * SQL (so ensureSchema/ensureDerived appear in the tally too):
+   *
+   * - sql.exec is wrapped to consume each cursor and add its rowsRead /
+   *   rowsWritten to the current method's tally. Consuming eagerly is safe
+   *   because every caller in this class takes .toArray() or reads
+   *   .rowsWritten (the rowcost test's shim relies on the same fact) — and
+   *   the counters are only final once a cursor is consumed. The wrapper is
+   *   installed on the sql OBJECT, and callers look exec up per call, so a
+   *   test that wraps exec again afterwards measures through this one.
+   *
+   * - every prototype method is shadowed by an instance wrapper that stamps
+   *   sqlOp while the OUTERMOST call runs (methods are synchronous, so a
+   *   plain try/finally holds). The wrapper dispatches through the prototype
+   *   per call rather than capturing the function, so a test that patches a
+   *   prototype method still takes effect. A single call crossing
+   *   SQL_WARN_ROWS_READ / SQL_WARN_ROWS_WRITTEN logs itself — that is how a
+   *   new scan announces itself in the live logs without an event per poll. */
+  private installSqlAccounting(): void {
+    const sql = this.ctx.storage.sql;
+    const real = sql.exec.bind(sql);
+    (sql as unknown as { exec: unknown }).exec = (q: string, ...args: unknown[]) => {
+      const cur = real(q, ...(args as string[]));
+      const rows = cur.toArray();
+      const t = this.sqlTally(this.sqlOp ?? "(outside any method)");
+      t.rowsRead += cur.rowsRead;
+      t.rowsWritten += cur.rowsWritten;
+      return { toArray: () => rows, rowsRead: cur.rowsRead, rowsWritten: cur.rowsWritten };
+    };
+    const proto = ReplayIndex.prototype as unknown as Record<string, unknown>;
+    // The accounting's own helpers stay unwrapped: the wrapper calls sqlTally
+    // before it stamps sqlOp, so wrapping sqlTally would recurse forever.
+    const skip = new Set(["constructor", "installSqlAccounting", "sqlTally"]);
+    for (const name of Object.getOwnPropertyNames(ReplayIndex.prototype)) {
+      if (skip.has(name) || typeof proto[name] !== "function") continue;
+      (this as unknown as Record<string, unknown>)[name] = (...args: unknown[]) => {
+        const fn = proto[name] as (...a: unknown[]) => unknown;
+        if (this.sqlOp !== null) return fn.apply(this, args);
+        const t = this.sqlTally(name);
+        t.calls += 1;
+        const read = t.rowsRead;
+        const written = t.rowsWritten;
+        this.sqlOp = name;
+        try {
+          return fn.apply(this, args);
+        } finally {
+          this.sqlOp = null;
+          const dRead = t.rowsRead - read;
+          const dWritten = t.rowsWritten - written;
+          if (dRead > SQL_WARN_ROWS_READ || dWritten > SQL_WARN_ROWS_WRITTEN) {
+            console.warn(`sql cost: ${name} read=${dRead} written=${dWritten} rows in one call`);
+          }
+        }
+      };
+    }
+  }
+
+  private sqlTally(op: string): { calls: number; rowsRead: number; rowsWritten: number } {
+    let t = this.sqlStats.get(op);
+    if (t === undefined) {
+      t = { calls: 0, rowsRead: 0, rowsWritten: 0 };
+      this.sqlStats.set(op, t);
+    }
+    return t;
+  }
+
+  /** sqlStatsReport serves the tally: per method — most expensive first — and
+   * in total, with when the counting started and how long that is, since the
+   * numbers mean nothing without their window. */
+  sqlStatsReport(): {
+    since: number;
+    elapsedSec: number;
+    ops: { op: string; calls: number; rowsRead: number; rowsWritten: number }[];
+    totals: { rowsRead: number; rowsWritten: number };
+  } {
+    const ops = [...this.sqlStats.entries()]
+      .map(([op, t]) => ({ op, ...t }))
+      .sort((a, b) => b.rowsRead + b.rowsWritten - (a.rowsRead + a.rowsWritten));
+    const totals = { rowsRead: 0, rowsWritten: 0 };
+    for (const o of ops) {
+      totals.rowsRead += o.rowsRead;
+      totals.rowsWritten += o.rowsWritten;
+    }
+    return {
+      since: this.sqlStatsSince,
+      elapsedSec: Math.round((Date.now() - this.sqlStatsSince) / 1000),
+      ops,
+      totals,
+    };
   }
 
   /** ensureSchema migrates when a read-only check says something is missing,
