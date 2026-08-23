@@ -113,13 +113,15 @@ test("the polled and cron reads do not scan the tables they read from", async ()
     index.jobsPending("resim");
     out.jobsPendingResim = tally();
 
-    // The same poll when there is nothing queued: the mirror backfill. Bounded
-    // in size by the window it inspects, and in rate by its cooldown — the
-    // second call must not scan again.
+    // The same poll when there is nothing queued: the mirror backfill, whose
+    // cost is the window it inspects rather than the size of the mirror. The
+    // second call does not scan at all — the first one queued a game, so this
+    // one is answered by jobsPending out of an index, which is what every poll
+    // for the length of the run would be.
     index.jobsOffer("resim", "job-backfill-1");
     out.jobsOfferScan = tally();
     index.jobsOffer("resim", "job-backfill-2");
-    out.jobsOfferResting = tally();
+    out.jobsOfferQueued = tally();
 
     // The cron, every minute.
     index.lobbiesOpen();
@@ -151,7 +153,7 @@ test("the polled and cron reads do not scan the tables they read from", async ()
   // The backfill inspects a fixed window of the mirror (BACKFILL_INSPECT), so
   // this is flat in GAMES; it was ~2x GAMES per poll.
   expect(costs.jobsOfferScan, report).toBeLessThan(1500);
-  expect(costs.jobsOfferResting, report).toBeLessThan(50);
+  expect(costs.jobsOfferQueued, report).toBeLessThan(50);
   // Partial index over the open observations, not a scan of every one ever
   // recorded.
   expect(costs.lobbiesOpen, report).toBeLessThan(100);
