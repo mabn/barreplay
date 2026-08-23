@@ -190,22 +190,9 @@ function progressPercent(progressJSON: unknown): number | null {
  * changes; a rebuild is a few writes per row, not a migration. */
 const DERIVED_VERSION = 1;
 
-export class ReplayIndex extends DurableObject<Env> {
-  /** How many samples each live job has, so a healthcheck does not have to
-   * COUNT them to find out. IN MEMORY on purpose: it is a cache of something
-   * the table already knows, it costs nothing to lose (an evicted object
-   * counts once and carries on), and the thing it replaces — one COUNT(*) over
-   * a job's whole series, ten seconds apart, for an hour — reads several
-   * hundred rows a beat to answer "not yet" every single time.
-   *
-   * It is allowed to drift (a beat retried inside one second upserts the same
-   * row while this counts two), which is why crossing the cap re-counts for
-   * real before thinning anything. Entries are dropped when the job ends. */
-  private sampleCounts = new Map<string, number>();
-
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    ctx.storage.sql.exec(`
+/** Everything migrateSchema creates, split from the code so schemaCurrent can
+ * scan the same text it executes (one source, nothing to drift). */
+const SCHEMA_DDL = `
       CREATE TABLE IF NOT EXISTS replays (
         id           TEXT PRIMARY KEY,
         start_unix   INTEGER,
@@ -344,75 +331,11 @@ export class ReplayIndex extends DurableObject<Env> {
         PRIMARY KEY (lobby_id, started_unix)
       );
       CREATE INDEX IF NOT EXISTS lobbies_started ON lobbies (started_unix);
-    `);
-    // In-place upgrades for tables created before a column existed (SQLite has
-    // no ADD COLUMN IF NOT EXISTS; a duplicate-column error just means the
-    // schema is already current).
-    const addColumn = (table: string, col: string): void => {
-      try {
-        ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`);
-      } catch (e) {
-        if (!String(e).includes("duplicate column")) throw e;
-      }
-    };
-    // The jobs table predates the re-sim requests, so its rows are all
-    // uploads; the DEFAULT is what says so, for the existing rows and for
-    // every daemon that still POSTs without naming a kind.
-    addColumn("jobs", "kind TEXT NOT NULL DEFAULT 'upload'");
-    // Nullable, unlike kind: a job finished before the daemon reported stats
-    // has none, and there is nothing to infer.
-    addColumn("jobs", "stats TEXT");
-    // The running job's live self-report. Nullable and, unlike stats,
-    // deliberately EMPTY most of the time: jobUpdate clears it the moment the
-    // job reaches a terminal state, because progress describes work in flight
-    // and a finished row showing "simulating, 43%" would be a lie.
-    addColumn("jobs", "progress TEXT");
-    // Held back by hand from the queue page. NOT NULL with a default, so every
-    // row that predates it reads as enabled, which is what they all were.
-    addColumn("jobs", "disabled INTEGER NOT NULL DEFAULT 0");
-    // What kind of failure, for the failures the daemon can name. Nullable: it
-    // is null for every job that has not failed and for every failure with no
-    // name, which is most of them.
-    addColumn("jobs", "error_kind TEXT");
-    // Added after the other sample columns: a run's remaining-time estimate was
-    // reported from the start but only ever overwritten in place, so the rows
-    // written before this have none and chart as a gap.
-    addColumn("job_samples", "eta_sec REAL");
-    // Same story: reported from the start of the healthcheck but only ever
-    // shown live, so rows written before this chart as a gap.
-    addColumn("job_samples", "swap_bytes INTEGER");
-    // The lobby the game was played under (lobbiesMatch below). Deliberately
-    // NOT in gamesInsert's upsert list: a later re-sync of the game knows
-    // nothing about lobbies and must not erase what the match wrote.
-    addColumn("games", "lobby_name TEXT");
-    addColumn("games", "lobby_id INTEGER");
-    for (const col of [
-      "settings TEXT",
-      "rid TEXT",
-      "players TEXT",
-      "uploader_ally INTEGER",
-      "uploads TEXT",
-      "view TEXT",
-      "player_count INTEGER",
-      // The uploader-widget build behind the current revision. Three columns
-      // rather than one JSON blob because the whole point is to be able to ask
-      // "which widget builds are in the wild" / "which replays came from the
-      // build with that bug" in SQL, over the catalog, without opening a blob
-      // per row. The per-revision history lives in uploads[] (mergeUploads).
-      "widget_version TEXT",
-      "widget_sha TEXT",
-      "widget_date TEXT",
-      // 1 = this row is a PIPELINE placeholder: it exists so a game being
-      // worked on shows up in the list, and nothing has been published for it
-      // yet. It is what makes a row un-openable in the viewer, and the only
-      // kind of row the pipeline ever deletes.
-      "placeholder INTEGER NOT NULL DEFAULT 0",
-    ]) {
-      addColumn("replays", col);
-    }
-    // Filter indexes. Created after the ALTERs because one of them indexes a
-    // column the ALTERs may have just added.
-    ctx.storage.sql.exec(`
+    `;
+
+// // Filter indexes. Created after the ALTERs because one of them indexes a
+// column the ALTERs may have just added.
+const INDEX_DDL = `
       CREATE INDEX IF NOT EXISTS replays_map   ON replays (map);
       CREATE INDEX IF NOT EXISTS replays_count ON replays (player_count);
       CREATE INDEX IF NOT EXISTS replays_dur   ON replays (duration_sec);
@@ -461,8 +384,91 @@ export class ReplayIndex extends DurableObject<Env> {
         WHERE ended_unix IS NULL;
       CREATE INDEX IF NOT EXISTS lobbies_matched ON lobbies (started_unix)
         WHERE matched_game_id IS NOT NULL;
-    `);
+    `;
 
+/** Columns added to tables that already existed in deployments (SQLite has no
+ * ADD COLUMN IF NOT EXISTS; a duplicate-column error just means the schema is
+ * already current). schemaCurrent checks each entry's column name against the
+ * table's stored CREATE statement (an ALTER rewrites it), so the name must not
+ * also appear in a comment inside that table's CREATE. */
+const ADDED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
+  // The jobs table predates the re-sim requests, so its rows are all
+  // uploads; the DEFAULT is what says so, for the existing rows and for
+  // every daemon that still POSTs without naming a kind.
+  ["jobs", "kind TEXT NOT NULL DEFAULT 'upload'"],
+  // Nullable, unlike kind: a job finished before the daemon reported stats
+  // has none, and there is nothing to infer.
+  ["jobs", "stats TEXT"],
+  // The running job's live self-report. Nullable and, unlike stats,
+  // deliberately EMPTY most of the time: jobUpdate clears it the moment the
+  // job reaches a terminal state, because progress describes work in flight
+  // and a finished row showing "simulating, 43%" would be a lie.
+  ["jobs", "progress TEXT"],
+  // Held back by hand from the queue page. NOT NULL with a default, so every
+  // row that predates it reads as enabled, which is what they all were.
+  ["jobs", "disabled INTEGER NOT NULL DEFAULT 0"],
+  // What kind of failure, for the failures the daemon can name. Nullable: it
+  // is null for every job that has not failed and for every failure with no
+  // name, which is most of them.
+  ["jobs", "error_kind TEXT"],
+  // Added after the other sample columns: a run's remaining-time estimate was
+  // reported from the start but only ever overwritten in place, so the rows
+  // written before this have none and chart as a gap.
+  ["job_samples", "eta_sec REAL"],
+  // Same story: reported from the start of the healthcheck but only ever
+  // shown live, so rows written before this chart as a gap.
+  ["job_samples", "swap_bytes INTEGER"],
+  // The lobby the game was played under (lobbiesMatch below). Deliberately
+  // NOT in gamesInsert's upsert list: a later re-sync of the game knows
+  // nothing about lobbies and must not erase what the match wrote.
+  ["games", "lobby_name TEXT"],
+  ["games", "lobby_id INTEGER"],
+  ["replays", "settings TEXT"],
+  ["replays", "rid TEXT"],
+  ["replays", "players TEXT"],
+  ["replays", "uploader_ally INTEGER"],
+  ["replays", "uploads TEXT"],
+  ["replays", "view TEXT"],
+  ["replays", "player_count INTEGER"],
+  // The uploader-widget build behind the current revision. Three columns
+  // rather than one JSON blob because the whole point is to be able to ask
+  // "which widget builds are in the wild" / "which replays came from the
+  // build with that bug" in SQL, over the catalog, without opening a blob
+  // per row. The per-revision history lives in uploads[] (mergeUploads).
+  ["replays", "widget_version TEXT"],
+  ["replays", "widget_sha TEXT"],
+  ["replays", "widget_date TEXT"],
+  // 1 = this row is a PIPELINE placeholder: it exists so a game being
+  // worked on shows up in the list, and nothing has been published for it
+  // yet. It is what makes a row un-openable in the viewer, and the only
+  // kind of row the pipeline ever deletes.
+  ["replays", "placeholder INTEGER NOT NULL DEFAULT 0"],
+];
+
+export class ReplayIndex extends DurableObject<Env> {
+  /** How many samples each live job has, so a healthcheck does not have to
+   * COUNT them to find out. IN MEMORY on purpose: it is a cache of something
+   * the table already knows, it costs nothing to lose (an evicted object
+   * counts once and carries on), and the thing it replaces — one COUNT(*) over
+   * a job's whole series, ten seconds apart, for an hour — reads several
+   * hundred rows a beat to answer "not yet" every single time.
+   *
+   * It is allowed to drift (a beat retried inside one second upserts the same
+   * row while this counts two), which is why crossing the cap re-counts for
+   * real before thinning anything. Entries are dropped when the job ends. */
+  private sampleCounts = new Map<string, number>();
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    // The schema DDL is write-classified by the storage layer even when it
+    // changes nothing (CREATE TABLE IF NOT EXISTS on an existing table), and
+    // this constructor runs for every request. Observed live: with the free
+    // plan's daily rows-written allowance spent, every route — reads included —
+    // died here with "Exceeded allowed rows written", because the first
+    // statement of any request was a write. So the DDL runs only when a
+    // read-only look at sqlite_master says something is actually missing; the
+    // steady-state constructor reads a few dozen rows and writes nothing.
+    if (!this.schemaCurrent()) this.migrateSchema();
     const have = ctx.storage.sql
       .exec(`SELECT value FROM schema_meta WHERE key = 'derived_version'`)
       .toArray();
@@ -474,6 +480,49 @@ export class ReplayIndex extends DurableObject<Env> {
         DERIVED_VERSION,
       );
     }
+  }
+
+  /** schemaCurrent reports whether every table, index and late-added column
+   * the DDL would create is already present — reading only sqlite_master, so
+   * asking costs no writes. Dropped indexes still present, or a column still
+   * missing from its table's stored CREATE statement, mean a migration is due.
+   * A fresh database has none of the objects and reports false trivially. */
+  private schemaCurrent(): boolean {
+    const objects = new Map<string, string>();
+    for (const r of this.ctx.storage.sql
+      .exec(`SELECT name, sql FROM sqlite_master WHERE type IN ('table', 'index')`)
+      .toArray()) {
+      objects.set(r.name as string, (r.sql as string | null) ?? "");
+    }
+    for (const [, name] of (SCHEMA_DDL + INDEX_DDL).matchAll(/CREATE (?:TABLE|INDEX) IF NOT EXISTS (\w+)/g)) {
+      if (!objects.has(name)) return false;
+    }
+    for (const [, name] of INDEX_DDL.matchAll(/DROP INDEX IF EXISTS (\w+)/g)) {
+      if (objects.has(name)) return false;
+    }
+    for (const [table, col] of ADDED_COLUMNS) {
+      const create = objects.get(table);
+      if (create === undefined || !new RegExp(`\\b${col.split(/\s/)[0]}\\b`).test(create)) return false;
+    }
+    return true;
+  }
+
+  /** migrateSchema brings the database to the current schema: the base DDL,
+   * the late-added columns, then the indexes (after the ALTERs, because one of
+   * them indexes a column the ALTERs may have just added). Idempotent — every
+   * statement tolerates what already exists — but never a no-op to the write
+   * meter, which is why the constructor gates it on schemaCurrent. */
+  private migrateSchema(): void {
+    const sql = this.ctx.storage.sql;
+    sql.exec(SCHEMA_DDL);
+    for (const [table, col] of ADDED_COLUMNS) {
+      try {
+        sql.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`);
+      } catch (e) {
+        if (!String(e).includes("duplicate column")) throw e;
+      }
+    }
+    sql.exec(INDEX_DDL);
   }
 
   /** metaGet / metaPut are the schema_meta table used as a scratchpad for the

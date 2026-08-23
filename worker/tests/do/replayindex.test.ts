@@ -1138,3 +1138,42 @@ test("list surfaces the processing job's live percent for the pill", async () =>
     expect(index.list()).toMatchObject([{ id: "busy", processing: false, processingPercent: null }]);
   });
 });
+
+test("a current schema is detected read-only and a stale one still migrates", async () => {
+  // The constructor's DDL used to run unconditionally, and CREATE TABLE IF
+  // NOT EXISTS counts as a WRITE even when it changes nothing — so the day
+  // the free tier's rows-written allowance ran out, every route died in the
+  // constructor before its first read. The contract now: deciding "nothing
+  // to migrate" writes zero rows, and a schema that really is missing
+  // something is still brought current.
+  await inIndex((index, sql) => {
+    const priv = index as unknown as { schemaCurrent(): boolean; migrateSchema(): void };
+    expect(priv.schemaCurrent(), "a freshly constructed instance is current").toBe(true);
+
+    // The whole no-migration decision, as the constructor takes it, measured:
+    // reads only.
+    const real = sql.exec.bind(sql);
+    let written = 0;
+    (sql as unknown as { exec: unknown }).exec = (q: string, ...args: unknown[]) => {
+      const cur = real(q, ...(args as string[]));
+      const out = cur.toArray();
+      written += cur.rowsWritten;
+      return { toArray: () => out, rowsWritten: cur.rowsWritten, rowsRead: cur.rowsRead };
+    };
+    try {
+      expect(priv.schemaCurrent()).toBe(true);
+      expect(written, "deciding there is nothing to migrate must not write").toBe(0);
+    } finally {
+      (sql as unknown as { exec: unknown }).exec = real;
+    }
+
+    // A missing index and a missing column are each noticed, and one
+    // migration pass repairs both.
+    sql.exec(`DROP INDEX games_backfill_end`);
+    sql.exec(`ALTER TABLE jobs DROP COLUMN error_kind`);
+    expect(priv.schemaCurrent(), "a stale schema must be noticed").toBe(false);
+    priv.migrateSchema();
+    expect(priv.schemaCurrent()).toBe(true);
+    expect(rows(sql, `SELECT name FROM sqlite_master WHERE name = 'games_backfill_end'`).length).toBe(1);
+  });
+});
