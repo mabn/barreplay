@@ -3386,7 +3386,7 @@ function renderPager() {
   range.textContent = replayList.length ? `${first}–${first + replayList.length - 1}` : '—';
 }
 
-// gameIdIn pulls a replay id out of whatever was pasted into the id filter: the
+// gameIdIn pulls a game id out of whatever was pasted into the id filter: the
 // bare id, a link containing it, a log line. The rule is "the longest run of
 // hex in there", which is what an id is among URL punctuation, and it falls
 // back to the trimmed text so a half-typed prefix still filters (and so a
@@ -3481,7 +3481,7 @@ async function initFilters() {
     typing = setTimeout(() => setFilter('player', player.value.trim()), 300);
   };
 
-  // Replay id. Nobody types 32 hex characters, so this field exists to be
+  // Game id. Nobody types 32 hex characters, so this field exists to be
   // pasted into — and what gets pasted is as often a LINK (a gex or bar-rts
   // URL, a line out of a log) as the bare id. gameIdIn lifts the id out of
   // whatever arrives, so all of those work and the server still only ever

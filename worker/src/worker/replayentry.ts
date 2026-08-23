@@ -163,7 +163,7 @@ export interface ReplayFilter {
    * match would put games of any length inside a range the user drew. */
   minDuration: number | null;
   maxDuration: number | null;
-  /** PREFIX of the replay's own game id, lowercase hex. A prefix rather than
+  /** PREFIX of the game id, lowercase hex. A prefix rather than
    * an exact match for one reason: the whole id is 32 characters of hex that
    * nobody types, so what actually happens is a paste — of the id, or of the
    * head of one out of a log line or a URL — and an exact match turns the
@@ -251,7 +251,7 @@ export function parseReplayFilter(params: URLSearchParams): ReplayFilter | strin
   // that does not have the game.
   const id = (params.get("id") ?? "").trim().toLowerCase();
   if (id !== "") {
-    if (!/^[0-9a-f]{1,32}$/.test(id)) return "id must be a replay id, or the start of one (hex)";
+    if (!/^[0-9a-f]{1,32}$/.test(id)) return "id must be a game id, or the start of one (hex)";
     f.id = id;
   }
   const player = (params.get("player") ?? "").trim();
