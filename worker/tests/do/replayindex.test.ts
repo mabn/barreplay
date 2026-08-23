@@ -1294,3 +1294,17 @@ test("sql accounting bills each row to the outermost public method", async () =>
     expect(index.sqlStatsReport().totals.rowsWritten).toBe(written);
   });
 });
+
+test("attribution holds over real RPC, not only direct calls", async () => {
+  // The first accounting version shadowed methods with instance properties:
+  // the deployed runtime refused those RPC calls outright ("The RPC receiver
+  // does not implement the method") while the local one silently bypassed
+  // them — two failures no direct-call test can see. So this one talks to
+  // the stub exactly like the worker does.
+  const stub = env.REPLAY_INDEX.get(env.REPLAY_INDEX.idFromName("rpc-attribution"));
+  await stub.list(emptyFilter(), 10, 0);
+  const report = await stub.sqlStatsReport();
+  const ops = Object.fromEntries(report.ops.map((o: { op: string }) => [o.op, o]));
+  expect(ops.list?.calls).toBe(1);
+  expect(ops["(outside any method)"], "every statement has a method to bill").toBeUndefined();
+});

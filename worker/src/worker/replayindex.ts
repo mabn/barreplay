@@ -538,26 +538,16 @@ export class ReplayIndex extends DurableObject<Env> {
     this.ensureDerived();
   }
 
-  /** installSqlAccounting makes every SQL statement bill itself to the public
-   * method running it, so GET /api/sqlstats can say which endpoint spends the
-   * row budgets. Two shims, both installed before the constructor runs any
-   * SQL (so ensureSchema/ensureDerived appear in the tally too):
-   *
-   * - sql.exec is wrapped to consume each cursor and add its rowsRead /
-   *   rowsWritten to the current method's tally. Consuming eagerly is safe
-   *   because every caller in this class takes .toArray() or reads
-   *   .rowsWritten (the rowcost test's shim relies on the same fact) — and
-   *   the counters are only final once a cursor is consumed. The wrapper is
-   *   installed on the sql OBJECT, and callers look exec up per call, so a
-   *   test that wraps exec again afterwards measures through this one.
-   *
-   * - every prototype method is shadowed by an instance wrapper that stamps
-   *   sqlOp while the OUTERMOST call runs (methods are synchronous, so a
-   *   plain try/finally holds). The wrapper dispatches through the prototype
-   *   per call rather than capturing the function, so a test that patches a
-   *   prototype method still takes effect. A single call crossing
-   *   SQL_WARN_ROWS_READ / SQL_WARN_ROWS_WRITTEN logs itself — that is how a
-   *   new scan announces itself in the live logs without an event per poll. */
+  /** installSqlAccounting wraps sql.exec so every statement bills its
+   * rowsRead / rowsWritten to the method named by sqlOp (stamped by the
+   * prototype wrappers installed below the class). Installed before the
+   * constructor runs any SQL, so ensureSchema/ensureDerived appear in the
+   * tally too. Consuming each cursor eagerly is safe because every caller in
+   * this class takes .toArray() or reads .rowsWritten (the rowcost test's
+   * shim relies on the same fact) — and the counters are only final once a
+   * cursor is consumed. The wrapper is installed on the sql OBJECT, and
+   * callers look exec up per call, so a test that wraps exec again
+   * afterwards measures through this one. */
   private installSqlAccounting(): void {
     const sql = this.ctx.storage.sql;
     const real = sql.exec.bind(sql);
@@ -569,31 +559,30 @@ export class ReplayIndex extends DurableObject<Env> {
       t.rowsWritten += cur.rowsWritten;
       return { toArray: () => rows, rowsRead: cur.rowsRead, rowsWritten: cur.rowsWritten };
     };
-    const proto = ReplayIndex.prototype as unknown as Record<string, unknown>;
-    // The accounting's own helpers stay unwrapped: the wrapper calls sqlTally
-    // before it stamps sqlOp, so wrapping sqlTally would recurse forever.
-    const skip = new Set(["constructor", "installSqlAccounting", "sqlTally"]);
-    for (const name of Object.getOwnPropertyNames(ReplayIndex.prototype)) {
-      if (skip.has(name) || typeof proto[name] !== "function") continue;
-      (this as unknown as Record<string, unknown>)[name] = (...args: unknown[]) => {
-        const fn = proto[name] as (...a: unknown[]) => unknown;
-        if (this.sqlOp !== null) return fn.apply(this, args);
-        const t = this.sqlTally(name);
-        t.calls += 1;
-        const read = t.rowsRead;
-        const written = t.rowsWritten;
-        this.sqlOp = name;
-        try {
-          return fn.apply(this, args);
-        } finally {
-          this.sqlOp = null;
-          const dRead = t.rowsRead - read;
-          const dWritten = t.rowsWritten - written;
-          if (dRead > SQL_WARN_ROWS_READ || dWritten > SQL_WARN_ROWS_WRITTEN) {
-            console.warn(`sql cost: ${name} read=${dRead} written=${dWritten} rows in one call`);
-          }
-        }
-      };
+  }
+
+  /** sqlTracked runs one method under its name for the exec shim to bill.
+   * Outermost wins — a helper a method calls bills its caller, the
+   * endpoint's-eye view — and methods are synchronous, so a plain
+   * try/finally holds the stamp. A single call crossing SQL_WARN_ROWS_READ /
+   * SQL_WARN_ROWS_WRITTEN logs itself: that is how a new scan announces
+   * itself in the live logs without an event per poll. */
+  private sqlTracked(name: string, fn: (...a: unknown[]) => unknown, args: unknown[]): unknown {
+    if (this.sqlOp !== null) return fn.apply(this, args);
+    const t = this.sqlTally(name);
+    t.calls += 1;
+    const read = t.rowsRead;
+    const written = t.rowsWritten;
+    this.sqlOp = name;
+    try {
+      return fn.apply(this, args);
+    } finally {
+      this.sqlOp = null;
+      const dRead = t.rowsRead - read;
+      const dWritten = t.rowsWritten - written;
+      if (dRead > SQL_WARN_ROWS_READ || dWritten > SQL_WARN_ROWS_WRITTEN) {
+        console.warn(`sql cost: ${name} read=${dRead} written=${dWritten} rows in one call`);
+      }
     }
   }
 
@@ -2030,5 +2019,30 @@ function parseStored<T>(raw: string | null, parse: (v: unknown) => T | null): T 
     return parse(JSON.parse(raw));
   } catch {
     return null;
+  }
+}
+
+// ---- SQL attribution: wrap the prototype, once, at module load -------------
+// Attribution has to live on the PROTOTYPE. The first version shadowed each
+// method with an instance property, and the deployed runtime REFUSED those
+// RPC calls outright — "The RPC receiver does not implement the method
+// \"jobsOffer\"" took every job poll down — while the local dev runtime
+// silently bypassed the shadow (attribution read "(outside any method)"), so
+// neither tests nor vite dev caught it. Wrapped here the methods stay
+// ordinary class methods in RPC's eyes; a test that patches a prototype
+// method replaces the wrapper slot and still takes effect, because the
+// original bodies reach their helpers through `this`.
+{
+  const proto = ReplayIndex.prototype as unknown as Record<string, unknown>;
+  // The accounting's own pieces stay unwrapped, or stamping would recurse.
+  const skip = new Set(["constructor", "installSqlAccounting", "sqlTally", "sqlTracked"]);
+  for (const name of Object.getOwnPropertyNames(ReplayIndex.prototype)) {
+    if (skip.has(name) || typeof proto[name] !== "function") continue;
+    const fn = proto[name] as (...a: unknown[]) => unknown;
+    proto[name] = function (this: ReplayIndex, ...args: unknown[]) {
+      return (
+        this as unknown as { sqlTracked(n: string, f: (...a: unknown[]) => unknown, a: unknown[]): unknown }
+      ).sqlTracked(name, fn, args);
+    };
   }
 }
