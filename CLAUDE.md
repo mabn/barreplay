@@ -549,7 +549,12 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           listing) and FILTERED by its query params (parseReplayFilter:
                           from/to — unix seconds or YYYY-MM-DD, where a YYYY-MM-DD `to` covers the
                           whole day — map, minPlayers/maxPlayers, minDuration/maxDuration in
-                          seconds, player = a case-insensitive name
+                          seconds, id = a lowercase-hex PREFIX of the game's own id (a
+                          range over the PRIMARY KEY, so a whole id is one seek; a prefix
+                          because what people have is a paste — of the id, or of the head of
+                          one out of a link — and non-hex is REFUSED rather than answered
+                          with an empty list, since there is no such thing as a partly-typed
+                          id that is merely wrong), player = a case-insensitive name
                           PREFIX, settings = comma-separated flags that must ALL be present; no
                           params = the whole catalog, unknown params ignored so an older front-end
                           still works). Filtering is SQL, not a pass over the JSON: name and flag
@@ -739,7 +744,12 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           facet maps, so typing part of a name shrinks the list to the maps
                           containing it; ?map= stays an exact match, applied when the text
                           names exactly one map — a player-count RANGE, a duration RANGE,
-                          player name — a datalist of the known names, debounced 300 ms), then
+                          player name — a datalist of the known names, debounced 300 ms — and
+                          REPLAY ID, which is a paste target rather than something anyone
+                          types: app.js gameIdIn takes the longest hex run out of whatever
+                          arrives, so a gex or bar-rts link, a ?replay= URL or a log line all
+                          resolve to the id, while a bare prefix stays a prefix and anything
+                          with no id in it is passed through for the server to reject), then
                           the settings chips with Clear/Unregistered/count pushed to the far end.
                           Two rows because one wrapped at some widths and not others, which moved
                           the buttons around as the catalog gained flags.
