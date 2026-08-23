@@ -65,7 +65,7 @@
 
     <section id="tab-replays">
       <!-- Catalog filters. Hidden unless the backend answers GET
-           /api/replays/facets: filtering is a SQL feature of the Worker's catalog,
+           /api/replays/maps: filtering is a SQL feature of the Worker's catalog,
            and the Go viz server (which serves the same list from local files)
            has none, so the bar appears only where it works. -->
       <div id="filters" style="display:none">
@@ -82,12 +82,12 @@
              one map fits, applies the filter. -->
         <label>Map <input type="search" id="f_map" list="f_maps" placeholder="any" autocomplete="off"></label>
         <datalist id="f_maps"></datalist>
-        <!-- Players: a two-thumb range (min thumb / max thumb) over the sizes
-             the catalog holds. Two stacked <input type=range> rather than a
+        <!-- Players: a two-thumb range over a fixed 2..32 domain (app.js
+             PLAYERS_MIN/MAX; the right thumb at the end means "and bigger" —
+             it writes no bound). Two stacked <input type=range> rather than a
              widget: real inputs come with keyboard support and focus rings for
              free, and only their thumbs take pointer events, so the track
-             below shows through. app.js hides the whole label when the catalog
-             has fewer than two distinct sizes — nothing to slide between. -->
+             below shows through. -->
         <label id="f_sizefilter">Players
           <span class="dualrange" id="f_sizerange">
             <span class="rangetrack"><span class="rangefill" id="f_sizefill"></span></span>
@@ -107,8 +107,9 @@
           </span>
           <output id="f_durout" for="f_dmin f_dmax"></output>
         </label>
-        <label>Player <input type="search" id="f_player" list="f_players" placeholder="name" autocomplete="off"></label>
-        <datalist id="f_players"></datalist>
+        <!-- Player: free text, matched as a prefix server-side. No completion
+             list — offering one meant walking every roster in the catalog. -->
+        <label>Player <input type="search" id="f_player" placeholder="name" autocomplete="off"></label>
         <!-- Game id: a paste target, not something anyone types out. It
              takes the id, the start of one, or a link with one in it (app.js
              lifts the hex out), and matches as a prefix. -->

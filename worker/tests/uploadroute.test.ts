@@ -1178,6 +1178,17 @@ test("an uncaught route error answers 500 and logs the message", async () => {
   assert.match(line, /GET \/api\/replays/, "so is the request that hit it");
 });
 
+test("the maps route serves the DO's maintained list", async () => {
+  const { env, index } = makeEnv();
+  (index as unknown as { mapNames: () => string[] }).mapNames = () => ["All That Glitters v2", "Great Divide V1"];
+  const res = await app.request("/api/replays/maps", {}, env);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await asJson(res), { maps: ["All That Glitters v2", "Great Divide V1"] });
+  // Open and no-cache, like the listing it accompanies: the front-end probes
+  // it on every list view, and staleness is the DO cache's business.
+  assert.equal(res.headers.get("cache-control"), "no-cache");
+});
+
 test("the sqlstats route serves the DO's tally as-is", async () => {
   const { env, index } = makeEnv();
   const report = { since: 123, elapsedSec: 45, ops: [], totals: { rowsRead: 0, rowsWritten: 0 } };

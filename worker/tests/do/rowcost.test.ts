@@ -154,6 +154,14 @@ test("the polled and cron reads do not scan the tables they read from", async ()
     index.list(undefined, 50, 0);
     out.listPage = tally();
 
+    // The filter bar's map list, fetched with every landing page: a
+    // maintained unique_values row, never a DISTINCT scan of the catalog.
+    // The in-memory copy is dropped first so this measures the actual read —
+    // on the deployment even that one row is paid at most once a minute.
+    (index as unknown as { mapsCache: unknown }).mapsCache = null;
+    index.mapNames();
+    out.mapNames = tally();
+
     // A running job's healthcheck, every 10s: the first beat learns how many
     // samples the job has, the rest must not ask again.
     index.jobUpdate("j000001", "processing", null, null, { state: "simulating", percent: 12 });
@@ -185,6 +193,8 @@ test("the polled and cron reads do not scan the tables they read from", async ()
   // A page is a page: the listing walks replays_start and stops, where a
   // leading ORDER BY expression made it sort every row in the catalog first.
   expect(costs.listPage, report).toBeLessThan(400);
+  // One row: the stored maps list, not the catalog.
+  expect(costs.mapNames, report).toBeLessThan(5);
   // The first beat counts the job's samples; every beat after it is answered
   // from memory.
   expect(costs.healthcheckNext, report).toBeLessThan(50);
