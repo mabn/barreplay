@@ -285,7 +285,6 @@ export class ReplayIndex extends DurableObject<Env> {
         game_version   TEXT,
         synced_unix    INTEGER NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS games_start ON games (start_unix DESC);
       -- Nothing reads this yet. It is here because the query the mirror exists
       -- to answer is "the newest games of this kind", and adding it now costs
       -- one line where adding it to a full table later costs a rebuild.
@@ -414,6 +413,20 @@ export class ReplayIndex extends DurableObject<Env> {
       -- the games mirrored since the last run instead of every game inside the
       -- oldest open observation's time window.
       CREATE INDEX IF NOT EXISTS games_synced   ON games (synced_unix);
+      -- The re-sim backfill's walk (jobsOffer), COVERING it: newest-first is
+      -- the order it reads in, and id + player_count are the only other
+      -- columns it wants, so the walk never touches the games table itself and
+      -- the ORDER BY needs no temp b-tree for its id tiebreak. Measured over
+      -- 5000 mirrored games: 61 rows read down to 40 in the steady state, and
+      -- 861 to 840 when it has to step over the games it already took.
+      --
+      -- It REPLACES games_start (start_unix DESC), which is its first column
+      -- and nothing else: every query that index served this one serves at
+      -- least as well, and keeping both would cost a second index write per
+      -- mirrored game — ~2000 a day against a write budget that is already
+      -- two thirds spent.
+      CREATE INDEX IF NOT EXISTS games_backfill ON games (start_unix DESC, id, player_count);
+      DROP INDEX IF EXISTS games_start;
       -- PARTIAL indexes, because the two questions asked of the lobbies
       -- table every minute are about the handful of rows in a state, over
       -- a table that keeps every unmatched observation forever: which
@@ -1331,7 +1344,7 @@ export class ReplayIndex extends DurableObject<Env> {
    * so two daemons polling together cannot both queue the same game.
    *
    * The scan is cheap because it STOPS EARLY, not because it looks at a slice:
-   * it walks games_start newest-first and quits at the 20th candidate, which
+   * it walks games_backfill newest-first and quits at the 20th candidate, which
    * on a mirror this daemon cannot keep up with is the first twenty rows it
    * touches. That distinction is the whole design. A fixed window over the
    * newest N games reads the same twenty rows in the good case and then LIES
@@ -1378,7 +1391,7 @@ export class ReplayIndex extends DurableObject<Env> {
            FROM games g
            WHERE NOT EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id)
              AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = g.id)
-           -- Walks games_start newest-first and STOPS at the 20th candidate,
+           -- Walks games_backfill newest-first and STOPS at the 20th candidate,
            -- which is what makes the scan cost the size of its answer instead
            -- of the size of the mirror. Both terms matter: a leading
            -- start_unix-IS-NULL term is an expression, which disqualifies the
