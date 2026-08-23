@@ -1,5 +1,8 @@
 # Engine speed patches (engine 2026.07.04) — measured results
 
+(Memory is a separate axis with its own record: `MEMORY.md`, and the
+`0003-static-mempool-lazy-zeroing.patch` that goes with it.)
+
 Goal: make the headless re-sim significantly faster while the produced **`.brp`
 is byte-identical** to the one the stock engine produces.
 
@@ -44,6 +47,14 @@ than a long one.
 **The published series is verified to be what was measured**: applying these 15
 patches with `git am` to a clean `2026.07.04` checkout reproduces, byte for
 byte, the `rts/` tree of the build that produced every number above.
+
+The build actually DEPLOYED to the re-sim host is those 15 plus
+`0003-static-mempool-lazy-zeroing.patch`, the memory patch — 16 in total, and
+the same reproduction check passes on all 16 (`MEMORY.md` has its numbers and
+the deploy recipe). It is listed apart from the table below because it buys no
+speed and is measured on a different axis; it touches
+`rts/System/MemPoolTypes.h`, which nothing else in the series does, so its place
+in the apply order is free.
 
 ## The stack, in apply order
 
