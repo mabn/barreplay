@@ -3791,10 +3791,10 @@ function ensureHomeData() {
 // shareable, survives a refresh, and replayHref carries it into a replay so
 // the back button returns to the section it was opened from. Unlike a filter
 // change this IS navigation between screens, so it pushes a history entry.
-const HOME_TABS = ['replays', 'queue'];
+const HOME_TABS = ['replays', 'queue', 'sqlstats'];
 // Sections only an admin may see. The menu entry is hidden by CSS; this is
 // what keeps a shared ?tab=queue link from opening the section anyway.
-const ADMIN_TABS = new Set(['queue']);
+const ADMIN_TABS = new Set(['queue', 'sqlstats']);
 
 function homeTab() {
   const t = new URLSearchParams(location.search).get('tab');
@@ -3827,12 +3827,104 @@ function applyHomeTab() {
   // read — the Reload button is what asks again — and refreshQueue itself is
   // the no-op for everyone else.
   refreshQueue();
+  // The SQL section has no badge on the menu, so nothing needs it before it
+  // is on screen; it re-reads on every open, since opening it is asking.
+  if (tab === 'sqlstats') refreshSqlStats();
 }
 
 function initHomeNav() {
   for (const b of document.querySelectorAll('#homenav .navitem')) {
     b.addEventListener('click', () => setHomeTab(b.dataset.tab));
   }
+}
+
+// ---- sql stats section (admin) ---------------------------------------------
+// What each Durable Object method has cost in SQLite rows since its instance
+// started — GET /api/sqlstats, the live counterpart of the repo's rowcost
+// test suite. Admin-only like the Queue and read on demand. The window is the
+// DO instance's lifetime (a deploy or eviction resets it), so the header
+// always states when the counting started; the /day columns project each
+// method's spend onto the free plan's daily allowances, which is the number
+// that says whether a method will exhaust a budget before midnight.
+const SQL_READS_PER_DAY = 5000000; // Workers Free plan daily allowances — the
+const SQL_WRITES_PER_DAY = 100000; // budgets the "/day · budget" columns are % of
+const SQLSTATS_UNSUPPORTED =
+  "This server does not meter SQL — its catalog is computed from local files, not the worker's SQLite.";
+let sqlStatsSupported = true; // cleared by a 404: a backend won't grow the route
+let sqlStatsSeq = 0;          // ignore a reply overtaken by a newer request
+
+async function refreshSqlStats() {
+  if (!adminMode()) return;
+  if (!sqlStatsSupported) { renderSqlStats(null, SQLSTATS_UNSUPPORTED); return; }
+  const seq = ++sqlStatsSeq;
+  let report;
+  try {
+    const r = await fetch('/api/sqlstats');
+    if (r.status === 404 || r.status === 405) {
+      sqlStatsSupported = false;
+      renderSqlStats(null, SQLSTATS_UNSUPPORTED);
+      return;
+    }
+    if (!r.ok) { renderSqlStats(null, `Could not read the SQL stats: HTTP ${r.status}`); return; }
+    report = await r.json();
+    if (!report || !Array.isArray(report.ops) || !report.totals) throw new Error('unexpected reply');
+  } catch (err) {
+    renderSqlStats(null, 'Could not read the SQL stats: ' + (err.message || err));
+    return;
+  }
+  if (seq !== sqlStatsSeq) return; // a newer read already went out
+  renderSqlStats(report);
+}
+
+function renderSqlStats(report, errMsg) {
+  const head = document.getElementById('sqlstatshead');
+  const msg = document.getElementById('sqlstatsmsg');
+  const table = document.getElementById('sqlstatstable');
+  const tbody = table.querySelector('tbody');
+  const tfoot = table.querySelector('tfoot');
+  tbody.textContent = '';
+  tfoot.textContent = '';
+  if (errMsg) {
+    head.textContent = '';
+    table.style.display = 'none';
+    msg.textContent = errMsg;
+    msg.style.display = '';
+    return;
+  }
+  msg.style.display = 'none';
+  table.style.display = '';
+  head.textContent = `Counting since ${fmtDate(Math.round(report.since / 1000))} — `
+    + `${fmtDuration(Math.max(report.elapsedSec, 0))} so far. The window is the Durable Object `
+    + `instance's lifetime: a deploy or an eviction starts it over.`;
+  // A projection off a seconds-old window is noise, not a rate.
+  const projectable = report.elapsedSec >= 60;
+  const num = (n) => n.toLocaleString('en-US');
+  const projCell = (rows, budget) => {
+    if (!projectable) return null;
+    const perDay = rows / report.elapsedSec * 86400;
+    return `${num(Math.round(perDay))} · ${(perDay / budget * 100).toFixed(1)}%`;
+  };
+  const emit = (label, calls, rowsRead, rowsWritten, into) => {
+    const tr = document.createElement('tr');
+    const cell = (text, cls) => {
+      const td = document.createElement('td');
+      if (cls) td.className = cls;
+      if (text == null) td.classList.add('dim');
+      td.textContent = text ?? '—';
+      tr.appendChild(td);
+    };
+    cell(label, 'op');
+    cell(calls == null ? null : num(calls));
+    cell(num(rowsRead));
+    cell(calls ? num(Math.round(rowsRead / calls)) : null);
+    cell(projCell(rowsRead, SQL_READS_PER_DAY));
+    cell(num(rowsWritten));
+    cell(calls ? num(Math.round(rowsWritten / calls)) : null);
+    cell(projCell(rowsWritten, SQL_WRITES_PER_DAY));
+    into.appendChild(tr);
+  };
+  for (const o of report.ops) emit(o.op, o.calls, o.rowsRead, o.rowsWritten, tbody);
+  emit('total', null, report.totals.rowsRead, report.totals.rowsWritten, tfoot);
 }
 
 // ---- queue section ---------------------------------------------------------
@@ -4406,6 +4498,7 @@ function initQueue() {
   document.getElementById('q_prev').onclick = () => setQueueOffset(queueOffset - QUEUE_PAGE);
   document.getElementById('q_next').onclick = () => setQueueOffset(queueOffset + QUEUE_PAGE);
   document.getElementById('q_reload').onclick = () => refreshQueue();
+  document.getElementById('sql_reload').onclick = () => refreshSqlStats();
 }
 
 // fillProgressCell renders a running job's live self-report into the Detail

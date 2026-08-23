@@ -634,3 +634,28 @@ body.admin-mode #filters .admin { display: inline-block; }
 #viewstatus { min-width: 8ch; font-size: 11px; color: #6f87a0; }
 #viewstatus.ok { color: #7fd18b; }
 #viewstatus.err { color: #ff9c8f; }
+
+/* ---- SQL cost table (admin) ------------------------------------------------
+   The queue's dress, with every column but the method a number: right-aligned,
+   tabular digits. The totals row closes the table like a ledger line. */
+#sqlstatshead { max-width: 1100px; margin: 0 auto 10px; }
+#sqlstatstable { border-collapse: collapse; margin: 0 auto; font-size: 13px; }
+#sqlstatstable th {
+  text-align: right; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+  color: #6f87a0; font-weight: 600; padding: 4px 8px 6px 16px; border-bottom: 1px solid #2a323c;
+}
+#sqlstatstable td {
+  padding: 6px 8px 6px 16px; border-bottom: 1px solid #202830; text-align: right;
+  white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+#sqlstatstable th:first-child, #sqlstatstable td:first-child { text-align: left; padding-left: 8px; }
+#sqlstatstable td.op { color: #8fd3ff; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+#sqlstatstable td.dim { color: #6a7785; }
+#sqlstatstable tfoot td { border-top: 1px solid #2a323c; border-bottom: none; color: #cfe3f5; font-weight: 600; }
+#sqlstatstable tfoot td.op { color: #cfe3f5; font-family: inherit; font-size: 13px; }
+#sqlstatsbar { max-width: 1100px; margin: 10px auto 0; text-align: center; }
+#sqlstatsbar button {
+  background: #1a222b; color: #9fb0bf; border: 1px solid #33404d; border-radius: 4px;
+  padding: 4px 12px; font-size: 12px; cursor: pointer;
+}
+#sqlstatsbar button:hover { color: #cfe3f5; border-color: #4a5a6c; }
