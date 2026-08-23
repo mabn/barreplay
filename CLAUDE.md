@@ -745,7 +745,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           containing it; ?map= stays an exact match, applied when the text
                           names exactly one map — a player-count RANGE, a duration RANGE,
                           player name — a datalist of the known names, debounced 300 ms — and
-                          REPLAY ID, which is a paste target rather than something anyone
+                          GAME ID, which is a paste target rather than something anyone
                           types: app.js gameIdIn takes the longest hex run out of whatever
                           arrives, so a gex or bar-rts link, a ?replay= URL or a log line all
                           resolve to the id, while a bare prefix stays a prefix and anything

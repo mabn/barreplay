@@ -114,7 +114,7 @@ test("player count is null when nothing can answer", () => {
 
 // The id filter is a PASTE target: a whole id, the start of one, or (once
 // app.js has lifted the hex out of a link) whatever that yielded.
-test("a replay id filters as a prefix, folded", () => {
+test("a game id filters as a prefix, folded", () => {
   const id = "92488a6a2807186a199996b9a0712fa5";
   const got = (qs: string) => (parse(qs) as Exclude<ReturnType<typeof parse>, string>).id;
   assert.equal(got(`id=${id}`), id);
