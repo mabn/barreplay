@@ -28,8 +28,16 @@ class FakeIndex {
   entries = new Map<string, ReplayEntry>();
   jobs = new Map<string, IngestJob>();
 
-  upsert(e: ReplayEntry): void {
+  /** The id the route offers for the game's re-simulation, if the publish
+   * turns out to leave it one-sided. The real DO decides whether to use it;
+   * what is worth pinning HERE is that the route hands one over at all —
+   * dropping it would silently stop every one-sided upload from queueing its
+   * full view, with nothing failing. */
+  resimJobIds: (string | undefined)[] = [];
+
+  upsert(e: ReplayEntry, resimJobId?: string): void {
     this.entries.set(e.id, e);
+    this.resimJobIds.push(resimJobId);
   }
   list(): ReplayEntry[] {
     return [...this.entries.values()];
@@ -490,6 +498,8 @@ test("PUT /api/replays carries rid into the catalog", async () => {
   );
   assert.equal(res.status, 200);
   assert.equal(index.entries.get(GAME_ID)?.rid, `${GAME_ID}-1a2b3c4d`);
+  // ...and an id for the re-sim the publish may want to queue.
+  assert.match(index.resimJobIds[0] ?? "", /^[0-9a-f-]{36}$/);
 });
 
 // The admin settings-refresh re-derives one row's badges AND players roster

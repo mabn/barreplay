@@ -4,7 +4,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mergeUploads, parseViewRequest, playersFromApi, sanitizeEntry, settingsFlags } from "../src/worker/replayentry";
+import {
+  mergeUploads,
+  parseViewRequest,
+  playersFromApi,
+  sanitizeEntry,
+  settingsFlags,
+  wantsFullView,
+} from "../src/worker/replayentry";
 
 test("full entry passes through", () => {
   const e = sanitizeEntry("abc123", {
@@ -341,4 +348,30 @@ test("view request rejects malformed bodies", () => {
   ]) {
     assert.equal(typeof parseViewRequest(bad), "string", `should reject ${JSON.stringify(bad)}`);
   }
+});
+
+// wantsFullView is what decides, at publish time, whether a game is worth an
+// hour of somebody's engine time: recorded from inside, with no full view of
+// it published yet. It used to be needsResim in cmd/bringest, asked of every
+// catalog row on a timer.
+test("wantsFullView asks for a re-sim only for a game that is one-sided all the way down", () => {
+  const one = { rid: "g-11111111", ally: 1 };
+  const full = { rid: "g-fefefefe", ally: null };
+  // The current publish says it recorded one side, and nothing published for
+  // this game saw the rest.
+  assert.equal(wantsFullView(1, [one]), true);
+  // Two teammates' uploads are still two halves of the same side's view.
+  assert.equal(wantsFullView(0, [one, { rid: "g-22222222", ally: 0 }]), true);
+  // The uploads list is the durable record: a later provenance-less publish
+  // nulls the column, and the game is still one somebody recorded from inside.
+  assert.equal(wantsFullView(null, [one]), true);
+  // A full view exists — a spectator's upload, or the re-sim's own publish.
+  assert.equal(wantsFullView(1, [one, full]), false);
+  assert.equal(wantsFullView(null, [full]), false);
+  // Nothing says anything: most of the catalog, from before the recorder
+  // record existed. Unknown is not "ally", and guessing costs an hour.
+  assert.equal(wantsFullView(null, null), false);
+  assert.equal(wantsFullView(null, []), false);
+  // Known one-sided, nothing in the list yet (an unrevisioned publish).
+  assert.equal(wantsFullView(1, null), true);
 });
