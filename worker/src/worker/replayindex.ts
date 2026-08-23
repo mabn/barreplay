@@ -102,8 +102,15 @@ const BACKFILL_INSPECT = 200;
  * jobs landing on a strict five-minute spacing each took ninety seconds; the
  * assumption behind the first version of this — that a queued job is an hour
  * of work, so five minutes of granularity is invisible — is not true of a
- * host running the patched engine over ordinary games. */
-const BACKFILL_COOLDOWN_SEC = 5 * 60;
+ * host running the patched engine over ordinary games.
+ *
+ * A MINUTE, which is the cron's own period: an empty scan can only start
+ * finding something again when the mirror gains a game, and that is the
+ * fastest it can happen. Waiting longer just leaves an engine host idle in
+ * front of work that has arrived. It costs ~1440 scans a day in the idle
+ * case, which at the size bound above is a fraction of the daily rows-read
+ * allowance — see ROW BUDGET in CLAUDE.md. */
+const BACKFILL_COOLDOWN_SEC = 60;
 
 /** How many healthchecks one job keeps. At the daemon's 10-second beat that is
  * two hours at full resolution, comfortably past any real re-simulation.

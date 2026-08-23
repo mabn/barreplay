@@ -1379,7 +1379,9 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           polling together cannot both take the same game. And the scan is
                           bounded in SIZE always — the newest BACKFILL_INSPECT=200 mirrored
                           games, never the whole table — and in RATE only when it comes up
-                          EMPTY (BACKFILL_COOLDOWN_SEC=5min, in schema_meta). It is the one
+                          EMPTY (BACKFILL_COOLDOWN_SEC=60s, in schema_meta — the cron's own
+                          period, since a new candidate can only appear when the mirror gains
+                          a game). It is the one
                           query on the 10s poll path whose cost grows with the mirror — which
                           grows ~2000 games a day forever — and an unbounded walk of it 8640
                           times a day is what first exhausted the account's daily rows-read
@@ -1389,7 +1391,8 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           an index. Resting after a SUCCESSFUL scan is the same bug seen from
                           the other side — it put the deployment on a strict five-minute grid
                           for jobs that took ninety seconds, an engine host idle most of the
-                          day. The window cannot drain the way one over raw recency would: a
+                          day; a minute of rest on the empty answer is the whole of what is
+                          left. The window cannot drain the way one over raw recency would: a
                           host consumes far fewer games a day than the ~2000 arriving, so it
                           slides in faster than it empties. It makes a GET write,
                           which is the price of leaving the daemon's protocol untouched: a
