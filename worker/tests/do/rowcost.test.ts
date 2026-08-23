@@ -157,10 +157,11 @@ test("the polled and cron reads do not scan the tables they read from", async ()
   // A poll is answered out of an index, not out of the tables.
   expect(costs.jobsPendingUpload, report).toBeLessThan(50);
   expect(costs.jobsPendingResim, report).toBeLessThan(50);
-  // The backfill stops at its 20th candidate rather than reading the mirror:
-  // here that means stepping over the 200 newest games (which have job rows)
-  // and no further, where the unindexed ORDER BY read all 5000 twice over.
-  expect(costs.jobsOfferScan, report).toBeLessThan(1500);
+  // The backfill stops at its 200th candidate rather than reading the mirror:
+  // here that means stepping over the 300 latest-ended games (published, the
+  // newest 200 of them also with job rows) plus the 200-candidate window and
+  // no further, where the unindexed ORDER BY read all 5000 twice over.
+  expect(costs.jobsOfferScan, report).toBeLessThan(4000);
   expect(costs.jobsOfferQueued, report).toBeLessThan(50);
   // Partial index over the open observations, not a scan of every one ever
   // recorded.
