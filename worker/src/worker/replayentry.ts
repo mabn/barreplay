@@ -494,10 +494,15 @@ function sanitizePlayers(v: unknown): CatalogTeam[] | null | string {
 
 /** The flag settingsFlags emits for a game that ran with any tweakdefs or
  * tweakunits slot set. Named because it is not only a badge: the re-sim
- * backfill (ReplayIndex.jobsOffer) refuses a game carrying it, and that
- * refusal is a string match in SQL — renaming the flag here without the query
- * would disable the restriction silently rather than break anything. The Go
- * twin viz.SettingsFlags emits the same literal. */
+ * backfill (ReplayIndex.jobsOffer) RANKS a game carrying it first, and that
+ * ranking is a string match in SQL — renaming the flag here without the query
+ * would silently stop preferring modded games rather than break anything. The
+ * Go twin viz.SettingsFlags emits the same literal.
+ *
+ * It used to be a refusal, on the grounds that an hour of engine time was
+ * better spent elsewhere. It is the other way round: a modded game — which is
+ * also how the modes that ship as tweak blobs, lava and zombies, show up — is
+ * the one nobody has another way to look at. */
 export const SETTINGS_MODS_FLAG = "mods";
 
 /** settingsFlags distills a game's raw modoptions map (string-valued, as the

@@ -1312,11 +1312,18 @@ export class ReplayIndex extends DurableObject<Env> {
    * force a retry by pasting its link, which is exactly the existing story for
    * a failed request.
    *
-   * It must also be UNMODDED: no tweakdefs/tweakunits slot set, which is
-   * exactly what the settings' `mods` flag records. Note this rules out the
-   * game modes that SHIP as tweak blobs — lava, zombies — which is the same
-   * thing said twice, not an accident. A person who wants one of those
-   * re-simulated can still paste its link; nothing refuses that.
+   * A MODDED game — any tweakdefs/tweakunits slot set, which is exactly what
+   * the settings' `mods` flag records — is taken FIRST, ahead of a bigger one.
+   * It is the rarer thing and the less replaceable: an 8v8 nobody re-simulates
+   * today is one of forty played this hour, where a game running somebody's
+   * tweaks is the only one of its kind, and the tweaks are most of what a
+   * spectator view of it would be for. The same rule prefers the modes that
+   * SHIP as tweak blobs — lava, zombies — which is the same thing said twice
+   * rather than an accident.
+   *
+   * This was a REFUSAL until it was measured: modded games are ~0 in 24 of
+   * BAR's output, so excluding them bought nothing and cost the only games in
+   * the mirror that are not interchangeable.
    *
    * It backfills only into an EMPTY pending list, so at most one auto-queued
    * job is ever waiting: the next poll finds that job rather than making
@@ -1359,11 +1366,18 @@ export class ReplayIndex extends DurableObject<Env> {
     const candidate = this.ctx.storage.sql
       .exec(
         `SELECT id FROM (
-           SELECT g.id AS id, g.player_count AS player_count, g.start_unix AS start_unix
+           SELECT g.id AS id, g.player_count AS player_count, g.start_unix AS start_unix,
+                  -- Ranked on below, not filtered on: a modded game is the
+                  -- one this pipeline is most worth spending an hour of engine
+                  -- time on, since it is the one nobody else can look at.
+                  -- Read from the derived table rather than the row's settings
+                  -- JSON: the flag index (flag, replay_id) makes it a seek,
+                  -- and a mirrored game always owns its own entries there.
+                  EXISTS (SELECT 1 FROM replay_settings s
+                          WHERE s.replay_id = g.id AND s.flag = ?) AS modded
            FROM games g
            WHERE NOT EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id)
              AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = g.id)
-             AND NOT EXISTS (SELECT 1 FROM replay_settings s WHERE s.replay_id = g.id AND s.flag = ?)
            -- Walks games_start newest-first and STOPS at the 20th candidate,
            -- which is what makes the scan cost the size of its answer instead
            -- of the size of the mirror. Both terms matter: a leading
@@ -1376,14 +1390,14 @@ export class ReplayIndex extends DurableObject<Env> {
            ORDER BY g.start_unix DESC, g.id
            LIMIT ${BACKFILL_WINDOW}
          )
-         -- Biggest game in that window; a game whose roster the API never gave
-         -- goes last, and an exact tie goes to the newer one.
-         ORDER BY player_count IS NULL, player_count DESC, start_unix DESC, id
+         -- MODDED first, then the biggest; a game whose roster the API never
+         -- gave goes last, and an exact tie goes to the newer one. Modded
+         -- beats bigger because it is rarer and less replaceable: an 8v8 that
+         -- nobody re-simulates today is one of forty played this hour, where
+         -- the game with tweakdefs in it is the only one of its kind, and it
+         -- is the mode's own tweaks that a spectator view is worth having of.
+         ORDER BY modded DESC, player_count IS NULL, player_count DESC, start_unix DESC, id
          LIMIT 1`,
-        // Read from the derived table rather than the row's settings JSON: the
-        // flag index (flag, replay_id) makes it a seek, and a mirrored game
-        // always owns its own entries there — a game the catalog owns instead
-        // is excluded by the first clause anyway.
         SETTINGS_MODS_FLAG,
       )
       .toArray();
