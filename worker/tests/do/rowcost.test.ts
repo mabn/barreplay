@@ -100,6 +100,19 @@ function seed(index: ReplayIndex): void {
   sql.exec(`INSERT INTO jobs (id, stream_key, game_id, kind, state, created_unix, updated_unix)
     SELECT printf('j%06d', n), '', printf('g%06d', n), 'resim', 'done', ${NOW}, ${NOW}
     FROM (${seq(JOBS)})`);
+  // A few jobs still in flight (upload-kind, over games outside the mirror,
+  // so the re-sim backfill's own measurements stay undisturbed). The queue
+  // page reads the in-flight set whole, and — the case that bit — the
+  // catalog list's per-row jobs subqueries must stay seeks with these
+  // present, not a walk of the processing set per listed row.
+  sql.exec(`INSERT INTO jobs (id, stream_key, game_id, kind, state, created_unix, updated_unix)
+    SELECT printf('a%06d', n), 'streams/x', printf('x%06d', n), 'upload',
+           CASE WHEN n % 2 THEN 'pending' ELSE 'processing' END, ${NOW}, ${NOW}
+    FROM (${seq(6)})`);
+  // The maintained count behind queuePage's total (raw-SQL seeding bypasses
+  // jobInsert, which is what increments it in production).
+  sql.exec(`INSERT INTO schema_meta (key, value) VALUES ('jobs_count', ${JOBS + 6})
+    ON CONFLICT(key) DO UPDATE SET value = ${JOBS + 6}`);
   sql.exec(`INSERT INTO job_samples (job_id, at_unix, state, frame, percent, eta_sec, rss_bytes, swap_bytes, cpu_pct)
     SELECT printf('j%06d', (n % ${JOBS}) + 1), ${NOW} + (n / ${JOBS}) * 10, 'simulating', n, 50.0, 100.0, 3e9, 0, 600.0
     FROM (${seq(JOBS * SAMPLES_PER_JOB)})`);
@@ -162,6 +175,19 @@ test("the polled and cron reads do not scan the tables they read from", async ()
     index.mapNames();
     out.mapNames = tally();
 
+    // The queue page, as the admin's browser asks for it. Not on a timer,
+    // but 25 rows on a click must not cost the jobs table: the CASE-ordered
+    // single query this replaced read ~4.7x the whole table per call (2122
+    // rows to return one, on the 451-job deployment), and jobs are never
+    // deleted. total is JOBS + the six in-flight seeds + the one job the
+    // backfill measurement above queued through jobInsert — which is also
+    // the proof that the maintained count follows real inserts, not just
+    // the seed; that backfilled job is pending, hence active = 7.
+    const page = index.queuePage(25, 0);
+    out.queuePage = tally();
+    expect(page.total, "the maintained count sees every job").toBe(JOBS + 7);
+    expect(page.active, "the in-flight count is the active set").toBe(7);
+
     // A running job's healthcheck, every 10s: the first beat learns how many
     // samples the job has, the rest must not ask again.
     index.jobUpdate("j000001", "processing", null, null, { state: "simulating", percent: 12 });
@@ -195,6 +221,10 @@ test("the polled and cron reads do not scan the tables they read from", async ()
   expect(costs.listPage, report).toBeLessThan(400);
   // One row: the stored maps list, not the catalog.
   expect(costs.mapNames, report).toBeLessThan(5);
+  // The in-flight set + one page of settled jobs + their joins + the meta
+  // count — never a scan-and-sort of the jobs table (which at this seed
+  // would read ~1000 rows; the deployment measured ~4.7x table size).
+  expect(costs.queuePage, report).toBeLessThan(300);
   // The first beat counts the job's samples; every beat after it is answered
   // from memory.
   expect(costs.healthcheckNext, report).toBeLessThan(50);

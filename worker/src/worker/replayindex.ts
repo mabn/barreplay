@@ -186,16 +186,20 @@ function progressPercent(progressJSON: unknown): number | null {
  * table). Rows carry no derivation of their own — it is recomputed from the
  * replays row — so bumping this runs a one-time pass on the next wake
  * (ensureDerived holds the CURRENT bump's work; a new version replaces that
- * block with its own). v1 backfilled rows that predate the derived data;
- * v2 seeded unique_values('maps') from the catalog's existing rows. */
-const DERIVED_VERSION = 2;
+ * block with its own — CUMULATIVELY, when the versions between never shipped
+ * separately, since a deployed database jumps straight from its stamp to the
+ * current one). v1 backfilled rows that predate the derived data; v2 seeded
+ * unique_values('maps') from the catalog's existing rows; v3 added the
+ * jobs_count seed (and re-runs the v2 seed, which never deployed on its own —
+ * both are idempotent recomputes). */
+const DERIVED_VERSION = 3;
 
 /** Version of the SCHEMA itself, stamped into the schema_version table by the
  * migration that produced it. schemaCurrent reads this one row to decide
  * whether the DDL needs to run at all — a read, where the DDL statements are
  * write-classified even as no-ops. BUMP THIS whenever SCHEMA_DDL, INDEX_DDL
  * or ADDED_COLUMNS change, or the change never reaches a deployed database. */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 /** Everything migrateSchema creates, split from the code so schemaCurrent can
  * scan the same text it executes (one source, nothing to drift). */
@@ -401,6 +405,17 @@ const INDEX_DDL = `
       -- gone, and dropping it here (one schema statement) is what sheds the
       -- ~100k mirror roster rows a row-by-row DELETE could not afford.
       DROP TABLE IF EXISTS replay_players;
+      -- queuePage's settled half: every job no longer in flight, most
+      -- recently updated first. PARTIAL, and deliberately over exactly the
+      -- rows a heartbeat never touches: an active job's updated_unix moves
+      -- every 10 seconds, so indexing it here would cost an index rewrite
+      -- per beat, where a settled job lands in this index once, when it
+      -- ends. The settled query's WHERE must repeat this clause TEXTUALLY —
+      -- the planner only takes a partial index when the query's own WHERE
+      -- provably implies the index's, and an identical expression is the
+      -- proof it accepts (the rowcost test is the guard).
+      CREATE INDEX IF NOT EXISTS jobs_settled ON jobs (updated_unix DESC, id)
+        WHERE state NOT IN ('pending', 'processing') OR disabled != 0;
       -- PARTIAL indexes, because the two questions asked of the lobbies
       -- table every minute are about the handful of rows in a state, over
       -- a table that keeps every unmatched observation forever: which
@@ -476,6 +491,15 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
  * the TTL is a backstop against anything else touching the table, not the
  * consistency mechanism. */
 const MAPS_CACHE_MS = 60_000;
+
+/** The schema_meta key holding how many rows the jobs table has. Maintained —
+ * incremented by jobInsert, seeded once by the derived backfill — because a
+ * COUNT(*) is O(table) in rows read even over an index, the jobs table only
+ * grows (nothing ever deletes a job row; the dedupe rules depend on the
+ * history), and queuePage needs the number on every read. Sound precisely
+ * BECAUSE nothing deletes: the count is monotonic, so one seed plus an
+ * increment per insert can never drift. */
+const JOBS_COUNT_KEY = "jobs_count";
 
 /** Escape a string for use inside a LIKE pattern with ESCAPE '\\':
  * backslash first covers the escapes it is about to add, then the wildcards. */
@@ -660,11 +684,16 @@ export class ReplayIndex extends DurableObject<Env> {
         .exec(`SELECT value FROM schema_meta WHERE key = 'derived_version'`)
         .toArray();
       if ((have.length > 0 ? (have[0].value as number) : 0) >= DERIVED_VERSION) return;
-      // v2: seed the maps list from the rows already in the catalog. Upsert
-      // maintains it for every publish from here on; this one pass is what
-      // hands the deployed rows their entry (a fresh database derives an
-      // empty list, which is equally right).
+      // v2+v3, together because neither shipped before the other: seed the
+      // maps list from the rows already in the catalog (upsert maintains it
+      // for every publish from here on), and seed the jobs counter from the
+      // table (jobInsert increments it from here on). Both are idempotent
+      // recomputes, so re-running them on a database that somehow ran one
+      // is harmless; a fresh database derives an empty list and a zero
+      // count, which is equally right.
       this.rebuildMapsList();
+      const jobs = this.ctx.storage.sql.exec(`SELECT COUNT(*) AS n FROM jobs`).toArray();
+      this.metaPut(JOBS_COUNT_KEY, Number(jobs[0].n));
       this.ctx.storage.sql.exec(
         `INSERT INTO schema_meta (key, value) VALUES ('derived_version', ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
@@ -961,8 +990,17 @@ export class ReplayIndex extends DurableObject<Env> {
     const rows = this.ctx.storage.sql
       .exec(
         `SELECT id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date, placeholder,
-                EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = replays.id AND j.state = 'processing') AS processing,
-                (SELECT j.progress FROM jobs j WHERE j.game_id = replays.id AND j.state = 'processing'
+                -- Both jobs subqueries are PINNED to the (game_id, state)
+                -- index: left to itself the planner answered the progress
+                -- subselect's ORDER BY from jobs_state instead, which reads
+                -- every processing job PER LISTED ROW — 50 rows x the number
+                -- of daemons at work, on every landing-page load (the rowcost
+                -- test's in-flight seed is what caught it). Seeked by game,
+                -- each costs the game's own jobs, i.e. almost always 0-1.
+                EXISTS (SELECT 1 FROM jobs j INDEXED BY jobs_game
+                        WHERE j.game_id = replays.id AND j.state = 'processing') AS processing,
+                (SELECT j.progress FROM jobs j INDEXED BY jobs_game
+                 WHERE j.game_id = replays.id AND j.state = 'processing'
                  ORDER BY j.updated_unix DESC LIMIT 1) AS processing_progress,
                 (SELECT lobby_name FROM games g WHERE g.id = replays.id) AS lobby_name,
                 (SELECT map_file FROM games g WHERE g.id = replays.id) AS map_file
@@ -1380,6 +1418,14 @@ export class ReplayIndex extends DurableObject<Env> {
       now,
       now,
     );
+    // The maintained table count queuePage's `total` reads (JOBS_COUNT_KEY):
+    // one meta row touched per insert, against the COUNT(*) per page view it
+    // replaces, whose cost was the table.
+    this.ctx.storage.sql.exec(
+      `INSERT INTO schema_meta (key, value) VALUES (?, 1)
+       ON CONFLICT(key) DO UPDATE SET value = value + 1`,
+      JOBS_COUNT_KEY,
+    );
   }
 
   /** resimEnqueue takes a re-simulation request for one game, refusing it when
@@ -1677,50 +1723,83 @@ export class ReplayIndex extends DurableObject<Env> {
 
   /** queuePage is the queue as a PERSON reads it (GET /api/queue): one page of
    * jobs, everything still in flight first — those are what the view exists to
-   * answer for — then the most recently finished, newest first. Unlike
+   * answer for — then the most recently settled, newest first. Unlike
    * jobsPending it does not hide a fresh "processing" job: a daemon working
    * right now is exactly what the viewer wants to see, even though it is not
    * work to hand out.
    *
    * `total` and `active` are counted over the WHOLE table, not the page, so a
    * pager can say how much it is paging through and the menu's in-flight count
-   * stays true on any page. */
+   * stays true on any page.
+   *
+   * TWO queries plus a meta row, assembled here, instead of the one query this
+   * used to be. That one led its ORDER BY with the unfinished-first CASE, which
+   * no index can satisfy, so every read joined and sorted the WHOLE jobs table
+   * into a temp b-tree and the LIMIT saved nothing — measured at 2122 rows to
+   * return one, on a 451-job table that only ever grows (the ROW BUDGET
+   * pattern this codebase keeps refusing, this time on an admin click instead
+   * of a timer). Split at exactly the CASE's boundary, each half is index
+   * work: the in-flight jobs come off jobs_state and are read IN FULL (bounded
+   * by work actually in flight, which drains — never by the table, which
+   * doesn't), the settled ones walk the jobs_settled partial index in display
+   * order and stop at the page edge, and the joins run only for rows actually
+   * paged. Deep pages still pay O(offset), like the catalog list. */
   queuePage(limit: number, offset: number): { jobs: QueueJob[]; total: number; active: number } {
-    const jobs = this.ctx.storage.sql
+    // The jobs table knows a gameId and nothing else about the game, so the
+    // duration and the team spec are joined on from whichever table knows
+    // them: the catalog first (what was captured), the games mirror second
+    // (what BAR published), which is what covers the re-sim of a game
+    // nobody has uploaded — most of this queue.
+    //
+    // EVERY column in the ORDER BY is qualified, and has to be: `id` is in
+    // all three tables and `updated_unix` is in two of them, so an
+    // unqualified one is an ambiguous-column error rather than a wrong
+    // answer.
+    const select = `
+      SELECT ${JOB_COLS_J},
+             COALESCE(r.duration_sec, g.duration_sec) AS game_duration_sec,
+             COALESCE(r.game_size, g.game_size)       AS game_size
+      FROM jobs j
+      LEFT JOIN replays r ON r.id = j.game_id
+      LEFT JOIN games   g ON g.id = j.game_id`;
+    const active = this.ctx.storage.sql
       .exec(
-        // The jobs table knows a gameId and nothing else about the game, so the
-        // duration and the team spec are joined on from whichever table knows
-        // them: the catalog first (what was captured), the games mirror second
-        // (what BAR published), which is what covers the re-sim of a game
-        // nobody has uploaded — most of this queue.
-        //
-        // EVERY column in the ORDER BY is qualified, and has to be: `id` is in
-        // all three tables and `updated_unix` is in two of them, so an
-        // unqualified one is an ambiguous-column error rather than a wrong
-        // answer.
-        `SELECT ${JOB_COLS_J},
-                COALESCE(r.duration_sec, g.duration_sec) AS game_duration_sec,
-                COALESCE(r.game_size, g.game_size)       AS game_size
-         FROM jobs j
-         LEFT JOIN replays r ON r.id = j.game_id
-         LEFT JOIN games   g ON g.id = j.game_id
-         ORDER BY CASE WHEN j.state IN ('pending', 'processing') AND j.disabled = 0 THEN 0 ELSE 1 END,
-                  j.updated_unix DESC, j.id
-         LIMIT ? OFFSET ?`,
-        limit,
-        offset,
+        `${select}
+         WHERE j.state IN ('pending', 'processing') AND j.disabled = 0
+         ORDER BY j.updated_unix DESC, j.id`,
       )
       .toArray()
       .map(queueJobRow);
-    // SUM over no rows is NULL, hence the coalesce.
-    const counts = this.ctx.storage.sql
-      .exec(
-        `SELECT COUNT(*) AS total,
-                COALESCE(SUM(CASE WHEN state IN ('pending', 'processing') AND disabled = 0 THEN 1 ELSE 0 END), 0) AS active
-         FROM jobs`,
-      )
-      .toArray()[0];
-    return { jobs, total: Number(counts.total), active: Number(counts.active) };
+    const fromActive = active.slice(offset, offset + limit);
+    // The settled half fills what the page has left, its offset shifted by
+    // the actives that precede it in the combined order. The WHERE repeats
+    // jobs_settled's clause TEXTUALLY — that identity is what lets the
+    // planner take the partial index, walk it in display order, and stop at
+    // the page edge instead of sorting the table (see INDEX_DDL).
+    let settled: QueueJob[] = [];
+    if (fromActive.length < limit) {
+      settled = this.ctx.storage.sql
+        .exec(
+          `${select}
+           WHERE j.state NOT IN ('pending', 'processing') OR j.disabled != 0
+           ORDER BY j.updated_unix DESC, j.id
+           LIMIT ? OFFSET ?`,
+          limit - fromActive.length,
+          Math.max(0, offset - active.length),
+        )
+        .toArray()
+        .map(queueJobRow);
+    }
+    // The maintained count (see JOBS_COUNT_KEY). The COUNT(*) fallback is
+    // only reachable while the derived seed has not landed — a database
+    // serving through a budget overage — and self-heals with the seed.
+    let total = this.metaGet(JOBS_COUNT_KEY);
+    if (total === null) {
+      total = Number(this.ctx.storage.sql.exec(`SELECT COUNT(*) AS n FROM jobs`).toArray()[0].n);
+    }
+    // `active` is the rows already in hand — reading them all is what made
+    // the count free.
+    return { jobs: [...fromActive, ...settled], total, active: active.length };
   }
 
   /** jobClaim takes a job for a worker, refusing when someone else already

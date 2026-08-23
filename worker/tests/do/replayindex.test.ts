@@ -792,6 +792,47 @@ test("the catalog's own numbers beat the mirror's", async () => {
   });
 });
 
+// The page order and counts now come from two indexed queries assembled in
+// the method (the single CASE-ordered query sorted the whole table per read),
+// so what the assembly must not get wrong is pinned here: the order across
+// the bucket boundary, paging that spans it, and totals that stay whole-table
+// numbers on any page.
+test("the queue lists in-flight work first, then the settled, newest first", async () => {
+  await inIndex((index, sql) => {
+    for (const [id, state, at, disabled] of [
+      ["j-done-old", "done", 100, 0],
+      ["j-done-new", "done", 300, 0],
+      ["j-error", "error", 250, 0],
+      ["j-run-old", "processing", 50, 0],
+      ["j-run-new", "pending", 200, 0],
+      // Held back: settled bucket despite being pending — nothing will pick
+      // it up, so it must not sit at the head of the queue forever — and out
+      // of the in-flight count for the same reason.
+      ["j-disabled", "pending", 400, 1],
+    ] as const) {
+      index.jobInsert(id, "", `g-${id}`);
+      sql.exec(`UPDATE jobs SET state = ?, updated_unix = ?, disabled = ? WHERE id = ?`, state, at, disabled, id);
+    }
+
+    const page = index.queuePage(25, 0);
+    expect(page.jobs.map((j) => j.id)).toEqual([
+      "j-run-new", "j-run-old", // in flight, newest update first
+      "j-disabled", "j-done-new", "j-error", "j-done-old", // settled, newest first
+    ]);
+    expect(page.total).toBe(6);
+    expect(page.active).toBe(2);
+
+    // A page spanning the bucket boundary reads as one continuous list, and
+    // the counts stay whole-table numbers however the window falls.
+    const spanning = index.queuePage(2, 1);
+    expect(spanning.jobs.map((j) => j.id)).toEqual(["j-run-old", "j-disabled"]);
+    expect(spanning.total).toBe(6);
+    expect(spanning.active).toBe(2);
+    const deep = index.queuePage(25, 4);
+    expect(deep.jobs.map((j) => j.id)).toEqual(["j-error", "j-done-old"]);
+  });
+});
+
 test("a published replay keeps its row and never becomes a placeholder", async () => {
   await inIndex((index) => {
     index.upsert(replay("real"));
