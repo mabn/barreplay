@@ -495,7 +495,15 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           purge the zone after re-syncing the vendored bitmaps.
                           HOSTNAMES: the worker is served from replay.fogofwar.dev (a wrangler
                           Custom Domain — a PER-HOSTNAME cert, so no wildcard and no Advanced
-                          Certificate Manager; the zone must live in the worker's own account).
+                          Certificate Manager; the zone must live in the worker's own account)
+                          AND from replay.bartools.workers.dev — workers_dev: true is EXPLICIT
+                          in wrangler.jsonc, because with routes configured wrangler's default
+                          flips to off and a deploy would disable the subdomain. Either origin
+                          serves the same viewer unchanged (the bulk pieces go to the absolute
+                          cdn-bar.fogofwar.dev data origin from both), which is why the
+                          workers.dev origin is also in r2-cors.json — re-apply that policy to
+                          the bucket when its origins change (README's CORS step) or the
+                          browser blocks every replay piece on the new hostname.
                           NO STAGING/PREVIEW deployment exists, and Workers preview URLs
                           CANNOT work here: previews are never generated for Workers that
                           implement a Durable Object (hard platform limitation; this one
