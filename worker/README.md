@@ -603,6 +603,10 @@ The viewer therefore fetches the four bulk per-replay pieces (`.brw`, `.keys`,
 could serve.
 
 `replay.fogofwar.dev` (Worker)      SPA, /api/*, /index.json, uploads
+`replay.bartools.workers.dev`       the same Worker on its workers.dev hostname
+                                    (`workers_dev: true` in wrangler.jsonc —
+                                    explicit, because configured routes flip
+                                    wrangler's default to off)
 `cdn-bar.fogofwar.dev` (R2 direct)  replays/** — cached at the edge
 
 ### One-time setup
@@ -613,9 +617,12 @@ could serve.
 npx wrangler r2 bucket domain add barreplay-replays \
   --domain cdn-bar.fogofwar.dev --zone-id <ZONE_ID> --min-tls 1.2
 
-# 2. allow the viewer's origin to read it cross-origin. Without this the
+# 2. allow the viewer's origins to read it cross-origin. Without this the
 #    browser blocks every replay fetch — the Worker path was same-origin and
-#    needed none.
+#    needed none. r2-cors.json lists every hostname the viewer is served from
+#    (the custom domain AND replay.bartools.workers.dev); RE-RUN this whenever
+#    an origin is added to that file, or the new hostname loads a page whose
+#    every replay piece the browser refuses.
 npx wrangler r2 bucket cors set barreplay-replays --file r2-cors.json
 npx wrangler r2 bucket cors list barreplay-replays   # verify it took
 ```
