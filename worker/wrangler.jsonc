@@ -17,15 +17,23 @@
   // first (Registrar -> Manage Domain -> Configuration -> Start; the domain
   // must be >10 days old) — or this worker redeployed into that account.
   //
-  // The workers.dev hostname keeps working alongside this, so the switch is
-  // additive: nothing that already points at replay.bartools.workers.dev
-  // breaks when this lands.
   "routes": [
     {
       "pattern": "replay.fogofwar.dev",
       "custom_domain": true
     }
   ],
+
+  // Also serve the worker on its workers.dev hostname
+  // (replay.bartools.workers.dev), alongside the custom domain. This must be
+  // EXPLICIT: wrangler defaults workers_dev to true only while no routes are
+  // configured — with the custom domain above present, a deploy without this
+  // flag DISABLES the workers.dev subdomain. The viewer works unchanged from
+  // either hostname because the bulk replay fetches go to the absolute
+  // cdn-bar.fogofwar.dev data origin either way — which is why the workers.dev
+  // origin must also be in r2-cors.json (see the README's CORS step), or the
+  // browser blocks every replay piece there.
+  "workers_dev": true,
 
   // The Vite build (client bundle in dist/client) is served as static assets by the
   // runtime BEFORE the Worker runs. Requests that don't match an asset fall through to
