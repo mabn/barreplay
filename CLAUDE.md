@@ -564,6 +564,14 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           re-publish that drops a flag stops matching it; those predicates are
                           index-backed (replays_start / replays_map / replays_count and the
                           derived table's covering index — verified with EXPLAIN QUERY PLAN).
+                          The flag predicate is a CORRELATED EXISTS probing that table's
+                          primary key per candidate row, NOT `id IN (SELECT replay_id ...)`:
+                          replay_settings is shared with the games MIRROR, so the IN form
+                          enumerated the flag's whole population ('ranked' = every ranked game
+                          BAR has played, growing ~2000/day) and sorted the survivors in a
+                          temp b-tree before the LIMIT could stop anything — 31,400 rows read
+                          for one 51-row page at a 15k-game mirror, against 155 correlated
+                          (the rowcost test pins it).
                           The PLAYER predicate is the exception that reads the roster JSON on
                           the rows directly (a LIKE over a JSON-encoded, LIKE-escaped needle):
                           its old derived table replay_players cost ~48 rows written per
@@ -746,8 +754,13 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           be hunted for among them). A row that WAS already published and is being
                           re-simulated gets the same pill and stays openable, since a revision
                           exists to play. Both flags are server-owned and neither is stored as
-                          state to maintain: `processing` is an EXISTS over the jobs table
-                          computed per read (jobs_game index), so it clears itself the moment the
+                          state to maintain: `processing` is answered from the jobs table per
+                          read — list reads the WHOLE in-flight set once per call (state =
+                          'processing' off jobs_state: a handful of rows, bounded by work in
+                          flight, which drains; it replaced two per-listed-row subselects that
+                          cost ~1 jobs-row read per row) and matches it to the page in JS, and
+                          the same rows carry the progress JSON behind processingPercent — so
+                          it clears itself the moment the
                           job stops running — no path can leave a row saying "processing"
                           forever; `placeholder` is cleared by the publishing upsert, and a job
                           that ends WITHOUT publishing deletes the row (dropCatalogPlaceholder),
@@ -1156,7 +1169,9 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           per-game, so renames between games record correctly). Matched
                           observations prune after 48h; unmatched ones are kept forever as
                           the record of why a game has no name. SERVED: the DO's list JOINS
-                          lobby_name per read (a scalar subselect on games' primary key;
+                          lobby_name per read (ONE LEFT JOIN on games' primary key — it was
+                          two scalar subselects, which paid two PK seeks per listed row for
+                          one row's worth of data;
                           games.map_file rides the same join into `mapFile` — the archive
                           name behind the list's 18px map THUMBNAILS, fetched lazily from
                           api.bar-rts.com/maps/<file>/texture-thumb.jpg; rows without a

@@ -931,28 +931,32 @@ export class ReplayIndex extends DurableObject<Env> {
    * than a fixed `(? IS NULL OR col = ?)` chain, because the latter hides the
    * column behind an OR and SQLite then scans the table instead of using an
    * index. Every branch below is index-backed: replays_start for the dates,
-   * replays_map, replays_count, and an EXISTS-style IN over the two derived
-   * tables' covering indexes for names and flags. */
+   * replays_map, replays_count, and a correlated EXISTS probing the settings
+   * table's primary key for flags. */
   list(filter?: ReplayFilter, limit?: number, offset?: number): ReplayEntry[] {
+    // Every column name is `replays.`-qualified because the games mirror
+    // joined below shares most of them (start_unix, map, players, ...) — an
+    // unqualified predicate here is an ambiguous-column ERROR, not a wrong
+    // answer (the same trap queuePage documents).
     const where: string[] = [];
     const args: (string | number)[] = [];
     if (filter) {
-      if (filter.from !== null) { where.push(`start_unix >= ?`); args.push(filter.from); }
-      if (filter.to !== null) { where.push(`start_unix <= ?`); args.push(filter.to); }
-      if (filter.map !== null) { where.push(`map = ?`); args.push(filter.map); }
+      if (filter.from !== null) { where.push(`replays.start_unix >= ?`); args.push(filter.from); }
+      if (filter.to !== null) { where.push(`replays.start_unix <= ?`); args.push(filter.to); }
+      if (filter.map !== null) { where.push(`replays.map = ?`); args.push(filter.map); }
       // The same >= / < range the player prefix uses, here over the primary
       // key: a full id is a seek, a partial one reads only its own span.
       if (filter.id !== null) {
-        where.push(`id >= ? AND id < ?`);
+        where.push(`replays.id >= ? AND replays.id < ?`);
         args.push(filter.id, filter.id + "\uffff");
       }
-      if (filter.minPlayers !== null) { where.push(`player_count >= ?`); args.push(filter.minPlayers); }
-      if (filter.maxPlayers !== null) { where.push(`player_count <= ?`); args.push(filter.maxPlayers); }
+      if (filter.minPlayers !== null) { where.push(`replays.player_count >= ?`); args.push(filter.minPlayers); }
+      if (filter.maxPlayers !== null) { where.push(`replays.player_count <= ?`); args.push(filter.maxPlayers); }
       // NULL duration compares false either way, which is the intent: a row
       // that never recorded how long the game ran cannot be said to fall
       // inside a length the user asked for.
-      if (filter.minDuration !== null) { where.push(`duration_sec >= ?`); args.push(filter.minDuration); }
-      if (filter.maxDuration !== null) { where.push(`duration_sec <= ?`); args.push(filter.maxDuration); }
+      if (filter.minDuration !== null) { where.push(`replays.duration_sec >= ?`); args.push(filter.minDuration); }
+      if (filter.maxDuration !== null) { where.push(`replays.duration_sec <= ?`); args.push(filter.maxDuration); }
       if (filter.player !== null) {
         // Prefix match over the roster JSON the row already stores. The
         // replay_players table this used to seek is gone (see SCHEMA_DDL):
@@ -965,13 +969,23 @@ export class ReplayIndex extends DurableObject<Env> {
         // LIKE-escaped (so a wildcard in a name cannot widen the match);
         // JSON.stringify's opening quote is kept — it is the roster's own
         // name delimiter.
-        where.push(`players LIKE ? ESCAPE '\\'`);
+        where.push(`replays.players LIKE ? ESCAPE '\\'`);
         args.push(`%"name":${likeEscape(JSON.stringify(filter.player).slice(0, -1))}%`);
       }
       for (const flag of filter.settings) {
-        // One IN per flag, so the row must carry ALL of them (a single
-        // `flag IN (...)` would match any one of them).
-        where.push(`id IN (SELECT replay_id FROM replay_settings WHERE flag = ?)`);
+        // One EXISTS per flag, so the row must carry ALL of them (a single
+        // `flag IN (...)` would match any one of them). A correlated EXISTS,
+        // NOT `id IN (SELECT replay_id ...)`: the IN form made the planner
+        // enumerate the flag's whole population first — and replay_settings
+        // is shared with the games MIRROR, so 'ranked' alone is every ranked
+        // game BAR has played since the mirror started, tens of thousands of
+        // entries and growing ~2000/day — then sort the survivors in a temp
+        // b-tree, so the LIMIT saved nothing (measured: 31,400 rows read for
+        // one 51-row page at a 15k-game mirror). Correlated, the listing
+        // stays driven by replays_start and each candidate row costs one
+        // probe of the settings PK; the cost is bounded by the CATALOG,
+        // which is the small table (155 rows read for the same page).
+        where.push(`EXISTS (SELECT 1 FROM replay_settings s WHERE s.replay_id = replays.id AND s.flag = ?)`);
         args.push(flag);
       }
     }
@@ -987,24 +1001,31 @@ export class ReplayIndex extends DurableObject<Env> {
       window = `LIMIT ? OFFSET ?`;
       args.push(limit, offset !== undefined && offset > 0 ? offset : 0);
     }
+    // The processing overlay is read ONCE per list call, not once per listed
+    // row: `state = 'processing'` seeks jobs_state and reads exactly the jobs
+    // in flight — a handful, bounded by work being done, which drains — where
+    // the per-row progress subselect this replaces cost a jobs-row read for
+    // every listed row (~1/row: the progress column is not in any index, so
+    // even a probe that found nothing paid the table visit). Ordered oldest
+    // first so the Map keeps the NEWEST job's progress for a game with two —
+    // the same row the old ORDER BY updated_unix DESC LIMIT 1 picked.
+    const processing = new Map<string, string | null>();
+    for (const j of this.ctx.storage.sql
+      .exec(`SELECT game_id, progress FROM jobs WHERE state = 'processing' ORDER BY updated_unix`)
+      .toArray()) {
+      processing.set(j.game_id as string, (j.progress as string | null) ?? null);
+    }
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date, placeholder,
-                -- Both jobs subqueries are PINNED to the (game_id, state)
-                -- index: left to itself the planner answered the progress
-                -- subselect's ORDER BY from jobs_state instead, which reads
-                -- every processing job PER LISTED ROW — 50 rows x the number
-                -- of daemons at work, on every landing-page load (the rowcost
-                -- test's in-flight seed is what caught it). Seeked by game,
-                -- each costs the game's own jobs, i.e. almost always 0-1.
-                EXISTS (SELECT 1 FROM jobs j INDEXED BY jobs_game
-                        WHERE j.game_id = replays.id AND j.state = 'processing') AS processing,
-                (SELECT j.progress FROM jobs j INDEXED BY jobs_game
-                 WHERE j.game_id = replays.id AND j.state = 'processing'
-                 ORDER BY j.updated_unix DESC LIMIT 1) AS processing_progress,
-                (SELECT lobby_name FROM games g WHERE g.id = replays.id) AS lobby_name,
-                (SELECT map_file FROM games g WHERE g.id = replays.id) AS map_file
-         FROM replays
+        `SELECT replays.id, rid, replays.start_unix, replays.duration_sec, replays.map, replays.game_size, size_bytes, replays.settings, replays.players, replays.player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date, placeholder,
+                -- ONE LEFT JOIN carries both mirror columns: as scalar
+                -- subselects, lobby_name and map_file each paid their own PK
+                -- seek into games — two rows read per listed row for one row's
+                -- worth of data (measured: +104 on a 51-row page, against +52
+                -- joined). The join key is the primary key, so the join cannot
+                -- fan out and the replays_start-driven order survives.
+                g.lobby_name AS lobby_name, g.map_file AS map_file
+         FROM replays LEFT JOIN games g ON g.id = replays.id
          ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
          -- NULLs sort last here because SQL says so — NULL is smaller than
          -- every value, so DESC puts them at the end — and NOT because of a
@@ -1013,7 +1034,7 @@ export class ReplayIndex extends DurableObject<Env> {
          -- disqualifies replays_start, so every listing sorted the whole table
          -- in a temp b-tree and a LIMIT saved nothing. Measured over 3000 rows
          -- asked for 50: 6000 rows read, against 101 with the index driving.
-         ORDER BY start_unix DESC, id
+         ORDER BY replays.start_unix DESC, replays.id
          ${window}`,
         ...args,
       )
@@ -1048,8 +1069,8 @@ export class ReplayIndex extends DurableObject<Env> {
       // daemon, a job deleted by hand — would leave a row saying "processing"
       // forever. Asked of the jobs table it is simply true while a job is
       // running and false the moment one is not.
-      processing: r.processing === 1,
-      processingPercent: progressPercent(r.processing_progress),
+      processing: processing.has(r.id as string),
+      processingPercent: progressPercent(processing.get(r.id as string)),
     }));
   }
 

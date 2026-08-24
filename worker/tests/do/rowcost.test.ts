@@ -167,6 +167,20 @@ test("the polled and cron reads do not scan the tables they read from", async ()
     index.list(undefined, 50, 0);
     out.listPage = tally();
 
+    // The same page behind a settings chip. The flag population lives in the
+    // table the games MIRROR also indexes into — the seed above gives every
+    // mirrored game a 'ranked' row, 5000 of them — and the old IN-subquery
+    // shape enumerated all of them (and sorted the survivors in a temp
+    // b-tree) before the LIMIT could stop anything: a click whose cost grew
+    // with the mirror forever. The correlated EXISTS keeps the walk on
+    // replays_start, one settings-PK probe per candidate row.
+    index.list(
+      { from: null, to: null, map: null, id: null, minPlayers: null, maxPlayers: null,
+        minDuration: null, maxDuration: null, player: null, settings: ["ranked"] },
+      50, 0,
+    );
+    out.listPageFlagged = tally();
+
     // The filter bar's map list, fetched with every landing page: a
     // maintained unique_values row, never a DISTINCT scan of the catalog.
     // The in-memory copy is dropped first so this measures the actual read —
@@ -218,7 +232,14 @@ test("the polled and cron reads do not scan the tables they read from", async ()
   expect(costs.jobSamplePrune, report).toBeLessThan(100);
   // A page is a page: the listing walks replays_start and stops, where a
   // leading ORDER BY expression made it sort every row in the catalog first.
-  expect(costs.listPage, report).toBeLessThan(400);
+  // Within that, ~3 rows per listed row (index entry + row + the games-mirror
+  // join) plus the in-flight jobs set read once — the per-row jobs and
+  // double games subselects this bound used to allow for are gone.
+  expect(costs.listPage, report).toBeLessThan(200);
+  // The flag chip must not enumerate the mirror's flag population (5000
+  // 'ranked' entries here; unbounded on the deployment) — its cost is one
+  // extra probe per candidate row on top of the plain page.
+  expect(costs.listPageFlagged, report).toBeLessThan(250);
   // One row: the stored maps list, not the catalog.
   expect(costs.mapNames, report).toBeLessThan(5);
   // The in-flight set + one page of settled jobs + their joins + the meta
