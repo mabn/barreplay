@@ -45,6 +45,7 @@
   <nav id="homenav">
     <button type="button" class="navitem" data-tab="replays">Replays</button>
     <button type="button" class="navitem admin" data-tab="queue">Queue<span class="badge" id="navqueue"></span></button>
+    <button type="button" class="navitem" data-tab="games">Games</button>
     <button type="button" class="navitem admin" data-tab="sqlstats">SQL</button>
   </nav>
   <div id="homemain">
@@ -178,6 +179,33 @@
         <button type="button" id="q_reload" title="Re-read the queue">Reload</button>
       </div>
       <div id="queuemsg" class="hint" style="display:none"></div>
+    </section>
+
+    <!-- The games MIRROR: every game BAR published that the cron has
+         recorded, captured or not — the other half of the catalog, and the
+         work list the re-sim backfill draws from. Open to every visitor,
+         unlike Queue/SQL: it is public games, not the pipeline's state.
+         Read from GET /api/games, which only the Worker backend implements.
+         CURSOR-paged, Prev/Next only: like the replay list there is
+         deliberately NO total and no page count, since counting the mirror
+         means reading a table that grows by ~2000 rows a day; each reply
+         carries the cursor of the page after it, and Prev walks back down
+         the cursors this visit came through. Read on demand: opening the
+         section, paging, Reload. -->
+    <section id="tab-games" style="display:none">
+      <div id="gamespager" style="display:none">
+        <button type="button" id="g_prev" title="Newer games">‹ Prev</button>
+        <span id="g_range" class="hint"></span>
+        <button type="button" id="g_next" title="Older games">Next ›</button>
+        <button type="button" id="g_reload" title="Re-read the mirror">Reload</button>
+      </div>
+      <table id="gamestable">
+        <thead>
+          <tr><th>Ended</th><th>Duration</th><th>Map</th><th>Size</th><th>Preset</th><th>Players</th><th>Lobby</th><th>Settings</th><th>Engine</th><th>Links</th><th>Here</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id="gamesmsg" class="hint" style="display:none"></div>
     </section>
 
     <!-- SQL cost accounting (admin-only, like the Queue): what each Durable

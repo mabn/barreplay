@@ -19,7 +19,7 @@
 // re-sim side will pick from.
 import { DurableObject } from "cloudflare:workers";
 
-import type { GameEntry } from "./games";
+import type { GameEntry, GameListRow, GamesCursor } from "./games";
 import { parseJobErrorKind, parseJobProgress, parseJobStats } from "./jobs";
 import type {
   IngestJob,
@@ -1231,6 +1231,87 @@ export class ReplayIndex extends DurableObject<Env> {
     return games.length;
   }
 
+  /** gamesPage lists the mirror for the admin's Games section: one page of
+   * mirrored games, latest-ENDED first, each with whether this site has a
+   * replay of it and what its last ingest job did, plus the cursor of the
+   * page after it (null on the last page).
+   *
+   * The order is end time, not start time, for the same reason jobsOffer
+   * walks that way: end order is ARRIVAL order (the mirror learns a game
+   * once it is over), and it is the one order the mirror has an index for.
+   * Both the ORDER BY and the cursor predicate repeat games_backfill_end's
+   * expression TEXTUALLY, which is what lets the planner seek into the index
+   * and walk it to the page edge instead of sorting the whole mirror into a
+   * temp b-tree — a mirror that grows by ~2000 rows a day, so a sort per
+   * page would be a scan on a click (see ROW BUDGET).
+   *
+   * KEYSET, not OFFSET: `after` is the order key of the previous page's last
+   * row, and the query resumes strictly after it. An OFFSET reads every row
+   * before the page (page 40 of 50 = 2000 index entries stepped over) and
+   * shifts under a list that gains a game a minute — reload page 2 after a
+   * new game lands and its first row is the old page's last; a cursor costs
+   * the same on every page and never repeats a row.
+   *
+   * Two indexed queries, because the DESC order puts the games with NO
+   * recorded end (null start) LAST and a range on the expression cannot
+   * reach them: the dated walk is `expr <= end` — one index range, with the
+   * tie rows already shown (same end, id at or before the cursor's) filtered
+   * off the few entries that share that second — and the undated tail is
+   * `expr IS NULL AND id > ?`, an equality seek on the same index. The tail
+   * runs only when the dated walk has fewer rows than the page wants.
+   *
+   * Nothing here counts the table: `next` is read off one row more than the
+   * page shows, and there is no total anywhere. */
+  gamesPage(limit: number, after: GamesCursor | null): { games: GameListRow[]; next: GamesCursor | null } {
+    const select = `
+      SELECT g.id, g.start_unix, g.duration_sec, g.map, g.map_file, g.game_size, g.preset,
+             g.player_count, g.players, g.settings, g.engine_version, g.game_version,
+             g.synced_unix, g.lobby_name,
+             -- A primary-key seek per row. placeholder = 0 because a
+             -- placeholder is a re-sim in flight, not a replay to play.
+             EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id AND r.placeholder = 0) AS published,
+             -- Pinned to jobs_game like list()'s subqueries: seeked by
+             -- game, it costs the game's own jobs, almost always 0-1.
+             (SELECT j.state FROM jobs j INDEXED BY jobs_game
+              WHERE j.game_id = g.id ORDER BY j.created_unix DESC LIMIT 1) AS job_state
+      FROM games g`;
+    const order = `ORDER BY (start_unix + COALESCE(duration_sec, 0)) DESC, id`;
+    const want = limit + 1; // the extra row is "there is a next page"
+    let rows: Record<string, unknown>[] = [];
+    if (after === null || after.endUnix !== null) {
+      // The first page's IS NOT NULL is not decoration: without it the
+      // DESC walk runs on into the undated rows at the end, which the tail
+      // query below then lists a second time.
+      const where =
+        after === null
+          ? `WHERE (start_unix + COALESCE(duration_sec, 0)) IS NOT NULL`
+          : `WHERE (start_unix + COALESCE(duration_sec, 0)) <= ?
+               AND NOT ((start_unix + COALESCE(duration_sec, 0)) = ? AND id <= ?)`;
+      const args = after === null ? [] : [after.endUnix, after.endUnix, after.id];
+      rows = this.ctx.storage.sql.exec(`${select} ${where} ${order} LIMIT ?`, ...args, want).toArray();
+    }
+    if (rows.length < want) {
+      // The undated tail, resumed after the cursor when the cursor is
+      // already in it, from its start otherwise.
+      const afterId = after !== null && after.endUnix === null ? after.id : "";
+      const tail = this.ctx.storage.sql
+        .exec(
+          `${select} WHERE (start_unix + COALESCE(duration_sec, 0)) IS NULL AND id > ? ${order} LIMIT ?`,
+          afterId,
+          want - rows.length,
+        )
+        .toArray();
+      rows = rows.concat(tail);
+    }
+    const games = rows.slice(0, limit).map(gameListRow);
+    const last = games[games.length - 1];
+    const next =
+      rows.length > limit && last
+        ? { endUnix: last.startUnix === null ? null : last.startUnix + (last.durationSec ?? 0), id: last.id }
+        : null;
+    return { games, next };
+  }
+
   /** teiserverCookies reads the persisted teiserver web-session jar, or null
    * when no login has ever succeeded. The lobby sync seeds its session from
    * this, which is what makes the steady state one authed GET per tick with
@@ -2087,6 +2168,27 @@ function queueJobRow(r: Record<string, unknown>): QueueJob {
   const game: QueueGame | null =
     durationSec === null && gameSize === null ? null : { durationSec, gameSize };
   return { ...jobRow(r), game };
+}
+
+function gameListRow(r: Record<string, unknown>): GameListRow {
+  return {
+    id: r.id as string,
+    startUnix: (r.start_unix as number | null) ?? null,
+    durationSec: (r.duration_sec as number | null) ?? null,
+    map: (r.map as string | null) ?? null,
+    mapFile: (r.map_file as string | null) ?? null,
+    gameSize: (r.game_size as string | null) ?? null,
+    preset: (r.preset as string | null) ?? null,
+    playerCount: (r.player_count as number | null) ?? null,
+    players: r.players == null ? null : JSON.parse(r.players as string),
+    settings: r.settings == null ? null : JSON.parse(r.settings as string),
+    engineVersion: (r.engine_version as string | null) ?? null,
+    gameVersion: (r.game_version as string | null) ?? null,
+    syncedUnix: r.synced_unix as number,
+    lobbyName: (r.lobby_name as string | null) ?? null,
+    published: r.published === 1,
+    jobState: (r.job_state as string | null) ?? null,
+  };
 }
 
 function jobRow(r: Record<string, unknown>): IngestJob {
