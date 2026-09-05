@@ -191,6 +191,54 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
 #hometable td.dim { color: #6a7785; }
 #homemsg { padding: 12px 8px; font-size: 13px; max-width: 1650px; margin: 0 auto; }
 
+/* ---- games section: the mirror of what BAR published (admin) ----
+   Same table look as the replay list. The Here column is the one that is
+   coloured: "which of these do we have" is the question this view answers. */
+#gamestable { border-collapse: collapse; width: 100%; max-width: 1650px; margin: 0 auto; font-size: 13px; }
+#gamestable th {
+  text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+  color: #6f87a0; font-weight: 600; padding: 4px 14px 6px 8px; border-bottom: 1px solid #2a323c;
+}
+#gamestable td {
+  padding: 5px 14px 5px 8px; border-bottom: 1px solid #202830; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+#gamestable tbody tr:hover { background: #1b232c; }
+#gamestable td.dim { color: #6a7785; }
+#gamestable td.map .mapthumb { height: 18px; width: 18px; object-fit: cover; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+/* Eleven columns of nowrap cells: the section scrolls sideways inside itself
+   rather than clipping the Links and Here columns off the page. */
+#tab-games { overflow-x: auto; }
+#gamestable td.players { max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
+#gamestable td.players .vs { color: #6a7785; margin: 0 5px; font-size: 11px; }
+#gamestable td.lobby { max-width: 200px; overflow: hidden; text-overflow: ellipsis; color: #9fb0bf; }
+#gamestable td.engine { color: #7f8fa0; font-size: 12px; }
+#gamestable td.settings .badge {
+  display: inline-block; font-size: 10px; line-height: 1; padding: 3px 5px; margin-right: 4px;
+  border-radius: 3px; border: 1px solid #2f3b47; color: #9fb0bf; background: #171e25;
+}
+#gamestable td.links a { color: #7f8fa0; text-decoration: none; font-size: 12px; margin-right: 8px; }
+#gamestable td.links a:hover { color: #8fd3ff; text-decoration: underline; }
+#gamestable td.links a.here { color: #8fd3ff; }
+#gamestable .have {
+  display: inline-block; font-size: 11px; line-height: 1; padding: 3px 6px; border-radius: 3px;
+  border: 1px solid #2f3b47; color: #9fb0bf; background: #171e25;
+}
+#gamestable .have-published { color: #7fd18b; border-color: #33663c; background: #16311b; }
+#gamestable .have-processing { color: #8fd3ff; border-color: #2f5878; background: #16293a; }
+#gamestable .have-pending { color: #d3b98f; border-color: #5c4a2f; background: #2b2417; }
+#gamestable .have-error { color: #ff9c8f; border-color: #7a3428; background: #34160f; }
+#gamespager {
+  display: flex; align-items: center; gap: 10px; max-width: 1650px; margin: 0 auto 8px; padding: 0 8px;
+}
+#gamespager button {
+  background: #1d252e; border: 1px solid #2f3b47; border-radius: 4px; color: #9fb0bf;
+  padding: 4px 10px; font-size: 12px;
+}
+#gamespager button:hover:not(:disabled) { color: #cfe3f5; border-color: #4a5a6c; }
+#gamespager button:disabled { opacity: .45; }
+#gamesmsg { padding: 12px 8px; font-size: 13px; max-width: 1650px; margin: 0 auto; }
+
 /* ---- queue section: the ingest jobs behind the drag&drop uploads ----
    Same table look as the replay list; only the state cell is coloured, since
    "is anything stuck" is the question this view answers. */

@@ -188,6 +188,13 @@ test("the polled and cron reads do not scan the tables they read from", async ()
     expect(page.total, "the maintained count sees every job").toBe(JOBS + 7);
     expect(page.active, "the in-flight count is the active set").toBe(7);
 
+    // A page of the games mirror, as the admin's Games section asks for it.
+    // Not on a timer, but the mirror is the one table here that a person
+    // cannot bound: it walks games_backfill_end and stops at the page edge,
+    // with a primary-key seek and one index seek per row for the join.
+    index.gamesPage(51, 0);
+    out.gamesPage = tally();
+
     // A running job's healthcheck, every 10s: the first beat learns how many
     // samples the job has, the rest must not ask again.
     index.jobUpdate("j000001", "processing", null, null, { state: "simulating", percent: 12 });
@@ -225,6 +232,9 @@ test("the polled and cron reads do not scan the tables they read from", async ()
   // count — never a scan-and-sort of the jobs table (which at this seed
   // would read ~1000 rows; the deployment measured ~4.7x table size).
   expect(costs.queuePage, report).toBeLessThan(300);
+  // 51 index entries + 51 rows + their two seeks each — never a sort of the
+  // whole mirror (5000 rows here) into a temp b-tree.
+  expect(costs.gamesPage, report).toBeLessThan(400);
   // The first beat counts the job's samples; every beat after it is answered
   // from memory.
   expect(costs.healthcheckNext, report).toBeLessThan(50);

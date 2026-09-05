@@ -211,6 +211,61 @@ test("the catalog list is blind to the mirror", async () => {
   });
 });
 
+// --- the Games section: a page of the mirror ---------------------------------
+
+test("gamesPage lists the mirror latest-ended first, saying what this site has of each", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([
+      // Started first but ended LAST: a long game outranks a duel that
+      // started after it, because end order is the order the mirror learns
+      // games in.
+      game("long", { startUnix: 1000, durationSec: 5000 }),
+      game("late-duel", { startUnix: 3000, durationSec: 200 }),
+      game("early", { startUnix: 2000, durationSec: 100 }),
+      game("undated", { startUnix: null, durationSec: null }),
+    ]);
+    index.upsert(replay("early"));
+    index.jobInsert("j-late", "", "late-duel", "resim");
+
+    const page = index.gamesPage(10, 0);
+    expect(page.map((g) => g.id)).toEqual(["long", "late-duel", "early", "undated"]);
+    // The row is the whole GameEntry plus the join.
+    expect(page[0]).toMatchObject({
+      id: "long", startUnix: 1000, durationSec: 5000, map: "Great Divide V1", mapFile: "great_divide_v1",
+      gameSize: "1v1", preset: "duel", playerCount: 2, settings: { unranked: true },
+      engineVersion: "2026.07.04", gameVersion: "Beyond All Reason test-31027-900131b",
+      lobbyName: null, published: false, jobState: null,
+    });
+    expect(page[0].players).toEqual(game("x").players);
+    expect(page[0].syncedUnix).toBeGreaterThan(0);
+    expect(page[1]).toMatchObject({ id: "late-duel", published: false, jobState: "pending" });
+    expect(page[2]).toMatchObject({ id: "early", published: true, jobState: null });
+  });
+});
+
+test("gamesPage pages by offset and never counts", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([1, 2, 3, 4, 5].map((n) => game(`g${n}`, { startUnix: n * 1000, durationSec: 0 })));
+    // The view asks for one row more than it shows: three rows back means
+    // "there is a next page", two means this is the last one.
+    expect(index.gamesPage(3, 0).map((g) => g.id)).toEqual(["g5", "g4", "g3"]);
+    expect(index.gamesPage(3, 2).map((g) => g.id)).toEqual(["g3", "g2", "g1"]);
+    expect(index.gamesPage(3, 4).map((g) => g.id)).toEqual(["g1"]);
+    expect(index.gamesPage(3, 9)).toEqual([]);
+  });
+});
+
+test("a placeholder row does not count as published, and a claimed job reads as processing", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([game("g")]);
+    index.jobInsert("j", "", "g", "resim");
+    expect(index.jobClaim("j", "resim")).toBe(true);
+    // Claiming inserted the catalog placeholder (seeded from the mirror).
+    expect(index.list().map((e) => [e.id, e.placeholder])).toEqual([["g", true]]);
+    expect(index.gamesPage(10, 0)[0]).toMatchObject({ published: false, jobState: "processing" });
+  });
+});
+
 // --- the idle re-sim poll: work invented from the games mirror --------------
 
 /** jobsOffer needs a job id from its caller (the route passes a UUID); these
