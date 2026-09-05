@@ -24,7 +24,7 @@
 // fake Env.
 import { Hono } from "hono";
 
-import { encodeGamesCursor, parseGamesCursor } from "./games";
+import { encodeGamesCursor, gameFromApi, parseGamesCursor } from "./games";
 import { parseGameId } from "./gameid";
 import { JOB_KINDS, parseJobErrorKind, parseJobProgress, parseJobStats } from "./jobs";
 import type { JobKind } from "./jobs";
@@ -443,6 +443,52 @@ app.post("/api/jobs", async (c) => {
   }
   const res = await indexStub(c.env).jobAnnounce(crypto.randomUUID(), gameId, "resim");
   return c.json({ job: res.job?.id, gameId, status: res.status });
+});
+
+// One-off / recovery backfill for the games mirror. The cron only ever walks
+// back GAMES_COVERAGE_SEC (2h) from the newest game, so games the pre-2h-window
+// build missed, or any older gap, are beyond its reach. This lets an operator
+// feed them in from OUTSIDE: the body is verbatim api.bar-rts.com/replays/<id>
+// details (a bare array, or {games:[...]}), exactly the shape the sync's own
+// detail fetch decodes — so a local script does ALL the BAR fetching (no
+// per-invocation subrequest cap to worry about; this handler makes no outbound
+// call) and posts them here in batches. gamesUnknown dedups, so re-posting is
+// a no-op and the caller need not know what the mirror already has. Guarded by
+// the same token as the other write APIs. Not the cron's job and never called
+// by it: this is a manual recovery door, kept small.
+const MAX_BACKFILL = 500;
+app.post("/api/games/backfill", async (c) => {
+  if (!authorized(c)) return c.json({ error: "unauthorized" }, 401);
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "body must be JSON" }, 400);
+  }
+  const raw = Array.isArray(body)
+    ? body
+    : Array.isArray((body as { games?: unknown })?.games)
+      ? (body as { games: unknown[] }).games
+      : null;
+  if (raw === null) return c.json({ error: "body must be a JSON array of replay details (or {games:[...]})" }, 400);
+  if (raw.length > MAX_BACKFILL) {
+    return c.json({ error: `too many games in one batch (${raw.length} > ${MAX_BACKFILL})` }, 400);
+  }
+  // Map each detail to a mirror row, keeping only ones with a usable id — the
+  // same shape check the sync applies before it would ever key a row on it.
+  const entries = [];
+  const ids = [];
+  for (const detail of raw) {
+    const id = (detail as { id?: unknown })?.id;
+    if (typeof id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) continue;
+    ids.push(id);
+    entries.push({ id, entry: gameFromApi(id, detail) });
+  }
+  if (ids.length === 0) return c.json({ received: raw.length, fresh: 0, inserted: 0 });
+  const fresh = new Set(await indexStub(c.env).gamesUnknown(ids));
+  const toInsert = entries.filter((e) => fresh.has(e.id)).map((e) => e.entry);
+  const inserted = toInsert.length === 0 ? 0 : await indexStub(c.env).gamesInsert(toInsert);
+  return c.json({ received: raw.length, fresh: fresh.size, inserted });
 });
 
 // The ingest daemon's work queue: pending jobs of ONE kind (plus stalled

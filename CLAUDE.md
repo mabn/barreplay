@@ -1132,6 +1132,20 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the handler logs rather than rethrows, since a minute-by-minute stream
                           of failed crons is worse signal than one self-healing blip. Nothing is
                           logged on a tick that changed nothing.
+                          BACKFILL (guarded POST /api/games/backfill + tools/backfill-games.ts):
+                          the cron only ever reaches back GAMES_COVERAGE_SEC (2h) from the
+                          newest game, so games an older build missed (the pre-2h-window one
+                          silently dropped ~12% of a 48h span, almost all >30min) or any gap
+                          wider than the window are beyond it. The route is the manual recovery
+                          door: its body is verbatim /replays/<id> details (a bare array or
+                          {games:[...]}), which it maps through the SAME gameFromApi the sync
+                          uses, dedups with gamesUnknown and inserts — making NO outbound call
+                          itself, so the free plan's 50-subrequest-per-invocation cap is a
+                          non-issue and the batching lives in the caller. tools/backfill-games.ts
+                          is that caller: from a trusted host it pages the BAR listing back
+                          --hours, subtracts what the mirror already has, fetches the detail for
+                          only the missing games, and POSTs them in batches with $REPLAY_PUT_TOKEN
+                          (--dry just reports the count). Re-running is a no-op (gamesUnknown).
                           Mirrored games index their SETTINGS into the SAME replay_settings
                           table as the catalog — ROSTERS are indexed NOWHERE: replay_players
                           is gone (the migration drops it), because keeping the mirror's
