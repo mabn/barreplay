@@ -31,7 +31,7 @@ export default {
       // Quiet on a no-op tick: most runs find nothing new, and a line a minute
       // saying so would bury the ones that did something.
       if (r.added > 0 || r.failed > 0) {
-        console.log(`games sync: scanned=${r.scanned} fresh=${r.fresh} added=${r.added} failed=${r.failed}`);
+        console.log(`games sync: pages=${r.pages} scanned=${r.scanned} fresh=${r.fresh} added=${r.added} failed=${r.failed}`);
       }
     } catch (e) {
       console.error(`games sync failed: ${e}`);

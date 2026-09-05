@@ -1069,11 +1069,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           that does not exist are the same thing to the view.
                           GAMES MIRROR (games table + src/worker/games.ts + the cron in
                           index.ts): every minute a scheduled handler (which also prunes job_samples —
-                          see JOB SAMPLES above) reads ONE page of
-                          api.bar-rts.com's replay listing —
-                          /replays?page=1&limit=24&hasBots=false&endedNormally=true, the query
-                          verbatim in GAMES_QUERY — and records the games this worker has not
-                          seen. It is the OTHER half of the picture: `replays` is what somebody
+                          see JOB SAMPLES above) reads api.bar-rts.com's replay listing
+                          (/replays?page=<n>&limit=50&hasBots=false&endedNormally=true;
+                          GAMES_BASE_QUERY + gamesPageUrl) and records the games this worker
+                          has not seen. It is the OTHER half of the picture: `replays` is what somebody
                           captured, `games` is what was PLAYED, keyed by the same gameId, so the
                           two are views of one game and a row in `games` with none in `replays`
                           is a re-sim candidate nobody has to paste a link for. It is SERVED
@@ -1102,9 +1101,26 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           preset (duel/team/ffa, stored verbatim so a value the API adds later
                           survives), and engine_version/game_version — the two builds a re-sim
                           must run and nothing else.
-                          One page, never a second: at a run a minute, page 1 covers far more
-                          than a minute of BAR's game rate, so a gap closes itself and no run
-                          walks history (a real backfill would be a different job). The LISTING
+                          Enough pages to cover the last 2h of START TIMES, not one page:
+                          the listing is ordered by start time DESCENDING, so a game that
+                          started a while ago sits deep in it the moment it ends (at ~2000
+                          games/day one that started ~90 min ago is already ~120 rows down),
+                          and the old single 24-row page never saw it — long and older games
+                          were silently missed. So the sync now walks pages of GAMES_PAGE_LIMIT
+                          (50) until the oldest start on a page is at least GAMES_COVERAGE_SEC
+                          (2h) old, or a short page ends the list, or GAMES_MAX_PAGES (6, ~300
+                          games) caps it — the cap being what keeps a clock skew or a listing
+                          that never ages out from turning the once-a-minute cron into a walk
+                          of history (a gap bigger than the window is a backfill, a different
+                          job). Every game that STARTED within the window is therefore seen
+                          whatever its length; games LONGER than 2h can still slip past, which
+                          a start-time window cannot help. Page 1 failing is the run; a LATER
+                          page failing ends the walk with what earlier pages gathered. Two
+                          things keep this inside the ROW BUDGET: the page cap bounds the fetch,
+                          and gamesUnknown — now handed a whole window of ids at once — CHUNKS
+                          its IN(...) (past SQLite's bind-param cap otherwise) into PK-index-
+                          backed seeks, so its cost is the id count, not the mirror's size
+                          (rowcost.test.ts bounds it). The LISTING
                           carries no modoptions, so each genuinely NEW id costs one
                           /replays/<id> detail fetch — 4 at a time, once per game, never again —
                           which is where settings and the roster come from, through the same
