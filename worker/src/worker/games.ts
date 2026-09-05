@@ -29,7 +29,7 @@
 // Like app.ts, this file has no `cloudflare:workers` import anywhere in its
 // module graph, so the node tests drive the whole sync against a fake index
 // and a fake fetch.
-import { CATALOG_PLAYERS_PER_ALLY, derivePlayerCount, playersFromApi, settingsFlags } from "./replayentry";
+import { CATALOG_PLAYERS_PER_ALLY, SETTINGS_MODS_FLAG, derivePlayerCount, playersFromApi, settingsFlags } from "./replayentry";
 import type { CatalogTeam } from "./replayentry";
 
 /** The BAR replay API this mirrors. */
@@ -173,6 +173,9 @@ export interface GameSyncResult {
   failed: number;
   /** Listing pages read this run (1..GAMES_MAX_PAGES). */
   pages: number;
+  /** Of the games recorded, ones carrying the mods flag — lava-sync
+   * candidates, which is what the cron triggers the lava sync on. */
+  modded: number;
 }
 
 /** syncGames runs one pass: read page 1, ask the index which ids are new,
@@ -224,10 +227,10 @@ export async function syncGames(index: GamesIndex, fetchImpl: typeof fetch = fet
     if (rows.length < GAMES_PAGE_LIMIT) break;
     if (oldest !== null && oldest <= horizon) break;
   }
-  if (ids.length === 0) return { scanned: 0, fresh: 0, added: 0, failed: 0, pages };
+  if (ids.length === 0) return { scanned: 0, fresh: 0, added: 0, failed: 0, pages, modded: 0 };
 
   const fresh = await index.gamesUnknown(ids);
-  if (fresh.length === 0) return { scanned: ids.length, fresh: 0, added: 0, failed: 0, pages };
+  if (fresh.length === 0) return { scanned: ids.length, fresh: 0, added: 0, failed: 0, pages, modded: 0 };
 
   const entries: GameEntry[] = [];
   let failed = 0;
@@ -243,7 +246,8 @@ export async function syncGames(index: GamesIndex, fetchImpl: typeof fetch = fet
   // unrecorded — the ones the next page-1 read is certain to offer again.
   entries.sort((a, b) => (a.startUnix ?? 0) - (b.startUnix ?? 0));
   const added = entries.length === 0 ? 0 : await index.gamesInsert(entries);
-  return { scanned: ids.length, fresh: fresh.length, added, failed, pages };
+  const modded = entries.filter((e) => e.settings?.[SETTINGS_MODS_FLAG] !== undefined).length;
+  return { scanned: ids.length, fresh: fresh.length, added, failed, pages, modded };
 }
 
 /** gameFromApi builds a mirror row from one /replays/<id> detail reply. The

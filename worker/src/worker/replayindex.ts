@@ -1185,6 +1185,29 @@ export class ReplayIndex extends DurableObject<Env> {
     return ids.filter((id) => !known.has(id));
   }
 
+  /** gamesModdedEndedAfter lists the mirror's MODDED games (the mods flag in
+   * replay_settings — the lava sync's candidate pre-filter, see lavasync.ts)
+   * that ended at or after `endUnix`, oldest-ended first. Driven by the
+   * (flag, replay_id) covering index, so the cost is the number of modded
+   * games ever mirrored (rare — ~0 in 24) plus a PK seek each, NOT the
+   * mirror's size; and it runs only on a fresh-modded-game trigger or the
+   * hourly sweep, never the every-minute path (rowcost.test.ts bounds it). */
+  gamesModdedEndedAfter(endUnix: number, limit: number): { id: string; endUnix: number }[] {
+    return this.ctx.storage.sql
+      .exec(
+        `SELECT g.id AS id, g.start_unix + COALESCE(g.duration_sec, 0) AS end_unix
+           FROM replay_settings rs JOIN games g ON g.id = rs.replay_id
+          WHERE rs.flag = ? AND g.start_unix IS NOT NULL
+            AND g.start_unix + COALESCE(g.duration_sec, 0) >= ?
+          ORDER BY end_unix ASC, g.id LIMIT ?`,
+        SETTINGS_MODS_FLAG,
+        endUnix,
+        limit,
+      )
+      .toArray()
+      .map((r) => ({ id: r.id as string, endUnix: Number(r.end_unix) }));
+  }
+
   /** gamesInsert records mirrored games and indexes their settings into
    * replay_settings (their rosters stay JSON on the row — see the note at the
    * indexSettings call). Upsert rather than plain insert so re-syncing a game (a

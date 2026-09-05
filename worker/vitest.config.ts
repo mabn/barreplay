@@ -26,6 +26,16 @@ export default defineConfig({
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./wrangler.jsonc" },
+      // wrangler.jsonc binds LAVABALANCE to the deployed sibling worker, which
+      // does not exist inside the test runtime — without a stub, workerd
+      // refuses to start at all. Nothing in tests/do calls it (the lava sync
+      // is node-tested with an injected fetch); the stub only satisfies the
+      // binding so the runtime boots.
+      miniflare: {
+        serviceBindings: {
+          LAVABALANCE: () => new Response("lavabalance is not under test", { status: 503 }),
+        },
+      },
     }),
   ],
   test: {
