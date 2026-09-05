@@ -207,6 +207,31 @@ test("the polled and cron reads do not scan the tables they read from", async ()
     out.healthcheckFirst = tally();
     index.jobUpdate("j000001", "processing", null, null, { state: "simulating", percent: 13 });
     out.healthcheckNext = tally();
+
+    // The games sync now hands gamesUnknown a whole 2h window of ids at once
+    // (~150+ when the mirror is behind). It chunks the IN and each chunk is
+    // PK-index-backed, so the cost is ~the id count, not the 5000-row table.
+    const probe: string[] = [];
+    for (let n = 1; n <= 100; n++) probe.push(`g${String(n).padStart(6, "0")}`); // known
+    for (let n = 1; n <= 100; n++) probe.push(`u${String(n).padStart(6, "0")}`); // new
+    index.gamesUnknown(probe);
+    out.gamesUnknown = tally();
+
+    // The lava sync's candidate query (trigger + hourly, never per-minute):
+    // driven by replay_settings' (flag, replay_id) index, so its cost is the
+    // count of modded games ever mirrored, not the mirror's size. The seed
+    // marks every game 'ranked', so the 'mods' entries are only the few added
+    // here — the point being that the flag seek does not touch the rest.
+    index.gamesInsert([
+      {
+        id: "lava1", startUnix: NOW - 600, durationSec: 300, map: "M", mapFile: "m",
+        gameSize: "8v8", preset: "team", playerCount: 16, players: null,
+        settings: { mods: true }, engineVersion: "e", gameVersion: "v",
+      },
+    ]);
+    tally();
+    index.gamesModdedEndedAfter(NOW - 3600, 30);
+    out.gamesModdedEndedAfter = tally();
     return out;
   });
 
@@ -242,6 +267,12 @@ test("the polled and cron reads do not scan the tables they read from", async ()
   // whole mirror (5000 rows here) into a temp b-tree.
   expect(costs.gamesPage, report).toBeLessThan(400);
   expect(costs.gamesPageDeep, report).toBeLessThan(400);
+  // gamesUnknown over a 200-id window: a seek per id (the 100 that exist), not
+  // a scan of the 5000-row mirror — chunked so it also fits the bind cap.
+  expect(costs.gamesUnknown, report).toBeLessThan(400);
+  // A seek into the settings index for the mods flag + a row per modded game —
+  // never a scan of the 5000-row mirror or of the 5000 'ranked' entries.
+  expect(costs.gamesModdedEndedAfter, report).toBeLessThan(50);
   // The first beat counts the job's samples; every beat after it is answered
   // from memory.
   expect(costs.healthcheckNext, report).toBeLessThan(50);
