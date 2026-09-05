@@ -103,9 +103,11 @@ body.admin-mode #homenav .navitem.admin { display: flex; }
   flex: none; background: #232e39;
 }
 /* Settings badges: small muted pills, wrapping within the row's link. */
-#hometable td.settings { white-space: normal; }
-#hometable td.settings a, #hometable td.settings > span { display: flex; flex-wrap: wrap; gap: 4px; }
-#hometable .badge {
+/* Shared with the Games section (#gamestable): the same flag must look the
+   same in both lists, so the per-flag colours below are written once. */
+#hometable td.settings, #gamestable td.settings { white-space: normal; }
+#hometable td.settings a, #hometable td.settings > span, #gamestable td.settings > span { display: flex; flex-wrap: wrap; gap: 4px; }
+#hometable .badge, #gamestable .badge {
   font-size: 10px; line-height: 1; padding: 3px 6px; border-radius: 8px;
   background: #232e39; border: 1px solid #33404d; color: #9fb0bf;
   white-space: nowrap;
@@ -113,17 +115,17 @@ body.admin-mode #homenav .navitem.admin { display: flex; }
 /* Per-flag badge colours: lava glows orange, mods (tweaked unit/def tables)
    warns yellow — the same yellow family as the energy bars; zombies rise in
    purple, ruins moss over in green, an explicitly unranked lobby cools blue. */
-#hometable .badge-lava {
+#hometable .badge-lava, #gamestable .badge-lava {
   color: #ffc46a; border-color: #b85c1a;
   /* ember gradient: hot orange rim fading into deep red coals */
   background: linear-gradient(180deg, #7a2606, #4a1204 55%, #38150a);
   text-shadow: 0 0 4px rgba(255, 140, 30, .5);
   box-shadow: 0 0 8px rgba(255, 110, 20, .35), inset 0 1px 3px rgba(255, 150, 40, .35), inset 0 -3px 6px rgba(230, 60, 0, .4);
 }
-#hometable .badge-mods { color: #e3c34a; border-color: #6e5c1e; background: #332b10; }
-#hometable .badge-zombies { color: #c58aff; border-color: #5e3d85; background: #2a1a40; }
-#hometable .badge-ruins { color: #7fd58a; border-color: #33663c; background: #16311b; }
-#hometable .badge-unranked { color: #7fb2ff; border-color: #2f4d7a; background: #16243a; }
+#hometable .badge-mods, #gamestable .badge-mods { color: #e3c34a; border-color: #6e5c1e; background: #332b10; }
+#hometable .badge-zombies, #gamestable .badge-zombies { color: #c58aff; border-color: #5e3d85; background: #2a1a40; }
+#hometable .badge-ruins, #gamestable .badge-ruins { color: #7fd58a; border-color: #33663c; background: #16311b; }
+#hometable .badge-unranked, #gamestable .badge-unranked { color: #7fb2ff; border-color: #2f4d7a; background: #16243a; }
 /* "processing": not a game setting at all — the pipeline is working on this
    game right now — so it leads the cell and is the one FILLED pill in a row
    of dark muted ones. Bright ground against the table's near-black is what
@@ -190,6 +192,50 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
 #hometable tbody tr.unopenable:hover { background: #161d24; }
 #hometable td.dim { color: #6a7785; }
 #homemsg { padding: 12px 8px; font-size: 13px; max-width: 1650px; margin: 0 auto; }
+
+/* ---- games section: the mirror of what BAR published ----
+   Same table look as the replay list. The Here column is the one that is
+   coloured: "which of these do we have" is the question this view answers. */
+#gamestable { border-collapse: collapse; width: 100%; max-width: 1650px; margin: 0 auto; font-size: 13px; }
+#gamestable th {
+  text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+  color: #6f87a0; font-weight: 600; padding: 4px 14px 6px 8px; border-bottom: 1px solid #2a323c;
+}
+#gamestable td {
+  padding: 5px 14px 5px 8px; border-bottom: 1px solid #202830; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+#gamestable tbody tr:hover { background: #1b232c; }
+#gamestable td.dim { color: #6a7785; }
+#gamestable td.map .mapthumb { height: 18px; width: 18px; object-fit: cover; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+/* Eleven columns of nowrap cells: the section scrolls sideways inside itself
+   rather than clipping the Links and Here columns off the page. */
+#tab-games { overflow-x: auto; }
+#gamestable td.players { max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
+#gamestable td.players .vs { color: #6a7785; margin: 0 5px; font-size: 11px; }
+#gamestable td.lobby { max-width: 200px; overflow: hidden; text-overflow: ellipsis; color: #9fb0bf; }
+#gamestable td.engine { color: #7f8fa0; font-size: 12px; }
+#gamestable td.links a { color: #7f8fa0; text-decoration: none; font-size: 12px; margin-right: 8px; }
+#gamestable td.links a:hover { color: #8fd3ff; text-decoration: underline; }
+#gamestable td.links a.here { color: #8fd3ff; }
+#gamestable .have {
+  display: inline-block; font-size: 11px; line-height: 1; padding: 3px 6px; border-radius: 3px;
+  border: 1px solid #2f3b47; color: #9fb0bf; background: #171e25;
+}
+#gamestable .have-published { color: #7fd18b; border-color: #33663c; background: #16311b; }
+#gamestable .have-processing { color: #8fd3ff; border-color: #2f5878; background: #16293a; }
+#gamestable .have-pending { color: #d3b98f; border-color: #5c4a2f; background: #2b2417; }
+#gamestable .have-error { color: #ff9c8f; border-color: #7a3428; background: #34160f; }
+#gamespager {
+  display: flex; align-items: center; gap: 10px; max-width: 1650px; margin: 0 auto 8px; padding: 0 8px;
+}
+#gamespager button {
+  background: #1d252e; border: 1px solid #2f3b47; border-radius: 4px; color: #9fb0bf;
+  padding: 4px 10px; font-size: 12px;
+}
+#gamespager button:hover:not(:disabled) { color: #cfe3f5; border-color: #4a5a6c; }
+#gamespager button:disabled { opacity: .45; }
+#gamesmsg { padding: 12px 8px; font-size: 13px; max-width: 1650px; margin: 0 auto; }
 
 /* ---- queue section: the ingest jobs behind the drag&drop uploads ----
    Same table look as the replay list; only the state cell is coloured, since

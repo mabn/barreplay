@@ -712,13 +712,23 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           filters DO depend on is catalogPlayersPerAlly, because BuildCatalogEntry is
                           what builds the roster the worker stores). The front-end landing page
                           (no ?replay= in the URL) is a LEFT MENU (app.js homeTab/applyHomeTab,
-                          #homenav) over two sections: "Replays" (the catalog list, the default)
-                          and "Queue" (the ingest jobs, below), which is ADMIN-ONLY — the entry is
-                          hidden without ?admin=true (CSS, like the row refresh button) and
-                          homeTab() maps the tab back to "replays" for everyone else, so a shared
-                          ?tab=queue link cannot walk past the hidden entry and refreshQueue never
-                          fires. It is the pipeline's state — every uploader's jobs and their
-                          failure messages — which is maintenance, not something a visitor came for.
+                          #homenav) over these sections: "Replays" (the catalog list, the
+                          default), "Games" (the games MIRROR — see the GAMES MIRROR entry;
+                          app.js refreshGames/renderGames, GAMES_PAGE=20 rows per page,
+                          CURSOR-paged: Next hands back the reply's `next`, Prev walks back
+                          down the trail of cursors this visit came through (gamesTrail),
+                          the pager states the range and NO total or page count; the cursors
+                          are component state, not in the URL, and the Go viz server 404s
+                          the route, which the section says; open to every visitor, since
+                          it is public games rather than the pipeline's state), "Queue"
+                          (the ingest jobs, below) and "SQL" (the DO's row accounting).
+                          Queue and SQL are ADMIN-ONLY — the entry is hidden without
+                          ?admin=true (CSS, like the row refresh button) and homeTab() maps
+                          the tab back to "replays" for everyone else (ADMIN_TABS), so a
+                          shared ?tab=queue link cannot walk past the hidden entry and
+                          refreshQueue never fires. The Queue is the pipeline's state —
+                          every uploader's jobs and their failure messages — which is
+                          maintenance, not something a visitor came for.
                           Which section is shown lives in the
                           URL as ?tab=, like the filters, so a pick is shareable and survives a
                           refresh — but it PUSHES a history entry, because switching section is
@@ -1066,8 +1076,26 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           seen. It is the OTHER half of the picture: `replays` is what somebody
                           captured, `games` is what was PLAYED, keyed by the same gameId, so the
                           two are views of one game and a row in `games` with none in `replays`
-                          is a re-sim candidate nobody has to paste a link for. Nothing serves it
-                          yet — there is no route and no UI, by request.
+                          is a re-sim candidate nobody has to paste a link for. It is SERVED
+                          to the landing page's "Games" section (see the landing-page entry
+                          above) by GET /api/games -> ReplayIndex.gamesPage: one page,
+                          latest-ENDED first, KEYSET-paged — ?after=<endUnix>:<id> is the
+                          order key of the previous page's last row (games.ts
+                          encodeGamesCursor/parseGamesCursor; the reply's `next`, null on
+                          the last page) and the query resumes strictly after it. Both the
+                          ORDER BY and the cursor predicate repeat games_backfill_end's
+                          expression textually, so the planner seeks into the index and
+                          walks to the page edge — a page deep in the mirror costs the same
+                          as the first (rowcost.test.ts bounds both), where an OFFSET stepped
+                          over every row before it and shifted under a list that gains a
+                          game a minute. Two indexed queries: the dated walk (`expr <= end`,
+                          the shown tie rows filtered off; `IS NOT NULL` on the first page,
+                          or the DESC walk runs on into the undated rows the tail then
+                          repeats) and the undated tail (`expr IS NULL AND id > ?`, an
+                          equality seek), the tail only when the walk fell short. Each row
+                          is joined with whether a playable catalog row exists and the
+                          state of the game's last job, both seeks. No total and no count
+                          anywhere: `next` is read off one row more than the page shows.
                           The columns deliberately echo the catalog's vocabulary (start_unix,
                           duration_sec, map, game_size, player_count, players, settings) plus
                           what only the API knows: map_file (what BAR's maps API keys on),

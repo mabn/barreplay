@@ -35,7 +35,7 @@ unreachable), so there is no map proxy.
 
 ## The landing page's sections
 
-The landing page (no `?replay=` in the URL) has a **left menu** with two sections:
+The landing page (no `?replay=` in the URL) has a **left menu** with these sections:
 
 - **Replays** — the catalog list (below), the default.
 - **Queue** — **admin-only** (`?admin=true`): the ingest jobs (`GET /api/queue`),
@@ -56,6 +56,23 @@ The landing page (no `?replay=` in the URL) has a **left menu** with two section
   server-side over the whole table, so it is true on any page). A backend without the
   route (the Go viz server, which runs no ingest pipeline) says so instead of showing
   an empty table.
+- **Games** — open to everyone, like Replays: the **games mirror** (`GET /api/games`),
+  every game BAR published that the worker's cron has recorded, captured or not —
+  the other half of the catalog, and the list the re-sim backfill draws from. One
+  row per game, latest-**ended** first (the order the mirror learns games in, and the
+  one order it has an index for): when it ended, duration, map, size, preset, the
+  top players a side, the lobby name (when the teiserver poll matched one), settings
+  badges, engine version, links out to gex/BAR and into the replay here once one is
+  published, and a **Here** pill saying what this site has of it — `published`, or
+  the state of its last ingest job (`processing`, `queued`, `failed`). **20 per page**,
+  **cursor-paged**: each reply carries `next`, the cursor of the page after it, Next
+  hands it back, and Prev walks back down the cursors this visit came through. The
+  pager states the range shown and deliberately **no total and no page count**:
+  counting the mirror means reading a table that grows by ~2000 rows a day, and a
+  cursor — unlike an offset — costs the same on every page and never repeats a row
+  when a game lands mid-visit. Read on open, on paging, and on **Reload**; the page
+  is not in the URL. A backend without the route (the Go viz server keeps no mirror)
+  says so.
 
 The selection lives in the URL as `?tab=queue`, so it is shareable and survives a
 refresh, and opening a replay from a section returns there on `back`. Without
@@ -431,6 +448,7 @@ wherever the repo lives (`cmd/bringest`, e.g. a VM):
 | `GET /api/jobs/<id>` | open; the job's state for the requesting browser's poll (`pending → processing → done \| error`) |
 | `GET /api/jobs` | bearer-guarded; a daemon's work queue (pending + stalled-processing jobs of ONE kind, oldest first). `?kind=upload` (**the default**, so a deployed daemon is never handed work it cannot run) or `?kind=resim` |
 | `GET /api/queue` | open; the same jobs for the landing page's **Queue** section, paged — `?offset=&limit=` (default 25, capped at 100) → `{jobs, total, active, offset}`, unfinished first then recently finished. `total`/`active` count the whole table, not the page. The archive key is left out, since those bytes are guarded |
+| `GET /api/games` | open; a page of the **games mirror** for the landing page's **Games** section — `?limit=` (default 20, capped at 100) and `?after=<cursor>` → `{games, next}`, latest-ended first, each row a mirrored game plus `lobbyName`, `syncedUnix`, `published` (a playable catalog row exists) and `jobState` (its last ingest job). `next` is the cursor of the following page (`<endUnix>:<id>`, the order key of the last row; null on the last page) — keyset paging, no offset and no total; a malformed cursor is a 400 |
 | `POST /api/jobs/<id>` | bearer-guarded; daemon transitions (`processing`, `done`, `error` + message, `stats`). `{state:"processing", claim:true, kind}` is a **claim**, which fails with 409 when another daemon already holds the job; a plain `processing` is the heartbeat a long job sends to keep the stale-job rule from offering it away |
 | `GET /api/streams/<gameId>/<file>` | bearer-guarded; the daemon downloads the archived stream (it speaks only HTTPS to the Worker — no S3 reads, no inbound connectivity) |
 

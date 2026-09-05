@@ -211,6 +211,92 @@ test("the catalog list is blind to the mirror", async () => {
   });
 });
 
+// --- the Games section: a page of the mirror ---------------------------------
+
+test("gamesPage lists the mirror latest-ended first, saying what this site has of each", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([
+      // Started first but ended LAST: a long game outranks a duel that
+      // started after it, because end order is the order the mirror learns
+      // games in.
+      game("long", { startUnix: 1000, durationSec: 5000 }),
+      game("late-duel", { startUnix: 3000, durationSec: 200 }),
+      game("early", { startUnix: 2000, durationSec: 100 }),
+      game("undated", { startUnix: null, durationSec: null }),
+    ]);
+    index.upsert(replay("early"));
+    index.jobInsert("j-late", "", "late-duel", "resim");
+
+    const page = index.gamesPage(10, null);
+    expect(page.games.map((g) => g.id)).toEqual(["long", "late-duel", "early", "undated"]);
+    expect(page.next).toBeNull();
+    // The row is the whole GameEntry plus the join.
+    expect(page.games[0]).toMatchObject({
+      id: "long", startUnix: 1000, durationSec: 5000, map: "Great Divide V1", mapFile: "great_divide_v1",
+      gameSize: "1v1", preset: "duel", playerCount: 2, settings: { unranked: true },
+      engineVersion: "2026.07.04", gameVersion: "Beyond All Reason test-31027-900131b",
+      lobbyName: null, published: false, jobState: null,
+    });
+    expect(page.games[0].players).toEqual(game("x").players);
+    expect(page.games[0].syncedUnix).toBeGreaterThan(0);
+    expect(page.games[1]).toMatchObject({ id: "late-duel", published: false, jobState: "pending" });
+    expect(page.games[2]).toMatchObject({ id: "early", published: true, jobState: null });
+  });
+});
+
+test("gamesPage pages by cursor across ties and into the undated tail, never counting", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([
+      // Three games ending in the SAME second: the id tiebreak is what the
+      // cursor has to resume on, or a page boundary inside the tie would
+      // repeat or skip a row.
+      game("t-b", { startUnix: 5000, durationSec: 0 }),
+      game("t-a", { startUnix: 4000, durationSec: 1000 }),
+      game("t-c", { startUnix: 3000, durationSec: 2000 }),
+      game("g2", { startUnix: 2000, durationSec: 0 }),
+      game("g1", { startUnix: 1000, durationSec: 0 }),
+      // No recorded start: last, in id order, and reachable only through
+      // the tail query.
+      game("u-b", { startUnix: null, durationSec: null }),
+      game("u-a", { startUnix: null, durationSec: null }),
+    ]);
+    const walk: string[] = [];
+    let after = null as ReturnType<typeof index.gamesPage>["next"];
+    const pages: string[][] = [];
+    do {
+      const p = index.gamesPage(2, after);
+      pages.push(p.games.map((g) => g.id));
+      walk.push(...p.games.map((g) => g.id));
+      after = p.next;
+    } while (after !== null);
+    expect(pages).toEqual([["t-a", "t-b"], ["t-c", "g2"], ["g1", "u-a"], ["u-b"]]);
+    expect(walk).toEqual(["t-a", "t-b", "t-c", "g2", "g1", "u-a", "u-b"]);
+
+    // The cursor handed out is the last row's own key, and it is exact: the
+    // page after the first tie row resumes at the next tie row.
+    const first = index.gamesPage(1, null);
+    expect(first.next).toEqual({ endUnix: 5000, id: "t-a" });
+    expect(index.gamesPage(1, first.next).games.map((g) => g.id)).toEqual(["t-b"]);
+    // A cursor at the last row of the dated walk lands in the tail.
+    expect(index.gamesPage(5, { endUnix: 1000, id: "g1" }).games.map((g) => g.id)).toEqual(["u-a", "u-b"]);
+    // ...and past everything is empty, not an error.
+    expect(index.gamesPage(5, { endUnix: null, id: "u-b" })).toEqual({ games: [], next: null });
+    // A page that exactly fits has no next: the extra row is the signal.
+    expect(index.gamesPage(7, null).next).toBeNull();
+  });
+});
+
+test("a placeholder row does not count as published, and a claimed job reads as processing", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([game("g")]);
+    index.jobInsert("j", "", "g", "resim");
+    expect(index.jobClaim("j", "resim")).toBe(true);
+    // Claiming inserted the catalog placeholder (seeded from the mirror).
+    expect(index.list().map((e) => [e.id, e.placeholder])).toEqual([["g", true]]);
+    expect(index.gamesPage(10, null).games[0]).toMatchObject({ published: false, jobState: "processing" });
+  });
+});
+
 // --- the idle re-sim poll: work invented from the games mirror --------------
 
 /** jobsOffer needs a job id from its caller (the route passes a UUID); these

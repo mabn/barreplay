@@ -19,6 +19,7 @@ import type {
   QueueJob,
 } from "../src/worker/jobs";
 import type { ReplayEntry } from "../src/worker/replayentry";
+import type { GameListRow, GamesCursor } from "../src/worker/games";
 
 const FIXTURE = new URL("../../internal/capture/testdata/harness.brepstream", import.meta.url);
 const GAME_ID = "feed5eed00000000000000000000beef";
@@ -121,6 +122,20 @@ class FakeIndex {
     j.error = null;
     j.progress = null; // a claim starts fresh; the previous holder's reading is not ours
     return true;
+  }
+  /** The games mirror. The real DO joins the catalog and the jobs table per
+   * row and seeks by cursor (tested against real SQL in tests/do); here the
+   * rows are handed back as stored, resumed after the cursor's id, which is
+   * enough to prove the route pages, caps and refuses a junk cursor. */
+  games: GameListRow[] = [];
+  lastGamesQuery: { limit: number; after: GamesCursor | null } | null = null;
+  gamesPage(limit: number, after: GamesCursor | null): { games: GameListRow[]; next: GamesCursor | null } {
+    this.lastGamesQuery = { limit, after };
+    const from = after === null ? 0 : this.games.findIndex((g) => g.id === after.id) + 1;
+    const games = this.games.slice(from, from + limit);
+    const last = games[games.length - 1];
+    const next = from + limit < this.games.length && last ? { endUnix: last.startUnix, id: last.id } : null;
+    return { games, next };
   }
   lastQueueQuery: { limit: number; offset: number } | null = null;
   queuePage(limit: number, offset: number): { jobs: QueueJob[]; total: number; active: number } {
@@ -388,6 +403,48 @@ test("GET /api/queue lists jobs for the viewer without the archive key", async (
 
 // Paging: the page is a window, but total/active describe the WHOLE table —
 // that is what lets a 5-row page state how much it is paging through.
+test("GET /api/games pages the mirror by cursor, and counts nothing", async () => {
+  const { env, index } = makeEnv();
+  for (let i = 0; i < 7; i++) {
+    index.games.push({
+      id: `game-${i}`, startUnix: 1000 * (7 - i), durationSec: 600, map: "Map", mapFile: "map",
+      gameSize: "1v1", preset: "duel", playerCount: 2, players: null, settings: null,
+      engineVersion: "e", gameVersion: "v", syncedUnix: 1, lobbyName: null,
+      published: i === 0, jobState: i === 1 ? "pending" : null,
+    });
+  }
+
+  const first = await asJson(await app.request("/api/games?limit=5", {}, env));
+  assert.equal(first.games.length, 5);
+  assert.deepEqual(Object.keys(first).sort(), ["games", "next"], "no total, no page count, no offset");
+  assert.equal(first.games[0].published, true);
+  assert.equal(first.games[1].jobState, "pending");
+  assert.equal(typeof first.next, "string", "a page with more behind it hands out the cursor of the next one");
+  assert.deepEqual(index.lastGamesQuery, { limit: 5, after: null });
+
+  const second = await asJson(await app.request(`/api/games?limit=5&after=${encodeURIComponent(first.next)}`, {}, env));
+  assert.equal(second.games.length, 2, "the tail page holds what is left");
+  assert.equal(second.next, null, "the last page has no next");
+  // The route decoded the wire cursor into the DO's key, not a string.
+  assert.deepEqual(index.lastGamesQuery, { limit: 5, after: { endUnix: 3000, id: "game-4" } });
+  const ids = new Set([...first.games, ...second.games].map((g: GameListRow) => g.id));
+  assert.equal(ids.size, 7, "the two pages together are the whole mirror, no repeats");
+
+  // The cap keeps a hand-written limit from asking for the whole mirror, and
+  // an omitted limit still bounds the read.
+  assert.equal((await app.request("/api/games?limit=1000", {}, env)).status, 200);
+  assert.equal(index.lastGamesQuery?.limit, 100);
+  await app.request("/api/games", {}, env);
+  assert.deepEqual(index.lastGamesQuery, { limit: 20, after: null });
+  // Junk is refused up front, never handed to the query.
+  assert.equal((await app.request("/api/games?limit=abc", {}, env)).status, 400);
+  assert.equal((await app.request("/api/games?after=not-a-cursor", {}, env)).status, 400);
+  assert.equal((await app.request("/api/games?after=12:'%3B--", {}, env)).status, 400);
+  // A cursor into the undated tail (blank end) is a valid one.
+  assert.equal((await app.request("/api/games?after=:game-9", {}, env)).status, 200);
+  assert.deepEqual(index.lastGamesQuery?.after, { endUnix: null, id: "game-9" });
+});
+
 test("GET /api/queue pages with ?offset= and ?limit=", async () => {
   const { env, index } = makeEnv();
   for (let i = 0; i < 7; i++) {
