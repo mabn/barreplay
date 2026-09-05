@@ -88,6 +88,32 @@ test("gamesUnknown reports the ids the mirror has never recorded", async () => {
   });
 });
 
+test("gamesModdedEndedAfter lists modded mirror games by end time", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([
+      // Ends at 1000+600=1600, modded.
+      game("m-old", { startUnix: 1000, durationSec: 600, settings: { mods: true } }),
+      // Ends at 2000+600=2600, modded.
+      game("m-new", { startUnix: 2000, durationSec: 600, settings: { mods: true, ranked: true } }),
+      // Plain game in range: no mods flag, never a candidate.
+      game("plain", { startUnix: 2500, durationSec: 600, settings: { ranked: true } }),
+      // Modded but undated: cannot be placed against a watermark.
+      game("m-undated", { startUnix: null, durationSec: null, settings: { mods: true } }),
+    ]);
+
+    // Everything modded from the epoch, oldest-ended first.
+    assert.deepEqual(index.gamesModdedEndedAfter(0, 10), [
+      { id: "m-old", endUnix: 1600 },
+      { id: "m-new", endUnix: 2600 },
+    ]);
+    // The cutoff is inclusive (>=): a game ending exactly at it still lists.
+    assert.deepEqual(index.gamesModdedEndedAfter(1600, 10).map((r) => r.id), ["m-old", "m-new"]);
+    assert.deepEqual(index.gamesModdedEndedAfter(1601, 10).map((r) => r.id), ["m-new"]);
+    // The limit caps the answer from the oldest end up.
+    assert.deepEqual(index.gamesModdedEndedAfter(0, 1).map((r) => r.id), ["m-old"]);
+  });
+});
+
 test("gamesInsert stores the whole row", async () => {
   await inIndex((index, sql) => {
     index.gamesInsert([game("a1")]);

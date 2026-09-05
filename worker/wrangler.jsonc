@@ -97,6 +97,20 @@
   // src/worker/replayindex.ts. `pack -upload` upserts rows via
   // PUT /api/replays/<id>. Optional write auth: `wrangler secret put
   // REPLAY_PUT_TOKEN` (the uploader sends it as a bearer token).
+  // The sibling lavabalance worker (claudebar/lavabalance, same account),
+  // which keeps the LOS (OpenSkill) ratings for the lava game mode. The cron's
+  // lava sync (src/worker/lavasync.ts) submits freshly-mirrored candidate
+  // games to its open POST /api/games over this binding — worker-to-worker,
+  // no public egress. The lavabalance worker must be deployed in this account
+  // for the binding to resolve; no change on its side is needed (a service
+  // binding invokes its ordinary fetch handler).
+  "services": [
+    {
+      "binding": "LAVABALANCE",
+      "service": "lavabalance"
+    }
+  ],
+
   "durable_objects": {
     "bindings": [
       {

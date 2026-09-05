@@ -1146,6 +1146,40 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           --hours, subtracts what the mirror already has, fetches the detail for
                           only the missing games, and POSTs them in batches with $REPLAY_PUT_TOKEN
                           (--dry just reports the count). Re-running is a no-op (gamesUnknown).
+                          LAVA SYNC (src/worker/lavasync.ts + the LAVABALANCE service binding
+                          in wrangler.jsonc): freshly-finished candidate games are handed to
+                          the sibling lavabalance worker (claudebar/lavabalance, same account
+                          — the LOS OpenSkill ratings for the lava game mode), which ingests a
+                          game as the VERBATIM /replays/<id> detail POSTed to its open
+                          /api/games. STATELESS: each run reads lavabalance's own most recent
+                          stored game (GET /api/games?limit=1 over the binding), takes its END
+                          (start+duration) as the watermark, and submits every candidate the
+                          mirror holds that ended at/after it (the watermark game excluded by
+                          id; re-offers come back "duplicate", harmlessly) — so a run after
+                          lavabalance downtime just finds a lower watermark and catches up,
+                          and barreplay keeps no sync state to lose. CANDIDATES are the
+                          mirror's MODS-flagged games (every lava game runs tweakdefs; the
+                          mirror's `lava` flag is map_waterislava, a different thing) —
+                          lavabalance's classifier stays the authority and simply rejects
+                          non-lava mods; rejected/skipped games are NOT stored there, so they
+                          re-offer until a rated game moves the watermark past them, bounded
+                          by the sync's cadence. CADENCE: a tick that just mirrored a modded
+                          game (GameSyncResult.modded > 0 — known for free from the details
+                          the sync already fetched) runs it at once, plus one hourly sweep
+                          (LAVA_SYNC_MINUTE), which is the retry after a failed trigger —
+                          never every tick, because the candidate query
+                          (ReplayIndex.gamesModdedEndedAfter: the (flag, replay_id) index
+                          seek for 'mods' + a games PK seek each, rowcost-bounded) costs the
+                          count of modded games ever mirrored, and 1440 of those a day is the
+                          ROW BUDGET pattern to avoid. MAX_LAVA_BATCH=20 caps one run's
+                          detail fetches (subrequests); a failed BAR detail is skipped and
+                          re-offered next run. lavasync.ts is pure like games.ts (both
+                          fetches injected — the cron passes the service binding's), tested
+                          in tests/lavasync.test.ts; the vitest pool STUBS the LAVABALANCE
+                          binding (vitest.config.ts), since without one workerd refuses to
+                          boot over a service binding to a worker the test runtime lacks.
+                          The lavabalance worker needs NO change and no redeploy ordering: a
+                          service binding invokes its ordinary fetch handler.
                           Mirrored games index their SETTINGS into the SAME replay_settings
                           table as the catalog — ROSTERS are indexed NOWHERE: replay_players
                           is gone (the migration drops it), because keeping the mirror's
@@ -1267,8 +1301,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           pipes the detail from the BAR API into the POST, with nothing
                           inlined that shell quoting could mangle. The page POSTS NOTHING:
                           the upload is the operator's shell command, so a wrong click
-                          costs a look, not a row in the rating fold. A worker-side push
-                          over a service binding is the deferred next step.
+                          costs a look, not a row in the rating fold. The AUTOMATIC push
+                          is the LAVA SYNC (see the games-mirror entry): the cron submits
+                          candidates over the LAVABALANCE service binding; the button stays
+                          as the manual door and the way to see exactly what is sent.
                           WIDGET-INSTALL GUIDE: the dropzone banner links (relatively, so it
                           resolves on both backends) to /setup — public/setup.html, four numbered
                           steps ending in a drag&drop upload. The page is deliberately
