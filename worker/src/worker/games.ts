@@ -97,6 +97,36 @@ export interface GameListRow extends GameEntry {
   jobState: string | null;
 }
 
+/** Where a page of the Games listing stopped: the ORDER key of its last row
+ * — when the game ended (start + duration; null for a game with no recorded
+ * start, which the DESC order puts last) and its id, the tiebreak. The next
+ * page resumes strictly after it on the same index, which is what makes a
+ * page cost the same whether it is the first or the thousandth: an OFFSET
+ * steps over every row before the page, a cursor seeks to it. */
+export interface GamesCursor {
+  endUnix: number | null;
+  id: string;
+}
+
+/** The cursor on the wire: "<endUnix>:<id>", the number blank for null. Not
+ * opaque on purpose — a cursor a person can read is a cursor a person can
+ * debug — but nothing about its shape is promised to a client beyond "hand
+ * back what `next` said". */
+export function encodeGamesCursor(c: GamesCursor): string {
+  return `${c.endUnix ?? ""}:${c.id}`;
+}
+
+const CURSOR_RE = /^(-?\d{1,15})?:([A-Za-z0-9_-]{1,128})$/;
+
+/** parseGamesCursor reads a wire cursor back, or null for anything that is
+ * not one. The id part is held to the same shape the mirror accepts (ID_RE),
+ * so a cursor is never a way to feed the query an arbitrary string. */
+export function parseGamesCursor(raw: string): GamesCursor | null {
+  const m = CURSOR_RE.exec(raw);
+  if (!m) return null;
+  return { endUnix: m[1] === undefined ? null : parseInt(m[1], 10), id: m[2] };
+}
+
 /** What syncGames needs of the ReplayIndex Durable Object. Narrowed to the two
  * methods so the tests can stand in for it without modelling the catalog. */
 export interface GamesIndex {

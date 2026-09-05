@@ -749,7 +749,7 @@ test('the games section lists the mirror with what this site has of each game', 
   const render = eval(`(function(){
     const document = dom.document;
     const window = { scrollTo() {} };
-    const gamesRows = games, gamesHasNext = true, gamesOffset = 50;
+    const gamesRows = games, gamesNext = '1787350500:pub', gamesBefore = 20, gamesTrail = [{ after: null, before: 0 }];
     const fmtDate = () => 'date', fmtDateShort = () => 'short';
     const replayHref = (id) => '/?replay=' + id, openReplay = () => {};
     const mapFileGuess = (m) => m;
@@ -792,7 +792,7 @@ test('the games section lists the mirror with what this site has of each game', 
   assert.ok(badges.includes('lava') && badges.includes('ranked'), JSON.stringify(badges));
 
   // The pager: a range, never a total or a page count.
-  assert.equal(dom.document.getElementById('g_range').textContent, '51–54');
+  assert.equal(dom.document.getElementById('g_range').textContent, '21–24');
   assert.equal(dom.document.getElementById('g_prev').disabled, false);
   assert.equal(dom.document.getElementById('g_next').disabled, false);
   assert.equal(dom.document.getElementById('gamespager').style.display, 'flex');

@@ -3805,7 +3805,7 @@ function ensureHomeData() {
 const HOME_TABS = ['replays', 'queue', 'games', 'sqlstats'];
 // Sections only an admin may see. The menu entry is hidden by CSS; this is
 // what keeps a shared ?tab=queue link from opening the section anyway.
-const ADMIN_TABS = new Set(['queue', 'games', 'sqlstats']);
+const ADMIN_TABS = new Set(['queue', 'sqlstats']);
 
 function homeTab() {
   const t = new URLSearchParams(location.search).get('tab');
@@ -4513,42 +4513,48 @@ function initQueue() {
   document.getElementById('q_next').onclick = () => setQueueOffset(queueOffset + QUEUE_PAGE);
   document.getElementById('q_reload').onclick = () => refreshQueue();
   document.getElementById('sql_reload').onclick = () => refreshSqlStats();
-  document.getElementById('g_prev').onclick = () => setGamesOffset(gamesOffset - GAMES_PAGE);
-  document.getElementById('g_next').onclick = () => setGamesOffset(gamesOffset + GAMES_PAGE);
+  document.getElementById('g_prev').onclick = () => gamesPagePrev();
+  document.getElementById('g_next').onclick = () => gamesPageNext();
   document.getElementById('g_reload').onclick = () => refreshGames();
 }
 
-// ---- games section (admin) --------------------------------------------------
+// ---- games section --------------------------------------------------------
 // The games MIRROR: every game BAR published that the worker's cron has
 // recorded, whether or not anybody captured it — the other half of the
-// catalog, and the list the re-sim backfill draws from. GET /api/games is the
-// Worker's alone (the Go viz server has no mirror and 404s it, which the
-// section says rather than showing an empty table that reads as "BAR played
-// nothing").
+// catalog, and the list the re-sim backfill draws from. Open to every visitor
+// (unlike Queue and SQL: these are public games, not the pipeline's state).
+// GET /api/games is the Worker's alone (the Go viz server has no mirror and
+// 404s it, which the section says rather than showing an empty table that
+// reads as "BAR played nothing").
 //
-// Paged Prev/Next with NO total and NO page count, exactly like the replay
-// list: counting the mirror means reading a table that grows ~2000 rows a day,
-// and the range ("51–100") answers what the number was for. The listing asks
-// for one row MORE than it shows and reads "there is a next page" off that
-// row's existence. The page is plain component state, not in the URL, for the
-// queue's reason: "page 3" describes a moment in a list that gains a game a
-// minute, not a set of games.
-const GAMES_PAGE = 50; // rows per page (the worker caps a page at GAMES_LIMIT_MAX = 100)
+// CURSOR-paged, Prev/Next, with NO total and NO page count, like the replay
+// list: counting the mirror means reading a table that grows ~2000 rows a
+// day, and the range ("21–40") answers what the number was for. Each reply
+// carries `next`, the cursor of the page after it (null on the last page),
+// and Next hands it back; Prev walks back down the stack of cursors this
+// visit came through, since a keyset cursor has no "previous" of its own.
+// The cursors are plain component state, not in the URL, for the queue's
+// reason: "page 3" describes a moment in a list that gains a game a minute,
+// not a set of games — and a cursor is only meaningful against the reply
+// that issued it.
+const GAMES_PAGE = 20; // rows per page (the worker caps a page at GAMES_LIMIT_MAX = 100)
 const GAMES_UNSUPPORTED =
   'This server keeps no mirror of BAR\'s game history — that is the Cloudflare worker\'s cron, and its catalog is computed from local files.';
 let gamesRows = null;        // last fetched page's rows (GAMES_PAGE at most)
-let gamesHasNext = false;    // the extra row existed
-let gamesOffset = 0;         // first row of the page being shown
+let gamesAfter = null;       // cursor the shown page was read with (null = first page)
+let gamesNext = null;        // cursor of the page after it, from the reply (null = last page)
+let gamesBefore = 0;         // rows on the pages before this one, for the range
+let gamesTrail = [];         // [{after, before}] of the pages Prev returns to
 let gamesSeq = 0;            // ignore a reply overtaken by a newer request
 let gamesSupported = true;   // cleared by a 404: a backend won't grow the route
 
 async function refreshGames() {
-  if (!adminMode()) return;
   if (!gamesSupported) { renderGames(GAMES_UNSUPPORTED); return; }
   const seq = ++gamesSeq;
   let page;
   try {
-    const r = await fetch(`/api/games?offset=${gamesOffset}&limit=${GAMES_PAGE + 1}`);
+    const after = gamesAfter ? `&after=${encodeURIComponent(gamesAfter)}` : '';
+    const r = await fetch(`/api/games?limit=${GAMES_PAGE}${after}`);
     if (r.status === 404 || r.status === 405) {
       gamesSupported = false;
       renderGames(GAMES_UNSUPPORTED);
@@ -4562,24 +4568,30 @@ async function refreshGames() {
     return;
   }
   if (seq !== gamesSeq) return; // a newer read already went out
-  // Stepped past the end (the mirror is shorter than the offset says): fall
-  // back one page rather than showing an empty screen with Prev still lit.
-  if (page.games.length === 0 && gamesOffset > 0) {
-    gamesOffset = Math.max(0, gamesOffset - GAMES_PAGE);
-    refreshGames();
-    return;
-  }
-  gamesHasNext = page.games.length > GAMES_PAGE;
-  gamesRows = gamesHasNext ? page.games.slice(0, GAMES_PAGE) : page.games;
+  gamesRows = page.games;
+  gamesNext = typeof page.next === 'string' && page.next ? page.next : null;
   renderGames();
 }
 
-// setGamesOffset pages the table. Bounded below at the first page; above by
-// gamesHasNext — the pager cannot offer a page that was never shown to exist.
-function setGamesOffset(offset) {
-  const next = Math.max(0, offset);
-  if (next === gamesOffset || (next > gamesOffset && !gamesHasNext)) return;
-  gamesOffset = next;
+// gamesPageNext / gamesPagePrev step the listing. Next is bounded by the
+// reply's own cursor — the pager cannot offer a page that was never shown to
+// exist — and Prev by the trail of pages this visit came through.
+function gamesPageNext() {
+  if (!gamesNext || !gamesRows) return;
+  gamesTrail.push({ after: gamesAfter, before: gamesBefore });
+  gamesBefore += gamesRows.length;
+  gamesAfter = gamesNext;
+  gamesNext = null;
+  refreshGames();
+  window.scrollTo({ top: 0 });
+}
+
+function gamesPagePrev() {
+  const back = gamesTrail.pop();
+  if (!back) return;
+  gamesAfter = back.after;
+  gamesBefore = back.before;
+  gamesNext = null;
   refreshGames();
   window.scrollTo({ top: 0 });
 }
@@ -4766,9 +4778,9 @@ function renderGames(errMsg) {
   pager.style.display = gamesRows !== null ? 'flex' : 'none';
   if (gamesRows !== null) {
     document.getElementById('g_range').textContent =
-      rows.length ? `${gamesOffset + 1}–${gamesOffset + rows.length}` : '—';
-    document.getElementById('g_prev').disabled = gamesOffset <= 0;
-    document.getElementById('g_next').disabled = !gamesHasNext;
+      rows.length ? `${gamesBefore + 1}–${gamesBefore + rows.length}` : '—';
+    document.getElementById('g_prev').disabled = gamesTrail.length === 0;
+    document.getElementById('g_next').disabled = !gamesNext;
   }
   msg.style.display = rows.length ? 'none' : '';
   if (!rows.length) msg.textContent = gamesRows === null ? 'Reading the mirror…'

@@ -192,8 +192,14 @@ test("the polled and cron reads do not scan the tables they read from", async ()
     // Not on a timer, but the mirror is the one table here that a person
     // cannot bound: it walks games_backfill_end and stops at the page edge,
     // with a primary-key seek and one index seek per row for the join.
-    index.gamesPage(51, 0);
+    const gamesFirst = index.gamesPage(50, null);
     out.gamesPage = tally();
+    // ...and a page DEEP in the mirror costs the same: the cursor seeks into
+    // the index where an offset would have stepped over every row before it.
+    // The seed's games are 40s apart, so this key sits ~4000 rows in.
+    index.gamesPage(50, { endUnix: NOW - 4000 * 40 + 900, id: "g004000" });
+    out.gamesPageDeep = tally();
+    expect(gamesFirst.next, "a full page hands out a cursor").not.toBeNull();
 
     // A running job's healthcheck, every 10s: the first beat learns how many
     // samples the job has, the rest must not ask again.
@@ -235,6 +241,7 @@ test("the polled and cron reads do not scan the tables they read from", async ()
   // 51 index entries + 51 rows + their two seeks each — never a sort of the
   // whole mirror (5000 rows here) into a temp b-tree.
   expect(costs.gamesPage, report).toBeLessThan(400);
+  expect(costs.gamesPageDeep, report).toBeLessThan(400);
   // The first beat counts the job's samples; every beat after it is answered
   // from memory.
   expect(costs.healthcheckNext, report).toBeLessThan(50);
