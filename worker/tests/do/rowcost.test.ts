@@ -207,6 +207,15 @@ test("the polled and cron reads do not scan the tables they read from", async ()
     out.healthcheckFirst = tally();
     index.jobUpdate("j000001", "processing", null, null, { state: "simulating", percent: 13 });
     out.healthcheckNext = tally();
+
+    // The games sync now hands gamesUnknown a whole 2h window of ids at once
+    // (~150+ when the mirror is behind). It chunks the IN and each chunk is
+    // PK-index-backed, so the cost is ~the id count, not the 5000-row table.
+    const probe: string[] = [];
+    for (let n = 1; n <= 100; n++) probe.push(`g${String(n).padStart(6, "0")}`); // known
+    for (let n = 1; n <= 100; n++) probe.push(`u${String(n).padStart(6, "0")}`); // new
+    index.gamesUnknown(probe);
+    out.gamesUnknown = tally();
     return out;
   });
 
@@ -242,6 +251,9 @@ test("the polled and cron reads do not scan the tables they read from", async ()
   // whole mirror (5000 rows here) into a temp b-tree.
   expect(costs.gamesPage, report).toBeLessThan(400);
   expect(costs.gamesPageDeep, report).toBeLessThan(400);
+  // gamesUnknown over a 200-id window: a seek per id (the 100 that exist), not
+  // a scan of the 5000-row mirror — chunked so it also fits the bind cap.
+  expect(costs.gamesUnknown, report).toBeLessThan(400);
   // The first beat counts the job's samples; every beat after it is answered
   // from memory.
   expect(costs.healthcheckNext, report).toBeLessThan(50);
