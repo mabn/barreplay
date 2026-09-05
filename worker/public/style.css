@@ -191,7 +191,7 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
 #hometable td.dim { color: #6a7785; }
 #homemsg { padding: 12px 8px; font-size: 13px; max-width: 1650px; margin: 0 auto; }
 
-/* ---- games section: the mirror of what BAR published (admin) ----
+/* ---- games section: the mirror of what BAR published ----
    Same table look as the replay list. The Here column is the one that is
    coloured: "which of these do we have" is the question this view answers. */
 #gamestable { border-collapse: collapse; width: 100%; max-width: 1650px; margin: 0 auto; font-size: 13px; }
