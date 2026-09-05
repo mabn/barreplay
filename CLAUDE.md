@@ -1224,6 +1224,21 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the DO tests. Note the workerd trap it dodges in webFetch: calling
                           an injected global fetch as `this.fetchImpl(...)` binds `this` to
                           the session and workerd throws "Illegal invocation" — detach first.
+                          LAVABALANCE PREVIEW (app.js previewLavabalance, index.html
+                          #lbdialog): each Games row carries an admin-only (?admin=true)
+                          LOS button — lavabalance, the sibling worker keeping the LOS
+                          (OpenSkill) ratings, ingests a game through its open POST
+                          /api/games, whose body is the VERBATIM api.bar-rts.com/replays/
+                          <id> detail in a one-element array. The button opens a native
+                          <dialog> showing exactly that body — fetched by the BROWSER, the
+                          way the map loader talks to the same API (it allows any
+                          origin), so no worker route exists and the Go viz server serves
+                          it unchanged — plus a paste-ready curl (lavabalanceCurl) that
+                          pipes the detail from the BAR API into the POST, with nothing
+                          inlined that shell quoting could mangle. The page POSTS NOTHING:
+                          the upload is the operator's shell command, so a wrong click
+                          costs a look, not a row in the rating fold. A worker-side push
+                          over a service binding is the deferred next step.
                           WIDGET-INSTALL GUIDE: the dropzone banner links (relatively, so it
                           resolves on both backends) to /setup — public/setup.html, four numbered
                           steps ending in a drag&drop upload. The page is deliberately

@@ -201,12 +201,36 @@
       </div>
       <table id="gamestable">
         <thead>
-          <tr><th>Ended</th><th>Duration</th><th>Map</th><th>Size</th><th>Preset</th><th>Players</th><th>Lobby</th><th>Settings</th><th>Engine</th><th>Links</th><th>Here</th></tr>
+          <tr><th>Ended</th><th>Duration</th><th>Map</th><th>Size</th><th>Preset</th><th>Players</th><th>Lobby</th><th>Settings</th><th>Engine</th><th>Links</th><th>Here</th><th class="admin"></th></tr>
         </thead>
         <tbody></tbody>
       </table>
       <div id="gamesmsg" class="hint" style="display:none"></div>
     </section>
+
+    <!-- lavabalance upload PREVIEW (admin-only, opened by the Games rows' LOS
+         button). lavabalance ingests a game through its POST /api/games,
+         whose body is the verbatim api.bar-rts.com/replays/<id> detail; this
+         dialog shows exactly that body, fetched by the browser (the BAR API
+         allows any origin, which is how the map loader talks to it too), and
+         a paste-ready curl that performs the upload. NOTHING is posted by the
+         page: the upload is the operator's shell command, so a wrong game
+         costs a look rather than a row in somebody else's rating fold. -->
+    <dialog id="lbdialog">
+      <div class="lbhead">
+        <span id="lbtitle">lavabalance upload</span>
+        <button type="button" id="lbclose" title="Close">×</button>
+      </div>
+      <div id="lbstatus" class="hint"></div>
+      <div class="lbsection">
+        <div class="lblabel">curl <button type="button" id="lbcopy">copy</button></div>
+        <pre id="lbcurl"></pre>
+      </div>
+      <div class="lbsection">
+        <div class="lblabel">POST body</div>
+        <pre id="lbjson"></pre>
+      </div>
+    </dialog>
 
     <!-- SQL cost accounting (admin-only, like the Queue): what each Durable
          Object method has cost in SQLite rows — GET /api/sqlstats, the live
