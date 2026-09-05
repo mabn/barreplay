@@ -4705,16 +4705,21 @@ function renderGames(errMsg) {
       const td = cell(g.lobbyName, 'lobby');
       if (g.lobbyName) td.title = g.lobbyName;
     }
-    // Settings badges (empty cell — not a dash — when the game has none).
+    // Settings badges (empty cell — not a dash — when the game has none),
+    // in the replay list's colours: the same flag reads the same in both
+    // lists. Wrapped in a span like there, so the flex layout that wraps
+    // them lives on the wrapper, not the table cell.
     {
       const td = document.createElement('td');
       td.className = 'settings';
+      const wrap = document.createElement('span');
       for (const b of settingsBadges(g.settings)) {
         const s = document.createElement('span');
         s.className = 'badge badge-' + b.key.replace(/[^\w-]/g, '');
         s.textContent = b.label;
-        td.appendChild(s);
+        wrap.appendChild(s);
       }
+      td.appendChild(wrap);
       tr.appendChild(td);
     }
     // The engine build a re-sim of it must run; the game build in the tooltip.
