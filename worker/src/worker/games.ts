@@ -8,11 +8,18 @@
 // exists — so the pipeline has a work list of its own instead of waiting for a
 // person to paste a link.
 //
-// It is deliberately SHALLOW: one page of the newest games per run, never a
-// second. At one run a minute, page 1 covers far more than a minute of BAR's
-// game rate, so the sync catches up on its own after a hiccup and no run ever
-// walks history. If the gap is ever big enough that page 1 cannot close it,
-// that is a backfill — a different job, run once, not this one.
+// It reads the newest games until the last GAMES_COVERAGE_SEC (2h) of START
+// TIMES is covered, up to GAMES_MAX_PAGES pages of GAMES_PAGE_LIMIT. The
+// listing is ordered by start time DESCENDING, so a game that started a while
+// ago sits deep in it from the moment it ends: at ~2000 games/day a game that
+// started ~90 min ago is already ~120 rows down, and a single 24-row page 1
+// never saw it — long and older games were silently missed. Paging back a
+// fixed span of start time is what fixes that. It is still bounded, and that
+// is what keeps it inside the ROW BUDGET (see worker/ CLAUDE.md): SIZE by
+// GAMES_MAX_PAGES, and the index reads it feeds (gamesUnknown) are chunked and
+// PK-backed. Games LONGER than the window can still slip past — a start-time
+// window cannot cover them — but that is a rare tail, not the every-day miss.
+// A gap bigger than the window is a backfill: a different job, run once.
 //
 // Two API calls are involved and they are not interchangeable: the LISTING
 // (which this queries) carries no modoptions, so the settings badges can only
@@ -22,18 +29,36 @@
 // Like app.ts, this file has no `cloudflare:workers` import anywhere in its
 // module graph, so the node tests drive the whole sync against a fake index
 // and a fake fetch.
-import { CATALOG_PLAYERS_PER_ALLY, derivePlayerCount, playersFromApi, settingsFlags } from "./replayentry";
+import { CATALOG_PLAYERS_PER_ALLY, SETTINGS_MODS_FLAG, derivePlayerCount, playersFromApi, settingsFlags } from "./replayentry";
 import type { CatalogTeam } from "./replayentry";
 
 /** The BAR replay API this mirrors. */
 export const BAR_API = "https://api.bar-rts.com";
 
-/** The listing the sync reads, verbatim. `hasBots=false` and
- * `endedNormally=true` keep the mirror to games worth having: a bot match
- * describes nobody's play, and a game that did not end normally is a crash or
- * an abandon. `limit=24` is the API's own default page size — page 1 only,
- * every run (see the module comment). */
-export const GAMES_QUERY = "page=1&limit=24&hasBots=false&endedNormally=true";
+/** The listing filters, verbatim. `hasBots=false` and `endedNormally=true`
+ * keep the mirror to games worth having: a bot match describes nobody's play,
+ * and a game that did not end normally is a crash or an abandon. */
+export const GAMES_BASE_QUERY = "hasBots=false&endedNormally=true";
+
+/** Rows per page. 50 (the API caps at 100). */
+export const GAMES_PAGE_LIMIT = 50;
+
+/** Page back until the oldest fetched start is at least this old, so every
+ * game that STARTED within this span is seen whatever its length (see the
+ * module comment). Two hours. */
+export const GAMES_COVERAGE_SEC = 2 * 3600;
+
+/** Safety cap on pages per run. 6 x 50 = 300 games comfortably exceeds two
+ * hours at BAR's rate (~2000/day), so this is only ever reached by a clock
+ * skew, a listing that never ages out, or a bad reply — none of which may turn
+ * the once-a-minute cron into a walk of history, and it bounds the burst
+ * against a public API. */
+export const GAMES_MAX_PAGES = 6;
+
+/** The listing URL for one page. */
+export function gamesPageUrl(page: number): string {
+  return `${BAR_API}/replays?page=${page}&limit=${GAMES_PAGE_LIMIT}&${GAMES_BASE_QUERY}`;
+}
 
 /** How many per-game detail fetches run at once. The list is at most one page,
  * so this bounds a first run's burst against a public API; in the steady state
@@ -144,8 +169,13 @@ export interface GameSyncResult {
   added: number;
   /** New games whose detail could not be fetched or parsed. They are NOT
    * recorded, so the next run retries them — which is the whole recovery
-   * story for a blip, and costs nothing once the game drops off page 1. */
+   * story for a blip, and costs nothing once the game drops off the window. */
   failed: number;
+  /** Listing pages read this run (1..GAMES_MAX_PAGES). */
+  pages: number;
+  /** Of the games recorded, ones carrying the mods flag — lava-sync
+   * candidates, which is what the cron triggers the lava sync on. */
+  modded: number;
 }
 
 /** syncGames runs one pass: read page 1, ask the index which ids are new,
@@ -155,21 +185,52 @@ export interface GameSyncResult {
  * nothing partial to keep. A single game's detail failing is counted, not
  * thrown: one unparseable game must not cost the other 23 their row. */
 export async function syncGames(index: GamesIndex, fetchImpl: typeof fetch = fetch): Promise<GameSyncResult> {
-  const listed = await fetchJSON(fetchImpl, `${BAR_API}/replays?${GAMES_QUERY}`);
-  const rows: unknown[] = Array.isArray((listed as { data?: unknown })?.data)
-    ? ((listed as { data: unknown[] }).data)
-    : [];
+  // The instant the walk must cover back to. Read once, so every page this run
+  // is judged against the same horizon.
+  const horizon = Math.floor(Date.now() / 1000) - GAMES_COVERAGE_SEC;
+  const seen = new Set<string>();
   const ids: string[] = [];
-  for (const row of rows) {
-    const id = (row as Record<string, unknown>)?.id;
-    // Newest first, as the API sorts them, and deduped: the page is the only
-    // thing feeding the id list, so a repeat would just do the work twice.
-    if (typeof id === "string" && ID_RE.test(id) && !ids.includes(id)) ids.push(id);
+  let pages = 0;
+  for (let page = 1; page <= GAMES_MAX_PAGES; page++) {
+    let rows: unknown[];
+    try {
+      const listed = await fetchJSON(fetchImpl, gamesPageUrl(page));
+      rows = Array.isArray((listed as { data?: unknown })?.data)
+        ? ((listed as { data: unknown[] }).data)
+        : [];
+    } catch (e) {
+      // Page 1 failing is the run — nothing partial to keep. A LATER page
+      // failing ends the walk with what earlier pages gathered, so a blip deep
+      // in the list still records the newer games above it.
+      if (page === 1) throw e;
+      break;
+    }
+    pages = page;
+    let oldest: number | null = null;
+    for (const row of rows) {
+      const r = row as Record<string, unknown>;
+      const id = r?.id;
+      // Newest first, as the API sorts them, and deduped across pages.
+      if (typeof id === "string" && ID_RE.test(id) && !seen.has(id)) {
+        seen.add(id);
+        ids.push(id);
+      }
+      // Track the oldest start on this page to decide coverage. A row with no
+      // parseable start cannot prove the horizon was reached, so it is ignored
+      // here and never shortens the walk.
+      const start = parseStart(r?.startTime);
+      if (start !== null && (oldest === null || start < oldest)) oldest = start;
+    }
+    // Stop once the last page is reached (a short page has no successor), or the
+    // window is covered (the oldest start this page is at/older than the
+    // horizon, so every later game started even earlier).
+    if (rows.length < GAMES_PAGE_LIMIT) break;
+    if (oldest !== null && oldest <= horizon) break;
   }
-  if (ids.length === 0) return { scanned: 0, fresh: 0, added: 0, failed: 0 };
+  if (ids.length === 0) return { scanned: 0, fresh: 0, added: 0, failed: 0, pages, modded: 0 };
 
   const fresh = await index.gamesUnknown(ids);
-  if (fresh.length === 0) return { scanned: ids.length, fresh: 0, added: 0, failed: 0 };
+  if (fresh.length === 0) return { scanned: ids.length, fresh: 0, added: 0, failed: 0, pages, modded: 0 };
 
   const entries: GameEntry[] = [];
   let failed = 0;
@@ -185,7 +246,8 @@ export async function syncGames(index: GamesIndex, fetchImpl: typeof fetch = fet
   // unrecorded — the ones the next page-1 read is certain to offer again.
   entries.sort((a, b) => (a.startUnix ?? 0) - (b.startUnix ?? 0));
   const added = entries.length === 0 ? 0 : await index.gamesInsert(entries);
-  return { scanned: ids.length, fresh: fresh.length, added, failed };
+  const modded = entries.filter((e) => e.settings?.[SETTINGS_MODS_FLAG] !== undefined).length;
+  return { scanned: ids.length, fresh: fresh.length, added, failed, pages, modded };
 }
 
 /** gameFromApi builds a mirror row from one /replays/<id> detail reply. The

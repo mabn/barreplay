@@ -1169,13 +1169,43 @@ export class ReplayIndex extends DurableObject<Env> {
    * API page (24), so the list is small by construction. */
   gamesUnknown(ids: string[]): string[] {
     if (ids.length === 0) return [];
-    const known = new Set(
-      this.ctx.storage.sql
-        .exec(`SELECT id FROM games WHERE id IN (${ids.map(() => "?").join(",")})`, ...ids)
-        .toArray()
-        .map((r) => r.id as string),
-    );
+    // Chunked because the games sync now passes a whole 2h window of ids (~150+
+    // when the mirror is behind), past SQLite's per-statement bind-param cap;
+    // each chunk's IN is PK-index-backed, so the reads stay ~the id count.
+    const CHUNK = 90;
+    const known = new Set<string>();
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const batch = ids.slice(i, i + CHUNK);
+      for (const r of this.ctx.storage.sql
+        .exec(`SELECT id FROM games WHERE id IN (${batch.map(() => "?").join(",")})`, ...batch)
+        .toArray()) {
+        known.add(r.id as string);
+      }
+    }
     return ids.filter((id) => !known.has(id));
+  }
+
+  /** gamesModdedEndedAfter lists the mirror's MODDED games (the mods flag in
+   * replay_settings — the lava sync's candidate pre-filter, see lavasync.ts)
+   * that ended at or after `endUnix`, oldest-ended first. Driven by the
+   * (flag, replay_id) covering index, so the cost is the number of modded
+   * games ever mirrored (rare — ~0 in 24) plus a PK seek each, NOT the
+   * mirror's size; and it runs only on a fresh-modded-game trigger or the
+   * hourly sweep, never the every-minute path (rowcost.test.ts bounds it). */
+  gamesModdedEndedAfter(endUnix: number, limit: number): { id: string; endUnix: number }[] {
+    return this.ctx.storage.sql
+      .exec(
+        `SELECT g.id AS id, g.start_unix + COALESCE(g.duration_sec, 0) AS end_unix
+           FROM replay_settings rs JOIN games g ON g.id = rs.replay_id
+          WHERE rs.flag = ? AND g.start_unix IS NOT NULL
+            AND g.start_unix + COALESCE(g.duration_sec, 0) >= ?
+          ORDER BY end_unix ASC, g.id LIMIT ?`,
+        SETTINGS_MODS_FLAG,
+        endUnix,
+        limit,
+      )
+      .toArray()
+      .map((r) => ({ id: r.id as string, endUnix: Number(r.end_unix) }));
   }
 
   /** gamesInsert records mirrored games and indexes their settings into

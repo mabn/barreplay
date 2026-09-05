@@ -4,6 +4,7 @@
 // handler, which is the one thing that cannot live in a Hono app.
 import app, { indexStub } from "./app";
 import { syncGames } from "./games";
+import { syncLava } from "./lavasync";
 import { JOB_SAMPLE_RETENTION_SEC, ReplayIndex } from "./replayindex";
 import { syncLobbies } from "./teiserver";
 
@@ -13,6 +14,17 @@ export { ReplayIndex };
  * zero, only so it does not share the tick with whatever else the platform
  * does on the hour. */
 const PRUNE_MINUTE = 17;
+
+/** Which minute of the hour the lava sync runs UNCONDITIONALLY. Every other
+ * tick it runs only when the games sync just mirrored a modded game (the
+ * trigger that makes a finished lava game reach lavabalance within a minute);
+ * this sweep is the retry path — a trigger that failed because lavabalance
+ * was down is re-attempted here, the watermark it re-derives from lavabalance
+ * finding everything still unsubmitted. Hourly, not per-tick, because the
+ * candidate query's cost is the count of modded games ever mirrored (see
+ * ReplayIndex.gamesModdedEndedAfter) and 1440 of those a day is the ROW
+ * BUDGET pattern to avoid. */
+const LAVA_SYNC_MINUTE = 43;
 
 export default {
   fetch: app.fetch,
@@ -31,7 +43,27 @@ export default {
       // Quiet on a no-op tick: most runs find nothing new, and a line a minute
       // saying so would bury the ones that did something.
       if (r.added > 0 || r.failed > 0) {
-        console.log(`games sync: scanned=${r.scanned} fresh=${r.fresh} added=${r.added} failed=${r.failed}`);
+        console.log(`games sync: pages=${r.pages} scanned=${r.scanned} fresh=${r.fresh} added=${r.added} failed=${r.failed}`);
+      }
+      // Same tick, second step: offer freshly-finished modded games to the
+      // sibling lavabalance worker over the service binding (lavasync.ts —
+      // stateless, keyed on lavabalance's own newest stored game, so a run
+      // after downtime catches up by itself). Triggered by the sync above
+      // mirroring a modded game, plus the hourly sweep (see LAVA_SYNC_MINUTE).
+      // Its own try/catch: lavabalance being down must not cost the mirror.
+      const sweep = new Date(controller.scheduledTime).getUTCMinutes() === LAVA_SYNC_MINUTE;
+      if ((r.modded > 0 || sweep) && env.LAVABALANCE !== undefined) {
+        try {
+          const lv = await syncLava(indexStub(env), env.LAVABALANCE.fetch.bind(env.LAVABALANCE));
+          if (lv.submitted > 0) {
+            console.log(
+              `lava sync: candidates=${lv.candidates} submitted=${lv.submitted} rated=${lv.rated} ` +
+                `ignored=${lv.ignored} skipped=${lv.skipped} duplicate=${lv.duplicate} rejected=${lv.rejected}`,
+            );
+          }
+        } catch (e) {
+          console.error(`lava sync failed: ${e}`);
+        }
       }
     } catch (e) {
       console.error(`games sync failed: ${e}`);

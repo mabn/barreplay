@@ -1069,11 +1069,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           that does not exist are the same thing to the view.
                           GAMES MIRROR (games table + src/worker/games.ts + the cron in
                           index.ts): every minute a scheduled handler (which also prunes job_samples —
-                          see JOB SAMPLES above) reads ONE page of
-                          api.bar-rts.com's replay listing —
-                          /replays?page=1&limit=24&hasBots=false&endedNormally=true, the query
-                          verbatim in GAMES_QUERY — and records the games this worker has not
-                          seen. It is the OTHER half of the picture: `replays` is what somebody
+                          see JOB SAMPLES above) reads api.bar-rts.com's replay listing
+                          (/replays?page=<n>&limit=50&hasBots=false&endedNormally=true;
+                          GAMES_BASE_QUERY + gamesPageUrl) and records the games this worker
+                          has not seen. It is the OTHER half of the picture: `replays` is what somebody
                           captured, `games` is what was PLAYED, keyed by the same gameId, so the
                           two are views of one game and a row in `games` with none in `replays`
                           is a re-sim candidate nobody has to paste a link for. It is SERVED
@@ -1102,9 +1101,26 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           preset (duel/team/ffa, stored verbatim so a value the API adds later
                           survives), and engine_version/game_version — the two builds a re-sim
                           must run and nothing else.
-                          One page, never a second: at a run a minute, page 1 covers far more
-                          than a minute of BAR's game rate, so a gap closes itself and no run
-                          walks history (a real backfill would be a different job). The LISTING
+                          Enough pages to cover the last 2h of START TIMES, not one page:
+                          the listing is ordered by start time DESCENDING, so a game that
+                          started a while ago sits deep in it the moment it ends (at ~2000
+                          games/day one that started ~90 min ago is already ~120 rows down),
+                          and the old single 24-row page never saw it — long and older games
+                          were silently missed. So the sync now walks pages of GAMES_PAGE_LIMIT
+                          (50) until the oldest start on a page is at least GAMES_COVERAGE_SEC
+                          (2h) old, or a short page ends the list, or GAMES_MAX_PAGES (6, ~300
+                          games) caps it — the cap being what keeps a clock skew or a listing
+                          that never ages out from turning the once-a-minute cron into a walk
+                          of history (a gap bigger than the window is a backfill, a different
+                          job). Every game that STARTED within the window is therefore seen
+                          whatever its length; games LONGER than 2h can still slip past, which
+                          a start-time window cannot help. Page 1 failing is the run; a LATER
+                          page failing ends the walk with what earlier pages gathered. Two
+                          things keep this inside the ROW BUDGET: the page cap bounds the fetch,
+                          and gamesUnknown — now handed a whole window of ids at once — CHUNKS
+                          its IN(...) (past SQLite's bind-param cap otherwise) into PK-index-
+                          backed seeks, so its cost is the id count, not the mirror's size
+                          (rowcost.test.ts bounds it). The LISTING
                           carries no modoptions, so each genuinely NEW id costs one
                           /replays/<id> detail fetch — 4 at a time, once per game, never again —
                           which is where settings and the roster come from, through the same
@@ -1116,6 +1132,54 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the handler logs rather than rethrows, since a minute-by-minute stream
                           of failed crons is worse signal than one self-healing blip. Nothing is
                           logged on a tick that changed nothing.
+                          BACKFILL (guarded POST /api/games/backfill + tools/backfill-games.ts):
+                          the cron only ever reaches back GAMES_COVERAGE_SEC (2h) from the
+                          newest game, so games an older build missed (the pre-2h-window one
+                          silently dropped ~12% of a 48h span, almost all >30min) or any gap
+                          wider than the window are beyond it. The route is the manual recovery
+                          door: its body is verbatim /replays/<id> details (a bare array or
+                          {games:[...]}), which it maps through the SAME gameFromApi the sync
+                          uses, dedups with gamesUnknown and inserts — making NO outbound call
+                          itself, so the free plan's 50-subrequest-per-invocation cap is a
+                          non-issue and the batching lives in the caller. tools/backfill-games.ts
+                          is that caller: from a trusted host it pages the BAR listing back
+                          --hours, subtracts what the mirror already has, fetches the detail for
+                          only the missing games, and POSTs them in batches with $REPLAY_PUT_TOKEN
+                          (--dry just reports the count). Re-running is a no-op (gamesUnknown).
+                          LAVA SYNC (src/worker/lavasync.ts + the LAVABALANCE service binding
+                          in wrangler.jsonc): freshly-finished candidate games are handed to
+                          the sibling lavabalance worker (claudebar/lavabalance, same account
+                          — the LOS OpenSkill ratings for the lava game mode), which ingests a
+                          game as the VERBATIM /replays/<id> detail POSTed to its open
+                          /api/games. STATELESS: each run reads lavabalance's own most recent
+                          stored game (GET /api/games?limit=1 over the binding), takes its END
+                          (start+duration) as the watermark, and submits every candidate the
+                          mirror holds that ended at/after it (the watermark game excluded by
+                          id; re-offers come back "duplicate", harmlessly) — so a run after
+                          lavabalance downtime just finds a lower watermark and catches up,
+                          and barreplay keeps no sync state to lose. CANDIDATES are the
+                          mirror's MODS-flagged games (every lava game runs tweakdefs; the
+                          mirror's `lava` flag is map_waterislava, a different thing) —
+                          lavabalance's classifier stays the authority and simply rejects
+                          non-lava mods; rejected/skipped games are NOT stored there, so they
+                          re-offer until a rated game moves the watermark past them, bounded
+                          by the sync's cadence. CADENCE: a tick that just mirrored a modded
+                          game (GameSyncResult.modded > 0 — known for free from the details
+                          the sync already fetched) runs it at once, plus one hourly sweep
+                          (LAVA_SYNC_MINUTE), which is the retry after a failed trigger —
+                          never every tick, because the candidate query
+                          (ReplayIndex.gamesModdedEndedAfter: the (flag, replay_id) index
+                          seek for 'mods' + a games PK seek each, rowcost-bounded) costs the
+                          count of modded games ever mirrored, and 1440 of those a day is the
+                          ROW BUDGET pattern to avoid. MAX_LAVA_BATCH=20 caps one run's
+                          detail fetches (subrequests); a failed BAR detail is skipped and
+                          re-offered next run. lavasync.ts is pure like games.ts (both
+                          fetches injected — the cron passes the service binding's), tested
+                          in tests/lavasync.test.ts; the vitest pool STUBS the LAVABALANCE
+                          binding (vitest.config.ts), since without one workerd refuses to
+                          boot over a service binding to a worker the test runtime lacks.
+                          The lavabalance worker needs NO change and no redeploy ordering: a
+                          service binding invokes its ordinary fetch handler.
                           Mirrored games index their SETTINGS into the SAME replay_settings
                           table as the catalog — ROSTERS are indexed NOWHERE: replay_players
                           is gone (the migration drops it), because keeping the mirror's
@@ -1224,6 +1288,23 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the DO tests. Note the workerd trap it dodges in webFetch: calling
                           an injected global fetch as `this.fetchImpl(...)` binds `this` to
                           the session and workerd throws "Illegal invocation" — detach first.
+                          LAVABALANCE PREVIEW (app.js previewLavabalance, index.html
+                          #lbdialog): each Games row carries an admin-only (?admin=true)
+                          LOS button — lavabalance, the sibling worker keeping the LOS
+                          (OpenSkill) ratings, ingests a game through its open POST
+                          /api/games, whose body is the VERBATIM api.bar-rts.com/replays/
+                          <id> detail in a one-element array. The button opens a native
+                          <dialog> showing exactly that body — fetched by the BROWSER, the
+                          way the map loader talks to the same API (it allows any
+                          origin), so no worker route exists and the Go viz server serves
+                          it unchanged — plus a paste-ready curl (lavabalanceCurl) that
+                          pipes the detail from the BAR API into the POST, with nothing
+                          inlined that shell quoting could mangle. The page POSTS NOTHING:
+                          the upload is the operator's shell command, so a wrong click
+                          costs a look, not a row in the rating fold. The AUTOMATIC push
+                          is the LAVA SYNC (see the games-mirror entry): the cron submits
+                          candidates over the LAVABALANCE service binding; the button stays
+                          as the manual door and the way to see exactly what is sent.
                           WIDGET-INSTALL GUIDE: the dropzone banner links (relatively, so it
                           resolves on both backends) to /setup — public/setup.html, four numbered
                           steps ending in a drag&drop upload. The page is deliberately

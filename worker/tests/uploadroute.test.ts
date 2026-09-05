@@ -128,6 +128,16 @@ class FakeIndex {
    * rows are handed back as stored, resumed after the cursor's id, which is
    * enough to prove the route pages, caps and refuses a junk cursor. */
   games: GameListRow[] = [];
+  // The two mirror-write methods the backfill route drives (real SQL tested in
+  // tests/do); here an in-memory stand-in: unknown = not already stored.
+  mirror = new Map<string, unknown>();
+  gamesUnknown(ids: string[]): string[] {
+    return ids.filter((id) => !this.mirror.has(id));
+  }
+  gamesInsert(rows: { id: string }[]): number {
+    for (const r of rows) this.mirror.set(r.id, r);
+    return rows.length;
+  }
   lastGamesQuery: { limit: number; after: GamesCursor | null } | null = null;
   gamesPage(limit: number, after: GamesCursor | null): { games: GameListRow[]; next: GamesCursor | null } {
     this.lastGamesQuery = { limit, after };
@@ -1253,4 +1263,67 @@ test("the sqlstats route serves the DO's tally as-is", async () => {
   const res = await app.request("/api/sqlstats", {}, env);
   assert.equal(res.status, 200);
   assert.deepEqual(await asJson(res), report);
+});
+
+// The games-mirror backfill route: a guarded write door for games the cron's
+// 2h window can't reach. It maps verbatim BAR replay details, dedups against
+// what the mirror has, and inserts the rest — making no outbound call itself.
+const detailBody = (id: string) => ({
+  id,
+  startTime: "2026-09-04T10:00:00.000Z",
+  durationMs: 3000000,
+  Map: { scriptName: "Supreme Isthmus", fileName: "supreme_isthmus" },
+  gameSettings: { ranked_game: "1" },
+  AllyTeams: [
+    { allyTeamId: 0, Players: [{ name: "a", skill: "[20]" }], AIs: [] },
+    { allyTeamId: 1, Players: [{ name: "b", skill: "[21]" }], AIs: [] },
+  ],
+});
+
+test("backfill inserts new mirror rows and dedups the rest", async () => {
+  const { env, index } = makeEnv("tok");
+  index.mirror.set("known1", {}); // already mirrored
+
+  const res = await app.request(
+    "/api/games/backfill",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer tok" },
+      body: JSON.stringify([detailBody("new1"), detailBody("new2"), detailBody("known1"), { id: 42 }, {}]),
+    },
+    env,
+  );
+  assert.equal(res.status, 200);
+  // received counts the whole batch; fresh/inserted only the two new valid ids.
+  assert.deepEqual(await asJson(res), { received: 5, fresh: 2, inserted: 2 });
+  assert.ok(index.mirror.has("new1") && index.mirror.has("new2"));
+  // The row went through gameFromApi: its fields are populated, not the raw detail.
+  assert.equal((index.mirror.get("new1") as { map?: string }).map, "Supreme Isthmus");
+});
+
+test("backfill needs the write token and rejects junk bodies", async () => {
+  const { env } = makeEnv("tok");
+  const noAuth = await app.request(
+    "/api/games/backfill",
+    { method: "POST", headers: { "content-type": "application/json" }, body: "[]" },
+    env,
+  );
+  assert.equal(noAuth.status, 401);
+
+  const notArray = await app.request(
+    "/api/games/backfill",
+    { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer tok" }, body: "{}" },
+    env,
+  );
+  assert.equal(notArray.status, 400);
+
+  // An open deployment (no token configured) accepts it, like the other writes.
+  const { env: openEnv } = makeEnv();
+  const open = await app.request(
+    "/api/games/backfill",
+    { method: "POST", headers: { "content-type": "application/json" }, body: "[]" },
+    openEnv,
+  );
+  assert.equal(open.status, 200);
+  assert.deepEqual(await asJson(open), { received: 0, fresh: 0, inserted: 0 });
 });
