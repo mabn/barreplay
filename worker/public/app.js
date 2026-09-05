@@ -3802,10 +3802,10 @@ function ensureHomeData() {
 // shareable, survives a refresh, and replayHref carries it into a replay so
 // the back button returns to the section it was opened from. Unlike a filter
 // change this IS navigation between screens, so it pushes a history entry.
-const HOME_TABS = ['replays', 'queue', 'sqlstats'];
+const HOME_TABS = ['replays', 'queue', 'games', 'sqlstats'];
 // Sections only an admin may see. The menu entry is hidden by CSS; this is
 // what keeps a shared ?tab=queue link from opening the section anyway.
-const ADMIN_TABS = new Set(['queue', 'sqlstats']);
+const ADMIN_TABS = new Set(['queue', 'games', 'sqlstats']);
 
 function homeTab() {
   const t = new URLSearchParams(location.search).get('tab');
@@ -3841,6 +3841,9 @@ function applyHomeTab() {
   // The SQL section has no badge on the menu, so nothing needs it before it
   // is on screen; it re-reads on every open, since opening it is asking.
   if (tab === 'sqlstats') refreshSqlStats();
+  // The Games section likewise reads when opened (the mirror gains a game a
+  // minute, so a page shown an hour ago is stale), staying on its page.
+  if (tab === 'games') refreshGames();
 }
 
 function initHomeNav() {
@@ -4510,6 +4513,266 @@ function initQueue() {
   document.getElementById('q_next').onclick = () => setQueueOffset(queueOffset + QUEUE_PAGE);
   document.getElementById('q_reload').onclick = () => refreshQueue();
   document.getElementById('sql_reload').onclick = () => refreshSqlStats();
+  document.getElementById('g_prev').onclick = () => setGamesOffset(gamesOffset - GAMES_PAGE);
+  document.getElementById('g_next').onclick = () => setGamesOffset(gamesOffset + GAMES_PAGE);
+  document.getElementById('g_reload').onclick = () => refreshGames();
+}
+
+// ---- games section (admin) --------------------------------------------------
+// The games MIRROR: every game BAR published that the worker's cron has
+// recorded, whether or not anybody captured it — the other half of the
+// catalog, and the list the re-sim backfill draws from. GET /api/games is the
+// Worker's alone (the Go viz server has no mirror and 404s it, which the
+// section says rather than showing an empty table that reads as "BAR played
+// nothing").
+//
+// Paged Prev/Next with NO total and NO page count, exactly like the replay
+// list: counting the mirror means reading a table that grows ~2000 rows a day,
+// and the range ("51–100") answers what the number was for. The listing asks
+// for one row MORE than it shows and reads "there is a next page" off that
+// row's existence. The page is plain component state, not in the URL, for the
+// queue's reason: "page 3" describes a moment in a list that gains a game a
+// minute, not a set of games.
+const GAMES_PAGE = 50; // rows per page (the worker caps a page at GAMES_LIMIT_MAX = 100)
+const GAMES_UNSUPPORTED =
+  'This server keeps no mirror of BAR\'s game history — that is the Cloudflare worker\'s cron, and its catalog is computed from local files.';
+let gamesRows = null;        // last fetched page's rows (GAMES_PAGE at most)
+let gamesHasNext = false;    // the extra row existed
+let gamesOffset = 0;         // first row of the page being shown
+let gamesSeq = 0;            // ignore a reply overtaken by a newer request
+let gamesSupported = true;   // cleared by a 404: a backend won't grow the route
+
+async function refreshGames() {
+  if (!adminMode()) return;
+  if (!gamesSupported) { renderGames(GAMES_UNSUPPORTED); return; }
+  const seq = ++gamesSeq;
+  let page;
+  try {
+    const r = await fetch(`/api/games?offset=${gamesOffset}&limit=${GAMES_PAGE + 1}`);
+    if (r.status === 404 || r.status === 405) {
+      gamesSupported = false;
+      renderGames(GAMES_UNSUPPORTED);
+      return;
+    }
+    if (!r.ok) { renderGames(`Could not read the games: HTTP ${r.status}`); return; }
+    page = await r.json();
+    if (!page || !Array.isArray(page.games)) throw new Error('unexpected reply');
+  } catch (err) {
+    renderGames('Could not read the games: ' + (err.message || err));
+    return;
+  }
+  if (seq !== gamesSeq) return; // a newer read already went out
+  // Stepped past the end (the mirror is shorter than the offset says): fall
+  // back one page rather than showing an empty screen with Prev still lit.
+  if (page.games.length === 0 && gamesOffset > 0) {
+    gamesOffset = Math.max(0, gamesOffset - GAMES_PAGE);
+    refreshGames();
+    return;
+  }
+  gamesHasNext = page.games.length > GAMES_PAGE;
+  gamesRows = gamesHasNext ? page.games.slice(0, GAMES_PAGE) : page.games;
+  renderGames();
+}
+
+// setGamesOffset pages the table. Bounded below at the first page; above by
+// gamesHasNext — the pager cannot offer a page that was never shown to exist.
+function setGamesOffset(offset) {
+  const next = Math.max(0, offset);
+  if (next === gamesOffset || (next > gamesOffset && !gamesHasNext)) return;
+  gamesOffset = next;
+  refreshGames();
+  window.scrollTo({ top: 0 });
+}
+
+// gameHaveLabel says what this deployment has of a mirrored game, for the
+// Here column: a replay to play, a job doing something about it, or nothing.
+// [text, class-suffix]; the ordering matters — a published game that is also
+// being re-simulated again is still, first of all, published.
+function gameHaveLabel(g) {
+  if (g.published) return ['published', 'published'];
+  if (g.jobState === 'processing') return ['processing', 'processing'];
+  if (g.jobState === 'pending') return ['queued', 'pending'];
+  if (g.jobState === 'error') return ['failed', 'error'];
+  if (g.jobState === 'done') return ['done, unpublished', 'error'];
+  return ['—', 'none'];
+}
+
+function renderGames(errMsg) {
+  const rows = gamesRows || [];
+  const tbody = document.querySelector('#gamestable tbody');
+  const msg = document.getElementById('gamesmsg');
+  const pager = document.getElementById('gamespager');
+  tbody.textContent = '';
+  if (errMsg) {
+    pager.style.display = 'none';
+    msg.textContent = errMsg;
+    msg.style.display = '';
+    return;
+  }
+  for (const g of rows) {
+    const tr = document.createElement('tr');
+    const cell = (text, cls) => {
+      const td = document.createElement('td');
+      if (cls) td.className = cls;
+      if (text == null) td.classList.add('dim');
+      td.textContent = text ?? '—';
+      tr.appendChild(td);
+      return td;
+    };
+    // Ended, not started: the list is in end order (the order the mirror
+    // learns games in), and a column that reads in the order it is sorted
+    // by is the one that needs no explaining.
+    {
+      const end = g.startUnix != null ? g.startUnix + (g.durationSec || 0) : null;
+      const td = cell(end != null ? fmtDateShort(end) : null);
+      if (g.startUnix != null) td.title = 'started ' + fmtDate(g.startUnix);
+    }
+    {
+      const td = cell(g.durationSec != null ? fmtGameDuration(g.durationSec) : null);
+      if (g.durationSec != null) td.title = fmtDur(g.durationSec) + ' of game time';
+    }
+    // Map, with the same lazy terrain thumbnail the replay list draws; the
+    // mirror always knows the archive file name, so no guess is needed.
+    {
+      const td = document.createElement('td');
+      td.className = 'map';
+      if (g.map == null) td.classList.add('dim');
+      const file = g.mapFile ?? (g.map ? mapFileGuess(g.map) : null);
+      if (file) {
+        const img = document.createElement('img');
+        img.className = 'mapthumb';
+        img.loading = 'lazy';
+        img.alt = '';
+        img.onerror = () => { img.style.display = 'none'; };
+        img.src = `https://api.bar-rts.com/maps/${encodeURIComponent(file)}/texture-thumb.jpg`;
+        td.appendChild(img);
+      }
+      const s = document.createElement('span');
+      s.textContent = g.map ?? '—';
+      td.appendChild(s);
+      tr.appendChild(td);
+    }
+    cell(g.gameSize);
+    cell(g.preset);
+    // Players: each side's top names by OS, three per side for a two-team
+    // game and one when there are more sides, in the viewer's per-ally
+    // colours; the full known roster with OS rides each side's tooltip.
+    {
+      const td = document.createElement('td');
+      td.className = 'players';
+      const groups = Array.isArray(g.players) ? g.players : [];
+      if (!groups.length) {
+        td.classList.add('dim');
+        td.textContent = '—';
+      } else {
+        const per = groups.length === 2 ? 3 : 1;
+        groups.forEach((grp, i) => {
+          if (i) {
+            const sep = document.createElement('span');
+            sep.className = 'vs';
+            sep.textContent = 'v';
+            td.appendChild(sep);
+          }
+          const s = document.createElement('span');
+          s.style.color = `hsl(${ALLY_HUES[i % ALLY_HUES.length]} 62% 62%)`;
+          const shown = (grp.players || []).slice(0, per);
+          let text = shown.map(p => p.name).join(', ');
+          if (grp.count > shown.length) text += ` +${grp.count - shown.length}`;
+          s.textContent = text;
+          let tip = (grp.players || [])
+            .map(p => (p.os != null ? `${p.name} (${p.os.toFixed(1)})` : p.name))
+            .join('\n');
+          if (grp.count > (grp.players || []).length) tip += `\n+${grp.count - grp.players.length} more`;
+          s.title = tip;
+          td.appendChild(s);
+        });
+      }
+      tr.appendChild(td);
+    }
+    {
+      const td = cell(g.lobbyName, 'lobby');
+      if (g.lobbyName) td.title = g.lobbyName;
+    }
+    // Settings badges (empty cell — not a dash — when the game has none).
+    {
+      const td = document.createElement('td');
+      td.className = 'settings';
+      for (const b of settingsBadges(g.settings)) {
+        const s = document.createElement('span');
+        s.className = 'badge badge-' + b.key.replace(/[^\w-]/g, '');
+        s.textContent = b.label;
+        td.appendChild(s);
+      }
+      tr.appendChild(td);
+    }
+    // The engine build a re-sim of it must run; the game build in the tooltip.
+    {
+      const td = cell(g.engineVersion, 'engine');
+      if (g.gameVersion) td.title = g.gameVersion;
+    }
+    // Out to gex and BAR's own page, always; and into the replay here once
+    // there is one to play (an internal link, routed through the SPA).
+    {
+      const td = document.createElement('td');
+      td.className = 'links';
+      const ext = [
+        ['gex', 'https://gex.honu.pw/match/' + encodeURIComponent(g.id)],
+        ['BAR', 'https://bar-rts.com/replays/' + encodeURIComponent(g.id)],
+      ];
+      for (const [label, url] of ext) {
+        const a = document.createElement('a');
+        a.className = 'ext';
+        a.href = url;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.textContent = label;
+        td.appendChild(a);
+      }
+      if (g.published) {
+        const a = document.createElement('a');
+        a.className = 'here';
+        a.href = replayHref(g.id);
+        a.textContent = 'replay';
+        a.title = 'Play the replay published here';
+        a.addEventListener('click', (ev) => {
+          if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+          ev.preventDefault();
+          openReplay(g.id);
+        });
+        td.appendChild(a);
+      }
+      tr.appendChild(td);
+    }
+    // What this site has of the game: the question the section exists for.
+    {
+      const td = document.createElement('td');
+      const [text, kind] = gameHaveLabel(g);
+      if (kind === 'none') {
+        td.classList.add('dim');
+        td.textContent = text;
+      } else {
+        const s = document.createElement('span');
+        s.className = 'have have-' + kind;
+        s.textContent = text;
+        if (g.jobState) s.title = 'last ingest job: ' + g.jobState;
+        td.appendChild(s);
+      }
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  // The pager states the RANGE, never a count (see the section comment). It
+  // stays up on a one-page mirror too: Reload lives there.
+  pager.style.display = gamesRows !== null ? 'flex' : 'none';
+  if (gamesRows !== null) {
+    document.getElementById('g_range').textContent =
+      rows.length ? `${gamesOffset + 1}–${gamesOffset + rows.length}` : '—';
+    document.getElementById('g_prev').disabled = gamesOffset <= 0;
+    document.getElementById('g_next').disabled = !gamesHasNext;
+  }
+  msg.style.display = rows.length ? 'none' : '';
+  if (!rows.length) msg.textContent = gamesRows === null ? 'Reading the mirror…'
+    : 'The mirror is empty — the worker\'s cron has not recorded a game yet.';
 }
 
 // fillProgressCell renders a running job's live self-report into the Detail

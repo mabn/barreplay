@@ -370,6 +370,37 @@ app.get("/api/queue", async (c) => {
   );
 });
 
+// The games MIRROR as the landing page's "Games" section (admin-only in the
+// UI) shows it: what BAR published, latest-ended first, each row saying
+// whether this site has a replay of it and what its last ingest job did.
+// Open like /api/queue and for the same reason — it reports on public games
+// and can change nothing; the section is only reachable with ?admin=true and
+// the browser holds no bearer token.
+//
+// Paged by ?offset= and ?limit= (capped) and NOTHING ELSE: no total, no page
+// count. Counting the mirror means reading the mirror, which grows by ~2000
+// rows a day forever, and the view answers "is there a next page" by asking
+// for one row more than it shows (see the front-end's GAMES_PAGE).
+const GAMES_LIMIT_MAX = 100;
+const GAMES_LIMIT_DEFAULT = 50;
+
+app.get("/api/games", async (c) => {
+  const params = new URL(c.req.url).searchParams;
+  const num = (name: string, fallback: number): number | string => {
+    const raw = params.get(name);
+    if (raw === null || raw === "") return fallback;
+    if (!/^\d+$/.test(raw)) return `${name} must be a non-negative integer`;
+    return parseInt(raw, 10);
+  };
+  const limit = num("limit", GAMES_LIMIT_DEFAULT);
+  if (typeof limit === "string") return c.json({ error: limit }, 400);
+  const offset = num("offset", 0);
+  if (typeof offset === "string") return c.json({ error: offset }, 400);
+
+  const games = await indexStub(c.env).gamesPage(Math.min(Math.max(limit, 1), GAMES_LIMIT_MAX), offset);
+  return c.json({ games, offset }, 200, { "cache-control": "no-cache" });
+});
+
 // Queue a re-sim for a game the OPEN door refuses: one that is already in the
 // catalog.
 //

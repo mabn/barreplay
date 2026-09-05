@@ -19,6 +19,7 @@ import type {
   QueueJob,
 } from "../src/worker/jobs";
 import type { ReplayEntry } from "../src/worker/replayentry";
+import type { GameListRow } from "../src/worker/games";
 
 const FIXTURE = new URL("../../internal/capture/testdata/harness.brepstream", import.meta.url);
 const GAME_ID = "feed5eed00000000000000000000beef";
@@ -121,6 +122,15 @@ class FakeIndex {
     j.error = null;
     j.progress = null; // a claim starts fresh; the previous holder's reading is not ours
     return true;
+  }
+  /** The games mirror. The real DO joins the catalog and the jobs table per
+   * row (tested against real SQL in tests/do); here the rows are handed back
+   * as stored, which is enough to prove the route pages and caps. */
+  games: GameListRow[] = [];
+  lastGamesQuery: { limit: number; offset: number } | null = null;
+  gamesPage(limit: number, offset: number): GameListRow[] {
+    this.lastGamesQuery = { limit, offset };
+    return this.games.slice(offset, offset + limit);
   }
   lastQueueQuery: { limit: number; offset: number } | null = null;
   queuePage(limit: number, offset: number): { jobs: QueueJob[]; total: number; active: number } {
@@ -388,6 +398,43 @@ test("GET /api/queue lists jobs for the viewer without the archive key", async (
 
 // Paging: the page is a window, but total/active describe the WHOLE table —
 // that is what lets a 5-row page state how much it is paging through.
+test("GET /api/games pages the mirror with ?offset= and ?limit=, and counts nothing", async () => {
+  const { env, index } = makeEnv();
+  for (let i = 0; i < 7; i++) {
+    index.games.push({
+      id: `game-${i}`, startUnix: 1000 * (7 - i), durationSec: 600, map: "Map", mapFile: "map",
+      gameSize: "1v1", preset: "duel", playerCount: 2, players: null, settings: null,
+      engineVersion: "e", gameVersion: "v", syncedUnix: 1, lobbyName: null,
+      published: i === 0, jobState: i === 1 ? "pending" : null,
+    });
+  }
+
+  const first = await asJson(await app.request("/api/games?limit=5&offset=0", {}, env));
+  assert.equal(first.games.length, 5);
+  assert.equal(first.offset, 0);
+  assert.deepEqual(Object.keys(first).sort(), ["games", "offset"], "no total, no page count — the view reads 'next' off an extra row");
+  assert.equal(first.games[0].published, true);
+  assert.equal(first.games[1].jobState, "pending");
+
+  const second = await asJson(await app.request("/api/games?limit=5&offset=5", {}, env));
+  assert.equal(second.games.length, 2, "the tail page holds what is left");
+  assert.equal(second.offset, 5);
+  const ids = new Set([...first.games, ...second.games].map((g: GameListRow) => g.id));
+  assert.equal(ids.size, 7, "the two pages together are the whole mirror, no repeats");
+
+  const past = await asJson(await app.request("/api/games?limit=5&offset=99", {}, env));
+  assert.deepEqual(past.games, [], "an offset past the end is empty, not an error");
+
+  // The cap keeps a hand-written limit from asking for the whole mirror, and
+  // an omitted limit still bounds the read.
+  assert.equal((await app.request("/api/games?limit=1000", {}, env)).status, 200);
+  assert.equal(index.lastGamesQuery?.limit, 100);
+  await app.request("/api/games", {}, env);
+  assert.deepEqual(index.lastGamesQuery, { limit: 50, offset: 0 });
+  assert.equal((await app.request("/api/games?offset=-1", {}, env)).status, 400);
+  assert.equal((await app.request("/api/games?limit=abc", {}, env)).status, 400);
+});
+
 test("GET /api/queue pages with ?offset= and ?limit=", async () => {
   const { env, index } = makeEnv();
   for (let i = 0; i < 7; i++) {

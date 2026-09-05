@@ -712,12 +712,19 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           filters DO depend on is catalogPlayersPerAlly, because BuildCatalogEntry is
                           what builds the roster the worker stores). The front-end landing page
                           (no ?replay= in the URL) is a LEFT MENU (app.js homeTab/applyHomeTab,
-                          #homenav) over two sections: "Replays" (the catalog list, the default)
-                          and "Queue" (the ingest jobs, below), which is ADMIN-ONLY — the entry is
-                          hidden without ?admin=true (CSS, like the row refresh button) and
-                          homeTab() maps the tab back to "replays" for everyone else, so a shared
-                          ?tab=queue link cannot walk past the hidden entry and refreshQueue never
-                          fires. It is the pipeline's state — every uploader's jobs and their
+                          #homenav) over these sections: "Replays" (the catalog list, the
+                          default), "Queue" (the ingest jobs, below), "Games" (the games
+                          MIRROR — see the GAMES MIRROR entry; app.js refreshGames/renderGames,
+                          GAMES_PAGE=50 rows per page with a Prev/Next pager that states the
+                          range and NO total or page count, reading "next" off an extra row
+                          like the replay list; the page is component state, not in the URL,
+                          and the Go viz server 404s the route, which the section says) and
+                          "SQL" (the DO's row accounting). All but Replays are ADMIN-ONLY — the
+                          entry is hidden without ?admin=true (CSS, like the row refresh
+                          button) and homeTab() maps the tab back to "replays" for everyone
+                          else (ADMIN_TABS), so a shared ?tab=queue link cannot walk past the
+                          hidden entry and refreshQueue never fires. The Queue is the
+                          pipeline's state — every uploader's jobs and their
                           failure messages — which is maintenance, not something a visitor came for.
                           Which section is shown lives in the
                           URL as ?tab=, like the filters, so a pick is shareable and survives a
@@ -1066,8 +1073,15 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           seen. It is the OTHER half of the picture: `replays` is what somebody
                           captured, `games` is what was PLAYED, keyed by the same gameId, so the
                           two are views of one game and a row in `games` with none in `replays`
-                          is a re-sim candidate nobody has to paste a link for. Nothing serves it
-                          yet — there is no route and no UI, by request.
+                          is a re-sim candidate nobody has to paste a link for. It is SERVED
+                          to the admin's "Games" section (see the landing-page entry above)
+                          by GET /api/games -> ReplayIndex.gamesPage: one page, latest-ENDED
+                          first (the ORDER BY repeats games_backfill_end's expression
+                          textually, so the walk stops at the page edge instead of sorting
+                          the mirror — rowcost.test.ts bounds it), each row joined with
+                          whether a playable catalog row exists and the state of the game's
+                          last job, both seeks. No total and no count anywhere: the section
+                          asks for one row more than it shows.
                           The columns deliberately echo the catalog's vocabulary (start_unix,
                           duration_sec, map, game_size, player_count, players, settings) plus
                           what only the API knows: map_file (what BAR's maps API keys on),

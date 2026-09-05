@@ -78,6 +78,25 @@ export interface GameEntry {
   gameVersion: string | null;
 }
 
+/** One row of the Games section's listing (GET /api/games): a mirrored game
+ * plus what this deployment has done about it. The mirror itself never
+ * says whether a game was captured — that is the catalog's business, and the
+ * whole point of putting the two side by side is to see which of the games
+ * BAR published this site has a replay of, and which the pipeline is working
+ * on. Joined per read (a primary-key seek and one index seek per row), never
+ * stored: a stored flag would have to be cleared by whoever finishes the job. */
+export interface GameListRow extends GameEntry {
+  /** The lobby name the teiserver poll matched to the game, when it did. */
+  lobbyName: string | null;
+  /** When the mirror recorded the game. */
+  syncedUnix: number;
+  /** A playable catalog row exists for the game (placeholders — a re-sim in
+   * flight with nothing published yet — do not count). */
+  published: boolean;
+  /** The state of the game's most recent ingest job, if it ever had one. */
+  jobState: string | null;
+}
+
 /** What syncGames needs of the ReplayIndex Durable Object. Narrowed to the two
  * methods so the tests can stand in for it without modelling the catalog. */
 export interface GamesIndex {

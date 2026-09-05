@@ -715,6 +715,89 @@ function walk(n: any, out: any[] = []): any[] {
   return out;
 }
 
+// The Games section: a page of the mirror, each row saying what this site has
+// of the game, with a pager that states a RANGE and never a count.
+test('the games section lists the mirror with what this site has of each game', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+
+  const dom = fakeDom();
+  const base = {
+    startUnix: 1787349000, durationSec: 1500, map: 'Supreme Isthmus v2', mapFile: 'supreme_isthmus_v2',
+    gameSize: '8v8', preset: 'team', playerCount: 16, engineVersion: '2026.07.04', gameVersion: 'BAR test-1',
+    players: [
+      { ally: 0, count: 8, players: [{ name: 'a', os: 30 }, { name: 'b', os: 20 }, { name: 'c', os: 10 }, { name: 'd', os: 5 }] },
+      { ally: 1, count: 8, players: [{ name: 'e', os: 30 }] },
+    ],
+    settings: { ranked: true, lava: true }, syncedUnix: 1787349900, lobbyName: null,
+  };
+  const games = [
+    { ...base, id: 'pub', published: true, jobState: 'done', lobbyName: 'Isthmus 8v8 noobs' },
+    { ...base, id: 'run', published: false, jobState: 'processing' },
+    { ...base, id: 'bad', published: false, jobState: 'error' },
+    { ...base, id: 'new', published: false, jobState: null, players: null, settings: null },
+  ];
+
+  const render = eval(`(function(){
+    const document = dom.document;
+    const window = { scrollTo() {} };
+    const gamesRows = games, gamesHasNext = true, gamesOffset = 50;
+    const fmtDate = () => 'date', fmtDateShort = () => 'short';
+    const replayHref = (id) => '/?replay=' + id, openReplay = () => {};
+    const mapFileGuess = (m) => m;
+    const ALLY_HUES = [210, 5];
+    ${extract('fmtDur')} ${extract('fmtDuration')} ${extract('fmtGameDuration')}
+    ${APP.slice(APP.indexOf('const HIDDEN_SETTINGS'), APP.indexOf('// ---- drag&drop publishing'))}
+    ${APP.slice(APP.indexOf('const SETTINGS_BADGES'), APP.indexOf(';', APP.indexOf('const SETTINGS_BADGES')) + 1)}
+    ${extract('gameHaveLabel')}
+    ${extract('renderGames')}
+    return renderGames;
+  })()`);
+
+  render();
+
+  const trs = dom.tbody.children;
+  assert.equal(trs.length, 4);
+  const haveOf = (tr: any) => walk(tr).find((n) => String(n.className).startsWith('have'));
+  assert.equal(haveOf(trs[0]).className, 'have have-published');
+  assert.equal(haveOf(trs[1]).className, 'have have-processing');
+  assert.equal(haveOf(trs[1]).textContent, 'processing');
+  assert.equal(haveOf(trs[2]).className, 'have have-error');
+  assert.equal(haveOf(trs[2]).textContent, 'failed');
+  assert.equal(haveOf(trs[3]), undefined, 'a game nothing touched gets a dash, not a pill');
+
+  // Only the published game links into the viewer; every row links out.
+  const linksOf = (tr: any) => walk(tr).filter((n) => n.tag === 'a').map((n: any) => n.textContent);
+  assert.deepEqual(linksOf(trs[0]).filter((t) => ['gex', 'BAR', 'replay'].includes(t)), ['gex', 'BAR', 'replay']);
+  assert.deepEqual(linksOf(trs[1]).filter((t) => ['gex', 'BAR', 'replay'].includes(t)), ['gex', 'BAR']);
+  assert.equal(walk(trs[0]).find((n) => n.className === 'here').href, '/?replay=pub');
+
+  // Players: top three a side by OS for a two-sided game, the rest counted.
+  const sides = walk(trs[0]).filter((n) => n.tag === 'span' && /hsl/.test(n.style.color));
+  assert.deepEqual(sides.map((n) => n.textContent), ['a, b, c +5', 'e +7']);
+  // The lobby name lands in its column; a game without one gets the dash.
+  assert.ok(trs[0].children.some((td: any) => td.className === 'lobby' && td.textContent === 'Isthmus 8v8 noobs'));
+  assert.ok(trs[1].children.some((td: any) => td.className === 'lobby dim' && td.textContent === '—'));
+  // Settings badges, through the same rules as the replay list (mods hidden
+  // beside lava, hidden flags dropped).
+  const badges = walk(trs[0]).filter((n) => String(n.className).startsWith('badge')).map((n) => n.textContent);
+  assert.ok(badges.includes('lava') && badges.includes('ranked'), JSON.stringify(badges));
+
+  // The pager: a range, never a total or a page count.
+  assert.equal(dom.document.getElementById('g_range').textContent, '51–54');
+  assert.equal(dom.document.getElementById('g_prev').disabled, false);
+  assert.equal(dom.document.getElementById('g_next').disabled, false);
+  assert.equal(dom.document.getElementById('gamespager').style.display, 'flex');
+});
+
 test('a game being processed is listed, badged first, and cannot be opened', () => {
   const extract = (n: string) => {
     const start = APP.indexOf(`function ${n}(`);

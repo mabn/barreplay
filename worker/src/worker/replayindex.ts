@@ -19,7 +19,7 @@
 // re-sim side will pick from.
 import { DurableObject } from "cloudflare:workers";
 
-import type { GameEntry } from "./games";
+import type { GameEntry, GameListRow } from "./games";
 import { parseJobErrorKind, parseJobProgress, parseJobStats } from "./jobs";
 import type {
   IngestJob,
@@ -1229,6 +1229,63 @@ export class ReplayIndex extends DurableObject<Env> {
       if (!owned) this.indexSettings(g.id, g.settings);
     }
     return games.length;
+  }
+
+  /** gamesPage lists the mirror for the admin's Games section: one page of
+   * mirrored games, latest-ENDED first, each with whether this site has a
+   * replay of it and what its last ingest job did.
+   *
+   * The order is end time, not start time, for the same reason jobsOffer
+   * walks that way: end order is ARRIVAL order (the mirror learns a game
+   * once it is over), and it is the one order the mirror has an index for.
+   * The ORDER BY repeats games_backfill_end's expression TEXTUALLY, which is
+   * what lets the planner walk the index and stop at the page edge instead
+   * of sorting the whole mirror into a temp b-tree — a mirror that grows by
+   * ~2000 rows a day, so a sort per page would be a scan on a click (see ROW
+   * BUDGET). An OFFSET still steps over the rows before the page, one index
+   * entry each, which is fine for a person paging and is why the route caps
+   * the page size rather than offering a page count.
+   *
+   * Nothing here counts the table: the caller asks for one row more than it
+   * shows and reads "there is a next page" off that row's existence. */
+  gamesPage(limit: number, offset: number): GameListRow[] {
+    return this.ctx.storage.sql
+      .exec(
+        `SELECT g.id, g.start_unix, g.duration_sec, g.map, g.map_file, g.game_size, g.preset,
+                g.player_count, g.players, g.settings, g.engine_version, g.game_version,
+                g.synced_unix, g.lobby_name,
+                -- A primary-key seek per row. placeholder = 0 because a
+                -- placeholder is a re-sim in flight, not a replay to play.
+                EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id AND r.placeholder = 0) AS published,
+                -- Pinned to jobs_game like list()'s subqueries: seeked by
+                -- game, it costs the game's own jobs, almost always 0-1.
+                (SELECT j.state FROM jobs j INDEXED BY jobs_game
+                 WHERE j.game_id = g.id ORDER BY j.created_unix DESC LIMIT 1) AS job_state
+         FROM games g
+         ORDER BY (start_unix + COALESCE(duration_sec, 0)) DESC, id
+         LIMIT ? OFFSET ?`,
+        limit,
+        offset,
+      )
+      .toArray()
+      .map((r) => ({
+        id: r.id as string,
+        startUnix: (r.start_unix as number | null) ?? null,
+        durationSec: (r.duration_sec as number | null) ?? null,
+        map: (r.map as string | null) ?? null,
+        mapFile: (r.map_file as string | null) ?? null,
+        gameSize: (r.game_size as string | null) ?? null,
+        preset: (r.preset as string | null) ?? null,
+        playerCount: (r.player_count as number | null) ?? null,
+        players: r.players == null ? null : JSON.parse(r.players as string),
+        settings: r.settings == null ? null : JSON.parse(r.settings as string),
+        engineVersion: (r.engine_version as string | null) ?? null,
+        gameVersion: (r.game_version as string | null) ?? null,
+        syncedUnix: r.synced_unix as number,
+        lobbyName: (r.lobby_name as string | null) ?? null,
+        published: r.published === 1,
+        jobState: (r.job_state as string | null) ?? null,
+      }));
   }
 
   /** teiserverCookies reads the persisted teiserver web-session jar, or null
