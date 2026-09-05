@@ -632,6 +632,7 @@ test('the catalog is fetched for the list view, not for a direct replay link', a
     // section to show. None of it touches the catalog, which is what this
     // test counts.
     const initHomeNav = () => {}, initQueue = () => {}, initResim = () => {}, applyHomeTab = () => {};
+    const initLavabalanceDialog = () => {};
     const hideHome = () => {};
     const knownReplayURL = () => true;
     const initFilters = async () => { filters++; };
@@ -754,11 +755,15 @@ test('the games section lists the mirror with what this site has of each game', 
     const replayHref = (id) => '/?replay=' + id, openReplay = () => {};
     const mapFileGuess = (m) => m;
     const ALLY_HUES = [210, 5];
+    // ?admin=true is what reveals the LOS (lavabalance preview) button.
+    let admin = false;
+    const adminMode = () => admin, previewLavabalance = async () => {};
     ${extract('fmtDur')} ${extract('fmtDuration')} ${extract('fmtGameDuration')}
     ${APP.slice(APP.indexOf('const HIDDEN_SETTINGS'), APP.indexOf('// ---- drag&drop publishing'))}
     ${APP.slice(APP.indexOf('const SETTINGS_BADGES'), APP.indexOf(';', APP.indexOf('const SETTINGS_BADGES')) + 1)}
     ${extract('gameHaveLabel')}
     ${extract('renderGames')}
+    renderGames.setAdmin = (on) => { admin = on; };
     return renderGames;
   })()`);
 
@@ -796,6 +801,42 @@ test('the games section lists the mirror with what this site has of each game', 
   assert.equal(dom.document.getElementById('g_prev').disabled, false);
   assert.equal(dom.document.getElementById('g_next').disabled, false);
   assert.equal(dom.document.getElementById('gamespager').style.display, 'flex');
+
+  // The lavabalance preview button lives in the admin column and exists only
+  // under ?admin=true: the column itself is CSS-hidden otherwise, but the
+  // button must not even be built — it is one per row, and it is nobody's
+  // business but the operator's.
+  const losButtons = () => walk(dom.tbody).filter((n) => n.tag === 'button' && n.className === 'lavabalance');
+  assert.equal(losButtons().length, 0, 'no LOS button outside admin mode');
+  render.setAdmin(true);
+  render();
+  assert.equal(losButtons().length, 4, 'one LOS button per row in admin mode');
+  assert.ok(dom.tbody.children[0].children.at(-1).className === 'admin', 'the admin cell is the last column');
+});
+
+// The paste-ready upload command shown by the preview: the BAR API detail
+// piped into lavabalance's POST as a one-element array, nothing inlined.
+test('the lavabalance curl pipes the BAR API detail into the upload endpoint', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+  const consts = APP.slice(APP.indexOf('const LAVABALANCE_UPLOAD_URL'), APP.indexOf('\n', APP.indexOf('const BAR_API_REPLAY_URL')));
+  const curl = eval(`(function(){ ${consts}\n${extract('lavabalanceCurl')}\nreturn lavabalanceCurl; })()`);
+  const cmd = curl('f8e5816a04505f9c2b5b69a6a458b696');
+  const lines = cmd.split('\n');
+  assert.equal(lines[0], "curl -sS 'https://api.bar-rts.com/replays/f8e5816a04505f9c2b5b69a6a458b696' \\");
+  assert.ok(/printf '\['; cat; printf '\]'/.test(lines[1]), 'wraps the detail in a one-element array');
+  assert.ok(lines[2].includes("-X POST 'https://lavabalance.fogofwar.dev/api/games'"), lines[2]);
+  assert.ok(lines[3].includes("content-type: application/json") && lines[3].includes('--data-binary @-'), lines[3]);
+  // The id is URL-encoded, never spliced raw into the quoted URL.
+  assert.ok(curl("a'b c").includes("/replays/a'\\''b%20c'"), curl("a'b c"));
 });
 
 test('a game being processed is listed, badged first, and cannot be opened', () => {

@@ -163,17 +163,21 @@ body.admin-mode #homenav .navitem.admin { display: flex; }
 #hometable td.links a.alt:hover { text-decoration: underline; color: #8fd3ff; }
 /* Admin-only columns (?admin=true): the refresh-button column and the Data
    (bundle size) column stay hidden unless the page is in admin mode. */
-#hometable th.admin, #hometable td.admin,
+#hometable th.admin, #hometable td.admin, #gamestable th.admin, #gamestable td.admin,
 #hometable th.data, #hometable td.data { display: none; }
 body.admin-mode #hometable th.admin, body.admin-mode #hometable td.admin,
+body.admin-mode #gamestable th.admin, body.admin-mode #gamestable td.admin,
 body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display: table-cell; }
-#hometable td.admin button.refresh {
+#hometable td.admin button.refresh, #gamestable td.admin button.lavabalance {
   font: inherit; font-size: 13px; line-height: 1; padding: 4px 7px; margin: 2px 4px;
   color: #9fb0bf; background: #232e39; border: 1px solid #33404d; border-radius: 6px;
   cursor: pointer;
 }
-#hometable td.admin button.refresh:hover:enabled { color: #cfe3f5; border-color: #4a5a6c; }
-#hometable td.admin button.refresh:disabled { opacity: .6; cursor: default; }
+#gamestable td.admin button.lavabalance { font-size: 11px; white-space: nowrap; }
+#hometable td.admin button.refresh:hover:enabled,
+#gamestable td.admin button.lavabalance:hover:enabled { color: #cfe3f5; border-color: #4a5a6c; }
+#hometable td.admin button.refresh:disabled,
+#gamestable td.admin button.lavabalance:disabled { opacity: .6; cursor: default; }
 /* External per-game links (gex, BAR): real links, visually distinct from the
    invisible row-link anchors filling the other cells. */
 #hometable td.links a.ext {
@@ -410,6 +414,48 @@ pre.sizereport {
 #resimstatus { margin-top: 8px; font-size: 12px; color: #c7d3de; }
 #resimstatus.error { color: #e2785b; }
 #resimstatus.ok { color: #6fd07f; }
+
+/* The lavabalance upload preview (index.html #lbdialog, app.js
+   previewLavabalance): a native <dialog>, so Escape and focus trapping come
+   free. Two <pre> blocks — the curl wraps (a paste target, not a table) and
+   the body scrolls, since a 16-player detail is a few hundred lines. */
+#lbdialog {
+  width: min(900px, calc(100vw - 40px)); max-height: calc(100vh - 40px); padding: 0;
+  background: #12181e; color: #c7d3de; border: 1px solid #33404d; border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.6); font-size: 12px;
+}
+#lbdialog::backdrop { background: rgba(0,0,0,0.55); }
+#lbdialog .lbhead {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 10px 14px; border-bottom: 1px solid #2a323c; font-size: 13px; color: #cfe3f5;
+}
+#lbdialog #lbtitle { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+#lbdialog #lbclose {
+  font: inherit; font-size: 16px; line-height: 1; padding: 2px 8px; cursor: pointer;
+  color: #9fb0bf; background: transparent; border: 1px solid transparent; border-radius: 6px;
+}
+#lbdialog #lbclose:hover { color: #cfe3f5; border-color: #4a5a6c; }
+#lbdialog #lbstatus { padding: 6px 14px 0; min-height: 1.4em; }
+#lbdialog #lbstatus.error { color: #e2785b; }
+#lbdialog #lbstatus.ok { color: #6fd07f; }
+#lbdialog .lbsection { padding: 8px 14px 12px; }
+#lbdialog .lblabel {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 5px;
+  font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #7f8f9e;
+}
+#lbdialog #lbcopy {
+  font: inherit; font-size: 11px; text-transform: none; letter-spacing: 0; line-height: 1;
+  padding: 3px 8px; cursor: pointer; color: #9fb0bf; background: #1b232c;
+  border: 1px solid #2f3947; border-radius: 4px;
+}
+#lbdialog #lbcopy:hover:enabled { color: #cfe3f5; border-color: #4a5a6c; }
+#lbdialog pre {
+  margin: 0; padding: 8px 10px; background: #0d1116; border: 1px solid #2a323c; border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px;
+  line-height: 1.45; color: #cfe3f5; overflow: auto;
+}
+#lbdialog #lbcurl { white-space: pre-wrap; word-break: break-all; }
+#lbdialog #lbjson { max-height: 45vh; }
 
 #wrap { display: flex; flex: 1; min-height: 0; }
 #left { flex: 1; position: relative; }

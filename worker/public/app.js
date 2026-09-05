@@ -4547,6 +4547,11 @@ let gamesBefore = 0;         // rows on the pages before this one, for the range
 let gamesTrail = [];         // [{after, before}] of the pages Prev returns to
 let gamesSeq = 0;            // ignore a reply overtaken by a newer request
 let gamesSupported = true;   // cleared by a 404: a backend won't grow the route
+// lavabalance (the sibling LOS-ratings worker) takes a game as the verbatim
+// BAR API replay detail, POSTed to this URL; the admin LOS button on each
+// row previews exactly that (previewLavabalance below).
+const LAVABALANCE_UPLOAD_URL = 'https://lavabalance.fogofwar.dev/api/games';
+const BAR_API_REPLAY_URL = 'https://api.bar-rts.com/replays/';
 
 async function refreshGames() {
   if (!gamesSupported) { renderGames(GAMES_UNSUPPORTED); return; }
@@ -4607,6 +4612,81 @@ function gameHaveLabel(g) {
   if (g.jobState === 'error') return ['failed', 'error'];
   if (g.jobState === 'done') return ['done, unpublished', 'error'];
   return ['—', 'none'];
+}
+
+// lavabalanceCurl is the upload as a shell command: fetch the BAR API's
+// replay detail and POST it, wrapped in the one-element array lavabalance's
+// endpoint takes, straight through — the body is never inlined, since a
+// 16-player detail is kilobytes of JSON that would have to survive shell
+// quoting, and piping needs nothing but curl.
+function lavabalanceCurl(id) {
+  const q = (u) => `'${u.replace(/'/g, "'\\''")}'`;
+  return [
+    `curl -sS ${q(BAR_API_REPLAY_URL + encodeURIComponent(id))} \\`,
+    `  | { printf '['; cat; printf ']'; } \\`,
+    `  | curl -sS -X POST ${q(LAVABALANCE_UPLOAD_URL)} \\`,
+    `      -H 'content-type: application/json' --data-binary @-`,
+  ].join('\n');
+}
+
+// lavabalanceStatus writes the dialog's one status line (empty = clear).
+function lavabalanceStatus(text, cls) {
+  const el = document.getElementById('lbstatus');
+  el.textContent = text || '';
+  el.className = 'hint' + (cls ? ' ' + cls : '');
+}
+
+// previewLavabalance opens the dialog for one game: the curl at once (it
+// needs only the id), then the body once the BAR API answers. The detail is
+// fetched by the BROWSER — the API allows any origin, as the map loader
+// relies on — so no route of ours is involved and the Go viz server serves
+// this unchanged. A game the API does not know, or a network failure, is
+// reported in the status line; the curl stays, since it may well work later.
+async function previewLavabalance(id) {
+  const dialog = document.getElementById('lbdialog');
+  document.getElementById('lbtitle').textContent = `lavabalance upload · ${id}`;
+  document.getElementById('lbcurl').textContent = lavabalanceCurl(id);
+  document.getElementById('lbjson').textContent = '';
+  lavabalanceStatus('Fetching the replay detail from the BAR API…');
+  if (!dialog.open) dialog.showModal();
+  try {
+    const r = await fetch(BAR_API_REPLAY_URL + encodeURIComponent(id));
+    if (r.status === 404) throw new Error('the BAR API does not know this game');
+    if (!r.ok) throw new Error(`BAR API: HTTP ${r.status}`);
+    const detail = await r.json();
+    const body = [detail];
+    document.getElementById('lbjson').textContent = JSON.stringify(body, null, 2);
+    const teams = Array.isArray(detail.AllyTeams) ? detail.AllyTeams.length : 0;
+    const players = Array.isArray(detail.AllyTeams)
+      ? detail.AllyTeams.reduce((n, t) => n + (Array.isArray(t.Players) ? t.Players.length : 0), 0) : 0;
+    lavabalanceStatus(`This is the body POST ${LAVABALANCE_UPLOAD_URL} would receive: `
+      + `${detail.Map?.scriptName || 'unknown map'}, ${teams} teams, ${players} players. Nothing has been sent.`, 'ok');
+  } catch (err) {
+    lavabalanceStatus(`Could not build the body: ${err.message || err}`, 'error');
+  }
+}
+
+// initLavabalanceDialog wires the dialog's own controls once: close (button,
+// backdrop click — a click whose target is the dialog element itself lands
+// on the backdrop, since the content fills it), and copy, which puts the curl
+// on the clipboard and says so on the button for a moment.
+function initLavabalanceDialog() {
+  const dialog = document.getElementById('lbdialog');
+  if (!dialog) return;
+  document.getElementById('lbclose').addEventListener('click', () => dialog.close());
+  dialog.addEventListener('click', (ev) => { if (ev.target === dialog) dialog.close(); });
+  const copy = document.getElementById('lbcopy');
+  copy.addEventListener('click', async () => {
+    const text = document.getElementById('lbcurl').textContent;
+    try {
+      await navigator.clipboard.writeText(text);
+      copy.textContent = 'copied';
+    } catch (err) {
+      copy.textContent = 'copy failed';
+      lavabalanceStatus(`Clipboard: ${err.message || err}`, 'error');
+    }
+    setTimeout(() => { copy.textContent = 'copy'; }, 1200);
+  });
 }
 
 function renderGames(errMsg) {
@@ -4776,8 +4856,34 @@ function renderGames(errMsg) {
       }
       tr.appendChild(td);
     }
+    // Admin column (?admin=true only): preview this game's upload to
+    // lavabalance — the body it would POST and a paste-ready curl. Nothing
+    // is sent from here; see previewLavabalance.
+    {
+      const td = document.createElement('td');
+      td.className = 'admin';
+      if (adminMode()) {
+        const btn = document.createElement('button');
+        btn.className = 'lavabalance';
+        btn.textContent = 'LOS';
+        btn.title = 'Preview the upload of this game to lavabalance (LOS ratings)';
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          btn.textContent = '…';
+          try {
+            await previewLavabalance(g.id);
+          } finally {
+            btn.disabled = false;
+            btn.textContent = 'LOS';
+          }
+        });
+        td.appendChild(btn);
+      }
+      tr.appendChild(td);
+    }
     tbody.appendChild(tr);
   }
+  document.body.classList.toggle('admin-mode', adminMode());
   // The pager states the RANGE, never a count (see the section comment). It
   // stays up on a one-page mirror too: Reload lives there.
   pager.style.display = gamesRows !== null ? 'flex' : 'none';
@@ -5738,6 +5844,7 @@ async function init() {
   initHomeNav(); // the left menu; the section itself is applied by showHome
   initQueue();   // the queue's pager buttons (it reads on demand only)
   initResim();   // the queue's "re-simulate this replay" box
+  initLavabalanceDialog();   // the Games rows' LOS upload preview
   initUpload(); // the dropzone works without the catalog being loaded
   const params = new URLSearchParams(location.search);
 
