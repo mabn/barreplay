@@ -24,7 +24,7 @@
 // fake Env.
 import { Hono } from "hono";
 
-import { encodeGamesCursor, gameFromApi, parseGamesCursor } from "./games";
+import { GAME_ID_RE, encodeGamesCursor, gameFromApi, parseGamesCursor } from "./games";
 import { parseGameId } from "./gameid";
 import { JOB_KINDS, parseJobErrorKind, parseJobProgress, parseJobStats } from "./jobs";
 import type { JobKind } from "./jobs";
@@ -383,9 +383,32 @@ app.get("/api/queue", async (c) => {
 // counting the mirror means reading a table that grows by ~2000 rows a day.
 const GAMES_LIMIT_MAX = 100;
 const GAMES_LIMIT_DEFAULT = 20;
+/** Cap on ?id= — a fetch-by-ids is a lookup, not a listing, and 100 ids is
+ * already every row a listing page can carry. The DO chunks the IN() under
+ * this, so raising it means checking gamesByIds' chunk size too. */
+const GAMES_IDS_MAX = 100;
 
 app.get("/api/games", async (c) => {
   const params = new URL(c.req.url).searchParams;
+
+  // Fetch-by-ids: ?id=<id>[,<id>...] answers exactly the named games (in the
+  // asked order, ids the mirror does not hold absent) instead of a listing
+  // page — so a client holding ids from elsewhere (the queue, a gex link, an
+  // earlier listing) resolves them in one request instead of one each.
+  // limit/after are ignored with it: a lookup has nothing to page. Malformed
+  // ids are REFUSED rather than answered with an empty list — an id the
+  // mirror could never store describes a broken request, not a missing game.
+  const rawIds = params.get("id");
+  if (rawIds !== null && rawIds !== "") {
+    const ids = [...new Set(rawIds.split(",").map((s) => s.trim()).filter((s) => s !== ""))];
+    if (ids.length === 0) return c.json({ error: "id lists no ids" }, 400);
+    if (ids.length > GAMES_IDS_MAX) return c.json({ error: `id lists more than ${GAMES_IDS_MAX} ids` }, 400);
+    const bad = ids.find((id) => !GAME_ID_RE.test(id));
+    if (bad !== undefined) return c.json({ error: "id is not a game id" }, 400);
+    const games = await indexStub(c.env).gamesByIds(ids);
+    return c.json({ games, next: null }, 200, { "cache-control": "no-cache" });
+  }
+
   const rawLimit = params.get("limit");
   let limit = GAMES_LIMIT_DEFAULT;
   if (rawLimit !== null && rawLimit !== "") {

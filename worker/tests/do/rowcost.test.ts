@@ -201,6 +201,15 @@ test("the polled and cron reads do not scan the tables they read from", async ()
     out.gamesPageDeep = tally();
     expect(gamesFirst.next, "a full page hands out a cursor").not.toBeNull();
 
+    // Fetch-by-ids at the route's cap (100 ids), on an OPEN route: a PK seek
+    // per id plus the same two join seeks a listing row pays — never a scan
+    // of the mirror, however many ids are asked for.
+    const byIds: string[] = [];
+    for (let n = 1; n <= 100; n++) byIds.push(`g${String(n).padStart(6, "0")}`);
+    const named = index.gamesByIds(byIds);
+    out.gamesByIds = tally();
+    expect(named.length, "the seeks must actually find the rows").toBe(100);
+
     // A running job's healthcheck, every 10s: the first beat learns how many
     // samples the job has, the rest must not ask again.
     index.jobUpdate("j000001", "processing", null, null, { state: "simulating", percent: 12 });
@@ -267,6 +276,8 @@ test("the polled and cron reads do not scan the tables they read from", async ()
   // whole mirror (5000 rows here) into a temp b-tree.
   expect(costs.gamesPage, report).toBeLessThan(400);
   expect(costs.gamesPageDeep, report).toBeLessThan(400);
+  // 100 ids: a seek and two join seeks each, not the 5000-row mirror.
+  expect(costs.gamesByIds, report).toBeLessThan(800);
   // gamesUnknown over a 200-id window: a seek per id (the 100 that exist), not
   // a scan of the 5000-row mirror — chunked so it also fits the bind cap.
   expect(costs.gamesUnknown, report).toBeLessThan(400);
