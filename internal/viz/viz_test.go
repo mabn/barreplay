@@ -761,6 +761,54 @@ func TestIndexHTMLDataOrigin(t *testing.T) {
 	}
 }
 
+// TestSPAPaths pins the client-side routes: the viewer's pages live at paths
+// now (/replays/<id>, /queue, /games, /sqlstats), so a direct load or refresh
+// of one must serve the SPA entry exactly like "/" — while the data pieces
+// under the same /replays/ prefix (an extension, or a /c<n> second segment)
+// keep answering as data, never as HTML.
+func TestSPAPaths(t *testing.T) {
+	srv := httptest.NewServer((&Server{Dir: t.TempDir()}).Handler())
+	defer srv.Close()
+
+	for _, path := range []string{
+		"/replays/f8e5816a04505f9c2b5b69a6a458b696",
+		"/replays/f8e5816a04505f9c2b5b69a6a458b696-9942e3d8",
+		"/queue", "/games", "/sqlstats",
+	} {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET %s: status %d, want 200", path, resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
+			t.Errorf("GET %s: content-type %q, want text/html", path, ct)
+		}
+		if !strings.Contains(string(b), `id="homelink"`) {
+			t.Errorf("GET %s: response is not the SPA entry", path)
+		}
+	}
+
+	// A data path for a file that does not exist must stay an error, not HTML:
+	// the dot (or the chunk's second segment) is the dispatch.
+	for _, path := range []string{"/replays/nosuch.brw", "/replays/nosuch/c0"} {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			t.Errorf("GET %s: status 200 for a missing data piece", path)
+		}
+	}
+}
+
 // TestFingerprintedAssets pins the contract between index.html and this server:
 // the entry references its subresources by their content-hashed names, so those
 // exact URLs must resolve. A mismatch would leave the viewer with no script and

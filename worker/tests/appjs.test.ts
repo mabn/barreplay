@@ -620,13 +620,19 @@ test('the catalog is fetched for the list view, not for a direct replay link', a
     throw new Error('unbalanced: ' + n);
   };
 
-  const boot = (search: string) => eval(`(function(){
+  const boot = (path: string, search: string) => eval(`(function(){
     let homeDataPending = null, homeDataLoaded = false;
     let filters = 0, lists = 0, opened = null, renders = 0;
     const el = () => ({ style: {}, textContent: '', onclick: null, classList: { add(){}, remove(){}, toggle(){} } });
     const document = { getElementById: el, body: { classList: { add(){}, remove(){}, toggle(){} } } };
-    const location = { href: 'https://x/' + ${JSON.stringify(search)}, search: ${JSON.stringify(search)} };
-    const history = { pushState(){}, replaceState(){} };
+    // A mutable URL stand-in: replaceState lands here, like the browser's.
+    const state = { url: new URL('https://x' + ${JSON.stringify(path)} + ${JSON.stringify(search)}) };
+    const location = {
+      get href() { return state.url.href; },
+      get search() { return state.url.search; },
+      get pathname() { return state.url.pathname; },
+    };
+    const history = { pushState(){}, replaceState: (_a, _b, u) => { state.url = new URL(u, state.url); } };
     const initGL = () => {}, initUpload = () => {}, startFpsMonitor = () => {}, stopPlay = () => {};
     // The left menu: wiring the nav and the queue's pager, and picking the
     // section to show. None of it touches the catalog, which is what this
@@ -639,24 +645,43 @@ test('the catalog is fetched for the list view, not for a direct replay link', a
     const reloadList = async () => { lists++; };
     const renderHome = () => { renders++; };
     const loadReplay = async (id) => { opened = id; };
+    ${APP.slice(APP.indexOf('const HOME_TABS'), APP.indexOf(';', APP.indexOf('const ADMIN_TABS')) + 1)}
+    ${extract('replayFromURL')}
     ${extract('showHome')}
     ${extract('ensureHomeData')}
     ${extract('init')}
-    return { init, ensureHomeData, stats: () => ({ filters, lists, opened, renders }) };
+    return { init, ensureHomeData, url: () => state.url.pathname + state.url.search,
+      stats: () => ({ filters, lists, opened, renders }) };
   })()`);
 
-  // A direct replay link: the replay loads, and nothing the table needs is
-  // requested. This is the assertion that matters.
-  const direct = boot('?replay=f8e5816a04505f9c2b5b69a6a458b696-9942e3d8');
+  // A direct replay link — the canonical PATH form: the replay loads, and
+  // nothing the table needs is requested. This is the assertion that matters.
+  const direct = boot('/replays/f8e5816a04505f9c2b5b69a6a458b696-9942e3d8', '');
   await direct.init();
   let s = direct.stats();
   assert.equal(s.opened, 'f8e5816a04505f9c2b5b69a6a458b696-9942e3d8', 'the replay is opened');
   assert.equal(s.lists, 0, 'no catalog listing fetched for a direct link');
   assert.equal(s.filters, 0, 'no filter data fetched for a direct link');
 
+  // The legacy query form still opens, and the address bar is normalized to
+  // the path form (replaceState — the visitor arrived at one page).
+  const legacy = boot('/', '?replay=f8e5816a04505f9c2b5b69a6a458b696&admin=true');
+  await legacy.init();
+  s = legacy.stats();
+  assert.equal(s.opened, 'f8e5816a04505f9c2b5b69a6a458b696', 'a legacy ?replay= link still opens');
+  assert.equal(legacy.url(), '/replays/f8e5816a04505f9c2b5b69a6a458b696?admin=true',
+    'normalized to the path form, keeping the other params');
+  assert.equal(s.lists, 0, 'and it stays as cheap as the canonical form');
+
+  // A legacy ?tab= link normalizes to its path too.
+  const tab = boot('/', '?tab=games');
+  await tab.init();
+  assert.equal(tab.url(), '/games', 'a legacy ?tab= link becomes its path');
+  assert.equal(tab.stats().opened, null, 'and opens the landing page, not a replay');
+
   // The list view still loads both, exactly once however often it is shown
   // (returning from a replay re-renders but must not re-fetch).
-  const home = boot('');
+  const home = boot('/', '');
   await home.init();
   await home.ensureHomeData();
   await home.ensureHomeData();
