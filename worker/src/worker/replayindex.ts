@@ -32,7 +32,7 @@ import type {
   QueueJob,
 } from "./jobs";
 import { LOBBY_MATCH_EARLY_SLACK_SEC, LOBBY_MATCH_WINDOW_SEC, pickLobbyMatches } from "./teiserver";
-import type { LobbyMatchResult, LobbyObservation, MatchGame, MatchLobby, OpenLobby } from "./teiserver";
+import type { LobbyDetails, LobbyMatchResult, LobbyObservation, MatchGame, MatchLobby, OpenLobby } from "./teiserver";
 import {
   SETTINGS_MODS_FLAG,
   derivePlayerCount,
@@ -199,7 +199,7 @@ const DERIVED_VERSION = 3;
  * whether the DDL needs to run at all — a read, where the DDL statements are
  * write-classified even as no-ops. BUMP THIS whenever SCHEMA_DDL, INDEX_DDL
  * or ADDED_COLUMNS change, or the change never reaches a deployed database. */
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 /** Everything migrateSchema creates, split from the code so schemaCurrent can
  * scan the same text it executes (one source, nothing to drift). */
@@ -464,6 +464,16 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   // nothing about lobbies and must not erase what the match wrote.
   ["games", "lobby_name TEXT"],
   ["games", "lobby_id INTEGER"],
+  // The full lobby detail at observation time (teiserver.ts LobbyDetails
+  // JSON: locked/passworded/counts from the index page, the per-player
+  // team/party/rating/bonus/faction roster from the show page). One blob
+  // like jobs.stats — consumer-facing, nothing filters on it in SQL. On
+  // lobbies it is what the observation recorded; on games it is COPIED by
+  // lobbiesMatch in the same write-once UPDATE as lobby_name, because a
+  // matched observation is pruned after 48h and match time is the only
+  // chance. Like the two above, NOT in gamesInsert's upsert list.
+  ["lobbies", "lobby_details TEXT"],
+  ["games", "lobby_details TEXT"],
   ["replays", "settings TEXT"],
   ["replays", "rid TEXT"],
   ["replays", "players TEXT"],
@@ -1191,11 +1201,17 @@ export class ReplayIndex extends DurableObject<Env> {
    * (flag, replay_id) covering index, so the cost is the number of modded
    * games ever mirrored (rare — ~0 in 24) plus a PK seek each, NOT the
    * mirror's size; and it runs only on a fresh-modded-game trigger or the
-   * hourly sweep, never the every-minute path (rowcost.test.ts bounds it). */
-  gamesModdedEndedAfter(endUnix: number, limit: number): { id: string; endUnix: number }[] {
+   * hourly sweep, never the every-minute path (rowcost.test.ts bounds it).
+   * Each row also carries the game's matched lobby info (null when no lobby
+   * was ever matched), which the lava sync attaches to what it submits. */
+  gamesModdedEndedAfter(
+    endUnix: number,
+    limit: number,
+  ): { id: string; endUnix: number; lobbyName: string | null; lobbyDetails: LobbyDetails | null }[] {
     return this.ctx.storage.sql
       .exec(
-        `SELECT g.id AS id, g.start_unix + COALESCE(g.duration_sec, 0) AS end_unix
+        `SELECT g.id AS id, g.start_unix + COALESCE(g.duration_sec, 0) AS end_unix,
+                g.lobby_name, g.lobby_details
            FROM replay_settings rs JOIN games g ON g.id = rs.replay_id
           WHERE rs.flag = ? AND g.start_unix IS NOT NULL
             AND g.start_unix + COALESCE(g.duration_sec, 0) >= ?
@@ -1205,7 +1221,12 @@ export class ReplayIndex extends DurableObject<Env> {
         limit,
       )
       .toArray()
-      .map((r) => ({ id: r.id as string, endUnix: Number(r.end_unix) }));
+      .map((r) => ({
+        id: r.id as string,
+        endUnix: Number(r.end_unix),
+        lobbyName: (r.lobby_name as string | null) ?? null,
+        lobbyDetails: parseStored(r.lobby_details as string | null, (v) => v as LobbyDetails),
+      }));
   }
 
   /** gamesInsert records mirrored games and indexes their settings into
@@ -1404,8 +1425,8 @@ export class ReplayIndex extends DurableObject<Env> {
     const now = Math.floor(Date.now() / 1000);
     for (const o of obs) {
       this.ctx.storage.sql.exec(
-        `INSERT INTO lobbies (lobby_id, started_unix, name, map, players, player_count, ended_unix, matched_game_id)
-         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)
+        `INSERT INTO lobbies (lobby_id, started_unix, name, map, players, player_count, lobby_details, ended_unix, matched_game_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
          ON CONFLICT(lobby_id, started_unix) DO NOTHING`,
         o.lobbyId,
         now - Math.max(0, o.elapsedSec ?? 0),
@@ -1413,6 +1434,7 @@ export class ReplayIndex extends DurableObject<Env> {
         o.map,
         o.players === null ? null : JSON.stringify(o.players),
         o.playerCount,
+        o.details == null ? null : JSON.stringify(o.details),
       );
     }
   }
@@ -1499,12 +1521,20 @@ export class ReplayIndex extends DurableObject<Env> {
           players: r.players == null ? null : JSON.parse(r.players as string),
         }));
       for (const m of pickLobbyMatches(lobbies, games)) {
+        // lobby_details rides the same write-once UPDATE: the observation is
+        // pruned 48h after a match, so this copy is the detail's only route
+        // to permanence. A pre-column observation copies NULL harmlessly.
         sql.exec(
-          `UPDATE games SET lobby_name = (SELECT name FROM lobbies WHERE lobby_id = ? AND started_unix = ?), lobby_id = ?
+          `UPDATE games SET
+             lobby_name    = (SELECT name FROM lobbies WHERE lobby_id = ? AND started_unix = ?),
+             lobby_id      = ?,
+             lobby_details = (SELECT lobby_details FROM lobbies WHERE lobby_id = ? AND started_unix = ?)
            WHERE id = ? AND lobby_name IS NULL`,
           m.lobbyId,
           m.startedUnix,
           m.lobbyId,
+          m.lobbyId,
+          m.startedUnix,
           m.gameId,
         );
         // Matching also RETIRES the observation (ended_unix, if the page diff
@@ -2227,7 +2257,7 @@ function queueJobRow(r: Record<string, unknown>): QueueJob {
 const GAMES_LIST_SELECT = `
   SELECT g.id, g.start_unix, g.duration_sec, g.map, g.map_file, g.game_size, g.preset,
          g.player_count, g.players, g.settings, g.engine_version, g.game_version,
-         g.synced_unix, g.lobby_name,
+         g.synced_unix, g.lobby_name, g.lobby_details,
          -- A primary-key seek per row. placeholder = 0 because a
          -- placeholder is a re-sim in flight, not a replay to play.
          EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id AND r.placeholder = 0) AS published,
@@ -2253,6 +2283,7 @@ function gameListRow(r: Record<string, unknown>): GameListRow {
     gameVersion: (r.game_version as string | null) ?? null,
     syncedUnix: r.synced_unix as number,
     lobbyName: (r.lobby_name as string | null) ?? null,
+    lobbyDetails: parseStored(r.lobby_details as string | null, (v) => v as LobbyDetails),
     published: r.published === 1,
     jobState: (r.job_state as string | null) ?? null,
   };
