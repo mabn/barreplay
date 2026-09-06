@@ -323,6 +323,32 @@ test("a placeholder row does not count as published, and a claimed job reads as 
   });
 });
 
+test("gamesByIds answers the named games in asked order, with a page row's joins", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([
+      game("a", { startUnix: 1000, durationSec: 100 }),
+      game("b", { startUnix: 2000, durationSec: 200 }),
+      game("c", { startUnix: 3000, durationSec: 300 }),
+    ]);
+    index.upsert(replay("b"));
+    index.jobInsert("j-c", "", "c", "resim");
+
+    // Asked order, not the listing's; an id the mirror does not hold is
+    // simply absent, indistinguishable from a game that never existed.
+    const got = index.gamesByIds(["c", "nope", "a", "b"]);
+    expect(got.map((g) => g.id)).toEqual(["c", "a", "b"]);
+    // The rows are full listing rows: the same shape and joins a page carries.
+    expect(got[0]).toMatchObject({ id: "c", jobState: "pending", published: false });
+    expect(got[2]).toMatchObject({ id: "b", published: true, map: "Great Divide V1" });
+    expect(got[1]).toEqual(index.gamesPage(10, null).games.find((g) => g.id === "a"));
+
+    expect(index.gamesByIds([])).toEqual([]);
+    // Past the IN() chunk size: the chunking is invisible in the answer.
+    const many = Array.from({ length: 120 }, (_, i) => `m-${i}`).concat(["a", "c"]);
+    expect(index.gamesByIds(many).map((g) => g.id)).toEqual(["a", "c"]);
+  });
+});
+
 // --- the idle re-sim poll: work invented from the games mirror --------------
 
 /** jobsOffer needs a job id from its caller (the route passes a UUID); these

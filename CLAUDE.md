@@ -1111,6 +1111,11 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           is joined with whether a playable catalog row exists and the
                           state of the game's last job, both seeks. No total and no count
                           anywhere: `next` is read off one row more than the page shows.
+                          FETCH-BY-IDS: ?id=<id>[,<id>...] (up to 100 ids) answers exactly
+                          the named games instead of a listing page (ReplayIndex.gamesByIds:
+                          chunked IN() PK seeks with the same per-row joins, rows in asked
+                          order, unknown ids absent, `next` always null; limit/after are
+                          ignored beside it, a malformed or over-count id list is a 400).
                           The columns deliberately echo the catalog's vocabulary (start_unix,
                           duration_sec, map, game_size, player_count, players, settings) plus
                           what only the API knows: map_file (what BAR's maps API keys on),
