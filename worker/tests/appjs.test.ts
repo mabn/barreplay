@@ -1654,3 +1654,123 @@ test('the id filter lifts a game id out of whatever was pasted', () => {
   assert.equal(gameIdIn('Great Divide'), 'great divide');
 });
 
+// Shareable links carry the BARE game id, but a revisioned publish serves its
+// pieces under <gameId>-<8 hex>. resolveReplayFile is the map between the two:
+// the loaded listing answers for free, a direct link asks the catalog for the
+// one row, and everything that is not a bare cataloged game id passes through
+// untouched so the head fetch stays the arbiter.
+test('a bare game id resolves to the served revision before anything is fetched', async () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    const async = APP.slice(Math.max(0, start - 6), start).trim() === 'async' ? 'async ' : '';
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return async + APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+
+  const id = 'f8e5816a04505f9c2b5b69a6a458b696';
+  const fetches: string[] = [];
+  let catalogRows: unknown = [];
+  let catalogOk = true;
+  const boot = (list: unknown[]) => eval(`(function(){
+    const replayList = list;
+    const fetch = async (url) => {
+      fetches.push(String(url));
+      if (!catalogOk) throw new Error('no catalog');
+      return { ok: true, json: async () => catalogRows };
+    };
+    ${extract('urlId')}
+    ${extract('resolveReplayFile')}
+    return resolveReplayFile;
+  })()`);
+
+  // A list click: the loaded listing already names the revision — no request.
+  let resolve = boot([{ id, rid: `${id}-9942e3d8` }]);
+  assert.equal(await resolve(id), `${id}-9942e3d8`);
+  assert.equal(fetches.length, 0, 'the loaded listing answers without a fetch');
+
+  // A listed row with no revision (pre-revisioning publish): the bare id IS
+  // the file.
+  resolve = boot([{ id, rid: null }]);
+  assert.equal(await resolve(id), id);
+  assert.equal(fetches.length, 0);
+
+  // A direct link (empty listing): one catalog lookup for the one row, and
+  // only the EXACT id answers — ?id= matches by prefix, so a longer id that
+  // happens to share this prefix must not.
+  resolve = boot([]);
+  catalogRows = [{ id: id + 'ff', rid: 'wrong' }, { id, rid: `${id}-9942e3d8` }];
+  assert.equal(await resolve(id), `${id}-9942e3d8`);
+  assert.equal(fetches.length, 1);
+  assert.ok(fetches[0].includes('id=' + id) && fetches[0].includes('limit=2'), fetches[0]);
+
+  // An explicit revision id (alt-upload link, old shared URL) names its file
+  // directly — no lookup, no rewrite.
+  fetches.length = 0;
+  assert.equal(await resolve(`${id}-9942e3d8`), `${id}-9942e3d8`);
+  assert.equal(fetches.length, 0, 'a revision id is never resolved');
+
+  // No catalog (a plain static host, the Go server's local files): the direct
+  // fetch decides, exactly as before.
+  catalogOk = false;
+  assert.equal(await resolve(id), id);
+});
+
+// The GUI's own links carry the bare id everywhere EXCEPT an explicit
+// alternative upload, whose entire point is a specific revision.
+test('list rows link the bare game id; alt-upload links keep their revision', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+
+  const dom = fakeDom();
+  const rows = [
+    { id: 'aaaa', rid: 'aaaa-11111111', startUnix: 1, durationSec: 60, map: 'M', gameSize: '8v8',
+      sizeBytes: 1, players: [], settings: null,
+      uploads: [{ rid: 'aaaa-11111111', ally: 0 }, { rid: 'aaaa-22222222', ally: 1 }] },
+  ];
+  const render = eval(`(function(){
+    const document = dom.document;
+    const replayList = rows;
+    const homeDataLoaded = true;
+    const ALLY_HUES = [0, 120];
+    ${extract('urlId')}
+    const replayHref = (id) => '/?replay=' + id;
+    const fmtDate = () => 'date', fmtDateShort = () => 'date', fmtDuration = () => 'dur', fmtGameDuration = () => 'dur', fmtSize = () => 'size';
+    const settingsBadges = () => [];
+    const adminMode = () => false, syncOrphanButton = () => {}, filterQuery = () => '';
+    const PAGE_SIZE = 50; let homePage = 0, homeHasNext = false;
+    const goPage = () => {};
+    const playersColumn = () => 'players';
+    ${extract('mapFileGuess')}
+    ${extract('renderPager')}
+    ${extract('renderHome')}
+    return renderHome;
+  })()`);
+
+  render();
+  const tr = dom.tbody.children[0];
+  const links = walk(tr).filter((n) => n.tag === 'a' && n.href);
+  const internal = links.filter((n) => !n.className.includes('ext'));
+  // Every row cell links the shareable form — the bare id, no -<rev> suffix.
+  assert.ok(internal.length > 1, 'the row cells are links');
+  for (const a of internal.filter((n) => n.className !== 'alt')) {
+    assert.equal(a.href, '/?replay=aaaa', a.className);
+  }
+  // The one exception: an alternative upload names its revision outright, and
+  // only the non-current revision is offered.
+  const alts = internal.filter((n) => n.className === 'alt');
+  assert.deepEqual(alts.map((a) => a.href), ['/?replay=aaaa-22222222']);
+});
+
