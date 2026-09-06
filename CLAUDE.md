@@ -1172,7 +1172,15 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the sibling lavabalance worker (claudebar/lavabalance, same account
                           — the LOS OpenSkill ratings for the lava game mode), which ingests a
                           game as the VERBATIM /replays/<id> detail POSTed to its open
-                          /api/games. STATELESS: each run reads lavabalance's own most recent
+                          /api/games — plus, when the teiserver poll matched a lobby onto the
+                          game, the lobby info as EXTRA top-level fields on that detail
+                          (lobbyName + the lobbyDetails blob with the party roster; the BAR
+                          reply carries neither key, so nothing collides; an unmatched game
+                          submits the plain detail). That is why the cron runs the LOBBY sync
+                          BEFORE this one: the match is arrival-driven, landing on the same
+                          tick `modded > 0` triggers this sync, and a submission that ran
+                          first would hand lavabalance the game without its parties forever.
+                          STATELESS: each run reads lavabalance's own most recent
                           stored game (GET /api/games?limit=1 over the binding), takes its END
                           (start+duration) as the watermark, and submits every candidate the
                           mirror holds that ended at/after it (the watermark game excluded by
@@ -1234,7 +1242,8 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           curl /cdn-cgi/handler/scheduled against `vite dev` mirrored 24 real
                           games, and the second call added none.
                           LOBBY NAMES (teiserver poll, src/worker/teiserver.ts + the same
-                          cron): the tick's second step, because a mirrored game carries no
+                          cron): the tick's second step — BEFORE the lava sync, see its entry
+                          — because a mirrored game carries no
                           LOBBY NAME — that exists only while the lobby is alive, on
                           teiserver's web UI (server4.beyondallreason.info/battle/lobbies, a
                           Phoenix dead render scraped with small regexes; parsers and the
@@ -1245,6 +1254,14 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           (spectators churn; the roster is captured at the start, when it is
                           most honest; a failed show fetch records the observation with a null
                           roster rather than dropping it — that moment never comes back).
+                          The show page's whole players table is kept, not just the names:
+                          parseLobbyShowRoster resolves team/PARTY/rating/bonus/faction per
+                          player by header label (party as trimmed cell TEXT, null = queued
+                          alone — it is only ever compared for equality), and that roster
+                          plus the index page's locked/passworded/member/spectator counts
+                          land in ONE lobby_details JSON column (teiserver.ts LobbyDetails,
+                          the jobs.stats pattern — nothing filters on it in SQL). The flat
+                          `players` name list stays what the MATCH reads, untouched.
                           When the finished game later reaches the rts-api mirror,
                           ReplayIndex.lobbiesMatch pairs them: no shared id exists, so the
                           match is same map (normalized) + started within [-60s,+300s] of the
@@ -1267,7 +1284,13 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           Best candidate WINS ties (smaller time delta) — a name on the row
                           beats abstaining — one-to-one both ways, and the name lands in
                           games.lobby_name (+lobby_id), which is deliberately OUTSIDE
-                          gamesInsert's upsert list so a re-sync cannot erase it. A match
+                          gamesInsert's upsert list so a re-sync cannot erase it. The same
+                          write-once UPDATE also COPIES the observation's lobby_details onto
+                          the games row (equally outside the upsert list): the observation
+                          is pruned 48h after a match, so match time is the detail's only
+                          route to permanence. GET /api/games serves it parsed as
+                          `lobbyDetails` (GAMES_LIST_SELECT/gameListRow, both the listing
+                          and ?id=); /api/replays deliberately does not. A match
                           also RETIRES its observation (ended_unix): the matched game has
                           certainly ended even if the lobby never left the in-progress set
                           (back-to-back games inside one cron gap), so the next tick opens a

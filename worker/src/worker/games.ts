@@ -31,6 +31,9 @@
 // and a fake fetch.
 import { CATALOG_PLAYERS_PER_ALLY, SETTINGS_MODS_FLAG, derivePlayerCount, playersFromApi, settingsFlags } from "./replayentry";
 import type { CatalogTeam } from "./replayentry";
+// Type-only, so the runtime edge teiserver.ts -> games.ts (`pool`) gains no
+// import cycle; must stay `import type`.
+import type { LobbyDetails } from "./teiserver";
 
 /** The BAR replay API this mirrors. */
 export const BAR_API = "https://api.bar-rts.com";
@@ -115,6 +118,11 @@ export interface GameEntry {
 export interface GameListRow extends GameEntry {
   /** The lobby name the teiserver poll matched to the game, when it did. */
   lobbyName: string | null;
+  /** The matched lobby's full detail — flags, counts and the per-player
+   * party/team/rating/faction roster (see teiserver.ts LobbyDetails) —
+   * copied onto the game at match time. Null for games matched before the
+   * column existed, or never matched at all. */
+  lobbyDetails: LobbyDetails | null;
   /** When the mirror recorded the game. */
   syncedUnix: number;
   /** A playable catalog row exists for the game (placeholders — a re-sim in

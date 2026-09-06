@@ -14,6 +14,7 @@ import type { GameEntry } from "../../src/worker/games";
 import type { ReplayIndex } from "../../src/worker/replayindex";
 import { emptyFilter } from "../../src/worker/replayentry";
 import type { ReplayEntry, ReplayFilter } from "../../src/worker/replayentry";
+import type { LobbyDetails } from "../../src/worker/teiserver";
 
 /** Run a block inside a ReplayIndex instance, with its SQL to hand.
  *
@@ -101,10 +102,11 @@ test("gamesModdedEndedAfter lists modded mirror games by end time", async () => 
       game("m-undated", { startUnix: null, durationSec: null, settings: { mods: true } }),
     ]);
 
-    // Everything modded from the epoch, oldest-ended first.
+    // Everything modded from the epoch, oldest-ended first. The lobby fields
+    // are null until the teiserver poll matches a lobby onto the game.
     assert.deepEqual(index.gamesModdedEndedAfter(0, 10), [
-      { id: "m-old", endUnix: 1600 },
-      { id: "m-new", endUnix: 2600 },
+      { id: "m-old", endUnix: 1600, lobbyName: null, lobbyDetails: null },
+      { id: "m-new", endUnix: 2600, lobbyName: null, lobbyDetails: null },
     ]);
     // The cutoff is inclusive (>=): a game ending exactly at it still lists.
     assert.deepEqual(index.gamesModdedEndedAfter(1600, 10).map((r) => r.id), ["m-old", "m-new"]);
@@ -261,7 +263,7 @@ test("gamesPage lists the mirror latest-ended first, saying what this site has o
       id: "long", startUnix: 1000, durationSec: 5000, map: "Great Divide V1", mapFile: "great_divide_v1",
       gameSize: "1v1", preset: "duel", playerCount: 2, settings: { unranked: true },
       engineVersion: "2026.07.04", gameVersion: "Beyond All Reason test-31027-900131b",
-      lobbyName: null, published: false, jobState: null,
+      lobbyName: null, lobbyDetails: null, published: false, jobState: null,
     });
     expect(page.games[0].players).toEqual(game("x").players);
     expect(page.games[0].syncedUnix).toBeGreaterThan(0);
@@ -1157,6 +1159,17 @@ test("the duration filter bounds are inclusive, and unknown lengths match neithe
 
 // ---- The teiserver lobby poll's SQL half (teiserver.ts holds the logic) ----
 
+/** A LobbyDetails literal with quiet defaults, so observation fixtures stay
+ * one line each. */
+const det = (over: Partial<LobbyDetails> = {}): LobbyDetails => ({
+  locked: false,
+  passworded: false,
+  memberCount: null,
+  spectatorCount: null,
+  players: null,
+  ...over,
+});
+
 test("teiserver session jar round-trips through one row", async () => {
   await inIndex((index, sql) => {
     expect(index.teiserverCookies()).toBeNull();
@@ -1173,8 +1186,19 @@ test("lobby observations open, back-date, close, and reuse the lobby id", async 
   await inIndex((index, sql) => {
     expect(index.lobbiesOpen()).toEqual([]);
     index.lobbiesObserve([
-      { lobbyId: 7, name: "First Game", map: "Great Divide V1", players: ["A"], playerCount: 1, elapsedSec: 120 },
+      {
+        lobbyId: 7,
+        name: "First Game",
+        map: "Great Divide V1",
+        players: ["A"],
+        playerCount: 1,
+        elapsedSec: 120,
+        details: det({ memberCount: 3, spectatorCount: 2, players: [{ name: "A", team: 0, party: null, rating: 20, bonus: 0, faction: null }] }),
+      },
     ]);
+    // The full detail lands as JSON on the observation row.
+    expect(JSON.parse(rows(sql, `SELECT lobby_details FROM lobbies WHERE lobby_id = 7`)[0].lobby_details as string))
+      .toEqual(det({ memberCount: 3, spectatorCount: 2, players: [{ name: "A", team: 0, party: null, rating: 20, bonus: 0, faction: null }] }));
     const open = index.lobbiesOpen();
     expect(open.length).toBe(1);
     expect(open[0].lobbyId).toBe(7);
@@ -1186,7 +1210,7 @@ test("lobby observations open, back-date, close, and reuse the lobby id", async 
     index.lobbiesEnd([7]);
     expect(index.lobbiesOpen()).toEqual([]);
     index.lobbiesObserve([
-      { lobbyId: 7, name: "Second Game", map: "Great Divide V1", players: null, playerCount: 2, elapsedSec: 0 },
+      { lobbyId: 7, name: "Second Game", map: "Great Divide V1", players: null, playerCount: 2, elapsedSec: 0, details: det() },
     ]);
     expect(index.lobbiesOpen().length).toBe(1);
     expect(rows(sql, `SELECT COUNT(*) AS n FROM lobbies WHERE lobby_id = 7`)[0].n).toBe(2);
@@ -1199,6 +1223,14 @@ test("lobby observations open, back-date, close, and reuse the lobby id", async 
 
 test("lobbiesMatch names the game and survives a re-sync", async () => {
   await inIndex((index, sql) => {
+    const chillDetails = det({
+      memberCount: 20,
+      spectatorCount: 4,
+      players: [
+        { name: "ROUBEN", team: 0, party: "3", rating: 30.1, bonus: 0, faction: "Armada" },
+        { name: "laufendestahlwand", team: 1, party: "3", rating: 28.4, bonus: 0, faction: "Cortex" },
+      ],
+    });
     index.lobbiesObserve([
       {
         lobbyId: 42,
@@ -1207,6 +1239,7 @@ test("lobbiesMatch names the game and survives a re-sync", async () => {
         players: ["ROUBEN", "laufendestahlwand"],
         playerCount: 2,
         elapsedSec: 30,
+        details: chillDetails,
       },
     ]);
     const started = rows(sql, `SELECT started_unix FROM lobbies WHERE lobby_id = 42`)[0].started_unix as number;
@@ -1214,9 +1247,15 @@ test("lobbiesMatch names the game and survives a re-sync", async () => {
     // observation, same map, same players (case differing).
     index.gamesInsert([game("g42", { startUnix: started - 10 })]);
     expect(index.lobbiesMatch()).toEqual({ matched: 1, pruned: 0 });
-    const g = rows(sql, `SELECT lobby_name, lobby_id FROM games WHERE id = 'g42'`)[0];
+    const g = rows(sql, `SELECT lobby_name, lobby_id, lobby_details FROM games WHERE id = 'g42'`)[0];
     expect(g.lobby_name).toBe("Chillmus most welcome | 8v8");
     expect(g.lobby_id).toBe(42);
+    // The observation's full detail (parties included) is COPIED onto the
+    // games row at match time — the observation itself is pruned 48h later,
+    // so this copy is the detail's only route to permanence.
+    expect(JSON.parse(g.lobby_details as string)).toEqual(chillDetails);
+    // ...and GET /api/games serves it parsed.
+    expect(index.gamesByIds(["g42"])[0].lobbyDetails).toEqual(chillDetails);
     expect(rows(sql, `SELECT matched_game_id FROM lobbies WHERE lobby_id = 42`)[0].matched_game_id).toBe("g42");
     // Matching RETIRES the observation even though the page diff never closed
     // it (the lobby may be running its next game already): it leaves the open
@@ -1225,19 +1264,19 @@ test("lobbiesMatch names the game and survives a re-sync", async () => {
     expect(index.lobbiesOpen()).toEqual([]);
     expect(rows(sql, `SELECT ended_unix FROM lobbies WHERE lobby_id = 42`)[0].ended_unix).not.toBeNull();
     index.lobbiesObserve([
-      { lobbyId: 42, name: "Chillmus renamed", map: "Otago 1.43", players: null, playerCount: 16, elapsedSec: 0 },
+      { lobbyId: 42, name: "Chillmus renamed", map: "Otago 1.43", players: null, playerCount: 16, elapsedSec: 0, details: det() },
     ]);
     expect(index.lobbiesOpen().length).toBe(1);
     expect(rows(sql, `SELECT COUNT(*) AS n FROM lobbies WHERE lobby_id = 42`)[0].n).toBe(2);
     // Nothing left to match (the fresh observation has no candidate game);
     // the write is not repeated.
     expect(index.lobbiesMatch()).toEqual({ matched: 0, pruned: 0 });
-    // A later re-sync of the game (regression: lobby_name is NOT in the
-    // upsert's column list) keeps the name the match wrote.
+    // A later re-sync of the game (regression: lobby_name and lobby_details
+    // are NOT in the upsert's column list) keeps what the match wrote.
     index.gamesInsert([game("g42", { startUnix: started - 10 })]);
-    expect(rows(sql, `SELECT lobby_name FROM games WHERE id = 'g42'`)[0].lobby_name).toBe(
-      "Chillmus most welcome | 8v8",
-    );
+    const resynced = rows(sql, `SELECT lobby_name, lobby_details FROM games WHERE id = 'g42'`)[0];
+    expect(resynced.lobby_name).toBe("Chillmus most welcome | 8v8");
+    expect(JSON.parse(resynced.lobby_details as string)).toEqual(chillDetails);
   });
 });
 
@@ -1260,7 +1299,7 @@ test("lobbiesMatch considers the games mirrored since its last run", async () =>
     sql.exec(`UPDATE games SET synced_unix = ? WHERE id = 'g1'`, now - 600);
     expect(index.lobbiesMatch()).toEqual({ matched: 0, pruned: 0 });
     index.lobbiesObserve([
-      { lobbyId: 7, name: "Late observation", map: "Great Divide V1", players: null, playerCount: 8, elapsedSec: 0 },
+      { lobbyId: 7, name: "Late observation", map: "Great Divide V1", players: null, playerCount: 8, elapsedSec: 0, details: det() },
     ]);
     expect(index.lobbiesMatch()).toEqual({ matched: 0, pruned: 0 });
     expect(rows(sql, `SELECT lobby_name FROM games WHERE id = 'g1'`)[0].lobby_name).toBeNull();
@@ -1270,7 +1309,7 @@ test("lobbiesMatch considers the games mirrored since its last run", async () =>
 test("lobbiesMatch leaves an already-named game and a wrong-map lobby alone", async () => {
   await inIndex((index, sql) => {
     index.lobbiesObserve([
-      { lobbyId: 1, name: "Wrong Map Lobby", map: "Otago 1.43", players: ["Rouben"], playerCount: 1, elapsedSec: 0 },
+      { lobbyId: 1, name: "Wrong Map Lobby", map: "Otago 1.43", players: ["Rouben"], playerCount: 1, elapsedSec: 0, details: det() },
     ]);
     const started = rows(sql, `SELECT started_unix FROM lobbies WHERE lobby_id = 1`)[0].started_unix as number;
     index.gamesInsert([game("named", { startUnix: started - 5 })]);
@@ -1278,6 +1317,24 @@ test("lobbiesMatch leaves an already-named game and a wrong-map lobby alone", as
     expect(index.lobbiesMatch()).toEqual({ matched: 0, pruned: 0 });
     expect(rows(sql, `SELECT lobby_name FROM games WHERE id = 'named'`)[0].lobby_name).toBe("Existing Name");
     expect(rows(sql, `SELECT matched_game_id FROM lobbies WHERE lobby_id = 1`)[0].matched_game_id).toBeNull();
+  });
+});
+
+test("an observation predating lobby_details still matches, copying NULL", async () => {
+  await inIndex((index, sql) => {
+    const now = Math.floor(Date.now() / 1000);
+    // A row as an older deployment wrote it: no lobby_details column value.
+    sql.exec(
+      `INSERT INTO lobbies (lobby_id, started_unix, name, map, players, player_count, ended_unix, matched_game_id)
+       VALUES (8, ?, 'Old Observation', 'Great Divide V1', '["ROUBEN","laufendestahlwand"]', 2, NULL, NULL)`,
+      now - 60,
+    );
+    index.gamesInsert([game("g8", { startUnix: now - 70 })]);
+    expect(index.lobbiesMatch()).toEqual({ matched: 1, pruned: 0 });
+    const g = rows(sql, `SELECT lobby_name, lobby_details FROM games WHERE id = 'g8'`)[0];
+    expect(g.lobby_name).toBe("Old Observation");
+    expect(g.lobby_details).toBeNull();
+    expect(index.gamesByIds(["g8"])[0].lobbyDetails).toBeNull();
   });
 });
 

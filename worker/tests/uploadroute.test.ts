@@ -430,7 +430,7 @@ test("GET /api/games pages the mirror by cursor, and counts nothing", async () =
     index.games.push({
       id: `game-${i}`, startUnix: 1000 * (7 - i), durationSec: 600, map: "Map", mapFile: "map",
       gameSize: "1v1", preset: "duel", playerCount: 2, players: null, settings: null,
-      engineVersion: "e", gameVersion: "v", syncedUnix: 1, lobbyName: null,
+      engineVersion: "e", gameVersion: "v", syncedUnix: 1, lobbyName: null, lobbyDetails: null,
       published: i === 0, jobState: i === 1 ? "pending" : null,
     });
   }
@@ -473,7 +473,7 @@ test("GET /api/games?id= fetches the named games, holding ids to shape and count
     index.games.push({
       id: `game-${i}`, startUnix: 1000 * (3 - i), durationSec: 600, map: "Map", mapFile: "map",
       gameSize: "1v1", preset: "duel", playerCount: 2, players: null, settings: null,
-      engineVersion: "e", gameVersion: "v", syncedUnix: 1, lobbyName: null,
+      engineVersion: "e", gameVersion: "v", syncedUnix: 1, lobbyName: null, lobbyDetails: null,
       published: false, jobState: null,
     });
   }
