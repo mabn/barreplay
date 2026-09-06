@@ -42,6 +42,11 @@ type Server struct {
 	// mtime+size-keyed). Separate from cache and unbounded: a row is a few
 	// dozen bytes, and the listing must not evict parsed playback files.
 	catalog map[string]*catalogCacheEntry
+
+	// serveEntry writes the SPA entry (index.html with its placeholders
+	// substituted). Set by Handler; handleReplays uses it for the replay PAGE
+	// path (/replays/<id>, no extension).
+	serveEntry http.HandlerFunc
 }
 
 const cacheMaxEntries = 4
@@ -99,11 +104,7 @@ func (s *Server) Handler() http.Handler {
 	}
 
 	rev := []byte(assetRev())
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
+	serveEntry := func(w http.ResponseWriter, r *http.Request) {
 		b, err := webassets.Assets.ReadFile("index.html")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -119,7 +120,22 @@ func (s *Server) Handler() http.Handler {
 		// "same origin" and its URLs are unchanged.
 		b = bytes.ReplaceAll(b, []byte("__DATA_ORIGIN__"), nil)
 		w.Write(b)
+	}
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		serveEntry(w, r)
 	})
+	// The SPA's client-side routes (app.js reads the pathname): a direct load
+	// or refresh of a section must serve the entry, exactly like "/". The
+	// replay page path (/replays/<id>, no extension) is dispatched inside
+	// handleReplays, where it shares a prefix with the data pieces.
+	mux.HandleFunc("/queue", serveEntry)
+	mux.HandleFunc("/games", serveEntry)
+	mux.HandleFunc("/sqlstats", serveEntry)
+	s.serveEntry = serveEntry
 	// index.html now references the subresources by their FINGERPRINTED names
 	// (/app.<rev>.js, /style.<rev>.css — the hash is in the name so the URL of
 	// a given byte sequence never changes). This server has no build step to
@@ -203,6 +219,12 @@ func (s *Server) handleReplays(w http.ResponseWriter, r *http.Request) {
 		s.handleResources(w, r, strings.TrimSuffix(rest, ".resources"))
 	case strings.HasSuffix(rest, ".keys"):
 		s.handleKeys(w, r, strings.TrimSuffix(rest, ".keys"))
+	case !strings.Contains(rest, ".") && validID(rest) && s.serveEntry != nil:
+		// /replays/<id> with no extension is the viewer's PAGE for one replay
+		// (app.js routes on the path); every data piece has an extension or a
+		// second segment, so the dot is the whole dispatch — same rule as the
+		// worker's route.
+		s.serveEntry(w, r)
 	default:
 		http.NotFound(w, r)
 	}

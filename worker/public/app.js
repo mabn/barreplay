@@ -3833,25 +3833,29 @@ function ensureHomeData() {
 
 // ---- home sections (the left menu) -----------------------------------------
 // The landing page holds more than the catalog now, so which section is shown
-// lives in the URL (?tab=) exactly like the filters do: a menu pick is then
-// shareable, survives a refresh, and replayHref carries it into a replay so
-// the back button returns to the section it was opened from. Unlike a filter
-// change this IS navigation between screens, so it pushes a history entry.
+// lives in the URL — as the PATH (/queue, /games, /sqlstats; "/" is the
+// replay list), so a menu pick is shareable and survives a refresh. Unlike a
+// filter change this IS navigation between screens, so it pushes a history
+// entry; the back button restores the previous screen through history, not
+// through anything carried in the replay's own URL. Legacy ?tab= links keep
+// resolving (init normalizes them to the path form).
 const HOME_TABS = ['replays', 'queue', 'games', 'sqlstats'];
 // Sections only an admin may see. The menu entry is hidden by CSS; this is
-// what keeps a shared ?tab=queue link from opening the section anyway.
+// what keeps a shared /queue link from opening the section anyway.
 const ADMIN_TABS = new Set(['queue', 'sqlstats']);
 
 function homeTab() {
-  const t = new URLSearchParams(location.search).get('tab');
+  const seg = String(location.pathname || '/').replace(/^\/+|\/+$/g, '');
+  const t = HOME_TABS.includes(seg) ? seg : new URLSearchParams(location.search).get('tab');
   if (!HOME_TABS.includes(t)) return 'replays';
   return ADMIN_TABS.has(t) && !adminMode() ? 'replays' : t;
 }
 
 function setHomeTab(tab) {
   const u = new URL(location.href);
-  if (tab === 'replays') u.searchParams.delete('tab');
-  else u.searchParams.set('tab', tab);
+  u.pathname = tab === 'replays' ? '/' : '/' + tab;
+  u.searchParams.delete('tab');    // the legacy form the path supersedes
+  u.searchParams.delete('replay'); // defensive: the home view names none
   if (u.href !== location.href) history.pushState(null, '', u);
   applyHomeTab();
 }
@@ -5553,7 +5557,9 @@ function renderHome(errMsg) {
       // An alternate-upload link opens ITS revision instead of the row's.
       const alt = ev.target.closest && ev.target.closest('a.alt');
       if (alt) {
-        openReplay(new URL(alt.href, location.href).searchParams.get('replay'));
+        const u = new URL(alt.href, location.href);
+        const m = /^\/replays\/([A-Za-z0-9_-]{1,128})$/.exec(u.pathname);
+        openReplay(m ? m[1] : u.searchParams.get('replay'));
         return;
       }
       // Nothing to open: the row is a game being worked on. (Its alt links,
@@ -5598,12 +5604,25 @@ function adminMode() {
   return new URLSearchParams(location.search).get('admin') === 'true';
 }
 
-// replayHref is the shareable URL for one replay: the current URL (so params
-// like ?admin= and ?gl= carry over) with ?replay= set.
+// replayHref is the shareable URL for one replay: /replays/<id>, keeping the
+// current query (?admin=, ?gl=, ?col= and the filters carry over) minus the
+// legacy replay/tab params the path now expresses.
 function replayHref(id) {
   const u = new URL(location.href);
-  u.searchParams.set('replay', id);
+  u.pathname = '/replays/' + encodeURIComponent(id);
+  u.searchParams.delete('replay');
+  u.searchParams.delete('tab');
   return u.pathname + u.search;
+}
+
+// replayFromURL reads which replay the URL names: the canonical path form
+// (/replays/<id>) first, then the legacy ?replay= query form, which every
+// link shared before the path scheme still carries. Null when the URL names
+// none (the landing page and its sections).
+function replayFromURL() {
+  const m = /^\/replays\/([A-Za-z0-9_-]{1,128})$/.exec(String(location.pathname || ''));
+  if (m) return m[1];
+  return new URLSearchParams(location.search).get('replay');
 }
 
 // The known settings flags (from the uploader's modoptions distillation) in
@@ -5871,7 +5890,7 @@ async function submitResim() {
 // where the user was — the list, or the previously watched replay).
 function openReplay(id) {
   hideHome();
-  if (new URLSearchParams(location.search).get('replay') !== id) {
+  if (replayFromURL() !== id) {
     history.pushState(null, '', replayHref(id));
   }
   loadReplay(id);
@@ -5893,17 +5912,34 @@ async function init() {
   document.getElementById('homelink').onclick = (e) => {
     e.preventDefault();
     const u = new URL(location.href);
+    u.pathname = '/';
     u.searchParams.delete('replay');
+    u.searchParams.delete('tab');
     history.pushState(null, '', u);
     showHome();
   };
 
-  // ?replay=<id> opens that replay directly (refresh / shared link); without
+  // Legacy query URLs (?replay=, ?tab=) normalize to the path form once, so
+  // the address bar shows the canonical link and a copy/refresh carries it.
+  // replaceState, not pushState: the visitor arrived at ONE page, whatever
+  // spelling the link used.
+  if (params.get('replay') || params.get('tab')) {
+    const u = new URL(location.href);
+    const rep = u.searchParams.get('replay');
+    const tab = u.searchParams.get('tab');
+    u.searchParams.delete('replay');
+    u.searchParams.delete('tab');
+    u.pathname = rep ? '/replays/' + encodeURIComponent(rep)
+      : HOME_TABS.includes(tab) && tab !== 'replays' ? '/' + tab : '/';
+    history.replaceState(null, '', u);
+  }
+
+  // /replays/<id> opens that replay directly (refresh / shared link); without
   // it the page is the replay list (the table IS the picker), and showHome
   // fetches the catalog it needs. A direct link asks for NOTHING the table
   // would have used — knownReplayURL accepts a well-formed id on its own, and
   // loadReplay reports a real failure if the pieces are not there.
-  const wanted = params.get('replay');
+  const wanted = replayFromURL();
   if (wanted && knownReplayURL(wanted)) {
     hideHome();
     await loadReplay(wanted);
@@ -5912,10 +5948,10 @@ async function init() {
   }
 }
 
-// Support browser back/forward and manual URL edits: no ?replay= means the
-// replay list, anything else re-opens that replay.
+// Support browser back/forward and manual URL edits: a URL naming no replay
+// means the replay list, anything else re-opens that replay.
 window.addEventListener('popstate', () => {
-  const wanted = new URLSearchParams(location.search).get('replay');
+  const wanted = replayFromURL();
   if (!wanted) {
     showHome();
     return;
