@@ -1293,18 +1293,7 @@ export class ReplayIndex extends DurableObject<Env> {
    * Nothing here counts the table: `next` is read off one row more than the
    * page shows, and there is no total anywhere. */
   gamesPage(limit: number, after: GamesCursor | null): { games: GameListRow[]; next: GamesCursor | null } {
-    const select = `
-      SELECT g.id, g.start_unix, g.duration_sec, g.map, g.map_file, g.game_size, g.preset,
-             g.player_count, g.players, g.settings, g.engine_version, g.game_version,
-             g.synced_unix, g.lobby_name,
-             -- A primary-key seek per row. placeholder = 0 because a
-             -- placeholder is a re-sim in flight, not a replay to play.
-             EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id AND r.placeholder = 0) AS published,
-             -- Pinned to jobs_game like list()'s subqueries: seeked by
-             -- game, it costs the game's own jobs, almost always 0-1.
-             (SELECT j.state FROM jobs j INDEXED BY jobs_game
-              WHERE j.game_id = g.id ORDER BY j.created_unix DESC LIMIT 1) AS job_state
-      FROM games g`;
+    const select = GAMES_LIST_SELECT;
     const order = `ORDER BY (start_unix + COALESCE(duration_sec, 0)) DESC, id`;
     const want = limit + 1; // the extra row is "there is a next page"
     let rows: Record<string, unknown>[] = [];
@@ -1340,6 +1329,37 @@ export class ReplayIndex extends DurableObject<Env> {
         ? { endUnix: last.startUnix === null ? null : last.startUnix + (last.durationSec ?? 0), id: last.id }
         : null;
     return { games, next };
+  }
+
+  /** gamesByIds answers GET /api/games?id=: the named mirrored games, in the
+   * order they were asked for (ids the mirror does not hold are simply absent
+   * — to the caller an unmirrored game and a nonexistent one are the same).
+   * The rows are GAMES_LIST_SELECT rows, identical to a listing page's.
+   *
+   * Chunked IN(...) like gamesUnknown — the route caps the list at 100 ids,
+   * over SQLite's default bind-param headroom once the other reads are counted
+   * — and each chunk is a PK-index seek per id, so the cost is the id count
+   * plus the per-row join seeks, never the mirror's size (rowcost.test.ts
+   * bounds it: this is an open route). */
+  gamesByIds(ids: string[]): GameListRow[] {
+    if (ids.length === 0) return [];
+    const CHUNK = 90;
+    const byId = new Map<string, GameListRow>();
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const batch = ids.slice(i, i + CHUNK);
+      for (const r of this.ctx.storage.sql
+        .exec(`${GAMES_LIST_SELECT} WHERE g.id IN (${batch.map(() => "?").join(",")})`, ...batch)
+        .toArray()) {
+        const row = gameListRow(r);
+        byId.set(row.id, row);
+      }
+    }
+    const found: GameListRow[] = [];
+    for (const id of ids) {
+      const row = byId.get(id);
+      if (row !== undefined) found.push(row);
+    }
+    return found;
   }
 
   /** teiserverCookies reads the persisted teiserver web-session jar, or null
@@ -2199,6 +2219,23 @@ function queueJobRow(r: Record<string, unknown>): QueueJob {
     durationSec === null && gameSize === null ? null : { durationSec, gameSize };
   return { ...jobRow(r), game };
 }
+
+/** The Games listing's SELECT — one mirrored game plus the per-row joins
+ * saying what this deployment has done about it. Shared by gamesPage and
+ * gamesByIds so the two reads cannot disagree on what a row carries; every
+ * subquery is a seek, so a row costs the same however it was reached. */
+const GAMES_LIST_SELECT = `
+  SELECT g.id, g.start_unix, g.duration_sec, g.map, g.map_file, g.game_size, g.preset,
+         g.player_count, g.players, g.settings, g.engine_version, g.game_version,
+         g.synced_unix, g.lobby_name,
+         -- A primary-key seek per row. placeholder = 0 because a
+         -- placeholder is a re-sim in flight, not a replay to play.
+         EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id AND r.placeholder = 0) AS published,
+         -- Pinned to jobs_game like list()'s subqueries: seeked by
+         -- game, it costs the game's own jobs, almost always 0-1.
+         (SELECT j.state FROM jobs j INDEXED BY jobs_game
+          WHERE j.game_id = g.id ORDER BY j.created_unix DESC LIMIT 1) AS job_state
+  FROM games g`;
 
 function gameListRow(r: Record<string, unknown>): GameListRow {
   return {
