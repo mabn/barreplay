@@ -129,6 +129,17 @@ try {
     check(`GET ${ref}`, sub.status === 200 && sub.body.length > 0, String(sub.status));
   }
 
+  // The path-form pages: /replays/<id> and the landing sections are Worker
+  // routes that hand the request to the asset layer's single-page-application
+  // fallback. Only this harness exercises that fallback for real — a 404 or a
+  // redirect here means a shared replay link dies on refresh.
+  for (const path of ["/replays/f8e5816a04505f9c2b5b69a6a458b696", "/queue", "/games", "/sqlstats"]) {
+    const page = await get(base, path);
+    check(`GET ${path} serves the viewer`,
+      page.status === 200 && page.body.includes('id="homelink"'),
+      `${page.status} ${page.headers.get("content-type")}`);
+  }
+
   // The guide. A 3xx here is the redirect loop: the asset layer bounces
   // /setup.html back to /setup, so a route that rewrites the path serves its
   // own bounce forever.

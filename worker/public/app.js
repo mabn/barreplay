@@ -350,7 +350,8 @@ let pendingDelta = [];    // chunk i -> gunzipped delta bytes that arrived befor
 let fetchQueue = [];      // pending chunk indices
 let inflight = 0;
 let loadGen = 0;          // bumped per loadReplay; stale completions are dropped
-let currentFile = null;   // replay id for building /replays/ URLs
+let currentFile = null;   // served id for building /replays/ URLs (may carry a -<rev> suffix)
+let currentRequest = null; // the ?replay= value that opened it (usually the bare game id)
 
 // chunkOf returns the chunk containing global frame index gi.
 function chunkOf(gi) {
@@ -3029,11 +3030,12 @@ function setEmpty(msg) {
   emptyEl.textContent = msg || '';
 }
 
-async function loadReplay(file) {
+async function loadReplay(id) {
   stopPlay();
   setEmpty('Loading…');
   // Invalidate any in-flight chunk fetches from the previous replay.
   loadGen++;
+  const gen = loadGen;
   fetchQueue = [];
   inflight = 0;
   clearTimeout(scrubTimer);
@@ -3049,6 +3051,11 @@ async function loadReplay(file) {
   teamLastSeen = new Map();
   quietAnchor = null;
   flashSeenIdx = -1;
+  currentRequest = id;
+  // The shareable URL carries the BARE game id; the pieces are served under
+  // the catalog row's current revision. Resolve before fetching anything.
+  const file = await resolveReplayFile(id);
+  if (gen !== loadGen) return; // another replay was opened while resolving
   currentFile = file;
   try {
     const r = await fetch(dataURL('/replays/' + encodeURIComponent(file) + '.brw'));
@@ -3059,6 +3066,7 @@ async function loadReplay(file) {
     data = null;
     return;
   }
+  if (gen !== loadGen) return;
   codecVer = data.codecVer || 4; // published v4 bundles keep playing
   data.chunks = data.chunks || [];
   data.frameCount = data.frameCount || 0;
@@ -3750,6 +3758,33 @@ function knownReplayURL(wanted) {
   return /^[A-Za-z0-9_-]{1,128}$/.test(wanted);
 }
 
+// resolveReplayFile maps a ?replay= value to the id the pieces are actually
+// SERVED under. Shareable links carry the bare game id, but a revisioned
+// publish stores its files at <gameId>-<8 hex> and only the catalog row's rid
+// says which revision is current — so a bare id must be resolved before
+// anything is fetched. The loaded listing answers for free (a list click);
+// a direct link asks the catalog for the one row (?id= is an indexed lookup).
+// Everything else — an explicit revision id (an alt-upload link, an old
+// shared URL), an unrevisioned file on the Go server, a catalog miss — comes
+// back unchanged and the head fetch is the arbiter, exactly as before.
+async function resolveReplayFile(id) {
+  const hit = replayList.find(e => e.id === id);
+  if (hit) return urlId(hit);
+  // A revision id names its file directly; a non-hex value cannot be a game
+  // id, so the catalog could not answer for it either way.
+  if (!/^[0-9a-f]{8,64}$/.test(id)) return id;
+  try {
+    const r = await fetch('/api/replays?' + new URLSearchParams({ id, limit: '2' }));
+    if (r.ok) {
+      const rows = await r.json();
+      // ?id= matches by PREFIX; only the row whose id IS this id answers.
+      const e = Array.isArray(rows) ? rows.find(x => x && x.id === id) : null;
+      if (e && e.rid) return e.rid;
+    }
+  } catch (_) { /* no catalog (static host): the direct fetch decides */ }
+  return id;
+}
+
 let replayList = [];
 
 // What the Players column shows: the rosters, or the LOBBY NAME the game was
@@ -3798,25 +3833,29 @@ function ensureHomeData() {
 
 // ---- home sections (the left menu) -----------------------------------------
 // The landing page holds more than the catalog now, so which section is shown
-// lives in the URL (?tab=) exactly like the filters do: a menu pick is then
-// shareable, survives a refresh, and replayHref carries it into a replay so
-// the back button returns to the section it was opened from. Unlike a filter
-// change this IS navigation between screens, so it pushes a history entry.
+// lives in the URL — as the PATH (/queue, /games, /sqlstats; "/" is the
+// replay list), so a menu pick is shareable and survives a refresh. Unlike a
+// filter change this IS navigation between screens, so it pushes a history
+// entry; the back button restores the previous screen through history, not
+// through anything carried in the replay's own URL. Legacy ?tab= links keep
+// resolving (init normalizes them to the path form).
 const HOME_TABS = ['replays', 'queue', 'games', 'sqlstats'];
 // Sections only an admin may see. The menu entry is hidden by CSS; this is
-// what keeps a shared ?tab=queue link from opening the section anyway.
+// what keeps a shared /queue link from opening the section anyway.
 const ADMIN_TABS = new Set(['queue', 'sqlstats']);
 
 function homeTab() {
-  const t = new URLSearchParams(location.search).get('tab');
+  const seg = String(location.pathname || '/').replace(/^\/+|\/+$/g, '');
+  const t = HOME_TABS.includes(seg) ? seg : new URLSearchParams(location.search).get('tab');
   if (!HOME_TABS.includes(t)) return 'replays';
   return ADMIN_TABS.has(t) && !adminMode() ? 'replays' : t;
 }
 
 function setHomeTab(tab) {
   const u = new URL(location.href);
-  if (tab === 'replays') u.searchParams.delete('tab');
-  else u.searchParams.set('tab', tab);
+  u.pathname = tab === 'replays' ? '/' : '/' + tab;
+  u.searchParams.delete('tab');    // the legacy form the path supersedes
+  u.searchParams.delete('replay'); // defensive: the home view names none
   if (u.href !== location.href) history.pushState(null, '', u);
   applyHomeTab();
 }
@@ -4987,8 +5026,8 @@ function renderQueue(errMsg) {
       return td;
     };
     cell(j.createdUnix ? fmtDate(j.createdUnix) : null);
-    // The game: a link once its replay is in the catalog (the pieces are
-    // served under the revision id, so the row's rid is what plays). Until
+    // The game: a link once its replay is in the catalog (the bare id — the
+    // shareable form; loadReplay resolves it to the served revision). Until
     // then, out to BAR's own page for it — which for a queued re-sim is the
     // whole point of the row and is where the link was pasted from.
     {
@@ -4998,11 +5037,11 @@ function renderQueue(errMsg) {
       const a = document.createElement('a');
       a.textContent = j.gameId;
       if (e) {
-        a.href = replayHref(urlId(e));
+        a.href = replayHref(e.id);
         a.addEventListener('click', (ev) => {
           if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
           ev.preventDefault();
-          openReplay(urlId(e));
+          openReplay(e.id);
         });
       } else {
         a.href = 'https://bar-rts.com/replays/' + encodeURIComponent(j.gameId);
@@ -5301,7 +5340,10 @@ function renderHome(errMsg) {
     // like an <a>: middle/ctrl/cmd-click opens a new tab, right-click offers
     // "open in new tab", and a plain click is intercepted below for SPA
     // navigation (pushState, so the back button returns to this list).
-    const href = openable ? replayHref(urlId(e)) : null;
+    // The link carries the BARE game id — the shareable form; loadReplay
+    // resolves it to the current revision — and only an explicit alt-upload
+    // link (below) names a revision outright.
+    const href = openable ? replayHref(e.id) : null;
     // linkish is that <a> — or a plain <span> when the row has nowhere to go,
     // so every cell below keeps its markup shape without caring which it is.
     const linkish = () => {
@@ -5515,14 +5557,16 @@ function renderHome(errMsg) {
       // An alternate-upload link opens ITS revision instead of the row's.
       const alt = ev.target.closest && ev.target.closest('a.alt');
       if (alt) {
-        openReplay(new URL(alt.href, location.href).searchParams.get('replay'));
+        const u = new URL(alt.href, location.href);
+        const m = /^\/replays\/([A-Za-z0-9_-]{1,128})$/.exec(u.pathname);
+        openReplay(m ? m[1] : u.searchParams.get('replay'));
         return;
       }
       // Nothing to open: the row is a game being worked on. (Its alt links,
       // if it somehow had any, are handled above — a published revision is
       // always openable.)
       if (!openable) return;
-      openReplay(urlId(e));
+      openReplay(e.id);
     });
     tbody.appendChild(tr);
   }
@@ -5560,12 +5604,25 @@ function adminMode() {
   return new URLSearchParams(location.search).get('admin') === 'true';
 }
 
-// replayHref is the shareable URL for one replay: the current URL (so params
-// like ?admin= and ?gl= carry over) with ?replay= set.
+// replayHref is the shareable URL for one replay: /replays/<id>, keeping the
+// current query (?admin=, ?gl=, ?col= and the filters carry over) minus the
+// legacy replay/tab params the path now expresses.
 function replayHref(id) {
   const u = new URL(location.href);
-  u.searchParams.set('replay', id);
+  u.pathname = '/replays/' + encodeURIComponent(id);
+  u.searchParams.delete('replay');
+  u.searchParams.delete('tab');
   return u.pathname + u.search;
+}
+
+// replayFromURL reads which replay the URL names: the canonical path form
+// (/replays/<id>) first, then the legacy ?replay= query form, which every
+// link shared before the path scheme still carries. Null when the URL names
+// none (the landing page and its sections).
+function replayFromURL() {
+  const m = /^\/replays\/([A-Za-z0-9_-]{1,128})$/.exec(String(location.pathname || ''));
+  if (m) return m[1];
+  return new URLSearchParams(location.search).get('replay');
 }
 
 // The known settings flags (from the uploader's modoptions distillation) in
@@ -5738,7 +5795,7 @@ async function pollJob(job, gameId, status, opts) {
       } catch (_) { /* the replay still published; the list just didn't refresh */ }
       const e = replayList.find((x) => x.id === gameId) ||
         replayList.find((x) => x.id.startsWith(gameId + '-'));
-      if (e && o.autoOpen !== false) openReplay(urlId(e));
+      if (e && o.autoOpen !== false) openReplay(e.id);
       return;
     }
     if (j.state === 'processing') {
@@ -5833,7 +5890,7 @@ async function submitResim() {
 // where the user was — the list, or the previously watched replay).
 function openReplay(id) {
   hideHome();
-  if (new URLSearchParams(location.search).get('replay') !== id) {
+  if (replayFromURL() !== id) {
     history.pushState(null, '', replayHref(id));
   }
   loadReplay(id);
@@ -5855,17 +5912,34 @@ async function init() {
   document.getElementById('homelink').onclick = (e) => {
     e.preventDefault();
     const u = new URL(location.href);
+    u.pathname = '/';
     u.searchParams.delete('replay');
+    u.searchParams.delete('tab');
     history.pushState(null, '', u);
     showHome();
   };
 
-  // ?replay=<id> opens that replay directly (refresh / shared link); without
+  // Legacy query URLs (?replay=, ?tab=) normalize to the path form once, so
+  // the address bar shows the canonical link and a copy/refresh carries it.
+  // replaceState, not pushState: the visitor arrived at ONE page, whatever
+  // spelling the link used.
+  if (params.get('replay') || params.get('tab')) {
+    const u = new URL(location.href);
+    const rep = u.searchParams.get('replay');
+    const tab = u.searchParams.get('tab');
+    u.searchParams.delete('replay');
+    u.searchParams.delete('tab');
+    u.pathname = rep ? '/replays/' + encodeURIComponent(rep)
+      : HOME_TABS.includes(tab) && tab !== 'replays' ? '/' + tab : '/';
+    history.replaceState(null, '', u);
+  }
+
+  // /replays/<id> opens that replay directly (refresh / shared link); without
   // it the page is the replay list (the table IS the picker), and showHome
   // fetches the catalog it needs. A direct link asks for NOTHING the table
   // would have used — knownReplayURL accepts a well-formed id on its own, and
   // loadReplay reports a real failure if the pieces are not there.
-  const wanted = params.get('replay');
+  const wanted = replayFromURL();
   if (wanted && knownReplayURL(wanted)) {
     hideHome();
     await loadReplay(wanted);
@@ -5874,17 +5948,19 @@ async function init() {
   }
 }
 
-// Support browser back/forward and manual URL edits: no ?replay= means the
-// replay list, anything else re-opens that replay.
+// Support browser back/forward and manual URL edits: a URL naming no replay
+// means the replay list, anything else re-opens that replay.
 window.addEventListener('popstate', () => {
-  const wanted = new URLSearchParams(location.search).get('replay');
+  const wanted = replayFromURL();
   if (!wanted) {
     showHome();
     return;
   }
   if (knownReplayURL(wanted)) {
     hideHome();
-    if (wanted !== currentFile || !data) {
+    // currentRequest, not currentFile: the URL carries what was asked for
+    // (usually the bare id), currentFile the revision it resolved to.
+    if (wanted !== currentRequest || !data) {
       loadReplay(wanted);
     }
   }

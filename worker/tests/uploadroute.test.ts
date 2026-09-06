@@ -922,6 +922,50 @@ test("both favicon files exist for the asset layer to serve", () => {
   assert.match(html, /href="\/favicon\.ico"/);
 });
 
+// The viewer's canonical replay URL is a PATH under the same prefix as the
+// data pieces: /replays/<id> (no extension) is the SPA page, while every
+// piece carries an extension (<id>.brw/.keys/.resources) or a second segment
+// (<id>/c<n>). The dot is the whole dispatch — a page id and a bucket key
+// cannot collide on it.
+test("/replays/<id> serves the SPA page; pieces with extensions stay on the bucket", async () => {
+  const { env, bucket } = makeEnv();
+  await bucket.put("replays/aaaa.brw", new Uint8Array([1, 2, 3]));
+  await bucket.put("replays/aaaa/c0", new Uint8Array([9]));
+  const asked: string[] = [];
+  (env as unknown as { ASSETS: { fetch(r: Request): Promise<Response> } }).ASSETS = {
+    async fetch(r: Request) {
+      asked.push(new URL(r.url).pathname);
+      return new Response("<!DOCTYPE html>", { headers: { "content-type": "text/html" } });
+    },
+  };
+
+  // A bare id — a revisioned one included — is the page: the SPA entry,
+  // revalidated like "/", and never a bucket lookup.
+  for (const path of ["/replays/aaaa", "/replays/f8e5816a04505f9c2b5b69a6a458b696-9942e3d8"]) {
+    const page = await app.request(path, {}, env);
+    assert.equal(page.status, 200, path);
+    assert.equal(page.headers.get("cache-control"), "no-cache", path);
+    assert.match(await page.text(), /DOCTYPE html/, path);
+  }
+  assert.deepEqual(asked, ["/replays/aaaa", "/replays/f8e5816a04505f9c2b5b69a6a458b696-9942e3d8"]);
+
+  // A key with an extension is a data piece and still comes from the bucket…
+  const brw = await app.request("/replays/aaaa.brw", {}, env);
+  assert.equal(brw.status, 200);
+  assert.deepEqual(new Uint8Array(await brw.arrayBuffer()), new Uint8Array([1, 2, 3]));
+  // …and so does a chunk (two segments never match the page route).
+  const chunk = await app.request("/replays/aaaa/c0", {}, env);
+  assert.equal(chunk.status, 200);
+  assert.equal(asked.length, 2, "no data piece reached the asset layer");
+
+  // The landing page's sections are paths too, served exactly like "/".
+  for (const path of ["/queue", "/games", "/sqlstats"]) {
+    const r = await app.request(path, {}, env);
+    assert.equal(r.status, 200, path);
+    assert.equal(r.headers.get("cache-control"), "no-cache", path);
+  }
+});
+
 // The widget-install guide. The route hands the request to the asset layer
 // UNCHANGED: it resolves /setup to setup.html itself, and its default HTML
 // handling (auto-trailing-slash) answers a /setup.html URL with a 307 back to

@@ -20,7 +20,11 @@
 </head>
 <body>
 <header>
-  <h1><a href="./" id="homelink" title="All replays">barreplay</a><span class="sub" id="subtitle">replay state viewer</span></h1>
+  <!-- Absolute, not "./": the viewer's pages live at paths now
+       (/replays/<id>, /queue, …), where a relative link resolves inside the
+       page's own directory. A plain click is intercepted by the SPA anyway;
+       this is for middle-click / open-in-new-tab. -->
+  <h1><a href="/" id="homelink" title="All replays">barreplay</a><span class="sub" id="subtitle">replay state viewer</span></h1>
   <!-- Point-of-view marking. Most catalog rows carry no recorder provenance
        (their captures predate the GAME record's recorder fields) and it cannot
        be derived after the fact, so it is marked by hand here. Shown only in
@@ -34,9 +38,10 @@
   </div>
 </header>
 
-<!-- Landing view: the left menu and the section it selects (shown when no
-     ?replay= is selected). The selected section lives in the URL as ?tab=,
-     so a menu pick is shareable and survives a refresh.
+<!-- Landing view: the left menu and the section it selects (shown when the
+     URL names no replay). The selected section lives in the URL as the PATH
+     (/queue, /games, /sqlstats), so a menu pick is shareable and survives a
+     refresh.
      Queue is admin-only (?admin=true), like the row refresh button and the
      POV dropdown: it is the pipeline's state — everyone's uploads and their
      failure messages — which is maintenance, not something a visitor came

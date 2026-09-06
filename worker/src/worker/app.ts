@@ -614,6 +614,17 @@ app.get("/api/streams/:gameId/:file", async (c) => {
 // The replay listing is built live from the bucket (list the replays/ prefix), so
 // uploading a single replay's files makes it appear with no index.json to maintain.
 app.get("/index.json", (c) => handleIndex(c.env.BUCKET));
+// /replays/<id> with no extension is a PAGE — the viewer's canonical URL for
+// one replay (app.js routes on the path) — while every data piece under the
+// same prefix has an extension (<id>.brw/.keys/.resources) or a second
+// segment (<id>/c<n>, which this single-segment route never matches). The dot
+// is the whole dispatch: bucket keys and page ids cannot collide on it.
+// Registered before the wildcard so it wins for one-segment paths.
+app.on(["GET", "HEAD"], "/replays/:id", (c) => {
+  const id = c.req.param("id");
+  if (!id.includes(".")) return serveEntry(c);
+  return serveR2(c.env.BUCKET, c.req.path.slice(1), c.req.raw, true);
+});
 app.on(["GET", "HEAD"], "/replays/*", (c) => {
   const key = c.req.path.slice(1); // strip leading "/"
   return serveR2(c.env.BUCKET, key, c.req.raw, true);
@@ -660,6 +671,13 @@ const serveEntry = async (c: { env: Env; req: { raw: Request } }) => {
 };
 app.get("/", serveEntry);
 app.get("/index.html", serveEntry);
+// The landing page's sections live at paths now (/queue, /games, /sqlstats —
+// app.js routes on the pathname), so a direct load or refresh of one must
+// serve the SPA entry exactly like "/". The replay page path (/replays/<id>)
+// is handled above, where it shares a prefix with the data pieces.
+app.get("/queue", serveEntry);
+app.get("/games", serveEntry);
+app.get("/sqlstats", serveEntry);
 
 // The widget-install guide (public/setup.html), linked from the landing page's
 // dropzone. The asset layer resolves the extensionless /setup to setup.html on

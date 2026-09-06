@@ -619,7 +619,21 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           game adds no second hour of engine time, and the re-sim's own publish
                           (view "full") cannot re-queue itself. Rows are keyed by the BARE gameId and carry a
                           nullable `rid` (the <gameId>-<rev> revision the pieces are actually served
-                          under — see the internal/packer entry; the front-end fetches at rid ?? id)
+                          under — see the internal/packer entry; the front-end fetches at rid ?? id.
+                          SHAREABLE LINKS carry the BARE id as a PATH: /replays/<gameId> is the
+                          canonical URL — app.js resolveReplayFile maps it to the served revision,
+                          from the loaded listing when in hand, else one GET /api/replays?id=
+                          <gameId> — and every GUI link uses it except an explicit alt-upload
+                          link, which names its revision outright; /replays/<rid> keeps playing
+                          forever, since nothing is deleted, and legacy ?replay= links still
+                          resolve (init normalizes them to the path form via replaceState).
+                          BOTH backends serve the SPA entry at the page paths — /replays/<id>
+                          with NO extension (the dot is the whole dispatch against the data
+                          pieces under the same prefix: <id>.brw/.keys/.resources have one,
+                          chunks have a second segment) plus /queue /games /sqlstats — the
+                          worker via a /replays/:id route ahead of the R2 wildcard and the Go
+                          server inside handleReplays; the smoke harness checks all four
+                          against the real asset layer)
                           plus a nullable `settings` object (notable game-settings badges: ranked/
                           unranked, lava, mods, zombies, ruins, …) sourced from the demo fetch — see
                           the internal/packer entry — plus `players` (per-ally rosters by OS with the
@@ -725,21 +739,23 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           Queue and SQL are ADMIN-ONLY — the entry is hidden without
                           ?admin=true (CSS, like the row refresh button) and homeTab() maps
                           the tab back to "replays" for everyone else (ADMIN_TABS), so a
-                          shared ?tab=queue link cannot walk past the hidden entry and
+                          shared /queue link cannot walk past the hidden entry and
                           refreshQueue never fires. The Queue is the pipeline's state —
                           every uploader's jobs and their failure messages — which is
                           maintenance, not something a visitor came for.
                           Which section is shown lives in the
-                          URL as ?tab=, like the filters, so a pick is shareable and survives a
-                          refresh — but it PUSHES a history entry, because switching section is
-                          navigation, not a narrowing of what is listed; replayHref carries the
-                          param into a replay so back returns to the section it was opened from.
+                          URL as the PATH — /queue, /games, /sqlstats, with "/" the replay
+                          list (legacy ?tab= links normalize) — so a pick is shareable and
+                          survives a refresh; it PUSHES a history entry, because switching
+                          section is navigation, not a narrowing of what is listed, and back
+                          from a replay returns to the section through history.
                           The dropzone sits above both sections (a drop is accepted from either,
                           and its progress line stays visible while the Queue is watched).
                           "Replays" renders the catalog with
-                          superseded revisions of cataloged games hidden (their
-                          direct ?replay= links keep playing — nothing is deleted); picking a replay
-                          sets ?replay=, the header title returns to the list. The list's Players
+                          superseded revisions of cataloged games hidden (their direct
+                          /replays/<rid> links keep playing — nothing is deleted); picking a
+                          replay navigates to /replays/<id>, the header title returns to the
+                          list. The list's Players
                           column shows each side's top names by OS (3 per side for a two-team game,
                           1 when there are more sides; full roster + OS in the tooltip) with a ◉ on
                           the side that recorded the current upload, the Links cell adds an alt·T<n>
@@ -1274,7 +1290,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the URL (?col=lobby, replaceState like the filters, absent =
                           players so a fresh URL stays clean; replayHref carries it into a
                           replay), and on a backend without the field a ?col=lobby link
-                          degrades to players without touching the param, like ?tab=queue. The web SESSION (the Guardian
+                          degrades to players without touching the param, like a /queue link outside admin mode. The web SESSION (the Guardian
                           cookie jar) persists in the one-row teiserver_session table, so the
                           steady state is ONE authed GET per tick, no login (an expired
                           session shows as a redirect to /login: drop the cookie, log in once,
@@ -1441,7 +1457,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           .brp size breakdown verbatim in a scrolling <pre>. The row is the
                           toggle rather than a control of its own, minus clicks on a link, which
                           is there to be followed; which rows are open is plain component state
-                          (queueOpen), NOT in the URL — unlike ?tab= and the filters, "the third
+                          (queueOpen), NOT in the URL — unlike the section path and the filters, "the third
                           job's timings were expanded" is not a thing to share or restore.
                           A RUNNING job has no stats — those are written when the work ends — so
                           both of those cells answer from the live `progress` instead
@@ -1536,7 +1552,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           The reply's `total`/`active` are counted over the WHOLE jobs table, not
                           the page, so the pager and the menu's in-flight count stay true on any
                           page — one window of rows cannot say how many jobs are queued. The page
-                          number is deliberately NOT in the URL (unlike ?tab= and the filters):
+                          number is deliberately NOT in the URL (unlike the section path and the filters):
                           "page 3 of the queue" describes a moment in a pipeline, not a set of
                           replays, so there is nothing to share or restore. The route is OPEN, like
                           the per-job status the uploading browser already polls, but it omits
