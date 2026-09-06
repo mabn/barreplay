@@ -619,7 +619,13 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           game adds no second hour of engine time, and the re-sim's own publish
                           (view "full") cannot re-queue itself. Rows are keyed by the BARE gameId and carry a
                           nullable `rid` (the <gameId>-<rev> revision the pieces are actually served
-                          under — see the internal/packer entry; the front-end fetches at rid ?? id)
+                          under — see the internal/packer entry; the front-end fetches at rid ?? id.
+                          SHAREABLE LINKS carry the BARE id: ?replay=<gameId> is the canonical URL —
+                          app.js resolveReplayFile maps it to the served revision, from the loaded
+                          listing when in hand, else one GET /api/replays?id=<gameId> — and every
+                          GUI link uses it except an explicit alt-upload link, which names its
+                          revision outright; ?replay=<rid> keeps playing forever, since nothing is
+                          deleted)
                           plus a nullable `settings` object (notable game-settings badges: ranked/
                           unranked, lava, mods, zombies, ruins, …) sourced from the demo fetch — see
                           the internal/packer entry — plus `players` (per-ally rosters by OS with the
