@@ -67,8 +67,10 @@ const DETAIL_CONCURRENCY = 4;
 
 /** Shape check for an id from the API, matching the /api routes' own. It only
  * has to be safe as a key — BAR's ids are 32 hex chars, but refusing anything
- * else here would silently empty the mirror the day that changes. */
-const ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+ * else here would silently empty the mirror the day that changes. Exported
+ * because /api/games' ?id= filter holds requested ids to the same shape: an id
+ * the mirror could never store is a malformed request, not an empty answer. */
+export const GAME_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
 /** One mirrored game: what the BAR API says about a game nobody necessarily
  * captured. Deliberately the same vocabulary as a catalog row (map, size,
@@ -144,7 +146,7 @@ export function encodeGamesCursor(c: GamesCursor): string {
 const CURSOR_RE = /^(-?\d{1,15})?:([A-Za-z0-9_-]{1,128})$/;
 
 /** parseGamesCursor reads a wire cursor back, or null for anything that is
- * not one. The id part is held to the same shape the mirror accepts (ID_RE),
+ * not one. The id part is held to the same shape the mirror accepts (GAME_ID_RE),
  * so a cursor is never a way to feed the query an arbitrary string. */
 export function parseGamesCursor(raw: string): GamesCursor | null {
   const m = CURSOR_RE.exec(raw);
@@ -211,7 +213,7 @@ export async function syncGames(index: GamesIndex, fetchImpl: typeof fetch = fet
       const r = row as Record<string, unknown>;
       const id = r?.id;
       // Newest first, as the API sorts them, and deduped across pages.
-      if (typeof id === "string" && ID_RE.test(id) && !seen.has(id)) {
+      if (typeof id === "string" && GAME_ID_RE.test(id) && !seen.has(id)) {
         seen.add(id);
         ids.push(id);
       }

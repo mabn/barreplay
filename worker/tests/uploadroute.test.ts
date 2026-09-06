@@ -138,6 +138,17 @@ class FakeIndex {
     for (const r of rows) this.mirror.set(r.id, r);
     return rows.length;
   }
+  lastIdsQuery: string[] | null = null;
+  gamesByIds(ids: string[]): GameListRow[] {
+    this.lastIdsQuery = ids;
+    const byId = new Map(this.games.map((g) => [g.id, g] as const));
+    const out: GameListRow[] = [];
+    for (const id of ids) {
+      const g = byId.get(id);
+      if (g !== undefined) out.push(g);
+    }
+    return out;
+  }
   lastGamesQuery: { limit: number; after: GamesCursor | null } | null = null;
   gamesPage(limit: number, after: GamesCursor | null): { games: GameListRow[]; next: GamesCursor | null } {
     this.lastGamesQuery = { limit, after };
@@ -453,6 +464,41 @@ test("GET /api/games pages the mirror by cursor, and counts nothing", async () =
   // A cursor into the undated tail (blank end) is a valid one.
   assert.equal((await app.request("/api/games?after=:game-9", {}, env)).status, 200);
   assert.deepEqual(index.lastGamesQuery?.after, { endUnix: null, id: "game-9" });
+});
+
+// Fetch-by-ids: ?id= answers the named games instead of a listing page.
+test("GET /api/games?id= fetches the named games, holding ids to shape and count", async () => {
+  const { env, index } = makeEnv();
+  for (let i = 0; i < 3; i++) {
+    index.games.push({
+      id: `game-${i}`, startUnix: 1000 * (3 - i), durationSec: 600, map: "Map", mapFile: "map",
+      gameSize: "1v1", preset: "duel", playerCount: 2, players: null, settings: null,
+      engineVersion: "e", gameVersion: "v", syncedUnix: 1, lobbyName: null,
+      published: false, jobState: null,
+    });
+  }
+
+  // Asked order, unknown ids simply absent, and the same reply shape as a
+  // listing page — with nothing to page (next is null, not a cursor).
+  const got = await asJson(await app.request("/api/games?id=game-2,nope,%20game-0", {}, env));
+  assert.deepEqual(Object.keys(got).sort(), ["games", "next"]);
+  assert.deepEqual(got.games.map((g: GameListRow) => g.id), ["game-2", "game-0"]);
+  assert.equal(got.next, null);
+  // The route trimmed, deduped and passed the ids through.
+  await app.request("/api/games?id=game-1,game-1,,game-0", {}, env);
+  assert.deepEqual(index.lastIdsQuery, ["game-1", "game-0"]);
+  // limit/after are ignored beside id: a lookup has nothing to page.
+  index.lastGamesQuery = null;
+  await app.request("/api/games?id=game-1&limit=2&after=1000:game-9", {}, env);
+  assert.equal(index.lastGamesQuery, null, "an id request never reaches the pager");
+
+  // Junk is refused up front, never handed to the query.
+  assert.equal((await app.request("/api/games?id=,%20,", {}, env)).status, 400);
+  assert.equal((await app.request("/api/games?id=game'%3B--", {}, env)).status, 400);
+  // Up to 100 ids per request; 101 is a malformed request, not a bigger read.
+  const many = Array.from({ length: 100 }, (_, i) => `id-${i}`);
+  assert.equal((await app.request(`/api/games?id=${many.join(",")}`, {}, env)).status, 200);
+  assert.equal((await app.request(`/api/games?id=${[...many, "id-100"].join(",")}`, {}, env)).status, 400);
 });
 
 test("GET /api/queue pages with ?offset= and ?limit=", async () => {
