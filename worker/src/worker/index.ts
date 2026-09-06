@@ -38,35 +38,65 @@ export default {
   // would only turn a self-healing hiccup into a minute-by-minute stream of
   // failed cron invocations in the dashboard.
   async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+    let modded = 0;
     try {
       const r = await syncGames(indexStub(env));
+      modded = r.modded;
       // Quiet on a no-op tick: most runs find nothing new, and a line a minute
       // saying so would bury the ones that did something.
       if (r.added > 0 || r.failed > 0) {
         console.log(`games sync: pages=${r.pages} scanned=${r.scanned} fresh=${r.fresh} added=${r.added} failed=${r.failed}`);
       }
-      // Same tick, second step: offer freshly-finished modded games to the
-      // sibling lavabalance worker over the service binding (lavasync.ts —
-      // stateless, keyed on lavabalance's own newest stored game, so a run
-      // after downtime catches up by itself). Triggered by the sync above
-      // mirroring a modded game, plus the hourly sweep (see LAVA_SYNC_MINUTE).
-      // Its own try/catch: lavabalance being down must not cost the mirror.
-      const sweep = new Date(controller.scheduledTime).getUTCMinutes() === LAVA_SYNC_MINUTE;
-      if ((r.modded > 0 || sweep) && env.LAVABALANCE !== undefined) {
-        try {
-          const lv = await syncLava(indexStub(env), env.LAVABALANCE.fetch.bind(env.LAVABALANCE));
-          if (lv.submitted > 0) {
-            console.log(
-              `lava sync: candidates=${lv.candidates} submitted=${lv.submitted} rated=${lv.rated} ` +
-                `ignored=${lv.ignored} skipped=${lv.skipped} duplicate=${lv.duplicate} rejected=${lv.rejected}`,
-            );
-          }
-        } catch (e) {
-          console.error(`lava sync failed: ${e}`);
-        }
-      }
     } catch (e) {
       console.error(`games sync failed: ${e}`);
+    }
+
+    // Same tick, second step: poll teiserver's lobby list for the names
+    // the rts-api mirror can never carry (teiserver.ts). Its own try/catch,
+    // so a teiserver outage never costs the games mirror a run and vice
+    // versa; skipped entirely without the secrets, so local dev and forks
+    // run the games sync alone. BEFORE the lava sync, deliberately: the
+    // lobby match is arrival-driven, pairing a game on the tick it lands in
+    // the mirror — the same tick `modded > 0` triggers the lava sync — and
+    // the lobby details it copies onto the games row must be there before
+    // that submission reads them, or lavabalance stores the game without
+    // its parties forever.
+    if (env.TEISERVER_EMAIL !== undefined && env.TEISERVER_PASSWORD !== undefined) {
+      try {
+        const r = await syncLobbies(indexStub(env), {
+          email: env.TEISERVER_EMAIL,
+          password: env.TEISERVER_PASSWORD,
+          base: env.TEISERVER_BASE,
+        });
+        if (r.started > 0 || r.ended > 0 || r.matched > 0 || r.failed > 0) {
+          console.log(
+            `lobby sync: active=${r.active} started=${r.started} ended=${r.ended} matched=${r.matched} failed=${r.failed}`,
+          );
+        }
+      } catch (e) {
+        console.error(`lobby sync failed: ${e}`);
+      }
+    }
+
+    // Same tick, third step: offer freshly-finished modded games to the
+    // sibling lavabalance worker over the service binding (lavasync.ts —
+    // stateless, keyed on lavabalance's own newest stored game, so a run
+    // after downtime catches up by itself). Triggered by the games sync
+    // mirroring a modded game, plus the hourly sweep (see LAVA_SYNC_MINUTE).
+    // Its own try/catch: lavabalance being down must not cost the mirror.
+    const sweep = new Date(controller.scheduledTime).getUTCMinutes() === LAVA_SYNC_MINUTE;
+    if ((modded > 0 || sweep) && env.LAVABALANCE !== undefined) {
+      try {
+        const lv = await syncLava(indexStub(env), env.LAVABALANCE.fetch.bind(env.LAVABALANCE));
+        if (lv.submitted > 0) {
+          console.log(
+            `lava sync: candidates=${lv.candidates} submitted=${lv.submitted} rated=${lv.rated} ` +
+              `ignored=${lv.ignored} skipped=${lv.skipped} duplicate=${lv.duplicate} rejected=${lv.rejected}`,
+          );
+        }
+      } catch (e) {
+        console.error(`lava sync failed: ${e}`);
+      }
     }
     // The job_samples table is the one thing here that would otherwise grow
     // without a rule: a finished job's healthcheck history deliberately
@@ -89,28 +119,6 @@ export default {
         if (dropped > 0) console.log(`job samples pruned: ${dropped}`);
       } catch (e) {
         console.error(`job sample prune failed: ${e}`);
-      }
-    }
-
-    // Same tick, third step: poll teiserver's lobby list for the names
-    // the rts-api mirror can never carry (teiserver.ts). Its own try/catch,
-    // so a teiserver outage never costs the games mirror a run and vice
-    // versa; skipped entirely without the secrets, so local dev and forks
-    // run the games sync alone.
-    if (env.TEISERVER_EMAIL !== undefined && env.TEISERVER_PASSWORD !== undefined) {
-      try {
-        const r = await syncLobbies(indexStub(env), {
-          email: env.TEISERVER_EMAIL,
-          password: env.TEISERVER_PASSWORD,
-          base: env.TEISERVER_BASE,
-        });
-        if (r.started > 0 || r.ended > 0 || r.matched > 0 || r.failed > 0) {
-          console.log(
-            `lobby sync: active=${r.active} started=${r.started} ended=${r.ended} matched=${r.matched} failed=${r.failed}`,
-          );
-        }
-      } catch (e) {
-        console.error(`lobby sync failed: ${e}`);
       }
     }
   },

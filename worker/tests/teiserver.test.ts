@@ -14,10 +14,11 @@ import {
   extractCsrfToken,
   parseLobbyIndex,
   parseLobbyShowPlayers,
+  parseLobbyShowRoster,
   pickLobbyMatches,
   syncLobbies,
 } from "../src/worker/teiserver";
-import type { LobbyIndex, LobbyObservation, MatchGame, MatchLobby, OpenLobby } from "../src/worker/teiserver";
+import type { LobbyIndex, LobbyObservation, LobbyRosterPlayer, MatchGame, MatchLobby, OpenLobby } from "../src/worker/teiserver";
 
 // ---- Fixtures (trimmed from a real /battle/lobbies dead render) ----
 
@@ -57,13 +58,17 @@ const INDEX_HTML = `<table><tbody>
 
 /** A show page's players/spectators tables as rendered: a leading unlabeled
  * icon column before Name, and extra columns after it, so the test proves the
- * header-label indexing rather than a fixed position. */
+ * header-label indexing rather than a fixed position. Two players share a
+ * Party value, two have the blank (`&nbsp;`) cell teiserver renders for a
+ * solo queuer. */
 const SHOW_HTML = `
 <table class="table table-sm" id="players-table">
   <thead><tr><th width="100">&nbsp;</th><th>Name</th><th>Ready</th><th>Team</th><th>Party</th><th>Rating</th><th>Bonus</th><th>Faction</th></tr></thead>
   <tbody>
     <tr id="user-row-81372"><td width="100"></td><td>Adzek</td><td></td><td>0</td><td width="50">&nbsp;</td><td>27.25</td><td>0</td><td>Random</td></tr>
-    <tr id="user-row-561838"><td width="100"></td><td>[BS]Phoenix</td><td></td><td>1</td><td width="50">&nbsp;</td><td>26.78</td><td>0</td><td>Armada</td></tr>
+    <tr id="user-row-561838"><td width="100"></td><td>[BS]Phoenix</td><td></td><td>1</td><td width="50">7</td><td>26.78</td><td>0</td><td>Armada</td></tr>
+    <tr id="user-row-90001"><td width="100"></td><td>Kirdiel</td><td></td><td>1</td><td width="50">7</td><td>19.02</td><td>0</td><td>Cortex</td></tr>
+    <tr id="user-row-90002"><td width="100"></td><td>voidy</td><td></td><td>0</td><td width="50">&nbsp;</td><td>21.4</td><td>25</td><td></td></tr>
   </tbody>
 </table>
 <table class="table table-sm" id="spectators-table">
@@ -72,6 +77,14 @@ const SHOW_HTML = `
     <tr id="user-row-9"><td width="100"></td><td>LurkerGuy</td><td>12.00</td></tr>
   </tbody>
 </table>`;
+
+/** What parseLobbyShowRoster reads out of SHOW_HTML, verbatim. */
+const SHOW_ROSTER: LobbyRosterPlayer[] = [
+  { name: "Adzek", team: 0, party: null, rating: 27.25, bonus: 0, faction: "Random" },
+  { name: "[BS]Phoenix", team: 1, party: "7", rating: 26.78, bonus: 0, faction: "Armada" },
+  { name: "Kirdiel", team: 1, party: "7", rating: 19.02, bonus: 0, faction: "Cortex" },
+  { name: "voidy", team: 0, party: null, rating: 21.4, bonus: 25, faction: null },
+];
 
 // ---- Parsers ----
 
@@ -101,8 +114,20 @@ test("parseLobbyIndex reads rows, flags and the running clock", () => {
 });
 
 test("parseLobbyShowPlayers returns players by header label and never spectators", () => {
-  assert.deepEqual(parseLobbyShowPlayers(SHOW_HTML), ["Adzek", "[BS]Phoenix"]);
+  assert.deepEqual(parseLobbyShowPlayers(SHOW_HTML), ["Adzek", "[BS]Phoenix", "Kirdiel", "voidy"]);
   assert.deepEqual(parseLobbyShowPlayers("<p>no tables</p>"), []);
+});
+
+test("parseLobbyShowRoster keeps every cell, blank party/faction as null", () => {
+  assert.deepEqual(parseLobbyShowRoster(SHOW_HTML), SHOW_ROSTER);
+  assert.deepEqual(parseLobbyShowRoster("<p>no tables</p>"), []);
+  // A column the account class does not render: that field is null, the rest
+  // still resolve by label.
+  const noParty = SHOW_HTML.replace("<th>Party</th>", "").replace(/<td width="50">[^<]*<\/td>/g, "");
+  assert.deepEqual(
+    parseLobbyShowRoster(noParty),
+    SHOW_ROSTER.map((p) => ({ ...p, party: null })),
+  );
 });
 
 test("extractCsrfToken reads the meta tag, then the hidden input", () => {
@@ -253,9 +278,16 @@ test("syncLobbies observes new games, closes finished ones, skips known ones", a
       lobbyId: 10795,
       name: "Rosetta Rotato All Welcome | 8v8",
       map: "Proving Grounds v1.0",
-      players: ["Adzek", "[BS]Phoenix"],
-      playerCount: 2,
+      players: ["Adzek", "[BS]Phoenix", "Kirdiel", "voidy"],
+      playerCount: 4,
       elapsedSec: 13 * 60 + 49,
+      details: {
+        locked: false,
+        passworded: false,
+        memberCount: 35,
+        spectatorCount: 19,
+        players: SHOW_ROSTER,
+      },
     },
   ]);
   assert.deepEqual(index.ended, [5]);
@@ -291,6 +323,24 @@ test("a failed show fetch still records the observation, with players null", asy
   assert.equal(broken?.players, null);
   // The index page's player count stands in for the roster we could not get.
   assert.equal(broken?.playerCount, 16);
+  // The index-page half of the detail is still recorded; only the roster is
+  // missing.
+  assert.deepEqual(broken?.details, {
+    locked: false,
+    passworded: false,
+    memberCount: 35,
+    spectatorCount: 19,
+    players: null,
+  });
+  // 7000's show fetch worked, and its index flags carry into the detail.
+  const keyed = index.observed.find((o) => o.lobbyId === 7000);
+  assert.deepEqual(keyed?.details, {
+    locked: true,
+    passworded: true,
+    memberCount: 4,
+    spectatorCount: 0,
+    players: SHOW_ROSTER,
+  });
 });
 
 // ---- Matching ----

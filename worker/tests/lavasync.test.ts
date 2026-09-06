@@ -9,6 +9,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { MAX_LAVA_BATCH, syncLava } from "../src/worker/lavasync";
+import type { LavaCandidate } from "../src/worker/lavasync";
+import type { LobbyDetails } from "../src/worker/teiserver";
 
 /** One lavabalance WireGame, shaped like its GET /api/games rows. */
 function lavaGame(id: string, startISO: string, durationMs: number) {
@@ -50,13 +52,16 @@ function fakeBar(failing: Set<string> = new Set()) {
   return { impl, asked };
 }
 
-function fakeIndex(rows: { id: string; endUnix: number }[]) {
+function fakeIndex(rows: (Partial<LavaCandidate> & { id: string; endUnix: number })[]) {
   const queries: { endUnix: number; limit: number }[] = [];
   return {
     queries,
-    gamesModdedEndedAfter(endUnix: number, limit: number) {
+    gamesModdedEndedAfter(endUnix: number, limit: number): LavaCandidate[] {
       queries.push({ endUnix, limit });
-      return rows.filter((r) => r.endUnix >= endUnix).slice(0, limit);
+      return rows
+        .filter((r) => r.endUnix >= endUnix)
+        .slice(0, limit)
+        .map((r) => ({ lobbyName: null, lobbyDetails: null, ...r }));
     },
   };
 }
@@ -111,6 +116,32 @@ test("the watermark game itself is excluded; an equal-ended sibling is not", asy
 
   assert.equal(r.candidates, 1);
   assert.deepEqual(lava.posted[0].map((d) => (d as { id: string }).id), ["sibling"]);
+});
+
+test("a matched game's lobby info rides the submission; an unmatched one stays verbatim", async () => {
+  const lava = fakeLava(null);
+  const details: LobbyDetails = {
+    locked: false,
+    passworded: false,
+    memberCount: 20,
+    spectatorCount: 4,
+    players: [{ name: "Adzek", team: 0, party: "7", rating: 27.25, bonus: 0, faction: "Random" }],
+  };
+  const index = fakeIndex([
+    { id: "named", endUnix: 100, lobbyName: "Lava 8v8", lobbyDetails: details },
+    { id: "plain", endUnix: 200 },
+  ]);
+
+  const r = await syncLava(index, lava.impl, fakeBar().impl);
+
+  assert.equal(r.submitted, 2);
+  const [named, plain] = lava.posted[0] as Record<string, unknown>[];
+  // The BAR payload survives untouched (the marker), with the lobby fields on top.
+  assert.equal(named.marker, "detail-named");
+  assert.equal(named.lobbyName, "Lava 8v8");
+  assert.deepEqual(named.lobbyDetails, details);
+  // No matched lobby: the plain verbatim detail, no extra keys.
+  assert.deepEqual(Object.keys(plain).sort(), ["id", "marker"]);
 });
 
 test("a failed detail fetch skips that game and submits the rest", async () => {

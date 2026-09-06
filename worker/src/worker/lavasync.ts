@@ -27,6 +27,8 @@
 // side is an injected fetch (the cron passes the service binding's), so the
 // node tests drive the whole sync against fakes.
 
+import type { LobbyDetails } from "./teiserver";
+
 /** Cap on games submitted per run. Keeps one cron invocation's subrequest
  * count bounded (a detail fetch each); anything past the cap is picked up by
  * the next run once the watermark advances — or by the hourly sweep. */
@@ -38,9 +40,19 @@ const DETAIL_CONCURRENCY = 4;
 /** The service-binding host is arbitrary; the path is what routes. */
 const LAVA_BASE = "https://lavabalance";
 
+/** One candidate row: the game, when it ended, and the lobby info the
+ * teiserver poll matched onto it (null when it never was), which rides the
+ * submission so lavabalance learns the parties the players queued in. */
+export interface LavaCandidate {
+  id: string;
+  endUnix: number;
+  lobbyName: string | null;
+  lobbyDetails: LobbyDetails | null;
+}
+
 /** What the sync needs of the ReplayIndex Durable Object. */
 export interface LavaSyncIndex {
-  gamesModdedEndedAfter(endUnix: number, limit: number): { id: string; endUnix: number }[] | Promise<{ id: string; endUnix: number }[]>;
+  gamesModdedEndedAfter(endUnix: number, limit: number): LavaCandidate[] | Promise<LavaCandidate[]>;
 }
 
 /** What one run did, for the cron's log line. */
@@ -98,11 +110,19 @@ export async function syncLava(
   if (candidates.length === 0) return zero;
 
   // 3. The verbatim detail per candidate — lavabalance classifies from the
-  // raw gameSettings, so nothing less than the API's own reply will do.
+  // raw gameSettings, so nothing less than the API's own reply will do. The
+  // matched lobby info rides as EXTRA top-level fields on the detail object
+  // (the BAR API reply carries no lobbyName/lobbyDetails keys, so nothing
+  // collides): parties are lobby-only knowledge the raw detail cannot carry.
+  // A game with no matched lobby submits the plain detail, exactly as before.
   const details: unknown[] = new Array(candidates.length);
   await pool(candidates, DETAIL_CONCURRENCY, async (c, i) => {
     try {
-      details[i] = await fetchJSON(barFetch, `https://api.bar-rts.com/replays/${encodeURIComponent(c.id)}`);
+      const detail = await fetchJSON(barFetch, `https://api.bar-rts.com/replays/${encodeURIComponent(c.id)}`);
+      details[i] =
+        c.lobbyName === null && c.lobbyDetails === null
+          ? detail
+          : { ...(detail as Record<string, unknown>), lobbyName: c.lobbyName, lobbyDetails: c.lobbyDetails };
     } catch {
       // Skipped this run; still ahead of the watermark, so a later run retries.
     }

@@ -138,33 +138,73 @@ export function parseLobbyIndex(html: string): IndexLobby[] {
   return out;
 }
 
+/** One non-spectator row of a show page's players table, every cell kept.
+ * Any field but the name is null when its column is absent (teiserver renders
+ * different columns per account class) or its cell is blank — a blank Party
+ * cell means the player queued alone. */
+export interface LobbyRosterPlayer {
+  name: string;
+  /** Numeric Team cell. */
+  team: number | null;
+  /** Party label, kept as the trimmed cell TEXT rather than a number: it is
+   * only ever compared for equality (players sharing a value queued
+   * together), so this survives whatever rendering teiserver picks. */
+  party: string | null;
+  /** The lobby-shown rating ("27.25"). */
+  rating: number | null;
+  /** Handicap bonus. */
+  bonus: number | null;
+  /** Faction pick ("Armada", "Random", ...). */
+  faction: string | null;
+}
+
 /**
- * Parse the non-spectator player names out of a /battle/lobbies/show/<id>
- * page. Cells are resolved by header LABEL so the extra columns a
- * moderator account sees cannot shift the name column; the spectators table
- * is deliberately never read — spectators join and leave constantly, so a
- * roster that included them would disagree with itself minutes apart, and the
- * match this roster feeds ignores them by design.
+ * Parse the non-spectator players table of a /battle/lobbies/show/<id> page,
+ * keeping every cell. Cells are resolved by header LABEL so the extra columns
+ * a moderator account sees cannot shift anything; the spectators table is
+ * deliberately never read — spectators join and leave constantly, so a roster
+ * that included them would disagree with itself minutes apart, and the match
+ * this roster feeds ignores them by design.
  */
-export function parseLobbyShowPlayers(html: string): string[] {
+export function parseLobbyShowRoster(html: string): LobbyRosterPlayer[] {
   const tbl = /<table[^>]*id="players-table"[\s\S]*?<\/table>/.exec(html);
   if (!tbl) return [];
   const thead = /<thead>([\s\S]*?)<\/thead>/.exec(tbl[0]);
   const headers = thead
-    ? [...thead[1].matchAll(/<th[^>]*>([\s\S]*?)<\/th>/g)].map((m) => cellText(m[1]))
+    ? [...thead[1].matchAll(/<th[^>]*>([\s\S]*?)<\/th>/g)].map((m) => cellText(m[1]).toLowerCase())
     : [];
-  const nameCol = headers.findIndex((h) => h.toLowerCase() === "name");
+  const col = (label: string) => headers.indexOf(label);
+  const nameCol = col("name");
   if (nameCol < 0) return [];
+  const teamCol = col("team");
+  const partyCol = col("party");
+  const ratingCol = col("rating");
+  const bonusCol = col("bonus");
+  const factionCol = col("faction");
   const tbody = /<tbody>([\s\S]*?)<\/tbody>/.exec(tbl[0]);
   if (!tbody) return [];
-  const names: string[] = [];
+  const out: LobbyRosterPlayer[] = [];
   for (const r of tbody[1].matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)) {
     const cells = [...r[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)];
     if (!cells.length) continue;
-    const name = cellText(cells[nameCol]?.[1] ?? "");
-    if (name) names.push(name);
+    const cell = (i: number) => (i < 0 ? "" : cellText(cells[i]?.[1] ?? ""));
+    const name = cell(nameCol);
+    if (!name) continue;
+    out.push({
+      name,
+      team: parseNumber(cell(teamCol)),
+      party: cell(partyCol) || null,
+      rating: parseNumber(cell(ratingCol)),
+      bonus: parseNumber(cell(bonusCol)),
+      faction: cell(factionCol) || null,
+    });
   }
-  return names;
+  return out;
+}
+
+/** The roster's names alone — what the lobby↔game matching consumes. */
+export function parseLobbyShowPlayers(html: string): string[] {
+  return parseLobbyShowRoster(html).map((p) => p.name);
 }
 
 // ---- Session (adapted from claudebar's lavabalance/src/bot/teiserverWeb.ts) ----
@@ -457,6 +497,21 @@ export function pickLobbyMatches(lobbies: MatchLobby[], games: MatchGame[]): Lob
 
 // ---- The sync itself ----
 
+/** Everything the lobby pages say about a game beyond name/map/roster-names:
+ * the index page's flags and counts plus the show page's full per-player
+ * rows. One JSON blob (like jobs.stats): nothing filters on it in SQL, it is
+ * recorded to be read back — and copied verbatim onto the matched games row,
+ * since the observation itself is pruned 48h after a match. */
+export interface LobbyDetails {
+  locked: boolean;
+  passworded: boolean;
+  memberCount: number | null;
+  spectatorCount: number | null;
+  /** Per-player rows from the show page (party assignments live here); null
+   * when that fetch failed — the index-page fields above are still good. */
+  players: LobbyRosterPlayer[] | null;
+}
+
 /** A newly started lobby-game, ready to record. started_unix is stamped by
  * the DO at insert time — "when this sync saw it" IS the observation. */
 export interface LobbyObservation {
@@ -469,6 +524,8 @@ export interface LobbyObservation {
   /** The index page's running time at observation, so started_unix can be
    * back-dated for a game already minutes in when first seen. */
   elapsedSec: number | null;
+  /** The full lobby detail at observation time (see LobbyDetails). */
+  details: LobbyDetails;
 }
 
 /** An observation still open (its lobby was in progress last tick). */
@@ -546,9 +603,9 @@ export async function syncLobbies(
   let failed = 0;
   const observations: LobbyObservation[] = [];
   await pool(started, SHOW_CONCURRENCY, async (lobby) => {
-    let players: string[] | null = null;
+    let roster: LobbyRosterPlayer[] | null = null;
     try {
-      players = parseLobbyShowPlayers(await session.authedFetch(`${LOBBIES_PATH}/show/${lobby.id}`));
+      roster = parseLobbyShowRoster(await session.authedFetch(`${LOBBIES_PATH}/show/${lobby.id}`));
     } catch {
       failed++;
     }
@@ -556,9 +613,16 @@ export async function syncLobbies(
       lobbyId: lobby.id,
       name: lobby.name,
       map: lobby.map === "" ? null : lobby.map,
-      players,
-      playerCount: players !== null ? players.length : lobby.playerCount,
+      players: roster === null ? null : roster.map((p) => p.name),
+      playerCount: roster !== null ? roster.length : lobby.playerCount,
       elapsedSec: lobby.elapsedSec,
+      details: {
+        locked: lobby.locked,
+        passworded: lobby.passworded,
+        memberCount: lobby.memberCount,
+        spectatorCount: lobby.spectatorCount,
+        players: roster,
+      },
     });
   });
 
