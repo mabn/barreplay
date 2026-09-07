@@ -146,9 +146,10 @@ export interface LobbyRosterPlayer {
   name: string;
   /** Numeric Team cell. */
   team: number | null;
-  /** Party label, kept as the trimmed cell TEXT rather than a number: it is
-   * only ever compared for equality (players sharing a value queued
-   * together), so this survives whatever rendering teiserver picks. */
+  /** Opaque party key — the Party cell's BACKGROUND COLOUR (see partyKey),
+   * null = unpartied. Players sharing a key queued together; it is only ever
+   * compared for equality, and doubles as the colour teiserver shows for that
+   * party. */
   party: string | null;
   /** The lobby-shown rating ("27.25"). */
   rating: number | null;
@@ -156,6 +157,24 @@ export interface LobbyRosterPlayer {
   bonus: number | null;
   /** Faction pick ("Armada", "Random", ...). */
   faction: string | null;
+}
+
+/**
+ * The Party column identifies parties by CELL COLOUR, not text: teiserver
+ * gives each party (2+ members only, so a key always means a real party) a
+ * distinct background colour and renders an otherwise EMPTY cell —
+ * `<td style="background-color: #62ea6b;" width="50">&nbsp;</td>` — so
+ * players sharing a colour are in one party and an unstyled cell means
+ * "no party". Reading the cell's text finds nothing but `&nbsp;` on every
+ * row, which is exactly how the first version of this recorded parties for
+ * 1093 players and found none. Takes the RAW `<td …>…</td>`, not its text.
+ * (Same rule as claudebar's lavabalance/src/teiserver.ts partyKey, which
+ * drives these same pages.)
+ */
+export function partyKey(rawCell: string): string | null {
+  const m = /background-color:\s*([^;"']+)/i.exec(rawCell);
+  const colour = m?.[1]?.trim().toLowerCase();
+  return colour ? colour : null;
 }
 
 /**
@@ -188,12 +207,15 @@ export function parseLobbyShowRoster(html: string): LobbyRosterPlayer[] {
     const cells = [...r[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)];
     if (!cells.length) continue;
     const cell = (i: number) => (i < 0 ? "" : cellText(cells[i]?.[1] ?? ""));
+    // The whole `<td …>…</td>`, for the one column whose value is an
+    // attribute rather than text.
+    const rawCell = (i: number) => (i < 0 ? "" : (cells[i]?.[0] ?? ""));
     const name = cell(nameCol);
     if (!name) continue;
     out.push({
       name,
       team: parseNumber(cell(teamCol)),
-      party: cell(partyCol) || null,
+      party: partyKey(rawCell(partyCol)),
       rating: parseNumber(cell(ratingCol)),
       bonus: parseNumber(cell(bonusCol)),
       faction: cell(factionCol) || null,
