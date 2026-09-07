@@ -13,6 +13,7 @@ import {
   TeiserverSession,
   extractCsrfToken,
   parseLobbyIndex,
+  partyKey,
   parseLobbyShowPlayers,
   parseLobbyShowRoster,
   pickLobbyMatches,
@@ -58,16 +59,18 @@ const INDEX_HTML = `<table><tbody>
 
 /** A show page's players/spectators tables as rendered: a leading unlabeled
  * icon column before Name, and extra columns after it, so the test proves the
- * header-label indexing rather than a fixed position. Two players share a
- * Party value, two have the blank (`&nbsp;`) cell teiserver renders for a
- * solo queuer. */
+ * header-label indexing rather than a fixed position. The Party column is
+ * rendered the way teiserver really does it: an EMPTY cell whose background
+ * COLOUR is the party key (two players share one), and an unstyled cell for
+ * a solo queuer — a fixture carrying party text instead is what let a parser
+ * reading the cell's text ship and report no parties at all. */
 const SHOW_HTML = `
 <table class="table table-sm" id="players-table">
   <thead><tr><th width="100">&nbsp;</th><th>Name</th><th>Ready</th><th>Team</th><th>Party</th><th>Rating</th><th>Bonus</th><th>Faction</th></tr></thead>
   <tbody>
     <tr id="user-row-81372"><td width="100"></td><td>Adzek</td><td></td><td>0</td><td width="50">&nbsp;</td><td>27.25</td><td>0</td><td>Random</td></tr>
-    <tr id="user-row-561838"><td width="100"></td><td>[BS]Phoenix</td><td></td><td>1</td><td width="50">7</td><td>26.78</td><td>0</td><td>Armada</td></tr>
-    <tr id="user-row-90001"><td width="100"></td><td>Kirdiel</td><td></td><td>1</td><td width="50">7</td><td>19.02</td><td>0</td><td>Cortex</td></tr>
+    <tr id="user-row-561838"><td width="100"></td><td>[BS]Phoenix</td><td></td><td>1</td><td style="background-color: #62EA6B;" width="50">&nbsp;</td><td>26.78</td><td>0</td><td>Armada</td></tr>
+    <tr id="user-row-90001"><td width="100"></td><td>Kirdiel</td><td></td><td>1</td><td style="background-color: #62ea6b;" width="50">&nbsp;</td><td>19.02</td><td>0</td><td>Cortex</td></tr>
     <tr id="user-row-90002"><td width="100"></td><td>voidy</td><td></td><td>0</td><td width="50">&nbsp;</td><td>21.4</td><td>25</td><td></td></tr>
   </tbody>
 </table>
@@ -81,8 +84,9 @@ const SHOW_HTML = `
 /** What parseLobbyShowRoster reads out of SHOW_HTML, verbatim. */
 const SHOW_ROSTER: LobbyRosterPlayer[] = [
   { name: "Adzek", team: 0, party: null, rating: 27.25, bonus: 0, faction: "Random" },
-  { name: "[BS]Phoenix", team: 1, party: "7", rating: 26.78, bonus: 0, faction: "Armada" },
-  { name: "Kirdiel", team: 1, party: "7", rating: 19.02, bonus: 0, faction: "Cortex" },
+  // The two partied players share one key, case-normalized from the markup.
+  { name: "[BS]Phoenix", team: 1, party: "#62ea6b", rating: 26.78, bonus: 0, faction: "Armada" },
+  { name: "Kirdiel", team: 1, party: "#62ea6b", rating: 19.02, bonus: 0, faction: "Cortex" },
   { name: "voidy", team: 0, party: null, rating: 21.4, bonus: 25, faction: null },
 ];
 
@@ -123,11 +127,25 @@ test("parseLobbyShowRoster keeps every cell, blank party/faction as null", () =>
   assert.deepEqual(parseLobbyShowRoster("<p>no tables</p>"), []);
   // A column the account class does not render: that field is null, the rest
   // still resolve by label.
-  const noParty = SHOW_HTML.replace("<th>Party</th>", "").replace(/<td width="50">[^<]*<\/td>/g, "");
+  const noParty = SHOW_HTML.replace("<th>Party</th>", "").replace(/<td[^>]*width="50"[^>]*>[^<]*<\/td>/g, "");
   assert.deepEqual(
     parseLobbyShowRoster(noParty),
     SHOW_ROSTER.map((p) => ({ ...p, party: null })),
   );
+});
+
+// The Party cell is EMPTY by design — its colour is the value — so this is
+// the one column a text-reading parser silently reports as "nobody is ever
+// in a party", which is what shipped.
+test("partyKey reads the cell's background colour, not its text", () => {
+  assert.equal(partyKey(`<td style="background-color: #62ea6b;" width="50">&nbsp;</td>`), "#62ea6b");
+  // Case-normalized, so one party is one key however teiserver spells it.
+  assert.equal(partyKey(`<td style="background-color: #62EA6B" width="50">&nbsp;</td>`), "#62ea6b");
+  assert.equal(partyKey(`<td style="background-color: rgb(98, 234, 107);">&nbsp;</td>`), "rgb(98, 234, 107)");
+  // Unstyled cell, other styles, and a missing column are all "no party".
+  assert.equal(partyKey(`<td width="50">&nbsp;</td>`), null);
+  assert.equal(partyKey(`<td style="text-align: center;">&nbsp;</td>`), null);
+  assert.equal(partyKey(""), null);
 });
 
 test("extractCsrfToken reads the meta tag, then the hidden input", () => {
