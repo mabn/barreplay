@@ -1256,12 +1256,25 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           roster rather than dropping it — that moment never comes back).
                           The show page's whole players table is kept, not just the names:
                           parseLobbyShowRoster resolves team/PARTY/rating/bonus/faction per
-                          player by header label (party as trimmed cell TEXT, null = queued
-                          alone — it is only ever compared for equality), and that roster
+                          player by header label, and that roster
                           plus the index page's locked/passworded/member/spectator counts
                           land in ONE lobby_details JSON column (teiserver.ts LobbyDetails,
                           the jobs.stats pattern — nothing filters on it in SQL). The flat
                           `players` name list stays what the MATCH reads, untouched.
+                          PARTY IS A COLOUR, NOT TEXT (teiserver.ts partyKey): teiserver
+                          gives each party of 2+ a distinct background colour and renders an
+                          otherwise EMPTY cell — `<td style="background-color: #62ea6b;"
+                          width="50">&nbsp;</td>` — so the parser takes the RAW `<td>` and
+                          reads the colour, normalized to lower case, as an opaque key
+                          (equality only; unstyled cell = unpartied; a key always means a
+                          real party, since teiserver colours nothing else). Reading the
+                          cell's TEXT is the trap and it shipped once: every field around it
+                          parsed fine while `party` came back null for 1093 players across
+                          89 games, because the cell really is empty. The fixture in
+                          tests/teiserver.test.ts therefore carries the colour markup — a
+                          fixture with party text in that cell tests a rendering that does
+                          not exist. Same rule, and the same parse, as claudebar's
+                          lavabalance/src/teiserver.ts, which drives these same pages.
                           When the finished game later reaches the rts-api mirror,
                           ReplayIndex.lobbiesMatch pairs them: no shared id exists, so the
                           match is same map (normalized) + started within [-60s,+300s] of the
