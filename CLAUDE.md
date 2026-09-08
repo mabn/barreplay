@@ -1606,7 +1606,43 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           precisely the row a person watching wants to see), and which also
                           MAKES work: a "resim" poll with nothing pending queues a mirrored
                           game nothing has published and returns that (ReplayIndex.jobsOffer).
-                          WHICH game: of the BACKFILL_WINDOW=200 most recently ENDED
+                          WHICH game: TWO scans decide, asked in order.
+                          FIRST the LAVA PRIORITY lookup (ReplayIndex.lavaCandidate): the
+                          most recently ENDED 8v8 lava game of the last
+                          LAVA_WINDOW_SEC=24h that is still a candidate. Its window is
+                          measured in TIME, and that is the point — the ranked window
+                          below is measured in RANK, and on a mirror the daemon cannot
+                          keep up with (~2000 games a day against one publish an hour)
+                          the head of that list never empties, so a game not among the
+                          newest 200 candidates when a host is free is not merely
+                          outranked, it is INVISIBLE and stays invisible forever.
+                          Measured on the deployment: the two 8v8 lava games with no
+                          capture sat at candidate ranks 1621 and 1634, eight windows
+                          deep. Preferring lava inside the ranking would have found
+                          neither — a rank the window never reads is not a rank. LAVA is
+                          the settings flag (SETTINGS_LAVA_FLAG = map_waterislava), which
+                          is the closest thing the mirror has to the mode lavabalance
+                          rates: that mode ships as tweakdefs only its own classifier can
+                          identify (see LAVA SYNC), but every one of its lobbies also sets
+                          map_waterislava — over two days of the mirror, 42 of the 45 8v8
+                          games carrying the flag were LAVA SUPREME hosts and the other
+                          three were lava-map team games, the same thing to a spectator.
+                          8v8 is the game_size SPEC, not player_count=16 (a 4v4v4v4 FFA is
+                          16 players too). No ranking beyond recency inside it: every 8v8
+                          is sixteen players. The walk is games_backfill_end stopped at the
+                          window's edge, so it costs a DAY of BAR's output (~2200 rows,
+                          measured; rowcost.test.ts bounds it) whatever the mirror has
+                          grown to — a seek through every lava game ever mirrored would
+                          grow forever, which the ROW BUDGET rules out on the 10s poll
+                          path — and it stops at the FIRST match, so a lava game near the
+                          head costs a handful. It rests LAVA_COOLDOWN_SEC=5min on the
+                          EMPTY answer, longer than the ranked window's minute because
+                          the empty answer is the common one here (an 8v8 lava game
+                          finishes a couple of times an hour) and much more expensive
+                          than jobsPending; its OWN meta key (lava_after), so neither
+                          scan's rest can silence the other. Only the empty answer rests,
+                          for the same reason as below.
+                          THEN the ranked window: of the BACKFILL_WINDOW=200 most recently ENDED
                           eligible ones, the one
                           that is MODDED, and failing that the one with the MOST PLAYERS —
                           an hour of engine time buys an 8v8 as cheaply as the duel that
