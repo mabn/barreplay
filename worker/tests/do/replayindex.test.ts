@@ -504,6 +504,125 @@ test("the backfill takes a modded game first, ahead of a bigger one", async () =
   });
 });
 
+/** The lava lookup's window is real wall-clock time (24h back from now), so
+ * its games have to be dated against the same clock — unlike every other
+ * backfill test above, whose small epochs fall outside it and therefore leave
+ * the priority scan with nothing to find. */
+const NOW = Math.floor(Date.now() / 1000);
+const AGO = (sec: number) => NOW - sec;
+
+test("an 8v8 lava game of the last day is taken ahead of everything else", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([
+      // What the ranked window would pick: newer, modded, and the biggest.
+      game("fresh-modded", {
+        startUnix: AGO(600), durationSec: 300, gameSize: "16v16",
+        playerCount: 32, settings: { mods: true },
+      }),
+      // Older and smaller, and taken first anyway.
+      game("lava-8v8", {
+        startUnix: AGO(7200), durationSec: 1800, gameSize: "8v8",
+        playerCount: 16, settings: { lava: true, mods: true },
+      }),
+    ]);
+
+    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "lava-8v8" });
+  });
+});
+
+test("the lava lookup reaches past the ranked window the general scan is stuck in", async () => {
+  await inIndex((index) => {
+    // The deployment's actual failure: 8v8 lava games sitting ~1600 candidates
+    // deep, where a window over the newest 200 could never see them however
+    // it ranked. A time window can.
+    index.gamesInsert([
+      game("buried-lava", {
+        startUnix: AGO(80000), durationSec: 1800, gameSize: "8v8",
+        playerCount: 16, settings: { lava: true },
+      }),
+      ...Array.from({ length: 300 }, (_, i) =>
+        game(`recent-${i}`, { startUnix: AGO(3000) + i, durationSec: 60, playerCount: 16 })),
+    ]);
+
+    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "buried-lava" });
+  });
+});
+
+test("the lava lookup stops at a day, and hands back to the ranked window", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([
+      // Ended just over 24h ago: out of the priority window entirely.
+      game("stale-lava", {
+        startUnix: AGO(90000), durationSec: 600, gameSize: "8v8",
+        playerCount: 16, settings: { lava: true },
+      }),
+      game("plain", { startUnix: AGO(3600), durationSec: 600, playerCount: 16 }),
+    ]);
+
+    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "plain" });
+  });
+});
+
+test("only 8v8 lava games take priority, not every lava game", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([
+      game("lava-6v6", {
+        startUnix: AGO(7200), durationSec: 600, gameSize: "6v6",
+        playerCount: 12, settings: { lava: true },
+      }),
+      game("lava-ffa", {
+        startUnix: AGO(7300), durationSec: 600, gameSize: "4v4v4v4",
+        playerCount: 16, settings: { lava: true },
+      }),
+      // Newer and unremarkable — the ranked window's own pick, which stands
+      // because neither lava game is the shape the priority lookup is for.
+      game("plain", { startUnix: AGO(600), durationSec: 300, playerCount: 16 }),
+    ]);
+
+    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "plain" });
+  });
+});
+
+test("the lava lookup applies the same candidate rules as the ranked window", async () => {
+  await inIndex((index) => {
+    const lava = { gameSize: "8v8", playerCount: 16, settings: { lava: true }, durationSec: 600 };
+    index.gamesInsert([
+      game("published-lava", { startUnix: AGO(1200), ...lava }),
+      game("tried-lava", { startUnix: AGO(2400), ...lava }),
+      game("open-lava", { startUnix: AGO(3600), ...lava }),
+    ]);
+    index.upsert(replay("published-lava"));
+    index.jobInsert("old-job", "", "tried-lava", "resim");
+    index.jobUpdate("old-job", "error", "engine died at frame 400");
+
+    // Published is done, and a job of ANY state — a failed one included —
+    // means this game has had its hour; taking it again every poll is what
+    // excluding finished jobs exists to prevent.
+    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "open-lava" });
+  });
+});
+
+test("successive polls work through the lava games newest-ended first", async () => {
+  await inIndex((index, sql) => {
+    index.gamesInsert([
+      game("lava-old", {
+        startUnix: AGO(20000), durationSec: 600, gameSize: "8v8",
+        playerCount: 16, settings: { lava: true },
+      }),
+      game("lava-new", {
+        startUnix: AGO(5000), durationSec: 600, gameSize: "8v8",
+        playerCount: 16, settings: { lava: true },
+      }),
+    ]);
+
+    expect(index.jobsOffer("resim", OFFER)[0]).toMatchObject({ gameId: "lava-new" });
+    // A scan that FOUND something does not rest, so the next idle poll picks
+    // up the next one rather than waiting out a cooldown.
+    sql.exec(`UPDATE jobs SET state = 'done'`);
+    expect(index.jobsOffer("resim", "offer-2")[0]).toMatchObject({ gameId: "lava-old" });
+  });
+});
+
 test("a game with no settings recorded at all is still eligible", async () => {
   await inIndex((index) => {
     // settings is null when the API's reply carried no gameSettings. There is

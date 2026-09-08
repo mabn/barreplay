@@ -500,6 +500,22 @@ function sanitizePlayers(v: unknown): CatalogTeam[] | null | string {
  * the one nobody has another way to look at. */
 export const SETTINGS_MODS_FLAG = "mods";
 
+/** The flag settingsFlags emits for a game whose water is lava
+ * (map_waterislava). Named for the same reason SETTINGS_MODS_FLAG is: the
+ * re-sim backfill matches it as a string in SQL — ReplayIndex.jobsOffer looks
+ * for 8v8 lava games FIRST, ahead of everything else in the mirror — so
+ * renaming it here without the query would silently stop finding them.
+ *
+ * It is the closest thing the mirror has to "this was a lava game". The mode
+ * that lavabalance rates ships as tweakdefs, which only its own classifier can
+ * tell from any other mod (see lavasync.ts), but every one of those lobbies
+ * also sets map_waterislava — measured over two days of the mirror, 42 of the
+ * 45 8v8 games carrying this flag were LAVA SUPREME hosts and the other three
+ * were lava-map team games, which are the same thing to a spectator. So this
+ * flag alone is both cheap and right, where matching the mode exactly is
+ * neither. */
+export const SETTINGS_LAVA_FLAG = "lava";
+
 /** settingsFlags distills a game's raw modoptions map (string-valued, as the
  * BAR API's gameSettings serves it) into the catalog's settings object — the
  * TypeScript twin of viz.SettingsFlags in internal/viz/catalog.go, used by
@@ -514,7 +530,7 @@ export function settingsFlags(mo: Record<string, string>): Record<string, boolea
   // The one "off is the news" flag: an explicitly unranked lobby gets its
   // own badge (absent key = unknown).
   if (mo["ranked_game"] === "0") out["unranked"] = true;
-  on("map_waterislava", "lava");
+  on("map_waterislava", SETTINGS_LAVA_FLAG);
   on("scavunitsforplayers", "scavUnits");
   on("experimentalextraunits", "extraUnits");
   on("unit_restrictions_nonukes", "noNukes");

@@ -124,6 +124,82 @@ function seed(index: ReplayIndex): void {
     FROM (${seq(LOBBIES)})`);
 }
 
+/** The re-sim backfill's PRIORITY lookup (jobsOffer -> lavaCandidate) has its
+ * own seed, because the one above is dated to a fixed NOW in the past and this
+ * scan's window is the real clock's last 24 hours — against those rows it
+ * matches nothing and walks nothing, which measures the wrong thing entirely.
+ *
+ * Seeded here is the WORST case the walk can meet: a full day of games inside
+ * the window, every one of them an 8v8 (so the shape test never short-circuits
+ * the flag seek) and not one of them lava — the empty answer, which is both the
+ * common one and the only one a daemon can ask for repeatedly. What must hold
+ * is that it costs a DAY of BAR's output and not the mirror: the games table
+ * grows ~2000 rows a day forever, and a walk of all of it on a 10-second poll
+ * is the shape that has already taken this worker down twice. */
+const IN_WINDOW = 86400 / 40;
+/** The lava game's row: near the far edge of the window, so the walk crosses
+ * nearly the whole day to reach it — the expensive end of the success case. */
+const LAVA_AT = IN_WINDOW - 60;
+
+test("the lava priority lookup costs a day of the mirror, not the mirror", async () => {
+  const costs = await measured((index, tally) => {
+    const sql = (index as unknown as { ctx: DurableObjectState }).ctx.storage.sql;
+    const now = Math.floor(Date.now() / 1000);
+    const roster = `'[{"ally":0,"count":8,"players":[{"name":"p' || n || '","os":25}]}]'`;
+    // Dated back from the real clock at BAR's own rate (~40s between games),
+    // so the first IN_WINDOW rows fall inside the 24h window and the other
+    // ~2800 sit behind it, where the walk must stop.
+    sql.exec(`INSERT INTO games (id, start_unix, duration_sec, map, map_file, game_size, preset,
+                player_count, players, settings, engine_version, game_version, synced_unix)
+      SELECT printf('g%06d', n), ${now} - n*40 - 900, 900, 'Map ' || (n % 40), 'map_' || (n % 40),
+             '8v8', 'team', 16, ${roster}, '{"ranked":true}', 'e', 'v', ${now} - n*40
+      FROM (WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < ${GAMES})
+            SELECT n FROM seq)`);
+    sql.exec(`INSERT INTO replay_settings (replay_id, flag)
+      SELECT printf('g%06d', n), 'ranked'
+      FROM (WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < ${GAMES})
+            SELECT n FROM seq)`);
+    tally();
+    const out: Record<string, number> = {};
+
+    // Nothing lava in the window: the whole day is walked and comes back
+    // empty, which is the reading that decides whether this can sit on the
+    // poll path at all.
+    const empty = index.jobsOffer("resim", "job-lava-empty");
+    out.lavaScanEmpty = tally();
+    // It still hands back the ranked window's own pick — the priority lookup
+    // finding nothing must not end the poll.
+    expect(empty.length, "an empty lava scan still falls through to the ranked window").toBe(1);
+    sql.exec(`DELETE FROM jobs`);
+    sql.exec(`DELETE FROM schema_meta WHERE key IN ('lava_after', 'backfill_after')`);
+    tally();
+
+    // One lava game at the far edge of the window: the walk crosses the whole
+    // day to reach it, so this is the expensive END of the success case (a
+    // game near the head costs a handful of rows).
+    sql.exec(`INSERT INTO replay_settings (replay_id, flag)
+      VALUES (printf('g%06d', ${LAVA_AT}), 'lava')`);
+    tally();
+    const found = index.jobsOffer("resim", "job-lava-found");
+    out.lavaScanFound = tally();
+    expect(found[0]?.gameId, "the lava game at the window's edge is reachable").toBe(
+      `g${String(LAVA_AT).padStart(6, "0")}`,
+    );
+    return out;
+  });
+
+  const report = JSON.stringify(costs, null, 2);
+  // A day of games, and NOT the 5000-row mirror behind them (measured: 2566
+  // for the empty scan — which includes the ranked window's own scan behind it
+  // — and 2106 to reach a lava game at the window's edge). What the bound
+  // asserts is that the walk STOPS at that edge; the number does not grow as
+  // the mirror does, which is the whole reason the window is measured in time
+  // rather than in rank. At LAVA_COOLDOWN_SEC that is ~750k rows a day in the
+  // idle case — see ROW BUDGET in CLAUDE.md.
+  expect(costs.lavaScanEmpty, report).toBeLessThan(4000);
+  expect(costs.lavaScanFound, report).toBeLessThan(4000);
+});
+
 test("the polled and cron reads do not scan the tables they read from", async () => {
   const costs = await measured((index, tally) => {
     seed(index);

@@ -34,6 +34,7 @@ import type {
 import { LOBBY_MATCH_EARLY_SLACK_SEC, LOBBY_MATCH_WINDOW_SEC, pickLobbyMatches } from "./teiserver";
 import type { LobbyDetails, LobbyMatchResult, LobbyObservation, MatchGame, MatchLobby, OpenLobby } from "./teiserver";
 import {
+  SETTINGS_LAVA_FLAG,
   SETTINGS_MODS_FLAG,
   derivePlayerCount,
   mergeUploads,
@@ -113,6 +114,46 @@ const BACKFILL_WINDOW = 200;
  * case, which at the size bound above is a fraction of the daily rows-read
  * allowance — see ROW BUDGET in CLAUDE.md. */
 const BACKFILL_COOLDOWN_SEC = 60;
+
+/** The re-sim backfill's PRIORITY lookup: how far back it will reach for an
+ * 8v8 lava game, and how long it rests when there is none.
+ *
+ * WHY A SECOND LOOKUP AT ALL. The general backfill ranks over the
+ * BACKFILL_WINDOW most recently ended candidates, and that window is the whole
+ * problem: a host that publishes one game an hour against a mirror gaining
+ * ~2000 a day never empties the head of the list, so a game that is not among
+ * the 200 newest candidates when it is looked at is never looked at again.
+ * Measured on the deployment, the two 8v8 lava games with no capture sat at
+ * candidate ranks 1621 and 1634 — eight windows deep, and unreachable by any
+ * amount of waiting. Preferring lava inside the existing ranking would not
+ * have found them either, for the same reason: the ranking only ever sees the
+ * window. So this is a lookup of its own, over a window defined by TIME rather
+ * than by rank, asked FIRST.
+ *
+ * 24 HOURS because that is the horizon over which a lava game is still worth
+ * the hour of engine time, and because a day of BAR's output is a walk of
+ * fixed size (~2000 games) — one that does not grow as the mirror does, unlike
+ * a seek through every lava game ever mirrored, which is the shape the ROW
+ * BUDGET rules out for anything on the 10-second poll path.
+ *
+ * FIVE MINUTES of rest on the empty answer, where the general backfill rests
+ * one. The empty answer is the common one — an 8v8 lava game finishes a couple
+ * of times an hour, not a couple of times a minute — and it is the answer that
+ * repeats: an idle daemon would otherwise walk a day of the mirror every ten
+ * seconds to be told the same thing. Five minutes costs nothing anyone can
+ * see (the job it is looking for takes an hour to run) and keeps the idle case
+ * to ~288 walks a day. As with the general backfill, ONLY the empty answer
+ * rests: a walk that queues a game is not repeated, because the daemon leaves
+ * with it. */
+const LAVA_WINDOW_SEC = 24 * 3600;
+const LAVA_COOLDOWN_SEC = 300;
+
+/** The game_size spec an 8v8 game is recorded under, in both the mirror and
+ * the catalog: allies joined by "v", so a 16-player two-team game is exactly
+ * this string and a 16-player four-way FFA is "4v4v4v4". Matching the SPEC
+ * rather than player_count = 16 is the point — the ask is 8v8, and the two
+ * are not the same set. */
+const LAVA_GAME_SIZE = "8v8";
 
 /** How many healthchecks one job keeps. At the daemon's 10-second beat that is
  * two hours at full resolution, comfortably past any real re-simulation.
@@ -1754,9 +1795,73 @@ export class ReplayIndex extends DurableObject<Env> {
     );
   }
 
+  /** lavaCandidate is the backfill's PRIORITY lookup: the most recently ended
+   * 8v8 lava game of the last LAVA_WINDOW_SEC that nothing has captured and
+   * nothing has queued, or null.
+   *
+   * It exists because the general backfill cannot reach these games. That one
+   * ranks over the newest BACKFILL_WINDOW candidates, which on a mirror the
+   * daemon cannot keep up with is the last couple of hours — so a lava game
+   * that is not among them by the time a host is free is not merely
+   * outranked, it is invisible, and stays invisible as the head of the list
+   * refills ahead of it forever. Ranking lava higher inside that query would change nothing:
+   * a rank the window never reads is not a rank. What this needs, and has, is
+   * a window measured in TIME.
+   *
+   * WHY THESE GAMES FIRST. A lava game is the mode's own tweakdefs, and a
+   * spectator view of it is most of what the capture is for — the sibling
+   * lavabalance worker rates exactly these, and an 8v8 is the shape it wants
+   * (the general backfill already prefers modded and prefers bigger, for the
+   * same reasons; this is those two preferences made reachable rather than a
+   * new opinion).
+   *
+   * CANDIDATE means the same thing here as it does there: a mirrored game with
+   * no catalog row and NO JOB ROW AT ALL, done and errored ones included, or a
+   * lava game that fails to re-simulate would be handed straight back out on
+   * the next poll, an hour of engine time at a time. Pasting its link stays the
+   * retry.
+   *
+   * THE WALK is games_backfill_end, latest-ended-first, stopped at the window's
+   * edge — a range over the index, so its cost is a day of BAR's output (~2000
+   * rows) whatever the mirror has grown to, and it stops at the FIRST match, so
+   * a lava game near the head costs a handful. The ORDER BY repeats the index's
+   * expression textually (COALESCE included) for the reason the general
+   * backfill's does: anything else sorts the window into a temp b-tree. The
+   * flag test is a seek into replay_settings' (flag, replay_id) index, and a
+   * mirrored game always owns its own entries there (see indexSettings), so the
+   * flag read is the game's own.
+   *
+   * No ranking beyond recency: every 8v8 is sixteen players, so within one
+   * shape and one window the newest is simply the one someone might still be
+   * asking about. */
+  private lavaCandidate(now: number): string | null {
+    const rows = this.ctx.storage.sql
+      .exec(
+        `SELECT g.id AS id FROM games g
+          WHERE (g.start_unix + COALESCE(g.duration_sec, 0)) >= ?
+            AND g.game_size = ?
+            AND EXISTS (SELECT 1 FROM replay_settings s
+                        WHERE s.replay_id = g.id AND s.flag = ?)
+            AND NOT EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id)
+            AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = g.id)
+          ORDER BY (g.start_unix + COALESCE(g.duration_sec, 0)) DESC, g.id
+          LIMIT 1`,
+        now - LAVA_WINDOW_SEC,
+        LAVA_GAME_SIZE,
+        SETTINGS_LAVA_FLAG,
+      )
+      .toArray();
+    return rows.length === 0 ? null : (rows[0].id as string);
+  }
+
   /** jobsOffer is what the daemon's poll actually gets: the pending work of
    * its kind and, when a re-sim daemon would otherwise go home empty-handed,
    * one job queued on the spot from the games mirror.
+   *
+   * TWO scans make that job, asked in order. First lavaCandidate — an 8v8 lava
+   * game of the last day — which is a priority and, more to the point, is the
+   * one class of game the second scan structurally cannot reach; see its own
+   * note. Then the ranked window below, which is everything else.
    *
    * Of the BACKFILL_WINDOW most recently ENDED candidates it takes the one
    * with the MOST PLAYERS: an hour of engine time buys an 8v8 as cheaply as a
@@ -1831,6 +1936,21 @@ export class ReplayIndex extends DurableObject<Env> {
     // forever with nothing changing. A scan that finds a game does not: the
     // daemon leaves with it and stops asking.
     const now = Math.floor(Date.now() / 1000);
+
+    // The PRIORITY lookup, ahead of the general scan and rested separately:
+    // an 8v8 lava game of the last day outranks anything the ranked window
+    // below could offer, and is the one class of game that window cannot see
+    // at all (see lavaCandidate). Its own cooldown, because its empty answer
+    // is both the common one and much more expensive than jobsPending — and
+    // because sharing the general backfill's would let either one's rest
+    // silence the other.
+    const lavaRest = this.metaGet("lava_after");
+    if (lavaRest === null || now >= lavaRest) {
+      const lava = this.lavaCandidate(now);
+      if (lava !== null) return this.offerBackfilled(newJobId, lava);
+      this.metaPut("lava_after", now + LAVA_COOLDOWN_SEC);
+    }
+
     const restUntil = this.metaGet("backfill_after");
     if (restUntil !== null && now < restUntil) return [];
     const candidate = this.ctx.storage.sql
@@ -1877,7 +1997,14 @@ export class ReplayIndex extends DurableObject<Env> {
       this.metaPut("backfill_after", now + BACKFILL_COOLDOWN_SEC);
       return [];
     }
-    this.jobInsert(newJobId, "", candidate[0].id as string, "resim");
+    return this.offerBackfilled(newJobId, candidate[0].id as string);
+  }
+
+  /** offerBackfilled queues a game one of jobsOffer's two scans just picked and
+   * hands the daemon the row, which is what makes an auto-queued job
+   * indistinguishable from one a person pasted a link for a minute earlier. */
+  private offerBackfilled(newJobId: string, gameId: string): IngestJob[] {
+    this.jobInsert(newJobId, "", gameId, "resim");
     const job = this.jobGet(newJobId);
     return job === null ? [] : [job];
   }
