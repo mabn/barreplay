@@ -5,8 +5,8 @@
 //   REPLAY_PUT_TOKEN=... npx tsx tools/backfill-games.ts [--hours 48] \
 //       [--base https://replay.fogofwar.dev] [--batch 100] [--dry]
 //
-// What it does, all from HERE (the Worker makes no outbound calls, so its
-// free-plan 50-subrequest cap is irrelevant):
+// What it does, all from HERE (the Worker makes no outbound calls of its own on
+// this path, so no per-invocation subrequest cap applies):
 //   1. page api.bar-rts.com's listing (the mirror's own filter) back --hours,
 //   2. page the deployed mirror to see which of those it already has,
 //   3. fetch the /replays/<id> detail for only the MISSING ones,

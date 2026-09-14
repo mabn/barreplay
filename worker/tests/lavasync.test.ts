@@ -1,38 +1,33 @@
-// Drives the lava sync (src/worker/lavasync.ts) against fakes for all three
-// of its ports: lavabalance (an injected fetch, in production the service
-// binding's), the BAR API (an injected fetch), and the index (the one RPC
-// method it uses). What matters here: the watermark is derived from
-// lavabalance's own newest stored game, candidates at/after it are submitted
-// oldest-ended first as verbatim details, and every failure mode leaves the
-// next run able to catch up.
+// Drives the lava sync (src/worker/lavasync.ts) against fakes for all three of
+// its ports: lavabalance (an injected fetch, in production the service
+// binding's), the BAR API (an injected fetch), and the index (the two RPC
+// methods it uses). What matters here: the queue is the games barreplay has not
+// offered yet, they go out oldest-STARTED first as verbatim details, each batch
+// is marked only once lavabalance has answered for it — and a RUN keeps going
+// until the queue is empty, which is what turns a backlog from a night of
+// trickling into a few seconds.
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { MAX_LAVA_BATCH, syncLava } from "../src/worker/lavasync";
+import { MAX_LAVA_BATCH, MAX_LAVA_RUN, syncLava } from "../src/worker/lavasync";
 import type { LavaCandidate } from "../src/worker/lavasync";
 import type { LobbyDetails } from "../src/worker/teiserver";
 
-/** One lavabalance WireGame, shaped like its GET /api/games rows. */
-function lavaGame(id: string, startISO: string, durationMs: number) {
-  return { id, startTime: startISO, durationMs, map: "Supreme Isthmus", winnerTeam: 0, ignored: false, teams: [[], []] };
-}
-
-/** A fake lavabalance: serves `newest` on the listing, records POSTed bodies,
- * answers each with an UploadResult rating everything. */
-function fakeLava(newest: ReturnType<typeof lavaGame> | null) {
+/** A fake lavabalance: records POSTed bodies and answers each with an
+ * UploadResult under `verdict` — "rated" by default, "rejected" for the runs
+ * that matter most, since a reject is what used to stall the queue.
+ * `failPost` makes the Nth POST (1-based) fail, for the partial-run case. */
+function fakeLava(verdict: "rated" | "rejected" = "rated", failPost = 0) {
   const posted: unknown[][] = [];
   const impl = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = String(input);
-    if (url.endsWith("/api/games?limit=1")) {
-      return new Response(JSON.stringify({ games: newest ? [newest] : [], next: null }));
-    }
     if (url.endsWith("/api/games") && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as unknown[];
       posted.push(body);
+      if (posted.length === failPost) return new Response("boom", { status: 503 });
       const ids = body.map((d) => (d as { id: string }).id);
-      return new Response(JSON.stringify({
-        rated: ids, ignored: [], skipped: [], duplicate: [], rejected: [], lastSeq: 1, players: 16,
-      }));
+      const empty = { rated: [], ignored: [], skipped: [], duplicate: [], rejected: [] };
+      return new Response(JSON.stringify({ ...empty, [verdict]: ids, lastSeq: 1, players: 16 }));
     }
     return new Response("nope", { status: 404 });
   }) as typeof fetch;
@@ -52,74 +47,155 @@ function fakeBar(failing: Set<string> = new Set()) {
   return { impl, asked };
 }
 
-function fakeIndex(rows: (Partial<LavaCandidate> & { id: string; endUnix: number })[]) {
-  const queries: { endUnix: number; limit: number }[] = [];
+/** The index as the sync sees it: a pending queue that shrinks as games are
+ * marked, which is the behaviour the loop rests on — the real one is SQL over
+ * games.lava_offered_unix (tests/do/replayindex.test.ts). `stuck` makes marking
+ * a no-op, the one case where that premise fails. */
+function fakeIndex(
+  rows: (Partial<LavaCandidate> & { id: string; startUnix: number })[],
+  stuck = false,
+) {
+  const offered = new Set<string>();
+  const limits: number[] = [];
   return {
-    queries,
-    gamesModdedEndedAfter(endUnix: number, limit: number): LavaCandidate[] {
-      queries.push({ endUnix, limit });
+    offered,
+    limits,
+    gamesLavaPending(limit: number): LavaCandidate[] {
+      limits.push(limit);
       return rows
-        .filter((r) => r.endUnix >= endUnix)
+        .filter((r) => !offered.has(r.id))
+        .sort((a, b) => a.startUnix - b.startUnix || (a.id < b.id ? -1 : 1))
         .slice(0, limit)
-        .map((r) => ({ lobbyName: null, lobbyDetails: null, ...r }));
+        .map((r) => ({ endUnix: r.startUnix + 600, lobbyName: null, lobbyDetails: null, ...r }));
+    },
+    lavaMarkOffered(ids: string[]): number {
+      if (stuck) return 0;
+      for (const id of ids) offered.add(id);
+      return ids.length;
     },
   };
 }
 
 // 2026-09-04T10:00:00Z, in unix seconds — the fixtures hang off this moment.
 const T0 = Math.floor(Date.parse("2026-09-04T10:00:00.000Z") / 1000);
-const iso = (unix: number) => new Date(unix * 1000).toISOString();
 
-test("submits everything at/after the watermark, oldest-ended first, as verbatim details", async () => {
-  // lavabalance's newest stored game ended at T0 (started 30 min before).
-  const lava = fakeLava(lavaGame("stored", iso(T0 - 1800), 1800_000));
+/** n queued games, started one second apart so their order is unambiguous. */
+const queued = (n: number, prefix = "g") =>
+  Array.from({ length: n }, (_, i) => ({ id: `${prefix}${i}`, startUnix: T0 + i }));
+
+const idsOf = (body: unknown[]) => body.map((d) => (d as { id: string }).id);
+
+test("submits the pending queue oldest-started first, as verbatim details", async () => {
+  const lava = fakeLava();
   const bar = fakeBar();
   const index = fakeIndex([
-    { id: "old", endUnix: T0 - 600 },  // before the mark: not offered
-    { id: "b", endUnix: T0 + 900 },
-    { id: "a", endUnix: T0 + 300 },
+    { id: "b", startUnix: T0 + 900 },
+    { id: "a", startUnix: T0 + 300 },
   ]);
 
   const r = await syncLava(index, lava.impl, bar.impl);
 
-  assert.equal(index.queries[0].endUnix, T0, "watermark = start + duration of the newest stored game");
   assert.deepEqual(r, {
-    watermarkEnd: T0, candidates: 2, submitted: 2,
+    candidates: 2, submitted: 2, failed: 0, failure: null, batches: 1, more: false,
     rated: 2, ignored: 0, skipped: 0, duplicate: 0, rejected: 0,
   });
-  // One POST, finish order, verbatim BAR payloads (the marker survives).
+  // One POST, start order, verbatim BAR payloads (the marker survives).
   assert.equal(lava.posted.length, 1);
-  assert.deepEqual(lava.posted[0].map((d) => (d as { id: string }).id), ["a", "b"]);
+  assert.deepEqual(idsOf(lava.posted[0]), ["a", "b"]);
   assert.equal((lava.posted[0][0] as { marker: string }).marker, "detail-a");
+  // Both are out of the queue, so the next run has nothing to do.
+  assert.deepEqual([...index.offered].sort(), ["a", "b"]);
 });
 
-test("an empty lavabalance fold means everything modded qualifies", async () => {
-  const lava = fakeLava(null);
-  const index = fakeIndex([{ id: "x", endUnix: 100 }]);
+test("one run drains the whole queue, a batch at a time", async () => {
+  // 45 games: the shape of a backlog. The single-batch version took 20 and
+  // waited for the next cron tick, so a gap like the 2026-09-11 one arrived
+  // over hours. Marking each batch before reading the next is what makes
+  // carrying on inside one run both possible and safe.
+  const lava = fakeLava();
+  const index = fakeIndex(queued(45));
 
   const r = await syncLava(index, lava.impl, fakeBar().impl);
 
-  assert.equal(r.watermarkEnd, 0);
-  assert.equal(r.submitted, 1);
+  assert.deepEqual([r.candidates, r.submitted, r.batches, r.more], [45, 45, 3, false]);
+  assert.deepEqual(lava.posted.map((b) => b.length), [20, 20, 5]);
+  assert.equal(index.offered.size, 45);
+  // Start order holds ACROSS batches, not just inside one: lavabalance folds
+  // forward from a (startTime, id) head and stores anything behind it unranked.
+  const submitted = lava.posted.flatMap(idsOf);
+  assert.deepEqual(submitted, queued(45).map((g) => g.id));
 });
 
-test("the watermark game itself is excluded; an equal-ended sibling is not", async () => {
-  const lava = fakeLava(lavaGame("stored", iso(T0 - 1800), 1800_000));
-  // The stored game reappears in the mirror with the same end; a different
-  // game that ended the same second must still be offered (>=, not >).
+test("a batch lavabalance rejects wholesale does not hold up the one behind it", async () => {
+  // THE REGRESSION. MAX_LAVA_BATCH unstorable games sit in front of one real
+  // lava game; lavabalance rejects every one of them and therefore stores none.
+  // The old sync re-derived its queue from lavabalance's newest STORED game, so
+  // the rejects stayed in front of the mark and the run repeated, verbatim,
+  // hourly, for three days. Now one run gets through them to the game behind.
+  const lava = fakeLava("rejected");
   const index = fakeIndex([
-    { id: "stored", endUnix: T0 },
-    { id: "sibling", endUnix: T0 },
+    ...queued(MAX_LAVA_BATCH, "junk"),
+    { id: "real", startUnix: T0 + MAX_LAVA_BATCH },
   ]);
 
   const r = await syncLava(index, lava.impl, fakeBar().impl);
 
-  assert.equal(r.candidates, 1);
-  assert.deepEqual(lava.posted[0].map((d) => (d as { id: string }).id), ["sibling"]);
+  assert.deepEqual([r.candidates, r.batches, r.more], [MAX_LAVA_BATCH + 1, 2, false]);
+  assert.equal(r.rejected, MAX_LAVA_BATCH + 1);
+  assert.deepEqual(idsOf(lava.posted[1]), ["real"]);
+  // Marked despite being rejected: classification is deterministic, so offering
+  // them again could only produce the same answer.
+  assert.equal(index.offered.size, MAX_LAVA_BATCH + 1);
+});
+
+test("a run stops at MAX_LAVA_RUN and says work is still waiting", async () => {
+  // The ceiling is politeness to api.bar-rts.com and the cron's wall clock, NOT
+  // a subrequest budget (10,000 per invocation on this plan). What is left rides
+  // the next tick, which finds it because this run marked what it took.
+  const lava = fakeLava();
+  const bar = fakeBar();
+  const index = fakeIndex(queued(MAX_LAVA_RUN + 50));
+
+  const r = await syncLava(index, lava.impl, bar.impl);
+
+  assert.deepEqual([r.candidates, r.submitted, r.more], [MAX_LAVA_RUN, MAX_LAVA_RUN, true]);
+  assert.equal(r.batches, MAX_LAVA_RUN / MAX_LAVA_BATCH);
+  assert.equal(bar.asked.length, MAX_LAVA_RUN, "one detail per game taken, and no more");
+  assert.equal(index.offered.size, MAX_LAVA_RUN);
+});
+
+test("a queue that will not shrink stops the run instead of spinning it", async () => {
+  // The loop's premise is that marking removes a batch from the pending query.
+  // If that fails — here marking writes nothing — the same rows come back, and
+  // without the guard the run would re-fetch them until the ceiling: 200 BAR
+  // requests to make no progress at all.
+  const lava = fakeLava();
+  const bar = fakeBar();
+  const index = fakeIndex(queued(45), true);
+
+  const r = await syncLava(index, lava.impl, bar.impl);
+
+  assert.deepEqual([r.candidates, r.batches, r.more], [MAX_LAVA_BATCH, 1, true]);
+  assert.equal(bar.asked.length, MAX_LAVA_BATCH, "one wasted batch, not ten");
+  assert.equal(lava.posted.length, 1);
+});
+
+test("a POST that fails mid-drain keeps the batches already marked", async () => {
+  // What makes looping safe: progress is per batch, so a run that dies partway
+  // still moved the queue. The throw reaches the cron, which logs it; the next
+  // run picks up from the third batch.
+  const lava = fakeLava("rated", 3);
+  const index = fakeIndex(queued(60));
+
+  await assert.rejects(() => syncLava(index, lava.impl, fakeBar().impl), /503/);
+
+  assert.equal(lava.posted.length, 3, "it got as far as the third POST");
+  assert.equal(index.offered.size, 2 * MAX_LAVA_BATCH, "the first two batches stay marked");
+  for (const id of queued(2 * MAX_LAVA_BATCH).map((g) => g.id)) assert.ok(index.offered.has(id));
 });
 
 test("a matched game's lobby info rides the submission; an unmatched one stays verbatim", async () => {
-  const lava = fakeLava(null);
+  const lava = fakeLava();
   const details: LobbyDetails = {
     locked: false,
     passworded: false,
@@ -128,8 +204,8 @@ test("a matched game's lobby info rides the submission; an unmatched one stays v
     players: [{ name: "Adzek", team: 0, party: "7", rating: 27.25, bonus: 0, faction: "Random" }],
   };
   const index = fakeIndex([
-    { id: "named", endUnix: 100, lobbyName: "Lava 8v8", lobbyDetails: details },
-    { id: "plain", endUnix: 200 },
+    { id: "named", startUnix: T0, lobbyName: "Lava 8v8", lobbyDetails: details },
+    { id: "plain", startUnix: T0 + 100 },
   ]);
 
   const r = await syncLava(index, lava.impl, fakeBar().impl);
@@ -144,53 +220,75 @@ test("a matched game's lobby info rides the submission; an unmatched one stays v
   assert.deepEqual(Object.keys(plain).sort(), ["id", "marker"]);
 });
 
-test("a failed detail fetch skips that game and submits the rest", async () => {
-  const lava = fakeLava(null);
+test("a failed detail fetch submits the rest and leaves that one pending", async () => {
+  const lava = fakeLava();
   const bar = fakeBar(new Set(["bad"]));
   const index = fakeIndex([
-    { id: "bad", endUnix: 100 },
-    { id: "good", endUnix: 200 },
+    { id: "bad", startUnix: T0 },
+    { id: "good", startUnix: T0 + 100 },
   ]);
 
   const r = await syncLava(index, lava.impl, bar.impl);
 
   assert.equal(r.candidates, 2);
   assert.equal(r.submitted, 1);
-  assert.deepEqual(lava.posted[0].map((d) => (d as { id: string }).id), ["good"]);
+  // Reported rather than swallowed: a detail that will not load is the kind of
+  // quiet failure this design exists to make loud.
+  assert.equal(r.failed, 1);
+  assert.match(String(r.failure), /502/);
+  assert.deepEqual(idsOf(lava.posted[0]), ["good"]);
+  // Unmarked, so the next run offers it again — the retry for a BAR blip.
+  assert.deepEqual([...index.offered], ["good"]);
+});
+
+test("a batch whose every detail fails ends the run rather than pressing on", async () => {
+  // BAR having a bad minute is not a reason to walk the whole queue: nothing
+  // can be marked, so the next pass would hit the no-progress guard anyway.
+  const lava = fakeLava();
+  const bar = fakeBar(new Set(queued(20).map((g) => g.id)));
+  const index = fakeIndex(queued(45));
+
+  const r = await syncLava(index, lava.impl, bar.impl);
+
+  assert.deepEqual([r.candidates, r.submitted, r.batches, r.more], [20, 0, 0, true]);
+  assert.equal(r.failed, 20);
+  assert.match(String(r.failure), /502/);
+  assert.equal(lava.posted.length, 0);
+  assert.equal(index.offered.size, 0);
+  assert.equal(bar.asked.length, 20, "it stopped after the one bad batch");
 });
 
 test("no candidates costs no BAR fetch and no POST", async () => {
-  const lava = fakeLava(lavaGame("stored", iso(T0 - 1800), 1800_000));
+  const lava = fakeLava();
   const bar = fakeBar();
 
   const r = await syncLava(fakeIndex([]), lava.impl, bar.impl);
 
-  assert.deepEqual([r.candidates, r.submitted], [0, 0]);
+  assert.deepEqual([r.candidates, r.submitted, r.batches, r.more], [0, 0, 0, false]);
   assert.deepEqual(bar.asked, []);
   assert.equal(lava.posted.length, 0);
 });
 
-test("the batch is capped so one run's subrequests stay bounded", async () => {
-  const lava = fakeLava(null);
-  const rows = Array.from({ length: MAX_LAVA_BATCH + 10 }, (_, i) => ({ id: `g${i}`, endUnix: 100 + i }));
+test("one row past the batch is read, to tell a full batch from the last one", async () => {
+  const index = fakeIndex(queued(3));
 
-  const r = await syncLava(fakeIndex(rows), lava.impl, fakeBar().impl);
+  await syncLava(index, fakeLava().impl, fakeBar().impl);
 
-  assert.equal(r.submitted, MAX_LAVA_BATCH);
+  // Asked for MAX_LAVA_BATCH + 1 and got 3, so the queue was done in one pass —
+  // no second read spent being told it is empty.
+  assert.deepEqual(index.limits, [MAX_LAVA_BATCH + 1]);
 });
 
-test("lavabalance being unreachable throws — the caller's retry story", async () => {
+test("lavabalance being unreachable throws, and marks nothing", async () => {
   const down = (async () => new Response("boom", { status: 503 })) as typeof fetch;
-  await assert.rejects(() => syncLava(fakeIndex([]), down, fakeBar().impl), /503/);
+  const index = fakeIndex([{ id: "x", startUnix: T0 }]);
 
-  // Reachable listing, failing upload: also a throw, nothing half-recorded.
-  const lava = fakeLava(null);
-  const failPost = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (init?.method === "POST") return new Response("boom", { status: 503 });
-    return lava.impl(input, init);
-  }) as typeof fetch;
-  await assert.rejects(
-    () => syncLava(fakeIndex([{ id: "x", endUnix: 1 }]), failPost, fakeBar().impl),
-    /503/,
-  );
+  await assert.rejects(() => syncLava(index, down, fakeBar().impl), /503/);
+
+  // Nothing marked, so the next run re-offers the lot: a crashed run costs
+  // nothing, which is the one property of the stateless design worth keeping.
+  assert.deepEqual([...index.offered], []);
+  const lava = fakeLava();
+  await syncLava(index, lava.impl, fakeBar().impl);
+  assert.deepEqual(idsOf(lava.posted[0]), ["x"]);
 });
