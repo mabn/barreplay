@@ -91,9 +91,11 @@ export default {
         const lv = await syncLava(indexStub(env), env.LAVABALANCE.fetch.bind(env.LAVABALANCE));
         if (lv.submitted > 0) {
           console.log(
-            `lava sync: candidates=${lv.candidates} submitted=${lv.submitted} rated=${lv.rated} ` +
-              `ignored=${lv.ignored} skipped=${lv.skipped} duplicate=${lv.duplicate} ` +
-              `rejected=${lv.rejected}${lv.more ? " (more pending)" : ""}`,
+            `lava sync: candidates=${lv.candidates} submitted=${lv.submitted} ` +
+              `batches=${lv.batches} rated=${lv.rated} ignored=${lv.ignored} ` +
+              `skipped=${lv.skipped} duplicate=${lv.duplicate} ` +
+              `rejected=${lv.rejected}${lv.more ? " (more pending)" : ""}` +
+              (lv.failed > 0 ? ` — ${lv.failed} detail(s) failed: ${lv.failure}` : ""),
           );
         }
       } catch (e) {

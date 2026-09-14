@@ -1224,9 +1224,27 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           after the column was added, when every lava game in the mirror is
                           unoffered and nearly all are long since stored; if the count ever
                           grows enough to matter, the shape that fixes it is a pending-work
-                          table, not a wider index. MAX_LAVA_BATCH=20 caps one run's
-                          detail fetches (subrequests); a failed BAR detail is left unmarked
-                          and retried next run. lavasync.ts is pure like games.ts (both
+                          table, not a wider index. DRAINING: a run works through the queue
+                          in batches of MAX_LAVA_BATCH=20 — one POST and one lavaMarkOffered
+                          each — and keeps going until the queue is empty or MAX_LAVA_RUN=200
+                          games. The BATCH is the unit of progress (marked before the next is
+                          read), which is what makes the loop safe: a run that dies in batch
+                          four keeps one to three, and the next run resumes. MAX_LAVA_BATCH
+                          was once described as a per-invocation SUBREQUEST cap; that was
+                          reasoning from the FREE plan's 50, and this Worker is on Workers
+                          PAID, where the limit is 10,000 (200 details + 10 service-binding
+                          POSTs = 210). The ceiling is there for the limits that are real at
+                          this size: api.bar-rts.com's goodwill — politeness here is
+                          structural, no backoff anywhere, just DETAIL_CONCURRENCY=4, one
+                          detail per game ever, and this cap — and the cron's envelope (30s
+                          CPU under an hourly interval, 15min wall; ~10-15s at 200). Two
+                          things end a run early rather than press on: a batch whose every BAR
+                          detail failed, and a batch that comes back entirely already-taken,
+                          which means marking did not shrink the queue and continuing would
+                          re-fetch the same games to the ceiling. A failed BAR detail is left
+                          unmarked and retried next run; DETAIL_TIMEOUT_MS=8000 keeps a hung
+                          one from holding a multi-batch run open across ticks.
+                          lavasync.ts is pure like games.ts (both
                           fetches injected — the cron passes the service binding's), tested
                           in tests/lavasync.test.ts; the vitest pool STUBS the LAVABALANCE
                           binding (vitest.config.ts), since without one workerd refuses to
