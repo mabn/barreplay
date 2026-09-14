@@ -1178,31 +1178,55 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           reply carries neither key, so nothing collides; an unmatched game
                           submits the plain detail). That is why the cron runs the LOBBY sync
                           BEFORE this one: the match is arrival-driven, landing on the same
-                          tick `modded > 0` triggers this sync, and a submission that ran
-                          first would hand lavabalance the game without its parties forever.
-                          STATELESS: each run reads lavabalance's own most recent
-                          stored game (GET /api/games?limit=1 over the binding), takes its END
-                          (start+duration) as the watermark, and submits every candidate the
-                          mirror holds that ended at/after it (the watermark game excluded by
-                          id; re-offers come back "duplicate", harmlessly) — so a run after
-                          lavabalance downtime just finds a lower watermark and catches up,
-                          and barreplay keeps no sync state to lose. CANDIDATES are the
-                          mirror's MODS-flagged games (every lava game runs tweakdefs; the
-                          mirror's `lava` flag is map_waterislava, a different thing) —
-                          lavabalance's classifier stays the authority and simply rejects
-                          non-lava mods; rejected/skipped games are NOT stored there, so they
-                          re-offer until a rated game moves the watermark past them, bounded
-                          by the sync's cadence. CADENCE: a tick that just mirrored a modded
-                          game (GameSyncResult.modded > 0 — known for free from the details
-                          the sync already fetched) runs it at once, plus one hourly sweep
-                          (LAVA_SYNC_MINUTE), which is the retry after a failed trigger —
-                          never every tick, because the candidate query
-                          (ReplayIndex.gamesModdedEndedAfter: the (flag, replay_id) index
-                          seek for 'mods' + a games PK seek each, rowcost-bounded) costs the
-                          count of modded games ever mirrored, and 1440 of those a day is the
-                          ROW BUDGET pattern to avoid. MAX_LAVA_BATCH=20 caps one run's
-                          detail fetches (subrequests); a failed BAR detail is skipped and
-                          re-offered next run. lavasync.ts is pure like games.ts (both
+                          tick `lavaCandidates > 0` triggers this sync, and a submission that
+                          ran first would hand lavabalance the game without its parties —
+                          which is also why lobbiesMatch CLEARS lava_offered_unix, giving a
+                          game whose lobby landed late exactly one re-offer (the UPDATE is
+                          write-once on lobby_name, so it cannot loop; lavabalance fills a
+                          NULL lobby column on a game it already holds).
+                          WHAT BARREPLAY REMEMBERS: which games it has offered, one mark per
+                          game — games.lava_offered_unix, set by ReplayIndex.lavaMarkOffered
+                          after lavabalance ANSWERS a batch, read by gamesLavaPending. A run
+                          that throws marks nothing and the next re-offers the lot, so a crash
+                          still costs nothing; re-submission comes back "duplicate". CANDIDATES
+                          are the mirror's LAVA-SHAPED games: the `lava` flag (map_waterislava)
+                          on an 8v8 roster — what lavabalance itself requires of every game it
+                          stores — offered oldest-STARTED first, because its fold runs forward
+                          from a (startTime, id) head and stores anything behind it unranked
+                          for good. Its classifier stays the authority on what a lava game IS
+                          (the mode ships as tweakdefs; only it reads those).
+                          WHY, because both halves replaced something that deadlocked from
+                          2026-09-11 to 09-14: the sync was STATELESS, deriving its queue from
+                          lavabalance's newest STORED game (GET /api/games?limit=1) and offering
+                          everything that ended at/after it, and its pre-filter was the MODS
+                          flag on the theory that tweaked games are rare (~0 in 24). Both were
+                          measured wrong. There were 405 modded games in three days, and since
+                          lavabalance stores only what its classifier accepts, every one it
+                          declined stayed ahead of the watermark: a night of zombie and
+                          noob-friendly lobbies left 33 such games in front of the queue, past
+                          MAX_LAVA_BATCH=20, and the sync re-offered the same 20 rejects hourly
+                          for three days while 72 real lava games queued behind them. Nothing
+                          logged an error because nothing failed — hence `more` in
+                          LavaSyncResult, so a backlog says so in the log line. A queue whose
+                          head can be held by work the consumer refuses has to be drained by
+                          the producer.
+                          CADENCE: a tick that just mirrored a lava-shaped game
+                          (GameSyncResult.lavaCandidates > 0 — known for free from the details
+                          the games sync already fetched, and deliberately the SAME predicate
+                          as the query, since the two drifting is what hid the stall) runs it
+                          at once, plus one hourly sweep (LAVA_SYNC_MINUTE), which is both the
+                          retry after a failed trigger and what drains a backlog — never every
+                          tick, because the candidate query (ReplayIndex.gamesLavaPending: the
+                          (flag, replay_id) index seek for 'lava' + a games PK seek each,
+                          rowcost-bounded) costs the count of lava-flagged games ever mirrored,
+                          and 1440 of those a day is the ROW BUDGET pattern to avoid.
+                          LAVA_OFFER_HORIZON_SEC (7 days) bounds that query and the first run
+                          after the column was added, when every lava game in the mirror is
+                          unoffered and nearly all are long since stored; if the count ever
+                          grows enough to matter, the shape that fixes it is a pending-work
+                          table, not a wider index. MAX_LAVA_BATCH=20 caps one run's
+                          detail fetches (subrequests); a failed BAR detail is left unmarked
+                          and retried next run. lavasync.ts is pure like games.ts (both
                           fetches injected — the cron passes the service binding's), tested
                           in tests/lavasync.test.ts; the vitest pool STUBS the LAVABALANCE
                           binding (vitest.config.ts), since without one workerd refuses to
