@@ -516,6 +516,19 @@ export const SETTINGS_MODS_FLAG = "mods";
  * neither. */
 export const SETTINGS_LAVA_FLAG = "lava";
 
+/** The game_size spec an 8v8 game is recorded under, in both the mirror and
+ * the catalog: allies joined by "v", so a 16-player two-team game is exactly
+ * this string and a 16-player four-way FFA is "4v4v4v4". Matching the SPEC
+ * rather than player_count = 16 is the point — the ask is 8v8, and the two are
+ * not the same set. Measured on the lava lobbies, the difference is 21 games in
+ * three days: a 7v7v2 "GOD MODE ISLANDS" format that is 16 players and three
+ * allies, which lavabalance skips as "not 2 teams".
+ *
+ * Here rather than in replayindex.ts because both SQL users of it (the re-sim
+ * backfill's lava priority, the lava sync's candidate filter) and the games
+ * sync's own count of fresh candidates must agree on one string. */
+export const LAVA_GAME_SIZE = "8v8";
+
 /** settingsFlags distills a game's raw modoptions map (string-valued, as the
  * BAR API's gameSettings serves it) into the catalog's settings object — the
  * TypeScript twin of viz.SettingsFlags in internal/viz/catalog.go, used by

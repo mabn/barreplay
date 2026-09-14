@@ -78,7 +78,7 @@ test("syncGames reads page 1 with the agreed query and records every new game", 
 
   assert.equal(calls[0], LIST_URL);
   assert.match(calls[0], /[?&]page=1&limit=50&hasBots=false&endedNormally=true$/);
-  assert.deepEqual(r, { scanned: 3, fresh: 3, added: 3, failed: 0, pages: 1, modded: 0 });
+  assert.deepEqual(r, { scanned: 3, fresh: 3, added: 3, failed: 0, pages: 1, lavaCandidates: 0 });
   assert.deepEqual([...index.rows.keys()].sort(), ["a1", "b2", "c3"]);
 });
 
@@ -90,7 +90,7 @@ test("syncGames spends a detail fetch only on games it does not have", async () 
   const { impl, calls } = fakeFetch(["c3", "a1", "b2"]);
   const r = await syncGames(index, impl);
 
-  assert.deepEqual(r, { scanned: 3, fresh: 1, added: 1, failed: 0, pages: 1, modded: 0 });
+  assert.deepEqual(r, { scanned: 3, fresh: 1, added: 1, failed: 0, pages: 1, lavaCandidates: 0 });
   assert.deepEqual(calls, [LIST_URL, "https://api.bar-rts.com/replays/c3"]);
 });
 
@@ -101,7 +101,7 @@ test("syncGames touches the API once when the whole page is already mirrored", a
 
   const r = await syncGames(index, impl);
 
-  assert.deepEqual(r, { scanned: 1, fresh: 0, added: 0, failed: 0, pages: 1, modded: 0 });
+  assert.deepEqual(r, { scanned: 1, fresh: 0, added: 0, failed: 0, pages: 1, lavaCandidates: 0 });
   assert.deepEqual(calls, [LIST_URL], "a known page must cost exactly the listing");
 });
 
@@ -111,7 +111,7 @@ test("syncGames records the games whose detail loaded and retries the rest next 
 
   const r = await syncGames(index, impl);
 
-  assert.deepEqual(r, { scanned: 3, fresh: 3, added: 2, failed: 1, pages: 1, modded: 0 });
+  assert.deepEqual(r, { scanned: 3, fresh: 3, added: 2, failed: 1, pages: 1, lavaCandidates: 0 });
   assert.deepEqual([...index.rows.keys()].sort(), ["a1", "c3"]);
   // Not recorded means still unknown, so the next pass offers it again.
   assert.deepEqual(index.gamesUnknown(["a1", "b2", "c3"]), ["b2"]);
@@ -153,7 +153,7 @@ test("syncGames ignores junk rows and duplicate ids on the page", async () => {
 
   const r = await syncGames(index, impl);
 
-  assert.deepEqual(r, { scanned: 1, fresh: 1, added: 1, failed: 0, pages: 1, modded: 0 });
+  assert.deepEqual(r, { scanned: 1, fresh: 1, added: 1, failed: 0, pages: 1, lavaCandidates: 0 });
   assert.deepEqual(calls, [LIST_URL, "https://api.bar-rts.com/replays/a1"]);
 });
 
@@ -161,7 +161,7 @@ test("syncGames is a no-op on an empty or malformed page", async () => {
   const index = new FakeIndex();
   for (const body of ['{"data":[]}', "{}", '{"data":"nope"}']) {
     const impl = (async () => new Response(body)) as typeof fetch;
-    assert.deepEqual(await syncGames(index, impl), { scanned: 0, fresh: 0, added: 0, failed: 0, pages: 1, modded: 0 });
+    assert.deepEqual(await syncGames(index, impl), { scanned: 0, fresh: 0, added: 0, failed: 0, pages: 1, lavaCandidates: 0 });
   }
 });
 
@@ -267,19 +267,55 @@ test("syncGames keeps the pages it gathered when a later page fails", async () =
   assert.equal(index.rows.size, GAMES_PAGE_LIMIT);
 });
 
-test("syncGames counts freshly-recorded modded games (the lava-sync trigger)", async () => {
+/** An ally of `n` players, the shape gameSizeSpec reads. */
+function ally(allyTeamId: number, n: number): Record<string, unknown> {
+  return {
+    allyTeamId,
+    winningTeam: allyTeamId === 0,
+    Players: Array.from({ length: n }, (_, i) => ({ name: `p${allyTeamId}_${i}`, skill: "[20.0]" })),
+    AIs: [],
+  };
+}
+
+test("syncGames counts freshly-recorded LAVA-SHAPED games (the lava-sync trigger)", async () => {
   const index = new FakeIndex();
-  const { impl } = fakeFetch(["m1", "plain", "m2"], {
-    m1: detail("m1", { gameSettings: { tweakdefs: "ZmFrZQ==" } }),
-    m2: detail("m2", { gameSettings: { tweakunits3: "ZmFrZQ==" } }),
+  // What the trigger must count: the lava flag (map_waterislava) on an 8v8.
+  // What it must NOT count is everything the sync used to — any tweaked game —
+  // because those are what jammed the queue: zombie FFAs and modded team games
+  // lavabalance has no use for, at 100+ a day.
+  const { impl } = fakeFetch(["lava1", "lava2", "ffa", "modded8v8", "lava6v6", "plain"], {
+    lava1: detail("lava1", {
+      gameSettings: { map_waterislava: "1", tweakdefs: "ZmFrZQ==" },
+      AllyTeams: [ally(0, 8), ally(1, 8)],
+    }),
+    lava2: detail("lava2", {
+      gameSettings: { map_waterislava: "1", tweakunits3: "ZmFrZQ==" },
+      AllyTeams: [ally(0, 8), ally(1, 8)],
+    }),
+    // 16 players, lava map, FOUR allies — the 4v4v4v4 zombie shape.
+    ffa: detail("ffa", {
+      gameSettings: { map_waterislava: "1", tweakdefs: "ZmFrZQ==" },
+      AllyTeams: [ally(0, 4), ally(1, 4), ally(2, 4), ally(3, 4)],
+    }),
+    // Tweaked 8v8 on ordinary water: modded, not lava.
+    modded8v8: detail("modded8v8", {
+      gameSettings: { tweakdefs: "ZmFrZQ==" },
+      AllyTeams: [ally(0, 8), ally(1, 8)],
+    }),
+    // A lava lobby's smaller game: lavabalance stores 8v8 only.
+    lava6v6: detail("lava6v6", {
+      gameSettings: { map_waterislava: "1", tweakdefs: "ZmFrZQ==" },
+      AllyTeams: [ally(0, 6), ally(1, 6)],
+    }),
   });
 
   const r = await syncGames(index, impl);
 
-  assert.equal(r.modded, 2);
+  assert.equal(r.added, 6, "every game is still mirrored — only the COUNT is narrow");
+  assert.equal(r.lavaCandidates, 2);
   // A second pass records nothing, so nothing triggers.
-  const again = await syncGames(index, fakeFetch(["m1", "plain", "m2"]).impl);
-  assert.equal(again.modded, 0);
+  const again = await syncGames(index, fakeFetch(["lava1", "plain"]).impl);
+  assert.equal(again.lavaCandidates, 0);
 });
 
 test("gameFromApi maps a detail reply onto the mirror row", () => {

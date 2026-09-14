@@ -34,6 +34,7 @@ import type {
 import { LOBBY_MATCH_EARLY_SLACK_SEC, LOBBY_MATCH_WINDOW_SEC, pickLobbyMatches } from "./teiserver";
 import type { LobbyDetails, LobbyMatchResult, LobbyObservation, MatchGame, MatchLobby, OpenLobby } from "./teiserver";
 import {
+  LAVA_GAME_SIZE,
   SETTINGS_LAVA_FLAG,
   SETTINGS_MODS_FLAG,
   derivePlayerCount,
@@ -148,12 +149,14 @@ const BACKFILL_COOLDOWN_SEC = 60;
 const LAVA_WINDOW_SEC = 24 * 3600;
 const LAVA_COOLDOWN_SEC = 300;
 
-/** The game_size spec an 8v8 game is recorded under, in both the mirror and
- * the catalog: allies joined by "v", so a 16-player two-team game is exactly
- * this string and a 16-player four-way FFA is "4v4v4v4". Matching the SPEC
- * rather than player_count = 16 is the point — the ask is 8v8, and the two
- * are not the same set. */
-const LAVA_GAME_SIZE = "8v8";
+/** How far back the lava sync will still offer a game it has never offered
+ * (see gamesLavaPending). Its whole job is to bound that query, and the first
+ * run after lava_offered_unix was added — when every lava game in the mirror
+ * is unoffered and nearly all of them are long since stored on the other side.
+ * A week is well past the point where lavabalance could rate a late arrival
+ * anyway: its fold is forward-only, so a game behind the head is stored
+ * unranked whenever it turns up. */
+const LAVA_OFFER_HORIZON_SEC = 7 * 24 * 3600;
 
 /** How many healthchecks one job keeps. At the daemon's 10-second beat that is
  * two hours at full resolution, comfortably past any real re-simulation.
@@ -240,7 +243,7 @@ const DERIVED_VERSION = 3;
  * whether the DDL needs to run at all — a read, where the DDL statements are
  * write-classified even as no-ops. BUMP THIS whenever SCHEMA_DDL, INDEX_DDL
  * or ADDED_COLUMNS change, or the change never reaches a deployed database. */
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 /** Everything migrateSchema creates, split from the code so schemaCurrent can
  * scan the same text it executes (one source, nothing to drift). */
@@ -515,6 +518,14 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   // chance. Like the two above, NOT in gamesInsert's upsert list.
   ["lobbies", "lobby_details TEXT"],
   ["games", "lobby_details TEXT"],
+  // When this game was handed to lavabalance (lavaMarkOffered), NULL until it
+  // has been. It is the lava sync's whole memory, and the reason the sync now
+  // has any: the watermark it derived instead came from lavabalance's newest
+  // STORED game, so games lavabalance declines — most modded ones, since its
+  // classifier wants lava tweaks — sat in front of the queue forever. See
+  // gamesLavaPending. Like the lobby columns, NOT in gamesInsert's upsert list:
+  // a re-sync of a game says nothing about whether it was offered.
+  ["games", "lava_offered_unix INTEGER"],
   ["replays", "settings TEXT"],
   ["replays", "rid TEXT"],
   ["replays", "players TEXT"],
@@ -1236,38 +1247,100 @@ export class ReplayIndex extends DurableObject<Env> {
     return ids.filter((id) => !known.has(id));
   }
 
-  /** gamesModdedEndedAfter lists the mirror's MODDED games (the mods flag in
-   * replay_settings — the lava sync's candidate pre-filter, see lavasync.ts)
-   * that ended at or after `endUnix`, oldest-ended first. Driven by the
-   * (flag, replay_id) covering index, so the cost is the number of modded
-   * games ever mirrored (rare — ~0 in 24) plus a PK seek each, NOT the
-   * mirror's size; and it runs only on a fresh-modded-game trigger or the
-   * hourly sweep, never the every-minute path (rowcost.test.ts bounds it).
-   * Each row also carries the game's matched lobby info (null when no lobby
-   * was ever matched), which the lava sync attaches to what it submits. */
-  gamesModdedEndedAfter(
-    endUnix: number,
+  /** gamesLavaPending lists the lava sync's candidates: the mirror's
+   * LAVA-SHAPED games — the lava flag in replay_settings (map_waterislava) and
+   * an 8v8 roster — that have never been offered to lavabalance and ended
+   * inside LAVA_OFFER_HORIZON_SEC, OLDEST-STARTED first, `limit` at a time.
+   * Each row also carries the game's matched lobby info (null when no lobby was
+   * ever matched), which the lava sync attaches to what it submits.
+   *
+   * Three deliberate choices, all of them repairs of the version that stalled
+   * from 2026-09-11 to 09-14 (see lavasync.ts for the shape it replaces):
+   *
+   * NEVER OFFERED, not "after a watermark". The watermark was lavabalance's
+   * newest STORED game, and it only stores what its classifier accepts, so a
+   * game it declines stayed ahead of the mark and was re-offered forever. One
+   * night of zombie and noob-friendly lobbies put 33 such games in front of the
+   * queue, MAX_LAVA_BATCH is 20, and the sync spent three days re-offering the
+   * same 20 rejects while 72 real lava games queued up behind them. Offer state
+   * belongs to the side doing the offering.
+   *
+   * LAVA-SHAPED, not merely modded. The old pre-filter was the mods flag, on
+   * the theory that tweaked games are rare (~0 in 24) and lavabalance's
+   * classifier could reject the rest. They are not rare — 405 modded games in
+   * three days — and rejects were exactly what jammed the queue. These two
+   * facts are what lavabalance itself requires of every game it stores, so a
+   * candidate is now plausible rather than merely unusual; its classifier stays
+   * the authority on the tweak stack, which is the part only it can judge.
+   *
+   * OLDEST-STARTED, not oldest-ended. lavabalance folds ratings forward from a
+   * (startTime, id) head and stores anything behind it unranked, permanently.
+   * Start order is therefore the order it wants; end order is what the mirror
+   * happens to learn games in. The two agree for the lava lobby's own
+   * back-to-back games and diverge when two lobbies overlap.
+   *
+   * Driven by the (flag, replay_id) covering index, so the cost is the number of
+   * lava-flagged games ever mirrored plus a PK seek each, NOT the mirror's size;
+   * and it runs only on a fresh-candidate trigger or the hourly sweep, never the
+   * every-minute path (rowcost.test.ts bounds it). If that count ever grows
+   * enough to matter, the shape that fixes it is a pending-work table, not a
+   * wider index: what this asks for is a queue. */
+  gamesLavaPending(
     limit: number,
-  ): { id: string; endUnix: number; lobbyName: string | null; lobbyDetails: LobbyDetails | null }[] {
+    now = Math.floor(Date.now() / 1000),
+  ): {
+    id: string;
+    startUnix: number;
+    endUnix: number;
+    lobbyName: string | null;
+    lobbyDetails: LobbyDetails | null;
+  }[] {
     return this.ctx.storage.sql
       .exec(
-        `SELECT g.id AS id, g.start_unix + COALESCE(g.duration_sec, 0) AS end_unix,
+        `SELECT g.id AS id, g.start_unix AS start_unix,
+                g.start_unix + COALESCE(g.duration_sec, 0) AS end_unix,
                 g.lobby_name, g.lobby_details
            FROM replay_settings rs JOIN games g ON g.id = rs.replay_id
-          WHERE rs.flag = ? AND g.start_unix IS NOT NULL
+          WHERE rs.flag = ? AND g.game_size = ? AND g.start_unix IS NOT NULL
+            AND g.lava_offered_unix IS NULL
             AND g.start_unix + COALESCE(g.duration_sec, 0) >= ?
-          ORDER BY end_unix ASC, g.id LIMIT ?`,
-        SETTINGS_MODS_FLAG,
-        endUnix,
+          ORDER BY g.start_unix ASC, g.id LIMIT ?`,
+        SETTINGS_LAVA_FLAG,
+        LAVA_GAME_SIZE,
+        now - LAVA_OFFER_HORIZON_SEC,
         limit,
       )
       .toArray()
       .map((r) => ({
         id: r.id as string,
+        startUnix: Number(r.start_unix),
         endUnix: Number(r.end_unix),
         lobbyName: (r.lobby_name as string | null) ?? null,
         lobbyDetails: parseStored(r.lobby_details as string | null, (v) => v as LobbyDetails),
       }));
+  }
+
+  /** lavaMarkOffered records that these games have been handed to lavabalance,
+   * so gamesLavaPending stops proposing them. Called with the ids of a batch
+   * lavabalance ANSWERED — a POST that threw marks nothing and the next run
+   * re-offers the lot, which is the old stateless design's one good property
+   * kept.
+   *
+   * A verdict is not a reason to re-offer: classification is deterministic, so
+   * a game lavabalance rejected or skipped will be rejected or skipped again.
+   * The one thing that does change is lobby info arriving late, and lobbiesMatch
+   * clears this column when it fills it. Returns the rows marked.
+   *
+   * Un-chunked, unlike gamesByIds: callers mark one batch, and MAX_LAVA_BATCH
+   * is 20 ids — two orders of magnitude under the bind limit. */
+  lavaMarkOffered(ids: string[], now = Math.floor(Date.now() / 1000)): number {
+    if (ids.length === 0) return 0;
+    return this.ctx.storage.sql.exec(
+      `UPDATE games SET lava_offered_unix = ?
+        WHERE id IN (${ids.map(() => "?").join(",")}) AND lava_offered_unix IS NULL`,
+      now,
+      ...ids,
+    ).rowsWritten;
   }
 
   /** gamesInsert records mirrored games and indexes their settings into
@@ -1565,11 +1638,19 @@ export class ReplayIndex extends DurableObject<Env> {
         // lobby_details rides the same write-once UPDATE: the observation is
         // pruned 48h after a match, so this copy is the detail's only route
         // to permanence. A pre-column observation copies NULL harmlessly.
+        //
+        // The match also RE-OPENS the game to the lava sync (lava_offered_unix
+        // back to NULL), which matters in exactly one order of events: the game
+        // was submitted before its lobby was matched, so lavabalance stored it
+        // with no parties. Re-offering it once carries them (its upload fills a
+        // NULL lobby column on a duplicate and answers "duplicate" otherwise),
+        // and because this UPDATE is write-once on lobby_name it cannot loop.
         sql.exec(
           `UPDATE games SET
              lobby_name    = (SELECT name FROM lobbies WHERE lobby_id = ? AND started_unix = ?),
              lobby_id      = ?,
-             lobby_details = (SELECT lobby_details FROM lobbies WHERE lobby_id = ? AND started_unix = ?)
+             lobby_details = (SELECT lobby_details FROM lobbies WHERE lobby_id = ? AND started_unix = ?),
+             lava_offered_unix = NULL
            WHERE id = ? AND lobby_name IS NULL`,
           m.lobbyId,
           m.startedUnix,

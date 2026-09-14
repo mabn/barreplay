@@ -29,7 +29,14 @@
 // Like app.ts, this file has no `cloudflare:workers` import anywhere in its
 // module graph, so the node tests drive the whole sync against a fake index
 // and a fake fetch.
-import { CATALOG_PLAYERS_PER_ALLY, SETTINGS_MODS_FLAG, derivePlayerCount, playersFromApi, settingsFlags } from "./replayentry";
+import {
+  CATALOG_PLAYERS_PER_ALLY,
+  LAVA_GAME_SIZE,
+  SETTINGS_LAVA_FLAG,
+  derivePlayerCount,
+  playersFromApi,
+  settingsFlags,
+} from "./replayentry";
 import type { CatalogTeam } from "./replayentry";
 // Type-only, so the runtime edge teiserver.ts -> games.ts (`pool`) gains no
 // import cycle; must stay `import type`.
@@ -183,9 +190,12 @@ export interface GameSyncResult {
   failed: number;
   /** Listing pages read this run (1..GAMES_MAX_PAGES). */
   pages: number;
-  /** Of the games recorded, ones carrying the mods flag — lava-sync
-   * candidates, which is what the cron triggers the lava sync on. */
-  modded: number;
+  /** Of the games recorded, ones shaped like a lava game — the lava flag on an
+   * 8v8 roster, the lava sync's own candidate filter (lavasync.ts) — which is
+   * what the cron triggers that sync on. It counted MODDED games until the
+   * filters diverged and a night of zombie lobbies triggered run after run that
+   * had no lava game to offer; one predicate, named once, in both places. */
+  lavaCandidates: number;
 }
 
 /** syncGames runs one pass: read page 1, ask the index which ids are new,
@@ -237,10 +247,10 @@ export async function syncGames(index: GamesIndex, fetchImpl: typeof fetch = fet
     if (rows.length < GAMES_PAGE_LIMIT) break;
     if (oldest !== null && oldest <= horizon) break;
   }
-  if (ids.length === 0) return { scanned: 0, fresh: 0, added: 0, failed: 0, pages, modded: 0 };
+  if (ids.length === 0) return { scanned: 0, fresh: 0, added: 0, failed: 0, pages, lavaCandidates: 0 };
 
   const fresh = await index.gamesUnknown(ids);
-  if (fresh.length === 0) return { scanned: ids.length, fresh: 0, added: 0, failed: 0, pages, modded: 0 };
+  if (fresh.length === 0) return { scanned: ids.length, fresh: 0, added: 0, failed: 0, pages, lavaCandidates: 0 };
 
   const entries: GameEntry[] = [];
   let failed = 0;
@@ -256,8 +266,10 @@ export async function syncGames(index: GamesIndex, fetchImpl: typeof fetch = fet
   // unrecorded — the ones the next page-1 read is certain to offer again.
   entries.sort((a, b) => (a.startUnix ?? 0) - (b.startUnix ?? 0));
   const added = entries.length === 0 ? 0 : await index.gamesInsert(entries);
-  const modded = entries.filter((e) => e.settings?.[SETTINGS_MODS_FLAG] !== undefined).length;
-  return { scanned: ids.length, fresh: fresh.length, added, failed, pages, modded };
+  const lavaCandidates = entries.filter(
+    (e) => e.settings?.[SETTINGS_LAVA_FLAG] === true && e.gameSize === LAVA_GAME_SIZE,
+  ).length;
+  return { scanned: ids.length, fresh: fresh.length, added, failed, pages, lavaCandidates };
 }
 
 /** gameFromApi builds a mirror row from one /replays/<id> detail reply. The
