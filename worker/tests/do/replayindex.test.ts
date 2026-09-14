@@ -89,30 +89,68 @@ test("gamesUnknown reports the ids the mirror has never recorded", async () => {
   });
 });
 
-test("gamesModdedEndedAfter lists modded mirror games by end time", async () => {
+// The lava sync's queue. LAVA_NOW is "now" as these tests tell the method it
+// is, so the 7-day horizon is crossed deliberately rather than by the clock.
+const LAVA_NOW = 1789000000;
+const lava = (id: string, over: Partial<GameEntry> = {}): GameEntry =>
+  game(id, { gameSize: "8v8", playerCount: 16, settings: { lava: true, mods: true }, ...over });
+
+test("gamesLavaPending lists never-offered lava 8v8 games, oldest-STARTED first", async () => {
   await inIndex((index) => {
     index.gamesInsert([
-      // Ends at 1000+600=1600, modded.
-      game("m-old", { startUnix: 1000, durationSec: 600, settings: { mods: true } }),
-      // Ends at 2000+600=2600, modded.
-      game("m-new", { startUnix: 2000, durationSec: 600, settings: { mods: true, ranked: true } }),
-      // Plain game in range: no mods flag, never a candidate.
-      game("plain", { startUnix: 2500, durationSec: 600, settings: { ranked: true } }),
-      // Modded but undated: cannot be placed against a watermark.
-      game("m-undated", { startUnix: null, durationSec: null, settings: { mods: true } }),
+      lava("l-new", { startUnix: LAVA_NOW - 1800, durationSec: 600 }),
+      lava("l-old", { startUnix: LAVA_NOW - 3600, durationSec: 600 }),
+      // 16 players on a lava map in FOUR allies (the zombie 4v4v4v4 shape) and
+      // a lava lobby's 6v6: both are why the filter matches the SIZE SPEC and
+      // not player_count — lavabalance stores neither.
+      lava("l-ffa", { startUnix: LAVA_NOW - 2000, gameSize: "4v4v4v4" }),
+      lava("l-6v6", { startUnix: LAVA_NOW - 2000, gameSize: "6v6", playerCount: 12 }),
+      // Modded 8v8 on ordinary water — what the old mods-flag filter offered by
+      // the hundred, and what jammed the queue.
+      game("modded", { startUnix: LAVA_NOW - 2000, gameSize: "8v8", settings: { mods: true } }),
+      // Lava 8v8, but older than the horizon: never offered and never will be.
+      lava("l-ancient", { startUnix: LAVA_NOW - 40 * 24 * 3600, durationSec: 600 }),
+      // Undated: cannot be ordered, so never offered.
+      lava("l-undated", { startUnix: null, durationSec: null }),
     ]);
 
-    // Everything modded from the epoch, oldest-ended first. The lobby fields
-    // are null until the teiserver poll matches a lobby onto the game.
-    assert.deepEqual(index.gamesModdedEndedAfter(0, 10), [
-      { id: "m-old", endUnix: 1600, lobbyName: null, lobbyDetails: null },
-      { id: "m-new", endUnix: 2600, lobbyName: null, lobbyDetails: null },
+    // Start order, not end order — lavabalance folds ratings forward from a
+    // (startTime, id) head. The lobby fields stay null until a lobby is matched.
+    assert.deepEqual(index.gamesLavaPending(10, LAVA_NOW), [
+      { id: "l-old", startUnix: LAVA_NOW - 3600, endUnix: LAVA_NOW - 3000, lobbyName: null, lobbyDetails: null },
+      { id: "l-new", startUnix: LAVA_NOW - 1800, endUnix: LAVA_NOW - 1200, lobbyName: null, lobbyDetails: null },
     ]);
-    // The cutoff is inclusive (>=): a game ending exactly at it still lists.
-    assert.deepEqual(index.gamesModdedEndedAfter(1600, 10).map((r) => r.id), ["m-old", "m-new"]);
-    assert.deepEqual(index.gamesModdedEndedAfter(1601, 10).map((r) => r.id), ["m-new"]);
-    // The limit caps the answer from the oldest end up.
-    assert.deepEqual(index.gamesModdedEndedAfter(0, 1).map((r) => r.id), ["m-old"]);
+    // The limit caps the answer from the oldest START up, so a batch never
+    // leaves an older game behind a newer one.
+    assert.deepEqual(index.gamesLavaPending(1, LAVA_NOW).map((r) => r.id), ["l-old"]);
+  });
+});
+
+test("lavaMarkOffered takes a game out of the queue for good", async () => {
+  await inIndex((index, sql) => {
+    index.gamesInsert([
+      lava("l-old", { startUnix: LAVA_NOW - 3600, durationSec: 600 }),
+      lava("l-new", { startUnix: LAVA_NOW - 1800, durationSec: 600 }),
+    ]);
+
+    expect(index.lavaMarkOffered(["l-old"], LAVA_NOW)).toBe(1);
+    // THE BUG THIS COLUMN EXISTS FOR: lavabalance's verdict is not consulted.
+    // A game it rejects is offered once and then gone from the queue, where the
+    // watermark this replaced would re-derive it from lavabalance's newest
+    // STORED game and hand back the same rejects forever.
+    assert.deepEqual(index.gamesLavaPending(10, LAVA_NOW).map((r) => r.id), ["l-new"]);
+    expect(rows(sql, `SELECT lava_offered_unix FROM games WHERE id = 'l-old'`)[0].lava_offered_unix).toBe(LAVA_NOW);
+
+    // Marking is write-once, so a re-offered game keeps its first mark.
+    expect(index.lavaMarkOffered(["l-old"], LAVA_NOW + 500)).toBe(0);
+    expect(rows(sql, `SELECT lava_offered_unix FROM games WHERE id = 'l-old'`)[0].lava_offered_unix).toBe(LAVA_NOW);
+    expect(index.lavaMarkOffered([], LAVA_NOW)).toBe(0);
+
+    // A re-sync of the game does not forget that it was offered
+    // (lava_offered_unix is not in gamesInsert's upsert list, like the lobby
+    // columns) — otherwise every mirror refresh would re-offer the mirror.
+    index.gamesInsert([lava("l-old", { startUnix: LAVA_NOW - 3600, durationSec: 600 })]);
+    assert.deepEqual(index.gamesLavaPending(10, LAVA_NOW).map((r) => r.id), ["l-new"]);
   });
 });
 
@@ -1396,6 +1434,41 @@ test("lobbiesMatch names the game and survives a re-sync", async () => {
     const resynced = rows(sql, `SELECT lobby_name, lobby_details FROM games WHERE id = 'g42'`)[0];
     expect(resynced.lobby_name).toBe("Chillmus most welcome | 8v8");
     expect(JSON.parse(resynced.lobby_details as string)).toEqual(chillDetails);
+  });
+});
+
+test("a match re-opens an already-offered game to the lava sync, once", async () => {
+  await inIndex((index, sql) => {
+    // The order that costs parties: the game is mirrored and submitted before
+    // the teiserver poll matches its lobby, so lavabalance stored it without
+    // them. Clearing the mark at match time is what gets them there — its
+    // upload fills a NULL lobby column on a game it already holds.
+    index.lobbiesObserve([
+      {
+        lobbyId: 7,
+        name: "LAVA SUPREME | 8v8",
+        map: "Great Divide V1",
+        players: ["Rouben", "LaufendeStahlwand"],
+        playerCount: 2,
+        elapsedSec: 30,
+        details: det(),
+      },
+    ]);
+    const started = rows(sql, `SELECT started_unix FROM lobbies WHERE lobby_id = 7`)[0].started_unix as number;
+    index.gamesInsert([lava("g7", { startUnix: started - 10 })]);
+    index.lavaMarkOffered(["g7"], started);
+    assert.deepEqual(index.gamesLavaPending(10, started).map((r) => r.id), []);
+
+    expect(index.lobbiesMatch()).toEqual({ matched: 1, pruned: 0 });
+
+    const again = index.gamesLavaPending(10, started);
+    assert.deepEqual(again.map((r) => r.id), ["g7"]);
+    expect(again[0].lobbyName).toBe("LAVA SUPREME | 8v8");
+    // And only once: the UPDATE behind it is write-once on lobby_name, so a
+    // later match cannot put the game back in the queue again and again.
+    index.lavaMarkOffered(["g7"], started + 60);
+    expect(index.lobbiesMatch()).toEqual({ matched: 0, pruned: 0 });
+    assert.deepEqual(index.gamesLavaPending(10, started).map((r) => r.id), []);
   });
 });
 

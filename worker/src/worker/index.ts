@@ -16,14 +16,14 @@ export { ReplayIndex };
 const PRUNE_MINUTE = 17;
 
 /** Which minute of the hour the lava sync runs UNCONDITIONALLY. Every other
- * tick it runs only when the games sync just mirrored a modded game (the
+ * tick it runs only when the games sync just mirrored a lava-shaped game (the
  * trigger that makes a finished lava game reach lavabalance within a minute);
- * this sweep is the retry path — a trigger that failed because lavabalance
- * was down is re-attempted here, the watermark it re-derives from lavabalance
- * finding everything still unsubmitted. Hourly, not per-tick, because the
- * candidate query's cost is the count of modded games ever mirrored (see
- * ReplayIndex.gamesModdedEndedAfter) and 1440 of those a day is the ROW
- * BUDGET pattern to avoid. */
+ * this sweep is the retry path — a trigger that failed because lavabalance was
+ * down is re-attempted here, finding everything still unmarked and therefore
+ * still pending — and it is what drains a backlog, one batch an hour. Hourly,
+ * not per-tick, because the candidate query's cost is the count of lava-flagged
+ * games ever mirrored (see ReplayIndex.gamesLavaPending) and 1440 of those a
+ * day is the ROW BUDGET pattern to avoid. */
 const LAVA_SYNC_MINUTE = 43;
 
 export default {
@@ -38,10 +38,10 @@ export default {
   // would only turn a self-healing hiccup into a minute-by-minute stream of
   // failed cron invocations in the dashboard.
   async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
-    let modded = 0;
+    let lavaCandidates = 0;
     try {
       const r = await syncGames(indexStub(env));
-      modded = r.modded;
+      lavaCandidates = r.lavaCandidates;
       // Quiet on a no-op tick: most runs find nothing new, and a line a minute
       // saying so would bury the ones that did something.
       if (r.added > 0 || r.failed > 0) {
@@ -78,20 +78,22 @@ export default {
       }
     }
 
-    // Same tick, third step: offer freshly-finished modded games to the
-    // sibling lavabalance worker over the service binding (lavasync.ts —
-    // stateless, keyed on lavabalance's own newest stored game, so a run
-    // after downtime catches up by itself). Triggered by the games sync
-    // mirroring a modded game, plus the hourly sweep (see LAVA_SYNC_MINUTE).
+    // Same tick, third step: offer freshly-finished lava games to the sibling
+    // lavabalance worker over the service binding (lavasync.ts — it marks what
+    // it offers, so a run after downtime catches up by itself and a game the
+    // other side declines cannot hold up the ones behind it). Triggered by the
+    // games sync mirroring a game of that shape, plus the hourly sweep (see
+    // LAVA_SYNC_MINUTE), which is also what drains a backlog.
     // Its own try/catch: lavabalance being down must not cost the mirror.
     const sweep = new Date(controller.scheduledTime).getUTCMinutes() === LAVA_SYNC_MINUTE;
-    if ((modded > 0 || sweep) && env.LAVABALANCE !== undefined) {
+    if ((lavaCandidates > 0 || sweep) && env.LAVABALANCE !== undefined) {
       try {
         const lv = await syncLava(indexStub(env), env.LAVABALANCE.fetch.bind(env.LAVABALANCE));
         if (lv.submitted > 0) {
           console.log(
             `lava sync: candidates=${lv.candidates} submitted=${lv.submitted} rated=${lv.rated} ` +
-              `ignored=${lv.ignored} skipped=${lv.skipped} duplicate=${lv.duplicate} rejected=${lv.rejected}`,
+              `ignored=${lv.ignored} skipped=${lv.skipped} duplicate=${lv.duplicate} ` +
+              `rejected=${lv.rejected}${lv.more ? " (more pending)" : ""}`,
           );
         }
       } catch (e) {
