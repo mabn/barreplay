@@ -149,10 +149,16 @@ try {
     const r = await get(base, path);
     check(`GET ${path} is closed without a sign-in`, r.status === 401, String(r.status));
   }
+  // On a loopback host (which this is) /admin/login is the DEV login's first
+  // hop: it bounces to the deployed site's login, asking for the token back
+  // at this server's callback — never a token in hand here.
   const login = await get(base, "/admin/login?next=%2Fqueue%3Fadmin%3Dtrue");
-  check("GET /admin/login redirects back on-site",
-    login.status === 302 && login.headers.get("location") === "/queue?admin=true",
-    `${login.status} ${login.headers.get("location")}`);
+  const loginTo = login.headers.get("location") ?? "";
+  check("GET /admin/login on a loopback host bounces to the deployed login",
+    login.status === 302 && loginTo.startsWith("https://replay.fogofwar.dev/admin/login?next=http%3A%2F%2F127.0.0.1%3A"),
+    `${login.status} ${loginTo}`);
+  const cb = await get(base, "/admin/callback?token=not.a.token");
+  check("GET /admin/callback refuses a token that does not verify", cb.status === 401, String(cb.status));
 
   // The guide. A 3xx here is the redirect loop: the asset layer bounces
   // /setup.html back to /setup, so a route that rewrites the path serves its

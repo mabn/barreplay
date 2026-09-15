@@ -206,3 +206,49 @@ export function loginNext(raw: string | null | undefined): string {
   if (typeof raw === "string" && /^\/(?!\/)[^\r\n]*$/.test(raw) && raw.length <= 2048) return raw;
   return "/queue?admin=true";
 }
+
+/** The one path a login may hand a token to on another origin. */
+export const DEV_CALLBACK_PATH = "/admin/callback";
+
+/** isLoopbackHost: the hostnames a browser resolves to this machine, which is
+ * where a `vite dev` server lives. */
+export function isLoopbackHost(hostname: string): boolean {
+  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
+}
+
+/** devCallbackNext accepts a post-login destination that is the DEV LOGIN
+ * CALLBACK of a server on this machine — `http://127.0.0.1:<port>/admin/
+ * callback?...` (or localhost / [::1]) — and nothing else. The deployed
+ * login hands the Access token to exactly this shape, since it is the only
+ * way a local server, which no Access rule fronts, can get one. Loopback
+ * only: a token forwarded anywhere else would be a credential sent to a
+ * third party on the strength of a link. */
+export function devCallbackNext(raw: string | null | undefined): URL | null {
+  if (typeof raw !== "string" || raw.length > 2048) return null;
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "http:" || !isLoopbackHost(u.hostname) || u.pathname !== DEV_CALLBACK_PATH) return null;
+  if (u.username || u.password || u.hash) return null;
+  return u;
+}
+
+/** accessCookie builds the Set-Cookie value that stores a token as the
+ * CF_Authorization cookie for THIS origin — what the dev callback does
+ * with a token the deployed login forwarded, so every admin call from then
+ * on carries it exactly as it would on the deployed site. HttpOnly, Lax,
+ * and expiring with the token; Secure only on https, since the dev server
+ * is plain http. An empty token clears the cookie (logout). */
+export function accessCookie(token: string, opts: { secure: boolean; expUnix?: number; now?: number }): string {
+  const parts = [`CF_Authorization=${token}`, "Path=/", "HttpOnly", "SameSite=Lax"];
+  if (opts.secure) parts.push("Secure");
+  if (!token) parts.push("Max-Age=0");
+  else if (opts.expUnix !== undefined) {
+    const now = opts.now ?? Date.now();
+    parts.push(`Max-Age=${Math.max(0, Math.floor(opts.expUnix - now / 1000))}`);
+  }
+  return parts.join("; ");
+}
