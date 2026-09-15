@@ -3893,7 +3893,7 @@ function initHomeNav() {
 
 // ---- sql stats section (admin) ---------------------------------------------
 // What each Durable Object method has cost in SQLite rows since its instance
-// started — GET /api/sqlstats, the live counterpart of the repo's rowcost
+// started — GET /api/admin/sqlstats, the live counterpart of the repo's rowcost
 // test suite. Admin-only like the Queue and read on demand. The window is the
 // DO instance's lifetime (a deploy or eviction resets it), so the header
 // always states when the counting started; the /day columns project each
@@ -3912,7 +3912,7 @@ async function refreshSqlStats() {
   const seq = ++sqlStatsSeq;
   let report;
   try {
-    const r = await fetch('/api/sqlstats');
+    const r = await fetch('/api/admin/sqlstats');
     if (r.status === 401) { adminSignedOut(); return; }
     if (r.status === 404 || r.status === 405) {
       sqlStatsSupported = false;
@@ -3983,7 +3983,7 @@ function renderSqlStats(report, errMsg) {
 
 // ---- queue section ---------------------------------------------------------
 // The ingest queue: what happened to the drag&drop uploads and to the re-sims
-// requested from the box above the table. GET /api/queue is
+// requested from the box above the table. GET /api/admin/queue is
 // the Worker's job table (pending/processing first, then what recently
 // finished); the Go viz server has no ingest pipeline at all, so a missing
 // route says so plainly rather than showing an empty table that looks like
@@ -4030,7 +4030,7 @@ async function refreshQueue() {
   queueSamples.clear();
   let page;
   try {
-    const r = await fetch(`/api/queue?offset=${queueOffset}&limit=${QUEUE_PAGE}`);
+    const r = await fetch(`/api/admin/queue?offset=${queueOffset}&limit=${QUEUE_PAGE}`);
     if (r.status === 401) { adminSignedOut(); return; }
     if (r.status === 404 || r.status === 405) {
       // A backend without the endpoint will not grow one while the page is
@@ -4299,7 +4299,7 @@ const queueSamples = new Map(); // job id -> { state: 'loading' | 'ok', rows }
 function loadJobSamples(id) {
   if (queueSamples.has(id)) return;
   queueSamples.set(id, { state: 'loading', rows: [] });
-  fetch('/api/jobs/' + encodeURIComponent(id) + '/samples')
+  fetch('/api/admin/jobs/' + encodeURIComponent(id) + '/samples')
     .then((r) => (r.ok ? r.json() : null))
     .catch(() => null)
     // A backend without the route (the Go dev server) simply has no charts;
@@ -4897,7 +4897,7 @@ function renderGames(errMsg) {
       }
       tr.appendChild(td);
     }
-    // Admin column (?admin=true only): preview this game's upload to
+    // Admin column (admin mode only): preview this game's upload to
     // lavabalance — the body it would POST and a paste-ready curl. Nothing
     // is sent from here; see previewLavabalance.
     {
@@ -4998,7 +4998,7 @@ async function setJobDisabled(j, disabled, btn) {
   btn.disabled = true;
   btn.textContent = '…';
   try {
-    const r = await fetch('/api/jobs/' + encodeURIComponent(j.id) + '/disabled', {
+    const r = await fetch('/api/admin/jobs/' + encodeURIComponent(j.id) + '/disabled', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ disabled }),
@@ -5205,7 +5205,7 @@ function renderQueue(errMsg) {
 // side plus whatever it scouted). The .brp records this only for captures made
 // by widget versions that write the recorder fields; for everything else it is
 // unknowable after the fact, so the header offers an explicit marking. The
-// control writes POST /api/replays/<id>/view, which only the Worker backend
+// control writes POST /api/admin/replays/<id>/view, which only the Worker backend
 // implements — the Go dev server serves the same catalog read-only, so a
 // missing route disables the control rather than looking broken.
 
@@ -5218,7 +5218,7 @@ function viewLabel(view, ally) {
 
 // initViewMark fills the select from the replay's own ally teams and shows the
 // current marking. gameId is the BARE catalog id (rows are keyed by it, not by
-// the revisioned id the pieces are served under). Admin-only (?admin=true),
+// the revisioned id the pieces are served under). Admin-only (a sign-in),
 // like the list's settings-refresh button: it rewrites a row every viewer
 // shares, so it is maintenance, not a per-visitor viewing preference.
 async function initViewMark(gameId) {
@@ -5268,7 +5268,7 @@ async function initViewMark(gameId) {
     status.textContent = 'saving…';
     sel.disabled = true;
     try {
-      const r = await fetch(`/api/replays/${encodeURIComponent(gameId)}/view`, {
+      const r = await fetch(`/api/admin/replays/${encodeURIComponent(gameId)}/view`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
@@ -5516,7 +5516,7 @@ function renderHome(errMsg) {
       tr.appendChild(td);
     }
     cell(e.sizeBytes != null ? fmtSize(e.sizeBytes) : null, 'num data');
-    // Admin column (?admin=true only): re-derive the row's settings badges
+    // Admin column (admin mode only): re-derive the row's settings badges
     // from the BAR API's stored modoptions, no repack/re-upload needed.
     {
       const td = document.createElement('td');
@@ -5531,7 +5531,7 @@ function renderHome(errMsg) {
           btn.disabled = true;
           btn.textContent = '…';
           try {
-            const r = await fetch(`/api/replays/${encodeURIComponent(e.id)}/refresh-settings`, { method: 'POST' });
+            const r = await fetch(`/api/admin/replays/${encodeURIComponent(e.id)}/refresh-settings`, { method: 'POST' });
             if (r.status === 401) { adminSignedOut(); return; }
             const body = await r.json().catch(() => ({}));
             if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
@@ -5602,32 +5602,26 @@ function renderHome(errMsg) {
 }
 
 // ---- admin mode (Cloudflare Access) -----------------------------------------
-// ?admin=true is the REQUEST to see the maintenance controls — the Queue and
-// SQL sections, the list's settings-refresh button, the viewer header's POV
-// marking, the re-sim paste box — all of which edit or expose state every
-// visitor shares. What GRANTS them is the server: probeAdmin asks GET
-// /api/admin/me once at boot when the flag is set, and adminMode() is true
-// only when that answered 200, i.e. the browser carries a Cloudflare Access
-// cookie for a person the worker's Access policy allows (src/worker/
-// access.ts). A 401 shows the sign-in notice in the header instead, whose
-// link goes through the one path Access protects (/admin/login) and back.
-// A 404 (the Go viz server, an older worker) means a backend with no login
-// and no admin route a script could drive, so the flag alone is honoured
-// there, as it always was. Without the flag nothing is asked and nothing
-// changes for an ordinary visit.
-let adminUser = null; // {email, via} once /api/admin/me answers 200, or {via:'legacy'} on a 404
+// Admin mode is BEING SIGNED IN, nothing else: probeAdmin asks GET
+// /api/admin/me once at boot, and adminMode() is true only when that answered
+// 200, i.e. the browser carries a Cloudflare Access cookie for a person the
+// worker's Access policy allows (src/worker/access.ts). It unlocks the
+// maintenance controls — the Queue and SQL sections, the list's
+// settings-refresh button, the viewer header's POV marking, the re-sim paste
+// box — all of which edit or expose state every visitor shares, and every
+// one of which calls a route under /api/admin/, which the worker gates by
+// that prefix. A 401 leaves a quiet "sign in" link in the header, whose
+// path goes through the one route Access protects (/admin/login) and back to
+// this page. A 404 (the Go viz server) is a backend with no login and no
+// admin routes, and the header says nothing.
+let adminUser = null; // {email, via} once /api/admin/me answers 200
 
 function adminMode() {
   return adminUser !== null;
 }
 
-function adminRequested() {
-  return new URLSearchParams(location.search).get('admin') === 'true';
-}
-
 async function probeAdmin() {
   adminUser = null;
-  if (!adminRequested()) { renderAdminNote(); return; }
   let r;
   try {
     r = await fetch('/api/admin/me', { cache: 'no-store' });
@@ -5635,23 +5629,19 @@ async function probeAdmin() {
     renderAdminNote('signed-out');
     return;
   }
-  if (r.status === 404 || r.status === 405) {
-    adminUser = { email: null, via: 'legacy' };
-  } else if (r.ok) {
+  if (r.ok) {
     adminUser = await r.json().catch(() => ({ email: null, via: 'access' }));
+    renderAdminNote();
   } else if (r.status === 401) {
     const body = await r.json().catch(() => ({}));
     renderAdminNote(body.configured === false ? 'unconfigured' : 'signed-out');
-    return;
   } else {
-    renderAdminNote('signed-out');
-    return;
+    renderAdminNote('none'); // 404: no login here
   }
-  renderAdminNote();
 }
 
 // adminLoginHref: the login path with the current page as the destination,
-// so signing in lands back on the section that asked (the server keeps it
+// so signing in lands back on the page that offered it (the server keeps it
 // on-site).
 function adminLoginHref() {
   return '/admin/login?next=' + encodeURIComponent(location.pathname + location.search);
@@ -5659,7 +5649,7 @@ function adminLoginHref() {
 
 // adminSignedOut is what every admin fetch calls on a 401: the cookie has
 // expired (or was never there for a link opened in another browser), so the
-// controls come off and the notice says how to get them back.
+// controls come off and the header offers the sign-in again.
 function adminSignedOut() {
   if (adminUser === null) return;
   adminUser = null;
@@ -5668,41 +5658,38 @@ function adminSignedOut() {
   applyHomeTab();
 }
 
-// renderAdminNote fills the header's admin notice: who is signed in (with a
-// sign-out link), or why the controls are missing although ?admin=true is
-// set. Absent without the flag, since the ordinary page says nothing about
-// a login it does not have.
+// renderAdminNote fills the header's admin corner: who is signed in with a
+// sign-out link, or a muted sign-in link, or — on a deployment whose login
+// is not configured — why there is none. Nothing at all on a backend with
+// no login (the Go viz server).
 function renderAdminNote(state) {
   const el = document.getElementById('adminnote');
   if (!el) return;
   el.textContent = '';
   el.className = '';
-  if (!adminRequested()) { el.style.display = 'none'; return; }
   const link = (text, href) => {
     const a = document.createElement('a');
     a.textContent = text;
     a.href = href;
     return a;
   };
-  if (adminUser && adminUser.via !== 'legacy') {
+  if (adminUser) {
     el.append('admin: ' + (adminUser.email || adminUser.via) + ' · ');
     el.append(link('sign out', '/admin/logout'));
-  } else if (adminUser) {
-    el.style.display = 'none';
-    return;
   } else if (state === 'unconfigured') {
     el.className = 'error';
     el.append('admin login is not configured on this deployment (ACCESS_TEAM_DOMAIN / ACCESS_AUD)');
+  } else if (state === 'none') {
+    el.style.display = 'none';
+    return;
   } else {
-    el.className = 'error';
-    el.append('admin sign-in required · ');
     el.append(link('sign in', adminLoginHref()));
   }
   el.style.display = '';
 }
 
 // replayHref is the shareable URL for one replay: /replays/<id>, keeping the
-// current query (?admin=, ?gl=, ?col= and the filters carry over) minus the
+// current query (?gl=, ?col= and the filters carry over) minus the
 // legacy replay/tab params the path now expresses.
 function replayHref(id) {
   const u = new URL(location.href);
@@ -5939,7 +5926,7 @@ async function submitResim() {
   resimStatus('requesting…');
   let r, resp;
   try {
-    r = await fetch('/api/resim', {
+    r = await fetch('/api/admin/resim', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ link }),
@@ -6006,9 +5993,9 @@ async function init() {
   initLavabalanceDialog();   // the Games rows' LOS upload preview
   initUpload(); // the dropzone works without the catalog being loaded
   const params = new URLSearchParams(location.search);
-  // Whether the maintenance controls may show: one round trip, only when
-  // ?admin=true asks for them, and before anything that consults adminMode()
-  // renders.
+  // Whether the maintenance controls may show: one round trip (no cookie,
+  // no Durable Object — a 401 in a millisecond for an ordinary visit),
+  // before anything that consults adminMode() renders.
   await probeAdmin();
 
   // Optional render-smoothness overlay, gated on ?debug=true.

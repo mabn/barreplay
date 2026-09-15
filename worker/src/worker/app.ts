@@ -87,8 +87,8 @@ async function adminIdentity(c: {
 
 /** requireAdmin answers 401 for a request with no admin identity, telling
  * the browser where the login is; on a pass it stores the identity for the
- * route. The routes it guards are exactly the ones the admin UI drives — the
- * daemons' own routes keep their bearer guard. */
+ * route. Mounted on the /api/admin/* prefix below — exactly the routes the
+ * admin UI drives; the daemons' own routes keep their bearer guard. */
 const requireAdmin = async (
   c: {
     env: Env;
@@ -113,17 +113,19 @@ const requireAdmin = async (
   c.set("admin", who);
   await next();
 };
+// Every admin route lives under /api/admin/, and the prefix is the gate: one
+// middleware, registered before any route, so a route added here later is
+// guarded by where it is rather than by remembering to say so.
+app.use("/api/admin/*", (c, next) => requireAdmin(c, next));
 
 app.get("/api/health", (c) => c.json({ status: "ok" }));
 
 // Who am I, for the front-end: 200 with the identity when the request carries
 // an admin credential, else the same 401 the admin routes answer. app.js asks
-// this once when ?admin=true is in the URL and shows the admin controls only
-// on a 200 — the URL flag is the request to see them, the cookie is what
-// grants it. A 404 here (the Go viz server, an older worker) tells app.js the
-// backend has no login and it falls back to the flag alone, which is safe
-// because such a backend has no admin route a script could drive.
-app.get("/api/admin/me", requireAdmin, (c) => {
+// this once at boot and shows the admin controls only on a 200 — being signed
+// in IS admin mode, there is no URL flag. A 404 (the Go viz server) means a
+// backend with no login and no admin routes, and app.js shows nothing.
+app.get("/api/admin/me", (c) => {
   const who = c.get("admin");
   return c.json({ email: who.email, via: who.via }, 200, { "cache-control": "no-store" });
 });
@@ -228,7 +230,7 @@ app.get("/admin/logout", (c) => {
 // instead of the code. Admin-only like the other maintenance reads (requireAdmin).
 // The window is the instance's lifetime (`since`/`elapsedSec` in the reply);
 // a deploy or eviction resets it.
-app.get("/api/sqlstats", requireAdmin, async (c) => c.json(await indexStub(c.env).sqlStatsReport()));
+app.get("/api/admin/sqlstats", async (c) => c.json(await indexStub(c.env).sqlStatsReport()));
 
 // authorized checks the shared-secret guard used by every write API the
 // ingest daemon / pack talk to. When the REPLAY_PUT_TOKEN secret is not
@@ -315,7 +317,7 @@ app.put("/api/replays/:id", async (c) => {
 // recorder provenance — their captures predate the GAME record's recorder
 // fields — and nothing can derive it after the fact, so the viewer offers this
 // as an explicit marking. Admin-only like refresh-settings above.
-app.post("/api/replays/:id/view", requireAdmin, async (c) => {
+app.post("/api/admin/replays/:id/view", async (c) => {
   const id = c.req.param("id");
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) return c.json({ error: "invalid replay id" }, 400);
   let body: unknown;
@@ -331,7 +333,7 @@ app.post("/api/replays/:id/view", requireAdmin, async (c) => {
   return c.json({ ok: true, view: parsed.view, ally: parsed.ally });
 });
 
-app.post("/api/replays/:id/refresh-settings", requireAdmin, async (c) => {
+app.post("/api/admin/replays/:id/refresh-settings", async (c) => {
   const id = c.req.param("id");
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) return c.json({ error: "invalid replay id" }, 400);
   let detail: { gameSettings?: Record<string, unknown>; AllyTeams?: unknown };
@@ -414,7 +416,7 @@ app.post("/api/upload", async (c) => {
 // simulation input), the game must not already be published, and a second
 // request for a game already queued returns the job that exists rather than
 // making another.
-app.post("/api/resim", requireAdmin, async (c) => {
+app.post("/api/admin/resim", async (c) => {
   let body: unknown;
   try {
     body = await c.req.json();
@@ -453,7 +455,7 @@ app.post("/api/resim", requireAdmin, async (c) => {
 });
 
 // Job status for the browser that created it — a dropped stream or a pasted
-// re-sim link: pending -> processing -> done|error. Open, so like /api/queue
+// re-sim link: pending -> processing -> done|error. Open, so like /api/admin/queue
 // it answers with a subset of the row rather than the row: the archive key is
 // the one field of a job that is not public.
 app.get("/api/jobs/:id", async (c) => {
@@ -477,7 +479,7 @@ app.get("/api/jobs/:id", async (c) => {
 // An unknown job is an empty series, not a 404 — a job that never healthchecked
 // (an upload, or anything from a daemon older than the beat) is indistinguishable
 // from one that does not exist, and the view says the same thing about both.
-app.get("/api/jobs/:id/samples", requireAdmin, async (c) => {
+app.get("/api/admin/jobs/:id/samples", async (c) => {
   const samples = await indexStub(c.env).jobSamples(c.req.param("id"));
   return c.json({ samples }, 200, { "cache-control": "no-cache" });
 });
@@ -493,7 +495,7 @@ app.get("/api/jobs/:id/samples", requireAdmin, async (c) => {
 const QUEUE_LIMIT_MAX = 100;
 const QUEUE_LIMIT_DEFAULT = 25;
 
-app.get("/api/queue", requireAdmin, async (c) => {
+app.get("/api/admin/queue", async (c) => {
   const params = new URL(c.req.url).searchParams;
   const num = (name: string, fallback: number): number | string => {
     const raw = params.get(name);
@@ -608,7 +610,7 @@ app.get("/api/games", async (c) => {
 // forever. This is the door for the second one. It was the daemon's, back when
 // it searched the catalog for the first.
 //
-// GUARDED, unlike /api/resim: this is the one door into the job table with no
+// GUARDED, unlike /api/admin/resim: this is the one door into the job table with no
 // refusals behind it, and the refusals are what keep the open one from being a
 // way to spend somebody else's hour of engine time. Only "resim" — an upload
 // job is bytes somebody sent, and there is no stream to invent for one nobody
@@ -776,7 +778,7 @@ app.post("/api/jobs/:id", async (c) => {
 // Admin-only (requireAdmin), like the other maintenance routes the admin UI
 // drives (/refresh-settings and /view): the browser carries the Access
 // cookie, which is what lets the button exist without a bearer token.
-app.post("/api/jobs/:id/disabled", requireAdmin, async (c) => {
+app.post("/api/admin/jobs/:id/disabled", async (c) => {
   let body: unknown;
   try {
     body = await c.req.json();

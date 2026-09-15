@@ -38,8 +38,8 @@ unreachable), so there is no map proxy.
 The landing page (no `?replay=` in the URL) has a **left menu** with these sections:
 
 - **Replays** — the catalog list (below), the default.
-- **Queue** — **admin-only** (`?admin=true` plus a Cloudflare Access sign-in, see
-  [Admin login](#admin-login-cloudflare-access)): the ingest jobs (`GET /api/queue`),
+- **Queue** — **admin-only** (a Cloudflare Access sign-in, see
+  [Admin login](#admin-login-cloudflare-access)): the ingest jobs (`GET /api/admin/queue`),
   one row per job with its game, **kind**, state, age and failure detail, **25 per
   page** with a Prev/Next pager. Two kinds appear here: an `upload` is a dropped
   `.brepstream` waiting for a plain `bringest`, a `re-sim` is a game **nobody
@@ -76,10 +76,11 @@ The landing page (no `?replay=` in the URL) has a **left menu** with these secti
   says so.
 
 The selection lives in the URL as the path (`/queue`), so it is shareable and survives a
-refresh, and opening a replay from a section returns there on `back`. Without
-`?admin=true` the Queue entry is hidden and `/queue` falls back to Replays; with it,
-the section (and every other admin control) appears only once `GET /api/admin/me`
-has confirmed an Access sign-in — the routes behind them answer 401 to anyone else.
+refresh, and opening a replay from a section returns there on `back`. Signed out,
+the Queue entry is hidden and `/queue` falls back to Replays; the section (and every
+other admin control) appears once `GET /api/admin/me` has confirmed an Access
+sign-in — being signed in *is* admin mode, there is no URL flag — and the routes
+behind them, everything under `/api/admin/`, answer 401 to anyone else.
 
 ## Admin login (Cloudflare Access)
 
@@ -97,19 +98,21 @@ Verifying in the worker rather than trusting the edge is what makes the gate hol
 on the `workers.dev` hostname too, where no Access rule runs, and against anything
 that is not a browser.
 
-Why this and not `?admin=true` alone: `app.js` is served unminified to every
+Why a login at all: `app.js` is served unminified to every
 visitor, so the routes and their request shapes are readable off the page, and
-`POST /api/resim` was in fact driven by a script from an OVH host, queueing every
+`POST /api/admin/resim` was in fact driven by a script from an OVH host, queueing every
 ranked game within minutes of it ending (2026-09-15).
 
-**Routes.** `GET /api/admin/me` answers `{email, via}` for a signed-in request and
-401 otherwise (the front-end asks it once at boot when `?admin=true` is set).
-`GET /admin/login?next=<path>` is the protected path; the handler just redirects
-back to `next` (on-site paths only). The admin routes are `GET /api/queue`,
-`GET /api/sqlstats`, `GET /api/jobs/<id>/samples`, `POST /api/resim`,
-`POST /api/replays/<id>/view`, `POST /api/replays/<id>/refresh-settings` and
-`POST /api/jobs/<id>/disabled`. The daemons' routes keep their bearer guard; the
-uploader's own `GET /api/jobs/<id>` poll stays open.
+**Routes.** Everything under `/api/admin/` is gated by one middleware on the
+prefix: `GET /api/admin/me` answers `{email, via}` for a signed-in request and 401
+otherwise (the front-end asks it once at boot; a 200 turns the admin controls on),
+and the admin routes are `GET /api/admin/queue`, `GET /api/admin/sqlstats`,
+`GET /api/admin/jobs/<id>/samples`, `POST /api/admin/resim`,
+`POST /api/admin/replays/<id>/view`, `POST /api/admin/replays/<id>/refresh-settings`
+and `POST /api/admin/jobs/<id>/disabled`. `GET /admin/login?next=<path>` is the
+Access-protected path; the handler just redirects back to `next` (on-site paths
+only), and `GET /admin/logout` clears the cookie. The daemons' routes keep their
+bearer guard; the uploader's own `GET /api/jobs/<id>` poll stays open.
 
 Three things count as an admin, tried in this order:
 
@@ -123,8 +126,7 @@ Three things count as an admin, tried in this order:
    `Cf-Access-Jwt-Assertion` header.
 
 **Fail-closed:** with `ACCESS_TEAM_DOMAIN` or `ACCESS_AUD` missing, every admin
-route answers 401 with `configured:false` and the header says so under
-`?admin=true`. A deploy that forgot the configuration locks the admin out; it never
+route answers 401 with `configured:false` and the header says so. A deploy that forgot the configuration locks the admin out; it never
 opens the door. The smoke test asserts this on the built worker.
 
 ### One-time setup
@@ -144,9 +146,9 @@ opens the door. The smoke test asserts this on the built worker.
    the AUD of the `replay.fogofwar.dev/admin/login` application); a
    `wrangler secret put` of the same names would override them.
 
-5. `npm run deploy`. Open `https://replay.fogofwar.dev/queue?admin=true`: the
-   header offers **sign in**, which goes through `/admin/login` (Access), and
-   back to the queue with the controls on. **sign out** goes to Access's
+5. `npm run deploy`. Open `https://replay.fogofwar.dev/`: the header's muted
+   **sign in** goes through `/admin/login` (Access) and back with the controls on
+   and the Queue and SQL entries in the menu. **sign out** goes to Access's
    `/cdn-cgi/access/logout`.
 
 The `workers.dev` hostname has no Access application in front of it, so nobody
@@ -156,7 +158,7 @@ can sign in there: `/admin/login` redirects without a cookie and the admin calls
 ### Local development: a real sign-in through the deployed site
 
 `vite dev` signs in for real, with your Access identity, and needs no setup: open
-`http://127.0.0.1:5173/queue?admin=true` and click **sign in**. Access can only
+`http://127.0.0.1:5173/` and click the header's **sign in**. Access can only
 set its cookie on the hostname it fronts, and a dev server on 127.0.0.1 is not
 one, so the dev server **borrows the deployed login** in three hops (the
 `/admin/login` comment in `src/worker/app.ts` has the picture):
@@ -543,10 +545,10 @@ wherever the repo lives (`cmd/bringest`, e.g. a VM):
 | URL | What |
 | --- | --- |
 | `POST /api/upload` | open; validates the stream's preamble (`src/worker/preamble.ts`), archives the raw bytes at `streams/<gameId>/<ts>-a<ally>.brepstream` (append-only, never listed, never served publicly), inserts a pending `upload` job, returns `{job, gameId, streamKey}` |
-| `POST /api/resim` | admin ([Access](#admin-login-cloudflare-access)); `{link}` → a pending `resim` job for a game **nobody uploaded** (see below) |
+| `POST /api/admin/resim` | admin ([Access](#admin-login-cloudflare-access)); `{link}` → a pending `resim` job for a game **nobody uploaded** (see below) |
 | `GET /api/jobs/<id>` | open; the job's state for the requesting browser's poll (`pending → processing → done \| error`) |
 | `GET /api/jobs` | bearer-guarded; a daemon's work queue (pending + stalled-processing jobs of ONE kind, oldest first). `?kind=upload` (**the default**, so a deployed daemon is never handed work it cannot run) or `?kind=resim` |
-| `GET /api/queue` | open; the same jobs for the landing page's **Queue** section, paged — `?offset=&limit=` (default 25, capped at 100) → `{jobs, total, active, offset}`, unfinished first then recently finished. `total`/`active` count the whole table, not the page. The archive key is left out, since those bytes are guarded |
+| `GET /api/admin/queue` | admin; the same jobs for the landing page's **Queue** section, paged — `?offset=&limit=` (default 25, capped at 100) → `{jobs, total, active, offset}`, unfinished first then recently finished. `total`/`active` count the whole table, not the page. The archive key is left out, since those bytes are guarded |
 | `GET /api/games` | open; a page of the **games mirror** for the landing page's **Games** section — `?limit=` (default 20, capped at 100) and `?after=<cursor>` → `{games, next}`, latest-ended first, each row a mirrored game plus `lobbyName`, `syncedUnix`, `published` (a playable catalog row exists) and `jobState` (its last ingest job). `next` is the cursor of the following page (`<endUnix>:<id>`, the order key of the last row; null on the last page) — keyset paging, no offset and no total; a malformed cursor is a 400 |
 | `POST /api/jobs/<id>` | bearer-guarded; daemon transitions (`processing`, `done`, `error` + message, `stats`). `{state:"processing", claim:true, kind}` is a **claim**, which fails with 409 when another daemon already holds the job; a plain `processing` is the heartbeat a long job sends to keep the stale-job rule from offering it away |
 | `GET /api/streams/<gameId>/<file>` | bearer-guarded; the daemon downloads the archived stream (it speaks only HTTPS to the Worker — no S3 reads, no inbound connectivity) |
@@ -595,7 +597,7 @@ https://www.beyondallreason.info/replays?gameId=<gameId>
 
 `src/worker/gameid.ts` pulls the id out (the TypeScript twin of
 `barapi.ParseGameID` — the two must stay in lockstep, since the Go side is what
-eventually looks the game up). `POST /api/resim` then refuses everything it
+eventually looks the game up). `POST /api/admin/resim` then refuses everything it
 should, before an hour of somebody's engine time is spent:
 
 - the id has to parse;

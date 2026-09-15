@@ -384,12 +384,12 @@ test("daemon queue and transitions are bearer-guarded when a token is set", asyn
 // The landing page's Queue section: open (it reports on public replays), and
 // it must not hand out the archive key — those bytes are behind the guarded
 // /api/streams route.
-test("GET /api/queue lists jobs for the viewer without the archive key", async () => {
+test("GET /api/admin/queue lists jobs for the viewer without the archive key", async () => {
   const { env } = makeEnv("s3cret");
   const up = await app.request("/api/upload", { method: "POST", body: fixture() }, env);
   const { job, streamKey } = await asJson(up);
 
-  const res = await app.request("/api/queue", {}, env);
+  const res = await app.request("/api/admin/queue", {}, env);
   assert.equal(res.status, 200, "open even though a token is configured");
   const page = await asJson(res);
   assert.deepEqual(page, {
@@ -422,7 +422,7 @@ test("GET /api/queue lists jobs for the viewer without the archive key", async (
     { method: "POST", headers: { authorization: "Bearer s3cret" }, body: JSON.stringify({ state: "error", error: "demo not found" }) },
     env,
   );
-  const after = await asJson(await app.request("/api/queue", {}, env));
+  const after = await asJson(await app.request("/api/admin/queue", {}, env));
   assert.equal(after.jobs[0].state, "error");
   assert.equal(after.jobs[0].error, "demo not found");
   assert.equal(after.active, 0, "a finished job is no longer in flight");
@@ -507,39 +507,39 @@ test("GET /api/games?id= fetches the named games, holding ids to shape and count
   assert.equal((await app.request(`/api/games?id=${[...many, "id-100"].join(",")}`, {}, env)).status, 400);
 });
 
-test("GET /api/queue pages with ?offset= and ?limit=", async () => {
+test("GET /api/admin/queue pages with ?offset= and ?limit=", async () => {
   const { env, index } = makeEnv();
   for (let i = 0; i < 7; i++) {
     index.jobInsert(`job-${i}`, `streams/g${i}/x.brepstream`, `game-${i}`);
     if (i < 4) index.jobUpdate(`job-${i}`, "done", null); // 4 finished, 3 pending
   }
 
-  const first = await asJson(await app.request("/api/queue?limit=5&offset=0", {}, env));
+  const first = await asJson(await app.request("/api/admin/queue?limit=5&offset=0", {}, env));
   assert.equal(first.jobs.length, 5);
   assert.equal(first.total, 7);
   assert.equal(first.active, 3);
   assert.deepEqual(first.jobs.slice(0, 3).map((j: IngestJob) => j.state), ["pending", "pending", "pending"]);
 
-  const second = await asJson(await app.request("/api/queue?limit=5&offset=5", {}, env));
+  const second = await asJson(await app.request("/api/admin/queue?limit=5&offset=5", {}, env));
   assert.equal(second.jobs.length, 2, "the tail page holds what is left");
   assert.equal(second.offset, 5);
   assert.equal(second.total, 7, "counts stay whole-table, not per page");
   const ids = new Set([...first.jobs, ...second.jobs].map((j: IngestJob) => j.id));
   assert.equal(ids.size, 7, "the two pages together are the whole table, no repeats");
 
-  const past = await asJson(await app.request("/api/queue?limit=5&offset=99", {}, env));
+  const past = await asJson(await app.request("/api/admin/queue?limit=5&offset=99", {}, env));
   assert.deepEqual(past.jobs, [], "an offset past the end is empty, not an error");
   assert.equal(past.total, 7);
 
   // The cap keeps a hand-written limit from asking for the whole table, and
   // an omitted limit still bounds the read.
-  assert.equal((await app.request("/api/queue?limit=1000", {}, env)).status, 200);
+  assert.equal((await app.request("/api/admin/queue?limit=1000", {}, env)).status, 200);
   assert.equal(index.lastQueueQuery?.limit, 100);
-  await app.request("/api/queue", {}, env);
+  await app.request("/api/admin/queue", {}, env);
   assert.deepEqual(index.lastQueueQuery, { limit: 25, offset: 0 });
 
   for (const bad of ["limit=-1", "limit=abc", "offset=1.5"]) {
-    const res = await app.request(`/api/queue?${bad}`, {}, env);
+    const res = await app.request(`/api/admin/queue?${bad}`, {}, env);
     assert.equal(res.status, 400, bad);
   }
 });
@@ -624,7 +624,7 @@ test("PUT /api/replays carries rid into the catalog", async () => {
 // The admin settings-refresh re-derives one row's badges AND players roster
 // from the BAR API's stored demo metadata (no repack/re-upload). The API
 // call is stubbed out.
-test("POST /api/replays/:id/refresh-settings updates the row from the BAR API", async (t) => {
+test("POST /api/admin/replays/:id/refresh-settings updates the row from the BAR API", async (t) => {
   const { env, index } = makeEnv();
   await app.request(
     `/api/replays/${GAME_ID}`,
@@ -655,7 +655,7 @@ test("POST /api/replays/:id/refresh-settings updates the row from the BAR API", 
     });
   }) as typeof fetch;
 
-  const res = await app.request(`/api/replays/${GAME_ID}/refresh-settings`, { method: "POST" }, env);
+  const res = await app.request(`/api/admin/replays/${GAME_ID}/refresh-settings`, { method: "POST" }, env);
   assert.equal(res.status, 200);
   const body = await asJson(res);
   assert.deepEqual(body.settings, { unranked: true, zombies: "nightmare", ruins: true });
@@ -670,15 +670,15 @@ test("POST /api/replays/:id/refresh-settings updates the row from the BAR API", 
   assert.deepEqual(body.players, row?.players);
 
   // A game the BAR API doesn't know, and a game with no catalog row: 404.
-  const unknownApi = await app.request(`/api/replays/unknown0000/refresh-settings`, { method: "POST" }, env);
+  const unknownApi = await app.request(`/api/admin/replays/unknown0000/refresh-settings`, { method: "POST" }, env);
   assert.equal(unknownApi.status, 404);
   globalThis.fetch = (async () => Response.json({ gameSettings: {} })) as typeof fetch;
-  const noRow = await app.request(`/api/replays/norow11111/refresh-settings`, { method: "POST" }, env);
+  const noRow = await app.request(`/api/admin/replays/norow11111/refresh-settings`, { method: "POST" }, env);
   assert.equal(noRow.status, 404);
 });
 
 // ---- re-sim requests -------------------------------------------------------
-// POST /api/resim is the pipeline's other door: a game NOBODY uploaded, queued
+// POST /api/admin/resim is the pipeline's other door: a game NOBODY uploaded, queued
 // from a pasted link. Every refusal below exists because the work behind an
 // accepted request is the better part of an hour of somebody's engine time.
 
@@ -702,12 +702,12 @@ function stubBarApi(t: { after(fn: () => void): void }, known: Set<string>): { u
   return { urls };
 }
 
-test("POST /api/resim queues a re-sim from a pasted replay link", async (t) => {
+test("POST /api/admin/resim queues a re-sim from a pasted replay link", async (t) => {
   const { env, index } = makeEnv();
   const { urls } = stubBarApi(t, new Set([RESIM_ID]));
 
   const res = await app.request(
-    "/api/resim",
+    "/api/admin/resim",
     { method: "POST", body: JSON.stringify({ link: `https://gex.honu.pw/match/${RESIM_ID}` }) },
     env,
   );
@@ -723,39 +723,39 @@ test("POST /api/resim queues a re-sim from a pasted replay link", async (t) => {
   assert.equal(job?.streamKey, "", "a re-sim has no archived stream behind it");
 });
 
-test("POST /api/resim refuses what it cannot or should not run", async (t) => {
+test("POST /api/admin/resim refuses what it cannot or should not run", async (t) => {
   const { env, index } = makeEnv();
   stubBarApi(t, new Set([RESIM_ID]));
 
   // Not a link to anything.
-  const junk = await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: "yesterday's 8v8" }) }, env);
+  const junk = await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: "yesterday's 8v8" }) }, env);
   assert.equal(junk.status, 400);
 
   // A well-formed id the BAR API has never heard of: there is no demo to
   // re-simulate, and a re-sim cannot degrade past that the way an upload can.
   const unknown = "0000000000000000000000000000dead";
-  const miss = await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: unknown }) }, env);
+  const miss = await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: unknown }) }, env);
   assert.equal(miss.status, 404);
 
   // Already published: re-simulating would mostly repeat a capture that exists.
   await app.request(`/api/replays/${RESIM_ID}`, { method: "PUT", body: JSON.stringify({ durationSec: 60 }) }, env);
-  const dup = await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env);
+  const dup = await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env);
   assert.equal(dup.status, 409);
   assert.equal((await asJson(dup)).gameId, RESIM_ID);
 
   assert.equal(index.jobs.size, 0, "no refusal may leave a job behind");
 });
 
-test("POST /api/resim is idempotent: the same link twice is one job", async (t) => {
+test("POST /api/admin/resim is idempotent: the same link twice is one job", async (t) => {
   const { env, index } = makeEnv();
   stubBarApi(t, new Set([RESIM_ID]));
 
   const first = await asJson(
-    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+    await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
   );
   const again = await asJson(
     await app.request(
-      "/api/resim",
+      "/api/admin/resim",
       { method: "POST", body: JSON.stringify({ link: `https://bar-rts.com/replays/${RESIM_ID}` }) },
       env,
     ),
@@ -773,7 +773,7 @@ test("GET /api/jobs serves one kind, defaulting to upload", async (t) => {
   stubBarApi(t, new Set([RESIM_ID]));
   await app.request("/api/upload", { method: "POST", body: fixture() }, env);
   const resim = await asJson(
-    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+    await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
   );
 
   const byDefault = await asJson(await app.request("/api/jobs", {}, env));
@@ -796,7 +796,7 @@ test("a job can only be claimed once, but heartbeats keep working", async (t) =>
   const { env } = makeEnv();
   stubBarApi(t, new Set([RESIM_ID]));
   const { job } = await asJson(
-    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+    await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
   );
   const post = (body: unknown) =>
     app.request(`/api/jobs/${job}`, { method: "POST", body: JSON.stringify(body) }, env);
@@ -815,7 +815,7 @@ test("a job's processing stats round-trip through the report", async (t) => {
   const { env } = makeEnv();
   stubBarApi(t, new Set([RESIM_ID]));
   const { job } = await asJson(
-    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+    await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
   );
   const stats = {
     tookSec: 2483,
@@ -838,7 +838,7 @@ test("a job's processing stats round-trip through the report", async (t) => {
 
   const polled = await asJson(await app.request(`/api/jobs/${job}`, {}, env));
   assert.deepEqual(polled.stats, stats, "the poll sees it");
-  const page = await asJson(await app.request("/api/queue", {}, env));
+  const page = await asJson(await app.request("/api/admin/queue", {}, env));
   assert.deepEqual(page.jobs[0].stats, stats, "and so does the queue page");
 });
 
@@ -849,7 +849,7 @@ test("unusable stats are dropped without losing the report", async (t) => {
   const { env } = makeEnv();
   stubBarApi(t, new Set([RESIM_ID]));
   const { job } = await asJson(
-    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+    await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
   );
   const post = (body: unknown) =>
     app.request(`/api/jobs/${job}`, { method: "POST", body: JSON.stringify(body) }, env);
@@ -1082,7 +1082,7 @@ test("a running job's progress round-trips and is cleared when it ends", async (
   const { env } = makeEnv();
   stubBarApi(t, new Set([RESIM_ID]));
   const { job } = await asJson(
-    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+    await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
   );
   const progress = {
     state: "simulating",
@@ -1102,7 +1102,7 @@ test("a running job's progress round-trips and is cleared when it ends", async (
 
   const polled = await asJson(await app.request(`/api/jobs/${job}`, {}, env));
   assert.deepEqual(polled.progress, progress, "the poll sees it");
-  const page = await asJson(await app.request("/api/queue", {}, env));
+  const page = await asJson(await app.request("/api/admin/queue", {}, env));
   assert.deepEqual(page.jobs[0].progress, progress, "and so does the queue page");
 
   // A beat with no reading keeps the last one — an older daemon simply sends
@@ -1121,7 +1121,7 @@ test("unusable progress is dropped without losing the healthcheck", async (t) =>
   const { env } = makeEnv();
   stubBarApi(t, new Set([RESIM_ID]));
   const { job } = await asJson(
-    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+    await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
   );
   const post = (body: unknown) =>
     app.request(`/api/jobs/${job}`, { method: "POST", body: JSON.stringify(body) }, env);
@@ -1141,7 +1141,7 @@ test("a job's healthcheck history is served on its own route", async (t) => {
   const { env, index } = makeEnv();
   stubBarApi(t, new Set([RESIM_ID]));
   const { job } = await asJson(
-    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+    await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
   );
   const post = (body: unknown) =>
     app.request(`/api/jobs/${job}`, { method: "POST", body: JSON.stringify(body) }, env);
@@ -1154,7 +1154,7 @@ test("a job's healthcheck history is served on its own route", async (t) => {
     assert.equal((await post({ state: "processing", progress: p })).status, 200);
   }
 
-  const { samples } = await asJson(await app.request(`/api/jobs/${job}/samples`, {}, env));
+  const { samples } = await asJson(await app.request(`/api/admin/jobs/${job}/samples`, {}, env));
   assert.equal(samples.length, 3, 'every beat is a point');
   assert.deepEqual(samples[2], {
     atUnix: 2, state: "simulating", percent: 43, frame: null, etaSec: null,
@@ -1167,21 +1167,21 @@ test("a job's healthcheck history is served on its own route", async (t) => {
   // reason to keep it, and the live progress is gone by then.
   assert.equal((await post({ state: "error", error: "engine died" })).status, 200);
   assert.equal((await asJson(await app.request(`/api/jobs/${job}`, {}, env))).progress, null);
-  assert.equal((await asJson(await app.request(`/api/jobs/${job}/samples`, {}, env))).samples.length, 3);
+  assert.equal((await asJson(await app.request(`/api/admin/jobs/${job}/samples`, {}, env))).samples.length, 3);
 
   // A job that never beat — an upload, or an older daemon — is an empty series
   // rather than a 404: the view says the same thing about both.
   index.jobInsert("plain", "streams/x", "gid");
-  assert.deepEqual((await asJson(await app.request("/api/jobs/plain/samples", {}, env))).samples, []);
-  assert.deepEqual((await asJson(await app.request("/api/jobs/nope/samples", {}, env))).samples, []);
+  assert.deepEqual((await asJson(await app.request("/api/admin/jobs/plain/samples", {}, env))).samples, []);
+  assert.deepEqual((await asJson(await app.request("/api/admin/jobs/nope/samples", {}, env))).samples, []);
 });
 
 // The daemon's catalog scan re-simulates games whose only upload is one-sided.
-// Every one of those is already IN the catalog, so /api/resim refuses them all
+// Every one of those is already IN the catalog, so /api/admin/resim refuses them all
 // — right for a person pasting a link, wrong for work that is already running.
 // Announcing is the door for it, and it is guarded because it is the one path
 // into the job table with no refusals behind it.
-test("a daemon can announce work it found itself, which /api/resim would refuse", async (t) => {
+test("a daemon can announce work it found itself, which /api/admin/resim would refuse", async (t) => {
   const { env, index } = makeEnv("s3cret");
   const auth = { Authorization: "Bearer s3cret" };
   const post = (body: unknown, headers = auth) =>
@@ -1191,7 +1191,7 @@ test("a daemon can announce work it found itself, which /api/resim would refuse"
   index.upsert({ id: RESIM_ID, uploaderAlly: 1 } as ReplayEntry);
   stubBarApi(t, new Set([RESIM_ID]));
   assert.equal(
-    (await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env)).status,
+    (await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env)).status,
     409,
     "the open door refuses it as published",
   );
@@ -1228,10 +1228,10 @@ test("a job can be held back from the queue page, and let go again", async (t) =
   const { env, index } = makeEnv();
   stubBarApi(t, new Set([RESIM_ID]));
   const { job } = await asJson(
-    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+    await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
   );
   const flip = (disabled: unknown, id = job) =>
-    app.request(`/api/jobs/${id}/disabled`, { method: "POST", body: JSON.stringify({ disabled }) }, env);
+    app.request(`/api/admin/jobs/${id}/disabled`, { method: "POST", body: JSON.stringify({ disabled }) }, env);
 
   assert.equal((await asJson(await flip(true))).disabled, true);
   assert.equal(index.jobGet(job)?.disabled, true);
@@ -1240,12 +1240,12 @@ test("a job can be held back from the queue page, and let go again", async (t) =
 
   // It rides both open job reads, so the row can say so.
   assert.equal((await asJson(await app.request(`/api/jobs/${job}`, {}, env))).disabled, true);
-  assert.equal((await asJson(await app.request("/api/queue", {}, env))).jobs[0].disabled, true);
+  assert.equal((await asJson(await app.request("/api/admin/queue", {}, env))).jobs[0].disabled, true);
 
   // A held-back job still BLOCKS a new one for the same game — walking around
   // it with a fresh row is exactly what "will not be picked up" rules out —
   // and the paste box is told why rather than "already queued".
-  const again = await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env);
+  const again = await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env);
   assert.equal(again.status, 409);
   assert.equal((await asJson(again)).status, "disabled");
 
@@ -1269,7 +1269,7 @@ test("queue rows carry the game's size and duration", async (t) => {
   // from a private lobby. The row still lists, it just has nothing to say.
   index.jobInsert("stranger", "streams/x", "ffffffffffffffffffffffffffffffff");
 
-  const page = await asJson(await app.request("/api/queue", {}, env));
+  const page = await asJson(await app.request("/api/admin/queue", {}, env));
   const byId = Object.fromEntries(page.jobs.map((j: { id: string }) => [j.id, j]));
   assert.deepEqual(byId.known.game, { durationSec: 2417, gameSize: "8v8" });
   assert.equal(byId.stranger.game, null);
@@ -1283,7 +1283,7 @@ test("a failure carries its kind, from a closed set", async (t) => {
   const { env } = makeEnv();
   stubBarApi(t, new Set([RESIM_ID]));
   const { job } = await asJson(
-    await app.request("/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+    await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
   );
   const post = (body: unknown) =>
     app.request(`/api/jobs/${job}`, { method: "POST", body: JSON.stringify(body) }, env);
@@ -1292,7 +1292,7 @@ test("a failure carries its kind, from a closed set", async (t) => {
   assert.equal((await post({ state: "error", error: "host ran out of memory", errorKind: "oom" })).status, 200);
   let j = await read();
   assert.equal(j.errorKind, "oom");
-  assert.equal((await asJson(await app.request("/api/queue", {}, env))).jobs[0].errorKind, "oom");
+  assert.equal((await asJson(await app.request("/api/admin/queue", {}, env))).jobs[0].errorKind, "oom");
 
   // A kind this worker does not know is DROPPED, never a 400: a daemon newer
   // than the worker must still be able to report that its job failed.
@@ -1356,7 +1356,7 @@ test("the sqlstats route serves the DO's tally as-is", async () => {
   const { env, index } = makeEnv();
   const report = { since: 123, elapsedSec: 45, ops: [], totals: { rowsRead: 0, rowsWritten: 0 } };
   (index as unknown as { sqlStatsReport: () => unknown }).sqlStatsReport = () => report;
-  const res = await app.request("/api/sqlstats", {}, env);
+  const res = await app.request("/api/admin/sqlstats", {}, env);
   assert.equal(res.status, 200);
   assert.deepEqual(await asJson(res), report);
 });
@@ -1425,19 +1425,19 @@ test("backfill needs the write token and rejects junk bodies", async () => {
 });
 
 // ---- the admin gate (Cloudflare Access) -------------------------------------
-// The routes the admin UI drives answer 401 to anyone without an identity.
+// Everything under /api/admin/ answers 401 to anyone without an identity.
 // Three identities count: ADMIN_OPEN (dev), the configured bearer token, and
 // a verified Access JWT (tests/access.test.ts covers the verifier itself;
 // here a token the test signs proves the route reads the cookie and the
 // configuration). Unconfigured Access is closed, not open.
 const ADMIN_ROUTES: [string, RequestInit][] = [
-  ["/api/queue", {}],
-  ["/api/sqlstats", {}],
-  ["/api/jobs/x/samples", {}],
-  ["/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }],
-  ["/api/replays/x/view", { method: "POST", body: JSON.stringify({ view: "full" }) }],
-  ["/api/replays/x/refresh-settings", { method: "POST" }],
-  ["/api/jobs/x/disabled", { method: "POST", body: JSON.stringify({ disabled: true }) }],
+  ["/api/admin/queue", {}],
+  ["/api/admin/sqlstats", {}],
+  ["/api/admin/jobs/x/samples", {}],
+  ["/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }],
+  ["/api/admin/replays/x/view", { method: "POST", body: JSON.stringify({ view: "full" }) }],
+  ["/api/admin/replays/x/refresh-settings", { method: "POST" }],
+  ["/api/admin/jobs/x/disabled", { method: "POST", body: JSON.stringify({ disabled: true }) }],
 ];
 
 test("admin routes are closed without an identity, and closed when Access is not configured", async () => {
@@ -1453,7 +1453,7 @@ test("admin routes are closed without an identity, and closed when Access is not
 
   // Configured but no cookie: still 401, now saying sign in.
   const { env: cfg } = makeEnv(undefined, { ACCESS_TEAM_DOMAIN: "example", ACCESS_AUD: "a".repeat(64) });
-  const res = await app.request("/api/queue", {}, cfg);
+  const res = await app.request("/api/admin/queue", {}, cfg);
   assert.equal(res.status, 401);
   assert.equal((await asJson(res)).configured, true);
   const me = await app.request("/api/admin/me", {}, cfg);
@@ -1468,11 +1468,11 @@ test("admin routes are closed without an identity, and closed when Access is not
 
 test("the daemons' bearer token is an admin identity — only when it is configured", async () => {
   const { env } = makeEnv("s3cret", {});
-  const denied = await app.request("/api/queue", {}, env);
+  const denied = await app.request("/api/admin/queue", {}, env);
   assert.equal(denied.status, 401);
-  const wrong = await app.request("/api/queue", { headers: { authorization: "Bearer nope" } }, env);
+  const wrong = await app.request("/api/admin/queue", { headers: { authorization: "Bearer nope" } }, env);
   assert.equal(wrong.status, 401);
-  const ok = await app.request("/api/queue", { headers: { authorization: "Bearer s3cret" } }, env);
+  const ok = await app.request("/api/admin/queue", { headers: { authorization: "Bearer s3cret" } }, env);
   assert.equal(ok.status, 200);
   const me = await asJson(await app.request("/api/admin/me", { headers: { authorization: "Bearer s3cret" } }, env));
   assert.deepEqual(me, { email: null, via: "token" });
@@ -1480,7 +1480,7 @@ test("the daemons' bearer token is an admin identity — only when it is configu
   // No token configured: `authorized` is open for the daemon routes (a dev
   // bucket), but that openness must not leak into the admin gate.
   const { env: open } = makeEnv(undefined, {});
-  assert.equal((await app.request("/api/queue", { headers: { authorization: "Bearer " } }, open)).status, 401);
+  assert.equal((await app.request("/api/admin/queue", { headers: { authorization: "Bearer " } }, open)).status, 401);
 });
 
 test("a verified Access cookie is an admin identity", async (t) => {
@@ -1520,17 +1520,17 @@ test("a verified Access cookie is an admin identity", async (t) => {
   const me = await app.request("/api/admin/me", { headers: { cookie: `CF_Authorization=${good}` } }, env);
   assert.equal(me.status, 200);
   assert.deepEqual(await asJson(me), { email: "me@example.org", via: "access" });
-  assert.equal((await app.request("/api/queue", { headers: { cookie: `CF_Authorization=${good}` } }, env)).status, 200);
+  assert.equal((await app.request("/api/admin/queue", { headers: { cookie: `CF_Authorization=${good}` } }, env)).status, 200);
   // The header Access adds on the protected path works too.
-  assert.equal((await app.request("/api/queue", { headers: { "cf-access-jwt-assertion": good } }, env)).status, 200);
+  assert.equal((await app.request("/api/admin/queue", { headers: { "cf-access-jwt-assertion": good } }, env)).status, 200);
 
   // Wrong application, expired, or signed by a key the team never published.
   const otherApp = await sign(claims({ aud: ["d".repeat(64)] }));
-  assert.equal((await app.request("/api/queue", { headers: { cookie: `CF_Authorization=${otherApp}` } }, env)).status, 401);
+  assert.equal((await app.request("/api/admin/queue", { headers: { cookie: `CF_Authorization=${otherApp}` } }, env)).status, 401);
   const expired = await sign(claims({ exp: now - 1 }));
-  assert.equal((await app.request("/api/queue", { headers: { cookie: `CF_Authorization=${expired}` } }, env)).status, 401);
+  assert.equal((await app.request("/api/admin/queue", { headers: { cookie: `CF_Authorization=${expired}` } }, env)).status, 401);
   const wrongTeam = makeEnv(undefined, { ACCESS_TEAM_DOMAIN: "someone-else", ACCESS_AUD: AUD }).env;
-  assert.equal((await app.request("/api/queue", { headers: { cookie: `CF_Authorization=${good}` } }, wrongTeam)).status, 401,
+  assert.equal((await app.request("/api/admin/queue", { headers: { cookie: `CF_Authorization=${good}` } }, wrongTeam)).status, 401,
     "a token for another team is refused before any key is fetched");
 });
 
@@ -1541,15 +1541,15 @@ test("/admin/login sends the visitor back where they were going, on this site on
   const at = (path: string, init: RequestInit = {}) => app.request(`https://replay.example${path}`, init, env);
   const plain = await at("/admin/login");
   assert.equal(plain.status, 302);
-  assert.equal(plain.headers.get("location"), "/queue?admin=true");
-  const next = await at("/admin/login?next=%2Freplays%2Fabc%3Fadmin%3Dtrue");
-  assert.equal(next.headers.get("location"), "/replays/abc?admin=true");
+  assert.equal(plain.headers.get("location"), "/queue");
+  const next = await at("/admin/login?next=%2Freplays%2Fabc%3Fgl%3D0");
+  assert.equal(next.headers.get("location"), "/replays/abc?gl=0");
   const evil = await at("/admin/login?next=https%3A%2F%2Fevil.example%2F");
-  assert.equal(evil.headers.get("location"), "/queue?admin=true", "no open redirect");
+  assert.equal(evil.headers.get("location"), "/queue", "no open redirect");
   // A loopback callback named by the link, but no assertion to forward
   // (Access did not run): still the on-site redirect, never the callback.
   const cbNoTok = await at("/admin/login?next=" + encodeURIComponent("http://127.0.0.1:5173/admin/callback?next=%2Fqueue"));
-  assert.equal(cbNoTok.headers.get("location"), "/queue?admin=true");
+  assert.equal(cbNoTok.headers.get("location"), "/queue");
 });
 
 // The dev login: a `vite dev` server borrows the deployed site's Access
@@ -1558,11 +1558,11 @@ test("/admin/login sends the visitor back where they were going, on this site on
 // that verifies for this deployment.
 test("dev login: a loopback server bounces to the deployed login asking for its callback", async () => {
   const { env } = makeEnv(undefined, {});
-  const r = await app.request("http://127.0.0.1:5173/admin/login?next=%2Fqueue%3Fadmin%3Dtrue", {}, env);
+  const r = await app.request("http://127.0.0.1:5173/admin/login?next=%2Fqueue", {}, env);
   assert.equal(r.status, 302);
   const to = new URL(r.headers.get("location")!);
   assert.equal(to.origin + to.pathname, "https://replay.fogofwar.dev/admin/login");
-  assert.equal(to.searchParams.get("next"), "http://127.0.0.1:5173/admin/callback?next=%2Fqueue%3Fadmin%3Dtrue");
+  assert.equal(to.searchParams.get("next"), "http://127.0.0.1:5173/admin/callback?next=%2Fqueue");
 
   // localhost and [::1] count; a loopback host that already carries the
   // assertion is not hop 1 (it is the deployed handler under test), and a
@@ -1570,7 +1570,7 @@ test("dev login: a loopback server bounces to the deployed login asking for its 
   const lh = await app.request("http://localhost:8787/admin/login", {}, env);
   assert.match(lh.headers.get("location")!, /^https:\/\/replay\.fogofwar\.dev\/admin\/login\?next=http%3A%2F%2Flocalhost%3A8787%2Fadmin%2Fcallback/);
   const pub = await app.request("https://replay.example/admin/login", {}, env);
-  assert.equal(pub.headers.get("location"), "/queue?admin=true");
+  assert.equal(pub.headers.get("location"), "/queue");
 });
 
 test("dev login: the deployed login forwards the Access token to a loopback callback and nowhere else", async () => {
@@ -1579,7 +1579,7 @@ test("dev login: the deployed login forwards the Access token to a loopback call
     app.request(`https://replay.example/admin/login?next=${encodeURIComponent(next)}`,
       { headers: { "cf-access-jwt-assertion": "the.access.token" } }, env);
 
-  for (const cb of ["http://127.0.0.1:5173/admin/callback?next=%2Fqueue%3Fadmin%3Dtrue",
+  for (const cb of ["http://127.0.0.1:5173/admin/callback?next=%2Fqueue",
                     "http://localhost:8787/admin/callback",
                     "http://[::1]:5173/admin/callback"]) {
     const r = await withTok(cb);
@@ -1593,14 +1593,14 @@ test("dev login: the deployed login forwards the Access token to a loopback call
   for (const bad of ["https://evil.example/admin/callback", "http://127.0.0.1.evil.example/admin/callback",
                      "http://127.0.0.1:5173/steal", "https://127.0.0.1:5173/admin/callback",
                      "http://127.0.0.1:5173/admin/callback#x", "http://u:p@127.0.0.1:5173/admin/callback",
-                     "/queue?admin=true"]) {
+                     "/queue"]) {
     const r = await withTok(bad);
-    assert.equal(r.headers.get("location"), "/queue?admin=true", bad);
+    assert.equal(r.headers.get("location"), "/queue", bad);
     assert.ok(!r.headers.get("location")!.includes("the.access.token"), bad);
   }
   // With the assertion but an on-site next: the ordinary redirect.
-  const onsite = await withTok("/replays/abc?admin=true");
-  assert.equal(onsite.headers.get("location"), "/replays/abc?admin=true");
+  const onsite = await withTok("/replays/abc?gl=0");
+  assert.equal(onsite.headers.get("location"), "/replays/abc?gl=0");
 });
 
 test("dev login: the callback stores a token that verifies, refuses one that does not, and logout clears it", async (t) => {
@@ -1635,9 +1635,9 @@ test("dev login: the callback stores a token that verifies, refuses one that doe
 
   const { env } = makeEnv(undefined, { ACCESS_TEAM_DOMAIN: TEAM, ACCESS_AUD: AUD });
   const base = "http://127.0.0.1:5173";
-  const cb = await app.request(`${base}/admin/callback?token=${good}&next=%2Fqueue%3Fadmin%3Dtrue`, {}, env);
+  const cb = await app.request(`${base}/admin/callback?token=${good}&next=%2Fqueue`, {}, env);
   assert.equal(cb.status, 302);
-  assert.equal(cb.headers.get("location"), "/queue?admin=true");
+  assert.equal(cb.headers.get("location"), "/queue");
   const cookie = cb.headers.get("set-cookie")!;
   assert.match(cookie, new RegExp(`^CF_Authorization=${good.replace(/[.+]/g, "\\$&")}; Path=/; HttpOnly; SameSite=Lax; Max-Age=\\d+$`));
   assert.ok(!cookie.includes("Secure"), "plain http dev server: no Secure flag");

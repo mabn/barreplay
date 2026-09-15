@@ -1,9 +1,9 @@
 // Cloudflare Access as the admin login.
 //
 // The admin surface — the Queue and SQL sections, the re-sim paste box, the
-// row refresh and POV controls, the job hold-back switch — used to be gated
-// by nothing but `?admin=true` in the front-end. The routes behind it were
-// open, and app.js is served unminified to every visitor, so anyone could
+// row refresh and POV controls, the job hold-back switch; every route under
+// /api/admin/ — used to be gated by nothing but `?admin=true` in the
+// front-end. The routes behind it were open, and app.js is served unminified to every visitor, so anyone could
 // read the request shape off the page and drive the routes from a script;
 // somebody did, feeding every ranked game to POST /api/resim within minutes
 // of it ending (2026-09-15: 195 pending re-sims, 60 an hour arriving against
@@ -204,7 +204,7 @@ export function accessToken(headers: { get(name: string): string | null }): stri
  * be a phishing tool. Anything else lands on the queue. */
 export function loginNext(raw: string | null | undefined): string {
   if (typeof raw === "string" && /^\/(?!\/)[^\r\n]*$/.test(raw) && raw.length <= 2048) return raw;
-  return "/queue?admin=true";
+  return "/queue";
 }
 
 /** The one path a login may hand a token to on another origin. */
