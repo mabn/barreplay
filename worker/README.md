@@ -139,13 +139,10 @@ opens the door. The smoke test asserts this on the built worker.
 3. From the application's overview copy the **Application Audience (AUD) Tag**
    (64 hex chars). The **team domain** is under Zero Trust → Settings → Custom
    Pages (`<team>.cloudflareaccess.com`; the bare `<team>` is accepted too).
-4. Give the worker both — neither is secret, so either a `vars` block in
-   `wrangler.jsonc` or:
-
-   ```sh
-   wrangler secret put ACCESS_TEAM_DOMAIN   # <team>.cloudflareaccess.com
-   wrangler secret put ACCESS_AUD           # the application's AUD tag
-   ```
+4. Give the worker both. They are not secret, so they live in the `vars`
+   block of `wrangler.jsonc` (currently `bartools.cloudflareaccess.com` and
+   the AUD of the `replay.fogofwar.dev/admin/login` application); a
+   `wrangler secret put` of the same names would override them.
 
 5. `npm run deploy`. Open `https://replay.fogofwar.dev/queue?admin=true`: the
    header offers **sign in**, which goes through `/admin/login` (Access), and
