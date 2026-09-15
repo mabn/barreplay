@@ -646,7 +646,20 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           a display one: the list filters by "was this player in the game" and can
                           only match names a row stores, so the old cap of 5 left every 8v8 hiding
                           three players a side; rows published under it get their full roster back
-                          from the admin refresh-settings route, which re-derives from the BAR API),
+                          from the admin refresh-settings route, which re-derives from the BAR API.
+                          Each entry is {name, os?, rank?}: `rank` is BAR's CHEVRON level at the
+                          time of THAT game, 0..7, which under BAR's "Role" rank method buckets
+                          in-game hours (0: <5h, 1: 5h, 2: 15h, 3: 100h, 4: 250h, 5: 1000h) with
+                          6/7 reserved for contributors and tournament winners — so it is the one
+                          reading a row carries of how long a player had been playing BAR, which
+                          the OS does not say. Both halves fill it: playersFromApi off the API's
+                          Player.rank (every mirrored game and every refreshed row), catalogPlayers
+                          off the .brp meta's PlayerInfo.Rank. It is ABSENT rather than 0 when
+                          unknown, because 0 is a real level (an account under five hours) — which
+                          is also why the Go side guards it (startscriptRank): the .brp meta stores
+                          Rank as an int32 with omitempty, so a recorded 0 and a capture with no
+                          startscript behind it decode identically, and only a player the
+                          startscript named can report a 0 honestly),
                           a derived `playerCount` (total players, Gaia/scavengers excluded — the
                           size the list filters on: derivePlayerCount sums the ROSTER's counts and
                           only falls back to the gameSize spec, because gameSize is built from the
@@ -1224,7 +1237,12 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           game, the lobby info as EXTRA top-level fields on that detail
                           (lobbyName + the lobbyDetails blob with the party roster; the BAR
                           reply carries neither key, so nothing collides; an unmatched game
-                          submits the plain detail). That is why the cron runs the LOBBY sync
+                          submits the plain detail). VERBATIM is load-bearing beyond the tweak
+                          classifier: the detail's per-player `rank` is how lavabalance learns
+                          each player's CHEVRON at game time (it stores it per game, in
+                          game_players.bar_rank), and nothing here selects fields, so that
+                          arrives for free — tests/lavasync.test.ts pins the property rather
+                          than the plumbing. That is why the cron runs the LOBBY sync
                           BEFORE this one: the match is arrival-driven, landing on the same
                           tick `lavaCandidates > 0` triggers this sync, and a submission that
                           ran first would hand lavabalance the game without its parties —
