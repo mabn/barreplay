@@ -639,9 +639,8 @@ test('the catalog is fetched for the list view, not for a direct replay link', a
     // test counts.
     const initHomeNav = () => {}, initQueue = () => {}, initResim = () => {}, applyHomeTab = () => {};
     const initLavabalanceDialog = () => {};
-    // The admin probe (GET /api/admin/me) runs only under ?admin=true and
-    // is a fetch of its own; stubbed here because this test counts only
-    // what the TABLE needs.
+    // The admin probe (GET /api/admin/me) is one fetch of its own at boot;
+    // stubbed here because this test counts only what the TABLE needs.
     const probeAdmin = async () => {};
     const hideHome = () => {};
     const knownReplayURL = () => true;
@@ -669,11 +668,11 @@ test('the catalog is fetched for the list view, not for a direct replay link', a
 
   // The legacy query form still opens, and the address bar is normalized to
   // the path form (replaceState — the visitor arrived at one page).
-  const legacy = boot('/', '?replay=f8e5816a04505f9c2b5b69a6a458b696&admin=true');
+  const legacy = boot('/', '?replay=f8e5816a04505f9c2b5b69a6a458b696&gl=0');
   await legacy.init();
   s = legacy.stats();
   assert.equal(s.opened, 'f8e5816a04505f9c2b5b69a6a458b696', 'a legacy ?replay= link still opens');
-  assert.equal(legacy.url(), '/replays/f8e5816a04505f9c2b5b69a6a458b696?admin=true',
+  assert.equal(legacy.url(), '/replays/f8e5816a04505f9c2b5b69a6a458b696?gl=0',
     'normalized to the path form, keeping the other params');
   assert.equal(s.lists, 0, 'and it stays as cheap as the canonical form');
 
@@ -784,7 +783,7 @@ test('the games section lists the mirror with what this site has of each game', 
     const replayHref = (id) => '/?replay=' + id, openReplay = () => {};
     const mapFileGuess = (m) => m;
     const ALLY_HUES = [210, 5];
-    // ?admin=true is what reveals the LOS (lavabalance preview) button.
+    // Admin mode (a sign-in) is what reveals the LOS (lavabalance preview) button.
     let admin = false;
     const adminMode = () => admin, previewLavabalance = async () => {};
     ${extract('fmtDur')} ${extract('fmtDuration')} ${extract('fmtGameDuration')}
@@ -832,7 +831,7 @@ test('the games section lists the mirror with what this site has of each game', 
   assert.equal(dom.document.getElementById('gamespager').style.display, 'flex');
 
   // The lavabalance preview button lives in the admin column and exists only
-  // under ?admin=true: the column itself is CSS-hidden otherwise, but the
+  // in admin mode: the column itself is CSS-hidden otherwise, but the
   // button must not even be built — it is one per row, and it is nobody's
   // business but the operator's.
   const losButtons = () => walk(dom.tbody).filter((n) => n.tag === 'button' && n.className === 'lavabalance');

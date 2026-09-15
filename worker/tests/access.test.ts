@@ -193,10 +193,10 @@ test("team domain spellings normalize; the login's next stays on this site", () 
     assert.equal(normalizeTeamDomain(raw), "example.cloudflareaccess.com", raw);
     assert.equal(accessCertsURL(raw), "https://example.cloudflareaccess.com/cdn-cgi/access/certs");
   }
-  assert.equal(loginNext("/queue?admin=true"), "/queue?admin=true");
-  assert.equal(loginNext("/replays/abc?admin=true&gl=0"), "/replays/abc?admin=true&gl=0");
-  assert.equal(loginNext(null), "/queue?admin=true");
-  assert.equal(loginNext("https://evil.example/"), "/queue?admin=true", "an absolute URL is not a destination");
-  assert.equal(loginNext("//evil.example/x"), "/queue?admin=true", "a protocol-relative URL neither");
-  assert.equal(loginNext("queue"), "/queue?admin=true", "a relative path neither");
+  assert.equal(loginNext("/queue"), "/queue");
+  assert.equal(loginNext("/replays/abc?gl=0&col=lobby"), "/replays/abc?gl=0&col=lobby");
+  assert.equal(loginNext(null), "/queue");
+  assert.equal(loginNext("https://evil.example/"), "/queue", "an absolute URL is not a destination");
+  assert.equal(loginNext("//evil.example/x"), "/queue", "a protocol-relative URL neither");
+  assert.equal(loginNext("queue"), "/queue", "a relative path neither");
 });
