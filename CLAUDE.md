@@ -599,12 +599,12 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           mapNames serves that one row behind a one-minute in-memory cache. It
                           replaced GET /api/replays/facets, which ran DISTINCT scans plus a
                           full roster walk over the whole catalog on every landing-page load —
-                          the single biggest rows-read line in /api/sqlstats (~4000 rows/call).
+                          the single biggest rows-read line in /api/admin/sqlstats (~4000 rows/call).
                           PUT /api/replays/<id> upserts (called by pack -upload
                           and the ingest daemon; optionally guarded by the REPLAY_PUT_TOKEN wrangler
-                          secret as a bearer token; GET /api/sqlstats, /api/queue and
-                          /api/jobs/<id>/samples and the maintenance POSTs /view,
-                          /refresh-settings, /api/resim and /api/jobs/<id>/disabled are
+                          secret as a bearer token; GET /api/admin/sqlstats, /api/admin/queue and
+                          /api/admin/jobs/<id>/samples and the maintenance POSTs /view,
+                          /refresh-settings, /api/admin/resim and /api/admin/jobs/<id>/disabled are
                           ADMIN routes behind Cloudflare Access — see the landing-page
                           entry below). A publish that leaves the game ONE-SIDED
                           also QUEUES ITS RE-SIMULATION: upsert asks wantsFullView of the merged
@@ -689,12 +689,12 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           all, since only the live uploader widget writes one — declares "full"
                           through packer.UploadOptions.View (set by bringest -resim), without
                           which the row would keep the marking of the one-sided upload it just
-                          superseded. Everything else is HAND-SET via POST /api/replays/<id>/view
+                          superseded. Everything else is HAND-SET via POST /api/admin/replays/<id>/view
                           (admin, like refresh-settings; body {view, ally}, validated by
                           parseViewRequest) from the viewer header's POV dropdown — which, also
-                          like refresh-settings, appears only under ?admin=true (app.js
-                          adminMode(), carried into the replay view by replayHref; it edits a row
-                          every visitor reads, so it is maintenance, not a viewing preference) —
+                          like refresh-settings, appears only in admin mode (app.js
+                          adminMode() — an Access sign-in; it edits a row every visitor
+                          reads, so it is maintenance, not a viewing preference) —
                           and setView
                           also re-stamps the current rid's uploads entry so the per-revision
                           history agrees. upsert COALESCEs it (`view = COALESCE(excluded.view,
@@ -707,7 +707,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           `uploads` is server-owned) — refusing it, so that setView alone could
                           write the column, is what made every fresh upload arrive unmarked even
                           though its stream named the recording side.
-                          POST /api/replays/<id>/refresh-settings (admin) re-derives one
+                          POST /api/admin/replays/<id>/refresh-settings (admin) re-derives one
                           row's settings AND players from the BAR API's stored demo metadata (its
                           replay detail carries the demo modoptions verbatim as gameSettings, plus
                           the AllyTeams roster) via settingsFlags + playersFromApi in replayentry.ts
@@ -740,25 +740,28 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the route, which the section says; open to every visitor, since
                           it is public games rather than the pipeline's state), "Queue"
                           (the ingest jobs, below) and "SQL" (the DO's row accounting).
-                          Queue and SQL are ADMIN-ONLY — the entry is hidden without
-                          ?admin=true (CSS, like the row refresh button) and homeTab() maps
+                          Queue and SQL are ADMIN-ONLY — the entry is hidden when signed
+                          out (CSS, like the row refresh button) and homeTab() maps
                           the tab back to "replays" for everyone else (ADMIN_TABS), so a
                           shared /queue link cannot walk past the hidden entry and
-                          refreshQueue never fires. ADMIN MODE IS SERVER-GRANTED
-                          (worker/src/worker/access.ts, worker/README.md "Admin login"):
-                          ?admin=true is only the REQUEST to see the controls; app.js
-                          probeAdmin asks GET /api/admin/me once at boot and adminMode()
-                          is true only on a 200, i.e. the browser carries a CLOUDFLARE
-                          ACCESS cookie for a person the worker's policy allows. An Access
+                          refreshQueue never fires. ADMIN MODE IS BEING SIGNED IN, nothing
+                          else (worker/src/worker/access.ts, worker/README.md "Admin
+                          login"; the ?admin=true flag is gone): app.js probeAdmin asks
+                          GET /api/admin/me once at boot — every visit, one cheap 401
+                          for an ordinary visitor — and adminMode() is true only on a
+                          200, i.e. the browser carries a CLOUDFLARE ACCESS cookie for a
+                          person the worker's policy allows. EVERY ADMIN ROUTE LIVES
+                          UNDER /api/admin/ and the PREFIX is the gate: one
+                          app.use("/api/admin/*", requireAdmin) registered before any
+                          route, so a route added there is guarded by where it is. An Access
                           application protects ONE path, /admin/login, at the edge; the
                           worker VERIFIES the resulting CF_Authorization JWT itself with
                           jose — jwtVerify over createRemoteJWKSet, the repo's one npm
                           runtime dependency besides hono (signature against the team's
                           published keys, aud, iss, exp; jose owns the key-set cache)
-                          on every admin route via requireAdmin — GET /api/queue,
-                          /api/sqlstats, /api/jobs/<id>/samples, POST /api/resim,
-                          /api/replays/<id>/view, /refresh-settings, /api/jobs/<id>/
-                          disabled — so the gate holds on the workers.dev hostname (no
+                          on every /api/admin/* route — queue, sqlstats, jobs/<id>/samples,
+                          resim, replays/<id>/view, replays/<id>/refresh-settings,
+                          jobs/<id>/disabled, and me — so the gate holds on the workers.dev hostname (no
                           Access rule runs there) and against scripts. Config is two
                           vars, ACCESS_TEAM_DOMAIN + ACCESS_AUD; missing = FAIL-CLOSED
                           (401 with configured:false, and the header says so). The
@@ -776,13 +779,13 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           like any admin route and stores it as its own CF_Authorization
                           cookie (accessCookie, HttpOnly/Lax, expiring with the token).
                           /admin/logout clears that cookie on any origin and is the
-                          header's sign-out link. A 404 from /api/admin/me (the Go viz server,
-                          which has no admin route a script could drive) honours the
-                          flag alone, as before. Every admin fetch in app.js treats a
-                          401 as adminSignedOut (controls off, sign-in link in the
-                          header #adminnote). Why: app.js is served unminified, the
+                          header's sign-out link; signed out, the header carries a muted
+                          sign-in link (#adminnote). A 404 from /api/admin/me (the Go viz
+                          server, which has no login and no admin routes) shows nothing
+                          and no admin controls. Every admin fetch in app.js treats a
+                          401 as adminSignedOut (controls off, sign-in link back). Why: app.js is served unminified, the
                           routes were open, and on 2026-09-15 a script from an OVH host
-                          was feeding every ranked game to POST /api/resim within
+                          was feeding every ranked game to POST /api/admin/resim within
                           minutes of it ending (~60/h against one host clearing 2-3). The Queue is the pipeline's state —
                           every uploader's jobs and their failure messages — which is
                           maintenance, not something a visitor came for.
@@ -803,7 +806,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           1 when there are more sides; full roster + OS in the tooltip) with a ◉ on
                           the side that recorded the current upload, the Links cell adds an alt·T<n>
                           SPA link per other uploaded revision (from the row's `uploads`), and
-                          ?admin=true reveals a per-row ⟳ button calling the refresh-settings route.
+                          admin mode reveals a per-row ⟳ button calling the refresh-settings route.
                           WORK IN PROGRESS (rows the pipeline owns): a game with a job in
                           "processing" is in this list too, so the work is visible while it runs
                           rather than only once it lands — the DO inserts a PLACEHOLDER catalog
@@ -918,7 +921,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           which were never registered, so it is fetched only when it can change what
                           is shown: when /api/replays is unavailable (it is then the WHOLE listing —
                           an old deployment or a plain static host) or on ?orphans=true, the admin
-                          bar's "Unregistered" button (a button, not something ?admin=true does to
+                          bar's "Unregistered" button (a button, not something admin mode does to
                           every page load; disabled while a filter is active, since a stub has no
                           metadata any filter could match). Consequence: an unregistered upload is
                           invisible until someone asks for it. knownReplayURL therefore no longer
@@ -948,7 +951,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           RE-SIM REQUESTS: the pipeline's OTHER door, for a game nobody
                           uploaded — nothing else reaches those except the mirror backfill, and
                           that picks its own. The Queue section's paste box POSTs a
-                          replay link to the admin-gated POST /api/resim, which parses the gameId out of
+                          replay link to the admin-gated POST /api/admin/resim, which parses the gameId out of
                           it (src/worker/gameid.ts — accepts gex.honu.pw/match/<id>,
                           bar-rts.com/replays/<id>, ...info/replays?gameId=<id> and a bare id;
                           the TS twin of barapi.ParseGameID, which the two MUST stay in lockstep
@@ -978,8 +981,8 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           dedupes on an ACTIVE job for the game, so two callers get the same row
                           back and only one can claim it; a finished or failed job does not block
                           a fresh one, which is exactly what makes the retry possible. GUARDED,
-                          like /api/resim is now (Access) and was not: this is the one door into
-                          the jobs table with no refusals behind it. /api/resim's refusals
+                          like /api/admin/resim is now (Access) and was not: this is the one door into
+                          the jobs table with no refusals behind it. /api/admin/resim's refusals
                           were once the whole argument for leaving it open; a script feeding
                           it every ranked game (2026-09-15) showed they cannot price an hour
                           of engine time, which is why it is admin-gated too. Only kind
@@ -990,7 +993,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           processing without turning it into a placeholder (a revision exists,
                           so it stays openable), and a failure leaves that row untouched —
                           dropCatalogPlaceholder only ever deletes placeholder = 1.
-                          DISABLING A JOB (jobs.disabled + POST /api/jobs/<id>/disabled +
+                          DISABLING A JOB (jobs.disabled + POST /api/admin/jobs/<id>/disabled +
                           ReplayIndex.jobSetDisabled): the queue page's per-row switch. A COLUMN,
                           not a fifth state — the four states describe how far the WORK got, and
                           being held back is not a stage of that; it is also reversible, which a
@@ -1086,9 +1089,9 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           so a threaded engine exceeds 100). parseJobProgress shape-checks it
                           exactly as parseJobStats does, under MAX_JOB_PROGRESS_BYTES (2 KB —
                           it is a dozen small numbers), and drops rather than 400s for the same
-                          reason. It rides the OPEN reads (/api/jobs/<id>, /api/queue) like the
+                          reason. It rides the OPEN reads (/api/jobs/<id>, /api/admin/queue) like the
                           stats do.
-                          JOB SAMPLES (job_samples table + GET /api/jobs/<id>/samples): every
+                          JOB SAMPLES (job_samples table + GET /api/admin/jobs/<id>/samples): every
                           healthcheck is ALSO kept as its own row, which is what the queue page's
                           charts are drawn from. progress is the newest reading and is cleared
                           when the job ends; this is the SERIES, and it deliberately OUTLIVES the
@@ -1433,7 +1436,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           an injected global fetch as `this.fetchImpl(...)` binds `this` to
                           the session and workerd throws "Illegal invocation" — detach first.
                           LAVABALANCE PREVIEW (app.js previewLavabalance, index.html
-                          #lbdialog): each Games row carries an admin-only (?admin=true)
+                          #lbdialog): each Games row carries an admin-only (signed in)
                           LOS button — lavabalance, the sibling worker keeping the LOS
                           (OpenSkill) ratings, ingests a game through its open POST
                           /api/games, whose body is the VERBATIM api.bar-rts.com/replays/
@@ -1519,7 +1522,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           (jobs_count, incremented by jobInsert, sound because nothing ever
                           deletes a job row) and `active` free off the in-flight set already
                           in hand.
-                          SQL STATS (GET /api/sqlstats): the LIVE counterpart of the rowcost
+                          SQL STATS (GET /api/admin/sqlstats): the LIVE counterpart of the rowcost
                           suite — the DO bills every statement's rowsRead/rowsWritten to the
                           public method running it (installSqlAccounting: an exec shim plus
                           per-method wrappers, outermost method wins so helpers bill their
@@ -1609,7 +1612,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           rather than a verdict on the replay. A kind the page has no label for
                           renders as a plain error, exactly as an unclassified failure does.
                           The row's last cell is the HOLD-BACK switch (disableCell/
-                          setJobDisabled -> POST /api/jobs/<id>/disabled, see the worker entry).
+                          setJobDisabled -> POST /api/admin/jobs/<id>/disabled, see the worker entry).
                           It is offered only on a pending or running job — a finished one is
                           already never handed out, so a switch there would do nothing — and it
                           stopPropagations, since the row itself is an expand toggle. A held-back
@@ -1669,7 +1672,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           direct label and in the tooltip). X labels are ELAPSED time, not clock
                           time: "it spiked at minute 32" is the reading.
                           It reads GET
-                          /api/queue (ReplayIndex.queuePage: unfinished jobs first, then the most
+                          /api/admin/queue (ReplayIndex.queuePage: unfinished jobs first, then the most
                           recently finished; ?offset=/?limit=, limit capped at QUEUE_LIMIT_MAX),
                           QUEUE_PAGE = 25 rows at a time with a Prev/Next pager. It NEVER refreshes
                           itself: every read is an explicit act — opening the landing page, paging,
