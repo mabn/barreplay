@@ -312,6 +312,58 @@ test("playersFromApi: allies ascend, humans sort by OS, AIs follow", () => {
   ]);
 });
 
+// The chevron rides the same roster entry as the OS. Its whole difficulty is
+// that 0 is a real level (an account with under five hours), so it must be
+// ABSENT rather than 0 when the API states nothing — the two are different
+// facts and a row that conflates them cannot be read back.
+test("playersFromApi: keeps the chevron, and 0 is a level not a silence", () => {
+  const got = playersFromApi([
+    {
+      allyTeamId: 0,
+      Players: [
+        { name: "veteran", skill: "[30.00]", rank: 5 },
+        { name: "newcomer", skill: "[16.67]", rank: 0 },
+        { name: "unstated", skill: "[20.00]", rank: null },
+        { name: "nonsense", skill: "[10.00]", rank: "3" },
+        { name: "offscale", skill: "[5.00]", rank: 99 },
+      ],
+      AIs: [],
+    },
+  ]);
+  assert.deepEqual(got, [
+    {
+      ally: 0,
+      count: 5,
+      players: [
+        { name: "veteran", os: 30, rank: 5 },
+        { name: "unstated", os: 20 },
+        { name: "newcomer", os: 16.67, rank: 0 },
+        { name: "nonsense", os: 10 },
+        { name: "offscale", os: 5 },
+      ],
+    },
+  ]);
+});
+
+// A PUT body's roster is our own publishers' to send, so an unreadable rank
+// there is an error rather than a silent drop — unlike the API path above.
+test("sanitizeEntry: accepts a roster chevron and rejects an unreadable one", () => {
+  const ok = sanitizeEntry("6da7496aca487581a12b7a6d5bd99bc0", {
+    players: [{ ally: 0, count: 2, players: [{ name: "a", os: 30, rank: 0 }, { name: "b" }] }],
+  });
+  assert.ok(typeof ok === "object");
+  assert.deepEqual((ok as { players: unknown }).players, [
+    { ally: 0, count: 2, players: [{ name: "a", os: 30, rank: 0 }, { name: "b" }] },
+  ]);
+
+  for (const rank of [-1, 99, 1.5, "3", null]) {
+    const bad = sanitizeEntry("6da7496aca487581a12b7a6d5bd99bc0", {
+      players: [{ ally: 0, count: 1, players: [{ name: "a", rank }] }],
+    });
+    assert.equal(typeof bad, "string", `rank ${JSON.stringify(rank)} must be refused`);
+  }
+});
+
 test("ids are confined to a bare token", () => {
   assert.equal(sanitizeEntry("", {}), "invalid replay id");
   assert.equal(sanitizeEntry("a/b", {}), "invalid replay id");

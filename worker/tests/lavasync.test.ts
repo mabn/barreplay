@@ -220,6 +220,34 @@ test("a matched game's lobby info rides the submission; an unmatched one stays v
   assert.deepEqual(Object.keys(plain).sort(), ["id", "marker"]);
 });
 
+// lavabalance reads the per-player chevron (Player.rank) out of what this
+// sync hands it, and the only reason it is there is that the BAR detail is
+// forwarded VERBATIM. Nothing here picks fields, so this pins the property
+// rather than the plumbing: a nested roster arrives byte-for-byte, chevrons
+// and all, including a rank of 0 — a real level that must not be dropped as
+// if it were an absent one.
+test("the per-player chevron survives the forward, 0 included", async () => {
+  const roster = {
+    AllyTeams: [
+      {
+        allyTeamId: 0,
+        Players: [
+          { name: "veteran", userId: 1, skill: "[30.00]", rank: 5 },
+          { name: "newcomer", userId: 2, skill: "[16.67]", rank: 0 },
+          { name: "unstated", userId: 3, skill: "[20.00]", rank: null },
+        ],
+      },
+    ],
+  };
+  const bar = (async () => new Response(JSON.stringify({ id: "g", ...roster }))) as typeof fetch;
+  const lava = fakeLava();
+
+  await syncLava(fakeIndex([{ id: "g", startUnix: T0 }]), lava.impl, bar);
+
+  const posted = lava.posted[0][0] as typeof roster;
+  assert.deepEqual(posted.AllyTeams, roster.AllyTeams);
+});
+
 test("a failed detail fetch submits the rest and leaves that one pending", async () => {
   const lava = fakeLava();
   const bar = fakeBar(new Set(["bad"]));
