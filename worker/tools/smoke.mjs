@@ -140,6 +140,26 @@ try {
       `${page.status} ${page.headers.get("content-type")}`);
   }
 
+  // The admin gate. Nothing here carries an Access cookie and ADMIN_OPEN is
+  // never set for a build, so every admin route must be CLOSED — a 200 here
+  // is the door standing open, which is the failure the fail-closed design
+  // exists to make loud. The login path merely redirects: Access itself runs
+  // at the edge, in front of this Worker.
+  for (const path of ["/api/queue", "/api/sqlstats", "/api/admin/me"]) {
+    const r = await get(base, path);
+    check(`GET ${path} is closed without a sign-in`, r.status === 401, String(r.status));
+  }
+  // On a loopback host (which this is) /admin/login is the DEV login's first
+  // hop: it bounces to the deployed site's login, asking for the token back
+  // at this server's callback — never a token in hand here.
+  const login = await get(base, "/admin/login?next=%2Fqueue%3Fadmin%3Dtrue");
+  const loginTo = login.headers.get("location") ?? "";
+  check("GET /admin/login on a loopback host bounces to the deployed login",
+    login.status === 302 && loginTo.startsWith("https://replay.fogofwar.dev/admin/login?next=http%3A%2F%2F127.0.0.1%3A"),
+    `${login.status} ${loginTo}`);
+  const cb = await get(base, "/admin/callback?token=not.a.token");
+  check("GET /admin/callback refuses a token that does not verify", cb.status === 401, String(cb.status));
+
   // The guide. A 3xx here is the redirect loop: the asset layer bounces
   // /setup.html back to /setup, so a route that rewrites the path serves its
   // own bounce forever.

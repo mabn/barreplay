@@ -21,7 +21,8 @@
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
-    "hono": "^4.12.27"
+    "hono": "^4.12.27",
+    "jose": "^6.2.12"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.52.1",

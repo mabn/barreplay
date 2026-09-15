@@ -13,4 +13,14 @@ interface Env {
   /** Dev/test override of the teiserver web base URL, so a local mock can
    * stand in for server4.beyondallreason.info. Never set in production. */
   TEISERVER_BASE?: string;
+  /** Cloudflare Access, the admin login (src/worker/access.ts): the Zero
+   * Trust team domain ("<team>.cloudflareaccess.com" or just "<team>") and
+   * the Access application's Audience (AUD) tag. Set both (`wrangler secret
+   * put`, or a `vars` block — neither is secret) or every admin route
+   * answers 401: unconfigured is CLOSED. */
+  ACCESS_TEAM_DOMAIN?: string;
+  ACCESS_AUD?: string;
+  /** Local dev only (.dev.vars): "true" opens the admin routes with no
+   * login at all. Never set it on a deployment. */
+  ADMIN_OPEN?: string;
 }
