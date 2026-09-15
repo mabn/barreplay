@@ -5686,7 +5686,7 @@ function renderAdminNote(state) {
   };
   if (adminUser && adminUser.via !== 'legacy') {
     el.append('admin: ' + (adminUser.email || adminUser.via) + ' · ');
-    el.append(link('sign out', '/cdn-cgi/access/logout'));
+    el.append(link('sign out', '/admin/logout'));
   } else if (adminUser) {
     el.style.display = 'none';
     return;

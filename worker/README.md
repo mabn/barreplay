@@ -153,13 +153,31 @@ The `workers.dev` hostname has no Access application in front of it, so nobody
 can sign in there: `/admin/login` redirects without a cookie and the admin calls
 401. That is intended — the admin UI is for the custom domain.
 
-### Local development
+### Local development: a real sign-in through the deployed site
 
-Put `ADMIN_OPEN=true` in `worker/.dev.vars` and `vite dev` treats every request as
-an admin. To exercise the real gate locally instead, set `ACCESS_TEAM_DOMAIN` and
-`ACCESS_AUD` there and paste a `CF_Authorization` cookie copied from a signed-in
-browser session on the deployed site (the JWT is for the same application, so it
-verifies against the same keys).
+`vite dev` signs in for real, with your Access identity, and needs no setup: open
+`http://127.0.0.1:5173/queue?admin=true` and click **sign in**. Access can only
+set its cookie on the hostname it fronts, and a dev server on 127.0.0.1 is not
+one, so the dev server **borrows the deployed login** in three hops (the
+`/admin/login` comment in `src/worker/app.ts` has the picture):
+
+1. the dev server's `/admin/login` sees it is on a loopback host with no Access
+   assertion header and bounces the browser to
+   `https://replay.fogofwar.dev/admin/login?next=http://127.0.0.1:5173/admin/callback?next=<page>`;
+2. Access authenticates you on the deployed site; its `/admin/login` handler then
+   runs with the `Cf-Access-Jwt-Assertion` header (the token Access just issued)
+   and, because `next` is a **loopback** dev callback and nothing else, redirects
+   there with the token attached;
+3. the dev server's `/admin/callback` verifies that token exactly as every admin
+   route would (same team, same AUD, same keys — they come from `wrangler.jsonc`,
+   which `vite dev` reads), stores it as its own `CF_Authorization` cookie, and
+   sends you to the page. The header then shows your email; **sign out**
+   (`/admin/logout`) clears the cookie on that origin.
+
+The token only ever travels to `127.0.0.1`, `localhost` or `[::1]` — this machine —
+and only to the `/admin/callback` path; a link naming any other host gets the
+plain on-site redirect. `ADMIN_OPEN=true` in `worker/.dev.vars` remains the
+no-login switch for a fork with no Access application to borrow.
 
 ## The replay catalog (Durable Object + SQLite)
 

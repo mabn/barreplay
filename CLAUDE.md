@@ -764,7 +764,19 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           (401 with configured:false, and the header says so). The
                           configured REPLAY_PUT_TOKEN bearer is an admin identity too
                           (an operator's curl); ADMIN_OPEN=true in .dev.vars opens it for
-                          local dev only. A 404 from /api/admin/me (the Go viz server,
+                          local dev only. LOCAL DEV SIGNS IN FOR REAL by borrowing the
+                          deployed login (app.ts /admin/login, three hops): a loopback
+                          host with no assertion header bounces to
+                          PUBLIC_ORIGIN/admin/login with next = its own
+                          http://127.0.0.1:<port>/admin/callback; the deployed handler,
+                          holding the Cf-Access-Jwt-Assertion header Access just set,
+                          forwards the token ONLY to a loopback /admin/callback
+                          (access.ts devCallbackNext — nowhere else, a credential on the
+                          strength of a link); the dev server's callback verifies it
+                          like any admin route and stores it as its own CF_Authorization
+                          cookie (accessCookie, HttpOnly/Lax, expiring with the token).
+                          /admin/logout clears that cookie on any origin and is the
+                          header's sign-out link. A 404 from /api/admin/me (the Go viz server,
                           which has no admin route a script could drive) honours the
                           flag alone, as before. Every admin fetch in app.js treats a
                           401 as adminSignedOut (controls off, sign-in link in the

@@ -24,7 +24,8 @@
 // fake Env.
 import { Hono } from "hono";
 
-import { AccessVerifier, accessToken, loginNext } from "./access";
+import { AccessVerifier, accessCookie, accessToken, devCallbackNext, isLoopbackHost, loginNext } from "./access";
+import { decodeJwt } from "jose";
 import { GAME_ID_RE, encodeGamesCursor, gameFromApi, parseGamesCursor } from "./games";
 import { parseGameId } from "./gameid";
 import { JOB_KINDS, parseJobErrorKind, parseJobProgress, parseJobStats } from "./jobs";
@@ -135,7 +136,91 @@ app.get("/api/admin/me", requireAdmin, (c) => {
 // visitors just the same, to a page whose admin calls then 401. loginNext
 // keeps the destination on this site (an open redirect on the admin's login
 // page would be a phishing tool).
-app.get("/admin/login", (c) => c.redirect(loginNext(new URL(c.req.url).searchParams.get("next")), 302));
+//
+// LOCAL DEVELOPMENT logs in for real through the deployed site, because
+// Access can only ever set its cookie on the hostname it fronts, and a
+// `vite dev` server on 127.0.0.1 is not one. Three hops:
+//   1. the DEV server's /admin/login (a loopback host, no Access assertion
+//      header) bounces the browser to PUBLIC_ORIGIN/admin/login with
+//      next = its own http://127.0.0.1:<port>/admin/callback?next=<page>;
+//   2. Access authenticates on the deployed site and this handler runs there
+//      WITH the Cf-Access-Jwt-Assertion header — the token Access just
+//      issued — and, because `next` is a loopback dev callback and nothing
+//      else (devCallbackNext), redirects to it with the token attached;
+//   3. the dev server's /admin/callback verifies that token exactly as every
+//      admin route would, stores it as its own CF_Authorization cookie, and
+//      sends the browser on to the page.
+// Same application, same keys, same AUD — the local server is then an admin
+// with the person's real identity and nothing pretended. The token travels
+// only to a loopback address, which is this machine; a link that names any
+// other host gets the plain on-site redirect.
+/** The deployed site, where the Access application lives; a dev server
+ * borrows its login. The custom domain in wrangler.jsonc. */
+const PUBLIC_ORIGIN = "https://replay.fogofwar.dev";
+
+app.get("/admin/login", (c) => {
+  const url = new URL(c.req.url);
+  const rawNext = url.searchParams.get("next");
+  const assertion = c.req.header("cf-access-jwt-assertion");
+
+  // Hop 1: a dev server with no Access in front of it sends the browser to
+  // the deployed login, asking for the token back at its own callback.
+  if (!assertion && isLoopbackHost(url.hostname)) {
+    const cb = new URL(`${url.origin}/admin/callback`);
+    cb.searchParams.set("next", loginNext(rawNext));
+    const to = new URL(`${PUBLIC_ORIGIN}/admin/login`);
+    to.searchParams.set("next", cb.href);
+    return c.redirect(to.href, 302);
+  }
+
+  // Hop 2: on the deployed site, hand the token to a loopback dev callback.
+  const dev = devCallbackNext(rawNext);
+  if (dev && assertion) {
+    dev.searchParams.set("token", assertion);
+    return c.redirect(dev.href, 302);
+  }
+
+  return c.redirect(loginNext(rawNext), 302);
+});
+
+// Hop 3 (dev only in practice, but safe anywhere): take a token the deployed
+// login forwarded, verify it like any admin request would, and store it as
+// this origin's cookie. Nothing is trusted about the caller: a token that
+// does not verify for THIS deployment's team + AUD is refused, so the route
+// cannot be used to plant a foreign credential.
+app.get("/admin/callback", async (c) => {
+  const url = new URL(c.req.url);
+  const token = url.searchParams.get("token");
+  if (!token) return c.json({ error: "no token" }, 400);
+  const { ACCESS_TEAM_DOMAIN: teamDomain, ACCESS_AUD: aud } = c.env;
+  if (!teamDomain || !aud) return c.json({ error: "admin login is not configured on this deployment" }, 401);
+  const id = await accessVerifier.verify(token, { teamDomain, aud });
+  if (!id) return c.json({ error: "the token did not verify" }, 401);
+  let exp: number | undefined;
+  try {
+    exp = decodeJwt(token).exp;
+  } catch {
+    exp = undefined;
+  }
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: loginNext(url.searchParams.get("next")),
+      "set-cookie": accessCookie(token, { secure: url.protocol === "https:", expUnix: exp }),
+    },
+  });
+});
+
+// Sign out of THIS origin: drop the cookie and go home. On the deployed site
+// Access's own /cdn-cgi/access/logout also ends the Access session; this is
+// the one that exists on a dev server too, so the header links here.
+app.get("/admin/logout", (c) => {
+  const url = new URL(c.req.url);
+  return new Response(null, {
+    status: 302,
+    headers: { location: "/", "set-cookie": accessCookie("", { secure: url.protocol === "https:" }) },
+  });
+});
 
 // What each Durable Object method has cost in SQLite rows since its instance
 // started — the live counterpart of the rowcost test suite, for asking "which
