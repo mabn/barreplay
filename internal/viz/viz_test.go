@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -630,6 +631,42 @@ func str(p *string) string {
 		return "<nil>"
 	}
 	return *p
+}
+
+// The chevron rank rides the catalog roster next to the OS, and its whole
+// difficulty is that 0 is a real level (an account with under five hours)
+// while the .brp meta cannot tell a recorded 0 from a field it never wrote.
+// So a player the startscript named reports their rank even when it is 0, and
+// a player known only from the widget's own P line reports nothing at all.
+func TestCatalogPlayerRank(t *testing.T) {
+	teams := []snapshot.TeamInfo{{TeamID: 0, AllyTeam: 0}}
+	groups := catalogPlayers(snapshot.Meta{
+		Teams: teams,
+		Players: []snapshot.PlayerInfo{
+			{PlayerID: 0, Name: "veteran", Team: 0, Skill: 30, Rank: 5, AccountID: "1"},
+			{PlayerID: 1, Name: "newcomer", Team: 0, Skill: 16.67, Rank: 0, AccountID: "2"},
+			{PlayerID: 2, Name: "unrated", Team: 0, Rank: 3},
+			{PlayerID: 3, Name: "widgetonly", Team: 0},
+		},
+	})
+	if len(groups) != 1 {
+		t.Fatalf("groups = %d, want 1", len(groups))
+	}
+	want := map[string]string{
+		"veteran":    "5",
+		"newcomer":   "0", // a level, not a silence
+		"unrated":    "3", // a rank alone still proves the startscript
+		"widgetonly": "<nil>",
+	}
+	for _, p := range groups[0].Players {
+		got := "<nil>"
+		if p.Rank != nil {
+			got = strconv.Itoa(int(*p.Rank))
+		}
+		if got != want[p.Name] {
+			t.Errorf("%s rank = %s, want %s", p.Name, got, want[p.Name])
+		}
+	}
 }
 
 func TestGameSizeSpec(t *testing.T) {
