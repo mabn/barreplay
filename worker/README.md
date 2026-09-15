@@ -89,8 +89,10 @@ per-row settings refresh, the POV marking, the job hold-back switch — is behin
 in the Zero Trust dashboard protects **one path** of the hostname, `/admin/login`,
 with a policy naming who may sign in. A visitor who passes it gets a
 `CF_Authorization` cookie for the whole hostname, holding a JWT Access signed;
-the worker **verifies that JWT itself** (`src/worker/access.ts` — signature
-against the team's published keys, audience, issuer, expiry) on every admin route.
+the worker **verifies that JWT itself** (`src/worker/access.ts`, with
+[jose](https://www.npmjs.com/package/jose)'s `jwtVerify` over `createRemoteJWKSet`:
+signature against the team's published keys, audience, issuer, expiry; jose owns
+the key-set cache and its refetch cooldown) on every admin route.
 Verifying in the worker rather than trusting the edge is what makes the gate hold
 on the `workers.dev` hostname too, where no Access rule runs, and against anything
 that is not a browser.

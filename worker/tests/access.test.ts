@@ -1,16 +1,16 @@
-// The Access JWT verifier (src/worker/access.ts) against a keypair this test
-// makes: a token it signs itself must verify, and every way a token can be
-// wrong — signature, audience, issuer, expiry, algorithm, an unknown key —
-// must come back null rather than throw. The key set is served by a stubbed
-// globalThis.fetch, which is also how the refetch-on-rotation and its rate
-// limit are observed.
+// The Access JWT verifier (src/worker/access.ts — jose underneath) against a
+// keypair this test makes: a token it signs itself must verify, and every
+// way a token can be wrong — signature, audience, issuer, expiry, algorithm,
+// an unknown key — must come back null rather than throw. The key set is
+// served by a stubbed globalThis.fetch, which is also how the
+// refetch-on-rotation and its cooldown are observed. jose's key-set cache
+// runs on the real clock, so those two are driven by the verifier's
+// cooldown option rather than by a fake `now` (which reaches the claims only).
 import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
   AccessVerifier,
-  JWKS_REFETCH_MIN_MS,
-  JWKS_TTL_MS,
   accessCertsURL,
   accessToken,
   loginNext,
@@ -96,6 +96,11 @@ test("a token Access signed for this application verifies to its identity", asyn
   const single = await signer.sign({ alg: "RS256", kid: "k1" }, goodClaims({ aud: AUD }));
   assert.ok(await v.verify(single, { teamDomain: TEAM, aud: AUD, now: NOW }));
 
+  // No kid, but signed by the one published key: jose matches on alg when
+  // that is unambiguous, and the signature is genuine.
+  const noKid = await signer.sign({ alg: "RS256" }, goodClaims());
+  assert.ok(await v.verify(noKid, { teamDomain: TEAM, aud: AUD, now: NOW }));
+
   // A service token carries no email.
   const svc = await signer.sign({ alg: "RS256", kid: "k1" }, goodClaims({ email: undefined }));
   assert.deepEqual(await v.verify(svc, { teamDomain: TEAM, aud: AUD, now: NOW }), { email: null, sub: "user-1" });
@@ -119,7 +124,6 @@ test("every wrong token is null, never an exception", async (t) => {
     ["no sub", signer.sign(H, goodClaims({ sub: undefined }))],
     ["alg none", `${b64url('{"alg":"none","kid":"k1"}')}.${b64url(JSON.stringify(goodClaims()))}.`],
     ["HS256", signer.sign({ alg: "HS256", kid: "k1" }, goodClaims())],
-    ["no kid", signer.sign({ alg: "RS256" }, goodClaims())],
     ["two parts", "abc.def"],
     ["garbage", "not a token at all"],
     ["bad json", `${b64url("{nope")}.${b64url("{}")}.${b64url("x")}`],
@@ -134,46 +138,33 @@ test("every wrong token is null, never an exception", async (t) => {
   }
 });
 
-test("an unknown kid re-reads the key set once a minute at most — rotation, not a fetch per forgery", async (t) => {
+test("an unknown kid re-reads the key set (rotation), but not inside the cooldown (a forgery per request)", async (t) => {
   const k1 = await makeSigner("k1");
   const k2 = await makeSigner("k2");
   let live = [k1];
   const calls = stubCerts(t, () => live);
-  const v = new AccessVerifier();
-  const opts = { teamDomain: TEAM, aud: AUD };
+  const opts = { teamDomain: TEAM, aud: AUD, now: NOW };
 
-  assert.ok(await v.verify(await k1.sign({ alg: "RS256", kid: "k1" }, goodClaims()), { ...opts, now: NOW }));
+  // No cooldown: a rotated-in key is found on the re-read the unknown kid
+  // provokes.
+  const eager = new AccessVerifier({ cooldownMs: 0 });
+  assert.ok(await eager.verify(await k1.sign({ alg: "RS256", kid: "k1" }, goodClaims()), opts));
   assert.equal(calls.length, 1);
-
-  // Rotation: k2 signs, the set is re-read and k2 is found — once the floor
-  // since the last read has passed (a rotation seconds after a read waits
-  // out the minute, which is the price of the rate limit).
   live = [k1, k2];
   const t2 = await k2.sign({ alg: "RS256", kid: "k2" }, goodClaims());
-  const T_ROT = NOW + JWKS_REFETCH_MIN_MS + 1000;
-  assert.equal(await v.verify(t2, { ...opts, now: NOW + 1000 }), null, "inside the floor: not re-read yet");
-  assert.equal(calls.length, 1);
-  assert.ok(await v.verify(t2, { ...opts, now: T_ROT }), "the rotated-in key is found on a re-read");
+  assert.ok(await eager.verify(t2, opts), "the rotated-in key is found on a re-read");
   assert.equal(calls.length, 2);
 
-  // A stream of unknown kids inside the floor costs no further fetch.
+  // The production cooldown: a stream of unknown kids after one read costs
+  // no further fetch — each is refused off the cached set.
+  const patient = new AccessVerifier();
+  assert.ok(await patient.verify(t2, opts));
+  assert.equal(calls.length, 3);
   for (let i = 0; i < 5; i++) {
     const forged = await k1.sign({ alg: "RS256", kid: `bogus-${i}` }, goodClaims());
-    assert.equal(await v.verify(forged, { ...opts, now: T_ROT + 1000 + i }), null);
+    assert.equal(await patient.verify(forged, opts), null);
   }
-  assert.equal(calls.length, 2, "no re-read inside JWKS_REFETCH_MIN_MS");
-
-  // Past the floor, one more.
-  const later = await k1.sign({ alg: "RS256", kid: "bogus-x" }, goodClaims());
-  assert.equal(await v.verify(later, { ...opts, now: T_ROT + JWKS_REFETCH_MIN_MS + 1 }), null);
-  assert.equal(calls.length, 3);
-
-  // And the TTL alone re-reads a set that is simply old (a token that is
-  // still valid then, since the one above has expired by six hours later).
-  const T_OLD = T_ROT + JWKS_TTL_MS + JWKS_REFETCH_MIN_MS + 10;
-  const longLived = await k2.sign({ alg: "RS256", kid: "k2" }, goodClaims({ exp: Math.floor(T_OLD / 1000) + 60 }));
-  assert.ok(await v.verify(longLived, { ...opts, now: T_OLD }));
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 3, "no re-read inside the cooldown");
 });
 
 test("an unreadable key set is an error, not a silent pass or a silent refusal", async (t) => {
@@ -185,7 +176,7 @@ test("an unreadable key set is an error, not a silent pass or a silent refusal",
   });
   const v = new AccessVerifier();
   const tok = await signer.sign({ alg: "RS256", kid: "k1" }, goodClaims());
-  await assert.rejects(v.verify(tok, { teamDomain: TEAM, aud: AUD, now: NOW }), /Access certs: HTTP 503/);
+  await assert.rejects(v.verify(tok, { teamDomain: TEAM, aud: AUD, now: NOW }), /Expected 200 OK/);
 });
 
 test("the token is read from the Access header first, then the CF_Authorization cookie", () => {

@@ -751,8 +751,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           is true only on a 200, i.e. the browser carries a CLOUDFLARE
                           ACCESS cookie for a person the worker's policy allows. An Access
                           application protects ONE path, /admin/login, at the edge; the
-                          worker VERIFIES the resulting CF_Authorization JWT itself
-                          (signature against the team's published keys, aud, iss, exp)
+                          worker VERIFIES the resulting CF_Authorization JWT itself with
+                          jose — jwtVerify over createRemoteJWKSet, the repo's one npm
+                          runtime dependency besides hono (signature against the team's
+                          published keys, aud, iss, exp; jose owns the key-set cache)
                           on every admin route via requireAdmin — GET /api/queue,
                           /api/sqlstats, /api/jobs/<id>/samples, POST /api/resim,
                           /api/replays/<id>/view, /refresh-settings, /api/jobs/<id>/
