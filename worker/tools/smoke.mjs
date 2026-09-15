@@ -140,6 +140,20 @@ try {
       `${page.status} ${page.headers.get("content-type")}`);
   }
 
+  // The admin gate. The built worker has no ACCESS_* vars and no ADMIN_OPEN,
+  // so every admin route must be CLOSED — a 200 here is the door standing
+  // open on a deployment that forgot its configuration, which is the failure
+  // the fail-closed design exists to make loud. The login path merely
+  // redirects: Access itself runs at the edge, in front of this Worker.
+  for (const path of ["/api/queue", "/api/sqlstats", "/api/admin/me"]) {
+    const r = await get(base, path);
+    check(`GET ${path} is closed without a sign-in`, r.status === 401, String(r.status));
+  }
+  const login = await get(base, "/admin/login?next=%2Fqueue%3Fadmin%3Dtrue");
+  check("GET /admin/login redirects back on-site",
+    login.status === 302 && login.headers.get("location") === "/queue?admin=true",
+    `${login.status} ${login.headers.get("location")}`);
+
   // The guide. A 3xx here is the redirect loop: the asset layer bounces
   // /setup.html back to /setup, so a route that rewrites the path serves its
   // own bounce forever.

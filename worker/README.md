@@ -38,7 +38,8 @@ unreachable), so there is no map proxy.
 The landing page (no `?replay=` in the URL) has a **left menu** with these sections:
 
 - **Replays** — the catalog list (below), the default.
-- **Queue** — **admin-only** (`?admin=true`): the ingest jobs (`GET /api/queue`),
+- **Queue** — **admin-only** (`?admin=true` plus a Cloudflare Access sign-in, see
+  [Admin login](#admin-login-cloudflare-access)): the ingest jobs (`GET /api/queue`),
   one row per job with its game, **kind**, state, age and failure detail, **25 per
   page** with a Prev/Next pager. Two kinds appear here: an `upload` is a dropped
   `.brepstream` waiting for a plain `bringest`, a `re-sim` is a game **nobody
@@ -74,11 +75,92 @@ The landing page (no `?replay=` in the URL) has a **left menu** with these secti
   is not in the URL. A backend without the route (the Go viz server keeps no mirror)
   says so.
 
-The selection lives in the URL as `?tab=queue`, so it is shareable and survives a
+The selection lives in the URL as the path (`/queue`), so it is shareable and survives a
 refresh, and opening a replay from a section returns there on `back`. Without
-`?admin=true` the Queue entry is hidden and `?tab=queue` falls back to Replays, so
-the section is not reachable by URL alone — the route itself stays open, like the
-per-job status the uploading browser polls.
+`?admin=true` the Queue entry is hidden and `/queue` falls back to Replays; with it,
+the section (and every other admin control) appears only once `GET /api/admin/me`
+has confirmed an Access sign-in — the routes behind them answer 401 to anyone else.
+
+## Admin login (Cloudflare Access)
+
+The maintenance surface — the Queue and SQL sections, the re-sim paste box, the
+per-row settings refresh, the POV marking, the job hold-back switch — is behind
+**Cloudflare Access**. The worker never sees a password: an Access *application*
+in the Zero Trust dashboard protects **one path** of the hostname, `/admin/login`,
+with a policy naming who may sign in. A visitor who passes it gets a
+`CF_Authorization` cookie for the whole hostname, holding a JWT Access signed;
+the worker **verifies that JWT itself** (`src/worker/access.ts` — signature
+against the team's published keys, audience, issuer, expiry) on every admin route.
+Verifying in the worker rather than trusting the edge is what makes the gate hold
+on the `workers.dev` hostname too, where no Access rule runs, and against anything
+that is not a browser.
+
+Why this and not `?admin=true` alone: `app.js` is served unminified to every
+visitor, so the routes and their request shapes are readable off the page, and
+`POST /api/resim` was in fact driven by a script from an OVH host, queueing every
+ranked game within minutes of it ending (2026-09-15).
+
+**Routes.** `GET /api/admin/me` answers `{email, via}` for a signed-in request and
+401 otherwise (the front-end asks it once at boot when `?admin=true` is set).
+`GET /admin/login?next=<path>` is the protected path; the handler just redirects
+back to `next` (on-site paths only). The admin routes are `GET /api/queue`,
+`GET /api/sqlstats`, `GET /api/jobs/<id>/samples`, `POST /api/resim`,
+`POST /api/replays/<id>/view`, `POST /api/replays/<id>/refresh-settings` and
+`POST /api/jobs/<id>/disabled`. The daemons' routes keep their bearer guard; the
+uploader's own `GET /api/jobs/<id>` poll stays open.
+
+Three things count as an admin, tried in this order:
+
+1. `ADMIN_OPEN=true` — **local dev only**, in `.dev.vars` (gitignored), never in
+   `wrangler.jsonc`. `vite dev` then shows the admin UI with no login.
+2. The daemons' bearer token, when `REPLAY_PUT_TOKEN` is configured and matches —
+   so an operator's `curl -H "authorization: Bearer $REPLAY_PUT_TOKEN"` can drive
+   an admin route. (An absent token opens the daemon routes for a dev bucket; it
+   never opens the admin gate.)
+3. A valid Access token for **this** application, from the cookie or the
+   `Cf-Access-Jwt-Assertion` header.
+
+**Fail-closed:** with `ACCESS_TEAM_DOMAIN` or `ACCESS_AUD` missing, every admin
+route answers 401 with `configured:false` and the header says so under
+`?admin=true`. A deploy that forgot the configuration locks the admin out; it never
+opens the door. The smoke test asserts this on the built worker.
+
+### One-time setup
+
+1. Zero Trust dashboard → **Access → Applications → Add an application →
+   Self-hosted**. Application domain: `replay.fogofwar.dev`, path: `admin/login`
+   (only that path — nothing else on the site goes through Access). Session
+   duration as you like (the cookie's JWT expires with it; the UI then shows the
+   sign-in link again). Identity: the default One-time PIN by email is enough.
+2. Add a policy: action **Allow**, include **Emails** = the addresses allowed
+   to administer the site.
+3. From the application's overview copy the **Application Audience (AUD) Tag**
+   (64 hex chars). The **team domain** is under Zero Trust → Settings → Custom
+   Pages (`<team>.cloudflareaccess.com`; the bare `<team>` is accepted too).
+4. Give the worker both — neither is secret, so either a `vars` block in
+   `wrangler.jsonc` or:
+
+   ```sh
+   wrangler secret put ACCESS_TEAM_DOMAIN   # <team>.cloudflareaccess.com
+   wrangler secret put ACCESS_AUD           # the application's AUD tag
+   ```
+
+5. `npm run deploy`. Open `https://replay.fogofwar.dev/queue?admin=true`: the
+   header offers **sign in**, which goes through `/admin/login` (Access), and
+   back to the queue with the controls on. **sign out** goes to Access's
+   `/cdn-cgi/access/logout`.
+
+The `workers.dev` hostname has no Access application in front of it, so nobody
+can sign in there: `/admin/login` redirects without a cookie and the admin calls
+401. That is intended — the admin UI is for the custom domain.
+
+### Local development
+
+Put `ADMIN_OPEN=true` in `worker/.dev.vars` and `vite dev` treats every request as
+an admin. To exercise the real gate locally instead, set `ACCESS_TEAM_DOMAIN` and
+`ACCESS_AUD` there and paste a `CF_Authorization` cookie copied from a signed-in
+browser session on the deployed site (the JWT is for the same application, so it
+verifies against the same keys).
 
 ## The replay catalog (Durable Object + SQLite)
 
@@ -444,7 +526,7 @@ wherever the repo lives (`cmd/bringest`, e.g. a VM):
 | URL | What |
 | --- | --- |
 | `POST /api/upload` | open; validates the stream's preamble (`src/worker/preamble.ts`), archives the raw bytes at `streams/<gameId>/<ts>-a<ally>.brepstream` (append-only, never listed, never served publicly), inserts a pending `upload` job, returns `{job, gameId, streamKey}` |
-| `POST /api/resim` | open; `{link}` → a pending `resim` job for a game **nobody uploaded** (see below) |
+| `POST /api/resim` | admin ([Access](#admin-login-cloudflare-access)); `{link}` → a pending `resim` job for a game **nobody uploaded** (see below) |
 | `GET /api/jobs/<id>` | open; the job's state for the requesting browser's poll (`pending → processing → done \| error`) |
 | `GET /api/jobs` | bearer-guarded; a daemon's work queue (pending + stalled-processing jobs of ONE kind, oldest first). `?kind=upload` (**the default**, so a deployed daemon is never handed work it cannot run) or `?kind=resim` |
 | `GET /api/queue` | open; the same jobs for the landing page's **Queue** section, paged — `?offset=&limit=` (default 25, capped at 100) → `{jobs, total, active, offset}`, unfinished first then recently finished. `total`/`active` count the whole table, not the page. The archive key is left out, since those bytes are guarded |
@@ -506,9 +588,12 @@ should, before an hour of somebody's engine time is spent:
 - a game already queued or running returns *that* job, so re-pasting a link is
   harmless rather than a second hour of work.
 
-The box is admin-only, like the Queue section it sits in; the route itself is
-open, like the row-refresh and point-of-view controls (the browser holds no
-bearer token, and the refusals above are what keeps it cheap to expose).
+The box is admin-only, like the Queue section it sits in, and since 2026-09-15 so
+is the route (an Access sign-in — see [Admin login](#admin-login-cloudflare-access)),
+like the row-refresh and point-of-view controls. It was open on the theory that
+the refusals above kept it cheap to expose; then a script fed it every ranked
+game within minutes of ending, 60 an hour against one engine host clearing two or
+three, and the refusals cannot price an hour of engine time.
 
 A re-sim runs for far longer than the 15 minutes after which a silent
 `processing` job is presumed dead and offered to somebody else, so the daemon

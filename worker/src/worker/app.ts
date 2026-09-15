@@ -24,6 +24,7 @@
 // fake Env.
 import { Hono } from "hono";
 
+import { AccessVerifier, accessToken, loginNext } from "./access";
 import { GAME_ID_RE, encodeGamesCursor, gameFromApi, parseGamesCursor } from "./games";
 import { parseGameId } from "./gameid";
 import { JOB_KINDS, parseJobErrorKind, parseJobProgress, parseJobStats } from "./jobs";
@@ -39,7 +40,7 @@ import { parseReplayFilter, parseViewRequest, playersFromApi, sanitizeEntry, set
  * such a zone the edge 413s anything past that before this cap is consulted. */
 const MAX_UPLOAD = 150 << 20;
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{ Bindings: Env; Variables: { admin: { email: string | null; via: string } } }>();
 
 // Without this, Hono's default handler answers an uncaught error with a bare
 // "Internal Server Error" and the MESSAGE never reaches the logs: the
@@ -53,15 +54,96 @@ app.onError((err, c) => {
   return c.text("Internal Server Error", 500);
 });
 
+// ---- admin login (Cloudflare Access) ---------------------------------------
+// The admin surface — queue, SQL stats, the re-sim paste box, the row refresh
+// and POV controls, the job hold-back switch — is gated by an identity that
+// Cloudflare Access issued, verified HERE on every request (src/worker/
+// access.ts has the why). One verifier per isolate: it caches the team's
+// signing keys.
+const accessVerifier = new AccessVerifier();
+
+/** Who is asking, when it is an admin. Three ways in, tried in order:
+ * ADMIN_OPEN=true (local dev only — .dev.vars, never wrangler.jsonc); the
+ * daemons' bearer token, when one is CONFIGURED and matches (an operator's
+ * script drives the admin routes with the credential it already holds); and
+ * a valid Access token for this application. Unconfigured Access is CLOSED:
+ * a deploy that forgot the two vars locks the admin out, never opens the
+ * door. Answers null for everyone else. */
+async function adminIdentity(c: {
+  env: Env;
+  req: { header(name: string): string | undefined; raw: Request };
+}): Promise<{ email: string | null; via: "open" | "token" | "access" } | null> {
+  if (c.env.ADMIN_OPEN === "true") return { email: null, via: "open" };
+  const token = c.env.REPLAY_PUT_TOKEN;
+  if (token && c.req.header("authorization") === `Bearer ${token}`) return { email: null, via: "token" };
+  const { ACCESS_TEAM_DOMAIN: teamDomain, ACCESS_AUD: aud } = c.env;
+  if (!teamDomain || !aud) return null;
+  const jwt = accessToken(c.req.raw.headers);
+  if (!jwt) return null;
+  const id = await accessVerifier.verify(jwt, { teamDomain, aud });
+  return id ? { email: id.email, via: "access" } : null;
+}
+
+/** requireAdmin answers 401 for a request with no admin identity, telling
+ * the browser where the login is; on a pass it stores the identity for the
+ * route. The routes it guards are exactly the ones the admin UI drives — the
+ * daemons' own routes keep their bearer guard. */
+const requireAdmin = async (
+  c: {
+    env: Env;
+    req: { header(name: string): string | undefined; raw: Request };
+    json: (body: unknown, status: 401) => Response;
+    set: (key: "admin", value: unknown) => void;
+  },
+  next: () => Promise<void>,
+): Promise<Response | void> => {
+  const who = await adminIdentity(c);
+  if (!who) {
+    const configured = Boolean(c.env.ACCESS_TEAM_DOMAIN && c.env.ACCESS_AUD);
+    return c.json(
+      {
+        error: configured ? "admin sign-in required" : "admin login is not configured on this deployment",
+        login: "/admin/login",
+        configured,
+      },
+      401,
+    );
+  }
+  c.set("admin", who);
+  await next();
+};
+
 app.get("/api/health", (c) => c.json({ status: "ok" }));
+
+// Who am I, for the front-end: 200 with the identity when the request carries
+// an admin credential, else the same 401 the admin routes answer. app.js asks
+// this once when ?admin=true is in the URL and shows the admin controls only
+// on a 200 — the URL flag is the request to see them, the cookie is what
+// grants it. A 404 here (the Go viz server, an older worker) tells app.js the
+// backend has no login and it falls back to the flag alone, which is safe
+// because such a backend has no admin route a script could drive.
+app.get("/api/admin/me", requireAdmin, (c) => {
+  const who = c.get("admin");
+  return c.json({ email: who.email, via: who.via }, 200, { "cache-control": "no-store" });
+});
+
+// The one path the Access application protects. Reaching this handler on the
+// custom domain means Access already authenticated the visitor and set the
+// CF_Authorization cookie for the hostname; all that is left is to send them
+// back where they were going. Nothing here TRUSTS having been reached — on
+// the workers.dev hostname no rule runs and this redirects unauthenticated
+// visitors just the same, to a page whose admin calls then 401. loginNext
+// keeps the destination on this site (an open redirect on the admin's login
+// page would be a phishing tool).
+app.get("/admin/login", (c) => c.redirect(loginNext(new URL(c.req.url).searchParams.get("next")), 302));
 
 // What each Durable Object method has cost in SQLite rows since its instance
 // started — the live counterpart of the rowcost test suite, for asking "which
 // endpoint is spending the daily row budgets" of the running deployment
-// instead of the code. Open like the other admin reads: counts leak nothing.
+// instead of the code. Admin-only like the other maintenance reads (requireAdmin).
 // The window is the instance's lifetime (`since`/`elapsedSec` in the reply);
 // a deploy or eviction resets it.
-app.get("/api/sqlstats", async (c) => c.json(await indexStub(c.env).sqlStatsReport()));
+app.get("/api/sqlstats", requireAdmin, async (c) => c.json(await indexStub(c.env).sqlStatsReport()));
 
 // authorized checks the shared-secret guard used by every write API the
 // ingest daemon / pack talk to. When the REPLAY_PUT_TOKEN secret is not
@@ -70,6 +152,7 @@ const authorized = (c: { env: Env; req: { header(name: string): string | undefin
   const token = c.env.REPLAY_PUT_TOKEN;
   return !token || c.req.header("authorization") === `Bearer ${token}`;
 };
+
 
 // The replay catalog lives in the ReplayIndex Durable Object (one SQLite
 // table, single instance). GET lists every replay with its picker stats,
@@ -139,15 +222,15 @@ app.put("/api/replays/:id", async (c) => {
 // carries the demo's gameSettings verbatim plus the AllyTeams roster),
 // without repacking or re-uploading the replay — useful when the badge
 // distillation gains a new flag after a replay was published, or when the
-// original upload ran demo-less. The endpoint is deliberately open: it can
-// only write values derived from the public authoritative API for the row's
-// own game id, so there is nothing to forge.
+// original upload ran demo-less. Admin-only (requireAdmin): it writes only
+// values derived from the public authoritative API for the row's own game
+// id, so there is nothing to forge — but a row everyone reads is still not
+// anyone's to rewrite.
 // Hand-mark whose point of view a replay was recorded from. Most rows carry no
 // recorder provenance — their captures predate the GAME record's recorder
 // fields — and nothing can derive it after the fact, so the viewer offers this
-// as an explicit marking. Open like refresh-settings above: it writes only a
-// three-valued label plus an ally id onto the row's own game, nothing forgeable.
-app.post("/api/replays/:id/view", async (c) => {
+// as an explicit marking. Admin-only like refresh-settings above.
+app.post("/api/replays/:id/view", requireAdmin, async (c) => {
   const id = c.req.param("id");
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) return c.json({ error: "invalid replay id" }, 400);
   let body: unknown;
@@ -163,7 +246,7 @@ app.post("/api/replays/:id/view", async (c) => {
   return c.json({ ok: true, view: parsed.view, ally: parsed.ally });
 });
 
-app.post("/api/replays/:id/refresh-settings", async (c) => {
+app.post("/api/replays/:id/refresh-settings", requireAdmin, async (c) => {
   const id = c.req.param("id");
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) return c.json({ error: "invalid replay id" }, 400);
   let detail: { gameSettings?: Record<string, unknown>; AllyTeams?: unknown };
@@ -237,15 +320,16 @@ app.post("/api/upload", async (c) => {
 // the catalog for one-sided uploads, which by construction cannot see a game
 // that was never uploaded at all.
 //
-// Open, like /view and /refresh-settings, because the browser holds no bearer
-// token and the section it is reached from is admin-gated in the UI. What
-// keeps it from being a way to burn somebody else's machine time is the
-// checks: the id has to parse, the BAR API has to know the game (a re-sim
+// Admin-only (requireAdmin), like /view and /refresh-settings. It was open,
+// on the theory that its refusals kept it cheap to expose; then a script fed
+// it every ranked game within minutes of ending, 60 an hour, and an hour of
+// engine time each is exactly what the refusals cannot price. The refusals
+// stay, since they are still right: the id has to parse, the BAR API has to know the game (a re-sim
 // cannot degrade past a missing demo the way an upload can — the demo IS the
 // simulation input), the game must not already be published, and a second
 // request for a game already queued returns the job that exists rather than
 // making another.
-app.post("/api/resim", async (c) => {
+app.post("/api/resim", requireAdmin, async (c) => {
   let body: unknown;
   try {
     body = await c.req.json();
@@ -303,31 +387,28 @@ app.get("/api/jobs/:id", async (c) => {
 // One job's healthcheck HISTORY: the series behind the queue page's charts,
 // fetched only when a row is expanded rather than riding every queue read (a
 // page of 25 rows would otherwise carry thousands of points nobody asked for).
-// Open, like the per-job status and the queue itself, and for the same reason:
-// it reports on public replays and can change nothing.
+// Admin-only, like the queue it belongs to.
 //
 // An unknown job is an empty series, not a 404 — a job that never healthchecked
 // (an upload, or anything from a daemon older than the beat) is indistinguishable
 // from one that does not exist, and the view says the same thing about both.
-app.get("/api/jobs/:id/samples", async (c) => {
+app.get("/api/jobs/:id/samples", requireAdmin, async (c) => {
   const samples = await indexStub(c.env).jobSamples(c.req.param("id"));
   return c.json({ samples }, 200, { "cache-control": "no-cache" });
 });
 
 // The queue as the landing page's "Queue" section shows it: unfinished jobs
-// first, then what recently finished. Open, like the per-job status the
-// uploading browser already polls, and for the same reason — it reports on
-// public replays and can change nothing. The archive KEY is deliberately not
-// in the reply: it is the one field of a job row that is not public (the
-// route serving those bytes is bearer-guarded), and the view has no use for
-// it.
+// first, then what recently finished. Admin-only (requireAdmin): it is the
+// pipeline's state, every uploader's jobs and their failure messages. The
+// archive KEY is still not in the reply: the route serving those bytes is
+// bearer-guarded, and the view has no use for it.
 // Paged, because the table only grows and the view shows a handful at a time:
 // ?offset= and ?limit= (capped), with `total` and `active` counted over the
 // whole table so the pager and the menu's in-flight count are true on any page.
 const QUEUE_LIMIT_MAX = 100;
 const QUEUE_LIMIT_DEFAULT = 25;
 
-app.get("/api/queue", async (c) => {
+app.get("/api/queue", requireAdmin, async (c) => {
   const params = new URL(c.req.url).searchParams;
   const num = (name: string, fallback: number): number | string => {
     const raw = params.get(name);
@@ -607,11 +688,10 @@ app.post("/api/jobs/:id", async (c) => {
 // good), and it resets a "processing" row to pending, since leaving it claimed
 // would only mean waiting out the stale window before it was re-offered.
 //
-// Open, like the other two maintenance routes the admin UI drives
-// (/refresh-settings and /view): the browser has no bearer token, and the
-// Queue section that shows the control is itself only reachable with
-// ?admin=true. Guarding it would mean the button could not exist.
-app.post("/api/jobs/:id/disabled", async (c) => {
+// Admin-only (requireAdmin), like the other maintenance routes the admin UI
+// drives (/refresh-settings and /view): the browser carries the Access
+// cookie, which is what lets the button exist without a bearer token.
+app.post("/api/jobs/:id/disabled", requireAdmin, async (c) => {
   let body: unknown;
   try {
     body = await c.req.json();
