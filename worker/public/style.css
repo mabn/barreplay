@@ -78,11 +78,15 @@ body.admin-mode #homenav .navitem.admin { display: flex; }
    renderAdminNote): who is signed in with a sign-out link, or a muted
    sign-in link. margin-top:auto pins it to the foot of the flex column. */
 #homenav #adminnote {
-  margin-top: auto; padding: 10px 10px 2px; font-size: 12px; line-height: 1.4;
-  color: #6f87a0; overflow-wrap: anywhere;
+  margin-top: auto; padding: 10px 10px 2px; font-size: 12px; line-height: 1.5;
+  color: #6f87a0; min-width: 0;
 }
-#homenav #adminnote.error { color: #e0a060; }
-#homenav #adminnote a { color: #7fb3e0; }
+#homenav #adminnote .who {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #9fb0bf;
+}
+#homenav #adminnote.error { color: #e0a060; overflow-wrap: anywhere; }
+#homenav #adminnote a { color: #7fb3e0; text-decoration: none; }
+#homenav #adminnote a:hover { text-decoration: underline; }
 /* Count of jobs still in flight; empty (and invisible) when there are none. */
 #homenav .badge {
   margin-left: auto; font-size: 10px; line-height: 1; padding: 3px 6px;

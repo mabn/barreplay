@@ -5674,7 +5674,13 @@ function renderAdminNote(state) {
     return a;
   };
   if (adminUser) {
-    el.append('admin: ' + (adminUser.email || adminUser.via) + ' · ');
+    // The address on one line, cut with an ellipsis (the menu is 150px and
+    // an address does not wrap well); the whole of it in the tooltip.
+    const who = document.createElement('div');
+    who.className = 'who';
+    who.textContent = adminUser.email || adminUser.via;
+    who.title = 'signed in as ' + (adminUser.email || adminUser.via);
+    el.append(who);
     el.append(link('sign out', '/admin/logout'));
   } else if (state === 'unconfigured') {
     el.className = 'error';
