@@ -37,6 +37,11 @@
 // Pure like games.ts: the JWKS fetch is `globalThis.fetch` read at call time
 // (the node tests stub it, as they do for the BAR API) and the clock is an
 // argument, so the whole thing is tested against a keypair the test makes.
+// The JWT work itself is jose's (jwtVerify + createRemoteJWKSet): nothing
+// here parses a token by hand.
+
+import { createRemoteJWKSet, customFetch, decodeJwt, errors, jwtVerify } from "jose";
+import type { JWTPayload } from "jose";
 
 /** Where a team's Access signing keys are published. */
 export const accessCertsURL = (teamDomain: string): string =>
@@ -61,45 +66,61 @@ export interface AccessIdentity {
   sub: string;
 }
 
-export interface AccessJWK {
-  kid: string;
-  kty: string;
-  n: string;
-  e: string;
-  alg?: string;
-}
-
-/** How long a fetched key set is trusted before it is re-read. Access keys
- * rotate rarely (and an unknown kid re-reads at once, below), so this is
- * only what bounds a stale set. */
+/** How long jose trusts a fetched key set before re-reading it. Access keys
+ * rotate rarely (and an unknown kid re-reads at once, below), so this only
+ * bounds a stale set. */
 export const JWKS_TTL_MS = 6 * 60 * 60 * 1000;
 /** The floor between two key-set fetches provoked by an UNKNOWN kid. A token
  * naming a kid the set does not have is what key rotation looks like — and
  * also what a forged token looks like, and the second must not turn into one
- * outbound fetch per request. */
+ * outbound fetch per request. jose's cooldownDuration. */
 export const JWKS_REFETCH_MIN_MS = 60 * 1000;
-
-/** The JWK set the verifier holds for one team domain, with when it was
- * read. */
-interface JWKSCache {
-  url: string;
-  keys: AccessJWK[];
-  fetchedAt: number;
-}
 
 export interface VerifyOptions {
   teamDomain: string;
   aud: string;
-  /** Unix milliseconds; defaults to Date.now(). */
+  /** Unix milliseconds; defaults to Date.now(). Only the claims (exp/nbf)
+   * read it — the key-set cache keeps jose's own clock. */
   now?: number;
 }
 
-/** AccessVerifier verifies Access JWTs for one team + application, caching
- * the team's key set across calls. One instance lives for the isolate's
- * life in app.ts. */
+export interface VerifierOptions {
+  /** Override of JWKS_REFETCH_MIN_MS (tests: 0 makes a rotation visible
+   * without waiting a minute). */
+  cooldownMs?: number;
+  /** Override of JWKS_TTL_MS. */
+  cacheMaxAgeMs?: number;
+}
+
+/** The jose errors that mean "this token is no good" — answered with null.
+ * Everything else jose throws (a key set that cannot be fetched or parsed,
+ * a timeout) is an outage and propagates. */
+const BAD_TOKEN_ERRORS = [
+  errors.JWTClaimValidationFailed,
+  errors.JWTExpired,
+  errors.JOSEAlgNotAllowed,
+  errors.JOSENotSupported,
+  errors.JWSInvalid,
+  errors.JWSSignatureVerificationFailed,
+  errors.JWTInvalid,
+  errors.JWKInvalid,
+  errors.JWKSNoMatchingKey,
+  errors.JWKSMultipleMatchingKeys,
+];
+
+/** AccessVerifier verifies Access JWTs for one team + application with jose
+ * (jwtVerify over createRemoteJWKSet, which owns the key-set cache, its
+ * TTL and the unknown-kid refetch cooldown). One instance lives for the
+ * isolate's life in app.ts. */
 export class AccessVerifier {
-  private cache: JWKSCache | null = null;
-  private lastRefetch = 0;
+  private jwks: { href: string; get: ReturnType<typeof createRemoteJWKSet> } | null = null;
+  private readonly cooldownMs: number;
+  private readonly cacheMaxAgeMs: number;
+
+  constructor(opts: VerifierOptions = {}) {
+    this.cooldownMs = opts.cooldownMs ?? JWKS_REFETCH_MIN_MS;
+    this.cacheMaxAgeMs = opts.cacheMaxAgeMs ?? JWKS_TTL_MS;
+  }
 
   /** verify returns the token's identity, or null for anything short of a
    * valid, unexpired token for THIS application. It never throws for a bad
@@ -107,99 +128,57 @@ export class AccessVerifier {
    * an outage, not an answer. */
   async verify(token: string, opts: VerifyOptions): Promise<AccessIdentity | null> {
     const now = opts.now ?? Date.now();
-    const parts = token.split(".");
-    if (parts.length !== 3) return null;
-    const [h, p, s] = parts;
-    let header: { alg?: unknown; kid?: unknown };
-    let claims: Record<string, unknown>;
+    const issuer = accessIssuer(opts.teamDomain);
+
+    // A cheap look at the claims first (no signature, no key set): a token
+    // for another issuer or application, or one already expired, is not
+    // worth a key lookup, which may be a fetch.
+    let claims: JWTPayload;
     try {
-      header = JSON.parse(b64urlToString(h));
-      claims = JSON.parse(b64urlToString(p));
+      claims = decodeJwt(token);
     } catch {
       return null;
     }
-    if (header.alg !== "RS256" || typeof header.kid !== "string") return null;
-
-    // Claims before the signature: they are cheap, and a token that fails
-    // them is not worth a key lookup (which may be a fetch).
-    const nowSec = Math.floor(now / 1000);
-    if (typeof claims.exp !== "number" || claims.exp <= nowSec) return null;
-    if (typeof claims.nbf === "number" && claims.nbf > nowSec) return null;
-    if (claims.iss !== accessIssuer(opts.teamDomain)) return null;
+    if (claims.iss !== issuer) return null;
     const aud = claims.aud;
-    const audOk = Array.isArray(aud) ? aud.includes(opts.aud) : aud === opts.aud;
-    if (!audOk) return null;
-    if (typeof claims.sub !== "string") return null;
+    if (!(Array.isArray(aud) ? aud.includes(opts.aud) : aud === opts.aud)) return null;
+    if (typeof claims.exp !== "number" || claims.exp * 1000 <= now) return null;
 
-    const key = await this.keyFor(header.kid, opts.teamDomain, now);
-    if (!key) return null;
-    let cryptoKey: CryptoKey;
+    const url = new URL(accessCertsURL(opts.teamDomain));
+    if (!this.jwks || this.jwks.href !== url.href) {
+      this.jwks = {
+        href: url.href,
+        get: createRemoteJWKSet(url, {
+          cooldownDuration: this.cooldownMs,
+          cacheMaxAge: this.cacheMaxAgeMs,
+          // globalThis.fetch at call time, never captured at import: the
+          // tests stub it per test, and a captured reference would outlive
+          // the stub.
+          [customFetch]: (...args: Parameters<typeof fetch>) => globalThis.fetch(...args),
+        }),
+      };
+    }
     try {
-      cryptoKey = await crypto.subtle.importKey(
-        "jwk",
-        { kty: "RSA", n: key.n, e: key.e, alg: "RS256", ext: true },
-        { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-        false,
-        ["verify"],
-      );
-    } catch {
-      return null;
+      const { payload } = await jwtVerify(token, this.jwks.get, {
+        issuer,
+        audience: opts.aud,
+        algorithms: ["RS256"],
+        currentDate: new Date(now),
+        requiredClaims: ["exp", "sub"],
+      });
+      return {
+        email: typeof payload.email === "string" ? payload.email : null,
+        sub: payload.sub as string,
+      };
+    } catch (e) {
+      if (BAD_TOKEN_ERRORS.some((cls) => e instanceof cls)) return null;
+      throw e;
     }
-    let ok = false;
-    try {
-      ok = await crypto.subtle.verify(
-        "RSASSA-PKCS1-v1_5",
-        cryptoKey,
-        b64urlToBytes(s),
-        new TextEncoder().encode(`${h}.${p}`),
-      );
-    } catch {
-      return null;
-    }
-    if (!ok) return null;
-    return { email: typeof claims.email === "string" ? claims.email : null, sub: claims.sub };
   }
 
-  /** keyFor finds the signing key by kid, reading the team's key set when
-   * there is none cached, when the cache is old, or — rate-limited — when the
-   * kid is unknown (rotation). */
-  private async keyFor(kid: string, teamDomain: string, now: number): Promise<AccessJWK | null> {
-    const url = accessCertsURL(teamDomain);
-    const stale = !this.cache || this.cache.url !== url || now - this.cache.fetchedAt > JWKS_TTL_MS;
-    if (stale) await this.refetch(url, now);
-    let key = this.cache?.keys.find((k) => k.kid === kid) ?? null;
-    if (!key && !stale && now - this.lastRefetch >= JWKS_REFETCH_MIN_MS) {
-      await this.refetch(url, now);
-      key = this.cache?.keys.find((k) => k.kid === kid) ?? null;
-    }
-    return key;
-  }
-
-  private async refetch(url: string, now: number): Promise<void> {
-    this.lastRefetch = now;
-    // globalThis.fetch at call time, never captured at import: the tests
-    // stub it per test, and a captured reference would outlive the stub.
-    const r = await globalThis.fetch(url);
-    if (!r.ok) throw new Error(`Access certs: HTTP ${r.status} from ${url}`);
-    const body = (await r.json()) as { keys?: unknown };
-    const keys = Array.isArray(body.keys)
-      ? (body.keys as unknown[]).filter(
-          (k): k is AccessJWK =>
-            typeof k === "object" &&
-            k !== null &&
-            typeof (k as AccessJWK).kid === "string" &&
-            (k as AccessJWK).kty === "RSA" &&
-            typeof (k as AccessJWK).n === "string" &&
-            typeof (k as AccessJWK).e === "string",
-        )
-      : [];
-    this.cache = { url, keys, fetchedAt: now };
-  }
-
-  /** forget drops the cached key set (tests). */
+  /** forget drops the key-set cache (tests). */
   forget(): void {
-    this.cache = null;
-    this.lastRefetch = 0;
+    this.jwks = null;
   }
 }
 
@@ -226,16 +205,4 @@ export function accessToken(headers: { get(name: string): string | null }): stri
 export function loginNext(raw: string | null | undefined): string {
   if (typeof raw === "string" && /^\/(?!\/)[^\r\n]*$/.test(raw) && raw.length <= 2048) return raw;
   return "/queue?admin=true";
-}
-
-function b64urlToBytes(s: string): Uint8Array<ArrayBuffer> {
-  const b64 = s.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (s.length % 4)) % 4);
-  const bin = atob(b64);
-  const out = new Uint8Array(new ArrayBuffer(bin.length));
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
-function b64urlToString(s: string): string {
-  return new TextDecoder().decode(b64urlToBytes(s));
 }
