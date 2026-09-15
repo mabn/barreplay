@@ -122,7 +122,15 @@ export interface CatalogTeam {
   ally: number;
   /** Total players on the ally team (players may be a capped slice). */
   count: number;
-  players: { name: string; os?: number }[];
+  /** `os` is the lobby-shown OpenSkill rating; `rank` is BAR's chevron level
+   * at the time of THIS game — the lobby server's coarse experience badge,
+   * which under BAR's "Role" rank method buckets in-game hours (0: <5h,
+   * 1: 5h, 2: 15h, 3: 100h, 4: 250h, 5: 1000h) with 6/7 reserved for
+   * contributors and tournament winners. Both are per-game snapshots, so a
+   * row records what the player was then, not what they are now. Either is
+   * absent when the source did not state it — and `rank` must be absent
+   * rather than 0 for that, since 0 is a real level (a new account). */
+  players: { name: string; os?: number; rank?: number }[];
 }
 
 /** One published revision of a game and the ally team that recorded it. */
@@ -476,10 +484,16 @@ function sanitizePlayers(v: unknown): CatalogTeam[] | null | string {
     const ps: CatalogTeam["players"] = [];
     for (const p of players) {
       if (typeof p !== "object" || p === null) return "players[].players entries must be objects";
-      const { name, os } = p as Record<string, unknown>;
+      const { name, os, rank } = p as Record<string, unknown>;
       if (typeof name !== "string" || name === "") return "player name must be a non-empty string";
       if (os !== undefined && (typeof os !== "number" || !Number.isFinite(os))) return "player os must be a finite number";
-      ps.push(os === undefined ? { name: name.slice(0, 64) } : { name: name.slice(0, 64), os });
+      if (rank !== undefined && parseRank(rank) === null) {
+        return `player rank must be an integer between 0 and ${RANK_MAX}`;
+      }
+      const player: CatalogTeam["players"][number] = { name: name.slice(0, 64) };
+      if (os !== undefined) player.os = os as number;
+      if (rank !== undefined) player.rank = rank as number;
+      ps.push(player);
     }
     out.push({ ally, count, players: ps });
   }
@@ -595,8 +609,12 @@ export function playersFromApi(allyTeams: unknown): CatalogTeam[] | null {
     for (const p of Array.isArray(a.Players) ? a.Players : []) {
       const name = (p as Record<string, unknown>)?.name;
       if (typeof name !== "string" || name === "") continue;
+      const entry: CatalogTeam["players"][number] = { name };
       const os = parseSkill((p as Record<string, unknown>).skill);
-      ps.push(os === null ? { name } : { name, os });
+      if (os !== null) entry.os = os;
+      const rank = parseRank((p as Record<string, unknown>).rank);
+      if (rank !== null) entry.rank = rank;
+      ps.push(entry);
     }
     ps.sort((x, y) => (y.os ?? -Infinity) - (x.os ?? -Infinity));
     for (const b of Array.isArray(a.AIs) ? a.AIs : []) {
@@ -609,6 +627,22 @@ export function playersFromApi(allyTeams: unknown): CatalogTeam[] | null {
   }
   groups.sort((x, y) => x.ally - y.ally);
   return groups.length ? groups : null;
+}
+
+// RANK_MAX bounds a stored chevron level. BAR ships eight (0..7), which is
+// what worker/public/app.js has icons for and clamps to; this bound is looser
+// so a level added later is kept rather than silently dropped on the way in —
+// the badge renderer is where an unrenderable one is handled.
+const RANK_MAX = 15;
+
+// parseRank reads the API's chevron level for one player. Best-effort like
+// parseSkill: anything that is not a rank in range is DROPPED rather than
+// stored or raised, since the roster is the API's to shape and a game whose
+// levels we cannot read is still worth mirroring. Note null is the API's own
+// "no rank recorded" and 0 is a real level, so the two must not collapse.
+function parseRank(v: unknown): number | null {
+  if (typeof v !== "number" || !Number.isInteger(v)) return null;
+  return v >= 0 && v <= RANK_MAX ? v : null;
 }
 
 // parseSkill reads the API's OpenSkill value: a bracketed string like

@@ -88,6 +88,17 @@ type CatalogPlayer struct {
 	// Skill is the OpenSkill rating ("OS") from the demo startscript;
 	// 0 (omitted) when the capture has no startscript behind it.
 	Skill float32 `json:"os,omitempty"`
+	// Rank is BAR's chevron level 0..7 at the time of THIS game — the lobby
+	// server's coarse experience badge, which under BAR's "Role" rank method
+	// buckets in-game hours (0: <5h, 1: 5h, 2: 15h, 3: 100h, 4: 250h,
+	// 5: 1000h) with 6/7 reserved for contributors and tournament winners.
+	// A POINTER because 0 is a real rank (a brand-new account) and so cannot
+	// double as "unknown": the .brp meta stores PlayerInfo.Rank as an int32
+	// with omitempty, making a recorded 0 and an absent field identical on
+	// the way back in, and a capture with no startscript behind it knows no
+	// ranks at all. catalogPlayers therefore sets it only for players the
+	// startscript named (see startscriptRank).
+	Rank *int32 `json:"rank,omitempty"`
 }
 
 // CatalogUpload is one published revision of a game: its rid and the ally
@@ -182,7 +193,7 @@ func catalogPlayers(meta snapshot.Meta) []CatalogTeam {
 		if !ok {
 			continue
 		}
-		perAlly[ally] = append(perAlly[ally], CatalogPlayer{Name: p.Name, Skill: p.Skill})
+		perAlly[ally] = append(perAlly[ally], CatalogPlayer{Name: p.Name, Skill: p.Skill, Rank: startscriptRank(p)})
 	}
 	if len(perAlly) == 0 {
 		return nil
@@ -203,6 +214,23 @@ func catalogPlayers(meta snapshot.Meta) []CatalogTeam {
 		out = append(out, CatalogTeam{Ally: a, Count: n, Players: ps})
 	}
 	return out
+}
+
+// startscriptRank returns the player's chevron rank when the roster behind it
+// came from the demo startscript, and nil when it did not. The distinction
+// cannot be read off Rank alone: rank 0 is a genuine level (an account with
+// under five hours) and snapshot.PlayerInfo.Rank is a plain int32 that the
+// meta JSON omits when zero, so a startscript-less capture — the widget's own
+// P-line fallback, which carries name/team/spectator and nothing else —
+// decodes to exactly the same 0. Any of the three startscript-only fields
+// being set proves the player was seeded from one, and a 0 there is then the
+// real rank rather than a missing one.
+func startscriptRank(p snapshot.PlayerInfo) *int32 {
+	if p.Rank == 0 && p.Skill == 0 && p.AccountID == "" {
+		return nil
+	}
+	r := p.Rank
+	return &r
 }
 
 // SettingsFlags distills a demo startscript's raw [modoptions] map into the
