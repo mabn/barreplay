@@ -639,6 +639,10 @@ test('the catalog is fetched for the list view, not for a direct replay link', a
     // test counts.
     const initHomeNav = () => {}, initQueue = () => {}, initResim = () => {}, applyHomeTab = () => {};
     const initLavabalanceDialog = () => {};
+    // The admin probe (GET /api/admin/me) runs only under ?admin=true and
+    // is a fetch of its own; stubbed here because this test counts only
+    // what the TABLE needs.
+    const probeAdmin = async () => {};
     const hideHome = () => {};
     const knownReplayURL = () => true;
     const initFilters = async () => { filters++; };

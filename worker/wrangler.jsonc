@@ -97,6 +97,11 @@
   // src/worker/replayindex.ts. `pack -upload` upserts rows via
   // PUT /api/replays/<id>. Optional write auth: `wrangler secret put
   // REPLAY_PUT_TOKEN` (the uploader sends it as a bearer token).
+  // ADMIN LOGIN (Cloudflare Access, src/worker/access.ts): the admin routes
+  // verify an Access JWT against ACCESS_TEAM_DOMAIN + ACCESS_AUD. Neither is
+  // secret — a `vars` block here works — but they are per-deployment, so they
+  // are set with `wrangler secret put` (README "Admin login"). Missing = every
+  // admin route 401s (fail-closed). ADMIN_OPEN=true belongs in .dev.vars ONLY.
   // The sibling lavabalance worker (claudebar/lavabalance, same account),
   // which keeps the LOS (OpenSkill) ratings for the lava game mode. The cron's
   // lava sync (src/worker/lavasync.ts) submits freshly-mirrored candidate
