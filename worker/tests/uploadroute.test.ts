@@ -249,10 +249,16 @@ class FakeBucket {
   }
 }
 
-function makeEnv(token?: string): { env: Env; index: FakeIndex; bucket: FakeBucket } {
+// ADMIN_OPEN, the local-dev switch: the admin routes (queue, resim, view,
+// refresh-settings, the hold-back switch, samples, sqlstats) are behind a
+// Cloudflare Access identity otherwise, and their tests below are about what
+// the routes DO. The gate itself is tested on its own, with an env that
+// leaves this out.
+function makeEnv(token?: string, extra: Partial<Env> = { ADMIN_OPEN: "true" }): { env: Env; index: FakeIndex; bucket: FakeBucket } {
   const index = new FakeIndex();
   const bucket = new FakeBucket();
   const env = {
+    ...extra,
     REPLAY_PUT_TOKEN: token,
     BUCKET: bucket,
     REPLAY_INDEX: { idFromName: () => ({}), get: () => index },
@@ -1416,4 +1422,246 @@ test("backfill needs the write token and rejects junk bodies", async () => {
   );
   assert.equal(open.status, 200);
   assert.deepEqual(await asJson(open), { received: 0, fresh: 0, inserted: 0 });
+});
+
+// ---- the admin gate (Cloudflare Access) -------------------------------------
+// The routes the admin UI drives answer 401 to anyone without an identity.
+// Three identities count: ADMIN_OPEN (dev), the configured bearer token, and
+// a verified Access JWT (tests/access.test.ts covers the verifier itself;
+// here a token the test signs proves the route reads the cookie and the
+// configuration). Unconfigured Access is closed, not open.
+const ADMIN_ROUTES: [string, RequestInit][] = [
+  ["/api/queue", {}],
+  ["/api/sqlstats", {}],
+  ["/api/jobs/x/samples", {}],
+  ["/api/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }],
+  ["/api/replays/x/view", { method: "POST", body: JSON.stringify({ view: "full" }) }],
+  ["/api/replays/x/refresh-settings", { method: "POST" }],
+  ["/api/jobs/x/disabled", { method: "POST", body: JSON.stringify({ disabled: true }) }],
+];
+
+test("admin routes are closed without an identity, and closed when Access is not configured", async () => {
+  const { env, index } = makeEnv(undefined, {});
+  for (const [path, init] of ADMIN_ROUTES) {
+    const res = await app.request(path, init, env);
+    assert.equal(res.status, 401, `${init.method ?? "GET"} ${path}`);
+    const body = await asJson(res);
+    assert.equal(body.login, "/admin/login", "the reply says where the login is");
+    assert.equal(body.configured, false, "and that this deployment has none");
+  }
+  assert.equal(index.jobs.size, 0, "nothing got queued");
+
+  // Configured but no cookie: still 401, now saying sign in.
+  const { env: cfg } = makeEnv(undefined, { ACCESS_TEAM_DOMAIN: "example", ACCESS_AUD: "a".repeat(64) });
+  const res = await app.request("/api/queue", {}, cfg);
+  assert.equal(res.status, 401);
+  assert.equal((await asJson(res)).configured, true);
+  const me = await app.request("/api/admin/me", {}, cfg);
+  assert.equal(me.status, 401);
+
+  // The open routes stay open: an uploader's poll, the catalog, the games.
+  for (const path of ["/api/jobs/x", "/api/replays", "/api/games", "/api/health"]) {
+    const r = await app.request(path, {}, cfg);
+    assert.notEqual(r.status, 401, path);
+  }
+});
+
+test("the daemons' bearer token is an admin identity — only when it is configured", async () => {
+  const { env } = makeEnv("s3cret", {});
+  const denied = await app.request("/api/queue", {}, env);
+  assert.equal(denied.status, 401);
+  const wrong = await app.request("/api/queue", { headers: { authorization: "Bearer nope" } }, env);
+  assert.equal(wrong.status, 401);
+  const ok = await app.request("/api/queue", { headers: { authorization: "Bearer s3cret" } }, env);
+  assert.equal(ok.status, 200);
+  const me = await asJson(await app.request("/api/admin/me", { headers: { authorization: "Bearer s3cret" } }, env));
+  assert.deepEqual(me, { email: null, via: "token" });
+
+  // No token configured: `authorized` is open for the daemon routes (a dev
+  // bucket), but that openness must not leak into the admin gate.
+  const { env: open } = makeEnv(undefined, {});
+  assert.equal((await app.request("/api/queue", { headers: { authorization: "Bearer " } }, open)).status, 401);
+});
+
+test("a verified Access cookie is an admin identity", async (t) => {
+  const TEAM = "example";
+  const AUD = "c".repeat(64);
+  const pair = await crypto.subtle.generateKey(
+    { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+    true,
+    ["sign", "verify"],
+  );
+  const jwk = await crypto.subtle.exportKey("jwk", pair.publicKey);
+  const b64url = (v: Uint8Array | string) =>
+    btoa(typeof v === "string" ? v : String.fromCharCode(...v)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const sign = async (claims: object) => {
+    const h = b64url(JSON.stringify({ alg: "RS256", kid: "k1", typ: "JWT" }));
+    const p = b64url(JSON.stringify(claims));
+    const sig = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", pair.privateKey, new TextEncoder().encode(`${h}.${p}`));
+    return `${h}.${p}.${b64url(new Uint8Array(sig))}`;
+  };
+  const orig = globalThis.fetch;
+  const certs = `https://${TEAM}.cloudflareaccess.com/cdn-cgi/access/certs`;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    if (String(input) === certs) return Response.json({ keys: [{ kid: "k1", kty: "RSA", n: jwk.n, e: jwk.e }] });
+    return new Response("not stubbed: " + String(input), { status: 500 });
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = orig;
+  });
+  const now = Math.floor(Date.now() / 1000);
+  const claims = (over: object = {}) => ({
+    aud: [AUD], iss: `https://${TEAM}.cloudflareaccess.com`, sub: "u1", email: "me@example.org",
+    exp: now + 600, iat: now - 1, ...over,
+  });
+
+  const { env } = makeEnv(undefined, { ACCESS_TEAM_DOMAIN: TEAM, ACCESS_AUD: AUD });
+  const good = await sign(claims());
+  const me = await app.request("/api/admin/me", { headers: { cookie: `CF_Authorization=${good}` } }, env);
+  assert.equal(me.status, 200);
+  assert.deepEqual(await asJson(me), { email: "me@example.org", via: "access" });
+  assert.equal((await app.request("/api/queue", { headers: { cookie: `CF_Authorization=${good}` } }, env)).status, 200);
+  // The header Access adds on the protected path works too.
+  assert.equal((await app.request("/api/queue", { headers: { "cf-access-jwt-assertion": good } }, env)).status, 200);
+
+  // Wrong application, expired, or signed by a key the team never published.
+  const otherApp = await sign(claims({ aud: ["d".repeat(64)] }));
+  assert.equal((await app.request("/api/queue", { headers: { cookie: `CF_Authorization=${otherApp}` } }, env)).status, 401);
+  const expired = await sign(claims({ exp: now - 1 }));
+  assert.equal((await app.request("/api/queue", { headers: { cookie: `CF_Authorization=${expired}` } }, env)).status, 401);
+  const wrongTeam = makeEnv(undefined, { ACCESS_TEAM_DOMAIN: "someone-else", ACCESS_AUD: AUD }).env;
+  assert.equal((await app.request("/api/queue", { headers: { cookie: `CF_Authorization=${good}` } }, wrongTeam)).status, 401,
+    "a token for another team is refused before any key is fetched");
+});
+
+test("/admin/login sends the visitor back where they were going, on this site only", async () => {
+  const { env } = makeEnv(undefined, {});
+  // A non-loopback host with no assertion (the workers.dev hostname, say):
+  // a plain on-site redirect, no token to forward.
+  const at = (path: string, init: RequestInit = {}) => app.request(`https://replay.example${path}`, init, env);
+  const plain = await at("/admin/login");
+  assert.equal(plain.status, 302);
+  assert.equal(plain.headers.get("location"), "/queue?admin=true");
+  const next = await at("/admin/login?next=%2Freplays%2Fabc%3Fadmin%3Dtrue");
+  assert.equal(next.headers.get("location"), "/replays/abc?admin=true");
+  const evil = await at("/admin/login?next=https%3A%2F%2Fevil.example%2F");
+  assert.equal(evil.headers.get("location"), "/queue?admin=true", "no open redirect");
+  // A loopback callback named by the link, but no assertion to forward
+  // (Access did not run): still the on-site redirect, never the callback.
+  const cbNoTok = await at("/admin/login?next=" + encodeURIComponent("http://127.0.0.1:5173/admin/callback?next=%2Fqueue"));
+  assert.equal(cbNoTok.headers.get("location"), "/queue?admin=true");
+});
+
+// The dev login: a `vite dev` server borrows the deployed site's Access
+// login in three hops (app.ts has the picture). What matters: the token only
+// ever travels to a loopback callback, and the callback only stores a token
+// that verifies for this deployment.
+test("dev login: a loopback server bounces to the deployed login asking for its callback", async () => {
+  const { env } = makeEnv(undefined, {});
+  const r = await app.request("http://127.0.0.1:5173/admin/login?next=%2Fqueue%3Fadmin%3Dtrue", {}, env);
+  assert.equal(r.status, 302);
+  const to = new URL(r.headers.get("location")!);
+  assert.equal(to.origin + to.pathname, "https://replay.fogofwar.dev/admin/login");
+  assert.equal(to.searchParams.get("next"), "http://127.0.0.1:5173/admin/callback?next=%2Fqueue%3Fadmin%3Dtrue");
+
+  // localhost and [::1] count; a loopback host that already carries the
+  // assertion is not hop 1 (it is the deployed handler under test), and a
+  // public host never bounces.
+  const lh = await app.request("http://localhost:8787/admin/login", {}, env);
+  assert.match(lh.headers.get("location")!, /^https:\/\/replay\.fogofwar\.dev\/admin\/login\?next=http%3A%2F%2Flocalhost%3A8787%2Fadmin%2Fcallback/);
+  const pub = await app.request("https://replay.example/admin/login", {}, env);
+  assert.equal(pub.headers.get("location"), "/queue?admin=true");
+});
+
+test("dev login: the deployed login forwards the Access token to a loopback callback and nowhere else", async () => {
+  const { env } = makeEnv(undefined, {});
+  const withTok = (next: string) =>
+    app.request(`https://replay.example/admin/login?next=${encodeURIComponent(next)}`,
+      { headers: { "cf-access-jwt-assertion": "the.access.token" } }, env);
+
+  for (const cb of ["http://127.0.0.1:5173/admin/callback?next=%2Fqueue%3Fadmin%3Dtrue",
+                    "http://localhost:8787/admin/callback",
+                    "http://[::1]:5173/admin/callback"]) {
+    const r = await withTok(cb);
+    assert.equal(r.status, 302, cb);
+    const to = new URL(r.headers.get("location")!);
+    assert.equal(to.origin + to.pathname, new URL(cb).origin + "/admin/callback", cb);
+    assert.equal(to.searchParams.get("token"), "the.access.token", cb);
+  }
+  // Not loopback, not the callback path, not http, or carrying a fragment or
+  // credentials: the token goes nowhere, the visitor gets the on-site page.
+  for (const bad of ["https://evil.example/admin/callback", "http://127.0.0.1.evil.example/admin/callback",
+                     "http://127.0.0.1:5173/steal", "https://127.0.0.1:5173/admin/callback",
+                     "http://127.0.0.1:5173/admin/callback#x", "http://u:p@127.0.0.1:5173/admin/callback",
+                     "/queue?admin=true"]) {
+    const r = await withTok(bad);
+    assert.equal(r.headers.get("location"), "/queue?admin=true", bad);
+    assert.ok(!r.headers.get("location")!.includes("the.access.token"), bad);
+  }
+  // With the assertion but an on-site next: the ordinary redirect.
+  const onsite = await withTok("/replays/abc?admin=true");
+  assert.equal(onsite.headers.get("location"), "/replays/abc?admin=true");
+});
+
+test("dev login: the callback stores a token that verifies, refuses one that does not, and logout clears it", async (t) => {
+  // Its own team domain: app.ts holds ONE verifier for the isolate, whose
+  // jose key-set cache (keyed by the certs URL, held for the cooldown) still
+  // has the keypair an earlier test published for "example".
+  const TEAM = "example-dev";
+  const AUD = "e".repeat(64);
+  const pair = await crypto.subtle.generateKey(
+    { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
+    true, ["sign", "verify"]);
+  const jwk = await crypto.subtle.exportKey("jwk", pair.publicKey);
+  const b64url = (v: Uint8Array | string) =>
+    btoa(typeof v === "string" ? v : String.fromCharCode(...v)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const sign = async (claims: object) => {
+    const h = b64url(JSON.stringify({ alg: "RS256", kid: "k1", typ: "JWT" }));
+    const p = b64url(JSON.stringify(claims));
+    const sig = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", pair.privateKey, new TextEncoder().encode(`${h}.${p}`));
+    return `${h}.${p}.${b64url(new Uint8Array(sig))}`;
+  };
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    if (String(input) === `https://${TEAM}.cloudflareaccess.com/cdn-cgi/access/certs`) {
+      return Response.json({ keys: [{ kid: "k1", kty: "RSA", n: jwk.n, e: jwk.e }] });
+    }
+    return new Response("not stubbed", { status: 500 });
+  }) as typeof fetch;
+  t.after(() => { globalThis.fetch = orig; });
+  const now = Math.floor(Date.now() / 1000);
+  const good = await sign({ aud: [AUD], iss: `https://${TEAM}.cloudflareaccess.com`, sub: "u1", email: "me@example.org", exp: now + 600, iat: now });
+  const foreign = await sign({ aud: ["f".repeat(64)], iss: `https://${TEAM}.cloudflareaccess.com`, sub: "u1", exp: now + 600, iat: now });
+
+  const { env } = makeEnv(undefined, { ACCESS_TEAM_DOMAIN: TEAM, ACCESS_AUD: AUD });
+  const base = "http://127.0.0.1:5173";
+  const cb = await app.request(`${base}/admin/callback?token=${good}&next=%2Fqueue%3Fadmin%3Dtrue`, {}, env);
+  assert.equal(cb.status, 302);
+  assert.equal(cb.headers.get("location"), "/queue?admin=true");
+  const cookie = cb.headers.get("set-cookie")!;
+  assert.match(cookie, new RegExp(`^CF_Authorization=${good.replace(/[.+]/g, "\\$&")}; Path=/; HttpOnly; SameSite=Lax; Max-Age=\\d+$`));
+  assert.ok(!cookie.includes("Secure"), "plain http dev server: no Secure flag");
+  const maxAge = Number(/Max-Age=(\d+)/.exec(cookie)![1]);
+  assert.ok(maxAge > 500 && maxAge <= 600, `cookie expires with the token: ${maxAge}`);
+
+  // And that cookie is an admin identity from then on, with the real email.
+  const me = await app.request(`${base}/api/admin/me`, { headers: { cookie: `CF_Authorization=${good}` } }, env);
+  assert.equal(me.status, 200);
+  assert.equal((await asJson(me)).email, "me@example.org");
+
+  // A token for another application, or none: refused, no cookie set.
+  const bad = await app.request(`${base}/admin/callback?token=${foreign}`, {}, env);
+  assert.equal(bad.status, 401);
+  assert.equal(bad.headers.get("set-cookie"), null);
+  assert.equal((await app.request(`${base}/admin/callback`, {}, env)).status, 400);
+  // Unconfigured deployment: nothing to verify against, so nothing stored.
+  const { env: open } = makeEnv(undefined, {});
+  assert.equal((await app.request(`${base}/admin/callback?token=${good}`, {}, open)).status, 401);
+
+  // Logout clears the cookie on this origin; Secure rides on https.
+  const out = await app.request(`${base}/admin/logout`, {}, env);
+  assert.equal(out.status, 302);
+  assert.equal(out.headers.get("set-cookie"), "CF_Authorization=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+  const outHttps = await app.request("https://replay.example/admin/logout", {}, env);
+  assert.match(outHttps.headers.get("set-cookie")!, /; Secure; Max-Age=0$/);
 });

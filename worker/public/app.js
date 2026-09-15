@@ -3913,6 +3913,7 @@ async function refreshSqlStats() {
   let report;
   try {
     const r = await fetch('/api/sqlstats');
+    if (r.status === 401) { adminSignedOut(); return; }
     if (r.status === 404 || r.status === 405) {
       sqlStatsSupported = false;
       renderSqlStats(null, SQLSTATS_UNSUPPORTED);
@@ -4030,6 +4031,7 @@ async function refreshQueue() {
   let page;
   try {
     const r = await fetch(`/api/queue?offset=${queueOffset}&limit=${QUEUE_PAGE}`);
+    if (r.status === 401) { adminSignedOut(); return; }
     if (r.status === 404 || r.status === 405) {
       // A backend without the endpoint will not grow one while the page is
       // open, so stop asking it anything.
@@ -5001,6 +5003,7 @@ async function setJobDisabled(j, disabled, btn) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ disabled }),
     });
+    if (r.status === 401) { adminSignedOut(); return; }
     if (!r.ok) throw new Error('HTTP ' + r.status);
   } catch (err) {
     btn.disabled = false;
@@ -5270,7 +5273,8 @@ async function initViewMark(gameId) {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
       });
-      if (r.ok) {
+      if (r.status === 401) { adminSignedOut(); status.className = 'error'; status.textContent = 'sign-in required'; }
+      else if (r.ok) {
         status.className = 'ok';
         status.textContent = '✓ ' + viewLabel(body.view, body.ally);
       } else {
@@ -5528,6 +5532,7 @@ function renderHome(errMsg) {
           btn.textContent = '…';
           try {
             const r = await fetch(`/api/replays/${encodeURIComponent(e.id)}/refresh-settings`, { method: 'POST' });
+            if (r.status === 401) { adminSignedOut(); return; }
             const body = await r.json().catch(() => ({}));
             if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
             e.settings = body.settings;
@@ -5596,12 +5601,104 @@ function renderHome(errMsg) {
   msg.textContent = text;
 }
 
-// adminMode: ?admin=true unlocks the maintenance controls — the list's
-// settings-refresh button and the viewer header's POV marking, both of which
-// edit a catalog row everyone else reads. Purely a UI gate — the endpoints
-// behind it are their own authority.
+// ---- admin mode (Cloudflare Access) -----------------------------------------
+// ?admin=true is the REQUEST to see the maintenance controls — the Queue and
+// SQL sections, the list's settings-refresh button, the viewer header's POV
+// marking, the re-sim paste box — all of which edit or expose state every
+// visitor shares. What GRANTS them is the server: probeAdmin asks GET
+// /api/admin/me once at boot when the flag is set, and adminMode() is true
+// only when that answered 200, i.e. the browser carries a Cloudflare Access
+// cookie for a person the worker's Access policy allows (src/worker/
+// access.ts). A 401 shows the sign-in notice in the header instead, whose
+// link goes through the one path Access protects (/admin/login) and back.
+// A 404 (the Go viz server, an older worker) means a backend with no login
+// and no admin route a script could drive, so the flag alone is honoured
+// there, as it always was. Without the flag nothing is asked and nothing
+// changes for an ordinary visit.
+let adminUser = null; // {email, via} once /api/admin/me answers 200, or {via:'legacy'} on a 404
+
 function adminMode() {
+  return adminUser !== null;
+}
+
+function adminRequested() {
   return new URLSearchParams(location.search).get('admin') === 'true';
+}
+
+async function probeAdmin() {
+  adminUser = null;
+  if (!adminRequested()) { renderAdminNote(); return; }
+  let r;
+  try {
+    r = await fetch('/api/admin/me', { cache: 'no-store' });
+  } catch {
+    renderAdminNote('signed-out');
+    return;
+  }
+  if (r.status === 404 || r.status === 405) {
+    adminUser = { email: null, via: 'legacy' };
+  } else if (r.ok) {
+    adminUser = await r.json().catch(() => ({ email: null, via: 'access' }));
+  } else if (r.status === 401) {
+    const body = await r.json().catch(() => ({}));
+    renderAdminNote(body.configured === false ? 'unconfigured' : 'signed-out');
+    return;
+  } else {
+    renderAdminNote('signed-out');
+    return;
+  }
+  renderAdminNote();
+}
+
+// adminLoginHref: the login path with the current page as the destination,
+// so signing in lands back on the section that asked (the server keeps it
+// on-site).
+function adminLoginHref() {
+  return '/admin/login?next=' + encodeURIComponent(location.pathname + location.search);
+}
+
+// adminSignedOut is what every admin fetch calls on a 401: the cookie has
+// expired (or was never there for a link opened in another browser), so the
+// controls come off and the notice says how to get them back.
+function adminSignedOut() {
+  if (adminUser === null) return;
+  adminUser = null;
+  document.body.classList.remove('admin-mode');
+  renderAdminNote('signed-out');
+  applyHomeTab();
+}
+
+// renderAdminNote fills the header's admin notice: who is signed in (with a
+// sign-out link), or why the controls are missing although ?admin=true is
+// set. Absent without the flag, since the ordinary page says nothing about
+// a login it does not have.
+function renderAdminNote(state) {
+  const el = document.getElementById('adminnote');
+  if (!el) return;
+  el.textContent = '';
+  el.className = '';
+  if (!adminRequested()) { el.style.display = 'none'; return; }
+  const link = (text, href) => {
+    const a = document.createElement('a');
+    a.textContent = text;
+    a.href = href;
+    return a;
+  };
+  if (adminUser && adminUser.via !== 'legacy') {
+    el.append('admin: ' + (adminUser.email || adminUser.via) + ' · ');
+    el.append(link('sign out', '/admin/logout'));
+  } else if (adminUser) {
+    el.style.display = 'none';
+    return;
+  } else if (state === 'unconfigured') {
+    el.className = 'error';
+    el.append('admin login is not configured on this deployment (ACCESS_TEAM_DOMAIN / ACCESS_AUD)');
+  } else {
+    el.className = 'error';
+    el.append('admin sign-in required · ');
+    el.append(link('sign in', adminLoginHref()));
+  }
+  el.style.display = '';
 }
 
 // replayHref is the shareable URL for one replay: /replays/<id>, keeping the
@@ -5854,6 +5951,11 @@ async function submitResim() {
     return;
   }
   go.disabled = false;
+  if (r.status === 401) {
+    adminSignedOut();
+    resimStatus('admin sign-in required — see the header.', 'error');
+    return;
+  }
   if (r.status === 404 || r.status === 405) {
     // Same reflex as the queue's own missing-route handling: a backend without
     // the endpoint will not grow one while the page is open.
@@ -5904,6 +6006,10 @@ async function init() {
   initLavabalanceDialog();   // the Games rows' LOS upload preview
   initUpload(); // the dropzone works without the catalog being loaded
   const params = new URLSearchParams(location.search);
+  // Whether the maintenance controls may show: one round trip, only when
+  // ?admin=true asks for them, and before anything that consults adminMode()
+  // renders.
+  await probeAdmin();
 
   // Optional render-smoothness overlay, gated on ?debug=true.
   if (params.get('debug') === 'true') startFpsMonitor();

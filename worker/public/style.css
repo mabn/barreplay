@@ -20,6 +20,11 @@ h1 { font-size: 15px; margin: 0; white-space: nowrap; }
 h1 a { color: inherit; text-decoration: none; }
 h1 a:hover { color: #8fd3ff; }
 h1 .sub { color: #6f87a0; font-weight: 400; font-size: 12px; margin-left: 8px; }
+/* The admin sign-in notice (index.html #adminnote, app.js renderAdminNote):
+   only with ?admin=true — who is signed in, or the sign-in link. */
+#adminnote { font-size: 12px; color: #6f87a0; margin-left: 12px; }
+#adminnote.error { color: #e0a060; }
+#adminnote a { color: #7fb3e0; }
 select, button {
   background: #2a3742; color: #d7dee6; border: 1px solid #3a4856;
   border-radius: 4px; padding: 5px 10px; cursor: pointer; font-size: 13px;
@@ -68,9 +73,10 @@ body.home .controls, body.home #wrap { display: none; }
 }
 #homenav .navitem:hover { background: #1d252e; color: #cfe3f5; }
 #homenav .navitem.on { background: #24425c; border-color: #4a7fa8; color: #d6ecff; }
-/* Admin-only entries (?admin=true), same gate as the list's refresh button.
-   homeTab() enforces it too, so a shared ?tab= link can't reach the section
-   past the hidden menu entry. */
+/* Admin-only entries (?admin=true plus an Access sign-in — app.js
+   adminMode()), same gate as the list's refresh button. homeTab() enforces it
+   too, so a shared /queue link can't reach the section past the hidden menu
+   entry. */
 #homenav .navitem.admin { display: none; }
 body.admin-mode #homenav .navitem.admin { display: flex; }
 /* Count of jobs still in flight; empty (and invisible) when there are none. */
