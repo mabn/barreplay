@@ -25,10 +25,6 @@
        page's own directory. A plain click is intercepted by the SPA anyway;
        this is for middle-click / open-in-new-tab. -->
   <h1><a href="/" id="homelink" title="All replays">barreplay</a><span class="sub" id="subtitle">replay state viewer</span></h1>
-  <!-- Admin corner: who is signed in through Cloudflare Access (app.js
-       probeAdmin / renderAdminNote) with a sign-out link, or a muted sign-in
-       link. Being signed in is admin mode; there is no URL flag. -->
-  <span id="adminnote" style="display:none"></span>
   <!-- Point-of-view marking. Most catalog rows carry no recorder provenance
        (their captures predate the GAME record's recorder fields) and it cannot
        be derived after the fact, so it is marked by hand here. Shown only in
@@ -56,6 +52,11 @@
     <button type="button" class="navitem admin" data-tab="queue">Queue<span class="badge" id="navqueue"></span></button>
     <button type="button" class="navitem" data-tab="games">Games</button>
     <button type="button" class="navitem admin" data-tab="sqlstats">SQL</button>
+    <!-- Admin corner, pinned to the bottom of the menu: who is signed in
+         through Cloudflare Access (app.js probeAdmin / renderAdminNote) with
+         a sign-out link, or a muted sign-in link. Being signed in is admin
+         mode; there is no URL flag. -->
+    <div id="adminnote" style="display:none"></div>
   </nav>
   <div id="homemain">
     <!-- Drag&drop publishing: a .brepstream (the Replay uploader widget's

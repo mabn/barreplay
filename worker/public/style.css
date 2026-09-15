@@ -20,11 +20,6 @@ h1 { font-size: 15px; margin: 0; white-space: nowrap; }
 h1 a { color: inherit; text-decoration: none; }
 h1 a:hover { color: #8fd3ff; }
 h1 .sub { color: #6f87a0; font-weight: 400; font-size: 12px; margin-left: 8px; }
-/* The admin sign-in notice (index.html #adminnote, app.js renderAdminNote):
-   who is signed in with a sign-out link, or a muted sign-in link. */
-#adminnote { font-size: 12px; color: #6f87a0; margin-left: 12px; }
-#adminnote.error { color: #e0a060; }
-#adminnote a { color: #7fb3e0; }
 select, button {
   background: #2a3742; color: #d7dee6; border: 1px solid #3a4856;
   border-radius: 4px; padding: 5px 10px; cursor: pointer; font-size: 13px;
@@ -79,6 +74,15 @@ body.home .controls, body.home #wrap { display: none; }
    entry. */
 #homenav .navitem.admin { display: none; }
 body.admin-mode #homenav .navitem.admin { display: flex; }
+/* The admin corner at the bottom of the menu (index.html #adminnote, app.js
+   renderAdminNote): who is signed in with a sign-out link, or a muted
+   sign-in link. margin-top:auto pins it to the foot of the flex column. */
+#homenav #adminnote {
+  margin-top: auto; padding: 10px 10px 2px; font-size: 12px; line-height: 1.4;
+  color: #6f87a0; overflow-wrap: anywhere;
+}
+#homenav #adminnote.error { color: #e0a060; }
+#homenav #adminnote a { color: #7fb3e0; }
 /* Count of jobs still in flight; empty (and invisible) when there are none. */
 #homenav .badge {
   margin-left: auto; font-size: 10px; line-height: 1; padding: 3px 6px;
