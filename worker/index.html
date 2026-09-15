@@ -25,15 +25,10 @@
        page's own directory. A plain click is intercepted by the SPA anyway;
        this is for middle-click / open-in-new-tab. -->
   <h1><a href="/" id="homelink" title="All replays">barreplay</a><span class="sub" id="subtitle">replay state viewer</span></h1>
-  <!-- Admin sign-in state, shown only with ?admin=true in the URL: who is
-       signed in through Cloudflare Access (app.js probeAdmin / renderAdminNote),
-       or the sign-in link when the controls were asked for and the browser
-       carries no valid Access cookie. -->
-  <span id="adminnote" style="display:none"></span>
   <!-- Point-of-view marking. Most catalog rows carry no recorder provenance
        (their captures predate the GAME record's recorder fields) and it cannot
        be derived after the fact, so it is marked by hand here. Shown only in
-       admin mode (?admin=true plus an Access sign-in): the marking is a
+       admin mode (an Access sign-in): the marking is a
        property of the replay, not of the visitor looking at it. -->
   <div id="viewmark" style="display:none"
        title="Whose point of view this capture is from. A spectator recording sees every team; a player's recording only sees their own side plus what it scouted.">
@@ -47,8 +42,8 @@
      URL names no replay). The selected section lives in the URL as the PATH
      (/queue, /games, /sqlstats), so a menu pick is shareable and survives a
      refresh.
-     Queue is admin-only (?admin=true plus a Cloudflare Access sign-in — see
-     app.js probeAdmin), like the row refresh button and the POV dropdown: it is the pipeline's state — everyone's uploads and their
+     Queue is admin-only (a Cloudflare Access sign-in — see app.js
+     probeAdmin), like the row refresh button and the POV dropdown: it is the pipeline's state — everyone's uploads and their
      failure messages — which is maintenance, not something a visitor came
      to look at. -->
 <div id="home" style="display:none">
@@ -57,6 +52,11 @@
     <button type="button" class="navitem admin" data-tab="queue">Queue<span class="badge" id="navqueue"></span></button>
     <button type="button" class="navitem" data-tab="games">Games</button>
     <button type="button" class="navitem admin" data-tab="sqlstats">SQL</button>
+    <!-- Admin corner, pinned to the bottom of the menu: who is signed in
+         through Cloudflare Access (app.js probeAdmin / renderAdminNote) with
+         a sign-out link, or a muted sign-in link. Being signed in is admin
+         mode; there is no URL flag. -->
+    <div id="adminnote" style="display:none"></div>
   </nav>
   <div id="homemain">
     <!-- Drag&drop publishing: a .brepstream (the Replay uploader widget's
@@ -132,7 +132,7 @@
         <button type="button" id="f_clear" title="Clear all filters">Clear</button>
         <!-- Admin-only, and deliberately a BUTTON: listing unregistered uploads
              means scanning the whole bucket (~1.5 s), which is not something to
-             spend on every page load just because ?admin=true is set. -->
+             spend on every page load just because an admin is signed in. -->
         <button type="button" id="f_orphans" class="admin"
                 title="Scan the bucket for uploads that were never registered in the catalog (slow: reads every object)">Unregistered</button>
         <span id="f_count" class="hint"></span>
@@ -160,7 +160,7 @@
     <!-- Ingest queue: every uploaded stream and every requested re-simulation
          still waiting for (or being published by) a daemon, plus the recently
          finished ones.
-         Read from GET /api/queue, which only the Worker backend implements.
+         Read from GET /api/admin/queue, which only the Worker backend implements.
          Read on demand only — the section never refreshes itself, so the
          Reload button is how a job's state moves on screen. -->
     <section id="tab-queue" style="display:none">
@@ -243,7 +243,7 @@
     </dialog>
 
     <!-- SQL cost accounting (admin-only, like the Queue): what each Durable
-         Object method has cost in SQLite rows — GET /api/sqlstats, the live
+         Object method has cost in SQLite rows — GET /api/admin/sqlstats, the live
          counterpart of the repo's rowcost test suite. The DO's storage is
          billed by rows read/written with daily allowances on the free plan,
          so the /day columns project each method's spend against those

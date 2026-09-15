@@ -145,14 +145,14 @@ try {
   // is the door standing open, which is the failure the fail-closed design
   // exists to make loud. The login path merely redirects: Access itself runs
   // at the edge, in front of this Worker.
-  for (const path of ["/api/queue", "/api/sqlstats", "/api/admin/me"]) {
+  for (const path of ["/api/admin/queue", "/api/admin/sqlstats", "/api/admin/me"]) {
     const r = await get(base, path);
     check(`GET ${path} is closed without a sign-in`, r.status === 401, String(r.status));
   }
   // On a loopback host (which this is) /admin/login is the DEV login's first
   // hop: it bounces to the deployed site's login, asking for the token back
   // at this server's callback — never a token in hand here.
-  const login = await get(base, "/admin/login?next=%2Fqueue%3Fadmin%3Dtrue");
+  const login = await get(base, "/admin/login?next=%2Fqueue");
   const loginTo = login.headers.get("location") ?? "";
   check("GET /admin/login on a loopback host bounces to the deployed login",
     login.status === 302 && loginTo.startsWith("https://replay.fogofwar.dev/admin/login?next=http%3A%2F%2F127.0.0.1%3A"),
