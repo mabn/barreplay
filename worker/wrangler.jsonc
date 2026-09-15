@@ -98,10 +98,17 @@
   // PUT /api/replays/<id>. Optional write auth: `wrangler secret put
   // REPLAY_PUT_TOKEN` (the uploader sends it as a bearer token).
   // ADMIN LOGIN (Cloudflare Access, src/worker/access.ts): the admin routes
-  // verify an Access JWT against ACCESS_TEAM_DOMAIN + ACCESS_AUD. Neither is
-  // secret — a `vars` block here works — but they are per-deployment, so they
-  // are set with `wrangler secret put` (README "Admin login"). Missing = every
-  // admin route 401s (fail-closed). ADMIN_OPEN=true belongs in .dev.vars ONLY.
+  // verify an Access JWT against these two. Neither is secret: the team
+  // domain is the subdomain every Access login page for this account lives
+  // on, and the AUD tag is the Access application's audience — the
+  // self-hosted application for replay.fogofwar.dev/admin/login (README
+  // "Admin login"). Both missing = every admin route 401s (fail-closed).
+  // ADMIN_OPEN=true belongs in .dev.vars ONLY, never here.
+  "vars": {
+    "ACCESS_TEAM_DOMAIN": "bartools.cloudflareaccess.com",
+    "ACCESS_AUD": "94214a467ff0d56eac5a9b0f4637a189722107d5770b90d387af453642f2b83d"
+  },
+
   // The sibling lavabalance worker (claudebar/lavabalance, same account),
   // which keeps the LOS (OpenSkill) ratings for the lava game mode. The cron's
   // lava sync (src/worker/lavasync.ts) submits freshly-mirrored candidate
