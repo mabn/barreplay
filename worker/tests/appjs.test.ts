@@ -1017,7 +1017,7 @@ test('the Players header swaps the column to lobby names and back', () => {
   assert.equal(new URL(state.href).searchParams.get('col'), null);
   assert.ok(walk(playerCell(0)).some((n) => n.textContent === 'Rouben'));
 
-  // Against the Go server (no lobbyName key anywhere) the header is inert.
+  // Against a backend with no lobbyName key anywhere the header is inert.
   rows.forEach((r: any) => delete r.lobbyName);
   render();
   const plain = dom.document.getElementById('h_players');
@@ -1742,7 +1742,7 @@ test('a bare game id resolves to the served revision before anything is fetched'
   assert.equal(await resolve(`${id}-9942e3d8`), `${id}-9942e3d8`);
   assert.equal(fetches.length, 0, 'a revision id is never resolved');
 
-  // No catalog (a plain static host, the Go server's local files): the direct
+  // No catalog (a plain static host): the direct
   // fetch decides, exactly as before.
   catalogOk = false;
   assert.equal(await resolve(id), id);

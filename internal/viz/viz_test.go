@@ -4,19 +4,12 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
-	"fmt"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
-	"regexp"
 	"strconv"
-	"strings"
 	"testing"
 
-	"github.com/mabn/barreplay/assets"
 	"github.com/mabn/barreplay/snapshot"
 )
 
@@ -108,37 +101,11 @@ func writeBRP(t *testing.T, dir, gameID string) string {
 
 // The head payload must carry everything the viewer needs before any frame
 // data arrives: bounds, the full team roster (including teams only seen in
-// frames), footprints, and the chunk index. The E section and every chunk
-// must be served byte-for-byte from the stored file.
-func TestServeBRP(t *testing.T) {
+// frames), footprints, and the chunk index. The E and C sections ride along
+// byte-for-byte from the stored file, and no frame data does.
+func TestWirePayload(t *testing.T) {
 	dir := t.TempDir()
 	path := writeBRP(t, dir, "g")
-
-	srv := httptest.NewServer((&Server{Dir: dir}).Handler())
-	defer srv.Close()
-
-	get := func(url string) ([]byte, *http.Response) {
-		t.Helper()
-		resp, err := http.Get(srv.URL + url)
-		if err != nil {
-			t.Fatal(err)
-		}
-		b, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if resp.StatusCode != 200 {
-			t.Fatalf("GET %s: status %d: %s", url, resp.StatusCode, b)
-		}
-		return b, resp
-	}
-
-	payload, resp := get("/replays/g.brw")
-	if resp.Header.Get("ETag") == "" {
-		t.Error("no ETag on head payload")
-	}
-	head, secs := parseWire(t, payload)
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -149,6 +116,11 @@ func TestServeBRP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	payload, err := brpWirePayload(bf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, secs := parseWire(t, payload)
 
 	// Head basics.
 	if head.GameID != "g" || head.MapName != "Test Map" || head.SampleEvery != 30 {
@@ -210,53 +182,16 @@ func TestServeBRP(t *testing.T) {
 	// E and C sections pass through byte-for-byte; no frame data in the head
 	// payload.
 	if !bytes.Equal(secs[snapshot.SecEvents], bf.Sections[snapshot.SecEvents]) {
-		t.Errorf("served E section is not the stored one")
+		t.Errorf("wire E section is not the stored one")
 	}
 	if len(bf.Sections[snapshot.SecComms]) == 0 {
 		t.Fatal("stored file has no comms section")
 	}
 	if !bytes.Equal(secs[snapshot.SecComms], bf.Sections[snapshot.SecComms]) {
-		t.Errorf("served C section is not the stored one")
+		t.Errorf("wire C section is not the stored one")
 	}
 	if _, ok := secs[snapshot.SecFrames]; ok {
 		t.Errorf("head payload must not contain a frames section")
-	}
-
-	// Chunk endpoint serves the stored delta byte range; the keys endpoint the
-	// stored K section — both byte-for-byte.
-	c := bf.Chunks[0]
-	fsec := bf.Sections[snapshot.SecFrames]
-	full, _ := get("/replays/g/c0")
-	if !bytes.Equal(full, fsec[c.FOff:c.FOff+c.FLen]) {
-		t.Errorf("chunk 0 is not the stored byte range")
-	}
-	keys, _ := get("/replays/g.keys")
-	if !bytes.Equal(keys, bf.Sections[snapshot.SecKeyframes]) {
-		t.Errorf("keys is not the stored K section")
-	}
-
-	// Out-of-range chunk and bad ids are rejected.
-	if resp, err := http.Get(srv.URL + "/replays/g/c9"); err != nil || resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("chunk c9: %v %v", resp.StatusCode, err)
-	} else {
-		resp.Body.Close()
-	}
-	if resp, err := http.Get(srv.URL + "/replays/..%2Fg.brw"); err != nil || resp.StatusCode == http.StatusOK {
-		t.Errorf("traversal name served: %v %v", resp.StatusCode, err)
-	} else {
-		resp.Body.Close()
-	}
-
-	// ETag revalidation: a matching If-None-Match yields 304 with no body.
-	req, _ := http.NewRequest("GET", srv.URL+"/replays/g/c0", nil)
-	req.Header.Set("If-None-Match", resp.Header.Get("ETag"))
-	r304, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r304.Body.Close()
-	if r304.StatusCode != http.StatusNotModified {
-		t.Errorf("revalidation status = %d, want 304", r304.StatusCode)
 	}
 }
 
@@ -343,7 +278,7 @@ func TestHeadIconByType(t *testing.T) {
 	}
 }
 
-// The head must carry the player roster, and brpResourcesPayload must return
+// The head must carry the player roster, and brpResourcesJSON must return
 // each sampled frame's per-team economy (the .brp X stream, which the frame
 // chunk path never fetches) so the sidebar player list can draw its bars.
 func TestPlayersAndResources(t *testing.T) {
@@ -398,16 +333,11 @@ func TestPlayersAndResources(t *testing.T) {
 		t.Errorf("player1 should be a spectator: %+v", head.Players[1])
 	}
 
-	// Resources payload: gzipped JSON, one {f, r} per sampled frame.
-	gz, err := brpResourcesPayload(bf)
+	// Resources body: a JSON array, one {f, r} per sampled frame.
+	raw, err := brpResourcesJSON(bf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	zr, err := gzip.NewReader(bytes.NewReader(gz))
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, _ := io.ReadAll(zr)
 	var arr []wireResFrame
 	if err := json.Unmarshal(raw, &arr); err != nil {
 		t.Fatal(err)
@@ -428,112 +358,9 @@ func TestPlayersAndResources(t *testing.T) {
 	}
 }
 
-// The listing shows only .brp files; legacy formats are invisible to the UI.
-func TestListBRPOnly(t *testing.T) {
-	dir := t.TempDir()
-	writeBRP(t, dir, "a")
-	writeBRP(t, dir, "b")
-	if err := os.WriteFile(filepath.Join(dir, "legacy.jsonl"), []byte("{}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "raw.brsnap"), []byte("BRSNAP READY\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	s := &Server{Dir: dir}
-	infos, err := s.list()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(infos) != 2 || infos[0].File != "a" || infos[1].File != "b" {
-		t.Fatalf("got %+v, want just a and b", infos)
-	}
-}
-
-// The catalog endpoint must serve the same JSON shape as the worker's Durable
-// Object table (nullable stats, newest game first, no-start rows last) with
-// the stats derived from each .brp's meta record.
-// The shared front-end asks EVERY backend for one page and reads "there is a
-// next page" off getting one row more than it means to show. This server
-// ignores the filter params on purpose (it lists a directory), but ignoring
-// these would make that Next button lie.
-func TestCatalogPaging(t *testing.T) {
-	dir := t.TempDir()
-	for i := 0; i < 5; i++ {
-		writeBRP(t, dir, fmt.Sprintf("r%d", i))
-	}
-	srv := httptest.NewServer((&Server{Dir: dir}).Handler())
-	defer srv.Close()
-
-	page := func(query string) []string {
-		resp, err := http.Get(srv.URL + "/api/replays" + query)
-		if err != nil {
-			t.Fatal(err)
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		var entries []CatalogEntry
-		if err := json.Unmarshal(body, &entries); err != nil {
-			t.Fatalf("%s: %v (%s)", query, err, body)
-		}
-		ids := make([]string, len(entries))
-		for i, e := range entries {
-			ids[i] = e.ID
-		}
-		return ids
-	}
-
-	// These captures have no start time, so they sort by id.
-	all := page("")
-	if len(all) != 5 {
-		t.Fatalf("unpaged listing = %v, want 5 rows", all)
-	}
-	if got := page("?limit=2"); !reflect.DeepEqual(got, all[:2]) {
-		t.Errorf("?limit=2 = %v, want %v", got, all[:2])
-	}
-	if got := page("?limit=2&offset=2"); !reflect.DeepEqual(got, all[2:4]) {
-		t.Errorf("?limit=2&offset=2 = %v, want %v", got, all[2:4])
-	}
-	// A short page is how the front-end learns it is on the last one.
-	if got := page("?limit=2&offset=4"); !reflect.DeepEqual(got, all[4:]) {
-		t.Errorf("last page = %v, want %v", got, all[4:])
-	}
-	// Past the end is an empty page, not an error: the listing shrinks between
-	// requests, and a stale Next click is not a failure.
-	if got := page("?limit=2&offset=99"); len(got) != 0 {
-		t.Errorf("offset past the end = %v, want none", got)
-	}
-	// Junk is "unset", which now falls back to the DEFAULT limit
-	// (catalogLimitMax) rather than the whole listing — larger than this
-	// listing, so everything still comes back here; the cap itself is pinned
-	// by TestPageEntriesAlwaysLimits below.
-	if got := page("?limit=abc&offset=-3"); !reflect.DeepEqual(got, all) {
-		t.Errorf("junk params = %v, want the whole (small) listing", got)
-	}
-}
-
-// The listing must never hand out the whole catalog in one response: an
-// absent, junk or oversized limit all serve at most catalogLimitMax rows and
-// a client that wants more pages with offset. The worker's route enforces
-// the same contract (CATALOG_LIMIT_MAX in app.ts).
-func TestPageEntriesAlwaysLimits(t *testing.T) {
-	entries := make([]CatalogEntry, catalogLimitMax+50)
-	for i := range entries {
-		entries[i].ID = fmt.Sprintf("id%04d", i)
-	}
-	if got := len(pageEntries(entries, 0, 0)); got != catalogLimitMax {
-		t.Errorf("no limit served %d rows, want the default %d", got, catalogLimitMax)
-	}
-	if got := len(pageEntries(entries, 0, catalogLimitMax*10)); got != catalogLimitMax {
-		t.Errorf("oversized limit served %d rows, want the cap %d", got, catalogLimitMax)
-	}
-	// Paging past the cap still reaches the rest.
-	rest := pageEntries(entries, catalogLimitMax, 0)
-	if len(rest) != 50 || rest[0].ID != entries[catalogLimitMax].ID {
-		t.Errorf("second page = %d rows starting %q, want 50 starting %q",
-			len(rest), rest[0].ID, entries[catalogLimitMax].ID)
-	}
-}
-
+// BuildCatalogEntry is the row the packer PUTs into the worker's catalog, so
+// it must produce the Durable Object table's shape (nullable stats, a null
+// start time for a capture without one) from each .brp's meta record.
 func TestCatalog(t *testing.T) {
 	dir := t.TempDir()
 	writeBRP(t, dir, "nostart") // StartUnix 0 -> null start, sorts last
@@ -576,26 +403,29 @@ func TestCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv := httptest.NewServer((&Server{Dir: dir}).Handler())
-	defer srv.Close()
-	resp, err := http.Get(srv.URL + "/api/replays")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("status %d: %s", resp.StatusCode, body)
-	}
-	var entries []CatalogEntry
-	if err := json.Unmarshal(body, &entries); err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 2 || entries[0].ID != "recent" || entries[1].ID != "nostart" {
-		t.Fatalf("want [recent nostart], got %+v", entries)
+	entry := func(id string) CatalogEntry {
+		t.Helper()
+		path := filepath.Join(dir, id+".brp")
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		bf, err := snapshot.ParseBRP(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fi, err := f.Stat()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return BuildCatalogEntry(id, bf, fi.Size())
 	}
 
-	r := entries[0]
+	r := entry("recent")
+	if r.ID != "recent" {
+		t.Errorf("recent id = %q", r.ID)
+	}
 	if r.StartUnix == nil || *r.StartUnix != 1_752_000_000 {
 		t.Errorf("recent startUnix = %v", r.StartUnix)
 	}
@@ -629,7 +459,7 @@ func TestCatalog(t *testing.T) {
 		t.Errorf("recent widget = %v/%v/%v", str(r.WidgetVersion), str(r.WidgetSha), str(r.WidgetDate))
 	}
 
-	n := entries[1]
+	n := entry("nostart")
 	if n.StartUnix != nil {
 		t.Errorf("nostart startUnix = %v, want null", *n.StartUnix)
 	}
@@ -785,214 +615,5 @@ func TestSettingsFlags(t *testing.T) {
 	want := map[string]any{"ranked": true, "lava": true, "mods": true}
 	if len(got) != len(want) || got["ranked"] != true || got["lava"] != true || got["mods"] != true {
 		t.Errorf("combined = %v, want %v", got, want)
-	}
-}
-
-// TestIndexHTMLDataOrigin pins the __DATA_ORIGIN__ contract this server shares
-// with the Vite build. The deployed viewer fetches replay pieces from the R2
-// bucket's own hostname (stamped into the placeholder at build time); this
-// server IS the origin for its files, so it must blank the placeholder — an
-// unsubstituted one would send the viewer looking for a literal host.
-//
-// It also guards the shape of the emitted line. Both substituters do a plain
-// textual replace, so a placeholder token that collided with the global's name
-// would be rewritten into `window.https://... =`: invalid JS that nothing else
-// in the build or the test suite would notice.
-func TestIndexHTMLDataOrigin(t *testing.T) {
-	srv := httptest.NewServer((&Server{Dir: t.TempDir()}).Handler())
-	defer srv.Close()
-
-	resp, err := http.Get(srv.URL + "/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	html := string(b)
-
-	if want := `window.__DATA_BASE__ = "";`; !strings.Contains(html, want) {
-		t.Errorf("served index.html does not assign an empty data origin (want %q)", want)
-	}
-	for _, tok := range []string{"__DATA_ORIGIN__", "__ASSET_REV__"} {
-		if strings.Contains(html, tok) {
-			t.Errorf("served index.html still contains the unsubstituted placeholder %s", tok)
-		}
-	}
-}
-
-// TestSPAPaths pins the client-side routes: the viewer's pages live at paths
-// now (/replays/<id>, /queue, /games, /sqlstats), so a direct load or refresh
-// of one must serve the SPA entry exactly like "/" — while the data pieces
-// under the same /replays/ prefix (an extension, or a /c<n> second segment)
-// keep answering as data, never as HTML.
-func TestSPAPaths(t *testing.T) {
-	srv := httptest.NewServer((&Server{Dir: t.TempDir()}).Handler())
-	defer srv.Close()
-
-	for _, path := range []string{
-		"/replays/f8e5816a04505f9c2b5b69a6a458b696",
-		"/replays/f8e5816a04505f9c2b5b69a6a458b696-9942e3d8",
-		"/queue", "/games", "/sqlstats",
-	} {
-		resp, err := http.Get(srv.URL + path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		b, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("GET %s: status %d, want 200", path, resp.StatusCode)
-		}
-		if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
-			t.Errorf("GET %s: content-type %q, want text/html", path, ct)
-		}
-		if !strings.Contains(string(b), `id="homelink"`) {
-			t.Errorf("GET %s: response is not the SPA entry", path)
-		}
-	}
-
-	// A data path for a file that does not exist must stay an error, not HTML:
-	// the dot (or the chunk's second segment) is the dispatch.
-	for _, path := range []string{"/replays/nosuch.brw", "/replays/nosuch/c0"} {
-		resp, err := http.Get(srv.URL + path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
-			t.Errorf("GET %s: status 200 for a missing data piece", path)
-		}
-	}
-}
-
-// TestFingerprintedAssets pins the contract between index.html and this server:
-// the entry references its subresources by their content-hashed names, so those
-// exact URLs must resolve. A mismatch would leave the viewer with no script and
-// no stylesheet — a blank page, not a degraded one.
-func TestFingerprintedAssets(t *testing.T) {
-	srv := httptest.NewServer((&Server{Dir: t.TempDir()}).Handler())
-	defer srv.Close()
-
-	resp, err := http.Get(srv.URL + "/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-
-	// Pull the URLs the entry actually asks for rather than reconstructing
-	// them, so this fails if either side's naming scheme moves.
-	refs := regexp.MustCompile(`/(?:app|style)\.[0-9a-f]{8}\.(?:js|css)`).FindAllString(string(b), -1)
-	if len(refs) != 2 {
-		t.Fatalf("index.html references %d fingerprinted subresources, want 2: %v", len(refs), refs)
-	}
-	for _, ref := range refs {
-		r, err := http.Get(srv.URL + ref)
-		if err != nil {
-			t.Fatal(err)
-		}
-		body, _ := io.ReadAll(r.Body)
-		r.Body.Close()
-		if r.StatusCode != 200 {
-			t.Errorf("GET %s: status %d", ref, r.StatusCode)
-		}
-		if len(body) == 0 {
-			t.Errorf("GET %s: empty body", ref)
-		}
-	}
-}
-
-// TestFavicon guards the tab icon's plumbing: the embed pattern in
-// worker/assets.go and the route that serves it. A missing embed is the easy
-// mistake here and shows up only as a 404 in a browser tab nobody is watching.
-func TestFavicon(t *testing.T) {
-	srv := httptest.NewServer((&Server{Dir: t.TempDir()}).Handler())
-	defer srv.Close()
-
-	for _, tc := range []struct{ path, ctype, magic string }{
-		{"/favicon.svg", "image/svg+xml", "<svg"},
-		{"/favicon.ico", "image/x-icon", "\x00\x00\x01\x00"}, // ICONDIR
-	} {
-		resp, err := http.Get(srv.URL + tc.path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		b, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != 200 {
-			t.Errorf("GET %s: status %d", tc.path, resp.StatusCode)
-			continue
-		}
-		if got := resp.Header.Get("Content-Type"); got != tc.ctype {
-			t.Errorf("GET %s: content-type = %q, want %q", tc.path, got, tc.ctype)
-		}
-		if !strings.HasPrefix(string(b), tc.magic) {
-			t.Errorf("GET %s: wrong file (starts %q)", tc.path, string(b[:min(8, len(b))]))
-		}
-	}
-
-	// index.html must actually reference them, or a fallback ships dead.
-	page, err := http.Get(srv.URL + "/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html, _ := io.ReadAll(page.Body)
-	page.Body.Close()
-	for _, want := range []string{`href="/favicon.svg"`, `href="/favicon.ico"`} {
-		if !strings.Contains(string(html), want) {
-			t.Errorf("index.html does not reference %s", want)
-		}
-	}
-}
-
-// TestSetupPage guards the widget-install guide the landing page links to. The
-// link in index.html is relative, so it must resolve on THIS server too, not
-// only on the Cloudflare deployment — and the widget it offers has to be the
-// embedded assets/lua copy, byte for byte.
-func TestSetupPage(t *testing.T) {
-	srv := httptest.NewServer((&Server{Dir: t.TempDir()}).Handler())
-	defer srv.Close()
-
-	get := func(path string) (*http.Response, string) {
-		t.Helper()
-		resp, err := http.Get(srv.URL + path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		b, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != 200 {
-			t.Fatalf("GET %s: status %d", path, resp.StatusCode)
-		}
-		return resp, string(b)
-	}
-
-	_, home := get("/")
-	if !strings.Contains(home, `href="/setup"`) {
-		t.Error("the dropzone banner does not link to /setup")
-	}
-
-	resp, page := get("/setup")
-	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/html") {
-		t.Errorf("/setup content-type = %q", got)
-	}
-	if !strings.Contains(page, `href="/replay_uploader.lua"`) {
-		t.Error("/setup does not offer the widget download")
-	}
-	// The page is deliberately self-contained: it must not reference the
-	// fingerprinted subresources, whose hash only index.html gets substituted.
-	if strings.Contains(page, "__ASSET_REV__") {
-		t.Error("/setup references an unsubstituted fingerprinted asset")
-	}
-
-	_, widget := get("/replay_uploader.lua")
-	if widget != assets.ReplayUploaderLua {
-		t.Error("/replay_uploader.lua is not the embedded widget")
 	}
 }

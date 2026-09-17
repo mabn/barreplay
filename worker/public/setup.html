@@ -7,12 +7,11 @@
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="alternate icon" href="/favicon.ico" sizes="48x48 32x32 16x16">
 <!-- Deliberately SELF-CONTAINED: no /style.<rev>.css, no /app.<rev>.js. The
-     viewer's stylesheet is fingerprinted by the build (and by the Go viz
-     server at startup), and only index.html goes through the substitution
-     that stamps the hash in — a second page referencing it would have to be
-     taught to every substituter, for a static page that shares none of the
-     viewer's layout. Inline styles keep this page servable verbatim from the
-     asset layer, from `vite dev`, and from the Go server's embedded copy. -->
+     viewer's stylesheet is fingerprinted by the build, and only index.html
+     goes through the substitution that stamps the hash in — a second page
+     referencing it would have to be taught to every substituter, for a static
+     page that shares none of the viewer's layout. Inline styles keep this page
+     servable verbatim from the asset layer and from `vite dev`. -->
 <style>
 :root { color-scheme: dark; }
 * { box-sizing: border-box; }

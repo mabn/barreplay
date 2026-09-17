@@ -13,8 +13,7 @@ const readAsset = (src: string) => readFileSync(fileURLToPath(new URL(src, impor
 
 // revOf is the content hash both the URL and the emitted filenames carry: one
 // hash over BOTH subresources, so editing either busts both. Slightly
-// over-eager and deliberately so — it is one number to reason about, and the
-// Go viz server computes it the same way (internal/viz.assetRev).
+// over-eager and deliberately so — it is one number to reason about.
 function revOf(): string {
   const h = createHash("sha256");
   for (const s of SUBRESOURCES) h.update(readAsset(s.src));
@@ -30,8 +29,7 @@ function revOf(): string {
 //
 // Vite copies public/ verbatim and does not fingerprint it, so the build has to
 // emit the hashed names itself; `vite dev` serves public/ directly, so there
-// the hashed URL is rewritten back to the plain one by middleware. The Go viz
-// server does the equivalent at startup (internal/viz).
+// the hashed URL is rewritten back to the plain one by middleware.
 function assetRev(): Plugin {
   return {
     name: "asset-rev",

@@ -4,17 +4,16 @@ A Cloudflare Worker that hosts the barreplay viewer as **static files, with no s
 on the playback path**. Built with [Hono](https://hono.dev) and
 [Vite](https://vite.dev) (via
 [`@cloudflare/vite-plugin`](https://developers.cloudflare.com/workers/vite-plugin/)).
-No front-end framework — the viewer is the same plain Canvas/vanilla-JS app as
-`cmd/barreplay-viz`.
+No front-end framework — the viewer is a plain Canvas/vanilla-JS app
+(`index.html` + `public/app.js`).
 
 ## How it works
 
 The `.brp` format was designed so serving is a byte copy, not a re-encode: the
 head is a pure function of the file's meta, the keyframes section and each frame
-chunk are independently-gzipped byte ranges. The Go viz server and this Worker
-share ONE URL scheme, so the same `worker/public` front-end works against both.
-The files are precomputed **offline** by `cmd/barreplay-static` and served
-straight from an **R2 bucket**:
+chunk are independently-gzipped byte ranges. The files are precomputed
+**offline** by `cmd/barreplay-static` / `pack` and served straight from an
+**R2 bucket**:
 
 | URL | Static object (in R2) |
 | --- | --- |
@@ -55,8 +54,8 @@ The landing page (no `?replay=` in the URL) has a **left menu** with these secti
   and when your own upload lands or fails — so the pager stamps the clock time of the
   read. The menu entry carries a count of the jobs still in flight (counted
   server-side over the whole table, so it is true on any page). A backend without the
-  route (the Go viz server, which runs no ingest pipeline) says so instead of showing
-  an empty table.
+  route (a backend that runs no ingest pipeline) says so instead of showing an empty
+  table.
 - **Games** — open to everyone, like Replays: the **games mirror** (`GET /api/games`),
   every game BAR published that the worker's cron has recorded, captured or not —
   the other half of the catalog, and the list the re-sim backfill draws from. One
@@ -72,8 +71,7 @@ The landing page (no `?replay=` in the URL) has a **left menu** with these secti
   counting the mirror means reading a table that grows by ~2000 rows a day, and a
   cursor — unlike an offset — costs the same on every page and never repeats a row
   when a game lands mid-visit. Read on open, on paging, and on **Reload**; the page
-  is not in the URL. A backend without the route (the Go viz server keeps no mirror)
-  says so.
+  is not in the URL. A backend without the route (one that keeps no mirror) says so.
 
 The selection lives in the URL as the path (`/queue`), so it is shareable and survives a
 refresh, and opening a replay from a section returns there on `back`. Signed out,
@@ -215,8 +213,8 @@ in flight rather than about the replay:
   dead entry behind.
 
 A game that was already published and is being re-simulated gets the pill but stays
-openable — there is a revision to play. The Go viz server has no pipeline and sends
-neither field; the front-end reads a missing value as false.
+openable — there is a revision to play. The front-end reads a missing value of
+either field as false.
 
 `rid` is the **revision** the replay's pieces are actually served under:
 publishes are append-only — `pack -upload` (and the ingest daemon) put the
@@ -270,16 +268,12 @@ curl -X PUT https://<worker-host>/api/replays/<gameId> \
   -d '{"startUnix":1752000000,"durationSec":1987,"map":"Isidis crack 1.1","gameSize":"8v8","sizeBytes":8400000,"settings":{"ranked":true,"lava":true}}'
 ```
 
-The Go viz server (`cmd/barreplay-viz`) serves the same `GET /api/replays` shape
-computed live from its `.brp` files (`internal/viz/catalog.go`), so the shared front-end
-works against both backends; the row shape must stay in lockstep with
-`src/worker/replayentry.ts`. It does **not** implement the filters — it lists a local
-directory of a few captures — so it ignores those query params and has no
-`/api/replays/maps` route, and the front-end hides the filter bar when that route is
-missing. It *does*
-honour `?limit=&offset=`: paging is not a filter, and the shared front-end reads "there
-is a next page" off being handed one row more than it asked to show, so ignoring them
-would make its Next button lie.
+The PUT body is built by `viz.BuildCatalogEntry` (`internal/viz/catalog.go`) from the
+packed `.brp`'s meta; the row shape must stay in lockstep with
+`src/worker/replayentry.ts`. The front-end hides the filter bar on any backend without
+a `/api/replays/maps` route (a plain static host), and reads "there is a next page" off
+being handed one row more than it asked to show, so `?limit=&offset=` must be honoured
+by anything that serves this listing.
 
 ### The list is paged
 
@@ -367,8 +361,8 @@ without a mirror row guess the file from the map name and hide the image on a 40
 In the list, the **Players column header is a switch** — click it to swap the column
 between the rosters and the lobby name (a dash where no match exists). The choice lives
 in the URL as `?col=lobby` (absent = players), so it is shareable and survives a refresh
-and a round trip through a replay. The Go viz server has no games mirror, omits the
-field, and the header stays inert there — a `?col=lobby` link still lists players.
+and a round trip through a replay. On a backend that omits the field the header stays
+inert — a `?col=lobby` link still lists players.
 
 The teiserver **web session** (the Guardian cookie jar) persists in the one-row DO table
 `teiserver_session`, so the steady state is **one authed GET per minute** — no re-login —
@@ -433,7 +427,7 @@ worker/
   wrangler.jsonc          Worker config (name, main, account_id, assets + R2 + DO bindings, cron trigger)
   vite.config.ts          Vite + @cloudflare/vite-plugin
   index.html              viewer page (Vite entry)
-  public/app.js           viewer logic (copied from internal/viz/web, URLs point at R2)
+  public/app.js           viewer logic (the ONE copy of the front-end)
   public/style.css
   public/setup.html       the widget-install guide (/setup), self-contained: no fingerprinted
                           subresources, since only index.html gets the hash substituted
@@ -652,10 +646,6 @@ game leaves in `…\data`. Three things make that page work:
   it the extensionless path reaches the catch-all, where the asset layer's
   single-page-application handling answers with the viewer's `index.html`.
 
-The Go viz server serves the same page and widget from its embedded copies
-(`internal/viz/server.go`), so the relative link in `index.html` resolves on
-both backends.
-
 ## Commands
 
 ```sh
@@ -783,9 +773,9 @@ which is why this check uses curl.
 
 - **`vite.config.ts`** stamps the origin into `index.html`'s `__DATA_ORIGIN__`
   placeholder at build time (`$DATA_BASE` overrides; an empty value pins the
-  viewer back to same-origin). `vite dev` and the Go viz server blank it, so
-  both keep serving their own files — that is why `app.js` routes those four
-  URLs through `dataURL()` rather than hardcoding a host.
+  viewer back to same-origin). `vite dev` blanks it, so it keeps serving its
+  own files — that is why `app.js` routes those four URLs through `dataURL()`
+  rather than hardcoding a host.
 - **Uploads store `content-type` and `cache-control` on the object.** R2 replies
   with stored metadata verbatim on the direct path, so it can no longer be a
   serve-time fixup. The derivation is `objectHTTPMeta`, duplicated in

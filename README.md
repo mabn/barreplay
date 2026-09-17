@@ -9,9 +9,9 @@ A BAR replay (`.sdfz`) only stores the deterministic input stream — not unit
 positions — so the only way to recover positions is to replay it in the engine and
 sample state from inside via a small read-only Lua widget.
 
-A companion tool, **`barreplay-viz`**, serves a browser UI that scrubs back and
-forth through the captured data (unit positions/teams/health on a top-down map).
-See [Visualizing a capture](#visualizing-a-capture) below.
+A browser viewer (`worker/`, deployed as a Cloudflare Worker over an R2 bucket)
+scrubs back and forth through the captured data (unit positions/teams/health on
+a top-down map). See [Visualizing a capture](#visualizing-a-capture) below.
 
 ## Pipeline
 
@@ -41,7 +41,6 @@ flowchart LR
     brp[".brp v4<br/>packed capture"]
     bundle["static bundle<br/>.brw + .keys + chunks + .resources"]
     r2[("R2 bucket")]
-    viz["barreplay-viz<br/>local server"]
     worker["Cloudflare Worker"]
     viewer["browser viewer<br/>worker/public app.js"]
 
@@ -53,7 +52,6 @@ flowchart LR
     brp -->|"barreplay-static<br/>or pack -upload"| bundle
     bundle -->|"upload.ts<br/>S3 fast path / wrangler"| r2
     r2 --> worker --> viewer
-    brp --> viz --> viewer
 ```
 
 A raw `.brepstream` can also enter the pipeline through the **browser**: the
@@ -71,7 +69,7 @@ pipeline. See `worker/README.md`.
 | `internal/demofile` | Parse the `.sdfz` header (byte-packed, little-endian) and the embedded TDF startscript. |
 | `internal/engine` | Locate `spring-headless`/`pr-downloader`, provision missing content, write the widget (with its output-file path), build the playback startscript, launch the engine. |
 | `internal/capture` | Parse the widget's `BRSNAP` output file into `snapshot` records. |
-| `internal/viz` | Serve the browser playback UI over a dir of `.brp` captures, and pack captures into static-hosting bundles. The SPA itself lives in `worker/` (one copy, embedded into the Go binary). |
+| `internal/viz` | Pack a `.brp` into the viewer's wire pieces (the `.brw` head with icons/footprints/chunk index, `.keys`, chunks, `.resources`) as a static-hosting bundle, and build the catalog row the publisher registers. |
 | `worker/` | Cloudflare Worker (Hono + Vite) hosting the viewer as **static files from R2** — and the home of the front-end (`worker/public`, `worker/index.html`). |
 | `assets/lua` | The embedded, read-only Lua widget injected into the engine's write-dir. |
 
@@ -79,7 +77,6 @@ pipeline. See `worker/README.md`.
 
 ```sh
 go build ./cmd/barreplay        # the capture CLI
-go build ./cmd/barreplay-viz    # the visualization server
 go build ./cmd/pack   # converter: raw .brsnap/.brepstream -> .brp
 go build ./cmd/barreplay-static # pack .brp captures into a static-hosting bundle (see worker/)
 go test ./...
@@ -162,10 +159,9 @@ A `.brp` holds everything the old JSONL format did except unit elevation: full m
 progress, per-team economy, and lifecycle events, plus precomputed bounds so
 the viewer doesn't scan frames. Read it back with `snapshot.ReadBRP` (or one
 chunk at a time via `snapshot.ParseBRP` + `DecodeChunk`). The keyframes section
-and each chunk are independently compressed **on purpose**: any server —
-`barreplay-viz`, or a dumb static host like R2 (see `worker/`) — hands them to
-the browser byte-for-byte (no server-side re-encoding), and the browser gunzips
-them natively.
+and each chunk are independently compressed **on purpose**: a dumb static host
+like R2 (see `worker/`) hands them to the browser byte-for-byte (no server-side
+re-encoding), and the browser gunzips them natively.
 
 Raw widget streams convert without re-running the simulation:
 
@@ -195,24 +191,13 @@ To change the persisted format, implement `snapshot.Writer` — nothing else cha
 
 ## Visualizing a capture
 
-`barreplay-viz` serves an interactive, browser-based playback of a capture. It is a
-separate, **read-only** tool: it never launches the engine — it only reads finished
-snapshot files.
-
-```sh
-go build ./cmd/barreplay-viz
-./barreplay-viz -snapshots ./snapshots      # then open http://127.0.0.1:8080
-```
-
-| Flag | Meaning |
-| --- | --- |
-| `-snapshots <dir>` | Directory of snapshot files to browse (default `./snapshots`). |
-| `-addr <host:port>` | Listen address (default `127.0.0.1:8080`). |
-
-It lists every `.brp` file in the directory in a picker (**only the current `.brp`
-version is supported**; convert a raw `.brsnap`/`.brepstream` once with
-`pack`, and regenerate any pre-v4 `.brp` the same way). The replay
-**streams, keyframes first**: the viewer fetches a small head (metadata, teams,
+The viewer is the browser app in `worker/`, served by the Cloudflare Worker from
+an R2 bucket (see [`worker/README.md`](./worker/README.md)). Publishing a capture
+is `pack <capture>` (which uploads the packed `.brp`'s static pieces and registers
+the replay in the catalog); to run the viewer locally, `npm run dev` in `worker/`
+and `pack -upload local`. **Only the current `.brp` version is served**; convert a
+raw `.brsnap`/`.brepstream` once with `pack`, and regenerate any pre-v4 `.brp`
+the same way. The replay **streams, keyframes first**: the viewer fetches a small head (metadata, teams,
 icons, events, chunk index), then the keyframes stream — every minute's keyframe,
 one download, decoded progressively as it arrives — and then chunk-sized pieces of
 delta frame data around the playhead while the rest downloads in the background.
@@ -244,25 +229,24 @@ top-down map, colouring units by team (grouped by ally-team), with:
 - a live **sidebar**: game time / sim frame / unit count, per-team unit counts, and a
   lifecycle **event feed** (created/finished/destroyed) up to the current frame.
 
-The front-end is plain HTML/JS/Canvas — one copy for all deployments, living in
-`worker/public` and embedded into the Go binary via `go:embed`. The server exposes
-the same static-shaped URLs the R2/Cloudflare deployment serves (so the app can't
-tell them apart): `/index.json` (the replay list), `/replays/<id>.brw` (one
+The front-end is plain HTML/JS/Canvas — one copy, living in `worker/public`. It
+reads static-shaped URLs: `/index.json` (the replay list), `/replays/<id>.brw` (one
 capture's head: metadata + events + chunk index), `/replays/<id>.keys` (every
 keyframe, one gzip stream), `/replays/<id>/c<n>` (one chunk's delta frames, sliced
 byte-for-byte from the stored file — the browser decodes everything with its native
 `DecompressionStream`, see `internal/viz/wire.go` and `snapshot/brp.go`),
 `/replays/<id>.resources` (per-frame team economy), and `/icons/<file>` (the
-vendored unit icons). For hosting the same viewer with **no server at all**, pack
-captures with `barreplay-static` and serve the resulting file tree from any static
-host — see [`worker/README.md`](./worker/README.md). The
+vendored unit icons). Every one of those is a plain file: `internal/viz/static.go`
+precomputes them from a `.brp` (`barreplay-static` for a local bundle, `pack` to
+publish), so any static host can serve the viewer — see
+[`worker/README.md`](./worker/README.md). The
 icon set and BAR's `icontypes.lua` name→bitmap table are vendored under
 `internal/viz/bardata/` (see its README); the mapping is parsed directly in Go,
 so no Lua VM / third-party dependency is added. The map terrain is fetched by the
 **browser directly** from the BAR maps API (`api.bar-rts.com`) using the capture's map
 name (falling back to the map record on the replay's own API entry when the API's
-file name for the map isn't a plain lowercasing of that name) — the viz server never
-proxies it; if the API is unreachable the viewer just falls back to a plain background.
+file name for the map isn't a plain lowercasing of that name) — nothing proxies it;
+if the API is unreachable the viewer just falls back to a plain background.
 
 ## Requirements for a real run
 
@@ -336,8 +320,9 @@ Expect: the `.sdfz` downloaded into `<data>/demos`, a fast run (the widget force
 playback speed via `setmin/maxspeed` — add `-progress` to watch the speed-up), and
 `./snaps/<gameId>.brp` with roughly `gameTime` sampled frames inside. On completion the
 tool reports the engine simulation time, the `infolog.txt` size, and the snapshot's
-size. Load it in `barreplay-viz` and spot-check that unit counts rise and fall
-plausibly and that positions fall within the map bounds.
+size. Publish it with `pack -upload local` against a local `npm run dev` worker and
+spot-check that unit counts rise and fall plausibly and that positions fall within
+the map bounds.
 
 ## Notes & known rough edges
 

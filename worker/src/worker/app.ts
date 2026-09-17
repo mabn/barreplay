@@ -123,8 +123,8 @@ app.get("/api/health", (c) => c.json({ status: "ok" }));
 // Who am I, for the front-end: 200 with the identity when the request carries
 // an admin credential, else the same 401 the admin routes answer. app.js asks
 // this once at boot and shows the admin controls only on a 200 — being signed
-// in IS admin mode, there is no URL flag. A 404 (the Go viz server) means a
-// backend with no login and no admin routes, and app.js shows nothing.
+// in IS admin mode, there is no URL flag. A 404 (a backend with no login and
+// no admin routes, e.g. a plain static host) makes app.js show nothing.
 app.get("/api/admin/me", (c) => {
   const who = c.get("admin");
   return c.json({ email: who.email, via: who.via }, 200, { "cache-control": "no-store" });
@@ -254,8 +254,8 @@ export const indexStub = (env: Env) => env.REPLAY_INDEX.get(env.REPLAY_INDEX.idF
  * absent, junk or oversized ?limit= all serve this many, never the whole
  * catalog. A client that wants more pages with ?offset= (a short page means
  * the last one). The page is 50; the front-end asks for 51 so the extra row
- * can say "there is more". Its twin is catalogLimitMax in
- * internal/viz/server.go — the two backends must page alike. */
+ * can say "there is more". The front-end's CATALOG_FETCH_LIMIT (app.js) is
+ * its twin — the two must page alike. */
 const CATALOG_LIMIT_MAX = 200;
 
 app.get("/api/replays", async (c) => {
@@ -277,8 +277,8 @@ app.get("/api/replays", async (c) => {
 // from a maintained list behind a one-minute in-memory cache in the DO
 // (ReplayIndex.mapNames), so it costs one row read a minute where the facets
 // endpoint it replaces scanned the whole catalog per call. Doubles as the
-// front-end's probe for "does this backend filter at all": the Go viz server
-// 404s it and the filter bar stays hidden there.
+// front-end's probe for "does this backend filter at all": a backend that
+// 404s it (a plain static host) keeps the filter bar hidden.
 app.get("/api/replays/maps", async (c) => {
   const maps = await indexStub(c.env).mapNames();
   return c.json({ maps }, 200, { "cache-control": "no-cache" });

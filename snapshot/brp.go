@@ -44,8 +44,8 @@ package snapshot
 // offset is reported by ReadContainer, so range-based consumers can add the
 // two).
 //
-// Chunks are separately gzipped ON PURPOSE: the viz server (and the static
-// bundle for R2 hosting) hands individual chunk byte ranges, the K payload,
+// Chunks are separately gzipped ON PURPOSE: the static bundle for R2 hosting
+// (internal/viz/static.go) hands individual chunk byte ranges, the K payload,
 // and the E payload to the browser byte-for-byte with no re-encoding, and the
 // browser gunzips them with its native DecompressionStream — that is what
 // makes instant start, seeking and skimming cheap. Unknown tags are skipped

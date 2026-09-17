@@ -1,4 +1,4 @@
-// Copies the vendored BAR unit + rank icons from the Go viz package into this
+// Copies the vendored BAR unit + rank icons from internal/viz/bardata into this
 // Worker's public/ dir so Vite bundles them as static assets (served at /icons/*
 // and /ranks/*). They're a fixed set that versions with the app, so they ship as
 // assets rather than living in R2. Run automatically before dev/build; the copies
