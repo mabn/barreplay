@@ -1,348 +1,243 @@
 # barreplay
 
-A Go tool that turns a **Beyond All Reason** (BAR) replay link into on-disk
-**snapshots** of game state (unit positions, types, teams, health, and lifecycle
-events), sampled periodically throughout the match.
+**Live site: <https://replay.fogofwar.dev>** — browse and play back captured
+Beyond All Reason games. To record your own games, follow the
+[widget install guide](https://replay.fogofwar.dev/setup).
 
-It works by **re-simulating** the replay in the Recoil (Spring) engine headlessly.
-A BAR replay (`.sdfz`) only stores the deterministic input stream — not unit
-positions — so the only way to recover positions is to replay it in the engine and
-sample state from inside via a small read-only Lua widget.
+barreplay recovers **unit positions** from Beyond All Reason (BAR) games and
+plays them back in the browser: a top-down map with every unit, its health,
+what it is building, the chat, the map drawings, scrubbable at any speed.
 
-A browser viewer (`worker/`, deployed as a Cloudflare Worker over an R2 bucket)
-scrubs back and forth through the captured data (unit positions/teams/health on
-a top-down map). See [Visualizing a capture](#visualizing-a-capture) below.
+A BAR replay (`.sdfz`) does not contain positions. It stores only the players'
+input stream, and the deterministic Recoil (Spring) engine recomputes everything
+else. So there are exactly two ways to get positions, and this repo does both:
 
-## Pipeline
+- **Re-simulate the replay** headlessly in `spring-headless` with a read-only
+  Lua widget sampling game state once a second.
+- **Record a live game** with the same widget installed by a player, who then
+  drag-and-drops the capture onto the site.
 
-```
-replay link / gameId / local .sdfz
-        │
-        ▼  internal/barapi      resolve gameId → metadata, download .sdfz from OVH storage
-        ▼  internal/demofile    gunzip + parse header & startscript (engine/game/map/gameId)
-        ▼  internal/engine      locate spring-headless, provision content, inject widget, launch
-        ▼  assets/lua           snapshot_widget.lua samples units each N frames → writes BRSNAP lines to <gameId>.brsnap
-        ▼  internal/capture     parse the BRSNAP file → snapshot records
-        ▼  snapshot             pluggable Writer persists them (.brp compact binary)
-```
+Either way the result is a `.brp` file, a compact delta-coded binary the viewer
+streams keyframes-first.
 
-### Format flows
-
-Every capture, whatever its origin, converges on the packed `.brp` — the **only**
-format the viewer is served (as the v4 wire pieces: `.brw` head + `.keys` +
-chunks + `.resources`):
+## How it works
 
 ```mermaid
 flowchart LR
-    sdfz[".sdfz demo<br/>replay link / gameId"]
-    live["live game<br/>player runs<br/>replay_uploader.lua"]
-    brsnap[".brsnap<br/>text widget stream"]
-    breps[".brepstream<br/>binary widget stream"]
-    brp[".brp v4<br/>packed capture"]
-    bundle["static bundle<br/>.brw + .keys + chunks + .resources"]
-    r2[("R2 bucket")]
-    worker["Cloudflare Worker"]
-    viewer["browser viewer<br/>worker/public app.js"]
+    subgraph sources [Two ways in]
+        live["live game<br/>player runs replay_uploader.lua"]
+        sdfz[".sdfz demo<br/>from api.bar-rts.com"]
+    end
 
-    sdfz -->|"barreplay re-sim<br/>spring-headless + widget"| brsnap
-    live -->|"own ally team, LOS-filtered"| breps
-    live -.->|"writeText debug twin"| brsnap
-    brsnap -->|"same barreplay run,<br/>or pack"| brp
-    breps -->|"pack<br/>+ demo metadata fetch"| brp
-    brp -->|"barreplay-static<br/>or pack -upload"| bundle
-    bundle -->|"upload.ts<br/>S3 fast path / wrangler"| r2
-    r2 --> worker --> viewer
+    live -->|"drag & drop<br/>.brepstream"| upload["worker<br/>POST /api/upload"]
+    upload -->|"job queue"| bringest["bringest daemon<br/>(any machine)"]
+    sdfz -->|"re-sim queue"| resim["bringest -resim<br/>spring-headless + widget"]
+    resim --> brp
+    bringest -->|"pack"| brp[".brp"]
+
+    brp -->|"static bundle<br/>.brw .keys chunks .resources"| r2[("R2 bucket")]
+    brp -->|"catalog row"| do[("Durable Object<br/>SQLite catalog")]
+    r2 --> viewer["browser viewer<br/>worker/public/app.js"]
+    do --> viewer
 ```
 
-A raw `.brepstream` can also enter the pipeline through the **browser**: the
-worker's landing page accepts a drag&dropped capture (`POST /api/upload`
-archives it in R2 and records a job), and the `cmd/bringest` daemon —
-running wherever the repo lives — publishes it through the same `pack`
-pipeline. See `worker/README.md`.
+**A live capture** starts with a player. The
+[uploader widget](assets/lua/replay_uploader.lua) writes a binary
+`.brepstream` of their own side of the game (plus whatever enemies they can
+see) at 1 Hz. They drop it on the landing page; the worker archives it and
+queues a job. `bringest`, a daemon polling the worker from any machine, packs it
+into a `.brp`, fetches the demo's metadata (map, players, ranks, chat) from the
+BAR API, uploads the pieces to R2, and registers the replay in the catalog.
 
-### Package layout
+**A re-simulation** starts with a game id. The worker mirrors BAR's public game
+list every minute, so any game can be queued: pasted by an admin, or picked
+automatically when a one-sided upload lands and the game wants a full
+spectator view. A `bringest -resim` daemon on a machine with the engine
+downloads the demo, provisions the exact engine and game build the replay pins,
+injects the [snapshot widget](assets/lua/snapshot_widget.lua), runs the demo at
+max speed, and publishes the result exactly like an upload.
 
-| Package | Responsibility |
+**The viewer** never talks to a playback server. Every `.brp` is served as
+independently-gzipped byte ranges from R2 through `cdn-bar.fogofwar.dev`: a
+small head, then all keyframes as one stream (the whole timeline is scrubbable
+in seconds), then delta chunks around the playhead. The map terrain and unit
+icons are BAR's own. For local development the same front-end runs under
+`npm run dev` in `worker/` against a simulated bucket fed by `pack -upload local`.
+
+## Architecture
+
+The Go side is stdlib-only. The worker is Hono + Vite on Cloudflare Workers
+with a SQLite Durable Object and an R2 bucket. `CLAUDE.md` is the exhaustive
+reference; this table is the map.
+
+| Path | What it is |
 | --- | --- |
-| `snapshot/` | **Public data model + pluggable `Writer`.** Owns the on-disk format. The format is `.brp` (currently version 4), a delta-coded columnar binary ~60x smaller than the retired v1 JSONL. |
-| `internal/barapi` | Resolve a gameId/URL via `api.bar-rts.com` and download the `.sdfz` from the OVH bucket. (That API is open source: [`beyond-all-reason/bar-db`](https://github.com/beyond-all-reason/bar-db).) |
-| `internal/demofile` | Parse the `.sdfz` header (byte-packed, little-endian) and the embedded TDF startscript. |
-| `internal/engine` | Locate `spring-headless`/`pr-downloader`, provision missing content, write the widget (with its output-file path), build the playback startscript, launch the engine. |
-| `internal/capture` | Parse the widget's `BRSNAP` output file into `snapshot` records. |
-| `internal/viz` | Pack a `.brp` into the viewer's wire pieces (the `.brw` head with icons/footprints/chunk index, `.keys`, chunks, `.resources`) as a static-hosting bundle, and build the catalog row the publisher registers. |
-| `worker/` | Cloudflare Worker (Hono + Vite) hosting the viewer as **static files from R2** — and the home of the front-end (`worker/public`, `worker/index.html`). |
-| `assets/lua` | The embedded, read-only Lua widget injected into the engine's write-dir. |
+| `cmd/barreplay` | CLI: one replay link in, one `.brp` out. Downloads, provisions, injects the widget, runs the engine. |
+| `cmd/bringest` | The ingest daemon. Polls the worker's job queue; publishes drag-and-drop uploads, or with `-resim` re-simulates games headlessly. |
+| `cmd/pack` | Convert a raw widget stream to `.brp`, print a size breakdown, publish to R2 and the catalog. |
+| `cmd/barreplay-static` | Pack `.brp` files into a static-hosting bundle. |
+| `snapshot/` | The data model and the `.brp` codec. Nothing else knows the on-disk format. |
+| `internal/capture` | Parse the widgets' streams (`.brsnap` text, `.brepstream` binary) into snapshot records. |
+| `internal/demofile` | Parse the `.sdfz` header, startscript, and the chat and map-drawing packets. |
+| `internal/engine` | Locate or download `spring-headless`, provision content via `pr-downloader`, write the widget, launch and watch the engine, memory guard, ETA. |
+| `internal/resim` | The re-simulation pipeline as one call, with live progress for the daemon. |
+| `internal/packer` | Pack, upload (native SigV4 to R2), and register in the catalog. |
+| `internal/barapi` | BAR's replay API and demo download. |
+| `internal/viz` | The wire format served to the browser, the static bundle writer, the catalog row builder, BAR's unit icons. |
+| `assets/lua` | The two widgets: the injected re-sim sampler and the player-installable live recorder. |
+| `worker/` | The Cloudflare Worker: front-end (`worker/public`), catalog, job queue, games mirror, admin routes. See `worker/README.md`. |
+| `patches/` | Engine patches for faster, leaner headless re-simulation. See below. |
+| `docs/` | Byte-level format specs and the engine build recipe. |
 
-## Build
+Why a widget and not an engine change: widgets run in the unsynced Lua state,
+read game state through `Spring.Get*`, and cannot desync the replay. The
+sampler writes its stream to a file inside the engine's write-dir rather than
+through `Spring.Echo`, which flushes the log on every call and truncates long
+lines. Getting BAR to load a user widget in a replay is non-obvious; see
+"Making BAR actually load the widget" in `CLAUDE.md`.
+
+## Replay file format
+
+Three formats, in order of appearance. Only the last is ever served.
+
+**`.brepstream`** is what the live uploader widget writes: a binary
+keyframe-plus-delta stream, spec in [`docs/brepstream-format.md`](docs/brepstream-format.md).
+The re-sim widget writes the older tagged-text `.brsnap` (`BRSNAP F …`,
+`BRSNAP U …`), which is the reference format for the binary encoder. Both
+carry unit defs dumped in full, team and player preambles, per-unit position,
+velocity, health and build progress, per-team economy, lifecycle events, and
+since widget 1.6.0 chat and map drawings.
+
+**`.brp`** (version 5) is the packed capture, owned by `snapshot/brp.go` and
+specified byte for byte in [`docs/brp-format.md`](docs/brp-format.md), with the
+measured design evaluation in [`docs/brp-optimizations.md`](docs/brp-optimizations.md).
+A container of tagged sections: `M` meta JSON with a chunk index, `K` every
+keyframe as one gzip stream, `F` delta-frame chunks, `X` team resources, `E`
+events, `C` comms. Frames are grouped into chunks of 64 samples with the
+predictor reset at every boundary, the video-codec model. A delta frame stores
+only a dead-id list and the units whose columns differ from prediction;
+positions predict from the previous velocity, so a unit moving at constant
+speed costs zero bytes, and about two thirds of all unit records do. Changed
+columns are zigzag-varint deltas against the unit's previous sample. Elevation
+is not stored. A real 33-minute 8v8 is about 8 MB, where the original JSONL
+format was 476 MB. The writer is deterministic: the same capture always
+produces the same bytes, which is what the engine-patch verification relies on.
+
+**The wire** is the `.brp` cut into static files the browser fetches directly:
+`<id>.brw` (head: meta, teams, unit defs, icons, events, comms, chunk index),
+`<id>.keys` (the `K` section verbatim), `<id>/c<n>` (one chunk's delta bytes
+sliced from the file), `<id>.resources`. Nothing is re-encoded server-side; the
+browser gunzips with `DecompressionStream`. Three decoders stay in lockstep:
+the Go encoder and decoder in `snapshot/brp.go` and the JavaScript decoder in
+`worker/public/app.js`.
+
+## Engine patches
+
+A headless re-simulation of a big game is an hour of somebody's machine and
+several gigabytes of memory, and every improvement has to leave the produced
+`.brp` byte-identical to the stock engine's. `patches/engine-<version>/`
+holds the series that apply with `git am` onto that tag of
+[RecoilEngine](https://github.com/beyond-all-reason/RecoilEngine); the build
+recipe is [`docs/building-recoil.md`](docs/building-recoil.md).
+
+The current series, for engine 2026.07.04, on a 16-player 30-minute game:
+
+| Axis | Stock | Patched | Record |
+| --- | --- | --- | --- |
+| Sim wall time | 7m33s | 5m12s | [`RESULTS.md`](patches/engine-2026.07.04/RESULTS.md) |
+| Engine load | 12s | 9s | same |
+| Peak resident memory (16p, 13 min) | 5.4 GB | 3.9 GB | [`MEMORY.md`](patches/engine-2026.07.04/MEMORY.md) |
+
+The big wins, none of them inside the simulation:
+
+- **Unpaced demo playback.** The local game server paces packet release to
+  hold client CPU at a fixed target, so the sim idled and the main loop spun
+  draw passes. Releasing packets as fast as the client consumes them changes
+  timing only, never content.
+- **A coarse exit-only block grid** for the yardmap collision test, the single
+  largest instruction cut.
+- **Lazy zeroing of the static memory pools.** Recoil `memset`s 1.05 GiB of
+  pre-zeroed `.bss` before `main`; zeroing only handed-out pages preserves the
+  pool's invariant and saves about 1.1 GB resident on every run, including
+  ordinary BAR clients.
+- **Skipping `.smt` tile decode** and other draw-side work under `HEADLESS`.
+
+`experiments/` under each version keeps every hypothesis tried, including the
+rejected ones, with the benchmark tooling and a log of the method. Verdicts
+were taken on a synced-instruction meter rather than wall time, because the
+benchmark VM drifts by ten percent across hours.
+
+`bringest -resim` prefers a patched `spring-headless-patched` beside the stock
+binary when one exists and otherwise runs stock; nothing downloads patched
+builds, and the capture cannot tell which build made it.
+
+## Build and run
 
 ```sh
-go build ./cmd/barreplay        # the capture CLI
-go build ./cmd/pack   # converter: raw .brsnap/.brepstream -> .brp
-go build ./cmd/barreplay-static # pack .brp captures into a static-hosting bundle (see worker/)
+go build ./cmd/...
 go test ./...
+go vet ./... && gofmt -l .
 ```
 
-## Usage
-
-```
-barreplay [flags] <replay-link | gameId | path.sdfz>
-```
-
-Key flags:
-
-| Flag | Meaning |
-| --- | --- |
-| `-data <dir>` | BAR/Spring data directory (`engine/`, `games/`, `maps/`); also the engine `--write-dir`. Required to run the engine. (`$BAR_DATA_DIR` also works.) |
-| `-out <dir>` | Output directory for snapshot files (default `./snapshots`). |
-| `-every <frames>` | Sampling interval in sim frames (30 = 1 Hz, the default). |
-| `-engine <path>` | Path to `spring-headless` (overrides auto-location under `-data/engine/`). |
-| `-no-provision` | Assume engine/game/map are already installed; skip `pr-downloader`. |
-| `-force-provision` | Re-run `pr-downloader` even for content already recorded as provisioned (see below). |
-| `-game` / `-map` | Override the `pr-downloader` game/map identifiers (the rapid-tag mapping is best-effort). |
-| `-rapid-repo <url>` | Override the `pr-downloader` rapid master repo (default: BAR's repo). |
-| `-progress` | Poll `<data>/infolog.txt` every 2s and print replay progress: current/total frame, in-game time / total, % complete, ETA, and processing speed (sim frames/sec and speed-up vs realtime, e.g. 45 fps = 1.5x). |
-| `-no-run` | Download + parse only; don't launch the engine (useful for inspecting metadata). |
-
-### Examples
-
-Inspect a replay's metadata without running anything:
+Capture one replay (needs the engine, see below):
 
 ```sh
-barreplay -no-run https://www.beyondallreason.info/replays?gameId=836d486a5480a9e830be54db7d2c7be9
-# demo: gameId=836d486a... engine=2025.06.24 map="Isidis crack 1.1" game="Beyond All Reason test-30541-..." gameTime=720s
+./barreplay -data <BARdata> -out ./snaps https://www.beyondallreason.info/replays?gameId=<id>
 ```
 
-Full capture (requires a BAR install / engine — see below); `-progress` streams live
-status and the run prints a summary when it finishes:
+View captures locally (the worker's dev server over a simulated bucket):
 
 ```sh
-barreplay -progress -data ~/.local/share/Beyond-All-Reason/data -out ./snaps \
-    https://www.beyondallreason.info/replays?gameId=836d486a5480a9e830be54db7d2c7be9
-# progress: frame 2700/5790  •  01:30 / 03:13 game (46.6%)  •  512 sim-fps (17.1x)  •  ETA 00:12
-# ...
-# done: wrote snaps/836d486a...brp
-#   engine simulation took 12.847s
-#   infolog.txt: 45.20 MB
-#   snapshot: 0.15 MB
+cd worker && npm run dev                # http://127.0.0.1:5173
+./pack -upload local ./snaps/<gameId>.brp
 ```
 
-## Output format (`.brp` compact binary, version 4)
-
-The default output is `.brp` — a sectioned, gzip-compressed columnar binary owned
-by `snapshot/brp.go` and specified byte-for-byte in
-[`docs/brp-format.md`](./docs/brp-format.md) (the measured evaluation behind its
-design decisions is in [`docs/brp-optimizations.md`](./docs/brp-optimizations.md)).
-Unit state barely changes between 1 Hz samples, so a frame stores only the units
-that **changed** (plus an explicit dead list): a changed unit's values are deltas
-against its previous sample (positions additionally predicted by the unit's own
-velocity, so constant-velocity movement costs nothing), zigzag-varint encoded
-column by column, then gzipped; every unchanged unit — about two thirds of all
-records in a real game — costs zero bytes, and the decoder re-materializes it by
-dead reckoning. Unit elevation (y) is not stored at all: the viewer renders the
-x/z plane, and a ground unit's height is implied by the terrain. On a real
-~33-minute 8v8 game (4.2M unit records) this is **~8 MB where the retired v1 JSONL format was
-476 MB (~60x)**, with no other loss beyond fixed quantization (whole elmos/hp,
-velocity per sample interval, build progress 1/255, resources 0.1).
-
-Frames are grouped into **chunks of 64 samples** (~1 minute of game each), with
-the codec's prediction state reset at every chunk boundary — the video-codec
-model. Every chunk's first frame (its **keyframe**, fully absolute) lives
-outside the chunks, in a dedicated section holding all keyframes as **one gzip
-stream**; chunks carry only the remaining delta frames. That is what makes the
-viewer start instantly and the whole timeline scrubbable within seconds: it
-downloads the keyframes section first (one request, decoded progressively while
-it streams), then fills in delta chunks around the playhead — and no byte is
-ever fetched twice.
-
-A `.brp` holds everything the old JSONL format did except unit elevation: full meta
-(unit-def table, teams, players), per-unit position/velocity/health/build
-progress, per-team economy, and lifecycle events, plus precomputed bounds so
-the viewer doesn't scan frames. Read it back with `snapshot.ReadBRP` (or one
-chunk at a time via `snapshot.ParseBRP` + `DecodeChunk`). The keyframes section
-and each chunk are independently compressed **on purpose**: a dumb static host
-like R2 (see `worker/`) hands them to the browser byte-for-byte (no server-side
-re-encoding), and the browser gunzips them natively.
-
-Raw widget streams convert without re-running the simulation:
+Pack a raw widget stream and publish it:
 
 ```sh
-pack ./caps/*.brsnap        # writes <gameId>.brp next to each input
-pack ./caps/*.brepstream    # the binary widget stream works the same way
+./pack ./caps/<gameId>.brepstream       # packs, fetches demo metadata, uploads, registers
+./pack -upload= ./caps/<gameId>.brp     # size breakdown only, publishes nothing
 ```
 
-A raw `.brsnap` is just the widget's stream — it has no map name, versions, or
-player roster (those live in the demo the capture replayed). To still produce a
-**full** `.brp` without re-running the simulation, `pack` takes the
-replay's gameId from the input's file name (the pipeline names streams
-`<gameId>.brsnap`; use `-id <gameId|link>` if yours is named differently),
-downloads the demo from the BAR API, and seeds its startscript metadata exactly
-like a capture run does. `-no-demo` skips the download (offline) at the cost of
-that metadata; the sampling interval is inferred from the stream's frame
-spacing either way.
-
-`-upload r2` additionally uploads the packed `.brp`'s static bundle to the worker's
-R2 bucket (via the worker project in `-worker-dir`, default `./worker`) — the replay
-appears in the deployed viewer immediately, no redeploy needed. `-upload local`
-targets the local `npm run dev` simulator instead. Every input — including a raw
-`.brepstream` — is converted to `.brp` first: the viewer serves only the `.brp` wire
-format (it is the most compact encoding of the pieces it downloads).
-
-To change the persisted format, implement `snapshot.Writer` — nothing else changes.
-
-## Visualizing a capture
-
-The viewer is the browser app in `worker/`, served by the Cloudflare Worker from
-an R2 bucket (see [`worker/README.md`](./worker/README.md)). Publishing a capture
-is `pack <capture>` (which uploads the packed `.brp`'s static pieces and registers
-the replay in the catalog); to run the viewer locally, `npm run dev` in `worker/`
-and `pack -upload local`. **Only the current `.brp` version is served**; convert a
-raw `.brsnap`/`.brepstream` once with `pack`, and regenerate any pre-v4 `.brp`
-the same way. The replay **streams, keyframes first**: the viewer fetches a small head (metadata, teams,
-icons, events, chunk index), then the keyframes stream — every minute's keyframe,
-one download, decoded progressively as it arrives — and then chunk-sized pieces of
-delta frame data around the playhead while the rest downloads in the background.
-Playback starts in under a second even on a slow connection, and within a few
-seconds the **whole timeline is scrubbable**: dragging it across regions whose
-chunks haven't downloaded yet shows each minute's keyframe instantly. A bar under
-the timeline shows keyframe-only vs fully-downloaded ranges, video-player style. The page renders each sampled frame as a
-top-down map, colouring units by team (grouped by ally-team), with:
-
-- the **real map terrain** behind the units (the browser loads it straight from the BAR
-  maps API using the capture's map name, positioned in world space), toggled with the
-  **Map** checkbox,
-- **real BAR unit icons** (from vendored game assets), team-tinted and drawn at a
-  constant screen size (per-type, like BAR's minimap — icons overlap when zoomed out and
-  spread apart when zoomed in); toggle to plain dots with the **Icons** checkbox and adjust
-  their size with the slider next to it (persisted in the URL as `?iconsize=`),
-- **build footprints** for buildings — the terrain rectangle each structure occupies,
-  drawn in world space (so it scales with zoom) and team-tinted; mobile units get none.
-  Toggle with the **Footprints** checkbox. (The footprint size comes from the captured
-  unit-def `xsize`/`zsize`, so only captures made after the unit-def dump was added carry it.)
-- **Fit icons** (checkbox, default on): normally icons are a constant screen size, but when
-  you zoom in far enough that a building's icon would reach 90% of its footprint, the icon
-  grows with the footprint instead of staying tiny inside it. Mobile units are unaffected.
-- a **timeline scrubber** + play/pause and a speed control (from **1× real time** up to 60×);
-  playback **interpolates unit movement** between the 1 Hz samples using each unit's captured
-  velocity, so units glide smoothly instead of blinking to the next position (stationary units
-  stay put),
-- **scroll to zoom, middle-drag to pan**, and a hover **tooltip** (unit name, team, position, health),
-- a live **sidebar**: game time / sim frame / unit count, per-team unit counts, and a
-  lifecycle **event feed** (created/finished/destroyed) up to the current frame.
-
-The front-end is plain HTML/JS/Canvas — one copy, living in `worker/public`. It
-reads static-shaped URLs: `/index.json` (the replay list), `/replays/<id>.brw` (one
-capture's head: metadata + events + chunk index), `/replays/<id>.keys` (every
-keyframe, one gzip stream), `/replays/<id>/c<n>` (one chunk's delta frames, sliced
-byte-for-byte from the stored file — the browser decodes everything with its native
-`DecompressionStream`, see `internal/viz/wire.go` and `snapshot/brp.go`),
-`/replays/<id>.resources` (per-frame team economy), and `/icons/<file>` (the
-vendored unit icons). Every one of those is a plain file: `internal/viz/static.go`
-precomputes them from a `.brp` (`barreplay-static` for a local bundle, `pack` to
-publish), so any static host can serve the viewer — see
-[`worker/README.md`](./worker/README.md). The
-icon set and BAR's `icontypes.lua` name→bitmap table are vendored under
-`internal/viz/bardata/` (see its README); the mapping is parsed directly in Go,
-so no Lua VM / third-party dependency is added. The map terrain is fetched by the
-**browser directly** from the BAR maps API (`api.bar-rts.com`) using the capture's map
-name (falling back to the map record on the replay's own API entry when the API's
-file name for the map isn't a plain lowercasing of that name) — nothing proxies it;
-if the API is unreachable the viewer just falls back to a plain background.
-
-## Requirements for a real run
-
-`barreplay` launches the engine; the host must therefore have:
-
-- **`spring-headless`** matching the replay's engine version (e.g. `2025.06.24`).
-  The version **must match** or the deterministic replay desyncs. It is typically at
-  `<data>/engine/<version>/spring-headless`. If missing, build the `engine-headless`
-  target from the matching RecoilEngine tag, or point `-engine` at a build.
-- The **game archive** (the `gameVersion` from the demo) and the **map** under
-  `<data>/games` and `<data>/maps`. Unless `-no-provision` is set, `barreplay` runs the
-  bundled `pr-downloader` **pointed at BAR's rapid repo** (`repos.beyondallreason.dev`)
-  to fetch whatever is missing — no manual `pr-downloader` steps needed. A replay pins
-  one exact game build, so `barreplay` resolves the demo's game name to its precise
-  `byar:git:<sha>` rapid tag (via BAR's `versions.gz` index, cached under
-  `<data>/cache/`) and downloads *that* — using
-  the moving `byar:test` tag would install the wrong build and the engine would abort
-  with `content_error: Dependent archive … not found`. Provisioning is best-effort (it
-  warns and continues if a fetch fails, since content may already be installed). Because
-  `pr-downloader` re-queries (and can re-download) content on every call even when it is
-  present, `barreplay` first checks the filesystem and skips the download when the content
-  is already there (a rapid game's `packages/<md5>.sdp`, or a map archive in `maps/`); this
-  is self-correcting — delete the content and it re-downloads. `-force-provision` forces the
-  download anyway. Rapid
-  pool downloads use `PRD_RAPID_USE_STREAMER=false` by default (the streamer is faster
-  but stalls mid-pool on WSL/behind proxies, leaving a `.sdp.incomplete` the engine
-  ignores — so the game would be reported "not found"); set it to `true` to opt back in.
-  Use `-game`/`-map`/`-rapid-repo` to override identifiers, and set `PRD_SSL_CERT_FILE=<ca>`
-  in the environment if you are behind a proxy (it is passed through to `pr-downloader`).
-- **A working GL stack (GPU or full software GL) — see the next section.** Recoil's
-  `spring-headless` (through at least engine `2025.06.24`) still initializes GL and
-  builds a unit-icon render-to-texture atlas at load; on a GPU-less host it never
-  finishes and the game never starts playing, so no snapshots are produced.
-
-## Running on Linux / Windows / WSL
-
-The engine, not this tool, is the constraint. Two facts drive the choice of engine:
-
-1. **Engine version must match the replay** (or the re-sim desyncs), so you generally
-   run the exact `spring-headless` the replay was recorded with.
-2. **The pre-2026-04-12 `spring-headless` needs real GL.** The headless icon-atlas hang
-   (`CreateAtlasTexture … atlasRendered=0` looping forever at frame `-1`) was a Recoil
-   bug fixed on 2026-04-12 (*"do not run atlas/iconhandler in headless"*). Builds after
-   that skip the atlas and run with **no GPU at all**; builds at/before it need GL.
-
-Pick the row that matches your engine + host:
-
-| Host | Engine | What to run |
-| --- | --- | --- |
-| **Windows** (native) | any, incl. old | `barreplay.exe` (`GOOS=windows go build ./cmd/barreplay`) against `spring-headless.exe`. Windows has a real GL driver, so the atlas completes — the most reliable route. |
-| **Linux / WSL, no GPU** | **post-2026-04-12** | Just run it — `-engine` at that headless build; fully headless, no GPU/Xvfb. Only valid when the replay was recorded on a compatible engine. |
-| **Linux / WSL, no GPU** | old (e.g. `2025.06.24`) | Headless will hang. Run the **graphical** binary instead: `-engine <data>/engine/<ver>/spring` under Xvfb + Mesa llvmpipe (`LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe xvfb-run -a …`). Needs `libsdl2-2.0-0` + `libopenal1`; slow. |
-| **WSL2 + WSLg + GPU** (Win11) | old | WSLg provides GPU GL (d3d12). Run the **graphical** `-engine <data>/engine/<ver>/spring`; BAR calls WSLg "too slow for the game", so prefer the Windows-native route. |
-
-`-engine` accepts **any** engine binary (headless or graphical) — the tool just execs it
-with `--isolation --write-dir <script>`, which both accept — so switching to the
-graphical `spring`/`spring.exe` needs no code change, only the flag. See
-[`CLAUDE.md`](./CLAUDE.md) for the full GPU/GL caveat and the source-level explanation.
-
-### Manual end-to-end verification
-
-On a machine with BAR installed:
+Run the ingest daemon (reads `./.env` for `REPLAY_PUT_TOKEN` and R2 keys):
 
 ```sh
-go build ./cmd/barreplay
-./barreplay -data <BAR data dir> -out ./snaps \
-    https://www.beyondallreason.info/replays?gameId=836d486a5480a9e830be54db7d2c7be9
+./bringest                              # publish drag-and-drop uploads
+./bringest -resim -data <BARdata>       # re-simulate queued games
 ```
 
-Expect: the `.sdfz` downloaded into `<data>/demos`, a fast run (the widget forces max
-playback speed via `setmin/maxspeed` — add `-progress` to watch the speed-up), and
-`./snaps/<gameId>.brp` with roughly `gameTime` sampled frames inside. On completion the
-tool reports the engine simulation time, the `infolog.txt` size, and the snapshot's
-size. Publish it with `pack -upload local` against a local `npm run dev` worker and
-spot-check that unit counts rise and fall plausibly and that positions fall within
-the map bounds.
+The worker deploys with `npm run deploy` from `worker/`, which runs the tests,
+builds, smoke-tests the built worker, and deploys. `worker/README.md` has the
+runbook, including the R2 CORS policy, the cache rule for the data hostname,
+and the Cloudflare Access setup for the admin routes.
 
-## Notes & known rough edges
+### Requirements for a real run
 
-- The widget forces `spectatorfullview 1` so `Spring.GetAllUnits()` returns every
-  unit regardless of line-of-sight. It is strictly read-only (only `Get*` +
-  `Spring.Echo`), so it cannot desync the replay.
-- Dropping the widget into `<data>/LuaUI/Widgets/` with `enabled = true` is **not**
-  enough: BAR only auto-runs a user widget already named in its saved order list, and
-  a replay forces `allowuserwidgets = true`, which paradoxically skips the
-  `enabled`-based auto-enable for fresh user widgets. So `barreplay` seeds
-  `<data>/LuaUI/Config/BYAR.lua` to enable the widget, backing up and restoring your
-  real widget config around the run. (A gadget would need engine dev-Lua to load from
-  the write-dir, so a widget is the right mechanism.) `-engine`, `-no-provision`,
-  `-game`, `-map`, and `-rapid-repo` are the escape hatches for install-specific setups.
-- The transport from Lua to Go is a file of tagged `BRSNAP ...` lines that the widget
-  writes with `io.open`, not stdout: the engine flushes its log on every `Spring.Echo` and
-  caps each Echo at a few hundred units, so streaming through stdout was slow and truncated.
-  Spring's LuaIO sandbox forbids absolute paths, so the widget writes a relative path inside
-  the engine's write-dir (`<data>/barreplay/<gameId>.brsnap`); the tool reads it after the
-  run and moves it to `<out>/<gameId>.brsnap`. `internal/capture` parses that file, isolating
-  the transport so it can change without touching the `snapshot` format. The `.brsnap` file
-  is the raw intermediate; the `.brp` is the final deliverable.
-```
+The engine is the constraint, not this tool.
+
+- `spring-headless` **matching the replay's engine version exactly**. A
+  mismatch desyncs silently, so `barreplay` refuses one. It downloads the
+  release into `<BARdata>/engine/<version>/` when missing, which needs `7z` on
+  the path.
+- The game build and map the replay pins. `pr-downloader` fetches them from
+  BAR's rapid repo, resolving the demo's game name to its exact
+  `byar:git:<sha>` tag. Provisioning is idempotent and best-effort.
+- Memory. A big 8v8 wants 5 to 8 GB resident. A memory guard stops the
+  engine before the host runs out, which matters because a global OOM kill
+  takes the whole systemd scope with it. See "Running out of memory" in
+  `CLAUDE.md`.
+- No GPU is needed on engine 2025.06.24 and later. `docs/building-recoil.md`
+  has the validated GPU-less run.
+
+One engine run per data dir: runs share widget config and the infolog, so
+`barreplay` takes an advisory lock and a second concurrent run must use a
+separate `-data`.
+
+## Documentation
+
+- [`docs/brp-format.md`](docs/brp-format.md), [`docs/brepstream-format.md`](docs/brepstream-format.md): byte-level specs.
+- [`docs/brp-optimizations.md`](docs/brp-optimizations.md): the measured evaluation behind the codec.
+- [`docs/building-recoil.md`](docs/building-recoil.md): building the engine at an exact tag.
+- [`docs/widget-remote-upload.md`](docs/widget-remote-upload.md): the crowd-sourced capture design.
+- [`worker/README.md`](worker/README.md): deploying and operating the site.
+- `CLAUDE.md`: the full design record, with the reasoning behind every non-obvious decision.
