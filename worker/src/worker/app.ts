@@ -247,25 +247,26 @@ const authorized = (c: { env: Env; req: { header(name: string): string | undefin
 // after a replay's static files land in the bucket.
 export const indexStub = (env: Env) => env.REPLAY_INDEX.get(env.REPLAY_INDEX.idFromName("index"));
 
-// Query params narrow the listing (parseReplayFilter documents them); no
-// params means the whole catalog, so an older front-end sees no change. The
+// Query params narrow the listing (parseReplayFilter documents them). The
 // filtering is SQL, not a pass over the JSON, because the list is the one
 // endpoint whose cost grows with the archive.
-/** Most rows one listing will hand out. The page is 50; the front-end asks
- * for 51 so the extra row can say "there is more". */
+/** Most rows one listing will hand out — the ceiling AND the default: an
+ * absent, junk or oversized ?limit= all serve this many, never the whole
+ * catalog. A client that wants more pages with ?offset= (a short page means
+ * the last one). The page is 50; the front-end asks for 51 so the extra row
+ * can say "there is more". Its twin is catalogLimitMax in
+ * internal/viz/server.go — the two backends must page alike. */
 const CATALOG_LIMIT_MAX = 200;
 
 app.get("/api/replays", async (c) => {
   const params = new URL(c.req.url).searchParams;
   const filter = parseReplayFilter(params);
   if (typeof filter === "string") return c.json({ error: filter }, 400);
-  // ?limit=&offset= page the listing. Absent limit = the whole thing, which
-  // is what bringest's catalog scan and any pre-paging front-end ask for.
   const num = (key: string): number => {
     const n = parseInt(params.get(key) ?? "", 10);
     return Number.isFinite(n) && n > 0 ? n : 0;
   };
-  const limit = Math.min(num("limit"), CATALOG_LIMIT_MAX);
+  const limit = Math.min(num("limit") || CATALOG_LIMIT_MAX, CATALOG_LIMIT_MAX);
   const list = await indexStub(c.env).list(filter, limit, num("offset"));
   return c.json(list, 200, { "cache-control": "no-cache" });
 });
