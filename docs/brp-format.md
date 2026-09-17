@@ -13,7 +13,7 @@ Reference implementations (these three must stay in lockstep):
 | --- | --- |
 | Encoder + decoder (Go) | `snapshot/brp.go` |
 | Frame/event decoder (JS) | `worker/public/app.js` (`decodeFrames`, `decodeEvents`) |
-| Serving / wire container | `internal/viz/wire.go`, `internal/viz/server.go` |
+| Wire container / static bundle | `internal/viz/wire.go`, `internal/viz/static.go` |
 
 Measured on a real 33-minute 8v8 game (1 952 sampled frames, 4 223 293 unit
 records, 48 823 events): **476 MB** as v1 JSONL → **7 993 143 bytes (7.6 MiB)**
@@ -564,9 +564,9 @@ reader's idea of what should still be visible.
 ## 10. The BRW wire container (how the replay is served)
 
 Not part of the file format, but specified here because it reuses the same
-framing and the same stored bytes. The Go viz server and the static/R2
-deployment (see `worker/`) share ONE URL scheme; `cmd/barreplay-static`
-precomputes the same responses as plain files:
+framing and the same stored bytes. The static/R2 deployment (see `worker/`)
+serves it as plain files, precomputed by `cmd/barreplay-static` /
+`viz.WriteStaticBundle`:
 
 - **`GET /replays/<id>.brw`** → a container with magic **`BRW1`**, version 5
   (always equal to the file format version, since the data bytes pass through

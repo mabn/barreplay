@@ -22,14 +22,14 @@ import (
 // The frame data itself is NOT in this payload: the browser streams
 // /replays/<id>.keys (every keyframe, one gzip stream — the whole timeline
 // becomes scrubbable while it downloads) and fetches each chunk's delta file
-// /replays/<id>/c<n> as the user plays/seeks. The server slices all of these
-// straight out of the stored file (they are independently gzipped exactly so
-// that no re-encoding is ever needed). The decoder lives in
+// /replays/<id>/c<n> as the user plays/seeks. The static bundler (static.go)
+// slices all of these straight out of the stored file (they are independently
+// gzipped exactly so that no re-encoding is ever needed). The decoder lives in
 // worker/public/app.js and must mirror snapshot/brp.go's layout exactly —
 // evolve them together.
 
 // resourceStride is the number of ints packed per team in a resource record
-// (see /api/replay/resources): [team, metal, energy, metalStore, energyStore,
+// (see /replays/<id>.resources): [team, metal, energy, metalStore, energyStore,
 // metalIncome, energyIncome]. Income is per game-second; values are rounded to
 // integers (a resource UI needs no sub-unit precision). The front-end reads this
 // stride.
@@ -192,7 +192,7 @@ func buildHead(meta snapshot.Meta, b wireBounds, extraTeams []int32) wireHead {
 
 	// Player roster (drives the sidebar player list). Passed through verbatim from
 	// Meta; the front-end maps each player to its team's per-frame economy (fetched
-	// separately via /api/replay/resources).
+	// separately via /replays/<id>.resources).
 	h.Players = make([]wirePlayer, 0, len(meta.Players))
 	for _, p := range meta.Players {
 		h.Players = append(h.Players, wirePlayer{
@@ -209,10 +209,10 @@ func buildHead(meta snapshot.Meta, b wireBounds, extraTeams []int32) wireHead {
 	return h
 }
 
-// brpWirePayload builds the /api/replay response for a parsed .brp: the head
-// (with the chunk index) plus the stored E section byte-for-byte. Bounds and
-// teams come from the file's meta record, precomputed at capture time — the
-// server never decodes a frame.
+// brpWirePayload builds the /replays/<id>.brw body for a parsed .brp: the head
+// (with the chunk index) plus the stored E and C sections byte-for-byte. Bounds
+// and teams come from the file's meta record, precomputed at capture time — no
+// frame is ever decoded for it.
 func brpWirePayload(f *snapshot.BRPFile) ([]byte, error) {
 	b := defaultBounds()
 	if f.Bounds != nil {
@@ -250,25 +250,15 @@ type wireResFrame struct {
 	R []int32 `json:"r"`
 }
 
-// brpResourcesPayload builds the /api/replay/resources response: a gzipped JSON
-// array of {f, r} for every sampled frame that carries team economy. The viewer
-// fetches this once (lazily, after the head) to drive the player list's metal/
-// energy bars — resources are stored in the .brp X stream, which the frame
-// chunk-streaming path never fetches, so we decode them here instead. Decoding
-// chunk-by-chunk keeps peak memory bounded (frames are discarded after their
-// resources are copied out).
-func brpResourcesPayload(f *snapshot.BRPFile) ([]byte, error) {
-	js, err := brpResourcesJSON(f)
-	if err != nil {
-		return nil, err
-	}
-	return gzipBytes(js), nil
-}
-
-// brpResourcesJSON is the uncompressed resources body (the JSON array before
-// gzip). The static bundler stores this verbatim so the platform can apply its
-// own transport compression — storing a pre-gzipped body and declaring
-// Content-Encoding: gzip double-compresses on Cloudflare (workerd re-encodes it).
+// brpResourcesJSON builds the /replays/<id>.resources body: a JSON array of
+// {f, r} for every sampled frame that carries team economy. The viewer fetches
+// this once (lazily, after the head) to drive the player list's metal/energy
+// bars — resources are stored in the .brp X stream, which the frame
+// chunk-streaming path never fetches, so they are decoded here instead.
+// Decoding chunk-by-chunk keeps peak memory bounded (frames are discarded after
+// their resources are copied out). Stored UNCOMPRESSED so the host applies its
+// own transport compression — a pre-gzipped body declared Content-Encoding: gzip
+// double-compresses on Cloudflare (workerd re-encodes it).
 func brpResourcesJSON(f *snapshot.BRPFile) ([]byte, error) {
 	out := make([]wireResFrame, 0, f.FrameCount)
 	for i := range f.Chunks {

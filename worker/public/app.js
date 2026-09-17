@@ -27,8 +27,8 @@
 // (see codecVer below), so no bars or lines draw for it.
 
 // The origin the four replay-data URLs above are fetched from. Empty means
-// same-origin, which is what the Go viz server (internal/viz) and `vite dev`
-// both stamp into index.html; a production build stamps the R2 bucket's own
+// same-origin, which is what `vite dev` stamps into index.html; a
+// production build stamps the R2 bucket's own
 // hostname, so those reads are answered from Cloudflare's cache instead of
 // costing a billed R2 GetObject through the Worker.
 //
@@ -3219,9 +3219,8 @@ function startFpsMonitor() {
 
 // ---- replay list / home view ----------------------------------------------
 // The catalog: [{id, rid, startUnix, durationSec, map, gameSize, sizeBytes}].
-// Served by GET /api/replays (the worker's Durable Object table, or the Go viz
-// server computing the same shape from the .brp files). /index.json (the live
-// bucket / directory listing) is merged in so a replay whose files exist but
+// Served by GET /api/replays (the worker's Durable Object table). /index.json
+// (the live bucket listing) is merged in so a replay whose files exist but
 // which was never PUT into the catalog still shows up — and it is the whole
 // fallback when /api/replays doesn't exist (old deployment, plain static host).
 async function fetchReplayList() {
@@ -3301,7 +3300,7 @@ async function fetchReplayList() {
     catalog.push({ id: f.file, rid: null, startUnix: null, durationSec: null, map: null, gameSize: null, sizeBytes: f.size ?? null });
   }
   // Whoever did not page above pages here: a backend that ignored the params
-  // (the Go server, a plain static host) and orphan mode, which asked for
+  // (a plain static host) and orphan mode, which asked for
   // everything on purpose.
   if (!serverPaged || !haveCatalog) {
     const start = homePage * PAGE_SIZE;
@@ -3319,9 +3318,9 @@ async function fetchReplayList() {
 // replayHref carries it into a replay so the back button returns to the same
 // filtered list.
 //
-// The bar is shown only once /api/replays/maps answers: the Go viz server
-// serves the same catalog shape from local files with no filtering behind it,
-// and a filter bar that silently does nothing is worse than none. That one
+// The bar is shown only once /api/replays/maps answers: a backend with no
+// filtering behind its catalog (a plain static host) must not show one, since
+// a filter bar that silently does nothing is worse than none. That one
 // small request (a maintained list, cached a minute in the worker) is all the
 // bar needs from the server — every other control is hardcoded here: the
 // settings chips are a fixed vocabulary (SETTINGS_BADGES), the two ranges
@@ -3378,8 +3377,8 @@ async function reloadList(keepPage) {
 /** Rows per page. The list is one screenful of a growing archive, not the
  * archive. */
 const PAGE_SIZE = 50;
-/** The most rows either backend serves per response (CATALOG_LIMIT_MAX in
- * worker/src/worker/app.ts, catalogLimitMax in internal/viz/server.go) — an
+/** The most rows the backend serves per response (CATALOG_LIMIT_MAX in
+ * worker/src/worker/app.ts) — an
  * absent or bigger ?limit= still gets this many, so a caller that wants the
  * whole catalog (orphan mode) must walk it in pages of exactly this size:
  * a shorter page is how it knows it reached the end. */
@@ -3786,7 +3785,7 @@ function knownReplayURL(wanted) {
 // anything is fetched. The loaded listing answers for free (a list click);
 // a direct link asks the catalog for the one row (?id= is an indexed lookup).
 // Everything else — an explicit revision id (an alt-upload link, an old
-// shared URL), an unrevisioned file on the Go server, a catalog miss — comes
+// shared URL), an unrevisioned file, a catalog miss — comes
 // back unchanged and the head fetch is the arbiter, exactly as before.
 async function resolveReplayFile(id) {
   const hit = replayList.find(e => e.id === id);
@@ -4006,9 +4005,9 @@ function renderSqlStats(report, errMsg) {
 // The ingest queue: what happened to the drag&drop uploads and to the re-sims
 // requested from the box above the table. GET /api/admin/queue is
 // the Worker's job table (pending/processing first, then what recently
-// finished); the Go viz server has no ingest pipeline at all, so a missing
-// route says so plainly rather than showing an empty table that looks like
-// "nothing is queued".
+// finished); a backend with no ingest pipeline (a plain static host) has no
+// such route, and a missing one says so plainly rather than showing an empty
+// table that looks like "nothing is queued".
 // It is read ON DEMAND ONLY — opening the section, paging, the Reload button,
 // and one's own upload landing. Nothing here refreshes itself on a timer: a
 // job's state changes on the scale of minutes, and a table that rewrites
@@ -4585,9 +4584,9 @@ function initQueue() {
 // recorded, whether or not anybody captured it — the other half of the
 // catalog, and the list the re-sim backfill draws from. Open to every visitor
 // (unlike Queue and SQL: these are public games, not the pipeline's state).
-// GET /api/games is the Worker's alone (the Go viz server has no mirror and
-// 404s it, which the section says rather than showing an empty table that
-// reads as "BAR played nothing").
+// GET /api/games is the Worker's alone (a backend without the mirror 404s
+// it, which the section says rather than showing an empty table that reads
+// as "BAR played nothing").
 //
 // CURSOR-paged, Prev/Next, with NO total and NO page count, like the replay
 // list: counting the mirror means reading a table that grows ~2000 rows a
@@ -4701,8 +4700,8 @@ function lavabalanceStatus(text, cls) {
 // previewLavabalance opens the dialog for one game: the curl at once (it
 // needs only the id), then the body once the BAR API answers. The detail is
 // fetched by the BROWSER — the API allows any origin, as the map loader
-// relies on — so no route of ours is involved and the Go viz server serves
-// this unchanged. A game the API does not know, or a network failure, is
+// relies on — so no route of ours is involved. A game the API does not know,
+// or a network failure, is
 // reported in the status line; the curl stays, since it may well work later.
 async function previewLavabalance(id) {
   const dialog = document.getElementById('lbdialog');
@@ -5330,8 +5329,9 @@ function renderHome(errMsg) {
   tbody.textContent = '';
   // The Players header doubles as a switch between the rosters and the lobby
   // name (joined server-side from the games mirror). Only offered when the
-  // backend sends the field at all — the Go viz server omits it wholesale,
-  // and a header that toggles to a column of dashes is worse than none. The
+  // backend sends the field at all — a backend without the games mirror omits
+  // it wholesale, and a header that toggles to a column of dashes is worse
+  // than none. The
   // key is the tell, not the value: an unmatched game arrives as
   // lobbyName:null, which still means the backend plays. A ?col=lobby URL on
   // a backend without the field renders players and leaves the param alone,
@@ -5364,8 +5364,8 @@ function renderHome(errMsg) {
     // list so the work is visible, but there is nothing published to open
     // yet. Such a row gets no links at all — not a dead one, not one that
     // 404s — so nothing about it invites a click. `placeholder` is absent
-    // from the Go server's catalog, which has no pipeline, hence the
-    // truthiness test rather than a comparison.
+    // from a catalog with no pipeline behind it, hence the truthiness test
+    // rather than a comparison.
     const openable = !e.placeholder;
     if (!openable) tr.className = 'unopenable';
     // Every cell holds a real link to the replay's URL, so the row behaves
@@ -5640,8 +5640,8 @@ function renderHome(errMsg) {
 // one of which calls a route under /api/admin/, which the worker gates by
 // that prefix. A 401 leaves a quiet "sign in" link in the header, whose
 // path goes through the one route Access protects (/admin/login) and back to
-// this page. A 404 (the Go viz server) is a backend with no login and no
-// admin routes, and the header says nothing.
+// this page. A 404 is a backend with no login and no admin routes (a plain
+// static host), and the header says nothing.
 let adminUser = null; // {email, via} once /api/admin/me answers 200
 
 function adminMode() {
@@ -5689,7 +5689,7 @@ function adminSignedOut() {
 // renderAdminNote fills the header's admin corner: who is signed in with a
 // sign-out link, or a muted sign-in link, or — on a deployment whose login
 // is not configured — why there is none. Nothing at all on a backend with
-// no login (the Go viz server).
+// no login.
 function renderAdminNote(state) {
   const el = document.getElementById('adminnote');
   if (!el) return;
@@ -5800,8 +5800,8 @@ function settingsBadges(settings) {
 // A dropped .brepstream POSTs to /api/upload; the worker archives it and
 // records an ingest job, the Go daemon publishes it, and we poll the job
 // until the replay is ready to open. The same front-end also runs against
-// backends without the upload API (the Go viz server, a plain static host) —
-// there the attempt fails with a clear message.
+// backends without the upload API (a plain static host) — there the attempt
+// fails with a clear message.
 const MAX_UPLOAD_BYTES = 150 << 20; // mirrors the worker's /api/upload cap (MAX_UPLOAD)
 
 function initUpload() {

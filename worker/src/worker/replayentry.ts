@@ -80,7 +80,7 @@ export interface ReplayEntry {
    * game: a job entered "processing" and nothing has been published yet. It
    * is the row's way of saying there is nothing to play, which is what the
    * viewer refuses to open — a missing rid could not carry that meaning, since
-   * the Go server's rows have none and play fine. A publish clears it, and a
+   * unrevisioned rows have none and play fine. A publish clears it, and a
    * job that ends with nothing published removes the row.
    *
    * Server-owned, like `uploads`: a PUT body cannot set it. Absent from the Go
@@ -91,8 +91,7 @@ export interface ReplayEntry {
    * shows. DERIVED from the jobs table on every read rather than stored, so
    * nothing has to remember to clear it: it stops being true the moment the
    * job stops running, whether it finished, failed, or its daemon vanished.
-   * Server-owned and absent from the Go server's catalog, exactly like
-   * `placeholder`. */
+   * Server-owned, exactly like `placeholder`. */
   processing: boolean;
   /** The processing job's live percent (0-100), when it reports one — read
    * off the jobs row's progress JSON at the same moment `processing` is
@@ -106,8 +105,8 @@ export interface ReplayEntry {
    * see teiserver.ts). Never stored on the replays row and never accepted
    * from a PUT — the join is the single source, so the name appears the
    * moment the match lands with no republish. Optional because only the DO's
-   * list fills it; the Go server's catalog has no games mirror and omits it,
-   * and the front-end reads a missing value as null. */
+   * list fills it (a plain static host has no games mirror and omits it), and
+   * the front-end reads a missing value as null. */
   lobbyName?: string | null;
   /** The map's ARCHIVE file name ("all_that_glitters_v2.2.3") — what BAR's
    * maps API keys on, and what the list's terrain thumbnail needs. Joined at
@@ -153,10 +152,8 @@ export interface WidgetRef {
 }
 
 /** ReplayFilter narrows GET /api/replays. Every field is independent and
- * ANDed; a null (or empty settings) means "don't restrict on this". The same
- * shape is applied by the Durable Object in SQL and by the Go viz server over
- * its computed list (internal/viz/catalog.go), so the one front-end filters
- * identically against either backend. */
+ * ANDed; a null (or empty settings) means "don't restrict on this". Applied
+ * by the Durable Object in SQL. */
 export interface ReplayFilter {
   /** Inclusive bounds on startUnix (unix seconds). */
   from: number | null;
