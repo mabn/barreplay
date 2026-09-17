@@ -3232,19 +3232,34 @@ async function fetchReplayList() {
   // the slow admin path anyway (it reads every object), so there it takes the
   // whole catalog and pages in the browser.
   const serverPaged = !orphanMode();
-  const params = new URLSearchParams(query);
-  if (serverPaged) {
-    // One row MORE than a page: whether it came back is the entire answer to
-    // "is there a next page", and it costs no count query.
-    params.set('limit', String(PAGE_SIZE + 1));
-    params.set('offset', String(homePage * PAGE_SIZE));
-  }
   let catalog = [];
   let haveCatalog = false;
   try {
-    const qs = params.toString();
-    const r = await fetch('/api/replays' + (qs ? '?' + qs : ''));
-    if (r.ok) { catalog = await r.json(); haveCatalog = true; }
+    if (serverPaged) {
+      const params = new URLSearchParams(query);
+      // One row MORE than a page: whether it came back is the entire answer
+      // to "is there a next page", and it costs no count query.
+      params.set('limit', String(PAGE_SIZE + 1));
+      params.set('offset', String(homePage * PAGE_SIZE));
+      const r = await fetch('/api/replays?' + params.toString());
+      if (r.ok) { catalog = await r.json(); haveCatalog = true; }
+    } else {
+      // Orphan mode needs the WHOLE catalog (recognising which unregistered
+      // upload a row already covers is a question one page cannot answer),
+      // and the server now always caps a response at CATALOG_FETCH_LIMIT —
+      // so take it a full page at a time until a short page says it ended.
+      for (let offset = 0; offset < CATALOG_FETCH_LIMIT * 100; offset += CATALOG_FETCH_LIMIT) {
+        const params = new URLSearchParams(query);
+        params.set('limit', String(CATALOG_FETCH_LIMIT));
+        params.set('offset', String(offset));
+        const r = await fetch('/api/replays?' + params.toString());
+        if (!r.ok) break;
+        const page = await r.json();
+        haveCatalog = true;
+        catalog = catalog.concat(page);
+        if (page.length < CATALOG_FETCH_LIMIT) break;
+      }
+    }
   } catch (_) { /* fall through to /index.json */ }
 
   // /index.json is NOT a file — the worker builds it per request by paging the
@@ -3363,6 +3378,12 @@ async function reloadList(keepPage) {
 /** Rows per page. The list is one screenful of a growing archive, not the
  * archive. */
 const PAGE_SIZE = 50;
+/** The most rows either backend serves per response (CATALOG_LIMIT_MAX in
+ * worker/src/worker/app.ts, catalogLimitMax in internal/viz/server.go) — an
+ * absent or bigger ?limit= still gets this many, so a caller that wants the
+ * whole catalog (orphan mode) must walk it in pages of exactly this size:
+ * a shorter page is how it knows it reached the end. */
+const CATALOG_FETCH_LIMIT = 200;
 let homePage = 0;
 let homeHasNext = false;
 
@@ -5243,10 +5264,17 @@ async function initViewMark(gameId) {
   allies.forEach(a => opt('ally:' + a, 'One side — ally ' + a));
   opt('unknown', 'Unknown');
 
+  // One indexed row lookup (?id= is a PK-prefix seek), exactly like
+  // resolveReplayFile — this used to fetch the WHOLE catalog to find one
+  // row, a full table read per replay open for anyone signed in.
   let row = null;
   try {
-    const r = await fetch('/api/replays');
-    if (r.ok) row = (await r.json()).find(e => e.id === gameId) || null;
+    const r = await fetch('/api/replays?' + new URLSearchParams({ id: gameId, limit: '2' }));
+    if (r.ok) {
+      const rows = await r.json();
+      // ?id= matches by PREFIX; only the row whose id IS this id answers.
+      row = (Array.isArray(rows) ? rows.find(e => e.id === gameId) : null) || null;
+    }
   } catch { /* offline or no catalog: leave the control at "not marked" */ }
 
   if (!row) {

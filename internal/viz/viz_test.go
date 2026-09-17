@@ -502,10 +502,35 @@ func TestCatalogPaging(t *testing.T) {
 	if got := page("?limit=2&offset=99"); len(got) != 0 {
 		t.Errorf("offset past the end = %v, want none", got)
 	}
-	// Junk is "unset", and no limit still means the whole listing — which is
-	// what a front-end too old to page, and bringest's scan, ask for.
+	// Junk is "unset", which now falls back to the DEFAULT limit
+	// (catalogLimitMax) rather than the whole listing — larger than this
+	// listing, so everything still comes back here; the cap itself is pinned
+	// by TestPageEntriesAlwaysLimits below.
 	if got := page("?limit=abc&offset=-3"); !reflect.DeepEqual(got, all) {
-		t.Errorf("junk params = %v, want the whole listing", got)
+		t.Errorf("junk params = %v, want the whole (small) listing", got)
+	}
+}
+
+// The listing must never hand out the whole catalog in one response: an
+// absent, junk or oversized limit all serve at most catalogLimitMax rows and
+// a client that wants more pages with offset. The worker's route enforces
+// the same contract (CATALOG_LIMIT_MAX in app.ts).
+func TestPageEntriesAlwaysLimits(t *testing.T) {
+	entries := make([]CatalogEntry, catalogLimitMax+50)
+	for i := range entries {
+		entries[i].ID = fmt.Sprintf("id%04d", i)
+	}
+	if got := len(pageEntries(entries, 0, 0)); got != catalogLimitMax {
+		t.Errorf("no limit served %d rows, want the default %d", got, catalogLimitMax)
+	}
+	if got := len(pageEntries(entries, 0, catalogLimitMax*10)); got != catalogLimitMax {
+		t.Errorf("oversized limit served %d rows, want the cap %d", got, catalogLimitMax)
+	}
+	// Paging past the cap still reaches the rest.
+	rest := pageEntries(entries, catalogLimitMax, 0)
+	if len(rest) != 50 || rest[0].ID != entries[catalogLimitMax].ID {
+		t.Errorf("second page = %d rows starting %q, want 50 starting %q",
+			len(rest), rest[0].ID, entries[catalogLimitMax].ID)
 	}
 }
 

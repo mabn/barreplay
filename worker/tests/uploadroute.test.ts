@@ -1341,6 +1341,28 @@ test("an uncaught route error answers 500 and logs the message", async () => {
   assert.match(line, /GET \/api\/replays/, "so is the request that hit it");
 });
 
+test("the listing never hands out the whole catalog: absent, junk and oversized limits all cap", async () => {
+  // 200 = CATALOG_LIMIT_MAX in app.ts. The whole-catalog listing used to be
+  // reachable by simply omitting ?limit= (and initViewMark paid it on every
+  // replay open); now every response is at most one capped page and a client
+  // that wants more must walk ?offset=.
+  const { env, index } = makeEnv();
+  const calls: Array<[number, number]> = [];
+  (index as unknown as { list: (f: unknown, l: number, o: number) => unknown[] }).list = (_f, l, o) => {
+    calls.push([l, o]);
+    return [];
+  };
+  for (const qs of ["", "?limit=99999&offset=40", "?limit=abc", "?limit=51"]) {
+    assert.equal((await app.request("/api/replays" + qs, {}, env)).status, 200);
+  }
+  assert.deepEqual(calls, [
+    [200, 0], // absent -> the default page, not everything
+    [200, 40], // oversized -> capped, offset untouched
+    [200, 0], // junk -> the default
+    [51, 0], // an honest page passes through
+  ]);
+});
+
 test("the maps route serves the DO's maintained list", async () => {
   const { env, index } = makeEnv();
   (index as unknown as { mapNames: () => string[] }).mapNames = () => ["All That Glitters v2", "Great Divide V1"];

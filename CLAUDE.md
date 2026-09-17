@@ -554,8 +554,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           spec like "8v8", bundle bytes) lives in a SQLite table inside a Durable
                           Object (src/worker/replayindex.ts, single instance, wrangler migration v1
                           new_sqlite_classes): GET /api/replays lists it newest-game-first (null
-                          start times last), PAGED by ?limit=&offset= (absent limit = the whole
-                          listing) and FILTERED by its query params (parseReplayFilter:
+                          start times last), PAGED by ?limit=&offset= (every response capped at
+                          CATALOG_LIMIT_MAX = 200 rows — absent/junk/oversized limits all serve
+                          the cap, never the whole catalog; walk offset until a short page for
+                          more) and FILTERED by its query params (parseReplayFilter:
                           from/to — unix seconds or YYYY-MM-DD, where a YYYY-MM-DD `to` covers the
                           whole day — map, minPlayers/maxPlayers, minDuration/maxDuration in
                           seconds, id = a lowercase-hex PREFIX of the game's own id (a
@@ -905,9 +907,11 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           ?limit=&offset= are served by BOTH backends (the DO appends
                           LIMIT/OFFSET to the ordered query; the Go server slices its sorted
                           listing — it ignores the FILTER params, but ignoring these would make
-                          the shared Next button lie), and an absent limit still means the whole
-                          listing (nothing asks for it now that the re-sim daemon's catalog
-                          scan is gone, but a front-end too old to page still would). The page is
+                          the shared Next button lie), and an absent limit now serves the SAME
+                          200-row cap as an explicit one (catalogLimitMax in server.go,
+                          CATALOG_LIMIT_MAX in app.ts — lockstep): the whole-catalog response
+                          is gone, so a caller that really wants everything (orphan mode)
+                          walks offset in cap-sized pages until a short page. The page is
                           in-process state, NOT in the URL (like the queue's pager and unlike
                           the filters): "page 3" describes a moment in a growing list, not a set
                           of replays. Any filter change returns to the first page. Orphan mode
