@@ -1817,8 +1817,8 @@ export class ReplayIndex extends DurableObject<Env> {
    *
    * The row is marked `placeholder`, which says the obvious thing: there is
    * nothing to play yet. That is what the viewer keys "not openable" off —
-   * inferring it from a missing rid would be wrong, since the Go server's own
-   * rows have none and are perfectly playable. A publish clears the mark
+   * inferring it from a missing rid would be wrong, since unrevisioned rows
+   * have none and are perfectly playable. A publish clears the mark
    * (upsert writes placeholder = 0), and a job that ends without one takes the
    * row away again, so a failed re-sim leaves no dead entry behind.
    *

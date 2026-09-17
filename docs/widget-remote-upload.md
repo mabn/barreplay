@@ -174,8 +174,8 @@ existing seams do most of the work:
    the best uploader per ally team (longest coverage / spec preferred);
    cross-verify overlapping uploaders byte-for-byte; union frames by
    `(frame, unitID)`, events by `(frame, kind, unitID)`, resources by team.
-4. **Write** through `snapshot.NewBRPWriter` — everything downstream (viz server,
-   `barreplay-static`, the worker/R2 deployment) works unchanged. Add a
+4. **Write** through `snapshot.NewBRPWriter` — everything downstream
+   (`barreplay-static`, the worker/R2 deployment) works unchanged. Add a
    `coverage` field to `Meta` (which ally teams / frame ranges are present) so the
    viewer can label partial captures.
 

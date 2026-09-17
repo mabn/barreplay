@@ -1,8 +1,10 @@
 # Vendored Beyond All Reason assets
 
 These files are game content from **Beyond All Reason** (BAR), vendored here so
-`barreplay-viz` can render real unit icons instead of plain dots. They are not
-part of the barreplay capture format or pipeline — only the viewer uses them.
+the viewer can render real unit icons instead of plain dots. They are not
+part of the barreplay capture format or pipeline — only the viewer uses them
+(`internal/viz/icons.go` resolves each replay's icons into the `.brw` head, and
+`worker/tools/sync-assets.mjs` copies the bitmaps into the worker's assets).
 
 - `icons/` — minimap unit-icon PNGs (including the `inverted/` scavenger set).
 - `icontypes.lua` — BAR's gamedata table mapping each unit's internal name to

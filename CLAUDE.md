@@ -14,14 +14,12 @@ positions is to replay it in the engine and sample state from a read-only Lua wi
 
 ```sh
 go build ./cmd/barreplay        # build the capture CLI -> ./barreplay
-go build ./cmd/barreplay-viz    # build the visualization server -> ./barreplay-viz
 go build ./cmd/pack             # build the .brsnap/.brepstream -> .brp converter -> ./pack
 go build ./cmd/barreplay-static # build the .brp -> static-hosting bundle packer (for worker/)
 go build ./cmd/bringest         # build the drag&drop upload daemon (polls the worker's job queue)
 go test ./...                   # all unit tests (no engine required)
 go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
 go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, no engine
-go run ./cmd/barreplay-viz -snapshots ./snapshots        # serve the viewer at 127.0.0.1:8080
 go run ./cmd/pack ./caps/<gameId>.brepstream   # THE default publish: raw stream -> FULL .brp (fetches the demo for map/versions/players; -id overrides, -no-demo skips) -> stats -> upload to R2 + register in the deployed worker's catalog, revisioned. -upload, -stats and -rev all default ON, so the bare command does the whole job; a .brsnap input works the same
 go run ./cmd/pack -upload= ./caps/<gameId>.brsnap   # pack + stats only, publish NOTHING (also how to analyze an existing .brp without republishing it)
 go run ./cmd/pack -upload local ./caps/<gameId>.brepstream   # ...to the dev simulator instead
@@ -53,7 +51,6 @@ against a mock worker API. None of them launch the engine or touch the network.
 
 ```
 cmd/barreplay/main.go     CLI: link/gameId/.sdfz -> full pipeline
-cmd/barreplay-viz/main.go CLI: serve the browser playback UI over a snapshots dir
 cmd/pack/main.go          CLI: convert .brsnap/.brepstream captures to .brp; -stats prints the
                           size breakdown (sections + per-unit-def bytes, measured by
                           snapshot/brpstats.go and rendered by packer.ReportStats —
@@ -465,20 +462,18 @@ internal/capture/         parse the widgets' streams -> snapshot records (BRSNAP
 internal/viz/             serve the viewer (SPA embedded from worker/) + the static-shaped replay URLs
 internal/viz/static.go    pack a .brp into plain static files (byte-identical to the served URLs) for serverless hosting
 worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as static files from R2 (no playback server);
-                          worker/public + worker/index.html are THE front-end (embedded into barreplay-viz via assets.go).
+                          worker/public + worker/index.html are THE front-end (the one copy in the repo).
                           UI CACHE-BUSTING: index.html references /app.<rev>.js /
                           /style.<rev>.css — the hash is in the FILENAME, not a ?v= query, so a
                           given byte sequence's URL never changes and public/_headers serves it
                           immutable for a year. __ASSET_REV__ is stamped with
                           sha256(app.js+style.css)[:8] by the Vite asset-rev plugin
-                          (vite.config.ts, build AND dev) and by the Go viz server at startup
-                          (viz.assetRev), and index.html itself is served no-cache (the Hono
-                          serveEntry route; the Go server serves all UI no-store) — so a UI
-                          deploy propagates on a plain reload, no hard refresh. Vite copies
-                          public/ VERBATIM and fingerprints nothing, so the plugin emits the
-                          hashed copies itself (generateBundle) and rewrites the hashed URL back
-                          to the plain file under `vite dev`; the Go server, which has no build
-                          step, registers the hashed routes for the rev it computed.
+                          (vite.config.ts, build AND dev), and index.html itself is served
+                          no-cache (the Hono serveEntry route) — so a UI deploy propagates on a
+                          plain reload, no hard refresh. Vite copies public/ VERBATIM and
+                          fingerprints nothing, so the plugin emits the hashed copies itself
+                          (generateBundle) and rewrites the hashed URL back to the plain file
+                          under `vite dev`.
                           STATIC ASSET CACHING: run_worker_first is ["/*", "!/icons/*",
                           "!/ranks/*"]. The "/*" preserves the original guarantee (no route
                           falls through to the asset layer's single-page-application handling,
@@ -528,8 +523,8 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           app.js routes exactly those four URLs through dataURL(), whose origin
                           comes from index.html's __DATA_ORIGIN__ placeholder: stamped by the
                           Vite dataBase plugin on a BUILD only ($DATA_BASE overrides), BLANKED
-                          by `vite dev` and by the Go viz server (which is the origin for its
-                          own files) — empty means same-origin, and app.js ignores any value
+                          by `vite dev` (which is the origin for its own files) — empty means
+                          same-origin, and app.js ignores any value
                           that is not an absolute http(s) origin, so an unsubstituted
                           placeholder degrades rather than breaks. The placeholder token is
                           deliberately NOT the global's name (window.__DATA_BASE__): both
@@ -736,12 +731,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           Row shape + PUT validation + the filter contract live in
                           src/worker/replayentry.ts
                           (pure, node-tested) and MUST stay in lockstep with internal/viz/catalog.go,
-                          which serves the same GET /api/replays computed live from .brp files so the
-                          shared front-end works against both backends (the Go server leaves rid
-                          null — its files are unrevisioned — and implements NO filtering: it lists a
-                          local directory, so it ignores the query params and 404s
-                          /api/replays/maps, which is exactly what keeps the filter bar off
-                          there. The one Go-side piece the
+                          whose BuildCatalogEntry builds the PUT body from the packed .brp (the
+                          front-end also degrades against a backend with no filtering behind its
+                          catalog — a plain static host — by hiding the filter bar when
+                          /api/replays/maps 404s. The one Go-side piece the
                           filters DO depend on is catalogPlayersPerAlly, because BuildCatalogEntry is
                           what builds the roster the worker stores). The front-end landing page
                           (no ?replay= in the URL) is a LEFT MENU (app.js homeTab/applyHomeTab,
@@ -751,8 +744,8 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           CURSOR-paged: Next hands back the reply's `next`, Prev walks back
                           down the trail of cursors this visit came through (gamesTrail),
                           the pager states the range and NO total or page count; the cursors
-                          are component state, not in the URL, and the Go viz server 404s
-                          the route, which the section says; open to every visitor, since
+                          are component state, not in the URL, and a backend that 404s
+                          the route is what the section says; open to every visitor, since
                           it is public games rather than the pipeline's state), "Queue"
                           (the ingest jobs, below) and "SQL" (the DO's row accounting).
                           Queue and SQL are ADMIN-ONLY — the entry is hidden when signed
@@ -795,9 +788,9 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           cookie (accessCookie, HttpOnly/Lax, expiring with the token).
                           /admin/logout clears that cookie on any origin and is the
                           header's sign-out link; signed out, the header carries a muted
-                          sign-in link (#adminnote). A 404 from /api/admin/me (the Go viz
-                          server, which has no login and no admin routes) shows nothing
-                          and no admin controls. Every admin fetch in app.js treats a
+                          sign-in link (#adminnote). A 404 from /api/admin/me (a backend
+                          with no login and no admin routes) shows nothing and no admin
+                          controls. Every admin fetch in app.js treats a
                           401 as adminSignedOut (controls off, sign-in link back). Why: app.js is served unminified, the
                           routes were open, and on 2026-09-15 a script from an OVH host
                           was feeding every ranked game to POST /api/admin/resim within
@@ -904,14 +897,12 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           decorative (3000 rows read to return 50, against 101). The expression
                           was redundant anyway — NULL is smaller than every value, so DESC
                           already puts those rows last.
-                          ?limit=&offset= are served by BOTH backends (the DO appends
-                          LIMIT/OFFSET to the ordered query; the Go server slices its sorted
-                          listing — it ignores the FILTER params, but ignoring these would make
-                          the shared Next button lie), and an absent limit now serves the SAME
-                          200-row cap as an explicit one (catalogLimitMax in server.go,
-                          CATALOG_LIMIT_MAX in app.ts — lockstep): the whole-catalog response
-                          is gone, so a caller that really wants everything (orphan mode)
-                          walks offset in cap-sized pages until a short page. The page is
+                          ?limit=&offset= page the listing (the DO appends LIMIT/OFFSET to the
+                          ordered query; ignoring them would make the Next button lie), and an
+                          absent limit serves the SAME 200-row cap as an explicit one
+                          (CATALOG_LIMIT_MAX in app.ts): the whole-catalog response is gone,
+                          so a caller that really wants everything (orphan mode) walks offset
+                          in cap-sized pages until a short page. The page is
                           in-process state, NOT in the URL (like the queue's pager and unlike
                           the filters): "page 3" describes a moment in a growing list, not a set
                           of replays. Any filter change returns to the first page. Orphan mode
@@ -927,9 +918,9 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           and replayHref carries it into a replay so returning lands on the same list.
                           While any filter is active the /index.json-only stubs are dropped: they have
                           no map, size, roster or settings, so no filter could be true of them. The
-                          bar stays HIDDEN unless GET /api/replays/maps answers — the Go viz server
-                          serves the same catalog shape from local files with no filtering behind it,
-                          and a filter bar that silently does nothing is worse than none.
+                          bar stays HIDDEN unless GET /api/replays/maps answers — a backend with no
+                          filtering behind its catalog (a plain static host) must not show one, since
+                          a filter bar that silently does nothing is worse than none.
                           /index.json is NOT merged into the list by default, because it is not a
                           file: the worker BUILDS it per request by paging the bucket's whole
                           replays/ prefix (~3.4k objects — every head/keys/resources and 64-sample
@@ -1433,9 +1424,9 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           into no thumbnail via onerror), so
                           GET /api/replays rows carry a `lobbyName` — never stored on the
                           replays row, never accepted from a PUT, appearing the moment the
-                          match lands with no republish; the Go server omits the key
-                          entirely, which is how the front-end knows not to offer the
-                          column. In the LIST the Players column header is a SWITCH
+                          match lands with no republish; a backend without the mirror omits
+                          the key entirely, which is how the front-end knows not to offer
+                          the column. In the LIST the Players column header is a SWITCH
                           (app.js playersColumn): clicking it swaps the column between the
                           rosters and the lobby name (dash when unmatched) — offered only
                           when any row carries the key, since a toggle to a column of dashes
@@ -1465,8 +1456,8 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           <id> detail in a one-element array. The button opens a native
                           <dialog> showing exactly that body — fetched by the BROWSER, the
                           way the map loader talks to the same API (it allows any
-                          origin), so no worker route exists and the Go viz server serves
-                          it unchanged — plus a paste-ready curl (lavabalanceCurl) that
+                          origin), so no worker route exists — plus a paste-ready curl
+                          (lavabalanceCurl) that
                           pipes the detail from the BAR API into the POST, with nothing
                           inlined that shell quoting could mangle. The page POSTS NOTHING:
                           the upload is the operator's shell command, so a wrong click
@@ -1475,7 +1466,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           candidates over the LAVABALANCE service binding; the button stays
                           as the manual door and the way to see exactly what is sent.
                           WIDGET-INSTALL GUIDE: the dropzone banner links (relatively, so it
-                          resolves on both backends) to /setup — public/setup.html, four numbered
+                          resolves on any origin serving the page) to /setup — public/setup.html, four numbered
                           steps ending in a drag&drop upload. The page is deliberately
                           SELF-CONTAINED (inline CSS, no /style.<rev>.css): only index.html goes
                           through the __ASSET_REV__ substitution, so a second page referencing the
@@ -1492,9 +1483,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           path itself and its default HTML handling (auto-trailing-slash) answers
                           a /setup.html URL with a 307 to /setup — so rewriting the path fed that
                           bounce back into the same route and shipped /setup as an INFINITE
-                          REDIRECT LOOP. The Go viz server serves the same page
-                          and the same widget from its embedded copies (worker/assets.go embeds
-                          public/setup.html; assets.ReplayUploaderLua is the widget).
+                          REDIRECT LOOP.
                           ROW BUDGET (the constraint behind half the SQL above): the DO's
                           SQLite is billed by ROWS READ — every row a query scans, index
                           entries included — and the Workers Free plan allows 5 million a DAY
@@ -1837,11 +1826,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           backfilled job is indistinguishable from one a person queued a minute
                           earlier, so no deployed daemon needs to know this happens. The job id
                           comes from the ROUTE (crypto.randomUUID, like the other two job
-                          creators), which is also what keeps the DO deterministic under test. The Go viz server
-                          has no ingest pipeline
-                          and 404s the route; the section then says so rather than showing an
-                          empty table that would read as "nothing is queued", and asks it nothing
-                          further.
+                          creators), which is also what keeps the DO deterministic under test. A
+                          backend with no ingest pipeline 404s the route; the section then says so
+                          rather than showing an empty table that would read as "nothing is
+                          queued", and asks it nothing further.
                           Uploads (tools/upload.ts) go
                           through tools/r2put.ts: parallel S3 PUTs when R2_ACCESS_KEY_ID/
                           R2_SECRET_ACCESS_KEY are set (fast, aws4fetch), else parallel `wrangler r2
@@ -2125,22 +2113,25 @@ A **gadget** would be worse here: `luarules/gadgets.lua` only scans the write-di
 `Spring.IsDevLuaEnabled()` (else `VFS.ZIP_ONLY`, game-archive only), so a dropped-in gadget
 won't load without an extra dev flag. Widgets are the right injection point.
 
-## Visualization tool (`cmd/barreplay-viz` + `internal/viz`)
+## The viewer (`internal/viz` + `worker/`)
 
-A **separate, read-only** tool that serves a browser playback of a finished capture; it
-never touches the engine. `barreplay-viz -snapshots <dir> [-addr host:port]` scans the
-dir for `.brp` files and serves the viewer. **The viz tool reads the current .brp
-version only** — convert a raw `.brsnap`/`.brepstream` once with `pack` (the
-converter owns the legacy parsing; viz has none). The viz server and the `worker/`
-static deployment share ONE URL scheme (`/index.json`, `/api/replays`,
-`/replays/<id>.brw`, `.keys`, `.resources`, `/replays/<id>/c<n>`), so the single
-front-end in `worker/public` works against both unchanged. `/api/replays` is the
-replay catalog (stats for the landing list — see the worker/ entry above): the
-worker serves it from its Durable Object table, the Go server computes the identical
-shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
+The browser playback of a finished capture lives in `worker/` (the front-end) and
+is served as **plain static files** from R2 by the Cloudflare Worker; `internal/viz`
+is the Go side that produces those files from a `.brp` (`static.go`, used by `pack
+-upload` and `cmd/barreplay-static`) and the catalog row the publisher registers
+(`catalog.go`). Nothing here touches the engine. **The viewer reads the current
+.brp version only** — convert a raw `.brsnap`/`.brepstream` once with `pack` (the
+converter owns the legacy parsing; viz has none). The URL scheme is `/index.json`,
+`/api/replays`, `/replays/<id>.brw`, `.keys`, `.resources`, `/replays/<id>/c<n>`.
+`/api/replays` is the replay catalog (stats for the landing list — see the worker/
+entry above), served by the worker from its Durable Object table; the rows are
+built by `viz.BuildCatalogEntry` (`internal/viz/catalog.go`) at publish time.
+(There used to be a Go HTTP server, `cmd/barreplay-viz`, serving the same URLs over
+a local directory of `.brp` files; it was removed as unused. Local viewing is `npm
+run dev` in `worker/` plus `pack -upload local`.)
 
-- **`internal/viz/wire.go` + `server.go`** implement the serving side:
-  `/replays/<id>.brw` returns a small binary **"BRW1" container** (same section framing
+- **`internal/viz/wire.go`** builds the pieces the viewer reads:
+  `/replays/<id>.brw` is a small binary **"BRW1" container** (same section framing
   as `.brp`) of a gzipped `J` head JSON (meta, teams, unitDef names — BOTH the internal
   one (`unitDefs`, the icon/footprint lookup key) and the human-readable one
   (`unitNames`, "Construction Bot", which is what the viewer LABELS units with in the
@@ -2151,13 +2142,11 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   players, bounds, `frameCount`, and the **chunk index** `{frame,count,kLen,len}` per
   chunk — `kLen` is the keyframe's RAW length inside the decompressed keys stream)
   plus the file's `E` events and `C` comms sections byte-for-byte — ~230 KB for a
-  33-min game, so the page is interactive immediately. `/replays/<id>.keys` serves the `K` section
-  byte-for-byte (every keyframe, one gzip stream); `/replays/<id>/c<n>` serves chunk
-  n's delta bytes, **sliced straight out of the stored file**. The server never
-  decodes a frame (except `.resources`, decoded once and cached): bounds/teams/index
-  all come from the file's meta record (`snapshot.ParseBRP`), and parsed files are
-  cached in-memory (mtime-keyed, ~4 entries) with `ETag`/304 revalidation so requests
-  are cheap and re-visits free. In the browser, `app.js` gunzips each response with
+  33-min game, so the page is interactive immediately. `/replays/<id>.keys` is the `K` section
+  byte-for-byte (every keyframe, one gzip stream); `/replays/<id>/c<n>` is chunk
+  n's delta bytes, **sliced straight out of the stored file**. No frame is ever
+  decoded to build these (except `.resources`): bounds/teams/index all come from the
+  file's meta record (`snapshot.ParseBRP`). In the browser, `app.js` gunzips each response with
   the native `DecompressionStream` and unpacks frames into the same flat stride-9
   `Int32Array` (`[id, def, team, x, z, hp, maxHp, dvx, dvz]`) the renderer always
   used.
@@ -2377,8 +2366,8 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   `…/replays/<gameId>`, whose `Map` object carries the authoritative
   `{fileName,width,height}` — which also gives a `pack -no-demo` capture (empty
   `mapName`) its terrain back. The API sends `access-control-allow-origin: *`, and the image is loaded
-  with `crossOrigin="anonymous"` so the canvas stays untainted. The viz server has **no
-  map code at all**. Best-effort: no name in the meta, an unknown map, or no outbound
+  with `crossOrigin="anonymous"` so the canvas stays untainted. There is **no map code
+  on the serving side at all**. Best-effort: no name in the meta, an unknown map, or no outbound
   network just yields a plain background (and the field extent falls back to the
   sampled unit bounds). The front-end positions the texture at world
   `(0,0)`–`(width,height)` so units overlay correctly; the terrain layer is always
@@ -2386,17 +2375,6 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   (only the demo startscript path does), so a `.brp` packed from a raw `.brsnap` with
   `pack -no-demo` has an empty `mapName` and renders the plain background; the
   default pack fetches the demo by gameId and fills it in.
-- **`internal/viz/server.go`** embeds the SPA from **`worker/`** (`index.html` +
-  `public/{app.js,style.css}` via `worker/assets.go` — the single copy of the
-  front-end in the repo) and exposes `/index.json` (the replay list),
-  `/replays/<id>.brw|.keys|.resources`, `/replays/<id>/c<n>`, and `/icons/<file>` +
-  `/ranks/<n>.png` (the embedded icons, cached). It also serves the widget-install
-  guide the landing banner links to — `/setup` (`public/setup.html`, embedded too)
-  and `/replay_uploader.lua` (`assets.ReplayUploaderLua`) — so the relative link
-  works here and not only on the Cloudflare deployment. The `<id>` segment is
-  confined to the snapshots dir (maps to `<id>.brp`, basename only — rejects any
-  path separator / traversal). UI/JSON assets are served `no-store` so a changed UI
-  never serves stale.
 - **`worker/public/`** (+ `worker/index.html`) is plain HTML/Canvas/vanilla-JS — **no
   framework, no build step for the app itself** (Vite only wraps it for the Cloudflare
   deploy). `app.js` reads the flat unit arrays by index (no per-unit objects), renders
@@ -2404,25 +2382,24 @@ shape from each file's meta (`internal/viz/catalog.go`, mtime-cached per file).
   zoom / pan / hover-tooltip. Colours are assigned per ally-team (a base hue per ally,
   lightness varied per team within it).
 
-Guarding the tool: `internal/viz/viz_test.go` serves a synthetic `.brp` through the
-real HTTP handler and checks the head payload (bounds, teams incl. frame-only ones,
-footprints, chunk index) plus the pass-through contract: the keys and chunk responses
-must be the stored file's exact byte ranges, and the listing shows only `.brp` files.
-No engine or browser needed.
+Guarding it: `internal/viz/viz_test.go` encodes a synthetic `.brp` through the wire
+encoder and checks the head payload (bounds, teams incl. frame-only ones, footprints,
+chunk index) plus the pass-through contract (the E and C sections byte-for-byte, no
+frame data); `static_test.go` checks the bundle against the encoders and the stored
+file's exact byte ranges. No engine or browser needed.
 
 ### Serverless static hosting (`internal/viz/static.go` + `cmd/barreplay-static` + `worker/`)
 
-Because the viz server never decodes a frame — the head is a pure function of the `.brp`
-meta and the keys/chunk responses are independently-gzipped byte ranges — the whole
-playback path can be served as **plain static files with no server**.
+Because nothing decodes a frame to serve one — the head is a pure function of the `.brp`
+meta and the keys/chunk pieces are independently-gzipped byte ranges — the whole
+playback path is served as **plain static files with no server**.
 `viz.WriteStaticBundle` precomputes, per capture: `replays/<id>.brw` (the head),
 `replays/<id>.keys` (the `K` section), `replays/<id>.resources` (the economy JSON,
 stored **uncompressed** — a pre-gzipped body double-compresses on Cloudflare), and one
 `replays/<id>/c<n>` file per chunk with delta frames (single-frame chunks get no file).
-`WriteIndex` writes `index.json`. These are **byte-identical** to the dynamic server at
-the same URLs (guarded by `static_test.go`, which diffs the bundle against the real HTTP
-handler), so the same `worker/public/app.js` runs against both backends with no URL
-swapping at all. `cmd/barreplay-static` is the CLI; the `worker/` Cloudflare project
+`WriteIndex` writes `index.json` (guarded by `static_test.go`, which diffs the bundle
+against the wire encoders and the stored file's byte ranges). `cmd/barreplay-static`
+is the CLI (and `packer.UploadStatic` the publisher's path); the `worker/` Cloudflare project
 (Hono + Vite) serves the bundle from an R2 bucket and the SPA + vendored icons as static
 assets. Map terrain is fetched browser-side straight from `api.bar-rts.com`, so the
 worker has no map proxy and no playback logic. `static.go` shares the wire encoders

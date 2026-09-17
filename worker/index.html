@@ -9,11 +9,11 @@
      cannot carry a content hash (public/_headers caps it at a day instead). -->
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="alternate icon" href="/favicon.ico" sizes="48x48 32x32 16x16">
-<!-- __ASSET_REV__ is replaced with a content hash of app.js+style.css (Vite
-     plugin at build/dev; the Go viz server at startup). The hash is in the
+<!-- __ASSET_REV__ is replaced with a content hash of app.js+style.css (the
+     Vite asset-rev plugin, at build and dev). The hash is in the
      FILENAME, not a ?v= query, so a given byte sequence has a URL that never
      changes and the file can be served immutable for a year (public/_headers).
-     Only index.html revalidates — both servers send it no-cache — and because
+     Only index.html revalidates — it is served no-cache — and because
      a UI change moves these URLs, browsers refetch exactly the files that
      changed, with no hard refresh. -->
 <link rel="stylesheet" href="/style.__ASSET_REV__.css">
@@ -65,9 +65,9 @@
          Outside the sections: a drop is accepted from either of them, and its
          progress line stays put while the Queue section is watched. -->
     <div id="dropzone">
-      <!-- The setup link is RELATIVE: it resolves to /setup on the deployed
-           worker (https://replay.fogofwar.dev/setup) and to the same page on the
-           Go viz server, which serves it from the same embedded file. -->
+      <!-- The setup link is RELATIVE: it resolves to /setup on whichever
+           origin serves the page (https://replay.fogofwar.dev/setup deployed,
+           the loopback origin under `vite dev`). -->
       <span id="droplabel">Drop a <code>.brepstream</code> capture here to publish it —
         or <label class="browse">browse<input type="file" id="dropfile" accept=".brepstream" hidden></label>.
         Want to record your games? <a href="/setup">Click here!</a></span>
@@ -77,8 +77,8 @@
     <section id="tab-replays">
       <!-- Catalog filters. Hidden unless the backend answers GET
            /api/replays/maps: filtering is a SQL feature of the Worker's catalog,
-           and the Go viz server (which serves the same list from local files)
-           has none, so the bar appears only where it works. -->
+           and a plain static host has none, so the bar appears only where it
+           works. -->
       <div id="filters" style="display:none">
         <!-- Row 1 is the fields, row 2 the settings chips and the actions.
              One row could not hold both without wrapping at some widths and
@@ -331,8 +331,8 @@
      is fetched from: the R2 bucket's own hostname, so those reads are answered
      by Cloudflare's cache instead of costing a billed R2 GetObject through the
      Worker. The placeholder below is filled in only by a production
-     `vite build`; `vite dev` and the Go viz server both blank it, which means
-     "same origin" and keeps them serving their own files. app.js ignores any
+     `vite build`; `vite dev` blanks it, which means "same origin" and keeps
+     it serving its own files. app.js ignores any
      value that is not an absolute http(s) origin, so an unsubstituted
      placeholder degrades to same-origin rather than breaking.
 

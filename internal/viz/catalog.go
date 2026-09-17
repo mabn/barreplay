@@ -12,9 +12,8 @@ import (
 // (when the game started, how long it ran, which map, the team-size spec).
 // In the Cloudflare deployment these rows live in the worker's SQLite-backed
 // Durable Object (worker/src/worker/replayindex.ts), upserted by `pack
-// -upload` via PUT /api/replays/<id>; the Go viz server computes the same
-// shape live from its .brp files, so GET /api/replays answers identically
-// against either backend and the shared front-end needs no URL swapping.
+// -upload` via PUT /api/replays/<id>, whose body BuildCatalogEntry produces
+// from the packed .brp's meta.
 
 // CatalogEntry is one replay's row in GET /api/replays (and the body of
 // PUT /api/replays/<id>). Stats are best-effort: a field the capture doesn't
@@ -26,7 +25,7 @@ type CatalogEntry struct {
 	// (`<gameId>-<rev>`, rev = first 8 hex of the source stream's SHA-256).
 	// Revisioned publishes are append-only — a re-upload lands under a fresh
 	// rid and the row moves — so the front-end fetches pieces at `rid ?? id`.
-	// The Go viz server's files are unrevisioned, so it leaves this nil.
+	// Set by the publisher, not here: BuildCatalogEntry leaves it nil.
 	Rid         *string `json:"rid,omitempty"`
 	StartUnix   *int64  `json:"startUnix"`
 	DurationSec *int64  `json:"durationSec"`
@@ -37,7 +36,7 @@ type CatalogEntry struct {
 	// startscript's modoptions (SettingsFlags) — only true/non-default entries,
 	// so a vanilla game carries just {"ranked": true}. Modoptions are NOT
 	// persisted in the .brp, so this is set only by pack's demo-fetch path
-	// (uploaded via PUT); the Go server's locally-computed entries omit it.
+	// (uploaded via PUT); BuildCatalogEntry itself omits it.
 	Settings map[string]any `json:"settings,omitempty"`
 	// Players is the roster the landing list shows AND the list's player
 	// filter matches against: one group per ally team (ascending ally id),
@@ -55,7 +54,7 @@ type CatalogEntry struct {
 	// this, since nil there is ambiguous between "full", "unknown" and a row
 	// predating the recorder fields. In the worker it is a HAND-SET marking
 	// (POST /api/replays/<id>/view from the viewer's header control) which
-	// upserts deliberately preserve; the Go server derives it from the
+	// upserts deliberately preserve; BuildCatalogEntry derives it from the
 	// capture's own Meta.Recorder and leaves it empty when there is none.
 	View string `json:"view,omitempty"`
 	// WidgetVersion/WidgetSha/WidgetDate identify the uploader-widget build
@@ -70,8 +69,7 @@ type CatalogEntry struct {
 	// Uploads lists every revision ever published for this game with the side
 	// that recorded it, oldest first. Accumulated PUT-by-PUT in the worker's
 	// catalog (revisions are append-only, so every entry keeps playing at
-	// ?replay=<rid>); the Go viz server's files are unrevisioned, so it leaves
-	// this nil.
+	// ?replay=<rid>); server-owned, so BuildCatalogEntry leaves this nil.
 	Uploads []CatalogUpload `json:"uploads,omitempty"`
 }
 
