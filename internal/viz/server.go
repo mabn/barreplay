@@ -296,16 +296,27 @@ func intParam(r *http.Request, key string) int {
 	return n
 }
 
-// pageEntries applies offset/limit to a sorted listing. A zero limit means
-// the whole thing (no param, or a front-end too old to page), and an offset
-// past the end is an empty page rather than an error — the listing shrinks
-// between requests, and a stale Next click is not a failure.
+// catalogLimitMax is the most rows one listing hands out — the ceiling AND
+// the default: an absent, junk or oversized ?limit= all serve this many,
+// never the whole listing, so a client that wants more must page with
+// ?offset=. Its twin is CATALOG_LIMIT_MAX in worker/src/worker/app.ts — the
+// two backends must page alike or the shared front-end's pager lies on one
+// of them.
+const catalogLimitMax = 200
+
+// pageEntries applies offset/limit to a sorted listing. A zero limit (no
+// param, or junk) falls back to catalogLimitMax, and an offset past the end
+// is an empty page rather than an error — the listing shrinks between
+// requests, and a stale Next click is not a failure.
 func pageEntries(entries []CatalogEntry, offset, limit int) []CatalogEntry {
+	if limit <= 0 || limit > catalogLimitMax {
+		limit = catalogLimitMax
+	}
 	if offset >= len(entries) {
 		return []CatalogEntry{}
 	}
 	entries = entries[offset:]
-	if limit > 0 && limit < len(entries) {
+	if limit < len(entries) {
 		entries = entries[:limit]
 	}
 	return entries

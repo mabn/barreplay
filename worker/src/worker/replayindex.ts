@@ -1042,8 +1042,9 @@ export class ReplayIndex extends DurableObject<Env> {
     // a next page" off that row's existence, which is why nothing here counts
     // anything: a COUNT over the whole catalog would be a second query whose
     // cost grows with the archive, to answer a question the extra row already
-    // answers. An omitted limit means the whole listing (bringest's catalog
-    // scan, and any front-end too old to page).
+    // answers. An omitted limit means the whole listing — the ROUTE never
+    // omits it any more (it defaults to CATALOG_LIMIT_MAX, so no HTTP client
+    // can ask for everything at once); only direct callers (tests) still may.
     let window = "";
     if (limit !== undefined && limit > 0) {
       window = `LIMIT ? OFFSET ?`;
