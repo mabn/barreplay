@@ -4983,34 +4983,91 @@ function fillProgressCell(td, p) {
   td.appendChild(line);
 }
 
-// disableCell is the row's one control: hold this job back, or let it go again.
-//
-// Only offered where it can change anything — a job that is pending or running.
-// A finished or failed job is already never handed out, so a switch on it would
-// be a control that does nothing; and the row for a game whose job errored
-// still keeps that game out of the mirror's auto-queue, which is the effect
-// somebody would be reaching for.
-function disableCell(j) {
+// actionCell is the row's control: one "⋯" button opening a menu of what can
+// be done to this job. Two entries, each offered only where it can change
+// anything:
+//   Disable/Enable — hold the job back, or let it go again (pending or
+//     running jobs; a disabled one always, so it can be let go).
+//   Retry — queue the same work again under a fresh id (finished or failed
+//     jobs; a live one already covers the work). The old row stays as the
+//     record of the attempt. A FAILED re-sim has no other door from the
+//     browser: the paste box refuses its game once it has a job row.
+// A menu rather than a row of buttons because the entries grew past one and
+// the cell is the narrowest thing on the page. A row with nothing to offer
+// gets no button.
+function actionCell(j) {
   const td = document.createElement('td');
   td.className = 'act';
   const live = j.state === 'pending' || j.state === 'processing';
-  if (!live && !j.disabled) return td;
+  const items = [];
+  if (live || j.disabled) {
+    items.push({
+      label: j.disabled ? 'Enable' : 'Disable',
+      title: j.disabled
+        ? 'Let daemons pick this job up again'
+        : 'Hold this job back. It will not be offered to any daemon, and the game stays out of the '
+          + 'auto-queue while the row exists. A run already under way is NOT stopped — nothing here can '
+          + 'reach that machine — but the row is reset so it is not simply re-offered later.',
+      run: (btn) => setJobDisabled(j, !j.disabled, btn),
+    });
+  }
+  if (!live) {
+    items.push({
+      label: 'Retry',
+      title: j.kind === 'resim'
+        ? 'Queue this game\'s re-simulation again, as a new job. This row stays as the record of this attempt.'
+        : 'Queue this upload\'s publish again from its archived stream, as a new job.',
+      run: (btn) => retryJob(j, btn),
+    });
+  }
+  if (items.length === 0) return td;
   const b = document.createElement('button');
   b.type = 'button';
-  b.className = 'jobbtn' + (j.disabled ? ' on' : '');
-  b.textContent = j.disabled ? 'Enable' : 'Disable';
-  b.title = j.disabled
-    ? 'Let daemons pick this job up again'
-    : 'Hold this job back. It will not be offered to any daemon, and the game stays out of the '
-      + 'auto-queue while the row exists. A run already under way is NOT stopped — nothing here can '
-      + 'reach that machine — but the row is reset so it is not simply re-offered later.';
+  b.className = 'jobbtn jobmenubtn' + (j.disabled ? ' on' : '');
+  b.textContent = '⋯';
+  b.title = 'Actions';
+  b.setAttribute('aria-haspopup', 'menu');
   b.onclick = (ev) => {
     ev.stopPropagation(); // the row is an expand toggle; this is not that
-    setJobDisabled(j, !j.disabled, b);
+    if (td.querySelector('.jobmenu')) { closeJobMenus(); return; }
+    closeJobMenus();
+    const menu = document.createElement('div');
+    menu.className = 'jobmenu';
+    menu.setAttribute('role', 'menu');
+    for (const it of items) {
+      const mi = document.createElement('button');
+      mi.type = 'button';
+      mi.setAttribute('role', 'menuitem');
+      mi.textContent = it.label;
+      mi.title = it.title;
+      mi.onclick = (e) => {
+        e.stopPropagation();
+        closeJobMenus();
+        b.disabled = true;
+        b.textContent = '…';
+        it.run(b);
+      };
+      menu.appendChild(mi);
+    }
+    menu.onclick = (e) => e.stopPropagation();
+    td.appendChild(menu);
+    b.setAttribute('aria-expanded', 'true');
+    menu.querySelector('button').focus();
   };
   td.appendChild(b);
   return td;
 }
+
+// One open menu at a time; a click anywhere else, or Escape, closes it.
+function closeJobMenus() {
+  for (const m of document.querySelectorAll('#queuetable .jobmenu')) {
+    const btn = m.parentElement.querySelector('.jobmenubtn');
+    if (btn) btn.removeAttribute('aria-expanded');
+    m.remove();
+  }
+}
+document.addEventListener('click', closeJobMenus);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeJobMenus(); });
 
 // setJobDisabled flips one job and re-reads the page, so what is shown is what
 // the worker actually did rather than what the click assumed.
@@ -5031,6 +5088,29 @@ async function setJobDisabled(j, disabled, btn) {
     return;
   }
   refreshQueue();
+}
+
+// retryJob asks for the job's work again and re-reads the page; the new row
+// lands at the top as pending. A "duplicate" or "disabled" answer means a job
+// already covers the game, which the message says rather than pretending a
+// second one was queued.
+async function retryJob(j, btn) {
+  btn.disabled = true;
+  btn.textContent = '…';
+  let res;
+  try {
+    const r = await fetch('/api/admin/jobs/' + encodeURIComponent(j.id) + '/retry', { method: 'POST' });
+    if (r.status === 401) { adminSignedOut(); return; }
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    res = await r.json();
+  } catch (err) {
+    btn.disabled = false;
+    renderQueue('Could not retry that job: ' + (err.message || err));
+    return;
+  }
+  await refreshQueue();
+  if (res.status === 'duplicate') renderQueue('Not queued again: a job for that game is already pending or running (' + res.job + ').');
+  else if (res.status === 'disabled') renderQueue('Not queued again: a job for that game exists but is disabled (' + res.job + '). Enable it instead.');
 }
 
 function renderQueue(errMsg) {
@@ -5174,7 +5254,7 @@ function renderQueue(errMsg) {
     const detail = cell(j.error || null, 'detail');
     if (j.error) detail.classList.add('error');
     else if (j.progress) fillProgressCell(detail, j.progress);
-    tr.appendChild(disableCell(j));
+    tr.appendChild(actionCell(j));
     tbody.appendChild(tr);
 
     // The details row, only while expanded. Clicking anywhere on the job's
