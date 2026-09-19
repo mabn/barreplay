@@ -648,6 +648,15 @@ app.post("/api/jobs", async (c) => {
 // a no-op and the caller need not know what the mirror already has. Guarded by
 // the same token as the other write APIs. Not the cron's job and never called
 // by it: this is a manual recovery door, kept small.
+//
+// ?refresh=true skips the dedup and re-reads the named games from the posted
+// details — gamesInsert is an upsert that leaves the lobby columns alone, so
+// this REPAIRS a row rather than replacing it. It exists for rows the cron
+// recorded from a detail the BAR API was still writing (see
+// games.ts DETAIL_SETTLE_SEC): an 8v8 stored as "7v6" stays that way for
+// good otherwise, since nothing else ever re-reads a mirrored game. The
+// posted details are the operator's to choose, so it is not a blanket
+// re-sync — just the ids they name.
 const MAX_BACKFILL = 500;
 app.post("/api/games/backfill", async (c) => {
   if (!authorized(c)) return c.json({ error: "unauthorized" }, 401);
@@ -677,7 +686,8 @@ app.post("/api/games/backfill", async (c) => {
     entries.push({ id, entry: gameFromApi(id, detail) });
   }
   if (ids.length === 0) return c.json({ received: raw.length, fresh: 0, inserted: 0 });
-  const fresh = new Set(await indexStub(c.env).gamesUnknown(ids));
+  const refresh = c.req.query("refresh") === "true";
+  const fresh = new Set(refresh ? ids : await indexStub(c.env).gamesUnknown(ids));
   const toInsert = entries.filter((e) => fresh.has(e.id)).map((e) => e.entry);
   const inserted = toInsert.length === 0 ? 0 : await indexStub(c.env).gamesInsert(toInsert);
   return c.json({ received: raw.length, fresh: fresh.size, inserted });

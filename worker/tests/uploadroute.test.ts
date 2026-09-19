@@ -1419,6 +1419,26 @@ test("backfill inserts new mirror rows and dedups the rest", async () => {
   assert.equal((index.mirror.get("new1") as { map?: string }).map, "Supreme Isthmus");
 });
 
+test("backfill ?refresh=true re-reads games the mirror already has", async () => {
+  const { env, index } = makeEnv("tok");
+  index.mirror.set("known1", { map: "stale" }); // mirrored from a half-written detail
+
+  const res = await app.request(
+    "/api/games/backfill?refresh=true",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer tok" },
+      body: JSON.stringify([detailBody("known1"), detailBody("new1")]),
+    },
+    env,
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(await asJson(res), { received: 2, fresh: 2, inserted: 2 });
+  // The known row was rewritten from the posted detail, not left as it was.
+  assert.equal((index.mirror.get("known1") as { map?: string }).map, "Supreme Isthmus");
+  assert.ok(index.mirror.has("new1"));
+});
+
 test("backfill needs the write token and rejects junk bodies", async () => {
   const { env } = makeEnv("tok");
   const noAuth = await app.request(

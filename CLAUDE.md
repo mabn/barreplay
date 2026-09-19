@@ -1205,7 +1205,14 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           mirrored game and a refreshed catalog row read identically. Known ids
                           cost nothing: a steady-state tick is ONE request (gamesUnknown filters
                           the page first). A detail that fails is simply not recorded, so the
-                          next tick retries it; a failing LISTING throws (that is the run), and
+                          next tick retries it; a detail whose createdAt is under
+                          DETAIL_SETTLE_SEC = 5s old is likewise left for the next tick
+                          (`unsettled` in the result and the log line): the BAR API creates
+                          the replay row first and inserts its players one at a time over
+                          ~1s (measured 2.4s worst on 200 games), and a detail read in
+                          between is missing players — an 8v8 landed as "7v6" that way, 3 of
+                          200 recent games — and nothing ever re-reads a mirrored game, so
+                          it would stay wrong; a failing LISTING throws (that is the run), and
                           the handler logs rather than rethrows, since a minute-by-minute stream
                           of failed crons is worse signal than one self-healing blip. Nothing is
                           logged on a tick that changed nothing.
@@ -1223,6 +1230,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           --hours, subtracts what the mirror already has, fetches the detail for
                           only the missing games, and POSTs them in batches with $REPLAY_PUT_TOKEN
                           (--dry just reports the count). Re-running is a no-op (gamesUnknown).
+                          ?refresh=true skips that dedup and REWRITES the named rows from the
+                          posted details (gamesInsert is an upsert that leaves the lobby
+                          columns alone) — `backfill-games.ts --refresh <id>,<id>` is the one
+                          command that repairs a row mirrored from a half-written detail.
                           LAVA SYNC (src/worker/lavasync.ts + the LAVABALANCE service binding
                           in wrangler.jsonc): freshly-finished candidate games are handed to
                           the sibling lavabalance worker (claudebar/lavabalance, same account

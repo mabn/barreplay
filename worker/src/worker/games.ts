@@ -75,6 +75,29 @@ export function gamesPageUrl(page: number): string {
  * a run has a handful of new games at most. */
 const DETAIL_CONCURRENCY = 4;
 
+/** How old a game's API record must be before its detail is trusted. The BAR
+ * API creates the replay row first and then inserts its players one at a
+ * time, and a detail read in between answers with the players written so far:
+ * one 8v8 mirrored a second after its row appeared was stored as "7v6" with 13
+ * names, and 3 of 200 recent games had the same partial roster, each synced
+ * within a second of the API's createdAt. Measured over those 200 games the
+ * roster is complete within 0.8s median, 1.5s p90, 2.4s at worst (a 40-slot
+ * game), so 5s covers it twice over. A game younger than this is left
+ * unrecorded — gamesUnknown offers it again next tick, a minute later — which
+ * is the same one-tick delay any wait under the cron's period would cost. */
+export const DETAIL_SETTLE_SEC = 5;
+
+/** detailSettled says whether a /replays/<id> reply is old enough to be
+ * complete (see DETAIL_SETTLE_SEC). A reply with no readable createdAt is
+ * taken as settled: the age check is a guard against a race, not a required
+ * field, and refusing such a reply forever would empty the mirror. */
+export function detailSettled(detail: unknown, nowMs: number): boolean {
+  const d = (typeof detail === "object" && detail !== null ? detail : {}) as Record<string, unknown>;
+  const created = parseStart(d.createdAt);
+  if (created === null) return true;
+  return nowMs / 1000 - created >= DETAIL_SETTLE_SEC;
+}
+
 /** Shape check for an id from the API, matching the /api routes' own. It only
  * has to be safe as a key — BAR's ids are 32 hex chars, but refusing anything
  * else here would silently empty the mirror the day that changes. Exported
@@ -188,6 +211,11 @@ export interface GameSyncResult {
    * recorded, so the next run retries them — which is the whole recovery
    * story for a blip, and costs nothing once the game drops off the window. */
   failed: number;
+  /** New games whose API record was younger than DETAIL_SETTLE_SEC — its
+   * roster possibly still being written — and so, like the failed ones, left
+   * for the next run. Counted apart from `failed` because it is expected a
+   * few times a day and says nothing is wrong. */
+  unsettled: number;
   /** Listing pages read this run (1..GAMES_MAX_PAGES). */
   pages: number;
   /** Of the games recorded, ones shaped like a lava game — the lava flag on an
@@ -247,16 +275,26 @@ export async function syncGames(index: GamesIndex, fetchImpl: typeof fetch = fet
     if (rows.length < GAMES_PAGE_LIMIT) break;
     if (oldest !== null && oldest <= horizon) break;
   }
-  if (ids.length === 0) return { scanned: 0, fresh: 0, added: 0, failed: 0, pages, lavaCandidates: 0 };
+  if (ids.length === 0) return { scanned: 0, fresh: 0, added: 0, failed: 0, unsettled: 0, pages, lavaCandidates: 0 };
 
   const fresh = await index.gamesUnknown(ids);
-  if (fresh.length === 0) return { scanned: ids.length, fresh: 0, added: 0, failed: 0, pages, lavaCandidates: 0 };
+  if (fresh.length === 0) {
+    return { scanned: ids.length, fresh: 0, added: 0, failed: 0, unsettled: 0, pages, lavaCandidates: 0 };
+  }
 
   const entries: GameEntry[] = [];
   let failed = 0;
+  let unsettled = 0;
   await pool(fresh, DETAIL_CONCURRENCY, async (id) => {
     try {
       const detail = await fetchJSON(fetchImpl, `${BAR_API}/replays/${encodeURIComponent(id)}`);
+      // A record the API is still writing (see DETAIL_SETTLE_SEC) is left
+      // unrecorded, like a failed fetch: still unknown, so the next tick
+      // re-offers it and reads the finished roster.
+      if (!detailSettled(detail, Date.now())) {
+        unsettled++;
+        return;
+      }
       entries.push(gameFromApi(id, detail));
     } catch {
       failed++;
@@ -269,7 +307,7 @@ export async function syncGames(index: GamesIndex, fetchImpl: typeof fetch = fet
   const lavaCandidates = entries.filter(
     (e) => e.settings?.[SETTINGS_LAVA_FLAG] === true && e.gameSize === LAVA_GAME_SIZE,
   ).length;
-  return { scanned: ids.length, fresh: fresh.length, added, failed, pages, lavaCandidates };
+  return { scanned: ids.length, fresh: fresh.length, added, failed, unsettled, pages, lavaCandidates };
 }
 
 /** gameFromApi builds a mirror row from one /replays/<id> detail reply. The
