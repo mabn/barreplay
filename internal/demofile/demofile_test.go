@@ -117,3 +117,50 @@ func TestParseStartscriptNested(t *testing.T) {
 		t.Errorf("allyteams = %d, want 1", len(ss.AllyTeams))
 	}
 }
+
+// A modoption value may contain braces — BAR's lava tweak is
+// `map_tweaklava={10,5,400},{80,1,130},...;` — and the value runs to its ';'
+// terminator, so those braces must not close the section. A real Silveridge
+// demo failed with "unbalanced '}'" at exactly that option before this held.
+func TestParseStartscriptBracesInValue(t *testing.T) {
+	const doc = `[game]
+{
+	mapname=Silveridge v1.0.1;
+	[modoptions]
+	{
+		map_tweaklava={10,5,400},{80,1,130},{150,1,60};
+		map_waterislava=1;
+		tweakunits1=;
+	}
+	[player0]
+	{
+		name=Alice;
+		team=0;
+	}
+}`
+	ss, err := ParseStartscript(doc)
+	if err != nil {
+		t.Fatalf("ParseStartscript: %v", err)
+	}
+	if got := ss.ModOptions["map_tweaklava"]; got != "{10,5,400},{80,1,130},{150,1,60}" {
+		t.Errorf("map_tweaklava = %q", got)
+	}
+	if ss.ModOptions["map_waterislava"] != "1" {
+		t.Errorf("map_waterislava = %q (the option after the braces was lost)", ss.ModOptions["map_waterislava"])
+	}
+	if len(ss.Players) != 1 || ss.Players[0].Name != "Alice" {
+		t.Errorf("players = %+v", ss.Players)
+	}
+}
+
+// A pair with no ';' still ends at the closing brace, so a hand-written
+// `key=v}` closes its section instead of swallowing the rest of the document.
+func TestParseStartscriptUnterminatedPair(t *testing.T) {
+	ss, err := ParseStartscript("[game]\n{\n\tmapname=Foo}\n[extra]\n{\n\tx=1;\n}")
+	if err != nil {
+		t.Fatalf("ParseStartscript: %v", err)
+	}
+	if ss.MapName != "Foo" {
+		t.Errorf("MapName = %q", ss.MapName)
+	}
+}
