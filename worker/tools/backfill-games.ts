@@ -4,6 +4,13 @@
 //
 //   REPLAY_PUT_TOKEN=... npx tsx tools/backfill-games.ts [--hours 48] \
 //       [--base https://replay.fogofwar.dev] [--batch 100] [--dry]
+//   REPLAY_PUT_TOKEN=... npx tsx tools/backfill-games.ts --refresh <id>[,<id>...]
+//
+// --refresh REPAIRS rows the mirror already has: it fetches the named games'
+// current details and posts them with ?refresh=true, which rewrites the rows
+// instead of deduping them. For games the cron recorded from a detail the BAR
+// API was still writing (a partial roster — an 8v8 stored as "7v6"; see
+// games.ts DETAIL_SETTLE_SEC), which nothing else ever re-reads.
 //
 // What it does, all from HERE (the Worker makes no outbound calls of its own on
 // this path, so no per-invocation subrequest cap applies):
@@ -28,6 +35,7 @@ const BASE = arg("base", "https://replay.fogofwar.dev").replace(/\/$/, "");
 const BATCH = Number(arg("batch", "100"));
 const DRY = process.argv.includes("--dry");
 const TOKEN = process.env.REPLAY_PUT_TOKEN ?? "";
+const REFRESH = arg("refresh", "").split(",").map((s) => s.trim()).filter(Boolean);
 
 async function getJSON(url: string, init?: RequestInit): Promise<any> {
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -56,7 +64,29 @@ async function pool<T>(items: T[], limit: number, fn: (item: T) => Promise<void>
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 }
 
+async function refresh(ids: string[]) {
+  if (!TOKEN) throw new Error("REPLAY_PUT_TOKEN is not set — the backfill route is guarded");
+  const details: unknown[] = [];
+  for (const id of ids) {
+    const d = await getJSON(`${BAR}/replays/${encodeURIComponent(id)}`);
+    const n = (d?.AllyTeams ?? []).map((a: any) => (a?.Players?.length ?? 0) + (a?.AIs?.length ?? 0));
+    console.log(`  ${id}: ${n.join("v")} per BAR`);
+    details.push(d);
+  }
+  if (DRY) {
+    console.log("--dry: not writing.");
+    return;
+  }
+  const res = await getJSON(`${BASE}/api/games/backfill?refresh=true`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify(details),
+  });
+  console.log(`refreshed: received=${res.received} inserted=${res.inserted}`);
+}
+
 async function main() {
+  if (REFRESH.length > 0) return refresh(REFRESH);
   const now = Math.floor(Date.now() / 1000);
   const cutoff = now - HOURS * 3600;
   console.log(`window: last ${HOURS}h (start >= ${new Date(cutoff * 1000).toISOString()}); base ${BASE}`);

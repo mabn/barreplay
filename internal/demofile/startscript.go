@@ -148,10 +148,32 @@ func parseTDF(s string) (*TDFSection, error) {
 		case isSpace(c):
 			i++
 		default:
-			// key=value; pair. Read until ';' or newline or '}'.
+			// key=value; pair. The key runs to '=', and the VALUE runs to the
+			// ';' terminator (or the end of the line), which is the engine's own
+			// grammar (TdfParser: a value is everything up to ';'). It matters
+			// because values contain braces: BAR's lava tweak modoption is
+			// `map_tweaklava={10,5,400},{80,1,130},...;`, and stopping the
+			// value at its first '}' handed that brace to the section closer —
+			// every lava game's demo then failed with "unbalanced '}'". A '}'
+			// only ends the pair when no '=' precedes it (a bare token) or when
+			// the pair has no ';' before its line ends, so a value written
+			// `key=v}` without a terminator still closes the section.
 			end := i
-			for end < n && s[end] != ';' && s[end] != '\n' && s[end] != '}' {
+			for end < n && s[end] != ';' && s[end] != '\n' && s[end] != '}' && s[end] != '=' {
 				end++
+			}
+			if end < n && s[end] == '=' {
+				valEnd := end
+				for valEnd < n && s[valEnd] != ';' && s[valEnd] != '\n' {
+					valEnd++
+				}
+				if valEnd < n && s[valEnd] == ';' {
+					end = valEnd
+				} else if brace := strings.IndexByte(s[end:valEnd], '}'); brace >= 0 {
+					end += brace
+				} else {
+					end = valEnd
+				}
 			}
 			pair := strings.TrimSpace(s[i:end])
 			if pair != "" {

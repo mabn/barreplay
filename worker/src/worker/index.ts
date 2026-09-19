@@ -44,8 +44,10 @@ export default {
       lavaCandidates = r.lavaCandidates;
       // Quiet on a no-op tick: most runs find nothing new, and a line a minute
       // saying so would bury the ones that did something.
-      if (r.added > 0 || r.failed > 0) {
-        console.log(`games sync: pages=${r.pages} scanned=${r.scanned} fresh=${r.fresh} added=${r.added} failed=${r.failed}`);
+      if (r.added > 0 || r.failed > 0 || r.unsettled > 0) {
+        console.log(
+          `games sync: pages=${r.pages} scanned=${r.scanned} fresh=${r.fresh} added=${r.added} failed=${r.failed} unsettled=${r.unsettled}`,
+        );
       }
     } catch (e) {
       console.error(`games sync failed: ${e}`);

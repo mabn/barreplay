@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { GAMES_MAX_PAGES, GAMES_PAGE_LIMIT, gameFromApi, gameSizeSpec, gamesPageUrl, syncGames } from "../src/worker/games";
+import { DETAIL_SETTLE_SEC, GAMES_MAX_PAGES, GAMES_PAGE_LIMIT, detailSettled, gameFromApi, gameSizeSpec, gamesPageUrl, syncGames } from "../src/worker/games";
 import type { GameEntry } from "../src/worker/games";
 
 const LIST_URL = gamesPageUrl(1);
@@ -78,7 +78,7 @@ test("syncGames reads page 1 with the agreed query and records every new game", 
 
   assert.equal(calls[0], LIST_URL);
   assert.match(calls[0], /[?&]page=1&limit=50&hasBots=false&endedNormally=true$/);
-  assert.deepEqual(r, { scanned: 3, fresh: 3, added: 3, failed: 0, pages: 1, lavaCandidates: 0 });
+  assert.deepEqual(r, { scanned: 3, fresh: 3, added: 3, failed: 0, unsettled: 0, pages: 1, lavaCandidates: 0 });
   assert.deepEqual([...index.rows.keys()].sort(), ["a1", "b2", "c3"]);
 });
 
@@ -90,7 +90,7 @@ test("syncGames spends a detail fetch only on games it does not have", async () 
   const { impl, calls } = fakeFetch(["c3", "a1", "b2"]);
   const r = await syncGames(index, impl);
 
-  assert.deepEqual(r, { scanned: 3, fresh: 1, added: 1, failed: 0, pages: 1, lavaCandidates: 0 });
+  assert.deepEqual(r, { scanned: 3, fresh: 1, added: 1, failed: 0, unsettled: 0, pages: 1, lavaCandidates: 0 });
   assert.deepEqual(calls, [LIST_URL, "https://api.bar-rts.com/replays/c3"]);
 });
 
@@ -101,7 +101,7 @@ test("syncGames touches the API once when the whole page is already mirrored", a
 
   const r = await syncGames(index, impl);
 
-  assert.deepEqual(r, { scanned: 1, fresh: 0, added: 0, failed: 0, pages: 1, lavaCandidates: 0 });
+  assert.deepEqual(r, { scanned: 1, fresh: 0, added: 0, failed: 0, unsettled: 0, pages: 1, lavaCandidates: 0 });
   assert.deepEqual(calls, [LIST_URL], "a known page must cost exactly the listing");
 });
 
@@ -111,10 +111,43 @@ test("syncGames records the games whose detail loaded and retries the rest next 
 
   const r = await syncGames(index, impl);
 
-  assert.deepEqual(r, { scanned: 3, fresh: 3, added: 2, failed: 1, pages: 1, lavaCandidates: 0 });
+  assert.deepEqual(r, { scanned: 3, fresh: 3, added: 2, failed: 1, unsettled: 0, pages: 1, lavaCandidates: 0 });
   assert.deepEqual([...index.rows.keys()].sort(), ["a1", "c3"]);
   // Not recorded means still unknown, so the next pass offers it again.
   assert.deepEqual(index.gamesUnknown(["a1", "b2", "c3"]), ["b2"]);
+});
+
+// The BAR API creates a replay's row before its player rows and a detail read
+// in between is missing players: the 8v8 in the repo's history that was mirrored
+// as "7v6". A record younger than DETAIL_SETTLE_SEC is therefore left alone —
+// not failed, not recorded — and the next run, a minute later, reads it whole.
+test("syncGames leaves a game whose API record is seconds old for the next run", async () => {
+  const index = new FakeIndex();
+  const young = new Date(Date.now() - 1000).toISOString();
+  const old = new Date(Date.now() - (DETAIL_SETTLE_SEC + 1) * 1000).toISOString();
+  const { impl } = fakeFetch(["a1", "b2", "c3"], {
+    a1: detail("a1", { createdAt: young }),
+    b2: detail("b2", { createdAt: old }),
+    // c3's detail (the fixture) has no createdAt at all: settled by default.
+  });
+
+  const r = await syncGames(index, impl);
+
+  assert.deepEqual(r, { scanned: 3, fresh: 3, added: 2, failed: 0, unsettled: 1, pages: 1, lavaCandidates: 0 });
+  assert.deepEqual([...index.rows.keys()].sort(), ["b2", "c3"]);
+  assert.deepEqual(index.gamesUnknown(["a1", "b2", "c3"]), ["a1"], "still unknown, so re-offered next run");
+});
+
+test("detailSettled draws the line at DETAIL_SETTLE_SEC and trusts a reply with no createdAt", () => {
+  const nowMs = 1_700_000_000_000;
+  const at = (sec: number) => new Date(nowMs - sec * 1000).toISOString();
+  assert.equal(detailSettled({ createdAt: at(0) }, nowMs), false);
+  assert.equal(detailSettled({ createdAt: at(DETAIL_SETTLE_SEC - 1) }, nowMs), false);
+  assert.equal(detailSettled({ createdAt: at(DETAIL_SETTLE_SEC) }, nowMs), true);
+  assert.equal(detailSettled({ createdAt: at(3600) }, nowMs), true);
+  assert.equal(detailSettled({}, nowMs), true);
+  assert.equal(detailSettled({ createdAt: "not a date" }, nowMs), true);
+  assert.equal(detailSettled(null, nowMs), true);
 });
 
 test("syncGames writes oldest first, so an interrupted run drops the newest", async () => {
@@ -153,7 +186,7 @@ test("syncGames ignores junk rows and duplicate ids on the page", async () => {
 
   const r = await syncGames(index, impl);
 
-  assert.deepEqual(r, { scanned: 1, fresh: 1, added: 1, failed: 0, pages: 1, lavaCandidates: 0 });
+  assert.deepEqual(r, { scanned: 1, fresh: 1, added: 1, failed: 0, unsettled: 0, pages: 1, lavaCandidates: 0 });
   assert.deepEqual(calls, [LIST_URL, "https://api.bar-rts.com/replays/a1"]);
 });
 
@@ -161,7 +194,7 @@ test("syncGames is a no-op on an empty or malformed page", async () => {
   const index = new FakeIndex();
   for (const body of ['{"data":[]}', "{}", '{"data":"nope"}']) {
     const impl = (async () => new Response(body)) as typeof fetch;
-    assert.deepEqual(await syncGames(index, impl), { scanned: 0, fresh: 0, added: 0, failed: 0, pages: 1, lavaCandidates: 0 });
+    assert.deepEqual(await syncGames(index, impl), { scanned: 0, fresh: 0, added: 0, failed: 0, unsettled: 0, pages: 1, lavaCandidates: 0 });
   }
 });
 
