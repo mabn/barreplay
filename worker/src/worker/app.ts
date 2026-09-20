@@ -803,6 +803,20 @@ app.post("/api/admin/jobs/:id/disabled", async (c) => {
   return c.json({ ok: true, disabled });
 });
 
+// The queue page's per-row "Retry": queue the job's work again under a fresh
+// id (ReplayIndex.jobRetry). It exists because a FAILED re-sim has no other
+// door from the browser: the paste box refuses a game that is in the catalog,
+// and POST /api/jobs, which does not, takes a bearer token a browser has not
+// got. The old row stays as the record of the attempt. Answers with the
+// announce vocabulary — "queued", or "duplicate"/"disabled" with the job that
+// already covers the work — so the page can say what happened. Admin-only
+// like /disabled beside it: the browser's Access cookie is the credential.
+app.post("/api/admin/jobs/:id/retry", async (c) => {
+  const res = await indexStub(c.env).jobRetry(crypto.randomUUID(), c.req.param("id"));
+  if (res === null) return c.json({ error: "unknown job" }, 404);
+  return c.json({ status: res.status, job: res.job?.id ?? null });
+});
+
 // Archived raw streams for the ingest daemon (which speaks only HTTP to the
 // worker — no S3 credentials needed on the read side). Guarded: the archive
 // is not public, unlike the published replay pieces.

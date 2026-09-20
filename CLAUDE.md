@@ -1633,11 +1633,24 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           spotting down a column of red rows, since it is a fact about the host
                           rather than a verdict on the replay. A kind the page has no label for
                           renders as a plain error, exactly as an unclassified failure does.
-                          The row's last cell is the HOLD-BACK switch (disableCell/
-                          setJobDisabled -> POST /api/admin/jobs/<id>/disabled, see the worker entry).
-                          It is offered only on a pending or running job — a finished one is
-                          already never handed out, so a switch there would do nothing — and it
-                          stopPropagations, since the row itself is an expand toggle. A held-back
+                          The row's last cell is the ACTION MENU (actionCell): one ⋯ button
+                          opening a dropdown (one open at a time, closeJobMenus on any other
+                          click or Escape) with what can be done to the job. Disable/Enable
+                          (setJobDisabled -> POST /api/admin/jobs/<id>/disabled, see the worker
+                          entry) is offered only on a pending or running job — a finished one
+                          is already never handed out, so a switch there would do nothing — or
+                          a disabled one, so it can be let go. RETRY (retryJob -> POST
+                          /api/admin/jobs/<id>/retry -> ReplayIndex.jobRetry) is offered on a
+                          finished or failed job and queues the SAME work again under a FRESH
+                          id — a re-sim through jobAnnounce (so a job already covering the game
+                          is handed back as "duplicate"/"disabled" and the page says so), an
+                          upload against its archived stream. Never in place: the old row is
+                          the record of the attempt, its error, stats and samples. It exists
+                          because a failed re-sim had no door from the browser — the paste box
+                          refuses a game with a job row and POST /api/jobs takes a bearer token.
+                          The menu stopPropagations, since the row itself is an expand toggle.
+                          A menu rather than a row of buttons because the entries grew past
+                          one and the cell is the narrowest thing on the page. A held-back
                           row reads "disabled" in the STATE column rather than "pending", which
                           would be the misleading half of the truth on something nothing will
                           ever pick up (the real state rides the tooltip); the button is ghosted

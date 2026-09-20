@@ -1022,6 +1022,33 @@ test("disabling a job stops it being offered and resets a running one", async ()
   });
 });
 
+test("retrying a job queues the same work under a fresh id and keeps the old row", async () => {
+  await inIndex((index) => {
+    index.jobInsert("j", "", "g1", "resim");
+    // Pending already: the retry hands back the row that covers the game.
+    expect(index.jobRetry("j2", "j")).toMatchObject({ status: "duplicate", job: { id: "j" } });
+    index.jobClaim("j", "resim");
+    index.jobUpdate("j", "error", "boom");
+    expect(index.jobRetry("j2", "j")).toMatchObject({ status: "queued", job: { id: "j2", gameId: "g1", kind: "resim" } });
+    expect(index.jobGet("j")).toMatchObject({ state: "error", error: "boom" });
+    expect(index.jobsPending("resim").map((j) => j.id)).toEqual(["j2"]);
+    // A held-back retry blocks the next one and says so.
+    index.jobSetDisabled("j2", true);
+    expect(index.jobRetry("j3", "j")).toMatchObject({ status: "disabled", job: { id: "j2" } });
+
+    // An upload retries against its archived stream.
+    index.jobInsert("u", "streams/g2/a.brepstream", "g2", "upload");
+    index.jobClaim("u", "upload");
+    index.jobUpdate("u", "error", "bad");
+    expect(index.jobRetry("u2", "u")).toMatchObject({
+      status: "queued",
+      job: { id: "u2", streamKey: "streams/g2/a.brepstream", gameId: "g2", kind: "upload" },
+    });
+    expect(index.jobRetry("u3", "u")).toMatchObject({ status: "duplicate", job: { id: "u2" } });
+    expect(index.jobRetry("x", "nope")).toBeNull();
+  });
+});
+
 // A daemon that was mid-run keeps beating until its engine stops. Those beats
 // must not put the row back into "processing" a second after it was reset —
 // but the outcome, when it finally lands, is still worth recording.

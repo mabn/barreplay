@@ -1779,6 +1779,38 @@ export class ReplayIndex extends DurableObject<Env> {
     return rows.length === 0 ? null : jobRow(rows[0]);
   }
 
+  /** jobRetry queues the same work again under a fresh id: the queue page's
+   * "Retry" for a job that failed (or finished, when a re-run is wanted).
+   * Null when the id is unknown.
+   *
+   * Nothing is retried in place. The old row is the record of what happened
+   * — its error, its stats, its samples — and a state flipped back to pending
+   * would lose that, while a fresh row keeps both attempts side by side. A
+   * re-sim goes through jobAnnounce, so a job already pending or running for
+   * the game is handed back instead of doubled ("duplicate"), and a held-back
+   * one says so ("disabled"). An upload is re-queued against the SAME archived
+   * stream, which is still in the bucket (the archive is append-only), with
+   * the same guard on an active job for that stream. */
+  jobRetry(newId: string, id: string): JobEnqueue | null {
+    const job = this.jobGet(id);
+    if (job === null) return null;
+    if (job.kind === "resim") return this.jobAnnounce(newId, job.gameId, "resim");
+    const active = this.ctx.storage.sql
+      .exec(
+        `SELECT ${JOB_COLS} FROM jobs
+         WHERE stream_key = ? AND kind = 'upload' AND state IN ('pending', 'processing')
+         ORDER BY created_unix, id LIMIT 1`,
+        job.streamKey,
+      )
+      .toArray();
+    if (active.length > 0) {
+      const cur = jobRow(active[0]);
+      return { status: cur.disabled ? "disabled" : "duplicate", job: cur };
+    }
+    this.jobInsert(newId, job.streamKey, job.gameId, "upload");
+    return { status: "queued", job: this.jobGet(newId) };
+  }
+
   /** jobsPending lists what a daemon of this kind should work on: every
    * pending job of that kind, plus "processing" ones whose worker apparently
    * died (no update for the kind's stale window), oldest first.

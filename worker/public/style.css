@@ -315,6 +315,21 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
 #queuetable .jobbtn:hover { color: #cfe3f5; border-color: #3f4b5a; background: #222c37; }
 #queuetable .jobbtn.on { color: #b9a9d0; border-color: #4a3f5c; background: #241f2e; }
 #queuetable .jobbtn:disabled { cursor: default; opacity: .6; }
+/* The row's action menu: the ⋯ button opens it in place, anchored to the
+   cell, above the rows below. One open at a time (closeJobMenus). */
+#queuetable td.act { position: relative; }
+#queuetable .jobmenubtn { padding: 4px 7px; font-size: 13px; }
+#queuetable .jobmenubtn[aria-expanded] { opacity: 1; color: #cfe3f5; border-color: #3f4b5a; }
+#queuetable .jobmenu {
+  position: absolute; right: 10px; top: calc(100% - 4px); z-index: 5; min-width: 120px;
+  background: #1b232c; border: 1px solid #3f4b5a; border-radius: 5px; padding: 4px;
+  box-shadow: 0 6px 18px rgba(0,0,0,.45); display: flex; flex-direction: column; gap: 2px;
+}
+#queuetable .jobmenu button {
+  font: inherit; font-size: 12px; text-align: left; padding: 6px 10px; border-radius: 3px;
+  color: #c7d3de; background: none; border: 0; cursor: pointer; white-space: nowrap;
+}
+#queuetable .jobmenu button:hover, #queuetable .jobmenu button:focus-visible { background: #222c37; color: #fff; outline: none; }
 /* A running job's live self-report, in the same cell a finished one puts its
    failure detail — the two never coexist (the worker clears progress when a job
    reaches a terminal state). The bar is deliberately thin and unlabelled: the

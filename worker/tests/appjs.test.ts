@@ -698,6 +698,8 @@ test('the catalog is fetched for the list view, not for a direct replay link', a
 // creates elements, sets text/class, and appends. Kept out of the eval string
 // (which a direct eval lets it reach) so the harness below stays readable.
 function fakeDom() {
+  const matches = (c: any, sel: string) =>
+    sel.includes('.') ? c.className.split(/\s+/).includes(sel.replace(/^.*\./, '')) : c.tag === sel;
   const node = (tag: string): any => {
     const n: any = {
       tag, children: [] as any[], style: {}, title: '', href: undefined as string | undefined,
@@ -711,12 +713,19 @@ function fakeDom() {
           if (want) n.classList.add(c); else n.classList.remove(c);
         },
       },
-      appendChild(c: any) { n.children.push(c); return c; },
-      append(...cs: any[]) { n.children.push(...cs); },
+      appendChild(c: any) { n.children.push(c); c.parentElement = n; return c; },
+      append(...cs: any[]) { for (const c of cs) { n.children.push(c); c.parentElement = n; } },
       attrs: {} as Record<string, string>,
       setAttribute(k: string, v: unknown) { n.attrs[k] = String(v); },
       getAttribute(k: string) { return n.attrs[k]; },
+      removeAttribute(k: string) { delete n.attrs[k]; },
       addEventListener() {},
+      focus() {},
+      // One class or one tag, which is all the queue's menu asks for.
+      querySelector(sel: string) { return walk(n).find((c) => matches(c, sel)) ?? null; },
+      querySelectorAll(sel: string) { return walk(n).filter((c) => matches(c, sel)); },
+      remove() { if (n.parentElement) n.parentElement.children = n.parentElement.children.filter((c: any) => c !== n); },
+      parentElement: null as any,
     };
     Object.defineProperty(n, 'textContent', {
       get: () => n._text,
@@ -731,6 +740,7 @@ function fakeDom() {
     // The job charts are SVG, which only createElementNS can make.
     createElementNS: (_ns: string, tag: string) => node(tag),
     querySelector: () => tbody,
+    querySelectorAll: () => walk(tbody).filter((c) => c.className.split(/\s+/).includes('jobmenu')),
     getElementById: (id: string) => (byId[id] ??= node('div')),
     body: { classList: { add() {}, remove() {}, toggle() {} } },
   };
@@ -1372,7 +1382,8 @@ test('a running job shows its live progress instead of an empty row', () => {
     ${extract('progressText')}
     ${extract('statsTooltip')}
     ${extract('fillProgressCell')}
-    ${extract('disableCell')}
+    ${extract('actionCell')}
+    ${extract('closeJobMenus')}
     ${extract('fmtDuration')} ${extract('fmtGameDuration')}
     ${APP.slice(APP.indexOf('const ERROR_KIND_LABELS'), APP.indexOf('const QUEUE_PAGE'))}
     ${extract('renderQueue')}
@@ -1414,13 +1425,19 @@ test('a running job shows its live progress instead of an empty row', () => {
   assert.match(tookOf(trs[0]).title, /Now: simulating/);
   assert.ok(trs[0].className.includes('hasstats'), 'and the row expands for the rest');
 
-  // The hold-back control, offered only where it can change anything: a
-  // finished job is already never handed out, so a switch on it would be a
-  // control that does nothing.
+  // The row's action menu: one ⋯ button, and what it opens depends on the
+  // job. A live job can be held back; a finished or failed one can be retried
+  // (a switch on it would do nothing, and a live one already covers the work).
   const btnOf = (tr: any) => walk(tr).find((n: any) => n.tag === 'button');
-  assert.equal(btnOf(trs[0]).textContent, 'Disable', 'a running job can be held back');
-  assert.equal(btnOf(trs[1]).textContent, 'Disable');
-  assert.equal(btnOf(trs[2]), undefined, 'a failed job has nothing to hold back');
+  const menuOf = (tr: any) => {
+    btnOf(tr).onclick({ stopPropagation() {} });
+    return walk(tr).filter((n: any) => n.attrs['role'] === 'menuitem').map((n: any) => n.textContent);
+  };
+  assert.equal(btnOf(trs[0]).textContent, '⋯');
+  assert.deepEqual(menuOf(trs[0]), ['Disable'], 'a running job can be held back');
+  assert.deepEqual(menuOf(trs[1]), ['Disable']);
+  assert.deepEqual(menuOf(trs[2]), ['Retry'], 'a failed job can be asked for again');
+  assert.equal(walk(trs[0]).filter((n: any) => n.className === 'jobmenu').length, 0, 'one menu open at a time');
 
   // The game's own facts, joined on by the worker: a queue of bare ids cannot
   // say whether an hour of engine time is buying an 8v8 or a duel.
@@ -1477,7 +1494,7 @@ test('a disabled job reads as disabled and offers the way back', () => {
     const replayHref = (id) => '/?replay=' + id, urlId = (e) => e.id, openReplay = () => {};
     ${extract('fmtDur')} ${extract('statsLines')} ${extract('progressLines')}
     ${extract('progressText')} ${extract('statsTooltip')} ${extract('fillProgressCell')}
-    ${extract('fmtSize')} ${extract('disableCell')} ${extract('fmtDuration')} ${extract('fmtGameDuration')}
+    ${extract('fmtSize')} ${extract('actionCell')} ${extract('closeJobMenus')} ${extract('fmtDuration')} ${extract('fmtGameDuration')}
     ${APP.slice(APP.indexOf('const ERROR_KIND_LABELS'), APP.indexOf('const QUEUE_PAGE'))}
     ${extract('renderQueue')}
     return renderQueue;
@@ -1490,8 +1507,13 @@ test('a disabled job reads as disabled and offers the way back', () => {
   assert.match(state.title, /Underlying state: pending/, 'the real state stays available');
 
   const btn = walk(tr).find((n: any) => n.tag === 'button');
-  assert.equal(btn.textContent, 'Enable');
-  assert.ok(btn.className.includes('on'), 'and it stays lit rather than waiting for a hover');
+  assert.ok(btn.className.includes('on'), 'and the menu button stays lit rather than waiting for a hover');
+  btn.onclick({ stopPropagation() {} });
+  assert.deepEqual(
+    walk(tr).filter((n: any) => n.attrs['role'] === 'menuitem').map((n: any) => n.textContent),
+    ['Enable'],
+    'the way back is in the menu',
+  );
 });
 
 // The healthcheck history, drawn. Three separate plots, never one with three

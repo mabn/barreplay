@@ -99,6 +99,18 @@ class FakeIndex {
   jobsPending(kind: JobKind): IngestJob[] {
     return [...this.jobs.values()].filter((j) => j.kind === kind && j.state === "pending" && !j.disabled);
   }
+  // The same work again under a fresh id; the old row stays as the record.
+  jobRetry(newId: string, id: string): { status: string; job: IngestJob | null } | null {
+    const j = this.jobs.get(id);
+    if (!j) return null;
+    if (j.kind === "resim") return this.jobAnnounce(newId, j.gameId, "resim");
+    const active = [...this.jobs.values()].find(
+      (o) => o.streamKey === j.streamKey && o.kind === "upload" && (o.state === "pending" || o.state === "processing"),
+    );
+    if (active) return { status: active.disabled ? "disabled" : "duplicate", job: active };
+    this.jobInsert(newId, j.streamKey, j.gameId, "upload");
+    return { status: "queued", job: this.jobs.get(newId) ?? null };
+  }
   jobSetDisabled(id: string, disabled: boolean): boolean {
     const j = this.jobs.get(id);
     if (!j) return false;
@@ -1466,6 +1478,39 @@ test("backfill needs the write token and rejects junk bodies", async () => {
   assert.deepEqual(await asJson(open), { received: 0, fresh: 0, inserted: 0 });
 });
 
+// The queue page's per-row "Retry": a failed re-sim's game is in the catalog
+// (or at least refused by the paste box once it has a job row), so this is the
+// browser's only way to ask for it again. The old row is kept as the record.
+test("a failed job can be retried from the queue page, under a fresh id", async (t) => {
+  const { env, index } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  const { job } = await asJson(
+    await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env),
+  );
+  const retry = (id: string) => app.request(`/api/admin/jobs/${id}/retry`, { method: "POST" }, env);
+
+  // While the first is still pending, a retry hands that one back.
+  let r = await asJson(await retry(job));
+  assert.deepEqual(r, { status: "duplicate", job });
+
+  index.jobGet(job)!.state = "error";
+  r = await asJson(await retry(job));
+  assert.equal(r.status, "queued");
+  assert.notEqual(r.job, job, "a fresh row, not the old one flipped back");
+  assert.equal(index.jobGet(job)?.state, "error", "the failed attempt stays on record");
+  assert.equal(index.jobGet(r.job)?.gameId, RESIM_ID);
+  assert.equal(index.jobGet(r.job)?.kind, "resim");
+
+  // An upload retries against its archived stream.
+  index.jobInsert("up1", "streams/g/x.brepstream", "g", "upload");
+  index.jobGet("up1")!.state = "error";
+  const u = await asJson(await retry("up1"));
+  assert.equal(u.status, "queued");
+  assert.equal(index.jobGet(u.job)?.streamKey, "streams/g/x.brepstream");
+
+  assert.equal((await retry("nope")).status, 404);
+});
+
 // ---- the admin gate (Cloudflare Access) -------------------------------------
 // Everything under /api/admin/ answers 401 to anyone without an identity.
 // Three identities count: ADMIN_OPEN (dev), the configured bearer token, and
@@ -1480,6 +1525,7 @@ const ADMIN_ROUTES: [string, RequestInit][] = [
   ["/api/admin/replays/x/view", { method: "POST", body: JSON.stringify({ view: "full" }) }],
   ["/api/admin/replays/x/refresh-settings", { method: "POST" }],
   ["/api/admin/jobs/x/disabled", { method: "POST", body: JSON.stringify({ disabled: true }) }],
+  ["/api/admin/jobs/x/retry", { method: "POST" }],
 ];
 
 test("admin routes are closed without an identity, and closed when Access is not configured", async () => {
