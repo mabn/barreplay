@@ -1895,13 +1895,19 @@ function drawOverlay(u) {
   // common case rather than the rare one, so the scan's job there is only to
   // skip the bar loop entirely on the frames (and the zoom levels) with
   // nothing to draw.
+  //
+  // EITHER bar flag is enough to stop scanning, because the two share one
+  // pass that re-tests every unit anyway — the flags only decide whether to
+  // enter it. Requiring both would mean never breaking out below
+  // HEALTH_BAR_MIN_SCALE, where anyHealth can never become true: exactly the
+  // zoomed-out view with the most units to walk.
   const healthZoom = scale >= HEALTH_BAR_MIN_SCALE;
   let anyLine = false, anyBar = false, anyHealth = false;
   for (let i = 0; i < u.length; i += STRIDE) {
     if (u[i + F.TARGET] !== 0) anyLine = true;
     if (u[i + F.BUILD] < BUILD_DONE) anyBar = true;
     else if (healthZoom && u[i + F.HP] < u[i + F.MAXHP]) anyHealth = true;
-    if (anyLine && anyBar && anyHealth) break;
+    if (anyLine && (anyBar || anyHealth)) break;
   }
 
   if (showBuildLines && anyLine) {
