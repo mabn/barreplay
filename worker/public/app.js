@@ -5170,7 +5170,10 @@ function renderGames(errMsg) {
       td.appendChild(s);
       tr.appendChild(td);
     }
-    cell(g.gameSize);
+    {
+      const td = cell(sizeLabel(g.gameSize), 'size');
+      if (g.gameSize) td.title = g.gameSize + ' — the team spec BAR recorded';
+    }
     cell(g.preset);
     // Players: each side's top names by OS, three per side for a two-team
     // game and one when there are more sides, in the viewer's per-ally
@@ -5184,7 +5187,8 @@ function renderGames(errMsg) {
         td.textContent = '—';
       } else {
         const per = groups.length === 2 ? 3 : 1;
-        groups.forEach((grp, i) => {
+        const { shown: sides, hidden } = sidesShown(groups);
+        sides.forEach((grp, i) => {
           if (i) {
             const sep = document.createElement('span');
             sep.className = 'vs';
@@ -5204,6 +5208,7 @@ function renderGames(errMsg) {
           s.title = tip;
           td.appendChild(s);
         });
+        if (hidden) td.appendChild(moreSidesSpan(hidden));
       }
       tr.appendChild(td);
     }
@@ -5527,7 +5532,7 @@ function renderQueue(errMsg) {
     // is this an 8v8 worth the machine time, or a three-minute duel?
     {
       const g = j.game || {};
-      const size = cell(g.gameSize || null, 'size');
+      const size = cell(sizeLabel(g.gameSize), 'size');
       if (g.gameSize) size.title = g.gameSize + ' — the team spec BAR recorded';
       const dur = cell(g.durationSec ? fmtGameDuration(g.durationSec) : null, 'dur');
       if (g.durationSec) dur.title = fmtDur(g.durationSec) + ' of game time';
@@ -5837,6 +5842,7 @@ function renderHome(errMsg) {
       a.textContent = text ?? '—';
       td.appendChild(a);
       tr.appendChild(td);
+      return td;
     };
     cell(e.startUnix ? fmtDateShort(e.startUnix) : null);
     cell(e.durationSec != null ? fmtGameDuration(e.durationSec) : null);
@@ -5868,7 +5874,10 @@ function renderHome(errMsg) {
       td.appendChild(a);
       tr.appendChild(td);
     }
-    cell(e.gameSize);
+    {
+      const td = cell(sizeLabel(e.gameSize), 'size');
+      if (e.gameSize) td.title = e.gameSize + ' — the team spec BAR recorded';
+    }
     // Players: each side's top names by OS — three per side for a two-team
     // game, one when there are more sides. The side whose client recorded
     // the current upload is marked; the full known roster (with OS) rides
@@ -5894,7 +5903,8 @@ function renderHome(errMsg) {
         a.textContent = '—';
       } else {
         const per = groups.length === 2 ? 3 : 1;
-        groups.forEach((g, i) => {
+        const { shown: sides, hidden } = sidesShown(groups);
+        sides.forEach((g, i) => {
           if (i) {
             const sep = document.createElement('span');
             sep.className = 'vs';
@@ -5921,6 +5931,7 @@ function renderHome(errMsg) {
           s.title = tip;
           a.appendChild(s);
         });
+        if (hidden) a.appendChild(moreSidesSpan(hidden));
       }
       td.appendChild(a);
       tr.appendChild(td);
@@ -6577,6 +6588,51 @@ function fmtDuration(sec) {
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
   const mm = h ? String(m).padStart(2, '0') : String(m);
   return (h ? h + ':' : '') + mm + ':' + String(s).padStart(2, '0');
+}
+
+// A game's Size column stops being readable once it stops being two sides: a
+// 16-player free-for-all is recorded as "1v1v1v1v1v1v1v1v1v1v1v1v1v1v1v1",
+// 31 characters in a column sized for "8v8", with sixteen names beside it in
+// the next one — between them they pushed every other column of the list out
+// of shape. Both columns therefore abbreviate past the same threshold, so a
+// row can never read "8v8" beside an ellipsis. FOUR sides rather than three,
+// because an 8v8 played with scavengers is recorded as "8v8v1" — two sides
+// plus a team nobody plays — and that is not an FFA.
+const FFA_MIN_SIDES = 4;
+const PLAYERS_MAX_SIDES = 2;
+
+// sideCount reads the number of sides out of a "8v8" / "4v4v4v4" team spec
+// (viz.GameSizeSpec / games.ts gameSizeSpec build them, always digits joined
+// with "v").
+function sideCount(spec) {
+  return String(spec).split('v').length;
+}
+
+// sizeLabel is what the Size column prints: the spec itself, or the word for
+// what it is once the spec is longer than the thing it describes. Callers put
+// the spec on the cell's tooltip, so the exact shape of an FFA is still one
+// hover away.
+function sizeLabel(spec) {
+  if (!spec) return null;
+  return sideCount(spec) >= FFA_MIN_SIDES ? 'FFA' : spec;
+}
+
+// sidesShown splits a roster into the sides the Players column draws and the
+// count it abbreviates away. Sixteen sides of one name each is not something
+// anyone reads across a table row; the first two and a count of the rest say
+// the same and fit. The full roster stays in each side's tooltip, as always.
+function sidesShown(groups) {
+  if (groups.length < FFA_MIN_SIDES) return { shown: groups, hidden: 0 };
+  return { shown: groups.slice(0, PLAYERS_MAX_SIDES), hidden: groups.length - PLAYERS_MAX_SIDES };
+}
+
+// moreSidesSpan is the "v …" that ends an abbreviated Players cell.
+function moreSidesSpan(hidden) {
+  const span = document.createElement('span');
+  span.className = 'vs';
+  span.textContent = 'v …';
+  span.title = `+${hidden} more ${hidden === 1 ? 'side' : 'sides'}`;
+  return span;
 }
 
 // fmtGameDuration renders a game's length: "1h 20m", or "20m" under an hour —

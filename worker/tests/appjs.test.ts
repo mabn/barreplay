@@ -21,6 +21,28 @@ const APP = readFileSync(fileURLToPath(new URL('../public/app.js', import.meta.u
 // new undefined call must fail, not be waved through.
 const BROWSER_GLOBALS = new Set(['Image', 'requestAnimationFrame', 'cancelAnimationFrame', 'XMLHttpRequest']);
 
+// The Size and Players columns abbreviate a free-for-all, and both do it past
+// the SAME side count. Every renderer harness below needs those four pure
+// helpers, and lifting them whole keeps the threshold in app.js rather than
+// copied into the tests.
+const FFA_HELPERS = (() => {
+  const fn = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+  return [
+    APP.match(/const FFA_MIN_SIDES = \d+;/)![0],
+    APP.match(/const PLAYERS_MAX_SIDES = \d+;/)![0],
+    fn('sideCount'), fn('sizeLabel'), fn('sidesShown'), fn('moreSidesSpan'),
+  ].join('\n');
+})();
+
 const KEYWORDS = new Set([
   'if', 'for', 'while', 'switch', 'catch', 'return', 'typeof', 'function', 'await',
   'new', 'do', 'else', 'in', 'of', 'case', 'delete', 'void', 'yield', 'instanceof',
@@ -800,6 +822,7 @@ test('the games section lists the mirror with what this site has of each game', 
     ${APP.slice(APP.indexOf('const HIDDEN_SETTINGS'), APP.indexOf('// ---- drag&drop publishing'))}
     ${APP.slice(APP.indexOf('const SETTINGS_BADGES'), APP.indexOf(';', APP.indexOf('const SETTINGS_BADGES')) + 1)}
     ${extract('gameHaveLabel')}
+    ${FFA_HELPERS}
     ${extract('renderGames')}
     renderGames.setAdmin = (on) => { admin = on; };
     return renderGames;
@@ -923,6 +946,7 @@ test('a game being processed is listed, badged first, and cannot be opened', () 
     const playersColumn = () => 'players';
     ${extract('mapFileGuess')}
     ${extract('renderPager')}
+    ${FFA_HELPERS}
     ${extract('renderHome')}
     return renderHome;
   })()`);
@@ -1001,6 +1025,7 @@ test('the Players header swaps the column to lobby names and back', () => {
     ${extract('playersColumn')}
     ${extract('mapFileGuess')}
     ${extract('renderPager')}
+    ${FFA_HELPERS}
     ${extract('renderHome')}
     return renderHome;
   })()`);
@@ -1386,6 +1411,7 @@ test('a running job shows its live progress instead of an empty row', () => {
     ${extract('closeJobMenus')}
     ${extract('fmtDuration')} ${extract('fmtGameDuration')}
     ${APP.slice(APP.indexOf('const ERROR_KIND_LABELS'), APP.indexOf('const QUEUE_PAGE'))}
+    ${FFA_HELPERS}
     ${extract('renderQueue')}
     return renderQueue;
   })()`);
@@ -1496,6 +1522,7 @@ test('a disabled job reads as disabled and offers the way back', () => {
     ${extract('progressText')} ${extract('statsTooltip')} ${extract('fillProgressCell')}
     ${extract('fmtSize')} ${extract('actionCell')} ${extract('closeJobMenus')} ${extract('fmtDuration')} ${extract('fmtGameDuration')}
     ${APP.slice(APP.indexOf('const ERROR_KIND_LABELS'), APP.indexOf('const QUEUE_PAGE'))}
+    ${FFA_HELPERS}
     ${extract('renderQueue')}
     return renderQueue;
   })()`)();
@@ -1675,6 +1702,48 @@ test('game durations render minutes-precision, started dates drop the year', () 
   assert.ok(!fns.fmtDateShort(1787349909).includes('2026'));
 });
 
+// A free-for-all is the case both list columns are not built for: BAR records
+// a 16-player one as a 31-character spec with sixteen names beside it, which
+// pushed every other column of the replay list out of shape. Both columns
+// abbreviate past the SAME side count, so a row can never read "8v8" beside an
+// ellipsis — that agreement is what these pin.
+test('a free-for-all abbreviates in both the size and the players column', () => {
+  const fns = eval(`(function(){
+    ${FFA_HELPERS}
+    return { sideCount, sizeLabel, sidesShown };
+  })()`) as {
+    sideCount: (s: string) => number;
+    sizeLabel: (s: string | null) => string | null;
+    sidesShown: (g: unknown[]) => { shown: unknown[]; hidden: number };
+  };
+
+  // The ordinary games keep their spec: it says more than the word would.
+  assert.equal(fns.sizeLabel('8v8'), '8v8');
+  assert.equal(fns.sizeLabel('1v1'), '1v1');
+  // An 8v8 played with scavengers is recorded as a third team nobody plays.
+  // Three sides is not an FFA, which is why the cutoff is four.
+  assert.equal(fns.sizeLabel('8v8v1'), '8v8v1');
+  assert.equal(fns.sizeLabel('4v4v4v4'), 'FFA');
+  assert.equal(fns.sizeLabel('1v1v1v1v1v1v1v1v1v1v1v1v1v1v1v1'), 'FFA');
+  assert.equal(fns.sideCount('1v1v1v1v1v1v1v1v1v1v1v1v1v1v1v1'), 16);
+  // Nothing recorded stays nothing, so the cell keeps its dash.
+  assert.equal(fns.sizeLabel(null), null);
+  assert.equal(fns.sizeLabel(''), null);
+
+  // The rosters the Players column draws whole, and the one it cuts.
+  const sides = (n: number) => Array.from({ length: n }, (_, i) => i);
+  assert.deepEqual(fns.sidesShown(sides(2)), { shown: [0, 1], hidden: 0 });
+  assert.deepEqual(fns.sidesShown(sides(3)), { shown: [0, 1, 2], hidden: 0 });
+  assert.deepEqual(fns.sidesShown(sides(4)), { shown: [0, 1], hidden: 2 });
+  assert.deepEqual(fns.sidesShown(sides(16)), { shown: [0, 1], hidden: 14 });
+  // The two columns turn over together: whatever the size column calls an
+  // FFA, the players column abbreviates.
+  for (const n of [2, 3, 4, 8, 16]) {
+    const spec = Array(n).fill('1').join('v');
+    assert.equal(fns.sizeLabel(spec) === 'FFA', fns.sidesShown(sides(n)).hidden > 0, `${n} sides`);
+  }
+});
+
 // The id filter's input is a paste target, and what people paste is as often a
 // link as a bare id. gameIdIn is the bit with a decision in it, so it is worth
 // pinning against the real shapes: a gex link, a bar-rts link, the id on its
@@ -1772,6 +1841,75 @@ test('a bare game id resolves to the served revision before anything is fetched'
 
 // The GUI's own links carry the bare id everywhere EXCEPT an explicit
 // alternative upload, whose entire point is a specific revision.
+// And what the two columns actually put in the row. This is the case the
+// abbreviation exists for: a 16-player free-for-all, whose spec and roster
+// between them stretched the replay list until every other column lost its
+// shape.
+test('a 16-way free-for-all row stays the width of an 8v8 one', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+
+  const dom = fakeDom();
+  const side = (ally: number, names: string[]) => ({ ally, count: names.length, players: names.map((name) => ({ name, os: 20 })) });
+  const rows = [
+    { id: 'ffa', rid: 'ffa-1', startUnix: 1, durationSec: 60, map: 'M', sizeBytes: 1, settings: null, uploads: [],
+      gameSize: Array(16).fill('1').join('v'),
+      players: Array.from({ length: 16 }, (_, i) => side(i, ['p' + i])) },
+    { id: 'team', rid: 'team-1', startUnix: 1, durationSec: 60, map: 'M', sizeBytes: 1, settings: null, uploads: [],
+      gameSize: '8v8v1', players: [side(0, ['a', 'b', 'c', 'd']), side(1, ['e'])] },
+  ];
+  const render = eval(`(function(){
+    const document = dom.document;
+    const replayList = rows;
+    const homeDataLoaded = true;
+    const ALLY_HUES = [0, 120];
+    ${extract('urlId')}
+    const replayHref = (id) => '/?replay=' + id;
+    const fmtDate = () => 'date', fmtDateShort = () => 'date', fmtDuration = () => 'dur', fmtGameDuration = () => 'dur', fmtSize = () => 'size';
+    const settingsBadges = () => [];
+    const adminMode = () => false, syncOrphanButton = () => {}, filterQuery = () => '';
+    const PAGE_SIZE = 50; let homePage = 0, homeHasNext = false;
+    const goPage = () => {};
+    const playersColumn = () => 'players';
+    ${extract('mapFileGuess')}
+    ${extract('renderPager')}
+    ${FFA_HELPERS}
+    ${extract('renderHome')}
+    return renderHome;
+  })()`);
+
+  render();
+  const cellOf = (i: number, cls: string) =>
+    dom.tbody.children[i].children.find((td: any) => td.className.split(/\s+/).includes(cls));
+  const textOf = (n: any) => walk(n).map((c: any) => c.textContent).join(' ');
+
+  const ffaSize = cellOf(0, 'size');
+  assert.equal(textOf(ffaSize).trim(), 'FFA', 'the spec is longer than the thing it describes');
+  assert.equal(ffaSize.title, rows[0].gameSize + ' — the team spec BAR recorded', 'the spec stays one hover away');
+
+  // Two sides and a count of the rest, in place of sixteen names.
+  const ffaPlayers = textOf(cellOf(0, 'players'));
+  assert.match(ffaPlayers, /p0.*v.*p1.*v …/, ffaPlayers);
+  for (const n of ['p2', 'p9', 'p15']) assert.ok(!ffaPlayers.includes(n), `${n} must not be drawn`);
+  const more = walk(cellOf(0, 'players')).find((c: any) => c.textContent === 'v …');
+  assert.equal(more.title, '+14 more sides');
+
+  // The 8v8-with-scavengers row is untouched: three teams recorded, two sides
+  // played, and neither column has anything to abbreviate.
+  assert.equal(textOf(cellOf(1, 'size')).trim(), '8v8v1');
+  const teamPlayers = textOf(cellOf(1, 'players'));
+  assert.ok(teamPlayers.includes('a, b, c +1') && teamPlayers.includes('e'), teamPlayers);
+  assert.ok(!teamPlayers.includes('…'), 'nothing to abbreviate');
+});
+
 test('list rows link the bare game id; alt-upload links keep their revision', () => {
   const extract = (n: string) => {
     const start = APP.indexOf(`function ${n}(`);
@@ -1805,6 +1943,7 @@ test('list rows link the bare game id; alt-upload links keep their revision', ()
     const playersColumn = () => 'players';
     ${extract('mapFileGuess')}
     ${extract('renderPager')}
+    ${FFA_HELPERS}
     ${extract('renderHome')}
     return renderHome;
   })()`);
