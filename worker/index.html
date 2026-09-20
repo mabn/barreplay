@@ -280,12 +280,15 @@
     <div class="stat"><span>Sim frame</span><b id="s_frame">—</b></div>
     <div class="stat"><span>Units</span><b id="s_units">—</b></div>
 
-    <h2>Players</h2>
     <!-- BAR's spectator team-comparison rows (see renderTeamStats in app.js).
-         Only a two-sided game has anything to compare, so this stays hidden
-         for an FFA, for a capture with no roster, and until the economy
-         timeline has landed. -->
+         It sits ABOVE the Players heading rather than under it: the heading
+         names the roster below it, and these rows describe the two SIDES, not
+         the players. Only a two-sided game has anything to compare, so this
+         stays hidden for an FFA, for a capture with no roster, and until the
+         economy timeline has landed. -->
     <div id="teamstats" style="display:none"></div>
+
+    <h2>Players</h2>
     <div id="players"></div>
 
     <!-- Chat transcript. Hidden when the capture recorded no messages — a

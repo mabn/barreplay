@@ -2238,14 +2238,21 @@ run dev` in `worker/` plus `pack -upload local`.)
   footprints; the layer is off by default (`showFootprints`). Unlike icons, footprints are drawn
   in world space, so they scale with zoom and are centred on the unit position (the footprint
   centre).
-- **Team statistics bar (`app.js` `renderTeamStats`, above the sidebar's player
-  list)**: BAR's spectator team comparison
+- **Team statistics bar (`app.js` `renderTeamStats`, above the sidebar's
+  "Players" HEADING — not under it: that heading names the roster below it,
+  and these rows are about the two SIDES, so the block leads with an `h2`'s
+  top margin and leaves the gap beneath it to the heading that follows)**:
+  BAR's spectator team comparison
   (`luaui/Widgets/gui_spectator_hud.lua`), reproduced for the three metrics a
   capture can answer — metal income, energy income, and ARMY VALUE. One row per
   metric: the metric's name, then one track holding both sides — each side's
   value at its own end in its team colour, and between them the LEAD, the
   leader's margin over the TRAILING side rather than its share of the total, so
-  a 2:1 game reads "100%" and a side at zero reads "∞" rather than 100%. Values
+  a 2:1 game reads "100%" and a side at zero reads "∞" rather than 100%. The
+  lead reads in the LEADING side's colour, which is what says whose lead it is
+  — the number alone is a bare margin that could belong to either end of the
+  row; the tint is inline and a DEAD HEAT simply sets none, falling back to the
+  stylesheet's muted tone, since a tie has no leader to name. Values
   format like BAR's own `formatResources(v, true)` (`fmtStat`: 7.0k, 504k, 3.7M,
   192M) rather than `fmtNum`, whose trailing-zero trimming would let a reading
   jitter in width from "7k" to "7.01k" as the game ran.

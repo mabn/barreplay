@@ -2849,13 +2849,20 @@ function renderTeamStats(fr, res, playing) {
     const fa = total > 0 ? a / total : 0.5;
     const fill = (i, grow) =>
       `<i style="flex-grow:${grow.toFixed(4)};background:${sides[i].color}"></i>`;
+    // The lead reads in the LEADING side's colour, which is what says whose
+    // lead it is: the number alone is a bare margin and could belong to
+    // either end of the row. A dead heat has no leader, so it keeps the
+    // muted tone the stylesheet gives it (an empty inline style loses to the
+    // class rule, which is the tie's only case).
+    const leadColor = a === b ? '' : (a > b ? sides[0].color : sides[1].color);
     return `<div class="tsrow" title="${escapeHtml(tip + ' \u2014 ' + label)}">` +
       `<span class="tslabel">${escapeHtml(label)}</span>` +
       '<span class="tsbar">' +
       `<span class="tsfills">${fill(0, fa)}${fill(1, 1 - fa)}</span>` +
       '<span class="tsvals">' +
       `<b style="color:${sides[0].color}">${escapeHtml(fmtStat(a))}</b>` +
-      `<b class="tslead">${escapeHtml(tsLead(a, b))}</b>` +
+      `<b class="tslead"${leadColor ? ` style="color:${leadColor}"` : ''}>` +
+      `${escapeHtml(tsLead(a, b))}</b>` +
       `<b style="color:${sides[1].color}">${escapeHtml(fmtStat(b))}</b>` +
       '</span></span></div>';
   }).join('');
