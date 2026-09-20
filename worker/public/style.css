@@ -544,9 +544,11 @@ canvas { display: block; width: 100%; height: 100%; background: #0c0f13; cursor:
   font-variant-numeric: tabular-nums;
 }
 /* Each side's value sits at its own end, the lead between them — so a value's
-   position says which side it belongs to, as its colour does. The lead is
-   tinted inline with the LEADING side's colour (renderTeamStats); the muted
-   tone here is what a dead heat, which has no leader to name, falls back to. */
+   position says which side it belongs to, as its colour does. Every one of
+   those colours is the team's run through app.js's readableOn against this
+   track, since a raw BAR team colour as 11px text can sit at 2:1. The lead is
+   tinted inline with the LEADING side's (renderTeamStats); the muted tone here
+   is what a dead heat, which has no leader to name, falls back to. */
 .tsvals > b:first-child { flex: 1; text-align: left; }
 .tsvals > b:last-child { flex: 1; text-align: right; }
 .tsvals .tslead { flex: 0 0 auto; color: #9fb0bf; }

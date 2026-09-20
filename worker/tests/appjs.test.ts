@@ -86,6 +86,73 @@ test('app.js still defines its load-path entry points', () => {
   }
 });
 
+// Team colours come out of the game, where they are blocks on a lit map, and
+// BAR's default blue as 11px text on the sidebar sits at a contrast of 2:1.
+// readableOn is what stops that reaching the screen, so the floor it promises
+// is pinned here — against the REAL surfaces app.js names, so a change to
+// either the constants or the walk has to face this test.
+test('team colours are lifted to a readable contrast as text', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('not found: ' + n);
+  };
+  const num = (n: string) => Number(APP.match(new RegExp(`const ${n} = ([\\d.]+);`))![1]);
+  const hex = (n: string) => APP.match(new RegExp(`const ${n} = '(#[0-9a-f]{6})';`))![1];
+  const TEXT_CONTRAST = num('TEXT_CONTRAST');
+  const TRACK_BG = hex('TRACK_BG'), SIDEBAR_BG = hex('SIDEBAR_BG'), TOOLTIP_BG = hex('TOOLTIP_BG');
+
+  // cssToTint normalises through a 2D canvas in the browser; the colours here
+  // are already #rrggbb, which is what it would hand back.
+  const cssToTint = (c: string) => [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16) / 255);
+  const readableCache = new Map<string, string>();
+  const api = eval(`(function(){
+    ${extract('relLuminance')}
+    ${extract('contrastRatio')}
+    ${extract('rgbToHsl')}
+    ${extract('hslToRgb')}
+    ${extract('tintToCss')}
+    ${extract('readableOn')}
+    return { readableOn, contrastRatio, rgbToHsl };
+  })()`);
+  const ratio = (a: string, b: string) => api.contrastRatio(cssToTint(a), cssToTint(b));
+  const hue = (c: string) => api.rgbToHsl(cssToTint(c))[0];
+
+  // The two colours from the report that started this: BAR's default blue and
+  // red, both under the floor as text on the statistics track.
+  for (const [raw, bg] of [['#0b3ef3', TRACK_BG], ['#ff1005', TRACK_BG],
+                           ['#0b3ef3', SIDEBAR_BG], ['#0b3ef3', TOOLTIP_BG]] as const) {
+    assert.ok(ratio(raw, bg) < TEXT_CONTRAST, `${raw} on ${bg} is the unreadable case`);
+    const lifted = api.readableOn(raw, bg);
+    assert.ok(ratio(lifted, bg) >= TEXT_CONTRAST,
+      `${raw} on ${bg} lifted to ${lifted}, contrast ${ratio(lifted, bg).toFixed(2)}`);
+    // Hue is what says which side it is, so the lift may not move it.
+    assert.ok(Math.abs(hue(lifted) - hue(raw)) < 1, `${raw} kept its hue as ${lifted}`);
+  }
+
+  // A colour that already clears the floor is handed back untouched — most are,
+  // and re-tinting them would wash the list out for nothing.
+  for (const bright of ['#ffff00', '#00ff00', '#c7d0d9']) {
+    assert.ok(ratio(bright, TRACK_BG) >= TEXT_CONTRAST, `${bright} is already readable`);
+    assert.equal(api.readableOn(bright, TRACK_BG), bright, `${bright} is unchanged`);
+  }
+
+  // Greys have no hue to keep; black still has to clear the floor rather than
+  // stay black, and the walk must terminate.
+  assert.ok(ratio(api.readableOn('#000000', TRACK_BG), TRACK_BG) >= TEXT_CONTRAST,
+    'black lifts to a readable grey');
+  // Nothing is lightened further than it needed: one step darker misses.
+  const lifted = api.readableOn('#0b3ef3', TRACK_BG);
+  const [h, sat, l] = api.rgbToHsl(cssToTint(lifted));
+  assert.ok(l - 0.02 <= api.rgbToHsl(cssToTint('#0b3ef3'))[2] ||
+    api.contrastRatio(eval('(' + extract('hslToRgb') + ')')(h, sat, l - 0.02), cssToTint(TRACK_BG)) < TEXT_CONTRAST,
+    'the walk stops at the first step that clears the floor');
+});
+
 // The sidebar chat panel's scroll rule, pinned because it is subtle and easy to
 // get wrong: show only what has been said, stay parked at the bottom, stop
 // following once the reader scrolls away, resume when they scroll back down.
@@ -141,6 +208,9 @@ test('chat log shows only sent lines and sticks to the bottom', () => {
   const data = { sampleEvery: 30 };
   const escapeHtml = (s: any) => String(s), fmtTime = (s: number) => String(s | 0);
   const commColor = () => '#fff', commName = () => 'p', go = () => {};
+  // The author name is tinted through the contrast floor; identity here, since
+  // what this test pins is the scroll rule (readableOn has its own test).
+  const readableOn = (c: string) => c, SIDEBAR_BG = '#161b21';
 
   const api = eval(`(function(){
     ${extract('renderChat')}

@@ -2263,7 +2263,8 @@ run dev` in `worker/` plus `pack -upload local`.)
   that way once and was rejected on sight). The row is instead built from the
   vocabulary of the player list right under it: the `.rmeter` track colour and
   3px radius, and team colour as the thing that says whose a number is, exactly
-  as `.pname` uses it. The proportion BAR draws as two full-height fills with a
+  as `.pname` uses it — run, like every other piece of team-coloured TEXT, through
+  `readableOn` (see the colour-contrast note below). The proportion BAR draws as two full-height fills with a
   knob riding their boundary is a 3px BAND along the bottom of the track: two
   full-width fills make the row the loudest thing in a sidebar whose own meters
   are a sliver of grey, and they put each side's number on a field of its own
@@ -2456,6 +2457,26 @@ run dev` in `worker/` plus `pack -upload local`.)
   via WebGL instanced sprites (2D-canvas fallback), and does timeline scrub / play /
   zoom / pan / hover-tooltip. Colours are assigned per ally-team (a base hue per ally,
   lightness varied per team within it).
+- **Team colour as TEXT goes through a contrast floor (`app.js` `readableOn`)**: a
+  team colour is picked to be read as a BLOCK on a lit map, and several of BAR's
+  are unreadable as small text on this dark sidebar — the default blue,
+  `#0b3ef3`, is a contrast of **2.0** against the statistics track where 11px
+  bold wants 4.5 (WCAG AA), and its red only reaches 3.6. `readableOn(css,
+  surface)` raises such a colour's LIGHTNESS in HSL until it clears
+  `TEXT_CONTRAST`, so hue and saturation are untouched and the word still says
+  whose it is; a colour already bright enough comes back unchanged, which is
+  most of them, and one that cannot clear the floor short of white ends there.
+  The surfaces are named constants mirroring style.css (`SIDEBAR_BG`,
+  `TRACK_BG`, `TOOLTIP_BG`) and results are memoized per colour+surface, since
+  these render per tick. EVERY team-coloured text in the UI uses it — the
+  statistics values and their lead, the player list's names, the chat log's
+  author names, the map tooltip's team row — and NO FILL does: showing a team
+  colour as a block is the one thing it was chosen for, so the statistics
+  bands, the unit icons and the chat bubbles keep it raw. The cost, accepted:
+  two teams of one ally whose colours differ only in LIGHTNESS converge once
+  both are lifted to the same floor, which is unavoidable with a floor and
+  cheap beside text nobody can read (the rank, flag, OS and ally grouping all
+  still tell those rows apart).
 
 Guarding it: `internal/viz/viz_test.go` encodes a synthetic `.brp` through the wire
 encoder and checks the head payload (bounds, teams incl. frame-only ones, footprints,
