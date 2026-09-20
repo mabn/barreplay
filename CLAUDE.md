@@ -2364,9 +2364,12 @@ run dev` in `worker/` plus `pack -upload local`.)
   (0.016% of a 60fps budget), so it is not gated on playback speed. That bar is
   YELLOW (`BUILD_BAR_COLOR`, the build line's own colour, so a construction site
   and the builders feeding it read as one thing), which frees green for the
-  HEALTH BAR: a thin green bar over any FINISHED unit whose hp is under its
-  maxHp, drawn only at `HEALTH_BAR_MIN_SCALE` (0.25 screen px per elmo) or
-  closer — zoomed further out a unit is a few px wide, the bars' 10px minimum
+  HEALTH BAR: a thin green bar over any FINISHED unit missing at least
+  `DAMAGE_MIN_FRAC` (2%) of its health — a bar a pixel short of full is noise,
+  and in a real fight it is most of the map, since hp is quantized to whole
+  points and a unit grazed by one stray shot reads as damaged exactly like one
+  about to die — drawn only at `HEALTH_BAR_MIN_SCALE` (0.25 screen px per elmo)
+  or closer — zoomed further out a unit is a few px wide, the bars' 10px minimum
   width makes neighbours overlap, and the whole-map view people read the front
   line in turns into a band of noise. It is deliberately NOT interpolated the
   way the build bar is: build progress really does creep between samples, where
@@ -2374,7 +2377,14 @@ run dev` in `worker/` plus `pack -upload local`.)
   An UNFINISHED unit gets the build bar only — its missing hp IS the
   construction, so a health bar would count the same progress twice — and a
   unit with no recorded maxHp (an unidentified radar contact, 0/0) gets
-  neither. The 2D
+  neither. The health bar is `BAR_H_SMALL` (2px) rather than `BAR_H` (3px) on a
+  unit the bar is already WIDER than, i.e. one whose icon falls under the
+  `BAR_MIN_W` (10px) width floor: the raiders (corak, armpw — icon size 0.735,
+  so ~9px) then read as a bar with a unit under it, where a commander at 22px
+  does not. The test is the px actually drawn, so a building that grows into
+  its footprint when zoomed in keeps the full height. One predicate,
+  `damagedEnough`, serves both the pre-scan and the bar pass — they must agree
+  or the scan enables a pass that draws nothing. The 2D
   path itself was also slimmed for unit-heavy replays: per-def icon/footprint tables
   built once per load (`buildDefTables`) instead of two string-hash lookups per unit per
   frame, per-draw def/glyph memos instead of per-unit `"path|color|px"` keys, an

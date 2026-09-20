@@ -1874,6 +1874,30 @@ const HEALTH_BAR_COLOR = '#5ad35a';
 // front line turns into noise — where the same view at 0.25 and in is the one
 // you are watching a fight in.
 const HEALTH_BAR_MIN_SCALE = 0.25;
+// A unit is worth a health bar once it is missing DAMAGE_MIN_FRAC of its
+// health. A bar a pixel short of full is noise, and in a real fight it is most
+// of the map: hp is quantized to whole points, so a unit grazed by one stray
+// shot, or a tick away from fully repaired, reads as damaged exactly like one
+// about to die.
+const DAMAGE_MIN_FRAC = 0.98;
+// Bar geometry. The WIDTH follows the icon but never goes under BAR_MIN_W, and
+// that floor is also what identifies a unit too small to carry a full-height
+// bar: the raiders (corak, armpw — icon size 0.735, so ~9px against the 10px
+// floor) end up with a bar wider than the thing it belongs to, where a
+// commander at 22px does not.
+const BAR_MIN_W = 10;
+const BAR_H = 3;
+const BAR_H_SMALL = 2;
+// The one health test, shared by the pre-scan and the bar pass — they must
+// agree, or the scan enables a pass that draws nothing. maxHp > 0 keeps a bar
+// off a unit nothing is known about: an unidentified radar contact records
+// 0/0, and since the frame columns are zigzag-decoded deltas, a truncated or
+// corrupt stream can decode a negative pair where hp < maxHp is perfectly true
+// and means nothing.
+function damagedEnough(hp, maxHp) {
+  return maxHp > 0 && hp <= maxHp * DAMAGE_MIN_FRAC; // <=: missing EXACTLY 2% counts
+}
+
 function drawOverlay(u) {
   if (!octx) return;
   octx.setTransform(DPR, 0, 0, DPR, 0, 0);
@@ -1906,7 +1930,7 @@ function drawOverlay(u) {
   for (let i = 0; i < u.length; i += STRIDE) {
     if (u[i + F.TARGET] !== 0) anyLine = true;
     if (u[i + F.BUILD] < BUILD_DONE) anyBar = true;
-    else if (healthZoom && u[i + F.MAXHP] > 0 && u[i + F.HP] < u[i + F.MAXHP]) anyHealth = true;
+    else if (healthZoom && damagedEnough(u[i + F.HP], u[i + F.MAXHP])) anyHealth = true;
     if (anyLine && (anyBar || anyHealth)) break;
   }
 
@@ -1942,22 +1966,18 @@ function drawOverlay(u) {
       const hp = u[i + F.HP], maxHp = u[i + F.MAXHP];
       // An unfinished unit's missing hp IS its construction — it fills up as
       // the thing gets built — so it gets the build bar and no health bar,
-      // rather than two bars both counting the same progress. The maxHp test
-      // keeps a bar off a unit nothing is known about: an unidentified radar
-      // contact records 0/0. It is `> 0` rather than a comparison against hp
-      // because the frame columns are zigzag-decoded deltas, so a truncated
-      // or corrupt stream can decode a negative pair, where hp < maxHp is
-      // perfectly true and means nothing.
-      const damaged = healthZoom && !unfinished && maxHp > 0 && hp < maxHp;
+      // rather than two bars both counting the same progress.
+      const damaged = healthZoom && !unfinished && damagedEnough(hp, maxHp);
       if (!unfinished && !damaged) continue;
       const p = interpPos(u, i);
       const sx = viewW / 2 + (p[0] - center.x) * scale;
       const sy = viewH / 2 + (p[1] - center.z) * scale;
       const px = iconPxFor(u[i + F.DEF]); // bars track the icon's screen size
-      const w = Math.max(10, px * 0.9), h = 3;
+      const w = Math.max(BAR_MIN_W, px * 0.9);
       const x = sx - w / 2;
       if (x + w < 0 || x > viewW) continue;
       if (unfinished) {
+        const h = BAR_H;
         const y = sy + px / 2 + 2;      // under the icon
         if (y + h >= 0 && y <= viewH) {
           octx.fillStyle = BAR_BACK;
@@ -1972,6 +1992,12 @@ function drawOverlay(u) {
         // hits, so lerping a health bar would invent a drain that never
         // happened — and would have to guard on the def matching to survive
         // the engine recycling unit ids.
+        //
+        // A pixel thinner on a unit the bar is already wider than (see
+        // BAR_MIN_W): 3px of green over a 9px raider reads as a bar with a
+        // unit under it. Measured off the px actually drawn, so a building
+        // that grows into its footprint when zoomed in keeps the full height.
+        const h = px * 0.9 < BAR_MIN_W ? BAR_H_SMALL : BAR_H;
         const y = sy - px / 2 - 2 - h;
         if (y + h >= 0 && y <= viewH) {
           octx.fillStyle = BAR_BACK;
