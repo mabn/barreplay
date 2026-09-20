@@ -2245,31 +2245,40 @@ run dev` in `worker/` plus `pack -upload local`.)
   BAR's spectator team comparison
   (`luaui/Widgets/gui_spectator_hud.lua`), reproduced for the three metrics a
   capture can answer — metal income, energy income, and ARMY VALUE. One row per
-  metric: the metric's name, then one track holding both sides — each side's
-  value at its own end in its team colour, and between them the LEAD, the
-  leader's margin over the TRAILING side rather than its share of the total, so
-  a 2:1 game reads "100%" and a side at zero reads "∞" rather than 100%. The
-  lead reads in the LEADING side's colour, which is what says whose lead it is
-  — the number alone is a bare margin that could belong to either end of the
-  row; the tint is inline and a DEAD HEAT simply sets none, falling back to the
-  stylesheet's muted tone, since a tie has no leader to name. Values
+  metric: the metric's name, then each side's value in a KNOB of that side's
+  colour, two BARS between them in a darkened version of each colour sharing
+  the leftover width in proportion to the values (BAR's `leftBarWidth`), and
+  riding the split a third knob carrying the LEAD — the leader's margin over
+  the TRAILING side rather than its share of the total, so a 2:1 game reads
+  "100%" and a side at zero reads "∞" rather than 100%. That knob takes the
+  LEADING side's colour, which is what says whose lead it is (the number alone
+  is a bare margin that could belong to either end of the row); a DEAD HEAT has
+  no leader to name and takes the neutral `TS_TIE_KNOB` instead, as BAR's own
+  `colorKnobMiddleGrey` does. A number written ACROSS a block of team colour is
+  what makes both readable at once, and is why the row is shaped this way: the
+  colour says whose the number is, `textColorOn` picks the ink off that
+  colour's luminance (white on a navy team, black on a yellow one), and neither
+  has to compromise for the other. Drawing the number IN the team colour
+  instead was tried and reverted — BAR's default blue is a contrast of 2.0
+  against a dark panel, where small text wants 4.5. Values
   format like BAR's own `formatResources(v, true)` (`fmtStat`: 7.0k, 504k, 3.7M,
   192M) rather than `fmtNum`, whose trailing-zero trimming would let a reading
   jitter in width from "7k" to "7.01k" as the game ran.
-  What the widget MEASURES is copied; its LOOK deliberately is not. It draws
-  into a game HUD — bevelled panels, a lit top edge, saturated knobs tinted by
-  four multipliers of the team colour — and beside this sidebar's flat surfaces
-  and muted labels that read as a transplant from another program (it shipped
-  that way once and was rejected on sight). The row is instead built from the
-  vocabulary of the player list right under it: the `.rmeter` track colour and
-  3px radius, and team colour as the thing that says whose a number is, exactly
-  as `.pname` uses it — run, like every other piece of team-coloured TEXT, through
-  `readableOn` (see the colour-contrast note below). The proportion BAR draws as two full-height fills with a
-  knob riding their boundary is a 3px BAND along the bottom of the track: two
-  full-width fills make the row the loudest thing in a sidebar whose own meters
-  are a sliver of grey, and they put each side's number on a field of its own
-  colour where it stops being readable. The band carries the same split and
-  leaves the numbers on the plain track. Drawn ONLY for a TWO-ALLY game: the row's whole shape is a
+  The widget's SHAPE is copied; its game-HUD FINISH is not — no bevels, no lit
+  top edge, no gradients, since next to this sidebar's flat surfaces those read
+  as a transplant from another program (a faithful copy shipped once and was
+  rejected on sight). Knobs size to their own text and carry tabular figures,
+  so "504k" beside "7.0k" each get the room they need and no knob breathes in
+  and out as its last digit changes during playback; the bars carry `min-width:
+  0` over a zero basis, so a side with nothing collapses its bar rather than
+  pushing the row wider than the sidebar. A flat restyle that dropped the knobs
+  — team-coloured numbers on the plain track over a 3px split band — was tried
+  in between and rejected as well: it is where the contrast problem above came
+  from, and the two rejections together are why the knobs are the part to leave
+  alone. Nothing OUTSIDE this bar was
+  re-tinted: the player list, the chat log and the map tooltip keep the raw team
+  colour they have always used, which was asked for explicitly after a change
+  that lightened them. Drawn ONLY for a TWO-ALLY game: the row's whole shape is a
   comparison of two sides and there is nothing to split in an FFA. The sides come
   from the PLAYER roster rather than the team list, which is also what keeps Gaia
   and the scavenger team out of them — no player controls those. BAR's MP and EP
@@ -2488,26 +2497,6 @@ run dev` in `worker/` plus `pack -upload local`.)
   via WebGL instanced sprites (2D-canvas fallback), and does timeline scrub / play /
   zoom / pan / hover-tooltip. Colours are assigned per ally-team (a base hue per ally,
   lightness varied per team within it).
-- **Team colour as TEXT goes through a contrast floor (`app.js` `readableOn`)**: a
-  team colour is picked to be read as a BLOCK on a lit map, and several of BAR's
-  are unreadable as small text on this dark sidebar — the default blue,
-  `#0b3ef3`, is a contrast of **2.0** against the statistics track where 11px
-  bold wants 4.5 (WCAG AA), and its red only reaches 3.6. `readableOn(css,
-  surface)` raises such a colour's LIGHTNESS in HSL until it clears
-  `TEXT_CONTRAST`, so hue and saturation are untouched and the word still says
-  whose it is; a colour already bright enough comes back unchanged, which is
-  most of them, and one that cannot clear the floor short of white ends there.
-  The surfaces are named constants mirroring style.css (`SIDEBAR_BG`,
-  `TRACK_BG`, `TOOLTIP_BG`) and results are memoized per colour+surface, since
-  these render per tick. EVERY team-coloured text in the UI uses it — the
-  statistics values and their lead, the player list's names, the chat log's
-  author names, the map tooltip's team row — and NO FILL does: showing a team
-  colour as a block is the one thing it was chosen for, so the statistics
-  bands, the unit icons and the chat bubbles keep it raw. The cost, accepted:
-  two teams of one ally whose colours differ only in LIGHTNESS converge once
-  both are lifted to the same floor, which is unavoidable with a floor and
-  cheap beside text nobody can read (the rank, flag, OS and ally grouping all
-  still tell those rows apart).
 
 Guarding it: `internal/viz/viz_test.go` encodes a synthetic `.brp` through the wire
 encoder and checks the head payload (bounds, teams incl. frame-only ones, footprints,
