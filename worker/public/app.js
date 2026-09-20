@@ -1906,7 +1906,7 @@ function drawOverlay(u) {
   for (let i = 0; i < u.length; i += STRIDE) {
     if (u[i + F.TARGET] !== 0) anyLine = true;
     if (u[i + F.BUILD] < BUILD_DONE) anyBar = true;
-    else if (healthZoom && u[i + F.HP] < u[i + F.MAXHP]) anyHealth = true;
+    else if (healthZoom && u[i + F.MAXHP] > 0 && u[i + F.HP] < u[i + F.MAXHP]) anyHealth = true;
     if (anyLine && (anyBar || anyHealth)) break;
   }
 
@@ -1942,10 +1942,13 @@ function drawOverlay(u) {
       const hp = u[i + F.HP], maxHp = u[i + F.MAXHP];
       // An unfinished unit's missing hp IS its construction — it fills up as
       // the thing gets built — so it gets the build bar and no health bar,
-      // rather than two bars both counting the same progress. A unit with no
-      // recorded maxHp (an unidentified radar contact, hp/maxHp 0/0) fails
-      // this test, which is what keeps a bar off a dot nothing is known about.
-      const damaged = healthZoom && !unfinished && hp < maxHp;
+      // rather than two bars both counting the same progress. The maxHp test
+      // keeps a bar off a unit nothing is known about: an unidentified radar
+      // contact records 0/0. It is `> 0` rather than a comparison against hp
+      // because the frame columns are zigzag-decoded deltas, so a truncated
+      // or corrupt stream can decode a negative pair, where hp < maxHp is
+      // perfectly true and means nothing.
+      const damaged = healthZoom && !unfinished && maxHp > 0 && hp < maxHp;
       if (!unfinished && !damaged) continue;
       const p = interpPos(u, i);
       const sx = viewW / 2 + (p[0] - center.x) * scale;
