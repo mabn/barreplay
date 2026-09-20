@@ -1736,6 +1736,13 @@ test('a free-for-all abbreviates in both the size and the players column', () =>
   // a number made up out of the parts that happened to parse.
   assert.equal(fns.specPlayers('4v4vX'), null);
   assert.equal(fns.sizeLabel('4v4vXv4'), 'FFA');
+  // Nor one whose parts are not plausible counts. The only shape check gameSize
+  // passes on the way in is a 40-character length cap, so a hand-written PUT
+  // can store a part Number reads as 1e+38 — which the cell would print.
+  assert.equal(fns.specPlayers('1v1v' + '9'.repeat(36)), null);
+  assert.equal(fns.sizeLabel('1v1v1v' + '9'.repeat(34)), 'FFA');
+  // A real side is still comfortably inside it.
+  assert.equal(fns.specPlayers('32v32v32v32'), 128);
   // Nothing recorded stays nothing, so the cell keeps its dash.
   assert.equal(fns.sizeLabel(null), null);
   assert.equal(fns.sizeLabel(''), null);
