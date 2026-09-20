@@ -504,45 +504,47 @@ canvas { display: block; width: 100%; height: 100%; background: #0c0f13; cursor:
 .stat b { color: #fff; font-variant-numeric: tabular-nums; }
 
 /* ---- team statistics bar ----
-   BAR's spectator team comparison, one row per metric above the player list:
-   label, this side's value, a bar split in proportion to the two values with
-   the lead riding the split, the other side's value. Every colour is inline —
-   each is a multiple of that side's own team colour, computed in app.js (see
-   renderTeamStats) — so this file owns only the geometry.
-
-   The proportions are the widget's, scaled to the sidebar: of the row's width
-   BAR spends ~16% on the label, ~16% on each side knob and ~17% on the split
-   knob, leaving ~46% of it for the bar itself. Fixed pixel slots rather than
-   percentages because the knobs hold numbers, which must not resize as the
-   game grows from "12" to "504k". */
-#teamstats { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; }
-.tsrow {
-  display: flex; align-items: stretch; gap: 2px; height: 22px;
-  padding: 2px; border-radius: 3px;
-  /* The widget's rows sit on a panel lit from above: a bright top edge falling
-     away to near-black. */
-  background: linear-gradient(#4e4c49, #191713 22%, #100f0d);
-}
+   The two sides compared, one row per metric, directly above the player list.
+   Deliberately built from the LIST's own vocabulary rather than the BAR widget
+   this reproduces (see renderTeamStats): the .rmeter track and radius, a fill
+   at low opacity under a number in that series' colour, and team colour as what
+   says whose a number is — because the widget's bevelled panels and saturated
+   knobs sit in a game HUD, and next to these flat surfaces they read as a
+   transplant. The split between the two fills is the only thing carrying the
+   proportion, so the fills are the one element that must stay legible. */
+#teamstats { display: flex; flex-direction: column; gap: 3px; padding-bottom: 8px; }
+.tsrow { display: flex; align-items: center; gap: 6px; }
+/* Same slot and muted tone as the player rows' OS column, so the metric names
+   line up with the column of numbers beneath them. */
 .tslabel {
-  flex: 0 0 28px; display: flex; align-items: center; justify-content: flex-end;
-  padding-right: 4px; font-size: 11px; color: #c8ced5;
+  flex: 0 0 26px; text-align: right;
+  color: #6f87a0; font-size: 11px; line-height: 1;
 }
-.tsknob {
-  flex: 0 0 46px; display: flex; align-items: center; justify-content: center;
-  border-radius: 2px; box-shadow: inset 0 0 0 1px rgba(0,0,0,.6);
-  color: #fff; font-size: 11px; font-weight: 700; line-height: 1;
+.tsbar {
+  position: relative; flex: 1; min-width: 0; height: 19px;
+  background: #222c36; border-radius: 3px; overflow: hidden;
+}
+/* Two layers in one track: the proportional split, and the three readings over
+   it. Both are absolute so neither can push the other around as the numbers
+   grow from "12" to "504k".
+
+   The split is a BAND along the bottom rather than two full-height fills. Two
+   fills covering the whole track make the row the loudest thing in a sidebar
+   whose own meters are a sliver of grey, and they put each side's number on a
+   field of its own colour, where it stops being readable. A band keeps the
+   proportion exactly as legible while leaving the numbers on the plain track. */
+.tsfills { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; display: flex; }
+.tsfills > i { flex-basis: 0; min-width: 0; opacity: .85; }
+.tsvals {
+  position: absolute; inset: 0; display: flex; align-items: center;
+  padding: 0 6px 3px; font-size: 11px; font-weight: 600; line-height: 1;
   font-variant-numeric: tabular-nums;
 }
-/* The split knob is narrower than the value knobs: it only ever holds a
-   percentage, where those hold a formatted resource total. */
-.tsmid { flex: 0 0 38px; }
-/* The bar is what is LEFT once the three knobs have their slots, which is what
-   makes the split proportional to the values and nothing else: the two fills
-   below grow into it, and the split knob rides the boundary between them. */
-.tsbar { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; }
-.tsfill { position: relative; flex-basis: 0; min-width: 0; height: 14px; }
-/* The brighter line down the middle of each fill (BAR's colorLine). */
-.tsfill > u { position: absolute; left: 0; right: 0; top: 5px; height: 4px; }
+/* Each side's value sits at its own end, the lead between them — so a value's
+   position says which side it belongs to, as its colour does. */
+.tsvals > b:first-child { flex: 1; text-align: left; }
+.tsvals > b:last-child { flex: 1; text-align: right; }
+.tsvals .tslead { flex: 0 0 auto; color: #9fb0bf; }
 
 /* ---- player list ----
    One row per player: rank / flag / OS / name on the left, the metal + energy

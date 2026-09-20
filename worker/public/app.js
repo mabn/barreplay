@@ -2710,12 +2710,22 @@ function incomePeaks(simFrame, teams) {
 // ---- team statistics bar ---------------------------------------------------
 // BAR's spectator HUD (luaui/Widgets/gui_spectator_hud.lua) puts a row per
 // metric above the player list while a two-sided game is watched, and this
-// reproduces it for the three metrics a capture can answer: metal income,
-// energy income, and army value. A row is the metric's name, each side's value
-// in a knob tinted that side's colour, and between them one bar split in
-// proportion to the two values, with a knob riding the split that reads the
-// LEAD — how far ahead the leader is as a percentage OF THE TRAILING SIDE, not
+// reproduces what it MEASURES for the three metrics a capture can answer:
+// metal income, energy income, and army value. A row is the metric's name and
+// one track holding both sides — each side's value at its own end in its team
+// colour, a fill behind each as wide as that side's share, and the LEAD between
+// them: how far ahead the leader is as a percentage OF THE TRAILING SIDE, not
 // of the total, so a 2:1 game reads "100%" (gui_spectator_hud's relativeLead).
+//
+// The widget's own LOOK is deliberately not copied. It is drawn for a game's
+// HUD — bevelled panels, saturated knobs, a lit top edge — and beside this
+// sidebar's flat surfaces and muted labels it read as a transplant from another
+// program. So the row is built from the vocabulary the player list under it
+// already uses: the #222c36 track, the rounded 3px corners, a fill at low
+// opacity under a number in that series' own colour (.rmeter), and team colour
+// as the thing that says whose a number is (.pname). Where the two fills MEET
+// is the split BAR draws a knob on, and it carries the same reading without an
+// ornament this UI has nowhere else.
 //
 // Only a TWO-ALLY game gets the bar. The row's whole shape is one comparison of
 // two sides and there is nothing to split in an FFA. The sides come from the
@@ -2726,47 +2736,9 @@ function incomePeaks(simFrame, teams) {
 // produced). Those are engine running totals (GetTeamResourceStats), which a
 // sampled capture never recorded, so they are not here.
 
-// The tints BAR derives from a side's team colour, as plain multipliers on its
-// channels: the side knobs, the knob riding the split, the bar, and the
-// brighter line down the bar's middle (gui_spectator_hud's
-// darkerSideKnobsFactor / darkerMiddleKnobFactor / darkerBarsFactor /
-// darkerLinesFactor). Reproducing them is what makes the row read as the same
-// object at any team colour, rather than four hand-picked shades that only
-// work for blue against red.
-const TS_KNOB = 0.6, TS_MID = 0.75, TS_BAR = 0.4, TS_LINE = 0.7;
-// The split knob when the two sides are exactly level and neither leads
-// (colorKnobMiddleGrey).
-const TS_EVEN = '#808080';
 // Lead percentages run away to nothing once a side is nearly wiped out, so
-// BAR caps the readout rather than letting the knob fill with digits.
+// BAR caps the readout rather than letting the row fill with digits.
 const TS_LEAD_MAX = 999;
-
-// shade multiplies a CSS colour's channels by f. The colour arrives either as
-// the replay's own "#rrggbb" or as one of computeTeamColors' hsl() strings, so
-// it is normalized through a canvas fillStyle — which always reads back as
-// "#rrggbb" — instead of being parsed by hand. Memoized because the shades are
-// a property of the replay and this runs on every sidebar rebuild.
-const shadeCache = new Map();
-let shadeCtx = null;
-function shade(css, f) {
-  const key = css + '|' + f;
-  const hit = shadeCache.get(key);
-  if (hit !== undefined) return hit;
-  let out = css;
-  try {
-    if (!shadeCtx) shadeCtx = document.createElement('canvas').getContext('2d');
-    shadeCtx.fillStyle = '#000';
-    shadeCtx.fillStyle = css;
-    const m = /^#([0-9a-f]{6})$/i.exec(shadeCtx.fillStyle);
-    if (m) {
-      const n = parseInt(m[1], 16);
-      const ch = i => Math.round(((n >> i) & 0xff) * f);
-      out = `rgb(${ch(16)},${ch(8)},${ch(0)})`;
-    }
-  } catch (_) { /* no canvas: the undarkened colour still reads as that side */ }
-  shadeCache.set(key, out);
-  return out;
-}
 
 // fmtStat renders a value the way BAR's HUD does (formatResources(v, true)):
 // one decimal through the first decade of each unit and none after — 7.0k,
@@ -2869,33 +2841,23 @@ function renderTeamStats(fr, res, playing) {
   ].filter(r => r[1] !== null && r[1] !== undefined && r[2] !== null && r[2] !== undefined);
   if (!rows.length) { root.style.display = 'none'; root.innerHTML = ''; return; }
 
-  const tint = sides.map(s => ({
-    knob: shade(s.color, TS_KNOB),
-    mid: shade(s.color, TS_MID),
-    bar: shade(s.color, TS_BAR),
-    line: shade(s.color, TS_LINE),
-  }));
-
   root.innerHTML = rows.map(([label, a, b, tip]) => {
-    // The two fills share what the three knobs leave, split in proportion to
-    // the values — BAR's leftBarWidth = barLength * left / (left + right) —
-    // and go halves when neither side has anything to compare yet.
+    // The two fills share the whole track, split in proportion to the values —
+    // BAR's leftBarWidth = barLength * left / (left + right) — and go halves
+    // when neither side has anything to compare yet.
     const total = a + b;
     const fa = total > 0 ? a / total : 0.5;
-    const mid = a === b ? TS_EVEN : (a > b ? tint[0].mid : tint[1].mid);
     const fill = (i, grow) =>
-      `<i class="tsfill" style="flex-grow:${grow.toFixed(4)};background:${tint[i].bar}">` +
-      `<u style="background:${tint[i].line}"></u></i>`;
-    return `<div class="tsrow" title="${escapeHtml(tip)}">` +
+      `<i style="flex-grow:${grow.toFixed(4)};background:${sides[i].color}"></i>`;
+    return `<div class="tsrow" title="${escapeHtml(tip + ' \u2014 ' + label)}">` +
       `<span class="tslabel">${escapeHtml(label)}</span>` +
-      `<span class="tsknob" style="background:${tint[0].knob}">${escapeHtml(fmtStat(a))}</span>` +
       '<span class="tsbar">' +
-      fill(0, fa) +
-      `<span class="tsknob tsmid" style="background:${mid}">${escapeHtml(tsLead(a, b))}</span>` +
-      fill(1, 1 - fa) +
-      '</span>' +
-      `<span class="tsknob" style="background:${tint[1].knob}">${escapeHtml(fmtStat(b))}</span>` +
-      '</div>';
+      `<span class="tsfills">${fill(0, fa)}${fill(1, 1 - fa)}</span>` +
+      '<span class="tsvals">' +
+      `<b style="color:${sides[0].color}">${escapeHtml(fmtStat(a))}</b>` +
+      `<b class="tslead">${escapeHtml(tsLead(a, b))}</b>` +
+      `<b style="color:${sides[1].color}">${escapeHtml(fmtStat(b))}</b>` +
+      '</span></span></div>';
   }).join('');
   root.style.display = '';
 }

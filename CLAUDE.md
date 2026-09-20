@@ -2242,19 +2242,26 @@ run dev` in `worker/` plus `pack -upload local`.)
   list)**: BAR's spectator team comparison
   (`luaui/Widgets/gui_spectator_hud.lua`), reproduced for the three metrics a
   capture can answer — metal income, energy income, and ARMY VALUE. One row per
-  metric: the metric's name, each side's value in a knob tinted that side's
-  colour, and between them a bar split in proportion to the two values with a
-  knob riding the split reading the LEAD — the leader's margin over the TRAILING
-  side, not its share of the total, so a 2:1 game reads "100%" and a side at zero
-  reads "∞" rather than 100%. Values format like BAR's own
-  `formatResources(v, true)` (`fmtStat`: 7.0k, 504k, 3.7M, 192M) rather than
-  `fmtNum`, whose trailing-zero trimming would let a knob's width jitter from
-  "7k" to "7.01k" as the game ran. Every colour is a MULTIPLE of the side's own
-  team colour (`shade`, factors 0.6/0.75/0.4/0.7 for the side knobs / the split
-  knob / the bar / the brighter line down its middle — BAR's
-  darkerSideKnobsFactor and friends), which is what makes the row read as one
-  object at any team colour instead of four shades that only work for blue
-  against red. Drawn ONLY for a TWO-ALLY game: the row's whole shape is a
+  metric: the metric's name, then one track holding both sides — each side's
+  value at its own end in its team colour, and between them the LEAD, the
+  leader's margin over the TRAILING side rather than its share of the total, so
+  a 2:1 game reads "100%" and a side at zero reads "∞" rather than 100%. Values
+  format like BAR's own `formatResources(v, true)` (`fmtStat`: 7.0k, 504k, 3.7M,
+  192M) rather than `fmtNum`, whose trailing-zero trimming would let a reading
+  jitter in width from "7k" to "7.01k" as the game ran.
+  What the widget MEASURES is copied; its LOOK deliberately is not. It draws
+  into a game HUD — bevelled panels, a lit top edge, saturated knobs tinted by
+  four multipliers of the team colour — and beside this sidebar's flat surfaces
+  and muted labels that read as a transplant from another program (it shipped
+  that way once and was rejected on sight). The row is instead built from the
+  vocabulary of the player list right under it: the `.rmeter` track colour and
+  3px radius, and team colour as the thing that says whose a number is, exactly
+  as `.pname` uses it. The proportion BAR draws as two full-height fills with a
+  knob riding their boundary is a 3px BAND along the bottom of the track: two
+  full-width fills make the row the loudest thing in a sidebar whose own meters
+  are a sliver of grey, and they put each side's number on a field of its own
+  colour where it stops being readable. The band carries the same split and
+  leaves the numbers on the plain track. Drawn ONLY for a TWO-ALLY game: the row's whole shape is a
   comparison of two sides and there is nothing to split in an FFA. The sides come
   from the PLAYER roster rather than the team list, which is also what keeps Gaia
   and the scavenger team out of them — no player controls those. BAR's MP and EP
