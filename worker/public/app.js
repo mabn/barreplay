@@ -6608,13 +6608,30 @@ function sideCount(spec) {
   return String(spec).split('v').length;
 }
 
+// specPlayers adds a spec's sides up — how many people were in the game. Null
+// unless EVERY part is a number, since a spec this cannot read whole is one it
+// cannot count. It is read off the spec rather than the row's own playerCount
+// so the Size cell and the spec on its tooltip can never disagree.
+function specPlayers(spec) {
+  let total = 0;
+  for (const part of String(spec).split('v')) {
+    if (!/^\d+$/.test(part)) return null;
+    total += Number(part);
+  }
+  return total;
+}
+
 // sizeLabel is what the Size column prints: the spec itself, or the word for
-// what it is once the spec is longer than the thing it describes. Callers put
-// the spec on the cell's tooltip, so the exact shape of an FFA is still one
-// hover away.
+// what it is once the spec is longer than the thing it describes — with the
+// head count it dropped, because "FFA" alone loses the one number the spec was
+// really carrying, and a 16-player free-for-all is a different proposition
+// from a 4-player one. Callers put the spec on the cell's tooltip, so the exact
+// shape is still one hover away.
 function sizeLabel(spec) {
   if (!spec) return null;
-  return sideCount(spec) >= FFA_MIN_SIDES ? 'FFA' : spec;
+  if (sideCount(spec) < FFA_MIN_SIDES) return spec;
+  const players = specPlayers(spec);
+  return players ? `FFA (${players})` : 'FFA';
 }
 
 // sidesShown splits a roster into the sides the Players column draws and the

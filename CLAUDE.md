@@ -817,9 +817,12 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           admin mode reveals a per-row ⟳ button calling the refresh-settings route.
                           A FREE-FOR-ALL abbreviates in BOTH the Size and the Players column, past
                           the same side count (app.js FFA_MIN_SIDES = 4, so a row can never read
-                          "8v8" beside an ellipsis): Size prints the word "FFA" with the spec on
-                          its tooltip, Players draws the first two sides and ends "v …" carrying a
-                          count of the rest. BAR records a 16-player FFA as
+                          "8v8" beside an ellipsis): Size prints "FFA (<players>)" with the spec on
+                          its tooltip — the head count comes along because the word alone drops the
+                          one number the spec was really carrying, and it is summed from the SPEC
+                          (specPlayers, null unless every part parses) rather than the row's own
+                          playerCount, so the cell and its tooltip cannot disagree — and Players
+                          draws the first two sides and ends "v …" carrying a count of the rest. BAR records a 16-player FFA as
                           "1v1v1v1v1v1v1v1v1v1v1v1v1v1v1v1" with sixteen names beside it, which
                           between them stretched the table until Map wrapped to three lines and the
                           Links and Settings columns were pushed off the page. FOUR sides rather

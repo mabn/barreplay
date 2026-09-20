@@ -39,7 +39,7 @@ const FFA_HELPERS = (() => {
   return [
     APP.match(/const FFA_MIN_SIDES = \d+;/)![0],
     APP.match(/const PLAYERS_MAX_SIDES = \d+;/)![0],
-    fn('sideCount'), fn('sizeLabel'), fn('sidesShown'), fn('moreSidesSpan'),
+    fn('sideCount'), fn('specPlayers'), fn('sizeLabel'), fn('sidesShown'), fn('moreSidesSpan'),
   ].join('\n');
 })();
 
@@ -1710,9 +1710,10 @@ test('game durations render minutes-precision, started dates drop the year', () 
 test('a free-for-all abbreviates in both the size and the players column', () => {
   const fns = eval(`(function(){
     ${FFA_HELPERS}
-    return { sideCount, sizeLabel, sidesShown };
+    return { sideCount, specPlayers, sizeLabel, sidesShown };
   })()`) as {
     sideCount: (s: string) => number;
+    specPlayers: (s: string) => number | null;
     sizeLabel: (s: string | null) => string | null;
     sidesShown: (g: unknown[]) => { shown: unknown[]; hidden: number };
   };
@@ -1723,9 +1724,18 @@ test('a free-for-all abbreviates in both the size and the players column', () =>
   // An 8v8 played with scavengers is recorded as a third team nobody plays.
   // Three sides is not an FFA, which is why the cutoff is four.
   assert.equal(fns.sizeLabel('8v8v1'), '8v8v1');
-  assert.equal(fns.sizeLabel('4v4v4v4'), 'FFA');
-  assert.equal(fns.sizeLabel('1v1v1v1v1v1v1v1v1v1v1v1v1v1v1v1'), 'FFA');
+  // The word alone would drop the one number the spec was really carrying, so
+  // the head count comes with it: a 16-player free-for-all is a different
+  // proposition from a 4-player one.
+  assert.equal(fns.sizeLabel('4v4v4v4'), 'FFA (16)');
+  assert.equal(fns.sizeLabel('1v1v1v1'), 'FFA (4)');
+  assert.equal(fns.sizeLabel('1v1v1v1v1v1v1v1v1v1v1v1v1v1v1v1'), 'FFA (16)');
   assert.equal(fns.sideCount('1v1v1v1v1v1v1v1v1v1v1v1v1v1v1v1'), 16);
+  assert.equal(fns.specPlayers('8v8'), 16);
+  // A spec that cannot be read whole is not counted — better a bare "FFA" than
+  // a number made up out of the parts that happened to parse.
+  assert.equal(fns.specPlayers('4v4vX'), null);
+  assert.equal(fns.sizeLabel('4v4vXv4'), 'FFA');
   // Nothing recorded stays nothing, so the cell keeps its dash.
   assert.equal(fns.sizeLabel(null), null);
   assert.equal(fns.sizeLabel(''), null);
@@ -1740,7 +1750,7 @@ test('a free-for-all abbreviates in both the size and the players column', () =>
   // FFA, the players column abbreviates.
   for (const n of [2, 3, 4, 8, 16]) {
     const spec = Array(n).fill('1').join('v');
-    assert.equal(fns.sizeLabel(spec) === 'FFA', fns.sidesShown(sides(n)).hidden > 0, `${n} sides`);
+    assert.equal(fns.sizeLabel(spec)!.startsWith('FFA'), fns.sidesShown(sides(n)).hidden > 0, `${n} sides`);
   }
 });
 
@@ -1892,7 +1902,7 @@ test('a 16-way free-for-all row stays the width of an 8v8 one', () => {
   const textOf = (n: any) => walk(n).map((c: any) => c.textContent).join(' ');
 
   const ffaSize = cellOf(0, 'size');
-  assert.equal(textOf(ffaSize).trim(), 'FFA', 'the spec is longer than the thing it describes');
+  assert.equal(textOf(ffaSize).trim(), 'FFA (16)', 'the spec is longer than the thing it describes');
   assert.equal(ffaSize.title, rows[0].gameSize + ' — the team spec BAR recorded', 'the spec stays one hover away');
 
   // Two sides and a count of the rest, in place of sixteen names.
