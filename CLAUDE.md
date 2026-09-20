@@ -815,6 +815,20 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the side that recorded the current upload, the Links cell adds an alt·T<n>
                           SPA link per other uploaded revision (from the row's `uploads`), and
                           admin mode reveals a per-row ⟳ button calling the refresh-settings route.
+                          A FREE-FOR-ALL abbreviates in BOTH the Size and the Players column, past
+                          the same side count (app.js FFA_MIN_SIDES = 4, so a row can never read
+                          "8v8" beside an ellipsis): Size prints "FFA (<players>)" with the spec on
+                          its tooltip — the head count comes along because the word alone drops the
+                          one number the spec was really carrying, and it is summed from the SPEC
+                          (specPlayers, null unless every part parses) rather than the row's own
+                          playerCount, so the cell and its tooltip cannot disagree — and Players
+                          draws the first two sides and ends "v …" carrying a count of the rest. BAR records a 16-player FFA as
+                          "1v1v1v1v1v1v1v1v1v1v1v1v1v1v1v1" with sixteen names beside it, which
+                          between them stretched the table until Map wrapped to three lines and the
+                          Links and Settings columns were pushed off the page. FOUR sides rather
+                          than three, because an 8v8 played with scavengers is recorded as "8v8v1"
+                          — two sides plus a team nobody plays — and that is not an FFA. The Games
+                          section's twin columns and the queue's Size cell abbreviate identically.
                           WORK IN PROGRESS (rows the pipeline owns): a game with a job in
                           "processing" is in this list too, so the work is visible while it runs
                           rather than only once it lands — the DO inserts a PLACEHOLDER catalog
