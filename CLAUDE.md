@@ -2361,7 +2361,20 @@ run dev` in `worker/` plus `pack -upload local`.)
   `interpPos` — the engine recycles unit ids and a bar rewinding to zero because
   the id now belongs to something else is far more noticeable than a position
   doing it. Measured at 2.7us/frame for 200 under-construction units among 2500
-  (0.016% of a 60fps budget), so it is not gated on playback speed. The 2D
+  (0.016% of a 60fps budget), so it is not gated on playback speed. That bar is
+  YELLOW (`BUILD_BAR_COLOR`, the build line's own colour, so a construction site
+  and the builders feeding it read as one thing), which frees green for the
+  HEALTH BAR: a thin green bar over any FINISHED unit whose hp is under its
+  maxHp, drawn only at `HEALTH_BAR_MIN_SCALE` (0.25 screen px per elmo) or
+  closer — zoomed further out a unit is a few px wide, the bars' 10px minimum
+  width makes neighbours overlap, and the whole-map view people read the front
+  line in turns into a band of noise. It is deliberately NOT interpolated the
+  way the build bar is: build progress really does creep between samples, where
+  damage arrives in hits, so lerping it would draw a drain that never happened.
+  An UNFINISHED unit gets the build bar only — its missing hp IS the
+  construction, so a health bar would count the same progress twice — and a
+  unit with no recorded maxHp (an unidentified radar contact, 0/0) gets
+  neither. The 2D
   path itself was also slimmed for unit-heavy replays: per-def icon/footprint tables
   built once per load (`buildDefTables`) instead of two string-hash lookups per unit per
   frame, per-draw def/glyph memos instead of per-unit `"path|color|px"` keys, an

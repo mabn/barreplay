@@ -1852,13 +1852,28 @@ function drawIcons2D(u) {
   }
 }
 
-// ---- build-lines + construction-progress overlay ---------------------------
+// ---- build-lines + unit-bar overlay ----------------------------------------
 // Yellow lines from each construction unit (cons, commander, nano turret,
 // factory, ...) to the unit it is currently building or assisting (the frame
-// array's TARGET column), plus a small progress bar under every unit whose
-// BUILD column is below finished. Both endpoints interpolate with the units,
-// so this redraws on every animation tick — on #ovcv, above the icon layers.
-// Empty for codec v4 replays (their columns decode to finished/none).
+// array's TARGET column), plus two small bars per unit: build progress UNDER
+// every unit whose BUILD column is below finished, and health OVER every
+// finished unit that has taken damage. Both endpoints interpolate with the
+// units, so this redraws on every animation tick — on #ovcv, above the icon
+// layers. The build line and the build bar share the same yellow, so a
+// construction site and the builders feeding it read as one thing; green is
+// reserved for health, which is what the eye is looking for in a fight.
+// Build bars are empty for codec v4 replays (their columns decode to
+// finished/none); health bars work on every capture, since hp/maxHp have been
+// core columns since v1.
+const BAR_BACK = 'rgba(8, 12, 16, 0.7)';
+const BUILD_BAR_COLOR = '#ffd600';   // the build line's yellow
+const HEALTH_BAR_COLOR = '#5ad35a';
+// Health bars are drawn only at this zoom (screen px per elmo) or closer. Below
+// it a unit is a handful of pixels wide, the minimum-width bars of neighbouring
+// units overlap into a band, and the whole-map view people use to read the
+// front line turns into noise — where the same view at 0.25 and in is the one
+// you are watching a fight in.
+const HEALTH_BAR_MIN_SCALE = 0.25;
 function drawOverlay(u) {
   if (!octx) return;
   octx.setTransform(DPR, 0, 0, DPR, 0, 0);
@@ -1876,12 +1891,17 @@ function drawOverlay(u) {
   if (!u) return;
 
   // Cheap scan first: most frames have far fewer builders/under-construction
-  // units than units, and many replays (v4) have none at all.
-  let anyLine = false, anyBar = false;
+  // units than units, and many replays (v4) have none at all. Damage is the
+  // common case rather than the rare one, so the scan's job there is only to
+  // skip the bar loop entirely on the frames (and the zoom levels) with
+  // nothing to draw.
+  const healthZoom = scale >= HEALTH_BAR_MIN_SCALE;
+  let anyLine = false, anyBar = false, anyHealth = false;
   for (let i = 0; i < u.length; i += STRIDE) {
     if (u[i + F.TARGET] !== 0) anyLine = true;
     if (u[i + F.BUILD] < BUILD_DONE) anyBar = true;
-    if (anyLine && anyBar) break;
+    else if (healthZoom && u[i + F.HP] < u[i + F.MAXHP]) anyHealth = true;
+    if (anyLine && anyBar && anyHealth) break;
   }
 
   if (showBuildLines && anyLine) {
@@ -1910,22 +1930,47 @@ function drawOverlay(u) {
     octx.stroke();
   }
 
-  if (anyBar) {
+  if (anyBar || anyHealth) {
     for (let i = 0; i < u.length; i += STRIDE) {
-      const b = u[i + F.BUILD];
-      if (b >= BUILD_DONE) continue;
-      const bv = interpBuild(u, i);
+      const unfinished = u[i + F.BUILD] < BUILD_DONE;
+      const hp = u[i + F.HP], maxHp = u[i + F.MAXHP];
+      // An unfinished unit's missing hp IS its construction — it fills up as
+      // the thing gets built — so it gets the build bar and no health bar,
+      // rather than two bars both counting the same progress. A unit with no
+      // recorded maxHp (an unidentified radar contact, hp/maxHp 0/0) fails
+      // this test, which is what keeps a bar off a dot nothing is known about.
+      const damaged = healthZoom && !unfinished && hp < maxHp;
+      if (!unfinished && !damaged) continue;
       const p = interpPos(u, i);
       const sx = viewW / 2 + (p[0] - center.x) * scale;
       const sy = viewH / 2 + (p[1] - center.z) * scale;
-      const px = iconPxFor(u[i + F.DEF]); // bar tracks the icon's screen size
+      const px = iconPxFor(u[i + F.DEF]); // bars track the icon's screen size
       const w = Math.max(10, px * 0.9), h = 3;
-      const x = sx - w / 2, y = sy + px / 2 + 2;
-      if (x + w < 0 || y + h < 0 || x > viewW || y > viewH) continue;
-      octx.fillStyle = 'rgba(8, 12, 16, 0.7)';
-      octx.fillRect(x, y, w, h);
-      octx.fillStyle = '#5ad35a';
-      octx.fillRect(x, y, w * Math.min(1, bv / BUILD_DONE), h);
+      const x = sx - w / 2;
+      if (x + w < 0 || x > viewW) continue;
+      if (unfinished) {
+        const y = sy + px / 2 + 2;      // under the icon
+        if (y + h >= 0 && y <= viewH) {
+          octx.fillStyle = BAR_BACK;
+          octx.fillRect(x, y, w, h);
+          octx.fillStyle = BUILD_BAR_COLOR;
+          octx.fillRect(x, y, w * Math.min(1, interpBuild(u, i) / BUILD_DONE), h);
+        }
+      }
+      if (damaged) {
+        // Over the icon, and NOT interpolated the way the build bar is: build
+        // progress really does creep between samples, where damage arrives in
+        // hits, so lerping a health bar would invent a drain that never
+        // happened — and would have to guard on the def matching to survive
+        // the engine recycling unit ids.
+        const y = sy - px / 2 - 2 - h;
+        if (y + h >= 0 && y <= viewH) {
+          octx.fillStyle = BAR_BACK;
+          octx.fillRect(x, y, w, h);
+          octx.fillStyle = HEALTH_BAR_COLOR;
+          octx.fillRect(x, y, w * Math.max(0, Math.min(1, hp / maxHp)), h);
+        }
+      }
     }
   }
 
