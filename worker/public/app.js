@@ -1224,86 +1224,11 @@ function textColorOn(css) {
   return (0.299 * r + 0.587 * g + 0.114 * b) > 0.55 ? '#0b0e12' : '#ffffff';
 }
 
-// A team colour is chosen to be read as a BLOCK on a lit map, and several of
-// BAR's are far too dark to double as TEXT on this sidebar: the default blue,
-// #0b3ef3, sits at a contrast of 2.0 against the statistics track where small
-// text wants 4.5 (WCAG AA for 11px bold), and its red only reaches 3.6.
-// readableOn lifts such a colour's LIGHTNESS until it clears the floor — in
-// HSL, so hue and saturation are untouched and the word still says which side
-// it belongs to — and returns a colour already bright enough unchanged, which
-// is most of them. Only TEXT goes through it: a FILL keeps the raw colour,
-// since showing a team colour as a block is the one thing it was picked for,
-// and lightening the two bands would cost the split its contrast against
-// itself.
-const TEXT_CONTRAST = 4.5;
-// The surfaces team-coloured text is drawn on, mirroring style.css: the
-// sidebar panel (the player list and the chat log), the statistics rows'
-// track, and the map tooltip, whose 96%-opaque panel reads as this whatever
-// is under it.
-const SIDEBAR_BG = '#161b21';
-const TRACK_BG = '#222c36';
-const TOOLTIP_BG = '#141a21';
-const readableCache = new Map();
-
-function relLuminance([r, g, b]) {
-  const f = v => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
-  return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
-}
-
-function contrastRatio(a, b) {
-  const x = relLuminance(a), y = relLuminance(b);
-  return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
-}
-
-function rgbToHsl([r, g, b]) {
-  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
-  let h = 0;
-  if (d) {
-    if (mx === r) h = ((g - b) / d) % 6;
-    else if (mx === g) h = (b - r) / d + 2;
-    else h = (r - g) / d + 4;
-    h *= 60;
-    if (h < 0) h += 360;
-  }
-  const l = (mx + mn) / 2;
-  return [h, d ? d / (1 - Math.abs(2 * l - 1)) : 0, l];
-}
-
-function hslToRgb(h, s, l) {
-  const c = (1 - Math.abs(2 * l - 1)) * s;
-  const x = c * (1 - Math.abs((h / 60) % 2 - 1));
-  const m = l - c / 2;
-  const t = [[c, x, 0], [x, c, 0], [0, c, x], [0, x, c], [x, 0, c], [c, 0, x]][Math.floor(h / 60) % 6];
-  return [t[0] + m, t[1] + m, t[2] + m];
-}
-
+// tintToCss turns the 0..1 triple cssToTint hands back into a #rrggbb string,
+// which is how a derived colour gets into an inline style.
 function tintToCss(rgb) {
   return '#' + rgb.map(v =>
     Math.round(Math.max(0, Math.min(1, v)) * 255).toString(16).padStart(2, '0')).join('');
-}
-
-function readableOn(css, surface) {
-  const key = css + '|' + surface;
-  const hit = readableCache.get(key);
-  if (hit) return hit;
-  const bg = cssToTint(surface);
-  const rgb = cssToTint(css);
-  let out = css;
-  if (contrastRatio(rgb, bg) < TEXT_CONTRAST) {
-    const [h, sat, l0] = rgbToHsl(rgb);
-    // White is where the walk ends: a colour that cannot clear the floor short
-    // of it has no tint left to keep anyway.
-    out = '#ffffff';
-    for (let l = l0; l < 1; ) {
-      // 2% steps — fine enough that nothing is lightened past what it needed,
-      // coarse enough to settle in a few dozen tries from the darkest colour.
-      l = Math.min(1, l + 0.02);
-      const c = hslToRgb(h, sat, l);
-      if (contrastRatio(c, bg) >= TEXT_CONTRAST) { out = tintToCss(c); break; }
-    }
-  }
-  readableCache.set(key, out);
-  return out;
 }
 
 function roundRectPath(c, x, y, w, h, r) {
@@ -1646,8 +1571,7 @@ function renderChat() {
     row.innerHTML =
       `<span class="chattime">${escapeHtml(fmtTime(c.f / 30))}</span>` +
       (tag ? `<span class="chattag">${escapeHtml(tag)}</span>` : '') +
-      `<b style="color:${escapeHtml(readableOn(commColor(c.p), SIDEBAR_BG))}">` +
-      `${escapeHtml(commName(c))}</b> ` +
+      `<b style="color:${escapeHtml(commColor(c.p))}">${escapeHtml(commName(c))}</b> ` +
       `<span>${escapeHtml(c.t)}</span>`;
     row.title = 'Jump to ' + fmtTime(c.f / 30);
     row.addEventListener('click', () => {
@@ -2704,9 +2628,7 @@ function updateTooltip() {
     `<h3>${name}${code !== name ? `<span class="code">${code}</span>` : ''}</h3>` +
     (ghost ? `<div class="row"><span class="label">Status</span><span style="color:#8a98a6">ghost — last seen state</span></div>` : '') +
     `<div class="row"><span class="label">Unit</span><span>#${id}</span></div>` +
-    `<div class="row"><span class="label">Team</span>` +
-    `<span style="color:${readableOn(teamColor[team] || '#fff', TOOLTIP_BG)}">` +
-    `${teamNameById(team)}</span></div>` +
+    `<div class="row"><span class="label">Team</span><span style="color:${teamColor[team] || '#fff'}">${teamNameById(team)}</span></div>` +
     `<div class="row"><span class="label">Position</span><span>${x}, ${z}</span></div>` +
     (maxHp > 0
       ? `<div class="row"><span class="label">Health</span><span>${hp} / ${maxHp}</span></div>` +
@@ -2911,6 +2833,20 @@ function incomePeaks(simFrame, teams) {
 // BAR caps the readout rather than letting the row fill with digits.
 const TS_LEAD_MAX = 999;
 
+// The bars between the knobs are the side's colour DARKENED, which is what
+// makes a knob read as the block carrying a number and the bar as the track it
+// rides — BAR draws the same relation with a 0.4 bar under a 0.6 knob. Here the
+// knob is the colour itself, so the bar goes further down to keep the two
+// apart.
+const TS_BAR_SHADE = 0.45;
+// A dead heat has no leading side, so its knob is neutral rather than one
+// team's colour (BAR's colorKnobMiddleGrey).
+const TS_TIE_KNOB = '#5a6773';
+
+function shade(css, f) {
+  return tintToCss(cssToTint(css).map(v => v * f));
+}
+
 // fmtStat renders a value the way BAR's HUD does (formatResources(v, true)):
 // one decimal through the first decade of each unit and none after — 7.0k,
 // 504k, 3.7M, 192M. Deliberately not fmtNum, whose trailing-zero trimming
@@ -3013,29 +2949,36 @@ function renderTeamStats(fr, res, playing) {
   if (!rows.length) { root.style.display = 'none'; root.innerHTML = ''; return; }
 
   root.innerHTML = rows.map(([label, a, b, tip]) => {
-    // The two fills share the whole track, split in proportion to the values —
-    // BAR's leftBarWidth = barLength * left / (left + right) — and go halves
-    // when neither side has anything to compare yet.
+    // The two bars share whatever the knobs leave, split in proportion to the
+    // values — BAR's leftBarWidth = barLength * left / (left + right) — and go
+    // halves when neither side has anything to compare yet.
     const total = a + b;
     const fa = total > 0 ? a / total : 0.5;
-    const fill = (i, grow) =>
-      `<i style="flex-grow:${grow.toFixed(4)};background:${sides[i].color}"></i>`;
-    // The lead reads in the LEADING side's colour, which is what says whose
-    // lead it is: the number alone is a bare margin and could belong to
-    // either end of the row. A dead heat has no leader, so it keeps the
-    // muted tone the stylesheet gives it (an empty inline style loses to the
-    // class rule, which is the tie's only case).
-    const leadColor = a === b ? '' : readableOn(a > b ? sides[0].color : sides[1].color, TRACK_BG);
+    const bar = (i, grow) =>
+      `<i class="tsfill" style="flex-grow:${grow.toFixed(4)};` +
+      `background:${shade(sides[i].color, TS_BAR_SHADE)}"></i>`;
+    // A knob is a block of the side's colour with the value written across it,
+    // which is the whole point of the shape: the colour says whose the number
+    // is without the number having to be legible AS that colour. The ink is
+    // picked off the colour's own luminance, so a yellow team gets black where
+    // a navy one gets white.
+    const knob = (color, text, cls) =>
+      `<b class="tsknob${cls ? ' ' + cls : ''}" style="background:${color};` +
+      `color:${textColorOn(color)}">${escapeHtml(text)}</b>`;
+    // The lead's knob is the LEADING side's colour, so it says whose lead it
+    // is as well as how big — the number alone is a bare margin that could
+    // belong to either end. A dead heat has no leader to name and takes the
+    // neutral knob instead, which is what BAR does with it too.
+    const leadColor = a === b ? TS_TIE_KNOB : (a > b ? sides[0].color : sides[1].color);
     return `<div class="tsrow" title="${escapeHtml(tip + ' \u2014 ' + label)}">` +
       `<span class="tslabel">${escapeHtml(label)}</span>` +
       '<span class="tsbar">' +
-      `<span class="tsfills">${fill(0, fa)}${fill(1, 1 - fa)}</span>` +
-      '<span class="tsvals">' +
-      `<b style="color:${readableOn(sides[0].color, TRACK_BG)}">${escapeHtml(fmtStat(a))}</b>` +
-      `<b class="tslead"${leadColor ? ` style="color:${leadColor}"` : ''}>` +
-      `${escapeHtml(tsLead(a, b))}</b>` +
-      `<b style="color:${readableOn(sides[1].color, TRACK_BG)}">${escapeHtml(fmtStat(b))}</b>` +
-      '</span></span></div>';
+      knob(sides[0].color, fmtStat(a)) +
+      bar(0, fa) +
+      knob(leadColor, tsLead(a, b), 'tslead') +
+      bar(1, 1 - fa) +
+      knob(sides[1].color, fmtStat(b)) +
+      '</span></div>';
   }).join('');
   root.style.display = '';
 }
@@ -3108,11 +3051,7 @@ function playerRow(p, r, peaks) {
     `<div class="phead">${rank}${flag}${os}` +
     // Two meters on one line leave the name ~70px, so it ellipsizes often —
     // the title keeps the full name reachable.
-    // The name is TEXT in the team's colour, so it goes through the same
-    // contrast floor the statistics rows use — BAR's darker team colours are
-    // barely legible on this panel raw.
-    `<span class="pname" title="${escapeHtml(p.name)}" ` +
-    `style="color:${readableOn(color, SIDEBAR_BG)}">${escapeHtml(p.name)}</span></div>`;
+    `<span class="pname" title="${escapeHtml(p.name)}" style="color:${color}">${escapeHtml(p.name)}</span></div>`;
   if (r) {
     html += '<div class="pres">' +
       resRow('metal', r.metal, r.mStore, r.mInc, peaks.m) +
