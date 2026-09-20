@@ -503,6 +503,47 @@ canvas { display: block; width: 100%; height: 100%; background: #0c0f13; cursor:
 .stat { display: flex; justify-content: space-between; padding: 2px 0; }
 .stat b { color: #fff; font-variant-numeric: tabular-nums; }
 
+/* ---- team statistics bar ----
+   BAR's spectator team comparison, one row per metric above the player list:
+   label, this side's value, a bar split in proportion to the two values with
+   the lead riding the split, the other side's value. Every colour is inline —
+   each is a multiple of that side's own team colour, computed in app.js (see
+   renderTeamStats) — so this file owns only the geometry.
+
+   The proportions are the widget's, scaled to the sidebar: of the row's width
+   BAR spends ~16% on the label, ~16% on each side knob and ~17% on the split
+   knob, leaving ~46% of it for the bar itself. Fixed pixel slots rather than
+   percentages because the knobs hold numbers, which must not resize as the
+   game grows from "12" to "504k". */
+#teamstats { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; }
+.tsrow {
+  display: flex; align-items: stretch; gap: 2px; height: 22px;
+  padding: 2px; border-radius: 3px;
+  /* The widget's rows sit on a panel lit from above: a bright top edge falling
+     away to near-black. */
+  background: linear-gradient(#4e4c49, #191713 22%, #100f0d);
+}
+.tslabel {
+  flex: 0 0 28px; display: flex; align-items: center; justify-content: flex-end;
+  padding-right: 4px; font-size: 11px; color: #c8ced5;
+}
+.tsknob {
+  flex: 0 0 46px; display: flex; align-items: center; justify-content: center;
+  border-radius: 2px; box-shadow: inset 0 0 0 1px rgba(0,0,0,.6);
+  color: #fff; font-size: 11px; font-weight: 700; line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+/* The split knob is narrower than the value knobs: it only ever holds a
+   percentage, where those hold a formatted resource total. */
+.tsmid { flex: 0 0 38px; }
+/* The bar is what is LEFT once the three knobs have their slots, which is what
+   makes the split proportional to the values and nothing else: the two fills
+   below grow into it, and the split knob rides the boundary between them. */
+.tsbar { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; }
+.tsfill { position: relative; flex-basis: 0; min-width: 0; height: 14px; }
+/* The brighter line down the middle of each fill (BAR's colorLine). */
+.tsfill > u { position: absolute; left: 0; right: 0; top: 5px; height: 4px; }
+
 /* ---- player list ----
    One row per player: rank / flag / OS / name on the left, the metal + energy
    bars (small) on the right, laid out like BAR's in-game player list. */

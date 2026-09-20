@@ -2163,7 +2163,11 @@ run dev` in `worker/` plus `pack -upload local`.)
   wholesale from bundles published before it existed, so `app.js` `defName` falls back
   to `unitDefs` — a deployed replay keeps showing codes until it is republished),
   icons, footprints,
-  players, bounds, `frameCount`, and the **chunk index** `{frame,count,kLen,len}` per
+  players, bounds, `frameCount`, `armyCost` (the metal price of each ARMED, MOBILE
+  def, which is what the sidebar's team statistics bar sums into a side's army
+  value — absent from every bundle published before it existed, which is why that
+  row hides rather than reading zero), and the **chunk index**
+  `{frame,count,kLen,len}` per
   chunk — `kLen` is the keyframe's RAW length inside the decompressed keys stream)
   plus the file's `E` events and `C` comms sections byte-for-byte — ~230 KB for a
   33-min game, so the page is interactive immediately. `/replays/<id>.keys` is the `K` section
@@ -2234,6 +2238,39 @@ run dev` in `worker/` plus `pack -upload local`.)
   footprints; the layer is off by default (`showFootprints`). Unlike icons, footprints are drawn
   in world space, so they scale with zoom and are centred on the unit position (the footprint
   centre).
+- **Team statistics bar (`app.js` `renderTeamStats`, above the sidebar's player
+  list)**: BAR's spectator team comparison
+  (`luaui/Widgets/gui_spectator_hud.lua`), reproduced for the three metrics a
+  capture can answer — metal income, energy income, and ARMY VALUE. One row per
+  metric: the metric's name, each side's value in a knob tinted that side's
+  colour, and between them a bar split in proportion to the two values with a
+  knob riding the split reading the LEAD — the leader's margin over the TRAILING
+  side, not its share of the total, so a 2:1 game reads "100%" and a side at zero
+  reads "∞" rather than 100%. Values format like BAR's own
+  `formatResources(v, true)` (`fmtStat`: 7.0k, 504k, 3.7M, 192M) rather than
+  `fmtNum`, whose trailing-zero trimming would let a knob's width jitter from
+  "7k" to "7.01k" as the game ran. Every colour is a MULTIPLE of the side's own
+  team colour (`shade`, factors 0.6/0.75/0.4/0.7 for the side knobs / the split
+  knob / the bar / the brighter line down its middle — BAR's
+  darkerSideKnobsFactor and friends), which is what makes the row read as one
+  object at any team colour instead of four shades that only work for blue
+  against red. Drawn ONLY for a TWO-ALLY game: the row's whole shape is a
+  comparison of two sides and there is nothing to split in an FFA. The sides come
+  from the PLAYER roster rather than the team list, which is also what keeps Gaia
+  and the scavenger team out of them — no player controls those. BAR's MP and EP
+  (metal/energy ever produced) are deliberately absent: those are engine running
+  totals (`GetTeamResourceStats`) that a sampled capture never recorded. ARMY
+  VALUE sums the metal cost of every ARMED, MOBILE unit a side owns that is not a
+  commander, weighted by the sampled build progress so a unit under construction
+  counts for the metal actually sunk into it. The rule is SPLIT across the two
+  sides on purpose: the armed/mobile half needs the unit-def table and is applied
+  at publish time (`wire.go`'s `ArmyCost`, which prices only the defs that pass
+  it), the commander half stays in `app.js`, which already holds this repo's one
+  definition of a commander (`COMMANDER_RE`/`defIsCom`). A bundle published
+  before `armyCost` existed carries none, so the AV row is DROPPED rather than
+  drawn as 0 against 0 — republishing the `.brp` (`pack`) brings it back without
+  a re-simulation. Each row is likewise dropped when the economy timeline has no
+  reading for it, and the whole bar hides when no row is left.
 - **Chat + map drawings in the viewer (`app.js` `buildCommIndex`/`drawMarks`/
   `renderChat`)**: the head's `C` section decodes into `data.comms`, which splits two
   ways. MARKS (points, lines) draw in WORLD space on the overlay canvas — so a

@@ -2707,6 +2707,199 @@ function incomePeaks(simFrame, teams) {
   return peak;
 }
 
+// ---- team statistics bar ---------------------------------------------------
+// BAR's spectator HUD (luaui/Widgets/gui_spectator_hud.lua) puts a row per
+// metric above the player list while a two-sided game is watched, and this
+// reproduces it for the three metrics a capture can answer: metal income,
+// energy income, and army value. A row is the metric's name, each side's value
+// in a knob tinted that side's colour, and between them one bar split in
+// proportion to the two values, with a knob riding the split that reads the
+// LEAD — how far ahead the leader is as a percentage OF THE TRAILING SIDE, not
+// of the total, so a 2:1 game reads "100%" (gui_spectator_hud's relativeLead).
+//
+// Only a TWO-ALLY game gets the bar. The row's whole shape is one comparison of
+// two sides and there is nothing to split in an FFA. The sides come from the
+// PLAYER roster rather than the team list, which is also what keeps Gaia and
+// the scavenger team out of it: no player controls those.
+//
+// BAR's own metric set also carries MP and EP (total metal/energy ever
+// produced). Those are engine running totals (GetTeamResourceStats), which a
+// sampled capture never recorded, so they are not here.
+
+// The tints BAR derives from a side's team colour, as plain multipliers on its
+// channels: the side knobs, the knob riding the split, the bar, and the
+// brighter line down the bar's middle (gui_spectator_hud's
+// darkerSideKnobsFactor / darkerMiddleKnobFactor / darkerBarsFactor /
+// darkerLinesFactor). Reproducing them is what makes the row read as the same
+// object at any team colour, rather than four hand-picked shades that only
+// work for blue against red.
+const TS_KNOB = 0.6, TS_MID = 0.75, TS_BAR = 0.4, TS_LINE = 0.7;
+// The split knob when the two sides are exactly level and neither leads
+// (colorKnobMiddleGrey).
+const TS_EVEN = '#808080';
+// Lead percentages run away to nothing once a side is nearly wiped out, so
+// BAR caps the readout rather than letting the knob fill with digits.
+const TS_LEAD_MAX = 999;
+
+// shade multiplies a CSS colour's channels by f. The colour arrives either as
+// the replay's own "#rrggbb" or as one of computeTeamColors' hsl() strings, so
+// it is normalized through a canvas fillStyle — which always reads back as
+// "#rrggbb" — instead of being parsed by hand. Memoized because the shades are
+// a property of the replay and this runs on every sidebar rebuild.
+const shadeCache = new Map();
+let shadeCtx = null;
+function shade(css, f) {
+  const key = css + '|' + f;
+  const hit = shadeCache.get(key);
+  if (hit !== undefined) return hit;
+  let out = css;
+  try {
+    if (!shadeCtx) shadeCtx = document.createElement('canvas').getContext('2d');
+    shadeCtx.fillStyle = '#000';
+    shadeCtx.fillStyle = css;
+    const m = /^#([0-9a-f]{6})$/i.exec(shadeCtx.fillStyle);
+    if (m) {
+      const n = parseInt(m[1], 16);
+      const ch = i => Math.round(((n >> i) & 0xff) * f);
+      out = `rgb(${ch(16)},${ch(8)},${ch(0)})`;
+    }
+  } catch (_) { /* no canvas: the undarkened colour still reads as that side */ }
+  shadeCache.set(key, out);
+  return out;
+}
+
+// fmtStat renders a value the way BAR's HUD does (formatResources(v, true)):
+// one decimal through the first decade of each unit and none after — 7.0k,
+// 504k, 3.7M, 192M. Deliberately not fmtNum, whose trailing-zero trimming
+// renders 7000 as "7k" and 7010 as "7.01k", so a knob's width would jitter as
+// the game ran.
+function fmtStat(n) {
+  n = Math.max(0, Math.round(n));
+  if (n >= 1e7) return Math.trunc(n / 1e6) + 'M';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e4) return Math.trunc(n / 1e3) + 'k';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+  return String(n);
+}
+
+// tsLead is the split knob's text: the leader's margin over the TRAILING side.
+// A side at zero is left behind by an undefined factor rather than by 100%,
+// which is why that case reads "∞" instead of dividing.
+function tsLead(a, b) {
+  const hi = Math.max(a, b), lo = Math.min(a, b);
+  if (hi === lo) return '0%';
+  if (lo <= 0) return '∞';
+  const lead = Math.floor(100 * (hi - lo) / lo);
+  return lead > TS_LEAD_MAX ? TS_LEAD_MAX + '+%' : lead + '%';
+}
+
+// tsSides returns the two sides of a two-ally game — {ally, color, teams} each,
+// in ally order so the left side of the bar is the first group of the player
+// list below it — or null when this replay is not one. The colour is the
+// ally's lowest-numbered team's, BAR's "captain" of that side.
+function tsSides(playing) {
+  const allyOf = {};
+  (data.teams || []).forEach(t => { allyOf[t.team] = t.ally; });
+  const byAlly = new Map();
+  for (const p of playing) {
+    const ally = allyOf[p.team];
+    if (ally === undefined) continue;
+    let s = byAlly.get(ally);
+    if (!s) byAlly.set(ally, s = { ally, teams: new Set() });
+    s.teams.add(p.team);
+  }
+  if (byAlly.size !== 2) return null;
+  const sides = [...byAlly.values()].sort((a, b) => a.ally - b.ally);
+  for (const s of sides) {
+    const lead = Math.min(...s.teams);
+    s.color = teamColor[lead] || '#c7d0d9';
+  }
+  return sides;
+}
+
+// tsArmyValue sums each side's army value out of one sampled frame: the metal
+// cost of every ARMED, MOBILE unit it owns that is not a commander. The cost
+// table rides the head (wire.go's ArmyCost, which applies the armed/mobile half
+// of BAR's rule since the browser has no unit-def table); the commander half is
+// defIsCom, this file's one definition of a commander. Units under construction
+// count for the metal actually sunk into them so far, which is what the sampled
+// build progress measures.
+//
+// Returns null when the bundle carries no cost table at all — every replay
+// published before that field existed — because a side with no army and a side
+// whose army nothing can price both sum to zero, and the row is dropped rather
+// than reading 0 against 0 for the rest of the game.
+function tsArmyValue(fr, sides) {
+  const cost = data.armyCost;
+  if (!cost || !fr || !fr.u) return null;
+  const teamSide = new Map();
+  sides.forEach((s, i) => { for (const t of s.teams) teamSide.set(t, i); });
+  const out = [0, 0];
+  const u = fr.u;
+  for (let i = 0; i < u.length; i += STRIDE) {
+    const side = teamSide.get(u[i + F.TEAM]);
+    if (side === undefined) continue;
+    const def = u[i + F.DEF];
+    const c = cost[def];
+    if (!c || defIsCom.get(def)) continue;
+    out[side] += c * Math.min(1, u[i + F.BUILD] / BUILD_DONE);
+  }
+  return out;
+}
+
+// renderTeamStats draws the bar, and hides it when this replay has no two sides
+// to compare or when not one of the three metrics can be read yet.
+function renderTeamStats(fr, res, playing) {
+  const root = document.getElementById('teamstats');
+  const sides = playing.length ? tsSides(playing) : null;
+  if (!sides) { root.style.display = 'none'; root.innerHTML = ''; return; }
+
+  const sum = (s, key) => {
+    let n = 0, any = false;
+    for (const t of s.teams) if (res[t]) { n += res[t][key]; any = true; }
+    return any ? n : null;
+  };
+  const av = tsArmyValue(fr, sides);
+  const rows = [
+    // Income is per game-second already (the capture stores the engine's own
+    // per-second figure), so these are the numbers BAR's M/s and E/s show.
+    ['M/s', sum(sides[0], 'mInc'), sum(sides[1], 'mInc'), 'metal income per second'],
+    ['E/s', sum(sides[0], 'eInc'), sum(sides[1], 'eInc'), 'energy income per second'],
+    ['AV', av && av[0], av && av[1], 'army value: metal in armed mobile units'],
+  ].filter(r => r[1] !== null && r[1] !== undefined && r[2] !== null && r[2] !== undefined);
+  if (!rows.length) { root.style.display = 'none'; root.innerHTML = ''; return; }
+
+  const tint = sides.map(s => ({
+    knob: shade(s.color, TS_KNOB),
+    mid: shade(s.color, TS_MID),
+    bar: shade(s.color, TS_BAR),
+    line: shade(s.color, TS_LINE),
+  }));
+
+  root.innerHTML = rows.map(([label, a, b, tip]) => {
+    // The two fills share what the three knobs leave, split in proportion to
+    // the values — BAR's leftBarWidth = barLength * left / (left + right) —
+    // and go halves when neither side has anything to compare yet.
+    const total = a + b;
+    const fa = total > 0 ? a / total : 0.5;
+    const mid = a === b ? TS_EVEN : (a > b ? tint[0].mid : tint[1].mid);
+    const fill = (i, grow) =>
+      `<i class="tsfill" style="flex-grow:${grow.toFixed(4)};background:${tint[i].bar}">` +
+      `<u style="background:${tint[i].line}"></u></i>`;
+    return `<div class="tsrow" title="${escapeHtml(tip)}">` +
+      `<span class="tslabel">${escapeHtml(label)}</span>` +
+      `<span class="tsknob" style="background:${tint[0].knob}">${escapeHtml(fmtStat(a))}</span>` +
+      '<span class="tsbar">' +
+      fill(0, fa) +
+      `<span class="tsknob tsmid" style="background:${mid}">${escapeHtml(tsLead(a, b))}</span>` +
+      fill(1, 1 - fa) +
+      '</span>' +
+      `<span class="tsknob" style="background:${tint[1].knob}">${escapeHtml(fmtStat(b))}</span>` +
+      '</div>';
+  }).join('');
+  root.style.display = '';
+}
+
 // Player list: rank, flag, OS (skill), name — then the metal and energy meters
 // side by side, one line per player — grouped by ally team. Economy comes from
 // the current frame's per-team
@@ -2717,16 +2910,19 @@ function renderPlayers() {
   const root = document.getElementById('players');
   root.innerHTML = '';
   const players = data.players || [];
+  const fr = dispIdx >= 0 ? data.frames[dispIdx] : null;
+  const res = resourcesByTeam(fr ? fr.f : -1);
+  const playing = players.filter(p => !p.spec);
+  // The comparison rows sit above this list and describe the same two groups,
+  // so they are rendered from the same roster and the same frame's economy.
+  renderTeamStats(fr, res, playing);
   if (!players.length) {
     root.innerHTML = '<div class="hint">no player roster in this capture</div>';
     return;
   }
-  const fr = dispIdx >= 0 ? data.frames[dispIdx] : null;
-  const res = resourcesByTeam(fr ? fr.f : -1);
   const allyOf = {};
   (data.teams || []).forEach(t => { allyOf[t.team] = t.ally; });
 
-  const playing = players.filter(p => !p.spec);
   const specs = players.filter(p => p.spec);
 
   // The meters scale among the rows that exist, so the peak is taken over

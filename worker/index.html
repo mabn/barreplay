@@ -281,6 +281,11 @@
     <div class="stat"><span>Units</span><b id="s_units">—</b></div>
 
     <h2>Players</h2>
+    <!-- BAR's spectator team-comparison rows (see renderTeamStats in app.js).
+         Only a two-sided game has anything to compare, so this stays hidden
+         for an FFA, for a capture with no roster, and until the economy
+         timeline has landed. -->
+    <div id="teamstats" style="display:none"></div>
     <div id="players"></div>
 
     <!-- Chat transcript. Hidden when the capture recorded no messages — a

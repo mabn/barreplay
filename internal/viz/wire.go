@@ -61,6 +61,19 @@ type wireHead struct {
 	// elmos. Only immobile units are included (presence == it doesn't move), so the
 	// front-end draws a footprint rectangle only for buildings/turrets/etc.
 	Footprints map[string]wireFootprint `json:"footprints"`
+	// ArmyCost maps a unit def id to the METAL the def contributes to the team
+	// statistics bar's "AV" (army value) — BAR's own spectator HUD counts a unit
+	// as army when it is ARMED and MOBILE and is not a commander
+	// (gui_spectator_hud.lua's isArmyUnit). The first half of that test needs the
+	// unit-def table, which the browser never receives, so it is applied here and
+	// a def that fails it simply has no entry. The COMMANDER half deliberately
+	// stays in app.js, which already holds this repo's one definition of a
+	// commander (COMMANDER_RE) and applies it to the def names it is sent;
+	// restating BAR's faction prefixes here would be a second copy to keep in
+	// step. Omitted wholesale by a capture whose widget recorded no def stats,
+	// and absent from every bundle published before this field existed — which is
+	// why the front-end drops the AV row rather than drawing it as zero.
+	ArmyCost map[int32]int32 `json:"armyCost,omitempty"`
 	// Players is the human/AI roster the sidebar player list renders (country
 	// flag, rank, OpenSkill "OS"), tied to a team. Small, so it rides the head.
 	Players []wirePlayer `json:"players"`
@@ -187,6 +200,18 @@ func buildHead(meta snapshot.Meta, b wireBounds, extraTeams []int32) wireHead {
 	for _, d := range meta.UnitDefs {
 		if (!d.CanMove || d.IsBuilding) && d.XSize > 0 {
 			h.Footprints[d.Name] = wireFootprint{W: d.XSize * squareSize, H: d.ZSize * squareSize}
+		}
+	}
+
+	// Metal cost of every ARMED, MOBILE def, which is what the team statistics
+	// bar sums into each side's army value (see ArmyCost above for where the rest
+	// of BAR's rule lives). A def with no recorded cost or stats contributes
+	// nothing and is left out, so a capture predating the full DEF dump yields an
+	// empty map and the row disappears instead of reading zero for both sides.
+	h.ArmyCost = map[int32]int32{}
+	for id, d := range meta.UnitDefs {
+		if d.WeaponCount > 0 && d.Speed > 0 && d.MetalCost > 0 {
+			h.ArmyCost[id] = int32(math.Round(float64(d.MetalCost)))
 		}
 	}
 
