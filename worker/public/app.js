@@ -1224,6 +1224,88 @@ function textColorOn(css) {
   return (0.299 * r + 0.587 * g + 0.114 * b) > 0.55 ? '#0b0e12' : '#ffffff';
 }
 
+// A team colour is chosen to be read as a BLOCK on a lit map, and several of
+// BAR's are far too dark to double as TEXT on this sidebar: the default blue,
+// #0b3ef3, sits at a contrast of 2.0 against the statistics track where small
+// text wants 4.5 (WCAG AA for 11px bold), and its red only reaches 3.6.
+// readableOn lifts such a colour's LIGHTNESS until it clears the floor — in
+// HSL, so hue and saturation are untouched and the word still says which side
+// it belongs to — and returns a colour already bright enough unchanged, which
+// is most of them. Only TEXT goes through it: a FILL keeps the raw colour,
+// since showing a team colour as a block is the one thing it was picked for,
+// and lightening the two bands would cost the split its contrast against
+// itself.
+const TEXT_CONTRAST = 4.5;
+// The surfaces team-coloured text is drawn on, mirroring style.css: the
+// sidebar panel (the player list and the chat log), the statistics rows'
+// track, and the map tooltip, whose 96%-opaque panel reads as this whatever
+// is under it.
+const SIDEBAR_BG = '#161b21';
+const TRACK_BG = '#222c36';
+const TOOLTIP_BG = '#141a21';
+const readableCache = new Map();
+
+function relLuminance([r, g, b]) {
+  const f = v => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4));
+  return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+}
+
+function contrastRatio(a, b) {
+  const x = relLuminance(a), y = relLuminance(b);
+  return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+}
+
+function rgbToHsl([r, g, b]) {
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  let h = 0;
+  if (d) {
+    if (mx === r) h = ((g - b) / d) % 6;
+    else if (mx === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  const l = (mx + mn) / 2;
+  return [h, d ? d / (1 - Math.abs(2 * l - 1)) : 0, l];
+}
+
+function hslToRgb(h, s, l) {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+  const m = l - c / 2;
+  const t = [[c, x, 0], [x, c, 0], [0, c, x], [0, x, c], [x, 0, c], [c, 0, x]][Math.floor(h / 60) % 6];
+  return [t[0] + m, t[1] + m, t[2] + m];
+}
+
+function tintToCss(rgb) {
+  return '#' + rgb.map(v =>
+    Math.round(Math.max(0, Math.min(1, v)) * 255).toString(16).padStart(2, '0')).join('');
+}
+
+function readableOn(css, surface) {
+  const key = css + '|' + surface;
+  const hit = readableCache.get(key);
+  if (hit) return hit;
+  const bg = cssToTint(surface);
+  const rgb = cssToTint(css);
+  let out = css;
+  if (contrastRatio(rgb, bg) < TEXT_CONTRAST) {
+    const [h, sat, l0] = rgbToHsl(rgb);
+    // White is where the walk ends: a colour that cannot clear the floor short
+    // of it has no tint left to keep anyway.
+    out = '#ffffff';
+    for (let l = l0; l < 1; ) {
+      // 2% steps — fine enough that nothing is lightened past what it needed,
+      // coarse enough to settle in a few dozen tries from the darkest colour.
+      l = Math.min(1, l + 0.02);
+      const c = hslToRgb(h, sat, l);
+      if (contrastRatio(c, bg) >= TEXT_CONTRAST) { out = tintToCss(c); break; }
+    }
+  }
+  readableCache.set(key, out);
+  return out;
+}
+
 function roundRectPath(c, x, y, w, h, r) {
   if (c.roundRect) { c.beginPath(); c.roundRect(x, y, w, h, r); return; }
   c.beginPath();
@@ -1564,7 +1646,8 @@ function renderChat() {
     row.innerHTML =
       `<span class="chattime">${escapeHtml(fmtTime(c.f / 30))}</span>` +
       (tag ? `<span class="chattag">${escapeHtml(tag)}</span>` : '') +
-      `<b style="color:${escapeHtml(commColor(c.p))}">${escapeHtml(commName(c))}</b> ` +
+      `<b style="color:${escapeHtml(readableOn(commColor(c.p), SIDEBAR_BG))}">` +
+      `${escapeHtml(commName(c))}</b> ` +
       `<span>${escapeHtml(c.t)}</span>`;
     row.title = 'Jump to ' + fmtTime(c.f / 30);
     row.addEventListener('click', () => {
@@ -2621,7 +2704,9 @@ function updateTooltip() {
     `<h3>${name}${code !== name ? `<span class="code">${code}</span>` : ''}</h3>` +
     (ghost ? `<div class="row"><span class="label">Status</span><span style="color:#8a98a6">ghost — last seen state</span></div>` : '') +
     `<div class="row"><span class="label">Unit</span><span>#${id}</span></div>` +
-    `<div class="row"><span class="label">Team</span><span style="color:${teamColor[team] || '#fff'}">${teamNameById(team)}</span></div>` +
+    `<div class="row"><span class="label">Team</span>` +
+    `<span style="color:${readableOn(teamColor[team] || '#fff', TOOLTIP_BG)}">` +
+    `${teamNameById(team)}</span></div>` +
     `<div class="row"><span class="label">Position</span><span>${x}, ${z}</span></div>` +
     (maxHp > 0
       ? `<div class="row"><span class="label">Health</span><span>${hp} / ${maxHp}</span></div>` +
@@ -2793,6 +2878,168 @@ function incomePeaks(simFrame, teams) {
   return peak;
 }
 
+// ---- team statistics bar ---------------------------------------------------
+// BAR's spectator HUD (luaui/Widgets/gui_spectator_hud.lua) puts a row per
+// metric above the player list while a two-sided game is watched, and this
+// reproduces what it MEASURES for the three metrics a capture can answer:
+// metal income, energy income, and army value. A row is the metric's name and
+// one track holding both sides — each side's value at its own end in its team
+// colour, a fill behind each as wide as that side's share, and the LEAD between
+// them: how far ahead the leader is as a percentage OF THE TRAILING SIDE, not
+// of the total, so a 2:1 game reads "100%" (gui_spectator_hud's relativeLead).
+//
+// The widget's own LOOK is deliberately not copied. It is drawn for a game's
+// HUD — bevelled panels, saturated knobs, a lit top edge — and beside this
+// sidebar's flat surfaces and muted labels it read as a transplant from another
+// program. So the row is built from the vocabulary the player list under it
+// already uses: the #222c36 track, the rounded 3px corners, a fill at low
+// opacity under a number in that series' own colour (.rmeter), and team colour
+// as the thing that says whose a number is (.pname). Where the two fills MEET
+// is the split BAR draws a knob on, and it carries the same reading without an
+// ornament this UI has nowhere else.
+//
+// Only a TWO-ALLY game gets the bar. The row's whole shape is one comparison of
+// two sides and there is nothing to split in an FFA. The sides come from the
+// PLAYER roster rather than the team list, which is also what keeps Gaia and
+// the scavenger team out of it: no player controls those.
+//
+// BAR's own metric set also carries MP and EP (total metal/energy ever
+// produced). Those are engine running totals (GetTeamResourceStats), which a
+// sampled capture never recorded, so they are not here.
+
+// Lead percentages run away to nothing once a side is nearly wiped out, so
+// BAR caps the readout rather than letting the row fill with digits.
+const TS_LEAD_MAX = 999;
+
+// fmtStat renders a value the way BAR's HUD does (formatResources(v, true)):
+// one decimal through the first decade of each unit and none after — 7.0k,
+// 504k, 3.7M, 192M. Deliberately not fmtNum, whose trailing-zero trimming
+// renders 7000 as "7k" and 7010 as "7.01k", so a knob's width would jitter as
+// the game ran.
+function fmtStat(n) {
+  n = Math.max(0, Math.round(n));
+  if (n >= 1e7) return Math.trunc(n / 1e6) + 'M';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e4) return Math.trunc(n / 1e3) + 'k';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+  return String(n);
+}
+
+// tsLead is the split knob's text: the leader's margin over the TRAILING side.
+// A side at zero is left behind by an undefined factor rather than by 100%,
+// which is why that case reads "∞" instead of dividing.
+function tsLead(a, b) {
+  const hi = Math.max(a, b), lo = Math.min(a, b);
+  if (hi === lo) return '0%';
+  if (lo <= 0) return '∞';
+  const lead = Math.floor(100 * (hi - lo) / lo);
+  return lead > TS_LEAD_MAX ? TS_LEAD_MAX + '+%' : lead + '%';
+}
+
+// tsSides returns the two sides of a two-ally game — {ally, color, teams} each,
+// in ally order so the left side of the bar is the first group of the player
+// list below it — or null when this replay is not one. The colour is the
+// ally's lowest-numbered team's, BAR's "captain" of that side.
+function tsSides(playing) {
+  const allyOf = {};
+  (data.teams || []).forEach(t => { allyOf[t.team] = t.ally; });
+  const byAlly = new Map();
+  for (const p of playing) {
+    const ally = allyOf[p.team];
+    if (ally === undefined) continue;
+    let s = byAlly.get(ally);
+    if (!s) byAlly.set(ally, s = { ally, teams: new Set() });
+    s.teams.add(p.team);
+  }
+  if (byAlly.size !== 2) return null;
+  const sides = [...byAlly.values()].sort((a, b) => a.ally - b.ally);
+  for (const s of sides) {
+    const lead = Math.min(...s.teams);
+    s.color = teamColor[lead] || '#c7d0d9';
+  }
+  return sides;
+}
+
+// tsArmyValue sums each side's army value out of one sampled frame: the metal
+// cost of every ARMED, MOBILE unit it owns that is not a commander. The cost
+// table rides the head (wire.go's ArmyCost, which applies the armed/mobile half
+// of BAR's rule since the browser has no unit-def table); the commander half is
+// defIsCom, this file's one definition of a commander. Units under construction
+// count for the metal actually sunk into them so far, which is what the sampled
+// build progress measures.
+//
+// Returns null when the bundle carries no cost table at all — every replay
+// published before that field existed — because a side with no army and a side
+// whose army nothing can price both sum to zero, and the row is dropped rather
+// than reading 0 against 0 for the rest of the game.
+function tsArmyValue(fr, sides) {
+  const cost = data.armyCost;
+  if (!cost || !fr || !fr.u) return null;
+  const teamSide = new Map();
+  sides.forEach((s, i) => { for (const t of s.teams) teamSide.set(t, i); });
+  const out = [0, 0];
+  const u = fr.u;
+  for (let i = 0; i < u.length; i += STRIDE) {
+    const side = teamSide.get(u[i + F.TEAM]);
+    if (side === undefined) continue;
+    const def = u[i + F.DEF];
+    const c = cost[def];
+    if (!c || defIsCom.get(def)) continue;
+    out[side] += c * Math.min(1, u[i + F.BUILD] / BUILD_DONE);
+  }
+  return out;
+}
+
+// renderTeamStats draws the bar, and hides it when this replay has no two sides
+// to compare or when not one of the three metrics can be read yet.
+function renderTeamStats(fr, res, playing) {
+  const root = document.getElementById('teamstats');
+  const sides = playing.length ? tsSides(playing) : null;
+  if (!sides) { root.style.display = 'none'; root.innerHTML = ''; return; }
+
+  const sum = (s, key) => {
+    let n = 0, any = false;
+    for (const t of s.teams) if (res[t]) { n += res[t][key]; any = true; }
+    return any ? n : null;
+  };
+  const av = tsArmyValue(fr, sides);
+  const rows = [
+    // Income is per game-second already (the capture stores the engine's own
+    // per-second figure), so these are the numbers BAR's M/s and E/s show.
+    ['M/s', sum(sides[0], 'mInc'), sum(sides[1], 'mInc'), 'metal income per second'],
+    ['E/s', sum(sides[0], 'eInc'), sum(sides[1], 'eInc'), 'energy income per second'],
+    ['AV', av && av[0], av && av[1], 'army value: metal in armed mobile units'],
+  ].filter(r => r[1] !== null && r[1] !== undefined && r[2] !== null && r[2] !== undefined);
+  if (!rows.length) { root.style.display = 'none'; root.innerHTML = ''; return; }
+
+  root.innerHTML = rows.map(([label, a, b, tip]) => {
+    // The two fills share the whole track, split in proportion to the values —
+    // BAR's leftBarWidth = barLength * left / (left + right) — and go halves
+    // when neither side has anything to compare yet.
+    const total = a + b;
+    const fa = total > 0 ? a / total : 0.5;
+    const fill = (i, grow) =>
+      `<i style="flex-grow:${grow.toFixed(4)};background:${sides[i].color}"></i>`;
+    // The lead reads in the LEADING side's colour, which is what says whose
+    // lead it is: the number alone is a bare margin and could belong to
+    // either end of the row. A dead heat has no leader, so it keeps the
+    // muted tone the stylesheet gives it (an empty inline style loses to the
+    // class rule, which is the tie's only case).
+    const leadColor = a === b ? '' : readableOn(a > b ? sides[0].color : sides[1].color, TRACK_BG);
+    return `<div class="tsrow" title="${escapeHtml(tip + ' \u2014 ' + label)}">` +
+      `<span class="tslabel">${escapeHtml(label)}</span>` +
+      '<span class="tsbar">' +
+      `<span class="tsfills">${fill(0, fa)}${fill(1, 1 - fa)}</span>` +
+      '<span class="tsvals">' +
+      `<b style="color:${readableOn(sides[0].color, TRACK_BG)}">${escapeHtml(fmtStat(a))}</b>` +
+      `<b class="tslead"${leadColor ? ` style="color:${leadColor}"` : ''}>` +
+      `${escapeHtml(tsLead(a, b))}</b>` +
+      `<b style="color:${readableOn(sides[1].color, TRACK_BG)}">${escapeHtml(fmtStat(b))}</b>` +
+      '</span></span></div>';
+  }).join('');
+  root.style.display = '';
+}
+
 // Player list: rank, flag, OS (skill), name — then the metal and energy meters
 // side by side, one line per player — grouped by ally team. Economy comes from
 // the current frame's per-team
@@ -2803,16 +3050,19 @@ function renderPlayers() {
   const root = document.getElementById('players');
   root.innerHTML = '';
   const players = data.players || [];
+  const fr = dispIdx >= 0 ? data.frames[dispIdx] : null;
+  const res = resourcesByTeam(fr ? fr.f : -1);
+  const playing = players.filter(p => !p.spec);
+  // The comparison rows sit above this list and describe the same two groups,
+  // so they are rendered from the same roster and the same frame's economy.
+  renderTeamStats(fr, res, playing);
   if (!players.length) {
     root.innerHTML = '<div class="hint">no player roster in this capture</div>';
     return;
   }
-  const fr = dispIdx >= 0 ? data.frames[dispIdx] : null;
-  const res = resourcesByTeam(fr ? fr.f : -1);
   const allyOf = {};
   (data.teams || []).forEach(t => { allyOf[t.team] = t.ally; });
 
-  const playing = players.filter(p => !p.spec);
   const specs = players.filter(p => p.spec);
 
   // The meters scale among the rows that exist, so the peak is taken over
@@ -2858,7 +3108,11 @@ function playerRow(p, r, peaks) {
     `<div class="phead">${rank}${flag}${os}` +
     // Two meters on one line leave the name ~70px, so it ellipsizes often —
     // the title keeps the full name reachable.
-    `<span class="pname" title="${escapeHtml(p.name)}" style="color:${color}">${escapeHtml(p.name)}</span></div>`;
+    // The name is TEXT in the team's colour, so it goes through the same
+    // contrast floor the statistics rows use — BAR's darker team colours are
+    // barely legible on this panel raw.
+    `<span class="pname" title="${escapeHtml(p.name)}" ` +
+    `style="color:${readableOn(color, SIDEBAR_BG)}">${escapeHtml(p.name)}</span></div>`;
   if (r) {
     html += '<div class="pres">' +
       resRow('metal', r.metal, r.mStore, r.mInc, peaks.m) +

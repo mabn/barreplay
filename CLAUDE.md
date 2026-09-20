@@ -2163,7 +2163,11 @@ run dev` in `worker/` plus `pack -upload local`.)
   wholesale from bundles published before it existed, so `app.js` `defName` falls back
   to `unitDefs` — a deployed replay keeps showing codes until it is republished),
   icons, footprints,
-  players, bounds, `frameCount`, and the **chunk index** `{frame,count,kLen,len}` per
+  players, bounds, `frameCount`, `armyCost` (the metal price of each ARMED, MOBILE
+  def, which is what the sidebar's team statistics bar sums into a side's army
+  value — absent from every bundle published before it existed, which is why that
+  row hides rather than reading zero), and the **chunk index**
+  `{frame,count,kLen,len}` per
   chunk — `kLen` is the keyframe's RAW length inside the decompressed keys stream)
   plus the file's `E` events and `C` comms sections byte-for-byte — ~230 KB for a
   33-min game, so the page is interactive immediately. `/replays/<id>.keys` is the `K` section
@@ -2234,6 +2238,54 @@ run dev` in `worker/` plus `pack -upload local`.)
   footprints; the layer is off by default (`showFootprints`). Unlike icons, footprints are drawn
   in world space, so they scale with zoom and are centred on the unit position (the footprint
   centre).
+- **Team statistics bar (`app.js` `renderTeamStats`, above the sidebar's
+  "Players" HEADING — not under it: that heading names the roster below it,
+  and these rows are about the two SIDES, so the block leads with an `h2`'s
+  top margin and leaves the gap beneath it to the heading that follows)**:
+  BAR's spectator team comparison
+  (`luaui/Widgets/gui_spectator_hud.lua`), reproduced for the three metrics a
+  capture can answer — metal income, energy income, and ARMY VALUE. One row per
+  metric: the metric's name, then one track holding both sides — each side's
+  value at its own end in its team colour, and between them the LEAD, the
+  leader's margin over the TRAILING side rather than its share of the total, so
+  a 2:1 game reads "100%" and a side at zero reads "∞" rather than 100%. The
+  lead reads in the LEADING side's colour, which is what says whose lead it is
+  — the number alone is a bare margin that could belong to either end of the
+  row; the tint is inline and a DEAD HEAT simply sets none, falling back to the
+  stylesheet's muted tone, since a tie has no leader to name. Values
+  format like BAR's own `formatResources(v, true)` (`fmtStat`: 7.0k, 504k, 3.7M,
+  192M) rather than `fmtNum`, whose trailing-zero trimming would let a reading
+  jitter in width from "7k" to "7.01k" as the game ran.
+  What the widget MEASURES is copied; its LOOK deliberately is not. It draws
+  into a game HUD — bevelled panels, a lit top edge, saturated knobs tinted by
+  four multipliers of the team colour — and beside this sidebar's flat surfaces
+  and muted labels that read as a transplant from another program (it shipped
+  that way once and was rejected on sight). The row is instead built from the
+  vocabulary of the player list right under it: the `.rmeter` track colour and
+  3px radius, and team colour as the thing that says whose a number is, exactly
+  as `.pname` uses it — run, like every other piece of team-coloured TEXT, through
+  `readableOn` (see the colour-contrast note below). The proportion BAR draws as two full-height fills with a
+  knob riding their boundary is a 3px BAND along the bottom of the track: two
+  full-width fills make the row the loudest thing in a sidebar whose own meters
+  are a sliver of grey, and they put each side's number on a field of its own
+  colour where it stops being readable. The band carries the same split and
+  leaves the numbers on the plain track. Drawn ONLY for a TWO-ALLY game: the row's whole shape is a
+  comparison of two sides and there is nothing to split in an FFA. The sides come
+  from the PLAYER roster rather than the team list, which is also what keeps Gaia
+  and the scavenger team out of them — no player controls those. BAR's MP and EP
+  (metal/energy ever produced) are deliberately absent: those are engine running
+  totals (`GetTeamResourceStats`) that a sampled capture never recorded. ARMY
+  VALUE sums the metal cost of every ARMED, MOBILE unit a side owns that is not a
+  commander, weighted by the sampled build progress so a unit under construction
+  counts for the metal actually sunk into it. The rule is SPLIT across the two
+  sides on purpose: the armed/mobile half needs the unit-def table and is applied
+  at publish time (`wire.go`'s `ArmyCost`, which prices only the defs that pass
+  it), the commander half stays in `app.js`, which already holds this repo's one
+  definition of a commander (`COMMANDER_RE`/`defIsCom`). A bundle published
+  before `armyCost` existed carries none, so the AV row is DROPPED rather than
+  drawn as 0 against 0 — republishing the `.brp` (`pack`) brings it back without
+  a re-simulation. Each row is likewise dropped when the economy timeline has no
+  reading for it, and the whole bar hides when no row is left.
 - **Chat + map drawings in the viewer (`app.js` `buildCommIndex`/`drawMarks`/
   `renderChat`)**: the head's `C` section decodes into `data.comms`, which splits two
   ways. MARKS (points, lines) draw in WORLD space on the overlay canvas — so a
@@ -2436,6 +2488,26 @@ run dev` in `worker/` plus `pack -upload local`.)
   via WebGL instanced sprites (2D-canvas fallback), and does timeline scrub / play /
   zoom / pan / hover-tooltip. Colours are assigned per ally-team (a base hue per ally,
   lightness varied per team within it).
+- **Team colour as TEXT goes through a contrast floor (`app.js` `readableOn`)**: a
+  team colour is picked to be read as a BLOCK on a lit map, and several of BAR's
+  are unreadable as small text on this dark sidebar — the default blue,
+  `#0b3ef3`, is a contrast of **2.0** against the statistics track where 11px
+  bold wants 4.5 (WCAG AA), and its red only reaches 3.6. `readableOn(css,
+  surface)` raises such a colour's LIGHTNESS in HSL until it clears
+  `TEXT_CONTRAST`, so hue and saturation are untouched and the word still says
+  whose it is; a colour already bright enough comes back unchanged, which is
+  most of them, and one that cannot clear the floor short of white ends there.
+  The surfaces are named constants mirroring style.css (`SIDEBAR_BG`,
+  `TRACK_BG`, `TOOLTIP_BG`) and results are memoized per colour+surface, since
+  these render per tick. EVERY team-coloured text in the UI uses it — the
+  statistics values and their lead, the player list's names, the chat log's
+  author names, the map tooltip's team row — and NO FILL does: showing a team
+  colour as a block is the one thing it was chosen for, so the statistics
+  bands, the unit icons and the chat bubbles keep it raw. The cost, accepted:
+  two teams of one ally whose colours differ only in LIGHTNESS converge once
+  both are lifted to the same floor, which is unavoidable with a floor and
+  cheap beside text nobody can read (the rank, flag, OS and ally grouping all
+  still tell those rows apart).
 
 Guarding it: `internal/viz/viz_test.go` encodes a synthetic `.brp` through the wire
 encoder and checks the head payload (bounds, teams incl. frame-only ones, footprints,

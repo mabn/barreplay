@@ -503,6 +503,56 @@ canvas { display: block; width: 100%; height: 100%; background: #0c0f13; cursor:
 .stat { display: flex; justify-content: space-between; padding: 2px 0; }
 .stat b { color: #fff; font-variant-numeric: tabular-nums; }
 
+/* ---- team statistics bar ----
+   The two sides compared, one row per metric, sitting above the Players
+   heading rather than under it — that heading belongs to the roster below it,
+   and these rows are about the two SIDES. It leads its own block, so it takes
+   an h2's top margin and leaves the bottom gap to the heading that follows.
+   Deliberately built from the LIST's own vocabulary rather than the BAR widget
+   this reproduces (see renderTeamStats): the .rmeter track and radius, a fill
+   at low opacity under a number in that series' colour, and team colour as what
+   says whose a number is — because the widget's bevelled panels and saturated
+   knobs sit in a game HUD, and next to these flat surfaces they read as a
+   transplant. The split between the two fills is the only thing carrying the
+   proportion, so the fills are the one element that must stay legible. */
+#teamstats { display: flex; flex-direction: column; gap: 3px; margin-top: 14px; }
+.tsrow { display: flex; align-items: center; gap: 6px; }
+/* Same slot and muted tone as the player rows' OS column, so the metric names
+   line up with the column of numbers beneath them. */
+.tslabel {
+  flex: 0 0 26px; text-align: right;
+  color: #6f87a0; font-size: 11px; line-height: 1;
+}
+.tsbar {
+  position: relative; flex: 1; min-width: 0; height: 19px;
+  background: #222c36; border-radius: 3px; overflow: hidden;
+}
+/* Two layers in one track: the proportional split, and the three readings over
+   it. Both are absolute so neither can push the other around as the numbers
+   grow from "12" to "504k".
+
+   The split is a BAND along the bottom rather than two full-height fills. Two
+   fills covering the whole track make the row the loudest thing in a sidebar
+   whose own meters are a sliver of grey, and they put each side's number on a
+   field of its own colour, where it stops being readable. A band keeps the
+   proportion exactly as legible while leaving the numbers on the plain track. */
+.tsfills { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; display: flex; }
+.tsfills > i { flex-basis: 0; min-width: 0; opacity: .85; }
+.tsvals {
+  position: absolute; inset: 0; display: flex; align-items: center;
+  padding: 0 6px 3px; font-size: 11px; font-weight: 600; line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+/* Each side's value sits at its own end, the lead between them — so a value's
+   position says which side it belongs to, as its colour does. Every one of
+   those colours is the team's run through app.js's readableOn against this
+   track, since a raw BAR team colour as 11px text can sit at 2:1. The lead is
+   tinted inline with the LEADING side's (renderTeamStats); the muted tone here
+   is what a dead heat, which has no leader to name, falls back to. */
+.tsvals > b:first-child { flex: 1; text-align: left; }
+.tsvals > b:last-child { flex: 1; text-align: right; }
+.tsvals .tslead { flex: 0 0 auto; color: #9fb0bf; }
+
 /* ---- player list ----
    One row per player: rank / flag / OS / name on the left, the metal + energy
    bars (small) on the right, laid out like BAR's in-game player list. */

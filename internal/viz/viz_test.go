@@ -54,10 +54,11 @@ func writeBRP(t *testing.T, dir, gameID string) string {
 		MapName:     "Test Map",
 		SampleEvery: 30,
 		UnitDefs: map[int32]snapshot.UnitDef{
-			1: {DefID: 1, Name: "armcom", HumanName: "Armada Commander", CanMove: true},        // mobile: no footprint
-			2: {DefID: 2, Name: "corllt", XSize: 2, ZSize: 3, IsBuilding: true},                // building: 16x24 elmos
-			3: {DefID: 3, Name: "armnanotct3", XSize: 12, ZSize: 12, IsBuilder: true},          // immobile builder (nano turret): footprint despite not IsBuilding
-			4: {DefID: 4, Name: "armlab", XSize: 5, ZSize: 5, IsBuilding: true, CanMove: true}, // factory: reports CanMove but IsBuilding -> footprint
+			1: {DefID: 1, Name: "armcom", HumanName: "Armada Commander", CanMove: true},             // mobile: no footprint
+			2: {DefID: 2, Name: "corllt", XSize: 2, ZSize: 3, IsBuilding: true},                     // building: 16x24 elmos
+			3: {DefID: 3, Name: "armnanotct3", XSize: 12, ZSize: 12, IsBuilder: true},               // immobile builder (nano turret): footprint despite not IsBuilding
+			4: {DefID: 4, Name: "armlab", XSize: 5, ZSize: 5, IsBuilding: true, CanMove: true},      // factory: reports CanMove but IsBuilding -> footprint
+			5: {DefID: 5, Name: "armpw", CanMove: true, Speed: 58, WeaponCount: 1, MetalCost: 46.4}, // armed + mobile -> army value
 		},
 		Teams: []snapshot.TeamInfo{
 			{TeamID: 0, AllyTeam: 0, Side: "armada"},
@@ -165,6 +166,19 @@ func TestWirePayload(t *testing.T) {
 	if fp, ok := head.Footprints["armlab"]; !ok || fp.W != 40 || fp.H != 40 {
 		t.Errorf("armlab footprint = %+v (ok=%v), want {W:40 H:40}", fp, ok)
 	}
+	// ArmyCost: the metal the team-statistics bar sums per side. Only ARMED,
+	// MOBILE defs are priced — the rest of BAR's rule (commanders) is applied in
+	// the browser, which is why armcom is not excluded here but corllt (a
+	// building) and armlab (unarmed) are.
+	if c, ok := head.ArmyCost[5]; !ok || c != 46 {
+		t.Errorf("armyCost[armpw] = %d, %v; want 46, true", c, ok)
+	}
+	for _, id := range []int32{1, 2, 3, 4} {
+		if _, ok := head.ArmyCost[id]; ok {
+			t.Errorf("armyCost = %+v, want no entry for def %d (not armed+mobile)", head.ArmyCost, id)
+		}
+	}
+
 	if _, ok := head.Footprints["armcom"]; ok {
 		t.Errorf("armcom is mobile; should have no footprint")
 	}
