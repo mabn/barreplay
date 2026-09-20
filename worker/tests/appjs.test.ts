@@ -1741,6 +1741,12 @@ test('a free-for-all abbreviates in both the size and the players column', () =>
   // can store a part Number reads as 1e+38 — which the cell would print.
   assert.equal(fns.specPlayers('1v1v' + '9'.repeat(36)), null);
   assert.equal(fns.sizeLabel('1v1v1v' + '9'.repeat(34)), 'FFA');
+  // Nor an EMPTY side: both producers drop a non-positive count before building
+  // the spec, so "1v1v1v0" is forged too — and summing it to a confident
+  // "FFA (3)" would report the zero side as if it had never been there.
+  assert.equal(fns.specPlayers('1v1v1v0'), null);
+  assert.equal(fns.sizeLabel('1v1v1v0'), 'FFA');
+  assert.equal(fns.specPlayers('0v0v0v0'), null);
   // A real side is still comfortably inside it.
   assert.equal(fns.specPlayers('32v32v32v32'), 128);
   // Nothing recorded stays nothing, so the cell keeps its dash.

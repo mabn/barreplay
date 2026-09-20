@@ -6609,18 +6609,21 @@ function sideCount(spec) {
 }
 
 // specPlayers adds a spec's sides up — how many people were in the game. Null
-// unless EVERY part is a PLAUSIBLE count, since a spec this cannot read whole
-// is one it cannot count, and a bare "FFA" beats a number nobody can believe.
-// Three digits is the bound: a side of a BAR game is at most a few dozen
-// people, while the only shape check the spec passes on the way in is a
-// 40-character length cap (replayentry.ts sanitizeEntry), so a hand-written PUT
-// can store 38 digits — which Number reads as 1e+38 and the cell would print
-// verbatim. It is read off the spec rather than the row's own playerCount so
-// the Size cell and the spec on its tooltip can never disagree.
+// unless EVERY part is a PLAUSIBLE side, since a spec this cannot read whole is
+// one it cannot count, and a bare "FFA" beats a number nobody can believe.
+// Plausible is one to three digits and not zero: a side of a BAR game is at
+// most a few dozen people and is never empty, and both producers drop a
+// non-positive count before building the spec (viz.GameSizeSpec counts the
+// teams an ally has, games.ts filters). The only shape check the spec passes on
+// the way in is a 40-character length cap (replayentry.ts sanitizeEntry), so a
+// hand-written PUT is what reaches here with "1v1v1v0", summing to a confident
+// "FFA (3)", or with 38 digits, which Number reads as 1e+38 and the cell would
+// print verbatim. The total is read off the spec rather than the row's own
+// playerCount so the Size cell and the spec on its tooltip cannot disagree.
 function specPlayers(spec) {
   let total = 0;
   for (const part of String(spec).split('v')) {
-    if (!/^\d{1,3}$/.test(part)) return null;
+    if (!/^\d{1,3}$/.test(part) || Number(part) === 0) return null;
     total += Number(part);
   }
   return total;
