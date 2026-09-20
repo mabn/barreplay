@@ -2870,7 +2870,12 @@ const TS_AVG_SEC = 5;
 function tsIncomeAvg(simFrame, side, col) {
   if (!resByFrame || simFrame < 0) return null;
   const step = data.sampleEvery > 0 ? data.sampleEvery : 30;
-  const samples = Math.max(1, Math.round(TS_AVG_SEC * 30 / step));
+  // CEIL, not round: a sample stands for `step` frames of game time, so it
+  // takes ceil(window / step) of them to cover the window. -every is a flag,
+  // and rounding lost the whole point of this function at the coarse end — a
+  // capture sampled every 4 game-seconds rounds 5/4 down to ONE sample, which
+  // is the unaveraged reading this replaced.
+  const samples = Math.max(1, Math.ceil(TS_AVG_SEC * 30 / step));
   let sum = 0, n = 0;
   for (let k = 0; k < samples; k++) {
     const f = simFrame - k * step;
