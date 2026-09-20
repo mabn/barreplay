@@ -1874,6 +1874,12 @@ const HEALTH_BAR_COLOR = '#5ad35a';
 // front line turns into noise — where the same view at 0.25 and in is the one
 // you are watching a fight in.
 const HEALTH_BAR_MIN_SCALE = 0.25;
+// Health bars can be switched off from the sidebar, like the chat bubbles and
+// for the same reason: in a big fight they are a bar over nearly every unit on
+// screen, which is sometimes exactly what you are trying to look at. The build
+// bars are not part of this — there are only ever a handful of them, and a
+// construction site with no bar is indistinguishable from a finished building.
+let showHealthBars = true;
 // A unit is worth a health bar once it is missing DAMAGE_MIN_FRAC of its
 // health. A bar a pixel short of full is noise, and in a real fight it is most
 // of the map: hp is quantized to whole points, so a unit grazed by one stray
@@ -1917,20 +1923,20 @@ function drawOverlay(u) {
   // Cheap scan first: most frames have far fewer builders/under-construction
   // units than units, and many replays (v4) have none at all. Damage is the
   // common case rather than the rare one, so the scan's job there is only to
-  // skip the bar loop entirely on the frames (and the zoom levels) with
-  // nothing to draw.
+  // skip the bar loop entirely on the frames — and the zoom levels, and with
+  // the bars switched off — that have nothing to draw.
   //
   // EITHER bar flag is enough to stop scanning, because the two share one
   // pass that re-tests every unit anyway — the flags only decide whether to
   // enter it. Requiring both would mean never breaking out below
   // HEALTH_BAR_MIN_SCALE, where anyHealth can never become true: exactly the
   // zoomed-out view with the most units to walk.
-  const healthZoom = scale >= HEALTH_BAR_MIN_SCALE;
+  const wantHealth = showHealthBars && scale >= HEALTH_BAR_MIN_SCALE;
   let anyLine = false, anyBar = false, anyHealth = false;
   for (let i = 0; i < u.length; i += STRIDE) {
     if (u[i + F.TARGET] !== 0) anyLine = true;
     if (u[i + F.BUILD] < BUILD_DONE) anyBar = true;
-    else if (healthZoom && damagedEnough(u[i + F.HP], u[i + F.MAXHP])) anyHealth = true;
+    else if (wantHealth && damagedEnough(u[i + F.HP], u[i + F.MAXHP])) anyHealth = true;
     if (anyLine && (anyBar || anyHealth)) break;
   }
 
@@ -1967,7 +1973,7 @@ function drawOverlay(u) {
       // An unfinished unit's missing hp IS its construction — it fills up as
       // the thing gets built — so it gets the build bar and no health bar,
       // rather than two bars both counting the same progress.
-      const damaged = healthZoom && !unfinished && damagedEnough(hp, maxHp);
+      const damaged = wantHealth && !unfinished && damagedEnough(hp, maxHp);
       if (!unfinished && !damaged) continue;
       const p = interpPos(u, i);
       const sx = viewW / 2 + (p[0] - center.x) * scale;
@@ -3091,6 +3097,11 @@ document.getElementById('togglebubbles').onclick = e => {
   showBubbles = !showBubbles;
   e.target.textContent = showBubbles ? 'Hide chat bubbles' : 'Show chat bubbles';
   scheduleDraw(); // the overlay is only repainted on a draw; force one now
+};
+document.getElementById('togglehp').onclick = e => {
+  showHealthBars = !showHealthBars;
+  e.target.textContent = showHealthBars ? 'Hide HP bars' : 'Show HP bars';
+  scheduleDraw(); // same overlay, same reason
 };
 window.addEventListener('keydown', e => {
   if (e.target.tagName === 'SELECT') return;

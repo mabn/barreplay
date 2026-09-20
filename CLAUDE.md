@@ -2384,7 +2384,15 @@ run dev` in `worker/` plus `pack -upload local`.)
   does not. The test is the px actually drawn, so a building that grows into
   its footprint when zoomed in keeps the full height. One predicate,
   `damagedEnough`, serves both the pre-scan and the bar pass — they must agree
-  or the scan enables a pass that draws nothing. The 2D
+  or the scan enables a pass that draws nothing. The layer switches off from
+  the sidebar's "Hide HP bars" (`showHealthBars`, `#togglehp`) — the second
+  view toggle to earn a control rather than a `const`, for the chat bubbles'
+  reason: in a big fight it is a bar over nearly every unit on screen, which is
+  sometimes what you are trying to look at. It folds into the same per-draw
+  `wantHealth` gate as the zoom, so switching it off skips the scan and the bar
+  pass rather than drawing nothing expensively. The BUILD bars are deliberately
+  not part of it: there are only ever a handful, and a construction site with no
+  bar is indistinguishable from a finished building. The 2D
   path itself was also slimmed for unit-heavy replays: per-def icon/footprint tables
   built once per load (`buildDefTables`) instead of two string-hash lookups per unit per
   frame, per-draw def/glyph memos instead of per-unit `"path|color|px"` keys, an
