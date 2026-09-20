@@ -2264,6 +2264,19 @@ run dev` in `worker/` plus `pack -upload local`.)
   format like BAR's own `formatResources(v, true)` (`fmtStat`: 7.0k, 504k, 3.7M,
   192M) rather than `fmtNum`, whose trailing-zero trimming would let a reading
   jitter in width from "7k" to "7.01k" as the game ran.
+  The two INCOME rows read a MEAN over the last `TS_AVG_SEC` = 5 game-seconds
+  (`tsIncomeAvg`, averaging the economy timeline's samples — evenly spaced, so
+  averaging them and integrating over time agree, and a partly-filled window at
+  the start of a replay still reads right), not the sample under the playhead.
+  The engine's per-second income is genuinely twitchy — build pulses, converters
+  toggling, wind gusting — so at 1 Hz both knobs stepped to a new number every
+  sample and the row was unreadable while the replay played; measured on a
+  synthetic 2v2 the sample-to-sample movement drops from 2.3 to 0.8 metal/s, and
+  the reversals with it. ARMY VALUE is deliberately NOT smoothed: it is a stock
+  rather than a rate, so its jumps are units dying, which is the thing the row
+  is for — and it is read off the displayed FRAME, where a window would need
+  frames a sparsely-loaded timeline may not hold, unlike the economy timeline
+  which is fetched whole.
   The widget's SHAPE is copied; its game-HUD FINISH is not — no bevels, no lit
   top edge, no gradients, since next to this sidebar's flat surfaces those read
   as a transplant from another program (a faithful copy shipped once and was

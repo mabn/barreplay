@@ -2881,6 +2881,53 @@ function shade(css, f) {
   return tintToCss(cssToTint(css).map(v => v * f));
 }
 
+// TS_AVG_SEC: the income rows read the MEAN income over this many game-seconds
+// ending at the playhead, not the current sample. The engine's per-second
+// figure is genuinely twitchy — a factory taking a build pulse, a converter
+// toggling, wind gusting — so at 1 Hz the two knobs stepped to a different
+// number every sample and the row could not be read at all while the replay
+// played. Five seconds is long enough that no single sample can swing it and
+// short enough to still show a side losing its metal as it happens. Army value
+// is deliberately NOT smoothed: it is a stock rather than a rate, so its jumps
+// are units dying, which is the thing worth seeing.
+const TS_AVG_SEC = 5;
+
+// tsIncomeAvg returns a side's mean income (column `col` of the economy
+// records) over the TS_AVG_SEC window ending at simFrame, or null when the
+// timeline holds no reading in it — which is also what a capture with no
+// economy and a timeline that has not loaded yet both look like, and all three
+// drop the row.
+//
+// It averages the SAMPLES rather than integrating over time: they are evenly
+// spaced, so the two agree, and the mean stays right over the opening seconds
+// of a replay where the window is only partly filled.
+function tsIncomeAvg(simFrame, side, col) {
+  if (!resByFrame || simFrame < 0) return null;
+  const step = data.sampleEvery > 0 ? data.sampleEvery : 30;
+  // CEIL, not round: a sample stands for `step` frames of game time, so it
+  // takes ceil(window / step) of them to cover the window. -every is a flag,
+  // and rounding lost the whole point of this function at the coarse end — a
+  // capture sampled every 4 game-seconds rounds 5/4 down to ONE sample, which
+  // is the unaveraged reading this replaced.
+  const samples = Math.max(1, Math.ceil(TS_AVG_SEC * 30 / step));
+  let sum = 0, n = 0;
+  for (let k = 0; k < samples; k++) {
+    const f = simFrame - k * step;
+    if (f < 0) break;
+    const r = resByFrame.get(f);
+    if (!r) continue;
+    let total = 0, any = false;
+    for (let i = 0; i < r.length; i += RSTRIDE) {
+      if (!side.teams.has(r[i + R.TEAM])) continue;
+      total += r[i + col];
+      any = true;
+    }
+    if (!any) continue;
+    sum += total; n++;
+  }
+  return n ? sum / n : null;
+}
+
 // fmtStat renders a value the way BAR's HUD does (formatResources(v, true)):
 // one decimal through the first decade of each unit and none after — 7.0k,
 // 504k, 3.7M, 192M. Deliberately not fmtNum, whose trailing-zero trimming
@@ -2962,22 +3009,22 @@ function tsArmyValue(fr, sides) {
 
 // renderTeamStats draws the bar, and hides it when this replay has no two sides
 // to compare or when not one of the three metrics can be read yet.
-function renderTeamStats(fr, res, playing) {
+function renderTeamStats(fr, playing) {
   const root = document.getElementById('teamstats');
   const sides = playing.length ? tsSides(playing) : null;
   if (!sides) { root.style.display = 'none'; root.innerHTML = ''; return; }
 
-  const sum = (s, key) => {
-    let n = 0, any = false;
-    for (const t of s.teams) if (res[t]) { n += res[t][key]; any = true; }
-    return any ? n : null;
-  };
+  const f = fr ? fr.f : -1;
+  const inc = col => [tsIncomeAvg(f, sides[0], col), tsIncomeAvg(f, sides[1], col)];
+  const m = inc(R.MINC), e = inc(R.EINC);
   const av = tsArmyValue(fr, sides);
   const rows = [
     // Income is per game-second already (the capture stores the engine's own
-    // per-second figure), so these are the numbers BAR's M/s and E/s show.
-    ['M/s', sum(sides[0], 'mInc'), sum(sides[1], 'mInc'), 'metal income per second'],
-    ['E/s', sum(sides[0], 'eInc'), sum(sides[1], 'eInc'), 'energy income per second'],
+    // per-second figure), so these are the numbers BAR's M/s and E/s show —
+    // averaged over the last TS_AVG_SEC seconds, which is the only place this
+    // row departs from the widget.
+    ['M/s', m[0], m[1], `metal income per second, averaged over ${TS_AVG_SEC}s`],
+    ['E/s', e[0], e[1], `energy income per second, averaged over ${TS_AVG_SEC}s`],
     ['AV', av && av[0], av && av[1], 'army value: metal in armed mobile units'],
   ].filter(r => r[1] !== null && r[1] !== undefined && r[2] !== null && r[2] !== undefined);
   if (!rows.length) { root.style.display = 'none'; root.innerHTML = ''; return; }
@@ -3032,7 +3079,7 @@ function renderPlayers() {
   const playing = players.filter(p => !p.spec);
   // The comparison rows sit above this list and describe the same two groups,
   // so they are rendered from the same roster and the same frame's economy.
-  renderTeamStats(fr, res, playing);
+  renderTeamStats(fr, playing);
   if (!players.length) {
     root.innerHTML = '<div class="hint">no player roster in this capture</div>';
     return;
