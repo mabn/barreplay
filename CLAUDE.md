@@ -2453,7 +2453,31 @@ run dev` in `worker/` plus `pack -upload local`.)
   `wantHealth` gate as the zoom, so switching it off skips the scan and the bar
   pass rather than drawing nothing expensively. The BUILD bars are deliberately
   not part of it: there are only ever a handful, and a construction site with no
-  bar is indistinguishable from a finished building. The 2D
+  bar is indistinguishable from a finished building.
+- **DEAD UNITS** (`app.js` `deadHp`/`DEAD_COLOR`): a unit whose health is gone
+  but which the engine has not removed is drawn in `#9fb0bf` grey instead of its
+  team colour, in every path that colours a unit (both icon renderers, both dot
+  fallbacks, the footprint rectangles and the ghost buildings). The case that
+  makes it worth doing is a crashing aircraft: Recoil does not delete one when
+  its health runs out, it drops the hull, which still does damage where it
+  lands — so the capture holds a real unit at or below 0 hp and the viewer used
+  to draw a corpse in full team colour, reading as something still in the fight.
+  The test is `maxHp > 0 && hp <= 0`, and the `maxHp > 0` half is the same guard
+  `damagedEnough` carries for the same reason: an unidentified radar contact
+  records 0/0, which is health UNKNOWN, not health gone, and greying every radar
+  blip would be most of an enemy's map. Such records only reach the viewer at
+  all because no destroyed event has been written for the unit yet — once one
+  is, `capture.graveyard` (internal/capture/lines.go) drops every later record
+  of that id, so a corpse is on screen exactly while it is still doing
+  something. Two things follow the grey. `damagedEnough` gained `hp > 0`, so a
+  corpse gets no health bar: an empty dark bar over an icon already greyed says
+  the same thing twice. And the damage flash skips it — a falling wreck loses
+  health every sample without being shot at, so it would otherwise strobe red
+  the whole way down. The 2D glyph memo keys the grey variant at `DEAD_SLOT`
+  (4092), the slot below the flash targets' 4095-4093, which team ids (u8)
+  cannot reach. Captures from the UPLOADER widget carry none of this: it buries
+  a unit the sample its health reads `<= 0` and never writes the record, so the
+  grey is a re-simulated (full-view) capture's to show. The 2D
   path itself was also slimmed for unit-heavy replays: per-def icon/footprint tables
   built once per load (`buildDefTables`) instead of two string-hash lookups per unit per
   frame, per-draw def/glyph memos instead of per-unit `"path|color|px"` keys, an

@@ -804,6 +804,29 @@ function cssToTint(css) {
   ];
 }
 
+// ---- dead units ------------------------------------------------------------
+// A unit the engine has killed but not yet removed from the world. The clearest
+// case is a crashing aircraft: Recoil does not delete it when its health runs
+// out, it puts the hull into a fall that still does damage where it lands, and
+// only then destroys it. The capture records that hull like any other unit — it
+// is genuinely there — so the viewer would otherwise draw a corpse in full team
+// colour, reading as a unit still in the fight.
+//
+// Those records reach the viewer precisely because no destroyed event has been
+// written for the unit yet: once one is, the capture decoder drops every later
+// record of that id (internal/capture/lines.go, graveyard.drop), so a corpse is
+// only ever on screen for the window in which it is still doing something.
+const DEAD_COLOR = '#9fb0bf';
+// deadHp: is this unit's health gone? maxHp > 0 is the same guard damagedEnough
+// applies, for the same reason — an unidentified radar contact records 0/0,
+// which means "health unknown", not "health gone", and greying every radar blip
+// would be both wrong and most of the map.
+function deadHp(hp, maxHp) { return maxHp > 0 && hp <= 0; }
+const DEAD_TINT = cssToTint(DEAD_COLOR);
+// Team ids are u8, so the 2D glyph memo (def * 4096 + team) has spare slots
+// above them for the recoloured variants; the flash targets take 4095-4093.
+const DEAD_SLOT = 4092;
+
 // ---- damage flash ----------------------------------------------------------
 // A unit whose hp dropped since the previous sampled frame briefly flashes:
 // its icon blends toward the flash colour and fades back (GL: per-instance
@@ -960,6 +983,9 @@ function noteFrameAdvance() {
   const intervalMs = (secPerFrame / speed) * 1000; // real duration of one sample interval
   for (let i = 0; i < cu.length; i += STRIDE) {
     const ph = _flashPrevHp.get(cu[i + F.ID]);
+    // A falling wreck loses health every sample without being shot at, so
+    // flashing it would strobe red the whole way down. It is grey already.
+    if (deadHp(cu[i + F.HP], cu[i + F.MAXHP])) continue;
     if (ph !== undefined && cu[i + F.HP] < ph) {
       damageFlash.set(cu[i + F.ID], now + Math.random() * intervalMs);
     }
@@ -1737,7 +1763,7 @@ function drawDots(u) {
       const sx = viewW / 2 + (g.x - center.x) * scale;
       const sy = viewH / 2 + (g.z - center.z) * scale;
       if (sx < -8 || sy < -8 || sx > viewW + 8 || sy > viewH + 8) continue;
-      ctx.fillStyle = teamColor[g.team] || '#9aa6b2';
+      ctx.fillStyle = deadHp(g.hp, g.maxHp) ? DEAD_COLOR : (teamColor[g.team] || '#9aa6b2');
       ctx.beginPath();
       ctx.arc(sx, sy, rad, 0, 7);
       ctx.fill();
@@ -1746,7 +1772,8 @@ function drawDots(u) {
   }
   const byColor = {};
   for (let i = 0; i < u.length; i += STRIDE) {
-    const c = teamColor[u[i + F.TEAM]] || '#9aa6b2';
+    const c = deadHp(u[i + F.HP], u[i + F.MAXHP])
+      ? DEAD_COLOR : (teamColor[u[i + F.TEAM]] || '#9aa6b2');
     (byColor[c] ||= []).push(i);
   }
   for (const color in byColor) {
@@ -1791,7 +1818,8 @@ function drawGhosts2D() {
     const sx = viewW / 2 + (g.x - center.x) * scale;
     const sy = viewH / 2 + (g.z - center.z) * scale;
     if (sx < -px || sy < -px || sx > viewW + px || sy > viewH + px) continue;
-    const glyph = renderIcon(info.p, teamColor[g.team] || '#9aa6b2', px);
+    const color = deadHp(g.hp, g.maxHp) ? DEAD_COLOR : (teamColor[g.team] || '#9aa6b2');
+    const glyph = renderIcon(info.p, color, px);
     if (!glyph) continue;
     const dx = Math.round((sx - r) * DPR) / DPR;
     const dy = Math.round((sy - r) * DPR) / DPR;
@@ -1818,8 +1846,9 @@ function drawIcons2D(u) {
     const sx = viewW / 2 + (p[0] - center.x) * scale;
     const sy = viewH / 2 + (p[1] - center.z) * scale;
     if (sx < -px || sy < -px || sx > viewW + px || sy > viewH + px) continue;
-    const color = teamColor[team] || '#9aa6b2';
-    const gk = def * 4096 + team;
+    const dead = deadHp(u[i + F.HP], u[i + F.MAXHP]);
+    const color = dead ? DEAD_COLOR : (teamColor[team] || '#9aa6b2');
+    const gk = def * 4096 + (dead ? DEAD_SLOT : team);
     let glyph = glyphMemo.get(gk);
     if (glyph === undefined) {
       const info = defIcon.get(def);
@@ -1832,7 +1861,7 @@ function drawIcons2D(u) {
       const dx = Math.round((sx - r) * DPR) / DPR;
       const dy = Math.round((sy - r) * DPR) / DPR;
       ctx.drawImage(glyph, dx, dy, px, px);
-      if (fNow) {
+      if (fNow && !dead) {
         const k = flashK(u[i + F.ID], fNow);
         if (k > 0) {
           const target = flashTargetOf.get(team) || 0;
@@ -1906,9 +1935,11 @@ const BAR_H_SMALL = 2;
 // off a unit nothing is known about: an unidentified radar contact records
 // 0/0, and since the frame columns are zigzag-decoded deltas, a truncated or
 // corrupt stream can decode a negative pair where hp < maxHp is perfectly true
-// and means nothing.
+// and means nothing. hp > 0 keeps one off a corpse (see DEAD_COLOR): its bar
+// would be an empty dark smudge over an icon already greyed to say the same
+// thing.
 function damagedEnough(hp, maxHp) {
-  return maxHp > 0 && hp <= maxHp * DAMAGE_MIN_FRAC; // <=: missing EXACTLY 2% counts
+  return maxHp > 0 && hp > 0 && hp <= maxHp * DAMAGE_MIN_FRAC; // <=: missing EXACTLY 2% counts
 }
 
 function drawOverlay(u) {
@@ -2072,7 +2103,8 @@ function drawFootprints(u) {
   const byColor = {};
   for (let i = 0; i < u.length; i += STRIDE) {
     if (!footprintFor(u[i + F.DEF])) continue;
-    const c = teamColor[u[i + F.TEAM]] || '#9aa6b2';
+    const c = deadHp(u[i + F.HP], u[i + F.MAXHP])
+      ? DEAD_COLOR : (teamColor[u[i + F.TEAM]] || '#9aa6b2');
     (byColor[c] ||= []).push(i);
   }
   ctx.lineWidth = 1;
@@ -2425,7 +2457,7 @@ function buildInstances(u) {
     const sx = viewW / 2 + (g.x - center.x) * scale;
     const sy = viewH / 2 + (g.z - center.z) * scale;
     if (sx < -px || sy < -px || sx > viewW + px || sy > viewH + px) continue;
-    const tint = teamTint.get(g.team) || GRAY_TINT;
+    const tint = deadHp(g.hp, g.maxHp) ? DEAD_TINT : (teamTint.get(g.team) || GRAY_TINT);
     const o = n * INST_FLOATS;
     inst[o] = sx * DPR; inst[o + 1] = sy * DPR; inst[o + 2] = px * DPR;
     inst[o + 3] = rect.u0; inst[o + 4] = rect.v0; inst[o + 5] = rect.u1; inst[o + 6] = rect.v1;
@@ -2448,9 +2480,10 @@ function buildInstances(u) {
     if (sx < -px || sy < -px || sx > viewW + px || sy > viewH + px) continue;
     const rect = m.rect;
     if (!rect) { (fb ||= []).push(i, sx, sy, px); continue; }
-    const tint = teamTint.get(u[i + F.TEAM]) || GRAY_TINT;
+    const dead = deadHp(u[i + F.HP], u[i + F.MAXHP]);
+    const tint = dead ? DEAD_TINT : (teamTint.get(u[i + F.TEAM]) || GRAY_TINT);
     let tr = tint[0], tg = tint[1], tb = tint[2];
-    if (fNow) {
+    if (fNow && !dead) {
       const k = flashK(u[i + F.ID], fNow) * FLASH_STRENGTH;
       if (k > 0) {
         const ft = FLASH_TARGETS[flashTargetOf.get(u[i + F.TEAM]) || 0].tint;
@@ -2494,7 +2527,8 @@ function glRender(active) {
 function drawGLFallbackDots(u, fb) {
   for (let k = 0; k < fb.length; k += 4) {
     const i = fb[k], sx = fb[k + 1], sy = fb[k + 2], r = fb[k + 3] / 2;
-    ctx.fillStyle = teamColor[u[i + F.TEAM]] || '#9aa6b2';
+    ctx.fillStyle = deadHp(u[i + F.HP], u[i + F.MAXHP])
+      ? DEAD_COLOR : (teamColor[u[i + F.TEAM]] || '#9aa6b2');
     ctx.beginPath();
     ctx.arc(sx, sy, Math.max(1.5, r * 0.5), 0, 7);
     ctx.fill();
