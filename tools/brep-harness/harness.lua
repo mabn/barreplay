@@ -459,7 +459,8 @@ for d = 1, 38 do
 		xsize = 2, zsize = 2, canMove = true, isBuilding = false,
 		maxWeaponRange = (d % 3 == 0) and 0 or 300 + d,
 		customParams = { techlevel = tostring(1 + d % 3), unitgroup = (d % 2 == 0) and "weapon" or "builder",
-			iscommander = (d == 1) and "1" or nil } }
+			iscommander = (d == 1) and "1" or nil },
+		deathExplosion = "deathblast" }
 end
 WeaponDefs = {}
 for w = 0, 4 do
@@ -467,6 +468,10 @@ for w = 0, 4 do
 		type = "Cannon", range = 300 + 50 * w, reload = 1.5, damages = { [0] = 100 + w },
 		paralyzer = (w == 4) }
 end
+-- Every unit's death blast: a chain explosion's weapon (see kill).
+WeaponDefs[5] = { id = 5, name = "deathblast", type = "Cannon", range = 0, reload = 0,
+	damages = { [0] = 500 }, damageAreaOfEffect = 1e6 }
+WeaponDefNames = { deathblast = WeaponDefs[5] }
 sentCommands = {}
 widgetHandler = { RemoveWidget = function() error("widget removed itself") end }
 -- The handler API the resim sampler uses to switch BAR's own widget suite off.
@@ -566,6 +571,14 @@ local function kill(id)
 	end
 	widget:UnitDestroyed(id, u.def, u.team, aID, aDef, aTeam, weapon)
 	killedShooters[#killedShooters + 1] = { id = id, team = u.team }
+	-- Its death blast hits a teammate: the engine names no attacker and no
+	-- projectile, only the blast weapon, and the widget credits the killer.
+	if resim and widget.UnitDamaged and aID then
+		local n = firstOf(allyOf[u.team], id)
+		if n then
+			unitDamaged(n.id, n.def, n.team, 40, false, 5, -1, nil, nil, nil)
+		end
+	end
 end
 
 -- combat lands this sample's scripted hits: every unit whose id and sample

@@ -315,6 +315,13 @@ projectile was in flight — takes `aTeam` from the projectile
 (`GetProjectileTeamID`) and `aDef` from its owner's id, looked up among the
 units that have died; there is no attacker unit id to credit.
 
+A unit's death or self-destruct blast reaches the widget with no attacker
+either. The widget credits it to whoever killed the unit that blew up — and,
+through a chain of blasts, to whoever killed the first one — so the row's
+attacker is that root while `weapon` stays the explosion. A blast with no
+root (a self-destruct, a team dying) stays unknown. A `destroyed` event
+caused by a chained blast names the root as its killer the same way.
+
 **Every integer the widget writes stays below 2^24.** Spring's Lua numbers
 are single-precision floats, which hold integers exactly only up to 2^24, and
 `VFS.PackU32` converts whatever it is handed: 0xFFFFFFFF rounded to 2^32 and
