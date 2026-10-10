@@ -316,13 +316,19 @@ func (p *pass) playerEvent(e snapshot.Event) {
 	st := p.strip(e.Team, step)
 	switch e.Kind {
 	case snapshot.EventFinished:
+		if p.evolved.replaced(e) {
+			break // spawned by an evolution, not built
+		}
 		st.BuiltMetal[step] += d.cost
 		st.BuiltN[step]++
 		if a := p.team(e.Team); a.t2 < 0 && d.milestone >= 0 && milestoneDefs[d.milestone].Key == "t2lab" {
 			a.t2 = e.Frame
 		}
 	case snapshot.EventDestroyed:
-		st.LostMetal[step] += d.cost
+		if p.removedByOwner(e) {
+			break
+		}
+		st.LostMetal[step] += p.lossCost(e)
 		st.LostN[step]++
 		if d.commander {
 			p.team(e.Team).comDied = e.Frame

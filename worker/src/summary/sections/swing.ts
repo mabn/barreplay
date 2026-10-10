@@ -10,10 +10,11 @@ import { bandPath, linePath, stepAt, timeChart, type ChartGroup } from "../chart
 import { mirrorKey } from "../legend";
 import { knockouts } from "../losses";
 import { sideColor, sideName } from "../model";
-import { momentStory } from "../moments";
+import { eliminationFocus, momentStory } from "../moments";
+import { fightersLine, named } from "../names";
 import { stepTimes } from "../series";
 import { tip } from "../tooltip";
-import { clipSpan, watchNote, type Watch } from "../watch";
+import { clipAround, clipAt, clipEvent, clipSpan, watchNote, type Watch } from "../watch";
 import { SIM_FPS, type Insights } from "../types";
 
 /** pct formats a probability as a whole percent. */
@@ -45,8 +46,8 @@ export function swingChart(ins: Insights, watch: Watch | null, group: ChartGroup
       if (i < 0) return null;
       const p = sw.p[i];
       return [
-        { color: sideColor(ins, 0), label: sideName(ins, 0), value: `${pct(p)} to win` },
-        { color: sideColor(ins, 1), label: sideName(ins, 1), value: `${pct(1 - p)} to win` },
+        { color: sideColor(ins, 0), label: sideName(ins, 0), metric: "Chance to win", value: pct(p) },
+        { color: sideColor(ins, 1), label: sideName(ins, 1), metric: "Chance to win", value: pct(1 - p) },
       ];
     },
   });
@@ -64,17 +65,31 @@ export function swingChart(ins: Insights, watch: Watch | null, group: ChartGroup
     const x = c.x(k.f / SIM_FPS);
     const y = k.side === 0 ? c.top + 8 : c.bottom - 6;
     const m = s("text", { x, y, "text-anchor": "middle", class: "brs-ko" + (watch ? " brs-clickable" : ""), style: `fill: ${sideColor(ins, k.side)}` }, "✕");
-    tip(m, { title: `${k.name} is eliminated`, rows: [{ color: sideColor(ins, k.side), label: fmtClock(k.f / SIM_FPS) }], note: watchNote(watch) });
-    if (watch) m.addEventListener("click", () => watch(clipSpan(k.f, k.f, { title: `${k.name} is eliminated` })));
+    tip(m, { title: named(ins, `${k.name} is eliminated`), rows: [{ color: sideColor(ins, k.side), label: fmtClock(k.f / SIM_FPS) }], note: watchNote(watch) });
+    if (watch) m.addEventListener("click", () => {
+      const at = eliminationFocus(ins, k.team, k.f);
+      watch(clipAround(k.f, { x: at.x, z: at.z, r: at.r, title: `${k.name} is eliminated` }));
+    });
     marks.append(m);
   }
 
   const stories = sw.moments.map((m) => momentStory(ins, m));
+  // A moment's clip opens just before the thing that made it — the
+  // commander dying, the fight peaking — zoomed to where it happened, rather
+  // than at the start of the minute the line took to move.
   const clipOf = (k: number) => {
     const m = sw.moments[k];
-    const b = ins.battles[stories[k].battle];
+    const st = stories[k];
+    const b = ins.battles[st.battle];
+    const title = `${m.n}. ${st.title}`;
+    const f = st.focus;
+    // An event with a span (a raid, a fight) is marked as that span and runs
+    // to its END, however long; a single instant runs on to the end of the
+    // swing.
+    if (f && f.f1 !== undefined && f.f1 > f.f) return clipEvent(f.f, f.f1, { x: f.x, z: f.z, r: f.r, title });
+    if (f && typeof f.x === "number") return clipAt(f.f, m.f1, { x: f.x, z: f.z, r: f.r, title });
     const where = b ? { x: b.x, z: b.z, r: b.r } : {};
-    return clipSpan(m.f0, m.f1, { ...where, title: `${m.n}. ${stories[k].title}` });
+    return f ? clipAt(f.f, m.f1, { ...where, title }) : clipSpan(m.f0, m.f1, { ...where, title });
   };
   sw.moments.forEach((m, k) => {
     const tt = m.f1 / SIM_FPS;
@@ -85,7 +100,7 @@ export function swingChart(ins: Insights, watch: Watch | null, group: ChartGroup
       s("text", { x: c.x(tt), y: y + 4, "text-anchor": "middle", style: "fill: #000; font-weight: 600; pointer-events: none" }, String(m.n)),
     );
     tip(g, {
-      title: `${m.n}. ${stories[k].title}`,
+      title: named(ins, `${m.n}. ${stories[k].title}`),
       rows: [{ color: sideColor(ins, m.side), label: `${fmtClock(m.f0 / SIM_FPS)}–${fmtClock(m.f1 / SIM_FPS)}`, value: `${sideName(ins, m.side)} +${pct(m.delta)}` }],
       note: stories[k].detail + (watch ? " Click to watch." : ""),
     });
@@ -97,6 +112,15 @@ export function swingChart(ins: Insights, watch: Watch | null, group: ChartGroup
   });
   c.svg.append(marks);
 
+  // When it happened: the event's own span when the story found one, else
+  // the instant, else the minute the line took to move.
+  const when = (k: number) => {
+    const f = stories[k].focus;
+    const m = sw.moments[k];
+    if (!f) return `${fmtClock(m.f0 / SIM_FPS)}–${fmtClock(m.f1 / SIM_FPS)}`;
+    const end = f.f1 ?? f.f;
+    return end - f.f >= SIM_FPS ? `${fmtClock(f.f / SIM_FPS)}–${fmtClock(end / SIM_FPS)}` : fmtClock(f.f / SIM_FPS);
+  };
   const rows = sw.moments.map((m, k) => {
     const st = stories[k];
     const play = watch ? h("button", { class: "brs-play", type: "button", "aria-label": `Watch swing ${m.n}` }, "▶") : null;
@@ -104,10 +128,11 @@ export function swingChart(ins: Insights, watch: Watch | null, group: ChartGroup
     return h("div", { class: "brs-moment" },
       h("span", { class: "brs-num", style: `background: ${sideColor(ins, m.side)}` }, String(m.n)),
       h("div", { class: "brs-grow" },
-        h("div", undefined, h("b", undefined, st.title), " ",
-          h("span", { class: "brs-muted" }, `· ${fmtClock(m.f0 / SIM_FPS)}–${fmtClock(m.f1 / SIM_FPS)} · `),
+        h("div", undefined, h("b", undefined, named(ins, st.title)), " ",
+          h("span", { class: "brs-muted" }, `· ${when(k)} · `),
           h("span", { style: `color: ${sideColor(ins, m.side)}` }, `${sideName(ins, m.side)} +${pct(m.delta)}`)),
-        h("div", { class: "brs-hint" }, st.detail)),
+        fightersLine(ins, st.fighters),
+        h("div", { class: "brs-hint" }, named(ins, st.detail))),
       play);
   });
   const model = sw.fitted

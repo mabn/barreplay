@@ -5,7 +5,7 @@
 import { h, s, section } from "../dom";
 import { fmtClock } from "../format";
 import { CHART_W, timeChart } from "../chart";
-import { sideColor, sideName } from "../model";
+import { sideColor, sideName, teamColor } from "../model";
 import { tip } from "../tooltip";
 import { clipAround, watchNote, watcher } from "../watch";
 import { SIM_FPS, type Insights, type SummaryOptions } from "../types";
@@ -46,10 +46,13 @@ export function tech(ins: Insights, opts: SummaryOptions): HTMLElement | null {
     const owner = ins.teams.find((tm) => tm.team === m.team)?.player;
     tip(dot, {
       title: `${m.label} · ${fmtClock(m.f / SIM_FPS)}`,
-      rows: [{ color: sideColor(ins, m.side), label: owner || sideName(ins, m.side), value: def?.human || def?.name || "?" }],
+      rows: [{ color: owner ? teamColor(ins, m.team) : sideColor(ins, m.side), label: owner || sideName(ins, m.side), value: def?.human || def?.name || "?" }],
       note: watchNote(watch),
     });
-    if (watch) dot.addEventListener("click", () => watch(clipAround(m.f, { title: `${m.label}: ${def?.human || def?.name || "?"}` })));
+    // Zoomed to the unit that got there, and following it out of its lab.
+    const at = m.pos ? { x: m.pos[0], z: m.pos[1], r: 700 } : {};
+    const follow = m.unit !== undefined ? { follow: { id: m.unit, def: m.def } } : {};
+    if (watch) dot.addEventListener("click", () => watch(clipAround(m.f, { ...at, ...follow, title: `${m.label}: ${def?.human || def?.name || "?"}` })));
     marks.append(dot);
   }
   c.svg.append(marks);

@@ -72,12 +72,10 @@
          Outside the sections: a drop is accepted from either of them, and its
          progress line stays put while the Queue section is watched. -->
     <div id="dropzone">
-      <!-- The setup link is RELATIVE: it resolves to /setup on whichever
-           origin serves the page (https://replay.fogofwar.dev/setup deployed,
-           the loopback origin under `vite dev`). -->
-      <span id="droplabel">Drop a <code>.brepstream</code> capture here to publish it —
-        or <label class="browse">browse<input type="file" id="dropfile" accept=".brepstream" hidden></label>.
-        Want to record your games? <a href="/setup">Click here!</a></span>
+      <!-- No standing banner (nobody used it): the zone appears only while a
+           file is dragged over the page, or to report an upload's progress. -->
+      <span id="droplabel">Drop the <code>.brepstream</code> capture to publish it</span>
+      <input type="file" id="dropfile" accept=".brepstream" hidden>
       <div id="dropstatus" style="display:none"></div>
     </div>
 
@@ -334,7 +332,10 @@
   <div id="clipbody"></div>
   <div id="clipbar">
     <button type="button" id="clipplay" aria-label="Play / pause (space)">▶</button>
-    <input type="range" id="clipslider" min="0" max="1000" value="0" step="any" aria-label="Position in the clip">
+    <div id="clipslot">
+      <input type="range" id="clipslider" min="0" max="1000" value="0" step="any" aria-label="Position in the clip">
+      <i id="clipmark" style="display:none" title="The moment"></i>
+    </div>
     <span id="cliptime"></span>
     <select id="clipspeed" aria-label="Speed">
       <option value="1">1×</option>
@@ -342,6 +343,8 @@
       <option value="4">4×</option>
       <option value="8">8×</option>
       <option value="16">16×</option>
+      <option value="32">32×</option>
+      <option value="64">64×</option>
     </select>
   </div>
 </div>

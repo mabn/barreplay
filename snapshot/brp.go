@@ -1419,6 +1419,102 @@ func IndexBRP(r io.Reader, w io.Writer) error {
 	return WriteContainer(w, BRPMagic, version, sections)
 }
 
+// MergeEvents merges extra (in frame order) into events (in frame order),
+// the capture's own first on a tie.
+func MergeEvents(events, extra []Event) []Event {
+	if len(extra) == 0 {
+		return events
+	}
+	out := make([]Event, 0, len(events)+len(extra))
+	i, j := 0, 0
+	for i < len(events) || j < len(extra) {
+		if j == len(extra) || (i < len(events) && events[i].Frame <= extra[j].Frame) {
+			out = append(out, events[i])
+			i++
+		} else {
+			out = append(out, extra[j])
+			j++
+		}
+	}
+	return out
+}
+
+// AddEventsBRP copies a .brp with extra events merged into its events
+// section — every other section byte-for-byte, the meta's event count and
+// section layout updated — and reports how many it added. A file that
+// already holds events of any kind among extra's gets none (it was given
+// them before), which makes re-running it harmless. This is how events only
+// the DEMO knows (self-destruct orders) reach a .brp packed without them,
+// with no re-simulation: the frames do not change, so nothing else does.
+func AddEventsBRP(r io.Reader, w io.Writer, extra []Event) (int, error) {
+	version, sections, err := ReadContainer(r, BRPMagic)
+	if err != nil {
+		return 0, err
+	}
+	if version < BRPMinVersion || version > BRPVersion {
+		return 0, fmt.Errorf("snapshot: unsupported .brp version %d (want %d..%d)", version, BRPMinVersion, BRPVersion)
+	}
+	if len(sections) == 0 || sections[0].Tag != SecMeta {
+		return 0, fmt.Errorf("snapshot: .brp meta is not the first section")
+	}
+	var events []Event
+	ei := -1
+	for i, s := range sections {
+		if s.Tag != SecEvents {
+			continue
+		}
+		ei = i
+		b, err := gunzip(s.Payload)
+		if err != nil {
+			return 0, fmt.Errorf("snapshot: events section: %w", err)
+		}
+		if events, err = decodeEvents(b); err != nil {
+			return 0, err
+		}
+	}
+	kinds := map[EventKind]bool{}
+	for _, e := range extra {
+		kinds[e.Kind] = true
+	}
+	for _, e := range events {
+		if kinds[e.Kind] {
+			extra = nil
+			break
+		}
+	}
+	added := len(extra)
+	if added > 0 {
+		events = MergeEvents(events, extra)
+		payload := gzipCompress(encodeEvents(events))
+		if ei < 0 {
+			// No events section: put one right behind the meta, where the
+			// viewer's first read finds it.
+			sections = append(sections[:1], append([]Section{{Tag: SecEvents, Payload: payload}}, sections[1:]...)...)
+		} else {
+			sections[ei].Payload = payload
+		}
+		metaJSON, err := gunzip(sections[0].Payload)
+		if err != nil {
+			return 0, fmt.Errorf("snapshot: meta section: %w", err)
+		}
+		var rec map[string]json.RawMessage
+		if err := json.Unmarshal(metaJSON, &rec); err != nil {
+			return 0, fmt.Errorf("snapshot: meta section: %w", err)
+		}
+		if rec["events"], err = json.Marshal(len(events)); err != nil {
+			return 0, err
+		}
+		if rec["sections"], err = json.Marshal(sectionLayout(sections[1:])); err != nil {
+			return 0, err
+		}
+		if metaJSON, err = json.Marshal(rec); err != nil {
+			return 0, err
+		}
+		sections[0].Payload = gzipCompress(metaJSON)
+	}
+	return added, WriteContainer(w, BRPMagic, version, sections)
+}
+
 // chunkSlice extracts and decompresses one gzip stream out of a section
 // payload.
 func chunkSlice(sec []byte, off, length int64, what string) ([]byte, error) {

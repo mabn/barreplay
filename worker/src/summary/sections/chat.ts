@@ -3,7 +3,7 @@
 import { h, s, section } from "../dom";
 import { fmtClock } from "../format";
 import { timeChart } from "../chart";
-import { sideColor } from "../model";
+import { playerColor, sideColor } from "../model";
 import { clipAround, watcher } from "../watch";
 import { SIM_FPS, type Insights, type SummaryOptions } from "../types";
 
@@ -14,6 +14,8 @@ export function chat(ins: Insights, opts: SummaryOptions): HTMLElement | null {
   const pings = ins.marks.reduce((n, row) => n + row.reduce((a, b) => a + b, 0), 0);
   if (ins.chat.length === 0 && pings === 0) return null;
   const colorOf = (side: number) => (side >= 0 ? sideColor(ins, side) : SPECTATOR);
+  // A speaker is drawn in their own in-game colour; a spectator in grey.
+  const speaker = (l: { name: string; side: number }) => (l.name && playerColor(ins, l.name)) || colorOf(l.side);
   const rows = Math.max(1, ins.sides.length);
   const rowH = 18;
   const height = rows * rowH + 40;
@@ -24,7 +26,7 @@ export function chat(ins: Insights, opts: SummaryOptions): HTMLElement | null {
       const i = Math.floor(tt / ins.stepSec);
       const rows = ins.marks.map((row, side) => ({ color: colorOf(side), label: "Map pings", value: String(row[i] ?? 0) })).filter((r) => r.value !== "0");
       const near = ins.chat.filter((l) => Math.abs(l.f / SIM_FPS - tt) <= ins.stepSec / 2).slice(0, 4);
-      return [...rows, ...near.map((l) => ({ color: colorOf(l.side), label: l.name || "?", value: l.text.length > 40 ? l.text.slice(0, 40) + "…" : l.text }))];
+      return [...rows, ...near.map((l) => ({ color: speaker(l), label: l.name || "?", value: l.text.length > 40 ? l.text.slice(0, 40) + "…" : l.text }))];
     },
   });
   // Pings: one bar per step per side, its height the count.
@@ -53,7 +55,7 @@ export function chat(ins: Insights, opts: SummaryOptions): HTMLElement | null {
     const dest = line.dest && line.dest !== "all" ? `(${DEST_LABELS[line.dest] ?? line.dest}) ` : "";
     list.append(h("div", { class: "brs-line" },
       when, " ",
-      h("b", { style: `color: ${colorOf(line.side)}` }, line.name || "?"), ": ",
+      h("b", { style: `color: ${speaker(line)}` }, line.name || "?"), ": ",
       h("span", { class: "brs-dest" }, dest), line.text));
   }
   return section("Conversation",

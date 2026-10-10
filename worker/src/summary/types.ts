@@ -66,6 +66,8 @@ export interface Def {
   human?: string;
   /** Metal; absent when the replay does not record it. */
   cost?: number;
+  /** Its icontypes key, when the capture records one (version 4+). */
+  icon?: string;
 }
 
 export interface Series {
@@ -73,6 +75,9 @@ export interface Series {
   t: number[];
   /** [side][step] metal value of the army. */
   army: number[][];
+  /** [side][step] metal value of everything the side owns, buildings and
+   * commanders included (version 4+). */
+  value?: number[][];
   metalIncome: number[][];
   energyIncome: number[][];
   armyCats: string[];
@@ -103,6 +108,25 @@ export interface Moment {
   battle: number;
 }
 
+/** One team's part in a battle (version 4+), in metal. */
+export interface BattleTeam {
+  team: number;
+  /** Its largest army within reach of the battle while it lasted. */
+  army: number;
+  /** What it lost there. */
+  lost: number;
+  /** The enemy metal credited to it there, wherever it fired from (version
+   * 4 re-simulations; absent or 0 when the capture names no killers). */
+  killed?: number;
+}
+
+/** How many of one def a side lost in a battle (version 4+). */
+export interface UnitLoss {
+  def: number;
+  n: number;
+  metal: number;
+}
+
 export interface Battle {
   f0: number;
   f1: number;
@@ -111,7 +135,9 @@ export interface Battle {
   /** Radius holding the deaths, elmos. */
   r: number;
   /** Indexed like sides. */
-  lost: { n: number; metal: number; top: number[] }[];
+  lost: { n: number; metal: number; top: number[]; units?: UnitLoss[] }[];
+  /** Who took part, by team (version 4+). */
+  teams?: BattleTeam[];
 }
 
 export interface Elimination {
@@ -163,6 +189,13 @@ export interface Award {
   value: number;
   /** The moment to watch. */
   f: number;
+  /** Version 4: the unit's id, for the host to follow and mark it. */
+  unit?: number;
+  /** Version 4, a unit with a life to show: its first and last sampled
+   * frame, and its route as [frame, x, z]. */
+  f0?: number;
+  f1?: number;
+  path?: [number, number, number][];
 }
 
 /** Columnar: the i-th entry of every array describes one death. */
@@ -184,6 +217,10 @@ export interface Milestone {
   def: number;
   /** Sim frame (30 per game-second). */
   f: number;
+  /** Version 4: the unit that reached it, and where it was last sampled
+   * before it finished. */
+  unit?: number;
+  pos?: [number, number];
 }
 
 export interface ChatLine {
@@ -200,11 +237,29 @@ export interface ChatLine {
 export interface Clip {
   f0: number;
   f1: number;
+  /** The instant the clip is about, inside [f0, f1], for the host to mark on
+   * its timeline: the lead-in is then plainly a wait of a few seconds. */
+  at?: number;
+  /** When the moment is a span (a raid, a fight), where it ends: the host
+   * marks [at, atEnd] rather than one instant. */
+  atEnd?: number;
+  /** Where playback starts, inside [f0, f1]: a few seconds before `at`,
+   * with the rest of the clip before it there to scroll back to. Absent:
+   * from f0. */
+  start?: number;
   x?: number;
   z?: number;
   r?: number;
   /** What the clip shows, for the host's player to title it. */
   title?: string;
+  /** The title split into runs, player and side names carrying their
+   * colours, for a host that can draw them. */
+  titleRuns?: { text: string; color?: string }[];
+  /** The ONE unit the clip is about: the host follows and marks it. Match
+   * on def as well as id, since ids are recycled. */
+  follow?: { id: number; def?: number };
+  /** That unit's route, [frame, x, z], for the host to draw. */
+  path?: [number, number, number][];
 }
 
 export interface SummaryOptions {
@@ -219,6 +274,10 @@ export interface SummaryOptions {
   /** Where map images come from; defaults to BAR's maps API. Null draws the
    * map views on a plain background. */
   mapApi?: string | null;
+  /** Where unit icons come from: an origin serving /icons/icontypes.json and
+   * the bitmaps it names (the replay viewer). Defaults to the origin this
+   * module was loaded from; null draws unit names instead. */
+  iconBase?: string | null;
 }
 
 export interface SummaryHandle {

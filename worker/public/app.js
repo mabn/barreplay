@@ -1176,13 +1176,64 @@ const GHOST_ALPHA = 0.45;
 let ghostBuildings = new Map(); // id -> {f, def, team, x, z, hp, maxHp} (current ghost set)
 let ghostIndex = new Map();     // id -> [{f, def, team, x, z, hp, maxHp}] per keyframe sighting, f ascending
 let destroyedAt = new Map();    // id -> frames of its destroyed events (per load)
+// RECLAIM LINES: a builder taking a unit back is drawn like a build line, in
+// its own colour, over the last RECLAIM_LINE_SEC before the unit goes. A
+// capture records only that a reclaim FINISHED — the destroyed event's cause
+// names the builder and the engine's reclaim damage type (-12, re-simulated
+// captures only) — not when it began, so the line is a fixed-length lead-up
+// to that moment rather than the whole order. Reclaiming trees and wrecks
+// leaves no event at all and draws nothing.
+const WEAPON_RECLAIMED = -12;
+const RECLAIM_LINE_SEC = 3;
+const RECLAIM_LINE_COLOR = 'rgba(214, 120, 255, 0.85)';
+let reclaims = [];              // [{f, builder, target}] in frame order (per load)
+// SELF-DESTRUCT COUNTDOWNS. A 'selfd' event is a player's ORDER (the demo's
+// input stream, packed in by Go — demofile/orders.go), which the engine
+// TOGGLES: given again while a unit counts down, it stops. Each countdown runs
+// from its order to whichever comes first of the unit's death and the order
+// cancelling it. A death with no cause is the self-destruct going off, so its
+// frame is the countdown's real end and the timer shows the seconds left; a
+// unit killed by somebody first, a cancel, or no ending in sight still gets
+// the pulsing bomb, without a number that would be a guess.
+const SELFD_MAX_SEC = 60;       // an order this long without its end shows SELFD_OPEN_SEC
+const SELFD_OPEN_SEC = 10;
+let selfds = [];                // [{f, end, unit, exact}] by start frame (per load)
 function buildDestroyedIndex() {
   destroyedAt = new Map();
+  reclaims = [];
+  selfds = [];
+  const deaths = new Map(); // unit id -> [{f, cause}] for the countdowns
+  const orders = [];
   for (const e of data.events || []) {
+    if (e.k === 'selfd') orders.push(e);
     if (e.k !== 'destroyed') continue;
+    let d = deaths.get(e.id);
+    if (d === undefined) deaths.set(e.id, d = []);
+    d.push(e);
+    if (e.cause && e.cause.weapon === WEAPON_RECLAIMED && e.cause.id >= 0) {
+      reclaims.push({ f: e.f, builder: e.cause.id, target: e.id });
+    }
     let a = destroyedAt.get(e.id);
     if (a === undefined) destroyedAt.set(e.id, a = []);
     a.push(e.f);
+  }
+  const open = new Map(); // unit id -> its countdown still running
+  for (const o of orders) {
+    const run = open.get(o.id);
+    if (run && o.f < run.end) { // ordered again while counting: cancelled
+      run.end = o.f;
+      run.exact = false;
+      open.delete(o.id);
+      continue;
+    }
+    const death = (deaths.get(o.id) || []).find(d => d.f >= o.f);
+    const s = { f: o.f, unit: o.id, end: o.f + SELFD_OPEN_SEC * 30, exact: false };
+    if (death && death.f - o.f <= SELFD_MAX_SEC * 30) {
+      s.end = death.f;
+      s.exact = !death.cause;
+    }
+    selfds.push(s);
+    open.set(o.id, s);
   }
 }
 // diedBetween: a destroyed event for id in sim-frame range (f0, f1].
@@ -1980,6 +2031,7 @@ function draw() {
   updateZoomLabel();
   const fr = data && dispIdx >= 0 ? data.frames[dispIdx] : null;
   const u = fr ? fr.u : null;
+  if (clip && clip.focus.follow && u) followClipUnit(u, clip.focus.follow);
 
   // Damage flashes tint the icons themselves (GL: per-instance tint; 2D: a
   // red glyph blended over). Prune expired ones first, and keep redraws
@@ -2224,6 +2276,40 @@ function damagedEnough(hp, maxHp) {
   return maxHp > 0 && hp > 0 && hp <= maxHp * DAMAGE_MIN_FRAC; // <=: missing EXACTLY 2% counts
 }
 
+// drawReclaimLines draws the reclaims finishing within RECLAIM_LINE_SEC of
+// simFrame, builder to target, where both are in the frame.
+function drawReclaimLines(u, simFrame) {
+  // First reclaim not yet over: binary search on f >= simFrame.
+  let lo = 0, hi = reclaims.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (reclaims[mid].f < simFrame) lo = mid + 1; else hi = mid;
+  }
+  const until = simFrame + RECLAIM_LINE_SEC * 30;
+  if (lo >= reclaims.length || reclaims[lo].f > until) return;
+  const off = new Map();
+  for (let i = 0; i < u.length; i += STRIDE) off.set(u[i + F.ID], i);
+  octx.strokeStyle = RECLAIM_LINE_COLOR;
+  octx.lineWidth = 1.4;
+  octx.beginPath();
+  for (let k = lo; k < reclaims.length && reclaims[k].f <= until; k++) {
+    const i = off.get(reclaims[k].builder);
+    const j = off.get(reclaims[k].target);
+    if (i === undefined || j === undefined) continue;
+    let p = interpPos(u, i); // shared scratch: copy before the second call
+    const ax = viewW / 2 + (p[0] - center.x) * scale;
+    const ay = viewH / 2 + (p[1] - center.z) * scale;
+    p = interpPos(u, j);
+    const bx = viewW / 2 + (p[0] - center.x) * scale;
+    const by = viewH / 2 + (p[1] - center.z) * scale;
+    if ((ax < 0 && bx < 0) || (ay < 0 && by < 0) ||
+      (ax > viewW && bx > viewW) || (ay > viewH && by > viewH)) continue;
+    octx.moveTo(ax, ay);
+    octx.lineTo(bx, by);
+  }
+  octx.stroke();
+}
+
 function drawOverlay(u) {
   if (!octx) return;
   octx.setTransform(DPR, 0, 0, DPR, 0, 0);
@@ -2238,6 +2324,7 @@ function drawOverlay(u) {
   // frame, which at 1x is a visible stutter rather than a fade.
   const simFrame = frameNumAt(idx) + renderFrac * (data.sampleEvery || 30);
   if (marks.length) drawMarks(simFrame);
+  if (clip && clip.focus.path) drawClipPath(clip.focus.path, simFrame);
   if (!u) return;
 
   // Cheap scan first: most frames have far fewer builders/under-construction
@@ -2285,6 +2372,8 @@ function drawOverlay(u) {
     }
     octx.stroke();
   }
+
+  if (showBuildLines && reclaims.length) drawReclaimLines(u, simFrame);
 
   if (anyBar || anyHealth) {
     for (let i = 0; i < u.length; i += STRIDE) {
@@ -2335,8 +2424,120 @@ function drawOverlay(u) {
     }
   }
 
+  if (clip && clip.focus.follow) drawClipRing(u, clip.focus.follow);
+  if (selfds.length) drawSelfDestructs(u, simFrame);
+
   // Speech last: nothing should paint over a message.
   drawChatBubbles(simFrame, u);
+}
+
+// drawSelfDestructs puts a pulsing bomb, and the seconds left when they are
+// known, over every unit counting down to self-destruct at simFrame.
+function drawSelfDestructs(u, simFrame) {
+  let off = null;
+  for (const s of selfds) {
+    if (s.f > simFrame) break; // sorted by start
+    if (simFrame >= s.end) continue;
+    if (off === null) {
+      off = new Map();
+      for (let i = 0; i < u.length; i += STRIDE) off.set(u[i + F.ID], i);
+    }
+    const i = off.get(s.unit);
+    if (i === undefined) continue;
+    const p = interpPos(u, i);
+    const sx = viewW / 2 + (p[0] - center.x) * scale;
+    const sy = viewH / 2 + (p[1] - center.z) * scale;
+    if (sx < -40 || sx > viewW + 40 || sy < -40 || sy > viewH + 40) continue;
+    const left = (s.end - simFrame) / 30;
+    // Faster as it runs out, like a fuse.
+    const rate = s.exact ? Math.max(2, 8 - left) : 3;
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 1000 * rate * Math.PI);
+    const y = sy - iconPxFor(u[i + F.DEF]) / 2 - 12;
+    octx.save();
+    octx.globalAlpha = 0.65 + 0.35 * pulse;
+    octx.font = `${Math.round(14 + 4 * pulse)}px sans-serif`;
+    octx.textAlign = 'center';
+    octx.textBaseline = 'middle';
+    const label = s.exact ? left.toFixed(1) : '';
+    octx.fillText('💣', sx - (label ? 14 : 0), y);
+    if (label) {
+      octx.font = 'bold 13px sans-serif';
+      octx.lineWidth = 3;
+      octx.strokeStyle = 'rgba(0, 0, 0, 0.85)';
+      octx.strokeText(label, sx + 10, y);
+      octx.fillStyle = '#ff5a3c';
+      octx.fillText(label, sx + 10, y);
+    }
+    octx.restore();
+    scheduleDraw(); // keep it pulsing while paused
+  }
+}
+
+// ---- the clip's unit ---------------------------------------------------------
+// A summary award goes to ONE unit among thousands, so its clip says which:
+// the camera follows it (followClipUnit, before anything is drawn), a ring
+// marks it, and its route is drawn under everything — bright where it has
+// been by now, faint where it is still going. Matched by id AND def, since
+// the engine recycles ids.
+const FOCUS_COLOR = '#ffe14d';
+
+function clipUnitIndex(u, f) {
+  for (let i = 0; i < u.length; i += STRIDE) {
+    if (u[i + F.ID] === f.id && (f.def === undefined || u[i + F.DEF] === f.def)) return i;
+  }
+  return -1;
+}
+
+function followClipUnit(u, f) {
+  const i = clipUnitIndex(u, f);
+  if (i < 0) return; // not born yet, or gone: hold where it was last seen
+  const p = interpPos(u, i);
+  center = { x: p[0], z: p[1] };
+}
+
+function drawClipRing(u, f) {
+  const i = clipUnitIndex(u, f);
+  if (i < 0) return;
+  const p = interpPos(u, i);
+  const sx = viewW / 2 + (p[0] - center.x) * scale;
+  const sy = viewH / 2 + (p[1] - center.z) * scale;
+  const r = Math.max(14, iconPxFor(u[i + F.DEF]) * 0.9);
+  // A slow pulse, so the eye finds it among a thousand still icons.
+  const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 220);
+  octx.lineWidth = 2;
+  octx.strokeStyle = FOCUS_COLOR;
+  octx.globalAlpha = 0.6 + 0.4 * pulse;
+  octx.beginPath();
+  octx.arc(sx, sy, r + 3 * pulse, 0, Math.PI * 2);
+  octx.stroke();
+  octx.globalAlpha = 1;
+  scheduleDraw(); // keep the pulse going while paused
+}
+
+function drawClipPath(path, simFrame) {
+  if (path.length < 2) return;
+  const sx = (x) => viewW / 2 + (x - center.x) * scale;
+  const sy = (z) => viewH / 2 + (z - center.z) * scale;
+  octx.lineJoin = 'round';
+  // Where it is still going: faint and dashed.
+  octx.setLineDash([4, 5]);
+  octx.lineWidth = 1.5;
+  octx.strokeStyle = 'rgba(255, 225, 77, 0.35)';
+  octx.beginPath();
+  path.forEach((pt, k) => (k ? octx.lineTo(sx(pt[1]), sy(pt[2])) : octx.moveTo(sx(pt[1]), sy(pt[2]))));
+  octx.stroke();
+  octx.setLineDash([]);
+  // Where it has been: solid, up to now.
+  octx.lineWidth = 2.5;
+  octx.strokeStyle = 'rgba(255, 225, 77, 0.9)';
+  octx.beginPath();
+  octx.moveTo(sx(path[0][1]), sy(path[0][2]));
+  for (let k = 1; k < path.length && path[k - 1][0] < simFrame; k++) {
+    const a = path[k - 1], b = path[k];
+    const t = Math.min(1, (simFrame - a[0]) / Math.max(1, b[0] - a[0]));
+    octx.lineTo(sx(a[1] + (b[1] - a[1]) * t), sy(a[2] + (b[2] - a[2]) * t));
+  }
+  octx.stroke();
 }
 
 // Per-def render info, resolved ONCE per replay load. The draw loops touch this
@@ -3605,7 +3806,7 @@ function startPlay() {
   const last = data.frameCount - 1;
   if (playPos >= last) setPlayhead(0, true); // restart from the beginning at the end
   // A finished clip plays again from its start.
-  if (clip && frameNumAt(idx) >= clip.f1) go(idxForFrame(clip.f0));
+  if (clip && frameNumAt(idx) >= clip.f1) go(idxForFrame(clip.start));
   playLastTs = 0;
   document.getElementById('play').textContent = '⏸ Pause';
   document.getElementById('clipplay').textContent = '⏸';
@@ -4524,6 +4725,7 @@ function playersColumn() {
 
 function showHome() {
   stopPlay();
+  leaveReplayTabs();
   document.body.classList.add('home');
   document.getElementById('home').style.display = '';
   document.getElementById('subtitle').textContent = 'replay state viewer';
@@ -6636,6 +6838,7 @@ function initUpload() {
 
 function uploadStatus(text, cls) {
   const el = document.getElementById('dropstatus');
+  document.getElementById('dropzone').classList.toggle('busy', !!text);
   el.style.display = text ? '' : 'none';
   el.className = cls || '';
   el.textContent = text || '';
@@ -6829,7 +7032,7 @@ async function submitResim() {
 // The insights file versions this page reads, newest first (src/summary
 // INSIGHTS_VERSIONS): a revision whose newer file is not built yet falls back
 // to the one it has.
-const INSIGHTS_VERSIONS = [3, 2, 1];
+const INSIGHTS_VERSIONS = [4, 3, 2, 1];
 let summaryModule = null;   // Promise of the imported library
 let summaryFor = null;      // currentFile the #summary pane was filled for
 let summaryHandle = null;   // the mounted summary, for destroy()
@@ -6862,6 +7065,14 @@ function applyReplayTab() {
     resize(); // the canvases were display:none while the summary showed
     show();
   }
+}
+
+// leaveReplayTabs is the replay page's tabs going away under the list: a
+// Summary left open (and any clip playing over it) would otherwise render
+// below the list, since its pane is shown by a body class, not by the page.
+function leaveReplayTabs() {
+  if (clip) closeClip(false);
+  document.body.classList.remove('summary-tab');
 }
 
 function resetSummary() {
@@ -6965,10 +7176,41 @@ function openClip(c) {
     document.body.classList.add('clip-open');
   }
   clip.f0 = c.f0;
+  // Playback starts a few seconds before the moment; the clip reaches back
+  // further so the reader can scroll to what led up to it.
+  clip.start = typeof c.start === 'number' ? Math.max(c.f0, c.start) : c.f0;
   clip.f1 = Math.max(c.f0 + 30, c.f1);
   clip.focus = c;
-  document.getElementById('cliptitle').textContent = c.title || 'Clip';
-  const dur = (clip.f1 - clip.f0) / 30;
+  // The title's player and side names come in their colours when the
+  // summary sends them split into runs.
+  const title = document.getElementById('cliptitle');
+  title.textContent = '';
+  if (Array.isArray(c.titleRuns) && c.titleRuns.length) {
+    for (const r of c.titleRuns) {
+      const span = document.createElement('span');
+      span.textContent = r.text;
+      if (r.color) span.style.color = r.color;
+      title.append(span);
+    }
+  } else {
+    title.textContent = c.title || 'Clip';
+  }
+  title.title = c.title || '';
+  // The moment itself, marked on the clip's timeline: the lead-in before it
+  // is then plainly a few seconds' wait rather than a clip of nothing.
+  const mark = document.getElementById('clipmark');
+  if (typeof c.at === 'number' && c.at >= clip.f0 && c.at <= clip.f1) {
+    const span = clip.f1 - clip.f0;
+    // A moment with a span (a raid, a fight) is a band from start to end.
+    const end = typeof c.atEnd === 'number' ? Math.min(clip.f1, Math.max(c.at, c.atEnd)) : c.at;
+    mark.style.setProperty('--at', String((c.at - clip.f0) / span));
+    mark.style.setProperty('--len', String((end - c.at) / span));
+    mark.title = 'The moment: ' + fmtClipTime(c.at) + (end > c.at ? '–' + fmtClipTime(end) : '');
+    mark.style.display = '';
+  } else {
+    mark.style.display = 'none';
+  }
+  const dur = (clip.f1 - clip.start) / 30;
   const opts = [...document.getElementById('clipspeed').options].map(o => +o.value);
   document.getElementById('clipspeed').value = String(opts.find(v => dur / v <= CLIP_WALL_SEC) || opts[opts.length - 1]);
   resize();
@@ -6977,6 +7219,13 @@ function openClip(c) {
 
 function startClip() {
   const c = clip.focus;
+  // A followed unit starts the clip where its route says it was; the
+  // camera then rides along with it (followClipUnit).
+  if (c.follow && Array.isArray(c.path) && c.path.length && typeof c.x !== 'number') {
+    const pt = c.path.reduce((b, p) => (Math.abs(p[0] - clip.start) < Math.abs(b[0] - clip.start) ? p : b));
+    c.x = pt[1];
+    c.z = pt[2];
+  }
   if (typeof c.x === 'number' && typeof c.z === 'number') {
     const r = Math.max(700, c.r || 1200) * 1.5;
     center = { x: c.x, z: c.z };
@@ -6985,7 +7234,7 @@ function startClip() {
     fitView();
   }
   stopPlay();
-  go(idxForFrame(clip.f0));
+  go(idxForFrame(clip.start));
   startPlay();
 }
 

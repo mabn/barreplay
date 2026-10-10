@@ -1145,14 +1145,12 @@ test("/setup serves the guide page without rewriting the path", async () => {
   assert.equal(res.headers.get("cache-control"), "no-cache");
 });
 
-// The three halves of the install flow must agree: the landing page links to
-// the guide, the guide offers the widget at a URL, and tools/sync-assets.mjs
+// The halves of the install flow must agree: the guide offers the widget at a
+// URL, and tools/sync-assets.mjs
 // is what puts that file in public/ (it is gitignored — the source of truth is
 // assets/lua/replay_uploader.lua, so nothing here can be checked by presence).
-test("the setup guide is wired to the banner and to the widget", () => {
+test("the setup guide is wired to the widget", () => {
   const at = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
-
-  assert.match(at("../index.html"), /href="\/setup"/, "the dropzone banner links to the guide");
 
   const guide = at("../public/setup.html");
   assert.match(guide, /href="\/replay_uploader\.lua" download/, "the guide offers the widget");

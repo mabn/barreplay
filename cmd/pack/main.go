@@ -111,10 +111,15 @@ func main() {
 		var modOptions map[string]string
 		var err error
 		if strings.EqualFold(filepath.Ext(in), ".brp") {
-			// Already packed: only meaningful to analyze, never to repack.
+			// Already packed: never repacked. Publishing one first gives it
+			// what only the demo knows and older packs lack (self-destruct
+			// orders), which changes no frame; analyzing reads it as it is.
 			brpPath = in
-			if !*stats {
+			if !*stats && *upload == "" {
 				err = fmt.Errorf("input is already a .brp (use -stats to analyze it, or pass the raw .brepstream to pack)")
+			}
+			if err == nil && *upload != "" && !*noDemo {
+				brpPath, err = packer.AddDemoOrders(ctx, client, in, *outDir, *idArg)
 			}
 		} else {
 			brpPath, modOptions, err = packer.Pack(ctx, client, in, *outDir, *idArg, *noDemo)

@@ -11,10 +11,15 @@ export interface TipRow {
   color?: string;
   label: string;
   value?: string;
+  /** Set on a SIDE'S reading of a metric (label = the side, metric = what
+   * is measured): such rows are drawn as one table, a column per side and a
+   * line per metric, so the sides' numbers line up. */
+  metric?: string;
 }
 
 export interface Tip {
-  title?: string;
+  /** A string, or a node (a title with names in colour). */
+  title?: string | Node;
   rows?: TipRow[];
   /** A muted last line: what a click does. */
   note?: string;
@@ -43,13 +48,44 @@ function render(el: HTMLElement, c: TipContent): void {
     return;
   }
   if (c.title) el.append(h("div", { class: "brs-tip-title" }, c.title));
-  for (const r of c.rows ?? []) {
+  const rows = c.rows ?? [];
+  let tabled = false;
+  for (const r of rows) {
+    if (r.metric !== undefined) {
+      if (!tabled) el.append(table(rows.filter((x) => x.metric !== undefined)));
+      tabled = true;
+      continue;
+    }
     el.append(h("div", { class: "brs-tip-row" },
       h("i", { style: r.color ? `background: ${r.color}` : "visibility: hidden" }),
       h("span", undefined, r.label),
       r.value !== undefined ? h("b", undefined, r.value) : null));
   }
   if (c.note) el.append(h("div", { class: "brs-tip-note" }, c.note));
+}
+
+/** table pivots per-side metric rows: a column per side (in the order the
+ * sides first appear, each headed by its swatch and name) and a line per
+ * metric, so "80%" sits under "20%"'s neighbour rather than two lines away. */
+function table(rows: TipRow[]): HTMLElement {
+  const cols: TipRow[] = [];
+  const metrics: string[] = [];
+  const cell = new Map<string, string>();
+  for (const r of rows) {
+    if (!cols.some((c) => c.label === r.label)) cols.push(r);
+    const m = r.metric ?? "";
+    if (!metrics.includes(m)) metrics.push(m);
+    cell.set(`${m}\u0000${r.label}`, r.value ?? "");
+  }
+  const t = h("div", { class: "brs-tip-table", style: `grid-template-columns: auto repeat(${cols.length}, auto)` },
+    h("span"),
+    ...cols.map((c) => h("span", { class: "brs-tip-head" },
+      h("i", { style: c.color ? `background: ${c.color}` : "visibility: hidden" }), c.label)));
+  for (const m of metrics) {
+    t.append(h("span", { class: "brs-tip-metric" }, m));
+    for (const c of cols) t.append(h("b", undefined, cell.get(`${m}\u0000${c.label}`) ?? "–"));
+  }
+  return t;
 }
 
 /** showTip shows content beside the window point (x, y). */

@@ -1,6 +1,10 @@
 package insights
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/mabn/barreplay/snapshot"
+)
 
 func TestBattles(t *testing.T) {
 	ins := computeFixture(t)
@@ -16,6 +20,32 @@ func TestBattles(t *testing.T) {
 	if b.X < 3500 || b.X > 4200 || len(b.Lost[0].Top) != 1 || b.Lost[0].Top[0] != defRaider {
 		t.Errorf("battle centre/top = %d / %v", b.X, b.Lost[0].Top)
 	}
+	// The unit list counts every death: one def, all fourteen, all the metal.
+	if u := b.Lost[0].Units; len(u) != 1 || u[0].Def != defRaider || u[0].N != 14 || u[0].Metal != 700 {
+		t.Errorf("battle units = %+v", u)
+	}
+	// Who fought it: every team's losses add up to its side's, and the
+	// sides that lost raiders had an army there to lose them from.
+	lost := make([]float64, len(b.Lost))
+	army := make([]float64, len(b.Lost))
+	for _, tm := range b.Teams {
+		side := -1
+		for _, x := range ins.Teams {
+			if x.Team == tm.Team {
+				side = x.Side
+			}
+		}
+		if side < 0 {
+			t.Fatalf("battle team %d has no side", tm.Team)
+		}
+		lost[side] += tm.Lost
+		army[side] += tm.Army
+	}
+	for s := range b.Lost {
+		if lost[s] != b.Lost[s].Metal || army[s] <= 0 {
+			t.Errorf("side %d: teams lost %v (want %v), army %v", s, lost[s], b.Lost[s].Metal, army[s])
+		}
+	}
 }
 
 func TestAwards(t *testing.T) {
@@ -28,15 +58,15 @@ func TestAwards(t *testing.T) {
 	if _, ok := got["immortal"]; ok {
 		t.Errorf("immortal = %+v, want none", got["immortal"])
 	}
-	// The fusion is the costliest loss but went unfinished; it takes that
-	// award, and the costliest FINISHED loss is a raider.
-	if a := got["costliest"]; a.Def != defRaider || a.Value != 50 {
-		t.Errorf("costliest = %+v", a)
+	// The biggest blow is the most one team lost within 30 s.
+	if a := got["blow"]; a.Key == "" || a.Value <= 0 || a.F0 > a.F || a.F > a.F1 || a.F1-a.F0 > blowWindow {
+		t.Errorf("blow = %+v", a)
 	}
+	t.Logf("blow = %+v", got["blow"])
 	if _, ok := got["tourist"]; ok {
 		t.Errorf("tourist = %+v, want none (nobody covered 5%% of the map)", got["tourist"])
 	}
-	if a := got["unfinished"]; a.Def != defFusion || a.Team != 2 || a.F != 300*30 || a.Value != 3600 {
+	if a := got["unfinished"]; a.Def != defFusion || a.Team != 2 || a.F != 300*30 || a.Value != 1397.6 {
 		t.Errorf("unfinished = %+v", a)
 	}
 	if a := got["marathon"]; a.Def != defRaider && a.Def != defCom {
@@ -44,6 +74,40 @@ func TestAwards(t *testing.T) {
 	}
 	if _, ok := ins.Defs[got["marathon"].Def]; !ok {
 		t.Error("an award's def must be described in Defs")
+	} // Every award names its unit; a mobile one also carries where it went.
+	for _, k := range []string{"marathon"} {
+		a := got[k]
+		if len(a.Path) < 2 || a.F0 >= a.F1 || a.Path[0][0] != a.F0 || a.Path[len(a.Path)-1][0] != a.F1 {
+			t.Errorf("%s: life %d-%d, path %v", k, a.F0, a.F1, a.Path)
+		}
+	}
+	if a := got["unfinished"]; a.Unit == 0 || a.Path != nil {
+		t.Errorf("unfinished = %+v, want the building's id and no path", a)
+	}
+}
+
+func TestHealedTracksRepairs(t *testing.T) {
+	p := &pass{in: Input{}, tracks: map[int32]*track{}}
+	d := defInfo{army: true}
+	hp := func(fr int32, h float32) {
+		p.trackUnit(fr, snapshot.UnitState{UnitID: 7, DefID: 3, Team: 1, Health: h, MaxHealth: 100, BuildProgress: 1}, d)
+	}
+	hp(0, 100)
+	hp(30, 40)      // hit
+	hp(60, 100)     // 60 repaired
+	hp(30*40, 20)   // hit again, in a later half-minute
+	hp(30*41, 90)   // 70 repaired
+	hp(30*42, 100)  // 10 more in the same one
+	hp(30*400, 100) // nothing
+	tr := p.tracks[7]
+	if tr.healed != 140 || tr.hpeak != 80 || tr.hpeakF != 30*41 {
+		t.Errorf("healed %v, peak %v at %d; want 140, 80 at %d", tr.healed, tr.hpeak, tr.hpeakF, 30*41)
+	}
+	if tr.minHP != 0.2 || tr.minHPF != 30*40 {
+		t.Errorf("min hp %v at %d", tr.minHP, tr.minHPF)
+	}
+	if r := tr.route(); len(r) != 3 || r[2][0] != 30*400 {
+		t.Errorf("route = %v, want a point per 5 s sampled", r)
 	}
 }
 
@@ -109,5 +173,62 @@ func TestEliminationsInferred(t *testing.T) {
 	w := wipedDeaths(d, got)
 	if w[0] || !w[1] || w[2] {
 		t.Errorf("wiped = %v, want only team 0's burst", w[:3])
+	}
+}
+
+// TestAwardRules pins the rules that keep an award from going to a unit that
+// merely happened to be standing there: Immortal must fight on after its
+// hardest moment, Close call skips cheap units, Most healed needs the unit's
+// own health in repairs.
+func TestAwardRules(t *testing.T) {
+	end := int32(30 * 600)
+	mk := func(id int32, cost float64) *track {
+		return &track{id: id, def: id, team: 1, first: 0, last: end, army: true, eligible: true, cost: cost, maxHP: 1000, minHP: 2}
+	}
+	run := func(causes bool, ts ...*track) map[string]Award {
+		p := &pass{out: &Insights{}, tracks: map[int32]*track{}, usedDef: map[int32]bool{}, lastFrame: end, hasCauses: causes}
+		p.allTracks = ts
+		got := map[string]Award{}
+		for _, a := range p.awards() {
+			got[a.Key] = a
+		}
+		return got
+	}
+
+	// Fell to 10%, then killed nothing: not Immortal. Killing three times
+	// its cost (and 1500 metal) after that moment, it is; what it killed
+	// before the moment does not count, and nothing counts without causes.
+	im := mk(1, 400)
+	im.minHP, im.minHPF = 0.1, 30*100
+	if a, ok := run(true, im)["immortal"]; ok {
+		t.Errorf("immortal with no kills after = %+v", a)
+	}
+	im.kills = []kill{{30 * 90, 5000}, {30 * 200, 1000}}
+	if a, ok := run(true, im)["immortal"]; ok {
+		t.Errorf("immortal on kills before its low = %+v", a)
+	}
+	im.kills = append(im.kills, kill{30 * 300, 600})
+	if a := run(true, im)["immortal"]; a.Unit != 1 || a.Value != 1600 || a.F != 30*100 {
+		t.Errorf("immortal = %+v, want unit 1, 1600 metal at its low", a)
+	}
+	if a, ok := run(false, im)["immortal"]; ok {
+		t.Errorf("immortal without causes = %+v", a)
+	}
+
+	// Close call: a fighter at 6% is no story, a tank at 10% is.
+	fighter, tank := mk(2, 80), mk(3, closeCallCost)
+	fighter.minHP, tank.minHP = 0.06, 0.10
+	if a := run(true, fighter, tank)["closecall"]; a.Unit != 3 {
+		t.Errorf("closecall = %+v, want the tank", a)
+	}
+
+	// Most healed: the most hp repaired, at least its own health over.
+	small, big := mk(4, 600), mk(5, 600)
+	small.healed, big.healed = 900, 4000
+	if a := run(true, small, big)["healed"]; a.Unit != 5 || a.Value != 4 {
+		t.Errorf("healed = %+v, want unit 5 at 4x", a)
+	}
+	if a, ok := run(true, small)["healed"]; ok {
+		t.Errorf("healed under its own health = %+v", a)
 	}
 }

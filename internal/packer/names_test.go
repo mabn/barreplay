@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/mabn/barreplay/internal/barapi"
+	"github.com/mabn/barreplay/internal/insights"
 	"github.com/mabn/barreplay/snapshot"
 )
 
@@ -151,7 +152,7 @@ func publishFull(t *testing.T, f *fakeWorker, o UploadOptions) {
 func TestUploadStaticFullViewTakesMain(t *testing.T) {
 	f := &fakeWorker{}
 	publishFull(t, f, UploadOptions{View: "full"})
-	want := []string{"replays/undated/" + gid + ".brp", "replays/undated/" + gid + ".insights3.json"}
+	want := []string{"replays/undated/" + gid + ".brp", "replays/undated/" + gid + ".insights" + fmt.Sprint(insights.Version) + ".json"}
 	if fmt.Sprint(f.puts) != fmt.Sprint(want) {
 		t.Errorf("puts = %v, want %v", f.puts, want)
 	}
@@ -179,7 +180,7 @@ func TestUploadStaticMonthFromBarAPI(t *testing.T) {
 func TestUploadStaticMainTakenFallsBackToSuffix(t *testing.T) {
 	f := &fakeWorker{objects: map[string]bool{"replays/undated/" + gid + ".brp": true}}
 	publishFull(t, f, UploadOptions{View: "full"})
-	want := []string{"replays/undated/" + gid + "-1a2b3c4d.brp", "replays/undated/" + gid + "-1a2b3c4d.insights3.json"}
+	want := []string{"replays/undated/" + gid + "-1a2b3c4d.brp", "replays/undated/" + gid + "-1a2b3c4d.insights" + fmt.Sprint(insights.Version) + ".json"}
 	if fmt.Sprint(f.puts) != fmt.Sprint(want) {
 		t.Errorf("puts = %v, want %v", f.puts, want)
 	}
@@ -195,7 +196,7 @@ func TestUploadStaticExistingMain(t *testing.T) {
 
 	f := &fakeWorker{row: fmt.Sprintf(row, "99999999")}
 	publishFull(t, f, UploadOptions{View: "full"})
-	want := []string{"replays/undated/" + gid + "-1a2b3c4d.brp", "replays/undated/" + gid + "-1a2b3c4d.insights3.json"}
+	want := []string{"replays/undated/" + gid + "-1a2b3c4d.brp", "replays/undated/" + gid + "-1a2b3c4d.insights" + fmt.Sprint(insights.Version) + ".json"}
 	if fmt.Sprint(f.puts) != fmt.Sprint(want) {
 		t.Errorf("different bytes: puts = %v, want %v", f.puts, want)
 	}

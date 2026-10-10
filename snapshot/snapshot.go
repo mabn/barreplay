@@ -72,6 +72,11 @@ const (
 	// player's army handed to an ally. Team is the team it went TO and
 	// Cause.Team the one it came from.
 	EventGiven EventKind = "given"
+	// EventSelfD is a player ORDERING the unit to self-destruct — or, given
+	// again while it counts down, to stop: the engine toggles. Read from the
+	// demo's input stream (demofile.SelfD), never from the capture; DefID is
+	// -1 (an order names only the unit) and Team is the ordering player's.
+	EventSelfD EventKind = "selfd"
 )
 
 // Event is a discrete unit lifecycle event, recorded at the exact frame it

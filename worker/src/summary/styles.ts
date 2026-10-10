@@ -27,6 +27,23 @@ export const CSS = `
 .brs-root .brs-stat { display: flex; justify-content: space-between; gap: 10px;
   font-variant-numeric: tabular-nums; }
 .brs-root .brs-stat span { color: var(--brs-muted); }
+.brs-root .brs-losscols { display: grid; grid-template-columns: 1fr auto 1fr; gap: 6px 8px; margin: 6px 0 8px; align-items: start; }
+.brs-root .brs-losscols > .brs-fnames { padding: 0 9px; }
+.brs-root .brs-vs { align-self: center; }
+.brs-root .brs-losscol { border: 1px solid transparent; border-radius: 6px; padding: 5px 8px; }
+.brs-root .brs-losscol.brs-won { border-color: var(--brs-side);
+  background: color-mix(in srgb, var(--brs-side) 9%, transparent); }
+.brs-root .brs-losshead { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+.brs-root .brs-ahead { font-size: 10px; font-weight: 700; border-radius: 8px; padding: 0 6px; line-height: 15px; }
+.brs-root .brs-units { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; }
+.brs-root .brs-unit { display: inline-flex; align-items: center; gap: 3px; font-variant-numeric: tabular-nums; color: var(--brs-muted); }
+.brs-root .brs-uicon { width: 22px; height: 22px; object-fit: contain; }
+.brs-root .brs-unitref { white-space: nowrap; }
+.brs-root .brs-uicon-inline { width: 1.25em; height: 1.25em; object-fit: contain; vertical-align: -0.3em; margin-right: 3px; }
+.brs-root .brs-uname { color: var(--brs-text); }
+.brs-root .brs-strong { font-weight: 600; }
+.brs-root .brs-more { font: inherit; font-size: 12px; color: var(--brs-muted); background: none; border: 1px solid var(--brs-grid); border-radius: 10px; padding: 1px 8px; cursor: pointer; }
+.brs-root .brs-more:hover { color: var(--brs-text); }
 .brs-root .brs-hint { color: var(--brs-muted); font-size: 12px; }
 .brs-root svg { display: block; width: 100%; height: auto; overflow: visible; }
 .brs-root svg text { fill: var(--brs-muted); font-size: 11px; font-family: inherit; }
@@ -43,6 +60,8 @@ export const CSS = `
 .brs-root .brs-seekable { cursor: pointer; }
 .brs-root .brs-seekable:hover { border-color: var(--brs-accent); }
 .brs-root .brs-award-title { font-weight: 600; margin-bottom: 3px; }
+.brs-root .brs-award-body { display: flex; gap: 10px; align-items: flex-start; }
+.brs-root .brs-awardmap { width: 64px; height: 64px; flex: none; }
 .brs-root .brs-chat { max-height: 320px; overflow-y: auto; margin-top: 10px; border-top: 1px solid var(--brs-line); padding-top: 8px; }
 .brs-root .brs-line { padding: 1px 0; overflow-wrap: anywhere; }
 .brs-root .brs-moment { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; border-top: 1px solid var(--brs-grid); }
@@ -51,20 +70,22 @@ export const CSS = `
 .brs-root .brs-muted { color: var(--brs-muted); }
 .brs-root .brs-when { color: var(--brs-muted); font-variant-numeric: tabular-nums; }
 .brs-root .brs-dest { color: var(--brs-muted); }
-.brs-root .brs-playerbtn { all: unset; cursor: pointer; color: var(--brs-text); border-bottom: 1px dotted var(--brs-team, var(--brs-muted)); }
-.brs-root .brs-playerbtn:hover, .brs-root .brs-playerbtn:focus-visible { color: var(--brs-accent); border-bottom-style: solid; }
+.brs-root .brs-fighters { font-size: 13px; margin: 1px 0; }
+.brs-root .brs-playerbtn { all: unset; cursor: pointer; color: var(--brs-team, var(--brs-text)); border-bottom: 1px dotted var(--brs-team, var(--brs-muted)); }
+.brs-root .brs-playerbtn:hover, .brs-root .brs-playerbtn:focus-visible { border-bottom-style: solid; }
 .brs-root .brs-reportgrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; margin-top: 12px; }
 @media (max-width: 720px) { .brs-root .brs-reportgrid { grid-template-columns: minmax(0, 1fr); } }
 .brs-root .brs-small { max-width: 420px; margin: 0; }
 .brs-root .brs-tabs { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 4px 0 12px; }
 .brs-root .brs-tabgroup { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .brs-root .brs-tabside { font-size: 12px; margin-right: 2px; }
-.brs-root .brs-tab { font: inherit; font-size: 12px; color: var(--brs-muted); background: var(--brs-bg); cursor: pointer;
+.brs-root .brs-tab { font: inherit; font-size: 12px; color: var(--brs-team); background: var(--brs-bg); cursor: pointer;
   border: 1px solid var(--brs-line); border-bottom: 3px solid var(--brs-team); border-radius: 4px 4px 2px 2px; padding: 3px 9px; }
-.brs-root .brs-tab:hover { color: var(--brs-text); border-color: var(--brs-muted); border-bottom-color: var(--brs-team); }
+.brs-root .brs-tab:hover { border-color: var(--brs-muted); border-bottom-color: var(--brs-team); }
 .brs-root .brs-tab.brs-on { color: #0b0f13; background: var(--brs-team); border-color: var(--brs-team); font-weight: 600; }
 .brs-root .brs-pdetail h2 { margin-bottom: 0; }
-.brs-root .brs-axis { display: grid; grid-template-columns: 110px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 2px 0; }
+.brs-root .brs-axis { display: grid; grid-template-columns: 96px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 2px 0; }
+.brs-root .brs-axis > span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .brs-root .brs-bar { display: block; height: 8px; background: var(--brs-grid); border-radius: 2px; overflow: hidden; }
 .brs-root .brs-bar i { display: block; height: 100%; }
 .brs-root .brs-panel-label { color: var(--brs-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; margin: 10px 0 2px; }
@@ -100,14 +121,28 @@ export const CSS = `
 .brs-root .brs-battle.brs-hover .brs-ring { stroke-opacity: 1; fill-opacity: .14; }
 .brs-root .brs-battle.brs-on .brs-ring { stroke: var(--brs-accent); stroke-opacity: 1; fill: var(--brs-accent); fill-opacity: .16; }
 .brs-root .brs-battle.brs-on .brs-badge { fill: var(--brs-accent); }
-.brs-root .brs-tip { position: fixed; z-index: 1000; display: none; pointer-events: none; max-width: 340px;
+.brs-root .brs-tip { position: fixed; z-index: 1000; display: none; pointer-events: none; max-width: calc(100vw - 16px);
   background: #0b0f13; color: var(--brs-text); border: 1px solid var(--brs-line); border-radius: 6px;
   padding: 7px 10px; font-size: 12px; line-height: 1.4; box-shadow: 0 6px 18px rgba(0, 0, 0, .45); }
-.brs-root .brs-tip-title { font-weight: 600; margin-bottom: 3px; }
-.brs-root .brs-tip-row { display: flex; align-items: center; gap: 7px; }
+.brs-root .brs-tip-title { font-weight: 600; margin-bottom: 3px; max-width: 440px; }
+.brs-root .brs-tip-row { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
 .brs-root .brs-tip-row i { flex: 0 0 10px; height: 10px; border-radius: 2px; }
 .brs-root .brs-tip-row b { font-weight: 600; font-variant-numeric: tabular-nums; margin-left: auto; padding-left: 14px; white-space: nowrap; }
-.brs-root .brs-tip-note { color: var(--brs-muted); margin-top: 4px; }
+.brs-root .brs-scale { display: inline-flex; margin-left: 10px; vertical-align: 1px; border: 1px solid var(--brs-line); border-radius: 4px; overflow: hidden; }
+.brs-root .brs-scale button { font: inherit; font-size: 10px; letter-spacing: .04em; text-transform: none; padding: 1px 7px; border: 0;
+  background: transparent; color: var(--brs-muted); cursor: pointer; }
+.brs-root .brs-scale button + button { border-left: 1px solid var(--brs-line); }
+.brs-root .brs-scale button[aria-pressed="true"] { background: var(--brs-line); color: var(--brs-text); }
+.brs-root .brs-section > h3 .brs-scale { font-weight: 400; }
+.brs-root .brs-info { display: inline-flex; align-items: center; justify-content: center; width: 13px; height: 13px; border-radius: 50%;
+  border: 1px solid var(--brs-muted); color: var(--brs-muted); font: italic 600 9px/1 Georgia, serif; cursor: help; vertical-align: 1px; }
+.brs-root .brs-info:hover, .brs-root .brs-info:focus { color: var(--brs-text); border-color: var(--brs-text); outline: none; }
+.brs-root .brs-tip-table { display: grid; column-gap: 14px; row-gap: 2px; align-items: center; }
+.brs-root .brs-tip-table b { font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.brs-root .brs-tip-head { display: flex; align-items: center; justify-content: flex-end; gap: 6px; font-weight: 600; white-space: nowrap; }
+.brs-root .brs-tip-head i { flex: 0 0 10px; height: 10px; border-radius: 2px; }
+.brs-root .brs-tip-metric { color: var(--brs-muted); white-space: nowrap; }
+.brs-root .brs-tip-note { color: var(--brs-muted); margin-top: 4px; max-width: 440px; }
 .brs-root .brs-val { font-variant-numeric: tabular-nums; color: var(--brs-muted); white-space: nowrap; }
 `;
 

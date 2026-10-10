@@ -4,10 +4,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { fmtClock, fmtMetal, niceStep, timeStep } from "../src/summary/format";
-import { comparable, notices, readable, sideColor, sideName } from "../src/summary/model";
+import { colorName, comparable, nameRuns, notices, readable, sideColor, sideName } from "../src/summary/model";
 import { knockouts, lossesByStep, wipedOf } from "../src/summary/losses";
-import { compass, momentStory } from "../src/summary/moments";
-import { clipAround, clipSpan, watcher } from "../src/summary/watch";
+import { compass, fighters, momentStory } from "../src/summary/moments";
+import { clipAround, clipAt, clipEvent, clipSpan, watcher } from "../src/summary/watch";
+import { zonesOf } from "../src/summary/zones";
+import { lossKinds } from "../src/summary/losskinds";
+import { clipOf } from "../src/summary/sections/awards";
 import type { Insights } from "../src/summary/types";
 
 function ins(over: Partial<Insights> = {}): Insights {
@@ -54,8 +57,13 @@ test("notices say why something is missing", () => {
 });
 
 test("side labels and colours", () => {
-  assert.equal(sideName(ins(), 0), "Ann +1");
-  assert.equal(sideName(ins(), 1), "Cy");
+  // #112233 is a dark blue; the second side has no colour of its own.
+  assert.equal(sideName(ins(), 0), "Blue team");
+  assert.equal(sideName(ins(), 1), "Team 2");
+  const red = ins({ sides: [ins().sides[0], { ...ins().sides[1], color: "#ff1010" }] });
+  assert.equal(sideName(red, 1), "Red team");
+  const twoBlues = ins({ sides: [ins().sides[0], { ...ins().sides[1], color: "#0b3ef3" }] });
+  assert.equal(sideName(twoBlues, 0), "Team 1", "two sides are never called the same");
   assert.equal(readable("#ffd000"), "#ffd000", "a light colour is kept");
   assert.notEqual(readable("#0000ff"), "#0000ff", "pure blue is lifted");
   assert.notEqual(sideColor(ins(), 0), "#112233");
@@ -86,16 +94,35 @@ test("a moment is named after what died in it", () => {
   // Ann's commander dies in the north-west: that names it.
   let st = momentStory(ins({ ...base, deaths: deaths([[1000, 1, 0, 100, 100], [1000, 2, 1, 100, 100]]) }), m);
   assert.equal(st.title, "Ann's commander falls in the north-west");
-  assert.equal(st.detail, "Ann +1 lost 1 unit (1.2k metal): Commander; Cy lost 1 unit (50 metal): Pawn.");
+  assert.equal(st.detail, "Blue team lost 1 unit (1.2k metal): Commander; Team 2 lost 1 unit (50 metal): Pawn.");
+  // Its clip is about the commander's death, where it happened.
+  assert.deepEqual(st.focus, { f: 1000, x: 100, z: 100, r: 700 });
   // One big unit is most of the loss.
   st = momentStory(ins({ ...base, deaths: deaths([[1000, 3, 0, 800, 800], [1000, 2, 0, 800, 800]]) }), m);
-  assert.equal(st.title, "Ann +1 loses a Juggernaut in the south-east");
+  assert.equal(st.title, "Blue team loses a Juggernaut in the south-east");
+  assert.equal(st.focus?.f, 1000);
+  const pawns10 = () => Array.from({ length: 10 }, () => [1000, 2, 0, 450, 450] as [number, number, number, number, number]);
   // A lopsided trade of small units is a won fight.
   st = momentStory(ins({ ...base, deaths: deaths(Array.from({ length: 10 }, () => [1000, 2, 0, 450, 450] as [number, number, number, number, number])) }), m);
-  assert.equal(st.title, "Cy wins the fight in the centre");
+  assert.equal(st.title, "Team 2 wins the fight in the centre");
+  assert.deepEqual(st.focus, { f: 1000, f1: 1000, x: 450, z: 450, r: 600 });
+  // With a battle there, the fight is that battle: its span, and only what
+  // died inside it — not the pawns lost across the map at the same time.
+  const far = Array.from({ length: 10 }, () => [1000, 2, 1, 2000, 2000] as [number, number, number, number, number]);
+  st = momentStory(ins({ ...base, deaths: deaths([...pawns10(), ...far.slice(0, 2)]),
+    battles: [{ f0: 950, f1: 1300, x: 450, z: 450, r: 200, lost: [] }] }), m);
+  assert.deepEqual(st.focus, { f: 950, f1: 1300, x: 450, z: 450, r: 200 });
+  assert.match(st.detail, /^There, 0:32–0:43: Blue team lost 10 units/);
+  assert.match(st.detail, /Team 2 lost nothing/);
+  // The line moved toward a side that lost MORE there: the title states the
+  // trade instead of calling it a win.
+  const trade = [...pawns10().slice(0, 8), ...Array.from({ length: 16 }, () => [1000, 2, 1, 450, 450] as [number, number, number, number, number])];
+  st = momentStory(ins({ ...base, deaths: deaths(trade) }), m);
+  assert.equal(st.title, "Team 2 trades 800 metal for 400 metal in the centre");
   // Nothing died: the armies pulled apart.
   st = momentStory(ins({ ...base, deaths: deaths([]) }), m);
-  assert.equal(st.title, "Cy out-builds Ann +1");
+  assert.equal(st.title, "Team 2 out-builds Blue team");
+  assert.equal(st.focus, null, "nothing happened at one place");
   // Deaths outside the window (and the step before it) do not count.
   st = momentStory(ins({ ...base, deaths: deaths([[100, 1, 0, 100, 100]]) }), m);
   assert.equal(st.lost[0].n, 0);
@@ -104,6 +131,8 @@ test("a moment is named after what died in it", () => {
   const pawns = Array.from({ length: 10 }, () => [1100, 2, 0, 450, 450] as [number, number, number, number, number]);
   st = momentStory(ins({ ...base, deaths: deaths(pawns), eliminated: [{ f: 1100, team: 0, recorded: true }] }), m);
   assert.equal(st.title, "Ann is eliminated");
+  assert.equal(st.focus?.f, 1100);
+  assert.equal(st.focus?.x, 450);
   assert.equal(st.lost[0].n, 0);
 });
 
@@ -129,8 +158,14 @@ test("losses split what died fighting from what went down with its team", () => 
 });
 
 test("clips carry a lead-in, and fall back to a seek", () => {
-  assert.deepEqual(clipAround(600), { f0: 300, f1: 1200 });
-  assert.deepEqual(clipSpan(100, 900, { x: 5, title: "t" }), { x: 5, title: "t", f0: 0, f1: 1050 });
+  assert.deepEqual(clipAround(600), { at: 600, f0: 0, start: 450, f1: 1200 });
+  assert.deepEqual(clipSpan(100, 900, { x: 5, title: "t" }), { x: 5, title: "t", at: 100, f0: 0, start: 0, f1: 1050 });
+  // A swing explained by one instant opens 5 s before it, not at the start
+  // of the minute the line took to move, and runs on to the swing's end.
+  assert.deepEqual(clipAt(2610, 3150), { at: 2610, f0: 1920, start: 2460, f1: 3300 }, "the instant mid-clip, playback 5 s before it");
+  assert.deepEqual(clipAt(300, 9000), { at: 300, f0: 0, start: 150, f1: 2100 }, "at most a minute past the instant");
+  // An event with an end plays all of it, however long, marked as a band.
+  assert.deepEqual(clipEvent(3000, 6600), { at: 3000, atEnd: 6600, f0: 2400, start: 2850, f1: 6750 });
   assert.equal(watcher({}), null, "no hook: nothing is clickable");
   let seeked = -1;
   watcher({ onSeek: (f) => { seeked = f; } })!({ f0: 42, f1: 99 });
@@ -138,4 +173,83 @@ test("clips carry a lead-in, and fall back to a seek", () => {
   let clipped: unknown = null;
   watcher({ onSeek: () => {}, onClip: (c) => { clipped = c; } })!({ f0: 1, f1: 2 });
   assert.deepEqual(clipped, { f0: 1, f1: 2 }, "onClip wins over onSeek");
+});
+
+test("colorName names BAR's team colours", () => {
+  assert.deepEqual(["#0b3ef3", "#ff1010", "#0ce908", "#00f5e5", "#ffd000", "#ff8c00", "#a020f0", "#ff69b4", "#808080"].map(colorName),
+    ["Blue", "Red", "Green", "Cyan", "Yellow", "Orange", "Purple", "Pink", "Grey"]);
+});
+
+test("nameRuns colours whole player and side names only", () => {
+  const i = ins({ teams: [{ team: 0, side: 0, player: "Ann", color: "#ffd000" }, { team: 1, side: 1, player: "Annabel", color: "#00f5e5" }] });
+  const runs = nameRuns(i, "Annabel's commander falls; Ann lost Annex; Blue team wins");
+  assert.deepEqual(runs.map((r) => [r.text, !!r.color]), [
+    ["Annabel", true], ["'s commander falls; ", false], ["Ann", true], [" lost Annex; ", false], ["Blue team", true], [" wins", false],
+  ]);
+  assert.equal(runs[0].color, "#00f5e5");
+});
+
+test("a battle names the players who carried it", () => {
+  const i = ins({
+    teams: [{ team: 0, side: 0, player: "Benz" }, { team: 1, side: 0, player: "Lazy" }, { team: 2, side: 1, player: "Mir" }, { team: 3, side: 1, player: "Para" }, { team: 4, side: 1, player: "Leo" }],
+  });
+  const b = { f0: 0, f1: 1, x: 0, z: 0, r: 1, lost: [], teams: [
+    { team: 0, army: 17572, lost: 18058 }, { team: 1, army: 0, lost: 52 },
+    { team: 2, army: 0, lost: 60814 }, { team: 3, army: 4527, lost: 31610 }, { team: 4, army: 1500, lost: 2320 },
+  ] };
+  const f = fighters(i, b);
+  assert.deepEqual(f.map((l) => l.map((x) => x.name)), [["Benz"], ["Mir", "Para"]], "10% of a side's army-plus-losses names a player");
+  assert.deepEqual(fighters(i, { ...b, teams: undefined }), [[], []], "an older file names nobody");
+});
+
+test("killing zones merge nearby deaths and leave out what was not fought for", () => {
+  const rows: [number, number, number, number, number][] = [
+    // A fight in the west: both sides lose there.
+    [1000, 0, 100, 100, 300], [1100, 1, 120, 90, 100], [1200, 0, 90, 110, 100],
+    // A lone loss in the east.
+    [5000, 1, 1900, 1900, 50],
+    // Team 0 is eliminated at 6000: what goes down after is not a loss.
+    [6000, 0, 1900, 100, 999],
+  ];
+  const i = ins({
+    bounds: { minX: 0, maxX: 2000, minZ: 0, maxZ: 2000 },
+    teams: [{ team: 0, side: 0, player: "Ann" }, { team: 1, side: 1, player: "Cy" }],
+    deaths: { f: rows.map((r) => r[0]), team: rows.map((r) => r[1]), x: rows.map((r) => r[2]), z: rows.map((r) => r[3]),
+      cost: rows.map((r) => r[4]), def: rows.map(() => 1), unfinished: rows.map(() => 0) },
+    eliminated: [{ f: 6000, team: 0, recorded: true }],
+  });
+  const { zones } = zonesOf(i);
+  assert.equal(zones.length, 2);
+  assert.deepEqual(zones[0].lost, [400, 100]);
+  assert.deepEqual(zones[0].count, [2, 1]);
+  assert.equal(zones[0].peakF0, 1000);
+  assert.deepEqual(zones[1].lost, [0, 50]);
+  assert.deepEqual(zonesOf(i).totals, [400, 150]);
+});
+
+test("an award's clip follows its unit", () => {
+  const a = { key: "marathon", label: "Marathon", text: "", team: 0, def: 2, value: 1, f: 900, unit: 77, f0: 300, f1: 900, path: [[300, 1, 1], [900, 5, 5]] as [number, number, number][] };
+  const c = clipOf(a, {}, "t");
+  assert.deepEqual([c.f0, c.f1, c.follow], [300, 900, { id: 77, def: 2 }], "a life award plays the life");
+  const loss = clipOf({ ...a, key: "costliest", f: 3000 }, { x: 4, z: 6 }, "t");
+  assert.deepEqual([loss.f0, loss.start, loss.f1, loss.at, loss.x], [2400, 2850, 3600, 3000, 4], "a loss: room to scroll back, playback 5 s before it");
+  const old = clipOf({ key: "immortal", label: "", text: "", team: 0, def: 2, value: 1, f: 900 }, {}, "t");
+  assert.equal(old.follow, undefined, "an older file names no unit");
+});
+
+test("lossKinds merges defs sharing an icon and keeps 90% of the metal up front", () => {
+  const units = [
+    { def: 1, n: 2, metal: 600 }, // fighter A
+    { def: 2, n: 3, metal: 300 }, // fighter B, same icon
+    { def: 3, n: 1, metal: 50 }, // jammer
+    { def: 4, n: 2, metal: 20 }, // walls
+  ];
+  const icon: Record<number, string> = { 1: "fighter", 2: "fighter", 3: "jammer", 4: "wall" };
+  const { main, rest } = lossKinds(units, (u) => icon[u.def]);
+  assert.deepEqual(main.map((g) => [g.key, g.n, g.metal]), [["fighter", 5, 900]]);
+  assert.deepEqual(rest.map((g) => g.key), ["jammer", "wall"]);
+  // Unpriced losses split by count; one kind always shows.
+  const unpriced = lossKinds([{ def: 1, n: 1, metal: 0 }], (u) => String(u.def));
+  assert.equal(unpriced.main.length, 1);
+  assert.equal(unpriced.rest.length, 0);
 });

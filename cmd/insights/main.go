@@ -15,7 +15,7 @@
 //	insights <gameId|link|rid> [...]       # compute + publish to r2
 //	insights -upload local <gameId>        # ...to the dev simulator
 //	insights -upload= -out ./ins <gameId>  # compute only, write the file locally
-//	insights -all                          # every replay in the catalog
+//	insights -all                          # every replay in the catalog, 4 at a time (-j)
 //	insights -all -from 2026-10-01 -to 2026-10-07   # games started in that range
 //	insights ./snapshots/<gameId>.brp      # from a local .brp (full costs)
 //	insights -rid <rid> ./caps/<gameId>.brepstream   # repack a raw stream (full costs)
@@ -62,6 +62,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -82,6 +83,7 @@ func main() {
 		from      = flag.String("from", "", "with -all: only games that started on/after this date (YYYY-MM-DD or unix seconds)")
 		to        = flag.String("to", "", "with -all: only games that started on/before this date (YYYY-MM-DD covers the whole day, or unix seconds)")
 		ridFlag   = flag.String("rid", "", "with a local capture: the published revision the summary belongs to (default: the packed .brp's own content revision)")
+		jobs      = flag.Int("j", 4, "replays processed at once (each holds one whole replay in memory)")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: insights [flags] <gameId|link|rid|file.brp> [...]\n       insights [flags] -all\n\n")
@@ -149,19 +151,50 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	failed := 0
+	if *jobs < 1 {
+		*jobs = 1
+	}
+	if failed := r.each(ctx, args, *jobs); failed > 0 || ctx.Err() != nil {
+		os.Exit(1)
+	}
+}
+
+// each processes args with up to jobs of them in flight and returns how many
+// failed. Every replay is independent (its own fetches, compute and upload),
+// and a run over the catalog is mostly waiting on downloads and uploads, so
+// a few at once is most of the speed-up; more mainly costs memory, since each
+// holds a whole replay. Output lines from different replays interleave, but
+// every one names its replay.
+func (r *runner) each(ctx context.Context, args []string, jobs int) int {
+	var (
+		wg     sync.WaitGroup
+		mu     sync.Mutex
+		failed int
+	)
+	work := make(chan string)
+	for range min(jobs, len(args)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for a := range work {
+				if err := r.one(ctx, a); err != nil {
+					fmt.Fprintf(os.Stderr, "insights: %s: %v\n", a, err)
+					mu.Lock()
+					failed++
+					mu.Unlock()
+				}
+			}
+		}()
+	}
 	for _, a := range args {
 		if ctx.Err() != nil {
 			break
 		}
-		if err := r.one(ctx, a); err != nil {
-			fmt.Fprintf(os.Stderr, "insights: %s: %v\n", a, err)
-			failed++
-		}
+		work <- a
 	}
-	if failed > 0 || ctx.Err() != nil {
-		os.Exit(1)
-	}
+	close(work)
+	wg.Wait()
+	return failed
 }
 
 // runner holds what every replay is processed with. publish is nil when

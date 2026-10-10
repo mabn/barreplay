@@ -31,6 +31,7 @@ type pass struct {
 	nextEv  int
 	lastPos map[int32][2]int32 // unit id -> last sampled x, z
 	pending map[int32]bool     // created and not yet finished
+	built   map[int32]float32  // a pending unit's last sampled build progress
 	usedDef map[int32]bool
 	reached map[[2]int]bool // (milestone, side) already recorded
 
@@ -42,6 +43,19 @@ type pass struct {
 
 	tracks    map[int32]*track // unit id -> its current life
 	allTracks []*track         // every life, in the order first seen
+	// deathUnit and deathTrack line up with out.Deaths: the dead unit's id
+	// and its track (nil for a structure), for the awards that go to a death.
+	deathUnit  []int32
+	deathTrack []*track
+	// deathKiller is the team the engine named as the killer, -1 when none
+	// (a capture without causes, a death with no attacker).
+	deathKiller []int32
+
+	hasCauses bool // some destroyed event names a cause: a re-simulation
+	evolved   evolution
+
+	presence     []presence // army positions, one sample per step (stories.go)
+	presenceStep int        // the last step sampled into presence, -1 for none
 
 	teamAlive map[int32]int32 // team -> last sampled frame holding a live unit of it
 	wiped     []bool          // per death: it went down with its team (wipes.go)
@@ -79,6 +93,7 @@ func newPass(in Input, ro roster) *pass {
 			Series: Series{
 				T:            []float64{},
 				Army:         make([][]float64, ns),
+				Value:        make([][]float64, ns),
 				MetalIncome:  make([][]float64, ns),
 				EnergyIncome: make([][]float64, ns),
 				ArmyCats:     armyCats,
@@ -91,9 +106,12 @@ func newPass(in Input, ro roster) *pass {
 		lastPos: map[int32][2]int32{},
 		pending: map[int32]bool{},
 		usedDef: map[int32]bool{},
+		built:   map[int32]float32{},
 		reached: map[[2]int]bool{},
 		incomeN: make([][]int, ns),
 		tracks:  map[int32]*track{},
+
+		presenceStep: -1,
 
 		teamAlive: map[int32]int32{},
 
@@ -109,6 +127,13 @@ func newPass(in Input, ro roster) *pass {
 	for _, t := range ro.teams {
 		if t.Side >= 0 {
 			p.playerTeams++
+		}
+	}
+	p.evolved = evolutions(in.Events)
+	for _, e := range in.Events {
+		if e.Kind == snapshot.EventDestroyed && e.Cause != nil {
+			p.hasCauses = true
+			break
 		}
 	}
 	if p.out.CostCoverage == "" {
@@ -154,6 +179,7 @@ func (p *pass) grow(i int) {
 	for side := range p.ro.sides {
 		for len(s.Army[side]) <= i {
 			s.Army[side] = append(s.Army[side], 0)
+			s.Value[side] = append(s.Value[side], 0)
 			s.MetalIncome[side] = append(s.MetalIncome[side], 0)
 			s.EnergyIncome[side] = append(s.EnergyIncome[side], 0)
 			p.incomeN[side] = append(p.incomeN[side], 0)
@@ -181,15 +207,31 @@ func (p *pass) event(e snapshot.Event) {
 		p.pending[e.UnitID] = true
 	case snapshot.EventFinished:
 		delete(p.pending, e.UnitID)
+		delete(p.built, e.UnitID)
 		d := p.defs[e.DefID]
 		side := p.ro.side(e.Team)
 		if d.milestone >= 0 && side >= 0 && !p.reached[[2]int{d.milestone, side}] {
 			p.reached[[2]int{d.milestone, side}] = true
 			ms := milestoneDefs[d.milestone]
-			p.out.Milestones = append(p.out.Milestones, Milestone{Key: ms.Key, Label: ms.Label, Side: side, Team: e.Team, Def: e.DefID, F: e.Frame})
+			m := Milestone{Key: ms.Key, Label: ms.Label, Side: side, Team: e.Team, Def: e.DefID, F: e.Frame, Unit: e.UnitID}
+			if pos, ok := p.lastPos[e.UnitID]; ok {
+				m.Pos = &pos
+			}
+			p.out.Milestones = append(p.out.Milestones, m)
 			p.usedDef[e.DefID] = true
 		}
 	case snapshot.EventDestroyed:
+		if p.removedByOwner(e) {
+			// Taken down by its own side: the unit is gone, but nothing
+			// was lost and nothing was fought over.
+			delete(p.pending, e.UnitID)
+			delete(p.built, e.UnitID)
+			delete(p.lastPos, e.UnitID)
+			if t := p.tracks[e.UnitID]; t != nil {
+				t.dead = true
+			}
+			return
+		}
 		pos, ok := p.lastPos[e.UnitID]
 		if !ok {
 			pos = [2]int32{-1, -1}
@@ -198,21 +240,97 @@ func (p *pass) event(e snapshot.Event) {
 		if p.pending[e.UnitID] {
 			unfinished = 1
 		}
+		cost := p.lossCost(e) // before the build is forgotten
 		delete(p.pending, e.UnitID)
+		delete(p.built, e.UnitID)
 		dl := &p.out.Deaths
 		dl.F = append(dl.F, e.Frame)
 		dl.X = append(dl.X, pos[0])
 		dl.Z = append(dl.Z, pos[1])
 		dl.Def = append(dl.Def, e.DefID)
 		dl.Team = append(dl.Team, e.Team)
-		dl.Cost = append(dl.Cost, round1(p.defs[e.DefID].cost))
+		dl.Cost = append(dl.Cost, round1(cost))
 		dl.Unfinished = append(dl.Unfinished, unfinished)
 		p.usedDef[e.DefID] = true
 		delete(p.lastPos, e.UnitID)
-		if t := p.tracks[e.UnitID]; t != nil {
-			t.dead = true
+		p.deathUnit = append(p.deathUnit, e.UnitID)
+		killer := int32(-1)
+		if e.Cause != nil && e.Cause.Team >= 0 {
+			killer = e.Cause.Team
 		}
+		p.deathKiller = append(p.deathKiller, killer)
+		if c := e.Cause; c != nil && cost > 0 {
+			// Credit the killing unit's track with an ENEMY it took down.
+			if kt := p.tracks[c.UnitID]; kt != nil && !kt.dead && kt.def == c.DefID {
+				if ks, vs := p.ro.side(kt.team), p.ro.side(e.Team); ks >= 0 && vs >= 0 && ks != vs {
+					kt.kills = append(kt.kills, kill{e.Frame, cost})
+				}
+			}
+		}
+		t := p.tracks[e.UnitID]
+		if t != nil && !t.dead {
+			t.dead = true
+		} else {
+			t = nil
+		}
+		p.deathTrack = append(p.deathTrack, t)
 	}
+}
+
+// weaponReclaimed is the weapon id the engine names in a destroyed event's
+// cause when a builder reclaims a unit: one of its negative, engine-owned
+// damage types (measured on a real re-simulation: all 888 of them were a
+// builder taking down its own team's unit, e.g. armrespawn clearing armwin).
+const weaponReclaimed = -12
+
+// removedByOwner reports a unit its own side took down, which is routine
+// housekeeping rather than a loss. An EVOLUTION (evolve.go) is one in any
+// capture; two more are readable only in one that names causes (a
+// re-simulation; older captures count those deaths, as they always did):
+//
+//   - RECLAIMED by its own side: wind turbines cleared for something better,
+//     a lab taken down; the metal comes back. Reclaiming an ENEMY unit is a
+//     real loss for its owner and stays one.
+//   - A STRUCTURE destroyed with no cause at all. Anything the enemy kills
+//     names its killer; a building that goes with none was replaced (BAR
+//     removes a metal extractor when an advanced one is built over it, and
+//     a geothermal the same way), cancelled while unfinished, or
+//     self-destructed. On a real 8v8 re-sim this was 14 of the 25 structure
+//     deaths in one "trade" the summary used to report, every one of them
+//     an upgrade. A finished mobile unit is left alone: a shot-down
+//     aircraft dies later, in its crash, with no cause either. An
+//     UNFINISHED one going with no cause is a cancelled build.
+func (p *pass) removedByOwner(e snapshot.Event) bool {
+	if e.Kind == snapshot.EventDestroyed && p.evolved.replaced(e) {
+		// Evolved into its next form (evolve.go): replaced, not lost.
+		return true
+	}
+	if e.Kind != snapshot.EventDestroyed || !p.hasCauses {
+		return false
+	}
+	c := e.Cause
+	if c == nil {
+		// An UNFINISHED unit going with no cause is a cancelled build (a
+		// half-built Liche in its lab), whatever it is; a finished mobile one
+		// is a crash, which is a real loss.
+		return (p.defs[e.DefID].structure || p.pending[e.UnitID]) && p.ro.side(e.Team) >= 0
+	}
+	if c.WeaponDef != weaponReclaimed || c.Team < 0 {
+		return false
+	}
+	side := p.ro.side(e.Team)
+	return side >= 0 && p.ro.side(c.Team) == side
+}
+
+// lossCost is the metal a destroyed unit was worth: its price, or for one
+// still under construction the share of it built so far — the rest was never
+// spent. A build destroyed before any sample saw it is worth nothing.
+func (p *pass) lossCost(e snapshot.Event) float64 {
+	c := p.defs[e.DefID].cost
+	if p.pending[e.UnitID] {
+		return c * float64(p.built[e.UnitID])
+	}
+	return c
 }
 
 // dead reports a unit whose health is gone but which the engine has not
@@ -229,14 +347,24 @@ func (p *pass) frame(fr snapshot.Frame) error {
 
 	ns := len(p.ro.sides)
 	army := make([]float64, ns)
+	value := make([]float64, ns)
 	byCat := make([][]float64, ns)
 	for i := range byCat {
 		byCat[i] = make([]float64, len(armyCats))
 	}
 	front := make([][3]float64, ns) // [side] cost-weighted x, z, weight
+	var here *presence
+	if step != p.presenceStep {
+		p.presenceStep = step
+		p.presence = append(p.presence, presence{f: fr.Frame})
+		here = &p.presence[len(p.presence)-1]
+	}
 	for _, u := range fr.Units {
 		x, z := u.Pos.X, u.Pos.Z
 		p.lastPos[u.UnitID] = [2]int32{int32(x), int32(z)}
+		if p.pending[u.UnitID] {
+			p.built[u.UnitID] = u.BuildProgress
+		}
 		p.extend(float64(x), float64(z))
 		d, ok := p.defs[u.DefID]
 		if !ok || dead(u) {
@@ -244,6 +372,9 @@ func (p *pass) frame(fr snapshot.Frame) error {
 		}
 		p.teamAlive[u.Team] = fr.Frame
 		p.trackUnit(fr.Frame, u, d)
+		if side := p.ro.side(u.Team); side >= 0 {
+			value[side] += d.cost * float64(u.BuildProgress)
+		}
 		if !d.army {
 			continue
 		}
@@ -252,6 +383,9 @@ func (p *pass) frame(fr snapshot.Frame) error {
 			continue
 		}
 		v := d.cost * float64(u.BuildProgress)
+		if here != nil {
+			here.units = append(here.units, presentUnit{team: u.Team, x: x, z: z, v: float32(v)})
+		}
 		army[side] += v
 		byCat[side][d.cat] += v
 		front[side][0] += float64(x) * v
@@ -268,6 +402,7 @@ func (p *pass) frame(fr snapshot.Frame) error {
 	for side := 0; side < ns; side++ {
 		// The step holds the value at its last sample.
 		s.Army[side][step] = army[side]
+		s.Value[side][step] = round1(value[side])
 		for c := range armyCats {
 			s.ArmyByCat[side][c][step] = byCat[side][c]
 		}
@@ -398,6 +533,6 @@ func (p *pass) finish() {
 	}
 	for id := range p.usedDef {
 		d := p.in.Meta.UnitDefs[id]
-		o.Defs[id] = Def{Name: d.Name, Human: d.HumanName, Cost: round1(float64(d.MetalCost))}
+		o.Defs[id] = Def{Name: d.Name, Human: d.HumanName, Cost: round1(float64(d.MetalCost)), Icon: d.IconType}
 	}
 }

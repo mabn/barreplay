@@ -540,7 +540,10 @@ count × svarint                  // cause weapon: the weapon def that dealt the
 
 Known kinds are `created`, `finished`, `destroyed` and (v6) `given` — a unit
 changing owner, `team` the new one; the string table means new kinds can
-appear without a format change. An event whose four cause values are all -1
+appear without a format change. `selfd` is a player's ORDER to self-destruct (or,
+given again while counting down, to stop — the engine toggles), read from the
+demo's input stream at pack time: `def` is -1 and `team` the ordering
+player's. An event whose four cause values are all -1
 has no cause. A v5 section simply ends after the team column, so a v6 reader
 needs no flag to tell them apart; the writer emits the cause columns whenever
 there is at least one event. Events are stored in capture order

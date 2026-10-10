@@ -664,7 +664,7 @@ test('the catalog is fetched for the list view, not for a direct replay link', a
     // The admin probe (GET /api/admin/me) is one fetch of its own at boot;
     // stubbed here because this test counts only what the TABLE needs.
     const probeAdmin = async () => {};
-    const hideHome = () => {};
+    const hideHome = () => {}, leaveReplayTabs = () => {};
     const knownReplayURL = () => true;
     const initFilters = async () => { filters++; };
     const reloadList = async () => { lists++; };

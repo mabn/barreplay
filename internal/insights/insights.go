@@ -22,7 +22,7 @@ import (
 // Version names the file: replays/<rid>.insights<Version>.json. Pieces are
 // immutable, so any change to what is computed or how is a new version,
 // written beside the old one; the viewer asks for the one it understands.
-const Version = 3
+const Version = 4
 
 // FileName is the published piece's name for a revision id.
 func FileName(rid string) string { return fmt.Sprintf("%s.insights%d.json", rid, Version) }
@@ -102,6 +102,9 @@ type Def struct {
 	Name  string  `json:"name"`
 	Human string  `json:"human,omitempty"`
 	Cost  float64 `json:"cost,omitempty"` // metal; absent when the replay does not record it
+	// Icon is the def's icontypes key (the viewer's /icons/icontypes.json),
+	// when the capture records one; the def's name is the fallback key.
+	Icon string `json:"icon,omitempty"`
 }
 
 // Series holds one value per side per step; T[i] is step i's time in seconds.
@@ -110,6 +113,12 @@ type Series struct {
 	// Army is the metal value of each side's army: armed, mobile, priced,
 	// not a commander, weighted by build progress.
 	Army [][]float64 `json:"army"`
+	// Value is the metal value of EVERYTHING each side owns — units and
+	// buildings, commanders included, weighted by build progress — at the
+	// step's last sample: what a loss is measured against, since metal lost
+	// early and late differ by orders of magnitude. Version 4 and later, and
+	// only when every def is priced (CostCoverage full).
+	Value [][]float64 `json:"value,omitempty"`
 	// MetalIncome and EnergyIncome are per game-second, averaged over the step.
 	MetalIncome  [][]float64 `json:"metalIncome"`
 	EnergyIncome [][]float64 `json:"energyIncome"`
@@ -152,6 +161,11 @@ type Milestone struct {
 	Team  int32  `json:"team"`
 	Def   int32  `json:"def"`
 	F     int32  `json:"f"`
+	// The unit that reached it, and where it was last sampled before it
+	// finished (absent when it never was): its clip zooms there and
+	// follows it.
+	Unit int32     `json:"unit,omitempty"`
+	Pos  *[2]int32 `json:"pos,omitempty"`
 }
 
 type ChatLine struct {
@@ -250,11 +264,62 @@ func Compute(in Input) (*Insights, error) {
 		return nil, fmt.Errorf("insights: no frames")
 	}
 	ro := buildRoster(in.Meta)
+	// The summary ends where the game was decided (gameend.go). A capture
+	// that recorded its eliminations says where up front; otherwise they are
+	// inferred from a first pass over the whole game, and the summary is
+	// computed again up to that point.
+	died := in.TeamDied
+	if died == nil {
+		whole, err := run(in, ro)
+		if err != nil {
+			return nil, err
+		}
+		died = map[int32]int32{}
+		for _, e := range whole.Eliminated {
+			died[e.Team] = e.F
+		}
+		if gameEnd(died, ro) < 0 {
+			return whole, nil
+		}
+	}
+	end := gameEnd(died, ro)
+	if end < 0 {
+		return run(in, ro)
+	}
+	out, err := run(in.until(end), ro)
+	if err != nil || in.TeamDied != nil {
+		return out, err
+	}
+	// Inferred eliminations come from the deaths, and the cut input no
+	// longer holds the bursts that ended the game: keep the first pass's.
+	out.Eliminated = out.Eliminated[:0]
+	for t, f := range died {
+		if f <= end {
+			out.Eliminated = append(out.Eliminated, Elimination{F: f, Team: t})
+		}
+	}
+	sort.Slice(out.Eliminated, func(i, j int) bool {
+		a, b := out.Eliminated[i], out.Eliminated[j]
+		if a.F != b.F {
+			return a.F < b.F
+		}
+		return a.Team < b.Team
+	})
+	return out, nil
+}
+
+// run is one pass over the input.
+func run(in Input, ro roster) (*Insights, error) {
 	p := newPass(in, ro)
 	if err := in.Frames(p.frame); err != nil {
 		return nil, err
 	}
 	p.finish()
+	if p.out.CostCoverage != CostFull {
+		// Only armed mobile defs are priced: a "value" of those alone is
+		// the army again, not what the side owns.
+		p.out.Series.Value = nil
+	}
 	return p.out, nil
 }
 

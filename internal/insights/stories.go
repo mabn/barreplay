@@ -4,15 +4,17 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"github.com/mabn/barreplay/snapshot"
 )
 
 // The map stories: where each army stood over time (the front), where the
 // fighting happened (battles), and the awards — all from positions, health
-// and lifecycle events. No capture records who killed what, so nothing here
-// names a killer: a battle says what each side lost, and an award goes to a
-// unit for something it did or survived.
+// and lifecycle events. A battle says what each side lost and, when the
+// capture names killers (a re-simulation), which teams did the killing from
+// wherever they fired; an award goes to a unit for something it did or
+// survived.
 
 // Battle is a cluster of deaths close in space and time.
 type Battle struct {
@@ -23,13 +25,59 @@ type Battle struct {
 	R  int32 `json:"r"` // radius holding them, elmos
 	// Lost is what each side lost there, indexed like Insights.Sides.
 	Lost []BattleLoss `json:"lost"`
+	// Teams is who took part: every team with army there or losses there,
+	// in team order. It is what lets a story name the players who fought a
+	// battle rather than only their sides. Version 4 and later.
+	Teams []BattleTeam `json:"teams"`
 }
+
+// BattleTeam is one team's part in a battle, in metal.
+type BattleTeam struct {
+	Team int32 `json:"team"`
+	// Army is the most army metal (armed, mobile, by build progress) the team
+	// had within reach of the battle at any sample during it.
+	Army float64 `json:"army"`
+	// Lost is the metal of the team's units that died in the battle.
+	Lost float64 `json:"lost"`
+	// Killed is the metal of enemy units the engine credited to the team in
+	// the battle, wherever it fired from (a long-range gun, a nuke), so a
+	// team shooting into the fight from afar still counts as fighting in it.
+	Killed float64 `json:"killed"`
+}
+
+// presence is one sample of where every side's army stood, kept once per
+// step so a battle can ask who had units at it.
+type presence struct {
+	f     int32
+	units []presentUnit
+}
+
+type presentUnit struct {
+	team int32
+	x, z float32
+	v    float32
+}
+
+// battleReach is how far beyond the deaths' own radius an army still counts
+// as fighting a battle: artillery and long-range units stand back from what
+// they kill.
+const battleReach = 600.0
 
 type BattleLoss struct {
 	N     int     `json:"n"`
 	Metal float64 `json:"metal"`
 	// Top is the costliest defs lost, by total metal, at most battleTopDefs.
 	Top []int32 `json:"top"`
+	// Units is every def lost with its count and metal, costliest first, at
+	// most battleUnitDefs: what the page draws as icons.
+	Units []UnitLoss `json:"units,omitempty"`
+}
+
+// UnitLoss is how many of one def a side lost in a battle, and their metal.
+type UnitLoss struct {
+	Def   int32   `json:"def"`
+	N     int     `json:"n"`
+	Metal float64 `json:"metal"`
 }
 
 // Award goes to one unit.
@@ -41,6 +89,15 @@ type Award struct {
 	Def   int32   `json:"def"`
 	Value float64 `json:"value"`
 	F     int32   `json:"f"` // the moment to watch
+	// Unit, F0/F1 and Path are set for an award that goes to a unit's whole
+	// life rather than to a death (Version 4): the unit id the viewer follows,
+	// the life's first and last sampled frame, and where it went — [frame, x,
+	// z] every pathEvery, at most pathMaxPts — so the page can show WHICH
+	// unit it was and where it went instead of a moment and a guess.
+	Unit int32      `json:"unit,omitempty"`
+	F0   int32      `json:"f0,omitempty"`
+	F1   int32      `json:"f1,omitempty"`
+	Path [][3]int32 `json:"path,omitempty"`
 }
 
 const (
@@ -54,27 +111,74 @@ const (
 	battleMinN      = 6                        // deaths for a peak to count as a battle
 	battleMaxN      = 12                       // battles kept (the biggest, then in time order)
 	battleTopDefs   = 3                        // costliest defs listed per side
+	blowWindow      = 30 * simFPS              // frames the Biggest blow's losses fall within
+	battleUnitDefs  = 48                       // defs a battle's unit list carries per side
 	tourGrid        = 32                       // cells per axis of the Tourist's map grid
 	tourMinCells    = tourGrid * tourGrid / 20 // 5% of the map, or no Tourist
 	closeCallMin    = 0.0                      // health fraction must be above this (alive)
-	immortalMinS    = 5 * 60 * simFPS          // frames an Immortal must have lived
+	closeCallCost   = 400.0                    // metal a Close call must cost (a fighter at 6% is no story)
+	immortalMaxHP   = 0.3                      // health fraction an Immortal must have fallen to
+	immortalKillX   = 3.0                      // metal killed after that, in multiples of its own cost
+	immortalMinKill = 1500.0                   // and at least this much metal
+	healedMin       = 1.0                      // own health a Most healed unit must have been repaired
+	pressureBin     = 30 * simFPS              // window Most healed's busiest moment is found in
+	pathEvery       = 5 * simFPS               // frames between recorded path points
+	pathMaxPts      = 400                      // path points an award carries at most
 )
+
+// pathPt is one recorded position of a unit's life.
+type pathPt struct {
+	f    int32
+	x, z float32
+}
 
 // track follows one unit across samples, for the awards.
 type track struct {
-	def      int32
-	team     int32
-	first    int32
-	last     int32
-	x, z     float32
-	path     float64
-	cells    [tourGrid * tourGrid / 64]uint64
-	minHP    float64 // lowest sampled health fraction
-	minHPF   int32
+	id     int32
+	def    int32
+	team   int32
+	first  int32
+	last   int32
+	x, z   float32
+	path   float64
+	cells  [tourGrid * tourGrid / 64]uint64
+	minHP  float64 // lowest sampled health fraction
+	minHPF int32
+	pts    []pathPt
+	prevHP float32
+	maxHP  float32
+	// What it repaired while finished, in hp: health rises between samples
+	// (damage in between hides some, so it is a floor), and the busiest
+	// pressureBin of it, for Most healed.
+	healed   float64
+	hbin     int32
+	hbinSum  float64
+	hbinF    int32
+	hpeak    float64
+	hpeakF   int32
+	cost     float64
+	kills    []kill // enemies the engine credited to it, in frame order
 	dead     bool
 	army     bool // Immortal (a commander outliving the game is no feat)
 	eligible bool // army or commander: Close call
 	ground   bool // mobile and not flying: Marathon, Tourist
+}
+
+// kill is one enemy a tracked unit was credited with.
+type kill struct {
+	f     int32
+	metal float64
+}
+
+// killedAfter is the metal of the kills credited to the unit after frame f.
+func (t *track) killedAfter(f int32) float64 {
+	sum := 0.0
+	for _, k := range t.kills {
+		if k.f > f {
+			sum += k.metal
+		}
+	}
+	return sum
 }
 
 // trackUnit updates a unit's track with one sample.
@@ -86,8 +190,11 @@ func (p *pass) trackUnit(fr int32, u snapshot.UnitState, d defInfo) {
 	if t == nil || t.def != u.DefID || t.dead {
 		// Unit ids are recycled once a unit is gone: a new def, or an id seen
 		// again after its death, is a new unit.
-		t = &track{def: u.DefID, team: u.Team, first: fr, x: u.Pos.X, z: u.Pos.Z, minHP: 2,
-			army: d.army, eligible: d.army || d.commander, ground: !d.fly}
+		t = &track{id: u.UnitID, def: u.DefID, team: u.Team, first: fr, x: u.Pos.X, z: u.Pos.Z, minHP: 2,
+			army: d.army, eligible: d.army || d.commander, ground: !d.fly, prevHP: -1, hbin: -1, cost: d.cost}
+		if d.commander {
+			t.cost = math.Max(t.cost, closeCallCost) // a commander is never cheap
+		}
 		p.tracks[u.UnitID] = t
 		p.allTracks = append(p.allTracks, t)
 	} else {
@@ -99,11 +206,45 @@ func (p *pass) trackUnit(fr int32, u snapshot.UnitState, d defInfo) {
 	if c, ok := p.cell(u.Pos.X, u.Pos.Z); ok {
 		t.cells[c/64] |= 1 << (c % 64)
 	}
+	if n := len(t.pts); n == 0 || fr-t.pts[n-1].f >= pathEvery {
+		t.pts = append(t.pts, pathPt{fr, u.Pos.X, u.Pos.Z})
+	}
 	if u.MaxHealth > 0 && u.BuildProgress >= 1 {
 		if hp := float64(u.Health) / float64(u.MaxHealth); hp < t.minHP && hp > closeCallMin {
 			t.minHP, t.minHPF = hp, fr
 		}
+		t.maxHP = u.MaxHealth
+		if t.prevHP >= 0 && u.Health > t.prevHP {
+			rise := float64(u.Health - t.prevHP)
+			t.healed += rise
+			if b := fr / pressureBin; b != t.hbin {
+				t.hbin, t.hbinSum, t.hbinF = b, 0, fr
+			}
+			t.hbinSum += rise
+			if t.hbinSum > t.hpeak {
+				t.hpeak, t.hpeakF = t.hbinSum, t.hbinF
+			}
+		}
+		t.prevHP = u.Health
 	}
+}
+
+// route is the track's recorded positions, ending where it was last seen,
+// thinned evenly to at most pathMaxPts.
+func (t *track) route() [][3]int32 {
+	pts := t.pts
+	if n := len(pts); n == 0 || pts[n-1].f != t.last {
+		pts = append(pts[:n:n], pathPt{t.last, t.x, t.z})
+	}
+	step := (len(pts) + pathMaxPts - 1) / pathMaxPts
+	out := make([][3]int32, 0, len(pts)/step+1)
+	for i := 0; i < len(pts); i += step {
+		out = append(out, [3]int32{pts[i].f, int32(math.Round(float64(pts[i].x))), int32(math.Round(float64(pts[i].z)))})
+	}
+	if last := pts[len(pts)-1]; out[len(out)-1][0] != last.f {
+		out = append(out, [3]int32{last.f, int32(math.Round(float64(last.x))), int32(math.Round(float64(last.z)))})
+	}
+	return out
 }
 
 // cell is the Tourist grid cell of a position, over the capture's bounds.
@@ -373,8 +514,10 @@ func (p *pass) battleOf(members []int, ns int) Battle {
 	d := p.out.Deaths
 	bt := Battle{F0: math.MaxInt32, Lost: make([]BattleLoss, ns)}
 	top := make([]map[int32]float64, ns)
+	count := make([]map[int32]int, ns)
 	for s := range top {
 		top[s] = map[int32]float64{}
+		count[s] = map[int32]int{}
 	}
 	var sx, sz, sw float64
 	for _, i := range members {
@@ -389,6 +532,7 @@ func (p *pass) battleOf(members []int, ns int) Battle {
 			l.N++
 			l.Metal += d.Cost[i]
 			top[side][d.Def[i]] += d.Cost[i]
+			count[side][d.Def[i]]++
 		}
 	}
 	cx, cz := sx/sw, sz/sw
@@ -397,11 +541,67 @@ func (p *pass) battleOf(members []int, ns int) Battle {
 		r = math.Max(r, math.Hypot(float64(d.X[i])-cx, float64(d.Z[i])-cz))
 	}
 	bt.X, bt.Z, bt.R = int32(cx), int32(cz), int32(r)
+	bt.Teams = p.battleTeams(members, bt)
 	for s := range bt.Lost {
 		bt.Lost[s].Metal = round1(bt.Lost[s].Metal)
 		bt.Lost[s].Top = topDefs(top[s])
+		bt.Lost[s].Units = unitLosses(top[s], count[s])
 	}
 	return bt
+}
+
+// battleTeams says which teams fought a battle and with how much: each
+// team's largest army within reach of it at any sample from a step before
+// it to its end, and what the team lost in it.
+func (p *pass) battleTeams(members []int, bt Battle) []BattleTeam {
+	d := p.out.Deaths
+	lost := map[int32]float64{}
+	killed := map[int32]float64{}
+	for _, i := range members {
+		lost[d.Team[i]] += d.Cost[i]
+		// Whoever killed it took part, wherever it fired from: a long-range
+		// gun, a bomber run or a nuke counts at the target, not at the
+		// launcher, which may be across the map.
+		if k := p.deathKiller[i]; k >= 0 && p.ro.side(k) >= 0 && p.ro.side(k) != p.ro.side(d.Team[i]) {
+			killed[k] += d.Cost[i]
+		}
+	}
+	army := map[int32]float64{}
+	reach := float64(bt.R) + battleReach
+	from := bt.F0 - StepSec*simFPS
+	for _, s := range p.presence {
+		if s.f < from || s.f > bt.F1 {
+			continue
+		}
+		here := map[int32]float64{}
+		for _, u := range s.units {
+			if math.Hypot(float64(u.x)-float64(bt.X), float64(u.z)-float64(bt.Z)) <= reach {
+				here[u.team] += float64(u.v)
+			}
+		}
+		for t, v := range here {
+			army[t] = math.Max(army[t], v)
+		}
+	}
+	teams := map[int32]bool{}
+	for t := range lost {
+		teams[t] = true
+	}
+	for t := range army {
+		teams[t] = true
+	}
+	for t := range killed {
+		teams[t] = true
+	}
+	out := make([]BattleTeam, 0, len(teams))
+	for t := range teams {
+		if p.ro.side(t) < 0 {
+			continue
+		}
+		out = append(out, BattleTeam{Team: t, Army: round1(army[t]), Lost: round1(lost[t]), Killed: round1(killed[t])})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Team < out[j].Team })
+	return out
 }
 
 func abs(v int) int {
@@ -409,6 +609,29 @@ func abs(v int) int {
 		return -v
 	}
 	return v
+}
+
+// unitLosses lists the defs lost, costliest first (then the most lost, then
+// by id, so the result is deterministic), at most battleUnitDefs.
+func unitLosses(metal map[int32]float64, n map[int32]int) []UnitLoss {
+	out := make([]UnitLoss, 0, len(n))
+	for id, k := range n {
+		out = append(out, UnitLoss{Def: id, N: k, Metal: round1(metal[id])})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.Metal != b.Metal {
+			return a.Metal > b.Metal
+		}
+		if a.N != b.N {
+			return a.N > b.N
+		}
+		return a.Def < b.Def
+	})
+	if len(out) > battleUnitDefs {
+		out = out[:battleUnitDefs]
+	}
+	return out
 }
 
 func topDefs(m map[int32]float64) []int32 {
@@ -428,7 +651,7 @@ func topDefs(m map[int32]float64) []int32 {
 	return ids
 }
 
-// awards picks the six awards a replay can support without knowing who
+// awards picks the seven awards a replay can support without knowing who
 // killed what. Ties go to the earlier unit, so the result is deterministic.
 func (p *pass) awards() []Award {
 	out := []Award{}
@@ -445,13 +668,40 @@ func (p *pass) awards() []Award {
 	}
 	add := func(t *track, key, label, text string, value float64, f int32) {
 		p.usedDef[t.def] = true
-		out = append(out, Award{Key: key, Label: label, Text: text, Team: t.team, Def: t.def, Value: round1(value), F: f})
+		out = append(out, Award{Key: key, Label: label, Text: text, Team: t.team, Def: t.def, Value: round1(value), F: f,
+			Unit: t.id, F0: t.first, F1: t.last, Path: t.route()})
 	}
 
-	if t := pick(func(a, b *track) bool { return a.first < b.first },
-		func(t *track) bool { return t.army && alive(t) && end-t.first >= immortalMinS }); t != nil {
-		sec := float64(end-t.first) / simFPS
-		add(t, "immortal", "Immortal", "fought from "+clock(t.first)+" to the end and survived", sec, t.first)
+	// Immortal: a unit that fell to a sliver of its health and then did
+	// something unusual — credited with enemies worth several times its own
+	// cost after that moment — and lived. Taking damage and surviving is what
+	// most of an army does; a Gladiator at 24% that kills 366 metal more is
+	// any unit's day. Only a capture that names killers can tell, so there is
+	// no Immortal without causes, and most games have none.
+	killedAfterLow := func(t *track) float64 { return t.killedAfter(t.minHPF) }
+	if p.hasCauses {
+		if t := pick(func(a, b *track) bool {
+			return killedAfterLow(a)/math.Max(a.cost, 1) > killedAfterLow(b)/math.Max(b.cost, 1)
+		},
+			func(t *track) bool {
+				k := killedAfterLow(t)
+				return t.army && alive(t) && t.minHP <= immortalMaxHP && k >= immortalMinKill && k >= immortalKillX*math.Max(t.cost, 1)
+			}); t != nil {
+			k := killedAfterLow(t)
+			add(t, "immortal", "Immortal", fmt.Sprintf("fell to %.0f%% health, then killed %s metal, %.0f× its own cost", math.Ceil(t.minHP*100), metal(k), k/math.Max(t.cost, 1)), k, t.minHPF)
+		}
+	}
+	// Most healed: repaired the most times over its own health — a unit kept
+	// in the fight by the builders behind it.
+	healedX := func(t *track) float64 {
+		if t.maxHP <= 0 {
+			return 0
+		}
+		return t.healed / float64(t.maxHP)
+	}
+	if t := pick(func(a, b *track) bool { return a.healed > b.healed },
+		func(t *track) bool { return t.army && t.cost >= closeCallCost && healedX(t) >= healedMin }); t != nil {
+		add(t, "healed", "Most healed", fmt.Sprintf("repaired %.1f× its own health (%s hp)", healedX(t), metal(t.healed)), healedX(t), t.hpeakF)
 	}
 	if t := pick(func(a, b *track) bool { return a.path > b.path }, func(t *track) bool { return t.ground && t.path > 0 }); t != nil {
 		add(t, "marathon", "Marathon", "travelled "+distance(t.path), t.path, t.last)
@@ -461,38 +711,117 @@ func (p *pass) awards() []Award {
 		pct := 100 * float64(n) / (tourGrid * tourGrid)
 		add(t, "tourist", "Tourist", fmt.Sprintf("visited %.0f%% of the map", pct), pct, t.last)
 	}
-	if t := pick(func(a, b *track) bool { return a.minHP < b.minHP }, func(t *track) bool { return t.eligible && alive(t) && t.minHP < 0.25 }); t != nil {
+	if t := pick(func(a, b *track) bool { return a.minHP < b.minHP }, func(t *track) bool { return t.eligible && alive(t) && t.minHP < 0.25 && t.cost >= closeCallCost }); t != nil {
 		add(t, "closecall", "Close call", fmt.Sprintf("survived at %.0f%% health", math.Ceil(t.minHP*100)), t.minHP*100, t.minHPF)
 	}
 
 	d := p.out.Deaths
-	best, bestUnf := -1, -1
+	bestUnf := -1
 	for i := range d.F {
 		// A unit that went down with its team was not lost in the game.
-		if d.Cost[i] <= 0 || p.wiped[i] {
+		// A BUILDING destroyed before it was finished: a unit cancelled in
+		// its factory refunds its metal and is no story (and is not a loss
+		// at all when the capture records causes).
+		if d.Cost[i] <= 0 || p.wiped[i] || d.Unfinished[i] != 1 || !p.defs[d.Def[i]].structure {
 			continue
 		}
-		if d.Unfinished[i] == 1 {
-			if bestUnf < 0 || d.Cost[i] > d.Cost[bestUnf] {
-				bestUnf = i
-			}
-		} else if best < 0 || d.Cost[i] > d.Cost[best] {
-			// Finished units only: the costliest unfinished loss already
-			// has its own award, and one unit should not take two.
-			best = i
+		if bestUnf < 0 || d.Cost[i] > d.Cost[bestUnf] {
+			bestUnf = i
 		}
 	}
 	if bestUnf >= 0 {
-		out = append(out, Award{Key: "unfinished", Label: "Unfinished business",
-			Text: "destroyed before it was finished, " + metal(d.Cost[bestUnf]) + " metal",
-			Team: d.Team[bestUnf], Def: d.Def[bestUnf], Value: d.Cost[bestUnf], F: d.F[bestUnf]})
+		out = append(out, p.deathAward(bestUnf, Award{Key: "unfinished", Label: "Unfinished business",
+			Text: fmt.Sprintf("destroyed %.0f%% built, %s metal in it", 100*d.Cost[bestUnf]/math.Max(p.defs[d.Def[bestUnf]].cost, 1), metal(d.Cost[bestUnf])),
+			Team: d.Team[bestUnf], Def: d.Def[bestUnf], Value: d.Cost[bestUnf], F: d.F[bestUnf]}))
 	}
-	if best >= 0 {
-		out = append(out, Award{Key: "costliest", Label: "Most expensive loss",
-			Text: "lost at " + clock(d.F[best]) + ", " + metal(d.Cost[best]) + " metal",
-			Team: d.Team[best], Def: d.Def[best], Value: d.Cost[best], F: d.F[best]})
+	if a, ok := p.biggestBlow(); ok {
+		out = append(out, a)
 	}
 	return out
+}
+
+// biggestBlow is the most metal one player lost within blowWindow: a base
+// going up, an army caught in the open. One expensive unit dying is no story
+// in a game where dozens of them do; losing a fortune at once is. Deaths that
+// went down with an eliminated team do not count, and neither does what an
+// owner removed (they are not in Deaths). The award's moment is the window's
+// costliest death (its def names the card), F0/F1 the window's first and
+// last death.
+func (p *pass) biggestBlow() (Award, bool) {
+	d := p.out.Deaths
+	byTeam := map[int32][]int{}
+	for i := range d.F {
+		if d.Cost[i] > 0 && !p.wiped[i] && p.ro.side(d.Team[i]) >= 0 {
+			byTeam[d.Team[i]] = append(byTeam[d.Team[i]], i)
+		}
+	}
+	teams := make([]int32, 0, len(byTeam))
+	for t := range byTeam {
+		teams = append(teams, t)
+	}
+	sort.Slice(teams, func(i, j int) bool { return teams[i] < teams[j] })
+	bestSum, bestTeam, bestLo, bestHi := 0.0, int32(-1), 0, 0
+	for _, t := range teams {
+		idx := byTeam[t] // in frame order, like Deaths
+		sum, lo := 0.0, 0
+		for hi, i := range idx {
+			sum += d.Cost[i]
+			for d.F[i]-d.F[idx[lo]] > blowWindow {
+				sum -= d.Cost[idx[lo]]
+				lo++
+			}
+			// Strictly more: a tie goes to the lower team, then the earlier window.
+			if sum > bestSum {
+				bestSum, bestTeam, bestLo, bestHi = sum, t, lo, hi
+			}
+		}
+	}
+	if bestTeam < 0 {
+		return Award{}, false
+	}
+	idx := byTeam[bestTeam][bestLo : bestHi+1]
+	top := map[int32]float64{}
+	count := map[int32]int{}
+	worst := idx[0]
+	for _, i := range idx {
+		top[d.Def[i]] += d.Cost[i]
+		count[d.Def[i]]++
+		if d.Cost[i] > d.Cost[worst] {
+			worst = i
+		}
+	}
+	parts := []string{}
+	for _, def := range topDefs(top) {
+		ud := p.in.Meta.UnitDefs[def]
+		name := ud.HumanName
+		if name == "" {
+			name = ud.Name
+		}
+		if count[def] > 1 {
+			name = fmt.Sprintf("%d %s", count[def], name)
+		}
+		parts = append(parts, name)
+	}
+	f0, f1 := d.F[idx[0]], d.F[idx[len(idx)-1]]
+	secs := (f1 - f0) / simFPS
+	when := fmt.Sprintf("in %d s from %s", secs, clock(f0))
+	if secs < 1 {
+		when = "at " + clock(f0)
+	}
+	p.usedDef[d.Def[worst]] = true
+	return Award{Key: "blow", Label: "Biggest blow",
+		Text: fmt.Sprintf("lost %s metal %s: %s", metal(bestSum), when, strings.Join(parts, ", ")),
+		Team: bestTeam, Def: d.Def[worst], Value: round1(bestSum), F: d.F[worst], F0: f0, F1: f1}, true
+}
+
+// deathAward names the unit behind death i, so the page can show which one
+// it was: its id, and for a mobile unit its life and route.
+func (p *pass) deathAward(i int, a Award) Award {
+	a.Unit = p.deathUnit[i]
+	if t := p.deathTrack[i]; t != nil {
+		a.F0, a.F1, a.Path = t.first, t.last, t.route()
+	}
+	return a
 }
 
 // recordFront stores each side's army centre at this step: the cost-weighted

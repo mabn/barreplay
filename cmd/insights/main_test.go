@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/mabn/barreplay/internal/insights"
@@ -161,6 +162,28 @@ func TestPrefersTheBRP(t *testing.T) {
 	}
 }
 
+// -j runs replays side by side: every good one is published, every bad one
+// counted, none lost.
+func TestEachInParallel(t *testing.T) {
+	bucket := t.TempDir()
+	writeBRP(t, filepath.Join(bucket, "replays"))
+	srv := server(t, bucket, "")
+	defer srv.Close()
+	r := newRunner(srv, t.TempDir())
+	var mu sync.Mutex
+	published := 0
+	r.publish = func(context.Context, string, string) error {
+		mu.Lock()
+		published++
+		mu.Unlock()
+		return nil
+	}
+	args := []string{rid, "not-a-game", rid, rid, "nope"}
+	if failed := r.each(context.Background(), args, 3); failed != 2 || published != 3 {
+		t.Errorf("failed %d, published %d; want 2 and 3", failed, published)
+	}
+}
+
 // An existing insights file is not recomputed (and the replay not fetched)
 // unless forced: publishing skips it, compute-only saves the published copy.
 func TestSkipsPublished(t *testing.T) {
@@ -299,6 +322,12 @@ func TestPiecesMatchBRP(t *testing.T) {
 			t.Errorf("%s differs:\n brp:    %s\n pieces: %s", name, ja, jb)
 		}
 	}
+	// Pieces price only armed mobile defs, so they cannot say what a side
+	// owns; everything else must match.
+	if got.Series.Value != nil {
+		t.Error("a pieces rebuild reported owned value it cannot price")
+	}
+	want.Series.Value = nil
 	same("series", want.Series, got.Series)
 	same("sides", want.Sides, got.Sides)
 	same("milestones", want.Milestones, got.Milestones)

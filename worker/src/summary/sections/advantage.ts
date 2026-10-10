@@ -12,7 +12,8 @@ import { lossesByStep } from "../losses";
 import { comparable, sideColor, sideName } from "../model";
 import { swingChart } from "./swing";
 import { diff, maxOf, stepTimes } from "../series";
-import type { TipRow } from "../tooltip";
+import { scaleToggle } from "../scale";
+import { tip, type TipRow } from "../tooltip";
 import { watcher, type Watch } from "../watch";
 import type { Insights, SummaryOptions } from "../types";
 
@@ -28,31 +29,59 @@ export function advantage(ins: Insights, opts: SummaryOptions): HTMLElement | nu
   const top: Node[] = sw ? [sw.key, sw.hint, sw.svg] : armyLead(ins, watch, group, t);
   return section(sw ? "Who was winning" : "Army advantage",
     ...top,
-    label(lossLabel(ins)), lossChart(ins, watch, group),
-    label("Metal income"), incomeChart(ins, watch, group, t),
+    label(...lossLabel(ins)), lossChart(ins, watch, group),
+    ...incomePanel(ins, watch, group, t),
     sw?.list ? h("h3", { style: "margin-top: 16px" }, "Biggest swings") : null,
     sw?.list ?? null);
 }
 
-/** label names a stacked panel, set in from the gutter like its plot. */
-function label(text: string): HTMLElement {
-  return h("div", { class: "brs-panel-label", style: `padding-left: ${(GUTTER / 10).toFixed(1)}%` }, text);
+/** label names a stacked panel, set in from the gutter like its plot, with
+ * an (i) that explains it on hover when there is more to say. */
+function label(text: string, info?: string): HTMLElement {
+  const el = h("div", { class: "brs-panel-label", style: `padding-left: ${(GUTTER / 10).toFixed(1)}%` }, text);
+  if (info) {
+    const i = h("span", { class: "brs-info", tabindex: "0", "aria-label": info }, "i");
+    tip(i, info);
+    el.append(" ", i);
+  }
+  return el;
 }
 
-function lossLabel(ins: Insights): string {
-  const priced = ins.deaths.cost.some((c) => c > 0);
+/** lossLabel names the losses panel and says what its bars measure. */
+function lossLabel(ins: Insights): [string, string] {
+  const L = lossesByStep(ins);
   const step = `${ins.stepSec} s`;
-  return priced ? `Metal lost every ${step}` : `Units lost every ${step}`;
+  const faint = " Faint bars on top are units that went down with an eliminated player rather than in a fight; they are left out of the scale.";
+  if (L.owned) {
+    return ["Metal lost", `Each bar is the metal a side lost in ${step}, as a share of everything it owned (units and buildings) when those ${step} began. A late unit costs a hundred times an early one, so the share makes a blow early and a blow late comparable; the tooltip also gives the metal. ${sideName(ins, 0)} is drawn above the line, ${sideName(ins, 1)} below. Reclaims, upgrades and cancelled builds are not losses.${faint}`];
+  }
+  if (L.priced) return ["Metal lost", `The metal each side lost in every ${step}.${faint}`];
+  return ["Units lost", `The number of units each side lost in every ${step} (this replay does not price every unit).${faint}`];
 }
 
 /** lossChart: each side's losses per step, mirrored like the line above it
- * (the first side's above the axis). The scale is set by what died FIGHTING;
+ * (the first side's above the axis). Drawn as a SHARE of what the side owned
+ * when the step began whenever the file says (version 4+): a late unit costs
+ * a hundred times an early one, so in raw metal every early fight is an
+ * empty line under the last few minutes, where losing 5% of everything is
+ * the same blow at minute five as at minute fifty. The scale is set by what
+ * died FIGHTING;
  * units that went down with an eliminated team are drawn faint on top, and a
  * bar past the scale is cut at the edge with a notch, the full number in the
  * tooltip — at the end of a game they would otherwise flatten everything. */
 function lossChart(ins: Insights, watch: Watch | null, group: ChartGroup): SVGSVGElement {
-  const L = lossesByStep(ins);
-  const fmt = (v: number) => (L.priced ? fmtMetal(v) : String(Math.round(v)));
+  const raw = lossesByStep(ins);
+  const fmtRaw = (v: number) => (raw.priced ? fmtMetal(v) : String(Math.round(v)));
+  const owned = raw.owned;
+  // Plotted values: the share lost, in percent, when there is something to
+  // share it of, else the raw loss.
+  const plot = (rows: number[][]) => owned
+    ? rows.map((row, sd) => row.map((v, i) => (owned[sd]?.[i] ?? 0) > 0 ? (100 * v) / owned[sd][i] : 0))
+    : rows;
+  const L = { combat: plot(raw.combat), wiped: plot(raw.wiped) };
+  const fmt = (v: number) => (owned ? `${v < 10 ? v.toFixed(1).replace(/\.0$/, "") : Math.round(v)}%` : fmtRaw(v));
+  const valueOf = (sd: number, i: number, rows: number[][], raws: number[][]) =>
+    owned ? `${fmt(rows[sd]?.[i] ?? 0)} (${fmtRaw(raws[sd]?.[i] ?? 0)} metal)` : fmtRaw(raws[sd]?.[i] ?? 0);
   let top = Math.max(maxOf(L.combat[0] ?? [], L.combat[1] ?? []));
   if (top <= 0) top = Math.max(1, maxOf(L.wiped[0] ?? [], L.wiped[1] ?? []));
   const lim = top * 1.1;
@@ -64,10 +93,10 @@ function lossChart(ins: Insights, watch: Watch | null, group: ChartGroup): SVGSV
       const i = Math.min(n - 1, Math.floor(tt / ins.stepSec));
       if (i < 0) return null;
       return [0, 1].map((sd): TipRow => {
-        const w = L.wiped[sd]?.[i] ?? 0;
+        const w = raw.wiped[sd]?.[i] ?? 0;
         return {
-          color: sideColor(ins, sd), label: `${sideName(ins, sd)} lost`,
-          value: fmt(L.combat[sd]?.[i] ?? 0) + (w ? ` (+${fmt(w)} eliminated)` : ""),
+          color: sideColor(ins, sd), label: sideName(ins, sd), metric: "Metal lost",
+          value: valueOf(sd, i, L.combat, raw.combat) + (w ? ` (+${valueOf(sd, i, L.wiped, raw.wiped)} eliminated)` : ""),
         };
       });
     },
@@ -98,15 +127,32 @@ function lossChart(ins: Insights, watch: Watch | null, group: ChartGroup): SVGSV
   return c.svg;
 }
 
-function incomeChart(ins: Insights, watch: Watch | null, group: ChartGroup, t: number[]): SVGSVGElement {
+/** incomePanel is the income label with its Linear/Log switch, and the
+ * chart, redrawn in place on a switch. Linear by default: income grows
+ * steadily, and a log axis would flatten the gap between the sides. */
+function incomePanel(ins: Insights, watch: Watch | null, group: ChartGroup, t: number[]): HTMLElement[] {
+  const holder = h("div");
+  const draw = (log: boolean) => {
+    const old = holder.firstElementChild;
+    // The old chart leaves the shared crosshair with its svg.
+    if (old) group.members = group.members.filter((m) => !old.contains(m.hair));
+    holder.replaceChildren(incomeChart(ins, watch, group, t, log));
+  };
+  draw(false);
+  const lab = label("Metal income");
+  lab.append(scaleToggle(false, draw));
+  return [lab, holder];
+}
+
+function incomeChart(ins: Insights, watch: Watch | null, group: ChartGroup, t: number[], log: boolean): SVGSVGElement {
   const mi = ins.series.metalIncome;
   const peak = Math.max(1, maxOf(mi[0], mi[1]));
   const c = timeChart({
-    height: 130, durationSec: ins.durationSec, yMin: 0, yMax: peak * 1.05,
-    yTick: (v) => String(Math.round(v)), gutter: GUTTER, watch, group,
+    height: 130, durationSec: ins.durationSec, yMin: 0, yMax: peak * 1.05, log: log ? { unit: 1 } : undefined,
+    yTick: (v) => (v >= 1000 ? fmtMetal(v) : String(Math.round(v))), gutter: GUTTER, watch, group,
     readout: (tt) => {
       const i = stepAt(t, tt);
-      return i < 0 ? null : [0, 1].map((sd) => ({ color: sideColor(ins, sd), label: `${sideName(ins, sd)} income`, value: `${mi[sd][i].toFixed(1)} metal/s` }));
+      return i < 0 ? null : [0, 1].map((sd) => ({ color: sideColor(ins, sd), label: sideName(ins, sd), metric: "Metal income", value: `${Math.round(mi[sd][i])}/s` }));
     },
   });
   for (const side of [0, 1]) {
@@ -126,7 +172,7 @@ function armyLead(ins: Insights, watch: Watch | null, group: ChartGroup, t: numb
     readout: (tt) => {
       const i = stepAt(t, tt);
       if (i < 0) return null;
-      return [0, 1].map((sd) => ({ color: sideColor(ins, sd), label: `${sideName(ins, sd)} army`, value: fmtMetal(ins.series.army[sd][i]) }));
+      return [0, 1].map((sd) => ({ color: sideColor(ins, sd), label: sideName(ins, sd), metric: "Army value", value: fmtMetal(ins.series.army[sd][i]) }));
     },
   });
   // One band above the zero line in side 0's colour, one below in side 1's.

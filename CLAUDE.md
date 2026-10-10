@@ -19,7 +19,7 @@ go build ./cmd/barreplay-static # build the .brp -> static-hosting bundle packer
 go build ./cmd/insights         # build the game-summary backfill CLI (one replay, or -all)
 go build ./cmd/winfit           # build the win-probability model fitter (reads insights files)
 go build ./cmd/bringest         # build the drag&drop upload daemon (polls the worker's job queue)
-go run ./cmd/insights <gameId|link|rid>   # compute a PUBLISHED replay's game summary and publish replays/<rid>.insights<N>.json beside it (-upload r2 default, local, or empty + -out to just write it; -all walks the catalog, -from/-to narrow it to games started in a date range (YYYY-MM-DD or unix seconds); -force recomputes; a local .brp/.brepstream with -rid gives full costs)
+go run ./cmd/insights <gameId|link|rid>   # compute a PUBLISHED replay's game summary and publish replays/<rid>.insights<N>.json beside it (-upload r2 default, local, or empty + -out to just write it; -all walks the catalog, -from/-to narrow it to games started in a date range (YYYY-MM-DD or unix seconds); -j N replays at once, default 4; -force recomputes; a local .brp/.brepstream with -rid gives full costs)
 go test ./...                   # all unit tests (no engine required)
 go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
 go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, no engine
@@ -346,6 +346,18 @@ internal/demofile/        gunzip + parse packed header + TDF startscript + the p
                           then both report 98 messages for that game, which is the
                           cross-check that the packet decoding is right. Typed autohost
                           commands ("!cv resign") are kept: a person wrote those.
+                          ORDERS (orders.go -> Demo.SelfD): the stream is the input log, so
+                          SELF-DESTRUCT orders are read from it too — NETMSG_SELECT tracks
+                          each player's selection, NETMSG_COMMAND applies to it, AICOMMAND/
+                          _TRACKED/AICOMMANDS name units directly (layouts from Recoil's
+                          BaseNetProtocol.cpp/NetCommands.cpp; verified on a 2026.07.04 demo
+                          whose commander self-destructs at f2416 and dies at f2580). They
+                          join the capture as "selfd" EVENTS (Demo.SelfDEvents; capture.
+                          AddEvents for the streaming re-sim, snapshot.MergeEvents in pack) —
+                          a new kind in the string table, no format change — and `pack
+                          -upload` of an already-packed .brp adds them in place
+                          (packer.AddDemoOrders -> snapshot.AddEventsBRP: only E and the
+                          meta change, no re-simulation; a file that has them is left alone).
 internal/engine/          locate spring-headless/pr-downloader, provision, launch, stream stdout.
                           Run records the child's pid (Engine.Pid) so a caller can watch the
                           run's resource use without Run growing a fourth return value — one
@@ -500,6 +512,17 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           units blown up by a player leaving, not fought for — and battles,
                           the costliest/unfinished awards and the page's moment stories skip
                           them; the page draws them faint on its losses chart.
+                          THE SUMMARY ENDS WHERE THE GAME WAS DECIDED (gameend.go): once every
+                          side but one is out (a resign vote, or the last commanders dying),
+                          Compute cuts the input at the start of the run of eliminations that
+                          emptied the last side to go (teams of one side within 30 s count as
+                          one surrender) and computes everything up to there — the engine then
+                          blows up the losing side's whole army, which dwarfed every real loss
+                          on every chart. Recorded teamdied facts give the cut up front; an
+                          inferred one costs a first pass over the whole game (whose
+                          eliminations are kept, since the cut input lost the bursts they were
+                          read from). One player leaving mid-game ends nothing; an FFA runs on
+                          until one side is left. Clips still play past the end.
                           players.go is the per-player report (Insights.Players, full view
                           only): built/lost/chat per step, the commander's path + death +
                           first contact (a 900-elmo grid shared with an enemy), leaks and a
@@ -515,6 +538,60 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           WriteStaticBundle writes the insights piece
                           beside the .brp on EVERY publish (a compute failure only warns), so
                           a publish uploads exactly two objects.
+                          VERSION 4 stops counting what an owner REMOVED as a loss (pass.go
+                          removedByOwner, only when the capture records causes): a unit
+                          reclaimed by its own side (cause weapon -12, the engine's reclaim id)
+                          and a STRUCTURE destroyed with no cause at all (a mex/geo upgrade, a
+                          cancelled build, a self-destruct) or ANY UNFINISHED unit destroyed
+                          with no cause (a cancelled build in a lab; a finished mobile one
+                          with no cause is a crash, still a loss — a cancelled build refunds
+                          its metal). An unfinished unit that IS lost is priced at the share of
+                          it BUILT (pass.go lossCost: its last sampled build progress; one
+                          never sampled is worth 0) everywhere a loss is counted, and
+                          "Unfinished business" goes only to a BUILDING destroyed unfinished
+                          — wind farms reclaimed for
+                          space used to read as a lost fight. An EVOLUTION is never a loss in any
+                          capture (evolve.go): BAR's evolving commanders are swapped at once
+                          (a new unit created AND finished in one frame, the old one destroyed
+                          with no cause, same team, same frame), so each such instant spawn
+                          takes one causeless death of its team in that frame — that death is
+                          no loss and the spawn is not "built". A real 8v8 evolved all 16
+                          commanders at 10:00 and read as "8 commanders fall". It adds Series.Value (everything a side
+                          owns, priced and weighted by build progress — the denominator of the
+                          page's loss SHARE, since a 15 s loss of 5k metal is a disaster at
+                          minute 3 and noise at minute 40) and Battle.Teams (per team: metal
+                          lost in the battle and the peak army within the battle's radius +
+                          600 elmos, from one presence sample per step, plus KILLED: the enemy
+                          metal the engine credited to the team there WHEREVER IT FIRED FROM,
+                          so a long-range gun or a nuke from across the map is in the fight it
+                          hit — zero in captures that name no killers), from which the page
+                          names the players carrying a fight (moments.ts fighters: >= 10% of
+                          their side's army + lost + killed there).
+                          Version 4 also lets every award SAY WHICH UNIT it is: Award.Unit
+                          (the id), F0/F1 (its life) and Path ([frame, x, z] every 5 s, at
+                          most 400) — a card draws the route, and its clip FOLLOWS the unit
+                          (Clip.follow / Clip.path: app.js followClipUnit keeps the camera on
+                          it, drawClipRing pulses a ring round it, drawClipPath draws where it
+                          has been bright and where it is going faint). Marathon and Tourist
+                          play the whole life (clip speeds up to 64x), the losses their last
+                          20 s. IMMORTAL is a unit that FELL to <= 30% health and AFTER that
+                          was credited (destroyed-event causes) with enemies worth >= 3x its
+                          own cost and >= 1500 metal, and lived — surviving damage is what most
+                          of an army does; no causes, no Immortal, and most games have none.
+                          CLOSE CALL skips units under closeCallCost = 400 metal (commanders
+                          always count). MOST HEALED (key "healed") is the army unit of >= 400
+                          metal that regained the most hp between samples while finished (a
+                          floor), if >= its own health. UNIT MENTIONS carry their strategic
+                          icon: names.ts named() puts unitRef (icon + name) before every unit
+                          name in a sentence, and award cards lead with it; tooltips and clip
+                          titles stay text.
+                          BIGGEST BLOW (stories.go biggestBlow) replaced "Most expensive loss":
+                          the most metal ONE PLAYER lost within 30 s (blowWindow; wiped deaths
+                          and owner removals excluded) — a base going up — rather than the
+                          single costliest unit, which in a big game is one of dozens of
+                          identical Juggernauts. Its F is the window's costliest death (where
+                          the card's map dot and the clip zoom), F0/F1 the window; the clip
+                          plays the window (clipEvent).
                           swing.go (Version 2) adds the WINNER (Insights.Winner, a side index
                           from Meta.Winners, -1 unknown) and the SWING line: P(side 0 wins)
                           per step from a logistic model (WinModel) over three antisymmetric
@@ -577,8 +654,36 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           and onSeek = seekToFrame (back to the Replay tab at that sim frame).
                           WATCHING (watch.ts): anything on the page with a moment behind it — a
                           chart time, a swing, a battle, a death, a milestone, an award — hands
-                          the host a Clip {f0, f1, x?, z?, r?, title?} (clipAround: 10 s before
-                          to 20 s after; clipSpan: 10 s before to 5 s after), onClip winning
+                          the host a Clip {f0, f1, at?, atEnd?, x?, z?, r?, title?, titleRuns?} — `at`
+                          is the INSTANT it is about, which the viewer marks on the clip's
+                          slider (#clipmark); PLAYBACK starts LEAD_IN_SEC = 5 s before it
+                          (Clip.start) while the clip itself reaches back as far before it
+                          as it runs after (at least CONTEXT_SEC = 20 s), so the moment sits
+                          mid-timeline with context to scroll back to (clipAround: 20 s
+                          after; clipSpan: to 5 s past an end; clipAt: at least 20 s, at
+                          most a minute). A swing's clip is about
+                          the moment's FOCUS (moments.ts: the commander death, the costliest
+                          loss, or the densest 10 s x 1500-elmo burst of losses), not the
+                          start of the minute the line took to move, and zooms there.
+                          A FIGHT moment is told as ONE EVENT with a START AND AN END: the
+                          battle (Insights.Battles) running in the window where the most metal
+                          went down (biggestFight — chosen by place as well as time, since two
+                          fights on opposite sides of the map at once are two stories), with
+                          its own span as Focus.f..f1 and only the deaths within its radius +
+                          600 elmos counted; what died elsewhere meanwhile is a separate
+                          "Elsewhere at the time" sentence when it is big enough to matter.
+                          The window it searches is the moment's +- one step (momentWindow),
+                          since a raid's buildings often blow up just after the line moved.
+                          A side the line moved toward that still lost MORE there is not said
+                          to win: the title states the trade ("trades 114k metal for 69.9k").
+                          A span clip (watch.ts clipEvent) plays the WHOLE event however long,
+                          20 s of context before it, and carries atEnd, which widens the
+                          slider's #clipmark into a band over the event; capping it at a
+                          minute hid the end of a two-minute fight its story was counting. Titles
+                          and every player/side name are drawn in that player's in-game
+                          colour (names.ts, model.nameRuns); a side is named by its leader's
+                          colour ("Blue team", model.colorName), "Team N" when two sides
+                          would share a name. onClip winning
                           over onSeek, which only takes the start. The viewer PLAYS IT IN PLACE
                           (app.js openClip/startClip/closeClip, index.html #clip): the replay's
                           own #wrap — the map canvases — moves into a small window over the
@@ -592,15 +697,24 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           TOOLTIPS (tooltip.ts) are one instant HTML box (.brs-tip, fixed,
                           flipping at the window's edges) used by every section — native
                           <title> tooltips were slow and unstyled. tip() binds one element,
-                          tipLayer() delegates for thousands (the killing-fields dots), and
+                          tipLayer() delegates for many marks (the killing-fields zones), and
                           charts in one chartGroup() share a crosshair whose tooltip lists
                           every member's readout, which is how the panels under "Who was
-                          winning" read as one chart.
+                          winning" read as one chart. A row carrying `metric` is one SIDE's
+                          reading of it: those rows pivot into a table (a column per side, a
+                          line per metric) so the two sides' numbers line up. A panel label
+                          can carry an (i) whose hover explains the panel (advantage.ts label).
                           Sections (sections/*.ts, in page order in index.ts) each
                           return null when the file cannot support them: the side-by-side
                           charts (advantage, army composition) need comparable(); race to
                           tech and killing fields need a full-view capture (a one-sided one
-                          knows only its own milestones and the deaths it saw). chart.ts is
+                          knows only its own milestones and the deaths it saw). KILLING
+                          FIELDS draws ZONES, not deaths (zones.ts): a big game's ~90k dots
+                          painted the map solid, so fought-for deaths (not those going down
+                          with an eliminated team) bin into half-zone cells, the heaviest
+                          cell left takes every cell within a zone radius (a twelfth of the
+                          map), repeated up to 40 times; each zone is a pie (area = metal,
+                          wedges = who lost it) whose click plays its busiest 30 s. chart.ts is
                           the shared time-axis frame (crosshair readout, click = a clip);
                           mapview.ts draws world-space marks over api.bar-rts.com terrain
                           (best-effort, plain background otherwise). Side colours go through
@@ -612,16 +726,41 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           no commander walks in a step is drawn as a gap), the diary/leaks/
                           style beside it and the built/lost strip below; names in the Sides
                           cards select a tab. "Who was winning" stacks the swing line (or the
-                          v1 army-difference chart), the metal LOST per step (losses.ts: what
+                          v1 army-difference chart), the metal LOST per step — as a SHARE of everything the side owned
+                          at the end of the step before when the file has Series.Value (v4),
+                          plain metal otherwise (losses.ts: what
                           died fighting, with what went down with an eliminated team faint on
                           top and left out of the scale) and metal income on one time axis
-                          and crosshair, with eliminations marked on the swing line. The MAP
+                          and crosshair, with eliminations marked on the swing line. LOG
+                          SCALES (chart.ts TimeChartSpec.log: symlog, ticks at powers of ten,
+                          labels closer than a line apart dropped): metal income and army
+                          composition each carry a Linear/Log toggle (scale.ts scaleToggle,
+                          which redraws the chart in place); composition defaults to LOG, and
+                          there places each side's TOTAL on the log axis and splits it by
+                          SHARE — stacking by value through a log would hand the bottom band
+                          most of the height whatever its size. The MAP
                           STORY numbers its battles in the order they happened, on the map and
                           in a one-line-per-battle list (losses either side of a centre line,
-                          square-root scaled), one selection shared by both.
-                          The library draws versions 1-3 (INSIGHTS_VERSIONS [3, 2, 1]; v2 adds
-                          winner + swing, v3 eliminations and peak battles) and app.js fetches
-                          .insights3, then 2, then 1.
+                          square-root scaled), one selection shared by both; a picked battle
+                          shows the two sides' losses SIDE BY SIDE, each KIND of unit as its
+                          untinted BAR icon with a count (Battle.lost[].units, v4: def/n/metal,
+                          costliest first, at most 48). Defs sharing a bitmap are one kind,
+                          added up (losskinds.ts lossKinds), and only the kinds carrying 90%
+                          of the metal show; the rest sit behind a "+N more" chip. The side that
+                          lost less is BOXED in its colour with an "ahead" chip (no verdict
+                          sentence), and each side's fighters sit over its own column.
+                          Race to tech's clips zoom to and FOLLOW the milestone's unit
+                          (Milestone.unit/pos, v4); the player's Built and lost strip is
+                          log by default with a Linear/Log toggle. ICONS (icons.ts unitIcon) come from
+                          the viewer's /icons/icontypes.json, looked up by the insights def's
+                          `icon` (its iconType) then its name; SummaryOptions.iconBase names
+                          the origin, defaulting to the one the module was loaded from, null
+                          = names; a def with no icon reads as its name.
+                          The library draws versions 1-4 (INSIGHTS_VERSIONS [4, 3, 2, 1]; v2 adds
+                          winner + swing, v3 eliminations and peak battles, v4 owner removals
+                          left out, owned value and battle teams) and app.js fetches
+                          .insights4, then 3, 2, 1. A version bump needs `insights -all` after
+                          the deploy, or published replays keep their older summary.
 internal/viz/readbundle.go ReadStaticBundle: the inverse of WriteStaticBundle, rebuilding a
                           BRPFile from published pieces through a PieceFetcher. Defs come back
                           from the head only (names, footprints, armyCost -> MetalCost, CanFly
@@ -2748,6 +2887,17 @@ run dev` in `worker/` plus `pack -upload local`.)
   pass rather than drawing nothing expensively. The BUILD bars are deliberately
   not part of it: there are only ever a handful, and a construction site with no
   bar is indistinguishable from a finished building.
+- **SELF-DESTRUCT COUNTDOWNS** (`app.js` `selfds`/`drawSelfDestructs`): a
+  pulsing 💣 over a unit from its `selfd` order to its death or the order
+  cancelling it (the engine toggles). A death with NO cause is the blast going
+  off, so its frame is exact and the seconds left are shown; killed first,
+  cancelled, or no end within 60 s, it is the bomb without a number.
+- **RECLAIM LINES** (`app.js` `drawReclaimLines`, `RECLAIM_LINE_SEC` = 3): a
+  purple line from a builder to what it is reclaiming, drawn for the last 3 s
+  before the target disappears. Derived with NO format change from the destroyed
+  event's cause (weapon -12 = reclaimed, killer = the builder), so it shows only
+  what was reclaimed to completion, only on captures that record causes (v6
+  re-sims), and only the finish of a long reclaim.
 - **DEAD UNITS** (`app.js` `deadHp`/`DEAD_COLOR`): a unit whose health is gone
   but which the engine has not removed is drawn in `#9fb0bf` grey instead of its
   team colour, in every path that colours a unit (both icon renderers, both dot
