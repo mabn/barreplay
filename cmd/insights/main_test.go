@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/mabn/barreplay/internal/insights"
@@ -158,6 +159,28 @@ func TestPrefersTheBRP(t *testing.T) {
 	ins := readInsights(t, filepath.Join(out, "replays", insights.FileName(rid)))
 	if ins.CostCoverage != insights.CostFull || ins.POV != insights.POVFull {
 		t.Errorf("cost/pov = %s/%s", ins.CostCoverage, ins.POV)
+	}
+}
+
+// -j runs replays side by side: every good one is published, every bad one
+// counted, none lost.
+func TestEachInParallel(t *testing.T) {
+	bucket := t.TempDir()
+	writeBRP(t, filepath.Join(bucket, "replays"))
+	srv := server(t, bucket, "")
+	defer srv.Close()
+	r := newRunner(srv, t.TempDir())
+	var mu sync.Mutex
+	published := 0
+	r.publish = func(context.Context, string, string) error {
+		mu.Lock()
+		published++
+		mu.Unlock()
+		return nil
+	}
+	args := []string{rid, "not-a-game", rid, rid, "nope"}
+	if failed := r.each(context.Background(), args, 3); failed != 2 || published != 3 {
+		t.Errorf("failed %d, published %d; want 2 and 3", failed, published)
 	}
 }
 
