@@ -15,6 +15,7 @@ export const CSS = `
 .brs-root h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
   color: var(--brs-muted); margin: 0 0 10px; font-weight: 600; }
 .brs-root .brs-meta { color: var(--brs-muted); margin-bottom: 14px; }
+.brs-root .brs-winner { font-weight: 600; }
 .brs-root .brs-notices { margin: 0 0 16px; padding: 0; list-style: none; }
 .brs-root .brs-notices li { border-left: 3px solid #c9a23a; background: var(--brs-panel);
   padding: 7px 10px; margin-bottom: 6px; color: var(--brs-text); }

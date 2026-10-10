@@ -6795,7 +6795,10 @@ async function submitResim() {
 // navigation so back returns from the summary to the playback. A path segment
 // (/replays/<id>/summary) was avoided: a second segment under /replays/ is a
 // chunk, and the worker sends it to R2.
-const INSIGHTS_VERSION = 1; // the file version this page reads (src/summary INSIGHTS_VERSION)
+// The insights file versions this page reads, newest first (src/summary
+// INSIGHTS_VERSIONS): a revision whose newer file is not built yet falls back
+// to the one it has.
+const INSIGHTS_VERSIONS = [2, 1];
 let summaryModule = null;   // Promise of the imported library
 let summaryFor = null;      // currentFile the #summary pane was filled for
 let summaryHandle = null;   // the mounted summary, for destroy()
@@ -6857,10 +6860,15 @@ async function showSummary() {
   }
   try {
     summaryModule = summaryModule || import(url);
-    const [lib, res] = await Promise.all([
-      summaryModule,
-      fetch(dataURL('/replays/' + encodeURIComponent(file) + '.insights' + INSIGHTS_VERSION + '.json')),
-    ]);
+    const fetchInsights = async () => {
+      let res;
+      for (const v of INSIGHTS_VERSIONS) {
+        res = await fetch(dataURL('/replays/' + encodeURIComponent(file) + '.insights' + v + '.json'));
+        if (res.status !== 404) break;
+      }
+      return res;
+    };
+    const [lib, res] = await Promise.all([summaryModule, fetchInsights()]);
     if (summaryFor !== file) return; // another replay was opened meanwhile
     if (res.status === 404) {
       summaryMessage('The summary for this replay has not been built yet.');

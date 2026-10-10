@@ -22,7 +22,7 @@ import (
 // Version names the file: replays/<rid>.insights<Version>.json. Pieces are
 // immutable, so any change to what is computed or how is a new version,
 // written beside the old one; the viewer asks for the one it understands.
-const Version = 1
+const Version = 2
 
 // FileName is the published piece's name for a revision id.
 func FileName(rid string) string { return fmt.Sprintf("%s.insights%d.json", rid, Version) }
@@ -61,6 +61,11 @@ type Insights struct {
 	// Battles are the biggest clusters of deaths, in time order.
 	Battles []Battle `json:"battles"`
 	Awards  []Award  `json:"awards"`
+	// Winner is the index into Sides of the side that won, -1 when the
+	// replay does not say (Meta.Winners, from the demo or the BAR API).
+	Winner int `json:"winner"`
+	// Swing is the win-probability line, for two-sided full-view games.
+	Swing *Swing `json:"swing,omitempty"`
 	// Players is the per-player report, one per team a player controlled.
 	Players []Player   `json:"players"`
 	Chat    []ChatLine `json:"chat"`

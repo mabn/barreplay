@@ -162,7 +162,7 @@ func TestPrefersTheBRP(t *testing.T) {
 }
 
 // An existing insights file is not recomputed (and the replay not fetched)
-// unless forced.
+// unless forced: publishing skips it, compute-only saves the published copy.
 func TestSkipsPublished(t *testing.T) {
 	bucket := t.TempDir()
 	name := filepath.Join(bucket, "replays", insights.FileName(rid))
@@ -172,11 +172,17 @@ func TestSkipsPublished(t *testing.T) {
 	defer srv.Close()
 	out := t.TempDir()
 	r := newRunner(srv, out)
-	if err := r.one(context.Background(), gameID); err != nil {
-		t.Fatalf("skip: %v", err)
+	published := false
+	r.publish = func(context.Context, string, string) error { published = true; return nil }
+	if err := r.one(context.Background(), gameID); err != nil || published {
+		t.Fatalf("skip: %v (published %v)", err, published)
 	}
-	if _, err := os.Stat(filepath.Join(out, "replays")); !os.IsNotExist(err) {
-		t.Error("wrote a file for an already-published revision")
+	r.publish = nil
+	if err := r.one(context.Background(), gameID); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(out, "replays", insights.FileName(rid))); err != nil || string(b) != "{}" {
+		t.Errorf("compute-only did not save the published file: %q, %v", b, err)
 	}
 	r.force = true
 	if err := r.one(context.Background(), gameID); err == nil {
@@ -190,6 +196,28 @@ func TestCatalogRids(t *testing.T) {
 	rids, err := newRunner(srv, "").catalogRids(context.Background())
 	if err != nil || len(rids) != 1 || rids[0] != rid {
 		t.Errorf("rids = %v, %v", rids, err)
+	}
+}
+
+// A replay whose meta names no winner asks the BAR API, and its answer
+// (ally teams) lands as a side index.
+func TestWinnerFromAPI(t *testing.T) {
+	brp := writeBRP(t, t.TempDir())
+	out := t.TempDir()
+	asked := ""
+	r := &runner{outDir: out, localRid: rid, winners: func(_ context.Context, id string) ([]int32, error) {
+		asked = id
+		return []int32{1}, nil
+	}}
+	if err := r.one(context.Background(), brp); err != nil {
+		t.Fatal(err)
+	}
+	ins := readInsights(t, filepath.Join(out, "replays", insights.FileName(rid)))
+	if asked != gameID || ins.Winner != 1 {
+		t.Errorf("asked %q, winner %d", asked, ins.Winner)
+	}
+	if ins.Swing == nil || len(ins.Swing.P) != len(ins.Series.T) {
+		t.Errorf("swing = %+v", ins.Swing)
 	}
 }
 

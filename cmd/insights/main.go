@@ -22,9 +22,14 @@
 // A gameId or link is resolved to the catalog row's current revision, and
 // the row's view (whose point of view the capture is) is carried into the
 // file, since a rebuilt replay has no recorder record of its own. A revision
-// that already has an insights file is skipped unless -force: pieces are
-// immutable, and a changed computation is a new version with a new name, so
-// recomputing the same version can only produce the same bytes.
+// that already has an insights file is skipped unless -force (with -upload=
+// the published file is saved to -out instead): pieces are immutable, and a
+// changed computation is a new version with a new name, so recomputing the
+// same version can only produce the same bytes.
+//
+// A replay whose meta does not name the winner (every .brp packed before the
+// demo's winners were read, and every replay rebuilt from pieces) asks the BAR
+// API for it.
 //
 // A local capture is the way back to full costs for a replay that was only
 // published as pieces: a drag&drop upload's raw stream is archived, so pack
@@ -102,6 +107,13 @@ func main() {
 		force:    *force,
 		outDir:   *outDir,
 		localRid: *ridFlag,
+		winners: func(ctx context.Context, gameID string) ([]int32, error) {
+			rep, err := barapi.New().Resolve(ctx, gameID)
+			if err != nil {
+				return nil, err
+			}
+			return rep.Winners(), nil
+		},
 	}
 	if *ridFlag != "" && flag.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "insights: -rid names ONE capture's revision; pass exactly one input")
@@ -144,6 +156,9 @@ type runner struct {
 	outDir            string
 	localRid          string // -rid: the revision a local capture's summary is published under
 	publish           func(ctx context.Context, dir, label string) error
+	// winners asks the BAR API who won, for a replay whose meta does not say
+	// (every .brp packed before the demo's winners were read). Nil skips it.
+	winners func(ctx context.Context, gameID string) ([]int32, error)
 }
 
 // catalogRow is the part of a GET /api/replays row this command reads.
@@ -229,9 +244,19 @@ func (r *runner) one(ctx context.Context, arg string) error {
 func (r *runner) rid(ctx context.Context, rid, view string) error {
 	name := insights.FileName(rid)
 	if !r.force {
-		if _, err := r.fetch(ctx, "replays/"+name); err == nil {
-			fmt.Fprintf(os.Stderr, "%s: already published, skipping (-force recomputes)\n", name)
-			return nil
+		if b, err := r.fetch(ctx, "replays/"+name); err == nil {
+			if r.publish != nil {
+				fmt.Fprintf(os.Stderr, "%s: already published, skipping (-force recomputes)\n", name)
+				return nil
+			}
+			// Compute-only mode collects files (e.g. for cmd/winfit), so the
+			// published one is saved as is: recomputing would give the same.
+			path := filepath.Join(r.outDir, "replays", name)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "%s: already published, saved to %s (-force recomputes)\n", name, path)
+			return os.WriteFile(path, b, 0o644)
 		} else if !errors.Is(err, viz.ErrNotFound) {
 			return err
 		}
@@ -292,6 +317,15 @@ func (r *runner) local(ctx context.Context, path string) error {
 }
 
 func (r *runner) write(ctx context.Context, rid string, in insights.Input) error {
+	if len(in.Meta.Winners) == 0 && r.winners != nil && in.Meta.GameID != "" {
+		// Unknown winners only cost the summary its result line, so a failed
+		// lookup is a warning.
+		if w, err := r.winners(ctx, in.Meta.GameID); err != nil {
+			fmt.Fprintf(os.Stderr, "%s: winner unknown (BAR API: %v)\n", rid, err)
+		} else {
+			in.Meta.Winners = w
+		}
+	}
 	ins, err := insights.Compute(in)
 	if err != nil {
 		return err
@@ -314,8 +348,12 @@ func (r *runner) write(ctx context.Context, rid string, in insights.Input) error
 	if err := os.WriteFile(path, b, 0o644); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "%s: %d sides, %d deaths, %d milestones, %.1f KB (cost coverage %s, view %s)\n",
-		rid, len(ins.Sides), len(ins.Deaths.F), len(ins.Milestones), float64(len(b))/1024, ins.CostCoverage, ins.POV)
+	winner := "unknown"
+	if ins.Winner >= 0 {
+		winner = fmt.Sprintf("side %d", ins.Winner+1)
+	}
+	fmt.Fprintf(os.Stderr, "%s: %d sides, %d deaths, %d milestones, winner %s, %.1f KB (cost coverage %s, view %s)\n",
+		rid, len(ins.Sides), len(ins.Deaths.F), len(ins.Milestones), winner, float64(len(b))/1024, ins.CostCoverage, ins.POV)
 	if r.publish == nil {
 		fmt.Fprintf(os.Stderr, "wrote %s\n", path)
 		return nil

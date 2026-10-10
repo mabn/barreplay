@@ -22,12 +22,17 @@ import type { Insights, SummaryHandle, SummaryOptions } from "./types";
 export type * from "./types";
 export { comparable, notices } from "./model";
 
-/** The insights file version this build understands. */
-export const INSIGHTS_VERSION = 1;
+/** The newest insights file version this build draws. */
+export const INSIGHTS_VERSION = 2;
+
+/** Every version this build draws, newest first: version 2 only adds to
+ * version 1 (the winner and the swing line), so an older file draws with
+ * those parts missing. A host fetches the first that exists. */
+export const INSIGHTS_VERSIONS = [2, 1];
 
 /** insightsFile names a revision's insights piece. */
-export function insightsFile(rid: string): string {
-  return `${rid}.insights${INSIGHTS_VERSION}.json`;
+export function insightsFile(rid: string, version = INSIGHTS_VERSION): string {
+  return `${rid}.insights${version}.json`;
 }
 
 /** A section draws one part of the summary, or returns null when the file
@@ -37,7 +42,7 @@ export type Section = (ins: Insights, opts: SummaryOptions) => HTMLElement | nul
 export function mountSummary(el: HTMLElement, ins: Insights, opts: SummaryOptions = {}): SummaryHandle {
   ensureStyles(el.ownerDocument);
   const root = h("div", { class: "brs-root" });
-  if (!ins || ins.version !== INSIGHTS_VERSION) {
+  if (!ins || !INSIGHTS_VERSIONS.includes(ins.version)) {
     root.append(h("p", { class: "brs-hint" }, `This summary was built in a format (version ${ins?.version ?? "?"}) this page cannot read.`));
   } else {
     root.append(header(ins));
@@ -54,9 +59,12 @@ export function mountSummary(el: HTMLElement, ins: Insights, opts: SummaryOption
 
 function header(ins: Insights): HTMLElement {
   const sizes = ins.sides.map((s) => s.players.length).join("v");
+  const won = typeof ins.winner === "number" && ins.winner >= 0 && ins.winner < ins.sides.length
+    ? h("span", { class: "brs-winner", style: `color: ${sideColor(ins, ins.winner)}` }, `${sideName(ins, ins.winner)} won`)
+    : null;
   return h("div", undefined,
     h("h2", undefined, ins.mapName || "Game summary"),
-    h("div", { class: "brs-meta" }, [sizes, fmtClock(ins.durationSec), ins.gameId].filter(Boolean).join(" · ")),
+    h("div", { class: "brs-meta" }, won, won ? " · " : null, [sizes, fmtClock(ins.durationSec), ins.gameId].filter(Boolean).join(" · ")),
   );
 }
 

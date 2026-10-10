@@ -377,6 +377,8 @@ func (p *pass) finish() {
 	}
 	sort.SliceStable(o.Milestones, func(i, j int) bool { return o.Milestones[i].F < o.Milestones[j].F })
 	o.Battles = p.battles()
+	o.Winner = winner(o.Sides, p.in.Meta.Winners)
+	o.Swing = swing(o)
 	o.Awards = p.awards()
 	o.Players = p.players()
 	for side := range p.ro.sides {

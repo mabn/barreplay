@@ -279,6 +279,10 @@ type Meta struct {
 	// sampler is injected by this tool, so its build is the tool's own) and
 	// for streams written before the widget reported it.
 	Widget *WidgetInfo `json:"widget,omitempty"`
+	// Winners are the ally teams that won, from the demo's tail. Nil when
+	// unknown: a capture packed without the demo, or a demo that never
+	// recorded an ending.
+	Winners []int32 `json:"winners,omitempty"`
 }
 
 // Writer is the pluggable persistence boundary. Callers must call WriteMeta

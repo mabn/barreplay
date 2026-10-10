@@ -1,16 +1,38 @@
-// The advantage line: how far ahead one side's army was, over the game.
-// Phase 1 of the swing chart (G1): it states the difference in army value,
-// not a win probability — that needs the fitted model (insights v2).
+// Who was ahead: the swing chart (a win probability, sections/swing.ts) when
+// the file carries one, else the plain difference in army value a version 1
+// file can give; the metal income chart under either.
 import { h, s, section } from "../dom";
 import { fmtMetal } from "../format";
 import { bandPath, linePath, stepAt, timeChart } from "../chart";
 import { comparable, sideColor, sideName } from "../model";
+import { swingParts } from "./swing";
 import { diff, maxOf, stepTimes } from "../series";
 import type { Insights, SummaryOptions } from "../types";
 
 export function advantage(ins: Insights, opts: SummaryOptions): HTMLElement | null {
   if (!comparable(ins) || ins.series.t.length < 2) return null;
   const t = stepTimes(ins);
+  const top = swingParts(ins, opts) ?? armyLead(ins, opts, t);
+  // Income beside it: the economy each army was bought with.
+  const mi = ins.series.metalIncome;
+  const peak = Math.max(1, maxOf(mi[0], mi[1]));
+  const inc = timeChart({
+    height: 140, durationSec: ins.durationSec, yMin: 0, yMax: peak * 1.05,
+    yTick: (v) => String(Math.round(v)),
+    onSeek: opts.onSeek,
+    readout: (tt) => {
+      const i = stepAt(t, tt);
+      return i < 0 ? "" : `${mi[0][i].toFixed(1)} vs ${mi[1][i].toFixed(1)} metal/s`;
+    },
+  });
+  for (const side of [0, 1]) {
+    inc.plot.append(s("path", { d: linePath(inc, t, mi[side]), fill: "none", stroke: sideColor(ins, side), "stroke-width": 2 }));
+  }
+  return section(ins.swing ? "Who was winning" : "Army advantage", ...top, h("h3", { style: "margin-top: 14px" }, "Metal income"), inc.svg);
+}
+
+/** armyLead is the version 1 chart: the difference in army value. */
+function armyLead(ins: Insights, opts: SummaryOptions, t: number[]): Element[] {
   const [a, b] = ins.series.army;
   const d = diff(a, b);
   const lim = Math.max(1, maxOf(d.map(Math.abs)));
@@ -37,25 +59,8 @@ export function advantage(ins: Insights, opts: SummaryOptions): HTMLElement | nu
     s("text", { x: c.left + 6, y: c.bottom - 6, style: `fill: ${sideColor(ins, 1)}` }, `▼ ${sideName(ins, 1)}`),
   );
 
-  // Income beside it: the economy each army was bought with.
-  const mi = ins.series.metalIncome;
-  const top = Math.max(1, maxOf(mi[0], mi[1]));
-  const inc = timeChart({
-    height: 140, durationSec: ins.durationSec, yMin: 0, yMax: top * 1.05,
-    yTick: (v) => String(Math.round(v)),
-    onSeek: opts.onSeek,
-    readout: (tt) => {
-      const i = stepAt(t, tt);
-      return i < 0 ? "" : `${mi[0][i].toFixed(1)} vs ${mi[1][i].toFixed(1)} metal/s`;
-    },
-  });
-  for (const side of [0, 1]) {
-    inc.plot.append(s("path", { d: linePath(inc, t, mi[side]), fill: "none", stroke: sideColor(ins, side), "stroke-width": 2 }));
-  }
-  return section("Army advantage",
+  return [
     h("p", { class: "brs-hint" }, "Difference in army value (metal in armed mobile units, commanders excluded). Above the line, the first side is ahead." + (opts.onSeek ? " Click to watch that moment." : "")),
     c.svg,
-    h("h3", { style: "margin-top: 14px" }, "Metal income"),
-    inc.svg,
-  );
+  ];
 }

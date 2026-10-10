@@ -24,6 +24,10 @@ export interface Insights {
   milestones: Milestone[];
   /** The biggest clusters of deaths, in time order. */
   battles: Battle[];
+  /** Index into sides of the winner, -1 unknown. Absent from version 1 files. */
+  winner?: number;
+  /** The win-probability line (version 2, two-sided full-view games). */
+  swing?: Swing;
   awards: Award[];
   /** One report per team a player controlled. */
   players: PlayerReport[];
@@ -74,6 +78,26 @@ export interface Series {
   /** [side][step] = [x, z], the cost-weighted centre of the side's army,
    * or null while it has none. */
   front: (number[] | null)[][];
+}
+
+export interface Swing {
+  /** Per step: the chance side 0 wins, 0..1. */
+  p: number[];
+  moments: Moment[];
+  /** Whether the model was fitted to real games, and to how many. */
+  fitted: boolean;
+  games?: number;
+}
+
+export interface Moment {
+  n: number;
+  f0: number;
+  f1: number;
+  /** The side that gained, and by how much (0..1). */
+  side: number;
+  delta: number;
+  /** Index into battles, -1 for none. */
+  battle: number;
 }
 
 export interface Battle {

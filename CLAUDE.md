@@ -16,6 +16,8 @@ positions is to replay it in the engine and sample state from a read-only Lua wi
 go build ./cmd/barreplay        # build the capture CLI -> ./barreplay
 go build ./cmd/pack             # build the .brepstream -> .brp converter -> ./pack
 go build ./cmd/barreplay-static # build the .brp -> static-hosting bundle packer (for worker/)
+go build ./cmd/insights         # build the game-summary backfill CLI (one replay, or -all)
+go build ./cmd/winfit           # build the win-probability model fitter (reads insights files)
 go build ./cmd/bringest         # build the drag&drop upload daemon (polls the worker's job queue)
 go run ./cmd/insights <gameId|link|rid>   # compute a PUBLISHED replay's game summary and publish replays/<rid>.insights<N>.json beside it (-upload r2 default, local, or empty + -out to just write it; -all walks the catalog; -force recomputes; a local .brp/.brepstream with -rid gives full costs)
 go test ./...                   # all unit tests (no engine required)
@@ -484,6 +486,31 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           building" needs build targets, which a v4 capture lacks (null, not
                           0 — Input.HasTargets). WriteStaticBundle writes the insights piece
                           on EVERY publish (a compute failure only warns).
+                          swing.go (Version 2) adds the WINNER (Insights.Winner, a side index
+                          from Meta.Winners, -1 unknown) and the SWING line: P(side 0 wins)
+                          per step from a logistic model (WinModel) over three antisymmetric
+                          features — log ratios of army value, last-minute metal income and
+                          cumulative income — so an even game is 50% by construction and
+                          the model is never told who won. Moments are the biggest shifts
+                          over a minute (>=12 points, 2 min apart, at most 6), each window
+                          trimmed to where the line actually moved and tied to the battle
+                          overlapping it. WinModel.Coef starts as HAND-SET PRIORS
+                          (Fitted=false, which the page states); cmd/winfit fits them.
+                          WINNERS come from the demo's tail (demofile.Demo.Winners: one byte
+                          per winning ally team right after the packet stream, per
+                          rts/System/LoadSave/demofile.h) into snapshot.Meta.Winners via
+                          BaseMeta, so every demo-backed pack carries them; anything without
+                          (older .brps, rebuilt pieces) gets them from the BAR API's
+                          AllyTeams[].winningTeam in cmd/insights (barapi.Replay.Winners).
+cmd/winfit/main.go        CLI: fits insights.WinModel to games with a known winner and prints
+                          the coefficients to paste into swing.go. Input is insights files:
+                          `insights -upload= -all -out ./ins` (compute-only mode SAVES an
+                          already-published file instead of skipping it) then `winfit ./ins`.
+                          Every step is a sample weighted 1/steps (each game counts once),
+                          mirrored so there is no side bias; Newton's method with a small L2;
+                          refuses under 20 games; reports log loss/accuracy of the current and
+                          fitted weights overall and at 25/50/75/90% of a game. A refit changes
+                          what is computed, so it is a new insights Version.
 cmd/insights/main.go      CLI: the summary BACKFILL, one replay at a time (or -all). Old replays
                           have no .brp anywhere, only their split pieces, so it resolves a
                           gameId/link through the catalog (current rid + the row's view, the
@@ -529,6 +556,11 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           (sections/player.ts) is not in SECTIONS: player names in the Sides
                           cards are buttons that open it below them (reportsShown — full view
                           and a players list), one at a time, a second click closing it.
+                          The library draws versions 1 and 2 (INSIGHTS_VERSIONS; v2 only adds
+                          winner + swing) and app.js fetches .insights2 then .insights1: the
+                          advantage section is "Who was winning" (sections/swing.ts, numbered
+                          moment markers that seek) when the file has a swing line, else the
+                          v1 army-difference chart; the header names the winner.
 internal/viz/readbundle.go ReadStaticBundle: the inverse of WriteStaticBundle, rebuilding a
                           BRPFile from published pieces through a PieceFetcher. Defs come back
                           from the head only (names, footprints, armyCost -> MetalCost, CanFly

@@ -40,6 +40,9 @@ type Header struct {
 	ScriptSize     int32
 	DemoStreamSize int32
 	GameTime       int32 // total game-time seconds
+	// WinningAllyTeams is how many ally teams the demo's tail names as
+	// winners; the ids themselves are Demo.Winners.
+	WinningAllyTeams int32
 }
 
 // Demo bundles the parsed header and startscript, plus the player comms
@@ -52,6 +55,10 @@ type Demo struct {
 	// authoritative record of it (see comms.go). Empty for a demo whose stream
 	// is absent or truncated, which is not an error.
 	Comms []snapshot.Comm
+	// Winners are the winning ally teams, read from the bytes that follow the
+	// packet stream. Nil when the header names none or the demo ends early
+	// (a game the engine never saw end, or a demo cut short by a crash).
+	Winners []int32
 }
 
 // rawHeader mirrors the on-disk packed layout for binary.Read. Field order and
@@ -112,6 +119,8 @@ func Parse(r io.Reader) (*Demo, error) {
 		ScriptSize:     rh.ScriptSize,
 		DemoStreamSize: rh.DemoStreamSize,
 		GameTime:       rh.GameTime,
+
+		WinningAllyTeams: rh.WinningAllyTeams,
 	}
 
 	// The header may be larger than our struct in future versions; skip any
@@ -150,5 +159,29 @@ func Parse(r io.Reader) (*Demo, error) {
 	}
 	comms := scanComms(stream)
 
-	return &Demo{Header: h, ScriptRaw: scriptRaw, Startscript: ss, Comms: comms}, nil
+	return &Demo{Header: h, ScriptRaw: scriptRaw, Startscript: ss, Comms: comms, Winners: readWinners(gz, stream, h)}, nil
+}
+
+// readWinners reads the winning ally teams the engine writes right after the
+// packet stream, one byte each (rts/System/LoadSave/demofile.h). It needs the
+// stream's declared size to know where the stream ends, and gives up on any
+// short read: winners are a nicety, never a reason to fail a parse.
+func readWinners(gz io.Reader, stream io.Reader, h Header) []int32 {
+	n := h.WinningAllyTeams
+	if n <= 0 || n > 255 || h.DemoStreamSize <= 0 {
+		return nil
+	}
+	// scanComms may stop early on a chunk it cannot parse; skip what it left.
+	if _, err := io.Copy(io.Discard, stream); err != nil {
+		return nil
+	}
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(gz, buf); err != nil {
+		return nil
+	}
+	out := make([]int32, n)
+	for i, b := range buf {
+		out[i] = int32(b)
+	}
+	return out
 }
