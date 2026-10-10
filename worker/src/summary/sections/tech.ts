@@ -49,7 +49,10 @@ export function tech(ins: Insights, opts: SummaryOptions): HTMLElement | null {
       rows: [{ color: owner ? teamColor(ins, m.team) : sideColor(ins, m.side), label: owner || sideName(ins, m.side), value: def?.human || def?.name || "?" }],
       note: watchNote(watch),
     });
-    if (watch) dot.addEventListener("click", () => watch(clipAround(m.f, { title: `${m.label}: ${def?.human || def?.name || "?"}` })));
+    // Zoomed to the unit that got there, and following it out of its lab.
+    const at = m.pos ? { x: m.pos[0], z: m.pos[1], r: 700 } : {};
+    const follow = m.unit !== undefined ? { follow: { id: m.unit, def: m.def } } : {};
+    if (watch) dot.addEventListener("click", () => watch(clipAround(m.f, { ...at, ...follow, title: `${m.label}: ${def?.human || def?.name || "?"}` })));
     marks.append(dot);
   }
   c.svg.append(marks);

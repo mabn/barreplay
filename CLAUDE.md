@@ -747,7 +747,12 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           untinted BAR icon with a count (Battle.lost[].units, v4: def/n/metal,
                           costliest first, at most 48). Defs sharing a bitmap are one kind,
                           added up (losskinds.ts lossKinds), and only the kinds carrying 90%
-                          of the metal show; the rest sit behind a "+N more" chip. ICONS (icons.ts unitIcon) come from
+                          of the metal show; the rest sit behind a "+N more" chip. The side that
+                          lost less is BOXED in its colour with an "ahead" chip (no verdict
+                          sentence), and each side's fighters sit over its own column.
+                          Race to tech's clips zoom to and FOLLOW the milestone's unit
+                          (Milestone.unit/pos, v4); the player's Built and lost strip is
+                          log by default with a Linear/Log toggle. ICONS (icons.ts unitIcon) come from
                           the viewer's /icons/icontypes.json, looked up by the insights def's
                           `icon` (its iconType) then its name; SummaryOptions.iconBase names
                           the origin, defaulting to the one the module was loaded from, null

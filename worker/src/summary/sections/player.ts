@@ -8,6 +8,7 @@
 import { h, s, section } from "../dom";
 import { fmtClock, fmtMetal } from "../format";
 import { stepAt, timeChart } from "../chart";
+import { scaleToggle } from "../scale";
 import { swatch } from "../legend";
 import { mapView } from "../mapview";
 import { sideColor, sideName, teamColor } from "../model";
@@ -188,6 +189,16 @@ function commanderMap(ins: Insights, players: PlayerReport[], pick: (pl: PlayerR
 /** strip: built above the axis, lost below, chat as dots, and the two
  * moments of the commander's day as lines. */
 function strip(ins: Insights, pl: PlayerReport, watch: Watch | null): HTMLElement {
+  const holder = h("div");
+  const draw = (log: boolean) => holder.replaceChildren(stripChart(ins, pl, watch, log));
+  draw(true);
+  const head = h("h3", undefined, "Built and lost");
+  head.append(scaleToggle(true, draw));
+  return h("div", { style: "margin-top: 14px" }, head, holder);
+}
+
+/** stripChart draws the strip on a linear or log scale. */
+function stripChart(ins: Insights, pl: PlayerReport, watch: Watch | null, log: boolean): HTMLElement {
   const priced = ins.costCoverage === "full";
   const built = priced ? pl.strip.builtMetal : pl.strip.builtN;
   const lost = priced ? pl.strip.lostMetal : pl.strip.lostN;
@@ -196,7 +207,7 @@ function strip(ins: Insights, pl: PlayerReport, watch: Watch | null): HTMLElemen
   const fmt = (v: number) => (priced ? fmtMetal(v) : String(Math.round(v)));
   const color = teamColor(ins, pl.team);
   const c = timeChart({
-    height: 170, durationSec: ins.durationSec, yMin: -top, yMax: top, zeroLine: true,
+    height: 170, durationSec: ins.durationSec, yMin: -top, yMax: top, zeroLine: true, log: log ? { unit: priced ? 100 : 1 } : undefined,
     yTick: (v) => fmt(Math.abs(v)), watch,
     readout: (tt) => {
       const i = stepAt(t, tt);
@@ -229,7 +240,7 @@ function strip(ins: Insights, pl: PlayerReport, watch: Watch | null): HTMLElemen
     swatch(color, `built${priced ? " (metal)" : " (units)"}, above`),
     swatch("#e06a5a", "lost, below"),
     said ? h("span", undefined, "● chat") : null);
-  return h("div", { style: "margin-top: 14px" }, h("h3", undefined, "Built and lost"), key, c.svg);
+  return h("div", undefined, key, c.svg);
 }
 
 /** diary: the commander's day in a few lines. */

@@ -161,6 +161,11 @@ type Milestone struct {
 	Team  int32  `json:"team"`
 	Def   int32  `json:"def"`
 	F     int32  `json:"f"`
+	// The unit that reached it, and where it was last sampled before it
+	// finished (absent when it never was): its clip zooms there and
+	// follows it.
+	Unit int32     `json:"unit,omitempty"`
+	Pos  *[2]int32 `json:"pos,omitempty"`
 }
 
 type ChatLine struct {

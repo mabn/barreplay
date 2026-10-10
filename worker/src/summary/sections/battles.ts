@@ -10,7 +10,7 @@ import { fmtClock, fmtMetal } from "../format";
 import { mapView } from "../mapview";
 import { comparable, sideColor, sideName } from "../model";
 import { compass, fighters } from "../moments";
-import { fightersLine } from "../names";
+import { fighterNames } from "../names";
 import { iconImg, iconSrc } from "../icons";
 import { lossKinds, type LossKind } from "../losskinds";
 import { tip, type TipRow } from "../tooltip";
@@ -165,6 +165,10 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
 
   function battleDetail(i: number): HTMLElement {
     const b = ins.battles[i];
+    // The side that lost less is boxed in its colour: which side came out
+    // ahead, without a sentence saying so (an even trade boxes neither).
+    const [a, c] = [size(b.lost[0] ?? { n: 0, metal: 0 }), size(b.lost[1] ?? { n: 0, metal: 0 })];
+    const ahead = a === c ? -1 : a < c ? 0 : 1;
     // One column a side, side by side: who, how much, then what — each
     // kind of unit lost as its icon with a count.
     const lossCol = (sd: number) => {
@@ -172,18 +176,29 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
       const units = l.units ?? l.top.map((def) => ({ def, n: 0, metal: 0 }));
       const list = h("div", { class: "brs-units" });
       void fillUnits(list, units);
-      return h("div", { class: "brs-losscol" },
-        h("div", { style: `color: ${sideColor(ins, sd)}` }, sideName(ins, sd)),
+      const won = sd === ahead;
+      const head = h("div", { class: "brs-losshead", style: `color: ${sideColor(ins, sd)}` }, sideName(ins, sd));
+      if (won) {
+        const bg = sideColor(ins, sd);
+        const mark = h("span", { class: "brs-ahead", style: `background: ${bg}; color: ${inkOn(bg)}` }, "▲ ahead");
+        tip(mark, { title: `${sideName(ins, sd)} lost less here` });
+        head.append(mark);
+      }
+      return h("div", { class: "brs-losscol" + (won ? " brs-won" : ""), style: `--brs-side: ${sideColor(ins, sd)}` },
+        head,
         h("div", { class: "brs-muted" }, `${l.n} lost` + (priced && l.metal ? ` · ${fmt(l.metal)} metal` : "")),
         list);
     };
+    // Who fought, each side's names over its own column.
+    const fs = fighters(ins, b);
+    const names = fs.some((l) => l.length)
+      ? [fighterNames(ins, fs[0] ?? [], 0), h("span", { class: "brs-muted brs-vs" }, "vs"), fighterNames(ins, fs[1] ?? [], 1)]
+      : [];
     const play = watch ? h("button", { class: "brs-watchbtn", type: "button" }, "▶ Watch this battle") : null;
     if (play && watch) play.addEventListener("click", () => watch(clipOf(b, i)));
     return h("div", undefined,
       h("div", undefined, h("b", undefined, `Battle ${i + 1}`), h("span", { class: "brs-muted" }, ` · ${when(b)} · ${compass(ins, b.x, b.z)}`)),
-      h("div", { style: "margin: 2px 0 6px" }, verdict(b)),
-      fightersLine(ins, fighters(ins, b)),
-      h("div", { class: "brs-losscols" }, lossCol(0), lossCol(1)), play);
+      h("div", { class: "brs-losscols" }, ...names, lossCol(0), h("span"), lossCol(1)), play);
   }
 
   const list = ins.battles.length
@@ -196,4 +211,16 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
   return section("Map story",
     h("p", { class: "brs-hint" }, "Lines: where each army stood, faint early and bright late. Numbers: the biggest fights in the order they happened, each ringed by the ground it covered. Click one for its losses."),
     h("div", { class: "brs-storygrid" }, h("div", { class: "brs-mapwrap" }, view.svg), list));
+}
+
+/** inkOn is black or white, whichever reads on the colour hex. */
+function inkOn(hex: string): string {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(hex);
+  if (!m) return "#000";
+  const lin = (x: string) => {
+    const c = parseInt(x, 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  };
+  const l = 0.2126 * lin(m[1]) + 0.7152 * lin(m[2]) + 0.0722 * lin(m[3]);
+  return l > 0.179 ? "#000" : "#fff";
 }

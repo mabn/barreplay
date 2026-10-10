@@ -27,7 +27,14 @@ export const CSS = `
 .brs-root .brs-stat { display: flex; justify-content: space-between; gap: 10px;
   font-variant-numeric: tabular-nums; }
 .brs-root .brs-stat span { color: var(--brs-muted); }
-.brs-root .brs-losscols { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; margin: 6px 0 8px; }
+.brs-root .brs-losscols { display: grid; grid-template-columns: 1fr auto 1fr; gap: 6px 8px; margin: 6px 0 8px; align-items: start; }
+.brs-root .brs-losscols > .brs-fnames { padding: 0 9px; }
+.brs-root .brs-vs { align-self: center; }
+.brs-root .brs-losscol { border: 1px solid transparent; border-radius: 6px; padding: 5px 8px; }
+.brs-root .brs-losscol.brs-won { border-color: var(--brs-side);
+  background: color-mix(in srgb, var(--brs-side) 9%, transparent); }
+.brs-root .brs-losshead { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+.brs-root .brs-ahead { font-size: 10px; font-weight: 700; border-radius: 8px; padding: 0 6px; line-height: 15px; }
 .brs-root .brs-units { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; }
 .brs-root .brs-unit { display: inline-flex; align-items: center; gap: 3px; font-variant-numeric: tabular-nums; color: var(--brs-muted); }
 .brs-root .brs-uicon { width: 22px; height: 22px; object-fit: contain; }

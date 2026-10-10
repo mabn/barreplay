@@ -217,6 +217,10 @@ export interface Milestone {
   def: number;
   /** Sim frame (30 per game-second). */
   f: number;
+  /** Version 4: the unit that reached it, and where it was last sampled
+   * before it finished. */
+  unit?: number;
+  pos?: [number, number];
 }
 
 export interface ChatLine {

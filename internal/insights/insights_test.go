@@ -103,6 +103,10 @@ func TestMilestones(t *testing.T) {
 	got := map[key]int32{}
 	for _, m := range ins.Milestones {
 		got[key{m.Key, m.Side}] = m.F
+		// Each names the unit that got there, for its clip to follow.
+		if m.Unit == 0 {
+			t.Errorf("milestone %+v names no unit", m)
+		}
 	}
 	want := map[key]int32{{"t2lab", 0}: 120 * 30, {"t2lab", 1}: 150 * 30, {"fusion", 1}: 240 * 30}
 	if len(got) != len(want) {

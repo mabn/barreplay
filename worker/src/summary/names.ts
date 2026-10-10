@@ -21,6 +21,23 @@ export function playerName(ins: Insights, name: string, tag: "span" | "b" = "spa
   return h(tag, c ? { style: `color: ${c}` } : undefined, name);
 }
 
+/** fighterNames is one side's fighters, each name in its colour with what
+ * it brought on hover — the side's own name when it names nobody. */
+export function fighterNames(ins: Insights, list: Fighter[], sd: number): HTMLElement {
+  const out = h("span", { class: "brs-fnames" });
+  if (!list.length) {
+    out.append(h("span", { style: `color: ${sideColor(ins, sd)}` }, sideName(ins, sd)));
+    return out;
+  }
+  list.forEach((f, k) => {
+    if (k) out.append(", ");
+    const el = playerName(ins, f.name, "b");
+    tip(el, { title: f.name, rows: [{ label: "Army there + lost + killed there", value: `${fmtMetal(f.metal)} metal · ${Math.round(f.share * 100)}% of ${sideName(ins, sd)}` }] });
+    out.append(el);
+  });
+  return out;
+}
+
 /** fightersLine is who fought a battle, side against side — "BenzWillEs vs
  * mirtandir, Paracetamolletje" — each name in its colour, with what each
  * brought on hover. Null when no side names anyone. */
@@ -29,16 +46,7 @@ export function fightersLine(ins: Insights, sides: Fighter[][]): HTMLElement | n
   const out = h("div", { class: "brs-fighters" });
   sides.forEach((list, sd) => {
     if (sd) out.append(h("span", { class: "brs-muted" }, " vs "));
-    if (!list.length) {
-      out.append(h("span", { style: `color: ${sideColor(ins, sd)}` }, sideName(ins, sd)));
-      return;
-    }
-    list.forEach((f, k) => {
-      if (k) out.append(", ");
-      const el = playerName(ins, f.name, "b");
-      tip(el, { title: f.name, rows: [{ label: "Army there + lost + killed there", value: `${fmtMetal(f.metal)} metal · ${Math.round(f.share * 100)}% of ${sideName(ins, sd)}` }] });
-      out.append(el);
-    });
+    out.append(fighterNames(ins, list, sd));
   });
   return out;
 }

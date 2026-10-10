@@ -213,7 +213,11 @@ func (p *pass) event(e snapshot.Event) {
 		if d.milestone >= 0 && side >= 0 && !p.reached[[2]int{d.milestone, side}] {
 			p.reached[[2]int{d.milestone, side}] = true
 			ms := milestoneDefs[d.milestone]
-			p.out.Milestones = append(p.out.Milestones, Milestone{Key: ms.Key, Label: ms.Label, Side: side, Team: e.Team, Def: e.DefID, F: e.Frame})
+			m := Milestone{Key: ms.Key, Label: ms.Label, Side: side, Team: e.Team, Def: e.DefID, F: e.Frame, Unit: e.UnitID}
+			if pos, ok := p.lastPos[e.UnitID]; ok {
+				m.Pos = &pos
+			}
+			p.out.Milestones = append(p.out.Milestones, m)
 			p.usedDef[e.DefID] = true
 		}
 	case snapshot.EventDestroyed:
