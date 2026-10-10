@@ -327,8 +327,8 @@ func run() error {
 	if mb, ok := fileSizeMB(outPath); ok {
 		fmt.Fprintf(os.Stderr, "  snapshot: %.2f MB\n", mb)
 	}
-	fmt.Fprintf(os.Stderr, "  analysis: %d facts, %d damage windows, %d unit lives, %d visibility samples\n",
-		stats.Facts, stats.DamageWindows, stats.Lives, stats.Visibility)
+	fmt.Fprintf(os.Stderr, "  analysis: %d facts, %d hits, %d unit ends, %d visibility samples\n",
+		stats.Facts, stats.Hits, stats.UnitEnds, stats.Visibility)
 	return nil
 }
 
