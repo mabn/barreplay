@@ -6,6 +6,7 @@ import { fmtMetal } from "../format";
 import { bandPath, linePath, stepAt, timeChart } from "../chart";
 import { comparable, sideColor, sideName } from "../model";
 import { swingParts } from "./swing";
+import { mirrorKey } from "../legend";
 import { diff, maxOf, stepTimes } from "../series";
 import type { Insights, SummaryOptions } from "../types";
 
@@ -54,12 +55,9 @@ function armyLead(ins: Insights, opts: SummaryOptions, t: number[]): Element[] {
     s("path", { d: bandPath(c, t, d.map((v) => Math.min(0, v)), zero), fill: sideColor(ins, 1), "fill-opacity": 0.35 }),
     s("path", { d: linePath(c, t, d), fill: "none", stroke: "var(--brs-text)", "stroke-width": 1.5 }),
   );
-  c.svg.append(
-    s("text", { x: c.left + 6, y: c.top + 24, style: `fill: ${sideColor(ins, 0)}` }, `▲ ${sideName(ins, 0)}`),
-    s("text", { x: c.left + 6, y: c.bottom - 6, style: `fill: ${sideColor(ins, 1)}` }, `▼ ${sideName(ins, 1)}`),
-  );
 
   return [
+    mirrorKey(ins),
     h("p", { class: "brs-hint" }, "Difference in army value (metal in armed mobile units, commanders excluded). Above the line, the first side is ahead." + (opts.onSeek ? " Click to watch that moment." : "")),
     c.svg,
   ];

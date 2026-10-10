@@ -32,10 +32,13 @@ export interface TimeChartSpec {
   onSeek?: (frame: number) => void;
   /** Draws the zero line strongly (a difference chart). */
   zeroLine?: boolean;
+  /** Width of the left gutter, overriding the y axis's; row labels live in
+   * it so they never sit on the data. */
+  gutter?: number;
 }
 
 export function timeChart(spec: TimeChartSpec): TimeChart {
-  const left = spec.yTick ? 52 : 8;
+  const left = spec.gutter ?? (spec.yTick ? 52 : 8);
   const right = CHART_W - 10;
   const top = 8;
   const bottom = spec.height - 22;

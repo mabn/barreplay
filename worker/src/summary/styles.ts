@@ -47,6 +47,13 @@ export const CSS = `
 .brs-root .brs-print { width: 320px; max-width: 100%; flex: 0 0 auto; }
 .brs-root .brs-chat { max-height: 320px; overflow-y: auto; margin-top: 10px; border-top: 1px solid var(--brs-line); padding-top: 8px; }
 .brs-root .brs-line { padding: 1px 0; overflow-wrap: anywhere; }
+.brs-root .brs-moment { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; border-top: 1px solid var(--brs-grid); }
+.brs-root .brs-moment:first-child { border-top: 0; }
+.brs-root .brs-num { flex: 0 0 auto; width: 20px; height: 20px; border-radius: 50%; color: #000; font-weight: 600; font-size: 12px; text-align: center; line-height: 20px; margin-top: 1px; }
+.brs-root .brs-muted { color: var(--brs-muted); }
+.brs-root .brs-printkey { display: grid; gap: 8px; font-size: 13px; color: var(--brs-muted); min-width: 220px; }
+.brs-root .brs-printkey .brs-printtitle { color: var(--brs-text); font-weight: 600; letter-spacing: .08em; text-transform: uppercase; font-size: 14px; }
+.brs-root .brs-printkey i { display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 8px; vertical-align: -1px; }
 .brs-root .brs-when { color: var(--brs-muted); font-variant-numeric: tabular-nums; }
 .brs-root .brs-dest { color: var(--brs-muted); }
 .brs-root .brs-playerbtn { all: unset; cursor: pointer; color: var(--brs-text); border-bottom: 1px dotted var(--brs-muted); }

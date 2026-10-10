@@ -5,6 +5,7 @@ import { test } from "node:test";
 
 import { fmtClock, fmtMetal, niceStep, timeStep } from "../src/summary/format";
 import { comparable, notices, readable, sideColor, sideName } from "../src/summary/model";
+import { compass, momentStory } from "../src/summary/moments";
 import type { Insights } from "../src/summary/types";
 
 function ins(over: Partial<Insights> = {}): Insights {
@@ -57,4 +58,43 @@ test("side labels and colours", () => {
   assert.notEqual(readable("#0000ff"), "#0000ff", "pure blue is lifted");
   assert.notEqual(sideColor(ins(), 0), "#112233");
   assert.match(sideColor(ins(), 1), /^#[0-9a-f]{6}$/);
+});
+
+test("compass splits the map in thirds", () => {
+  const i = ins({ bounds: { minX: 0, maxX: 900, minZ: 0, maxZ: 900 } });
+  assert.equal(compass(i, 100, 100), "the north-west");
+  assert.equal(compass(i, 450, 450), "the centre");
+  assert.equal(compass(i, 800, 450), "the east");
+  assert.equal(compass(i, 450, 800), "the south");
+});
+
+test("a moment is named after what died in it", () => {
+  const base = {
+    battles: [],
+    bounds: { minX: 0, maxX: 900, minZ: 0, maxZ: 900 },
+    teams: [{ team: 0, side: 0, player: "Ann" }, { team: 1, side: 1, player: "Cy" }],
+    defs: { "1": { name: "armcom", human: "Commander", cost: 1200 }, "2": { name: "armpw", human: "Pawn", cost: 50 }, "3": { name: "corkorg", human: "Juggernaut", cost: 3000 } },
+    series: { t: [0, 15, 30, 45], army: [[0, 100, 200, 300], [0, 100, 900, 1200]], metalIncome: [], energyIncome: [], armyCats: [], armyByCat: [] },
+  };
+  const deaths = (rows: [number, number, number, number, number][]) => ({
+    f: rows.map((r) => r[0]), def: rows.map((r) => r[1]), team: rows.map((r) => r[2]), x: rows.map((r) => r[3]), z: rows.map((r) => r[4]),
+    cost: rows.map((r) => (base.defs as Record<string, { cost: number }>)[String(r[1])].cost), unfinished: rows.map(() => 0),
+  });
+  const m = { n: 1, f0: 900, f1: 1350, side: 1, delta: 0.3, battle: -1 };
+  // Ann's commander dies in the north-west: that names it.
+  let st = momentStory(ins({ ...base, deaths: deaths([[1000, 1, 0, 100, 100], [1000, 2, 1, 100, 100]]) }), m);
+  assert.equal(st.title, "Ann's commander falls in the north-west");
+  assert.equal(st.detail, "Ann +1 lost 1 unit (1.2k metal): Commander; Cy lost 1 unit (50 metal): Pawn.");
+  // One big unit is most of the loss.
+  st = momentStory(ins({ ...base, deaths: deaths([[1000, 3, 0, 800, 800], [1000, 2, 0, 800, 800]]) }), m);
+  assert.equal(st.title, "Ann +1 loses a Juggernaut in the south-east");
+  // A lopsided trade of small units is a won fight.
+  st = momentStory(ins({ ...base, deaths: deaths(Array.from({ length: 10 }, () => [1000, 2, 0, 450, 450] as [number, number, number, number, number])) }), m);
+  assert.equal(st.title, "Cy wins the fight in the centre");
+  // Nothing died: the armies pulled apart.
+  st = momentStory(ins({ ...base, deaths: deaths([]) }), m);
+  assert.equal(st.title, "Cy out-builds Ann +1");
+  // Deaths outside the window (and the step before it) do not count.
+  st = momentStory(ins({ ...base, deaths: deaths([[100, 1, 0, 100, 100]]) }), m);
+  assert.equal(st.lost[0].n, 0);
 });

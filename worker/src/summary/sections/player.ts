@@ -5,6 +5,7 @@
 import { h, s, section } from "../dom";
 import { fmtClock, fmtMetal } from "../format";
 import { stepAt, timeChart } from "../chart";
+import { swatch } from "../legend";
 import { mapView } from "../mapview";
 import { readable, sideColor } from "../model";
 import { stepTimes } from "../series";
@@ -25,7 +26,7 @@ export function playerReport(ins: Insights, pl: PlayerReport, opts: SummaryOptio
 
 /** strip: built above the axis, lost below, chat as ticks, and the two
  * moments of the commander's day as lines. */
-function strip(ins: Insights, pl: PlayerReport, opts: SummaryOptions): SVGSVGElement {
+function strip(ins: Insights, pl: PlayerReport, opts: SummaryOptions): HTMLElement {
   const priced = ins.costCoverage === "full";
   const built = priced ? pl.strip.builtMetal : pl.strip.builtN;
   const lost = priced ? pl.strip.lostMetal : pl.strip.lostN;
@@ -56,13 +57,12 @@ function strip(ins: Insights, pl: PlayerReport, opts: SummaryOptions): SVGSVGEle
   };
   moment(pl.commander.firstContact, "first contact");
   moment(pl.commander.died, "commander died");
-  // Labels at the right end, where a game's last minutes are usually quiet
-  // and the chat dots along the bottom start at the left.
   const said = pl.strip.chat.some((n) => n > 0);
-  c.svg.append(
-    s("text", { x: c.right - 6, y: c.top + 24, "text-anchor": "end" }, `▲ built${priced ? "" : " (units)"}`),
-    s("text", { x: c.right - 6, y: c.bottom - 12, "text-anchor": "end" }, said ? "▼ lost · ● chat" : "▼ lost"));
-  return c.svg;
+  const key = h("div", { class: "brs-legend" },
+    swatch(color, `built${priced ? " (metal)" : " (units)"}, above`),
+    swatch("#e06a5a", "lost, below"),
+    said ? h("span", undefined, "● chat") : null);
+  return h("div", undefined, key, c.svg);
 }
 
 /** diary: the commander's path, coloured by its health, over the map. */

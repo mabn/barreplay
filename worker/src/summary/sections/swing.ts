@@ -6,7 +6,9 @@
 import { h, s } from "../dom";
 import { fmtClock } from "../format";
 import { bandPath, linePath, stepAt, timeChart } from "../chart";
+import { mirrorKey } from "../legend";
 import { sideColor, sideName } from "../model";
+import { momentStory } from "../moments";
 import { stepTimes } from "../series";
 import { SIM_FPS, type Insights, type SummaryOptions } from "../types";
 
@@ -44,38 +46,40 @@ export function swingParts(ins: Insights, opts: SummaryOptions): Element[] | nul
     s("path", { d: linePath(c, t, d), fill: "none", stroke: "var(--brs-text)", "stroke-width": 1.5 }),
   );
   const seekTo = (f0: number) => opts.onSeek?.(Math.max(0, f0 - LEAD_IN_SEC * SIM_FPS));
-  for (const m of sw.moments) {
+  const stories = sw.moments.map((m) => momentStory(ins, m));
+  sw.moments.forEach((m, k) => {
     const tt = m.f1 / SIM_FPS;
     const i = stepAt(t, tt);
     const y = c.y(i < 0 ? 0 : d[i]);
     const g = s("g", { class: opts.onSeek ? "brs-clickable" : null },
       s("circle", { cx: c.x(tt), cy: y, r: 9, fill: sideColor(ins, m.side), stroke: "var(--brs-bg)", "stroke-width": 2 }),
       s("text", { x: c.x(tt), y: y + 4, "text-anchor": "middle", style: "fill: #000; font-weight: 600" }, String(m.n)),
+      s("title", undefined, `${m.n}. ${stories[k].title}`),
     );
     if (opts.onSeek) g.addEventListener("click", (ev) => {
       ev.stopPropagation();
       seekTo(m.f0);
     });
     c.plot.append(g);
-  }
-  c.svg.append(
-    s("text", { x: c.left + 6, y: c.top + 24, style: `fill: ${sideColor(ins, 0)}` }, `▲ ${sideName(ins, 0)}`),
-    s("text", { x: c.left + 6, y: c.bottom - 6, style: `fill: ${sideColor(ins, 1)}` }, `▼ ${sideName(ins, 1)}`),
-  );
+  });
 
-  const rows = sw.moments.map((m) => {
-    const when = h("b", { class: opts.onSeek ? "brs-seek" : null }, `${m.n}. ${fmtClock(m.f0 / SIM_FPS)}–${fmtClock(m.f1 / SIM_FPS)}`);
+  const rows = sw.moments.map((m, k) => {
+    const st = stories[k];
+    const when = h("span", { class: opts.onSeek ? "brs-seek" : null }, `${fmtClock(m.f0 / SIM_FPS)}–${fmtClock(m.f1 / SIM_FPS)}`);
     if (opts.onSeek) when.addEventListener("click", () => seekTo(m.f0));
-    const bt = m.battle >= 0 ? ins.battles[m.battle] : undefined;
-    const where = bt ? `, with a battle at ${fmtClock(bt.f0 / SIM_FPS)}` : "";
-    return h("div", { class: "brs-line" }, when, " ",
-      h("span", { style: `color: ${sideColor(ins, m.side)}` }, sideName(ins, m.side)),
-      ` +${pct(m.delta)}${where}`);
+    const battle = st.battle >= 0 ? ` See battle ${st.battle + 1} on the map.` : "";
+    return h("div", { class: "brs-moment" },
+      h("span", { class: "brs-num", style: `background: ${sideColor(ins, m.side)}` }, String(m.n)),
+      h("div", undefined,
+        h("div", undefined, h("b", undefined, st.title), " ", h("span", { class: "brs-muted" }, "· "), when, " ",
+          h("span", { style: `color: ${sideColor(ins, m.side)}` }, `${sideName(ins, m.side)} +${pct(m.delta)}`)),
+        h("div", { class: "brs-hint" }, st.detail + battle)));
   });
   const model = sw.fitted
     ? `fitted to ${sw.games ?? "past"} games`
     : "with hand-set weights, not yet fitted to real games";
   const parts: Element[] = [
+    mirrorKey(ins),
     h("p", { class: "brs-hint" },
       `The chance each side wins, as army value and metal income read at each moment (a model ${model}; it is never told the result).` +
       (opts.onSeek ? " Click to watch that moment." : "")),

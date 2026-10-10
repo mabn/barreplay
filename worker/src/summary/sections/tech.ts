@@ -20,12 +20,12 @@ export function tech(ins: Insights, opts: SummaryOptions): HTMLElement | null {
     }
   }
   const rowH = 26;
-  const c = timeChart({ height: keys.length * rowH + 34, durationSec: ins.durationSec, yMin: 0, yMax: keys.length, yTick: null, onSeek: opts.onSeek });
+  const c = timeChart({ height: keys.length * rowH + 34, durationSec: ins.durationSec, yMin: 0, yMax: keys.length, yTick: null, onSeek: opts.onSeek, gutter: 130 });
   keys.forEach((k, r) => {
     const y = c.top + (r + 0.5) * rowH;
     c.plot.append(
       s("line", { x1: c.left, x2: c.right, y1: y, y2: y, stroke: "var(--brs-grid)" }),
-      s("text", { x: c.left + 4, y: y - 7 }, labels.get(k) ?? k),
+      s("text", { x: c.left - 12, y: y + 4, "text-anchor": "end" }, labels.get(k) ?? k),
     );
   });
   // Milestones sit ABOVE the hit area, so each is its own click target.
