@@ -19,7 +19,7 @@ go build ./cmd/barreplay-static # build the .brp -> static-hosting bundle packer
 go build ./cmd/insights         # build the game-summary backfill CLI (one replay, or -all)
 go build ./cmd/winfit           # build the win-probability model fitter (reads insights files)
 go build ./cmd/bringest         # build the drag&drop upload daemon (polls the worker's job queue)
-go run ./cmd/insights <gameId|link|rid>   # compute a PUBLISHED replay's game summary and publish replays/<rid>.insights<N>.json beside it (-upload r2 default, local, or empty + -out to just write it; -all walks the catalog, -from/-to narrow it to games started in a date range (YYYY-MM-DD or unix seconds); -j N replays at once, default 4; -force recomputes; a local .brp/.brepstream with -rid gives full costs)
+go run ./cmd/insights <gameId|link|rid>   # compute a PUBLISHED replay's game summary and publish replays/<rid>.insights<N>.json beside it (-upload r2 default, local, or empty + -out to just write it; -all walks the catalog, -from/-to narrow it to games started in a date range (YYYY-MM-DD or unix seconds); -j N replays at once, default 4; -force recomputes; a local .brp/.brepstream with -rid gives full costs; everything read from the real bucket is kept under ~/.cache/barreplay/<bucket host>/ so a re-run downloads only what is new — -cache DIR moves it, -cache= turns it off)
 go test ./...                   # all unit tests (no engine required)
 go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
 go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, no engine
@@ -629,6 +629,25 @@ cmd/insights/main.go      CLI: the summary BACKFILL, one replay at a time (or -a
                           capture (.brp, or a .brepstream it packs first) is the way back
                           to full costs for a pieces-only replay — e.g. an upload's archived
                           stream — with -rid naming the published revision it belongs to.
+                          LOCAL CACHE (cache.go): every object fetch reads (a .brp, a piece,
+                          a published insights file) is kept at <cache>/<bucket host>/<key>,
+                          and each summary it publishes is stored there too — so the second
+                          -all, the -upload= -all -out pass that collects files for winfit,
+                          and the recompute after a refit download only what is new. Sound
+                          only because the bucket is append-only: a key never changes bytes
+                          (the one exception, -force republishing a summary under its own
+                          name, goes through the cache too); misses are NOT remembered, since
+                          a 404 becomes an object the moment something is published there.
+                          -cache defaults to "auto" = os.UserCacheDir()/barreplay for r2 and
+                          NO cache for local, whose simulator bucket gets wiped and refilled
+                          (a main replay's unsuffixed key can come back holding another
+                          capture). Writes go through a temp file + rename so a killed run
+                          leaves no truncated copy, and so that -j's replays in flight, which
+                          share ONE cache, can race on a key (each writes its own temp file,
+                          the last rename wins with the same bytes; only the closing line's
+                          tallies take a lock); a cache that cannot be written only warns.
+                          Keys are refused unless they are clean relative paths, since the
+                          rid in them comes from the catalog.
                           Nothing writes pieces any more, so the rebuild tests (here and in
                           internal/viz) read testdata/legacy/: a bundle cut by the last
                           encoder that wrote them, beside the .brp it came from.

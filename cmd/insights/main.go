@@ -40,6 +40,12 @@
 // how a main replay, whose rid does not spell its rev, is found — and failing
 // that the flat <gameId>-<rev> of a publish from before month folders.
 //
+// Everything read from the bucket is kept on disk (-cache; by default under
+// the user cache dir, for the real bucket only), so running this over the
+// whole catalog again, or once more with -upload= to collect the files for
+// cmd/winfit, downloads only what the last run did not. The bucket never
+// rewrites a published object, so a kept copy is never stale.
+//
 // -upload names a destination exactly as cmd/pack does (packer.LookupTarget):
 // the catalog it reads, the bucket it reads pieces from and the bucket it
 // writes to are one choice. $REPLAY_PUT_TOKEN and the R2 credentials work as
@@ -84,6 +90,7 @@ func main() {
 		to        = flag.String("to", "", "with -all: only games that started on/before this date (YYYY-MM-DD covers the whole day, or unix seconds)")
 		ridFlag   = flag.String("rid", "", "with a local capture: the published revision the summary belongs to (default: the packed .brp's own content revision)")
 		jobs      = flag.Int("j", 4, "replays processed at once (each holds one whole replay in memory)")
+		cacheFlag = flag.String("cache", "auto", "keep files read from the bucket here for the next run (in a subdirectory per bucket host); empty keeps none, auto is "+autoCacheHelp())
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: insights [flags] <gameId|link|rid|file.brp> [...]\n       insights [flags] -all\n\n")
@@ -134,6 +141,9 @@ func main() {
 		}
 	}
 	r.from, r.to = *from, *to
+	if dir := cacheDir(*cacheFlag, target); dir != "" {
+		r.cache = &objectCache{dir: dir}
+	}
 	if *ridFlag != "" && flag.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "insights: -rid names ONE capture's revision; pass exactly one input")
 		os.Exit(2)
@@ -154,7 +164,11 @@ func main() {
 	if *jobs < 1 {
 		*jobs = 1
 	}
-	if failed := r.each(ctx, args, *jobs); failed > 0 || ctx.Err() != nil {
+	failed := r.each(ctx, args, *jobs)
+	if r.cache != nil {
+		fmt.Fprintln(os.Stderr, r.cache.summary())
+	}
+	if failed > 0 || ctx.Err() != nil {
 		os.Exit(1)
 	}
 }
@@ -210,6 +224,8 @@ type runner struct {
 	outDir   string
 	localRid string // -rid: the revision a local capture's summary is published under
 	publish  func(ctx context.Context, dir, label string) error
+	// cache keeps what fetch downloads for the next run; nil keeps nothing.
+	cache *objectCache
 	// winners asks the BAR API who won, for a replay whose meta does not say
 	// (every .brp packed before the demo's winners were read). Nil skips it.
 	winners func(ctx context.Context, gameID string) ([]int32, error)
@@ -425,13 +441,26 @@ func (r *runner) write(ctx context.Context, rid string, in insights.Input) error
 		fmt.Fprintf(os.Stderr, "wrote %s\n", path)
 		return nil
 	}
-	return r.publish(ctx, dir, rid)
+	if err := r.publish(ctx, dir, rid); err != nil {
+		return err
+	}
+	// What was just published is what the next run would download to find
+	// it published (or, with -upload=, to save to -out).
+	r.cache.put("replays/"+insights.FileName(rid), b)
+	return nil
 }
 
-// fetch GETs one object from the destination's data origin; a 404 is
-// viz.ErrNotFound.
+// fetch GETs one object from the destination's data origin, or reads the
+// copy an earlier run kept; a 404 is viz.ErrNotFound.
 func (r *runner) fetch(ctx context.Context, key string) ([]byte, error) {
-	return r.get(ctx, strings.TrimRight(r.dataURL, "/")+"/"+key)
+	if b, ok := r.cache.get(key); ok {
+		return b, nil
+	}
+	b, err := r.get(ctx, strings.TrimRight(r.dataURL, "/")+"/"+key)
+	if err == nil {
+		r.cache.put(key, b)
+	}
+	return b, err
 }
 
 func (r *runner) get(ctx context.Context, u string) ([]byte, error) {
