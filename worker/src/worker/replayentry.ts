@@ -6,12 +6,20 @@
  * an uploader that doesn't know a field sends null and the UI shows a dash. */
 export interface ReplayEntry {
   id: string;
-  /** The revision the pieces are actually served under (`<gameId>-<rev>`,
-   * rev = first 8 hex of the source stream's SHA-256). Publishes are
+  /** The key the pieces are actually served under, relative to replays/
+   * (see RID_RE): "<YYYY-MM>/<gameId>" for the game's MAIN replay,
+   * "<YYYY-MM>/<gameId>-<rev>" for any other upload, and the flat
+   * `<gameId>-<rev>` of everything published before month folders (rev =
+   * first 8 hex of the .brp's SHA-256). Publishes are
    * append-only — a re-upload lands under a fresh rid and this field moves,
    * so `/replays/*`'s immutable caching is always sound. Null for replays
    * uploaded pre-revisioning (pieces live under the bare id). */
   rid: string | null;
+  /** The published .brp's content revision, as the publishing PUT states it.
+   * Input only: it is kept on the uploads entry (a main rid does not spell
+   * it), never as a column, and absent from what GET /api/replays serves at
+   * the top level. */
+  rev?: string | null;
   /** Unix seconds when the game started (demo header UnixTime). */
   startUnix: number | null;
   /** Game length in seconds (sampled range of the capture). */
@@ -136,6 +144,10 @@ export interface CatalogTeam {
 export interface UploadRef {
   rid: string;
   ally: number | null;
+  /** The .brp's content revision: how a republish of the main replay's exact
+   * bytes is recognised (a main rid does not spell it). Absent on entries
+   * published before month folders, whose rid does. */
+  rev?: string;
   /** The widget build behind THIS revision (see the row's widget* fields).
    * The row's copy describes only the revision it currently points at, so a
    * re-publish would otherwise erase what produced the earlier upload —
@@ -305,6 +317,31 @@ const FILTER_SETTINGS_SET: ReadonlySet<string> = new Set(FILTER_SETTINGS_FLAGS);
 const SETTINGS_MAX_KEYS = 32;
 const SETTINGS_MAX_JSON = 2048;
 
+/** A replay folder: the UTC month a game started ("2026-10"), or "undated"
+ * when nobody knows. Twin of internal/packer names.go. */
+export const REPLAY_FOLDER_RE = /^(?:\d{4}-(?:0[1-9]|1[0-2])|undated)$/;
+
+/** isReplayFolder says whether one path segment is a replay folder. */
+export function isReplayFolder(s: string): boolean {
+  return REPLAY_FOLDER_RE.test(s);
+}
+
+/** monthFolder is the folder for unix seconds: its UTC "YYYY-MM". */
+export function monthFolder(unix: number): string {
+  const d = new Date(unix * 1000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+/** A rid: a name, optionally in a replay folder. */
+export const RID_RE = /^(?:(?:\d{4}-(?:0[1-9]|1[0-2])|undated)\/)?[A-Za-z0-9_-]{1,128}$/;
+
+/** isMainRid says whether rid names the game's MAIN replay: the unsuffixed
+ * one, in a folder or (published flat by pack -rev=false) not. Twin of
+ * packer.IsMainRid. */
+export function isMainRid(rid: string, gameId: string): boolean {
+  return rid.slice(rid.lastIndexOf("/") + 1) === gameId;
+}
+
 /** sanitizeEntry validates a PUT /api/replays/<id> body into a ReplayEntry,
  * or returns a string describing why it is unacceptable. Unknown fields are
  * dropped, missing stats become null, and a field of the wrong type is
@@ -316,8 +353,13 @@ export function sanitizeEntry(id: string, body: unknown): ReplayEntry | string {
 
   let rid: string | null = null;
   if (b.rid !== undefined && b.rid !== null) {
-    if (typeof b.rid !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(b.rid)) return "invalid rid";
+    if (typeof b.rid !== "string" || !RID_RE.test(b.rid)) return "invalid rid";
     rid = b.rid;
+  }
+  let rev: string | null = null;
+  if (b.rev !== undefined && b.rev !== null) {
+    if (typeof b.rev !== "string" || !/^[0-9a-f]{8,64}$/.test(b.rev)) return "invalid rev";
+    rev = b.rev;
   }
 
   const nums: Record<string, number | null> = {};
@@ -365,6 +407,7 @@ export function sanitizeEntry(id: string, body: unknown): ReplayEntry | string {
   return {
     id,
     rid,
+    rev,
     startUnix: nums.startUnix,
     durationSec: nums.durationSec,
     sizeBytes: nums.sizeBytes,
@@ -711,6 +754,7 @@ export function mergeUploads(
   rid: string | null,
   ally: number | null,
   widget?: WidgetRef | null,
+  rev?: string | null,
 ): UploadRef[] | null {
   if (rid === null) return existing;
   // Only carry a widget that says something, so an entry never grows an empty
@@ -724,9 +768,16 @@ export function mergeUploads(
     const merged: UploadRef = { rid: u.rid, ally: ally ?? u.ally };
     const keep = w ?? u.widget;
     if (keep) merged.widget = keep;
+    const r = rev ?? u.rev;
+    if (r) merged.rev = r;
     return merged;
   });
-  if (!prior.some((u) => u.rid === rid)) out.push(w ? { rid, ally, widget: w } : { rid, ally });
+  if (!prior.some((u) => u.rid === rid)) {
+    const ref: UploadRef = { rid, ally };
+    if (w) ref.widget = w;
+    if (rev) ref.rev = rev;
+    out.push(ref);
+  }
   return out;
 }
 

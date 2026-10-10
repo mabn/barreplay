@@ -38,6 +38,7 @@ import {
   SETTINGS_LAVA_FLAG,
   SETTINGS_MODS_FLAG,
   derivePlayerCount,
+  isMainRid,
   mergeUploads,
   wantsFullView,
 } from "./replayentry";
@@ -874,15 +875,40 @@ export class ReplayIndex extends DurableObject<Env> {
    * which is what an internal caller with no re-sim intent does. */
   upsert(e: ReplayEntry, resimJobId?: string): void {
     const prior = this.ctx.storage.sql
-      .exec(`SELECT uploads FROM replays WHERE id = ?`, e.id)
+      .exec(`SELECT rid, uploads, uploader_ally FROM replays WHERE id = ?`, e.id)
       .toArray();
     const before: UploadRef[] | null =
       prior.length > 0 && prior[0].uploads != null ? JSON.parse(prior[0].uploads as string) : null;
-    const uploads = mergeUploads(before, e.rid, e.uploaderAlly, {
-      version: e.widgetVersion ?? undefined,
-      sha: e.widgetSha ?? undefined,
-      date: e.widgetDate ?? undefined,
-    });
+    const uploads = mergeUploads(
+      before,
+      e.rid,
+      e.uploaderAlly,
+      {
+        version: e.widgetVersion ?? undefined,
+        sha: e.widgetSha ?? undefined,
+        date: e.widgetDate ?? undefined,
+      },
+      e.rev,
+    );
+    // A game with a MAIN replay (its unsuffixed, full-view one) keeps it as
+    // the row's current revision: a later suffixed upload — a player's
+    // one-sided capture, or a second full view — joins the uploads list as an
+    // alt link and changes nothing else, since every other column describes
+    // the revision the row points at.
+    const priorRid = prior.length > 0 ? (prior[0].rid as string | null) : null;
+    if (priorRid !== null && isMainRid(priorRid, e.id) && e.rid !== null && !isMainRid(e.rid, e.id)) {
+      this.ctx.storage.sql.exec(
+        `UPDATE replays SET uploads = ?, updated_unix = ? WHERE id = ?`,
+        uploads === null ? null : JSON.stringify(uploads),
+        Math.floor(Date.now() / 1000),
+        e.id,
+      );
+      const rowAlly = prior[0].uploader_ally as number | null;
+      if (resimJobId !== undefined && wantsFullView(rowAlly, uploads)) {
+        this.jobAnnounce(resimJobId, e.id, "resim");
+      }
+      return;
+    }
     this.ctx.storage.sql.exec(
       `INSERT INTO replays (id, rid, start_unix, duration_sec, map, game_size, size_bytes, settings, players, player_count, uploader_ally, uploads, view, widget_version, widget_sha, widget_date, placeholder, updated_unix)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
@@ -946,6 +972,14 @@ export class ReplayIndex extends DurableObject<Env> {
     }
   }
 
+  /** gameStartUnix is when the games mirror says a game started, or null
+   * when it does not know the game: a primary-key seek, for filing an
+   * uploaded stream under its month. */
+  gameStartUnix(id: string): number | null {
+    const rows = this.ctx.storage.sql.exec(`SELECT start_unix FROM games WHERE id = ?`, id).toArray();
+    return rows.length > 0 ? ((rows[0].start_unix as number | null) ?? null) : null;
+  }
+
   /** setView records, by hand, whose point of view a replay was recorded from
    * — the admin marking behind the viewer's header control. It exists because
    * most rows carry no recorder provenance at all: their captures predate the
@@ -971,7 +1005,7 @@ export class ReplayIndex extends DurableObject<Env> {
     if (rid !== null) {
       const prior = before ?? [];
       uploads = prior.some((u) => u.rid === rid)
-        ? prior.map((u) => (u.rid === rid ? { rid: u.rid, ally: effAlly } : u))
+        ? prior.map((u) => (u.rid === rid ? { rid: u.rid, ally: effAlly, ...(u.rev ? { rev: u.rev } : {}) } : u))
         : [...prior, { rid, ally: effAlly }];
     }
     this.ctx.storage.sql.exec(

@@ -379,7 +379,12 @@ const BRP_PROBE = 256 * 1024;
 // than downloaded again. Reset per loadReplay.
 let brpWhole = null; // {file, u8}
 
-function brpPath(file) { return '/replays/' + encodeURIComponent(file) + '.brp'; }
+// ridPath is a rid as a URL path: each segment escaped, the slash between a
+// month folder and the name kept ("2026-10/<gameId>"). encodeURIComponent on
+// the whole rid would send %2F, which names no object in the bucket.
+function ridPath(rid) { return String(rid).split('/').map(encodeURIComponent).join('/'); }
+
+function brpPath(file) { return '/replays/' + ridPath(file) + '.brp'; }
 
 // brpRange reads bytes [off, off+len) of a published .brp.
 async function brpRange(file, off, len) {
@@ -628,7 +633,7 @@ function frameNumAt(gi) {
 // ignores Range answers 200 with the whole file, which is kept (brpWhole) and
 // sliced, so it is downloaded once rather than once per piece.
 async function pieceFetch(i) {
-  const base = '/replays/' + encodeURIComponent(currentFile);
+  const base = '/replays/' + ridPath(currentFile);
   if (!data.keys) return fetch(dataURL(i < 0 ? base + '.keys' : base + '/c' + i));
   const off = i < 0 ? data.keys.off : data.chunks[i].off;
   const len = i < 0 ? data.keys.len : data.chunks[i].len;
@@ -3009,7 +3014,7 @@ async function loadResources(file, gen) {
       resByFrame = new Map();
       for (let i = 0; i < recs.length; i++) publishEconomy(i);
     } else {
-      const r = await fetch(dataURL('/replays/' + encodeURIComponent(file) + '.resources'));
+      const r = await fetch(dataURL('/replays/' + ridPath(file) + '.resources'));
       if (!r.ok) return;
       const arr = await r.json(); // [{f, r:[...]}]
       if (gen !== loadGen) return;
@@ -3753,7 +3758,7 @@ async function loadReplay(id) {
     // The .brp itself; a replay without one is an older bundle with a .brw.
     head = await loadBrpHead(file);
     if (!head && gen === loadGen) {
-      const r = await fetch(dataURL('/replays/' + encodeURIComponent(file) + '.brw'));
+      const r = await fetch(dataURL('/replays/' + ridPath(file) + '.brw'));
       if (!r.ok) throw new Error(await r.text());
       head = await decodeHead(await r.arrayBuffer());
     }
@@ -3982,8 +3987,8 @@ async function fetchReplayList() {
     }
   }
   // Revisioned publishes are append-only, so the bucket accumulates every
-  // <gameId>-<8 hex> revision ever uploaded; the catalog's rid names the
-  // current one. Hide the listing's other revisions of a cataloged game —
+  // revision ever uploaded (<gameId>-<8 hex>, or since month folders
+  // <YYYY-MM>/<gameId>[-<8 hex>]); the catalog's rid names the current one. Hide the listing's other revisions of a cataloged game —
   // an uncataloged upload (no row at all) still shows as a stub.
   const seen = new Set();
   const ids = new Set();
@@ -3994,8 +3999,8 @@ async function fetchReplayList() {
   }
   for (const f of files) {
     if (seen.has(f.file)) continue;
-    const m = /^(.+)-[0-9a-f]{8}$/.exec(f.file);
-    if (m && ids.has(m[1])) continue; // a superseded revision, not its own replay
+    const m = /^(?:[^/]+\/)?(.+?)(?:-[0-9a-f]{8})?$/.exec(f.file);
+    if (m && ids.has(m[1])) continue; // another revision of a cataloged game, not its own replay
     catalog.push({ id: f.file, rid: null, startUnix: null, durationSec: null, map: null, gameSize: null, sizeBytes: f.size ?? null });
   }
   // Whoever did not page above pages here: a backend that ignored the params
@@ -4472,9 +4477,9 @@ function urlId(e) {
 // dropping the visitor on the list with no explanation.
 function knownReplayURL(wanted) {
   if (replayList.some(e => e.id === wanted || e.rid === wanted)) return true;
-  const m = /^(.+)-[0-9a-f]{8}$/.exec(wanted);
+  const m = /^(?:[^/]+\/)?(.+?)(?:-[0-9a-f]{8})?$/.exec(wanted);
   if (m && replayList.some(e => e.id === m[1])) return true;
-  return /^[A-Za-z0-9_-]{1,128}$/.test(wanted);
+  return /^(?:(?:\d{4}-(?:0[1-9]|1[0-2])|undated)\/)?[A-Za-z0-9_-]{1,128}$/.test(wanted);
 }
 
 // resolveReplayFile maps a ?replay= value to the id the pieces are actually
@@ -6381,7 +6386,7 @@ function renderHome(errMsg) {
       const alt = ev.target.closest && ev.target.closest('a.alt');
       if (alt) {
         const u = new URL(alt.href, location.href);
-        const m = /^\/replays\/([A-Za-z0-9_-]{1,128})$/.exec(u.pathname);
+        const m = REPLAY_PATH_RE.exec(u.pathname);
         openReplay(m ? m[1] : u.searchParams.get('replay'));
         return;
       }
@@ -6517,18 +6522,23 @@ function renderAdminNote(state) {
 // legacy replay/tab params the path now expresses.
 function replayHref(id) {
   const u = new URL(location.href);
-  u.pathname = '/replays/' + encodeURIComponent(id);
+  u.pathname = '/replays/' + ridPath(id);
   u.searchParams.delete('replay');
   u.searchParams.delete('tab');
   return u.pathname + u.search;
 }
+
+// A replay page path: /replays/<gameId> (the canonical link), or one specific
+// upload's /replays/<rid> — flat for those published before month folders,
+// /replays/<YYYY-MM>/<name> (or undated/<name>) since.
+const REPLAY_PATH_RE = /^\/replays\/((?:(?:\d{4}-(?:0[1-9]|1[0-2])|undated)\/)?[A-Za-z0-9_-]{1,128})$/;
 
 // replayFromURL reads which replay the URL names: the canonical path form
 // (/replays/<id>) first, then the legacy ?replay= query form, which every
 // link shared before the path scheme still carries. Null when the URL names
 // none (the landing page and its sections).
 function replayFromURL() {
-  const m = /^\/replays\/([A-Za-z0-9_-]{1,128})$/.exec(String(location.pathname || ''));
+  const m = REPLAY_PATH_RE.exec(String(location.pathname || ''));
   if (m) return m[1];
   return new URLSearchParams(location.search).get('replay');
 }
@@ -6887,7 +6897,7 @@ async function showSummary() {
     const fetchInsights = async () => {
       let res;
       for (const v of INSIGHTS_VERSIONS) {
-        res = await fetch(dataURL('/replays/' + encodeURIComponent(file) + '.insights' + v + '.json'));
+        res = await fetch(dataURL('/replays/' + ridPath(file) + '.insights' + v + '.json'));
         if (res.status !== 404) break;
       }
       return res;
@@ -7068,7 +7078,7 @@ async function init() {
     const tab = u.searchParams.get('tab');
     u.searchParams.delete('replay');
     u.searchParams.delete('tab');
-    u.pathname = rep ? '/replays/' + encodeURIComponent(rep)
+    u.pathname = rep ? '/replays/' + ridPath(rep)
       : HOME_TABS.includes(tab) && tab !== 'replays' ? '/' + tab : '/';
     history.replaceState(null, '', u);
   }
