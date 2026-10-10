@@ -46,8 +46,8 @@ export function swingChart(ins: Insights, watch: Watch | null, group: ChartGroup
       if (i < 0) return null;
       const p = sw.p[i];
       return [
-        { color: sideColor(ins, 0), label: sideName(ins, 0), value: `${pct(p)} to win` },
-        { color: sideColor(ins, 1), label: sideName(ins, 1), value: `${pct(1 - p)} to win` },
+        { color: sideColor(ins, 0), label: sideName(ins, 0), metric: "Chance to win", value: pct(p) },
+        { color: sideColor(ins, 1), label: sideName(ins, 1), metric: "Chance to win", value: pct(1 - p) },
       ];
     },
   });

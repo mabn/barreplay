@@ -103,13 +103,21 @@ export const CSS = `
 .brs-root .brs-battle.brs-hover .brs-ring { stroke-opacity: 1; fill-opacity: .14; }
 .brs-root .brs-battle.brs-on .brs-ring { stroke: var(--brs-accent); stroke-opacity: 1; fill: var(--brs-accent); fill-opacity: .16; }
 .brs-root .brs-battle.brs-on .brs-badge { fill: var(--brs-accent); }
-.brs-root .brs-tip { position: fixed; z-index: 1000; display: none; pointer-events: none; max-width: 340px;
+.brs-root .brs-tip { position: fixed; z-index: 1000; display: none; pointer-events: none; max-width: 440px;
   background: #0b0f13; color: var(--brs-text); border: 1px solid var(--brs-line); border-radius: 6px;
   padding: 7px 10px; font-size: 12px; line-height: 1.4; box-shadow: 0 6px 18px rgba(0, 0, 0, .45); }
 .brs-root .brs-tip-title { font-weight: 600; margin-bottom: 3px; }
 .brs-root .brs-tip-row { display: flex; align-items: center; gap: 7px; }
 .brs-root .brs-tip-row i { flex: 0 0 10px; height: 10px; border-radius: 2px; }
 .brs-root .brs-tip-row b { font-weight: 600; font-variant-numeric: tabular-nums; margin-left: auto; padding-left: 14px; white-space: nowrap; }
+.brs-root .brs-info { display: inline-flex; align-items: center; justify-content: center; width: 13px; height: 13px; border-radius: 50%;
+  border: 1px solid var(--brs-muted); color: var(--brs-muted); font: italic 600 9px/1 Georgia, serif; cursor: help; vertical-align: 1px; }
+.brs-root .brs-info:hover, .brs-root .brs-info:focus { color: var(--brs-text); border-color: var(--brs-text); outline: none; }
+.brs-root .brs-tip-table { display: grid; column-gap: 14px; row-gap: 2px; align-items: center; }
+.brs-root .brs-tip-table b { font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.brs-root .brs-tip-head { display: flex; align-items: center; justify-content: flex-end; gap: 6px; font-weight: 600; white-space: nowrap; }
+.brs-root .brs-tip-head i { flex: 0 0 10px; height: 10px; border-radius: 2px; }
+.brs-root .brs-tip-metric { color: var(--brs-muted); white-space: nowrap; }
 .brs-root .brs-tip-note { color: var(--brs-muted); margin-top: 4px; }
 .brs-root .brs-val { font-variant-numeric: tabular-nums; color: var(--brs-muted); white-space: nowrap; }
 `;

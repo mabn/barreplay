@@ -670,7 +670,10 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           tipLayer() delegates for many marks (the killing-fields zones), and
                           charts in one chartGroup() share a crosshair whose tooltip lists
                           every member's readout, which is how the panels under "Who was
-                          winning" read as one chart.
+                          winning" read as one chart. A row carrying `metric` is one SIDE's
+                          reading of it: those rows pivot into a table (a column per side, a
+                          line per metric) so the two sides' numbers line up. A panel label
+                          can carry an (i) whose hover explains the panel (advantage.ts label).
                           Sections (sections/*.ts, in page order in index.ts) each
                           return null when the file cannot support them: the side-by-side
                           charts (advantage, army composition) need comparable(); race to
