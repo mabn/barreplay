@@ -92,6 +92,7 @@ func run(path string) error {
 	}
 	kinds := map[string]int{}
 	var teamStats []snapshot.FactTeamStatsData
+	var teamDeaths []int32 // frames teams died at
 	weaponName := map[int32]string{}
 	for _, ft := range facts {
 		kinds[ft.Kind]++
@@ -105,6 +106,7 @@ func run(path string) error {
 			var d snapshot.FactTeamDiedData
 			if err := ft.Decode(&d); err == nil {
 				fmt.Printf("team %d died at %s\n", d.Team, clock(d.Frame))
+				teamDeaths = append(teamDeaths, d.Frame)
 			}
 		case snapshot.FactTeamStats:
 			var d snapshot.FactTeamStatsData
@@ -151,7 +153,17 @@ func run(path string) error {
 	}
 	dealt, enemyHp, ally := map[int32]float64{}, map[int32]float64{}, map[int32]float64{}
 	unknownByWeapon := map[int32]float64{}
-	var unknownAfterStats float64
+	var unknownAfterStats, unknownAtTeamDeath float64
+	// nearTeamDeath: within 30 s after some team died, when the engine
+	// blows up everything the team still had.
+	nearTeamDeath := func(f int32) bool {
+		for _, d := range teamDeaths {
+			if f >= d-30 && f <= d+900 {
+				return true
+			}
+		}
+		return false
+	}
 	causes := map[string]float64{}
 	var total, para, over, unknownAttacker float64
 	hits := 0
@@ -169,6 +181,9 @@ func run(path string) error {
 				unknownByWeapon[r.WeaponDef] += float64(r.Damage)
 				if statsEnd >= 0 && w.Frame >= statsEnd {
 					unknownAfterStats += float64(r.Damage)
+				}
+				if nearTeamDeath(w.Frame) {
+					unknownAtTeamDeath += float64(r.Damage)
 				}
 				continue
 			}
@@ -190,6 +205,10 @@ func run(path string) error {
 		if statsEnd >= 0 {
 			fmt.Printf("  no known attacker: %s of it after the engine's last stats row (%s)\n",
 				pct(int(unknownAfterStats), int(unknownAttacker)), clock(statsEnd))
+		}
+		if len(teamDeaths) > 0 {
+			fmt.Printf("  no known attacker: %s of it within 30 s after a team died\n",
+				pct(int(unknownAtTeamDeath), int(unknownAttacker)))
 		}
 		ws := make([]int32, 0, len(unknownByWeapon))
 		for w := range unknownByWeapon {
