@@ -59,10 +59,16 @@ func erasePkt(player byte, x, z uint32) []byte {
 // stream: the packed header, a startscript, then the stream.
 func buildDemo(t *testing.T, stream []byte) []byte {
 	t.Helper()
+	return buildDemoTail(t, stream, nil)
+}
+
+// buildDemoTail is buildDemo with the winning ally teams after the stream.
+func buildDemoTail(t *testing.T, stream, winners []byte) []byte {
+	t.Helper()
 	script := "[GAME]\n{\n\tMapName=Test Map;\n\tGameType=BYAR;\n}\n\x00"
 
 	var raw bytes.Buffer
-	rh := rawHeader{Version: 5, HeaderSize: 352, ScriptSize: int32(len(script)), DemoStreamSize: int32(len(stream))}
+	rh := rawHeader{Version: 5, HeaderSize: 352, ScriptSize: int32(len(script)), DemoStreamSize: int32(len(stream)), WinningAllyTeams: int32(len(winners))}
 	copy(rh.Magic[:], magicString)
 	copy(rh.VersionString[:], "2025.06.24")
 	if err := binary.Write(&raw, binary.LittleEndian, &rh); err != nil {
@@ -75,6 +81,8 @@ func buildDemo(t *testing.T, stream []byte) []byte {
 	}
 	raw.WriteString(script)
 	raw.Write(stream)
+	raw.Write(winners)
+	raw.Write(make([]byte, 64)) // player/team stats, which nothing reads
 
 	var gz bytes.Buffer
 	zw := gzip.NewWriter(&gz)
@@ -205,4 +213,26 @@ func gzipBytesFor(t *testing.T, demo []byte, edit func([]byte)) ([]byte, error) 
 	zw.Write(b)
 	zw.Close()
 	return out.Bytes(), nil
+}
+
+// The winners follow the packet stream, one byte per ally team, and survive a
+// stream the comm scan stopped short of.
+func TestWinners(t *testing.T) {
+	var s bytes.Buffer
+	packet(&s, chatPkt(3, chatToEveryone, "gg"))
+	s.Write([]byte{0xff, 0xff, 0xff}) // junk the scan gives up on
+	d, err := Parse(bytes.NewReader(buildDemoTail(t, s.Bytes(), []byte{1})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Winners) != 1 || d.Winners[0] != 1 {
+		t.Errorf("winners = %v, want [1]", d.Winners)
+	}
+	if m := BaseMeta(d); len(m.Winners) != 1 || m.Winners[0] != 1 {
+		t.Errorf("meta winners = %v", m.Winners)
+	}
+	d, err = Parse(bytes.NewReader(buildDemo(t, s.Bytes())))
+	if err != nil || d.Winners != nil {
+		t.Errorf("no winners declared = %v, %v", d.Winners, err)
+	}
 }

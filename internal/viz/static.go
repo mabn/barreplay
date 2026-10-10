@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/mabn/barreplay/internal/insights"
 	"github.com/mabn/barreplay/snapshot"
 )
 
@@ -95,7 +96,30 @@ func WriteStaticBundle(brpPath, outDir string) (string, error) {
 	if err := os.WriteFile(filepath.Join(replaysDir, gameID+".brp"), buf.Bytes(), 0o644); err != nil {
 		return "", err
 	}
+
+	// The game summary's data. A failure costs the summary, never the
+	// publish: the replay itself is complete without it.
+	if err := WriteInsights(bf, filepath.Join(replaysDir, insights.FileName(gameID))); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: insights for %s: %v\n", gameID, err)
+	}
 	return gameID, nil
+}
+
+// WriteInsights computes a parsed .brp's game summary and writes it to path.
+func WriteInsights(bf *snapshot.BRPFile, path string) error {
+	in, err := insights.FromBRP(bf)
+	if err != nil {
+		return err
+	}
+	ins, err := insights.Compute(in)
+	if err != nil {
+		return err
+	}
+	b, err := insights.Marshal(ins)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, b, 0o644)
 }
 
 // WriteIndex (re)writes outDir/index.json listing every replay bundle found

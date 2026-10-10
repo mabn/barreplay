@@ -18,6 +18,7 @@ func BaseMeta(d *Demo) snapshot.Meta {
 		MapName:       d.Startscript.MapName,
 		StartUnix:     int64(d.Header.UnixTime),
 		UnitDefs:      map[int32]snapshot.UnitDef{},
+		Winners:       d.Winners,
 	}
 	for _, p := range d.Startscript.Players {
 		m.Players = append(m.Players, snapshot.PlayerInfo{

@@ -16,5 +16,8 @@
     "verbatimModuleSyntax": true,
     "noEmit": true
   },
-  "include": ["src", "tools", "tests", "vite.config.ts", "vitest.config.ts", "worker-configuration.d.ts"]
+  "include": ["src", "tools", "tests", "vite.config.ts", "vitest.config.ts", "worker-configuration.d.ts"],
+  // The summary library runs in a BROWSER, and the Workers types redefine
+  // DOM names (Element, Response) incompatibly; it has its own config.
+  "exclude": ["src/summary"]
 }

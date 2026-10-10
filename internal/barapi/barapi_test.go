@@ -15,7 +15,8 @@ const sampleJSON = `{
   "engineVersion": "2025.06.24",
   "gameVersion": "Beyond All Reason test-30541-1efcf40",
   "durationMs": 716233,
-  "Map": { "scriptName": "Isidis crack 1.1", "fileName": "isidis_crack_1.1" }
+  "Map": { "scriptName": "Isidis crack 1.1", "fileName": "isidis_crack_1.1" },
+  "AllyTeams": [{ "allyTeamId": 0, "winningTeam": false }, { "allyTeamId": 1, "winningTeam": true }]
 }`
 
 func TestParseGameID(t *testing.T) {
@@ -84,6 +85,9 @@ func TestResolveAndDownload(t *testing.T) {
 	}
 	if rep.MapName() != "Isidis crack 1.1" {
 		t.Errorf("MapName = %q", rep.MapName())
+	}
+	if w := rep.Winners(); len(w) != 1 || w[0] != 1 {
+		t.Errorf("Winners = %v, want [1]", w)
 	}
 
 	dir := t.TempDir()

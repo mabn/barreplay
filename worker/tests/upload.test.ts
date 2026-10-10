@@ -20,6 +20,7 @@ function fakeBundle(): string {
     "replays/aaa.brw",
     "replays/aaa.keys",
     "replays/aaa.resources",
+    "replays/aaa.insights1.json",
     "replays/aaa/c0",
     "replays/aaa/c1",
     "replays/bbb.brw",
@@ -39,7 +40,7 @@ test("collectReplayFiles walks only replays/**, heads last", () => {
   const keys = collectReplayFiles(fakeBundle()).map((o) => o.key);
   assert.ok(keys.every((k) => k.startsWith("replays/")), `outside replays/: ${keys}`);
   assert.ok(!keys.includes("index.json"));
-  assert.equal(keys.length, 11);
+  assert.equal(keys.length, 12);
   const heads = keys.filter((k) => k.endsWith(".brw"));
   assert.deepEqual(heads, ["replays/aaa.brw", "replays/bbb.brw", "replays/ccc.brw"]);
   assert.ok(
@@ -52,7 +53,7 @@ test("collectReplayFiles walks only replays/**, heads last", () => {
 
 test("collectReplayFiles single-replay filter", () => {
   const keys = collectReplayFiles(fakeBundle(), "aaa").map((o) => o.key);
-  assert.deepEqual(keys, ["replays/aaa.keys", "replays/aaa.resources", "replays/aaa/c0", "replays/aaa/c1", "replays/aaa.brw"]);
+  assert.deepEqual(keys, ["replays/aaa.insights1.json", "replays/aaa.keys", "replays/aaa.resources", "replays/aaa/c0", "replays/aaa/c1", "replays/aaa.brw"]);
   const cur = collectReplayFiles(fakeBundle(), "ccc").map((o) => o.key);
   assert.deepEqual(cur, ["replays/ccc.brp", "replays/ccc.resources", "replays/ccc.brw"]);
 });

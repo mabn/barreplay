@@ -65,6 +65,21 @@ type Replay struct {
 		ScriptName string `json:"scriptName"`
 		FileName   string `json:"fileName"`
 	} `json:"Map"`
+	AllyTeams []struct {
+		AllyTeamID  int32 `json:"allyTeamId"`
+		WinningTeam bool  `json:"winningTeam"`
+	} `json:"AllyTeams"`
+}
+
+// Winners returns the ally teams the API marks as winning, nil when none is.
+func (r *Replay) Winners() []int32 {
+	var out []int32
+	for _, a := range r.AllyTeams {
+		if a.WinningTeam {
+			out = append(out, a.AllyTeamID)
+		}
+	}
+	return out
 }
 
 // MapName returns the map's script (display) name, used for map provisioning.

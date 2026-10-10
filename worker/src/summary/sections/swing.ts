@@ -1,0 +1,123 @@
+// The swing chart (G1): who the numbers said was winning, as a probability,
+// with the biggest shifts numbered and listed underneath. The line is the
+// insights file's (internal/insights swing.go): a logistic model over army
+// value and metal income, which never sees who won, so the result is drawn
+// beside it rather than through it. Eliminations are marked on its edges —
+// a player leaving takes an army off the board, which moves the line.
+import { h, s } from "../dom";
+import { fmtClock } from "../format";
+import { bandPath, linePath, stepAt, timeChart, type ChartGroup } from "../chart";
+import { mirrorKey } from "../legend";
+import { knockouts } from "../losses";
+import { sideColor, sideName } from "../model";
+import { momentStory } from "../moments";
+import { stepTimes } from "../series";
+import { tip } from "../tooltip";
+import { clipSpan, watchNote, type Watch } from "../watch";
+import { SIM_FPS, type Insights } from "../types";
+
+/** pct formats a probability as a whole percent. */
+export function pct(p: number): string {
+  return `${Math.round(p * 100)}%`;
+}
+
+export interface SwingParts {
+  key: HTMLElement;
+  hint: HTMLElement;
+  svg: SVGSVGElement;
+  /** The numbered moments, or null when there are none. */
+  list: HTMLElement | null;
+}
+
+/** swingChart draws the chart and the moments list, or null when the file
+ * carries no swing line (version 1, a one-sided capture, an FFA). */
+export function swingChart(ins: Insights, watch: Watch | null, group: ChartGroup): SwingParts | null {
+  const sw = ins.swing;
+  if (!sw || sw.p.length < 2 || ins.sides.length !== 2) return null;
+  const t = stepTimes(ins);
+  const d = sw.p.map((p) => p - 0.5);
+  const c = timeChart({
+    height: 200, durationSec: ins.durationSec, yMin: -0.5, yMax: 0.5, zeroLine: true, xAxis: false,
+    yTick: (v) => pct(0.5 + Math.abs(v)),
+    watch, group,
+    readout: (tt) => {
+      const i = stepAt(t, tt);
+      if (i < 0) return null;
+      const p = sw.p[i];
+      return [
+        { color: sideColor(ins, 0), label: sideName(ins, 0), value: `${pct(p)} to win` },
+        { color: sideColor(ins, 1), label: sideName(ins, 1), value: `${pct(1 - p)} to win` },
+      ];
+    },
+  });
+  const zero = t.map(() => 0);
+  c.plot.append(
+    s("path", { d: bandPath(c, t, zero, d.map((v) => Math.max(0, v))), fill: sideColor(ins, 0), "fill-opacity": 0.35 }),
+    s("path", { d: bandPath(c, t, d.map((v) => Math.min(0, v)), zero), fill: sideColor(ins, 1), "fill-opacity": 0.35 }),
+    s("path", { d: linePath(c, t, d), fill: "none", stroke: "var(--brs-text)", "stroke-width": 1.5 }),
+  );
+
+  // Eliminations: a cross on the edge of the losing side's half.
+  const marks = s("g");
+  for (const k of knockouts(ins)) {
+    if (k.side !== 0 && k.side !== 1) continue;
+    const x = c.x(k.f / SIM_FPS);
+    const y = k.side === 0 ? c.top + 8 : c.bottom - 6;
+    const m = s("text", { x, y, "text-anchor": "middle", class: "brs-ko" + (watch ? " brs-clickable" : ""), style: `fill: ${sideColor(ins, k.side)}` }, "✕");
+    tip(m, { title: `${k.name} is eliminated`, rows: [{ color: sideColor(ins, k.side), label: fmtClock(k.f / SIM_FPS) }], note: watchNote(watch) });
+    if (watch) m.addEventListener("click", () => watch(clipSpan(k.f, k.f, { title: `${k.name} is eliminated` })));
+    marks.append(m);
+  }
+
+  const stories = sw.moments.map((m) => momentStory(ins, m));
+  const clipOf = (k: number) => {
+    const m = sw.moments[k];
+    const b = ins.battles[stories[k].battle];
+    const where = b ? { x: b.x, z: b.z, r: b.r } : {};
+    return clipSpan(m.f0, m.f1, { ...where, title: `${m.n}. ${stories[k].title}` });
+  };
+  sw.moments.forEach((m, k) => {
+    const tt = m.f1 / SIM_FPS;
+    const i = stepAt(t, tt);
+    const y = c.y(i < 0 ? 0 : d[i]);
+    const g = s("g", { class: watch ? "brs-clickable" : null },
+      s("circle", { cx: c.x(tt), cy: y, r: 10, fill: sideColor(ins, m.side), stroke: "var(--brs-bg)", "stroke-width": 2 }),
+      s("text", { x: c.x(tt), y: y + 4, "text-anchor": "middle", style: "fill: #000; font-weight: 600; pointer-events: none" }, String(m.n)),
+    );
+    tip(g, {
+      title: `${m.n}. ${stories[k].title}`,
+      rows: [{ color: sideColor(ins, m.side), label: `${fmtClock(m.f0 / SIM_FPS)}–${fmtClock(m.f1 / SIM_FPS)}`, value: `${sideName(ins, m.side)} +${pct(m.delta)}` }],
+      note: stories[k].detail + (watch ? " Click to watch." : ""),
+    });
+    if (watch) g.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      watch(clipOf(k));
+    });
+    marks.append(g);
+  });
+  c.svg.append(marks);
+
+  const rows = sw.moments.map((m, k) => {
+    const st = stories[k];
+    const play = watch ? h("button", { class: "brs-play", type: "button", "aria-label": `Watch swing ${m.n}` }, "▶") : null;
+    if (play && watch) play.addEventListener("click", () => watch(clipOf(k)));
+    return h("div", { class: "brs-moment" },
+      h("span", { class: "brs-num", style: `background: ${sideColor(ins, m.side)}` }, String(m.n)),
+      h("div", { class: "brs-grow" },
+        h("div", undefined, h("b", undefined, st.title), " ",
+          h("span", { class: "brs-muted" }, `· ${fmtClock(m.f0 / SIM_FPS)}–${fmtClock(m.f1 / SIM_FPS)} · `),
+          h("span", { style: `color: ${sideColor(ins, m.side)}` }, `${sideName(ins, m.side)} +${pct(m.delta)}`)),
+        h("div", { class: "brs-hint" }, st.detail)),
+      play);
+  });
+  const model = sw.fitted
+    ? `fitted to ${sw.games ?? "past"} games`
+    : "with hand-set weights, not yet fitted to real games";
+  return {
+    key: mirrorKey(ins, knockouts(ins).length ? h("span", undefined, "✕ a player eliminated") : null),
+    hint: h("p", { class: "brs-hint" },
+      `The chance each side wins, read from army value and metal income (a model ${model}; it is never told the result). Losses and income below share its time axis.`),
+    svg: c.svg,
+    list: rows.length ? h("div", undefined, ...rows) : null,
+  };
+}

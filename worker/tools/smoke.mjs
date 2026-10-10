@@ -122,8 +122,17 @@ try {
   const home = await get(base, "/");
   check("GET / serves the viewer", home.status === 200, String(home.status));
   check("index.html has no unsubstituted placeholders",
-    !home.body.includes("__ASSET_REV__") && !home.body.includes("__DATA_ORIGIN__"));
+    !home.body.includes("__ASSET_REV__") && !home.body.includes("__DATA_ORIGIN__") && !home.body.includes("__SUMMARY_MODULE__"));
   check("the dropzone banner links to /setup", home.body.includes('href="/setup"'));
+  // The summary library's module, imported by app.js on the first Summary
+  // tab: a fingerprinted name the page must actually serve as JavaScript.
+  const summaryRef = /window\.__SUMMARY_JS__ = "(\/summary\.[0-9a-f]{8}\.js)"/.exec(home.body)?.[1];
+  check("index.html names the summary module", Boolean(summaryRef), "no /summary.<rev>.js in the page");
+  if (summaryRef) {
+    const mod = await get(base, summaryRef);
+    check(`GET ${summaryRef} is the summary library`,
+      mod.status === 200 && mod.body.includes("mountSummary"), `${mod.status} ${mod.headers.get("content-type")}`);
+  }
   for (const ref of home.body.match(/\/(?:app|style)\.[0-9a-f]{8}\.(?:js|css)/g) ?? []) {
     const sub = await get(base, ref);
     check(`GET ${ref}`, sub.status === 200 && sub.body.length > 0, String(sub.status));

@@ -25,6 +25,13 @@
        page's own directory. A plain click is intercepted by the SPA anyway;
        this is for middle-click / open-in-new-tab. -->
   <h1><a href="/" id="homelink" title="All replays">barreplay</a><span class="sub" id="subtitle">replay state viewer</span></h1>
+  <!-- The replay page's two tabs (app.js applyReplayTab): the playback,
+       and the game summary drawn by the src/summary library. Kept in the URL
+       as ?tab=summary. Hidden on the landing page. -->
+  <nav id="replaytabs" style="display:none">
+    <button type="button" data-rtab="replay">Replay</button>
+    <button type="button" data-rtab="summary">Summary</button>
+  </nav>
   <!-- Point-of-view marking. Most catalog rows carry no recorder provenance
        (their captures predate the GAME record's recorder fields) and it cannot
        be derived after the fact, so it is marked by hand here. Shown only in
@@ -311,6 +318,34 @@
   </div>
 </div>
 
+<!-- The Summary tab's pane: filled by the src/summary library's
+     mountSummary, or one line saying why there is nothing to show. -->
+<div id="summary" style="display:none"></div>
+
+<!-- The summary's clip player (openClip in app.js): a small window over the
+     summary that plays one moment. The map inside it is #wrap itself, moved
+     in while the window is open, so it is the real playback. -->
+<div id="clip" style="display:none" role="dialog" aria-label="Clip player">
+  <div id="cliphead">
+    <span id="cliptitle"></span>
+    <button type="button" id="clipreplay" title="Carry on in the Replay tab from here">Open in Replay</button>
+    <button type="button" id="clipclose" aria-label="Close (Esc)">✕</button>
+  </div>
+  <div id="clipbody"></div>
+  <div id="clipbar">
+    <button type="button" id="clipplay" aria-label="Play / pause (space)">▶</button>
+    <input type="range" id="clipslider" min="0" max="1000" value="0" step="any" aria-label="Position in the clip">
+    <span id="cliptime"></span>
+    <select id="clipspeed" aria-label="Speed">
+      <option value="1">1×</option>
+      <option value="2">2×</option>
+      <option value="4">4×</option>
+      <option value="8">8×</option>
+      <option value="16">16×</option>
+    </select>
+  </div>
+</div>
+
 <div class="controls" id="bottombar">
   <button id="first" title="First frame">⏮</button>
   <button id="prev" title="Previous frame (←)">◀</button>
@@ -352,6 +387,10 @@
      rewritten into `window.https://... =` — invalid JS that no build step
      would flag. -->
 <script>window.__DATA_BASE__ = "__DATA_ORIGIN__";</script>
+<!-- The game-summary library's URL (a fingerprinted ES module built from
+     src/summary/ by the Vite summary-bundle plugin), imported by app.js the
+     first time a Summary tab opens. Same single-occurrence rule as above. -->
+<script>window.__SUMMARY_JS__ = "__SUMMARY_MODULE__";</script>
 <script src="/app.__ASSET_REV__.js"></script>
 </body>
 </html>

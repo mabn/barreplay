@@ -29,6 +29,7 @@
     "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@types/node": "^22.15.0",
     "aws4fetch": "^1.0.20",
+    "esbuild": "0.25.12",
     "tsx": "^4.19.0",
     "typescript": "^5.9.2",
     "vite": "^6.3.5",

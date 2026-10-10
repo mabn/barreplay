@@ -16,7 +16,10 @@ positions is to replay it in the engine and sample state from a read-only Lua wi
 go build ./cmd/barreplay        # build the capture CLI -> ./barreplay
 go build ./cmd/pack             # build the .brepstream -> .brp converter -> ./pack
 go build ./cmd/barreplay-static # build the .brp -> static-hosting bundle packer (for worker/)
+go build ./cmd/insights         # build the game-summary backfill CLI (one replay, or -all)
+go build ./cmd/winfit           # build the win-probability model fitter (reads insights files)
 go build ./cmd/bringest         # build the drag&drop upload daemon (polls the worker's job queue)
+go run ./cmd/insights <gameId|link|rid>   # compute a PUBLISHED replay's game summary and publish replays/<rid>.insights<N>.json beside it (-upload r2 default, local, or empty + -out to just write it; -all walks the catalog, -from/-to narrow it to games started in a date range (YYYY-MM-DD or unix seconds); -force recomputes; a local .brp/.brepstream with -rid gives full costs)
 go test ./...                   # all unit tests (no engine required)
 go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
 go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, no engine
@@ -454,6 +457,170 @@ internal/resim/           the cmd/barreplay pipeline packaged as one call (Run: 
                           BEATS every other explanation Run can give, deliberately: we sent that
                           signal, so "the engine was killed" and whatever the truncated stream
                           then failed to parse into are both true and both useless.
+internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Input — a parsed .brp
+                          via FromBRP, or a replay rebuilt from its published pieces) to the
+                          Insights file stored beside each revision as
+                          replays/<rid>.insights<Version>.json. One pass over the frames with the
+                          events interleaved at their frames: per-side army value (the team
+                          stats bar's rule: armed, mobile, priced, not a commander, weighted by
+                          build progress) and income every StepSec, army split by category (no
+                          tech level exists in the defs, so ground units split by PRICE), every
+                          death with its last sampled position and cost, tech milestones from a
+                          CURATED def-name table (defs.go — the defs carry no tier), chat and
+                          pings. A piece is immutable, so ANY change to what is computed is a
+                          new Version written beside the old one. Comparative sections need a
+                          full-view capture (POV) and two sides; CostCoverage says when only
+                          armed mobile defs are priced (a replay rebuilt from old pieces).
+                          stories.go adds what NO capture can attribute to a killer and so never
+                          tries: each side's army centre per step (Series.Front), battles and
+                          six awards picked from per-unit tracks (ids are recycled, so a new def
+                          or a reappearance after death is a new life) — ties to the earlier
+                          unit, one unit never takes two. BATTLES (Version 3) are PEAKS of
+                          killing, not clusters: the densest 1500-elmo, 30 s box of lost metal
+                          — divided by both armies' value at the time, or every battle lands in
+                          the last twenty minutes, where everything costs more — grown while
+                          the rate nearby stays >= a fifth of the peak (one quiet 10 s bin
+                          bridged, at most 5 min), its deaths removed, repeated up to 12; a
+                          peak abutting a battle already found joins it. The old rule (deaths
+                          chained within 1500 elmos and 45 s of quiet) chained a whole late
+                          game into ONE "battle" (10:00-55:47 on a real 8v8). ELIMINATIONS
+                          (wipes.go, Insights.Eliminated) come from a v6 capture's teamdied
+                          facts (Input.TeamDied; nil = no facts section), else are inferred: a
+                          team's LAST burst of deaths (gaps <= 1 s, >= 8) with no live unit of
+                          it seen after. Deaths at or after a team's elimination are WIPED —
+                          units blown up by a player leaving, not fought for — and battles,
+                          the costliest/unfinished awards and the page's moment stories skip
+                          them; the page draws them faint on its losses chart.
+                          players.go is the per-player report (Insights.Players, full view
+                          only): built/lost/chat per step, the commander's path + death +
+                          first contact (a 900-elmo grid shared with an enemy), leaks and a
+                          play style card. Two leaks are easy to get wrong: FLOATING counts
+                          only while the WHOLE SIDE sits at >=98% metal storage (overflow is
+                          shared with allies, so one full player is not waste), and "not
+                          building" needs build targets, which a v4 capture lacks (null, not
+                          0 — Input.HasTargets). The commander path FOLLOWS ONE unit
+                          (followCommander: the one followed last sample while it is there,
+                          else the one nearest where the path left off) — a team holding a
+                          teammate's commander after they left is routine, and taking the
+                          first commander in the frame zigzagged between the two.
+                          WriteStaticBundle writes the insights piece
+                          beside the .brp on EVERY publish (a compute failure only warns), so
+                          a publish uploads exactly two objects.
+                          swing.go (Version 2) adds the WINNER (Insights.Winner, a side index
+                          from Meta.Winners, -1 unknown) and the SWING line: P(side 0 wins)
+                          per step from a logistic model (WinModel) over three antisymmetric
+                          features — log ratios of army value, last-minute metal income and
+                          cumulative income — so an even game is 50% by construction and
+                          the model is never told who won. Moments are the biggest shifts
+                          over a minute (>=12 points, 2 min apart, at most 6), each window
+                          trimmed to where the line actually moved and tied to the battle
+                          overlapping it. WinModel.Coef starts as HAND-SET PRIORS
+                          (Fitted=false, which the page states); cmd/winfit fits them.
+                          WINNERS come from the demo's tail (demofile.Demo.Winners: one byte
+                          per winning ally team right after the packet stream, per
+                          rts/System/LoadSave/demofile.h) into snapshot.Meta.Winners via
+                          BaseMeta, so every demo-backed pack carries them; anything without
+                          (older .brps, rebuilt pieces) gets them from the BAR API's
+                          AllyTeams[].winningTeam in cmd/insights (barapi.Replay.Winners).
+cmd/winfit/main.go        CLI: fits insights.WinModel to games with a known winner and prints
+                          the coefficients to paste into swing.go. Input is insights files:
+                          `insights -upload= -all -out ./ins` (compute-only mode SAVES an
+                          already-published file instead of skipping it) then `winfit ./ins`.
+                          Every step is a sample weighted 1/steps (each game counts once),
+                          mirrored so there is no side bias; Newton's method with a small L2;
+                          refuses under 20 games; reports log loss/accuracy of the current and
+                          fitted weights overall and at 25/50/75/90% of a game. A refit changes
+                          what is computed, so it is a new insights Version.
+cmd/insights/main.go      CLI: the summary BACKFILL, one replay at a time (or -all). Old replays
+                          have no .brp anywhere, only their split pieces, so it resolves a
+                          gameId/link through the catalog (current rid + the row's view, the
+                          only record of whose POV a rebuilt replay is), reads replays/<rid>.brp
+                          from the destination's DataURL when the bucket has one (full costs),
+                          else rebuilds from .brw/.keys/c<n>/.resources (viz.ReadStaticBundle ->
+                          insights.FromPieces: army costs only, POV "unknown" when the row has no
+                          view), and uploads the one file via packer.UploadPieces (no catalog
+                          write). An existing insights file is skipped unless -force. A LOCAL
+                          capture (.brp, or a .brepstream it packs first) is the way back
+                          to full costs for a pieces-only replay — e.g. an upload's archived
+                          stream — with -rid naming the published revision it belongs to.
+                          Nothing writes pieces any more, so the rebuild tests (here and in
+                          internal/viz) read testdata/legacy/: a bundle cut by the last
+                          encoder that wrote them, beside the .brp it came from.
+worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, insights, {onClip, onSeek})
+                          draws an insights file and nothing else — no import from app.js, no
+                          globals, its CSS injected once and scoped under .brs-root — so another
+                          site (lavabalance) can mount the same pages. TypeScript, so unlike
+                          app.js it is BUNDLED: the Vite summary-bundle plugin runs esbuild over
+                          index.ts into one ES module fingerprinted by its own hash
+                          (summary.<rev>.js; /summary.dev.js under `vite dev`), and index.html
+                          hands app.js its URL as window.__SUMMARY_JS__ (placeholder token
+                          __SUMMARY_MODULE__ — NOT the global's name, the same textual-replace
+                          trap as __DATA_ORIGIN__). Browser code, so it has its own tsconfig
+                          (the Workers types redefine DOM names): `npx tsc -p src/summary`.
+                          Pure parts (format.ts, model.ts — e.g. comparable(): two sides AND a
+                          full-view capture, the only case a side-by-side chart is honest) are
+                          node-tested in tests/summary.test.ts. In the viewer it is the replay
+                          page's SUMMARY TAB (app.js applyReplayTab/showSummary): ?tab=summary
+                          on the /replays/<id> path (pushed, so back returns to the playback;
+                          the legacy ?tab= normalization therefore only applies on "/"), the
+                          library imported on first open, the insights fetched from the data
+                          origin, a 404 saying the summary is not built yet, onClip = openClip
+                          and onSeek = seekToFrame (back to the Replay tab at that sim frame).
+                          WATCHING (watch.ts): anything on the page with a moment behind it — a
+                          chart time, a swing, a battle, a death, a milestone, an award — hands
+                          the host a Clip {f0, f1, x?, z?, r?, title?} (clipAround: 10 s before
+                          to 20 s after; clipSpan: 10 s before to 5 s after), onClip winning
+                          over onSeek, which only takes the start. The viewer PLAYS IT IN PLACE
+                          (app.js openClip/startClip/closeClip, index.html #clip): the replay's
+                          own #wrap — the map canvases — moves into a small window over the
+                          summary, zoomed to the clip's spot, at a speed that fits the clip
+                          into ~20 s (CLIP_WALL_SEC), stopping at f1, with just play, a slider
+                          and the speed; Esc closes it with the summary where it was, "Open in
+                          Replay" carries on at that frame. Asked for because every click
+                          used to throw the reader out of the summary. fitView DEFERS while
+                          the viewport is 0x0 (fitPending, refit by resize), since a replay
+                          first loaded behind the summary tab has no size to fit.
+                          TOOLTIPS (tooltip.ts) are one instant HTML box (.brs-tip, fixed,
+                          flipping at the window's edges) used by every section — native
+                          <title> tooltips were slow and unstyled. tip() binds one element,
+                          tipLayer() delegates for thousands (the killing-fields dots), and
+                          charts in one chartGroup() share a crosshair whose tooltip lists
+                          every member's readout, which is how the panels under "Who was
+                          winning" read as one chart.
+                          Sections (sections/*.ts, in page order in index.ts) each
+                          return null when the file cannot support them: the side-by-side
+                          charts (advantage, army composition) need comparable(); race to
+                          tech and killing fields need a full-view capture (a one-sided one
+                          knows only its own milestones and the deaths it saw). chart.ts is
+                          the shared time-axis frame (crosshair readout, click = a clip);
+                          mapview.ts draws world-space marks over api.bar-rts.com terrain
+                          (best-effort, plain background otherwise). Side colours go through
+                          model.readable(), which lifts BAR's darkest team colours (#0000ff)
+                          until they read on the dark panels. PLAYERS (sections/player.ts,
+                          reportsShown — full view and a players list) is a section with a TAB
+                          per player grouped by side, a map drawing EVERY commander's path at
+                          once with the chosen one bold (a path is also a way to pick; a jump
+                          no commander walks in a step is drawn as a gap), the diary/leaks/
+                          style beside it and the built/lost strip below; names in the Sides
+                          cards select a tab. "Who was winning" stacks the swing line (or the
+                          v1 army-difference chart), the metal LOST per step (losses.ts: what
+                          died fighting, with what went down with an eliminated team faint on
+                          top and left out of the scale) and metal income on one time axis
+                          and crosshair, with eliminations marked on the swing line. The MAP
+                          STORY numbers its battles in the order they happened, on the map and
+                          in a one-line-per-battle list (losses either side of a centre line,
+                          square-root scaled), one selection shared by both.
+                          The library draws versions 1-3 (INSIGHTS_VERSIONS [3, 2, 1]; v2 adds
+                          winner + swing, v3 eliminations and peak battles) and app.js fetches
+                          .insights3, then 2, then 1.
+internal/viz/readbundle.go ReadStaticBundle: the inverse of WriteStaticBundle, rebuilding a
+                          BRPFile from published pieces through a PieceFetcher. Defs come back
+                          from the head only (names, footprints, armyCost -> MetalCost, CanFly
+                          from an "air*" icon), parsed by its OWN legacyHead types — the pieces
+                          outlive whatever the encoder becomes — and a v4
+                          head yields BRPFile.Legacy, which DecodeChunk decodes with the 8 old
+                          core columns (build = finished, target = none) — snapshot/brp.go's
+                          frameCodec.cols.
 internal/capture/         parse the widget's .brepstream -> snapshot records (brep.go; the
                           text preamble + comm-record parsing in lines.go). The BRSNAP text
                           stream it used to read too is GONE — nothing wrote it once the

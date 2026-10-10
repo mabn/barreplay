@@ -316,6 +316,9 @@ type BRPFile struct {
 	// file (Section.Offset), so a section-relative range — the K section, a
 	// chunk's FOff — can be turned into an HTTP Range over the file itself.
 	SectionOffsets map[byte]int64
+	// Legacy is set on a file rebuilt from published v4 pieces, whose frame
+	// streams lack the build/target columns; ParseBRP never sets it.
+	Legacy bool
 
 	keysRaw []byte // gunzipped K section, cached on first DecodeChunk
 }
@@ -391,9 +394,12 @@ type prevResState struct{ m, e, ms, es, mi, ei int64 }
 // identically.
 type frameCodec struct {
 	sampleEvery int32
-	prevFrame   int64
-	prev        map[int32]prevUnitState
-	prevRes     map[int32]prevResState
+	// cols is how many of coreColumns the stream carries; 0 means all. A v4
+	// stream has no build/target columns (see legacyV4Columns).
+	cols      int
+	prevFrame int64
+	prev      map[int32]prevUnitState
+	prevRes   map[int32]prevResState
 }
 
 func newFrameCodec(sampleEvery int32) *frameCodec {
@@ -436,6 +442,14 @@ var coreColumns = []func(*prevUnitState) *int64{
 	func(s *prevUnitState) *int64 { return &s.build },
 	func(s *prevUnitState) *int64 { return &s.target },
 }
+
+// buildColumn is the build-progress column's index in coreColumns.
+const buildColumn = 8
+
+// legacyV4Columns is a v4 stream's core column count: def..dvz, without the
+// build/target pair v5 moved into the core. Published v4 pieces still play,
+// so readers of them (viz.ReadStaticBundle) decode with this.
+const legacyV4Columns = 8
 
 // encodeFrame appends one frame to the core (F) and extra (X) streams (see
 // the frame-encoding layout at the top of the file). Returns the full frame's
@@ -491,7 +505,10 @@ func (c *frameCodec) encodeFrame(core, extra *varintWriter, fr Frame) []prevUnit
 
 	// Core columns for the changed units: delta vs the advanced previous state
 	// (absolute when the id is new), one column at a time.
-	for _, col := range coreColumns {
+	for ci, col := range coreColumns {
+		if c.cols > 0 && ci >= c.cols {
+			continue
+		}
 		for _, i := range changed {
 			base := int64(0)
 			if p, ok := c.prev[units[i].UnitID]; ok {
@@ -591,7 +608,19 @@ func decodeFrames(c *frameCodec, core, extra []byte) ([]Frame, error) {
 				preds[i], exists[i] = p.advance(), true
 			}
 		}
-		for _, col := range coreColumns {
+		for ci, col := range coreColumns {
+			if c.cols > 0 && ci >= c.cols {
+				// Absent from this stream: a unit keeps its state, and a new
+				// one reads finished with no target, as the viewer has it.
+				for i := 0; i < n; i++ {
+					if exists[i] {
+						*col(&q[i]) = *col(&preds[i])
+					} else if ci == buildColumn {
+						*col(&q[i]) = buildScale
+					}
+				}
+				continue
+			}
 			for i := 0; i < n; i++ {
 				d, err := cr.sv()
 				if err != nil {
@@ -1467,6 +1496,9 @@ func (f *BRPFile) DecodeChunk(i int) ([]Frame, error) {
 	// keyframe (encoded against empty state) establishes the prediction state
 	// the delta frames were encoded against.
 	codec := newFrameCodec(f.Meta.SampleEvery)
+	if f.Legacy {
+		codec.cols = legacyV4Columns
+	}
 	frames, err := decodeFrames(codec, key, extraKey)
 	if err != nil {
 		return nil, err
@@ -1498,6 +1530,20 @@ func (f *BRPFile) Comms() ([]Comm, error) {
 		return nil, fmt.Errorf("snapshot: comms section: %w", err)
 	}
 	return decodeComms(b)
+}
+
+// Events decodes the E section: every unit lifecycle event. An absent section
+// yields nil, not an error.
+func (f *BRPFile) Events() ([]Event, error) {
+	sec, ok := f.Sections[SecEvents]
+	if !ok {
+		return nil, nil
+	}
+	b, err := gunzip(sec)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot: events section: %w", err)
+	}
+	return decodeEvents(b)
 }
 
 // ReadBRP decodes a .brp capture's meta, frames (every chunk in order) and
