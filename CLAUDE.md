@@ -17,6 +17,7 @@ go build ./cmd/barreplay        # build the capture CLI -> ./barreplay
 go build ./cmd/pack             # build the .brepstream -> .brp converter -> ./pack
 go build ./cmd/barreplay-static # build the .brp -> static-hosting bundle packer (for worker/)
 go build ./cmd/bringest         # build the drag&drop upload daemon (polls the worker's job queue)
+go run ./cmd/insights <gameId|link|rid>   # compute a PUBLISHED replay's game summary and publish replays/<rid>.insights<N>.json beside it (-upload r2 default, local, or empty + -out to just write it; -all walks the catalog; -force recomputes; a local .brp/.brepstream with -rid gives full costs)
 go test ./...                   # all unit tests (no engine required)
 go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
 go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, no engine
@@ -468,6 +469,24 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           new Version written beside the old one. Comparative sections need a
                           full-view capture (POV) and two sides; CostCoverage says when only
                           armed mobile defs are priced (a replay rebuilt from old pieces).
+cmd/insights/main.go      CLI: the summary BACKFILL, one replay at a time (or -all). Old replays
+                          have no .brp anywhere, only their split pieces, so it resolves a
+                          gameId/link through the catalog (current rid + the row's view, the
+                          only record of whose POV a rebuilt replay is), reads replays/<rid>.brp
+                          from the destination's DataURL when the bucket has one (full costs),
+                          else rebuilds from .brw/.keys/c<n>/.resources (viz.ReadStaticBundle ->
+                          insights.FromPieces: army costs only, POV "unknown" when the row has no
+                          view), and uploads the one file via packer.UploadPieces (no catalog
+                          write). An existing insights file is skipped unless -force. A LOCAL
+                          capture (.brp, or a .brepstream/.brsnap it packs first) is the way back
+                          to full costs for a pieces-only replay — e.g. an upload's archived
+                          stream — with -rid naming the published revision it belongs to.
+internal/viz/readbundle.go ReadStaticBundle: the inverse of WriteStaticBundle, rebuilding a
+                          BRPFile from published pieces through a PieceFetcher. Defs come back
+                          from the head only (names, footprints, armyCost -> MetalCost), and a v4
+                          head yields BRPFile.Legacy, which DecodeChunk decodes with the 8 old
+                          core columns (build = finished, target = none) — snapshot/brp.go's
+                          frameCodec.cols.
 internal/capture/         parse the widget's .brepstream -> snapshot records (brep.go; the
                           text preamble + comm-record parsing in lines.go). The BRSNAP text
                           stream it used to read too is GONE — nothing wrote it once the

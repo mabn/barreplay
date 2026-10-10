@@ -396,6 +396,43 @@ func UploadStatic(ctx context.Context, brpPath string, o UploadOptions) error {
 		return err
 	}
 
+	if err := uploadDir(ctx, o, native, bundleDir, uploadID); err != nil {
+		return err
+	}
+	if o.IndexURL == "" {
+		// Unreachable from the CLIs, which resolve IndexURL from -upload via
+		// LookupTarget and so always have one; kept for a caller that builds
+		// UploadOptions by hand and leaves it empty.
+		fmt.Fprintf(os.Stderr, "%s: uploaded, but NOT registered in the replay catalog: the caller set no IndexURL\n", uploadID)
+		return nil
+	}
+	rid := ""
+	if o.Rev != "" {
+		rid = uploadID
+	}
+	if err := putCatalogEntry(ctx, o.IndexURL, gameID, rid, brpPath, dirSize(bundleDir), o.ModOptions, o.View); err != nil {
+		return fmt.Errorf("registering %s in the replay catalog at %s: %w", gameID, o.IndexURL, err)
+	}
+	fmt.Fprintf(os.Stderr, "%s: registered in the replay catalog at %s\n", gameID, o.IndexURL)
+	return nil
+}
+
+// UploadPieces uploads every file under bundleDir to the target's bucket,
+// keyed by its path relative to bundleDir ("replays/<rid>.insights1.json"),
+// through the same transports as UploadStatic. It registers nothing in the
+// catalog: it adds pieces beside a replay that is already published.
+func UploadPieces(ctx context.Context, o UploadOptions, bundleDir, label string) error {
+	var native *R2Client
+	if o.Target == "r2" {
+		native = r2ClientFromEnv(o.WorkerDir)
+	}
+	return uploadDir(ctx, o, native, bundleDir, label)
+}
+
+// uploadDir is UploadStatic's transport choice: native S3 when credentials
+// are present, the dev worker's PUT route for "local", else the worker
+// project's node uploader.
+func uploadDir(ctx context.Context, o UploadOptions, native *R2Client, bundleDir, uploadID string) error {
 	uploaded := false
 	if native != nil {
 		fmt.Fprintf(os.Stderr, "uploading %q to %s/%s (native S3, %d in flight)\n",
@@ -438,21 +475,6 @@ func UploadStatic(ctx context.Context, brpPath string, o UploadOptions) error {
 			return fmt.Errorf("uploading %s: %w (is the worker project installed? npm install in %s)", uploadID, err, o.WorkerDir)
 		}
 	}
-	if o.IndexURL == "" {
-		// Unreachable from the CLIs, which resolve IndexURL from -upload via
-		// LookupTarget and so always have one; kept for a caller that builds
-		// UploadOptions by hand and leaves it empty.
-		fmt.Fprintf(os.Stderr, "%s: uploaded, but NOT registered in the replay catalog: the caller set no IndexURL\n", uploadID)
-		return nil
-	}
-	rid := ""
-	if o.Rev != "" {
-		rid = uploadID
-	}
-	if err := putCatalogEntry(ctx, o.IndexURL, gameID, rid, brpPath, dirSize(bundleDir), o.ModOptions, o.View); err != nil {
-		return fmt.Errorf("registering %s in the replay catalog at %s: %w", gameID, o.IndexURL, err)
-	}
-	fmt.Fprintf(os.Stderr, "%s: registered in the replay catalog at %s\n", gameID, o.IndexURL)
 	return nil
 }
 

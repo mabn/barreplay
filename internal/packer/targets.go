@@ -26,6 +26,10 @@ type UploadTarget struct {
 	// IndexURL is the worker's base URL: the catalog PUT for every publisher,
 	// plus the job queue and archived-stream reads for the ingest daemon.
 	IndexURL string
+	// DataURL is where the bucket's objects are read back from: the bucket's
+	// own hostname for "r2", the dev worker (which serves /replays/* out of
+	// the simulator bucket) for "local".
+	DataURL string
 	// What describes the destination in flag help ("the real bucket").
 	What string
 }
@@ -35,8 +39,8 @@ var uploadTargets = map[string]UploadTarget{
 	// the custom domain: it is the one that survives a rename of the worker or
 	// of the account's workers.dev subdomain, and it is what the catalog rows
 	// are shared as.
-	"r2":    {Name: "r2", IndexURL: "https://replay.fogofwar.dev", What: "the real bucket"},
-	"local": {Name: "local", IndexURL: "http://127.0.0.1:5173", What: "the vite/wrangler dev simulator"},
+	"r2":    {Name: "r2", IndexURL: "https://replay.fogofwar.dev", DataURL: "https://cdn-bar.fogofwar.dev", What: "the real bucket"},
+	"local": {Name: "local", IndexURL: "http://127.0.0.1:5173", DataURL: "http://127.0.0.1:5173", What: "the vite/wrangler dev simulator"},
 }
 
 // LookupTarget resolves an -upload value to its destination. The second result

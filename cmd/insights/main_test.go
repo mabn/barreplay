@@ -1,0 +1,233 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/mabn/barreplay/internal/insights"
+	"github.com/mabn/barreplay/internal/viz"
+	"github.com/mabn/barreplay/snapshot"
+)
+
+const gameID = "0123456789abcdef0123456789abcdef"
+const rid = gameID + "-deadbeef"
+
+// writeBRP writes a small two-sided capture.
+func writeBRP(t *testing.T, dir string) string {
+	t.Helper()
+	w, err := snapshot.NewBRPWriter(dir, rid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := snapshot.Meta{
+		GameID: gameID, MapName: "Test Map", SampleEvery: 30,
+		UnitDefs: map[int32]snapshot.UnitDef{
+			1: {DefID: 1, Name: "armpw", HumanName: "Pawn", CanMove: true, Speed: 58, WeaponCount: 1, MetalCost: 50},
+			2: {DefID: 2, Name: "armfus", IsBuilding: true, XSize: 10, ZSize: 10, MetalCost: 3600},
+		},
+		Teams:   []snapshot.TeamInfo{{TeamID: 0, AllyTeam: 0}, {TeamID: 1, AllyTeam: 1}},
+		Players: []snapshot.PlayerInfo{{PlayerID: 0, Name: "Ann", Team: 0}, {PlayerID: 1, Name: "Bob", Team: 1}},
+	}
+	if err := w.WriteMeta(meta); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 100; i++ {
+		fr := snapshot.Frame{Frame: int32(i * 30), TimeSec: float32(i)}
+		for u := int32(0); u < 4; u++ {
+			fr.Units = append(fr.Units, snapshot.UnitState{UnitID: 10 + u, DefID: 1, Team: u % 2, Pos: snapshot.Vec3{X: float32(i), Z: float32(u * 100)}, Health: 100, MaxHealth: 100, BuildProgress: 1})
+		}
+		fr.Units = append(fr.Units, snapshot.UnitState{UnitID: 50, DefID: 2, Team: 1, Pos: snapshot.Vec3{X: 900, Z: 900}, Health: 5000, MaxHealth: 5000, BuildProgress: 1})
+		fr.Resources = []snapshot.TeamResource{{Team: 0, MetalIncome: 12}, {Team: 1, MetalIncome: 8}}
+		if err := w.WriteFrame(fr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(dir, rid+".brp")
+}
+
+// server serves a catalog with one row plus the bucket under root.
+func server(t *testing.T, root string, view string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/replays" {
+			rows := []map[string]any{}
+			if id := r.URL.Query().Get("id"); id == "" || id == gameID {
+				rows = append(rows, map[string]any{"id": gameID, "rid": rid, "view": view})
+			}
+			json.NewEncoder(w).Encode(rows)
+			return
+		}
+		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(r.URL.Path, "/"))))
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write(b)
+	}))
+}
+
+func readInsights(t *testing.T, path string) insights.Insights {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ins insights.Insights
+	if err := json.Unmarshal(b, &ins); err != nil {
+		t.Fatal(err)
+	}
+	return ins
+}
+
+func newRunner(srv *httptest.Server, out string) *runner {
+	return &runner{indexURL: srv.URL, dataURL: srv.URL, http: srv.Client(), outDir: out}
+}
+
+// A legacy replay (pieces only) is rebuilt, priced by army cost, and keeps
+// the catalog row's view.
+func TestRebuildsFromPieces(t *testing.T) {
+	bucket := t.TempDir()
+	if _, err := viz.WriteStaticBundle(writeBRP(t, t.TempDir()), bucket); err != nil {
+		t.Fatal(err)
+	}
+	srv := server(t, bucket, "ally")
+	defer srv.Close()
+	out := t.TempDir()
+	if err := newRunner(srv, out).one(context.Background(), "https://bar-rts.com/replays/"+gameID); err != nil {
+		t.Fatal(err)
+	}
+	ins := readInsights(t, filepath.Join(out, "replays", insights.FileName(rid)))
+	if ins.CostCoverage != insights.CostArmy || ins.POV != insights.POVAlly || len(ins.Sides) != 2 {
+		t.Errorf("cost/pov/sides = %s/%s/%d", ins.CostCoverage, ins.POV, len(ins.Sides))
+	}
+	if got := ins.Series.MetalIncome[0][2]; got != 12 {
+		t.Errorf("side 0 metal income = %v, want 12 (from .resources)", got)
+	}
+}
+
+// A revision whose .brp is in the bucket is read whole: full costs.
+func TestPrefersTheBRP(t *testing.T) {
+	bucket := t.TempDir()
+	brp := writeBRP(t, filepath.Join(bucket, "replays"))
+	if filepath.Base(brp) != rid+".brp" {
+		t.Fatal(brp)
+	}
+	srv := server(t, bucket, "")
+	defer srv.Close()
+	out := t.TempDir()
+	if err := newRunner(srv, out).one(context.Background(), rid); err != nil {
+		t.Fatal(err)
+	}
+	ins := readInsights(t, filepath.Join(out, "replays", insights.FileName(rid)))
+	if ins.CostCoverage != insights.CostFull || ins.POV != insights.POVFull {
+		t.Errorf("cost/pov = %s/%s", ins.CostCoverage, ins.POV)
+	}
+}
+
+// An existing insights file is not recomputed (and the replay not fetched)
+// unless forced.
+func TestSkipsPublished(t *testing.T) {
+	bucket := t.TempDir()
+	name := filepath.Join(bucket, "replays", insights.FileName(rid))
+	os.MkdirAll(filepath.Dir(name), 0o755)
+	os.WriteFile(name, []byte("{}"), 0o644)
+	srv := server(t, bucket, "")
+	defer srv.Close()
+	out := t.TempDir()
+	r := newRunner(srv, out)
+	if err := r.one(context.Background(), gameID); err != nil {
+		t.Fatalf("skip: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "replays")); !os.IsNotExist(err) {
+		t.Error("wrote a file for an already-published revision")
+	}
+	r.force = true
+	if err := r.one(context.Background(), gameID); err == nil {
+		t.Error("-force with no replay pieces should fail, not succeed")
+	}
+}
+
+func TestCatalogRids(t *testing.T) {
+	srv := server(t, t.TempDir(), "")
+	defer srv.Close()
+	rids, err := newRunner(srv, "").catalogRids(context.Background())
+	if err != nil || len(rids) != 1 || rids[0] != rid {
+		t.Errorf("rids = %v, %v", rids, err)
+	}
+}
+
+// A local .brp is published under -rid when given.
+func TestLocalWithRid(t *testing.T) {
+	brp := writeBRP(t, t.TempDir())
+	out := t.TempDir()
+	r := &runner{outDir: out, localRid: gameID + "-01234567"}
+	if err := r.one(context.Background(), brp); err != nil {
+		t.Fatal(err)
+	}
+	ins := readInsights(t, filepath.Join(out, "replays", insights.FileName(gameID+"-01234567")))
+	if ins.CostCoverage != insights.CostFull {
+		t.Errorf("cost = %s", ins.CostCoverage)
+	}
+}
+
+// The summary rebuilt from published pieces agrees with the one computed from
+// the .brp they were cut from, on everything the pieces carry: only costs of
+// unpriced defs (and the coverage/POV labels saying so) may differ.
+func TestPiecesMatchBRP(t *testing.T) {
+	brp := writeBRP(t, t.TempDir())
+	bucket := t.TempDir()
+	if _, err := viz.WriteStaticBundle(brp, bucket); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(brp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bf, err := snapshot.ParseBRP(f)
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, _ := insights.FromBRP(bf)
+	want, err := insights.Compute(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb, res, err := viz.ReadStaticBundle(context.Background(), func(_ context.Context, key string) ([]byte, error) {
+		b, err := os.ReadFile(filepath.Join(bucket, filepath.FromSlash(key)))
+		if os.IsNotExist(err) {
+			return nil, viz.ErrNotFound
+		}
+		return b, err
+	}, rid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin, _ := insights.FromPieces(pb, res, insights.POVFull)
+	got, err := insights.Compute(pin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	same := func(name string, a, b any) {
+		ja, _ := json.Marshal(a)
+		jb, _ := json.Marshal(b)
+		if string(ja) != string(jb) {
+			t.Errorf("%s differs:\n brp:    %s\n pieces: %s", name, ja, jb)
+		}
+	}
+	same("series", want.Series, got.Series)
+	same("sides", want.Sides, got.Sides)
+	same("milestones", want.Milestones, got.Milestones)
+	same("chat", want.Chat, got.Chat)
+	same("bounds", want.Bounds, got.Bounds)
+	same("death frames", want.Deaths.F, got.Deaths.F)
+}

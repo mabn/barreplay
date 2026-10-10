@@ -801,3 +801,41 @@ func TestIndexBRPAddsLayout(t *testing.T) {
 		t.Error("IndexBRP accepted a layout that does not match the file")
 	}
 }
+
+// A v4 stream carries only the first eight core columns. Decoded with Legacy
+// set, units come back finished and targetless, and everything else intact.
+func TestLegacyV4Columns(t *testing.T) {
+	enc := newFrameCodec(30)
+	enc.cols = legacyV4Columns
+	var coreBuf, extraBuf bytes.Buffer
+	core, extra := varintWriter{w: &coreBuf}, varintWriter{w: &extraBuf}
+	frames := []Frame{
+		{Frame: 30, Units: []UnitState{{UnitID: 1, DefID: 7, Team: 2, Pos: Vec3{X: 100, Z: 200}, Health: 50, MaxHealth: 80, VelX: 1, BuildProgress: 0.5, TargetID: 9}}},
+		{Frame: 60, Units: []UnitState{
+			{UnitID: 1, DefID: 7, Team: 2, Pos: Vec3{X: 130, Z: 200}, Health: 40, MaxHealth: 80, VelX: 1},
+			{UnitID: 2, DefID: 8, Team: 3, Pos: Vec3{X: 5, Z: 6}, Health: 1, MaxHealth: 1},
+		}},
+	}
+	for _, fr := range frames {
+		enc.encodeFrame(&core, &extra, fr)
+	}
+	dec := newFrameCodec(30)
+	dec.cols = legacyV4Columns
+	got, err := decodeFrames(dec, coreBuf.Bytes(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || len(got[1].Units) != 2 {
+		t.Fatalf("decoded %+v", got)
+	}
+	for _, fr := range got {
+		for _, u := range fr.Units {
+			if u.BuildProgress != 1 || u.TargetID != 0 {
+				t.Errorf("unit %d build=%v target=%d, want 1 and 0", u.UnitID, u.BuildProgress, u.TargetID)
+			}
+		}
+	}
+	if u := got[1].Units[0]; u.Pos.X != 130 || u.Health != 40 || u.DefID != 7 {
+		t.Errorf("unit 1 at 60 = %+v", u)
+	}
+}

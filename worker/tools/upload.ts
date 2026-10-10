@@ -7,8 +7,8 @@
 //   npx tsx tools/upload.ts <bundleDir> [replayId] [--local] [--preview]
 //
 //   <bundleDir>   the -out dir you passed to barreplay-static (default ../static)
-//   [replayId]    upload just this one replay (replays/<id>.brp — plus, for an
-//                 older bundle, its .brw, .resources, .keys and /c*). Omit to
+//   [replayId]    upload just this one replay (replays/<id>.* — the .brp and any
+//                 pieces beside it — plus an older bundle's /c*). Omit to
 //                 upload every replay in the dir.
 //   --local       target the local (miniflare) R2 used by `npm run dev`
 //                 (default is REAL R2)
@@ -42,8 +42,13 @@ export function collectReplayFiles(root: string, id?: string): R2Object[] {
   const files: string[] = [];
   const replays = join(root, "replays");
   if (id) {
-    for (const f of [join(replays, `${id}.brp`), join(replays, `${id}.keys`), join(replays, `${id}.resources`), join(replays, `${id}.brw`)]) {
-      if (existsSync(f)) files.push(f);
+    // Every <id>.<ext> beside the head: .brw/.keys/.resources, and pieces
+    // added to a published replay later (<id>.insights<N>.json).
+    if (existsSync(replays)) {
+      for (const name of readdirSync(replays)) {
+        const f = join(replays, name);
+        if (name.startsWith(`${id}.`) && statSync(f).isFile()) files.push(f);
+      }
     }
     walk(join(replays, id), files); // chunk files of an older split bundle
   } else {

@@ -35,8 +35,9 @@ const (
 	CostFull = "full"
 	CostArmy = "army"
 
-	POVFull = "full"
-	POVAlly = "ally"
+	POVFull    = "full"
+	POVAlly    = "ally"
+	POVUnknown = "unknown"
 )
 
 // FromBRP builds an Input over a parsed .brp. Frames are decoded chunk by
@@ -82,4 +83,26 @@ func (in Input) pov() string {
 		return POVAlly
 	}
 	return POVFull
+}
+
+// FromPieces builds an Input over a replay rebuilt from its published pieces
+// (viz.ReadStaticBundle): the economy comes from .resources rather than the
+// frames, and only armed mobile defs are priced. pov is the catalog row's view
+// ("full", "ally"), or empty when the row does not say.
+func FromPieces(f *snapshot.BRPFile, resources map[int32][]snapshot.TeamResource, pov string) (Input, error) {
+	in, err := FromBRP(f)
+	if err != nil {
+		return Input{}, err
+	}
+	in.Resources = resources
+	in.CostCoverage = CostArmy
+	switch pov {
+	case POVFull, POVAlly:
+		in.POV = pov
+	default:
+		// Nothing records whose view it is; a replay with no recorder record
+		// would otherwise read as full, which is the claim not to make.
+		in.POV = POVUnknown
+	}
+	return in, nil
 }
