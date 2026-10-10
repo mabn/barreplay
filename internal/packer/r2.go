@@ -4,7 +4,7 @@
 // worker's node tooling. Deliberately mirrors worker/tools/r2put.ts's fast
 // path (aws4fetch): UNSIGNED-PAYLOAD, the same three signed headers, 16 PUTs
 // in flight, one retry on transient failures, and the .brw-heads-last
-// completion barrier. The signer is pinned byte-for-byte against an
+// completion barrier (moot for a publish today, which is one .brp). The signer is pinned byte-for-byte against an
 // aws4fetch-produced signature in r2_test.go — the exact signer the TS path
 // uses successfully against R2. Only PutObject is implemented; that is all
 // publishing needs, and it keeps the repo's no-third-party-deps rule.
@@ -105,9 +105,11 @@ func (c *R2Client) UploadBundle(ctx context.Context, bundleDir string) error {
 }
 
 // uploadBundle uploads every file under bundleDir through put in two waves —
-// everything else first, then every .brw head. The barrier matters: the head
-// is the object the Worker's live listing keys on, so a replay can never
-// appear in the picker before the rest of its files exist.
+// everything else first, then every .brw head. A bundle written today is a
+// single .brp, which is its own listing marker and lands in one PUT, so the
+// barrier no longer has anything to order; it is kept for a directory holding
+// an OLDER bundle, whose .brw head was the marker the Worker's live listing
+// keyed on and so had to arrive after the pieces it describes.
 func uploadBundle(ctx context.Context, bundleDir string, put func(ctx context.Context, key string, body []byte) error) error {
 	var bodies, heads []string // bundle-relative keys
 	err := filepath.WalkDir(bundleDir, func(path string, d os.DirEntry, err error) error {
@@ -202,8 +204,9 @@ func objectHTTPMeta(key string) (contentType, cacheControl string) {
 	if strings.HasSuffix(key, ".resources") || strings.HasSuffix(key, ".json") {
 		contentType = "application/json"
 	} else {
-		// .brw head, .keys, or replays/<id>/c<n>: a raw gzip stream the viewer
-		// gunzips ITSELF. It must not be labelled Content-Encoding: gzip, or
+		// The .brp (or an old bundle's .brw / .keys / replays/<id>/c<n>):
+		// binary whose gzip streams the viewer gunzips ITSELF, Range-read out
+		// of the .brp. It must not be labelled Content-Encoding: gzip, or
 		// the browser would transparently inflate it and the decoder would be
 		// handed already-decompressed bytes.
 		contentType = "application/octet-stream"

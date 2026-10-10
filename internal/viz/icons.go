@@ -2,6 +2,7 @@ package viz
 
 import (
 	"embed"
+	"encoding/json"
 	"io/fs"
 	"regexp"
 	"strconv"
@@ -14,18 +15,17 @@ import (
 // unit's internal name to its minimap-icon bitmap). See bardata/README.md for
 // provenance. These are game content, not part of the capture format.
 //
+// The icon table is static per BAR version, so it does not ride in replay
+// files: this package turns icontypes.lua into bardata/icons/icontypes.json
+// (IconTypesJSON, kept current by TestIconTypesJSONUpToDate), which ships with
+// the viewer's other vendored icons and is what app.js resolves each unit def
+// against.
+//
 //go:embed bardata/icons
 var iconsFS embed.FS
 
 //go:embed bardata/icontypes.lua
 var iconTypesLua string
-
-// ranksFS holds BAR's player rank icons (the chevron/star badges shown left of a
-// player's name in the in-game player list). Files are named 1.png..8.png for
-// rank levels 0..7. Served at /ranks/<n>.png.
-//
-//go:embed bardata/ranks
-var ranksFS embed.FS
 
 // iconEntry opens a top-level table entry: `name = {` with tolerant spacing
 // (the real file has both `name = {` and `legjam ={`).
@@ -138,14 +138,23 @@ func loadIcons() {
 	}
 }
 
-// iconsSubFS returns the embedded icons directory rooted so files are served as
-// /icons/<file> (matching the "icons/..." bitmap paths in the wire payload).
-func iconsSubFS() (fs.FS, error) {
-	return fs.Sub(iconsFS, "bardata/icons")
-}
-
-// ranksSubFS returns the embedded rank-icon directory rooted so files are served
-// as /ranks/<n>.png.
-func ranksSubFS() (fs.FS, error) {
-	return fs.Sub(ranksFS, "bardata/ranks")
+// IconTypesJSON renders the whole icon table as the viewer reads it:
+// {"<icontype key>": {"p": "icons/<file>.png", "s": <size>}}, keys sorted (so
+// the output is stable). app.js looks a unit def up by its iconType first and
+// its internal name second — the same order as unitIconFor.
+func IconTypesJSON() ([]byte, error) {
+	iconOnce.Do(loadIcons)
+	type entry struct {
+		Path string  `json:"p"`
+		Size float64 `json:"s"`
+	}
+	out := make(map[string]entry, len(iconByName))
+	for k, ic := range iconByName {
+		out[k] = entry{Path: ic.Path, Size: ic.Size}
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
 }

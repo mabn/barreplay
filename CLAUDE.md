@@ -72,13 +72,15 @@ internal/packer/          the capture-to-published-replay pipeline: Pack (stream
                           ReportStats (stats.go: the .brp size report — it only RENDERS,
                           snapshot.ComputeBRPStats measures — shared so `pack -stats` and
                           every bringest publish print the identical breakdown), and
-                          UploadStatic — writes the static bundle (viz.WriteStaticBundle) and
+                          UploadStatic — writes the static bundle (viz.WriteStaticBundle: the
+                          .brp, one object) and
                           uploads it to the worker's R2 bucket so it appears in the deployed
                           viewer with no redeploy. For "r2" with R2 API credentials in the env
                           (R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY) the upload is NATIVE Go
                           (r2.go: a minimal SigV4 signer — pinned byte-for-byte against an
                           aws4fetch fixture, the signer the TS path uses against R2 — with 16
-                          concurrent PUTs, one retry on 5xx, and the .brw-heads-last barrier;
+                          concurrent PUTs, one retry on 5xx, and the .brw-heads-last barrier —
+                          moot for a publish today, which is ONE object, the .brp;
                           account/bucket from CLOUDFLARE_ACCOUNT_ID/R2_BUCKET or the worker
                           dir's wrangler.jsonc, R2_ENDPOINT overrides). "local" PUTs each piece
                           through the dev worker's bearer-guarded PUT /replays/* route (the dev
@@ -459,8 +461,9 @@ internal/capture/         parse the widgets' streams -> snapshot records (BRSNAP
                           a map drawing — through the SAME parser (parseComm), whose
                           sanitizeCommText length-caps the player-authored text and strips
                           control characters before it can reach a browser.
-internal/viz/             serve the viewer (SPA embedded from worker/) + the static-shaped replay URLs
-internal/viz/static.go    pack a .brp into plain static files (byte-identical to the served URLs) for serverless hosting
+internal/viz/             publish side of the viewer: the catalog row (catalog.go), the icon table
+                          the front-end resolves units against (icons.go -> bardata/icons/icontypes.json)
+internal/viz/static.go    a replay's published form: its .brp alone (plus index.json), for serverless hosting
 worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as static files from R2 (no playback server);
                           worker/public + worker/index.html are THE front-end (the one copy in the repo).
                           UI CACHE-BUSTING: index.html references /app.<rev>.js /
@@ -484,10 +487,14 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           and public/_headers applies ONLY to asset-layer responses — through the
                           Worker its cache-control rules are silently dead. Icons are NOT
                           fingerprinted and cannot be: each icon's path is baked into the
-                          unitIcons map of every published .brw (internal/viz/icons.go writes
-                          "icons/<file>"), so renaming would 404 the icons of every replay
-                          already published — hence a week's max-age rather than immutable, and
-                          purge the zone after re-syncing the vendored bitmaps.
+                          unitIcons map of every older replay's published .brw, so renaming
+                          would 404 the icons of every replay already published — hence a
+                          week's max-age rather than immutable, and purge the zone after
+                          re-syncing the vendored bitmaps. The same goes for the ICON TABLE,
+                          /icons/icontypes.json (generated into internal/viz/bardata/icons/
+                          by `go test ./internal/viz -run IconTypes -update`, and kept current
+                          by that test): it rides the same prefix, so a viewer may hold a stale
+                          copy for up to a week after BAR's icon set changes.
                           HOSTNAMES: the worker is served from replay.fogofwar.dev (a wrangler
                           Custom Domain — a PER-HOSTNAME cert, so no wildcard and no Advanced
                           Certificate Manager; the zone must live in the worker's own account)
@@ -513,14 +520,15 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the Durable Object, whose behaviour is its SQL and which plain node
                           cannot import) + `npm run smoke` + `vite dev`,
                           then deploy.
-                          The BULK replay pieces (.brw/.keys/c<n>/.resources) are NOT fetched
+                          The BULK replay pieces (the .brp, plus the .brw/.resources/.keys/
+                          c<n> of older replays) are NOT fetched
                           from it: they come from cdn-bar.fogofwar.dev, the R2 bucket bound
                           directly to a hostname. A Worker runs BEFORE Cloudflare's cache, so
                           every /replays/* read through it is a billed Class B GetObject no
                           matter what cache-control it sets; served straight from the bucket a
                           cache HIT never reaches R2 and costs nothing. /index.json and /api/*
                           stay on the worker because it BUILDS them (bucket scan, catalog DO).
-                          app.js routes exactly those four URLs through dataURL(), whose origin
+                          app.js routes exactly those URLs through dataURL(), whose origin
                           comes from index.html's __DATA_ORIGIN__ placeholder: stamped by the
                           Vite dataBase plugin on a BUILD only ($DATA_BASE overrides), BLANKED
                           by `vite dev` (which is the origin for its own files) — empty means
@@ -535,7 +543,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           cross-origin now; without it the browser blocks every piece) and a
                           Cache Rule making the hostname eligible for cache — Cloudflare's
                           default cache list is by file extension and matches NONE of .brw,
-                          .keys or the extensionless c<n>, so without the rule everything still
+                          .brp, .keys or the extensionless c<n>, so without the rule everything still
                           bills Class B while looking perfectly healthy. See worker/README.md
                           for the runbook. Consequence for uploads: content-type and
                           cache-control are STORED on each object (objectHTTPMeta, duplicated
@@ -630,7 +638,8 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           resolve (init normalizes them to the path form via replaceState).
                           BOTH backends serve the SPA entry at the page paths — /replays/<id>
                           with NO extension (the dot is the whole dispatch against the data
-                          pieces under the same prefix: <id>.brw/.keys/.resources have one,
+                          pieces under the same prefix: <id>.brp (and an older replay's .brw/
+                          .keys/.resources) have one,
                           chunks have a second segment) plus /queue /games /sqlstats — the
                           worker via a /replays/:id route ahead of the R2 wildcard and the Go
                           server inside handleReplays; the smoke harness checks all four
@@ -1871,8 +1880,9 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           Uploads (tools/upload.ts) go
                           through tools/r2put.ts: parallel S3 PUTs when R2_ACCESS_KEY_ID/
                           R2_SECRET_ACCESS_KEY are set (fast, aws4fetch), else parallel `wrangler r2
-                          object put`; .brw heads upload after a completion barrier so a
-                          half-uploaded replay never lists
+                          object put`; a publish is one .brp, which is its own listing
+                          marker; an older bundle's .brw heads upload after a completion
+                          barrier so a half-uploaded replay never lists
 snapshot/                 PUBLIC data model + pluggable Writer (owns the on-disk format: the .brp binary).
                           The Writer's four record types are Meta, Frame, Event and Comm
                           (snapshot.Comm = one thing a player wrote or drew).
@@ -1943,11 +1953,17 @@ displacement, build progress 1/255, resources 0.1; `t` is derived as `frame/30`,
 not stored; **y/dvy are not stored at all** — the viewer renders the x/z plane and
 ground-unit elevation is terrain noise, so decoded `Pos.Y`/`VelY` are 0). Container:
 `"BRP1" <ver u8 = 5>` then tagged sections `<tag u8><len u32le><payload>` — `M` meta
-JSON (Meta + precomputed bounds/frameTeams/counts + the **chunk index**), `K` **all
+JSON (Meta + precomputed bounds/frameTeams/counts + the **chunk index** + the
+**section layout**: every later section's tag and length in file order, which is how
+a browser holding only the head of the file finds the rest; always the FIRST
+section, and the writer puts `E`/`C` right behind it so the viewer's first Range
+read usually covers all three; `snapshot.IndexBRP` adds the layout to a file written
+before it existed, which is what `WriteStaticBundle` runs every publish through), `K` **all
 core keyframes as ONE gzip stream**, `F` core delta-frame chunks (columns: id def
 team x z hp maxHp dvx dvz build target — build + the build/assist target moved into
 the core in v5 so the browser can draw construction bars and builder→target lines),
-`X` extra (team resources — not sent to the browser), `E` events, `C` **comms**
+`X` extra (team resources — the viewer reads the whole section once and decodes it,
+`decodeEconomy` in app.js), `E` events, `C` **comms**
 (everything the players wrote or drew: chat + map points/lines/erases, columnar
 like `E` with two string tables and whole-elmo positions delta-coded against the
 previous comm — freehand drawing is a run of short segments, so those deltas are
@@ -1957,8 +1973,9 @@ Unknown tags are
 skipped, so sections can be added compatibly; any version byte other than 5 is
 rejected in Go (v1–v3 existed only pre-release, v4 shipped without build/target in
 core; regenerate a .brp from its .brsnap/.brepstream with pack). The JS decoder
-keys its column count off the .brw container's version byte and still plays
-published v4 bundles (their units decode as build=finished/target=none).
+keys its column count off the container's version byte (the .brp's, or an older
+replay's .brw) and still plays published v4 bundles (their units decode as
+build=finished/target=none).
 
 **Chunking (random access / streaming).** Frames are grouped into **chunks of 64
 samples** (~1 min at 1 Hz), and the codec's prediction state resets at every chunk
@@ -2155,12 +2172,15 @@ won't load without an extra dev flag. Widgets are the right injection point.
 
 The browser playback of a finished capture lives in `worker/` (the front-end) and
 is served as **plain static files** from R2 by the Cloudflare Worker; `internal/viz`
-is the Go side that produces those files from a `.brp` (`static.go`, used by `pack
--upload` and `cmd/barreplay-static`) and the catalog row the publisher registers
-(`catalog.go`). Nothing here touches the engine. **The viewer reads the current
-.brp version only** — convert a raw `.brsnap`/`.brepstream` once with `pack` (the
-converter owns the legacy parsing; viz has none). The URL scheme is `/index.json`,
-`/api/replays`, `/replays/<id>.brw`, `.keys`, `.resources`, `/replays/<id>/c<n>`.
+is the Go side that publishes a `.brp` (`static.go`, used by `pack -upload` and
+`cmd/barreplay-static`), generates the viewer's icon table (`icons.go`) and builds
+the catalog row the publisher registers (`catalog.go`). Nothing here touches the
+engine. **The viewer reads the current .brp version only** — convert a raw
+`.brsnap`/`.brepstream` once with `pack` (the converter owns the legacy parsing;
+viz has none). The URL scheme is `/index.json`, `/api/replays` and
+`/replays/<id>.brp` — the whole published replay, Range-read — plus, for OLDER
+replays, `/replays/<id>.brw`, `.resources`, and (older still) `.keys` and
+`/replays/<id>/c<n>`.
 `/api/replays` is the replay catalog (stats for the landing list — see the worker/
 entry above), served by the worker from its Durable Object table; the rows are
 built by `viz.BuildCatalogEntry` (`internal/viz/catalog.go`) at publish time.
@@ -2168,32 +2188,51 @@ built by `viz.BuildCatalogEntry` (`internal/viz/catalog.go`) at publish time.
 a local directory of `.brp` files; it was removed as unused. Local viewing is `npm
 run dev` in `worker/` plus `pack -upload local`.)
 
-- **`internal/viz/wire.go`** builds the pieces the viewer reads:
-  `/replays/<id>.brw` is a small binary **"BRW1" container** (same section framing
-  as `.brp`) of a gzipped `J` head JSON (meta, teams, unitDef names — BOTH the internal
-  one (`unitDefs`, the icon/footprint lookup key) and the human-readable one
-  (`unitNames`, "Construction Bot", which is what the viewer LABELS units with in the
-  tooltip and event log; per-def absent when the capture recorded none, and absent
-  wholesale from bundles published before it existed, so `app.js` `defName` falls back
-  to `unitDefs` — a deployed replay keeps showing codes until it is republished),
-  icons, footprints,
-  players, bounds, `frameCount`, `armyCost` (the metal price of each ARMED, MOBILE
-  def, which is what the sidebar's team statistics bar sums into a side's army
-  value — absent from every bundle published before it existed, which is why that
-  row hides rather than reading zero), and the **chunk index**
-  `{frame,count,kLen,len}` per
-  chunk — `kLen` is the keyframe's RAW length inside the decompressed keys stream)
-  plus the file's `E` events and `C` comms sections byte-for-byte — ~230 KB for a
-  33-min game, so the page is interactive immediately. `/replays/<id>.keys` is the `K` section
-  byte-for-byte (every keyframe, one gzip stream); `/replays/<id>/c<n>` is chunk
-  n's delta bytes, **sliced straight out of the stored file**. No frame is ever
-  decoded to build these (except `.resources`): bounds/teams/index all come from the
-  file's meta record (`snapshot.ParseBRP`). In the browser, `app.js` gunzips each response with
+- **A published replay is its `.brp`, nothing else** (`app.js` "reading a published
+  .brp": `loadBrpHead`, `headFromBrp`, `decodeEconomy`). The first request is a Range
+  read of the head of the file (`BRP_PROBE` = 256 KB): the 10-byte header, the `M`
+  meta and — because the writer puts them right behind it — `E` events and `C`
+  comms. The meta's section layout places every other section; a head bigger than
+  the probe costs exactly one more read for the rest of the meta and one for E+C
+  (adjacent wherever they are, so one span), and a FILE smaller than the probe — the
+  206 comes back short — or a server that ignores Range (200) is kept whole
+  (`brpWhole`) and every later piece is sliced from it. Everything a published
+  head used to carry precomputed is derived in the browser from the meta's full
+  unit-def table (`headFromBrp`): internal names (`unitDefs`, the icon/footprint
+  lookup key), human names (`unitNames`, "Construction Bot", what units are LABELLED
+  with — only where it differs from the internal one; `defName` falls back),
+  footprints (STRUCTURES only, `!canMove || isBuilding` — neither alone suffices:
+  nano turrets are immobile builders, some factories report canMove; sizes in
+  8-elmo squares), `armyCost` (the metal price of each ARMED, MOBILE def — the
+  sidebar's army value; the commander half of BAR's rule stays in `defIsCom`), the
+  team roster plus every team seen only in frames (`frameTeams` — nothing renders
+  colourless), players, bounds and the chunk index with ABSOLUTE ranges (`keys`,
+  each chunk's `off`). Icons come from `/icons/icontypes.json`, the icon table
+  generated from BAR's icontypes.lua: static per BAR version, so it ships with the
+  viewer instead of riding in every replay; a def resolves by its `iconType` key
+  first, then its name. The ECONOMY is the `X` section, read once after the head and
+  decoded in JS (`decodeEconomy`, the twin of snapshot/brp.go's extra-stream codec,
+  values rounded half away from zero like Go). The section has no frame numbers —
+  they live in the frame stream — so records are kept PER SAMPLE and filed under
+  their sim frame as each chunk's frames decode (`publishEconomy`); deriving the
+  frame from chunk.frame + k*sampleEvery is wrong wherever a capture skipped a
+  sample (the harness fixture does). The lockstep is pinned by
+  worker/tests/fixtures/viewer.brp + viewer.economy.json, written by internal/viz's
+  `TestViewerFixtureUpToDate` (regenerate with `-update`) and decoded by app.js's
+  own functions in worker/tests/appjs.test.ts. OLDER replays (no `.brp` — the first
+  read 404s) are read as they always were: `/replays/<id>.brw` is a small binary
+  **"BRW1" container** of a gzipped `J` head JSON (exactly what `headFromBrp`
+  now builds, computed by Go at publish time) plus the file's `E` and `C` sections
+  byte-for-byte; the economy is `/replays/<id>.resources` (JSON `[{f, r}]`); and the
+  frames are either Range-read from a `.brp` at the head's `keys`/`off` ranges or,
+  older still, fetched from `/replays/<id>.keys` + one `/replays/<id>/c<n>` per chunk
+  when the head has no `keys`. Those objects stay in the bucket and keep playing. In
+  the browser, `app.js` gunzips each response with
   the native `DecompressionStream` and unpacks frames into the same flat stride-9
   `Int32Array` (`[id, def, team, x, z, hp, maxHp, dvx, dvz]`) the renderer always
   used.
 - **`app.js` keys-first streaming**: right after the head, the viewer fetches
-  `.keys` and pipes the response body through `DecompressionStream`, slicing
+  the keys range and pipes the response body through `DecompressionStream`, slicing
   keyframes out at the cumulative `kLen` boundaries as bytes arrive (`streamKeys`) —
   the first keyframe renders within the first network chunks, and **every minute of
   the timeline becomes scrubbable in a few seconds**, before any full chunk arrives.
@@ -2241,7 +2280,7 @@ run dev` in `worker/` plus `pack -upload local`.)
   and `decodeFrames` in `worker/public/app.js` (JS decode) must stay in lockstep, as must
   `STRIDE` (JS). The head's `bounds` (viewport fit) and team roster (Meta.Teams plus any team id
   seen only in frames/events — `frameTeams` — so nothing renders colourless) come from
-  the file's meta record. `buildHead` also fills `footprints`
+  the file's meta record. `headFromBrp` also fills `footprints`
   (name→`{w,h}` in elmos) for **structures only** (`!UnitDef.CanMove || UnitDef.IsBuilding`):
   neither flag alone is enough — nano/build turrets are immobile but tagged builders (not
   buildings), while some factories report `CanMove`, so the union catches both and still
@@ -2315,12 +2354,12 @@ run dev` in `worker/` plus `pack -upload local`.)
   commander, weighted by the sampled build progress so a unit under construction
   counts for the metal actually sunk into it. The rule is SPLIT across the two
   sides on purpose: the armed/mobile half needs the unit-def table and is applied
-  at publish time (`wire.go`'s `ArmyCost`, which prices only the defs that pass
-  it), the commander half stays in `app.js`, which already holds this repo's one
-  definition of a commander (`COMMANDER_RE`/`defIsCom`). A bundle published
-  before `armyCost` existed carries none, so the AV row is DROPPED rather than
-  drawn as 0 against 0 — republishing the `.brp` (`pack`) brings it back without
-  a re-simulation. Each row is likewise dropped when the economy timeline has no
+  where the head is built (`headFromBrp`'s `armyCost`, which prices only the defs
+  that pass it; for an older replay, the same rule ran in Go at publish time), the
+  commander half stays in `defIsCom` (`COMMANDER_RE`), this repo's one definition
+  of a commander. An older bundle published before `armyCost` existed carries
+  none, so the AV row is DROPPED rather than drawn as 0 against 0 — republishing
+  the `.brp` (`pack`) brings it back without a re-simulation. Each row is likewise dropped when the economy timeline has no
   reading for it, and the whole bar hides when no row is left.
 - **Chat + map drawings in the viewer (`app.js` `buildCommIndex`/`drawMarks`/
   `renderChat`)**: the head's `C` section decodes into `data.comms`, which splits two
@@ -2396,9 +2435,13 @@ run dev` in `worker/` plus `pack -upload local`.)
   **parses the Lua data table directly in Go** (a small line/brace scanner, no `gopher-lua`)
   — keeping the repo stdlib-only. It also replicates the file's trailing `_scav` synthesis
   (inverted-path variants) and keeps only entries whose bitmap file actually exists in the
-  embedded FS, so the payload never advertises a 404. It also parses each type's `size`
-  multiplier. `buildHead` fills `unitIcons` (name→`{path,size}`) for just the def names in the
-  replay; the front-end draws every unit as its icon, **team-tinted** (BAR icons are grayscale
+  embedded FS, so the table never advertises a 404. It also parses each type's `size`
+  multiplier. The result is the ICON TABLE, `bardata/icons/icontypes.json`
+  (`IconTypesJSON`; regenerated by `go test ./internal/viz -run IconTypes -update`,
+  and that test fails while it is stale), served with the bitmaps at
+  `/icons/icontypes.json`: the icon set is static per BAR version, so it lives
+  with the viewer, never in a replay. `headFromBrp` resolves `unitIcons`
+  (name→`{p,s}`) for just the def names in the replay; the front-end draws every unit as its icon, **team-tinted** (BAR icons are grayscale
   luminance masks — bright→team colour, black→black — so the icon is `multiply`-composited
   into a team-colour field then clipped to its own alpha, preserving the internal detail;
   cached per icon×team) at a **constant
@@ -2549,29 +2592,33 @@ run dev` in `worker/` plus `pack -upload local`.)
   zoom / pan / hover-tooltip. Colours are assigned per ally-team (a base hue per ally,
   lightness varied per team within it).
 
-Guarding it: `internal/viz/viz_test.go` encodes a synthetic `.brp` through the wire
-encoder and checks the head payload (bounds, teams incl. frame-only ones, footprints,
-chunk index) plus the pass-through contract (the E and C sections byte-for-byte, no
-frame data); `static_test.go` checks the bundle against the encoders and the stored
-file's exact byte ranges. No engine or browser needed.
+Guarding it: `internal/viz/static_test.go` checks that a bundle is the `.brp` alone
+(byte-for-byte for a fresh capture), keeps the icon table current, and writes the
+viewer fixture (worker/tests/fixtures: a two-chunk capture with a skipped sample, a
+frame-only team, every footprint rule, an armed mobile def, an icon by iconType)
+together with the economy Go decodes from it; worker/tests/appjs.test.ts runs app.js's
+own reader over that fixture — head, events, comms, ranges, the economy against Go's,
+the request count. snapshot/brp_test.go guards the section layout and `IndexBRP`. No
+engine or browser needed.
 
 ### Serverless static hosting (`internal/viz/static.go` + `cmd/barreplay-static` + `worker/`)
 
 Because nothing decodes a frame to serve one — the head is a pure function of the `.brp`
-meta and the keys/chunk pieces are independently-gzipped byte ranges — the whole
-playback path is served as **plain static files with no server**.
-`viz.WriteStaticBundle` precomputes, per capture: `replays/<id>.brw` (the head),
-`replays/<id>.keys` (the `K` section), `replays/<id>.resources` (the economy JSON,
-stored **uncompressed** — a pre-gzipped body double-compresses on Cloudflare), and one
-`replays/<id>/c<n>` file per chunk with delta frames (single-frame chunks get no file).
-`WriteIndex` writes `index.json` (guarded by `static_test.go`, which diffs the bundle
-against the wire encoders and the stored file's byte ranges). `cmd/barreplay-static`
-is the CLI (and `packer.UploadStatic` the publisher's path); the `worker/` Cloudflare project
-(Hono + Vite) serves the bundle from an R2 bucket and the SPA + vendored icons as static
-assets. Map terrain is fetched browser-side straight from `api.bar-rts.com`, so the
-worker has no map proxy and no playback logic. `static.go` shares the wire encoders
-(`brpWirePayload`/`brpResourcesJSON`), so it stays in lockstep with the codec
-automatically — the same three-way codec lockstep note applies.
+meta and every section the browser reads is an independently-gzipped byte range — the
+whole playback path is served as **plain static files with no server**, and a replay
+is ONE of them. `viz.WriteStaticBundle` writes, per capture, `replays/<id>.brp`: the
+capture, validated and passed through `snapshot.IndexBRP` (which adds the section
+layout to a file packed before it existed and leaves a fresh one byte-for-byte). It
+used to also write a precomputed `.brw` head and a `.resources` economy JSON (and,
+before that, split the frames into `.keys` + `/c<n>` files); nothing writes those any
+more, and the bundles that have them still play. `WriteIndex` writes `index.json`,
+listing a replay by its `.brp` or an older bundle's `.brw`. `cmd/barreplay-static` is
+the CLI (and `packer.UploadStatic` the publisher's path); the `worker/` Cloudflare
+project (Hono + Vite) serves the bundle from an R2 bucket and the SPA + vendored icons
+(and the icon table) as static assets. Map terrain is fetched browser-side straight
+from `api.bar-rts.com`, so the worker has no map proxy and no playback logic. The
+codec lockstep is between snapshot/brp.go and app.js (`decodeFrames`, `decodeEvents`,
+`decodeComms`, `decodeEconomy`, `headFromBrp`).
 
 ## Running a real capture (needs the engine + content)
 

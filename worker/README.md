@@ -18,16 +18,14 @@ chunk are independently-gzipped byte ranges. The files are precomputed
 | URL | Static object (in R2) |
 | --- | --- |
 | `GET /index.json` | built live by the Worker from the bucket (no stored file) |
-| `GET /replays/<id>.brw` | `replays/<id>.brw` (head: meta, teams, icons, chunk index) |
-| `GET /replays/<id>.keys` | `replays/<id>.keys` (every keyframe, one gzip stream — streamed first, makes the whole timeline scrubbable) |
-| `GET /replays/<id>/c<n>` | `replays/<id>/c<n>` (chunk n's delta frames; absent for single-frame chunks) |
-| `GET /replays/<id>.resources` | `replays/<id>.resources` |
+| `GET /replays/<id>.brp` | `replays/<id>.brp` — the whole published replay. The viewer Range-reads its head (meta, events, comms), then its keyframes (the whole timeline becomes scrubbable), each chunk's delta frames and the economy, at the offsets the meta's section layout gives |
+| `GET /replays/<id>.brw`, `.resources` | only OLDER replays: a precomputed head and the economy as JSON. Still served and read (the viewer falls back to the `.brw` when there is no `.brp`), never written any more |
+| `GET /replays/<id>.keys`, `/replays/<id>/c<n>` | only replays older still, which split the keyframes and chunks into files; still served, never written any more |
 
 The Worker (`src/worker/index.ts`) is a thin Hono app that streams these out of R2 —
 no frame is ever decoded server-side. The replay listing (`/index.json`) is
 built **live** from the bucket (it lists the `replays/` prefix), so there is no listing file
-to maintain: uploading one replay's handful of files makes it appear, and deleting them
-removes it. The SPA and the vendored unit/rank
+to maintain: uploading one replay's `.brp` makes it appear, and deleting it removes it. The SPA and the vendored unit/rank
 icons (`/icons/*`, `/ranks/*`) are fixed static assets bundled with the deploy. Map terrain
 is fetched **browser-side directly** from `api.bar-rts.com` (degrades gracefully if
 unreachable), so there is no map proxy.
@@ -500,13 +498,14 @@ The TS upload tools go through `tools/r2put.ts`, which picks a transport:
   startup, which is why the old serial upload was slow; parallelism hides most of it,
   credentials stay wrangler's.
 
-Either way each replay's `.brw` head is uploaded **after all its other objects** (a
-completion barrier, not just ordering): the head is what the live listing keys on, so a
-half-uploaded replay never appears in the picker.
+A replay published today is a single `.brp`, which is its own listing marker. For an
+older bundle in the directory, each replay's `.brw` head is uploaded **after all its
+other objects** (a completion barrier, not just ordering): the head was what the live
+listing keyed on, so a half-uploaded replay never appears in the picker.
 
 Because the listing is built live, you upload **one replay at a time** —
-`npm run upload -- ../static <gameId>` pushes just that replay's `.brw`, `.resources`, and
-chunk files, and it shows up in the picker immediately. For a bulk import, `rclone`/`aws s3
+`npm run upload -- ../static <gameId>` pushes just that replay's `.brp` (and an older
+bundle's other pieces), and it shows up in the picker immediately. For a bulk import, `rclone`/`aws s3
 sync ./static/replays -> bucket/replays` against R2's S3 API works too (same R2 API
 token).
 
@@ -708,8 +707,9 @@ that header only ever helps a browser that already has the file. Binding the
 bucket to its own hostname puts the cache in front of R2 instead: a cache hit is
 answered at the edge, never becomes a `GetObject`, and so costs nothing.
 
-The viewer therefore fetches the four bulk per-replay pieces (`.brw`, `.keys`,
-`/c<n>`, `.resources`) from `cdn-bar.fogofwar.dev`, and everything else —
+The viewer therefore fetches the per-replay data (the `.brp`, and an older
+replay's `.brw`, `.resources`, `.keys` and `/c<n>`) from
+`cdn-bar.fogofwar.dev`, and everything else —
 `/index.json`, `/api/*` — from the Worker, because the Worker *builds* those
 (a bucket scan, the catalog Durable Object); they are not objects a bucket
 could serve.
@@ -743,7 +743,7 @@ npx wrangler r2 bucket cors list barreplay-replays   # verify it took
 (Caching → Cache Rules): match `Hostname equals cdn-bar.fogofwar.dev`, action
 **Eligible for cache**. This step is not optional and is easy to skip: by
 default Cloudflare caches only a fixed list of file extensions, and **none of
-these files qualify** — `.brw`, `.keys` and the extensionless `c0`, `c1`, … are
+these files qualify** — `.brw`, `.brp`, `.keys` and the extensionless `c0`, `c1`, … are
 all unrecognised. Without the rule the hostname works, looks fine, and still
 bills a Class B operation on every single read.
 
@@ -751,9 +751,18 @@ Verify by requesting the same piece twice and watching `cf-cache-status` go
 `MISS` then `HIT`:
 
 ```sh
-URL=https://cdn-bar.fogofwar.dev/replays/<id>.brw
+URL=https://cdn-bar.fogofwar.dev/replays/<id>.brp
 curl -s -o /dev/null -D - "$URL" | grep -i cf-cache-status
 curl -s -o /dev/null -D - "$URL" | grep -i cf-cache-status   # want HIT
+```
+
+Do the same for a **Range read**, which is how the viewer reads every part of
+a `.brp`: want `206` both times and `HIT` the second.
+
+```sh
+URL=https://cdn-bar.fogofwar.dev/replays/<id>.brp
+curl -s -o /dev/null -D - -H 'Range: bytes=0-99' "$URL" | grep -iE '^HTTP|cf-cache-status|content-range'
+curl -s -o /dev/null -D - -H 'Range: bytes=0-99' "$URL" | grep -iE '^HTTP|cf-cache-status|content-range'
 ```
 
 Use a **GET**, not `curl -I`. Cloudflare never serves HEAD requests from
@@ -774,7 +783,7 @@ which is why this check uses curl.
 - **`vite.config.ts`** stamps the origin into `index.html`'s `__DATA_ORIGIN__`
   placeholder at build time (`$DATA_BASE` overrides; an empty value pins the
   viewer back to same-origin). `vite dev` blanks it, so it keeps serving its
-  own files — that is why `app.js` routes those four URLs through `dataURL()`
+  own files — that is why `app.js` routes those URLs through `dataURL()`
   rather than hardcoding a host.
 - **Uploads store `content-type` and `cache-control` on the object.** R2 replies
   with stored metadata verbatim on the direct path, so it can no longer be a

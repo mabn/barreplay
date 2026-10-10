@@ -307,6 +307,22 @@ test("upload archives the stream and records a pending job", async () => {
   assert.deepEqual(await asJson(idx), []);
 });
 
+// A replay published today is its .brp alone, and that object is what lists
+// it; an older bundle is still listed by its .brw, with every piece counted.
+test("the listing names .brp replays and older .brw bundles", async () => {
+  const { env, bucket } = makeEnv();
+  bucket.objects.set("replays/new-1a2b3c4d.brp", new Uint8Array(100));
+  bucket.objects.set("replays/old.brw", new Uint8Array(10));
+  bucket.objects.set("replays/old.resources", new Uint8Array(5));
+  bucket.objects.set("replays/old.keys", new Uint8Array(3));
+  bucket.objects.set("replays/old/c0", new Uint8Array(7));
+  const idx = await app.request("/index.json", {}, env);
+  assert.deepEqual(await asJson(idx), [
+    { file: "new-1a2b3c4d", gameId: "new-1a2b3c4d", size: 100 },
+    { file: "old", gameId: "old", size: 25 },
+  ]);
+});
+
 test("rejected uploads write nothing", async () => {
   const { env, index, bucket } = makeEnv();
 
@@ -890,6 +906,7 @@ test("PUT /replays/<key> stores cache-control and content-type on the object", a
     [`replays/${rid}/c0`, "application/octet-stream", immutable],
     [`replays/${rid}.brw`, "application/octet-stream", immutable],
     [`replays/${rid}.keys`, "application/octet-stream", immutable],
+    [`replays/${rid}.brp`, "application/octet-stream", immutable],
     // .resources is real JSON the browser parses...
     [`replays/${rid}.resources`, "application/json", immutable],
     // ...while a listing changes on every publish, so it only revalidates.

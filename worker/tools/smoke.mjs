@@ -210,6 +210,16 @@ try {
       icon.status === 200 && (icon.headers.get("cache-control") ?? "").includes("max-age=604800"),
       `${icon.status} ${icon.headers.get("cache-control")}`);
   }
+  // The viewer resolves every unit's icon through this table (replays no
+  // longer carry one), so an SPA fallback here would leave every unit a dot.
+  const table = await get(base, "/icons/icontypes.json");
+  let armcom = null;
+  try {
+    armcom = JSON.parse(table.body).armcom;
+  } catch {}
+  check("GET /icons/icontypes.json is the icon table",
+    table.status === 200 && armcom?.p === "icons/armcom.png",
+    `${table.status} ${table.headers.get("content-type")}`);
 } catch (e) {
   console.error(`smoke: ${e.message}`);
   console.error(log.join("").split("\n").slice(-15).join("\n"));

@@ -35,7 +35,7 @@ flowchart LR
     resim --> brp
     bringest -->|"pack"| brp[".brp"]
 
-    brp -->|"static bundle<br/>.brw .keys chunks .resources"| r2[("R2 bucket")]
+    brp -->|"the .brp itself"| r2[("R2 bucket")]
     brp -->|"catalog row"| do[("Durable Object<br/>SQLite catalog")]
     r2 --> viewer["browser viewer<br/>worker/public/app.js"]
     do --> viewer
@@ -123,13 +123,17 @@ is not stored. A real 33-minute 8v8 is about 8 MB, where the original JSONL
 format was 476 MB. The writer is deterministic: the same capture always
 produces the same bytes, which is what the engine-patch verification relies on.
 
-**The wire** is the `.brp` cut into static files the browser fetches directly:
-`<id>.brw` (head: meta, teams, unit defs, icons, events, comms, chunk index),
-`<id>.keys` (the `K` section verbatim), `<id>/c<n>` (one chunk's delta bytes
-sliced from the file), `<id>.resources`. Nothing is re-encoded server-side; the
-browser gunzips with `DecompressionStream`. Three decoders stay in lockstep:
-the Go encoder and decoder in `snapshot/brp.go` and the JavaScript decoder in
-`worker/public/app.js`.
+**The wire** is the `.brp` itself: a publish uploads `<id>.brp` and nothing else,
+and the browser reads it with HTTP Range requests. The first read covers the
+meta, events and chat, and the meta's section layout says where the keyframes,
+each chunk's delta bytes and the economy sit. Unit names, footprints and army
+costs are derived in the browser from the meta's unit-def table, and the icon
+table ships with the viewer, since it is fixed per BAR version. Nothing is
+re-encoded server-side; the browser gunzips with `DecompressionStream`. The
+codecs stay in lockstep: the Go encoder and decoder in `snapshot/brp.go` and the
+JavaScript decoders in `worker/public/app.js`. Replays published earlier keep
+their older layout (a `.brw` head, `.resources`, and sometimes split chunk
+files), and the viewer still reads it.
 
 ## Engine patches
 

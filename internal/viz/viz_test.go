@@ -1,10 +1,6 @@
 package viz
 
 import (
-	"bytes"
-	"compress/gzip"
-	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,35 +8,6 @@ import (
 
 	"github.com/mabn/barreplay/snapshot"
 )
-
-// parseWire splits a BRW payload into tag->payload and decodes the head.
-func parseWire(t *testing.T, payload []byte) (wireHead, map[byte][]byte) {
-	t.Helper()
-	version, sections, err := snapshot.ReadContainer(bytes.NewReader(payload), snapshot.BRWMagic)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if version != snapshot.BRPVersion {
-		t.Fatalf("wire version = %d, want %d", version, snapshot.BRPVersion)
-	}
-	secs := map[byte][]byte{}
-	for _, s := range sections {
-		secs[s.Tag] = s.Payload
-	}
-	gz, err := gzip.NewReader(bytes.NewReader(secs[snapshot.SecHead]))
-	if err != nil {
-		t.Fatal(err)
-	}
-	headJSON, err := io.ReadAll(gz)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var head wireHead
-	if err := json.Unmarshal(headJSON, &head); err != nil {
-		t.Fatal(err)
-	}
-	return head, secs
-}
 
 // writeBRP writes a small two-frame capture to <dir>/<gameID>.brp.
 func writeBRP(t *testing.T, dir, gameID string) string {
@@ -100,115 +67,6 @@ func writeBRP(t *testing.T, dir, gameID string) string {
 	return filepath.Join(dir, gameID+".brp")
 }
 
-// The head payload must carry everything the viewer needs before any frame
-// data arrives: bounds, the full team roster (including teams only seen in
-// frames), footprints, and the chunk index. The E and C sections ride along
-// byte-for-byte from the stored file, and no frame data does.
-func TestWirePayload(t *testing.T) {
-	dir := t.TempDir()
-	path := writeBRP(t, dir, "g")
-
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bf, err := snapshot.ParseBRP(f)
-	f.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload, err := brpWirePayload(bf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	head, secs := parseWire(t, payload)
-
-	// Head basics.
-	if head.GameID != "g" || head.MapName != "Test Map" || head.SampleEvery != 30 {
-		t.Errorf("head = %+v", head)
-	}
-	if head.UnitDefs[1] != "armcom" {
-		t.Errorf("unitDefs = %+v", head.UnitDefs)
-	}
-	// Human names ride alongside the internal ones (the viewer labels units with
-	// them); a def whose capture recorded none is simply absent, so the front-end
-	// falls back to the internal name.
-	if head.UnitNames[1] != "Armada Commander" {
-		t.Errorf("unitNames[1] = %q, want %q", head.UnitNames[1], "Armada Commander")
-	}
-	if _, ok := head.UnitNames[2]; ok {
-		t.Errorf("unitNames = %+v, want no entry for a def with no human name", head.UnitNames)
-	}
-	// Bounds cover both frames' units: x in [-50, 500], z in [20, 600].
-	if head.Bounds.MinX != -50 || head.Bounds.MaxX != 500 || head.Bounds.MinZ != 20 || head.Bounds.MaxZ != 600 {
-		t.Errorf("bounds = %+v", head.Bounds)
-	}
-	// Team 7 appears only in a frame; the head must still list it.
-	found := false
-	for _, tm := range head.Teams {
-		if tm.TeamID == 7 {
-			found = true
-		}
-	}
-	if len(head.Teams) != 3 || !found {
-		t.Errorf("teams = %+v", head.Teams)
-	}
-
-	// Footprints: immobile units are included, in elmos (xsize/zsize * 8).
-	if fp, ok := head.Footprints["corllt"]; !ok || fp.W != 16 || fp.H != 24 {
-		t.Errorf("corllt footprint = %+v (ok=%v), want {W:16 H:24}", fp, ok)
-	}
-	// An immobile builder (nano turret) is not IsBuilding but still gets a footprint.
-	if fp, ok := head.Footprints["armnanotct3"]; !ok || fp.W != 96 || fp.H != 96 {
-		t.Errorf("armnanotct3 footprint = %+v (ok=%v), want {W:96 H:96}", fp, ok)
-	}
-	// A factory reports CanMove but is IsBuilding, so it gets a footprint.
-	if fp, ok := head.Footprints["armlab"]; !ok || fp.W != 40 || fp.H != 40 {
-		t.Errorf("armlab footprint = %+v (ok=%v), want {W:40 H:40}", fp, ok)
-	}
-	// ArmyCost: the metal the team-statistics bar sums per side. Only ARMED,
-	// MOBILE defs are priced — the rest of BAR's rule (commanders) is applied in
-	// the browser, which is why armcom is not excluded here but corllt (a
-	// building) and armlab (unarmed) are.
-	if c, ok := head.ArmyCost[5]; !ok || c != 46 {
-		t.Errorf("armyCost[armpw] = %d, %v; want 46, true", c, ok)
-	}
-	for _, id := range []int32{1, 2, 3, 4} {
-		if _, ok := head.ArmyCost[id]; ok {
-			t.Errorf("armyCost = %+v, want no entry for def %d (not armed+mobile)", head.ArmyCost, id)
-		}
-	}
-
-	if _, ok := head.Footprints["armcom"]; ok {
-		t.Errorf("armcom is mobile; should have no footprint")
-	}
-
-	// Chunk index mirrors the file's: kLen is the keyframe's RAW length in the
-	// decompressed keys stream, len the delta bytes.
-	if head.FrameCount != 2 || len(head.Chunks) != 1 {
-		t.Fatalf("frameCount=%d chunks=%+v", head.FrameCount, head.Chunks)
-	}
-	if head.Chunks[0].Frame != 30 || head.Chunks[0].Count != 2 ||
-		head.Chunks[0].KLen != bf.Chunks[0].KLen || head.Chunks[0].Len != bf.Chunks[0].FLen {
-		t.Errorf("wire chunk = %+v, file chunk = %+v", head.Chunks[0], bf.Chunks[0])
-	}
-
-	// E and C sections pass through byte-for-byte; no frame data in the head
-	// payload.
-	if !bytes.Equal(secs[snapshot.SecEvents], bf.Sections[snapshot.SecEvents]) {
-		t.Errorf("wire E section is not the stored one")
-	}
-	if len(bf.Sections[snapshot.SecComms]) == 0 {
-		t.Fatal("stored file has no comms section")
-	}
-	if !bytes.Equal(secs[snapshot.SecComms], bf.Sections[snapshot.SecComms]) {
-		t.Errorf("wire C section is not the stored one")
-	}
-	if _, ok := secs[snapshot.SecFrames]; ok {
-		t.Errorf("head payload must not contain a frames section")
-	}
-}
-
 func TestUnitIcons(t *testing.T) {
 	// Well-known BAR units should resolve to an icon that exists in the embedded
 	// FS. defence_0_laser is shared by arm/cor light laser towers.
@@ -240,23 +98,6 @@ func TestUnitIcons(t *testing.T) {
 	}
 }
 
-func TestHeadIncludesIcons(t *testing.T) {
-	meta := snapshot.Meta{
-		GameID: "g",
-		UnitDefs: map[int32]snapshot.UnitDef{
-			1: {DefID: 1, Name: "armcom"},
-			2: {DefID: 2, Name: "corllt"},
-		},
-	}
-	head := buildHead(meta, defaultBounds(), nil)
-	if head.UnitIcons["armcom"].Path != "icons/armcom.png" || head.UnitIcons["armcom"].Size <= 0 {
-		t.Errorf("armcom icon=%+v", head.UnitIcons["armcom"])
-	}
-	if head.UnitIcons["corllt"].Path != "icons/defence_0_laser.png" {
-		t.Errorf("corllt icon=%+v", head.UnitIcons["corllt"])
-	}
-}
-
 func TestUnitIconFor(t *testing.T) {
 	// A def whose name is not itself an icontype key still gets an icon via its
 	// IconType (the authoritative key), fixing the missing-icon case.
@@ -274,101 +115,6 @@ func TestUnitIconFor(t *testing.T) {
 	// Neither resolves -> not ok.
 	if _, _, ok := unitIconFor("no_such_type", "no_such_unit"); ok {
 		t.Errorf("unitIconFor(bad,bad) ok=true, want false")
-	}
-}
-
-// The head resolves an icon by IconType even when the unit's name is not an
-// icontype key.
-func TestHeadIconByType(t *testing.T) {
-	meta := snapshot.Meta{
-		GameID: "g",
-		UnitDefs: map[int32]snapshot.UnitDef{
-			1: {DefID: 1, Name: "made_up_unit_xyz", IconType: "armcom"},
-		},
-	}
-	head := buildHead(meta, defaultBounds(), nil)
-	if head.UnitIcons["made_up_unit_xyz"].Path != "icons/armcom.png" {
-		t.Errorf("icon-by-type = %+v, want icons/armcom.png", head.UnitIcons["made_up_unit_xyz"])
-	}
-}
-
-// The head must carry the player roster, and brpResourcesJSON must return
-// each sampled frame's per-team economy (the .brp X stream, which the frame
-// chunk path never fetches) so the sidebar player list can draw its bars.
-func TestPlayersAndResources(t *testing.T) {
-	dir := t.TempDir()
-	w, err := snapshot.NewBRPWriter(dir, "g")
-	if err != nil {
-		t.Fatal(err)
-	}
-	meta := snapshot.Meta{
-		GameID: "g", SampleEvery: 30,
-		Teams: []snapshot.TeamInfo{{TeamID: 0, AllyTeam: 0}, {TeamID: 1, AllyTeam: 1}},
-		Players: []snapshot.PlayerInfo{
-			{PlayerID: 0, Name: "Alice", Team: 0, CountryCode: "us", Rank: 5, Skill: 31.2},
-			{PlayerID: 2, Name: "Watcher", Team: 0, Spectator: true},
-		},
-	}
-	if err := w.WriteMeta(meta); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.WriteFrame(snapshot.Frame{
-		Frame: 30, TimeSec: 1,
-		Units: []snapshot.UnitState{{UnitID: 1, DefID: 1, Team: 0, Health: 1, MaxHealth: 1}},
-		Resources: []snapshot.TeamResource{
-			{Team: 0, Metal: 314, Energy: 14700, MetalStorage: 1000, EnergyStorage: 20000, MetalIncome: 12.5, EnergyIncome: 850},
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	f, err := os.Open(filepath.Join(dir, "g.brp"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	bf, err := snapshot.ParseBRP(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Players ride the head payload.
-	head := buildHead(bf.Meta, defaultBounds(), bf.FrameTeams)
-	if len(head.Players) != 2 {
-		t.Fatalf("players: got %d want 2 (%+v)", len(head.Players), head.Players)
-	}
-	if p := head.Players[0]; p.Name != "Alice" || p.Country != "us" || p.Rank != 5 || p.Skill != 31.2 {
-		t.Errorf("player0=%+v", p)
-	}
-	if !head.Players[1].Spectator {
-		t.Errorf("player1 should be a spectator: %+v", head.Players[1])
-	}
-
-	// Resources body: a JSON array, one {f, r} per sampled frame.
-	raw, err := brpResourcesJSON(bf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var arr []wireResFrame
-	if err := json.Unmarshal(raw, &arr); err != nil {
-		t.Fatal(err)
-	}
-	if len(arr) != 1 || arr[0].F != 30 {
-		t.Fatalf("resource frames = %+v", arr)
-	}
-	// [team, metal, energy, mStore, eStore, mInc, eInc]; income 12.5 -> 13 (rounded
-	// from the format's 1/10 quantization).
-	want := []int32{0, 314, 14700, 1000, 20000, 13, 850}
-	if len(arr[0].R) != resourceStride {
-		t.Fatalf("R len=%d want %d (%v)", len(arr[0].R), resourceStride, arr[0].R)
-	}
-	for i, v := range want {
-		if arr[0].R[i] != v {
-			t.Errorf("R[%d]=%d want %d (full=%v)", i, arr[0].R[i], v, arr[0].R)
-		}
 	}
 }
 

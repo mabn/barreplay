@@ -3,10 +3,13 @@
 These files are game content from **Beyond All Reason** (BAR), vendored here so
 the viewer can render real unit icons instead of plain dots. They are not
 part of the barreplay capture format or pipeline — only the viewer uses them
-(`internal/viz/icons.go` resolves each replay's icons into the `.brw` head, and
-`worker/tools/sync-assets.mjs` copies the bitmaps into the worker's assets).
+(`internal/viz/icons.go` turns `icontypes.lua` into the viewer's icon table,
+`icons/icontypes.json`, and `worker/tools/sync-assets.mjs` copies the bitmaps and
+that table into the worker's assets).
 
-- `icons/` — minimap unit-icon PNGs (including the `inverted/` scavenger set).
+- `icons/` — minimap unit-icon PNGs (including the `inverted/` scavenger set), plus
+  `icontypes.json`, GENERATED from `icontypes.lua` (do not edit by hand: run
+  `go test ./internal/viz -run IconTypes -update`; that test fails while it is stale).
 - `icontypes.lua` — BAR's gamedata table mapping each unit's internal name to
   its icon bitmap. `internal/viz/icons.go` parses the data table directly (no Lua
   VM) into a name→bitmap map.

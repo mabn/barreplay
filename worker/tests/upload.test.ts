@@ -25,6 +25,9 @@ function fakeBundle(): string {
     "replays/bbb.brw",
     "replays/bbb.keys",
     "replays/bbb.resources",
+    "replays/ccc.brw", // the current shape: the .brp in place of keys + chunks
+    "replays/ccc.brp",
+    "replays/ccc.resources",
   ]) {
     mkdirSync(dirname(join(root, f)), { recursive: true });
     writeFileSync(join(root, f), f);
@@ -36,11 +39,13 @@ test("collectReplayFiles walks only replays/**, heads last", () => {
   const keys = collectReplayFiles(fakeBundle()).map((o) => o.key);
   assert.ok(keys.every((k) => k.startsWith("replays/")), `outside replays/: ${keys}`);
   assert.ok(!keys.includes("index.json"));
-  assert.equal(keys.length, 8);
+  assert.equal(keys.length, 11);
   const heads = keys.filter((k) => k.endsWith(".brw"));
-  assert.deepEqual(heads, ["replays/aaa.brw", "replays/bbb.brw"]);
+  assert.deepEqual(heads, ["replays/aaa.brw", "replays/bbb.brw", "replays/ccc.brw"]);
   assert.ok(
-    keys.indexOf("replays/aaa.brw") > keys.indexOf("replays/aaa/c1") && keys.indexOf("replays/bbb.brw") > keys.indexOf("replays/bbb.keys"),
+    keys.indexOf("replays/aaa.brw") > keys.indexOf("replays/aaa/c1") &&
+      keys.indexOf("replays/bbb.brw") > keys.indexOf("replays/bbb.keys") &&
+      keys.indexOf("replays/ccc.brw") > keys.indexOf("replays/ccc.brp"),
     `heads must sort after their replay's files: ${keys}`,
   );
 });
@@ -48,6 +53,8 @@ test("collectReplayFiles walks only replays/**, heads last", () => {
 test("collectReplayFiles single-replay filter", () => {
   const keys = collectReplayFiles(fakeBundle(), "aaa").map((o) => o.key);
   assert.deepEqual(keys, ["replays/aaa.keys", "replays/aaa.resources", "replays/aaa/c0", "replays/aaa/c1", "replays/aaa.brw"]);
+  const cur = collectReplayFiles(fakeBundle(), "ccc").map((o) => o.key);
+  assert.deepEqual(cur, ["replays/ccc.brp", "replays/ccc.resources", "replays/ccc.brw"]);
 });
 
 test("pool bounds concurrency and preserves start order", async () => {

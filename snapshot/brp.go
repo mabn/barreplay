@@ -11,13 +11,20 @@ package snapshot
 //
 //	"BRP1" <version u8 = 5> then per section: <tag u8> <len u32le> <payload>
 //
-//	M  meta JSON: {"meta": <Meta>, "bounds", "frameTeams", "chunks" index, counts}
+//	M  meta JSON: {"meta": <Meta>, "bounds", "frameTeams", "chunks" index,
+//	   counts, "sections" layout} — always the FIRST section
+//	E  lifecycle events
+//	C  chat + map drawings (optional)
 //	K  ALL core keyframes, one gzip stream (keys-first streaming + skimming)
 //	F  core delta frames, chunked: id def team x z hp maxHp dvx dvz build target
-//	X  extra: team resources (keyframe+delta per chunk; never sent to a browser)
-//	E  lifecycle events
+//	X  extra: team resources (keyframe+delta per chunk)
 //
-// The M, K and E payloads are single gzip streams. The F and X payloads are a
+// The file is published as-is and the browser reads it with HTTP Range
+// requests (see worker/public/app.js): the meta's "sections" layout gives
+// every section's position, and M, E and C come first so that one read of
+// the head of the file usually holds everything needed to start drawing.
+//
+// The M, K, E and C payloads are single gzip streams. The F and X payloads are a
 // concatenation of CHUNKS — the random-access unit (the video-codec model):
 // frames are grouped into runs of chunkFrames samples (64 ≈ 1 min at 1 Hz) and
 // the codec's prediction state is RESET at every chunk boundary, so a chunk's
@@ -36,7 +43,8 @@ package snapshot
 // the chunk's delta bytes with that state (BRPFile.DecodeChunk does). Merging
 // the keyframes into one stream also compresses ~12% better than per-chunk
 // keyframe streams (adjacent keyframes are near-duplicates). The X section
-// (never sent to a browser) keeps its keyframe+delta split per chunk.
+// (the economy timeline the viewer fetches whole) keeps its keyframe+delta
+// split per chunk.
 //
 // The M record's "chunks" array indexes everything: first sim frame, sample
 // count, the keyframe's raw range in K, and the delta byte ranges (offsets
@@ -44,7 +52,7 @@ package snapshot
 // offset is reported by ReadContainer, so range-based consumers can add the
 // two).
 //
-// Chunks are separately gzipped ON PURPOSE: the static bundle for R2 hosting
+// Chunks are separately gzipped ON PURPOSE: the published file
 // (internal/viz/static.go) hands individual chunk byte ranges, the K payload,
 // and the E payload to the browser byte-for-byte with no re-encoding, and the
 // browser gunzips them with its native DecompressionStream — that is what
@@ -101,8 +109,9 @@ import (
 )
 
 // Container framing shared by .brp files ("BRP1") and the viz wire payload
-// ("BRW1"). Section order in a file is fixed (M, K, F, X, E, C) but readers
-// accept any order and skip unknown tags.
+// ("BRW1"). A .brp starts with M; the writer then puts E, C, K, F, X (the
+// layout in the meta record says so), but readers accept any order after M
+// and skip unknown tags.
 const (
 	BRPMagic = "BRP1"
 	BRWMagic = "BRW1"
@@ -118,7 +127,7 @@ const (
 	SecMeta      byte = 'M' // .brp: meta JSON
 	SecKeyframes byte = 'K' // all core keyframes, one gzip stream
 	SecFrames    byte = 'F' // core delta frames, chunked
-	SecExtra     byte = 'X' // extra frame columns (not sent to the browser)
+	SecExtra     byte = 'X' // extra frame columns: team economy
 	SecEvents    byte = 'E' // lifecycle events
 	SecComms     byte = 'C' // player chat + map drawings
 	SecHead      byte = 'J' // wire payload: head JSON (viz-specific)
@@ -250,6 +259,29 @@ type brpMetaRecord struct {
 	UnitRecords int64      `json:"unitRecords"`
 	ChunkFrames int        `json:"chunkFrames"` // samples per chunk (last may be short)
 	Chunks      []BRPChunk `json:"chunks,omitempty"`
+	// Sections is the file's LAYOUT: every section after M, in file order,
+	// with its payload length. The meta is always the first section, so its
+	// end is known from the 10 bytes in front of it, and from there this
+	// list places every other section — which is what lets a browser holding
+	// only the head of the file Range-read any section without walking the
+	// headers one round trip at a time. Absent from files written before it
+	// existed; IndexBRP adds it.
+	Sections []BRPSectionLen `json:"sections,omitempty"`
+}
+
+// BRPSectionLen is one entry of the meta record's section layout.
+type BRPSectionLen struct {
+	Tag string `json:"tag"` // the one-byte section tag, as a string ("K")
+	Len int64  `json:"len"` // payload bytes (the 5-byte header is not counted)
+}
+
+// sectionLayout lists sections as the meta record's layout.
+func sectionLayout(secs []Section) []BRPSectionLen {
+	out := make([]BRPSectionLen, len(secs))
+	for i, s := range secs {
+		out[i] = BRPSectionLen{Tag: string(rune(s.Tag)), Len: int64(len(s.Payload))}
+	}
+	return out
 }
 
 // BRPFile is a parsed .brp container: the decoded meta plus the raw
@@ -266,6 +298,10 @@ type BRPFile struct {
 	ChunkFrames int
 	Chunks      []BRPChunk
 	Sections    map[byte][]byte // tag -> raw section payload
+	// SectionOffsets is each section payload's absolute byte offset in the
+	// file (Section.Offset), so a section-relative range — the K section, a
+	// chunk's FOff — can be turned into an HTTP Range over the file itself.
+	SectionOffsets map[byte]int64
 
 	keysRaw []byte // gunzipped K section, cached on first DecodeChunk
 }
@@ -482,8 +518,9 @@ func (c *frameCodec) encodeFrame(core, extra *varintWriter, fr Frame) []prevUnit
 }
 
 // decodeFrames reconstructs full frames from a core stream and, when present,
-// the matching extra stream (which cannot be decoded standalone: it relies on
-// the core stream's changed list). Every live unit appears in every decoded
+// the matching extra stream (one economy record per frame; it decodes on its
+// own too — app.js decodeEconomy does — but carries no frame numbers, which
+// come from the core stream). Every live unit appears in every decoded
 // frame: units skipped by the encoder are re-materialised by advancing their
 // previous state. The codec carries the prediction state ACROSS calls — the
 // caller decodes a chunk by running its keyframe bytes (from the K section)
@@ -1099,6 +1136,24 @@ func (w *brpWriter) Close() error {
 	sort.Slice(teams, func(i, j int) bool { return teams[i] < teams[j] })
 	rec.FrameTeams = teams
 
+	// The sections the browser needs before it can draw anything (events,
+	// comms) come straight after the meta, so the viewer's first Range read
+	// — the head of the file — usually covers all three; the bulk frame data
+	// follows. Comms are optional: a capture from a widget that never
+	// recorded them (or a game where nobody spoke or drew) writes no section
+	// at all, which is also what every .brp from before they existed looks
+	// like.
+	data := []Section{{Tag: SecEvents, Payload: gzipCompress(encodeEvents(w.events))}}
+	if len(w.comms) > 0 {
+		data = append(data, Section{Tag: SecComms, Payload: gzipCompress(encodeComms(w.comms))})
+	}
+	data = append(data,
+		Section{Tag: SecKeyframes, Payload: gzipCompress(w.keysBuf.Bytes())},
+		Section{Tag: SecFrames, Payload: w.coreBuf.Bytes()},
+		Section{Tag: SecExtra, Payload: w.extraBuf.Bytes()},
+	)
+	rec.Sections = sectionLayout(data)
+
 	metaJSON, err := json.Marshal(rec)
 	if err != nil {
 		return err
@@ -1108,19 +1163,7 @@ func (w *brpWriter) Close() error {
 	if err != nil {
 		return err
 	}
-	sections := []Section{
-		{Tag: SecMeta, Payload: gzipCompress(metaJSON)},
-		{Tag: SecKeyframes, Payload: gzipCompress(w.keysBuf.Bytes())},
-		{Tag: SecFrames, Payload: w.coreBuf.Bytes()},
-		{Tag: SecExtra, Payload: w.extraBuf.Bytes()},
-		{Tag: SecEvents, Payload: gzipCompress(encodeEvents(w.events))},
-	}
-	// Comms are optional: a capture from a widget that never recorded them (or
-	// a game where nobody spoke or drew) writes no section at all, which is
-	// also what every .brp published before v5 gained one looks like.
-	if len(w.comms) > 0 {
-		sections = append(sections, Section{Tag: SecComms, Payload: gzipCompress(encodeComms(w.comms))})
-	}
+	sections := append([]Section{{Tag: SecMeta, Payload: gzipCompress(metaJSON)}}, data...)
 	if err := WriteContainer(f, BRPMagic, BRPVersion, sections); err != nil {
 		f.Close()
 		return err
@@ -1142,9 +1185,10 @@ func ParseBRP(r io.Reader) (*BRPFile, error) {
 	if version != BRPVersion {
 		return nil, fmt.Errorf("snapshot: unsupported .brp version %d (want %d)", version, BRPVersion)
 	}
-	f := &BRPFile{Sections: map[byte][]byte{}}
+	f := &BRPFile{Sections: map[byte][]byte{}, SectionOffsets: map[byte]int64{}}
 	for _, s := range sections {
 		f.Sections[s.Tag] = s.Payload
+		f.SectionOffsets[s.Tag] = s.Offset
 	}
 	m, ok := f.Sections[SecMeta]
 	if !ok {
@@ -1168,6 +1212,61 @@ func ParseBRP(r io.Reader) (*BRPFile, error) {
 	f.ChunkFrames = rec.ChunkFrames
 	f.Chunks = rec.Chunks
 	return f, nil
+}
+
+// IndexBRP copies the .brp container read from r to w, adding the section
+// layout (brpMetaRecord.Sections) to its meta record when the file was written
+// before it existed. It is what makes ANY .brp publishable: the viewer reads a
+// published file by Range requests and needs the layout to find its sections.
+// A file that already carries a layout is rewritten unchanged (and refused if
+// that layout does not describe the file), so publishing a fresh capture
+// uploads exactly the bytes the writer produced. Meta fields this reader does
+// not know are kept.
+func IndexBRP(r io.Reader, w io.Writer) error {
+	version, sections, err := ReadContainer(r, BRPMagic)
+	if err != nil {
+		return err
+	}
+	if version != BRPVersion {
+		return fmt.Errorf("snapshot: unsupported .brp version %d (want %d)", version, BRPVersion)
+	}
+	if len(sections) == 0 || sections[0].Tag != SecMeta {
+		return fmt.Errorf("snapshot: .brp meta is not the first section")
+	}
+	metaJSON, err := gunzip(sections[0].Payload)
+	if err != nil {
+		return fmt.Errorf("snapshot: meta section: %w", err)
+	}
+	var rec map[string]json.RawMessage
+	if err := json.Unmarshal(metaJSON, &rec); err != nil {
+		return fmt.Errorf("snapshot: meta section: %w", err)
+	}
+	layout := sectionLayout(sections[1:])
+	if have, ok := rec["sections"]; ok {
+		var got []BRPSectionLen
+		if err := json.Unmarshal(have, &got); err != nil {
+			return fmt.Errorf("snapshot: meta section layout: %w", err)
+		}
+		if len(got) != len(layout) {
+			return fmt.Errorf("snapshot: meta section layout lists %d sections, file has %d", len(got), len(layout))
+		}
+		for i := range got {
+			if got[i] != layout[i] {
+				return fmt.Errorf("snapshot: meta section layout entry %d is %+v, file has %+v", i, got[i], layout[i])
+			}
+		}
+	} else {
+		b, err := json.Marshal(layout)
+		if err != nil {
+			return err
+		}
+		rec["sections"] = b
+		if metaJSON, err = json.Marshal(rec); err != nil {
+			return err
+		}
+		sections[0].Payload = gzipCompress(metaJSON)
+	}
+	return WriteContainer(w, BRPMagic, version, sections)
 }
 
 // chunkSlice extracts and decompresses one gzip stream out of a section

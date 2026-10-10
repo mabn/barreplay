@@ -1986,3 +1986,144 @@ test('list rows link the bare game id; alt-upload links keep their revision', ()
   assert.deepEqual(alts.map((a) => a.href), ['/?replay=aaaa-22222222']);
 });
 
+
+// A replay published today is its .brp alone, read with Range requests, and
+// everything a .brw head used to carry is derived from the file's meta. The
+// fixture is written by internal/viz (TestViewerFixtureUpToDate) together with
+// the economy Go decodes from it, which pins this decoder to snapshot/brp.go.
+test('a published .brp is read by Range and decodes as Go decodes it', async () => {
+  const fixtures = new URL('./fixtures/', import.meta.url);
+  const BRP = new Uint8Array(readFileSync(fileURLToPath(new URL('viewer.brp', fixtures))));
+  const ECON = JSON.parse(readFileSync(fileURLToPath(new URL('viewer.economy.json', fixtures)), 'utf8'));
+  const ICONS = readFileSync(fileURLToPath(new URL('../../internal/viz/bardata/icons/icontypes.json', import.meta.url)), 'utf8');
+
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    const isAsync = APP.slice(start - 6, start) === 'async ';
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return (isAsync ? 'async ' : '') + APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+
+  // A bucket that honours Range (or, with ignoreRange, answers 200 whole).
+  const requests: string[] = [];
+  let ignoreRange = false;
+  const fakeFetch = async (url: string, init?: { headers?: Record<string, string> }) => {
+    if (url === '/icons/icontypes.json') return new Response(ICONS);
+    requests.push(url + ' ' + (init?.headers?.Range ?? ''));
+    if (url !== '/replays/viewer.brp') return new Response('not found', { status: 404 });
+    const m = /^bytes=(\d+)-(\d+)$/.exec(init?.headers?.Range ?? '');
+    if (!m || ignoreRange) return new Response(BRP.slice(), { status: 200 });
+    const lo = +m[1], hi = Math.min(+m[2], BRP.length - 1);
+    return new Response(BRP.slice(lo, hi + 1), { status: 206 });
+  };
+
+  const PROBE_DECL = APP.match(/const BRP_PROBE = [^;]+;/)![0];
+  // build(probe) lifts the reader, optionally with a smaller first read so a
+  // tiny fixture still exercises the path a real game takes (meta, events and
+  // comms past the first read).
+  const build = (probe?: number) => eval(`(function(fetch){
+    const dataURL = p => p;
+    ${probe ? `const BRP_PROBE = ${probe};` : PROBE_DECL}
+    let brpWhole = null;
+    let iconTablePromise = null;
+    ${APP.match(/const own = [^\n]+/)![0]}
+    ${['gunzipU8', 'brpPath', 'brpRange', 'brpMetaExtent', 'brpLayout', 'headFromBrp', 'iconTable',
+       'loadBrpHead', 'decodeEconomy', 'decodeEvents', 'decodeComms', 'publishEconomy'].map(extract).join('\n')}
+    let econChunks = null, resByFrame = null, data = null, chunkStartIdx = [];
+    // publish files every chunk's records the way loadResources does.
+    const publish = (recs, chunks, frames) => {
+      econChunks = recs; resByFrame = new Map(); data = { frames };
+      chunkStartIdx = []; let acc = 0;
+      for (const c of chunks) { chunkStartIdx.push(acc); acc += c.count; }
+      for (let i = 0; i < recs.length; i++) publishEconomy(i);
+      return resByFrame;
+    };
+    return { loadBrpHead, brpRange, decodeEconomy, publish };
+  })`)(fakeFetch);
+
+  // A real game's head outgrows a 64-byte first read: the rest of the meta,
+  // then events + comms in ONE more read (they sit side by side).
+  let api = build(64);
+  const head = await api.loadBrpHead('viewer');
+  assert.equal(requests.length, 3, requests.join('\n'));
+  assert.equal(requests[0], '/replays/viewer.brp bytes=0-63');
+  assert.equal(head.gameId, 'viewer');
+  assert.equal(head.mapName, 'Test Map');
+  assert.equal(head.sampleEvery, 30);
+  assert.equal(head.codecVer, 5);
+  assert.equal(head.frameCount, 70);
+  assert.deepEqual(head.chunks.map((c: { count: number }) => c.count), [64, 6]);
+
+  // Teams: the roster plus team 7, seen only in frames.
+  assert.deepEqual(head.teams.map((t: { team: number; ally: number }) => [t.team, t.ally]), [[0, 0], [1, 1], [7, 7]]);
+  assert.equal(head.teams[0].color, '#ff0000');
+  assert.equal(head.teams[0].player, 'alice');
+  assert.deepEqual(head.players.map((p: { name: string; spec?: boolean }) => [p.name, !!p.spec]),
+    [['alice', false], ['bob', false], ['spec', true]]);
+  assert.equal(head.players[0].country, 'PL');
+  assert.equal(head.players[0].skill, 22.5);
+
+  // The rules a .brw head used to carry precomputed.
+  assert.equal(head.unitDefs['5'], 'armpw');
+  assert.deepEqual(head.unitNames, { 1: 'Armada Commander' }, 'only names that differ from the internal one');
+  assert.deepEqual(head.footprints, {
+    corllt: { w: 16, h: 24 }, armnanotct3: { w: 96, h: 96 }, armlab: { w: 40, h: 40 },
+  }, 'structures only: immobile OR isBuilding');
+  assert.deepEqual(head.armyCost, { 1: 2700, 5: 46 }, 'armed AND mobile, with a cost');
+  assert.equal(head.unitIcons.armcom.p, 'icons/armcom.png');
+  assert.equal(head.unitIcons.corllt.p, 'icons/defence_0_laser.png');
+  assert.equal(head.unitIcons.made_up_unit_xyz.p, 'icons/armcom.png', 'resolved by iconType');
+  assert.equal(head.unitIcons.armnanotct3?.p, JSON.parse(ICONS).armnanotct3?.p);
+
+  // Events and comms came out of that first read.
+  assert.deepEqual(head.events.map((e: { f: number; id: number }) => [e.f, e.id]), [[45, 200], [1335, 300]]);
+  assert.deepEqual(head.comms.map((c: { k: string; t: string }) => [c.k, c.t]), [['chat', 'push'], ['point', 'here']]);
+
+  // The keys and chunk ranges point at gzip streams inside the file.
+  const isGzip = (off: number) => BRP[off] === 0x1f && BRP[off + 1] === 0x8b;
+  assert.ok(isGzip(head.keys.off), 'keys range starts a gzip stream');
+  for (const c of head.chunks) assert.ok(isGzip(c.off), 'chunk range starts a gzip stream');
+
+  // The economy, read from X and decoded here, is exactly Go's, sample for
+  // sample.
+  requests.length = 0;
+  const x = await api.brpRange('viewer', head.extra.off, head.extra.len);
+  assert.equal(requests.length, 1);
+  const econ = await api.decodeEconomy(x, head.chunks);
+  assert.deepEqual(econ.flat(), ECON.map((e: { r: number[] | null }) => e.r));
+
+  // ...and is filed under each sample's REAL frame as frames decode. The
+  // fixture skips samples after the 50th, so a frame derived from the
+  // sample's position would be wrong from there on.
+  const frames: ({ f: number } | undefined)[] = ECON.map((e: { f: number }) => ({ f: e.f }));
+  frames[60] = undefined; // chunk 0's deltas only partly decoded
+  const filed = api.publish(econ, head.chunks, frames);
+  const want = ECON.filter((e: { r: unknown }, i: number) => e.r && i !== 60).map((e: { f: number; r: number[] }) => [e.f, e.r]);
+  assert.deepEqual([...filed].sort((a, b) => a[0] - b[0]), want);
+
+  // At the real first-read size this fixture fits whole, and a file the first
+  // read reached the end of is never downloaded again.
+  api = build();
+  requests.length = 0;
+  assert.equal((await api.loadBrpHead('viewer')).frameCount, 70);
+  await api.brpRange('viewer', head.extra.off, head.extra.len);
+  assert.deepEqual(requests, ['/replays/viewer.brp ' + PROBE_DECL.replace(/.*= (.*) \* (.*);/, (_, a, b) => 'bytes=0-' + (a * b - 1))]);
+
+  // A server that ignores Range answers 200 with the whole file: it is kept,
+  // and nothing after it is downloaded again.
+  api = build(64);
+  ignoreRange = true;
+  requests.length = 0;
+  assert.equal((await api.loadBrpHead('viewer')).frameCount, 70);
+  await api.brpRange('viewer', head.extra.off, head.extra.len);
+  assert.equal(requests.length, 1, 'the whole file was fetched once');
+  ignoreRange = false;
+
+  // A replay with no .brp is an older bundle: the head reads as null.
+  assert.equal(await api.loadBrpHead('old'), null);
+});
