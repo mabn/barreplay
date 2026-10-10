@@ -528,6 +528,17 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           600 elmos, from one presence sample per step), from which the page
                           names the players carrying a fight (moments.ts fighters: >= 10% of
                           their side's army-plus-losses there).
+                          Version 4 also lets every award SAY WHICH UNIT it is: Award.Unit
+                          (the id), F0/F1 (its life) and Path ([frame, x, z] every 5 s, at
+                          most 400) — a card draws the route, and its clip FOLLOWS the unit
+                          (Clip.follow / Clip.path: app.js followClipUnit keeps the camera on
+                          it, drawClipRing pulses a ring round it, drawClipPath draws where it
+                          has been bright and where it is going faint). Marathon and Tourist
+                          play the whole life (clip speeds up to 64x), the losses their last
+                          20 s. IMMORTAL is no longer "survived to the end" — most of an army
+                          does — but the unit alive at the end that TOOK the most damage
+                          (health drops between samples, a floor since repair hides some),
+                          if that was >= half its own health, watched at its hardest 30 s.
                           swing.go (Version 2) adds the WINNER (Insights.Winner, a side index
                           from Meta.Winners, -1 unknown) and the SWING line: P(side 0 wins)
                           per step from a logistic model (WinModel) over three antisymmetric

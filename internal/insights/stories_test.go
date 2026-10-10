@@ -1,6 +1,10 @@
 package insights
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/mabn/barreplay/snapshot"
+)
 
 func TestBattles(t *testing.T) {
 	ins := computeFixture(t)
@@ -66,6 +70,36 @@ func TestAwards(t *testing.T) {
 	}
 	if _, ok := ins.Defs[got["marathon"].Def]; !ok {
 		t.Error("an award's def must be described in Defs")
+	} // Every award names its unit; a mobile one also carries where it went.
+	for _, k := range []string{"marathon", "costliest"} {
+		a := got[k]
+		if len(a.Path) < 2 || a.F0 >= a.F1 || a.Path[0][0] != a.F0 || a.Path[len(a.Path)-1][0] != a.F1 {
+			t.Errorf("%s: life %d-%d, path %v", k, a.F0, a.F1, a.Path)
+		}
+	}
+	if a := got["unfinished"]; a.Unit == 0 || a.Path != nil {
+		t.Errorf("unfinished = %+v, want the building's id and no path", a)
+	}
+}
+
+func TestImmortalTakesDamage(t *testing.T) {
+	p := &pass{in: Input{}, tracks: map[int32]*track{}}
+	d := defInfo{army: true}
+	hp := func(fr int32, h float32) {
+		p.trackUnit(fr, snapshot.UnitState{UnitID: 7, DefID: 3, Team: 1, Health: h, MaxHealth: 100, BuildProgress: 1}, d)
+	}
+	hp(0, 100)
+	hp(30, 40)      // 60 taken
+	hp(60, 100)     // repaired
+	hp(30*40, 20)   // 80 taken, in a later half-minute
+	hp(30*41, 10)   // 10 more in the same one
+	hp(30*400, 100) // repaired again
+	tr := p.tracks[7]
+	if tr.taken != 150 || tr.peak != 90 || tr.peakF != 30*40 {
+		t.Errorf("taken %v, peak %v at %d; want 150, 90 at %d", tr.taken, tr.peak, tr.peakF, 30*40)
+	}
+	if r := tr.route(); len(r) != 3 || r[2][0] != 30*400 {
+		t.Errorf("route = %v, want a point per 5 s sampled", r)
 	}
 }
 

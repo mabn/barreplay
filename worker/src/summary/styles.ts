@@ -43,6 +43,8 @@ export const CSS = `
 .brs-root .brs-seekable { cursor: pointer; }
 .brs-root .brs-seekable:hover { border-color: var(--brs-accent); }
 .brs-root .brs-award-title { font-weight: 600; margin-bottom: 3px; }
+.brs-root .brs-award-body { display: flex; gap: 10px; align-items: flex-start; }
+.brs-root .brs-awardmap { width: 64px; height: 64px; flex: none; }
 .brs-root .brs-chat { max-height: 320px; overflow-y: auto; margin-top: 10px; border-top: 1px solid var(--brs-line); padding-top: 8px; }
 .brs-root .brs-line { padding: 1px 0; overflow-wrap: anywhere; }
 .brs-root .brs-moment { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; border-top: 1px solid var(--brs-grid); }

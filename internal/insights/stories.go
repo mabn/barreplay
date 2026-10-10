@@ -73,6 +73,15 @@ type Award struct {
 	Def   int32   `json:"def"`
 	Value float64 `json:"value"`
 	F     int32   `json:"f"` // the moment to watch
+	// Unit, F0/F1 and Path are set for an award that goes to a unit's whole
+	// life rather than to a death (Version 4): the unit id the viewer follows,
+	// the life's first and last sampled frame, and where it went — [frame, x,
+	// z] every pathEvery, at most pathMaxPts — so the page can show WHICH
+	// unit it was and where it went instead of a moment and a guess.
+	Unit int32      `json:"unit,omitempty"`
+	F0   int32      `json:"f0,omitempty"`
+	F1   int32      `json:"f1,omitempty"`
+	Path [][3]int32 `json:"path,omitempty"`
 }
 
 const (
@@ -89,20 +98,43 @@ const (
 	tourGrid        = 32                       // cells per axis of the Tourist's map grid
 	tourMinCells    = tourGrid * tourGrid / 20 // 5% of the map, or no Tourist
 	closeCallMin    = 0.0                      // health fraction must be above this (alive)
-	immortalMinS    = 5 * 60 * simFPS          // frames an Immortal must have lived
+	immortalMinS    = 2 * 60 * simFPS          // frames an Immortal must have lived
+	immortalMinHits = 0.5                      // share of its own health it must have taken
+	pressureBin     = 30 * simFPS              // window the hardest moment is found in
+	pathEvery       = 5 * simFPS               // frames between recorded path points
+	pathMaxPts      = 400                      // path points an award carries at most
 )
+
+// pathPt is one recorded position of a unit's life.
+type pathPt struct {
+	f    int32
+	x, z float32
+}
 
 // track follows one unit across samples, for the awards.
 type track struct {
-	def      int32
-	team     int32
-	first    int32
-	last     int32
-	x, z     float32
-	path     float64
-	cells    [tourGrid * tourGrid / 64]uint64
-	minHP    float64 // lowest sampled health fraction
-	minHPF   int32
+	id     int32
+	def    int32
+	team   int32
+	first  int32
+	last   int32
+	x, z   float32
+	path   float64
+	cells  [tourGrid * tourGrid / 64]uint64
+	minHP  float64 // lowest sampled health fraction
+	minHPF int32
+	pts    []pathPt
+	// Damage it took while finished, in hp: health drops between samples
+	// (repair in between hides some, so it is a floor), and the costliest
+	// pressureBin of it, for the Immortal.
+	prevHP   float32
+	taken    float64
+	maxHP    float32
+	bin      int32
+	binTaken float64
+	binF     int32
+	peak     float64
+	peakF    int32
 	dead     bool
 	army     bool // Immortal (a commander outliving the game is no feat)
 	eligible bool // army or commander: Close call
@@ -118,8 +150,8 @@ func (p *pass) trackUnit(fr int32, u snapshot.UnitState, d defInfo) {
 	if t == nil || t.def != u.DefID || t.dead {
 		// Unit ids are recycled once a unit is gone: a new def, or an id seen
 		// again after its death, is a new unit.
-		t = &track{def: u.DefID, team: u.Team, first: fr, x: u.Pos.X, z: u.Pos.Z, minHP: 2,
-			army: d.army, eligible: d.army || d.commander, ground: !d.fly}
+		t = &track{id: u.UnitID, def: u.DefID, team: u.Team, first: fr, x: u.Pos.X, z: u.Pos.Z, minHP: 2,
+			army: d.army, eligible: d.army || d.commander, ground: !d.fly, prevHP: -1, bin: -1}
 		p.tracks[u.UnitID] = t
 		p.allTracks = append(p.allTracks, t)
 	} else {
@@ -131,11 +163,45 @@ func (p *pass) trackUnit(fr int32, u snapshot.UnitState, d defInfo) {
 	if c, ok := p.cell(u.Pos.X, u.Pos.Z); ok {
 		t.cells[c/64] |= 1 << (c % 64)
 	}
+	if n := len(t.pts); n == 0 || fr-t.pts[n-1].f >= pathEvery {
+		t.pts = append(t.pts, pathPt{fr, u.Pos.X, u.Pos.Z})
+	}
 	if u.MaxHealth > 0 && u.BuildProgress >= 1 {
 		if hp := float64(u.Health) / float64(u.MaxHealth); hp < t.minHP && hp > closeCallMin {
 			t.minHP, t.minHPF = hp, fr
 		}
+		t.maxHP = u.MaxHealth
+		if t.prevHP >= 0 && u.Health < t.prevHP {
+			drop := float64(t.prevHP - u.Health)
+			t.taken += drop
+			if b := fr / pressureBin; b != t.bin {
+				t.bin, t.binTaken, t.binF = b, 0, fr
+			}
+			t.binTaken += drop
+			if t.binTaken > t.peak {
+				t.peak, t.peakF = t.binTaken, t.binF
+			}
+		}
+		t.prevHP = u.Health
 	}
+}
+
+// route is the track's recorded positions, ending where it was last seen,
+// thinned evenly to at most pathMaxPts.
+func (t *track) route() [][3]int32 {
+	pts := t.pts
+	if n := len(pts); n == 0 || pts[n-1].f != t.last {
+		pts = append(pts[:n:n], pathPt{t.last, t.x, t.z})
+	}
+	step := (len(pts) + pathMaxPts - 1) / pathMaxPts
+	out := make([][3]int32, 0, len(pts)/step+1)
+	for i := 0; i < len(pts); i += step {
+		out = append(out, [3]int32{pts[i].f, int32(math.Round(float64(pts[i].x))), int32(math.Round(float64(pts[i].z)))})
+	}
+	if last := pts[len(pts)-1]; out[len(out)-1][0] != last.f {
+		out = append(out, [3]int32{last.f, int32(math.Round(float64(last.x))), int32(math.Round(float64(last.z)))})
+	}
+	return out
 }
 
 // cell is the Tourist grid cell of a position, over the capture's bounds.
@@ -522,13 +588,27 @@ func (p *pass) awards() []Award {
 	}
 	add := func(t *track, key, label, text string, value float64, f int32) {
 		p.usedDef[t.def] = true
-		out = append(out, Award{Key: key, Label: label, Text: text, Team: t.team, Def: t.def, Value: round1(value), F: f})
+		out = append(out, Award{Key: key, Label: label, Text: text, Team: t.team, Def: t.def, Value: round1(value), F: f,
+			Unit: t.id, F0: t.first, F1: t.last, Path: t.route()})
 	}
 
-	if t := pick(func(a, b *track) bool { return a.first < b.first },
-		func(t *track) bool { return t.army && alive(t) && end-t.first >= immortalMinS }); t != nil {
-		sec := float64(end-t.first) / simFPS
-		add(t, "immortal", "Immortal", "fought from "+clock(t.first)+" to the end and survived", sec, t.first)
+	// Immortal: surviving is not a feat — most of an army is alive at the
+	// end — so it goes to the unit that TOOK the most damage and lived, as
+	// long as that was a real share of its own health (a Juggernaut grazed
+	// for 2% is no story); the moment is its hardest half-minute. Measured
+	// on a real 8v8: the best survivor took 119k hp, 0.74x its health, and
+	// nothing alive at the end had taken more than 0.95x.
+	hits := func(t *track) float64 {
+		if t.maxHP <= 0 {
+			return 0
+		}
+		return t.taken / float64(t.maxHP)
+	}
+	if t := pick(func(a, b *track) bool { return a.taken > b.taken },
+		func(t *track) bool {
+			return t.army && alive(t) && end-t.first >= immortalMinS && hits(t) >= immortalMinHits
+		}); t != nil {
+		add(t, "immortal", "Immortal", fmt.Sprintf("took %s damage, %.0f%% of its own health, and survived", metal(t.taken), 100*hits(t)), t.taken, t.peakF)
 	}
 	if t := pick(func(a, b *track) bool { return a.path > b.path }, func(t *track) bool { return t.ground && t.path > 0 }); t != nil {
 		add(t, "marathon", "Marathon", "travelled "+distance(t.path), t.path, t.last)
@@ -560,16 +640,26 @@ func (p *pass) awards() []Award {
 		}
 	}
 	if bestUnf >= 0 {
-		out = append(out, Award{Key: "unfinished", Label: "Unfinished business",
+		out = append(out, p.deathAward(bestUnf, Award{Key: "unfinished", Label: "Unfinished business",
 			Text: "destroyed before it was finished, " + metal(d.Cost[bestUnf]) + " metal",
-			Team: d.Team[bestUnf], Def: d.Def[bestUnf], Value: d.Cost[bestUnf], F: d.F[bestUnf]})
+			Team: d.Team[bestUnf], Def: d.Def[bestUnf], Value: d.Cost[bestUnf], F: d.F[bestUnf]}))
 	}
 	if best >= 0 {
-		out = append(out, Award{Key: "costliest", Label: "Most expensive loss",
+		out = append(out, p.deathAward(best, Award{Key: "costliest", Label: "Most expensive loss",
 			Text: "lost at " + clock(d.F[best]) + ", " + metal(d.Cost[best]) + " metal",
-			Team: d.Team[best], Def: d.Def[best], Value: d.Cost[best], F: d.F[best]})
+			Team: d.Team[best], Def: d.Def[best], Value: d.Cost[best], F: d.F[best]}))
 	}
 	return out
+}
+
+// deathAward names the unit behind death i, so the page can show which one
+// it was: its id, and for a mobile unit its life and route.
+func (p *pass) deathAward(i int, a Award) Award {
+	a.Unit = p.deathUnit[i]
+	if t := p.deathTrack[i]; t != nil {
+		a.F0, a.F1, a.Path = t.first, t.last, t.route()
+	}
+	return a
 }
 
 // recordFront stores each side's army centre at this step: the cost-weighted

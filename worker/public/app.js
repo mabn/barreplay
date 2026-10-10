@@ -1995,6 +1995,7 @@ function draw() {
   updateZoomLabel();
   const fr = data && dispIdx >= 0 ? data.frames[dispIdx] : null;
   const u = fr ? fr.u : null;
+  if (clip && clip.focus.follow && u) followClipUnit(u, clip.focus.follow);
 
   // Damage flashes tint the icons themselves (GL: per-instance tint; 2D: a
   // red glyph blended over). Prune expired ones first, and keep redraws
@@ -2287,6 +2288,7 @@ function drawOverlay(u) {
   // frame, which at 1x is a visible stutter rather than a fade.
   const simFrame = frameNumAt(idx) + renderFrac * (data.sampleEvery || 30);
   if (marks.length) drawMarks(simFrame);
+  if (clip && clip.focus.path) drawClipPath(clip.focus.path, simFrame);
   if (!u) return;
 
   // Cheap scan first: most frames have far fewer builders/under-construction
@@ -2386,8 +2388,77 @@ function drawOverlay(u) {
     }
   }
 
+  if (clip && clip.focus.follow) drawClipRing(u, clip.focus.follow);
+
   // Speech last: nothing should paint over a message.
   drawChatBubbles(simFrame, u);
+}
+
+// ---- the clip's unit ---------------------------------------------------------
+// A summary award goes to ONE unit among thousands, so its clip says which:
+// the camera follows it (followClipUnit, before anything is drawn), a ring
+// marks it, and its route is drawn under everything — bright where it has
+// been by now, faint where it is still going. Matched by id AND def, since
+// the engine recycles ids.
+const FOCUS_COLOR = '#ffe14d';
+
+function clipUnitIndex(u, f) {
+  for (let i = 0; i < u.length; i += STRIDE) {
+    if (u[i + F.ID] === f.id && (f.def === undefined || u[i + F.DEF] === f.def)) return i;
+  }
+  return -1;
+}
+
+function followClipUnit(u, f) {
+  const i = clipUnitIndex(u, f);
+  if (i < 0) return; // not born yet, or gone: hold where it was last seen
+  const p = interpPos(u, i);
+  center = { x: p[0], z: p[1] };
+}
+
+function drawClipRing(u, f) {
+  const i = clipUnitIndex(u, f);
+  if (i < 0) return;
+  const p = interpPos(u, i);
+  const sx = viewW / 2 + (p[0] - center.x) * scale;
+  const sy = viewH / 2 + (p[1] - center.z) * scale;
+  const r = Math.max(14, iconPxFor(u[i + F.DEF]) * 0.9);
+  // A slow pulse, so the eye finds it among a thousand still icons.
+  const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 220);
+  octx.lineWidth = 2;
+  octx.strokeStyle = FOCUS_COLOR;
+  octx.globalAlpha = 0.6 + 0.4 * pulse;
+  octx.beginPath();
+  octx.arc(sx, sy, r + 3 * pulse, 0, Math.PI * 2);
+  octx.stroke();
+  octx.globalAlpha = 1;
+  scheduleDraw(); // keep the pulse going while paused
+}
+
+function drawClipPath(path, simFrame) {
+  if (path.length < 2) return;
+  const sx = (x) => viewW / 2 + (x - center.x) * scale;
+  const sy = (z) => viewH / 2 + (z - center.z) * scale;
+  octx.lineJoin = 'round';
+  // Where it is still going: faint and dashed.
+  octx.setLineDash([4, 5]);
+  octx.lineWidth = 1.5;
+  octx.strokeStyle = 'rgba(255, 225, 77, 0.35)';
+  octx.beginPath();
+  path.forEach((pt, k) => (k ? octx.lineTo(sx(pt[1]), sy(pt[2])) : octx.moveTo(sx(pt[1]), sy(pt[2]))));
+  octx.stroke();
+  octx.setLineDash([]);
+  // Where it has been: solid, up to now.
+  octx.lineWidth = 2.5;
+  octx.strokeStyle = 'rgba(255, 225, 77, 0.9)';
+  octx.beginPath();
+  octx.moveTo(sx(path[0][1]), sy(path[0][2]));
+  for (let k = 1; k < path.length && path[k - 1][0] < simFrame; k++) {
+    const a = path[k - 1], b = path[k];
+    const t = Math.min(1, (simFrame - a[0]) / Math.max(1, b[0] - a[0]));
+    octx.lineTo(sx(a[1] + (b[1] - a[1]) * t), sy(a[2] + (b[2] - a[2]) * t));
+  }
+  octx.stroke();
 }
 
 // Per-def render info, resolved ONCE per replay load. The draw loops touch this
@@ -7052,6 +7123,13 @@ function openClip(c) {
 
 function startClip() {
   const c = clip.focus;
+  // A followed unit starts the clip where its route says it was; the
+  // camera then rides along with it (followClipUnit).
+  if (c.follow && Array.isArray(c.path) && c.path.length && typeof c.x !== 'number') {
+    const pt = c.path.reduce((b, p) => (Math.abs(p[0] - clip.f0) < Math.abs(b[0] - clip.f0) ? p : b));
+    c.x = pt[1];
+    c.z = pt[2];
+  }
   if (typeof c.x === 'number' && typeof c.z === 'number') {
     const r = Math.max(700, c.r || 1200) * 1.5;
     center = { x: c.x, z: c.z };

@@ -42,6 +42,10 @@ type pass struct {
 
 	tracks    map[int32]*track // unit id -> its current life
 	allTracks []*track         // every life, in the order first seen
+	// deathUnit and deathTrack line up with out.Deaths: the dead unit's id
+	// and its track (nil for a structure), for the awards that go to a death.
+	deathUnit  []int32
+	deathTrack []*track
 
 	hasCauses bool // some destroyed event names a cause: a re-simulation
 
@@ -234,9 +238,14 @@ func (p *pass) event(e snapshot.Event) {
 		dl.Unfinished = append(dl.Unfinished, unfinished)
 		p.usedDef[e.DefID] = true
 		delete(p.lastPos, e.UnitID)
-		if t := p.tracks[e.UnitID]; t != nil {
+		p.deathUnit = append(p.deathUnit, e.UnitID)
+		t := p.tracks[e.UnitID]
+		if t != nil && !t.dead {
 			t.dead = true
+		} else {
+			t = nil
 		}
+		p.deathTrack = append(p.deathTrack, t)
 	}
 }
 

@@ -177,6 +177,13 @@ export interface Award {
   value: number;
   /** The moment to watch. */
   f: number;
+  /** Version 4: the unit's id, for the host to follow and mark it. */
+  unit?: number;
+  /** Version 4, a unit with a life to show: its first and last sampled
+   * frame, and its route as [frame, x, z]. */
+  f0?: number;
+  f1?: number;
+  path?: [number, number, number][];
 }
 
 /** Columnar: the i-th entry of every array describes one death. */
@@ -225,6 +232,11 @@ export interface Clip {
   /** The title split into runs, player and side names carrying their
    * colours, for a host that can draw them. */
   titleRuns?: { text: string; color?: string }[];
+  /** The ONE unit the clip is about: the host follows and marks it. Match
+   * on def as well as id, since ids are recycled. */
+  follow?: { id: number; def?: number };
+  /** That unit's route, [frame, x, z], for the host to draw. */
+  path?: [number, number, number][];
 }
 
 export interface SummaryOptions {

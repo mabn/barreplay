@@ -9,6 +9,7 @@ import { knockouts, lossesByStep, wipedOf } from "../src/summary/losses";
 import { compass, fighters, momentStory } from "../src/summary/moments";
 import { clipAround, clipAt, clipSpan, watcher } from "../src/summary/watch";
 import { zonesOf } from "../src/summary/zones";
+import { clipOf } from "../src/summary/sections/awards";
 import type { Insights } from "../src/summary/types";
 
 function ins(over: Partial<Insights> = {}): Insights {
@@ -207,4 +208,14 @@ test("killing zones merge nearby deaths and leave out what was not fought for", 
   assert.equal(zones[0].peakF0, 1000);
   assert.deepEqual(zones[1].lost, [0, 50]);
   assert.deepEqual(zonesOf(i).totals, [400, 150]);
+});
+
+test("an award's clip follows its unit", () => {
+  const a = { key: "marathon", label: "Marathon", text: "", team: 0, def: 2, value: 1, f: 900, unit: 77, f0: 300, f1: 900, path: [[300, 1, 1], [900, 5, 5]] as [number, number, number][] };
+  const c = clipOf(a, {}, "t");
+  assert.deepEqual([c.f0, c.f1, c.follow], [300, 900, { id: 77, def: 2 }], "a life award plays the life");
+  const loss = clipOf({ ...a, key: "costliest", f: 3000 }, { x: 4, z: 6 }, "t");
+  assert.deepEqual([loss.f0, loss.f1, loss.at, loss.x], [2400, 3150, 3000, 4], "a loss shows its run-up");
+  const old = clipOf({ key: "immortal", label: "", text: "", team: 0, def: 2, value: 1, f: 900 }, {}, "t");
+  assert.equal(old.follow, undefined, "an older file names no unit");
 });
