@@ -1106,7 +1106,8 @@ end
 --   vDef u16, damage f32, paralyze f32, hits u16, overkill f32
 --
 -- 255 / 65535 mean unknown (no attacker — e.g. a crash or self-destruct —
--- or a weapon the engine did not name). damage excludes paralyzer damage,
+-- or a weapon the engine did not name); 65528..65534 are the engine's own
+-- damage sources (see weaponCode). damage excludes paralyzer damage,
 -- which is its own column. overkill is the part of a killing blow past the
 -- health the victim had left (read as the victim's health going below zero
 -- after the hit), so damage - overkill is what actually came off health.

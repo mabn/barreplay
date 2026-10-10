@@ -92,6 +92,7 @@ func run(path string) error {
 	}
 	kinds := map[string]int{}
 	var teamStats []snapshot.FactTeamStatsData
+	weaponName := map[int32]string{}
 	for _, ft := range facts {
 		kinds[ft.Kind]++
 		switch ft.Kind {
@@ -114,6 +115,9 @@ func run(path string) error {
 			var d snapshot.FactWeaponDefsData
 			if err := ft.Decode(&d); err == nil {
 				fmt.Printf("weapon table: %d weapon defs\n", len(d.Defs))
+				for _, w := range d.Defs {
+					weaponName[w.ID] = w.Name
+				}
 			}
 		}
 	}
@@ -134,7 +138,20 @@ func run(path string) error {
 	for _, t := range meta.Teams {
 		allyOf[t.TeamID] = t.AllyTeam
 	}
+	// The engine's history is a row every 16 game-seconds, so its last row
+	// can stop short of the end of the game. statsEnd is that row's frame;
+	// the comparison below counts widget damage up to it only.
+	statsEnd := int32(-1)
+	for _, ts := range teamStats {
+		for i, name := range ts.Fields {
+			if name == "frame" && len(ts.Rows) > 0 && i < len(ts.Rows[len(ts.Rows)-1]) {
+				statsEnd = max(statsEnd, int32(ts.Rows[len(ts.Rows)-1][i]))
+			}
+		}
+	}
 	dealt, enemyHp, ally := map[int32]float64{}, map[int32]float64{}, map[int32]float64{}
+	unknownByWeapon := map[int32]float64{}
+	var unknownAfterStats float64
 	causes := map[string]float64{}
 	var total, para, over, unknownAttacker float64
 	hits := 0
@@ -147,9 +164,18 @@ func run(path string) error {
 			if c := snapshot.DamageCauseName(r.WeaponDef); c != "" {
 				causes[c] += float64(r.Damage)
 			}
-			switch {
-			case r.AttackerTeam < 0:
+			if r.AttackerTeam < 0 {
 				unknownAttacker += float64(r.Damage)
+				unknownByWeapon[r.WeaponDef] += float64(r.Damage)
+				if statsEnd >= 0 && w.Frame >= statsEnd {
+					unknownAfterStats += float64(r.Damage)
+				}
+				continue
+			}
+			if statsEnd >= 0 && w.Frame >= statsEnd {
+				continue // after the engine's last stats row
+			}
+			switch {
 			case allyOf[r.AttackerTeam] == allyOf[r.VictimTeam]:
 				ally[r.AttackerTeam] += float64(r.Damage)
 			default:
@@ -160,6 +186,30 @@ func run(path string) error {
 	}
 	fmt.Printf("damage: %d windows, %d hits, %.0f hp (%.0f paralyze, %.0f overkill), %s with no known attacker\n",
 		len(dmg), hits, total, para, over, pct(int(unknownAttacker), int(total)))
+	if unknownAttacker > 0 {
+		if statsEnd >= 0 {
+			fmt.Printf("  no known attacker: %s of it after the engine's last stats row (%s)\n",
+				pct(int(unknownAfterStats), int(unknownAttacker)), clock(statsEnd))
+		}
+		ws := make([]int32, 0, len(unknownByWeapon))
+		for w := range unknownByWeapon {
+			ws = append(ws, w)
+		}
+		sort.Slice(ws, func(i, j int) bool { return unknownByWeapon[ws[i]] > unknownByWeapon[ws[j]] })
+		fmt.Print("  no known attacker, by weapon:")
+		for i := 0; i < len(ws) && i < 8; i++ {
+			name := weaponName[ws[i]]
+			if c := snapshot.DamageCauseName(ws[i]); c != "" {
+				name = c
+			} else if ws[i] < 0 {
+				name = "unknown"
+			} else if name == "" {
+				name = fmt.Sprintf("#%d", ws[i])
+			}
+			fmt.Printf("  %s %.0f", name, unknownByWeapon[ws[i]])
+		}
+		fmt.Println()
+	}
 	if len(causes) > 0 {
 		names := make([]string, 0, len(causes))
 		for c := range causes {
@@ -179,7 +229,7 @@ func run(path string) error {
 	// Widget damage vs the engine's own per-team damageDealt, which counts
 	// only damage to enemies by a living attacker.
 	if len(teamStats) > 0 {
-		fmt.Println("damage dealt to enemies per team, widget vs engine teamstats (and widget less overkill; widget to allies):")
+		fmt.Printf("damage dealt to enemies per team up to %s, widget vs engine teamstats (and widget less overkill; widget to allies):\n", clock(statsEnd))
 		for _, ts := range teamStats {
 			col := -1
 			for i, name := range ts.Fields {
