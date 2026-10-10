@@ -571,8 +571,9 @@ func decodeDamageRecord(payload []byte) (snapshot.DamageWindow, error) {
 }
 
 // decodeLivesRecord decodes one 'S' payload: frame u32, n u16, then columns
-// id u16, def u16, team u8, born u32, died u32 (0xFFFFFFFF = alive at the
-// end), dealt f32, taken f32, kills u16, minHp u8, xp f32.
+// id u16, def u16, team u8, born u32, died u32 (0xFFFFFF = alive at the
+// end; the widget's float Lua cannot write 0xFFFFFFFF, which is accepted
+// too), dealt f32, taken f32, kills u16, minHp u8, xp f32.
 func decodeLivesRecord(payload []byte) ([]snapshot.UnitLife, error) {
 	c := &cursor{b: payload}
 	c.u32() // the frame the record was written on; each row carries its own
@@ -595,7 +596,7 @@ func decodeLivesRecord(payload []byte) ([]snapshot.UnitLife, error) {
 	}
 	for i := range ls {
 		d := c.u32()
-		if d == 0xFFFFFFFF {
+		if d == 0xFFFFFF || d == 0xFFFFFFFF {
 			ls[i].Died = -1
 		} else {
 			ls[i].Died = int32(d)
@@ -639,8 +640,13 @@ func decodeVisibilityRecord(payload []byte) (snapshot.Visibility, error) {
 	for i := range v.Units {
 		v.Units[i] = c.u16()
 	}
+	// Two u16 halves (sides 0-7, then 8-15): the widget's Lua numbers are
+	// floats, exact only to 2^24, so it never forms the 32-bit mask itself.
 	for i := range v.Masks {
-		v.Masks[i] = uint32(c.u32())
+		v.Masks[i] = uint32(c.u16())
+	}
+	for i := range v.Masks {
+		v.Masks[i] |= uint32(c.u16()) << 16
 	}
 	return v, c.err
 }

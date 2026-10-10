@@ -218,7 +218,16 @@ local function pk(fmt, t)
 	end
 	local parts = {}
 	for i = 1, #t do
-		parts[i] = string.pack("<" .. fmt, t[i])
+		local v = t[i]
+		-- Spring's Lua numbers are single-precision floats; Lua 5.4's are
+		-- not. An integer column value a float cannot hold exactly would be
+		-- silently wrong in the real engine (0xFFFFFFFF packed as 0 once),
+		-- so the harness refuses it rather than packing what the engine
+		-- never would.
+		if fmt ~= "f" and v ~= string.unpack("<f", string.pack("<f", v)) then
+			error(("Pack%s(%s): not exact as a float32, Spring's Lua number"):format(fmt, tostring(v)), 2)
+		end
+		parts[i] = string.pack("<" .. fmt, v)
 	end
 	return table.concat(parts)
 end

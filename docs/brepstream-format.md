@@ -304,7 +304,14 @@ then n rows as COLUMNS:
   f32 damage  f32 paralyze  u16 hits  f32 overkill
 ```
 
-Unknown ids are 255 (u8) / 65535 (u16). `overkill` is the damage past the
+Unknown ids are 255 (u8) / 65535 (u16).
+
+**Every integer the widget writes stays below 2^24.** Spring's Lua numbers
+are single-precision floats, which hold integers exactly only up to 2^24, and
+`VFS.PackU32` converts whatever it is handed: 0xFFFFFFFF rounded to 2^32 and
+was written as 0. That is why the alive marker is 0xFFFFFF and the visibility
+mask is two u16 halves rather than one u32 (decoders still accept 0xFFFFFFFF
+as alive). The test harness refuses to pack a value a float cannot hold. `overkill` is the damage past the
 victim's remaining health on the killing blow.
 
 **`S` — unit lives** (`__DAMAGE__`). Written for each unit when it dies, and
@@ -313,7 +320,7 @@ for every survivor at game over:
 ```
 u32 frame   u16 n
 then n rows as COLUMNS:
-  u16 id   u16 def   u8 team   u32 born   u32 died (0xFFFFFFFF = alive)
+  u16 id   u16 def   u8 team   u32 born   u32 died (0xFFFFFF = alive)
   f32 dealt   f32 taken   u16 kills   u8 minHp (% of max)   f32 xp
 ```
 
@@ -326,11 +333,11 @@ writes no record at all.
 ```
 u32 frame   u8 flags (bit0 = full restatement)
 u8  nAllies   u8 allies[nAllies]          the sides the masks index, gaia excluded, at most 16
-u16 n   u16 ids[n]   u32 masks[n]
+u16 n   u16 ids[n]   u16 lo[n]   u16 hi[n]
 ```
 
-Each mask holds two bits per side, in `allies` order: bit `2i` = in LOS of
-side `i`, bit `2i+1` = in its radar. A unit that leaves the frame (dead, or
+Each mask is `lo | hi << 16` and holds two bits per side, in `allies` order:
+bit `2i` = in LOS of side `i`, bit `2i+1` = in its radar. A unit that leaves the frame (dead, or
 gone) needs no V row: the frame's own dead list says so.
 
 **`P` — profiler.** JSON

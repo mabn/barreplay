@@ -693,10 +693,13 @@ end
 -- answerable: Spring.GetUnitLosState(unitID, allyTeam, true) reads the
 -- engine's own per-ally-team LOS bits regardless of who is watching.
 --
--- Each unit's state packs into one number, 2 bits per side in the order of
--- visAllies (bit 0 of a pair = in LOS, bit 1 = on radar). Up to 16 sides fit
--- a u32 exactly; sides past 16 are not recorded (a 16-way FFA is BAR's
--- largest). Arithmetic, not bit ops: Spring's Lua 5.1 has none.
+-- Each unit's state is 2 bits per side in the order of visAllies (bit 0 of a
+-- pair = in LOS, bit 1 = on radar), up to 16 sides (a 16-way FFA is BAR's
+-- largest; sides past 16 are not recorded). It is kept and written as TWO
+-- 16-bit halves, sides 0-7 and 8-15, never as one 32-bit number: Spring's
+-- Lua numbers are single-precision floats, exact only up to 2^24, so a
+-- combined mask past 12 sides would silently lose its low bits. Arithmetic,
+-- not bit ops: Spring's Lua 5.1 has none.
 --
 -- A V record carries only the units whose mask CHANGED since the previous
 -- sample (or that are new to the record); a unit's state is otherwise its last
@@ -705,7 +708,7 @@ end
 -- Units that left the game simply stop appearing; frames say when.
 
 local visAllies = nil   -- ally team ids, in mask order (built lazily)
-local visPrev = {}      -- unitID -> { m = last mask, f = last sampled frame }
+local visPrev = {}      -- unitID -> { lo, hi = last mask halves, f = last sampled frame }
 
 local function buildVisAllies()
 	visAllies = {}
@@ -724,15 +727,19 @@ local function buildVisAllies()
 end
 
 local function losMask(unitID)
-	local m, scale = 0, 1
+	local lo, hi, scale = 0, 0, 1
 	for i = 1, #visAllies do
 		local bits = spGetUnitLosState(unitID, visAllies[i], true)
 		if type(bits) == "number" then
-			m = m + (bits % 4) * scale
+			if i <= 8 then
+				lo = lo + (bits % 4) * scale
+			else
+				hi = hi + (bits % 4) * scale
+			end
 		end
-		scale = scale * 4
+		scale = (i == 8) and 1 or scale * 4
 	end
-	return m
+	return lo, hi
 end
 
 -- ---------------------------------------------------------------------------
@@ -768,7 +775,7 @@ local function sample(frame)
 	local recorded = 0
 
 	local doVis = recordVisibility and spGetUnitLosState ~= nil
-	local nv, vid, vmask = 0, {}, {}
+	local nv, vid, vlo, vhi = 0, {}, {}, {}
 	if doVis and visAllies == nil then
 		buildVisAllies()
 	end
@@ -874,18 +881,18 @@ local function sample(frame)
 					end
 				end
 				if doVis and unitID <= 65535 then
-					local m = losMask(unitID)
+					local lo, hi = losMask(unitID)
 					local v = visPrev[unitID]
 					if v == nil then
-						visPrev[unitID] = { m = m, f = frame }
+						visPrev[unitID] = { lo = lo, hi = hi, f = frame }
 						nv = nv + 1
-						vid[nv], vmask[nv] = unitID, m
+						vid[nv], vlo[nv], vhi[nv] = unitID, lo, hi
 					else
-						if keyframe or v.m ~= m then
+						if keyframe or v.lo ~= lo or v.hi ~= hi then
 							nv = nv + 1
-							vid[nv], vmask[nv] = unitID, m
+							vid[nv], vlo[nv], vhi[nv] = unitID, lo, hi
 						end
-						v.m, v.f = m, frame
+						v.lo, v.hi, v.f = lo, hi, frame
 					end
 				end
 			end
@@ -958,7 +965,8 @@ local function sample(frame)
 		parts[#parts + 1] = PackU16({ nv })
 		if nv > 0 then
 			parts[#parts + 1] = PackU16(vid)
-			parts[#parts + 1] = PackU32(vmask)
+			parts[#parts + 1] = PackU16(vlo)
+			parts[#parts + 1] = PackU16(vhi)
 		end
 		writeRecord("V", table.concat(parts))
 	end
@@ -1106,15 +1114,20 @@ end
 -- survivors, at game end:
 --
 --   frame u32, n u16, then columns of n: id u16, def u16, team u8,
---   born u32, died u32 (0xFFFFFFFF = alive at the end), dealt f32,
+--   born u32, died u32 (0xFFFFFF = alive at the end), dealt f32,
 --   taken f32, kills u16, minHp u8 (lowest health seen, % of max), xp f32
 --
 -- A life, not an id, because the engine recycles unit ids.
 
 local dmgStart = 0      -- first frame of the open window
-local dmgA = {}         -- aKey -> vKey -> row (see dmgKeys)
+local dmgA = {}         -- aKey -> weapon -> vKey -> row (see onDamaged)
 local dmgRows = 0
 local lives = {}        -- unitID -> life totals of the unit holding the id now
+-- The "died" of a unit alive when the game ended. Not 0xFFFFFFFF: a Spring
+-- Lua number is a single-precision float, 0xFFFFFFFF rounds to 2^32, and
+-- VFS.PackU32 wrapped that to 0 — every survivor read as dead at frame 0.
+-- 0xFFFFFF is exact, and no game runs 155 hours.
+local aliveAtEnd = 16777215
 local diedLives = {}    -- lives ended since the last S record
 
 local function lifeOf(unitID, defID, team)
@@ -1127,21 +1140,39 @@ local function lifeOf(unitID, defID, team)
 	return l
 end
 
+-- How many hits arrived, and how many of them named an attacker and a
+-- weapon: logged at game end, because whether the engine hands a widget the
+-- attacker of a hit is exactly what a capture cannot show on its own (an
+-- all-unknown damage section looks the same as a game of crashes).
+local dmgSeen, dmgNamedAttacker, dmgNamedWeapon = 0, 0, 0
+
 local function onDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, attackerID, attackerDefID, attackerTeam)
 	if type(damage) ~= "number" or damage <= 0 then
 		return
 	end
+	dmgSeen = dmgSeen + 1
+	if attackerTeam ~= nil then dmgNamedAttacker = dmgNamedAttacker + 1 end
+	if weaponDefID ~= nil and weaponDefID >= 0 then dmgNamedWeapon = dmgNamedWeapon + 1 end
 	local aTeam = (attackerTeam ~= nil and attackerTeam >= 0 and attackerTeam <= 254) and attackerTeam or 255
 	local aDef = (attackerDefID ~= nil and attackerDefID >= 0 and attackerDefID < 65535) and attackerDefID or 65535
 	local wpn = (weaponDefID ~= nil and weaponDefID >= 0 and weaponDefID < 65535) and weaponDefID or 65535
 	local vTeam = (unitTeam ~= nil and unitTeam >= 0 and unitTeam <= 254) and unitTeam or 255
 	local vDef = (unitDefID ~= nil and unitDefID >= 0 and unitDefID < 65535) and unitDefID or 65535
-	local ak = (aTeam * 65536 + aDef) * 65536 + wpn
+	-- Each key stays under 2^24, the largest integer a single-precision
+	-- Lua number holds exactly (see losMask): attacker, then weapon, then
+	-- victim. One combined key once rounded every unknown attacker to the
+	-- same wrong (team 0, def 0, weapon 0) row.
+	local ak = aTeam * 65536 + aDef
 	local vk = vTeam * 65536 + vDef
-	local byV = dmgA[ak]
+	local byW = dmgA[ak]
+	if byW == nil then
+		byW = {}
+		dmgA[ak] = byW
+	end
+	local byV = byW[wpn]
 	if byV == nil then
 		byV = {}
-		dmgA[ak] = byV
+		byW[wpn] = byV
 	end
 	local row = byV[vk]
 	if row == nil then
@@ -1220,22 +1251,23 @@ local function flushDamage(frame)
 		local at, ad, aw, vt, vd = {}, {}, {}, {}, {}
 		local dd, dp, dh, dk = {}, {}, {}, {}
 		local n = 0
-		for ak, byV in pairs(dmgA) do
-			local aTeam = mathFloor(ak / 4294967296)
-			local aDef = mathFloor(ak / 65536) % 65536
-			local wpn = ak % 65536
-			for vk, row in pairs(byV) do
-				n = n + 1
-				at[n], ad[n], aw[n] = aTeam, aDef, wpn
-				vt[n], vd[n] = mathFloor(vk / 65536), vk % 65536
-				dd[n], dp[n], dh[n], dk[n] = row[1], row[2], clamp(row[3], 0, 65535), row[4]
-				if n >= 65535 then
-					break
+		local full = false
+		for ak, byW in pairs(dmgA) do
+			local aTeam, aDef = mathFloor(ak / 65536), ak % 65536
+			for wpn, byV in pairs(byW) do
+				for vk, row in pairs(byV) do
+					n = n + 1
+					at[n], ad[n], aw[n] = aTeam, aDef, wpn
+					vt[n], vd[n] = mathFloor(vk / 65536), vk % 65536
+					dd[n], dp[n], dh[n], dk[n] = row[1], row[2], clamp(row[3], 0, 65535), row[4]
+					if n >= 65535 then
+						full = true
+						break
+					end
 				end
+				if full then break end
 			end
-			if n >= 65535 then
-				break
-			end
+			if full then break end
 		end
 		writeRecord("D", table.concat({
 			PackU32({ dmgStart }), PackU16({ n }),
@@ -1911,7 +1943,7 @@ end
 -- in one must not cost the others, nor the capture.
 local function finishResim(frame)
 	if recordDamage then
-		pcall(function()
+		local okLives, errLives = pcall(function()
 			flushDamage(frame)
 			for _, unitID in ipairs(spGetAllUnits()) do
 				lifeOf(unitID, spGetUnitDefID(unitID), spGetUnitTeam(unitID))
@@ -1921,11 +1953,16 @@ local function finishResim(frame)
 				if spGetUnitExperience then
 					l.xp = spGetUnitExperience(unitID)
 				end
-				rows[#rows + 1] = { unitID, l, 4294967295 }
+				rows[#rows + 1] = { unitID, l, aliveAtEnd }
 			end
 			table.sort(rows, function(a, b) return a[1] < b[1] end)
 			writeLives(frame, rows)
+			Echo(logTag .. " damage: " .. dmgSeen .. " hits, " .. dmgNamedAttacker
+				.. " naming an attacker, " .. dmgNamedWeapon .. " naming a weapon")
 		end)
+		if not okLives then
+			Echo(logTag .. " final damage window / unit lives failed (" .. tostring(errLives) .. ")")
+		end
 	end
 	local ok, err = pcall(writeTeamStats)
 	if not ok then

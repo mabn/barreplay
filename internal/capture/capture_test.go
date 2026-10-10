@@ -217,10 +217,10 @@ func TestConsumeAnalysisRecords(t *testing.T) {
 		uint16(12), uint16(3), uint8(1), uint32(30), uint32(90),
 		float32(10), float32(160.5), uint16(2), uint8(0), float32(0.25)))
 	e.record('S', packLE(uint32(3000), uint16(1),
-		uint16(40), uint16(7), uint8(0), uint32(0), uint32(0xFFFFFFFF),
+		uint16(40), uint16(7), uint8(0), uint32(0), uint32(0xFFFFFF),
 		float32(160.5), float32(0), uint16(1), uint8(100), float32(0)))
 	e.record('V', packLE(uint32(60), uint8(1), uint8(2), uint8(0), uint8(1), uint16(2),
-		uint16(12), uint16(40), uint32(0b1011), uint32(0b0011)))
+		uint16(12), uint16(40), uint16(0b1011), uint16(0b0011), uint16(0), uint16(0)))
 	e.record('P', []byte(`{"f":300,"u":10,"r":[["Sim",1200.5],["Lua",80]]}`))
 	e.record('P', []byte(`{"f":3000,"u":4,"final":true,"r":[["Sim",9000],["Lua",500]]}`))
 	w, st := consumeBrep(t, e, snapshot.Meta{})
