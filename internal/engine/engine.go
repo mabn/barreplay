@@ -68,17 +68,25 @@ type Config struct {
 	// RapidRepoMaster overrides the pr-downloader rapid master repo URL. Empty
 	// uses barRapidRepoMaster.
 	RapidRepoMaster string
-	// SnapshotStreamPath is the absolute path the widget writes its BRSNAP stream
-	// to (substituted into the Lua). Required for a real run; the tool reads this
+	// SnapshotStreamPath is the path, RELATIVE to DataDir, the widget writes
+	// its .brepstream to (substituted into the Lua; the engine's Lua sandbox
+	// refuses absolute paths). Required for a real run; the tool reads this
 	// file back through capture after the engine exits.
 	SnapshotStreamPath string
 	// Profile makes the widget enable the engine's internal time profiler
 	// ("debug 1 0": collection on, overlay drawer off), unlocking the fine-grained
-	// Sim::* sub-scope records and per-heartbeat PROFD samples. Small overhead.
+	// Sim::* sub-scope records and per-heartbeat profiler samples. Small overhead.
 	Profile bool
-	// DisableWidgets makes the snapshot widget turn off BAR's default widget suite
-	// at the first sim frame (unsynced-only overhead; cannot affect the replay).
+	// DisableWidgets makes the widget turn off BAR's default widget suite at
+	// the first sim frame (unsynced-only overhead; cannot affect the replay).
 	DisableWidgets bool
+	// SkipDamage turns off the widget's damage recording (the D and S
+	// records: damage per second by who hit whom, per-unit lifetime totals).
+	// On by default; this is the switch for measuring what it costs.
+	SkipDamage bool
+	// SkipVisibility turns off the widget's per-side visibility recording
+	// (the V records). On by default, like SkipDamage.
+	SkipVisibility bool
 	// ThrottleDraw lowers the engine's draw pacing to ~1 fps for the run via the
 	// MinDrawFPS/MinSimDrawBalance springsettings (injected through a
 	// barreplay-owned config file; the user's springsettings.cfg is not touched).
@@ -401,23 +409,40 @@ func (e *Engine) prdEnv() []string {
 	return env
 }
 
-// WriteWidget writes the snapshot widget (with SampleEvery substituted) into
-// <DataDir>/LuaUI/Widgets/ and best-effort seeds a widget config that enables it,
-// so it runs unattended in headless mode. Returns the widget path.
+// WriteWidget writes the capture widget into <DataDir>/LuaUI/Widgets/ in its
+// re-simulation mode: the Replay uploader with its tokens substituted (the
+// resim flag, the output path, the sample interval and the recording
+// switches). Returns the widget path.
+//
+// The file keeps the name the old dedicated re-sim widget used,
+// snapshot_widget.lua, so a data dir that has run an older build has that
+// file OVERWRITTEN rather than left behind next to this one under the same
+// widget name.
 func (e *Engine) WriteWidget() (string, error) {
 	widgetsDir := filepath.Join(e.cfg.DataDir, "LuaUI", "Widgets")
 	if err := os.MkdirAll(widgetsDir, 0o755); err != nil {
 		return "", err
 	}
-	src := strings.ReplaceAll(assets.SnapshotWidgetLua, "__SAMPLE_EVERY__", fmt.Sprint(e.cfg.SampleEvery))
-	src = strings.ReplaceAll(src, "__OUTPUT_PATH__", luaEscapeString(e.cfg.SnapshotStreamPath))
-	src = strings.ReplaceAll(src, "__PROFILE__", boolToken(e.cfg.Profile))
-	src = strings.ReplaceAll(src, "__DISABLE_WIDGETS__", boolToken(e.cfg.DisableWidgets))
+	src := resimWidget(e.cfg)
 	widgetPath := filepath.Join(widgetsDir, "snapshot_widget.lua")
 	if err := os.WriteFile(widgetPath, []byte(src), 0o644); err != nil {
 		return "", err
 	}
 	return widgetPath, nil
+}
+
+// resimWidget returns the widget source with the re-simulation tokens
+// substituted from cfg.
+func resimWidget(cfg Config) string {
+	return strings.NewReplacer(
+		"__RESIM__", "1",
+		"__SAMPLE_EVERY__", fmt.Sprint(cfg.SampleEvery),
+		"__OUTPUT_PATH__", luaEscapeString(cfg.SnapshotStreamPath),
+		"__PROFILE__", boolToken(cfg.Profile),
+		"__DISABLE_WIDGETS__", boolToken(cfg.DisableWidgets),
+		"__DAMAGE__", boolToken(!cfg.SkipDamage),
+		"__VISIBILITY__", boolToken(!cfg.SkipVisibility),
+	).Replace(assets.WidgetLua)
 }
 
 // luaEscapeString escapes s for embedding inside a Lua double-quoted string
@@ -558,7 +583,7 @@ func (e *Engine) BuildStartscript(demoPath string) (string, error) {
 }
 
 // Run launches spring-headless on scriptPath. It returns a reader over the merged
-// engine stdout+stderr (where the widget's BRSNAP lines appear) and a wait
+// engine stdout+stderr (where the widget's [barreplay] heartbeat lines appear) and a wait
 // function that reaps the process. The caller drains the reader to EOF (the read
 // end EOFs when the engine exits) via capture.Consume, then calls wait.
 // Cancelling ctx kills the engine.

@@ -68,6 +68,10 @@ const (
 	EventCreated   EventKind = "created"
 	EventFinished  EventKind = "finished"
 	EventDestroyed EventKind = "destroyed"
+	// EventGiven is a unit changing hands — shared, captured, or a resigned
+	// player's army handed to an ally. Team is the team it went TO and
+	// Cause.Team the one it came from.
+	EventGiven EventKind = "given"
 )
 
 // Event is a discrete unit lifecycle event, recorded at the exact frame it
@@ -78,6 +82,22 @@ type Event struct {
 	UnitID int32     `json:"id"`
 	DefID  int32     `json:"def"`
 	Team   int32     `json:"team"`
+	// Cause is what brought the event about, when the recorder knew: for
+	// EventDestroyed the killer and the weapon that dealt the blow, for
+	// EventGiven the previous owner (Cause.Team). Nil when there is none or
+	// the capture predates it — only a full-view recorder (a re-simulation)
+	// is handed the killer at all.
+	Cause *EventCause `json:"cause,omitempty"`
+}
+
+// EventCause is an event's cause. Every field is -1 when unknown: a kill by
+// a unit that has itself died since still names its def and team, a crash or
+// a self-destruct names nothing but may name a weapon.
+type EventCause struct {
+	UnitID    int32 `json:"id"`
+	DefID     int32 `json:"def"`
+	Team      int32 `json:"team"`
+	WeaponDef int32 `json:"weapon"`
 }
 
 // CommKind enumerates the things a player puts into a game besides orders:
@@ -192,6 +212,15 @@ type UnitDef struct {
 	CanFly      bool    `json:"canFly,omitempty"`
 	CanMove     bool    `json:"canMove,omitempty"`
 	WeaponCount int32   `json:"weaponCount,omitempty"`
+	// From BAR's unit customParams: the tech tier (1, 2, 3; 0 = unknown),
+	// BAR's own grouping ("weapon", "builder", "energy", ...), and whether
+	// BAR calls the unit a commander. Absent from captures before stream
+	// protocol 4.
+	TechLevel   int32  `json:"techLevel,omitempty"`
+	UnitGroup   string `json:"unitGroup,omitempty"`
+	IsCommander bool   `json:"isCommander,omitempty"`
+	// MaxWeaponRange is the reach of the unit's longest weapon, in elmos.
+	MaxWeaponRange float32 `json:"maxWeaponRange,omitempty"`
 }
 
 // RecorderInfo identifies the client that captured a live-game stream (the
@@ -245,12 +274,30 @@ type Meta struct {
 }
 
 // Writer is the pluggable persistence boundary. Callers must call WriteMeta
-// exactly once before any WriteFrame/WriteEvent/WriteComm, and Close exactly
-// once at the end. Implementations need not be safe for concurrent use.
+// exactly once before any other Write*, and Close exactly once at the end.
+// Implementations need not be safe for concurrent use.
+//
+// WriteFact, WriteDamage, WriteLife and WriteVisibility carry the ANALYSIS
+// records (see analysis.go): what a game summary is computed from, recorded
+// only by a re-simulation. A writer with no use for them embeds
+// DiscardAnalysis.
 type Writer interface {
 	WriteMeta(Meta) error
 	WriteFrame(Frame) error
 	WriteEvent(Event) error
 	WriteComm(Comm) error
+	WriteFact(Fact) error
+	WriteDamage(DamageWindow) error
+	WriteLife(UnitLife) error
+	WriteVisibility(Visibility) error
 	Close() error
 }
+
+// DiscardAnalysis implements the analysis half of Writer as no-ops, for
+// writers that only want the frames, events and comms.
+type DiscardAnalysis struct{}
+
+func (DiscardAnalysis) WriteFact(Fact) error             { return nil }
+func (DiscardAnalysis) WriteDamage(DamageWindow) error   { return nil }
+func (DiscardAnalysis) WriteLife(UnitLife) error         { return nil }
+func (DiscardAnalysis) WriteVisibility(Visibility) error { return nil }

@@ -358,6 +358,7 @@ func TestConsumeBrepRejectsNonBrep(t *testing.T) {
 
 // loadedSink is an in-memory snapshot.Writer for tests.
 type loadedSink struct {
+	snapshot.DiscardAnalysis
 	meta   snapshot.Meta
 	frames []snapshot.Frame
 	events []snapshot.Event

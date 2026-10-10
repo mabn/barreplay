@@ -1096,7 +1096,7 @@ test("the setup guide is wired to the banner and to the widget", () => {
   assert.match(at("../public/_headers"), /^\/replay_uploader\.lua$/m, "and has a cache rule");
   assert.ok(
     readFileSync(new URL("../../assets/lua/replay_uploader.lua", import.meta.url), "utf8").includes(
-      'name    = "Replay uploader"',
+      'or "Replay uploader",',
     ),
     "the widget's F11 name is the one the guide tells players to look for",
   );

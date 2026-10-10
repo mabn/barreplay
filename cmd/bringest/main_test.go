@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mabn/barreplay/internal/capture/breptest"
 	"github.com/mabn/barreplay/internal/engine"
 	"github.com/mabn/barreplay/internal/packer"
 	"github.com/mabn/barreplay/internal/resim"
@@ -565,8 +566,8 @@ func TestRunOnceUnauthorized(t *testing.T) {
 // has already succeeded by then.
 func TestReportStats(t *testing.T) {
 	dir := t.TempDir()
-	in := filepath.Join(dir, "abc123.brsnap")
-	if err := os.WriteFile(in, []byte(statsCapture), 0o644); err != nil {
+	in := filepath.Join(dir, "abc123.brepstream")
+	if err := os.WriteFile(in, statsCapture, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	brpPath, _, err := packer.Pack(context.Background(), nil, in, dir, "", true)
@@ -583,14 +584,13 @@ func TestReportStats(t *testing.T) {
 	}
 }
 
-const statsCapture = `BRSNAP DEF {"id":1,"name":"armcom","humanName":"Armada Commander","maxHealth":3000}
+var statsCapture = breptest.New(`BRSNAP DEF {"id":1,"name":"armcom","humanName":"Armada Commander","maxHealth":3000}
 BRSNAP T 0 0 armada #ff0000
 BRSNAP READY
-BRSNAP F 30 1.000 1
-BRSNAP U 100 1 0 512.0 80.0 1024.0 3000.0 3000.0
-BRSNAP F 60 2.000 1
-BRSNAP U 100 1 0 512.0 80.0 1030.0 2900.0 3000.0
-`
+`).
+	Keyframe(30, breptest.Unit{ID: 100, Def: 1, X: 512, Z: 1024, HP: 3000, MaxHP: 3000, Build: 255}).
+	Keyframe(60, breptest.Unit{ID: 100, Def: 1, X: 512, Z: 1030, HP: 2900, MaxHP: 3000, Build: 255}).
+	Bytes()
 
 // captureStderr runs fn with os.Stderr redirected into a pipe and returns what
 // it wrote — the same swap teeStderr performs in production.

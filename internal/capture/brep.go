@@ -6,12 +6,18 @@
 // Layout:
 //
 //	line "BREPSTREAM 1"
-//	text preamble, same grammar as .brsnap (BRSNAP GID/GAME/DEF/T/P lines),
-//	terminated by the "BRSNAP READY" line
+//	text preamble (BRSNAP GID/GAME/DEF/T/P lines), terminated by the
+//	"BRSNAP READY" line
 //	then length-framed binary records: <tag u8> <len u32le> <payload>
 //	  'F'  frame (see decodeFrameRecord)
-//	  'E'  unit lifecycle event, text payload "<frame> <kind> <id> <def> <team>"
+//	  'E'  unit lifecycle event, text payload
+//	       "<frame> <kind> <id> <def> <team> [<aID> <aDef> <aTeam> <weapon>]"
 //	  'C'  chat message or map drawing, JSON payload (see parseComm)
+//	  'G'  game fact, JSON payload (snapshot.Fact)
+//	  'D'  damage window, packed (decodeDamageRecord)
+//	  'S'  per-unit lifetime totals, packed (decodeLivesRecord)
+//	  'V'  per-side visibility changes, packed (decodeVisibilityRecord)
+//	  'P'  engine profiler readings, JSON (into Stats, not the writer)
 //	  'X'  end of stream, text payload = reason
 //	  anything else: skipped (forward compatibility)
 //
@@ -32,6 +38,7 @@ package capture
 import (
 	"bufio"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -202,7 +209,7 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 			if err := w.WriteFrame(fr); err != nil {
 				return err
 			}
-		case 'E': // "<frame> <kind> <id> <def> <team>"
+		case 'E': // "<frame> <kind> <id> <def> <team> [<aID> <aDef> <aTeam> <weapon>]"
 			f := strings.Fields(string(payload))
 			if len(f) >= 5 {
 				ev := snapshot.Event{
@@ -211,6 +218,12 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 					UnitID: atoi32(f[2]),
 					DefID:  atoi32(f[3]),
 					Team:   atoi32(f[4]),
+				}
+				if len(f) >= 9 {
+					c := snapshot.EventCause{UnitID: atoi32(f[5]), DefID: atoi32(f[6]), Team: atoi32(f[7]), WeaponDef: atoi32(f[8])}
+					if c.UnitID >= 0 || c.DefID >= 0 || c.Team >= 0 || c.WeaponDef >= 0 {
+						ev.Cause = &c
+					}
 				}
 				graves.note(ev.Kind, ev.UnitID)
 				if err := w.WriteEvent(ev); err != nil {
@@ -224,6 +237,50 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 					return err
 				}
 			}
+		case 'G': // game fact, JSON
+			fact, err := snapshot.ParseFact(payload)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "capture: bad G record %q: %v\n", payload, err)
+				continue
+			}
+			stats.Facts++
+			if err := w.WriteFact(fact); err != nil {
+				return err
+			}
+		case 'D':
+			dw, err := decodeDamageRecord(payload)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "capture: bad damage record: %v\n", err)
+				continue
+			}
+			stats.DamageWindows++
+			if err := w.WriteDamage(dw); err != nil {
+				return err
+			}
+		case 'S':
+			lives, err := decodeLivesRecord(payload)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "capture: bad lives record: %v\n", err)
+				continue
+			}
+			for _, l := range lives {
+				stats.Lives++
+				if err := w.WriteLife(l); err != nil {
+					return err
+				}
+			}
+		case 'V':
+			v, err := decodeVisibilityRecord(payload)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "capture: bad visibility record: %v\n", err)
+				continue
+			}
+			stats.Visibility++
+			if err := w.WriteVisibility(v); err != nil {
+				return err
+			}
+		case 'P':
+			applyProfileRecord(payload, stats)
 		case 'X':
 			// End-of-stream marker; the reason is informational only.
 		default:
@@ -455,4 +512,171 @@ func decodeFrameRecord(payload []byte, state map[int32]*brepUnit, graves graveya
 		})
 	}
 	return fr, nil
+}
+
+// unknown8 / unknown16 map the stream's "unknown" sentinels to -1.
+func unknown8(v int32) int32 {
+	if v == 0xFF {
+		return -1
+	}
+	return v
+}
+
+func unknown16(v int32) int32 {
+	if v == 0xFFFF {
+		return -1
+	}
+	return v
+}
+
+// decodeDamageRecord decodes one 'D' payload: frame u32, n u16, then columns
+// aTeam u8, aDef u16, weapon u16, vTeam u8, vDef u16, damage f32,
+// paralyze f32, hits u16, overkill f32.
+func decodeDamageRecord(payload []byte) (snapshot.DamageWindow, error) {
+	c := &cursor{b: payload}
+	dw := snapshot.DamageWindow{Frame: int32(c.u32())}
+	n := int(c.u16())
+	if c.err == nil && n*21 > len(payload) {
+		return dw, fmt.Errorf("damage record declares %d rows in %d bytes", n, len(payload))
+	}
+	dw.Rows = make([]snapshot.DamageRow, n)
+	for i := range dw.Rows {
+		dw.Rows[i].AttackerTeam = unknown8(c.u8())
+	}
+	for i := range dw.Rows {
+		dw.Rows[i].AttackerDef = unknown16(c.u16())
+	}
+	for i := range dw.Rows {
+		dw.Rows[i].WeaponDef = unknown16(c.u16())
+	}
+	for i := range dw.Rows {
+		dw.Rows[i].VictimTeam = unknown8(c.u8())
+	}
+	for i := range dw.Rows {
+		dw.Rows[i].VictimDef = unknown16(c.u16())
+	}
+	for i := range dw.Rows {
+		dw.Rows[i].Damage = c.f32()
+	}
+	for i := range dw.Rows {
+		dw.Rows[i].Paralyze = c.f32()
+	}
+	for i := range dw.Rows {
+		dw.Rows[i].Hits = c.u16()
+	}
+	for i := range dw.Rows {
+		dw.Rows[i].Overkill = c.f32()
+	}
+	return dw, c.err
+}
+
+// decodeLivesRecord decodes one 'S' payload: frame u32, n u16, then columns
+// id u16, def u16, team u8, born u32, died u32 (0xFFFFFFFF = alive at the
+// end), dealt f32, taken f32, kills u16, minHp u8, xp f32.
+func decodeLivesRecord(payload []byte) ([]snapshot.UnitLife, error) {
+	c := &cursor{b: payload}
+	c.u32() // the frame the record was written on; each row carries its own
+	n := int(c.u16())
+	if c.err == nil && n*28 > len(payload) {
+		return nil, fmt.Errorf("lives record declares %d rows in %d bytes", n, len(payload))
+	}
+	ls := make([]snapshot.UnitLife, n)
+	for i := range ls {
+		ls[i].UnitID = c.u16()
+	}
+	for i := range ls {
+		ls[i].DefID = c.u16()
+	}
+	for i := range ls {
+		ls[i].Team = unknown8(c.u8())
+	}
+	for i := range ls {
+		ls[i].Born = int32(c.u32())
+	}
+	for i := range ls {
+		d := c.u32()
+		if d == 0xFFFFFFFF {
+			ls[i].Died = -1
+		} else {
+			ls[i].Died = int32(d)
+		}
+	}
+	for i := range ls {
+		ls[i].Dealt = c.f32()
+	}
+	for i := range ls {
+		ls[i].Taken = c.f32()
+	}
+	for i := range ls {
+		ls[i].Kills = c.u16()
+	}
+	for i := range ls {
+		ls[i].MinHealthPct = c.u8()
+	}
+	for i := range ls {
+		ls[i].XP = c.f32()
+	}
+	return ls, c.err
+}
+
+// decodeVisibilityRecord decodes one 'V' payload: frame u32, flags u8 (bit 0
+// = every unit restated), nAllies u8, allies u8[nAllies], n u16, then ids
+// u16[n] and masks u32[n].
+func decodeVisibilityRecord(payload []byte) (snapshot.Visibility, error) {
+	c := &cursor{b: payload}
+	v := snapshot.Visibility{Frame: int32(c.u32())}
+	v.Full = c.u8()&1 != 0
+	na := int(c.u8())
+	v.Allies = make([]int32, na)
+	for i := range v.Allies {
+		v.Allies[i] = c.u8()
+	}
+	n := int(c.u16())
+	if c.err == nil && n*6 > len(payload) {
+		return v, fmt.Errorf("visibility record declares %d rows in %d bytes", n, len(payload))
+	}
+	v.Units, v.Masks = make([]int32, n), make([]uint32, n)
+	for i := range v.Units {
+		v.Units[i] = c.u16()
+	}
+	for i := range v.Masks {
+		v.Masks[i] = uint32(c.u32())
+	}
+	return v, c.err
+}
+
+// profileRecord is a 'P' payload: the engine profiler's per-scope totals at a
+// frame — the final ones at game over, or a -profile heartbeat sample.
+type profileRecord struct {
+	Frame int32                `json:"f"`
+	Units int32                `json:"u"`
+	Final bool                 `json:"final"`
+	R     [][2]json.RawMessage `json:"r"`
+}
+
+// applyProfileRecord folds one 'P' record into stats: the final record
+// becomes Profile (largest first, as written), a heartbeat sample extends
+// ProfileSamples.
+func applyProfileRecord(payload []byte, stats *Stats) {
+	var p profileRecord
+	if err := json.Unmarshal(payload, &p); err != nil {
+		fmt.Fprintf(os.Stderr, "capture: bad P record: %v\n", err)
+		return
+	}
+	var entries []ProfileEntry
+	for _, r := range p.R {
+		var name string
+		var ms float64
+		if json.Unmarshal(r[0], &name) != nil || json.Unmarshal(r[1], &ms) != nil {
+			continue
+		}
+		entries = append(entries, ProfileEntry{Name: name, Ms: ms})
+	}
+	if p.Final {
+		stats.Profile = entries
+		return
+	}
+	for _, e := range entries {
+		stats.ProfileSamples = append(stats.ProfileSamples, ProfileSample{Frame: p.Frame, Units: p.Units, Ms: e.Ms, Name: e.Name})
+	}
 }

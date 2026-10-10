@@ -1,6 +1,9 @@
 package capture
 
 import (
+	"bytes"
+	"encoding/binary"
+	"math"
 	"strings"
 	"testing"
 
@@ -9,11 +12,15 @@ import (
 
 // recordingWriter captures calls for assertions.
 type recordingWriter struct {
-	meta   *snapshot.Meta
-	frames []snapshot.Frame
-	events []snapshot.Event
-	comms  []snapshot.Comm
-	closed bool
+	meta       *snapshot.Meta
+	frames     []snapshot.Frame
+	events     []snapshot.Event
+	comms      []snapshot.Comm
+	facts      []snapshot.Fact
+	damage     []snapshot.DamageWindow
+	lives      []snapshot.UnitLife
+	visibility []snapshot.Visibility
+	closed     bool
 }
 
 func (r *recordingWriter) WriteMeta(m snapshot.Meta) error { r.meta = &m; return nil }
@@ -29,178 +36,41 @@ func (r *recordingWriter) WriteComm(c snapshot.Comm) error {
 	r.comms = append(r.comms, c)
 	return nil
 }
+func (r *recordingWriter) WriteFact(f snapshot.Fact) error { r.facts = append(r.facts, f); return nil }
+func (r *recordingWriter) WriteDamage(d snapshot.DamageWindow) error {
+	r.damage = append(r.damage, d)
+	return nil
+}
+func (r *recordingWriter) WriteLife(l snapshot.UnitLife) error {
+	r.lives = append(r.lives, l)
+	return nil
+}
+func (r *recordingWriter) WriteVisibility(v snapshot.Visibility) error {
+	r.visibility = append(r.visibility, v)
+	return nil
+}
 func (r *recordingWriter) Close() error { r.closed = true; return nil }
 
-func TestConsume(t *testing.T) {
-	stream := strings.Join([]string{
-		"[t=00:00:00] Loading widget BAR Replay Snapshotter", // engine noise, ignored
-		`BRSNAP DEF {"id":1,"name":"armcom","humanName":"Armada Commander","metalCost":2700,"maxHealth":3000,"xsize":8,"zsize":8,"iconType":"armcom","isBuilder":true}`,
-		"BRSNAP D 2 corcom", // legacy id->name line still understood
-		"BRSNAP T 0 0 armada #ff0000",
-		"BRSNAP T 1 1 cortex #0000ff",
-		"BRSNAP P 0 0 0 Alice",
-		"BRSNAP P 1 1 0 Bob The Builder",
-		"BRSNAP P 2 -1 1 Spectator Sam",
-		"BRSNAP READY",
-		"some other infolog line",
-		"BRSNAP F 30 1.000 2",
-		"BRSNAP U 100 1 0 512.0 80.0 1024.0 3000.0 3000.0 1.50 0.00 -2.25 0.750", // extended
-		"BRSNAP U 101 2 1 600.5 82.0 900.0 2500.0 3000.0",                        // legacy (no vel/build)
-		"BRSNAP R 0 500.0 1200.0 1000.0 5000.0 45.60 90.00",
-		"BRSNAP R 1 250.0 800.0 1000.0 5000.0 30.00 60.00",
-		"BRSNAP EV 45 created 102 1 0",
-		"BRSNAP F 60 2.000 1",
-		"BRSNAP U 100 1 0 512.0 80.0 1030.0 2900.0 3000.0",
-		"BRSNAP EV 58 destroyed 101 2 1",
-		"BRSNAP PROFD 300 120 1200.5 Sim",
-		"BRSNAP PROFD 600 450 3400.0 Sim::Unit::MoveType",
-		"BRSNAP PROF 95123.5 Sim",
-		"BRSNAP PROF 61200.0 Lua",
-	}, "\n")
-
-	base := snapshot.Meta{
-		GameID:        "gid123",
-		EngineVersion: "2025.06.24",
-		MapName:       "Isidis crack 1.1",
-		SampleEvery:   30,
-	}
+// consumeBrep decodes a test stream built from a preamble and records.
+func consumeBrep(t *testing.T, e *brepEnc, base snapshot.Meta) (*recordingWriter, *Stats) {
+	t.Helper()
 	w := &recordingWriter{}
-	var stats Stats
-	if err := ConsumeStats(strings.NewReader(stream), base, w, &stats); err != nil {
-		t.Fatalf("ConsumeStats: %v", err)
-	}
-
-	if w.meta == nil {
-		t.Fatal("meta not written")
-	}
-	if w.meta.GameID != "gid123" {
-		t.Errorf("meta GameID = %q", w.meta.GameID)
-	}
-	if d := w.meta.UnitDefs[1]; d.Name != "armcom" || d.HumanName != "Armada Commander" || d.MetalCost != 2700 || !d.IsBuilder {
-		t.Errorf("unitDefs[1] = %+v", d)
-	}
-	if d := w.meta.UnitDefs[1]; d.XSize != 8 || d.ZSize != 8 || d.IconType != "armcom" {
-		t.Errorf("unitDefs[1] footprint/icon = %+v", d)
-	}
-	if w.meta.UnitDefs[2].Name != "corcom" { // legacy D line
-		t.Errorf("unitDefs[2] = %+v", w.meta.UnitDefs[2])
-	}
-	if len(w.meta.Teams) != 2 || w.meta.Teams[1].Side != "cortex" {
-		t.Errorf("teams = %+v", w.meta.Teams)
-	}
-	if w.meta.Teams[0].Color != "#ff0000" || w.meta.Teams[1].Color != "#0000ff" {
-		t.Errorf("team colors = %+v", w.meta.Teams)
-	}
-	// Player roster; team display names backfilled from the first non-spectator.
-	if len(w.meta.Players) != 3 || w.meta.Players[1].Name != "Bob The Builder" || !w.meta.Players[2].Spectator {
-		t.Errorf("players = %+v", w.meta.Players)
-	}
-	if w.meta.Teams[0].PlayerName != "Alice" || w.meta.Teams[1].PlayerName != "Bob The Builder" {
-		t.Errorf("team player backfill = %+v", w.meta.Teams)
-	}
-
-	if len(w.frames) != 2 {
-		t.Fatalf("frames = %d, want 2", len(w.frames))
-	}
-	if len(w.frames[0].Units) != 2 {
-		t.Errorf("frame0 units = %d, want 2", len(w.frames[0].Units))
-	}
-	if got := w.frames[0].Units[0]; got.VelX != 1.5 || got.VelZ != -2.25 || got.BuildProgress != 0.75 {
-		t.Errorf("frame0 unit0 velocity/build = %+v", got)
-	}
-	if got := w.frames[0].Units[1]; got.UnitID != 101 || got.Pos.X != 600.5 || got.Team != 1 {
-		t.Errorf("frame0 unit1 = %+v", got)
-	}
-	if got := w.frames[0].Units[1]; got.VelX != 0 || got.BuildProgress != 0 {
-		t.Errorf("frame0 unit1 legacy line should have zero vel/build: %+v", got)
-	}
-	if len(w.frames[1].Units) != 1 {
-		t.Errorf("frame1 units = %d, want 1", len(w.frames[1].Units))
-	}
-	if len(w.frames[0].Resources) != 2 {
-		t.Fatalf("frame0 resources = %d, want 2", len(w.frames[0].Resources))
-	}
-	// No GAME line = legacy stream: the over-scaled income is divided back by
-	// the default gameSpeed (30) at decode time (see repairIncome).
-	if r := w.frames[0].Resources[0]; r.Team != 0 || r.Metal != 500 || r.EnergyStorage != 5000 || r.MetalIncome != float32(45.6)/30 {
-		t.Errorf("frame0 resource0 = %+v", r)
-	}
-	if len(w.frames[1].Resources) != 0 {
-		t.Errorf("frame1 resources = %d, want 0 (none emitted)", len(w.frames[1].Resources))
-	}
-
-	if len(w.events) != 2 {
-		t.Fatalf("events = %d, want 2", len(w.events))
-	}
-	if w.events[0].Kind != snapshot.EventCreated || w.events[0].UnitID != 102 {
-		t.Errorf("event0 = %+v", w.events[0])
-	}
-	if w.events[1].Kind != snapshot.EventDestroyed || w.events[1].Frame != 58 {
-		t.Errorf("event1 = %+v", w.events[1])
-	}
-
-	if stats.Frames != 2 || stats.LastFrame != 60 {
-		t.Errorf("stats frames = %d lastFrame = %d, want 2/60", stats.Frames, stats.LastFrame)
-	}
-	if len(stats.Profile) != 2 || stats.Profile[0].Name != "Sim" || stats.Profile[0].Ms != 95123.5 {
-		t.Errorf("stats.Profile = %+v", stats.Profile)
-	}
-	if stats.Profile[1].Name != "Lua" || stats.Profile[1].Ms != 61200.0 {
-		t.Errorf("stats.Profile[1] = %+v", stats.Profile[1])
-	}
-	if len(stats.ProfileSamples) != 2 {
-		t.Fatalf("ProfileSamples = %d, want 2", len(stats.ProfileSamples))
-	}
-	if s := stats.ProfileSamples[0]; s.Frame != 300 || s.Units != 120 || s.Ms != 1200.5 || s.Name != "Sim" {
-		t.Errorf("ProfileSamples[0] = %+v", s)
-	}
-	if s := stats.ProfileSamples[1]; s.Frame != 600 || s.Units != 450 || s.Name != "Sim::Unit::MoveType" {
-		t.Errorf("ProfileSamples[1] = %+v", s)
-	}
-}
-
-// A frame whose declared count exceeds the U lines present (e.g. a truncated log
-// write) is still persisted with the units that did arrive; the mismatch only
-// warns.
-func TestConsumeTruncatedFrameKeepsPartialUnits(t *testing.T) {
-	stream := strings.Join([]string{
-		"BRSNAP F 30 1.000 3", // declares 3 units
-		"BRSNAP U 100 1 0 1.0 2.0 3.0 100.0 100.0",
-		"BRSNAP U 101 1 0 4.0 5.0 6.0 100.0 100.0", // only 2 arrive
-		"BRSNAP F 60 2.000 1",
-		"BRSNAP U 102 1 0 7.0 8.0 9.0 100.0 100.0",
-	}, "\n")
-	w := &recordingWriter{}
-	if err := Consume(strings.NewReader(stream), snapshot.Meta{GameID: "x"}, w); err != nil {
+	var st Stats
+	if err := ConsumeBrepStats(bytes.NewReader(e.buf.Bytes()), base, w, &st); err != nil {
 		t.Fatal(err)
 	}
-	if len(w.frames) != 2 {
-		t.Fatalf("frames = %d, want 2", len(w.frames))
-	}
-	if len(w.frames[0].Units) != 2 {
-		t.Errorf("truncated frame kept %d units, want the 2 that arrived", len(w.frames[0].Units))
-	}
-	if len(w.frames[1].Units) != 1 {
-		t.Errorf("frame1 units = %d, want 1", len(w.frames[1].Units))
-	}
+	return w, &st
 }
 
 // When the caller pre-seeds a rich player roster (from the demo startscript),
 // the widget's live P line for the same id must not duplicate it.
 func TestConsumeKeepsSeededPlayers(t *testing.T) {
-	stream := strings.Join([]string{
-		"BRSNAP P 0 0 0 Alice",    // same id as the seed -> merged away
-		"BRSNAP P 5 3 0 Newcomer", // not in the seed -> appended
-		"BRSNAP READY",
-	}, "\n")
+	e := newBrepEnc("BRSNAP P 0 0 0 Alice\nBRSNAP P 5 3 0 Newcomer\nBRSNAP READY\n")
 	base := snapshot.Meta{
 		GameID:  "x",
 		Players: []snapshot.PlayerInfo{{PlayerID: 0, Name: "Alice", Team: 0, CountryCode: "US", Skill: 31.24}},
 	}
-	w := &recordingWriter{}
-	if err := Consume(strings.NewReader(stream), base, w); err != nil {
-		t.Fatal(err)
-	}
+	w, _ := consumeBrep(t, e, base)
 	if len(w.meta.Players) != 2 {
 		t.Fatalf("players = %d, want 2 (seed kept, newcomer added)", len(w.meta.Players))
 	}
@@ -212,44 +82,17 @@ func TestConsumeKeepsSeededPlayers(t *testing.T) {
 	}
 }
 
-// Protocol >= 3 streams write income as the engine reports it (already per
-// game-second); the legacy repair must NOT touch it.
-func TestConsumeProtocol3IncomeUnscaled(t *testing.T) {
-	stream := strings.Join([]string{
-		`BRSNAP GAME {"protocol":3,"sampleEvery":30,"gameSpeed":30}`,
-		"BRSNAP READY",
-		"BRSNAP F 30 1.000 0",
-		"BRSNAP R 0 500.0 1200.0 1000.0 5000.0 2.00 45.00",
-	}, "\n")
-	w := &recordingWriter{}
-	if err := Consume(strings.NewReader(stream), snapshot.Meta{}, w); err != nil {
-		t.Fatal(err)
-	}
-	if len(w.frames) != 1 || len(w.frames[0].Resources) != 1 {
-		t.Fatalf("frames = %+v", w.frames)
-	}
-	if r := w.frames[0].Resources[0]; r.MetalIncome != 2 || r.EnergyIncome != 45 {
-		t.Errorf("protocol 3 income must pass through unscaled: %+v", r)
-	}
-}
-
 // The GAME line names the widget build that produced the stream. A player's
 // installed copy can be arbitrarily old, so this is the only place it can be
 // learned — the catalog stores it per replay, and a bad capture is traced back
 // through it.
 func TestConsumeRecordsWidgetBuild(t *testing.T) {
 	const sha = "0f1e2d3c4b5a69788796a5b4c3d2e1f009182736"
-	stream := strings.Join([]string{
-		`BRSNAP GAME {"protocol":3,"widgetVersion":"1.7.0","widgetDate":"2026-08-16","widgetSha":"` + sha + `","mode":"live"}`,
+	e := newBrepEnc(`BRSNAP GAME {"protocol":3,"widgetVersion":"1.7.0","widgetDate":"2026-08-16","widgetSha":"` + sha + `","mode":"live"}` + "\n" +
 		// A widget re-enabled mid-game appends a segment with its own
 		// preamble; the capture is named after the build that started it.
-		`BRSNAP GAME {"protocol":3,"widgetVersion":"9.9.9","mode":"live"}`,
-		"BRSNAP READY",
-	}, "\n")
-	w := &recordingWriter{}
-	if err := Consume(strings.NewReader(stream), snapshot.Meta{}, w); err != nil {
-		t.Fatal(err)
-	}
+		`BRSNAP GAME {"protocol":3,"widgetVersion":"9.9.9","mode":"live"}` + "\nBRSNAP READY\n")
+	w, _ := consumeBrep(t, e, snapshot.Meta{})
 	got := w.meta.Widget
 	if got == nil {
 		t.Fatal("Meta.Widget not recorded")
@@ -257,68 +100,58 @@ func TestConsumeRecordsWidgetBuild(t *testing.T) {
 	if want := (snapshot.WidgetInfo{Version: "1.7.0", Sha: sha, Date: "2026-08-16"}); *got != want {
 		t.Errorf("Meta.Widget = %+v, want %+v", *got, want)
 	}
+	if w.meta.Recorder == nil {
+		t.Error("a live capture must record its recorder")
+	}
 }
 
 // An older widget reports only a version, and one installed straight from the
 // repo was never SHA-stamped. Both must still record what they do know.
 func TestConsumeWidgetBuildPartialAndAbsent(t *testing.T) {
-	unstamped := &recordingWriter{}
-	if err := Consume(strings.NewReader(
-		`BRSNAP GAME {"protocol":3,"widgetVersion":"1.6.0","mode":"live"}`+"\nBRSNAP READY",
-	), snapshot.Meta{}, unstamped); err != nil {
-		t.Fatal(err)
-	}
+	unstamped, _ := consumeBrep(t, newBrepEnc(`BRSNAP GAME {"protocol":3,"widgetVersion":"1.6.0","mode":"live"}`+"\nBRSNAP READY\n"), snapshot.Meta{})
 	if w := unstamped.meta.Widget; w == nil || w.Version != "1.6.0" || w.Sha != "" || w.Date != "" {
 		t.Errorf("partial widget info = %+v, want version only", w)
 	}
 
-	// A re-sim capture's GAME line names no widget at all: nothing to record,
-	// and inventing an empty struct would make the catalog claim otherwise.
-	resim := &recordingWriter{}
-	if err := Consume(strings.NewReader(
-		`BRSNAP GAME {"protocol":3,"mode":"replay"}`+"\nBRSNAP READY",
-	), snapshot.Meta{}, resim); err != nil {
-		t.Fatal(err)
-	}
-	if resim.meta.Widget != nil {
-		t.Errorf("Meta.Widget = %+v, want nil for a capture that names none", resim.meta.Widget)
+	// The re-simulation sampler is the same widget file, but its build is
+	// this tool's own and it is nobody's point of view: it records neither,
+	// or the catalog would claim a player uploaded the re-sim.
+	resim, _ := consumeBrep(t, newBrepEnc(`BRSNAP GAME {"protocol":4,"widgetVersion":"1.8.0","mode":"live","resim":true}`+"\nBRSNAP READY\n"), snapshot.Meta{})
+	if resim.meta.Widget != nil || resim.meta.Recorder != nil {
+		t.Errorf("re-sim capture recorded widget %+v / recorder %+v, want neither", resim.meta.Widget, resim.meta.Recorder)
 	}
 }
 
 func TestConsumeEmptyStillWritesMeta(t *testing.T) {
-	w := &recordingWriter{}
-	if err := Consume(strings.NewReader("no snapshot data here\n"), snapshot.Meta{GameID: "x"}, w); err != nil {
-		t.Fatal(err)
-	}
+	w, _ := consumeBrep(t, newBrepEnc(""), snapshot.Meta{GameID: "x"})
 	if w.meta == nil {
-		t.Error("meta should be written even for empty capture")
+		t.Error("meta should be written even for an empty capture")
 	}
 }
 
-// COMM records carry chat and drawings. The text they hold comes from
-// arbitrary players, so the parser must sanitize it; a record it cannot make
-// sense of is dropped without taking the rest of the capture with it.
+// C records carry chat and drawings. The text they hold comes from arbitrary
+// players, so the parser must sanitize it; a record it cannot make sense of
+// is dropped without taking the rest of the capture with it.
 func TestConsumeComms(t *testing.T) {
-	stream := strings.Join([]string{
-		"BRSNAP READY",
-		`BRSNAP COMM {"f":60,"k":"chat","p":0,"d":"ally","t":"go north"}`,
-		`BRSNAP COMM {"f":90,"k":"chat","p":-1,"n":"LobbyOnly","d":"lobby","t":"gl hf"}`,
-		`BRSNAP COMM {"f":120,"k":"point","p":1,"x":1200.5,"z":3400.25,"t":"here"}`,
-		`BRSNAP COMM {"f":150,"k":"line","p":1,"x":1200,"z":3400,"x2":1260,"z2":3450}`,
-		`BRSNAP COMM {"f":180,"k":"erase","p":1,"x":1200,"z":3400}`,
+	e := newBrepEnc("BRSNAP READY\n")
+	for _, c := range []string{
+		`{"f":60,"k":"chat","p":0,"d":"ally","t":"go north"}`,
+		`{"f":90,"k":"chat","p":-1,"n":"LobbyOnly","d":"lobby","t":"gl hf"}`,
+		`{"f":120,"k":"point","p":1,"x":1200.5,"z":3400.25,"t":"here"}`,
+		`{"f":150,"k":"line","p":1,"x":1200,"z":3400,"x2":1260,"z2":3450}`,
+		`{"f":180,"k":"erase","p":1,"x":1200,"z":3400}`,
 		// Control characters (JSON can only carry them escaped) are flattened
 		// to spaces and the result trimmed.
-		`BRSNAP COMM {"f":210,"k":"chat","p":0,"d":"all","t":"tab\u0009and\u0008reset  "}`,
+		`{"f":210,"k":"chat","p":0,"d":"all","t":"tab\u0009and\u0008reset  "}`,
 		// Junk: unparseable JSON, and a kind the model does not define.
-		"BRSNAP COMM not json at all",
-		`BRSNAP COMM {"f":240,"k":"telepathy","p":0,"t":"?"}`,
+		"not json at all",
+		`{"f":240,"k":"telepathy","p":0,"t":"?"}`,
 		// No player id at all: unknown, not player 0.
-		`BRSNAP COMM {"f":270,"k":"chat","d":"all","t":"who said that"}`,
-	}, "\n")
-	w := &recordingWriter{}
-	if err := Consume(strings.NewReader(stream), snapshot.Meta{}, w); err != nil {
-		t.Fatal(err)
+		`{"f":270,"k":"chat","d":"all","t":"who said that"}`,
+	} {
+		e.record('C', []byte(c))
 	}
+	w, _ := consumeBrep(t, e, snapshot.Meta{})
 	want := []snapshot.Comm{
 		{Frame: 60, Kind: snapshot.CommChat, PlayerID: 0, Dest: "ally", Text: "go north"},
 		{Frame: 90, Kind: snapshot.CommChat, PlayerID: -1, Name: "LobbyOnly", Dest: "lobby", Text: "gl hf"},
@@ -335,6 +168,123 @@ func TestConsumeComms(t *testing.T) {
 		if w.comms[i] != want[i] {
 			t.Errorf("comm[%d] = %+v, want %+v", i, w.comms[i], want[i])
 		}
+	}
+}
+
+// packLE builds a little-endian payload from typed values, mirroring the
+// widget's VFS.Pack* calls.
+func packLE(vals ...any) []byte {
+	var b bytes.Buffer
+	for _, v := range vals {
+		switch x := v.(type) {
+		case uint8:
+			b.WriteByte(x)
+		case uint16:
+			binary.Write(&b, binary.LittleEndian, x)
+		case uint32:
+			binary.Write(&b, binary.LittleEndian, x)
+		case float32:
+			binary.Write(&b, binary.LittleEndian, math.Float32bits(x))
+		default:
+			panic("packLE: unsupported type")
+		}
+	}
+	return b.Bytes()
+}
+
+// The protocol-4 records: an event's cause, game facts, damage windows, unit
+// lives, visibility and profiler readings — what a re-simulation records for
+// the game summary.
+func TestConsumeAnalysisRecords(t *testing.T) {
+	e := newBrepEnc("BRSNAP READY\n")
+	e.record('E', []byte("90 destroyed 12 3 1 40 7 0 5"))
+	e.record('E', []byte("91 destroyed 13 3 1 -1 -1 -1 -1")) // all unknown: no cause
+	e.record('E', []byte("92 given 14 3 0 -1 -1 2 -1"))
+	e.record('G', []byte(`{"k":"end","f":3000,"winners":[0]}`))
+	e.record('G', []byte(`{"f":1}`)) // no kind: dropped
+	e.record('D', packLE(uint32(60), uint16(2),
+		uint8(0), uint8(255), // aTeam
+		uint16(7), uint16(65535), // aDef
+		uint16(5), uint16(65535), // weapon
+		uint8(1), uint8(1), // vTeam
+		uint16(3), uint16(3), // vDef
+		float32(120.5), float32(40), // damage
+		float32(0), float32(0), // paralyze
+		uint16(3), uint16(1), // hits
+		float32(20), float32(0), // overkill
+	))
+	e.record('S', packLE(uint32(90), uint16(1),
+		uint16(12), uint16(3), uint8(1), uint32(30), uint32(90),
+		float32(10), float32(160.5), uint16(2), uint8(0), float32(0.25)))
+	e.record('S', packLE(uint32(3000), uint16(1),
+		uint16(40), uint16(7), uint8(0), uint32(0), uint32(0xFFFFFFFF),
+		float32(160.5), float32(0), uint16(1), uint8(100), float32(0)))
+	e.record('V', packLE(uint32(60), uint8(1), uint8(2), uint8(0), uint8(1), uint16(2),
+		uint16(12), uint16(40), uint32(0b1011), uint32(0b0011)))
+	e.record('P', []byte(`{"f":300,"u":10,"r":[["Sim",1200.5],["Lua",80]]}`))
+	e.record('P', []byte(`{"f":3000,"u":4,"final":true,"r":[["Sim",9000],["Lua",500]]}`))
+	w, st := consumeBrep(t, e, snapshot.Meta{})
+
+	if len(w.events) != 3 {
+		t.Fatalf("events = %+v", w.events)
+	}
+	if c := w.events[0].Cause; c == nil || *c != (snapshot.EventCause{UnitID: 40, DefID: 7, Team: 0, WeaponDef: 5}) {
+		t.Errorf("kill cause = %+v", c)
+	}
+	if w.events[1].Cause != nil {
+		t.Errorf("an all-unknown cause must decode as none, got %+v", w.events[1].Cause)
+	}
+	if ev := w.events[2]; ev.Kind != snapshot.EventGiven || ev.Team != 0 || ev.Cause == nil || ev.Cause.Team != 2 {
+		t.Errorf("given = %+v (cause %+v)", ev, ev.Cause)
+	}
+
+	if len(w.facts) != 1 || w.facts[0].Kind != snapshot.FactEnd || w.facts[0].Frame != 3000 {
+		t.Fatalf("facts = %+v", w.facts)
+	}
+	var end snapshot.FactEndData
+	if err := w.facts[0].Decode(&end); err != nil || len(end.Winners) != 1 || end.Winners[0] != 0 {
+		t.Errorf("end = %+v (%v)", end, err)
+	}
+
+	wantD := snapshot.DamageWindow{Frame: 60, Rows: []snapshot.DamageRow{
+		{AttackerTeam: 0, AttackerDef: 7, WeaponDef: 5, VictimTeam: 1, VictimDef: 3, Damage: 120.5, Hits: 3, Overkill: 20},
+		{AttackerTeam: -1, AttackerDef: -1, WeaponDef: -1, VictimTeam: 1, VictimDef: 3, Damage: 40, Hits: 1},
+	}}
+	if len(w.damage) != 1 || w.damage[0].Frame != wantD.Frame || len(w.damage[0].Rows) != 2 ||
+		w.damage[0].Rows[0] != wantD.Rows[0] || w.damage[0].Rows[1] != wantD.Rows[1] {
+		t.Errorf("damage = %+v, want %+v", w.damage, wantD)
+	}
+
+	wantL := []snapshot.UnitLife{
+		{UnitID: 12, DefID: 3, Team: 1, Born: 30, Died: 90, Dealt: 10, Taken: 160.5, Kills: 2, MinHealthPct: 0, XP: 0.25},
+		{UnitID: 40, DefID: 7, Team: 0, Born: 0, Died: -1, Dealt: 160.5, Kills: 1, MinHealthPct: 100},
+	}
+	if len(w.lives) != 2 || w.lives[0] != wantL[0] || w.lives[1] != wantL[1] {
+		t.Errorf("lives = %+v, want %+v", w.lives, wantL)
+	}
+
+	if len(w.visibility) != 1 {
+		t.Fatalf("visibility = %+v", w.visibility)
+	}
+	v := w.visibility[0]
+	if !v.Full || v.Frame != 60 || len(v.Allies) != 2 || len(v.Units) != 2 || v.Units[1] != 40 {
+		t.Fatalf("visibility = %+v", v)
+	}
+	if los, radar := v.Sees(0, 1); los || !radar { // unit 12, side 1: bits 10
+		t.Errorf("unit 12 side 1: los %v radar %v, want radar only", los, radar)
+	}
+	if los, radar := v.Sees(1, 0); !los || !radar {
+		t.Errorf("unit 40 side 0: los %v radar %v, want both", los, radar)
+	}
+
+	if st.Facts != 1 || st.DamageWindows != 1 || st.Lives != 2 || st.Visibility != 1 {
+		t.Errorf("stats = %+v", st)
+	}
+	if len(st.Profile) != 2 || st.Profile[0].Name != "Sim" || st.Profile[0].Ms != 9000 {
+		t.Errorf("profile = %+v", st.Profile)
+	}
+	if len(st.ProfileSamples) != 2 || st.ProfileSamples[0] != (ProfileSample{Frame: 300, Units: 10, Ms: 1200.5, Name: "Sim"}) {
+		t.Errorf("profile samples = %+v", st.ProfileSamples)
 	}
 }
 
@@ -359,20 +309,21 @@ func TestSanitizeCommText(t *testing.T) {
 // they replace whatever the capture stream recorded — but only when the demo
 // actually yielded some, since an empty result also means "truncated stream".
 func TestReplaceComms(t *testing.T) {
-	stream := strings.Join([]string{
-		"BRSNAP READY",
-		`BRSNAP COMM {"f":60,"k":"chat","p":0,"d":"all","t":"from the widget"}`,
-	}, "\n")
+	stream := func() *bytes.Reader {
+		e := newBrepEnc("BRSNAP READY\n")
+		e.record('C', []byte(`{"f":60,"k":"chat","p":0,"d":"all","t":"from the widget"}`))
+		return bytes.NewReader(e.buf.Bytes())
+	}
 	demo := []snapshot.Comm{
 		{Frame: 61, Kind: snapshot.CommChat, PlayerID: 1, Dest: snapshot.DestAlly, Text: "from the demo"},
 	}
 
 	t.Run("replaces", func(t *testing.T) {
 		w := &recordingWriter{}
-		// Consume never closes the writer; the caller does, and that is when the
-		// replacement comms are written.
+		// ConsumeBrep never closes the writer; the caller does, and that is
+		// when the replacement comms are written.
 		rc := ReplaceComms(w, demo)
-		if err := Consume(strings.NewReader(stream), snapshot.Meta{}, rc); err != nil {
+		if err := ConsumeBrep(stream(), snapshot.Meta{}, rc); err != nil {
 			t.Fatal(err)
 		}
 		if err := rc.Close(); err != nil {
@@ -388,7 +339,7 @@ func TestReplaceComms(t *testing.T) {
 
 	t.Run("empty keeps the stream's", func(t *testing.T) {
 		w := &recordingWriter{}
-		if err := Consume(strings.NewReader(stream), snapshot.Meta{}, ReplaceComms(w, nil)); err != nil {
+		if err := ConsumeBrep(stream(), snapshot.Meta{}, ReplaceComms(w, nil)); err != nil {
 			t.Fatal(err)
 		}
 		if len(w.comms) != 1 || w.comms[0].Text != "from the widget" {

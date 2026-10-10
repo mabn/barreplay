@@ -1,23 +1,33 @@
--- Harness for assets/lua/replay_uploader.lua: stubs the Spring/VFS API, runs
--- the real widget with BOTH emitters enabled over a deterministic simulated
--- game (movers, stationary structures, births, deaths, damage, and an enemy
--- team with scripted LOS/radar visibility windows exercising enemy recording,
--- visibility-driven dropping, and death tombstones), and leaves
--- <gameId>.brsnap + <gameId>.brepstream in the current directory.
+-- Harness for assets/lua/replay_uploader.lua: stubs the Spring/VFS API and
+-- runs the REAL widget over a deterministic simulated game (movers, stationary
+-- structures, births, deaths, damage, and an enemy team with scripted
+-- LOS/radar visibility windows exercising enemy recording, visibility-driven
+-- dropping, and death tombstones), leaving a .brepstream in the current
+-- directory. Two modes, one fixture each:
 --
--- The pair is committed as internal/capture/testdata fixtures (text gzipped);
--- TestBrepstreamMatchesTextFixture cross-checks that the Go .brepstream
--- decoder reconstructs the same game the battle-tested text parser sees, which
--- pins the Lua encoder <-> Go decoder lockstep. Regenerate after any widget
--- codec change (requires lua5.4 for string.pack):
+--   (default)  the live uploader, as a player on ally team 0 records it
+--              -> harness.brepstream
+--   resim      the re-simulation sampler: the Go tool's substitutions applied,
+--              a full-view spectator of a replay, with scripted damage,
+--              kills, a unit changing hands, a team dying, a player leaving,
+--              team statistics, per-side LOS and profiler readings
+--              -> harness_resim.brepstream
+--
+-- The streams are committed as internal/capture/testdata fixtures, and the
+-- tests there decode them against golden JSON dumps (TestHarnessGolden),
+-- which pins the Lua encoder <-> Go decoder lockstep. Regenerate after any
+-- widget codec change (requires Lua 5.4 for string.pack):
 --
 --	cd internal/capture/testdata
 --	lua5.4 ../../../tools/brep-harness/harness.lua ../../../assets/lua/replay_uploader.lua
---	gzip -9 -f harness.brsnap
+--	lua5.4 ../../../tools/brep-harness/harness.lua ../../../assets/lua/replay_uploader.lua resim
+--	cd .. && go test -run TestHarnessGolden -update .
 --
--- The harness renames the outputs to harness.* for stable fixture names.
+-- and read the golden diff: it is the change in what the widget records.
 
 local widgetPath = arg[1] or "assets/lua/replay_uploader.lua"
+local resim = (arg[2] == "resim")
+local outName = resim and "harness_resim.brepstream" or "harness.brepstream"
 
 -- Deterministic PRNG (LCG) so regenerated fixtures only change when the codec
 -- does. Do not use math.random: it differs across Lua versions.
@@ -145,6 +155,21 @@ end
 -- visState returns "los"/"radar"/nil for the CURRENT sample; friendlies (no
 -- schedule) are always in LOS.
 local function visState(u)
+	if resim then
+		-- Full view: everything alive is listed, a killed unit only while
+		-- its death sequence runs ("dying"), nothing as a memory dot.
+		if u.dead then
+			local s = math.floor(curFrame / sampleEvery)
+			for i = 1, #(u.vis or {}) do
+				local w = u.vis[i]
+				if s >= w[1] and s <= w[2] and w[3] == "dying" then
+					return "dying"
+				end
+			end
+			return nil
+		end
+		return "los"
+	end
 	if not u.vis then
 		return "los"
 	end
@@ -352,7 +377,7 @@ Spring = {
 	GetTeamInfo = function(t) return t, 0, false, false, (t == 1) and "cortex" or "armada", allyOf[t] end,
 	GetTeamColor = function(t) return 0.25 * (t + 1), 0.5, 0.75 end,
 	GetTeamResources = function(t, kind)
-		if allyOf[t] ~= 0 then
+		if allyOf[t] ~= 0 and not resim then
 			return nil -- LOS: enemy economy unreadable
 		end
 		if kind == "metal" then
@@ -362,38 +387,184 @@ Spring = {
 	end,
 	GetPlayerList = function() return { 0, 1 } end,
 	GetPlayerInfo = function(p) return "Player " .. p, true, false, p end,
-	GetSpectatingState = function() return false, false end,
+	GetSpectatingState = function() return resim, resim end,
 	GetMyAllyTeamID = function() return 0 end,
 	GetMyPlayerID = function() return 0 end,
-	IsReplay = function() return false end,
+	IsReplay = function() return resim end,
+	SendCommands = function(cmd) sentCommands[#sentCommands + 1] = cmd end,
+	GetAllyTeamList = function() return { 0, 1 } end,
+	GetGaiaTeamID = function() return 99 end, -- not in the team list: no gaia side
+	-- Raw LOS bits (1 = in LOS, 2 = in radar, 4 = previously in LOS, 8 =
+	-- continuous radar). Ally 0 sees team 1 through the scripted enemyVis
+	-- windows; ally 1 sees ally 0 on a fixed deterministic rotation; a side
+	-- always sees its own units fully.
+	GetUnitLosState = function(id, allyTeam, raw)
+		local u = units[id]
+		if allyOf[u.team] == allyTeam then
+			return 15
+		end
+		if allyTeam == 0 then
+			if not u.vis then
+				return 0
+			end
+			local s = math.floor(curFrame / sampleEvery)
+			for i = 1, #u.vis do
+				local w = u.vis[i]
+				if s >= w[1] and s <= w[2] then
+					return (w[3] == "los" or w[3] == "dying") and 3 or (w[3] == "radar" and 2 or 4)
+				end
+			end
+			return 0
+		end
+		return (id + math.floor(curFrame / 300)) % 4
+	end,
+	GetUnitExperience = function(id) return (id % 7) * 0.125 end,
+	-- The engine's team statistics: count, then the rows in a range.
+	GetTeamStatsHistory = function(t, from, to)
+		if from == nil then
+			return 3
+		end
+		local rows = {}
+		for i = from, to - 1 do
+			rows[#rows + 1] = { frame = i * 450, metalProduced = 100 * i + t, energyProduced = 1000 * i,
+				damageDealt = 50 * i * (t + 1), unitsKilled = i + t, unitsDied = i }
+		end
+		return rows
+	end,
+	GetProfilerRecordNames = function() return { "Sim", "Sim::Path", "Lua" } end,
+	GetProfilerTimeRecord = function(name, frameData)
+		local base = ({ Sim = 4000, ["Sim::Path"] = 600, Lua = 250 })[name]
+		return base + curFrame / 10
+	end,
 }
 Game = { gameSpeed = 30, mapName = "Harness Map 1.0", gameVersion = "Beyond All Reason test-harness" }
 Engine = { version = "2026-harness" }
 UnitDefs = {}
 for d = 1, 38 do
 	UnitDefs[d] = { name = "def" .. d, humanName = "Def " .. d, health = 1000 + d,
-		xsize = 2, zsize = 2, canMove = true, isBuilding = false }
+		xsize = 2, zsize = 2, canMove = true, isBuilding = false,
+		maxWeaponRange = (d % 3 == 0) and 0 or 300 + d,
+		customParams = { techlevel = tostring(1 + d % 3), unitgroup = (d % 2 == 0) and "weapon" or "builder",
+			iscommander = (d == 1) and "1" or nil } }
 end
+WeaponDefs = {}
+for w = 0, 4 do
+	WeaponDefs[w] = { name = "weapon" .. w, description = (w == 0) and "" or "Weapon " .. w,
+		type = "Cannon", range = 300 + 50 * w, reload = 1.5, damages = { [0] = 100 + w },
+		paralyzer = (w == 4) }
+end
+sentCommands = {}
 widgetHandler = { RemoveWidget = function() error("widget removed itself") end }
-widget = {}
+-- The handler API the resim sampler uses to switch BAR's own widget suite off.
+local disabledWidgets = {}
+local function newWidget()
+	return {
+		widgetHandler = {
+			widgets = { 1, 2, 3 },
+			knownWidgets = {
+				["BAR Replay Snapshotter"] = { active = true },
+				["Some BAR widget"] = { active = true },
+				["An inactive widget"] = { active = false },
+			},
+			DisableWidget = function(self, name) disabledWidgets[#disabledWidgets + 1] = name end,
+		},
+	}
+end
+widget = newWidget()
 
 -- ---------------------------------------------------------------------------
--- Load the widget with the text emitter force-enabled (writeText is a debug
--- constant, false by default; the fixtures need both formats from one run).
+-- Load the widget. In resim mode, apply the Go tool's substitutions exactly as
+-- internal/engine WriteWidget does (every switch on).
 
-local src = assert(io.open(widgetPath, "r")):read("a")
-local patched, nsub = src:gsub("local writeText = false", "local writeText = true", 1)
-assert(nsub == 1, "could not enable writeText in " .. widgetPath)
+local patched = assert(io.open(widgetPath, "r")):read("a")
+if resim then
+	local subs = {
+		__RESIM__ = "1", __OUTPUT_PATH__ = outName, __SAMPLE_EVERY__ = tostring(sampleEvery),
+		__PROFILE__ = "1", __DISABLE_WIDGETS__ = "1", __DAMAGE__ = "1", __VISIBILITY__ = "1",
+	}
+	for token, value in pairs(subs) do
+		local n
+		patched, n = patched:gsub(token, value)
+		assert(n > 0, "token " .. token .. " not found in " .. widgetPath)
+	end
+end
 assert(load(patched, "@" .. widgetPath))()
 
 widget:Initialize()
+
+-- Resim-only scripted combat. firstOf returns the first live unit of an ally
+-- team in id order — the scripted attacker. Nothing here consumes the LCG, so
+-- the live fixture's simulated game is the same with or without it.
+local function firstOf(ally, except)
+	for _, id in ipairs(order) do
+		local u = units[id]
+		if u and not u.dead and allyOf[u.team] == ally and id ~= except then
+			return u
+		end
+	end
+	return nil
+end
+
+-- killer returns the destroyed-callin attacker arguments for a death: the
+-- first unit of the other side and a weapon (live mode: the engine hands a
+-- playing client nothing).
+local function killer(victim)
+	if not resim then
+		return nil
+	end
+	local a = firstOf(allyOf[victim.team] == 0 and 1 or 0, victim.id)
+	if a == nil then
+		return nil
+	end
+	return a.id, a.def, a.team, victim.id % 4
+end
+
+-- kill delivers a killing blow (a hit past the remaining health, so the
+-- damage window records overkill) and the destroyed callin with its cause.
+local function kill(id)
+	local u = units[id]
+	local aID, aDef, aTeam, weapon = killer(u)
+	if resim and widget.UnitDamaged and aID then
+		local before = u.hp
+		u.hp = -25
+		widget:UnitDamaged(id, u.def, u.team, before + 25, false, weapon, 1, aID, aDef, aTeam)
+	end
+	widget:UnitDestroyed(id, u.def, u.team, aID, aDef, aTeam, weapon)
+end
+
+-- combat lands this sample's scripted hits: every unit whose id and sample
+-- line up is hit by the first unit of the other side, with a paralyzer
+-- weapon (4) now and then, and every so often by nothing at all (a crash,
+-- a self-destruct: no attacker).
+local function combat(s)
+	if not (resim and widget.UnitDamaged) then
+		return
+	end
+	for _, id in ipairs(order) do
+		local u = units[id]
+		if u and not u.dead and (id + s) % 13 == 0 then
+			local a = firstOf(allyOf[u.team] == 0 and 1 or 0, id)
+			local weapon = (id + s) % 5
+			local dmg = 10 + (id * 7 + s) % 50
+			if s % 17 == 0 or a == nil then
+				widget:UnitDamaged(id, u.def, u.team, dmg, false, nil, nil, nil, nil, nil)
+			else
+				widget:UnitDamaged(id, u.def, u.team, dmg, weapon == 4, weapon, 1, a.id, a.def, a.team)
+			end
+		end
+	end
+end
 
 -- Mid-game the player disables the widget for a few samples, then re-enables
 -- it: the handler shuts the instance down (saving its config) and later loads
 -- a FRESH instance, restoring the config. The GameID callin does not re-fire,
 -- so the new instance must recover the id from the config and APPEND a new
 -- stream segment. Both fixture files therefore contain two segments.
+-- (Live mode only: a re-simulation is one uninterrupted process.)
 local DISABLE_AT, ENABLE_AT = 70, 74
+if resim then
+	DISABLE_AT, ENABLE_AT = -1, -1
+end
 local widgetActive = true
 
 for s = 0, SAMPLES - 1 do
@@ -411,7 +582,7 @@ for s = 0, SAMPLES - 1 do
 		local saved = widget:GetConfigData()
 		widget:Shutdown()
 		widgetActive = false
-		widget = {}
+		widget = newWidget()
 		assert(load(patched, "@" .. widgetPath))()
 		widget:SetConfigData(saved)
 	elseif s == ENABLE_AT then
@@ -427,12 +598,12 @@ for s = 0, SAMPLES - 1 do
 	-- removing the unit — its "dot" window keeps it in GetAllUnits, exactly
 	-- the engine behavior that resurrected a buried ghost in a real capture.
 	if s == 40 then
+		kill(159)
 		units[159].dead = true
-		widget:UnitDestroyed(159, units[159].def, units[159].team)
 	end
 	if s == 20 then
+		kill(162)
 		units[162].dead = true
-		widget:UnitDestroyed(162, units[162].def, units[162].team)
 		units[165].dead = true -- dies out of view: no callin, only a memory dot
 	end
 	-- Killed in LOS: the callin fires AND the killed unit is still returned by
@@ -440,8 +611,8 @@ for s = 0, SAMPLES - 1 do
 	-- that read to mean "alive, so a new unit reused the id" is what left 57
 	-- dead units standing in a real capture.
 	if s == 30 then
+		kill(168)
 		units[168].dead = true
-		widget:UnitDestroyed(168, units[168].def, units[168].team)
 	end
 	-- id 177 takes damage on its LAST visible sample: the changed hp is
 	-- recorded at s=30 and the unit vanishes from the stream at s=31.
@@ -478,7 +649,7 @@ for s = 0, SAMPLES - 1 do
 		local id = (s == 44) and 153 or 123
 		local u = units[id]
 		if widgetActive then
-			widget:UnitDestroyed(id, u.def, u.team)
+			kill(id)
 		end
 		units[id] = nil
 		for i = 1, #order do
@@ -500,7 +671,7 @@ for s = 0, SAMPLES - 1 do
 		for _, id in ipairs(order) do
 			if allyOf[units[id].team] == 0 then
 				if widgetActive then
-					widget:UnitDestroyed(id, units[id].def, units[id].team)
+					kill(id)
 				end
 				units[id] = nil
 				for i = 1, #order do
@@ -524,17 +695,63 @@ for s = 0, SAMPLES - 1 do
 			end
 		end
 	end
+	-- Re-sim only: a unit whose health runs out but which the engine keeps
+	-- listing for a while before it is destroyed (a crashing aircraft) must
+	-- be RECORDED, at 0 hp, every sample until its destroyed event — the
+	-- viewer draws it grey. Unit 144 crashes at s=60 and is destroyed at 63.
+	if resim and s == 60 then
+		units[144].hp = -5
+	end
+	if resim and s == 63 then
+		kill(144)
+		units[144] = nil
+		for i = 1, #order do
+			if order[i] == 144 then
+				table.remove(order, i)
+				break
+			end
+		end
+	end
+	if widgetActive then
+		combat(s)
+		-- A unit changing hands: the first team-2 unit goes to team 0 (the
+		-- engine fires UnitTaken for the old owner as well; the widget
+		-- records one event per transfer).
+		if s == 50 then
+			for _, id in ipairs(order) do
+				local u = units[id]
+				if u.team == 2 then
+					u.team = 0
+					if widget.UnitTaken then widget:UnitTaken(id, u.def, 2, 0) end
+					widget:UnitGiven(id, u.def, 0, 2)
+					break
+				end
+			end
+		end
+		if s == 110 then
+			widget:PlayerRemoved(1, 1)
+		end
+		if s == 120 then
+			widget:TeamDied(1)
+		end
+	end
 	assignBuilders()
 	if widgetActive then
 		widget:GameFrame(curFrame)
 	end
 end
-widget:GameOver()
+curFrame = SAMPLES * sampleEvery - 5
+widget:GameOver({ 0 })
 widget:Shutdown()
 
-local id = "feed5eed00000000000000000000beef"
-os.remove("harness.brsnap")
-os.remove("harness.brepstream")
-assert(os.rename(id .. ".brsnap", "harness.brsnap"))
-assert(os.rename(id .. ".brepstream", "harness.brepstream"))
-print("HARNESS: wrote harness.brsnap + harness.brepstream (" .. SAMPLES .. " samples)")
+if resim then
+	assert(#disabledWidgets == 1 and disabledWidgets[1] == "Some BAR widget",
+		"resim must disable exactly the other active widget, got " .. table.concat(disabledWidgets, ","))
+	assert(sentCommands[#sentCommands] == "quitforce", "resim must quit at game over")
+else
+	assert(#disabledWidgets == 0 and #sentCommands == 0, "the uploader must not touch the game")
+	local id = "feed5eed00000000000000000000beef"
+	os.remove(outName)
+	assert(os.rename(id .. ".brepstream", outName))
+end
+print("HARNESS: wrote " .. outName .. " (" .. SAMPLES .. " samples)")

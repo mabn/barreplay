@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/mabn/barreplay/internal/barapi"
+	"github.com/mabn/barreplay/internal/capture/breptest"
 	"github.com/mabn/barreplay/internal/viz"
 	"github.com/mabn/barreplay/snapshot"
 )
@@ -20,15 +21,14 @@ const fixtureGameID = "836d486a5480a9e830be54db7d2c7be9"
 
 // testStream is a minimal but well-formed widget stream: two frames 30 sim
 // frames apart (so SampleEvery should be inferred as 30) and one event.
-const testStream = `BRSNAP DEF {"id":1,"name":"armcom","humanName":"Armada Commander","maxHealth":3000}
+var testStream = string(breptest.New(`BRSNAP DEF {"id":1,"name":"armcom","humanName":"Armada Commander","maxHealth":3000}
 BRSNAP T 0 0 armada #ff0000
 BRSNAP READY
-BRSNAP F 30 1.000 1
-BRSNAP U 100 1 0 512.0 80.0 1024.0 3000.0 3000.0
-BRSNAP F 60 2.000 1
-BRSNAP U 100 1 0 512.0 80.0 1030.0 2900.0 3000.0
-BRSNAP EV 58 destroyed 101 1 0
-`
+`).
+	Keyframe(30, breptest.Unit{ID: 100, Def: 1, X: 512, Z: 1024, HP: 3000, MaxHP: 3000, Build: 255}).
+	Keyframe(60, breptest.Unit{ID: 100, Def: 1, X: 512, Z: 1030, HP: 2900, MaxHP: 3000, Build: 255}).
+	Event(58, "destroyed", 101, 1, 0).
+	Bytes())
 
 // mockBARClient serves the real .sdfz fixture behind a mock replay API, so the
 // demo-metadata path runs end-to-end without the network.
@@ -50,11 +50,11 @@ func mockBARClient(t *testing.T) *barapi.Client {
 	return barapi.New(barapi.WithBaseURLs(srv.URL, srv.URL+"/demos"))
 }
 
-// A .brsnap named after its gameId packs into a FULL .brp: map, versions and
+// A .brepstream named after its gameId packs into a FULL .brp: map, versions and
 // players seeded from the demo, sampling interval inferred from the stream.
-func TestPackBRSNAPWithDemoMeta(t *testing.T) {
+func TestPackStreamWithDemoMeta(t *testing.T) {
 	dir := t.TempDir()
-	in := filepath.Join(dir, fixtureGameID+".brsnap")
+	in := filepath.Join(dir, fixtureGameID+".brepstream")
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -97,9 +97,9 @@ func TestPackBRSNAPWithDemoMeta(t *testing.T) {
 }
 
 // -id overrides the file name as the gameId source.
-func TestPackBRSNAPWithIDFlag(t *testing.T) {
+func TestPackStreamWithIDFlag(t *testing.T) {
 	dir := t.TempDir()
-	in := filepath.Join(dir, "renamed-capture.brsnap")
+	in := filepath.Join(dir, "renamed-capture.brepstream")
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -121,9 +121,9 @@ func TestPackBRSNAPWithIDFlag(t *testing.T) {
 
 // A file name that is not a gameId and no -id is a hard error (not a silent
 // map-less .brp), pointing at -id / -no-demo.
-func TestPackBRSNAPBadNameErrors(t *testing.T) {
+func TestPackStreamBadNameErrors(t *testing.T) {
 	dir := t.TempDir()
-	in := filepath.Join(dir, "not-a-game-id.brsnap")
+	in := filepath.Join(dir, "not-a-game-id.brepstream")
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -134,9 +134,9 @@ func TestPackBRSNAPBadNameErrors(t *testing.T) {
 }
 
 // -no-demo keeps the old offline behaviour: a bare .brp, no network.
-func TestPackBRSNAPNoDemo(t *testing.T) {
+func TestPackStreamNoDemo(t *testing.T) {
 	dir := t.TempDir()
-	in := filepath.Join(dir, "not-a-game-id.brsnap")
+	in := filepath.Join(dir, "not-a-game-id.brepstream")
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -155,6 +155,37 @@ func TestPackBRSNAPNoDemo(t *testing.T) {
 	}
 	if meta.SampleEvery != 30 {
 		t.Errorf("SampleEvery = %d, want 30 (inferred)", meta.SampleEvery)
+	}
+}
+
+// A re-simulation's analysis records reach the .brp: pack must carry them
+// through, not just frames, events and comms.
+func TestPackCarriesAnalysis(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "resim-capture.brepstream")
+	stream := breptest.New("BRSNAP READY\n").
+		Keyframe(30, breptest.Unit{ID: 100, Def: 1, X: 512, Z: 1024, HP: 3000, MaxHP: 3000, Build: 255}).
+		Fact(`{"k":"end","f":30,"winners":[0]}`).
+		Bytes()
+	if err := os.WriteFile(in, stream, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	brpPath, _, err := Pack(context.Background(), nil, in, dir, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(brpPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	bf, err := snapshot.ParseBRP(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, err := bf.Facts()
+	if err != nil || len(facts) != 1 || facts[0].Kind != snapshot.FactEnd {
+		t.Errorf("facts = %+v, %v; want the end fact", facts, err)
 	}
 }
 
@@ -223,7 +254,7 @@ func TestContentRev(t *testing.T) {
 // revision via rid; without a revision the rid field is omitted entirely.
 func TestPutCatalogEntryRid(t *testing.T) {
 	dir := t.TempDir()
-	in := filepath.Join(dir, "somegameid.brsnap")
+	in := filepath.Join(dir, "somegameid.brepstream")
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}

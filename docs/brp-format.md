@@ -1,4 +1,4 @@
-# The BRP capture format, version 5
+# The BRP capture format, version 6
 
 `.brp` is barreplay's on-disk (and effectively over-the-wire) format for a
 recorded replay capture: periodic snapshots of every unit's state plus unit
@@ -43,6 +43,14 @@ evaluation, including the ideas that were measured and rejected):
    moved from the X stream into the core columns and a tenth column `target`
    (the unit id this unit is constructing/assisting, 0 = none) was added. X
    now carries only team economy.
+5. **What happened, not just where** (v6). The re-simulation records why
+   things happened: the killer of each unit (four cause columns on `E`), the
+   game's facts (who won, who was eliminated, the weapon table, the engine's
+   team statistics — `G`), damage per (attacker, weapon, victim) per second
+   (`D`), each unit's lifetime totals (`S`) and which side could see each
+   unit (`V`). No frame column changed: v6 readers decode v5 files as they
+   always did, those files simply have none of it. None of the new sections
+   is sent to the browser; they feed the game summary.
 
 ---
 
@@ -92,26 +100,28 @@ evaluation, including the ideas that were measured and rejected):
 ```
 offset  size  value
 0       4     magic "BRP1" (ASCII)
-4       1     format version, u8. MUST be 5.
+4       1     format version, u8. 6 (written) or 5 (still read).
 5       …     zero or more sections, back to back, until EOF:
               tag u8 | payloadLength u32le | payload (payloadLength bytes)
 ```
 
 - The magic is `BRP1` for **all** versions; the version byte is what changes.
-  Version 5 is the only defined version — v1 (unchunked), v2 (every live unit
+  Versions 6 (what the writer emits) and 5 (identical frames, no event
+  causes or analysis sections) are readable — v1 (unchunked), v2 (every live unit
   re-encoded in every frame; y/dvy columns) and v3 (keyframes inside the
   chunks) existed only pre-release; v4 (no build/target core columns, build in
   X) was released and is still decoded by the JS viewer (so published bundles
   keep playing), but the Go reader rejects it. Readers MUST reject any other
   version byte. Older files cannot be converted in place; regenerate them from
-  their source `.brsnap`/`.brepstream` with `pack`.
+  their source `.brepstream` with `pack`.
 - Readers MUST skip sections with unknown tags (that is the format's
   forward-compatibility mechanism: new sections can be added without a version
   bump).
 - `M` is always the FIRST section (a reader holding only the head of the file
   finds everything else through it, §4). The writer then emits `E C K F X` —
   the sections a viewer needs before it can draw, then the bulk — and records
-  that order in `M`'s section layout. Files written before the layout existed
+  that order in `M`'s section layout, followed by v6's optional analysis
+  sections `G D S V`, which no viewer reads. Files written before the layout existed
   have `M K F X E C`. Readers MUST NOT rely on the order of anything after `M`:
   scan the headers, or follow the layout.
 
@@ -125,6 +135,10 @@ offset  size  value
 | `X` (0x58) | extra | concatenated chunks, same frame boundaries as `F` (keyframe gzip + delta gzip per chunk) | extras: team economy |
 | `E` (0x45) | events | one gzip stream (§9) | unit lifecycle events |
 | `C` (0x43) | comms | one gzip stream (§9.1) | player chat + map drawings; **omitted entirely** when the capture recorded none |
+| `G` (0x47) | facts | one gzip stream (§9.2), v6 | game facts; omitted when none |
+| `D` (0x44) | damage | one gzip stream (§9.2), v6 | damage windows; omitted when none |
+| `S` (0x53) | lives | one gzip stream (§9.2), v6 | per-unit lifetime totals; omitted when none |
+| `V` (0x56) | visibility | one gzip stream (§9.2), v6 | per-side LOS/radar per unit; omitted when none |
 | `J` (0x4A) | head | one gzip stream of JSON | **not used in files** — the head of the older `.brw` wire container (§10) |
 
 ## 4. `M` — the meta section
@@ -515,10 +529,19 @@ count × uvarint                  // kind:   index into the table
 count × svarint                  // unitId: delta vs previous event's unitId (from 0)
 count × svarint                  // defId:  absolute
 count × svarint                  // team:   absolute
+-- v6 only (detected by bytes remaining after the team column):
+count × svarint                  // cause unit:   the killer's unit id, -1 = unknown
+count × svarint                  // cause def:    the killer's unit def
+count × svarint                  // cause team:   the killer's team; for "given", the PREVIOUS owner
+count × svarint                  // cause weapon: the weapon def that dealt the blow
 ```
 
-Known kinds are `created`, `finished`, `destroyed`; the string table means new
-kinds can appear without a format change. Events are stored in capture order
+Known kinds are `created`, `finished`, `destroyed` and (v6) `given` — a unit
+changing owner, `team` the new one; the string table means new kinds can
+appear without a format change. An event whose four cause values are all -1
+has no cause. A v5 section simply ends after the team column, so a v6 reader
+needs no flag to tell them apart; the writer emits the cause columns whenever
+there is at least one event. Events are stored in capture order
 (non-decreasing frame), but the frame column is zigzag-coded so a
 non-monotonic stream still round-trips.
 
@@ -581,6 +604,62 @@ end) lies within **100 elmos** of it — `snapshot.CommEraseRadius`, the engine'
 own hardcoded `CInMapDrawModel::EraseNear` radius. Consumers resolve it
 themselves, which keeps the record faithful to what happened rather than to one
 reader's idea of what should still be visible.
+
+### 9.2 The analysis sections — `G`, `D`, `S`, `V` (v6)
+
+Written only by a re-simulation (see `docs/brepstream-format.md`, protocol 4,
+for what each record means and how the widget collects it), each one gzip
+stream and each omitted when empty. Go accessors: `BRPFile.Facts`, `Damage`,
+`Lives`, `Visibility` (`snapshot/analysis.go`).
+
+**`G` — facts.** A JSON array of the widget's fact objects, verbatim (each
+has `"k"`, its kind, and usually `"f"`, its frame). Kept verbatim so a new
+kind needs no codec change.
+
+**`D` — damage windows.** Ids are stored as `id + 1` (0 = unknown); amounts
+in tenths of a hit point.
+
+```
+uvarint  windows
+per window:
+  svarint  frame (delta vs previous window, from 0)
+  uvarint  rows
+  rows × uvarint  attacker team + 1
+  rows × uvarint  attacker def + 1
+  rows × uvarint  weapon def + 1
+  rows × uvarint  victim team + 1
+  rows × uvarint  victim def + 1
+  rows × uvarint  damage × 10
+  rows × uvarint  paralyze damage × 10
+  rows × uvarint  hits
+  rows × uvarint  overkill × 10
+```
+
+**`S` — unit lives.** One row per unit ever recorded (they are few):
+
+```
+uvarint  count
+per life:
+  svarint  unit id (delta vs previous)
+  uvarint  def + 1     uvarint team + 1
+  svarint  born frame (delta vs previous)
+  uvarint  0 = alive at the end, else (died - born) + 1
+  uvarint  dealt × 10  uvarint taken × 10  uvarint kills
+  uvarint  lowest health, % of max         uvarint xp × 1000
+```
+
+**`V` — visibility.** Change records: a unit's mask holds until a later record
+restates it, and a record with `full` set restates every unit.
+
+```
+uvarint  records
+per record:
+  svarint  frame (delta)
+  uvarint  flags (bit 0 = full restatement)
+  uvarint  sides; sides × uvarint ally team + 1
+  uvarint  units; units × svarint unit id (delta vs previous in the record)
+  units × uvarint  mask — bit 2i = in side i's LOS, bit 2i+1 = in its radar
+```
 
 ## 10. How a replay is served
 
@@ -658,7 +737,7 @@ Explicitly **not** guaranteed:
 ## 12. Reading a file, end to end
 
 ```
-1. Read 4-byte magic "BRP1"; read version byte; reject if != 5.
+1. Read 4-byte magic "BRP1"; read version byte; reject unless 5 or 6.
 2. Scan sections (tag, u32le length, payload) until EOF, remembering each
    payload's absolute offset. Skip unknown tags.
 3. gunzip M; parse JSON → meta, bounds, counts, chunk index.
@@ -676,6 +755,7 @@ Explicitly **not** guaranteed:
       and decode per §7 — one record per sample, the frame number taken
       from the core decode.
 6. gunzip E and decode per §9 when events are needed.
+7. (v6) gunzip G/D/S/V when present and decode per §9.2.
 ```
 
 Over HTTP, without the whole file: read the head of it, take `M` (first
