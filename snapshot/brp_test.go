@@ -756,8 +756,10 @@ func TestIndexBRPAddsLayout(t *testing.T) {
 	for _, tag := range []byte{SecKeyframes, SecFrames, SecExtra, SecEvents} {
 		old = append(old, byTag[tag])
 	}
+	// ...and the old version byte: every file written before the layout is
+	// a v5 file, and indexing must neither refuse nor upgrade it.
 	var legacy bytes.Buffer
-	if err := WriteContainer(&legacy, BRPMagic, BRPVersion, old); err != nil {
+	if err := WriteContainer(&legacy, BRPMagic, 5, old); err != nil {
 		t.Fatal(err)
 	}
 
@@ -775,6 +777,9 @@ func TestIndexBRPAddsLayout(t *testing.T) {
 	}
 	if at[SecEvents] != [2]int64{bf.SectionOffsets[SecEvents], int64(len(bf.Sections[SecEvents]))} {
 		t.Errorf("events: layout %v, file [%d %d]", at[SecEvents], bf.SectionOffsets[SecEvents], len(bf.Sections[SecEvents]))
+	}
+	if bf.Version != 5 {
+		t.Errorf("indexed file is v%d, want the v5 it was", bf.Version)
 	}
 	if bf.FrameCount != 3 || bf.Meta.GameID != meta.GameID {
 		t.Errorf("meta lost: frames=%d game=%q", bf.FrameCount, bf.Meta.GameID)

@@ -6,12 +6,18 @@
 // Layout:
 //
 //	line "BREPSTREAM 1"
-//	text preamble, same grammar as .brsnap (BRSNAP GID/GAME/DEF/T/P lines),
-//	terminated by the "BRSNAP READY" line
+//	text preamble (BRSNAP GID/GAME/DEF/T/P lines), terminated by the
+//	"BRSNAP READY" line
 //	then length-framed binary records: <tag u8> <len u32le> <payload>
 //	  'F'  frame (see decodeFrameRecord)
-//	  'E'  unit lifecycle event, text payload "<frame> <kind> <id> <def> <team>"
+//	  'E'  unit lifecycle event, text payload
+//	       "<frame> <kind> <id> <def> <team> [<aID> <aDef> <aTeam> <weapon>]"
 //	  'C'  chat message or map drawing, JSON payload (see parseComm)
+//	  'G'  game fact, JSON payload (snapshot.Fact)
+//	  'D'  damage window, packed (decodeDamageRecord)
+//	  'S'  per-unit lifetime totals, packed (decodeLivesRecord)
+//	  'V'  per-side visibility changes, packed (decodeVisibilityRecord)
+//	  'P'  engine profiler readings, JSON (into Stats, not the writer)
 //	  'X'  end of stream, text payload = reason
 //	  anything else: skipped (forward compatibility)
 //
@@ -32,6 +38,7 @@ package capture
 import (
 	"bufio"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -202,7 +209,7 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 			if err := w.WriteFrame(fr); err != nil {
 				return err
 			}
-		case 'E': // "<frame> <kind> <id> <def> <team>"
+		case 'E': // "<frame> <kind> <id> <def> <team> [<aID> <aDef> <aTeam> <weapon>]"
 			f := strings.Fields(string(payload))
 			if len(f) >= 5 {
 				ev := snapshot.Event{
@@ -211,6 +218,12 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 					UnitID: atoi32(f[2]),
 					DefID:  atoi32(f[3]),
 					Team:   atoi32(f[4]),
+				}
+				if len(f) >= 9 {
+					c := snapshot.EventCause{UnitID: atoi32(f[5]), DefID: atoi32(f[6]), Team: atoi32(f[7]), WeaponDef: atoi32(f[8])}
+					if c.UnitID >= 0 || c.DefID >= 0 || c.Team >= 0 || c.WeaponDef >= 0 {
+						ev.Cause = &c
+					}
 				}
 				graves.note(ev.Kind, ev.UnitID)
 				if err := w.WriteEvent(ev); err != nil {
@@ -224,6 +237,74 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 					return err
 				}
 			}
+		case 'G': // game fact, JSON
+			fact, err := snapshot.ParseFact(payload)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "capture: bad G record %q: %v\n", payload, err)
+				continue
+			}
+			stats.Facts++
+			if err := w.WriteFact(fact); err != nil {
+				return err
+			}
+		case 'D':
+			dw, err := decodeDamageRecord(payload)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "capture: bad damage record: %v\n", err)
+				continue
+			}
+			stats.DamageWindows++
+			if err := w.WriteDamage(dw); err != nil {
+				return err
+			}
+		case 'S':
+			lives, err := decodeLivesRecord(payload)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "capture: bad lives record: %v\n", err)
+				continue
+			}
+			for _, l := range lives {
+				stats.Lives++
+				if err := w.WriteLife(l); err != nil {
+					return err
+				}
+			}
+		case 'H':
+			hits, err := decodeHitsRecord(payload)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "capture: bad hits record: %v\n", err)
+				continue
+			}
+			for _, h := range hits {
+				stats.Hits++
+				if err := w.WriteHit(h); err != nil {
+					return err
+				}
+			}
+		case 'U':
+			ends, err := decodeUnitEndsRecord(payload)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "capture: bad unit-ends record: %v\n", err)
+				continue
+			}
+			for _, u := range ends {
+				stats.UnitEnds++
+				if err := w.WriteUnitEnd(u); err != nil {
+					return err
+				}
+			}
+		case 'V':
+			v, err := decodeVisibilityRecord(payload)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "capture: bad visibility record: %v\n", err)
+				continue
+			}
+			stats.Visibility++
+			if err := w.WriteVisibility(v); err != nil {
+				return err
+			}
+		case 'P':
+			applyProfileRecord(payload, stats)
 		case 'X':
 			// End-of-stream marker; the reason is informational only.
 		default:
@@ -455,4 +536,259 @@ func decodeFrameRecord(payload []byte, state map[int32]*brepUnit, graves graveya
 		})
 	}
 	return fr, nil
+}
+
+// unknown8 / unknown16 map the stream's "unknown" sentinels to -1.
+func unknown8(v int32) int32 {
+	if v == 0xFF {
+		return -1
+	}
+	return v
+}
+
+func unknown16(v int32) int32 {
+	if v == 0xFFFF {
+		return -1
+	}
+	return v
+}
+
+// damageWeapon maps a D record's weapon column: 0xFFFF is unknown, the seven
+// values below it are the engine's own damage sources (65535-k for Recoil's
+// DamageType k), everything else a weapon def.
+func damageWeapon(v int32) int32 {
+	if v == 0xFFFF {
+		return -1
+	}
+	if k := 0xFFFF - v; k >= 1 && k <= snapshot.DamageEngineCauses {
+		return snapshot.DamageEngineCause(k)
+	}
+	return v
+}
+
+// decodeDamageRecord decodes one 'D' payload: frame u32, n u16, then columns
+// aTeam u8, aDef u16, weapon u16, vTeam u8, vDef u16, damage f32,
+// paralyze f32, hits u16. Streams from before damage counted only the
+// health removed carry one more column, overkill f32, which is subtracted.
+func decodeDamageRecord(payload []byte) (snapshot.DamageWindow, error) {
+	c := &cursor{b: payload}
+	dw := snapshot.DamageWindow{Frame: int32(c.u32())}
+	n := int(c.u16())
+	if c.err == nil && n*17 > len(payload) {
+		return dw, fmt.Errorf("damage record declares %d rows in %d bytes", n, len(payload))
+	}
+	dw.Rows = make([]snapshot.DamageRow, n)
+	for i := range dw.Rows {
+		dw.Rows[i].AttackerTeam = unknown8(c.u8())
+	}
+	for i := range dw.Rows {
+		dw.Rows[i].AttackerDef = unknown16(c.u16())
+	}
+	for i := range dw.Rows {
+		dw.Rows[i].WeaponDef = damageWeapon(c.u16())
+	}
+	for i := range dw.Rows {
+		dw.Rows[i].VictimTeam = unknown8(c.u8())
+	}
+	for i := range dw.Rows {
+		dw.Rows[i].VictimDef = unknown16(c.u16())
+	}
+	for i := range dw.Rows {
+		dw.Rows[i].Damage = c.f32()
+	}
+	for i := range dw.Rows {
+		dw.Rows[i].Paralyze = c.f32()
+	}
+	for i := range dw.Rows {
+		dw.Rows[i].Hits = c.u16()
+	}
+	if c.err == nil && len(c.b)-c.off >= 4*n && n > 0 {
+		for i := range dw.Rows {
+			dw.Rows[i].Damage -= c.f32()
+		}
+	}
+	return dw, c.err
+}
+
+// decodeLivesRecord decodes one 'S' payload: frame u32, n u16, then columns
+// id u16, def u16, team u8, born u32, died u32 (0xFFFFFF = alive at the
+// end; the widget's float Lua cannot write 0xFFFFFFFF, which is accepted
+// too), dealt f32, taken f32, kills u16, minHp u8, xp f32.
+func decodeLivesRecord(payload []byte) ([]snapshot.UnitLife, error) {
+	c := &cursor{b: payload}
+	c.u32() // the frame the record was written on; each row carries its own
+	n := int(c.u16())
+	if c.err == nil && n*28 > len(payload) {
+		return nil, fmt.Errorf("lives record declares %d rows in %d bytes", n, len(payload))
+	}
+	ls := make([]snapshot.UnitLife, n)
+	for i := range ls {
+		ls[i].UnitID = c.u16()
+	}
+	for i := range ls {
+		ls[i].DefID = c.u16()
+	}
+	for i := range ls {
+		ls[i].Team = unknown8(c.u8())
+	}
+	for i := range ls {
+		ls[i].Born = int32(c.u32())
+	}
+	for i := range ls {
+		d := c.u32()
+		if d == 0xFFFFFF || d == 0xFFFFFFFF {
+			ls[i].Died = -1
+		} else {
+			ls[i].Died = int32(d)
+		}
+	}
+	for i := range ls {
+		ls[i].Dealt = c.f32()
+	}
+	for i := range ls {
+		ls[i].Taken = c.f32()
+	}
+	for i := range ls {
+		ls[i].Kills = c.u16()
+	}
+	for i := range ls {
+		ls[i].MinHealthPct = c.u8()
+	}
+	for i := range ls {
+		ls[i].XP = c.f32()
+	}
+	return ls, c.err
+}
+
+// decodeHitsRecord decodes one 'H' payload: frame u32 (the window's first
+// frame), n u32, then columns df u16 (frame - window), victim u16, vDef
+// u16, vTeam u8, x u16, z u16, attacker u16, aDef u16, aTeam u8, weapon u16
+// (as in D), projOwner u16, projTeam u8, flags u8 (bit 0 paralyzer, bit 1
+// projectile), damage f32, hpAfter f32. 65535 / 255 are unknown.
+func decodeHitsRecord(payload []byte) ([]snapshot.Hit, error) {
+	c := &cursor{b: payload}
+	base := int32(c.u32())
+	n := int(c.u32())
+	if c.err == nil && n*30 > len(payload) {
+		return nil, fmt.Errorf("hits record declares %d rows in %d bytes", n, len(payload))
+	}
+	hs := make([]snapshot.Hit, n)
+	cols := []func(h *snapshot.Hit){
+		func(h *snapshot.Hit) { h.Frame = base + c.u16() },
+		func(h *snapshot.Hit) { h.Victim = unknown16(c.u16()) },
+		func(h *snapshot.Hit) { h.VictimDef = unknown16(c.u16()) },
+		func(h *snapshot.Hit) { h.VictimTeam = unknown8(c.u8()) },
+		func(h *snapshot.Hit) { h.X = c.u16() },
+		func(h *snapshot.Hit) { h.Z = c.u16() },
+		func(h *snapshot.Hit) { h.Attacker = unknown16(c.u16()) },
+		func(h *snapshot.Hit) { h.AttackerDef = unknown16(c.u16()) },
+		func(h *snapshot.Hit) { h.AttackerTeam = unknown8(c.u8()) },
+		func(h *snapshot.Hit) { h.WeaponDef = damageWeapon(c.u16()) },
+		func(h *snapshot.Hit) { h.ProjOwner = unknown16(c.u16()) },
+		func(h *snapshot.Hit) { h.ProjTeam = unknown8(c.u8()) },
+		func(h *snapshot.Hit) { f := c.u8(); h.Paralyzer, h.Projectile = f&1 != 0, f&2 != 0 },
+		func(h *snapshot.Hit) { h.Damage = c.f32() },
+		func(h *snapshot.Hit) { h.HPAfter = c.f32() },
+	}
+	for _, col := range cols {
+		for i := range hs {
+			col(&hs[i])
+		}
+	}
+	return hs, c.err
+}
+
+// decodeUnitEndsRecord decodes one 'U' payload: frame u32, n u32, then
+// columns df u16, unit u16, hit u32 (hits recorded before it), x u16, z u16,
+// xp f32, flags u8 (bit 0 alive at the end).
+func decodeUnitEndsRecord(payload []byte) ([]snapshot.UnitEnd, error) {
+	c := &cursor{b: payload}
+	base := int32(c.u32())
+	n := int(c.u32())
+	if c.err == nil && n*17 > len(payload) {
+		return nil, fmt.Errorf("unit-ends record declares %d rows in %d bytes", n, len(payload))
+	}
+	us := make([]snapshot.UnitEnd, n)
+	cols := []func(u *snapshot.UnitEnd){
+		func(u *snapshot.UnitEnd) { u.Frame = base + c.u16() },
+		func(u *snapshot.UnitEnd) { u.Unit = c.u16() },
+		func(u *snapshot.UnitEnd) { u.Hit = int32(c.u32()) },
+		func(u *snapshot.UnitEnd) { u.X = c.u16() },
+		func(u *snapshot.UnitEnd) { u.Z = c.u16() },
+		func(u *snapshot.UnitEnd) { u.XP = c.f32() },
+		func(u *snapshot.UnitEnd) { u.Alive = c.u8()&1 != 0 },
+	}
+	for _, col := range cols {
+		for i := range us {
+			col(&us[i])
+		}
+	}
+	return us, c.err
+}
+
+// decodeVisibilityRecord decodes one 'V' payload: frame u32, flags u8 (bit 0
+// = every unit restated), nAllies u8, allies u8[nAllies], n u16, then ids
+// u16[n] and masks u32[n].
+func decodeVisibilityRecord(payload []byte) (snapshot.Visibility, error) {
+	c := &cursor{b: payload}
+	v := snapshot.Visibility{Frame: int32(c.u32())}
+	v.Full = c.u8()&1 != 0
+	na := int(c.u8())
+	v.Allies = make([]int32, na)
+	for i := range v.Allies {
+		v.Allies[i] = c.u8()
+	}
+	n := int(c.u16())
+	if c.err == nil && n*6 > len(payload) {
+		return v, fmt.Errorf("visibility record declares %d rows in %d bytes", n, len(payload))
+	}
+	v.Units, v.Masks = make([]int32, n), make([]uint32, n)
+	for i := range v.Units {
+		v.Units[i] = c.u16()
+	}
+	// Two u16 halves (sides 0-7, then 8-15): the widget's Lua numbers are
+	// floats, exact only to 2^24, so it never forms the 32-bit mask itself.
+	for i := range v.Masks {
+		v.Masks[i] = uint32(c.u16())
+	}
+	for i := range v.Masks {
+		v.Masks[i] |= uint32(c.u16()) << 16
+	}
+	return v, c.err
+}
+
+// profileRecord is a 'P' payload: the engine profiler's per-scope totals at a
+// frame — the final ones at game over, or a -profile heartbeat sample.
+type profileRecord struct {
+	Frame int32                `json:"f"`
+	Units int32                `json:"u"`
+	Final bool                 `json:"final"`
+	R     [][2]json.RawMessage `json:"r"`
+}
+
+// applyProfileRecord folds one 'P' record into stats: the final record
+// becomes Profile (largest first, as written), a heartbeat sample extends
+// ProfileSamples.
+func applyProfileRecord(payload []byte, stats *Stats) {
+	var p profileRecord
+	if err := json.Unmarshal(payload, &p); err != nil {
+		fmt.Fprintf(os.Stderr, "capture: bad P record: %v\n", err)
+		return
+	}
+	var entries []ProfileEntry
+	for _, r := range p.R {
+		var name string
+		var ms float64
+		if json.Unmarshal(r[0], &name) != nil || json.Unmarshal(r[1], &ms) != nil {
+			continue
+		}
+		entries = append(entries, ProfileEntry{Name: name, Ms: ms})
+	}
+	if p.Final {
+		stats.Profile = entries
+		return
+	}
+	for _, e := range entries {
+		stats.ProfileSamples = append(stats.ProfileSamples, ProfileSample{Frame: p.Frame, Units: p.Units, Ms: e.Ms, Name: e.Name})
+	}
 }

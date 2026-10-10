@@ -1,6 +1,6 @@
 // Package packer is the capture-to-published-replay pipeline shared by
 // cmd/pack (manual/CLI use) and cmd/bringest (the drag&drop upload
-// daemon): parse a raw widget stream (.brsnap/.brepstream), enrich it with
+// daemon): parse a raw widget stream (.brepstream), enrich it with
 // the demo's startscript metadata from the BAR API, write the .brp, and
 // optionally upload the static-hosting pieces to the worker's R2 bucket and
 // register the replay in its catalog.
@@ -43,6 +43,14 @@ type loaded struct {
 	frames []snapshot.Frame
 	events []snapshot.Event
 	comms  []snapshot.Comm
+	// The re-simulation's analysis records (protocol 4), carried through to
+	// the .brp untouched. A live upload has none.
+	facts      []snapshot.Fact
+	damage     []snapshot.DamageWindow
+	lives      []snapshot.UnitLife
+	visibility []snapshot.Visibility
+	hits       []snapshot.Hit
+	unitEnds   []snapshot.UnitEnd
 }
 
 func (l *loaded) WriteMeta(m snapshot.Meta) error { l.meta = m; return nil }
@@ -58,12 +66,27 @@ func (l *loaded) WriteComm(c snapshot.Comm) error {
 	l.comms = append(l.comms, c)
 	return nil
 }
+func (l *loaded) WriteFact(f snapshot.Fact) error { l.facts = append(l.facts, f); return nil }
+func (l *loaded) WriteDamage(d snapshot.DamageWindow) error {
+	l.damage = append(l.damage, d)
+	return nil
+}
+func (l *loaded) WriteLife(u snapshot.UnitLife) error { l.lives = append(l.lives, u); return nil }
+func (l *loaded) WriteVisibility(v snapshot.Visibility) error {
+	l.visibility = append(l.visibility, v)
+	return nil
+}
+func (l *loaded) WriteHit(h snapshot.Hit) error { l.hits = append(l.hits, h); return nil }
+func (l *loaded) WriteUnitEnd(u snapshot.UnitEnd) error {
+	l.unitEnds = append(l.unitEnds, u)
+	return nil
+}
 func (l *loaded) Close() error { return nil }
 
-// load reads a raw capture stream. .brsnap (the text widget stream) re-parses
-// through internal/capture — the exact parser the capture pipeline uses —
-// seeded with base, which carries whatever demo metadata the caller obtained;
-// .brepstream is its binary sibling.
+// load reads a raw .brepstream capture through internal/capture — the exact
+// parser the capture pipeline uses — seeded with base, which carries whatever
+// demo metadata the caller obtained. The legacy .brsnap text stream is no
+// longer read: nothing has written one since the re-sim moved to .brepstream.
 func load(path string, base snapshot.Meta) (*loaded, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -73,18 +96,49 @@ func load(path string, base snapshot.Meta) (*loaded, error) {
 
 	l := &loaded{}
 	switch strings.ToLower(filepath.Ext(path)) {
-	case ".brsnap":
-		if err := capture.Consume(f, base, l); err != nil {
-			return nil, fmt.Errorf("parsing brsnap: %w", err)
-		}
 	case ".brepstream":
 		if err := capture.ConsumeBrep(f, base, l); err != nil {
 			return nil, fmt.Errorf("parsing brepstream: %w", err)
 		}
 	default:
-		return nil, fmt.Errorf("unsupported input type %q (want .brsnap or .brepstream)", filepath.Ext(path))
+		return nil, fmt.Errorf("unsupported input type %q (want .brepstream)", filepath.Ext(path))
 	}
 	return l, nil
+}
+
+// writeAnalysis replays the analysis records into w.
+func (l *loaded) writeAnalysis(w snapshot.Writer) error {
+	for _, f := range l.facts {
+		if err := w.WriteFact(f); err != nil {
+			return err
+		}
+	}
+	for _, d := range l.damage {
+		if err := w.WriteDamage(d); err != nil {
+			return err
+		}
+	}
+	for _, u := range l.lives {
+		if err := w.WriteLife(u); err != nil {
+			return err
+		}
+	}
+	for _, v := range l.visibility {
+		if err := w.WriteVisibility(v); err != nil {
+			return err
+		}
+	}
+	for _, h := range l.hits {
+		if err := w.WriteHit(h); err != nil {
+			return err
+		}
+	}
+	for _, u := range l.unitEnds {
+		if err := w.WriteUnitEnd(u); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // demoInfo is everything a pack takes from the demo file.
@@ -218,6 +272,10 @@ func Pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 			w.Close()
 			return "", nil, err
 		}
+	}
+	if err := l.writeAnalysis(w); err != nil {
+		w.Close()
+		return "", nil, err
 	}
 	if err := w.Close(); err != nil {
 		return "", nil, err

@@ -16,8 +16,8 @@ func configPath(dir string) string {
 // The seeded config must name the exact GetInfo().name from the Lua asset, or
 // BAR's order-list lookup misses and the widget stays disabled.
 func TestWidgetNameMatchesAsset(t *testing.T) {
-	want := `name    = "` + widgetName + `"`
-	if !strings.Contains(assets.SnapshotWidgetLua, want) {
+	want := `name    = resim and "` + widgetName + `"`
+	if !strings.Contains(assets.WidgetLua, want) {
 		t.Errorf("widget asset does not declare %q as its GetInfo name", widgetName)
 	}
 	if !strings.Contains(widgetConfigLua(widgetName), `["`+widgetName+`"] = 1`) {
@@ -28,11 +28,12 @@ func TestWidgetNameMatchesAsset(t *testing.T) {
 // The widget-suite disabling needs handler access and must exclude itself by the
 // exact GetInfo name — otherwise it disables its own sampling.
 func TestWidgetDisableSuiteGuards(t *testing.T) {
-	if !strings.Contains(assets.SnapshotWidgetLua, "handler = true") {
-		t.Error("widget asset must set handler = true in GetInfo to reach widgetHandler")
+	if !strings.Contains(assets.WidgetLua, "handler = resim") {
+		t.Error("widget asset must set handler in GetInfo (in resim mode) to reach widgetHandler")
 	}
-	if !strings.Contains(assets.SnapshotWidgetLua, `name ~= "`+widgetName+`"`) {
-		t.Errorf("widget disable loop must self-exclude by the exact name %q", widgetName)
+	if !strings.Contains(assets.WidgetLua, "local me = widget:GetInfo().name") ||
+		!strings.Contains(assets.WidgetLua, "name ~= me") {
+		t.Error("widget disable loop must self-exclude by its own GetInfo name")
 	}
 }
 

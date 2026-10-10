@@ -99,6 +99,11 @@ func EnsureEngine(ctx context.Context, cfg Config, version string) error {
 	// Extract into a staging dir and move it into place only once complete, so
 	// an interrupted download can never leave a half-populated engine dir that
 	// the next run would treat as installed.
+	// A fresh data dir has no engine/ yet, and MkdirTemp will not create its
+	// parent.
+	if err := os.MkdirAll(filepath.Join(cfg.DataDir, "engine"), 0o755); err != nil {
+		return err
+	}
 	staging, err := os.MkdirTemp(filepath.Join(cfg.DataDir, "engine"), ".staging-*")
 	if err != nil {
 		return err

@@ -32,10 +32,14 @@ type gameLine struct {
 	PlayerID      int32  `json:"playerID"`
 	AllyTeam      int32  `json:"allyTeam"`
 	Spectator     bool   `json:"spectator"`
+	// Resim marks the re-simulation sampler (the same widget file, injected
+	// by this tool): it is nobody's point of view and its build is the
+	// tool's own, so it records neither a Recorder nor a Widget.
+	Resim bool `json:"resim"`
 }
 
-// applyPreambleLine handles the preamble record types shared by the text
-// (.brsnap) and binary (.brepstream) streams: GID, GAME, D, DEF, T and P.
+// applyPreambleLine handles the .brepstream's text preamble records: GID,
+// GAME, D, DEF, T and P.
 // fields is the whitespace-split content after the BRSNAP tag; content is the
 // unsplit form (JSON payloads may contain spaces). Returns the parsed GAME
 // line when this record was one (nil otherwise) and whether the record type
@@ -70,7 +74,7 @@ func applyPreambleLine(fields []string, content string, base *snapshot.Meta) (*g
 		// segment with its own preamble, and the capture is named after what
 		// started it. Recorded whenever the stream says anything at all, so a
 		// pre-widgetDate capture still keeps its version.
-		if base.Widget == nil && (g.WidgetVersion != "" || g.WidgetSha != "" || g.WidgetDate != "") {
+		if !g.Resim && base.Widget == nil && (g.WidgetVersion != "" || g.WidgetSha != "" || g.WidgetDate != "") {
 			base.Widget = &snapshot.WidgetInfo{
 				Version: g.WidgetVersion,
 				Sha:     g.WidgetSha,
@@ -81,7 +85,7 @@ func applyPreambleLine(fields []string, content string, base *snapshot.Meta) (*g
 		// (mode "replay" is the re-sim widget, which sees the whole game and
 		// carries no player identity.) An appended segment repeats GAME —
 		// keep the first identity.
-		if g.Mode == "live" && base.Recorder == nil {
+		if g.Mode == "live" && !g.Resim && base.Recorder == nil {
 			base.Recorder = &snapshot.RecorderInfo{
 				PlayerID:  g.PlayerID,
 				AllyTeam:  g.AllyTeam,
@@ -275,7 +279,7 @@ func repairIncome(v float32, protocol int, gameSpeed int32) float32 {
 
 // graveyard remembers the unit ids a stream reported destroyed, so a capture
 // can be decoded into a world without dead units standing in it even when the
-// recorder kept sampling them. Both stream parsers consult it.
+// recorder kept sampling them.
 //
 // This is a repair pass for captures already in the wild: the uploader widget
 // before 1.2.0 could mistake the engine's still-undeleted killed unit for a

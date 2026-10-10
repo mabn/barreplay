@@ -1,7 +1,6 @@
 package capture
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
@@ -69,31 +68,5 @@ func TestBrepGraveyardRepairsOldCaptures(t *testing.T) {
 	// The events themselves are always passed through untouched.
 	if len(s.events) != 2 {
 		t.Errorf("want both destroyed events preserved, got %d", len(s.events))
-	}
-}
-
-// TestConsumeGraveyardRepairsOldCaptures is the same repair on the text
-// (.brsnap) path — the two parsers must agree, since one real game is captured
-// in both formats to cross-check the encoders.
-func TestConsumeGraveyardRepairsOldCaptures(t *testing.T) {
-	var b strings.Builder
-	b.WriteString("BRSNAP DEF {\"id\":1,\"name\":\"armcom\"}\nBRSNAP T 0 0 armada #8040ff\nBRSNAP READY\n")
-	unit := func(id, def, hp int) string {
-		return fmt.Sprintf("BRSNAP U %d %d 0 100.0 0.0 200.0 %d.0 500.0 0.0 0.0 0.0 1.000\n", id, def, hp)
-	}
-	b.WriteString("BRSNAP F 0 0.0 2\n" + unit(7, 1, 500) + unit(9, 1, 600))
-	b.WriteString("BRSNAP EV 15 destroyed 7 1 0\n")
-	b.WriteString("BRSNAP EV 20 destroyed 9 1 0\n")
-	b.WriteString("BRSNAP F 30 1.0 2\n" + unit(7, 1, 0) + unit(9, 2, 111))
-
-	var r recordingWriter
-	if err := Consume(strings.NewReader(b.String()), snapshot.Meta{}, &r); err != nil {
-		t.Fatalf("Consume: %v", err)
-	}
-	if len(r.frames) != 2 {
-		t.Fatalf("want 2 frames, got %d", len(r.frames))
-	}
-	if len(r.frames[1].Units) != 1 || r.frames[1].Units[0].UnitID != 9 {
-		t.Errorf("frame 30 should keep only the recycled id 9, got %+v", r.frames[1].Units)
 	}
 }

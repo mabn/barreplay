@@ -1,7 +1,11 @@
-# .brepstream — the Replay uploader widget's binary capture stream
+# .brepstream — the widget's binary capture stream
 
-The append-only stream `assets/lua/replay_uploader.lua` writes during a live
-game (`<write-dir>/<gameId>.brepstream`). Decoder: `internal/capture/brep.go`
+The append-only stream `assets/lua/replay_uploader.lua` writes, both during a
+live game (`<write-dir>/<gameId>.brepstream`) and — since widget 1.8.0, when
+the Go tool injects the same file with its re-simulation switches
+substituted — during a headless re-simulation (to the path `cmd/barreplay` /
+`internal/resim` hand it). It replaced the `.brsnap` text stream, which
+nothing writes or reads any more. Decoder: `internal/capture/brep.go`
 (`capture.ConsumeBrep`); `pack` converts it to `.brp`. A third, minimal
 reader, `worker/src/worker/preamble.ts`, scans only the text preamble (header
 line + GID/GAME) so the worker's `POST /api/upload` can validate and file a
@@ -10,21 +14,22 @@ evolve in lockstep** (and the preamble scan with the preamble grammar); the
 stream is versioned by its header line, and the widget copy on players'
 machines can never be force-updated — readers must keep accepting every
 version ever shipped. `tools/brep-harness/harness.lua` +
-`TestBrepstreamMatchesTextFixture` (Go) + `worker/tests/preamble.test.ts` (TS)
-pin the readers against one shared fixture.
+`TestHarnessGolden` (Go; one fixture per mode, each decoded and compared
+line by line against a committed dump) + `worker/tests/preamble.test.ts` (TS)
+pin the readers against the shared fixtures.
 
 Design goals, in order: cheap to write from Lua mid-game (no per-unit
 `string.format`, a handful of `VFS.Pack*` C calls per sample), small (delta
 encoding: an unchanged unit costs zero bytes), crash-tolerant (append-only;
 a truncated tail record is dropped, everything before it parses). Measured
-~6.5x smaller than the equivalent `.brsnap` text raw, and ~4x cheaper per
+~6.5x smaller than the retired `.brsnap` text stream, and ~4x cheaper per
 sample (1.8 ms vs 7 ms at 2000 units, Lua 5.1).
 
 ## Layout
 
 ```
 line  "BREPSTREAM 1"                      format header (version 1)
-text  preamble: BRSNAP GID/GAME/DEF/T/P lines (same grammar as .brsnap),
+text  preamble: BRSNAP GID/GAME/DEF/T/P lines (the old .brsnap line grammar),
       terminated by the "BRSNAP READY" line
 then  binary records until EOF:  <tag u8> <len u32le> <payload[len]>
 ```
@@ -34,8 +39,13 @@ All integers little-endian. Record tags:
 | tag | payload |
 |-----|---------|
 | `F` | one sampled frame (below) |
-| `E` | unit lifecycle event, text: `<frame> <kind> <id> <def> <team>` |
+| `E` | unit lifecycle event, text: `<frame> <kind> <id> <def> <team>`, plus — protocol ≥ 4 — optional `<aID> <aDef> <aTeam> <weapon>` (below) |
 | `C` | a player comm — chat message or map drawing — JSON (widget ≥ 1.6.0; below) |
+| `G` | a game fact, JSON (protocol ≥ 4; below) |
+| `D` | a damage window (re-sim only; below) |
+| `S` | unit lifetime totals (re-sim only; below) |
+| `V` | per-side visibility (re-sim only; below) |
+| `P` | engine profiler reading, JSON (re-sim only; below) |
 | `X` | end of stream, text: reason (`gameover`/`shutdown`/`error`) |
 | other | reserved; readers skip unknown tags |
 
@@ -53,9 +63,7 @@ and it is the only source for a live game before it is published.
 
 JSON, not columns: comms are rare (hundreds per game against millions of unit
 records) and their text is free-form, so the encoding that pays off everywhere
-else buys nothing here. The same payload rides the `.brsnap` text stream as a
-`BRSNAP COMM <json>` line, which is why one parser
-(`capture.parseComm`) reads both.
+else buys nothing here. `capture.parseComm` reads it.
 
 ```
 {"f":<frame>,"k":"chat","p":<playerID>,"d":"all|ally|spec|private|lobby","t":"<text>"}
@@ -164,8 +172,8 @@ engine's `GetTeamResources` income return is already per game-second (it
 accumulates over `TEAM_SLOWUPDATE_RATE` = 30 sim frames = 1 game-second), and
 **protocol >= 3** streams write it as-is. Protocol <= 2 widgets multiplied it
 by `gameSpeed` on the wrong assumption it was per sim frame, so their stored
-income is 30x too high; the decoder repairs those streams (and `.brsnap`
-streams with no `GAME` line at all) by dividing the factor back out
+income is 30x too high; the decoder repairs those streams (and streams with
+no `GAME` line at all) by dividing the factor back out
 (`repairIncome` in `internal/capture/lines.go`).
 
 Quantization matches `.brp`'s storage precision (whole elmos/hp, per-interval
@@ -246,9 +254,141 @@ def/team columns upgrade in place, and identity/health are carried over a
 later radar-only phase rather than degrading back to 0. Radar-only positions
 are the engine's wobbled readings.
 
+## Protocol 4: re-simulation records and event causes (widget ≥ 1.8.0)
+
+One widget file serves both modes. The Go tool substitutes `__RESIM__=1` and
+the switches below when it injects it; every switch is tested against the
+literal `"1"`, so the published copy (tokens left in place) is the uploader.
+The `GAME` line carries `"resim":true` in that mode, and the decoder then
+records no recorder and no widget build — the capture is the spectator view
+and its widget is not something a player installed.
+
+A re-simulation additionally: records units at `hp <= 0` rather than burying
+them (the decoder's graveyard drops them once their destroyed event is
+written — a crashing aircraft is drawn grey until then), sees everything
+(`spectatorfullview 1`), runs at max speed, disables BAR's widget suite, and
+quits at game over.
+
+**`E` cause columns.** A `destroyed` event may carry the killer
+`<aID> <aDef> <aTeam> <weapon>` (weapon = weapon-def id), `-1` where the
+engine gave nothing; absent columns and all-`-1` both mean "unknown". The
+live uploader never writes a killer (a playing client is not handed one for
+units it cannot see, and it would be one-sided anyway). A new kind, `given`,
+records a unit changing owner: `<team>` is the new owner and `<aTeam>` the
+old one (the other three are `-1`). `UnitTaken` is not recorded — it is the
+same transfer seen from the other side.
+
+**`G` — game facts.** One JSON object per fact; `"k"` names it, `"f"` is its
+sim frame when it has one. Both modes write the first three:
+
+| kind | fields |
+|------|--------|
+| `end` | `f`, `winners` — the winning ALLY teams (empty: a draw) |
+| `teamdied` | `f`, `team` |
+| `playerleft` | `f`, `player`, `reason` (the engine's PlayerRemoved reason) |
+| `wdefs` | `defs`: `[{id, name, description, type, range, reload, damage, paralyzer, aoe}]` — the weapon table (re-sim only, written once at start) |
+| `blast` | `f`, `unit`, `def`, `team`, `x`, `z`, `weapon`, `byUnit`/`byDef`/`byTeam`, `damage`, `kills` — one big death explosion. No longer written: big blasts are derived from `H` (`snapshot.FactBlastData` is what `internal/combat` reports them as) |
+| `teamstats` | `team`, `fields`, `rows` — the engine's `GetTeamStatsHistory` for the team, one row per stats interval (re-sim only, at game over) |
+
+Facts are kept verbatim through the `.brp`, so a kind added here needs no
+codec change.
+
+**`H` — hits** (`__DAMAGE__`). Every damage callin, written as the engine
+delivered it: the widget draws no conclusions. Crediting a chain of
+exploding reactors to whoever killed the first one, removing overkill,
+picking out the big blasts and summing damage per second and per unit are
+all done when the file is READ (`internal/combat`), so they can change
+without re-simulating a game. Hits are buffered and written once per
+sample, before the frame record, covering the frames since the previous one.
+
+```
+u32 frame                         the window's first frame
+u32 n                             hits
+then n rows as COLUMNS:
+  u16 df (frame - window)   u16 victim   u16 vDef   u8 vTeam
+  u16 x   u16 z                     victim position, whole elmos
+  u16 attacker   u16 aDef   u8 aTeam  as the engine named it
+  u16 weapon
+  u16 projOwner   u8 projTeam
+  u8  flags                         bit 0 paralyzer, bit 1 the engine named a projectile
+  f32 damage   f32 hpAfter          health right after the hit
+```
+
+Unknown ids are 255 (u8) / 65535 (u16). The seven `weapon` values just
+below 65535 are damage the engine dealt itself, `65535 - k` for Recoil's
+`CSolidObject::DamageType` k (the engine passes weaponDefID `-k`): 1 debris,
+2 ground collision, 3 object collision, 4 fire, 5 water (lava), 6 killed by
+Lua, 7 crushed. Decoders report these as weapon `-1 - k` (-2..-8).
+
+`hpAfter` below zero is the overkill: the health the hit actually removed
+is `damage + hpAfter` then. The engine names NO attacker for a unit's death
+or self-destruct explosion, and sometimes names the exploding unit itself;
+the victim's position and the unit defs' explosion weapons (DEF
+`deathWeapon`/`selfdWeapon`, the `wdefs` fact's `aoe`) are what lets a
+reader tell which dead unit a blast came from. `projOwner`/`projTeam` are
+read off the projectile (`GetProjectileOwnerID`/`GetProjectileTeamID`) only
+when the engine named no attacker: it resolves the attacker from the
+shooter, which is gone once the shooter has died, so a shell still in flight
+then arrives anonymously while the projectile still knows who fired it.
+
+**`U` — unit ends** (`__DAMAGE__`). Where each unit's life ended: a row per
+death, at the death, and one per survivor at game over. Flushed with `H`.
+
+```
+u32 frame   u32 n
+then n rows as COLUMNS:
+  u16 df   u16 unit
+  u32 hit                           hits recorded before it: orders it exactly among them
+  u16 x   u16 z   f32 xp
+  u8  flags                         bit 0 alive at the end
+```
+
+A death's killer is on its `destroyed` event, also exactly as the engine
+gave it.
+
+**`D` — damage windows** and **`S` — unit lives** are what the widget wrote
+before `H`/`U`: sums it computed itself, with chain explosions already
+credited (D: `u32 frame, u16 n`, then columns `u8 aTeam, u16 aDef, u16
+weapon, u8 vTeam, u16 vDef, f32 damage, f32 paralyze, u16 hits`, and in the
+earliest streams a trailing `f32 overkill` the decoder subtracts; S: `u32
+frame, u16 n`, then columns `u16 id, u16 def, u8 team, u32 born, u32 died
+(0xFFFFFF = alive), f32 dealt, f32 taken, u16 kills, u8 minHp, f32 xp`).
+Nothing writes them now; decoders still read them. The `blast` fact is the
+same story.
+
+**Every integer the widget writes stays below 2^24.** Spring's Lua numbers
+are single-precision floats, which hold integers exactly only up to 2^24, and
+`VFS.PackU32` converts whatever it is handed: 0xFFFFFFFF rounded to 2^32 and
+was written as 0. That is why the old S alive marker was 0xFFFFFF, why U's
+`hit` caps at 2^24 hits, and why the visibility
+mask is two u16 halves rather than one u32 (decoders still accept 0xFFFFFFFF
+as alive). The test harness refuses to pack a value a float cannot hold.
+
+**`V` — visibility** (`__VISIBILITY__`). Which sides could see each unit, by
+LOS or radar, once per sample. Only units that are new or whose mask CHANGED
+are written;
+every keyframe sample restates all (flag bit 0), and a sample with no change
+writes no record at all.
+
+```
+u32 frame   u8 flags (bit0 = full restatement)
+u8  nAllies   u8 allies[nAllies]          the sides the masks index, gaia excluded, at most 16
+u16 n   u16 ids[n]   u16 lo[n]   u16 hi[n]
+```
+
+Each mask is `lo | hi << 16` and holds two bits per side, in `allies` order:
+bit `2i` = in LOS of side `i`, bit `2i+1` = in its radar. A unit that leaves the frame (dead, or
+gone) needs no V row: the frame's own dead list says so.
+
+**`P` — profiler.** JSON
+`{"f":frame,"u":units,"final":bool,"r":[[name,ms],...]}` — the engine's time
+profiler: the game-over totals (`final`, top 80 scopes, every re-sim), plus a
+reading at every heartbeat (top 30) under `-profile`. The Go
+tool prints them; they never reach the `.brp`.
+
 ## Preamble
 
-Identical line grammar to `.brsnap` so `internal/capture`'s parser is shared:
+The text line grammar the retired `.brsnap` stream used:
 `GID` (the 32-hex gameId, always the first line after the header), `GAME`
 (JSON: protocol, widgetVersion (semver of the emitting widget), widgetDate
 (when that version was cut) and widgetSha (git SHA of the exact widget file,

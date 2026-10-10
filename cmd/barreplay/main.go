@@ -62,6 +62,8 @@ func run() error {
 		minFree      = flag.Int("min-free", 512, "stop the engine when the host has less than this many MiB of memory left, instead of waiting for the kernel's OOM killer (0 disables)")
 		profile      = flag.Bool("profile", false, "enable the engine's internal time profiler for a fine-grained Sim breakdown and a unit-count growth table (small overhead)")
 		disWidgets   = flag.Bool("disable-widgets", true, "disable BAR's default widget suite during the replay (pure unsynced overhead; cannot affect the sim); =false to keep it")
+		damage       = flag.Bool("damage", true, "record damage windows and per-unit lifetime totals (D/S records: who hurt whom, with what, each second); =false to skip that bookkeeping")
+		visibility   = flag.Bool("visibility", true, "record which side could see each unit, each second (V records); =false to skip it")
 		throttleDraw = flag.Bool("throttle-draw", true, "throttle the headless draw loop to ~1 fps via MinDrawFPS/MinSimDrawBalance; =false for engine defaults")
 		workerThr    = flag.Int("worker-threads", workerThreadsUnset, "override the engine's WorkerThreadCount for this run (-1 = auto, 0/1 = no workers; scheduling only, cannot desync); unset = keep user/engine default")
 	)
@@ -126,12 +128,12 @@ func run() error {
 		return fmt.Errorf("-data is required to run the engine")
 	}
 
-	// The widget writes its BRSNAP stream to a file. Spring's LuaIO sandbox rejects
+	// The widget writes its .brepstream to a file. Spring's LuaIO sandbox rejects
 	// absolute paths, so the widget uses a RELATIVE path resolved against the engine's
 	// write-dir (= dataDir); we read it back from there, then move it next to the
 	// snapshot output. Forward slashes keep the Lua path portable.
-	relStream := "barreplay/" + h.GameID + ".brsnap"
-	streamPath := filepath.Join(*dataDir, "barreplay", h.GameID+".brsnap")
+	relStream := "barreplay/" + h.GameID + ".brepstream"
+	streamPath := filepath.Join(*dataDir, "barreplay", h.GameID+".brepstream")
 	if err := os.MkdirAll(filepath.Dir(streamPath), 0o755); err != nil {
 		return err
 	}
@@ -151,6 +153,8 @@ func run() error {
 		Profile:            *profile,
 		DisableWidgets:     *disWidgets,
 		ThrottleDraw:       *throttleDraw,
+		SkipDamage:         !*damage,
+		SkipVisibility:     !*visibility,
 	}
 	if *workerThr != workerThreadsUnset {
 		engCfg.WorkerThreads = workerThr
@@ -287,14 +291,14 @@ func run() error {
 	if raw, oerr := os.Open(streamPath); oerr != nil {
 		consumeErr = fmt.Errorf("open widget output %s: %w (did the widget load and run?)", streamPath, oerr)
 	} else {
-		consumeErr = capture.ConsumeStats(raw, base, w, &stats)
+		consumeErr = capture.ConsumeBrepStats(raw, base, w, &stats)
 		raw.Close()
 	}
 	closeErr := w.Close()
 
 	// Move the raw stream next to the snapshot output (best-effort); it lives in the
 	// data dir because the widget could only write inside the write-dir.
-	rawPath := filepath.Join(*outDir, h.GameID+".brsnap")
+	rawPath := filepath.Join(*outDir, h.GameID+".brepstream")
 	if consumeErr == nil {
 		if merr := moveFile(streamPath, rawPath); merr != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not move %s -> %s: %v\n", streamPath, rawPath, merr)
@@ -323,6 +327,8 @@ func run() error {
 	if mb, ok := fileSizeMB(outPath); ok {
 		fmt.Fprintf(os.Stderr, "  snapshot: %.2f MB\n", mb)
 	}
+	fmt.Fprintf(os.Stderr, "  analysis: %d facts, %d hits, %d unit ends, %d visibility samples\n",
+		stats.Facts, stats.Hits, stats.UnitEnds, stats.Visibility)
 	return nil
 }
 

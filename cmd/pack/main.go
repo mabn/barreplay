@@ -1,8 +1,8 @@
-// Command pack converts raw widget captures (.brsnap, or the Replay
-// uploader widget's binary .brepstream) into the compact binary .brp
+// Command pack converts raw widget captures (.brepstream — from a live
+// upload or a re-simulation) into the compact binary .brp
 // format — the only format the viewer serves. Use it once per capture.
 //
-// A raw .brsnap/.brepstream is just the widget's stream: it carries frames,
+// A raw .brepstream is just the widget's stream: it carries frames,
 // unit defs and teams, but the player roster from the demo startscript is
 // richer (rank/OpenSkill/country). To still produce a FULL .brp without
 // re-running the simulation, pack takes the replay's gameId (from the input's
@@ -14,12 +14,12 @@
 //
 // Usage:
 //
-//	pack [flags] <capture.brsnap|capture.brepstream> [...]
+//	pack [flags] <capture.brepstream> [...]
 //	pack ./caps/<gameId>.brepstream          # pack, print stats, publish to r2
 //	pack -upload local ./caps/*.brepstream   # ...to the dev simulator instead
-//	pack -upload= ./caps/*.brsnap            # pack only, publish nothing
-//	pack -out ./snapshots ./caps/*.brsnap
-//	pack -id 6da7496aca487581a12b7a6d5bd99bc0 ./renamed.brsnap
+//	pack -upload= ./caps/*.brepstream            # pack only, publish nothing
+//	pack -out ./snapshots ./caps/*.brepstream
+//	pack -id 6da7496aca487581a12b7a6d5bd99bc0 ./renamed.brepstream
 //	pack -upload= ./snapshots/<gameId>.brp   # analyze an already-packed file
 //
 // -stats prints a size breakdown of each resulting .brp — per-section sizes
@@ -69,15 +69,15 @@ import (
 func main() {
 	var (
 		outDir    = flag.String("out", "", "output directory (default: next to each input)")
-		idArg     = flag.String("id", "", "replay gameId or link used to fetch the demo metadata for a .brsnap/.brepstream input (default: the input's file name; only valid with a single input)")
-		noDemo    = flag.Bool("no-demo", false, "do not fetch the demo for .brsnap/.brepstream inputs; the .brp then only has the metadata the stream itself carries")
+		idArg     = flag.String("id", "", "replay gameId or link used to fetch the demo metadata for a .brepstream input (default: the input's file name; only valid with a single input)")
+		noDemo    = flag.Bool("no-demo", false, "do not fetch the demo for .brepstream inputs; the .brp then only has the metadata the stream itself carries")
 		upload    = flag.String("upload", "r2", "after packing, publish the replay to "+packer.TargetHelp()+". Empty packs only, uploading nothing")
 		workerDir = flag.String("worker-dir", "worker", "the Cloudflare worker project directory wrangler runs in (with -upload)")
 		stats     = flag.Bool("stats", true, "print size statistics for each resulting .brp (per-section sizes + the top unit defs by encoded bytes); a .brp input is analyzed directly without repacking")
 		rev       = flag.Bool("rev", true, "with -upload: publish under a content-addressed revision id <gameId>-<sha256[:8] of the input> so no served object is ever overwritten (the catalog row's rid tracks the current revision); -rev=false uses the bare gameId")
 	)
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: pack [flags] <capture.brsnap|capture.brepstream> [...]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: pack [flags] <capture.brepstream> [...]\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -109,7 +109,7 @@ func main() {
 			// Already packed: only meaningful to analyze, never to repack.
 			brpPath = in
 			if !*stats {
-				err = fmt.Errorf("input is already a .brp (use -stats to analyze it, or pass the raw .brsnap/.brepstream to pack)")
+				err = fmt.Errorf("input is already a .brp (use -stats to analyze it, or pass the raw .brepstream to pack)")
 			}
 		} else {
 			brpPath, modOptions, err = packer.Pack(ctx, client, in, *outDir, *idArg, *noDemo)

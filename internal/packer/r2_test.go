@@ -223,7 +223,7 @@ func TestR2ClientFromEnv(t *testing.T) {
 // under the revisioned id and the catalog PUT must carry that rid.
 func TestUploadStaticNative(t *testing.T) {
 	dir := t.TempDir()
-	in := filepath.Join(dir, "somegameid.brsnap")
+	in := filepath.Join(dir, "somegameid.brepstream")
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestUploadStaticNative(t *testing.T) {
 // node tooling ran) — and still PUTs the catalog row with the rid.
 func TestUploadStaticLocalWorkerRoute(t *testing.T) {
 	dir := t.TempDir()
-	in := filepath.Join(dir, "somegameid.brsnap")
+	in := filepath.Join(dir, "somegameid.brepstream")
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +341,7 @@ func TestUploadStaticLocalWorkerRoute(t *testing.T) {
 // tooling (which surfaces the worker-project requirement).
 func TestUploadStaticLocalFallsBack(t *testing.T) {
 	dir := t.TempDir()
-	in := filepath.Join(dir, "somegameid.brsnap")
+	in := filepath.Join(dir, "somegameid.brepstream")
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}

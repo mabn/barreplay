@@ -58,7 +58,9 @@ const F = { ID: 0, DEF: 1, TEAM: 2, X: 3, Z: 4, HP: 5, MAXHP: 6, DVX: 7, DVZ: 8,
 const BUILD_DONE = 255; // quantized "construction finished"
 
 // The .brw container's version byte == the .brp codec version the frame
-// streams were encoded with: 4 (8 columns) or 5 (adds build + target).
+// streams were encoded with: 4 (8 columns) or 5 (adds build + target). 6
+// changes no frame column — it adds the event cause columns (decodeEvents
+// reads them when present) and analysis sections the head never carries.
 // Set when the head loads, read by decodeFrames.
 let codecVer = 5;
 
@@ -80,7 +82,7 @@ function parseContainer(buf) {
     if (u8[i] !== magic.charCodeAt(i)) throw new Error('not a BRW payload (old server?)');
   }
   const ver = u8[magic.length];
-  if (ver !== 4 && ver !== 5) throw new Error('unsupported payload version ' + ver);
+  if (ver < 4 || ver > 6) throw new Error('unsupported payload version ' + ver);
   const dv = new DataView(buf);
   const secs = { _ver: ver };
   let off = magic.length + 1; // + version byte
@@ -263,6 +265,17 @@ function decodeEvents(b) {
   for (let i = 0; i < n; i++) { acc += sv(); evs[i].id = acc; }
   for (let i = 0; i < n; i++) evs[i].def = sv();
   for (let i = 0; i < n; i++) evs[i].team = sv();
+  // v6: four cause columns (killer unit/def/team + weapon for a death, the
+  // previous owner's team for a "given" transfer), -1 where unknown. A v5
+  // section ends at the team column, so their presence is just "bytes left".
+  if (p < b.length) {
+    const cause = [[], [], [], []];
+    for (let c = 0; c < 4; c++) for (let i = 0; i < n; i++) cause[c].push(sv());
+    for (let i = 0; i < n; i++) {
+      if (cause[0][i] < 0 && cause[1][i] < 0 && cause[2][i] < 0 && cause[3][i] < 0) continue;
+      evs[i].cause = { id: cause[0][i], def: cause[1][i], team: cause[2][i], weapon: cause[3][i] };
+    }
+  }
   return evs;
 }
 
@@ -389,7 +402,9 @@ function brpMetaExtent(u8) {
     if (u8[i] !== magic.charCodeAt(i)) throw new Error('not a .brp file');
   }
   const ver = u8[magic.length];
-  if (ver !== 5) throw new Error('unsupported .brp version ' + ver);
+  // v6 adds analysis sections the viewer never reads and cause columns on
+  // E (decodeEvents finds them by length); frames are v5's.
+  if (ver < 5 || ver > 6) throw new Error('unsupported .brp version ' + ver);
   if (u8[5] !== 77 /* 'M' */) throw new Error('.brp does not start with its meta section');
   const len = new DataView(u8.buffer, u8.byteOffset + 6, 4).getUint32(0, true);
   return { ver, mEnd: 10 + len };

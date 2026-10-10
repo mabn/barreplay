@@ -45,7 +45,7 @@ type BRPDefStat struct {
 
 // BRPStats is the full size breakdown of one .brp.
 type BRPStats struct {
-	Sections []BRPSectionStat // report order (M, K, F, X, E, C), present sections only
+	Sections []BRPSectionStat // report order (M, K, F, X, E, C, then G, D, S, V), present sections only
 	Defs     []BRPDefStat     // sorted by CoreBytes+ExtraBytes descending
 
 	// OverheadBytes is the core-stream framing no def owns: frame deltas and
@@ -88,6 +88,12 @@ func ComputeBRPStats(f *BRPFile) (*BRPStats, error) {
 		{SecExtra, "extra"},
 		{SecEvents, "events"},
 		{SecComms, "comms"},
+		{SecFacts, "facts"},
+		{SecDamage, "damage"},
+		{SecLives, "lives"},
+		{SecVisibility, "visibility"},
+		{SecHits, "hits"},
+		{SecUnitEnds, "unit ends"},
 	} {
 		payload, ok := f.Sections[s.tag]
 		if !ok {

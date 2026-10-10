@@ -32,7 +32,7 @@ func TestBuildStartscript(t *testing.T) {
 
 func TestWriteWidgetSubstitutesInterval(t *testing.T) {
 	dir := t.TempDir()
-	streamPath := "barreplay/game.brsnap" // relative: Spring's LuaIO forbids absolute paths
+	streamPath := "barreplay/game.brepstream" // relative: Spring's LuaIO forbids absolute paths
 	e := &Engine{cfg: Config{DataDir: dir, SampleEvery: 15, SnapshotStreamPath: streamPath}}
 	p, err := e.WriteWidget()
 	if err != nil {
@@ -43,45 +43,48 @@ func TestWriteWidgetSubstitutesInterval(t *testing.T) {
 	}
 	b, _ := os.ReadFile(p)
 	s := string(b)
-	if strings.Contains(s, "__SAMPLE_EVERY__") {
-		t.Error("SampleEvery token not substituted")
+	// Every token is substituted: the published uploader is the same file, and
+	// a token left in place reads as "off" there — here it would silently turn
+	// the re-sim back into the uploader.
+	for _, tok := range []string{"__RESIM__", "__SAMPLE_EVERY__", "__OUTPUT_PATH__", "__PROFILE__", "__DISABLE_WIDGETS__", "__DAMAGE__", "__VISIBILITY__"} {
+		if strings.Contains(s, tok) {
+			t.Errorf("token %s not substituted", tok)
+		}
 	}
-	if !strings.Contains(s, `tonumber("15")`) {
-		t.Errorf("interval 15 not substituted; got fragment: %q", firstLineWith(s, "sampleEvery ="))
-	}
-	if strings.Contains(s, "__OUTPUT_PATH__") {
-		t.Error("output path token not substituted")
-	}
-	if !strings.Contains(s, `local outputPath = "`+streamPath+`"`) {
-		t.Errorf("output path not substituted; got fragment: %q", firstLineWith(s, "outputPath ="))
-	}
-	if strings.Contains(s, "__PROFILE__") {
-		t.Error("profile token not substituted")
-	}
-	if !strings.Contains(s, `local profileMode = ("0" == "1")`) {
-		t.Errorf("profile off not substituted; got fragment: %q", firstLineWith(s, "profileMode ="))
-	}
-	if strings.Contains(s, "__DISABLE_WIDGETS__") {
-		t.Error("disable-widgets token not substituted")
-	}
-	if !strings.Contains(s, `local disableWidgets = ("0" == "1")`) {
-		t.Errorf("disable-widgets off not substituted; got fragment: %q", firstLineWith(s, "disableWidgets ="))
+	for _, want := range []string{
+		`local resim = ("1" == "1")`,
+		`tonumber("15")`,
+		`local outputPath = resim and "` + streamPath + `"`,
+		`local profileMode = resim and ("0" == "1")`,
+		`local disableWidgets = resim and ("0" == "1")`,
+		// Damage and visibility default ON (Config.Skip* opt out).
+		`local recordDamage = resim and ("1" == "1")`,
+		`local recordVisibility = resim and ("1" == "1")`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("widget missing %q", want)
+		}
 	}
 }
 
-func TestWriteWidgetSubstitutesProfileOn(t *testing.T) {
+func TestWriteWidgetSubstitutesSwitches(t *testing.T) {
 	dir := t.TempDir()
-	e := &Engine{cfg: Config{DataDir: dir, SampleEvery: 30, SnapshotStreamPath: "barreplay/g.brsnap", Profile: true, DisableWidgets: true}}
+	e := &Engine{cfg: Config{DataDir: dir, SampleEvery: 30, SnapshotStreamPath: "barreplay/g.brepstream",
+		Profile: true, DisableWidgets: true, SkipDamage: true, SkipVisibility: true}}
 	p, err := e.WriteWidget()
 	if err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(p)
-	if !strings.Contains(string(b), `local profileMode = ("1" == "1")`) {
-		t.Errorf("profile on not substituted; got fragment: %q", firstLineWith(string(b), "profileMode ="))
-	}
-	if !strings.Contains(string(b), `local disableWidgets = ("1" == "1")`) {
-		t.Errorf("disable-widgets on not substituted; got fragment: %q", firstLineWith(string(b), "disableWidgets ="))
+	for _, want := range []string{
+		`local profileMode = resim and ("1" == "1")`,
+		`local disableWidgets = resim and ("1" == "1")`,
+		`local recordDamage = resim and ("0" == "1")`,
+		`local recordVisibility = resim and ("0" == "1")`,
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("widget missing %q", want)
+		}
 	}
 }
 
@@ -224,20 +227,18 @@ func TestLocateAbsolutizesRelativeDataDir(t *testing.T) {
 	}
 }
 
-// TestWidgetHasRequiredCallins lints the embedded Lua statically (no luac in CI):
+// TestWidgetHasRequiredCallins lints the embedded Lua statically (the record
+// encoding itself is pinned by internal/capture's harness golden):
 // it must define the callins the capture protocol depends on and stay read-only.
 func TestWidgetHasRequiredCallins(t *testing.T) {
-	src := assets.SnapshotWidgetLua
+	src := assets.WidgetLua
 	for _, need := range []string{
 		"function widget:GetInfo()",
 		"function widget:Initialize()",
 		"function widget:GameFrame(",
 		"function widget:UnitCreated(",
 		"function widget:UnitDestroyed(",
-		"function widget:GameOver()",
-		"BRSNAP F ",
-		"BRSNAP U ",
-		"BRSNAP EV ",
+		"function widget:GameOver(",
 		"spectatorfullview 1",
 		"quitforce",
 		"sample_time=",

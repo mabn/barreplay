@@ -14,14 +14,14 @@ positions is to replay it in the engine and sample state from a read-only Lua wi
 
 ```sh
 go build ./cmd/barreplay        # build the capture CLI -> ./barreplay
-go build ./cmd/pack             # build the .brsnap/.brepstream -> .brp converter -> ./pack
+go build ./cmd/pack             # build the .brepstream -> .brp converter -> ./pack
 go build ./cmd/barreplay-static # build the .brp -> static-hosting bundle packer (for worker/)
 go build ./cmd/bringest         # build the drag&drop upload daemon (polls the worker's job queue)
 go test ./...                   # all unit tests (no engine required)
 go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
 go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, no engine
-go run ./cmd/pack ./caps/<gameId>.brepstream   # THE default publish: raw stream -> FULL .brp (fetches the demo for map/versions/players; -id overrides, -no-demo skips) -> stats -> upload to R2 + register in the deployed worker's catalog, revisioned. -upload, -stats and -rev all default ON, so the bare command does the whole job; a .brsnap input works the same
-go run ./cmd/pack -upload= ./caps/<gameId>.brsnap   # pack + stats only, publish NOTHING (also how to analyze an existing .brp without republishing it)
+go run ./cmd/pack ./caps/<gameId>.brepstream   # THE default publish: raw stream -> FULL .brp (fetches the demo for map/versions/players; -id overrides, -no-demo skips) -> stats -> upload to R2 + register in the deployed worker's catalog, revisioned. -upload, -stats and -rev all default ON, so the bare command does the whole job
+go run ./cmd/pack -upload= ./caps/<gameId>.brepstream   # pack + stats only, publish NOTHING (also how to analyze an existing .brp without republishing it)
 go run ./cmd/pack -upload local ./caps/<gameId>.brepstream   # ...to the dev simulator instead
 # -upload names a whole DESTINATION: the bucket AND the worker that serves+catalogs it, paired in
 # internal/packer/targets.go ("r2" -> https://replay.fogofwar.dev, "local" -> http://127.0.0.1:5173)
@@ -51,7 +51,7 @@ against a mock worker API. None of them launch the engine or touch the network.
 
 ```
 cmd/barreplay/main.go     CLI: link/gameId/.sdfz -> full pipeline
-cmd/pack/main.go          CLI: convert .brsnap/.brepstream captures to .brp; -stats prints the
+cmd/pack/main.go          CLI: convert .brepstream captures to .brp; -stats prints the
                           size breakdown (sections + per-unit-def bytes, measured by
                           snapshot/brpstats.go and rendered by packer.ReportStats —
                           a .brp input is analyzed directly, never repacked). The pack/upload
@@ -454,11 +454,12 @@ internal/resim/           the cmd/barreplay pipeline packaged as one call (Run: 
                           BEATS every other explanation Run can give, deliberately: we sent that
                           signal, so "the engine was killed" and whatever the truncated stream
                           then failed to parse into are both true and both useless.
-internal/capture/         parse the widgets' streams -> snapshot records (BRSNAP text in
-                          capture.go, binary .brepstream in brep.go, shared preamble +
-                          comm-record parsing in lines.go). COMM records (text) / 'C'
-                          records (binary) carry one JSON payload each — a chat message or
-                          a map drawing — through the SAME parser (parseComm), whose
+internal/capture/         parse the widget's .brepstream -> snapshot records (brep.go; the
+                          text preamble + comm-record parsing in lines.go). The BRSNAP text
+                          stream it used to read too is GONE — nothing wrote it once the
+                          re-sim moved to .brepstream (widget 1.8.0). 'C' records carry one
+                          JSON payload each — a chat message or a map drawing — through
+                          parseComm, whose
                           sanitizeCommText length-caps the player-authored text and strips
                           control characters before it can reach a browser.
 internal/viz/             publish side of the viewer: the catalog row (catalog.go), the icon table
@@ -1884,11 +1885,46 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           marker; an older bundle's .brw heads upload after a completion
                           barrier so a half-uploaded replay never lists
 snapshot/                 PUBLIC data model + pluggable Writer (owns the on-disk format: the .brp binary).
-                          The Writer's four record types are Meta, Frame, Event and Comm
-                          (snapshot.Comm = one thing a player wrote or drew).
-assets/lua/snapshot_widget.lua   embedded, read-only sampler (go:embed)
-assets/lua/replay_uploader.lua   player-installable live-game variant: constants only, with
-                          ONE substitution token (__WIDGET_SHA__, stamped by
+                          The Writer's record types are Meta, Frame, Event and Comm
+                          (snapshot.Comm = one thing a player wrote or drew) plus the
+                          re-sim's ANALYSIS records (snapshot/analysis.go, .brp v6): Fact
+                          (game end, eliminations, departures, the weapon table, the
+                          engine's team stats), Hit (every damage callin as the engine
+                          delivered it), UnitEnd (where each unit's life ended) and
+                          Visibility (per-side LOS/radar per unit). DamageWindow and
+                          UnitLife (per-second sums, lifetime totals) are what
+                          internal/combat DERIVES from the hits — and what older captures
+                          stored, which is still read. snapshot.DiscardAnalysis
+                          is the embeddable no-op for writers that want none of them.
+internal/combat/          SOURCE DATA IN THE FILE, JUDGEMENT IN THE READER: Derive turns
+                          the raw hits + unit ends + destroyed events into damage windows,
+                          lives, credited kills (a chain of exploding reactors goes to
+                          whoever killed the first; a shell landing after its shooter died
+                          goes to the shooter's team) and the BIG BLASTS (Options:
+                          thresholds, blast window). The widget used to do all of this
+                          itself, which froze every choice into the capture; re-simulating
+                          old games is the one expensive thing, so anything that might be
+                          tuned lives here. Deterministic; experiments/brp-analysis runs it.
+assets/lua/replay_uploader.lua   THE widget, in two modes (widget >= 1.8.0; the separate
+                          snapshot_widget.lua sampler is gone). Published as-is it is the
+                          player-installable live-game uploader. Injected by the Go tool
+                          (engine.WriteWidget, embedded as assets.WidgetLua) with __RESIM__=1
+                          and its switches substituted (__SAMPLE_EVERY__, __OUTPUT_PATH__,
+                          __PROFILE__, __DISABLE_WIDGETS__, __DAMAGE__, __VISIBILITY__ —
+                          each compared against the literal "1", so the published copy with
+                          the tokens left in place reads as the uploader) it is the
+                          re-simulation sampler: GetInfo name "BAR Replay Snapshotter" (what
+                          widgetconfig.go seeds), handler access, full view, max speed, the
+                          default suite disabled, quitforce at game over, the "[barreplay]"
+                          log tag, units at hp <= 0 recorded rather than buried (the grey
+                          crashing aircraft), and the protocol-4 analysis records — killer
+                          per death on E (as the engine gave it), G facts, H hits, U unit
+                          ends, V visibility,
+                          P profiler readings (docs/brepstream-format.md). cmd/barreplay's
+                          -damage/-visibility (default on) map to Config.SkipDamage/
+                          SkipVisibility. The uploader mode records G end/teamdied/
+                          playerleft facts and "given" events but never a killer.
+                          The uploader mode has ONE more substitution token (__WIDGET_SHA__, stamped by
                           worker/tools/sync-assets.mjs when the widget is published for
                           download — see the widget-provenance note under worker/ below;
                           an unstamped copy reports no SHA rather than the token, guarded by
@@ -1916,20 +1952,22 @@ assets/lua/replay_uploader.lua   player-installable live-game variant: constants
                           to <write-dir>/<gameId>.brepstream — a binary
                           keyframe+delta stream (spec: docs/brepstream-format.md, decoder:
                           internal/capture/brep.go, ~6.5x smaller and ~4x cheaper per sample
-                          than the text stream) — named via the "GameID" GameRulesParam
+                          than the retired text stream) — named via the "GameID" GameRulesParam
                           (BAR's game_id.lua gadget; barwidgets.lua does NOT forward the
-                          engine's GameID callin to widgets); the
-                          writeText constant additionally emits the legacy .brsnap text
-                          stream (debug/reference; both formats from ONE game validate the
-                          binary encoder without re-simulating). Since 1.6.0 it also
-                          records what players WRITE and DRAW (COMM/'C' records — see the
-                          chat/drawings note under the wire protocol below). NOT
-                          embedded/injected by
-                          the Go tool (crowd-sourced capture plan: docs/widget-remote-upload.md)
-tools/brep-harness/       stubbed-Spring Lua harness: runs the REAL uploader widget over a
-                          deterministic fake game to (re)generate the
+                          engine's GameID callin to widgets). Since 1.6.0 it also
+                          records what players WRITE and DRAW ('C' records — see the
+                          chat/drawings note under the wire protocol below)
+                          (crowd-sourced capture plan: docs/widget-remote-upload.md)
+tools/brep-harness/       stubbed-Spring Lua harness: runs the REAL widget over a
+                          deterministic fake game, once per mode (`harness.lua <widget>` and
+                          `harness.lua <widget> resim`), to (re)generate the
                           internal/capture/testdata fixtures that pin the Lua encoder <-> Go
-                          decoder lockstep (TestBrepstreamMatchesTextFixture); needs lua5.4.
+                          decoder lockstep (TestHarnessGolden decodes each and compares a
+                          line-per-record dump with a committed golden; `go test
+                          -run TestHarnessGolden -update` rewrites them — read the diff);
+                          needs lua5.4. The script also kills, transfers and crashes units,
+                          eliminates a team and ends the game, so every analysis record is
+                          exercised.
                           Its commScript drives AddConsoleLine/MapDrawCmd over every chat
                           shape and draw type — INCLUDING the console lines that must NOT be
                           recorded (engine noise, the widget's own heartbeat echo, an unknown
@@ -1939,10 +1977,10 @@ tools/brep-harness/       stubbed-Spring Lua harness: runs the REAL uploader wid
 
 Key design rule: **the on-disk format lives only in `snapshot/`** behind the `Writer`
 interface. To change it implement `snapshot.Writer`; nothing in `capture`/`engine`
-changes. `capture.Consume(r, baseMeta, w)` is the seam between the engine's text
-output and the writer.
+changes. `capture.ConsumeBrep(r, baseMeta, w)` is the seam between the widget's
+stream and the writer.
 
-### On-disk format v5: `.brp` (snapshot/brp.go)
+### On-disk format v6: `.brp` (snapshot/brp.go)
 
 Full byte-level spec: `docs/brp-format.md` — keep it in sync with any codec change
 (`docs/brp-optimizations.md` records the measured evaluation behind the format's
@@ -1952,7 +1990,7 @@ whole elmos/hp, velocity as per-sample-interval
 displacement, build progress 1/255, resources 0.1; `t` is derived as `frame/30`,
 not stored; **y/dvy are not stored at all** — the viewer renders the x/z plane and
 ground-unit elevation is terrain noise, so decoded `Pos.Y`/`VelY` are 0). Container:
-`"BRP1" <ver u8 = 5>` then tagged sections `<tag u8><len u32le><payload>` — `M` meta
+`"BRP1" <ver u8 = 6>` then tagged sections `<tag u8><len u32le><payload>` — `M` meta
 JSON (Meta + precomputed bounds/frameTeams/counts + the **chunk index** + the
 **section layout**: every later section's tag and length in file order, which is how
 a browser holding only the head of the file finds the rest; always the FIRST
@@ -1968,14 +2006,19 @@ the core in v5 so the browser can draw construction bars and builder→target li
 like `E` with two string tables and whole-elmo positions delta-coded against the
 previous comm — freehand drawing is a run of short segments, so those deltas are
 1-2 bytes; OMITTED entirely when a capture has none, which is every .brp packed
-from a pre-1.6.0 widget stream, so readers must treat a missing `C` as "none").
-Unknown tags are
-skipped, so sections can be added compatibly; any version byte other than 5 is
-rejected in Go (v1–v3 existed only pre-release, v4 shipped without build/target in
-core; regenerate a .brp from its .brsnap/.brepstream with pack). The JS decoder
+from a pre-1.6.0 widget stream, so readers must treat a missing `C` as "none"),
+and in v6 the re-sim's analysis sections `G` facts, `H` hits, `U` unit ends and
+`V` visibility (older v6 captures have `D` damage windows and `S` lives instead) (each omitted when empty, written LAST — after `X`, in the
+layout like every other section — and none read by the viewer) plus four
+CAUSE columns appended to `E` (killer unit/def/team + weapon; the old owner's
+team for a `given` event) — detected by the bytes left after the team column,
+so a v5 events section reads unchanged. Unknown tags are
+skipped, so sections can be added compatibly; the Go reader accepts 5 and 6
+and rejects everything else (v1–v3 existed only pre-release, v4 shipped without
+build/target in core; regenerate a .brp from its .brepstream with pack). The
+frame columns did not change in v6. The JS decoder
 keys its column count off the container's version byte (the .brp's, or an older
-replay's .brw) and still plays published v4 bundles (their units decode as
-build=finished/target=none).
+replay's .brw), accepts 4..6 and still plays published v4 bundles (their units decode as build=finished/target=none).
 
 **Chunking (random access / streaming).** Frames are grouped into **chunks of 64
 samples** (~1 min at 1 Hz), and the codec's prediction state resets at every chunk
@@ -2025,37 +2068,38 @@ else.
 drawings out of the packet stream**) → `engine.Locate` → `engine.EnsureContent`
 (pr-downloader) → `engine.WriteWidget` (substitutes the output-file path) →
 `engine.EnableWidget` (seed widget config) → `engine.BuildStartscript` →
-`engine.Run` (widget writes `<out>/<gameId>.brsnap` directly) → `capture.Consume`
+`engine.Run` (widget writes `<data>/barreplay/<gameId>.brepstream`) → `capture.ConsumeBrep`
 reads that file → `capture.ReplaceComms` (the demo's comms win over the widget's) →
 `snapshot.NewBRPWriter`.
 
-Note the widget writes its BRSNAP stream to its **own file** (path substituted from
+Note the widget writes its stream to its **own file** (path substituted from
 `Config.SnapshotStreamPath`), not to stdout: the tool drains the engine's stdout (watching
 only for the widget's first `[barreplay]` line, which marks the load/sim boundary) and
 parses the file after the engine exits. `-progress` still works off `infolog.txt` (the
 widget's heartbeat lines keep `[f=]` markers flowing there).
 
-### Widget wire protocol (BRSNAP)
+### Widget wire protocol (.brepstream)
 
-The Lua widget writes tagged lines to its output file; `internal/capture` parses that
-file after the run. Evolve the widget and `capture` together.
+The widget writes a `.brepstream` (text preamble, then binary records — byte-level
+spec: `docs/brepstream-format.md`) to its output file; `internal/capture` parses that
+file after the run. Evolve the widget and `capture` together. (The re-sim used to
+write the BRSNAP text stream instead; that format and its parser are gone, and
+`pack` no longer accepts `.brsnap`.)
 
 **Why a file, not `Spring.Echo`:** the engine flushes its log on every Echo *and* caps
 each Echo at a few hundred units (a real replay hit 617), so streaming snapshots through
 stdout was slow and silently truncated. `System` exposes `io` to widgets (BAR's own
 `savetable.lua` uses `io.open`), so the widget opens the substituted `__OUTPUT_PATH__`
-and writes each whole sampled frame (`F` line + all `U` lines) with one `out:write`,
-flushing every sample and closing in `GameOver`/`Shutdown`. No size cap, one write per
-frame. Only the small `[barreplay]` heartbeat lines still go through `Spring.Echo` (for
-`infolog.txt` / `-progress`). `capture` still cross-checks each frame's `U` count against
-the `F` line's declared `<count>` and warns on a mismatch.
+and writes each sampled frame as one binary record, flushing every sample and closing
+in `GameOver`/`Shutdown`. No size cap. Only the small `[barreplay]` heartbeat lines
+still go through `Spring.Echo` (for `infolog.txt` / `-progress`).
 
 **Path sandbox (non-obvious):** Spring's `LuaIO::fopen` runs `IsSafePath`, which rejects
 **absolute paths** and any `..`, so the widget can only write a *relative* path resolved
 against the engine's working directory. `engine.Run` sets `cmd.Dir` to the write-dir and
-passes the widget a relative `barreplay/<gameId>.brsnap` (`Config.SnapshotStreamPath`);
-the tool reads it from `<data>/barreplay/<gameId>.brsnap` after the run and moves it to
-`<out>/<gameId>.brsnap`. An absolute path makes `io.open` return nil → no file at all.
+passes the widget a relative `barreplay/<gameId>.brepstream` (`Config.SnapshotStreamPath`);
+the tool reads it from `<data>/barreplay/<gameId>.brepstream` after the run and moves it to
+`<out>/<gameId>.brepstream`. An absolute path makes `io.open` return nil → no file at all.
 
 Because that `cmd.Dir` is the data dir, **`engine.Locate` absolutizes `Config.DataDir` and
 every binary path it resolves** (`filepath.Abs`) — otherwise a relative `-data .bardata`
@@ -2066,45 +2110,46 @@ parent's cwd), and `--write-dir` doubled the same way. Regression test:
 `TestLocateAbsolutizesRelativeDataDir`.
 
 ```
-BRSNAP DEF <json>                              full unit-def as JSON (preamble)
-BRSNAP D <defID> <name>                        unit-def id -> internal name (legacy preamble)
-BRSNAP T <teamID> <allyTeam> <side> <color>    team info (preamble; side "_" = none, color "#rrggbb")
-BRSNAP P <playerID> <team> <spectator> <name...>   player info (preamble; name last, may have spaces)
-BRSNAP READY                                   end of preamble
-BRSNAP F <frame> <timeSec> <count>             start of a periodic snapshot
-BRSNAP U <id> <def> <team> <x> <y> <z> <hp> <maxHp> <vx> <vy> <vz> <build> <target>   one unit (follows an F line)
-BRSNAP R <teamID> <metal> <energy> <mStore> <eStore> <mIncome> <eIncome>   team economy (follows an F line)
-BRSNAP EV <frame> <kind> <id> <def> <team>     unit lifecycle event
-BRSNAP COMM <json>                             one player comm: chat message or map drawing
-BRSNAP PROF <totalMs> <name>                   engine time-profiler record (once, at game over)
-BRSNAP PROFD <frame> <units> <totalMs> <name>  per-heartbeat profiler sample (-profile only)
+preamble (text lines, the old BRSNAP grammar):
+BRSNAP GID <gameId> / BRSNAP GAME <json> / BRSNAP DEF <json> / BRSNAP T ... / BRSNAP P ... / BRSNAP READY
+records (<tag u8><len u32le><payload>):
+F  one sampled frame (keyframe or delta: units, dead ids, team economy)
+E  unit lifecycle event, text; protocol 4 adds the cause columns (killer / old owner)
+C  one player comm: chat message or map drawing (JSON)
+G  game fact (JSON: end, teamdied, playerleft; re-sim also wdefs, teamstats)
+H  every damage callin     (re-sim, -damage)
+U  where unit lives ended  (re-sim, -damage)
+V  per-side visibility     (re-sim, -visibility)
+P  engine profiler reading (re-sim, -profile)
+X  end of stream
 ```
 
 The **unit defs are dumped in full** (`DEF` JSON: name, humanName, costs, buildTime,
 maxHealth, speed, footprint `xsize`/`zsize`, `iconType`, builder/factory/fly flags,
 weaponCount), not just id→name — mods add
 and modify unit types, and the id space depends on the exact game build the replay pins.
-The legacy `D` line (id→name) is still parsed for old `.brsnap` files. **Players** are
+Since protocol 4 a DEF also carries `techLevel`, `unitGroup`, `isCommander`,
+`maxWeaponRange` and the `deathWeapon`/`selfdWeapon` explosion ids (from
+customParams/weapon defs; for the game summary). **Players** are
 seeded from the **demo startscript** (`demofile.BaseMeta`, used by both `cmd/barreplay`
 and `pack`'s demo fetch), the authoritative
 source for per-player metadata the live engine list lacks: country flag (`countrycode`),
 ladder rank, OpenSkill rating ("OS", the bracketed `skill`) + uncertainty, `accountid`, and
-`boss`. The widget's `P` line (name/team/spectator) is a fallback for a raw `.brsnap` with no
+`boss`. The widget's `P` line (name/team/spectator) is a fallback for a raw stream with no
 startscript behind it — `capture` merges it by player id so a seeded player is never
 duplicated. **Team colours** ride the `T` line; `capture` backfills each `TeamInfo.PlayerName`
 from the first non-spectator player on that team.
-Each sampled frame also emits one `R` line per team with its current metal/energy, storage
+Each sampled frame also carries one resource row per team with its current metal/energy, storage
 caps, and per-game-second income — `GetTeamResources`' income return is ALREADY per
 game-second (the engine accumulates it over `TEAM_SLOWUPDATE_RATE` = 30 sim frames), so
 protocol >= 3 widgets write it as-is. Widgets before that wrongly multiplied it by 30;
 `capture` repairs those streams at decode time (`repairIncome` in lines.go: any stream
 without a `GAME` line declaring `protocol >= 3` gets its income divided by gameSpeed).
-Each `U` line carries, besides position and health, the unit's velocity (`vx/vy/vz`) and
-`buildProgress` (1 = finished, <1 = under construction; from `GetUnitHealth`'s 5th return).
-Both are appended after `maxHp`, so pre-velocity `.brsnap` streams still parse (capture reads
-them only when the line has all 12 fields).
+Each unit row carries, besides position and health, the unit's velocity (as the
+per-sample displacement), `buildProgress` (0..255; from `GetUnitHealth`'s 5th return)
+and its build/assist target.
 
-**Chat and map drawings (`COMM` / `C` records; both widgets, uploader >= 1.6.0).**
+**Chat and map drawings (`C` records; widget >= 1.6.0).**
 THE WIDGET PATH IS THE FALLBACK — whenever a demo is available its comms replace
 these wholesale (`capture.ReplaceComms`, wired into cmd/barreplay, internal/resim
 and internal/packer), because the demo has every channel and exact frames. The
@@ -2148,7 +2193,7 @@ own output file, and unsynced widget-handler calls) so it cannot desync the repl
 It also echoes plain `[barreplay] ...` heartbeat lines (on load + every 300 frames ≈ 10s of
 game time) for infolog visibility; when the heartbeat frame was also sampled it appends
 `sample_time=<n>us` (the per-sample processing cost, timed via `Spring.GetTimer`/`DiffTimers`;
-falls back to `<n>ms` via `os.clock` if the hi-res timer is absent). `capture` ignores any line without the `BRSNAP` tag. The
+falls back to `<n>ms` via `os.clock` if the hi-res timer is absent). The
 widget forces max playback speed via `setminspeed`/`setmaxspeed` in `Initialize` (re-asserted
 each heartbeat) — without a loaded widget the replay runs realtime.
 
@@ -2176,7 +2221,7 @@ is the Go side that publishes a `.brp` (`static.go`, used by `pack -upload` and
 `cmd/barreplay-static`), generates the viewer's icon table (`icons.go`) and builds
 the catalog row the publisher registers (`catalog.go`). Nothing here touches the
 engine. **The viewer reads the current .brp version only** — convert a raw
-`.brsnap`/`.brepstream` once with `pack` (the converter owns the legacy parsing;
+`.brepstream` once with `pack` (the converter owns the legacy parsing;
 viz has none). The URL scheme is `/index.json`, `/api/replays` and
 `/replays/<id>.brp` — the whole published replay, Range-read — plus, for OLDER
 replays, `/replays/<id>.brw`, `.resources`, and (older still) `.keys` and
@@ -2582,7 +2627,7 @@ run dev` in `worker/` plus `pack -upload local`.)
   sampled unit bounds). The front-end positions the texture at world
   `(0,0)`–`(width,height)` so units overlay correctly; the terrain layer is always
   on (no toggle). Caveat: the widget stream doesn't record the map name
-  (only the demo startscript path does), so a `.brp` packed from a raw `.brsnap` with
+  (only the demo startscript path does), so a `.brp` packed from a raw `.brepstream` with
   `pack -no-demo` has an empty `mapName` and renders the plain background; the
   default pack fetches the demo by gameId and fills it in.
 - **`worker/public/`** (+ `worker/index.html`) is plain HTML/Canvas/vanilla-JS — **no
@@ -2804,7 +2849,7 @@ Some Recoil builds' `spring-headless` initialize a **null GL context (version
 `CTextureRenderAtlas`). On a **GPU-less** machine that render never completes
 (`atlasRendered=0` loops forever), so the game never reaches "playing" and LuaUI
 widgets — including the snapshotter — never load. Symptoms in `infolog.txt`: stuck at
-`[f=-000001]`, endless `CreateAtlasTexture ... IconsAtlas_0` lines, no `BRSNAP` output.
+`[f=-000001]`, endless `CreateAtlasTexture ... IconsAtlas_0` lines, no capture output.
 The demo does re-simulate up to that point (you'll see players connect, initial spawns,
 and demo chat replay), so this is purely a rendering-init wall, not a logic problem.
 
@@ -2837,7 +2882,7 @@ profiler** (the `/debug` overlay data) via `Spring.GetProfilerRecordNames()` /
 
 - every heartbeat: a `[barreplay] prof Sim=…ms Lua=…ms …` line (top 8, infolog only) —
   shows whether per-frame cost drifts as unit count grows;
-- at game over: `BRSNAP PROF <totalMs> <name>` lines (top 80) written into the stream
+- at game over: a final `P` record (top 80 scopes) written into the stream
   file, which `capture` collects into `capture.Stats.Profile` and the CLI prints as a
   sorted table with % of wall time.
 
@@ -2849,7 +2894,7 @@ GC) always record. The detailed scopes (`Sim::Unit::{MoveType,SlowUpdate,Update,
 `-profile` substitutes `__PROFILE__` so the widget runs `Spring.SendCommands("debug 1 0")`
 in `Initialize`: arg 1 (`drawDebug`) enables profiler collection, arg 2 (`draw4Real=0`)
 keeps the ProfileDrawer overlay off (nothing to draw headless). In this mode the widget
-also writes `BRSNAP PROFD <frame> <units> <totalMs> <name>` samples (top 30 scopes) each
+also writes a `P` record (top 30 scopes, with the frame and unit count) each
 heartbeat, and the CLI prints a **growth table**: per-scope ms/sim-frame over the first vs
 last third of the game, with the unit-count range — the direct answer to "what gets
 expensive as the unit count grows". Profiling overhead is visible in the table itself as
@@ -2936,7 +2981,7 @@ never their content — and is the main remaining speed lever (~25-35% at the 60
 
 - Go module: `github.com/mabn/barreplay`, Go 1.24. No third-party deps (stdlib only).
 - Unit-def internal names (`armcom`, `corllt`, …) and side names (`armada`, `cortex`)
-  have no spaces — the BRSNAP `D`/`T` parsers rely on that.
+  have no spaces — the preamble `T` parser relies on that.
 - `fileName` from the API contains spaces; always `url.PathEscape` it (see `barapi.DownloadURL`).
 - The demo header is little-endian, byte-packed; layout verified in
   `internal/demofile/demofile.go` against the real sample (magic `spring demofile`,

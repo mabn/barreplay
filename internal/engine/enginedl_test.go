@@ -149,3 +149,37 @@ func TestLocateRejectsMismatchedEngineVersion(t *testing.T) {
 		t.Errorf("error should name the required version, got: %v", err)
 	}
 }
+
+// A brand-new data dir (no engine/ subdir yet) must still get its engine:
+// the staging dir's parent is created rather than assumed. A fake 7z stands
+// in for the extractor.
+func TestEnsureEngineIntoFreshDataDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake extractor is a shell script")
+	}
+	bin := t.TempDir()
+	script := "#!/bin/sh\nfor a; do case \"$a\" in -o*) out=\"${a#-o}\";; esac; done\n" +
+		": > \"$out/" + headlessName() + "\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "7z"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("archive"))
+	}))
+	defer srv.Close()
+	restore := EngineReleaseURL
+	EngineReleaseURL = func(v, a string) string { return srv.URL + "/" + a }
+	defer func() { EngineReleaseURL = restore }()
+
+	dir := filepath.Join(t.TempDir(), "bardata")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureEngine(context.Background(), Config{DataDir: dir}, "2026.07.04"); err != nil {
+		t.Fatal(err)
+	}
+	if !fileExists(filepath.Join(dir, "engine", "2026.07.04", headlessName())) {
+		t.Error("engine not installed into a fresh data dir")
+	}
+}

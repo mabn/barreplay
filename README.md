@@ -54,7 +54,7 @@ list every minute, so any game can be queued: pasted by an admin, or picked
 automatically when a one-sided upload lands and the game wants a full
 spectator view. A `bringest -resim` daemon on a machine with the engine
 downloads the demo, provisions the exact engine and game build the replay pins,
-injects the [snapshot widget](assets/lua/snapshot_widget.lua), runs the demo at
+injects [the widget](assets/lua/replay_uploader.lua) in its re-sim mode, runs the demo at
 max speed, and publishes the result exactly like an upload.
 
 **The viewer** never talks to a playback server. Every `.brp` is served as
@@ -77,14 +77,14 @@ reference; this table is the map.
 | `cmd/pack` | Convert a raw widget stream to `.brp`, print a size breakdown, publish to R2 and the catalog. |
 | `cmd/barreplay-static` | Pack `.brp` files into a static-hosting bundle. |
 | `snapshot/` | The data model and the `.brp` codec. Nothing else knows the on-disk format. |
-| `internal/capture` | Parse the widgets' streams (`.brsnap` text, `.brepstream` binary) into snapshot records. |
+| `internal/capture` | Parse the widget's `.brepstream` into snapshot records. |
 | `internal/demofile` | Parse the `.sdfz` header, startscript, and the chat and map-drawing packets. |
 | `internal/engine` | Locate or download `spring-headless`, provision content via `pr-downloader`, write the widget, launch and watch the engine, memory guard, ETA. |
 | `internal/resim` | The re-simulation pipeline as one call, with live progress for the daemon. |
 | `internal/packer` | Pack, upload (native SigV4 to R2), and register in the catalog. |
 | `internal/barapi` | BAR's replay API and demo download. |
 | `internal/viz` | The wire format served to the browser, the static bundle writer, the catalog row builder, BAR's unit icons. |
-| `assets/lua` | The two widgets: the injected re-sim sampler and the player-installable live recorder. |
+| `assets/lua` | The widget: the player-installable live recorder, which the Go tool also injects as the re-sim sampler. |
 | `worker/` | The Cloudflare Worker: front-end (`worker/public`), catalog, job queue, games mirror, admin routes. See `worker/README.md`. |
 | `patches/` | Engine patches for faster, leaner headless re-simulation. See below. |
 | `docs/` | Byte-level format specs and the engine build recipe. |
@@ -98,22 +98,25 @@ lines. Getting BAR to load a user widget in a replay is non-obvious; see
 
 ## Replay file format
 
-Three formats, in order of appearance. Only the last is ever served.
+Two formats. Only the second is ever served.
 
-**`.brepstream`** is what the live uploader widget writes: a binary
-keyframe-plus-delta stream, spec in [`docs/brepstream-format.md`](docs/brepstream-format.md).
-The re-sim widget writes the older tagged-text `.brsnap` (`BRSNAP F …`,
-`BRSNAP U …`), which is the reference format for the binary encoder. Both
-carry unit defs dumped in full, team and player preambles, per-unit position,
-velocity, health and build progress, per-team economy, lifecycle events, and
-since widget 1.6.0 chat and map drawings.
+**`.brepstream`** is what the widget writes, live or in a re-simulation: a
+binary keyframe-plus-delta stream, spec in [`docs/brepstream-format.md`](docs/brepstream-format.md).
+It carries unit defs dumped in full, team and player preambles, per-unit
+position, velocity, health and build progress, per-team economy, lifecycle
+events, since widget 1.6.0 chat and map drawings, and since 1.8.0 the game's
+facts (who won, eliminations) plus, in a re-simulation, the killer of every
+unit, damage by attacker and weapon, per-unit lifetime totals and which side
+could see each unit. (The re-sim used to write a tagged-text `.brsnap`; it is
+gone.)
 
-**`.brp`** (version 5) is the packed capture, owned by `snapshot/brp.go` and
+**`.brp`** (version 6) is the packed capture, owned by `snapshot/brp.go` and
 specified byte for byte in [`docs/brp-format.md`](docs/brp-format.md), with the
 measured design evaluation in [`docs/brp-optimizations.md`](docs/brp-optimizations.md).
 A container of tagged sections: `M` meta JSON with a chunk index, `K` every
 keyframe as one gzip stream, `F` delta-frame chunks, `X` team resources, `E`
-events, `C` comms. Frames are grouped into chunks of 64 samples with the
+events, `C` comms, and (v6) the re-sim's analysis sections `G` facts, `D`
+damage, `S` lives, `V` visibility. Frames are grouped into chunks of 64 samples with the
 predictor reset at every boundary, the video-codec model. A delta frame stores
 only a dead-id list and the units whose columns differ from prediction;
 positions predict from the previous velocity, so a unit moving at constant

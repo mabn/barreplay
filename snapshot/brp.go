@@ -110,19 +110,25 @@ import (
 
 // Container framing shared by .brp files ("BRP1") and the viz wire payload
 // ("BRW1"). A .brp starts with M; the writer then puts E, C, K, F, X (the
-// layout in the meta record says so), but readers accept any order after M
-// and skip unknown tags.
+// layout in the meta record says so), then v6's optional analysis sections
+// G, D, S, V (see analysis.go). Readers accept any order after M and skip
+// unknown tags.
 const (
 	BRPMagic = "BRP1"
 	BRWMagic = "BRW1"
 
-	// BRPVersion is the only readable format version. v1 (unchunked), v2
+	// BRPVersion is the version written. v6 added the analysis sections
+	// (G, D, S, V — see analysis.go) and the events' cause columns; a v5
+	// file reads exactly as before, with none of them. v1 (unchunked), v2
 	// (every live unit re-encoded per frame, y/dvy columns), v3 (keyframes
 	// inside the chunks) and v4 (build in X, no target column) are not
-	// supported — regenerate a .brp from its source .brsnap/.brepstream with
-	// pack. (The JS decoder still plays published v4 bundles; only the Go
-	// reader is single-version.)
-	BRPVersion byte = 5
+	// supported — regenerate a .brp from its source .brepstream with pack.
+	// (The JS decoder still plays published v4 bundles.)
+	BRPVersion byte = 6
+	// BRPMinVersion is the oldest version the Go reader accepts. A capture
+	// cannot be re-simulated for free, so a version bump ADDS data and every
+	// older file stays readable, merely without the newer features.
+	BRPMinVersion byte = 5
 
 	SecMeta      byte = 'M' // .brp: meta JSON
 	SecKeyframes byte = 'K' // all core keyframes, one gzip stream
@@ -252,13 +258,20 @@ type brpMetaRecord struct {
 	Bounds *BRPBounds `json:"bounds,omitempty"`
 	// FrameTeams lists every team id that appears in frames or events, so a
 	// consumer can colour teams missing from Meta.Teams without scanning.
-	FrameTeams  []int32    `json:"frameTeams,omitempty"`
-	Frames      int        `json:"frames"`
-	Events      int        `json:"events"`
-	Comms       int        `json:"comms,omitempty"`
-	UnitRecords int64      `json:"unitRecords"`
-	ChunkFrames int        `json:"chunkFrames"` // samples per chunk (last may be short)
-	Chunks      []BRPChunk `json:"chunks,omitempty"`
+	FrameTeams []int32 `json:"frameTeams,omitempty"`
+	Frames     int     `json:"frames"`
+	Events     int     `json:"events"`
+	Comms      int     `json:"comms,omitempty"`
+	// Analysis record counts (v6; zero/absent when not recorded).
+	Facts         int        `json:"facts,omitempty"`
+	DamageWindows int        `json:"damageWindows,omitempty"`
+	Lives         int        `json:"lives,omitempty"`
+	Visibility    int        `json:"visibility,omitempty"`
+	Hits          int        `json:"hits,omitempty"`
+	UnitEnds      int        `json:"unitEnds,omitempty"`
+	UnitRecords   int64      `json:"unitRecords"`
+	ChunkFrames   int        `json:"chunkFrames"` // samples per chunk (last may be short)
+	Chunks        []BRPChunk `json:"chunks,omitempty"`
 	// Sections is the file's LAYOUT: every section after M, in file order,
 	// with its payload length. The meta is always the first section, so its
 	// end is known from the 10 bytes in front of it, and from there this
@@ -288,6 +301,7 @@ func sectionLayout(secs []Section) []BRPSectionLen {
 // (still-compressed) sections, so consumers can slice chunks / forward E
 // without re-encoding.
 type BRPFile struct {
+	Version     byte // container version (BRPMinVersion..BRPVersion)
 	Meta        Meta
 	Bounds      *BRPBounds
 	FrameTeams  []int32
@@ -702,6 +716,27 @@ func encodeEvents(events []Event) []byte {
 	for _, e := range events {
 		vw.sv(int64(e.Team))
 	}
+	// v6: the cause columns, -1 where an event has none. Readers detect them
+	// by the bytes left after the team column, so the section needs no flag
+	// of its own and a v5 section (which ends there) reads unchanged.
+	cause := func(e Event) EventCause {
+		if e.Cause == nil {
+			return EventCause{UnitID: -1, DefID: -1, Team: -1, WeaponDef: -1}
+		}
+		return *e.Cause
+	}
+	for _, e := range events {
+		vw.sv(int64(cause(e).UnitID))
+	}
+	for _, e := range events {
+		vw.sv(int64(cause(e).DefID))
+	}
+	for _, e := range events {
+		vw.sv(int64(cause(e).Team))
+	}
+	for _, e := range events {
+		vw.sv(int64(cause(e).WeaponDef))
+	}
 	return buf.Bytes()
 }
 
@@ -770,6 +805,26 @@ func decodeEvents(b []byte) ([]Event, error) {
 			return nil, err
 		}
 		events[i].Team = int32(v)
+	}
+	if vr.done() {
+		return events, nil // v5: no cause columns
+	}
+	cause := make([][4]int64, n)
+	for c := 0; c < 4; c++ {
+		for i := 0; i < n; i++ {
+			v, err := vr.sv()
+			if err != nil {
+				return nil, err
+			}
+			cause[i][c] = v
+		}
+	}
+	for i := range events {
+		c := cause[i]
+		if c[0] < 0 && c[1] < 0 && c[2] < 0 && c[3] < 0 {
+			continue
+		}
+		events[i].Cause = &EventCause{UnitID: int32(c[0]), DefID: int32(c[1]), Team: int32(c[2]), WeaponDef: int32(c[3])}
 	}
 	return events, nil
 }
@@ -1014,6 +1069,12 @@ type brpWriter struct {
 
 	events      []Event
 	comms       []Comm
+	facts       []Fact
+	damage      []DamageWindow
+	lives       []UnitLife
+	hits        []Hit
+	unitEnds    []UnitEnd
+	visibility  []Visibility
 	bounds      BRPBounds
 	anyUnit     bool
 	frameTeams  map[int32]bool
@@ -1113,6 +1174,36 @@ func (w *brpWriter) WriteComm(c Comm) error {
 	return nil
 }
 
+func (w *brpWriter) WriteFact(f Fact) error {
+	w.facts = append(w.facts, f)
+	return nil
+}
+
+func (w *brpWriter) WriteDamage(d DamageWindow) error {
+	w.damage = append(w.damage, d)
+	return nil
+}
+
+func (w *brpWriter) WriteLife(l UnitLife) error {
+	w.lives = append(w.lives, l)
+	return nil
+}
+
+func (w *brpWriter) WriteVisibility(v Visibility) error {
+	w.visibility = append(w.visibility, v)
+	return nil
+}
+
+func (w *brpWriter) WriteHit(h Hit) error {
+	w.hits = append(w.hits, h)
+	return nil
+}
+
+func (w *brpWriter) WriteUnitEnd(u UnitEnd) error {
+	w.unitEnds = append(w.unitEnds, u)
+	return nil
+}
+
 func (w *brpWriter) Close() error {
 	w.flushChunk()
 
@@ -1122,8 +1213,15 @@ func (w *brpWriter) Close() error {
 		Events:      len(w.events),
 		Comms:       len(w.comms),
 		UnitRecords: w.unitRecords,
-		ChunkFrames: w.chunkFrames,
-		Chunks:      w.chunks,
+
+		Facts:         len(w.facts),
+		DamageWindows: len(w.damage),
+		Lives:         len(w.lives),
+		Visibility:    len(w.visibility),
+		Hits:          len(w.hits),
+		UnitEnds:      len(w.unitEnds),
+		ChunkFrames:   w.chunkFrames,
+		Chunks:        w.chunks,
 	}
 	if w.anyUnit {
 		b := w.bounds
@@ -1152,6 +1250,27 @@ func (w *brpWriter) Close() error {
 		Section{Tag: SecFrames, Payload: w.coreBuf.Bytes()},
 		Section{Tag: SecExtra, Payload: w.extraBuf.Bytes()},
 	)
+	// The analysis sections (v6) exist only when recorded — which only a
+	// re-simulation does — and the browser fetches none of them, so they go
+	// last, past everything the viewer reads.
+	if len(w.facts) > 0 {
+		data = append(data, Section{Tag: SecFacts, Payload: gzipCompress(encodeFacts(w.facts))})
+	}
+	if len(w.damage) > 0 {
+		data = append(data, Section{Tag: SecDamage, Payload: gzipCompress(encodeDamage(w.damage))})
+	}
+	if len(w.lives) > 0 {
+		data = append(data, Section{Tag: SecLives, Payload: gzipCompress(encodeLives(w.lives))})
+	}
+	if len(w.visibility) > 0 {
+		data = append(data, Section{Tag: SecVisibility, Payload: gzipCompress(encodeVisibility(w.visibility))})
+	}
+	if len(w.hits) > 0 {
+		data = append(data, Section{Tag: SecHits, Payload: gzipCompress(encodeHits(w.hits))})
+	}
+	if len(w.unitEnds) > 0 {
+		data = append(data, Section{Tag: SecUnitEnds, Payload: gzipCompress(encodeUnitEnds(w.unitEnds))})
+	}
 	rec.Sections = sectionLayout(data)
 
 	metaJSON, err := json.Marshal(rec)
@@ -1182,10 +1301,10 @@ func ParseBRP(r io.Reader) (*BRPFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	if version != BRPVersion {
-		return nil, fmt.Errorf("snapshot: unsupported .brp version %d (want %d)", version, BRPVersion)
+	if version < BRPMinVersion || version > BRPVersion {
+		return nil, fmt.Errorf("snapshot: unsupported .brp version %d (want %d..%d)", version, BRPMinVersion, BRPVersion)
 	}
-	f := &BRPFile{Sections: map[byte][]byte{}, SectionOffsets: map[byte]int64{}}
+	f := &BRPFile{Version: version, Sections: map[byte][]byte{}, SectionOffsets: map[byte]int64{}}
 	for _, s := range sections {
 		f.Sections[s.Tag] = s.Payload
 		f.SectionOffsets[s.Tag] = s.Offset
@@ -1227,8 +1346,10 @@ func IndexBRP(r io.Reader, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if version != BRPVersion {
-		return fmt.Errorf("snapshot: unsupported .brp version %d (want %d)", version, BRPVersion)
+	// A v5 file keeps its version: indexing adds a layout, it does not
+	// upgrade the codec (and every replay packed before v6 is a v5 file).
+	if version < BRPMinVersion || version > BRPVersion {
+		return fmt.Errorf("snapshot: unsupported .brp version %d (want %d..%d)", version, BRPMinVersion, BRPVersion)
 	}
 	if len(sections) == 0 || sections[0].Tag != SecMeta {
 		return fmt.Errorf("snapshot: .brp meta is not the first section")

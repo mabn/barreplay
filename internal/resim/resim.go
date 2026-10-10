@@ -39,7 +39,7 @@ type Options struct {
 	// DataDir is the BAR/Spring data directory (engine/, games/, maps/; also
 	// the engine's --write-dir). Required.
 	DataDir string
-	// OutDir receives <gameId>.brp (and the raw .brsnap stream, best-effort).
+	// OutDir receives <gameId>.brp (and the raw .brepstream, best-effort).
 	// Required.
 	OutDir string
 	// Every is the sampling interval in sim frames (0 = 30 = 1 Hz).
@@ -173,8 +173,8 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 
 	// The widget can only write a RELATIVE path inside the engine write-dir
 	// (Spring's LuaIO sandbox rejects absolute paths); read it back from there.
-	relStream := "barreplay/" + h.GameID + ".brsnap"
-	streamPath := filepath.Join(o.DataDir, "barreplay", h.GameID+".brsnap")
+	relStream := "barreplay/" + h.GameID + ".brepstream"
+	streamPath := filepath.Join(o.DataDir, "barreplay", h.GameID+".brepstream")
 	if err := os.MkdirAll(filepath.Dir(streamPath), 0o755); err != nil {
 		return "", nil, err
 	}
@@ -352,7 +352,7 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 	if raw, oerr := os.Open(streamPath); oerr != nil {
 		consumeErr = fmt.Errorf("open widget output %s: %w (did the widget load and run? see the GL caveat in CLAUDE.md)", streamPath, oerr)
 	} else {
-		consumeErr = capture.ConsumeStats(raw, base, w, &stats)
+		consumeErr = capture.ConsumeBrepStats(raw, base, w, &stats)
 		raw.Close()
 	}
 	closeErr := w.Close()
@@ -407,7 +407,7 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 	// OutDir is routinely a temp dir on another filesystem, where rename fails
 	// with EXDEV — so fall back to a copy, otherwise every run leaks a
 	// multi-hundred-MB stream into the data dir.
-	if merr := moveFile(streamPath, filepath.Join(o.OutDir, h.GameID+".brsnap")); merr != nil {
+	if merr := moveFile(streamPath, filepath.Join(o.OutDir, h.GameID+".brepstream")); merr != nil {
 		fmt.Fprintf(os.Stderr, "resim: warning: could not move raw stream: %v\n", merr)
 	}
 	fmt.Fprintf(os.Stderr, "resim: %s: %d frames, %d comms in %s -> %s\n",

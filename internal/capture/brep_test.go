@@ -111,6 +111,7 @@ func frameRecord(frame int, keyframe bool, units []tu, dead []int, res []tr) []b
 const brepPreamble = `BRSNAP GID a1b2c3d4e5f60718293a4b5c6d7e8f90
 BRSNAP GAME {"protocol":2,"mode":"live","map":"Test Map","gameVersion":"BAR test","engineVersion":"2026.01","sampleEvery":30,"gameSpeed":30,"playerID":0,"allyTeam":0,"spectator":false}
 BRSNAP DEF {"id":1,"name":"armcom","humanName":"Commander","maxHealth":3700}
+BRSNAP DEF {"id":2,"name":"armhp","humanName":"Hovercraft Platform","maxHealth":3350,"techLevel":1.500}
 BRSNAP T 0 0 armada #8040ff
 BRSNAP P 0 0 0 Player Zero
 BRSNAP READY
@@ -151,7 +152,8 @@ func TestConsumeBrep(t *testing.T) {
 		sink.meta.EngineVersion != "2026.01" || sink.meta.SampleEvery != 30 {
 		t.Errorf("meta from GAME line = %+v", sink.meta)
 	}
-	if len(sink.meta.UnitDefs) != 1 || sink.meta.UnitDefs[1].Name != "armcom" {
+	// armhp: BAR's hover lab is tech level 1.5, which once failed the whole DEF.
+	if len(sink.meta.UnitDefs) != 2 || sink.meta.UnitDefs[1].Name != "armcom" || sink.meta.UnitDefs[2].TechLevel != 1.5 {
 		t.Errorf("unit defs = %+v", sink.meta.UnitDefs)
 	}
 	if len(sink.meta.Teams) != 1 || sink.meta.Teams[0].PlayerName != "Player Zero" {
@@ -358,6 +360,7 @@ func TestConsumeBrepRejectsNonBrep(t *testing.T) {
 
 // loadedSink is an in-memory snapshot.Writer for tests.
 type loadedSink struct {
+	snapshot.DiscardAnalysis
 	meta   snapshot.Meta
 	frames []snapshot.Frame
 	events []snapshot.Event

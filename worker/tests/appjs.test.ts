@@ -2055,7 +2055,7 @@ test('a published .brp is read by Range and decodes as Go decodes it', async () 
   assert.equal(head.gameId, 'viewer');
   assert.equal(head.mapName, 'Test Map');
   assert.equal(head.sampleEvery, 30);
-  assert.equal(head.codecVer, 5);
+  assert.equal(head.codecVer, 6);
   assert.equal(head.frameCount, 70);
   assert.deepEqual(head.chunks.map((c: { count: number }) => c.count), [64, 6]);
 
@@ -2126,4 +2126,32 @@ test('a published .brp is read by Range and decodes as Go decodes it', async () 
 
   // A replay with no .brp is an older bundle: the head reads as null.
   assert.equal(await api.loadBrpHead('old'), null);
+});
+
+// The events section gained four cause columns in .brp v6 (snapshot/brp.go
+// encodeEvents). The decoder must read them when present and read a v5
+// section — which simply ends after the team column — exactly as before.
+test('decodeEvents reads v5 sections and v6 cause columns', () => {
+  const start = APP.indexOf('function decodeEvents(');
+  let depth = 0, src = '';
+  for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+    if (APP[j] === '{') depth++;
+    else if (APP[j] === '}' && --depth === 0) { src = APP.slice(start, j + 1); break; }
+  }
+  const decodeEvents = eval(`(function(){ ${src} return decodeEvents; })()`);
+  const zz = (v: number) => (v < 0 ? -2 * v - 1 : 2 * v); // single-byte values only
+  const kind = [...new TextEncoder().encode('destroyed')];
+  // two events: frame 10 unit 5 def 3 team 1; frame 12 unit 6 def 3 team 0
+  const v5 = [2, 1, kind.length, ...kind,
+    zz(10), zz(2), 0, 0, zz(5), zz(1), zz(3), zz(3), zz(1), zz(0)];
+  const plain = [
+    { f: 10, k: 'destroyed', id: 5, def: 3, team: 1 },
+    { f: 12, k: 'destroyed', id: 6, def: 3, team: 0 },
+  ];
+  assert.deepEqual(decodeEvents(new Uint8Array(v5)), plain);
+  // v6: event 0 killed by unit 6 (def 3, team 0, weapon 2); event 1 unknown.
+  const v6 = [...v5, zz(6), zz(-1), zz(3), zz(-1), zz(0), zz(-1), zz(2), zz(-1)];
+  const got = decodeEvents(new Uint8Array(v6));
+  assert.deepEqual(got[0].cause, { id: 6, def: 3, team: 0, weapon: 2 });
+  assert.equal(got[1].cause, undefined, 'all -1 means no cause');
 });

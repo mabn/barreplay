@@ -1,44 +1,48 @@
--- Replay uploader widget.
+-- Replay uploader widget, and the re-simulation sampler.
 --
--- A player-installable variant of the BAR Replay Snapshotter (snapshot_widget.lua):
--- it runs during a LIVE game on a player's machine, samples the units the player
--- can legitimately see (their own ally team fully; enemy units while in LOS or
--- radar — see recordEnemies below; everything when spectating with full
--- view), and records them to <write-dir>/<gameId>.brepstream — a compact binary
--- stream (columnar VFS.Pack* frames, keyframe + changed-units-only delta). The
--- legacy text stream (<gameId>.brsnap) is kept behind the writeText constant as
--- the debug/reference emitter; both can run in the same game, so one real game
--- validates the binary encoder against the battle-tested text one without
--- re-simulating anything. Eventually the binary chunks will be uploaded to a
--- remote ingest server and merged with other players' captures per gameId.
+-- ONE file, two modes.
 --
--- Unlike the snapshotter this widget is NOT injected or configured by the Go
--- tool: there are no __TOKEN__ substitutions, every knob is a constant below, so
--- one copy of the file works for every game. The output file name is the game's
--- unique id (32-hex, the same id stored in the .sdfz demo header and used by
--- api.bar-rts.com, so this capture self-correlates with the replay), obtained
--- from the "GameID" GameRulesParam that BAR's game_id.lua gadget publishes at
--- game start — BAR's widget handler does NOT forward the engine's GameID
--- callin to widgets, so the callin below is only a fallback for handlers that
--- do. Sampling starts into memory buffers immediately; files open the moment
--- the id resolves.
+-- As the REPLAY UPLOADER (the file as published) it is a player-installable
+-- widget: it runs during a LIVE game on a player's machine, samples the units
+-- the player can legitimately see (their own ally team fully; enemy units while
+-- in LOS or radar — see recordEnemies below; everything when spectating with
+-- full view), and records them to <write-dir>/<gameId>.brepstream — a compact
+-- binary stream (columnar VFS.Pack* frames, keyframe + changed-units-only
+-- delta). Every knob is a constant below, so one copy works for every game.
 --
--- The widget is read-only (Get* calls and its own output files); it never issues
--- orders or mutates state. In a live game it must be a polite guest: no speed
--- commands, no spectatorfullview, no quitting, no touching other widgets, and
--- every callin body is pcall-guarded so an error can never unload it mid-game
--- (BAR's handler removes a widget whose callin raises) — after repeated sample
--- failures it closes its files and removes itself instead. The binary emitter
--- exists for the same reason: formatting ~2000 text lines cost ~7 ms inside a
--- single frame (measured), while filling number columns and packing them with a
--- few VFS.Pack* C calls costs well under 1 ms.
+-- As the RE-SIMULATION SAMPLER the Go tool (internal/engine WriteWidget)
+-- injects this same file into a headless engine replaying a demo, with its
+-- substitution tokens filled in (the resim flag, the output path, the sample
+-- interval, and the profiling/widget/damage/visibility switches). Resim mode
+-- watches as a full-view spectator, forces maximum playback speed, disables
+-- BAR's own widget suite, quits the engine at game over, and additionally
+-- records what only a full view can know: the killer of every unit, damage per
+-- second, per-unit totals, per-side visibility, the end of the game and the
+-- engine's own team statistics. A file taken straight from the repo has the
+-- tokens unfilled and runs as the uploader.
+--
+-- The output file name is the game's unique id (32-hex, the same id stored in
+-- the .sdfz demo header and used by api.bar-rts.com, so this capture
+-- self-correlates with the replay), obtained from the "GameID" GameRulesParam
+-- that BAR's game_id.lua gadget publishes at game start — BAR's widget handler
+-- does NOT forward the engine's GameID callin to widgets, so the callin below
+-- is only a fallback for handlers that do. Sampling starts into memory buffers
+-- immediately; the file opens the moment the id resolves.
+--
+-- The widget is read-only (Get* calls and its own output file); it never issues
+-- orders or mutates synced state, so it cannot desync a replay. In a live game
+-- it must be a polite guest: no speed commands, no spectatorfullview, no
+-- quitting, no touching other widgets, and every callin body is pcall-guarded
+-- so an error can never unload it mid-game (BAR's handler removes a widget
+-- whose callin raises) — after repeated sample failures it closes its file and
+-- removes itself instead. Filling number columns and packing them with a few
+-- VFS.Pack* C calls costs well under 1 ms per sample.
 --
 -- .brepstream layout (spec: docs/brepstream-format.md; decoder:
 -- internal/capture/brep.go — the two must evolve in lockstep, versioned by the
--- header line):
+-- header line and the GAME line's protocol):
 --   line "BREPSTREAM 1"
---   text preamble, same grammar as .brsnap (BRSNAP GID/GAME/DEF/T/P lines),
---   terminated by "BRSNAP READY"
+--   text preamble (BRSNAP GID/GAME/DEF/T/P lines), terminated by "BRSNAP READY"
 --   then length-framed binary records: <tag u8> <len u32le> <payload>
 --   (the whole block may repeat: a widget re-enabled mid-game APPENDS a new
 --   segment — see openOutputs; a rejoining client re-simulates from frame 0
@@ -52,23 +56,25 @@
 --        keyframeEvery-th sample is a keyframe. Flag bit 1 marks the target
 --        column (the unit id this one is building/assisting, 0 = none;
 --        widget >= 1.4.0).
---     E  unit lifecycle event, text payload "<frame> <kind> <id> <def> <team>"
+--     E  unit lifecycle event, text payload
+--        "<frame> <kind> <id> <def> <team> [<aID> <aDef> <aTeam> <weapon>]"
+--        (the bracketed cause columns: protocol >= 4, see event())
 --     C  a player comm — chat message or map drawing — JSON payload
 --        (widget >= 1.6.0; see the comms section below)
+--     G  a game fact, JSON payload (protocol >= 4; see the game facts section)
+--     D  one damage window, packed (resim only; see the damage section)
+--     S  per-unit lifetime totals, packed (resim only; see the damage section)
+--     V  per-side visibility changes, packed (resim only; see visibility)
+--     P  engine time-profiler readings, JSON (resim only; see profiling)
 --     X  end of stream, text payload = reason (gameover|shutdown|error)
---
--- .brsnap text format (writeText; see internal/capture/capture.go): the same
--- as the snapshotter's — GID/GAME/DEF/T/P/READY preamble then F/U/R/EV/COMM/END
--- lines. Unknown tags are ignored by the parser, so GID/GAME/COMM/END are
--- backward compatible.
 
 -- Widget version (semver) and the date that version was cut. Bump BOTH on any
 -- user-visible or wire-visible change; they are reported in GetInfo, the load
 -- Echo, and the stream's GAME line, so every capture records which encoder
 -- produced it (the copy on a player's machine can be arbitrarily old — the
 -- server/decoder needs to know, and the catalog stores it per replay).
-local widgetVersion = "1.7.0"
-local widgetDate = "2026-08-16"
+local widgetVersion = "1.8.0"
+local widgetDate = "2026-10-10"
 
 -- Git SHA of this exact file, stamped when the widget is published for
 -- download: worker/tools/sync-assets.mjs replaces the token below with the SHA
@@ -94,9 +100,38 @@ local function stampedSha()
 	return nil
 end
 
+-- Re-simulation mode and its switches, filled in by the Go tool when it injects
+-- this file into a headless replay (internal/engine WriteWidget). Each test is
+-- against a literal "1", so an unsubstituted copy — the published uploader —
+-- reads every switch as off.
+local resim = ("__RESIM__" == "1")
+-- Engine time profiler (the -profile flag): Initialize enables collection and
+-- each heartbeat writes the per-scope totals to the stream (P records).
+local profileMode = resim and ("__PROFILE__" == "1")
+-- Disable BAR's own widget suite (-disable-widgets): in a replay the game's
+-- whole UI widget set loads and runs per-frame callins nobody watches — pure
+-- unsynced overhead. Widgets cannot affect the synced sim.
+local disableWidgets = resim and ("__DISABLE_WIDGETS__" == "1")
+-- Damage windows and per-unit totals (D and S records; -damage).
+local recordDamage = resim and ("__DAMAGE__" == "1")
+-- Per-side visibility (V records; -visibility).
+local recordVisibility = resim and ("__VISIBILITY__" == "1")
+-- Output path for resim mode. Spring's LuaIO sandbox rejects absolute paths
+-- (IsSafePath), so it is RELATIVE to the engine's write-dir, which the Go tool
+-- sets as the engine's working directory and reads the stream back from.
+local outputPath = resim and "__OUTPUT_PATH__" or nil
+
+-- Log prefix. The Go tool watches the engine's stdout for the first
+-- "[barreplay]" line to split load time from sim time, and the -progress
+-- poller reads the heartbeats, so resim mode speaks under that tag.
+local logTag = resim and "[barreplay]" or "[replay-uploader]"
+
 function widget:GetInfo()
 	return {
-		name    = "Replay uploader",
+		-- Resim mode keeps the name the Go tool seeds into BAR's widget order
+		-- list (internal/engine/widgetconfig.go): a user widget runs in a
+		-- replay only if its name is already there.
+		name    = resim and "BAR Replay Snapshotter" or "Replay uploader",
 		desc    = "Records unit snapshots (your team + visible enemies) to <gameId>.brepstream for post-game replay visualization.",
 		author  = "barreplay",
 		version = widgetVersion,
@@ -104,6 +139,9 @@ function widget:GetInfo()
 		license = "MIT",
 		layer   = 0,
 		enabled = true,
+		-- Grants widget.widgetHandler, which disabling the default suite
+		-- needs; the uploader asks for nothing it does not use.
+		handler = resim or nil,
 	}
 end
 
@@ -113,15 +151,12 @@ end
 --    TEAM_SLOWUPDATE_RATE = 30 sim frames = 1 game-second). Protocol <= 2
 --    widgets wrongly multiplied it by gameSpeed (30x too high); the decoder
 --    repairs those streams by dividing it back out.
-local protocolVersion = 3
-
--- Output format selection. writeBinary emits <gameId>.brepstream (the real
--- output); writeText additionally emits the legacy <gameId>.brsnap text stream
--- — the debug/reference format. Enable BOTH to validate the binary encoder
--- against the text one on a single real game (games are expensive to produce).
--- If the engine lacks VFS.Pack* the widget falls back to text automatically.
-local writeBinary = true
-local writeText = false
+-- 4: E records may carry the cause columns (killer / previous owner), the
+--    "given" event kind exists, DEF carries the techLevel/unitGroup/
+--    isCommander/maxWeaponRange/deathWeapon/selfdWeapon extras, and the
+--    G/H/U/V/P record types may
+--    appear. Purely additive: a protocol-3 decoder skips all of it.
+local protocolVersion = 4
 
 -- Enemy recording: units of other ally teams are recorded while visible (in
 -- LOS or on radar — Spring.GetAllUnits already returns only what this client
@@ -144,10 +179,11 @@ local writeText = false
 -- own-ally-team-only behavior.
 local recordEnemies = true
 
--- Sampling interval in sim frames (30 = 1 Hz at BAR's 30 fps sim). A constant:
--- every uploader in a game must sample at the same frames (frame % sampleEvery
--- == 0) so the server can merge streams by exact frame number.
-local sampleEvery = 30
+-- Sampling interval in sim frames (30 = 1 Hz at BAR's 30 fps sim). A constant
+-- for the uploader: every uploader in a game must sample at the same frames
+-- (frame % sampleEvery == 0) so the server can merge streams by exact frame
+-- number. Resim mode takes the Go tool's -every.
+local sampleEvery = (resim and tonumber("__SAMPLE_EVERY__")) or 30
 
 -- Samples per keyframe (64 ≈ one keyframe per minute at 1 Hz, matching the
 -- .brp chunk size). A keyframe re-states every unit absolutely and resets the
@@ -167,6 +203,8 @@ local spGetUnitHealth   = Spring.GetUnitHealth
 local spGetUnitIsDead   = Spring.GetUnitIsDead -- may be absent on old engines
 local spGetUnitVelocity = Spring.GetUnitVelocity
 local spGetUnitIsBuilding = Spring.GetUnitIsBuilding
+local spGetProjectileTeamID  = Spring.GetProjectileTeamID
+local spGetProjectileOwnerID = Spring.GetProjectileOwnerID
 local spGetGameSeconds  = Spring.GetGameSeconds
 local spGetGameFrame    = Spring.GetGameFrame
 local spGetTeamList     = Spring.GetTeamList
@@ -179,6 +217,11 @@ local spGetSpectatingState = Spring.GetSpectatingState
 local spGetMyAllyTeamID = Spring.GetMyAllyTeamID
 local spGetMyPlayerID   = Spring.GetMyPlayerID
 local spGetGameRulesParam = Spring.GetGameRulesParam
+local spGetUnitExperience = Spring.GetUnitExperience
+local spGetUnitLosState = Spring.GetUnitLosState
+local spGetAllyTeamList = Spring.GetAllyTeamList
+local spGetGaiaTeamID   = Spring.GetGaiaTeamID
+local spGetTeamStatsHistory = Spring.GetTeamStatsHistory
 
 local mathFloor = math.floor
 
@@ -212,7 +255,7 @@ end
 -- Binary packing. VFS.PackU8/U16/U32/S16/F32 turn a table of numbers into a
 -- little-endian byte string in one C call — the whole point of the binary
 -- format: no per-unit string.format. Availability is feature-detected in
--- Initialize; without it the widget falls back to the text emitter.
+-- Initialize; without it the widget cannot record and removes itself.
 
 local PackU8, PackU16, PackU32, PackS16, PackF32
 
@@ -238,18 +281,16 @@ local function clamp(v, lo, hi)
 end
 
 -- ---------------------------------------------------------------------------
--- Output files. The gameId arrives via widget:GameID (at game start), which may
--- be after Initialize, so everything produced before the files can be opened is
--- buffered (text lines and binary records separately) and drained the moment
--- they open. Spring's LuaIO sandbox rejects absolute paths, so paths are
--- relative to the engine write-dir: "<gameId>.brsnap" / "<gameId>.brepstream"
--- land in the data directory.
+-- Output file. The gameId arrives at game start (see resolveGameID), which may
+-- be after Initialize, so every record produced before the file can be opened
+-- is buffered and drained the moment it opens. Spring's LuaIO sandbox rejects
+-- absolute paths, so the path is relative to the engine write-dir:
+-- "<gameId>.brepstream" lands in the data directory (resim mode writes to the
+-- Go tool's outputPath instead).
 
-local gameId = nil      -- 32-hex-char game id (nil until widget:GameID fires)
-local tout = nil        -- text output handle (writeText)
-local bout = nil        -- binary output handle (writeBinary)
-local pendingText = {}  -- text lines buffered before open (nil once open/failed)
-local pendingBin = {}   -- binary byte-strings buffered before open
+local gameId = nil      -- 32-hex-char game id (nil until it resolves)
+local bout = nil        -- output handle
+local pendingBin = {}   -- byte-strings buffered before open (nil once open/failed)
 
 -- Config persistence (widget:Get/SetConfigData): BAR's handler saves this on
 -- disable/shutdown and hands it back when the widget is re-enabled. The GameID
@@ -259,18 +300,9 @@ local savedConfig = nil
 local lastSampledFrame = 0
 local gameEnded = false
 
--- writeChunk appends s plus a newline to the text stream (buffer or file).
-local function writeChunk(s)
-	if tout then
-		tout:write(s, "\n")
-	elseif pendingText then
-		pendingText[#pendingText + 1] = s
-	end
-end
-
--- writeRecord appends one framed binary record to the binary stream.
+-- writeRecord appends one framed binary record to the stream.
 local function writeRecord(tag, payload)
-	if not (writeBinary and (bout or pendingBin)) then
+	if not (bout or pendingBin) then
 		return
 	end
 	local rec = tag .. PackU32({ #payload }) .. payload
@@ -282,16 +314,13 @@ local function writeRecord(tag, payload)
 end
 
 local function flushOut()
-	if tout then
-		tout:flush()
-	end
 	if bout then
 		bout:flush()
 	end
 end
 
--- preambleStr is built at Initialize and written into both streams when they
--- open (the binary stream keeps the same human-readable text head).
+-- preambleStr is built at Initialize and written into the stream when it
+-- opens (the binary stream keeps a human-readable text head).
 local preambleStr = nil
 
 -- normalizeGameID returns the 32-char lowercase hex form of the GameID callin
@@ -310,7 +339,7 @@ local function normalizeGameID(id)
 	return nil
 end
 
--- fallbackGameID names the files when the GameID callin never fired (e.g. the
+-- fallbackGameID names the file when the GameID callin never fired (e.g. the
 -- widget was loaded/reloaded mid-game, after the callin). Wall-clock based, so
 -- it cannot collide with a real 32-hex id.
 local function fallbackGameID()
@@ -321,7 +350,7 @@ local function fallbackGameID()
 	return "unknown_" .. stamp
 end
 
--- openOutputs opens the enabled output files and drains the pre-gameId buffers.
+-- openOutputs opens the output file and drains the pre-gameId buffer.
 --
 -- Open mode depends on when in the game this happens. Near frame 0 (game
 -- start, or a crashed player REJOINING — the rejoin re-simulates the whole
@@ -331,42 +360,27 @@ end
 -- copy of the earlier part of the game: APPEND a fresh self-contained segment
 -- (header + preamble + records; the decoder treats a "BREPSTREAM 1" line
 -- between records as a segment restart). Frames only move forward within a
--- process, so appended segments never overlap the ones before them.
+-- process, so appended segments never overlap the ones before them. A
+-- re-simulation is one process from start to end: always truncate.
 local function openOutputs(id)
 	if gameId then
 		return
 	end
 	gameId = id
 	local frame = (spGetGameFrame and spGetGameFrame()) or 0
-	local append = frame > sampleEvery
+	local append = not resim and frame > sampleEvery
 	local head = "BRSNAP GID " .. id .. "\n" .. (preambleStr or "")
-	if writeText then
-		local path = id .. ".brsnap"
-		tout = io.open(path, append and "a" or "w")
-		if tout then
-			tout:write(head)
-			if pendingText and #pendingText > 0 then
-				tout:write(table.concat(pendingText, "\n"), "\n")
-			end
-			Echo("[replay-uploader] recording text to " .. path .. (append and " (appending)" or ""))
-		else
-			Echo("[replay-uploader] ERROR: could not open " .. path)
+	local path = outputPath or (id .. ".brepstream")
+	bout = io.open(path, append and "ab" or "wb")
+	if bout then
+		bout:write("BREPSTREAM 1\n", head)
+		for i = 1, #pendingBin do
+			bout:write(pendingBin[i])
 		end
-	end
-	pendingText = nil
-	if writeBinary then
-		local path = id .. ".brepstream"
-		bout = io.open(path, append and "ab" or "wb")
-		if bout then
-			bout:write("BREPSTREAM 1\n", head)
-			for i = 1, #pendingBin do
-				bout:write(pendingBin[i])
-			end
-			Echo(string.format("[replay-uploader] recording binary to %s%s (sampling every %d frames, keyframe every %d samples)",
-				path, append and " (appending)" or "", sampleEvery, keyframeEvery))
-		else
-			Echo("[replay-uploader] ERROR: could not open " .. path)
-		end
+		Echo(string.format("%s recording to %s%s (sampling every %d frames, keyframe every %d samples)",
+			logTag, path, append and " (appending)" or "", sampleEvery, keyframeEvery))
+	else
+		Echo(logTag .. " ERROR: could not open " .. path)
 	end
 	pendingBin = nil
 	flushOut()
@@ -399,15 +413,50 @@ local function jsonValue(v)
 	return "null"
 end
 
--- jsonObject encodes { {key, value}, ... } pairs in order, skipping nils.
+-- jsonObject encodes { {key, value}, ... } pairs in order, skipping nils. A
+-- pair with a truthy third element carries a value that is ALREADY JSON
+-- (a nested array or object) and is written verbatim.
 local function jsonObject(fields)
 	local parts = {}
 	for _, kv in ipairs(fields) do
 		if kv[2] ~= nil then
-			parts[#parts + 1] = '"' .. kv[1] .. '":' .. jsonValue(kv[2])
+			parts[#parts + 1] = '"' .. kv[1] .. '":' .. (kv[3] and kv[2] or jsonValue(kv[2]))
 		end
 	end
 	return "{" .. table.concat(parts, ",") .. "}"
+end
+
+-- jsonArray encodes a Lua array of scalars.
+local function jsonArray(t)
+	local parts = {}
+	for i = 1, #t do
+		parts[i] = jsonValue(t[i])
+	end
+	return "[" .. table.concat(parts, ",") .. "]"
+end
+
+-- customParam reads one of BAR's unit customParams, which are always strings
+-- in the def table (techlevel "2", iscommander "1"). Numeric ones come back as
+-- numbers, flags as booleans; anything absent is nil (omitted from the JSON).
+local function customParam(ud, key, kind)
+	local cp = ud.customParams
+	local v = cp and cp[key]
+	if v == nil or v == "" then
+		return nil
+	end
+	if kind == "number" then
+		return tonumber(v)
+	elseif kind == "flag" then
+		return v ~= "0" and v ~= "false" and v ~= false
+	end
+	return tostring(v)
+end
+
+-- explosionWeapon is the weapon-def id of a unit's death or self-destruct
+-- explosion (UnitDefs carry the weapon's NAME), or nil.
+local function explosionWeapon(name)
+	local wd = name and name ~= "" and WeaponDefNames and WeaponDefNames[name]
+	return wd and wd.id or nil
 end
 
 local function defJSON(defID, ud)
@@ -429,6 +478,20 @@ local function defJSON(defID, ud)
 		{ "canFly", ud.canFly },
 		{ "canMove", ud.canMove },
 		{ "weaponCount", ud.weapons and #ud.weapons or nil },
+		-- Protocol 4 extras, all from BAR's own data: the tech tier and
+		-- unit group (customParams.techlevel / unitgroup — "T2 came at
+		-- minute 9", "the army was mostly bots"), whether BAR calls it a
+		-- commander (customParams.iscommander, which also covers the
+		-- decoys BAR does NOT flag), and the longest weapon range.
+		{ "techLevel", customParam(ud, "techlevel", "number") },
+		{ "unitGroup", customParam(ud, "unitgroup", "string") },
+		{ "isCommander", customParam(ud, "iscommander", "flag") or nil },
+		{ "maxWeaponRange", (ud.maxWeaponRange or 0) > 0 and ud.maxWeaponRange or nil },
+		-- The explosions the unit makes when it dies and when it
+		-- self-destructs: what lets a reader tell which dead unit a blast
+		-- with no attacker came from.
+		{ "deathWeapon", explosionWeapon(ud.deathExplosion) },
+		{ "selfdWeapon", explosionWeapon(ud.selfDExplosion) },
 	})
 end
 
@@ -489,6 +552,9 @@ local function buildPreamble()
 		{ "playerID", spGetMyPlayerID and spGetMyPlayerID() or nil },
 		{ "allyTeam", spGetMyAllyTeamID and spGetMyAllyTeamID() or nil },
 		{ "spectator", spec and true or false },
+		-- A re-simulation's sampler, not a player's capture: the decoder
+		-- then records neither a recorder nor a widget build for it.
+		{ "resim", resim or nil },
 	})
 	for defID, ud in pairs(UnitDefs) do
 		parts[#parts + 1] = "BRSNAP DEF " .. defJSON(defID, ud)
@@ -566,7 +632,7 @@ local buried = {}
 --
 -- Readable health alone is NOT proof of life: UnitDestroyed fires while the
 -- unit still exists (the engine deletes it only after its death sequence, and
--- a morph/Spring.DestroyUnit kills it outright at full health), so the very
+-- a morph or a scripted DestroyUnit kills it outright at full health), so the very
 -- next sample can still read it out of GetAllUnits — with health 0, or even
 -- intact. Trusting that read cleared the tombstone and re-recorded the corpse
 -- for the rest of the game: a real 8v8 capture ended with 57 dead units still
@@ -636,8 +702,64 @@ local function packFrameRecord(frame, keyframe, n, cid, cdef, cteam, cx, cz, chp
 end
 
 -- ---------------------------------------------------------------------------
+-- Visibility (resim only, recordVisibility): for every unit, at every sample,
+-- what each ally team could see of it — in LOS, on radar, both or neither.
+-- The re-simulation watches with full view, which is exactly what makes this
+-- answerable: Spring.GetUnitLosState(unitID, allyTeam, true) reads the
+-- engine's own per-ally-team LOS bits regardless of who is watching.
+--
+-- Each unit's state is 2 bits per side in the order of visAllies (bit 0 of a
+-- pair = in LOS, bit 1 = on radar), up to 16 sides (a 16-way FFA is BAR's
+-- largest; sides past 16 are not recorded). It is kept and written as TWO
+-- 16-bit halves, sides 0-7 and 8-15, never as one 32-bit number: Spring's
+-- Lua numbers are single-precision floats, exact only up to 2^24, so a
+-- combined mask past 12 sides would silently lose its low bits. Arithmetic,
+-- not bit ops: Spring's Lua 5.1 has none.
+--
+-- A V record carries only the units whose mask CHANGED since the previous
+-- sample (or that are new to the record); a unit's state is otherwise its last
+-- one. Keyframe samples restate every unit (flag bit 0), so a decoder that
+-- starts at a keyframe — or a segment that does — needs nothing earlier.
+-- Units that left the game simply stop appearing; frames say when.
+
+local visAllies = nil   -- ally team ids, in mask order (built lazily)
+local visPrev = {}      -- unitID -> { lo, hi = last mask halves, f = last sampled frame }
+
+local function buildVisAllies()
+	visAllies = {}
+	local gaiaAlly = nil
+	if spGetGaiaTeamID then
+		local gaia = spGetGaiaTeamID()
+		gaiaAlly = gaia and allyTeamOf[gaia]
+	end
+	local list = spGetAllyTeamList and spGetAllyTeamList() or {}
+	for i = 1, #list do
+		-- Gaia's "side" is nobody's point of view.
+		if list[i] ~= gaiaAlly and #visAllies < 16 then
+			visAllies[#visAllies + 1] = list[i]
+		end
+	end
+end
+
+local function losMask(unitID)
+	local lo, hi, scale = 0, 0, 1
+	for i = 1, #visAllies do
+		local bits = spGetUnitLosState(unitID, visAllies[i], true)
+		if type(bits) == "number" then
+			if i <= 8 then
+				lo = lo + (bits % 4) * scale
+			else
+				hi = hi + (bits % 4) * scale
+			end
+		end
+		scale = (i == 8) and 1 or scale * 4
+	end
+	return lo, hi
+end
+
+-- ---------------------------------------------------------------------------
 -- Sampling. The body is pcall-guarded from widget:GameFrame; after a few
--- consecutive failures the widget closes its files and removes itself rather
+-- consecutive failures the widget closes its file and removes itself rather
 -- than risk degrading a live game.
 
 local lastSampleTime = nil
@@ -649,13 +771,10 @@ local function sample(frame)
 	local units = spGetAllUnits()
 	local total = #units
 
-	local keyframe = false
-	if writeBinary then
-		keyframe = (sampleIdx % keyframeEvery == 0)
-		sampleIdx = sampleIdx + 1
-		if keyframe then
-			prev = {} -- decoder state resets at a keyframe; mirror it
-		end
+	local keyframe = (sampleIdx % keyframeEvery == 0)
+	sampleIdx = sampleIdx + 1
+	if keyframe then
+		prev = {} -- decoder state resets at a keyframe; mirror it
 	end
 
 	-- Under full view nothing is LOS-gated, so the read-side fallback cache
@@ -665,13 +784,16 @@ local function sample(frame)
 		lastKnown = {}
 	end
 
-	-- Text lines (writeText) and binary changed-columns (writeBinary) are
-	-- filled in one pass so Spring.Get* runs once per unit either way.
-	local ulines = writeText and {} or nil
 	local n = 0
 	local cid, cdef, cteam, cx, cz, chp, cmax, cdvx, cdvz, cb, ct =
 		{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
 	local recorded = 0
+
+	local doVis = recordVisibility and spGetUnitLosState ~= nil
+	local nv, vid, vlo, vhi = 0, {}, {}, {}
+	if doVis and visAllies == nil then
+		buildVisAllies()
+	end
 
 	for i = 1, total do
 		local unitID = units[i]
@@ -684,13 +806,19 @@ local function sample(frame)
 			local x, y, z = spGetUnitPosition(unitID)
 			local defID = spGetUnitDefID(unitID)
 			local hp, maxHp, _, _, buildProgress = spGetUnitHealth(unitID)
-			if hp ~= nil and hp <= 0 then
+			if hp ~= nil and hp <= 0 and not resim then
 				-- Readable but dead: the engine still holds a killed unit for its
 				-- death sequence. Bury it here rather than waiting for the
 				-- UnitDestroyed callin — which may already have fired (the sample
 				-- lands inside the death window) or may never fire at all (the
 				-- widget was reloaded across it). The stale prev entry puts the
 				-- id on this frame's dead list. See unburied above.
+				--
+				-- A re-simulation RECORDS such a unit instead: it sees the
+				-- whole game, so a unit at 0 hp is a real thing on the field
+				-- (a crashing aircraft still does damage where it lands), and
+				-- the viewer draws it grey. The decoder's graveyard drops it
+				-- once its destroyed event is in the stream.
 				buried[unitID] = { x = x, z = z, def = defID, team = team }
 				lastKnown[unitID] = nil
 			else
@@ -702,8 +830,6 @@ local function sample(frame)
 				-- Radar-only enemies read back nils (def/health unreadable, the
 				-- position wobbled): carry the last-known identity/health from
 				-- the cache so a typed unit does not degrade to an untyped blip.
-				-- Both emitters use these effective values — the fixture test
-				-- cross-checks def/team between the two streams EXACTLY.
 				local edef = defID or (g and g.def) or 0
 				local eteam = team or (g and g.team) or (isEnemy and unknownTeam or 0)
 				local ehp, emaxHp, ebuild
@@ -712,73 +838,76 @@ local function sample(frame)
 				else
 					ehp, emaxHp, ebuild = hp or 0, maxHp or 0, buildProgress or 1
 				end
-				if ulines then
-					ulines[#ulines + 1] = string.format("BRSNAP U %d %d %d %.1f %.1f %.1f %.1f %.1f %.2f %.2f %.2f %.3f %d",
-						unitID, edef, eteam, x or 0, y or 0, z or 0, ehp, emaxHp,
-						vx or 0, vy or 0, vz or 0, ebuild, tgt or 0)
-				end
 				if not isEnemy and recordEnemies and lastKnown[unitID] ~= nil then
 					lastKnown[unitID] = nil -- the engine reused the id for a non-enemy unit
 				end
-				-- Quantization also runs for enemies in the text-only fallback:
-				-- the cache stores quantized values so the radar fallback is
-				-- identical in both formats.
-				if writeBinary or isEnemy then
-					-- All quantization inlined: function calls dominate this loop's
-					-- cost on Lua 5.1 (measured ~2x). floor(v+0.5) is fine for the
-					-- occasional slightly-negative off-map coordinate too.
-					local qx = mathFloor((x or 0) + 0.5)
-					if qx > 32767 then qx = 32767 elseif qx < -32768 then qx = -32768 end
-					local qz = mathFloor((z or 0) + 0.5)
-					if qz > 32767 then qz = 32767 elseif qz < -32768 then qz = -32768 end
-					local qhp = mathFloor(ehp + 0.5)
-					if qhp < 0 then qhp = 0 end
-					local qmax = mathFloor(emaxHp + 0.5)
-					if qmax < 0 then qmax = 0 end
-					local qdvx = mathFloor((vx or 0) * sampleEvery + 0.5)
-					if qdvx > 32767 then qdvx = 32767 elseif qdvx < -32768 then qdvx = -32768 end
-					local qdvz = mathFloor((vz or 0) * sampleEvery + 0.5)
-					if qdvz > 32767 then qdvz = 32767 elseif qdvz < -32768 then qdvz = -32768 end
-					local qb = mathFloor(ebuild * 255 + 0.5)
-					if qb > 255 then qb = 255 elseif qb < 0 then qb = 0 end
-					local qdef = edef
-					if qdef > 65535 or qdef < 0 then qdef = 0 end
-					local qteam = eteam
-					if qteam > 255 or qteam < 0 then qteam = unknownTeam end
-					local qt = tgt or 0
-					if qt > 65535 or qt < 0 then qt = 0 end
-					if isEnemy then
-						if g == nil then
-							g = {}
-							lastKnown[unitID] = g
-						end
-						-- x/z feed the UnitDestroyed tombstone fingerprint.
-						g.x, g.z, g.hp, g.maxhp = qx, qz, qhp, qmax
-						g.def, g.team, g.b = qdef, qteam, qb
+				-- All quantization inlined: function calls dominate this loop's
+				-- cost on Lua 5.1 (measured ~2x). floor(v+0.5) is fine for the
+				-- occasional slightly-negative off-map coordinate too.
+				local qx = mathFloor((x or 0) + 0.5)
+				if qx > 32767 then qx = 32767 elseif qx < -32768 then qx = -32768 end
+				local qz = mathFloor((z or 0) + 0.5)
+				if qz > 32767 then qz = 32767 elseif qz < -32768 then qz = -32768 end
+				local qhp = mathFloor(ehp + 0.5)
+				if qhp < 0 then qhp = 0 end
+				local qmax = mathFloor(emaxHp + 0.5)
+				if qmax < 0 then qmax = 0 end
+				local qdvx = mathFloor((vx or 0) * sampleEvery + 0.5)
+				if qdvx > 32767 then qdvx = 32767 elseif qdvx < -32768 then qdvx = -32768 end
+				local qdvz = mathFloor((vz or 0) * sampleEvery + 0.5)
+				if qdvz > 32767 then qdvz = 32767 elseif qdvz < -32768 then qdvz = -32768 end
+				local qb = mathFloor(ebuild * 255 + 0.5)
+				if qb > 255 then qb = 255 elseif qb < 0 then qb = 0 end
+				local qdef = edef
+				if qdef > 65535 or qdef < 0 then qdef = 0 end
+				local qteam = eteam
+				if qteam > 255 or qteam < 0 then qteam = unknownTeam end
+				local qt = tgt or 0
+				if qt > 65535 or qt < 0 then qt = 0 end
+				if isEnemy then
+					if g == nil then
+						g = {}
+						lastKnown[unitID] = g
 					end
-					if writeBinary then
-						local p = prev[unitID]
-						if p ~= nil and not keyframe
-							and p.dvx == qdvx and p.dvz == qdvz
-							and p.x + qdvx == qx and p.z + qdvz == qz
-							and p.hp == qhp and p.maxhp == qmax and p.b == qb
-							and p.def == qdef and p.team == qteam and p.t == qt then
-							-- Fully predicted: costs zero bytes. Advance to what the
-							-- decoder will compute.
-							p.x, p.z, p.f = qx, qz, frame
-						else
-							n = n + 1
-							cid[n], cdef[n], cteam[n] = unitID, qdef, qteam
-							cx[n], cz[n], chp[n], cmax[n] = qx, qz, qhp, qmax
-							cdvx[n], cdvz[n], cb[n], ct[n] = qdvx, qdvz, qb, qt
-							if p == nil then
-								prev[unitID] = { x = qx, z = qz, dvx = qdvx, dvz = qdvz,
-									hp = qhp, maxhp = qmax, def = qdef, team = qteam, b = qb, t = qt, f = frame }
-							else
-								p.x, p.z, p.dvx, p.dvz = qx, qz, qdvx, qdvz
-								p.hp, p.maxhp, p.def, p.team, p.b, p.t, p.f = qhp, qmax, qdef, qteam, qb, qt, frame
-							end
+					-- x/z feed the UnitDestroyed tombstone fingerprint.
+					g.x, g.z, g.hp, g.maxhp = qx, qz, qhp, qmax
+					g.def, g.team, g.b = qdef, qteam, qb
+				end
+				local p = prev[unitID]
+				if p ~= nil and not keyframe
+					and p.dvx == qdvx and p.dvz == qdvz
+					and p.x + qdvx == qx and p.z + qdvz == qz
+					and p.hp == qhp and p.maxhp == qmax and p.b == qb
+					and p.def == qdef and p.team == qteam and p.t == qt then
+					-- Fully predicted: costs zero bytes. Advance to what the
+					-- decoder will compute.
+					p.x, p.z, p.f = qx, qz, frame
+				else
+					n = n + 1
+					cid[n], cdef[n], cteam[n] = unitID, qdef, qteam
+					cx[n], cz[n], chp[n], cmax[n] = qx, qz, qhp, qmax
+					cdvx[n], cdvz[n], cb[n], ct[n] = qdvx, qdvz, qb, qt
+					if p == nil then
+						prev[unitID] = { x = qx, z = qz, dvx = qdvx, dvz = qdvz,
+							hp = qhp, maxhp = qmax, def = qdef, team = qteam, b = qb, t = qt, f = frame }
+					else
+						p.x, p.z, p.dvx, p.dvz = qx, qz, qdvx, qdvz
+						p.hp, p.maxhp, p.def, p.team, p.b, p.t, p.f = qhp, qmax, qdef, qteam, qb, qt, frame
+					end
+				end
+				if doVis and unitID <= 65535 then
+					local lo, hi = losMask(unitID)
+					local v = visPrev[unitID]
+					if v == nil then
+						visPrev[unitID] = { lo = lo, hi = hi, f = frame }
+						nv = nv + 1
+						vid[nv], vlo[nv], vhi[nv] = unitID, lo, hi
+					else
+						if keyframe or v.lo ~= lo or v.hi ~= hi then
+							nv = nv + 1
+							vid[nv], vlo[nv], vhi[nv] = unitID, lo, hi
 						end
+						v.lo, v.hi, v.f = lo, hi, frame
 					end
 				end
 			end
@@ -795,7 +924,7 @@ local function sample(frame)
 	-- Dead list: every predictor entry not seen this sample. (After a keyframe
 	-- reset there are no stale entries by construction.)
 	local dead = {}
-	if writeBinary and not keyframe then
+	if not keyframe then
 		for id, p in pairs(prev) do
 			if p.f ~= frame then
 				dead[#dead + 1] = id
@@ -811,7 +940,6 @@ local function sample(frame)
 	local nR = 0
 	local rteam = {}
 	local rcols = { {}, {}, {}, {}, {}, {} } -- metal, energy, mStore, eStore, mInc, eInc
-	local rlines = ulines
 	for _, teamID in ipairs(spGetTeamList()) do
 		local m, mStore, _, mInc = spGetTeamResources(teamID, "metal")
 		if m ~= nil then
@@ -821,22 +949,43 @@ local function sample(frame)
 			rcols[1][nR], rcols[2][nR] = m or 0, e or 0
 			rcols[3][nR], rcols[4][nR] = mStore or 0, eStore or 0
 			rcols[5][nR], rcols[6][nR] = mInc or 0, eInc or 0
-			if rlines then
-				rlines[#rlines + 1] = string.format("BRSNAP R %d %.1f %.1f %.1f %.1f %.2f %.2f",
-					teamID, m or 0, e or 0, mStore or 0, eStore or 0,
-					mInc or 0, eInc or 0)
-			end
 		end
 	end
 
-	if ulines then
-		writeChunk(string.format("BRSNAP F %d %.3f %d", frame, spGetGameSeconds(), recorded))
-		writeChunk(table.concat(ulines, "\n"))
+	writeRecord("F", packFrameRecord(frame, keyframe, n,
+		cid, cdef, cteam, cx, cz, chp, cmax, cdvx, cdvz, cb, ct, dead, nR, rteam, rcols))
+
+	if doVis then
+		-- Forget units that left, so a recycled id is recorded afresh.
+		-- (A sample where nothing changed writes no record at all.)
+		for id, v in pairs(visPrev) do
+			if v.f ~= frame then
+				visPrev[id] = nil
+			end
+		end
 	end
-	if writeBinary then
-		writeRecord("F", packFrameRecord(frame, keyframe, n,
-			cid, cdef, cteam, cx, cz, chp, cmax, cdvx, cdvz, cb, ct, dead, nR, rteam, rcols))
+	if doVis and (nv > 0 or keyframe) then
+		local ally = {}
+		for k = 1, #visAllies do
+			ally[k] = clamp(visAllies[k], 0, 255)
+		end
+		local parts = {
+			PackU32({ frame }),
+			PackU8({ keyframe and 1 or 0 }),
+			PackU8({ #visAllies }),
+		}
+		if #visAllies > 0 then
+			parts[#parts + 1] = PackU8(ally)
+		end
+		parts[#parts + 1] = PackU16({ nv })
+		if nv > 0 then
+			parts[#parts + 1] = PackU16(vid)
+			parts[#parts + 1] = PackU16(vlo)
+			parts[#parts + 1] = PackU16(vhi)
+		end
+		writeRecord("V", table.concat(parts))
 	end
+
 	flushOut() -- durable if the game/engine dies mid-match
 	lastSampledFrame = frame
 	lastSampleTime = elapsedStr(t0)
@@ -846,26 +995,18 @@ local function closeOut(reason)
 	-- Samples were buffered but no id ever resolved and the grace period had
 	-- not expired (e.g. the player quit early): save them under a fallback
 	-- name rather than dropping them.
-	if not gameId and ((pendingBin and #pendingBin > 0) or (pendingText and #pendingText > 0)) then
+	if not gameId and pendingBin and #pendingBin > 0 then
 		openOutputs(fallbackGameID())
 	end
-	if reason and (tout or bout) then
-		if tout then
-			writeChunk("BRSNAP END " .. reason)
-		end
+	if reason and bout then
 		writeRecord("X", reason)
-	end
-	if tout then
-		tout:flush()
-		tout:close()
-		tout = nil
 	end
 	if bout then
 		bout:flush()
 		bout:close()
 		bout = nil
 	end
-	pendingText, pendingBin = nil, nil
+	pendingBin = nil
 end
 
 local sampleFailures = 0
@@ -878,25 +1019,509 @@ local function removeSelf()
 end
 
 -- ---------------------------------------------------------------------------
+-- Game facts (G records, protocol >= 4): the things a game summary needs that
+-- no sample can show — how and when the game ENDED and who won, which teams
+-- died when, which players left, the weapon table the cause columns refer
+-- to, and the engine's own running team statistics. One JSON object per
+-- record, "k" naming the kind:
+--
+--   {"k":"end","f":<frame>,"winners":[<allyTeam>...]}
+--   {"k":"teamdied","f":<frame>,"team":<teamID>}
+--   {"k":"playerleft","f":<frame>,"player":<playerID>,"reason":<n>}
+--   {"k":"wdefs","defs":[{"id":..,"name":..,...}...]}            (resim)
+--   {"k":"teamstats","team":<teamID>,"fields":[...],"rows":[[...]...]}  (resim)
+--
+-- Small and rare, so JSON; the decoder keeps every kind it does not know
+-- verbatim, so a fact can be added without touching it.
+
+local function writeFact(fields)
+	writeRecord("G", jsonObject(fields))
+end
+
+local function factFrame()
+	local f = spGetGameFrame()
+	if not f or f < 0 then
+		return 0
+	end
+	return f
+end
+
+-- weaponDefsJSON is the weapon table the cause columns (a kill's weapon, a
+-- damage window's weapon) index into. Weapon ids are per game build, like
+-- unit-def ids, so the table has to travel with the capture.
+local function weaponDefsJSON()
+	local defs = {}
+	for id, wd in pairs(WeaponDefs or {}) do
+		local dmg = wd.damages and (wd.damages[0] or wd.damages[1]) or nil
+		defs[#defs + 1] = jsonObject({
+			{ "id", id },
+			{ "name", wd.name },
+			{ "description", (wd.description ~= nil and wd.description ~= "") and wd.description or nil },
+			{ "type", wd.type },
+			{ "range", wd.range },
+			{ "reload", wd.reload },
+			{ "damage", type(dmg) == "number" and dmg or nil },
+			{ "paralyzer", wd.paralyzer or nil },
+			{ "aoe", (wd.damageAreaOfEffect or 0) > 0 and wd.damageAreaOfEffect or nil },
+		})
+	end
+	return "[" .. table.concat(defs, ",") .. "]"
+end
+
+-- Team statistics fields, in row order. These are the engine's own running
+-- totals (CTeam::statHistory, sampled every statsFrames by the sim itself) —
+-- the numbers BAR's end-of-game graphs draw. A demo does not carry them; the
+-- re-simulation recomputes them, and this is where they are read out.
+local teamStatFields = {
+	"frame", "metalUsed", "metalProduced", "metalExcess", "metalReceived", "metalSent",
+	"energyUsed", "energyProduced", "energyExcess", "energyReceived", "energySent",
+	"damageDealt", "damageReceived", "unitsProduced", "unitsDied", "unitsReceived",
+	"unitsSent", "unitsCaptured", "unitsOutCaptured", "unitsKilled",
+}
+
+local function writeTeamStats()
+	if not spGetTeamStatsHistory then
+		return
+	end
+	for _, teamID in ipairs(spGetTeamList()) do
+		local count = spGetTeamStatsHistory(teamID)
+		if type(count) == "number" and count > 0 then
+			local hist = spGetTeamStatsHistory(teamID, 0, count)
+			if type(hist) == "table" then
+				local rows = {}
+				for i = 1, #hist do
+					local h, row = hist[i], {}
+					for k = 1, #teamStatFields do
+						row[k] = h[teamStatFields[k]] or 0
+					end
+					rows[#rows + 1] = jsonArray(row)
+				end
+				writeFact({
+					{ "k", "teamstats" },
+					{ "team", teamID },
+					{ "fields", jsonArray(teamStatFields), true },
+					{ "rows", "[" .. table.concat(rows, ",") .. "]", true },
+				})
+			end
+		end
+	end
+end
+
+-- ---------------------------------------------------------------------------
+-- Damage (resim only, recordDamage). Every UnitDamaged callin is written
+-- down as the engine delivered it — the widget draws NO conclusions from it.
+-- Who gets the credit for a death explosion, how much of a blow was
+-- overkill, which blasts were big: all of that is worked out when the file
+-- is read (internal/combat), where it can be changed without re-simulating
+-- the game, which is the one expensive thing. Hits are buffered and written
+-- once per sample as an H record, columns over the hits since the previous
+-- sample:
+--
+--   frame u32 (the window's first frame), n u32, then columns of n:
+--   df u16 (frame - window), victim u16, vDef u16, vTeam u8, x u16, z u16,
+--   attacker u16, aDef u16, aTeam u8, weapon u16, projOwner u16,
+--   projTeam u8, flags u8 (bit 0 paralyzer, bit 1 projectile),
+--   damage f32, hpAfter f32
+--
+-- 65535 / 255 mean unknown. attacker* is what the engine named (nothing,
+-- for a death explosion; sometimes the exploding unit itself). x/z is the
+-- victim's position, hpAfter its health right after the hit (below zero by
+-- the overkill). projOwner/projTeam are read off the projectile only when
+-- the engine named no attacker: it resolves the attacker from the shooter,
+-- which is gone once the shooter has died, so a shell still in flight then
+-- lands anonymously while the projectile still knows who fired it.
+--
+-- Where each unit's life ended rides alongside as U records, one row per
+-- death and, at game end, per survivor:
+--
+--   frame u32, n u32, then columns of n: df u16, unit u16, hit u32 (how
+--   many hits had been recorded before it — orders it exactly among
+--   them), x u16, z u16, xp f32, flags u8 (bit 0 alive at the end)
+--
+-- The death's killer is on its destroyed event, also as the engine gave it.
+
+local hitStart = 0  -- first frame of the open window
+local hitTotal = 0  -- hits recorded so far: the U rows' order index
+
+local function newHitBuf()
+	return { n = 0, df = {}, v = {}, vd = {}, vt = {}, x = {}, z = {}, a = {}, ad = {}, at = {},
+		w = {}, po = {}, pt = {}, fl = {}, d = {}, hp = {} }
+end
+
+local function newEndBuf()
+	return { n = 0, df = {}, u = {}, h = {}, x = {}, z = {}, xp = {}, fl = {} }
+end
+
+local hits = newHitBuf()
+local ends = newEndBuf()
+
+-- How many hits arrived, and how many of them named an attacker and a
+-- weapon: logged at game end, because whether the engine hands a widget the
+-- attacker of a hit is exactly what a capture cannot show on its own (an
+-- all-unknown damage log looks the same as a game of crashes).
+local dmgSeen, dmgNamedAttacker, dmgNamedWeapon = 0, 0, 0
+-- Hits whose shooter came from the projectile, and hits the engine itself
+-- caused (a negative weaponDefID: lava, crushing, a collision, a Lua kill).
+local dmgFromProjectile, dmgEngineCause = 0, 0
+
+-- The engine's own damage sources arrive as weaponDefID = -k (Recoil's
+-- CSolidObject::DamageType: 1 debris, 2 ground collision, 3 object
+-- collision, 4 fire, 5 water/lava, 6 killed by Lua, 7 crushed). They are
+-- written just below the unknown sentinel, 65535 - k, so the cause survives
+-- instead of folding into "unknown".
+local maxEngineCause = 7
+local function weaponCode(weaponDefID)
+	if weaponDefID == nil then
+		return 65535
+	end
+	if weaponDefID >= 0 and weaponDefID < 65535 - maxEngineCause then
+		return weaponDefID
+	end
+	if weaponDefID < 0 and weaponDefID >= -maxEngineCause then
+		return 65535 + weaponDefID
+	end
+	return 65535
+end
+
+local function id16(v)
+	if v ~= nil and v >= 0 and v < 65535 then
+		return v
+	end
+	return 65535
+end
+
+local function team8(v)
+	if v ~= nil and v >= 0 and v < 255 then
+		return v
+	end
+	return 255
+end
+
+local function pos16(v)
+	if v == nil then
+		return 0
+	end
+	return clamp(mathFloor(v + 0.5), 0, 65535)
+end
+
+local flushDamage -- defined below; a full buffer flushes early
+
+local function recordHit(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
+	if type(damage) ~= "number" or damage <= 0 then
+		return
+	end
+	dmgSeen = dmgSeen + 1
+	if attackerTeam ~= nil then dmgNamedAttacker = dmgNamedAttacker + 1 end
+	if weaponDefID ~= nil and weaponDefID >= 0 then dmgNamedWeapon = dmgNamedWeapon + 1 end
+	if weaponDefID ~= nil and weaponDefID < 0 then dmgEngineCause = dmgEngineCause + 1 end
+	local isProj = projectileID ~= nil and projectileID >= 0
+	local po, pt = 65535, 255
+	if attackerTeam == nil and isProj and spGetProjectileTeamID then
+		local t = spGetProjectileTeamID(projectileID)
+		if t ~= nil then
+			pt = team8(t)
+			po = id16(spGetProjectileOwnerID and spGetProjectileOwnerID(projectileID))
+			dmgFromProjectile = dmgFromProjectile + 1
+		end
+	end
+	local hp = spGetUnitHealth(unitID)
+	local x, _, z = spGetUnitPosition(unitID)
+	local b = hits
+	local n = b.n + 1
+	b.n = n
+	b.df[n] = clamp(spGetGameFrame() - hitStart, 0, 65535)
+	b.v[n] = id16(unitID)
+	b.vd[n] = id16(unitDefID)
+	b.vt[n] = team8(unitTeam)
+	b.x[n] = pos16(x)
+	b.z[n] = pos16(z)
+	b.a[n] = id16(attackerID)
+	b.ad[n] = id16(attackerDefID)
+	b.at[n] = team8(attackerTeam)
+	b.w[n] = weaponCode(weaponDefID)
+	b.po[n] = po
+	b.pt[n] = pt
+	b.fl[n] = (paralyzer and 1 or 0) + (isProj and 2 or 0)
+	b.d[n] = damage
+	b.hp[n] = hp or 0
+	hitTotal = hitTotal + 1
+	if n >= 60000 then
+		flushDamage(spGetGameFrame(), true)
+	end
+end
+
+-- recordEnd writes where unitID's life ended (alive: still standing when
+-- the game ended).
+local function recordEnd(unitID, alive)
+	local x, _, z = spGetUnitPosition(unitID)
+	local b = ends
+	local n = b.n + 1
+	b.n = n
+	b.df[n] = clamp(factFrame() - hitStart, 0, 65535)
+	b.u[n] = id16(unitID)
+	b.h[n] = hitTotal
+	b.x[n] = pos16(x)
+	b.z[n] = pos16(z)
+	b.xp[n] = (spGetUnitExperience and spGetUnitExperience(unitID)) or 0
+	b.fl[n] = alive and 1 or 0
+end
+
+-- flushDamage writes the open window's hits and unit ends (if any), then
+-- opens the next window at frame. force writes even with no sim frame
+-- since the window opened (a full buffer, the game ending).
+flushDamage = function(frame, force)
+	if not force then
+		if frame <= hitStart and frame > 0 then
+			return -- no sim frame since the window opened; keep it open
+		end
+		if frame == 0 then
+			hitStart = 0 -- the first sample: anything before it joins window 0
+			return
+		end
+	end
+	local b = hits
+	if b.n > 0 then
+		writeRecord("H", table.concat({
+			PackU32({ hitStart }), PackU32({ b.n }),
+			PackU16(b.df), PackU16(b.v), PackU16(b.vd), PackU8(b.vt),
+			PackU16(b.x), PackU16(b.z),
+			PackU16(b.a), PackU16(b.ad), PackU8(b.at), PackU16(b.w),
+			PackU16(b.po), PackU8(b.pt), PackU8(b.fl),
+			PackF32(b.d), PackF32(b.hp),
+		}))
+		hits = newHitBuf()
+	end
+	local e = ends
+	if e.n > 0 then
+		writeRecord("U", table.concat({
+			PackU32({ hitStart }), PackU32({ e.n }),
+			PackU16(e.df), PackU16(e.u), PackU32(e.h),
+			PackU16(e.x), PackU16(e.z), PackF32(e.xp), PackU8(e.fl),
+		}))
+		ends = newEndBuf()
+	end
+	if frame > hitStart then
+		hitStart = frame
+	end
+end
+
+-- ---------------------------------------------------------------------------
+-- Profiling (resim only). The engine keeps an internal time profiler (the
+-- /debug overlay data): named scopes like "Sim", "Sim::Path", "Lua" with
+-- accumulated wall time. Scopes nest ("Sim::Path" time is also inside "Sim"),
+-- so totals overlap and do not sum to wall time — read them as relative
+-- weights. Readings go into the stream as P records,
+--
+--   {"f":<frame>,"u":<units>,"final":true|nil,"r":[["<scope>",<ms>]...]}
+--
+-- one at game over with the largest 80 scopes (final), and in -profile mode
+-- one per heartbeat with the largest 30 — the Go tool turns consecutive ones
+-- into per-scope growth with unit count.
+
+local spGetProfilerRecordNames = Spring.GetProfilerRecordNames
+local spGetProfilerTimeRecord  = Spring.GetProfilerTimeRecord
+
+local function collectProfilerTotals()
+	local names = spGetProfilerRecordNames()
+	if not names then
+		return nil
+	end
+	local recs = {}
+	for i = 1, #names do
+		local name = names[i]
+		-- The second (frameData) argument is nominally optional but MUST be passed:
+		-- the engine pushes its return values before reading arg 2 at a fixed stack
+		-- index, so with only one argument it reads its own pushed number there and
+		-- raises "boolean expected, got number".
+		local totalMs = spGetProfilerTimeRecord(name, false) -- first return: total ms
+		if totalMs and totalMs > 0 then
+			recs[#recs + 1] = { name = name, ms = totalMs }
+		end
+	end
+	table.sort(recs, function(a, b) return a.ms > b.ms end)
+	return recs
+end
+
+-- profilerTotals is the safe wrapper: profiling is auxiliary, and an error
+-- escaping a callin makes BAR's widget handler unload the whole widget. On
+-- the first failure it reports the error and disables further attempts.
+local profilerBroken = false
+local function profilerTotals()
+	if not resim or profilerBroken or not (spGetProfilerRecordNames and spGetProfilerTimeRecord) then
+		return nil
+	end
+	local ok, recs = pcall(collectProfilerTotals)
+	if not ok then
+		profilerBroken = true
+		Echo(logTag .. " engine time profiler failed (" .. tostring(recs) .. "); disabling prof output")
+		return nil
+	end
+	return recs
+end
+
+local function writeProfile(recs, limit, frame, units, final)
+	local parts = {}
+	for i = 1, math.min(limit, #recs) do
+		parts[i] = "[" .. jsonValue(recs[i].name) .. "," .. string.format("%.1f", recs[i].ms) .. "]"
+	end
+	writeRecord("P", jsonObject({
+		{ "f", frame }, { "u", units }, { "final", final or nil },
+		{ "r", "[" .. table.concat(parts, ",") .. "]", true },
+	}))
+end
+
+-- ---------------------------------------------------------------------------
+-- Re-simulation housekeeping: run as fast as possible, see the whole map,
+-- turn off the widgets nobody is watching.
+
+-- Target playback speed. setminspeed forces the sim up to this multiplier so
+-- the replay fast-forwards instead of running realtime; the engine clamps to
+-- its own ceiling and otherwise runs as fast as the CPU allows.
+local playbackSpeed = 1000
+
+local function forceMaxSpeed()
+	Spring.SendCommands("setmaxspeed " .. playbackSpeed)
+	Spring.SendCommands("setminspeed " .. playbackSpeed)
+end
+
+-- Draw-frame counter: widget:Update fires once per draw frame, so the
+-- per-heartbeat delta is the engine's real draw rate — the check on whether
+-- -throttle-draw is holding. Only defined in resim mode (see the callins).
+local drawFrames = 0
+local lastDrawFrames = 0
+
+-- activeWidgetCount reports how many widgets are currently active ("-" if the
+-- handler is unavailable): confirms the default suite stayed disabled.
+local function activeWidgetCount()
+	local wh = widget.widgetHandler
+	local ok, n = pcall(function() return #wh.widgets end)
+	if ok and n then
+		return tostring(n)
+	end
+	return "-"
+end
+
+-- disableOtherWidgets turns off every other active widget through the handler's
+-- queued DisableWidget (callin-safe: the handler applies it between callins).
+-- BAR auto-enables its whole game-archive widget suite in replays and a seeded
+-- order list cannot prevent that (absent widgets re-enable at order 12345), so
+-- runtime disabling via the handler is the only reliable off switch. Runs once,
+-- from the first GameFrame, when the full suite is guaranteed loaded.
+local widgetsDisabled = false
+local function disableOtherWidgets()
+	widgetsDisabled = true
+	local wh = widget.widgetHandler
+	if not (wh and wh.knownWidgets and wh.DisableWidget) then
+		Echo(logTag .. " widget handler API unavailable; leaving default widgets enabled")
+		return
+	end
+	local me = widget:GetInfo().name
+	local n = 0
+	for name, ki in pairs(wh.knownWidgets) do
+		if ki.active and name ~= me then
+			wh:DisableWidget(name)
+			n = n + 1
+		end
+	end
+	Echo(string.format("%s disabling %d default widgets (unsynced overhead only)", logTag, n))
+end
+
+-- ---------------------------------------------------------------------------
 -- Callins.
+
+-- BAR's widget handler forwards UnitDamaged with only its first five
+-- arguments (luaui/barwidgets.lua: widgetHandler:UnitDamaged(unitID,
+-- unitDefID, unitTeam, damage, paralyzer)), so a widget is never told the
+-- weapon or the attacker of a hit, although the engine passes both. The
+-- handler's top-level callin is a closure over widgetHandler.UnitDamaged that
+-- forwards everything the engine gave it, rebuilt by UpdateCallIn — so the
+-- re-sim sampler (which has handler access) wraps that method, takes the full
+-- arguments for itself, and then calls the original for every other widget.
+-- Without handler access the widget's own callin still records the hits,
+-- with every attacker unknown.
+local damageHooked = false
+local unhookDamage = nil
+
+local function hookDamage()
+	local wh = widget.widgetHandler
+	if not (wh and type(wh.UnitDamaged) == "function" and type(wh.UpdateCallIn) == "function") then
+		Echo(logTag .. " widget handler API unavailable; damage will name no attacker")
+		return
+	end
+	local orig = wh.UnitDamaged
+	wh.UnitDamaged = function(self, unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
+		pcall(recordHit, unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
+		return orig(self, unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
+	end
+	damageHooked = true
+	wh:UpdateCallIn("UnitDamaged")
+	unhookDamage = function()
+		wh.UnitDamaged = orig
+		damageHooked = false
+		pcall(wh.UpdateCallIn, wh, "UnitDamaged")
+	end
+end
+
+if recordDamage then
+	-- Defined only when recording: an unused UnitDamaged callin would still
+	-- cost a Lua call per hit. It also keeps the handler's callin list
+	-- non-empty, which is what makes UpdateCallIn install the hook above.
+	function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
+		if damageHooked then
+			return -- recorded by the hook, with the arguments BAR drops
+		end
+		pcall(recordHit, unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
+	end
+end
 
 function widget:Initialize()
 	myAllyTeam = (spGetMyAllyTeamID and spGetMyAllyTeamID()) or -1
-	if writeBinary and not detectPack() then
-		Echo("[replay-uploader] VFS.Pack* unavailable; falling back to text output")
-		writeBinary = false
-		writeText = true
+	if not detectPack() then
+		Echo(logTag .. " VFS.Pack* unavailable; cannot record, removing widget")
+		pendingBin = nil
+		if widgetHandler and widgetHandler.RemoveWidget then
+			widgetHandler:RemoveWidget(widget)
+		end
+		return
+	end
+	if resim then
+		-- Run as fast as possible and see the whole map (spectator full
+		-- view), so GetAllUnits returns every unit regardless of LOS.
+		forceMaxSpeed()
+		Spring.SendCommands("spectatorfullview 1")
+		if profileMode then
+			-- "debug <drawDebug> <draw4Real>": arg 1 enables CTimeProfiler
+			-- collection (unlocking the non-"special" scopes like
+			-- Sim::Unit::*), arg 2 keeps the overlay off — nothing to draw.
+			Spring.SendCommands("debug 1 0")
+			Echo(logTag .. " profile mode: engine time profiler enabled (debug 1 0)")
+		end
 	end
 	local ok, err = pcall(function() preambleStr = buildPreamble() end)
 	if not ok then
-		Echo("[replay-uploader] preamble failed (" .. tostring(err) .. "); removing widget")
+		Echo(logTag .. " preamble failed (" .. tostring(err) .. "); removing widget")
 		removeSelf()
 		return
 	end
-	Echo("[replay-uploader] v" .. widgetVersion ..
-		" (" .. widgetDate .. (stampedSha() and " " .. widgetSha:sub(1, 8) or " unstamped") .. ") loaded (" ..
-		(writeBinary and writeText and "binary+text" or writeBinary and "binary" or "text") ..
-		"); waiting for gameId (GameID callin)")
+	if resim and recordDamage then
+		local hok, herr = pcall(hookDamage)
+		if not hok then
+			Echo(logTag .. " damage hook failed (" .. tostring(herr) .. "); damage will name no attacker")
+		end
+	end
+	if resim then
+		local wok, werr = pcall(function()
+			writeFact({ { "k", "wdefs" }, { "defs", weaponDefsJSON(), true } })
+		end)
+		if not wok then
+			Echo(logTag .. " weapon table failed (" .. tostring(werr) .. "); continuing without it")
+		end
+	end
+	Echo(logTag .. " v" .. widgetVersion ..
+		" (" .. widgetDate .. (stampedSha() and " " .. widgetSha:sub(1, 8) or " unstamped") .. ") loaded" ..
+		(resim and string.format(" in re-simulation mode (damage %s, visibility %s, speed %d)",
+			recordDamage and "on" or "off", recordVisibility and "on" or "off", playbackSpeed) or "") ..
+		"; waiting for gameId")
 end
 
 function widget:GameID(id)
@@ -904,7 +1529,7 @@ function widget:GameID(id)
 	if hex then
 		openOutputs(hex)
 	else
-		Echo("[replay-uploader] unrecognized GameID value; using fallback file name")
+		Echo(logTag .. " unrecognized GameID value; using fallback file name")
 		openOutputs(fallbackGameID())
 	end
 end
@@ -976,59 +1601,103 @@ end
 local fallbackAfterSamples = 10
 local unresolvedSamples = 0
 
+local function heartbeat(frame)
+	local line = string.format("%s heartbeat frame=%d t=%.0fs units=%d",
+		logTag, frame, spGetGameSeconds(), lastUnitCount)
+	if resim then
+		-- Re-assert speed in case demo playback reset it.
+		forceMaxSpeed()
+		line = line .. string.format(" draws=%d widgets=%s", drawFrames - lastDrawFrames, activeWidgetCount())
+		lastDrawFrames = drawFrames
+	end
+	if lastSampleTime then
+		line = line .. " sample_time=" .. lastSampleTime
+	end
+	Echo(line)
+	-- Top profiler scopes so far (infolog only): shows whether the frame cost
+	-- drifts (e.g. Sim growing with unit count) as the replay progresses.
+	local recs = profilerTotals()
+	if recs and recs[1] then
+		local parts = {}
+		for i = 1, math.min(8, #recs) do
+			parts[i] = string.format("%s=%.0fms", recs[i].name, recs[i].ms)
+		end
+		Echo(logTag .. " prof " .. table.concat(parts, " "))
+		if profileMode then
+			writeProfile(recs, 30, frame, lastUnitCount, false)
+		end
+	end
+end
+
 function widget:GameFrame(frame)
+	if disableWidgets and not widgetsDisabled then
+		local ok, err = pcall(disableOtherWidgets)
+		if not ok then
+			Echo(logTag .. " disabling widgets failed (" .. tostring(err) .. "); continuing")
+		end
+	end
 	-- The gameId is usually not known at Initialize (the GameID callin fires
 	-- ~game start, the rules param appears just after). Sampling starts
-	-- immediately into the pre-open buffers; the files open the moment a
+	-- immediately into the pre-open buffers; the file opens the moment a
 	-- source resolves, and only after a grace period under a fallback name.
 	if not gameId then
 		local id = resolveGameID(frame)
 		if id then
 			openOutputs(id)
 		elseif unresolvedSamples >= fallbackAfterSamples then
-			Echo("[replay-uploader] no game id after " .. unresolvedSamples .. " samples; using fallback file name")
+			Echo(logTag .. " no game id after " .. unresolvedSamples .. " samples; using fallback file name")
 			openOutputs(fallbackGameID())
 		elseif frame % sampleEvery == 0 then
 			unresolvedSamples = unresolvedSamples + 1
 		end
 	end
-	local beat = (frame % heartbeatEvery == 0)
 	if frame % sampleEvery == 0 then
+		-- The damage window closes at the sample boundary, before the sample:
+		-- everything since the last one happened before this frame's sim.
+		if recordDamage then
+			local ok, err = pcall(flushDamage, frame)
+			if not ok then
+				Echo(logTag .. " damage flush failed (" .. tostring(err) .. ")")
+				hits, ends, hitStart = newHitBuf(), newEndBuf(), frame
+			end
+		end
 		local ok, err = pcall(sample, frame)
 		if ok then
 			sampleFailures = 0
 		else
 			sampleFailures = sampleFailures + 1
-			Echo("[replay-uploader] sample failed (" .. tostring(err) .. ")")
+			Echo(logTag .. " sample failed (" .. tostring(err) .. ")")
 			if sampleFailures >= 3 then
-				Echo("[replay-uploader] 3 consecutive failures; disabling")
+				Echo(logTag .. " 3 consecutive failures; disabling")
 				removeSelf()
 				return
 			end
 		end
 	end
-	if beat then
-		local line = string.format("[replay-uploader] heartbeat frame=%d t=%.0fs units=%d",
-			frame, spGetGameSeconds(), lastUnitCount)
-		if lastSampleTime then
-			line = line .. " sample_time=" .. lastSampleTime
-		end
-		Echo(line)
+	if frame % heartbeatEvery == 0 then
+		pcall(heartbeat, frame)
 	end
 end
 
 -- Lifecycle events. The engine only fires these callins for units this client
 -- can see, so with recordEnemies on no extra filtering is needed.
-local function event(kind, unitID, defID, team)
+--
+-- Payload: "<frame> <kind> <id> <def> <team>", plus — protocol >= 4 — the
+-- CAUSE columns "<aID> <aDef> <aTeam> <weapon>" (-1 = unknown) when there is
+-- one: for "destroyed" the killer (unit, its def and team) and the weapon
+-- that dealt the blow; for "given" (a unit changing hands — shared, captured,
+-- or a resigned player's units handed to an ally) aTeam is the team it came
+-- FROM and the event's team the one it went to.
+local function event(kind, unitID, defID, team, aID, aDef, aTeam, weapon)
 	if not (recordAll() or recordEnemies or (team ~= nil and allyTeamOf[team] == myAllyTeam)) then
 		return
 	end
 	local frame = spGetGameFrame()
-	if tout or (writeText and pendingText) then
-		writeChunk(string.format("BRSNAP EV %d %s %d %d %d",
-			frame, kind, unitID, defID or -1, team or -1))
+	local payload = string.format("%d %s %d %d %d", frame, kind, unitID, defID or -1, team or -1)
+	if aID ~= nil or aDef ~= nil or aTeam ~= nil or weapon ~= nil then
+		payload = payload .. string.format(" %d %d %d %d", aID or -1, aDef or -1, aTeam or -1, weapon or -1)
 	end
-	writeRecord("E", string.format("%d %s %d %d %d", frame, kind, unitID, defID or -1, team or -1))
+	writeRecord("E", payload)
 end
 
 function widget:UnitCreated(unitID, unitDefID, unitTeam)
@@ -1040,27 +1709,60 @@ function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	pcall(event, "finished", unitID, unitDefID, unitTeam)
 end
 
-function widget:UnitDestroyed(unitID, unitDefID, unitTeam)
-	-- A death in view tombstones the id — the engine may keep returning it
-	-- from GetAllUnits (stale radar-memory dot / lingering corpse), which
-	-- must not be recorded as a live unit. The next sample finds the prev
-	-- entry unrefreshed and emits the id on the dead list.
-	local src = lastKnown[unitID] or prev[unitID]
-	local tx, tz
-	if src ~= nil then
-		tx, tz = src.x, src.z
-	else
-		local x, _, z = spGetUnitPosition(unitID)
-		tx, tz = x, z
+-- The attacker arguments are what the engine hands an unsynced handle with
+-- full read access — a full-view spectator, i.e. a re-simulation; a playing
+-- client gets nils, and nils are recorded as "unknown".
+function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam, weaponDefID)
+	if not resim then
+		-- A death in view tombstones the id — the engine may keep returning it
+		-- from GetAllUnits (stale radar-memory dot / lingering corpse), which
+		-- must not be recorded as a live unit. The next sample finds the prev
+		-- entry unrefreshed and emits the id on the dead list. A
+		-- re-simulation records exactly what the engine lists instead (see
+		-- sample).
+		local src = lastKnown[unitID] or prev[unitID]
+		local tx, tz
+		if src ~= nil then
+			tx, tz = src.x, src.z
+		else
+			local x, _, z = spGetUnitPosition(unitID)
+			tx, tz = x, z
+		end
+		buried[unitID] = { x = tx, z = tz, def = unitDefID, team = unitTeam }
+		lastKnown[unitID] = nil
 	end
-	buried[unitID] = { x = tx, z = tz, def = unitDefID, team = unitTeam }
-	lastKnown[unitID] = nil
-	pcall(event, "destroyed", unitID, unitDefID, unitTeam)
+	if recordDamage then
+		pcall(recordEnd, unitID, false)
+	end
+	-- Only a REAL attacker is a cause: the engine passes nils for a death
+	-- with none (self-destruct, a crash, a reclaim), and a weapon id alone
+	-- does happen (a weapon with no surviving owner).
+	if attackerID ~= nil or attackerDefID ~= nil or attackerTeam ~= nil or weaponDefID ~= nil then
+		pcall(event, "destroyed", unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam, weaponDefID)
+	else
+		pcall(event, "destroyed", unitID, unitDefID, unitTeam)
+	end
+end
+
+-- A unit changing hands. UnitTaken fires for the same transfer from the
+-- other side and is deliberately not recorded: one event per transfer.
+function widget:UnitGiven(unitID, unitDefID, newTeam, oldTeam)
+	pcall(event, "given", unitID, unitDefID, newTeam, nil, nil, oldTeam or -1, nil)
+end
+
+if resim then
+	function widget:Update()
+		drawFrames = drawFrames + 1
+	end
+end
+
+function widget:TeamDied(teamID)
+	pcall(writeFact, { { "k", "teamdied" }, { "f", factFrame() }, { "team", teamID } })
 end
 
 -- ---------------------------------------------------------------------------
--- Player comms: what people write and draw. Recorded as "COMM <json>" text
--- lines / 'C' binary records, one per message or drawing command; the payload
+-- Player comms: what people write and draw. Recorded as 'C' records, one per
+-- message or drawing command; the payload
 -- is JSON because chat text and marker labels are free-form (spaces, quotes,
 -- UTF-8), like the DEF and GAME records.
 --
@@ -1122,13 +1824,9 @@ local function writeComm(fields)
 	end
 	commCount = commCount + 1
 	if commCount == maxComms then
-		Echo("[replay-uploader] comm limit reached (" .. maxComms .. "); no more chat/drawings recorded")
+		Echo(logTag .. " comm limit reached (" .. maxComms .. "); no more chat/drawings recorded")
 	end
-	local payload = jsonObject(fields)
-	if tout or (writeText and pendingText) then
-		writeChunk("BRSNAP COMM " .. payload)
-	end
-	writeRecord("C", payload)
+	writeRecord("C", jsonObject(fields))
 end
 
 -- commFrame is the sim frame a comm is stamped with, clamped at 0: chat can
@@ -1274,14 +1972,73 @@ function widget:PlayerChanged(playerID)
 	pcall(notePlayer, playerID)
 end
 
-function widget:GameOver()
-	Echo("[replay-uploader] game over; capture complete" .. (gameId and (": " .. gameId) or ""))
+-- PlayerRemoved: a player left (reason: 0 = lost connection, 1 = left,
+-- 2 = kicked — the engine's own codes, recorded as they come).
+function widget:PlayerRemoved(playerID, reason)
+	pcall(writeFact, { { "k", "playerleft" }, { "f", factFrame() }, { "player", playerID }, { "reason", reason } })
+end
+
+-- finishResim writes what only the end of the game can say: the last damage
+-- window, where every survivor stood, the engine's team statistics and
+-- the profiler's final totals. Each part is guarded on its own — a failure
+-- in one must not cost the others, nor the capture.
+local function finishResim(frame)
+	if recordDamage then
+		local okLives, errLives = pcall(function()
+			for _, unitID in ipairs(spGetAllUnits()) do
+				recordEnd(unitID, true)
+			end
+			flushDamage(frame, true)
+			Echo(logTag .. " damage: " .. dmgSeen .. " hits, " .. dmgNamedAttacker
+				.. " naming an attacker, " .. dmgFromProjectile .. " more naming the projectile's shooter, "
+				.. dmgNamedWeapon .. " naming a weapon, " .. dmgEngineCause .. " caused by the engine")
+		end)
+		if not okLives then
+			Echo(logTag .. " final damage window / unit ends failed (" .. tostring(errLives) .. ")")
+		end
+	end
+	local ok, err = pcall(writeTeamStats)
+	if not ok then
+		Echo(logTag .. " team statistics failed (" .. tostring(err) .. ")")
+	end
+	local recs = profilerTotals()
+	if recs and recs[1] then
+		pcall(writeProfile, recs, 80, frame, lastUnitCount, true)
+	else
+		Echo(logTag .. " engine time profiler not available; skipping the totals")
+	end
+end
+
+-- GameOver hands over the winning ALLY teams (empty for a draw, or when the
+-- game ended with nobody standing).
+function widget:GameOver(winningAllyTeams)
+	local frame = factFrame()
+	pcall(function()
+		local winners = {}
+		if type(winningAllyTeams) == "table" then
+			for i = 1, #winningAllyTeams do
+				winners[i] = winningAllyTeams[i]
+			end
+		end
+		writeFact({ { "k", "end" }, { "f", frame }, { "winners", jsonArray(winners), true } })
+	end)
+	if resim then
+		finishResim(frame)
+	end
+	Echo(logTag .. " game over; capture complete" .. (gameId and (": " .. gameId) or ""))
 	gameEnded = true
 	closeOut("gameover")
+	if resim then
+		-- Clean, deterministic exit of the headless process.
+		Spring.SendCommands("quitforce")
+	end
 end
 
 -- Shutdown fires on engine teardown (or widget removal) even if GameOver did
 -- not — e.g. the player quits mid-game; keep the partial capture.
 function widget:Shutdown()
+	if unhookDamage then
+		unhookDamage()
+	end
 	closeOut("shutdown")
 end

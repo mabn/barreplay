@@ -13,7 +13,7 @@ import (
 // is false because replays force allowuserwidgets=true. So we seed one order-list
 // entry that enables our widget, then restore the user's original config afterward.
 const (
-	// widgetName must match GetInfo().name in assets/lua/snapshot_widget.lua.
+	// widgetName must match the re-sim GetInfo().name in assets/lua/replay_uploader.lua.
 	widgetName = "BAR Replay Snapshotter"
 	// barGameShortName is BAR's Game.gameShortName; it names the widget config file.
 	barGameShortName = "BYAR"

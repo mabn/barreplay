@@ -1012,9 +1012,11 @@ func encodeChunk5(coreK, extraK, coreD, extraD vw, fs []qFrame, scale int64, fin
 	}
 }
 
-// loadBRSnap re-parses a raw .brsnap through internal/capture (the pipeline's
-// own parser) and returns quantized frames that carry full-precision float
-// velocities in fvx/fvz.
+// loadBRSnap re-parses a raw capture stream through internal/capture (the
+// pipeline's own parser) and returns quantized frames that carry the stream's
+// float velocities in fvx/fvz. The text .brsnap stream it was written for is
+// retired; a .brepstream already quantizes velocity on the widget side, so the
+// opt5 sweep is only as precise as that.
 func loadBRSnap(path string, se float32) ([]qFrame, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -1022,7 +1024,7 @@ func loadBRSnap(path string, se float32) ([]qFrame, error) {
 	}
 	defer f.Close()
 	l := &collector{}
-	if err := capture.Consume(f, snapshot.Meta{GameID: "eval"}, l); err != nil {
+	if err := capture.ConsumeBrep(f, snapshot.Meta{GameID: "eval"}, l); err != nil {
 		return nil, err
 	}
 	out := make([]qFrame, len(l.frames))
@@ -1044,6 +1046,7 @@ func loadBRSnap(path string, se float32) ([]qFrame, error) {
 }
 
 type collector struct {
+	snapshot.DiscardAnalysis
 	frames []snapshot.Frame
 }
 
