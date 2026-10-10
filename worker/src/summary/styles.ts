@@ -32,6 +32,7 @@ export const CSS = `
 .brs-root .brs-unit { display: inline-flex; align-items: center; gap: 3px; font-variant-numeric: tabular-nums; color: var(--brs-muted); }
 .brs-root .brs-uicon { width: 22px; height: 22px; object-fit: contain; }
 .brs-root .brs-uname { color: var(--brs-text); }
+.brs-root .brs-strong { font-weight: 600; }
 .brs-root .brs-more { font: inherit; font-size: 12px; color: var(--brs-muted); background: none; border: 1px solid var(--brs-grid); border-radius: 10px; padding: 1px 8px; cursor: pointer; }
 .brs-root .brs-more:hover { color: var(--brs-text); }
 .brs-root .brs-hint { color: var(--brs-muted); font-size: 12px; }

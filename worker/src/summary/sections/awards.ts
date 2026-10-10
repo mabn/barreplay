@@ -5,11 +5,11 @@
 import { h, s, section } from "../dom";
 import { comparable, sideColor, sideOfTeam, teamColor } from "../model";
 import { tip } from "../tooltip";
-import { clipAround, watcher } from "../watch";
+import { clipAround, clipEvent, watcher } from "../watch";
 import { type Award, type Clip, type Insights, type SummaryOptions } from "../types";
 
 const ICONS: Record<string, string> = {
-  immortal: "🛡", marathon: "🏃", tourist: "🧭", closecall: "❤", unfinished: "🏗", costliest: "💸",
+  immortal: "🛡", marathon: "🏃", tourist: "🧭", closecall: "❤", unfinished: "🏗", costliest: "💸", blow: "💥",
 };
 
 /** where is the award's unit on the map when the moment is its death (the
@@ -32,6 +32,10 @@ export function clipOf(a: Award, at: { x?: number; z?: number }, title: string):
   const base = { ...unit, ...at, r: 700, title };
   if ((a.key === "marathon" || a.key === "tourist") && a.f0 !== undefined && a.f1 !== undefined && a.f1 > a.f0) {
     return { ...base, f0: a.f0, f1: a.f1 };
+  }
+  // A player's worst half-minute: the whole of it, wide enough to see.
+  if (a.key === "blow" && a.f0 !== undefined && a.f1 !== undefined) {
+    return clipEvent(a.f0, Math.max(a.f1, a.f0 + 1), { ...base, r: 1200 });
   }
   return clipAround(a.f, base);
 }
@@ -82,12 +86,12 @@ export function awards(ins: Insights, opts: SummaryOptions): HTMLElement | null 
       h("div", { class: "brs-award-body" },
         map,
         h("div", undefined,
-          h("div", undefined,
-            h("b", undefined, name), " of ",
-            h("span", { style: `color: ${sd >= 0 ? teamColor(ins, a.team) : sideColor(ins, 0)}` }, who)),
+          // The blow is a player's, not one unit's: the text lists what went.
+          h("div", undefined, ...(a.key === "blow" ? [] : [h("b", undefined, name), " of "]),
+            h("span", { style: `color: ${sd >= 0 ? teamColor(ins, a.team) : sideColor(ins, 0)}`, class: a.key === "blow" ? "brs-strong" : null }, who)),
           h("div", { class: "brs-hint" }, a.text))),
       watch ? h("div", { class: "brs-watch" }, a.unit !== undefined ? "▶ Watch it (followed and ringed)" : "▶ Watch") : null);
-    if (watch) card.addEventListener("click", () => watch(clipOf(a, at, `${a.label}: ${name} of ${who}`)));
+    if (watch) card.addEventListener("click", () => watch(clipOf(a, at, a.key === "blow" ? `${a.label}: ${who}` : `${a.label}: ${name} of ${who}`)));
     return card;
   });
   return section(comparable(ins) ? "Awards" : "Awards (this capture saw every side)", h("div", { class: "brs-cards" }, ...cards));

@@ -58,11 +58,11 @@ func TestAwards(t *testing.T) {
 	if _, ok := got["immortal"]; ok {
 		t.Errorf("immortal = %+v, want none", got["immortal"])
 	}
-	// The fusion is the costliest loss but went unfinished; it takes that
-	// award, and the costliest FINISHED loss is a raider.
-	if a := got["costliest"]; a.Def != defRaider || a.Value != 50 {
-		t.Errorf("costliest = %+v", a)
+	// The biggest blow is the most one team lost within 30 s.
+	if a := got["blow"]; a.Key == "" || a.Value <= 0 || a.F0 > a.F || a.F > a.F1 || a.F1-a.F0 > blowWindow {
+		t.Errorf("blow = %+v", a)
 	}
+	t.Logf("blow = %+v", got["blow"])
 	if _, ok := got["tourist"]; ok {
 		t.Errorf("tourist = %+v, want none (nobody covered 5%% of the map)", got["tourist"])
 	}
@@ -75,7 +75,7 @@ func TestAwards(t *testing.T) {
 	if _, ok := ins.Defs[got["marathon"].Def]; !ok {
 		t.Error("an award's def must be described in Defs")
 	} // Every award names its unit; a mobile one also carries where it went.
-	for _, k := range []string{"marathon", "costliest"} {
+	for _, k := range []string{"marathon"} {
 		a := got[k]
 		if len(a.Path) < 2 || a.F0 >= a.F1 || a.Path[0][0] != a.F0 || a.Path[len(a.Path)-1][0] != a.F1 {
 			t.Errorf("%s: life %d-%d, path %v", k, a.F0, a.F1, a.Path)

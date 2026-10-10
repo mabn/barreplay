@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"github.com/mabn/barreplay/snapshot"
 )
@@ -110,6 +111,7 @@ const (
 	battleMinN      = 6                        // deaths for a peak to count as a battle
 	battleMaxN      = 12                       // battles kept (the biggest, then in time order)
 	battleTopDefs   = 3                        // costliest defs listed per side
+	blowWindow      = 30 * simFPS              // frames the Biggest blow's losses fall within
 	battleUnitDefs  = 48                       // defs a battle's unit list carries per side
 	tourGrid        = 32                       // cells per axis of the Tourist's map grid
 	tourMinCells    = tourGrid * tourGrid / 20 // 5% of the map, or no Tourist
@@ -676,20 +678,14 @@ func (p *pass) awards() []Award {
 	}
 
 	d := p.out.Deaths
-	best, bestUnf := -1, -1
+	bestUnf := -1
 	for i := range d.F {
 		// A unit that went down with its team was not lost in the game.
-		if d.Cost[i] <= 0 || p.wiped[i] {
+		if d.Cost[i] <= 0 || p.wiped[i] || d.Unfinished[i] != 1 {
 			continue
 		}
-		if d.Unfinished[i] == 1 {
-			if bestUnf < 0 || d.Cost[i] > d.Cost[bestUnf] {
-				bestUnf = i
-			}
-		} else if best < 0 || d.Cost[i] > d.Cost[best] {
-			// Finished units only: the costliest unfinished loss already
-			// has its own award, and one unit should not take two.
-			best = i
+		if bestUnf < 0 || d.Cost[i] > d.Cost[bestUnf] {
+			bestUnf = i
 		}
 	}
 	if bestUnf >= 0 {
@@ -697,12 +693,84 @@ func (p *pass) awards() []Award {
 			Text: "destroyed before it was finished, " + metal(d.Cost[bestUnf]) + " metal",
 			Team: d.Team[bestUnf], Def: d.Def[bestUnf], Value: d.Cost[bestUnf], F: d.F[bestUnf]}))
 	}
-	if best >= 0 {
-		out = append(out, p.deathAward(best, Award{Key: "costliest", Label: "Most expensive loss",
-			Text: "lost at " + clock(d.F[best]) + ", " + metal(d.Cost[best]) + " metal",
-			Team: d.Team[best], Def: d.Def[best], Value: d.Cost[best], F: d.F[best]}))
+	if a, ok := p.biggestBlow(); ok {
+		out = append(out, a)
 	}
 	return out
+}
+
+// biggestBlow is the most metal one player lost within blowWindow: a base
+// going up, an army caught in the open. One expensive unit dying is no story
+// in a game where dozens of them do; losing a fortune at once is. Deaths that
+// went down with an eliminated team do not count, and neither does what an
+// owner removed (they are not in Deaths). The award's moment is the window's
+// costliest death (its def names the card), F0/F1 the window's first and
+// last death.
+func (p *pass) biggestBlow() (Award, bool) {
+	d := p.out.Deaths
+	byTeam := map[int32][]int{}
+	for i := range d.F {
+		if d.Cost[i] > 0 && !p.wiped[i] && p.ro.side(d.Team[i]) >= 0 {
+			byTeam[d.Team[i]] = append(byTeam[d.Team[i]], i)
+		}
+	}
+	teams := make([]int32, 0, len(byTeam))
+	for t := range byTeam {
+		teams = append(teams, t)
+	}
+	sort.Slice(teams, func(i, j int) bool { return teams[i] < teams[j] })
+	bestSum, bestTeam, bestLo, bestHi := 0.0, int32(-1), 0, 0
+	for _, t := range teams {
+		idx := byTeam[t] // in frame order, like Deaths
+		sum, lo := 0.0, 0
+		for hi, i := range idx {
+			sum += d.Cost[i]
+			for d.F[i]-d.F[idx[lo]] > blowWindow {
+				sum -= d.Cost[idx[lo]]
+				lo++
+			}
+			// Strictly more: a tie goes to the lower team, then the earlier window.
+			if sum > bestSum {
+				bestSum, bestTeam, bestLo, bestHi = sum, t, lo, hi
+			}
+		}
+	}
+	if bestTeam < 0 {
+		return Award{}, false
+	}
+	idx := byTeam[bestTeam][bestLo : bestHi+1]
+	top := map[int32]float64{}
+	count := map[int32]int{}
+	worst := idx[0]
+	for _, i := range idx {
+		top[d.Def[i]] += d.Cost[i]
+		count[d.Def[i]]++
+		if d.Cost[i] > d.Cost[worst] {
+			worst = i
+		}
+	}
+	parts := []string{}
+	for _, def := range topDefs(top) {
+		ud := p.in.Meta.UnitDefs[def]
+		name := ud.HumanName
+		if name == "" {
+			name = ud.Name
+		}
+		if count[def] > 1 {
+			name = fmt.Sprintf("%d %s", count[def], name)
+		}
+		parts = append(parts, name)
+	}
+	f0, f1 := d.F[idx[0]], d.F[idx[len(idx)-1]]
+	secs := (f1 - f0) / simFPS
+	when := fmt.Sprintf("in %d s from %s", secs, clock(f0))
+	if secs < 1 {
+		when = "at " + clock(f0)
+	}
+	p.usedDef[d.Def[worst]] = true
+	return Award{Key: "blow", Label: "Biggest blow",
+		Text: fmt.Sprintf("lost %s metal %s: %s", metal(bestSum), when, strings.Join(parts, ", ")),
+		Team: bestTeam, Def: d.Def[worst], Value: round1(bestSum), F: d.F[worst], F0: f0, F1: f1}, true
 }
 
 // deathAward names the unit behind death i, so the page can show which one

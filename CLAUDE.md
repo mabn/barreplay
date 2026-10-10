@@ -573,6 +573,13 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           does — but the unit alive at the end that TOOK the most damage
                           (health drops between samples, a floor since repair hides some),
                           if that was >= half its own health, watched at its hardest 30 s.
+                          BIGGEST BLOW (stories.go biggestBlow) replaced "Most expensive loss":
+                          the most metal ONE PLAYER lost within 30 s (blowWindow; wiped deaths
+                          and owner removals excluded) — a base going up — rather than the
+                          single costliest unit, which in a big game is one of dozens of
+                          identical Juggernauts. Its F is the window's costliest death (where
+                          the card's map dot and the clip zoom), F0/F1 the window; the clip
+                          plays the window (clipEvent).
                           swing.go (Version 2) adds the WINNER (Insights.Winner, a side index
                           from Meta.Winners, -1 unknown) and the SWING line: P(side 0 wins)
                           per step from a logistic model (WinModel) over three antisymmetric
