@@ -454,6 +454,20 @@ internal/resim/           the cmd/barreplay pipeline packaged as one call (Run: 
                           BEATS every other explanation Run can give, deliberately: we sent that
                           signal, so "the engine was killed" and whatever the truncated stream
                           then failed to parse into are both true and both useless.
+internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Input — a parsed .brp
+                          via FromBRP, or a replay rebuilt from its published pieces) to the
+                          Insights file stored beside each revision as
+                          replays/<rid>.insights<Version>.json. One pass over the frames with the
+                          events interleaved at their frames: per-side army value (the team
+                          stats bar's rule: armed, mobile, priced, not a commander, weighted by
+                          build progress) and income every StepSec, army split by category (no
+                          tech level exists in the defs, so ground units split by PRICE), every
+                          death with its last sampled position and cost, tech milestones from a
+                          CURATED def-name table (defs.go — the defs carry no tier), chat and
+                          pings. A piece is immutable, so ANY change to what is computed is a
+                          new Version written beside the old one. Comparative sections need a
+                          full-view capture (POV) and two sides; CostCoverage says when only
+                          armed mobile defs are priced (a replay rebuilt from old pieces).
 internal/capture/         parse the widget's .brepstream -> snapshot records (brep.go; the
                           text preamble + comm-record parsing in lines.go). The BRSNAP text
                           stream it used to read too is GONE — nothing wrote it once the

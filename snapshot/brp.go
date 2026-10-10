@@ -1500,6 +1500,20 @@ func (f *BRPFile) Comms() ([]Comm, error) {
 	return decodeComms(b)
 }
 
+// Events decodes the E section: every unit lifecycle event. An absent section
+// yields nil, not an error.
+func (f *BRPFile) Events() ([]Event, error) {
+	sec, ok := f.Sections[SecEvents]
+	if !ok {
+		return nil, nil
+	}
+	b, err := gunzip(sec)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot: events section: %w", err)
+	}
+	return decodeEvents(b)
+}
+
 // ReadBRP decodes a .brp capture's meta, frames (every chunk in order) and
 // events. Chat and map drawings are read separately, via
 // ParseBRP(...).Comms().
