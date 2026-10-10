@@ -124,6 +124,9 @@ test("a moment is named after what died in it", () => {
   // Ann's commander dies in the north-west: that names it.
   let st = momentStory(ins({ ...base, deaths: deaths([[1000, 1, 0, 100, 100], [1000, 2, 1, 100, 100]]) }), m);
   assert.equal(st.title, "Ann's commander falls in the north-west");
+  // One Ann blew up herself (a version 5 file marks it) says so.
+  const own = deaths([[1000, 1, 0, 100, 100], [1000, 2, 1, 100, 100]]);
+  assert.equal(momentStory(ins({ ...base, deaths: { ...own, selfd: [1, 0] } }), m).title, "Ann self-destructs their commander in the north-west");
   assert.equal(st.detail, "Blue team lost 1 unit (1.2k metal): Commander; Team 2 lost 1 unit (50 metal): Pawn.");
   // Its clip is about the commander's death, where it happened.
   assert.deepEqual(st.focus, { f: 1000, x: 100, z: 100, r: 700 });

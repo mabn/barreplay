@@ -129,6 +129,9 @@ func main() {
 			}
 			return rep.Winners(), nil
 		},
+		orders: func(ctx context.Context, gameID string) ([]snapshot.Event, error) {
+			return packer.DemoSelfD(ctx, barapi.New(), gameID)
+		},
 	}
 	if (*from != "" || *to != "") && !*all {
 		fmt.Fprintln(os.Stderr, "insights: -from/-to narrow -all; pass them with -all")
@@ -229,6 +232,10 @@ type runner struct {
 	// winners asks the BAR API who won, for a replay whose meta does not say
 	// (every .brp packed before the demo's winners were read). Nil skips it.
 	winners func(ctx context.Context, gameID string) ([]int32, error)
+	// orders reads the self-destruct orders out of the game's demo, for a
+	// capture packed before they were (a .brp with no "selfd" events). Nil
+	// skips it.
+	orders func(ctx context.Context, gameID string) ([]snapshot.Event, error)
 }
 
 // catalogRow is the part of a GET /api/replays row this command reads.
@@ -399,6 +406,17 @@ func (r *runner) local(ctx context.Context, path string) error {
 	return r.write(ctx, rid, in)
 }
 
+// hasSelfD is whether a capture's events already carry the demo's
+// self-destruct orders.
+func hasSelfD(events []snapshot.Event) bool {
+	for _, e := range events {
+		if e.Kind == snapshot.EventSelfD {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *runner) write(ctx context.Context, rid string, in insights.Input) error {
 	if len(in.Meta.Winners) == 0 && r.winners != nil && in.Meta.GameID != "" {
 		// Unknown winners only cost the summary its result line, so a failed
@@ -407,6 +425,16 @@ func (r *runner) write(ctx context.Context, rid string, in insights.Input) error
 			fmt.Fprintf(os.Stderr, "%s: winner unknown (BAR API: %v)\n", rid, err)
 		} else {
 			in.Meta.Winners = w
+		}
+	}
+	if r.orders != nil && in.Meta.GameID != "" && !hasSelfD(in.Events) {
+		// A .brp packed before the demo's orders were read has none, and
+		// without them a self-destruct reads as a kill. Best-effort, like
+		// the winners: the rest of the summary does not depend on it.
+		if ev, err := r.orders(ctx, in.Meta.GameID); err != nil {
+			fmt.Fprintf(os.Stderr, "%s: self-destructs unknown (%v)\n", rid, err)
+		} else {
+			in.Events = snapshot.MergeEvents(in.Events, ev)
 		}
 	}
 	ins, err := insights.Compute(in)

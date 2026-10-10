@@ -207,6 +207,8 @@ export interface Deaths {
   team: number[];
   cost: number[];
   unfinished: number[];
+  /** 1 for a unit its owner self-destructed (version 5+). */
+  selfd?: number[];
 }
 
 export interface Milestone {

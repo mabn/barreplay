@@ -110,6 +110,12 @@ export function fighters(ins: Insights, b: Battle | undefined): Fighter[][] {
   return out;
 }
 
+/** selfDestructed is whether death i was a unit its owner blew up (a
+ * version 5 file; older ones cannot say). */
+export function selfDestructed(ins: Insights, i: number): boolean {
+  return i >= 0 && ins.deaths.selfd?.[i] === 1;
+}
+
 /** isCommander is whether a def name is a real commander. */
 export function isCommander(name: string): boolean {
   return COMMANDER_RE.test(name) && !name.includes("boss");
@@ -239,10 +245,14 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     title = `${out.length} of ${possessive(L)} players are eliminated`;
   } else if (ll.commanders.length === 1) {
     focus = deathFocus(ins, ll.commanderDeaths[0]);
-    title = `${possessive(ll.commanders[0])} commander falls${at(focus)}`;
+    title = selfDestructed(ins, ll.commanderDeaths[0])
+      ? `${ll.commanders[0]} self-destructs their commander${at(focus)}`
+      : `${possessive(ll.commanders[0])} commander falls${at(focus)}`;
   } else if (ll.commanders.length > 1) {
     focus = deathFocus(ins, ll.commanderDeaths[0]);
-    title = `${ll.commanders.length} of ${possessive(L)} commanders fall${at(focus)}`;
+    title = ll.commanderDeaths.every((i) => selfDestructed(ins, i))
+      ? `${ll.commanders.length} of ${possessive(L)} commanders self-destruct${at(focus)}`
+      : `${ll.commanders.length} of ${possessive(L)} commanders fall${at(focus)}`;
   } else if (size(ll) < (priced ? QUIET_METAL : 3) && size(ll) <= size(wl) * 1.5) {
     // No real fight: the line moved on what each side built.
     fight = false;
@@ -250,7 +260,9 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     title = armyGrew(ins, m, won) ? `${W} out-builds ${L}` : `${W} pulls ahead on income`;
   } else if (ll.kinds.length && priced && ll.kinds[0][1] === 1 && ll.kinds[0][2] >= SINGLE_SHARE * ll.metal && ll.kinds[0][2] >= 500) {
     focus = deathFocus(ins, ll.top);
-    title = `${L} loses a ${ll.kinds[0][0]}${at(focus)}`;
+    title = selfDestructed(ins, ll.top)
+      ? `${L} self-destructs a ${ll.kinds[0][0]}${at(focus)}`
+      : `${L} loses a ${ll.kinds[0][0]}${at(focus)}`;
   } else {
     // A fight: told as the EVENT it was — the battle running at its busiest
     // killing, from start to end, and only what died there — not as the sum

@@ -15,6 +15,7 @@ import { sideColor, sideName, teamColor } from "../model";
 import { stepTimes } from "../series";
 import { tip } from "../tooltip";
 import { clipAround, watchNote, watcher, type Watch } from "../watch";
+import { isCommander, selfDestructed } from "../moments";
 import { SIM_FPS, type Insights, type PlayerReport, type SummaryOptions } from "../types";
 
 /** Elmos a second no commander covers on foot: BAR's walk at about 37, with
@@ -159,8 +160,9 @@ function commanderMap(ins: Insights, players: PlayerReport[], pick: (pl: PlayerR
       end = s("path", {
         stroke: color, "stroke-linecap": "round", class: watch ? "brs-clickable" : null,
       });
-      tip(end, { title: `${name}'s commander dies`, rows: [{ color, label: fmtClock(died / SIM_FPS) }], note: watchNote(watch) });
-      if (watch) end.addEventListener("click", () => watch(clipAround(died, { x, z, r: 1500, title: `${name}'s commander dies` })));
+      const how = commanderSelfDestructed(ins, pl.team, died) ? `${name} self-destructs their commander` : `${name}'s commander dies`;
+      tip(end, { title: how, rows: [{ color, label: fmtClock(died / SIM_FPS) }], note: watchNote(watch) });
+      if (watch) end.addEventListener("click", () => watch(clipAround(died, { x, z, r: 1500, title: how })));
       g.append(end);
     }
     tip(hit, () => ({
@@ -314,4 +316,14 @@ function style(ins: Insights, pl: PlayerReport): HTMLElement {
     return row;
   });
   return h("div", undefined, h("h3", { style: "margin-top: 14px" }, "Play style"), ...rows);
+}
+
+/** commanderSelfDestructed is whether the commander a team lost at frame f
+ * was blown up by its owner. */
+function commanderSelfDestructed(ins: Insights, team: number, f: number): boolean {
+  const d = ins.deaths;
+  for (let i = 0; i < d.f.length; i++) {
+    if (d.f[i] === f && d.team[i] === team && isCommander(ins.defs[String(d.def[i])]?.name ?? "")) return selfDestructed(ins, i);
+  }
+  return false;
 }

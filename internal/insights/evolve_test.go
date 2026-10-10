@@ -73,3 +73,33 @@ func TestLossCostCountsWhatWasBuilt(t *testing.T) {
 		}
 	}
 }
+
+// A unit is self-destructed when its owner's order still stands when it
+// goes and nothing else is named as its killer.
+func TestSelfDestructed(t *testing.T) {
+	p := &pass{selfdArmed: map[int32]int32{}}
+	order := func(f, id int32) { p.event(snapshot.Event{Frame: f, Kind: snapshot.EventSelfD, UnitID: id}) }
+	gone := func(f, id int32, cause *snapshot.EventCause) bool {
+		return p.selfDestructed(snapshot.Event{Frame: f, Kind: snapshot.EventDestroyed, UnitID: id, Cause: cause})
+	}
+	order(1009, 1)
+	if !gone(1170, 1, nil) {
+		t.Error("the commander that blew up after its order is not self-destructed")
+	}
+	order(100, 2)
+	order(130, 2) // ordered again: cancelled
+	if gone(200, 2, nil) {
+		t.Error("a cancelled order still counts")
+	}
+	order(100, 3)
+	if gone(150, 3, &snapshot.EventCause{UnitID: 9, DefID: 2, Team: 1, WeaponDef: 3}) {
+		t.Error("a unit an enemy killed during its countdown counts as self-destructed")
+	}
+	order(100, 4)
+	if gone(100+61*30, 4, nil) {
+		t.Error("a death long after the order counts")
+	}
+	if gone(500, 5, nil) {
+		t.Error("a unit with no order counts")
+	}
+}

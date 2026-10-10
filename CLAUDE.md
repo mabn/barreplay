@@ -538,6 +538,14 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           WriteStaticBundle writes the insights piece
                           beside the .brp on EVERY publish (a compute failure only warns), so
                           a publish uploads exactly two objects.
+                          VERSION 5 marks SELF-DESTRUCTS (Deaths.SelfD, pass.go selfDestructed):
+                          a death with the owner's "selfd" order standing (the engine toggles,
+                          so a second order cancels; at most selfdMaxSec = 60 s before) and no
+                          other unit named as its cause. Still a loss — the metal is gone — but
+                          the page says "self-destructs their commander" rather than "falls".
+                          A .brp packed before the demo's orders were read has no selfd events,
+                          so cmd/insights reads them from the demo when the input has none
+                          (packer.DemoSelfD; best-effort like the winners).
                           VERSION 4 stops counting what an owner REMOVED as a loss (pass.go
                           removedByOwner, only when the capture records causes): a unit
                           reclaimed by its own side (cause weapon -12, the engine's reclaim id)
@@ -775,10 +783,10 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           `icon` (its iconType) then its name; SummaryOptions.iconBase names
                           the origin, defaulting to the one the module was loaded from, null
                           = names; a def with no icon reads as its name.
-                          The library draws versions 1-4 (INSIGHTS_VERSIONS [4, 3, 2, 1]; v2 adds
+                          The library draws versions 1-5 (INSIGHTS_VERSIONS [5, 4, 3, 2, 1]; v2 adds
                           winner + swing, v3 eliminations and peak battles, v4 owner removals
-                          left out, owned value and battle teams) and app.js fetches
-                          .insights4, then 3, 2, 1. A version bump needs `insights -all` after
+                          left out, owned value and battle teams, v5 self-destructs marked) and
+                          app.js fetches .insights5, then 4, 3, 2, 1. A version bump needs `insights -all` after
                           the deploy, or published replays keep their older summary.
                           EMBEDDING ON ANOTHER SITE (lavabalance's game pages): the folder is an
                           installable package (src/summary/package.json, "barreplay-summary",

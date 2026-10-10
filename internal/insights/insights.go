@@ -22,7 +22,7 @@ import (
 // Version names the file: replays/<rid>.insights<Version>.json. Pieces are
 // immutable, so any change to what is computed or how is a new version,
 // written beside the old one; the viewer asks for the one it understands.
-const Version = 4
+const Version = 5
 
 // FileName is the published piece's name for a revision id.
 func FileName(rid string) string { return fmt.Sprintf("%s.insights%d.json", rid, Version) }
@@ -141,6 +141,10 @@ type Deaths struct {
 	Team       []int32   `json:"team"`
 	Cost       []float64 `json:"cost"`
 	Unfinished []int8    `json:"unfinished"` // 1 when it died before it was finished
+	// SelfD is 1 for a unit its owner self-destructed (an order read from the
+	// demo stood when it died). Version 5 and later; all 0 for a capture
+	// whose events carry no orders.
+	SelfD []int8 `json:"selfd"`
 }
 
 // Elimination is a team leaving the game with its units: the frame its
