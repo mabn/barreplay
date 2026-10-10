@@ -485,7 +485,8 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           shared with allies, so one full player is not waste), and "not
                           building" needs build targets, which a v4 capture lacks (null, not
                           0 — Input.HasTargets). WriteStaticBundle writes the insights piece
-                          on EVERY publish (a compute failure only warns).
+                          beside the .brp on EVERY publish (a compute failure only warns), so
+                          a publish uploads exactly two objects.
                           swing.go (Version 2) adds the WINNER (Insights.Winner, a side index
                           from Meta.Winners, -1 unknown) and the SWING line: P(side 0 wins)
                           per step from a logistic model (WinModel) over three antisymmetric
@@ -523,6 +524,9 @@ cmd/insights/main.go      CLI: the summary BACKFILL, one replay at a time (or -a
                           capture (.brp, or a .brepstream/.brsnap it packs first) is the way back
                           to full costs for a pieces-only replay — e.g. an upload's archived
                           stream — with -rid naming the published revision it belongs to.
+                          Nothing writes pieces any more, so the rebuild tests (here and in
+                          internal/viz) read testdata/legacy/: a bundle cut by the last
+                          encoder that wrote them, beside the .brp it came from.
 worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, insights, {onSeek})
                           draws an insights file and nothing else — no import from app.js, no
                           globals, its CSS injected once and scoped under .brs-root — so another
