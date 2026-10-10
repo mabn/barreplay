@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { fmtClock, fmtMetal, niceStep, timeStep } from "../src/summary/format";
 import { colorName, comparable, nameRuns, notices, readable, sideColor, sideName } from "../src/summary/model";
 import { knockouts, lossesByStep, wipedOf } from "../src/summary/losses";
-import { compass, fighters, momentStory } from "../src/summary/moments";
+import { compass, fighters, momentStories, momentStory } from "../src/summary/moments";
 import { clipAround, clipAt, clipEvent, clipSpan, watcher } from "../src/summary/watch";
 import { zonesOf } from "../src/summary/zones";
 import { lossKinds } from "../src/summary/losskinds";
@@ -76,6 +76,36 @@ test("compass splits the map in thirds", () => {
   assert.equal(compass(i, 450, 450), "the centre");
   assert.equal(compass(i, 800, 450), "the east");
   assert.equal(compass(i, 450, 800), "the south");
+});
+
+test("two swings inside one long battle each tell their own part of it", () => {
+  const defs = { "2": { name: "armpw", human: "Pawn", cost: 50 } };
+  const rows: [number, number][] = [
+    ...Array.from({ length: 10 }, () => [1000, 0] as [number, number]),
+    ...Array.from({ length: 6 }, () => [5000, 1] as [number, number]),
+  ];
+  const file = ins({
+    bounds: { minX: 0, maxX: 900, minZ: 0, maxZ: 900 },
+    teams: [{ team: 0, side: 0, player: "Ann" }, { team: 1, side: 1, player: "Cy" }],
+    defs,
+    series: { t: [0, 15, 30, 45], army: [[0, 100, 200, 300], [0, 100, 900, 1200]], metalIncome: [], energyIncome: [], armyCats: [], armyByCat: [] },
+    battles: [{ f0: 900, f1: 5400, x: 450, z: 450, r: 300, lost: [] }],
+    deaths: {
+      f: rows.map((r) => r[0]), def: rows.map(() => 2), team: rows.map((r) => r[1]), x: rows.map(() => 450), z: rows.map(() => 450),
+      cost: rows.map(() => 50), unfinished: rows.map(() => 0),
+    },
+  });
+  const a = { n: 1, f0: 900, f1: 1350, side: 1, delta: 0.3, battle: -1 };
+  const b = { n: 2, f0: 4800, f1: 5250, side: 0, delta: -0.3, battle: -1 };
+  // Told alone, each would be the whole battle.
+  assert.deepEqual(momentStory(file, a).focus, momentStory(file, b).focus);
+  const [sa, sb] = momentStories(file, [a, b]);
+  assert.notEqual(sa.title, sb.title);
+  assert.deepEqual([sa.focus?.f, sa.focus?.f1], [900, 1350 + 450]);
+  assert.deepEqual([sb.focus?.f, sb.focus?.f1], [4800 - 450, 5400]);
+  assert.match(sa.detail, /Part of a fight from 0:30 to 3:00\.$/);
+  // A battle only one moment tells stays whole.
+  assert.deepEqual(momentStories(file, [a])[0].focus, momentStory(file, a).focus);
 });
 
 test("a moment is named after what died in it", () => {

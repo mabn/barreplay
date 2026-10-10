@@ -200,7 +200,7 @@ function possessive(name: string): string {
 }
 
 /** momentStory names a moment and says what happened in it. */
-export function momentStory(ins: Insights, m: Moment): MomentStory {
+export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<number>): MomentStory {
   const [f0, f1] = momentWindow(ins, m);
   const lost = sideLosses(ins, f0, f1);
   const won = m.side;
@@ -227,6 +227,8 @@ export function momentStory(ins: Insights, m: Moment): MomentStory {
   let local: SideLoss[] | null = null;
   // An elimination or a quiet stretch has no battle of its own to credit.
   let fight = true;
+  // The battle a shared moment told only part of.
+  let whole: Battle | null = null;
   if (out.length === 1) {
     fight = false;
     focus = eliminationFocus(ins, out[0].team, out[0].f);
@@ -261,8 +263,13 @@ export function momentStory(ins: Insights, m: Moment): MomentStory {
     const bi = biggestFight(ins, f0, f1);
     const b = ins.battles[bi];
     if (b) {
-      focus = { f: b.f0, f1: b.f1, x: b.x, z: b.z, r: b.r };
-      local = sideLosses(ins, b.f0, b.f1, { x: b.x, z: b.z, r: b.r + BATTLE_REACH });
+      // A long battle can hold more than one swing; told whole, each of
+      // them read the same sentence over the same span. Shared, each tells
+      // only its own part of it.
+      const part = shared?.has(bi) ? [Math.max(b.f0, f0), Math.min(b.f1, f1)] : [b.f0, b.f1];
+      focus = { f: part[0], f1: part[1], x: b.x, z: b.z, r: b.r };
+      local = sideLosses(ins, part[0], part[1], { x: b.x, z: b.z, r: b.r + BATTLE_REACH });
+      if (part[0] !== b.f0 || part[1] !== b.f1) whole = b;
     } else {
       focus = burstFocus(ins, f0, f1);
     }
@@ -281,6 +288,7 @@ export function momentStory(ins: Insights, m: Moment): MomentStory {
   let detail = local
     ? `There, ${fmtClock(focus!.f / SIM_FPS)}–${fmtClock((focus!.f1 ?? focus!.f) / SIM_FPS)}: ${L} lost ${lossText(dl, priced)}; ${W} lost ${lossText(dw, priced)}.`
     : `${L} lost ${lossText(ll, priced)}; ${W} lost ${lossText(wl, priced)}.`;
+  if (whole) detail += ` Part of a fight from ${fmtClock(whole.f0 / SIM_FPS)} to ${fmtClock(whole.f1 / SIM_FPS)}.`;
   if (local && priced) {
     // What went down elsewhere at the time, when it is worth a mention: the
     // reader should not take this fight for the whole story.
@@ -293,6 +301,20 @@ export function momentStory(ins: Insights, m: Moment): MomentStory {
   const battle = battleOfMoment(ins, focus, f0, f1);
   const fought = fight ? fighters(ins, ins.battles[battle]) : ins.sides.map(() => []);
   return { title, detail, lost, battle, focus, fighters: fought };
+}
+
+/** momentStories tells every moment of a swing line. A battle that two or
+ * more of them would each tell whole is told in parts instead: each moment
+ * then covers only the stretch of it inside its own window. */
+export function momentStories(ins: Insights, moments: Moment[]): MomentStory[] {
+  const first = moments.map((m) => momentStory(ins, m));
+  const told = new Map<number, number>();
+  for (const st of first) {
+    if (st.battle >= 0 && st.focus?.f1 !== undefined) told.set(st.battle, (told.get(st.battle) ?? 0) + 1);
+  }
+  const shared = new Set([...told].filter(([, n]) => n > 1).map(([b]) => b));
+  if (!shared.size) return first;
+  return moments.map((m, k) => (shared.has(first[k].battle) ? momentStory(ins, m, shared) : first[k]));
 }
 
 /** biggestFight is the battle running inside [f0, f1] where the most metal

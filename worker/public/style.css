@@ -538,7 +538,13 @@ pre.sizereport {
 #lbdialog #lbjson { max-height: 45vh; }
 
 #wrap { display: flex; flex: 1; min-height: 0; }
-#left { flex: 1; position: relative; }
+/* min-width/min-height 0: the canvases carry the px size of the LAST resize
+   inline, and a flex item's automatic minimum is its content, so #left would
+   otherwise refuse to shrink below it. resize() measures #left, so the stale
+   size fed itself back: a clip opened after the Replay tab had been shown kept
+   the full-page width inside its small window and drew the map off to the
+   right, mostly black. */
+#left { flex: 1; position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 canvas { display: block; width: 100%; height: 100%; background: #0c0f13; cursor: crosshair; }
 /* WebGL icon overlay: sits on the 2D base canvas; input goes to #cv below. */
 #glcv { position: absolute; left: 0; top: 0; background: transparent; pointer-events: none; }

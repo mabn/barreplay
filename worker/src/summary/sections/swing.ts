@@ -10,7 +10,7 @@ import { bandPath, linePath, stepAt, timeChart, type ChartGroup } from "../chart
 import { mirrorKey } from "../legend";
 import { knockouts } from "../losses";
 import { sideColor, sideName } from "../model";
-import { eliminationFocus, momentStory } from "../moments";
+import { eliminationFocus, momentStories } from "../moments";
 import { fightersLine, named } from "../names";
 import { stepTimes } from "../series";
 import { tip } from "../tooltip";
@@ -73,7 +73,7 @@ export function swingChart(ins: Insights, watch: Watch | null, group: ChartGroup
     marks.append(m);
   }
 
-  const stories = sw.moments.map((m) => momentStory(ins, m));
+  const stories = momentStories(ins, sw.moments);
   // A moment's clip opens just before the thing that made it — the
   // commander dying, the fight peaking — zoomed to where it happened, rather
   // than at the start of the minute the line took to move.
