@@ -7,15 +7,20 @@
 // teams, icons, bounds, and the CHUNK INDEX) plus the events section. Frame
 // data arrives in two tiers:
 //
-//   1. /replays/<id>.keys — EVERY chunk's keyframe, one gzip stream, fetched
-//      right after the head and decoded PROGRESSIVELY while it downloads
-//      (fetch body -> DecompressionStream -> keyframes sliced at the raw
-//      boundaries the head's chunk index gives). The first keyframe renders
-//      within the first network chunks, and the whole timeline becomes
-//      scrubbable in a few seconds, before any full chunk arrives.
-//   2. /replays/<id>/c<n> — chunk n's DELTA frames, fetched around the
-//      playhead (and sequentially in the background) and decoded seeded with
-//      keyframe n. No byte is ever downloaded twice.
+//   1. KEYS — EVERY chunk's keyframe, one gzip stream, fetched right after the
+//      head and decoded PROGRESSIVELY while it downloads (fetch body ->
+//      DecompressionStream -> keyframes sliced at the raw boundaries the
+//      head's chunk index gives). The first keyframe renders within the first
+//      network chunks, and the whole timeline becomes scrubbable in a few
+//      seconds, before any full chunk arrives.
+//   2. CHUNK n — its DELTA frames, fetched around the playhead (and
+//      sequentially in the background) and decoded seeded with keyframe n.
+//      No byte is ever downloaded twice.
+// Both are byte RANGES of /replays/<id>.brp, the published capture itself, at
+// the absolute offsets the head carries (head.keys, chunk.off). A replay
+// published before the .brp was uploaded has no head.keys and was split into
+// files instead — /replays/<id>.keys and /replays/<id>/c<n> — which are read
+// as they always were (pieceFetch below).
 //
 // Frames unpack into a flat Int32Array `u` of stride 11:
 // [id, def, team, x, z, hp, maxHp, dvx, dvz, build, target]. We read it by
@@ -26,7 +31,7 @@
 // only in codec v5 streams — a v4 replay decodes with build=255/target=0
 // (see codecVer below), so no bars or lines draw for it.
 
-// The origin the four replay-data URLs above are fetched from. Empty means
+// The origin the replay-data URLs above are fetched from. Empty means
 // same-origin, which is what `vite dev` stamps into index.html; a
 // production build stamps the R2 bucket's own
 // hostname, so those reads are answered from Cloudflare's cache instead of
@@ -371,7 +376,23 @@ function frameNumAt(gi) {
   return data.chunks[c].frame + (gi - chunkStartIdx[c]) * data.sampleEvery;
 }
 
-// streamKeys downloads /replays/<id>.keys — every chunk's keyframe as one
+// pieceFetch fetches the keys stream (i < 0) or chunk i's delta bytes. For a
+// head with ranges it is a Range read of the published .brp; for an older
+// split bundle, the piece's own file. A server that ignores Range answers 200
+// with the whole file, which is cut down to the range here rather than fed to
+// the decoder — slower, never wrong.
+async function pieceFetch(i) {
+  const base = '/replays/' + encodeURIComponent(currentFile);
+  if (!data.keys) return fetch(dataURL(i < 0 ? base + '.keys' : base + '/c' + i));
+  const off = i < 0 ? data.keys.off : data.chunks[i].off;
+  const len = i < 0 ? data.keys.len : data.chunks[i].len;
+  const r = await fetch(dataURL(base + '.brp'), { headers: { Range: 'bytes=' + off + '-' + (off + len - 1) } });
+  if (r.status !== 200) return r;
+  const whole = new Uint8Array(await r.arrayBuffer());
+  return new Response(whole.subarray(off, off + len));
+}
+
+// streamKeys downloads every chunk's keyframe as one
 // gzip stream — and decodes keyframes PROGRESSIVELY as bytes arrive: the
 // response body is piped through DecompressionStream and sliced at the raw
 // boundaries the head's chunk index provides (cumulative kLen), so keyframe 0
@@ -386,7 +407,7 @@ async function streamKeys(gen) {
   const buf = new Uint8Array(total);
   let have = 0, ci = 0;
   try {
-    const r = await fetch(dataURL('/replays/' + encodeURIComponent(currentFile) + '.keys'));
+    const r = await pieceFetch(-1);
     if (!r.ok) throw new Error(await r.text());
     const reader = r.body.pipeThrough(new DecompressionStream('gzip')).getReader();
     for (;;) {
@@ -457,7 +478,7 @@ function applyDeltas(i, raw) {
 async function fetchChunk(i) {
   const gen = loadGen;
   try {
-    const r = await fetch(dataURL('/replays/' + encodeURIComponent(currentFile) + '/c' + i));
+    const r = await pieceFetch(i);
     if (!r.ok) throw new Error(await r.text());
     const bytes = new Uint8Array(await r.arrayBuffer());
     if (gen !== loadGen) return; // a different replay was loaded meanwhile

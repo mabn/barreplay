@@ -8,7 +8,8 @@
 //
 //   <bundleDir>   the -out dir you passed to barreplay-static (default ../static)
 //   [replayId]    upload just this one replay (replays/<id>.brw, .resources,
-//                 .keys, /c*). Omit to upload every replay in the dir.
+//                 .brp — or an older split bundle's .keys and /c*). Omit to
+//                 upload every replay in the dir.
 //   --local       target the local (miniflare) R2 used by `npm run dev`
 //                 (default is REAL R2)
 //   --preview     with --local, use the preview bucket wrangler dev binds
@@ -40,10 +41,10 @@ export function collectReplayFiles(root: string, id?: string): R2Object[] {
   const files: string[] = [];
   const replays = join(root, "replays");
   if (id) {
-    for (const f of [join(replays, `${id}.keys`), join(replays, `${id}.resources`), join(replays, `${id}.brw`)]) {
+    for (const f of [join(replays, `${id}.brp`), join(replays, `${id}.keys`), join(replays, `${id}.resources`), join(replays, `${id}.brw`)]) {
       if (existsSync(f)) files.push(f);
     }
-    walk(join(replays, id), files); // chunk files
+    walk(join(replays, id), files); // chunk files of an older split bundle
   } else {
     walk(replays, files);
   }

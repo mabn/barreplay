@@ -890,6 +890,7 @@ test("PUT /replays/<key> stores cache-control and content-type on the object", a
     [`replays/${rid}/c0`, "application/octet-stream", immutable],
     [`replays/${rid}.brw`, "application/octet-stream", immutable],
     [`replays/${rid}.keys`, "application/octet-stream", immutable],
+    [`replays/${rid}.brp`, "application/octet-stream", immutable],
     // .resources is real JSON the browser parses...
     [`replays/${rid}.resources`, "application/json", immutable],
     // ...while a listing changes on every publish, so it only revalidates.

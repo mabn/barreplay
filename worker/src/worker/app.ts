@@ -5,15 +5,19 @@
 // `barreplay-static` (Go) precomputed and we synced into the R2 bucket:
 //
 //   /index.json                 the replay picker listing
-//   /replays/<id>.brw           one capture's head (meta, teams, icons, chunk index)
-//   /replays/<id>.resources     gzipped per-frame team economy
-//   /replays/<id>.keys          every chunk's keyframe, one gzip stream — the viewer
-//                               streams this first, so the whole timeline is
-//                               scrubbable before any chunk arrives
-//   /replays/<id>/c<n>          one frame chunk's DELTA frames (absent when the
-//                               chunk is a single frame)
+//   /replays/<id>.brw           one capture's head (meta, teams, icons, chunk index
+//                               with the byte ranges below)
+//   /replays/<id>.resources     per-frame team economy (JSON)
+//   /replays/<id>.brp           the capture itself; the viewer Range-reads its
+//                               keyframes section first (the whole timeline is
+//                               scrubbable before any chunk arrives), then each
+//                               chunk's DELTA frames
 //
-// These are served straight from R2 (with Range support kept for good measure).
+// Replays published before the .brp was uploaded were split instead, into
+// /replays/<id>.keys (the keyframes) and /replays/<id>/c<n> (one chunk's deltas);
+// those objects stay and the viewer still reads them.
+//
+// These are served straight from R2, honouring Range.
 // The SPA, unit icons (/icons/*) and rank icons (/ranks/*) are fixed static
 // assets served by the ASSETS binding before the Worker even runs.
 
@@ -831,7 +835,7 @@ app.get("/api/streams/:gameId/:file", async (c) => {
 app.get("/index.json", (c) => handleIndex(c.env.BUCKET));
 // /replays/<id> with no extension is a PAGE — the viewer's canonical URL for
 // one replay (app.js routes on the path) — while every data piece under the
-// same prefix has an extension (<id>.brw/.keys/.resources) or a second
+// same prefix has an extension (<id>.brw/.brp/.keys/.resources) or a second
 // segment (<id>/c<n>, which this single-segment route never matches). The dot
 // is the whole dispatch: bucket keys and page ids cannot collide on it.
 // Registered before the wildcard so it wins for one-segment paths.
@@ -918,7 +922,7 @@ export default app;
 
 // handleIndex builds the replay picker listing by scanning the bucket's replays/
 // prefix — one entry per replay (a <id>.brw exists), with size = the sum of that
-// replay's objects (head + resources + chunks). No index.json object is needed, so
+// replay's objects (head + resources + .brp, or an older bundle's keys + chunks). No index.json object is needed, so
 // a single-replay upload is self-sufficient.
 const REPLAY_PREFIX = "replays/";
 
@@ -939,6 +943,8 @@ async function handleIndex(bucket: R2Bucket): Promise<Response> {
         replays.add(id); // the marker file for a valid replay
       } else if (rest.endsWith(".resources")) {
         id = rest.slice(0, -".resources".length);
+      } else if (rest.endsWith(".brp")) {
+        id = rest.slice(0, -".brp".length);
       } else if (rest.endsWith(".keys")) {
         id = rest.slice(0, -".keys".length);
       } else {
@@ -956,7 +962,7 @@ async function handleIndex(bucket: R2Bucket): Promise<Response> {
 }
 
 // serveR2 streams an object out of the bucket, honoring a byte Range request
-// (used by the viewer's keyframe skim). `immutable` marks per-replay files that
+// (how the viewer reads keyframes and chunks out of a published .brp). `immutable` marks per-replay files that
 // never change once written; index.json is revalidated instead.
 async function serveR2(bucket: R2Bucket, key: string, req: Request, immutable: boolean): Promise<Response> {
   const rangeHeader = req.headers.get("range");
@@ -994,8 +1000,8 @@ async function serveR2(bucket: R2Bucket, key: string, req: Request, immutable: b
   return new Response(body, { headers });
 }
 
-// parseRange handles the single "bytes=start-[end]" form the viewer sends for the
-// keyframe skim. Anything else (multi-range, suffix ranges) → no range (full body).
+// parseRange handles the single "bytes=start-[end]" form the viewer sends for
+// its reads out of a .brp. Anything else (multi-range, suffix ranges) → no range (full body).
 function parseRange(header: string | null): R2Range | undefined {
   if (!header) return undefined;
   const m = /^bytes=(\d+)-(\d*)$/.exec(header.trim());
@@ -1021,7 +1027,7 @@ function parseRange(header: string | null): R2Range | undefined {
 // worker/tools/r2put.ts.
 export function objectHTTPMeta(key: string): { contentType: string; cacheControl: string } {
   // .resources and index.json are plain JSON (the platform applies transport
-  // compression itself); .brw, .keys and chunk files are opaque binary the
+  // compression itself); .brw, .brp, .keys and chunk files are opaque binary the
   // viewer gunzips internally, so they stay application/octet-stream with no
   // content-encoding — labelling them gzip would make the browser inflate them
   // and hand the decoder already-decompressed bytes.

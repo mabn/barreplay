@@ -266,6 +266,10 @@ type BRPFile struct {
 	ChunkFrames int
 	Chunks      []BRPChunk
 	Sections    map[byte][]byte // tag -> raw section payload
+	// SectionOffsets is each section payload's absolute byte offset in the
+	// file (Section.Offset), so a section-relative range — the K section, a
+	// chunk's FOff — can be turned into an HTTP Range over the file itself.
+	SectionOffsets map[byte]int64
 
 	keysRaw []byte // gunzipped K section, cached on first DecodeChunk
 }
@@ -1142,9 +1146,10 @@ func ParseBRP(r io.Reader) (*BRPFile, error) {
 	if version != BRPVersion {
 		return nil, fmt.Errorf("snapshot: unsupported .brp version %d (want %d)", version, BRPVersion)
 	}
-	f := &BRPFile{Sections: map[byte][]byte{}}
+	f := &BRPFile{Sections: map[byte][]byte{}, SectionOffsets: map[byte]int64{}}
 	for _, s := range sections {
 		f.Sections[s.Tag] = s.Payload
+		f.SectionOffsets[s.Tag] = s.Offset
 	}
 	m, ok := f.Sections[SecMeta]
 	if !ok {

@@ -513,14 +513,15 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the Durable Object, whose behaviour is its SQL and which plain node
                           cannot import) + `npm run smoke` + `vite dev`,
                           then deploy.
-                          The BULK replay pieces (.brw/.keys/c<n>/.resources) are NOT fetched
+                          The BULK replay pieces (.brw/.brp/.resources, plus the .keys/c<n>
+                          of replays published before the .brp was) are NOT fetched
                           from it: they come from cdn-bar.fogofwar.dev, the R2 bucket bound
                           directly to a hostname. A Worker runs BEFORE Cloudflare's cache, so
                           every /replays/* read through it is a billed Class B GetObject no
                           matter what cache-control it sets; served straight from the bucket a
                           cache HIT never reaches R2 and costs nothing. /index.json and /api/*
                           stay on the worker because it BUILDS them (bucket scan, catalog DO).
-                          app.js routes exactly those four URLs through dataURL(), whose origin
+                          app.js routes exactly those URLs through dataURL(), whose origin
                           comes from index.html's __DATA_ORIGIN__ placeholder: stamped by the
                           Vite dataBase plugin on a BUILD only ($DATA_BASE overrides), BLANKED
                           by `vite dev` (which is the origin for its own files) — empty means
@@ -535,7 +536,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           cross-origin now; without it the browser blocks every piece) and a
                           Cache Rule making the hostname eligible for cache — Cloudflare's
                           default cache list is by file extension and matches NONE of .brw,
-                          .keys or the extensionless c<n>, so without the rule everything still
+                          .brp, .keys or the extensionless c<n>, so without the rule everything still
                           bills Class B while looking perfectly healthy. See worker/README.md
                           for the runbook. Consequence for uploads: content-type and
                           cache-control are STORED on each object (objectHTTPMeta, duplicated
@@ -630,7 +631,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           resolve (init normalizes them to the path form via replaceState).
                           BOTH backends serve the SPA entry at the page paths — /replays/<id>
                           with NO extension (the dot is the whole dispatch against the data
-                          pieces under the same prefix: <id>.brw/.keys/.resources have one,
+                          pieces under the same prefix: <id>.brw/.brp/.keys/.resources have one,
                           chunks have a second segment) plus /queue /games /sqlstats — the
                           worker via a /replays/:id route ahead of the R2 wildcard and the Go
                           server inside handleReplays; the smoke harness checks all four
@@ -2160,7 +2161,9 @@ is the Go side that produces those files from a `.brp` (`static.go`, used by `pa
 (`catalog.go`). Nothing here touches the engine. **The viewer reads the current
 .brp version only** — convert a raw `.brsnap`/`.brepstream` once with `pack` (the
 converter owns the legacy parsing; viz has none). The URL scheme is `/index.json`,
-`/api/replays`, `/replays/<id>.brw`, `.keys`, `.resources`, `/replays/<id>/c<n>`.
+`/api/replays`, `/replays/<id>.brw`, `.resources`, `.brp` (Range-read for the
+keyframes and chunks), and — for replays published before the `.brp` was uploaded —
+`.keys` and `/replays/<id>/c<n>`.
 `/api/replays` is the replay catalog (stats for the landing list — see the worker/
 entry above), served by the worker from its Durable Object table; the rows are
 built by `viz.BuildCatalogEntry` (`internal/viz/catalog.go`) at publish time.
@@ -2181,19 +2184,26 @@ run dev` in `worker/` plus `pack -upload local`.)
   def, which is what the sidebar's team statistics bar sums into a side's army
   value — absent from every bundle published before it existed, which is why that
   row hides rather than reading zero), and the **chunk index**
-  `{frame,count,kLen,len}` per
-  chunk — `kLen` is the keyframe's RAW length inside the decompressed keys stream)
+  `{frame,count,kLen,len,off}` per
+  chunk — `kLen` is the keyframe's RAW length inside the decompressed keys stream,
+  `off` the delta bytes' absolute offset in the `.brp` — plus `keys` = `{off,len}`,
+  the `K` section's absolute range in the `.brp`)
   plus the file's `E` events and `C` comms sections byte-for-byte — ~230 KB for a
-  33-min game, so the page is interactive immediately. `/replays/<id>.keys` is the `K` section
-  byte-for-byte (every keyframe, one gzip stream); `/replays/<id>/c<n>` is chunk
-  n's delta bytes, **sliced straight out of the stored file**. No frame is ever
+  33-min game, so the page is interactive immediately. The frame data is
+  `/replays/<id>.brp` itself, published byte-for-byte beside the head: the viewer
+  Range-reads the `K` section (every keyframe, one gzip stream) and each chunk's delta
+  bytes out of it at the head's offsets (`app.js` `pieceFetch`; a server that ignores
+  Range answers 200 and the body is cut down to the range). Bundles published before
+  that were SPLIT into `/replays/<id>.keys` and one `/replays/<id>/c<n>` per chunk —
+  ~35 objects per publish where there are now 3 — and their heads carry no `keys`, which
+  is what sends the viewer to those files; they stay in the bucket and keep playing. No frame is ever
   decoded to build these (except `.resources`): bounds/teams/index all come from the
   file's meta record (`snapshot.ParseBRP`). In the browser, `app.js` gunzips each response with
   the native `DecompressionStream` and unpacks frames into the same flat stride-9
   `Int32Array` (`[id, def, team, x, z, hp, maxHp, dvx, dvz]`) the renderer always
   used.
 - **`app.js` keys-first streaming**: right after the head, the viewer fetches
-  `.keys` and pipes the response body through `DecompressionStream`, slicing
+  the keys range and pipes the response body through `DecompressionStream`, slicing
   keyframes out at the cumulative `kLen` boundaries as bytes arrive (`streamKeys`) —
   the first keyframe renders within the first network chunks, and **every minute of
   the timeline becomes scrubbable in a few seconds**, before any full chunk arrives.
@@ -2560,10 +2570,12 @@ file's exact byte ranges. No engine or browser needed.
 Because nothing decodes a frame to serve one — the head is a pure function of the `.brp`
 meta and the keys/chunk pieces are independently-gzipped byte ranges — the whole
 playback path is served as **plain static files with no server**.
-`viz.WriteStaticBundle` precomputes, per capture: `replays/<id>.brw` (the head),
-`replays/<id>.keys` (the `K` section), `replays/<id>.resources` (the economy JSON,
-stored **uncompressed** — a pre-gzipped body double-compresses on Cloudflare), and one
-`replays/<id>/c<n>` file per chunk with delta frames (single-frame chunks get no file).
+`viz.WriteStaticBundle` writes, per capture: `replays/<id>.brw` (the head, carrying
+the absolute byte ranges of the keys and every chunk), `replays/<id>.resources` (the
+economy JSON, stored **uncompressed** — a pre-gzipped body double-compresses on
+Cloudflare), and `replays/<id>.brp`, the capture byte-for-byte, which the viewer
+Range-reads. (It used to split the keys and chunks into `replays/<id>.keys` +
+`replays/<id>/c<n>` files instead; those old bundles still play.)
 `WriteIndex` writes `index.json` (guarded by `static_test.go`, which diffs the bundle
 against the wire encoders and the stored file's byte ranges). `cmd/barreplay-static`
 is the CLI (and `packer.UploadStatic` the publisher's path); the `worker/` Cloudflare project

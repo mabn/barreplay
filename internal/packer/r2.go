@@ -202,8 +202,9 @@ func objectHTTPMeta(key string) (contentType, cacheControl string) {
 	if strings.HasSuffix(key, ".resources") || strings.HasSuffix(key, ".json") {
 		contentType = "application/json"
 	} else {
-		// .brw head, .keys, or replays/<id>/c<n>: a raw gzip stream the viewer
-		// gunzips ITSELF. It must not be labelled Content-Encoding: gzip, or
+		// .brw head, the .brp (or an old bundle's .keys / replays/<id>/c<n>):
+		// binary whose gzip streams the viewer gunzips ITSELF, Range-read out
+		// of the .brp. It must not be labelled Content-Encoding: gzip, or
 		// the browser would transparently inflate it and the decoder would be
 		// handed already-decompressed bytes.
 		contentType = "application/octet-stream"

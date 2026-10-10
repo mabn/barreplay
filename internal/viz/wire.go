@@ -19,12 +19,18 @@ import (
 //	C  chat + map drawings — the .brp file's C section byte-for-byte (absent
 //	   when the capture recorded none)
 //
-// The frame data itself is NOT in this payload: the browser streams
-// /replays/<id>.keys (every keyframe, one gzip stream — the whole timeline
-// becomes scrubbable while it downloads) and fetches each chunk's delta file
-// /replays/<id>/c<n> as the user plays/seeks. The static bundler (static.go)
-// slices all of these straight out of the stored file (they are independently
-// gzipped exactly so that no re-encoding is ever needed). The decoder lives in
+// The frame data itself is NOT in this payload. It is read straight out of the
+// published .brp, /replays/<id>.brp, with HTTP Range requests: the browser
+// streams the K section (every keyframe, one gzip stream — the whole timeline
+// becomes scrubbable while it downloads) and fetches each chunk's delta bytes
+// as the user plays/seeks. The head carries the absolute byte ranges (keys,
+// and each chunk's off/len); both are independently gzipped exactly so that
+// a byte range of the stored file is all the browser ever needs.
+//
+// Bundles published before the .brp was uploaded have no ranges in their head
+// and were split instead, into /replays/<id>.keys and one /replays/<id>/c<n>
+// per chunk. Those objects stay in the bucket forever and the viewer still
+// reads them when the head carries no `keys` range. The decoder lives in
 // worker/public/app.js and must mirror snapshot/brp.go's layout exactly —
 // evolve them together.
 
@@ -82,6 +88,17 @@ type wireHead struct {
 	// [sum(count[:i]), sum(count[:i+1])) of the global timeline).
 	FrameCount int         `json:"frameCount"`
 	Chunks     []wireChunk `json:"chunks"`
+	// Keys is the K section's absolute byte range in /replays/<id>.brp. Its
+	// presence is what tells the viewer to Range-read the .brp (keys here, each
+	// chunk at its `off`) instead of fetching the split .keys/c<n> files of a
+	// bundle published before this field existed.
+	Keys *wireRange `json:"keys,omitempty"`
+}
+
+// wireRange is an absolute byte range [Off, Off+Len) of the published .brp.
+type wireRange struct {
+	Off int64 `json:"off"`
+	Len int64 `json:"len"`
 }
 
 // wirePlayer is one player in the roster. Only the fields the player list needs
@@ -102,12 +119,15 @@ type wirePlayer struct {
 // (decompressed) byte length of this chunk's keyframe inside the .keys
 // stream — the cumulative kLen values are the boundaries the client uses to
 // consume the keys download progressively. len is the byte size of the
-// chunk's delta file (0 when the chunk is a single frame: nothing to fetch).
+// chunk's delta bytes (0 when the chunk is a single frame: nothing to fetch),
+// and off their absolute offset in the .brp (set together with the head's
+// Keys range; absent from the split bundles published before it).
 type wireChunk struct {
 	Frame int32 `json:"frame"` // sim frame of the chunk's first sample
 	Count int   `json:"count"` // samples in this chunk
 	KLen  int64 `json:"kLen"`
 	Len   int64 `json:"len"`
+	Off   int64 `json:"off,omitempty"`
 }
 
 // wireIcon is one unit type's icon in the payload: p = served bitmap path
@@ -248,6 +268,18 @@ func brpWirePayload(f *snapshot.BRPFile) ([]byte, error) {
 	head.Chunks = make([]wireChunk, len(f.Chunks))
 	for i, c := range f.Chunks {
 		head.Chunks[i] = wireChunk{Frame: c.Frame, Count: c.Count, KLen: c.KLen, Len: c.FLen}
+	}
+	// Absolute ranges into the file itself, which is published beside the head
+	// (static.go). Only a file read through ParseBRP knows its offsets.
+	kOff, okK := f.SectionOffsets[snapshot.SecKeyframes]
+	fOff, okF := f.SectionOffsets[snapshot.SecFrames]
+	if okK && okF {
+		head.Keys = &wireRange{Off: kOff, Len: int64(len(f.Sections[snapshot.SecKeyframes]))}
+		for i, c := range f.Chunks {
+			if c.FLen > 0 {
+				head.Chunks[i].Off = fOff + c.FOff
+			}
+		}
 	}
 
 	headJSON, err := json.Marshal(head)

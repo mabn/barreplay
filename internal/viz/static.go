@@ -3,6 +3,7 @@ package viz
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,17 +16,19 @@ import (
 // viewer can be hosted with no server on the playback path (see the worker/
 // Cloudflare project). The .brp format was designed for exactly this: the head
 // is a pure function of the file's meta, and the keyframes section and each
-// chunk's delta frames are independently-gzipped byte ranges — so serving is a
-// byte copy, not a re-encode. The artifacts below are byte-identical to what
-// internal/viz serves dynamically (the URL scheme is shared):
+// chunk's delta frames are independently-gzipped byte ranges — so serving them
+// is a Range read of the stored file, not a re-encode. A bundle is three files:
 //
-//	replays/<gameId>.brw        == GET /replays/<gameId>.brw
-//	replays/<gameId>.resources  == GET /replays/<gameId>.resources
-//	replays/<gameId>.keys       == GET /replays/<gameId>.keys   (the K section:
-//	                               every keyframe, one gzip stream, streamed
-//	                               keys-first by the viewer)
-//	replays/<gameId>/c<i>       == GET /replays/<gameId>/c<i>   (chunk i's delta
-//	                               frames; not written when the chunk has none)
+//	replays/<gameId>.brw        the head (meta, icons, chunk index WITH the
+//	                            absolute byte ranges of the keys and chunks)
+//	replays/<gameId>.resources  per-frame team economy (JSON, decoded from X)
+//	replays/<gameId>.brp        the capture itself, byte-for-byte; the viewer
+//	                            Range-reads the K section and each chunk's
+//	                            delta bytes out of it
+//
+// Bundles published before the .brp was uploaded were split instead, into
+// replays/<gameId>.keys plus one replays/<gameId>/c<i> per chunk. Nothing
+// writes those any more; the viewer still reads them for those old heads.
 //
 // index.json lists every replay in the bundle (rebuilt from disk, so a growing
 // mirror stays correct). Unit and rank icons are NOT emitted here: they are a
@@ -38,7 +41,7 @@ type StaticReplay struct {
 	File   string `json:"file"`
 	GameID string `json:"gameId"`
 	// Size is the replay's on-disk static footprint in bytes (head + resources +
-	// all chunks) — what the viewer downloads, shown in the picker.
+	// the .brp, or the split keys/chunks of an older bundle), shown in the picker.
 	Size int64 `json:"size"`
 }
 
@@ -59,7 +62,7 @@ func WriteStaticBundle(brpPath, outDir string) (string, error) {
 	gameID := strings.TrimSuffix(filepath.Base(brpPath), filepath.Ext(brpPath))
 
 	replaysDir := filepath.Join(outDir, "replays")
-	if err := os.MkdirAll(filepath.Join(replaysDir, gameID), 0o755); err != nil {
+	if err := os.MkdirAll(replaysDir, 0o755); err != nil {
 		return "", err
 	}
 
@@ -82,33 +85,34 @@ func WriteStaticBundle(brpPath, outDir string) (string, error) {
 		return "", err
 	}
 
-	// The keyframes section byte-for-byte: the viewer streams this one file to
-	// make the whole timeline scrubbable before any chunk arrives.
-	keys, ok := bf.Sections[snapshot.SecKeyframes]
-	if !ok {
+	// The frame data is the .brp itself: the viewer Range-reads the K section
+	// and each chunk's delta bytes out of it at the absolute offsets the head
+	// carries, so ONE object replaces the .keys file and the per-chunk c<n>
+	// files the bundle used to be split into. Copied byte-for-byte — the
+	// offsets in the head are offsets into exactly these bytes. Check the
+	// ranges here so a malformed index fails the publish, not the viewer.
+	if _, ok := bf.Sections[snapshot.SecKeyframes]; !ok {
 		return "", fmt.Errorf("%s has no keyframes section", gameID)
 	}
-	if err := os.WriteFile(filepath.Join(replaysDir, gameID+".keys"), keys, 0o644); err != nil {
-		return "", err
-	}
-
-	// One file per frame chunk: its DELTA frames, the frames-section slice
-	// [FOff, FOff+FLen). Independently gzipped, so this is a byte copy. A
-	// single-frame chunk has no delta bytes and gets no file (the index in the
-	// head says len == 0, so the viewer never asks).
 	sec := bf.Sections[snapshot.SecFrames]
 	for i, c := range bf.Chunks {
-		end := c.FOff + c.FLen
-		if c.FOff < 0 || end > int64(len(sec)) {
+		if end := c.FOff + c.FLen; c.FOff < 0 || end > int64(len(sec)) {
 			return "", fmt.Errorf("%s chunk %d range [%d,%d) outside frames section (%d bytes)", gameID, i, c.FOff, end, len(sec))
 		}
-		if c.FLen == 0 {
-			continue
-		}
-		p := filepath.Join(replaysDir, gameID, fmt.Sprintf("c%d", i))
-		if err := os.WriteFile(p, sec[c.FOff:end], 0o644); err != nil {
-			return "", err
-		}
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	out, err := os.Create(filepath.Join(replaysDir, gameID+".brp"))
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(out, f); err != nil {
+		out.Close()
+		return "", err
+	}
+	if err := out.Close(); err != nil {
+		return "", err
 	}
 	return gameID, nil
 }
@@ -138,8 +142,9 @@ func WriteIndex(outDir string) (int, error) {
 	return len(infos), os.WriteFile(filepath.Join(outDir, "index.json"), b, 0o644)
 }
 
-// replayBundleSize sums the download footprint of one replay: its head,
-// resources, and every chunk file. Best-effort — unreadable files count as 0.
+// replayBundleSize sums the stored footprint of one replay: its head,
+// resources, and its .brp (or, for an older split bundle, its keys and chunk
+// files). Best-effort — unreadable files count as 0.
 func replayBundleSize(replaysDir, id string) int64 {
 	var total int64
 	add := func(p string) {
@@ -149,6 +154,7 @@ func replayBundleSize(replaysDir, id string) int64 {
 	}
 	add(filepath.Join(replaysDir, id+".brw"))
 	add(filepath.Join(replaysDir, id+".resources"))
+	add(filepath.Join(replaysDir, id+".brp"))
 	add(filepath.Join(replaysDir, id+".keys"))
 	if chunks, err := os.ReadDir(filepath.Join(replaysDir, id)); err == nil {
 		for _, c := range chunks {

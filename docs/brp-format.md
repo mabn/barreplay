@@ -579,24 +579,31 @@ serves it as plain files, precomputed by `cmd/barreplay-static` /
     what the viewer labels units with; omitted per def when the capture
     recorded none, and absent entirely from pre-existing bundles, so the
     front-end falls back to `unitDefs`),
-    `unitIcons`, `footprints`, `players`, `frameCount`, and `chunks` — the
-    index reduced to `{frame, count, kLen, len}` (the browser addresses
-    chunks by ordinal and consumes the keys stream by cumulative `kLen`, so
-    it needs no file offsets).
+    `unitIcons`, `footprints`, `players`, `frameCount`, `chunks` — the
+    index reduced to `{frame, count, kLen, len, off}`, where `off` is the
+    chunk's delta bytes' ABSOLUTE offset in the `.brp` (`Section.Offset` of
+    `F` plus `fOff`) — and `keys` = `{off, len}`, the `K` section payload's
+    absolute range. `keys`/`off` are absent from heads published before the
+    `.brp` itself was uploaded (see the split pieces below).
   - `E`: the file's events section, **byte-for-byte**.
   - `C`: the file's comms section, **byte-for-byte** — absent when the file
     has none, which is what the front-end reads as "this capture recorded no
     chat or drawings" (it then hides the chat panel entirely).
-- **`GET /replays/<id>.keys`** → the `K` section payload **byte-for-byte**:
+- **`GET /replays/<id>.brp`** → the file itself, byte-for-byte. The viewer
+  never downloads it whole: it Range-reads `bytes=keys.off-(keys.off+keys.len-1)`
+  for the keyframes and each chunk's `off`/`len` for its deltas, exactly the
+  two byte ranges described next.
+- **Keyframes** (Range of the `.brp`; in a head without `keys`, the split file
+  `GET /replays/<id>.keys`) → the `K` section payload **byte-for-byte**:
   one gzip stream of every keyframe. The viewer fetches this immediately
   after the head and decodes it progressively while it downloads
   (`fetch` → `DecompressionStream` → slice at the head's cumulative `kLen`
   boundaries), which is what makes the whole timeline scrubbable within the
   first seconds.
-- **`GET /replays/<id>/c<n>`** → the raw delta bytes `F[fOff : fOff+fLen]` of
+- **Chunk *n*** (Range of the `.brp`; in a head without `keys`, the split file
+  `GET /replays/<id>/c<n>`) → the raw delta bytes `F[fOff : fOff+fLen]` of
   chunk *n* — again byte-for-byte from the file. Decoded seeded with keyframe
-  *n*. Not requested (and, in a static bundle, not even written) when
-  `len == 0`.
+  *n*. Not requested when `len == 0`.
 - **`GET /replays/<id>.resources`** → per-frame team economy JSON (decoded
   from `X` once, server-side/offline — the only endpoint that isn't a byte
   copy, kept because browsers never fetch `X`).
