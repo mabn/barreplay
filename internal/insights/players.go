@@ -326,6 +326,10 @@ func (p *pass) playerEvent(e snapshot.Event) {
 		}
 	case snapshot.EventDestroyed:
 		if p.removedByOwner(e) {
+			if d.commander && p.selfDestructed(e) {
+				// Cashed in, not lost, but the commander's path still ends.
+				p.team(e.Team).comDied = e.Frame
+			}
 			break
 		}
 		st.LostMetal[step] += p.lossCost(e)

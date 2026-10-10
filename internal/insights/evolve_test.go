@@ -103,3 +103,27 @@ func TestSelfDestructed(t *testing.T) {
 		t.Error("a unit with no order counts")
 	}
 }
+
+// A self-destruct is a loss only when the unit went in a fight: its blast
+// killed something, or it had been hurt shortly before.
+func TestSelfDestructOutsideAFightIsNotALoss(t *testing.T) {
+	p := &pass{
+		selfdArmed: map[int32]int32{1: 1000, 2: 1000, 3: 1000},
+		killsBy:    map[int32][]int32{1: {1170}},
+		tracks:     map[int32]*track{3: {id: 3, def: 1, hurt: true, hurtF: 1140}},
+		defs:       map[int32]defInfo{1: {cost: 2700}},
+		ro:         roster{teamSide: map[int32]int{0: 0}},
+	}
+	gone := func(id int32) snapshot.Event {
+		return snapshot.Event{Frame: 1170, Kind: snapshot.EventDestroyed, UnitID: id, DefID: 1, Team: 0}
+	}
+	if p.removedByOwner(gone(1)) {
+		t.Error("a self-destruct whose blast killed something is not a loss")
+	}
+	if !p.removedByOwner(gone(2)) {
+		t.Error("a self-destruct away from any fight counts as a loss")
+	}
+	if p.removedByOwner(gone(3)) {
+		t.Error("a self-destruct of a unit hurt moments before is not a loss")
+	}
+}
