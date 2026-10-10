@@ -1493,7 +1493,11 @@ end
 local blastOf = {}  -- unitID -> { x, z, death, selfd, f, root }
 local blastWeapons = nil -- defID -> { death = wid, selfd = wid }; weaponID -> radius
 local blastRadius = nil
-local blastWindow = 600 -- frames a source stays live: death scripts are a few seconds
+-- Frames a source stays live: the blast follows the death script, which is
+-- a few seconds at most. Longer, and a reactor killed a while ago could be
+-- matched to a later blast of the same kind nearby (the 12:48 team deaths
+-- were credited to whoever had killed a reactor earlier).
+local blastWindow = 150
 local dmgFromChain = 0
 
 local function loadBlastWeapons()
@@ -1555,8 +1559,8 @@ local function blastRoot(unitID, weaponDefID)
 	local r = (blastRadius[weaponDefID] or 0) + 64 -- the victim's own size
 	local best, bestD = nil, r * r
 	for id, src in pairs(blastOf) do
-		if now - src.f > blastWindow then
-			blastOf[id] = nil
+		if now - src.f > blastWindow or (src.blastF ~= nil and src.blastF ~= now) then
+			blastOf[id] = nil -- too old, or already exploded: a blast lands in one frame
 		elseif src.death == weaponDefID or src.selfd == weaponDefID then
 			local dx, dz = src.x - vx, src.z - vz
 			local d = dx * dx + dz * dz
@@ -1565,7 +1569,11 @@ local function blastRoot(unitID, weaponDefID)
 			end
 		end
 	end
-	return best and best.root
+	if best == nil then
+		return nil
+	end
+	best.blastF = now
+	return best.root
 end
 
 -- ownBlast reports whether a hit the engine credits to attackerID is really
