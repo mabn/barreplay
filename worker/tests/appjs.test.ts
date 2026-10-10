@@ -671,6 +671,8 @@ test('the catalog is fetched for the list view, not for a direct replay link', a
     const renderHome = () => { renders++; };
     const loadReplay = async (id) => { opened = id; };
     ${APP.slice(APP.indexOf('const HOME_TABS'), APP.indexOf(';', APP.indexOf('const ADMIN_TABS')) + 1)}
+    ${APP.match(/const REPLAY_PATH_RE = [^\n]+/)![0]}
+    ${extract('ridPath')}
     ${extract('replayFromURL')}
     ${extract('showHome')}
     ${extract('ensureHomeData')}
@@ -2039,7 +2041,7 @@ test('a published .brp is read by Range and decodes as Go decodes it', async () 
     let brpWhole = null;
     let iconTablePromise = null;
     ${APP.match(/const own = [^\n]+/)![0]}
-    ${['gunzipU8', 'brpPath', 'brpRange', 'brpMetaExtent', 'brpLayout', 'headFromBrp', 'iconTable',
+    ${['gunzipU8', 'ridPath', 'brpPath', 'brpRange', 'brpMetaExtent', 'brpLayout', 'headFromBrp', 'iconTable',
        'loadBrpHead', 'decodeEconomy', 'decodeEvents', 'decodeComms', 'publishEconomy'].map(extract).join('\n')}
     let econChunks = null, resByFrame = null, data = null, chunkStartIdx = [];
     // publish files every chunk's records the way loadResources does.
@@ -2161,4 +2163,28 @@ test('decodeEvents reads v5 sections and v6 cause columns', () => {
   const got = decodeEvents(new Uint8Array(v6));
   assert.deepEqual(got[0].cause, { id: 6, def: 3, team: 0, weapon: 2 });
   assert.equal(got[1].cause, undefined, 'all -1 means no cause');
+});
+
+// A rid in a month folder keeps its slash on the wire: the bucket key is
+// replays/2026-10/<name>.brp, and %2F would name nothing.
+test("replay URLs keep a month folder's slash, and its page path parses", () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+  const re = APP.match(/const REPLAY_PATH_RE = [^\n]+/)![0];
+  const { brpPath, parse } = new Function(`${extract('ridPath')}\n${extract('brpPath')}\n${re}
+    return { brpPath, parse: (p) => { const m = REPLAY_PATH_RE.exec(p); return m ? m[1] : null; } };`)();
+  assert.equal(brpPath('2026-10/576dca6a783f78c1cbe7ab798b051c28'), '/replays/2026-10/576dca6a783f78c1cbe7ab798b051c28.brp');
+  assert.equal(brpPath('abc-1a2b3c4d'), '/replays/abc-1a2b3c4d.brp');
+  assert.equal(parse('/replays/2026-10/abc-1a2b3c4d'), '2026-10/abc-1a2b3c4d');
+  assert.equal(parse('/replays/undated/abc'), 'undated/abc');
+  assert.equal(parse('/replays/abc'), 'abc');
+  // A legacy chunk directory is not a page.
+  assert.equal(parse('/replays/abc-1a2b3c4d/c0'), null);
 });

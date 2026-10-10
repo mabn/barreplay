@@ -5,7 +5,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  isMainRid,
+  isReplayFolder,
   mergeUploads,
+  monthFolder,
   parseViewRequest,
   playersFromApi,
   sanitizeEntry,
@@ -34,6 +37,7 @@ test("full entry passes through", () => {
   assert.deepEqual(e, {
     id: "abc123",
     rid: "abc123-1a2b3c4d",
+    rev: null,
     startUnix: 1_752_000_000,
     durationSec: 1987,
     map: "Isidis crack 1.1",
@@ -65,6 +69,7 @@ test("missing stats become null, unknown fields are dropped", () => {
   assert.deepEqual(e, {
     id: "abc",
     rid: null,
+    rev: null,
     startUnix: null,
     durationSec: null,
     map: "Hooked 1.1.1",
@@ -84,8 +89,16 @@ test("missing stats become null, unknown fields are dropped", () => {
   });
 });
 
-test("rid is validated like an id", () => {
+test("rid is validated like an id, optionally in a replay folder", () => {
   assert.equal(sanitizeEntry("abc", { rid: "a/b" }), "invalid rid");
+  assert.equal(sanitizeEntry("abc", { rid: "2026-13/abc" }), "invalid rid");
+  assert.equal(sanitizeEntry("abc", { rid: "2026-10/x/abc" }), "invalid rid");
+  assert.equal(sanitizeEntry("abc", { rid: "../abc" }), "invalid rid");
+  for (const rid of ["2026-10/abc", "2026-10/abc-1a2b3c4d", "undated/abc"]) {
+    const ok = sanitizeEntry("abc", { rid, rev: "1a2b3c4d" });
+    assert.ok(typeof ok === "object" && ok.rid === rid && ok.rev === "1a2b3c4d", rid);
+  }
+  assert.equal(sanitizeEntry("abc", { rid: "2026-10/abc", rev: "XYZ" }), "invalid rev");
   assert.equal(sanitizeEntry("abc", { rid: 7 }), "invalid rid");
   assert.equal(sanitizeEntry("abc", { rid: "" }), "invalid rid");
   const e = sanitizeEntry("abc", { rid: null });
@@ -426,4 +439,33 @@ test("wantsFullView asks for a re-sim only for a game that is one-sided all the 
   assert.equal(wantsFullView(null, []), false);
   // Known one-sided, nothing in the list yet (an unrevisioned publish).
   assert.equal(wantsFullView(1, null), true);
+});
+
+test("isMainRid: the unsuffixed name, in a folder or flat", () => {
+  assert.equal(isMainRid("2026-10/abc", "abc"), true);
+  assert.equal(isMainRid("undated/abc", "abc"), true);
+  assert.equal(isMainRid("abc", "abc"), true);
+  assert.equal(isMainRid("2026-10/abc-1a2b3c4d", "abc"), false);
+  assert.equal(isMainRid("abc-1a2b3c4d", "abc"), false);
+});
+
+test("monthFolder is the UTC month; isReplayFolder knows months and undated", () => {
+  assert.equal(monthFolder(1791655167), "2026-10");
+  // 23:30 UTC on 31 October is already November in Warsaw; the folder is UTC.
+  assert.equal(monthFolder(1793489400), "2026-10");
+  assert.equal(isReplayFolder("2026-10"), true);
+  assert.equal(isReplayFolder("undated"), true);
+  assert.equal(isReplayFolder("2026-00"), false);
+  assert.equal(isReplayFolder("576dca6a783f78c1cbe7ab798b051c28"), false);
+});
+
+test("mergeUploads keeps each upload's rev", () => {
+  let u = mergeUploads(null, "2026-10/g", null, null, "1a2b3c4d");
+  u = mergeUploads(u, "2026-10/g-99999999", 1, null, "99999999");
+  assert.deepEqual(u, [
+    { rid: "2026-10/g", ally: null, rev: "1a2b3c4d" },
+    { rid: "2026-10/g-99999999", ally: 1, rev: "99999999" },
+  ]);
+  // A republish that states no rev keeps the one on record.
+  assert.deepEqual(mergeUploads(u, "2026-10/g", null)?.[0], { rid: "2026-10/g", ally: null, rev: "1a2b3c4d" });
 });

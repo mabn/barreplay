@@ -349,6 +349,10 @@ type UploadOptions struct {
 	// construction saw every team, has to declare "full" here. Without it the
 	// row would keep the marking of the one-sided upload it just superseded.
 	View string
+	// BarAPI, when set, supplies the game's start time for its month folder
+	// when the capture has none (a no-demo pack). Nil skips the lookup, and
+	// such a replay goes under UndatedFolder.
+	BarAPI *barapi.Client
 }
 
 // UploadStatic uploads one packed replay's static files to the worker's R2
@@ -366,6 +370,13 @@ type UploadOptions struct {
 //   - fallback (r2 without credentials, or the local dev server not
 //     reachable): shell the worker's uploader (npx tsx tools/upload.ts).
 //
+// With a Rev the key follows names.go: replays/<YYYY-MM>/<gameId>.brp when
+// the capture saw every team and the game has no main replay yet, else
+// replays/<YYYY-MM>/<gameId>-<rev>.brp. The main name is claimed with a
+// conditional PUT, so losing a race (or a catalog that did not know) falls
+// back to the suffixed name instead of overwriting; a full view whose bytes
+// ARE the main's uploads nothing and only re-registers.
+//
 // After the upload it registers the replay in the worker's catalog (the
 // Durable Object SQLite table behind GET /api/replays) via
 // PUT <IndexURL>/api/replays/<id>.
@@ -374,72 +385,150 @@ func UploadStatic(ctx context.Context, brpPath string, o UploadOptions) error {
 	if o.Target == "r2" {
 		native = r2ClientFromEnv(o.WorkerDir)
 	}
-	gameID, err := brpGameID(brpPath)
+	meta, err := brpMeta(brpPath)
 	if err != nil {
 		return err
 	}
+	gameID := meta.GameID
 	tmp, err := os.MkdirTemp("", "pack-upload-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmp)
 
-	// The bundle's URL id is the source .brp's basename, so the file is
-	// staged under its "<gameId>[-<rev>]" name first whenever that differs.
-	src, uploadID := brpPath, gameID
-	if o.Rev != "" {
-		uploadID = gameID + "-" + o.Rev
-	}
-	if base := strings.TrimSuffix(filepath.Base(brpPath), filepath.Ext(brpPath)); base != uploadID {
-		src = filepath.Join(tmp, uploadID+".brp")
-		if err := copyFile(brpPath, src); err != nil {
+	var rid string
+	var size int64
+	if o.Rev == "" {
+		// -rev=false: the pre-revisioning layout, flat under the bare id, and
+		// no rid on the row.
+		if _, size, err = publishBundle(ctx, o, native, tmp, brpPath, "", gameID, false); err != nil {
 			return err
 		}
-	}
-	bundleDir := filepath.Join(tmp, "bundle")
-	if _, err := viz.WriteStaticBundle(src, bundleDir); err != nil {
-		return err
+	} else {
+		folder := replayFolder(ctx, o, meta)
+		suffixed := gameID + "-" + o.Rev
+		name, claimMain := suffixed, false
+		if CapturesAllTeams(meta, o.View) {
+			main, err := existingMain(ctx, o.IndexURL, gameID)
+			if err != nil {
+				// The conditional PUT still guards an existing main.
+				fmt.Fprintf(os.Stderr, "%s: could not ask the catalog for a main replay (%v); trying the main name conditionally\n", gameID, err)
+			}
+			switch {
+			case main != nil && main.rev == o.Rev:
+				fmt.Fprintf(os.Stderr, "%s: identical to the main replay %s; nothing to upload\n", gameID, main.rid)
+				rid = main.rid
+			case main != nil:
+				fmt.Fprintf(os.Stderr, "%s: main replay %s already exists; publishing this full view as %s\n", gameID, main.rid, suffixed)
+			default:
+				name, claimMain = gameID, true
+			}
+		}
+		if rid == "" {
+			rid, size, err = publishBundle(ctx, o, native, tmp, brpPath, folder, name, claimMain)
+			if errors.Is(err, errObjectExists) {
+				fmt.Fprintf(os.Stderr, "%s: replays/%s/%s.brp appeared meanwhile; publishing as %s\n", gameID, folder, gameID, suffixed)
+				rid, size, err = publishBundle(ctx, o, native, tmp, brpPath, folder, suffixed, false)
+			}
+			if err != nil {
+				return err
+			}
+		} else {
+			size = fileSize(brpPath)
+		}
 	}
 
-	if err := uploadDir(ctx, o, native, bundleDir, uploadID); err != nil {
-		return err
-	}
 	if o.IndexURL == "" {
 		// Unreachable from the CLIs, which resolve IndexURL from -upload via
 		// LookupTarget and so always have one; kept for a caller that builds
 		// UploadOptions by hand and leaves it empty.
-		fmt.Fprintf(os.Stderr, "%s: uploaded, but NOT registered in the replay catalog: the caller set no IndexURL\n", uploadID)
+		fmt.Fprintf(os.Stderr, "%s: uploaded, but NOT registered in the replay catalog: the caller set no IndexURL\n", gameID)
 		return nil
 	}
-	rid := ""
-	if o.Rev != "" {
-		rid = uploadID
-	}
-	if err := putCatalogEntry(ctx, o.IndexURL, gameID, rid, brpPath, dirSize(bundleDir), o.ModOptions, o.View); err != nil {
+	if err := putCatalogEntry(ctx, o.IndexURL, gameID, rid, o.Rev, brpPath, size, o.ModOptions, o.View); err != nil {
 		return fmt.Errorf("registering %s in the replay catalog at %s: %w", gameID, o.IndexURL, err)
 	}
 	fmt.Fprintf(os.Stderr, "%s: registered in the replay catalog at %s\n", gameID, o.IndexURL)
 	return nil
 }
 
-// brpGameID is the game a .brp belongs to: its meta's GameID, which the file
-// name is not — a published revision downloaded for a republish is named
-// "<gameId>-<rev>.brp", and taking that as the id registered it as a new
-// game. The name is only the fallback for a meta with no id.
-func brpGameID(path string) (string, error) {
+// publishBundle writes brpPath's static bundle under replays/<folder>/<name>
+// (flat when folder is empty) and uploads it, returning the rid — the key
+// relative to replays/, without the extension — and the bundle's byte size.
+// claimMain writes the .brp with a conditional PUT first and returns
+// errObjectExists, uploading nothing, when the key is already taken.
+func publishBundle(ctx context.Context, o UploadOptions, native *R2Client, tmp, brpPath, folder, name string, claimMain bool) (string, int64, error) {
+	stage, err := os.MkdirTemp(tmp, "stage-")
+	if err != nil {
+		return "", 0, err
+	}
+	// The bundle's file names come from the source .brp's basename.
+	src := filepath.Join(stage, name+".brp")
+	if err := copyFile(brpPath, src); err != nil {
+		return "", 0, err
+	}
+	out := filepath.Join(stage, "out")
+	if _, err := viz.WriteStaticBundle(src, out); err != nil {
+		return "", 0, err
+	}
+	bundleDir := filepath.Join(stage, "bundle")
+	rid, dest := name, filepath.Join(bundleDir, "replays")
+	if folder != "" {
+		rid, dest = folder+"/"+name, filepath.Join(bundleDir, "replays", folder)
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return "", 0, err
+	}
+	if err := os.Rename(filepath.Join(out, "replays"), dest); err != nil {
+		return "", 0, err
+	}
+	size := dirSize(bundleDir)
+	if claimMain {
+		brp := filepath.Join(dest, name+".brp")
+		body, err := os.ReadFile(brp)
+		if err != nil {
+			return "", 0, err
+		}
+		created, supported, err := putIfAbsent(ctx, o, native, "replays/"+rid+".brp", body)
+		if err != nil {
+			return "", 0, err
+		}
+		if supported && !created {
+			return "", 0, errObjectExists
+		}
+		if created {
+			// Already in the bucket; the rest of the bundle follows it.
+			if err := os.Remove(brp); err != nil {
+				return "", 0, err
+			}
+		}
+	}
+	if err := uploadDir(ctx, o, native, bundleDir, rid); err != nil {
+		return "", 0, err
+	}
+	return rid, size, nil
+}
+
+// brpMeta reads a .brp's meta, with GameID always filled: the meta's own id,
+// which the file name is not — a published revision downloaded for a
+// republish is named "<gameId>-<rev>.brp", and taking that as the id
+// registered it as a new game. The name is only the fallback for a meta with
+// no id.
+func brpMeta(path string) (snapshot.Meta, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return snapshot.Meta{}, err
 	}
 	defer f.Close()
 	bf, err := snapshot.ParseBRP(f)
 	if err != nil {
-		return "", fmt.Errorf("parse %s: %w", path, err)
+		return snapshot.Meta{}, fmt.Errorf("parse %s: %w", path, err)
 	}
-	if id := bf.Meta.GameID; id != "" {
-		return id, nil
+	m := bf.Meta
+	if m.GameID == "" {
+		m.GameID = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	}
-	return strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), nil
+	return m, nil
 }
 
 // UploadPieces uploads every file under bundleDir to the target's bucket,
@@ -469,7 +558,7 @@ func uploadDir(ctx context.Context, o UploadOptions, native *R2Client, bundleDir
 	} else if o.Target == "local" && o.IndexURL != "" {
 		fmt.Fprintf(os.Stderr, "uploading %q via the dev worker at %s\n", uploadID, o.IndexURL)
 		err := uploadBundle(ctx, bundleDir, func(ctx context.Context, key string, body []byte) error {
-			return workerPut(ctx, o.IndexURL, key, body)
+			return workerPut(ctx, o.IndexURL, key, body, false)
 		})
 		if err == nil {
 			uploaded = true
@@ -522,7 +611,7 @@ func checkWorkerDir(workerDir string) error {
 // view overrides the capture's own point of view (UploadOptions.View); empty
 // keeps whatever the .brp's recorder record implies, and an entry with no view
 // at all leaves the row's existing marking alone (the worker COALESCEs it).
-func putCatalogEntry(ctx context.Context, indexURL, gameID, rid, brpPath string, sizeBytes int64, modOptions map[string]string, view string) error {
+func putCatalogEntry(ctx context.Context, indexURL, gameID, rid, rev, brpPath string, sizeBytes int64, modOptions map[string]string, view string) error {
 	f, err := os.Open(brpPath)
 	if err != nil {
 		return err
@@ -535,6 +624,7 @@ func putCatalogEntry(ctx context.Context, indexURL, gameID, rid, brpPath string,
 	entry := viz.BuildCatalogEntry(gameID, bf, sizeBytes)
 	if rid != "" {
 		entry.Rid = &rid
+		entry.Rev = rev
 	}
 	entry.Settings = viz.SettingsFlags(modOptions)
 	if view != "" {

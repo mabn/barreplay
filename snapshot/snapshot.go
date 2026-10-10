@@ -274,6 +274,13 @@ type Meta struct {
 	// Recorder is set for live-game captures (the uploader widget); nil for
 	// the engine re-sim pipeline, which sees the whole game.
 	Recorder *RecorderInfo `json:"recorder,omitempty"`
+	// Resim marks a capture made by the headless re-simulation (the stream's
+	// GAME line says so): it saw every team. It is what lets a publisher tell
+	// a re-sim (no Recorder because nobody's point of view) from an uploader
+	// stream old enough to carry no recorder record (no Recorder because it
+	// predates one) — the first may take a game's main, unsuffixed name, the
+	// second must not. False in every .brp packed before the field existed.
+	Resim bool `json:"resim,omitempty"`
 	// Widget is the build of the uploader widget that produced the capture,
 	// from the stream's GAME line. Nil for the engine re-sim pipeline (whose
 	// sampler is injected by this tool, so its build is the tool's own) and

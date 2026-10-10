@@ -746,6 +746,7 @@ func processStream(ctx context.Context, client *barapi.Client, streamPath, targe
 		IndexURL:   indexURL,
 		Rev:        rev,
 		ModOptions: modOptions,
+		BarAPI:     client,
 	})
 	if st != nil {
 		st.UploadSec = time.Since(uploadStart).Seconds()
@@ -977,7 +978,8 @@ func resimPublish(ctx context.Context, client *barapi.Client, gameID string, ro 
 		// A re-sim watched the whole game, but its capture carries no recorder
 		// record to say so (only live uploads do), so state it explicitly —
 		// otherwise the row keeps the superseded one-sided upload's marking.
-		View: "full",
+		View:   "full",
+		BarAPI: client,
 	})
 	if st != nil {
 		st.UploadSec = time.Since(uploadStart).Seconds()

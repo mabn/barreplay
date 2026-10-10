@@ -43,11 +43,16 @@ export function collectReplayFiles(root: string, id?: string): R2Object[] {
   const replays = join(root, "replays");
   if (id) {
     // Every <id>.<ext> beside the head: .brw/.keys/.resources, and pieces
-    // added to a published replay later (<id>.insights<N>.json).
-    if (existsSync(replays)) {
-      for (const name of readdirSync(replays)) {
-        const f = join(replays, name);
-        if (name.startsWith(`${id}.`) && statSync(f).isFile()) files.push(f);
+    // added to a published replay later (<id>.insights<N>.json). A rid may
+    // sit in a month folder ("2026-10/<gameId>"): its files are that
+    // folder's <name>.*.
+    const slash = id.lastIndexOf("/");
+    const folder = slash >= 0 ? join(replays, id.slice(0, slash)) : replays;
+    const base = id.slice(slash + 1);
+    if (existsSync(folder)) {
+      for (const name of readdirSync(folder)) {
+        const f = join(folder, name);
+        if (name.startsWith(`${base}.`) && statSync(f).isFile()) files.push(f);
       }
     }
     walk(join(replays, id), files); // chunk files of an older split bundle

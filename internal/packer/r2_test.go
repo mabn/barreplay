@@ -270,7 +270,8 @@ func TestUploadStaticNative(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rid := "somegameid-" + rev
+	// A one-sided-or-unknown capture with no start time: suffixed, undated.
+	rid := "undated/somegameid-" + rev
 	// A publish is the .brp alone, under the revisioned id.
 	sort.Strings(putKeys)
 	if want := []string{"replays/" + rid + ".brp", "replays/" + insights.FileName(rid)}; fmt.Sprint(putKeys) != fmt.Sprint(want) {
@@ -332,13 +333,13 @@ func TestUploadStaticLocalWorkerRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	sort.Strings(putKeys)
-	if want := []string{"replays/somegameid-1a2b3c4d.brp", "replays/" + insights.FileName("somegameid-1a2b3c4d")}; fmt.Sprint(putKeys) != fmt.Sprint(want) {
+	if want := []string{"replays/undated/somegameid-1a2b3c4d.brp", "replays/" + insights.FileName("undated/somegameid-1a2b3c4d")}; fmt.Sprint(putKeys) != fmt.Sprint(want) {
 		t.Errorf("piece PUTs = %v, want %v", putKeys, want)
 	}
 	if !sawAuth {
 		t.Error("piece PUTs did not carry the bearer token")
 	}
-	if !strings.Contains(catalogBody, `"rid":"somegameid-1a2b3c4d"`) {
+	if !strings.Contains(catalogBody, `"rid":"undated/somegameid-1a2b3c4d"`) {
 		t.Errorf("catalog PUT body lacks the rid: %s", catalogBody)
 	}
 }
@@ -463,7 +464,7 @@ func TestUploadStaticIDFromMeta(t *testing.T) {
 		t.Fatal(err)
 	}
 	sort.Strings(putKeys)
-	if want := []string{"replays/somegameid-1a2b3c4d.brp", "replays/" + insights.FileName("somegameid-1a2b3c4d")}; fmt.Sprint(putKeys) != fmt.Sprint(want) {
+	if want := []string{"replays/undated/somegameid-1a2b3c4d.brp", "replays/" + insights.FileName("undated/somegameid-1a2b3c4d")}; fmt.Sprint(putKeys) != fmt.Sprint(want) {
 		t.Errorf("piece PUTs = %v, want %v", putKeys, want)
 	}
 	if catalogPath != "/api/replays/somegameid" {

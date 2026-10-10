@@ -58,6 +58,16 @@ test("collectReplayFiles single-replay filter", () => {
   assert.deepEqual(cur, ["replays/ccc.brp", "replays/ccc.resources", "replays/ccc.brw"]);
 });
 
+test("collectReplayFiles finds a replay in a month folder", () => {
+  const root = mkdtempSync(join(tmpdir(), "bundle-"));
+  for (const f of ["replays/2026-10/g.brp", "replays/2026-10/g.insights3.json", "replays/2026-10/g-1a2b3c4d.brp"]) {
+    mkdirSync(dirname(join(root, f)), { recursive: true });
+    writeFileSync(join(root, f), f);
+  }
+  const keys = collectReplayFiles(root, "2026-10/g").map((o) => o.key);
+  assert.deepEqual(keys, ["replays/2026-10/g.brp", "replays/2026-10/g.insights3.json"]);
+});
+
 test("pool bounds concurrency and preserves start order", async () => {
   const started: number[] = [];
   let inFlight = 0;

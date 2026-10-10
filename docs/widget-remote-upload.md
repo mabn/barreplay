@@ -3,7 +3,7 @@
 Status: analysis; the **manual half is implemented**. A player can drag&drop
 their `<gameId>.brepstream` (the widget's local file) onto the worker's landing
 page: `POST /api/upload` archives the raw stream in R2 under
-`streams/<gameId>/<ts>-a<allyTeam>.brepstream` (append-only — every original is
+`streams/<YYYY-MM>/<gameId>/<ts>-<hash8>-a<allyTeam>.brepstream` (append-only — every original is
 kept, keyed by gameId with the recorder's ally team, exactly the merge
 substrate this doc anticipates) and `cmd/bringest` publishes it. What
 remains from this doc is the live path (the widget uploading during the match)

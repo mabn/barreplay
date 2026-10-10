@@ -1778,3 +1778,41 @@ test("attribution holds over real RPC, not only direct calls", async () => {
   expect(ops.list?.calls).toBe(1);
   expect(ops["(outside any method)"], "every statement has a method to bill").toBeUndefined();
 });
+
+test("a game's main replay stays current when a suffixed upload follows", async () => {
+  await inIndex((index, sql) => {
+    // The re-sim (full view) took the main name.
+    index.upsert(
+      replay("g", { rid: "2026-10/g", rev: "1a2b3c4d", uploaderAlly: null, view: "full", sizeBytes: 9_000_000 }),
+    );
+    // A player's one-sided upload of the same game lands suffixed.
+    index.upsert(replay("g", { rid: "2026-10/g-99999999", rev: "99999999", sizeBytes: 1_000 }), "job-1");
+
+    expect(rows(sql, `SELECT rid, view, uploader_ally, size_bytes FROM replays WHERE id = 'g'`)).toEqual([
+      { rid: "2026-10/g", view: "full", uploader_ally: null, size_bytes: 9_000_000 },
+    ]);
+    const [{ uploads }] = rows(sql, `SELECT uploads FROM replays WHERE id = 'g'`) as { uploads: string }[];
+    expect(JSON.parse(uploads)).toEqual([
+      { rid: "2026-10/g", ally: null, rev: "1a2b3c4d" },
+      { rid: "2026-10/g-99999999", ally: 0, rev: "99999999" },
+    ]);
+    // The game has its full view, so the one-sided upload queues nothing.
+    expect(rows(sql, `SELECT COUNT(*) AS n FROM jobs`)).toEqual([{ n: 0 }]);
+  });
+});
+
+test("a main replay replaces a suffixed current revision", async () => {
+  await inIndex((index, sql) => {
+    index.upsert(replay("h", { rid: "h-abcd1234" }));
+    index.upsert(replay("h", { rid: "2026-10/h", rev: "1a2b3c4d", uploaderAlly: null, view: "full" }));
+    expect(rows(sql, `SELECT rid, view FROM replays WHERE id = 'h'`)).toEqual([{ rid: "2026-10/h", view: "full" }]);
+  });
+});
+
+test("gameStartUnix reads the mirror's start time", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([game("m1")]);
+    expect(typeof index.gameStartUnix("m1")).toBe("number");
+    expect(index.gameStartUnix("nope")).toBe(null);
+  });
+});

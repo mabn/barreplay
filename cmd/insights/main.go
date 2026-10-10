@@ -35,8 +35,10 @@
 // A local capture is the way back to full costs for a replay that was only
 // published as pieces: a drag&drop upload's raw stream is archived, so pack
 // it again (a .brepstream input is packed here, demo fetch included)
-// and name the published revision with -rid. Without -rid the revision is
-// the one a publish of that .brp would get (packer.ContentRev).
+// and name the published revision with -rid. Without -rid it is the catalog
+// upload whose content rev matches the .brp (packer.ContentRev) — which is
+// how a main replay, whose rid does not spell its rev, is found — and failing
+// that the flat <gameId>-<rev> of a publish from before month folders.
 //
 // -upload names a destination exactly as cmd/pack does (packer.LookupTarget):
 // the catalog it reads, the bucket it reads pieces from and the bucket it
@@ -186,6 +188,10 @@ type catalogRow struct {
 	Rid         *string `json:"rid"`
 	View        *string `json:"view"`
 	Placeholder bool    `json:"placeholder"`
+	Uploads     []struct {
+		Rid string `json:"rid"`
+		Rev string `json:"rev"`
+	} `json:"uploads"`
 }
 
 func (c catalogRow) rid() string {
@@ -327,6 +333,15 @@ func (r *runner) local(ctx context.Context, path string) error {
 			return err
 		}
 		rid = bf.Meta.GameID + "-" + rev
+		if r.indexURL != "" {
+			if row, err := r.catalogRow(ctx, bf.Meta.GameID); err == nil && row != nil {
+				for _, u := range row.Uploads {
+					if u.Rev == rev {
+						rid = u.Rid
+					}
+				}
+			}
+		}
 	}
 	in, err := insights.FromBRP(bf)
 	if err != nil {

@@ -32,6 +32,15 @@ go run ./cmd/pack -upload local ./caps/<gameId>.brepstream   # ...to the dev sim
 # possible to upload pieces to one deployment and register the row in the other, which nothing downstream
 # can detect. Adding a destination to that one map makes it valid, documented and usable in both CLIs.
 # $REPLAY_PUT_TOKEN authenticates the PUT.
+# Publishes land in MONTH FOLDERS (internal/packer/names.go): replays/<YYYY-MM>/ = the game's UTC start month
+# (capture meta, else the BAR API's startTime, else replays/undated/). A capture that saw EVERY team
+# (packer.CapturesAllTeams: a spectator's recorder record, Meta.Resim from the re-sim's GAME line, or a declared
+# view "full" — bringest -resim, pack -view full) takes the game's MAIN name, <YYYY-MM>/<gameId>.brp, when the
+# game has none; everything else is <YYYY-MM>/<gameId>-<rev>.brp. "Has none" is asked of the catalog row's uploads
+# (each entry carries its rev, so a republish of the main's exact bytes uploads nothing) and then ENFORCED by a
+# conditional PUT (If-None-Match: *; 412 -> the suffixed name), so a main is never overwritten. The row keeps
+# pointing at its main when a suffixed upload follows (ReplayIndex.upsert). The rid is that whole relative path,
+# so readers (app.js ridPath, cmd/insights) need no layout knowledge; flat replays from before stay as they are.
 # Publishes are REVISIONED by default: pieces land at replays/<gameId>-<rev> (rev = sha256[:8] of the PACKED
 # .brp, NOT of the input stream: two packs of one capture can differ — a codec change, or -no-demo vs the
 # demo fetch — and hashing the input gave them the SAME immutable keys, so the second silently overwrote
@@ -1133,7 +1142,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the wrangler entry re-exporting the DO class). The worker never transcodes
                           (viewer serves the .brp wire only; the Go pipeline produces it): it scans
                           the preamble (src/worker/preamble.ts — gameId + recorder's ally team),
-                          archives the raw bytes at streams/<gameId>/<ts>-<hash8>-a<ally>.brepstream
+                          archives the raw bytes at streams/<YYYY-MM>/<gameId>/<ts>-<hash8>-a<ally>.brepstream
+                          (the month is the game's start from the games mirror, else the upload's
+                          own UTC month; archives from before month folders stay at
+                          streams/<gameId>/..., and both shapes download)
                           (job KIND "upload"; see the resim door below for the other kind)
                           (the hash is sha256[:4 bytes] of the body and is what makes the key unique:
                           gameId and the a<ally> suffix are equal for two teammates uploading the same

@@ -36,7 +36,7 @@ import { parseGameId } from "./gameid";
 import { JOB_KINDS, parseJobErrorKind, parseJobProgress, parseJobStats } from "./jobs";
 import type { JobKind } from "./jobs";
 import { archiveSuffix, scanStreamPreamble } from "./preamble";
-import { parseReplayFilter, parseViewRequest, playersFromApi, sanitizeEntry, settingsFlags } from "./replayentry";
+import { isReplayFolder, monthFolder, parseReplayFilter, parseViewRequest, playersFromApi, sanitizeEntry, settingsFlags } from "./replayentry";
 
 /** Upload size cap: keeps a whole raw stream inside Worker memory. Real
  * streams are single-digit MB (~6.5x smaller than the text format), so this
@@ -399,7 +399,14 @@ app.post("/api/upload", async (c) => {
   const hash = [...new Uint8Array(digest).slice(0, 4)]
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
-  const streamKey = `streams/${p.gameId}/${Date.now()}-${hash}-${archiveSuffix(p)}.brepstream`;
+  // Filed under the game's UTC start month, like the published replays. The
+  // stream itself carries no start time, so it comes from the games mirror,
+  // which knows every public game a minute after it ends; a game it does not
+  // know (a private lobby, or one uploaded the moment it ended) is filed
+  // under the month it was uploaded in.
+  const started = await indexStub(c.env).gameStartUnix(p.gameId);
+  const month = monthFolder(started ?? Math.floor(Date.now() / 1000));
+  const streamKey = `streams/${month}/${p.gameId}/${Date.now()}-${hash}-${archiveSuffix(p)}.brepstream`;
   await c.env.BUCKET.put(streamKey, body);
 
   const job = crypto.randomUUID();
@@ -830,6 +837,14 @@ app.get("/api/streams/:gameId/:file", async (c) => {
   const key = `streams/${c.req.param("gameId")}/${c.req.param("file")}`;
   return serveR2(c.env.BUCKET, key, c.req.raw, false);
 });
+// Archived since month folders: streams/<YYYY-MM>/<gameId>/<file>.
+app.get("/api/streams/:month/:gameId/:file", async (c) => {
+  if (!authorized(c)) return c.json({ error: "unauthorized" }, 401);
+  const month = c.req.param("month");
+  if (!isReplayFolder(month)) return c.json({ error: "not found" }, 404);
+  const key = `streams/${month}/${c.req.param("gameId")}/${c.req.param("file")}`;
+  return serveR2(c.env.BUCKET, key, c.req.raw, false);
+});
 
 // The replay listing is built live from the bucket (list the replays/ prefix), so
 // uploading a single replay's files makes it appear with no index.json to maintain.
@@ -843,6 +858,14 @@ app.get("/index.json", (c) => handleIndex(c.env.BUCKET));
 app.on(["GET", "HEAD"], "/replays/:id", (c) => {
   const id = c.req.param("id");
   if (!id.includes(".")) return serveEntry(c);
+  return serveR2(c.env.BUCKET, c.req.path.slice(1), c.req.raw, true);
+});
+// /replays/<YYYY-MM>/<rid name> with no extension is a page too: the link
+// to one specific upload published since month folders. A legacy chunk,
+// replays/<rid>/c<n>, also has no dot, but its first segment is a game id,
+// never a month, which is the whole dispatch.
+app.on(["GET", "HEAD"], "/replays/:folder/:id", (c) => {
+  if (isReplayFolder(c.req.param("folder")) && !c.req.param("id").includes(".")) return serveEntry(c);
   return serveR2(c.env.BUCKET, c.req.path.slice(1), c.req.raw, true);
 });
 app.on(["GET", "HEAD"], "/replays/*", (c) => {
@@ -867,15 +890,25 @@ app.put("/replays/*", async (c) => {
   if (declared > MAX_UPLOAD) return c.json({ error: `object exceeds ${MAX_UPLOAD} bytes` }, 413);
   const body = new Uint8Array(await c.req.arrayBuffer());
   if (body.length > MAX_UPLOAD) return c.json({ error: `object exceeds ${MAX_UPLOAD} bytes` }, 413);
+  // If-None-Match: * is how a publisher claims a game's MAIN replay name
+  // (internal/packer names.go): write only if nothing is there, else 412 and
+  // the publisher falls back to a suffixed name. Checked up front and again
+  // by R2 itself, so a race between two publishers cannot overwrite either.
+  const ifAbsent = c.req.header("if-none-match")?.trim() === "*";
+  if (ifAbsent && (await c.env.BUCKET.head(key)) !== null) {
+    return c.json({ error: "object already exists" }, 412);
+  }
   // Store the HTTP metadata rather than relying on serveR2 to add it: the
   // bucket is also read through its OWN hostname (cdn-bar.fogofwar.dev), where
   // R2 replies with exactly what is stored and no Worker gets to fix it up.
   // Derived from the key, not from the request headers, so every transport
   // (S3, wrangler, this route) leaves the bucket in the same state.
   const meta = objectHTTPMeta(key);
-  await c.env.BUCKET.put(key, body, {
+  const stored = await c.env.BUCKET.put(key, body, {
     httpMetadata: { contentType: meta.contentType, cacheControl: meta.cacheControl },
+    ...(ifAbsent ? { onlyIf: new Headers({ "if-none-match": "*" }) } : {}),
   });
+  if (ifAbsent && stored === null) return c.json({ error: "object already exists" }, 412);
   return c.json({ ok: true });
 });
 
@@ -935,7 +968,15 @@ async function handleIndex(bucket: R2Bucket): Promise<Response> {
   do {
     const page = await bucket.list({ prefix: REPLAY_PREFIX, cursor, limit: 1000 });
     for (const o of page.objects) {
-      const rest = o.key.slice(REPLAY_PREFIX.length);
+      let rest = o.key.slice(REPLAY_PREFIX.length);
+      // A month folder is part of the replay's id (its rid), not a chunk
+      // directory: replays/<YYYY-MM>/<name>.brp is replay "<YYYY-MM>/<name>".
+      let folder = "";
+      const first = rest.indexOf("/");
+      if (first >= 0 && isReplayFolder(rest.slice(0, first))) {
+        folder = rest.slice(0, first + 1);
+        rest = rest.slice(first + 1);
+      }
       const slash = rest.indexOf("/");
       let id: string;
       if (slash >= 0) {
@@ -950,8 +991,15 @@ async function handleIndex(bucket: R2Bucket): Promise<Response> {
         replays.add(id); // a published replay is its .brp
       } else if (rest.endsWith(".keys")) {
         id = rest.slice(0, -".keys".length);
+      } else if (/\.insights\d+\.json$/.test(rest)) {
+        id = rest.replace(/\.insights\d+\.json$/, ""); // the game summary beside it
       } else {
         id = rest;
+      }
+      if (folder !== "") {
+        const bare = id;
+        id = folder + bare;
+        if (replays.delete(bare)) replays.add(id);
       }
       sizes.set(id, (sizes.get(id) ?? 0) + o.size);
     }
@@ -960,7 +1008,7 @@ async function handleIndex(bucket: R2Bucket): Promise<Response> {
 
   const list = [...replays]
     .sort()
-    .map((id) => ({ file: id, gameId: id, size: sizes.get(id) ?? 0 }));
+    .map((id) => ({ file: id, gameId: id.slice(id.lastIndexOf("/") + 1), size: sizes.get(id) ?? 0 }));
   return Response.json(list, { headers: { "cache-control": "no-cache" } });
 }
 

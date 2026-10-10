@@ -61,7 +61,9 @@ type Replay struct {
 	EngineVersion string `json:"engineVersion"`
 	GameVersion   string `json:"gameVersion"`
 	DurationMs    int64  `json:"durationMs"`
-	Map           struct {
+	// StartTime is when the game started, RFC 3339 ("2026-10-10T17:59:27.000Z").
+	StartTime string `json:"startTime"`
+	Map       struct {
 		ScriptName string `json:"scriptName"`
 		FileName   string `json:"fileName"`
 	} `json:"Map"`

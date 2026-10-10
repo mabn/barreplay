@@ -36,6 +36,12 @@ class FakeIndex {
    * full view, with nothing failing. */
   resimJobIds: (string | undefined)[] = [];
 
+  /** The games mirror's start times, for filing an upload under its month. */
+  starts = new Map<string, number>();
+  gameStartUnix(id: string): number | null {
+    return this.starts.get(id) ?? null;
+  }
+
   upsert(e: ReplayEntry, resimJobId?: string): void {
     this.entries.set(e.id, e);
     this.resimJobIds.push(resimJobId);
@@ -243,10 +249,16 @@ class FakeBucket {
   async put(
     key: string,
     value: Uint8Array,
-    opts?: { httpMetadata?: { contentType?: string; cacheControl?: string } },
-  ): Promise<void> {
+    opts?: { httpMetadata?: { contentType?: string; cacheControl?: string }; onlyIf?: Headers },
+  ): Promise<object | null> {
+    // R2 returns null when an onlyIf precondition fails.
+    if (opts?.onlyIf?.get("if-none-match") === "*" && this.objects.has(key)) return null;
     this.objects.set(key, value);
     this.meta.set(key, opts?.httpMetadata ?? {});
+    return {};
+  }
+  async head(key: string): Promise<object | null> {
+    return this.objects.has(key) ? {} : null;
   }
   async list(): Promise<{ objects: { key: string; size: number }[]; truncated: boolean }> {
     return {
@@ -290,7 +302,8 @@ test("upload archives the stream and records a pending job", async () => {
   assert.equal(res.status, 200);
   const body = await asJson(res);
   assert.equal(body.gameId, GAME_ID);
-  assert.match(body.streamKey, new RegExp(`^streams/${GAME_ID}/\\d+-[0-9a-f]{8}-a0\\.brepstream$`));
+  // Filed under the UPLOAD's month: the games mirror does not know this game.
+  assert.match(body.streamKey, new RegExp(`^streams/\\d{4}-\\d{2}/${GAME_ID}/\\d+-[0-9a-f]{8}-a0\\.brepstream$`));
 
   const archived = bucket.objects.get(body.streamKey);
   assert.ok(archived, "raw stream archived");
@@ -316,11 +329,58 @@ test("the listing names .brp replays and older .brw bundles", async () => {
   bucket.objects.set("replays/old.resources", new Uint8Array(5));
   bucket.objects.set("replays/old.keys", new Uint8Array(3));
   bucket.objects.set("replays/old/c0", new Uint8Array(7));
+  // Published since month folders: the folder is part of the replay's id.
+  bucket.objects.set("replays/2026-10/main.brp", new Uint8Array(40));
+  bucket.objects.set("replays/2026-10/main.insights3.json", new Uint8Array(2));
+  bucket.objects.set("replays/2026-10/main-1a2b3c4d.brp", new Uint8Array(30));
   const idx = await app.request("/index.json", {}, env);
   assert.deepEqual(await asJson(idx), [
+    { file: "2026-10/main", gameId: "main", size: 42 },
+    { file: "2026-10/main-1a2b3c4d", gameId: "main-1a2b3c4d", size: 30 },
     { file: "new-1a2b3c4d", gameId: "new-1a2b3c4d", size: 100 },
     { file: "old", gameId: "old", size: 25 },
   ]);
+});
+
+// An uploaded stream is filed under the game's start month when the games
+// mirror knows the game.
+test("upload files the stream under the game's start month", async () => {
+  const { env, index } = makeEnv();
+  index.starts.set(GAME_ID, 1_788_000_000); // 2026-08-29 UTC
+  const res = await app.request("/api/upload", { method: "POST", body: fixture() }, env);
+  const { streamKey } = await asJson(res);
+  assert.match(streamKey, new RegExp(`^streams/2026-08/${GAME_ID}/`));
+});
+
+// /replays/<YYYY-MM>/<name> is the page of one specific upload, while a
+// legacy chunk (replays/<rid>/c<n>) — no dot either — is still a bucket read.
+test("a month-folder replay path without an extension is a page", async () => {
+  const { env, bucket } = makeEnv();
+  let served = "";
+  env.ASSETS = { fetch: async (r: Request) => ((served = new URL(r.url).pathname), new Response("<html>")) } as unknown as Env["ASSETS"];
+  bucket.objects.set(`replays/${GAME_ID}-1a2b3c4d/c0`, new Uint8Array([9]));
+  bucket.objects.set(`replays/2026-10/${GAME_ID}.brp`, new Uint8Array([1, 2]));
+
+  const page = await app.request(`/replays/2026-10/${GAME_ID}-1a2b3c4d`, {}, env);
+  assert.equal(page.status, 200);
+  assert.equal(served, `/replays/2026-10/${GAME_ID}-1a2b3c4d`);
+  const chunk = await app.request(`/replays/${GAME_ID}-1a2b3c4d/c0`, {}, env);
+  assert.deepEqual(new Uint8Array(await chunk.arrayBuffer()), new Uint8Array([9]));
+  const brp = await app.request(`/replays/2026-10/${GAME_ID}.brp`, {}, env);
+  assert.deepEqual(new Uint8Array(await brp.arrayBuffer()), new Uint8Array([1, 2]));
+});
+
+// If-None-Match: * is how a publisher claims a game's main replay name: the
+// write lands only on a free key, so an existing main is never overwritten.
+test("PUT /replays/<key> with If-None-Match: * never overwrites", async () => {
+  const { env, bucket } = makeEnv("s3cret");
+  const key = `replays/2026-10/${GAME_ID}.brp`;
+  const hdrs = { authorization: "Bearer s3cret", "if-none-match": "*" };
+  const first = await app.request(`/${key}`, { method: "PUT", headers: hdrs, body: "first" }, env);
+  assert.equal(first.status, 200);
+  const second = await app.request(`/${key}`, { method: "PUT", headers: hdrs, body: "second" }, env);
+  assert.equal(second.status, 412);
+  assert.deepEqual(bucket.objects.get(key), new TextEncoder().encode("first"));
 });
 
 test("rejected uploads write nothing", async () => {
@@ -577,7 +637,7 @@ test("the daemon can download the archived stream, guarded", async () => {
   const up = await app.request("/api/upload", { method: "POST", body: fixture() }, env);
   const { streamKey } = await asJson(up);
 
-  const path = `/api/${streamKey}`; // streams/<gameId>/<file> nests under /api/
+  const path = `/api/${streamKey}`; // streams/<YYYY-MM>/<gameId>/<file> nests under /api/
   assert.equal((await app.request(path, {}, env)).status, 401);
   const res = await app.request(path, { headers: { authorization: "Bearer s3cret" } }, env);
   assert.equal(res.status, 200);
@@ -585,6 +645,15 @@ test("the daemon can download the archived stream, guarded", async () => {
 
   const missing = await app.request(`/api/streams/${GAME_ID}/nope.brepstream`, { headers: { authorization: "Bearer s3cret" } }, env);
   assert.equal(missing.status, 404);
+});
+
+// Streams archived before month folders keep downloading by their old key.
+test("a stream archived before month folders still downloads", async () => {
+  const { env, bucket } = makeEnv("s3cret");
+  bucket.objects.set(`streams/${GAME_ID}/1-deadbeef-a0.brepstream`, new Uint8Array([7]));
+  const res = await app.request(`/api/streams/${GAME_ID}/1-deadbeef-a0.brepstream`, { headers: { authorization: "Bearer s3cret" } }, env);
+  assert.equal(res.status, 200);
+  assert.deepEqual(new Uint8Array(await res.arrayBuffer()), new Uint8Array([7]));
 });
 
 test("failed jobs carry their error to the poller", async () => {

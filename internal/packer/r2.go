@@ -148,7 +148,10 @@ func uploadBundle(ctx context.Context, bundleDir string, put func(ctx context.Co
 // PUT /replays/<key> route — the transport for the "local" target, where the
 // dev server binds the simulator's bucket (wrangler spawns cost ~1s each;
 // this is plain fast HTTP). One retry on transient failures, like R2Client.
-func workerPut(ctx context.Context, indexURL, key string, body []byte) error {
+//
+// ifAbsent sends If-None-Match: * so the write lands only on a free key; the
+// route answers 412 when it is taken, reported as errObjectExists.
+func workerPut(ctx context.Context, indexURL, key string, body []byte, ifAbsent bool) error {
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPut,
@@ -164,6 +167,9 @@ func workerPut(ctx context.Context, indexURL, key string, body []byte) error {
 		ct, cc := objectHTTPMeta(key)
 		req.Header.Set("Content-Type", ct)
 		req.Header.Set("Cache-Control", cc)
+		if ifAbsent {
+			req.Header.Set("If-None-Match", "*")
+		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			lastErr = err
@@ -176,6 +182,9 @@ func workerPut(ctx context.Context, indexURL, key string, body []byte) error {
 		resp.Body.Close()
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return nil
+		}
+		if resp.StatusCode == http.StatusPreconditionFailed {
+			return fmt.Errorf("PUT %s: %w", key, errObjectExists)
 		}
 		lastErr = fmt.Errorf("PUT %s: %s: %s", key, resp.Status, strings.TrimSpace(string(msg)))
 		if resp.StatusCode < 500 {
@@ -223,6 +232,14 @@ func objectHTTPMeta(key string) (contentType, cacheControl string) {
 // Put uploads one object, retrying once on a transient failure (5xx or a
 // transport error) like the TS s3Put.
 func (c *R2Client) Put(ctx context.Context, key string, body []byte) error {
+	return c.put(ctx, key, body, false)
+}
+
+// put is Put, optionally conditional: ifAbsent sends If-None-Match: *, which
+// R2 honours on PutObject, so the object is written only if the key is free
+// (412 otherwise, reported as errObjectExists). Unsigned like Content-Type —
+// SigV4 checks only the headers it lists.
+func (c *R2Client) put(ctx context.Context, key string, body []byte, ifAbsent bool) error {
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.Endpoint+"/"+uriEncodePath(c.Bucket+"/"+key), bytes.NewReader(body))
@@ -238,6 +255,9 @@ func (c *R2Client) Put(ctx context.Context, key string, body []byte) error {
 		ct, cc := objectHTTPMeta(key)
 		req.Header.Set("Content-Type", ct)
 		req.Header.Set("Cache-Control", cc)
+		if ifAbsent {
+			req.Header.Set("If-None-Match", "*")
+		}
 		c.sign(req)
 		client := c.HTTPClient
 		if client == nil {
@@ -255,6 +275,9 @@ func (c *R2Client) Put(ctx context.Context, key string, body []byte) error {
 		resp.Body.Close()
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return nil
+		}
+		if resp.StatusCode == http.StatusPreconditionFailed {
+			return fmt.Errorf("PUT %s: %w", key, errObjectExists)
 		}
 		lastErr = fmt.Errorf("PUT %s: %s: %s", key, resp.Status, strings.TrimSpace(string(msg)))
 		if resp.StatusCode < 500 {
