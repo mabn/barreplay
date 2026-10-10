@@ -512,6 +512,17 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           units blown up by a player leaving, not fought for — and battles,
                           the costliest/unfinished awards and the page's moment stories skip
                           them; the page draws them faint on its losses chart.
+                          THE SUMMARY ENDS WHERE THE GAME WAS DECIDED (gameend.go): once every
+                          side but one is out (a resign vote, or the last commanders dying),
+                          Compute cuts the input at the start of the run of eliminations that
+                          emptied the last side to go (teams of one side within 30 s count as
+                          one surrender) and computes everything up to there — the engine then
+                          blows up the losing side's whole army, which dwarfed every real loss
+                          on every chart. Recorded teamdied facts give the cut up front; an
+                          inferred one costs a first pass over the whole game (whose
+                          eliminations are kept, since the cut input lost the bursts they were
+                          read from). One player leaving mid-game ends nothing; an FFA runs on
+                          until one side is left. Clips still play past the end.
                           players.go is the per-player report (Insights.Players, full view
                           only): built/lost/chat per step, the commander's path + death +
                           first contact (a 900-elmo grid shared with an enemy), leaks and a

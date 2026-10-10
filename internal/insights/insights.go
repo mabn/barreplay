@@ -259,6 +259,52 @@ func Compute(in Input) (*Insights, error) {
 		return nil, fmt.Errorf("insights: no frames")
 	}
 	ro := buildRoster(in.Meta)
+	// The summary ends where the game was decided (gameend.go). A capture
+	// that recorded its eliminations says where up front; otherwise they are
+	// inferred from a first pass over the whole game, and the summary is
+	// computed again up to that point.
+	died := in.TeamDied
+	if died == nil {
+		whole, err := run(in, ro)
+		if err != nil {
+			return nil, err
+		}
+		died = map[int32]int32{}
+		for _, e := range whole.Eliminated {
+			died[e.Team] = e.F
+		}
+		if gameEnd(died, ro) < 0 {
+			return whole, nil
+		}
+	}
+	end := gameEnd(died, ro)
+	if end < 0 {
+		return run(in, ro)
+	}
+	out, err := run(in.until(end), ro)
+	if err != nil || in.TeamDied != nil {
+		return out, err
+	}
+	// Inferred eliminations come from the deaths, and the cut input no
+	// longer holds the bursts that ended the game: keep the first pass's.
+	out.Eliminated = out.Eliminated[:0]
+	for t, f := range died {
+		if f <= end {
+			out.Eliminated = append(out.Eliminated, Elimination{F: f, Team: t})
+		}
+	}
+	sort.Slice(out.Eliminated, func(i, j int) bool {
+		a, b := out.Eliminated[i], out.Eliminated[j]
+		if a.F != b.F {
+			return a.F < b.F
+		}
+		return a.Team < b.Team
+	})
+	return out, nil
+}
+
+// run is one pass over the input.
+func run(in Input, ro roster) (*Insights, error) {
 	p := newPass(in, ro)
 	if err := in.Frames(p.frame); err != nil {
 		return nil, err
