@@ -701,7 +701,14 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           plain metal otherwise (losses.ts: what
                           died fighting, with what went down with an eliminated team faint on
                           top and left out of the scale) and metal income on one time axis
-                          and crosshair, with eliminations marked on the swing line. The MAP
+                          and crosshair, with eliminations marked on the swing line. LOG
+                          SCALES (chart.ts TimeChartSpec.log: symlog, ticks at powers of ten,
+                          labels closer than a line apart dropped): metal income and army
+                          composition each carry a Linear/Log toggle (scale.ts scaleToggle,
+                          which redraws the chart in place); composition defaults to LOG, and
+                          there places each side's TOTAL on the log axis and splits it by
+                          SHARE — stacking by value through a log would hand the bottom band
+                          most of the height whatever its size. The MAP
                           STORY numbers its battles in the order they happened, on the map and
                           in a one-line-per-battle list (losses either side of a centre line,
                           square-root scaled), one selection shared by both.

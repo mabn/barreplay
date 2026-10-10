@@ -46,6 +46,27 @@ export interface TimeChartSpec {
   /** Width of the left gutter, overriding the y axis's; row labels live in
    * it so they never sit on the data. */
   gutter?: number;
+  /** A LOG y scale whose linear stretch near zero is `unit` wide (symlog:
+   * sign(v)·log10(1 + |v|/unit)), so zero and negatives — a mirrored chart's
+   * lower half — still have a place. Ticks fall on powers of ten. */
+  log?: { unit: number };
+}
+
+/** symlog is the log scale's transform. */
+export function symlog(v: number, unit: number): number {
+  return Math.sign(v) * Math.log10(1 + Math.abs(v) / unit);
+}
+
+/** logTicks are the values a log axis over [lo, hi] marks: zero when it is in
+ * range, and every power of ten from unit up, either side. */
+export function logTicks(lo: number, hi: number, unit: number): number[] {
+  const out: number[] = [];
+  if (lo <= 0 && hi >= 0) out.push(0);
+  for (let p = Math.pow(10, Math.ceil(Math.log10(unit))); p <= Math.max(Math.abs(lo), Math.abs(hi)) * 1.0001; p *= 10) {
+    if (p <= hi) out.push(p);
+    if (-p >= lo) out.push(-p);
+  }
+  return out.sort((a, b) => a - b);
 }
 
 /** ChartGroup ties charts to one crosshair. */
@@ -65,15 +86,28 @@ export function timeChart(spec: TimeChartSpec): TimeChart {
   const dur = Math.max(1, spec.durationSec);
   const span = spec.yMax - spec.yMin || 1;
   const x = (t: number) => left + (Math.max(0, Math.min(dur, t)) / dur) * (right - left);
-  const y = (v: number) => bottom - ((v - spec.yMin) / span) * (bottom - top);
+  const log = spec.log;
+  const tf = (v: number) => (log ? symlog(v, log.unit) : v);
+  const t0 = tf(spec.yMin);
+  const tspan = tf(spec.yMax) - t0 || 1;
+  const y = (v: number) => bottom - ((tf(v) - t0) / tspan) * (bottom - top);
 
   const svg = s("svg", { viewBox: `0 0 ${CHART_W} ${spec.height}`, role: "img" });
   const grid = s("g", { stroke: "var(--brs-grid)", "stroke-width": 1 });
   svg.append(grid);
   if (spec.yTick) {
     const step = niceStep(span, 4);
-    for (let v = Math.ceil(spec.yMin / step) * step; v <= spec.yMax + 1e-9; v += step) {
+    const ticks: number[] = [];
+    if (log) ticks.push(...logTicks(spec.yMin, spec.yMax, log.unit));
+    else for (let v = Math.ceil(spec.yMin / step) * step; v <= spec.yMax + 1e-9; v += step) ticks.push(v);
+    // Labels closer than a line apart would print over each other (a log
+    // axis's first power of ten sits just off zero): zero wins, then the rest
+    // in order.
+    const drawn: number[] = [];
+    for (const v of ticks.sort((a, b) => (a === 0 ? -1 : b === 0 ? 1 : 0))) {
       const yy = y(v);
+      if (drawn.some((d) => Math.abs(d - yy) < 14)) continue;
+      drawn.push(yy);
       grid.append(s("line", { x1: left, x2: right, y1: yy, y2: yy }));
       svg.append(s("text", { x: left - 6, y: yy + 4, "text-anchor": "end" }, spec.yTick(v)));
     }

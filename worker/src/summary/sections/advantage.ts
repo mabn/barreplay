@@ -12,6 +12,7 @@ import { lossesByStep } from "../losses";
 import { comparable, sideColor, sideName } from "../model";
 import { swingChart } from "./swing";
 import { diff, maxOf, stepTimes } from "../series";
+import { scaleToggle } from "../scale";
 import { tip, type TipRow } from "../tooltip";
 import { watcher, type Watch } from "../watch";
 import type { Insights, SummaryOptions } from "../types";
@@ -29,7 +30,7 @@ export function advantage(ins: Insights, opts: SummaryOptions): HTMLElement | nu
   return section(sw ? "Who was winning" : "Army advantage",
     ...top,
     label(...lossLabel(ins)), lossChart(ins, watch, group),
-    label("Metal income"), incomeChart(ins, watch, group, t),
+    ...incomePanel(ins, watch, group, t),
     sw?.list ? h("h3", { style: "margin-top: 16px" }, "Biggest swings") : null,
     sw?.list ?? null);
 }
@@ -126,12 +127,29 @@ function lossChart(ins: Insights, watch: Watch | null, group: ChartGroup): SVGSV
   return c.svg;
 }
 
-function incomeChart(ins: Insights, watch: Watch | null, group: ChartGroup, t: number[]): SVGSVGElement {
+/** incomePanel is the income label with its Linear/Log switch, and the
+ * chart, redrawn in place on a switch. Linear by default: income grows
+ * steadily, and a log axis would flatten the gap between the sides. */
+function incomePanel(ins: Insights, watch: Watch | null, group: ChartGroup, t: number[]): HTMLElement[] {
+  const holder = h("div");
+  const draw = (log: boolean) => {
+    const old = holder.firstElementChild;
+    // The old chart leaves the shared crosshair with its svg.
+    if (old) group.members = group.members.filter((m) => !old.contains(m.hair));
+    holder.replaceChildren(incomeChart(ins, watch, group, t, log));
+  };
+  draw(false);
+  const lab = label("Metal income");
+  lab.append(scaleToggle(false, draw));
+  return [lab, holder];
+}
+
+function incomeChart(ins: Insights, watch: Watch | null, group: ChartGroup, t: number[], log: boolean): SVGSVGElement {
   const mi = ins.series.metalIncome;
   const peak = Math.max(1, maxOf(mi[0], mi[1]));
   const c = timeChart({
-    height: 130, durationSec: ins.durationSec, yMin: 0, yMax: peak * 1.05,
-    yTick: (v) => String(Math.round(v)), gutter: GUTTER, watch, group,
+    height: 130, durationSec: ins.durationSec, yMin: 0, yMax: peak * 1.05, log: log ? { unit: 1 } : undefined,
+    yTick: (v) => (v >= 1000 ? fmtMetal(v) : String(Math.round(v))), gutter: GUTTER, watch, group,
     readout: (tt) => {
       const i = stepAt(t, tt);
       return i < 0 ? null : [0, 1].map((sd) => ({ color: sideColor(ins, sd), label: sideName(ins, sd), metric: "Metal income", value: `${Math.round(mi[sd][i])}/s` }));

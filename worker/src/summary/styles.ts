@@ -110,6 +110,12 @@ export const CSS = `
 .brs-root .brs-tip-row { display: flex; align-items: center; gap: 7px; }
 .brs-root .brs-tip-row i { flex: 0 0 10px; height: 10px; border-radius: 2px; }
 .brs-root .brs-tip-row b { font-weight: 600; font-variant-numeric: tabular-nums; margin-left: auto; padding-left: 14px; white-space: nowrap; }
+.brs-root .brs-scale { display: inline-flex; margin-left: 10px; vertical-align: 1px; border: 1px solid var(--brs-line); border-radius: 4px; overflow: hidden; }
+.brs-root .brs-scale button { font: inherit; font-size: 10px; letter-spacing: .04em; text-transform: none; padding: 1px 7px; border: 0;
+  background: transparent; color: var(--brs-muted); cursor: pointer; }
+.brs-root .brs-scale button + button { border-left: 1px solid var(--brs-line); }
+.brs-root .brs-scale button[aria-pressed="true"] { background: var(--brs-line); color: var(--brs-text); }
+.brs-root .brs-section > h3 .brs-scale { font-weight: 400; }
 .brs-root .brs-info { display: inline-flex; align-items: center; justify-content: center; width: 13px; height: 13px; border-radius: 50%;
   border: 1px solid var(--brs-muted); color: var(--brs-muted); font: italic 600 9px/1 Georgia, serif; cursor: help; vertical-align: 1px; }
 .brs-root .brs-info:hover, .brs-root .brs-info:focus { color: var(--brs-text); border-color: var(--brs-text); outline: none; }
