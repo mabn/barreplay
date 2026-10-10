@@ -28,6 +28,12 @@
 # only until this expires. Purge the zone after a re-sync to make it immediate.
 /icons/*
   Cache-Control: public, max-age=604800
+
+# The icon table is read by fetch() from other origins too: the game summary,
+# bundled into another site (src/summary/embed.ts), resolves unit icons
+# against this deployment. The bitmaps are plain <img> loads and need no CORS.
+/icons/icontypes.json
+  Access-Control-Allow-Origin: *
 /ranks/*
   Cache-Control: public, max-age=604800
 

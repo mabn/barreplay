@@ -253,3 +253,36 @@ test("lossKinds merges defs sharing an icon and keeps 90% of the metal up front"
   assert.equal(unpriced.main.length, 1);
   assert.equal(unpriced.rest.length, 0);
 });
+
+test("embed: findInsights resolves the game's revision and the newest insights file", async (t) => {
+  const { findInsights, replayLink } = await import("../src/summary/embed.ts");
+  const urls: string[] = [];
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  globalThis.fetch = (async (input: string) => {
+    const url = String(input);
+    urls.push(url);
+    if (url.includes("/api/replays?id=")) {
+      return Response.json([
+        { id: "aaaa0000", rid: "2026-10/aaaa0000", placeholder: false }, // the asked game
+        { id: "aaaa00001", rid: "x", placeholder: false },                // a longer id with the same prefix
+      ]);
+    }
+    if (url.endsWith(".insights4.json")) return new Response("", { status: 404 });
+    if (url.endsWith(".insights3.json")) return Response.json({ version: 3, gameId: "aaaa0000" });
+    return new Response("", { status: 404 });
+  }) as typeof fetch;
+  const ins = await findInsights("aaaa0000", { replayOrigin: "https://r.test", dataOrigin: "https://d.test" });
+  assert.equal(ins?.version, 3);
+  assert.ok(urls.includes("https://d.test/replays/2026-10/aaaa0000.insights3.json"), urls.join("\n"));
+  assert.equal(replayLink("aaaa0000", 4500.4, "https://r.test"), "https://r.test/replays/aaaa0000?f=4500");
+  assert.equal(replayLink("aaaa0000", 0, "https://r.test"), "https://r.test/replays/aaaa0000");
+});
+
+test("embed: a game with no published replay has no summary", async (t) => {
+  const { findInsights } = await import("../src/summary/embed.ts");
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  globalThis.fetch = (async () => Response.json([{ id: "bbbb", rid: null, placeholder: true }])) as unknown as typeof fetch;
+  assert.equal(await findInsights("bbbb"), null);
+});

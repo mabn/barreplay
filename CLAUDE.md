@@ -780,6 +780,24 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           left out, owned value and battle teams) and app.js fetches
                           .insights4, then 3, 2, 1. A version bump needs `insights -all` after
                           the deploy, or published replays keep their older summary.
+                          EMBEDDING ON ANOTHER SITE (lavabalance's game pages): the folder is an
+                          installable package (src/summary/package.json, "barreplay-summary",
+                          TypeScript source with no dependencies), which the other site pins to a
+                          commit with pnpm's subfolder git spec (github:mabn/barreplay#<sha>&path:
+                          /worker/src/summary) and bundles at ITS build time — no copied code, no
+                          stable URL on this deployment to keep alive. Its "./embed" entry
+                          (embed.ts, mountGameSummary(el, gameId)) keeps every fact about where
+                          things live HERE: it resolves the game's rid through GET /api/replays?id=
+                          on replay.fogofwar.dev, fetches the newest insights from cdn-bar, and by
+                          default opens a clicked moment as /replays/<gameId>?f=<frame> in a new
+                          tab (app.js seekFromURL reads ?f= once per load, then drops it), and
+                          points iconBase at replay.fogofwar.dev (bundled elsewhere, the
+                          module's own origin would be the other site's). That
+                          needs three CROSS-ORIGIN reads, each set up separately: /api/replays
+                          answers `access-control-allow-origin: *` (app.ts), /icons/icontypes.json
+                          the same (public/_headers), and the bucket's policy (r2-cors.json, which
+                          lists lavabalance's origins — re-apply it with the README's CORS step
+                          whenever it changes).
 internal/viz/readbundle.go ReadStaticBundle: the inverse of WriteStaticBundle, rebuilding a
                           BRPFile from published pieces through a PieceFetcher. Defs come back
                           from the head only (names, footprints, armyCost -> MetalCost, CanFly
