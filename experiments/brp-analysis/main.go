@@ -152,6 +152,12 @@ func run(path string) error {
 		}
 	}
 	dealt, enemyHp, ally := map[int32]float64{}, map[int32]float64{}, map[int32]float64{}
+	// allyRows: where each team's damage to its own side came from.
+	type allyKey struct {
+		team, victim, weapon int32
+		atDeath              bool
+	}
+	allyRows := map[allyKey]float64{}
 	unknownByWeapon := map[int32]float64{}
 	var unknownAfterStats, unknownAtTeamDeath float64
 	// nearTeamDeath: within 30 s after some team died, when the engine
@@ -193,6 +199,7 @@ func run(path string) error {
 			switch {
 			case allyOf[r.AttackerTeam] == allyOf[r.VictimTeam]:
 				ally[r.AttackerTeam] += float64(r.Damage)
+				allyRows[allyKey{r.AttackerTeam, r.VictimTeam, r.WeaponDef, nearTeamDeath(w.Frame)}] += float64(r.Damage)
 			default:
 				dealt[r.AttackerTeam] += float64(r.Damage)
 				enemyHp[r.AttackerTeam] += float64(r.Damage - r.Overkill)
@@ -262,6 +269,28 @@ func run(path string) error {
 			}
 			fmt.Printf("  team %2d: widget %10.0f  engine %10.0f  (%s)  less overkill %10.0f  to allies %9.0f\n",
 				ts.Team, dealt[ts.Team], engine, ratio(dealt[ts.Team], engine), enemyHp[ts.Team], ally[ts.Team])
+		}
+	}
+
+	if len(allyRows) > 0 {
+		fmt.Printf("ally map: %v\n", allyOf)
+		keys := make([]allyKey, 0, len(allyRows))
+		for k := range allyRows {
+			keys = append(keys, k)
+		}
+		sort.Slice(keys, func(i, j int) bool { return allyRows[keys[i]] > allyRows[keys[j]] })
+		fmt.Println("biggest damage to allies (attacker team -> victim team, weapon):")
+		for i := 0; i < len(keys) && i < 10; i++ {
+			k := keys[i]
+			name := weaponName[k.weapon]
+			if c := snapshot.DamageCauseName(k.weapon); c != "" {
+				name = c
+			}
+			when := ""
+			if k.atDeath {
+				when = " (after a team died)"
+			}
+			fmt.Printf("  team %d -> team %d  %s  %.0f%s\n", k.team, k.victim, name, allyRows[k], when)
 		}
 	}
 
