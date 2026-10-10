@@ -269,6 +269,30 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 					return err
 				}
 			}
+		case 'H':
+			hits, err := decodeHitsRecord(payload)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "capture: bad hits record: %v\n", err)
+				continue
+			}
+			for _, h := range hits {
+				stats.Hits++
+				if err := w.WriteHit(h); err != nil {
+					return err
+				}
+			}
+		case 'U':
+			ends, err := decodeUnitEndsRecord(payload)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "capture: bad unit-ends record: %v\n", err)
+				continue
+			}
+			for _, u := range ends {
+				stats.UnitEnds++
+				if err := w.WriteUnitEnd(u); err != nil {
+					return err
+				}
+			}
 		case 'V':
 			v, err := decodeVisibilityRecord(payload)
 			if err != nil {
@@ -634,6 +658,72 @@ func decodeLivesRecord(payload []byte) ([]snapshot.UnitLife, error) {
 		ls[i].XP = c.f32()
 	}
 	return ls, c.err
+}
+
+// decodeHitsRecord decodes one 'H' payload: frame u32 (the window's first
+// frame), n u32, then columns df u16 (frame - window), victim u16, vDef
+// u16, vTeam u8, x u16, z u16, attacker u16, aDef u16, aTeam u8, weapon u16
+// (as in D), projOwner u16, projTeam u8, flags u8 (bit 0 paralyzer, bit 1
+// projectile), damage f32, hpAfter f32. 65535 / 255 are unknown.
+func decodeHitsRecord(payload []byte) ([]snapshot.Hit, error) {
+	c := &cursor{b: payload}
+	base := int32(c.u32())
+	n := int(c.u32())
+	if c.err == nil && n*30 > len(payload) {
+		return nil, fmt.Errorf("hits record declares %d rows in %d bytes", n, len(payload))
+	}
+	hs := make([]snapshot.Hit, n)
+	cols := []func(h *snapshot.Hit){
+		func(h *snapshot.Hit) { h.Frame = base + c.u16() },
+		func(h *snapshot.Hit) { h.Victim = unknown16(c.u16()) },
+		func(h *snapshot.Hit) { h.VictimDef = unknown16(c.u16()) },
+		func(h *snapshot.Hit) { h.VictimTeam = unknown8(c.u8()) },
+		func(h *snapshot.Hit) { h.X = c.u16() },
+		func(h *snapshot.Hit) { h.Z = c.u16() },
+		func(h *snapshot.Hit) { h.Attacker = unknown16(c.u16()) },
+		func(h *snapshot.Hit) { h.AttackerDef = unknown16(c.u16()) },
+		func(h *snapshot.Hit) { h.AttackerTeam = unknown8(c.u8()) },
+		func(h *snapshot.Hit) { h.WeaponDef = damageWeapon(c.u16()) },
+		func(h *snapshot.Hit) { h.ProjOwner = unknown16(c.u16()) },
+		func(h *snapshot.Hit) { h.ProjTeam = unknown8(c.u8()) },
+		func(h *snapshot.Hit) { f := c.u8(); h.Paralyzer, h.Projectile = f&1 != 0, f&2 != 0 },
+		func(h *snapshot.Hit) { h.Damage = c.f32() },
+		func(h *snapshot.Hit) { h.HPAfter = c.f32() },
+	}
+	for _, col := range cols {
+		for i := range hs {
+			col(&hs[i])
+		}
+	}
+	return hs, c.err
+}
+
+// decodeUnitEndsRecord decodes one 'U' payload: frame u32, n u32, then
+// columns df u16, unit u16, hit u32 (hits recorded before it), x u16, z u16,
+// xp f32, flags u8 (bit 0 alive at the end).
+func decodeUnitEndsRecord(payload []byte) ([]snapshot.UnitEnd, error) {
+	c := &cursor{b: payload}
+	base := int32(c.u32())
+	n := int(c.u32())
+	if c.err == nil && n*17 > len(payload) {
+		return nil, fmt.Errorf("unit-ends record declares %d rows in %d bytes", n, len(payload))
+	}
+	us := make([]snapshot.UnitEnd, n)
+	cols := []func(u *snapshot.UnitEnd){
+		func(u *snapshot.UnitEnd) { u.Frame = base + c.u16() },
+		func(u *snapshot.UnitEnd) { u.Unit = c.u16() },
+		func(u *snapshot.UnitEnd) { u.Hit = int32(c.u32()) },
+		func(u *snapshot.UnitEnd) { u.X = c.u16() },
+		func(u *snapshot.UnitEnd) { u.Z = c.u16() },
+		func(u *snapshot.UnitEnd) { u.XP = c.f32() },
+		func(u *snapshot.UnitEnd) { u.Alive = c.u8()&1 != 0 },
+	}
+	for _, col := range cols {
+		for i := range us {
+			col(&us[i])
+		}
+	}
+	return us, c.err
 }
 
 // decodeVisibilityRecord decodes one 'V' payload: frame u32, flags u8 (bit 0

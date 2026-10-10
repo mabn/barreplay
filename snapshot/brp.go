@@ -267,6 +267,8 @@ type brpMetaRecord struct {
 	DamageWindows int        `json:"damageWindows,omitempty"`
 	Lives         int        `json:"lives,omitempty"`
 	Visibility    int        `json:"visibility,omitempty"`
+	Hits          int        `json:"hits,omitempty"`
+	UnitEnds      int        `json:"unitEnds,omitempty"`
 	UnitRecords   int64      `json:"unitRecords"`
 	ChunkFrames   int        `json:"chunkFrames"` // samples per chunk (last may be short)
 	Chunks        []BRPChunk `json:"chunks,omitempty"`
@@ -1070,6 +1072,8 @@ type brpWriter struct {
 	facts       []Fact
 	damage      []DamageWindow
 	lives       []UnitLife
+	hits        []Hit
+	unitEnds    []UnitEnd
 	visibility  []Visibility
 	bounds      BRPBounds
 	anyUnit     bool
@@ -1190,6 +1194,16 @@ func (w *brpWriter) WriteVisibility(v Visibility) error {
 	return nil
 }
 
+func (w *brpWriter) WriteHit(h Hit) error {
+	w.hits = append(w.hits, h)
+	return nil
+}
+
+func (w *brpWriter) WriteUnitEnd(u UnitEnd) error {
+	w.unitEnds = append(w.unitEnds, u)
+	return nil
+}
+
 func (w *brpWriter) Close() error {
 	w.flushChunk()
 
@@ -1204,6 +1218,8 @@ func (w *brpWriter) Close() error {
 		DamageWindows: len(w.damage),
 		Lives:         len(w.lives),
 		Visibility:    len(w.visibility),
+		Hits:          len(w.hits),
+		UnitEnds:      len(w.unitEnds),
 		ChunkFrames:   w.chunkFrames,
 		Chunks:        w.chunks,
 	}
@@ -1248,6 +1264,12 @@ func (w *brpWriter) Close() error {
 	}
 	if len(w.visibility) > 0 {
 		data = append(data, Section{Tag: SecVisibility, Payload: gzipCompress(encodeVisibility(w.visibility))})
+	}
+	if len(w.hits) > 0 {
+		data = append(data, Section{Tag: SecHits, Payload: gzipCompress(encodeHits(w.hits))})
+	}
+	if len(w.unitEnds) > 0 {
+		data = append(data, Section{Tag: SecUnitEnds, Payload: gzipCompress(encodeUnitEnds(w.unitEnds))})
 	}
 	rec.Sections = sectionLayout(data)
 

@@ -20,6 +20,8 @@ type recordingWriter struct {
 	damage     []snapshot.DamageWindow
 	lives      []snapshot.UnitLife
 	visibility []snapshot.Visibility
+	hits       []snapshot.Hit
+	unitEnds   []snapshot.UnitEnd
 	closed     bool
 }
 
@@ -47,6 +49,11 @@ func (r *recordingWriter) WriteLife(l snapshot.UnitLife) error {
 }
 func (r *recordingWriter) WriteVisibility(v snapshot.Visibility) error {
 	r.visibility = append(r.visibility, v)
+	return nil
+}
+func (r *recordingWriter) WriteHit(h snapshot.Hit) error { r.hits = append(r.hits, h); return nil }
+func (r *recordingWriter) WriteUnitEnd(u snapshot.UnitEnd) error {
+	r.unitEnds = append(r.unitEnds, u)
 	return nil
 }
 func (r *recordingWriter) Close() error { r.closed = true; return nil }

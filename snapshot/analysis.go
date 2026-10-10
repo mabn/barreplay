@@ -13,7 +13,15 @@ import (
 // what each side could see — and the engine's own end-of-game facts. None of
 // it is drawn by the viewer frame by frame; it is the input to summaries
 // computed once per replay. Each kind is its own optional .brp section (G, D,
-// S, V; .brp v6+), absent from every capture that did not record it.
+// S, V, H, U; .brp v6+), absent from every capture that did not record it.
+//
+// What is stored is SOURCE data — what the engine reported, as it reported
+// it (Hit, UnitEnd) — not conclusions drawn from it. Who gets the credit for
+// a chain explosion, what counts as a big blast, how damage is summed: all
+// of that is computed when a file is read (internal/combat), so it can be
+// changed without re-simulating, which is the one expensive thing. D and S
+// (per-second sums and lifetime totals the widget used to compute itself)
+// are read from older captures but no longer written.
 
 // Fact is one game fact (a G record): a JSON object whose "k" names its kind
 // and whose "f", when present, is the sim frame it happened on. Facts are kept
@@ -89,6 +97,8 @@ type WeaponDef struct {
 	Reload      float32 `json:"reload,omitempty"`
 	Damage      float32 `json:"damage,omitempty"` // against the default armour class
 	Paralyzer   bool    `json:"paralyzer,omitempty"`
+	// AOE is the explosion radius in elmos (damageAreaOfEffect).
+	AOE float32 `json:"aoe,omitempty"`
 }
 
 // FactWeaponDefsData is the weapon table.
@@ -216,6 +226,63 @@ type UnitLife struct {
 	XP           float32 `json:"xp"`
 }
 
+// Hit is one damage callin, as the engine delivered it to the re-sim widget.
+// Nothing about it is inferred: Attacker* is what the engine named (-1 for
+// none — it names nobody for a death explosion, and sometimes names the
+// exploding unit itself), and ProjOwner/ProjTeam are read off the projectile
+// only when the engine named no attacker (a shot landing after its shooter
+// died). X/Z is the victim's position at the hit, in whole elmos. HPAfter is
+// the victim's health right after the hit — below zero by the overkill — so
+// the health actually removed is Damage minus that excess. WeaponDef below -1
+// is an engine damage source (DamageEngineCause). Damage and HPAfter are
+// stored to 0.1 hp.
+type Hit struct {
+	Frame        int32   `json:"f"`
+	Victim       int32   `json:"victim"`
+	VictimDef    int32   `json:"vDef"`
+	VictimTeam   int32   `json:"vTeam"`
+	X            int32   `json:"x"`
+	Z            int32   `json:"z"`
+	Attacker     int32   `json:"attacker"`
+	AttackerDef  int32   `json:"aDef"`
+	AttackerTeam int32   `json:"aTeam"`
+	WeaponDef    int32   `json:"weapon"`
+	Projectile   bool    `json:"projectile,omitempty"` // the engine named a projectile
+	ProjOwner    int32   `json:"projOwner"`
+	ProjTeam     int32   `json:"projTeam"`
+	Paralyzer    bool    `json:"paralyzer,omitempty"`
+	Damage       float32 `json:"damage"`
+	HPAfter      float32 `json:"hpAfter"`
+}
+
+// Removed is the health the hit took off (0 for paralyzer damage): a killing
+// blow counts only what the victim had left.
+func (h Hit) Removed() float32 {
+	if h.Paralyzer || h.Damage <= 0 {
+		return 0
+	}
+	if h.HPAfter < 0 {
+		return max(h.Damage+h.HPAfter, 0)
+	}
+	return h.Damage
+}
+
+// UnitEnd is where and how a unit's life ended: a death (its destroyed event
+// has the same frame and unit; the event carries the engine's killer), or,
+// with Alive, a unit still standing when the game ended. Hit is how many hits
+// had been recorded before it, which orders it exactly among them — a unit's
+// death and the hits its explosion then deals happen within one frame. X/Z
+// in whole elmos; XP is the unit's experience.
+type UnitEnd struct {
+	Frame int32   `json:"f"`
+	Unit  int32   `json:"unit"`
+	Hit   int32   `json:"hit"`
+	X     int32   `json:"x"`
+	Z     int32   `json:"z"`
+	XP    float32 `json:"xp"`
+	Alive bool    `json:"alive,omitempty"`
+}
+
 // Visibility is one sample's per-side visibility changes: for each unit in
 // Units, Masks holds what each side in Allies could see of it — 2 bits per
 // side in Allies order, bit 0 of a pair "in LOS", bit 1 "on radar". Only
@@ -243,6 +310,8 @@ const (
 	SecDamage     byte = 'D' // damage windows
 	SecLives      byte = 'S' // per-unit lifetime totals
 	SecVisibility byte = 'V' // per-side visibility changes
+	SecHits       byte = 'H' // every damage callin
+	SecUnitEnds   byte = 'U' // where each unit's life ended
 )
 
 func q10(f float32) uint64 {
@@ -431,6 +500,197 @@ func decodeLives(b []byte) ([]UnitLife, error) {
 	return ls, nil
 }
 
+// encodeHits: count, then the hits column by column — frame and position
+// delta-coded against the previous hit (hits come in bursts, in one place),
+// ids as id+1 (0 = unknown), flags (bit 0 paralyzer, bit 1 projectile),
+// damage in 0.1 hp and the health after as a signed 0.1 hp.
+func encodeHits(hs []Hit) []byte {
+	var buf bytes.Buffer
+	vw := &varintWriter{w: &buf}
+	vw.uv(uint64(len(hs)))
+	delta := func(get func(h Hit) int32) {
+		prev := int64(0)
+		for _, h := range hs {
+			v := int64(get(h))
+			vw.sv(v - prev)
+			prev = v
+		}
+	}
+	col := func(get func(h Hit) uint64) {
+		for _, h := range hs {
+			vw.uv(get(h))
+		}
+	}
+	delta(func(h Hit) int32 { return h.Frame })
+	col(func(h Hit) uint64 { return idPlus(h.Victim) })
+	col(func(h Hit) uint64 { return idPlus(h.VictimDef) })
+	col(func(h Hit) uint64 { return idPlus(h.VictimTeam) })
+	delta(func(h Hit) int32 { return h.X })
+	delta(func(h Hit) int32 { return h.Z })
+	col(func(h Hit) uint64 { return idPlus(h.Attacker) })
+	col(func(h Hit) uint64 { return idPlus(h.AttackerDef) })
+	col(func(h Hit) uint64 { return idPlus(h.AttackerTeam) })
+	col(func(h Hit) uint64 { return weaponPlus(h.WeaponDef) })
+	col(func(h Hit) uint64 {
+		f := uint64(0)
+		if h.Paralyzer {
+			f |= 1
+		}
+		if h.Projectile {
+			f |= 2
+		}
+		return f
+	})
+	col(func(h Hit) uint64 { return idPlus(h.ProjOwner) })
+	col(func(h Hit) uint64 { return idPlus(h.ProjTeam) })
+	col(func(h Hit) uint64 { return q10(h.Damage) })
+	for _, h := range hs {
+		vw.sv(sq10(h.HPAfter))
+	}
+	return buf.Bytes()
+}
+
+// sq10 is q10 for a signed value.
+func sq10(f float32) int64 {
+	if math.IsNaN(float64(f)) {
+		return 0
+	}
+	return int64(math.Round(float64(f) * 10))
+}
+
+func decodeHits(b []byte) ([]Hit, error) {
+	vr := &varintReader{b: b}
+	n, err := vr.uv()
+	if err != nil {
+		return nil, err
+	}
+	if n > uint64(len(b)) {
+		return nil, fmt.Errorf("snapshot: hit count %d exceeds section", n)
+	}
+	hs := make([]Hit, n)
+	delta := func(set func(h *Hit, v int32)) error {
+		prev := int64(0)
+		for i := range hs {
+			d, err := vr.sv()
+			if err != nil {
+				return err
+			}
+			prev += d
+			set(&hs[i], int32(prev))
+		}
+		return nil
+	}
+	col := func(set func(h *Hit, v uint64)) error {
+		for i := range hs {
+			v, err := vr.uv()
+			if err != nil {
+				return err
+			}
+			set(&hs[i], v)
+		}
+		return nil
+	}
+	steps := []func() error{
+		func() error { return delta(func(h *Hit, v int32) { h.Frame = v }) },
+		func() error { return col(func(h *Hit, v uint64) { h.Victim = int32(v) - 1 }) },
+		func() error { return col(func(h *Hit, v uint64) { h.VictimDef = int32(v) - 1 }) },
+		func() error { return col(func(h *Hit, v uint64) { h.VictimTeam = int32(v) - 1 }) },
+		func() error { return delta(func(h *Hit, v int32) { h.X = v }) },
+		func() error { return delta(func(h *Hit, v int32) { h.Z = v }) },
+		func() error { return col(func(h *Hit, v uint64) { h.Attacker = int32(v) - 1 }) },
+		func() error { return col(func(h *Hit, v uint64) { h.AttackerDef = int32(v) - 1 }) },
+		func() error { return col(func(h *Hit, v uint64) { h.AttackerTeam = int32(v) - 1 }) },
+		func() error { return col(func(h *Hit, v uint64) { h.WeaponDef = weaponFromPlus(v) }) },
+		func() error {
+			return col(func(h *Hit, v uint64) { h.Paralyzer, h.Projectile = v&1 != 0, v&2 != 0 })
+		},
+		func() error { return col(func(h *Hit, v uint64) { h.ProjOwner = int32(v) - 1 }) },
+		func() error { return col(func(h *Hit, v uint64) { h.ProjTeam = int32(v) - 1 }) },
+		func() error { return col(func(h *Hit, v uint64) { h.Damage = float32(v) / 10 }) },
+	}
+	for _, s := range steps {
+		if err := s(); err != nil {
+			return nil, err
+		}
+	}
+	for i := range hs {
+		v, err := vr.sv()
+		if err != nil {
+			return nil, err
+		}
+		hs[i].HPAfter = float32(v) / 10
+	}
+	return hs, nil
+}
+
+// encodeUnitEnds: count, then one row per end: frame, hit index and position
+// delta-coded against the previous row, the unit as id+1, XP to 0.001, flags
+// (bit 0 alive at the end).
+func encodeUnitEnds(us []UnitEnd) []byte {
+	var buf bytes.Buffer
+	vw := &varintWriter{w: &buf}
+	vw.uv(uint64(len(us)))
+	var pf, ph, px, pz int64
+	for _, u := range us {
+		vw.sv(int64(u.Frame) - pf)
+		pf = int64(u.Frame)
+		vw.uv(idPlus(u.Unit))
+		vw.sv(int64(u.Hit) - ph)
+		ph = int64(u.Hit)
+		vw.sv(int64(u.X) - px)
+		px = int64(u.X)
+		vw.sv(int64(u.Z) - pz)
+		pz = int64(u.Z)
+		vw.uv(uint64(math.Round(math.Max(float64(u.XP), 0) * 1000)))
+		flags := uint64(0)
+		if u.Alive {
+			flags |= 1
+		}
+		vw.uv(flags)
+	}
+	return buf.Bytes()
+}
+
+func decodeUnitEnds(b []byte) ([]UnitEnd, error) {
+	vr := &varintReader{b: b}
+	n, err := vr.uv()
+	if err != nil {
+		return nil, err
+	}
+	if n > uint64(len(b)) {
+		return nil, fmt.Errorf("snapshot: unit-end count %d exceeds section", n)
+	}
+	us := make([]UnitEnd, n)
+	var pf, ph, px, pz int64
+	for i := range us {
+		var s [4]int64
+		var u [3]uint64
+		if s[0], err = vr.sv(); err != nil {
+			return nil, err
+		}
+		if u[0], err = vr.uv(); err != nil {
+			return nil, err
+		}
+		for k := 1; k < 4; k++ {
+			if s[k], err = vr.sv(); err != nil {
+				return nil, err
+			}
+		}
+		for k := 1; k < 3; k++ {
+			if u[k], err = vr.uv(); err != nil {
+				return nil, err
+			}
+		}
+		pf += s[0]
+		ph += s[1]
+		px += s[2]
+		pz += s[3]
+		us[i] = UnitEnd{Frame: int32(pf), Unit: int32(u[0]) - 1, Hit: int32(ph), X: int32(px), Z: int32(pz),
+			XP: float32(u[1]) / 1000, Alive: u[2]&1 != 0}
+	}
+	return us, nil
+}
+
 // encodeVisibility: count, then per record the frame (delta), flags (bit 0 =
 // full restatement), the side list, and the unit ids (delta-coded) and masks.
 func encodeVisibility(vs []Visibility) []byte {
@@ -566,6 +826,24 @@ func (f *BRPFile) Lives() ([]UnitLife, error) {
 		return nil, err
 	}
 	return decodeLives(b)
+}
+
+// Hits decodes the H section.
+func (f *BRPFile) Hits() ([]Hit, error) {
+	b, ok, err := f.section(SecHits, "hits")
+	if !ok || err != nil {
+		return nil, err
+	}
+	return decodeHits(b)
+}
+
+// UnitEnds decodes the U section.
+func (f *BRPFile) UnitEnds() ([]UnitEnd, error) {
+	b, ok, err := f.section(SecUnitEnds, "unit ends")
+	if !ok || err != nil {
+		return nil, err
+	}
+	return decodeUnitEnds(b)
 }
 
 // Visibility decodes the V section.

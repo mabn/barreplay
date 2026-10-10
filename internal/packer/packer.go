@@ -49,6 +49,8 @@ type loaded struct {
 	damage     []snapshot.DamageWindow
 	lives      []snapshot.UnitLife
 	visibility []snapshot.Visibility
+	hits       []snapshot.Hit
+	unitEnds   []snapshot.UnitEnd
 }
 
 func (l *loaded) WriteMeta(m snapshot.Meta) error { l.meta = m; return nil }
@@ -72,6 +74,11 @@ func (l *loaded) WriteDamage(d snapshot.DamageWindow) error {
 func (l *loaded) WriteLife(u snapshot.UnitLife) error { l.lives = append(l.lives, u); return nil }
 func (l *loaded) WriteVisibility(v snapshot.Visibility) error {
 	l.visibility = append(l.visibility, v)
+	return nil
+}
+func (l *loaded) WriteHit(h snapshot.Hit) error { l.hits = append(l.hits, h); return nil }
+func (l *loaded) WriteUnitEnd(u snapshot.UnitEnd) error {
+	l.unitEnds = append(l.unitEnds, u)
 	return nil
 }
 func (l *loaded) Close() error { return nil }
@@ -118,6 +125,16 @@ func (l *loaded) writeAnalysis(w snapshot.Writer) error {
 	}
 	for _, v := range l.visibility {
 		if err := w.WriteVisibility(v); err != nil {
+			return err
+		}
+	}
+	for _, h := range l.hits {
+		if err := w.WriteHit(h); err != nil {
+			return err
+		}
+	}
+	for _, u := range l.unitEnds {
+		if err := w.WriteUnitEnd(u); err != nil {
 			return err
 		}
 	}

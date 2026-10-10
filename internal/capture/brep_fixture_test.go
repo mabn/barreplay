@@ -23,7 +23,7 @@ var update = flag.Bool("update", false, "rewrite the harness golden dumps from t
 // as the live uploader and once as the re-simulation sampler, and this test
 // decodes each .brepstream and compares everything the decoder hands a writer
 // — meta, every frame's units and resources, events, comms, game facts,
-// damage windows, unit lives, visibility, profiler readings — against a
+// hits, unit ends, visibility, profiler readings — against a
 // committed golden dump, line by line.
 //
 // After a widget or decoder change, regenerate the fixtures (see the harness
@@ -97,9 +97,9 @@ func TestHarnessRecordsWhatEachModeOwes(t *testing.T) {
 
 	// The live uploader records no analysis: a playing client is handed no
 	// killer, and the damage/visibility recording is the re-sim's.
-	if len(live.w.damage)+len(live.w.lives)+len(live.w.visibility) != 0 {
-		t.Errorf("live capture recorded analysis: %d damage, %d lives, %d visibility",
-			len(live.w.damage), len(live.w.lives), len(live.w.visibility))
+	if len(live.w.hits)+len(live.w.unitEnds)+len(live.w.visibility) != 0 {
+		t.Errorf("live capture recorded analysis: %d hits, %d unit ends, %d visibility",
+			len(live.w.hits), len(live.w.unitEnds), len(live.w.visibility))
 	}
 	for _, e := range live.w.events {
 		if e.Kind == snapshot.EventDestroyed && e.Cause != nil {
@@ -131,8 +131,13 @@ func TestHarnessRecordsWhatEachModeOwes(t *testing.T) {
 			t.Errorf("re-sim capture has no %q fact (facts: %v)", k, factKinds)
 		}
 	}
-	if len(resim.w.damage) == 0 || len(resim.w.lives) == 0 || len(resim.w.visibility) == 0 {
-		t.Errorf("re-sim analysis: %d damage, %d lives, %d visibility", len(resim.w.damage), len(resim.w.lives), len(resim.w.visibility))
+	if len(resim.w.hits) == 0 || len(resim.w.unitEnds) == 0 || len(resim.w.visibility) == 0 {
+		t.Errorf("re-sim analysis: %d hits, %d unit ends, %d visibility", len(resim.w.hits), len(resim.w.unitEnds), len(resim.w.visibility))
+	}
+	// The widget draws no conclusions: the damage it used to sum and the
+	// lives it used to total are computed from the hits by internal/combat.
+	if len(resim.w.damage)+len(resim.w.lives) != 0 {
+		t.Errorf("re-sim wrote derived records: %d damage windows, %d lives", len(resim.w.damage), len(resim.w.lives))
 	}
 	if len(resim.st.Profile) == 0 || len(resim.st.ProfileSamples) == 0 {
 		t.Error("re-sim capture recorded no profiler readings")
@@ -231,6 +236,12 @@ func harnessDump(t *testing.T, path string) []byte {
 	}
 	for _, l := range d.w.lives {
 		line("S", l)
+	}
+	for _, h := range d.w.hits {
+		line("H", h)
+	}
+	for _, u := range d.w.unitEnds {
+		line("UE", u)
 	}
 	for _, v := range d.w.visibility {
 		line("V", v)

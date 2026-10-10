@@ -31,7 +31,7 @@ type Stats struct {
 	// them look the same in the output file.
 	Comms int
 	// Analysis record counts (re-simulations only; see snapshot/analysis.go).
-	Facts, DamageWindows, Lives, Visibility int
+	Facts, DamageWindows, Lives, Visibility, Hits, UnitEnds int
 	// Profile holds the engine's internal time-profiler records (the final
 	// P record, emitted once at game over), largest first. Profiler scopes nest (e.g.
 	// "Sim::Path" is also inside "Sim"), so entries overlap and do not sum to

@@ -222,6 +222,13 @@ type UnitDef struct {
 	IsCommander bool    `json:"isCommander,omitempty"`
 	// MaxWeaponRange is the reach of the unit's longest weapon, in elmos.
 	MaxWeaponRange float32 `json:"maxWeaponRange,omitempty"`
+	// DeathWeapon and SelfDWeapon are the weapon defs of the explosion the
+	// unit makes when it dies and when it self-destructs (nil = none, or a
+	// capture from before protocol 4 recorded them). Weapon ids index the
+	// wdefs fact. They are what lets a reader tell which dead unit a blast
+	// came from.
+	DeathWeapon *int32 `json:"deathWeapon,omitempty"`
+	SelfDWeapon *int32 `json:"selfdWeapon,omitempty"`
 }
 
 // RecorderInfo identifies the client that captured a live-game stream (the
@@ -278,9 +285,9 @@ type Meta struct {
 // exactly once before any other Write*, and Close exactly once at the end.
 // Implementations need not be safe for concurrent use.
 //
-// WriteFact, WriteDamage, WriteLife and WriteVisibility carry the ANALYSIS
-// records (see analysis.go): what a game summary is computed from, recorded
-// only by a re-simulation. A writer with no use for them embeds
+// WriteFact, WriteDamage, WriteLife, WriteVisibility, WriteHit and
+// WriteUnitEnd carry the ANALYSIS records (see analysis.go): what a game
+// summary is computed from, recorded only by a re-simulation. A writer with no use for them embeds
 // DiscardAnalysis.
 type Writer interface {
 	WriteMeta(Meta) error
@@ -291,6 +298,8 @@ type Writer interface {
 	WriteDamage(DamageWindow) error
 	WriteLife(UnitLife) error
 	WriteVisibility(Visibility) error
+	WriteHit(Hit) error
+	WriteUnitEnd(UnitEnd) error
 	Close() error
 }
 
@@ -302,3 +311,5 @@ func (DiscardAnalysis) WriteFact(Fact) error             { return nil }
 func (DiscardAnalysis) WriteDamage(DamageWindow) error   { return nil }
 func (DiscardAnalysis) WriteLife(UnitLife) error         { return nil }
 func (DiscardAnalysis) WriteVisibility(Visibility) error { return nil }
+func (DiscardAnalysis) WriteHit(Hit) error               { return nil }
+func (DiscardAnalysis) WriteUnitEnd(UnitEnd) error       { return nil }
