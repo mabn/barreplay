@@ -14,7 +14,8 @@ export interface TipRow {
 }
 
 export interface Tip {
-  title?: string;
+  /** A string, or a node (a title with names in colour). */
+  title?: string | Node;
   rows?: TipRow[];
   /** A muted last line: what a click does. */
   note?: string;

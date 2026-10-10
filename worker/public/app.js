@@ -1176,10 +1176,25 @@ const GHOST_ALPHA = 0.45;
 let ghostBuildings = new Map(); // id -> {f, def, team, x, z, hp, maxHp} (current ghost set)
 let ghostIndex = new Map();     // id -> [{f, def, team, x, z, hp, maxHp}] per keyframe sighting, f ascending
 let destroyedAt = new Map();    // id -> frames of its destroyed events (per load)
+// RECLAIM LINES: a builder taking a unit back is drawn like a build line, in
+// its own colour, over the last RECLAIM_LINE_SEC before the unit goes. A
+// capture records only that a reclaim FINISHED — the destroyed event's cause
+// names the builder and the engine's reclaim damage type (-12, re-simulated
+// captures only) — not when it began, so the line is a fixed-length lead-up
+// to that moment rather than the whole order. Reclaiming trees and wrecks
+// leaves no event at all and draws nothing.
+const WEAPON_RECLAIMED = -12;
+const RECLAIM_LINE_SEC = 3;
+const RECLAIM_LINE_COLOR = 'rgba(214, 120, 255, 0.85)';
+let reclaims = [];              // [{f, builder, target}] in frame order (per load)
 function buildDestroyedIndex() {
   destroyedAt = new Map();
+  reclaims = [];
   for (const e of data.events || []) {
     if (e.k !== 'destroyed') continue;
+    if (e.cause && e.cause.weapon === WEAPON_RECLAIMED && e.cause.id >= 0) {
+      reclaims.push({ f: e.f, builder: e.cause.id, target: e.id });
+    }
     let a = destroyedAt.get(e.id);
     if (a === undefined) destroyedAt.set(e.id, a = []);
     a.push(e.f);
@@ -2224,6 +2239,40 @@ function damagedEnough(hp, maxHp) {
   return maxHp > 0 && hp > 0 && hp <= maxHp * DAMAGE_MIN_FRAC; // <=: missing EXACTLY 2% counts
 }
 
+// drawReclaimLines draws the reclaims finishing within RECLAIM_LINE_SEC of
+// simFrame, builder to target, where both are in the frame.
+function drawReclaimLines(u, simFrame) {
+  // First reclaim not yet over: binary search on f >= simFrame.
+  let lo = 0, hi = reclaims.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (reclaims[mid].f < simFrame) lo = mid + 1; else hi = mid;
+  }
+  const until = simFrame + RECLAIM_LINE_SEC * 30;
+  if (lo >= reclaims.length || reclaims[lo].f > until) return;
+  const off = new Map();
+  for (let i = 0; i < u.length; i += STRIDE) off.set(u[i + F.ID], i);
+  octx.strokeStyle = RECLAIM_LINE_COLOR;
+  octx.lineWidth = 1.4;
+  octx.beginPath();
+  for (let k = lo; k < reclaims.length && reclaims[k].f <= until; k++) {
+    const i = off.get(reclaims[k].builder);
+    const j = off.get(reclaims[k].target);
+    if (i === undefined || j === undefined) continue;
+    let p = interpPos(u, i); // shared scratch: copy before the second call
+    const ax = viewW / 2 + (p[0] - center.x) * scale;
+    const ay = viewH / 2 + (p[1] - center.z) * scale;
+    p = interpPos(u, j);
+    const bx = viewW / 2 + (p[0] - center.x) * scale;
+    const by = viewH / 2 + (p[1] - center.z) * scale;
+    if ((ax < 0 && bx < 0) || (ay < 0 && by < 0) ||
+      (ax > viewW && bx > viewW) || (ay > viewH && by > viewH)) continue;
+    octx.moveTo(ax, ay);
+    octx.lineTo(bx, by);
+  }
+  octx.stroke();
+}
+
 function drawOverlay(u) {
   if (!octx) return;
   octx.setTransform(DPR, 0, 0, DPR, 0, 0);
@@ -2285,6 +2334,8 @@ function drawOverlay(u) {
     }
     octx.stroke();
   }
+
+  if (showBuildLines && reclaims.length) drawReclaimLines(u, simFrame);
 
   if (anyBar || anyHealth) {
     for (let i = 0; i < u.length; i += STRIDE) {
@@ -6829,7 +6880,7 @@ async function submitResim() {
 // The insights file versions this page reads, newest first (src/summary
 // INSIGHTS_VERSIONS): a revision whose newer file is not built yet falls back
 // to the one it has.
-const INSIGHTS_VERSIONS = [3, 2, 1];
+const INSIGHTS_VERSIONS = [4, 3, 2, 1];
 let summaryModule = null;   // Promise of the imported library
 let summaryFor = null;      // currentFile the #summary pane was filled for
 let summaryHandle = null;   // the mounted summary, for destroy()
@@ -6967,7 +7018,31 @@ function openClip(c) {
   clip.f0 = c.f0;
   clip.f1 = Math.max(c.f0 + 30, c.f1);
   clip.focus = c;
-  document.getElementById('cliptitle').textContent = c.title || 'Clip';
+  // The title's player and side names come in their colours when the
+  // summary sends them split into runs.
+  const title = document.getElementById('cliptitle');
+  title.textContent = '';
+  if (Array.isArray(c.titleRuns) && c.titleRuns.length) {
+    for (const r of c.titleRuns) {
+      const span = document.createElement('span');
+      span.textContent = r.text;
+      if (r.color) span.style.color = r.color;
+      title.append(span);
+    }
+  } else {
+    title.textContent = c.title || 'Clip';
+  }
+  title.title = c.title || '';
+  // The moment itself, marked on the clip's timeline: the lead-in before it
+  // is then plainly a few seconds' wait rather than a clip of nothing.
+  const mark = document.getElementById('clipmark');
+  if (typeof c.at === 'number' && c.at >= clip.f0 && c.at <= clip.f1) {
+    mark.style.setProperty('--at', String((c.at - clip.f0) / (clip.f1 - clip.f0)));
+    mark.title = 'The moment: ' + fmtClipTime(c.at);
+    mark.style.display = '';
+  } else {
+    mark.style.display = 'none';
+  }
   const dur = (clip.f1 - clip.f0) / 30;
   const opts = [...document.getElementById('clipspeed').options].map(o => +o.value);
   document.getElementById('clipspeed').value = String(opts.find(v => dur / v <= CLIP_WALL_SEC) || opts[opts.length - 1]);

@@ -23,7 +23,39 @@ type Battle struct {
 	R  int32 `json:"r"` // radius holding them, elmos
 	// Lost is what each side lost there, indexed like Insights.Sides.
 	Lost []BattleLoss `json:"lost"`
+	// Teams is who took part: every team with army there or losses there,
+	// in team order. It is what lets a story name the players who fought a
+	// battle rather than only their sides. Version 4 and later.
+	Teams []BattleTeam `json:"teams"`
 }
+
+// BattleTeam is one team's part in a battle, in metal.
+type BattleTeam struct {
+	Team int32 `json:"team"`
+	// Army is the most army metal (armed, mobile, by build progress) the team
+	// had within reach of the battle at any sample during it.
+	Army float64 `json:"army"`
+	// Lost is the metal of the team's units that died in the battle.
+	Lost float64 `json:"lost"`
+}
+
+// presence is one sample of where every side's army stood, kept once per
+// step so a battle can ask who had units at it.
+type presence struct {
+	f     int32
+	units []presentUnit
+}
+
+type presentUnit struct {
+	team int32
+	x, z float32
+	v    float32
+}
+
+// battleReach is how far beyond the deaths' own radius an army still counts
+// as fighting a battle: artillery and long-range units stand back from what
+// they kill.
+const battleReach = 600.0
 
 type BattleLoss struct {
 	N     int     `json:"n"`
@@ -397,11 +429,56 @@ func (p *pass) battleOf(members []int, ns int) Battle {
 		r = math.Max(r, math.Hypot(float64(d.X[i])-cx, float64(d.Z[i])-cz))
 	}
 	bt.X, bt.Z, bt.R = int32(cx), int32(cz), int32(r)
+	bt.Teams = p.battleTeams(members, bt)
 	for s := range bt.Lost {
 		bt.Lost[s].Metal = round1(bt.Lost[s].Metal)
 		bt.Lost[s].Top = topDefs(top[s])
 	}
 	return bt
+}
+
+// battleTeams says which teams fought a battle and with how much: each
+// team's largest army within reach of it at any sample from a step before
+// it to its end, and what the team lost in it.
+func (p *pass) battleTeams(members []int, bt Battle) []BattleTeam {
+	d := p.out.Deaths
+	lost := map[int32]float64{}
+	for _, i := range members {
+		lost[d.Team[i]] += d.Cost[i]
+	}
+	army := map[int32]float64{}
+	reach := float64(bt.R) + battleReach
+	from := bt.F0 - StepSec*simFPS
+	for _, s := range p.presence {
+		if s.f < from || s.f > bt.F1 {
+			continue
+		}
+		here := map[int32]float64{}
+		for _, u := range s.units {
+			if math.Hypot(float64(u.x)-float64(bt.X), float64(u.z)-float64(bt.Z)) <= reach {
+				here[u.team] += float64(u.v)
+			}
+		}
+		for t, v := range here {
+			army[t] = math.Max(army[t], v)
+		}
+	}
+	teams := map[int32]bool{}
+	for t := range lost {
+		teams[t] = true
+	}
+	for t := range army {
+		teams[t] = true
+	}
+	out := make([]BattleTeam, 0, len(teams))
+	for t := range teams {
+		if p.ro.side(t) < 0 {
+			continue
+		}
+		out = append(out, BattleTeam{Team: t, Army: round1(army[t]), Lost: round1(lost[t])})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Team < out[j].Team })
+	return out
 }
 
 func abs(v int) int {

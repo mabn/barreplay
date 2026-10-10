@@ -9,7 +9,8 @@ import { h, s, section } from "../dom";
 import { fmtClock, fmtMetal } from "../format";
 import { mapView } from "../mapview";
 import { comparable, sideColor, sideName } from "../model";
-import { compass } from "../moments";
+import { compass, fighters } from "../moments";
+import { fightersLine } from "../names";
 import { tip, type TipRow } from "../tooltip";
 import { clipSpan, watcher } from "../watch";
 import { SIM_FPS, type Battle, type Insights, type SummaryOptions } from "../types";
@@ -145,6 +146,7 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     return h("div", undefined,
       h("div", undefined, h("b", undefined, `Battle ${i + 1}`), h("span", { class: "brs-muted" }, ` · ${when(b)} · ${compass(ins, b.x, b.z)}`)),
       h("div", { style: "margin: 2px 0 6px" }, verdict(b)),
+      fightersLine(ins, fighters(ins, b)),
       lossLine(0), lossLine(1), play);
   }
 

@@ -12,6 +12,10 @@ export interface Losses {
   combat: number[][];
   /** [side][step]: lost with an eliminated team. */
   wiped: number[][];
+  /** [side][step]: what the side owned as the step began, in metal, which
+   * a loss is a share of; null when the file cannot say (before version 4,
+   * or a replay pricing only its army). */
+  owned: number[][] | null;
 }
 
 export interface Knockout {
@@ -63,5 +67,11 @@ export function lossesByStep(ins: Insights): Losses {
     const step = Math.min(n - 1, Math.max(0, Math.floor(d.f[i] / stepF)));
     (isWiped(i) ? wiped : combat)[sd][step] += priced ? d.cost[i] ?? 0 : 1;
   }
-  return { priced, combat, wiped };
+  // What each side owned as the step began is the value at the END of the
+  // step before: the step's own value already has its losses taken out.
+  const v = ins.series.value;
+  const owned = priced && ins.costCoverage === "full" && v && v.length === sides
+    ? v.map((row) => row.map((_, i) => row[Math.max(0, i - 1)] ?? 0))
+    : null;
+  return { priced, combat, wiped, owned };
 }

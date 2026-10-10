@@ -22,7 +22,7 @@ import (
 // Version names the file: replays/<rid>.insights<Version>.json. Pieces are
 // immutable, so any change to what is computed or how is a new version,
 // written beside the old one; the viewer asks for the one it understands.
-const Version = 3
+const Version = 4
 
 // FileName is the published piece's name for a revision id.
 func FileName(rid string) string { return fmt.Sprintf("%s.insights%d.json", rid, Version) }
@@ -110,6 +110,12 @@ type Series struct {
 	// Army is the metal value of each side's army: armed, mobile, priced,
 	// not a commander, weighted by build progress.
 	Army [][]float64 `json:"army"`
+	// Value is the metal value of EVERYTHING each side owns — units and
+	// buildings, commanders included, weighted by build progress — at the
+	// step's last sample: what a loss is measured against, since metal lost
+	// early and late differ by orders of magnitude. Version 4 and later, and
+	// only when every def is priced (CostCoverage full).
+	Value [][]float64 `json:"value,omitempty"`
 	// MetalIncome and EnergyIncome are per game-second, averaged over the step.
 	MetalIncome  [][]float64 `json:"metalIncome"`
 	EnergyIncome [][]float64 `json:"energyIncome"`
@@ -255,6 +261,11 @@ func Compute(in Input) (*Insights, error) {
 		return nil, err
 	}
 	p.finish()
+	if p.out.CostCoverage != CostFull {
+		// Only armed mobile defs are priced: a "value" of those alone is
+		// the army again, not what the side owns.
+		p.out.Series.Value = nil
+	}
 	return p.out, nil
 }
 

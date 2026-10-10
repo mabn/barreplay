@@ -10,10 +10,11 @@ import { bandPath, linePath, stepAt, timeChart, type ChartGroup } from "../chart
 import { mirrorKey } from "../legend";
 import { knockouts } from "../losses";
 import { sideColor, sideName } from "../model";
-import { momentStory } from "../moments";
+import { eliminationFocus, momentStory } from "../moments";
+import { fightersLine, named } from "../names";
 import { stepTimes } from "../series";
 import { tip } from "../tooltip";
-import { clipSpan, watchNote, type Watch } from "../watch";
+import { clipAround, clipAt, clipSpan, watchNote, type Watch } from "../watch";
 import { SIM_FPS, type Insights } from "../types";
 
 /** pct formats a probability as a whole percent. */
@@ -64,17 +65,27 @@ export function swingChart(ins: Insights, watch: Watch | null, group: ChartGroup
     const x = c.x(k.f / SIM_FPS);
     const y = k.side === 0 ? c.top + 8 : c.bottom - 6;
     const m = s("text", { x, y, "text-anchor": "middle", class: "brs-ko" + (watch ? " brs-clickable" : ""), style: `fill: ${sideColor(ins, k.side)}` }, "✕");
-    tip(m, { title: `${k.name} is eliminated`, rows: [{ color: sideColor(ins, k.side), label: fmtClock(k.f / SIM_FPS) }], note: watchNote(watch) });
-    if (watch) m.addEventListener("click", () => watch(clipSpan(k.f, k.f, { title: `${k.name} is eliminated` })));
+    tip(m, { title: named(ins, `${k.name} is eliminated`), rows: [{ color: sideColor(ins, k.side), label: fmtClock(k.f / SIM_FPS) }], note: watchNote(watch) });
+    if (watch) m.addEventListener("click", () => {
+      const at = eliminationFocus(ins, k.team, k.f);
+      watch(clipAround(k.f, { x: at.x, z: at.z, r: at.r, title: `${k.name} is eliminated` }));
+    });
     marks.append(m);
   }
 
   const stories = sw.moments.map((m) => momentStory(ins, m));
+  // A moment's clip opens just before the thing that made it — the
+  // commander dying, the fight peaking — zoomed to where it happened, rather
+  // than at the start of the minute the line took to move.
   const clipOf = (k: number) => {
     const m = sw.moments[k];
-    const b = ins.battles[stories[k].battle];
+    const st = stories[k];
+    const b = ins.battles[st.battle];
+    const title = `${m.n}. ${st.title}`;
+    const f = st.focus;
+    if (f && typeof f.x === "number") return clipAt(f.f, m.f1, { x: f.x, z: f.z, r: f.r, title });
     const where = b ? { x: b.x, z: b.z, r: b.r } : {};
-    return clipSpan(m.f0, m.f1, { ...where, title: `${m.n}. ${stories[k].title}` });
+    return f ? clipAt(f.f, m.f1, { ...where, title }) : clipSpan(m.f0, m.f1, { ...where, title });
   };
   sw.moments.forEach((m, k) => {
     const tt = m.f1 / SIM_FPS;
@@ -85,7 +96,7 @@ export function swingChart(ins: Insights, watch: Watch | null, group: ChartGroup
       s("text", { x: c.x(tt), y: y + 4, "text-anchor": "middle", style: "fill: #000; font-weight: 600; pointer-events: none" }, String(m.n)),
     );
     tip(g, {
-      title: `${m.n}. ${stories[k].title}`,
+      title: named(ins, `${m.n}. ${stories[k].title}`),
       rows: [{ color: sideColor(ins, m.side), label: `${fmtClock(m.f0 / SIM_FPS)}–${fmtClock(m.f1 / SIM_FPS)}`, value: `${sideName(ins, m.side)} +${pct(m.delta)}` }],
       note: stories[k].detail + (watch ? " Click to watch." : ""),
     });
@@ -104,10 +115,11 @@ export function swingChart(ins: Insights, watch: Watch | null, group: ChartGroup
     return h("div", { class: "brs-moment" },
       h("span", { class: "brs-num", style: `background: ${sideColor(ins, m.side)}` }, String(m.n)),
       h("div", { class: "brs-grow" },
-        h("div", undefined, h("b", undefined, st.title), " ",
+        h("div", undefined, h("b", undefined, named(ins, st.title)), " ",
           h("span", { class: "brs-muted" }, `· ${fmtClock(m.f0 / SIM_FPS)}–${fmtClock(m.f1 / SIM_FPS)} · `),
           h("span", { style: `color: ${sideColor(ins, m.side)}` }, `${sideName(ins, m.side)} +${pct(m.delta)}`)),
-        h("div", { class: "brs-hint" }, st.detail)),
+        fightersLine(ins, st.fighters),
+        h("div", { class: "brs-hint" }, named(ins, st.detail))),
       play);
   });
   const model = sw.fitted

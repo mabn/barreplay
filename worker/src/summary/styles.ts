@@ -51,17 +51,18 @@ export const CSS = `
 .brs-root .brs-muted { color: var(--brs-muted); }
 .brs-root .brs-when { color: var(--brs-muted); font-variant-numeric: tabular-nums; }
 .brs-root .brs-dest { color: var(--brs-muted); }
-.brs-root .brs-playerbtn { all: unset; cursor: pointer; color: var(--brs-text); border-bottom: 1px dotted var(--brs-team, var(--brs-muted)); }
-.brs-root .brs-playerbtn:hover, .brs-root .brs-playerbtn:focus-visible { color: var(--brs-accent); border-bottom-style: solid; }
+.brs-root .brs-fighters { font-size: 13px; margin: 1px 0; }
+.brs-root .brs-playerbtn { all: unset; cursor: pointer; color: var(--brs-team, var(--brs-text)); border-bottom: 1px dotted var(--brs-team, var(--brs-muted)); }
+.brs-root .brs-playerbtn:hover, .brs-root .brs-playerbtn:focus-visible { border-bottom-style: solid; }
 .brs-root .brs-reportgrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; margin-top: 12px; }
 @media (max-width: 720px) { .brs-root .brs-reportgrid { grid-template-columns: minmax(0, 1fr); } }
 .brs-root .brs-small { max-width: 420px; margin: 0; }
 .brs-root .brs-tabs { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 4px 0 12px; }
 .brs-root .brs-tabgroup { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .brs-root .brs-tabside { font-size: 12px; margin-right: 2px; }
-.brs-root .brs-tab { font: inherit; font-size: 12px; color: var(--brs-muted); background: var(--brs-bg); cursor: pointer;
+.brs-root .brs-tab { font: inherit; font-size: 12px; color: var(--brs-team); background: var(--brs-bg); cursor: pointer;
   border: 1px solid var(--brs-line); border-bottom: 3px solid var(--brs-team); border-radius: 4px 4px 2px 2px; padding: 3px 9px; }
-.brs-root .brs-tab:hover { color: var(--brs-text); border-color: var(--brs-muted); border-bottom-color: var(--brs-team); }
+.brs-root .brs-tab:hover { border-color: var(--brs-muted); border-bottom-color: var(--brs-team); }
 .brs-root .brs-tab.brs-on { color: #0b0f13; background: var(--brs-team); border-color: var(--brs-team); font-weight: 600; }
 .brs-root .brs-pdetail h2 { margin-bottom: 0; }
 .brs-root .brs-axis { display: grid; grid-template-columns: 110px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 2px 0; }

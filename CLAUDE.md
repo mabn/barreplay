@@ -515,6 +515,19 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           WriteStaticBundle writes the insights piece
                           beside the .brp on EVERY publish (a compute failure only warns), so
                           a publish uploads exactly two objects.
+                          VERSION 4 stops counting what an owner REMOVED as a loss (pass.go
+                          removedByOwner, only when the capture records causes): a unit
+                          reclaimed by its own side (cause weapon -12, the engine's reclaim id)
+                          and a STRUCTURE destroyed with no cause at all (a mex/geo upgrade, a
+                          cancelled build, a self-destruct) — wind farms reclaimed for space
+                          used to read as a lost fight. It adds Series.Value (everything a side
+                          owns, priced and weighted by build progress — the denominator of the
+                          page's loss SHARE, since a 15 s loss of 5k metal is a disaster at
+                          minute 3 and noise at minute 40) and Battle.Teams (per team: metal
+                          lost in the battle and the peak army within the battle's radius +
+                          600 elmos, from one presence sample per step), from which the page
+                          names the players carrying a fight (moments.ts fighters: >= 10% of
+                          their side's army-plus-losses there).
                           swing.go (Version 2) adds the WINNER (Insights.Winner, a side index
                           from Meta.Winners, -1 unknown) and the SWING line: P(side 0 wins)
                           per step from a logistic model (WinModel) over three antisymmetric
@@ -577,8 +590,18 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           and onSeek = seekToFrame (back to the Replay tab at that sim frame).
                           WATCHING (watch.ts): anything on the page with a moment behind it — a
                           chart time, a swing, a battle, a death, a milestone, an award — hands
-                          the host a Clip {f0, f1, x?, z?, r?, title?} (clipAround: 10 s before
-                          to 20 s after; clipSpan: 10 s before to 5 s after), onClip winning
+                          the host a Clip {f0, f1, at?, x?, z?, r?, title?, titleRuns?} — `at`
+                          is the INSTANT it is about, which the viewer marks on the clip's
+                          slider (#clipmark), and every clip opens LEAD_IN_SEC = 5 s before
+                          it (clipAround: to 20 s after; clipSpan: to 5 s past an end;
+                          clipAt: at least 20 s, at most a minute). A swing's clip is about
+                          the moment's FOCUS (moments.ts: the commander death, the costliest
+                          loss, or the densest 10 s x 1500-elmo burst of losses), not the
+                          start of the minute the line took to move, and zooms there. Titles
+                          and every player/side name are drawn in that player's in-game
+                          colour (names.ts, model.nameRuns); a side is named by its leader's
+                          colour ("Blue team", model.colorName), "Team N" when two sides
+                          would share a name. onClip winning
                           over onSeek, which only takes the start. The viewer PLAYS IT IN PLACE
                           (app.js openClip/startClip/closeClip, index.html #clip): the replay's
                           own #wrap — the map canvases — moves into a small window over the
@@ -592,7 +615,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           TOOLTIPS (tooltip.ts) are one instant HTML box (.brs-tip, fixed,
                           flipping at the window's edges) used by every section — native
                           <title> tooltips were slow and unstyled. tip() binds one element,
-                          tipLayer() delegates for thousands (the killing-fields dots), and
+                          tipLayer() delegates for many marks (the killing-fields zones), and
                           charts in one chartGroup() share a crosshair whose tooltip lists
                           every member's readout, which is how the panels under "Who was
                           winning" read as one chart.
@@ -600,7 +623,13 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           return null when the file cannot support them: the side-by-side
                           charts (advantage, army composition) need comparable(); race to
                           tech and killing fields need a full-view capture (a one-sided one
-                          knows only its own milestones and the deaths it saw). chart.ts is
+                          knows only its own milestones and the deaths it saw). KILLING
+                          FIELDS draws ZONES, not deaths (zones.ts): a big game's ~90k dots
+                          painted the map solid, so fought-for deaths (not those going down
+                          with an eliminated team) bin into half-zone cells, the heaviest
+                          cell left takes every cell within a zone radius (a twelfth of the
+                          map), repeated up to 40 times; each zone is a pie (area = metal,
+                          wedges = who lost it) whose click plays its busiest 30 s. chart.ts is
                           the shared time-axis frame (crosshair readout, click = a clip);
                           mapview.ts draws world-space marks over api.bar-rts.com terrain
                           (best-effort, plain background otherwise). Side colours go through
@@ -612,16 +641,20 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           no commander walks in a step is drawn as a gap), the diary/leaks/
                           style beside it and the built/lost strip below; names in the Sides
                           cards select a tab. "Who was winning" stacks the swing line (or the
-                          v1 army-difference chart), the metal LOST per step (losses.ts: what
+                          v1 army-difference chart), the metal LOST per step — as a SHARE of everything the side owned
+                          at the end of the step before when the file has Series.Value (v4),
+                          plain metal otherwise (losses.ts: what
                           died fighting, with what went down with an eliminated team faint on
                           top and left out of the scale) and metal income on one time axis
                           and crosshair, with eliminations marked on the swing line. The MAP
                           STORY numbers its battles in the order they happened, on the map and
                           in a one-line-per-battle list (losses either side of a centre line,
                           square-root scaled), one selection shared by both.
-                          The library draws versions 1-3 (INSIGHTS_VERSIONS [3, 2, 1]; v2 adds
-                          winner + swing, v3 eliminations and peak battles) and app.js fetches
-                          .insights3, then 2, then 1.
+                          The library draws versions 1-4 (INSIGHTS_VERSIONS [4, 3, 2, 1]; v2 adds
+                          winner + swing, v3 eliminations and peak battles, v4 owner removals
+                          left out, owned value and battle teams) and app.js fetches
+                          .insights4, then 3, 2, 1. A version bump needs `insights -all` after
+                          the deploy, or published replays keep their older summary.
 internal/viz/readbundle.go ReadStaticBundle: the inverse of WriteStaticBundle, rebuilding a
                           BRPFile from published pieces through a PieceFetcher. Defs come back
                           from the head only (names, footprints, armyCost -> MetalCost, CanFly
@@ -2748,6 +2781,12 @@ run dev` in `worker/` plus `pack -upload local`.)
   pass rather than drawing nothing expensively. The BUILD bars are deliberately
   not part of it: there are only ever a handful, and a construction site with no
   bar is indistinguishable from a finished building.
+- **RECLAIM LINES** (`app.js` `drawReclaimLines`, `RECLAIM_LINE_SEC` = 3): a
+  purple line from a builder to what it is reclaiming, drawn for the last 3 s
+  before the target disappears. Derived with NO format change from the destroyed
+  event's cause (weapon -12 = reclaimed, killer = the builder), so it shows only
+  what was reclaimed to completion, only on captures that record causes (v6
+  re-sims), and only the finish of a long reclaim.
 - **DEAD UNITS** (`app.js` `deadHp`/`DEAD_COLOR`): a unit whose health is gone
   but which the engine has not removed is drawn in `#9fb0bf` grey instead of its
   team colour, in every path that colours a unit (both icon renderers, both dot

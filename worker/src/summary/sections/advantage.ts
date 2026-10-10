@@ -40,19 +40,35 @@ function label(text: string): HTMLElement {
 }
 
 function lossLabel(ins: Insights): string {
-  const priced = ins.deaths.cost.some((c) => c > 0);
+  const L = lossesByStep(ins);
   const step = `${ins.stepSec} s`;
-  return priced ? `Metal lost every ${step}` : `Units lost every ${step}`;
+  if (L.owned) return `Share of everything owned that was lost, every ${step}`;
+  return L.priced ? `Metal lost every ${step}` : `Units lost every ${step}`;
 }
 
 /** lossChart: each side's losses per step, mirrored like the line above it
- * (the first side's above the axis). The scale is set by what died FIGHTING;
+ * (the first side's above the axis). Drawn as a SHARE of what the side owned
+ * when the step began whenever the file says (version 4+): a late unit costs
+ * a hundred times an early one, so in raw metal every early fight is an
+ * empty line under the last few minutes, where losing 5% of everything is
+ * the same blow at minute five as at minute fifty. The scale is set by what
+ * died FIGHTING;
  * units that went down with an eliminated team are drawn faint on top, and a
  * bar past the scale is cut at the edge with a notch, the full number in the
  * tooltip — at the end of a game they would otherwise flatten everything. */
 function lossChart(ins: Insights, watch: Watch | null, group: ChartGroup): SVGSVGElement {
-  const L = lossesByStep(ins);
-  const fmt = (v: number) => (L.priced ? fmtMetal(v) : String(Math.round(v)));
+  const raw = lossesByStep(ins);
+  const fmtRaw = (v: number) => (raw.priced ? fmtMetal(v) : String(Math.round(v)));
+  const owned = raw.owned;
+  // Plotted values: the share lost, in percent, when there is something to
+  // share it of, else the raw loss.
+  const plot = (rows: number[][]) => owned
+    ? rows.map((row, sd) => row.map((v, i) => (owned[sd]?.[i] ?? 0) > 0 ? (100 * v) / owned[sd][i] : 0))
+    : rows;
+  const L = { combat: plot(raw.combat), wiped: plot(raw.wiped) };
+  const fmt = (v: number) => (owned ? `${v < 10 ? v.toFixed(1).replace(/\.0$/, "") : Math.round(v)}%` : fmtRaw(v));
+  const valueOf = (sd: number, i: number, rows: number[][], raws: number[][]) =>
+    owned ? `${fmt(rows[sd]?.[i] ?? 0)} (${fmtRaw(raws[sd]?.[i] ?? 0)} metal)` : fmtRaw(raws[sd]?.[i] ?? 0);
   let top = Math.max(maxOf(L.combat[0] ?? [], L.combat[1] ?? []));
   if (top <= 0) top = Math.max(1, maxOf(L.wiped[0] ?? [], L.wiped[1] ?? []));
   const lim = top * 1.1;
@@ -64,10 +80,10 @@ function lossChart(ins: Insights, watch: Watch | null, group: ChartGroup): SVGSV
       const i = Math.min(n - 1, Math.floor(tt / ins.stepSec));
       if (i < 0) return null;
       return [0, 1].map((sd): TipRow => {
-        const w = L.wiped[sd]?.[i] ?? 0;
+        const w = raw.wiped[sd]?.[i] ?? 0;
         return {
           color: sideColor(ins, sd), label: `${sideName(ins, sd)} lost`,
-          value: fmt(L.combat[sd]?.[i] ?? 0) + (w ? ` (+${fmt(w)} eliminated)` : ""),
+          value: valueOf(sd, i, L.combat, raw.combat) + (w ? ` (+${valueOf(sd, i, L.wiped, raw.wiped)} eliminated)` : ""),
         };
       });
     },

@@ -7,7 +7,8 @@
 // onSeek, taking a sim frame, for a host that can only jump its replay.
 import { h, section } from "./dom";
 import { fmtClock, fmtMetal } from "./format";
-import { comparable, notices, sideColor, sideName } from "./model";
+import { comparable, nameRuns, notices, sideColor, sideName, teamColor } from "./model";
+import { playerName } from "./names";
 import { ensureStyles } from "./styles";
 import { tip } from "./tooltip";
 import { advantage } from "./sections/advantage";
@@ -16,7 +17,7 @@ import { mapStories } from "./sections/battles";
 import { chat } from "./sections/chat";
 import { killing } from "./sections/killing";
 import { rivers } from "./sections/rivers";
-import { playersSection, teamColor, type PlayersView } from "./sections/player";
+import { playersSection, type PlayersView } from "./sections/player";
 import { tech } from "./sections/tech";
 import type { Insights, SummaryHandle, SummaryOptions } from "./types";
 
@@ -24,13 +25,14 @@ export type * from "./types";
 export { comparable, notices } from "./model";
 
 /** The newest insights file version this build draws. */
-export const INSIGHTS_VERSION = 3;
+export const INSIGHTS_VERSION = 4;
 
 /** Every version this build draws, newest first: each only adds to the one
  * before (2: the winner and the swing line; 3: eliminations, and battles
- * found as peaks without them), so an older file draws with those parts
- * missing. A host fetches the first that exists. */
-export const INSIGHTS_VERSIONS = [3, 2, 1];
+ * found as peaks without them; 4: units their own side reclaimed are no
+ * longer deaths), so an older file draws with those parts missing. A host
+ * fetches the first that exists. */
+export const INSIGHTS_VERSIONS = [4, 3, 2, 1];
 
 /** insightsFile names a revision's insights piece. */
 export function insightsFile(rid: string, version = INSIGHTS_VERSION): string {
@@ -50,9 +52,14 @@ export function mountSummary(el: HTMLElement, ins: Insights, opts: SummaryOption
     root.append(header(ins));
     const notes = notices(ins);
     if (notes.length) root.append(h("ul", { class: "brs-notices" }, ...notes.map((n) => h("li", undefined, n))));
-    const players = playersSection(ins, opts);
+    // Every clip's title carries its names in colour for the host's player.
+    const onClip = opts.onClip;
+    const o: SummaryOptions = onClip
+      ? { ...opts, onClip: (c) => onClip({ ...c, titleRuns: c.titleRuns ?? (c.title ? nameRuns(ins, c.title) : undefined) }) }
+      : opts;
+    const players = playersSection(ins, o);
     for (const sec of sectionsFor(players)) {
-      const node = sec(ins, opts);
+      const node = sec(ins, o);
       if (node) root.append(node);
     }
   }
@@ -83,7 +90,7 @@ function overview(players: PlayersView | null): Section {
         if (k) out.push(", ");
         const pl = reports.find((p) => p.side === i && p.player === name);
         if (!pl || !players) {
-          out.push(name);
+          out.push(playerName(ins, name));
           return;
         }
         const btn = h("button", { class: "brs-playerbtn", type: "button", style: `--brs-team: ${teamColor(ins, pl.team)}` }, name);
@@ -101,7 +108,7 @@ function overview(players: PlayersView | null): Section {
       const peak = army.reduce((m, v) => Math.max(m, v), 0);
       const avgMetal = metal.length ? metal.reduce((a, b) => a + b, 0) / metal.length : 0;
       return h("div", { class: "brs-side", style: `--brs-side: ${sideColor(ins, i)}` },
-        h("b", undefined, sideName(ins, i)),
+        h("b", { style: `color: ${sideColor(ins, i)}` }, sideName(ins, i)),
         h("div", { class: "brs-players" }, ...names(i, side.players)),
         h("div", { class: "brs-stat" }, h("span", undefined, "Average metal income"), `${avgMetal.toFixed(1)}/s`),
         showArmy && n > 0 ? h("div", { class: "brs-stat" }, h("span", undefined, "Largest army"), fmtMetal(peak)) : null,

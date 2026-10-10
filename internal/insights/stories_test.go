@@ -16,6 +16,28 @@ func TestBattles(t *testing.T) {
 	if b.X < 3500 || b.X > 4200 || len(b.Lost[0].Top) != 1 || b.Lost[0].Top[0] != defRaider {
 		t.Errorf("battle centre/top = %d / %v", b.X, b.Lost[0].Top)
 	}
+	// Who fought it: every team's losses add up to its side's, and the
+	// sides that lost raiders had an army there to lose them from.
+	lost := make([]float64, len(b.Lost))
+	army := make([]float64, len(b.Lost))
+	for _, tm := range b.Teams {
+		side := -1
+		for _, x := range ins.Teams {
+			if x.Team == tm.Team {
+				side = x.Side
+			}
+		}
+		if side < 0 {
+			t.Fatalf("battle team %d has no side", tm.Team)
+		}
+		lost[side] += tm.Lost
+		army[side] += tm.Army
+	}
+	for s := range b.Lost {
+		if lost[s] != b.Lost[s].Metal || army[s] <= 0 {
+			t.Errorf("side %d: teams lost %v (want %v), army %v", s, lost[s], b.Lost[s].Metal, army[s])
+		}
+	}
 }
 
 func TestAwards(t *testing.T) {

@@ -299,6 +299,12 @@ func TestPiecesMatchBRP(t *testing.T) {
 			t.Errorf("%s differs:\n brp:    %s\n pieces: %s", name, ja, jb)
 		}
 	}
+	// Pieces price only armed mobile defs, so they cannot say what a side
+	// owns; everything else must match.
+	if got.Series.Value != nil {
+		t.Error("a pieces rebuild reported owned value it cannot price")
+	}
+	want.Series.Value = nil
 	same("series", want.Series, got.Series)
 	same("sides", want.Sides, got.Sides)
 	same("milestones", want.Milestones, got.Milestones)

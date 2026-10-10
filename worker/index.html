@@ -334,7 +334,10 @@
   <div id="clipbody"></div>
   <div id="clipbar">
     <button type="button" id="clipplay" aria-label="Play / pause (space)">▶</button>
-    <input type="range" id="clipslider" min="0" max="1000" value="0" step="any" aria-label="Position in the clip">
+    <div id="clipslot">
+      <input type="range" id="clipslider" min="0" max="1000" value="0" step="any" aria-label="Position in the clip">
+      <i id="clipmark" style="display:none" title="The moment"></i>
+    </div>
     <span id="cliptime"></span>
     <select id="clipspeed" aria-label="Speed">
       <option value="1">1×</option>

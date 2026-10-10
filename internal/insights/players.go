@@ -322,6 +322,9 @@ func (p *pass) playerEvent(e snapshot.Event) {
 			a.t2 = e.Frame
 		}
 	case snapshot.EventDestroyed:
+		if p.removedByOwner(e) {
+			break
+		}
 		st.LostMetal[step] += d.cost
 		st.LostN[step]++
 		if d.commander {

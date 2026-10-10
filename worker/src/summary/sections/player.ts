@@ -10,7 +10,7 @@ import { fmtClock, fmtMetal } from "../format";
 import { stepAt, timeChart } from "../chart";
 import { swatch } from "../legend";
 import { mapView } from "../mapview";
-import { readable, sideColor, sideName } from "../model";
+import { sideColor, sideName, teamColor } from "../model";
 import { stepTimes } from "../series";
 import { tip } from "../tooltip";
 import { clipAround, watchNote, watcher, type Watch } from "../watch";
@@ -30,14 +30,6 @@ export interface PlayersView {
   el: HTMLElement;
   /** Shows a team's player, and brings the section into view. */
   select(team: number): void;
-}
-
-/** teamColor is a player's own team colour, made readable, falling back to
- * the side's. */
-export function teamColor(ins: Insights, team: number): string {
-  const t = ins.teams.find((x) => x.team === team);
-  const c = t?.color;
-  return c && /^#[0-9a-f]{6}$/i.test(c) ? readable(c) : sideColor(ins, t?.side ?? 0);
 }
 
 export function playersSection(ins: Insights, opts: SummaryOptions): PlayersView | null {
@@ -80,7 +72,7 @@ export function playersSection(ins: Insights, opts: SummaryOptions): PlayersView
     trails.highlight(pl.team);
     detail.replaceChildren(
       h("h2", { style: `color: ${teamColor(ins, pl.team)}` }, pl.player || `Team ${pl.team}`),
-      h("div", { class: "brs-muted", style: "margin: -2px 0 10px" }, sideName(ins, pl.side)),
+      h("div", { style: `margin: -2px 0 10px; color: ${sideColor(ins, pl.side)}` }, sideName(ins, pl.side)),
       diary(ins, pl),
       leaks(pl),
       style(ins, pl));

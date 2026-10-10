@@ -3,6 +3,8 @@ package insights
 import (
 	"bytes"
 	"testing"
+
+	"github.com/mabn/barreplay/snapshot"
 )
 
 func TestSidesAndTeams(t *testing.T) {
@@ -41,6 +43,16 @@ func TestArmySeries(t *testing.T) {
 	}
 	if got := s.ArmyByCat[0][1][step]; got != 700 {
 		t.Errorf("side 0 light army = %v, want 700", got)
+	}
+	// Value counts everything a side owns, commanders and buildings too, so
+	// it is more than the army whenever there is one, and never nothing
+	// while the side still stands.
+	for side := range s.Value {
+		for i, v := range s.Value[side] {
+			if v < s.Army[side][i] || (s.Army[side][i] > 0 && v == s.Army[side][i]) {
+				t.Fatalf("side %d step %d: value %v against army %v", side, i, v, s.Army[side][i])
+			}
+		}
 	}
 	// After the fight nobody has an army.
 	if got := s.Army[0][len(s.T)-1] + s.Army[1][len(s.T)-1]; got != 0 {
@@ -132,5 +144,97 @@ func TestDeterministic(t *testing.T) {
 	}
 	if !bytes.Equal(out[0], out[1]) {
 		t.Error("two computations of the same replay differ")
+	}
+}
+
+// In a capture that names causes, a unit its own side took down is gone but
+// not lost: reclaimed by a teammate, or a structure going with no cause at
+// all (an upgrade, a cancelled build). An enemy reclaiming it, or a mobile
+// unit dying with no cause (a crash), is still a loss.
+func TestRemovedByOwnerIsNotALoss(t *testing.T) {
+	type rule func(e snapshot.Event, own, foe int32) *snapshot.EventCause
+	compute := func(structure bool, first rule) (*Insights, snapshot.Event) {
+		in, err := FromBRP(parseFixture(t, writeFixture(t)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		sideOf := map[int32]int{}
+		for _, tm := range in.Meta.Teams {
+			sideOf[tm.TeamID] = int(tm.AllyTeam)
+		}
+		foeOf := func(team int32) int32 {
+			for t2, sd := range sideOf {
+				if sd != sideOf[team] {
+					return t2
+				}
+			}
+			return -1
+		}
+		var hit snapshot.Event
+		seen := false
+		for i, e := range in.Events {
+			if e.Kind != snapshot.EventDestroyed {
+				continue
+			}
+			// Every death is a kill by the enemy, except the first mobile
+			// (or structure) one, which the rule decides: so the capture
+			// names causes, like a re-simulation.
+			if !seen && isStructure(in.Meta.UnitDefs[e.DefID]) == structure {
+				seen = true
+				in.Events[i].Cause = first(e, e.Team, foeOf(e.Team))
+				hit = in.Events[i]
+				continue
+			}
+			in.Events[i].Cause = &snapshot.EventCause{UnitID: 1, DefID: 1, Team: foeOf(e.Team), WeaponDef: 1}
+		}
+		ins, err := Compute(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ins, hit
+	}
+	lost := func(ins *Insights, team int32) (n int) {
+		for _, p := range ins.Players {
+			if p.Team == team {
+				for _, v := range p.Strip.LostN {
+					n += v
+				}
+			}
+		}
+		return n
+	}
+	killed, e := compute(false, func(e snapshot.Event, own, foe int32) *snapshot.EventCause {
+		return &snapshot.EventCause{UnitID: 1, DefID: 1, Team: foe, WeaponDef: 1}
+	})
+	n := len(killed.Deaths.F)
+	for _, c := range []struct {
+		name      string
+		structure bool
+		rule      rule
+		deaths    int
+	}{
+		{"reclaimed by its own team", false, func(e snapshot.Event, own, foe int32) *snapshot.EventCause {
+			return &snapshot.EventCause{UnitID: 1, DefID: 1, Team: own, WeaponDef: weaponReclaimed}
+		}, n - 1},
+		{"reclaimed by the enemy", false, func(e snapshot.Event, own, foe int32) *snapshot.EventCause {
+			return &snapshot.EventCause{UnitID: 1, DefID: 1, Team: foe, WeaponDef: weaponReclaimed}
+		}, n},
+		{"a mobile unit gone with no cause", false, func(snapshot.Event, int32, int32) *snapshot.EventCause { return nil }, n},
+	} {
+		got, _ := compute(c.structure, c.rule)
+		if len(got.Deaths.F) != c.deaths {
+			t.Errorf("%s: deaths %d, want %d", c.name, len(got.Deaths.F), c.deaths)
+		}
+		if want := lost(killed, e.Team) - (n - c.deaths); lost(got, e.Team) != want {
+			t.Errorf("%s: player lost %d, want %d", c.name, lost(got, e.Team), want)
+		}
+	}
+	// A structure going with no cause was replaced or cancelled: not a loss.
+	kept, _ := compute(true, func(e snapshot.Event, own, foe int32) *snapshot.EventCause {
+		return &snapshot.EventCause{UnitID: 1, DefID: 1, Team: foe, WeaponDef: 1}
+	})
+	gone, _ := compute(true, func(snapshot.Event, int32, int32) *snapshot.EventCause { return nil })
+	if len(gone.Deaths.F) != len(kept.Deaths.F)-1 {
+		t.Errorf("a structure gone with no cause: deaths %d, want %d", len(gone.Deaths.F), len(kept.Deaths.F)-1)
 	}
 }

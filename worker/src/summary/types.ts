@@ -73,6 +73,9 @@ export interface Series {
   t: number[];
   /** [side][step] metal value of the army. */
   army: number[][];
+  /** [side][step] metal value of everything the side owns, buildings and
+   * commanders included (version 4+). */
+  value?: number[][];
   metalIncome: number[][];
   energyIncome: number[][];
   armyCats: string[];
@@ -103,6 +106,15 @@ export interface Moment {
   battle: number;
 }
 
+/** One team's part in a battle (version 4+), in metal. */
+export interface BattleTeam {
+  team: number;
+  /** Its largest army within reach of the battle while it lasted. */
+  army: number;
+  /** What it lost there. */
+  lost: number;
+}
+
 export interface Battle {
   f0: number;
   f1: number;
@@ -112,6 +124,8 @@ export interface Battle {
   r: number;
   /** Indexed like sides. */
   lost: { n: number; metal: number; top: number[] }[];
+  /** Who took part, by team (version 4+). */
+  teams?: BattleTeam[];
 }
 
 export interface Elimination {
@@ -200,11 +214,17 @@ export interface ChatLine {
 export interface Clip {
   f0: number;
   f1: number;
+  /** The instant the clip is about, inside [f0, f1], for the host to mark on
+   * its timeline: the lead-in is then plainly a wait of a few seconds. */
+  at?: number;
   x?: number;
   z?: number;
   r?: number;
   /** What the clip shows, for the host's player to title it. */
   title?: string;
+  /** The title split into runs, player and side names carrying their
+   * colours, for a host that can draw them. */
+  titleRuns?: { text: string; color?: string }[];
 }
 
 export interface SummaryOptions {

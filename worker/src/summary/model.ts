@@ -36,11 +36,94 @@ export function readable(hex: string): string {
   return "#" + mix.map((v) => v.toString(16).padStart(2, "0")).join("");
 }
 
-/** sideName labels a side by its first player, plus how many more there are. */
+/** teamColor is a team's own colour (the player's in-game colour), made
+ * readable, falling back to its side's. */
+export function teamColor(ins: Insights, team: number): string {
+  const t = ins.teams.find((x) => x.team === team);
+  const c = t?.color;
+  return c && /^#[0-9a-f]{6}$/i.test(c) ? readable(c) : sideColor(ins, t?.side ?? 0);
+}
+
+/** playerColor is a player's in-game colour by name, or null for a name no
+ * team carries (a spectator, the autohost). */
+export function playerColor(ins: Insights, name: string): string | null {
+  const t = ins.teams.find((x) => x.player === name);
+  return t ? teamColor(ins, t.team) : null;
+}
+
+/** A piece of text, coloured when it is a player's name. */
+export interface Run {
+  text: string;
+  color?: string;
+}
+
+/** nameRuns splits text into runs, giving every player name in it that
+ * player's in-game colour, so a name reads the same wherever it is written.
+ * A name counts only as a whole word: "Pawn" inside "Pawns" is not a
+ * player called Pawn. Longer names win over names they contain. Side
+ * names ("Blue team") get their side's colour the same way. */
+export function nameRuns(ins: Insights, text: string): Run[] {
+  const names = [
+    ...ins.teams.filter((t) => t.player).map((t) => ({ name: t.player as string, color: teamColor(ins, t.team) })),
+    ...ins.sides.map((_, i) => ({ name: sideName(ins, i), color: sideColor(ins, i) })),
+  ].sort((a, b) => b.name.length - a.name.length);
+  const word = /[\p{L}\p{N}_]/u;
+  const out: Run[] = [];
+  let plain = "";
+  let i = 0;
+  outer: while (i < text.length) {
+    if (i === 0 || !word.test(text[i - 1])) {
+      for (const n of names) {
+        const end = i + n.name.length;
+        if (text.startsWith(n.name, i) && (end >= text.length || !word.test(text[end]))) {
+          if (plain) out.push({ text: plain });
+          plain = "";
+          out.push({ text: n.name, color: n.color });
+          i = end;
+          continue outer;
+        }
+      }
+    }
+    plain += text[i++];
+  }
+  if (plain) out.push({ text: plain });
+  return out;
+}
+
+/** colorName is the plain English name of a #rrggbb colour's hue ("Blue",
+ * "Red"), the way players call a side by its colour. */
+export function colorName(hex: string): string {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  const d = max - min;
+  const sat = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
+  if (sat < 0.2 || d < 0.08) return l > 0.75 ? "White" : l < 0.2 ? "Black" : "Grey";
+  let hue = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  hue = (hue * 60 + 360) % 360;
+  if (hue < 15 || hue >= 345) return "Red";
+  if (hue < 40) return "Orange";
+  if (hue < 70) return "Yellow";
+  if (hue < 160) return "Green";
+  if (hue < 195) return "Cyan";
+  if (hue < 260) return "Blue";
+  if (hue < 295) return "Purple";
+  return "Pink";
+}
+
+/** sideName labels a side by its leader's colour — "Blue team" — which is
+ * what players call it, and what its colour on the page already says. A
+ * side with no colour, or one sharing its colour's name with another side,
+ * is "Team N" instead, so two sides are never called the same. */
 export function sideName(ins: Insights, side: number): string {
-  const p = ins.sides[side]?.players ?? [];
-  if (p.length === 0) return `Side ${side + 1}`;
-  return p.length === 1 ? p[0] : `${p[0]} +${p.length - 1}`;
+  const named = (i: number) => {
+    const c = ins.sides[i]?.color;
+    return c && /^#[0-9a-f]{6}$/i.test(c) ? colorName(c) : null;
+  };
+  const mine = named(side);
+  if (!mine || ins.sides.some((_, i) => i !== side && named(i) === mine)) return `Team ${side + 1}`;
+  return `${mine} team`;
 }
 
 /** comparable is whether the sections that set one side against the other
