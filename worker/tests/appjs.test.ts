@@ -655,7 +655,7 @@ test('the catalog is fetched for the list view, not for a direct replay link', a
       get pathname() { return state.url.pathname; },
     };
     const history = { pushState(){}, replaceState: (_a, _b, u) => { state.url = new URL(u, state.url); } };
-    const initGL = () => {}, initUpload = () => {}, startFpsMonitor = () => {}, stopPlay = () => {};
+    const initGL = () => {}, initUpload = () => {}, initReplayTabs = () => {}, startFpsMonitor = () => {}, stopPlay = () => {};
     // The left menu: wiring the nav and the queue's pager, and picking the
     // section to show. None of it touches the catalog, which is what this
     // test counts.
@@ -697,6 +697,13 @@ test('the catalog is fetched for the list view, not for a direct replay link', a
   assert.equal(legacy.url(), '/replays/f8e5816a04505f9c2b5b69a6a458b696?gl=0',
     'normalized to the path form, keeping the other params');
   assert.equal(s.lists, 0, 'and it stays as cheap as the canonical form');
+
+  // ?tab=summary on a replay path is the replay page's own tab, not a legacy
+  // landing-section link: it must survive the normalization.
+  const summary = boot('/replays/f8e5816a04505f9c2b5b69a6a458b696', '?tab=summary');
+  await summary.init();
+  assert.equal(summary.stats().opened, 'f8e5816a04505f9c2b5b69a6a458b696');
+  assert.equal(summary.url(), '/replays/f8e5816a04505f9c2b5b69a6a458b696?tab=summary', 'the Summary tab is kept');
 
   // A legacy ?tab= link normalizes to its path too.
   const tab = boot('/', '?tab=games');

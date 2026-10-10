@@ -3680,6 +3680,8 @@ document.getElementById('togglehp').onclick = e => {
 };
 window.addEventListener('keydown', e => {
   if (e.target.tagName === 'SELECT') return;
+  // The Summary tab hides the playback; its keys are the page's own.
+  if (document.body.classList.contains('summary-tab')) return;
   // A FOCUSED slider would step natively on top of this, and since it carries
   // step="any" (so the thumb can glide between samples during playback) the
   // browser's own arrow step is a hundredth of the whole timeline rather than
@@ -3725,6 +3727,8 @@ async function loadReplay(id) {
   currentFile = file;
   brpWhole = null;
   let head;
+  resetSummary();
+  applyReplayTab();
   try {
     // The .brp itself; a replay without one is an older bundle with a .brw.
     head = await loadBrpHead(file);
@@ -6776,6 +6780,131 @@ async function submitResim() {
 // openReplay leaves the home view and starts playback of one replay,
 // PUSHING a history entry (navigation, not a tweak: back must return to
 // where the user was — the list, or the previously watched replay).
+// ---- Replay / Summary tabs -------------------------------------------------
+// A replay page has two tabs: the playback, and the game SUMMARY — charts and
+// map stories computed once per published revision by internal/insights and
+// stored beside it as replays/<rid>.insights<N>.json. The summary itself is a
+// separate library (worker/src/summary/, bundled by the Vite summary-bundle
+// plugin into the module named by window.__SUMMARY_JS__) that knows nothing
+// about this file: it is handed the insights and an onSeek callback, which is
+// how a click on a chart jumps the replay to that moment. It is imported the
+// first time a Summary tab opens, so a visit that never opens one never
+// downloads it.
+//
+// The tab lives in the URL as ?tab=summary (absent = the replay), pushed as
+// navigation so back returns from the summary to the playback. A path segment
+// (/replays/<id>/summary) was avoided: a second segment under /replays/ is a
+// chunk, and the worker sends it to R2.
+const INSIGHTS_VERSION = 1; // the file version this page reads (src/summary INSIGHTS_VERSION)
+let summaryModule = null;   // Promise of the imported library
+let summaryFor = null;      // currentFile the #summary pane was filled for
+let summaryHandle = null;   // the mounted summary, for destroy()
+
+function replayTab() {
+  return new URLSearchParams(location.search).get('tab') === 'summary' ? 'summary' : 'replay';
+}
+
+function setReplayTab(tab) {
+  const u = new URL(location.href);
+  if (tab === 'summary') u.searchParams.set('tab', 'summary');
+  else u.searchParams.delete('tab');
+  if (u.href !== location.href) history.pushState(null, '', u);
+  applyReplayTab();
+}
+
+function applyReplayTab() {
+  const tab = replayTab();
+  document.body.classList.toggle('summary-tab', tab === 'summary');
+  document.getElementById('replaytabs').style.display = '';
+  for (const b of document.querySelectorAll('#replaytabs button')) {
+    b.classList.toggle('active', b.dataset.rtab === tab);
+  }
+  if (tab === 'summary') {
+    stopPlay();
+    showSummary();
+  } else if (data) {
+    resize(); // the canvases were display:none while the summary showed
+    show();
+  }
+}
+
+function resetSummary() {
+  if (summaryHandle) summaryHandle.destroy();
+  summaryHandle = null;
+  summaryFor = null;
+  document.getElementById('summary').textContent = '';
+}
+
+// summaryMessage fills the pane with one line of text instead of a summary.
+function summaryMessage(text) {
+  const el = document.getElementById('summary');
+  el.textContent = '';
+  const p = document.createElement('p');
+  p.className = 'summarymsg';
+  p.textContent = text;
+  el.append(p);
+}
+
+async function showSummary() {
+  const file = currentFile;
+  if (!file || summaryFor === file) return; // not resolved yet, or already shown
+  summaryFor = file;
+  summaryMessage('Loading the summary…');
+  const url = window.__SUMMARY_JS__;
+  if (typeof url !== 'string' || !url.startsWith('/')) {
+    summaryMessage('This deployment has no summary page.');
+    return;
+  }
+  try {
+    summaryModule = summaryModule || import(url);
+    const [lib, res] = await Promise.all([
+      summaryModule,
+      fetch(dataURL('/replays/' + encodeURIComponent(file) + '.insights' + INSIGHTS_VERSION + '.json')),
+    ]);
+    if (summaryFor !== file) return; // another replay was opened meanwhile
+    if (res.status === 404) {
+      summaryMessage('The summary for this replay has not been built yet.');
+      return;
+    }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const ins = await res.json();
+    if (summaryFor !== file) return;
+    document.getElementById('summary').textContent = '';
+    summaryHandle = lib.mountSummary(document.getElementById('summary'), ins, { onSeek: seekToFrame });
+  } catch (err) {
+    if (summaryFor !== file) return;
+    summaryFor = null; // let a later visit retry
+    summaryMessage('Could not load the summary: ' + err.message);
+  }
+}
+
+// idxForFrame maps a sim frame to the nearest sample index.
+function idxForFrame(f) {
+  if (!data || !data.chunks.length) return 0;
+  const se = data.sampleEvery || 30;
+  let start = 0;
+  for (const c of data.chunks) {
+    if (f < c.frame + c.count * se) {
+      return start + Math.max(0, Math.min(c.count - 1, Math.round((f - c.frame) / se)));
+    }
+    start += c.count;
+  }
+  return Math.max(0, start - 1);
+}
+
+// seekToFrame is the summary's onSeek: back to the playback, at that moment.
+function seekToFrame(f) {
+  setReplayTab('replay');
+  stopPlay();
+  go(idxForFrame(f));
+}
+
+function initReplayTabs() {
+  for (const b of document.querySelectorAll('#replaytabs button')) {
+    b.onclick = () => setReplayTab(b.dataset.rtab);
+  }
+}
+
 function openReplay(id) {
   hideHome();
   if (replayFromURL() !== id) {
@@ -6791,6 +6920,7 @@ async function init() {
   initResim();   // the queue's "re-simulate this replay" box
   initLavabalanceDialog();   // the Games rows' LOS upload preview
   initUpload(); // the dropzone works without the catalog being loaded
+  initReplayTabs(); // Replay / Summary on a replay page
   const params = new URLSearchParams(location.search);
   // Whether the maintenance controls may show: one round trip (no cookie,
   // no Durable Object — a 401 in a millisecond for an ordinary visit),
@@ -6815,7 +6945,9 @@ async function init() {
   // the address bar shows the canonical link and a copy/refresh carries it.
   // replaceState, not pushState: the visitor arrived at ONE page, whatever
   // spelling the link used.
-  if (params.get('replay') || params.get('tab')) {
+  // A ?tab= on a /replays/<id> path is not legacy: it is the replay page's
+  // own Replay/Summary tab (replayTab).
+  if (params.get('replay') || (params.get('tab') && !replayFromURL())) {
     const u = new URL(location.href);
     const rep = u.searchParams.get('replay');
     const tab = u.searchParams.get('tab');
@@ -6854,6 +6986,8 @@ window.addEventListener('popstate', () => {
     // (usually the bare id), currentFile the revision it resolved to.
     if (wanted !== currentRequest || !data) {
       loadReplay(wanted);
+    } else {
+      applyReplayTab(); // same replay: back/forward between its two tabs
     }
   }
 });

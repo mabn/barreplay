@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { build as esbuild } from "esbuild";
 import { defineConfig, type Plugin } from "vite";
 import { cloudflare } from "@cloudflare/vite-plugin";
 
@@ -83,9 +84,70 @@ function dataBase(): Plugin {
   };
 }
 
+// The game-summary library (src/summary/), bundled into ONE self-contained ES
+// module that app.js imports the first time the Summary tab opens. It is
+// TypeScript in several files, so unlike app.js it does need a bundler, and it
+// is built here rather than as a Vite client entry because the viewer is not a
+// Vite app: app.js is a classic script copied verbatim from public/.
+//
+// The bundle is fingerprinted like the other subresources, by its OWN hash
+// (its bytes, after bundling): index.html carries the URL in its __SUMMARY_MODULE__ placeholder,
+// which app.js reads from window.__SUMMARY_JS__, so app.js itself does not
+// change when only the summary does. `vite dev` serves a fresh bundle per
+// request at a fixed /summary.dev.js.
+async function bundleSummary(): Promise<string> {
+  const out = await esbuild({
+    entryPoints: [fileURLToPath(new URL("./src/summary/index.ts", import.meta.url))],
+    bundle: true,
+    format: "esm",
+    target: "es2022",
+    write: false,
+    legalComments: "none",
+  });
+  return out.outputFiles[0].text;
+}
+
+const summaryName = (code: string) => `summary.${createHash("sha256").update(code).digest("hex").slice(0, 8)}.js`;
+
+function summaryBundle(): Plugin {
+  let isBuild = false;
+  let built: string | null = null;
+  return {
+    name: "summary-bundle",
+    configResolved(cfg) {
+      isBuild = cfg.command === "build";
+    },
+    async buildStart() {
+      if (isBuild) built = await bundleSummary();
+    },
+    async transformIndexHtml(html) {
+      if (!isBuild) return html.replaceAll("__SUMMARY_MODULE__", "/summary.dev.js");
+      built ??= await bundleSummary();
+      return html.replaceAll("__SUMMARY_MODULE__", "/" + summaryName(built));
+    },
+    async generateBundle() {
+      built ??= await bundleSummary();
+      this.emitFile({ type: "asset", fileName: summaryName(built), source: built });
+    },
+    configureServer(server) {
+      server.middlewares.use(async (req, res, next) => {
+        if (!req.url?.startsWith("/summary.dev.js")) return next();
+        try {
+          const code = await bundleSummary();
+          res.setHeader("content-type", "text/javascript; charset=utf-8");
+          res.setHeader("cache-control", "no-cache");
+          res.end(code);
+        } catch (e) {
+          next(e);
+        }
+      });
+    },
+  };
+}
+
 // The Cloudflare plugin runs the Worker (src/worker/index.ts, per wrangler.jsonc) inside
 // the real workerd runtime during `vite dev`, and builds both the client bundle and the
 // Worker on `vite build`. No React/JSX plugin: the UI is plain TypeScript + Canvas/DOM.
 export default defineConfig({
-  plugins: [assetRev(), dataBase(), cloudflare()],
+  plugins: [assetRev(), dataBase(), summaryBundle(), cloudflare()],
 });

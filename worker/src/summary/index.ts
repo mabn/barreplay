@@ -1,0 +1,75 @@
+// The game summary, as a library: mountSummary draws a replay's insights
+// file (internal/insights) into an element. It reads nothing but that file
+// and imports nothing from the viewer, so any page holding the file can show
+// the same summary — the replay viewer's Summary tab today, the lavabalance
+// site later. The one hook back into a host is onSeek, a callback taking a
+// sim frame, which the viewer uses to jump the replay to a moment.
+import { h, section } from "./dom";
+import { fmtClock, fmtMetal } from "./format";
+import { comparable, notices, sideColor, sideName } from "./model";
+import { ensureStyles } from "./styles";
+import type { Insights, SummaryHandle, SummaryOptions } from "./types";
+
+export type * from "./types";
+export { comparable, notices } from "./model";
+
+/** The insights file version this build understands. */
+export const INSIGHTS_VERSION = 1;
+
+/** insightsFile names a revision's insights piece. */
+export function insightsFile(rid: string): string {
+  return `${rid}.insights${INSIGHTS_VERSION}.json`;
+}
+
+/** A section draws one part of the summary, or returns null when the file
+ * cannot support it (a one-sided capture, no chat). */
+export type Section = (ins: Insights, opts: SummaryOptions) => HTMLElement | null;
+
+export function mountSummary(el: HTMLElement, ins: Insights, opts: SummaryOptions = {}): SummaryHandle {
+  ensureStyles(el.ownerDocument);
+  const root = h("div", { class: "brs-root" });
+  if (!ins || ins.version !== INSIGHTS_VERSION) {
+    root.append(h("p", { class: "brs-hint" }, `This summary was built in a format (version ${ins?.version ?? "?"}) this page cannot read.`));
+  } else {
+    root.append(header(ins));
+    const notes = notices(ins);
+    if (notes.length) root.append(h("ul", { class: "brs-notices" }, ...notes.map((n) => h("li", undefined, n))));
+    for (const sec of SECTIONS) {
+      const node = sec(ins, opts);
+      if (node) root.append(node);
+    }
+  }
+  el.append(root);
+  return { destroy: () => root.remove() };
+}
+
+function header(ins: Insights): HTMLElement {
+  const sizes = ins.sides.map((s) => s.players.length).join("v");
+  return h("div", undefined,
+    h("h2", undefined, ins.mapName || "Game summary"),
+    h("div", { class: "brs-meta" }, [sizes, fmtClock(ins.durationSec), ins.gameId].filter(Boolean).join(" · ")),
+  );
+}
+
+/** overview: who played, and each side's headline numbers. */
+const overview: Section = (ins) => {
+  const n = ins.series.t.length;
+  const showArmy = comparable(ins);
+  const cards = ins.sides.map((side, i) => {
+    const army = ins.series.army[i] ?? [];
+    const metal = ins.series.metalIncome[i] ?? [];
+    const peak = army.reduce((m, v) => Math.max(m, v), 0);
+    const avgMetal = metal.length ? metal.reduce((a, b) => a + b, 0) / metal.length : 0;
+    const card = h("div", { class: "brs-side", style: `--brs-side: ${sideColor(ins, i)}` },
+      h("b", undefined, sideName(ins, i)),
+      h("div", { class: "brs-players" }, side.players.join(", ")),
+      h("div", { class: "brs-stat" }, h("span", undefined, "Average metal income"), `${avgMetal.toFixed(1)}/s`),
+      showArmy && n > 0 ? h("div", { class: "brs-stat" }, h("span", undefined, "Largest army"), fmtMetal(peak)) : null,
+    );
+    return card;
+  });
+  return section("Sides", h("div", { class: "brs-sides" }, ...cards));
+};
+
+/** SECTIONS in page order. */
+const SECTIONS: Section[] = [overview];

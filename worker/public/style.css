@@ -54,6 +54,18 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: #5a9fd0; }
    underneath. The menu is a fixed rail; only the section next to it scrolls,
    so the menu stays reachable in a long list. */
 body.home .controls, body.home #wrap { display: none; }
+
+/* ---- replay page tabs: Replay (the playback) and Summary (the src/summary
+   library's pane). The summary hides the playback chrome and scrolls on its
+   own; the landing page shows neither. */
+#replaytabs { display: flex; gap: 2px; }
+#replaytabs button { background: transparent; border-color: transparent; color: #9fb0bf; }
+#replaytabs button.active { background: #2a3742; border-color: #3a4856; color: #d7dee6; }
+body.home #replaytabs, body.home #summary { display: none !important; }
+body.summary-tab #wrap, body.summary-tab .controls { display: none; }
+body.summary-tab #summary { display: block !important; }
+#summary { flex: 1; min-height: 0; overflow-y: auto; }
+#summary .summarymsg { color: #9fb0bf; text-align: center; margin-top: 60px; }
 #home { flex: 1; min-height: 0; display: flex; }
 #homemain { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; padding: 18px 24px; }
 #homenav {

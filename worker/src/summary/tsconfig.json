@@ -1,0 +1,20 @@
+{
+  // The summary library is browser code: DOM types only, none of the
+  // Workers runtime's (which redefine Element, Response, ... incompatibly).
+  // `npx tsc -p src/summary` checks it.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": [],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["."]
+}

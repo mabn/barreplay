@@ -481,6 +481,26 @@ cmd/insights/main.go      CLI: the summary BACKFILL, one replay at a time (or -a
                           capture (.brp, or a .brepstream/.brsnap it packs first) is the way back
                           to full costs for a pieces-only replay — e.g. an upload's archived
                           stream — with -rid naming the published revision it belongs to.
+worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, insights, {onSeek})
+                          draws an insights file and nothing else — no import from app.js, no
+                          globals, its CSS injected once and scoped under .brs-root — so another
+                          site (lavabalance) can mount the same pages. TypeScript, so unlike
+                          app.js it is BUNDLED: the Vite summary-bundle plugin runs esbuild over
+                          index.ts into one ES module fingerprinted by its own hash
+                          (summary.<rev>.js; /summary.dev.js under `vite dev`), and index.html
+                          hands app.js its URL as window.__SUMMARY_JS__ (placeholder token
+                          __SUMMARY_MODULE__ — NOT the global's name, the same textual-replace
+                          trap as __DATA_ORIGIN__). Browser code, so it has its own tsconfig
+                          (the Workers types redefine DOM names): `npx tsc -p src/summary`.
+                          Pure parts (format.ts, model.ts — e.g. comparable(): two sides AND a
+                          full-view capture, the only case a side-by-side chart is honest) are
+                          node-tested in tests/summary.test.ts. In the viewer it is the replay
+                          page's SUMMARY TAB (app.js applyReplayTab/showSummary): ?tab=summary
+                          on the /replays/<id> path (pushed, so back returns to the playback;
+                          the legacy ?tab= normalization therefore only applies on "/"), the
+                          library imported on first open, the insights fetched from the data
+                          origin, a 404 saying the summary is not built yet, and onSeek =
+                          seekToFrame (back to the Replay tab at that sim frame).
 internal/viz/readbundle.go ReadStaticBundle: the inverse of WriteStaticBundle, rebuilding a
                           BRPFile from published pieces through a PieceFetcher. Defs come back
                           from the head only (names, footprints, armyCost -> MetalCost), and a v4
