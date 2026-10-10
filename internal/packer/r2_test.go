@@ -418,3 +418,55 @@ func TestObjectHTTPMeta(t *testing.T) {
 		}
 	}
 }
+
+// A published revision downloaded for a republish is named after its rid; the
+// game id comes from the .brp's meta, so it registers under the game, not as a
+// new game named "<gameId>-<rev>".
+func TestUploadStaticIDFromMeta(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "somegameid.brsnap")
+	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	packed, _, err := Pack(context.Background(), nil, in, dir, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	brpPath := filepath.Join(dir, "somegameid-deadbeef.brp")
+	if err := os.Rename(packed, brpPath); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var putKeys []string
+	var catalogPath string
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/replays/"):
+			putKeys = append(putKeys, strings.TrimPrefix(r.URL.Path, "/"))
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/replays/"):
+			catalogPath = r.URL.Path
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(worker.Close)
+	t.Setenv("R2_ACCESS_KEY_ID", "")
+	t.Setenv("R2_SECRET_ACCESS_KEY", "")
+	err = UploadStatic(context.Background(), brpPath, UploadOptions{
+		Target: "local", WorkerDir: filepath.Join(dir, "does-not-exist"), IndexURL: worker.URL, Rev: "1a2b3c4d",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(putKeys)
+	if want := []string{"replays/somegameid-1a2b3c4d.brp", "replays/" + insights.FileName("somegameid-1a2b3c4d")}; fmt.Sprint(putKeys) != fmt.Sprint(want) {
+		t.Errorf("piece PUTs = %v, want %v", putKeys, want)
+	}
+	if catalogPath != "/api/replays/somegameid" {
+		t.Errorf("catalog PUT to %q, want /api/replays/somegameid", catalogPath)
+	}
+}

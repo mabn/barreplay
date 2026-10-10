@@ -374,18 +374,23 @@ func UploadStatic(ctx context.Context, brpPath string, o UploadOptions) error {
 	if o.Target == "r2" {
 		native = r2ClientFromEnv(o.WorkerDir)
 	}
-	gameID := strings.TrimSuffix(filepath.Base(brpPath), filepath.Ext(brpPath))
+	gameID, err := brpGameID(brpPath)
+	if err != nil {
+		return err
+	}
 	tmp, err := os.MkdirTemp("", "pack-upload-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmp)
 
-	// The bundle's URL id is the source .brp's basename, so a revisioned
-	// publish stages the file under its "<gameId>-<rev>" name first.
+	// The bundle's URL id is the source .brp's basename, so the file is
+	// staged under its "<gameId>[-<rev>]" name first whenever that differs.
 	src, uploadID := brpPath, gameID
 	if o.Rev != "" {
 		uploadID = gameID + "-" + o.Rev
+	}
+	if base := strings.TrimSuffix(filepath.Base(brpPath), filepath.Ext(brpPath)); base != uploadID {
 		src = filepath.Join(tmp, uploadID+".brp")
 		if err := copyFile(brpPath, src); err != nil {
 			return err
@@ -415,6 +420,26 @@ func UploadStatic(ctx context.Context, brpPath string, o UploadOptions) error {
 	}
 	fmt.Fprintf(os.Stderr, "%s: registered in the replay catalog at %s\n", gameID, o.IndexURL)
 	return nil
+}
+
+// brpGameID is the game a .brp belongs to: its meta's GameID, which the file
+// name is not — a published revision downloaded for a republish is named
+// "<gameId>-<rev>.brp", and taking that as the id registered it as a new
+// game. The name is only the fallback for a meta with no id.
+func brpGameID(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	bf, err := snapshot.ParseBRP(f)
+	if err != nil {
+		return "", fmt.Errorf("parse %s: %w", path, err)
+	}
+	if id := bf.Meta.GameID; id != "" {
+		return id, nil
+	}
+	return strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), nil
 }
 
 // UploadPieces uploads every file under bundleDir to the target's bucket,
