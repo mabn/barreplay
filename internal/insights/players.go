@@ -316,6 +316,9 @@ func (p *pass) playerEvent(e snapshot.Event) {
 	st := p.strip(e.Team, step)
 	switch e.Kind {
 	case snapshot.EventFinished:
+		if p.evolved.replaced(e) {
+			break // spawned by an evolution, not built
+		}
 		st.BuiltMetal[step] += d.cost
 		st.BuiltN[step]++
 		if a := p.team(e.Team); a.t2 < 0 && d.milestone >= 0 && milestoneDefs[d.milestone].Key == "t2lab" {

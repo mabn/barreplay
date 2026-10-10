@@ -51,6 +51,7 @@ type pass struct {
 	deathKiller []int32
 
 	hasCauses bool // some destroyed event names a cause: a re-simulation
+	evolved   evolution
 
 	presence     []presence // army positions, one sample per step (stories.go)
 	presenceStep int        // the last step sampled into presence, -1 for none
@@ -126,6 +127,7 @@ func newPass(in Input, ro roster) *pass {
 			p.playerTeams++
 		}
 	}
+	p.evolved = evolutions(in.Events)
 	for _, e := range in.Events {
 		if e.Kind == snapshot.EventDestroyed && e.Cause != nil {
 			p.hasCauses = true
@@ -264,9 +266,9 @@ func (p *pass) event(e snapshot.Event) {
 const weaponReclaimed = -12
 
 // removedByOwner reports a unit its own side took down, which is routine
-// housekeeping rather than a loss. Two ways, both readable only in a capture
-// that names causes (a re-simulation; older captures count every death, as
-// they always did):
+// housekeeping rather than a loss. An EVOLUTION (evolve.go) is one in any
+// capture; two more are readable only in one that names causes (a
+// re-simulation; older captures count those deaths, as they always did):
 //
 //   - RECLAIMED by its own side: wind turbines cleared for something better,
 //     a lab taken down; the metal comes back. Reclaiming an ENEMY unit is a
@@ -280,6 +282,10 @@ const weaponReclaimed = -12
 //     an upgrade. Mobile units are left alone: a shot-down aircraft dies
 //     later, in its crash, with no cause either.
 func (p *pass) removedByOwner(e snapshot.Event) bool {
+	if e.Kind == snapshot.EventDestroyed && p.evolved.replaced(e) {
+		// Evolved into its next form (evolve.go): replaced, not lost.
+		return true
+	}
 	if e.Kind != snapshot.EventDestroyed || !p.hasCauses {
 		return false
 	}

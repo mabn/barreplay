@@ -532,7 +532,13 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           reclaimed by its own side (cause weapon -12, the engine's reclaim id)
                           and a STRUCTURE destroyed with no cause at all (a mex/geo upgrade, a
                           cancelled build, a self-destruct) — wind farms reclaimed for space
-                          used to read as a lost fight. It adds Series.Value (everything a side
+                          used to read as a lost fight. An EVOLUTION is never a loss in any
+                          capture (evolve.go): BAR's evolving commanders are swapped at once
+                          (a new unit created AND finished in one frame, the old one destroyed
+                          with no cause, same team, same frame), so each such instant spawn
+                          takes one causeless death of its team in that frame — that death is
+                          no loss and the spawn is not "built". A real 8v8 evolved all 16
+                          commanders at 10:00 and read as "8 commanders fall". It adds Series.Value (everything a side
                           owns, priced and weighted by build progress — the denominator of the
                           page's loss SHARE, since a 15 s loss of 5k metal is a disaster at
                           minute 3 and noise at minute 40) and Battle.Teams (per team: metal
