@@ -1407,6 +1407,51 @@ end
 -- ---------------------------------------------------------------------------
 -- Callins.
 
+-- BAR's widget handler forwards UnitDamaged with only its first five
+-- arguments (luaui/barwidgets.lua: widgetHandler:UnitDamaged(unitID,
+-- unitDefID, unitTeam, damage, paralyzer)), so a widget is never told the
+-- weapon or the attacker of a hit, although the engine passes both. The
+-- handler's top-level callin is a closure over widgetHandler.UnitDamaged that
+-- forwards everything the engine gave it, rebuilt by UpdateCallIn — so the
+-- re-sim sampler (which has handler access) wraps that method, takes the full
+-- arguments for itself, and then calls the original for every other widget.
+-- Without handler access the widget's own callin still records the hits,
+-- with every attacker unknown.
+local damageHooked = false
+local unhookDamage = nil
+
+local function hookDamage()
+	local wh = widget.widgetHandler
+	if not (wh and type(wh.UnitDamaged) == "function" and type(wh.UpdateCallIn) == "function") then
+		Echo(logTag .. " widget handler API unavailable; damage will name no attacker")
+		return
+	end
+	local orig = wh.UnitDamaged
+	wh.UnitDamaged = function(self, unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
+		pcall(onDamaged, unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, attackerID, attackerDefID, attackerTeam)
+		return orig(self, unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
+	end
+	damageHooked = true
+	wh:UpdateCallIn("UnitDamaged")
+	unhookDamage = function()
+		wh.UnitDamaged = orig
+		damageHooked = false
+		pcall(wh.UpdateCallIn, wh, "UnitDamaged")
+	end
+end
+
+if recordDamage then
+	-- Defined only when recording: an unused UnitDamaged callin would still
+	-- cost a Lua call per hit. It also keeps the handler's callin list
+	-- non-empty, which is what makes UpdateCallIn install the hook above.
+	function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
+		if damageHooked then
+			return -- recorded by the hook, with the arguments BAR drops
+		end
+		pcall(onDamaged, unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, attackerID, attackerDefID, attackerTeam)
+	end
+end
+
 function widget:Initialize()
 	myAllyTeam = (spGetMyAllyTeamID and spGetMyAllyTeamID()) or -1
 	if not detectPack() then
@@ -1435,6 +1480,12 @@ function widget:Initialize()
 		Echo(logTag .. " preamble failed (" .. tostring(err) .. "); removing widget")
 		removeSelf()
 		return
+	end
+	if resim and recordDamage then
+		local hok, herr = pcall(hookDamage)
+		if not hok then
+			Echo(logTag .. " damage hook failed (" .. tostring(herr) .. "); damage will name no attacker")
+		end
 	end
 	if resim then
 		local wok, werr = pcall(function()
@@ -1699,14 +1750,6 @@ function widget:UnitGiven(unitID, unitDefID, newTeam, oldTeam)
 		end
 	end
 	pcall(event, "given", unitID, unitDefID, newTeam, nil, nil, oldTeam or -1, nil)
-end
-
-if recordDamage then
-	-- Defined only when recording: an unused UnitDamaged callin would still
-	-- cost a Lua call per hit.
-	function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
-		pcall(onDamaged, unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, attackerID, attackerDefID, attackerTeam)
-	end
 end
 
 if resim then
@@ -2004,5 +2047,8 @@ end
 -- Shutdown fires on engine teardown (or widget removal) even if GameOver did
 -- not — e.g. the player quits mid-game; keep the partial capture.
 function widget:Shutdown()
+	if unhookDamage then
+		unhookDamage()
+	end
 	closeOut("shutdown")
 end

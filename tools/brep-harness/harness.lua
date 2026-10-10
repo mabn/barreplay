@@ -476,10 +476,31 @@ local function newWidget()
 				["An inactive widget"] = { active = false },
 			},
 			DisableWidget = function(self, name) disabledWidgets[#disabledWidgets + 1] = name end,
+			-- BAR's handler (luaui/barwidgets.lua) forwards UnitDamaged with
+			-- its first five arguments only, and its top-level callin is a
+			-- closure over this method rebuilt by UpdateCallIn. Mirrored here
+			-- so the widget's way around it is what the fixture exercises.
+			UnitDamaged = function(self, unitID, unitDefID, unitTeam, damage, paralyzer)
+				if widget.UnitDamaged then
+					widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer)
+				end
+			end,
+			UpdateCallIn = function(self, name)
+				local f = self[name]
+				engineCallIns[name] = function(...) return f(self, ...) end
+			end,
 		},
 	}
 end
+-- The engine's view of LuaUI's callins: what it calls, with every argument.
+engineCallIns = {}
 widget = newWidget()
+widget.widgetHandler:UpdateCallIn("UnitDamaged")
+
+-- unitDamaged is the engine delivering a hit to LuaUI.
+local function unitDamaged(...)
+	engineCallIns.UnitDamaged(...)
+end
 
 -- ---------------------------------------------------------------------------
 -- Load the widget. In resim mode, apply the Go tool's substitutions exactly as
@@ -536,7 +557,7 @@ local function kill(id)
 	if resim and widget.UnitDamaged and aID then
 		local before = u.hp
 		u.hp = -25
-		widget:UnitDamaged(id, u.def, u.team, before + 25, false, weapon, 1, aID, aDef, aTeam)
+		unitDamaged(id, u.def, u.team, before + 25, false, weapon, 1, aID, aDef, aTeam)
 	end
 	widget:UnitDestroyed(id, u.def, u.team, aID, aDef, aTeam, weapon)
 end
@@ -556,9 +577,9 @@ local function combat(s)
 			local weapon = (id + s) % 5
 			local dmg = 10 + (id * 7 + s) % 50
 			if s % 17 == 0 or a == nil then
-				widget:UnitDamaged(id, u.def, u.team, dmg, false, nil, nil, nil, nil, nil)
+				unitDamaged(id, u.def, u.team, dmg, false, nil, nil, nil, nil, nil)
 			else
-				widget:UnitDamaged(id, u.def, u.team, dmg, weapon == 4, weapon, 1, a.id, a.def, a.team)
+				unitDamaged(id, u.def, u.team, dmg, weapon == 4, weapon, 1, a.id, a.def, a.team)
 			end
 		end
 	end
