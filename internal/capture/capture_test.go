@@ -211,7 +211,7 @@ func TestConsumeAnalysisRecords(t *testing.T) {
 		float32(120.5), float32(40), // damage
 		float32(0), float32(0), // paralyze
 		uint16(3), uint16(1), // hits
-		float32(20), float32(0), // overkill
+		float32(20), float32(0), // overkill: a pre-change stream, subtracted
 	))
 	e.record('S', packLE(uint32(90), uint16(1),
 		uint16(12), uint16(3), uint8(1), uint32(30), uint32(90),
@@ -247,7 +247,7 @@ func TestConsumeAnalysisRecords(t *testing.T) {
 	}
 
 	wantD := snapshot.DamageWindow{Frame: 60, Rows: []snapshot.DamageRow{
-		{AttackerTeam: 0, AttackerDef: 7, WeaponDef: 5, VictimTeam: 1, VictimDef: 3, Damage: 120.5, Hits: 3, Overkill: 20},
+		{AttackerTeam: 0, AttackerDef: 7, WeaponDef: 5, VictimTeam: 1, VictimDef: 3, Damage: 100.5, Hits: 3},
 		{AttackerTeam: -1, AttackerDef: -1, WeaponDef: -1, VictimTeam: 1, VictimDef: 3, Damage: 40, Hits: 1},
 	}}
 	if len(w.damage) != 1 || w.damage[0].Frame != wantD.Frame || len(w.damage[0].Rows) != 2 ||

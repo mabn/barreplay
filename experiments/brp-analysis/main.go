@@ -6,7 +6,6 @@
 //
 // Things to look at: the share of deaths that name a killer (near zero means
 // BAR's widget handler does not forward UnitDestroyed's attacker args), the
-// overkill total (zero means UnitDamaged reads health before the hit), the
 // teamstats fact being present (GetTeamStatsHistory works in a replay), and
 // the widget's damage per team against the engine's own damageDealt.
 package main
@@ -93,6 +92,7 @@ func run(path string) error {
 	kinds := map[string]int{}
 	var teamStats []snapshot.FactTeamStatsData
 	var teamDeaths []int32 // frames teams died at
+	var blasts []snapshot.FactBlastData
 	weaponName := map[int32]string{}
 	for _, ft := range facts {
 		kinds[ft.Kind]++
@@ -113,6 +113,11 @@ func run(path string) error {
 			if err := ft.Decode(&d); err == nil {
 				teamStats = append(teamStats, d)
 			}
+		case snapshot.FactBlast:
+			var d snapshot.FactBlastData
+			if err := ft.Decode(&d); err == nil {
+				blasts = append(blasts, d)
+			}
 		case snapshot.FactWeaponDefs:
 			var d snapshot.FactWeaponDefsData
 			if err := ft.Decode(&d); err == nil {
@@ -124,6 +129,28 @@ func run(path string) error {
 		}
 	}
 	fmt.Printf("facts by kind: %v\n", kinds)
+	if len(blasts) > 0 {
+		sort.Slice(blasts, func(i, j int) bool { return blasts[i].Damage > blasts[j].Damage })
+		defName := func(id int32) string {
+			if d, ok := meta.UnitDefs[id]; ok {
+				return d.Name
+			}
+			return fmt.Sprintf("#%d", id)
+		}
+		fmt.Printf("big blasts: %d; the biggest:\n", len(blasts))
+		for i := 0; i < len(blasts) && i < 10; i++ {
+			b := blasts[i]
+			by := "nobody"
+			if b.ByTeam != nil {
+				by = fmt.Sprintf("team %d", *b.ByTeam)
+				if b.ByDef != nil {
+					by += " " + defName(*b.ByDef)
+				}
+			}
+			fmt.Printf("  %s  team %d %s at (%d, %d): %d hp removed, %d kills, set off by %s\n",
+				clock(b.Frame), b.Team, defName(b.Def), b.X, b.Z, b.Damage, b.Kills, by)
+		}
+	}
 	if kinds[snapshot.FactTeamStats] == 0 {
 		fmt.Println("  !! no teamstats fact: GetTeamStatsHistory gave nothing in this replay")
 	}
@@ -134,8 +161,7 @@ func run(path string) error {
 		return fmt.Errorf("damage: %w", err)
 	}
 	// dealt counts what the engine's damageDealt counts: damage to a team
-	// that is not an ally, by a named attacker. enemyHp is the same less
-	// overkill — what actually came off health.
+	// that is not an ally, by a named attacker.
 	allyOf := map[int32]int32{}
 	for _, t := range meta.Teams {
 		allyOf[t.TeamID] = t.AllyTeam
@@ -151,7 +177,7 @@ func run(path string) error {
 			}
 		}
 	}
-	dealt, enemyHp, ally := map[int32]float64{}, map[int32]float64{}, map[int32]float64{}
+	dealt, ally := map[int32]float64{}, map[int32]float64{}
 	// allyRows: where each team's damage to its own side came from.
 	type allyKey struct {
 		team, victim, weapon int32
@@ -171,13 +197,12 @@ func run(path string) error {
 		return false
 	}
 	causes := map[string]float64{}
-	var total, para, over, unknownAttacker float64
+	var total, para, unknownAttacker float64
 	hits := 0
 	for _, w := range dmg {
 		for _, r := range w.Rows {
 			total += float64(r.Damage)
 			para += float64(r.Paralyze)
-			over += float64(r.Overkill)
 			hits += int(r.Hits)
 			if c := snapshot.DamageCauseName(r.WeaponDef); c != "" {
 				causes[c] += float64(r.Damage)
@@ -202,12 +227,11 @@ func run(path string) error {
 				allyRows[allyKey{r.AttackerTeam, r.VictimTeam, r.WeaponDef, nearTeamDeath(w.Frame)}] += float64(r.Damage)
 			default:
 				dealt[r.AttackerTeam] += float64(r.Damage)
-				enemyHp[r.AttackerTeam] += float64(r.Damage - r.Overkill)
 			}
 		}
 	}
-	fmt.Printf("damage: %d windows, %d hits, %.0f hp (%.0f paralyze, %.0f overkill), %s with no known attacker\n",
-		len(dmg), hits, total, para, over, pct(int(unknownAttacker), int(total)))
+	fmt.Printf("damage: %d windows, %d hits, %.0f hp removed (%.0f paralyze), %s with no known attacker\n",
+		len(dmg), hits, total, para, pct(int(unknownAttacker), int(total)))
 	if unknownAttacker > 0 {
 		if statsEnd >= 0 {
 			fmt.Printf("  no known attacker: %s of it after the engine's last stats row (%s)\n",
@@ -248,14 +272,11 @@ func run(path string) error {
 		}
 		fmt.Println()
 	}
-	if total > 0 && over == 0 {
-		fmt.Println("  !! zero overkill: UnitDamaged probably reads health before the hit lands")
-	}
 
 	// Widget damage vs the engine's own per-team damageDealt, which counts
 	// only damage to enemies by a living attacker.
 	if len(teamStats) > 0 {
-		fmt.Printf("damage dealt to enemies per team up to %s, widget vs engine teamstats (and widget less overkill; widget to allies):\n", clock(statsEnd))
+		fmt.Printf("damage dealt to enemies per team up to %s, widget (health removed) vs engine teamstats (which counts whole blows); widget to allies:\n", clock(statsEnd))
 		for _, ts := range teamStats {
 			col := -1
 			for i, name := range ts.Fields {
@@ -267,8 +288,8 @@ func run(path string) error {
 			if col >= 0 && len(ts.Rows) > 0 && col < len(ts.Rows[len(ts.Rows)-1]) {
 				engine = ts.Rows[len(ts.Rows)-1][col]
 			}
-			fmt.Printf("  team %2d: widget %10.0f  engine %10.0f  (%s)  less overkill %10.0f  to allies %9.0f\n",
-				ts.Team, dealt[ts.Team], engine, ratio(dealt[ts.Team], engine), enemyHp[ts.Team], ally[ts.Team])
+			fmt.Printf("  team %2d: widget %10.0f  engine %10.0f  (%s)  to allies %9.0f\n",
+				ts.Team, dealt[ts.Team], engine, ratio(dealt[ts.Team], engine), ally[ts.Team])
 		}
 	}
 

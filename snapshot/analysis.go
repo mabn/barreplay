@@ -32,6 +32,7 @@ const (
 	FactPlayerLeft = "playerleft" // FactPlayerLeftData: a player left
 	FactWeaponDefs = "wdefs"      // FactWeaponDefsData: the weapon table
 	FactTeamStats  = "teamstats"  // FactTeamStatsData: the engine's team statistics
+	FactBlast      = "blast"      // FactBlastData: a big death explosion
 )
 
 // FactEndData is the end of the game. Winners are ALLY team ids; empty for a
@@ -53,6 +54,27 @@ type FactPlayerLeftData struct {
 	Frame  int32 `json:"f"`
 	Player int32 `json:"player"`
 	Reason int32 `json:"reason"`
+}
+
+// FactBlastData is one big death explosion (an advanced fusion going up):
+// the unit that blew up, where, the explosion weapon, who set it off (By*,
+// absent when nobody did — a self-destruct, a team dying, or a chain whose
+// start the widget did not see) and what the blast did: Damage is health
+// removed, Kills the units it destroyed. Only blasts past a threshold are
+// written (re-sim only).
+type FactBlastData struct {
+	Frame  int32  `json:"f"`
+	Unit   int32  `json:"unit"`
+	Def    int32  `json:"def"`
+	Team   int32  `json:"team"`
+	X      int32  `json:"x"`
+	Z      int32  `json:"z"`
+	Weapon int32  `json:"weapon"`
+	ByUnit *int32 `json:"byUnit,omitempty"`
+	ByDef  *int32 `json:"byDef,omitempty"`
+	ByTeam *int32 `json:"byTeam,omitempty"`
+	Damage int32  `json:"damage"`
+	Kills  int32  `json:"kills"`
 }
 
 // WeaponDef is one entry of the weapon table that EventCause.WeaponDef and
@@ -162,8 +184,8 @@ func weaponFromPlus(v uint64) int32 {
 // def) combination within a window. Ids are -1 when unknown (no attacker — a
 // crash, a self-destruct). WeaponDef below -1 is an engine damage source
 // rather than a weapon (DamageEngineCause). Damage excludes paralyzer damage, which is
-// Paralyze; Overkill is the part of killing blows past the health the victim
-// had left, so Damage-Overkill is what actually came off health. Stored to
+// Paralyze, and counts only health actually removed: a killing blow counts
+// the health the victim had left, not the blow's full size. Stored to
 // 0.1 hp.
 type DamageRow struct {
 	AttackerTeam int32   `json:"aTeam"`
@@ -174,7 +196,6 @@ type DamageRow struct {
 	Damage       float32 `json:"damage"`
 	Paralyze     float32 `json:"paralyze,omitempty"`
 	Hits         int32   `json:"hits"`
-	Overkill     float32 `json:"overkill,omitempty"`
 }
 
 // UnitLife is one unit's lifetime totals — a LIFE, not an id, because the
@@ -280,7 +301,6 @@ func encodeDamage(ws []DamageWindow) []byte {
 			func(r DamageRow) uint64 { return q10(r.Damage) },
 			func(r DamageRow) uint64 { return q10(r.Paralyze) },
 			func(r DamageRow) uint64 { return uint64(max(r.Hits, 0)) },
-			func(r DamageRow) uint64 { return q10(r.Overkill) },
 		}
 		for _, col := range cols {
 			for _, r := range w.Rows {
@@ -322,7 +342,6 @@ func decodeDamage(b []byte) ([]DamageWindow, error) {
 			func(r *DamageRow, v uint64) { r.Damage = float32(v) / 10 },
 			func(r *DamageRow, v uint64) { r.Paralyze = float32(v) / 10 },
 			func(r *DamageRow, v uint64) { r.Hits = int32(v) },
-			func(r *DamageRow, v uint64) { r.Overkill = float32(v) / 10 },
 		}
 		for _, s := range set {
 			for j := range rows {

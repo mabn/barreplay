@@ -630,10 +630,10 @@ per window:
                   (decoded weapon -1-k: 1 debris … 7 crushed; see brepstream §D)
   rows × uvarint  victim team + 1
   rows × uvarint  victim def + 1
-  rows × uvarint  damage × 10
+  rows × uvarint  damage × 10 (health actually removed: a killing blow
+                  counts only what the victim had left)
   rows × uvarint  paralyze damage × 10
   rows × uvarint  hits
-  rows × uvarint  overkill × 10
 ```
 
 **`S` — unit lives.** One row per unit ever recorded (they are few):

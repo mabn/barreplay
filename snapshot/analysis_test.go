@@ -28,12 +28,12 @@ func TestBRPAnalysisRoundTrip(t *testing.T) {
 	damage := []DamageWindow{
 		{Frame: 60, Rows: []DamageRow{
 			{AttackerTeam: 1, AttackerDef: 2, WeaponDef: 7, VictimTeam: 0, VictimDef: 1, Damage: 500.04, Hits: 5},
-			{AttackerTeam: -1, AttackerDef: -1, WeaponDef: -1, VictimTeam: 1, VictimDef: 2, Damage: 12.5, Paralyze: 3.3, Hits: 1, Overkill: 2.1},
+			{AttackerTeam: -1, AttackerDef: -1, WeaponDef: -1, VictimTeam: 1, VictimDef: 2, Damage: 12.5, Paralyze: 3.3, Hits: 1},
 			{AttackerTeam: -1, AttackerDef: -1, WeaponDef: DamageEngineCause(5), VictimTeam: 0, VictimDef: 3, Damage: 40, Hits: 2},
 			{AttackerTeam: 0, AttackerDef: -1, WeaponDef: DamageEngineCause(7), VictimTeam: 1, VictimDef: 3, Damage: 900, Hits: 1},
 		}},
 		{Frame: 90, Rows: []DamageRow{
-			{AttackerTeam: 1, AttackerDef: 2, WeaponDef: 7, VictimTeam: 0, VictimDef: 1, Damage: 2500, Hits: 25, Overkill: 120},
+			{AttackerTeam: 1, AttackerDef: 2, WeaponDef: 7, VictimTeam: 0, VictimDef: 1, Damage: 2500, Hits: 25},
 		}},
 	}
 	lives := []UnitLife{
@@ -121,7 +121,7 @@ func TestBRPAnalysisRoundTrip(t *testing.T) {
 	for i := range damage {
 		for j := range damage[i].Rows {
 			r := &damage[i].Rows[j]
-			r.Damage, r.Paralyze, r.Overkill = q(r.Damage), q(r.Paralyze), q(r.Overkill)
+			r.Damage, r.Paralyze = q(r.Damage), q(r.Paralyze)
 		}
 	}
 	if !reflect.DeepEqual(gotDamage, damage) {

@@ -544,12 +544,13 @@ func damageWeapon(v int32) int32 {
 
 // decodeDamageRecord decodes one 'D' payload: frame u32, n u16, then columns
 // aTeam u8, aDef u16, weapon u16, vTeam u8, vDef u16, damage f32,
-// paralyze f32, hits u16, overkill f32.
+// paralyze f32, hits u16. Streams from before damage counted only the
+// health removed carry one more column, overkill f32, which is subtracted.
 func decodeDamageRecord(payload []byte) (snapshot.DamageWindow, error) {
 	c := &cursor{b: payload}
 	dw := snapshot.DamageWindow{Frame: int32(c.u32())}
 	n := int(c.u16())
-	if c.err == nil && n*21 > len(payload) {
+	if c.err == nil && n*17 > len(payload) {
 		return dw, fmt.Errorf("damage record declares %d rows in %d bytes", n, len(payload))
 	}
 	dw.Rows = make([]snapshot.DamageRow, n)
@@ -577,8 +578,10 @@ func decodeDamageRecord(payload []byte) (snapshot.DamageWindow, error) {
 	for i := range dw.Rows {
 		dw.Rows[i].Hits = c.u16()
 	}
-	for i := range dw.Rows {
-		dw.Rows[i].Overkill = c.f32()
+	if c.err == nil && len(c.b)-c.off >= 4*n && n > 0 {
+		for i := range dw.Rows {
+			dw.Rows[i].Damage -= c.f32()
+		}
 	}
 	return dw, c.err
 }

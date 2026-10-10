@@ -287,6 +287,7 @@ sim frame when it has one. Both modes write the first three:
 | `teamdied` | `f`, `team` |
 | `playerleft` | `f`, `player`, `reason` (the engine's PlayerRemoved reason) |
 | `wdefs` | `defs`: `[{id, name, description, type, range, reload, damage, paralyzer}]` — the weapon table (re-sim only, written once at start) |
+| `blast` | `f`, `unit`, `def`, `team`, `x`, `z`, `weapon`, `byUnit`/`byDef`/`byTeam` (who set it off; absent for nobody), `damage` (health removed), `kills` — one big death explosion: at least 3000 hp removed or 3 units killed (re-sim only, `__DAMAGE__`) |
 | `teamstats` | `team`, `fields`, `rows` — the engine's `GetTeamStatsHistory` for the team, one row per stats interval (re-sim only, at game over) |
 
 Facts are kept verbatim through the `.brp`, so a kind added here needs no
@@ -301,7 +302,7 @@ u32 frame                         window end (the sample's frame)
 u16 n                             rows
 then n rows as COLUMNS:
   u8  aTeam   u16 aDef   u16 weapon   u8 vTeam   u16 vDef
-  f32 damage  f32 paralyze  u16 hits  f32 overkill
+  f32 damage  f32 paralyze  u16 hits
 ```
 
 Unknown ids are 255 (u8) / 65535 (u16). The seven `weapon` values just
@@ -327,8 +328,12 @@ are single-precision floats, which hold integers exactly only up to 2^24, and
 `VFS.PackU32` converts whatever it is handed: 0xFFFFFFFF rounded to 2^32 and
 was written as 0. That is why the alive marker is 0xFFFFFF and the visibility
 mask is two u16 halves rather than one u32 (decoders still accept 0xFFFFFFFF
-as alive). The test harness refuses to pack a value a float cannot hold. `overkill` is the damage past the
-victim's remaining health on the killing blow.
+as alive). The test harness refuses to pack a value a float cannot hold.
+
+`damage` is the health a hit actually removed: a killing blow counts only
+what the victim had left, so a 30000 hp blast on a 63 hp unit is 63. Streams
+written before this carry a fourth f32 column, `overkill` (the part past
+the victim's health), which decoders subtract from `damage`.
 
 **`S` — unit lives** (`__DAMAGE__`). Written for each unit when it dies, and
 for every survivor at game over:

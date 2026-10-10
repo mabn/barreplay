@@ -1103,14 +1103,15 @@ end
 --   frame u32 (the sample the window opened at: it holds the damage dealt
 --   from that sample up to the next one, sim frames frame..frame+sampleEvery-1)
 --   n u16, then columns of n: aTeam u8, aDef u16, weapon u16, vTeam u8,
---   vDef u16, damage f32, paralyze f32, hits u16, overkill f32
+--   vDef u16, damage f32, paralyze f32, hits u16
 --
 -- 255 / 65535 mean unknown (no attacker — e.g. a crash or self-destruct —
 -- or a weapon the engine did not name); 65528..65534 are the engine's own
--- damage sources (see weaponCode). damage excludes paralyzer damage,
--- which is its own column. overkill is the part of a killing blow past the
--- health the victim had left (read as the victim's health going below zero
--- after the hit), so damage - overkill is what actually came off health.
+-- damage sources (see weaponCode). damage is the health the hit actually
+-- REMOVED: a killing blow counts only the health the victim had left (read
+-- as its health going below zero after the hit), because a reactor blast
+-- that deals 30000 to a 63 hp flea took 63 hp off the board, not 30000.
+-- Paralyzer damage is its own column.
 --
 -- Per-unit LIFETIME totals ride along as S records, one row per unit life,
 -- written when the unit dies (in the window record's sample) and, for the
@@ -1203,7 +1204,7 @@ local function onDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponD
 	end
 	local row = byV[vk]
 	if row == nil then
-		row = { 0, 0, 0, 0 } -- damage, paralyze, hits, overkill
+		row = { 0, 0, 0 } -- damage, paralyze, hits
 		byV[vk] = row
 		dmgRows = dmgRows + 1
 	end
@@ -1212,11 +1213,11 @@ local function onDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponD
 		row[2] = row[2] + damage
 		return
 	end
-	row[1] = row[1] + damage
 	local hp, maxHp = spGetUnitHealth(unitID)
 	if hp ~= nil and hp < 0 then
-		row[4] = row[4] + math.min(damage, -hp)
+		damage = damage - math.min(damage, -hp) -- only what came off health
 	end
+	row[1] = row[1] + damage
 	local victim = lifeOf(unitID, unitDefID, unitTeam)
 	victim.taken = victim.taken + damage
 	if hp ~= nil and maxHp ~= nil and maxHp > 0 then
@@ -1276,7 +1277,7 @@ local function flushDamage(frame)
 	end
 	if dmgRows > 0 then
 		local at, ad, aw, vt, vd = {}, {}, {}, {}, {}
-		local dd, dp, dh, dk = {}, {}, {}, {}
+		local dd, dp, dh = {}, {}, {}
 		local n = 0
 		local full = false
 		for ak, byW in pairs(dmgA) do
@@ -1286,7 +1287,7 @@ local function flushDamage(frame)
 					n = n + 1
 					at[n], ad[n], aw[n] = aTeam, aDef, wpn
 					vt[n], vd[n] = mathFloor(vk / 65536), vk % 65536
-					dd[n], dp[n], dh[n], dk[n] = row[1], row[2], clamp(row[3], 0, 65535), row[4]
+					dd[n], dp[n], dh[n] = row[1], row[2], clamp(row[3], 0, 65535)
 					if n >= 65535 then
 						full = true
 						break
@@ -1299,7 +1300,7 @@ local function flushDamage(frame)
 		writeRecord("D", table.concat({
 			PackU32({ dmgStart }), PackU16({ n }),
 			PackU8(at), PackU16(ad), PackU16(aw), PackU8(vt), PackU16(vd),
-			PackF32(dd), PackF32(dp), PackU16(dh), PackF32(dk),
+			PackF32(dd), PackF32(dp), PackU16(dh),
 		}))
 	end
 	dmgA, dmgRows = {}, 0
@@ -1490,11 +1491,19 @@ end
 -- its blast radius. The weapon column keeps the explosion, so a reader can
 -- still tell a blast from a shot. A source with no root (a self-destruct,
 -- a team dying) credits nobody, exactly as before.
-local blastOf = {}  -- unitID -> { x, z, death, selfd, f, root }
+local blastOf = {}  -- unitID -> source: { unit, def, team, x, z, death, selfd, f, root, ... }
 local blastWeapons = nil -- defID -> { death = wid, selfd = wid }; weaponID -> radius
 local blastRadius = nil
 local blastWindow = 600 -- frames a source stays live: death scripts are a few seconds
 local dmgFromChain = 0
+
+-- A blast big enough to be its own G fact ("blast"): the health it removed
+-- and the units it killed, with who set it off. An advanced fusion going up
+-- is one of the moments that turn a game, and the damage windows alone
+-- cannot say which blast did what — they sum a second of every blast of a
+-- kind. Small blasts (a dying tank) stay out: there are thousands.
+local blastFactDamage = 3000
+local blastFactKills = 3
 
 local function loadBlastWeapons()
 	blastWeapons, blastRadius = {}, {}
@@ -1519,7 +1528,7 @@ end
 -- addBlastSource records unitID as a source whose blast is credited to root
 -- ({ id, def, team }, or nil for nobody). A later call with a root fills a
 -- source registered without one; it never replaces a root already set.
-local function addBlastSource(unitID, unitDefID, root)
+local function addBlastSource(unitID, unitDefID, unitTeam, root)
 	if blastWeapons == nil then
 		loadBlastWeapons()
 	end
@@ -1538,12 +1547,52 @@ local function addBlastSource(unitID, unitDefID, root)
 	if x == nil then
 		return
 	end
-	blastOf[unitID] = { x = x, z = z, death = bw.death, selfd = bw.selfd, f = spGetGameFrame(), root = root }
+	blastOf[unitID] = { unit = unitID, def = unitDefID, team = unitTeam, x = x, z = z,
+		death = bw.death, selfd = bw.selfd, f = spGetGameFrame(), root = root,
+		dmg = 0, kills = 0 }
 end
 
--- blastRoot returns the root a hit by weaponDefID on unitID belongs to, or
--- nil. Old sources are dropped on the way.
-local function blastRoot(unitID, weaponDefID)
+-- writeBlastFact records a finished source's blast, if it was a big one.
+local function writeBlastFact(src)
+	if src.landed == nil or (src.dmg < blastFactDamage and src.kills < blastFactKills) then
+		return
+	end
+	local r = src.root
+	writeFact({
+		{ "k", "blast" },
+		{ "f", src.landed },
+		{ "unit", src.unit },
+		{ "def", src.def },
+		{ "team", src.team },
+		{ "x", mathFloor(src.x) },
+		{ "z", mathFloor(src.z) },
+		{ "weapon", src.weapon },
+		{ "byUnit", r and r.id },
+		{ "byDef", r and r.def },
+		{ "byTeam", r and r.team },
+		{ "damage", mathFloor(src.dmg) },
+		{ "kills", src.kills },
+	})
+end
+
+-- flushBlasts writes and drops every source older than the window (all of
+-- them at game over).
+local function flushBlasts(all)
+	local now = spGetGameFrame()
+	for id, src in pairs(blastOf) do
+		if all or now - src.f > blastWindow then
+			blastOf[id] = nil
+			pcall(writeBlastFact, src)
+		end
+	end
+end
+
+-- blastSource returns the source whose blast a hit by weaponDefID on unitID
+-- is, or nil: the nearest one of that kind within the blast's radius. A
+-- source explodes once, so one whose blast has not landed yet (or is
+-- landing this frame) is preferred over one that already went off; the
+-- spent ones are only a fallback, since a blast can land unseen.
+local function blastSource(unitID, weaponDefID)
 	if blastWeapons == nil or weaponDefID == nil or weaponDefID < 0 then
 		return nil
 	end
@@ -1553,32 +1602,48 @@ local function blastRoot(unitID, weaponDefID)
 	end
 	local now = spGetGameFrame()
 	local r = (blastRadius[weaponDefID] or 0) + 64 -- the victim's own size
-	local best, bestD = nil, r * r
-	for id, src in pairs(blastOf) do
-		if now - src.f > blastWindow then
-			blastOf[id] = nil
-		elseif src.death == weaponDefID or src.selfd == weaponDefID then
+	local best, bestD, spent, spentD = nil, r * r, nil, r * r
+	for _, src in pairs(blastOf) do
+		if now - src.f <= blastWindow and (src.death == weaponDefID or src.selfd == weaponDefID) then
 			local dx, dz = src.x - vx, src.z - vz
 			local d = dx * dx + dz * dz
-			if d <= bestD then
-				best, bestD = src, d
+			if src.landed == nil or src.landed == now then
+				if d <= bestD then
+					best, bestD = src, d
+				end
+			elseif d <= spentD then
+				spent, spentD = src, d
 			end
 		end
 	end
-	return best and best.root
+	return best or spent
 end
 
--- ownBlast reports whether a hit the engine credits to attackerID is really
--- that unit's own death blast — the engine sometimes names the exploding
--- unit as the attacker of its blast. Credit then belongs to whoever killed
--- it (its root, nil for nobody), not to the dead unit's own team: crediting
--- the unit seeded whole chains on the side that LOST the reactors.
+-- ownBlast returns attackerID's source when a hit the engine credits to it
+-- is really that unit's own death blast — the engine sometimes names the
+-- exploding unit as the attacker of its blast. Credit then belongs to
+-- whoever killed it (its root, nil for nobody), not to the dead unit's own
+-- team: crediting the unit seeded whole chains on the side that LOST the
+-- reactors.
 local function ownBlast(attackerID, weaponDefID)
 	local src = attackerID and blastOf[attackerID]
 	if src ~= nil and weaponDefID ~= nil and (src.death == weaponDefID or src.selfd == weaponDefID) then
-		return true, src.root
+		return src
 	end
-	return false, nil
+	return nil
+end
+
+-- blastHit books a hit of src's blast: when it landed, which explosion, and
+-- the health it removed (a killing blow counts what the victim had left).
+local function blastHit(src, weaponDefID, damage, hpAfter)
+	if src.landed == nil then
+		src.landed = spGetGameFrame()
+	end
+	src.weapon = weaponDefID
+	if hpAfter ~= nil and hpAfter < 0 then
+		damage = damage - math.min(damage, -hpAfter)
+	end
+	src.dmg = src.dmg + damage
 end
 
 local function hookDamage()
@@ -1591,15 +1656,9 @@ local function hookDamage()
 	wh.UnitDamaged = function(self, unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
 		local aID, aDef, aTeam = attackerID, attackerDefID, attackerTeam
 		local root = nil
-		local own, ownRoot = ownBlast(attackerID, weaponDefID)
-		if own then
-			if ownRoot ~= nil then
-				root, aTeam, aDef = ownRoot, ownRoot.team, ownRoot.def
-				aID = lives[ownRoot.id] and ownRoot.id or nil
-				dmgFromChain = dmgFromChain + 1
-			else
-				aID, aDef, aTeam = nil, nil, nil
-			end
+		local src = ownBlast(attackerID, weaponDefID)
+		if src ~= nil then
+			aID, aDef, aTeam = nil, nil, nil
 		elseif aTeam == nil then
 			local ok, t, d = pcall(attackerOfProjectile, projectileID)
 			if ok and t ~= nil then
@@ -1607,21 +1666,27 @@ local function hookDamage()
 				root = { def = d, team = t }
 				dmgFromProjectile = dmgFromProjectile + 1
 			elseif projectileID == nil or projectileID < 0 then
-				local rok, r = pcall(blastRoot, unitID, weaponDefID)
-				if rok and r ~= nil then
-					root, aTeam, aDef = r, r.team, r.def
-					aID = lives[r.id] and r.id or nil -- credit the unit only while it lives
-					dmgFromChain = dmgFromChain + 1
-				end
+				local bok, b = pcall(blastSource, unitID, weaponDefID)
+				src = bok and b or nil
 			end
 		elseif attackerID ~= nil then
 			root = { id = attackerID, def = attackerDefID, team = attackerTeam }
 		end
+		if src ~= nil and src.root ~= nil then
+			-- A blast: credit whoever set it off (the chain's root).
+			local r = src.root
+			root, aTeam, aDef = r, r.team, r.def
+			aID = lives[r.id] and r.id or nil -- credit the unit only while it lives
+			dmgFromChain = dmgFromChain + 1
+		end
 		pcall(onDamaged, unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, aID, aDef, aTeam)
 		if not paralyzer and type(damage) == "number" and damage > 0 then
 			local hp = spGetUnitHealth(unitID)
+			if src ~= nil then
+				pcall(blastHit, src, weaponDefID, damage, hp)
+			end
 			if hp ~= nil and hp <= 0 then
-				pcall(addBlastSource, unitID, unitDefID, root)
+				pcall(addBlastSource, unitID, unitDefID, unitTeam, root)
 			end
 		end
 		return orig(self, unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
@@ -1833,6 +1898,7 @@ function widget:GameFrame(frame)
 				Echo(logTag .. " damage flush failed (" .. tostring(err) .. ")")
 				dmgA, dmgRows, diedLives, dmgStart = {}, 0, {}, frame
 			end
+			pcall(flushBlasts, false)
 		end
 		local ok, err = pcall(sample, frame)
 		if ok then
@@ -1928,24 +1994,26 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	if recordDamage and damageHooked then
 		-- A death by a chain explosion is credited to the chain's root, and
 		-- this unit becomes a source for its own blast either way.
-		local own, ownRoot = ownBlast(attackerID, weaponDefID)
-		local r = nil
-		if own then
-			r = ownRoot
+		local src = ownBlast(attackerID, weaponDefID)
+		if src ~= nil then
 			attackerID, attackerDefID, attackerTeam, creditID = nil, nil, nil, nil
 		elseif attackerTeam == nil then
-			local ok, br = pcall(blastRoot, unitID, weaponDefID)
-			r = ok and br or nil
+			local ok, b = pcall(blastSource, unitID, weaponDefID)
+			src = ok and b or nil
 		end
-		if r ~= nil then
-			attackerID, attackerDefID, attackerTeam = r.id, r.def, r.team
-			creditID = lives[r.id] and r.id or nil -- only while the root lives
+		if src ~= nil then
+			src.kills = src.kills + 1
+			local r = src.root
+			if r ~= nil then
+				attackerID, attackerDefID, attackerTeam = r.id, r.def, r.team
+				creditID = lives[r.id] and r.id or nil -- only while the root lives
+			end
 		end
 		local root = nil
 		if attackerTeam ~= nil then
 			root = { id = attackerID, def = attackerDefID, team = attackerTeam }
 		end
-		pcall(addBlastSource, unitID, unitDefID, root)
+		pcall(addBlastSource, unitID, unitDefID, unitTeam, root)
 	end
 	if recordDamage then
 		pcall(onDestroyed, unitID, unitDefID, unitTeam, creditID, attackerDefID, attackerTeam)
@@ -2208,6 +2276,7 @@ local function finishResim(frame)
 	if recordDamage then
 		local okLives, errLives = pcall(function()
 			flushDamage(frame)
+			flushBlasts(true)
 			for _, unitID in ipairs(spGetAllUnits()) do
 				lifeOf(unitID, spGetUnitDefID(unitID), spGetUnitTeam(unitID))
 			end

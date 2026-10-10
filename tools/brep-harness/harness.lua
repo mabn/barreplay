@@ -576,7 +576,8 @@ local function kill(id)
 	if resim and widget.UnitDamaged and aID then
 		local n = firstOf(allyOf[u.team], id)
 		if n then
-			unitDamaged(n.id, n.def, n.team, 40, false, 5, -1, nil, nil, nil)
+			-- 159's blast is a big one (an advanced fusion): a "blast" fact.
+			unitDamaged(n.id, n.def, n.team, id == 159 and 3500 or 40, false, 5, -1, nil, nil, nil)
 			-- ...and sometimes the engine names the exploding unit itself as
 			-- the attacker: still the killer's credit, not the dead unit's.
 			if id % 2 == 0 then
