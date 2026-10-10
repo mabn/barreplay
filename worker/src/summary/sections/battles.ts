@@ -11,10 +11,11 @@ import { mapView } from "../mapview";
 import { comparable, sideColor, sideName } from "../model";
 import { compass, fighters } from "../moments";
 import { fightersLine } from "../names";
-import { unitIcon } from "../icons";
+import { iconImg, iconSrc } from "../icons";
+import { lossKinds, type LossKind } from "../losskinds";
 import { tip, type TipRow } from "../tooltip";
 import { clipSpan, watcher } from "../watch";
-import { SIM_FPS, type Battle, type Insights, type SummaryOptions } from "../types";
+import { SIM_FPS, type Battle, type Insights, type SummaryOptions, type UnitLoss } from "../types";
 
 export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | null {
   if (!comparable(ins)) return null;
@@ -133,6 +134,35 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     rows.push(row);
   });
 
+  // One chip per KIND of unit lost (defs sharing an icon add up), the kinds
+  // carrying 90% of the metal shown and the rest behind a "+N more" chip.
+  async function fillUnits(list: HTMLElement, units: UnitLoss[]): Promise<void> {
+    const src = new Map<number, string | null>();
+    await Promise.all(units.map(async (u) => src.set(u.def, await iconSrc(ins, opts, u.def))));
+    const { main, rest } = lossKinds(units, (u) => src.get(u.def) ?? `def:${u.def}`);
+    const chip = (g: LossKind) => {
+      const label = g.defs.map((u) => name(u.def)).join(", ");
+      const icon = src.get(g.defs[0].def);
+      const el = h("span", { class: "brs-unit" }, icon ? iconImg(icon, label) : h("span", { class: "brs-uname" }, label), g.n ? h("span", undefined, `×${g.n}`) : null);
+      tip(el, {
+        title: g.defs.length > 1 ? `${g.n} lost` : name(g.defs[0].def),
+        rows: g.defs.map((u) => ({ label: g.defs.length > 1 ? `${name(u.def)} ×${u.n}` : `${u.n} lost`, value: priced && u.metal ? `${fmtMetal(u.metal)} metal` : "" })),
+      });
+      return el;
+    };
+    list.replaceChildren(...main.map(chip));
+    if (rest.length) {
+      const n = rest.reduce((a, g) => a + g.n, 0);
+      const more = h("button", { class: "brs-more", type: "button", "aria-expanded": "false" }, `+${rest.length} more`);
+      tip(more, { title: `${n} more lost`, rows: [{ label: "Less than a tenth of the metal" }], note: "Click to show" });
+      more.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        more.replaceWith(...rest.map(chip));
+      });
+      list.append(more);
+    }
+  }
+
   function battleDetail(i: number): HTMLElement {
     const b = ins.battles[i];
     // One column a side, side by side: who, how much, then what — each
@@ -140,14 +170,12 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     const lossCol = (sd: number) => {
       const l = b.lost[sd] ?? { n: 0, metal: 0, top: [] };
       const units = l.units ?? l.top.map((def) => ({ def, n: 0, metal: 0 }));
+      const list = h("div", { class: "brs-units" });
+      void fillUnits(list, units);
       return h("div", { class: "brs-losscol" },
         h("div", { style: `color: ${sideColor(ins, sd)}` }, sideName(ins, sd)),
         h("div", { class: "brs-muted" }, `${l.n} lost` + (priced && l.metal ? ` · ${fmt(l.metal)} metal` : "")),
-        h("div", { class: "brs-units" }, ...units.map((u) => {
-          const chip = h("span", { class: "brs-unit" }, unitIcon(ins, opts, u.def), u.n ? h("span", undefined, `×${u.n}`) : null);
-          tip(chip, { title: name(u.def), rows: u.n ? [{ label: `${u.n} lost`, value: priced && u.metal ? `${fmtMetal(u.metal)} metal` : "" }] : [] });
-          return chip;
-        })));
+        list);
     };
     const play = watch ? h("button", { class: "brs-watchbtn", type: "button" }, "▶ Watch this battle") : null;
     if (play && watch) play.addEventListener("click", () => watch(clipOf(b, i)));

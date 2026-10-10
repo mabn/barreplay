@@ -110,7 +110,7 @@ const (
 	battleMinN      = 6                        // deaths for a peak to count as a battle
 	battleMaxN      = 12                       // battles kept (the biggest, then in time order)
 	battleTopDefs   = 3                        // costliest defs listed per side
-	battleUnitDefs  = 16                       // defs a battle's unit list carries per side
+	battleUnitDefs  = 48                       // defs a battle's unit list carries per side
 	tourGrid        = 32                       // cells per axis of the Tourist's map grid
 	tourMinCells    = tourGrid * tourGrid / 20 // 5% of the map, or no Tourist
 	closeCallMin    = 0.0                      // health fraction must be above this (alive)

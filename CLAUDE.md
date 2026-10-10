@@ -723,9 +723,11 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           STORY numbers its battles in the order they happened, on the map and
                           in a one-line-per-battle list (losses either side of a centre line,
                           square-root scaled), one selection shared by both; a picked battle
-                          shows the two sides' losses SIDE BY SIDE, each kind of unit as its
+                          shows the two sides' losses SIDE BY SIDE, each KIND of unit as its
                           untinted BAR icon with a count (Battle.lost[].units, v4: def/n/metal,
-                          costliest first, at most 16). ICONS (icons.ts unitIcon) come from
+                          costliest first, at most 48). Defs sharing a bitmap are one kind,
+                          added up (losskinds.ts lossKinds), and only the kinds carrying 90%
+                          of the metal show; the rest sit behind a "+N more" chip. ICONS (icons.ts unitIcon) come from
                           the viewer's /icons/icontypes.json, looked up by the insights def's
                           `icon` (its iconType) then its name; SummaryOptions.iconBase names
                           the origin, defaulting to the one the module was loaded from, null

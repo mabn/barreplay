@@ -34,20 +34,21 @@ function iconTable(base: string): Promise<IconTable> {
   return t;
 }
 
-/** unitIcon is an element naming a def: its icon once the table has it, its
- * name until then and wherever there is no icon. */
-export function unitIcon(ins: Insights, opts: SummaryOptions, def: number): HTMLElement {
+/** iconSrc is the URL of a def's icon, or null when it has none (or icons
+ * are off). Two defs drawn with the same bitmap share a src, which is how a
+ * list of losses can count them as one kind. */
+export async function iconSrc(ins: Insights, opts: SummaryOptions, def: number): Promise<string | null> {
   const d = ins.defs[String(def)];
-  const label = d?.human || d?.name || "?";
-  const el = h("span", { class: "brs-uname" }, label);
   const base = iconBase(opts);
-  if (!base || !d) return el;
-  void iconTable(base).then((tab) => {
-    const ic = (d.icon && tab[d.icon]) || tab[d.name];
-    if (!ic) return;
-    const img = h("img", { class: "brs-uicon", src: `${base}/${ic.p.replace(/^\//, "")}`, alt: label });
-    img.addEventListener("error", () => img.replaceWith(h("span", { class: "brs-uname" }, label)));
-    el.replaceWith(img);
-  });
-  return el;
+  if (!base || !d) return null;
+  const tab = await iconTable(base);
+  const ic = (d.icon && tab[d.icon]) || tab[d.name];
+  return ic ? `${base}/${ic.p.replace(/^\//, "")}` : null;
+}
+
+/** iconImg is an <img> of src that falls back to label if it fails. */
+export function iconImg(src: string, label: string): HTMLElement {
+  const img = h("img", { class: "brs-uicon", src, alt: label });
+  img.addEventListener("error", () => img.replaceWith(h("span", { class: "brs-uname" }, label)));
+  return img;
 }

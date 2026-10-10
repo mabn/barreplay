@@ -9,6 +9,7 @@ import { knockouts, lossesByStep, wipedOf } from "../src/summary/losses";
 import { compass, fighters, momentStory } from "../src/summary/moments";
 import { clipAround, clipAt, clipEvent, clipSpan, watcher } from "../src/summary/watch";
 import { zonesOf } from "../src/summary/zones";
+import { lossKinds } from "../src/summary/losskinds";
 import { clipOf } from "../src/summary/sections/awards";
 import type { Insights } from "../src/summary/types";
 
@@ -234,4 +235,21 @@ test("an award's clip follows its unit", () => {
   assert.deepEqual([loss.f0, loss.start, loss.f1, loss.at, loss.x], [2400, 2850, 3600, 3000, 4], "a loss: room to scroll back, playback 5 s before it");
   const old = clipOf({ key: "immortal", label: "", text: "", team: 0, def: 2, value: 1, f: 900 }, {}, "t");
   assert.equal(old.follow, undefined, "an older file names no unit");
+});
+
+test("lossKinds merges defs sharing an icon and keeps 90% of the metal up front", () => {
+  const units = [
+    { def: 1, n: 2, metal: 600 }, // fighter A
+    { def: 2, n: 3, metal: 300 }, // fighter B, same icon
+    { def: 3, n: 1, metal: 50 }, // jammer
+    { def: 4, n: 2, metal: 20 }, // walls
+  ];
+  const icon: Record<number, string> = { 1: "fighter", 2: "fighter", 3: "jammer", 4: "wall" };
+  const { main, rest } = lossKinds(units, (u) => icon[u.def]);
+  assert.deepEqual(main.map((g) => [g.key, g.n, g.metal]), [["fighter", 5, 900]]);
+  assert.deepEqual(rest.map((g) => g.key), ["jammer", "wall"]);
+  // Unpriced losses split by count; one kind always shows.
+  const unpriced = lossKinds([{ def: 1, n: 1, metal: 0 }], (u) => String(u.def));
+  assert.equal(unpriced.main.length, 1);
+  assert.equal(unpriced.rest.length, 0);
 });
