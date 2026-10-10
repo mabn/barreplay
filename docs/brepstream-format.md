@@ -304,7 +304,16 @@ then n rows as COLUMNS:
   f32 damage  f32 paralyze  u16 hits  f32 overkill
 ```
 
-Unknown ids are 255 (u8) / 65535 (u16).
+Unknown ids are 255 (u8) / 65535 (u16). The seven `weapon` values just
+below 65535 are damage the engine dealt itself, `65535 - k` for Recoil's
+`CSolidObject::DamageType` k (the engine passes weaponDefID `-k`): 1 debris,
+2 ground collision, 3 object collision, 4 fire, 5 water (lava), 6 killed by
+Lua, 7 crushed. Decoders report these as weapon `-1 - k` (-2..-8).
+
+A hit whose attacker the engine no longer knows — the shooter died while its
+projectile was in flight — takes `aTeam` from the projectile
+(`GetProjectileTeamID`) and `aDef` from its owner's id, looked up among the
+units that have died; there is no attacker unit id to credit.
 
 **Every integer the widget writes stays below 2^24.** Spring's Lua numbers
 are single-precision floats, which hold integers exactly only up to 2^24, and

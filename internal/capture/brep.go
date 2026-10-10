@@ -529,6 +529,19 @@ func unknown16(v int32) int32 {
 	return v
 }
 
+// damageWeapon maps a D record's weapon column: 0xFFFF is unknown, the seven
+// values below it are the engine's own damage sources (65535-k for Recoil's
+// DamageType k), everything else a weapon def.
+func damageWeapon(v int32) int32 {
+	if v == 0xFFFF {
+		return -1
+	}
+	if k := 0xFFFF - v; k >= 1 && k <= snapshot.DamageEngineCauses {
+		return snapshot.DamageEngineCause(k)
+	}
+	return v
+}
+
 // decodeDamageRecord decodes one 'D' payload: frame u32, n u16, then columns
 // aTeam u8, aDef u16, weapon u16, vTeam u8, vDef u16, damage f32,
 // paralyze f32, hits u16, overkill f32.
@@ -547,7 +560,7 @@ func decodeDamageRecord(payload []byte) (snapshot.DamageWindow, error) {
 		dw.Rows[i].AttackerDef = unknown16(c.u16())
 	}
 	for i := range dw.Rows {
-		dw.Rows[i].WeaponDef = unknown16(c.u16())
+		dw.Rows[i].WeaponDef = damageWeapon(c.u16())
 	}
 	for i := range dw.Rows {
 		dw.Rows[i].VictimTeam = unknown8(c.u8())

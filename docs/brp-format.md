@@ -626,7 +626,8 @@ per window:
   uvarint  rows
   rows × uvarint  attacker team + 1
   rows × uvarint  attacker def + 1
-  rows × uvarint  weapon def + 1
+  rows × uvarint  weapon def + 1, or 2^20 + 1 + k for engine damage source k
+                  (decoded weapon -1-k: 1 debris … 7 crushed; see brepstream §D)
   rows × uvarint  victim team + 1
   rows × uvarint  victim def + 1
   rows × uvarint  damage × 10

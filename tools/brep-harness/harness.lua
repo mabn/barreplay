@@ -124,6 +124,8 @@ units[174].mobile = false
 units[177].mobile = false
 
 local allyOf = { [0] = 0, [1] = 1, [2] = 0 }
+local projectiles = {} -- projectile id -> { owner, team }
+local killedShooters = {} -- units killed so far, in order: { id, team }
 local curFrame = 0
 
 -- building maps builderID -> the id it is constructing/assisting this sample
@@ -328,6 +330,9 @@ Spring = {
 		return units[id].def
 	end,
 	GetUnitTeam = function(id) return units[id].team end, -- readable even on radar
+	-- Projectiles in flight from a unit that has since died (see combat).
+	GetProjectileTeamID = function(pid) return projectiles[pid] and projectiles[pid].team end,
+	GetProjectileOwnerID = function(pid) return projectiles[pid] and projectiles[pid].owner end,
 	GetUnitHealth = function(id)
 		local u = units[id]
 		local vs = visState(u)
@@ -560,6 +565,7 @@ local function kill(id)
 		unitDamaged(id, u.def, u.team, before + 25, false, weapon, 1, aID, aDef, aTeam)
 	end
 	widget:UnitDestroyed(id, u.def, u.team, aID, aDef, aTeam, weapon)
+	killedShooters[#killedShooters + 1] = { id = id, team = u.team }
 end
 
 -- combat lands this sample's scripted hits: every unit whose id and sample
@@ -576,8 +582,18 @@ local function combat(s)
 			local a = firstOf(allyOf[u.team] == 0 and 1 or 0, id)
 			local weapon = (id + s) % 5
 			local dmg = 10 + (id * 7 + s) % 50
+			local dead = killedShooters[#killedShooters]
 			if s % 17 == 0 or a == nil then
 				unitDamaged(id, u.def, u.team, dmg, false, nil, nil, nil, nil, nil)
+			elseif s % 7 == 0 then
+				-- lava (the engine's water damage, -5): no weapon, no projectile
+				unitDamaged(id, u.def, u.team, dmg, false, -5, -1, nil, nil, nil)
+			elseif s % 5 == 0 and dead and allyOf[dead.team] ~= allyOf[u.team] then
+				-- a shell from a unit that has died since it fired: the engine
+				-- names no attacker, the projectile still knows its owner
+				local pid = 1000 + dead.id
+				projectiles[pid] = { owner = dead.id, team = dead.team }
+				unitDamaged(id, u.def, u.team, dmg, false, weapon, pid, nil, nil, nil)
 			else
 				unitDamaged(id, u.def, u.team, dmg, weapon == 4, weapon, 1, a.id, a.def, a.team)
 			end

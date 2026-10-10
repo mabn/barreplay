@@ -119,9 +119,49 @@ type DamageWindow struct {
 	Rows  []DamageRow `json:"rows"`
 }
 
+// DamageEngineCauses is how many of the engine's own damage sources a
+// DamageRow can name (Recoil's CSolidObject::DamageType, 1..7).
+const DamageEngineCauses = 7
+
+// DamageEngineCause is the DamageRow.WeaponDef recording engine damage source
+// k — damage no weapon dealt: 1 debris, 2 ground collision, 3 object
+// collision, 4 fire, 5 water (lava), 6 killed by Lua, 7 crushed. The values
+// are -2..-8, below -1 (unknown).
+func DamageEngineCause(k int32) int32 { return -1 - k }
+
+// DamageCauseName names the engine damage source a negative WeaponDef below
+// -1 records, or "" for anything else.
+func DamageCauseName(weapon int32) string {
+	names := [...]string{"debris", "ground collision", "object collision", "fire", "water", "killed by Lua", "crushed"}
+	if k := -1 - weapon; k >= 1 && k <= DamageEngineCauses {
+		return names[k-1]
+	}
+	return ""
+}
+
+// weaponPlus encodes a DamageRow.WeaponDef: idPlus for a weapon or unknown,
+// and an engine cause (-2..-8) far above any weapon id, so .brp files
+// written before causes existed decode unchanged.
+func weaponPlus(v int32) uint64 {
+	if v < -1 {
+		return weaponCauseBase + uint64(-v)
+	}
+	return idPlus(v)
+}
+
+const weaponCauseBase = 1 << 20
+
+func weaponFromPlus(v uint64) int32 {
+	if v > weaponCauseBase {
+		return -int32(v - weaponCauseBase)
+	}
+	return int32(v) - 1
+}
+
 // DamageRow is one (attacker team, attacker def, weapon, victim team, victim
 // def) combination within a window. Ids are -1 when unknown (no attacker — a
-// crash, a self-destruct). Damage excludes paralyzer damage, which is
+// crash, a self-destruct). WeaponDef below -1 is an engine damage source
+// rather than a weapon (DamageEngineCause). Damage excludes paralyzer damage, which is
 // Paralyze; Overkill is the part of killing blows past the health the victim
 // had left, so Damage-Overkill is what actually came off health. Stored to
 // 0.1 hp.
@@ -234,7 +274,7 @@ func encodeDamage(ws []DamageWindow) []byte {
 		cols := []func(r DamageRow) uint64{
 			func(r DamageRow) uint64 { return idPlus(r.AttackerTeam) },
 			func(r DamageRow) uint64 { return idPlus(r.AttackerDef) },
-			func(r DamageRow) uint64 { return idPlus(r.WeaponDef) },
+			func(r DamageRow) uint64 { return weaponPlus(r.WeaponDef) },
 			func(r DamageRow) uint64 { return idPlus(r.VictimTeam) },
 			func(r DamageRow) uint64 { return idPlus(r.VictimDef) },
 			func(r DamageRow) uint64 { return q10(r.Damage) },
@@ -276,7 +316,7 @@ func decodeDamage(b []byte) ([]DamageWindow, error) {
 		set := []func(r *DamageRow, v uint64){
 			func(r *DamageRow, v uint64) { r.AttackerTeam = int32(v) - 1 },
 			func(r *DamageRow, v uint64) { r.AttackerDef = int32(v) - 1 },
-			func(r *DamageRow, v uint64) { r.WeaponDef = int32(v) - 1 },
+			func(r *DamageRow, v uint64) { r.WeaponDef = weaponFromPlus(v) },
 			func(r *DamageRow, v uint64) { r.VictimTeam = int32(v) - 1 },
 			func(r *DamageRow, v uint64) { r.VictimDef = int32(v) - 1 },
 			func(r *DamageRow, v uint64) { r.Damage = float32(v) / 10 },

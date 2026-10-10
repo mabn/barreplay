@@ -29,6 +29,8 @@ func TestBRPAnalysisRoundTrip(t *testing.T) {
 		{Frame: 60, Rows: []DamageRow{
 			{AttackerTeam: 1, AttackerDef: 2, WeaponDef: 7, VictimTeam: 0, VictimDef: 1, Damage: 500.04, Hits: 5},
 			{AttackerTeam: -1, AttackerDef: -1, WeaponDef: -1, VictimTeam: 1, VictimDef: 2, Damage: 12.5, Paralyze: 3.3, Hits: 1, Overkill: 2.1},
+			{AttackerTeam: -1, AttackerDef: -1, WeaponDef: DamageEngineCause(5), VictimTeam: 0, VictimDef: 3, Damage: 40, Hits: 2},
+			{AttackerTeam: 0, AttackerDef: -1, WeaponDef: DamageEngineCause(7), VictimTeam: 1, VictimDef: 3, Damage: 900, Hits: 1},
 		}},
 		{Frame: 90, Rows: []DamageRow{
 			{AttackerTeam: 1, AttackerDef: 2, WeaponDef: 7, VictimTeam: 0, VictimDef: 1, Damage: 2500, Hits: 25, Overkill: 120},
@@ -203,5 +205,18 @@ func TestBRPAcceptsV5(t *testing.T) {
 	}
 	if _, err := ParseBRP(bytes.NewReader(buf.Bytes())); err == nil {
 		t.Error("want error for version 7")
+	}
+}
+
+func TestDamageCauseName(t *testing.T) {
+	for k, want := range map[int32]string{1: "debris", 5: "water", 7: "crushed"} {
+		if got := DamageCauseName(DamageEngineCause(k)); got != want {
+			t.Errorf("cause %d = %q, want %q", k, got, want)
+		}
+	}
+	for _, w := range []int32{-1, 0, 3, -9} {
+		if got := DamageCauseName(w); got != "" {
+			t.Errorf("DamageCauseName(%d) = %q, want none", w, got)
+		}
 	}
 }

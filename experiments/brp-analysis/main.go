@@ -127,7 +127,15 @@ func run(path string) error {
 	if err != nil {
 		return fmt.Errorf("damage: %w", err)
 	}
-	dealt := map[int32]float64{}
+	// dealt counts what the engine's damageDealt counts: damage to a team
+	// that is not an ally, by a named attacker. enemyHp is the same less
+	// overkill — what actually came off health.
+	allyOf := map[int32]int32{}
+	for _, t := range meta.Teams {
+		allyOf[t.TeamID] = t.AllyTeam
+	}
+	dealt, enemyHp, ally := map[int32]float64{}, map[int32]float64{}, map[int32]float64{}
+	causes := map[string]float64{}
 	var total, para, over, unknownAttacker float64
 	hits := 0
 	for _, w := range dmg {
@@ -136,22 +144,42 @@ func run(path string) error {
 			para += float64(r.Paralyze)
 			over += float64(r.Overkill)
 			hits += int(r.Hits)
-			if r.AttackerTeam < 0 {
+			if c := snapshot.DamageCauseName(r.WeaponDef); c != "" {
+				causes[c] += float64(r.Damage)
+			}
+			switch {
+			case r.AttackerTeam < 0:
 				unknownAttacker += float64(r.Damage)
-			} else if r.AttackerTeam != r.VictimTeam {
+			case allyOf[r.AttackerTeam] == allyOf[r.VictimTeam]:
+				ally[r.AttackerTeam] += float64(r.Damage)
+			default:
 				dealt[r.AttackerTeam] += float64(r.Damage)
+				enemyHp[r.AttackerTeam] += float64(r.Damage - r.Overkill)
 			}
 		}
 	}
 	fmt.Printf("damage: %d windows, %d hits, %.0f hp (%.0f paralyze, %.0f overkill), %s with no known attacker\n",
 		len(dmg), hits, total, para, over, pct(int(unknownAttacker), int(total)))
+	if len(causes) > 0 {
+		names := make([]string, 0, len(causes))
+		for c := range causes {
+			names = append(names, c)
+		}
+		sort.Slice(names, func(i, j int) bool { return causes[names[i]] > causes[names[j]] })
+		fmt.Print("  dealt by the engine, not a weapon:")
+		for _, c := range names {
+			fmt.Printf("  %s %.0f (%s)", c, causes[c], pct(int(causes[c]), int(total)))
+		}
+		fmt.Println()
+	}
 	if total > 0 && over == 0 {
 		fmt.Println("  !! zero overkill: UnitDamaged probably reads health before the hit lands")
 	}
 
-	// Widget damage vs the engine's own per-team damageDealt.
+	// Widget damage vs the engine's own per-team damageDealt, which counts
+	// only damage to enemies by a living attacker.
 	if len(teamStats) > 0 {
-		fmt.Println("damage dealt per team, widget vs engine teamstats:")
+		fmt.Println("damage dealt to enemies per team, widget vs engine teamstats (and widget less overkill; widget to allies):")
 		for _, ts := range teamStats {
 			col := -1
 			for i, name := range ts.Fields {
@@ -163,7 +191,8 @@ func run(path string) error {
 			if col >= 0 && len(ts.Rows) > 0 && col < len(ts.Rows[len(ts.Rows)-1]) {
 				engine = ts.Rows[len(ts.Rows)-1][col]
 			}
-			fmt.Printf("  team %2d: widget %10.0f  engine %10.0f  (%s)\n", ts.Team, dealt[ts.Team], engine, ratio(dealt[ts.Team], engine))
+			fmt.Printf("  team %2d: widget %10.0f  engine %10.0f  (%s)  less overkill %10.0f  to allies %9.0f\n",
+				ts.Team, dealt[ts.Team], engine, ratio(dealt[ts.Team], engine), enemyHp[ts.Team], ally[ts.Team])
 		}
 	}
 

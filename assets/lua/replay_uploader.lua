@@ -202,6 +202,8 @@ local spGetUnitHealth   = Spring.GetUnitHealth
 local spGetUnitIsDead   = Spring.GetUnitIsDead -- may be absent on old engines
 local spGetUnitVelocity = Spring.GetUnitVelocity
 local spGetUnitIsBuilding = Spring.GetUnitIsBuilding
+local spGetProjectileTeamID  = Spring.GetProjectileTeamID
+local spGetProjectileOwnerID = Spring.GetProjectileOwnerID
 local spGetGameSeconds  = Spring.GetGameSeconds
 local spGetGameFrame    = Spring.GetGameFrame
 local spGetTeamList     = Spring.GetTeamList
@@ -1145,6 +1147,29 @@ end
 -- attacker of a hit is exactly what a capture cannot show on its own (an
 -- all-unknown damage section looks the same as a game of crashes).
 local dmgSeen, dmgNamedAttacker, dmgNamedWeapon = 0, 0, 0
+-- Hits whose attacker came from the projectile rather than the callin (see
+-- attackerOfProjectile), and hits the engine itself caused (a negative
+-- weaponDefID: lava, crushing, a collision, a Lua kill).
+local dmgFromProjectile, dmgEngineCause = 0, 0
+
+-- The engine's own damage sources arrive as weaponDefID = -k (Recoil's
+-- CSolidObject::DamageType: 1 debris, 2 ground collision, 3 object
+-- collision, 4 fire, 5 water/lava, 6 killed by Lua, 7 crushed). They are
+-- written just below the unknown sentinel, 65535 - k, so the cause survives
+-- instead of folding into "unknown".
+local maxEngineCause = 7
+local function weaponCode(weaponDefID)
+	if weaponDefID == nil then
+		return 65535
+	end
+	if weaponDefID >= 0 and weaponDefID < 65535 - maxEngineCause then
+		return weaponDefID
+	end
+	if weaponDefID < 0 and weaponDefID >= -maxEngineCause then
+		return 65535 + weaponDefID
+	end
+	return 65535
+end
 
 local function onDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, attackerID, attackerDefID, attackerTeam)
 	if type(damage) ~= "number" or damage <= 0 then
@@ -1153,9 +1178,10 @@ local function onDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponD
 	dmgSeen = dmgSeen + 1
 	if attackerTeam ~= nil then dmgNamedAttacker = dmgNamedAttacker + 1 end
 	if weaponDefID ~= nil and weaponDefID >= 0 then dmgNamedWeapon = dmgNamedWeapon + 1 end
+	if weaponDefID ~= nil and weaponDefID < 0 then dmgEngineCause = dmgEngineCause + 1 end
 	local aTeam = (attackerTeam ~= nil and attackerTeam >= 0 and attackerTeam <= 254) and attackerTeam or 255
 	local aDef = (attackerDefID ~= nil and attackerDefID >= 0 and attackerDefID < 65535) and attackerDefID or 65535
-	local wpn = (weaponDefID ~= nil and weaponDefID >= 0 and weaponDefID < 65535) and weaponDefID or 65535
+	local wpn = weaponCode(weaponDefID)
 	local vTeam = (unitTeam ~= nil and unitTeam >= 0 and unitTeam <= 254) and unitTeam or 255
 	local vDef = (unitDefID ~= nil and unitDefID >= 0 and unitDefID < 65535) and unitDefID or 65535
 	-- Each key stays under 2^24, the largest integer a single-precision
@@ -1420,6 +1446,33 @@ end
 local damageHooked = false
 local unhookDamage = nil
 
+-- deadDefs remembers the def of every unit that died, so a shot still in
+-- flight from it can name what fired it. Cleared when the id is reused.
+local deadDefs = {}
+
+-- attackerOfProjectile names the shooter of a hit the engine delivered with
+-- no attacker. The engine resolves the attacker from the projectile's owner,
+-- which is gone once that unit has died — so every shell, missile and bomb
+-- still in the air when its shooter dies lands anonymously, and in a big
+-- fight that is a large share of all damage. The projectile itself still
+-- knows its team and its owner's id. The unit id is NOT returned: the life
+-- it would credit is already closed.
+local function attackerOfProjectile(projectileID)
+	if not (spGetProjectileTeamID and projectileID ~= nil and projectileID >= 0) then
+		return nil, nil
+	end
+	local team = spGetProjectileTeamID(projectileID)
+	if team == nil then
+		return nil, nil
+	end
+	local def = nil
+	local owner = spGetProjectileOwnerID and spGetProjectileOwnerID(projectileID)
+	if owner ~= nil then
+		def = deadDefs[owner] or spGetUnitDefID(owner)
+	end
+	return team, def
+end
+
 local function hookDamage()
 	local wh = widget.widgetHandler
 	if not (wh and type(wh.UnitDamaged) == "function" and type(wh.UpdateCallIn) == "function") then
@@ -1428,7 +1481,15 @@ local function hookDamage()
 	end
 	local orig = wh.UnitDamaged
 	wh.UnitDamaged = function(self, unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
-		pcall(onDamaged, unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, attackerID, attackerDefID, attackerTeam)
+		local aDef, aTeam = attackerDefID, attackerTeam
+		if aTeam == nil then
+			local ok, t, d = pcall(attackerOfProjectile, projectileID)
+			if ok and t ~= nil then
+				aTeam, aDef = t, d
+				dmgFromProjectile = dmgFromProjectile + 1
+			end
+		end
+		pcall(onDamaged, unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, attackerID, aDef, aTeam)
 		return orig(self, unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
 	end
 	damageHooked = true
@@ -1682,6 +1743,7 @@ function widget:UnitCreated(unitID, unitDefID, unitTeam)
 	buried[unitID] = nil -- a new unit definitely owns this recycled id now
 	if recordDamage then
 		lives[unitID] = nil
+		deadDefs[unitID] = nil
 		pcall(lifeOf, unitID, unitDefID, unitTeam)
 	end
 	pcall(event, "created", unitID, unitDefID, unitTeam)
@@ -1698,6 +1760,7 @@ local function onDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefI
 		l.xp = spGetUnitExperience(unitID)
 	end
 	diedLives[#diedLives + 1] = { unitID, l, factFrame() }
+	deadDefs[unitID] = unitDefID or l.def
 	lives[unitID] = nil
 	if attackerID ~= nil and attackerID ~= unitID then
 		local a = lifeOf(attackerID, attackerDefID, attackerTeam)
@@ -2001,7 +2064,8 @@ local function finishResim(frame)
 			table.sort(rows, function(a, b) return a[1] < b[1] end)
 			writeLives(frame, rows)
 			Echo(logTag .. " damage: " .. dmgSeen .. " hits, " .. dmgNamedAttacker
-				.. " naming an attacker, " .. dmgNamedWeapon .. " naming a weapon")
+				.. " naming an attacker (" .. dmgFromProjectile .. " of them from the projectile), "
+				.. dmgNamedWeapon .. " naming a weapon, " .. dmgEngineCause .. " caused by the engine")
 		end)
 		if not okLives then
 			Echo(logTag .. " final damage window / unit lives failed (" .. tostring(errLives) .. ")")
