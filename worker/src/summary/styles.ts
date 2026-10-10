@@ -32,6 +32,15 @@ export const CSS = `
 .brs-root .brs-seek { cursor: pointer; }
 .brs-root .brs-seek:hover { text-decoration: underline; }
 .brs-root .brs-clickable { cursor: crosshair; }
+.brs-root .brs-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 8px; color: var(--brs-muted); font-size: 12px; }
+.brs-root .brs-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.brs-root .brs-mapwrap { max-width: 640px; margin: 0 auto; }
+.brs-root .brs-map { border-radius: 4px; }
+.brs-root .brs-map circle.brs-clickable:hover { stroke: #fff; stroke-width: 2px; vector-effect: non-scaling-stroke; }
+.brs-root .brs-chat { max-height: 320px; overflow-y: auto; margin-top: 10px; border-top: 1px solid var(--brs-line); padding-top: 8px; }
+.brs-root .brs-line { padding: 1px 0; overflow-wrap: anywhere; }
+.brs-root .brs-when { color: var(--brs-muted); font-variant-numeric: tabular-nums; }
+.brs-root .brs-dest { color: var(--brs-muted); }
 `;
 
 const STYLE_ID = "brs-summary-style";

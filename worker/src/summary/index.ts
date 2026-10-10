@@ -8,6 +8,11 @@ import { h, section } from "./dom";
 import { fmtClock, fmtMetal } from "./format";
 import { comparable, notices, sideColor, sideName } from "./model";
 import { ensureStyles } from "./styles";
+import { advantage } from "./sections/advantage";
+import { chat } from "./sections/chat";
+import { killing } from "./sections/killing";
+import { rivers } from "./sections/rivers";
+import { tech } from "./sections/tech";
 import type { Insights, SummaryHandle, SummaryOptions } from "./types";
 
 export type * from "./types";
@@ -72,4 +77,4 @@ const overview: Section = (ins) => {
 };
 
 /** SECTIONS in page order. */
-const SECTIONS: Section[] = [overview];
+const SECTIONS: Section[] = [overview, advantage, rivers, tech, killing, chat];

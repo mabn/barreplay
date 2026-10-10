@@ -5,9 +5,35 @@ import type { Insights } from "./types";
 /** Used when a side carries no colour of its own. */
 const FALLBACK_COLORS = ["#4b90c4", "#d0644b", "#5fae5a", "#c9a23a", "#9a6cc9", "#4bb3a8", "#c95f9a", "#8a8f96"];
 
+/** sideColor is the side's colour, lifted toward white until it reads on the
+ * summary's dark panels: BAR's team colours include pure #0000ff, which is
+ * illegible as text or a line there. */
 export function sideColor(ins: Insights, side: number): string {
   const c = ins.sides[side]?.color;
-  return c && /^#[0-9a-f]{6}$/i.test(c) ? c : FALLBACK_COLORS[side % FALLBACK_COLORS.length];
+  return readable(c && /^#[0-9a-f]{6}$/i.test(c) ? c : FALLBACK_COLORS[side % FALLBACK_COLORS.length]);
+}
+
+/** Minimum relative luminance (WCAG) for a colour drawn on the dark panels;
+ * 0.2 gives about 5:1 against #161c22. */
+const MIN_LUMINANCE = 0.2;
+
+function luminance(rgb: number[]): number {
+  const lin = rgb.map((v) => {
+    const c = v / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+}
+
+/** readable mixes a #rrggbb colour with white, in small steps, until its
+ * luminance reaches MIN_LUMINANCE. Colours already light enough are kept. */
+export function readable(hex: string): string {
+  const rgb = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  let mix = rgb;
+  for (let k = 0; k <= 20 && luminance(mix) < MIN_LUMINANCE; k++) {
+    mix = rgb.map((v) => Math.round(v + (255 - v) * (k / 20)));
+  }
+  return "#" + mix.map((v) => v.toString(16).padStart(2, "0")).join("");
 }
 
 /** sideName labels a side by its first player, plus how many more there are. */

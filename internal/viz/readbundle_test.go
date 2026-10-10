@@ -24,6 +24,7 @@ func writeLongBRP(t *testing.T, dir string) string {
 		UnitDefs: map[int32]snapshot.UnitDef{
 			1: {DefID: 1, Name: "armpw", HumanName: "Pawn", CanMove: true, Speed: 58, WeaponCount: 1, MetalCost: 50},
 			2: {DefID: 2, Name: "armfus", IsBuilding: true, XSize: 10, ZSize: 10, MetalCost: 3600},
+			3: {DefID: 3, Name: "armfig", CanMove: true, CanFly: true, Speed: 200, WeaponCount: 1, MetalCost: 80},
 		},
 		Teams:   []snapshot.TeamInfo{{TeamID: 0, AllyTeam: 0, Color: "#0000ff"}, {TeamID: 1, AllyTeam: 1}},
 		Players: []snapshot.PlayerInfo{{PlayerID: 0, Name: "Ann", Team: 0}, {PlayerID: 1, Name: "Bob", Team: 1}},
@@ -125,6 +126,9 @@ func TestReadStaticBundleRoundTrip(t *testing.T) {
 	}
 	if d := got.Meta.UnitDefs[2]; d.MetalCost != 0 || !d.IsBuilding || d.XSize != 10 {
 		t.Errorf("def 2 = %+v (no cost: armyCost prices armed mobile defs only)", d)
+	}
+	if d := got.Meta.UnitDefs[3]; !d.CanFly || got.Meta.UnitDefs[1].CanFly {
+		t.Errorf("flight read off the icon: armfig %+v, armpw %+v", d, got.Meta.UnitDefs[1])
 	}
 	if len(got.Meta.Players) != 2 || got.Meta.Teams[0].Color != "#0000ff" {
 		t.Errorf("roster = %+v / %+v", got.Meta.Players, got.Meta.Teams)

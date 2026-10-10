@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
+	"strings"
 
 	"github.com/mabn/barreplay/snapshot"
 )
@@ -25,7 +27,8 @@ type PieceFetcher func(ctx context.Context, key string) ([]byte, error)
 // was never kept, and it recovers less than the .brp held:
 //
 //   - Unit defs: only what the head carries — names, human names, a footprint
-//     for structures, and a metal cost for armed mobile defs (armyCost). Every
+//     for structures, a metal cost for armed mobile defs (armyCost), and
+//     CanFly read off the icon (BAR draws aircraft from "air*" bitmaps). Every
 //     other def has no cost, so callers must not treat a missing cost as free.
 //   - No X section: the economy comes back separately, keyed by frame.
 //   - No recorder record, so no point of view.
@@ -46,7 +49,7 @@ func ReadStaticBundle(ctx context.Context, fetch PieceFetcher, rid string) (*sna
 		return nil, nil, fmt.Errorf("head: unsupported version %d", version)
 	}
 	bf := &snapshot.BRPFile{Sections: map[byte][]byte{}, Legacy: version == 4}
-	var head wireHead
+	var head legacyHead
 	for _, s := range sections {
 		switch s.Tag {
 		case snapshot.SecHead:
@@ -100,8 +103,8 @@ func ReadStaticBundle(ctx context.Context, fetch PieceFetcher, rid string) (*sna
 		}
 		for _, f := range rf {
 			var teams []snapshot.TeamResource
-			for i := 0; i+resourceStride <= len(f.R); i += resourceStride {
-				r := f.R[i : i+resourceStride]
+			for i := 0; i+legacyResStride <= len(f.R); i += legacyResStride {
+				r := f.R[i : i+legacyResStride]
 				teams = append(teams, snapshot.TeamResource{
 					Team:  r[0],
 					Metal: float32(r[1]), Energy: float32(r[2]),
@@ -117,8 +120,77 @@ func ReadStaticBundle(ctx context.Context, fetch PieceFetcher, rid string) (*sna
 	return bf, resources, nil
 }
 
+// The published head's JSON, as this package wrote it into every .brw. It is
+// declared here, apart from the encoder, on purpose: those pieces are
+// immutable and stay in the bucket whatever the publisher writes next, so
+// this reader has to keep reading them after the encoder changes or goes.
+type legacyHead struct {
+	GameID        string                     `json:"gameId"`
+	EngineVersion string                     `json:"engineVersion"`
+	GameVersion   string                     `json:"gameVersion"`
+	MapName       string                     `json:"mapName"`
+	SampleEvery   int32                      `json:"sampleEvery"`
+	Bounds        legacyBounds               `json:"bounds"`
+	Teams         []legacyTeam               `json:"teams"`
+	UnitDefs      map[int32]string           `json:"unitDefs"`
+	UnitNames     map[int32]string           `json:"unitNames"`
+	UnitIcons     map[string]legacyIcon      `json:"unitIcons"`
+	Footprints    map[string]legacyFootprint `json:"footprints"`
+	ArmyCost      map[int32]int32            `json:"armyCost"`
+	Players       []legacyPlayer             `json:"players"`
+	FrameCount    int                        `json:"frameCount"`
+	Chunks        []legacyChunk              `json:"chunks"`
+}
+
+type legacyBounds struct {
+	MinX, MaxX, MinZ, MaxZ float64
+}
+
+type legacyTeam struct {
+	TeamID   int32  `json:"team"`
+	AllyTeam int32  `json:"ally"`
+	Side     string `json:"side"`
+	Player   string `json:"player"`
+	Color    string `json:"color"`
+}
+
+type legacyIcon struct {
+	Path string `json:"p"`
+}
+
+type legacyFootprint struct {
+	W int32 `json:"w"`
+	H int32 `json:"h"`
+}
+
+type legacyPlayer struct {
+	ID        int32   `json:"id"`
+	Name      string  `json:"name"`
+	Team      int32   `json:"team"`
+	Spectator bool    `json:"spec"`
+	Country   string  `json:"country"`
+	Rank      int32   `json:"rank"`
+	Skill     float32 `json:"skill"`
+}
+
+type legacyChunk struct {
+	Frame int32 `json:"frame"`
+	Count int   `json:"count"`
+	KLen  int64 `json:"kLen"`
+	Len   int64 `json:"len"`
+}
+
+// legacyResFrame is one .resources record: a sim frame and, per team,
+// [team, metal, energy, metalStore, energyStore, metalIncome, energyIncome].
+type legacyResFrame struct {
+	F int32   `json:"f"`
+	R []int32 `json:"r"`
+}
+
+const legacyResStride = 7
+
 // metaFromHead recovers as much of the capture Meta as the head carries.
-func metaFromHead(h wireHead) snapshot.Meta {
+func metaFromHead(h legacyHead) snapshot.Meta {
 	m := snapshot.Meta{
 		GameID:        h.GameID,
 		EngineVersion: h.EngineVersion,
@@ -132,6 +204,12 @@ func metaFromHead(h wireHead) snapshot.Meta {
 		if fp, ok := h.Footprints[name]; ok {
 			d.IsBuilding, d.CanMove = true, false
 			d.XSize, d.ZSize = fp.W/8, fp.H/8
+		}
+		// The head has no flight flag, but BAR's icon set draws every
+		// aircraft (gunships included) from an "air*" bitmap, which is what
+		// the summary's air category needs.
+		if ic, ok := h.UnitIcons[name]; ok && strings.HasPrefix(path.Base(ic.Path), "air") {
+			d.CanFly = true
 		}
 		if cost, ok := h.ArmyCost[id]; ok {
 			// armyCost only lists armed mobile defs, so that is what it

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { fmtClock, fmtMetal, niceStep, timeStep } from "../src/summary/format";
-import { comparable, notices, sideColor, sideName } from "../src/summary/model";
+import { comparable, notices, readable, sideColor, sideName } from "../src/summary/model";
 import type { Insights } from "../src/summary/types";
 
 function ins(over: Partial<Insights> = {}): Insights {
@@ -53,6 +53,8 @@ test("notices say why something is missing", () => {
 test("side labels and colours", () => {
   assert.equal(sideName(ins(), 0), "Ann +1");
   assert.equal(sideName(ins(), 1), "Cy");
-  assert.equal(sideColor(ins(), 0), "#112233");
+  assert.equal(readable("#ffd000"), "#ffd000", "a light colour is kept");
+  assert.notEqual(readable("#0000ff"), "#0000ff", "pure blue is lifted");
+  assert.notEqual(sideColor(ins(), 0), "#112233");
   assert.match(sideColor(ins(), 1), /^#[0-9a-f]{6}$/);
 });

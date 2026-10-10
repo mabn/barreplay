@@ -501,9 +501,21 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           library imported on first open, the insights fetched from the data
                           origin, a 404 saying the summary is not built yet, and onSeek =
                           seekToFrame (back to the Replay tab at that sim frame).
+                          Sections (sections/*.ts, in page order in index.ts SECTIONS) each
+                          return null when the file cannot support them: the side-by-side
+                          charts (advantage, army composition) need comparable(); race to
+                          tech and killing fields need a full-view capture (a one-sided one
+                          knows only its own milestones and the deaths it saw). chart.ts is
+                          the shared time-axis frame (crosshair readout, click = onSeek);
+                          mapview.ts draws world-space marks over api.bar-rts.com terrain
+                          (best-effort, plain background otherwise). Side colours go through
+                          model.readable(), which lifts BAR's darkest team colours (#0000ff)
+                          until they read on the dark panels.
 internal/viz/readbundle.go ReadStaticBundle: the inverse of WriteStaticBundle, rebuilding a
                           BRPFile from published pieces through a PieceFetcher. Defs come back
-                          from the head only (names, footprints, armyCost -> MetalCost), and a v4
+                          from the head only (names, footprints, armyCost -> MetalCost, CanFly
+                          from an "air*" icon), parsed by its OWN legacyHead types — the pieces
+                          outlive whatever the encoder becomes — and a v4
                           head yields BRPFile.Legacy, which DecodeChunk decodes with the 8 old
                           core columns (build = finished, target = none) — snapshot/brp.go's
                           frameCodec.cols.
