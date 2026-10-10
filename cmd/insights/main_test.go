@@ -190,6 +190,29 @@ func TestSkipsPublished(t *testing.T) {
 	}
 }
 
+// -from/-to reach the catalog as its own date filter.
+func TestCatalogRidsDateRange(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.RawQuery
+		w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+	rn := newRunner(srv, "")
+	rn.from, rn.to = "2026-10-01", "1760000000"
+	if _, err := rn.catalogRids(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got != "from=2026-10-01&limit=200&offset=0&to=1760000000" {
+		t.Errorf("catalog query = %q", got)
+	}
+	for in, want := range map[string]bool{"2026-10-01": true, "1760000000": true, "2026-13-01": false, "yesterday": false} {
+		if validDate(in) != want {
+			t.Errorf("validDate(%q) = %v", in, !want)
+		}
+	}
+}
+
 func TestCatalogRids(t *testing.T) {
 	srv := server(t, t.TempDir(), "")
 	defer srv.Close()

@@ -16,6 +16,7 @@
 //	insights -upload local <gameId>        # ...to the dev simulator
 //	insights -upload= -out ./ins <gameId>  # compute only, write the file locally
 //	insights -all                          # every replay in the catalog
+//	insights -all -from 2026-10-01 -to 2026-10-07   # games started in that range
 //	insights ./snapshots/<gameId>.brp      # from a local .brp (full costs)
 //	insights -rid <rid> ./caps/<gameId>.brepstream   # repack a raw stream (full costs)
 //
@@ -57,6 +58,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -75,6 +77,8 @@ func main() {
 		force     = flag.Bool("force", false, "recompute even when the revision already has an insights file")
 		all       = flag.Bool("all", false, "process every replay in the catalog (no arguments)")
 		workerDir = flag.String("worker-dir", "worker", "the Cloudflare worker project directory (upload fallback)")
+		from      = flag.String("from", "", "with -all: only games that started on/after this date (YYYY-MM-DD or unix seconds)")
+		to        = flag.String("to", "", "with -all: only games that started on/before this date (YYYY-MM-DD covers the whole day, or unix seconds)")
 		ridFlag   = flag.String("rid", "", "with a local capture: the published revision the summary belongs to (default: the packed .brp's own content revision)")
 	)
 	flag.Usage = func() {
@@ -115,6 +119,17 @@ func main() {
 			return rep.Winners(), nil
 		},
 	}
+	if (*from != "" || *to != "") && !*all {
+		fmt.Fprintln(os.Stderr, "insights: -from/-to narrow -all; pass them with -all")
+		os.Exit(2)
+	}
+	for _, d := range []string{*from, *to} {
+		if d != "" && !validDate(d) {
+			fmt.Fprintf(os.Stderr, "insights: %q: want YYYY-MM-DD or unix seconds\n", d)
+			os.Exit(2)
+		}
+	}
+	r.from, r.to = *from, *to
 	if *ridFlag != "" && flag.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "insights: -rid names ONE capture's revision; pass exactly one input")
 		os.Exit(2)
@@ -151,11 +166,15 @@ func main() {
 // nothing is uploaded; the file is then written under outDir.
 type runner struct {
 	indexURL, dataURL string
-	http              *http.Client
-	force             bool
-	outDir            string
-	localRid          string // -rid: the revision a local capture's summary is published under
-	publish           func(ctx context.Context, dir, label string) error
+	// from/to narrow -all to games started in a date range, passed verbatim
+	// to the catalog's own filter (YYYY-MM-DD or unix seconds; a date `to`
+	// covers that whole day).
+	from, to string
+	http     *http.Client
+	force    bool
+	outDir   string
+	localRid string // -rid: the revision a local capture's summary is published under
+	publish  func(ctx context.Context, dir, label string) error
 	// winners asks the BAR API who won, for a replay whose meta does not say
 	// (every .brp packed before the demo's winners were read). Nil skips it.
 	winners func(ctx context.Context, gameID string) ([]int32, error)
@@ -407,12 +426,30 @@ func (r *runner) catalogRow(ctx context.Context, id string) (*catalogRow, error)
 // catalogPage is the largest page /api/replays serves (CATALOG_LIMIT_MAX).
 const catalogPage = 200
 
-// catalogRids walks the whole catalog, page by page, and returns every
-// published row's current revision.
+// validDate is the catalog's from/to syntax: YYYY-MM-DD or unix seconds.
+func validDate(s string) bool {
+	if _, err := time.Parse("2006-01-02", s); err == nil {
+		return true
+	}
+	_, err := strconv.ParseInt(s, 10, 64)
+	return err == nil
+}
+
+// catalogRids walks the catalog (narrowed to r.from..r.to), page by page, and
+// returns every published row's current revision.
 func (r *runner) catalogRids(ctx context.Context) ([]string, error) {
 	var out []string
+	q := url.Values{}
+	if r.from != "" {
+		q.Set("from", r.from)
+	}
+	if r.to != "" {
+		q.Set("to", r.to)
+	}
 	for offset := 0; ; offset += catalogPage {
-		b, err := r.get(ctx, fmt.Sprintf("%s/api/replays?limit=%d&offset=%d", strings.TrimRight(r.indexURL, "/"), catalogPage, offset))
+		q.Set("limit", strconv.Itoa(catalogPage))
+		q.Set("offset", strconv.Itoa(offset))
+		b, err := r.get(ctx, strings.TrimRight(r.indexURL, "/")+"/api/replays?"+q.Encode())
 		if err != nil {
 			return nil, err
 		}
