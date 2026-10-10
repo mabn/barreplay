@@ -66,6 +66,8 @@ export interface Def {
   human?: string;
   /** Metal; absent when the replay does not record it. */
   cost?: number;
+  /** Its icontypes key, when the capture records one (version 4+). */
+  icon?: string;
 }
 
 export interface Series {
@@ -118,6 +120,13 @@ export interface BattleTeam {
   killed?: number;
 }
 
+/** How many of one def a side lost in a battle (version 4+). */
+export interface UnitLoss {
+  def: number;
+  n: number;
+  metal: number;
+}
+
 export interface Battle {
   f0: number;
   f1: number;
@@ -126,7 +135,7 @@ export interface Battle {
   /** Radius holding the deaths, elmos. */
   r: number;
   /** Indexed like sides. */
-  lost: { n: number; metal: number; top: number[] }[];
+  lost: { n: number; metal: number; top: number[]; units?: UnitLoss[] }[];
   /** Who took part, by team (version 4+). */
   teams?: BattleTeam[];
 }
@@ -261,6 +270,10 @@ export interface SummaryOptions {
   /** Where map images come from; defaults to BAR's maps API. Null draws the
    * map views on a plain background. */
   mapApi?: string | null;
+  /** Where unit icons come from: an origin serving /icons/icontypes.json and
+   * the bitmaps it names (the replay viewer). Defaults to the origin this
+   * module was loaded from; null draws unit names instead. */
+  iconBase?: string | null;
 }
 
 export interface SummaryHandle {

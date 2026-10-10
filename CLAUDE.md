@@ -711,7 +711,14 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           most of the height whatever its size. The MAP
                           STORY numbers its battles in the order they happened, on the map and
                           in a one-line-per-battle list (losses either side of a centre line,
-                          square-root scaled), one selection shared by both.
+                          square-root scaled), one selection shared by both; a picked battle
+                          shows the two sides' losses SIDE BY SIDE, each kind of unit as its
+                          untinted BAR icon with a count (Battle.lost[].units, v4: def/n/metal,
+                          costliest first, at most 16). ICONS (icons.ts unitIcon) come from
+                          the viewer's /icons/icontypes.json, looked up by the insights def's
+                          `icon` (its iconType) then its name; SummaryOptions.iconBase names
+                          the origin, defaulting to the one the module was loaded from, null
+                          = names; a def with no icon reads as its name.
                           The library draws versions 1-4 (INSIGHTS_VERSIONS [4, 3, 2, 1]; v2 adds
                           winner + swing, v3 eliminations and peak battles, v4 owner removals
                           left out, owned value and battle teams) and app.js fetches

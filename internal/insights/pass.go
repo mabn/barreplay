@@ -501,6 +501,6 @@ func (p *pass) finish() {
 	}
 	for id := range p.usedDef {
 		d := p.in.Meta.UnitDefs[id]
-		o.Defs[id] = Def{Name: d.Name, Human: d.HumanName, Cost: round1(float64(d.MetalCost))}
+		o.Defs[id] = Def{Name: d.Name, Human: d.HumanName, Cost: round1(float64(d.MetalCost)), Icon: d.IconType}
 	}
 }

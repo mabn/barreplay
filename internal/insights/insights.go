@@ -102,6 +102,9 @@ type Def struct {
 	Name  string  `json:"name"`
 	Human string  `json:"human,omitempty"`
 	Cost  float64 `json:"cost,omitempty"` // metal; absent when the replay does not record it
+	// Icon is the def's icontypes key (the viewer's /icons/icontypes.json),
+	// when the capture records one; the def's name is the fallback key.
+	Icon string `json:"icon,omitempty"`
 }
 
 // Series holds one value per side per step; T[i] is step i's time in seconds.

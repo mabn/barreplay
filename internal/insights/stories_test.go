@@ -20,6 +20,10 @@ func TestBattles(t *testing.T) {
 	if b.X < 3500 || b.X > 4200 || len(b.Lost[0].Top) != 1 || b.Lost[0].Top[0] != defRaider {
 		t.Errorf("battle centre/top = %d / %v", b.X, b.Lost[0].Top)
 	}
+	// The unit list counts every death: one def, all fourteen, all the metal.
+	if u := b.Lost[0].Units; len(u) != 1 || u[0].Def != defRaider || u[0].N != 14 || u[0].Metal != 700 {
+		t.Errorf("battle units = %+v", u)
+	}
 	// Who fought it: every team's losses add up to its side's, and the
 	// sides that lost raiders had an army there to lose them from.
 	lost := make([]float64, len(b.Lost))

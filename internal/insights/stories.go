@@ -67,6 +67,16 @@ type BattleLoss struct {
 	Metal float64 `json:"metal"`
 	// Top is the costliest defs lost, by total metal, at most battleTopDefs.
 	Top []int32 `json:"top"`
+	// Units is every def lost with its count and metal, costliest first, at
+	// most battleUnitDefs: what the page draws as icons.
+	Units []UnitLoss `json:"units,omitempty"`
+}
+
+// UnitLoss is how many of one def a side lost in a battle, and their metal.
+type UnitLoss struct {
+	Def   int32   `json:"def"`
+	N     int     `json:"n"`
+	Metal float64 `json:"metal"`
 }
 
 // Award goes to one unit.
@@ -100,6 +110,7 @@ const (
 	battleMinN      = 6                        // deaths for a peak to count as a battle
 	battleMaxN      = 12                       // battles kept (the biggest, then in time order)
 	battleTopDefs   = 3                        // costliest defs listed per side
+	battleUnitDefs  = 16                       // defs a battle's unit list carries per side
 	tourGrid        = 32                       // cells per axis of the Tourist's map grid
 	tourMinCells    = tourGrid * tourGrid / 20 // 5% of the map, or no Tourist
 	closeCallMin    = 0.0                      // health fraction must be above this (alive)
@@ -476,8 +487,10 @@ func (p *pass) battleOf(members []int, ns int) Battle {
 	d := p.out.Deaths
 	bt := Battle{F0: math.MaxInt32, Lost: make([]BattleLoss, ns)}
 	top := make([]map[int32]float64, ns)
+	count := make([]map[int32]int, ns)
 	for s := range top {
 		top[s] = map[int32]float64{}
+		count[s] = map[int32]int{}
 	}
 	var sx, sz, sw float64
 	for _, i := range members {
@@ -492,6 +505,7 @@ func (p *pass) battleOf(members []int, ns int) Battle {
 			l.N++
 			l.Metal += d.Cost[i]
 			top[side][d.Def[i]] += d.Cost[i]
+			count[side][d.Def[i]]++
 		}
 	}
 	cx, cz := sx/sw, sz/sw
@@ -504,6 +518,7 @@ func (p *pass) battleOf(members []int, ns int) Battle {
 	for s := range bt.Lost {
 		bt.Lost[s].Metal = round1(bt.Lost[s].Metal)
 		bt.Lost[s].Top = topDefs(top[s])
+		bt.Lost[s].Units = unitLosses(top[s], count[s])
 	}
 	return bt
 }
@@ -567,6 +582,29 @@ func abs(v int) int {
 		return -v
 	}
 	return v
+}
+
+// unitLosses lists the defs lost, costliest first (then the most lost, then
+// by id, so the result is deterministic), at most battleUnitDefs.
+func unitLosses(metal map[int32]float64, n map[int32]int) []UnitLoss {
+	out := make([]UnitLoss, 0, len(n))
+	for id, k := range n {
+		out = append(out, UnitLoss{Def: id, N: k, Metal: round1(metal[id])})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.Metal != b.Metal {
+			return a.Metal > b.Metal
+		}
+		if a.N != b.N {
+			return a.N > b.N
+		}
+		return a.Def < b.Def
+	})
+	if len(out) > battleUnitDefs {
+		out = out[:battleUnitDefs]
+	}
+	return out
 }
 
 func topDefs(m map[int32]float64) []int32 {

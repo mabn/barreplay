@@ -11,6 +11,7 @@ import { mapView } from "../mapview";
 import { comparable, sideColor, sideName } from "../model";
 import { compass, fighters } from "../moments";
 import { fightersLine } from "../names";
+import { unitIcon } from "../icons";
 import { tip, type TipRow } from "../tooltip";
 import { clipSpan, watcher } from "../watch";
 import { SIM_FPS, type Battle, type Insights, type SummaryOptions } from "../types";
@@ -134,12 +135,19 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
 
   function battleDetail(i: number): HTMLElement {
     const b = ins.battles[i];
-    const lossLine = (sd: number) => {
+    // One column a side, side by side: who, how much, then what — each
+    // kind of unit lost as its icon with a count.
+    const lossCol = (sd: number) => {
       const l = b.lost[sd] ?? { n: 0, metal: 0, top: [] };
-      const top = l.top.map(name).join(", ");
-      return h("div", { class: "brs-stat" },
-        h("span", { style: `color: ${sideColor(ins, sd)}` }, sideName(ins, sd)),
-        `${l.n} lost` + (priced && l.metal ? ` · ${fmt(l.metal)} metal` : "") + (top ? ` · ${top}` : ""));
+      const units = l.units ?? l.top.map((def) => ({ def, n: 0, metal: 0 }));
+      return h("div", { class: "brs-losscol" },
+        h("div", { style: `color: ${sideColor(ins, sd)}` }, sideName(ins, sd)),
+        h("div", { class: "brs-muted" }, `${l.n} lost` + (priced && l.metal ? ` · ${fmt(l.metal)} metal` : "")),
+        h("div", { class: "brs-units" }, ...units.map((u) => {
+          const chip = h("span", { class: "brs-unit" }, unitIcon(ins, opts, u.def), u.n ? h("span", undefined, `×${u.n}`) : null);
+          tip(chip, { title: name(u.def), rows: u.n ? [{ label: `${u.n} lost`, value: priced && u.metal ? `${fmtMetal(u.metal)} metal` : "" }] : [] });
+          return chip;
+        })));
     };
     const play = watch ? h("button", { class: "brs-watchbtn", type: "button" }, "▶ Watch this battle") : null;
     if (play && watch) play.addEventListener("click", () => watch(clipOf(b, i)));
@@ -147,7 +155,7 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
       h("div", undefined, h("b", undefined, `Battle ${i + 1}`), h("span", { class: "brs-muted" }, ` · ${when(b)} · ${compass(ins, b.x, b.z)}`)),
       h("div", { style: "margin: 2px 0 6px" }, verdict(b)),
       fightersLine(ins, fighters(ins, b)),
-      lossLine(0), lossLine(1), play);
+      h("div", { class: "brs-losscols" }, lossCol(0), lossCol(1)), play);
   }
 
   const list = ins.battles.length

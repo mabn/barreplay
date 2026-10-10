@@ -249,10 +249,10 @@ function diary(ins: Insights, pl: PlayerReport): HTMLElement {
 
 function leaks(pl: PlayerReport): HTMLElement {
   const l = pl.leaks;
-  const floatRow = h("div", { class: "brs-stat" }, h("span", undefined, "Side on full metal storage"),
+  const floatRow = h("div", { class: "brs-stat" }, h("span", undefined, "Side on full metal"),
     l.floatSec > 0 ? `${fmtClock(l.floatSec)} · ${fmtMetal(l.floatMetal)} metal unused` : "never");
   tip(floatRow, "Storage overflow is shared with allies, so it only counts while the whole side is full.");
-  const idleRow = h("div", { class: "brs-stat" }, h("span", undefined, "Builders not building"),
+  const idleRow = h("div", { class: "brs-stat" }, h("span", undefined, "Builders idle"),
     l.notBuilding === null ? "not recorded in this replay" : `${Math.round(l.notBuilding * 100)}% of builder time`);
   tip(idleRow, "A builder with no target, standing still. Reclaiming counts as not building.");
   return h("div", { style: "margin-top: 14px" }, h("h3", undefined, "Leaks"), floatRow, idleRow);
@@ -260,18 +260,22 @@ function leaks(pl: PlayerReport): HTMLElement {
 
 interface Axis {
   label: string;
+  /** What the axis measures, in full, for the tooltip. */
+  info: string;
   value: (p: PlayerReport) => number | null;
   fmt: (v: number) => string;
   /** True when a smaller value ranks higher (time to T2). */
   lowFirst?: boolean;
 }
 
+// Labels stay one line (the column is narrow): the long reading is the
+// tooltip's `info`.
 const AXES: Axis[] = [
-  { label: "Share of side income", value: (p) => p.style.incomeShare, fmt: (v) => `${Math.round(v * 100)}%` },
-  { label: "Time to T2", value: (p) => (p.style.t2 >= 0 ? p.style.t2 / SIM_FPS : null), fmt: fmtClock, lowFirst: true },
-  { label: "Map covered", value: (p) => p.style.areaPct, fmt: (v) => `${v.toFixed(0)}%` },
-  { label: "Army past the middle", value: (p) => p.style.forwardShare, fmt: (v) => `${Math.round(v * 100)}%` },
-  { label: "Builder time assisting", value: (p) => p.style.assistShare, fmt: (v) => `${Math.round(v * 100)}%` },
+  { label: "Income share", info: "Share of the side's metal income", value: (p) => p.style.incomeShare, fmt: (v) => `${Math.round(v * 100)}%` },
+  { label: "Time to T2", info: "When the player finished their first tech 2 factory", value: (p) => (p.style.t2 >= 0 ? p.style.t2 / SIM_FPS : null), fmt: fmtClock, lowFirst: true },
+  { label: "Map covered", info: "Share of the map the player's units went to", value: (p) => p.style.areaPct, fmt: (v) => `${v.toFixed(0)}%` },
+  { label: "Army forward", info: "Share of the player's army past the middle of the map", value: (p) => p.style.forwardShare, fmt: (v) => `${Math.round(v * 100)}%` },
+  { label: "Assisting", info: "Share of builder time spent assisting another build", value: (p) => p.style.assistShare, fmt: (v) => `${Math.round(v * 100)}%` },
 ];
 
 /** style: each axis as the player's value, a bar against the game's best, and
@@ -295,7 +299,7 @@ function style(ins: Insights, pl: PlayerReport): HTMLElement {
       h("span", undefined, ax.label),
       h("span", { class: "brs-bar" }, h("i", { style: `width: ${Math.round(8 + 92 * frac)}%; background: ${teamColor(ins, pl.team)}` })),
       h("span", { class: "brs-val" }, `${ax.fmt(mine)} · ${rank}`));
-    tip(row, { title: ax.label, rows: [{ label: "This player", value: ax.fmt(mine) }, { label: "Best in the game", value: ax.fmt(ax.lowFirst ? lo : hi) }, { label: "Rank", value: rank }] });
+    tip(row, { title: ax.info, rows: [{ label: "This player", value: ax.fmt(mine) }, { label: "Best in the game", value: ax.fmt(ax.lowFirst ? lo : hi) }, { label: "Rank", value: rank }] });
     return row;
   });
   return h("div", undefined, h("h3", { style: "margin-top: 14px" }, "Play style"), ...rows);

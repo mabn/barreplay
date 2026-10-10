@@ -27,6 +27,11 @@ export const CSS = `
 .brs-root .brs-stat { display: flex; justify-content: space-between; gap: 10px;
   font-variant-numeric: tabular-nums; }
 .brs-root .brs-stat span { color: var(--brs-muted); }
+.brs-root .brs-losscols { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; margin: 6px 0 8px; }
+.brs-root .brs-units { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; }
+.brs-root .brs-unit { display: inline-flex; align-items: center; gap: 3px; font-variant-numeric: tabular-nums; color: var(--brs-muted); }
+.brs-root .brs-uicon { width: 22px; height: 22px; object-fit: contain; }
+.brs-root .brs-uname { color: var(--brs-text); }
 .brs-root .brs-hint { color: var(--brs-muted); font-size: 12px; }
 .brs-root svg { display: block; width: 100%; height: auto; overflow: visible; }
 .brs-root svg text { fill: var(--brs-muted); font-size: 11px; font-family: inherit; }
@@ -67,7 +72,8 @@ export const CSS = `
 .brs-root .brs-tab:hover { border-color: var(--brs-muted); border-bottom-color: var(--brs-team); }
 .brs-root .brs-tab.brs-on { color: #0b0f13; background: var(--brs-team); border-color: var(--brs-team); font-weight: 600; }
 .brs-root .brs-pdetail h2 { margin-bottom: 0; }
-.brs-root .brs-axis { display: grid; grid-template-columns: 110px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 2px 0; }
+.brs-root .brs-axis { display: grid; grid-template-columns: 96px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 2px 0; }
+.brs-root .brs-axis > span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .brs-root .brs-bar { display: block; height: 8px; background: var(--brs-grid); border-radius: 2px; overflow: hidden; }
 .brs-root .brs-bar i { display: block; height: 100%; }
 .brs-root .brs-panel-label { color: var(--brs-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; margin: 10px 0 2px; }
