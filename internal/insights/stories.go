@@ -116,6 +116,10 @@ const (
 	tourGrid        = 32                       // cells per axis of the Tourist's map grid
 	tourMinCells    = tourGrid * tourGrid / 20 // 5% of the map, or no Tourist
 	closeCallMin    = 0.0                      // health fraction must be above this (alive)
+	closeCallCost   = 400.0                    // metal a Close call must cost (a fighter at 6% is no story)
+	immortalAfterS  = 2 * 60 * simFPS          // without causes: its hardest moment must be this long before the end
+	immortalKillPct = 0.5                      // metal killed after its hardest moment, as a share of its own cost
+	healedMin       = 1.0                      // own health a Most healed unit must have been repaired
 	immortalMinS    = 2 * 60 * simFPS          // frames an Immortal must have lived
 	immortalMinHits = 0.5                      // share of its own health it must have taken
 	pressureBin     = 30 * simFPS              // window the hardest moment is found in
@@ -153,10 +157,37 @@ type track struct {
 	binF     int32
 	peak     float64
 	peakF    int32
+	// What it repaired (health rises while finished, a floor like taken)
+	// and the costliest pressureBin of it, for Most healed.
+	healed   float64
+	hbin     int32
+	hbinSum  float64
+	hbinF    int32
+	hpeak    float64
+	hpeakF   int32
+	cost     float64
+	kills    []kill // enemies the engine credited to it, in frame order
 	dead     bool
 	army     bool // Immortal (a commander outliving the game is no feat)
 	eligible bool // army or commander: Close call
 	ground   bool // mobile and not flying: Marathon, Tourist
+}
+
+// kill is one enemy a tracked unit was credited with.
+type kill struct {
+	f     int32
+	metal float64
+}
+
+// killedAfter is the metal of the kills credited to the unit after frame f.
+func (t *track) killedAfter(f int32) float64 {
+	sum := 0.0
+	for _, k := range t.kills {
+		if k.f > f {
+			sum += k.metal
+		}
+	}
+	return sum
 }
 
 // trackUnit updates a unit's track with one sample.
@@ -169,7 +200,10 @@ func (p *pass) trackUnit(fr int32, u snapshot.UnitState, d defInfo) {
 		// Unit ids are recycled once a unit is gone: a new def, or an id seen
 		// again after its death, is a new unit.
 		t = &track{id: u.UnitID, def: u.DefID, team: u.Team, first: fr, x: u.Pos.X, z: u.Pos.Z, minHP: 2,
-			army: d.army, eligible: d.army || d.commander, ground: !d.fly, prevHP: -1, bin: -1}
+			army: d.army, eligible: d.army || d.commander, ground: !d.fly, prevHP: -1, bin: -1, hbin: -1, cost: d.cost}
+		if d.commander {
+			t.cost = math.Max(t.cost, closeCallCost) // a commander is never cheap
+		}
 		p.tracks[u.UnitID] = t
 		p.allTracks = append(p.allTracks, t)
 	} else {
@@ -198,6 +232,17 @@ func (p *pass) trackUnit(fr int32, u snapshot.UnitState, d defInfo) {
 			t.binTaken += drop
 			if t.binTaken > t.peak {
 				t.peak, t.peakF = t.binTaken, t.binF
+			}
+		}
+		if t.prevHP >= 0 && u.Health > t.prevHP {
+			rise := float64(u.Health - t.prevHP)
+			t.healed += rise
+			if b := fr / pressureBin; b != t.hbin {
+				t.hbin, t.hbinSum, t.hbinF = b, 0, fr
+			}
+			t.hbinSum += rise
+			if t.hbinSum > t.hpeak {
+				t.hpeak, t.hpeakF = t.hbinSum, t.hbinF
 			}
 		}
 		t.prevHP = u.Health
@@ -626,7 +671,7 @@ func topDefs(m map[int32]float64) []int32 {
 	return ids
 }
 
-// awards picks the six awards a replay can support without knowing who
+// awards picks the seven awards a replay can support without knowing who
 // killed what. Ties go to the earlier unit, so the result is deterministic.
 func (p *pass) awards() []Award {
 	out := []Award{}
@@ -650,20 +695,44 @@ func (p *pass) awards() []Award {
 	// Immortal: surviving is not a feat — most of an army is alive at the
 	// end — so it goes to the unit that TOOK the most damage and lived, as
 	// long as that was a real share of its own health (a Juggernaut grazed
-	// for 2% is no story); the moment is its hardest half-minute. Measured
-	// on a real 8v8: the best survivor took 119k hp, 0.74x its health, and
-	// nothing alive at the end had taken more than 0.95x.
+	// for 2% is no story), AND that kept fighting after its hardest
+	// half-minute: credited with enemies worth half its own cost after it.
+	// A unit merely caught damaged when the game ended is no story either.
+	// A capture that names no killers cannot say what it did next, so there
+	// the hardest moment must just lie well before the end.
 	hits := func(t *track) float64 {
 		if t.maxHP <= 0 {
 			return 0
 		}
 		return t.taken / float64(t.maxHP)
 	}
+	foughtOn := func(t *track) bool {
+		if !p.hasCauses {
+			return end-t.peakF >= immortalAfterS
+		}
+		return t.killedAfter(t.peakF+pressureBin) >= immortalKillPct*math.Max(t.cost, 1)
+	}
 	if t := pick(func(a, b *track) bool { return a.taken > b.taken },
 		func(t *track) bool {
-			return t.army && alive(t) && end-t.first >= immortalMinS && hits(t) >= immortalMinHits
+			return t.army && alive(t) && end-t.first >= immortalMinS && hits(t) >= immortalMinHits && foughtOn(t)
 		}); t != nil {
-		add(t, "immortal", "Immortal", fmt.Sprintf("took %s damage, %.0f%% of its own health, and survived", metal(t.taken), 100*hits(t)), t.taken, t.peakF)
+		text := fmt.Sprintf("took %s damage, %.0f%% of its own health, and survived", metal(t.taken), 100*hits(t))
+		if p.hasCauses {
+			text = fmt.Sprintf("took %.0f%% of its own health in damage, then killed %s metal more", 100*hits(t), metal(t.killedAfter(t.peakF+pressureBin)))
+		}
+		add(t, "immortal", "Immortal", text, t.taken, t.peakF)
+	}
+	// Most healed: repaired the most times over its own health — a unit kept
+	// in the fight by the builders behind it.
+	healedX := func(t *track) float64 {
+		if t.maxHP <= 0 {
+			return 0
+		}
+		return t.healed / float64(t.maxHP)
+	}
+	if t := pick(func(a, b *track) bool { return a.healed > b.healed },
+		func(t *track) bool { return t.army && t.cost >= closeCallCost && healedX(t) >= healedMin }); t != nil {
+		add(t, "healed", "Most healed", fmt.Sprintf("repaired %.1f× its own health (%s hp)", healedX(t), metal(t.healed)), healedX(t), t.hpeakF)
 	}
 	if t := pick(func(a, b *track) bool { return a.path > b.path }, func(t *track) bool { return t.ground && t.path > 0 }); t != nil {
 		add(t, "marathon", "Marathon", "travelled "+distance(t.path), t.path, t.last)
@@ -673,7 +742,7 @@ func (p *pass) awards() []Award {
 		pct := 100 * float64(n) / (tourGrid * tourGrid)
 		add(t, "tourist", "Tourist", fmt.Sprintf("visited %.0f%% of the map", pct), pct, t.last)
 	}
-	if t := pick(func(a, b *track) bool { return a.minHP < b.minHP }, func(t *track) bool { return t.eligible && alive(t) && t.minHP < 0.25 }); t != nil {
+	if t := pick(func(a, b *track) bool { return a.minHP < b.minHP }, func(t *track) bool { return t.eligible && alive(t) && t.minHP < 0.25 && t.cost >= closeCallCost }); t != nil {
 		add(t, "closecall", "Close call", fmt.Sprintf("survived at %.0f%% health", math.Ceil(t.minHP*100)), t.minHP*100, t.minHPF)
 	}
 

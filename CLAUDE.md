@@ -577,7 +577,15 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           20 s. IMMORTAL is no longer "survived to the end" — most of an army
                           does — but the unit alive at the end that TOOK the most damage
                           (health drops between samples, a floor since repair hides some),
-                          if that was >= half its own health, watched at its hardest 30 s.
+                          if that was >= half its own health, watched at its hardest 30 s,
+                          AND that FOUGHT ON after it: credited (destroyed-event causes) with
+                          enemies worth >= half its own cost after that half-minute — a unit
+                          caught damaged when the game ended is no story; without causes its
+                          hardest moment must be >= 2 min before the end. CLOSE CALL skips
+                          units under closeCallCost = 400 metal (a fighter at 6% is no story;
+                          commanders always count). MOST HEALED (key "healed") is the army
+                          unit of >= 400 metal that regained the most hp between samples
+                          while finished (a floor, like damage taken), if >= its own health.
                           BIGGEST BLOW (stories.go biggestBlow) replaced "Most expensive loss":
                           the most metal ONE PLAYER lost within 30 s (blowWindow; wiped deaths
                           and owner removals excluded) — a base going up — rather than the

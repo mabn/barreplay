@@ -1,4 +1,4 @@
-// Awards: six that a replay supports without knowing who killed what. Each
+// Awards: seven that a replay supports without knowing who killed what. Each
 // goes to ONE unit among thousands, so each says which: a small route map
 // on the card, and a clip that follows the unit, rings it and draws where
 // it went (Clip.follow / Clip.path, Version 4 files).
@@ -9,7 +9,7 @@ import { clipAround, clipEvent, watcher } from "../watch";
 import { type Award, type Clip, type Insights, type SummaryOptions } from "../types";
 
 const ICONS: Record<string, string> = {
-  immortal: "🛡", marathon: "🏃", tourist: "🧭", closecall: "❤", unfinished: "🏗", costliest: "💸", blow: "💥",
+  immortal: "🛡", marathon: "🏃", tourist: "🧭", closecall: "❤", healed: "🔧", unfinished: "🏗", costliest: "💸", blow: "💥",
 };
 
 /** where is the award's unit on the map when the moment is its death (the

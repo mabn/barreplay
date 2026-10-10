@@ -171,3 +171,57 @@ func TestEliminationsInferred(t *testing.T) {
 		t.Errorf("wiped = %v, want only team 0's burst", w[:3])
 	}
 }
+
+// TestAwardRules pins the rules that keep an award from going to a unit that
+// merely happened to be standing there: Immortal must fight on after its
+// hardest moment, Close call skips cheap units, Most healed needs the unit's
+// own health in repairs.
+func TestAwardRules(t *testing.T) {
+	end := int32(30 * 600)
+	mk := func(id int32, cost float64) *track {
+		return &track{id: id, def: id, team: 1, first: 0, last: end, army: true, eligible: true, cost: cost, maxHP: 1000, minHP: 2}
+	}
+	run := func(causes bool, ts ...*track) map[string]Award {
+		p := &pass{out: &Insights{}, tracks: map[int32]*track{}, usedDef: map[int32]bool{}, lastFrame: end, hasCauses: causes}
+		p.allTracks = ts
+		got := map[string]Award{}
+		for _, a := range p.awards() {
+			got[a.Key] = a
+		}
+		return got
+	}
+
+	// Took 80% of its health, then killed nothing: not Immortal; once it
+	// kills half its cost after its hardest half-minute, it is.
+	im := mk(1, 400)
+	im.taken, im.peakF = 800, 30*100
+	if a, ok := run(true, im)["immortal"]; ok {
+		t.Errorf("immortal with no kills after = %+v", a)
+	}
+	im.kills = []kill{{30 * 90, 1000}, {30 * 200, 250}} // the first is before its hardest moment
+	if a := run(true, im)["immortal"]; a.Unit != 1 {
+		t.Errorf("immortal = %+v, want unit 1", a)
+	}
+	// Without causes, only a hardest moment well before the end counts.
+	im.kills, im.peakF = nil, end-30*30
+	if a, ok := run(false, im)["immortal"]; ok {
+		t.Errorf("immortal at the end = %+v", a)
+	}
+
+	// Close call: a fighter at 6% is no story, a tank at 10% is.
+	fighter, tank := mk(2, 80), mk(3, closeCallCost)
+	fighter.minHP, tank.minHP = 0.06, 0.10
+	if a := run(true, fighter, tank)["closecall"]; a.Unit != 3 {
+		t.Errorf("closecall = %+v, want the tank", a)
+	}
+
+	// Most healed: the most hp repaired, at least its own health over.
+	small, big := mk(4, 600), mk(5, 600)
+	small.healed, big.healed = 900, 4000
+	if a := run(true, small, big)["healed"]; a.Unit != 5 || a.Value != 4 {
+		t.Errorf("healed = %+v, want unit 5 at 4x", a)
+	}
+	if a, ok := run(true, small)["healed"]; ok {
+		t.Errorf("healed under its own health = %+v", a)
+	}
+}

@@ -255,6 +255,14 @@ func (p *pass) event(e snapshot.Event) {
 			killer = e.Cause.Team
 		}
 		p.deathKiller = append(p.deathKiller, killer)
+		if c := e.Cause; c != nil && cost > 0 {
+			// Credit the killing unit's track with an ENEMY it took down.
+			if kt := p.tracks[c.UnitID]; kt != nil && !kt.dead && kt.def == c.DefID {
+				if ks, vs := p.ro.side(kt.team), p.ro.side(e.Team); ks >= 0 && vs >= 0 && ks != vs {
+					kt.kills = append(kt.kills, kill{e.Frame, cost})
+				}
+			}
+		}
 		t := p.tracks[e.UnitID]
 		if t != nil && !t.dead {
 			t.dead = true
