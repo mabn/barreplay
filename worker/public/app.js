@@ -4725,6 +4725,7 @@ function playersColumn() {
 
 function showHome() {
   stopPlay();
+  leaveReplayTabs();
   document.body.classList.add('home');
   document.getElementById('home').style.display = '';
   document.getElementById('subtitle').textContent = 'replay state viewer';
@@ -6837,6 +6838,7 @@ function initUpload() {
 
 function uploadStatus(text, cls) {
   const el = document.getElementById('dropstatus');
+  document.getElementById('dropzone').classList.toggle('busy', !!text);
   el.style.display = text ? '' : 'none';
   el.className = cls || '';
   el.textContent = text || '';
@@ -7063,6 +7065,14 @@ function applyReplayTab() {
     resize(); // the canvases were display:none while the summary showed
     show();
   }
+}
+
+// leaveReplayTabs is the replay page's tabs going away under the list: a
+// Summary left open (and any clip playing over it) would otherwise render
+// below the list, since its pane is shown by a body class, not by the page.
+function leaveReplayTabs() {
+  if (clip) closeClip(false);
+  document.body.classList.remove('summary-tab');
 }
 
 function resetSummary() {
