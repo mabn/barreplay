@@ -406,6 +406,27 @@ func (r *runner) local(ctx context.Context, path string) error {
 	return r.write(ctx, rid, in)
 }
 
+// gameOrders is r.orders through the cache: a demo never changes, and a
+// re-run over the catalog would otherwise download every one of them again
+// for a few bytes of orders.
+func (r *runner) gameOrders(ctx context.Context, gameID string) ([]snapshot.Event, error) {
+	key := "demo-orders/" + gameID + ".json"
+	if b, ok := r.cache.get(key); ok {
+		var ev []snapshot.Event
+		if json.Unmarshal(b, &ev) == nil {
+			return ev, nil
+		}
+	}
+	ev, err := r.orders(ctx, gameID)
+	if err != nil {
+		return nil, err
+	}
+	if b, err := json.Marshal(ev); err == nil {
+		r.cache.put(key, b)
+	}
+	return ev, nil
+}
+
 // hasSelfD is whether a capture's events already carry the demo's
 // self-destruct orders.
 func hasSelfD(events []snapshot.Event) bool {
@@ -431,7 +452,7 @@ func (r *runner) write(ctx context.Context, rid string, in insights.Input) error
 		// A .brp packed before the demo's orders were read has none, and
 		// without them a self-destruct reads as a kill. Best-effort, like
 		// the winners: the rest of the summary does not depend on it.
-		if ev, err := r.orders(ctx, in.Meta.GameID); err != nil {
+		if ev, err := r.gameOrders(ctx, in.Meta.GameID); err != nil {
 			fmt.Fprintf(os.Stderr, "%s: self-destructs unknown (%v)\n", rid, err)
 		} else {
 			in.Events = snapshot.MergeEvents(in.Events, ev)

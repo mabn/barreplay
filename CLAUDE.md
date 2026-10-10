@@ -541,11 +541,17 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           VERSION 5 marks SELF-DESTRUCTS (Deaths.SelfD, pass.go selfDestructed):
                           a death with the owner's "selfd" order standing (the engine toggles,
                           so a second order cancels; at most selfdMaxSec = 60 s before) and no
-                          other unit named as its cause. Still a loss — the metal is gone — but
-                          the page says "self-destructs their commander" rather than "falls".
-                          A .brp packed before the demo's orders were read has no selfd events,
-                          so cmd/insights reads them from the demo when the input has none
-                          (packer.DemoSelfD; best-effort like the winners).
+                          other unit named as its cause. It is a loss only when the unit WENT IN
+                          A FIGHT (pass.go fought): its blast killed something within blastSec =
+                          3 s (credited to it in a capture with causes — an enemy, or its own
+                          side's buildings, both worth telling), or it was hurt in the last
+                          fightSec = 20 s. Otherwise its owner cashed it in (a commander blown
+                          up for its metal) and it is an owner removal like a reclaim (Marcin's
+                          rule). A counted one reads "self-destructs their commander" on the
+                          page rather than "falls". A .brp packed before the demo's orders were
+                          read has no selfd events, so cmd/insights reads them from the demo
+                          when the input has none (packer.DemoSelfD; best-effort like the
+                          winners; the orders are kept in -cache as demo-orders/<gameId>.json).
                           VERSION 4 stops counting what an owner REMOVED as a loss (pass.go
                           removedByOwner, only when the capture records causes): a unit
                           reclaimed by its own side (cause weapon -12, the engine's reclaim id)
