@@ -34,7 +34,7 @@
 //
 // A local capture is the way back to full costs for a replay that was only
 // published as pieces: a drag&drop upload's raw stream is archived, so pack
-// it again (a .brsnap/.brepstream input is packed here, demo fetch included)
+// it again (a .brepstream input is packed here, demo fetch included)
 // and name the published revision with -rid. Without -rid the revision is
 // the one a publish of that .brp would get (packer.ContentRev).
 //
@@ -211,7 +211,7 @@ func (r *runner) one(ctx context.Context, arg string) error {
 	switch filepath.Ext(arg) {
 	case ".brp":
 		return r.local(ctx, arg)
-	case ".brsnap", ".brepstream":
+	case ".brepstream":
 		dir, err := os.MkdirTemp("", "insights-pack-")
 		if err != nil {
 			return err

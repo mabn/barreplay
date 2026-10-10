@@ -521,7 +521,7 @@ cmd/insights/main.go      CLI: the summary BACKFILL, one replay at a time (or -a
                           insights.FromPieces: army costs only, POV "unknown" when the row has no
                           view), and uploads the one file via packer.UploadPieces (no catalog
                           write). An existing insights file is skipped unless -force. A LOCAL
-                          capture (.brp, or a .brepstream/.brsnap it packs first) is the way back
+                          capture (.brp, or a .brepstream it packs first) is the way back
                           to full costs for a pieces-only replay — e.g. an upload's archived
                           stream — with -rid naming the published revision it belongs to.
                           Nothing writes pieces any more, so the rebuild tests (here and in

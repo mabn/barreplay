@@ -424,7 +424,7 @@ func TestObjectHTTPMeta(t *testing.T) {
 // new game named "<gameId>-<rev>".
 func TestUploadStaticIDFromMeta(t *testing.T) {
 	dir := t.TempDir()
-	in := filepath.Join(dir, "somegameid.brsnap")
+	in := filepath.Join(dir, "somegameid.brepstream")
 	if err := os.WriteFile(in, []byte(testStream), 0o644); err != nil {
 		t.Fatal(err)
 	}

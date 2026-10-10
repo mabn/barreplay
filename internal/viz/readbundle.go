@@ -45,10 +45,11 @@ func ReadStaticBundle(ctx context.Context, fetch PieceFetcher, rid string) (*sna
 	if err != nil {
 		return nil, nil, fmt.Errorf("head: %w", err)
 	}
-	if version != 4 && version != snapshot.BRPVersion {
+	// Pieces were last written by v5; v6 replays are published as a .brp.
+	if version != 4 && version != 5 {
 		return nil, nil, fmt.Errorf("head: unsupported version %d", version)
 	}
-	bf := &snapshot.BRPFile{Sections: map[byte][]byte{}, Legacy: version == 4}
+	bf := &snapshot.BRPFile{Version: version, Sections: map[byte][]byte{}, Legacy: version == 4}
 	var head legacyHead
 	for _, s := range sections {
 		switch s.Tag {
