@@ -531,8 +531,10 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           removedByOwner, only when the capture records causes): a unit
                           reclaimed by its own side (cause weapon -12, the engine's reclaim id)
                           and a STRUCTURE destroyed with no cause at all (a mex/geo upgrade, a
-                          cancelled build, a self-destruct) — wind farms reclaimed for space
-                          used to read as a lost fight. An EVOLUTION is never a loss in any
+                          cancelled build, a self-destruct) or ANY UNFINISHED unit destroyed
+                          with no cause (a cancelled build in a lab; a finished mobile one
+                          with no cause is a crash, still a loss) — wind farms reclaimed for
+                          space used to read as a lost fight. An EVOLUTION is never a loss in any
                           capture (evolve.go): BAR's evolving commanders are swapped at once
                           (a new unit created AND finished in one frame, the old one destroyed
                           with no cause, same team, same frame), so each such instant spawn
@@ -644,8 +646,10 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           since a raid's buildings often blow up just after the line moved.
                           A side the line moved toward that still lost MORE there is not said
                           to win: the title states the trade ("trades 114k metal for 69.9k").
-                          A span clip carries atEnd, which widens the slider's #clipmark into
-                          a band over the event. Titles
+                          A span clip (watch.ts clipEvent) plays the WHOLE event however long,
+                          20 s of context before it, and carries atEnd, which widens the
+                          slider's #clipmark into a band over the event; capping it at a
+                          minute hid the end of a two-minute fight its story was counting. Titles
                           and every player/side name are drawn in that player's in-game
                           colour (names.ts, model.nameRuns); a side is named by its leader's
                           colour ("Blue team", model.colorName), "Team N" when two sides

@@ -14,7 +14,7 @@ import { eliminationFocus, momentStory } from "../moments";
 import { fightersLine, named } from "../names";
 import { stepTimes } from "../series";
 import { tip } from "../tooltip";
-import { clipAround, clipAt, clipSpan, watchNote, type Watch } from "../watch";
+import { clipAround, clipAt, clipEvent, clipSpan, watchNote, type Watch } from "../watch";
 import { SIM_FPS, type Insights } from "../types";
 
 /** pct formats a probability as a whole percent. */
@@ -84,8 +84,9 @@ export function swingChart(ins: Insights, watch: Watch | null, group: ChartGroup
     const title = `${m.n}. ${st.title}`;
     const f = st.focus;
     // An event with a span (a raid, a fight) is marked as that span and runs
-    // to its end; a single instant runs on to the end of the swing.
-    if (f && f.f1 !== undefined && f.f1 > f.f) return clipAt(f.f, f.f1, { x: f.x, z: f.z, r: f.r, atEnd: f.f1, title });
+    // to its END, however long; a single instant runs on to the end of the
+    // swing.
+    if (f && f.f1 !== undefined && f.f1 > f.f) return clipEvent(f.f, f.f1, { x: f.x, z: f.z, r: f.r, title });
     if (f && typeof f.x === "number") return clipAt(f.f, m.f1, { x: f.x, z: f.z, r: f.r, title });
     const where = b ? { x: b.x, z: b.z, r: b.r } : {};
     return f ? clipAt(f.f, m.f1, { ...where, title }) : clipSpan(m.f0, m.f1, { ...where, title });

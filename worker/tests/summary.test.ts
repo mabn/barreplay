@@ -7,7 +7,7 @@ import { fmtClock, fmtMetal, niceStep, timeStep } from "../src/summary/format";
 import { colorName, comparable, nameRuns, notices, readable, sideColor, sideName } from "../src/summary/model";
 import { knockouts, lossesByStep, wipedOf } from "../src/summary/losses";
 import { compass, fighters, momentStory } from "../src/summary/moments";
-import { clipAround, clipAt, clipSpan, watcher } from "../src/summary/watch";
+import { clipAround, clipAt, clipEvent, clipSpan, watcher } from "../src/summary/watch";
 import { zonesOf } from "../src/summary/zones";
 import { clipOf } from "../src/summary/sections/awards";
 import type { Insights } from "../src/summary/types";
@@ -163,6 +163,8 @@ test("clips carry a lead-in, and fall back to a seek", () => {
   // of the minute the line took to move, and runs on to the swing's end.
   assert.deepEqual(clipAt(2610, 3150), { at: 2610, f0: 1920, start: 2460, f1: 3300 }, "the instant mid-clip, playback 5 s before it");
   assert.deepEqual(clipAt(300, 9000), { at: 300, f0: 0, start: 150, f1: 2100 }, "at most a minute past the instant");
+  // An event with an end plays all of it, however long, marked as a band.
+  assert.deepEqual(clipEvent(3000, 6600), { at: 3000, atEnd: 6600, f0: 2400, start: 2850, f1: 6750 });
   assert.equal(watcher({}), null, "no hook: nothing is clickable");
   let seeked = -1;
   watcher({ onSeek: (f) => { seeked = f; } })!({ f0: 42, f1: 99 });

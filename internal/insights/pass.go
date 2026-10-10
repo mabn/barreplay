@@ -279,8 +279,9 @@ const weaponReclaimed = -12
 //     a geothermal the same way), cancelled while unfinished, or
 //     self-destructed. On a real 8v8 re-sim this was 14 of the 25 structure
 //     deaths in one "trade" the summary used to report, every one of them
-//     an upgrade. Mobile units are left alone: a shot-down aircraft dies
-//     later, in its crash, with no cause either.
+//     an upgrade. A finished mobile unit is left alone: a shot-down
+//     aircraft dies later, in its crash, with no cause either. An
+//     UNFINISHED one going with no cause is a cancelled build.
 func (p *pass) removedByOwner(e snapshot.Event) bool {
 	if e.Kind == snapshot.EventDestroyed && p.evolved.replaced(e) {
 		// Evolved into its next form (evolve.go): replaced, not lost.
@@ -291,7 +292,10 @@ func (p *pass) removedByOwner(e snapshot.Event) bool {
 	}
 	c := e.Cause
 	if c == nil {
-		return p.defs[e.DefID].structure && p.ro.side(e.Team) >= 0
+		// An UNFINISHED unit going with no cause is a cancelled build (a
+		// half-built Liche in its lab), whatever it is; a finished mobile one
+		// is a crash, which is a real loss.
+		return (p.defs[e.DefID].structure || p.pending[e.UnitID]) && p.ro.side(e.Team) >= 0
 	}
 	if c.WeaponDef != weaponReclaimed || c.Team < 0 {
 		return false

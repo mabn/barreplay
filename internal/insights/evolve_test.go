@@ -36,3 +36,23 @@ func TestEvolutions(t *testing.T) {
 		}
 	}
 }
+
+// A unit that goes with no cause before it was finished is a cancelled
+// build, not a loss; finished, it is a crash, which is.
+func TestCancelledBuildIsNotALoss(t *testing.T) {
+	p := &pass{
+		hasCauses: true,
+		defs:      map[int32]defInfo{1: {cost: 4400}},
+		pending:   map[int32]bool{7: true},
+		ro:        roster{teamSide: map[int32]int{5: 0}},
+	}
+	gone := func(id int32) snapshot.Event {
+		return snapshot.Event{Frame: 100, Kind: snapshot.EventDestroyed, UnitID: id, DefID: 1, Team: 5}
+	}
+	if !p.removedByOwner(gone(7)) {
+		t.Error("an unfinished unit gone with no cause counts as a loss")
+	}
+	if p.removedByOwner(gone(8)) {
+		t.Error("a finished unit gone with no cause (a crash) is not a loss")
+	}
+}

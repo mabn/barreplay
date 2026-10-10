@@ -60,6 +60,19 @@ export function clipAt(at: number, end: number, extra: Partial<Clip> = {}): Clip
   return framed(at, Math.min(at + MAX_AFTER_SEC * SIM_FPS, Math.max(at + AFTER_SEC * SIM_FPS, end + TAIL_SEC * SIM_FPS)), extra);
 }
 
+/** clipEvent is a clip of an event with a START AND AN END (a raid, a
+ * fight): CONTEXT_SEC before it, the WHOLE event — however long, since its
+ * story counts what died to the end of it, and a clip cut at a minute showed
+ * none of the losses a two-minute fight's last seconds held — and a short
+ * tail, with the event marked as a band (Clip.atEnd). */
+export function clipEvent(f0: number, f1: number, extra: Partial<Clip> = {}): Clip {
+  const c0 = Math.max(0, Math.round(f0 - CONTEXT_SEC * SIM_FPS));
+  return {
+    ...extra, at: Math.round(f0), atEnd: Math.round(f1), f0: c0,
+    start: Math.max(c0, Math.round(f0 - LEAD_IN_SEC * SIM_FPS)), f1: Math.round(f1 + TAIL_SEC * SIM_FPS),
+  };
+}
+
 /** watchNote is the tooltip line saying what a click does. */
 export function watchNote(w: Watch | null): string | undefined {
   return w ? "Click to watch" : undefined;
