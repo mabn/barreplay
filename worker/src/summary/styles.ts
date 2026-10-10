@@ -38,6 +38,8 @@ export const CSS = `
 .brs-root .brs-units { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; }
 .brs-root .brs-unit { display: inline-flex; align-items: center; gap: 3px; font-variant-numeric: tabular-nums; color: var(--brs-muted); }
 .brs-root .brs-uicon { width: 22px; height: 22px; object-fit: contain; }
+.brs-root .brs-unitref { white-space: nowrap; }
+.brs-root .brs-uicon-inline { width: 1.25em; height: 1.25em; object-fit: contain; vertical-align: -0.3em; margin-right: 3px; }
 .brs-root .brs-uname { color: var(--brs-text); }
 .brs-root .brs-strong { font-weight: 600; }
 .brs-root .brs-more { font: inherit; font-size: 12px; color: var(--brs-muted); background: none; border: 1px solid var(--brs-grid); border-radius: 10px; padding: 1px 8px; cursor: pointer; }

@@ -8,7 +8,7 @@
 import { h, section } from "./dom";
 import { fmtClock, fmtMetal } from "./format";
 import { comparable, nameRuns, notices, sideColor, sideName, teamColor } from "./model";
-import { playerName } from "./names";
+import { bindIcons, playerName } from "./names";
 import { ensureStyles } from "./styles";
 import { tip } from "./tooltip";
 import { advantage } from "./sections/advantage";
@@ -57,6 +57,7 @@ export function mountSummary(el: HTMLElement, ins: Insights, opts: SummaryOption
     const o: SummaryOptions = onClip
       ? { ...opts, onClip: (c) => onClip({ ...c, titleRuns: c.titleRuns ?? (c.title ? nameRuns(ins, c.title) : undefined) }) }
       : opts;
+    bindIcons(ins, o);
     const players = playersSection(ins, o);
     for (const sec of sectionsFor(players)) {
       const node = sec(ins, o);

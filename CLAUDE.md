@@ -574,18 +574,17 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           it, drawClipRing pulses a ring round it, drawClipPath draws where it
                           has been bright and where it is going faint). Marathon and Tourist
                           play the whole life (clip speeds up to 64x), the losses their last
-                          20 s. IMMORTAL is no longer "survived to the end" — most of an army
-                          does — but the unit alive at the end that TOOK the most damage
-                          (health drops between samples, a floor since repair hides some),
-                          if that was >= half its own health, watched at its hardest 30 s,
-                          AND that FOUGHT ON after it: credited (destroyed-event causes) with
-                          enemies worth >= half its own cost after that half-minute — a unit
-                          caught damaged when the game ended is no story; without causes its
-                          hardest moment must be >= 2 min before the end. CLOSE CALL skips
-                          units under closeCallCost = 400 metal (a fighter at 6% is no story;
-                          commanders always count). MOST HEALED (key "healed") is the army
-                          unit of >= 400 metal that regained the most hp between samples
-                          while finished (a floor, like damage taken), if >= its own health.
+                          20 s. IMMORTAL is a unit that FELL to <= 30% health and AFTER that
+                          was credited (destroyed-event causes) with enemies worth >= 3x its
+                          own cost and >= 1500 metal, and lived — surviving damage is what most
+                          of an army does; no causes, no Immortal, and most games have none.
+                          CLOSE CALL skips units under closeCallCost = 400 metal (commanders
+                          always count). MOST HEALED (key "healed") is the army unit of >= 400
+                          metal that regained the most hp between samples while finished (a
+                          floor), if >= its own health. UNIT MENTIONS carry their strategic
+                          icon: names.ts named() puts unitRef (icon + name) before every unit
+                          name in a sentence, and award cards lead with it; tooltips and clip
+                          titles stay text.
                           BIGGEST BLOW (stories.go biggestBlow) replaced "Most expensive loss":
                           the most metal ONE PLAYER lost within 30 s (blowWindow; wiped deaths
                           and owner removals excluded) — a base going up — rather than the

@@ -86,21 +86,25 @@ func TestAwards(t *testing.T) {
 	}
 }
 
-func TestImmortalTakesDamage(t *testing.T) {
+func TestHealedTracksRepairs(t *testing.T) {
 	p := &pass{in: Input{}, tracks: map[int32]*track{}}
 	d := defInfo{army: true}
 	hp := func(fr int32, h float32) {
 		p.trackUnit(fr, snapshot.UnitState{UnitID: 7, DefID: 3, Team: 1, Health: h, MaxHealth: 100, BuildProgress: 1}, d)
 	}
 	hp(0, 100)
-	hp(30, 40)      // 60 taken
-	hp(60, 100)     // repaired
-	hp(30*40, 20)   // 80 taken, in a later half-minute
-	hp(30*41, 10)   // 10 more in the same one
-	hp(30*400, 100) // repaired again
+	hp(30, 40)      // hit
+	hp(60, 100)     // 60 repaired
+	hp(30*40, 20)   // hit again, in a later half-minute
+	hp(30*41, 90)   // 70 repaired
+	hp(30*42, 100)  // 10 more in the same one
+	hp(30*400, 100) // nothing
 	tr := p.tracks[7]
-	if tr.taken != 150 || tr.peak != 90 || tr.peakF != 30*40 {
-		t.Errorf("taken %v, peak %v at %d; want 150, 90 at %d", tr.taken, tr.peak, tr.peakF, 30*40)
+	if tr.healed != 140 || tr.hpeak != 80 || tr.hpeakF != 30*41 {
+		t.Errorf("healed %v, peak %v at %d; want 140, 80 at %d", tr.healed, tr.hpeak, tr.hpeakF, 30*41)
+	}
+	if tr.minHP != 0.2 || tr.minHPF != 30*40 {
+		t.Errorf("min hp %v at %d", tr.minHP, tr.minHPF)
 	}
 	if r := tr.route(); len(r) != 3 || r[2][0] != 30*400 {
 		t.Errorf("route = %v, want a point per 5 s sampled", r)
@@ -191,21 +195,24 @@ func TestAwardRules(t *testing.T) {
 		return got
 	}
 
-	// Took 80% of its health, then killed nothing: not Immortal; once it
-	// kills half its cost after its hardest half-minute, it is.
+	// Fell to 10%, then killed nothing: not Immortal. Killing three times
+	// its cost (and 1500 metal) after that moment, it is; what it killed
+	// before the moment does not count, and nothing counts without causes.
 	im := mk(1, 400)
-	im.taken, im.peakF = 800, 30*100
+	im.minHP, im.minHPF = 0.1, 30*100
 	if a, ok := run(true, im)["immortal"]; ok {
 		t.Errorf("immortal with no kills after = %+v", a)
 	}
-	im.kills = []kill{{30 * 90, 1000}, {30 * 200, 250}} // the first is before its hardest moment
-	if a := run(true, im)["immortal"]; a.Unit != 1 {
-		t.Errorf("immortal = %+v, want unit 1", a)
+	im.kills = []kill{{30 * 90, 5000}, {30 * 200, 1000}}
+	if a, ok := run(true, im)["immortal"]; ok {
+		t.Errorf("immortal on kills before its low = %+v", a)
 	}
-	// Without causes, only a hardest moment well before the end counts.
-	im.kills, im.peakF = nil, end-30*30
+	im.kills = append(im.kills, kill{30 * 300, 600})
+	if a := run(true, im)["immortal"]; a.Unit != 1 || a.Value != 1600 || a.F != 30*100 {
+		t.Errorf("immortal = %+v, want unit 1, 1600 metal at its low", a)
+	}
 	if a, ok := run(false, im)["immortal"]; ok {
-		t.Errorf("immortal at the end = %+v", a)
+		t.Errorf("immortal without causes = %+v", a)
 	}
 
 	// Close call: a fighter at 6% is no story, a tank at 10% is.

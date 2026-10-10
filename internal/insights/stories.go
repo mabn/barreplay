@@ -117,12 +117,11 @@ const (
 	tourMinCells    = tourGrid * tourGrid / 20 // 5% of the map, or no Tourist
 	closeCallMin    = 0.0                      // health fraction must be above this (alive)
 	closeCallCost   = 400.0                    // metal a Close call must cost (a fighter at 6% is no story)
-	immortalAfterS  = 2 * 60 * simFPS          // without causes: its hardest moment must be this long before the end
-	immortalKillPct = 0.5                      // metal killed after its hardest moment, as a share of its own cost
+	immortalMaxHP   = 0.3                      // health fraction an Immortal must have fallen to
+	immortalKillX   = 3.0                      // metal killed after that, in multiples of its own cost
+	immortalMinKill = 1500.0                   // and at least this much metal
 	healedMin       = 1.0                      // own health a Most healed unit must have been repaired
-	immortalMinS    = 2 * 60 * simFPS          // frames an Immortal must have lived
-	immortalMinHits = 0.5                      // share of its own health it must have taken
-	pressureBin     = 30 * simFPS              // window the hardest moment is found in
+	pressureBin     = 30 * simFPS              // window Most healed's busiest moment is found in
 	pathEvery       = 5 * simFPS               // frames between recorded path points
 	pathMaxPts      = 400                      // path points an award carries at most
 )
@@ -146,19 +145,11 @@ type track struct {
 	minHP  float64 // lowest sampled health fraction
 	minHPF int32
 	pts    []pathPt
-	// Damage it took while finished, in hp: health drops between samples
-	// (repair in between hides some, so it is a floor), and the costliest
-	// pressureBin of it, for the Immortal.
-	prevHP   float32
-	taken    float64
-	maxHP    float32
-	bin      int32
-	binTaken float64
-	binF     int32
-	peak     float64
-	peakF    int32
-	// What it repaired (health rises while finished, a floor like taken)
-	// and the costliest pressureBin of it, for Most healed.
+	prevHP float32
+	maxHP  float32
+	// What it repaired while finished, in hp: health rises between samples
+	// (damage in between hides some, so it is a floor), and the busiest
+	// pressureBin of it, for Most healed.
 	healed   float64
 	hbin     int32
 	hbinSum  float64
@@ -200,7 +191,7 @@ func (p *pass) trackUnit(fr int32, u snapshot.UnitState, d defInfo) {
 		// Unit ids are recycled once a unit is gone: a new def, or an id seen
 		// again after its death, is a new unit.
 		t = &track{id: u.UnitID, def: u.DefID, team: u.Team, first: fr, x: u.Pos.X, z: u.Pos.Z, minHP: 2,
-			army: d.army, eligible: d.army || d.commander, ground: !d.fly, prevHP: -1, bin: -1, hbin: -1, cost: d.cost}
+			army: d.army, eligible: d.army || d.commander, ground: !d.fly, prevHP: -1, hbin: -1, cost: d.cost}
 		if d.commander {
 			t.cost = math.Max(t.cost, closeCallCost) // a commander is never cheap
 		}
@@ -223,17 +214,6 @@ func (p *pass) trackUnit(fr int32, u snapshot.UnitState, d defInfo) {
 			t.minHP, t.minHPF = hp, fr
 		}
 		t.maxHP = u.MaxHealth
-		if t.prevHP >= 0 && u.Health < t.prevHP {
-			drop := float64(t.prevHP - u.Health)
-			t.taken += drop
-			if b := fr / pressureBin; b != t.bin {
-				t.bin, t.binTaken, t.binF = b, 0, fr
-			}
-			t.binTaken += drop
-			if t.binTaken > t.peak {
-				t.peak, t.peakF = t.binTaken, t.binF
-			}
-		}
 		if t.prevHP >= 0 && u.Health > t.prevHP {
 			rise := float64(u.Health - t.prevHP)
 			t.healed += rise
@@ -692,35 +672,24 @@ func (p *pass) awards() []Award {
 			Unit: t.id, F0: t.first, F1: t.last, Path: t.route()})
 	}
 
-	// Immortal: surviving is not a feat — most of an army is alive at the
-	// end — so it goes to the unit that TOOK the most damage and lived, as
-	// long as that was a real share of its own health (a Juggernaut grazed
-	// for 2% is no story), AND that kept fighting after its hardest
-	// half-minute: credited with enemies worth half its own cost after it.
-	// A unit merely caught damaged when the game ended is no story either.
-	// A capture that names no killers cannot say what it did next, so there
-	// the hardest moment must just lie well before the end.
-	hits := func(t *track) float64 {
-		if t.maxHP <= 0 {
-			return 0
+	// Immortal: a unit that fell to a sliver of its health and then did
+	// something unusual — credited with enemies worth several times its own
+	// cost after that moment — and lived. Taking damage and surviving is what
+	// most of an army does; a Gladiator at 24% that kills 366 metal more is
+	// any unit's day. Only a capture that names killers can tell, so there is
+	// no Immortal without causes, and most games have none.
+	killedAfterLow := func(t *track) float64 { return t.killedAfter(t.minHPF) }
+	if p.hasCauses {
+		if t := pick(func(a, b *track) bool {
+			return killedAfterLow(a)/math.Max(a.cost, 1) > killedAfterLow(b)/math.Max(b.cost, 1)
+		},
+			func(t *track) bool {
+				k := killedAfterLow(t)
+				return t.army && alive(t) && t.minHP <= immortalMaxHP && k >= immortalMinKill && k >= immortalKillX*math.Max(t.cost, 1)
+			}); t != nil {
+			k := killedAfterLow(t)
+			add(t, "immortal", "Immortal", fmt.Sprintf("fell to %.0f%% health, then killed %s metal, %.0f× its own cost", math.Ceil(t.minHP*100), metal(k), k/math.Max(t.cost, 1)), k, t.minHPF)
 		}
-		return t.taken / float64(t.maxHP)
-	}
-	foughtOn := func(t *track) bool {
-		if !p.hasCauses {
-			return end-t.peakF >= immortalAfterS
-		}
-		return t.killedAfter(t.peakF+pressureBin) >= immortalKillPct*math.Max(t.cost, 1)
-	}
-	if t := pick(func(a, b *track) bool { return a.taken > b.taken },
-		func(t *track) bool {
-			return t.army && alive(t) && end-t.first >= immortalMinS && hits(t) >= immortalMinHits && foughtOn(t)
-		}); t != nil {
-		text := fmt.Sprintf("took %s damage, %.0f%% of its own health, and survived", metal(t.taken), 100*hits(t))
-		if p.hasCauses {
-			text = fmt.Sprintf("took %.0f%% of its own health in damage, then killed %s metal more", 100*hits(t), metal(t.killedAfter(t.peakF+pressureBin)))
-		}
-		add(t, "immortal", "Immortal", text, t.taken, t.peakF)
 	}
 	// Most healed: repaired the most times over its own health — a unit kept
 	// in the fight by the builders behind it.

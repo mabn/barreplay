@@ -4,6 +4,7 @@
 // it went (Clip.follow / Clip.path, Version 4 files).
 import { h, s, section } from "../dom";
 import { comparable, sideColor, sideOfTeam, teamColor } from "../model";
+import { named, unitRef } from "../names";
 import { tip } from "../tooltip";
 import { clipAround, clipEvent, watcher } from "../watch";
 import { type Award, type Clip, type Insights, type SummaryOptions } from "../types";
@@ -87,9 +88,9 @@ export function awards(ins: Insights, opts: SummaryOptions): HTMLElement | null 
         map,
         h("div", undefined,
           // The blow is a player's, not one unit's: the text lists what went.
-          h("div", undefined, ...(a.key === "blow" ? [] : [h("b", undefined, name), " of "]),
+          h("div", undefined, ...(a.key === "blow" ? [] : [unitRef(ins, a.def, true), " of "]),
             h("span", { style: `color: ${sd >= 0 ? teamColor(ins, a.team) : sideColor(ins, 0)}`, class: a.key === "blow" ? "brs-strong" : null }, who)),
-          h("div", { class: "brs-hint" }, a.text))),
+          named(ins, a.text, { class: "brs-hint" }))),
       watch ? h("div", { class: "brs-watch" }, a.unit !== undefined ? "▶ Watch it (followed and ringed)" : "▶ Watch") : null);
     if (watch) card.addEventListener("click", () => watch(clipOf(a, at, a.key === "blow" ? `${a.label}: ${who}` : `${a.label}: ${name} of ${who}`)));
     return card;
