@@ -162,13 +162,20 @@ func TestRemovedByOwnerIsNotALoss(t *testing.T) {
 		for _, tm := range in.Meta.Teams {
 			sideOf[tm.TeamID] = int(tm.AllyTeam)
 		}
+		played := map[int32]bool{}
+		for _, pl := range in.Meta.Players {
+			played[pl.Team] = !pl.Spectator
+		}
+		// The lowest-numbered played team on another side: deterministic,
+		// and never Gaia.
 		foeOf := func(team int32) int32 {
+			foe := int32(-1)
 			for t2, sd := range sideOf {
-				if sd != sideOf[team] {
-					return t2
+				if sd != sideOf[team] && played[t2] && (foe < 0 || t2 < foe) {
+					foe = t2
 				}
 			}
-			return -1
+			return foe
 		}
 		var hit snapshot.Event
 		seen := false
@@ -206,6 +213,21 @@ func TestRemovedByOwnerIsNotALoss(t *testing.T) {
 	killed, e := compute(false, func(e snapshot.Event, own, foe int32) *snapshot.EventCause {
 		return &snapshot.EventCause{UnitID: 1, DefID: 1, Team: foe, WeaponDef: 1}
 	})
+	// Every death names its killer, so a battle credits each side with
+	// exactly what the other lost there.
+	for _, b := range killed.Battles {
+		credit := make([]float64, len(b.Lost))
+		for _, tm := range b.Teams {
+			for _, x := range killed.Teams {
+				if x.Team == tm.Team && x.Side >= 0 {
+					credit[x.Side] += tm.Killed
+				}
+			}
+		}
+		if len(credit) != 2 || credit[0] != b.Lost[1].Metal || credit[1] != b.Lost[0].Metal || credit[0] == 0 {
+			t.Errorf("battle credit %v, losses %+v", credit, b.Lost)
+		}
+	}
 	n := len(killed.Deaths.F)
 	for _, c := range []struct {
 		name      string

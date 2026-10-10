@@ -83,6 +83,9 @@ export function swingChart(ins: Insights, watch: Watch | null, group: ChartGroup
     const b = ins.battles[st.battle];
     const title = `${m.n}. ${st.title}`;
     const f = st.focus;
+    // An event with a span (a raid, a fight) is marked as that span and runs
+    // to its end; a single instant runs on to the end of the swing.
+    if (f && f.f1 !== undefined && f.f1 > f.f) return clipAt(f.f, f.f1, { x: f.x, z: f.z, r: f.r, atEnd: f.f1, title });
     if (f && typeof f.x === "number") return clipAt(f.f, m.f1, { x: f.x, z: f.z, r: f.r, title });
     const where = b ? { x: b.x, z: b.z, r: b.r } : {};
     return f ? clipAt(f.f, m.f1, { ...where, title }) : clipSpan(m.f0, m.f1, { ...where, title });
@@ -108,6 +111,15 @@ export function swingChart(ins: Insights, watch: Watch | null, group: ChartGroup
   });
   c.svg.append(marks);
 
+  // When it happened: the event's own span when the story found one, else
+  // the instant, else the minute the line took to move.
+  const when = (k: number) => {
+    const f = stories[k].focus;
+    const m = sw.moments[k];
+    if (!f) return `${fmtClock(m.f0 / SIM_FPS)}–${fmtClock(m.f1 / SIM_FPS)}`;
+    const end = f.f1 ?? f.f;
+    return end - f.f >= SIM_FPS ? `${fmtClock(f.f / SIM_FPS)}–${fmtClock(end / SIM_FPS)}` : fmtClock(f.f / SIM_FPS);
+  };
   const rows = sw.moments.map((m, k) => {
     const st = stories[k];
     const play = watch ? h("button", { class: "brs-play", type: "button", "aria-label": `Watch swing ${m.n}` }, "▶") : null;
@@ -116,7 +128,7 @@ export function swingChart(ins: Insights, watch: Watch | null, group: ChartGroup
       h("span", { class: "brs-num", style: `background: ${sideColor(ins, m.side)}` }, String(m.n)),
       h("div", { class: "brs-grow" },
         h("div", undefined, h("b", undefined, named(ins, st.title)), " ",
-          h("span", { class: "brs-muted" }, `· ${fmtClock(m.f0 / SIM_FPS)}–${fmtClock(m.f1 / SIM_FPS)} · `),
+          h("span", { class: "brs-muted" }, `· ${when(k)} · `),
           h("span", { style: `color: ${sideColor(ins, m.side)}` }, `${sideName(ins, m.side)} +${pct(m.delta)}`)),
         fightersLine(ins, st.fighters),
         h("div", { class: "brs-hint" }, named(ins, st.detail))),

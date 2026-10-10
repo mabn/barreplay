@@ -113,6 +113,9 @@ export interface BattleTeam {
   army: number;
   /** What it lost there. */
   lost: number;
+  /** The enemy metal credited to it there, wherever it fired from (version
+   * 4 re-simulations; absent or 0 when the capture names no killers). */
+  killed?: number;
 }
 
 export interface Battle {
@@ -224,6 +227,9 @@ export interface Clip {
   /** The instant the clip is about, inside [f0, f1], for the host to mark on
    * its timeline: the lead-in is then plainly a wait of a few seconds. */
   at?: number;
+  /** When the moment is a span (a raid, a fight), where it ends: the host
+   * marks [at, atEnd] rather than one instant. */
+  atEnd?: number;
   /** Where playback starts, inside [f0, f1]: a few seconds before `at`,
    * with the rest of the clip before it there to scroll back to. Absent:
    * from f0. */

@@ -36,7 +36,7 @@ export function fightersLine(ins: Insights, sides: Fighter[][]): HTMLElement | n
     list.forEach((f, k) => {
       if (k) out.append(", ");
       const el = playerName(ins, f.name, "b");
-      tip(el, { title: f.name, rows: [{ label: "Army there + lost there", value: `${fmtMetal(f.metal)} metal · ${Math.round(f.share * 100)}% of ${sideName(ins, sd)}` }] });
+      tip(el, { title: f.name, rows: [{ label: "Army there + lost + killed there", value: `${fmtMetal(f.metal)} metal · ${Math.round(f.share * 100)}% of ${sideName(ins, sd)}` }] });
       out.append(el);
     });
   });

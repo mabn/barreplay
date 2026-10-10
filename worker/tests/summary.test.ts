@@ -100,10 +100,24 @@ test("a moment is named after what died in it", () => {
   st = momentStory(ins({ ...base, deaths: deaths([[1000, 3, 0, 800, 800], [1000, 2, 0, 800, 800]]) }), m);
   assert.equal(st.title, "Blue team loses a Juggernaut in the south-east");
   assert.equal(st.focus?.f, 1000);
+  const pawns10 = () => Array.from({ length: 10 }, () => [1000, 2, 0, 450, 450] as [number, number, number, number, number]);
   // A lopsided trade of small units is a won fight.
   st = momentStory(ins({ ...base, deaths: deaths(Array.from({ length: 10 }, () => [1000, 2, 0, 450, 450] as [number, number, number, number, number])) }), m);
   assert.equal(st.title, "Team 2 wins the fight in the centre");
-  assert.deepEqual(st.focus, { f: 1000, x: 450, z: 450, r: 600 });
+  assert.deepEqual(st.focus, { f: 1000, f1: 1000, x: 450, z: 450, r: 600 });
+  // With a battle there, the fight is that battle: its span, and only what
+  // died inside it — not the pawns lost across the map at the same time.
+  const far = Array.from({ length: 10 }, () => [1000, 2, 1, 2000, 2000] as [number, number, number, number, number]);
+  st = momentStory(ins({ ...base, deaths: deaths([...pawns10(), ...far.slice(0, 2)]),
+    battles: [{ f0: 950, f1: 1300, x: 450, z: 450, r: 200, lost: [] }] }), m);
+  assert.deepEqual(st.focus, { f: 950, f1: 1300, x: 450, z: 450, r: 200 });
+  assert.match(st.detail, /^There, 0:32–0:43: Blue team lost 10 units/);
+  assert.match(st.detail, /Team 2 lost nothing/);
+  // The line moved toward a side that lost MORE there: the title states the
+  // trade instead of calling it a win.
+  const trade = [...pawns10().slice(0, 8), ...Array.from({ length: 16 }, () => [1000, 2, 1, 450, 450] as [number, number, number, number, number])];
+  st = momentStory(ins({ ...base, deaths: deaths(trade) }), m);
+  assert.equal(st.title, "Team 2 trades 800 metal for 400 metal in the centre");
   // Nothing died: the armies pulled apart.
   st = momentStory(ins({ ...base, deaths: deaths([]) }), m);
   assert.equal(st.title, "Team 2 out-builds Blue team");

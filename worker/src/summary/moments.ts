@@ -3,7 +3,7 @@
 // Nothing in a capture says who killed what, so a moment is told from what
 // each side LOST, where, and how the armies moved — the same facts a battle
 // card uses. Pure, so the node tests can pin the wording rules.
-import { fmtMetal } from "./format";
+import { fmtClock, fmtMetal } from "./format";
 import { knockouts, wipedOf } from "./losses";
 import { sideName, sideOfTeam } from "./model";
 import { SIM_FPS, type Battle, type Insights, type Moment } from "./types";
@@ -55,10 +55,17 @@ export interface MomentStory {
 /** An instant on the map: sim frame f, at world (x, z) within radius r. */
 export interface Focus {
   f: number;
+  /** When the event runs on (a raid, a fight), where it ends: the moment is
+   * then the RANGE [f, f1], which is how a host should mark it. */
+  f1?: number;
   x?: number;
   z?: number;
   r?: number;
 }
+
+/** Elmos past a battle's radius whose deaths still count as the battle's,
+ * the same reach the insights give its armies. */
+const BATTLE_REACH = 600;
 
 /** Seconds and elmos of killing a fight's focus is looked for in: the box
  * holding the most metal lost is where the fight is. Both bounds matter —
@@ -79,8 +86,9 @@ export interface Fighter {
 }
 
 /** fighters names, per side, the players who carried a battle: each with at
- * least FIGHTER_SHARE of their side's army-there-plus-losses, biggest
- * first. */
+ * least FIGHTER_SHARE of their side's army there plus what it lost and
+ * killed there, biggest first. Killing counts so a long-range gun or a nuke
+ * fired from across the map is a fighter in the battle it hit. */
 export function fighters(ins: Insights, b: Battle | undefined): Fighter[][] {
   const out: Fighter[][] = ins.sides.map(() => []);
   if (!b?.teams) return out;
@@ -89,12 +97,12 @@ export function fighters(ins: Insights, b: Battle | undefined): Fighter[][] {
   const total = ins.sides.map(() => 0);
   for (const t of b.teams) {
     const sd = sideOf.get(t.team) ?? -1;
-    if (sd >= 0 && sd < total.length) total[sd] += t.army + t.lost;
+    if (sd >= 0 && sd < total.length) total[sd] += t.army + t.lost + (t.killed ?? 0);
   }
   for (const t of b.teams) {
     const sd = sideOf.get(t.team) ?? -1;
     if (sd < 0 || sd >= total.length || total[sd] <= 0) continue;
-    const metal = t.army + t.lost;
+    const metal = t.army + t.lost + (t.killed ?? 0);
     const share = metal / total[sd];
     if (share >= FIGHTER_SHARE) out[sd].push({ name: owner.get(t.team) || `Team ${t.team}`, team: t.team, metal, share });
   }
@@ -120,15 +128,20 @@ export function compass(ins: Insights, x: number, z: number): string {
 }
 
 /** momentWindow is the frames whose deaths explain a moment: its own window
- * plus the step before it, since a step's value is read at its END and the
- * deaths that moved it happened during it. */
+ * plus a step either side. Before, since a step's value is read at its END
+ * and the deaths that moved it happened during it; after, because a raid
+ * shows on the line as soon as it starts while its biggest losses can land
+ * seconds later — measured on a real 8v8, the bombers' first kills were
+ * inside the window and the four advanced fusions they blew up one second
+ * past it, so the story told of everything but the main event. */
 export function momentWindow(ins: Insights, m: Moment): [number, number] {
-  return [Math.max(0, m.f0 - ins.stepSec * SIM_FPS), m.f1];
+  const step = ins.stepSec * SIM_FPS;
+  return [Math.max(0, m.f0 - step), m.f1 + step];
 }
 
 /** sideLosses tallies each side's deaths inside [f0, f1], leaving out the
  * units that went down with an eliminated team: those were not fought for. */
-export function sideLosses(ins: Insights, f0: number, f1: number): SideLoss[] {
+export function sideLosses(ins: Insights, f0: number, f1: number, area?: { x: number; z: number; r: number }): SideLoss[] {
   const sideOf = sideOfTeam(ins);
   const wiped = wipedOf(ins);
   const owner = new Map(ins.teams.map((t) => [t.team, t.player ?? ""]));
@@ -136,6 +149,7 @@ export function sideLosses(ins: Insights, f0: number, f1: number): SideLoss[] {
   const d = ins.deaths;
   for (let i = 0; i < d.f.length; i++) {
     if (d.f[i] < f0 || d.f[i] > f1 || wiped(i)) continue;
+    if (area && (d.x[i] < 0 || Math.hypot(d.x[i] - area.x, d.z[i] - area.z) > area.r)) continue;
     const side = sideOf.get(d.team[i]) ?? -1;
     if (side < 0 || side >= out.length) continue;
     const o = out[side];
@@ -209,6 +223,8 @@ export function momentStory(ins: Insights, m: Moment): MomentStory {
   const out = knockouts(ins).filter((k) => k.side === lose && k.f >= f0 && k.f <= f1);
   let title: string;
   let focus: Focus | null;
+  // A fight's own losses, when it is told as one event (see below).
+  let local: SideLoss[] | null = null;
   // An elimination or a quiet stretch has no battle of its own to credit.
   let fight = true;
   if (out.length === 1) {
@@ -233,17 +249,68 @@ export function momentStory(ins: Insights, m: Moment): MomentStory {
   } else if (ll.kinds.length && priced && ll.kinds[0][1] === 1 && ll.kinds[0][2] >= SINGLE_SHARE * ll.metal && ll.kinds[0][2] >= 500) {
     focus = deathFocus(ins, ll.top);
     title = `${L} loses a ${ll.kinds[0][0]}${at(focus)}`;
-  } else if (size(wl) === 0 || size(ll) >= 2 * size(wl)) {
-    focus = burstFocus(ins, f0, f1);
-    title = `${W} wins the fight${at(focus)}`;
   } else {
-    focus = burstFocus(ins, f0, f1);
-    title = `${W} edges a trade${at(focus)}`;
+    // A fight: told as the EVENT it was — the battle running at its busiest
+    // killing, from start to end, and only what died there — not as the sum
+    // of a window that also holds whatever died elsewhere at the time.
+    // Which one is decided by DISTANCE as well as time: of the battles
+    // running in the window, the one where the most metal went down — two
+    // fights on opposite sides of the map at once are two stories, and the
+    // densest burst of killing (what used to pick) favours a short air
+    // skirmish over a long ground war that cost twice as much.
+    const bi = biggestFight(ins, f0, f1);
+    const b = ins.battles[bi];
+    if (b) {
+      focus = { f: b.f0, f1: b.f1, x: b.x, z: b.z, r: b.r };
+      local = sideLosses(ins, b.f0, b.f1, { x: b.x, z: b.z, r: b.r + BATTLE_REACH });
+    } else {
+      focus = burstFocus(ins, f0, f1);
+    }
+    const lw = local ? local[won] : wl;
+    const lo = local ? local[lose] : ll;
+    // The line moved toward W, but W can still have lost more there (its
+    // army was bigger, or what it lost mattered less): then the title states
+    // the trade rather than calling it a win the numbers beside it deny.
+    const unit = (v: number) => (priced ? `${fmtMetal(v)} metal` : `${v} units`);
+    title = size(lw) === 0 || size(lo) >= 2 * size(lw) ? `${W} wins the fight${at(focus)}`
+      : size(lw) <= size(lo) ? `${W} edges a trade${at(focus)}`
+      : `${W} trades ${unit(size(lw))} for ${unit(size(lo))}${at(focus)}`;
   }
-  const detail = `${L} lost ${lossText(ll, priced)}; ${W} lost ${lossText(wl, priced)}.`;
+  const dl = local ? local[lose] : ll;
+  const dw = local ? local[won] : wl;
+  let detail = local
+    ? `There, ${fmtClock(focus!.f / SIM_FPS)}–${fmtClock((focus!.f1 ?? focus!.f) / SIM_FPS)}: ${L} lost ${lossText(dl, priced)}; ${W} lost ${lossText(dw, priced)}.`
+    : `${L} lost ${lossText(ll, priced)}; ${W} lost ${lossText(wl, priced)}.`;
+  if (local && priced) {
+    // What went down elsewhere at the time, when it is worth a mention: the
+    // reader should not take this fight for the whole story.
+    const rest = (side: number) => Math.max(0, (lost[side]?.metal ?? 0) - (local![side]?.metal ?? 0));
+    const here = (local[won]?.metal ?? 0) + (local[lose]?.metal ?? 0);
+    if (rest(won) + rest(lose) >= 0.25 * here && rest(won) + rest(lose) >= QUIET_METAL) {
+      detail += ` Elsewhere at the time: ${L} lost ${fmtMetal(rest(lose))} metal, ${W} ${fmtMetal(rest(won))}.`;
+    }
+  }
   const battle = battleOfMoment(ins, focus, f0, f1);
   const fought = fight ? fighters(ins, ins.battles[battle]) : ins.sides.map(() => []);
   return { title, detail, lost, battle, focus, fighters: fought };
+}
+
+/** biggestFight is the battle running inside [f0, f1] where the most metal
+ * went down within that window, or -1 when none is. */
+function biggestFight(ins: Insights, f0: number, f1: number): number {
+  let best = -1;
+  let most = 0;
+  ins.battles.forEach((b, i) => {
+    const a = Math.max(b.f0, f0);
+    const e = Math.min(b.f1, f1);
+    if (e < a) return;
+    const sum = sideLosses(ins, a, e, { x: b.x, z: b.z, r: b.r + BATTLE_REACH }).reduce((s, l) => s + l.metal + l.n, 0);
+    if (sum > most) {
+      most = sum;
+      best = i;
+    }
+  });
+  return best;
 }
 
 /** battleOfMoment is the battle a moment was: the one running when its focus
@@ -331,7 +398,9 @@ function burstFocus(ins: Insights, f0: number, f1: number): Focus | null {
     const b = idx[j];
     if (Math.hypot(d.x[b] - d.x[a], d.z[b] - d.z[a]) <= BURST_RADIUS) pts.push([d.x[b], d.z[b]]);
   }
-  return { f: d.f[a], ...spread(pts) };
+  let last = d.f[a];
+  for (let j = bestAt; j < idx.length && d.f[idx[j]] - d.f[a] <= BURST_SEC * SIM_FPS; j++) last = d.f[idx[j]];
+  return { f: d.f[a], f1: last, ...spread(pts) };
 }
 
 /** spread is the centre of a set of points and a radius holding most of

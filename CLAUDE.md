@@ -537,9 +537,12 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           page's loss SHARE, since a 15 s loss of 5k metal is a disaster at
                           minute 3 and noise at minute 40) and Battle.Teams (per team: metal
                           lost in the battle and the peak army within the battle's radius +
-                          600 elmos, from one presence sample per step), from which the page
+                          600 elmos, from one presence sample per step, plus KILLED: the enemy
+                          metal the engine credited to the team there WHEREVER IT FIRED FROM,
+                          so a long-range gun or a nuke from across the map is in the fight it
+                          hit — zero in captures that name no killers), from which the page
                           names the players carrying a fight (moments.ts fighters: >= 10% of
-                          their side's army-plus-losses there).
+                          their side's army + lost + killed there).
                           Version 4 also lets every award SAY WHICH UNIT it is: Award.Unit
                           (the id), F0/F1 (its life) and Path ([frame, x, z] every 5 s, at
                           most 400) — a card draws the route, and its clip FOLLOWS the unit
@@ -613,7 +616,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           and onSeek = seekToFrame (back to the Replay tab at that sim frame).
                           WATCHING (watch.ts): anything on the page with a moment behind it — a
                           chart time, a swing, a battle, a death, a milestone, an award — hands
-                          the host a Clip {f0, f1, at?, x?, z?, r?, title?, titleRuns?} — `at`
+                          the host a Clip {f0, f1, at?, atEnd?, x?, z?, r?, title?, titleRuns?} — `at`
                           is the INSTANT it is about, which the viewer marks on the clip's
                           slider (#clipmark); PLAYBACK starts LEAD_IN_SEC = 5 s before it
                           (Clip.start) while the clip itself reaches back as far before it
@@ -623,7 +626,20 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           most a minute). A swing's clip is about
                           the moment's FOCUS (moments.ts: the commander death, the costliest
                           loss, or the densest 10 s x 1500-elmo burst of losses), not the
-                          start of the minute the line took to move, and zooms there. Titles
+                          start of the minute the line took to move, and zooms there.
+                          A FIGHT moment is told as ONE EVENT with a START AND AN END: the
+                          battle (Insights.Battles) running in the window where the most metal
+                          went down (biggestFight — chosen by place as well as time, since two
+                          fights on opposite sides of the map at once are two stories), with
+                          its own span as Focus.f..f1 and only the deaths within its radius +
+                          600 elmos counted; what died elsewhere meanwhile is a separate
+                          "Elsewhere at the time" sentence when it is big enough to matter.
+                          The window it searches is the moment's +- one step (momentWindow),
+                          since a raid's buildings often blow up just after the line moved.
+                          A side the line moved toward that still lost MORE there is not said
+                          to win: the title states the trade ("trades 114k metal for 69.9k").
+                          A span clip carries atEnd, which widens the slider's #clipmark into
+                          a band over the event. Titles
                           and every player/side name are drawn in that player's in-game
                           colour (names.ts, model.nameRuns); a side is named by its leader's
                           colour ("Blue team", model.colorName), "Team N" when two sides

@@ -46,6 +46,9 @@ type pass struct {
 	// and its track (nil for a structure), for the awards that go to a death.
 	deathUnit  []int32
 	deathTrack []*track
+	// deathKiller is the team the engine named as the killer, -1 when none
+	// (a capture without causes, a death with no attacker).
+	deathKiller []int32
 
 	hasCauses bool // some destroyed event names a cause: a re-simulation
 
@@ -239,6 +242,11 @@ func (p *pass) event(e snapshot.Event) {
 		p.usedDef[e.DefID] = true
 		delete(p.lastPos, e.UnitID)
 		p.deathUnit = append(p.deathUnit, e.UnitID)
+		killer := int32(-1)
+		if e.Cause != nil && e.Cause.Team >= 0 {
+			killer = e.Cause.Team
+		}
+		p.deathKiller = append(p.deathKiller, killer)
 		t := p.tracks[e.UnitID]
 		if t != nil && !t.dead {
 			t.dead = true

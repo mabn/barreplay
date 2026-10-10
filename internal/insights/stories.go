@@ -10,9 +10,10 @@ import (
 
 // The map stories: where each army stood over time (the front), where the
 // fighting happened (battles), and the awards — all from positions, health
-// and lifecycle events. No capture records who killed what, so nothing here
-// names a killer: a battle says what each side lost, and an award goes to a
-// unit for something it did or survived.
+// and lifecycle events. A battle says what each side lost and, when the
+// capture names killers (a re-simulation), which teams did the killing from
+// wherever they fired; an award goes to a unit for something it did or
+// survived.
 
 // Battle is a cluster of deaths close in space and time.
 type Battle struct {
@@ -37,6 +38,10 @@ type BattleTeam struct {
 	Army float64 `json:"army"`
 	// Lost is the metal of the team's units that died in the battle.
 	Lost float64 `json:"lost"`
+	// Killed is the metal of enemy units the engine credited to the team in
+	// the battle, wherever it fired from (a long-range gun, a nuke), so a
+	// team shooting into the fight from afar still counts as fighting in it.
+	Killed float64 `json:"killed"`
 }
 
 // presence is one sample of where every side's army stood, kept once per
@@ -509,8 +514,15 @@ func (p *pass) battleOf(members []int, ns int) Battle {
 func (p *pass) battleTeams(members []int, bt Battle) []BattleTeam {
 	d := p.out.Deaths
 	lost := map[int32]float64{}
+	killed := map[int32]float64{}
 	for _, i := range members {
 		lost[d.Team[i]] += d.Cost[i]
+		// Whoever killed it took part, wherever it fired from: a long-range
+		// gun, a bomber run or a nuke counts at the target, not at the
+		// launcher, which may be across the map.
+		if k := p.deathKiller[i]; k >= 0 && p.ro.side(k) >= 0 && p.ro.side(k) != p.ro.side(d.Team[i]) {
+			killed[k] += d.Cost[i]
+		}
 	}
 	army := map[int32]float64{}
 	reach := float64(bt.R) + battleReach
@@ -536,12 +548,15 @@ func (p *pass) battleTeams(members []int, bt Battle) []BattleTeam {
 	for t := range army {
 		teams[t] = true
 	}
+	for t := range killed {
+		teams[t] = true
+	}
 	out := make([]BattleTeam, 0, len(teams))
 	for t := range teams {
 		if p.ro.side(t) < 0 {
 			continue
 		}
-		out = append(out, BattleTeam{Team: t, Army: round1(army[t]), Lost: round1(lost[t])})
+		out = append(out, BattleTeam{Team: t, Army: round1(army[t]), Lost: round1(lost[t]), Killed: round1(killed[t])})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Team < out[j].Team })
 	return out

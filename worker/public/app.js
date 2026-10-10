@@ -7190,8 +7190,12 @@ function openClip(c) {
   // is then plainly a few seconds' wait rather than a clip of nothing.
   const mark = document.getElementById('clipmark');
   if (typeof c.at === 'number' && c.at >= clip.f0 && c.at <= clip.f1) {
-    mark.style.setProperty('--at', String((c.at - clip.f0) / (clip.f1 - clip.f0)));
-    mark.title = 'The moment: ' + fmtClipTime(c.at);
+    const span = clip.f1 - clip.f0;
+    // A moment with a span (a raid, a fight) is a band from start to end.
+    const end = typeof c.atEnd === 'number' ? Math.min(clip.f1, Math.max(c.at, c.atEnd)) : c.at;
+    mark.style.setProperty('--at', String((c.at - clip.f0) / span));
+    mark.style.setProperty('--len', String((end - c.at) / span));
+    mark.title = 'The moment: ' + fmtClipTime(c.at) + (end > c.at ? '–' + fmtClipTime(end) : '');
     mark.style.display = '';
   } else {
     mark.style.display = 'none';

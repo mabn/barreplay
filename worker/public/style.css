@@ -92,9 +92,12 @@ body.summary-tab #summary { display: block !important; }
 #clipslot { flex: 1; min-width: 0; position: relative; display: flex; align-items: center; --thumb: 16px; }
 #clipslot #clipslider { flex: 1; width: 100%; margin: 0; }
 #clipmark {
-  position: absolute; top: -3px; bottom: -3px; width: 3px; margin-left: -1.5px; border-radius: 2px;
+  position: absolute; top: -3px; bottom: -3px; margin-left: -1.5px; border-radius: 2px;
   left: calc(var(--thumb) / 2 + var(--at, 0) * (100% - var(--thumb)));
-  background: #ffd24a; box-shadow: 0 0 0 1px #11151a; pointer-events: none;
+  /* A span (--len > 0) is a band from the moment's start to its end. */
+  width: calc(3px + var(--len, 0) * (100% - var(--thumb)));
+  background: rgba(255, 210, 74, 0.55); border-left: 3px solid #ffd24a; box-sizing: border-box;
+  box-shadow: 0 0 0 1px #11151a; pointer-events: none;
 }
 #cliptime { font-size: 12px; color: #9fb0bf; font-variant-numeric: tabular-nums; min-width: 90px; text-align: right; }
 #home { flex: 1; min-height: 0; display: flex; }
