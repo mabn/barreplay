@@ -56,3 +56,20 @@ func TestCancelledBuildIsNotALoss(t *testing.T) {
 		t.Error("a finished unit gone with no cause (a crash) is not a loss")
 	}
 }
+
+func TestLossCostCountsWhatWasBuilt(t *testing.T) {
+	p := &pass{defs: map[int32]defInfo{7: {cost: 1000}}, pending: map[int32]bool{1: true, 2: true}, built: map[int32]float32{1: 0.25}}
+	cases := []struct {
+		unit int32
+		want float64
+	}{
+		{1, 250}, // a quarter built
+		{2, 0},   // never sampled: cancelled as it started
+		{3, 1000},
+	}
+	for _, c := range cases {
+		if got := p.lossCost(snapshot.Event{UnitID: c.unit, DefID: 7}); got != c.want {
+			t.Errorf("unit %d: lossCost = %v, want %v", c.unit, got, c.want)
+		}
+	}
+}

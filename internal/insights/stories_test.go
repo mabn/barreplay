@@ -66,7 +66,7 @@ func TestAwards(t *testing.T) {
 	if _, ok := got["tourist"]; ok {
 		t.Errorf("tourist = %+v, want none (nobody covered 5%% of the map)", got["tourist"])
 	}
-	if a := got["unfinished"]; a.Def != defFusion || a.Team != 2 || a.F != 300*30 || a.Value != 3600 {
+	if a := got["unfinished"]; a.Def != defFusion || a.Team != 2 || a.F != 300*30 || a.Value != 1397.6 {
 		t.Errorf("unfinished = %+v", a)
 	}
 	if a := got["marathon"]; a.Def != defRaider && a.Def != defCom {

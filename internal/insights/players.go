@@ -328,7 +328,7 @@ func (p *pass) playerEvent(e snapshot.Event) {
 		if p.removedByOwner(e) {
 			break
 		}
-		st.LostMetal[step] += d.cost
+		st.LostMetal[step] += p.lossCost(e)
 		st.LostN[step]++
 		if d.commander {
 			p.team(e.Team).comDied = e.Frame

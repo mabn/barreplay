@@ -544,7 +544,12 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           and a STRUCTURE destroyed with no cause at all (a mex/geo upgrade, a
                           cancelled build, a self-destruct) or ANY UNFINISHED unit destroyed
                           with no cause (a cancelled build in a lab; a finished mobile one
-                          with no cause is a crash, still a loss) — wind farms reclaimed for
+                          with no cause is a crash, still a loss — a cancelled build refunds
+                          its metal). An unfinished unit that IS lost is priced at the share of
+                          it BUILT (pass.go lossCost: its last sampled build progress; one
+                          never sampled is worth 0) everywhere a loss is counted, and
+                          "Unfinished business" goes only to a BUILDING destroyed unfinished
+                          — wind farms reclaimed for
                           space used to read as a lost fight. An EVOLUTION is never a loss in any
                           capture (evolve.go): BAR's evolving commanders are swapped at once
                           (a new unit created AND finished in one frame, the old one destroyed

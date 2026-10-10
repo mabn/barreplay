@@ -681,7 +681,10 @@ func (p *pass) awards() []Award {
 	bestUnf := -1
 	for i := range d.F {
 		// A unit that went down with its team was not lost in the game.
-		if d.Cost[i] <= 0 || p.wiped[i] || d.Unfinished[i] != 1 {
+		// A BUILDING destroyed before it was finished: a unit cancelled in
+		// its factory refunds its metal and is no story (and is not a loss
+		// at all when the capture records causes).
+		if d.Cost[i] <= 0 || p.wiped[i] || d.Unfinished[i] != 1 || !p.defs[d.Def[i]].structure {
 			continue
 		}
 		if bestUnf < 0 || d.Cost[i] > d.Cost[bestUnf] {
@@ -690,7 +693,7 @@ func (p *pass) awards() []Award {
 	}
 	if bestUnf >= 0 {
 		out = append(out, p.deathAward(bestUnf, Award{Key: "unfinished", Label: "Unfinished business",
-			Text: "destroyed before it was finished, " + metal(d.Cost[bestUnf]) + " metal",
+			Text: fmt.Sprintf("destroyed %.0f%% built, %s metal in it", 100*d.Cost[bestUnf]/math.Max(p.defs[d.Def[bestUnf]].cost, 1), metal(d.Cost[bestUnf])),
 			Team: d.Team[bestUnf], Def: d.Def[bestUnf], Value: d.Cost[bestUnf], F: d.F[bestUnf]}))
 	}
 	if a, ok := p.biggestBlow(); ok {

@@ -31,6 +31,7 @@ type pass struct {
 	nextEv  int
 	lastPos map[int32][2]int32 // unit id -> last sampled x, z
 	pending map[int32]bool     // created and not yet finished
+	built   map[int32]float32  // a pending unit's last sampled build progress
 	usedDef map[int32]bool
 	reached map[[2]int]bool // (milestone, side) already recorded
 
@@ -105,6 +106,7 @@ func newPass(in Input, ro roster) *pass {
 		lastPos: map[int32][2]int32{},
 		pending: map[int32]bool{},
 		usedDef: map[int32]bool{},
+		built:   map[int32]float32{},
 		reached: map[[2]int]bool{},
 		incomeN: make([][]int, ns),
 		tracks:  map[int32]*track{},
@@ -205,6 +207,7 @@ func (p *pass) event(e snapshot.Event) {
 		p.pending[e.UnitID] = true
 	case snapshot.EventFinished:
 		delete(p.pending, e.UnitID)
+		delete(p.built, e.UnitID)
 		d := p.defs[e.DefID]
 		side := p.ro.side(e.Team)
 		if d.milestone >= 0 && side >= 0 && !p.reached[[2]int{d.milestone, side}] {
@@ -218,6 +221,7 @@ func (p *pass) event(e snapshot.Event) {
 			// Taken down by its own side: the unit is gone, but nothing
 			// was lost and nothing was fought over.
 			delete(p.pending, e.UnitID)
+			delete(p.built, e.UnitID)
 			delete(p.lastPos, e.UnitID)
 			if t := p.tracks[e.UnitID]; t != nil {
 				t.dead = true
@@ -232,14 +236,16 @@ func (p *pass) event(e snapshot.Event) {
 		if p.pending[e.UnitID] {
 			unfinished = 1
 		}
+		cost := p.lossCost(e) // before the build is forgotten
 		delete(p.pending, e.UnitID)
+		delete(p.built, e.UnitID)
 		dl := &p.out.Deaths
 		dl.F = append(dl.F, e.Frame)
 		dl.X = append(dl.X, pos[0])
 		dl.Z = append(dl.Z, pos[1])
 		dl.Def = append(dl.Def, e.DefID)
 		dl.Team = append(dl.Team, e.Team)
-		dl.Cost = append(dl.Cost, round1(p.defs[e.DefID].cost))
+		dl.Cost = append(dl.Cost, round1(cost))
 		dl.Unfinished = append(dl.Unfinished, unfinished)
 		p.usedDef[e.DefID] = true
 		delete(p.lastPos, e.UnitID)
@@ -304,6 +310,17 @@ func (p *pass) removedByOwner(e snapshot.Event) bool {
 	return side >= 0 && p.ro.side(c.Team) == side
 }
 
+// lossCost is the metal a destroyed unit was worth: its price, or for one
+// still under construction the share of it built so far — the rest was never
+// spent. A build destroyed before any sample saw it is worth nothing.
+func (p *pass) lossCost(e snapshot.Event) float64 {
+	c := p.defs[e.DefID].cost
+	if p.pending[e.UnitID] {
+		return c * float64(p.built[e.UnitID])
+	}
+	return c
+}
+
 // dead reports a unit whose health is gone but which the engine has not
 // removed yet (a crashing aircraft): it is no longer part of anyone's army.
 // maxHp 0 is health unknown (an unidentified radar contact), not health gone.
@@ -333,6 +350,9 @@ func (p *pass) frame(fr snapshot.Frame) error {
 	for _, u := range fr.Units {
 		x, z := u.Pos.X, u.Pos.Z
 		p.lastPos[u.UnitID] = [2]int32{int32(x), int32(z)}
+		if p.pending[u.UnitID] {
+			p.built[u.UnitID] = u.BuildProgress
+		}
 		p.extend(float64(x), float64(z))
 		d, ok := p.defs[u.DefID]
 		if !ok || dead(u) {

@@ -74,7 +74,9 @@ func TestDeaths(t *testing.T) {
 	for i := range d.F {
 		if d.Unfinished[i] == 1 {
 			unfinished++
-			if d.Def[i] != defFusion || d.Cost[i] != 3600 {
+			// Priced at the share of it built when last sampled, not its
+			// whole 3600.
+			if d.Def[i] != defFusion || d.Cost[i] != 1397.6 {
 				t.Errorf("unfinished death = def %d cost %v", d.Def[i], d.Cost[i])
 			}
 		}
