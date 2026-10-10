@@ -271,7 +271,7 @@ func TestPutCatalogEntryRid(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	if err := putCatalogEntry(context.Background(), srv.URL, "somegameid", "somegameid-1a2b3c4d", brpPath, 42, nil, ""); err != nil {
+	if err := putCatalogEntry(context.Background(), srv.URL, "somegameid", "somegameid-1a2b3c4d", "1a2b3c4d", brpPath, 42, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	if gotPath != "/api/replays/somegameid" {
@@ -281,7 +281,7 @@ func TestPutCatalogEntryRid(t *testing.T) {
 		t.Errorf("PUT body lacks the rid: %s", gotBody)
 	}
 
-	if err := putCatalogEntry(context.Background(), srv.URL, "somegameid", "", brpPath, 42, nil, ""); err != nil {
+	if err := putCatalogEntry(context.Background(), srv.URL, "somegameid", "", "", brpPath, 42, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(gotBody, `"rid"`) {

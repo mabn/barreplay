@@ -85,6 +85,9 @@ func applyPreambleLine(fields []string, content string, base *snapshot.Meta) (*g
 		// (mode "replay" is the re-sim widget, which sees the whole game and
 		// carries no player identity.) An appended segment repeats GAME —
 		// keep the first identity.
+		if g.Resim {
+			base.Resim = true
+		}
 		if g.Mode == "live" && !g.Resim && base.Recorder == nil {
 			base.Recorder = &snapshot.RecorderInfo{
 				PlayerID:  g.PlayerID,

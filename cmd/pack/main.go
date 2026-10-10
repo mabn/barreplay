@@ -74,7 +74,8 @@ func main() {
 		upload    = flag.String("upload", "r2", "after packing, publish the replay to "+packer.TargetHelp()+". Empty packs only, uploading nothing")
 		workerDir = flag.String("worker-dir", "worker", "the Cloudflare worker project directory wrangler runs in (with -upload)")
 		stats     = flag.Bool("stats", true, "print size statistics for each resulting .brp (per-section sizes + the top unit defs by encoded bytes); a .brp input is analyzed directly without repacking")
-		rev       = flag.Bool("rev", true, "with -upload: publish under a content-addressed revision id <gameId>-<sha256[:8] of the input> so no served object is ever overwritten (the catalog row's rid tracks the current revision); -rev=false uses the bare gameId")
+		rev       = flag.Bool("rev", true, "with -upload: publish under replays/<YYYY-MM>/ (the game's start month, UTC): as the game's main replay <gameId>.brp when the capture saw every team and the game has none yet, else as <gameId>-<sha256[:8] of the .brp> so nothing served is ever overwritten; -rev=false uses the old flat layout under the bare gameId")
+		view      = flag.String("view", "", "with -upload: whose point of view the capture is, overriding what it says itself: \"full\" (saw every team — e.g. a re-sim .brp packed before captures recorded that), \"ally\" or \"unknown\". Decides whether it may take the game's main, unsuffixed name")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: pack [flags] <capture.brepstream> [...]\n\n")
@@ -87,6 +88,10 @@ func main() {
 	}
 	if *idArg != "" && flag.NArg() > 1 {
 		fmt.Fprintln(os.Stderr, "pack: -id applies to exactly one input")
+		os.Exit(2)
+	}
+	if *view != "" && *view != "full" && *view != "ally" && *view != "unknown" {
+		fmt.Fprintf(os.Stderr, "pack: -view must be full, ally or unknown (got %q)\n", *view)
 		os.Exit(2)
 	}
 	dest, ok := packer.LookupTarget(*upload)
@@ -132,6 +137,8 @@ func main() {
 					IndexURL:   dest.IndexURL,
 					Rev:        revID,
 					ModOptions: modOptions,
+					View:       *view,
+					BarAPI:     client,
 				})
 			}
 		}

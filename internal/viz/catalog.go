@@ -21,12 +21,18 @@ import (
 // camelCase keys) must stay in lockstep with worker/src/worker/replayentry.ts.
 type CatalogEntry struct {
 	ID string `json:"id"`
-	// Rid is the revision the replay's pieces are actually served under
-	// (`<gameId>-<rev>`, rev = first 8 hex of the source stream's SHA-256).
-	// Revisioned publishes are append-only — a re-upload lands under a fresh
-	// rid and the row moves — so the front-end fetches pieces at `rid ?? id`.
-	// Set by the publisher, not here: BuildCatalogEntry leaves it nil.
-	Rid         *string `json:"rid,omitempty"`
+	// Rid is the key the replay's pieces are actually served under, relative
+	// to replays/: "<YYYY-MM>/<gameId>" for a game's MAIN (full-view)
+	// replay, "<YYYY-MM>/<gameId>-<rev>" for every other upload, and the flat
+	// "<gameId>-<rev>" of everything published before month folders. Publishes
+	// are append-only, so the front-end fetches pieces at `rid ?? id`. Set by
+	// the publisher, not here: BuildCatalogEntry leaves it nil.
+	Rid *string `json:"rid,omitempty"`
+	// Rev is the published .brp's content revision (packer.ContentRev). The
+	// suffixed rid already spells it; a main rid does not, so the worker keeps
+	// it on the uploads entry, which is how a republish of identical bytes is
+	// recognised instead of landing a second copy. Set by the publisher.
+	Rev         string  `json:"rev,omitempty"`
 	StartUnix   *int64  `json:"startUnix"`
 	DurationSec *int64  `json:"durationSec"`
 	Map         *string `json:"map"`
@@ -104,6 +110,9 @@ type CatalogPlayer struct {
 type CatalogUpload struct {
 	Rid  string `json:"rid"`
 	Ally *int32 `json:"ally"`
+	// Rev is the .brp's content revision, recorded since month folders (a
+	// main rid does not spell it); empty on older entries.
+	Rev string `json:"rev,omitempty"`
 }
 
 // catalogPlayersPerAlly caps each ally team's roster slice in the catalog. It
