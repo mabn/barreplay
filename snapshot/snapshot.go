@@ -212,13 +212,14 @@ type UnitDef struct {
 	CanFly      bool    `json:"canFly,omitempty"`
 	CanMove     bool    `json:"canMove,omitempty"`
 	WeaponCount int32   `json:"weaponCount,omitempty"`
-	// From BAR's unit customParams: the tech tier (1, 2, 3; 0 = unknown),
+	// From BAR's unit customParams: the tech tier (1, 2, 3; 0 = unknown;
+	// fractional for some — BAR's hover, amphibious and seaplane labs are 1.5),
 	// BAR's own grouping ("weapon", "builder", "energy", ...), and whether
 	// BAR calls the unit a commander. Absent from captures before stream
 	// protocol 4.
-	TechLevel   int32  `json:"techLevel,omitempty"`
-	UnitGroup   string `json:"unitGroup,omitempty"`
-	IsCommander bool   `json:"isCommander,omitempty"`
+	TechLevel   float32 `json:"techLevel,omitempty"`
+	UnitGroup   string  `json:"unitGroup,omitempty"`
+	IsCommander bool    `json:"isCommander,omitempty"`
 	// MaxWeaponRange is the reach of the unit's longest weapon, in elmos.
 	MaxWeaponRange float32 `json:"maxWeaponRange,omitempty"`
 }
