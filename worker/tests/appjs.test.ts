@@ -2055,7 +2055,7 @@ test('a published .brp is read by Range and decodes as Go decodes it', async () 
   assert.equal(head.gameId, 'viewer');
   assert.equal(head.mapName, 'Test Map');
   assert.equal(head.sampleEvery, 30);
-  assert.equal(head.codecVer, 5);
+  assert.equal(head.codecVer, 6);
   assert.equal(head.frameCount, 70);
   assert.deepEqual(head.chunks.map((c: { count: number }) => c.count), [64, 6]);
 
@@ -2126,6 +2126,7 @@ test('a published .brp is read by Range and decodes as Go decodes it', async () 
 
   // A replay with no .brp is an older bundle: the head reads as null.
   assert.equal(await api.loadBrpHead('old'), null);
+});
 
 // The events section gained four cause columns in .brp v6 (snapshot/brp.go
 // encodeEvents). The decoder must read them when present and read a v5

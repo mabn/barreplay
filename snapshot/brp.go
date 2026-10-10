@@ -1324,8 +1324,10 @@ func IndexBRP(r io.Reader, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if version != BRPVersion {
-		return fmt.Errorf("snapshot: unsupported .brp version %d (want %d)", version, BRPVersion)
+	// A v5 file keeps its version: indexing adds a layout, it does not
+	// upgrade the codec (and every replay packed before v6 is a v5 file).
+	if version < BRPMinVersion || version > BRPVersion {
+		return fmt.Errorf("snapshot: unsupported .brp version %d (want %d..%d)", version, BRPMinVersion, BRPVersion)
 	}
 	if len(sections) == 0 || sections[0].Tag != SecMeta {
 		return fmt.Errorf("snapshot: .brp meta is not the first section")
