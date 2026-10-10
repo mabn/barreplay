@@ -294,6 +294,35 @@ func run(path string) error {
 		}
 	}
 
+	// Kills inside one side: who killed what, when, with what. The chain
+	// credit starts from these, so a surprising "to allies" figure is
+	// explained (or not) here.
+	var friendly []snapshot.Event
+	for _, e := range events {
+		if e.Kind == snapshot.EventDestroyed && e.Cause != nil && e.Cause.Team >= 0 &&
+			allyOf[e.Cause.Team] == allyOf[e.Team] && e.Cause.UnitID != e.UnitID {
+			friendly = append(friendly, e)
+		}
+	}
+	if len(friendly) > 0 {
+		fmt.Printf("kills inside one side: %d; the first 15:\n", len(friendly))
+		defName := func(id int32) string {
+			if d, ok := meta.UnitDefs[id]; ok {
+				return d.Name
+			}
+			return fmt.Sprintf("#%d", id)
+		}
+		for i := 0; i < len(friendly) && i < 15; i++ {
+			e := friendly[i]
+			wn := weaponName[e.Cause.WeaponDef]
+			if wn == "" {
+				wn = fmt.Sprintf("#%d", e.Cause.WeaponDef)
+			}
+			fmt.Printf("  %s  team %d %s (unit %d) killed team %d %s (unit %d) with %s\n", clock(e.Frame),
+				e.Cause.Team, defName(e.Cause.DefID), e.Cause.UnitID, e.Team, defName(e.DefID), e.UnitID, wn)
+		}
+	}
+
 	// Lives.
 	lives, err := bf.Lives()
 	if err != nil {
