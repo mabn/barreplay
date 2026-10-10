@@ -469,6 +469,12 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           new Version written beside the old one. Comparative sections need a
                           full-view capture (POV) and two sides; CostCoverage says when only
                           armed mobile defs are priced (a replay rebuilt from old pieces).
+                          stories.go adds what NO capture can attribute to a killer and so never
+                          tries: each side's army centre per step (Series.Front), battles (deaths
+                          clustered within 1500 elmos and 45 s of quiet, the 12 biggest, each
+                          with what every side lost) and six awards picked from per-unit tracks
+                          (ids are recycled, so a new def or a reappearance after death is a new
+                          life) — ties to the earlier unit, one unit never takes two.
 cmd/insights/main.go      CLI: the summary BACKFILL, one replay at a time (or -all). Old replays
                           have no .brp anywhere, only their split pieces, so it resolves a
                           gameId/link through the catalog (current rid + the row's view, the

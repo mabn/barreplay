@@ -58,7 +58,10 @@ type Insights struct {
 	Series     Series        `json:"series"`
 	Deaths     Deaths        `json:"deaths"`
 	Milestones []Milestone   `json:"milestones"`
-	Chat       []ChatLine    `json:"chat"`
+	// Battles are the biggest clusters of deaths, in time order.
+	Battles []Battle   `json:"battles"`
+	Awards  []Award    `json:"awards"`
+	Chat    []ChatLine `json:"chat"`
 	// Marks counts map points per side per step (the pings).
 	Marks [][]int `json:"marks"`
 }
@@ -102,6 +105,9 @@ type Series struct {
 	// ArmyByCat splits Army: [side][category][step], categories in ArmyCats.
 	ArmyCats  []string      `json:"armyCats"`
 	ArmyByCat [][][]float64 `json:"armyByCat"`
+	// Front is each side's army centre per step, [side][step] = [x, z] (the
+	// cost-weighted mean position of its army), null while it has none.
+	Front [][][]int32 `json:"front"`
 }
 
 // Deaths is every destroyed unit, columnar: the i-th entry of each slice

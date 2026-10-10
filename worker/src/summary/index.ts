@@ -9,6 +9,9 @@ import { fmtClock, fmtMetal } from "./format";
 import { comparable, notices, sideColor, sideName } from "./model";
 import { ensureStyles } from "./styles";
 import { advantage } from "./sections/advantage";
+import { awards } from "./sections/awards";
+import { mapStories } from "./sections/battles";
+import { fingerprint } from "./sections/fingerprint";
 import { chat } from "./sections/chat";
 import { killing } from "./sections/killing";
 import { rivers } from "./sections/rivers";
@@ -77,4 +80,4 @@ const overview: Section = (ins) => {
 };
 
 /** SECTIONS in page order. */
-const SECTIONS: Section[] = [overview, advantage, rivers, tech, killing, chat];
+const SECTIONS: Section[] = [overview, fingerprint, advantage, rivers, tech, mapStories, killing, awards, chat];

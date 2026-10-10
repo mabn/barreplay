@@ -22,6 +22,9 @@ export interface Insights {
   series: Series;
   deaths: Deaths;
   milestones: Milestone[];
+  /** The biggest clusters of deaths, in time order. */
+  battles: Battle[];
+  awards: Award[];
   chat: ChatLine[];
   /** Map pings per side per step. */
   marks: number[][];
@@ -66,6 +69,31 @@ export interface Series {
   armyCats: string[];
   /** [side][category][step]. */
   armyByCat: number[][][];
+  /** [side][step] = [x, z], the cost-weighted centre of the side's army,
+   * or null while it has none. */
+  front: (number[] | null)[][];
+}
+
+export interface Battle {
+  f0: number;
+  f1: number;
+  x: number;
+  z: number;
+  /** Radius holding the deaths, elmos. */
+  r: number;
+  /** Indexed like sides. */
+  lost: { n: number; metal: number; top: number[] }[];
+}
+
+export interface Award {
+  key: string;
+  label: string;
+  text: string;
+  team: number;
+  def: number;
+  value: number;
+  /** The moment to watch. */
+  f: number;
 }
 
 /** Columnar: the i-th entry of every array describes one death. */

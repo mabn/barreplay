@@ -37,6 +37,13 @@ export const CSS = `
 .brs-root .brs-mapwrap { max-width: 640px; margin: 0 auto; }
 .brs-root .brs-map { border-radius: 4px; }
 .brs-root .brs-map circle.brs-clickable:hover { stroke: #fff; stroke-width: 2px; vector-effect: non-scaling-stroke; }
+.brs-root .brs-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin-top: 12px; }
+.brs-root .brs-card { border: 1px solid var(--brs-line); border-radius: 5px; padding: 8px 10px; background: var(--brs-bg); }
+.brs-root .brs-seekable { cursor: pointer; }
+.brs-root .brs-seekable:hover { border-color: var(--brs-accent); }
+.brs-root .brs-award-title { font-weight: 600; margin-bottom: 3px; }
+.brs-root .brs-printwrap { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+.brs-root .brs-print { width: 320px; max-width: 100%; flex: 0 0 auto; }
 .brs-root .brs-chat { max-height: 320px; overflow-y: auto; margin-top: 10px; border-top: 1px solid var(--brs-line); padding-top: 8px; }
 .brs-root .brs-line { padding: 1px 0; overflow-wrap: anywhere; }
 .brs-root .brs-when { color: var(--brs-muted); font-variant-numeric: tabular-nums; }

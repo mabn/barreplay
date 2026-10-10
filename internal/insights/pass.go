@@ -14,6 +14,7 @@ type defInfo struct {
 	cost      float64
 	structure bool
 	commander bool
+	fly       bool
 	milestone int
 }
 
@@ -37,6 +38,9 @@ type pass struct {
 	seenPos   bool
 
 	incomeN [][]int // [side][step] samples averaged into the income series
+
+	tracks    map[int32]*track // unit id -> its current life
+	allTracks []*track         // every life, in the order first seen
 }
 
 func newPass(in Input, ro roster) *pass {
@@ -63,6 +67,7 @@ func newPass(in Input, ro roster) *pass {
 				EnergyIncome: make([][]float64, ns),
 				ArmyCats:     armyCats,
 				ArmyByCat:    make([][][]float64, ns),
+				Front:        make([][][]int32, ns),
 			},
 			Deaths: Deaths{F: []int32{}, X: []int32{}, Z: []int32{}, Def: []int32{}, Team: []int32{}, Cost: []float64{}, Unfinished: []int8{}},
 		},
@@ -72,6 +77,7 @@ func newPass(in Input, ro roster) *pass {
 		usedDef: map[int32]bool{},
 		reached: map[[2]int]bool{},
 		incomeN: make([][]int, ns),
+		tracks:  map[int32]*track{},
 	}
 	if p.out.CostCoverage == "" {
 		p.out.CostCoverage = CostFull
@@ -81,6 +87,7 @@ func newPass(in Input, ro roster) *pass {
 		p.out.Series.Army[s] = []float64{}
 		p.out.Series.MetalIncome[s] = []float64{}
 		p.out.Series.EnergyIncome[s] = []float64{}
+		p.out.Series.Front[s] = [][]int32{}
 		p.out.Series.ArmyByCat[s] = make([][]float64, len(armyCats))
 		for c := range armyCats {
 			p.out.Series.ArmyByCat[s][c] = []float64{}
@@ -94,6 +101,7 @@ func newPass(in Input, ro roster) *pass {
 			cost:      float64(d.MetalCost),
 			structure: isStructure(d),
 			commander: isCommander(d.Name),
+			fly:       d.CanFly,
 			milestone: milestoneOf(d.Name),
 		}
 	}
@@ -167,6 +175,9 @@ func (p *pass) event(e snapshot.Event) {
 		dl.Unfinished = append(dl.Unfinished, unfinished)
 		p.usedDef[e.DefID] = true
 		delete(p.lastPos, e.UnitID)
+		if t := p.tracks[e.UnitID]; t != nil {
+			t.dead = true
+		}
 	}
 }
 
@@ -188,12 +199,17 @@ func (p *pass) frame(fr snapshot.Frame) error {
 	for i := range byCat {
 		byCat[i] = make([]float64, len(armyCats))
 	}
+	front := make([][3]float64, ns) // [side] cost-weighted x, z, weight
 	for _, u := range fr.Units {
 		x, z := u.Pos.X, u.Pos.Z
 		p.lastPos[u.UnitID] = [2]int32{int32(x), int32(z)}
 		p.extend(float64(x), float64(z))
 		d, ok := p.defs[u.DefID]
-		if !ok || !d.army || dead(u) {
+		if !ok || dead(u) {
+			continue
+		}
+		p.trackUnit(fr.Frame, u, d)
+		if !d.army {
 			continue
 		}
 		side := p.ro.side(u.Team)
@@ -203,7 +219,11 @@ func (p *pass) frame(fr snapshot.Frame) error {
 		v := d.cost * float64(u.BuildProgress)
 		army[side] += v
 		byCat[side][d.cat] += v
+		front[side][0] += float64(x) * v
+		front[side][1] += float64(z) * v
+		front[side][2] += v
 	}
+	p.recordFront(step, front)
 	for side := 0; side < ns; side++ {
 		// The step holds the value at its last sample.
 		s.Army[side][step] = army[side]
@@ -327,6 +347,13 @@ func (p *pass) finish() {
 		}
 	}
 	sort.SliceStable(o.Milestones, func(i, j int) bool { return o.Milestones[i].F < o.Milestones[j].F })
+	o.Battles = p.battles()
+	o.Awards = p.awards()
+	for side := range p.ro.sides {
+		for len(o.Series.Front[side]) < len(o.Series.T) {
+			o.Series.Front[side] = append(o.Series.Front[side], nil)
+		}
+	}
 	for id := range p.usedDef {
 		d := p.in.Meta.UnitDefs[id]
 		o.Defs[id] = Def{Name: d.Name, Human: d.HumanName, Cost: round1(float64(d.MetalCost))}
