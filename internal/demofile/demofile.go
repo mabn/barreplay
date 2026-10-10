@@ -55,6 +55,8 @@ type Demo struct {
 	// authoritative record of it (see comms.go). Empty for a demo whose stream
 	// is absent or truncated, which is not an error.
 	Comms []snapshot.Comm
+	// SelfD is every self-destruct order, in frame order (orders.go).
+	SelfD []SelfD
 	// Winners are the winning ally teams, read from the bytes that follow the
 	// packet stream. Nil when the header names none or the demo ends early
 	// (a game the engine never saw end, or a demo cut short by a crash).
@@ -157,9 +159,9 @@ func Parse(r io.Reader) (*Demo, error) {
 	if h.DemoStreamSize > 0 {
 		stream = io.LimitReader(gz, int64(h.DemoStreamSize))
 	}
-	comms := scanComms(stream)
+	comms, selfd := scanComms(stream)
 
-	return &Demo{Header: h, ScriptRaw: scriptRaw, Startscript: ss, Comms: comms, Winners: readWinners(gz, stream, h)}, nil
+	return &Demo{Header: h, ScriptRaw: scriptRaw, Startscript: ss, Comms: comms, SelfD: selfd, Winners: readWinners(gz, stream, h)}, nil
 }
 
 // readWinners reads the winning ally teams the engine writes right after the

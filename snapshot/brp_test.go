@@ -839,3 +839,50 @@ func TestLegacyV4Columns(t *testing.T) {
 		t.Errorf("unit 1 at 60 = %+v", u)
 	}
 }
+
+func TestAddEventsBRP(t *testing.T) {
+	dir := t.TempDir()
+	meta, frames, events := testCapture()
+	in := writeBRP(t, dir, meta, frames, events)
+	orders := []Event{{Frame: 50, Kind: EventSelfD, UnitID: 100, DefID: -1, Team: 0}}
+	add := func(src string) (string, int) {
+		f, err := os.Open(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		out := filepath.Join(dir, fmt.Sprintf("out%d.brp", len(src)))
+		g, err := os.Create(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n, err := AddEventsBRP(f, g, orders)
+		g.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out, n
+	}
+	out, n := add(in)
+	if n != 1 {
+		t.Fatalf("added %d, want 1", n)
+	}
+	_, gotFrames, got, err := readBRPFile(t, out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotFrames) != len(frames) || len(got) != 4 || got[2].Kind != EventSelfD || got[2].Frame != 50 {
+		t.Fatalf("events = %+v", got)
+	}
+	// The layout must still place every section (what a browser reads).
+	f, _ := os.Open(out)
+	bf, err := ParseBRP(f)
+	f.Close()
+	if err != nil || bf.EventCount != 4 {
+		t.Fatalf("parse: %v, %d events", err, bf.EventCount)
+	}
+	// Once is enough: a second run adds nothing.
+	if _, n := add(out); n != 0 {
+		t.Errorf("second run added %d", n)
+	}
+}

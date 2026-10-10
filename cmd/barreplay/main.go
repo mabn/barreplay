@@ -224,6 +224,7 @@ func run() error {
 		return err
 	}
 	w = capture.ReplaceComms(w, demo.Comms)
+	w = capture.AddEvents(w, demo.SelfDEvents()) // orders are input: only the demo has them
 	outPath := filepath.Join(*outDir, h.GameID+".brp")
 
 	// 6. Launch the engine. The widget writes snapshots to rawPath directly; the

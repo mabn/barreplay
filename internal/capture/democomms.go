@@ -43,3 +43,52 @@ func (w *commReplacer) Close() error {
 	}
 	return w.Writer.Close()
 }
+
+// AddEvents returns a Writer that interleaves extra events (sorted by frame)
+// into the capture's own: each is written just before the first frame or
+// event of the capture that comes after it, the rest at Close. It is how the
+// demo's self-destruct ORDERS (demofile.Demo.SelfDEvents) join a capture:
+// orders are input, which no widget sees, and the event list must stay in
+// frame order for the readers that binary-search it.
+func AddEvents(w snapshot.Writer, extra []snapshot.Event) snapshot.Writer {
+	if len(extra) == 0 {
+		return w
+	}
+	return &eventAdder{Writer: w, extra: extra}
+}
+
+type eventAdder struct {
+	snapshot.Writer
+	extra []snapshot.Event
+}
+
+func (w *eventAdder) flush(through int32) error {
+	for len(w.extra) > 0 && w.extra[0].Frame <= through {
+		if err := w.Writer.WriteEvent(w.extra[0]); err != nil {
+			return err
+		}
+		w.extra = w.extra[1:]
+	}
+	return nil
+}
+
+func (w *eventAdder) WriteFrame(f snapshot.Frame) error {
+	if err := w.flush(f.Frame - 1); err != nil {
+		return err
+	}
+	return w.Writer.WriteFrame(f)
+}
+
+func (w *eventAdder) WriteEvent(e snapshot.Event) error {
+	if err := w.flush(e.Frame); err != nil {
+		return err
+	}
+	return w.Writer.WriteEvent(e)
+}
+
+func (w *eventAdder) Close() error {
+	if err := w.flush(1<<31 - 1); err != nil {
+		return err
+	}
+	return w.Writer.Close()
+}

@@ -103,19 +103,21 @@ var lobbyRelay = regexp.MustCompile(`^<([^>]{1,64})> (.*)$`)
 const machineChatPrefix = "> :"
 
 // scanComms walks the packet stream and returns everything players wrote and
-// drew, in stream order (non-decreasing frame).
+// drew, in stream order (non-decreasing frame), and the self-destruct orders
+// (orders.go).
 //
 // It is BEST-EFFORT by design: a demo can be cut short by a crash, and the
 // header of such a file may not even declare its stream size. A truncated or
 // unreadable tail ends the scan and keeps everything recovered before it,
 // because a partial transcript beats none.
-func scanComms(r io.Reader) []snapshot.Comm {
+func scanComms(r io.Reader) ([]snapshot.Comm, []SelfD) {
 	var comms []snapshot.Comm
+	o := orders{selection: map[uint8][]int16{}}
 	var frame int32
 	var hdr [8]byte
 	for {
 		if _, err := io.ReadFull(r, hdr[:]); err != nil {
-			return comms // EOF, or a truncated chunk header: done
+			return comms, o.selfd // EOF, or a truncated chunk header: done
 		}
 		// DemoStreamChunkHeader: float32 modGameTime, uint32 length. The time is
 		// wall-ish and unused — the frame counter below is exact.
@@ -125,11 +127,11 @@ func scanComms(r io.Reader) []snapshot.Comm {
 		}
 		if n > maxDemoPacket {
 			fmt.Fprintf(os.Stderr, "demofile: implausible demo chunk length %d after %d comms; stopping scan\n", n, len(comms))
-			return comms
+			return comms, o.selfd
 		}
 		pkt := make([]byte, n)
 		if _, err := io.ReadFull(r, pkt); err != nil {
-			return comms
+			return comms, o.selfd
 		}
 		switch pkt[0] {
 		case netKeyframe:
@@ -146,6 +148,8 @@ func scanComms(r io.Reader) []snapshot.Comm {
 			if c, ok := drawComm(pkt, frame); ok {
 				comms = append(comms, c)
 			}
+		default:
+			o.packet(pkt, frame)
 		}
 	}
 }

@@ -147,6 +147,9 @@ type demoInfo struct {
 	// Comms is the demo's chat + map drawings, which SUPERSEDE the capture
 	// stream's own (see capture.ReplaceComms for why).
 	Comms []snapshot.Comm
+	// SelfD is the demo's self-destruct orders, as events: input, which no
+	// capture records (demofile.Demo.SelfDEvents).
+	SelfD []snapshot.Event
 	// ModOptions is the raw [modoptions] map. Deliberately NOT part of
 	// snapshot.Meta (never persisted in the .brp) — its only consumer is the
 	// catalog PUT, which distills it into settings flags (viz.SettingsFlags).
@@ -184,6 +187,7 @@ func demoMeta(ctx context.Context, client *barapi.Client, id string) (demoInfo, 
 	return demoInfo{
 		Meta:       demofile.BaseMeta(demo),
 		Comms:      demo.Comms,
+		SelfD:      demo.SelfDEvents(),
 		ModOptions: demo.Startscript.ModOptions,
 	}, nil
 }
@@ -211,6 +215,7 @@ func Pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 	base := snapshot.Meta{GameID: gameID}
 	var modOptions map[string]string
 	var demoComms []snapshot.Comm
+	var demoSelfD []snapshot.Event
 	ext := strings.ToLower(filepath.Ext(in))
 	if (ext == ".brsnap" || ext == ".brepstream") && !noDemo {
 		id := idArg
@@ -226,6 +231,7 @@ func Pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 		base = d.Meta
 		modOptions = d.ModOptions
 		demoComms = d.Comms
+		demoSelfD = d.SelfD
 	}
 	l, err := load(in, base)
 	if err != nil {
@@ -237,6 +243,7 @@ func Pack(ctx context.Context, client *barapi.Client, in, outDir, idArg string, 
 	if len(demoComms) > 0 {
 		l.comms = demoComms
 	}
+	l.events = snapshot.MergeEvents(l.events, demoSelfD)
 	if l.meta.GameID == "" {
 		l.meta.GameID = gameID
 	}
@@ -701,3 +708,69 @@ func fileSize(path string) int64 {
 }
 
 func mb(n int64) float64 { return float64(n) / (1024 * 1024) }
+
+// AddDemoOrders gives an already-packed .brp the self-destruct orders out of
+// its game's demo (snapshot.AddEventsBRP), writing the result to outDir (a
+// temp dir when empty) and returning its path — or the input's own path when
+// there is nothing to add, which includes a file that already has them. It is
+// what lets a replay packed before orders were read get them with no
+// re-simulation.
+func AddDemoOrders(ctx context.Context, client *barapi.Client, in, outDir, idArg string) (string, error) {
+	f, err := os.Open(in)
+	if err != nil {
+		return "", err
+	}
+	bf, err := snapshot.ParseBRP(f)
+	f.Close()
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", in, err)
+	}
+	id := idArg
+	if id == "" {
+		id = bf.Meta.GameID
+	}
+	if id == "" {
+		return "", fmt.Errorf("%s: no gameId in its meta (pass -id)", in)
+	}
+	d, err := demoMeta(ctx, client, id)
+	if err != nil {
+		return "", fmt.Errorf("fetching the demo for %q: %w: %v", id, ErrDemoUnavailable, err)
+	}
+	if len(d.SelfD) == 0 {
+		return in, nil
+	}
+	if outDir == "" {
+		if outDir, err = os.MkdirTemp("", "barreplay-orders-"); err != nil {
+			return "", err
+		}
+	}
+	out := filepath.Join(outDir, filepath.Base(in))
+	ai, _ := filepath.Abs(in)
+	ao, _ := filepath.Abs(out)
+	if ai == ao {
+		return "", fmt.Errorf("%s: -out would overwrite the input", in)
+	}
+	src, err := os.Open(in)
+	if err != nil {
+		return "", err
+	}
+	defer src.Close()
+	dst, err := os.Create(out)
+	if err != nil {
+		return "", err
+	}
+	n, err := snapshot.AddEventsBRP(src, dst, d.SelfD)
+	if cerr := dst.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(out)
+		return "", err
+	}
+	if n == 0 {
+		os.Remove(out)
+		return in, nil
+	}
+	fmt.Fprintf(os.Stderr, "%s: added %d self-destruct orders from the demo -> %s\n", in, n, out)
+	return out, nil
+}

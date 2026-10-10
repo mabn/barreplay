@@ -1187,17 +1187,53 @@ const WEAPON_RECLAIMED = -12;
 const RECLAIM_LINE_SEC = 3;
 const RECLAIM_LINE_COLOR = 'rgba(214, 120, 255, 0.85)';
 let reclaims = [];              // [{f, builder, target}] in frame order (per load)
+// SELF-DESTRUCT COUNTDOWNS. A 'selfd' event is a player's ORDER (the demo's
+// input stream, packed in by Go — demofile/orders.go), which the engine
+// TOGGLES: given again while a unit counts down, it stops. Each countdown runs
+// from its order to whichever comes first of the unit's death and the order
+// cancelling it. A death with no cause is the self-destruct going off, so its
+// frame is the countdown's real end and the timer shows the seconds left; a
+// unit killed by somebody first, a cancel, or no ending in sight still gets
+// the pulsing bomb, without a number that would be a guess.
+const SELFD_MAX_SEC = 60;       // an order this long without its end shows SELFD_OPEN_SEC
+const SELFD_OPEN_SEC = 10;
+let selfds = [];                // [{f, end, unit, exact}] by start frame (per load)
 function buildDestroyedIndex() {
   destroyedAt = new Map();
   reclaims = [];
+  selfds = [];
+  const deaths = new Map(); // unit id -> [{f, cause}] for the countdowns
+  const orders = [];
   for (const e of data.events || []) {
+    if (e.k === 'selfd') orders.push(e);
     if (e.k !== 'destroyed') continue;
+    let d = deaths.get(e.id);
+    if (d === undefined) deaths.set(e.id, d = []);
+    d.push(e);
     if (e.cause && e.cause.weapon === WEAPON_RECLAIMED && e.cause.id >= 0) {
       reclaims.push({ f: e.f, builder: e.cause.id, target: e.id });
     }
     let a = destroyedAt.get(e.id);
     if (a === undefined) destroyedAt.set(e.id, a = []);
     a.push(e.f);
+  }
+  const open = new Map(); // unit id -> its countdown still running
+  for (const o of orders) {
+    const run = open.get(o.id);
+    if (run && o.f < run.end) { // ordered again while counting: cancelled
+      run.end = o.f;
+      run.exact = false;
+      open.delete(o.id);
+      continue;
+    }
+    const death = (deaths.get(o.id) || []).find(d => d.f >= o.f);
+    const s = { f: o.f, unit: o.id, end: o.f + SELFD_OPEN_SEC * 30, exact: false };
+    if (death && death.f - o.f <= SELFD_MAX_SEC * 30) {
+      s.end = death.f;
+      s.exact = !death.cause;
+    }
+    selfds.push(s);
+    open.set(o.id, s);
   }
 }
 // diedBetween: a destroyed event for id in sim-frame range (f0, f1].
@@ -2389,9 +2425,52 @@ function drawOverlay(u) {
   }
 
   if (clip && clip.focus.follow) drawClipRing(u, clip.focus.follow);
+  if (selfds.length) drawSelfDestructs(u, simFrame);
 
   // Speech last: nothing should paint over a message.
   drawChatBubbles(simFrame, u);
+}
+
+// drawSelfDestructs puts a pulsing bomb, and the seconds left when they are
+// known, over every unit counting down to self-destruct at simFrame.
+function drawSelfDestructs(u, simFrame) {
+  let off = null;
+  for (const s of selfds) {
+    if (s.f > simFrame) break; // sorted by start
+    if (simFrame >= s.end) continue;
+    if (off === null) {
+      off = new Map();
+      for (let i = 0; i < u.length; i += STRIDE) off.set(u[i + F.ID], i);
+    }
+    const i = off.get(s.unit);
+    if (i === undefined) continue;
+    const p = interpPos(u, i);
+    const sx = viewW / 2 + (p[0] - center.x) * scale;
+    const sy = viewH / 2 + (p[1] - center.z) * scale;
+    if (sx < -40 || sx > viewW + 40 || sy < -40 || sy > viewH + 40) continue;
+    const left = (s.end - simFrame) / 30;
+    // Faster as it runs out, like a fuse.
+    const rate = s.exact ? Math.max(2, 8 - left) : 3;
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 1000 * rate * Math.PI);
+    const y = sy - iconPxFor(u[i + F.DEF]) / 2 - 12;
+    octx.save();
+    octx.globalAlpha = 0.65 + 0.35 * pulse;
+    octx.font = `${Math.round(14 + 4 * pulse)}px sans-serif`;
+    octx.textAlign = 'center';
+    octx.textBaseline = 'middle';
+    const label = s.exact ? left.toFixed(1) : '';
+    octx.fillText('💣', sx - (label ? 14 : 0), y);
+    if (label) {
+      octx.font = 'bold 13px sans-serif';
+      octx.lineWidth = 3;
+      octx.strokeStyle = 'rgba(0, 0, 0, 0.85)';
+      octx.strokeText(label, sx + 10, y);
+      octx.fillStyle = '#ff5a3c';
+      octx.fillText(label, sx + 10, y);
+    }
+    octx.restore();
+    scheduleDraw(); // keep it pulsing while paused
+  }
 }
 
 // ---- the clip's unit ---------------------------------------------------------
@@ -3727,7 +3806,7 @@ function startPlay() {
   const last = data.frameCount - 1;
   if (playPos >= last) setPlayhead(0, true); // restart from the beginning at the end
   // A finished clip plays again from its start.
-  if (clip && frameNumAt(idx) >= clip.f1) go(idxForFrame(clip.f0));
+  if (clip && frameNumAt(idx) >= clip.f1) go(idxForFrame(clip.start));
   playLastTs = 0;
   document.getElementById('play').textContent = '⏸ Pause';
   document.getElementById('clipplay').textContent = '⏸';
@@ -7087,6 +7166,9 @@ function openClip(c) {
     document.body.classList.add('clip-open');
   }
   clip.f0 = c.f0;
+  // Playback starts a few seconds before the moment; the clip reaches back
+  // further so the reader can scroll to what led up to it.
+  clip.start = typeof c.start === 'number' ? Math.max(c.f0, c.start) : c.f0;
   clip.f1 = Math.max(c.f0 + 30, c.f1);
   clip.focus = c;
   // The title's player and side names come in their colours when the
@@ -7114,7 +7196,7 @@ function openClip(c) {
   } else {
     mark.style.display = 'none';
   }
-  const dur = (clip.f1 - clip.f0) / 30;
+  const dur = (clip.f1 - clip.start) / 30;
   const opts = [...document.getElementById('clipspeed').options].map(o => +o.value);
   document.getElementById('clipspeed').value = String(opts.find(v => dur / v <= CLIP_WALL_SEC) || opts[opts.length - 1]);
   resize();
@@ -7126,7 +7208,7 @@ function startClip() {
   // A followed unit starts the clip where its route says it was; the
   // camera then rides along with it (followClipUnit).
   if (c.follow && Array.isArray(c.path) && c.path.length && typeof c.x !== 'number') {
-    const pt = c.path.reduce((b, p) => (Math.abs(p[0] - clip.f0) < Math.abs(b[0] - clip.f0) ? p : b));
+    const pt = c.path.reduce((b, p) => (Math.abs(p[0] - clip.start) < Math.abs(b[0] - clip.start) ? p : b));
     c.x = pt[1];
     c.z = pt[2];
   }
@@ -7138,7 +7220,7 @@ function startClip() {
     fitView();
   }
   stopPlay();
-  go(idxForFrame(clip.f0));
+  go(idxForFrame(clip.start));
   startPlay();
 }
 

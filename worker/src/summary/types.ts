@@ -224,6 +224,10 @@ export interface Clip {
   /** The instant the clip is about, inside [f0, f1], for the host to mark on
    * its timeline: the lead-in is then plainly a wait of a few seconds. */
   at?: number;
+  /** Where playback starts, inside [f0, f1]: a few seconds before `at`,
+   * with the rest of the clip before it there to scroll back to. Absent:
+   * from f0. */
+  start?: number;
   x?: number;
   z?: number;
   r?: number;

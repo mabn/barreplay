@@ -6,15 +6,11 @@ import { h, s, section } from "../dom";
 import { comparable, sideColor, sideOfTeam, teamColor } from "../model";
 import { tip } from "../tooltip";
 import { clipAround, watcher } from "../watch";
-import { SIM_FPS, type Award, type Clip, type Insights, type SummaryOptions } from "../types";
+import { type Award, type Clip, type Insights, type SummaryOptions } from "../types";
 
 const ICONS: Record<string, string> = {
   immortal: "🛡", marathon: "🏃", tourist: "🧭", closecall: "❤", unfinished: "🏗", costliest: "💸",
 };
-
-/** A loss is shown from DEATH_LEAD_SEC before it: what killed it, not the
- * wreck. */
-const DEATH_LEAD_SEC = 20;
 
 /** where is the award's unit on the map when the moment is its death (the
  * costliest loss, the unfinished building), so its clip can zoom there. */
@@ -29,16 +25,13 @@ function whereOf(ins: Insights): (a: Award) => { x?: number; z?: number } {
 }
 
 /** clipOf is what watching an award shows. A unit's whole life when the
- * award is for the life (Marathon, Tourist), the moment around its hardest
- * time (Immortal, Close call), the run-up to its death (the losses). */
+ * award is for the life (Marathon, Tourist), else the moment around its
+ * hardest time (Immortal, Close call) or its death (the losses). */
 export function clipOf(a: Award, at: { x?: number; z?: number }, title: string): Clip {
   const unit = a.unit !== undefined ? { follow: { id: a.unit, def: a.def }, path: a.path } : {};
   const base = { ...unit, ...at, r: 700, title };
   if ((a.key === "marathon" || a.key === "tourist") && a.f0 !== undefined && a.f1 !== undefined && a.f1 > a.f0) {
     return { ...base, f0: a.f0, f1: a.f1 };
-  }
-  if (a.key === "unfinished" || a.key === "costliest") {
-    return { ...base, at: a.f, f0: Math.max(0, a.f - DEATH_LEAD_SEC * SIM_FPS), f1: a.f + 5 * SIM_FPS };
   }
   return clipAround(a.f, base);
 }

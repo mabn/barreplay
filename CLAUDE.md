@@ -346,6 +346,18 @@ internal/demofile/        gunzip + parse packed header + TDF startscript + the p
                           then both report 98 messages for that game, which is the
                           cross-check that the packet decoding is right. Typed autohost
                           commands ("!cv resign") are kept: a person wrote those.
+                          ORDERS (orders.go -> Demo.SelfD): the stream is the input log, so
+                          SELF-DESTRUCT orders are read from it too — NETMSG_SELECT tracks
+                          each player's selection, NETMSG_COMMAND applies to it, AICOMMAND/
+                          _TRACKED/AICOMMANDS name units directly (layouts from Recoil's
+                          BaseNetProtocol.cpp/NetCommands.cpp; verified on a 2026.07.04 demo
+                          whose commander self-destructs at f2416 and dies at f2580). They
+                          join the capture as "selfd" EVENTS (Demo.SelfDEvents; capture.
+                          AddEvents for the streaming re-sim, snapshot.MergeEvents in pack) —
+                          a new kind in the string table, no format change — and `pack
+                          -upload` of an already-packed .brp adds them in place
+                          (packer.AddDemoOrders -> snapshot.AddEventsBRP: only E and the
+                          meta change, no re-simulation; a file that has them is left alone).
 internal/engine/          locate spring-headless/pr-downloader, provision, launch, stream stdout.
                           Run records the child's pid (Engine.Pid) so a caller can watch the
                           run's resource use without Run growing a fourth return value — one
@@ -603,9 +615,12 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           chart time, a swing, a battle, a death, a milestone, an award — hands
                           the host a Clip {f0, f1, at?, x?, z?, r?, title?, titleRuns?} — `at`
                           is the INSTANT it is about, which the viewer marks on the clip's
-                          slider (#clipmark), and every clip opens LEAD_IN_SEC = 5 s before
-                          it (clipAround: to 20 s after; clipSpan: to 5 s past an end;
-                          clipAt: at least 20 s, at most a minute). A swing's clip is about
+                          slider (#clipmark); PLAYBACK starts LEAD_IN_SEC = 5 s before it
+                          (Clip.start) while the clip itself reaches back as far before it
+                          as it runs after (at least CONTEXT_SEC = 20 s), so the moment sits
+                          mid-timeline with context to scroll back to (clipAround: 20 s
+                          after; clipSpan: to 5 s past an end; clipAt: at least 20 s, at
+                          most a minute). A swing's clip is about
                           the moment's FOCUS (moments.ts: the commander death, the costliest
                           loss, or the densest 10 s x 1500-elmo burst of losses), not the
                           start of the minute the line took to move, and zooms there. Titles
@@ -2792,6 +2807,11 @@ run dev` in `worker/` plus `pack -upload local`.)
   pass rather than drawing nothing expensively. The BUILD bars are deliberately
   not part of it: there are only ever a handful, and a construction site with no
   bar is indistinguishable from a finished building.
+- **SELF-DESTRUCT COUNTDOWNS** (`app.js` `selfds`/`drawSelfDestructs`): a
+  pulsing 💣 over a unit from its `selfd` order to its death or the order
+  cancelling it (the engine toggles). A death with NO cause is the blast going
+  off, so its frame is exact and the seconds left are shown; killed first,
+  cancelled, or no end within 60 s, it is the bomb without a number.
 - **RECLAIM LINES** (`app.js` `drawReclaimLines`, `RECLAIM_LINE_SEC` = 3): a
   purple line from a builder to what it is reclaiming, drawn for the last 3 s
   before the target disappears. Derived with NO format change from the destroyed

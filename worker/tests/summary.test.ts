@@ -143,12 +143,12 @@ test("losses split what died fighting from what went down with its team", () => 
 });
 
 test("clips carry a lead-in, and fall back to a seek", () => {
-  assert.deepEqual(clipAround(600), { at: 600, f0: 450, f1: 1200 });
-  assert.deepEqual(clipSpan(100, 900, { x: 5, title: "t" }), { x: 5, title: "t", at: 100, f0: 0, f1: 1050 });
+  assert.deepEqual(clipAround(600), { at: 600, f0: 0, start: 450, f1: 1200 });
+  assert.deepEqual(clipSpan(100, 900, { x: 5, title: "t" }), { x: 5, title: "t", at: 100, f0: 0, start: 0, f1: 1050 });
   // A swing explained by one instant opens 5 s before it, not at the start
   // of the minute the line took to move, and runs on to the swing's end.
-  assert.deepEqual(clipAt(2610, 3150), { at: 2610, f0: 2460, f1: 3300 });
-  assert.deepEqual(clipAt(300, 9000), { at: 300, f0: 150, f1: 2100 }, "at most a minute past the instant");
+  assert.deepEqual(clipAt(2610, 3150), { at: 2610, f0: 1920, start: 2460, f1: 3300 }, "the instant mid-clip, playback 5 s before it");
+  assert.deepEqual(clipAt(300, 9000), { at: 300, f0: 0, start: 150, f1: 2100 }, "at most a minute past the instant");
   assert.equal(watcher({}), null, "no hook: nothing is clickable");
   let seeked = -1;
   watcher({ onSeek: (f) => { seeked = f; } })!({ f0: 42, f1: 99 });
@@ -215,7 +215,7 @@ test("an award's clip follows its unit", () => {
   const c = clipOf(a, {}, "t");
   assert.deepEqual([c.f0, c.f1, c.follow], [300, 900, { id: 77, def: 2 }], "a life award plays the life");
   const loss = clipOf({ ...a, key: "costliest", f: 3000 }, { x: 4, z: 6 }, "t");
-  assert.deepEqual([loss.f0, loss.f1, loss.at, loss.x], [2400, 3150, 3000, 4], "a loss shows its run-up");
+  assert.deepEqual([loss.f0, loss.start, loss.f1, loss.at, loss.x], [2400, 2850, 3600, 3000, 4], "a loss: room to scroll back, playback 5 s before it");
   const old = clipOf({ key: "immortal", label: "", text: "", team: 0, def: 2, value: 1, f: 900 }, {}, "t");
   assert.equal(old.follow, undefined, "an older file names no unit");
 });
