@@ -577,6 +577,11 @@ local function kill(id)
 		local n = firstOf(allyOf[u.team], id)
 		if n then
 			unitDamaged(n.id, n.def, n.team, 40, false, 5, -1, nil, nil, nil)
+			-- ...and sometimes the engine names the exploding unit itself as
+			-- the attacker: still the killer's credit, not the dead unit's.
+			if id % 2 == 0 then
+				unitDamaged(n.id, n.def, n.team, 30, false, 5, -1, id, u.def, u.team)
+			end
 		end
 	end
 end

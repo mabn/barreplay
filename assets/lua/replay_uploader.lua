@@ -1568,6 +1568,19 @@ local function blastRoot(unitID, weaponDefID)
 	return best and best.root
 end
 
+-- ownBlast reports whether a hit the engine credits to attackerID is really
+-- that unit's own death blast — the engine sometimes names the exploding
+-- unit as the attacker of its blast. Credit then belongs to whoever killed
+-- it (its root, nil for nobody), not to the dead unit's own team: crediting
+-- the unit seeded whole chains on the side that LOST the reactors.
+local function ownBlast(attackerID, weaponDefID)
+	local src = attackerID and blastOf[attackerID]
+	if src ~= nil and weaponDefID ~= nil and (src.death == weaponDefID or src.selfd == weaponDefID) then
+		return true, src.root
+	end
+	return false, nil
+end
+
 local function hookDamage()
 	local wh = widget.widgetHandler
 	if not (wh and type(wh.UnitDamaged) == "function" and type(wh.UpdateCallIn) == "function") then
@@ -1578,7 +1591,16 @@ local function hookDamage()
 	wh.UnitDamaged = function(self, unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
 		local aID, aDef, aTeam = attackerID, attackerDefID, attackerTeam
 		local root = nil
-		if aTeam == nil then
+		local own, ownRoot = ownBlast(attackerID, weaponDefID)
+		if own then
+			if ownRoot ~= nil then
+				root, aTeam, aDef = ownRoot, ownRoot.team, ownRoot.def
+				aID = lives[ownRoot.id] and ownRoot.id or nil
+				dmgFromChain = dmgFromChain + 1
+			else
+				aID, aDef, aTeam = nil, nil, nil
+			end
+		elseif aTeam == nil then
 			local ok, t, d = pcall(attackerOfProjectile, projectileID)
 			if ok and t ~= nil then
 				aTeam, aDef = t, d
@@ -1906,12 +1928,18 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	if recordDamage and damageHooked then
 		-- A death by a chain explosion is credited to the chain's root, and
 		-- this unit becomes a source for its own blast either way.
-		if attackerTeam == nil then
-			local ok, r = pcall(blastRoot, unitID, weaponDefID)
-			if ok and r ~= nil then
-				attackerID, attackerDefID, attackerTeam = r.id, r.def, r.team
-				creditID = lives[r.id] and r.id or nil -- only while the root lives
-			end
+		local own, ownRoot = ownBlast(attackerID, weaponDefID)
+		local r = nil
+		if own then
+			r = ownRoot
+			attackerID, attackerDefID, attackerTeam, creditID = nil, nil, nil, nil
+		elseif attackerTeam == nil then
+			local ok, br = pcall(blastRoot, unitID, weaponDefID)
+			r = ok and br or nil
+		end
+		if r ~= nil then
+			attackerID, attackerDefID, attackerTeam = r.id, r.def, r.team
+			creditID = lives[r.id] and r.id or nil -- only while the root lives
 		end
 		local root = nil
 		if attackerTeam ~= nil then
