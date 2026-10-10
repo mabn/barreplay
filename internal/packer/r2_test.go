@@ -267,17 +267,9 @@ func TestUploadStaticNative(t *testing.T) {
 		t.Fatal(err)
 	}
 	rid := "somegameid-" + rev
-	found := false
-	for _, k := range putKeys {
-		if !strings.HasPrefix(k, "replays/"+rid) {
-			t.Errorf("object %q not under the revisioned id %q", k, rid)
-		}
-		if k == "replays/"+rid+".brw" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("no .brw head among %v", putKeys)
+	// A publish is the .brp alone, under the revisioned id.
+	if len(putKeys) != 1 || putKeys[0] != "replays/"+rid+".brp" {
+		t.Errorf("objects = %v, want only replays/%s.brp", putKeys, rid)
 	}
 	if !strings.Contains(catalogBody, `"rid":"`+rid+`"`) {
 		t.Errorf("catalog PUT body lacks the rid: %s", catalogBody)
@@ -334,8 +326,8 @@ func TestUploadStaticLocalWorkerRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(putKeys) == 0 || putKeys[len(putKeys)-1] != "replays/somegameid-1a2b3c4d.brw" {
-		t.Errorf("piece PUTs = %v, want the revisioned keys with the .brw last", putKeys)
+	if len(putKeys) != 1 || putKeys[0] != "replays/somegameid-1a2b3c4d.brp" {
+		t.Errorf("piece PUTs = %v, want only the revisioned .brp", putKeys)
 	}
 	if !sawAuth {
 		t.Error("piece PUTs did not carry the bearer token")

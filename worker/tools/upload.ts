@@ -7,8 +7,8 @@
 //   npx tsx tools/upload.ts <bundleDir> [replayId] [--local] [--preview]
 //
 //   <bundleDir>   the -out dir you passed to barreplay-static (default ../static)
-//   [replayId]    upload just this one replay (replays/<id>.brw, .resources,
-//                 .brp — or an older split bundle's .keys and /c*). Omit to
+//   [replayId]    upload just this one replay (replays/<id>.brp — plus, for an
+//                 older bundle, its .brw, .resources, .keys and /c*). Omit to
 //                 upload every replay in the dir.
 //   --local       target the local (miniflare) R2 used by `npm run dev`
 //                 (default is REAL R2)
@@ -17,8 +17,9 @@
 // Transport is picked by tools/r2put.ts: parallel S3 PUTs when
 // R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY are set (fast), else parallel
 // `wrangler r2 object put` (needs `wrangler login` or CLOUDFLARE_API_TOKEN).
-// Each replay's .brw head is uploaded last: it is the marker object the live
-// listing keys on, so a half-uploaded replay never appears in the picker.
+// A replay published today is one .brp, which is its own listing marker. An
+// older bundle's .brw head is uploaded last: it was the marker the live
+// listing keyed on, so a half-uploaded replay never appeared in the picker.
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";

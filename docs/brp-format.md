@@ -12,8 +12,8 @@ Reference implementations (these three must stay in lockstep):
 | What | Where |
 | --- | --- |
 | Encoder + decoder (Go) | `snapshot/brp.go` |
-| Frame/event decoder (JS) | `worker/public/app.js` (`decodeFrames`, `decodeEvents`) |
-| Wire container / static bundle | `internal/viz/wire.go`, `internal/viz/static.go` |
+| Decoder + Range reader (JS) | `worker/public/app.js` (`loadBrpHead`, `headFromBrp`, `decodeFrames`, `decodeEvents`, `decodeComms`, `decodeEconomy`) |
+| Publishing (the file IS the published replay) | `internal/viz/static.go`, `snapshot.IndexBRP` |
 
 Measured on a real 33-minute 8v8 game (1 952 sampled frames, 4 223 293 unit
 records, 48 823 events): **476 MB** as v1 JSONL → **7 993 143 bytes (7.6 MiB)**
@@ -108,8 +108,12 @@ offset  size  value
 - Readers MUST skip sections with unknown tags (that is the format's
   forward-compatibility mechanism: new sections can be added without a version
   bump).
-- The writer emits sections in the order `M K F X E C`; readers MUST NOT rely
-  on order.
+- `M` is always the FIRST section (a reader holding only the head of the file
+  finds everything else through it, §4). The writer then emits `E C K F X` —
+  the sections a viewer needs before it can draw, then the bulk — and records
+  that order in `M`'s section layout. Files written before the layout existed
+  have `M K F X E C`. Readers MUST NOT rely on the order of anything after `M`:
+  scan the headers, or follow the layout.
 
 ### Section tags
 
@@ -121,7 +125,7 @@ offset  size  value
 | `X` (0x58) | extra | concatenated chunks, same frame boundaries as `F` (keyframe gzip + delta gzip per chunk) | extras: team economy |
 | `E` (0x45) | events | one gzip stream (§9) | unit lifecycle events |
 | `C` (0x43) | comms | one gzip stream (§9.1) | player chat + map drawings; **omitted entirely** when the capture recorded none |
-| `J` (0x4A) | head | one gzip stream of JSON | **not used in files** — reserved for the viz wire container (§10) |
+| `J` (0x4A) | head | one gzip stream of JSON | **not used in files** — the head of the older `.brw` wire container (§10) |
 
 ## 4. `M` — the meta section
 
@@ -136,7 +140,11 @@ offset  size  value
   "events":      48823,        // total events
   "unitRecords": 4223293,      // total per-frame unit rows (sum of frame unit counts)
   "chunkFrames": 64,           // nominal samples per chunk (the last chunk may be short)
-  "chunks":      [ ... ]       // the chunk index, see §5
+  "chunks":      [ ... ],      // the chunk index, see §5
+  "sections":    [             // the LAYOUT: every section after M, in file order
+    { "tag": "E", "len": 201733 },
+    { "tag": "K", "len": 551210 }, ...
+  ]
 }
 ```
 
@@ -147,6 +155,15 @@ offset  size  value
   that appear in frame or event data but are missing from `meta.teams`.
 - `unitRecords` counts **full frame contents** (live units per frame, summed),
   not stored changed-records — it is unaffected by delta-frame skipping.
+- `sections` lists every section after `M` — its one-character tag and its
+  payload length, in file order. `M` is the first section, so its end is known
+  from the 10 bytes in front of it (`10 + M's length`), and walking the layout
+  from there (each section is a 5-byte header plus `len` bytes) gives every
+  section's absolute payload offset. That is what lets a browser that has read
+  only the head of a published file Range-read any section directly, instead
+  of walking the headers one round trip at a time. Files written before it
+  existed lack it; `snapshot.IndexBRP` adds it (and every publish runs through
+  that, so a published file always has one).
 
 ### 4.1 `meta` — the capture metadata
 
@@ -424,8 +441,8 @@ uv(0)                         // nothing changed
 
 ## 7. `X` — the extra section
 
-Data the viewer does not render, kept for other consumers (economy graphs;
-the viz `.resources` endpoint decodes it once server-side). Same frame
+Team economy, which the viewer reads once, whole, and decodes for the player
+list and team statistics (`decodeEconomy` in app.js). Same frame
 boundaries as the core codec, stored as a keyframe gzip stream + delta gzip
 stream per chunk (§5); per frame, the decompressed stream is:
 
@@ -446,10 +463,14 @@ Incomes are per game-second. (Until v4 the stream additionally began with a
 per-changed-unit `build` column; v5 moved it into the core columns so the
 browser gets it.)
 
-**`X` is not self-describing:** it has no unit counts or ids of its own — the
-column length, unit order, and the existed-in-previous-frame flags all come
-from decoding the corresponding core stream (keyframe or chunk deltas) first.
-Decode them together (`snapshot.ReadBRP` / `BRPFile.DecodeChunk` do).
+Since v5 the X stream decodes standalone: it is one record per sample, in
+sample order, and needs nothing from the core stream. What it does NOT carry
+is the sample's sim frame — that is in the core stream — so a standalone
+reader keys records by sample position (record k of chunk i is the chunk's
+k-th sample) and takes the frame number from the decoded frames. Deriving it
+as `frame + k × sampleEvery` is wrong wherever a capture skipped a sample.
+(Until v4 X began with per-changed-unit columns and could only be decoded
+together with the core stream.)
 
 ## 8. Quantization and dropped fields
 
@@ -561,57 +582,47 @@ own hardcoded `CInMapDrawModel::EraseNear` radius. Consumers resolve it
 themselves, which keeps the record faithful to what happened rather than to one
 reader's idea of what should still be visible.
 
-## 10. The BRW wire container (how the replay is served)
+## 10. How a replay is served
 
-Not part of the file format, but specified here because it reuses the same
-framing and the same stored bytes. The static/R2 deployment (see `worker/`)
-serves it as plain files, precomputed by `cmd/barreplay-static` /
-`viz.WriteStaticBundle`:
+The published replay IS the file: a publish (`viz.WriteStaticBundle`, used by
+`pack -upload`, the ingest daemon and `cmd/barreplay-static`) uploads
+`replays/<id>.brp` and nothing else, and the static/R2 deployment (see
+`worker/`) serves it with HTTP Range support. The viewer reads it like this:
 
-- **`GET /replays/<id>.brw`** → a container with magic **`BRW1`**, version 5
-  (always equal to the file format version, since the data bytes pass through
-  untouched — the JS decoder keys its column count off this byte, and still
-  accepts 4 so published v4 bundles keep playing), sections:
-  - `J`: gzip(JSON head) — a *viewer-shaped* projection of `M`: `gameId`,
-    `engineVersion`, `gameVersion`, `mapName`, `sampleEvery`, `bounds`,
-    `teams` (meta teams + `frameTeams` fill-ins), `unitDefs` (id→internal
-    name only — the icon/footprint lookup key), `unitNames` (id→human name,
-    what the viewer labels units with; omitted per def when the capture
-    recorded none, and absent entirely from pre-existing bundles, so the
-    front-end falls back to `unitDefs`),
-    `unitIcons`, `footprints`, `players`, `frameCount`, `chunks` — the
-    index reduced to `{frame, count, kLen, len, off}`, where `off` is the
-    chunk's delta bytes' ABSOLUTE offset in the `.brp` (`Section.Offset` of
-    `F` plus `fOff`) — and `keys` = `{off, len}`, the `K` section payload's
-    absolute range. `keys`/`off` are absent from heads published before the
-    `.brp` itself was uploaded (see the split pieces below).
-  - `E`: the file's events section, **byte-for-byte**.
-  - `C`: the file's comms section, **byte-for-byte** — absent when the file
-    has none, which is what the front-end reads as "this capture recorded no
-    chat or drawings" (it then hides the chat panel entirely).
-- **`GET /replays/<id>.brp`** → the file itself, byte-for-byte. The viewer
-  never downloads it whole: it Range-reads `bytes=keys.off-(keys.off+keys.len-1)`
-  for the keyframes and each chunk's `off`/`len` for its deltas, exactly the
-  two byte ranges described next.
-- **Keyframes** (Range of the `.brp`; in a head without `keys`, the split file
-  `GET /replays/<id>.keys`) → the `K` section payload **byte-for-byte**:
-  one gzip stream of every keyframe. The viewer fetches this immediately
-  after the head and decodes it progressively while it downloads
-  (`fetch` → `DecompressionStream` → slice at the head's cumulative `kLen`
-  boundaries), which is what makes the whole timeline scrubbable within the
-  first seconds.
-- **Chunk *n*** (Range of the `.brp`; in a head without `keys`, the split file
-  `GET /replays/<id>/c<n>`) → the raw delta bytes `F[fOff : fOff+fLen]` of
-  chunk *n* — again byte-for-byte from the file. Decoded seeded with keyframe
-  *n*. Not requested when `len == 0`.
-- **`GET /replays/<id>.resources`** → per-frame team economy JSON (decoded
-  from `X` once, server-side/offline — the only endpoint that isn't a byte
-  copy, kept because browsers never fetch `X`).
+1. **The head**: `Range: bytes=0-262143`. That holds the header, `M`, and —
+   since the writer puts them right behind it — `E` and `C` for any ordinary
+   game. If `M` runs past the read, one more Range read fetches the rest of
+   it; if `E`/`C` do, one more fetches both (they are adjacent in either
+   writer order). A short 206 means the read reached the end of the file,
+   which is then kept whole; so is a 200 from a server that ignored Range.
+2. **The view** is derived from `M` in the browser: unit internal and human
+   names, structure footprints, army costs, teams (plus `frameTeams`), players,
+   bounds, and the chunk index with absolute ranges. Icons resolve against the
+   viewer's own icon table (`/icons/icontypes.json`, generated from BAR's
+   `icontypes.lua`) — it is fixed per BAR version, so it never rides in a
+   replay.
+3. **Keyframes**: the `K` payload's range, streamed through
+   `DecompressionStream` and sliced at the cumulative `kLen` boundaries, so
+   the whole timeline is scrubbable within the first seconds.
+4. **Chunk *n***: `F[fOff : fOff+fLen]` at its absolute offset, decoded seeded
+   with keyframe *n*. Not requested when `fLen == 0`.
+5. **Economy**: the whole `X` payload, once (§7).
 
 This zero-re-encoding property is the reason the keyframes section and each
 chunk are independently gzipped: the server's cost per request is a byte-range
 copy, and the storage format *is* the transfer format — which is also what
 makes the no-server R2 deployment possible.
+
+Replays published earlier are served from what was uploaded then, and keep
+playing: a `BRW1` container at `/replays/<id>.brw` (same framing, version byte
+= the file's; sections `J` — gzip(JSON) of exactly the view step 2 now derives,
+with the chunk index reduced to `{frame, count, kLen, len, off}` and the `K`
+range as `keys` — plus `E` and `C` byte-for-byte), the economy as JSON at
+`/replays/<id>.resources`, and the frames either Range-read from
+`/replays/<id>.brp` (heads with `keys`) or split into `/replays/<id>.keys`
+and one `/replays/<id>/c<n>` per chunk (heads without). The viewer tries the
+`.brp` first and falls back to the `.brw` when there is none. The JS decoder
+still accepts version 4 there, so published v4 bundles keep playing.
 
 ## 11. Guarantees and non-guarantees
 
@@ -642,7 +653,7 @@ Explicitly **not** guaranteed:
   it). Determinism holds per build; the diff-two-runs workflow assumes both
   runs used the same binary.
 - Any particular gzip compression level in files being read.
-- Section order within the container.
+- The order of the sections after `M` (follow the layout or scan headers).
 
 ## 12. Reading a file, end to end
 
@@ -662,10 +673,14 @@ Explicitly **not** guaranteed:
       codec: apply each frame's dead list, decode its changed units, advance
       every other live unit by its dv.
    d. (Optional, for resources:) gunzip the X keyframe and delta streams
-      alongside their core counterparts and decode per §7, driven by the
-      core changed lists.
+      and decode per §7 — one record per sample, the frame number taken
+      from the core decode.
 6. gunzip E and decode per §9 when events are needed.
 ```
+
+Over HTTP, without the whole file: read the head of it, take `M` (first
+section, its length at bytes 6–9), and place every other section with `M`'s
+`sections` layout (§4) — then Range-read only what you need (§10).
 
 Go entry points: `snapshot.ParseBRP` (steps 1–3, leaves sections compressed),
 `BRPFile.DecodeChunk(i)` (step 4), `snapshot.ReadBRP` (everything).

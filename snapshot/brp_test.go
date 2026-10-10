@@ -2,6 +2,8 @@ package snapshot
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -648,5 +650,149 @@ func TestBRPNoCommsSection(t *testing.T) {
 	got, err := bf.Comms()
 	if err != nil || got != nil {
 		t.Errorf("Comms() = %v, %v; want nil, nil", got, err)
+	}
+}
+
+// layoutOf decodes the meta record's section layout straight from the bytes
+// and walks it the way the viewer does: M is first, its end is known from its
+// own header, and every later section follows at the length the layout gives.
+func layoutOf(t *testing.T, file []byte) (map[byte][2]int64, []BRPSectionLen) {
+	t.Helper()
+	_, secs, err := ReadContainer(bytes.NewReader(file), BRPMagic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secs[0].Tag != SecMeta {
+		t.Fatalf("first section is %q, want M", secs[0].Tag)
+	}
+	raw, err := gunzip(secs[0].Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec brpMetaRecord
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		t.Fatal(err)
+	}
+	at := map[byte][2]int64{}
+	pos := secs[0].Offset + int64(len(secs[0].Payload))
+	for _, s := range rec.Sections {
+		at[s.Tag[0]] = [2]int64{pos + 5, s.Len}
+		pos += 5 + s.Len
+	}
+	if pos != int64(len(file)) {
+		t.Errorf("layout ends at %d, file is %d bytes", pos, len(file))
+	}
+	return at, rec.Sections
+}
+
+// The writer records where every section is, and the browser-facing ones come
+// right after the meta so the first Range read of a file covers them.
+func TestBRPSectionLayout(t *testing.T) {
+	meta, frames, events := testCapture()
+	path := writeBRP(t, t.TempDir(), meta, frames, events)
+	file, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at, layout := layoutOf(t, file)
+	var order []string
+	for _, s := range layout {
+		order = append(order, s.Tag)
+	}
+	if got := fmt.Sprint(order); got != "[E K F X]" {
+		t.Errorf("section order after M = %s, want [E K F X]", got)
+	}
+	bf, err := ParseBRP(bytes.NewReader(file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for tag, off := range bf.SectionOffsets {
+		if tag == SecMeta {
+			continue
+		}
+		if at[tag] != [2]int64{off, int64(len(bf.Sections[tag]))} {
+			t.Errorf("section %q: layout says %v, file has [%d %d]", tag, at[tag], off, len(bf.Sections[tag]))
+		}
+	}
+
+	// A file that already has its layout passes through unchanged.
+	var out bytes.Buffer
+	if err := IndexBRP(bytes.NewReader(file), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(out.Bytes(), file) {
+		t.Error("IndexBRP changed a file that already had a layout")
+	}
+}
+
+// A .brp written before the layout existed gains one — and keeps every other
+// meta field — so it can be published like a fresh capture.
+func TestIndexBRPAddsLayout(t *testing.T) {
+	meta, frames, events := testCapture()
+	path := writeBRP(t, t.TempDir(), meta, frames, events)
+	file, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rebuild the file the way the old writer laid it out: no layout, and
+	// the old section order (M K F X E).
+	_, secs, err := ReadContainer(bytes.NewReader(file), BRPMagic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := gunzip(secs[0].Payload)
+	var rec map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		t.Fatal(err)
+	}
+	delete(rec, "sections")
+	rec["futureField"] = json.RawMessage(`{"kept":true}`)
+	raw, _ = json.Marshal(rec)
+	byTag := map[byte]Section{}
+	for _, s := range secs {
+		byTag[s.Tag] = s
+	}
+	old := []Section{{Tag: SecMeta, Payload: gzipCompress(raw)}}
+	for _, tag := range []byte{SecKeyframes, SecFrames, SecExtra, SecEvents} {
+		old = append(old, byTag[tag])
+	}
+	var legacy bytes.Buffer
+	if err := WriteContainer(&legacy, BRPMagic, BRPVersion, old); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := IndexBRP(bytes.NewReader(legacy.Bytes()), &out); err != nil {
+		t.Fatal(err)
+	}
+	at, layout := layoutOf(t, out.Bytes())
+	if len(layout) != 4 || layout[0].Tag != "K" || layout[3].Tag != "E" {
+		t.Errorf("layout = %+v, want the file's own order K F X E", layout)
+	}
+	bf, err := ParseBRP(bytes.NewReader(out.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if at[SecEvents] != [2]int64{bf.SectionOffsets[SecEvents], int64(len(bf.Sections[SecEvents]))} {
+		t.Errorf("events: layout %v, file [%d %d]", at[SecEvents], bf.SectionOffsets[SecEvents], len(bf.Sections[SecEvents]))
+	}
+	if bf.FrameCount != 3 || bf.Meta.GameID != meta.GameID {
+		t.Errorf("meta lost: frames=%d game=%q", bf.FrameCount, bf.Meta.GameID)
+	}
+	m, _ := gunzip(bf.Sections[SecMeta])
+	if !bytes.Contains(m, []byte(`"futureField":{"kept":true}`)) {
+		t.Error("IndexBRP dropped a meta field it does not know")
+	}
+
+	// A layout that does not describe its file is refused, not published.
+	rec["sections"] = json.RawMessage(`[{"tag":"K","len":1}]`)
+	raw, _ = json.Marshal(rec)
+	old[0].Payload = gzipCompress(raw)
+	legacy.Reset()
+	if err := WriteContainer(&legacy, BRPMagic, BRPVersion, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := IndexBRP(bytes.NewReader(legacy.Bytes()), io.Discard); err == nil {
+		t.Error("IndexBRP accepted a layout that does not match the file")
 	}
 }

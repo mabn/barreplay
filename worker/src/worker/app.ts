@@ -2,19 +2,20 @@
 // static-asset SPA for everything else.
 //
 // There is no dynamic playback logic here. The viewer fetches plain files that
-// `barreplay-static` (Go) precomputed and we synced into the R2 bucket:
+// the Go publisher (`pack`, the ingest daemon, `barreplay-static`) put in the
+// R2 bucket:
 //
 //   /index.json                 the replay picker listing
-//   /replays/<id>.brw           one capture's head (meta, teams, icons, chunk index
-//                               with the byte ranges below)
-//   /replays/<id>.resources     per-frame team economy (JSON)
-//   /replays/<id>.brp           the capture itself; the viewer Range-reads its
-//                               keyframes section first (the whole timeline is
-//                               scrubbable before any chunk arrives), then each
-//                               chunk's DELTA frames
+//   /replays/<id>.brp           the capture itself — the whole published
+//                               replay. The viewer Range-reads its head (meta,
+//                               events, comms), then the keyframes section (the
+//                               whole timeline is scrubbable before any chunk
+//                               arrives), each chunk's DELTA frames, and the
+//                               economy section
 //
-// Replays published before the .brp was uploaded were split instead, into
-// /replays/<id>.keys (the keyframes) and /replays/<id>/c<n> (one chunk's deltas);
+// Replays published before that were several objects: /replays/<id>.brw (a
+// precomputed head), /replays/<id>.resources (the economy as JSON), and either
+// the .brp or /replays/<id>.keys plus /replays/<id>/c<n> (one chunk's deltas);
 // those objects stay and the viewer still reads them.
 //
 // These are served straight from R2, honouring Range.
@@ -854,7 +855,8 @@ app.on(["GET", "HEAD"], "/replays/*", (c) => {
 // simulator's bucket quickly (it is otherwise only writable via `wrangler r2
 // object put` — one ~1s node startup per object, serially); it works against
 // a deployed worker too when the bearer secret authorizes it. The publisher
-// remains responsible for the .brw-last ordering (the listing barrier).
+// is responsible for the order of an older multi-object bundle (its .brw
+// head last — the listing barrier); a .brp is one object.
 app.put("/replays/*", async (c) => {
   if (!authorized(c)) return c.json({ error: "unauthorized" }, 401);
   const key = c.req.path.slice(1);
@@ -921,9 +923,9 @@ app.all("*", (c) => c.env.ASSETS.fetch(c.req.raw));
 export default app;
 
 // handleIndex builds the replay picker listing by scanning the bucket's replays/
-// prefix — one entry per replay (a <id>.brw exists), with size = the sum of that
-// replay's objects (head + resources + .brp, or an older bundle's keys + chunks). No index.json object is needed, so
-// a single-replay upload is self-sufficient.
+// prefix — one entry per replay (a <id>.brp, or an older bundle's <id>.brw,
+// exists), with size = the sum of that replay's objects. No index.json object
+// is needed, so a single-replay upload is self-sufficient.
 const REPLAY_PREFIX = "replays/";
 
 async function handleIndex(bucket: R2Bucket): Promise<Response> {
@@ -945,6 +947,7 @@ async function handleIndex(bucket: R2Bucket): Promise<Response> {
         id = rest.slice(0, -".resources".length);
       } else if (rest.endsWith(".brp")) {
         id = rest.slice(0, -".brp".length);
+        replays.add(id); // a published replay is its .brp
       } else if (rest.endsWith(".keys")) {
         id = rest.slice(0, -".keys".length);
       } else {
