@@ -286,23 +286,32 @@ sim frame when it has one. Both modes write the first three:
 | `end` | `f`, `winners` — the winning ALLY teams (empty: a draw) |
 | `teamdied` | `f`, `team` |
 | `playerleft` | `f`, `player`, `reason` (the engine's PlayerRemoved reason) |
-| `wdefs` | `defs`: `[{id, name, description, type, range, reload, damage, paralyzer}]` — the weapon table (re-sim only, written once at start) |
-| `blast` | `f`, `unit`, `def`, `team`, `x`, `z`, `weapon`, `byUnit`/`byDef`/`byTeam` (who set it off; absent for nobody), `damage` (health removed), `kills` — one big death explosion: at least 3000 hp removed or 3 units killed (re-sim only, `__DAMAGE__`) |
+| `wdefs` | `defs`: `[{id, name, description, type, range, reload, damage, paralyzer, aoe}]` — the weapon table (re-sim only, written once at start) |
+| `blast` | `f`, `unit`, `def`, `team`, `x`, `z`, `weapon`, `byUnit`/`byDef`/`byTeam`, `damage`, `kills` — one big death explosion. No longer written: big blasts are derived from `H` (`snapshot.FactBlastData` is what `internal/combat` reports them as) |
 | `teamstats` | `team`, `fields`, `rows` — the engine's `GetTeamStatsHistory` for the team, one row per stats interval (re-sim only, at game over) |
 
 Facts are kept verbatim through the `.brp`, so a kind added here needs no
 codec change.
 
-**`D` — damage window** (`__DAMAGE__`). Damage is summed per (attacker team,
-attacker def, weapon, victim team, victim def) and flushed once per sample,
-before the frame record, covering the frames since the previous window.
+**`H` — hits** (`__DAMAGE__`). Every damage callin, written as the engine
+delivered it: the widget draws no conclusions. Crediting a chain of
+exploding reactors to whoever killed the first one, removing overkill,
+picking out the big blasts and summing damage per second and per unit are
+all done when the file is READ (`internal/combat`), so they can change
+without re-simulating a game. Hits are buffered and written once per
+sample, before the frame record, covering the frames since the previous one.
 
 ```
-u32 frame                         window end (the sample's frame)
-u16 n                             rows
+u32 frame                         the window's first frame
+u32 n                             hits
 then n rows as COLUMNS:
-  u8  aTeam   u16 aDef   u16 weapon   u8 vTeam   u16 vDef
-  f32 damage  f32 paralyze  u16 hits
+  u16 df (frame - window)   u16 victim   u16 vDef   u8 vTeam
+  u16 x   u16 z                     victim position, whole elmos
+  u16 attacker   u16 aDef   u8 aTeam  as the engine named it
+  u16 weapon
+  u16 projOwner   u8 projTeam
+  u8  flags                         bit 0 paralyzer, bit 1 the engine named a projectile
+  f32 damage   f32 hpAfter          health right after the hit
 ```
 
 Unknown ids are 255 (u8) / 65535 (u16). The seven `weapon` values just
@@ -311,39 +320,49 @@ below 65535 are damage the engine dealt itself, `65535 - k` for Recoil's
 2 ground collision, 3 object collision, 4 fire, 5 water (lava), 6 killed by
 Lua, 7 crushed. Decoders report these as weapon `-1 - k` (-2..-8).
 
-A hit whose attacker the engine no longer knows — the shooter died while its
-projectile was in flight — takes `aTeam` from the projectile
-(`GetProjectileTeamID`) and `aDef` from its owner's id, looked up among the
-units that have died; there is no attacker unit id to credit.
+`hpAfter` below zero is the overkill: the health the hit actually removed
+is `damage + hpAfter` then. The engine names NO attacker for a unit's death
+or self-destruct explosion, and sometimes names the exploding unit itself;
+the victim's position and the unit defs' explosion weapons (DEF
+`deathWeapon`/`selfdWeapon`, the `wdefs` fact's `aoe`) are what lets a
+reader tell which dead unit a blast came from. `projOwner`/`projTeam` are
+read off the projectile (`GetProjectileOwnerID`/`GetProjectileTeamID`) only
+when the engine named no attacker: it resolves the attacker from the
+shooter, which is gone once the shooter has died, so a shell still in flight
+then arrives anonymously while the projectile still knows who fired it.
 
-A unit's death or self-destruct blast reaches the widget with no attacker
-either. The widget credits it to whoever killed the unit that blew up — and,
-through a chain of blasts, to whoever killed the first one — so the row's
-attacker is that root while `weapon` stays the explosion. A blast with no
-root (a self-destruct, a team dying) stays unknown. A `destroyed` event
-caused by a chained blast names the root as its killer the same way.
+**`U` — unit ends** (`__DAMAGE__`). Where each unit's life ended: a row per
+death, at the death, and one per survivor at game over. Flushed with `H`.
+
+```
+u32 frame   u32 n
+then n rows as COLUMNS:
+  u16 df   u16 unit
+  u32 hit                           hits recorded before it: orders it exactly among them
+  u16 x   u16 z   f32 xp
+  u8  flags                         bit 0 alive at the end
+```
+
+A death's killer is on its `destroyed` event, also exactly as the engine
+gave it.
+
+**`D` — damage windows** and **`S` — unit lives** are what the widget wrote
+before `H`/`U`: sums it computed itself, with chain explosions already
+credited (D: `u32 frame, u16 n`, then columns `u8 aTeam, u16 aDef, u16
+weapon, u8 vTeam, u16 vDef, f32 damage, f32 paralyze, u16 hits`, and in the
+earliest streams a trailing `f32 overkill` the decoder subtracts; S: `u32
+frame, u16 n`, then columns `u16 id, u16 def, u8 team, u32 born, u32 died
+(0xFFFFFF = alive), f32 dealt, f32 taken, u16 kills, u8 minHp, f32 xp`).
+Nothing writes them now; decoders still read them. The `blast` fact is the
+same story.
 
 **Every integer the widget writes stays below 2^24.** Spring's Lua numbers
 are single-precision floats, which hold integers exactly only up to 2^24, and
 `VFS.PackU32` converts whatever it is handed: 0xFFFFFFFF rounded to 2^32 and
-was written as 0. That is why the alive marker is 0xFFFFFF and the visibility
+was written as 0. That is why the old S alive marker was 0xFFFFFF, why U's
+`hit` caps at 2^24 hits, and why the visibility
 mask is two u16 halves rather than one u32 (decoders still accept 0xFFFFFFFF
 as alive). The test harness refuses to pack a value a float cannot hold.
-
-`damage` is the health a hit actually removed: a killing blow counts only
-what the victim had left, so a 30000 hp blast on a 63 hp unit is 63. Streams
-written before this carry a fourth f32 column, `overkill` (the part past
-the victim's health), which decoders subtract from `damage`.
-
-**`S` — unit lives** (`__DAMAGE__`). Written for each unit when it dies, and
-for every survivor at game over:
-
-```
-u32 frame   u16 n
-then n rows as COLUMNS:
-  u16 id   u16 def   u8 team   u32 born   u32 died (0xFFFFFF = alive)
-  f32 dealt   f32 taken   u16 kills   u8 minHp (% of max)   f32 xp
-```
 
 **`V` — visibility** (`__VISIBILITY__`). Which sides could see each unit, by
 LOS or radar, once per sample. Only units that are new or whose mask CHANGED

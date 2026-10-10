@@ -153,7 +153,8 @@ end
 --    repairs those streams by dividing it back out.
 -- 4: E records may carry the cause columns (killer / previous owner), the
 --    "given" event kind exists, DEF carries the techLevel/unitGroup/
---    isCommander/maxWeaponRange extras, and the G/D/S/V/P record types may
+--    isCommander/maxWeaponRange/deathWeapon/selfdWeapon extras, and the
+--    G/H/U/V/P record types may
 --    appear. Purely additive: a protocol-3 decoder skips all of it.
 local protocolVersion = 4
 

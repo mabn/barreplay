@@ -1889,10 +1889,22 @@ snapshot/                 PUBLIC data model + pluggable Writer (owns the on-disk
                           (snapshot.Comm = one thing a player wrote or drew) plus the
                           re-sim's ANALYSIS records (snapshot/analysis.go, .brp v6): Fact
                           (game end, eliminations, departures, the weapon table, the
-                          engine's team stats), DamageWindow (damage per attacker/weapon/
-                          victim per sample), UnitLife (per-unit lifetime totals) and
-                          Visibility (per-side LOS/radar per unit). snapshot.DiscardAnalysis
+                          engine's team stats), Hit (every damage callin as the engine
+                          delivered it), UnitEnd (where each unit's life ended) and
+                          Visibility (per-side LOS/radar per unit). DamageWindow and
+                          UnitLife (per-second sums, lifetime totals) are what
+                          internal/combat DERIVES from the hits — and what older captures
+                          stored, which is still read. snapshot.DiscardAnalysis
                           is the embeddable no-op for writers that want none of them.
+internal/combat/          SOURCE DATA IN THE FILE, JUDGEMENT IN THE READER: Derive turns
+                          the raw hits + unit ends + destroyed events into damage windows,
+                          lives, credited kills (a chain of exploding reactors goes to
+                          whoever killed the first; a shell landing after its shooter died
+                          goes to the shooter's team) and the BIG BLASTS (Options:
+                          thresholds, blast window). The widget used to do all of this
+                          itself, which froze every choice into the capture; re-simulating
+                          old games is the one expensive thing, so anything that might be
+                          tuned lives here. Deterministic; experiments/brp-analysis runs it.
 assets/lua/replay_uploader.lua   THE widget, in two modes (widget >= 1.8.0; the separate
                           snapshot_widget.lua sampler is gone). Published as-is it is the
                           player-installable live-game uploader. Injected by the Go tool
@@ -1906,7 +1918,8 @@ assets/lua/replay_uploader.lua   THE widget, in two modes (widget >= 1.8.0; the 
                           default suite disabled, quitforce at game over, the "[barreplay]"
                           log tag, units at hp <= 0 recorded rather than buried (the grey
                           crashing aircraft), and the protocol-4 analysis records — killer
-                          per death on E, G facts, D damage windows, S lives, V visibility,
+                          per death on E (as the engine gave it), G facts, H hits, U unit
+                          ends, V visibility,
                           P profiler readings (docs/brepstream-format.md). cmd/barreplay's
                           -damage/-visibility (default on) map to Config.SkipDamage/
                           SkipVisibility. The uploader mode records G end/teamdied/
@@ -1994,8 +2007,8 @@ like `E` with two string tables and whole-elmo positions delta-coded against the
 previous comm — freehand drawing is a run of short segments, so those deltas are
 1-2 bytes; OMITTED entirely when a capture has none, which is every .brp packed
 from a pre-1.6.0 widget stream, so readers must treat a missing `C` as "none"),
-and in v6 the re-sim's analysis sections `G` facts, `D` damage, `S` lives and
-`V` visibility (each omitted when empty, written LAST — after `X`, in the
+and in v6 the re-sim's analysis sections `G` facts, `H` hits, `U` unit ends and
+`V` visibility (older v6 captures have `D` damage windows and `S` lives instead) (each omitted when empty, written LAST — after `X`, in the
 layout like every other section — and none read by the viewer) plus four
 CAUSE columns appended to `E` (killer unit/def/team + weapon; the old owner's
 team for a `given` event) — detected by the bytes left after the team column,
@@ -2104,8 +2117,8 @@ F  one sampled frame (keyframe or delta: units, dead ids, team economy)
 E  unit lifecycle event, text; protocol 4 adds the cause columns (killer / old owner)
 C  one player comm: chat message or map drawing (JSON)
 G  game fact (JSON: end, teamdied, playerleft; re-sim also wdefs, teamstats)
-D  damage window           (re-sim, -damage)
-S  unit lifetime totals    (re-sim, -damage)
+H  every damage callin     (re-sim, -damage)
+U  where unit lives ended  (re-sim, -damage)
 V  per-side visibility     (re-sim, -visibility)
 P  engine profiler reading (re-sim, -profile)
 X  end of stream
@@ -2115,8 +2128,9 @@ The **unit defs are dumped in full** (`DEF` JSON: name, humanName, costs, buildT
 maxHealth, speed, footprint `xsize`/`zsize`, `iconType`, builder/factory/fly flags,
 weaponCount), not just id→name — mods add
 and modify unit types, and the id space depends on the exact game build the replay pins.
-Since protocol 4 a DEF also carries `techLevel`, `unitGroup`, `isCommander` and
-`maxWeaponRange` (from customParams/weapon defs; for the game summary). **Players** are
+Since protocol 4 a DEF also carries `techLevel`, `unitGroup`, `isCommander`,
+`maxWeaponRange` and the `deathWeapon`/`selfdWeapon` explosion ids (from
+customParams/weapon defs; for the game summary). **Players** are
 seeded from the **demo startscript** (`demofile.BaseMeta`, used by both `cmd/barreplay`
 and `pack`'s demo fetch), the authoritative
 source for per-player metadata the live engine list lacks: country flag (`countrycode`),

@@ -1,6 +1,9 @@
 // brp-analysis prints a sanity report of a .brp's re-simulation analysis
-// (.brp v6: event causes, G facts, D damage, S lives, V visibility), with the
-// cross-checks that say whether the engine handed the widget what it hoped:
+// (.brp v6: event causes, G facts, H hits and U unit ends — or, in captures
+// from before the widget recorded raw hits, its D damage and S lives — and V
+// visibility), with the cross-checks that say whether the engine handed the
+// widget what it hoped. Damage, lives, kill credit and big blasts are derived
+// from the raw hits by internal/combat, the same code a summary uses:
 //
 //	go run ./experiments/brp-analysis <file.brp>
 //
@@ -15,6 +18,7 @@ import (
 	"os"
 	"sort"
 
+	"github.com/mabn/barreplay/internal/combat"
 	"github.com/mabn/barreplay/snapshot"
 )
 
@@ -65,6 +69,37 @@ func run(path string) error {
 	}
 	fmt.Printf("unit defs: %d, with techLevel %d, commanders %d, with weapon range %d\n", len(meta.UnitDefs), tech, coms, ranged)
 
+	facts, err := bf.Facts()
+	if err != nil {
+		return fmt.Errorf("facts: %w", err)
+	}
+	hitLog, err := bf.Hits()
+	if err != nil {
+		return fmt.Errorf("hits: %w", err)
+	}
+	unitEnds, err := bf.UnitEnds()
+	if err != nil {
+		return fmt.Errorf("unit ends: %w", err)
+	}
+	// derived is nil for a capture from before the raw hit log; its own D,
+	// S and blast facts are read instead.
+	var derived *combat.Result
+	if len(hitLog) > 0 || len(unitEnds) > 0 {
+		r := combat.Derive(meta, events, facts, hitLog, unitEnds, combat.DefaultOptions())
+		derived = &r
+		st := r.Stats
+		fmt.Printf("raw combat log: %d hits, %d unit ends; %d hits name an attacker, %d more the projectile's shooter, %d are credited through a chain explosion\n",
+			len(hitLog), len(unitEnds), st.NamedAttacker, st.FromProjectile, st.FromChain)
+		engineNamed := 0
+		for _, e := range events {
+			if e.Kind == snapshot.EventDestroyed && e.Cause != nil && e.Cause.UnitID >= 0 {
+				engineNamed++
+			}
+		}
+		fmt.Printf("deaths naming a killer as the engine reported them: %d (the figures below are credited)\n", engineNamed)
+		events = r.Credit(events)
+	}
+
 	// Event causes.
 	var destroyed, withKiller, withWeapon, given int
 	for _, e := range events {
@@ -85,10 +120,6 @@ func run(path string) error {
 		destroyed, withKiller, pct(withKiller, destroyed), withWeapon, pct(withWeapon, destroyed), given)
 
 	// Facts.
-	facts, err := bf.Facts()
-	if err != nil {
-		return fmt.Errorf("facts: %w", err)
-	}
 	kinds := map[string]int{}
 	var teamStats []snapshot.FactTeamStatsData
 	var teamDeaths []int32 // frames teams died at
@@ -129,6 +160,9 @@ func run(path string) error {
 		}
 	}
 	fmt.Printf("facts by kind: %v\n", kinds)
+	if derived != nil {
+		blasts = append([]snapshot.FactBlastData(nil), derived.Blasts...)
+	}
 	if len(blasts) > 0 {
 		sort.Slice(blasts, func(i, j int) bool { return blasts[i].Damage > blasts[j].Damage })
 		defName := func(id int32) string {
@@ -159,6 +193,9 @@ func run(path string) error {
 	dmg, err := bf.Damage()
 	if err != nil {
 		return fmt.Errorf("damage: %w", err)
+	}
+	if derived != nil {
+		dmg = derived.Windows
 	}
 	// dealt counts what the engine's damageDealt counts: damage to a team
 	// that is not an ally, by a named attacker.
@@ -350,6 +387,9 @@ func run(path string) error {
 	lives, err := bf.Lives()
 	if err != nil {
 		return fmt.Errorf("lives: %w", err)
+	}
+	if derived != nil {
+		lives = derived.Lives
 	}
 	alive, kills := 0, 0
 	var maxXP float32

@@ -121,7 +121,7 @@ offset  size  value
   finds everything else through it, §4). The writer then emits `E C K F X` —
   the sections a viewer needs before it can draw, then the bulk — and records
   that order in `M`'s section layout, followed by v6's optional analysis
-  sections `G D S V`, which no viewer reads. Files written before the layout existed
+  sections `G V H U` (`D S` in older v6 files), which no viewer reads. Files written before the layout existed
   have `M K F X E C`. Readers MUST NOT rely on the order of anything after `M`:
   scan the headers, or follow the layout.
 
@@ -136,9 +136,11 @@ offset  size  value
 | `E` (0x45) | events | one gzip stream (§9) | unit lifecycle events |
 | `C` (0x43) | comms | one gzip stream (§9.1) | player chat + map drawings; **omitted entirely** when the capture recorded none |
 | `G` (0x47) | facts | one gzip stream (§9.2), v6 | game facts; omitted when none |
-| `D` (0x44) | damage | one gzip stream (§9.2), v6 | damage windows; omitted when none |
-| `S` (0x53) | lives | one gzip stream (§9.2), v6 | per-unit lifetime totals; omitted when none |
+| `D` (0x44) | damage | one gzip stream (§9.2), v6 | damage windows; only in older v6 files (now derived from `H`) |
+| `S` (0x53) | lives | one gzip stream (§9.2), v6 | per-unit lifetime totals; only in older v6 files (now derived from `H`/`U`) |
 | `V` (0x56) | visibility | one gzip stream (§9.2), v6 | per-side LOS/radar per unit; omitted when none |
+| `H` (0x48) | hits | one gzip stream (§9.2), v6 | every damage callin, raw; omitted when none |
+| `U` (0x55) | unit ends | one gzip stream (§9.2), v6 | where each unit's life ended; omitted when none |
 | `J` (0x4A) | head | one gzip stream of JSON | **not used in files** — the head of the older `.brw` wire container (§10) |
 
 ## 4. `M` — the meta section
@@ -605,12 +607,48 @@ own hardcoded `CInMapDrawModel::EraseNear` radius. Consumers resolve it
 themselves, which keeps the record faithful to what happened rather than to one
 reader's idea of what should still be visible.
 
-### 9.2 The analysis sections — `G`, `D`, `S`, `V` (v6)
+### 9.2 The analysis sections — `G`, `H`, `U`, `V`, `D`, `S` (v6)
 
 Written only by a re-simulation (see `docs/brepstream-format.md`, protocol 4,
 for what each record means and how the widget collects it), each one gzip
-stream and each omitted when empty. Go accessors: `BRPFile.Facts`, `Damage`,
-`Lives`, `Visibility` (`snapshot/analysis.go`).
+stream and each omitted when empty. Go accessors: `BRPFile.Facts`, `Hits`,
+`UnitEnds`, `Visibility`, `Damage`, `Lives` (`snapshot/analysis.go`).
+
+The file keeps SOURCE data: `H` and `U` are what the engine reported, and
+everything concluded from them — damage per second, lifetime totals, who
+gets the credit for a chain explosion, which blasts were big — is derived on
+read by `internal/combat`, so it can change without re-simulating. `D` and
+`S` are the sums older captures stored instead (with chain credit already
+applied); they are still read.
+
+**`H` — hits.** One row per damage callin, column by column. Ids as `id + 1`
+(0 = unknown).
+
+```
+uvarint  hits
+hits × svarint  frame (delta vs previous hit, from 0)
+hits × uvarint  victim + 1      hits × uvarint victim def + 1
+hits × uvarint  victim team + 1
+hits × svarint  x (delta vs previous)   hits × svarint z (delta vs previous)
+hits × uvarint  attacker + 1    hits × uvarint attacker def + 1
+hits × uvarint  attacker team + 1       (as the engine named them)
+hits × uvarint  weapon, coded as in D below
+hits × uvarint  flags (bit 0 paralyzer, bit 1 the engine named a projectile)
+hits × uvarint  projectile owner + 1    hits × uvarint projectile team + 1
+hits × uvarint  damage × 10
+hits × svarint  health right after the hit × 10 (negative: the overkill)
+```
+
+**`U` — unit ends.**
+
+```
+uvarint  count
+per row:
+  svarint  frame (delta)   uvarint unit + 1
+  svarint  hit index (delta): hits recorded before this end
+  svarint  x (delta)       svarint z (delta)
+  uvarint  xp × 1000       uvarint flags (bit 0 alive at the end)
+```
 
 **`G` — facts.** A JSON array of the widget's fact objects, verbatim (each
 has `"k"`, its kind, and usually `"f"`, its frame). Kept verbatim so a new
@@ -756,7 +794,7 @@ Explicitly **not** guaranteed:
       and decode per §7 — one record per sample, the frame number taken
       from the core decode.
 6. gunzip E and decode per §9 when events are needed.
-7. (v6) gunzip G/D/S/V when present and decode per §9.2.
+7. (v6) gunzip G/V/H/U (or D/S) when present and decode per §9.2.
 ```
 
 Over HTTP, without the whole file: read the head of it, take `M` (first
