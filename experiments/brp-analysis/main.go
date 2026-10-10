@@ -294,13 +294,15 @@ func run(path string) error {
 		}
 	}
 
-	// Kills inside one side: who killed what, when, with what. The chain
+	// Kills inside one side by a weapon: who killed what, when, with what. The chain
 	// credit starts from these, so a surprising "to allies" figure is
 	// explained (or not) here.
 	var friendly []snapshot.Event
 	for _, e := range events {
 		if e.Kind == snapshot.EventDestroyed && e.Cause != nil && e.Cause.Team >= 0 &&
-			allyOf[e.Cause.Team] == allyOf[e.Team] && e.Cause.UnitID != e.UnitID {
+			allyOf[e.Cause.Team] == allyOf[e.Team] && e.Cause.WeaponDef >= 0 {
+			// A negative weapon is the engine's own (-12 on a builder taking
+			// down its own team's lab: a reclaim), not a fight.
 			friendly = append(friendly, e)
 		}
 	}
