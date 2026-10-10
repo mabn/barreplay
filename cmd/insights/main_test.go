@@ -92,13 +92,41 @@ func newRunner(srv *httptest.Server, out string) *runner {
 	return &runner{indexURL: srv.URL, dataURL: srv.URL, http: srv.Client(), outDir: out}
 }
 
+// legacyDir holds a legacy bundle (.brw/.keys/.resources/c<n>, no insights)
+// cut by the last encoder that wrote pieces from writeBRP's capture, beside
+// that capture's .brp.
+var legacyDir = filepath.Join("testdata", "legacy")
+
+// legacyBucket copies the legacy bundle's pieces (not the .brp) into a bucket.
+func legacyBucket(t *testing.T) string {
+	t.Helper()
+	bucket := t.TempDir()
+	src := filepath.Join(legacyDir, "replays")
+	err := filepath.WalkDir(src, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, _ := filepath.Rel(legacyDir, p)
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(bucket, rel)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(dst, b, 0o644)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bucket
+}
+
 // A legacy replay (pieces only) is rebuilt, priced by army cost, and keeps
 // the catalog row's view.
 func TestRebuildsFromPieces(t *testing.T) {
-	bucket := t.TempDir()
-	if _, err := viz.WriteStaticBundle(writeBRP(t, t.TempDir()), bucket); err != nil {
-		t.Fatal(err)
-	}
+	bucket := legacyBucket(t)
 	srv := server(t, bucket, "ally")
 	defer srv.Close()
 	out := t.TempDir()
@@ -183,12 +211,8 @@ func TestLocalWithRid(t *testing.T) {
 // the .brp they were cut from, on everything the pieces carry: only costs of
 // unpriced defs (and the coverage/POV labels saying so) may differ.
 func TestPiecesMatchBRP(t *testing.T) {
-	brp := writeBRP(t, t.TempDir())
-	bucket := t.TempDir()
-	if _, err := viz.WriteStaticBundle(brp, bucket); err != nil {
-		t.Fatal(err)
-	}
-	f, err := os.Open(brp)
+	bucket := legacyBucket(t)
+	f, err := os.Open(filepath.Join(legacyDir, rid+".brp"))
 	if err != nil {
 		t.Fatal(err)
 	}

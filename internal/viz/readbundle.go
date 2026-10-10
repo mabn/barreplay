@@ -97,7 +97,7 @@ func ReadStaticBundle(ctx context.Context, fetch PieceFetcher, rid string) (*sna
 
 	resources := map[int32][]snapshot.TeamResource{}
 	if b, err := fetch(ctx, "replays/"+rid+".resources"); err == nil {
-		var rf []wireResFrame
+		var rf []legacyResFrame
 		if err := json.Unmarshal(b, &rf); err != nil {
 			return nil, nil, fmt.Errorf("resources: %w", err)
 		}

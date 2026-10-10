@@ -14,6 +14,7 @@ type defInfo struct {
 	cost      float64
 	structure bool
 	commander bool
+	builder   bool
 	fly       bool
 	milestone int
 }
@@ -41,6 +42,17 @@ type pass struct {
 
 	tracks    map[int32]*track // unit id -> its current life
 	allTracks []*track         // every life, in the order first seen
+
+	// The player reports (players.go).
+	teamAcc     map[int32]*teamAcc
+	strips      map[int32]*Strip
+	comPaths    map[int32]*[][]int32
+	hadTarget   map[int32]bool
+	floatSec    map[int32]float64
+	floatMetal  map[int32]float64
+	prevFront   [][3]float64
+	contacted   int
+	playerTeams int
 }
 
 func newPass(in Input, ro roster) *pass {
@@ -78,6 +90,19 @@ func newPass(in Input, ro roster) *pass {
 		reached: map[[2]int]bool{},
 		incomeN: make([][]int, ns),
 		tracks:  map[int32]*track{},
+
+		teamAcc:    map[int32]*teamAcc{},
+		strips:     map[int32]*Strip{},
+		comPaths:   map[int32]*[][]int32{},
+		hadTarget:  map[int32]bool{},
+		floatSec:   map[int32]float64{},
+		floatMetal: map[int32]float64{},
+		prevFront:  make([][3]float64, ns),
+	}
+	for _, t := range ro.teams {
+		if t.Side >= 0 {
+			p.playerTeams++
+		}
 	}
 	if p.out.CostCoverage == "" {
 		p.out.CostCoverage = CostFull
@@ -101,6 +126,7 @@ func newPass(in Input, ro roster) *pass {
 			cost:      float64(d.MetalCost),
 			structure: isStructure(d),
 			commander: isCommander(d.Name),
+			builder:   d.IsBuilder,
 			fly:       d.CanFly,
 			milestone: milestoneOf(d.Name),
 		}
@@ -142,6 +168,7 @@ func (p *pass) runEvents(f int32, all bool) {
 }
 
 func (p *pass) event(e snapshot.Event) {
+	p.playerEvent(e)
 	switch e.Kind {
 	case snapshot.EventCreated:
 		p.pending[e.UnitID] = true
@@ -224,6 +251,12 @@ func (p *pass) frame(fr snapshot.Frame) error {
 		front[side][2] += v
 	}
 	p.recordFront(step, front)
+
+	res := fr.Resources
+	if len(res) == 0 && p.in.Resources != nil {
+		res = p.in.Resources[fr.Frame]
+	}
+	p.playerFrame(fr, step, res, front)
 	for side := 0; side < ns; side++ {
 		// The step holds the value at its last sample.
 		s.Army[side][step] = army[side]
@@ -232,10 +265,6 @@ func (p *pass) frame(fr snapshot.Frame) error {
 		}
 	}
 
-	res := fr.Resources
-	if len(res) == 0 && p.in.Resources != nil {
-		res = p.in.Resources[fr.Frame]
-	}
 	if len(res) > 0 {
 		mi := make([]float64, ns)
 		ei := make([]float64, ns)
@@ -349,6 +378,7 @@ func (p *pass) finish() {
 	sort.SliceStable(o.Milestones, func(i, j int) bool { return o.Milestones[i].F < o.Milestones[j].F })
 	o.Battles = p.battles()
 	o.Awards = p.awards()
+	o.Players = p.players()
 	for side := range p.ro.sides {
 		for len(o.Series.Front[side]) < len(o.Series.T) {
 			o.Series.Front[side] = append(o.Series.Front[side], nil)

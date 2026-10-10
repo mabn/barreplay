@@ -15,6 +15,7 @@ import { fingerprint } from "./sections/fingerprint";
 import { chat } from "./sections/chat";
 import { killing } from "./sections/killing";
 import { rivers } from "./sections/rivers";
+import { playerReport, reportsShown } from "./sections/player";
 import { tech } from "./sections/tech";
 import type { Insights, SummaryHandle, SummaryOptions } from "./types";
 
@@ -59,8 +60,37 @@ function header(ins: Insights): HTMLElement {
   );
 }
 
-/** overview: who played, and each side's headline numbers. */
-const overview: Section = (ins) => {
+/** overview: who played, and each side's headline numbers. When the file
+ * carries player reports each name is a button opening that player's report
+ * under the cards; clicking the same name again closes it. */
+const overview: Section = (ins, opts) => {
+  const slot = h("div", { class: "brs-reportslot" });
+  const reports = reportsShown(ins) ? ins.players : [];
+  let open: HTMLElement | null = null;
+  const names = (i: number, players: string[]): (HTMLElement | string)[] => {
+    const out: (HTMLElement | string)[] = [];
+    players.forEach((name, k) => {
+      if (k) out.push(", ");
+      const pl = reports.find((p) => p.side === i && p.player === name);
+      if (!pl) {
+        out.push(name);
+        return;
+      }
+      const btn = h("button", { class: "brs-playerbtn", type: "button", title: `Open ${name}'s report` }, name);
+      btn.addEventListener("click", () => {
+        const wasOpen = open === btn;
+        slot.replaceChildren();
+        open?.classList.remove("brs-on");
+        open = null;
+        if (wasOpen) return;
+        slot.append(playerReport(ins, pl, opts));
+        btn.classList.add("brs-on");
+        open = btn;
+      });
+      out.push(btn);
+    });
+    return out;
+  };
   const n = ins.series.t.length;
   const showArmy = comparable(ins);
   const cards = ins.sides.map((side, i) => {
@@ -70,13 +100,14 @@ const overview: Section = (ins) => {
     const avgMetal = metal.length ? metal.reduce((a, b) => a + b, 0) / metal.length : 0;
     const card = h("div", { class: "brs-side", style: `--brs-side: ${sideColor(ins, i)}` },
       h("b", undefined, sideName(ins, i)),
-      h("div", { class: "brs-players" }, side.players.join(", ")),
+      h("div", { class: "brs-players" }, ...names(i, side.players)),
       h("div", { class: "brs-stat" }, h("span", undefined, "Average metal income"), `${avgMetal.toFixed(1)}/s`),
       showArmy && n > 0 ? h("div", { class: "brs-stat" }, h("span", undefined, "Largest army"), fmtMetal(peak)) : null,
     );
     return card;
   });
-  return section("Sides", h("div", { class: "brs-sides" }, ...cards));
+  const hint = reports.length ? h("p", { class: "brs-hint" }, "Click a player for their report.") : null;
+  return section("Sides", h("div", { class: "brs-sides" }, ...cards), hint, slot);
 };
 
 /** SECTIONS in page order. */

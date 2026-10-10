@@ -99,18 +99,11 @@ func WriteStaticBundle(brpPath, outDir string) (string, error) {
 
 	// The game summary's data. A failure costs the summary, never the
 	// publish: the replay itself is complete without it.
-	if publishInsights {
-		if err := WriteInsights(bf, filepath.Join(replaysDir, insights.FileName(gameID))); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: insights for %s: %v\n", gameID, err)
-		}
+	if err := WriteInsights(bf, filepath.Join(replaysDir, insights.FileName(gameID))); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: insights for %s: %v\n", gameID, err)
 	}
 	return gameID, nil
 }
-
-// publishInsights gates writing the insights piece on publish. Pieces are
-// immutable, so it stays off until the file's first version is complete:
-// a partial v1 written now could never be replaced under the same name.
-const publishInsights = false
 
 // WriteInsights computes a parsed .brp's game summary and writes it to path.
 func WriteInsights(bf *snapshot.BRPFile, path string) error {

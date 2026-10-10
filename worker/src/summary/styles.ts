@@ -48,6 +48,17 @@ export const CSS = `
 .brs-root .brs-line { padding: 1px 0; overflow-wrap: anywhere; }
 .brs-root .brs-when { color: var(--brs-muted); font-variant-numeric: tabular-nums; }
 .brs-root .brs-dest { color: var(--brs-muted); }
+.brs-root .brs-playerbtn { all: unset; cursor: pointer; color: var(--brs-text); border-bottom: 1px dotted var(--brs-muted); }
+.brs-root .brs-playerbtn:hover, .brs-root .brs-playerbtn:focus-visible { color: var(--brs-accent); border-bottom-color: var(--brs-accent); }
+.brs-root .brs-playerbtn.brs-on { color: var(--brs-accent); border-bottom-style: solid; }
+.brs-root .brs-reportslot .brs-section { margin: 12px 0 0; background: var(--brs-bg); }
+.brs-root .brs-reportgrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; margin-top: 12px; }
+@media (max-width: 720px) { .brs-root .brs-reportgrid { grid-template-columns: minmax(0, 1fr); } }
+.brs-root .brs-small { max-width: 420px; margin: 0; }
+.brs-root .brs-axis { display: grid; grid-template-columns: 110px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 2px 0; }
+.brs-root .brs-bar { display: block; height: 8px; background: var(--brs-grid); border-radius: 2px; overflow: hidden; }
+.brs-root .brs-bar i { display: block; height: 100%; }
+.brs-root .brs-val { font-variant-numeric: tabular-nums; color: var(--brs-muted); white-space: nowrap; }
 `;
 
 const STYLE_ID = "brs-summary-style";

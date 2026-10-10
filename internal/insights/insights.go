@@ -59,8 +59,10 @@ type Insights struct {
 	Deaths     Deaths        `json:"deaths"`
 	Milestones []Milestone   `json:"milestones"`
 	// Battles are the biggest clusters of deaths, in time order.
-	Battles []Battle   `json:"battles"`
-	Awards  []Award    `json:"awards"`
+	Battles []Battle `json:"battles"`
+	Awards  []Award  `json:"awards"`
+	// Players is the per-player report, one per team a player controlled.
+	Players []Player   `json:"players"`
 	Chat    []ChatLine `json:"chat"`
 	// Marks counts map points per side per step (the pings).
 	Marks [][]int `json:"marks"`

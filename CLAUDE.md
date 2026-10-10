@@ -475,6 +475,15 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           with what every side lost) and six awards picked from per-unit tracks
                           (ids are recycled, so a new def or a reappearance after death is a new
                           life) — ties to the earlier unit, one unit never takes two.
+                          players.go is the per-player report (Insights.Players, full view
+                          only): built/lost/chat per step, the commander's path + death +
+                          first contact (a 900-elmo grid shared with an enemy), leaks and a
+                          play style card. Two leaks are easy to get wrong: FLOATING counts
+                          only while the WHOLE SIDE sits at >=98% metal storage (overflow is
+                          shared with allies, so one full player is not waste), and "not
+                          building" needs build targets, which a v4 capture lacks (null, not
+                          0 — Input.HasTargets). WriteStaticBundle writes the insights piece
+                          on EVERY publish (a compute failure only warns).
 cmd/insights/main.go      CLI: the summary BACKFILL, one replay at a time (or -all). Old replays
                           have no .brp anywhere, only their split pieces, so it resolves a
                           gameId/link through the catalog (current rid + the row's view, the
@@ -516,7 +525,10 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           mapview.ts draws world-space marks over api.bar-rts.com terrain
                           (best-effort, plain background otherwise). Side colours go through
                           model.readable(), which lifts BAR's darkest team colours (#0000ff)
-                          until they read on the dark panels.
+                          until they read on the dark panels. The PLAYER REPORT
+                          (sections/player.ts) is not in SECTIONS: player names in the Sides
+                          cards are buttons that open it below them (reportsShown — full view
+                          and a players list), one at a time, a second click closing it.
 internal/viz/readbundle.go ReadStaticBundle: the inverse of WriteStaticBundle, rebuilding a
                           BRPFile from published pieces through a PieceFetcher. Defs come back
                           from the head only (names, footprints, armyCost -> MetalCost, CanFly

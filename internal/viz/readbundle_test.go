@@ -68,12 +68,10 @@ func dirFetcher(root string) PieceFetcher {
 // Rebuilding a replay from its published pieces must decode to the same
 // frames, events, comms and economy as the .brp they were cut from.
 func TestReadStaticBundleRoundTrip(t *testing.T) {
-	brp := writeLongBRP(t, t.TempDir())
-	out := t.TempDir()
-	if _, err := WriteStaticBundle(brp, out); err != nil {
-		t.Fatal(err)
-	}
-	f, err := os.Open(brp)
+	// Publishes no longer write pieces, so these were cut by the last encoder
+	// that did, from writeLongBRP's capture.
+	out := filepath.Join("testdata", "legacy")
+	f, err := os.Open(filepath.Join(out, "long.brp"))
 	if err != nil {
 		t.Fatal(err)
 	}

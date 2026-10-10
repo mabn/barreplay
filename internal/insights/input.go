@@ -19,6 +19,9 @@ type Input struct {
 	// Resources maps a sim frame to its team economy, for inputs whose
 	// frames do not carry it (the published pieces keep it in .resources).
 	Resources map[int32][]snapshot.TeamResource
+	// HasTargets is whether frames carry build targets (TargetID). A v4
+	// bundle does not, and reads every unit as targeting nothing.
+	HasTargets bool
 	// Bounds is the world extent of all sampled positions, or nil.
 	Bounds *snapshot.BRPBounds
 	// CostCoverage is CostFull when Meta.UnitDefs carries every def's cost,
@@ -70,6 +73,7 @@ func FromBRP(f *snapshot.BRPFile) (Input, error) {
 			return nil
 		},
 		Bounds:       f.Bounds,
+		HasTargets:   !f.Legacy,
 		CostCoverage: CostFull,
 	}, nil
 }

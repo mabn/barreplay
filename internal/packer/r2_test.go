@@ -3,16 +3,20 @@ package packer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/mabn/barreplay/internal/insights"
 )
 
 // The signer must produce byte-for-byte what aws4fetch produces — the signer
@@ -268,8 +272,9 @@ func TestUploadStaticNative(t *testing.T) {
 	}
 	rid := "somegameid-" + rev
 	// A publish is the .brp alone, under the revisioned id.
-	if len(putKeys) != 1 || putKeys[0] != "replays/"+rid+".brp" {
-		t.Errorf("objects = %v, want only replays/%s.brp", putKeys, rid)
+	sort.Strings(putKeys)
+	if want := []string{"replays/" + rid + ".brp", "replays/" + insights.FileName(rid)}; fmt.Sprint(putKeys) != fmt.Sprint(want) {
+		t.Errorf("objects = %v, want %v (the .brp and its game summary)", putKeys, want)
 	}
 	if !strings.Contains(catalogBody, `"rid":"`+rid+`"`) {
 		t.Errorf("catalog PUT body lacks the rid: %s", catalogBody)
@@ -326,8 +331,9 @@ func TestUploadStaticLocalWorkerRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(putKeys) != 1 || putKeys[0] != "replays/somegameid-1a2b3c4d.brp" {
-		t.Errorf("piece PUTs = %v, want only the revisioned .brp", putKeys)
+	sort.Strings(putKeys)
+	if want := []string{"replays/somegameid-1a2b3c4d.brp", "replays/" + insights.FileName("somegameid-1a2b3c4d")}; fmt.Sprint(putKeys) != fmt.Sprint(want) {
+		t.Errorf("piece PUTs = %v, want %v", putKeys, want)
 	}
 	if !sawAuth {
 		t.Error("piece PUTs did not carry the bearer token")

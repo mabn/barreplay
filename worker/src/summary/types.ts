@@ -25,6 +25,8 @@ export interface Insights {
   /** The biggest clusters of deaths, in time order. */
   battles: Battle[];
   awards: Award[];
+  /** One report per team a player controlled. */
+  players: PlayerReport[];
   chat: ChatLine[];
   /** Map pings per side per step. */
   marks: number[][];
@@ -83,6 +85,39 @@ export interface Battle {
   r: number;
   /** Indexed like sides. */
   lost: { n: number; metal: number; top: number[] }[];
+}
+
+export interface PlayerReport {
+  team: number;
+  player: string;
+  side: number;
+  /** Per step, like Series. */
+  strip: { builtMetal: number[]; builtN: number[]; lostMetal: number[]; lostN: number[]; chat: number[] };
+  leaks: {
+    /** Seconds the player's whole side sat on full metal storage. */
+    floatSec: number;
+    /** The player's income over that time. */
+    floatMetal: number;
+    /** Share of builder time with no target and not moving; null without build targets. */
+    notBuilding: number | null;
+    builderSec: number;
+  };
+  commander: {
+    /** [x, z, health %] per step, null while there is no commander. */
+    path: (number[] | null)[];
+    /** Frame the commander died, -1 if it lived. */
+    died: number;
+    /** Frame of the first enemy army unit within range, -1 if none. */
+    firstContact: number;
+  };
+  style: {
+    incomeShare: number;
+    /** Frame of the first T2 lab, -1 if never. */
+    t2: number;
+    areaPct: number;
+    forwardShare: number | null;
+    assistShare: number | null;
+  };
 }
 
 export interface Award {

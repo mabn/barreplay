@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/mabn/barreplay/internal/insights"
 	"github.com/mabn/barreplay/snapshot"
 )
 
@@ -40,13 +42,17 @@ func TestStaticBundleIsTheBRP(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Error("published .brp differs from the capture")
 	}
+	// Beside it, the game summary's data, computed on every publish.
 	entries, _ := os.ReadDir(filepath.Join(out, "replays"))
-	if len(entries) != 1 {
-		var names []string
-		for _, e := range entries {
-			names = append(names, e.Name())
-		}
-		t.Errorf("bundle holds %v, want only g.brp", names)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if want := []string{"g.brp", insights.FileName("g")}; fmt.Sprint(names) != fmt.Sprint(want) {
+		t.Errorf("bundle holds %v, want %v", names, want)
+	}
+	if b, err := os.ReadFile(filepath.Join(out, "replays", insights.FileName("g"))); err != nil || !bytes.Contains(b, []byte(fmt.Sprintf(`"version":%d`, insights.Version))) {
+		t.Errorf("insights piece: %v (%d bytes)", err, len(b))
 	}
 
 	// An older bundle in the same mirror (head + split pieces, no .brp).
