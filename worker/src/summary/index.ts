@@ -2,20 +2,21 @@
 // file (internal/insights) into an element. It reads nothing but that file
 // and imports nothing from the viewer, so any page holding the file can show
 // the same summary — the replay viewer's Summary tab today, the lavabalance
-// site later. The one hook back into a host is onSeek, a callback taking a
-// sim frame, which the viewer uses to jump the replay to a moment.
+// site later. The hooks back into a host are onClip, taking a span of the
+// game to play (the viewer plays it in a small player over the summary), and
+// onSeek, taking a sim frame, for a host that can only jump its replay.
 import { h, section } from "./dom";
 import { fmtClock, fmtMetal } from "./format";
 import { comparable, notices, sideColor, sideName } from "./model";
 import { ensureStyles } from "./styles";
+import { tip } from "./tooltip";
 import { advantage } from "./sections/advantage";
 import { awards } from "./sections/awards";
 import { mapStories } from "./sections/battles";
-import { fingerprint } from "./sections/fingerprint";
 import { chat } from "./sections/chat";
 import { killing } from "./sections/killing";
 import { rivers } from "./sections/rivers";
-import { playerReport, reportsShown } from "./sections/player";
+import { playersSection, teamColor, type PlayersView } from "./sections/player";
 import { tech } from "./sections/tech";
 import type { Insights, SummaryHandle, SummaryOptions } from "./types";
 
@@ -23,12 +24,13 @@ export type * from "./types";
 export { comparable, notices } from "./model";
 
 /** The newest insights file version this build draws. */
-export const INSIGHTS_VERSION = 2;
+export const INSIGHTS_VERSION = 3;
 
-/** Every version this build draws, newest first: version 2 only adds to
- * version 1 (the winner and the swing line), so an older file draws with
- * those parts missing. A host fetches the first that exists. */
-export const INSIGHTS_VERSIONS = [2, 1];
+/** Every version this build draws, newest first: each only adds to the one
+ * before (2: the winner and the swing line; 3: eliminations, and battles
+ * found as peaks without them), so an older file draws with those parts
+ * missing. A host fetches the first that exists. */
+export const INSIGHTS_VERSIONS = [3, 2, 1];
 
 /** insightsFile names a revision's insights piece. */
 export function insightsFile(rid: string, version = INSIGHTS_VERSION): string {
@@ -48,7 +50,8 @@ export function mountSummary(el: HTMLElement, ins: Insights, opts: SummaryOption
     root.append(header(ins));
     const notes = notices(ins);
     if (notes.length) root.append(h("ul", { class: "brs-notices" }, ...notes.map((n) => h("li", undefined, n))));
-    for (const sec of SECTIONS) {
+    const players = playersSection(ins, opts);
+    for (const sec of sectionsFor(players)) {
       const node = sec(ins, opts);
       if (node) root.append(node);
     }
@@ -68,55 +71,47 @@ function header(ins: Insights): HTMLElement {
   );
 }
 
-/** overview: who played, and each side's headline numbers. When the file
- * carries player reports each name is a button opening that player's report
- * under the cards; clicking the same name again closes it. */
-const overview: Section = (ins, opts) => {
-  const slot = h("div", { class: "brs-reportslot" });
-  const reports = reportsShown(ins) ? ins.players : [];
-  let open: HTMLElement | null = null;
-  const names = (i: number, players: string[]): (HTMLElement | string)[] => {
-    const out: (HTMLElement | string)[] = [];
-    players.forEach((name, k) => {
-      if (k) out.push(", ");
-      const pl = reports.find((p) => p.side === i && p.player === name);
-      if (!pl) {
-        out.push(name);
-        return;
-      }
-      const btn = h("button", { class: "brs-playerbtn", type: "button", title: `Open ${name}'s report` }, name);
-      btn.addEventListener("click", () => {
-        const wasOpen = open === btn;
-        slot.replaceChildren();
-        open?.classList.remove("brs-on");
-        open = null;
-        if (wasOpen) return;
-        slot.append(playerReport(ins, pl, opts));
-        btn.classList.add("brs-on");
-        open = btn;
+/** overview: who played, and each side's headline numbers. When the page
+ * carries the players section each name is a button showing that player
+ * there. */
+function overview(players: PlayersView | null): Section {
+  return (ins) => {
+    const reports = players ? ins.players : [];
+    const names = (i: number, list: string[]): (HTMLElement | string)[] => {
+      const out: (HTMLElement | string)[] = [];
+      list.forEach((name, k) => {
+        if (k) out.push(", ");
+        const pl = reports.find((p) => p.side === i && p.player === name);
+        if (!pl || !players) {
+          out.push(name);
+          return;
+        }
+        const btn = h("button", { class: "brs-playerbtn", type: "button", style: `--brs-team: ${teamColor(ins, pl.team)}` }, name);
+        tip(btn, `Show ${name} under Players`);
+        btn.addEventListener("click", () => players.select(pl.team));
+        out.push(btn);
       });
-      out.push(btn);
+      return out;
+    };
+    const n = ins.series.t.length;
+    const showArmy = comparable(ins);
+    const cards = ins.sides.map((side, i) => {
+      const army = ins.series.army[i] ?? [];
+      const metal = ins.series.metalIncome[i] ?? [];
+      const peak = army.reduce((m, v) => Math.max(m, v), 0);
+      const avgMetal = metal.length ? metal.reduce((a, b) => a + b, 0) / metal.length : 0;
+      return h("div", { class: "brs-side", style: `--brs-side: ${sideColor(ins, i)}` },
+        h("b", undefined, sideName(ins, i)),
+        h("div", { class: "brs-players" }, ...names(i, side.players)),
+        h("div", { class: "brs-stat" }, h("span", undefined, "Average metal income"), `${avgMetal.toFixed(1)}/s`),
+        showArmy && n > 0 ? h("div", { class: "brs-stat" }, h("span", undefined, "Largest army"), fmtMetal(peak)) : null,
+      );
     });
-    return out;
+    return section("Sides", h("div", { class: "brs-sides" }, ...cards));
   };
-  const n = ins.series.t.length;
-  const showArmy = comparable(ins);
-  const cards = ins.sides.map((side, i) => {
-    const army = ins.series.army[i] ?? [];
-    const metal = ins.series.metalIncome[i] ?? [];
-    const peak = army.reduce((m, v) => Math.max(m, v), 0);
-    const avgMetal = metal.length ? metal.reduce((a, b) => a + b, 0) / metal.length : 0;
-    const card = h("div", { class: "brs-side", style: `--brs-side: ${sideColor(ins, i)}` },
-      h("b", undefined, sideName(ins, i)),
-      h("div", { class: "brs-players" }, ...names(i, side.players)),
-      h("div", { class: "brs-stat" }, h("span", undefined, "Average metal income"), `${avgMetal.toFixed(1)}/s`),
-      showArmy && n > 0 ? h("div", { class: "brs-stat" }, h("span", undefined, "Largest army"), fmtMetal(peak)) : null,
-    );
-    return card;
-  });
-  const hint = reports.length ? h("p", { class: "brs-hint" }, "Click a player for their report.") : null;
-  return section("Sides", h("div", { class: "brs-sides" }, ...cards), hint, slot);
-};
+}
 
-/** SECTIONS in page order. */
-const SECTIONS: Section[] = [overview, fingerprint, advantage, rivers, tech, mapStories, killing, awards, chat];
+/** sectionsFor lists the sections in page order. */
+function sectionsFor(players: PlayersView | null): Section[] {
+  return [overview(players), advantage, rivers, mapStories, () => players?.el ?? null, tech, killing, awards, chat];
+}

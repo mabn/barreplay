@@ -1,34 +1,41 @@
-// Map stories: where each army stood over the game (G2, tide lines) with the
-// battles marked on the same map, then a card per battle (G4). Nothing here
-// knows who killed what — a battle card says where, when and what each side
-// lost, and calls it for the side that lost less.
+// Map story: where each army stood over the game (G2, the fronts) with the
+// biggest fights marked on the same map and numbered in the order they
+// happened, beside a one-line-per-battle list (G4). The map and the list are
+// one control: hovering either lights the other, clicking either selects
+// the battle and opens what each side lost there, and the selected battle
+// can be played. Nothing here knows who killed what — a battle says where,
+// when and what each side lost, and calls it for the side that lost less.
 import { h, s, section } from "../dom";
 import { fmtClock, fmtMetal } from "../format";
 import { mapView } from "../mapview";
 import { comparable, sideColor, sideName } from "../model";
+import { compass } from "../moments";
+import { tip, type TipRow } from "../tooltip";
+import { clipSpan, watcher } from "../watch";
 import { SIM_FPS, type Battle, type Insights, type SummaryOptions } from "../types";
-
-/** Seconds of lead-in when jumping to a battle, so the approach is visible. */
-const LEAD_IN_SEC = 10;
 
 export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | null {
   if (!comparable(ins)) return null;
   const hasFront = ins.series.front.some((row) => row.some(Boolean));
   if (!hasFront && ins.battles.length === 0) return null;
-  const stroke = { w: 0 };
-  const lines: { el: SVGElement; k: number }[] = [];
-  const view = mapView(ins, opts.mapApi, (v) => {
-    stroke.w = v.width;
-    for (const l of lines) l.el.setAttribute("stroke-width", String(l.k * v.width));
-    for (const l of rings) l.el.setAttribute("stroke-width", String(l.k * v.width));
-    for (const t of labels) t.setAttribute("font-size", String(v.width * 0.03));
-  });
-  stroke.w = view.width;
-  const rings: { el: SVGElement; k: number }[] = [];
-  const labels: SVGElement[] = [];
+  const watch = watcher(opts);
+  const priced = ins.battles.some((b) => b.lost.some((l) => l.metal > 0));
+  const size = (l: { n: number; metal: number }) => (priced ? l.metal : l.n);
+  const fmt = (v: number) => (priced ? fmtMetal(v) : `${v}`);
+  const name = (d: number) => ins.defs[String(d)]?.human || ins.defs[String(d)]?.name || "?";
+  const when = (b: Battle) => `${fmtClock(b.f0 / SIM_FPS)}–${fmtClock(b.f1 / SIM_FPS)}`;
+  const clipOf = (b: Battle, i: number) => clipSpan(b.f0, b.f1, { x: b.x, z: b.z, r: Math.max(b.r, 800), title: `Battle ${i + 1} · ${when(b)}` });
 
-  // Each side's army centre, step by step, as a path that brightens toward
-  // the end of the game: where it starts faint is where the army began.
+  // Marks scale with the map, which is only known once its record arrives.
+  const scaled: ((w: number) => void)[] = [];
+  const view = mapView(ins, opts.mapApi, (v) => scaled.forEach((f) => f(v.width)));
+  const atWidth = (f: (w: number) => void) => {
+    scaled.push(f);
+    f(view.width);
+  };
+
+  // Each side's army centre, step by step, brightening toward the end of the
+  // game: where it starts faint is where the army began.
   ins.series.front.forEach((row, side) => {
     const n = row.length;
     for (let i = 1; i < n; i++) {
@@ -37,56 +44,118 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
       if (!a || !b) continue;
       const seg = s("line", {
         x1: a[0], y1: a[1], x2: b[0], y2: b[1],
-        stroke: sideColor(ins, side), "stroke-opacity": 0.25 + 0.75 * (i / n),
-        "stroke-width": 0.006 * stroke.w, "stroke-linecap": "round",
+        stroke: sideColor(ins, side), "stroke-opacity": 0.2 + 0.6 * (i / n), "stroke-linecap": "round", "pointer-events": "none",
       });
-      lines.push({ el: seg, k: 0.006 });
+      atWidth((w) => seg.setAttribute("stroke-width", String(0.005 * w)));
       view.layer.append(seg);
     }
   });
-  ins.battles.forEach((b, i) => {
-    const ring = s("circle", {
-      cx: b.x, cy: b.z, r: Math.max(b.r, 0.02 * stroke.w), fill: "#fff", "fill-opacity": 0.08,
-      stroke: "#fff", "stroke-opacity": 0.7, "stroke-width": 0.003 * stroke.w,
-      class: opts.onSeek ? "brs-clickable" : null,
-    }, s("title", undefined, `Battle ${i + 1} at ${fmtClock(b.f0 / SIM_FPS)}`));
-    rings.push({ el: ring, k: 0.003 });
-    const label = s("text", {
-      x: b.x, y: b.z, "text-anchor": "middle", "dominant-baseline": "central",
-      "font-size": 0.03 * stroke.w, style: "fill: #fff; font-weight: 600; pointer-events: none",
-    }, String(i + 1));
-    labels.push(label);
-    if (opts.onSeek) {
-      const seek = opts.onSeek;
-      ring.addEventListener("click", () => seek(Math.max(0, b.f0 - LEAD_IN_SEC * SIM_FPS)));
-    }
-    view.layer.append(ring, label);
-  });
-  const cards = h("div", { class: "brs-cards" }, ...ins.battles.map((b, i) => battleCard(ins, b, i, opts)));
-  return section("Map story",
-    h("p", { class: "brs-hint" }, "Lines trace where each side's army stood, faint at the start and bright at the end. Numbered rings are the biggest battles."),
-    h("div", { class: "brs-mapwrap" }, view.svg),
-    ins.battles.length ? cards : null);
-}
 
-function battleCard(ins: Insights, b: Battle, i: number, opts: SummaryOptions): HTMLElement {
-  const priced = b.lost.some((l) => l.metal > 0);
-  const cost = (l: { n: number; metal: number }) => (priced ? l.metal : l.n);
-  const [l0, l1] = b.lost;
-  const winner = cost(l0) === cost(l1) ? -1 : cost(l0) < cost(l1) ? 0 : 1;
-  const verdict = winner < 0 ? "Even trade" : `${sideName(ins, winner)} came out ahead`;
-  const lossRow = (side: number) => {
-    const l = b.lost[side];
-    const names = l.top.map((d) => ins.defs[String(d)]?.human || ins.defs[String(d)]?.name || "?").join(", ");
-    return h("div", { class: "brs-stat" },
-      h("span", { style: `color: ${sideColor(ins, side)}` }, sideName(ins, side)),
-      `${l.n} lost` + (l.metal ? ` · ${fmtMetal(l.metal)}` : "") + (names ? ` · ${names}` : ""));
+  const rings: SVGGElement[] = [];
+  const rows: HTMLElement[] = [];
+  const detail = h("div", { class: "brs-battledetail" }, h("p", { class: "brs-hint" }, "Pick a battle on the map or in the list."));
+  let selected = -1;
+  const light = (i: number, on: boolean) => {
+    rings[i]?.classList.toggle("brs-hover", on);
+    rows[i]?.classList.toggle("brs-hover", on);
   };
-  const when = `${fmtClock(b.f0 / SIM_FPS)}–${fmtClock(b.f1 / SIM_FPS)}`;
-  const title = h("b", { class: opts.onSeek ? "brs-seek" : null }, `${i + 1}. ${when}`);
-  if (opts.onSeek) {
-    const seek = opts.onSeek;
-    title.addEventListener("click", () => seek(Math.max(0, b.f0 - LEAD_IN_SEC * SIM_FPS)));
+  const select = (i: number) => {
+    selected = i;
+    rings.forEach((g, k) => g.classList.toggle("brs-on", k === i));
+    rows.forEach((r, k) => r.classList.toggle("brs-on", k === i));
+    if (rings[i]) view.layer.append(rings[i]); // over its neighbours
+    detail.replaceChildren(battleDetail(i));
+  };
+  const lossRows = (b: Battle): TipRow[] => [0, 1].map((sd) => ({
+    color: sideColor(ins, sd), label: `${sideName(ins, sd)} lost`,
+    value: `${b.lost[sd]?.n ?? 0} units` + (priced ? ` · ${fmtMetal(b.lost[sd]?.metal ?? 0)}` : ""),
+  }));
+  const verdict = (b: Battle) => {
+    const [a, c] = [size(b.lost[0] ?? { n: 0, metal: 0 }), size(b.lost[1] ?? { n: 0, metal: 0 })];
+    return a === c ? "An even trade" : `${sideName(ins, a < c ? 0 : 1)} came out ahead`;
+  };
+
+  ins.battles.forEach((b, i) => {
+    const ring = s("circle", { cx: b.x, cy: b.z, class: "brs-ring" });
+    const badge = s("circle", { cx: b.x, cy: b.z, class: "brs-badge" });
+    const num = s("text", { x: b.x, y: b.z, "text-anchor": "middle", "dominant-baseline": "central", class: "brs-badgenum" }, String(i + 1));
+    atWidth((w) => {
+      ring.setAttribute("r", String(Math.max(b.r, 0.025 * w)));
+      ring.setAttribute("stroke-width", String(0.003 * w));
+      badge.setAttribute("r", String(0.024 * w));
+      // A style, not an attribute: the scoped stylesheet sizes svg text, and
+      // a stylesheet beats an attribute.
+      num.setAttribute("style", `font-size: ${(0.03 * w).toFixed(0)}px`);
+    });
+    const g = s("g", { class: "brs-battle brs-clickable" }, ring, badge, num);
+    tip(g, () => ({ title: `Battle ${i + 1} · ${when(b)} · ${compass(ins, b.x, b.z)}`, rows: lossRows(b), note: selected === i ? (watch ? "Click to watch" : undefined) : "Click for details" }));
+    g.addEventListener("pointerenter", () => light(i, true));
+    g.addEventListener("pointerleave", () => light(i, false));
+    g.addEventListener("click", () => (selected === i && watch ? watch(clipOf(b, i)) : select(i)));
+    rings.push(g);
+    view.layer.append(g);
+  });
+
+  // The list: one line a battle, its losses as a bar either side of a
+  // centre line, the first side's to the left. Square-root scaled: the last
+  // fight of a long game can cost a hundred times the first, which would
+  // leave every early row an empty track.
+  const most = Math.max(1, ...ins.battles.map((b) => Math.max(size(b.lost[0] ?? { n: 0, metal: 0 }), size(b.lost[1] ?? { n: 0, metal: 0 }))));
+  ins.battles.forEach((b, i) => {
+    const half = (sd: number) => {
+      const v = size(b.lost[sd] ?? { n: 0, metal: 0 });
+      return h("span", { class: "brs-half" + (sd === 0 ? " brs-left" : "") },
+        h("i", { style: `width: ${(100 * Math.sqrt(v / most)).toFixed(1)}%; background: ${sideColor(ins, sd)}` }));
+    };
+    const play = watch ? h("button", { class: "brs-play", type: "button", "aria-label": `Watch battle ${i + 1}` }, "▶") : null;
+    if (play && watch) play.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      watch(clipOf(b, i));
+    });
+    const row = h("div", { class: "brs-brow", tabindex: 0, role: "button" },
+      h("span", { class: "brs-num brs-numlight" }, String(i + 1)),
+      h("span", { class: "brs-when" }, fmtClock(b.f0 / SIM_FPS)),
+      h("span", { class: "brs-where" }, compass(ins, b.x, b.z).replace(/^the /, "")),
+      h("span", { class: "brs-lossbar" }, half(0), half(1)),
+      play);
+    tip(row, () => ({ title: `Battle ${i + 1} · ${when(b)}`, rows: lossRows(b), note: verdict(b) }));
+    row.addEventListener("pointerenter", () => light(i, true));
+    row.addEventListener("pointerleave", () => light(i, false));
+    row.addEventListener("click", () => select(i));
+    row.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        select(i);
+      }
+    });
+    rows.push(row);
+  });
+
+  function battleDetail(i: number): HTMLElement {
+    const b = ins.battles[i];
+    const lossLine = (sd: number) => {
+      const l = b.lost[sd] ?? { n: 0, metal: 0, top: [] };
+      const top = l.top.map(name).join(", ");
+      return h("div", { class: "brs-stat" },
+        h("span", { style: `color: ${sideColor(ins, sd)}` }, sideName(ins, sd)),
+        `${l.n} lost` + (priced && l.metal ? ` · ${fmt(l.metal)} metal` : "") + (top ? ` · ${top}` : ""));
+    };
+    const play = watch ? h("button", { class: "brs-watchbtn", type: "button" }, "▶ Watch this battle") : null;
+    if (play && watch) play.addEventListener("click", () => watch(clipOf(b, i)));
+    return h("div", undefined,
+      h("div", undefined, h("b", undefined, `Battle ${i + 1}`), h("span", { class: "brs-muted" }, ` · ${when(b)} · ${compass(ins, b.x, b.z)}`)),
+      h("div", { style: "margin: 2px 0 6px" }, verdict(b)),
+      lossLine(0), lossLine(1), play);
   }
-  return h("div", { class: "brs-card" }, title, h("div", { class: "brs-hint" }, verdict), lossRow(0), lossRow(1));
+
+  const list = ins.battles.length
+    ? h("div", { class: "brs-blist" },
+      h("div", { class: "brs-bhead" },
+        h("span", { style: `color: ${sideColor(ins, 0)}` }, `◀ ${sideName(ins, 0)} lost`),
+        h("span", { style: `color: ${sideColor(ins, 1)}` }, `${sideName(ins, 1)} lost ▶`)),
+      ...rows, detail)
+    : null;
+  return section("Map story",
+    h("p", { class: "brs-hint" }, "Lines: where each army stood, faint early and bright late. Numbers: the biggest fights in the order they happened, each ringed by the ground it covered. Click one for its losses."),
+    h("div", { class: "brs-storygrid" }, h("div", { class: "brs-mapwrap" }, view.svg), list));
 }

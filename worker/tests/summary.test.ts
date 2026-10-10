@@ -5,7 +5,9 @@ import { test } from "node:test";
 
 import { fmtClock, fmtMetal, niceStep, timeStep } from "../src/summary/format";
 import { comparable, notices, readable, sideColor, sideName } from "../src/summary/model";
+import { knockouts, lossesByStep, wipedOf } from "../src/summary/losses";
 import { compass, momentStory } from "../src/summary/moments";
+import { clipAround, clipSpan, watcher } from "../src/summary/watch";
 import type { Insights } from "../src/summary/types";
 
 function ins(over: Partial<Insights> = {}): Insights {
@@ -97,4 +99,43 @@ test("a moment is named after what died in it", () => {
   // Deaths outside the window (and the step before it) do not count.
   st = momentStory(ins({ ...base, deaths: deaths([[100, 1, 0, 100, 100]]) }), m);
   assert.equal(st.lost[0].n, 0);
+  // A player leaving takes their army with them: that names it, and what
+  // went down with the team is not counted as lost in the game.
+  const pawns = Array.from({ length: 10 }, () => [1100, 2, 0, 450, 450] as [number, number, number, number, number]);
+  st = momentStory(ins({ ...base, deaths: deaths(pawns), eliminated: [{ f: 1100, team: 0, recorded: true }] }), m);
+  assert.equal(st.title, "Ann is eliminated");
+  assert.equal(st.lost[0].n, 0);
+});
+
+test("losses split what died fighting from what went down with its team", () => {
+  const i = ins({
+    stepSec: 15,
+    teams: [{ team: 0, side: 0, player: "Ann" }, { team: 1, side: 1, player: "Cy" }, { team: 2, side: -1 }],
+    series: { t: [0, 15, 30], army: [], metalIncome: [], energyIncome: [], armyCats: [], armyByCat: [] },
+    deaths: {
+      f: [30, 500, 900, 950, 950], x: [0, 0, 0, 0, 0], z: [0, 0, 0, 0, 0], def: [1, 1, 1, 1, 1],
+      team: [0, 1, 0, 0, 2], cost: [100, 50, 200, 400, 999], unfinished: [0, 0, 0, 0, 0],
+    },
+    eliminated: [{ f: 950, team: 0, recorded: false }],
+  });
+  const w = wipedOf(i);
+  assert.deepEqual([0, 1, 2, 3, 4].map(w), [false, false, false, true, false]);
+  const l = lossesByStep(i);
+  assert.equal(l.priced, true);
+  assert.deepEqual(l.combat, [[100, 0, 200], [0, 50, 0]], "Gaia's loss belongs to no side");
+  assert.deepEqual(l.wiped, [[0, 0, 400], [0, 0, 0]]);
+  assert.deepEqual(knockouts(i), [{ f: 950, team: 0, side: 0, name: "Ann" }]);
+  assert.deepEqual(knockouts(ins()), [], "a file before version 3 names none");
+});
+
+test("clips carry a lead-in, and fall back to a seek", () => {
+  assert.deepEqual(clipAround(600), { f0: 300, f1: 1200 });
+  assert.deepEqual(clipSpan(100, 900, { x: 5, title: "t" }), { x: 5, title: "t", f0: 0, f1: 1050 });
+  assert.equal(watcher({}), null, "no hook: nothing is clickable");
+  let seeked = -1;
+  watcher({ onSeek: (f) => { seeked = f; } })!({ f0: 42, f1: 99 });
+  assert.equal(seeked, 42);
+  let clipped: unknown = null;
+  watcher({ onSeek: () => {}, onClip: (c) => { clipped = c; } })!({ f0: 1, f1: 2 });
+  assert.deepEqual(clipped, { f0: 1, f1: 2 }, "onClip wins over onSeek");
 });

@@ -22,8 +22,11 @@ export interface Insights {
   series: Series;
   deaths: Deaths;
   milestones: Milestone[];
-  /** The biggest clusters of deaths, in time order. */
+  /** The most intense fights, in time order. */
   battles: Battle[];
+  /** Teams knocked out of the game, in time order (version 3). A team's
+   * deaths from that frame on went down with it, and are not fighting. */
+  eliminated?: Elimination[];
   /** Index into sides of the winner, -1 unknown. Absent from version 1 files. */
   winner?: number;
   /** The win-probability line (version 2, two-sided full-view games). */
@@ -111,6 +114,13 @@ export interface Battle {
   lost: { n: number; metal: number; top: number[] }[];
 }
 
+export interface Elimination {
+  f: number;
+  team: number;
+  /** Recorded by the capture, rather than inferred from a burst of deaths. */
+  recorded: boolean;
+}
+
 export interface PlayerReport {
   team: number;
   player: string;
@@ -185,10 +195,26 @@ export interface ChatLine {
   text: string;
 }
 
+/** A moment to watch: sim frames f0..f1 (lead-in included), and where on the
+ * map it happened when that is known (world elmos, r a radius to fit). */
+export interface Clip {
+  f0: number;
+  f1: number;
+  x?: number;
+  z?: number;
+  r?: number;
+  /** What the clip shows, for the host's player to title it. */
+  title?: string;
+}
+
 export interface SummaryOptions {
-  /** Called with a sim frame when the reader asks to see a moment (a click
-   * on a chart, a milestone, a chat line). A host with no replay to seek
-   * leaves it out, and nothing is clickable. */
+  /** Called with a clip when the reader asks to see a moment (a click on a
+   * chart, a battle, a chat line), for the host to play it in place. Wins
+   * over onSeek. */
+  onClip?: (clip: Clip) => void;
+  /** Called with a sim frame when the reader asks to see a moment, for a
+   * host that can only jump its replay there. A host with neither hook
+   * leaves both out, and nothing is clickable. */
   onSeek?: (frame: number) => void;
   /** Where map images come from; defaults to BAR's maps API. Null draws the
    * map views on a plain background. */

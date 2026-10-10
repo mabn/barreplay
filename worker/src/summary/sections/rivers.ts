@@ -5,8 +5,9 @@ import { s, section } from "../dom";
 import { fmtMetal } from "../format";
 import { bandPath, stepAt, timeChart } from "../chart";
 import { mirrorKey, swatch } from "../legend";
-import { comparable } from "../model";
+import { comparable, sideColor, sideName } from "../model";
 import { maxOf, stepTimes } from "../series";
+import { watcher } from "../watch";
 import type { Insights, SummaryOptions } from "../types";
 
 const CAT_LABELS: Record<string, string> = {
@@ -33,10 +34,18 @@ export function rivers(ins: Insights, opts: SummaryOptions): HTMLElement | null 
   const c = timeChart({
     height: 260, durationSec: ins.durationSec, yMin: -lim, yMax: lim, zeroLine: true,
     yTick: (v) => fmtMetal(Math.abs(v)),
-    onSeek: opts.onSeek,
+    watch: watcher(opts),
     readout: (tt) => {
       const i = stepAt(t, tt);
-      return i < 0 ? "" : `${fmtMetal(ins.series.army[0][i])} vs ${fmtMetal(ins.series.army[1][i])}`;
+      if (i < 0) return null;
+      return [0, 1].map((sd) => {
+        const total = ins.series.army[sd][i];
+        // The two biggest kinds, as shares: what the army was made of.
+        const kinds = cats.map((cat, k) => [CAT_LABELS[cat]?.split(" ")[0] ?? cat, ins.series.armyByCat[sd][k][i] ?? 0] as [string, number])
+          .filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 2)
+          .map(([name, v]) => `${name} ${Math.round((100 * v) / total)}%`).join(", ");
+        return { color: sideColor(ins, sd), label: sideName(ins, sd), value: fmtMetal(total) + (kinds ? ` · ${kinds}` : "") };
+      });
     },
   });
   for (const side of [0, 1]) {

@@ -1932,12 +1932,18 @@ function resize() {
     ovcv.style.width = viewW + 'px';
     ovcv.style.height = viewH + 'px';
   }
+  if (fitPending && data && viewW && viewH) fitView();
   draw();
 }
 window.addEventListener('resize', resize);
 
-// Fit the whole map extent into the viewport with a margin.
+// Fit the whole map extent into the viewport with a margin. While the map is
+// hidden (a replay opened on its Summary tab) the viewport has no size, so
+// the fit waits for the first resize that gives it one.
+let fitPending = false;
 function fitView() {
+  if (!viewW || !viewH) { fitPending = true; return; }
+  fitPending = false;
   const b = data.bounds;
   const w = Math.max(1, b.maxX - b.minX);
   const h = Math.max(1, b.maxZ - b.minZ);
@@ -3558,6 +3564,7 @@ function setPlayhead(pos, forceSidebar) {
   resolveDisplay();
   if (changed) { maybeUpdateSidebar(forceSidebar); buildNextPosMap(); updateChat(frameNumAt(idx)); }
   updateTimeLabel();
+  if (clip) updateClipBar();
   draw();
 }
 
@@ -3583,6 +3590,7 @@ function go(i) {
 function stopPlay() {
   if (playRAF) { cancelAnimationFrame(playRAF); playRAF = null; }
   document.getElementById('play').textContent = '▶ Play';
+  document.getElementById('clipplay').textContent = '▶';
   // Flush a sidebar update the playback throttle skipped, so the panel matches
   // the frame the playhead stopped on.
   if (sidebarStale && data) maybeUpdateSidebar(true);
@@ -3591,17 +3599,22 @@ function startPlay() {
   if (!data || data.frameCount < 2) return;
   const last = data.frameCount - 1;
   if (playPos >= last) setPlayhead(0, true); // restart from the beginning at the end
+  // A finished clip plays again from its start.
+  if (clip && frameNumAt(idx) >= clip.f1) go(idxForFrame(clip.f0));
   playLastTs = 0;
   document.getElementById('play').textContent = '⏸ Pause';
+  document.getElementById('clipplay').textContent = '⏸';
   const tick = (ts) => {
     if (!playLastTs) playLastTs = ts;
     // Clamp large gaps (e.g. the tab was backgrounded) so we don't jump.
     const dtReal = Math.min(0.1, (ts - playLastTs) / 1000);
     playLastTs = ts;
-    const speed = +document.getElementById('speed').value || 1;
+    const speed = +document.getElementById(clip ? 'clipspeed' : 'speed').value || 1;
     // 1x = real time: 1 game-second per second. Advance in keyframe units.
     const next = playPos + (dtReal * speed) / secPerFrame;
     if (next >= last) { setPlayhead(last, false); stopPlay(); return; }
+    // A clip stops at its end, where the moment it was opened for is over.
+    if (clip && frameNumAt(Math.floor(next)) >= clip.f1) { setPlayhead(next, false); stopPlay(); return; }
     // Keep the pipeline primed: the playhead's chunk plus the next one (the
     // higher the speed, the sooner the boundary arrives — c+1 covers both
     // interpolation and continued playback).
@@ -3680,6 +3693,13 @@ document.getElementById('togglehp').onclick = e => {
 };
 window.addEventListener('keydown', e => {
   if (e.target.tagName === 'SELECT') return;
+  // The clip player over the summary: Escape closes it, space plays (a
+  // focused button already answers space with a click of its own).
+  if (clip) {
+    if (e.key === 'Escape') closeClip(false);
+    else if (e.key === ' ' && e.target.tagName !== 'BUTTON') { e.preventDefault(); togglePlay(); }
+    return;
+  }
   // The Summary tab hides the playback; its keys are the page's own.
   if (document.body.classList.contains('summary-tab')) return;
   // A FOCUSED slider would step natively on top of this, and since it carries
@@ -3793,6 +3813,7 @@ async function loadReplay(id) {
   pumpBackground();
   loadResources(file, loadGen); // economy timeline for the player-list bars (async)
   show();
+  if (clip) startClip(); // a clip was asked for while the replay loaded
 }
 
 // The BAR maps API. The browser talks to it directly (the API allows
@@ -6798,7 +6819,7 @@ async function submitResim() {
 // The insights file versions this page reads, newest first (src/summary
 // INSIGHTS_VERSIONS): a revision whose newer file is not built yet falls back
 // to the one it has.
-const INSIGHTS_VERSIONS = [2, 1];
+const INSIGHTS_VERSIONS = [3, 2, 1];
 let summaryModule = null;   // Promise of the imported library
 let summaryFor = null;      // currentFile the #summary pane was filled for
 let summaryHandle = null;   // the mounted summary, for destroy()
@@ -6825,6 +6846,8 @@ function applyReplayTab() {
   if (tab === 'summary') {
     stopPlay();
     showSummary();
+  } else if (clip) {
+    closeClip(true); // carry on from the clip, where it was
   } else if (data) {
     resize(); // the canvases were display:none while the summary showed
     show();
@@ -6832,6 +6855,7 @@ function applyReplayTab() {
 }
 
 function resetSummary() {
+  if (clip) closeClip(false);
   if (summaryHandle) summaryHandle.destroy();
   summaryHandle = null;
   summaryFor = null;
@@ -6878,7 +6902,7 @@ async function showSummary() {
     const ins = await res.json();
     if (summaryFor !== file) return;
     document.getElementById('summary').textContent = '';
-    summaryHandle = lib.mountSummary(document.getElementById('summary'), ins, { onSeek: seekToFrame });
+    summaryHandle = lib.mountSummary(document.getElementById('summary'), ins, { onSeek: seekToFrame, onClip: openClip });
   } catch (err) {
     if (summaryFor !== file) return;
     summaryFor = null; // let a later visit retry
@@ -6907,10 +6931,93 @@ function seekToFrame(f) {
   go(idxForFrame(f));
 }
 
+// ---- clip player ------------------------------------------------------------
+// The summary's onClip: a moment (a battle, a swing, a death) played in a
+// small window over the summary instead of switching to the Replay tab, so
+// the reader stays where they were reading. It IS the playback — #wrap, the
+// map with its canvases, is moved into the window while it is open and put
+// back after — so it streams, interpolates and draws exactly as the Replay
+// tab does, without a second renderer to keep in step. It zooms to where the
+// moment happened when the summary says, plays from the clip's lead-in at a
+// speed that fits it into ~20 s, and stops at its end. "Open in Replay"
+// carries on in the full view from where the clip is; closing returns the
+// map to the view it had.
+let clip = null; // {f0, f1, focus, home: {center, scale}} while open
+
+const CLIP_WALL_SEC = 20;
+
+function openClip(c) {
+  const box = document.getElementById('clip');
+  if (!clip) {
+    clip = { home: { center: { ...center }, scale } };
+    document.getElementById('clipbody').append(document.getElementById('wrap'));
+    box.style.display = 'flex';
+    document.body.classList.add('clip-open');
+  }
+  clip.f0 = c.f0;
+  clip.f1 = Math.max(c.f0 + 30, c.f1);
+  clip.focus = c;
+  document.getElementById('cliptitle').textContent = c.title || 'Clip';
+  const dur = (clip.f1 - clip.f0) / 30;
+  const opts = [...document.getElementById('clipspeed').options].map(o => +o.value);
+  document.getElementById('clipspeed').value = String(opts.find(v => dur / v <= CLIP_WALL_SEC) || opts[opts.length - 1]);
+  resize();
+  if (data) startClip(); // else loadReplay starts it once the replay is in
+}
+
+function startClip() {
+  const c = clip.focus;
+  if (typeof c.x === 'number' && typeof c.z === 'number') {
+    const r = Math.max(700, c.r || 1200) * 1.5;
+    center = { x: c.x, z: c.z };
+    scale = Math.max(0.01, Math.min(viewW, viewH) / (2 * r));
+  } else {
+    fitView();
+  }
+  stopPlay();
+  go(idxForFrame(clip.f0));
+  startPlay();
+}
+
+function closeClip(keepView) {
+  if (!clip) return;
+  stopPlay();
+  document.getElementById('summary').before(document.getElementById('wrap'));
+  document.getElementById('clip').style.display = 'none';
+  document.body.classList.remove('clip-open');
+  if (!keepView) { center = clip.home.center; scale = clip.home.scale; }
+  clip = null;
+  resize();
+}
+
+function updateClipBar() {
+  const f = frameNumAt(idx) + renderFrac * (data.sampleEvery || 30);
+  const span = Math.max(1, clip.f1 - clip.f0);
+  document.getElementById('clipslider').value = String(Math.max(0, Math.min(1, (f - clip.f0) / span)) * 1000);
+  document.getElementById('cliptime').textContent = fmtClipTime(f) + ' / ' + fmtClipTime(clip.f1);
+}
+
+function fmtClipTime(f) {
+  const s = Math.max(0, Math.round(f / 30));
+  return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+
+function initClip() {
+  document.getElementById('clipclose').onclick = () => closeClip(false);
+  document.getElementById('clipreplay').onclick = () => setReplayTab('replay');
+  document.getElementById('clipplay').onclick = togglePlay;
+  document.getElementById('clipslider').oninput = e => {
+    if (!clip || !data) return;
+    stopPlay();
+    go(idxForFrame(clip.f0 + (+e.target.value / 1000) * (clip.f1 - clip.f0)));
+  };
+}
+
 function initReplayTabs() {
   for (const b of document.querySelectorAll('#replaytabs button')) {
     b.onclick = () => setReplayTab(b.dataset.rtab);
   }
+  initClip();
 }
 
 function openReplay(id) {
@@ -6928,7 +7035,7 @@ async function init() {
   initResim();   // the queue's "re-simulate this replay" box
   initLavabalanceDialog();   // the Games rows' LOS upload preview
   initUpload(); // the dropzone works without the catalog being loaded
-  initReplayTabs(); // Replay / Summary on a replay page
+  initReplayTabs(); // Replay / Summary on a replay page, and the clip player
   const params = new URLSearchParams(location.search);
   // Whether the maintenance controls may show: one round trip (no cookie,
   // no Durable Object — a 401 in a millisecond for an ordinary visit),

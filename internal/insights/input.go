@@ -32,6 +32,10 @@ type Input struct {
 	// rebuilt from its pieces has no recorder record, so its caller reads
 	// the catalog row's view instead.
 	POV string
+	// TeamDied maps a team to the frame it was eliminated, from the capture's
+	// own record (a v6 .brp's teamdied facts). Nil when the capture keeps no
+	// facts; Compute then infers eliminations from the deaths.
+	TeamDied map[int32]int32
 }
 
 const (
@@ -54,6 +58,26 @@ func FromBRP(f *snapshot.BRPFile) (Input, error) {
 	if err != nil {
 		return Input{}, err
 	}
+	facts, err := f.Facts()
+	if err != nil {
+		return Input{}, err
+	}
+	var died map[int32]int32
+	if facts != nil {
+		died = map[int32]int32{}
+		for _, fc := range facts {
+			if fc.Kind != snapshot.FactTeamDied {
+				continue
+			}
+			var d snapshot.FactTeamDiedData
+			if fc.Decode(&d) != nil {
+				continue
+			}
+			if old, ok := died[d.Team]; !ok || d.Frame < old {
+				died[d.Team] = d.Frame
+			}
+		}
+	}
 	return Input{
 		Meta:   f.Meta,
 		Events: events,
@@ -75,6 +99,7 @@ func FromBRP(f *snapshot.BRPFile) (Input, error) {
 		Bounds:       f.Bounds,
 		HasTargets:   !f.Legacy,
 		CostCoverage: CostFull,
+		TeamDied:     died,
 	}, nil
 }
 

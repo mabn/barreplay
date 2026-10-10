@@ -44,6 +44,8 @@ async function resolveMap(api: string, ins: Insights): Promise<{ file: string; r
   return rec?.fileName ? { file: rec.fileName, rec } : null;
 }
 
+let clipSeq = 0;
+
 /** mapView builds the view sized to the capture's bounds, then swaps in the
  * real map extent and terrain when the API answers. */
 export function mapView(ins: Insights, mapApi: string | null | undefined, onExtent?: (v: MapView) => void): MapView {
@@ -54,8 +56,12 @@ export function mapView(ins: Insights, mapApi: string | null | undefined, onExte
   const svg = s("svg", { viewBox: `0 0 ${w0} ${h0}`, preserveAspectRatio: "xMidYMid meet", class: "brs-map" });
   const bg = s("rect", { x: 0, y: 0, width: w0, height: h0, fill: "#1b2229" });
   const terrain = s("g");
-  const layer = s("g");
-  svg.append(bg, terrain, layer);
+  // Marks stop at the map's edge: aircraft die off it, and with the svg
+  // letterboxed into its box they would otherwise spill into the margins.
+  const clipId = `brs-mapclip-${++clipSeq}`;
+  const clipRect = s("rect", { x: 0, y: 0, width: w0, height: h0 });
+  const layer = s("g", { "clip-path": `url(#${clipId})` });
+  svg.append(s("defs", undefined, s("clipPath", { id: clipId }, clipRect)), bg, terrain, layer);
   const view: MapView = { svg, layer, width: w0, height: h0 };
   const api = mapApi === undefined ? DEFAULT_MAP_API : mapApi;
   if (api) {
@@ -64,8 +70,10 @@ export function mapView(ins: Insights, mapApi: string | null | undefined, onExte
       const w = m.rec.width * ELMOS_PER_UNIT;
       const h = m.rec.height * ELMOS_PER_UNIT;
       svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
-      bg.setAttribute("width", String(w));
-      bg.setAttribute("height", String(h));
+      for (const r of [bg, clipRect]) {
+        r.setAttribute("width", String(w));
+        r.setAttribute("height", String(h));
+      }
       terrain.append(s("image", {
         href: `${api}/maps/${encodeURIComponent(m.file)}/texture-mq.jpg`,
         x: 0, y: 0, width: w, height: h, preserveAspectRatio: "none", opacity: 0.55,

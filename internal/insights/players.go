@@ -125,8 +125,8 @@ func (p *pass) playerFrame(fr snapshot.Frame, step int, res []snapshot.TeamResou
 		dir = [2]float64{b[0] - a[0], b[1] - a[1]}
 	}
 
-	comSeen := map[int32]bool{}
-	for _, u := range fr.Units {
+	coms := map[int32][]int{} // team -> its commanders' indices in fr.Units
+	for i, u := range fr.Units {
 		d, ok := p.defs[u.DefID]
 		if !ok || dead(u) {
 			continue
@@ -164,18 +164,21 @@ func (p *pass) playerFrame(fr snapshot.Frame, step int, res []snapshot.TeamResou
 				a.assistS += interval
 			}
 		}
-		if d.commander && !comSeen[u.Team] {
-			comSeen[u.Team] = true
-			hp := int32(0)
-			if u.MaxHealth > 0 {
-				hp = int32(math.Round(100 * float64(u.Health) / float64(u.MaxHealth)))
-			}
-			path := p.comPath(u.Team)
-			for len(*path) <= step {
-				*path = append(*path, nil)
-			}
-			(*path)[step] = []int32{int32(u.Pos.X), int32(u.Pos.Z), hp}
+		if d.commander {
+			coms[u.Team] = append(coms[u.Team], i)
 		}
+	}
+	for team, idx := range coms {
+		u := fr.Units[p.followCommander(team, fr.Units, idx)]
+		hp := int32(0)
+		if u.MaxHealth > 0 {
+			hp = int32(math.Round(100 * float64(u.Health) / float64(u.MaxHealth)))
+		}
+		path := p.comPath(team)
+		for len(*path) <= step {
+			*path = append(*path, nil)
+		}
+		(*path)[step] = []int32{int32(u.Pos.X), int32(u.Pos.Z), hp}
 	}
 
 	// Floating: a side counts as full only when every team on it is.
@@ -260,6 +263,40 @@ func (p *pass) contact(fr snapshot.Frame) {
 			}
 		}
 	}
+}
+
+// followCommander picks which of a team's commanders (idx, into units) its
+// path follows: the one it followed last sample while that one is still
+// there, else the one nearest where the path left off. A team with two is
+// routine — a teammate's commander is given to it when that teammate leaves —
+// and taking whichever came first in the frame flipped between them, drawing
+// the path as zigzags across the map.
+func (p *pass) followCommander(team int32, units []snapshot.UnitState, idx []int) int {
+	pick := idx[0]
+	if id, ok := p.comFollow[team]; ok {
+		for _, i := range idx {
+			if units[i].UnitID == id {
+				return i
+			}
+		}
+		if path := *p.comPath(team); len(path) > 0 {
+			var last []int32
+			for k := len(path) - 1; k >= 0 && last == nil; k-- {
+				last = path[k]
+			}
+			if last != nil {
+				best := math.Inf(1)
+				for _, i := range idx {
+					dx, dz := float64(units[i].Pos.X)-float64(last[0]), float64(units[i].Pos.Z)-float64(last[1])
+					if d := dx*dx + dz*dz; d < best {
+						best, pick = d, i
+					}
+				}
+			}
+		}
+	}
+	p.comFollow[team] = units[pick].UnitID
+	return pick
 }
 
 func (p *pass) comPath(team int32) *[][]int32 {

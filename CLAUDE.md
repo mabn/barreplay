@@ -472,11 +472,25 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           full-view capture (POV) and two sides; CostCoverage says when only
                           armed mobile defs are priced (a replay rebuilt from old pieces).
                           stories.go adds what NO capture can attribute to a killer and so never
-                          tries: each side's army centre per step (Series.Front), battles (deaths
-                          clustered within 1500 elmos and 45 s of quiet, the 12 biggest, each
-                          with what every side lost) and six awards picked from per-unit tracks
-                          (ids are recycled, so a new def or a reappearance after death is a new
-                          life) — ties to the earlier unit, one unit never takes two.
+                          tries: each side's army centre per step (Series.Front), battles and
+                          six awards picked from per-unit tracks (ids are recycled, so a new def
+                          or a reappearance after death is a new life) — ties to the earlier
+                          unit, one unit never takes two. BATTLES (Version 3) are PEAKS of
+                          killing, not clusters: the densest 1500-elmo, 30 s box of lost metal
+                          — divided by both armies' value at the time, or every battle lands in
+                          the last twenty minutes, where everything costs more — grown while
+                          the rate nearby stays >= a fifth of the peak (one quiet 10 s bin
+                          bridged, at most 5 min), its deaths removed, repeated up to 12; a
+                          peak abutting a battle already found joins it. The old rule (deaths
+                          chained within 1500 elmos and 45 s of quiet) chained a whole late
+                          game into ONE "battle" (10:00-55:47 on a real 8v8). ELIMINATIONS
+                          (wipes.go, Insights.Eliminated) come from a v6 capture's teamdied
+                          facts (Input.TeamDied; nil = no facts section), else are inferred: a
+                          team's LAST burst of deaths (gaps <= 1 s, >= 8) with no live unit of
+                          it seen after. Deaths at or after a team's elimination are WIPED —
+                          units blown up by a player leaving, not fought for — and battles,
+                          the costliest/unfinished awards and the page's moment stories skip
+                          them; the page draws them faint on its losses chart.
                           players.go is the per-player report (Insights.Players, full view
                           only): built/lost/chat per step, the commander's path + death +
                           first contact (a 900-elmo grid shared with an enemy), leaks and a
@@ -484,7 +498,12 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           only while the WHOLE SIDE sits at >=98% metal storage (overflow is
                           shared with allies, so one full player is not waste), and "not
                           building" needs build targets, which a v4 capture lacks (null, not
-                          0 — Input.HasTargets). WriteStaticBundle writes the insights piece
+                          0 — Input.HasTargets). The commander path FOLLOWS ONE unit
+                          (followCommander: the one followed last sample while it is there,
+                          else the one nearest where the path left off) — a team holding a
+                          teammate's commander after they left is routine, and taking the
+                          first commander in the frame zigzagged between the two.
+                          WriteStaticBundle writes the insights piece
                           beside the .brp on EVERY publish (a compute failure only warns), so
                           a publish uploads exactly two objects.
                           swing.go (Version 2) adds the WINNER (Insights.Winner, a side index
@@ -527,7 +546,7 @@ cmd/insights/main.go      CLI: the summary BACKFILL, one replay at a time (or -a
                           Nothing writes pieces any more, so the rebuild tests (here and in
                           internal/viz) read testdata/legacy/: a bundle cut by the last
                           encoder that wrote them, beside the .brp it came from.
-worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, insights, {onSeek})
+worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, insights, {onClip, onSeek})
                           draws an insights file and nothing else — no import from app.js, no
                           globals, its CSS injected once and scoped under .brs-root — so another
                           site (lavabalance) can mount the same pages. TypeScript, so unlike
@@ -545,26 +564,55 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           on the /replays/<id> path (pushed, so back returns to the playback;
                           the legacy ?tab= normalization therefore only applies on "/"), the
                           library imported on first open, the insights fetched from the data
-                          origin, a 404 saying the summary is not built yet, and onSeek =
-                          seekToFrame (back to the Replay tab at that sim frame).
-                          Sections (sections/*.ts, in page order in index.ts SECTIONS) each
+                          origin, a 404 saying the summary is not built yet, onClip = openClip
+                          and onSeek = seekToFrame (back to the Replay tab at that sim frame).
+                          WATCHING (watch.ts): anything on the page with a moment behind it — a
+                          chart time, a swing, a battle, a death, a milestone, an award — hands
+                          the host a Clip {f0, f1, x?, z?, r?, title?} (clipAround: 10 s before
+                          to 20 s after; clipSpan: 10 s before to 5 s after), onClip winning
+                          over onSeek, which only takes the start. The viewer PLAYS IT IN PLACE
+                          (app.js openClip/startClip/closeClip, index.html #clip): the replay's
+                          own #wrap — the map canvases — moves into a small window over the
+                          summary, zoomed to the clip's spot, at a speed that fits the clip
+                          into ~20 s (CLIP_WALL_SEC), stopping at f1, with just play, a slider
+                          and the speed; Esc closes it with the summary where it was, "Open in
+                          Replay" carries on at that frame. Asked for because every click
+                          used to throw the reader out of the summary. fitView DEFERS while
+                          the viewport is 0x0 (fitPending, refit by resize), since a replay
+                          first loaded behind the summary tab has no size to fit.
+                          TOOLTIPS (tooltip.ts) are one instant HTML box (.brs-tip, fixed,
+                          flipping at the window's edges) used by every section — native
+                          <title> tooltips were slow and unstyled. tip() binds one element,
+                          tipLayer() delegates for thousands (the killing-fields dots), and
+                          charts in one chartGroup() share a crosshair whose tooltip lists
+                          every member's readout, which is how the panels under "Who was
+                          winning" read as one chart.
+                          Sections (sections/*.ts, in page order in index.ts) each
                           return null when the file cannot support them: the side-by-side
                           charts (advantage, army composition) need comparable(); race to
                           tech and killing fields need a full-view capture (a one-sided one
                           knows only its own milestones and the deaths it saw). chart.ts is
-                          the shared time-axis frame (crosshair readout, click = onSeek);
+                          the shared time-axis frame (crosshair readout, click = a clip);
                           mapview.ts draws world-space marks over api.bar-rts.com terrain
                           (best-effort, plain background otherwise). Side colours go through
                           model.readable(), which lifts BAR's darkest team colours (#0000ff)
-                          until they read on the dark panels. The PLAYER REPORT
-                          (sections/player.ts) is not in SECTIONS: player names in the Sides
-                          cards are buttons that open it below them (reportsShown — full view
-                          and a players list), one at a time, a second click closing it.
-                          The library draws versions 1 and 2 (INSIGHTS_VERSIONS; v2 only adds
-                          winner + swing) and app.js fetches .insights2 then .insights1: the
-                          advantage section is "Who was winning" (sections/swing.ts, numbered
-                          moment markers that seek) when the file has a swing line, else the
-                          v1 army-difference chart; the header names the winner.
+                          until they read on the dark panels. PLAYERS (sections/player.ts,
+                          reportsShown — full view and a players list) is a section with a TAB
+                          per player grouped by side, a map drawing EVERY commander's path at
+                          once with the chosen one bold (a path is also a way to pick; a jump
+                          no commander walks in a step is drawn as a gap), the diary/leaks/
+                          style beside it and the built/lost strip below; names in the Sides
+                          cards select a tab. "Who was winning" stacks the swing line (or the
+                          v1 army-difference chart), the metal LOST per step (losses.ts: what
+                          died fighting, with what went down with an eliminated team faint on
+                          top and left out of the scale) and metal income on one time axis
+                          and crosshair, with eliminations marked on the swing line. The MAP
+                          STORY numbers its battles in the order they happened, on the map and
+                          in a one-line-per-battle list (losses either side of a centre line,
+                          square-root scaled), one selection shared by both.
+                          The library draws versions 1-3 (INSIGHTS_VERSIONS [3, 2, 1]; v2 adds
+                          winner + swing, v3 eliminations and peak battles) and app.js fetches
+                          .insights3, then 2, then 1.
 internal/viz/readbundle.go ReadStaticBundle: the inverse of WriteStaticBundle, rebuilding a
                           BRPFile from published pieces through a PieceFetcher. Defs come back
                           from the head only (names, footprints, armyCost -> MetalCost, CanFly

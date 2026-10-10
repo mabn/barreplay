@@ -91,3 +91,53 @@ func TestFloatingNeedsTheWholeSide(t *testing.T) {
 		t.Errorf("ann floated %v s / %v metal, want 60 s / 600", ann.Leaks.FloatSec, ann.Leaks.FloatMetal)
 	}
 }
+
+// A team with two commanders (a teammate's, given when they left) keeps
+// following the one its path is on, rather than whichever the frame lists
+// first.
+func TestCommanderPathFollowsOneCommander(t *testing.T) {
+	in, err := FromBRP(parseFixture(t, writeFixture(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames := in.Frames
+	n := 0
+	in.Frames = func(yield func(f snapshot.Frame) error) error {
+		return frames(func(f snapshot.Frame) error {
+			for _, u := range f.Units {
+				if u.Team == 0 && u.DefID == defCom {
+					far := u
+					far.UnitID = 9999
+					far.Pos.X += 3000
+					// The second commander comes first in every other frame.
+					if n++; n%2 == 0 {
+						f.Units = append([]snapshot.UnitState{far}, f.Units...)
+					} else {
+						f.Units = append(f.Units, far)
+					}
+					break
+				}
+			}
+			return yield(f)
+		})
+	}
+	ins, err := Compute(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prev []int32
+	for i, pt := range playerOf(t, ins, 0).Commander.Path {
+		if pt == nil {
+			continue
+		}
+		if prev != nil {
+			if dx := pt[0] - prev[0]; dx > 1000 || dx < -1000 {
+				t.Fatalf("step %d: path jumps from %v to %v", i, prev, pt)
+			}
+		}
+		prev = pt
+	}
+	if prev == nil {
+		t.Fatal("no commander path")
+	}
+}

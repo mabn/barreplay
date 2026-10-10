@@ -443,7 +443,7 @@ func brpGameID(path string) (string, error) {
 }
 
 // UploadPieces uploads every file under bundleDir to the target's bucket,
-// keyed by its path relative to bundleDir ("replays/<rid>.insights1.json"),
+// keyed by its path relative to bundleDir ("replays/<rid>.insights<N>.json"),
 // through the same transports as UploadStatic. It registers nothing in the
 // catalog: it adds pieces beside a replay that is already published.
 func UploadPieces(ctx context.Context, o UploadOptions, bundleDir, label string) error {

@@ -22,7 +22,7 @@ import (
 // Version names the file: replays/<rid>.insights<Version>.json. Pieces are
 // immutable, so any change to what is computed or how is a new version,
 // written beside the old one; the viewer asks for the one it understands.
-const Version = 2
+const Version = 3
 
 // FileName is the published piece's name for a revision id.
 func FileName(rid string) string { return fmt.Sprintf("%s.insights%d.json", rid, Version) }
@@ -58,9 +58,13 @@ type Insights struct {
 	Series     Series        `json:"series"`
 	Deaths     Deaths        `json:"deaths"`
 	Milestones []Milestone   `json:"milestones"`
-	// Battles are the biggest clusters of deaths, in time order.
+	// Battles are the most intense fights, in time order.
 	Battles []Battle `json:"battles"`
-	Awards  []Award  `json:"awards"`
+	// Eliminated is every team that was knocked out of the game, in time
+	// order. A team's deaths from that frame on are its units going down
+	// with it, not fighting, so no battle or award counts them.
+	Eliminated []Elimination `json:"eliminated"`
+	Awards     []Award       `json:"awards"`
 	// Winner is the index into Sides of the side that won, -1 when the
 	// replay does not say (Meta.Winners, from the demo or the BAR API).
 	Winner int `json:"winner"`
@@ -128,6 +132,16 @@ type Deaths struct {
 	Team       []int32   `json:"team"`
 	Cost       []float64 `json:"cost"`
 	Unfinished []int8    `json:"unfinished"` // 1 when it died before it was finished
+}
+
+// Elimination is a team leaving the game with its units: the frame its
+// remaining units started dying with it.
+type Elimination struct {
+	F    int32 `json:"f"`
+	Team int32 `json:"team"`
+	// Recorded is true when the capture recorded the elimination (a v6
+	// teamdied fact), false when it was inferred from a burst of deaths.
+	Recorded bool `json:"recorded"`
 }
 
 // Milestone is the first time a side finished a unit of a milestone class.

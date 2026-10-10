@@ -1,9 +1,14 @@
 // A time-axis chart frame shared by the summary's charts: an SVG with a
 // viewBox (so it scales with its container), the plot area, a minutes axis,
-// horizontal grid, and a crosshair that reads the time under the pointer.
-// A click seeks the replay to that moment when the host gave an onSeek.
+// horizontal grid, and a crosshair whose readout opens in the shared
+// tooltip. Charts in one group share the crosshair — hovering one draws it
+// through all of them and the tooltip lists every chart's readout — which is
+// how stacked charts on the same time axis read as one figure. A click plays
+// the moment under the pointer when the host can.
 import { s } from "./dom";
 import { fmtClock, niceStep, timeStep } from "./format";
+import { hideTip, showTip, type TipRow } from "./tooltip";
+import { clipAround, type Watch } from "./watch";
 import { SIM_FPS } from "./types";
 
 export const CHART_W = 1000;
@@ -27,9 +32,15 @@ export interface TimeChartSpec {
   yMax: number;
   /** Formats a y tick. Null draws no y axis. */
   yTick: ((v: number) => string) | null;
-  /** Called with the game time under the pointer, for the readout. */
-  readout?: (t: number) => string;
-  onSeek?: (frame: number) => void;
+  /** The tooltip rows for the game time under the pointer. */
+  readout?: (t: number) => TipRow[] | null;
+  /** Plays the moment under the pointer on a click. */
+  watch?: Watch | null;
+  /** Charts sharing one crosshair and one tooltip. */
+  group?: ChartGroup;
+  /** False leaves out the minutes axis (a chart stacked above another
+   * that draws it). */
+  xAxis?: boolean;
   /** Draws the zero line strongly (a difference chart). */
   zeroLine?: boolean;
   /** Width of the left gutter, overriding the y axis's; row labels live in
@@ -37,11 +48,20 @@ export interface TimeChartSpec {
   gutter?: number;
 }
 
+/** ChartGroup ties charts to one crosshair. */
+export interface ChartGroup {
+  members: { hair: SVGLineElement; x: (t: number) => number; readout?: (t: number) => TipRow[] | null }[];
+}
+
+export function chartGroup(): ChartGroup {
+  return { members: [] };
+}
+
 export function timeChart(spec: TimeChartSpec): TimeChart {
   const left = spec.gutter ?? (spec.yTick ? 52 : 8);
   const right = CHART_W - 10;
   const top = 8;
-  const bottom = spec.height - 22;
+  const bottom = spec.height - (spec.xAxis === false ? 4 : 22);
   const dur = Math.max(1, spec.durationSec);
   const span = spec.yMax - spec.yMin || 1;
   const x = (t: number) => left + (Math.max(0, Math.min(dur, t)) / dur) * (right - left);
@@ -61,48 +81,50 @@ export function timeChart(spec: TimeChartSpec): TimeChart {
   if (spec.zeroLine && spec.yMin < 0 && spec.yMax > 0) {
     svg.append(s("line", { x1: left, x2: right, y1: y(0), y2: y(0), stroke: "var(--brs-muted)", "stroke-width": 1 }));
   }
-  const tStep = timeStep(dur, 10);
-  for (let t = 0; t <= dur; t += tStep) {
-    svg.append(s("text", { x: x(t), y: spec.height - 6, "text-anchor": "middle" }, String(Math.round(t / 60)) + "m"));
+  if (spec.xAxis !== false) {
+    const tStep = timeStep(dur, 10);
+    for (let t = 0; t <= dur; t += tStep) {
+      svg.append(s("text", { x: x(t), y: spec.height - 6, "text-anchor": "middle" }, String(Math.round(t / 60)) + "m"));
+    }
+    svg.append(s("line", { x1: left, x2: right, y1: bottom, y2: bottom, stroke: "var(--brs-line)" }));
   }
-  svg.append(s("line", { x1: left, x2: right, y1: bottom, y2: bottom, stroke: "var(--brs-line)" }));
 
   const plot = s("g");
   svg.append(plot);
 
-  // Crosshair + readout, and the hit area that drives them.
-  const hair = s("line", { y1: top, y2: bottom, stroke: "var(--brs-text)", "stroke-opacity": 0.5, visibility: "hidden" });
-  const label = s("text", { y: top + 10, visibility: "hidden", style: "fill: var(--brs-text)" });
+  // Crosshair, and the hit area that drives it and the tooltip.
+  const hair = s("line", { y1: top, y2: bottom, stroke: "var(--brs-text)", "stroke-opacity": 0.5, visibility: "hidden", "pointer-events": "none" });
   const hit = s("rect", {
     x: left, y: top, width: right - left, height: bottom - top, fill: "transparent",
-    class: spec.onSeek ? "brs-clickable" : null,
+    class: spec.watch ? "brs-clickable" : null,
   });
-  svg.append(hair, label, hit);
+  svg.append(hair, hit);
+  const group = spec.group ?? chartGroup();
+  group.members.push({ hair, x, readout: spec.readout });
   const timeAt = (ev: MouseEvent) => {
     const r = svg.getBoundingClientRect();
     const px = ((ev.clientX - r.left) / r.width) * CHART_W;
     return ((Math.max(left, Math.min(right, px)) - left) / (right - left)) * dur;
   };
-  hit.addEventListener("mousemove", (ev) => {
+  hit.addEventListener("pointermove", (ev) => {
     const t = timeAt(ev);
-    const xx = x(t);
-    hair.setAttribute("x1", String(xx));
-    hair.setAttribute("x2", String(xx));
-    hair.setAttribute("visibility", "visible");
-    const text = fmtClock(t) + (spec.readout ? "  " + spec.readout(t) : "");
-    label.textContent = text;
-    const leftSide = xx > (left + right) / 2;
-    label.setAttribute("x", String(leftSide ? xx - 6 : xx + 6));
-    label.setAttribute("text-anchor", leftSide ? "end" : "start");
-    label.setAttribute("visibility", "visible");
+    const rows: TipRow[] = [];
+    for (const m of group.members) {
+      const xx = String(m.x(t));
+      m.hair.setAttribute("x1", xx);
+      m.hair.setAttribute("x2", xx);
+      m.hair.setAttribute("visibility", "visible");
+      rows.push(...(m.readout?.(t) ?? []));
+    }
+    showTip(svg, ev.clientX, ev.clientY, { title: fmtClock(t), rows, note: spec.watch ? "Click to watch from here" : undefined });
   });
-  hit.addEventListener("mouseleave", () => {
-    hair.setAttribute("visibility", "hidden");
-    label.setAttribute("visibility", "hidden");
+  hit.addEventListener("pointerleave", () => {
+    for (const m of group.members) m.hair.setAttribute("visibility", "hidden");
+    hideTip(svg);
   });
-  if (spec.onSeek) {
-    const seek = spec.onSeek;
-    hit.addEventListener("click", (ev) => seek(Math.round(timeAt(ev) * SIM_FPS)));
+  if (spec.watch) {
+    const watch = spec.watch;
+    hit.addEventListener("click", (ev) => watch(clipAround(Math.round(timeAt(ev) * SIM_FPS))));
   }
   return { svg, plot, x, y, left, right, top, bottom };
 }

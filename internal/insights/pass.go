@@ -43,10 +43,14 @@ type pass struct {
 	tracks    map[int32]*track // unit id -> its current life
 	allTracks []*track         // every life, in the order first seen
 
+	teamAlive map[int32]int32 // team -> last sampled frame holding a live unit of it
+	wiped     []bool          // per death: it went down with its team (wipes.go)
+
 	// The player reports (players.go).
 	teamAcc     map[int32]*teamAcc
 	strips      map[int32]*Strip
 	comPaths    map[int32]*[][]int32
+	comFollow   map[int32]int32 // team -> the commander unit its path follows
 	hadTarget   map[int32]bool
 	floatSec    map[int32]float64
 	floatMetal  map[int32]float64
@@ -91,9 +95,12 @@ func newPass(in Input, ro roster) *pass {
 		incomeN: make([][]int, ns),
 		tracks:  map[int32]*track{},
 
+		teamAlive: map[int32]int32{},
+
 		teamAcc:    map[int32]*teamAcc{},
 		strips:     map[int32]*Strip{},
 		comPaths:   map[int32]*[][]int32{},
+		comFollow:  map[int32]int32{},
 		hadTarget:  map[int32]bool{},
 		floatSec:   map[int32]float64{},
 		floatMetal: map[int32]float64{},
@@ -235,6 +242,7 @@ func (p *pass) frame(fr snapshot.Frame) error {
 		if !ok || dead(u) {
 			continue
 		}
+		p.teamAlive[u.Team] = fr.Frame
 		p.trackUnit(fr.Frame, u, d)
 		if !d.army {
 			continue
@@ -376,6 +384,8 @@ func (p *pass) finish() {
 		}
 	}
 	sort.SliceStable(o.Milestones, func(i, j int) bool { return o.Milestones[i].F < o.Milestones[j].F })
+	o.Eliminated = eliminations(o.Deaths, p.in.TeamDied, p.teamAlive, o.Teams)
+	p.wiped = wipedDeaths(o.Deaths, o.Eliminated)
 	o.Battles = p.battles()
 	o.Winner = winner(o.Sides, p.in.Meta.Winners)
 	o.Swing = swing(o)

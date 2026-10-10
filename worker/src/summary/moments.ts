@@ -4,6 +4,7 @@
 // each side LOST, where, and how the armies moved — the same facts a battle
 // card uses. Pure, so the node tests can pin the wording rules.
 import { fmtMetal } from "./format";
+import { knockouts, wipedOf } from "./losses";
 import { sideName, sideOfTeam } from "./model";
 import { SIM_FPS, type Insights, type Moment } from "./types";
 
@@ -61,14 +62,16 @@ export function momentWindow(ins: Insights, m: Moment): [number, number] {
   return [Math.max(0, m.f0 - ins.stepSec * SIM_FPS), m.f1];
 }
 
-/** sideLosses tallies each side's deaths inside [f0, f1]. */
+/** sideLosses tallies each side's deaths inside [f0, f1], leaving out the
+ * units that went down with an eliminated team: those were not fought for. */
 export function sideLosses(ins: Insights, f0: number, f1: number): SideLoss[] {
   const sideOf = sideOfTeam(ins);
+  const wiped = wipedOf(ins);
   const owner = new Map(ins.teams.map((t) => [t.team, t.player ?? ""]));
   const out = ins.sides.map(() => ({ n: 0, metal: 0, commanders: [] as string[], kinds: new Map<string, [number, number]>(), sx: 0, sz: 0, w: 0 }));
   const d = ins.deaths;
   for (let i = 0; i < d.f.length; i++) {
-    if (d.f[i] < f0 || d.f[i] > f1) continue;
+    if (d.f[i] < f0 || d.f[i] > f1 || wiped(i)) continue;
     const side = sideOf.get(d.team[i]) ?? -1;
     if (side < 0 || side >= out.length) continue;
     const o = out[side];
@@ -123,8 +126,15 @@ export function momentStory(ins: Insights, m: Moment): MomentStory {
   const where = ll.at ? ` in ${compass(ins, ll.at[0], ll.at[1])}` : "";
   const size = (l: SideLoss) => (priced ? l.metal : l.n);
 
+  // A player leaving takes their whole army off the board, which is the
+  // shift whatever else happened in the window.
+  const out = knockouts(ins).filter((k) => k.side === lose && k.f >= f0 && k.f <= f1);
   let title: string;
-  if (ll.commanders.length === 1) {
+  if (out.length === 1) {
+    title = `${out[0].name} is eliminated`;
+  } else if (out.length > 1) {
+    title = `${out.length} of ${possessive(L)} players are eliminated`;
+  } else if (ll.commanders.length === 1) {
     title = `${possessive(ll.commanders[0])} commander falls${where}`;
   } else if (ll.commanders.length > 1) {
     title = `${ll.commanders.length} of ${possessive(L)} commanders fall${where}`;
