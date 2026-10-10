@@ -228,6 +228,11 @@ try {
   check("GET /icons/icontypes.json is the icon table",
     table.status === 200 && armcom?.p === "icons/armcom.png",
     `${table.status} ${table.headers.get("content-type")}`);
+  // Another site's bundled summary fetches it cross-origin (src/summary/
+  // embed.ts); the header comes from public/_headers, i.e. the asset layer.
+  check("GET /icons/icontypes.json is readable cross-origin",
+    table.headers.get("access-control-allow-origin") === "*",
+    `access-control-allow-origin: ${table.headers.get("access-control-allow-origin")}`);
 } catch (e) {
   console.error(`smoke: ${e.message}`);
   console.error(log.join("").split("\n").slice(-15).join("\n"));

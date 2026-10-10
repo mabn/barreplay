@@ -721,6 +721,13 @@ test("PUT /api/replays carries rid into the catalog", async () => {
 // The admin settings-refresh re-derives one row's badges AND players roster
 // from the BAR API's stored demo metadata (no repack/re-upload). The API
 // call is stubbed out.
+test("GET /api/replays is readable cross-origin, for the embedded summary", async () => {
+  const { env } = makeEnv();
+  const res = await app.request(`/api/replays?id=${GAME_ID}`, {}, env);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("access-control-allow-origin"), "*");
+});
+
 test("POST /api/admin/replays/:id/refresh-settings updates the row from the BAR API", async (t) => {
   const { env, index } = makeEnv();
   await app.request(

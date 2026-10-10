@@ -273,7 +273,10 @@ app.get("/api/replays", async (c) => {
   };
   const limit = Math.min(num("limit") || CATALOG_LIMIT_MAX, CATALOG_LIMIT_MAX);
   const list = await indexStub(c.env).list(filter, limit, num("offset"));
-  return c.json(list, 200, { "cache-control": "no-cache" });
+  // Readable from any origin: the catalog is public, carries no credentials,
+  // and other sites embed the game summary (src/summary/embed.ts), which
+  // resolves a game's revision here before fetching its insights.
+  return c.json(list, 200, { "cache-control": "no-cache", "access-control-allow-origin": "*" });
 });
 
 // The catalog's distinct map names, for the filter bar's combobox — the one

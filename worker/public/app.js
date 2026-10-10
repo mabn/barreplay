@@ -4019,6 +4019,7 @@ async function loadReplay(id) {
   pumpBackground();
   loadResources(file, loadGen); // economy timeline for the player-list bars (async)
   show();
+  seekFromURL();
   if (clip) startClip(); // a clip was asked for while the replay loaded
 }
 
@@ -7146,6 +7147,20 @@ function idxForFrame(f) {
 }
 
 // seekToFrame is the summary's onSeek: back to the playback, at that moment.
+// seekFromURL honours a ?f=<sim frame> on the replay link — how a page that
+// is not this one (the summary embedded on another site, src/summary/embed.ts)
+// opens a replay AT a moment. Read once per load and then dropped from the
+// address bar (replaceState), since the playhead moves on and a copied link
+// should not keep pointing back at where the visit started.
+function seekFromURL() {
+  const u = new URL(location.href);
+  const f = parseInt(u.searchParams.get('f') || '', 10);
+  if (!u.searchParams.has('f')) return;
+  u.searchParams.delete('f');
+  history.replaceState(null, '', u);
+  if (Number.isFinite(f) && f > 0) go(idxForFrame(f));
+}
+
 function seekToFrame(f) {
   setReplayTab('replay');
   stopPlay();
