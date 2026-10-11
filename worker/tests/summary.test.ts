@@ -10,7 +10,7 @@ import { armyDrop, compass, fighters, gapBattles, momentStories, momentStory } f
 import { clipAround, clipAt, clipEvent, clipSpan, watcher } from "../src/summary/watch";
 import { zonesOf } from "../src/summary/zones";
 import { lossKinds } from "../src/summary/losskinds";
-import { leadPct } from "../src/summary/series";
+import { leadPct, ratioDomain } from "../src/summary/series";
 import { clipOf } from "../src/summary/sections/awards";
 import type { Insights } from "../src/summary/types";
 
@@ -410,4 +410,16 @@ test("gapBattles tells only decisive battles with real losses in the opening", (
   } as Partial<Insights>);
   const got = gapBattles(file, [], []);
   assert.deepEqual(got.map((g) => [g.battle, g.side, g.verdict]), [[0, 0, "decisive"], [3, 1, "decisive"], [4, -1, "even"]]);
+});
+
+test("ratioDomain scales to the leads from 40% to 95% of the game", () => {
+  const t = Array.from({ length: 100 }, (_, i) => i * 10); // a 1000 s game
+  // Thousands of percent at the start and the very end, -30..+60 between.
+  const lead = t.map((s) => (s < 400 ? 3000 : s > 950 ? -5000 : s < 700 ? -30 : 60));
+  const [lo, hi] = ratioDomain(t, lead, 1000);
+  assert.ok(lo < -30 && lo > -40, `lo ${lo}`);
+  assert.ok(hi > 60 && hi < 70, `hi ${hi}`);
+  // Zero is always on the axis, and an even game still has some height.
+  const [a, b] = ratioDomain(t, t.map(() => 1), 1000);
+  assert.ok(a < 0 && b > 1 && b - a >= 10);
 });
