@@ -724,6 +724,12 @@ internal/insightsrun/     what cmd/insights does, as a package (Runner: New(Opti
                           only its flags. One() takes a revision id in every form the catalog
                           serves — flat <gameId>-<rev> and month-folder <YYYY-MM|undated>/<gameId>
                           [-<rev>] (ridRE) — a bare gameId being a GAME, resolved to its row.
+                          A reader waits on it (on-demand summaries), so nothing in it runs
+                          one thing after another that could overlap: a rebuilt replay's
+                          pieces download 8 at a time (viz.ReadStaticBundle) while the BAR
+                          API's winners and the demo's orders are fetched beside them, and
+                          insights decodes chunks decodeAhead = 3 ahead of its pass. A 51-
+                          chunk 8v8 went from 32 s to 10 s on a 4-core host.
 cmd/insights/main.go      CLI: the summary BACKFILL, one replay at a time (or -all). Old replays
                           have no .brp anywhere, only their split pieces, so it resolves a
                           gameId/link through the catalog (current rid + the row's view, the

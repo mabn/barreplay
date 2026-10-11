@@ -332,6 +332,10 @@ func (r *runner) rid(ctx context.Context, rid, view string) error {
 		}
 		fmt.Fprintf(os.Stderr, "%s: read from its .brp\n", rid)
 	} else if errors.Is(err, viz.ErrNotFound) {
+		// A rebuilt replay knows neither its winners nor its self-destruct
+		// orders (pieces were last written before either was read), so both
+		// lookups start now and run while the pieces download.
+		pre := r.lookups(ctx, ridGameID(rid), true)
 		bf, res, err := viz.ReadStaticBundle(ctx, r.fetch, rid)
 		if err != nil {
 			return err
@@ -340,6 +344,10 @@ func (r *runner) rid(ctx context.Context, rid, view string) error {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "%s: rebuilt from %d published chunks (army costs only)\n", rid, len(bf.Chunks))
+		if pre == nil || pre.gameID != in.Meta.GameID {
+			return r.write(ctx, rid, in)
+		}
+		return r.writeWith(ctx, rid, in, pre)
 	} else {
 		return err
 	}
@@ -414,24 +422,79 @@ func hasSelfD(events []snapshot.Event) bool {
 	return false
 }
 
+// lookups is the BAR API's half of a summary — who won and the demo's
+// self-destruct orders — fetched in the background; wait hands back what came.
+type lookups struct {
+	gameID  string
+	winners chan lookupResult[[]int32]
+	orders  chan lookupResult[[]snapshot.Event]
+}
+
+type lookupResult[T any] struct {
+	v   T
+	err error
+}
+
+// lookups starts the winners lookup, and the orders one when withOrders,
+// for gameID. Nil when the runner has neither to ask.
+func (r *runner) lookups(ctx context.Context, gameID string, withOrders bool) *lookups {
+	if gameID == "" {
+		return nil
+	}
+	l := &lookups{gameID: gameID}
+	if r.winners != nil {
+		l.winners = make(chan lookupResult[[]int32], 1)
+		go func() {
+			w, err := r.winners(ctx, gameID)
+			l.winners <- lookupResult[[]int32]{w, err}
+		}()
+	}
+	if withOrders && r.orders != nil {
+		l.orders = make(chan lookupResult[[]snapshot.Event], 1)
+		go func() {
+			ev, err := r.gameOrders(ctx, gameID)
+			l.orders <- lookupResult[[]snapshot.Event]{ev, err}
+		}()
+	}
+	return l
+}
+
 func (r *runner) write(ctx context.Context, rid string, in insights.Input) error {
-	if len(in.Meta.Winners) == 0 && r.winners != nil && in.Meta.GameID != "" {
-		// Unknown winners only cost the summary its result line, so a failed
-		// lookup is a warning.
-		if w, err := r.winners(ctx, in.Meta.GameID); err != nil {
-			fmt.Fprintf(os.Stderr, "%s: winner unknown (BAR API: %v)\n", rid, err)
-		} else {
-			in.Meta.Winners = w
+	// Only what the capture lacks is asked for, both at once.
+	l := &lookups{gameID: in.Meta.GameID}
+	if in.Meta.GameID != "" {
+		needWinners := len(in.Meta.Winners) == 0
+		needOrders := !hasSelfD(in.Events)
+		if needWinners || needOrders {
+			l = r.lookups(ctx, in.Meta.GameID, needOrders)
+			if !needWinners {
+				l.winners = nil
+			}
 		}
 	}
-	if r.orders != nil && in.Meta.GameID != "" && !hasSelfD(in.Events) {
+	return r.writeWith(ctx, rid, in, l)
+}
+
+// writeWith computes, writes and publishes the summary, merging in what
+// the lookups found (a nil one, or a nil half of one, asks nothing).
+func (r *runner) writeWith(ctx context.Context, rid string, in insights.Input, l *lookups) error {
+	if l != nil && l.winners != nil && len(in.Meta.Winners) == 0 && in.Meta.GameID == l.gameID {
+		// Unknown winners only cost the summary its result line, so a failed
+		// lookup is a warning.
+		if w := <-l.winners; w.err != nil {
+			fmt.Fprintf(os.Stderr, "%s: winner unknown (BAR API: %v)\n", rid, w.err)
+		} else {
+			in.Meta.Winners = w.v
+		}
+	}
+	if l != nil && l.orders != nil && in.Meta.GameID == l.gameID && !hasSelfD(in.Events) {
 		// A .brp packed before the demo's orders were read has none, and
 		// without them a self-destruct reads as a kill. Best-effort, like
 		// the winners: the rest of the summary does not depend on it.
-		if ev, err := r.gameOrders(ctx, in.Meta.GameID); err != nil {
-			fmt.Fprintf(os.Stderr, "%s: self-destructs unknown (%v)\n", rid, err)
+		if o := <-l.orders; o.err != nil {
+			fmt.Fprintf(os.Stderr, "%s: self-destructs unknown (%v)\n", rid, o.err)
 		} else {
-			in.Events = snapshot.MergeEvents(in.Events, ev)
+			in.Events = snapshot.MergeEvents(in.Events, o.v)
 		}
 	}
 	ins, err := insights.Compute(in)
