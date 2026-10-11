@@ -15,8 +15,11 @@
 // summaries it computes at once (its slots); requests past the free slots
 // wait in a short queue (maxQueued), and past THAT they are refused at once
 // ("busy") — the page then simply keeps the summary it already shows. Every
-// request has a deadline (timeoutMs), queue wait included. Two readers of the
-// same replay share one computation. A summary that FAILED is not retried for
+// request has a deadline (timeoutMs), queue wait included. Readers of the
+// same replay share one computation — including a reader who arrives after an
+// earlier one ran out of time: the computation is still running on its daemon,
+// so the new reader waits on THAT rather than starting a second one (which is
+// what lets a page whose 15 s ran out simply ask again). A summary that FAILED is not retried for
 // failTtlMs, so a replay that cannot be summarised costs a daemon once, not
 // once per page view. All of this is lost if the instance is evicted, which
 // is harmless: eviction only happens with nothing in flight.
@@ -79,13 +82,18 @@ export const HUB_DEFAULTS: HubOptions = {
   failTtlMs: 10 * 60_000,
 };
 
+/** One reader waiting on a computation, with its own deadline. */
+interface Reader {
+  resolve: (r: HubResult) => void;
+  timer: unknown;
+}
+
+/** One computation of one summary, shared by every reader asking for it. */
 interface Pending {
   key: string;
   rid: string;
   version: number;
-  promise: Promise<HubResult>;
-  resolve: (r: HubResult) => void;
-  timer: unknown;
+  readers: Set<Reader>;
   /** The daemon working on it and the id it was sent under, once dispatched. */
   socket?: string;
   msgId?: string;
@@ -94,7 +102,9 @@ interface Pending {
 
 export class SummaryDispatcher {
   private o: Required<HubOptions>;
-  /** By summary key (rid@version): what readers wait on. */
+  /** By summary key (rid@version): what readers wait on. A dispatched
+   * computation stays here until its daemon answers, whether or not anyone
+   * is still waiting, so a later reader joins it. */
   private byKey = new Map<string, Pending>();
   /** By message id: what daemons are working on. Outlives a reader's
    * timeout, because the daemon is still busy until it answers. */
@@ -122,7 +132,7 @@ export class SummaryDispatcher {
   request(rid: string, version: number): Promise<HubResult> {
     const key = `${rid}@${version}`;
     const same = this.byKey.get(key);
-    if (same) return same.promise;
+    if (same) return this.wait(same);
     const f = this.failed.get(key);
     if (f && f.until > this.o.now()) return Promise.resolve({ status: "failed", error: f.error });
     this.failed.delete(key);
@@ -141,14 +151,28 @@ export class SummaryDispatcher {
     const target = this.free(able);
     if (!target && this.queue.length >= this.o.maxQueued) return Promise.resolve({ status: "busy" });
 
-    let resolve!: (r: HubResult) => void;
-    const promise = new Promise<HubResult>((ok) => (resolve = ok));
-    const p: Pending = { key, rid, version, promise, resolve, timer: null, settled: false };
-    p.timer = this.o.setTimer(() => this.settle(p, { status: "timeout" }), this.o.timeoutMs);
+    const p: Pending = { key, rid, version, readers: new Set(), settled: false };
+    const promise = this.wait(p);
     this.byKey.set(key, p);
     if (target) this.dispatch(p, target);
     else this.queue.push(p);
     return promise;
+  }
+
+  /** wait adds a reader to p with its own deadline. A reader running out of
+   * time leaves the computation alone once a daemon has it (it finishes and
+   * publishes, and the next reader joins it); one still QUEUED with nobody
+   * left waiting is dropped, since nobody would read what it made. */
+  private wait(p: Pending): Promise<HubResult> {
+    return new Promise<HubResult>((resolve) => {
+      const r: Reader = { resolve, timer: null };
+      r.timer = this.o.setTimer(() => {
+        p.readers.delete(r);
+        resolve({ status: "timeout" });
+        if (p.readers.size === 0 && p.msgId === undefined) this.settle(p, { status: "timeout" });
+      }, this.o.timeoutMs);
+      p.readers.add(r);
+    });
   }
 
   /** onMessage takes a daemon's answer. Anything that is not a result for a
@@ -230,11 +254,14 @@ export class SummaryDispatcher {
   private settle(p: Pending, r: HubResult): void {
     if (p.settled) return;
     p.settled = true;
-    this.o.clearTimer(p.timer);
     if (this.byKey.get(p.key) === p) this.byKey.delete(p.key);
     const qi = this.queue.indexOf(p);
     if (qi >= 0) this.queue.splice(qi, 1);
-    p.resolve(r);
+    for (const reader of p.readers) {
+      this.o.clearTimer(reader.timer);
+      reader.resolve(r);
+    }
+    p.readers.clear();
   }
 
   private drain(): void {
