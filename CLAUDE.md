@@ -1015,7 +1015,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           UP for the first side ahead, DOWN for the second, as far out as
                           log10 of the loss ratio (gridlines 2x/5x/10x, capped at 10x), its
                           area the metal lost, a faint ring the armies nearby, a line its
-                          span, in FIRE (yellow to amber, never red: Marcin) when ownBlast decided it. Each list row carries the same
+                          span, as a FIREBALL (yellow to amber, never red, ringed by flame tongues — flameRing; Marcin) when ownBlast decided it. Each list row carries the same
                           verdict as a bar from a centre line (lean) ending in a dot sized by
                           the metal lost, plus "blue : red" losses. One selection is shared
                           by the map, the list and the timeline — a click on either

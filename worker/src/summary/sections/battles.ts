@@ -26,9 +26,59 @@ import { SIM_FPS, type Battle, type Insights, type SummaryOptions } from "../typ
 const FIRE_CORE = "#fffbe6";
 const FIRE_HOT = "#ffd23a";
 const FIRE_EDGE = "#f59300";
+const FIRE_FLAME = "#ff7f11";
 const FIRE = FIRE_HOT;
-const FIRE_CSS = `radial-gradient(circle at 45% 40%, ${FIRE_CORE}, ${FIRE_HOT} 45%, ${FIRE_EDGE})`;
 let fireSeq = 0;
+
+/** listFireball is a list row's dot for a blast battle: the same fireball
+ * as the timeline's, flames and all, centred where the bar ends. */
+function listFireball(end: number, d: number, seed: number): SVGSVGElement {
+  const r = d / 2;
+  const box = d * 2.2;
+  const c = box / 2;
+  const id = `brs-lfire-${++fireSeq}`;
+  return s("svg", { class: "brs-vfire", width: box, height: box, viewBox: `0 0 ${box} ${box}`, style: `left: ${end.toFixed(1)}%; width: ${box.toFixed(1)}px; height: ${box.toFixed(1)}px` },
+    s("defs", {}, fireGradient(id)),
+    flameRing(c, c, r, seed),
+    s("circle", { cx: c, cy: c, r, fill: `url(#${id})` }));
+}
+
+function fireGradient(id: string): SVGElement {
+  return s("radialGradient", { id, cx: "45%", cy: "40%", r: "60%" },
+    s("stop", { offset: "0", "stop-color": FIRE_CORE }),
+    s("stop", { offset: "0.45", "stop-color": FIRE_HOT }),
+    s("stop", { offset: "1", "stop-color": FIRE_EDGE }));
+}
+
+/** flameRing is a ring of flame tongues licking out of a circle of radius r
+ * at (cx, cy): an orange outer layer and a yellow inner one, offset half a
+ * tongue, every tongue curling the same way like fire in a draught. Lengths
+ * vary from a seed so two fireballs do not burn alike. */
+function flameRing(cx: number, cy: number, r: number, seed: number): SVGGElement {
+  let st = (seed * 2654435761) >>> 0 || 1;
+  const rnd = () => ((st = (st * 1664525 + 1013904223) >>> 0) / 4294967296);
+  const layer = (n: number, phase: number, len: number, color: string, opacity: number) => {
+    let d = "";
+    const pt = (rr: number, a: number) => `${(cx + rr * Math.cos(a)).toFixed(1)},${(cy + rr * Math.sin(a)).toFixed(1)}`;
+    for (let k = 0; k < n; k++) {
+      const a = ((k + phase) / n) * 2 * Math.PI;
+      // A tongue: wide at the base, bellying out on the leading side and
+      // licking back to a curled tip, like a candle flame in a draught.
+      const w = (Math.PI / n) * 1.25;
+      const l = len * (0.5 + 0.8 * rnd());
+      const curl = w * (0.9 + 0.8 * rnd());
+      const r0 = r * 0.9;
+      d += `M${pt(r0, a - w)}C${pt(r + l * 0.45, a - w * 1.1)} ${pt(r + l * 0.8, a + curl * 0.2)} ${pt(r + l, a + curl)}`
+        + `C${pt(r + l * 0.6, a + curl * 0.5)} ${pt(r + l * 0.3, a + w * 1.2)} ${pt(r0, a + w)}Z`;
+    }
+    return s("path", { d, fill: color, "fill-opacity": opacity });
+  };
+  const n = Math.max(9, Math.round((2 * Math.PI * r) / 8));
+  const len = Math.max(3.5, Math.min(16, r * 0.45));
+  return s("g", { class: "brs-flames", "pointer-events": "none" },
+    layer(n, 0, len, FIRE_FLAME, 0.9),
+    layer(n, 0.5, len * 0.6, FIRE_HOT, 0.95));
+}
 
 export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | null {
   if (!comparable(ins)) return null;
@@ -157,7 +207,8 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     const d = 5 + 11 * Math.sqrt(total(b) / biggest);
     const bar = h("span", { class: "brs-verdict" }, ...ticks.map((t) => t.cloneNode(true)),
       h("i", { style: `left: ${Math.min(50, end).toFixed(1)}%; width: ${Math.abs(end - 50).toFixed(1)}%; background: ${blasted(b) ? `linear-gradient(${end < 50 ? 270 : 90}deg, ${FIRE_HOT}, ${FIRE_EDGE})` : color}` }),
-      h("b", { class: blasted(b) ? "brs-fire" : null, style: `left: ${end.toFixed(1)}%; width: ${d.toFixed(1)}px; height: ${d.toFixed(1)}px; background: ${blasted(b) ? FIRE_CSS : color}` }));
+      blasted(b) ? listFireball(end, d, i + 1)
+        : h("b", { style: `left: ${end.toFixed(1)}%; width: ${d.toFixed(1)}px; height: ${d.toFixed(1)}px; background: ${color}` }));
     const nums = h("span", { class: "brs-bnums" },
       h("span", { style: `color: ${sideColor(ins, 0)}` }, fmt(size(b.lost[0] ?? { n: 0, metal: 0 }))),
       h("span", { class: "brs-muted" }, " : "),
@@ -208,10 +259,7 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
       s("text", { x: c.left + 6, y: c.bottom - 6, style: `fill: ${sideColor(ins, 1)}` }, `▼ ${sideName(ins, 1)} came out ahead`));
     c.plot.append(bands);
     const fireId = `brs-fire-${++fireSeq}`;
-    c.svg.prepend(s("defs", {}, s("radialGradient", { id: fireId, cx: "45%", cy: "40%", r: "60%" },
-      s("stop", { offset: "0", "stop-color": FIRE_CORE }),
-      s("stop", { offset: "0.45", "stop-color": FIRE_HOT }),
-      s("stop", { offset: "1", "stop-color": FIRE_EDGE }))));
+    c.svg.prepend(s("defs", {}, fireGradient(fireId)));
     const most = Math.max(1, ...ins.battles.map((b) => Math.max(total(b), reach(b)[0] + reach(b)[1])));
     const rad = (v: number) => 4 + 30 * Math.sqrt(v / most);
     // Above the crosshair's hit area, so a bubble takes its own pointer.
@@ -228,6 +276,7 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
       const g = s("g", { class: "brs-bmark brs-clickable" },
         s("line", { x1: x0, x2: x1, y1: yy, y2: yy, stroke: color, "stroke-opacity": 0.5, "stroke-width": 2 }),
         r[0] + r[1] > 0 ? s("circle", { cx: x, cy: yy, r: rad(r[0] + r[1]), fill: "none", stroke: color, "stroke-opacity": 0.4 }) : null,
+        blasted(b) ? flameRing(x, yy, rad(total(b)), i + 1) : null,
         s("circle", { class: blasted(b) ? "brs-bdot brs-fire" : "brs-bdot", cx: x, cy: yy, r: rad(total(b)), fill: blasted(b) ? `url(#${fireId})` : color, "fill-opacity": blasted(b) ? 1 : 0.85 }),
         s("text", { x, y: yy + 4, "text-anchor": "middle", class: "brs-bmarknum", style: blasted(b) ? "fill: #3a1a00" : null }, String(i + 1)));
       tip(g, () => ({
