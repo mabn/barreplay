@@ -781,7 +781,15 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           sides' columns side by side, each with its fighters and its losses
                           as icon chips (unitchips.ts fillUnits, at most SWING_CHIPS), the
                           side the line moved toward boxed with the shift — and the whole
-                          row plays the clip, as do the chart's numbered dots. LOG
+                          row plays the clip, as do the chart's lettered dots. Swings are
+                          LETTERED (A, B, C...) because battles are NUMBERED, and a long stretch
+                          with no swing is filled with BATTLES (moments.ts gapBattles: the
+                          biggest battle in the widest gap over an eighth of the game, at least
+                          4 min, until none is left or none holds a battle >= 10% of the
+                          game's biggest; at most 12 entries), each told as "Red team
+                          decisively wins battle (5)" with the battles list's white-circle
+                          badge — the line lists only its biggest shifts, and a decided fight
+                          can move it little. A swing told as one battle carries the badge too. LOG
                           SCALES (chart.ts TimeChartSpec.log: symlog, ticks at powers of ten,
                           labels closer than a line apart dropped): metal income and army
                           composition each carry a Linear/Log toggle (scale.ts scaleToggle,

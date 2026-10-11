@@ -119,6 +119,7 @@ export const CSS = `
 .brs-root .brs-brow.brs-on { background: var(--brs-bg); box-shadow: inset 2px 0 0 var(--brs-accent); }
 .brs-root .brs-numlight { background: var(--brs-text); }
 .brs-root .brs-brow.brs-on .brs-numlight { background: var(--brs-accent); }
+.brs-root .brs-num.brs-inline { display: inline-block; width: 18px; height: 18px; line-height: 18px; font-size: 11px; margin: 0; vertical-align: 1px; }
 .brs-root .brs-where { color: var(--brs-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .brs-root .brs-lossbar { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; height: 10px; }
 .brs-root .brs-half { display: flex; background: var(--brs-grid); border-radius: 2px; overflow: hidden; }

@@ -525,3 +525,91 @@ function armyGrew(ins: Insights, m: Moment, won: number): boolean {
   const g = (side: number) => (a[side][i1] ?? 0) - (a[side][i0] ?? 0);
   return g(won) > g(1 - won);
 }
+
+/** A battle told in the swing list because nothing else was: the line went
+ * quiet on the list for a stretch in which armies still died. */
+export interface GapBattle {
+  /** Index into battles (the battles section numbers it battle + 1). */
+  battle: number;
+  /** The side that lost less there, -1 for an even trade. */
+  side: number;
+  /** How far the line moved toward side across the battle (may be <= 0). */
+  delta: number;
+  /** "decisive" when the other side lost twice as much or more. */
+  verdict: "decisive" | "win" | "even";
+}
+
+/** A stretch of the game this long with nothing in the swing list is a gap
+ * worth filling: a sixth of the game, at least four minutes. */
+const GAP_SHARE = 1 / 8;
+const GAP_MIN_SEC = 240;
+/** A filler stays this far from every entry already listed. */
+const GAP_APART_SEC = 90;
+/** A battle under this share of the game's biggest is not worth a line. */
+const GAP_BATTLE_SHARE = 0.1;
+/** The swing list holds at most this many entries in all. */
+const LIST_MAX = 12;
+
+/** gapBattles picks battles to tell between the swings, where the list
+ * would otherwise skip a long stretch of the game: the swing line only
+ * lists its biggest shifts, and a fight can decide a lot without being one
+ * of them (the line was already far over, or two fights cancelled out).
+ * Greedily, the biggest battle in the widest gap goes in, until no gap is
+ * wider than GAP_SHARE of the game or none holds a battle worth telling.
+ * A battle a swing already tells, or one overlapping a swing's window, is
+ * left out. Ordered by time. */
+export function gapBattles(ins: Insights, moments: Moment[], stories: MomentStory[]): GapBattle[] {
+  const sw = ins.swing;
+  if (!sw || !ins.battles.length) return [];
+  const priced = ins.costCoverage === "full" || ins.battles.some((b) => b.lost.some((l) => l.metal > 0));
+  const size = (l?: { n: number; metal: number }) => (l ? (priced ? l.metal : l.n) : 0);
+  const total = (b: Battle) => size(b.lost[0]) + size(b.lost[1]);
+  const biggest = Math.max(...ins.battles.map(total));
+  const told = new Set(stories.map((st) => st.battle).filter((b) => b >= 0));
+  const gap = Math.max(GAP_MIN_SEC, ins.durationSec * GAP_SHARE) * SIM_FPS;
+  const apart = GAP_APART_SEC * SIM_FPS;
+  const end = ins.durationSec * SIM_FPS;
+  // Where each entry sits on the time axis: a swing at the end of its
+  // window (where its dot is), a battle at its end.
+  const marks = moments.map((m) => m.f1);
+  const free = ins.battles.map((_, i) => i).filter((i) => {
+    const b = ins.battles[i];
+    return !told.has(i) && total(b) > 0 && total(b) >= GAP_BATTLE_SHARE * biggest
+      && !moments.some((m) => b.f0 <= m.f1 && b.f1 >= m.f0);
+  });
+  const picked: number[] = [];
+  while (marks.length < LIST_MAX) {
+    const at = [0, ...marks].sort((a, b) => a - b);
+    // The gaps, widest first, and the biggest battle that fits in one.
+    const gaps = at.map((a, k) => [a, k + 1 < at.length ? at[k + 1] : end]).filter(([a, e]) => e - a > gap)
+      .sort((x, y) => (y[1] - y[0]) - (x[1] - x[0]));
+    let pick = -1;
+    for (const [a, e] of gaps) {
+      for (const i of free) {
+        const f = ins.battles[i].f1;
+        if (picked.includes(i) || f <= a || f >= e || marks.some((m) => Math.abs(m - f) < apart)) continue;
+        if (pick < 0 || total(ins.battles[i]) > total(ins.battles[pick])) pick = i;
+      }
+      if (pick >= 0) break;
+    }
+    if (pick < 0) break;
+    picked.push(pick);
+    marks.push(ins.battles[pick].f1);
+  }
+  const t = ins.series.t.map((x) => Math.min(ins.durationSec, x + ins.stepSec));
+  const pAt = (sec: number) => {
+    let i = 0;
+    while (i + 1 < t.length && t[i + 1] <= sec) i++;
+    return sw.p[i] ?? 0.5;
+  };
+  return picked.sort((a, b) => a - b).map((i) => {
+    const b = ins.battles[i];
+    const [a, c] = [size(b.lost[0]), size(b.lost[1])];
+    const side = Math.abs(a - c) <= 0.1 * Math.max(a, c) ? -1 : a < c ? 0 : 1;
+    const lo = Math.min(a, c);
+    const hi = Math.max(a, c);
+    const verdict = side < 0 ? "even" : lo === 0 || hi >= 2 * lo ? "decisive" : "win";
+    const move = pAt(b.f1 / SIM_FPS + ins.stepSec) - pAt(b.f0 / SIM_FPS);
+    return { battle: i, side, delta: side === 1 ? -move : move, verdict };
+  });
+}

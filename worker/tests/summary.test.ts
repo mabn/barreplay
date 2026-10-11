@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { fmtClock, fmtMetal, niceStep, timeStep } from "../src/summary/format";
 import { colorName, comparable, nameRuns, notices, readable, sideColor, sideName } from "../src/summary/model";
 import { knockouts, lossesByStep, wipedOf } from "../src/summary/losses";
-import { armyDrop, compass, fighters, momentStories, momentStory } from "../src/summary/moments";
+import { armyDrop, compass, fighters, gapBattles, momentStories, momentStory } from "../src/summary/moments";
 import { clipAround, clipAt, clipEvent, clipSpan, watcher } from "../src/summary/watch";
 import { zonesOf } from "../src/summary/zones";
 import { lossKinds } from "../src/summary/losskinds";
@@ -343,4 +343,26 @@ test("leadPct reads the leader's margin both ways", () => {
   // Smoothing keeps an opening lead finite.
   const s = leadPct([0], [300], 300);
   assert.equal(Math.round(s[0]), 100);
+});
+
+test("gapBattles fills a long stretch with no swing with its biggest battles", () => {
+  const F = 30;
+  const battle = (min: number, a: number, b: number) => ({ f0: min * 60 * F, f1: (min * 60 + 30) * F, x: 0, z: 0, r: 500,
+    lost: [{ n: 1, metal: a, top: [] }, { n: 1, metal: b, top: [] }] });
+  const steps = Array.from({ length: 40 }, (_, i) => i * 60);
+  const file = ins({
+    durationSec: 2400, stepSec: 60,
+    series: { t: steps, army: [], metalIncome: [], energyIncome: [], armyCats: [], armyByCat: [] },
+    battles: [battle(3, 5000, 4000), battle(15, 60000, 3000), battle(16, 500, 500), battle(25, 20000, 19500), battle(31, 4000, 6000)],
+    swing: { p: steps.map((_, i) => (i < 15 ? 0.5 : 0.3)), moments: [
+      { n: 1, f0: 3 * 60 * F, f1: 4 * 60 * F, side: 0, delta: 0.2, battle: 0 },
+      { n: 2, f0: 34 * 60 * F, f1: 35 * 60 * F, side: 1, delta: 0.2, battle: -1 },
+    ], fitted: false },
+  } as Partial<Insights>);
+  const got = gapBattles(file, file.swing!.moments, momentStories(file, file.swing!.moments));
+  // The 30-minute gap takes the 15-minute rout first, then the even trade
+  // at 25 and the small one at 31; the tiny one at 16 is not worth a line,
+  // and battle 1 overlaps a swing.
+  assert.deepEqual(got.map((g) => [g.battle, g.side, g.verdict]), [[1, 1, "decisive"], [3, -1, "even"], [4, 0, "win"]]);
+  assert.ok(got[0].delta > 0.15, "the line moved toward the side that won it");
 });
