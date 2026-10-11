@@ -7214,6 +7214,8 @@ function resetSummary() {
 
 // summaryMessage fills the pane with one line of text instead of a summary.
 function summaryMessage(text) {
+  if (summaryHandle) summaryHandle.destroy();
+  summaryHandle = null;
   const el = document.getElementById('summary');
   el.textContent = '';
   const p = document.createElement('p');
@@ -7246,7 +7248,7 @@ async function showSummary() {
     if (summaryFor !== file) return; // another replay was opened meanwhile
     if (res.status === 404) {
       // Nothing built at any version: ask for it, and say so while it runs.
-      summaryMessage('Building the summary for this replay…');
+      summaryLoading(lib);
       const fresh = await freshSummary(file);
       if (summaryFor !== file) return;
       if (!fresh) {
@@ -7263,7 +7265,7 @@ async function showSummary() {
       // An older summary: the page WAITS for the current one rather than
       // drawing one it is about to replace. The older one is shown only when
       // the request cannot answer (no daemon, too busy, failed).
-      summaryMessage('Updating the summary for this replay…');
+      summaryLoading(lib);
       const fresh = await freshSummary(file);
       if (summaryFor !== file) return;
       mountSummaryIns(lib, fresh || ins);
@@ -7279,6 +7281,17 @@ async function showSummary() {
 
 function insightsURL(file, v) {
   return dataURL('/replays/' + ridPath(file) + '.insights' + v + '.json');
+}
+
+// summaryLoading fills the pane with the library's "monkeys building your
+// summary" scene while one is computed on demand; the next mount or message
+// replaces it (it is the summaryHandle meanwhile, so its timer stops too).
+function summaryLoading(lib) {
+  if (summaryHandle) summaryHandle.destroy();
+  const el = document.getElementById('summary');
+  el.textContent = '';
+  summaryHandle = lib.mountLoading ? lib.mountLoading(el) : null;
+  if (!summaryHandle) summaryMessage('Building the summary for this replay…');
 }
 
 function mountSummaryIns(lib, ins) {

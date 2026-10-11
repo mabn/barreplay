@@ -1621,7 +1621,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           computes it with internal/insightsrun, publishes it, and answers on the
                           socket. CAPACITY IS THE HUB'S, IN MEMORY: requests go only to a daemon
                           computing that VERSION, up to its slots; past them up to HUB_DEFAULTS
-                          .maxQueued wait, past that "busy"; a 10 s deadline, queue
+                          .maxQueued wait, past that "busy"; a 15 s deadline, queue
                           wait included (Marcin's pick — how long a reader is kept waiting; a
                           timed-out computation still finishes and publishes for the next visit)
                           (a timed-out request keeps its daemon's slot until it answers); readers
@@ -1629,7 +1629,8 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           a broken replay costs a daemon once. Busy/unavailable answer 503,
                           timeout 504, failed 502. The page BLOCKS on the request (Marcin's call:
                           synchronous) — a stale summary is not drawn while the current one is
-                          computed, "Updating the summary…" shows instead — and every non-200
+                          computed, the library's mountLoading scene shows instead (loading.ts: monkeys
+                          hammering a bar chart, rotating captions, Marcin's ask) — and every non-200
                           means it falls back to the older file, if there is one. Its own DO class so socket traffic
                           never wakes ReplayIndex (no SQL, no ROW BUDGET); Hibernation API, the
                           daemon's "ping" keepalive answered "pong" by the runtime
