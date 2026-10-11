@@ -121,7 +121,7 @@ offset  size  value
   finds everything else through it, §4). The writer then emits `E C K F X` —
   the sections a viewer needs before it can draw, then the bulk — and records
   that order in `M`'s section layout, followed by v6's optional analysis
-  sections `G V H U` (`D S` in older v6 files), which no viewer reads. Files written before the layout existed
+  sections `G V H U R B` (`D S` in older v6 files), which no viewer reads. Files written before the layout existed
   have `M K F X E C`. Readers MUST NOT rely on the order of anything after `M`:
   scan the headers, or follow the layout.
 
@@ -141,6 +141,8 @@ offset  size  value
 | `V` (0x56) | visibility | one gzip stream (§9.2), v6 | per-side LOS/radar per unit; omitted when none |
 | `H` (0x48) | hits | one gzip stream (§9.2), v6 | every damage callin, raw; omitted when none |
 | `U` (0x55) | unit ends | one gzip stream (§9.2), v6 | where each unit's life ended; omitted when none |
+| `R` (0x52) | projectiles | one gzip stream (§9.2), v6 | tracks of long-range projectiles and heavy beams; omitted when none |
+| `B` (0x42) | blasts | one gzip stream (§9.2), v6 | strong unit-death explosions and impacts no track ended; omitted when none |
 | `J` (0x4A) | head | one gzip stream of JSON | **not used in files** — the head of the older `.brw` wire container (§10) |
 
 ## 4. `M` — the meta section
@@ -610,12 +612,14 @@ own hardcoded `CInMapDrawModel::EraseNear` radius. Consumers resolve it
 themselves, which keeps the record faithful to what happened rather than to one
 reader's idea of what should still be visible.
 
-### 9.2 The analysis sections — `G`, `H`, `U`, `V`, `D`, `S` (v6)
+### 9.2 The analysis sections — `G`, `H`, `U`, `V`, `R`, `B`, `D`, `S` (v6)
 
 Written only by a re-simulation (see `docs/brepstream-format.md`, protocol 4,
 for what each record means and how the widget collects it), each one gzip
 stream and each omitted when empty. Go accessors: `BRPFile.Facts`, `Hits`,
-`UnitEnds`, `Visibility`, `Damage`, `Lives` (`snapshot/analysis.go`).
+`UnitEnds`, `Visibility`, `Projectiles`, `Blasts`, `Damage`, `Lives`
+(`snapshot/analysis.go`, `snapshot/projectiles.go`). `R` and `B` were added
+inside v6: a reader that predates them skips the tags, so no version bump.
 
 The file keeps SOURCE data: `H` and `U` are what the engine reported, and
 everything concluded from them — damage per second, lifetime totals, who
@@ -651,6 +655,50 @@ per row:
   svarint  hit index (delta): hits recorded before this end
   svarint  x (delta)       svarint z (delta)
   uvarint  xp × 1000       uvarint flags (bit 0 alive at the end)
+```
+
+**`R` — projectile and beam tracks.** One row per track (see
+`docs/brepstream-format.md`, protocol 5, for what a track is), sorted by birth
+frame, then projectile id. Column by column; ids as `id + 1` (0 = unknown).
+
+```
+uvarint  rows
+rows × svarint  birth (delta vs previous row, from 0)
+rows × uvarint  end - birth
+rows × uvarint  projectile id + 1
+rows × uvarint  weapon + 1        rows × uvarint owner + 1
+rows × uvarint  team + 1
+rows × uvarint  class             rows × uvarint end kind
+rows × uvarint  flags
+rows × svarint  x0   rows × svarint y0   rows × svarint z0      launch, whole elmos
+rows × svarint  vx × 100   vy × 100   vz × 100                 elmos per frame
+rows × svarint  gravity × 100000                               elmos per frame²
+rows × uvarint  target type (0, 'u', 'g', 'f', 'p')
+rows × uvarint  target id + 1
+rows × svarint  tx - x0   rows × svarint ty   rows × svarint tz - z0
+rows × svarint  x1 - x0   rows × svarint y1   rows × svarint z1 - z0
+rows × uvarint  path points
+then each row's points in row order:
+  uvarint  df (frames since birth)
+  svarint  x - previous x   svarint y   svarint z - previous z
+                            (the previous point; the launch for the first)
+```
+
+Velocity and gravity are quantized here (the stream carries them as f32): the
+arc a reader rebuilds from them drifts well under one elmo over a long shot.
+
+**`B` — blasts.** One row per explosion the widget watched that ended no
+track: kind 1, a unit's own death or self-destruct explosion (weapon strong
+enough to be watched); kind 2, a projectile explosion with no open track
+(cluster sub-munitions). Sorted by frame.
+
+```
+uvarint  rows
+rows × svarint  frame (delta vs previous row, from 0)
+rows × uvarint  weapon + 1
+rows × svarint  x (delta)   rows × svarint y   rows × svarint z (delta)
+rows × uvarint  unit + 1    rows × uvarint team + 1
+rows × uvarint  kind
 ```
 
 **`G` — facts.** A JSON array of the widget's fact objects, verbatim (each

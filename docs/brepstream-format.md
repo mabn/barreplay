@@ -42,10 +42,14 @@ All integers little-endian. Record tags:
 | `E` | unit lifecycle event, text: `<frame> <kind> <id> <def> <team>`, plus — protocol ≥ 4 — optional `<aID> <aDef> <aTeam> <weapon>` (below) |
 | `C` | a player comm — chat message or map drawing — JSON (widget ≥ 1.6.0; below) |
 | `G` | a game fact, JSON (protocol ≥ 4; below) |
-| `D` | a damage window (re-sim only; below) |
-| `S` | unit lifetime totals (re-sim only; below) |
+| `H` | every damage callin (re-sim only; below) |
+| `U` | where unit lives ended (re-sim only; below) |
 | `V` | per-side visibility (re-sim only; below) |
+| `R` | closed projectile and beam tracks (re-sim only, protocol ≥ 5; below) |
+| `B` | strong explosions: unit deaths and unmatched impacts (re-sim only, protocol ≥ 5; below) |
 | `P` | engine profiler reading, JSON (re-sim only; below) |
+| `D` | a damage window (older re-sims only; below) |
+| `S` | unit lifetime totals (older re-sims only; below) |
 | `X` | end of stream, text: reason (`gameover`/`shutdown`/`error`) |
 | other | reserved; readers skip unknown tags |
 
@@ -286,7 +290,8 @@ sim frame when it has one. Both modes write the first three:
 | `end` | `f`, `winners` — the winning ALLY teams (empty: a draw) |
 | `teamdied` | `f`, `team` |
 | `playerleft` | `f`, `player`, `reason` (the engine's PlayerRemoved reason) |
-| `wdefs` | `defs`: `[{id, name, description, type, range, reload, damage, paralyzer, aoe}]` — the weapon table (re-sim only, written once at start) |
+| `wdefs` | `defs`: `[{id, name, description, type, range, reload, damage, paralyzer, aoe}]` — the weapon table (re-sim only, written once at start). Protocol ≥ 5 adds the explosion and flight keys to every weapon the capture **watches** (see `R`/`B` below) |
+| `stock` | `f`, `unit`, `def`, `team`, `w` (weapon slot, 1-based), `old`, `n` — a stockpile count changed: a round finished building (`n > old`) or was fired (`n < old`). Protocol ≥ 5, re-sim only, only for stockpiled weapons the capture tracks |
 | `blast` | `f`, `unit`, `def`, `team`, `x`, `z`, `weapon`, `byUnit`/`byDef`/`byTeam`, `damage`, `kills` — one big death explosion. No longer written: big blasts are derived from `H` (`snapshot.FactBlastData` is what `internal/combat` reports them as) |
 | `teamstats` | `team`, `fields`, `rows` — the engine's `GetTeamStatsHistory` for the team, one row per stats interval (re-sim only, at game over) |
 
@@ -385,6 +390,136 @@ gone) needs no V row: the frame's own dead list says so.
 profiler: the game-over totals (`final`, top 80 scopes, every re-sim), plus a
 reading at every heartbeat (top 30) under `-profile`. The Go
 tool prints them; they never reach the `.brp`.
+
+## Protocol 5: projectiles, beams and strong explosions (widget ≥ 1.9.0)
+
+Re-simulation only, behind the `__PROJECTILES__` switch (`cmd/barreplay
+-projectiles`, default on). Purely additive: a protocol-4 decoder skips the
+two new record types and keeps the new fact keys verbatim. The design and the
+engine behaviour it relies on are in `docs/projectiles-and-explosions.md`.
+
+**What is watched.** Decided once, at `Initialize`, from `WeaponDefs` (never
+from unit names: mods change the numbers). A weapon is **tracked** when it
+falls in one of these classes, in this order (`damage` = `damages[0]`, the
+whole shot; `range` in elmos):
+
+| class | code | rule |
+|---|---|---|
+| — | | `customParams.bogus` (silo dummies, energy chargers): never |
+| `antinuke` | 2 | `interceptor ≠ 0` |
+| `juno` | 5 | `customParams.junotype` |
+| `nuke` | 1 | `customParams.nuclear` and `range ≥ 10000` |
+| `tactical` | 4 | `customParams.nuclear` (shorter range) |
+| `beam` | 8 | `BeamLaser`/`LightningCannon`, `damage ≥ 2000`, `range ≥ 600` (an EMP beam is a beam) |
+| `emp` | 3 | `paralyzer`, `damage ≥ 5000` |
+| `tactical` | 4 | `stockpile` and `range ≥ 1500` (Perdition) |
+| — | | `damage ≤ 1` (AA, utility): never |
+| `artillery` | 6 | `Cannon`, `range ≥ 1500` |
+| `rocket` | 7 | `StarburstLauncher`/`MissileLauncher`, `range ≥ 1000` |
+
+A weapon is a **blast** weapon when a unit def names it as its
+`deathExplosion` or `selfDExplosion` and it is strong: `damage ≥ 400` **and**
+`damageAreaOfEffect ≥ 64` (the radius). That keeps fusions, metal makers,
+commanders, Juggernauts, crawling bombs, mines and big buildings, and drops
+the ordinary unit-death puffs (measured on a 60-minute 8v8: 2,535 of 100,066
+exploding deaths kept). Every tracked weapon's `customParams.cluster_def`
+sub-munition is watched too. The thresholds are constants in the widget, and
+each watched weapon's `wdefs` entry says which role it was watched in.
+
+**`R` — projectile and beam tracks.** One row per projectile of a tracked
+weapon, from launch to its end; one row per **firing** of a tracked beam. A
+row is written when its track closes. Rows are buffered and flushed once per
+sample, before the frame record, like `H`.
+
+```
+u32 n                               rows
+then n rows as COLUMNS:
+  u32 birth   u32 end               sim frames: launch (a beam's first frame), and
+                                    the explosion / last frame seen
+  u32 id                            the projectile's id (a beam: the segment id of its
+                                    first hit, 0xFFFFFF if it never hit); ids are
+                                    recycled, so (id, birth) names a track
+  u16 weapon  u16 owner  u8 team    weapon def; launcher unit and its team at launch
+  u8  class                         code from the table above
+  u8  end kind                      0 still open at game over, 1 exploded (an Explosion
+                                    callin carried its id; a beam: it hit something),
+                                    2 vanished (gone with no explosion; a beam: never hit)
+  u8  flags                         bit 0 engaged: an interceptor targeted it
+                                    (GetProjectileIsIntercepted read true)
+                                    bit 1 intercepted: destroyed by the interceptor
+                                    that targeted it
+                                    bit 2 path truncated at the point cap
+  s16 x0  s16 y0  s16 z0            launch position, whole elmos (a beam: its muzzle)
+  f32 vx  f32 vy  f32 vz            launch velocity, elmos per frame (0 for a beam)
+  f32 gravity                       the projectile's per-frame gravity (GetProjectileGravity)
+  u8  targetType                    0 none, or the engine's byte: 'u' unit, 'g' ground,
+                                    'f' feature, 'p' projectile
+  u32 target                        unit / feature / projectile id; 0xFFFFFF none
+  s16 tx  s16 ty  s16 tz            where the target was at launch
+  s16 x1  s16 y1  s16 z1            end position (explosion, or last seen; a beam:
+                                    its last hit point)
+  u16 points                        path points this row contributes
+then every row's path points, concatenated in row order, as COLUMNS:
+  u16 df   s16 x   s16 y   s16 z    df = frames since birth
+```
+
+Path points: `nuke`, `antinuke`, `emp`, `tactical` and `juno` tracks sample
+the projectile's position every 10 frames; a beam keeps its hit points (the
+first, every 5th frame, any that jumped more than 64 elmos from the last kept
+one, and the last); everything else stores none, since the arc follows from
+the launch velocity and gravity. At most 400 points per row (flag bit 2).
+
+Unknown ids are 65535 (u16), 255 (u8), 0xFFFFFF (u32; every value stays
+below 2^24 — see above). How a launch is found: the widget watches each
+tracked launcher's `reloadFrame`, which changes exactly when the weapon
+fires, and in that frame's `GameFramePost` picks the new projectile out of a
+`GetProjectilesInSphere` query around the muzzle, by owner and weapon def.
+How a track ends: the `Explosion` callin, which LuaUI may watch itself
+(`Script.SetWatchExplosion`) and which carries the projectile id; a sweep every
+15 frames closes tracks whose projectile is gone with no explosion. A nuke
+whose explosion falls within a frame of the explosion of an interceptor whose
+target was that nuke is flagged intercepted.
+
+**`B` — blasts.** One row per explosion of a watched weapon that is not the
+end of an `R` track: a unit's death or self-destruct explosion (of a blast
+weapon), or a tracked weapon's or sub-munition's explosion no track was open
+for (cluster sub-munitions, which a gadget spawns at the impact). Buffered and
+flushed with `H`.
+
+```
+u32 frame   u32 n
+then n rows as COLUMNS:
+  u16 df (frame - window)   u16 weapon
+  s16 x   s16 y   s16 z             where it went off, whole elmos
+  u16 unit  u8 team                 kind 1: the unit that exploded; kind 2: the owner
+  u8  kind                          1 unit explosion (death or self-destruct — the
+                                    weapon says which), 2 projectile with no track
+```
+
+The engine makes a unit's death explosion with the dying unit as owner and no
+projectile, and only when the unit was finished and not reclaimed
+(`CUnit::ForcedKillUnit`). What a blast did is in `H`: the hits of its weapon
+around (x, z) from its frame on, since damage further out arrives
+`distance / explosionSpeed` frames later.
+
+**`wdefs` keys for watched weapons (protocol ≥ 5).** Present only on weapons
+the capture watches, so the fact stays small (about 540 of 2,900 weapons in a
+modded game):
+
+| key | meaning |
+|---|---|
+| `role` | `"track"`, `"blast"`, `"sub"` (a cluster sub-munition) |
+| `class` | the track class name (tracked weapons) |
+| `edge`, `expSpeed` | `edgeEffectiveness`, `explosionSpeed` |
+| `crater`, `impulse` | `craterAreaOfEffect`, `damages.impulseFactor` |
+| `damages` | `{armorName: damage}` for the armour classes that differ from `damage` |
+| `paralyzeTime` | `damages.paralyzeDamageTime`, when a paralyzer |
+| `stockpile`, `stockpileTime` | when stockpiled |
+| `interceptor`, `targetable`, `coverage` | bitmasks and the protected radius (anti-nukes, nukes) |
+| `salvo`, `salvoDelay`, `projectiles` | shots per firing, frames between them, projectiles per shot |
+| `speed`, `gravity`, `highTrajectory`, `flightTime` | flight shape (`projectilespeed`, `myGravity`) |
+| `beamtime`, `sweepFire` | beam weapons |
+| `cp` | the customParams that change what a weapon does, when present: `nuclear`, `junotype`, `cluster_def`, `cluster_number`, `area_onhit_damage`, `area_onhit_range`, `area_onhit_time`, `overrange_distance`, `stockpilelimit` |
 
 ## Preamble
 

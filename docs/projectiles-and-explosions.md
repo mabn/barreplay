@@ -6,7 +6,8 @@ variants, Junos, rocket artillery), **heavy beam weapons** (Pulsar,
 Bulwark, Titan, Juggernaut, …) and **explosions** (where, how big, what
 they hit) during a re-simulation, for the post-game report.
 
-Status: **design, nothing implemented.** Every API claim below was checked
+Status: **designed; the byte formats are specified** in
+`docs/brepstream-format.md` (protocol 5) and `docs/brp-format.md` (§9.2). Every API claim below was checked
 against the engine source (`~/dev/recoil`, tag 2026.07.04) and BAR's game
 checkout (`~/dev/bar-full`). The weapon numbers come from a real capture's
 runtime weapon table. Source references are given so each claim can be
@@ -41,6 +42,10 @@ re-checked when either one moves on.
   calls `Explosion` at the hit point with that segment's id. So one
   Pulsar shot is 45 explosions, each carrying a 45th of the damage. The
   widget folds them into one beam record per firing (§4.7).
+- **Strong unit explosions are recorded too**, chosen by damage and radius
+  (fusions, metal makers, commanders, Juggernauts, crawling bombs, mines, big
+  buildings): about 2.5% of the deaths in a big game, and the ones that
+  matter (§4.6).
 - **Damage actually dealt is already recorded.** Every `H` hit carries the
   weapon, and the engine hands the hit callin the projectile id. Linking a
   blast to its hits answers "what was in the blast".
@@ -249,7 +254,7 @@ local function classify(wd)
     -- dmg is the whole shot; the engine divides it over the beam's frames
     return (dmg >= 2000 and wd.range >= 600) and "beam" or nil  -- Pulsar, Bulwark, Titan, Juggernaut…
   end
-  if wd.paralyzer and dmg >= 5000 then return "emp" end   -- armemp, armthor
+  if wd.paralyzer and dmg >= 5000 then return "emp" end   -- armemp, armthor (before the stockpile rule)
   if wd.stockpile and wd.range >= 1500 then return "tactical" end  -- legperdition
   if dmg <= 1 then return nil end                          -- AA and utility
   if wd.type == "Cannon" and wd.range >= 1500 then return "artillery" end   -- LRPC, rapid, minis
@@ -292,8 +297,8 @@ for wdid in pairs(watched) do Script.SetWatchExplosion(wdid, true) end
 
 **Watched set** = every tracked weapon def (§4.1), plus every
 `cluster_def` sub-munition they name, plus every unit's `deathExplosion` /
-`selfDExplosion` def. Death explosions are the commander, reactor and
-metal-maker blasts.
+`selfDExplosion` def that is strong enough (§4.6): the commander, reactor,
+metal-maker, Juggernaut, crawling-bomb and mine blasts.
 
 Caveat: the watch mask belongs to the whole LuaUI handle, so another widget
 calling `SetWatchExplosion(id, false)` would switch ours off. The re-sim
@@ -368,25 +373,51 @@ Alternatives considered:
 
 ### 4.6 Explosions
 
-Every `Explosion` call for a watched def writes one blast record:
+Two kinds of explosion are recorded:
 
-```
-frame, weaponDefID, x, y, z, owner unit (may be nil), projectileID (−1 for death explosions), projectile record index (if tracked)
-```
+1. **The end of a track.** An `Explosion` whose projectile id belongs to an
+   open track closes it (§4.5). The impact is the track's end position, and
+   nothing else is written.
+2. **A blast row (`B`)** for every other explosion of a watched weapon:
+   - **Kind 1, a unit's own explosion:** its death or self-destruct blast.
+     The engine makes it with the dying unit as owner and no projectile, and
+     only for a finished unit that wasn't reclaimed (`Unit.cpp:493-522`).
+     `UnitDestroyed` fires first, which is where the widget learns the
+     unit's team.
+   - **Kind 2, a projectile with no open track:** cluster sub-munitions,
+     which a gadget spawns at the impact, so no launch was ever seen.
 
-"Strength" comes from the weapon def (§2) through `weaponDefID`, so it isn't
-repeated per blast. "What was in it" comes from the existing `H` hits, linked
-one of two ways:
+**Which unit explosions are watched: by strength, not by unit.** A death or
+self-destruct weapon is watched when `damage ≥ 400` **and** radius
+`damageAreaOfEffect ≥ 64`. Measured over every explosion weapon in a modded
+game's runtime table, that keeps:
 
-- **Exactly:** hits whose callin projectileID equals the blast's. This needs
-  the projectile id in `H`, which today stores only a flag that one existed.
-  The cheapest form is a column holding the tracked-projectile index for
-  hits from tracked projectiles, `0xFFFF` otherwise. It is a new trailing
-  column, detected by the bytes left, as `E`'s cause columns were.
-- **By matching, with no format change:** hits with the same weapon def,
-  within the blast radius of (x, z), from the blast frame to
-  `frame + R / explosionSpeed + 1`. Death explosions have no projectile, so
-  they always use this. Their hits name the dying unit as attacker, or no one.
+| Explosion | Damage / radius | Units |
+|---|---|---|
+| `advancedfusionexplosionselfd` | 12,800 / 960 | Advanced Fusion self-destruct |
+| `customfusionexplo`, `korgexplosion` | 10,600 / 640 | Advanced Fusion, Juggernaut |
+| `commanderexplosion` | 5,000 / 350 | every commander |
+| `bantha` | 3,900 / 250 | Titan |
+| `mine_heavy` / `mine_medium` / `mine_light` | 3,000 / 165, 1,110 / 125, 445 / 100 | mines |
+| `crawl_blast` / `crawl_blastsml` | 2,700 / 200, 2,000 / 140 | crawling bombs (self-destruct / death) |
+| `fusionexplosion` | 2,650 / 240 | Fusion |
+| `juggernaut` | 2,000 / 140 | Behemoth |
+| `geo`, `advmetalmaker`, `metalmaker` | 1,420 / 260, 1,220 / 160, 660 / 105 | geothermal, metal makers |
+| `hugebuildingexplosiongeneric`, `largebuildingexplosiongeneric` | 1,330 / 210, 670 / 170 | big buildings, factories |
+
+It drops the ordinary unit deaths that make up nearly all of them: aircraft
+6 / 12, small units 11 / 18, tanks and bots 20–28 / 24–32, small buildings
+89 / 90. In the 60-minute 8v8 (replay `3adeca6a…`) that is **2,535 of
+100,066** exploding deaths; in the 12.6-minute one, 359 of 1,446. 92 weapons
+are watched for it.
+
+"Strength" travels once per weapon, in the extended `wdefs` fact (§2), not
+per blast. "What was in it" is matched from `H` with no format change: hits
+of the same weapon within the blast radius of (x, z), from the blast frame to
+`frame + R / explosionSpeed + 1`. A unit explosion's hits name the dying unit
+as attacker, or no one. A projectile-id column in `H` was considered for exact
+linking and **left out**: it would cost ~190 KB on the 60-minute game to
+save a match that the weapon, frame and radius already make unambiguous.
 
 Metal destroyed = hits whose `hpAfter <= 0`, priced by victim def. Blasts
 with a metal owner join `internal/combat`'s chain crediting ("a chain of
@@ -447,49 +478,29 @@ writes one small record per 9.9 s shot. Cheap.
 
 ## 5. Formats
 
-### Stream (`.brepstream`, protocol bump)
+The byte-level specs live with the formats they extend:
 
-Two new record tags, both buffered per sample like `H`:
+- **Stream:** `docs/brepstream-format.md`, "Protocol 5". New record types
+  `R` (tracks) and `B` (blasts), a new `stock` fact, and new `wdefs` keys on
+  watched weapons. The `GAME` line says protocol 5; a protocol-4 decoder
+  skips all of it.
+- **`.brp`:** `docs/brp-format.md` §9.2. Two new analysis sections, `R` and
+  `B`, inside v6: readers skip unknown tags, so no version bump.
 
-- **`R` projectiles**, written when a record closes:
-  - `u32 id`, `u16 weapon`, `u16 owner`, `u8 team`, `u8 class`
-  - `u32 birthFrame`, `u32 endFrame`, `u8 endKind` (exploded, vanished, intercepted, unfinished)
-  - `i16 x0, y0, z0` (launch), `f32 vx, vy, vz` (launch velocity), `f32 gravity`
-  - `u8 targetType`, then `i16 tx, ty, tz` or `u32 targetId`
-  - `i16 x1, y1, z1` (end), `u8 flags` (bit 0: was intercepted)
-  - `u16 nPath` followed by `i16 x, y, z` points (strategic classes only)
-  - for class `beam`: launch = the muzzle, velocity and gravity 0, end =
-    the last hit point, and each path point is a thinned hit point with a
-    `u16` frame offset in front of it (§4.7).
-- **`B` blasts:** one per `Explosion` call (except beam frames, which fold
-  into their `R` record), columnar like `H`:
-  - `u16 df`, `u16 weapon`, `i16 x, y, z`, `u16 owner`, `u8 ownerTeam`
-  - `u32 projectile` (`0xFFFFFFFF` = none)
+The switch is `__PROJECTILES__` (`cmd/barreplay -projectiles`, default on).
 
-The stockpile timeline needs no new record type: it is the `stock` fact.
+**Measured cost** (built from each replay's real hits, deaths and unit
+positions, gzipped the way the writer does; projectile counts are a lower
+bound, since shots that hit nothing aren't in `H`):
 
-### `.brp` (v6, compatible)
-
-Two new **analysis sections, `R` and `B`** (both tags are free; `snapshot/brp.go`
-and `analysis.go` use `M K F X E C J G D S H U V`). They are written last,
-listed in the section layout, and omitted when empty. Readers already skip
-unknown tags, so the viewer and older code are unaffected.
-
-### `wdefs` fact: extend it
-
-The fact is verbatim JSON, so new keys reach the `.brp` with no codec
-change. Today it records `id, name, description, type, range, reload,
-damage, paralyzer, aoe`. Add:
-- `edge` (edgeEffectiveness), `expSpeed`, `crater`, `impulse`;
-- `damages` (the full armour-class array, plus a one-time `armorTypes` name
-  list);
-- `stockpile`, `stockpileTime`, `interceptor`, `targetable`, `coverage`;
-- `salvo`, `salvoDelay`, `projectiles`, `speed`, `gravity`, `highTrajectory`,
-  `flightTime`;
-- the BAR customParams from §2 (`nuclear`, `junotype`, `cluster_def` and
-  `cluster_number`, `area_onhit_*`, `overrange_distance`, `bogus`,
-  `stockpilelimit`);
-- the widget's own `class` (§4.1).
+| | 12.6-min lava 8v8 (`5a21cb6a…`, 0.96 MB) | 60-min lava 8v8 (`3adeca6a…`, 74.9 MB) |
+|---|---|---|
+| `R` rows | 28 projectiles, 7 beam firings | 3,835 projectiles, 6,674 beam firings |
+| `R` section | ~1.3 KB | ~227 KB |
+| `B` rows (strong unit explosions) | 359 | 2,535 |
+| `B` section | ~3–4 KB | ~23 KB |
+| `wdefs` extension | ~10 KB | ~10 KB |
+| **Total** | **~15 KB, 1.6%** | **~260 KB, 0.35%** (~0.9% if 2 in 3 shots miss) |
 
 ## 6. What the report can then say
 
