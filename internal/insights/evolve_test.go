@@ -127,3 +127,21 @@ func TestSelfDestructOutsideAFightIsNotALoss(t *testing.T) {
 		t.Error("a self-destruct of a unit hurt moments before is not a loss")
 	}
 }
+
+func TestArmyCatPutsCostlyAircraftWithExperimentals(t *testing.T) {
+	for _, c := range []struct {
+		d    snapshot.UnitDef
+		want string
+	}{
+		{snapshot.UnitDef{CanFly: true, MetalCost: 200}, "air"},
+		{snapshot.UnitDef{CanFly: true, MetalCost: 3000}, "experimental"},
+		{snapshot.UnitDef{MetalCost: 249}, "light"},
+		{snapshot.UnitDef{MetalCost: 799}, "medium"},
+		{snapshot.UnitDef{MetalCost: 2999}, "heavy"},
+		{snapshot.UnitDef{MetalCost: 3000}, "experimental"},
+	} {
+		if got := armyCats[armyCat(c.d)]; got != c.want {
+			t.Errorf("%+v: got %s, want %s", c.d, got, c.want)
+		}
+	}
+}

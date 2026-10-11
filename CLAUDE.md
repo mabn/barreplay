@@ -485,7 +485,9 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           events interleaved at their frames: per-side army value (the team
                           stats bar's rule: armed, mobile, priced, not a commander, weighted by
                           build progress) and income every StepSec, army split by category (no
-                          tech level exists in the defs, so ground units split by PRICE), every
+                          tech level exists in the defs, so ground units split by PRICE:
+                          <250/<800/<3000 metal, and anything at 3000+ is experimental, flying
+                          or not — v5), every
                           death with its last sampled position and cost, tech milestones from a
                           CURATED def-name table (defs.go — the defs carry no tier), chat and
                           pings. A piece is immutable, so ANY change to what is computed is a

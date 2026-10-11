@@ -12,7 +12,7 @@ import { watcher } from "../watch";
 import type { Insights, SummaryOptions } from "../types";
 
 const CAT_LABELS: Record<string, string> = {
-  air: "air", light: "light (<250)", medium: "medium (<800)", heavy: "heavy (<3000)", experimental: "experimental",
+  air: "air (<3000m)", light: "light (<250m)", medium: "medium (<800m)", heavy: "heavy (<3000m)", experimental: "experimental (3000m+)",
 };
 
 /** One hue per kind, the same on both sides: the axis already says whose

@@ -74,20 +74,24 @@ func isStructure(d snapshot.UnitDef) bool {
 }
 
 // Army categories. With no tech level in the defs, ground units are split by
-// price, which tracks BAR's tiers closely enough to show a tech switch.
+// price, which tracks BAR's tiers closely enough to show a tech switch. Air
+// is one band below the experimental price: a flying experimental (a
+// Liche, a Dragon) is an experimental first.
 var armyCats = []string{"air", "light", "medium", "heavy", "experimental"}
+
+const experimentalCost = 3000
 
 func armyCat(d snapshot.UnitDef) int {
 	switch {
+	case d.MetalCost >= experimentalCost:
+		return 4
 	case d.CanFly:
 		return 0
 	case d.MetalCost < 250:
 		return 1
 	case d.MetalCost < 800:
 		return 2
-	case d.MetalCost < 3000:
-		return 3
 	default:
-		return 4
+		return 3
 	}
 }
