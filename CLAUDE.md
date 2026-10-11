@@ -494,6 +494,10 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           new Version written beside the old one. Comparative sections need a
                           full-view capture (POV) and two sides; CostCoverage says when only
                           armed mobile defs are priced (a replay rebuilt from old pieces).
+                          SIDES are ally teams with a human player OR an AI (insights.go
+                          aiTeams: a team with a faction and no human — eight BARbs are an
+                          8v8's other half, named "AI 1".."AI 8"); Gaia (no faction) and a
+                          scavenger/raptor team (>= half its units _scav/raptor defs) are not.
                           stories.go adds what NO capture can attribute to a killer and so never
                           tries: each side's army centre per step (Series.Front), battles and
                           six awards picked from per-unit tracks (ids are recycled, so a new def
@@ -691,6 +695,15 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           the fighting a one-line "Meanwhile" note, no battle badge, and the side
                           that put more into its army instead said so; a fall in income names the
                           mines/converters the side lost in the window.
+                          A FIGHT THE GAINING SIDE LOST (lost more worth there) while its
+                          army still grew faster than the other's (moments.ts armyGrew) is
+                          not why the line moved: it is told as the build-up, titled "...
+                          despite losing a fight in the middle", with the fight a "Meanwhile
+                          Red team won the fight ..." sentence counting only its part INSIDE
+                          the moment's window (notableLoss names one unit carrying >= 30% and
+                          3000+ metal of it: "including a half-built Epic Pulsar"), and the
+                          swing row shows each side's army and income plus "in the fight"
+                          losses (MomentStory.lostFight; Marcin, f9c2cb6a's swing A).
                           VERSION 8 says WHAT DID THE KILLING, for the page's BATTLE PHRASES
                           (worker/src/summary/phrases.ts; Marcin's ask: "won battle" every
                           time is boring). Each battle side's BattleLoss.By lists the enemy
@@ -953,9 +966,14 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           once with the chosen one bold (a path is also a way to pick; a jump
                           no commander walks in a step is drawn as a gap), the diary/leaks/
                           style beside it and the built/lost strip below; names in the Sides
-                          cards select a tab. "Who was winning" stacks the swing line, ARMY VALUE and METAL
-                          INCOME (advantage.ts comparePanel) on one time axis and crosshair, with eliminations marked on the swing line. The two
-                          panels default to RATIO (series.ts leadPct: ONE white line, the first side's
+                          cards select a tab. "Who was winning" stacks the swing line, ARMY VALUE, METAL
+                          INCOME and METAL DESTROYED (advantage.ts comparePanel) on one time axis and crosshair, with eliminations marked on the swing line;
+                          the three panels sit FOLDED in a <details> under the line (Marcin's call: the line is what a reader came for), which
+                          is why the swing chart draws its own minutes axis. METAL DESTROYED is the win model's fourth input (losses.ts
+                          destroyedBySide = the other side's fought-for losses, Go's Killed): its Value mode, the default, draws per-step
+                          BARS like a player's Built and lost (first side up, second down), and its Ratio compares the totals so far
+                          with the model's own 25k k. The two
+                          ratio panels default to RATIO (series.ts leadPct: ONE white line, the first side's
                           lead UP like the swing line above it, +20% / -20%, shaded in the
                           leader's colour,
                           smoothed by the win model's own k; the axis spans the min and max
@@ -971,7 +989,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           sides' columns side by side, each with its fighters and its losses
                           as icon chips (unitchips.ts fillUnits, at most SWING_CHIPS), the
                           side the line moved toward boxed with the shift — and the whole
-                          row plays the clip, as do the chart's lettered dots. Swings are
+                          row plays the clip, as do the chart's lettered dots, whose tooltip IS that row (swing.ts entryRow, inert). Swings are
                           LETTERED (A, B, C...) because battles are NUMBERED, and a long stretch
                           with no swing is filled with BATTLES (moments.ts gapBattles: the
                           biggest battle in the widest gap over an eighth of the game, at least
@@ -988,16 +1006,28 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           badge — the line lists only its biggest shifts, and a decided fight
                           can move it little. A swing told as one battle carries the badge too. LOG
                           SCALES (chart.ts TimeChartSpec.log: symlog, ticks at powers of ten,
-                          labels closer than a line apart dropped): metal income and army
+                          labels closer than a line apart dropped); every y tick drops a fraction of only zeros, "1.0k" -> "1k" (chart.ts tickText, Marcin's call): metal income and army
                           composition each carry a Linear/Log toggle (scale.ts scaleToggle,
                           which redraws the chart in place); composition defaults to LOG, and
                           there places each side's TOTAL on the log axis and splits it by
                           SHARE — stacking by value through a log would hand the bottom band
                           most of the height whatever its size. The BATTLES
                           section (once "Map story"; no army-centre lines since v7) numbers its battles in the order they happened, on the map and
-                          in a one-line-per-battle list (losses either side of a centre line,
-                          square-root scaled), one selection shared by both — a click on either
-                          selects AND plays the battle's clip, marked on the slider as its whole span (clipEvent, like every clip of something with a duration — a killing-fields zone's busiest 30 s too); a picked battle
+                          in a one-line-per-battle list, and over both a TIMELINE (battles.ts
+                          timeline; Marcin's "C+B": a linear loss scale made every late battle
+                          look bigger than an early rout): each battle a bubble at its time,
+                          UP for the first side ahead, DOWN for the second, as far out as
+                          log10 of the loss ratio (gridlines 2x/5x/10x, capped at 10x), its
+                          area the metal lost, a faint ring the armies nearby, a line its
+                          span, as a FIREBALL (yellow to amber, never red, ringed by flame tongues — flameRing; Marcin) when ownBlast decided it. Each list row carries the same
+                          verdict as a bar from a centre line (lean) ending in a dot sized by
+                          the metal lost, plus "blue : red" losses; the MAP draws the same
+                          bubbles (colour, size, fireball) where each was fought. All three
+                          share ONE tooltip (battleTip: the battle's own detail panel —
+                          fighters, two per side then "+N" (fighterNames max), and the two
+                          sides' losses side by side, first side left — cached per battle).
+                          Nothing is SELECTED (Marcin: hover + clip is enough): pointing lights
+                          the battle in all three, a click plays its clip, marked on the slider as its whole span (clipEvent, like every clip of something with a duration — a killing-fields zone's busiest 30 s too). The tooltip
                           shows the two sides' losses SIDE BY SIDE, each KIND of unit as its
                           untinted BAR icon with a count (Battle.lost[].units, v4: def/n/metal,
                           costliest first, at most 48). Defs sharing a bitmap are one kind,
@@ -1702,7 +1732,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           wait included (Marcin's pick — how long a reader is kept waiting; a
                           timed-out computation still finishes and publishes for the next visit)
                           (a timed-out request keeps its daemon's slot until it answers); readers
-                          of one replay share one computation; a failure is remembered 10 min so
+                          of one replay share one computation, and a reader asking AGAIN after its 15 s ran out joins the one still running (per-reader deadlines; a page with NO summary at all re-asks on 504 for up to NO_SUMMARY_WAIT_MS = 2 min, app.js freshSummary / embed.ts requestSummary, since a big game's first summary takes longer than 15 s); a "not built yet" with a daemon connected can also be a viewer and daemon on DIFFERENT insights versions (the hub only sends a request to a daemon computing the version asked for, and answers "unavailable" otherwise), which a worker deploy fixes; a failure is remembered 10 min so
                           a broken replay costs a daemon once. Busy/unavailable answer 503,
                           timeout 504, failed 502. The page BLOCKS on the request (Marcin's call:
                           synchronous) — a stale summary is not drawn while the current one is

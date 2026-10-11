@@ -7560,10 +7560,10 @@ async function showSummary() {
     if (res.status === 404) {
       // Nothing built at any version: ask for it, and say so while it runs.
       summaryLoading(lib);
-      const fresh = await freshSummary(file);
+      const fresh = await freshSummary(file, NO_SUMMARY_WAIT_MS);
       if (summaryFor !== file) return;
       if (!fresh) {
-        summaryMessage('The summary for this replay has not been built yet.');
+        summaryMessage('The summary for this replay could not be built yet. Try again in a few minutes.');
         return;
       }
       mountSummaryIns(lib, fresh);
@@ -7623,17 +7623,26 @@ function mountSummaryIns(lib, ins) {
 // from the bucket, so the CDN's cached 404 for this file never comes into
 // it. Anything else — no daemon connected, too many readers waiting, a
 // failure, a backend without the route — is null, and the page keeps what it
-// shows.
-async function freshSummary(file) {
+// shows. A request that ran out of time (504) is asked again while waitMs
+// lasts: the worker's hub joins the computation still running rather than
+// starting another, so a page with NO summary to fall back to waits for a big
+// game's first one (NO_SUMMARY_WAIT_MS) instead of saying it was never built.
+const NO_SUMMARY_WAIT_MS = 120000;
+async function freshSummary(file, waitMs = 0) {
+  const until = Date.now() + waitMs;
   try {
-    const res = await fetch('/api/insights', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ rid: file, version: INSIGHTS_VERSIONS[0] }),
-    });
-    if (!res.ok) return null;
-    const ins = await res.json();
-    return ins && ins.version === INSIGHTS_VERSIONS[0] ? ins : null;
+    for (;;) {
+      const res = await fetch('/api/insights', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ rid: file, version: INSIGHTS_VERSIONS[0] }),
+      });
+      if (res.ok) {
+        const ins = await res.json();
+        return ins && ins.version === INSIGHTS_VERSIONS[0] ? ins : null;
+      }
+      if (res.status !== 504 || Date.now() >= until) return null;
+    }
   } catch (_) {
     return null;
   }

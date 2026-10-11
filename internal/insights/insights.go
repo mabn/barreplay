@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"github.com/mabn/barreplay/snapshot"
 )
@@ -210,7 +211,48 @@ type roster struct {
 	playerName map[int32]string
 }
 
-func buildRoster(m snapshot.Meta) roster {
+// pveShare is the share of a team's units that must be scavenger or raptor
+// defs for it to be the game's PvE opponent rather than an AI player.
+const pveShare = 0.5
+
+// aiTeams are the teams an AI plays (BARb and the like): a slot with a
+// faction (the engine's Gaia team has none) that no human controls. Their
+// sides are sides like any other — eight BARbs are an 8v8's other half. The
+// scavengers and raptors are AIs too but not an opponent side: a team whose
+// units are mostly their defs stays out, as Gaia does. Nothing in a capture
+// names the AI directly (the startscript's [ai] sections are not recorded),
+// so it is read off the team list and what each team built.
+func aiTeams(m snapshot.Meta, events []snapshot.Event, human map[int32]bool) map[int32]bool {
+	cand := map[int32]bool{}
+	for _, t := range m.Teams {
+		if !human[t.TeamID] && t.Side != "" {
+			cand[t.TeamID] = true
+		}
+	}
+	if len(cand) == 0 {
+		return cand
+	}
+	built := map[int32]int{}
+	pve := map[int32]int{}
+	for _, e := range events {
+		if e.Kind != snapshot.EventCreated || !cand[e.Team] {
+			continue
+		}
+		built[e.Team]++
+		name := m.UnitDefs[e.DefID].Name
+		if strings.HasSuffix(name, "_scav") || strings.HasPrefix(name, "raptor") || strings.HasPrefix(name, "scav") {
+			pve[e.Team]++
+		}
+	}
+	for team := range cand {
+		if built[team] > 0 && float64(pve[team]) >= pveShare*float64(built[team]) {
+			delete(cand, team)
+		}
+	}
+	return cand
+}
+
+func buildRoster(m snapshot.Meta, events []snapshot.Event) roster {
 	r := roster{teamSide: map[int32]int{}, teamIndex: map[int32]int{}, playerTeam: map[int32]int32{}, playerName: map[int32]string{}}
 	teamAlly := map[int32]int32{}
 	teamColor := map[int32]string{}
@@ -227,11 +269,19 @@ func buildRoster(m snapshot.Meta) roster {
 		}
 		teamPlayers[p.Team] = append(teamPlayers[p.Team], p.Name)
 	}
+	human := map[int32]bool{}
+	for team, ps := range teamPlayers {
+		human[team] = len(ps) > 0
+	}
+	ai := aiTeams(m, events, human)
 	allies := map[int32]bool{}
 	for team := range teamPlayers {
 		if a, ok := teamAlly[team]; ok {
 			allies[a] = true
 		}
+	}
+	for team := range ai {
+		allies[teamAlly[team]] = true
 	}
 	allyIDs := make([]int32, 0, len(allies))
 	for a := range allies {
@@ -248,6 +298,15 @@ func buildRoster(m snapshot.Meta) roster {
 		teamIDs = append(teamIDs, t.TeamID)
 	}
 	sort.Slice(teamIDs, func(i, j int) bool { return teamIDs[i] < teamIDs[j] })
+	// An AI has no name in the capture; "AI 1", "AI 2"... in team order,
+	// so the page has something to call each one.
+	aiN := 0
+	for _, id := range teamIDs {
+		if ai[id] {
+			aiN++
+			teamPlayers[id] = []string{fmt.Sprintf("AI %d", aiN)}
+		}
+	}
 	for _, id := range teamIDs {
 		side := -1
 		if len(teamPlayers[id]) > 0 {
@@ -283,7 +342,7 @@ func Compute(in Input) (*Insights, error) {
 	if in.Frames == nil {
 		return nil, fmt.Errorf("insights: no frames")
 	}
-	ro := buildRoster(in.Meta)
+	ro := buildRoster(in.Meta, in.Events)
 	// The summary ends where the game was decided (gameend.go). A capture
 	// that recorded its eliminations says where up front; otherwise they are
 	// inferred from a first pass over the whole game, and the summary is

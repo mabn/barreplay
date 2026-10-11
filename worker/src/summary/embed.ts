@@ -123,25 +123,38 @@ export async function findInsights(gameId: string, opts: EmbedOptions = {}, onWa
     onWait?.();
     return (await requestSummary(replayOrigin, rid)) ?? ins;
   }
-  // None at all: worth waiting for, since there is nothing else to show.
+  // None at all: worth waiting for, since there is nothing else to show —
+  // past the hub's 15 s too, for a big game whose summary takes longer.
   onWait?.();
-  return requestSummary(replayOrigin, rid);
+  return requestSummary(replayOrigin, rid, NO_SUMMARY_WAIT_MS);
 }
+
+/** How long a page with NO summary at all keeps waiting for one. Each
+ * request answers within the hub's 15 s; one that runs out (504) is asked
+ * again, which joins the computation still running rather than starting
+ * another, until this much time has passed. A big game takes longer than
+ * 15 s to download and compute, and without this its first reader was told
+ * the summary "has not been built" while it was still being built. */
+export const NO_SUMMARY_WAIT_MS = 120_000;
 
 /** requestSummary asks the viewer's worker for rid's summary at the newest
  * version (POST /api/insights), which computes it on demand and answers with
- * it; null when it cannot (no daemon, too busy, failed). A text/plain body
+ * it; null when it cannot (no daemon, too busy, failed). A timeout is asked
+ * again while waitMs (from the first request) lasts. A text/plain body
  * keeps the cross-origin POST a simple request — no preflight — and the
  * route answers any origin, so the reply can be read. */
-async function requestSummary(replayOrigin: string, rid: string): Promise<Insights | null> {
+async function requestSummary(replayOrigin: string, rid: string, waitMs = 0): Promise<Insights | null> {
+  const until = Date.now() + waitMs;
   try {
-    const r = await fetch(`${replayOrigin}/api/insights`, {
-      method: "POST",
-      headers: { "content-type": "text/plain" },
-      body: JSON.stringify({ rid, version: INSIGHTS_VERSIONS[0] }),
-    });
-    if (!r.ok) return null;
-    return (await r.json()) as Insights;
+    for (;;) {
+      const r = await fetch(`${replayOrigin}/api/insights`, {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: JSON.stringify({ rid, version: INSIGHTS_VERSIONS[0] }),
+      });
+      if (r.ok) return (await r.json()) as Insights;
+      if (r.status !== 504 || Date.now() >= until) return null;
+    }
   } catch {
     return null;
   }

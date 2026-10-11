@@ -99,6 +99,9 @@ export const CSS = `
 .brs-root .brs-bar { display: block; height: 8px; background: var(--brs-grid); border-radius: 2px; overflow: hidden; }
 .brs-root .brs-bar i { display: block; height: 100%; }
 .brs-root .brs-panel-label { color: var(--brs-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; margin: 10px 0 2px; }
+.brs-root details.brs-more { margin-top: 8px; }
+.brs-root details.brs-more > summary { cursor: pointer; color: var(--brs-muted); font-size: 12px; padding: 4px 0; user-select: none; }
+.brs-root details.brs-more > summary:hover, .brs-root details.brs-more > summary:focus-visible { color: var(--brs-text); outline: none; }
 .brs-root svg text.brs-ko { font-size: 15px; font-weight: 700; }
 .brs-root .brs-grow { flex: 1; min-width: 0; }
 .brs-root .brs-play { font: inherit; font-size: 11px; line-height: 1; flex: 0 0 auto; cursor: pointer; color: var(--brs-text);
@@ -106,14 +109,10 @@ export const CSS = `
 .brs-root .brs-play:hover, .brs-root .brs-play:focus-visible { border-color: var(--brs-accent); color: var(--brs-accent); }
 .brs-root .brs-watch { color: var(--brs-accent); font-size: 12px; margin-top: 4px; visibility: hidden; }
 .brs-root .brs-seekable:hover .brs-watch { visibility: visible; }
-.brs-root .brs-watchbtn { font: inherit; margin-top: 8px; cursor: pointer; color: var(--brs-text); background: var(--brs-bg);
-  border: 1px solid var(--brs-line); border-radius: 4px; padding: 4px 10px; }
-.brs-root .brs-watchbtn:hover { border-color: var(--brs-accent); color: var(--brs-accent); }
 .brs-root .brs-storygrid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 18px; align-items: start; }
 @media (max-width: 820px) { .brs-root .brs-storygrid { grid-template-columns: minmax(0, 1fr); } }
 .brs-root .brs-storygrid .brs-mapwrap { max-width: none; margin: 0; }
-.brs-root .brs-bhead { display: flex; justify-content: space-between; font-size: 12px; padding: 0 30px 4px 116px; }
-.brs-root .brs-brow { display: grid; grid-template-columns: 22px 40px 50px minmax(0, 1fr) 24px; align-items: center; gap: 6px;
+.brs-root .brs-brow { display: grid; grid-template-columns: 22px 40px 64px minmax(0, 1fr) 92px 24px; align-items: center; gap: 6px;
   padding: 3px 4px; border-radius: 4px; cursor: pointer; outline: none; }
 .brs-root .brs-brow:hover, .brs-root .brs-brow.brs-hover, .brs-root .brs-brow:focus-visible { background: var(--brs-bg); }
 .brs-root .brs-brow.brs-on { background: var(--brs-bg); box-shadow: inset 2px 0 0 var(--brs-accent); }
@@ -121,17 +120,26 @@ export const CSS = `
 .brs-root .brs-brow.brs-on .brs-numlight { background: var(--brs-accent); }
 .brs-root .brs-num.brs-inline { display: inline-block; width: 18px; height: 18px; line-height: 18px; font-size: 11px; margin: 0; vertical-align: 1px; }
 .brs-root .brs-where { color: var(--brs-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.brs-root .brs-lossbar { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; height: 10px; }
-.brs-root .brs-half { display: flex; background: var(--brs-grid); border-radius: 2px; overflow: hidden; }
-.brs-root .brs-half.brs-left { justify-content: flex-end; }
-.brs-root .brs-half i { display: block; height: 100%; min-width: 1px; }
-.brs-root .brs-battledetail { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--brs-line); }
-.brs-root .brs-battle .brs-ring { fill: #fff; fill-opacity: .03; stroke: #fff; stroke-opacity: .25; pointer-events: none; }
-.brs-root .brs-battle .brs-badge { fill: var(--brs-text); stroke: #0b0f13; stroke-width: 0; }
-.brs-root svg text.brs-badgenum { fill: #0b0f13; font-weight: 700; pointer-events: none; }
-.brs-root .brs-battle.brs-hover .brs-ring { stroke-opacity: 1; fill-opacity: .14; }
-.brs-root .brs-battle.brs-on .brs-ring { stroke: var(--brs-accent); stroke-opacity: 1; fill: var(--brs-accent); fill-opacity: .16; }
-.brs-root .brs-battle.brs-on .brs-badge { fill: var(--brs-accent); }
+.brs-root .brs-brow.brs-bhead { cursor: default; font-size: 12px; padding-bottom: 4px; background: none; }
+.brs-root .brs-vhead { display: flex; justify-content: space-between; white-space: nowrap; gap: 4px; overflow: hidden; }
+.brs-root .brs-bnumhead { text-align: right; white-space: nowrap; }
+.brs-root .brs-verdict { position: relative; height: 18px; }
+.brs-root .brs-verdict::before { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; border-left: 1px solid var(--brs-muted); }
+.brs-root .brs-vtick { position: absolute; top: 3px; bottom: 3px; border-left: 1px dashed var(--brs-grid); }
+.brs-root .brs-verdict i { position: absolute; top: 7px; height: 4px; border-radius: 2px; }
+.brs-root .brs-verdict b { position: absolute; top: 50%; transform: translate(-50%, -50%); border-radius: 50%; }
+.brs-root .brs-bnums { font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+.brs-root .brs-btimeline { display: block; width: 100%; margin-bottom: 12px; }
+.brs-root .brs-bmark .brs-bdot { stroke: var(--brs-panel, #12181e); stroke-width: 1.5; }
+.brs-root .brs-battle .brs-bdot { stroke: var(--brs-panel, #12181e); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.brs-root .brs-battle.brs-hover .brs-bdot { stroke: var(--brs-text); }
+.brs-root .brs-battle.brs-on .brs-bdot { stroke: var(--brs-accent); stroke-width: 3; }
+.brs-root :is(.brs-bmark, .brs-battle):not(.brs-hover):not(.brs-on) .brs-bdot.brs-fire { stroke: none; }
+.brs-root .brs-vfire { position: absolute; top: 50%; transform: translate(-50%, -50%); overflow: visible; filter: drop-shadow(0 0 3px rgba(255, 160, 30, 0.7)); }
+.brs-root .brs-fire { filter: drop-shadow(0 0 4px rgba(255, 200, 40, 0.75)); }
+.brs-root .brs-bmark.brs-hover .brs-bdot { stroke: var(--brs-text); }
+.brs-root .brs-bmark.brs-on .brs-bdot { stroke: var(--brs-accent); stroke-width: 3; }
+.brs-root .brs-bmarknum { fill: #fff; font-weight: 700; pointer-events: none; }
 .brs-root .brs-tip { position: fixed; z-index: 1000; display: none; pointer-events: none; max-width: calc(100vw - 16px);
   background: #0b0f13; color: var(--brs-text); border: 1px solid var(--brs-line); border-radius: 6px;
   padding: 7px 10px; font-size: 12px; line-height: 1.4; box-shadow: 0 6px 18px rgba(0, 0, 0, .45); }
@@ -154,6 +162,13 @@ export const CSS = `
 .brs-root .brs-tip-head { display: flex; align-items: center; justify-content: flex-end; gap: 6px; font-weight: 600; white-space: nowrap; }
 .brs-root .brs-tip-head i { flex: 0 0 10px; height: 10px; border-radius: 2px; }
 .brs-root .brs-tip-metric { color: var(--brs-muted); white-space: nowrap; }
+/* A swing dot's tooltip is the swing's list row (sections/swing.ts). */
+.brs-root .brs-tip-title:has(> .brs-moment) { max-width: none; font-weight: normal; margin: 0; }
+.brs-root .brs-tip .brs-moment { width: min(680px, calc(100vw - 40px)); padding: 2px 0; border-top: 0; }
+.brs-root .brs-tip-title:has(> .brs-battletip) { max-width: none; font-weight: normal; margin: 0; }
+.brs-root .brs-tip .brs-battletip { width: min(700px, calc(100vw - 40px)); }
+.brs-root .brs-tip .brs-battletip .brs-losscols { margin-bottom: 2px; }
+.brs-root .brs-tip:has(.brs-battletip) .brs-tip-note { max-width: none; }
 .brs-root .brs-tip-note { color: var(--brs-muted); margin-top: 4px; max-width: 440px; }
 .brs-root .brs-val { font-variant-numeric: tabular-nums; color: var(--brs-muted); white-space: nowrap; }
 /* The on-demand wait (loading.ts): monkeys hammering a bar chart together. */

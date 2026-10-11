@@ -1,15 +1,17 @@
 // Who was ahead, and why: the swing chart (a win probability, swing.ts) when
-// the file carries one; under it, on the same time axis and one shared
-// crosshair, the two inputs that move it most — army value and metal income —
-// each as a RATIO between the sides by default (how far ahead the leader is)
-// or as both sides' VALUES. Stacked that way a shift in the line sits right
-// above the army or the economy that caused it.
+// the file carries one; under it, folded away until asked for, on the same
+// time axis and one shared crosshair, three of the inputs that move it —
+// army value, metal income and metal destroyed — each as a RATIO between the
+// sides (how far ahead the leader is) or as the sides' VALUES (metal
+// destroyed as per-step bars, one side up and one down). Opened, a shift in
+// the line sits right above the army, economy or fighting that caused it.
 import { h, s, section } from "../dom";
 import { fmtMetal } from "../format";
 import { bandPath, chartGroup, fadeMask, linePath, stepAt, timeChart, type ChartGroup } from "../chart";
 import { mirrorKey } from "../legend";
 import { comparable, sideColor, sideName } from "../model";
 import { swingChart } from "./swing";
+import { destroyedBySide } from "../losses";
 import { leadPct, maxOf, ratioDomain, stepTimes } from "../series";
 import { pairToggle, scaleToggle } from "../scale";
 import { tip, type TipRow } from "../tooltip";
@@ -26,16 +28,30 @@ export function advantage(ins: Insights, opts: SummaryOptions): HTMLElement | nu
   const t = stepTimes(ins);
   const sw = swingChart(ins, opts, watch, group);
   const top: Node[] = sw ? [sw.key, sw.hint, sw.svg] : [mirrorKey(ins)];
-  return section(sw ? "Who was winning" : "Army advantage",
-    ...top,
+  const destroyed = destroyedBySide(ins);
+  const panels = [
     ...comparePanel(ins, watch, group, t, {
       name: "Army value", lead: "Army lead", values: ins.series.army, k: ARMY_K, fmt: fmtMetal, logUnit: 100, height: 130, xAxis: false,
       info: "The metal in each side's armed mobile units (commanders excluded), weighted by how far each is built.",
     }),
     ...comparePanel(ins, watch, group, t, {
-      name: "Metal income", lead: "Income lead", values: ins.series.metalIncome, k: INCOME_K, fmt: (v) => `${Math.round(v)}/s`, logUnit: 1, height: 130, xAxis: true,
+      name: "Metal income", lead: "Income lead", values: ins.series.metalIncome, k: INCOME_K, fmt: (v) => `${Math.round(v)}/s`, logUnit: 1, height: 130, xAxis: !destroyed,
       info: "The metal each side made per second, averaged over each step.",
     }),
+    ...(destroyed ? comparePanel(ins, watch, group, t, {
+      name: "Metal destroyed", lead: "Destroyed lead", values: destroyed.total, perStep: destroyed.step, k: DESTROYED_K, fmt: fmtMetal, logUnit: 100, height: 180, xAxis: true,
+      info: "The metal the enemy lost: every enemy unit a side destroyed, at what it cost (units going down with an eliminated team left out). The win model reads the total so far.",
+      startValue: true,
+    }) : []),
+  ];
+  // With a swing line the panels under it are the detail behind it, folded
+  // away until asked for; without one they are the section.
+  const body: Node[] = sw
+    ? [h("details", { class: "brs-more" }, h("summary", undefined, destroyed ? "Army value, metal income and metal destroyed" : "Army value and metal income"), ...panels)]
+    : panels;
+  return section(sw ? "Who was winning" : "Army advantage",
+    ...top,
+    ...body,
     sw?.list ? h("h3", { style: "margin-top: 16px" }, "Biggest swings") : null,
     sw?.list ?? null);
 }
@@ -45,6 +61,9 @@ export function advantage(ins: Insights, opts: SummaryOptions): HTMLElement | nu
  * what the model reads: metal for army, metal/s for income. */
 const ARMY_K = 300;
 const INCOME_K = 3;
+/** The win model's swingTradeK: early on a few thousand metal destroyed is
+ * already a lead it reads. */
+const DESTROYED_K = 25000;
 
 /** label names a stacked panel, set in from the gutter like its plot, with
  * an (i) that explains it on hover when there is more to say. */
@@ -67,6 +86,12 @@ interface CompareSpec {
   /** What the label's (i) says about the measure itself. */
   info: string;
   values: number[][];
+  /** Set for a measure that accumulates: what each side added in each step,
+   * which VALUE mode draws as bars (the first side up, the second down) while
+   * `values` (the running total) is what RATIO compares. */
+  perStep?: number[][];
+  /** Opens on VALUE rather than RATIO. */
+  startValue?: boolean;
   /** Added to both sides before taking the ratio (see leadPct). */
   k: number;
   /** Formats a value for the tooltip and a value-mode tick. */
@@ -87,19 +112,19 @@ interface CompareSpec {
  * ratio, being a percentage, has no use for and hides. */
 function comparePanel(ins: Insights, watch: Watch | null, group: ChartGroup, t: number[], spec: CompareSpec): HTMLElement[] {
   const holder = h("div");
-  let value = false;
+  let value = spec.startValue ?? false;
   let log = true;
   const draw = () => {
     const old = holder.firstElementChild;
     // The old chart leaves the shared crosshair with its svg.
     if (old) group.members = group.members.filter((m) => !old.contains(m.hair));
-    holder.replaceChildren(value ? valueChart(ins, watch, group, t, spec, log) : ratioChart(ins, watch, group, t, spec));
+    holder.replaceChildren(value ? (spec.perStep ? barChart(ins, watch, group, t, spec, spec.perStep, log) : valueChart(ins, watch, group, t, spec, log)) : ratioChart(ins, watch, group, t, spec));
   };
   draw();
   const scale = scaleToggle(log, (l) => { log = l; draw(); });
-  scale.hidden = true;
+  scale.hidden = !value;
   const mode = pairToggle(["Ratio", "Value"], value, (v) => { value = v; scale.hidden = !v; draw(); }, "Show");
-  const lab = label(spec.name, `${spec.info} Ratio shows how far ahead the leading side is: +20% when ${sideName(ins, 0)} has 20% more, -20% when ${sideName(ins, 1)} has 20% more, shaded in the leader's colour. Value shows both sides' own numbers.`);
+  const lab = label(spec.name, `${spec.info} Ratio shows how far ahead the leading side is: +20% when ${sideName(ins, 0)} has 20% more, -20% when ${sideName(ins, 1)} has 20% more, shaded in the leader's colour.${spec.perStep ? " Ratio compares the totals so far." : ""} ${spec.perStep ? `Value shows what each side added every ${ins.stepSec} s: ${sideName(ins, 0)} above the axis, ${sideName(ins, 1)} below.` : "Value shows both sides' own numbers."}`);
   lab.append(mode, scale);
   return [lab, holder];
 }
@@ -172,5 +197,32 @@ function valueChart(ins: Insights, watch: Watch | null, group: ChartGroup, t: nu
   for (const side of [0, 1]) {
     c.plot.append(s("path", { d: linePath(c, t, v[side]), fill: "none", stroke: sideColor(ins, side), "stroke-width": 2 }));
   }
+  return c.svg;
+}
+
+/** barChart draws a per-step measure as bars, the first side's above the
+ * axis and the second's below (the player strip's Built and lost shape). */
+function barChart(ins: Insights, watch: Watch | null, group: ChartGroup, t: number[], spec: CompareSpec, v: number[][], log: boolean): SVGSVGElement {
+  const top = Math.max(1, maxOf(v[0], v[1]));
+  const c = timeChart({
+    height: spec.height, durationSec: ins.durationSec, yMin: -top, yMax: top, zeroLine: true, xAxis: spec.xAxis, log: log ? { unit: spec.logUnit } : undefined,
+    yTick: (y) => { const a = Math.abs(y); return a >= 1000 ? fmtMetal(a) : String(Math.round(a)); }, gutter: GUTTER, watch, group,
+    readout: (tt) => {
+      const i = stepAt(t, tt);
+      if (i < 0) return null;
+      return [0, 1].flatMap((sd): TipRow[] => [
+        { color: sideColor(ins, sd), label: sideName(ins, sd), metric: `${spec.name}, ${ins.stepSec} s`, value: spec.fmt(v[sd][i] ?? 0) },
+        { color: sideColor(ins, sd), label: sideName(ins, sd), metric: `${spec.name} so far`, value: spec.fmt(spec.values[sd][i] ?? 0) },
+      ]);
+    },
+  });
+  const w = ((c.right - c.left) / Math.max(1, t.length)) * 0.8;
+  t.forEach((tt, i) => {
+    const x = c.x(tt - ins.stepSec / 2) - w / 2;
+    const up = v[0][i] ?? 0;
+    const down = v[1][i] ?? 0;
+    if (up > 0) c.plot.append(s("rect", { x, y: c.y(up), width: w, height: c.y(0) - c.y(up), fill: sideColor(ins, 0), "fill-opacity": 0.75 }));
+    if (down > 0) c.plot.append(s("rect", { x, y: c.y(0), width: w, height: c.y(-down) - c.y(0), fill: sideColor(ins, 1), "fill-opacity": 0.75 }));
+  });
   return c.svg;
 }

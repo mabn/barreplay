@@ -119,6 +119,21 @@ test("a request runs out of time, but its daemon stays busy until it answers", a
   assert.deepEqual(await p3, { status: "done" });
 });
 
+test("a reader asking again after a timeout joins the computation still running", async () => {
+  const { hub, connect, advance, answer } = setup();
+  const d = connect("a");
+  const p1 = hub.request("r1", 7);
+  advance(60_000);
+  assert.deepEqual(await p1, { status: "timeout" });
+  // The page asks again: no second computation, a fresh deadline.
+  const p2 = hub.request("r1", 7);
+  assert.equal(d.sent.length, 1);
+  advance(30_000);
+  answer(d, 0, true);
+  assert.deepEqual(await p2, { status: "done" });
+  assert.deepEqual(hub.stats(), { inFlight: 0, queued: 0 });
+});
+
 test("a failure is remembered, so a broken replay costs a daemon once", async () => {
   const { hub, connect, advance, answer } = setup({ failTtlMs: 1000 });
   const d = connect("a");

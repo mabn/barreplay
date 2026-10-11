@@ -266,3 +266,36 @@ func TestRemovedByOwnerIsNotALoss(t *testing.T) {
 		t.Errorf("a structure gone with no cause: deaths %d, want %d", len(gone.Deaths.F), len(kept.Deaths.F)-1)
 	}
 }
+
+// TestAITeamsAreASide: an 8v8 against BARbs is two sides — the AI teams have
+// a faction and no human player — while Gaia (no faction) and a scavenger
+// team (mostly _scav units) stay out.
+func TestAITeamsAreASide(t *testing.T) {
+	m := snapshot.Meta{
+		UnitDefs: map[int32]snapshot.UnitDef{1: {DefID: 1, Name: "armpw"}, 2: {DefID: 2, Name: "armpw_scav"}},
+		Teams: []snapshot.TeamInfo{
+			{TeamID: 0, AllyTeam: 0, Side: "armada"},
+			{TeamID: 1, AllyTeam: 1, Side: "random"}, {TeamID: 2, AllyTeam: 1, Side: "cortex"},
+			{TeamID: 3, AllyTeam: 2, Side: "random"}, // scavengers
+			{TeamID: 4, AllyTeam: 3},                 // Gaia
+		},
+		Players: []snapshot.PlayerInfo{{PlayerID: 0, Name: "Ann", Team: 0}},
+	}
+	events := []snapshot.Event{
+		{Kind: snapshot.EventCreated, DefID: 1, Team: 1},
+		{Kind: snapshot.EventCreated, DefID: 2, Team: 3}, {Kind: snapshot.EventCreated, DefID: 2, Team: 3},
+		{Kind: snapshot.EventCreated, DefID: 1, Team: 3},
+	}
+	r := buildRoster(m, events)
+	if len(r.sides) != 2 {
+		t.Fatalf("sides = %d, want 2", len(r.sides))
+	}
+	if got := r.sides[1].Players; len(got) != 2 || got[0] != "AI 1" || got[1] != "AI 2" {
+		t.Errorf("AI side players = %v, want [AI 1 AI 2]", got)
+	}
+	for team, want := range map[int32]int{0: 0, 1: 1, 2: 1, 3: -1, 4: -1} {
+		if got := r.side(team); got != want {
+			t.Errorf("team %d side = %d, want %d", team, got, want)
+		}
+	}
+}

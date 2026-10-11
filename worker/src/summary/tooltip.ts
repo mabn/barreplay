@@ -21,8 +21,9 @@ export interface Tip {
   /** A string, or a node (a title with names in colour). */
   title?: string | Node;
   rows?: TipRow[];
-  /** A muted last line: what a click does. */
-  note?: string;
+  /** A muted last line: what a click does, or a story's detail (a node
+   * when it names players and units). */
+  note?: string | Node;
 }
 
 export type TipContent = Tip | string;
