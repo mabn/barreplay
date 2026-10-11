@@ -43,6 +43,13 @@ const WIPE_ARMY = 0.3;
 /** An even battle in which both sides lost this share of their army is a
  * bloodbath, not a skirmish. */
 const BLOODY_ARMY = 0.15;
+/** How big a fight is, by the metal the side that lost more lost there —
+ * the words scale with it, not only with the margin: a 2.8k-for-600 kill is
+ * a nice skirmish, not Blue "overwhelming" anyone (Marcin's call). Under
+ * FIGHT_METAL a battle is a skirmish whatever the margin; strong verbs
+ * (overwhelms, smashes, crushes, a bloody stalemate) need BIG_METAL. */
+const FIGHT_METAL = 5000;
+const BIG_METAL = 20000;
 
 const AIR = new Set(["bomber", "fighter", "gunship", "air"]);
 const STRUCTURE = new Set(["defence", "lrgun", "nuke", "factory", "eco", "building"]);
@@ -161,7 +168,9 @@ export function battlePhrase(ins: Insights, b: Battle, won: number, where: strin
     // Defences HOLD only when the attack plainly failed.
     if (army && killed(new Set(["defence"])) >= MOSTLY && 3 * lossWorth(Wl) <= 2 * lossWorth(L)) return say(new Set(["defence"]), "defences", "hold off", `a ${Ls} attack ${where}`);
     if (top && (ins.defs[String(top.def)]?.cost ?? Infinity) < SWARM_COST && top.units >= SWARM_UNITS && top.metal >= MOSTLY * credited) {
-      return `A swarm of ${W} ${unitName(ins, top.def, 2)} overwhelms ${Ls} ${where}`;
+      return L.metal >= BIG_METAL
+        ? `A swarm of ${W} ${unitName(ins, top.def, 2)} overwhelms ${Ls} ${where}`
+        : `${W} ${unitName(ins, top.def, 2)} swarm ${Ls} ${where}`;
     }
     if (lost(new Set(["eco"])) >= MOSTLY && 3 * Wl.metal <= L.metal) {
       const eco = victim ? `${possessive(victim)} economy` : `the ${Ls} economy`;
@@ -188,7 +197,7 @@ export function marginPhrase(ins: Insights, b: Battle, index: number, side: numb
     return a[Math.max(0, Math.min(a.length - 1, Math.floor(b.f0 / 30 / ins.stepSec)))] ?? 0;
   };
   if (side < 0) {
-    const bloody = priced && [0, 1].every((s) => (b.lost[s]?.metal ?? 0) >= BLOODY_ARMY * Math.max(1, armyAt(s)));
+    const bloody = priced && [0, 1].every((s) => (b.lost[s]?.metal ?? 0) >= Math.max(BIG_METAL / 2, BLOODY_ARMY * Math.max(1, armyAt(s))));
     if (bloody) {
       const each = ((b.lost[0]?.metal ?? 0) + (b.lost[1]?.metal ?? 0)) / 2;
       return `Bloody stalemate ${where}: both sides lose ~${fmtMetal(each)} metal`;
@@ -201,13 +210,23 @@ export function marginPhrase(ins: Insights, b: Battle, index: number, side: numb
   const ll = b.lost[1 - side];
   const lsize = priced ? lossWorth(ll) : ll?.n ?? 0;
   const wsize = priced ? lossWorth(lw) : lw?.n ?? 0;
-  if (lsize >= WIPE_MARGIN * Math.max(wsize, 1e-9) && priced && (ll?.metal ?? 0) >= WIPE_ARMY * Math.max(1, armyAt(1 - side))) {
+  // Without prices there is no size to go by: the middle words.
+  const metal = priced ? ll?.metal ?? 0 : FIGHT_METAL;
+  if (lsize >= WIPE_MARGIN * Math.max(wsize, 1e-9) && priced && metal >= BIG_METAL / 2 && metal >= WIPE_ARMY * Math.max(1, armyAt(1 - side))) {
     return share(ins, ll?.units, MOBILE, ll?.metal ?? 0) >= MOSTLY && index % 2
       ? `${Ls} army is wiped out ${where}`
       : `${W} crushes ${Ls} ${where}`;
   }
+  if (metal < FIGHT_METAL) {
+    const words = decisive
+      ? [`${W} wins a skirmish ${where}`, `${W} picks off ${Ls} units ${where}`, `${W} takes a clean fight ${where}`]
+      : [`${W} edges out ${Ls} ${where}`, `${W} narrowly wins a skirmish ${where}`, `${W} comes out ahead ${where}`];
+    return words[index % words.length];
+  }
   if (decisive) {
-    const words = [`${W} decisively wins ${where}`, `${W} overwhelms ${Ls} ${where}`, `${W} outfights ${Ls} ${where}`, `${W} smashes ${Ls} ${where}`];
+    const words = metal >= BIG_METAL
+      ? [`${W} overwhelms ${Ls} ${where}`, `${W} smashes ${Ls} ${where}`, `${W} decisively wins ${where}`, `${W} outfights ${Ls} ${where}`]
+      : [`${W} decisively wins ${where}`, `${W} outfights ${Ls} ${where}`, `${W} beats ${Ls} ${where}`];
     return words[index % words.length];
   }
   const words = [`${W} edges out ${Ls} ${where}`, `${W} narrowly wins ${where}`, `${W} comes out ahead ${where}`];

@@ -712,10 +712,14 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           the killing, naval, defences holding (only when the attacker lost
                           1.5x), a swarm (one def under 60 metal, 30+ units), an economy raid,
                           and a factory that was a quarter of the loss. Otherwise marginPhrase
-                          rotates its words by battle number ("decisively wins", "overwhelms",
-                          "outfights", "smashes"; "edges out"...; a 10x loss of 30% of an army
-                          "crushes", never "routs", Marcin's call), with "Bloody stalemate"
-                          for an even fight that cost both armies 15%. Units are named by the
+                          rotates its words by battle number, SCALED BY THE FIGHT'S SIZE (the
+                          loser's metal; Marcin: a 2.8k-for-628 kill is no "overwhelms"):
+                          under 5k a skirmish ("wins a skirmish", "picks off Red units"),
+                          5k-20k "decisively wins"/"outfights"/"beats", 20k+ adds
+                          "overwhelms"/"smashes"; a 10x loss of 30% of an army and >= 10k
+                          "crushes", never "routs" (Marcin's call); "Bloody stalemate" for an
+                          even fight that cost both armies 15% and >= 10k each; a swarm
+                          "overwhelms" only at 20k+. Units are named by the
                           side's COLOUR alone, "Blue Juggernauts" (Marcin's call, also for
                           ownBlastTitle), which nameRuns colours like "Blue team". The phrases
                           title the gap battles in the swing list and a fight swing whose

@@ -532,19 +532,30 @@ test("battle phrases say what did the killing, and only when the numbers are sur
   assert.equal(battlePhrase(g, held, 0, where), "Blue Sentries hold off a Red attack in the middle");
   assert.equal(battlePhrase(g, battle([{ def: 4, n: 50, metal: 2000 }], [{ def: 5, n: 50, metal: 2000, units: 5 }], 1800), 0, where), null);
   // A swarm of cheap units.
-  assert.equal(battlePhrase(g, battle([{ def: 5, n: 30, metal: 2550 }], [{ def: 4, n: 30, metal: 2550, units: 60 }]), 0, where), "A swarm of Blue Grunts overwhelms Red in the middle");
+  assert.equal(battlePhrase(g, battle([{ def: 5, n: 30, metal: 2550 }], [{ def: 4, n: 30, metal: 2550, units: 60 }]), 0, where), "Blue Grunts swarm Red in the middle");
+  assert.equal(battlePhrase(g, battle([{ def: 5, n: 300, metal: 25500 }], [{ def: 4, n: 300, metal: 25500, units: 600 }]), 0, where), "A swarm of Blue Grunts overwhelms Red in the middle");
   // A lab that was a real part of the loss names the battle.
   assert.equal(battlePhrase(g, battle([{ def: 6, n: 1, metal: 1500 }, { def: 4, n: 10, metal: 400 }], []), 0, where), "Blue destroys Cy's Bot Lab in the middle");
   // Killers unknown for most of the loss: nothing but the margin is sure.
   assert.equal(battlePhrase(g, battle([{ def: 2, n: 40, metal: 2000 }], [{ def: 1, n: 10, metal: 500, units: 2 }]), 0, where), null);
   // The side that lost MORE is never the subject of a phrase.
   assert.equal(battlePhrase(g, battle([{ def: 2, n: 40, metal: 2000 }], [{ def: 1, n: 40, metal: 2000, units: 6 }], 2500), 0, where), null);
-  // Margin words rotate by battle number, and a lopsided result is a crush.
-  const b = battle([{ def: 4, n: 50, metal: 2000 }], [], 800);
-  assert.equal(marginPhrase(g, b, 0, 0, true, where, true), "Blue decisively wins in the middle");
-  assert.equal(marginPhrase(g, b, 1, 0, true, where, true), "Blue overwhelms Red in the middle");
-  assert.equal(marginPhrase(g, battle([{ def: 4, n: 50, metal: 2000 }], [], 100), 0, 0, true, where, true), "Blue crushes Red in the middle");
-  assert.equal(marginPhrase(g, b, 0, -1, false, where, true), "Bloody stalemate in the middle: both sides lose ~1.4k metal");
+  // Margin words rotate by battle number and scale with the fight: a 2.8k
+  // kill for 628 is a skirmish won, not Red overwhelmed (Marcin's screenshot).
+  const small = battle([{ def: 4, n: 70, metal: 2800 }], [], 628);
+  assert.equal(marginPhrase(g, small, 0, 0, true, where, true), "Blue wins a skirmish in the middle");
+  assert.equal(marginPhrase(g, small, 1, 0, true, where, true), "Blue picks off Red units in the middle");
+  const mid = battle([{ def: 4, n: 200, metal: 8000 }], [], 2000);
+  assert.equal(marginPhrase(g, mid, 0, 0, true, where, true), "Blue decisively wins in the middle");
+  assert.equal(marginPhrase(g, mid, 1, 0, true, where, true), "Blue outfights Red in the middle");
+  const big = battle([{ def: 4, n: 750, metal: 30000 }], [], 8000);
+  assert.equal(marginPhrase(g, big, 0, 0, true, where, true), "Blue overwhelms Red in the middle");
+  // A lopsided result is a crush only when the fight was a real one.
+  assert.equal(marginPhrase(g, battle([{ def: 4, n: 300, metal: 12000 }], [], 100), 0, 0, true, where, true), "Blue crushes Red in the middle");
+  assert.equal(marginPhrase(g, battle([{ def: 4, n: 50, metal: 2000 }], [], 100), 0, 0, true, where, true), "Blue wins a skirmish in the middle");
+  // Bloody needs real losses on both sides.
+  assert.equal(marginPhrase(g, battle([{ def: 4, n: 300, metal: 12000 }], [], 11000), 0, -1, false, where, true), "Bloody stalemate in the middle: both sides lose ~11.5k metal");
+  assert.equal(marginPhrase(g, battle([{ def: 4, n: 50, metal: 2000 }], [], 800), 0, -1, false, where, true), "Even trade in the middle");
 });
 
 test("Supreme Isthmus areas go by the names players use", () => {
