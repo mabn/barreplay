@@ -15,10 +15,15 @@ import (
 // what came after: the charts, battles, awards and stories all stop there
 // (the clips can still play past it).
 
-// surrenderGap is how far apart the eliminations of one side's teams may be
-// and still be ONE surrender: a resign vote kills the voting teams together,
-// a straggler a few seconds later.
-const surrenderGap = 30 * simFPS
+// surrenderGap is how long before a side's LAST elimination its other teams
+// may have gone out and still be part of that one surrender: a resign vote
+// kills the voting teams in the same frame, a straggler a few seconds later.
+// It is measured from the last elimination, never chained from one to the
+// next: in the final push teams are knocked out one after another, each
+// within half a minute of the previous, and chaining them pulled the end of
+// the game a minute before the resign (ccd1ca6a: teams out at 39:41, 40:02
+// and 40:05, the other four resigning at 40:34 — the summary ended at 39:41).
+const surrenderGap = 10 * simFPS
 
 // gameEnd is the frame the game was decided, or -1 when no side left it: the
 // moment the number of sides still playing fell to one, taken from the start
@@ -50,11 +55,12 @@ func gameEnd(died map[int32]int32, ro roster) int32 {
 			continue // a team of this side was still playing
 		}
 		sort.Slice(fs, func(i, j int) bool { return fs[i] < fs[j] })
+		last := fs[len(fs)-1]
 		i := len(fs) - 1
-		for i > 0 && fs[i]-fs[i-1] <= surrenderGap {
+		for i > 0 && last-fs[i-1] <= surrenderGap {
 			i--
 		}
-		gone = append(gone, out{last: fs[len(fs)-1], start: fs[i]})
+		gone = append(gone, out{last: last, start: fs[i]})
 	}
 	// The game is over once every side but one is out.
 	if len(gone) < len(teams)-1 {

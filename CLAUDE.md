@@ -517,8 +517,11 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           THE SUMMARY ENDS WHERE THE GAME WAS DECIDED (gameend.go): once every
                           side but one is out (a resign vote, or the last commanders dying),
                           Compute cuts the input at the start of the run of eliminations that
-                          emptied the last side to go (teams of one side within 30 s count as
-                          one surrender) and computes everything up to there — the engine then
+                          emptied the last side to go (teams of one side out within 10 s of
+                          its LAST elimination count as one surrender — measured from the
+                          last, never chained, since in a final push teams fall one after
+                          another and chaining them ended a real 8v8 a minute before its
+                          resign; v7) and computes everything up to there — the engine then
                           blows up the losing side's whole army, which dwarfed every real loss
                           on every chart. Recorded teamdied facts give the cut up front; an
                           inferred one costs a first pass over the whole game (whose
@@ -831,10 +834,11 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           `icon` (its iconType) then its name; SummaryOptions.iconBase names
                           the origin, defaulting to the one the module was loaded from, null
                           = names; a def with no icon reads as its name.
-                          The library draws versions 1-6 (INSIGHTS_VERSIONS [6, 5, 4, 3, 2, 1]; v2 adds
+                          The library draws versions 1-7 (INSIGHTS_VERSIONS [7, 6, 5, 4, 3, 2, 1]; v2 adds
                           winner + swing, v3 eliminations and peak battles, v4 owner removals
                           left out, owned value and battle teams, v5 self-destructs marked, v6 fitted
-                          win weights) and app.js fetches .insights6, then 5, 4, 3, 2, 1. A version bump needs `insights -all` after
+                          win weights, v7 the game ends at the resign rather than the first team knocked
+                          out before it) and app.js fetches .insights7, then 6, 5, 4, 3, 2, 1. A version bump needs `insights -all` after
                           the deploy, or published replays keep their older summary.
                           EMBEDDING ON ANOTHER SITE (lavabalance's game pages): the other site
                           IMPORTS THE LIBRARY AT RUN TIME — import("https://replay.fogofwar.dev/
