@@ -5105,6 +5105,7 @@ function showHome() {
   leaveReplayTabs();
   document.body.classList.add('home');
   document.getElementById('home').style.display = '';
+  document.getElementById('rail').style.display = '';
   document.getElementById('subtitle').textContent = 'replay state viewer';
   document.getElementById('viewmark').style.display = 'none';
   renderHome();
@@ -5154,13 +5155,45 @@ function homeTab() {
   return ADMIN_TABS.has(t) && !adminMode() ? 'replays' : t;
 }
 
-function setHomeTab(tab) {
+// homeTabURL is where a section lives: its path, keeping the current query
+// (the list's filters and ?col= carry over, as they do into a replay) minus
+// what only a replay page means.
+function homeTabURL(tab) {
   const u = new URL(location.href);
   u.pathname = tab === 'replays' ? '/' : '/' + tab;
-  u.searchParams.delete('tab');    // the legacy form the path supersedes
+  u.searchParams.delete('tab');    // the legacy form the path supersedes; a replay's ?tab=summary
   u.searchParams.delete('replay'); // defensive: the home view names none
+  u.searchParams.delete('f');      // a replay's seek frame
+  return u;
+}
+
+// setHomeTab is a pick in the left menu. The menu is the same on every page,
+// so it can come from a replay page too, which then gives way to the list.
+function setHomeTab(tab) {
+  const u = homeTabURL(tab);
   if (u.href !== location.href) history.pushState(null, '', u);
-  applyHomeTab();
+  if (document.body.classList.contains('home')) applyHomeTab();
+  else showHome(); // applies the section itself
+}
+
+// markRail marks where the reader is in the left menu, which never changes
+// its entries: on the landing page the section shown; on a replay page
+// Replays, opened onto its sub menu (#replaytabs, marked by applyReplayTab).
+// It also keeps every entry's href current, so a middle-click opens the
+// section as it would be reached from here.
+function markRail() {
+  const home = document.body.classList.contains('home');
+  const replay = document.body.classList.contains('replay-page');
+  const tab = home ? homeTab() : null;
+  for (const a of document.querySelectorAll('#rail .railitem[data-tab]')) {
+    const on = a.dataset.tab === tab;
+    a.classList.toggle('active', on);
+    a.classList.toggle('open', replay && a.dataset.tab === 'replays');
+    if (on) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+    const u = homeTabURL(a.dataset.tab);
+    a.href = u.pathname + u.search;
+  }
 }
 
 // applyHomeTab shows the selected section and marks its menu entry. It also
@@ -5168,9 +5201,7 @@ function setHomeTab(tab) {
 // asking the server for it.
 function applyHomeTab() {
   const tab = homeTab();
-  for (const b of document.querySelectorAll('#homenav .navitem')) {
-    b.classList.toggle('on', b.dataset.tab === tab);
-  }
+  markRail();
   for (const name of HOME_TABS) {
     document.getElementById('tab-' + name).style.display = name === tab ? '' : 'none';
   }
@@ -5189,8 +5220,14 @@ function applyHomeTab() {
 }
 
 function initHomeNav() {
-  for (const b of document.querySelectorAll('#homenav .navitem')) {
-    b.addEventListener('click', () => setHomeTab(b.dataset.tab));
+  for (const a of document.querySelectorAll('#rail .railitem[data-tab]')) {
+    a.addEventListener('click', (e) => {
+      // Modified clicks keep the browser's new-tab meaning, as on the
+      // replay's sub menu; a middle-click never reaches here (an auxclick).
+      if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      setHomeTab(a.dataset.tab);
+    });
   }
 }
 
@@ -6738,9 +6775,16 @@ async function initViewMark(gameId) {
   };
 }
 
+// hideHome is the list giving way to a replay. The replay page's layout goes
+// on at once rather than when loadReplay gets to applyReplayTab: the menu is
+// already showing, and without its grid it would sit above the header for
+// as long as the replay's revision takes to resolve.
 function hideHome() {
   document.body.classList.remove('home');
+  document.body.classList.add('replay-page');
   document.getElementById('home').style.display = 'none';
+  document.getElementById('rail').style.display = '';
+  markRail();
 }
 
 function renderHome(errMsg) {
@@ -7092,6 +7136,9 @@ async function probeAdmin() {
   } else {
     renderAdminNote('none'); // 404: no login here
   }
+  // Here and not only where the tables render: the menu's admin entries
+  // show on every page, and a replay opened directly renders no table.
+  document.body.classList.toggle('admin-mode', adminMode());
 }
 
 // adminLoginHref: the login path with the current page as the destination,
@@ -7112,42 +7159,56 @@ function adminSignedOut() {
   applyHomeTab();
 }
 
-// renderAdminNote fills the header's admin corner: who is signed in with a
-// sign-out link, or a muted sign-in link, or — on a deployment whose login
-// is not configured — why there is none. Nothing at all on a backend with
-// no login.
+const RAIL_ICON_SIGN_IN = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M11 4 H15.5 V16 H11 M3.5 10 H11.5 M8.5 7 L11.5 10 L8.5 13"/></svg>';
+const RAIL_ICON_WARN = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5 L17.5 16.5 H2.5 Z M10 8.5 V12 M10 14.2 h.01"/></svg>';
+
+// renderAdminNote fills the admin corner at the foot of the left menu: the
+// signed-in admin's initial over a sign-out entry, or a muted sign-in entry,
+// or — on a deployment whose login is not configured — a warning whose
+// tooltip says why. Nothing at all on a backend with no login. The menu is
+// 72px wide, so who is signed in rides the tooltip rather than the label.
 function renderAdminNote(state) {
   const el = document.getElementById('adminnote');
   if (!el) return;
   el.textContent = '';
   el.className = '';
-  const link = (text, href) => {
-    const a = document.createElement('a');
-    a.textContent = text;
-    a.href = href;
-    return a;
+  const entry = (tag, label, title) => {
+    const item = document.createElement(tag);
+    item.className = 'railitem';
+    item.title = title;
+    const text = document.createElement('span');
+    text.textContent = label;
+    el.append(item);
+    return [item, text];
   };
   if (adminUser) {
-    // The address on one line, cut with an ellipsis (the menu is 150px and
-    // an address does not wrap well); the whole of it in the tooltip.
-    const who = document.createElement('div');
-    who.className = 'who';
-    who.textContent = adminUser.email || adminUser.via;
-    who.title = 'signed in as ' + (adminUser.email || adminUser.via);
-    el.append(who);
-    el.append(link('sign out', '/admin/logout'));
+    const who = adminUser.email || adminUser.via || 'admin';
+    const [a, text] = entry('a', 'Sign out', 'Signed in as ' + who + '. Click to sign out.');
+    a.href = '/admin/logout';
+    const avatar = document.createElement('span');
+    avatar.className = 'avatar';
+    avatar.textContent = String(who).charAt(0).toUpperCase();
+    a.append(avatar, text);
   } else if (state === 'unconfigured') {
     el.className = 'error';
-    el.append('admin login is not configured on this deployment (ACCESS_TEAM_DOMAIN / ACCESS_AUD)');
+    const [item, text] = entry('span', 'No login',
+      'Admin login is not configured on this deployment (ACCESS_TEAM_DOMAIN / ACCESS_AUD).');
+    item.innerHTML = RAIL_ICON_WARN;
+    item.append(text);
   } else if (state === 'none') {
     el.style.display = 'none';
     return;
   } else {
-    el.append(link('sign in', adminLoginHref()));
+    const [a, text] = entry('a', 'Sign in', 'Sign in as an admin');
+    // The destination is the page the reader is on when they click, which
+    // the menu (shown on every page) cannot know when it is drawn.
+    a.href = adminLoginHref();
+    a.addEventListener('click', () => { a.href = adminLoginHref(); });
+    a.innerHTML = RAIL_ICON_SIGN_IN;
+    a.append(text);
   }
   el.style.display = '';
 }
-
 // replayHref is the shareable URL for one replay: /replays/<id>, keeping the
 // current query (?gl=, ?col= and the filters carry over) minus the
 // legacy replay/tab params the path now expresses.
@@ -7444,7 +7505,8 @@ async function submitResim() {
 // PUSHING a history entry (navigation, not a tweak: back must return to
 // where the user was — the list, or the previously watched replay).
 // ---- Replay / Summary tabs -------------------------------------------------
-// A replay page has two tabs: the playback, and the game SUMMARY — charts and
+// A replay page has two tabs, the sub menu under Replays in the left menu
+// (index.html #replaytabs): the playback, and the game SUMMARY — charts and
 // map stories computed once per published revision by internal/insights and
 // stored beside it as replays/<rid>.insights<N>.json. The summary itself is a
 // separate library (worker/src/summary/, bundled by the Vite summary-bundle
@@ -7492,9 +7554,16 @@ function replayTabHref(tab) {
 function applyReplayTab() {
   const tab = replayTab();
   document.body.classList.toggle('summary-tab', tab === 'summary');
-  document.getElementById('replaytabs').style.display = '';
+  // The page's own layout: the left menu, and the sidebar as a full-height
+  // column beside the map (style.css body.replay-page).
+  document.body.classList.add('replay-page');
+  document.getElementById('rail').style.display = '';
+  markRail();
   for (const a of document.querySelectorAll('#replaytabs a')) {
-    a.classList.toggle('active', a.dataset.rtab === tab);
+    const on = a.dataset.rtab === tab;
+    a.classList.toggle('active', on);
+    if (on) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
     a.href = replayTabHref(a.dataset.rtab);
   }
   if (tab === 'summary') {
@@ -7513,7 +7582,7 @@ function applyReplayTab() {
 // below the list, since its pane is shown by a body class, not by the page.
 function leaveReplayTabs() {
   if (clip) closeClip(false);
-  document.body.classList.remove('summary-tab');
+  document.body.classList.remove('summary-tab', 'replay-page');
 }
 
 function resetSummary() {
@@ -8010,16 +8079,22 @@ async function init() {
   // Optional render-smoothness overlay, gated on ?debug=true.
   if (params.get('debug') === 'true') startFpsMonitor();
 
-  // The header title returns to the replay list without a page reload.
-  document.getElementById('homelink').onclick = (e) => {
-    e.preventDefault();
-    const u = new URL(location.href);
-    u.pathname = '/';
-    u.searchParams.delete('replay');
-    u.searchParams.delete('tab');
-    history.pushState(null, '', u);
-    showHome();
-  };
+  // The header title, and on a replay page the left menu's logo and the
+  // header's Replays back link, return to the replay list without a page
+  // reload. Modified clicks keep the browser's new-tab meaning, as on the
+  // menu's tabs.
+  for (const id of ['homelink', 'raillogo', 'backlink']) {
+    document.getElementById(id).onclick = (e) => {
+      if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      const u = new URL(location.href);
+      u.pathname = '/';
+      u.searchParams.delete('replay');
+      u.searchParams.delete('tab');
+      history.pushState(null, '', u);
+      showHome();
+    };
+  }
 
   // Legacy query URLs (?replay=, ?tab=) normalize to the path form once, so
   // the address bar shows the canonical link and a copy/refresh carries it.
