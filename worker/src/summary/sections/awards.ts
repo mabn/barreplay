@@ -10,7 +10,7 @@ import { clipAround, clipEvent, watcher } from "../watch";
 import { type Award, type Clip, type Insights, type SummaryOptions } from "../types";
 
 const ICONS: Record<string, string> = {
-  immortal: "🛡", marathon: "🏃", tourist: "🧭", closecall: "❤", healed: "🔧", unfinished: "🏗", costliest: "💸", blow: "💥",
+  immortal: "🛡", marathon: "🏃", tourist: "🧭", closecall: "❤", healed: "🔧", unfinished: "🏗", costliest: "💸", blow: "💥", idle: "🛬",
 };
 
 /** where is the award's unit on the map when the moment is its death (the
@@ -37,6 +37,10 @@ export function clipOf(a: Award, at: { x?: number; z?: number }, title: string):
   // A player's worst half-minute: the whole of it, wide enough to see.
   if (a.key === "blow" && a.f0 !== undefined && a.f1 !== undefined) {
     return clipEvent(a.f0, Math.max(a.f1, a.f0 + 1), { ...base, r: 1200 });
+  }
+  // A fleet nobody used: the stretch it was built over, following the last.
+  if (a.key === "idle" && a.f0 !== undefined && a.f1 !== undefined) {
+    return clipEvent(a.f0, Math.max(a.f1, a.f0 + 1), base);
   }
   return clipAround(a.f, base);
 }

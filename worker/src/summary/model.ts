@@ -159,3 +159,14 @@ export function sideOfTeam(ins: Insights): Map<number, number> {
   for (const t of ins.teams) m.set(t.team, t.side);
   return m;
 }
+
+/** POWER_WORTH is what a lost power plant counts for per metal of its cost
+ * when deciding who won a fight (Go's powerWorth): losing a fusion loses its
+ * metal AND the energy it would have made. */
+export const POWER_WORTH = 2.5;
+
+/** lossWorth is what a battle side's losses decide the battle by: their
+ * worth when the file records it, else their metal. */
+export function lossWorth(l?: { metal: number; worth?: number }): number {
+  return l ? (l.worth ?? l.metal) : 0;
+}

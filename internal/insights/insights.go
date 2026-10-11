@@ -105,6 +105,9 @@ type Def struct {
 	// Icon is the def's icontypes key (the viewer's /icons/icontypes.json),
 	// when the capture records one; the def's name is the fallback key.
 	Icon string `json:"icon,omitempty"`
+	// Power marks a power plant, whose loss counts powerWorth times its
+	// metal wherever a battle's winner is decided (version 7 and later).
+	Power bool `json:"power,omitempty"`
 }
 
 // Series holds one value per side per step; T[i] is step i's time in seconds.

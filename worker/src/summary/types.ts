@@ -68,6 +68,9 @@ export interface Def {
   cost?: number;
   /** Its icontypes key, when the capture records one (version 4+). */
   icon?: string;
+  /** A power plant: its loss counts POWER_WORTH times its metal wherever a
+   * battle's winner is decided (version 7+). */
+  power?: boolean;
 }
 
 export interface Series {
@@ -139,7 +142,9 @@ export interface Battle {
   /** Radius holding the deaths, elmos. */
   r: number;
   /** Indexed like sides. */
-  lost: { n: number; metal: number; top: number[]; units?: UnitLoss[] }[];
+  /** worth: the metal with power plants at POWER_WORTH times theirs, what
+   * a winner is decided by (version 7+; absent = metal). */
+  lost: { n: number; metal: number; worth?: number; top: number[]; units?: UnitLoss[] }[];
   /** Who took part, by team (version 4+). */
   teams?: BattleTeam[];
 }

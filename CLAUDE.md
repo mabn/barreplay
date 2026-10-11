@@ -503,7 +503,8 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           — divided by both armies' value at the time, or every battle lands in
                           the last twenty minutes, where everything costs more — grown while
                           the rate nearby stays >= a fifth of the peak (one quiet 10 s bin
-                          bridged, at most 5 min), its deaths removed, repeated up to 12; a
+                          bridged, at most 5 min), its deaths removed, repeated up to 16 (battleMaxN; 12 cut a
+                          real game's 34-minute air battle); a
                           peak abutting a battle already found joins it. The old rule (deaths
                           chained within 1500 elmos and 45 s of quiet) chained a whole late
                           game into ONE "battle" (10:00-55:47 on a real 8v8). ELIMINATIONS
@@ -611,6 +612,21 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           identical Juggernauts. Its F is the window's costliest death (where
                           the card's map dot and the clip zoom), F0/F1 the window; the clip
                           plays the window (clipEvent).
+                          GROUNDED FLEET (transports.go, key "idle"): a player's air transports
+                          of one def that never carried a unit — >= idleMin = 5 and >= 75% of
+                          those they built (a factory left repeating its last order). The defs
+                          carry no transport flag, so transportRE is a curated name table; a
+                          carry is read off positions (carryFrame: a same-team ground unit
+                          within 32 elmos in two consecutive samples while the transport moved
+                          >= 64). Unit/Path are the last one built, F0/F1 the build span.
+                          POWER PLANTS COUNT 2.5x (defs.go powerWorth, isPowerPlant: wind,
+                          tidal, solar, fusion, geo by name; storage shares their UnitGroup)
+                          WHEREVER A BATTLE'S WINNER IS DECIDED — losing a fusion loses its
+                          output too (Marcin's rule). BattleLoss.Worth carries it, Def.Power
+                          marks the defs for the page's own tallies (moments.ts SideLoss.worth),
+                          and every verdict — gapBattles' decisive/win/even, a fight story's
+                          "wins"/"trades", the Battles list's "ahead" box — compares worth,
+                          while every number SHOWN stays plain metal (model.ts lossWorth).
                           swing.go (Version 2) adds the WINNER (Insights.Winner, a side index
                           from Meta.Winners, -1 unknown) and the SWING line: P(side 0 wins)
                           per step from a logistic model (WinModel) over three antisymmetric
@@ -827,7 +843,11 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           game's biggest; at most 12 entries; in the opening EARLY_SHARE = 30%,
                           which lists no swings, ONLY the decisive battles: loser lost >= 3x
                           the winner and >= 1000 metal that was >= 20% of its army then, at
-                          most 4, however small next to the game's biggest), each told as "Red team
+                          most 4, however small next to the game's biggest; and any STORY
+                          battle: at most 2 min long, >= 1000 metal lost by one side and both
+                          sides' losses >= 15% of both armies then — a raid or a bombing run
+                          too small next to the game's biggest yet decisive for the moment;
+                          at most LIST_MAX = 20 entries, one per time and place), each told as "Red team
                           decisively wins battle (5)" with the battles list's white-circle
                           badge — the line lists only its biggest shifts, and a decided fight
                           can move it little. A swing told as one battle carries the badge too. LOG

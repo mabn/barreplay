@@ -401,7 +401,7 @@ test("gapBattles tells only decisive battles with real losses in the opening", (
     series: { t: steps, army: [steps.map(() => 4000), steps.map(() => 4000)], metalIncome: [], energyIncome: [], armyCats: [], armyByCat: [] },
     battles: [
       battle(2, 300, 2500), // decisive, 2.5k of a 4k army: told
-      battle(5, 1500, 2500), // not by a large margin
+      battle(5, 1500, 2500), // not by a large margin, but half of both armies: a story
       battle(8, 0, 600), // decisive but trivial
       battle(10, 2000, 200), // decisive: told
       battle(20, 30000, 29000), // past the opening: fills the gap as before
@@ -409,7 +409,21 @@ test("gapBattles tells only decisive battles with real losses in the opening", (
     swing: { p: steps.map(() => 0.5), moments: [], fitted: false },
   } as Partial<Insights>);
   const got = gapBattles(file, [], []);
-  assert.deepEqual(got.map((g) => [g.battle, g.side, g.verdict]), [[0, 0, "decisive"], [3, 1, "decisive"], [4, -1, "even"]]);
+  assert.deepEqual(got.map((g) => [g.battle, g.side, g.verdict]), [[0, 0, "decisive"], [1, 0, "win"], [3, 1, "decisive"], [4, -1, "even"]]);
+});
+
+test("gapBattles judges a battle by worth: lost power plants count 2.5x", () => {
+  const F = 30;
+  const steps = Array.from({ length: 40 }, (_, i) => i * 60);
+  // Side 0 lost less metal, but 1000 of it was a fusion (worth 2500).
+  const file = ins({
+    durationSec: 2400, stepSec: 60,
+    series: { t: steps, army: [steps.map(() => 4000), steps.map(() => 4000)], metalIncome: [], energyIncome: [], armyCats: [], armyByCat: [] },
+    battles: [{ f0: 20 * 60 * F, f1: (20 * 60 + 30) * F, x: 0, z: 0, r: 500,
+      lost: [{ n: 3, metal: 1500, worth: 3000, top: [] }, { n: 9, metal: 2000, worth: 2000, top: [] }] }],
+    swing: { p: steps.map(() => 0.5), moments: [], fitted: false },
+  } as Partial<Insights>);
+  assert.deepEqual(gapBattles(file, [], []).map((g) => [g.side, g.verdict]), [[1, "win"]]);
 });
 
 test("ratioDomain scales to the leads from 40% to 95% of the game", () => {

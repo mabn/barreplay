@@ -7,7 +7,7 @@
 import { h, s, section } from "../dom";
 import { fmtClock, fmtMetal } from "../format";
 import { mapView } from "../mapview";
-import { comparable, sideColor, sideName } from "../model";
+import { comparable, lossWorth, sideColor, sideName } from "../model";
 import { compass, fighters } from "../moments";
 import { fighterNames } from "../names";
 import { fillUnits, inkOn } from "../unitchips";
@@ -73,8 +73,11 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     color: sideColor(ins, sd), label: `${sideName(ins, sd)} lost`,
     value: `${b.lost[sd]?.n ?? 0} units` + (priced ? ` · ${fmtMetal(b.lost[sd]?.metal ?? 0)}` : ""),
   }));
+  // Who came out ahead is decided by worth: a lost power plant costs its
+  // output as well as its metal.
+  const worth = (l?: { n: number; metal: number; worth?: number }) => (priced ? lossWorth(l) : l?.n ?? 0);
   const verdict = (b: Battle) => {
-    const [a, c] = [size(b.lost[0] ?? { n: 0, metal: 0 }), size(b.lost[1] ?? { n: 0, metal: 0 })];
+    const [a, c] = [worth(b.lost[0]), worth(b.lost[1])];
     return a === c ? "An even trade" : `${sideName(ins, a < c ? 0 : 1)} came out ahead`;
   };
 
@@ -138,7 +141,7 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     const b = ins.battles[i];
     // The side that lost less is boxed in its colour: which side came out
     // ahead, without a sentence saying so (an even trade boxes neither).
-    const [a, c] = [size(b.lost[0] ?? { n: 0, metal: 0 }), size(b.lost[1] ?? { n: 0, metal: 0 })];
+    const [a, c] = [worth(b.lost[0]), worth(b.lost[1])];
     const ahead = a === c ? -1 : a < c ? 0 : 1;
     // One column a side, side by side: who, how much, then what — each
     // kind of unit lost as its icon with a count.

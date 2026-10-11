@@ -66,6 +66,10 @@ const battleReach = 600.0
 type BattleLoss struct {
 	N     int     `json:"n"`
 	Metal float64 `json:"metal"`
+	// Worth is what the losses decide a battle by: their metal, with power
+	// plants at powerWorth times theirs (losing a fusion loses its output
+	// too). Version 7 and later.
+	Worth float64 `json:"worth"`
 	// Top is the costliest defs lost, by total metal, at most battleTopDefs.
 	Top []int32 `json:"top"`
 	// Units is every def lost with its count and metal, costliest first, at
@@ -109,7 +113,7 @@ const (
 	battleUnpriced  = 25.0                     // metal a death with no recorded cost weighs
 	battleArmyFloor = 3000.0                   // smallest army total a fight is measured against
 	battleMinN      = 6                        // deaths for a peak to count as a battle
-	battleMaxN      = 12                       // battles kept (the biggest, then in time order)
+	battleMaxN      = 16                       // battles kept (the biggest, then in time order)
 	battleTopDefs   = 3                        // costliest defs listed per side
 	blowWindow      = 30 * simFPS              // frames the Biggest blow's losses fall within
 	battleUnitDefs  = 48                       // defs a battle's unit list carries per side
@@ -164,6 +168,7 @@ type track struct {
 	army     bool // Immortal (a commander outliving the game is no feat)
 	eligible bool // army or commander: Close call
 	ground   bool // mobile and not flying: Marathon, Tourist
+	carried  bool // a transport seen carrying a unit (transports.go)
 }
 
 // kill is one enemy a tracked unit was credited with.
@@ -536,6 +541,7 @@ func (p *pass) battleOf(members []int, ns int) Battle {
 			l := &bt.Lost[side]
 			l.N++
 			l.Metal += d.Cost[i]
+			l.Worth += d.Cost[i] * p.defs[d.Def[i]].worth
 			top[side][d.Def[i]] += d.Cost[i]
 			count[side][d.Def[i]]++
 		}
@@ -549,6 +555,7 @@ func (p *pass) battleOf(members []int, ns int) Battle {
 	bt.Teams = p.battleTeams(members, bt)
 	for s := range bt.Lost {
 		bt.Lost[s].Metal = round1(bt.Lost[s].Metal)
+		bt.Lost[s].Worth = round1(bt.Lost[s].Worth)
 		bt.Lost[s].Top = topDefs(top[s])
 		bt.Lost[s].Units = unitLosses(top[s], count[s])
 	}
@@ -740,6 +747,9 @@ func (p *pass) awards() []Award {
 			Team: d.Team[bestUnf], Def: d.Def[bestUnf], Value: d.Cost[bestUnf], F: d.F[bestUnf]}))
 	}
 	if a, ok := p.biggestBlow(); ok {
+		out = append(out, a)
+	}
+	if a, ok := p.idleTransports(); ok {
 		out = append(out, a)
 	}
 	return out

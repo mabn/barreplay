@@ -16,7 +16,9 @@ type defInfo struct {
 	commander bool
 	builder   bool
 	fly       bool
+	transport bool
 	milestone int
+	worth     float64 // what a loss of it is worth per metal: powerWorth for a power plant, else 1
 }
 
 // pass walks the frames once, with the lifecycle events interleaved at their
@@ -75,6 +77,8 @@ type pass struct {
 	prevFront   [][3]float64
 	contacted   int
 	playerTeams int
+
+	carry carries // transports seen carrying a unit (transports.go)
 }
 
 func newPass(in Input, ro roster) *pass {
@@ -171,6 +175,8 @@ func newPass(in Input, ro roster) *pass {
 			commander: isCommander(d.Name),
 			builder:   d.IsBuilder,
 			fly:       d.CanFly,
+			transport: isTransport(d.Name),
+			worth:     worthPerMetal(d),
 			milestone: milestoneOf(d.Name),
 		}
 	}
@@ -417,6 +423,7 @@ func dead(u snapshot.UnitState) bool { return u.MaxHealth > 0 && u.Health <= 0 }
 func (p *pass) frame(fr snapshot.Frame) error {
 	p.runEvents(fr.Frame, false)
 	p.lastFrame = fr.Frame
+	p.carryFrame(fr)
 	step := stepOf(fr.Frame)
 	p.grow(step)
 	s := &p.out.Series
@@ -609,6 +616,6 @@ func (p *pass) finish() {
 	}
 	for id := range p.usedDef {
 		d := p.in.Meta.UnitDefs[id]
-		o.Defs[id] = Def{Name: d.Name, Human: d.HumanName, Cost: round1(float64(d.MetalCost)), Icon: d.IconType}
+		o.Defs[id] = Def{Name: d.Name, Human: d.HumanName, Cost: round1(float64(d.MetalCost)), Icon: d.IconType, Power: isPowerPlant(d)}
 	}
 }
