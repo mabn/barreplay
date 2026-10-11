@@ -55,18 +55,132 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: #5a9fd0; }
    so the menu stays reachable in a long list. */
 body.home .controls, body.home #wrap { display: none; }
 
-/* ---- replay page tabs: Replay (the playback) and Summary (the src/summary
-   library's pane). The summary hides the playback chrome and scrolls on its
-   own; the landing page shows neither. */
-#replaytabs { display: flex; gap: 2px; }
-#replaytabs a {
-  border: 1px solid transparent; border-radius: 4px; padding: 5px 10px; font-size: 13px;
-  color: #9fb0bf; text-decoration: none;
+/* ---- page layout: the left menu (index.html #rail) as a full-height
+   column on every page, the header beside it. On the landing page the
+   section the menu selects (#home) fills the rest; on a replay page the map
+   and the playback bar sit under the header in one column and the sidebar is
+   a full-height column on the right. A grid rather than the body's default
+   column flow, because the menu and the sidebar span the header and the bar
+   while the map sits between them. body.home is set by app.js showHome,
+   body.replay-page by applyReplayTab; the summary hides the playback chrome
+   and fills the page beside the menu, scrolling on its own. */
+body.home, body.replay-page {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
 }
-#replaytabs a:hover { background: #344450; color: #d7dee6; }
-#replaytabs a.active { background: #2a3742; border-color: #3a4856; color: #d7dee6; }
-body.home #replaytabs, body.home #summary { display: none !important; }
-body.summary-tab #wrap, body.summary-tab .controls { display: none; }
+body.home { grid-template-columns: auto minmax(0, 1fr); }
+body.replay-page { grid-template-columns: auto minmax(0, 1fr) auto; }
+body.home #rail, body.replay-page #rail { grid-column: 1; grid-row: 1 / -1; }
+body.home header, body.replay-page header { grid-column: 2; grid-row: 1; }
+body.home #home { grid-column: 2; grid-row: 2 / -1; }
+body.replay-page #wrap { grid-column: 2; grid-row: 2; }
+body.replay-page #bottombar { grid-column: 2; grid-row: 3; }
+body.replay-page #side { grid-column: 3; grid-row: 1 / -1; }
+body.replay-page #summary { grid-column: 2 / -1; grid-row: 2 / -1; }
+/* The header's brand link gives way to a "Replays" back link leading the
+   replay's own title, so the way back to the list sits where the page starts
+   as well as in the menu. */
+body.replay-page #homelink { display: none; }
+#backlink { display: none; }
+body.replay-page #backlink {
+  display: inline-flex; align-items: center; gap: 3px; vertical-align: middle;
+  margin-right: 12px; padding: 3px 9px 3px 5px; border-radius: 6px;
+  border: 1px solid #2a323c; color: #9fb0bf; font-size: 12px; font-weight: 500;
+}
+body.replay-page #backlink:hover { color: #fff; background: #1d252e; border-color: #3a4856; }
+#backlink:focus-visible { outline: 2px solid #8fd3ff; outline-offset: 2px; }
+#backlink svg {
+  width: 14px; height: 14px;
+  fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; stroke-linecap: round;
+}
+body.replay-page h1 .sub { margin-left: 0; vertical-align: middle; }
+
+#rail {
+  width: 72px; padding: 12px 0 10px;
+  background: #0f1317; border-right: 1px solid #2a323c;
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+}
+#raillogo {
+  width: 36px; height: 36px; margin-bottom: 14px; border-radius: 10px;
+  display: grid; place-items: center;
+  background: #d7dee6; color: #11151a; font-weight: 800; font-size: 16px;
+  letter-spacing: -.02em; text-decoration: none;
+}
+#raillogo:hover { background: #fff; }
+.railitem, .railsubitem {
+  position: relative; border-radius: 10px;
+  display: flex; flex-direction: column; align-items: center;
+  color: #7d8aa0; text-decoration: none;
+}
+.railitem { width: 56px; padding: 8px 0 6px; gap: 4px; font-size: 10.5px; }
+.railitem svg, .railsubitem svg {
+  width: 20px; height: 20px;
+  fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round;
+}
+.railitem:hover, .railsubitem:hover { color: #cfe3f5; background: #1d252e; }
+.railitem.active, .railsubitem.active { color: #fff; background: #ffffff12; }
+/* The selected entry is also marked at the menu's edge, so it reads at a
+   glance without depending on the tint alone. Only ever ONE mark: on a
+   replay page it is the sub menu's, and Replays reads as open instead. */
+.railitem.active::before {
+  content: ''; position: absolute; left: -8px; top: 12px; bottom: 12px;
+  width: 3px; border-radius: 0 2px 2px 0; background: #8fd3ff;
+}
+#raillogo:focus-visible, .railitem:focus-visible, .railsubitem:focus-visible {
+  outline: 2px solid #8fd3ff; outline-offset: 2px;
+}
+/* Admin-only entries (an Access sign-in — app.js adminMode()), same gate as
+   the list's refresh button. homeTab() enforces it too, so a shared /queue
+   link can't reach the section past the hidden entry. */
+.railitem.admin { display: none; }
+body.admin-mode .railitem.admin { display: flex; }
+/* Count of jobs still in flight, on the Queue icon's corner; empty (and
+   invisible) when there are none. */
+.railitem .badge {
+  position: absolute; top: 3px; right: 6px;
+  font-size: 9px; line-height: 1; padding: 2px 5px; border-radius: 8px;
+  background: #2f6f9f; color: #fff; font-variant-numeric: tabular-nums;
+}
+.railitem .badge:empty { display: none; }
+
+/* Replays and, while a replay is open, its SUB MENU: the replay's views,
+   boxed together with Replays, smaller than the main entries and hung off a
+   guide line, so they read as belonging to it rather than as sections of
+   their own. The main entries never change; only this box opens. */
+.railgroup { width: 60px; display: flex; flex-direction: column; align-items: center; border-radius: 12px; }
+#replaytabs { display: none; }
+body.replay-page #railreplays {
+  padding: 2px 0 6px; background: #161d24; box-shadow: inset 0 0 0 1px #26303a;
+}
+#railreplays > .railitem.open { color: #e6eef6; }
+body.replay-page #replaytabs {
+  position: relative; width: 100%; padding: 2px 0 0 12px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+#replaytabs::before {
+  content: ''; position: absolute; left: 7px; top: 0; bottom: 6px;
+  width: 1px; background: #3a4856;
+}
+.railsubitem { width: 45px; padding: 6px 0 5px; gap: 3px; font-size: 9.5px; border-radius: 8px; }
+.railsubitem svg { width: 16px; height: 16px; }
+.railsubitem.active::before {
+  content: ''; position: absolute; left: -6px; top: 7px; bottom: 7px;
+  width: 3px; border-radius: 2px; background: #8fd3ff;
+}
+
+/* The admin corner at the foot of the menu (index.html #adminnote, app.js
+   renderAdminNote): the signed-in admin's initial with a sign-out entry, or
+   a muted sign-in entry. margin-top:auto pins it to the foot. */
+#adminnote { margin-top: auto; }
+#adminnote .railitem { color: #6f87a0; }
+#adminnote .railitem:hover { color: #cfe3f5; }
+#adminnote.error .railitem { color: #e0a060; cursor: help; }
+#adminnote .avatar {
+  width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
+  background: #2f4a63; color: #d6ecff; font-size: 11px; font-weight: 700;
+}
+body.home #side, body.home #summary { display: none !important; }
+body.summary-tab #wrap, body.summary-tab .controls, body.summary-tab #side { display: none; }
 body.summary-tab #summary { display: block !important; }
 #summary { flex: 1; min-height: 0; overflow-y: auto; }
 #summary .summarymsg { color: #9fb0bf; text-align: center; margin-top: 60px; }
@@ -96,7 +210,7 @@ body.clip-dragging #clip canvas { pointer-events: none; }
 #clipplay { min-width: 34px; }
 #clipbody { flex: 1; min-height: 0; display: flex; }
 #clipbody #wrap { display: flex; flex: 1; min-width: 0; }
-#clipbody #side, #clipbody #zoomlabel { display: none; }
+#clipbody #zoomlabel { display: none; }
 /* The moment the clip is about, marked on its timeline, so the lead-in reads
    as a few seconds' wait for it. The slider's ends are a thumb's half-width
    in from the box (--thumb), which is where its 0 and 1 sit. */
@@ -116,45 +230,8 @@ body.clip-embed #clip {
   inset: 0; width: auto; height: auto; border: 0; border-radius: 0; box-shadow: none;
 }
 #cliptime { font-size: 12px; color: #9fb0bf; font-variant-numeric: tabular-nums; min-width: 90px; text-align: right; }
-#home { flex: 1; min-height: 0; display: flex; }
+#home { min-height: 0; display: flex; }
 #homemain { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; padding: 18px 24px; }
-#homenav {
-  flex: 0 0 auto; width: 150px; padding: 18px 8px;
-  background: #161b21; border-right: 1px solid #2a323c;
-  display: flex; flex-direction: column; gap: 2px;
-}
-#homenav .navitem {
-  display: flex; align-items: center; gap: 6px;
-  background: transparent; border: 1px solid transparent; border-radius: 5px;
-  padding: 7px 10px; text-align: left; font-size: 13px; color: #9fb0bf;
-}
-#homenav .navitem:hover { background: #1d252e; color: #cfe3f5; }
-#homenav .navitem.on { background: #24425c; border-color: #4a7fa8; color: #d6ecff; }
-/* Admin-only entries (an Access sign-in — app.js
-   adminMode()), same gate as the list's refresh button. homeTab() enforces it
-   too, so a shared /queue link can't reach the section past the hidden menu
-   entry. */
-#homenav .navitem.admin { display: none; }
-body.admin-mode #homenav .navitem.admin { display: flex; }
-/* The admin corner at the bottom of the menu (index.html #adminnote, app.js
-   renderAdminNote): who is signed in with a sign-out link, or a muted
-   sign-in link. margin-top:auto pins it to the foot of the flex column. */
-#homenav #adminnote {
-  margin-top: auto; padding: 10px 10px 2px; font-size: 12px; line-height: 1.5;
-  color: #6f87a0; min-width: 0;
-}
-#homenav #adminnote .who {
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #9fb0bf;
-}
-#homenav #adminnote.error { color: #e0a060; overflow-wrap: anywhere; }
-#homenav #adminnote a { color: #7fb3e0; text-decoration: none; }
-#homenav #adminnote a:hover { text-decoration: underline; }
-/* Count of jobs still in flight; empty (and invisible) when there are none. */
-#homenav .badge {
-  margin-left: auto; font-size: 10px; line-height: 1; padding: 3px 6px;
-  border-radius: 8px; background: #2a3742; color: #9fb0bf;
-}
-#homenav .badge:empty { display: none; }
 #hometable { border-collapse: collapse; width: 100%; max-width: 1650px; margin: 0 auto; font-size: 13px; }
 #hometable th {
   text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;

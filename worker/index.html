@@ -19,22 +19,65 @@
 <link rel="stylesheet" href="/style.__ASSET_REV__.css">
 </head>
 <body>
+<!-- The left menu, the same on every page (app.js markRail): the logo, then
+     the site's sections — Replays, Queue, Games, SQL, each a path (/,
+     /queue, /games, /sqlstats) — and the admin corner at the foot. While a
+     replay is open, its views (the playback and the game summary drawn by
+     the src/summary library, kept in the URL as ?tab=summary) appear as a
+     SUB MENU under Replays (#replaytabs), boxed together with it and hung
+     off a guide line, so the main entries never change under the reader.
+     Entries are links, not buttons, so a middle-click or ctrl-click opens a
+     view in a new browser tab; a plain click is handled in the page (app.js
+     initHomeNav / initReplayTabs), which keeps the hrefs current.
+     Queue and SQL are admin-only (a Cloudflare Access sign-in — see app.js
+     probeAdmin), like the row refresh button and the POV dropdown: the queue
+     is the pipeline's state — everyone's uploads and their failure messages
+     — which is maintenance, not something a visitor came to look at. -->
+<nav id="rail" style="display:none" aria-label="Menu">
+  <a href="/" id="raillogo" title="All replays">br</a>
+  <div id="railreplays" class="railgroup">
+    <a href="/" data-tab="replays" class="railitem" title="All replays">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.5 5.5 H16 M7.5 10 H16 M7.5 14.5 H16 M4 5.5 h.01 M4 10 h.01 M4 14.5 h.01"/></svg>
+      <span>Replays</span>
+    </a>
+    <div id="replaytabs" aria-label="This replay">
+      <a href="" data-rtab="replay" class="railsubitem" title="Watch the replay">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4 L16 10 L6 16 Z"/></svg>
+        <span>Replay</span>
+      </a>
+      <a href="" data-rtab="summary" class="railsubitem" title="The game summary">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 16 V10 M8 16 V5 M12 16 V11 M16 16 V7"/></svg>
+        <span>Summary</span>
+      </a>
+    </div>
+  </div>
+  <a href="/queue" data-tab="queue" class="railitem admin" title="The ingest queue">
+    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 L17 6.5 L10 10 L3 6.5 Z M3 10 L10 13.5 L17 10 M3 13.5 L10 17 L17 13.5"/></svg>
+    <span>Queue</span><span class="badge" id="navqueue"></span>
+  </a>
+  <a href="/games" data-tab="games" class="railitem" title="Games played on BAR">
+    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6.5 6.5 H13.5 C16 6.5 17.4 8.4 17.8 11.3 C18.1 13.6 17 15 15.7 15 C14.5 15 13.8 13.8 13.1 12.9 H6.9 C6.2 13.8 5.5 15 4.3 15 C3 15 1.9 13.6 2.2 11.3 C2.6 8.4 4 6.5 6.5 6.5 Z M5.6 9.3 V11.5 M4.5 10.4 H6.7 M13.6 9.6 h.01 M15 11.1 h.01"/></svg>
+    <span>Games</span>
+  </a>
+  <a href="/sqlstats" data-tab="sqlstats" class="railitem admin" title="SQL row accounting">
+    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 5.5 A6 2 0 1 0 16 5.5 A6 2 0 1 0 4 5.5 M4 5.5 V14.5 A6 2 0 0 0 16 14.5 V5.5 M4 10 A6 2 0 0 0 16 10"/></svg>
+    <span>SQL</span>
+  </a>
+  <!-- Admin corner, pinned to the foot of the menu: the signed-in admin
+       (Cloudflare Access, app.js probeAdmin / renderAdminNote) with a
+       sign-out entry, or a muted sign-in entry. Being signed in is admin
+       mode; there is no URL flag. -->
+  <div id="adminnote" style="display:none"></div>
+</nav>
+
 <header>
   <!-- Absolute, not "./": the viewer's pages live at paths now
        (/replays/<id>, /queue, …), where a relative link resolves inside the
        page's own directory. A plain click is intercepted by the SPA anyway;
        this is for middle-click / open-in-new-tab. -->
-  <h1><a href="/" id="homelink" title="All replays">barreplay</a><span class="sub" id="subtitle">replay state viewer</span></h1>
-  <!-- The replay page's two tabs (app.js applyReplayTab): the playback,
-       and the game summary drawn by the src/summary library. Kept in the URL
-       as ?tab=summary. Hidden on the landing page. -->
-  <!-- Links, not buttons, so a middle-click or ctrl-click opens the tab in a
-       new browser tab; a plain click is handled in the page (app.js
-       initReplayTabs), and applyReplayTab keeps the hrefs current. -->
-  <nav id="replaytabs" style="display:none">
-    <a href="" data-rtab="replay">Replay</a>
-    <a href="" data-rtab="summary">Summary</a>
-  </nav>
+  <!-- On a replay page the brand link gives way to #backlink, the way back
+       to the list, leading the replay's own title like a breadcrumb. -->
+  <h1><a href="/" id="homelink" title="All replays">barreplay</a><a href="/" id="backlink" title="Back to all replays"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12 4 L6 10 L12 16"/></svg>Replays</a><span class="sub" id="subtitle">replay state viewer</span></h1>
   <!-- Point-of-view marking. Most catalog rows carry no recorder provenance
        (their captures predate the GAME record's recorder fields) and it cannot
        be derived after the fact, so it is marked by hand here. Shown only in
@@ -48,26 +91,11 @@
   </div>
 </header>
 
-<!-- Landing view: the left menu and the section it selects (shown when the
-     URL names no replay). The selected section lives in the URL as the PATH
+<!-- Landing view: the section the left menu (#rail) selects, shown when the
+     URL names no replay. The selected section lives in the URL as the PATH
      (/queue, /games, /sqlstats), so a menu pick is shareable and survives a
-     refresh.
-     Queue is admin-only (a Cloudflare Access sign-in — see app.js
-     probeAdmin), like the row refresh button and the POV dropdown: it is the pipeline's state — everyone's uploads and their
-     failure messages — which is maintenance, not something a visitor came
-     to look at. -->
+     refresh. -->
 <div id="home" style="display:none">
-  <nav id="homenav">
-    <button type="button" class="navitem" data-tab="replays">Replays</button>
-    <button type="button" class="navitem admin" data-tab="queue">Queue<span class="badge" id="navqueue"></span></button>
-    <button type="button" class="navitem" data-tab="games">Games</button>
-    <button type="button" class="navitem admin" data-tab="sqlstats">SQL</button>
-    <!-- Admin corner, pinned to the bottom of the menu: who is signed in
-         through Cloudflare Access (app.js probeAdmin / renderAdminNote) with
-         a sign-out link, or a muted sign-in link. Being signed in is admin
-         mode; there is no URL flag. -->
-    <div id="adminnote" style="display:none"></div>
-  </nav>
   <div id="homemain">
     <!-- Drag&drop publishing: a .brepstream (the Replay uploader widget's
          capture) POSTs to /api/upload; the worker archives it and the ingest
@@ -282,42 +310,47 @@
     <div id="zoomlabel"></div>
     <div id="empty" style="display:none"></div>
   </div>
-  <div id="side">
-    <h2>Frame</h2>
-    <div class="stat"><span>Game time</span><b id="s_time">—</b></div>
-    <div class="stat"><span>Sim frame</span><b id="s_frame">—</b></div>
-    <div class="stat"><span>Units</span><b id="s_units">—</b></div>
+</div>
 
-    <!-- BAR's spectator team-comparison rows (see renderTeamStats in app.js).
-         It sits ABOVE the Players heading rather than under it: the heading
-         names the roster below it, and these rows describe the two SIDES, not
-         the players. Only a two-sided game has anything to compare, so this
-         stays hidden for an FFA, for a capture with no roster, and until the
-         economy timeline has landed. -->
-    <div id="teamstats" style="display:none"></div>
+<!-- The sidebar: a column of its own, the full height of the page beside
+     the header, the map and the playback bar (body.replay-page's grid in
+     style.css). It is deliberately NOT inside #wrap: the clip player moves
+     #wrap into its window, and the window is the map alone. -->
+<div id="side">
+  <h2>Frame</h2>
+  <div class="stat"><span>Game time</span><b id="s_time">—</b></div>
+  <div class="stat"><span>Sim frame</span><b id="s_frame">—</b></div>
+  <div class="stat"><span>Units</span><b id="s_units">—</b></div>
 
-    <h2>Players</h2>
-    <div id="players"></div>
+  <!-- BAR's spectator team-comparison rows (see renderTeamStats in app.js).
+       It sits ABOVE the Players heading rather than under it: the heading
+       names the roster below it, and these rows describe the two SIDES, not
+       the players. Only a two-sided game has anything to compare, so this
+       stays hidden for an FFA, for a capture with no roster, and until the
+       economy timeline has landed. -->
+  <div id="teamstats" style="display:none"></div>
 
-    <!-- Chat transcript. Hidden when the capture recorded no messages — a
-         re-simulated demo sees every channel, but a live player's upload only
-         holds the chat their own client received. -->
-    <div id="chatwrap" style="display:none">
-      <h2>Chat</h2>
-      <div id="chat" title="Click a line to jump to when it was said"></div>
-    </div>
+  <h2>Players</h2>
+  <div id="players"></div>
 
-    <h2>Controls</h2>
-    <button type="button" id="togglebubbles" class="sidebtn"
-            title="Chat also pops up over the speaker on the map">Hide chat bubbles</button>
-    <button type="button" id="togglehp" class="sidebtn"
-            title="A green bar over every damaged unit, when zoomed in">Hide HP bars</button>
-    <button type="button" id="togglefx" class="sidebtn" style="display:none"
-            title="Long-range shells, missiles, heavy beams and big explosions (re-simulated replays)">Hide effects</button>
-    <div class="hint">
-      Scroll to zoom · middle-drag to pan · hover a unit for details.<br>
-      ← / → step · space play/pause.
-    </div>
+  <!-- Chat transcript. Hidden when the capture recorded no messages — a
+       re-simulated demo sees every channel, but a live player's upload only
+       holds the chat their own client received. -->
+  <div id="chatwrap" style="display:none">
+    <h2>Chat</h2>
+    <div id="chat" title="Click a line to jump to when it was said"></div>
+  </div>
+
+  <h2>Controls</h2>
+  <button type="button" id="togglebubbles" class="sidebtn"
+          title="Chat also pops up over the speaker on the map">Hide chat bubbles</button>
+  <button type="button" id="togglehp" class="sidebtn"
+          title="A green bar over every damaged unit, when zoomed in">Hide HP bars</button>
+  <button type="button" id="togglefx" class="sidebtn" style="display:none"
+          title="Long-range shells, missiles, heavy beams and big explosions (re-simulated replays)">Hide effects</button>
+  <div class="hint">
+    Scroll to zoom · middle-drag to pan · hover a unit for details.<br>
+    ← / → step · space play/pause.
   </div>
 </div>
 
