@@ -11,7 +11,6 @@ import { mirrorKey } from "../legend";
 import { knockouts } from "../losses";
 import { sideColor, sideName } from "../model";
 import { eliminationFocus, fighters, gapBattles, momentStories, type Fighter, type GapBattle, type MomentStory } from "../moments";
-import { at as placeAt } from "../places";
 import { fighterNames, named } from "../names";
 import { fillUnits, inkOn } from "../unitchips";
 import { stepTimes } from "../series";
@@ -102,7 +101,9 @@ export function swingChart(ins: Insights, opts: SummaryOptions, watch: Watch | n
       s("circle", { cx: c.x(tt), cy: y, r: 10, fill: e.color, stroke: "var(--brs-bg)", "stroke-width": 2 }),
       s("text", { x: c.x(tt), y: y + 4, "text-anchor": "middle", style: "fill: #000; font-weight: 600; pointer-events: none" }, e.letter),
     );
-    tip(g, { title: named(ins, `${e.letter}. ${e.text}`), rows: e.rows, note: named(ins, e.detail + (watch ? " Click to watch." : "")) });
+    // The tooltip is the entry's row from the list under the chart: one
+    // format for the story, which reads better than a title and rows.
+    tip(g, () => ({ title: entryRow(e, false), note: watch ? "Click to watch." : undefined }));
     if (watch) g.addEventListener("click", (ev) => {
       ev.stopPropagation();
       watch(e.clip());
@@ -114,8 +115,11 @@ export function swingChart(ins: Insights, opts: SummaryOptions, watch: Watch | n
   // One row an entry, laid out like a battle's detail: the two sides side
   // by side (the first on the left), each with who fought for it and what
   // it lost as icons with counts, the side the line moved toward boxed with
-  // the shift. The whole row plays the entry.
-  const rows = entries.map((e) => {
+  // the shift. The whole row plays the entry; a dot's tooltip shows the
+  // same row, inert (live = false).
+  const watchClip = watch;
+  const entryRow = (e: Entry, live: boolean): HTMLElement => {
+    const watch = live ? watchClip : undefined;
     const play = () => watch?.(e.clip());
     const col = (sd: number) => {
       const l = e.shown[sd];
@@ -175,7 +179,8 @@ export function swingChart(ins: Insights, opts: SummaryOptions, watch: Watch | n
       });
     }
     return row;
-  });
+  };
+  const rows = entries.map((e) => entryRow(e, true));
   const model = sw.fitted
     ? `fitted to ${sw.games ?? "past"} games`
     : "with hand-set weights, not yet fitted to real games";
@@ -216,8 +221,6 @@ interface Entry {
   part: string;
   chip: string | null;
   chipTip: string;
-  rows: { color: string; label: string; value?: string }[];
-  detail: string;
   shown: ({ n: number; metal: number; units: UnitLoss[] } | undefined)[];
   elsewhere: number[] | null;
   fighters: Fighter[][];
@@ -251,8 +254,7 @@ function listEntries(ins: Insights, moments: Moment[], stories: MomentStory[], g
       when: f ? span(f.f, f.f1 ?? f.f) : span(m.f0, m.f1),
       part: st.whole ? ` · part of a fight ${fmtClock(st.whole.f0 / SIM_FPS)}–${fmtClock(st.whole.f1 / SIM_FPS)}` : "",
       chip: `▲ +${pct(m.delta)}`, chipTip: `${sideName(ins, m.side)}'s chance to win rose ${pct(m.delta)}`,
-      rows: [{ color: sideColor(ins, m.side), label: `${fmtClock(m.f0 / SIM_FPS)}–${fmtClock(m.f1 / SIM_FPS)}`, value: `${sideName(ins, m.side)} +${pct(m.delta)}` }],
-      detail: st.detail, shown: st.shown, elsewhere: st.elsewhere, fighters: st.fighters,
+      shown: st.shown, elsewhere: st.elsewhere, fighters: st.fighters,
       income: st.growth && st.growthNamed?.eco !== false ? st.growth.map((g) => g.income) : null,
       army: st.growth && st.growthNamed?.army ? st.growth.map((g) => g.army) : null,
       fightLost: st.lostFight,
@@ -276,18 +278,11 @@ function listEntries(ins: Insights, moments: Moment[], stories: MomentStory[], g
     const W = gb.side >= 0 ? sideName(ins, gb.side) : "";
     const title = gb.title;
     const moved = gb.side >= 0 && Math.round(gb.delta * 100) >= 1;
-    const priced = ins.costCoverage === "full" || b.lost.some((l) => l.metal > 0);
-    const lostText = (sd: number) => {
-      const l = b.lost[sd];
-      return !l?.n ? "nothing" : priced && l.metal ? `${fmtMetal(l.metal)} metal` : `${l.n} units`;
-    };
     out.push({
       at: b.f1, span: [b.f0, b.f1], side: gb.side, color: gb.side >= 0 ? sideColor(ins, gb.side) : "var(--brs-text)", title, battle: gb.battle,
       when: span(b.f0, b.f1), part: "",
       chip: gb.side < 0 ? null : moved ? `▲ +${pct(gb.delta)}` : "▲ ahead",
       chipTip: moved ? `${W}'s chance to win rose ${pct(gb.delta)} over it` : `${W} lost less here`,
-      rows: [0, 1].map((sd) => ({ color: sideColor(ins, sd), label: `${sideName(ins, sd)} lost`, value: lostText(sd) })),
-      detail: `Battle ${gb.battle + 1}, ${span(b.f0, b.f1)} ${placeAt(ins, b.x, b.z)}.`,
       shown: b.lost.map((l) => ({ n: l.n, metal: l.metal, units: l.units ?? l.top.map((def) => ({ def, n: 0, metal: 0 })) })),
       elsewhere: null, fighters: fighters(ins, b), income: null, army: null, fightLost: null,
     });

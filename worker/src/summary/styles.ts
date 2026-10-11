@@ -157,6 +157,9 @@ export const CSS = `
 .brs-root .brs-tip-head { display: flex; align-items: center; justify-content: flex-end; gap: 6px; font-weight: 600; white-space: nowrap; }
 .brs-root .brs-tip-head i { flex: 0 0 10px; height: 10px; border-radius: 2px; }
 .brs-root .brs-tip-metric { color: var(--brs-muted); white-space: nowrap; }
+/* A swing dot's tooltip is the swing's list row (sections/swing.ts). */
+.brs-root .brs-tip-title:has(> .brs-moment) { max-width: none; font-weight: normal; margin: 0; }
+.brs-root .brs-tip .brs-moment { width: min(680px, calc(100vw - 40px)); padding: 2px 0; border-top: 0; }
 .brs-root .brs-tip-note { color: var(--brs-muted); margin-top: 4px; max-width: 440px; }
 .brs-root .brs-val { font-variant-numeric: tabular-nums; color: var(--brs-muted); white-space: nowrap; }
 /* The on-demand wait (loading.ts): monkeys hammering a bar chart together. */

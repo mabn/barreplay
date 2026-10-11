@@ -985,7 +985,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           sides' columns side by side, each with its fighters and its losses
                           as icon chips (unitchips.ts fillUnits, at most SWING_CHIPS), the
                           side the line moved toward boxed with the shift — and the whole
-                          row plays the clip, as do the chart's lettered dots. Swings are
+                          row plays the clip, as do the chart's lettered dots, whose tooltip IS that row (swing.ts entryRow, inert). Swings are
                           LETTERED (A, B, C...) because battles are NUMBERED, and a long stretch
                           with no swing is filled with BATTLES (moments.ts gapBattles: the
                           biggest battle in the widest gap over an eighth of the game, at least
