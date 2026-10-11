@@ -232,3 +232,53 @@ func TestAwardRules(t *testing.T) {
 		t.Errorf("healed under its own health = %+v", a)
 	}
 }
+
+func TestMergeAdvances(t *testing.T) {
+	// Two fights 45 s and 1400 elmos apart: the second is the same force's
+	// push when its killers (team 2's def 9) did the killing in both.
+	p := &pass{hasCauses: true, ro: roster{teamSide: map[int32]int{1: 0, 2: 1}, sides: []Side{{}, {}}}, out: &Insights{}}
+	add := func(f, x int32, killer [2]int32) {
+		d := &p.out.Deaths
+		d.F, d.X, d.Z, d.Def, d.Team, d.Cost = append(d.F, f), append(d.X, x), append(d.Z, 1000), append(d.Def, 1), append(d.Team, 1), append(d.Cost, 100)
+		d.Unfinished, d.SelfD = append(d.Unfinished, 0), append(d.SelfD, 0)
+		p.deathKiller = append(p.deathKiller, killer[0])
+		p.deathKillerKind = append(p.deathKillerKind, killer)
+	}
+	run := func(second [2]int32) int {
+		p.out.Deaths, p.deathKiller, p.deathKillerKind = Deaths{}, nil, nil
+		var a, b []int
+		for i := int32(0); i < 6; i++ {
+			a = append(a, len(p.out.Deaths.F))
+			add(3000+i*30, 1000, [2]int32{2, 9})
+			b = append(b, len(p.out.Deaths.F))
+			add(4500+i*30, 2400, second)
+		}
+		found := []foundBattle{{b: p.battleOf(a, 2), members: a}, {b: p.battleOf(b, 2), members: b}}
+		return len(p.mergeAdvances(found, 2))
+	}
+	if n := run([2]int32{2, 9}); n != 1 {
+		t.Errorf("same killers: %d battles, want 1", n)
+	}
+	if n := run([2]int32{2, 7}); n != 2 {
+		t.Errorf("other killers: %d battles, want 2", n)
+	}
+}
+
+func TestHandoffs(t *testing.T) {
+	teams := []Team{{Team: 0, Side: 0}, {Team: 1, Side: 0}, {Team: 2, Side: 1}}
+	var g giveBursts
+	for i := int32(0); i < 20; i++ {
+		g.add(0, 1, 9000+i) // team 0 hands its army to team 1 and is gone
+		if i < 10 {
+			g.add(2, 1, 3000+i*100) // gives spread over 15 s: no burst
+		}
+	}
+	got := withHandoffs(nil, g, map[int32]int32{0: 8990, 1: 20000, 2: 20000}, teams)
+	if len(got) != 1 || got[0].Team != 0 || got[0].F != 9000 || got[0].To == nil || *got[0].To != 1 || got[0].Recorded {
+		t.Fatalf("handoffs = %+v", got)
+	}
+	// A team still owning units after it gave some is still playing.
+	if got := withHandoffs(nil, g, map[int32]int32{0: 9500}, teams); len(got) != 0 {
+		t.Errorf("handoffs = %+v, want none", got)
+	}
+}

@@ -52,6 +52,9 @@ type pass struct {
 	// deathKiller is the team the engine named as the killer, -1 when none
 	// (a capture without causes, a death with no attacker).
 	deathKiller []int32
+	// deathKillerKind is the killer's (team, def), {-1, -1} when none: what
+	// tells one force's advance from two fights (stories.go mergeAdvances).
+	deathKillerKind [][2]int32
 
 	hasCauses bool // some destroyed event names a cause: a re-simulation
 	// selfdArmed is each unit with a self-destruct order standing: the frame
@@ -78,7 +81,8 @@ type pass struct {
 	contacted   int
 	playerTeams int
 
-	carry carries // transports seen carrying a unit (transports.go)
+	carry carries    // transports seen carrying a unit (transports.go)
+	gives giveBursts // units handed to another team, by giver (wipes.go)
 }
 
 func newPass(in Input, ro roster) *pass {
@@ -220,6 +224,10 @@ func (p *pass) runEvents(f int32, all bool) {
 func (p *pass) event(e snapshot.Event) {
 	p.playerEvent(e)
 	switch e.Kind {
+	case snapshot.EventGiven:
+		if e.Cause != nil && e.Cause.Team >= 0 && e.Cause.Team != e.Team {
+			p.gives.add(e.Cause.Team, e.Team, e.Frame)
+		}
 	case snapshot.EventSelfD:
 		if _, on := p.selfdArmed[e.UnitID]; on {
 			delete(p.selfdArmed, e.UnitID)
@@ -286,6 +294,11 @@ func (p *pass) event(e snapshot.Event) {
 			killer = e.Cause.Team
 		}
 		p.deathKiller = append(p.deathKiller, killer)
+		killerKind := [2]int32{-1, -1}
+		if e.Cause != nil && e.Cause.Team >= 0 && e.Cause.DefID > 0 && e.Cause.UnitID != e.UnitID {
+			killerKind = [2]int32{e.Cause.Team, e.Cause.DefID}
+		}
+		p.deathKillerKind = append(p.deathKillerKind, killerKind)
 		if c := e.Cause; c != nil && cost > 0 {
 			// Credit the killing unit's track with an ENEMY it took down.
 			if kt := p.tracks[c.UnitID]; kt != nil && !kt.dead && kt.def == c.DefID {
@@ -588,6 +601,7 @@ func (p *pass) finish() {
 	p.comms()
 	o := p.out
 	o.DurationSec = round1(float64(p.lastFrame) / simFPS)
+	o.Causes = p.hasCauses
 	if b := p.in.Bounds; b != nil {
 		o.Bounds = Bounds{MinX: b.MinX, MaxX: b.MaxX, MinZ: b.MinZ, MaxZ: b.MaxZ}
 	} else {
@@ -602,7 +616,7 @@ func (p *pass) finish() {
 		}
 	}
 	sort.SliceStable(o.Milestones, func(i, j int) bool { return o.Milestones[i].F < o.Milestones[j].F })
-	o.Eliminated = eliminations(o.Deaths, p.in.TeamDied, p.teamAlive, o.Teams)
+	o.Eliminated = withHandoffs(eliminations(o.Deaths, p.in.TeamDied, p.teamAlive, o.Teams), p.gives, p.teamAlive, o.Teams)
 	p.wiped = wipedDeaths(o.Deaths, o.Eliminated)
 	o.Battles = p.battles()
 	o.Winner = winner(o.Sides, p.in.Meta.Winners)

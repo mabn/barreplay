@@ -62,6 +62,63 @@ func eliminations(d Deaths, recorded map[int32]int32, lastAlive map[int32]int32,
 	return out
 }
 
+// giveBursts follows, per giving team, its latest run of units handed to
+// another team: the frames between gives at most wipeGap apart.
+type giveBursts map[int32]*giveBurst
+
+type giveBurst struct {
+	f0, f1 int32
+	n      int
+	to     map[int32]int
+}
+
+func (g *giveBursts) add(from, to, f int32) {
+	if *g == nil {
+		*g = giveBursts{}
+	}
+	b := (*g)[from]
+	if b == nil || f-b.f1 > wipeGap {
+		b = &giveBurst{f0: f, to: map[int32]int{}}
+		(*g)[from] = b
+	}
+	b.f1 = f
+	b.n++
+	b.to[to]++
+}
+
+// withHandoffs adds the players who left by HANDING their units over: a
+// last burst of at least wipeMinN units given away, after which the team
+// owned nothing. The engine destroys nothing and records no teamdied, since
+// the team still exists, so neither rule in eliminations sees it; the
+// player is out of the game all the same. A team already eliminated is left
+// as it is.
+func withHandoffs(out []Elimination, gives giveBursts, lastAlive map[int32]int32, teams []Team) []Elimination {
+	known := map[int32]bool{}
+	for _, e := range out {
+		known[e.Team] = true
+	}
+	for _, t := range teams {
+		b := gives[t.Team]
+		if t.Side < 0 || known[t.Team] || b == nil || b.n < wipeMinN || lastAlive[t.Team] > b.f1 {
+			continue
+		}
+		to, most := int32(-1), 0
+		for k, n := range b.to {
+			if n > most || (n == most && k < to) {
+				to, most = k, n
+			}
+		}
+		out = append(out, Elimination{F: b.f0, Team: t.Team, To: &to})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].F != out[j].F {
+			return out[i].F < out[j].F
+		}
+		return out[i].Team < out[j].Team
+	})
+	return out
+}
+
 // wipedDeaths marks the deaths that came with their team's elimination.
 func wipedDeaths(d Deaths, elim []Elimination) []bool {
 	at := map[int32]int32{}

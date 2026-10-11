@@ -16,7 +16,7 @@ import type { Insights } from "../src/summary/types";
 
 function ins(over: Partial<Insights> = {}): Insights {
   return {
-    version: 1, gameId: "g", durationSec: 600, stepSec: 15, costCoverage: "full", pov: "full",
+    version: 7, causes: true, gameId: "g", durationSec: 600, stepSec: 15, costCoverage: "full", pov: "full",
     bounds: { minX: 0, maxX: 1, minZ: 0, maxZ: 1 },
     sides: [{ ally: 0, teams: [0], players: ["Ann", "Bob"], color: "#112233" }, { ally: 1, teams: [1], players: ["Cy"] }],
     teams: [], defs: {},
@@ -55,6 +55,9 @@ test("notices say why something is missing", () => {
   assert.deepEqual(notices(ins()), []);
   assert.match(notices(ins({ pov: "ally" }))[0], /re-simulation/);
   assert.match(notices(ins({ costCoverage: "army" }))[0], /armed mobile units only/);
+  // An older file says what it lacks; a capture without killers says so.
+  assert.equal(notices(ins({ version: 5 }))[0], "Outdated report (v5), missing: fitted win odds, game end at the resign, story battles. It updates when summaries are recomputed.");
+  assert.match(notices(ins({ causes: false }))[0], /does not record killers/);
 });
 
 test("side labels and colours", () => {
@@ -225,7 +228,8 @@ test("losses split what died fighting from what went down with its team", () => 
   assert.equal(l.priced, true);
   assert.deepEqual(l.combat, [[100, 0, 200], [0, 50, 0]], "Gaia's loss belongs to no side");
   assert.deepEqual(l.wiped, [[0, 0, 400], [0, 0, 0]]);
-  assert.deepEqual(knockouts(i), [{ f: 950, team: 0, side: 0, name: "Ann" }]);
+  assert.deepEqual(knockouts(i), [{ f: 950, team: 0, side: 0, name: "Ann", label: "Ann is eliminated" }]);
+  assert.equal(knockouts({ ...i, eliminated: [{ f: 950, team: 0, recorded: false, to: 1 }] })[0].label, `Ann leaves, handing their units to ${i.teams.find((t) => t.team === 1)?.player ?? "Team 1"}`);
   assert.deepEqual(knockouts(ins()), [], "a file before version 3 names none");
 });
 

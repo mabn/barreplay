@@ -351,11 +351,11 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
   if (out.length === 1) {
     fight = false;
     focus = eliminationFocus(ins, out[0].team, out[0].f);
-    title = `${out[0].name} is eliminated`;
+    title = out[0].label;
   } else if (out.length > 1) {
     fight = false;
     focus = eliminationFocus(ins, out[0].team, out[0].f);
-    title = `${out.length} of ${possessive(L)} players are eliminated`;
+    title = `${out.length} of ${possessive(L)} players are out`;
   } else if (ll.commanders.length === 1) {
     focus = deathFocus(ins, ll.commanderDeaths[0]);
     title = selfDestructed(ins, ll.commanderDeaths[0])

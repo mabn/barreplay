@@ -70,10 +70,10 @@ export function swingChart(ins: Insights, opts: SummaryOptions, watch: Watch | n
     const x = c.x(k.f / SIM_FPS);
     const y = k.side === 0 ? c.top + 8 : c.bottom - 6;
     const m = s("text", { x, y, "text-anchor": "middle", class: "brs-ko" + (watch ? " brs-clickable" : ""), style: `fill: ${sideColor(ins, k.side)}` }, "✕");
-    tip(m, { title: named(ins, `${k.name} is eliminated`), rows: [{ color: sideColor(ins, k.side), label: fmtClock(k.f / SIM_FPS) }], note: watchNote(watch) });
+    tip(m, { title: named(ins, k.label), rows: [{ color: sideColor(ins, k.side), label: fmtClock(k.f / SIM_FPS) }], note: watchNote(watch) });
     if (watch) m.addEventListener("click", () => {
       const at = eliminationFocus(ins, k.team, k.f);
-      watch(clipAround(k.f, { x: at.x, z: at.z, r: at.r, title: `${k.name} is eliminated` }));
+      watch(clipAround(k.f, { x: at.x, z: at.z, r: at.r, title: k.label }));
     });
     marks.append(m);
   }
@@ -167,7 +167,7 @@ export function swingChart(ins: Insights, opts: SummaryOptions, watch: Watch | n
     ? `fitted to ${sw.games ?? "past"} games`
     : "with hand-set weights, not yet fitted to real games";
   return {
-    key: mirrorKey(ins, knockouts(ins).length ? h("span", undefined, "✕ a player eliminated") : null),
+    key: mirrorKey(ins, knockouts(ins).length ? h("span", undefined, "✕ a player out") : null),
     hint: h("p", { class: "brs-hint" },
       `The chance each side wins, read from army value and metal income (a model ${model}; it is never told the result). The army value and income charts below share its time axis.`),
     svg: c.svg,

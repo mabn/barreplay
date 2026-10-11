@@ -503,18 +503,27 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           — divided by both armies' value at the time, or every battle lands in
                           the last twenty minutes, where everything costs more — grown while
                           the rate nearby stays >= a fifth of the peak (one quiet 10 s bin
-                          bridged, at most 5 min), its deaths removed, repeated up to 16 (battleMaxN; 12 cut a
-                          real game's 34-minute air battle); a
+                          bridged, at most 5 min), its deaths removed, repeated up to 24 (battleMaxN; 12 cut a
+                          real game's 34-minute air battle, 16 an 8-minute bomber fight); a
                           peak abutting a battle already found joins it. The old rule (deaths
                           chained within 1500 elmos and 45 s of quiet) chained a whole late
-                          game into ONE "battle" (10:00-55:47 on a real 8v8). ELIMINATIONS
+                          game into ONE "battle" (10:00-55:47 on a real 8v8). A battle that starts within 60 s of
+                          another's end, near it, where >= 30% of the metal killed in either
+                          was killed by the same (team, def) of killer is the SAME FORCE
+                          PUSHING ON and joins it (stories.go mergeAdvances; captures with
+                          causes only). ELIMINATIONS
                           (wipes.go, Insights.Eliminated) come from a v6 capture's teamdied
                           facts (Input.TeamDied; nil = no facts section), else are inferred: a
                           team's LAST burst of deaths (gaps <= 1 s, >= 8) with no live unit of
                           it seen after. Deaths at or after a team's elimination are WIPED —
                           units blown up by a player leaving, not fought for — and battles,
                           the costliest/unfinished awards and the page's moment stories skip
-                          them; the page draws them faint on its losses chart.
+                          them; the page draws them faint on its losses chart. A player who
+                          HANDS their units over and leaves (a burst of >= 8 "given" events,
+                          nothing owned after) is out too, with Elimination.To naming the
+                          recipient (withHandoffs; v7): the engine destroys nothing and records
+                          no teamdied, so neither rule above sees it. The page says "X leaves,
+                          handing their units to Y".
                           THE SUMMARY ENDS WHERE THE GAME WAS DECIDED (gameend.go): once every
                           side but one is out (a resign vote, or the last commanders dying),
                           Compute cuts the input at the start of the run of eliminations that
@@ -797,6 +806,10 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           reading of it: those rows pivot into a table (a column per side, a
                           line per metric) so the two sides' numbers line up. A panel label
                           can carry an (i) whose hover explains the panel (advantage.ts label).
+                          NOTICES (model.ts notices) open the page: an OUTDATED file says
+                          which features its version lacks (VERSION_FEATURES — add a line
+                          with every version bump), and a v7+ full-view file whose capture
+                          names no killers (Insights.Causes false) says what that costs.
                           Sections (sections/*.ts, in page order in index.ts) each
                           return null when the file cannot support them: the side-by-side
                           charts (advantage, army composition) need comparable(); race to

@@ -134,9 +134,29 @@ export function comparable(ins: Insights): boolean {
   return ins.sides.length === 2 && ins.pov === "full";
 }
 
+/** What each insights version added, for the outdated-report notice. */
+const VERSION_FEATURES: [number, string][] = [
+  [2, "swing line"],
+  [3, "eliminations"],
+  [4, "reclaims left out of losses"],
+  [5, "self-destructs"],
+  [6, "fitted win odds"],
+  [7, "game end at the resign, story battles"],
+];
+
+/** The newest insights version the page knows (index.ts INSIGHTS_VERSIONS[0]). */
+export const LATEST_INSIGHTS = 7;
+
 /** notices are the caveats the page states up front, in reading order. */
 export function notices(ins: Insights): string[] {
   const out: string[] = [];
+  if (ins.version < LATEST_INSIGHTS) {
+    const missing = VERSION_FEATURES.filter(([v]) => v > ins.version).map(([, f]) => f);
+    out.push(`Outdated report (v${ins.version}), missing: ${missing.join(", ")}. It updates when summaries are recomputed.`);
+  }
+  if (ins.version >= 7 && ins.pov === "full" && !ins.causes) {
+    out.push("This capture does not record killers: reclaims count as losses, battles name no killers, no Immortal award. A new re-simulation adds them.");
+  }
   if (ins.pov === "ally") {
     out.push("This capture was recorded by a player, so it only saw one side of the game. The side-by-side comparison appears once the full re-simulation is published.");
   } else if (ins.pov === "unknown") {

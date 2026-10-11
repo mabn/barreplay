@@ -25,7 +25,7 @@ export type * from "./types";
 export { comparable, notices } from "./model";
 
 /** The newest insights file version this build draws. */
-export const INSIGHTS_VERSION = 5;
+export const INSIGHTS_VERSION = 7;
 
 /** Every version this build draws, newest first: each only adds to the one
  * before (2: the winner and the swing line; 3: eliminations, and battles

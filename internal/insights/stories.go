@@ -105,29 +105,31 @@ type Award struct {
 }
 
 const (
-	battleRadius    = 1500.0                   // elmos from a battle's centre that still join it
-	battleCell      = 500.0                    // elmos per side of a heat-grid cell
-	battleBin       = 10                       // seconds per heat bin
-	battleFade      = 0.2                      // share of its peak rate a battle runs down to
-	battleMaxSec    = 300                      // longest a battle runs, seconds
-	battleUnpriced  = 25.0                     // metal a death with no recorded cost weighs
-	battleArmyFloor = 3000.0                   // smallest army total a fight is measured against
-	battleMinN      = 6                        // deaths for a peak to count as a battle
-	battleMaxN      = 16                       // battles kept (the biggest, then in time order)
-	battleTopDefs   = 3                        // costliest defs listed per side
-	blowWindow      = 30 * simFPS              // frames the Biggest blow's losses fall within
-	battleUnitDefs  = 48                       // defs a battle's unit list carries per side
-	tourGrid        = 32                       // cells per axis of the Tourist's map grid
-	tourMinCells    = tourGrid * tourGrid / 20 // 5% of the map, or no Tourist
-	closeCallMin    = 0.0                      // health fraction must be above this (alive)
-	closeCallCost   = 400.0                    // metal a Close call must cost (a fighter at 6% is no story)
-	immortalMaxHP   = 0.3                      // health fraction an Immortal must have fallen to
-	immortalKillX   = 3.0                      // metal killed after that, in multiples of its own cost
-	immortalMinKill = 1500.0                   // and at least this much metal
-	healedMin       = 1.0                      // own health a Most healed unit must have been repaired
-	pressureBin     = 30 * simFPS              // window Most healed's busiest moment is found in
-	pathEvery       = 5 * simFPS               // frames between recorded path points
-	pathMaxPts      = 400                      // path points an award carries at most
+	battleRadius       = 1500.0                   // elmos from a battle's centre that still join it
+	battleCell         = 500.0                    // elmos per side of a heat-grid cell
+	battleBin          = 10                       // seconds per heat bin
+	battleFade         = 0.2                      // share of its peak rate a battle runs down to
+	battleMaxSec       = 300                      // longest a battle runs, seconds
+	battleUnpriced     = 25.0                     // metal a death with no recorded cost weighs
+	battleArmyFloor    = 3000.0                   // smallest army total a fight is measured against
+	battleMinN         = 6                        // deaths for a peak to count as a battle
+	battleMaxN         = 24                       // battles kept (the biggest, then in time order)
+	battleAdvanceGap   = 60                       // seconds between a battle's end and the next start of the same force's push
+	battleAdvanceShare = 0.3                      // share of the metal killed by units killing in both
+	battleTopDefs      = 3                        // costliest defs listed per side
+	blowWindow         = 30 * simFPS              // frames the Biggest blow's losses fall within
+	battleUnitDefs     = 48                       // defs a battle's unit list carries per side
+	tourGrid           = 32                       // cells per axis of the Tourist's map grid
+	tourMinCells       = tourGrid * tourGrid / 20 // 5% of the map, or no Tourist
+	closeCallMin       = 0.0                      // health fraction must be above this (alive)
+	closeCallCost      = 400.0                    // metal a Close call must cost (a fighter at 6% is no story)
+	immortalMaxHP      = 0.3                      // health fraction an Immortal must have fallen to
+	immortalKillX      = 3.0                      // metal killed after that, in multiples of its own cost
+	immortalMinKill    = 1500.0                   // and at least this much metal
+	healedMin          = 1.0                      // own health a Most healed unit must have been repaired
+	pressureBin        = 30 * simFPS              // window Most healed's busiest moment is found in
+	pathEvery          = 5 * simFPS               // frames between recorded path points
+	pathMaxPts         = 400                      // path points an award carries at most
 )
 
 // pathPt is one recorded position of a unit's life.
@@ -505,12 +507,79 @@ func (p *pass) battles() []Battle {
 			found = append(found, foundBattle{b: nb, members: members})
 		}
 	}
+	found = p.mergeAdvances(found, ns)
 	out := make([]Battle, len(found))
 	for k, f := range found {
 		out[k] = f.b
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].F0 < out[j].F0 })
 	return out
+}
+
+// mergeAdvances joins a battle to the one before it when it is the same
+// force pushing on: it starts within battleAdvanceGap of the other's end,
+// near enough (their radii plus battleRadius apart at most), and at least
+// battleAdvanceShare of the metal killed in either was killed by units that
+// also killed in the other. A raid that wins a fight and walks on into the
+// base behind it is one battle that lasts longer, not two; two fights next
+// to each other share no killers. Only a capture that names killers (a
+// re-simulation) can tell, so nothing else is merged this way.
+func (p *pass) mergeAdvances(found []foundBattle, ns int) []foundBattle {
+	if !p.hasCauses {
+		return found
+	}
+	d := p.out.Deaths
+	killers := func(f foundBattle) (map[[2]int32]float64, float64) {
+		by := map[[2]int32]float64{}
+		total := 0.0
+		for _, i := range f.members {
+			if k := p.deathKillerKind[i]; k[0] >= 0 {
+				by[k] += d.Cost[i]
+				total += d.Cost[i]
+			}
+		}
+		return by, total
+	}
+	shared := func(a, b map[[2]int32]float64, total float64) float64 {
+		if total <= 0 {
+			return 0
+		}
+		s := 0.0
+		for k, v := range a {
+			if b[k] > 0 {
+				s += v
+			}
+		}
+		return s / total
+	}
+	gap := int32(battleAdvanceGap * simFPS)
+	for merged := true; merged; {
+		merged = false
+		sort.SliceStable(found, func(i, j int) bool { return found[i].b.F0 < found[j].b.F0 })
+		for i := 0; i < len(found) && !merged; i++ {
+			a := found[i]
+			ka, ta := killers(a)
+			for j := i + 1; j < len(found); j++ {
+				b := found[j]
+				if b.b.F0-a.b.F1 > gap || b.b.F1 < a.b.F1 {
+					continue
+				}
+				if math.Hypot(float64(b.b.X-a.b.X), float64(b.b.Z-a.b.Z)) > float64(a.b.R+b.b.R)+battleRadius {
+					continue
+				}
+				kb, tb := killers(b)
+				if shared(ka, kb, ta) < battleAdvanceShare && shared(kb, ka, tb) < battleAdvanceShare {
+					continue
+				}
+				members := append(append([]int{}, a.members...), b.members...)
+				found[i] = foundBattle{b: p.battleOf(members, ns), members: members}
+				found = append(found[:j], found[j+1:]...)
+				merged = true
+				break
+			}
+		}
+	}
+	return found
 }
 
 // foundBattle is a battle and the deaths it holds, while battles are found.

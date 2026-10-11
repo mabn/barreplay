@@ -24,6 +24,9 @@ export interface Knockout {
   side: number;
   /** Who the team was, for a label. */
   name: string;
+  /** What happened: "X is eliminated", or "X leaves, handing their units
+   * to Y" for a player whose units went to a teammate. */
+  label: string;
 }
 
 /** knockouts lists the eliminated teams with their sides and names, in time
@@ -33,7 +36,9 @@ export function knockouts(ins: Insights): Knockout[] {
   const owner = new Map(ins.teams.map((t) => [t.team, t.player ?? ""]));
   return (ins.eliminated ?? []).map((e) => {
     const sd = side.get(e.team) ?? -1;
-    return { f: e.f, team: e.team, side: sd, name: owner.get(e.team) || (sd >= 0 ? sideName(ins, sd) : `Team ${e.team}`) };
+    const name = owner.get(e.team) || (sd >= 0 ? sideName(ins, sd) : `Team ${e.team}`);
+    const to = e.to !== undefined ? owner.get(e.to) || `Team ${e.to}` : null;
+    return { f: e.f, team: e.team, side: sd, name, label: to ? `${name} leaves, handing their units to ${to}` : `${name} is eliminated` };
   });
 }
 

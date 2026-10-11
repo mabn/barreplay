@@ -5,6 +5,8 @@
 export interface Insights {
   version: number;
   gameId: string;
+  /** The capture names what killed each unit (version 7+). */
+  causes?: boolean;
   mapName?: string;
   durationSec: number;
   /** Spacing of every series, in seconds. */
@@ -154,6 +156,9 @@ export interface Elimination {
   team: number;
   /** Recorded by the capture, rather than inferred from a burst of deaths. */
   recorded: boolean;
+  /** The team the player handed their units to before leaving (version
+   * 7+): nothing was destroyed, the player is out all the same. */
+  to?: number;
 }
 
 export interface PlayerReport {
