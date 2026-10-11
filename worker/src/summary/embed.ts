@@ -94,20 +94,12 @@ function ridPath(rid: string): string {
   return rid.split("/").map(encodeURIComponent).join("/");
 }
 
-/** findInsights returns the newest insights file published for gameId, or
- * null when the game has no playable replay or no summary could be had (one
- * missing at every version is computed on demand first). An older version is
- * returned as it is, with the current one asked for in the background so the
- * NEXT visit finds it; mountGameSummary instead waits for it and swaps it in.
- * A failure other than "not there" throws. */
+/** findInsights returns the newest insights file for gameId, or null when
+ * the game has no playable replay or no summary could be had. One older than
+ * this build draws, or missing at every version, is computed on demand and
+ * WAITED for (POST /api/insights); an older one is the fallback only when that
+ * request cannot answer. A failure other than "not there" throws. */
 export async function findInsights(gameId: string, opts: EmbedOptions = {}): Promise<Insights | null> {
-  const found = await lookup(gameId, opts);
-  return found?.ins ?? null;
-}
-
-/** lookup is findInsights plus the pending request for the current version
- * when what it found is older (stale: resolves to it, or null). */
-async function lookup(gameId: string, opts: EmbedOptions): Promise<{ ins: Insights | null; stale?: Promise<Insights | null> } | null> {
   const replayOrigin = opts.replayOrigin ?? REPLAY_ORIGIN;
   const dataOrigin = opts.dataOrigin ?? DATA_ORIGIN;
   const res = await fetch(`${replayOrigin}/api/replays?id=${encodeURIComponent(gameId)}&limit=2`);
@@ -123,11 +115,13 @@ async function lookup(gameId: string, opts: EmbedOptions): Promise<{ ins: Insigh
     if (r.status === 404) continue;
     if (!r.ok) throw new Error(`insights: HTTP ${r.status}`);
     const ins = (await r.json()) as Insights;
-    if (v === INSIGHTS_VERSIONS[0]) return { ins };
-    return { ins, stale: requestSummary(replayOrigin, rid) };
+    if (v === INSIGHTS_VERSIONS[0]) return ins;
+    // Older than this build draws: wait for the current one, computed on
+    // demand, and fall back to this one only when that cannot answer.
+    return (await requestSummary(replayOrigin, rid)) ?? ins;
   }
   // None at all: worth waiting for, since there is nothing else to show.
-  return { ins: await requestSummary(replayOrigin, rid) };
+  return requestSummary(replayOrigin, rid);
 }
 
 /** requestSummary asks the viewer's worker for rid's summary at the newest
@@ -154,8 +148,8 @@ async function requestSummary(replayOrigin: string, rid: string): Promise<Insigh
  * moment plays it in a clip window over the page (clipPlayer), like the
  * viewer's own summary does, unless the host passes its own onClip/onSeek. */
 export async function mountGameSummary(el: HTMLElement, gameId: string, opts: EmbedOptions = {}): Promise<SummaryHandle | null> {
-  const found = await lookup(gameId, opts);
-  if (!found?.ins) return null;
+  const ins = await findInsights(gameId, opts);
+  if (!ins) return null;
   const { replayOrigin = REPLAY_ORIGIN, dataOrigin: _d, ...rest } = opts;
   // Icons live beside the viewer; bundled into another site, the module's
   // own origin (icons.ts's default) would be that site's. Maps go through the
@@ -165,28 +159,5 @@ export async function mountGameSummary(el: HTMLElement, gameId: string, opts: Em
     summaryOpts.onClip = clipPlayer(gameId, replayOrigin);
     summaryOpts.onSeek = (f) => window.open(replayLink(gameId, f, replayOrigin), "_blank", "noopener");
   }
-  let current = mountSummary(el, found.ins, summaryOpts);
-  let destroyed = false;
-  if (found.stale) {
-    // An older summary is shown at once, under a line saying the current one
-    // is on its way, and swapped for it the moment it arrives — as the
-    // viewer's own Summary tab does. No answer (no daemon, too busy, failed)
-    // leaves the older one, minus the line.
-    const note = el.ownerDocument.createElement("p");
-    note.textContent = "Updating this summary to the current version…";
-    note.style.cssText = "margin:0 0 8px;font-size:12px;opacity:.7";
-    el.prepend(note);
-    void found.stale.then((fresh) => {
-      note.remove();
-      if (destroyed || !fresh) return;
-      current.destroy();
-      current = mountSummary(el, fresh, summaryOpts);
-    });
-  }
-  return {
-    destroy() {
-      destroyed = true;
-      current.destroy();
-    },
-  };
+  return mountSummary(el, ins, summaryOpts);
 }

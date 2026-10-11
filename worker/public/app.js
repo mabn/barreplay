@@ -7259,15 +7259,17 @@ async function showSummary() {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const ins = await res.json();
     if (summaryFor !== file) return;
+    if (ins.version !== INSIGHTS_VERSIONS[0]) {
+      // An older summary: the page WAITS for the current one rather than
+      // drawing one it is about to replace. The older one is shown only when
+      // the request cannot answer (no daemon, too busy, failed).
+      summaryMessage('Updating the summary for this replay…');
+      const fresh = await freshSummary(file);
+      if (summaryFor !== file) return;
+      mountSummaryIns(lib, fresh || ins);
+      return;
+    }
     mountSummaryIns(lib, ins);
-    if (ins.version === INSIGHTS_VERSIONS[0]) return;
-    // An older summary: shown at once, with a line saying the current one is
-    // being computed, and swapped for it the moment it arrives.
-    const note = summaryNote('Updating this summary to the current version…');
-    const fresh = await freshSummary(file);
-    if (summaryFor !== file) return;
-    if (fresh) mountSummaryIns(lib, fresh);
-    else note.remove();
   } catch (err) {
     if (summaryFor !== file) return;
     summaryFor = null; // let a later visit retry
@@ -7284,16 +7286,6 @@ function mountSummaryIns(lib, ins) {
   const el = document.getElementById('summary');
   el.textContent = '';
   summaryHandle = lib.mountSummary(el, ins, { onSeek: seekToFrame, onClip: openClip, mapApi: MAP_API });
-}
-
-// summaryNote puts one muted line above the mounted summary; the caller
-// removes it (or a remount replaces the pane, line and all).
-function summaryNote(text) {
-  const p = document.createElement('p');
-  p.className = 'summarynote';
-  p.textContent = text;
-  document.getElementById('summary').prepend(p);
-  return p;
 }
 
 // ---- on-demand summaries ----------------------------------------------------

@@ -1621,21 +1621,23 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           computes it with internal/insightsrun, publishes it, and answers on the
                           socket. CAPACITY IS THE HUB'S, IN MEMORY: requests go only to a daemon
                           computing that VERSION, up to its slots; past them up to HUB_DEFAULTS
-                          .maxQueued wait, past that "busy"; 60 s deadline queue wait included
+                          .maxQueued wait, past that "busy"; a 10 s deadline, queue
+                          wait included (Marcin's pick — how long a reader is kept waiting; a
+                          timed-out computation still finishes and publishes for the next visit)
                           (a timed-out request keeps its daemon's slot until it answers); readers
                           of one replay share one computation; a failure is remembered 10 min so
                           a broken replay costs a daemon once. Busy/unavailable answer 503,
-                          timeout 504, failed 502, and every one means the page KEEPS the summary
-                          it shows (an older one under a muted "Updating…" line, .summarynote,
-                          swapped when the new one arrives). Its own DO class so socket traffic
+                          timeout 504, failed 502. The page BLOCKS on the request (Marcin's call:
+                          synchronous) — a stale summary is not drawn while the current one is
+                          computed, "Updating the summary…" shows instead — and every non-200
+                          means it falls back to the older file, if there is one. Its own DO class so socket traffic
                           never wakes ReplayIndex (no SQL, no ROW BUDGET); Hibernation API, the
                           daemon's "ping" keepalive answered "pong" by the runtime
                           (setWebSocketAutoResponse) without waking it, per-socket facts in the
                           attachment, and nothing in flight across an eviction (an instance with a
                           request in progress is never evicted). OPEN and answering any origin
                           (the lavabalance embed asks with a text/plain body — no preflight — and
-                          awaits it when there is no summary at all, else asks in the background
-                          for the next visit): what it can cost is bounded by the slots and the
+                          waits for it like the viewer does): what it can cost is bounded by the slots and the
                           queue. Only plain bringest serves it (cmd/bringest/summaries.go over
                           ws.go, a stdlib WebSocket client: net/http does the handshake and hands
                           back the connection, the framing is hand-written) — never -resim, whose
