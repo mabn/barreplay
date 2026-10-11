@@ -5698,6 +5698,57 @@ function gameHaveLabel(g) {
   return ['—', 'none'];
 }
 
+// queueGameButton is the Games row's admin Queue button: it asks for a
+// re-simulation of that game through the same admin route the queue page's
+// paste box uses, with force, so a published game (a one-sided upload, a
+// capture worth redoing) can be queued too. A game with a job already
+// queued or running gets a disabled button saying so; asking twice is
+// harmless anyway (the route hands back the job in flight).
+function queueGameButton(g) {
+  const btn = document.createElement('button');
+  btn.className = 'queue';
+  const active = g.jobState === 'pending' || g.jobState === 'processing';
+  btn.textContent = active ? 'Queued' : 'Queue';
+  btn.disabled = active;
+  btn.title = active ? 'A re-simulation of this game is already queued or running'
+    : g.published ? 'Queue a re-simulation of this game, although a replay of it is published'
+    : 'Queue a re-simulation of this game';
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    btn.textContent = '…';
+    let r, resp;
+    try {
+      r = await fetch('/api/admin/resim', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ link: g.id, force: true }),
+      });
+      resp = await r.json().catch(() => ({}));
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = 'Queue';
+      btn.title = 'request failed: ' + (err.message || err);
+      return;
+    }
+    if (r.status === 401) {
+      adminSignedOut();
+      btn.disabled = false;
+      btn.textContent = 'Queue';
+      return;
+    }
+    if (!r.ok) {
+      btn.disabled = false;
+      btn.textContent = 'Queue';
+      btn.textContent = 'Failed';
+      btn.title = (resp.error || `request rejected: HTTP ${r.status}`) + ' — click to try again';
+      return;
+    }
+    btn.textContent = 'Queued';
+    btn.title = resp.status === 'duplicate' ? 'Already queued: following that job' : 'Queued for re-simulation';
+  });
+  return btn;
+}
+
 // lavabalanceCurl is the upload as a shell command: fetch the BAR API's
 // replay detail and POST it, wrapped in the one-element array lavabalance's
 // endpoint takes, straight through — the body is never inlined, since a
@@ -5967,6 +6018,7 @@ function renderGames(errMsg) {
           }
         });
         td.appendChild(btn);
+        td.appendChild(queueGameButton(g));
       }
       tr.appendChild(td);
     }

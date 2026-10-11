@@ -834,6 +834,8 @@ test('the games section lists the mirror with what this site has of each game', 
     ${extract('gameHaveLabel')}
     ${FFA_HELPERS}
     ${extract('renderGames')}
+    ${extract('queueGameButton')}
+    const adminSignedOut = () => {};
     renderGames.setAdmin = (on) => { admin = on; };
     return renderGames;
   })()`);
@@ -882,6 +884,10 @@ test('the games section lists the mirror with what this site has of each game', 
   render.setAdmin(true);
   render();
   assert.equal(losButtons().length, 4, 'one LOS button per row in admin mode');
+  // Beside it, the Queue button: a game with a job in flight says so and
+  // cannot be queued again; any other game, published or not, can.
+  const queue = walk(dom.tbody).filter((n) => n.tag === 'button' && n.className === 'queue');
+  assert.deepEqual(queue.map((b) => [b.textContent, b.disabled]), [['Queue', false], ['Queued', true], ['Queue', false], ['Queue', false]]);
   assert.ok(dom.tbody.children[0].children.at(-1).className === 'admin', 'the admin cell is the last column');
 });
 

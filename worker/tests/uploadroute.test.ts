@@ -850,6 +850,21 @@ test("POST /api/admin/resim refuses what it cannot or should not run", async (t)
   assert.equal(index.jobs.size, 0, "no refusal may leave a job behind");
 });
 
+test("POST /api/admin/resim with force queues a published game", async (t) => {
+  const { env, index } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  await app.request(`/api/replays/${RESIM_ID}`, { method: "PUT", body: JSON.stringify({ durationSec: 60 }) }, env);
+  const req = () => app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID, force: true }) }, env);
+  const first = await asJson(await req());
+  assert.equal(first.status, "queued");
+  assert.equal(index.jobs.get(first.job)?.kind, "resim");
+  // Still one job per game while it is active.
+  const again = await asJson(await req());
+  assert.equal(again.status, "duplicate");
+  assert.equal(again.job, first.job);
+  assert.equal(index.jobs.size, 1);
+});
+
 test("POST /api/admin/resim is idempotent: the same link twice is one job", async (t) => {
   const { env, index } = makeEnv();
   stubBarApi(t, new Set([RESIM_ID]));

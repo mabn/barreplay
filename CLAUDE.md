@@ -2137,6 +2137,13 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the DO tests. Note the workerd trap it dodges in webFetch: calling
                           an injected global fetch as `this.fetchImpl(...)` binds `this` to
                           the session and workerd throws "Illegal invocation" — detach first.
+                          QUEUE BUTTON (app.js queueGameButton): beside it in the same admin
+                          column, each Games row has a Queue button POSTing {link: id, force:
+                          true} to /api/admin/resim. force swaps resimEnqueue for jobAnnounce,
+                          so an admin can queue a PUBLISHED game too (a one-sided upload, a
+                          capture worth redoing); it still dedupes on an active job and
+                          honours a disabled one. A row whose job is pending/processing shows
+                          a disabled "Queued".
                           LAVABALANCE PREVIEW (app.js previewLavabalance, index.html
                           #lbdialog): each Games row carries an admin-only (signed in)
                           LOS button — lavabalance, the sibling worker keeping the LOS
