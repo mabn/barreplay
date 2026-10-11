@@ -1989,6 +1989,11 @@ function resize() {
     ovcv.style.height = viewH + 'px';
   }
   if (fitPending && data && viewW && viewH) fitView();
+  // Assigning a canvas's width CLEARS it, even to the same value, so the
+  // base layer must repaint: its skip key (lastBaseKey) only sees the size,
+  // and a resize that kept it (the clip window dragged, not resized) left
+  // the map solid black until something else changed.
+  lastBaseKey = '';
   draw();
 }
 window.addEventListener('resize', resize);
@@ -2335,7 +2340,7 @@ function drawOverlay(u) {
   // interpolated to. Passing the integer sample frame made every fade step
   // once per SECOND of game time (the sampling rate) instead of per rendered
   // frame, which at 1x is a visible stutter rather than a fade.
-  const simFrame = frameNumAt(idx) + renderFrac * (data.sampleEvery || 30);
+  const simFrame = frameNumAt(idx) + renderFrac * ((data && data.sampleEvery) || 30);
   if (marks.length) drawMarks(simFrame);
   if (clip && clip.focus.path) drawClipPath(clip.focus.path, simFrame);
   if (!u) return;
@@ -3784,7 +3789,7 @@ function setPlayhead(pos, forceSidebar) {
   resolveDisplay();
   if (changed) { maybeUpdateSidebar(forceSidebar); buildNextPosMap(); updateChat(frameNumAt(idx)); }
   updateTimeLabel();
-  if (clip) updateClipBar();
+  if (clip && data) updateClipBar();
   draw();
 }
 
@@ -3795,7 +3800,13 @@ function show() { setPlayhead(idx, true); } // full refresh at the current keyfr
 // so the map keeps up with the slider; the chunk's delta fetch starts once
 // the user dwells.
 function go(i) {
-  const target = Math.round(i);
+  scrub(Math.round(i));
+}
+
+// scrub is go at a fractional position (the clip's slider): the units are
+// interpolated to it exactly as during playback.
+function scrub(pos) {
+  const target = Math.floor(pos + 1e-6);
   if (data && !data.frames[target]) {
     clearTimeout(scrubTimer);
     scrubTimer = setTimeout(() => {
@@ -3804,7 +3815,7 @@ function go(i) {
       ensureChunk(c + 1);
     }, 250);
   }
-  setPlayhead(target, true);
+  setPlayhead(pos, true);
 }
 
 function stopPlay() {
@@ -7048,7 +7059,7 @@ async function submitResim() {
 // The insights file versions this page reads, newest first (src/summary
 // INSIGHTS_VERSIONS): a revision whose newer file is not built yet falls back
 // to the one it has.
-const INSIGHTS_VERSIONS = [6, 5, 4, 3, 2, 1];
+const INSIGHTS_VERSIONS = [7, 6, 5, 4, 3, 2, 1];
 let summaryModule = null;   // Promise of the imported library
 let summaryFor = null;      // currentFile the #summary pane was filled for
 let summaryHandle = null;   // the mounted summary, for destroy()
@@ -7065,16 +7076,28 @@ function setReplayTab(tab) {
   applyReplayTab();
 }
 
+// replayTabHref is the link behind a tab: this page with the tab set, so a
+// middle-click opens it in a new browser tab. A ?f= seek is dropped, since it
+// was this visit's starting point, not the tab's.
+function replayTabHref(tab) {
+  const u = new URL(location.href);
+  u.searchParams.delete('f');
+  if (tab === 'summary') u.searchParams.set('tab', 'summary');
+  else u.searchParams.delete('tab');
+  return u.pathname + u.search;
+}
+
 function applyReplayTab() {
   const tab = replayTab();
   document.body.classList.toggle('summary-tab', tab === 'summary');
   document.getElementById('replaytabs').style.display = '';
-  for (const b of document.querySelectorAll('#replaytabs button')) {
-    b.classList.toggle('active', b.dataset.rtab === tab);
+  for (const a of document.querySelectorAll('#replaytabs a')) {
+    a.classList.toggle('active', a.dataset.rtab === tab);
+    a.href = replayTabHref(a.dataset.rtab);
   }
   if (tab === 'summary') {
     stopPlay();
-    showSummary();
+    showSummary(); // the map window opens only when a moment is clicked
   } else if (clip) {
     closeClip(true); // carry on from the clip, where it was
   } else if (data) {
@@ -7161,6 +7184,22 @@ function idxForFrame(f) {
   return Math.max(0, start - 1);
 }
 
+// posForFrame is idxForFrame without the rounding: the fractional sample
+// position of a sim frame, so a scrub between samples interpolates the units
+// (and moves the playhead) smoothly rather than snapping to whole seconds.
+function posForFrame(f) {
+  if (!data || !data.chunks.length) return 0;
+  const se = data.sampleEvery || 30;
+  let start = 0;
+  for (const c of data.chunks) {
+    if (f < c.frame + c.count * se) {
+      return start + Math.max(0, Math.min(c.count - 1, (f - c.frame) / se));
+    }
+    start += c.count;
+  }
+  return Math.max(0, start - 1);
+}
+
 // seekToFrame is the summary's onSeek: back to the playback, at that moment.
 // seekFromURL honours a ?f=<sim frame> on the replay link — how a page that
 // is not this one (the summary embedded on another site, src/summary/embed.ts)
@@ -7197,14 +7236,124 @@ let clip = null; // {f0, f1, focus, home: {center, scale}} while open
 
 const CLIP_WALL_SEC = 20;
 
+// ---- the map window's place on screen ----
+// Dragged by its title bar, resized from any edge, and remembered in
+// localStorage (a per-viewer convenience: without storage it simply opens at
+// its default place, the middle of the screen).
+const CLIP_RECT_KEY = 'barreplay.mapwindow';
+const CLIP_MIN_W = 260, CLIP_MIN_H = 200;
+let clipRect = null; // {x, y, w, h} in CSS px while the window is placed
+
+function clipDefaultRect() {
+  const W = window.innerWidth, H = window.innerHeight;
+  const head = document.querySelector('header');
+  const top = (head ? head.getBoundingClientRect().bottom : 0) + 12;
+  const w = Math.min(900, W - 40), h = Math.min(680, H - top - 20);
+  return { x: (W - w) / 2, y: top + (H - top - h) / 2, w, h };
+}
+
+function clampClipRect(r) {
+  const W = window.innerWidth, H = window.innerHeight;
+  const w = Math.max(Math.min(CLIP_MIN_W, W), Math.min(r.w, W));
+  const h = Math.max(Math.min(CLIP_MIN_H, H), Math.min(r.h, H));
+  return { x: Math.max(0, Math.min(r.x, W - w)), y: Math.max(0, Math.min(r.y, H - h)), w, h };
+}
+
+function placeClip(r) {
+  clipRect = clampClipRect(r);
+  const box = document.getElementById('clip');
+  box.style.left = clipRect.x + 'px';
+  box.style.top = clipRect.y + 'px';
+  box.style.width = clipRect.w + 'px';
+  box.style.height = clipRect.h + 'px';
+  box.style.right = 'auto';
+  box.style.bottom = 'auto';
+}
+
+function savedClipRect() {
+  try {
+    const r = JSON.parse(localStorage.getItem(CLIP_RECT_KEY) || 'null');
+    if (r && ['x', 'y', 'w', 'h'].every(k => Number.isFinite(r[k]))) return r;
+  } catch { /* no storage, or junk in it: the default */ }
+  return null;
+}
+
+function saveClipRect() {
+  try { localStorage.setItem(CLIP_RECT_KEY, JSON.stringify(clipRect)); } catch { /* best-effort */ }
+}
+
+function initClipWindow() {
+  const box = document.getElementById('clip');
+  const EDGE = 6;
+  let op = null; // the drag or resize in progress
+  const edgesAt = (e) => {
+    const r = box.getBoundingClientRect();
+    return {
+      l: e.clientX - r.left < EDGE, r: r.right - e.clientX < EDGE,
+      t: e.clientY - r.top < EDGE, b: r.bottom - e.clientY < EDGE,
+    };
+  };
+  const cursorFor = (g) => ((g.t && g.l) || (g.b && g.r) ? 'nwse-resize'
+    : (g.t && g.r) || (g.b && g.l) ? 'nesw-resize'
+    : g.l || g.r ? 'ew-resize' : g.t || g.b ? 'ns-resize' : '');
+  box.addEventListener('pointermove', (e) => {
+    if (embedClip) return;
+    if (!op) {
+      const c = cursorFor(edgesAt(e));
+      box.style.cursor = c;
+      box.classList.toggle('edge', !!c);
+      return;
+    }
+    const dx = e.clientX - op.sx, dy = e.clientY - op.sy, r = { ...op.r };
+    if (!op.g) { r.x += dx; r.y += dy; }
+    else {
+      // An edge moves on its own; the opposite one stays where it is.
+      if (op.g.r) r.w = Math.max(CLIP_MIN_W, op.r.w + dx);
+      if (op.g.b) r.h = Math.max(CLIP_MIN_H, op.r.h + dy);
+      if (op.g.l) { r.w = Math.max(CLIP_MIN_W, op.r.w - dx); r.x = op.r.x + op.r.w - r.w; }
+      if (op.g.t) { r.h = Math.max(CLIP_MIN_H, op.r.h - dy); r.y = op.r.y + op.r.h - r.h; }
+    }
+    placeClip(r);
+    if (op.g) resize();
+  });
+  // Capture phase: a press on the edge over the map must not also start a pan.
+  box.addEventListener('pointerdown', (e) => {
+    if (embedClip || e.button !== 0) return;
+    const g = edgesAt(e);
+    const onEdge = g.l || g.r || g.t || g.b;
+    const onHead = e.target.closest('#cliphead') && !e.target.closest('button, select, input, a');
+    if (!onEdge && !onHead) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const r = box.getBoundingClientRect();
+    op = { g: onEdge ? g : null, sx: e.clientX, sy: e.clientY, r: { x: r.left, y: r.top, w: r.width, h: r.height } };
+    box.setPointerCapture(e.pointerId);
+    document.body.classList.add('clip-dragging');
+  }, true);
+  const end = () => {
+    if (!op) return;
+    op = null;
+    document.body.classList.remove('clip-dragging');
+    saveClipRect();
+    resize();
+  };
+  box.addEventListener('pointerup', end);
+  box.addEventListener('pointercancel', end);
+  window.addEventListener('resize', () => {
+    if (clip && !embedClip && clipRect) { placeClip(clipRect); resize(); }
+  });
+}
+
 function openClip(c) {
   const box = document.getElementById('clip');
   if (!clip) {
     clip = { home: { center: { ...center }, scale } };
     document.getElementById('clipbody').append(document.getElementById('wrap'));
+    if (!embedClip) placeClip(savedClipRect() || clipDefaultRect());
     box.style.display = 'flex';
     document.body.classList.add('clip-open');
   }
+
   clip.f0 = c.f0;
   // Playback starts a few seconds before the moment; the clip reaches back
   // further so the reader can scroll to what led up to it.
@@ -7284,7 +7433,10 @@ function closeClip(keepView) {
 // window is the host's to hide: the player stays as it is, ready for the
 // next clip.
 function dismissClip() {
-  if (!embedClip) { closeClip(false); return; }
+  if (!embedClip) {
+    closeClip(false);
+    return;
+  }
   stopPlay();
   parent.postMessage({ type: 'barreplay:close' }, '*');
 }
@@ -7314,7 +7466,7 @@ function initClip() {
   document.getElementById('clipslider').oninput = e => {
     if (!clip || !data) return;
     stopPlay();
-    go(idxForFrame(clip.f0 + (+e.target.value / 1000) * (clip.f1 - clip.f0)));
+    scrub(posForFrame(clip.f0 + (+e.target.value / 1000) * (clip.f1 - clip.f0)));
   };
 }
 
@@ -7340,10 +7492,17 @@ function initEmbedClip() {
 }
 
 function initReplayTabs() {
-  for (const b of document.querySelectorAll('#replaytabs button')) {
-    b.onclick = () => setReplayTab(b.dataset.rtab);
+  for (const a of document.querySelectorAll('#replaytabs a')) {
+    a.onclick = (e) => {
+      // Modified clicks (ctrl/cmd/shift) keep the browser's new-tab/window
+      // meaning; a middle-click never reaches here (it is an auxclick).
+      if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      setReplayTab(a.dataset.rtab);
+    };
   }
   initClip();
+  initClipWindow();
 }
 
 function openReplay(id) {

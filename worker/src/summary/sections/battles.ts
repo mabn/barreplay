@@ -1,14 +1,14 @@
-// Battles: where each army stood over the game (G2, the fronts) with the
-// biggest fights marked on the same map and numbered in the order they
-// happened, beside a one-line-per-battle list (G4). The map and the list are
+// Battles: the biggest fights marked on the map and numbered in the order
+// they happened (the army-centre lines once drawn under them were dropped
+// as clutter), beside a one-line-per-battle list (G4). The map and the list are
 // one control: hovering either lights the other, clicking either selects
 // the battle, opens what each side lost there and plays its clip. Nothing here knows who killed what — a battle says where,
 // when and what each side lost, and calls it for the side that lost less.
 import { h, s, section } from "../dom";
 import { fmtClock, fmtMetal } from "../format";
 import { mapView } from "../mapview";
-import { comparable, sideColor, sideName } from "../model";
-import { compass, fighters } from "../moments";
+import { comparable, lossWorth, sideColor, sideName } from "../model";
+import { compass, fighters, ownBlast, ownBlastTitle } from "../moments";
 import { fighterNames } from "../names";
 import { fillUnits, inkOn } from "../unitchips";
 import { tip, type TipRow } from "../tooltip";
@@ -17,8 +17,7 @@ import { SIM_FPS, type Battle, type Insights, type SummaryOptions } from "../typ
 
 export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | null {
   if (!comparable(ins)) return null;
-  const hasFront = ins.series.front.some((row) => row.some(Boolean));
-  if (!hasFront && ins.battles.length === 0) return null;
+  if (ins.battles.length === 0) return null;
   const watch = watcher(opts);
   const priced = ins.battles.some((b) => b.lost.some((l) => l.metal > 0));
   const size = (l: { n: number; metal: number }) => (priced ? l.metal : l.n);
@@ -33,23 +32,6 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     scaled.push(f);
     f(view.width);
   };
-
-  // Each side's army centre, step by step, brightening toward the end of the
-  // game: where it starts faint is where the army began.
-  ins.series.front.forEach((row, side) => {
-    const n = row.length;
-    for (let i = 1; i < n; i++) {
-      const a = row[i - 1];
-      const b = row[i];
-      if (!a || !b) continue;
-      const seg = s("line", {
-        x1: a[0], y1: a[1], x2: b[0], y2: b[1],
-        stroke: sideColor(ins, side), "stroke-opacity": 0.2 + 0.6 * (i / n), "stroke-linecap": "round", "pointer-events": "none",
-      });
-      atWidth((w) => seg.setAttribute("stroke-width", String(0.005 * w)));
-      view.layer.append(seg);
-    }
-  });
 
   const rings: SVGGElement[] = [];
   const rows: HTMLElement[] = [];
@@ -73,8 +55,13 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     color: sideColor(ins, sd), label: `${sideName(ins, sd)} lost`,
     value: `${b.lost[sd]?.n ?? 0} units` + (priced ? ` · ${fmtMetal(b.lost[sd]?.metal ?? 0)}` : ""),
   }));
+  // Who came out ahead is decided by worth: a lost power plant costs its
+  // output as well as its metal.
+  const worth = (l?: { n: number; metal: number; worth?: number }) => (priced ? lossWorth(l) : l?.n ?? 0);
   const verdict = (b: Battle) => {
-    const [a, c] = [size(b.lost[0] ?? { n: 0, metal: 0 }), size(b.lost[1] ?? { n: 0, metal: 0 })];
+    const [a, c] = [worth(b.lost[0]), worth(b.lost[1])];
+    const own = ownBlast(b);
+    if (own >= 0 && (a === c || own === (a < c ? 1 : 0))) return ownBlastTitle(ins, b, own);
     return a === c ? "An even trade" : `${sideName(ins, a < c ? 0 : 1)} came out ahead`;
   };
 
@@ -138,8 +125,10 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     const b = ins.battles[i];
     // The side that lost less is boxed in its colour: which side came out
     // ahead, without a sentence saying so (an even trade boxes neither).
-    const [a, c] = [size(b.lost[0] ?? { n: 0, metal: 0 }), size(b.lost[1] ?? { n: 0, metal: 0 })];
-    const ahead = a === c ? -1 : a < c ? 0 : 1;
+    const [a, c] = [worth(b.lost[0]), worth(b.lost[1])];
+    // A battle its loser lost to its own blasts was won by nobody.
+    const more = a === c ? -1 : a < c ? 1 : 0;
+    const ahead = more < 0 || ownBlast(b) === more ? -1 : 1 - more;
     // One column a side, side by side: who, how much, then what — each
     // kind of unit lost as its icon with a count.
     const lossCol = (sd: number) => {
@@ -180,6 +169,6 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
       ...rows, detail)
     : null;
   return section("Battles",
-    h("p", { class: "brs-hint" }, "Lines: where each army stood, faint early and bright late. Numbers: the biggest fights in the order they happened, each ringed by the ground it covered. Click one to watch it and see its losses."),
+    h("p", { class: "brs-hint" }, "Numbers: the biggest fights in the order they happened, each ringed by the ground it covered. Click one to watch it and see its losses."),
     h("div", { class: "brs-storygrid" }, h("div", { class: "brs-mapwrap" }, view.svg), list));
 }

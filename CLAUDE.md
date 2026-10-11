@@ -503,22 +503,39 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           — divided by both armies' value at the time, or every battle lands in
                           the last twenty minutes, where everything costs more — grown while
                           the rate nearby stays >= a fifth of the peak (one quiet 10 s bin
-                          bridged, at most 5 min), its deaths removed, repeated up to 12; a
+                          bridged, at most 5 min), its deaths removed, repeated up to 24 (battleMaxN; 12 cut a
+                          real game's 34-minute air battle, 16 an 8-minute bomber fight); a
                           peak abutting a battle already found joins it. The old rule (deaths
                           chained within 1500 elmos and 45 s of quiet) chained a whole late
-                          game into ONE "battle" (10:00-55:47 on a real 8v8). ELIMINATIONS
+                          game into ONE "battle" (10:00-55:47 on a real 8v8). A battle that starts within 60 s of
+                          another's end, near it, where >= 30% of the metal killed in either
+                          was killed by the same (team, def) of killer is the SAME FORCE
+                          PUSHING ON and joins it (stories.go mergeAdvances; captures with
+                          causes only). ELIMINATIONS
                           (wipes.go, Insights.Eliminated) come from a v6 capture's teamdied
                           facts (Input.TeamDied; nil = no facts section), else are inferred: a
                           team's LAST burst of deaths (gaps <= 1 s, >= 8) with no live unit of
                           it seen after. Deaths at or after a team's elimination are WIPED —
                           units blown up by a player leaving, not fought for — and battles,
                           the costliest/unfinished awards and the page's moment stories skip
-                          them; the page draws them faint on its losses chart.
+                          them; the page draws them faint on its losses chart. A player who
+                          HANDS their units over and leaves (a burst of >= 8 "given" events,
+                          nothing owned after) is out too, with Elimination.To naming the
+                          recipient (withHandoffs; v7): the engine destroys nothing and records
+                          no teamdied, so neither rule above sees it. The page says "X leaves,
+                          handing their units to Y". A player who RESIGNS is recorded dead
+                          (teamdied) and THEN has their units shared out: a give burst within
+                          handoffNear = 60 s of a recorded elimination gives it the same To. A
+                          handoff is never a swing's story (the army stayed on the board,
+                          losses.ts Knockout.handoff); the story says "Meanwhile X leaves...".
                           THE SUMMARY ENDS WHERE THE GAME WAS DECIDED (gameend.go): once every
                           side but one is out (a resign vote, or the last commanders dying),
                           Compute cuts the input at the start of the run of eliminations that
-                          emptied the last side to go (teams of one side within 30 s count as
-                          one surrender) and computes everything up to there — the engine then
+                          emptied the last side to go (teams of one side out within 10 s of
+                          its LAST elimination count as one surrender — measured from the
+                          last, never chained, since in a final push teams fall one after
+                          another and chaining them ended a real 8v8 a minute before its
+                          resign; v7) and computes everything up to there — the engine then
                           blows up the losing side's whole army, which dwarfed every real loss
                           on every chart. Recorded teamdied facts give the cut up front; an
                           inferred one costs a first pass over the whole game (whose
@@ -608,6 +625,42 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           identical Juggernauts. Its F is the window's costliest death (where
                           the card's map dot and the clip zoom), F0/F1 the window; the clip
                           plays the window (clipEvent).
+                          GROUNDED FLEET (transports.go, key "idle"): a player's air transports
+                          of one def that never carried a unit — >= idleMin = 5 and >= 75% of
+                          those they built (a factory left repeating its last order). The defs
+                          carry no transport flag, so transportRE is a curated name table; a
+                          carry is read off positions (carryFrame: a same-team ground unit
+                          within 32 elmos in two consecutive samples while the transport moved
+                          >= 64). Unit/Path are the last one built, F0/F1 the build span.
+                          OWN BLASTS AND FRIENDLY FIRE (friendly.go; captures with causes only):
+                          the engine credits a dying unit's explosion (a chain of fusions) to
+                          the exploding unit or to nobody, exactly like a weapon kill. A
+                          battle's BattleLoss.Own is the metal of a side's losses its OWN side
+                          destroyed (ownFire: killer on the same side, or an explosion with no
+                          killer named), OwnDef the def that did most of it, Trigger the enemy
+                          (team, def) whose kill came at most 5 s before the first of them. When
+                          Own is >= 50% and >= 1000 metal of the side that lost more, nobody
+                          "wins" the battle (moments.ts ownBlast): it reads "Blue team's
+                          Advanced Fusion Reactors blow up, set off by [MANTA]'s Basilica" in
+                          the swing list, the battle tooltip and a swing story, with no
+                          "ahead" box. FRIENDLY FIRE (key "friendly") is the LIVING unit (it
+                          did not die within 3 s: that would be its blast) that destroyed the
+                          most metal of ANOTHER team of its side within 10 s, at least 2000;
+                          Award.Pos is where its costliest victim stood.
+                          Merged battles (the abutting-peak rule and mergeAdvances) are capped
+                          at battleAdvanceMax = 8 min and mergeAdvances at a 3000-elmo radius:
+                          chained merges grew one 8v8's centre into a 27-minute "battle".
+                          A swing story that counts losses over its whole window (an
+                          elimination, a commander's death, one big loss) carries that span
+                          as its focus (deathSpan), so the clip marks a band, not an instant.
+                          POWER PLANTS COUNT 2.5x (defs.go powerWorth, isPowerPlant: wind,
+                          tidal, solar, fusion, geo by name; storage shares their UnitGroup)
+                          WHEREVER A BATTLE'S WINNER IS DECIDED — losing a fusion loses its
+                          output too (Marcin's rule). BattleLoss.Worth carries it, Def.Power
+                          marks the defs for the page's own tallies (moments.ts SideLoss.worth),
+                          and every verdict — gapBattles' decisive/win/even, a fight story's
+                          "wins"/"trades", the Battles list's "ahead" box — compares worth,
+                          while every number SHOWN stays plain metal (model.ts lossWorth).
                           swing.go (Version 2) adds the WINNER (Insights.Winner, a side index
                           from Meta.Winners, -1 unknown) and the SWING line: P(side 0 wins)
                           per step from a logistic model (WinModel) over three antisymmetric
@@ -616,10 +669,30 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           the model is never told who won. Moments are the biggest shifts
                           over a minute (>=12 points, 2 min apart, at most 6), each window
                           trimmed to where the line actually moved and tied to the battle
-                          overlapping it. WinModel.Coef started as HAND-SET PRIORS
+                          overlapping it. VERSION 7 splits each moment's move in the model's
+                          logit into what carried it (Moment.Army / Moment.Eco, shares toward
+                          the gaining side, income = last-minute + cumulative), DROPS EVERY
+                          moment starting in the first earlyShare = 30% of the game (both
+                          armies and economies still grow from nothing there, so the line
+                          swings on who built sooner; the page tells that stretch's decisive
+                          battles instead, see gapBattles), and drops a
+                          moment starting in the first earlyEcoSec = 4 min (a short game) that income
+                          carried (Eco >= 0.5) unless the other side lost an ECONOMY
+                          BUILDING in it (defs.go isEcoBuilding: UnitGroup metal/energy, a
+                          name pattern for captures without groups) — every opening is two
+                          economies growing a few seconds apart. The page (moments.ts
+                          growthStory) names in a no-fight story only what carried >= 20% of
+                          the shift, says for income whether the losing side's FELL or the
+                          other's grew faster, and gives the model's own numbers (last-minute
+                          income, metal mined so far); no story says a side "lost nothing".
+                          WinModel.Coef started as HAND-SET PRIORS
                           (Fitted=false, which the page states); VERSION 6 ships cmd/winfit's
-                          fit over 933 games from the 10 days before 2026-10-11 (0.840 army,
-                          3.428 last-minute income, 3.044 cumulative income: income carries
+                          fit over 933 games from the 10 days before 2026-10-11; v7 refits it
+                          over 1191 games with 25k metal (250 m/s for income) of VIRTUAL METAL
+                          added to both sides before every ratio (swingArmyK etc.: the opening's
+                          few hundred metal no longer swing the line; Marcin's pick of
+                          0.3k/1k/5k/10k/25k tested) — 1.904 army, 4.925 last-minute income,
+                          3.988 cumulative income: income carries
                           the line). Per-category fits (winfit -categories) differed mainly
                           in steepness and gained little, so it stays ONE model.
                           WINNERS come from the demo's tail (demofile.Demo.Winners: one byte
@@ -699,6 +772,17 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           library imported on first open, the insights fetched from the data
                           origin, a 404 saying the summary is not built yet, onClip = openClip
                           and onSeek = seekToFrame (back to the Replay tab at that sim frame).
+                          The two tabs are <a href> links (replayTabHref), so a middle- or
+                          ctrl-click opens either in a new browser tab; a plain click stays
+                          in the page. The clip window over the (centred) summary opens ONLY
+                          when a moment is clicked — never on its own when the tab opens
+                          (Marcin's call: an unasked-for popup over the page). ✕ and
+                          Escape close it. It drags by its title bar
+                          and resizes from any edge (initClipWindow; edge presses are taken in
+                          the capture phase so they do not also pan the map), and its rect is
+                          kept in localStorage ('barreplay.mapwindow', clamped to the
+                          viewport); the default is the middle of the screen (clipDefaultRect).
+                          Embedded (?embed=clip) none of this applies.
                           WATCHING (watch.ts): anything on the page with a moment behind it — a
                           chart time, a swing, a battle, a death, a milestone, an award — hands
                           the host a Clip {f0, f1, at?, atEnd?, x?, z?, r?, title?, titleRuns?} — `at`
@@ -746,7 +830,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           (app.js openClip/startClip/closeClip, index.html #clip): the replay's
                           own #wrap — the map canvases — moves into a small window over the
                           summary, zoomed to the clip's spot, at a speed that fits the clip
-                          into ~20 s (CLIP_WALL_SEC), stopping at f1, with just play, a slider
+                          into ~20 s (CLIP_WALL_SEC), stopping at f1, with just play, a slider (which SCRUBS fractionally — app.js scrub/posForFrame — so units interpolate between samples while it is dragged)
                           and the speed; Esc closes it with the summary where it was, "Open in
                           Replay" carries on at that frame. Asked for because every click
                           used to throw the reader out of the summary. fitView DEFERS while
@@ -762,6 +846,10 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           reading of it: those rows pivot into a table (a column per side, a
                           line per metric) so the two sides' numbers line up. A panel label
                           can carry an (i) whose hover explains the panel (advantage.ts label).
+                          NOTICES (model.ts notices) open the page: an OUTDATED file says
+                          which features its version lacks (VERSION_FEATURES — add a line
+                          with every version bump), and a v7+ full-view file whose capture
+                          names no killers (Insights.Causes false) says what that costs.
                           Sections (sections/*.ts, in page order in index.ts) each
                           return null when the file cannot support them: the side-by-side
                           charts (advantage, army composition) need comparable(); race to
@@ -787,10 +875,13 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           INCOME (advantage.ts comparePanel) on one time axis and crosshair, with eliminations marked on the swing line. The two
                           panels default to RATIO (series.ts leadPct: the first side a flat
                           line at 0%, the other at how much bigger the leader is, +20% / -20%,
-                          smoothed by the win model's own k; the axis is FIXED at +-50%
-                          (RATIO_CAP, Marcin's call) since the opening minutes and a decided
-                          game's last ones run to thousands of percent — past it the line
-                          runs along the edge and the tooltip has the number) with a Ratio/Value
+                          smoothed by the win model's own k; the axis spans the min and max
+                          lead from 40% to 95% of the game (series.ts ratioDomain, RATIO_WINDOW,
+                          Marcin's call), since the opening minutes and a decided game's last
+                          ones run to thousands of percent — past it the line runs into a
+                          16 px strip where an SVG mask fades it out (chart.ts fadeMask,
+                          TimeChartSpec.overflow), never along a solid edge, and the tooltip
+                          has the number) with a Ratio/Value
                           switch (scale.ts pairToggle); Value shows both sides' numbers with
                           a Linear/Log switch, log default, hidden under Ratio. The swings
                           list under it lays each swing out like a battle detail — the two
@@ -802,7 +893,14 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           with no swing is filled with BATTLES (moments.ts gapBattles: the
                           biggest battle in the widest gap over an eighth of the game, at least
                           4 min, until none is left or none holds a battle >= 10% of the
-                          game's biggest; at most 12 entries), each told as "Red team
+                          game's biggest; at most 12 entries; in the opening EARLY_SHARE = 30%,
+                          which lists no swings, ONLY the decisive battles: loser lost >= 3x
+                          the winner and >= 1000 metal that was >= 20% of its army then, at
+                          most 4, however small next to the game's biggest; and any STORY
+                          battle: at most 2 min long, >= 1000 metal lost by one side and both
+                          sides' losses >= 15% of both armies then — a raid or a bombing run
+                          too small next to the game's biggest yet decisive for the moment;
+                          at most LIST_MAX = 20 entries, one per time and place), each told as "Red team
                           decisively wins battle (5)" with the battles list's white-circle
                           badge — the line lists only its biggest shifts, and a decided fight
                           can move it little. A swing told as one battle carries the badge too. LOG
@@ -813,7 +911,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           there places each side's TOTAL on the log axis and splits it by
                           SHARE — stacking by value through a log would hand the bottom band
                           most of the height whatever its size. The BATTLES
-                          section (once "Map story") numbers its battles in the order they happened, on the map and
+                          section (once "Map story"; no army-centre lines since v7) numbers its battles in the order they happened, on the map and
                           in a one-line-per-battle list (losses either side of a centre line,
                           square-root scaled), one selection shared by both — a click on either
                           selects AND plays the battle's clip; a picked battle
@@ -831,10 +929,11 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           `icon` (its iconType) then its name; SummaryOptions.iconBase names
                           the origin, defaulting to the one the module was loaded from, null
                           = names; a def with no icon reads as its name.
-                          The library draws versions 1-6 (INSIGHTS_VERSIONS [6, 5, 4, 3, 2, 1]; v2 adds
+                          The library draws versions 1-7 (INSIGHTS_VERSIONS [7, 6, 5, 4, 3, 2, 1]; v2 adds
                           winner + swing, v3 eliminations and peak battles, v4 owner removals
                           left out, owned value and battle teams, v5 self-destructs marked, v6 fitted
-                          win weights) and app.js fetches .insights6, then 5, 4, 3, 2, 1. A version bump needs `insights -all` after
+                          win weights, v7 the game ends at the resign rather than the first team knocked
+                          out before it, swing drivers and no opening economy swings) and app.js fetches .insights7, then 6, 5, 4, 3, 2, 1. A version bump needs `insights -all` after
                           the deploy, or published replays keep their older summary.
                           EMBEDDING ON ANOTHER SITE (lavabalance's game pages): the other site
                           IMPORTS THE LIBRARY AT RUN TIME — import("https://replay.fogofwar.dev/

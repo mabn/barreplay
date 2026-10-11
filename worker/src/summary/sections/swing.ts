@@ -70,10 +70,10 @@ export function swingChart(ins: Insights, opts: SummaryOptions, watch: Watch | n
     const x = c.x(k.f / SIM_FPS);
     const y = k.side === 0 ? c.top + 8 : c.bottom - 6;
     const m = s("text", { x, y, "text-anchor": "middle", class: "brs-ko" + (watch ? " brs-clickable" : ""), style: `fill: ${sideColor(ins, k.side)}` }, "✕");
-    tip(m, { title: named(ins, `${k.name} is eliminated`), rows: [{ color: sideColor(ins, k.side), label: fmtClock(k.f / SIM_FPS) }], note: watchNote(watch) });
+    tip(m, { title: named(ins, k.label), rows: [{ color: sideColor(ins, k.side), label: fmtClock(k.f / SIM_FPS) }], note: watchNote(watch) });
     if (watch) m.addEventListener("click", () => {
       const at = eliminationFocus(ins, k.team, k.f);
-      watch(clipAround(k.f, { x: at.x, z: at.z, r: at.r, title: `${k.name} is eliminated` }));
+      watch(clipAround(k.f, { x: at.x, z: at.z, r: at.r, title: k.label }));
     });
     marks.append(m);
   }
@@ -129,7 +129,12 @@ export function swingChart(ins: Insights, opts: SummaryOptions, watch: Watch | n
       const units = h("span", { class: "brs-units" });
       if (l?.units.length) void fillUnits(units, ins, opts, l.units, priced, SWING_CHIPS);
       const away = e.elsewhere?.[sd] ? ` (+${fmtMetal(e.elsewhere[sd])} elsewhere)` : "";
-      const count = !l?.n ? "lost nothing" : `${l.n} lost` + (priced && l.metal ? ` · ${fmtMetal(l.metal)} metal` : "") + away;
+      // A swing on economy says what each side's income did, not that
+      // nobody lost anything.
+      const inc = e.income?.[sd];
+      const rate = (v: number) => `${fmtMetal(Math.round(v * 10) / 10)}/s`;
+      const count = inc && !l?.n ? `income ${rate(inc[0])} → ${rate(inc[1])}`
+        : !l?.n ? "" : `${l.n} lost` + (priced && l.metal ? ` · ${fmtMetal(l.metal)} metal` : "") + away;
       return h("div", { class: "brs-losscol" + (gained ? " brs-won" : ""), style: `--brs-side: ${sideColor(ins, sd)}` },
         head, h("div", { class: "brs-swloss" }, h("span", { class: "brs-muted" }, count), units));
     };
@@ -162,7 +167,7 @@ export function swingChart(ins: Insights, opts: SummaryOptions, watch: Watch | n
     ? `fitted to ${sw.games ?? "past"} games`
     : "with hand-set weights, not yet fitted to real games";
   return {
-    key: mirrorKey(ins, knockouts(ins).length ? h("span", undefined, "✕ a player eliminated") : null),
+    key: mirrorKey(ins, knockouts(ins).length ? h("span", undefined, "✕ a player out") : null),
     hint: h("p", { class: "brs-hint" },
       `The chance each side wins, read from army value and metal income (a model ${model}; it is never told the result). The army value and income charts below share its time axis.`),
     svg: c.svg,
@@ -203,6 +208,9 @@ interface Entry {
   shown: ({ n: number; metal: number; units: UnitLoss[] } | undefined)[];
   elsewhere: number[] | null;
   fighters: Fighter[][];
+  /** What each side's metal income went from and to, for a swing the line
+   * made on economy rather than a fight; null otherwise. */
+  income: [number, number][] | null;
   clip: () => Clip;
 }
 
@@ -228,6 +236,7 @@ function listEntries(ins: Insights, moments: Moment[], stories: MomentStory[], g
       chip: `▲ +${pct(m.delta)}`, chipTip: `${sideName(ins, m.side)}'s chance to win rose ${pct(m.delta)}`,
       rows: [{ color: sideColor(ins, m.side), label: `${fmtClock(m.f0 / SIM_FPS)}–${fmtClock(m.f1 / SIM_FPS)}`, value: `${sideName(ins, m.side)} +${pct(m.delta)}` }],
       detail: st.detail, shown: st.shown, elsewhere: st.elsewhere, fighters: st.fighters,
+      income: st.growth ? st.growth.map((g) => g.income) : null,
     });
     // A moment's clip opens just before the thing that made it — the
     // commander dying, the fight peaking — zoomed to where it happened,
@@ -246,7 +255,7 @@ function listEntries(ins: Insights, moments: Moment[], stories: MomentStory[], g
   for (const gb of gaps) {
     const b = ins.battles[gb.battle];
     const W = gb.side >= 0 ? sideName(ins, gb.side) : "";
-    const title = gb.verdict === "even" ? "Even trade in battle" : `${W} ${gb.verdict === "decisive" ? "decisively wins" : "wins"} battle`;
+    const title = gb.verdict === "blast" ? gb.blast! : gb.verdict === "even" ? "Even trade in battle" : `${W} ${gb.verdict === "decisive" ? "decisively wins" : "wins"} battle`;
     const moved = gb.side >= 0 && Math.round(gb.delta * 100) >= 1;
     const priced = ins.costCoverage === "full" || b.lost.some((l) => l.metal > 0);
     const lostText = (sd: number) => {
@@ -261,7 +270,7 @@ function listEntries(ins: Insights, moments: Moment[], stories: MomentStory[], g
       rows: [0, 1].map((sd) => ({ color: sideColor(ins, sd), label: `${sideName(ins, sd)} lost`, value: lostText(sd) })),
       detail: `Battle ${gb.battle + 1}, ${span(b.f0, b.f1)} in ${compass(ins, b.x, b.z)}.`,
       shown: b.lost.map((l) => ({ n: l.n, metal: l.metal, units: l.units ?? l.top.map((def) => ({ def, n: 0, metal: 0 })) })),
-      elsewhere: null, fighters: fighters(ins, b),
+      elsewhere: null, fighters: fighters(ins, b), income: null,
     });
     clips.push((t) => clipEvent(b.f0, b.f1, { x: b.x, z: b.z, r: Math.max(b.r, 800), title: t }));
   }

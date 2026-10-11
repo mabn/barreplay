@@ -16,7 +16,9 @@ type defInfo struct {
 	commander bool
 	builder   bool
 	fly       bool
+	transport bool
 	milestone int
+	worth     float64 // what a loss of it is worth per metal: powerWorth for a power plant, else 1
 }
 
 // pass walks the frames once, with the lifecycle events interleaved at their
@@ -50,6 +52,14 @@ type pass struct {
 	// deathKiller is the team the engine named as the killer, -1 when none
 	// (a capture without causes, a death with no attacker).
 	deathKiller []int32
+	// deathKillerKind is the killer's (team, def), {-1, -1} when none: what
+	// tells one force's advance from two fights (stories.go mergeAdvances).
+	deathKillerKind [][2]int32
+	// deathKillerUnit is the killing unit's id (-1 when none) and
+	// deathWeapon the weapon def of the blow (-1 when none): what tells
+	// friendly fire from a blast with nobody behind it (friendly.go).
+	deathKillerUnit []int32
+	deathWeapon     []int32
 
 	hasCauses bool // some destroyed event names a cause: a re-simulation
 	// selfdArmed is each unit with a self-destruct order standing: the frame
@@ -75,6 +85,9 @@ type pass struct {
 	prevFront   [][3]float64
 	contacted   int
 	playerTeams int
+
+	carry carries    // transports seen carrying a unit (transports.go)
+	gives giveBursts // units handed to another team, by giver (wipes.go)
 }
 
 func newPass(in Input, ro roster) *pass {
@@ -171,6 +184,8 @@ func newPass(in Input, ro roster) *pass {
 			commander: isCommander(d.Name),
 			builder:   d.IsBuilder,
 			fly:       d.CanFly,
+			transport: isTransport(d.Name),
+			worth:     worthPerMetal(d),
 			milestone: milestoneOf(d.Name),
 		}
 	}
@@ -214,6 +229,10 @@ func (p *pass) runEvents(f int32, all bool) {
 func (p *pass) event(e snapshot.Event) {
 	p.playerEvent(e)
 	switch e.Kind {
+	case snapshot.EventGiven:
+		if e.Cause != nil && e.Cause.Team >= 0 && e.Cause.Team != e.Team {
+			p.gives.add(e.Cause.Team, e.Team, e.Frame)
+		}
 	case snapshot.EventSelfD:
 		if _, on := p.selfdArmed[e.UnitID]; on {
 			delete(p.selfdArmed, e.UnitID)
@@ -280,6 +299,17 @@ func (p *pass) event(e snapshot.Event) {
 			killer = e.Cause.Team
 		}
 		p.deathKiller = append(p.deathKiller, killer)
+		killerKind := [2]int32{-1, -1}
+		if e.Cause != nil && e.Cause.Team >= 0 && e.Cause.DefID > 0 && e.Cause.UnitID != e.UnitID {
+			killerKind = [2]int32{e.Cause.Team, e.Cause.DefID}
+		}
+		p.deathKillerKind = append(p.deathKillerKind, killerKind)
+		ku, wd := int32(-1), int32(-1)
+		if e.Cause != nil {
+			ku, wd = e.Cause.UnitID, e.Cause.WeaponDef
+		}
+		p.deathKillerUnit = append(p.deathKillerUnit, ku)
+		p.deathWeapon = append(p.deathWeapon, wd)
 		if c := e.Cause; c != nil && cost > 0 {
 			// Credit the killing unit's track with an ENEMY it took down.
 			if kt := p.tracks[c.UnitID]; kt != nil && !kt.dead && kt.def == c.DefID {
@@ -417,6 +447,7 @@ func dead(u snapshot.UnitState) bool { return u.MaxHealth > 0 && u.Health <= 0 }
 func (p *pass) frame(fr snapshot.Frame) error {
 	p.runEvents(fr.Frame, false)
 	p.lastFrame = fr.Frame
+	p.carryFrame(fr)
 	step := stepOf(fr.Frame)
 	p.grow(step)
 	s := &p.out.Series
@@ -581,6 +612,7 @@ func (p *pass) finish() {
 	p.comms()
 	o := p.out
 	o.DurationSec = round1(float64(p.lastFrame) / simFPS)
+	o.Causes = p.hasCauses
 	if b := p.in.Bounds; b != nil {
 		o.Bounds = Bounds{MinX: b.MinX, MaxX: b.MaxX, MinZ: b.MinZ, MaxZ: b.MaxZ}
 	} else {
@@ -595,11 +627,11 @@ func (p *pass) finish() {
 		}
 	}
 	sort.SliceStable(o.Milestones, func(i, j int) bool { return o.Milestones[i].F < o.Milestones[j].F })
-	o.Eliminated = eliminations(o.Deaths, p.in.TeamDied, p.teamAlive, o.Teams)
+	o.Eliminated = withHandoffs(eliminations(o.Deaths, p.in.TeamDied, p.teamAlive, o.Teams), p.gives, p.teamAlive, o.Teams)
 	p.wiped = wipedDeaths(o.Deaths, o.Eliminated)
 	o.Battles = p.battles()
 	o.Winner = winner(o.Sides, p.in.Meta.Winners)
-	o.Swing = swing(o)
+	o.Swing = swing(o, func(id int32) bool { return isEcoBuilding(p.in.Meta.UnitDefs[id]) })
 	o.Awards = p.awards()
 	o.Players = p.players()
 	for side := range p.ro.sides {
@@ -609,6 +641,6 @@ func (p *pass) finish() {
 	}
 	for id := range p.usedDef {
 		d := p.in.Meta.UnitDefs[id]
-		o.Defs[id] = Def{Name: d.Name, Human: d.HumanName, Cost: round1(float64(d.MetalCost)), Icon: d.IconType}
+		o.Defs[id] = Def{Name: d.Name, Human: d.HumanName, Cost: round1(float64(d.MetalCost)), Icon: d.IconType, Power: isPowerPlant(d)}
 	}
 }

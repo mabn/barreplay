@@ -22,7 +22,7 @@ import (
 // Version names the file: replays/<rid>.insights<Version>.json. Pieces are
 // immutable, so any change to what is computed or how is a new version,
 // written beside the old one; the viewer asks for the one it understands.
-const Version = 6
+const Version = 7
 
 // FileName is the published piece's name for a revision id.
 func FileName(rid string) string { return fmt.Sprintf("%s.insights%d.json", rid, Version) }
@@ -47,6 +47,11 @@ type Insights struct {
 	StepSec      int     `json:"stepSec"`
 	CostCoverage string  `json:"costCoverage"`
 	POV          string  `json:"pov"`
+	// Causes is whether the capture names what killed each unit (a v6
+	// re-simulation): without it nothing tells a kill from a reclaim, no
+	// battle credits its killers and there is no Immortal. Version 7 and
+	// later; the page says what a report lacks.
+	Causes bool `json:"causes"`
 	// Bounds is the world extent the map views fit, in elmos.
 	Bounds Bounds `json:"bounds"`
 	// Sides are the ally teams with at least one player, in ally order.
@@ -105,6 +110,9 @@ type Def struct {
 	// Icon is the def's icontypes key (the viewer's /icons/icontypes.json),
 	// when the capture records one; the def's name is the fallback key.
 	Icon string `json:"icon,omitempty"`
+	// Power marks a power plant, whose loss counts powerWorth times its
+	// metal wherever a battle's winner is decided (version 7 and later).
+	Power bool `json:"power,omitempty"`
 }
 
 // Series holds one value per side per step; T[i] is step i's time in seconds.
@@ -155,6 +163,10 @@ type Elimination struct {
 	// Recorded is true when the capture recorded the elimination (a v6
 	// teamdied fact), false when it was inferred from a burst of deaths.
 	Recorded bool `json:"recorded"`
+	// To is the team a player HANDED their units to before leaving (a
+	// resign or a takeover after a disconnect): nothing was destroyed, so
+	// no fact or burst of deaths records it. Absent for a team that died.
+	To *int32 `json:"to,omitempty"`
 }
 
 // Milestone is the first time a side finished a unit of a milestone class.

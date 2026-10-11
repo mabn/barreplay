@@ -95,3 +95,43 @@ func armyCat(d snapshot.UnitDef) int {
 		return 3
 	}
 }
+
+// ecoNameRE matches BAR's economy buildings by name, for captures whose defs
+// carry no UnitGroup (before stream protocol 4): extractors, wind and tidal
+// generators, solars, fusions, geothermals and metal makers.
+var ecoNameRE = regexp.MustCompile(`^(arm|cor|leg)[a-z]*(mex|moho|win|sol|fus|geo|tide|makr|mmkr|mmm)`)
+
+// powerNameRE matches BAR's power plants: wind and tidal generators,
+// solars, fusions (the legendary one has no faction prefix) and geothermals.
+// Energy storage shares their UnitGroup, which is why the name decides.
+var powerNameRE = regexp.MustCompile(`^((arm|cor|leg)[a-z0-9]*(win|sol|fus|geo|tide)|afuslegendary)`)
+
+// powerWorth is what a lost power plant counts for per metal of its cost when
+// a battle's winner is decided (Marcin's rule): a fusion's loss is its metal
+// AND the energy it would have made, which has a metal equivalent.
+const powerWorth = 2.5
+
+func isPowerPlant(d snapshot.UnitDef) bool {
+	return isStructure(d) && (d.UnitGroup == "energy" || d.UnitGroup == "") && powerNameRE.MatchString(d.Name)
+}
+
+func worthPerMetal(d snapshot.UnitDef) float64 {
+	if isPowerPlant(d) {
+		return powerWorth
+	}
+	return 1
+}
+
+// isEcoBuilding is whether a def is a structure that makes metal or energy.
+func isEcoBuilding(d snapshot.UnitDef) bool {
+	if !isStructure(d) {
+		return false
+	}
+	switch d.UnitGroup {
+	case "metal", "energy":
+		return true
+	case "":
+		return ecoNameRE.MatchString(d.Name)
+	}
+	return false
+}

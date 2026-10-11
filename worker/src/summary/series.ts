@@ -34,3 +34,30 @@ export function leadPct(a: number[], b: number[], k: number): number[] {
     return y >= x ? 100 * (y / x - 1) : -100 * (x / y - 1);
   });
 }
+
+/** The share of a game a ratio chart scales to: from 40% to 95% of it.
+ * Before that both sides own next to nothing and the ratio runs to
+ * thousands of percent; the last minutes of a decided game do the same. */
+export const RATIO_WINDOW: [number, number] = [0.4, 0.95];
+
+/** ratioDomain is the y range a lead chart (leadPct) is drawn over: the
+ * lowest and highest lead inside RATIO_WINDOW of the game, with zero (the
+ * first side's line) always in it and a little room either side. Leads
+ * outside it run off the chart's edge. */
+export function ratioDomain(t: number[], lead: number[], durationSec: number): [number, number] {
+  const [w0, w1] = RATIO_WINDOW.map((x) => x * durationSec);
+  let inWin = lead.filter((v, i) => Number.isFinite(v) && t[i] >= w0 && t[i] <= w1);
+  if (!inWin.length) inWin = lead.filter(Number.isFinite);
+  let lo = Math.min(0, ...inWin);
+  let hi = Math.max(0, ...inWin);
+  const pad = Math.max(2, (hi - lo) * 0.05);
+  if (lo < 0) lo -= pad;
+  if (hi > 0) hi += pad;
+  if (hi - lo < 10) {
+    // A dead even game still gets a readable axis.
+    const grow = (10 - (hi - lo)) / 2;
+    lo -= grow;
+    hi += grow;
+  }
+  return [lo, hi];
+}

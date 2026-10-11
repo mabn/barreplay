@@ -6,11 +6,11 @@
 // above the army or the economy that caused it.
 import { h, s, section } from "../dom";
 import { fmtMetal } from "../format";
-import { bandPath, chartGroup, linePath, stepAt, timeChart, type ChartGroup } from "../chart";
+import { bandPath, chartGroup, fadeMask, linePath, stepAt, timeChart, type ChartGroup } from "../chart";
 import { mirrorKey } from "../legend";
 import { comparable, sideColor, sideName } from "../model";
 import { swingChart } from "./swing";
-import { leadPct, maxOf, stepTimes } from "../series";
+import { leadPct, maxOf, ratioDomain, stepTimes } from "../series";
 import { pairToggle, scaleToggle } from "../scale";
 import { tip, type TipRow } from "../tooltip";
 import { watcher, type Watch } from "../watch";
@@ -110,21 +110,20 @@ function pctText(v: number): string {
   return `${a < 10 ? a.toFixed(1).replace(/\.0$/, "") : Math.round(a)}%`;
 }
 
-/** RATIO_CAP is the ratio axis's half-height, in percent. Past it the gap
- * is not the story any more: the opening minutes, when one side has a
- * couple of units more of almost nothing, read as thousands of percent, as
- * do the last minutes of a decided game — scaled to those, every lead in
- * between is a flat line on zero. The tooltip has the exact number. */
-const RATIO_CAP = 50;
+/** OVERFLOW is how far, in chart pixels, a ratio line runs past its scale
+ * before it has faded out (chart.ts fadeMask). */
+const OVERFLOW = 16;
 
 function ratioChart(ins: Insights, watch: Watch | null, group: ChartGroup, t: number[], spec: CompareSpec): SVGSVGElement {
   const [a, b] = spec.values;
   const r = leadPct(a, b, spec.k);
-  const lim = RATIO_CAP;
-  // Past the scale the line runs along its edge; the tooltip has the number.
-  const shown = r.map((v) => Math.max(-lim, Math.min(lim, v)));
+  // Scaled to the middle-to-late game (ratioDomain); outside it the lead
+  // runs off the edge into a strip where it fades out, and the tooltip has
+  // the number.
+  const [lo, hi] = ratioDomain(t, r, ins.durationSec);
+  const overflow = { top: r.some((v) => v > hi) ? OVERFLOW : 0, bottom: r.some((v) => v < lo) ? OVERFLOW : 0 };
   const c = timeChart({
-    height: spec.height, durationSec: ins.durationSec, yMin: -lim, yMax: lim, zeroLine: true, xAxis: spec.xAxis,
+    height: spec.height, durationSec: ins.durationSec, yMin: lo, yMax: hi, zeroLine: true, xAxis: spec.xAxis, overflow,
     yTick: (v) => `${v > 0 ? "+" : v < 0 ? "-" : ""}${pctText(v)}`, gutter: GUTTER, watch, group,
     readout: (tt) => {
       const i = stepAt(t, tt);
@@ -140,7 +139,15 @@ function ratioChart(ins: Insights, watch: Watch | null, group: ChartGroup, t: nu
   // The lead shaded in the leader's colour: above the line the second side,
   // below it the first.
   const zero = t.map(() => 0);
-  c.plot.append(
+  // Past the strip a lead is clamped to the chart's very edge, where the
+  // mask has faded it to nothing.
+  const perPx = (hi - lo) / Math.max(1, c.y(lo) - c.y(hi));
+  const edgeHi = hi + overflow.top * perPx;
+  const edgeLo = lo - overflow.bottom * perPx;
+  const shown = r.map((v) => Math.max(edgeLo, Math.min(edgeHi, v)));
+  const marks = s("g", overflow.top || overflow.bottom ? { mask: `url(#${fadeMask(c, overflow)})` } : {});
+  c.plot.append(marks);
+  marks.append(
     s("path", { d: bandPath(c, t, zero, shown.map((v) => Math.max(0, v))), fill: sideColor(ins, 1), "fill-opacity": 0.25 }),
     s("path", { d: bandPath(c, t, shown.map((v) => Math.min(0, v)), zero), fill: sideColor(ins, 0), "fill-opacity": 0.25 }),
     s("path", { d: linePath(c, t, zero), fill: "none", stroke: sideColor(ins, 0), "stroke-width": 2 }),

@@ -50,6 +50,9 @@ export interface TimeChartSpec {
    * sign(v)·log10(1 + |v|/unit)), so zero and negatives — a mirrored chart's
    * lower half — still have a place. Ticks fall on powers of ten. */
   log?: { unit: number };
+  /** Pixels kept free above yMax and below yMin, for marks that run past
+   * the range to fade out in (fadeMask). */
+  overflow?: { top: number; bottom: number };
 }
 
 /** symlog is the log scale's transform. */
@@ -90,7 +93,8 @@ export function timeChart(spec: TimeChartSpec): TimeChart {
   const tf = (v: number) => (log ? symlog(v, log.unit) : v);
   const t0 = tf(spec.yMin);
   const tspan = tf(spec.yMax) - t0 || 1;
-  const y = (v: number) => bottom - ((tf(v) - t0) / tspan) * (bottom - top);
+  const ov = spec.overflow ?? { top: 0, bottom: 0 };
+  const y = (v: number) => bottom - ov.bottom - ((tf(v) - t0) / tspan) * (bottom - top - ov.top - ov.bottom);
 
   const svg = s("svg", { viewBox: `0 0 ${CHART_W} ${spec.height}`, role: "img" });
   const grid = s("g", { stroke: "var(--brs-grid)", "stroke-width": 1 });
@@ -198,4 +202,27 @@ export function stepAt(times: number[], t: number): number {
     else hi = mid - 1;
   }
   return lo;
+}
+
+let maskSeq = 0;
+
+/** fadeMask hides what a chart draws past its range gradually: marks in
+ * the overflow strips above yMax and below yMin (TimeChartSpec.overflow)
+ * fade out fast, so a line that runs off the scale reads as going on out of
+ * sight rather than as a value sitting on the edge. Apply the returned id
+ * as mask="url(#id)" on the group holding those marks. */
+export function fadeMask(c: TimeChart, overflow: { top: number; bottom: number }): string {
+  const id = `brs-fade-${++maskSeq}`;
+  const h = c.bottom - c.top || 1;
+  const stops: [number, number][] = [];
+  // Opacity falls off steeply: half gone a quarter of the way out.
+  if (overflow.top > 0) stops.push([0, 0], [overflow.top * 0.5 / h, 0.15], [overflow.top * 0.75 / h, 0.5]);
+  stops.push([overflow.top / h, 1], [1 - overflow.bottom / h, 1]);
+  if (overflow.bottom > 0) stops.push([1 - overflow.bottom * 0.75 / h, 0.5], [1 - overflow.bottom * 0.5 / h, 0.15], [1, 0]);
+  const grad = s("linearGradient", { id: `${id}-g`, gradientUnits: "userSpaceOnUse", x1: 0, x2: 0, y1: c.top, y2: c.bottom },
+    ...stops.map(([o, a]) => s("stop", { offset: o.toFixed(4), "stop-color": "#fff", "stop-opacity": a })));
+  const mask = s("mask", { id, maskUnits: "userSpaceOnUse", x: 0, y: 0, width: CHART_W, height: c.bottom + 4 },
+    s("rect", { x: 0, y: c.top, width: CHART_W, height: h, fill: `url(#${id}-g)` }));
+  c.svg.prepend(s("defs", {}, grad, mask));
+  return id;
 }

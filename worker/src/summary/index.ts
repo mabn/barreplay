@@ -25,14 +25,14 @@ export type * from "./types";
 export { comparable, notices } from "./model";
 
 /** The newest insights file version this build draws. */
-export const INSIGHTS_VERSION = 5;
+export const INSIGHTS_VERSION = 7;
 
 /** Every version this build draws, newest first: each only adds to the one
  * before (2: the winner and the swing line; 3: eliminations, and battles
  * found as peaks without them; 4: units their own side reclaimed are no
  * longer deaths; 5: self-destructs are marked), so an older file draws with those parts missing. A host
  * fetches the first that exists. */
-export const INSIGHTS_VERSIONS = [6, 5, 4, 3, 2, 1];
+export const INSIGHTS_VERSIONS = [7, 6, 5, 4, 3, 2, 1];
 
 /** insightsFile names a revision's insights piece. */
 export function insightsFile(rid: string, version = INSIGHTS_VERSION): string {

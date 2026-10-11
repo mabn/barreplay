@@ -5,6 +5,8 @@
 export interface Insights {
   version: number;
   gameId: string;
+  /** The capture names what killed each unit (version 7+). */
+  causes?: boolean;
   mapName?: string;
   durationSec: number;
   /** Spacing of every series, in seconds. */
@@ -68,6 +70,9 @@ export interface Def {
   cost?: number;
   /** Its icontypes key, when the capture records one (version 4+). */
   icon?: string;
+  /** A power plant: its loss counts POWER_WORTH times its metal wherever a
+   * battle's winner is decided (version 7+). */
+  power?: boolean;
 }
 
 export interface Series {
@@ -106,6 +111,10 @@ export interface Moment {
   delta: number;
   /** Index into battles, -1 for none. */
   battle: number;
+  /** The share of the shift carried by army value and by metal income
+   * (version 7; summing to 1, absent from older files). */
+  army?: number;
+  eco?: number;
 }
 
 /** One team's part in a battle (version 4+), in metal. */
@@ -135,7 +144,12 @@ export interface Battle {
   /** Radius holding the deaths, elmos. */
   r: number;
   /** Indexed like sides. */
-  lost: { n: number; metal: number; top: number[]; units?: UnitLoss[] }[];
+  /** worth: the metal with power plants at POWER_WORTH times theirs, what
+   * a winner is decided by (version 7+; absent = metal). */
+  /** own: the metal of it the side's OWN side destroyed (its dying units'
+   * blasts, allies' fire), ownDef the def that did most of it, trigger the
+   * enemy [team, def] whose kill set it off (version 7+, causes only). */
+  lost: { n: number; metal: number; worth?: number; top: number[]; units?: UnitLoss[]; own?: number; ownDef?: number; trigger?: [number, number] }[];
   /** Who took part, by team (version 4+). */
   teams?: BattleTeam[];
 }
@@ -145,6 +159,9 @@ export interface Elimination {
   team: number;
   /** Recorded by the capture, rather than inferred from a burst of deaths. */
   recorded: boolean;
+  /** The team the player handed their units to before leaving (version
+   * 7+): nothing was destroyed, the player is out all the same. */
+  to?: number;
 }
 
 export interface PlayerReport {
@@ -196,6 +213,9 @@ export interface Award {
   f0?: number;
   f1?: number;
   path?: [number, number, number][];
+  /** Where to look when the award has no unit route (Friendly fire: the
+   * costliest ally it destroyed), [x, z]. Version 7. */
+  pos?: [number, number];
 }
 
 /** Columnar: the i-th entry of every array describes one death. */

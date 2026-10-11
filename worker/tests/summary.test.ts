@@ -10,13 +10,13 @@ import { armyDrop, compass, fighters, gapBattles, momentStories, momentStory } f
 import { clipAround, clipAt, clipEvent, clipSpan, watcher } from "../src/summary/watch";
 import { zonesOf } from "../src/summary/zones";
 import { lossKinds } from "../src/summary/losskinds";
-import { leadPct } from "../src/summary/series";
+import { leadPct, ratioDomain } from "../src/summary/series";
 import { clipOf } from "../src/summary/sections/awards";
 import type { Insights } from "../src/summary/types";
 
 function ins(over: Partial<Insights> = {}): Insights {
   return {
-    version: 1, gameId: "g", durationSec: 600, stepSec: 15, costCoverage: "full", pov: "full",
+    version: 7, causes: true, gameId: "g", durationSec: 600, stepSec: 15, costCoverage: "full", pov: "full",
     bounds: { minX: 0, maxX: 1, minZ: 0, maxZ: 1 },
     sides: [{ ally: 0, teams: [0], players: ["Ann", "Bob"], color: "#112233" }, { ally: 1, teams: [1], players: ["Cy"] }],
     teams: [], defs: {},
@@ -55,6 +55,9 @@ test("notices say why something is missing", () => {
   assert.deepEqual(notices(ins()), []);
   assert.match(notices(ins({ pov: "ally" }))[0], /re-simulation/);
   assert.match(notices(ins({ costCoverage: "army" }))[0], /armed mobile units only/);
+  // An older file says what it lacks; a capture without killers says so.
+  assert.equal(notices(ins({ version: 5 }))[0], "Outdated report (v5), missing: fitted win odds, game end at the resign, story battles, friendly fire. It updates when summaries are recomputed.");
+  assert.match(notices(ins({ causes: false }))[0], /does not record killers/);
 });
 
 test("side labels and colours", () => {
@@ -161,7 +164,7 @@ test("a moment is named after what died in it", () => {
     battles: [{ f0: 950, f1: 1300, x: 450, z: 450, r: 200, lost: [] }] }), m);
   assert.deepEqual(st.focus, { f: 950, f1: 1300, x: 450, z: 450, r: 200 });
   assert.match(st.detail, /^There, 0:32–0:43: Blue team lost 10 units/);
-  assert.match(st.detail, /Team 2 lost nothing/);
+  assert.doesNotMatch(st.detail, /lost nothing/, "a side that lost nothing is not mentioned");
   // With no battle, the fight is still the killing at one spot: from its
   // first death in the window to its last (the clip plays all of it), and
   // not what died across the map meanwhile.
@@ -179,8 +182,22 @@ test("a moment is named after what died in it", () => {
   assert.equal(st.title, "Team 2 trades 800 metal for 400 metal in the centre");
   // Nothing died: the armies pulled apart.
   st = momentStory(ins({ ...base, deaths: deaths([]) }), m);
-  assert.equal(st.title, "Team 2 out-builds Blue team");
+  assert.equal(st.title, "Team 2 out-builds Blue team's army");
   assert.equal(st.focus, null, "nothing happened at one place");
+  assert.doesNotMatch(st.detail, /lost/, "nobody lost anything, so nobody is said to have");
+  // A version 7 file says what carried the shift: income alone names only
+  // income, with the numbers the model read; both name both.
+  const inc = { ...base, series: { ...base.series, metalIncome: [[5, 5, 5, 5], [5, 5, 20, 30]] } };
+  st = momentStory(ins({ ...inc, deaths: deaths([]) }), { ...m, army: 0.1, eco: 0.9 });
+  assert.equal(st.title, "Team 2 builds up a bigger economy");
+  assert.match(st.detail, /^Metal income over the last minute: Team 2 /);
+  assert.doesNotMatch(st.detail, /Army|lost/);
+  assert.deepEqual(st.growth?.[1].income, [5, 10]);
+  const fell = { ...base, series: { ...base.series, metalIncome: [[20, 20, 4, 4], [5, 5, 5, 5]] } };
+  st = momentStory(ins({ ...fell, deaths: deaths([]) }), { ...m, army: 0, eco: 1 });
+  assert.equal(st.title, "Blue team loses metal income");
+  st = momentStory(ins({ ...inc, deaths: deaths([]) }), { ...m, army: 0.4, eco: 0.6 });
+  assert.equal(st.title, "Team 2 out-builds Blue team in army and economy");
   // Deaths outside the window (and the step before it) do not count.
   st = momentStory(ins({ ...base, deaths: deaths([[100, 1, 0, 100, 100]]) }), m);
   assert.equal(st.lost[0].n, 0);
@@ -211,7 +228,8 @@ test("losses split what died fighting from what went down with its team", () => 
   assert.equal(l.priced, true);
   assert.deepEqual(l.combat, [[100, 0, 200], [0, 50, 0]], "Gaia's loss belongs to no side");
   assert.deepEqual(l.wiped, [[0, 0, 400], [0, 0, 0]]);
-  assert.deepEqual(knockouts(i), [{ f: 950, team: 0, side: 0, name: "Ann" }]);
+  assert.deepEqual(knockouts(i), [{ f: 950, team: 0, side: 0, name: "Ann", label: "Ann is eliminated", handoff: false }]);
+  assert.equal(knockouts({ ...i, eliminated: [{ f: 950, team: 0, recorded: false, to: 1 }] })[0].label, `Ann leaves, handing their units to ${i.teams.find((t) => t.team === 1)?.player ?? "Team 1"}`);
   assert.deepEqual(knockouts(ins()), [], "a file before version 3 names none");
 });
 
@@ -375,4 +393,51 @@ test("gapBattles fills a long stretch with no swing with its biggest battles", (
   // and battle 1 overlaps a swing.
   assert.deepEqual(got.map((g) => [g.battle, g.side, g.verdict]), [[1, 1, "decisive"], [3, -1, "even"], [4, 0, "win"]]);
   assert.ok(got[0].delta > 0.15, "the line moved toward the side that won it");
+});
+
+test("gapBattles tells only decisive battles with real losses in the opening", () => {
+  const F = 30;
+  const battle = (min: number, a: number, b: number) => ({ f0: min * 60 * F, f1: (min * 60 + 30) * F, x: 0, z: 0, r: 500,
+    lost: [{ n: 1, metal: a, top: [] }, { n: 1, metal: b, top: [] }] });
+  const steps = Array.from({ length: 40 }, (_, i) => i * 60);
+  const file = ins({
+    durationSec: 2400, stepSec: 60,
+    series: { t: steps, army: [steps.map(() => 4000), steps.map(() => 4000)], metalIncome: [], energyIncome: [], armyCats: [], armyByCat: [] },
+    battles: [
+      battle(2, 300, 2500), // decisive, 2.5k of a 4k army: told
+      battle(5, 1500, 2500), // not by a large margin, but half of both armies: a story
+      battle(8, 0, 600), // decisive but trivial
+      battle(10, 2000, 200), // decisive: told
+      battle(20, 30000, 29000), // past the opening: fills the gap as before
+    ],
+    swing: { p: steps.map(() => 0.5), moments: [], fitted: false },
+  } as Partial<Insights>);
+  const got = gapBattles(file, [], []);
+  assert.deepEqual(got.map((g) => [g.battle, g.side, g.verdict]), [[0, 0, "decisive"], [1, 0, "win"], [3, 1, "decisive"], [4, -1, "even"]]);
+});
+
+test("gapBattles judges a battle by worth: lost power plants count 2.5x", () => {
+  const F = 30;
+  const steps = Array.from({ length: 40 }, (_, i) => i * 60);
+  // Side 0 lost less metal, but 1000 of it was a fusion (worth 2500).
+  const file = ins({
+    durationSec: 2400, stepSec: 60,
+    series: { t: steps, army: [steps.map(() => 4000), steps.map(() => 4000)], metalIncome: [], energyIncome: [], armyCats: [], armyByCat: [] },
+    battles: [{ f0: 20 * 60 * F, f1: (20 * 60 + 30) * F, x: 0, z: 0, r: 500,
+      lost: [{ n: 3, metal: 1500, worth: 3000, top: [] }, { n: 9, metal: 2000, worth: 2000, top: [] }] }],
+    swing: { p: steps.map(() => 0.5), moments: [], fitted: false },
+  } as Partial<Insights>);
+  assert.deepEqual(gapBattles(file, [], []).map((g) => [g.side, g.verdict]), [[1, "win"]]);
+});
+
+test("ratioDomain scales to the leads from 40% to 95% of the game", () => {
+  const t = Array.from({ length: 100 }, (_, i) => i * 10); // a 1000 s game
+  // Thousands of percent at the start and the very end, -30..+60 between.
+  const lead = t.map((s) => (s < 400 ? 3000 : s > 950 ? -5000 : s < 700 ? -30 : 60));
+  const [lo, hi] = ratioDomain(t, lead, 1000);
+  assert.ok(lo < -30 && lo > -40, `lo ${lo}`);
+  assert.ok(hi > 60 && hi < 70, `hi ${hi}`);
+  // Zero is always on the axis, and an even game still has some height.
+  const [a, b] = ratioDomain(t, t.map(() => 1), 1000);
+  assert.ok(a < 0 && b > 1 && b - a >= 10);
 });
