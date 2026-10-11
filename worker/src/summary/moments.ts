@@ -314,7 +314,7 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
       focus = { f: f0, f1 };
       title = `${L} loses ${Math.round(drop.share * 100)}% of its army${drop.mostly ? `, mostly ${drop.mostly}` : ""}`;
     } else title = size(lw) === 0 || size(lo) >= 2 * size(lw) ? `${W} wins the fight${at(focus)}`
-      : size(lw) <= size(lo) ? `${W} edges a trade${at(focus)}`
+      : size(lw) <= size(lo) ? `${W} wins a close fight${at(focus)}`
       : `${W} trades ${unit(size(lw))} for ${unit(size(lo))}${at(focus)}`;
   }
   const dl = local ? local[lose] : ll;
