@@ -37,6 +37,7 @@ const FFA_HELPERS = (() => {
     throw new Error('unbalanced: ' + n);
   };
   return [
+    APP.match(/const MAP_API = '[^']*';/)![0],
     APP.match(/const FFA_MIN_SIDES = \d+;/)![0],
     APP.match(/const PLAYERS_MAX_SIDES = \d+;/)![0],
     fn('sideCount'), fn('specPlayers'), fn('sizeLabel'), fn('sidesShown'), fn('moreSidesSpan'),

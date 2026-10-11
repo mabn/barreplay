@@ -952,6 +952,66 @@ app.get("/setup", async (c) => {
   return new Response(r.body, { status: r.status, headers: h });
 });
 
+// BAR API PROXY for what the map drawing reads: a map's record
+// (/maps/<file>), its terrain images (/maps/<file>/texture-*.jpg) and, as the
+// fallback that finds a map's file name, a replay's detail (/replays/<id>).
+// api.bar-rts.com answers the JSON with no cache-control and the images with
+// max-age=0, so a browser re-downloaded a several-hundred-KB terrain texture
+// on every replay load. Through here the answer is cached at our edge
+// (cf.cacheTtlByStatus) AND told to the browser (cache-control), a map's
+// archive name naming fixed content. A 404 is cached briefly rather than
+// long: resolveMapFile reads it as "the guess was wrong, ask the replay", and
+// a map uploaded after a miss should not stay missing for a week.
+// access-control-allow-origin: * because the summary embed draws maps from
+// another site (lavabalance) through this same path.
+const BAR_API = "https://api.bar-rts.com";
+const BAR_PROXY_OK_SEC = 7 * 24 * 3600;
+const BAR_PROXY_MISS_SEC = 300;
+const MAP_ASSETS = new Set(["texture-mq.jpg", "texture-lq.jpg", "texture-thumb.jpg"]);
+
+async function barProxy(path: string): Promise<Response> {
+  let r: Response;
+  try {
+    r = await fetch(BAR_API + path, {
+      cf: { cacheEverything: true, cacheTtlByStatus: { "200-299": BAR_PROXY_OK_SEC, "404": BAR_PROXY_MISS_SEC, "500-599": 0 } },
+    } as RequestInit);
+  } catch {
+    return new Response("upstream unreachable", { status: 502, headers: { "access-control-allow-origin": "*", "cache-control": "no-store" } });
+  }
+  const h = new Headers();
+  const ct = r.headers.get("content-type");
+  if (ct) h.set("content-type", ct);
+  for (const k of ["etag", "last-modified"]) {
+    const v = r.headers.get(k);
+    if (v) h.set(k, v);
+  }
+  h.set("access-control-allow-origin", "*");
+  h.set("cache-control", r.ok ? `public, max-age=${BAR_PROXY_OK_SEC}`
+    : r.status === 404 ? `public, max-age=${BAR_PROXY_MISS_SEC}` : "no-store");
+  return new Response(r.body, { status: r.status, headers: h });
+}
+
+// A map's file name is the archive its author uploaded: anything but a path
+// separator, so it can be handed on (re-escaped) without reaching another
+// upstream path.
+const okMapFile = (f: string) => f.length > 0 && f.length <= 200 && !/[\/\\]/.test(f) && f !== "." && f !== "..";
+app.get("/api/bar/maps/:file", (c) => {
+  const file = c.req.param("file");
+  if (!okMapFile(file)) return c.text("bad map file", 400);
+  return barProxy(`/maps/${encodeURIComponent(file)}`);
+});
+app.get("/api/bar/maps/:file/:asset", (c) => {
+  const file = c.req.param("file");
+  const asset = c.req.param("asset");
+  if (!okMapFile(file) || !MAP_ASSETS.has(asset)) return c.text("not proxied", 404);
+  return barProxy(`/maps/${encodeURIComponent(file)}/${asset}`);
+});
+app.get("/api/bar/replays/:id", (c) => {
+  const id = c.req.param("id");
+  if (!GAME_ID_RE.test(id)) return c.text("bad game id", 400);
+  return barProxy(`/replays/${id}`);
+});
+
 // Non-R2, non-API requests reach the Worker only when no static asset matched.
 // Hand them to the SPA fallback.
 app.all("*", (c) => c.env.ASSETS.fetch(c.req.raw));

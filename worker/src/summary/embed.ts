@@ -126,8 +126,9 @@ export async function mountGameSummary(el: HTMLElement, gameId: string, opts: Em
   if (!ins) return null;
   const { replayOrigin = REPLAY_ORIGIN, dataOrigin: _d, ...rest } = opts;
   // Icons live beside the viewer; bundled into another site, the module's
-  // own origin (icons.ts's default) would be that site's.
-  const summaryOpts: SummaryOptions = { iconBase: replayOrigin, ...rest };
+  // own origin (icons.ts's default) would be that site's. Maps go through the
+  // viewer's caching BAR API proxy (app.ts barProxy) for the same reason.
+  const summaryOpts: SummaryOptions = { iconBase: replayOrigin, mapApi: `${replayOrigin}/api/bar`, ...rest };
   if (!summaryOpts.onClip && !summaryOpts.onSeek) {
     summaryOpts.onClip = clipPlayer(gameId, replayOrigin);
     summaryOpts.onSeek = (f) => window.open(replayLink(gameId, f, replayOrigin), "_blank", "noopener");

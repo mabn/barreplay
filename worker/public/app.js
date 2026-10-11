@@ -4136,10 +4136,13 @@ async function loadReplay(id) {
   if (embedClip && parent !== window) parent.postMessage({ type: 'barreplay:ready' }, '*');
 }
 
-// The BAR maps API. The browser talks to it directly (the API allows
-// cross-origin use): /maps/<file> gives the map's extent, and
-// /maps/<file>/texture-mq.jpg is the terrain image drawn behind the units.
-const MAP_API = 'https://api.bar-rts.com';
+// The BAR maps API, through the worker's caching proxy (app.ts barProxy):
+// /maps/<file> gives the map's extent, /maps/<file>/texture-mq.jpg is the
+// terrain image drawn behind the units, and /replays/<gameId> the fallback
+// that names a map's file. Fetched from api.bar-rts.com directly, none of it
+// was browser-cacheable (no cache-control on the JSON, max-age=0 on the
+// images), so every replay load downloaded its terrain again.
+const MAP_API = '/api/bar';
 // The API reports map width/height in map units; 1 map unit = 512 elmos.
 const MAP_ELMOS_PER_UNIT = 512;
 
@@ -5817,7 +5820,7 @@ function renderGames(errMsg) {
         img.loading = 'lazy';
         img.alt = '';
         img.onerror = () => { img.style.display = 'none'; };
-        img.src = `https://api.bar-rts.com/maps/${encodeURIComponent(file)}/texture-thumb.jpg`;
+        img.src = `${MAP_API}/maps/${encodeURIComponent(file)}/texture-thumb.jpg`;
         td.appendChild(img);
       }
       const s = document.createElement('span');
@@ -6520,7 +6523,7 @@ function renderHome(errMsg) {
         img.loading = 'lazy';
         img.alt = '';
         img.onerror = () => { img.style.display = 'none'; };
-        img.src = `https://api.bar-rts.com/maps/${encodeURIComponent(file)}/texture-thumb.jpg`;
+        img.src = `${MAP_API}/maps/${encodeURIComponent(file)}/texture-thumb.jpg`;
         a.appendChild(img);
       }
       const s = document.createElement('span');
@@ -7249,7 +7252,7 @@ async function showSummary() {
     const ins = await res.json();
     if (summaryFor !== file) return;
     document.getElementById('summary').textContent = '';
-    summaryHandle = lib.mountSummary(document.getElementById('summary'), ins, { onSeek: seekToFrame, onClip: openClip });
+    summaryHandle = lib.mountSummary(document.getElementById('summary'), ins, { onSeek: seekToFrame, onClip: openClip, mapApi: MAP_API });
   } catch (err) {
     if (summaryFor !== file) return;
     summaryFor = null; // let a later visit retry
