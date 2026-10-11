@@ -526,6 +526,14 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     const span = deathSpan(ins, f0, f1);
     if (span && span[1] - span[0] >= SIM_FPS) focus = { ...focus, f: Math.min(focus.f, span[0]), f1: Math.max(focus.f, span[1]) };
   }
+  if (!local && !growth) {
+    // Losses counted over the whole window take in any own-blast chain in
+    // it, which the battles list then leaves to this story: say it here.
+    for (const b of ins.battles) {
+      const side = ownBlast(b);
+      if (side >= 0 && b.f0 <= f1 && b.f1 >= f0) detail += ` ${ownBlastTitle(ins, b, side)} at ${fmtClock(b.f0 / SIM_FPS)}.`;
+    }
+  }
   if (whole) detail += ` Part of a fight from ${fmtClock(whole.f0 / SIM_FPS)} to ${fmtClock(whole.f1 / SIM_FPS)}.`;
   let elsewhere: number[] | null = null;
   if (local && priced) {
@@ -911,8 +919,16 @@ export function gapBattles(ins: Insights, moments: Moment[], stories: MomentStor
     const [x, y] = [ins.battles[i], ins.battles[j]];
     return Math.abs(x.f1 - y.f1) < apart && Math.hypot(x.x - y.x, x.z - y.z) < x.r + y.r;
   };
+  // A swing told over its whole window (a commander's death, an
+  // elimination, one big loss) counts every death in it, so a battle inside
+  // that window is already in its story; one told as a fight in one place
+  // covers the battles there. One told on what was built covers none.
+  const windows = moments.map((m, k) => ({ w: momentWindow(ins, m), st: stories[k] })).filter(({ st }) => st && !st.growth);
+  const covered = (b: Battle) => windows.some(({ w, st }) => b.f0 <= w[1] && b.f1 >= w[0]
+    && (st.shown === st.lost || !st.focus || typeof st.focus.x !== "number"
+      || Math.hypot(b.x - st.focus.x, b.z - (st.focus.z ?? 0)) < b.r + (st.focus.r ?? 0) + BATTLE_REACH));
   const storied = ins.battles.map((_, i) => i)
-    .filter((i) => !told.has(i) && storyBattle(ins.battles[i]))
+    .filter((i) => !told.has(i) && storyBattle(ins.battles[i]) && !covered(ins.battles[i]))
     .sort((x, y) => total(ins.battles[y]) - total(ins.battles[x]));
   for (const i of storied) {
     if (marks.length >= LIST_MAX || picked.some((j) => samePlace(i, j))) continue;

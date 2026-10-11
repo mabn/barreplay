@@ -427,6 +427,26 @@ test("gapBattles tells only decisive battles with real losses in the opening", (
   assert.deepEqual(got.map((g) => [g.battle, g.side, g.verdict]), [[0, 0, "decisive"], [1, 0, "win"], [3, 1, "decisive"], [4, -1, "even"]]);
 });
 
+test("gapBattles leaves a battle inside a swing told over its whole window to that swing", () => {
+  const F = 30;
+  const battle = (min: number, a: number, b: number) => ({ f0: min * 60 * F, f1: (min * 60 + 30) * F, x: 0, z: 0, r: 500,
+    lost: [{ n: 1, metal: a, top: [] }, { n: 1, metal: b, top: [] }] });
+  const steps = Array.from({ length: 40 }, (_, i) => i * 60);
+  const file = ins({
+    durationSec: 2400, stepSec: 60,
+    series: { t: steps, army: [steps.map(() => 4000), steps.map(() => 4000)], metalIncome: [], energyIncome: [], armyCats: [], armyByCat: [] },
+    // A short, costly story battle in the middle of a swing's minute.
+    battles: [battle(30, 3000, 300)],
+    swing: { p: steps.map(() => 0.5), moments: [], fitted: false },
+  } as Partial<Insights>);
+  const m = { n: 1, f0: 30 * 60 * F, f1: 31 * 60 * F, side: 1, delta: 0.2, battle: -1 };
+  const lost: never[] = [];
+  const whole = { shown: lost, lost, growth: null, focus: { f: 30 * 60 * F }, battle: -1 } as unknown as ReturnType<typeof momentStory>;
+  assert.deepEqual(gapBattles(file, [m], [whole]), [], "the swing's story already counts its deaths");
+  const built = { ...whole, growth: [] } as unknown as ReturnType<typeof momentStory>;
+  assert.equal(gapBattles(file, [m], [built]).length, 1, "a swing told on what was built covers no fight");
+});
+
 test("gapBattles judges a battle by worth: lost power plants count 2.5x", () => {
   const F = 30;
   const steps = Array.from({ length: 40 }, (_, i) => i * 60);
