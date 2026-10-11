@@ -134,6 +134,7 @@ export const CSS = `
 .brs-root .brs-bnums { font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
 .brs-root .brs-btimeline { display: block; width: 100%; margin-bottom: 12px; }
 .brs-root .brs-bmark .brs-bdot { stroke: var(--brs-panel, #12181e); stroke-width: 1.5; }
+.brs-root .brs-fire { filter: drop-shadow(0 0 4px rgba(255, 200, 40, 0.75)); }
 .brs-root .brs-bmark.brs-hover .brs-bdot { stroke: var(--brs-text); }
 .brs-root .brs-bmark.brs-on .brs-bdot { stroke: var(--brs-accent); stroke-width: 3; }
 .brs-root .brs-bmarknum { fill: #fff; font-weight: 700; pointer-events: none; }

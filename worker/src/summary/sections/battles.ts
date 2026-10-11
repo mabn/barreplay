@@ -21,6 +21,15 @@ import { tip, type TipRow } from "../tooltip";
 import { clipEvent, watcher } from "../watch";
 import { SIM_FPS, type Battle, type Insights, type SummaryOptions } from "../types";
 
+// Fire colours for a battle decided by a side's own blasts: yellow into
+// amber, kept clear of red so it never reads as the red side's.
+const FIRE_CORE = "#fffbe6";
+const FIRE_HOT = "#ffd23a";
+const FIRE_EDGE = "#f59300";
+const FIRE = FIRE_HOT;
+const FIRE_CSS = `radial-gradient(circle at 45% 40%, ${FIRE_CORE}, ${FIRE_HOT} 45%, ${FIRE_EDGE})`;
+let fireSeq = 0;
+
 export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | null {
   if (!comparable(ins)) return null;
   if (ins.battles.length === 0) return null;
@@ -95,9 +104,12 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     const r = Math.max(a, c) / Math.max(Math.min(a, c), 1);
     return r < 1.25 ? " (about even)" : ` (${r < 10 ? r.toFixed(1) : Math.round(r)}× less lost)`;
   };
+  // A battle a side's own blasts decided (a fusion chain going up) won by
+  // nobody: drawn in FIRE rather than either side's colour.
+  const blasted = (b: Battle) => ownBlast(b) >= 0 && aheadOf(b) < 0;
   const leanColor = (b: Battle) => {
     const w = aheadOf(b);
-    return w < 0 ? "var(--brs-muted)" : sideColor(ins, w);
+    return blasted(b) ? FIRE : w < 0 ? "var(--brs-muted)" : sideColor(ins, w);
   };
   const total = (b: Battle) => size(b.lost[0] ?? { n: 0, metal: 0 }) + size(b.lost[1] ?? { n: 0, metal: 0 });
   const biggest = Math.max(1, ...ins.battles.map(total));
@@ -144,8 +156,8 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     const color = leanColor(b);
     const d = 5 + 11 * Math.sqrt(total(b) / biggest);
     const bar = h("span", { class: "brs-verdict" }, ...ticks.map((t) => t.cloneNode(true)),
-      h("i", { style: `left: ${Math.min(50, end).toFixed(1)}%; width: ${Math.abs(end - 50).toFixed(1)}%; background: ${color}` }),
-      h("b", { style: `left: ${end.toFixed(1)}%; width: ${d.toFixed(1)}px; height: ${d.toFixed(1)}px; background: ${color}` }));
+      h("i", { style: `left: ${Math.min(50, end).toFixed(1)}%; width: ${Math.abs(end - 50).toFixed(1)}%; background: ${blasted(b) ? `linear-gradient(${end < 50 ? 270 : 90}deg, ${FIRE_HOT}, ${FIRE_EDGE})` : color}` }),
+      h("b", { class: blasted(b) ? "brs-fire" : null, style: `left: ${end.toFixed(1)}%; width: ${d.toFixed(1)}px; height: ${d.toFixed(1)}px; background: ${blasted(b) ? FIRE_CSS : color}` }));
     const nums = h("span", { class: "brs-bnums" },
       h("span", { style: `color: ${sideColor(ins, 0)}` }, fmt(size(b.lost[0] ?? { n: 0, metal: 0 }))),
       h("span", { class: "brs-muted" }, " : "),
@@ -195,6 +207,11 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
       s("text", { x: c.left + 6, y: c.top + 14, style: `fill: ${sideColor(ins, 0)}` }, `▲ ${sideName(ins, 0)} came out ahead`),
       s("text", { x: c.left + 6, y: c.bottom - 6, style: `fill: ${sideColor(ins, 1)}` }, `▼ ${sideName(ins, 1)} came out ahead`));
     c.plot.append(bands);
+    const fireId = `brs-fire-${++fireSeq}`;
+    c.svg.prepend(s("defs", {}, s("radialGradient", { id: fireId, cx: "45%", cy: "40%", r: "60%" },
+      s("stop", { offset: "0", "stop-color": FIRE_CORE }),
+      s("stop", { offset: "0.45", "stop-color": FIRE_HOT }),
+      s("stop", { offset: "1", "stop-color": FIRE_EDGE }))));
     const most = Math.max(1, ...ins.battles.map((b) => Math.max(total(b), reach(b)[0] + reach(b)[1])));
     const rad = (v: number) => 4 + 30 * Math.sqrt(v / most);
     // Above the crosshair's hit area, so a bubble takes its own pointer.
@@ -211,8 +228,8 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
       const g = s("g", { class: "brs-bmark brs-clickable" },
         s("line", { x1: x0, x2: x1, y1: yy, y2: yy, stroke: color, "stroke-opacity": 0.5, "stroke-width": 2 }),
         r[0] + r[1] > 0 ? s("circle", { cx: x, cy: yy, r: rad(r[0] + r[1]), fill: "none", stroke: color, "stroke-opacity": 0.4 }) : null,
-        s("circle", { class: "brs-bdot", cx: x, cy: yy, r: rad(total(b)), fill: color, "fill-opacity": 0.85 }),
-        s("text", { x, y: yy + 4, "text-anchor": "middle", class: "brs-bmarknum" }, String(i + 1)));
+        s("circle", { class: blasted(b) ? "brs-bdot brs-fire" : "brs-bdot", cx: x, cy: yy, r: rad(total(b)), fill: blasted(b) ? `url(#${fireId})` : color, "fill-opacity": blasted(b) ? 1 : 0.85 }),
+        s("text", { x, y: yy + 4, "text-anchor": "middle", class: "brs-bmarknum", style: blasted(b) ? "fill: #3a1a00" : null }, String(i + 1)));
       tip(g, () => ({
         title: `Battle ${i + 1} · ${when(b)} · ${compass(ins, b.x, b.z)}`,
         rows: [...lossRows(b), ...(r[0] + r[1] > 0 ? [0, 1].map((sd) => ({ color: sideColor(ins, sd), label: `${sideName(ins, sd)} army nearby`, value: fmtMetal(r[sd]) })) : [])],
@@ -280,7 +297,7 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
       ...rows, detail)
     : null;
   return section("Battles",
-    h("p", { class: "brs-hint" }, "Numbers: the biggest fights in the order they happened, each ringed by the ground it covered. Above the line the first side came out ahead, below it the second, further out the less it lost against the other; a bubble's size is the metal lost there, grey when a side's own blasts did most of it. Click one to watch it and see its losses."),
+    h("p", { class: "brs-hint" }, "Numbers: the biggest fights in the order they happened, each ringed by the ground it covered. Above the line the first side came out ahead, below it the second, further out the less it lost against the other; a bubble's size is the metal lost there, in fire colours when a side's own blasts (a fusion chain, say) did most of it. Click one to watch it and see its losses."),
     timeline(),
     h("div", { class: "brs-storygrid" }, h("div", { class: "brs-mapwrap" }, view.svg), list));
 }
