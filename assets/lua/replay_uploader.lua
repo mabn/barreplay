@@ -65,6 +65,10 @@
 --     D  one damage window, packed (resim only; see the damage section)
 --     S  per-unit lifetime totals, packed (resim only; see the damage section)
 --     V  per-side visibility changes, packed (resim only; see visibility)
+--     R  closed projectile and beam tracks, packed (resim only, protocol >= 5;
+--        see the projectiles section)
+--     W  strong explosions that end no track, packed (resim only, protocol >= 5;
+--        not B, which would read as the start of a segment header)
 --     P  engine time-profiler readings, JSON (resim only; see profiling)
 --     X  end of stream, text payload = reason (gameover|shutdown|error)
 
@@ -73,8 +77,8 @@
 -- Echo, and the stream's GAME line, so every capture records which encoder
 -- produced it (the copy on a player's machine can be arbitrarily old — the
 -- server/decoder needs to know, and the catalog stores it per replay).
-local widgetVersion = "1.8.0"
-local widgetDate = "2026-10-10"
+local widgetVersion = "1.9.0"
+local widgetDate = "2026-10-11"
 
 -- Git SHA of this exact file, stamped when the widget is published for
 -- download: worker/tools/sync-assets.mjs replaces the token below with the SHA
@@ -116,6 +120,9 @@ local disableWidgets = resim and ("__DISABLE_WIDGETS__" == "1")
 local recordDamage = resim and ("__DAMAGE__" == "1")
 -- Per-side visibility (V records; -visibility).
 local recordVisibility = resim and ("__VISIBILITY__" == "1")
+-- Long-range projectiles, heavy beams and strong explosions (R and W
+-- records, the stock fact; -projectiles).
+local recordProjectiles = resim and ("__PROJECTILES__" == "1")
 -- Output path for resim mode. Spring's LuaIO sandbox rejects absolute paths
 -- (IsSafePath), so it is RELATIVE to the engine's write-dir, which the Go tool
 -- sets as the engine's working directory and reads the stream back from.
@@ -156,7 +163,10 @@ end
 --    isCommander/maxWeaponRange/deathWeapon/selfdWeapon extras, and the
 --    G/H/U/V/P record types may
 --    appear. Purely additive: a protocol-3 decoder skips all of it.
-local protocolVersion = 4
+-- 5: the R (projectile and beam tracks) and B (strong explosions) record
+--    types, the "stock" fact, and explosion/flight keys on the wdefs entries
+--    of watched weapons. Re-simulation only; purely additive again.
+local protocolVersion = 5
 
 -- Enemy recording: units of other ally teams are recorded while visible (in
 -- LOS or on radar — Spring.GetAllUnits already returns only what this client
@@ -1046,6 +1056,10 @@ local function factFrame()
 	return f
 end
 
+-- watchedWeaponFields returns the protocol-5 keys of a weapon the capture
+-- watches (nil for the rest). Defined with the projectiles section below.
+local watchedWeaponFields
+
 -- weaponDefsJSON is the weapon table the cause columns (a kill's weapon, a
 -- damage window's weapon) index into. Weapon ids are per game build, like
 -- unit-def ids, so the table has to travel with the capture.
@@ -1053,7 +1067,7 @@ local function weaponDefsJSON()
 	local defs = {}
 	for id, wd in pairs(WeaponDefs or {}) do
 		local dmg = wd.damages and (wd.damages[0] or wd.damages[1]) or nil
-		defs[#defs + 1] = jsonObject({
+		local fields = {
 			{ "id", id },
 			{ "name", wd.name },
 			{ "description", (wd.description ~= nil and wd.description ~= "") and wd.description or nil },
@@ -1063,7 +1077,12 @@ local function weaponDefsJSON()
 			{ "damage", type(dmg) == "number" and dmg or nil },
 			{ "paralyzer", wd.paralyzer or nil },
 			{ "aoe", (wd.damageAreaOfEffect or 0) > 0 and wd.damageAreaOfEffect or nil },
-		})
+		}
+		local extra = watchedWeaponFields and watchedWeaponFields(id, wd)
+		for i = 1, #(extra or {}) do
+			fields[#fields + 1] = extra[i]
+		end
+		defs[#defs + 1] = jsonObject(fields)
 	end
 	return "[" .. table.concat(defs, ",") .. "]"
 end
@@ -1306,6 +1325,841 @@ flushDamage = function(frame, force)
 end
 
 -- ---------------------------------------------------------------------------
+-- Projectiles, beams and strong explosions (resim only, recordProjectiles;
+-- protocol 5). Design and the engine behaviour it relies on:
+-- docs/projectiles-and-explosions.md; byte formats: docs/brepstream-format.md.
+--
+-- What is watched is decided once from WeaponDefs, never from unit names —
+-- mods add units and change their numbers. A weapon is TRACKED when it falls
+-- in one of the classes below (classifyWeapon); a unit's death or
+-- self-destruct weapon is a BLAST weapon when it is strong (damage and radius
+-- over the thresholds); a tracked weapon's cluster sub-munition is watched
+-- too. The widget writes what the engine reported and nothing it concluded:
+-- who a blast hit is in the H records.
+--
+-- R rows (one per closed track; a track is one projectile, or one firing of
+-- a beam): written when the track closes, buffered and flushed once per
+-- sample like H. Columns: birth u32, end u32, id u32, weapon u16, owner u16,
+-- team u8, class u8, endKind u8, flags u8, x0/y0/z0 s16, vx/vy/vz f32,
+-- gravity f32, targetType u8, target u32, tx/ty/tz s16, x1/y1/z1 s16,
+-- points u16; then every row's path points as columns df u16, x/y/z s16.
+-- W rows (an explosion of a watched weapon that ends no track): frame u32,
+-- n u32, then columns df u16, weapon u16, x/y/z s16, unit u16, team u8,
+-- kind u8 (1 a unit's own explosion, 2 a projectile no track was open for).
+
+-- The section lives in one closure so its state does not count against the
+-- main chunk's 200-local limit (Lua 5.1); it hands back its entry points.
+local projectiles = (function()
+	local spGetProjectilesInSphere = Spring.GetProjectilesInSphere
+	local spGetProjectileDefID = Spring.GetProjectileDefID
+	local spGetProjectilePosition = Spring.GetProjectilePosition
+	local spGetProjectileVelocity = Spring.GetProjectileVelocity
+	local spGetProjectileGravity = Spring.GetProjectileGravity
+	local spGetProjectileTarget = Spring.GetProjectileTarget
+	local spGetProjectileIsIntercepted = Spring.GetProjectileIsIntercepted
+	local spGetUnitWeaponState = Spring.GetUnitWeaponState
+	local spGetUnitWeaponVectors = Spring.GetUnitWeaponVectors
+	local spGetUnitWeaponTarget = Spring.GetUnitWeaponTarget
+	local spGetFeaturePosition = Spring.GetFeaturePosition
+
+	-- Class codes (the R record's class column; docs/brepstream-format.md).
+	local CLS_NUKE, CLS_ANTINUKE, CLS_EMP, CLS_TACTICAL = 1, 2, 3, 4
+	local CLS_JUNO, CLS_ARTILLERY, CLS_ROCKET, CLS_BEAM = 5, 6, 7, 8
+	local classNames = { "nuke", "antinuke", "emp", "tactical", "juno", "artillery", "rocket", "beam" }
+	-- Strategic classes: few per game, and their path IS the story (a starburst
+	-- missile climbs, turns and dives), so their position is sampled in flight.
+	-- Everything else flies an arc the launch velocity and gravity describe.
+	local strategicClass = { [CLS_NUKE] = true, [CLS_ANTINUKE] = true, [CLS_EMP] = true,
+		[CLS_TACTICAL] = true, [CLS_JUNO] = true }
+
+	-- Selection thresholds. damage = damages[0] (the whole shot; a beam spreads
+	-- it over its frames), range and radius in elmos. Measured against a modded
+	-- game's runtime weapon table (docs/projectiles-and-explosions.md §3, §4.6).
+	local nukeMinRange = 10000
+	local beamMinDamage, beamMinRange = 2000, 600
+	local empMinDamage = 5000
+	local tacticalMinRange = 1500
+	local artilleryMinRange = 1500
+	local rocketMinRange = 1000
+	local blastMinDamage, blastMinRadius = 400, 64
+
+	local strategicPathEvery = 10 -- frames between a strategic track's path samples
+	local beamPathEvery = 5       -- a beam keeps a hit point at most this often...
+	local beamPathJump2 = 64 * 64 -- ...unless it jumped this far (squared elmos)
+	local maxPathPoints = 400
+	local trackSweepEvery = 15    -- frames between checks for tracks gone silently
+
+	-- Engine target-type bytes (GetProjectileTarget), and the R record's codes
+	-- for GetUnitWeaponTarget's numeric types (0 none, 1 unit, 2 ground, 3 an
+	-- interceptor's projectile).
+	local TGT_UNIT, TGT_GROUND, TGT_FEATURE, TGT_PROJ = 117, 103, 102, 112 -- 'u' 'g' 'f' 'p'
+	local weaponTargetByte = { [1] = TGT_UNIT, [2] = TGT_GROUND, [3] = TGT_PROJ }
+
+	local none24 = 16777215 -- 0xFFFFFF: the u32 "none" (every packed value stays below 2^24)
+
+	local trackClassOf = {} -- weaponDefID -> class code
+	local blastWeapon = {}  -- weaponDefID -> true: a strong unit explosion
+	local subWeapon = {}    -- weaponDefID -> true: a tracked weapon's cluster sub-munition
+	local watchRole = {}    -- weaponDefID -> "track" | "blast" | "sub" (the wdefs fact)
+	local slotsOfDef = {}   -- unitDefID -> { {slot, wd, cls, window, radius}, ... }
+	local nTracked, nLauncherDefs, nWatched = 0, 0, 0
+
+	-- wcp reads one of BAR's weapon customParams (strings in the def table);
+	-- "0", "false" and empty count as absent.
+	local function wcp(wd, key)
+		local cp = wd.customParams
+		local v = cp and cp[key]
+		if v == nil or v == "" or v == "0" or v == "false" or v == false then
+			return nil
+		end
+		return v
+	end
+
+	-- weaponDamage is the shot's default damage, read exactly as the wdefs fact
+	-- reads it.
+	local function weaponDamage(wd)
+		local d = wd.damages and (wd.damages[0] or wd.damages[1]) or nil
+		return type(d) == "number" and d or 0
+	end
+
+	-- classifyWeapon returns the track class of a weapon def, or nil. The order
+	-- matters: an anti-nuke and a Juno are stockpiled long-range starbursts too,
+	-- the Paralyzer is stockpiled, and an EMP beam is a beam.
+	local function classifyWeapon(wd)
+		if wcp(wd, "bogus") then
+			return nil -- silo dummies, energy chargers
+		end
+		local dmg, range = weaponDamage(wd), wd.range or 0
+		if (wd.interceptor or 0) ~= 0 then
+			return CLS_ANTINUKE
+		end
+		if wcp(wd, "junotype") then
+			return CLS_JUNO
+		end
+		if wcp(wd, "nuclear") then
+			return range >= nukeMinRange and CLS_NUKE or CLS_TACTICAL
+		end
+		if wd.type == "BeamLaser" or wd.type == "LightningCannon" then
+			if dmg >= beamMinDamage and range >= beamMinRange then
+				return CLS_BEAM
+			end
+			return nil
+		end
+		if wd.paralyzer and dmg >= empMinDamage then
+			return CLS_EMP
+		end
+		if wd.stockpile and range >= tacticalMinRange then
+			return CLS_TACTICAL
+		end
+		if dmg <= 1 then
+			return nil -- AA and utility weapons
+		end
+		if wd.type == "Cannon" and range >= artilleryMinRange then
+			return CLS_ARTILLERY
+		end
+		if (wd.type == "StarburstLauncher" or wd.type == "MissileLauncher") and range >= rocketMinRange then
+			return CLS_ROCKET
+		end
+		return nil
+	end
+
+	local function strongBlast(wd)
+		return wd ~= nil and weaponDamage(wd) >= blastMinDamage
+			and (wd.damageAreaOfEffect or 0) >= blastMinRadius
+	end
+
+	-- buildWatch fills the tables above from the def tables. Runs once.
+	local function buildWatch()
+		for id, wd in pairs(WeaponDefs or {}) do
+			local c = classifyWeapon(wd)
+			if c then
+				trackClassOf[id] = c
+				watchRole[id] = "track"
+				nTracked = nTracked + 1
+			end
+		end
+		for udid, ud in pairs(UnitDefs) do
+			for _, name in ipairs({ ud.deathExplosion or "", ud.selfDExplosion or "" }) do
+				local wd = name ~= "" and WeaponDefNames and WeaponDefNames[name]
+				if wd and strongBlast(wd) and not trackClassOf[wd.id] then
+					blastWeapon[wd.id] = true
+					watchRole[wd.id] = "blast"
+				end
+			end
+			local slots = nil
+			for i, w in ipairs(ud.weapons or {}) do
+				local wid = w.weaponDef
+				local c = wid and trackClassOf[wid]
+				if c then
+					local wd = WeaponDefs[wid]
+					-- Frames the shot keeps producing projectiles (a salvo, a
+					-- beam's duration), and how far from the muzzle a new one
+					-- can be by the time GameFramePost looks for it.
+					local salvo = math.ceil(((wd.salvoSize or 1) - 1) * (wd.salvoDelay or 0) * gameSpeed)
+					local window = salvo
+					if c == CLS_BEAM then
+						window = math.max(window, mathFloor((wd.beamtime or 0) * gameSpeed))
+					end
+					slots = slots or {}
+					slots[#slots + 1] = { slot = i, wd = wid, cls = c, window = window + 2,
+						radius = math.max(96, 4 * (wd.projectilespeed or 0)) }
+					local sub = wcp(wd, "cluster_def")
+					if sub then
+						local sw = WeaponDefNames and (WeaponDefNames[ud.name .. "_" .. sub] or WeaponDefNames[sub])
+						if sw and not trackClassOf[sw.id] then
+							subWeapon[sw.id] = true
+							watchRole[sw.id] = watchRole[sw.id] or "sub"
+						end
+					end
+				end
+			end
+			if slots then
+				slotsOfDef[udid] = slots
+				nLauncherDefs = nLauncherDefs + 1
+			end
+		end
+		for _ in pairs(watchRole) do
+			nWatched = nWatched + 1
+		end
+	end
+
+	-- watchedWeaponJSON is the protocol-5 extension of a watched weapon's wdefs
+	-- entry: what an explosion of it does and how it flies (units as the Lua
+	-- def table gives them: speed and gravity per frame, salvoDelay and
+	-- beamtime in seconds, stockpileTime and flightTime in frames).
+	local function armorDamages(wd)
+		local d0 = weaponDamage(wd)
+		local types = Game and Game.armorTypes
+		if type(types) ~= "table" or not wd.damages then
+			return nil
+		end
+		local idx = {}
+		for k, v in pairs(types) do
+			if type(k) == "number" and type(v) == "string" then
+				idx[#idx + 1] = k
+			end
+		end
+		table.sort(idx)
+		local parts = {}
+		for _, i in ipairs(idx) do
+			local v = wd.damages[i]
+			if type(v) == "number" and v ~= d0 then
+				parts[#parts + 1] = '"' .. jsonEscape(types[i]) .. '":' .. jsonValue(v)
+			end
+		end
+		if #parts == 0 then
+			return nil
+		end
+		return "{" .. table.concat(parts, ",") .. "}"
+	end
+
+	local watchedCustomParams = { "nuclear", "junotype", "cluster_def", "cluster_number",
+		"area_onhit_damage", "area_onhit_range", "area_onhit_time", "overrange_distance", "stockpilelimit" }
+
+	watchedWeaponFields = function(id, wd)
+		if watchRole[id] == nil then
+			return nil
+		end
+		local cp = {}
+		for _, key in ipairs(watchedCustomParams) do
+			local v = wcp(wd, key)
+			if v ~= nil then
+				cp[#cp + 1] = { key, tonumber(v) or tostring(v) }
+			end
+		end
+		local dmg = wd.damages or {}
+		return {
+			{ "role", watchRole[id] },
+			{ "class", trackClassOf[id] and classNames[trackClassOf[id]] or nil },
+			{ "edge", wd.edgeEffectiveness },
+			{ "expSpeed", wd.explosionSpeed },
+			{ "crater", (wd.craterAreaOfEffect or 0) > 0 and wd.craterAreaOfEffect or nil },
+			{ "impulse", dmg.impulseFactor },
+			{ "damages", armorDamages(wd), true },
+			{ "paralyzeTime", wd.paralyzer and dmg.paralyzeDamageTime or nil },
+			{ "stockpile", wd.stockpile or nil },
+			{ "stockpileTime", wd.stockpile and wd.stockpileTime or nil },
+			{ "interceptor", (wd.interceptor or 0) ~= 0 and wd.interceptor or nil },
+			{ "targetable", (wd.targetable or 0) ~= 0 and wd.targetable or nil },
+			{ "coverage", (wd.coverageRange or 0) > 0 and wd.coverageRange or nil },
+			{ "salvo", (wd.salvoSize or 1) > 1 and wd.salvoSize or nil },
+			{ "salvoDelay", (wd.salvoSize or 1) > 1 and wd.salvoDelay or nil },
+			{ "projectiles", (wd.projectiles or 1) > 1 and wd.projectiles or nil },
+			{ "speed", (wd.projectilespeed or 0) > 0 and wd.projectilespeed or nil },
+			{ "gravity", (wd.myGravity or 0) ~= 0 and wd.myGravity or nil },
+			{ "highTrajectory", (wd.highTrajectory or 0) ~= 0 and wd.highTrajectory or nil },
+			{ "flightTime", (wd.flightTime or 0) > 0 and wd.flightTime or nil },
+			{ "beamtime", (wd.type == "BeamLaser") and wd.beamtime or nil },
+			{ "sweepFire", wd.sweepFire or nil },
+			{ "cp", #cp > 0 and jsonObject(cp) or nil, true },
+		}
+	end
+
+	-- --- buffers ---------------------------------------------------------------
+
+	local function newTrackBuf()
+		return { n = 0, birth = {}, fin = {}, id = {}, w = {}, o = {}, t = {}, c = {}, k = {}, fl = {},
+			x0 = {}, y0 = {}, z0 = {}, vx = {}, vy = {}, vz = {}, g = {}, tt = {}, tg = {},
+			tx = {}, ty = {}, tz = {}, x1 = {}, y1 = {}, z1 = {}, np = {},
+			pn = 0, pf = {}, px = {}, py = {}, pz = {} }
+	end
+
+	local function newBlastBuf()
+		return { n = 0, df = {}, w = {}, x = {}, y = {}, z = {}, u = {}, t = {}, k = {} }
+	end
+
+	local trackBuf = newTrackBuf()
+	local blastBuf = newBlastBuf()
+	local projStart = 0 -- first frame of the open W window
+	local tracksClosed, blastsSeen, launchesFound = 0, 0, 0
+
+	-- s16 clamps a coordinate into the record's signed 16-bit column.
+	local function s16(v)
+		if v == nil then
+			return 0
+		end
+		return clamp(mathFloor(v + 0.5), -32768, 32767)
+	end
+
+	local function u24(v)
+		if v ~= nil and v >= 0 and v < none24 then
+			return v
+		end
+		return none24
+	end
+
+	-- --- open tracks -----------------------------------------------------------
+
+	local launchers = {} -- unitID -> { team, slots = { {info, rf, untilF}, ... } }
+	local tracks = {}    -- projectileID -> open track
+	local strategic = {} -- projectileID -> open strategic track (sampled in flight)
+	local beamsOf = {}   -- unitID -> { [weaponDefID] = open beam }
+	local beamList = {}  -- open beams, for expiry
+	local boomAt = {}    -- projectileID -> frame an interceptor targeting it exploded
+	local closedRow = {} -- projectileID -> { buf, n, f }: a track that closed this frame or the last
+	local dyingTeam = {} -- unitID -> team, set by UnitDestroyed for the blast that follows
+
+	local function setFlag(flags, bit) -- bit is a power of two; Lua 5.1 has no bit ops
+		if (flags % (bit * 2)) >= bit then
+			return flags
+		end
+		return flags + bit
+	end
+
+	local function addLauncher(unitID, defID, team)
+		local slots = slotsOfDef[defID]
+		if not slots or not spGetUnitWeaponState then
+			return
+		end
+		local L = { team = team, slots = {} }
+		for i, info in ipairs(slots) do
+			L.slots[i] = { info = info, rf = spGetUnitWeaponState(unitID, info.slot, "reloadFrame"), untilF = -1 }
+		end
+		launchers[unitID] = L
+	end
+
+	-- targetOf returns the target type byte, id and position of a projectile.
+	local function targetOf(pid)
+		if not spGetProjectileTarget then
+			return 0, nil
+		end
+		local tt, tgt = spGetProjectileTarget(pid)
+		if tt == TGT_GROUND and type(tgt) == "table" then
+			return tt, nil, tgt[1], tgt[2], tgt[3]
+		elseif tt == TGT_UNIT and type(tgt) == "number" then
+			local x, y, z = spGetUnitPosition(tgt)
+			return tt, tgt, x, y, z
+		elseif tt == TGT_FEATURE and type(tgt) == "number" and spGetFeaturePosition then
+			local x, y, z = spGetFeaturePosition(tgt)
+			return tt, tgt, x, y, z
+		elseif tt == TGT_PROJ and type(tgt) == "number" then
+			local x, y, z = spGetProjectilePosition(tgt)
+			return tt, tgt, x, y, z
+		end
+		return 0, nil
+	end
+
+	local function openTrack(pid, owner, team, info, frame)
+		local x, y, z = spGetProjectilePosition(pid)
+		if x == nil then
+			return
+		end
+		local vx, vy, vz = 0, 0, 0
+		if spGetProjectileVelocity then
+			vx, vy, vz = spGetProjectileVelocity(pid)
+		end
+		local tt, tg, tx, ty, tz = targetOf(pid)
+		local t = { id = pid, wd = info.wd, cls = info.cls, owner = owner, team = team, birth = frame,
+			x0 = x, y0 = y, z0 = z, lx = x, ly = y, lz = z,
+			vx = vx or 0, vy = vy or 0, vz = vz or 0,
+			g = spGetProjectileGravity and spGetProjectileGravity(pid) or 0,
+			tt = tt, tg = tg, tx = tx, ty = ty, tz = tz, flags = 0,
+			pf = {}, px = {}, py = {}, pz = {}, next = frame + strategicPathEvery }
+		tracks[pid] = t
+		if strategicClass[info.cls] then
+			strategic[pid] = t
+		end
+		-- An interceptor names the projectile it is after: that one is engaged.
+		if tt == TGT_PROJ and tg ~= nil and tracks[tg] ~= nil then
+			local victim = tracks[tg]
+			victim.flags = setFlag(victim.flags, 1)
+		end
+		launchesFound = launchesFound + 1
+	end
+
+	local function pushRow(r)
+		local b = trackBuf
+		local n = b.n + 1
+		b.n = n
+		b.birth[n], b.fin[n] = r.birth, math.max(r.fin, r.birth)
+		b.id[n], b.w[n], b.o[n], b.t[n] = u24(r.id), id16(r.wd), id16(r.owner), team8(r.team)
+		b.c[n], b.k[n], b.fl[n] = r.cls, r.kind, r.flags
+		b.x0[n], b.y0[n], b.z0[n] = s16(r.x0), s16(r.y0), s16(r.z0)
+		b.vx[n], b.vy[n], b.vz[n], b.g[n] = r.vx or 0, r.vy or 0, r.vz or 0, r.g or 0
+		b.tt[n], b.tg[n] = r.tt or 0, u24(r.tg)
+		b.tx[n], b.ty[n], b.tz[n] = s16(r.tx), s16(r.ty), s16(r.tz)
+		b.x1[n], b.y1[n], b.z1[n] = s16(r.x1), s16(r.y1), s16(r.z1)
+		local np = #r.pf
+		b.np[n] = np
+		for i = 1, np do
+			local m = b.pn + 1
+			b.pn = m
+			b.pf[m] = clamp(r.pf[i], 0, 65535)
+			b.px[m], b.py[m], b.pz[m] = s16(r.px[i]), s16(r.py[i]), s16(r.pz[i])
+		end
+		tracksClosed = tracksClosed + 1
+		return n
+	end
+
+	local function addPathPoint(t, f, x, y, z)
+		local n = #t.pf
+		if n >= maxPathPoints then
+			t.flags = setFlag(t.flags, 4)
+			return
+		end
+		t.pf[n + 1], t.px[n + 1], t.py[n + 1], t.pz[n + 1] = f - t.birth, x, y, z
+	end
+
+	-- closeTrack ends a projectile track: kind 1 exploded (at x, y, z), 2
+	-- vanished, 0 still flying when the game ended.
+	local function closeTrack(t, frame, kind, x, y, z)
+		tracks[t.id] = nil
+		strategic[t.id] = nil
+		if x == nil then
+			x, y, z = t.lx, t.ly, t.lz
+		end
+		-- Interception, whichever of the two explosions the engine reported
+		-- first: an interceptor whose target was this track exploded within a
+		-- frame of it.
+		local boom = boomAt[t.id]
+		if boom ~= nil and frame - boom <= 1 and kind == 1 then
+			t.flags = setFlag(t.flags, 2)
+		end
+		boomAt[t.id] = nil
+		local n = pushRow({ birth = t.birth, fin = frame, id = t.id, wd = t.wd, owner = t.owner, team = t.team,
+			cls = t.cls, kind = kind, flags = t.flags, x0 = t.x0, y0 = t.y0, z0 = t.z0,
+			vx = t.vx, vy = t.vy, vz = t.vz, g = t.g, tt = t.tt, tg = t.tg, tx = t.tx, ty = t.ty, tz = t.tz,
+			x1 = x, y1 = y, z1 = z, pf = t.pf, px = t.px, py = t.py, pz = t.pz })
+		closedRow[t.id] = { buf = trackBuf, n = n, f = frame }
+		if t.cls == CLS_ANTINUKE and t.tt == TGT_PROJ and t.tg ~= nil and kind == 1 then
+			local victim = closedRow[t.tg]
+			if victim ~= nil and victim.buf == trackBuf and frame - victim.f <= 1
+				and victim.buf.k[victim.n] == 1 then
+				victim.buf.fl[victim.n] = setFlag(victim.buf.fl[victim.n], 2)
+			else
+				boomAt[t.tg] = frame
+			end
+		end
+	end
+
+	-- openBeam starts (or returns, when it already started this frame) the beam
+	-- record of one firing. A beam's first frame usually reaches the explosion
+	-- callin before GameFramePost sees the weapon's reload change — the engine
+	-- fires and traces in the same unit update — so either can open it.
+	local function openBeam(owner, wdID, frame)
+		local byWd = beamsOf[owner]
+		local b = byWd and byWd[wdID]
+		if b ~= nil and b.birth == frame then
+			return b
+		end
+		if b ~= nil then
+			b.untilF = frame - 1 -- superseded: expires at the next sweep
+		end
+		local info = nil
+		local defID = spGetUnitDefID(owner)
+		for _, s in ipairs((defID and slotsOfDef[defID]) or {}) do
+			if s.wd == wdID then
+				info = s
+				break
+			end
+		end
+		local x, y, z
+		if info and spGetUnitWeaponVectors then
+			x, y, z = spGetUnitWeaponVectors(owner, info.slot)
+		end
+		if x == nil then
+			x, y, z = spGetUnitPosition(owner)
+		end
+		local tt, tg, tx, ty, tz = 0, nil, nil, nil, nil
+		if info and spGetUnitWeaponTarget then
+			local wt, _, target = spGetUnitWeaponTarget(owner, info.slot)
+			tt = weaponTargetByte[wt or 0] or 0
+			if type(target) == "table" then
+				tx, ty, tz = target[1], target[2], target[3]
+			elseif type(target) == "number" then
+				tg = target
+				if tt == TGT_UNIT then
+					tx, ty, tz = spGetUnitPosition(target)
+				end
+			end
+		end
+		local window = info and info.window or (gameSpeed + 2)
+		b = { owner = owner, wd = wdID, team = spGetUnitTeam(owner), birth = frame, untilF = frame + window,
+			x0 = x, y0 = y, z0 = z, tt = tt, tg = tg, tx = tx, ty = ty, tz = tz, hits = 0, flags = 0,
+			pf = {}, px = {}, py = {}, pz = {} }
+		beamsOf[owner] = beamsOf[owner] or {}
+		beamsOf[owner][wdID] = b
+		beamList[#beamList + 1] = b
+		return b
+	end
+
+	local function beamHit(b, frame, x, y, z, pid)
+		if b.id == nil and pid ~= nil then
+			b.id = pid
+		end
+		b.hits = b.hits + 1
+		local n = #b.pf
+		local keep = n == 0
+		if not keep then
+			local dx, dz = x - b.px[n], z - b.pz[n]
+			keep = (frame - b.birth) - b.pf[n] >= beamPathEvery or dx * dx + dz * dz > beamPathJump2
+		end
+		if keep then
+			addPathPoint(b, frame, x, y, z)
+			b.lastKept = true
+		else
+			b.lastKept = false
+		end
+		b.lf, b.lx, b.ly, b.lz = frame, x, y, z
+	end
+
+	local function closeBeam(b)
+		local byWd = beamsOf[b.owner]
+		if byWd and byWd[b.wd] == b then
+			byWd[b.wd] = nil
+		end
+		if b.hits > 0 and not b.lastKept then
+			addPathPoint(b, b.lf, b.lx, b.ly, b.lz) -- the last hit is always kept
+		end
+		pushRow({ birth = b.birth, fin = b.lf or b.birth, id = b.id, wd = b.wd, owner = b.owner, team = b.team,
+			cls = CLS_BEAM, kind = b.hits > 0 and 1 or 2, flags = b.flags, x0 = b.x0, y0 = b.y0, z0 = b.z0,
+			vx = 0, vy = 0, vz = 0, g = 0, tt = b.tt, tg = b.tg, tx = b.tx, ty = b.ty, tz = b.tz,
+			x1 = b.lx or b.x0, y1 = b.ly or b.y0, z1 = b.lz or b.z0,
+			pf = b.pf, px = b.px, py = b.py, pz = b.pz })
+	end
+
+	local function addBlast(frame, wdID, x, y, z, unit, team, kind)
+		local b = blastBuf
+		local n = b.n + 1
+		b.n = n
+		b.df[n] = clamp(frame - projStart, 0, 65535)
+		b.w[n] = id16(wdID)
+		b.x[n], b.y[n], b.z[n] = s16(x), s16(y), s16(z)
+		b.u[n], b.t[n], b.k[n] = id16(unit), team8(team), kind
+		blastsSeen = blastsSeen + 1
+	end
+
+	-- onExplosion is the engine's Explosion callin for every watched weapon.
+	-- A projectile id arrives as a number; "none" is the engine's -1u, which
+	-- reaches Lua as 4294967295.
+	local function onExplosion(wdID, px, py, pz, ownerID, projID)
+		local frame = factFrame()
+		local pid = nil
+		if type(projID) == "number" and projID >= 0 and projID < 2147483648 then
+			pid = projID
+		end
+		if pid ~= nil then
+			local t = tracks[pid]
+			if t ~= nil and t.wd == wdID then
+				closeTrack(t, frame, 1, px, py, pz)
+				return
+			end
+		end
+		if trackClassOf[wdID] == CLS_BEAM and ownerID ~= nil then
+			local b = beamsOf[ownerID] and beamsOf[ownerID][wdID]
+			if b == nil or frame > b.untilF then
+				b = openBeam(ownerID, wdID, frame) -- a new firing; an expired one closes next frame
+			end
+			beamHit(b, frame, px, py, pz, pid)
+			return
+		end
+		if blastWeapon[wdID] and pid == nil then
+			local team = dyingTeam[ownerID or -1]
+			if team == nil and ownerID ~= nil then
+				team = spGetUnitTeam(ownerID)
+			end
+			addBlast(frame, wdID, px, py, pz, ownerID, team, 1)
+			return
+		end
+		if trackClassOf[wdID] or subWeapon[wdID] or blastWeapon[wdID] then
+			addBlast(frame, wdID, px, py, pz, ownerID, ownerID and spGetUnitTeam(ownerID) or nil, 2)
+		end
+	end
+
+	-- findLaunches picks the new projectiles of one firing out of the sphere
+	-- around the weapon's muzzle: owned by the launcher, of the slot's weapon,
+	-- and not already being tracked.
+	local function findLaunches(unitID, team, info, frame)
+		local x, y, z
+		if spGetUnitWeaponVectors then
+			x, y, z = spGetUnitWeaponVectors(unitID, info.slot)
+		end
+		if x == nil then
+			x, y, z = spGetUnitPosition(unitID)
+			if x == nil then
+				return
+			end
+		end
+		local ids = spGetProjectilesInSphere(x, y, z, info.radius, false, true)
+		for i = 1, #(ids or {}) do
+			local pid = ids[i]
+			local t = tracks[pid]
+			if not (t ~= nil and t.owner == unitID and t.wd == info.wd)
+				and spGetProjectileOwnerID(pid) == unitID and spGetProjectileDefID(pid) == info.wd then
+				if t ~= nil then
+					closeTrack(t, frame, 2) -- the id was recycled under an open track
+				end
+				openTrack(pid, unitID, team, info, frame)
+			end
+		end
+	end
+
+	-- projectileFrame runs in GameFramePost: after the frame's unit and
+	-- projectile updates, so a weapon that fired this frame has its new
+	-- projectiles in the world and its reload frame moved.
+	local function projectileFrame(frame)
+		for unitID, L in pairs(launchers) do
+			for _, s in ipairs(L.slots) do
+				local rf = spGetUnitWeaponState(unitID, s.info.slot, "reloadFrame")
+				if rf ~= nil and rf ~= s.rf then
+					s.rf = rf
+					if rf > frame then -- a shot moves it into the future
+						if s.info.cls == CLS_BEAM then
+							openBeam(unitID, s.info.wd, frame)
+						else
+							s.untilF = frame + s.info.window
+						end
+					end
+				end
+				if s.untilF >= frame then
+					findLaunches(unitID, L.team, s.info, frame)
+				end
+			end
+		end
+		if frame % strategicPathEvery == 0 then
+			for pid, t in pairs(strategic) do
+				if frame >= t.next then
+					local x, y, z = spGetProjectilePosition(pid)
+					if x ~= nil then
+						addPathPoint(t, frame, x, y, z)
+						t.lx, t.ly, t.lz = x, y, z
+						t.next = frame + strategicPathEvery
+					end
+					if spGetProjectileIsIntercepted and spGetProjectileIsIntercepted(pid) then
+						t.flags = setFlag(t.flags, 1)
+					end
+				end
+			end
+		end
+		if frame % trackSweepEvery == 0 then
+			local gone = {}
+			for pid, t in pairs(tracks) do
+				local x, y, z = spGetProjectilePosition(pid)
+				if x == nil or spGetProjectileDefID(pid) ~= t.wd then
+					gone[#gone + 1] = t
+				else
+					t.lx, t.ly, t.lz = x, y, z
+				end
+			end
+			for i = 1, #gone do
+				closeTrack(gone[i], frame, 2)
+			end
+		end
+		if #beamList > 0 then
+			local keep = {}
+			for _, b in ipairs(beamList) do
+				if frame > b.untilF then
+					closeBeam(b)
+				else
+					keep[#keep + 1] = b
+				end
+			end
+			beamList = keep
+		end
+		-- Interception bookkeeping only spans a frame.
+		for pid, r in pairs(closedRow) do
+			if frame - r.f > 1 then
+				closedRow[pid] = nil
+			end
+		end
+		for pid, f in pairs(boomAt) do
+			if frame - f > 1 then
+				boomAt[pid] = nil
+			end
+		end
+		-- A unit's explosion follows its UnitDestroyed within the same frame.
+		if next(dyingTeam) ~= nil then
+			dyingTeam = {}
+		end
+	end
+
+	-- flushProjectiles writes the closed tracks and the blasts since the last
+	-- sample (if any), then opens the next blast window at frame.
+	local function flushProjectiles(frame)
+		local b = trackBuf
+		if b.n > 0 then
+			local parts = {
+				PackU32({ b.n }),
+				PackU32(b.birth), PackU32(b.fin), PackU32(b.id),
+				PackU16(b.w), PackU16(b.o), PackU8(b.t),
+				PackU8(b.c), PackU8(b.k), PackU8(b.fl),
+				PackS16(b.x0), PackS16(b.y0), PackS16(b.z0),
+				PackF32(b.vx), PackF32(b.vy), PackF32(b.vz), PackF32(b.g),
+				PackU8(b.tt), PackU32(b.tg),
+				PackS16(b.tx), PackS16(b.ty), PackS16(b.tz),
+				PackS16(b.x1), PackS16(b.y1), PackS16(b.z1),
+				PackU16(b.np),
+			}
+			if b.pn > 0 then
+				parts[#parts + 1] = PackU16(b.pf)
+				parts[#parts + 1] = PackS16(b.px)
+				parts[#parts + 1] = PackS16(b.py)
+				parts[#parts + 1] = PackS16(b.pz)
+			end
+			writeRecord("R", table.concat(parts))
+			trackBuf = newTrackBuf()
+		end
+		local e = blastBuf
+		if e.n > 0 then
+			writeRecord("W", table.concat({
+				PackU32({ projStart }), PackU32({ e.n }),
+				PackU16(e.df), PackU16(e.w),
+				PackS16(e.x), PackS16(e.y), PackS16(e.z),
+				PackU16(e.u), PackU8(e.t), PackU8(e.k),
+			}))
+			blastBuf = newBlastBuf()
+		end
+		if frame > projStart then
+			projStart = frame
+		end
+	end
+
+	-- closeAllTracks ends every open track and beam at game over.
+	local function closeAllTracks(frame)
+		local open = {}
+		for _, t in pairs(tracks) do
+			open[#open + 1] = t
+		end
+		table.sort(open, function(a, b) return a.id < b.id end)
+		for _, t in ipairs(open) do
+			closeTrack(t, frame, 0)
+		end
+		for _, b in ipairs(beamList) do
+			closeBeam(b)
+		end
+		beamList = {}
+	end
+
+	-- Installing the Explosion callin. LuaUI may keep its own explosion watch
+	-- list (Script.SetWatchExplosion; rts/Lua/LuaUI.cpp), but BAR's widget
+	-- handler does not forward Explosion. UpdateCallIn assigns the top-level
+	-- callin for any name outside its "flex" list as a closure over the
+	-- handler's method of that name, once the handler has a list for it — the
+	-- same handler access the damage hook uses. The callin returns nothing: a
+	-- true return would suppress the engine's own graphics for the explosion.
+	local explosionHooked = false
+	local unhookExplosion = nil
+
+	local function hookExplosion()
+		local wh = widget.widgetHandler
+		if not (wh and type(wh.UpdateCallIn) == "function" and Script and Script.SetWatchExplosion) then
+			Echo(logTag .. " explosion callin unavailable; no projectile ends or blasts will be recorded")
+			return
+		end
+		wh.ExplosionList = wh.ExplosionList or {}
+		wh.Explosion = function(self, wdID, px, py, pz, ownerID, projID)
+			pcall(onExplosion, wdID, px, py, pz, ownerID, projID)
+		end
+		wh:UpdateCallIn("Explosion")
+		local n = 0
+		for id in pairs(watchRole) do
+			Script.SetWatchExplosion(id, true)
+			n = n + 1
+		end
+		explosionHooked = true
+		unhookExplosion = function()
+			for id in pairs(watchRole) do
+				pcall(Script.SetWatchExplosion, id, false)
+			end
+			-- Not nil: the handler's closure keeps calling this method.
+			wh.Explosion = function() end
+			explosionHooked = false
+		end
+		Echo(string.format("%s watching %d weapons for explosions (%d tracked, launchers on %d unit types)",
+			logTag, n, nTracked, nLauncherDefs))
+	end
+
+	-- unitGone drops a dead unit's launcher and remembers its team for the
+	-- explosion the engine makes right after UnitDestroyed.
+	local function unitGone(unitID, team)
+		launchers[unitID] = nil
+		dyingTeam[unitID] = team
+	end
+
+	local function unitGiven(unitID, team)
+		local L = launchers[unitID]
+		if L then
+			L.team = team
+		end
+	end
+
+	-- stockChanged writes the stock fact for a tracked stockpiled weapon: a
+	-- round finished (n > old) or fired (n < old).
+	local function stockChanged(unitID, unitDefID, team, weaponNum, oldCount, newCount)
+		for _, info in ipairs(slotsOfDef[unitDefID] or {}) do
+			if info.slot == weaponNum then
+				writeFact({ { "k", "stock" }, { "f", factFrame() }, { "unit", unitID }, { "def", unitDefID },
+					{ "team", team }, { "w", weaponNum }, { "old", oldCount }, { "n", newCount } })
+				return
+			end
+		end
+	end
+
+	local function summary()
+		return string.format("%d launches tracked, %d tracks and beam firings closed, %d blasts",
+			launchesFound, tracksClosed, blastsSeen)
+	end
+
+	return {
+		buildWatch = buildWatch,
+		hookExplosion = hookExplosion,
+		unhook = function()
+			if unhookExplosion then
+				unhookExplosion()
+			end
+		end,
+		addLauncher = addLauncher,
+		unitGone = unitGone,
+		unitGiven = unitGiven,
+		stockChanged = stockChanged,
+		frame = projectileFrame,
+		flush = flushProjectiles,
+		closeAll = closeAllTracks,
+		summary = summary,
+	}
+end)()
+
+-- ---------------------------------------------------------------------------
 -- Profiling (resim only). The engine keeps an internal time profiler (the
 -- /debug overlay data): named scopes like "Sim", "Sim::Path", "Lua" with
 -- accumulated wall time. Scopes nest ("Sim::Path" time is also inside "Sim"),
@@ -1509,6 +2363,23 @@ function widget:Initialize()
 			Echo(logTag .. " damage hook failed (" .. tostring(herr) .. "); damage will name no attacker")
 		end
 	end
+	if recordProjectiles then
+		-- Before the weapon table: the watched weapons' entries carry the
+		-- protocol-5 keys, which need the watch list.
+		local pok, perr = pcall(function()
+			projectiles.buildWatch()
+			projectiles.hookExplosion()
+			for _, unitID in ipairs(spGetAllUnits()) do
+				local _, _, _, _, build = spGetUnitHealth(unitID)
+				if (build or 0) >= 1 then
+					projectiles.addLauncher(unitID, spGetUnitDefID(unitID), spGetUnitTeam(unitID))
+				end
+			end
+		end)
+		if not pok then
+			Echo(logTag .. " projectile recording failed to start (" .. tostring(perr) .. ")")
+		end
+	end
 	if resim then
 		local wok, werr = pcall(function()
 			writeFact({ { "k", "wdefs" }, { "defs", weaponDefsJSON(), true } })
@@ -1519,8 +2390,9 @@ function widget:Initialize()
 	end
 	Echo(logTag .. " v" .. widgetVersion ..
 		" (" .. widgetDate .. (stampedSha() and " " .. widgetSha:sub(1, 8) or " unstamped") .. ") loaded" ..
-		(resim and string.format(" in re-simulation mode (damage %s, visibility %s, speed %d)",
-			recordDamage and "on" or "off", recordVisibility and "on" or "off", playbackSpeed) or "") ..
+		(resim and string.format(" in re-simulation mode (damage %s, visibility %s, projectiles %s, speed %d)",
+			recordDamage and "on" or "off", recordVisibility and "on" or "off",
+			recordProjectiles and "on" or "off", playbackSpeed) or "") ..
 		"; waiting for gameId")
 end
 
@@ -1661,6 +2533,12 @@ function widget:GameFrame(frame)
 				hits, ends, hitStart = newHitBuf(), newEndBuf(), frame
 			end
 		end
+		if recordProjectiles then
+			local ok, err = pcall(projectiles.flush, frame)
+			if not ok then
+				Echo(logTag .. " projectile flush failed (" .. tostring(err) .. ")")
+			end
+		end
 		local ok, err = pcall(sample, frame)
 		if ok then
 			sampleFailures = 0
@@ -1707,6 +2585,9 @@ end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	pcall(event, "finished", unitID, unitDefID, unitTeam)
+	if recordProjectiles then
+		pcall(projectiles.addLauncher, unitID, unitDefID, unitTeam)
+	end
 end
 
 -- The attacker arguments are what the engine hands an unsynced handle with
@@ -1734,6 +2615,9 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 	if recordDamage then
 		pcall(recordEnd, unitID, false)
 	end
+	if recordProjectiles then
+		pcall(projectiles.unitGone, unitID, unitTeam)
+	end
 	-- Only a REAL attacker is a cause: the engine passes nils for a death
 	-- with none (self-destruct, a crash, a reclaim), and a weapon id alone
 	-- does happen (a weapon with no surviving owner).
@@ -1748,6 +2632,31 @@ end
 -- other side and is deliberately not recorded: one event per transfer.
 function widget:UnitGiven(unitID, unitDefID, newTeam, oldTeam)
 	pcall(event, "given", unitID, unitDefID, newTeam, nil, nil, oldTeam or -1, nil)
+	if recordProjectiles then
+		pcall(projectiles.unitGiven, unitID, newTeam)
+	end
+end
+
+if recordProjectiles then
+	-- GameFramePost runs after the frame's unit and projectile updates: a
+	-- weapon that fired this frame has moved its reload frame and its new
+	-- projectiles are in the world. Defined only when recording, since it is
+	-- a Lua call every sim frame.
+	local projectileErrors = 0
+	function widget:GameFramePost(frame)
+		local ok, err = pcall(projectiles.frame, frame)
+		if not ok then
+			projectileErrors = projectileErrors + 1
+			if projectileErrors <= 3 then
+				Echo(logTag .. " projectile tracking failed at frame " .. frame .. " (" .. tostring(err) .. ")")
+			end
+		end
+	end
+
+	-- A stockpile count changed: a round built, or one fired.
+	function widget:StockpileChanged(unitID, unitDefID, unitTeam, weaponNum, oldCount, newCount)
+		pcall(projectiles.stockChanged, unitID, unitDefID, unitTeam, weaponNum, oldCount, newCount)
+	end
 end
 
 if resim then
@@ -1997,6 +2906,16 @@ local function finishResim(frame)
 			Echo(logTag .. " final damage window / unit ends failed (" .. tostring(errLives) .. ")")
 		end
 	end
+	if recordProjectiles then
+		local okProj, errProj = pcall(function()
+			projectiles.closeAll(frame)
+			projectiles.flush(frame)
+			Echo(logTag .. " projectiles: " .. projectiles.summary())
+		end)
+		if not okProj then
+			Echo(logTag .. " closing the projectile tracks failed (" .. tostring(errProj) .. ")")
+		end
+	end
 	local ok, err = pcall(writeTeamStats)
 	if not ok then
 		Echo(logTag .. " team statistics failed (" .. tostring(err) .. ")")
@@ -2040,5 +2959,6 @@ function widget:Shutdown()
 	if unhookDamage then
 		unhookDamage()
 	end
+	pcall(projectiles.unhook)
 	closeOut("shutdown")
 end

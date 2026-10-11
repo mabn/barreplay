@@ -121,7 +121,7 @@ offset  size  value
   finds everything else through it, §4). The writer then emits `E C K F X` —
   the sections a viewer needs before it can draw, then the bulk — and records
   that order in `M`'s section layout, followed by v6's optional analysis
-  sections `G V H U R B` (`D S` in older v6 files), which no viewer reads. Files written before the layout existed
+  sections `G V H U R W` (`D S` in older v6 files), which no viewer reads. Files written before the layout existed
   have `M K F X E C`. Readers MUST NOT rely on the order of anything after `M`:
   scan the headers, or follow the layout.
 
@@ -142,7 +142,7 @@ offset  size  value
 | `H` (0x48) | hits | one gzip stream (§9.2), v6 | every damage callin, raw; omitted when none |
 | `U` (0x55) | unit ends | one gzip stream (§9.2), v6 | where each unit's life ended; omitted when none |
 | `R` (0x52) | projectiles | one gzip stream (§9.2), v6 | tracks of long-range projectiles and heavy beams; omitted when none |
-| `B` (0x42) | blasts | one gzip stream (§9.2), v6 | strong unit-death explosions and impacts no track ended; omitted when none |
+| `W` (0x57) | blasts | one gzip stream (§9.2), v6 | strong unit-death explosions and impacts no track ended; omitted when none |
 | `J` (0x4A) | head | one gzip stream of JSON | **not used in files** — the head of the older `.brw` wire container (§10) |
 
 ## 4. `M` — the meta section
@@ -612,13 +612,13 @@ own hardcoded `CInMapDrawModel::EraseNear` radius. Consumers resolve it
 themselves, which keeps the record faithful to what happened rather than to one
 reader's idea of what should still be visible.
 
-### 9.2 The analysis sections — `G`, `H`, `U`, `V`, `R`, `B`, `D`, `S` (v6)
+### 9.2 The analysis sections — `G`, `H`, `U`, `V`, `R`, `W`, `D`, `S` (v6)
 
 Written only by a re-simulation (see `docs/brepstream-format.md`, protocol 4,
 for what each record means and how the widget collects it), each one gzip
 stream and each omitted when empty. Go accessors: `BRPFile.Facts`, `Hits`,
 `UnitEnds`, `Visibility`, `Projectiles`, `Blasts`, `Damage`, `Lives`
-(`snapshot/analysis.go`, `snapshot/projectiles.go`). `R` and `B` were added
+(`snapshot/analysis.go`, `snapshot/projectiles.go`). `R` and `W` were added
 inside v6: a reader that predates them skips the tags, so no version bump.
 
 The file keeps SOURCE data: `H` and `U` are what the engine reported, and
@@ -687,7 +687,7 @@ then each row's points in row order:
 Velocity and gravity are quantized here (the stream carries them as f32): the
 arc a reader rebuilds from them drifts well under one elmo over a long shot.
 
-**`B` — blasts.** One row per explosion the widget watched that ended no
+**`W` — blasts.** One row per explosion the widget watched that ended no
 track: kind 1, a unit's own death or self-destruct explosion (weapon strong
 enough to be watched); kind 2, a projectile explosion with no open track
 (cluster sub-munitions). Sorted by frame.

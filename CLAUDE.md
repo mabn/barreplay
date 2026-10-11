@@ -2474,8 +2474,12 @@ snapshot/                 PUBLIC data model + pluggable Writer (owns the on-disk
                           re-sim's ANALYSIS records (snapshot/analysis.go, .brp v6): Fact
                           (game end, eliminations, departures, the weapon table, the
                           engine's team stats), Hit (every damage callin as the engine
-                          delivered it), UnitEnd (where each unit's life ended) and
-                          Visibility (per-side LOS/radar per unit). DamageWindow and
+                          delivered it), UnitEnd (where each unit's life ended),
+                          Visibility (per-side LOS/radar per unit) and, since protocol 5,
+                          Projectile (one track of a long-range projectile or one firing
+                          of a heavy beam) and Blast (a strong explosion that ended no
+                          track: a unit's own death blast, a cluster sub-munition) —
+                          snapshot/projectiles.go, sections R and W. DamageWindow and
                           UnitLife (per-second sums, lifetime totals) are what
                           internal/combat DERIVES from the hits — and what older captures
                           stored, which is still read. snapshot.DiscardAnalysis
@@ -2494,7 +2498,8 @@ assets/lua/replay_uploader.lua   THE widget, in two modes (widget >= 1.8.0; the 
                           player-installable live-game uploader. Injected by the Go tool
                           (engine.WriteWidget, embedded as assets.WidgetLua) with __RESIM__=1
                           and its switches substituted (__SAMPLE_EVERY__, __OUTPUT_PATH__,
-                          __PROFILE__, __DISABLE_WIDGETS__, __DAMAGE__, __VISIBILITY__ —
+                          __PROFILE__, __DISABLE_WIDGETS__, __DAMAGE__, __VISIBILITY__,
+                          __PROJECTILES__ —
                           each compared against the literal "1", so the published copy with
                           the tokens left in place reads as the uploader) it is the
                           re-simulation sampler: GetInfo name "BAR Replay Snapshotter" (what
@@ -2505,8 +2510,28 @@ assets/lua/replay_uploader.lua   THE widget, in two modes (widget >= 1.8.0; the 
                           per death on E (as the engine gave it), G facts, H hits, U unit
                           ends, V visibility,
                           P profiler readings (docs/brepstream-format.md). cmd/barreplay's
-                          -damage/-visibility (default on) map to Config.SkipDamage/
-                          SkipVisibility. The uploader mode records G end/teamdied/
+                          -damage/-visibility/-projectiles (default on) map to
+                          Config.SkipDamage/SkipVisibility/SkipProjectiles.
+                          PROTOCOL 5 (widget 1.9.0, re-sim only) adds R projectile and beam
+                          TRACKS, W blasts and the "stock" fact (design + measurements:
+                          docs/projectiles-and-explosions.md). What is watched is classified
+                          from WeaponDefs at Initialize (nukes, anti-nukes, EMP, tactical,
+                          Junos, long-range artillery, rockets, heavy beams; death/self-d
+                          explosions with damage >= 400 and radius >= 64), never from unit
+                          names — mods change the numbers. Two non-obvious mechanisms: LuaUI
+                          MAY watch explosions itself (Script.SetWatchExplosion), but BAR's
+                          handler does not forward Explosion, so the widget installs it the
+                          way it hooks UnitDamaged (handler UpdateCallIn, which needs an
+                          ExplosionList to exist); and ProjectileCreated never reaches LuaUI,
+                          so a launch is found when a tracked launcher's reloadFrame changes,
+                          in GameFramePost (after the frame's unit and projectile updates),
+                          by a GetProjectilesInSphere around its muzzle. A beam is one record
+                          per firing: the engine fires a beamtime beam as one beam per frame,
+                          each ending in an Explosion at its hit point. The section lives in
+                          one closure (`local projectiles = (function() ... end)()`) because
+                          the main chunk was at Lua 5.1's 200-local limit. The blast record is
+                          W, not B: a B where a record tag is expected is the start of a
+                          segment's header line. The uploader mode records G end/teamdied/
                           playerleft facts and "given" events but never a killer.
                           The uploader mode has ONE more substitution token (__WIDGET_SHA__, stamped by
                           worker/tools/sync-assets.mjs when the widget is published for
@@ -2551,7 +2576,13 @@ tools/brep-harness/       stubbed-Spring Lua harness: runs the REAL widget over 
                           -run TestHarnessGolden -update` rewrites them — read the diff);
                           needs lua5.4. The script also kills, transfers and crashes units,
                           eliminates a team and ends the game, so every analysis record is
-                          exercised.
+                          exercised. Its projectileScript (resim) drives GameFramePost every
+                          sim frame over fixed launchers kept out of the LCG-driven unit list
+                          (so the rest of the fixture is unchanged by it): an LRPC shot with
+                          cluster sub-munitions, a recycled projectile id deleted with no
+                          explosion, an intercepted nuke and one that lands, a sweeping beam
+                          with gaps, a fusion's death blast, a shell still flying at game
+                          over, stockpile changes — and weapons that must NOT be watched.
                           Its commScript drives AddConsoleLine/MapDrawCmd over every chat
                           shape and draw type — INCLUDING the console lines that must NOT be
                           recorded (engine noise, the widget's own heartbeat echo, an unknown
@@ -2591,8 +2622,8 @@ like `E` with two string tables and whole-elmo positions delta-coded against the
 previous comm — freehand drawing is a run of short segments, so those deltas are
 1-2 bytes; OMITTED entirely when a capture has none, which is every .brp packed
 from a pre-1.6.0 widget stream, so readers must treat a missing `C` as "none"),
-and in v6 the re-sim's analysis sections `G` facts, `H` hits, `U` unit ends and
-`V` visibility (older v6 captures have `D` damage windows and `S` lives instead) (each omitted when empty, written LAST — after `X`, in the
+and in v6 the re-sim's analysis sections `G` facts, `H` hits, `U` unit ends,
+`V` visibility, `R` projectile tracks and `W` blasts (older v6 captures have `D` damage windows and `S` lives instead) (each omitted when empty, written LAST — after `X`, in the
 layout like every other section — and none read by the viewer) plus four
 CAUSE columns appended to `E` (killer unit/def/team + weapon; the old owner's
 team for a `given` event) — detected by the bytes left after the team column,
@@ -2704,6 +2735,8 @@ G  game fact (JSON: end, teamdied, playerleft; re-sim also wdefs, teamstats)
 H  every damage callin     (re-sim, -damage)
 U  where unit lives ended  (re-sim, -damage)
 V  per-side visibility     (re-sim, -visibility)
+R  projectile/beam tracks  (re-sim, -projectiles; protocol 5)
+W  strong explosions       (re-sim, -projectiles; protocol 5)
 P  engine profiler reading (re-sim, -profile)
 X  end of stream
 ```

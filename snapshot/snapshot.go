@@ -316,6 +316,8 @@ type Writer interface {
 	WriteVisibility(Visibility) error
 	WriteHit(Hit) error
 	WriteUnitEnd(UnitEnd) error
+	WriteProjectile(Projectile) error
+	WriteBlast(Blast) error
 	Close() error
 }
 
@@ -329,3 +331,5 @@ func (DiscardAnalysis) WriteLife(UnitLife) error         { return nil }
 func (DiscardAnalysis) WriteVisibility(Visibility) error { return nil }
 func (DiscardAnalysis) WriteHit(Hit) error               { return nil }
 func (DiscardAnalysis) WriteUnitEnd(UnitEnd) error       { return nil }
+func (DiscardAnalysis) WriteProjectile(Projectile) error { return nil }
+func (DiscardAnalysis) WriteBlast(Blast) error           { return nil }

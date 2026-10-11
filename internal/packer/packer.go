@@ -45,12 +45,14 @@ type loaded struct {
 	comms  []snapshot.Comm
 	// The re-simulation's analysis records (protocol 4), carried through to
 	// the .brp untouched. A live upload has none.
-	facts      []snapshot.Fact
-	damage     []snapshot.DamageWindow
-	lives      []snapshot.UnitLife
-	visibility []snapshot.Visibility
-	hits       []snapshot.Hit
-	unitEnds   []snapshot.UnitEnd
+	facts       []snapshot.Fact
+	damage      []snapshot.DamageWindow
+	lives       []snapshot.UnitLife
+	visibility  []snapshot.Visibility
+	hits        []snapshot.Hit
+	unitEnds    []snapshot.UnitEnd
+	projectiles []snapshot.Projectile
+	blasts      []snapshot.Blast
 }
 
 func (l *loaded) WriteMeta(m snapshot.Meta) error { l.meta = m; return nil }
@@ -81,7 +83,12 @@ func (l *loaded) WriteUnitEnd(u snapshot.UnitEnd) error {
 	l.unitEnds = append(l.unitEnds, u)
 	return nil
 }
-func (l *loaded) Close() error { return nil }
+func (l *loaded) WriteProjectile(p snapshot.Projectile) error {
+	l.projectiles = append(l.projectiles, p)
+	return nil
+}
+func (l *loaded) WriteBlast(b snapshot.Blast) error { l.blasts = append(l.blasts, b); return nil }
+func (l *loaded) Close() error                      { return nil }
 
 // load reads a raw .brepstream capture through internal/capture — the exact
 // parser the capture pipeline uses — seeded with base, which carries whatever
@@ -135,6 +142,16 @@ func (l *loaded) writeAnalysis(w snapshot.Writer) error {
 	}
 	for _, u := range l.unitEnds {
 		if err := w.WriteUnitEnd(u); err != nil {
+			return err
+		}
+	}
+	for _, p := range l.projectiles {
+		if err := w.WriteProjectile(p); err != nil {
+			return err
+		}
+	}
+	for _, b := range l.blasts {
+		if err := w.WriteBlast(b); err != nil {
 			return err
 		}
 	}

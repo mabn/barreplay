@@ -293,6 +293,30 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 					return err
 				}
 			}
+		case 'R':
+			tracks, err := decodeProjectilesRecord(payload)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "capture: bad projectile record: %v\n", err)
+				continue
+			}
+			for _, tr := range tracks {
+				stats.Projectiles++
+				if err := w.WriteProjectile(tr); err != nil {
+					return err
+				}
+			}
+		case 'W':
+			blasts, err := decodeBlastsRecord(payload)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "capture: bad blast record: %v\n", err)
+				continue
+			}
+			for _, b := range blasts {
+				stats.Blasts++
+				if err := w.WriteBlast(b); err != nil {
+					return err
+				}
+			}
 		case 'V':
 			v, err := decodeVisibilityRecord(payload)
 			if err != nil {
@@ -696,6 +720,121 @@ func decodeHitsRecord(payload []byte) ([]snapshot.Hit, error) {
 		}
 	}
 	return hs, c.err
+}
+
+// unknown24 maps the widget's u32 "none" (0xFFFFFF: every value it writes
+// stays below 2^24, the float limit) to -1.
+func unknown24(v int64) int32 {
+	if v >= 0xFFFFFF {
+		return -1
+	}
+	return int32(v)
+}
+
+// decodeProjectilesRecord decodes one 'R' payload: n u32, then the tracks as
+// columns, then every track's path points as columns (docs/brepstream-format.md,
+// protocol 5).
+func decodeProjectilesRecord(payload []byte) ([]snapshot.Projectile, error) {
+	c := &cursor{b: payload}
+	n := int(c.u32())
+	// A row is 61 bytes before its path points.
+	if c.err == nil && n*61 > len(payload) {
+		return nil, fmt.Errorf("projectile record declares %d rows in %d bytes", n, len(payload))
+	}
+	ps := make([]snapshot.Projectile, n)
+	counts := make([]int, n)
+	cols := []func(i int, p *snapshot.Projectile){
+		func(i int, p *snapshot.Projectile) { p.Birth = int32(c.u32()) },
+		func(i int, p *snapshot.Projectile) { p.End = int32(c.u32()) },
+		func(i int, p *snapshot.Projectile) { p.ID = unknown24(c.u32()) },
+		func(i int, p *snapshot.Projectile) { p.Weapon = unknown16(c.u16()) },
+		func(i int, p *snapshot.Projectile) { p.Owner = unknown16(c.u16()) },
+		func(i int, p *snapshot.Projectile) { p.Team = unknown8(c.u8()) },
+		func(i int, p *snapshot.Projectile) { p.Class = uint8(c.u8()) },
+		func(i int, p *snapshot.Projectile) { p.EndKind = uint8(c.u8()) },
+		func(i int, p *snapshot.Projectile) { p.Flags = uint8(c.u8()) },
+		func(i int, p *snapshot.Projectile) { p.X0 = c.s16() },
+		func(i int, p *snapshot.Projectile) { p.Y0 = c.s16() },
+		func(i int, p *snapshot.Projectile) { p.Z0 = c.s16() },
+		func(i int, p *snapshot.Projectile) { p.VX = c.f32() },
+		func(i int, p *snapshot.Projectile) { p.VY = c.f32() },
+		func(i int, p *snapshot.Projectile) { p.VZ = c.f32() },
+		func(i int, p *snapshot.Projectile) { p.Gravity = c.f32() },
+		func(i int, p *snapshot.Projectile) { p.TargetType = uint8(c.u8()) },
+		func(i int, p *snapshot.Projectile) { p.Target = unknown24(c.u32()) },
+		func(i int, p *snapshot.Projectile) { p.TX = c.s16() },
+		func(i int, p *snapshot.Projectile) { p.TY = c.s16() },
+		func(i int, p *snapshot.Projectile) { p.TZ = c.s16() },
+		func(i int, p *snapshot.Projectile) { p.X1 = c.s16() },
+		func(i int, p *snapshot.Projectile) { p.Y1 = c.s16() },
+		func(i int, p *snapshot.Projectile) { p.Z1 = c.s16() },
+		func(i int, p *snapshot.Projectile) { counts[i] = int(c.u16()) },
+	}
+	for _, col := range cols {
+		for i := range ps {
+			col(i, &ps[i])
+		}
+	}
+	if c.err != nil {
+		return nil, c.err
+	}
+	total := 0
+	for _, k := range counts {
+		total += k
+	}
+	if total*8 > len(payload) {
+		return nil, fmt.Errorf("projectile record declares %d path points in %d bytes", total, len(payload))
+	}
+	pts := make([]snapshot.PathPoint, total)
+	for i := range pts {
+		pts[i].DF = c.u16()
+	}
+	for i := range pts {
+		pts[i].X = c.s16()
+	}
+	for i := range pts {
+		pts[i].Y = c.s16()
+	}
+	for i := range pts {
+		pts[i].Z = c.s16()
+	}
+	off := 0
+	for i := range ps {
+		if counts[i] > 0 {
+			ps[i].Path = pts[off : off+counts[i] : off+counts[i]]
+			off += counts[i]
+		}
+	}
+	return ps, c.err
+}
+
+// decodeBlastsRecord decodes one 'W' payload: frame u32, n u32, then
+// columns df u16, weapon u16, x/y/z s16, unit u16, team u8, kind u8.
+func decodeBlastsRecord(payload []byte) ([]snapshot.Blast, error) {
+	c := &cursor{b: payload}
+	base := int32(c.u32())
+	n := int(c.u32())
+	// A row is 14 bytes.
+	if c.err == nil && n*14 > len(payload) {
+		return nil, fmt.Errorf("blast record declares %d rows in %d bytes", n, len(payload))
+	}
+	bs := make([]snapshot.Blast, n)
+	cols := []func(b *snapshot.Blast){
+		func(b *snapshot.Blast) { b.Frame = base + c.u16() },
+		func(b *snapshot.Blast) { b.Weapon = unknown16(c.u16()) },
+		func(b *snapshot.Blast) { b.X = c.s16() },
+		func(b *snapshot.Blast) { b.Y = c.s16() },
+		func(b *snapshot.Blast) { b.Z = c.s16() },
+		func(b *snapshot.Blast) { b.Unit = unknown16(c.u16()) },
+		func(b *snapshot.Blast) { b.Team = unknown8(c.u8()) },
+		func(b *snapshot.Blast) { b.Kind = uint8(c.u8()) },
+	}
+	for _, col := range cols {
+		for i := range bs {
+			col(&bs[i])
+		}
+	}
+	return bs, c.err
 }
 
 // decodeUnitEndsRecord decodes one 'U' payload: frame u32, n u32, then

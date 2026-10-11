@@ -87,6 +87,10 @@ type Config struct {
 	// SkipVisibility turns off the widget's per-side visibility recording
 	// (the V records). On by default, like SkipDamage.
 	SkipVisibility bool
+	// SkipProjectiles turns off the widget's projectile, beam and strong
+	// explosion recording (the R and W records and the stock fact; see
+	// docs/projectiles-and-explosions.md). On by default, like SkipDamage.
+	SkipProjectiles bool
 	// ThrottleDraw lowers the engine's draw pacing to ~1 fps for the run via the
 	// MinDrawFPS/MinSimDrawBalance springsettings (injected through a
 	// barreplay-owned config file; the user's springsettings.cfg is not touched).
@@ -442,6 +446,7 @@ func resimWidget(cfg Config) string {
 		"__DISABLE_WIDGETS__", boolToken(cfg.DisableWidgets),
 		"__DAMAGE__", boolToken(!cfg.SkipDamage),
 		"__VISIBILITY__", boolToken(!cfg.SkipVisibility),
+		"__PROJECTILES__", boolToken(!cfg.SkipProjectiles),
 	).Replace(assets.WidgetLua)
 }
 

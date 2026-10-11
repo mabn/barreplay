@@ -46,7 +46,7 @@ func TestWriteWidgetSubstitutesInterval(t *testing.T) {
 	// Every token is substituted: the published uploader is the same file, and
 	// a token left in place reads as "off" there — here it would silently turn
 	// the re-sim back into the uploader.
-	for _, tok := range []string{"__RESIM__", "__SAMPLE_EVERY__", "__OUTPUT_PATH__", "__PROFILE__", "__DISABLE_WIDGETS__", "__DAMAGE__", "__VISIBILITY__"} {
+	for _, tok := range []string{"__RESIM__", "__SAMPLE_EVERY__", "__OUTPUT_PATH__", "__PROFILE__", "__DISABLE_WIDGETS__", "__DAMAGE__", "__VISIBILITY__", "__PROJECTILES__"} {
 		if strings.Contains(s, tok) {
 			t.Errorf("token %s not substituted", tok)
 		}
@@ -60,6 +60,7 @@ func TestWriteWidgetSubstitutesInterval(t *testing.T) {
 		// Damage and visibility default ON (Config.Skip* opt out).
 		`local recordDamage = resim and ("1" == "1")`,
 		`local recordVisibility = resim and ("1" == "1")`,
+		`local recordProjectiles = resim and ("1" == "1")`,
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("widget missing %q", want)
@@ -70,7 +71,7 @@ func TestWriteWidgetSubstitutesInterval(t *testing.T) {
 func TestWriteWidgetSubstitutesSwitches(t *testing.T) {
 	dir := t.TempDir()
 	e := &Engine{cfg: Config{DataDir: dir, SampleEvery: 30, SnapshotStreamPath: "barreplay/g.brepstream",
-		Profile: true, DisableWidgets: true, SkipDamage: true, SkipVisibility: true}}
+		Profile: true, DisableWidgets: true, SkipDamage: true, SkipVisibility: true, SkipProjectiles: true}}
 	p, err := e.WriteWidget()
 	if err != nil {
 		t.Fatal(err)
@@ -81,6 +82,7 @@ func TestWriteWidgetSubstitutesSwitches(t *testing.T) {
 		`local disableWidgets = resim and ("1" == "1")`,
 		`local recordDamage = resim and ("0" == "1")`,
 		`local recordVisibility = resim and ("0" == "1")`,
+		`local recordProjectiles = resim and ("0" == "1")`,
 	} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("widget missing %q", want)

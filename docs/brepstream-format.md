@@ -46,7 +46,7 @@ All integers little-endian. Record tags:
 | `U` | where unit lives ended (re-sim only; below) |
 | `V` | per-side visibility (re-sim only; below) |
 | `R` | closed projectile and beam tracks (re-sim only, protocol ≥ 5; below) |
-| `B` | strong explosions: unit deaths and unmatched impacts (re-sim only, protocol ≥ 5; below) |
+| `W` | strong explosions (blast **w**aves): unit deaths and unmatched impacts (re-sim only, protocol ≥ 5; below) |
 | `P` | engine profiler reading, JSON (re-sim only; below) |
 | `D` | a damage window (older re-sims only; below) |
 | `S` | unit lifetime totals (older re-sims only; below) |
@@ -290,7 +290,7 @@ sim frame when it has one. Both modes write the first three:
 | `end` | `f`, `winners` — the winning ALLY teams (empty: a draw) |
 | `teamdied` | `f`, `team` |
 | `playerleft` | `f`, `player`, `reason` (the engine's PlayerRemoved reason) |
-| `wdefs` | `defs`: `[{id, name, description, type, range, reload, damage, paralyzer, aoe}]` — the weapon table (re-sim only, written once at start). Protocol ≥ 5 adds the explosion and flight keys to every weapon the capture **watches** (see `R`/`B` below) |
+| `wdefs` | `defs`: `[{id, name, description, type, range, reload, damage, paralyzer, aoe}]` — the weapon table (re-sim only, written once at start). Protocol ≥ 5 adds the explosion and flight keys to every weapon the capture **watches** (see `R`/`W` below) |
 | `stock` | `f`, `unit`, `def`, `team`, `w` (weapon slot, 1-based), `old`, `n` — a stockpile count changed: a round finished building (`n > old`) or was fired (`n < old`). Protocol ≥ 5, re-sim only, only for stockpiled weapons the capture tracks |
 | `blast` | `f`, `unit`, `def`, `team`, `x`, `z`, `weapon`, `byUnit`/`byDef`/`byTeam`, `damage`, `kills` — one big death explosion. No longer written: big blasts are derived from `H` (`snapshot.FactBlastData` is what `internal/combat` reports them as) |
 | `teamstats` | `team`, `fields`, `rows` — the engine's `GetTeamStatsHistory` for the team, one row per stats interval (re-sim only, at game over) |
@@ -480,7 +480,9 @@ How a track ends: the `Explosion` callin, which LuaUI may watch itself
 whose explosion falls within a frame of the explosion of an interceptor whose
 target was that nuke is flagged intercepted.
 
-**`B` — blasts.** One row per explosion of a watched weapon that is not the
+**`W` — blasts.** (Not `B`: a `B` where a record tag is expected is the
+start of a segment's header line, see Segments.) One row per explosion of a
+watched weapon that is not the
 end of an `R` track: a unit's death or self-destruct explosion (of a blast
 weapon), or a tracked weapon's or sub-munition's explosion no track was open
 for (cluster sub-munitions, which a gadget spawns at the impact). Buffered and
@@ -514,11 +516,11 @@ modded game):
 | `crater`, `impulse` | `craterAreaOfEffect`, `damages.impulseFactor` |
 | `damages` | `{armorName: damage}` for the armour classes that differ from `damage` |
 | `paralyzeTime` | `damages.paralyzeDamageTime`, when a paralyzer |
-| `stockpile`, `stockpileTime` | when stockpiled |
+| `stockpile`, `stockpileTime` | when stockpiled; `stockpileTime` in frames |
 | `interceptor`, `targetable`, `coverage` | bitmasks and the protected radius (anti-nukes, nukes) |
-| `salvo`, `salvoDelay`, `projectiles` | shots per firing, frames between them, projectiles per shot |
-| `speed`, `gravity`, `highTrajectory`, `flightTime` | flight shape (`projectilespeed`, `myGravity`) |
-| `beamtime`, `sweepFire` | beam weapons |
+| `salvo`, `salvoDelay`, `projectiles` | shots per firing, seconds between them, projectiles per shot |
+| `speed`, `gravity`, `highTrajectory`, `flightTime` | flight shape: `projectilespeed` in elmos per frame, `myGravity` per frame² (absent = the map's gravity), `flightTime` in frames |
+| `beamtime`, `sweepFire` | beam weapons; `beamtime` in seconds |
 | `cp` | the customParams that change what a weapon does, when present: `nuclear`, `junotype`, `cluster_def`, `cluster_number`, `area_onhit_damage`, `area_onhit_range`, `area_onhit_time`, `overrange_distance`, `stockpilelimit` |
 
 ## Preamble

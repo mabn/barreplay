@@ -12,17 +12,19 @@ import (
 
 // recordingWriter captures calls for assertions.
 type recordingWriter struct {
-	meta       *snapshot.Meta
-	frames     []snapshot.Frame
-	events     []snapshot.Event
-	comms      []snapshot.Comm
-	facts      []snapshot.Fact
-	damage     []snapshot.DamageWindow
-	lives      []snapshot.UnitLife
-	visibility []snapshot.Visibility
-	hits       []snapshot.Hit
-	unitEnds   []snapshot.UnitEnd
-	closed     bool
+	meta        *snapshot.Meta
+	frames      []snapshot.Frame
+	events      []snapshot.Event
+	comms       []snapshot.Comm
+	facts       []snapshot.Fact
+	damage      []snapshot.DamageWindow
+	lives       []snapshot.UnitLife
+	visibility  []snapshot.Visibility
+	hits        []snapshot.Hit
+	unitEnds    []snapshot.UnitEnd
+	projectiles []snapshot.Projectile
+	blasts      []snapshot.Blast
+	closed      bool
 }
 
 func (r *recordingWriter) WriteMeta(m snapshot.Meta) error { r.meta = &m; return nil }
@@ -54,6 +56,14 @@ func (r *recordingWriter) WriteVisibility(v snapshot.Visibility) error {
 func (r *recordingWriter) WriteHit(h snapshot.Hit) error { r.hits = append(r.hits, h); return nil }
 func (r *recordingWriter) WriteUnitEnd(u snapshot.UnitEnd) error {
 	r.unitEnds = append(r.unitEnds, u)
+	return nil
+}
+func (r *recordingWriter) WriteProjectile(p snapshot.Projectile) error {
+	r.projectiles = append(r.projectiles, p)
+	return nil
+}
+func (r *recordingWriter) WriteBlast(b snapshot.Blast) error {
+	r.blasts = append(r.blasts, b)
 	return nil
 }
 func (r *recordingWriter) Close() error { r.closed = true; return nil }

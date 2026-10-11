@@ -6,8 +6,12 @@ variants, Junos, rocket artillery), **heavy beam weapons** (Pulsar,
 Bulwark, Titan, Juggernaut, …) and **explosions** (where, how big, what
 they hit) during a re-simulation, for the post-game report.
 
-Status: **designed; the byte formats are specified** in
-`docs/brepstream-format.md` (protocol 5) and `docs/brp-format.md` (§9.2). Every API claim below was checked
+Status: **implemented** in widget 1.9.0 (stream protocol 5), decoded by
+`internal/capture` and packed into `.brp` sections `R` and `W`
+(`snapshot/projectiles.go`); byte formats in `docs/brepstream-format.md`
+(protocol 5) and `docs/brp-format.md` (§9.2). Pinned by the Lua harness's
+projectile script and `TestHarnessGolden`; **not yet run on a real
+re-simulation** (§8). Every API claim below was checked
 against the engine source (`~/dev/recoil`, tag 2026.07.04) and BAR's game
 checkout (`~/dev/bar-full`). The weapon numbers come from a real capture's
 runtime weapon table. Source references are given so each claim can be
@@ -378,7 +382,7 @@ Two kinds of explosion are recorded:
 1. **The end of a track.** An `Explosion` whose projectile id belongs to an
    open track closes it (§4.5). The impact is the track's end position, and
    nothing else is written.
-2. **A blast row (`B`)** for every other explosion of a watched weapon:
+2. **A blast row (`W`)** for every other explosion of a watched weapon:
    - **Kind 1, a unit's own explosion:** its death or self-destruct blast.
      The engine makes it with the dying unit as owner and no projectile, and
      only for a finished unit that wasn't reclaimed (`Unit.cpp:493-522`).
@@ -461,7 +465,7 @@ because one Pulsar shot is 45 explosion callins:
 3. **The record closes** `beamtime · 30 + 2` frames after it opened, or when
    the weapon fires again.
 4. **It is stored as one `R` record** of class `beam`, never as per-frame
-   `B` blasts:
+   `W` blasts:
    - first and last frame, muzzle, and the number of frames that hit
      something;
    - the hit points thinned to the first, the last, every 5th, and any
@@ -481,11 +485,12 @@ writes one small record per 9.9 s shot. Cheap.
 The byte-level specs live with the formats they extend:
 
 - **Stream:** `docs/brepstream-format.md`, "Protocol 5". New record types
-  `R` (tracks) and `B` (blasts), a new `stock` fact, and new `wdefs` keys on
+  `R` (tracks) and `W` (blasts; not `B`, which the stream reserves for its
+  segment headers), a new `stock` fact, and new `wdefs` keys on
   watched weapons. The `GAME` line says protocol 5; a protocol-4 decoder
   skips all of it.
 - **`.brp`:** `docs/brp-format.md` §9.2. Two new analysis sections, `R` and
-  `B`, inside v6: readers skip unknown tags, so no version bump.
+  `W`, inside v6: readers skip unknown tags, so no version bump.
 
 The switch is `__PROJECTILES__` (`cmd/barreplay -projectiles`, default on).
 
@@ -497,8 +502,8 @@ bound, since shots that hit nothing aren't in `H`):
 |---|---|---|
 | `R` rows | 28 projectiles, 7 beam firings | 3,835 projectiles, 6,674 beam firings |
 | `R` section | ~1.3 KB | ~227 KB |
-| `B` rows (strong unit explosions) | 359 | 2,535 |
-| `B` section | ~3–4 KB | ~23 KB |
+| `W` rows (strong unit explosions) | 359 | 2,535 |
+| `W` section | ~3–4 KB | ~23 KB |
 | `wdefs` extension | ~10 KB | ~10 KB |
 | **Total** | **~15 KB, 1.6%** | **~260 KB, 0.35%** (~0.9% if 2 in 3 shots miss) |
 
