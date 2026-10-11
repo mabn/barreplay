@@ -17,7 +17,7 @@ go build ./cmd/barreplay        # build the capture CLI -> ./barreplay
 go build ./cmd/pack             # build the .brepstream -> .brp converter -> ./pack
 go build ./cmd/barreplay-static # build the .brp -> static-hosting bundle packer (for worker/)
 go build ./cmd/insights         # build the game-summary backfill CLI (one replay, or -all)
-go build ./cmd/winfit           # build the win-probability model fitter (reads insights files)
+go build ./cmd/winfit           # build the win-probability model fitter (reads insights files; -categories fits lava / large ranked / ranked / unranked separately)
 go build ./cmd/bringest         # build the drag&drop upload daemon (polls the worker's job queue)
 go run ./cmd/insights <gameId|link|rid>   # compute a PUBLISHED replay's game summary and publish replays/<rid>.insights<N>.json beside it (-upload r2 default, local, or empty + -out to just write it; -all walks the catalog, -from/-to narrow it to games started in a date range (YYYY-MM-DD or unix seconds); -j N replays at once, default 4; -force recomputes; a local .brp/.brepstream with -rid gives full costs; everything read from the real bucket is kept under ~/.cache/barreplay/<bucket host>/ so a re-run downloads only what is new — -cache DIR moves it, -cache= turns it off)
 go test ./...                   # all unit tests (no engine required)
@@ -616,8 +616,12 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           the model is never told who won. Moments are the biggest shifts
                           over a minute (>=12 points, 2 min apart, at most 6), each window
                           trimmed to where the line actually moved and tied to the battle
-                          overlapping it. WinModel.Coef starts as HAND-SET PRIORS
-                          (Fitted=false, which the page states); cmd/winfit fits them.
+                          overlapping it. WinModel.Coef started as HAND-SET PRIORS
+                          (Fitted=false, which the page states); VERSION 6 ships cmd/winfit's
+                          fit over 933 games from the 10 days before 2026-10-11 (0.840 army,
+                          3.428 last-minute income, 3.044 cumulative income: income carries
+                          the line). Per-category fits (winfit -categories) differed mainly
+                          in steepness and gained little, so it stays ONE model.
                           WINNERS come from the demo's tail (demofile.Demo.Winners: one byte
                           per winning ally team right after the packet stream, per
                           rts/System/LoadSave/demofile.h) into snapshot.Meta.Winners via
@@ -633,6 +637,14 @@ cmd/winfit/main.go        CLI: fits insights.WinModel to games with a known winn
                           refuses under 20 games; reports log loss/accuracy of the current and
                           fitted weights overall and at 25/50/75/90% of a game. A refit changes
                           what is computed, so it is a new insights Version.
+                          -categories also fits each game CATEGORY on its own (internal/gamecat:
+                          lava games lavabalance rates — the lobby's tweak stack, ported from
+                          claudebar's lava.ts, NOT the map_waterislava flag — ranked two-team
+                          games of >= 10 players, other ranked, unranked), from each game's
+                          api.bar-rts.com detail, cached under the user cache dir
+                          (barreplay/api.bar-rts.com/replays/). An unreadable insights file is
+                          skipped with a warning; cmd/insights no longer accepts (or serves from
+                          its cache) an empty body, which is how 0-byte files got there.
 cmd/insights/main.go      CLI: the summary BACKFILL, one replay at a time (or -all). Old replays
                           have no .brp anywhere, only their split pieces, so it resolves a
                           gameId/link through the catalog (current rid + the row's view, the
@@ -711,6 +723,10 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           since a raid's buildings often blow up just after the line moved.
                           A side the line moved toward that still lost MORE there is not said
                           to win: the title states the trade ("trades 114k metal for 69.9k").
+                          With NO battle there, the fight is still ONE event: the burst's spot
+                          (moments.ts burstEvent: every death in the window within 1500 elmos
+                          of the densest 10 s burst, first to last), so the sentence counts
+                          exactly what the clip plays rather than the whole map's window.
                           When NO battle holds the losses (spread over the map) and the losing
                           side's army fell by >= ARMY_DROP_SHARE (25%) in the window, the moment
                           is told as that: "Blue team loses 43% of its army[, mostly aircraft]"
@@ -815,10 +831,10 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           `icon` (its iconType) then its name; SummaryOptions.iconBase names
                           the origin, defaulting to the one the module was loaded from, null
                           = names; a def with no icon reads as its name.
-                          The library draws versions 1-5 (INSIGHTS_VERSIONS [5, 4, 3, 2, 1]; v2 adds
+                          The library draws versions 1-6 (INSIGHTS_VERSIONS [6, 5, 4, 3, 2, 1]; v2 adds
                           winner + swing, v3 eliminations and peak battles, v4 owner removals
-                          left out, owned value and battle teams, v5 self-destructs marked) and
-                          app.js fetches .insights5, then 4, 3, 2, 1. A version bump needs `insights -all` after
+                          left out, owned value and battle teams, v5 self-destructs marked, v6 fitted
+                          win weights) and app.js fetches .insights6, then 5, 4, 3, 2, 1. A version bump needs `insights -all` after
                           the deploy, or published replays keep their older summary.
                           EMBEDDING ON ANOTHER SITE (lavabalance's game pages): the folder is an
                           installable package (src/summary/package.json, "barreplay-summary",

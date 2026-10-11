@@ -162,6 +162,16 @@ test("a moment is named after what died in it", () => {
   assert.deepEqual(st.focus, { f: 950, f1: 1300, x: 450, z: 450, r: 200 });
   assert.match(st.detail, /^There, 0:32–0:43: Blue team lost 10 units/);
   assert.match(st.detail, /Team 2 lost nothing/);
+  // With no battle, the fight is still the killing at one spot: from its
+  // first death in the window to its last (the clip plays all of it), and
+  // not what died across the map meanwhile.
+  const later = Array.from({ length: 2 }, () => [1200, 2, 0, 500, 500] as [number, number, number, number, number]);
+  st = momentStory(ins({ ...base, deaths: deaths([...pawns10(), ...later, ...far.slice(0, 3).map((r) => [r[0], r[1], 0, r[3], r[4]] as typeof r)]) }), m);
+  assert.equal(st.focus?.f, 1000);
+  assert.equal(st.focus?.f1, 1200);
+  assert.match(st.detail, /^There, 0:33–0:40: Blue team lost 12 units/);
+  assert.equal(st.shown[0].n, 12);
+  assert.equal(st.lost[0].n, 15);
   // The line moved toward a side that lost MORE there: the title states the
   // trade instead of calling it a win.
   const trade = [...pawns10().slice(0, 8), ...Array.from({ length: 16 }, () => [1000, 2, 1, 450, 450] as [number, number, number, number, number])];

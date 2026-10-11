@@ -18,18 +18,33 @@
 // and accuracy of the current coefficients and the fitted ones, overall and
 // at fixed points through a game, so a fit that is not better is visible
 // before it is committed.
+//
+// -categories also splits the games into internal/gamecat's categories (lava
+// games lavabalance rates, large ranked team games, other ranked, unranked),
+// read from each game's BAR API detail, and fits each one on its own — to see
+// whether one set of weights describes them all. A detail is fetched once and
+// kept under the user cache dir (barreplay/api.bar-rts.com/replays/), so a
+// rerun asks the API only about games it has not seen:
+//
+//	go run ./cmd/winfit -categories ./ins
 package main
 
 import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/mabn/barreplay/internal/gamecat"
 	"github.com/mabn/barreplay/internal/insights"
 )
 
@@ -42,8 +57,20 @@ type sample struct {
 	frac float64 // how far through its game, 0..1
 }
 
+// minGames is the fewest games a fit is made from; under it a fit describes
+// those games, not BAR.
+const minGames = 20
+
+type game struct {
+	id string
+	ss []sample
+}
+
 func main() {
 	l2 := flag.Float64("l2", 1e-3, "L2 regularisation strength")
+	cats := flag.Bool("categories", false, "also fit each game category (lava / large ranked / ranked / unranked) on its own, from the BAR API's replay details")
+	apiBase := flag.String("api", "https://api.bar-rts.com", "BAR API base URL (-categories)")
+	cacheDir := flag.String("cache", "auto", "where -categories keeps fetched details (auto = the user cache dir; empty = no cache)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: winfit [flags] <insights file or dir> [...]\n\n")
 		flag.PrintDefaults()
@@ -54,7 +81,8 @@ func main() {
 		os.Exit(2)
 	}
 	var samples []sample
-	games, skipped := 0, 0
+	var all []game
+	games, skipped, broken := 0, 0, 0
 	for _, root := range flag.Args() {
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -63,9 +91,12 @@ func main() {
 			if d.IsDir() || !strings.HasSuffix(path, ".json") || !strings.Contains(filepath.Base(path), ".insights") {
 				return nil
 			}
-			ss, ok, err := load(path)
+			id, ss, ok, err := load(path)
 			if err != nil {
-				return fmt.Errorf("%s: %w", path, err)
+				// A truncated download is one game lost, not the run.
+				fmt.Fprintf(os.Stderr, "winfit: skipping %s: %v\n", path, err)
+				broken++
+				return nil
 			}
 			if !ok {
 				skipped++
@@ -73,6 +104,7 @@ func main() {
 			}
 			games++
 			samples = append(samples, ss...)
+			all = append(all, game{id, ss})
 			return nil
 		})
 		if err != nil {
@@ -81,7 +113,10 @@ func main() {
 		}
 	}
 	fmt.Printf("%d games (%d files skipped: no winner, no swing line, or another version)\n", games, skipped)
-	if games < 20 {
+	if broken > 0 {
+		fmt.Printf("%d files unreadable (delete them and fetch again)\n", broken)
+	}
+	if games < minGames {
 		fmt.Fprintln(os.Stderr, "winfit: fewer than 20 games; a fit would describe these games, not BAR")
 		os.Exit(1)
 	}
@@ -90,24 +125,186 @@ func main() {
 	report("fitted", fit, samples)
 	fmt.Printf("\n// Paste into internal/insights/swing.go:\n")
 	fmt.Printf("\tCoef:   [swingFeatures]float64{%.3f, %.3f, %.3f},\n\tFitted: true,\n\tGames:  %d,\n", fit[0], fit[1], fit[2], games)
+	if *cats {
+		dir := *cacheDir
+		if dir == "auto" {
+			dir = ""
+			if d, err := os.UserCacheDir(); err == nil {
+				dir = filepath.Join(d, "barreplay", "api.bar-rts.com", "replays")
+			}
+		}
+		f := &detailFetcher{base: strings.TrimRight(*apiBase, "/"), dir: dir, http: &http.Client{Timeout: 30 * time.Second}}
+		byCat := categorize(all, f)
+		reportCategories(byCat, fit, *l2)
+	}
 }
 
-// load reads one insights file into mirrored, game-weighted samples.
-func load(path string) ([]sample, bool, error) {
+// categorize fetches every game's detail (8 at a time) and groups the games
+// by category; a game whose detail cannot be had is "unknown".
+func categorize(gs []game, f *detailFetcher) map[gamecat.Category][]game {
+	cats := make([]gamecat.Category, len(gs))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	var mu sync.Mutex
+	failed := 0
+	for i, g := range gs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			d, err := f.detail(g.id)
+			if err != nil {
+				mu.Lock()
+				failed++
+				if failed <= 5 {
+					fmt.Fprintf(os.Stderr, "winfit: %s: %v\n", g.id, err)
+				}
+				mu.Unlock()
+				cats[i] = unknown
+				return
+			}
+			cats[i] = gamecat.Classify(d)
+		}()
+	}
+	wg.Wait()
+	if failed > 0 {
+		fmt.Fprintf(os.Stderr, "winfit: %d games without a BAR API detail, counted as %q\n", failed, unknown)
+	}
+	out := map[gamecat.Category][]game{}
+	for i, g := range gs {
+		out[cats[i]] = append(out[cats[i]], g)
+	}
+	return out
+}
+
+const unknown gamecat.Category = "unknown"
+
+var gameIDRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// detailFetcher reads api.bar-rts.com/replays/<id>, keeping each good answer
+// on disk: a finished game's detail never changes.
+type detailFetcher struct {
+	base string
+	dir  string // "" = no cache
+	http *http.Client
+}
+
+func (f *detailFetcher) detail(id string) (*gamecat.Detail, error) {
+	if !gameIDRe.MatchString(id) {
+		return nil, fmt.Errorf("no game id in the insights file")
+	}
+	var p string
+	if f.dir != "" {
+		p = filepath.Join(f.dir, id+".json")
+		if b, err := os.ReadFile(p); err == nil {
+			if d, err := decodeDetail(b); err == nil {
+				return d, nil
+			}
+		}
+	}
+	resp, err := f.http.Get(f.base + "/replays/" + id)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET replays/%s: %s", id, resp.Status)
+	}
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	d, err := decodeDetail(b)
+	if err != nil {
+		return nil, fmt.Errorf("replays/%s: %w", id, err)
+	}
+	if p != "" {
+		// Best-effort, and via a rename so a killed run leaves no half file.
+		if os.MkdirAll(f.dir, 0o755) == nil {
+			tmp := p + ".tmp"
+			if os.WriteFile(tmp, b, 0o644) == nil {
+				os.Rename(tmp, p)
+			}
+		}
+	}
+	return d, nil
+}
+
+func decodeDetail(b []byte) (*gamecat.Detail, error) {
+	var d gamecat.Detail
+	if err := json.Unmarshal(b, &d); err != nil {
+		return nil, err
+	}
+	if len(d.AllyTeams) == 0 {
+		return nil, fmt.Errorf("detail has no teams")
+	}
+	return &d, nil
+}
+
+// reportCategories fits each category with enough games on its own and
+// compares, on that category's games, the current weights, the all-games fit
+// and the category's own fit.
+func reportCategories(byCat map[gamecat.Category][]game, overall [nf]float64, l2 float64) {
+	fmt.Printf("\n== per category (log loss / accuracy on the category's own games; own fit is in-sample) ==\n")
+	for _, c := range append(append([]gamecat.Category{}, gamecat.All...), unknown) {
+		gs := byCat[c]
+		if len(gs) == 0 {
+			continue
+		}
+		var ss []sample
+		for _, g := range gs {
+			ss = append(ss, g.ss...)
+		}
+		fmt.Printf("\n%s: %d games\n", c, len(gs))
+		if len(gs) < minGames {
+			fmt.Printf("  too few for a fit of its own\n")
+			table([]row{{"current", insights.WinModel.Coef}, {"all-games fit", overall}}, ss)
+			continue
+		}
+		own := newton(ss, l2)
+		table([]row{{"current", insights.WinModel.Coef}, {"all-games fit", overall}, {"own fit", own}}, ss)
+	}
+}
+
+type row struct {
+	name string
+	c    [nf]float64
+}
+
+func table(rows []row, ss []sample) {
+	fmt.Printf("  %-14s %-20s %-14s %-14s %-14s %-14s %s\n", "", "coef army/inc/cum", "all steps", "at 25%", "at 50%", "at 75%", "at 90%")
+	for _, r := range rows {
+		m := measure(r.c, ss)
+		fmt.Printf("  %-14s %-20s", r.name, fmt.Sprintf("%.2f %.2f %.2f", r.c[0], r.c[1], r.c[2]))
+		for _, a := range append([]acc{m.all}, m.at...) {
+			if a.w == 0 {
+				fmt.Printf(" %-14s", "-")
+				continue
+			}
+			fmt.Printf(" %-14s", fmt.Sprintf("%.3f %.1f%%", a.loss/a.w, 100*a.right/a.w))
+		}
+		fmt.Println()
+	}
+}
+
+// load reads one insights file into mirrored, game-weighted samples, and
+// the game's id.
+func load(path string) (string, []sample, bool, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, false, err
+		return "", nil, false, err
 	}
 	var ins insights.Insights
 	if err := json.Unmarshal(b, &ins); err != nil {
-		return nil, false, err
+		return "", nil, false, err
 	}
 	if ins.Version != insights.Version || ins.Swing == nil || ins.Winner < 0 || ins.Winner > 1 {
-		return nil, false, nil
+		return "", nil, false, nil
 	}
 	feats := insights.SwingFeatures(ins.Series)
 	if len(feats) < 4 {
-		return nil, false, nil
+		return "", nil, false, nil
 	}
 	y := 0.0
 	if ins.Winner == 0 {
@@ -123,7 +320,7 @@ func load(path string) ([]sample, bool, error) {
 		}
 		out = append(out, sample{f, y, w, frac}, sample{m, 1 - y, w, frac})
 	}
-	return out, true, nil
+	return ins.GameID, out, true, nil
 }
 
 func prob(c [nf]float64, f [nf]float64) float64 { return insights.WinProb(c, f) }
@@ -196,13 +393,19 @@ func solve(a [nf][nf]float64, b [nf]float64) [nf]float64 {
 	return x
 }
 
-// report prints log loss and accuracy overall and near fixed points of a game.
-func report(name string, c [nf]float64, ss []sample) {
-	fmt.Printf("\n%s coefficients %.3f %.3f %.3f\n", name, c[0], c[1], c[2])
-	type acc struct{ loss, right, w float64 }
-	var all acc
-	points := []float64{0.25, 0.5, 0.75, 0.9}
-	at := make([]acc, len(points))
+type acc struct{ loss, right, w float64 }
+
+var points = []float64{0.25, 0.5, 0.75, 0.9}
+
+type metrics struct {
+	all acc
+	at  []acc // at points
+}
+
+// measure is the log loss and accuracy of c over ss, overall (game-weighted)
+// and near fixed points of a game.
+func measure(c [nf]float64, ss []sample) metrics {
+	m := metrics{at: make([]acc, len(points))}
 	for _, s := range ss {
 		p := math.Min(math.Max(prob(c, s.f), 1e-9), 1-1e-9)
 		loss := -(s.y*math.Log(p) + (1-s.y)*math.Log(1-p))
@@ -210,21 +413,28 @@ func report(name string, c [nf]float64, ss []sample) {
 		if (p > 0.5) == (s.y == 1) {
 			right = 1
 		}
-		all.loss += s.w * loss
-		all.right += s.w * right
-		all.w += s.w
+		m.all.loss += s.w * loss
+		m.all.right += s.w * right
+		m.all.w += s.w
 		for i, pt := range points {
 			if math.Abs(s.frac-pt) <= 0.025 {
-				at[i].loss += loss
-				at[i].right += right
-				at[i].w++
+				m.at[i].loss += loss
+				m.at[i].right += right
+				m.at[i].w++
 			}
 		}
 	}
-	fmt.Printf("  all steps: log loss %.3f, accuracy %.1f%%\n", all.loss/all.w, 100*all.right/all.w)
+	return m
+}
+
+// report prints log loss and accuracy overall and near fixed points of a game.
+func report(name string, c [nf]float64, ss []sample) {
+	fmt.Printf("\n%s coefficients %.3f %.3f %.3f\n", name, c[0], c[1], c[2])
+	m := measure(c, ss)
+	fmt.Printf("  all steps: log loss %.3f, accuracy %.1f%%\n", m.all.loss/m.all.w, 100*m.all.right/m.all.w)
 	for i, pt := range points {
-		if at[i].w > 0 {
-			fmt.Printf("  at %3.0f%%:   log loss %.3f, accuracy %.1f%%\n", 100*pt, at[i].loss/at[i].w, 100*at[i].right/at[i].w)
+		if m.at[i].w > 0 {
+			fmt.Printf("  at %3.0f%%:   log loss %.3f, accuracy %.1f%%\n", 100*pt, m.at[i].loss/m.at[i].w, 100*m.at[i].right/m.at[i].w)
 		}
 	}
 }

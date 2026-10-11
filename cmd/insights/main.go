@@ -528,7 +528,16 @@ func (r *runner) get(ctx context.Context, u string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GET %s: %s", u, resp.Status)
 	}
-	return io.ReadAll(resp.Body)
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", u, err)
+	}
+	// Nothing published here is empty, so an empty 200 is a failed transfer;
+	// returning it would get it cached and read as a broken file forever.
+	if len(b) == 0 {
+		return nil, fmt.Errorf("GET %s: empty body", u)
+	}
+	return b, nil
 }
 
 // catalogRow looks one game up in the catalog; nil when it has no row.

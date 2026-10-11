@@ -300,12 +300,23 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     } else {
       focus = burstFocus(ins, f0, f1);
     }
-    const lw = local ? local[won] : wl;
-    const lo = local ? local[lose] : ll;
     // No one battle holds it: the losses were spread over the map. The line
     // moves on the ARMY, so say how much of it went — a ten-second burst
     // somewhere is not what moved it — and watch the whole window.
     const drop = b ? null : armyDrop(ins, lose, f0, f1);
+    if (!b && !drop && focus) {
+      // Still told as ONE event: the killing around the busiest burst's spot,
+      // from its first death in the window to its last, and only that — the
+      // clip watches that spot, so the sentence must count what it shows,
+      // not every unit lost anywhere on the map in a window longer than it.
+      const ev = burstEvent(ins, f0, f1, focus);
+      if (ev) {
+        focus = ev.focus;
+        local = ev.local;
+      }
+    }
+    const lw = local ? local[won] : wl;
+    const lo = local ? local[lose] : ll;
     // The line moved toward W, but W can still have lost more there (its
     // army was bigger, or what it lost mattered less): then the title states
     // the trade rather than calling it a win the numbers beside it deny.
@@ -502,6 +513,28 @@ function burstFocus(ins: Insights, f0: number, f1: number): Focus | null {
   let last = d.f[a];
   for (let j = bestAt; j < idx.length && d.f[idx[j]] - d.f[a] <= BURST_SEC * SIM_FPS; j++) last = d.f[idx[j]];
   return { f: d.f[a], f1: last, ...spread(pts) };
+}
+
+/** burstEvent grows a burst into the event it belongs to: every death in
+ * [f0, f1] within BURST_RADIUS of the burst's centre, spanning its first to
+ * its last, with what each side lost there. Null without a place. */
+function burstEvent(ins: Insights, f0: number, f1: number, burst: Focus): { focus: Focus; local: SideLoss[] } | null {
+  if (typeof burst.x !== "number" || typeof burst.z !== "number") return null;
+  const d = ins.deaths;
+  const wiped = wipedOf(ins);
+  const pts: [number, number][] = [];
+  let a = Infinity;
+  let e = -Infinity;
+  for (let i = 0; i < d.f.length; i++) {
+    if (d.f[i] < f0 || d.f[i] > f1 || d.x[i] < 0 || wiped(i)) continue;
+    if (Math.hypot(d.x[i] - burst.x, d.z[i] - burst.z) > BURST_RADIUS) continue;
+    pts.push([d.x[i], d.z[i]]);
+    a = Math.min(a, d.f[i]);
+    e = Math.max(e, d.f[i]);
+  }
+  if (!pts.length) return null;
+  const local = sideLosses(ins, a, e, { x: burst.x, z: burst.z, r: BURST_RADIUS });
+  return { focus: { f: a, f1: e, ...spread(pts) }, local };
 }
 
 /** spread is the centre of a set of points and a radius holding most of

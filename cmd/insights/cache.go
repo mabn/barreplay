@@ -106,7 +106,9 @@ func (c *objectCache) get(key string) ([]byte, bool) {
 		return nil, false
 	}
 	b, err := os.ReadFile(p)
-	if err != nil {
+	if err != nil || len(b) == 0 {
+		// An empty file is a failed download an older build cached; a miss
+		// fetches it again and the put replaces it.
 		return nil, false
 	}
 	c.mu.Lock()
