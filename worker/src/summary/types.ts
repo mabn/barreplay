@@ -73,6 +73,10 @@ export interface Def {
   /** A power plant: its loss counts POWER_WORTH times its metal wherever a
    * battle's winner is decided (version 7+). */
   power?: boolean;
+  /** What the unit is for (version 8+): bomber, fighter, gunship, air,
+   * ship, experimental, army, commander, defence, lrgun, nuke, factory,
+   * eco, building or unit. */
+  class?: string;
 }
 
 export interface Series {
@@ -136,6 +140,18 @@ export interface UnitLoss {
   metal: number;
 }
 
+/** What one team's units of one def destroyed of a side in a battle
+ * (version 8+, captures that name killers). */
+export interface UnitKill {
+  team: number;
+  def: number;
+  /** Deaths credited to them. */
+  n: number;
+  metal: number;
+  /** How many of the killers did it. */
+  units: number;
+}
+
 export interface Battle {
   f0: number;
   f1: number;
@@ -149,7 +165,7 @@ export interface Battle {
   /** own: the metal of it the side's OWN side destroyed (its dying units'
    * blasts, allies' fire), ownDef the def that did most of it, trigger the
    * enemy [team, def] whose kill set it off (version 7+, causes only). */
-  lost: { n: number; metal: number; worth?: number; top: number[]; units?: UnitLoss[]; own?: number; ownDef?: number; trigger?: [number, number] }[];
+  lost: { n: number; metal: number; worth?: number; top: number[]; units?: UnitLoss[]; own?: number; ownDef?: number; trigger?: [number, number]; by?: UnitKill[] }[];
   /** Who took part, by team (version 4+). */
   teams?: BattleTeam[];
 }

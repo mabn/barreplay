@@ -7149,7 +7149,7 @@ async function submitResim() {
 // The insights file versions this page reads, newest first (src/summary
 // INSIGHTS_VERSIONS): a revision whose newer file is not built yet falls back
 // to the one it has.
-const INSIGHTS_VERSIONS = [7, 6, 5, 4, 3, 2, 1];
+const INSIGHTS_VERSIONS = [8, 7, 6, 5, 4, 3, 2, 1];
 let summaryModule = null;   // Promise of the imported library
 let summaryFor = null;      // currentFile the #summary pane was filled for
 let summaryHandle = null;   // the mounted summary, for destroy()
