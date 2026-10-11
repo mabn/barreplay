@@ -1388,8 +1388,9 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           /api/replays/maps 404s. The one Go-side piece the
                           filters DO depend on is catalogPlayersPerAlly, because BuildCatalogEntry is
                           what builds the roster the worker stores). The front-end landing page
-                          (no ?replay= in the URL) is a LEFT MENU (app.js homeTab/applyHomeTab,
-                          #homenav) over these sections: "Replays" (the catalog list, the
+                          (no ?replay= in the URL) is a LEFT MENU (index.html #rail, app.js
+                          homeTab/applyHomeTab/markRail — the SAME menu on every page, see the
+                          replay-page note below) over these sections: "Replays" (the catalog list, the
                           default), "Games" (the games MIRROR — see the GAMES MIRROR entry;
                           app.js refreshGames/renderGames, GAMES_PAGE=20 rows per page,
                           CURSOR-paged: Next hands back the reply's `next`, Prev walks back
@@ -1438,8 +1439,9 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           like any admin route and stores it as its own CF_Authorization
                           cookie (accessCookie, HttpOnly/Lax, expiring with the token).
                           /admin/logout clears that cookie on any origin and is the
-                          header's sign-out link; signed out, the header carries a muted
-                          sign-in link (#adminnote). A 404 from /api/admin/me (a backend
+                          menu's sign-out entry (the admin's initial, the address in its
+                          tooltip — the menu is 72px); signed out, the foot of the menu
+                          carries a muted sign-in entry (#adminnote), on every page. A 404 from /api/admin/me (a backend
                           with no login and no admin routes) shows nothing and no admin
                           controls. Every admin fetch in app.js treats a
                           401 as adminSignedOut (controls off, sign-in link back). Why: app.js is served unminified, the
@@ -1460,13 +1462,22 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           superseded revisions of cataloged games hidden (their direct
                           /replays/<rid> links keep playing — nothing is deleted); picking a
                           replay navigates to /replays/<id>, the header title returns to the
-                          list. A REPLAY PAGE has its own LEFT MENU (index.html #rail: logo,
-                          Replay and Summary — the ?tab=summary tabs); the way back to the
-                          list is the header's "Replays" link (#backlink) leading the replay's
-                          title, not a menu entry (Marcin's call: not at the menu's bottom),
-                          and body.replay-page lays the page out as a CSS GRID: the
-                          menu, then the header/map/bottom bar column, then #side as a
-                          full-height column. #side is a body child rather than inside #wrap
+                          list. The LEFT MENU (index.html #rail) is ONE menu, the same on
+                          every page and never switching its entries (Marcin's call): the
+                          logo, Replays/Queue/Games/SQL (links to the section paths; a click
+                          from a replay page goes to the list view), the admin corner at the
+                          foot. While a replay is open its two views — Replay and Summary,
+                          the ?tab=summary tabs — appear as a SUB MENU under Replays
+                          (#replaytabs): boxed together with Replays, smaller, hung off a
+                          guide line, the selected one marked on it. It stays 72px wide
+                          (Marcin: the replay area is what matters). The header also leads
+                          the replay's title with a "Replays" back link (#backlink). Both
+                          pages are a CSS GRID (body.home / body.replay-page): the menu as a
+                          full-height first column, the header beside it, then the section
+                          (#home) or, on a replay page, the map and bottom bar column and
+                          #side as a full-height last column. body.admin-mode is set by
+                          probeAdmin itself, since the menu's admin entries show on a replay
+                          opened directly, where no table render sets it. #side is a body child rather than inside #wrap
                           because the summary's clip player moves #wrap into its window; the
                           grid places every piece explicitly, so where closeClip puts #wrap
                           back does not matter. The list's Players
