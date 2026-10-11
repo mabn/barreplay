@@ -2,9 +2,11 @@
 // find the replay's published revision, fetch its insights and mount them.
 // It exists so that the knowledge of WHERE things are — the catalog route,
 // the data origin, how a rid becomes a path, which insights versions exist —
-// stays in this repo, next to the code that publishes them. A host bundles
-// this package (pinned to a commit) and calls mountGameSummary; it never
-// learns what a rid is.
+// stays in this repo, next to the code that publishes them. A host imports
+// it at run time from https://replay.fogofwar.dev/embed/summary.js (a stable,
+// no-cache name forwarding to this module's fingerprinted build; see
+// vite.config.ts) and calls mountGameSummary; it never learns what a rid is,
+// and a deploy here reaches it with no change on its side.
 //
 // Everything is fetched from the replay viewer's deployment at run time, so
 // nothing is copied between the two sites. The catalog route and the data
