@@ -100,8 +100,7 @@ func TestWinner(t *testing.T) {
 // side it moved against lost economy buildings in it; later it is one, and
 // says income carried it.
 func TestEarlyEconomyMoments(t *testing.T) {
-	n := 60
-	jump := func(at int) *Insights {
+	jump := func(n, at int) *Insights {
 		i0, i1 := flat(n, 5), flat(n, 5)
 		for i := at; i < n; i++ {
 			i0[i] = 15
@@ -112,21 +111,28 @@ func TestEarlyEconomyMoments(t *testing.T) {
 			Series: series(flat(n, 0), flat(n, 0), i0, i1),
 		}
 	}
-	early := jump(6) // 1:30
-	if sw := swing(early, nil); len(sw.Moments) != 0 {
+	eco := func(id int32) bool { return id == 42 }
+	raid := func(o *Insights, step int) *Insights {
+		o.Deaths = Deaths{F: []int32{int32(step * StepSec * simFPS)}, Def: []int32{42}, Team: []int32{1}}
+		return o
+	}
+	// The first 30% of the game has no moments, a raid included.
+	if sw := swing(raid(jump(60, 10), 11), eco); len(sw.Moments) != 0 {
+		t.Errorf("a moment in the opening 30%%: %+v", sw.Moments)
+	}
+	// A short game: past 30% but inside the first four minutes, income
+	// alone is no moment unless economy buildings were lost.
+	if sw := swing(jump(20, 10), nil); len(sw.Moments) != 0 {
 		t.Errorf("an opening income lead is a moment: %+v", sw.Moments)
 	}
-	early.Deaths = Deaths{F: []int32{7 * StepSec * simFPS}, Def: []int32{42}, Team: []int32{1}}
-	eco := func(id int32) bool { return id == 42 }
-	sw := swing(early, eco)
+	sw := swing(raid(jump(20, 10), 11), eco)
 	if len(sw.Moments) == 0 {
 		t.Fatal("a raid on the opening economy is no moment")
 	}
 	if m := sw.Moments[0]; m.Side != 0 || m.Eco != 1 || m.Army != 0 {
 		t.Errorf("moment = %+v", m)
 	}
-	late := jump(30)
-	if sw := swing(late, nil); len(sw.Moments) == 0 || sw.Moments[0].Eco != 1 {
+	if sw := swing(jump(60, 30), nil); len(sw.Moments) == 0 || sw.Moments[0].Eco != 1 {
 		t.Errorf("a mid-game income lead: %+v", sw.Moments)
 	}
 }

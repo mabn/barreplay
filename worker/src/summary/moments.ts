@@ -683,6 +683,19 @@ const GAP_APART_SEC = 90;
 const GAP_BATTLE_SHARE = 0.1;
 /** The swing list holds at most this many entries in all. */
 const LIST_MAX = 12;
+/** The opening share of the game the swing line lists nothing from (Go's
+ * earlyShare): there the list tells only battles one side clearly won. */
+export const EARLY_SHARE = 0.3;
+/** An opening battle is told when its loser lost at least EARLY_MARGIN
+ * times what the winner did, and at least EARLY_MIN_METAL metal that was
+ * also EARLY_MIN_ARMY of its army at the time (EARLY_MIN_UNITS units when
+ * the capture prices nothing) — a skirmish over two scouts is not one. */
+const EARLY_MARGIN = 3;
+const EARLY_MIN_METAL = 1000;
+const EARLY_MIN_ARMY = 0.2;
+const EARLY_MIN_UNITS = 10;
+/** At most this many opening battles are told. */
+const EARLY_MAX = 4;
 
 /** gapBattles picks battles to tell between the swings, where the list
  * would otherwise skip a long stretch of the game: the swing line only
@@ -691,7 +704,10 @@ const LIST_MAX = 12;
  * Greedily, the biggest battle in the widest gap goes in, until no gap is
  * wider than GAP_SHARE of the game or none holds a battle worth telling.
  * A battle a swing already tells, or one overlapping a swing's window, is
- * left out. Ordered by time. */
+ * left out. The opening EARLY_SHARE of the game, where the line lists no
+ * swings, is told differently: only its DECISIVE battles (earlyBattle),
+ * however small next to the game's biggest, and nothing else from there
+ * fills a gap. Ordered by time. */
 export function gapBattles(ins: Insights, moments: Moment[], stories: MomentStory[]): GapBattle[] {
   const sw = ins.swing;
   if (!sw || !ins.battles.length) return [];
@@ -706,12 +722,36 @@ export function gapBattles(ins: Insights, moments: Moment[], stories: MomentStor
   // Where each entry sits on the time axis: a swing at the end of its
   // window (where its dot is), a battle at its end.
   const marks = moments.map((m) => m.f1);
+  const opening = EARLY_SHARE * end;
+  const army = ins.series.army;
+  const armyAt = (side: number, f: number) => {
+    const a = army[side] ?? [];
+    return a[Math.max(0, Math.min(a.length - 1, Math.floor(f / SIM_FPS / ins.stepSec)))] ?? 0;
+  };
+  // A battle in the opening one side clearly won, with real losses.
+  const earlyBattle = (b: Battle) => {
+    const [a, c] = [size(b.lost[0]), size(b.lost[1])];
+    const loser = a > c ? 0 : 1;
+    const hi = Math.max(a, c);
+    if (hi < EARLY_MARGIN * Math.min(a, c)) return false;
+    if (!priced) return hi >= EARLY_MIN_UNITS;
+    return hi >= EARLY_MIN_METAL && hi >= EARLY_MIN_ARMY * armyAt(loser, b.f0);
+  };
+  const picked: number[] = [];
+  const early = ins.battles.map((_, i) => i)
+    .filter((i) => ins.battles[i].f0 < opening && !told.has(i) && earlyBattle(ins.battles[i]))
+    .sort((x, y) => total(ins.battles[y]) - total(ins.battles[x]));
+  for (const i of early) {
+    const f = ins.battles[i].f1;
+    if (picked.length >= EARLY_MAX || marks.some((m) => Math.abs(m - f) < apart)) continue;
+    picked.push(i);
+    marks.push(f);
+  }
   const free = ins.battles.map((_, i) => i).filter((i) => {
     const b = ins.battles[i];
-    return !told.has(i) && total(b) > 0 && total(b) >= GAP_BATTLE_SHARE * biggest
+    return !told.has(i) && b.f0 >= opening && total(b) > 0 && total(b) >= GAP_BATTLE_SHARE * biggest
       && !moments.some((m) => b.f0 <= m.f1 && b.f1 >= m.f0);
   });
-  const picked: number[] = [];
   while (marks.length < LIST_MAX) {
     const at = [0, ...marks].sort((a, b) => a - b);
     // The gaps, widest first, and the biggest battle that fits in one.

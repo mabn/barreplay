@@ -390,3 +390,24 @@ test("gapBattles fills a long stretch with no swing with its biggest battles", (
   assert.deepEqual(got.map((g) => [g.battle, g.side, g.verdict]), [[1, 1, "decisive"], [3, -1, "even"], [4, 0, "win"]]);
   assert.ok(got[0].delta > 0.15, "the line moved toward the side that won it");
 });
+
+test("gapBattles tells only decisive battles with real losses in the opening", () => {
+  const F = 30;
+  const battle = (min: number, a: number, b: number) => ({ f0: min * 60 * F, f1: (min * 60 + 30) * F, x: 0, z: 0, r: 500,
+    lost: [{ n: 1, metal: a, top: [] }, { n: 1, metal: b, top: [] }] });
+  const steps = Array.from({ length: 40 }, (_, i) => i * 60);
+  const file = ins({
+    durationSec: 2400, stepSec: 60,
+    series: { t: steps, army: [steps.map(() => 4000), steps.map(() => 4000)], metalIncome: [], energyIncome: [], armyCats: [], armyByCat: [] },
+    battles: [
+      battle(2, 300, 2500), // decisive, 2.5k of a 4k army: told
+      battle(5, 1500, 2500), // not by a large margin
+      battle(8, 0, 600), // decisive but trivial
+      battle(10, 2000, 200), // decisive: told
+      battle(20, 30000, 29000), // past the opening: fills the gap as before
+    ],
+    swing: { p: steps.map(() => 0.5), moments: [], fitted: false },
+  } as Partial<Insights>);
+  const got = gapBattles(file, [], []);
+  assert.deepEqual(got.map((g) => [g.battle, g.side, g.verdict]), [[0, 0, "decisive"], [3, 1, "decisive"], [4, -1, "even"]]);
+});

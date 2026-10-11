@@ -621,8 +621,12 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           trimmed to where the line actually moved and tied to the battle
                           overlapping it. VERSION 7 splits each moment's move in the model's
                           logit into what carried it (Moment.Army / Moment.Eco, shares toward
-                          the gaining side, income = last-minute + cumulative), and DROPS a
-                          moment starting in the first earlyEcoSec = 4 min that income
+                          the gaining side, income = last-minute + cumulative), DROPS EVERY
+                          moment starting in the first earlyShare = 30% of the game (both
+                          armies and economies still grow from nothing there, so the line
+                          swings on who built sooner; the page tells that stretch's decisive
+                          battles instead, see gapBattles), and drops a
+                          moment starting in the first earlyEcoSec = 4 min (a short game) that income
                           carried (Eco >= 0.5) unless the other side lost an ECONOMY
                           BUILDING in it (defs.go isEcoBuilding: UnitGroup metal/energy, a
                           name pattern for captures without groups) — every opening is two
@@ -817,7 +821,10 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           with no swing is filled with BATTLES (moments.ts gapBattles: the
                           biggest battle in the widest gap over an eighth of the game, at least
                           4 min, until none is left or none holds a battle >= 10% of the
-                          game's biggest; at most 12 entries), each told as "Red team
+                          game's biggest; at most 12 entries; in the opening EARLY_SHARE = 30%,
+                          which lists no swings, ONLY the decisive battles: loser lost >= 3x
+                          the winner and >= 1000 metal that was >= 20% of its army then, at
+                          most 4, however small next to the game's biggest), each told as "Red team
                           decisively wins battle (5)" with the battles list's white-circle
                           badge — the line lists only its biggest shifts, and a decided fight
                           can move it little. A swing told as one battle carries the badge too. LOG

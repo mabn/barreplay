@@ -87,6 +87,12 @@ const (
 	// one of them being a few seconds ahead says nothing about the game. A
 	// raid that destroys economy buildings there still counts.
 	earlyEcoSec = 4 * 60
+	// earlyShare is the opening share of the game in which no shift of the
+	// line is a moment at all: army and income both still grow from nothing,
+	// so the line swings on who built a few seconds sooner. What happened
+	// there worth telling is a fight one side clearly won, which the page
+	// lists from the battles instead (moments.ts gapBattles).
+	earlyShare = 0.3
 )
 
 // SwingFeatures returns the model's inputs at every step of a two-sided
@@ -156,10 +162,15 @@ func swing(o *Insights, ecoDef func(int32) bool) *Swing {
 	for i, f := range feats {
 		sw.P[i] = math.Round(WinProb(WinModel.Coef, f)*1000) / 1000
 	}
-	// An opening shift carried by income alone is two economies growing at
-	// slightly different speeds — unless the side it moved against lost
-	// economy buildings in it.
+	// Nothing in the first earlyShare of the game is a moment. After it, a
+	// shift still inside the first earlyEcoSec (a short game) carried by
+	// income alone is two economies growing at slightly different speeds —
+	// unless the side it moved against lost economy buildings in it.
+	opening := int32(earlyShare * o.DurationSec * simFPS)
 	skip := func(m Moment) bool {
+		if m.F0 < opening {
+			return true
+		}
 		if m.F0 >= earlyEcoSec*simFPS || m.Eco < 0.5 {
 			return false
 		}
