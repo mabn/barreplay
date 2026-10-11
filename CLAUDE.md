@@ -684,7 +684,13 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           growthStory) names in a no-fight story only what carried >= 20% of
                           the shift, says for income whether the losing side's FELL or the
                           other's grew faster, and gives the model's own numbers (last-minute
-                          income, metal mined so far); no story says a side "lost nothing".
+                          income, metal mined so far); no story says a side "lost nothing". A moment the model says ARMY carried
+                          under 20% of (Moment.Army < 0.2) is told this way EVEN WITH A FIGHT in
+                          its window (moments.ts builtNotFought) — an even trade that left the
+                          armies' balance where it was did not move the line, the incomes did — with
+                          the fighting a one-line "Meanwhile" note, no battle badge, and the side
+                          that put more into its army instead said so; a fall in income names the
+                          mines/converters the side lost in the window.
                           WinModel.Coef started as HAND-SET PRIORS
                           (Fitted=false, which the page states); VERSION 6 ships cmd/winfit's
                           fit over 933 games from the 10 days before 2026-10-11; v7 refits it
