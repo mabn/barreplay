@@ -64,6 +64,7 @@ func run() error {
 		disWidgets   = flag.Bool("disable-widgets", true, "disable BAR's default widget suite during the replay (pure unsynced overhead; cannot affect the sim); =false to keep it")
 		damage       = flag.Bool("damage", true, "record damage windows and per-unit lifetime totals (D/S records: who hurt whom, with what, each second); =false to skip that bookkeeping")
 		visibility   = flag.Bool("visibility", true, "record which side could see each unit, each second (V records); =false to skip it")
+		projectiles  = flag.Bool("projectiles", true, "record long-range projectiles, heavy beams and strong explosions (R/W records: nukes, anti-nukes, LRPCs, rockets, Pulsars, reactor blasts); =false to skip it")
 		throttleDraw = flag.Bool("throttle-draw", true, "throttle the headless draw loop to ~1 fps via MinDrawFPS/MinSimDrawBalance; =false for engine defaults")
 		workerThr    = flag.Int("worker-threads", workerThreadsUnset, "override the engine's WorkerThreadCount for this run (-1 = auto, 0/1 = no workers; scheduling only, cannot desync); unset = keep user/engine default")
 	)
@@ -155,6 +156,7 @@ func run() error {
 		ThrottleDraw:       *throttleDraw,
 		SkipDamage:         !*damage,
 		SkipVisibility:     !*visibility,
+		SkipProjectiles:    !*projectiles,
 	}
 	if *workerThr != workerThreadsUnset {
 		engCfg.WorkerThreads = workerThr
@@ -328,8 +330,8 @@ func run() error {
 	if mb, ok := fileSizeMB(outPath); ok {
 		fmt.Fprintf(os.Stderr, "  snapshot: %.2f MB\n", mb)
 	}
-	fmt.Fprintf(os.Stderr, "  analysis: %d facts, %d hits, %d unit ends, %d visibility samples\n",
-		stats.Facts, stats.Hits, stats.UnitEnds, stats.Visibility)
+	fmt.Fprintf(os.Stderr, "  analysis: %d facts, %d hits, %d unit ends, %d visibility samples, %d projectile tracks, %d blasts\n",
+		stats.Facts, stats.Hits, stats.UnitEnds, stats.Visibility, stats.Projectiles, stats.Blasts)
 	return nil
 }
 

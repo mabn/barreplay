@@ -10,7 +10,8 @@
 --   resim      the re-simulation sampler: the Go tool's substitutions applied,
 --              a full-view spectator of a replay, with scripted damage,
 --              kills, a unit changing hands, a team dying, a player leaving,
---              team statistics, per-side LOS and profiler readings
+--              team statistics, per-side LOS and profiler readings, and a
+--              frame-by-frame projectile script (see projectileScript)
 --              -> harness_resim.brepstream
 --
 -- The streams are committed as internal/capture/testdata fixtures, and the
@@ -124,7 +125,12 @@ units[174].mobile = false
 units[177].mobile = false
 
 local allyOf = { [0] = 0, [1] = 1, [2] = 0 }
-local projectiles = {} -- projectile id -> { owner, team }
+local projectiles = {} -- projectile id -> { owner, team } (+ wd, position, velocity... when flying)
+-- Launchers for the projectile script (resim): fixed units outside `order`,
+-- so they consume nothing of the LCG and every other unit's data stays the
+-- same as before they existed.
+statics = {}
+weaponState = {} -- unitID -> { [slot] = reloadFrame }
 local killedShooters = {} -- units killed so far, in order: { id, team }
 local curFrame = 0
 
@@ -301,6 +307,11 @@ Spring = {
 				out[#out + 1] = order[i]
 			end
 		end
+		for i = 1, #statics do
+			if not units[statics[i]].removed then
+				out[#out + 1] = statics[i]
+			end
+		end
 		return out
 	end,
 	GetUnitPosition = function(id)
@@ -333,6 +344,58 @@ Spring = {
 	-- Projectiles in flight from a unit that has since died (see combat).
 	GetProjectileTeamID = function(pid) return projectiles[pid] and projectiles[pid].team end,
 	GetProjectileOwnerID = function(pid) return projectiles[pid] and projectiles[pid].owner end,
+	-- Flying projectiles (the projectile script): only those have a weapon
+	-- def and a position; the combat ones above exist only as an owner.
+	GetProjectileDefID = function(pid) return projectiles[pid] and projectiles[pid].wd end,
+	GetProjectilePosition = function(pid)
+		local p = projectiles[pid]
+		if p and p.x then
+			return p.x, p.y, p.z
+		end
+		return nil
+	end,
+	GetProjectileVelocity = function(pid)
+		local p = projectiles[pid]
+		if p and p.x then
+			return p.vx, p.vy, p.vz, math.sqrt(p.vx * p.vx + p.vy * p.vy + p.vz * p.vz)
+		end
+		return nil
+	end,
+	GetProjectileGravity = function(pid) return projectiles[pid] and projectiles[pid].g end,
+	GetProjectileTarget = function(pid)
+		local p = projectiles[pid]
+		local t = p and p.target
+		if t == nil then
+			return nil
+		end
+		if t.kind == "g" then
+			return string.byte("g"), { t.x, t.y, t.z }
+		end
+		return string.byte(t.kind), t.id
+	end,
+	GetProjectileIsIntercepted = function(pid) return projectiles[pid] ~= nil and projectiles[pid].intercepted == true end,
+	-- The engine's quadfield query: every flying projectile within r, by id.
+	GetProjectilesInSphere = function(x, y, z, r)
+		local out = {}
+		for pid, p in pairs(projectiles) do
+			if p.x and (p.x - x) ^ 2 + (p.y - y) ^ 2 + (p.z - z) ^ 2 <= r * r then
+				out[#out + 1] = pid
+			end
+		end
+		table.sort(out)
+		return out
+	end,
+	GetUnitWeaponState = function(id, slot, key)
+		local w = weaponState[id]
+		return w and w[slot] or nil
+	end,
+	GetUnitWeaponVectors = function(id, slot)
+		local u = units[id]
+		return u.x, 120, u.z, 0, 1, 0
+	end,
+	GetUnitWeaponTarget = function(id, slot)
+		return 2, false, { 3000, 0, 4000 } -- a ground target
+	end,
 	GetUnitHealth = function(id)
 		local u = units[id]
 		local vs = visState(u)
@@ -451,10 +514,11 @@ Spring = {
 		return base + curFrame / 10
 	end,
 }
-Game = { gameSpeed = 30, mapName = "Harness Map 1.0", gameVersion = "Beyond All Reason test-harness" }
+Game = { gameSpeed = 30, mapName = "Harness Map 1.0", gameVersion = "Beyond All Reason test-harness",
+	armorTypes = { [0] = "default", default = 0, [1] = "vtol", vtol = 1 } }
 Engine = { version = "2026-harness" }
 UnitDefs = {}
-for d = 1, 38 do
+for d = 1, 44 do
 	UnitDefs[d] = { name = "def" .. d, humanName = "Def " .. d, health = 1000 + d,
 		xsize = 2, zsize = 2, canMove = true, isBuilding = false,
 		maxWeaponRange = (d % 3 == 0) and 0 or 300 + d,
@@ -471,7 +535,58 @@ end
 -- Every unit's death blast: a chain explosion's weapon (see kill).
 WeaponDefs[5] = { id = 5, name = "deathblast", type = "Cannon", range = 0, reload = 0,
 	damages = { [0] = 500 }, damageAreaOfEffect = 1e6 }
-WeaponDefNames = { deathblast = WeaponDefs[5] }
+-- The projectile script's weapons (resim): one per kind of thing the widget
+-- watches, plus three it must NOT (a weak death puff, a silo's dummy launch
+-- weapon, an anti-air missile dealing 1 to ground).
+WeaponDefs[6] = { name = "h_silo_nuke", type = "StarburstLauncher", range = 72000, reload = 30,
+	damages = { [0] = 12500, impulseFactor = 0.1 }, damageAreaOfEffect = 640, edgeEffectiveness = 0.45,
+	explosionSpeed = 10, stockpile = true, stockpileTime = 2700, targetable = 1, projectilespeed = 10,
+	customParams = { nuclear = "1", stockpilelimit = "10" } }
+WeaponDefs[7] = { name = "h_amd_rocket", type = "StarburstLauncher", range = 72000, reload = 2,
+	damages = { [0] = 1500 }, damageAreaOfEffect = 210, interceptor = 1, coverageRange = 2000,
+	stockpile = true, stockpileTime = 2700, projectilespeed = 20, customParams = { stockpilelimit = "20" } }
+WeaponDefs[8] = { name = "h_brtha_lrpc", type = "Cannon", range = 4650, reload = 13.2,
+	damages = { [0] = 1625, [1] = 541 }, damageAreaOfEffect = 67.5, projectilespeed = 36.67, myGravity = 0.12,
+	customParams = { cluster_def = "cluster", cluster_number = "2" } }
+WeaponDefs[9] = { name = "h_anni_ata", type = "BeamLaser", range = 1400, reload = 9.9,
+	damages = { [0] = 10800 }, damageAreaOfEffect = 8, beamtime = 1.5 }
+WeaponDefs[10] = { name = "h_brtha_cluster", type = "Cannon", range = 110, reload = 1,
+	damages = { [0] = 100 }, damageAreaOfEffect = 57.5 }
+WeaponDefs[11] = { name = "fusionblast", type = "Cannon", range = 0, reload = 0,
+	damages = { [0] = 2650 }, damageAreaOfEffect = 240, edgeEffectiveness = 0.15 }
+WeaponDefs[12] = { name = "smallboom", type = "Cannon", range = 0, reload = 0,
+	damages = { [0] = 11 }, damageAreaOfEffect = 18 }
+WeaponDefs[13] = { name = "h_silo_launch", type = "Cannon", range = 0, reload = 30,
+	damages = { [0] = 0 }, customParams = { bogus = "1" } }
+WeaponDefs[14] = { name = "h_aa", type = "MissileLauncher", range = 2400, reload = 1.8, damages = { [0] = 1 } }
+-- A volley gun that waits before its salvo (the Mini Starfall waits 2.5 s,
+-- then fires 63): the shells appear long after the reload frame moved.
+WeaponDefs[15] = { name = "h_starfall_starfire", type = "Cannon", range = 1750, reload = 7,
+	damages = { [0] = 125 }, damageAreaOfEffect = 27.5, projectilespeed = 16.7,
+	salvoSize = 3, salvoDelay = 0.1, windup = 2.5 }
+WeaponDefNames = {}
+for id, wd in pairs(WeaponDefs) do
+	wd.id = id
+	WeaponDefNames[wd.name] = wd
+end
+UnitDefs[39].name, UnitDefs[39].weapons = "h_silo", { { weaponDef = 13 }, { weaponDef = 6 } }
+UnitDefs[39].deathExplosion = "smallboom"
+UnitDefs[40].name, UnitDefs[40].weapons = "h_amd", { { weaponDef = 7 } }
+UnitDefs[41].name, UnitDefs[41].weapons = "h_brtha", { { weaponDef = 8 }, { weaponDef = 14 } }
+UnitDefs[42].name, UnitDefs[42].weapons = "h_anni", { { weaponDef = 9 } }
+UnitDefs[44].name, UnitDefs[44].weapons = "h_starfall", { { weaponDef = 15 } }
+UnitDefs[43].name = "h_fus"
+UnitDefs[43].deathExplosion, UnitDefs[43].selfDExplosion = "fusionblast", "fusionblast"
+-- Script.SetWatchExplosion: the engine calls LuaUI's Explosion only for the
+-- weapon defs LuaUI watches.
+watchedExplosions = {}
+watchedEver = {}
+Script = { SetWatchExplosion = function(id, on)
+	watchedExplosions[id] = on or nil
+	if on then
+		watchedEver[id] = true
+	end
+end }
 sentCommands = {}
 widgetHandler = { RemoveWidget = function() error("widget removed itself") end }
 -- The handler API the resim sampler uses to switch BAR's own widget suite off.
@@ -521,6 +636,7 @@ if resim then
 	local subs = {
 		__RESIM__ = "1", __OUTPUT_PATH__ = outName, __SAMPLE_EVERY__ = tostring(sampleEvery),
 		__PROFILE__ = "1", __DISABLE_WIDGETS__ = "1", __DAMAGE__ = "1", __VISIBILITY__ = "1",
+		__PROJECTILES__ = "1",
 	}
 	for token, value in pairs(subs) do
 		local n
@@ -616,6 +732,137 @@ local function combat(s)
 			else
 				unitDamaged(id, u.def, u.team, dmg, weapon == 4, weapon, 1, a.id, a.def, a.team)
 			end
+		end
+	end
+end
+
+-- ---------------------------------------------------------------------------
+-- Resim-only projectile script, run every sim frame between GameFrame and
+-- GameFramePost (the engine's order: units fire and projectiles move inside
+-- the frame, so GameFramePost sees what the frame produced). Fixed values,
+-- no LCG: the rest of the fixture is unchanged by it. It covers every way a
+-- track or a blast can come about:
+--   LRPC 502      f610 fires 7001, which lands at f670 and splits into two
+--                 cluster sub-munitions (no track: B kind 2) at f671; f1210
+--                 fires again under the SAME id 7001, which a gadget deletes
+--                 at f1240 with no explosion (vanished, found by the sweep);
+--                 f4150 fires 7005, still flying at game over (open)
+--   nuke silo 501 stockpile built f300 and f2300 (stock facts); f1500 fires
+--                 7002, intercepted at f1620 by 7003 from the anti-nuke 503
+--                 (fired f1560, its target the nuke; the nuke explodes first);
+--                 f2400 fires 7004, which reaches the ground at f2550
+--   beam 504      fires f1800 for 45 frames, sweeping, a jump at its 30th
+--                 frame, frames 1810-1814 into empty air (no explosion)
+--   fusion 505    dies f2100: UnitDestroyed, then its own blast (B kind 1)
+--   volley 506    fires f3000 with a 75-frame windup: its 3 shells leave at
+--                 f3075, f3078 and f3081 and land 60 frames later
+
+local function addStatic(id, def, team, x, z)
+	units[id] = { id = id, team = team, def = def, x = x, z = z, vx = 0, vz = 0,
+		hp = 5000, maxHp = 5000, build = 1, mobile = false }
+	statics[#statics + 1] = id
+	weaponState[id] = { [1] = 0, [2] = 0 }
+	widget:UnitCreated(id, def, team)
+	widget:UnitFinished(id, def, team)
+end
+
+-- deliver is the engine calling LuaUI's Explosion — only for watched weapons.
+local function deliver(wd, x, y, z, owner, pid)
+	if watchedExplosions[wd] and engineCallIns.Explosion then
+		engineCallIns.Explosion(wd, x, y, z, owner, pid)
+	end
+end
+
+local function spawn(pid, owner, slot, wd, vx, vy, vz, g, target, reloadFrames)
+	local u = units[owner]
+	weaponState[owner][slot] = curFrame + reloadFrames
+	projectiles[pid] = { owner = owner, team = u.team, wd = wd, x = u.x, y = 120, z = u.z,
+		vx = vx, vy = vy, vz = vz, g = g, target = target }
+end
+
+local function explode(pid)
+	local p = projectiles[pid]
+	projectiles[pid] = nil
+	deliver(p.wd, p.x, p.y, p.z, p.owner, pid)
+	return p
+end
+
+local lastImpact = nil
+
+local function projectileScript(f)
+	if f == 300 then widget:StockpileChanged(501, 39, 0, 2, 0, 1) end
+	if f == 330 then widget:StockpileChanged(503, 40, 1, 1, 0, 1) end
+	if f == 2300 then widget:StockpileChanged(501, 39, 0, 2, 0, 1) end
+	if f == 610 then
+		spawn(7001, 502, 1, 8, 33.3, 3.6, 16.7, 0.12, { kind = "g", x = 4000, y = 0, z = 3000 }, 396)
+	end
+	if f == 1210 then
+		spawn(7001, 502, 1, 8, 25, 3.6, -20, 0.12, { kind = "g", x = 3500, y = 0, z = 800 }, 396)
+	end
+	if f == 1500 then
+		widget:StockpileChanged(501, 39, 0, 2, 1, 0)
+		spawn(7002, 501, 2, 6, 30, 5, 30, 0.05, { kind = "g", x = 7000, y = 0, z = 7000 }, 900)
+	end
+	if f == 1560 then
+		widget:StockpileChanged(503, 40, 1, 1, 1, 0)
+		spawn(7003, 503, 1, 7, -40, 12, -40, 0, { kind = "p", id = 7002 }, 60)
+		projectiles[7002].intercepted = true
+	end
+	if f == 1800 then
+		weaponState[504][1] = f + 297
+	end
+	if f == 2400 then
+		widget:StockpileChanged(501, 39, 0, 2, 1, 0)
+		spawn(7004, 501, 2, 6, 25, 8, 20, 0.11, { kind = "g", x = 4750, y = 0, z = 4000 }, 900)
+	end
+	if f == 4150 then
+		spawn(7005, 502, 1, 8, 30, 3.6, 10, 0.12, { kind = "g", x = 6000, y = 0, z = 2000 }, 396)
+	end
+	for _, p in pairs(projectiles) do
+		if p.x then
+			p.x, p.y, p.z = p.x + p.vx, p.y + p.vy, p.z + p.vz
+			p.vy = p.vy - (p.g or 0)
+		end
+	end
+	if f >= 1800 and f < 1845 and not (f >= 1810 and f <= 1814) then
+		local k = f - 1800
+		deliver(9, 3000 + 10 * k + (k >= 30 and 200 or 0), 30, 4000 + 3 * k, 504, 8000 + k)
+	end
+	if f == 670 then
+		lastImpact = explode(7001)
+	end
+	if f == 671 then
+		deliver(10, lastImpact.x + 40, lastImpact.y, lastImpact.z, 502, 9001)
+		deliver(10, lastImpact.x - 40, lastImpact.y, lastImpact.z + 25, 502, 9002)
+	end
+	if f == 1240 then
+		projectiles[7001] = nil -- deleted by a gadget: no explosion
+	end
+	if f == 1620 then
+		explode(7002)
+		explode(7003)
+	end
+	if f == 2100 then
+		widget:UnitDestroyed(505, 43, 1)
+		units[505].removed = true
+		deliver(11, units[505].x, 60, units[505].z, 505, 4294967295)
+		-- A weak death puff the widget does not watch: never delivered.
+		deliver(12, 100, 0, 100, 505, 4294967295)
+	end
+	if f == 2550 then
+		explode(7004)
+	end
+	if f == 3000 then
+		weaponState[506][1] = f + 210
+	end
+	for k = 0, 2 do
+		if f == 3075 + 3 * k then
+			local u = units[506]
+			projectiles[7101 + k] = { owner = 506, team = u.team, wd = 15, x = u.x, y = 120, z = u.z,
+				vx = 12, vy = 5, vz = 10, g = 0.16, target = { kind = "g", x = u.x + 720, y = 0, z = u.z + 600 } }
+		end
+		if f == 3135 + 3 * k then
+			explode(7101 + k)
 		end
 	end
 end
@@ -800,9 +1047,26 @@ for s = 0, SAMPLES - 1 do
 			widget:TeamDied(1)
 		end
 	end
+	if resim and s == 0 then
+		addStatic(501, 39, 0, 1000, 1000)
+		addStatic(502, 41, 0, 2000, 2000)
+		addStatic(503, 40, 1, 7000, 6500)
+		addStatic(504, 42, 1, 2600, 3800)
+		addStatic(505, 43, 1, 5000, 5200)
+		addStatic(506, 44, 0, 3000, 1500)
+	end
 	assignBuilders()
 	if widgetActive then
 		widget:GameFrame(curFrame)
+	end
+	if resim and widget.GameFramePost then
+		local sampleFrame = curFrame
+		for f = sampleFrame, math.min(sampleFrame + sampleEvery - 1, SAMPLES * sampleEvery - 6) do
+			curFrame = f
+			projectileScript(f)
+			widget:GameFramePost(f)
+		end
+		curFrame = sampleFrame
 	end
 end
 curFrame = SAMPLES * sampleEvery - 5
@@ -810,6 +1074,15 @@ widget:GameOver({ 0 })
 widget:Shutdown()
 
 if resim then
+	-- What the widget must watch, and what it must not.
+	for _, wd in ipairs({ 5, 6, 7, 8, 9, 10, 11 }) do
+		assert(watchedExplosions[wd] == nil, "weapon " .. wd .. " still watched after shutdown")
+	end
+	assert(watchedEver[6] and watchedEver[7] and watchedEver[8] and watchedEver[9] and watchedEver[10] and watchedEver[11],
+		"resim must watch the nuke, anti-nuke, LRPC, beam, cluster and fusion blast weapons")
+	for _, wd in ipairs({ 0, 1, 2, 3, 4, 12, 13, 14 }) do
+		assert(not watchedEver[wd], "weapon " .. wd .. " must not be watched")
+	end
 	assert(#disabledWidgets == 1 and disabledWidgets[1] == "Some BAR widget",
 		"resim must disable exactly the other active widget, got " .. table.concat(disabledWidgets, ","))
 	assert(sentCommands[#sentCommands] == "quitforce", "resim must quit at game over")

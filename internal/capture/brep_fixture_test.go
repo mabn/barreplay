@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -154,6 +155,89 @@ func TestHarnessRecordsWhatEachModeOwes(t *testing.T) {
 	if _, ok := unitAt(resim.w.frames, 64*30, 144); ok {
 		t.Error("unit 144 outlived its destroyed event")
 	}
+
+	checkHarnessProjectiles(t, live, resim)
+}
+
+// checkHarnessProjectiles pins the protocol-5 records against the harness's
+// projectile script (tools/brep-harness/harness.lua, projectileScript), which
+// covers every way a track can end and both kinds of blast.
+func checkHarnessProjectiles(t *testing.T, live, resim decodedHarness) {
+	t.Helper()
+	if n := len(live.w.projectiles) + len(live.w.blasts); n != 0 {
+		t.Errorf("live capture recorded %d projectile records; they are the re-sim's", n)
+	}
+	tracks := map[[2]int32]snapshot.Projectile{} // (id, birth): ids are recycled
+	for _, p := range resim.w.projectiles {
+		tracks[[2]int32{p.ID, p.Birth}] = p
+	}
+	if len(tracks) != 10 {
+		t.Errorf("re-sim recorded %d tracks, want 10", len(tracks))
+	}
+	check := func(id, birth int32, class, end, flags uint8) snapshot.Projectile {
+		t.Helper()
+		p, ok := tracks[[2]int32{id, birth}]
+		if !ok {
+			t.Errorf("no track for projectile %d born at %d", id, birth)
+			return p
+		}
+		if p.Class != class || p.EndKind != end || p.Flags != flags {
+			t.Errorf("track %d@%d: class %d end %d flags %d, want %d %d %d",
+				id, birth, p.Class, p.EndKind, p.Flags, class, end, flags)
+		}
+		return p
+	}
+	check(7001, 610, snapshot.ProjArtillery, snapshot.TrackExploded, 0)
+	// The same id fired again, deleted with no explosion: the sweep closes it.
+	check(7001, 1210, snapshot.ProjArtillery, snapshot.TrackVanished, 0)
+	nuke := check(7002, 1500, snapshot.ProjNuke, snapshot.TrackExploded, snapshot.TrackEngaged|snapshot.TrackIntercepted)
+	if len(nuke.Path) == 0 || nuke.Path[0].DF != 10 {
+		t.Errorf("nuke path %+v: a strategic track is sampled every 10 frames", nuke.Path)
+	}
+	amd := check(7003, 1560, snapshot.ProjAntiNuke, snapshot.TrackExploded, 0)
+	if amd.TargetType != 'p' || amd.Target != 7002 {
+		t.Errorf("anti-nuke target %c %d, want the nuke 7002", amd.TargetType, amd.Target)
+	}
+	check(7004, 2400, snapshot.ProjNuke, snapshot.TrackExploded, 0) // not intercepted
+	check(7005, 4150, snapshot.ProjArtillery, snapshot.TrackOpen, 0)
+	// A volley gun with a windup: the shells leave 75 frames after the
+	// reload frame moved, each one still found and tracked.
+	for k, birth := range []int32{3075, 3078, 3081} {
+		if p := check(7101+int32(k), birth, snapshot.ProjArtillery, snapshot.TrackExploded, 0); p.Owner != 506 {
+			t.Errorf("volley shell %d owned by %d, want 506", k, p.Owner)
+		}
+	}
+	beam := check(8000, 1800, snapshot.ProjBeam, snapshot.TrackExploded, 0)
+	if beam.End != 1844 {
+		t.Errorf("beam ended at %d, want its last hit at 1844", beam.End)
+	}
+	var dfs []int32
+	for _, pt := range beam.Path {
+		dfs = append(dfs, pt.DF)
+	}
+	if want := []int32{0, 5, 15, 20, 25, 30, 35, 40, 44}; !reflect.DeepEqual(dfs, want) {
+		t.Errorf("beam hit points at %v, want %v (frames 10-14 hit nothing, 30 jumped, 44 is the last)", dfs, want)
+	}
+
+	kinds := map[uint8]int{}
+	for _, b := range resim.w.blasts {
+		kinds[b.Kind]++
+		if b.Kind == snapshot.BlastUnit && (b.Unit != 505 || b.Team != 1 || b.Weapon != 11) {
+			t.Errorf("unit blast %+v, want the fusion 505 of team 1 (weapon 11)", b)
+		}
+	}
+	if kinds[snapshot.BlastUnit] != 1 || kinds[snapshot.BlastStray] != 2 || len(resim.w.blasts) != 3 {
+		t.Errorf("blast kinds %v, want 1 unit blast and 2 cluster sub-munitions", kinds)
+	}
+	stock := 0
+	for _, f := range resim.w.facts {
+		if f.Kind == "stock" {
+			stock++
+		}
+	}
+	if stock != 6 {
+		t.Errorf("%d stock facts, want 6", stock)
+	}
 }
 
 func unitAt(frames []snapshot.Frame, frame, id int32) (snapshot.UnitState, bool) {
@@ -245,6 +329,12 @@ func harnessDump(t *testing.T, path string) []byte {
 	}
 	for _, v := range d.w.visibility {
 		line("V", v)
+	}
+	for _, p := range d.w.projectiles {
+		line("RT", p)
+	}
+	for _, b := range d.w.blasts {
+		line("B", b)
 	}
 	line("PROF", d.st.Profile)
 	line("PROFD", d.st.ProfileSamples)
