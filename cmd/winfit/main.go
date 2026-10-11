@@ -36,10 +36,13 @@
 // side by side. It then fits every model again on each PHASE of a game alone
 // (early/mid/late thirds of each game, and 0-10 / 10-25 / 25+ minutes of
 // game time), to show which resource matters when. Nothing it fits changes
-// the live model:
+// the live model. It also prints how much each fitted line MOVES (jitter,
+// zigzags, swing-sized shifts), since a calmer line can be worth some
+// accuracy on a chart; -window N widens the income average to try that:
 //
 //	go run ./cmd/winfit -energy ./ins
 //	go run ./cmd/winfit -energy -categories ./ins
+//	go run ./cmd/winfit -energy -window 8 ./ins
 package main
 
 import (
@@ -75,6 +78,8 @@ const (
 // metal (insights.swingIncomeK/swingCumK); BAR economies run at roughly
 // twenty energy to the metal, so energy's are twenty times those.
 const (
+	metalIncK  = 3
+	metalCumK  = 300
 	energyIncK = 60
 	energyCumK = 6000
 )
@@ -114,6 +119,7 @@ func main() {
 	cats := flag.Bool("categories", false, "also fit each game category (lava / large ranked / ranked / unranked) on its own, from the BAR API's replay details")
 	apiBase := flag.String("api", "https://api.bar-rts.com", "BAR API base URL (-categories)")
 	cacheDir := flag.String("cache", "auto", "where -categories keeps fetched details (auto = the user cache dir; empty = no cache)")
+	window := flag.Int("window", 4, "steps (15 s each) income is averaged over for the last-minute income features; the live model uses 4")
 	energy := flag.Bool("energy", false, "also fit models on energy income (army+energy, army+metal+energy) and compare them with the metal model on the same games")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: winfit [flags] <insights file or dir> [...]\n\n")
@@ -135,7 +141,7 @@ func main() {
 			if d.IsDir() || !strings.HasSuffix(path, ".json") || !strings.Contains(filepath.Base(path), ".insights") {
 				return nil
 			}
-			id, ss, ok, err := load(path)
+			id, ss, ok, err := load(path, *window)
 			if err != nil {
 				// A truncated download is one game lost, not the run.
 				fmt.Fprintf(os.Stderr, "winfit: skipping %s: %v\n", path, err)
@@ -176,6 +182,7 @@ func main() {
 		fmt.Printf("\n== metal vs energy income, fitted on the same %d games (log loss / accuracy; all in-sample) ==\n", games)
 		table(append([]row{{"current", metalModel, current}, {"metal fit", metalModel, fit}}, fitRows(extra, " fit")...), samples)
 		models := []model{metalModel, energyModel, bothModel}
+		steadiness(append([]fitted{{metalModel, fit}}, extra...), all)
 		phaseReport("thirds of each game", thirds, models, samples, *l2)
 		phaseReport("game time", byClock, models, samples, *l2)
 	}
@@ -376,6 +383,74 @@ func table(rows []row, ss []sample) {
 	}
 }
 
+// Swing moments as the summary page picks them (insights' momentSteps /
+// momentMin), for counting how often a line would announce one.
+const (
+	momentSteps = 4
+	momentMin   = 0.12
+)
+
+// steadiness says how much each model's line moves about, which accuracy
+// does not: a line that jumps with every build pulse reads badly on a chart
+// and invents swings. Per game (each counted once), on side 0's line:
+//   - jitter: the mean step-to-step move, in percentage points per 15 s;
+//   - wasted: the share of all movement that was later undone (total
+//     movement minus the net change from start to end, over the total);
+//   - reversals: direction changes of at least 5 points, per game;
+//   - moments: shifts the page would mark (>= 12 points over a minute),
+//     counted at every step rather than de-duplicated, per game.
+func steadiness(fs []fitted, games []game) {
+	fmt.Printf("\n== how much each line moves (per game; lower is calmer) ==\n")
+	fmt.Printf("  %-14s %-12s %-10s %-14s %s\n", "", "jitter pp/15s", "wasted", "reversals/game", "1-min shifts >=12pp/game")
+	for _, f := range fs {
+		var jit, waste, rev, mom float64
+		n := 0
+		for _, g := range games {
+			var p []float64
+			for i := 0; i < len(g.ss); i += 2 { // unmirrored half
+				p = append(p, prob(f.m, f.c, g.ss[i].f))
+			}
+			if len(p) < 2 {
+				continue
+			}
+			n++
+			tv := 0.0
+			for i := 1; i < len(p); i++ {
+				tv += math.Abs(p[i] - p[i-1])
+			}
+			jit += 100 * tv / float64(len(p)-1)
+			if tv > 0 {
+				waste += (tv - math.Abs(p[len(p)-1]-p[0])) / tv
+			}
+			// Reversals: a zigzag filter with a 5-point threshold.
+			ext, dir := p[0], 0.0
+			for _, v := range p[1:] {
+				switch {
+				case dir == 0:
+					if math.Abs(v-ext) >= 0.05 {
+						dir, ext = math.Copysign(1, v-ext), v
+					}
+				case (v-ext)*dir > 0:
+					ext = v // still going the same way
+				case math.Abs(v-ext) >= 0.05:
+					rev++
+					dir, ext = -dir, v
+				}
+			}
+			for i := momentSteps; i < len(p); i++ {
+				if math.Abs(p[i]-p[i-momentSteps]) >= momentMin {
+					mom++
+				}
+			}
+		}
+		if n == 0 {
+			continue
+		}
+		k := float64(n)
+		fmt.Printf("  %-14s %-12s %-10s %-14s %.1f\n", f.m.name, fmt.Sprintf("%.2f", jit/k), fmt.Sprintf("%.0f%%", 100*waste/k), fmt.Sprintf("%.1f", rev/k), mom/k)
+	}
+}
+
 // A phase is a slice of every game's steps.
 type phase struct {
 	name string
@@ -434,7 +509,7 @@ func phaseReport(title string, phases []phase, models []model, ss []sample, l2 f
 
 // load reads one insights file into mirrored, game-weighted samples, and
 // the game's id.
-func load(path string) (string, []sample, bool, error) {
+func load(path string, window int) (string, []sample, bool, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return "", nil, false, err
@@ -453,7 +528,8 @@ func load(path string) (string, []sample, bool, error) {
 	// Energy income is in every insights file the model reads; one with no
 	// energy series reads as even on energy rather than being dropped, so
 	// the metal and energy models always see the same games.
-	energy := insights.IncomeFeatures(ins.Series.EnergyIncome, len(feats), energyIncK, energyCumK)
+	metal := insights.IncomeFeatures(ins.Series.MetalIncome, len(feats), window, metalIncK, metalCumK)
+	energy := insights.IncomeFeatures(ins.Series.EnergyIncome, len(feats), window, energyIncK, energyCumK)
 	y := 0.0
 	if ins.Winner == 0 {
 		y = 1
@@ -463,7 +539,7 @@ func load(path string) (string, []sample, bool, error) {
 	for i, mf := range feats {
 		frac := float64(i+1) / float64(len(feats))
 		var f [nAll]float64
-		f[fArmy], f[fMetalInc], f[fMetalCum] = mf[0], mf[1], mf[2]
+		f[fArmy], f[fMetalInc], f[fMetalCum] = mf[0], metal[i][0], metal[i][1]
 		if energy != nil {
 			f[fEnergyInc], f[fEnergyCum] = energy[i][0], energy[i][1]
 		}

@@ -43,7 +43,7 @@ func TestFitRecoversTheSignal(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "x.insights1.json"), []byte(`{"version":1}`), 0o644) // skipped
 	var ss []sample
 	for _, p := range must(filepath.Glob(filepath.Join(dir, "*.json"))) {
-		_, got, ok, err := load(p)
+		_, got, ok, err := load(p, 4)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -86,7 +86,7 @@ func TestEnergyModelFindsEnergySignal(t *testing.T) {
 		p := filepath.Join(t.TempDir(), "g.insights.json")
 		b, _ := json.Marshal(ins)
 		os.WriteFile(p, b, 0o644)
-		_, got, ok, err := load(p)
+		_, got, ok, err := load(p, 4)
 		if err != nil || !ok {
 			t.Fatalf("load: ok=%v err=%v", ok, err)
 		}
