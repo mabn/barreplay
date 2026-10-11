@@ -3176,8 +3176,10 @@ run dev` in `worker/` plus `pack -upload local`.)
   `mapName`) its terrain back. The proxy exists for CACHING: api.bar-rts.com sends
   no cache-control on the JSON and `max-age=0` on the images, so every replay load
   downloaded its terrain again. barProxy caches the answer at the edge
-  (`cf.cacheTtlByStatus`) and tells the browser `public, max-age` a week on a 200 —
-  a map's archive name names fixed content — but only 5 minutes on a 404, which must
+  (`cf.cacheTtlByStatus`, a week) and tells the browser `max-age` a year and
+  `immutable` on a 200 — a map's archive name names fixed content, and without
+  `immutable` Firefox revalidates on every reload (a hard reload that still asks is
+  answered 304 off the ETag) — but only 5 minutes on a 404, which must
   stay a 404 (it is how resolveMapFile learns the guess was wrong), and nothing on a
   5xx. It answers `access-control-allow-origin: *` because the summary EMBED draws its
   maps through it from another site (embed.ts passes `mapApi = <replayOrigin>/api/bar`;

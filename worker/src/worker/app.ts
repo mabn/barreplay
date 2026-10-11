@@ -959,17 +959,23 @@ app.get("/setup", async (c) => {
 // max-age=0, so a browser re-downloaded a several-hundred-KB terrain texture
 // on every replay load. Through here the answer is cached at our edge
 // (cf.cacheTtlByStatus) AND told to the browser (cache-control), a map's
-// archive name naming fixed content. A 404 is cached briefly rather than
+// archive name naming fixed content. The browser is told `immutable` with a
+// year's max-age, so it does not even revalidate on reload (Firefox does
+// revalidate a plain max-age resource on reload; immutable stops that), and a
+// revalidation that does arrive (a hard reload) is answered 304 off the ETag.
+// The edge copy stays a week, so a re-uploaded map reaches new visitors. A
+// 404 is cached briefly rather than
 // long: resolveMapFile reads it as "the guess was wrong, ask the replay", and
 // a map uploaded after a miss should not stay missing for a week.
 // access-control-allow-origin: * because the summary embed draws maps from
 // another site (lavabalance) through this same path.
 const BAR_API = "https://api.bar-rts.com";
 const BAR_PROXY_OK_SEC = 7 * 24 * 3600;
+const BAR_PROXY_BROWSER_SEC = 365 * 24 * 3600;
 const BAR_PROXY_MISS_SEC = 300;
 const MAP_ASSETS = new Set(["texture-mq.jpg", "texture-lq.jpg", "texture-thumb.jpg"]);
 
-async function barProxy(path: string): Promise<Response> {
+async function barProxy(path: string, ifNoneMatch?: string): Promise<Response> {
   let r: Response;
   try {
     r = await fetch(BAR_API + path, {
@@ -986,8 +992,13 @@ async function barProxy(path: string): Promise<Response> {
     if (v) h.set(k, v);
   }
   h.set("access-control-allow-origin", "*");
-  h.set("cache-control", r.ok ? `public, max-age=${BAR_PROXY_OK_SEC}`
+  h.set("cache-control", r.ok ? `public, max-age=${BAR_PROXY_BROWSER_SEC}, immutable`
     : r.status === 404 ? `public, max-age=${BAR_PROXY_MISS_SEC}` : "no-store");
+  const etag = r.headers.get("etag");
+  if (r.ok && etag && ifNoneMatch && ifNoneMatch.split(",").some((t) => t.trim() === etag)) {
+    await r.body?.cancel();
+    return new Response(null, { status: 304, headers: h });
+  }
   return new Response(r.body, { status: r.status, headers: h });
 }
 
@@ -998,18 +1009,18 @@ const okMapFile = (f: string) => f.length > 0 && f.length <= 200 && !/[\/\\]/.te
 app.get("/api/bar/maps/:file", (c) => {
   const file = c.req.param("file");
   if (!okMapFile(file)) return c.text("bad map file", 400);
-  return barProxy(`/maps/${encodeURIComponent(file)}`);
+  return barProxy(`/maps/${encodeURIComponent(file)}`, c.req.header("if-none-match"));
 });
 app.get("/api/bar/maps/:file/:asset", (c) => {
   const file = c.req.param("file");
   const asset = c.req.param("asset");
   if (!okMapFile(file) || !MAP_ASSETS.has(asset)) return c.text("not proxied", 404);
-  return barProxy(`/maps/${encodeURIComponent(file)}/${asset}`);
+  return barProxy(`/maps/${encodeURIComponent(file)}/${asset}`, c.req.header("if-none-match"));
 });
 app.get("/api/bar/replays/:id", (c) => {
   const id = c.req.param("id");
   if (!GAME_ID_RE.test(id)) return c.text("bad game id", 400);
-  return barProxy(`/replays/${id}`);
+  return barProxy(`/replays/${id}`, c.req.header("if-none-match"));
 });
 
 // Non-R2, non-API requests reach the Worker only when no static asset matched.

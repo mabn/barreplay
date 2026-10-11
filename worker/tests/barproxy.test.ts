@@ -30,7 +30,7 @@ test("a map record is proxied with a long browser + edge cache and open CORS", a
     assert.equal(r.status, 200);
     assert.equal(s.seen[0].url, "https://api.bar-rts.com/maps/supreme_isthmus_v2.1");
     assert.deepEqual((s.seen[0].init?.cf as { cacheEverything: boolean }).cacheEverything, true);
-    assert.match(r.headers.get("cache-control") ?? "", /^public, max-age=604800$/);
+    assert.match(r.headers.get("cache-control") ?? "", /^public, max-age=31536000, immutable$/);
     assert.equal(r.headers.get("access-control-allow-origin"), "*");
     assert.equal(r.headers.get("content-type"), "application/json");
     assert.equal(r.headers.get("vary"), null);
@@ -46,8 +46,11 @@ test("terrain images are proxied; a map name with spaces is re-escaped", async (
     const r = await app.request("/api/bar/maps/Eye%20Of%20Horus_1.6/texture-mq.jpg", {}, env);
     assert.equal(r.status, 200);
     assert.equal(s.seen[0].url, "https://api.bar-rts.com/maps/Eye%20Of%20Horus_1.6/texture-mq.jpg");
-    assert.equal(r.headers.get("cache-control"), "public, max-age=604800");
+    assert.equal(r.headers.get("cache-control"), "public, max-age=31536000, immutable");
     assert.equal(r.headers.get("etag"), 'W/"2bff"');
+    const nm = await app.request("/api/bar/maps/x/texture-mq.jpg", { headers: { "if-none-match": 'W/"2bff"' } }, env);
+    assert.equal(nm.status, 304);
+    assert.equal(await nm.text(), "");
     const t = await app.request("/api/bar/maps/x/texture-thumb.jpg", {}, env);
     assert.equal(t.status, 200);
   } finally { s.restore(); }
