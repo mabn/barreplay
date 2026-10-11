@@ -132,7 +132,7 @@ try {
     check(`GET ${summaryRef} is the summary library`,
       mod.status === 200 && mod.body.includes("mountSummary"), `${mod.status} ${mod.headers.get("content-type")}`);
   }
-  for (const ref of home.body.match(/\/(?:app|style)\.[0-9a-f]{8}\.(?:js|css)/g) ?? []) {
+  for (const ref of home.body.match(/\/(?:app|style|fx-[a-z]+)\.[0-9a-f]{8}\.(?:js|css)/g) ?? []) {
     const sub = await get(base, ref);
     check(`GET ${ref}`, sub.status === 200 && sub.body.length > 0, String(sub.status));
   }

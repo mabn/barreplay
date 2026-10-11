@@ -571,6 +571,10 @@ function headFromBrp(rec, at, icons) {
     frameCount: rec.frames || 0, chunks,
     keys: at.K ? { off: at.K.off, len: at.K.len } : { off: 0, len: 0 },
     extra: at.X || null,
+    // The re-sim's effect records (R tracks, W blasts, G facts for the weapon
+    // table), read only when effects are shown (loadEffects); null when the
+    // capture has none, which is every replay before widget 1.9.0.
+    fxAt: at.R || at.W ? { G: at.G || null, R: at.R || null, W: at.W || null } : null,
   };
 }
 
@@ -2430,7 +2434,7 @@ function drawOverlay(u) {
   const simFrame = frameNumAt(idx) + renderFrac * ((data && data.sampleEvery) || 30);
   if (marks.length) drawMarks(simFrame);
   if (clip && clip.focus.path) drawClipPath(clip.focus.path, simFrame);
-  if (!u) return;
+  if (!u) { drawEffects(octx, simFrame, null); return; }
 
   // Cheap scan first: most frames have far fewer builders/under-construction
   // units than units, and many replays (v4) have none at all. Damage is the
@@ -2479,6 +2483,7 @@ function drawOverlay(u) {
   }
 
   if (showBuildLines && reclaims.length) drawReclaimLines(u, simFrame);
+  drawEffects(octx, simFrame, u); // over the ground and its lines, under the bars
 
   if (anyBar || anyHealth) {
     for (let i = 0; i < u.length; i += STRIDE) {
@@ -3333,6 +3338,251 @@ async function loadResources(file, gen) {
   } catch (err) { console.error('economy:', err); /* the bars simply stay empty */ }
 }
 
+// ---- effects: projectiles, beams and blasts (.brp R, W and G) ---------------
+// A re-simulation from widget 1.9.0 on records the long-range projectiles,
+// heavy beams and strong explosions of the game (docs/brp-format.md, R and W;
+// what each column means in docs/brepstream-format.md, "Protocol 5"). They are
+// drawn over the map by three files of their own — fx-projectiles.js
+// (drawProjectiles), fx-beams.js (drawBeams) and fx-blasts.js (drawBlasts),
+// loaded before this one — which drawOverlay calls with the fractional sim
+// frame the units are interpolated to, so clips get them too. Everything they
+// read is set up here, once per replay, on `data`:
+//
+//   data.tracks       every R row, by birth (decodeProjectiles)
+//   data.projectiles  the rows that are not beams    } each with a frame
+//   data.beams        the beam firings (class 8)     } index in data.fxIndex
+//   data.blasts       the W rows, by frame (decodeBlasts)
+//   data.weapons      Map weapon def id -> its wdefs entry (name, class, aoe, ...)
+//   data.facts        the G facts, verbatim (wdefs, stock, end, ...)
+//   data.fxIndex      {projectiles, beams, blasts}: .between(f0, f1) returns
+//                     the rows alive at any frame of [f0, f1], in row order
+//
+// None of it is in the head: the sections sit at the end of the file and are
+// fetched only while effects are shown (loadEffects). A replay without them
+// (fxAt null) simply draws none.
+
+// Track classes and how a track ended: snapshot/projectiles.go's codes.
+const FX_CLASS = { NUKE: 1, ANTINUKE: 2, EMP: 3, TACTICAL: 4, JUNO: 5, ARTILLERY: 6, ROCKET: 7, BEAM: 8 };
+const FX_END = { OPEN: 0, EXPLODED: 1, VANISHED: 2 };
+const FX_FLAG = { ENGAGED: 1, INTERCEPTED: 2, TRUNCATED: 4 };
+const FX_BLAST = { UNIT: 1, STRAY: 2 };
+
+// showEffects is the sidebar's "Hide effects" switch: all three layers.
+let showEffects = true;
+
+// varints reads the uvarints and zigzag svarints the Go codec writes.
+function varints(b) {
+  let p = 0;
+  const uv = () => {
+    let v = 0, mul = 1;
+    for (;;) {
+      if (p >= b.length) throw new Error('truncated section');
+      const ch = b[p++];
+      v += (ch & 0x7f) * mul;
+      if (ch < 0x80) return v;
+      mul *= 128;
+    }
+  };
+  const sv = () => { const u = uv(); return u % 2 === 0 ? u / 2 : -(u + 1) / 2; };
+  return { uv, sv };
+}
+
+// decodeProjectiles decodes an R section (gunzipped) into rows named like
+// snapshot.Projectile's JSON — {birth, end, id, weapon, owner, team, class,
+// endKind, flags, x0, y0, z0, vx, vy, vz, gravity, targetType, target, tx,
+// ty, tz, x1, y1, z1, path} — with -1 for an unknown id and path null when
+// the row has none (only steered missiles and beams carry one: [{df, x, y,
+// z}], df frames after birth). Mirrors snapshot/projectiles.go.
+function decodeProjectiles(b) {
+  const { uv, sv } = varints(b);
+  const n = uv();
+  if (n > b.length) throw new Error('projectile count ' + n + ' exceeds section');
+  const ps = new Array(n);
+  let prev = 0;
+  for (let i = 0; i < n; i++) { prev += sv(); ps[i] = { birth: prev }; }
+  const col = (read, set) => { for (let i = 0; i < n; i++) set(ps[i], read()); };
+  col(uv, (p, v) => { p.end = p.birth + v; });
+  col(uv, (p, v) => { p.id = v - 1; });
+  col(uv, (p, v) => { p.weapon = v - 1; });
+  col(uv, (p, v) => { p.owner = v - 1; });
+  col(uv, (p, v) => { p.team = v - 1; });
+  col(uv, (p, v) => { p.class = v; });
+  col(uv, (p, v) => { p.endKind = v; });
+  col(uv, (p, v) => { p.flags = v; });
+  col(sv, (p, v) => { p.x0 = v; });
+  col(sv, (p, v) => { p.y0 = v; });
+  col(sv, (p, v) => { p.z0 = v; });
+  col(sv, (p, v) => { p.vx = v / 100; });   // elmos per frame, to 0.01
+  col(sv, (p, v) => { p.vy = v / 100; });
+  col(sv, (p, v) => { p.vz = v / 100; });
+  col(sv, (p, v) => { p.gravity = v / 100000; }); // per frame², to 1e-5
+  col(uv, (p, v) => { p.targetType = v; });
+  col(uv, (p, v) => { p.target = v - 1; });
+  col(sv, (p, v) => { p.tx = p.x0 + v; });
+  col(sv, (p, v) => { p.ty = v; });
+  col(sv, (p, v) => { p.tz = p.z0 + v; });
+  col(sv, (p, v) => { p.x1 = p.x0 + v; });
+  col(sv, (p, v) => { p.y1 = v; });
+  col(sv, (p, v) => { p.z1 = p.z0 + v; });
+  const counts = new Array(n);
+  for (let i = 0; i < n; i++) counts[i] = uv();
+  for (let i = 0; i < n; i++) {
+    const p = ps[i];
+    p.path = null;
+    if (!counts[i]) continue;
+    const pts = new Array(counts[i]);
+    let x = p.x0, z = p.z0;
+    for (let k = 0; k < pts.length; k++) {
+      const df = uv();
+      x += sv();
+      const y = sv();
+      z += sv();
+      pts[k] = { df, x, y, z };
+    }
+    p.path = pts;
+  }
+  return ps;
+}
+
+// decodeBlasts decodes a W section (gunzipped) into rows named like
+// snapshot.Blast's JSON: {f, weapon, x, y, z, unit, team, kind}.
+function decodeBlasts(b) {
+  const { uv, sv } = varints(b);
+  const n = uv();
+  if (n > b.length) throw new Error('blast count ' + n + ' exceeds section');
+  const bs = new Array(n);
+  for (let i = 0; i < n; i++) bs[i] = {};
+  const delta = (k) => { let prev = 0; for (const x of bs) { prev += sv(); x[k] = prev; } };
+  const col = (read, set) => { for (const x of bs) set(x, read()); };
+  delta('f');
+  col(uv, (x, v) => { x.weapon = v - 1; });
+  delta('x');
+  col(sv, (x, v) => { x.y = v; });
+  delta('z');
+  col(uv, (x, v) => { x.unit = v - 1; });
+  col(uv, (x, v) => { x.team = v - 1; });
+  col(uv, (x, v) => { x.kind = v; });
+  return bs;
+}
+
+// weaponTable reads the wdefs fact into weapon def id -> its entry. Watched
+// weapons carry the role, class and flight/explosion keys the effects need.
+function weaponTable(facts) {
+  const out = new Map();
+  for (const f of facts || []) {
+    if (!f || f.k !== 'wdefs' || !Array.isArray(f.defs)) continue;
+    for (const d of f.defs) if (d && Number.isFinite(d.id)) out.set(d.id, d);
+  }
+  return out;
+}
+
+// fxIndex files rows into buckets of FX_BUCKET frames over [start, end], so
+// between(f0, f1) — the rows alive at any frame in that span — costs the rows
+// near it rather than a walk of the game. A row spanning several buckets sits
+// in each; between dedupes and keeps row order.
+const FX_BUCKET = 128;
+function fxIndex(rows, startOf, endOf) {
+  const buckets = new Map();
+  for (let i = 0; i < rows.length; i++) {
+    const s = startOf(rows[i]), e = Math.max(s, endOf(rows[i]));
+    for (let k = Math.floor(s / FX_BUCKET), last = Math.floor(e / FX_BUCKET); k <= last; k++) {
+      let b = buckets.get(k);
+      if (!b) buckets.set(k, (b = []));
+      b.push(i);
+    }
+  }
+  return {
+    rows,
+    between: function (f0, f1) {
+      const k0 = Math.floor(f0 / FX_BUCKET), k1 = Math.floor(f1 / FX_BUCKET);
+      const hit = [];
+      const seen = k1 > k0 ? new Set() : null;
+      for (let k = k0; k <= k1; k++) {
+        const b = buckets.get(k);
+        if (!b) continue;
+        for (const i of b) {
+          const r = rows[i];
+          if (startOf(r) > f1 || Math.max(startOf(r), endOf(r)) < f0) continue;
+          if (seen) { if (seen.has(i)) continue; seen.add(i); }
+          hit.push(i);
+        }
+      }
+      if (seen) hit.sort((a, b) => a - b);
+      return hit.map(i => rows[i]);
+    },
+  };
+}
+
+// brpSections reads the named sections of a published .brp and gunzips them:
+// {tag: bytes}. Sections that sit side by side (the writer puts the analysis
+// sections last) come in one Range read.
+async function brpSections(file, at, tags) {
+  const want = tags.filter(t => at[t]).sort((a, b) => at[a].off - at[b].off);
+  const out = {};
+  let k = 0;
+  while (k < want.length) {
+    // A span: consecutive sections, each starting 5 bytes (its tag and
+    // length) after the previous one ends.
+    let j = k;
+    while (j + 1 < want.length && at[want[j + 1]].off === at[want[j]].off + at[want[j]].len + 5) j++;
+    const lo = at[want[k]].off, hi = at[want[j]].off + at[want[j]].len;
+    const span = await brpRange(file, lo, hi - lo);
+    for (let i = k; i <= j; i++) {
+      const s = at[want[i]];
+      out[want[i]] = await gunzipU8(span.subarray(s.off - lo, s.off - lo + s.len));
+    }
+    k = j + 1;
+  }
+  return out;
+}
+
+// setEffects installs decoded effect records on d (see the top of this part).
+function setEffects(d, facts, tracks, blasts) {
+  d.facts = facts;
+  d.weapons = weaponTable(facts);
+  d.tracks = tracks;
+  d.projectiles = tracks.filter(p => p.class !== FX_CLASS.BEAM);
+  d.beams = tracks.filter(p => p.class === FX_CLASS.BEAM);
+  d.blasts = blasts;
+  d.fxIndex = {
+    projectiles: fxIndex(d.projectiles, p => p.birth, p => p.end),
+    beams: fxIndex(d.beams, p => p.birth, p => p.end),
+    blasts: fxIndex(blasts, b => b.f, b => b.f),
+  };
+  d.fxState = 'ready';
+}
+
+// loadEffects reads and decodes the current replay's effect records, once,
+// and redraws when they land. Best-effort like the economy: a failure only
+// leaves the effects off. Called on load and when effects are switched on.
+async function loadEffects(file, gen) {
+  const d = data;
+  if (!d || !d.fxAt || d.fxState) return;
+  d.fxState = 'loading';
+  try {
+    const sec = await brpSections(file, d.fxAt, ['G', 'R', 'W']);
+    if (gen !== loadGen || d !== data) return;
+    const facts = sec.G ? JSON.parse(new TextDecoder().decode(sec.G)) : [];
+    setEffects(d, Array.isArray(facts) ? facts : [],
+      sec.R ? decodeProjectiles(sec.R) : [], sec.W ? decodeBlasts(sec.W) : []);
+    scheduleDraw();
+  } catch (err) {
+    console.error('effects:', err);
+    d.fxState = 'failed';
+  }
+}
+
+// drawEffects is drawOverlay's hook: blasts on the ground, then beams, then
+// the projectiles flying over everything. c is the overlay's 2D context;
+// simFrame is fractional; u is the displayed frame's units (null while its
+// chunk is still streaming — effects do not need it).
+function drawEffects(c, simFrame, u) {
+  if (!showEffects || !data || data.fxState !== 'ready') return;
+  drawBlasts(c, simFrame, u);
+  drawBeams(c, simFrame, u);
+  drawProjectiles(c, simFrame, u);
+}
+
 // resourcesByTeam builds team id -> economy object for one sim frame, from the
 // fetched timeline. Returns {} until the timeline has loaded or when the frame
 // carries no economy.
@@ -4009,6 +4259,12 @@ document.getElementById('togglehp').onclick = e => {
   e.target.textContent = showHealthBars ? 'Hide HP bars' : 'Show HP bars';
   scheduleDraw(); // same overlay, same reason
 };
+document.getElementById('togglefx').onclick = e => {
+  showEffects = !showEffects;
+  e.target.textContent = showEffects ? 'Hide effects' : 'Show effects';
+  if (showEffects && data && currentFile) loadEffects(currentFile, loadGen); // fetched on first use
+  scheduleDraw(); // same overlay, same reason
+};
 window.addEventListener('keydown', e => {
   if (e.target.tagName === 'SELECT') return;
   // The clip player over the summary: Escape closes it, space plays (a
@@ -4099,6 +4355,8 @@ async function loadReplay(id) {
   } else {
     setEmpty('');
   }
+  // The effects switch only means something for a capture that has effects.
+  document.getElementById('togglefx').style.display = data.fxAt ? '' : 'none';
   buildDefTables();
   buildCommanderDefs();
   buildDestroyedIndex();
@@ -4130,6 +4388,7 @@ async function loadReplay(id) {
   ensureChunk(1);
   pumpBackground();
   loadResources(file, loadGen); // economy timeline for the player-list bars (async)
+  if (showEffects) loadEffects(file, loadGen); // projectiles, beams, blasts (async)
   show();
   seekFromURL();
   if (clip) startClip(); // a clip was asked for while the replay loaded
