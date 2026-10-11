@@ -48,8 +48,8 @@ type Moment struct {
 // 50% by construction.
 //
 // The coefficients are cmd/winfit's output over published games with a known
-// winner (2026-10-11: the games of the 10 days before, Version 6). Income
-// carries the line; army value adds little once income is known. Fitting per
+// winner (2026-10-11: 1191 full-view Version 6 summaries, refitted with the
+// 25k smoothing below). Income carries the line; army value adds less. Fitting per
 // category (winfit -categories) made large ranked team games steeper and
 // unranked ones flatter but gained little over this one model.
 var WinModel = struct {
@@ -57,19 +57,24 @@ var WinModel = struct {
 	Fitted bool
 	Games  int // games the fit saw
 }{
-	Coef:   [swingFeatures]float64{0.840, 3.428, 3.044},
+	Coef:   [swingFeatures]float64{1.904, 4.925, 3.988},
 	Fitted: true,
-	Games:  933,
+	Games:  1191,
 }
 
 const (
 	swingFeatures = 3
-	// The smoothing constants keep the log ratios sane while both sides
-	// are near zero (the first minutes): metal for army and cumulative
-	// income, metal/s for income.
-	swingArmyK   = 300
-	swingIncomeK = 3
-	swingCumK    = 300
+	// The smoothing constants are VIRTUAL METAL added to both sides before
+	// a ratio is taken (metal for army and cumulative income, metal/s for
+	// income), so 190 against 559 metal of army in the opening reads as
+	// nearly even rather than a 3x lead. Tested at 0.3k/1k/5k/10k/25k over
+	// 1191 games (2026-10-11): 25k keeps accuracy (76.9%), predicts the
+	// opening best and halves its jitter (4.96 -> 2.79 points a step), at a
+	// small cost mid-game (log loss 0.522 vs 0.498 at half time). Marcin's
+	// pick. Changing them needs a refit (cmd/winfit).
+	swingArmyK   = 25000
+	swingIncomeK = 250
+	swingCumK    = 25000
 	// swingIncomeSteps is the trailing window income is averaged over.
 	swingIncomeSteps = 4
 

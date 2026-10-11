@@ -26,8 +26,8 @@ func TestSwingIsSymmetric(t *testing.T) {
 	n := 40
 	a0, a1 := flat(n, 0), flat(n, 0)
 	for i := range a0 {
-		a0[i] = float64(i * 100)
-		a1[i] = float64(i * 60)
+		a0[i] = float64(i * 2000)
+		a1[i] = float64(i * 1200)
 	}
 	even := SwingFeatures(series(a0, a0, flat(n, 10), flat(n, 10)))
 	for i, f := range even {
@@ -35,8 +35,8 @@ func TestSwingIsSymmetric(t *testing.T) {
 			t.Fatalf("even game step %d = %v, want 0.5", i, p)
 		}
 	}
-	ab := SwingFeatures(series(a0, a1, flat(n, 12), flat(n, 8)))
-	ba := SwingFeatures(series(a1, a0, flat(n, 8), flat(n, 12)))
+	ab := SwingFeatures(series(a0, a1, flat(n, 240), flat(n, 160)))
+	ba := SwingFeatures(series(a1, a0, flat(n, 160), flat(n, 240)))
 	for i := range ab {
 		p, q := WinProb(WinModel.Coef, ab[i]), WinProb(WinModel.Coef, ba[i])
 		if math.Abs(p+q-1) > 1e-9 {
@@ -52,9 +52,9 @@ func TestSwingIsSymmetric(t *testing.T) {
 // and to the battle fought over it.
 func TestMoments(t *testing.T) {
 	n := 60
-	a0, a1 := flat(n, 4000), flat(n, 4000)
+	a0, a1 := flat(n, 60000), flat(n, 60000)
 	for i := 30; i < n; i++ {
-		a0[i] = 200
+		a0[i] = 3000
 	}
 	o := &Insights{
 		POV: POVFull, Sides: []Side{{Ally: 0}, {Ally: 1}}, DurationSec: float64(n * StepSec),
@@ -101,9 +101,9 @@ func TestWinner(t *testing.T) {
 // says income carried it.
 func TestEarlyEconomyMoments(t *testing.T) {
 	jump := func(n, at int) *Insights {
-		i0, i1 := flat(n, 5), flat(n, 5)
+		i0, i1 := flat(n, 100), flat(n, 100)
 		for i := at; i < n; i++ {
-			i0[i] = 15
+			i0[i] = 300
 		}
 		return &Insights{
 			POV: POVFull, Sides: []Side{{Ally: 0}, {Ally: 1}}, DurationSec: float64(n * StepSec),

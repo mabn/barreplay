@@ -662,8 +662,12 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           income, metal mined so far); no story says a side "lost nothing".
                           WinModel.Coef started as HAND-SET PRIORS
                           (Fitted=false, which the page states); VERSION 6 ships cmd/winfit's
-                          fit over 933 games from the 10 days before 2026-10-11 (0.840 army,
-                          3.428 last-minute income, 3.044 cumulative income: income carries
+                          fit over 933 games from the 10 days before 2026-10-11; v7 refits it
+                          over 1191 games with 25k metal (250 m/s for income) of VIRTUAL METAL
+                          added to both sides before every ratio (swingArmyK etc.: the opening's
+                          few hundred metal no longer swing the line; Marcin's pick of
+                          0.3k/1k/5k/10k/25k tested) — 1.904 army, 4.925 last-minute income,
+                          3.988 cumulative income: income carries
                           the line). Per-category fits (winfit -categories) differed mainly
                           in steepness and gained little, so it stays ONE model.
                           WINNERS come from the demo's tail (demofile.Demo.Winners: one byte
