@@ -712,10 +712,14 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           the killing, naval, defences holding (only when the attacker lost
                           1.5x), a swarm (one def under 60 metal, 30+ units), an economy raid,
                           and a factory that was a quarter of the loss. Otherwise marginPhrase
-                          rotates its words by battle number ("decisively wins", "overwhelms",
-                          "outfights", "smashes"; "edges out"...; a 10x loss of 30% of an army
-                          "crushes", never "routs", Marcin's call), with "Bloody stalemate"
-                          for an even fight that cost both armies 15%. Units are named by the
+                          rotates its words by battle number, SCALED BY THE FIGHT'S SIZE (the
+                          loser's metal; Marcin: a 2.8k-for-628 kill is no "overwhelms"):
+                          under 5k a skirmish ("wins a skirmish", "picks off Red units"),
+                          5k+ "decisively wins"/"outfights"/"beats", and "overwhelms"/
+                          "smashes" only when BOTH 20k+ and a 4x margin hold (Marcin); a 10x loss of 30% of an army and >= 10k
+                          "crushes", never "routs" (Marcin's call); "Bloody stalemate" for an
+                          even fight that cost both armies 15% and >= 10k each; a swarm
+                          "overwhelms" only at 20k+ and 4x. Units are named by the
                           side's COLOUR alone, "Blue Juggernauts" (Marcin's call, also for
                           ownBlastTitle), which nameRuns colours like "Blue team". The phrases
                           title the gap battles in the swing list and a fight swing whose
@@ -881,7 +885,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           its own span as Focus.f..f1 and only the deaths within its radius +
                           600 elmos counted; what died elsewhere meanwhile is a separate
                           "Elsewhere at the time" sentence when it is big enough to matter.
-                          The window it searches is the moment's +- one step (momentWindow),
+                          A battle one swing would tell whole that runs over ANOTHER swing's event is told in part too (momentStories; a long merged fight swallowed the next swing's bombing run). The window it searches is the moment's +- one step (momentWindow),
                           since a raid's buildings often blow up just after the line moved.
                           A side the line moved toward that still lost MORE there is not said
                           to win: the title states the trade ("trades 114k metal for 69.9k").
@@ -993,7 +997,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           section (once "Map story"; no army-centre lines since v7) numbers its battles in the order they happened, on the map and
                           in a one-line-per-battle list (losses either side of a centre line,
                           square-root scaled), one selection shared by both — a click on either
-                          selects AND plays the battle's clip; a picked battle
+                          selects AND plays the battle's clip, marked on the slider as its whole span (clipEvent, like every clip of something with a duration — a killing-fields zone's busiest 30 s too); a picked battle
                           shows the two sides' losses SIDE BY SIDE, each KIND of unit as its
                           untinted BAR icon with a count (Battle.lost[].units, v4: def/n/metal,
                           costliest first, at most 48). Defs sharing a bitmap are one kind,
@@ -2133,6 +2137,13 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the DO tests. Note the workerd trap it dodges in webFetch: calling
                           an injected global fetch as `this.fetchImpl(...)` binds `this` to
                           the session and workerd throws "Illegal invocation" — detach first.
+                          QUEUE BUTTON (app.js queueGameButton): beside it in the same admin
+                          column, each Games row has a Queue button POSTing {link: id, force:
+                          true} to /api/admin/resim. force swaps resimEnqueue for jobAnnounce,
+                          so an admin can queue a PUBLISHED game too (a one-sided upload, a
+                          capture worth redoing); it still dedupes on an active job and
+                          honours a disabled one. A row whose job is pending/processing shows
+                          a disabled "Queued".
                           LAVABALANCE PREVIEW (app.js previewLavabalance, index.html
                           #lbdialog): each Games row carries an admin-only (signed in)
                           LOS button — lavabalance, the sibling worker keeping the LOS

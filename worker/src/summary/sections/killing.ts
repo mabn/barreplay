@@ -8,7 +8,7 @@ import { fmtClock, fmtMetal } from "../format";
 import { mapView } from "../mapview";
 import { sideColor, sideName } from "../model";
 import { tipLayer } from "../tooltip";
-import { clipAt, watchNote, watcher } from "../watch";
+import { clipEvent, watchNote, watcher } from "../watch";
 import { zonesOf, type Zone } from "../zones";
 import { SIM_FPS, type Insights, type SummaryOptions } from "../types";
 
@@ -69,7 +69,7 @@ export function killing(ins: Insights, opts: SummaryOptions): HTMLElement | null
       const i = ev.target instanceof Element ? at(ev.target) : -1;
       if (i < 0) return;
       const z = zones[i];
-      watch(clipAt(z.peakF0, z.peakF1, { x: z.x, z: z.z, r: z.r * 1.5, title: `${amount(z.total)} lost here` }));
+      watch(clipEvent(z.peakF0, z.peakF1, { x: z.x, z: z.z, r: z.r * 1.5, title: `${amount(z.total)} lost here` }));
     });
   }
   const legend = h("div", { class: "brs-legend" },

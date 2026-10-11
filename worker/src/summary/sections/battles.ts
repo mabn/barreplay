@@ -12,7 +12,7 @@ import { compass, fighters, ownBlast, ownBlastTitle } from "../moments";
 import { fighterNames } from "../names";
 import { fillUnits, inkOn } from "../unitchips";
 import { tip, type TipRow } from "../tooltip";
-import { clipSpan, watcher } from "../watch";
+import { clipEvent, watcher } from "../watch";
 import { SIM_FPS, type Battle, type Insights, type SummaryOptions } from "../types";
 
 export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | null {
@@ -23,7 +23,7 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
   const size = (l: { n: number; metal: number }) => (priced ? l.metal : l.n);
   const fmt = (v: number) => (priced ? fmtMetal(v) : `${v}`);
   const when = (b: Battle) => `${fmtClock(b.f0 / SIM_FPS)}–${fmtClock(b.f1 / SIM_FPS)}`;
-  const clipOf = (b: Battle, i: number) => clipSpan(b.f0, b.f1, { x: b.x, z: b.z, r: Math.max(b.r, 800), title: `Battle ${i + 1} · ${when(b)}` });
+  const clipOf = (b: Battle, i: number) => clipEvent(b.f0, b.f1, { x: b.x, z: b.z, r: Math.max(b.r, 800), title: `Battle ${i + 1} · ${when(b)}` });
 
   // Marks scale with the map, which is only known once its record arrives.
   const scaled: ((w: number) => void)[] = [];

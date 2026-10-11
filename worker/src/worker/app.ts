@@ -457,7 +457,14 @@ app.post("/api/admin/resim", async (c) => {
     return c.json({ error: `fetching the BAR API: ${e}`, gameId }, 502);
   }
 
-  const res = await indexStub(c.env).resimEnqueue(crypto.randomUUID(), gameId);
+  // force: queue it even when the game is published — the Games list's
+  // admin Queue button, where an admin asks for THIS game (a one-sided
+  // upload, a capture worth redoing). It is the announce door the bearer-
+  // guarded POST /api/jobs opens, behind the same admin gate as this route;
+  // it still dedupes on an active job and honours a disabled one.
+  const force = (body as { force?: unknown }).force === true;
+  const index = indexStub(c.env);
+  const res = force ? await index.jobAnnounce(crypto.randomUUID(), gameId, "resim") : await index.resimEnqueue(crypto.randomUUID(), gameId);
   if (res.status === "in-catalog") {
     return c.json({ error: "this game is already published", gameId, status: res.status }, 409);
   }

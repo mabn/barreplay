@@ -568,6 +568,21 @@ export function momentStories(ins: Insights, moments: Moment[]): MomentStory[] {
     if (st.battle >= 0 && st.focus?.f1 !== undefined) told.set(st.battle, (told.get(st.battle) ?? 0) + 1);
   }
   const shared = new Set([...told].filter(([, n]) => n > 1).map(([b]) => b));
+  // A battle told whole must not run over ANOTHER moment's event either: a
+  // long merged fight told whole by one swing took in the bombing run the
+  // next swing was about, and the two split that one event between them
+  // (a63ccb6a: a ground fight from 30:20 "held" until 38:06, through the
+  // 36:00 bombing that the next swing told). It is told in part instead.
+  first.forEach((st, k) => {
+    const b = st.battle >= 0 && st.focus?.f1 !== undefined && !st.whole ? ins.battles[st.battle] : undefined;
+    if (!b || shared.has(st.battle)) return;
+    const overlaps = first.some((o, j) => {
+      if (j === k || o.battle === st.battle) return false;
+      const [g0, g1] = o.focus ? [o.focus.f, o.focus.f1 ?? o.focus.f] : [moments[j].f0, moments[j].f1];
+      return g0 < b.f1 && g1 > b.f0;
+    });
+    if (overlaps) shared.add(st.battle);
+  });
   if (!shared.size) return first;
   return moments.map((m, k) => (shared.has(first[k].battle) ? momentStory(ins, m, shared) : first[k]));
 }
