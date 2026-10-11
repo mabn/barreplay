@@ -4,10 +4,15 @@ import (
 	"encoding/json"
 	"math"
 	"math/rand"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/mabn/barreplay/internal/gamecat"
 	"github.com/mabn/barreplay/internal/insights"
 )
 
@@ -38,7 +43,7 @@ func TestFitRecoversTheSignal(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "x.insights1.json"), []byte(`{"version":1}`), 0o644) // skipped
 	var ss []sample
 	for _, p := range must(filepath.Glob(filepath.Join(dir, "*.json"))) {
-		got, ok, err := load(p)
+		_, got, ok, err := load(p)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -75,3 +80,40 @@ func must[T any](v T, err error) T {
 }
 
 func logf(p float64) float64 { return math.Log(p) }
+
+// Games are sorted by their BAR API detail, a good detail is cached and read
+// back without the API, and a game the API does not know is "unknown".
+func TestCategorizeFetchesAndCaches(t *testing.T) {
+	ranked := `{"durationMs":1200000,"gameSettings":{"ranked_game":"1"},"AllyTeams":[{"Players":[{},{},{},{},{}]},{"Players":[{},{},{},{},{}]}]}`
+	duel := `{"durationMs":1200000,"gameSettings":{"ranked_game":"1"},"AllyTeams":[{"Players":[{}]},{"Players":[{}]}]}`
+	unranked := `{"durationMs":1200000,"gameSettings":{"ranked_game":"0"},"AllyTeams":[{"Players":[{}]},{"Players":[{}]}]}`
+	ids := map[string]string{
+		strings.Repeat("a", 32): ranked,
+		strings.Repeat("b", 32): duel,
+		strings.Repeat("c", 32): unranked,
+	}
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if b, ok := ids[strings.TrimPrefix(r.URL.Path, "/replays/")]; ok {
+			w.Write([]byte(b))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	gs := []game{{id: strings.Repeat("a", 32)}, {id: strings.Repeat("b", 32)}, {id: strings.Repeat("c", 32)}, {id: strings.Repeat("d", 32)}}
+	f := &detailFetcher{base: srv.URL, dir: t.TempDir(), http: srv.Client()}
+	got := categorize(gs, f)
+	want := map[gamecat.Category]int{gamecat.LargeRanked: 1, gamecat.Ranked: 1, gamecat.Unranked: 1, unknown: 1}
+	for c, n := range want {
+		if len(got[c]) != n {
+			t.Errorf("%s: %d games, want %d (%v)", c, len(got[c]), n, got)
+		}
+	}
+	before := hits.Load()
+	categorize(gs[:3], f)
+	if hits.Load() != before {
+		t.Errorf("cached details fetched again: %d requests", hits.Load()-before)
+	}
+}

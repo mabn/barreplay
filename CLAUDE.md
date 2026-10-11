@@ -17,7 +17,7 @@ go build ./cmd/barreplay        # build the capture CLI -> ./barreplay
 go build ./cmd/pack             # build the .brepstream -> .brp converter -> ./pack
 go build ./cmd/barreplay-static # build the .brp -> static-hosting bundle packer (for worker/)
 go build ./cmd/insights         # build the game-summary backfill CLI (one replay, or -all)
-go build ./cmd/winfit           # build the win-probability model fitter (reads insights files)
+go build ./cmd/winfit           # build the win-probability model fitter (reads insights files; -categories fits lava / large ranked / ranked / unranked separately)
 go build ./cmd/bringest         # build the drag&drop upload daemon (polls the worker's job queue)
 go run ./cmd/insights <gameId|link|rid>   # compute a PUBLISHED replay's game summary and publish replays/<rid>.insights<N>.json beside it (-upload r2 default, local, or empty + -out to just write it; -all walks the catalog, -from/-to narrow it to games started in a date range (YYYY-MM-DD or unix seconds); -j N replays at once, default 4; -force recomputes; a local .brp/.brepstream with -rid gives full costs; everything read from the real bucket is kept under ~/.cache/barreplay/<bucket host>/ so a re-run downloads only what is new — -cache DIR moves it, -cache= turns it off)
 go test ./...                   # all unit tests (no engine required)
@@ -633,6 +633,14 @@ cmd/winfit/main.go        CLI: fits insights.WinModel to games with a known winn
                           refuses under 20 games; reports log loss/accuracy of the current and
                           fitted weights overall and at 25/50/75/90% of a game. A refit changes
                           what is computed, so it is a new insights Version.
+                          -categories also fits each game CATEGORY on its own (internal/gamecat:
+                          lava games lavabalance rates — the lobby's tweak stack, ported from
+                          claudebar's lava.ts, NOT the map_waterislava flag — ranked two-team
+                          games of >= 10 players, other ranked, unranked), from each game's
+                          api.bar-rts.com detail, cached under the user cache dir
+                          (barreplay/api.bar-rts.com/replays/). An unreadable insights file is
+                          skipped with a warning; cmd/insights no longer accepts (or serves from
+                          its cache) an empty body, which is how 0-byte files got there.
 cmd/insights/main.go      CLI: the summary BACKFILL, one replay at a time (or -all). Old replays
                           have no .brp anywhere, only their split pieces, so it resolves a
                           gameId/link through the catalog (current rid + the row's view, the
