@@ -1983,7 +1983,8 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           lobby_name per read (a scalar subselect on games' primary key;
                           games.map_file rides the same join into `mapFile` — the archive
                           name behind the list's 18px map THUMBNAILS, fetched lazily from
-                          api.bar-rts.com/maps/<file>/texture-thumb.jpg; rows without a
+                          /api/bar/maps/<file>/texture-thumb.jpg (the caching BAR proxy,
+                          see the map terrain note under the viewer); rows without a
                           mirror row fall back to mapFileGuess and a wrong guess just 404s
                           into no thumbnail via onerror), so
                           GET /api/replays rows carry a `lobbyName` — never stored on the
@@ -2770,7 +2771,15 @@ run dev` in `worker/` plus `pack -upload local`.)
   the probe costs exactly one more read for the rest of the meta and one for E+C
   (adjacent wherever they are, so one span), and a FILE smaller than the probe — the
   206 comes back short — or a server that ignores Range (200) is kept whole
-  (`brpWhole`) and every later piece is sliced from it. Everything a published
+  (`brpWhole`) and every later piece is sliced from it. Every one of those Range
+  reads goes through `rangeFetch`, which keeps them in the CACHE STORAGE API
+  (one cache per file, the `RANGE_CACHE_KEEP` = 12 most recent kept, never on a
+  loopback host, whose simulator bucket is refilled under the same keys): the
+  browser's HTTP cache cannot be relied on for them although cdn-bar serves
+  them immutable and as HITs — Firefox never stores a sub-range request at all,
+  and Chrome's one sparse entry per URL lost the head, keys and economy on
+  every reload (measured), and everything when a page was left mid-download.
+  Sound only because a published key never changes bytes. Everything a published
   head used to carry precomputed is derived in the browser from the meta's full
   unit-def table (`headFromBrp`): internal names (`unitDefs`, the icon/footprint
   lookup key), human names (`unitNames`, "Construction Bot", what units are LABELLED
@@ -3149,10 +3158,12 @@ run dev` in `worker/` plus `pack -upload local`.)
   under `step="any"` the browser's own arrow step is a hundredth of the timeline
   rather than one frame. Dragging is unaffected — `go()` rounds, and the round-trip
   writes the whole sample straight back.
-- The **real map terrain** behind the units is loaded **entirely client-side** (`loadMap`
+- The **real map terrain** behind the units is loaded **client-side** (`loadMap`
   in `app.js`): the browser takes the head's `mapName` (from the capture's meta),
-  resolves it to the API's **file name** (see below), and talks straight
-  to BAR's maps API — `https://api.bar-rts.com/maps/<file>` for the world extent in
+  resolves it to the API's **file name** (see below), and asks BAR's maps API
+  THROUGH THE WORKER'S CACHING PROXY (`MAP_API = '/api/bar'`, app.ts `barProxy`:
+  `/api/bar/maps/<file>`, `/api/bar/maps/<file>/texture-{mq,lq,thumb}.jpg` and
+  `/api/bar/replays/<gameId>`, nothing else) — `/maps/<file>` for the world extent in
   elmos (the API's width/height are map units × 512) and `…/texture-mq.jpg` for the
   terrain image. **Resolving the file name is not a string transform** (non-obvious):
   the API keys maps on the archive file the map's author uploaded, so
@@ -3162,9 +3173,18 @@ run dev` in `worker/` plus `pack -upload local`.)
   So `resolveMapFile` tries the guess and, on any non-200, falls back to
   `…/replays/<gameId>`, whose `Map` object carries the authoritative
   `{fileName,width,height}` — which also gives a `pack -no-demo` capture (empty
-  `mapName`) its terrain back. The API sends `access-control-allow-origin: *`, and the image is loaded
-  with `crossOrigin="anonymous"` so the canvas stays untainted. There is **no map code
-  on the serving side at all**. Best-effort: no name in the meta, an unknown map, or no outbound
+  `mapName`) its terrain back. The proxy exists for CACHING: api.bar-rts.com sends
+  no cache-control on the JSON and `max-age=0` on the images, so every replay load
+  downloaded its terrain again. barProxy caches the answer at the edge
+  (`cf.cacheTtlByStatus`, a week) and tells the browser `max-age` a year and
+  `immutable` on a 200 — a map's archive name names fixed content, and without
+  `immutable` Firefox revalidates on every reload (a hard reload that still asks is
+  answered 304 off the ETag) — but only 5 minutes on a 404, which must
+  stay a 404 (it is how resolveMapFile learns the guess was wrong), and nothing on a
+  5xx. It answers `access-control-allow-origin: *` because the summary EMBED draws its
+  maps through it from another site (embed.ts passes `mapApi = <replayOrigin>/api/bar`;
+  the viewer passes its own MAP_API). The image is loaded
+  with `crossOrigin="anonymous"` so the canvas stays untainted. Best-effort: no name in the meta, an unknown map, or no outbound
   network just yields a plain background (and the field extent falls back to the
   sampled unit bounds). The front-end positions the texture at world
   `(0,0)`–`(width,height)` so units overlay correctly; the terrain layer is always
@@ -3202,8 +3222,9 @@ more, and the bundles that have them still play. `WriteIndex` writes `index.json
 listing a replay by its `.brp` or an older bundle's `.brw`. `cmd/barreplay-static` is
 the CLI (and `packer.UploadStatic` the publisher's path); the `worker/` Cloudflare
 project (Hono + Vite) serves the bundle from an R2 bucket and the SPA + vendored icons
-(and the icon table) as static assets. Map terrain is fetched browser-side straight
-from `api.bar-rts.com`, so the worker has no map proxy and no playback logic. The
+(and the icon table) as static assets. Map terrain is fetched browser-side from
+`api.bar-rts.com` through the worker's caching proxy (`/api/bar/*`, only there to add
+cache headers), and the worker has no playback logic. The
 codec lockstep is between snapshot/brp.go and app.js (`decodeFrames`, `decodeEvents`,
 `decodeComms`, `decodeEconomy`, `headFromBrp`).
 
