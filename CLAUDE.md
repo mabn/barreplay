@@ -2930,8 +2930,10 @@ run dev` in `worker/` plus `pack -upload local`.)
   line in turns into a band of noise. It is deliberately NOT interpolated the
   way the build bar is: build progress really does creep between samples, where
   damage arrives in hits, so lerping it would draw a drain that never happened.
-  An UNFINISHED unit gets the build bar only — its missing hp IS the
-  construction, so a health bar would count the same progress twice — and a
+  An UNFINISHED unit's health rises with its build progress, so it gets a
+  health bar only when it has LESS hp than that progress accounts for (hit
+  while being built: hp < build x maxHp x UNFINISHED_SLACK = 0.9, measured
+  within 2.5% of 1 for 99% of undamaged builds) — and a
   unit with no recorded maxHp (an unidentified radar contact, 0/0) gets
   neither. The health bar is `BAR_H_SMALL` (2px) rather than `BAR_H` (3px) on a
   unit the bar is already WIDER than, i.e. one whose icon falls under the
