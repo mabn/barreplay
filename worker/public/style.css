@@ -55,18 +55,67 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: #5a9fd0; }
    so the menu stays reachable in a long list. */
 body.home .controls, body.home #wrap { display: none; }
 
-/* ---- replay page tabs: Replay (the playback) and Summary (the src/summary
-   library's pane). The summary hides the playback chrome and scrolls on its
-   own; the landing page shows neither. */
-#replaytabs { display: flex; gap: 2px; }
-#replaytabs a {
-  border: 1px solid transparent; border-radius: 4px; padding: 5px 10px; font-size: 13px;
-  color: #9fb0bf; text-decoration: none;
+/* ---- replay page layout: the left menu (index.html #rail) holding the
+   page's views — Replay (the playback) and Summary (the src/summary library's
+   pane) — then the header, the map and the playback bar in one column, and the
+   sidebar as a full-height column on the right. A grid rather than the body's
+   default column flow, because the sidebar spans the header and the bar while
+   the map sits between them. body.replay-page is set by app.js applyReplayTab
+   and dropped on the way back to the list, which keeps its own menu. The
+   summary hides the playback chrome and fills the page beside the menu,
+   scrolling on its own. */
+body.replay-page {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
 }
-#replaytabs a:hover { background: #344450; color: #d7dee6; }
-#replaytabs a.active { background: #2a3742; border-color: #3a4856; color: #d7dee6; }
-body.home #replaytabs, body.home #summary { display: none !important; }
-body.summary-tab #wrap, body.summary-tab .controls { display: none; }
+body.replay-page #rail { grid-column: 1; grid-row: 1 / -1; }
+body.replay-page header { grid-column: 2; grid-row: 1; }
+body.replay-page #wrap { grid-column: 2; grid-row: 2; }
+body.replay-page #bottombar { grid-column: 2; grid-row: 3; }
+body.replay-page #side { grid-column: 3; grid-row: 1 / -1; }
+body.replay-page #summary { grid-column: 2 / -1; grid-row: 2 / -1; }
+/* The menu's logo is the way back to the list here, so the header's brand
+   link would say it twice; the header keeps the replay's own title. */
+body.replay-page #homelink { display: none; }
+body.replay-page h1 .sub { margin-left: 0; }
+
+#rail {
+  width: 72px; padding: 12px 0;
+  background: #0f1317; border-right: 1px solid #2a323c;
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+}
+#raillogo {
+  width: 36px; height: 36px; margin-bottom: 14px; border-radius: 10px;
+  display: grid; place-items: center;
+  background: #d7dee6; color: #11151a; font-weight: 800; font-size: 16px;
+  letter-spacing: -.02em; text-decoration: none;
+}
+#raillogo:hover { background: #fff; }
+#replaytabs { display: flex; flex-direction: column; gap: 4px; }
+.railitem {
+  position: relative; width: 56px; padding: 8px 0 6px; border-radius: 10px;
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  color: #7d8aa0; font-size: 10.5px; text-decoration: none;
+}
+.railitem svg {
+  width: 20px; height: 20px;
+  fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round;
+}
+.railitem:hover { color: #cfe3f5; background: #1d252e; }
+.railitem.active { color: #fff; background: #ffffff12; }
+/* The selected view is also marked at the menu's edge, so it reads at a glance
+   without depending on the tint alone. */
+.railitem.active::before {
+  content: ''; position: absolute; left: -8px; top: 12px; bottom: 12px;
+  width: 3px; border-radius: 0 2px 2px 0; background: #8fd3ff;
+}
+#raillogo:focus-visible, .railitem:focus-visible { outline: 2px solid #8fd3ff; outline-offset: 2px; }
+/* The way back to the list sits at the bottom of the menu, apart from the
+   views of this replay. */
+#railhome { margin-top: auto; }
+body.home #rail, body.home #side, body.home #summary { display: none !important; }
+body.summary-tab #wrap, body.summary-tab .controls, body.summary-tab #side { display: none; }
 body.summary-tab #summary { display: block !important; }
 #summary { flex: 1; min-height: 0; overflow-y: auto; }
 #summary .summarymsg { color: #9fb0bf; text-align: center; margin-top: 60px; }
@@ -96,7 +145,7 @@ body.clip-dragging #clip canvas { pointer-events: none; }
 #clipplay { min-width: 34px; }
 #clipbody { flex: 1; min-height: 0; display: flex; }
 #clipbody #wrap { display: flex; flex: 1; min-width: 0; }
-#clipbody #side, #clipbody #zoomlabel { display: none; }
+#clipbody #zoomlabel { display: none; }
 /* The moment the clip is about, marked on its timeline, so the lead-in reads
    as a few seconds' wait for it. The slider's ends are a thumb's half-width
    in from the box (--thumb), which is where its 0 and 1 sit. */

@@ -7443,7 +7443,8 @@ async function submitResim() {
 // PUSHING a history entry (navigation, not a tweak: back must return to
 // where the user was — the list, or the previously watched replay).
 // ---- Replay / Summary tabs -------------------------------------------------
-// A replay page has two tabs: the playback, and the game SUMMARY — charts and
+// A replay page has two tabs, entries in its left menu (index.html #rail): the
+// playback, and the game SUMMARY — charts and
 // map stories computed once per published revision by internal/insights and
 // stored beside it as replays/<rid>.insights<N>.json. The summary itself is a
 // separate library (worker/src/summary/, bundled by the Vite summary-bundle
@@ -7491,9 +7492,15 @@ function replayTabHref(tab) {
 function applyReplayTab() {
   const tab = replayTab();
   document.body.classList.toggle('summary-tab', tab === 'summary');
-  document.getElementById('replaytabs').style.display = '';
+  // The page's own layout: the left menu, and the sidebar as a full-height
+  // column beside the map (style.css body.replay-page).
+  document.body.classList.add('replay-page');
+  document.getElementById('rail').style.display = '';
   for (const a of document.querySelectorAll('#replaytabs a')) {
-    a.classList.toggle('active', a.dataset.rtab === tab);
+    const on = a.dataset.rtab === tab;
+    a.classList.toggle('active', on);
+    if (on) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
     a.href = replayTabHref(a.dataset.rtab);
   }
   if (tab === 'summary') {
@@ -7512,7 +7519,7 @@ function applyReplayTab() {
 // below the list, since its pane is shown by a body class, not by the page.
 function leaveReplayTabs() {
   if (clip) closeClip(false);
-  document.body.classList.remove('summary-tab');
+  document.body.classList.remove('summary-tab', 'replay-page');
 }
 
 function resetSummary() {
@@ -8009,16 +8016,21 @@ async function init() {
   // Optional render-smoothness overlay, gated on ?debug=true.
   if (params.get('debug') === 'true') startFpsMonitor();
 
-  // The header title returns to the replay list without a page reload.
-  document.getElementById('homelink').onclick = (e) => {
-    e.preventDefault();
-    const u = new URL(location.href);
-    u.pathname = '/';
-    u.searchParams.delete('replay');
-    u.searchParams.delete('tab');
-    history.pushState(null, '', u);
-    showHome();
-  };
+  // The header title, and on a replay page the left menu's logo and its
+  // Replays entry, return to the replay list without a page reload. Modified
+  // clicks keep the browser's new-tab meaning, as on the menu's tabs.
+  for (const id of ['homelink', 'raillogo', 'railhome']) {
+    document.getElementById(id).onclick = (e) => {
+      if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      const u = new URL(location.href);
+      u.pathname = '/';
+      u.searchParams.delete('replay');
+      u.searchParams.delete('tab');
+      history.pushState(null, '', u);
+      showHome();
+    };
+  }
 
   // Legacy query URLs (?replay=, ?tab=) normalize to the path form once, so
   // the address bar shows the canonical link and a copy/refresh carries it.

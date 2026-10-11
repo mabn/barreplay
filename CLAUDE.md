@@ -1460,7 +1460,14 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           superseded revisions of cataloged games hidden (their direct
                           /replays/<rid> links keep playing — nothing is deleted); picking a
                           replay navigates to /replays/<id>, the header title returns to the
-                          list. The list's Players
+                          list. A REPLAY PAGE has its own LEFT MENU (index.html #rail: logo,
+                          Replay and Summary — the ?tab=summary tabs — and Replays back to the
+                          list), and body.replay-page lays the page out as a CSS GRID: the
+                          menu, then the header/map/bottom bar column, then #side as a
+                          full-height column. #side is a body child rather than inside #wrap
+                          because the summary's clip player moves #wrap into its window; the
+                          grid places every piece explicitly, so where closeClip puts #wrap
+                          back does not matter. The list's Players
                           column shows each side's top names by OS (3 per side for a two-team game,
                           1 when there are more sides; full roster + OS in the tooltip) with a ◉ on
                           the side that recorded the current upload, the Links cell adds an alt·T<n>
