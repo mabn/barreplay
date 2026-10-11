@@ -23,8 +23,10 @@ export async function fillUnits(list: HTMLElement, ins: Insights, opts: SummaryO
     const icon = src.get(g.defs[0].def);
     const el = h("span", { class: "brs-unit" }, icon ? iconImg(icon, label) : h("span", { class: "brs-uname" }, label), g.n ? h("span", undefined, `×${g.n}`) : null);
     tip(el, {
-      title: g.defs.length > 1 ? `${g.n} lost` : name(g.defs[0].def),
-      rows: g.defs.map((u) => ({ label: g.defs.length > 1 ? `${name(u.def)} ×${u.n}` : `${u.n} lost`, value: priced && u.metal ? `${fmtMetal(u.metal)} metal` : "" })),
+      title: g.defs.length > 1 ? (g.n ? `${g.n} lost` : label) : name(g.defs[0].def),
+      // n 0 is a count the file never recorded (a pre-v4 summary lists only
+      // its top defs): say nothing rather than "0 lost".
+      rows: g.defs.map((u) => ({ label: g.defs.length > 1 ? (u.n ? `${name(u.def)} ×${u.n}` : name(u.def)) : u.n ? `${u.n} lost` : "Among the costliest lost", value: priced && u.metal ? `${fmtMetal(u.metal)} metal` : "" })),
     });
     return el;
   };
