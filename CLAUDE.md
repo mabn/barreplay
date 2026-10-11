@@ -1025,10 +1025,9 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           bubbles (colour, size, fireball) where each was fought. All three
                           share ONE tooltip (battleTip: the battle's own detail panel —
                           fighters, two per side then "+N" (fighterNames max), and the two
-                          sides' losses side by side, first side left — minus its Watch
-                          button, cached per battle). One selection is shared
-                          by the map, the list and the timeline — a click on either
-                          selects AND plays the battle's clip, marked on the slider as its whole span (clipEvent, like every clip of something with a duration — a killing-fields zone's busiest 30 s too); a picked battle
+                          sides' losses side by side, first side left — cached per battle).
+                          Nothing is SELECTED (Marcin: hover + clip is enough): pointing lights
+                          the battle in all three, a click plays its clip, marked on the slider as its whole span (clipEvent, like every clip of something with a duration — a killing-fields zone's busiest 30 s too). The tooltip
                           shows the two sides' losses SIDE BY SIDE, each KIND of unit as its
                           untinted BAR icon with a count (Battle.lost[].units, v4: def/n/metal,
                           costliest first, at most 48). Defs sharing a bitmap are one kind,

@@ -109,9 +109,6 @@ export const CSS = `
 .brs-root .brs-play:hover, .brs-root .brs-play:focus-visible { border-color: var(--brs-accent); color: var(--brs-accent); }
 .brs-root .brs-watch { color: var(--brs-accent); font-size: 12px; margin-top: 4px; visibility: hidden; }
 .brs-root .brs-seekable:hover .brs-watch { visibility: visible; }
-.brs-root .brs-watchbtn { font: inherit; margin-top: 8px; cursor: pointer; color: var(--brs-text); background: var(--brs-bg);
-  border: 1px solid var(--brs-line); border-radius: 4px; padding: 4px 10px; }
-.brs-root .brs-watchbtn:hover { border-color: var(--brs-accent); color: var(--brs-accent); }
 .brs-root .brs-storygrid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 18px; align-items: start; }
 @media (max-width: 820px) { .brs-root .brs-storygrid { grid-template-columns: minmax(0, 1fr); } }
 .brs-root .brs-storygrid .brs-mapwrap { max-width: none; margin: 0; }
@@ -143,7 +140,6 @@ export const CSS = `
 .brs-root .brs-bmark.brs-hover .brs-bdot { stroke: var(--brs-text); }
 .brs-root .brs-bmark.brs-on .brs-bdot { stroke: var(--brs-accent); stroke-width: 3; }
 .brs-root .brs-bmarknum { fill: #fff; font-weight: 700; pointer-events: none; }
-.brs-root .brs-battledetail { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--brs-line); }
 .brs-root .brs-tip { position: fixed; z-index: 1000; display: none; pointer-events: none; max-width: calc(100vw - 16px);
   background: #0b0f13; color: var(--brs-text); border: 1px solid var(--brs-line); border-radius: 6px;
   padding: 7px 10px; font-size: 12px; line-height: 1.4; box-shadow: 0 6px 18px rgba(0, 0, 0, .45); }

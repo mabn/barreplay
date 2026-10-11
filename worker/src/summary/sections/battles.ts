@@ -1,8 +1,8 @@
 // Battles: the biggest fights marked on the map and numbered in the order
 // they happened (the army-centre lines once drawn under them were dropped
 // as clutter), beside a one-line-per-battle list (G4). The map and the list are
-// one control: hovering either lights the other, clicking either selects
-// the battle, opens what each side lost there and plays its clip. Nothing here knows who killed what — a battle says where,
+// one control: hovering either lights the other and shows what each side
+// lost there in the tooltip, clicking either plays its clip. Nothing here knows who killed what — a battle says where,
 // when and what each side lost, and calls it for the side that lost less.
 // Above both, every battle on the game's time axis: up for a first-side win,
 // down for a second-side one, by HOW MUCH less the winner lost (a ratio, so
@@ -103,25 +103,13 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
   const rings: SVGGElement[] = [];
   const rows: HTMLElement[] = [];
   const marks: SVGGElement[] = [];
-  const pickHint = h("p", { class: "brs-hint" }, "Click a battle to watch it; its losses stay here.");
-  const detail = h("div", { class: "brs-battledetail" }, pickHint);
-  const details: HTMLElement[] = [];
-  const detailOf = (i: number) => (details[i] ??= battleDetail(i));
   const light = (i: number, on: boolean) => {
     rings[i]?.classList.toggle("brs-hover", on);
     rows[i]?.classList.toggle("brs-hover", on);
     marks[i]?.classList.toggle("brs-hover", on);
+    if (on && rings[i]) view.layer.append(rings[i]); // over its neighbours
   };
-  const select = (i: number) => {
-    rings.forEach((g, k) => g.classList.toggle("brs-on", k === i));
-    rows.forEach((r, k) => r.classList.toggle("brs-on", k === i));
-    marks.forEach((m, k) => m.classList.toggle("brs-on", k === i));
-    if (rings[i]) view.layer.append(rings[i]); // over its neighbours
-    detail.replaceChildren(detailOf(i));
-  };
-  // A click both selects and plays: the losses are waiting under the clip.
   const open = (i: number) => {
-    select(i);
     if (watch) watch(clipOf(ins.battles[i], i));
   };
   // One tooltip wherever a battle is pointed at (map, timeline, list): the
@@ -130,7 +118,7 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
   // icons load asynchronously.
   const tipDetails: HTMLElement[] = [];
   const battleTip = (b: Battle, i: number): Tip => ({
-    title: (tipDetails[i] ??= h("div", { class: "brs-battletip" }, battleDetail(i, false))),
+    title: (tipDetails[i] ??= h("div", { class: "brs-battletip" }, battleDetail(i))),
     note: verdict(b) + ratioText(b) + (watch ? " · click to watch" : ""),
   });
   // Pointing at a battle lights it everywhere.
@@ -311,7 +299,7 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     return c.svg;
   }
 
-  function battleDetail(i: number, withPlay = true): HTMLElement {
+  function battleDetail(i: number): HTMLElement {
     const b = ins.battles[i];
     // The side that lost less is boxed in its colour: which side came out
     // ahead, without a sentence saying so (an even trade boxes neither).
@@ -342,11 +330,9 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     const names = fs.some((l) => l.length)
       ? [fighterNames(ins, fs[0] ?? [], 0, 2), h("span", { class: "brs-muted brs-vs" }, "vs"), fighterNames(ins, fs[1] ?? [], 1, 2)]
       : [];
-    const play = watch && withPlay ? h("button", { class: "brs-watchbtn", type: "button" }, "▶ Watch this battle") : null;
-    if (play && watch) play.addEventListener("click", () => watch(clipOf(b, i)));
     return h("div", undefined,
       h("div", undefined, h("b", undefined, `Battle ${i + 1}`), h("span", { class: "brs-muted" }, ` · ${when(b)} · ${compass(ins, b.x, b.z)}`)),
-      h("div", { class: "brs-losscols" }, ...names, lossCol(0), h("span"), lossCol(1)), play);
+      h("div", { class: "brs-losscols" }, ...names, lossCol(0), h("span"), lossCol(1)));
   }
 
   const list = ins.battles.length
@@ -356,7 +342,7 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
           h("span", { style: `color: ${sideColor(ins, 0)}` }, `◀ ${sideName(ins, 0)}`),
           h("span", { style: `color: ${sideColor(ins, 1)}` }, `${sideName(ins, 1)} ▶`)),
         h("span", { class: "brs-muted brs-bnumhead" }, priced ? "metal lost" : "units lost"), h("span")),
-      ...rows, detail)
+      ...rows)
     : null;
   return section("Battles",
     h("p", { class: "brs-hint" }, "Numbers: the biggest fights in the order they happened, on the map where they were fought. Above the line the first side came out ahead, below it the second, further out the less it lost against the other; a bubble's size is the metal lost there, in fire colours when a side's own blasts (a fusion chain, say) did most of it. Point at one to see its losses, click to watch it."),
