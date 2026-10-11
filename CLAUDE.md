@@ -494,6 +494,10 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           new Version written beside the old one. Comparative sections need a
                           full-view capture (POV) and two sides; CostCoverage says when only
                           armed mobile defs are priced (a replay rebuilt from old pieces).
+                          SIDES are ally teams with a human player OR an AI (insights.go
+                          aiTeams: a team with a faction and no human — eight BARbs are an
+                          8v8's other half, named "AI 1".."AI 8"); Gaia (no faction) and a
+                          scavenger/raptor team (>= half its units _scav/raptor defs) are not.
                           stories.go adds what NO capture can attribute to a killer and so never
                           tries: each side's army centre per step (Series.Front), battles and
                           six awards picked from per-unit tracks (ids are recycled, so a new def
