@@ -831,7 +831,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           (app.js openClip/startClip/closeClip, index.html #clip): the replay's
                           own #wrap — the map canvases — moves into a small window over the
                           summary, zoomed to the clip's spot, at a speed that fits the clip
-                          into ~20 s (CLIP_WALL_SEC), stopping at f1, with just play, a slider
+                          into ~20 s (CLIP_WALL_SEC), stopping at f1, with just play, a slider (which SCRUBS fractionally — app.js scrub/posForFrame — so units interpolate between samples while it is dragged)
                           and the speed; Esc closes it with the summary where it was, "Open in
                           Replay" carries on at that frame. Asked for because every click
                           used to throw the reader out of the summary. fitView DEFERS while

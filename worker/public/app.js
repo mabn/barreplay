@@ -3800,7 +3800,13 @@ function show() { setPlayhead(idx, true); } // full refresh at the current keyfr
 // so the map keeps up with the slider; the chunk's delta fetch starts once
 // the user dwells.
 function go(i) {
-  const target = Math.round(i);
+  scrub(Math.round(i));
+}
+
+// scrub is go at a fractional position (the clip's slider): the units are
+// interpolated to it exactly as during playback.
+function scrub(pos) {
+  const target = Math.floor(pos + 1e-6);
   if (data && !data.frames[target]) {
     clearTimeout(scrubTimer);
     scrubTimer = setTimeout(() => {
@@ -3809,7 +3815,7 @@ function go(i) {
       ensureChunk(c + 1);
     }, 250);
   }
-  setPlayhead(target, true);
+  setPlayhead(pos, true);
 }
 
 function stopPlay() {
@@ -7184,6 +7190,22 @@ function idxForFrame(f) {
   return Math.max(0, start - 1);
 }
 
+// posForFrame is idxForFrame without the rounding: the fractional sample
+// position of a sim frame, so a scrub between samples interpolates the units
+// (and moves the playhead) smoothly rather than snapping to whole seconds.
+function posForFrame(f) {
+  if (!data || !data.chunks.length) return 0;
+  const se = data.sampleEvery || 30;
+  let start = 0;
+  for (const c of data.chunks) {
+    if (f < c.frame + c.count * se) {
+      return start + Math.max(0, Math.min(c.count - 1, (f - c.frame) / se));
+    }
+    start += c.count;
+  }
+  return Math.max(0, start - 1);
+}
+
 // seekToFrame is the summary's onSeek: back to the playback, at that moment.
 // seekFromURL honours a ?f=<sim frame> on the replay link — how a page that
 // is not this one (the summary embedded on another site, src/summary/embed.ts)
@@ -7487,7 +7509,7 @@ function initClip() {
   document.getElementById('clipslider').oninput = e => {
     if (!clip || !data) return;
     stopPlay();
-    go(idxForFrame(clip.f0 + (+e.target.value / 1000) * (clip.f1 - clip.f0)));
+    scrub(posForFrame(clip.f0 + (+e.target.value / 1000) * (clip.f1 - clip.f0)));
   };
 }
 
