@@ -144,6 +144,49 @@
     return lo;
   }
 
+  // A chain of reactors going up is a hundred blasts on screen at once, and
+  // in Firefox building a radial gradient per blast per animation frame was
+  // what made that stutter. The fireball is the same picture for every
+  // blast of one palette, only scaled and faded, so it is painted ONCE per
+  // palette into a sprite and stamped with drawImage + globalAlpha — the
+  // same pixels, since every gradient stop's alpha was s.a times a constant.
+  // Past MAX_FIREBALLS (or MAX_RINGS for the shock rings) the OLDEST live
+  // blasts are dropped: by then the screen is solid fire and more additive
+  // layers only cost time, and the newest are the ones still growing.
+  const MAX_FIREBALLS = 120, MAX_RINGS = 40;
+  const SPRITE_PX = 128;
+  const sprites = new Map(); // palette -> canvas, or null where none can be made
+  function makeCanvas(px) {
+    if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(px, px);
+    if (typeof document !== 'undefined') {
+      const c = document.createElement('canvas');
+      c.width = c.height = px;
+      return c;
+    }
+    return null;
+  }
+  function spriteFor(pal) {
+    if (sprites.has(pal)) return sprites.get(pal);
+    let c = makeCanvas(SPRITE_PX);
+    const g = c && c.getContext('2d');
+    if (g) {
+      const h = SPRITE_PX / 2;
+      g.fillStyle = gradient(g, h, h, h, pal, 1);
+      g.fillRect(0, 0, SPRITE_PX, SPRITE_PX);
+    } else c = null;
+    sprites.set(pal, c);
+    return c;
+  }
+  function gradient(ctx, x, y, r, pal, a) {
+    const [core, body, rim] = pal;
+    const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+    grad.addColorStop(0, rgba(core, a));
+    grad.addColorStop(0.35, rgba(body, a * 0.85));
+    grad.addColorStop(0.75, rgba(rim, a * 0.45));
+    grad.addColorStop(1, rgba(rim, 0));
+    return grad;
+  }
+
   // draw paints every explosion live at simFrame (fractional) onto ctx.
   // view = {cx, cz, scale, w, h, stretch}: the world point at the screen's
   // centre, px per elmo, the viewport in CSS px, and the life multiplier
@@ -153,14 +196,14 @@
     if (!fx || !fx.list.length) return 0;
     const list = fx.list;
     const k = view.stretch || 1;
-    let i = first(list, simFrame - fx.maxLife * k);
-    if (i >= list.length || list[i].f > simFrame) return 0;
-    let n = 0;
+    const lo = first(list, simFrame - fx.maxLife * k);
+    if (lo >= list.length || list[lo].f > simFrame) return 0;
+    let n = 0, rings = 0;
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    for (; i < list.length; i++) {
+    // Newest first, so the cap drops the oldest.
+    for (let i = first(list, simFrame + 1e-9) - 1; i >= lo && n < MAX_FIREBALLS; i--) {
       const e = list[i];
-      if (e.f > simFrame) break;
       const s = stage(e, (simFrame - e.f) / k);
       if (!s) continue;
       const sx = view.w / 2 + (e.x - view.cx) * view.scale;
@@ -169,18 +212,20 @@
       const reach = Math.max(r, s.ringR * view.scale) + 2;
       if (sx + reach < 0 || sy + reach < 0 || sx - reach > view.w || sy - reach > view.h) continue;
       n++;
-      const [core, body, rim] = e.pal;
-      const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, r);
-      grad.addColorStop(0, rgba(core, s.a));
-      grad.addColorStop(0.35, rgba(body, s.a * 0.85));
-      grad.addColorStop(0.75, rgba(rim, s.a * 0.45));
-      grad.addColorStop(1, rgba(rim, 0));
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(sx, sy, r, 0, Math.PI * 2);
-      ctx.fill();
-      if (s.ringA > 0) {
-        ctx.strokeStyle = rgba(body, s.ringA);
+      const sprite = spriteFor(e.pal);
+      if (sprite) {
+        ctx.globalAlpha = s.a;
+        ctx.drawImage(sprite, sx - r, sy - r, 2 * r, 2 * r);
+        ctx.globalAlpha = 1;
+      } else {
+        ctx.fillStyle = gradient(ctx, sx, sy, r, e.pal, s.a);
+        ctx.beginPath();
+        ctx.arc(sx, sy, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      if (s.ringA > 0 && rings < MAX_RINGS) {
+        rings++;
+        ctx.strokeStyle = rgba(e.pal[1], s.ringA);
         ctx.lineWidth = Math.max(1, Math.min(3, r * 0.04));
         ctx.beginPath();
         ctx.arc(sx, sy, Math.max(r, s.ringR * view.scale), 0, Math.PI * 2);
@@ -191,7 +236,7 @@
     return n;
   }
 
-  const api = { look, collect, stage, draw, first, stretchFor, DEFAULT_AOE, MIN_RADIUS_PX, LIFE_MIN, LIFE_MAX };
+  const api = { look, collect, stage, draw, first, stretchFor, DEFAULT_AOE, MIN_RADIUS_PX, LIFE_MIN, LIFE_MAX, MAX_FIREBALLS };
   root.FxBlasts = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
