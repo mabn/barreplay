@@ -84,6 +84,40 @@ const INCOME_STEPS = 4;
 /** A share of a shift below this is not mentioned as what moved it. */
 const DRIVER_MIN = 0.2;
 
+/** builtNotFought says the model's own split (version 7) put less than
+ * DRIVER_MIN of a moment's shift on army value: whatever was lost in the
+ * window, the armies' balance hardly moved, so a fight there — however big
+ * — is not what moved the line. An even trade of 5.9k for 5.5k metal is
+ * exactly that, while the incomes pulled apart. */
+function builtNotFought(m: Moment): boolean {
+  return typeof m.army === "number" && typeof m.eco === "number" && m.army + m.eco > 0 && m.army < DRIVER_MIN;
+}
+
+/** BAR's metal producers by name — mines and energy converters — the
+ * metal half of insights defs.go ecoNameRE. Power plants feed converters
+ * too, but a lost wind turbine is not what a fall in metal income is. */
+const METAL_NAME = /^(arm|cor|leg)[a-z]*(mex|moho|makr|mmkr|mmm)/;
+
+/** ecoLost is the metal producers side lost in [f0, f1], the most first. */
+function ecoLost(ins: Insights, side: number, f0: number, f1: number): { n: number; metal: number; kinds: [string, number][] } {
+  const wiped = wipedOf(ins);
+  const sideOf = sideOfTeam(ins);
+  const d = ins.deaths;
+  const kinds = new Map<string, number>();
+  let n = 0;
+  let metal = 0;
+  for (let i = 0; i < d.f.length; i++) {
+    if (d.f[i] < f0 || d.f[i] > f1 || wiped(i) || sideOf.get(d.team[i]) !== side) continue;
+    const def = ins.defs[d.def[i]];
+    if (!def || !METAL_NAME.test(def.name)) continue;
+    const name = def.human || def.name;
+    kinds.set(name, (kinds.get(name) ?? 0) + 1);
+    n++;
+    metal += d.cost?.[i] ?? 0;
+  }
+  return { n, metal, kinds: [...kinds].sort((a, b) => b[1] - a[1]) };
+}
+
 interface Growth {
   title: string;
   detail: string;
@@ -150,7 +184,20 @@ export function growthStory(ins: Insights, m: Moment): Growth {
     parts.push(`Metal income over the last minute: ${W} ${rate(gw.income[0])} → ${rate(gw.income[1])}, ${L} ${rate(gl.income[0])} → ${rate(gl.income[1])}.`);
     parts.push(`Metal mined so far: ${W} ${fmtMetal(gw.mined[1])}, ${L} ${fmtMetal(gl.mined[1])}.`);
   }
+  if (eco && incomeLost) {
+    // Where it went, when that was the other side: the mines and
+    // converters the losing side lost in the window.
+    const [w0, w1] = momentWindow(ins, m);
+    const eb = ecoLost(ins, lose, w0, w1);
+    if (eb.n >= 1) parts.push(`${L} lost ${eb.n} metal producer${eb.n === 1 ? "" : "s"} (${fmtMetal(eb.metal)} metal): ${eb.kinds.slice(0, 4).map(([name, n]) => (n > 1 ? `${n} ${name}` : name)).join(", ")}.`);
+  }
   if (army) parts.push(`Army: ${W} ${fmtMetal(gw.army[0])} → ${fmtMetal(gw.army[1])} metal, ${L} ${fmtMetal(gl.army[0])} → ${fmtMetal(gl.army[1])}.`);
+  else if (gl.army[1] - gl.army[0] > Math.max(0, gw.army[1] - gw.army[0])) {
+    // The other side spent the stretch on its army instead: worth saying,
+    // since the army chart shows it pulling ahead while the line went the
+    // other way.
+    parts.push(`${L} put more into its army: ${fmtMetal(gl.army[0])} → ${fmtMetal(gl.army[1])} metal, ${W} ${fmtMetal(gw.army[0])} → ${fmtMetal(gw.army[1])}.`);
+  }
   return { title, detail: parts.join(" "), sides };
 }
 
@@ -368,6 +415,8 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
   let fight = true;
   // The battle a shared moment told only part of.
   let whole: Battle | null = null;
+  // A fight there that the line did not move on (see builtNotFought).
+  let notFought = false;
   if (out.length === 1) {
     fight = false;
     focus = eliminationFocus(ins, out[0].team, out[0].f);
@@ -386,8 +435,9 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     title = ll.commanderDeaths.every((i) => selfDestructed(ins, i))
       ? `${ll.commanders.length} of ${possessive(L)} commanders self-destruct${at(focus)}`
       : `${ll.commanders.length} of ${possessive(L)} commanders fall${at(focus)}`;
-  } else if (size(ll) < (priced ? QUIET_METAL : 3) && size(ll) <= size(wl) * 1.5) {
-    // No real fight: the line moved on what each side built.
+  } else if ((size(ll) < (priced ? QUIET_METAL : 3) && size(ll) <= size(wl) * 1.5) || (notFought = builtNotFought(m))) {
+    // No real fight, or one that did not move the line: it moved on what
+    // each side built.
     fight = false;
     focus = null;
     growth = growthStory(ins, m);
@@ -459,8 +509,12 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     .map(([name, l]) => `${name} lost ${lossText(l as SideLoss, priced)}`)
     .join("; ");
   const said = losses(dl, dw);
+  // Fighting the line did not move on is said as what it was: a side note.
+  const traded = notFought && priced && Math.max(size(ll), size(wl)) >= QUIET_METAL
+    ? ` Meanwhile ${L} lost ${fmtMetal(ll.metal)} metal in fighting and ${W} ${fmtMetal(wl.metal)}, which did not tip the armies toward ${W}.`
+    : said ? ` ${said}.` : "";
   let detail = growth
-    ? growth.detail + (said ? ` ${said}.` : "")
+    ? growth.detail + traded
     : local
       ? `There, ${fmtClock(focus!.f / SIM_FPS)}–${fmtClock((focus!.f1 ?? focus!.f) / SIM_FPS)}: ${said || "nothing was lost"}.`
       : said ? `${said}.` : "";
@@ -484,7 +538,8 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
       elsewhere = ins.sides.map((_, sd) => rest(sd));
     }
   }
-  const battle = battleOfMoment(ins, focus, f0, f1);
+  // A moment told on what was built despite a fight is not about that fight.
+  const battle = notFought ? -1 : battleOfMoment(ins, focus, f0, f1);
   const fought = fight ? fighters(ins, ins.battles[battle]) : ins.sides.map(() => []);
   return { title, detail, lost, shown: local ?? lost, elsewhere, whole, battle, focus, fighters: fought, growth: growth?.sides ?? null };
 }

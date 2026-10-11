@@ -196,6 +196,17 @@ test("a moment is named after what died in it", () => {
   const fell = { ...base, series: { ...base.series, metalIncome: [[20, 20, 4, 4], [5, 5, 5, 5]] } };
   st = momentStory(ins({ ...fell, deaths: deaths([]) }), { ...m, army: 0, eco: 1 });
   assert.equal(st.title, "Blue team loses metal income");
+  // A fight the model says did not move the armies' balance (army < 20% of
+  // the shift) is not the story, however big: the incomes are, with the
+  // fighting a side note and no battle credited.
+  st = momentStory(ins({ ...fell, deaths: deaths(trade), battles: [{ f0: 950, f1: 1300, x: 450, z: 450, r: 200, lost: [] }] }), { ...m, army: 0, eco: 1 });
+  assert.equal(st.title, "Blue team loses metal income");
+  assert.equal(st.battle, -1);
+  assert.equal(st.focus, null);
+  assert.match(st.detail, /Meanwhile Blue team lost 400 metal in fighting and Team 2 800, which did not tip the armies toward Team 2\.$/);
+  // The same trade with the army carrying the shift is still the fight.
+  st = momentStory(ins({ ...fell, deaths: deaths(trade) }), { ...m, army: 0.6, eco: 0.4 });
+  assert.equal(st.title, "Team 2 trades 800 metal for 400 metal in the centre");
   st = momentStory(ins({ ...inc, deaths: deaths([]) }), { ...m, army: 0.4, eco: 0.6 });
   assert.equal(st.title, "Team 2 out-builds Blue team in army and economy");
   // Deaths outside the window (and the step before it) do not count.

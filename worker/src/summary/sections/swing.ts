@@ -127,13 +127,13 @@ export function swingChart(ins: Insights, opts: SummaryOptions, watch: Watch | n
         head.append(mark);
       }
       const units = h("span", { class: "brs-units" });
-      if (l?.units.length) void fillUnits(units, ins, opts, l.units, priced, SWING_CHIPS);
-      const away = e.elsewhere?.[sd] ? ` (+${fmtMetal(e.elsewhere[sd])} elsewhere)` : "";
-      // A swing on economy says what each side's income did, not that
-      // nobody lost anything.
+      // A swing on economy says what each side's income did, not what it
+      // lost in fighting the line did not move on.
       const inc = e.income?.[sd];
+      if (l?.units.length && !inc) void fillUnits(units, ins, opts, l.units, priced, SWING_CHIPS);
+      const away = e.elsewhere?.[sd] ? ` (+${fmtMetal(e.elsewhere[sd])} elsewhere)` : "";
       const rate = (v: number) => `${fmtMetal(Math.round(v * 10) / 10)}/s`;
-      const count = inc && !l?.n ? `income ${rate(inc[0])} → ${rate(inc[1])}`
+      const count = inc ? `income ${rate(inc[0])} → ${rate(inc[1])}`
         : !l?.n ? "" : `${l.n} lost` + (priced && l.metal ? ` · ${fmtMetal(l.metal)} metal` : "") + away;
       return h("div", { class: "brs-losscol" + (gained ? " brs-won" : ""), style: `--brs-side: ${sideColor(ins, sd)}` },
         head, h("div", { class: "brs-swloss" }, h("span", { class: "brs-muted" }, count), units));
