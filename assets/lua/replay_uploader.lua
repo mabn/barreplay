@@ -1424,7 +1424,8 @@ local projectiles = (function()
 
 	-- classifyWeapon returns the track class of a weapon def, or nil. The order
 	-- matters: an anti-nuke and a Juno are stockpiled long-range starbursts too,
-	-- the Paralyzer is stockpiled, and an EMP beam is a beam.
+	-- the Paralyzer is stockpiled, an EMP beam is a beam, and a stockpiled
+	-- long-range AA missile (the Mercury) deals 1 to the ground.
 	local function classifyWeapon(wd)
 		if wcp(wd, "bogus") then
 			return nil -- silo dummies, energy chargers
@@ -1448,11 +1449,11 @@ local projectiles = (function()
 		if wd.paralyzer and dmg >= empMinDamage then
 			return CLS_EMP
 		end
+		if dmg <= 1 then
+			return nil -- AA and utility weapons (a stockpiled long-range AA missile too)
+		end
 		if wd.stockpile and range >= tacticalMinRange then
 			return CLS_TACTICAL
-		end
-		if dmg <= 1 then
-			return nil -- AA and utility weapons
 		end
 		if wd.type == "Cannon" and range >= artilleryMinRange then
 			return CLS_ARTILLERY
@@ -1495,10 +1496,13 @@ local projectiles = (function()
 					-- Frames the shot keeps producing projectiles (a salvo, a
 					-- beam's duration), and how far from the muzzle a new one
 					-- can be by the time GameFramePost looks for it.
+					-- The first shot leaves windup seconds after the weapon
+					-- fires (the Mini Starfall waits 2.5 s, then fires 63).
+					local windup = mathFloor((wd.windup or 0) * gameSpeed + 0.5)
 					local salvo = math.ceil(((wd.salvoSize or 1) - 1) * (wd.salvoDelay or 0) * gameSpeed)
-					local window = salvo
+					local window = windup + salvo
 					if c == CLS_BEAM then
-						window = math.max(window, mathFloor((wd.beamtime or 0) * gameSpeed))
+						window = math.max(window, windup + mathFloor((wd.beamtime or 0) * gameSpeed))
 					end
 					slots = slots or {}
 					slots[#slots + 1] = { slot = i, wd = wid, cls = c, window = window + 2,
@@ -1612,6 +1616,7 @@ local projectiles = (function()
 	local blastBuf = newBlastBuf()
 	local projStart = 0 -- first frame of the open W window
 	local tracksClosed, blastsSeen, launchesFound = 0, 0, 0
+	local frameMs = 0 -- time spent in projectileFrame (hi-res timer only)
 
 	-- s16 clamps a coordinate into the record's signed 16-bit column.
 	local function s16(v)
@@ -1938,9 +1943,14 @@ local projectiles = (function()
 	-- projectile updates, so a weapon that fired this frame has its new
 	-- projectiles in the world and its reload frame moved.
 	local function projectileFrame(frame)
+		local t0 = hiResTimer and spGetTimer() or nil
 		for unitID, L in pairs(launchers) do
 			for _, s in ipairs(L.slots) do
-				local rf = spGetUnitWeaponState(unitID, s.info.slot, "reloadFrame")
+				-- A weapon cannot fire before its reload frame: until then
+				-- there is nothing to read (the cost here is per slot per
+				-- frame, so this is most of it).
+				local rf = (s.rf == nil or frame >= s.rf)
+					and spGetUnitWeaponState(unitID, s.info.slot, "reloadFrame") or s.rf
 				if rf ~= nil and rf ~= s.rf then
 					s.rf = rf
 					if rf > frame then -- a shot moves it into the future
@@ -2010,6 +2020,9 @@ local projectiles = (function()
 		-- A unit's explosion follows its UnitDestroyed within the same frame.
 		if next(dyingTeam) ~= nil then
 			dyingTeam = {}
+		end
+		if t0 then
+			frameMs = frameMs + spDiffTimers(spGetTimer(), t0, true)
 		end
 	end
 
@@ -2136,8 +2149,13 @@ local projectiles = (function()
 	end
 
 	local function summary()
-		return string.format("%d launches tracked, %d tracks and beam firings closed, %d blasts",
-			launchesFound, tracksClosed, blastsSeen)
+		local slots = 0
+		for _, L in pairs(launchers) do
+			slots = slots + #L.slots
+		end
+		return string.format("%d launches tracked, %d tracks and beam firings closed, %d blasts; "
+			.. "%.0f ms in GameFramePost, %d launcher slots at the end",
+			launchesFound, tracksClosed, blastsSeen, frameMs, slots)
 	end
 
 	return {

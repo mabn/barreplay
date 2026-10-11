@@ -412,8 +412,8 @@ whole shot; `range` in elmos):
 | `tactical` | 4 | `customParams.nuclear` (shorter range) |
 | `beam` | 8 | `BeamLaser`/`LightningCannon`, `damage ≥ 2000`, `range ≥ 600` (an EMP beam is a beam) |
 | `emp` | 3 | `paralyzer`, `damage ≥ 5000` |
+| — | | `damage ≤ 1` (AA, utility): never — before the stockpile rule, since the Mercury is a stockpiled long-range AA missile |
 | `tactical` | 4 | `stockpile` and `range ≥ 1500` (Perdition) |
-| — | | `damage ≤ 1` (AA, utility): never |
 | `artillery` | 6 | `Cannon`, `range ≥ 1500` |
 | `rocket` | 7 | `StarburstLauncher`/`MissileLauncher`, `range ≥ 1000` |
 
@@ -451,7 +451,8 @@ then n rows as COLUMNS:
                                     bit 2 path truncated at the point cap
   s16 x0  s16 y0  s16 z0            launch position, whole elmos (a beam: its muzzle)
   f32 vx  f32 vy  f32 vz            launch velocity, elmos per frame (0 for a beam)
-  f32 gravity                       the projectile's per-frame gravity (GetProjectileGravity)
+  f32 gravity                       the projectile's per-frame gravity as GetProjectileGravity
+                                    reports it: negative pulls down
   u8  targetType                    0 none, or the engine's byte: 'u' unit, 'g' ground,
                                     'f' feature, 'p' projectile
   u32 target                        unit / feature / projectile id; 0xFFFFFF none
@@ -472,8 +473,10 @@ the launch velocity and gravity. At most 400 points per row (flag bit 2).
 Unknown ids are 65535 (u16), 255 (u8), 0xFFFFFF (u32; every value stays
 below 2^24 — see above). How a launch is found: the widget watches each
 tracked launcher's `reloadFrame`, which changes exactly when the weapon
-fires, and in that frame's `GameFramePost` picks the new projectile out of a
-`GetProjectilesInSphere` query around the muzzle, by owner and weapon def.
+fires (it is read only once the weapon has reloaded: it cannot fire before),
+and from that frame's `GameFramePost` on, for the weapon's `windup` plus its
+salvo, picks the new projectiles out of a `GetProjectilesInSphere` query
+around the muzzle, by owner and weapon def.
 How a track ends: the `Explosion` callin, which LuaUI may watch itself
 (`Script.SetWatchExplosion`) and which carries the projectile id; a sweep every
 15 frames closes tracks whose projectile is gone with no explosion. A nuke

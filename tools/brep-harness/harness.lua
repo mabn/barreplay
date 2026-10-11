@@ -518,7 +518,7 @@ Game = { gameSpeed = 30, mapName = "Harness Map 1.0", gameVersion = "Beyond All 
 	armorTypes = { [0] = "default", default = 0, [1] = "vtol", vtol = 1 } }
 Engine = { version = "2026-harness" }
 UnitDefs = {}
-for d = 1, 43 do
+for d = 1, 44 do
 	UnitDefs[d] = { name = "def" .. d, humanName = "Def " .. d, health = 1000 + d,
 		xsize = 2, zsize = 2, canMove = true, isBuilding = false,
 		maxWeaponRange = (d % 3 == 0) and 0 or 300 + d,
@@ -559,6 +559,11 @@ WeaponDefs[12] = { name = "smallboom", type = "Cannon", range = 0, reload = 0,
 WeaponDefs[13] = { name = "h_silo_launch", type = "Cannon", range = 0, reload = 30,
 	damages = { [0] = 0 }, customParams = { bogus = "1" } }
 WeaponDefs[14] = { name = "h_aa", type = "MissileLauncher", range = 2400, reload = 1.8, damages = { [0] = 1 } }
+-- A volley gun that waits before its salvo (the Mini Starfall waits 2.5 s,
+-- then fires 63): the shells appear long after the reload frame moved.
+WeaponDefs[15] = { name = "h_starfall_starfire", type = "Cannon", range = 1750, reload = 7,
+	damages = { [0] = 125 }, damageAreaOfEffect = 27.5, projectilespeed = 16.7,
+	salvoSize = 3, salvoDelay = 0.1, windup = 2.5 }
 WeaponDefNames = {}
 for id, wd in pairs(WeaponDefs) do
 	wd.id = id
@@ -569,6 +574,7 @@ UnitDefs[39].deathExplosion = "smallboom"
 UnitDefs[40].name, UnitDefs[40].weapons = "h_amd", { { weaponDef = 7 } }
 UnitDefs[41].name, UnitDefs[41].weapons = "h_brtha", { { weaponDef = 8 }, { weaponDef = 14 } }
 UnitDefs[42].name, UnitDefs[42].weapons = "h_anni", { { weaponDef = 9 } }
+UnitDefs[44].name, UnitDefs[44].weapons = "h_starfall", { { weaponDef = 15 } }
 UnitDefs[43].name = "h_fus"
 UnitDefs[43].deathExplosion, UnitDefs[43].selfDExplosion = "fusionblast", "fusionblast"
 -- Script.SetWatchExplosion: the engine calls LuaUI's Explosion only for the
@@ -748,6 +754,8 @@ end
 --   beam 504      fires f1800 for 45 frames, sweeping, a jump at its 30th
 --                 frame, frames 1810-1814 into empty air (no explosion)
 --   fusion 505    dies f2100: UnitDestroyed, then its own blast (B kind 1)
+--   volley 506    fires f3000 with a 75-frame windup: its 3 shells leave at
+--                 f3075, f3078 and f3081 and land 60 frames later
 
 local function addStatic(id, def, team, x, z)
 	units[id] = { id = id, team = team, def = def, x = x, z = z, vx = 0, vz = 0,
@@ -843,6 +851,19 @@ local function projectileScript(f)
 	end
 	if f == 2550 then
 		explode(7004)
+	end
+	if f == 3000 then
+		weaponState[506][1] = f + 210
+	end
+	for k = 0, 2 do
+		if f == 3075 + 3 * k then
+			local u = units[506]
+			projectiles[7101 + k] = { owner = 506, team = u.team, wd = 15, x = u.x, y = 120, z = u.z,
+				vx = 12, vy = 5, vz = 10, g = 0.16, target = { kind = "g", x = u.x + 720, y = 0, z = u.z + 600 } }
+		end
+		if f == 3135 + 3 * k then
+			explode(7101 + k)
+		end
 	end
 end
 
@@ -1032,6 +1053,7 @@ for s = 0, SAMPLES - 1 do
 		addStatic(503, 40, 1, 7000, 6500)
 		addStatic(504, 42, 1, 2600, 3800)
 		addStatic(505, 43, 1, 5000, 5200)
+		addStatic(506, 44, 0, 3000, 1500)
 	end
 	assignBuilders()
 	if widgetActive then

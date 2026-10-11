@@ -171,8 +171,8 @@ func checkHarnessProjectiles(t *testing.T, live, resim decodedHarness) {
 	for _, p := range resim.w.projectiles {
 		tracks[[2]int32{p.ID, p.Birth}] = p
 	}
-	if len(tracks) != 7 {
-		t.Errorf("re-sim recorded %d tracks, want 7", len(tracks))
+	if len(tracks) != 10 {
+		t.Errorf("re-sim recorded %d tracks, want 10", len(tracks))
 	}
 	check := func(id, birth int32, class, end, flags uint8) snapshot.Projectile {
 		t.Helper()
@@ -200,6 +200,13 @@ func checkHarnessProjectiles(t *testing.T, live, resim decodedHarness) {
 	}
 	check(7004, 2400, snapshot.ProjNuke, snapshot.TrackExploded, 0) // not intercepted
 	check(7005, 4150, snapshot.ProjArtillery, snapshot.TrackOpen, 0)
+	// A volley gun with a windup: the shells leave 75 frames after the
+	// reload frame moved, each one still found and tracked.
+	for k, birth := range []int32{3075, 3078, 3081} {
+		if p := check(7101+int32(k), birth, snapshot.ProjArtillery, snapshot.TrackExploded, 0); p.Owner != 506 {
+			t.Errorf("volley shell %d owned by %d, want 506", k, p.Owner)
+		}
+	}
 	beam := check(8000, 1800, snapshot.ProjBeam, snapshot.TrackExploded, 0)
 	if beam.End != 1844 {
 		t.Errorf("beam ended at %d, want its last hit at 1844", beam.End)

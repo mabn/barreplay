@@ -10,8 +10,8 @@ Status: **implemented** in widget 1.9.0 (stream protocol 5), decoded by
 `internal/capture` and packed into `.brp` sections `R` and `W`
 (`snapshot/projectiles.go`); byte formats in `docs/brepstream-format.md`
 (protocol 5) and `docs/brp-format.md` (§9.2). Pinned by the Lua harness's
-projectile script and `TestHarnessGolden`; **not yet run on a real
-re-simulation** (§8). Every API claim below was checked
+projectile script and `TestHarnessGolden`, and run on real re-simulations
+(§8). Every API claim below was checked
 against the engine source (`~/dev/recoil`, tag 2026.07.04) and BAR's game
 checkout (`~/dev/bar-full`). The weapon numbers come from a real capture's
 runtime weapon table. Source references are given so each claim can be
@@ -259,8 +259,8 @@ local function classify(wd)
     return (dmg >= 2000 and wd.range >= 600) and "beam" or nil  -- Pulsar, Bulwark, Titan, Juggernaut…
   end
   if wd.paralyzer and dmg >= 5000 then return "emp" end   -- armemp, armthor (before the stockpile rule)
+  if dmg <= 1 then return nil end                          -- AA and utility (the Mercury is a stockpiled AA missile)
   if wd.stockpile and wd.range >= 1500 then return "tactical" end  -- legperdition
-  if dmg <= 1 then return nil end                          -- AA and utility
   if wd.type == "Cannon" and wd.range >= 1500 then return "artillery" end   -- LRPC, rapid, minis
   if (wd.type == "StarburstLauncher" or wd.type == "MissileLauncher")
      and wd.range >= 1000 then return "rocket" end
@@ -315,9 +315,11 @@ unit with a tracked weapon slot is added with its slot numbers. It is removed
 on `UnitDestroyed`. Then in **`GameFramePost`**, for each registered launcher
 slot:
 
-1. `rf = GetUnitWeaponState(u, w, "reloadFrame")`. If it **differs** from the
-   last reading, the weapon fired this frame. Open a **capture window** lasting
-   `salvoSize · salvoDelay + 2` frames, which is 63 shells' worth for Starfall.
+1. `rf = GetUnitWeaponState(u, w, "reloadFrame")`, read only once the last
+   reading has passed (a weapon cannot fire before it). If it **differs** from
+   the last reading, the weapon fired this frame. Open a **capture window**
+   lasting `windup + salvoSize · salvoDelay + 2` frames. The windup matters:
+   the Mini Starfall waits 2.5 s after firing, then fires 63 shells.
 2. While a window is open, run `GetProjectilesInSphere(mx, my, mz, r)` around
    the muzzle from `GetUnitWeaponVectors(u, w)`, with `r = max(64, 3 ·
    projectileSpeed)` because the shell has had one projectile update.
@@ -541,7 +543,39 @@ can see. So a player's capture would hold their own side's launches and
 whatever the enemy fired into their line of sight. That's still worth
 recording, but it isn't the report, and it should wait.
 
-## 8. To verify when implementing
+## 8. Verified on real re-simulations (engine 2026.07.04)
+
+Two replays, each re-simulated with `-projectiles` on and off:
+`d53f896a…` (a 15-minute duel) and `672ecb6a…` (a 13-minute lava 8v8 with
+Mini Starfalls, Perdition missiles and Pulsars).
+
+- **The capture is otherwise unchanged:** every existing section (`K F X E C
+  H U V`) is byte-identical with recording on and off, in both games.
+- **The `Explosion` install works** in BAR's real widget handler: 139 weapons
+  watched in the duel, 462 in the modded 8v8.
+- **Launch detection:** 2,828 launches in the 8v8. The first run found 33:
+  the Mini Starfall fires its 63-shell salvo 2.5 s after the weapon fires
+  (`windup`), and the capture window ended before the first shell. The window
+  now includes the windup, and the harness has a regression case for it.
+- **Results in the 8v8:** 2,810 Starfall shell tracks (2,747 exploded, 63
+  still flying at game over: one volley), 43 Pulsar beam firings, 18
+  Perdition missiles, 332 strong unit explosions, 37 stock facts. No shot fell
+  through as an untracked blast.
+- **Classification fix:** the Mercury, a stockpiled long-range AA missile, was
+  first classed `tactical`; the `damage ≤ 1` exclusion now runs before the
+  stockpile rule.
+- **Cost:** peak engine memory unchanged (5,423–5,430 MB either way). Sim time
+  1m33–1m34 on against 1m27–1m31 off, so roughly 3–8% within this host's
+  run-to-run noise. The widget's per-frame work measured 442 ms over the whole
+  game, because a slot is polled only once its weapon has reloaded.
+
+Still open:
+
+- **Anti-nuke interception and Juno** on a real game: neither occurred in
+  these two.
+- **Shield-bent beams.**
+
+## 8a. Originally listed to verify
 
 - **The `Explosion` install (§4.2) in a real re-sim.** The harness stubs
   Spring and can't prove the engine calls it.
