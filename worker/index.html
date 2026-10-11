@@ -40,10 +40,6 @@
       <span>Summary</span>
     </a>
   </div>
-  <a href="/" id="railhome" class="railitem" title="All replays">
-    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12 4 L6 10 L12 16"/></svg>
-    <span>Replays</span>
-  </a>
 </nav>
 
 <header>
@@ -51,7 +47,9 @@
        (/replays/<id>, /queue, …), where a relative link resolves inside the
        page's own directory. A plain click is intercepted by the SPA anyway;
        this is for middle-click / open-in-new-tab. -->
-  <h1><a href="/" id="homelink" title="All replays">barreplay</a><span class="sub" id="subtitle">replay state viewer</span></h1>
+  <!-- On a replay page the brand link gives way to #backlink, the way back
+       to the list, leading the replay's own title like a breadcrumb. -->
+  <h1><a href="/" id="homelink" title="All replays">barreplay</a><a href="/" id="backlink" title="Back to all replays"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12 4 L6 10 L12 16"/></svg>Replays</a><span class="sub" id="subtitle">replay state viewer</span></h1>
   <!-- Point-of-view marking. Most catalog rows carry no recorder provenance
        (their captures predate the GAME record's recorder fields) and it cannot
        be derived after the fact, so it is marked by hand here. Shown only in

@@ -75,10 +75,23 @@ body.replay-page #wrap { grid-column: 2; grid-row: 2; }
 body.replay-page #bottombar { grid-column: 2; grid-row: 3; }
 body.replay-page #side { grid-column: 3; grid-row: 1 / -1; }
 body.replay-page #summary { grid-column: 2 / -1; grid-row: 2 / -1; }
-/* The menu's logo is the way back to the list here, so the header's brand
-   link would say it twice; the header keeps the replay's own title. */
+/* The header's brand link gives way to a "Replays" back link leading the
+   replay's own title, so the way back to the list sits where the page starts
+   rather than at the far end of the menu. */
 body.replay-page #homelink { display: none; }
-body.replay-page h1 .sub { margin-left: 0; }
+#backlink { display: none; }
+body.replay-page #backlink {
+  display: inline-flex; align-items: center; gap: 3px; vertical-align: middle;
+  margin-right: 12px; padding: 3px 9px 3px 5px; border-radius: 6px;
+  border: 1px solid #2a323c; color: #9fb0bf; font-size: 12px; font-weight: 500;
+}
+body.replay-page #backlink:hover { color: #fff; background: #1d252e; border-color: #3a4856; }
+#backlink:focus-visible { outline: 2px solid #8fd3ff; outline-offset: 2px; }
+#backlink svg {
+  width: 14px; height: 14px;
+  fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; stroke-linecap: round;
+}
+body.replay-page h1 .sub { margin-left: 0; vertical-align: middle; }
 
 #rail {
   width: 72px; padding: 12px 0;
@@ -111,9 +124,6 @@ body.replay-page h1 .sub { margin-left: 0; }
   width: 3px; border-radius: 0 2px 2px 0; background: #8fd3ff;
 }
 #raillogo:focus-visible, .railitem:focus-visible { outline: 2px solid #8fd3ff; outline-offset: 2px; }
-/* The way back to the list sits at the bottom of the menu, apart from the
-   views of this replay. */
-#railhome { margin-top: auto; }
 body.home #rail, body.home #side, body.home #summary { display: none !important; }
 body.summary-tab #wrap, body.summary-tab .controls, body.summary-tab #side { display: none; }
 body.summary-tab #summary { display: block !important; }

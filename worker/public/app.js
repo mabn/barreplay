@@ -8016,10 +8016,11 @@ async function init() {
   // Optional render-smoothness overlay, gated on ?debug=true.
   if (params.get('debug') === 'true') startFpsMonitor();
 
-  // The header title, and on a replay page the left menu's logo and its
-  // Replays entry, return to the replay list without a page reload. Modified
-  // clicks keep the browser's new-tab meaning, as on the menu's tabs.
-  for (const id of ['homelink', 'raillogo', 'railhome']) {
+  // The header title, and on a replay page the left menu's logo and the
+  // header's Replays back link, return to the replay list without a page
+  // reload. Modified clicks keep the browser's new-tab meaning, as on the
+  // menu's tabs.
+  for (const id of ['homelink', 'raillogo', 'backlink']) {
     document.getElementById(id).onclick = (e) => {
       if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
       e.preventDefault();

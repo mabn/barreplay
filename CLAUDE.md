@@ -1461,8 +1461,10 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           /replays/<rid> links keep playing — nothing is deleted); picking a
                           replay navigates to /replays/<id>, the header title returns to the
                           list. A REPLAY PAGE has its own LEFT MENU (index.html #rail: logo,
-                          Replay and Summary — the ?tab=summary tabs — and Replays back to the
-                          list), and body.replay-page lays the page out as a CSS GRID: the
+                          Replay and Summary — the ?tab=summary tabs); the way back to the
+                          list is the header's "Replays" link (#backlink) leading the replay's
+                          title, not a menu entry (Marcin's call: not at the menu's bottom),
+                          and body.replay-page lays the page out as a CSS GRID: the
                           menu, then the header/map/bottom bar column, then #side as a
                           full-height column. #side is a body child rather than inside #wrap
                           because the summary's clip player moves #wrap into its window; the
