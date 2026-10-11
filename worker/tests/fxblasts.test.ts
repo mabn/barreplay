@@ -97,3 +97,14 @@ test('fast playback stretches a blast so it stays visible', () => {
   assert.equal(Fx.draw(ctx, fx, late, view), 0);
   assert.equal(Fx.draw(ctx, fx, late, { ...view, stretch: 4 }), 1);
 });
+
+test('a pile-up draws at most MAX_FIREBALLS, keeping the newest', () => {
+  const ctx: any = new Proxy({}, {
+    get(_t, k) { return k === 'createRadialGradient' ? () => ({ addColorStop() {} }) : () => {}; },
+    set() { return true; },
+  });
+  const many = Array.from({ length: 300 }, (_, i) => ({ f: 100 + i * 0.01, weapon: 1, x: 0, z: 0, team: 0, kind: 1 }));
+  const fx = Fx.collect(many, [], weapons);
+  const view = { cx: 0, cz: 0, scale: 0.1, w: 800, h: 600 };
+  assert.equal(Fx.draw(ctx, fx, 104, view), Fx.MAX_FIREBALLS);
+});
