@@ -7,7 +7,11 @@
 // R track that exploded (a nuke landing, an LRPC shell, a rocket). Both are
 // drawn here, as the same thing: a fireball sized by the weapon's own blast
 // radius (the wdefs fact's `aoe`, already halved from the unit file's
-// diameter), with a shock ring on the big ones. The projectile layer draws a
+// diameter), and a shock ring that is the engine's own DAMAGE FRONT: it
+// leaves the centre at the weapon's explosionSpeed (elmos per frame, the
+// wdefs fact's `expSpeed`) and stops at the blast radius, exactly where and
+// when the engine applies the damage (GameHelper: a unit d elmos out is hit
+// d / explosionSpeed frames late, nothing past the radius is hit at all). The projectile layer draws a
 // track's FLIGHT and stops at its end; beams and their hit points belong to
 // the beam layer.
 //
@@ -45,8 +49,13 @@
   // just on screen vanish.
   const STRETCH_MAX = 6;
   function stretchFor(speed) { return Math.min(STRETCH_MAX, Math.max(1, (speed || 1) / 2)); }
-  // Blasts at least this big (radius, elmos) also throw a shock ring.
-  const RING_MIN_AOE = 120;
+  // Blasts at least this big (radius, elmos) also draw their damage front:
+  // the widget's own floor for a W blast, so every recorded blast has one
+  // and only the small shell impacts at track ends go without.
+  const RING_MIN_AOE = 64;
+  // The ring holds at the radius for at least this many frames once the
+  // front gets there, so a fast front still reads as a circle.
+  const RING_HOLD = 8;
 
   // Palettes: [core, body, rim] as r,g,b. Fire for an ordinary blast; EMP is
   // blue-white and does no fire at all; a Juno pulse is BAR's green; a nuke
@@ -73,11 +82,16 @@
     else if (wcls === CLASS_EMP || (w && w.paralyzer)) pal = EMP;
     else if (wcls === CLASS_NUKE || (w && w.cp && w.cp.nuclear)) { pal = NUKE; lifeMul = 1.5; }
     else if (wcls === CLASS_ANTINUKE) pal = PUFF;
-    const life = Math.min(LIFE_MAX, Math.max(LIFE_MIN, (LIFE_BASE + aoe * LIFE_PER_ELMO) * lifeMul));
+    // Frames the damage front takes to reach the radius: 0 when the weapon
+    // states no speed (the engine then damages the whole radius at once).
+    const front = w && w.expSpeed > 0 ? w.expSpeed : 0;
+    const travel = front ? aoe / front : 0;
+    const life = Math.max(travel + RING_HOLD,
+      Math.min(LIFE_MAX, Math.max(LIFE_MIN, (LIFE_BASE + aoe * LIFE_PER_ELMO) * lifeMul)));
     // How long the fireball takes to reach full size: the engine's own blast
     // wave (explosionSpeed, elmos per frame), bounded to stay readable.
-    const grow = w && w.expSpeed > 0 ? Math.min(life * 0.5, Math.max(2, aoe / w.expSpeed)) : Math.min(4, life * 0.3);
-    return { aoe, pal, life, grow, ring: aoe >= RING_MIN_AOE };
+    const grow = front ? Math.min(life * 0.5, Math.max(2, travel)) : Math.min(4, life * 0.3);
+    return { aoe, pal, life, grow, front, travel, ring: aoe >= RING_MIN_AOE };
   }
 
   function classCode(name) {
@@ -113,25 +127,38 @@
     return { list: out, maxLife };
   }
 
-  // stage is one explosion's state at age frames after it went off, or null
-  // when it is not on screen (not yet, or over). Pure, so it is what the
-  // tests pin: r is the fireball's radius in elmos, a its opacity; ringR and
-  // ringA the shock ring's.
-  function stage(e, age) {
-    if (age < 0 || age >= e.life) return null;
-    const t = age / e.life;
+  // stage is one explosion's state at age GAME frames after it went off,
+  // or null when it is not on screen (not yet, or over). k is the playback
+  // stretch (stretchFor): it slows the fireball's fade so it stays visible at
+  // speed, but never the damage front, which runs on game time because it
+  // is a fact about the game. Pure, so it is what the tests pin: r is the
+  // fireball's radius in elmos, a its opacity; ringR and ringA the ring's.
+  function stage(e, age, k) {
+    k = k || 1;
+    const span = Math.max(e.life * k, e.ring ? (e.travel || 0) + RING_HOLD * k : 0);
+    if (age < 0 || age >= span) return null;
+    const fage = age / k;
+    if (fage >= e.life && !e.ring) return null;
+    const t = Math.min(1, fage / e.life);
     const g = Math.min(1, age / e.grow);
     const r = e.aoe * (0.3 + 0.7 * (1 - (1 - g) * (1 - g))); // ease out
     // Bright for the first instant, then a smooth fade.
     const a = Math.pow(1 - t, 1.6);
-    const s = { r, a, ringR: 0, ringA: 0 };
+    const s = { r, a: fage < e.life ? a : 0, ringR: 0, ringA: 0 };
     if (e.ring) {
-      s.ringR = e.aoe * (0.9 + 0.8 * t);
-      s.ringA = 0.55 * (1 - t);
+      const travel = e.travel || 0;
+      if (age < travel) {
+        s.ringR = e.front * age;
+        s.ringA = RING_ALPHA;
+      } else {
+        s.ringR = e.aoe;
+        s.ringA = RING_ALPHA * (1 - (age - travel) / (span - travel));
+      }
     }
     return s;
   }
 
+  const RING_ALPHA = 0.7;
   const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a.toFixed(3)})`;
 
   // first returns the index of the first explosion at or after frame f.
@@ -204,16 +231,19 @@
     // Newest first, so the cap drops the oldest.
     for (let i = first(list, simFrame + 1e-9) - 1; i >= lo && n < MAX_FIREBALLS; i--) {
       const e = list[i];
-      const s = stage(e, (simFrame - e.f) / k);
+      const s = stage(e, simFrame - e.f, k);
       if (!s) continue;
       const sx = view.w / 2 + (e.x - view.cx) * view.scale;
       const sy = view.h / 2 + (e.z - view.cz) * view.scale;
       const r = Math.max(MIN_RADIUS_PX, s.r * view.scale);
-      const reach = Math.max(r, s.ringR * view.scale) + 2;
+      const ringPx = s.ringR * view.scale;
+      const reach = Math.max(r, ringPx) + 2;
       if (sx + reach < 0 || sy + reach < 0 || sx - reach > view.w || sy - reach > view.h) continue;
       n++;
       const sprite = spriteFor(e.pal);
-      if (sprite) {
+      if (s.a <= 0) {
+        // fireball over, the ring is still holding at the radius
+      } else if (sprite) {
         ctx.globalAlpha = s.a;
         ctx.drawImage(sprite, sx - r, sy - r, 2 * r, 2 * r);
         ctx.globalAlpha = 1;
@@ -226,9 +256,9 @@
       if (s.ringA > 0 && rings < MAX_RINGS) {
         rings++;
         ctx.strokeStyle = rgba(e.pal[1], s.ringA);
-        ctx.lineWidth = Math.max(1, Math.min(3, r * 0.04));
+        ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.arc(sx, sy, Math.max(r, s.ringR * view.scale), 0, Math.PI * 2);
+        ctx.arc(sx, sy, Math.max(1, ringPx), 0, Math.PI * 2);
         ctx.stroke();
       }
     }
