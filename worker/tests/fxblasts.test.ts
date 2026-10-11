@@ -81,3 +81,19 @@ test('draw culls off-screen blasts and draws live ones at fractional frames', ()
   assert.equal(Fx.draw(ctx, fx, 100 + fx.maxLife + 1, view), 0);
   assert.ok(calls.includes('fill'));
 });
+
+test('fast playback stretches a blast so it stays visible', () => {
+  assert.equal(Fx.stretchFor(1), 1);
+  assert.equal(Fx.stretchFor(2), 1);
+  assert.equal(Fx.stretchFor(8), 4);
+  assert.equal(Fx.stretchFor(64), 6);
+  const ctx: any = new Proxy({}, {
+    get(_t, k) { return k === 'createRadialGradient' ? () => ({ addColorStop() {} }) : () => {}; },
+    set() { return true; },
+  });
+  const fx = Fx.collect([{ f: 100, weapon: 3, x: 0, z: 0, team: 0, kind: 1 }], [], weapons);
+  const late = 100 + fx.list[0].life + 5;
+  const view = { cx: 0, cz: 0, scale: 0.1, w: 800, h: 600 };
+  assert.equal(Fx.draw(ctx, fx, late, view), 0);
+  assert.equal(Fx.draw(ctx, fx, late, { ...view, stretch: 4 }), 1);
+});

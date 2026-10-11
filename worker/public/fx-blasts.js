@@ -37,6 +37,14 @@
   // of its size, so a fusion's blast lingers and a rocket's pops. Clamped so
   // a modded million-damage warhead does not hang over the map for a minute.
   const LIFE_BASE = 12, LIFE_PER_ELMO = 0.06, LIFE_MIN = 14, LIFE_MAX = 90;
+  // Playback speed stretches a blast's life, or at 16x a fusion going up is
+  // three animation frames: gone before the eye finds it. Half the speed,
+  // never below 1 (1x and 2x are real time) and at most STRETCH_MAX, so at
+  // 16x a blast stays up ~0.6 s of wall time. It follows the speed SETTING,
+  // not whether the replay is playing, so pausing does not make what was
+  // just on screen vanish.
+  const STRETCH_MAX = 6;
+  function stretchFor(speed) { return Math.min(STRETCH_MAX, Math.max(1, (speed || 1) / 2)); }
   // Blasts at least this big (radius, elmos) also throw a shock ring.
   const RING_MIN_AOE = 120;
 
@@ -137,13 +145,15 @@
   }
 
   // draw paints every explosion live at simFrame (fractional) onto ctx.
-  // view = {cx, cz, scale, w, h}: the world point at the screen's centre,
-  // px per elmo, and the viewport in CSS px. Returns how many it drew, so
+  // view = {cx, cz, scale, w, h, stretch}: the world point at the screen's
+  // centre, px per elmo, the viewport in CSS px, and the life multiplier
+  // (stretchFor). Returns how many it drew, so
   // the caller knows to keep animating while paused.
   function draw(ctx, fx, simFrame, view) {
     if (!fx || !fx.list.length) return 0;
     const list = fx.list;
-    let i = first(list, simFrame - fx.maxLife);
+    const k = view.stretch || 1;
+    let i = first(list, simFrame - fx.maxLife * k);
     if (i >= list.length || list[i].f > simFrame) return 0;
     let n = 0;
     ctx.save();
@@ -151,7 +161,7 @@
     for (; i < list.length; i++) {
       const e = list[i];
       if (e.f > simFrame) break;
-      const s = stage(e, simFrame - e.f);
+      const s = stage(e, (simFrame - e.f) / k);
       if (!s) continue;
       const sx = view.w / 2 + (e.x - view.cx) * view.scale;
       const sy = view.h / 2 + (e.z - view.cz) * view.scale;
@@ -181,7 +191,7 @@
     return n;
   }
 
-  const api = { look, collect, stage, draw, first, DEFAULT_AOE, MIN_RADIUS_PX, LIFE_MIN, LIFE_MAX };
+  const api = { look, collect, stage, draw, first, stretchFor, DEFAULT_AOE, MIN_RADIUS_PX, LIFE_MIN, LIFE_MAX };
   root.FxBlasts = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
@@ -190,6 +200,13 @@
 // on the overlay canvas c. The explosion list is built on first use and
 // cached on the identity of the replay's blast rows, so a new replay (or the
 // effect records arriving) rebuilds it.
+// blastSpeed is the playback speed in force: the clip window's own control
+// while a clip plays, the main one otherwise (as the play loop reads them).
+function blastSpeed() {
+  const el = document.getElementById(clip ? 'clipspeed' : 'speed');
+  return el ? +el.value || 1 : 1;
+}
+
 let fxBlastsCache = null; // {blasts, projectiles, fx}
 function drawBlasts(c, simFrame, u) {
   if (!data) return;
@@ -198,9 +215,9 @@ function drawBlasts(c, simFrame, u) {
     fxBlastsCache = { blasts, projectiles, fx: FxBlasts.collect(blasts, projectiles, data.weapons) };
   }
   const n = FxBlasts.draw(c, fxBlastsCache.fx, simFrame,
-    { cx: center.x, cz: center.z, scale, w: viewW, h: viewH });
+    { cx: center.x, cz: center.z, scale, w: viewW, h: viewH, stretch: FxBlasts.stretchFor(blastSpeed()) });
   // Paused or scrubbed onto a blast the picture is already final (it is a
-  // pure function of the frame); only playback moves it on, and playback
-  // already redraws every tick. Nothing to schedule.
+  // pure function of the frame and the speed setting); only playback moves
+  // it on, and playback already redraws every tick. Nothing to schedule.
   return n;
 }
