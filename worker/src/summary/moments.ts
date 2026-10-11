@@ -302,6 +302,22 @@ export function sideLosses(ins: Insights, f0: number, f1: number, area?: { x: nu
   }));
 }
 
+/** deathSpan is the first and last frame of the deaths sideLosses counts
+ * inside [f0, f1], or null when there are none. */
+function deathSpan(ins: Insights, f0: number, f1: number): [number, number] | null {
+  const wiped = wipedOf(ins);
+  const sideOf = sideOfTeam(ins);
+  const d = ins.deaths;
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (let i = 0; i < d.f.length; i++) {
+    if (d.f[i] < f0 || d.f[i] > f1 || wiped(i) || (sideOf.get(d.team[i]) ?? -1) < 0) continue;
+    lo = Math.min(lo, d.f[i]);
+    hi = Math.max(hi, d.f[i]);
+  }
+  return lo <= hi ? [lo, hi] : null;
+}
+
 /** lossText is "12 units (2.1k metal): 3 Thud, 2 Pawn", or "nothing". */
 export function lossText(l: SideLoss, priced: boolean): string {
   if (l.n === 0) return "nothing";
@@ -337,7 +353,11 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
 
   // A player leaving takes their whole army off the board, which is the
   // shift whatever else happened in the window.
-  const out = knockouts(ins).filter((k) => k.side === lose && k.f >= f0 && k.f <= f1);
+  // A player who HANDED their units to a teammate took nothing off the
+  // board, so their leaving is said beside the story rather than as it.
+  const gone = knockouts(ins).filter((k) => k.side === lose && k.f >= f0 && k.f <= f1);
+  const out = gone.filter((k) => !k.handoff);
+  const handed = gone.filter((k) => k.handoff);
   let title: string;
   let focus: Focus | null;
   // A fight's own losses, when it is told as one event (see below).
@@ -420,7 +440,10 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     // army was bigger, or what it lost mattered less): then the title states
     // the trade rather than calling it a win the numbers beside it deny.
     const unit = (v: number) => (priced ? `${fmtMetal(v)} metal` : `${v} units`);
-    if (drop) {
+    if (b && ownBlast(b) === lose) {
+      // Its own blasts or allies' fire, not the other side, did most of it.
+      title = ownBlastTitle(ins, b, lose);
+    } else if (drop) {
       focus = { f: f0, f1 };
       title = `${L} loses ${Math.round(drop.share * 100)}% of its army${drop.mostly ? `, mostly ${drop.mostly}` : ""}`;
     } else title = worth(lw) === 0 || worth(lo) >= 2 * worth(lw) ? `${W} wins the fight${at(focus)}`
@@ -441,6 +464,14 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     : local
       ? `There, ${fmtClock(focus!.f / SIM_FPS)}–${fmtClock((focus!.f1 ?? focus!.f) / SIM_FPS)}: ${said || "nothing was lost"}.`
       : said ? `${said}.` : "";
+  if (handed.length) detail += ` Meanwhile ${handed.map((k) => k.label).join("; ")}.`;
+  // Losses counted over the whole window are a span, and the clip marks
+  // that span rather than one instant (an elimination, a commander's death)
+  // in it: from the first death counted to the last.
+  if (!local && !growth && said && focus && focus.f1 === undefined) {
+    const span = deathSpan(ins, f0, f1);
+    if (span && span[1] - span[0] >= SIM_FPS) focus = { ...focus, f: Math.min(focus.f, span[0]), f1: Math.max(focus.f, span[1]) };
+  }
   if (whole) detail += ` Part of a fight from ${fmtClock(whole.f0 / SIM_FPS)} to ${fmtClock(whole.f1 / SIM_FPS)}.`;
   let elsewhere: number[] | null = null;
   if (local && priced) {
@@ -676,8 +707,55 @@ export interface GapBattle {
   side: number;
   /** How far the line moved toward side across the battle (may be <= 0). */
   delta: number;
-  /** "decisive" when the other side lost twice as much or more. */
-  verdict: "decisive" | "win" | "even";
+  /** "decisive" when the other side lost twice as much or more; "blast"
+   * when most of what the loser lost there was its own side's doing. */
+  verdict: "decisive" | "win" | "even" | "blast";
+  /** The title of a "blast" battle (ownBlastTitle). */
+  blast?: string;
+}
+
+/** A side's losses in a battle are its own doing when its own side
+ * destroyed at least this share of them... */
+const OWN_SHARE = 0.5;
+/** ...and at least this much metal. */
+const OWN_MIN = 1000;
+
+/** ownBlast is the side of a battle whose losses were mostly its own side's
+ * doing — a chain of power plants going up, an ally shelling it — or -1. A
+ * battle like that is not won by the other side, whatever it lost. */
+export function ownBlast(b: Battle | undefined): number {
+  if (!b) return -1;
+  let best = -1;
+  b.lost.forEach((l, s) => {
+    const own = l?.own ?? 0;
+    if (own >= OWN_MIN && own >= OWN_SHARE * l.metal && (best < 0 || own > (b.lost[best].own ?? 0))) best = s;
+  });
+  return best;
+}
+
+/** ownBlastTitle says what blew up and, when an enemy's kill set it off,
+ * whose: "Blue team's Advanced Fusion Reactors blow up, set off by
+ * [MANTA]'s Basilica". Losses to allies' fire rather than to blasts read
+ * "Blue team loses 18.9k metal to its own side's fire". */
+export function ownBlastTitle(ins: Insights, b: Battle, side: number): string {
+  const l = b.lost[side];
+  const S = sideName(ins, side);
+  const def = l.ownDef !== undefined ? ins.defs[String(l.ownDef)] : undefined;
+  const name = def?.human || def?.name;
+  const n = l.units?.find((u) => u.def === l.ownDef)?.n ?? 0;
+  let title = def?.power && name
+    ? `${possessive(S)} ${n > 1 ? plural(name) : name} ${n > 1 ? "blow" : "blows"} up`
+    : `${S} loses ${fmtMetal(l.own ?? 0)} metal to its own side's fire`;
+  if (l.trigger) {
+    const who = ins.teams.find((t) => t.team === l.trigger![0])?.player || `Team ${l.trigger[0]}`;
+    const td = ins.defs[String(l.trigger[1])];
+    title += `, set off by ${possessive(who)} ${td?.human || td?.name || "unit"}`;
+  }
+  return title;
+}
+
+function plural(name: string): string {
+  return /(s|x|ch|sh)$/.test(name) ? name + "es" : name + "s";
 }
 
 /** A stretch of the game this long with nothing in the swing list is a gap
@@ -825,8 +903,10 @@ export function gapBattles(ins: Insights, moments: Moment[], stories: MomentStor
     const side = Math.abs(a - c) <= 0.1 * Math.max(a, c) ? -1 : a < c ? 0 : 1;
     const lo = Math.min(a, c);
     const hi = Math.max(a, c);
-    const verdict = side < 0 ? "even" : lo === 0 || hi >= 2 * lo ? "decisive" : "win";
+    const blast = ownBlast(b);
+    const verdict = blast >= 0 && blast !== side ? "blast" as const
+      : side < 0 ? "even" as const : lo === 0 || hi >= 2 * lo ? "decisive" as const : "win" as const;
     const move = pAt(b.f1 / SIM_FPS + ins.stepSec) - pAt(b.f0 / SIM_FPS);
-    return { battle: i, side, delta: side === 1 ? -move : move, verdict };
+    return { battle: i, side, delta: side === 1 ? -move : move, verdict, ...(verdict === "blast" ? { blast: ownBlastTitle(ins, b, blast) } : {}) };
   });
 }

@@ -75,6 +75,14 @@ type BattleLoss struct {
 	// Units is every def lost with its count and metal, costliest first, at
 	// most battleUnitDefs: what the page draws as icons.
 	Units []UnitLoss `json:"units,omitempty"`
+	// Own is the metal of these losses that the side's OWN side destroyed:
+	// blasts of its dying units (a chain of power plants going up) and allies'
+	// fire (friendly.go ownFire). OwnDef is the def whose blasts or fire took
+	// the most of it, Trigger the enemy (team, def) whose kill set it off,
+	// when one came just before. Captures that record causes only; Version 7.
+	Own     float64   `json:"own,omitempty"`
+	OwnDef  int32     `json:"ownDef,omitempty"`
+	Trigger *[2]int32 `json:"trigger,omitempty"`
 }
 
 // UnitLoss is how many of one def a side lost in a battle, and their metal.
@@ -102,6 +110,9 @@ type Award struct {
 	F0   int32      `json:"f0,omitempty"`
 	F1   int32      `json:"f1,omitempty"`
 	Path [][3]int32 `json:"path,omitempty"`
+	// Pos is where to look for an award with no route of its own (Friendly
+	// fire: the costliest ally it destroyed). Version 7.
+	Pos *[2]int32 `json:"pos,omitempty"`
 }
 
 const (
@@ -115,6 +126,8 @@ const (
 	battleMinN         = 6                        // deaths for a peak to count as a battle
 	battleMaxN         = 24                       // battles kept (the biggest, then in time order)
 	battleAdvanceGap   = 60                       // seconds between a battle's end and the next start of the same force's push
+	battleAdvanceMax   = 480                      // longest a merged push runs, seconds
+	battleAdvanceR     = 2.0 * battleRadius       // widest a merged push grows, elmos
 	battleAdvanceShare = 0.3                      // share of the metal killed by units killing in both
 	battleTopDefs      = 3                        // costliest defs listed per side
 	blowWindow         = 30 * simFPS              // frames the Biggest blow's losses fall within
@@ -496,7 +509,8 @@ func (p *pass) battles() []Battle {
 		for k := range found {
 			o := &found[k]
 			if nb.F0-o.b.F1 <= binF && o.b.F0-nb.F1 <= binF &&
-				math.Hypot(float64(nb.X-o.b.X), float64(nb.Z-o.b.Z)) <= battleRadius {
+				math.Hypot(float64(nb.X-o.b.X), float64(nb.Z-o.b.Z)) <= battleRadius &&
+				max(nb.F1, o.b.F1)-min(nb.F0, o.b.F0) <= battleAdvanceMax*simFPS {
 				o.members = append(o.members, members...)
 				o.b = p.battleOf(o.members, ns)
 				merged = true
@@ -571,8 +585,17 @@ func (p *pass) mergeAdvances(found []foundBattle, ns int) []foundBattle {
 				if shared(ka, kb, ta) < battleAdvanceShare && shared(kb, ka, tb) < battleAdvanceShare {
 					continue
 				}
+				// A push is bounded: chained merges once grew one "battle" over
+				// 27 minutes of a game and most of the map.
+				if max(a.b.F1, b.b.F1)-a.b.F0 > battleAdvanceMax*simFPS {
+					continue
+				}
 				members := append(append([]int{}, a.members...), b.members...)
-				found[i] = foundBattle{b: p.battleOf(members, ns), members: members}
+				nb := p.battleOf(members, ns)
+				if float64(nb.R) > battleAdvanceR {
+					continue
+				}
+				found[i] = foundBattle{b: nb, members: members}
 				found = append(found[:j], found[j+1:]...)
 				merged = true
 				break
@@ -622,6 +645,7 @@ func (p *pass) battleOf(members []int, ns int) Battle {
 	}
 	bt.X, bt.Z, bt.R = int32(cx), int32(cz), int32(r)
 	bt.Teams = p.battleTeams(members, bt)
+	p.battleOwnFire(members, &bt)
 	for s := range bt.Lost {
 		bt.Lost[s].Metal = round1(bt.Lost[s].Metal)
 		bt.Lost[s].Worth = round1(bt.Lost[s].Worth)
@@ -819,6 +843,9 @@ func (p *pass) awards() []Award {
 		out = append(out, a)
 	}
 	if a, ok := p.idleTransports(); ok {
+		out = append(out, a)
+	}
+	if a, ok := p.friendlyFire(); ok {
 		out = append(out, a)
 	}
 	return out

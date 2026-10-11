@@ -55,6 +55,11 @@ type pass struct {
 	// deathKillerKind is the killer's (team, def), {-1, -1} when none: what
 	// tells one force's advance from two fights (stories.go mergeAdvances).
 	deathKillerKind [][2]int32
+	// deathKillerUnit is the killing unit's id (-1 when none) and
+	// deathWeapon the weapon def of the blow (-1 when none): what tells
+	// friendly fire from a blast with nobody behind it (friendly.go).
+	deathKillerUnit []int32
+	deathWeapon     []int32
 
 	hasCauses bool // some destroyed event names a cause: a re-simulation
 	// selfdArmed is each unit with a self-destruct order standing: the frame
@@ -299,6 +304,12 @@ func (p *pass) event(e snapshot.Event) {
 			killerKind = [2]int32{e.Cause.Team, e.Cause.DefID}
 		}
 		p.deathKillerKind = append(p.deathKillerKind, killerKind)
+		ku, wd := int32(-1), int32(-1)
+		if e.Cause != nil {
+			ku, wd = e.Cause.UnitID, e.Cause.WeaponDef
+		}
+		p.deathKillerUnit = append(p.deathKillerUnit, ku)
+		p.deathWeapon = append(p.deathWeapon, wd)
 		if c := e.Cause; c != nil && cost > 0 {
 			// Credit the killing unit's track with an ENEMY it took down.
 			if kt := p.tracks[c.UnitID]; kt != nil && !kt.dead && kt.def == c.DefID {

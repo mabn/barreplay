@@ -10,7 +10,7 @@ import { clipAround, clipEvent, watcher } from "../watch";
 import { type Award, type Clip, type Insights, type SummaryOptions } from "../types";
 
 const ICONS: Record<string, string> = {
-  immortal: "🛡", marathon: "🏃", tourist: "🧭", closecall: "❤", healed: "🔧", unfinished: "🏗", costliest: "💸", blow: "💥", idle: "🛬",
+  immortal: "🛡", marathon: "🏃", tourist: "🧭", closecall: "❤", healed: "🔧", unfinished: "🏗", costliest: "💸", blow: "💥", idle: "🛬", friendly: "🎯",
 };
 
 /** where is the award's unit on the map when the moment is its death (the
@@ -18,6 +18,7 @@ const ICONS: Record<string, string> = {
 function whereOf(ins: Insights): (a: Award) => { x?: number; z?: number } {
   const d = ins.deaths;
   return (a) => {
+    if (a.pos) return { x: a.pos[0], z: a.pos[1] };
     for (let i = 0; i < d.f.length; i++) {
       if (d.f[i] === a.f && d.team[i] === a.team && d.def[i] === a.def && d.x[i] >= 0) return { x: d.x[i], z: d.z[i] };
     }
@@ -39,7 +40,7 @@ export function clipOf(a: Award, at: { x?: number; z?: number }, title: string):
     return clipEvent(a.f0, Math.max(a.f1, a.f0 + 1), { ...base, r: 1200 });
   }
   // A fleet nobody used: the stretch it was built over, following the last.
-  if (a.key === "idle" && a.f0 !== undefined && a.f1 !== undefined) {
+  if ((a.key === "idle" || a.key === "friendly") && a.f0 !== undefined && a.f1 !== undefined) {
     return clipEvent(a.f0, Math.max(a.f1, a.f0 + 1), base);
   }
   return clipAround(a.f, base);

@@ -255,7 +255,7 @@ function listEntries(ins: Insights, moments: Moment[], stories: MomentStory[], g
   for (const gb of gaps) {
     const b = ins.battles[gb.battle];
     const W = gb.side >= 0 ? sideName(ins, gb.side) : "";
-    const title = gb.verdict === "even" ? "Even trade in battle" : `${W} ${gb.verdict === "decisive" ? "decisively wins" : "wins"} battle`;
+    const title = gb.verdict === "blast" ? gb.blast! : gb.verdict === "even" ? "Even trade in battle" : `${W} ${gb.verdict === "decisive" ? "decisively wins" : "wins"} battle`;
     const moved = gb.side >= 0 && Math.round(gb.delta * 100) >= 1;
     const priced = ins.costCoverage === "full" || b.lost.some((l) => l.metal > 0);
     const lostText = (sd: number) => {

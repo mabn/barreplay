@@ -141,7 +141,7 @@ const VERSION_FEATURES: [number, string][] = [
   [4, "reclaims left out of losses"],
   [5, "self-destructs"],
   [6, "fitted win odds"],
-  [7, "game end at the resign, story battles"],
+  [7, "game end at the resign, story battles, friendly fire"],
 ];
 
 /** The newest insights version the page knows (index.ts INSIGHTS_VERSIONS[0]). */

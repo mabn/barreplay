@@ -146,7 +146,10 @@ export interface Battle {
   /** Indexed like sides. */
   /** worth: the metal with power plants at POWER_WORTH times theirs, what
    * a winner is decided by (version 7+; absent = metal). */
-  lost: { n: number; metal: number; worth?: number; top: number[]; units?: UnitLoss[] }[];
+  /** own: the metal of it the side's OWN side destroyed (its dying units'
+   * blasts, allies' fire), ownDef the def that did most of it, trigger the
+   * enemy [team, def] whose kill set it off (version 7+, causes only). */
+  lost: { n: number; metal: number; worth?: number; top: number[]; units?: UnitLoss[]; own?: number; ownDef?: number; trigger?: [number, number] }[];
   /** Who took part, by team (version 4+). */
   teams?: BattleTeam[];
 }
@@ -210,6 +213,9 @@ export interface Award {
   f0?: number;
   f1?: number;
   path?: [number, number, number][];
+  /** Where to look when the award has no unit route (Friendly fire: the
+   * costliest ally it destroyed), [x, z]. Version 7. */
+  pos?: [number, number];
 }
 
 /** Columnar: the i-th entry of every array describes one death. */

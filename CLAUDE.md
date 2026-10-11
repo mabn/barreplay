@@ -523,7 +523,11 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           nothing owned after) is out too, with Elimination.To naming the
                           recipient (withHandoffs; v7): the engine destroys nothing and records
                           no teamdied, so neither rule above sees it. The page says "X leaves,
-                          handing their units to Y".
+                          handing their units to Y". A player who RESIGNS is recorded dead
+                          (teamdied) and THEN has their units shared out: a give burst within
+                          handoffNear = 60 s of a recorded elimination gives it the same To. A
+                          handoff is never a swing's story (the army stayed on the board,
+                          losses.ts Knockout.handoff); the story says "Meanwhile X leaves...".
                           THE SUMMARY ENDS WHERE THE GAME WAS DECIDED (gameend.go): once every
                           side but one is out (a resign vote, or the last commanders dying),
                           Compute cuts the input at the start of the run of eliminations that
@@ -628,6 +632,27 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           carry is read off positions (carryFrame: a same-team ground unit
                           within 32 elmos in two consecutive samples while the transport moved
                           >= 64). Unit/Path are the last one built, F0/F1 the build span.
+                          OWN BLASTS AND FRIENDLY FIRE (friendly.go; captures with causes only):
+                          the engine credits a dying unit's explosion (a chain of fusions) to
+                          the exploding unit or to nobody, exactly like a weapon kill. A
+                          battle's BattleLoss.Own is the metal of a side's losses its OWN side
+                          destroyed (ownFire: killer on the same side, or an explosion with no
+                          killer named), OwnDef the def that did most of it, Trigger the enemy
+                          (team, def) whose kill came at most 5 s before the first of them. When
+                          Own is >= 50% and >= 1000 metal of the side that lost more, nobody
+                          "wins" the battle (moments.ts ownBlast): it reads "Blue team's
+                          Advanced Fusion Reactors blow up, set off by [MANTA]'s Basilica" in
+                          the swing list, the battle tooltip and a swing story, with no
+                          "ahead" box. FRIENDLY FIRE (key "friendly") is the LIVING unit (it
+                          did not die within 3 s: that would be its blast) that destroyed the
+                          most metal of ANOTHER team of its side within 10 s, at least 2000;
+                          Award.Pos is where its costliest victim stood.
+                          Merged battles (the abutting-peak rule and mergeAdvances) are capped
+                          at battleAdvanceMax = 8 min and mergeAdvances at a 3000-elmo radius:
+                          chained merges grew one 8v8's centre into a 27-minute "battle".
+                          A swing story that counts losses over its whole window (an
+                          elimination, a commander's death, one big loss) carries that span
+                          as its focus (deathSpan), so the clip marks a band, not an instant.
                           POWER PLANTS COUNT 2.5x (defs.go powerWorth, isPowerPlant: wind,
                           tidal, solar, fusion, geo by name; storage shares their UnitGroup)
                           WHEREVER A BATTLE'S WINNER IS DECIDED — losing a fusion loses its
@@ -889,7 +914,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           there places each side's TOTAL on the log axis and splits it by
                           SHARE — stacking by value through a log would hand the bottom band
                           most of the height whatever its size. The BATTLES
-                          section (once "Map story") numbers its battles in the order they happened, on the map and
+                          section (once "Map story"; no army-centre lines since v7) numbers its battles in the order they happened, on the map and
                           in a one-line-per-battle list (losses either side of a centre line,
                           square-root scaled), one selection shared by both — a click on either
                           selects AND plays the battle's clip; a picked battle
