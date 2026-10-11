@@ -17,7 +17,7 @@ go build ./cmd/barreplay        # build the capture CLI -> ./barreplay
 go build ./cmd/pack             # build the .brepstream -> .brp converter -> ./pack
 go build ./cmd/barreplay-static # build the .brp -> static-hosting bundle packer (for worker/)
 go build ./cmd/insights         # build the game-summary backfill CLI (one replay, or -all)
-go build ./cmd/winfit           # build the win-probability model fitter (reads insights files; -categories fits lava / large ranked / ranked / unranked separately)
+go build ./cmd/winfit           # build the win-probability model fitter (reads insights files; -categories fits lava / large ranked / ranked / unranked separately; -energy compares army+energy and army+metal+energy models with the metal one)
 go build ./cmd/bringest         # build the drag&drop upload daemon (polls the worker's job queue)
 go run ./cmd/insights <gameId|link|rid>   # compute a PUBLISHED replay's game summary and publish replays/<rid>.insights<N>.json beside it (-upload r2 default, local, or empty + -out to just write it; -all walks the catalog, -from/-to narrow it to games started in a date range (YYYY-MM-DD or unix seconds); -j N replays at once, default 4; -force recomputes; a local .brp/.brepstream with -rid gives full costs; everything read from the real bucket is kept under ~/.cache/barreplay/<bucket host>/ so a re-run downloads only what is new — -cache DIR moves it, -cache= turns it off)
 go test ./...                   # all unit tests (no engine required)

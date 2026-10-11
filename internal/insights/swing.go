@@ -86,26 +86,46 @@ func SwingFeatures(s Series) [][swingFeatures]float64 {
 		return nil
 	}
 	n := len(s.T)
+	inc := IncomeFeatures(s.MetalIncome, n, swingIncomeK, swingCumK)
 	out := make([][swingFeatures]float64, n)
+	for i := 0; i < n; i++ {
+		a0, a1 := at(s.Army[0], i), at(s.Army[1], i)
+		out[i] = [swingFeatures]float64{
+			math.Log((a0 + swingArmyK) / (a1 + swingArmyK)),
+			inc[i][0],
+			inc[i][1],
+		}
+	}
+	return out
+}
+
+// IncomeFeatures is the income half of SwingFeatures for any resource's
+// [side][step] income series: per step, the log ratio of income over the last
+// minute (smoothed by incK, in the resource per second) and of income
+// accumulated so far (smoothed by cumK). cmd/winfit applies it to energy too,
+// to compare the two resources as predictors.
+func IncomeFeatures(income [][]float64, n int, incK, cumK float64) [][2]float64 {
+	if len(income) != 2 {
+		return nil
+	}
+	out := make([][2]float64, n)
 	var cum [2]float64
 	for i := 0; i < n; i++ {
-		var army, inc [2]float64
+		var inc [2]float64
 		for side := 0; side < 2; side++ {
-			army[side] = at(s.Army[side], i)
-			cum[side] += at(s.MetalIncome[side], i) * StepSec
+			cum[side] += at(income[side], i) * StepSec
 			lo := i - swingIncomeSteps + 1
 			if lo < 0 {
 				lo = 0
 			}
 			for j := lo; j <= i; j++ {
-				inc[side] += at(s.MetalIncome[side], j)
+				inc[side] += at(income[side], j)
 			}
 			inc[side] /= float64(i - lo + 1)
 		}
-		out[i] = [swingFeatures]float64{
-			math.Log((army[0] + swingArmyK) / (army[1] + swingArmyK)),
-			math.Log((inc[0] + swingIncomeK) / (inc[1] + swingIncomeK)),
-			math.Log((cum[0] + swingCumK) / (cum[1] + swingCumK)),
+		out[i] = [2]float64{
+			math.Log((inc[0] + incK) / (inc[1] + incK)),
+			math.Log((cum[0] + cumK) / (cum[1] + cumK)),
 		}
 	}
 	return out

@@ -27,6 +27,16 @@
 // rerun asks the API only about games it has not seen:
 //
 //	go run ./cmd/winfit -categories ./ins
+//
+// -energy asks whether ENERGY income predicts the winner better than metal
+// income. It reads the same files (every insights file already carries each
+// side's energy income), builds the model's income features from energy
+// instead of metal, and fits three models on the same games: the live one
+// (army + metal), army + energy, and army + metal + energy, printing them
+// side by side. Nothing it fits changes the live model:
+//
+//	go run ./cmd/winfit -energy ./ins
+//	go run ./cmd/winfit -energy -categories ./ins
 package main
 
 import (
@@ -48,10 +58,39 @@ import (
 	"github.com/mabn/barreplay/internal/insights"
 )
 
-const nf = 3 // len(insights.WinModel.Coef)
+// A sample carries every candidate feature; a model picks some of them.
+const (
+	fArmy      = iota // log ratio of army value
+	fMetalInc         // ... of metal income over the last minute
+	fMetalCum         // ... of metal income so far
+	fEnergyInc        // ... of energy income over the last minute
+	fEnergyCum        // ... of energy income so far
+	nAll
+)
+
+// The energy features' smoothing constants. Metal's are 3 metal/s and 300
+// metal (insights.swingIncomeK/swingCumK); BAR economies run at roughly
+// twenty energy to the metal, so energy's are twenty times those.
+const (
+	energyIncK = 60
+	energyCumK = 6000
+)
+
+// model is a choice of features; its coefficients pair with them in order.
+type model struct {
+	name  string
+	feats []int
+	label string // what the coefficients are, for the tables' header
+}
+
+var (
+	metalModel  = model{"metal", []int{fArmy, fMetalInc, fMetalCum}, "army/inc/cum"}
+	energyModel = model{"energy", []int{fArmy, fEnergyInc, fEnergyCum}, "army/einc/ecum"}
+	bothModel   = model{"metal+energy", []int{fArmy, fMetalInc, fMetalCum, fEnergyInc, fEnergyCum}, "army/inc/cum/einc/ecum"}
+)
 
 type sample struct {
-	f    [nf]float64
+	f    [nAll]float64
 	y    float64
 	w    float64
 	frac float64 // how far through its game, 0..1
@@ -71,6 +110,7 @@ func main() {
 	cats := flag.Bool("categories", false, "also fit each game category (lava / large ranked / ranked / unranked) on its own, from the BAR API's replay details")
 	apiBase := flag.String("api", "https://api.bar-rts.com", "BAR API base URL (-categories)")
 	cacheDir := flag.String("cache", "auto", "where -categories keeps fetched details (auto = the user cache dir; empty = no cache)")
+	energy := flag.Bool("energy", false, "also fit models on energy income (army+energy, army+metal+energy) and compare them with the metal model on the same games")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: winfit [flags] <insights file or dir> [...]\n\n")
 		flag.PrintDefaults()
@@ -120,11 +160,18 @@ func main() {
 		fmt.Fprintln(os.Stderr, "winfit: fewer than 20 games; a fit would describe these games, not BAR")
 		os.Exit(1)
 	}
-	fit := newton(samples, *l2)
-	report("current", insights.WinModel.Coef, samples)
-	report("fitted", fit, samples)
+	current := insights.WinModel.Coef[:]
+	fit := newton(metalModel, samples, *l2)
+	report("current", metalModel, current, samples)
+	report("fitted", metalModel, fit, samples)
 	fmt.Printf("\n// Paste into internal/insights/swing.go:\n")
 	fmt.Printf("\tCoef:   [swingFeatures]float64{%.3f, %.3f, %.3f},\n\tFitted: true,\n\tGames:  %d,\n", fit[0], fit[1], fit[2], games)
+	var extra []fitted
+	if *energy {
+		extra = []fitted{{energyModel, newton(energyModel, samples, *l2)}, {bothModel, newton(bothModel, samples, *l2)}}
+		fmt.Printf("\n== metal vs energy income, fitted on the same %d games (log loss / accuracy; all in-sample) ==\n", games)
+		table(append([]row{{"current", metalModel, current}, {"metal fit", metalModel, fit}}, fitRows(extra, " fit")...), samples)
+	}
 	if *cats {
 		dir := *cacheDir
 		if dir == "auto" {
@@ -135,7 +182,7 @@ func main() {
 		}
 		f := &detailFetcher{base: strings.TrimRight(*apiBase, "/"), dir: dir, http: &http.Client{Timeout: 30 * time.Second}}
 		byCat := categorize(all, f)
-		reportCategories(byCat, fit, *l2)
+		reportCategories(byCat, fit, extra, *l2)
 	}
 }
 
@@ -245,7 +292,11 @@ func decodeDetail(b []byte) (*gamecat.Detail, error) {
 // reportCategories fits each category with enough games on its own and
 // compares, on that category's games, the current weights, the all-games fit
 // and the category's own fit.
-func reportCategories(byCat map[gamecat.Category][]game, overall [nf]float64, l2 float64) {
+//
+// extra are the -energy models' all-games fits: each gets the same pair of
+// rows, its all-games fit and its own fit on the category.
+func reportCategories(byCat map[gamecat.Category][]game, overall []float64, extra []fitted, l2 float64) {
+	current := insights.WinModel.Coef[:]
 	fmt.Printf("\n== per category (log loss / accuracy on the category's own games; own fit is in-sample) ==\n")
 	for _, c := range append(append([]gamecat.Category{}, gamecat.All...), unknown) {
 		gs := byCat[c]
@@ -257,26 +308,56 @@ func reportCategories(byCat map[gamecat.Category][]game, overall [nf]float64, l2
 			ss = append(ss, g.ss...)
 		}
 		fmt.Printf("\n%s: %d games\n", c, len(gs))
+		rows := []row{{"current", metalModel, current}, {"all-games fit", metalModel, overall}}
 		if len(gs) < minGames {
 			fmt.Printf("  too few for a fit of its own\n")
-			table([]row{{"current", insights.WinModel.Coef}, {"all-games fit", overall}}, ss)
+			table(append(rows, fitRows(extra, " all")...), ss)
 			continue
 		}
-		own := newton(ss, l2)
-		table([]row{{"current", insights.WinModel.Coef}, {"all-games fit", overall}, {"own fit", own}}, ss)
+		rows = append(rows, row{"own fit", metalModel, newton(metalModel, ss, l2)})
+		for _, e := range extra {
+			rows = append(rows, row{e.m.name + " all", e.m, e.c}, row{e.m.name + " own", e.m, newton(e.m, ss, l2)})
+		}
+		table(rows, ss)
 	}
+}
+
+type fitted struct {
+	m model
+	c []float64
+}
+
+func fitRows(fs []fitted, suffix string) []row {
+	var out []row
+	for _, f := range fs {
+		out = append(out, row{f.m.name + suffix, f.m, f.c})
+	}
+	return out
 }
 
 type row struct {
 	name string
-	c    [nf]float64
+	m    model
+	c    []float64
 }
 
 func table(rows []row, ss []sample) {
-	fmt.Printf("  %-14s %-20s %-14s %-14s %-14s %-14s %s\n", "", "coef army/inc/cum", "all steps", "at 25%", "at 50%", "at 75%", "at 90%")
+	// The coefficient column is as wide as the longest model's.
+	cw, label := 20, "coef "+rows[0].m.label
 	for _, r := range rows {
-		m := measure(r.c, ss)
-		fmt.Printf("  %-14s %-20s", r.name, fmt.Sprintf("%.2f %.2f %.2f", r.c[0], r.c[1], r.c[2]))
+		if r.m.label != rows[0].m.label {
+			label = "coefficients"
+		}
+		cw = max(cw, 5*len(r.c)+2)
+	}
+	fmt.Printf("  %-18s %-*s %-14s %-14s %-14s %-14s %s\n", "", cw, label, "all steps", "at 25%", "at 50%", "at 75%", "at 90%")
+	for _, r := range rows {
+		m := measure(r.m, r.c, ss)
+		cs := make([]string, len(r.c))
+		for i, c := range r.c {
+			cs[i] = fmt.Sprintf("%.2f", c)
+		}
+		fmt.Printf("  %-18s %-*s", r.name, cw, strings.Join(cs, " "))
 		for _, a := range append([]acc{m.all}, m.at...) {
 			if a.w == 0 {
 				fmt.Printf(" %-14s", "-")
@@ -306,15 +387,24 @@ func load(path string) (string, []sample, bool, error) {
 	if len(feats) < 4 {
 		return "", nil, false, nil
 	}
+	// Energy income is in every insights file the model reads; one with no
+	// energy series reads as even on energy rather than being dropped, so
+	// the metal and energy models always see the same games.
+	energy := insights.IncomeFeatures(ins.Series.EnergyIncome, len(feats), energyIncK, energyCumK)
 	y := 0.0
 	if ins.Winner == 0 {
 		y = 1
 	}
 	w := 1 / float64(len(feats))
 	out := make([]sample, 0, 2*len(feats))
-	for i, f := range feats {
+	for i, mf := range feats {
 		frac := float64(i+1) / float64(len(feats))
-		var m [nf]float64
+		var f [nAll]float64
+		f[fArmy], f[fMetalInc], f[fMetalCum] = mf[0], mf[1], mf[2]
+		if energy != nil {
+			f[fEnergyInc], f[fEnergyCum] = energy[i][0], energy[i][1]
+		}
+		var m [nAll]float64
 		for k := range f {
 			m[k] = -f[k]
 		}
@@ -323,24 +413,38 @@ func load(path string) (string, []sample, bool, error) {
 	return ins.GameID, out, true, nil
 }
 
-func prob(c [nf]float64, f [nf]float64) float64 { return insights.WinProb(c, f) }
+// prob is P(side 0 wins) under model m with coefficients c — the same
+// sigmoid as insights.WinProb, over whichever features m picks.
+func prob(m model, c []float64, f [nAll]float64) float64 {
+	z := 0.0
+	for k, fi := range m.feats {
+		z += c[k] * f[fi]
+	}
+	return 1 / (1 + math.Exp(-z))
+}
 
-// newton minimises sum w*logloss + l2/2*|c|^2.
-func newton(ss []sample, l2 float64) [nf]float64 {
-	var c [nf]float64
+// newton minimises sum w*logloss + l2/2*|c|^2 for model m.
+func newton(m model, ss []sample, l2 float64) []float64 {
+	n := len(m.feats)
+	c := make([]float64, n)
+	x := make([]float64, n)
 	for iter := 0; iter < 50; iter++ {
-		var g [nf]float64
-		var hm [nf][nf]float64
-		for k := 0; k < nf; k++ {
+		g := make([]float64, n)
+		hm := make([][]float64, n)
+		for k := range hm {
+			hm[k] = make([]float64, n)
 			g[k] = l2 * c[k]
 			hm[k][k] = l2
 		}
 		for _, s := range ss {
-			p := prob(c, s.f)
-			for a := 0; a < nf; a++ {
-				g[a] += s.w * (p - s.y) * s.f[a]
-				for b := 0; b < nf; b++ {
-					hm[a][b] += s.w * p * (1 - p) * s.f[a] * s.f[b]
+			p := prob(m, c, s.f)
+			for a, fa := range m.feats {
+				x[a] = s.f[fa]
+			}
+			for a := 0; a < n; a++ {
+				g[a] += s.w * (p - s.y) * x[a]
+				for b := 0; b < n; b++ {
+					hm[a][b] += s.w * p * (1 - p) * x[a] * x[b]
 				}
 			}
 		}
@@ -357,11 +461,13 @@ func newton(ss []sample, l2 float64) [nf]float64 {
 	return c
 }
 
-// solve does Gaussian elimination with partial pivoting on a tiny system.
-func solve(a [nf][nf]float64, b [nf]float64) [nf]float64 {
-	for i := 0; i < nf; i++ {
+// solve does Gaussian elimination with partial pivoting on a tiny system,
+// in place.
+func solve(a [][]float64, b []float64) []float64 {
+	n := len(b)
+	for i := 0; i < n; i++ {
 		p := i
-		for r := i + 1; r < nf; r++ {
+		for r := i + 1; r < n; r++ {
 			if math.Abs(a[r][i]) > math.Abs(a[p][i]) {
 				p = r
 			}
@@ -371,21 +477,21 @@ func solve(a [nf][nf]float64, b [nf]float64) [nf]float64 {
 		if a[i][i] == 0 {
 			continue
 		}
-		for r := i + 1; r < nf; r++ {
+		for r := i + 1; r < n; r++ {
 			f := a[r][i] / a[i][i]
-			for k := i; k < nf; k++ {
+			for k := i; k < n; k++ {
 				a[r][k] -= f * a[i][k]
 			}
 			b[r] -= f * b[i]
 		}
 	}
-	var x [nf]float64
-	for i := nf - 1; i >= 0; i-- {
+	x := make([]float64, n)
+	for i := n - 1; i >= 0; i-- {
 		if a[i][i] == 0 {
 			continue
 		}
 		s := b[i]
-		for k := i + 1; k < nf; k++ {
+		for k := i + 1; k < n; k++ {
 			s -= a[i][k] * x[k]
 		}
 		x[i] = s / a[i][i]
@@ -404,10 +510,10 @@ type metrics struct {
 
 // measure is the log loss and accuracy of c over ss, overall (game-weighted)
 // and near fixed points of a game.
-func measure(c [nf]float64, ss []sample) metrics {
+func measure(md model, c []float64, ss []sample) metrics {
 	m := metrics{at: make([]acc, len(points))}
 	for _, s := range ss {
-		p := math.Min(math.Max(prob(c, s.f), 1e-9), 1-1e-9)
+		p := math.Min(math.Max(prob(md, c, s.f), 1e-9), 1-1e-9)
 		loss := -(s.y*math.Log(p) + (1-s.y)*math.Log(1-p))
 		right := 0.0
 		if (p > 0.5) == (s.y == 1) {
@@ -428,9 +534,9 @@ func measure(c [nf]float64, ss []sample) metrics {
 }
 
 // report prints log loss and accuracy overall and near fixed points of a game.
-func report(name string, c [nf]float64, ss []sample) {
+func report(name string, md model, c []float64, ss []sample) {
 	fmt.Printf("\n%s coefficients %.3f %.3f %.3f\n", name, c[0], c[1], c[2])
-	m := measure(c, ss)
+	m := measure(md, c, ss)
 	fmt.Printf("  all steps: log loss %.3f, accuracy %.1f%%\n", m.all.loss/m.all.w, 100*m.all.right/m.all.w)
 	for i, pt := range points {
 		if m.at[i].w > 0 {
