@@ -42,15 +42,18 @@ type Moment struct {
 // 50% by construction.
 //
 // The coefficients are cmd/winfit's output over published games with a known
-// winner. Until that has run over real games they are hand-set priors (an
-// army twice the size, alone, reads ~70%); Fitted says which.
+// winner (2026-10-11: the games of the 10 days before, Version 6). Income
+// carries the line; army value adds little once income is known. Fitting per
+// category (winfit -categories) made large ranked team games steeper and
+// unranked ones flatter but gained little over this one model.
 var WinModel = struct {
 	Coef   [swingFeatures]float64
 	Fitted bool
 	Games  int // games the fit saw
 }{
-	Coef:   [swingFeatures]float64{1.2, 0.8, 1.5},
-	Fitted: false,
+	Coef:   [swingFeatures]float64{0.840, 3.428, 3.044},
+	Fitted: true,
+	Games:  933,
 }
 
 const (
