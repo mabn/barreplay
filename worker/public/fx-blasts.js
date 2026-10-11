@@ -244,9 +244,10 @@
   const RING_STEPS = 8;
 
   // draw paints every explosion live at simFrame (fractional) onto ctx.
-  // view = {cx, cz, scale, w, h, stretch}: the world point at the screen's
-  // centre, px per elmo, the viewport in CSS px, and the life multiplier
-  // (stretchFor). Returns how many it drew, so
+  // view = {cx, cz, scale, w, h, stretch, ringsOnly}: the world point at the
+  // screen's centre, px per elmo, the viewport in CSS px, the life multiplier
+  // (stretchFor), and whether to leave the fireballs out because fx-ceg.js
+  // is drawing BAR's effects instead. Returns how many it drew, so
   // the caller knows to keep animating while paused.
   function draw(ctx, fx, simFrame, view) {
     if (!fx || !fx.list.length) return 0;
@@ -271,8 +272,9 @@
       if (sx + reach < 0 || sy + reach < 0 || sx - reach > view.w || sy - reach > view.h) continue;
       n++;
       const sprite = spriteFor(e.pal);
-      if (s.a <= 0) {
-        // fireball over, the ring is still holding at the radius
+      if (s.a <= 0 || view.ringsOnly) {
+        // fireball over (the ring is still holding at the radius), or drawn
+        // by fx-ceg.js as BAR's own effect
       } else if (sprite) {
         let g = ctx, q = 1;
         if (r >= LOWRES_MIN_PX) {
@@ -332,14 +334,61 @@ function blastSpeed() {
 }
 
 let fxBlastsCache = null; // {blasts, projectiles, fx}
+
+// BAR's own explosion effects (fx-ceg.js) replace the fireballs wherever they
+// can: WebGL2 on #fxcv + #fxlight and the effect table (fx-cegdata.js, ~70 KB gzipped,
+// loaded on the first replay that has explosions). Until both are there, and
+// on a browser without WebGL2, the fireballs above are drawn instead. The
+// damage-front rings stay either way: they are the engine's damage, which
+// BAR's effects do not show.
+let cegLoad = null; // null | 'loading' | 'ready' | 'failed'
+let cegCache = null; // {blasts, projectiles}: the rows the scene was built from
+let cegLib = null;
+function loadCegData() {
+  if (cegLoad) return;
+  if (globalThis.BAR_CEGS) { cegLoad = 'ready'; return; }
+  const src = window.__FX_CEGDATA_JS__;
+  if (!src || /__ASSET_REV__/.test(src)) { cegLoad = 'failed'; return; }
+  cegLoad = 'loading';
+  const s = document.createElement('script');
+  s.src = src;
+  s.onload = () => { cegLoad = globalThis.BAR_CEGS ? 'ready' : 'failed'; scheduleDraw(); };
+  s.onerror = () => { cegLoad = 'failed'; };
+  document.head.appendChild(s);
+}
+function cegReady() {
+  if (typeof FxCeg === 'undefined' || !FxCeg.init) return false;
+  const cv = document.getElementById('fxcv'), lv = document.getElementById('fxlight');
+  if (!cv || !lv) return false;
+  loadCegData();
+  if (cegLoad !== 'ready' || !FxCeg.init(cv, lv, globalThis.BAR_CEGS.textures)) return false;
+  if (!cegCache || cegCache.blasts !== data.blasts || cegCache.projectiles !== data.projectiles) {
+    cegCache = { blasts: data.blasts, projectiles: data.projectiles };
+    if (!cegLib) cegLib = FxCeg.Library(globalThis.BAR_CEGS);
+    FxCeg.setScene(cegLib, FxCeg.events(data.blasts, data.projectiles, data.weapons));
+  }
+  return true;
+}
+// clearCeg empties the effect layer, for frames that draw no effects.
+function clearCeg() {
+  if (typeof FxCeg !== 'undefined' && FxCeg.clear) FxCeg.clear();
+}
+
 function drawBlasts(c, simFrame, u) {
   if (!data) return;
   const blasts = data.blasts, projectiles = data.projectiles;
   if (!fxBlastsCache || fxBlastsCache.blasts !== blasts || fxBlastsCache.projectiles !== projectiles) {
     fxBlastsCache = { blasts, projectiles, fx: FxBlasts.collect(blasts, projectiles, data.weapons) };
   }
+  const stretch = FxBlasts.stretchFor(blastSpeed());
+  const ceg = cegReady();
+  if (ceg) {
+    // BAR's flashes are short and bright: stretched as far as the rings, a
+    // fusion chain at 16x would white the map out for seconds.
+    FxCeg.render(simFrame, { cx: center.x, cz: center.z, scale, dpr: DPR, w: viewW, h: viewH, stretch: Math.sqrt(stretch) });
+  }
   const n = FxBlasts.draw(c, fxBlastsCache.fx, simFrame,
-    { cx: center.x, cz: center.z, scale, w: viewW, h: viewH, stretch: FxBlasts.stretchFor(blastSpeed()) });
+    { cx: center.x, cz: center.z, scale, w: viewW, h: viewH, stretch, ringsOnly: ceg });
   // Paused or scrubbed onto a blast the picture is already final (it is a
   // pure function of the frame and the speed setting); only playback moves
   // it on, and playback already redraws every tick. Nothing to schedule.

@@ -9,7 +9,7 @@ const SUBRESOURCES = [
   { src: "./public/app.js", name: (rev: string) => `app.${rev}.js` },
   { src: "./public/style.css", name: (rev: string) => `style.${rev}.css` },
   // The effect layers app.js draws through (see "effects" in app.js).
-  ...["fx-projectiles", "fx-beams", "fx-blasts"].map((n) => ({
+  ...["fx-projectiles", "fx-beams", "fx-blasts", "fx-ceg", "fx-cegdata"].map((n) => ({
     src: `./public/${n}.js`, name: (rev: string) => `${n}.${rev}.js`,
   })),
 ];

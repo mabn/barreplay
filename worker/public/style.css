@@ -560,6 +560,10 @@ pre.sizereport {
 canvas { display: block; width: 100%; height: 100%; background: #0c0f13; cursor: crosshair; }
 /* WebGL icon overlay: sits on the 2D base canvas; input goes to #cv below. */
 #glcv { position: absolute; left: 0; top: 0; background: transparent; pointer-events: none; }
+/* BAR's explosion effects (fx-ceg.js), WebGL, between the icons and the
+   overlay: what darkens (smoke) and what glows, which adds (plus-lighter). */
+#fxcv, #fxlight { position: absolute; left: 0; top: 0; background: transparent; pointer-events: none; }
+#fxlight { mix-blend-mode: screen; mix-blend-mode: plus-lighter; }
 #ovcv { position: absolute; left: 0; top: 0; background: transparent; pointer-events: none; }
 
 #side {

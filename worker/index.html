@@ -276,6 +276,10 @@
 <div id="wrap">
   <div id="left">
     <canvas id="cv"></canvas>
+    <!-- BAR's explosion effects sit UNDER the unit icons: a nuke's glow
+         would otherwise hide every unit it is killing. -->
+    <canvas id="fxcv"></canvas>
+    <canvas id="fxlight"></canvas>
     <canvas id="glcv"></canvas>
     <canvas id="ovcv"></canvas>
     <div id="tooltip"></div>
@@ -408,6 +412,9 @@
 <script src="/fx-projectiles.__ASSET_REV__.js"></script>
 <script src="/fx-beams.__ASSET_REV__.js"></script>
 <script src="/fx-blasts.__ASSET_REV__.js"></script>
+<script src="/fx-ceg.__ASSET_REV__.js"></script>
+<!-- BAR's explosion effects table, loaded by fx-blasts.js on the first replay with explosions. -->
+<script>window.__FX_CEGDATA_JS__ = "/fx-cegdata.__ASSET_REV__.js";</script>
 <script src="/app.__ASSET_REV__.js"></script>
 </body>
 </html>

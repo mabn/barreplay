@@ -2073,6 +2073,11 @@ function resize() {
     glcv.style.width = viewW + 'px';
     glcv.style.height = viewH + 'px';
   }
+  // The explosion layers (fx-ceg.js) size their buffers when they draw.
+  for (const id of ['fxcv', 'fxlight']) {
+    const c = document.getElementById(id);
+    if (c) { c.style.width = viewW + 'px'; c.style.height = viewH + 'px'; }
+  }
   if (ovcv) {
     ovcv.width = Math.round(viewW * DPR);
     ovcv.height = Math.round(viewH * DPR);
@@ -3577,7 +3582,7 @@ async function loadEffects(file, gen) {
 // simFrame is fractional; u is the displayed frame's units (null while its
 // chunk is still streaming — effects do not need it).
 function drawEffects(c, simFrame, u) {
-  if (!showEffects || !data || data.fxState !== 'ready') return;
+  if (!showEffects || !data || data.fxState !== 'ready') { clearCeg(); return; }
   drawBlasts(c, simFrame, u);
   drawBeams(c, simFrame, u);
   drawProjectiles(c, simFrame, u);
