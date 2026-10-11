@@ -216,6 +216,33 @@
     return grad;
   }
 
+  // Fill rate is what is left once the gradients are cached: a reactor
+  // chain is dozens of fireballs hundreds of px across, every pixel of each
+  // blended additively. A fireball is a soft gradient with no edge, so the
+  // BIG ones (LOWRES_MIN_PX and up) are stamped into a layer at 1/LOWRES of
+  // the viewport and that layer is stretched over it once — LOWRES^2 = 16
+  // times fewer pixels blended, invisible on a blur. Small ones stay sharp
+  // on the main canvas, where they would shrink to a pixel in the layer.
+  const LOWRES = 4, LOWRES_MIN_PX = 16;
+  let layer = null, layerCtx = null, layerOff = false;
+  function lowresLayer(w, h) {
+    if (layerOff) return null;
+    const lw = Math.max(1, Math.ceil(w / LOWRES)), lh = Math.max(1, Math.ceil(h / LOWRES));
+    if (!layer) {
+      layer = makeCanvas(1);
+      layerCtx = layer && layer.getContext('2d');
+      if (!layerCtx) { layerOff = true; return null; }
+    }
+    if (layer.width !== lw || layer.height !== lh) { layer.width = lw; layer.height = lh; }
+    else layerCtx.clearRect(0, 0, lw, lh);
+    layerCtx.globalCompositeOperation = 'lighter';
+    return layerCtx;
+  }
+
+  // Rings are batched into one stroke per palette and opacity step, so a
+  // chain's forty rings are a handful of draw calls rather than forty.
+  const RING_STEPS = 8;
+
   // draw paints every explosion live at simFrame (fractional) onto ctx.
   // view = {cx, cz, scale, w, h, stretch}: the world point at the screen's
   // centre, px per elmo, the viewport in CSS px, and the life multiplier
@@ -227,7 +254,8 @@
     const k = view.stretch || 1;
     const lo = first(list, simFrame - fx.maxLife * k);
     if (lo >= list.length || list[lo].f > simFrame) return 0;
-    let n = 0, rings = 0;
+    let n = 0, rings = 0, lc = null;
+    const ringBatches = new Map(); // pal -> [steps] of [x, y, r] triples
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     // Newest first, so the cap drops the oldest.
@@ -246,9 +274,14 @@
       if (s.a <= 0) {
         // fireball over, the ring is still holding at the radius
       } else if (sprite) {
-        ctx.globalAlpha = s.a;
-        ctx.drawImage(sprite, sx - r, sy - r, 2 * r, 2 * r);
-        ctx.globalAlpha = 1;
+        let g = ctx, q = 1;
+        if (r >= LOWRES_MIN_PX) {
+          if (!lc) lc = lowresLayer(view.w, view.h);
+          if (lc) { g = lc; q = 1 / LOWRES; }
+        }
+        g.globalAlpha = s.a;
+        g.drawImage(sprite, (sx - r) * q, (sy - r) * q, 2 * r * q, 2 * r * q);
+        g.globalAlpha = 1;
       } else {
         ctx.fillStyle = gradient(ctx, sx, sy, r, e.pal, s.a);
         ctx.beginPath();
@@ -257,10 +290,24 @@
       }
       if (s.ringA > 0 && rings < MAX_RINGS) {
         rings++;
-        ctx.strokeStyle = rgba(e.pal[1], s.ringA);
-        ctx.lineWidth = 1.5;
+        let b = ringBatches.get(e.pal);
+        if (!b) ringBatches.set(e.pal, b = []);
+        const step = Math.min(RING_STEPS, Math.max(1, Math.round(s.ringA / RING_ALPHA * RING_STEPS)));
+        (b[step] || (b[step] = [])).push(sx, sy, Math.max(1, ringPx));
+      }
+    }
+    if (lc) ctx.drawImage(layer, 0, 0, layer.width, layer.height, 0, 0, layer.width * LOWRES, layer.height * LOWRES);
+    ctx.lineWidth = 1.5;
+    for (const [pal, steps] of ringBatches) {
+      for (let st = 1; st <= RING_STEPS; st++) {
+        const c = steps[st];
+        if (!c) continue;
+        ctx.strokeStyle = rgba(pal[1], RING_ALPHA * st / RING_STEPS);
         ctx.beginPath();
-        ctx.arc(sx, sy, Math.max(1, ringPx), 0, Math.PI * 2);
+        for (let j = 0; j < c.length; j += 3) {
+          ctx.moveTo(c[j] + c[j + 2], c[j + 1]);
+          ctx.arc(c[j], c[j + 1], c[j + 2], 0, Math.PI * 2);
+        }
         ctx.stroke();
       }
     }
