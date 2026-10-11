@@ -17,7 +17,7 @@ import { comparable, lossWorth, sideColor, sideName, sideOfTeam } from "../model
 import { compass, fighters, ownBlast, ownBlastTitle } from "../moments";
 import { fighterNames } from "../names";
 import { fillUnits, inkOn } from "../unitchips";
-import { tip, type TipRow } from "../tooltip";
+import { tip, type Tip, type TipRow } from "../tooltip";
 import { clipEvent, watcher } from "../watch";
 import { SIM_FPS, type Battle, type Insights, type SummaryOptions } from "../types";
 
@@ -53,8 +53,9 @@ function fireGradient(id: string): SVGElement {
 /** flameRing is a ring of flame tongues licking out of a circle of radius r
  * at (cx, cy): an orange outer layer and a yellow inner one, offset half a
  * tongue, every tongue curling the same way like fire in a draught. Lengths
- * vary from a seed so two fireballs do not burn alike. */
-function flameRing(cx: number, cy: number, r: number, seed: number): SVGGElement {
+ * vary from a seed so two fireballs do not burn alike; `unit` is the size of
+ * one screen pixel in the drawing's units, so a map draws the same flames. */
+function flameRing(cx: number, cy: number, r: number, seed: number, unit = 1): SVGGElement {
   let st = (seed * 2654435761) >>> 0 || 1;
   const rnd = () => ((st = (st * 1664525 + 1013904223) >>> 0) / 4294967296);
   const layer = (n: number, phase: number, len: number, color: string, opacity: number) => {
@@ -73,8 +74,9 @@ function flameRing(cx: number, cy: number, r: number, seed: number): SVGGElement
     }
     return s("path", { d, fill: color, "fill-opacity": opacity });
   };
-  const n = Math.max(9, Math.round((2 * Math.PI * r) / 8));
-  const len = Math.max(3.5, Math.min(16, r * 0.45));
+  // Sized in screen pixels: `unit` is how many user units one pixel is.
+  const n = Math.max(9, Math.round((2 * Math.PI * r) / unit / 8));
+  const len = Math.max(3.5, Math.min(16, (r / unit) * 0.45)) * unit;
   return s("g", { class: "brs-flames", "pointer-events": "none" },
     layer(n, 0, len, FIRE_FLAME, 0.9),
     layer(n, 0.5, len * 0.6, FIRE_HOT, 0.95));
@@ -101,7 +103,11 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
   const rings: SVGGElement[] = [];
   const rows: HTMLElement[] = [];
   const marks: SVGGElement[] = [];
-  const detail = h("div", { class: "brs-battledetail" }, h("p", { class: "brs-hint" }, "Pick a battle on the map or in the list."));
+  const pickHint = h("p", { class: "brs-hint" }, "Point at a battle to see its losses; click to watch it.");
+  const detail = h("div", { class: "brs-battledetail" }, pickHint);
+  const details: HTMLElement[] = [];
+  const detailOf = (i: number) => (details[i] ??= battleDetail(i));
+  let selected = -1;
   const light = (i: number, on: boolean) => {
     rings[i]?.classList.toggle("brs-hover", on);
     rows[i]?.classList.toggle("brs-hover", on);
@@ -112,17 +118,44 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     rows.forEach((r, k) => r.classList.toggle("brs-on", k === i));
     marks.forEach((m, k) => m.classList.toggle("brs-on", k === i));
     if (rings[i]) view.layer.append(rings[i]); // over its neighbours
-    detail.replaceChildren(battleDetail(i));
+    selected = i;
+    detail.replaceChildren(detailOf(i));
   };
   // A click both selects and plays: the losses are waiting under the clip.
   const open = (i: number) => {
     select(i);
     if (watch) watch(clipOf(ins.battles[i], i));
   };
-  const lossRows = (b: Battle): TipRow[] => [0, 1].map((sd) => ({
-    color: sideColor(ins, sd), label: `${sideName(ins, sd)} lost`,
-    value: `${b.lost[sd]?.n ?? 0} units` + (priced ? ` · ${fmtMetal(b.lost[sd]?.metal ?? 0)}` : ""),
-  }));
+  // One tooltip wherever a battle is pointed at (map, timeline, list): the
+  // two sides side by side, first side on the left.
+  const battleTip = (b: Battle, i: number): Tip => {
+    const rows: TipRow[] = [];
+    const add = (metric: string, v: (sd: number) => string) => {
+      for (const sd of [0, 1]) rows.push({ color: sideColor(ins, sd), label: sideName(ins, sd), metric, value: v(sd) });
+    };
+    add("Units lost", (sd) => String(b.lost[sd]?.n ?? 0));
+    if (priced) add("Metal lost", (sd) => fmtMetal(b.lost[sd]?.metal ?? 0));
+    const r = reach(b);
+    if (r[0] + r[1] > 0) add("Army nearby", (sd) => fmtMetal(r[sd]));
+    return {
+      title: `Battle ${i + 1} · ${when(b)} · ${compass(ins, b.x, b.z)}`,
+      rows,
+      note: verdict(b) + ratioText(b) + (watch ? " · click to watch" : ""),
+    };
+  };
+  // Pointing at a battle lights it everywhere and previews its losses
+  // below the list; leaving goes back to the picked one.
+  const hover = (el: Element, i: number) => {
+    tip(el, () => battleTip(ins.battles[i], i));
+    el.addEventListener("pointerenter", () => {
+      light(i, true);
+      detail.replaceChildren(detailOf(i));
+    });
+    el.addEventListener("pointerleave", () => {
+      light(i, false);
+      detail.replaceChildren(selected >= 0 ? detailOf(selected) : pickHint);
+    });
+  };
   // Who came out ahead is decided by worth: a lost power plant costs its
   // output as well as its metal.
   const worth = (l?: { n: number; metal: number; worth?: number }) => (priced ? lossWorth(l) : l?.n ?? 0);
@@ -174,26 +207,31 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     return r;
   };
 
-  ins.battles.forEach((b, i) => {
-    const ring = s("circle", { cx: b.x, cy: b.z, class: "brs-ring" });
-    const badge = s("circle", { cx: b.x, cy: b.z, class: "brs-badge" });
-    const num = s("text", { x: b.x, y: b.z, "text-anchor": "middle", "dominant-baseline": "central", class: "brs-badgenum" }, String(i + 1));
+  // The map: each battle a bubble where it was fought, coloured and sized
+  // like the timeline's (the side that came out ahead, the metal lost), a
+  // fireball when its own blasts decided it. Biggest first, so small ones
+  // stay on top.
+  const mapFire = `brs-mfire-${++fireSeq}`;
+  view.svg.prepend(s("defs", {}, fireGradient(mapFire)));
+  for (const i of ins.battles.map((_, k) => k).sort((p, q) => total(ins.battles[q]) - total(ins.battles[p]))) {
+    const b = ins.battles[i];
+    const g = s("g", { class: "brs-battle brs-clickable" });
     atWidth((w) => {
-      ring.setAttribute("r", String(Math.max(b.r, 0.025 * w)));
-      ring.setAttribute("stroke-width", String(0.003 * w));
-      badge.setAttribute("r", String(0.024 * w));
-      // A style, not an attribute: the scoped stylesheet sizes svg text, and
-      // a stylesheet beats an attribute.
-      num.setAttribute("style", `font-size: ${(0.03 * w).toFixed(0)}px`);
+      const r = w * (0.014 + 0.036 * Math.sqrt(total(b) / biggest));
+      const fire = blasted(b);
+      g.replaceChildren(
+        fire ? flameRing(b.x, b.z, r, i + 1, w / 600) : s("g"),
+        s("circle", { cx: b.x, cy: b.z, r, class: fire ? "brs-bdot brs-fire" : "brs-bdot", fill: fire ? `url(#${mapFire})` : leanColor(b), "fill-opacity": fire ? 1 : 0.85 }),
+        // A style, not an attribute: the scoped stylesheet sizes svg text, and
+        // a stylesheet beats an attribute.
+        s("text", { x: b.x, y: b.z, "text-anchor": "middle", "dominant-baseline": "central", class: "brs-bmarknum",
+          style: `font-size: ${(0.026 * w).toFixed(0)}px` + (fire ? "; fill: #3a1a00" : "") }, String(i + 1)));
     });
-    const g = s("g", { class: "brs-battle brs-clickable" }, ring, badge, num);
-    tip(g, () => ({ title: `Battle ${i + 1} · ${when(b)} · ${compass(ins, b.x, b.z)}`, rows: lossRows(b), note: watch ? "Click to watch" : "Click for details" }));
-    g.addEventListener("pointerenter", () => light(i, true));
-    g.addEventListener("pointerleave", () => light(i, false));
+    hover(g, i);
     g.addEventListener("click", () => open(i));
-    rings.push(g);
+    rings[i] = g;
     view.layer.append(g);
-  });
+  }
 
   // The list: one line a battle. Its bar leaves the centre line toward the
   // side that came out ahead, as far as how much less it lost (log scale,
@@ -224,9 +262,7 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
       h("span", { class: "brs-where" }, compass(ins, b.x, b.z).replace(/^the /, "")),
       bar, nums,
       play);
-    tip(row, () => ({ title: `Battle ${i + 1} · ${when(b)}`, rows: lossRows(b), note: verdict(b) + ratioText(b) }));
-    row.addEventListener("pointerenter", () => light(i, true));
-    row.addEventListener("pointerleave", () => light(i, false));
+    hover(row, i);
     row.addEventListener("click", () => open(i));
     row.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter" || ev.key === " ") {
@@ -279,13 +315,7 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
         blasted(b) ? flameRing(x, yy, rad(total(b)), i + 1) : null,
         s("circle", { class: blasted(b) ? "brs-bdot brs-fire" : "brs-bdot", cx: x, cy: yy, r: rad(total(b)), fill: blasted(b) ? `url(#${fireId})` : color, "fill-opacity": blasted(b) ? 1 : 0.85 }),
         s("text", { x, y: yy + 4, "text-anchor": "middle", class: "brs-bmarknum", style: blasted(b) ? "fill: #3a1a00" : null }, String(i + 1)));
-      tip(g, () => ({
-        title: `Battle ${i + 1} · ${when(b)} · ${compass(ins, b.x, b.z)}`,
-        rows: [...lossRows(b), ...(r[0] + r[1] > 0 ? [0, 1].map((sd) => ({ color: sideColor(ins, sd), label: `${sideName(ins, sd)} army nearby`, value: fmtMetal(r[sd]) })) : [])],
-        note: verdict(b) + ratioText(b) + (watch ? " · click to watch" : ""),
-      }));
-      g.addEventListener("pointerenter", () => light(i, true));
-      g.addEventListener("pointerleave", () => light(i, false));
+      hover(g, i);
       g.addEventListener("click", (ev) => {
         ev.stopPropagation();
         open(i);
@@ -346,7 +376,7 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
       ...rows, detail)
     : null;
   return section("Battles",
-    h("p", { class: "brs-hint" }, "Numbers: the biggest fights in the order they happened, each ringed by the ground it covered. Above the line the first side came out ahead, below it the second, further out the less it lost against the other; a bubble's size is the metal lost there, in fire colours when a side's own blasts (a fusion chain, say) did most of it. Click one to watch it and see its losses."),
+    h("p", { class: "brs-hint" }, "Numbers: the biggest fights in the order they happened, on the map where they were fought. Above the line the first side came out ahead, below it the second, further out the less it lost against the other; a bubble's size is the metal lost there, in fire colours when a side's own blasts (a fusion chain, say) did most of it. Point at one to see its losses, click to watch it."),
     timeline(),
     h("div", { class: "brs-storygrid" }, h("div", { class: "brs-mapwrap" }, view.svg), list));
 }

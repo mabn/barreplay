@@ -134,19 +134,16 @@ export const CSS = `
 .brs-root .brs-bnums { font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
 .brs-root .brs-btimeline { display: block; width: 100%; margin-bottom: 12px; }
 .brs-root .brs-bmark .brs-bdot { stroke: var(--brs-panel, #12181e); stroke-width: 1.5; }
-.brs-root .brs-bmark .brs-bdot.brs-fire { stroke: none; }
+.brs-root .brs-battle .brs-bdot { stroke: var(--brs-panel, #12181e); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.brs-root .brs-battle.brs-hover .brs-bdot { stroke: var(--brs-text); }
+.brs-root .brs-battle.brs-on .brs-bdot { stroke: var(--brs-accent); stroke-width: 3; }
+.brs-root :is(.brs-bmark, .brs-battle):not(.brs-hover):not(.brs-on) .brs-bdot.brs-fire { stroke: none; }
 .brs-root .brs-vfire { position: absolute; top: 50%; transform: translate(-50%, -50%); overflow: visible; filter: drop-shadow(0 0 3px rgba(255, 160, 30, 0.7)); }
 .brs-root .brs-fire { filter: drop-shadow(0 0 4px rgba(255, 200, 40, 0.75)); }
 .brs-root .brs-bmark.brs-hover .brs-bdot { stroke: var(--brs-text); }
 .brs-root .brs-bmark.brs-on .brs-bdot { stroke: var(--brs-accent); stroke-width: 3; }
 .brs-root .brs-bmarknum { fill: #fff; font-weight: 700; pointer-events: none; }
 .brs-root .brs-battledetail { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--brs-line); }
-.brs-root .brs-battle .brs-ring { fill: #fff; fill-opacity: .03; stroke: #fff; stroke-opacity: .25; pointer-events: none; }
-.brs-root .brs-battle .brs-badge { fill: var(--brs-text); stroke: #0b0f13; stroke-width: 0; }
-.brs-root svg text.brs-badgenum { fill: #0b0f13; font-weight: 700; pointer-events: none; }
-.brs-root .brs-battle.brs-hover .brs-ring { stroke-opacity: 1; fill-opacity: .14; }
-.brs-root .brs-battle.brs-on .brs-ring { stroke: var(--brs-accent); stroke-opacity: 1; fill: var(--brs-accent); fill-opacity: .16; }
-.brs-root .brs-battle.brs-on .brs-badge { fill: var(--brs-accent); }
 .brs-root .brs-tip { position: fixed; z-index: 1000; display: none; pointer-events: none; max-width: calc(100vw - 16px);
   background: #0b0f13; color: var(--brs-text); border: 1px solid var(--brs-line); border-radius: 6px;
   padding: 7px 10px; font-size: 12px; line-height: 1.4; box-shadow: 0 6px 18px rgba(0, 0, 0, .45); }

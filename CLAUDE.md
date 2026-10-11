@@ -1017,7 +1017,11 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           area the metal lost, a faint ring the armies nearby, a line its
                           span, as a FIREBALL (yellow to amber, never red, ringed by flame tongues — flameRing; Marcin) when ownBlast decided it. Each list row carries the same
                           verdict as a bar from a centre line (lean) ending in a dot sized by
-                          the metal lost, plus "blue : red" losses. One selection is shared
+                          the metal lost, plus "blue : red" losses; the MAP draws the same
+                          bubbles (colour, size, fireball) where each was fought. All three
+                          share ONE tooltip (battleTip: the sides side by side, first side
+                          left) and pointing at a battle in any of them previews its losses
+                          below the list (back to the picked one on leave). One selection is shared
                           by the map, the list and the timeline — a click on either
                           selects AND plays the battle's clip, marked on the slider as its whole span (clipEvent, like every clip of something with a duration — a killing-fields zone's busiest 30 s too); a picked battle
                           shows the two sides' losses SIDE BY SIDE, each KIND of unit as its
