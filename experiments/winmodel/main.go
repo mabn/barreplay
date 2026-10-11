@@ -18,6 +18,11 @@
 //
 //	go run ./experiments/winmodel [-only "current,+trade win12"] [-os rosters.jsonl] <dir>
 //
+// -map limits the run to one map (e.g. "(?i)^supreme isthmus"). geo.go adds
+// location and unit-kind features: the army centres' advance toward the
+// enemy start, and losses by place and kind; only the advance helped, and
+// only log loss.
+//
 // -os adds the players' OpenSkill difference as a feature (catalog rosters,
 // one {"id","allies":[{"ally","os":[...]}]} per line); it added nothing.
 package main
@@ -31,6 +36,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -52,6 +58,8 @@ type file struct {
 	Battles     []insights.Battle      `json:"battles"`
 	Eliminated  []insights.Elimination `json:"eliminated"`
 	Winner      int                    `json:"winner"`
+	MapName     string                 `json:"mapName"`
+	Defs        map[int32]insights.Def `json:"defs"`
 }
 
 // game is one two-sided game cut where it was decided.
@@ -70,14 +78,32 @@ type game struct {
 	bat   []insights.Battle
 	ally  [2]int32
 	skill float64 // mean OS of side 0 minus side 1; NaN when unknown
+
+	// Where things happened (geo.go); pos is false when either side has
+	// no army centre to start from.
+	mapName string
+	pos     bool
+	adv     [2][]float64 // army centre's way from own start to the enemy's, 0..1; NaN with no army
+	lostBy  map[string]*[2][]float64
 }
 
 func main() {
 	only := flag.String("only", "", "comma-separated variant names to run")
+	mapRE := flag.String("map", "", "only games on maps matching this regexp")
 	osFile := flag.String("os", "", "catalog rosters (jsonl: id, allies[{ally, os[]}])")
 	flag.BoolVar(&debug, "debug", false, "print the series around the first unnamed income-carried moves")
 	flag.Parse()
 	gs := loadAll(flag.Args())
+	if *mapRE != "" {
+		re := regexp.MustCompile(*mapRE)
+		var keep []*game
+		for _, g := range gs {
+			if re.MatchString(g.mapName) {
+				keep = append(keep, g)
+			}
+		}
+		gs = keep
+	}
 	if *osFile != "" {
 		loadSkill(*osFile, gs)
 	}
@@ -205,6 +231,7 @@ func build(f *file) *game {
 			g.lost[sd][st] += f.Deaths.Cost[i]
 		}
 	}
+	geo(g, f, side, died)
 	for _, e := range f.Eliminated {
 		if sd, ok := side[e.Team]; ok && sd >= 0 && sd <= 1 {
 			g.elim[sd] = append(g.elim[sd], int(e.F)/(step*30))
