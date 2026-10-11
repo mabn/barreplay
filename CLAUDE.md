@@ -788,10 +788,11 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           which redraws the chart in place); composition defaults to LOG, and
                           there places each side's TOTAL on the log axis and splits it by
                           SHARE — stacking by value through a log would hand the bottom band
-                          most of the height whatever its size. The MAP
-                          STORY numbers its battles in the order they happened, on the map and
+                          most of the height whatever its size. The BATTLES
+                          section (once "Map story") numbers its battles in the order they happened, on the map and
                           in a one-line-per-battle list (losses either side of a centre line,
-                          square-root scaled), one selection shared by both; a picked battle
+                          square-root scaled), one selection shared by both — a click on either
+                          selects AND plays the battle's clip; a picked battle
                           shows the two sides' losses SIDE BY SIDE, each KIND of unit as its
                           untinted BAR icon with a count (Battle.lost[].units, v4: def/n/metal,
                           costliest first, at most 48). Defs sharing a bitmap are one kind,

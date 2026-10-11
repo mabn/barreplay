@@ -1,9 +1,8 @@
-// Map story: where each army stood over the game (G2, the fronts) with the
+// Battles: where each army stood over the game (G2, the fronts) with the
 // biggest fights marked on the same map and numbered in the order they
 // happened, beside a one-line-per-battle list (G4). The map and the list are
 // one control: hovering either lights the other, clicking either selects
-// the battle and opens what each side lost there, and the selected battle
-// can be played. Nothing here knows who killed what — a battle says where,
+// the battle, opens what each side lost there and plays its clip. Nothing here knows who killed what — a battle says where,
 // when and what each side lost, and calls it for the side that lost less.
 import { h, s, section } from "../dom";
 import { fmtClock, fmtMetal } from "../format";
@@ -55,17 +54,20 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
   const rings: SVGGElement[] = [];
   const rows: HTMLElement[] = [];
   const detail = h("div", { class: "brs-battledetail" }, h("p", { class: "brs-hint" }, "Pick a battle on the map or in the list."));
-  let selected = -1;
   const light = (i: number, on: boolean) => {
     rings[i]?.classList.toggle("brs-hover", on);
     rows[i]?.classList.toggle("brs-hover", on);
   };
   const select = (i: number) => {
-    selected = i;
     rings.forEach((g, k) => g.classList.toggle("brs-on", k === i));
     rows.forEach((r, k) => r.classList.toggle("brs-on", k === i));
     if (rings[i]) view.layer.append(rings[i]); // over its neighbours
     detail.replaceChildren(battleDetail(i));
+  };
+  // A click both selects and plays: the losses are waiting under the clip.
+  const open = (i: number) => {
+    select(i);
+    if (watch) watch(clipOf(ins.battles[i], i));
   };
   const lossRows = (b: Battle): TipRow[] => [0, 1].map((sd) => ({
     color: sideColor(ins, sd), label: `${sideName(ins, sd)} lost`,
@@ -89,10 +91,10 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
       num.setAttribute("style", `font-size: ${(0.03 * w).toFixed(0)}px`);
     });
     const g = s("g", { class: "brs-battle brs-clickable" }, ring, badge, num);
-    tip(g, () => ({ title: `Battle ${i + 1} · ${when(b)} · ${compass(ins, b.x, b.z)}`, rows: lossRows(b), note: selected === i ? (watch ? "Click to watch" : undefined) : "Click for details" }));
+    tip(g, () => ({ title: `Battle ${i + 1} · ${when(b)} · ${compass(ins, b.x, b.z)}`, rows: lossRows(b), note: watch ? "Click to watch" : "Click for details" }));
     g.addEventListener("pointerenter", () => light(i, true));
     g.addEventListener("pointerleave", () => light(i, false));
-    g.addEventListener("click", () => (selected === i && watch ? watch(clipOf(b, i)) : select(i)));
+    g.addEventListener("click", () => open(i));
     rings.push(g);
     view.layer.append(g);
   });
@@ -122,11 +124,11 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     tip(row, () => ({ title: `Battle ${i + 1} · ${when(b)}`, rows: lossRows(b), note: verdict(b) }));
     row.addEventListener("pointerenter", () => light(i, true));
     row.addEventListener("pointerleave", () => light(i, false));
-    row.addEventListener("click", () => select(i));
+    row.addEventListener("click", () => open(i));
     row.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter" || ev.key === " ") {
         ev.preventDefault();
-        select(i);
+        open(i);
       }
     });
     rows.push(row);
@@ -177,7 +179,7 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
         h("span", { style: `color: ${sideColor(ins, 1)}` }, `${sideName(ins, 1)} lost ▶`)),
       ...rows, detail)
     : null;
-  return section("Map story",
-    h("p", { class: "brs-hint" }, "Lines: where each army stood, faint early and bright late. Numbers: the biggest fights in the order they happened, each ringed by the ground it covered. Click one for its losses."),
+  return section("Battles",
+    h("p", { class: "brs-hint" }, "Lines: where each army stood, faint early and bright late. Numbers: the biggest fights in the order they happened, each ringed by the ground it covered. Click one to watch it and see its losses."),
     h("div", { class: "brs-storygrid" }, h("div", { class: "brs-mapwrap" }, view.svg), list));
 }
