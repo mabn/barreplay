@@ -99,7 +99,7 @@ function comparePanel(ins: Insights, watch: Watch | null, group: ChartGroup, t: 
   const scale = scaleToggle(log, (l) => { log = l; draw(); });
   scale.hidden = true;
   const mode = pairToggle(["Ratio", "Value"], value, (v) => { value = v; scale.hidden = !v; draw(); }, "Show");
-  const lab = label(spec.name, `${spec.info} Ratio shows how far ahead the leading side is: ${sideName(ins, 0)} is the flat line at 0%, and the other line is ${sideName(ins, 1)} — at +20% when it has 20% more, at -20% when ${sideName(ins, 0)} has 20% more. Value shows both sides' own numbers.`);
+  const lab = label(spec.name, `${spec.info} Ratio shows how far ahead the leading side is: +20% when ${sideName(ins, 0)} has 20% more, -20% when ${sideName(ins, 1)} has 20% more, shaded in the leader's colour. Value shows both sides' own numbers.`);
   lab.append(mode, scale);
   return [lab, holder];
 }
@@ -116,7 +116,10 @@ const OVERFLOW = 16;
 
 function ratioChart(ins: Insights, watch: Watch | null, group: ChartGroup, t: number[], spec: CompareSpec): SVGSVGElement {
   const [a, b] = spec.values;
-  const r = leadPct(a, b, spec.k);
+  // The first side's lead reads UP, like the swing line above it (which is
+  // the first side's chance of winning): one white line on all three charts,
+  // the shading under it saying whose lead it is.
+  const r = leadPct(b, a, spec.k);
   // Scaled to the middle-to-late game (ratioDomain); outside it the lead
   // runs off the edge into a strip where it fades out, and the tooltip has
   // the number.
@@ -129,15 +132,15 @@ function ratioChart(ins: Insights, watch: Watch | null, group: ChartGroup, t: nu
       const i = stepAt(t, tt);
       if (i < 0) return null;
       const lead = r[i];
-      const ahead = Math.abs(lead) < 0.5 ? -1 : lead > 0 ? 1 : 0;
+      const ahead = Math.abs(lead) < 0.5 ? -1 : lead > 0 ? 0 : 1;
       return [0, 1].flatMap((sd): TipRow[] => [
         { color: sideColor(ins, sd), label: sideName(ins, sd), metric: spec.name, value: spec.fmt(spec.values[sd][i] ?? 0) },
         { color: sideColor(ins, sd), label: sideName(ins, sd), metric: spec.lead, value: ahead < 0 ? "even" : ahead === sd ? pctText(lead) : "" },
       ]);
     },
   });
-  // The lead shaded in the leader's colour: above the line the second side,
-  // below it the first.
+  // The lead shaded in the leader's colour: above the axis the first side,
+  // below it the second.
   const zero = t.map(() => 0);
   // Past the strip a lead is clamped to the chart's very edge, where the
   // mask has faded it to nothing.
@@ -148,10 +151,9 @@ function ratioChart(ins: Insights, watch: Watch | null, group: ChartGroup, t: nu
   const marks = s("g", overflow.top || overflow.bottom ? { mask: `url(#${fadeMask(c, overflow)})` } : {});
   c.plot.append(marks);
   marks.append(
-    s("path", { d: bandPath(c, t, zero, shown.map((v) => Math.max(0, v))), fill: sideColor(ins, 1), "fill-opacity": 0.25 }),
-    s("path", { d: bandPath(c, t, shown.map((v) => Math.min(0, v)), zero), fill: sideColor(ins, 0), "fill-opacity": 0.25 }),
-    s("path", { d: linePath(c, t, zero), fill: "none", stroke: sideColor(ins, 0), "stroke-width": 2 }),
-    s("path", { d: linePath(c, t, shown), fill: "none", stroke: sideColor(ins, 1), "stroke-width": 2 }),
+    s("path", { d: bandPath(c, t, zero, shown.map((v) => Math.max(0, v))), fill: sideColor(ins, 0), "fill-opacity": 0.25 }),
+    s("path", { d: bandPath(c, t, shown.map((v) => Math.min(0, v)), zero), fill: sideColor(ins, 1), "fill-opacity": 0.25 }),
+    s("path", { d: linePath(c, t, shown), fill: "none", stroke: "var(--brs-text)", "stroke-width": 1.5 }),
   );
   return c.svg;
 }

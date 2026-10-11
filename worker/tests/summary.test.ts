@@ -430,6 +430,25 @@ test("gapBattles judges a battle by worth: lost power plants count 2.5x", () => 
   assert.deepEqual(gapBattles(file, [], []).map((g) => [g.side, g.verdict]), [[1, "win"]]);
 });
 
+test("gapBattles' metal floors read plain metal, not worth", () => {
+  const F = 30;
+  const steps = Array.from({ length: 40 }, (_, i) => i * 60);
+  const lost = (metal: number, worth = metal) => ({ n: 4, metal, worth, top: [] });
+  const at = (min: number) => ({ f0: min * 60 * F, f1: (min * 60 + 5) * F, x: 0, z: 0, r: 500 });
+  const file = ins({
+    durationSec: 2400, stepSec: 60,
+    series: { t: steps, army: [steps.map(() => 1000), steps.map(() => 1000)], metalIncome: [], energyIncome: [], armyCats: [], armyByCat: [] },
+    battles: [
+      // 440 metal of wind turbines (worth 1100) against 300: not decisive, not a story.
+      { ...at(5), lost: [lost(300), lost(440, 1100)] },
+      // Past the opening, the game's only other battle: too small to fill a gap.
+      { ...at(20), lost: [lost(900), lost(200)] },
+    ],
+    swing: { p: steps.map(() => 0.5), moments: [], fitted: false },
+  } as Partial<Insights>);
+  assert.deepEqual(gapBattles(file, [], []), []);
+});
+
 test("ratioDomain scales to the leads from 40% to 95% of the game", () => {
   const t = Array.from({ length: 100 }, (_, i) => i * 10); // a 1000 s game
   // Thousands of percent at the start and the very end, -30..+60 between.

@@ -885,8 +885,9 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           style beside it and the built/lost strip below; names in the Sides
                           cards select a tab. "Who was winning" stacks the swing line, ARMY VALUE and METAL
                           INCOME (advantage.ts comparePanel) on one time axis and crosshair, with eliminations marked on the swing line. The two
-                          panels default to RATIO (series.ts leadPct: the first side a flat
-                          line at 0%, the other at how much bigger the leader is, +20% / -20%,
+                          panels default to RATIO (series.ts leadPct: ONE white line, the first side's
+                          lead UP like the swing line above it, +20% / -20%, shaded in the
+                          leader's colour,
                           smoothed by the win model's own k; the axis spans the min and max
                           lead from 40% to 95% of the game (series.ts ratioDomain, RATIO_WINDOW,
                           Marcin's call), since the opening minutes and a decided game's last
