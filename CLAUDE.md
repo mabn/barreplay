@@ -747,6 +747,20 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           library imported on first open, the insights fetched from the data
                           origin, a 404 saying the summary is not built yet, onClip = openClip
                           and onSeek = seekToFrame (back to the Replay tab at that sim frame).
+                          The two tabs are <a href> links (replayTabHref), so a middle- or
+                          ctrl-click opens either in a new browser tab; a plain click stays
+                          in the page. On the Summary tab the summary sits against the RIGHT
+                          edge (style.css: min(1100px, max(720px, 60vw))) and the clip window
+                          is ALWAYS open beside it as the MAP WINDOW: the whole game, fitted
+                          and paused (overviewClip, focus.overview — no ✕, Escape does
+                          nothing), until a moment is clicked; closing a moment hands the
+                          window back to the overview at the view it had. It drags by its
+                          title bar and resizes from any edge (initClipWindow; edge presses
+                          are taken in the capture phase so they do not also pan the map),
+                          and its rect is kept in localStorage ('barreplay.mapwindow',
+                          clamped to the viewport). The default fills the space left of the
+                          summary (clipDefaultRect), or the old bottom-right size when that
+                          space is under 360 px. Embedded (?embed=clip) none of this applies.
                           WATCHING (watch.ts): anything on the page with a moment behind it — a
                           chart time, a swing, a battle, a death, a milestone, an award — hands
                           the host a Clip {f0, f1, at?, atEnd?, x?, z?, r?, title?, titleRuns?} — `at`

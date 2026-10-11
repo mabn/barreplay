@@ -2335,7 +2335,7 @@ function drawOverlay(u) {
   // interpolated to. Passing the integer sample frame made every fade step
   // once per SECOND of game time (the sampling rate) instead of per rendered
   // frame, which at 1x is a visible stutter rather than a fade.
-  const simFrame = frameNumAt(idx) + renderFrac * (data.sampleEvery || 30);
+  const simFrame = frameNumAt(idx) + renderFrac * ((data && data.sampleEvery) || 30);
   if (marks.length) drawMarks(simFrame);
   if (clip && clip.focus.path) drawClipPath(clip.focus.path, simFrame);
   if (!u) return;
@@ -3784,7 +3784,7 @@ function setPlayhead(pos, forceSidebar) {
   resolveDisplay();
   if (changed) { maybeUpdateSidebar(forceSidebar); buildNextPosMap(); updateChat(frameNumAt(idx)); }
   updateTimeLabel();
-  if (clip) updateClipBar();
+  if (clip && data) updateClipBar();
   draw();
 }
 
@@ -7065,16 +7065,31 @@ function setReplayTab(tab) {
   applyReplayTab();
 }
 
+// replayTabHref is the link behind a tab: this page with the tab set, so a
+// middle-click opens it in a new browser tab. A ?f= seek is dropped, since it
+// was this visit's starting point, not the tab's.
+function replayTabHref(tab) {
+  const u = new URL(location.href);
+  u.searchParams.delete('f');
+  if (tab === 'summary') u.searchParams.set('tab', 'summary');
+  else u.searchParams.delete('tab');
+  return u.pathname + u.search;
+}
+
 function applyReplayTab() {
   const tab = replayTab();
   document.body.classList.toggle('summary-tab', tab === 'summary');
   document.getElementById('replaytabs').style.display = '';
-  for (const b of document.querySelectorAll('#replaytabs button')) {
-    b.classList.toggle('active', b.dataset.rtab === tab);
+  for (const a of document.querySelectorAll('#replaytabs a')) {
+    a.classList.toggle('active', a.dataset.rtab === tab);
+    a.href = replayTabHref(a.dataset.rtab);
   }
   if (tab === 'summary') {
     stopPlay();
     showSummary();
+    // The map window beside the summary, showing the whole game until a
+    // moment is clicked. Not embedded: there the window is the host's.
+    if (!clip && !embedClip) openClip(overviewClip());
   } else if (clip) {
     closeClip(true); // carry on from the clip, where it was
   } else if (data) {
@@ -7197,14 +7212,147 @@ let clip = null; // {f0, f1, focus, home: {center, scale}} while open
 
 const CLIP_WALL_SEC = 20;
 
+// overviewClip is what the map window shows on the Summary tab when no
+// moment is playing: the whole game, fitted, paused where the playhead is.
+// Its range needs the replay's chunks, so startClip fills it in again once
+// they are there.
+function overviewClip() {
+  const c = { overview: true, f0: 0, f1: 30, title: 'Map' };
+  if (data && data.chunks.length) {
+    const n = data.chunks.reduce((s, ch) => s + ch.count, 0);
+    c.f0 = data.chunks[0].frame;
+    c.f1 = Math.max(c.f0 + 30, frameNumAt(n - 1));
+  }
+  c.start = c.f0;
+  return c;
+}
+
+// ---- the map window's place on screen ----
+// Dragged by its title bar, resized from any edge, and remembered in
+// localStorage (a per-viewer convenience: without storage it simply opens at
+// its default place). The default fills the space left of the summary, which
+// style.css pushes against the right edge at the width computed here.
+const CLIP_RECT_KEY = 'barreplay.mapwindow';
+const CLIP_MIN_W = 260, CLIP_MIN_H = 200;
+let clipRect = null; // {x, y, w, h} in CSS px while the window is placed
+
+function clipDefaultRect() {
+  const W = window.innerWidth, H = window.innerHeight;
+  const head = document.querySelector('header');
+  const top = (head ? head.getBoundingClientRect().bottom : 0) + 12;
+  const summaryW = Math.min(1100, Math.max(720, W * 0.6));
+  const left = W - summaryW - 16; // the summary's scrollbar
+  if (left >= 360) return { x: 12, y: top, w: left - 24, h: H - top - 12 };
+  const w = Math.min(680, W - 40), h = Math.min(520, H - 110);
+  return { x: W - w - 20, y: H - h - 20, w, h };
+}
+
+function clampClipRect(r) {
+  const W = window.innerWidth, H = window.innerHeight;
+  const w = Math.max(Math.min(CLIP_MIN_W, W), Math.min(r.w, W));
+  const h = Math.max(Math.min(CLIP_MIN_H, H), Math.min(r.h, H));
+  return { x: Math.max(0, Math.min(r.x, W - w)), y: Math.max(0, Math.min(r.y, H - h)), w, h };
+}
+
+function placeClip(r) {
+  clipRect = clampClipRect(r);
+  const box = document.getElementById('clip');
+  box.style.left = clipRect.x + 'px';
+  box.style.top = clipRect.y + 'px';
+  box.style.width = clipRect.w + 'px';
+  box.style.height = clipRect.h + 'px';
+  box.style.right = 'auto';
+  box.style.bottom = 'auto';
+}
+
+function savedClipRect() {
+  try {
+    const r = JSON.parse(localStorage.getItem(CLIP_RECT_KEY) || 'null');
+    if (r && ['x', 'y', 'w', 'h'].every(k => Number.isFinite(r[k]))) return r;
+  } catch { /* no storage, or junk in it: the default */ }
+  return null;
+}
+
+function saveClipRect() {
+  try { localStorage.setItem(CLIP_RECT_KEY, JSON.stringify(clipRect)); } catch { /* best-effort */ }
+}
+
+function initClipWindow() {
+  const box = document.getElementById('clip');
+  const EDGE = 6;
+  let op = null; // the drag or resize in progress
+  const edgesAt = (e) => {
+    const r = box.getBoundingClientRect();
+    return {
+      l: e.clientX - r.left < EDGE, r: r.right - e.clientX < EDGE,
+      t: e.clientY - r.top < EDGE, b: r.bottom - e.clientY < EDGE,
+    };
+  };
+  const cursorFor = (g) => ((g.t && g.l) || (g.b && g.r) ? 'nwse-resize'
+    : (g.t && g.r) || (g.b && g.l) ? 'nesw-resize'
+    : g.l || g.r ? 'ew-resize' : g.t || g.b ? 'ns-resize' : '');
+  box.addEventListener('pointermove', (e) => {
+    if (embedClip) return;
+    if (!op) {
+      const c = cursorFor(edgesAt(e));
+      box.style.cursor = c;
+      box.classList.toggle('edge', !!c);
+      return;
+    }
+    const dx = e.clientX - op.sx, dy = e.clientY - op.sy, r = { ...op.r };
+    if (!op.g) { r.x += dx; r.y += dy; }
+    else {
+      // An edge moves on its own; the opposite one stays where it is.
+      if (op.g.r) r.w = Math.max(CLIP_MIN_W, op.r.w + dx);
+      if (op.g.b) r.h = Math.max(CLIP_MIN_H, op.r.h + dy);
+      if (op.g.l) { r.w = Math.max(CLIP_MIN_W, op.r.w - dx); r.x = op.r.x + op.r.w - r.w; }
+      if (op.g.t) { r.h = Math.max(CLIP_MIN_H, op.r.h - dy); r.y = op.r.y + op.r.h - r.h; }
+    }
+    placeClip(r);
+    if (op.g) resize();
+  });
+  // Capture phase: a press on the edge over the map must not also start a pan.
+  box.addEventListener('pointerdown', (e) => {
+    if (embedClip || e.button !== 0) return;
+    const g = edgesAt(e);
+    const onEdge = g.l || g.r || g.t || g.b;
+    const onHead = e.target.closest('#cliphead') && !e.target.closest('button, select, input, a');
+    if (!onEdge && !onHead) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const r = box.getBoundingClientRect();
+    op = { g: onEdge ? g : null, sx: e.clientX, sy: e.clientY, r: { x: r.left, y: r.top, w: r.width, h: r.height } };
+    box.setPointerCapture(e.pointerId);
+    document.body.classList.add('clip-dragging');
+  }, true);
+  const end = () => {
+    if (!op) return;
+    op = null;
+    document.body.classList.remove('clip-dragging');
+    saveClipRect();
+    resize();
+  };
+  box.addEventListener('pointerup', end);
+  box.addEventListener('pointercancel', end);
+  window.addEventListener('resize', () => {
+    if (clip && !embedClip && clipRect) { placeClip(clipRect); resize(); }
+  });
+}
+
 function openClip(c) {
   const box = document.getElementById('clip');
   if (!clip) {
     clip = { home: { center: { ...center }, scale } };
     document.getElementById('clipbody').append(document.getElementById('wrap'));
+    if (!embedClip) placeClip(savedClipRect() || clipDefaultRect());
     box.style.display = 'flex';
     document.body.classList.add('clip-open');
+  } else if (clip.focus && clip.focus.overview && !c.overview) {
+    // A moment played from the overview returns to the overview's view.
+    clip.home = { center: { ...center }, scale };
   }
+  // The overview stays until the tab closes; only a moment can be closed.
+  document.getElementById('clipclose').style.display = c.overview ? 'none' : '';
   clip.f0 = c.f0;
   // Playback starts a few seconds before the moment; the clip reaches back
   // further so the reader can scroll to what led up to it.
@@ -7249,6 +7397,20 @@ function openClip(c) {
 
 function startClip() {
   const c = clip.focus;
+  if (c.overview) {
+    // The whole game: its range is only known now the chunks are in.
+    const o = overviewClip();
+    clip.f0 = o.f0; clip.start = o.start; clip.f1 = o.f1;
+    // Fitted once; coming back from a moment keeps the view it had.
+    if (!clip.fitted) {
+      fitView();
+      document.getElementById('clipspeed').value = '16'; // a whole game
+    }
+    clip.fitted = true;
+    stopPlay();
+    show();
+    return;
+  }
   // A followed unit starts the clip where its route says it was; the
   // camera then rides along with it (followClipUnit).
   if (c.follow && Array.isArray(c.path) && c.path.length && typeof c.x !== 'number') {
@@ -7276,15 +7438,30 @@ function closeClip(keepView) {
   document.getElementById('clip').style.display = 'none';
   document.body.classList.remove('clip-open');
   if (!keepView) { center = clip.home.center; scale = clip.home.scale; }
+  const overview = clip.focus && clip.focus.overview;
   clip = null;
   resize();
+  // The overview was fitted to the small window; the Replay tab refits.
+  if (overview && keepView && data) { fitView(); draw(); }
 }
 
 // dismissClip is the reader closing the clip (✕ or Escape). Embedded, the
 // window is the host's to hide: the player stays as it is, ready for the
 // next clip.
 function dismissClip() {
-  if (!embedClip) { closeClip(false); return; }
+  if (!embedClip) {
+    if (clip && clip.focus && clip.focus.overview) return; // nothing to close
+    // On the Summary tab a closed moment hands the window back to the
+    // whole-game map, at the view it had before.
+    if (document.body.classList.contains('summary-tab')) {
+      stopPlay();
+      center = clip.home.center; scale = clip.home.scale;
+      openClip(overviewClip());
+      return;
+    }
+    closeClip(false);
+    return;
+  }
   stopPlay();
   parent.postMessage({ type: 'barreplay:close' }, '*');
 }
@@ -7340,10 +7517,17 @@ function initEmbedClip() {
 }
 
 function initReplayTabs() {
-  for (const b of document.querySelectorAll('#replaytabs button')) {
-    b.onclick = () => setReplayTab(b.dataset.rtab);
+  for (const a of document.querySelectorAll('#replaytabs a')) {
+    a.onclick = (e) => {
+      // Modified clicks (ctrl/cmd/shift) keep the browser's new-tab/window
+      // meaning; a middle-click never reaches here (it is an auxclick).
+      if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      setReplayTab(a.dataset.rtab);
+    };
   }
   initClip();
+  initClipWindow();
 }
 
 function openReplay(id) {

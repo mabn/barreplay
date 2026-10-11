@@ -59,13 +59,21 @@ body.home .controls, body.home #wrap { display: none; }
    library's pane). The summary hides the playback chrome and scrolls on its
    own; the landing page shows neither. */
 #replaytabs { display: flex; gap: 2px; }
-#replaytabs button { background: transparent; border-color: transparent; color: #9fb0bf; }
-#replaytabs button.active { background: #2a3742; border-color: #3a4856; color: #d7dee6; }
+#replaytabs a {
+  border: 1px solid transparent; border-radius: 4px; padding: 5px 10px; font-size: 13px;
+  color: #9fb0bf; text-decoration: none;
+}
+#replaytabs a:hover { background: #344450; color: #d7dee6; }
+#replaytabs a.active { background: #2a3742; border-color: #3a4856; color: #d7dee6; }
 body.home #replaytabs, body.home #summary { display: none !important; }
 body.summary-tab #wrap, body.summary-tab .controls { display: none; }
 body.summary-tab #summary { display: block !important; }
 #summary { flex: 1; min-height: 0; overflow-y: auto; }
 #summary .summarymsg { color: #9fb0bf; text-align: center; margin-top: 60px; }
+/* The summary sits against the RIGHT edge so the space on its left holds the
+   map window (app.js clipDefaultRect computes the same width). */
+#summary .brs-root { max-width: min(1100px, max(720px, 60vw)); margin: 0 0 0 auto; }
+#summary .summarymsg { margin-left: auto; margin-right: 0; max-width: min(1100px, max(720px, 60vw)); }
 /* The summary's clip player: a window over the summary holding the real map
    (#wrap is moved into #clipbody while it is open; two ids outrank the
    summary tab's rule hiding it). The sidebar stays behind: the window is the
@@ -82,6 +90,13 @@ body.summary-tab #summary { display: block !important; }
 #clipbar { border-top: 1px solid #2a323c; }
 #cliptitle { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
 #clipclose { padding: 3px 9px; }
+/* Drag by the title bar; resize from any edge (the edge's cursor wins over
+   the map's crosshair while the pointer is on it). */
+#cliphead { cursor: move; user-select: none; }
+#cliphead button { cursor: pointer; }
+#clip.edge * { cursor: inherit !important; }
+body.clip-dragging { user-select: none; }
+body.clip-dragging #clip canvas { pointer-events: none; }
 #clipplay { min-width: 34px; }
 #clipbody { flex: 1; min-height: 0; display: flex; }
 #clipbody #wrap { display: flex; flex: 1; min-width: 0; }
