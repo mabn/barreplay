@@ -10,7 +10,8 @@ import { bandPath, linePath, stepAt, timeChart, type ChartGroup } from "../chart
 import { mirrorKey } from "../legend";
 import { knockouts } from "../losses";
 import { sideColor, sideName } from "../model";
-import { compass, eliminationFocus, fighters, gapBattles, momentStories, type Fighter, type GapBattle, type MomentStory } from "../moments";
+import { eliminationFocus, fighters, gapBattles, momentStories, type Fighter, type GapBattle, type MomentStory } from "../moments";
+import { at as placeAt } from "../places";
 import { fighterNames, named } from "../names";
 import { fillUnits, inkOn } from "../unitchips";
 import { stepTimes } from "../series";
@@ -127,13 +128,13 @@ export function swingChart(ins: Insights, opts: SummaryOptions, watch: Watch | n
         head.append(mark);
       }
       const units = h("span", { class: "brs-units" });
-      if (l?.units.length) void fillUnits(units, ins, opts, l.units, priced, SWING_CHIPS);
-      const away = e.elsewhere?.[sd] ? ` (+${fmtMetal(e.elsewhere[sd])} elsewhere)` : "";
-      // A swing on economy says what each side's income did, not that
-      // nobody lost anything.
+      // A swing on economy says what each side's income did, not what it
+      // lost in fighting the line did not move on.
       const inc = e.income?.[sd];
+      if (l?.units.length && !inc) void fillUnits(units, ins, opts, l.units, priced, SWING_CHIPS);
+      const away = e.elsewhere?.[sd] ? ` (+${fmtMetal(e.elsewhere[sd])} elsewhere)` : "";
       const rate = (v: number) => `${fmtMetal(Math.round(v * 10) / 10)}/s`;
-      const count = inc && !l?.n ? `income ${rate(inc[0])} → ${rate(inc[1])}`
+      const count = inc ? `income ${rate(inc[0])} → ${rate(inc[1])}`
         : !l?.n ? "" : `${l.n} lost` + (priced && l.metal ? ` · ${fmtMetal(l.metal)} metal` : "") + away;
       return h("div", { class: "brs-losscol" + (gained ? " brs-won" : ""), style: `--brs-side: ${sideColor(ins, sd)}` },
         head, h("div", { class: "brs-swloss" }, h("span", { class: "brs-muted" }, count), units));
@@ -255,7 +256,7 @@ function listEntries(ins: Insights, moments: Moment[], stories: MomentStory[], g
   for (const gb of gaps) {
     const b = ins.battles[gb.battle];
     const W = gb.side >= 0 ? sideName(ins, gb.side) : "";
-    const title = gb.verdict === "blast" ? gb.blast! : gb.verdict === "even" ? "Even trade in battle" : `${W} ${gb.verdict === "decisive" ? "decisively wins" : "wins"} battle`;
+    const title = gb.title;
     const moved = gb.side >= 0 && Math.round(gb.delta * 100) >= 1;
     const priced = ins.costCoverage === "full" || b.lost.some((l) => l.metal > 0);
     const lostText = (sd: number) => {
@@ -268,7 +269,7 @@ function listEntries(ins: Insights, moments: Moment[], stories: MomentStory[], g
       chip: gb.side < 0 ? null : moved ? `▲ +${pct(gb.delta)}` : "▲ ahead",
       chipTip: moved ? `${W}'s chance to win rose ${pct(gb.delta)} over it` : `${W} lost less here`,
       rows: [0, 1].map((sd) => ({ color: sideColor(ins, sd), label: `${sideName(ins, sd)} lost`, value: lostText(sd) })),
-      detail: `Battle ${gb.battle + 1}, ${span(b.f0, b.f1)} in ${compass(ins, b.x, b.z)}.`,
+      detail: `Battle ${gb.battle + 1}, ${span(b.f0, b.f1)} ${placeAt(ins, b.x, b.z)}.`,
       shown: b.lost.map((l) => ({ n: l.n, metal: l.metal, units: l.units ?? l.top.map((def) => ({ def, n: 0, metal: 0 })) })),
       elsewhere: null, fighters: fighters(ins, b), income: null,
     });

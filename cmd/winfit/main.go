@@ -13,7 +13,7 @@
 // Every step of every game is a sample (features at that step, label = did
 // side 0 win), weighted so each game counts once however long it ran, and
 // mirrored (sides swapped) so the fit has no side bias to learn. The fit is
-// Newton's method on the L2-regularised log loss, which for three
+// Newton's method on the L2-regularised log loss, which for four
 // coefficients converges in a handful of iterations. It prints the log loss
 // and accuracy of the current coefficients and the fitted ones, overall and
 // at fixed points through a game, so a fit that is not better is visible
@@ -48,7 +48,7 @@ import (
 	"github.com/mabn/barreplay/internal/insights"
 )
 
-const nf = 3 // len(insights.WinModel.Coef)
+const nf = len(insights.WinModel.Coef)
 
 type sample struct {
 	f    [nf]float64
@@ -112,7 +112,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	fmt.Printf("%d games (%d files skipped: no winner, no swing line, or another version)\n", games, skipped)
+	fmt.Printf("%d games (%d files skipped: no winner, no swing line, or older than Version 7)\n", games, skipped)
 	if broken > 0 {
 		fmt.Printf("%d files unreadable (delete them and fetch again)\n", broken)
 	}
@@ -124,7 +124,7 @@ func main() {
 	report("current", insights.WinModel.Coef, samples)
 	report("fitted", fit, samples)
 	fmt.Printf("\n// Paste into internal/insights/swing.go:\n")
-	fmt.Printf("\tCoef:   [swingFeatures]float64{%.3f, %.3f, %.3f},\n\tFitted: true,\n\tGames:  %d,\n", fit[0], fit[1], fit[2], games)
+	fmt.Printf("\tCoef:   [swingFeatures]float64{%s},\n\tFitted: true,\n\tGames:  %d,\n", coefs(fit, "%.3f", ", "), games)
 	if *cats {
 		dir := *cacheDir
 		if dir == "auto" {
@@ -273,10 +273,10 @@ type row struct {
 }
 
 func table(rows []row, ss []sample) {
-	fmt.Printf("  %-14s %-20s %-14s %-14s %-14s %-14s %s\n", "", "coef army/inc/cum", "all steps", "at 25%", "at 50%", "at 75%", "at 90%")
+	fmt.Printf("  %-14s %-24s %-14s %-14s %-14s %-14s %s\n", "", "coef army/inc/cum/kill", "all steps", "at 25%", "at 50%", "at 75%", "at 90%")
 	for _, r := range rows {
 		m := measure(r.c, ss)
-		fmt.Printf("  %-14s %-20s", r.name, fmt.Sprintf("%.2f %.2f %.2f", r.c[0], r.c[1], r.c[2]))
+		fmt.Printf("  %-14s %-24s", r.name, coefs(r.c, "%.2f", " "))
 		for _, a := range append([]acc{m.all}, m.at...) {
 			if a.w == 0 {
 				fmt.Printf(" %-14s", "-")
@@ -299,10 +299,10 @@ func load(path string) (string, []sample, bool, error) {
 	if err := json.Unmarshal(b, &ins); err != nil {
 		return "", nil, false, err
 	}
-	if ins.Version != insights.Version || ins.Swing == nil || ins.Winner < 0 || ins.Winner > 1 {
+	if ins.Version < minVersion || ins.Swing == nil || ins.Winner < 0 || ins.Winner > 1 {
 		return "", nil, false, nil
 	}
-	feats := insights.SwingFeatures(ins.Series)
+	feats := insights.SwingFeatures(ins.Series, insights.Killed(&ins))
 	if len(feats) < 4 {
 		return "", nil, false, nil
 	}
@@ -321,6 +321,20 @@ func load(path string) (string, []sample, bool, error) {
 		out = append(out, sample{f, y, w, frac}, sample{m, 1 - y, w, frac})
 	}
 	return ins.GameID, out, true, nil
+}
+
+// minVersion is the oldest insights file a fit reads: Version 7 cut every
+// game where it was decided, and nothing the features read has changed
+// since. An older file runs on past the resign, through the losing side's
+// whole army blowing up.
+const minVersion = 7
+
+func coefs(c [nf]float64, f, sep string) string {
+	s := make([]string, nf)
+	for k, x := range c {
+		s[k] = fmt.Sprintf(f, x)
+	}
+	return strings.Join(s, sep)
 }
 
 func prob(c [nf]float64, f [nf]float64) float64 { return insights.WinProb(c, f) }
@@ -429,7 +443,7 @@ func measure(c [nf]float64, ss []sample) metrics {
 
 // report prints log loss and accuracy overall and near fixed points of a game.
 func report(name string, c [nf]float64, ss []sample) {
-	fmt.Printf("\n%s coefficients %.3f %.3f %.3f\n", name, c[0], c[1], c[2])
+	fmt.Printf("\n%s coefficients %s\n", name, coefs(c, "%.3f", " "))
 	m := measure(c, ss)
 	fmt.Printf("  all steps: log loss %.3f, accuracy %.1f%%\n", m.all.loss/m.all.w, 100*m.all.right/m.all.w)
 	for i, pt := range points {

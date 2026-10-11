@@ -684,7 +684,52 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           growthStory) names in a no-fight story only what carried >= 20% of
                           the shift, says for income whether the losing side's FELL or the
                           other's grew faster, and gives the model's own numbers (last-minute
-                          income, metal mined so far); no story says a side "lost nothing".
+                          income, metal mined so far); no story says a side "lost nothing". A moment the model says ARMY carried
+                          under 20% of (Moment.Army < 0.2) is told this way EVEN WITH A FIGHT in
+                          its window (moments.ts builtNotFought) — an even trade that left the
+                          armies' balance where it was did not move the line, the incomes did — with
+                          the fighting a one-line "Meanwhile" note, no battle badge, and the side
+                          that put more into its army instead said so; a fall in income names the
+                          mines/converters the side lost in the window.
+                          VERSION 8 says WHAT DID THE KILLING, for the page's BATTLE PHRASES
+                          (worker/src/summary/phrases.ts; Marcin's ask: "won battle" every
+                          time is boring). Each battle side's BattleLoss.By lists the enemy
+                          (team, def) units credited with its losses: deaths, metal, and how
+                          many of the killers did it (captures with causes only). Every Def
+                          carries a Class (classes.go): bomber/fighter/gunship/air/ship,
+                          lrgun, nuke, experimental (mobile, >= 3000 metal), army, commander,
+                          defence, factory, eco, building, unit. The air roles, ships, long-
+                          range guns and nukes are curated NAME TABLES read off BAR's own icon
+                          assignments (icontypes: air_bomber*, air_hover*, ship_*, ...) since
+                          the defs carry no role; an unknown def falls to a generic class, so a
+                          phrase that needs a role never fires on a guess. battlePhrase fires a
+                          rule only when the numbers are sure (the killers of >= 60% of the
+                          loss known, the class >= 60% of the metal, the subject the side that
+                          lost less), in order: a failed bombing run (the loser lost mostly
+                          bombers: "Blue Falcons intercept the Red Thunders" / "... are shot
+                          down"), nuke, long-range guns, bombers ("bomb"/"level" a base, 20k+
+                          of buildings), air battle, gunships, one experimental def doing half
+                          the killing, naval, defences holding (only when the attacker lost
+                          1.5x), a swarm (one def under 60 metal, 30+ units), an economy raid,
+                          and a factory that was a quarter of the loss. Otherwise marginPhrase
+                          rotates its words by battle number ("decisively wins", "overwhelms",
+                          "outfights", "smashes"; "edges out"...; a 10x loss of 30% of an army
+                          "crushes", never "routs", Marcin's call), with "Bloody stalemate"
+                          for an even fight that cost both armies 15%. Units are named by the
+                          side's COLOUR alone, "Blue Juggernauts" (Marcin's call, also for
+                          ownBlastTitle), which nameRuns colours like "Blue team". The phrases
+                          title the gap battles in the swing list and a fight swing whose
+                          battle is told whole; a phrase never overrides a trade the numbers
+                          contradict.
+                          PLACES (places.ts): compass() says "the middle", never "the centre"
+                          (Marcin's call), and a map with community area names uses them.
+                          Supreme Isthmus has Marcin's labels: each base's air, eco, beach,
+                          geo, front and geo sea, named by the colour of the side that STARTED
+                          in that half (its first Series.Front point; unknown = compass), so
+                          a battle reads "at Blue geo" and a bombed base "Blue geo's base";
+                          the middle, north/south sea and north/south island name no side.
+                          Points are fractions of the map's own size (24x24 = 12288 elmos),
+                          not of Insights.Bounds, which take in aircraft past the edge.
                           WinModel.Coef started as HAND-SET PRIORS
                           (Fitted=false, which the page states); VERSION 6 ships cmd/winfit's
                           fit over 933 games from the 10 days before 2026-10-11; v7 refits it
@@ -695,12 +740,32 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           3.988 cumulative income: income carries
                           the line). Per-category fits (winfit -categories) differed mainly
                           in steepness and gained little, so it stays ONE model.
+                          VERSION 9 (Marcin's ask: right more often, and every big move of
+                          the line something that can be NAMED) adds a fourth feature, the
+                          log ratio of metal each side has DESTROYED so far (Killed: the
+                          other side's fought-for losses, wiped deaths excluded, any capture)
+                          and stretches the income window from 1 to 3 minutes
+                          (swingIncomeSteps 12) — 1.597 army, 5.294 income, 4.149 cumulative,
+                          1.788 destroyed, over 1217 games. Out of sample (experiments/
+                          winmodel, 5 folds) accuracy and log loss are unchanged (77.0%,
+                          0.478 — they sit at a ceiling: value, a time-varying model,
+                          medians and the players' OpenSkill all added nothing), but the line
+                          moves 2.41 -> 1.61 points a step, and of its 12-point moves past the
+                          opening 44% -> 66% come with a fight the losing side lost or an
+                          elimination (1.71 -> 0.57 unnamed moves a game). The unnamed ones
+                          were nearly all last-minute income. Moment.Army counts the
+                          destroyed feature as army (fighting moved it).
                           WINNERS come from the demo's tail (demofile.Demo.Winners: one byte
                           per winning ally team right after the packet stream, per
                           rts/System/LoadSave/demofile.h) into snapshot.Meta.Winners via
                           BaseMeta, so every demo-backed pack carries them; anything without
                           (older .brps, rebuilt pieces) gets them from the BAR API's
                           AllyTeams[].winningTeam in cmd/insights (barapi.Replay.Winners).
+experiments/winmodel/      compares win-model VARIANTS on insights files (any version from 6;
+                          pre-7 files cut at the decision like v7 does): out-of-fold accuracy,
+                          log loss, jitter, 5-point zigzags, and the share of big moves an
+                          event can name. Where Version 9's model came from; add a variant to
+                          variants.go to try another idea.
 cmd/winfit/main.go        CLI: fits insights.WinModel to games with a known winner and prints
                           the coefficients to paste into swing.go. Input is insights files:
                           `insights -upload= -all -out ./ins` (compute-only mode SAVES an
@@ -708,7 +773,8 @@ cmd/winfit/main.go        CLI: fits insights.WinModel to games with a known winn
                           Every step is a sample weighted 1/steps (each game counts once),
                           mirrored so there is no side bias; Newton's method with a small L2;
                           refuses under 20 games; reports log loss/accuracy of the current and
-                          fitted weights overall and at 25/50/75/90% of a game. A refit changes
+                          fitted weights overall and at 25/50/75/90% of a game. It reads files
+                          of Version 7 or later (games cut at the decision). A refit changes
                           what is computed, so it is a new insights Version.
                           -categories also fits each game CATEGORY on its own (internal/gamecat:
                           lava games lavabalance rates — the lobby's tweak stack, ported from
@@ -942,11 +1008,11 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           `icon` (its iconType) then its name; SummaryOptions.iconBase names
                           the origin, defaulting to the one the module was loaded from, null
                           = names; a def with no icon reads as its name.
-                          The library draws versions 1-7 (INSIGHTS_VERSIONS [7, 6, 5, 4, 3, 2, 1]; v2 adds
+                          The library draws versions 1-9 (INSIGHTS_VERSIONS [9, 8, 7, 6, 5, 4, 3, 2, 1]; v2 adds
                           winner + swing, v3 eliminations and peak battles, v4 owner removals
                           left out, owned value and battle teams, v5 self-destructs marked, v6 fitted
                           win weights, v7 the game ends at the resign rather than the first team knocked
-                          out before it, swing drivers and no opening economy swings) and app.js fetches .insights7, then 6, 5, 4, 3, 2, 1. A version bump needs `insights -all` after
+                          out before it, swing drivers and no opening economy swings, v8 battle killers and unit classes for the battle phrases, v9 the calmer win model with metal destroyed and a 3-minute income window) and app.js fetches .insights9, then 8, 7, 6, 5, 4, 3, 2, 1. A version bump needs `insights -all` after
                           the deploy, or published replays keep their older summary — except the ones people OPEN, which
                           update themselves: see ON-DEMAND SUMMARIES under worker/ (so
                           `insights -all` is now only for having every summary current at once).

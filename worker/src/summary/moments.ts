@@ -5,7 +5,9 @@
 // card uses. Pure, so the node tests can pin the wording rules.
 import { fmtClock, fmtMetal } from "./format";
 import { knockouts, wipedOf } from "./losses";
-import { lossWorth, POWER_WORTH, sideName, sideOfTeam } from "./model";
+import { lossWorth, POWER_WORTH, sideName, sideOfTeam, sideShort } from "./model";
+import { battlePhrase, battleWhere, marginPhrase, plural } from "./phrases";
+import { at as placeAt, place } from "./places";
 import { SIM_FPS, type Battle, type Insights, type Moment, type UnitLoss } from "./types";
 
 /** BAR's commanders, minus the scavenger bosses (app.js's COMMANDER_RE). */
@@ -84,6 +86,40 @@ const INCOME_STEPS = 4;
 /** A share of a shift below this is not mentioned as what moved it. */
 const DRIVER_MIN = 0.2;
 
+/** builtNotFought says the model's own split (version 7) put less than
+ * DRIVER_MIN of a moment's shift on army value: whatever was lost in the
+ * window, the armies' balance hardly moved, so a fight there — however big
+ * — is not what moved the line. An even trade of 5.9k for 5.5k metal is
+ * exactly that, while the incomes pulled apart. */
+function builtNotFought(m: Moment): boolean {
+  return typeof m.army === "number" && typeof m.eco === "number" && m.army + m.eco > 0 && m.army < DRIVER_MIN;
+}
+
+/** BAR's metal producers by name — mines and energy converters — the
+ * metal half of insights defs.go ecoNameRE. Power plants feed converters
+ * too, but a lost wind turbine is not what a fall in metal income is. */
+const METAL_NAME = /^(arm|cor|leg)[a-z]*(mex|moho|makr|mmkr|mmm)/;
+
+/** ecoLost is the metal producers side lost in [f0, f1], the most first. */
+function ecoLost(ins: Insights, side: number, f0: number, f1: number): { n: number; metal: number; kinds: [string, number][] } {
+  const wiped = wipedOf(ins);
+  const sideOf = sideOfTeam(ins);
+  const d = ins.deaths;
+  const kinds = new Map<string, number>();
+  let n = 0;
+  let metal = 0;
+  for (let i = 0; i < d.f.length; i++) {
+    if (d.f[i] < f0 || d.f[i] > f1 || wiped(i) || sideOf.get(d.team[i]) !== side) continue;
+    const def = ins.defs[d.def[i]];
+    if (!def || !METAL_NAME.test(def.name)) continue;
+    const name = def.human || def.name;
+    kinds.set(name, (kinds.get(name) ?? 0) + 1);
+    n++;
+    metal += d.cost?.[i] ?? 0;
+  }
+  return { n, metal, kinds: [...kinds].sort((a, b) => b[1] - a[1]) };
+}
+
 interface Growth {
   title: string;
   detail: string;
@@ -150,7 +186,20 @@ export function growthStory(ins: Insights, m: Moment): Growth {
     parts.push(`Metal income over the last minute: ${W} ${rate(gw.income[0])} → ${rate(gw.income[1])}, ${L} ${rate(gl.income[0])} → ${rate(gl.income[1])}.`);
     parts.push(`Metal mined so far: ${W} ${fmtMetal(gw.mined[1])}, ${L} ${fmtMetal(gl.mined[1])}.`);
   }
+  if (eco && incomeLost) {
+    // Where it went, when that was the other side: the mines and
+    // converters the losing side lost in the window.
+    const [w0, w1] = momentWindow(ins, m);
+    const eb = ecoLost(ins, lose, w0, w1);
+    if (eb.n >= 1) parts.push(`${L} lost ${eb.n} metal producer${eb.n === 1 ? "" : "s"} (${fmtMetal(eb.metal)} metal): ${eb.kinds.slice(0, 4).map(([name, n]) => (n > 1 ? `${n} ${name}` : name)).join(", ")}.`);
+  }
   if (army) parts.push(`Army: ${W} ${fmtMetal(gw.army[0])} → ${fmtMetal(gw.army[1])} metal, ${L} ${fmtMetal(gl.army[0])} → ${fmtMetal(gl.army[1])}.`);
+  else if (gl.army[1] - gl.army[0] > Math.max(0, gw.army[1] - gw.army[0])) {
+    // The other side spent the stretch on its army instead: worth saying,
+    // since the army chart shows it pulling ahead while the line went the
+    // other way.
+    parts.push(`${L} put more into its army: ${fmtMetal(gl.army[0])} → ${fmtMetal(gl.army[1])} metal, ${W} ${fmtMetal(gw.army[0])} → ${fmtMetal(gw.army[1])}.`);
+  }
   return { title, detail: parts.join(" "), sides };
 }
 
@@ -224,15 +273,10 @@ export function isCommander(name: string): boolean {
 }
 
 /** compass names where a point sits on the map: "the north-west", "the
- * centre". Bounds are the capture's, which is what the map view draws. */
+ * middle", or what players call it on a map whose areas have names
+ * ("Blue geo"; places.ts). */
 export function compass(ins: Insights, x: number, z: number): string {
-  const b = ins.bounds;
-  const u = (x - b.minX) / Math.max(1, b.maxX - b.minX);
-  const v = (z - b.minZ) / Math.max(1, b.maxZ - b.minZ);
-  const ns = v < 1 / 3 ? "north" : v > 2 / 3 ? "south" : "";
-  const ew = u < 1 / 3 ? "west" : u > 2 / 3 ? "east" : "";
-  if (!ns && !ew) return "the centre";
-  return "the " + (ns && ew ? `${ns}-${ew}` : ns || ew);
+  return place(ins, x, z).name;
 }
 
 /** momentWindow is the frames whose deaths explain a moment: its own window
@@ -330,6 +374,10 @@ function possessive(name: string): string {
   return name.endsWith("s") ? `${name}'` : `${name}'s`;
 }
 
+function article(name: string): string {
+  return /^[aeiou]/i.test(name) ? "an" : "a";
+}
+
 /** momentStory names a moment and says what happened in it. */
 export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<number>): MomentStory {
   const [f0, f1] = momentWindow(ins, m);
@@ -347,8 +395,8 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
   // Where it happened: the focus when it has a place (the commander's
   // death, the fight's busiest spot), else the centre of what was lost.
   const at = (f: Focus | null) => {
-    if (f && typeof f.x === "number" && typeof f.z === "number") return ` in ${compass(ins, f.x, f.z)}`;
-    return ll.at ? ` in ${compass(ins, ll.at[0], ll.at[1])}` : "";
+    if (f && typeof f.x === "number" && typeof f.z === "number") return ` ${placeAt(ins, f.x, f.z)}`;
+    return ll.at ? ` ${placeAt(ins, ll.at[0], ll.at[1])}` : "";
   };
 
   // A player leaving takes their whole army off the board, which is the
@@ -368,6 +416,8 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
   let fight = true;
   // The battle a shared moment told only part of.
   let whole: Battle | null = null;
+  // A fight there that the line did not move on (see builtNotFought).
+  let notFought = false;
   if (out.length === 1) {
     fight = false;
     focus = eliminationFocus(ins, out[0].team, out[0].f);
@@ -386,8 +436,9 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     title = ll.commanderDeaths.every((i) => selfDestructed(ins, i))
       ? `${ll.commanders.length} of ${possessive(L)} commanders self-destruct${at(focus)}`
       : `${ll.commanders.length} of ${possessive(L)} commanders fall${at(focus)}`;
-  } else if (size(ll) < (priced ? QUIET_METAL : 3) && size(ll) <= size(wl) * 1.5) {
-    // No real fight: the line moved on what each side built.
+  } else if ((size(ll) < (priced ? QUIET_METAL : 3) && size(ll) <= size(wl) * 1.5) || (notFought = builtNotFought(m))) {
+    // No real fight, or one that did not move the line: it moved on what
+    // each side built.
     fight = false;
     focus = null;
     growth = growthStory(ins, m);
@@ -395,8 +446,8 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
   } else if (ll.kinds.length && priced && ll.kinds[0][1] === 1 && ll.kinds[0][2] >= SINGLE_SHARE * ll.metal && ll.kinds[0][2] >= 500) {
     focus = deathFocus(ins, ll.top);
     title = selfDestructed(ins, ll.top)
-      ? `${L} self-destructs a ${ll.kinds[0][0]}${at(focus)}`
-      : `${L} loses a ${ll.kinds[0][0]}${at(focus)}`;
+      ? `${L} self-destructs ${article(ll.kinds[0][0])} ${ll.kinds[0][0]}${at(focus)}`
+      : `${L} loses ${article(ll.kinds[0][0])} ${ll.kinds[0][0]}${at(focus)}`;
   } else {
     // A fight: told as the EVENT it was — the battle running at its busiest
     // killing, from start to end, and only what died there — not as the sum
@@ -434,6 +485,7 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
         local = ev.local;
       }
     }
+    let phrase: string | null = null;
     const lw = local ? local[won] : wl;
     const lo = local ? local[lose] : ll;
     // The line moved toward W, but W can still have lost more there (its
@@ -446,6 +498,10 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     } else if (drop) {
       focus = { f: f0, f1 };
       title = `${L} loses ${Math.round(drop.share * 100)}% of its army${drop.mostly ? `, mostly ${drop.mostly}` : ""}`;
+    } else if (b && !whole && worth(lw) < worth(lo) && (phrase = battlePhrase(ins, b, won, at(focus).trim()))) {
+      // The whole battle is this story, so what its numbers say happened
+      // there is the title ("Blue Thunders level Ann's base").
+      title = phrase;
     } else title = worth(lw) === 0 || worth(lo) >= 2 * worth(lw) ? `${W} wins the fight${at(focus)}`
       : worth(lw) <= worth(lo) ? `${W} wins a close fight${at(focus)}`
       : `${W} trades ${unit(size(lw))} for ${unit(size(lo))}${at(focus)}`;
@@ -459,8 +515,12 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     .map(([name, l]) => `${name} lost ${lossText(l as SideLoss, priced)}`)
     .join("; ");
   const said = losses(dl, dw);
+  // Fighting the line did not move on is said as what it was: a side note.
+  const traded = notFought && priced && Math.max(size(ll), size(wl)) >= QUIET_METAL
+    ? ` Meanwhile ${L} lost ${fmtMetal(ll.metal)} metal in fighting and ${W} ${fmtMetal(wl.metal)}, which did not tip the armies toward ${W}.`
+    : said ? ` ${said}.` : "";
   let detail = growth
-    ? growth.detail + (said ? ` ${said}.` : "")
+    ? growth.detail + traded
     : local
       ? `There, ${fmtClock(focus!.f / SIM_FPS)}–${fmtClock((focus!.f1 ?? focus!.f) / SIM_FPS)}: ${said || "nothing was lost"}.`
       : said ? `${said}.` : "";
@@ -471,6 +531,14 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
   if (!local && !growth && said && focus && focus.f1 === undefined) {
     const span = deathSpan(ins, f0, f1);
     if (span && span[1] - span[0] >= SIM_FPS) focus = { ...focus, f: Math.min(focus.f, span[0]), f1: Math.max(focus.f, span[1]) };
+  }
+  if (!local && !growth) {
+    // Losses counted over the whole window take in any own-blast chain in
+    // it, which the battles list then leaves to this story: say it here.
+    for (const b of ins.battles) {
+      const side = ownBlast(b);
+      if (side >= 0 && b.f0 <= f1 && b.f1 >= f0) detail += ` ${ownBlastTitle(ins, b, side)} at ${fmtClock(b.f0 / SIM_FPS)}.`;
+    }
   }
   if (whole) detail += ` Part of a fight from ${fmtClock(whole.f0 / SIM_FPS)} to ${fmtClock(whole.f1 / SIM_FPS)}.`;
   let elsewhere: number[] | null = null;
@@ -484,7 +552,8 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
       elsewhere = ins.sides.map((_, sd) => rest(sd));
     }
   }
-  const battle = battleOfMoment(ins, focus, f0, f1);
+  // A moment told on what was built despite a fight is not about that fight.
+  const battle = notFought ? -1 : battleOfMoment(ins, focus, f0, f1);
   const fought = fight ? fighters(ins, ins.battles[battle]) : ins.sides.map(() => []);
   return { title, detail, lost, shown: local ?? lost, elsewhere, whole, battle, focus, fighters: fought, growth: growth?.sides ?? null };
 }
@@ -712,6 +781,9 @@ export interface GapBattle {
   verdict: "decisive" | "win" | "even" | "blast";
   /** The title of a "blast" battle (ownBlastTitle). */
   blast?: string;
+  /** What the list says happened: the blast, a battle phrase when one is
+   * sure (phrases.ts battlePhrase), else the margin's words. */
+  title: string;
 }
 
 /** A side's losses in a battle are its own doing when its own side
@@ -734,7 +806,7 @@ export function ownBlast(b: Battle | undefined): number {
 }
 
 /** ownBlastTitle says what blew up and, when an enemy's kill set it off,
- * whose: "Blue team's Advanced Fusion Reactors blow up, set off by
+ * whose: "Blue Advanced Fusion Reactors blow up, set off by
  * [MANTA]'s Basilica". Losses to allies' fire rather than to blasts read
  * "Blue team loses 18.9k metal to its own side's fire". */
 export function ownBlastTitle(ins: Insights, b: Battle, side: number): string {
@@ -744,7 +816,7 @@ export function ownBlastTitle(ins: Insights, b: Battle, side: number): string {
   const name = def?.human || def?.name;
   const n = l.units?.find((u) => u.def === l.ownDef)?.n ?? 0;
   let title = def?.power && name
-    ? `${possessive(S)} ${n > 1 ? plural(name) : name} ${n > 1 ? "blow" : "blows"} up`
+    ? `${sideShort(ins, side)} ${n > 1 ? plural(name) : name} ${n > 1 ? "blow" : "blows"} up`
     : `${S} loses ${fmtMetal(l.own ?? 0)} metal to its own side's fire`;
   if (l.trigger) {
     const who = ins.teams.find((t) => t.team === l.trigger![0])?.player || `Team ${l.trigger[0]}`;
@@ -754,9 +826,6 @@ export function ownBlastTitle(ins: Insights, b: Battle, side: number): string {
   return title;
 }
 
-function plural(name: string): string {
-  return /(s|x|ch|sh)$/.test(name) ? name + "es" : name + "s";
-}
 
 /** A stretch of the game this long with nothing in the swing list is a gap
  * worth filling: a sixth of the game, at least four minutes. */
@@ -856,8 +925,16 @@ export function gapBattles(ins: Insights, moments: Moment[], stories: MomentStor
     const [x, y] = [ins.battles[i], ins.battles[j]];
     return Math.abs(x.f1 - y.f1) < apart && Math.hypot(x.x - y.x, x.z - y.z) < x.r + y.r;
   };
+  // A swing told over its whole window (a commander's death, an
+  // elimination, one big loss) counts every death in it, so a battle inside
+  // that window is already in its story; one told as a fight in one place
+  // covers the battles there. One told on what was built covers none.
+  const windows = moments.map((m, k) => ({ w: momentWindow(ins, m), st: stories[k] })).filter(({ st }) => st && !st.growth);
+  const covered = (b: Battle) => windows.some(({ w, st }) => b.f0 <= w[1] && b.f1 >= w[0]
+    && (st.shown === st.lost || !st.focus || typeof st.focus.x !== "number"
+      || Math.hypot(b.x - st.focus.x, b.z - (st.focus.z ?? 0)) < b.r + (st.focus.r ?? 0) + BATTLE_REACH));
   const storied = ins.battles.map((_, i) => i)
-    .filter((i) => !told.has(i) && storyBattle(ins.battles[i]))
+    .filter((i) => !told.has(i) && storyBattle(ins.battles[i]) && !covered(ins.battles[i]))
     .sort((x, y) => total(ins.battles[y]) - total(ins.battles[x]));
   for (const i of storied) {
     if (marks.length >= LIST_MAX || picked.some((j) => samePlace(i, j))) continue;
@@ -915,6 +992,9 @@ export function gapBattles(ins: Insights, moments: Moment[], stories: MomentStor
     const verdict = blast >= 0 && blast !== side ? "blast" as const
       : side < 0 ? "even" as const : lo === 0 || hi >= 2 * lo ? "decisive" as const : "win" as const;
     const move = pAt(b.f1 / SIM_FPS + ins.stepSec) - pAt(b.f0 / SIM_FPS);
-    return { battle: i, side, delta: side === 1 ? -move : move, verdict, ...(verdict === "blast" ? { blast: ownBlastTitle(ins, b, blast) } : {}) };
+    const where = battleWhere(ins, b);
+    const title = verdict === "blast" ? ownBlastTitle(ins, b, blast)
+      : (side >= 0 && battlePhrase(ins, b, side, where)) || marginPhrase(ins, b, i, side, verdict === "decisive", where, priced);
+    return { battle: i, side, delta: side === 1 ? -move : move, verdict, title, ...(verdict === "blast" ? { blast: title } : {}) };
   });
 }

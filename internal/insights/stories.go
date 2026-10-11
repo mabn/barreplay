@@ -83,6 +83,22 @@ type BattleLoss struct {
 	Own     float64   `json:"own,omitempty"`
 	OwnDef  int32     `json:"ownDef,omitempty"`
 	Trigger *[2]int32 `json:"trigger,omitempty"`
+	// By is what KILLED these losses: every enemy (team, def) the engine
+	// credited, with the deaths and metal it took and how many of its units
+	// did it, costliest first, at most battleUnitDefs. What the page's battle
+	// phrases read ("Blue bombers level the base"). Captures that record
+	// causes only; Version 8.
+	By []UnitKill `json:"by,omitempty"`
+}
+
+// UnitKill is what one team's units of one def destroyed of a side in a
+// battle.
+type UnitKill struct {
+	Team  int32   `json:"team"`
+	Def   int32   `json:"def"`
+	N     int     `json:"n"`     // deaths credited to them
+	Metal float64 `json:"metal"` // metal of those deaths
+	Units int     `json:"units"` // how many of the killers did it
 }
 
 // UnitLoss is how many of one def a side lost in a battle, and their metal.
@@ -646,6 +662,7 @@ func (p *pass) battleOf(members []int, ns int) Battle {
 	bt.X, bt.Z, bt.R = int32(cx), int32(cz), int32(r)
 	bt.Teams = p.battleTeams(members, bt)
 	p.battleOwnFire(members, &bt)
+	p.battleKillers(members, &bt)
 	for s := range bt.Lost {
 		bt.Lost[s].Metal = round1(bt.Lost[s].Metal)
 		bt.Lost[s].Worth = round1(bt.Lost[s].Worth)
@@ -653,6 +670,73 @@ func (p *pass) battleOf(members []int, ns int) Battle {
 		bt.Lost[s].Units = unitLosses(top[s], count[s])
 	}
 	return bt
+}
+
+// battleKillers fills each side's By: the enemy units credited with its
+// losses there, wherever they fired from.
+func (p *pass) battleKillers(members []int, bt *Battle) {
+	if !p.hasCauses {
+		return
+	}
+	d := p.out.Deaths
+	type acc struct {
+		n     int
+		metal float64
+		units map[int32]bool
+	}
+	by := make([]map[[2]int32]*acc, len(bt.Lost))
+	for _, i := range members {
+		side := p.ro.side(d.Team[i])
+		k := p.deathKillerKind[i]
+		if side < 0 || k[0] < 0 || k[1] <= 0 {
+			continue
+		}
+		if ks := p.ro.side(k[0]); ks < 0 || ks == side {
+			continue
+		}
+		if by[side] == nil {
+			by[side] = map[[2]int32]*acc{}
+		}
+		a := by[side][k]
+		if a == nil {
+			a = &acc{units: map[int32]bool{}}
+			by[side][k] = a
+		}
+		a.n++
+		a.metal += d.Cost[i]
+		if i < len(p.deathKillerUnit) && p.deathKillerUnit[i] >= 0 {
+			a.units[p.deathKillerUnit[i]] = true
+		}
+	}
+	for s, m := range by {
+		if m == nil {
+			continue
+		}
+		out := make([]UnitKill, 0, len(m))
+		for k, a := range m {
+			out = append(out, UnitKill{Team: k[0], Def: k[1], N: a.n, Metal: round1(a.metal), Units: max(1, len(a.units))})
+			if p.usedDef != nil {
+				p.usedDef[k[1]] = true
+			}
+		}
+		sort.Slice(out, func(i, j int) bool {
+			a, b := out[i], out[j]
+			if a.Metal != b.Metal {
+				return a.Metal > b.Metal
+			}
+			if a.N != b.N {
+				return a.N > b.N
+			}
+			if a.Team != b.Team {
+				return a.Team < b.Team
+			}
+			return a.Def < b.Def
+		})
+		if len(out) > battleUnitDefs {
+			out = out[:battleUnitDefs]
+		}
+		bt.Lost[s].By = out
+	}
 }
 
 // battleTeams says which teams fought a battle and with how much: each

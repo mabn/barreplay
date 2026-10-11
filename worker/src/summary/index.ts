@@ -33,7 +33,7 @@ export const INSIGHTS_VERSION = 7;
  * found as peaks without them; 4: units their own side reclaimed are no
  * longer deaths; 5: self-destructs are marked), so an older file draws with those parts missing. A host
  * fetches the first that exists. */
-export const INSIGHTS_VERSIONS = [7, 6, 5, 4, 3, 2, 1];
+export const INSIGHTS_VERSIONS = [9, 8, 7, 6, 5, 4, 3, 2, 1];
 
 /** insightsFile names a revision's insights piece. */
 export function insightsFile(rid: string, version = INSIGHTS_VERSION): string {

@@ -12,11 +12,13 @@ import { zonesOf } from "../src/summary/zones";
 import { lossKinds } from "../src/summary/losskinds";
 import { leadPct, ratioDomain } from "../src/summary/series";
 import { clipOf } from "../src/summary/sections/awards";
+import { battlePhrase, marginPhrase } from "../src/summary/phrases";
+import { at, place } from "../src/summary/places";
 import type { Insights } from "../src/summary/types";
 
 function ins(over: Partial<Insights> = {}): Insights {
   return {
-    version: 7, causes: true, gameId: "g", durationSec: 600, stepSec: 15, costCoverage: "full", pov: "full",
+    version: 9, causes: true, gameId: "g", durationSec: 600, stepSec: 15, costCoverage: "full", pov: "full",
     bounds: { minX: 0, maxX: 1, minZ: 0, maxZ: 1 },
     sides: [{ ally: 0, teams: [0], players: ["Ann", "Bob"], color: "#112233" }, { ally: 1, teams: [1], players: ["Cy"] }],
     teams: [], defs: {},
@@ -56,7 +58,7 @@ test("notices say why something is missing", () => {
   assert.match(notices(ins({ pov: "ally" }))[0], /re-simulation/);
   assert.match(notices(ins({ costCoverage: "army" }))[0], /armed mobile units only/);
   // An older file says what it lacks; a capture without killers says so.
-  assert.equal(notices(ins({ version: 5 }))[0], "Outdated report (v5), missing: fitted win odds, game end at the resign, story battles, friendly fire. It updates when summaries are recomputed.");
+  assert.equal(notices(ins({ version: 5 }))[0], "Outdated report (v5), missing: fitted win odds, game end at the resign, story battles, friendly fire, battle titles that say what did the killing, calmer win odds that move with the fighting. It updates when summaries are recomputed.");
   assert.match(notices(ins({ causes: false }))[0], /does not record killers/);
 });
 
@@ -77,7 +79,7 @@ test("side labels and colours", () => {
 test("compass splits the map in thirds", () => {
   const i = ins({ bounds: { minX: 0, maxX: 900, minZ: 0, maxZ: 900 } });
   assert.equal(compass(i, 100, 100), "the north-west");
-  assert.equal(compass(i, 450, 450), "the centre");
+  assert.equal(compass(i, 450, 450), "the middle");
   assert.equal(compass(i, 800, 450), "the east");
   assert.equal(compass(i, 450, 800), "the south");
 });
@@ -155,7 +157,7 @@ test("a moment is named after what died in it", () => {
   const pawns10 = () => Array.from({ length: 10 }, () => [1000, 2, 0, 450, 450] as [number, number, number, number, number]);
   // A lopsided trade of small units is a won fight.
   st = momentStory(ins({ ...base, deaths: deaths(Array.from({ length: 10 }, () => [1000, 2, 0, 450, 450] as [number, number, number, number, number])) }), m);
-  assert.equal(st.title, "Team 2 wins the fight in the centre");
+  assert.equal(st.title, "Team 2 wins the fight in the middle");
   assert.deepEqual(st.focus, { f: 1000, f1: 1000, x: 450, z: 450, r: 600 });
   // With a battle there, the fight is that battle: its span, and only what
   // died inside it — not the pawns lost across the map at the same time.
@@ -179,7 +181,7 @@ test("a moment is named after what died in it", () => {
   // trade instead of calling it a win.
   const trade = [...pawns10().slice(0, 8), ...Array.from({ length: 16 }, () => [1000, 2, 1, 450, 450] as [number, number, number, number, number])];
   st = momentStory(ins({ ...base, deaths: deaths(trade) }), m);
-  assert.equal(st.title, "Team 2 trades 800 metal for 400 metal in the centre");
+  assert.equal(st.title, "Team 2 trades 800 metal for 400 metal in the middle");
   // Nothing died: the armies pulled apart.
   st = momentStory(ins({ ...base, deaths: deaths([]) }), m);
   assert.equal(st.title, "Team 2 out-builds Blue team's army");
@@ -196,6 +198,17 @@ test("a moment is named after what died in it", () => {
   const fell = { ...base, series: { ...base.series, metalIncome: [[20, 20, 4, 4], [5, 5, 5, 5]] } };
   st = momentStory(ins({ ...fell, deaths: deaths([]) }), { ...m, army: 0, eco: 1 });
   assert.equal(st.title, "Blue team loses metal income");
+  // A fight the model says did not move the armies' balance (army < 20% of
+  // the shift) is not the story, however big: the incomes are, with the
+  // fighting a side note and no battle credited.
+  st = momentStory(ins({ ...fell, deaths: deaths(trade), battles: [{ f0: 950, f1: 1300, x: 450, z: 450, r: 200, lost: [] }] }), { ...m, army: 0, eco: 1 });
+  assert.equal(st.title, "Blue team loses metal income");
+  assert.equal(st.battle, -1);
+  assert.equal(st.focus, null);
+  assert.match(st.detail, /Meanwhile Blue team lost 400 metal in fighting and Team 2 800, which did not tip the armies toward Team 2\.$/);
+  // The same trade with the army carrying the shift is still the fight.
+  st = momentStory(ins({ ...fell, deaths: deaths(trade) }), { ...m, army: 0.6, eco: 0.4 });
+  assert.equal(st.title, "Team 2 trades 800 metal for 400 metal in the middle");
   st = momentStory(ins({ ...inc, deaths: deaths([]) }), { ...m, army: 0.4, eco: 0.6 });
   assert.equal(st.title, "Team 2 out-builds Blue team in army and economy");
   // Deaths outside the window (and the step before it) do not count.
@@ -416,6 +429,26 @@ test("gapBattles tells only decisive battles with real losses in the opening", (
   assert.deepEqual(got.map((g) => [g.battle, g.side, g.verdict]), [[0, 0, "decisive"], [1, 0, "win"], [3, 1, "decisive"], [4, -1, "even"]]);
 });
 
+test("gapBattles leaves a battle inside a swing told over its whole window to that swing", () => {
+  const F = 30;
+  const battle = (min: number, a: number, b: number) => ({ f0: min * 60 * F, f1: (min * 60 + 30) * F, x: 0, z: 0, r: 500,
+    lost: [{ n: 1, metal: a, top: [] }, { n: 1, metal: b, top: [] }] });
+  const steps = Array.from({ length: 40 }, (_, i) => i * 60);
+  const file = ins({
+    durationSec: 2400, stepSec: 60,
+    series: { t: steps, army: [steps.map(() => 4000), steps.map(() => 4000)], metalIncome: [], energyIncome: [], armyCats: [], armyByCat: [] },
+    // A short, costly story battle in the middle of a swing's minute.
+    battles: [battle(30, 3000, 300)],
+    swing: { p: steps.map(() => 0.5), moments: [], fitted: false },
+  } as Partial<Insights>);
+  const m = { n: 1, f0: 30 * 60 * F, f1: 31 * 60 * F, side: 1, delta: 0.2, battle: -1 };
+  const lost: never[] = [];
+  const whole = { shown: lost, lost, growth: null, focus: { f: 30 * 60 * F }, battle: -1 } as unknown as ReturnType<typeof momentStory>;
+  assert.deepEqual(gapBattles(file, [m], [whole]), [], "the swing's story already counts its deaths");
+  const built = { ...whole, growth: [] } as unknown as ReturnType<typeof momentStory>;
+  assert.equal(gapBattles(file, [m], [built]).length, 1, "a swing told on what was built covers no fight");
+});
+
 test("gapBattles judges a battle by worth: lost power plants count 2.5x", () => {
   const F = 30;
   const steps = Array.from({ length: 40 }, (_, i) => i * 60);
@@ -459,4 +492,75 @@ test("ratioDomain scales to the leads from 40% to 95% of the game", () => {
   // Zero is always on the axis, and an even game still has some height.
   const [a, b] = ratioDomain(t, t.map(() => 1), 1000);
   assert.ok(a < 0 && b > 1 && b - a >= 10);
+});
+
+test("battle phrases say what did the killing, and only when the numbers are sure", () => {
+  const defs = {
+    "1": { name: "armthund", human: "Thunder", cost: 150, class: "bomber" },
+    "2": { name: "cormex", human: "Metal Extractor", cost: 50, class: "eco" },
+    "3": { name: "corjugg", human: "Behemoth", cost: 40000, class: "experimental" },
+    "4": { name: "corak", human: "Grunt", cost: 40, class: "army" },
+    "5": { name: "armllt", human: "Sentry", cost: 85, class: "defence" },
+    "6": { name: "corlab", human: "Bot Lab", cost: 1500, class: "factory" },
+    "7": { name: "armfig", human: "Falcon", cost: 80, class: "fighter" },
+    "8": { name: "corwin", human: "Wind Turbine", cost: 40, class: "building" },
+  };
+  const g = ins({
+    defs,
+    sides: [{ ally: 0, teams: [0], players: ["Ann"], color: "#0000ff" }, { ally: 1, teams: [1], players: ["Cy"], color: "#ff0000" }],
+    teams: [{ team: 0, side: 0, player: "Ann" }, { team: 1, side: 1, player: "Cy" }] as Insights["teams"],
+  });
+  const battle = (lost1: { def: number; n: number; metal: number }[], by: { def: number; n: number; metal: number; units: number }[], lost0 = 0) => ({
+    f0: 0, f1: 300, x: 0.5, z: 0.5, r: 100,
+    lost: [
+      { n: lost0 ? 1 : 0, metal: lost0, top: [] },
+      { n: lost1.reduce((a, u) => a + u.n, 0), metal: lost1.reduce((a, u) => a + u.metal, 0), top: [], units: lost1, by: by.map((k) => ({ team: 0, ...k })) },
+    ],
+    teams: [{ team: 0, army: 0, lost: lost0, killed: 0 }, { team: 1, army: 0, lost: lost1.reduce((a, u) => a + u.metal, 0), killed: 0 }],
+  });
+  const where = "in the middle";
+  // Bombers taking out buildings bomb the base; a big haul levels it, and
+  // one player losing nearly all of it is named.
+  assert.equal(battlePhrase(g, battle([{ def: 2, n: 40, metal: 2000 }], [{ def: 1, n: 40, metal: 2000, units: 6 }]), 0, where), "Blue Thunders bomb Cy's base");
+  assert.equal(battlePhrase(g, battle([{ def: 8, n: 600, metal: 24000 }], [{ def: 1, n: 600, metal: 24000, units: 20 }]), 0, where), "Blue Thunders level Cy's base");
+  // One experimental doing the killing: the verb agrees with one of it.
+  assert.equal(battlePhrase(g, battle([{ def: 4, n: 100, metal: 4000 }], [{ def: 3, n: 100, metal: 4000, units: 1 }], 500), 0, where), "Blue Behemoth stomps through the Red army in the middle");
+  // A failed bombing run is the bombers' own loss; fighters intercept it.
+  assert.equal(battlePhrase(g, battle([{ def: 1, n: 20, metal: 3000 }], [{ def: 7, n: 20, metal: 3000, units: 8 }]), 0, where), "Blue Falcons intercept the Red Thunders");
+  // Defences hold only when the attack plainly failed.
+  const held = battle([{ def: 4, n: 50, metal: 2000 }], [{ def: 5, n: 50, metal: 2000, units: 5 }], 500);
+  assert.equal(battlePhrase(g, held, 0, where), "Blue Sentries hold off a Red attack in the middle");
+  assert.equal(battlePhrase(g, battle([{ def: 4, n: 50, metal: 2000 }], [{ def: 5, n: 50, metal: 2000, units: 5 }], 1800), 0, where), null);
+  // A swarm of cheap units.
+  assert.equal(battlePhrase(g, battle([{ def: 5, n: 30, metal: 2550 }], [{ def: 4, n: 30, metal: 2550, units: 60 }]), 0, where), "A swarm of Blue Grunts overwhelms Red in the middle");
+  // A lab that was a real part of the loss names the battle.
+  assert.equal(battlePhrase(g, battle([{ def: 6, n: 1, metal: 1500 }, { def: 4, n: 10, metal: 400 }], []), 0, where), "Blue destroys Cy's Bot Lab in the middle");
+  // Killers unknown for most of the loss: nothing but the margin is sure.
+  assert.equal(battlePhrase(g, battle([{ def: 2, n: 40, metal: 2000 }], [{ def: 1, n: 10, metal: 500, units: 2 }]), 0, where), null);
+  // The side that lost MORE is never the subject of a phrase.
+  assert.equal(battlePhrase(g, battle([{ def: 2, n: 40, metal: 2000 }], [{ def: 1, n: 40, metal: 2000, units: 6 }], 2500), 0, where), null);
+  // Margin words rotate by battle number, and a lopsided result is a crush.
+  const b = battle([{ def: 4, n: 50, metal: 2000 }], [], 800);
+  assert.equal(marginPhrase(g, b, 0, 0, true, where, true), "Blue decisively wins in the middle");
+  assert.equal(marginPhrase(g, b, 1, 0, true, where, true), "Blue overwhelms Red in the middle");
+  assert.equal(marginPhrase(g, battle([{ def: 4, n: 50, metal: 2000 }], [], 100), 0, 0, true, where, true), "Blue crushes Red in the middle");
+  assert.equal(marginPhrase(g, b, 0, -1, false, where, true), "Bloody stalemate in the middle: both sides lose ~1.4k metal");
+});
+
+test("Supreme Isthmus areas go by the names players use", () => {
+  const g = ins({
+    mapName: "Supreme Isthmus v2.1",
+    sides: [{ ally: 0, teams: [0], players: ["Ann"], color: "#0000ff" }, { ally: 1, teams: [1], players: ["Cy"], color: "#ff0000" }],
+    series: { t: [0], army: [], metalIncome: [], energyIncome: [], armyCats: [], armyByCat: [], front: [[null, [2000, 10500]], [[10500, 2000]]] },
+  });
+  // Blue started south-west, so the south-west base areas are Blue's and
+  // their north-east twins Red's.
+  assert.equal(at(g, 0.387 * 12288, 0.787 * 12288), "at Blue geo");
+  assert.equal(at(g, (1 - 0.387) * 12288, (1 - 0.787) * 12288), "at Red geo");
+  assert.equal(at(g, 0.19 * 12288, 0.95 * 12288), "at Blue air");
+  assert.deepEqual(place(g, 6300, 6200), { name: "the middle", prep: "in", side: -1 });
+  assert.equal(at(g, 900, 1800), "on the north island");
+  assert.equal(at(g, 9000, 9000), "in the south sea");
+  // Without knowing who started where, a base is told by the compass.
+  assert.equal(at({ ...g, bounds: { minX: 0, maxX: 12288, minZ: 0, maxZ: 12288 }, series: { ...g.series, front: [] } }, 0.387 * 12288, 0.787 * 12288), "in the south");
 });

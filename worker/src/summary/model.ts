@@ -61,11 +61,14 @@ export interface Run {
  * player's in-game colour, so a name reads the same wherever it is written.
  * A name counts only as a whole word: "Pawn" inside "Pawns" is not a
  * player called Pawn. Longer names win over names they contain. Side
- * names ("Blue team") get their side's colour the same way. */
+ * names ("Blue team", and "Blue" on its own) get their side's colour the
+ * same way. */
 export function nameRuns(ins: Insights, text: string): Run[] {
   const names = [
     ...ins.teams.filter((t) => t.player).map((t) => ({ name: t.player as string, color: teamColor(ins, t.team) })),
     ...ins.sides.map((_, i) => ({ name: sideName(ins, i), color: sideColor(ins, i) })),
+    // A side's units are named by its colour alone ("Blue Juggernauts").
+    ...ins.sides.map((_, i) => ({ name: sideName(ins, i).replace(/ team$/, ""), color: sideColor(ins, i) })),
   ].sort((a, b) => b.name.length - a.name.length);
   const word = /[\p{L}\p{N}_]/u;
   const out: Run[] = [];
@@ -126,6 +129,11 @@ export function sideName(ins: Insights, side: number): string {
   return `${mine} team`;
 }
 
+/** sideShort names a side's units: "Blue" in "Blue Juggernauts". */
+export function sideShort(ins: Insights, side: number): string {
+  return sideName(ins, side).replace(/ team$/, "");
+}
+
 /** comparable is whether the sections that set one side against the other
  * may be drawn: exactly two sides, and a capture that saw both. A one-sided
  * capture's enemy half is whatever the uploader happened to see, which would
@@ -142,10 +150,12 @@ const VERSION_FEATURES: [number, string][] = [
   [5, "self-destructs"],
   [6, "fitted win odds"],
   [7, "game end at the resign, story battles, friendly fire"],
+  [8, "battle titles that say what did the killing"],
+  [9, "calmer win odds that move with the fighting"],
 ];
 
 /** The newest insights version the page knows (index.ts INSIGHTS_VERSIONS[0]). */
-export const LATEST_INSIGHTS = 7;
+export const LATEST_INSIGHTS = 9;
 
 /** notices are the caveats the page states up front, in reading order. */
 export function notices(ins: Insights): string[] {
