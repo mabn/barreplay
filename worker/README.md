@@ -747,6 +747,15 @@ these files qualify** — `.brw`, `.brp`, `.keys` and the extensionless `c0`, `c
 all unrecognised. Without the rule the hostname works, looks fine, and still
 bills a Class B operation on every single read.
 
+Give the same rule two more settings, so a **404 is never cached**:
+**Edge TTL** "Use cache-control header if present, use default Cloudflare
+caching behavior if not" plus a status code TTL `404` → **No store**, and
+**Browser TTL** → **Respect origin TTL**. Without them Cloudflare keeps a
+404 for 4 hours at the edge AND tells the browser `max-age=14400`, so a
+summary published on demand (POST /api/insights) stays invisible behind the
+404 its reader just got. Real objects are unaffected: each carries its own
+`max-age=31536000, immutable`. Purge the hostname once after changing it.
+
 Verify by requesting the same piece twice and watching `cf-cache-status` go
 `MISS` then `HIT`:
 

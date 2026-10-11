@@ -156,6 +156,31 @@ export const CSS = `
 .brs-root .brs-tip-metric { color: var(--brs-muted); white-space: nowrap; }
 .brs-root .brs-tip-note { color: var(--brs-muted); margin-top: 4px; max-width: 440px; }
 .brs-root .brs-val { font-variant-numeric: tabular-nums; color: var(--brs-muted); white-space: nowrap; }
+/* The on-demand wait (loading.ts): monkeys hammering a bar chart together. */
+.brs-root.brs-loading { display: flex; flex-direction: column; align-items: center; padding: 48px 16px; text-align: center; }
+.brs-root .brs-load-scene { position: relative; width: 220px; height: 120px; }
+.brs-root .brs-load-chart { position: absolute; left: 30px; right: 30px; bottom: 34px; height: 70px;
+  display: flex; align-items: flex-end; gap: 8px; border-bottom: 2px solid var(--brs-line); }
+.brs-root .brs-load-chart i { flex: 1; height: 100%; border-radius: 3px 3px 0 0; background: var(--brs-accent); opacity: .85;
+  transform-origin: bottom; animation: brs-build 2.4s ease-in-out infinite; animation-delay: calc(var(--i) * -0.45s); }
+.brs-root .brs-load-chart i:nth-child(even) { background: #e0675f; }
+.brs-root .brs-load-crew { position: absolute; left: 0; right: 0; bottom: 0; display: flex; justify-content: space-around; }
+.brs-root .brs-load-monkey { position: relative; font-size: 28px; line-height: 1;
+  animation: brs-hop .9s ease-in-out infinite; animation-delay: calc(var(--i) * -0.3s); }
+.brs-root .brs-load-monkey b { font-weight: normal; }
+.brs-root .brs-load-monkey em { position: absolute; right: -14px; top: -6px; font-size: 18px; font-style: normal;
+  transform-origin: 20% 90%; animation: brs-hammer .45s ease-in-out infinite alternate; animation-delay: calc(var(--i) * -0.15s); }
+.brs-root .brs-load-caption { margin: 18px 0 10px; font-size: 15px; font-weight: 600; color: var(--brs-text); min-height: 1.4em; }
+.brs-root .brs-load-track { width: 220px; height: 3px; border-radius: 2px; background: var(--brs-grid); overflow: hidden; margin-bottom: 10px; }
+.brs-root .brs-load-track i { display: block; width: 35%; height: 100%; background: var(--brs-accent); animation: brs-slide 1.4s ease-in-out infinite; }
+@keyframes brs-build { 0%, 100% { transform: scaleY(.15); } 50% { transform: scaleY(1); } }
+@keyframes brs-hop { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
+@keyframes brs-hammer { from { transform: rotate(-35deg); } to { transform: rotate(25deg); } }
+@keyframes brs-slide { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+@media (prefers-reduced-motion: reduce) {
+  .brs-root .brs-load-chart i, .brs-root .brs-load-monkey, .brs-root .brs-load-monkey em, .brs-root .brs-load-track i { animation: none; }
+  .brs-root .brs-load-chart i { transform: scaleY(calc(.35 + var(--i) * .15)); }
+}
 `;
 
 const STYLE_ID = "brs-summary-style";

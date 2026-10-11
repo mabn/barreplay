@@ -11,7 +11,7 @@
 // Everything is fetched from the replay viewer's deployment at run time, so
 // nothing is copied between the two sites. The catalog route and the data
 // bucket both answer cross-origin reads for that reason (app.ts, r2-cors.json).
-import { INSIGHTS_VERSIONS, mountSummary } from "./index";
+import { INSIGHTS_VERSIONS, mountLoading, mountSummary } from "./index";
 import type { Clip, Insights, SummaryHandle, SummaryOptions } from "./types";
 
 /** The replay viewer: the catalog route and the replay pages. */
@@ -94,11 +94,14 @@ function ridPath(rid: string): string {
   return rid.split("/").map(encodeURIComponent).join("/");
 }
 
-/** findInsights returns the newest insights file published for gameId, or
- * null when the game has no playable replay or no summary could be had (one
- * missing at every version is computed on demand first). A failure other
- * than "not there" throws. */
-export async function findInsights(gameId: string, opts: EmbedOptions = {}): Promise<Insights | null> {
+/** findInsights returns the newest insights file for gameId, or null when
+ * the game has no playable replay or no summary could be had. One older than
+ * this build draws, or missing at every version, is computed on demand and
+ * WAITED for (POST /api/insights); an older one is the fallback only when that
+ * request cannot answer. onWait is called once, just before that wait starts
+ * (mountGameSummary draws the loading scene there). A failure other than
+ * "not there" throws. */
+export async function findInsights(gameId: string, opts: EmbedOptions = {}, onWait?: () => void): Promise<Insights | null> {
   const replayOrigin = opts.replayOrigin ?? REPLAY_ORIGIN;
   const dataOrigin = opts.dataOrigin ?? DATA_ORIGIN;
   const res = await fetch(`${replayOrigin}/api/replays?id=${encodeURIComponent(gameId)}&limit=2`);
@@ -113,12 +116,15 @@ export async function findInsights(gameId: string, opts: EmbedOptions = {}): Pro
     const r = await fetch(`${dataOrigin}/replays/${ridPath(rid)}.insights${v}.json`);
     if (r.status === 404) continue;
     if (!r.ok) throw new Error(`insights: HTTP ${r.status}`);
-    // An older summary is shown as it is, and the current one asked for in
-    // the background, so the NEXT visit finds it.
-    if (v !== INSIGHTS_VERSIONS[0]) void requestSummary(replayOrigin, rid);
-    return (await r.json()) as Insights;
+    const ins = (await r.json()) as Insights;
+    if (v === INSIGHTS_VERSIONS[0]) return ins;
+    // Older than this build draws: wait for the current one, computed on
+    // demand, and fall back to this one only when that cannot answer.
+    onWait?.();
+    return (await requestSummary(replayOrigin, rid)) ?? ins;
   }
   // None at all: worth waiting for, since there is nothing else to show.
+  onWait?.();
   return requestSummary(replayOrigin, rid);
 }
 
@@ -146,7 +152,13 @@ async function requestSummary(replayOrigin: string, rid: string): Promise<Insigh
  * moment plays it in a clip window over the page (clipPlayer), like the
  * viewer's own summary does, unless the host passes its own onClip/onSeek. */
 export async function mountGameSummary(el: HTMLElement, gameId: string, opts: EmbedOptions = {}): Promise<SummaryHandle | null> {
-  const ins = await findInsights(gameId, opts);
+  let loading: SummaryHandle | null = null;
+  let ins: Insights | null;
+  try {
+    ins = await findInsights(gameId, opts, () => (loading = mountLoading(el)));
+  } finally {
+    (loading as SummaryHandle | null)?.destroy();
+  }
   if (!ins) return null;
   const { replayOrigin = REPLAY_ORIGIN, dataOrigin: _d, ...rest } = opts;
   // Icons live beside the viewer; bundled into another site, the module's

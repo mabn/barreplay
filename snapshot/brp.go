@@ -400,6 +400,31 @@ type frameCodec struct {
 	prevFrame int64
 	prev      map[int32]prevUnitState
 	prevRes   map[int32]prevResState
+	// dec is the decoder's unit state, sorted by id (the encoder keeps prev).
+	dec []decUnit
+}
+
+type decUnit struct {
+	id int32
+	s  prevUnitState
+}
+
+// lookup finds a unit in the decoder's state.
+func (c *frameCodec) lookup(id int32) (prevUnitState, bool) {
+	i := sort.Search(len(c.dec), func(i int) bool { return c.dec[i].id >= id })
+	if i < len(c.dec) && c.dec[i].id == id {
+		return c.dec[i].s, true
+	}
+	return prevUnitState{}, false
+}
+
+func idsAscending(ids []int32) bool {
+	for i := 1; i < len(ids); i++ {
+		if ids[i] < ids[i-1] {
+			return false
+		}
+	}
+	return true
 }
 
 func newFrameCodec(sampleEvery int32) *frameCodec {
@@ -598,13 +623,30 @@ func decodeFrames(c *frameCodec, core, extra []byte) ([]Frame, error) {
 			return nil, err
 		}
 
+		// The encoder writes both lists in ascending id order, which lets the
+		// state be walked as one sorted slice instead of a map rebuilt and
+		// sorted every frame (that was most of a summary's compute time).
+		// A stream that is not sorted is put in order first, keeping the
+		// map's "last change wins" for a repeated id.
+		var order []int
+		if !idsAscending(dead) {
+			sort.Slice(dead, func(i, j int) bool { return dead[i] < dead[j] })
+		}
+		if !idsAscending(chIDs) {
+			order = make([]int, len(chIDs))
+			for i := range order {
+				order[i] = i
+			}
+			sort.SliceStable(order, func(i, j int) bool { return chIDs[order[i]] < chIDs[order[j]] })
+		}
+
 		// Decode the changed units' columns.
 		n := len(chIDs)
 		q := make([]prevUnitState, n)
 		exists := make([]bool, n)
 		preds := make([]prevUnitState, n)
 		for i, id := range chIDs {
-			if p, ok := c.prev[id]; ok {
+			if p, ok := c.lookup(id); ok {
 				preds[i], exists[i] = p.advance(), true
 			}
 		}
@@ -666,33 +708,53 @@ func decodeFrames(c *frameCodec, core, extra []byte) ([]Frame, error) {
 			}
 		}
 
-		// Assemble the next state: survivors advance, changed units override.
-		next := make(map[int32]prevUnitState, len(c.prev)+n)
-		for id, p := range c.prev {
-			next[id] = p.advance()
-		}
-		for _, id := range dead {
-			if _, ok := next[id]; !ok {
-				return nil, fmt.Errorf("snapshot: frame %d: dead unit %d was not alive", frame, id)
+		// Assemble the next state: survivors advance, dead ones go, changed
+		// units override — one merge of three sorted lists.
+		next := make([]decUnit, 0, len(c.dec)+n)
+		j, d := 0, 0
+		for k := 0; j < len(c.dec) || k < n; {
+			ki := k
+			if order != nil && k < n {
+				ki = order[k]
 			}
-			delete(next, id)
+			if k < n && (j == len(c.dec) || chIDs[ki] <= c.dec[j].id) {
+				id := chIDs[ki]
+				if j < len(c.dec) && c.dec[j].id == id {
+					if d < len(dead) && dead[d] == id {
+						d++
+					}
+					j++
+				}
+				if len(next) > 0 && next[len(next)-1].id == id {
+					next[len(next)-1].s = q[ki]
+				} else {
+					next = append(next, decUnit{id, q[ki]})
+				}
+				k++
+				continue
+			}
+			u := c.dec[j]
+			j++
+			if d < len(dead) && dead[d] < u.id {
+				break
+			}
+			if d < len(dead) && dead[d] == u.id {
+				d++
+				continue
+			}
+			next = append(next, decUnit{u.id, u.s.advance()})
 		}
-		for i, id := range chIDs {
-			next[id] = q[i]
+		if d < len(dead) {
+			return nil, fmt.Errorf("snapshot: frame %d: dead unit %d was not alive", frame, dead[d])
 		}
-		c.prev = next
+		c.dec = next
 
 		// Materialise the full frame, sorted by id.
-		ids := make([]int32, 0, len(next))
-		for id := range next {
-			ids = append(ids, id)
-		}
-		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-		fr.Units = make([]UnitState, len(ids))
-		for i, id := range ids {
-			s := next[id]
+		fr.Units = make([]UnitState, len(next))
+		for i, u := range next {
+			s := &u.s
 			fr.Units[i] = UnitState{
-				UnitID: id, DefID: int32(s.def), Team: int32(s.team),
+				UnitID: u.id, DefID: int32(s.def), Team: int32(s.team),
 				Pos:    Vec3{X: float32(s.x), Z: float32(s.z)},
 				Health: float32(s.hp), MaxHealth: float32(s.maxHp),
 				VelX: float32(s.dvx) / se, VelZ: float32(s.dvz) / se,

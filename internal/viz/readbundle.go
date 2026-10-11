@@ -10,6 +10,7 @@ import (
 	"io"
 	"path"
 	"strings"
+	"sync"
 
 	"github.com/mabn/barreplay/snapshot"
 )
@@ -69,9 +70,12 @@ func ReadStaticBundle(ctx context.Context, fetch PieceFetcher, rid string) (*sna
 	bf.Bounds = &snapshot.BRPBounds{MinX: head.Bounds.MinX, MaxX: head.Bounds.MaxX, MinZ: head.Bounds.MinZ, MaxZ: head.Bounds.MaxZ}
 	bf.FrameCount = head.FrameCount
 
-	keys, err := fetch(ctx, "replays/"+rid+".keys")
+	// Everything after the head is fetched at once, a few objects at a
+	// time: one after another, the fifty-odd chunks of a long game were most
+	// of an on-demand summary's wait.
+	keys, chunks, resBody, resErr, err := fetchPieces(ctx, fetch, rid, head.Chunks)
 	if err != nil {
-		return nil, nil, fmt.Errorf("keyframes: %w", err)
+		return nil, nil, err
 	}
 	bf.Sections[snapshot.SecKeyframes] = keys
 
@@ -82,22 +86,13 @@ func ReadStaticBundle(ctx context.Context, fetch PieceFetcher, rid string) (*sna
 	for i, c := range head.Chunks {
 		ch := snapshot.BRPChunk{Frame: c.Frame, Count: c.Count, KOff: kOff, KLen: c.KLen, FOff: int64(frames.Len()), FLen: c.Len}
 		kOff += c.KLen
-		if c.Len > 0 {
-			b, err := fetch(ctx, fmt.Sprintf("replays/%s/c%d", rid, i))
-			if err != nil {
-				return nil, nil, fmt.Errorf("chunk %d: %w", i, err)
-			}
-			if int64(len(b)) != c.Len {
-				return nil, nil, fmt.Errorf("chunk %d: %d bytes, head says %d", i, len(b), c.Len)
-			}
-			frames.Write(b)
-		}
+		frames.Write(chunks[i])
 		bf.Chunks = append(bf.Chunks, ch)
 	}
 	bf.Sections[snapshot.SecFrames] = frames.Bytes()
 
 	resources := map[int32][]snapshot.TeamResource{}
-	if b, err := fetch(ctx, "replays/"+rid+".resources"); err == nil {
+	if b, err := resBody, resErr; err == nil {
 		var rf []legacyResFrame
 		if err := json.Unmarshal(b, &rf); err != nil {
 			return nil, nil, fmt.Errorf("resources: %w", err)
@@ -119,6 +114,79 @@ func ReadStaticBundle(ctx context.Context, fetch PieceFetcher, rid string) (*sna
 		return nil, nil, fmt.Errorf("resources: %w", err)
 	}
 	return bf, resources, nil
+}
+
+// pieceFetchers is how many pieces ReadStaticBundle fetches at once.
+const pieceFetchers = 8
+
+// fetchPieces fetches a bundle's keyframes, its delta chunks (in index order;
+// nil for a chunk the head says is empty) and its economy, up to
+// pieceFetchers at a time. The economy's own error is handed back rather than
+// failing the rest, since a bundle may simply not have one.
+func fetchPieces(ctx context.Context, fetch PieceFetcher, rid string, index []legacyChunk) (keys []byte, chunks [][]byte, res []byte, resErr, err error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	chunks = make([][]byte, len(index))
+	var (
+		mu    sync.Mutex
+		first error
+		wg    sync.WaitGroup
+	)
+	fail := func(e error) {
+		mu.Lock()
+		if first == nil {
+			first = e
+			cancel()
+		}
+		mu.Unlock()
+	}
+	sem := make(chan struct{}, pieceFetchers)
+	run := func(f func()) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if ctx.Err() != nil {
+				return
+			}
+			f()
+		}()
+	}
+	run(func() {
+		b, e := fetch(ctx, "replays/"+rid+".keys")
+		if e != nil {
+			fail(fmt.Errorf("keyframes: %w", e))
+		}
+		keys = b
+	})
+	for i, c := range index {
+		if c.Len <= 0 {
+			continue
+		}
+		run(func() {
+			b, e := fetch(ctx, fmt.Sprintf("replays/%s/c%d", rid, i))
+			if e != nil {
+				fail(fmt.Errorf("chunk %d: %w", i, e))
+				return
+			}
+			if int64(len(b)) != c.Len {
+				fail(fmt.Errorf("chunk %d: %d bytes, head says %d", i, len(b), c.Len))
+				return
+			}
+			chunks[i] = b
+		})
+	}
+	run(func() { res, resErr = fetch(ctx, "replays/"+rid+".resources") })
+	wg.Wait()
+	if first != nil {
+		return nil, nil, nil, nil, first
+	}
+	if ctx.Err() != nil {
+		// The caller's context ended before every piece was asked for.
+		return nil, nil, nil, nil, ctx.Err()
+	}
+	return keys, chunks, res, resErr, nil
 }
 
 // The published head's JSON, as this package wrote it into every .brw. It is

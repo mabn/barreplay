@@ -83,18 +83,7 @@ func FromBRP(f *snapshot.BRPFile) (Input, error) {
 		Events: events,
 		Comms:  comms,
 		Frames: func(yield func(snapshot.Frame) error) error {
-			for i := range f.Chunks {
-				frames, err := f.DecodeChunk(i)
-				if err != nil {
-					return fmt.Errorf("insights: chunk %d: %w", i, err)
-				}
-				for _, fr := range frames {
-					if err := yield(fr); err != nil {
-						return err
-					}
-				}
-			}
-			return nil
+			return chunkFrames(f, yield)
 		},
 		Bounds:       f.Bounds,
 		HasTargets:   !f.Legacy,
@@ -134,4 +123,59 @@ func FromPieces(f *snapshot.BRPFile, resources map[int32][]snapshot.TeamResource
 		in.POV = POVUnknown
 	}
 	return in, nil
+}
+
+// decodeAhead is how many chunks are decoded ahead of the pass. Decoding is
+// a third of a summary's work and the pass cannot use more than one core, so
+// the chunks after the one being read decode on others meanwhile: the summary
+// a reader is waiting for (POST /api/insights) is then bound by the pass alone.
+const decodeAhead = 3
+
+// chunkFrames yields every frame of f in order, decoding up to decodeAhead
+// chunks ahead of the one being yielded.
+func chunkFrames(f *snapshot.BRPFile, yield func(snapshot.Frame) error) error {
+	// DecodeChunk caches the keyframes on first use; do that here, before
+	// several goroutines could race to.
+	if len(f.Chunks) > 0 {
+		if _, err := f.Keyframes(); err != nil {
+			return fmt.Errorf("insights: chunk 0: %w", err)
+		}
+	}
+	type decoded struct {
+		frames []snapshot.Frame
+		err    error
+	}
+	done := make(chan struct{})
+	defer close(done)
+	results := make([]chan decoded, len(f.Chunks))
+	for i := range results {
+		results[i] = make(chan decoded, 1)
+	}
+	sem := make(chan struct{}, decodeAhead)
+	go func() {
+		for i := range f.Chunks {
+			select {
+			case sem <- struct{}{}:
+			case <-done:
+				return
+			}
+			go func(i int) {
+				frames, err := f.DecodeChunk(i)
+				results[i] <- decoded{frames, err}
+			}(i)
+		}
+	}()
+	for i := range f.Chunks {
+		r := <-results[i]
+		<-sem
+		if r.err != nil {
+			return fmt.Errorf("insights: chunk %d: %w", i, r.err)
+		}
+		for _, fr := range r.frames {
+			if err := yield(fr); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

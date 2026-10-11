@@ -23,6 +23,7 @@ import type { Insights, SummaryHandle, SummaryOptions } from "./types";
 
 export type * from "./types";
 export { comparable, notices } from "./model";
+export { mountLoading } from "./loading";
 
 /** The newest insights file version this build draws. */
 export const INSIGHTS_VERSION = 7;

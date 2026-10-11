@@ -7214,6 +7214,8 @@ function resetSummary() {
 
 // summaryMessage fills the pane with one line of text instead of a summary.
 function summaryMessage(text) {
+  if (summaryHandle) summaryHandle.destroy();
+  summaryHandle = null;
   const el = document.getElementById('summary');
   el.textContent = '';
   const p = document.createElement('p');
@@ -7246,7 +7248,7 @@ async function showSummary() {
     if (summaryFor !== file) return; // another replay was opened meanwhile
     if (res.status === 404) {
       // Nothing built at any version: ask for it, and say so while it runs.
-      summaryMessage('Building the summary for this replay…');
+      summaryLoading(lib);
       const fresh = await freshSummary(file);
       if (summaryFor !== file) return;
       if (!fresh) {
@@ -7259,15 +7261,17 @@ async function showSummary() {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const ins = await res.json();
     if (summaryFor !== file) return;
+    if (ins.version !== INSIGHTS_VERSIONS[0]) {
+      // An older summary: the page WAITS for the current one rather than
+      // drawing one it is about to replace. The older one is shown only when
+      // the request cannot answer (no daemon, too busy, failed).
+      summaryLoading(lib);
+      const fresh = await freshSummary(file);
+      if (summaryFor !== file) return;
+      mountSummaryIns(lib, fresh || ins);
+      return;
+    }
     mountSummaryIns(lib, ins);
-    if (ins.version === INSIGHTS_VERSIONS[0]) return;
-    // An older summary: shown at once, with a line saying the current one is
-    // being computed, and swapped for it the moment it arrives.
-    const note = summaryNote('Updating this summary to the current version…');
-    const fresh = await freshSummary(file);
-    if (summaryFor !== file) return;
-    if (fresh) mountSummaryIns(lib, fresh);
-    else note.remove();
   } catch (err) {
     if (summaryFor !== file) return;
     summaryFor = null; // let a later visit retry
@@ -7279,21 +7283,22 @@ function insightsURL(file, v) {
   return dataURL('/replays/' + ridPath(file) + '.insights' + v + '.json');
 }
 
+// summaryLoading fills the pane with the library's "monkeys building your
+// summary" scene while one is computed on demand; the next mount or message
+// replaces it (it is the summaryHandle meanwhile, so its timer stops too).
+function summaryLoading(lib) {
+  if (summaryHandle) summaryHandle.destroy();
+  const el = document.getElementById('summary');
+  el.textContent = '';
+  summaryHandle = lib.mountLoading ? lib.mountLoading(el) : null;
+  if (!summaryHandle) summaryMessage('Building the summary for this replay…');
+}
+
 function mountSummaryIns(lib, ins) {
   if (summaryHandle) summaryHandle.destroy();
   const el = document.getElementById('summary');
   el.textContent = '';
   summaryHandle = lib.mountSummary(el, ins, { onSeek: seekToFrame, onClip: openClip, mapApi: MAP_API });
-}
-
-// summaryNote puts one muted line above the mounted summary; the caller
-// removes it (or a remount replaces the pane, line and all).
-function summaryNote(text) {
-  const p = document.createElement('p');
-  p.className = 'summarynote';
-  p.textContent = text;
-  document.getElementById('summary').prepend(p);
-  return p;
 }
 
 // ---- on-demand summaries ----------------------------------------------------

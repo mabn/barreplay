@@ -66,10 +66,12 @@ export interface HubOptions {
 }
 
 export const HUB_DEFAULTS: HubOptions = {
-  // A page waits on this. Long enough for a big game's .brp download and
-  // compute (seconds), short enough that a stuck daemon costs a reader no
-  // more than a minute of "Updating…" over the summary it already sees.
-  timeoutMs: 60_000,
+  // A page BLOCKS on this (Marcin's pick, 15 s): long enough for a typical
+  // .brp download and compute, short enough that a slow or stuck daemon costs
+  // a reader no more than that before the page falls back to the older file.
+  // A timed-out computation still finishes and publishes, so the next visit
+  // finds it.
+  timeoutMs: 15_000,
   // Readers waiting beyond the busy slots. A version bump makes every
   // replay stale at once, so a burst is normal; past this the page keeps
   // its older summary, and the next visit asks again.
