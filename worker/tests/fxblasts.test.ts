@@ -40,7 +40,7 @@ test('size and lifetime follow the weapon', () => {
   const fusion = Fx.look(weapons.get(1), 0, false);
   const nuke = Fx.look(weapons.get(2), 1, false);
   assert.ok(small.life < fusion.life && fusion.life < nuke.life);
-  assert.equal(small.ring, false);
+  assert.equal(Fx.look({ aoe: 40 }, 6, false).ring, false);
   assert.equal(fusion.ring, true);
   assert.ok(nuke.life <= Fx.LIFE_MAX);
   assert.equal(Fx.look(undefined, 0, false).aoe, Fx.DEFAULT_AOE);
@@ -107,4 +107,17 @@ test('a pile-up draws at most MAX_FIREBALLS, keeping the newest', () => {
   const fx = Fx.collect(many, [], weapons);
   const view = { cx: 0, cz: 0, scale: 0.1, w: 800, h: 600 };
   assert.equal(Fx.draw(ctx, fx, 104, view), Fx.MAX_FIREBALLS);
+});
+
+test('the shock ring is the engine damage front: expSpeed per frame, stopping at the radius', () => {
+  const w = { aoe: 640, expSpeed: 16, class: 'nuke' }; // 40 frames to the rim
+  const e = { ...Fx.look(w, 1, false), f: 0 };
+  assert.equal(Fx.stage(e, 10).ringR, 160);
+  assert.equal(Fx.stage(e, 10, 6).ringR, 160, 'playback stretch never slows the front');
+  assert.equal(Fx.stage(e, 40).ringR, 640);
+  assert.equal(Fx.stage(e, 45).ringR, 640, 'holds at the radius');
+  assert.ok(e.life >= 40 + 8);
+  // no stated speed: the engine damages the whole radius at once
+  const flat = { ...Fx.look({ aoe: 200 }, 0, false), f: 0 };
+  assert.equal(Fx.stage(flat, 0).ringR, 200);
 });
