@@ -6,7 +6,7 @@
 import { fmtClock, fmtMetal } from "./format";
 import { knockouts, wipedOf } from "./losses";
 import { sideName, sideOfTeam } from "./model";
-import { SIM_FPS, type Battle, type Insights, type Moment } from "./types";
+import { SIM_FPS, type Battle, type Insights, type Moment, type UnitLoss } from "./types";
 
 /** BAR's commanders, minus the scavenger bosses (app.js's COMMANDER_RE). */
 const COMMANDER_RE = /^(arm|cor|leg)com/;
@@ -30,6 +30,8 @@ export interface SideLoss {
   top: number;
   /** Kinds lost, most metal first: [name, count, metal]. */
   kinds: [string, number, number][];
+  /** The same losses by def, most metal first (what icons are drawn from). */
+  units: UnitLoss[];
   /** Where the side's losses were, cost-weighted, or null with none. */
   at: [number, number] | null;
 }
@@ -38,6 +40,14 @@ export interface MomentStory {
   title: string;
   detail: string;
   lost: SideLoss[];
+  /** What each side lost in the EVENT the story tells: the battle's own
+   * losses for a fight, else the whole window's (= lost). */
+  shown: SideLoss[];
+  /** For a fight, what each side lost ELSEWHERE in the window when that is
+   * worth a mention (null otherwise). */
+  elsewhere: number[] | null;
+  /** The whole battle a shared moment told only part of, else null. */
+  whole: Battle | null;
   /** Index into battles of the battle the moment was (the one holding its
    * focus, else the one overlapping its window most), -1 for none. */
   battle: number;
@@ -151,7 +161,7 @@ export function sideLosses(ins: Insights, f0: number, f1: number, area?: { x: nu
   const sideOf = sideOfTeam(ins);
   const wiped = wipedOf(ins);
   const owner = new Map(ins.teams.map((t) => [t.team, t.player ?? ""]));
-  const out = ins.sides.map(() => ({ n: 0, metal: 0, commanders: [] as string[], commanderDeaths: [] as number[], top: -1, topCost: -1, kinds: new Map<string, [number, number]>(), sx: 0, sz: 0, w: 0 }));
+  const out = ins.sides.map(() => ({ n: 0, metal: 0, commanders: [] as string[], commanderDeaths: [] as number[], top: -1, topCost: -1, kinds: new Map<string, [number, number]>(), units: new Map<number, UnitLoss>(), sx: 0, sz: 0, w: 0 }));
   const d = ins.deaths;
   for (let i = 0; i < d.f.length; i++) {
     if (d.f[i] < f0 || d.f[i] > f1 || wiped(i)) continue;
@@ -174,6 +184,10 @@ export function sideLosses(ins: Insights, f0: number, f1: number, area?: { x: nu
     const name = def?.human || def?.name || "unit";
     const k = o.kinds.get(name) ?? [0, 0];
     o.kinds.set(name, [k[0] + 1, k[1] + cost]);
+    const u = o.units.get(d.def[i]) ?? { def: d.def[i], n: 0, metal: 0 };
+    u.n++;
+    u.metal += cost;
+    o.units.set(d.def[i], u);
     if (d.x[i] >= 0) {
       const w = Math.max(1, cost);
       o.sx += d.x[i] * w;
@@ -189,6 +203,7 @@ export function sideLosses(ins: Insights, f0: number, f1: number, area?: { x: nu
     top: o.top,
     kinds: [...o.kinds.entries()].map(([name, [n, metal]]) => [name, n, metal] as [string, number, number])
       .sort((a, b) => b[2] - a[2] || b[1] - a[1]),
+    units: [...o.units.values()].sort((a, b) => b.metal - a.metal || b.n - a.n),
     at: o.w ? [o.sx / o.w, o.sz / o.w] : null,
   }));
 }
@@ -214,8 +229,8 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
   const priced = ins.costCoverage === "full" || lost.some((l) => l.metal > 0);
   const W = sideName(ins, won);
   const L = sideName(ins, lose);
-  const ll = lost[lose] ?? { n: 0, metal: 0, commanders: [], commanderDeaths: [], top: -1, kinds: [], at: null };
-  const wl = lost[won] ?? { n: 0, metal: 0, commanders: [], commanderDeaths: [], top: -1, kinds: [], at: null };
+  const ll = lost[lose] ?? { n: 0, metal: 0, commanders: [], commanderDeaths: [], top: -1, kinds: [], units: [], at: null };
+  const wl = lost[won] ?? { n: 0, metal: 0, commanders: [], commanderDeaths: [], top: -1, kinds: [], units: [], at: null };
   const size = (l: SideLoss) => (priced ? l.metal : l.n);
   // Where it happened: the focus when it has a place (the commander's
   // death, the fight's busiest spot), else the centre of what was lost.
@@ -308,6 +323,7 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     ? `There, ${fmtClock(focus!.f / SIM_FPS)}–${fmtClock((focus!.f1 ?? focus!.f) / SIM_FPS)}: ${L} lost ${lossText(dl, priced)}; ${W} lost ${lossText(dw, priced)}.`
     : `${L} lost ${lossText(ll, priced)}; ${W} lost ${lossText(wl, priced)}.`;
   if (whole) detail += ` Part of a fight from ${fmtClock(whole.f0 / SIM_FPS)} to ${fmtClock(whole.f1 / SIM_FPS)}.`;
+  let elsewhere: number[] | null = null;
   if (local && priced) {
     // What went down elsewhere at the time, when it is worth a mention: the
     // reader should not take this fight for the whole story.
@@ -315,11 +331,12 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     const here = (local[won]?.metal ?? 0) + (local[lose]?.metal ?? 0);
     if (rest(won) + rest(lose) >= 0.25 * here && rest(won) + rest(lose) >= QUIET_METAL) {
       detail += ` Elsewhere at the time: ${L} lost ${fmtMetal(rest(lose))} metal, ${W} ${fmtMetal(rest(won))}.`;
+      elsewhere = ins.sides.map((_, sd) => rest(sd));
     }
   }
   const battle = battleOfMoment(ins, focus, f0, f1);
   const fought = fight ? fighters(ins, ins.battles[battle]) : ins.sides.map(() => []);
-  return { title, detail, lost, battle, focus, fighters: fought };
+  return { title, detail, lost, shown: local ?? lost, elsewhere, whole, battle, focus, fighters: fought };
 }
 
 /** momentStories tells every moment of a swing line. A battle that two or

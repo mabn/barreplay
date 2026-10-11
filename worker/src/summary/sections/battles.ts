@@ -11,11 +11,10 @@ import { mapView } from "../mapview";
 import { comparable, sideColor, sideName } from "../model";
 import { compass, fighters } from "../moments";
 import { fighterNames } from "../names";
-import { iconImg, iconSrc } from "../icons";
-import { lossKinds, type LossKind } from "../losskinds";
+import { fillUnits, inkOn } from "../unitchips";
 import { tip, type TipRow } from "../tooltip";
 import { clipSpan, watcher } from "../watch";
-import { SIM_FPS, type Battle, type Insights, type SummaryOptions, type UnitLoss } from "../types";
+import { SIM_FPS, type Battle, type Insights, type SummaryOptions } from "../types";
 
 export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | null {
   if (!comparable(ins)) return null;
@@ -25,7 +24,6 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
   const priced = ins.battles.some((b) => b.lost.some((l) => l.metal > 0));
   const size = (l: { n: number; metal: number }) => (priced ? l.metal : l.n);
   const fmt = (v: number) => (priced ? fmtMetal(v) : `${v}`);
-  const name = (d: number) => ins.defs[String(d)]?.human || ins.defs[String(d)]?.name || "?";
   const when = (b: Battle) => `${fmtClock(b.f0 / SIM_FPS)}–${fmtClock(b.f1 / SIM_FPS)}`;
   const clipOf = (b: Battle, i: number) => clipSpan(b.f0, b.f1, { x: b.x, z: b.z, r: Math.max(b.r, 800), title: `Battle ${i + 1} · ${when(b)}` });
 
@@ -134,35 +132,6 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     rows.push(row);
   });
 
-  // One chip per KIND of unit lost (defs sharing an icon add up), the kinds
-  // carrying 90% of the metal shown and the rest behind a "+N more" chip.
-  async function fillUnits(list: HTMLElement, units: UnitLoss[]): Promise<void> {
-    const src = new Map<number, string | null>();
-    await Promise.all(units.map(async (u) => src.set(u.def, await iconSrc(ins, opts, u.def))));
-    const { main, rest } = lossKinds(units, (u) => src.get(u.def) ?? `def:${u.def}`);
-    const chip = (g: LossKind) => {
-      const label = g.defs.map((u) => name(u.def)).join(", ");
-      const icon = src.get(g.defs[0].def);
-      const el = h("span", { class: "brs-unit" }, icon ? iconImg(icon, label) : h("span", { class: "brs-uname" }, label), g.n ? h("span", undefined, `×${g.n}`) : null);
-      tip(el, {
-        title: g.defs.length > 1 ? `${g.n} lost` : name(g.defs[0].def),
-        rows: g.defs.map((u) => ({ label: g.defs.length > 1 ? `${name(u.def)} ×${u.n}` : `${u.n} lost`, value: priced && u.metal ? `${fmtMetal(u.metal)} metal` : "" })),
-      });
-      return el;
-    };
-    list.replaceChildren(...main.map(chip));
-    if (rest.length) {
-      const n = rest.reduce((a, g) => a + g.n, 0);
-      const more = h("button", { class: "brs-more", type: "button", "aria-expanded": "false" }, `+${rest.length} more`);
-      tip(more, { title: `${n} more lost`, rows: [{ label: "Less than a tenth of the metal" }], note: "Click to show" });
-      more.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        more.replaceWith(...rest.map(chip));
-      });
-      list.append(more);
-    }
-  }
-
   function battleDetail(i: number): HTMLElement {
     const b = ins.battles[i];
     // The side that lost less is boxed in its colour: which side came out
@@ -175,7 +144,7 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
       const l = b.lost[sd] ?? { n: 0, metal: 0, top: [] };
       const units = l.units ?? l.top.map((def) => ({ def, n: 0, metal: 0 }));
       const list = h("div", { class: "brs-units" });
-      void fillUnits(list, units);
+      void fillUnits(list, ins, opts, units, priced);
       const won = sd === ahead;
       const head = h("div", { class: "brs-losshead", style: `color: ${sideColor(ins, sd)}` }, sideName(ins, sd));
       if (won) {
@@ -211,16 +180,4 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
   return section("Map story",
     h("p", { class: "brs-hint" }, "Lines: where each army stood, faint early and bright late. Numbers: the biggest fights in the order they happened, each ringed by the ground it covered. Click one for its losses."),
     h("div", { class: "brs-storygrid" }, h("div", { class: "brs-mapwrap" }, view.svg), list));
-}
-
-/** inkOn is black or white, whichever reads on the colour hex. */
-function inkOn(hex: string): string {
-  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(hex);
-  if (!m) return "#000";
-  const lin = (x: string) => {
-    const c = parseInt(x, 16) / 255;
-    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
-  };
-  const l = 0.2126 * lin(m[1]) + 0.7152 * lin(m[2]) + 0.0722 * lin(m[3]);
-  return l > 0.179 ? "#000" : "#fff";
 }

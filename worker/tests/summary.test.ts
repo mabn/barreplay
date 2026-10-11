@@ -10,6 +10,7 @@ import { armyDrop, compass, fighters, momentStories, momentStory } from "../src/
 import { clipAround, clipAt, clipEvent, clipSpan, watcher } from "../src/summary/watch";
 import { zonesOf } from "../src/summary/zones";
 import { lossKinds } from "../src/summary/losskinds";
+import { leadPct } from "../src/summary/series";
 import { clipOf } from "../src/summary/sections/awards";
 import type { Insights } from "../src/summary/types";
 
@@ -332,4 +333,14 @@ test("embed: a game with no published replay has no summary", async (t) => {
   t.after(() => { globalThis.fetch = realFetch; });
   globalThis.fetch = (async () => Response.json([{ id: "bbbb", rid: null, placeholder: true }])) as unknown as typeof fetch;
   assert.equal(await findInsights("bbbb"), null);
+});
+
+test("leadPct reads the leader's margin both ways", () => {
+  const r = leadPct([100, 120, 0, 0], [120, 100, 0, 50], 0.0001);
+  assert.ok(Math.abs(r[0] - 20) < 0.01); // b 20% bigger
+  assert.ok(Math.abs(r[1] + 20) < 0.01); // a 20% bigger
+  assert.equal(Math.round(r[2]), 0); // both empty: even
+  // Smoothing keeps an opening lead finite.
+  const s = leadPct([0], [300], 300);
+  assert.equal(Math.round(s[0]), 100);
 });
