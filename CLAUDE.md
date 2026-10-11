@@ -50,7 +50,7 @@ go run ./cmd/pack -upload local ./caps/<gameId>.brepstream   # ...to the dev sim
 # sizes + top-10 unit defs by encoded bytes with per-instance cost (snapshot.ComputeBRPStats, self-checked
 # against the codec; raw captures pack first, then report).
 go run ./cmd/barreplay-static -out ./static ./snapshots/*.brp   # pack .brp -> static bundle for R2 hosting (see worker/)
-go run ./cmd/bringest   # drag&drop upload daemon: poll the deployed worker's job queue and publish uploaded .brepstreams, printing each one's .brp size breakdown like pack -stats (-stats=false quiets it; -once drains and exits; -upload local targets the dev simulator — one flag picks the queue, bucket and catalog together; -resim -data <BARdata> runs the re-sim worker instead: it drains the re-sims REQUESTED from the queue page's paste box, then scans the catalog for games with only a one-sided upload, publishing each full view as another revision)
+go run ./cmd/bringest   # drag&drop upload daemon: poll the deployed worker's job queue and publish uploaded .brepstreams, printing each one's .brp size breakdown like pack -stats (-stats=false quiets it; -once drains and exits; -upload local targets the dev simulator — one flag picks the queue, bucket and catalog together; -resim -data <BARdata> runs the re-sim worker instead: it drains the re-sims REQUESTED from the queue page's paste box, then scans the catalog for games with only a one-sided upload, publishing each full view as another revision; the UPLOAD mode — never -resim — also holds a WebSocket to the worker and computes ON-DEMAND SUMMARIES while a reader waits: a summary the viewer found stale or missing is computed, published and handed to the page in seconds; -insights=false skips it, -insights-slots N at once (default 2), -cache as for insights)
 ```
 
 Tests are hermetic: `barapi` uses a mock HTTP server, `demofile` tests against the
@@ -718,6 +718,12 @@ cmd/winfit/main.go        CLI: fits insights.WinModel to games with a known winn
                           (barreplay/api.bar-rts.com/replays/). An unreadable insights file is
                           skipped with a warning; cmd/insights no longer accepts (or serves from
                           its cache) an empty body, which is how 0-byte files got there.
+internal/insightsrun/     what cmd/insights does, as a package (Runner: New(Options), One, Each,
+                          CatalogRids), so cmd/bringest's on-demand summary service runs the SAME
+                          code as the backfill. The entry below describes it; cmd/insights is now
+                          only its flags. One() takes a revision id in every form the catalog
+                          serves — flat <gameId>-<rev> and month-folder <YYYY-MM|undated>/<gameId>
+                          [-<rev>] (ridRE) — a bare gameId being a GAME, resolved to its row.
 cmd/insights/main.go      CLI: the summary BACKFILL, one replay at a time (or -all). Old replays
                           have no .brp anywhere, only their split pieces, so it resolves a
                           gameId/link through the catalog (current rid + the row's view, the
@@ -934,7 +940,9 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           left out, owned value and battle teams, v5 self-destructs marked, v6 fitted
                           win weights, v7 the game ends at the resign rather than the first team knocked
                           out before it, swing drivers and no opening economy swings) and app.js fetches .insights7, then 6, 5, 4, 3, 2, 1. A version bump needs `insights -all` after
-                          the deploy, or published replays keep their older summary.
+                          the deploy, or published replays keep their older summary — except the ones people OPEN, which
+                          update themselves: see ON-DEMAND SUMMARIES under worker/ (so
+                          `insights -all` is now only for having every summary current at once).
                           EMBEDDING ON ANOTHER SITE (lavabalance's game pages): the other site
                           IMPORTS THE LIBRARY AT RUN TIME — import("https://replay.fogofwar.dev/
                           embed/summary.js") — so a deploy here reaches it with no change, pin or
@@ -1599,6 +1607,42 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           report that its job failed. It follows `error` exactly and is NOT
                           COALESCEd like the stats — it is a property of that message, so a
                           transition clearing the message clears the classification with it.
+                          ON-DEMAND SUMMARIES (POST /api/insights + the SummaryHub Durable
+                          Object, src/worker/summaryhub.ts + summaryhubdo.ts): the viewer's
+                          Summary tab, finding the newest file it reads (INSIGHTS_VERSIONS[0])
+                          missing for the revision it shows, POSTs {rid, version} and WAITS. It is
+                          NOT a job (Marcin's call: synchronous, nothing on the queue page). The
+                          route answers with the SUMMARY ITSELF, read from the bucket (x-summary:
+                          fresh when it was already there — the reader's 404 was the CDN's, cached
+                          4h — or computed), 404s a revision that is not published (.brp or .brw),
+                          and otherwise awaits SummaryHub.compute: the hub hands the request to a
+                          daemon holding a WebSocket to it (GET /api/insights/connect, bearer-
+                          guarded, ?version=&slots= — the daemon dials OUT, so NAT is fine), which
+                          computes it with internal/insightsrun, publishes it, and answers on the
+                          socket. CAPACITY IS THE HUB'S, IN MEMORY: requests go only to a daemon
+                          computing that VERSION, up to its slots; past them up to HUB_DEFAULTS
+                          .maxQueued wait, past that "busy"; 60 s deadline queue wait included
+                          (a timed-out request keeps its daemon's slot until it answers); readers
+                          of one replay share one computation; a failure is remembered 10 min so
+                          a broken replay costs a daemon once. Busy/unavailable answer 503,
+                          timeout 504, failed 502, and every one means the page KEEPS the summary
+                          it shows (an older one under a muted "Updating…" line, .summarynote,
+                          swapped when the new one arrives). Its own DO class so socket traffic
+                          never wakes ReplayIndex (no SQL, no ROW BUDGET); Hibernation API, the
+                          daemon's "ping" keepalive answered "pong" by the runtime
+                          (setWebSocketAutoResponse) without waking it, per-socket facts in the
+                          attachment, and nothing in flight across an eviction (an instance with a
+                          request in progress is never evicted). OPEN and answering any origin
+                          (the lavabalance embed asks with a text/plain body — no preflight — and
+                          awaits it when there is no summary at all, else asks in the background
+                          for the next visit): what it can cost is bounded by the slots and the
+                          queue. Only plain bringest serves it (cmd/bringest/summaries.go over
+                          ws.go, a stdlib WebSocket client: net/http does the handshake and hands
+                          back the connection, the framing is hand-written) — never -resim, whose
+                          host's time is the engine's. It reconnects with backoff and drops a link
+                          silent for 90 s. The dispatcher's rules are node-tested
+                          (tests/summaryhub.test.ts), the DO's socket handling in workerd
+                          (tests/do/summaryhub.test.ts).
                           JOB KINDS: jobs.kind is "upload" | "resim", a KIND rather than a fifth
                           state because the four states describe both equally well — what
                           differs is the work, not the progress. The contract (JobKind,

@@ -7237,7 +7237,7 @@ async function showSummary() {
     const fetchInsights = async () => {
       let res;
       for (const v of INSIGHTS_VERSIONS) {
-        res = await fetch(dataURL('/replays/' + ridPath(file) + '.insights' + v + '.json'));
+        res = await fetch(insightsURL(file, v));
         if (res.status !== 404) break;
       }
       return res;
@@ -7245,18 +7245,81 @@ async function showSummary() {
     const [lib, res] = await Promise.all([summaryModule, fetchInsights()]);
     if (summaryFor !== file) return; // another replay was opened meanwhile
     if (res.status === 404) {
-      summaryMessage('The summary for this replay has not been built yet.');
+      // Nothing built at any version: ask for it, and say so while it runs.
+      summaryMessage('Building the summary for this replay…');
+      const fresh = await freshSummary(file);
+      if (summaryFor !== file) return;
+      if (!fresh) {
+        summaryMessage('The summary for this replay has not been built yet.');
+        return;
+      }
+      mountSummaryIns(lib, fresh);
       return;
     }
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const ins = await res.json();
     if (summaryFor !== file) return;
-    document.getElementById('summary').textContent = '';
-    summaryHandle = lib.mountSummary(document.getElementById('summary'), ins, { onSeek: seekToFrame, onClip: openClip, mapApi: MAP_API });
+    mountSummaryIns(lib, ins);
+    if (ins.version === INSIGHTS_VERSIONS[0]) return;
+    // An older summary: shown at once, with a line saying the current one is
+    // being computed, and swapped for it the moment it arrives.
+    const note = summaryNote('Updating this summary to the current version…');
+    const fresh = await freshSummary(file);
+    if (summaryFor !== file) return;
+    if (fresh) mountSummaryIns(lib, fresh);
+    else note.remove();
   } catch (err) {
     if (summaryFor !== file) return;
     summaryFor = null; // let a later visit retry
     summaryMessage('Could not load the summary: ' + err.message);
+  }
+}
+
+function insightsURL(file, v) {
+  return dataURL('/replays/' + ridPath(file) + '.insights' + v + '.json');
+}
+
+function mountSummaryIns(lib, ins) {
+  if (summaryHandle) summaryHandle.destroy();
+  const el = document.getElementById('summary');
+  el.textContent = '';
+  summaryHandle = lib.mountSummary(el, ins, { onSeek: seekToFrame, onClip: openClip, mapApi: MAP_API });
+}
+
+// summaryNote puts one muted line above the mounted summary; the caller
+// removes it (or a remount replaces the pane, line and all).
+function summaryNote(text) {
+  const p = document.createElement('p');
+  p.className = 'summarynote';
+  p.textContent = text;
+  document.getElementById('summary').prepend(p);
+  return p;
+}
+
+// ---- on-demand summaries ----------------------------------------------------
+// A summary is computed once per revision and version, so a deploy that bumps
+// INSIGHTS_VERSIONS leaves every published replay on its older file until
+// something recomputes it. This is that something, for the replays people
+// actually open: freshSummary asks the worker for the current version (POST
+// /api/insights) and WAITS while an ingest daemon computes it — the same code
+// `insights -all` runs (cmd/bringest/summaries.go, reached through the
+// worker's SummaryHub). The answer IS the new summary, read by the worker
+// from the bucket, so the CDN's cached 404 for this file never comes into
+// it. Anything else — no daemon connected, too many readers waiting, a
+// failure, a backend without the route — is null, and the page keeps what it
+// shows.
+async function freshSummary(file) {
+  try {
+    const res = await fetch('/api/insights', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ rid: file, version: INSIGHTS_VERSIONS[0] }),
+    });
+    if (!res.ok) return null;
+    const ins = await res.json();
+    return ins && ins.version === INSIGHTS_VERSIONS[0] ? ins : null;
+  } catch (_) {
+    return null;
   }
 }
 

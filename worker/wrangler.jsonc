@@ -132,6 +132,10 @@
       {
         "name": "REPLAY_INDEX",
         "class_name": "ReplayIndex"
+      },
+      {
+        "name": "SUMMARY_HUB",
+        "class_name": "SummaryHub"
       }
     ]
   },
@@ -139,6 +143,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["ReplayIndex"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["SummaryHub"]
     }
   ],
 

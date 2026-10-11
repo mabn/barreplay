@@ -46,6 +46,10 @@
 // cmd/winfit, downloads only what the last run did not. The bucket never
 // rewrites a published object, so a kept copy is never stale.
 //
+// The work itself is internal/insightsrun, shared with cmd/bringest, which
+// recomputes a summary on demand when the viewer opens a replay whose summary
+// is older than the page.
+//
 // -upload names a destination exactly as cmd/pack does (packer.LookupTarget):
 // the catalog it reads, the bucket it reads pieces from and the bucket it
 // writes to are one choice. $REPLAY_PUT_TOKEN and the R2 credentials work as
@@ -53,30 +57,15 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"regexp"
-	"strconv"
-	"strings"
-	"sync"
 	"syscall"
-	"time"
 
-	"github.com/mabn/barreplay/internal/barapi"
-	"github.com/mabn/barreplay/internal/insights"
+	"github.com/mabn/barreplay/internal/insightsrun"
 	"github.com/mabn/barreplay/internal/packer"
-	"github.com/mabn/barreplay/internal/viz"
-	"github.com/mabn/barreplay/snapshot"
 )
 
 func main() {
@@ -90,7 +79,7 @@ func main() {
 		to        = flag.String("to", "", "with -all: only games that started on/before this date (YYYY-MM-DD covers the whole day, or unix seconds)")
 		ridFlag   = flag.String("rid", "", "with a local capture: the published revision the summary belongs to (default: the packed .brp's own content revision)")
 		jobs      = flag.Int("j", 4, "replays processed at once (each holds one whole replay in memory)")
-		cacheFlag = flag.String("cache", "auto", "keep files read from the bucket here for the next run (in a subdirectory per bucket host); empty keeps none, auto is "+autoCacheHelp())
+		cacheFlag = flag.String("cache", "auto", "keep files read from the bucket here for the next run (in a subdirectory per bucket host); empty keeps none, auto is "+insightsrun.AutoCacheHelp())
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: insights [flags] <gameId|link|rid|file.brp> [...]\n       insights [flags] -all\n\n")
@@ -112,54 +101,38 @@ func main() {
 		fmt.Fprintf(os.Stderr, "insights: -upload %q: must be %s, or empty\n", *upload, packer.TargetList())
 		os.Exit(2)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	r := &runner{
-		indexURL: target.IndexURL,
-		dataURL:  target.DataURL,
-		http:     &http.Client{Timeout: 2 * time.Minute},
-		force:    *force,
-		outDir:   *outDir,
-		localRid: *ridFlag,
-		winners: func(ctx context.Context, gameID string) ([]int32, error) {
-			rep, err := barapi.New().Resolve(ctx, gameID)
-			if err != nil {
-				return nil, err
-			}
-			return rep.Winners(), nil
-		},
-		orders: func(ctx context.Context, gameID string) ([]snapshot.Event, error) {
-			return packer.DemoSelfD(ctx, barapi.New(), gameID)
-		},
-	}
 	if (*from != "" || *to != "") && !*all {
 		fmt.Fprintln(os.Stderr, "insights: -from/-to narrow -all; pass them with -all")
 		os.Exit(2)
 	}
 	for _, d := range []string{*from, *to} {
-		if d != "" && !validDate(d) {
+		if d != "" && !insightsrun.ValidDate(d) {
 			fmt.Fprintf(os.Stderr, "insights: %q: want YYYY-MM-DD or unix seconds\n", d)
 			os.Exit(2)
 		}
-	}
-	r.from, r.to = *from, *to
-	if dir := cacheDir(*cacheFlag, target); dir != "" {
-		r.cache = &objectCache{dir: dir}
 	}
 	if *ridFlag != "" && flag.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "insights: -rid names ONE capture's revision; pass exactly one input")
 		os.Exit(2)
 	}
-	if *upload != "" {
-		r.publish = func(ctx context.Context, dir, label string) error {
-			return packer.UploadPieces(ctx, packer.UploadOptions{Target: target.Name, IndexURL: target.IndexURL, WorkerDir: *workerDir}, dir, label)
-		}
-	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	r := insightsrun.New(insightsrun.Options{
+		Target:    target,
+		Publish:   *upload != "",
+		WorkerDir: *workerDir,
+		OutDir:    *outDir,
+		Force:     *force,
+		LocalRid:  *ridFlag,
+		From:      *from,
+		To:        *to,
+		Cache:     *cacheFlag,
+	})
 	args := flag.Args()
 	if *all {
 		var err error
-		if args, err = r.catalogRids(ctx); err != nil {
+		if args, err = r.CatalogRids(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "insights: listing the catalog: %v\n", err)
 			os.Exit(1)
 		}
@@ -167,438 +140,11 @@ func main() {
 	if *jobs < 1 {
 		*jobs = 1
 	}
-	failed := r.each(ctx, args, *jobs)
-	if r.cache != nil {
-		fmt.Fprintln(os.Stderr, r.cache.summary())
+	failed := r.Each(ctx, args, *jobs)
+	if s := r.CacheSummary(); s != "" {
+		fmt.Fprintln(os.Stderr, s)
 	}
 	if failed > 0 || ctx.Err() != nil {
 		os.Exit(1)
-	}
-}
-
-// each processes args with up to jobs of them in flight and returns how many
-// failed. Every replay is independent (its own fetches, compute and upload),
-// and a run over the catalog is mostly waiting on downloads and uploads, so
-// a few at once is most of the speed-up; more mainly costs memory, since each
-// holds a whole replay. Output lines from different replays interleave, but
-// every one names its replay.
-func (r *runner) each(ctx context.Context, args []string, jobs int) int {
-	var (
-		wg     sync.WaitGroup
-		mu     sync.Mutex
-		failed int
-	)
-	work := make(chan string)
-	for range min(jobs, len(args)) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for a := range work {
-				if err := r.one(ctx, a); err != nil {
-					fmt.Fprintf(os.Stderr, "insights: %s: %v\n", a, err)
-					mu.Lock()
-					failed++
-					mu.Unlock()
-				}
-			}
-		}()
-	}
-	for _, a := range args {
-		if ctx.Err() != nil {
-			break
-		}
-		work <- a
-	}
-	close(work)
-	wg.Wait()
-	return failed
-}
-
-// runner holds what every replay is processed with. publish is nil when
-// nothing is uploaded; the file is then written under outDir.
-type runner struct {
-	indexURL, dataURL string
-	// from/to narrow -all to games started in a date range, passed verbatim
-	// to the catalog's own filter (YYYY-MM-DD or unix seconds; a date `to`
-	// covers that whole day).
-	from, to string
-	http     *http.Client
-	force    bool
-	outDir   string
-	localRid string // -rid: the revision a local capture's summary is published under
-	publish  func(ctx context.Context, dir, label string) error
-	// cache keeps what fetch downloads for the next run; nil keeps nothing.
-	cache *objectCache
-	// winners asks the BAR API who won, for a replay whose meta does not say
-	// (every .brp packed before the demo's winners were read). Nil skips it.
-	winners func(ctx context.Context, gameID string) ([]int32, error)
-	// orders reads the self-destruct orders out of the game's demo, for a
-	// capture packed before they were (a .brp with no "selfd" events). Nil
-	// skips it.
-	orders func(ctx context.Context, gameID string) ([]snapshot.Event, error)
-}
-
-// catalogRow is the part of a GET /api/replays row this command reads.
-type catalogRow struct {
-	ID          string  `json:"id"`
-	Rid         *string `json:"rid"`
-	View        *string `json:"view"`
-	Placeholder bool    `json:"placeholder"`
-	Uploads     []struct {
-		Rid string `json:"rid"`
-		Rev string `json:"rev"`
-	} `json:"uploads"`
-}
-
-func (c catalogRow) rid() string {
-	if c.Rid != nil && *c.Rid != "" {
-		return *c.Rid
-	}
-	return c.ID
-}
-
-func (c catalogRow) view() string {
-	if c.View != nil {
-		return *c.View
-	}
-	return ""
-}
-
-// ridRE matches a revision id: a gameId plus the 8-hex content revision.
-var ridRE = regexp.MustCompile(`^[0-9a-f]{32}-[0-9a-f]{8}$`)
-
-// one processes one argument: a local .brp, a revision id, or anything
-// barapi.ParseGameID reads as a game.
-func (r *runner) one(ctx context.Context, arg string) error {
-	switch filepath.Ext(arg) {
-	case ".brp":
-		return r.local(ctx, arg)
-	case ".brepstream":
-		dir, err := os.MkdirTemp("", "insights-pack-")
-		if err != nil {
-			return err
-		}
-		defer os.RemoveAll(dir)
-		brp, _, err := packer.Pack(ctx, barapi.New(), arg, dir, "", false)
-		if errors.Is(err, packer.ErrDemoUnavailable) {
-			fmt.Fprintf(os.Stderr, "%s: demo unavailable (%v); packing without it\n", arg, err)
-			brp, _, err = packer.Pack(ctx, barapi.New(), arg, dir, "", true)
-		}
-		if err != nil {
-			return err
-		}
-		return r.local(ctx, brp)
-	}
-	var rid, view string
-	if ridRE.MatchString(arg) {
-		rid = arg
-		row, err := r.catalogRow(ctx, arg[:32])
-		if err != nil {
-			return err
-		}
-		// The row's view describes its CURRENT revision; an older one keeps
-		// whatever its own upload knew, which nothing here can recover.
-		if row != nil && row.rid() == rid {
-			view = row.view()
-		}
-	} else {
-		id, err := barapi.ParseGameID(arg)
-		if err != nil {
-			return err
-		}
-		row, err := r.catalogRow(ctx, id)
-		if err != nil {
-			return err
-		}
-		if row == nil {
-			return fmt.Errorf("game %s is not in the catalog at %s", id, r.indexURL)
-		}
-		if row.Placeholder {
-			return fmt.Errorf("game %s has nothing published yet", id)
-		}
-		rid, view = row.rid(), row.view()
-	}
-	return r.rid(ctx, rid, view)
-}
-
-// rid computes and publishes one published revision's summary.
-func (r *runner) rid(ctx context.Context, rid, view string) error {
-	name := insights.FileName(rid)
-	if !r.force {
-		if b, err := r.fetch(ctx, "replays/"+name); err == nil {
-			if r.publish != nil {
-				fmt.Fprintf(os.Stderr, "%s: already published, skipping (-force recomputes)\n", name)
-				return nil
-			}
-			// Compute-only mode collects files (e.g. for cmd/winfit), so the
-			// published one is saved as is: recomputing would give the same.
-			path := filepath.Join(r.outDir, "replays", name)
-			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-				return err
-			}
-			fmt.Fprintf(os.Stderr, "%s: already published, saved to %s (-force recomputes)\n", name, path)
-			return os.WriteFile(path, b, 0o644)
-		} else if !errors.Is(err, viz.ErrNotFound) {
-			return err
-		}
-	}
-	var in insights.Input
-	if b, err := r.fetch(ctx, "replays/"+rid+".brp"); err == nil {
-		bf, err := snapshot.ParseBRP(bytes.NewReader(b))
-		if err != nil {
-			return fmt.Errorf("%s.brp: %w", rid, err)
-		}
-		if in, err = insights.FromBRP(bf); err != nil {
-			return err
-		}
-		if view == insights.POVAlly || view == insights.POVFull {
-			in.POV = view
-		}
-		fmt.Fprintf(os.Stderr, "%s: read from its .brp\n", rid)
-	} else if errors.Is(err, viz.ErrNotFound) {
-		bf, res, err := viz.ReadStaticBundle(ctx, r.fetch, rid)
-		if err != nil {
-			return err
-		}
-		if in, err = insights.FromPieces(bf, res, view); err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "%s: rebuilt from %d published chunks (army costs only)\n", rid, len(bf.Chunks))
-	} else {
-		return err
-	}
-	return r.write(ctx, rid, in)
-}
-
-// local computes the summary of a .brp on disk, under the revision id a
-// publish of that same file gets (packer.ContentRev of the packed bytes).
-func (r *runner) local(ctx context.Context, path string) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	bf, err := snapshot.ParseBRP(f)
-	if err != nil {
-		return err
-	}
-	rid := r.localRid
-	if rid == "" {
-		rev, err := packer.ContentRev(path)
-		if err != nil {
-			return err
-		}
-		rid = bf.Meta.GameID + "-" + rev
-		if r.indexURL != "" {
-			if row, err := r.catalogRow(ctx, bf.Meta.GameID); err == nil && row != nil {
-				for _, u := range row.Uploads {
-					if u.Rev == rev {
-						rid = u.Rid
-					}
-				}
-			}
-		}
-	}
-	in, err := insights.FromBRP(bf)
-	if err != nil {
-		return err
-	}
-	return r.write(ctx, rid, in)
-}
-
-// gameOrders is r.orders through the cache: a demo never changes, and a
-// re-run over the catalog would otherwise download every one of them again
-// for a few bytes of orders.
-func (r *runner) gameOrders(ctx context.Context, gameID string) ([]snapshot.Event, error) {
-	key := "demo-orders/" + gameID + ".json"
-	if b, ok := r.cache.get(key); ok {
-		var ev []snapshot.Event
-		if json.Unmarshal(b, &ev) == nil {
-			return ev, nil
-		}
-	}
-	ev, err := r.orders(ctx, gameID)
-	if err != nil {
-		return nil, err
-	}
-	if b, err := json.Marshal(ev); err == nil {
-		r.cache.put(key, b)
-	}
-	return ev, nil
-}
-
-// hasSelfD is whether a capture's events already carry the demo's
-// self-destruct orders.
-func hasSelfD(events []snapshot.Event) bool {
-	for _, e := range events {
-		if e.Kind == snapshot.EventSelfD {
-			return true
-		}
-	}
-	return false
-}
-
-func (r *runner) write(ctx context.Context, rid string, in insights.Input) error {
-	if len(in.Meta.Winners) == 0 && r.winners != nil && in.Meta.GameID != "" {
-		// Unknown winners only cost the summary its result line, so a failed
-		// lookup is a warning.
-		if w, err := r.winners(ctx, in.Meta.GameID); err != nil {
-			fmt.Fprintf(os.Stderr, "%s: winner unknown (BAR API: %v)\n", rid, err)
-		} else {
-			in.Meta.Winners = w
-		}
-	}
-	if r.orders != nil && in.Meta.GameID != "" && !hasSelfD(in.Events) {
-		// A .brp packed before the demo's orders were read has none, and
-		// without them a self-destruct reads as a kill. Best-effort, like
-		// the winners: the rest of the summary does not depend on it.
-		if ev, err := r.gameOrders(ctx, in.Meta.GameID); err != nil {
-			fmt.Fprintf(os.Stderr, "%s: self-destructs unknown (%v)\n", rid, err)
-		} else {
-			in.Events = snapshot.MergeEvents(in.Events, ev)
-		}
-	}
-	ins, err := insights.Compute(in)
-	if err != nil {
-		return err
-	}
-	b, err := insights.Marshal(ins)
-	if err != nil {
-		return err
-	}
-	dir := r.outDir
-	if r.publish != nil {
-		if dir, err = os.MkdirTemp("", "insights-"); err != nil {
-			return err
-		}
-		defer os.RemoveAll(dir)
-	}
-	path := filepath.Join(dir, "replays", insights.FileName(rid))
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(path, b, 0o644); err != nil {
-		return err
-	}
-	winner := "unknown"
-	if ins.Winner >= 0 {
-		winner = fmt.Sprintf("side %d", ins.Winner+1)
-	}
-	fmt.Fprintf(os.Stderr, "%s: %d sides, %d deaths, %d milestones, winner %s, %.1f KB (cost coverage %s, view %s)\n",
-		rid, len(ins.Sides), len(ins.Deaths.F), len(ins.Milestones), winner, float64(len(b))/1024, ins.CostCoverage, ins.POV)
-	if r.publish == nil {
-		fmt.Fprintf(os.Stderr, "wrote %s\n", path)
-		return nil
-	}
-	if err := r.publish(ctx, dir, rid); err != nil {
-		return err
-	}
-	// What was just published is what the next run would download to find
-	// it published (or, with -upload=, to save to -out).
-	r.cache.put("replays/"+insights.FileName(rid), b)
-	return nil
-}
-
-// fetch GETs one object from the destination's data origin, or reads the
-// copy an earlier run kept; a 404 is viz.ErrNotFound.
-func (r *runner) fetch(ctx context.Context, key string) ([]byte, error) {
-	if b, ok := r.cache.get(key); ok {
-		return b, nil
-	}
-	b, err := r.get(ctx, strings.TrimRight(r.dataURL, "/")+"/"+key)
-	if err == nil {
-		r.cache.put(key, b)
-	}
-	return b, err
-}
-
-func (r *runner) get(ctx context.Context, u string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := r.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("GET %s: %w", u, viz.ErrNotFound)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: %s", u, resp.Status)
-	}
-	b, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", u, err)
-	}
-	// Nothing published here is empty, so an empty 200 is a failed transfer;
-	// returning it would get it cached and read as a broken file forever.
-	if len(b) == 0 {
-		return nil, fmt.Errorf("GET %s: empty body", u)
-	}
-	return b, nil
-}
-
-// catalogRow looks one game up in the catalog; nil when it has no row.
-func (r *runner) catalogRow(ctx context.Context, id string) (*catalogRow, error) {
-	b, err := r.get(ctx, strings.TrimRight(r.indexURL, "/")+"/api/replays?id="+url.QueryEscape(id))
-	if err != nil {
-		return nil, err
-	}
-	var rows []catalogRow
-	if err := json.Unmarshal(b, &rows); err != nil {
-		return nil, fmt.Errorf("catalog: %w", err)
-	}
-	for i := range rows {
-		if rows[i].ID == id {
-			return &rows[i], nil
-		}
-	}
-	return nil, nil
-}
-
-// catalogPage is the largest page /api/replays serves (CATALOG_LIMIT_MAX).
-const catalogPage = 200
-
-// validDate is the catalog's from/to syntax: YYYY-MM-DD or unix seconds.
-func validDate(s string) bool {
-	if _, err := time.Parse("2006-01-02", s); err == nil {
-		return true
-	}
-	_, err := strconv.ParseInt(s, 10, 64)
-	return err == nil
-}
-
-// catalogRids walks the catalog (narrowed to r.from..r.to), page by page, and
-// returns every published row's current revision.
-func (r *runner) catalogRids(ctx context.Context) ([]string, error) {
-	var out []string
-	q := url.Values{}
-	if r.from != "" {
-		q.Set("from", r.from)
-	}
-	if r.to != "" {
-		q.Set("to", r.to)
-	}
-	for offset := 0; ; offset += catalogPage {
-		q.Set("limit", strconv.Itoa(catalogPage))
-		q.Set("offset", strconv.Itoa(offset))
-		b, err := r.get(ctx, strings.TrimRight(r.indexURL, "/")+"/api/replays?"+q.Encode())
-		if err != nil {
-			return nil, err
-		}
-		var rows []catalogRow
-		if err := json.Unmarshal(b, &rows); err != nil {
-			return nil, fmt.Errorf("catalog: %w", err)
-		}
-		for _, row := range rows {
-			if !row.Placeholder {
-				out = append(out, row.rid())
-			}
-		}
-		if len(rows) < catalogPage {
-			return out, nil
-		}
 	}
 }
