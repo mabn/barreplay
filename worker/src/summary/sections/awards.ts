@@ -7,6 +7,7 @@
 // can decide, judged in the browser (achievements/), loaded after the page
 // draws since they need the game's demo.
 import { loadAchievements, type AchievementResult, type Hit } from "../achievements";
+import { RARITY_NAMES, rarityOf } from "../achievements/rarity";
 import { h, s, section } from "../dom";
 import { comparable, sideColor, sideOfTeam, sideShort, teamColor } from "../model";
 import { named, unitRef } from "../names";
@@ -135,11 +136,12 @@ function achievements(ins: Insights, opts: SummaryOptions): HTMLElement | null {
 
 function renderAchievements(ins: Insights, opts: SummaryOptions, r: AchievementResult): Node[] {
   const watch = watcher(opts);
-  // Rarest first: a rule half the lobby earned says less than one only a
-  // single player did.
-  const earned = [...r.earned].sort((a, b) => a.hits.length - b.hits.length);
+  // Rarest first, by the shortlist's estimate and then by how many earned it
+  // here: a rule half the lobby earned says less than one only a single
+  // player did.
+  const earned = [...r.earned].sort((a, b) => rarityOf(b.rule.id) - rarityOf(a.rule.id) || a.hits.length - b.hits.length);
   const cards = earned.map(({ rule, hits }) => h("div", { class: "brs-card brs-achcard" },
-    h("div", { class: "brs-award-title" }, `★ ${rule.name}`),
+    h("div", { class: "brs-award-title" }, `★ ${rule.name} `, rarityChip(rule.id)),
     h("div", { class: "brs-hint" }, rule.desc),
     h("ul", { class: "brs-achhits" }, ...hits.map((hit) => {
       const li = h("li", { class: hit.f !== undefined && watch ? "brs-seekable" : null }, whoOf(ins, hit), ": ", hit.text,
@@ -150,9 +152,9 @@ function renderAchievements(ins: Insights, opts: SummaryOptions, r: AchievementR
       }
       return li;
     }))));
-  const nameList = (rules: { name: string; desc: string; why?: string }[]) =>
+  const nameList = (rules: { id: number; name: string; desc: string; why?: string }[]) =>
     h("ul", { class: "brs-achlist" }, ...rules.map((x) => h("li", undefined,
-      h("span", { class: "brs-strong" }, x.name), " ", h("span", { class: "brs-hint" }, x.why ? `${x.desc} (${x.why})` : x.desc))));
+      h("span", { class: "brs-strong" }, x.name), " ", rarityChip(x.id), " ", h("span", { class: "brs-hint" }, x.why ? `${x.desc} (${x.why})` : x.desc))));
   const total = r.earned.length + r.missed.length + r.unknown.length;
   const out: (Node | null)[] = [
     h("h4", undefined, `Achievements: ${r.earned.length} of ${total} earned`),
@@ -161,9 +163,18 @@ function renderAchievements(ins: Insights, opts: SummaryOptions, r: AchievementR
     cards.length ? h("div", { class: "brs-cards" }, ...cards) : h("div", { class: "brs-hint" }, "Nobody earned one in this game."),
     r.missed.length ? h("details", { class: "brs-more" }, h("summary", undefined, `Not earned in this game (${r.missed.length})`), nameList(r.missed)) : null,
     r.unknown.length ? h("details", { class: "brs-more" }, h("summary", undefined, `Can't be checked for this game (${r.unknown.length})`),
-      nameList(r.unknown.map((u) => ({ name: u.rule.name, desc: u.rule.desc, why: u.why })))) : null,
+      nameList(r.unknown.map((u) => ({ id: u.rule.id, name: u.rule.name, desc: u.rule.desc, why: u.why })))) : null,
   ];
   return out.filter((x): x is Node => x !== null);
+}
+
+/** rarityChip labels a rule with its estimated rarity (achievements/rarity.ts:
+ * the shortlist's guess, 1 common to 5 legendary). */
+function rarityChip(id: number): HTMLElement {
+  const n = rarityOf(id);
+  const el = h("span", { class: `brs-rarity brs-rarity${n}` }, RARITY_NAMES[n]);
+  tip(el, { title: `Rarity ${n} of 5: estimated before any game was checked, not measured` });
+  return el;
 }
 
 /** whoOf names who earned a hit: the player in their colour, their side in
