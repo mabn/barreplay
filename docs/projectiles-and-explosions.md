@@ -569,11 +569,21 @@ Mini Starfalls, Perdition missiles and Pulsars).
   run-to-run noise. The widget's per-frame work measured 442 ms over the whole
   game, because a slot is polled only once its weapon has reloaded.
 
+Three more games, re-simulated for UI work and published with these
+records (all under `https://cdn-bar.fogofwar.dev/replays/`):
+
+| Capture | Length | What it holds |
+|---|---|---|
+| `2026-10/672ecb6abad74a5a71e4b3d0dc750f1b.brp` | 13 min | 2,810 Mini Starfall shells, 43 Pulsar beams, 18 Perdition missiles |
+| `2026-10/0944cb6afcf5b0fe672e3d30078c7fb9-17458b3f.brp` | 32 min | **2 Seadragon nukes, both intercepted** by Prevailers; Catalysts; Epoch shells; Longbow split rockets |
+| `2026-10/912ccb6a098dd688fc682f852510113f.brp` | 36 min | 20 Junos, ~2,900 rockets (Thanatos, Arbiter, Ambassador, Negotiator), 308 beam firings, Astraeus cluster shells |
+| `2026-10/8227cb6aabe4dd5c14d62dcb33a9aebe.brp` | 22 min | Basilica and Basilisk LRPCs, 827 Mini Ragnarok shells, Juggernaut, Pulsar and Epic Bulwark beams |
+
 Still open:
 
-- **Anti-nuke interception and Juno** on a real game: neither occurred in
-  these two.
-- **Shield-bent beams.**
+- **8% of Epoch shells vanish** with no explosion (46 of 580): probably
+  shields or shots leaving the map; not confirmed.
+- **Shield-bent beams**: none occurred yet.
 
 ## 8a. Originally listed to verify
 

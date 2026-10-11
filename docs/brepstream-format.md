@@ -507,6 +507,88 @@ projectile, and only when the unit was finished and not reclaimed
 around (x, z) from its frame on, since damage further out arrives
 `distance / explosionSpeed` frames later.
 
+**Reading a track.** What each column means in practice, measured on real
+re-simulations (engine 2026.07.04; the four captures below):
+
+- **Launch.** `birth` is the frame the widget found the projectile: the frame
+  it left the muzzle (or, for a salvo shot, the frame that shell appeared).
+  `x0/y0/z0` and the velocity are read at the end of that frame, after the
+  frame's projectile update, so a fast shell is already up to a frame's travel
+  from the muzzle.
+- **Ballistic classes** (`artillery`: plasma cannons, LRPCs, the Starfall
+  family): each frame the engine adds the gravity (negative) to the vertical
+  velocity and then the velocity to the position (`CProjectile::Update`), so
+  from the recorded state the flight is exactly
+  `x(t) = x0 + vx·t`, `z(t) = z0 + vz·t`, `y(t) = y0 + vy·t + gravity·t(t+1)/2`
+  with `t = frame − birth`, up to the `.brp`'s quantization (§9.2 there) and
+  any Lua that moves the shell itself. No path is stored for them; the arc is
+  that.
+- **Steered classes** (`nuke`, `antinuke`, `juno`, `tactical` and `rocket`
+  starburst launchers): the missile leaves the silo almost straight up and
+  slowly (`vx = vz = 0`, `vy` ≈ 0.1–0.2) and is then steered, so the launch
+  velocity says nothing about the flight. The strategic classes carry a
+  `path` (every 10 frames) that does; `rocket` rows have none (too many, and
+  too short) and are best drawn as a curve from launch to end. For a steered
+  missile `ty` is the height the engine steers toward (about 3,000 for a
+  nuke), not the ground.
+- **End.** `endKind` 1 is an explosion the engine reported with this
+  projectile's id: `x1/y1/z1` is where it went off and `end` its frame. A `y1`
+  far above the ground is an air burst: an interception, or a shell meeting a
+  shield. `endKind` 2 (vanished) has two common causes in BAR: a gadget
+  deleting the projectile on purpose (a Longbow rocket that splits into
+  sub-rockets, a rocket past its leash range), and a shell absorbed by a
+  shield; `x1/y1/z1` is then the last position seen, at most 15 frames before
+  `end`. `endKind` 0 rows were still flying when the game ended.
+- **Interception.** The anti-nuke's row names its victim: `targetType` `'p'`
+  (112) and `target` = the nuke's `id`. The nuke's row carries flag bit 0
+  (an interceptor engaged it) and bit 1 (destroyed by it): their explosions
+  came within a frame of each other. A nuke with bit 0 and not bit 1 survived
+  an interception attempt.
+- **Beams.** One row per firing. `x0/y0/z0` is the muzzle, `path` the kept hit
+  points (`df` from the first frame), `x1/y1/z1` the last hit. A point
+  repeated at several `df` is the beam held on one target. `endKind` 2 means
+  no frame of it hit anything.
+- **What it did.** Damage is in `H`, not here: the hits of the same `weapon`
+  within its radius (`aoe` in `wdefs`) of the end position, from `end` to
+  `end + aoe / expSpeed + 1` (damage further out lands later). A beam's
+  hits are the ones of its weapon and `owner` during its frames.
+
+Real rows, decoded (`snapshot.Projectile` as JSON; paths cut to their first
+three points and the last). An Armada Seadragon nuke and the Prevailer
+anti-nuke that killed it, both ending at frame 50516, 2,800 elmos up:
+
+```json
+{"birth":50237,"end":50516,"id":13159,"weapon":349,"owner":19773,"team":0,"class":1,
+ "endKind":1,"flags":3,"x0":8968,"y0":9,"z0":5356,"vx":0,"vy":0.12,"vz":0,"gravity":-0.11111,
+ "targetType":103,"target":-1,"tx":9911,"ty":3025,"tz":557,"x1":9244,"y1":2875,"z1":3954,
+ "path":[{"df":13,"x":8968,"y":20,"z":5356},{"df":23,"x":8968,"y":42,"z":5356},
+         {"df":33,"x":8968,"y":75,"z":5356},{"df":273,"x":9218,"y":2869,"z":4083}]}
+{"birth":50275,"end":50516,"id":10904,"weapon":624,"owner":9320,"team":12,"class":2,
+ "endKind":1,"x0":9888,"y0":289,"z0":672,"vx":0,"vy":0.21,"vz":0,"gravity":-0.11111,
+ "targetType":112,"target":13159,"tx":8968,"ty":95,"tz":5356,"x1":9268,"y1":2793,"z1":3828,
+ "path":[{"df":15,"x":9888,"y":316,"z":672},{"df":25,"x":9888,"y":359,"z":672},
+         {"df":35,"x":9888,"y":422,"z":672},{"df":235,"x":9310,"y":2687,"z":3618}]}
+```
+
+A Bulwark beam held on one unit, a commander's death blast (kind 1) and a
+Longbow sub-rocket nobody launched (kind 2), and a stock fact:
+
+```json
+{"birth":34713,"end":34721,"id":6654,"weapon":594,"owner":29790,"team":2,"class":8,"endKind":1,
+ "x0":5959,"y0":121,"z0":6112,"targetType":117,"target":27782,"tx":6688,"ty":23,"tz":5815,
+ "x1":6745,"y1":27,"z1":5778,"path":[{"df":0,"x":6682,"y":35,"z":5805},{"df":2,"x":6745,"y":27,"z":5778},
+ {"df":7,"x":6745,"y":27,"z":5778},{"df":8,"x":6745,"y":27,"z":5778}]}
+{"f":8100,"weapon":416,"x":908,"y":252,"z":9317,"unit":30227,"team":3,"kind":1}
+{"f":29636,"weapon":290,"x":10429,"y":304,"z":6849,"unit":24118,"team":0,"kind":2}
+{"k":"stock","f":25613,"unit":23705,"def":411,"team":5,"w":1,"old":0,"n":1}
+```
+
+**Volume.** Four real 8v8 captures (13–36 minutes) recorded 778–3,236
+tracks and 332–847 blasts; packed, the `R` section is 20–75 KB and `W` 3–5
+KB, 0.5–4.4% of the file (the high end is a game of Mini Starfalls, whose
+every shell is a track). The widget's per-frame work came to 0.4–2.5 s per
+game; peak engine memory was unchanged.
+
 **`wdefs` keys for watched weapons (protocol ≥ 5).** Present only on weapons
 the capture watches, so the fact stays small (about 540 of 2,900 weapons in a
 modded game):
@@ -526,6 +608,17 @@ modded game):
 | `beamtime`, `sweepFire` | beam weapons; `beamtime` in seconds |
 | `cp` | the customParams that change what a weapon does, when present: `nuclear`, `junotype`, `cluster_def`, `cluster_number`, `area_onhit_damage`, `area_onhit_range`, `area_onhit_time`, `overrange_distance`, `stockpilelimit` |
 
+One watched weapon's entry, as the fact carries it (the Seadragon's nuke):
+
+```json
+{"id":349,"name":"armseadragon_sdmssl","description":"Intercontinental ballistic nuclear warhead",
+ "type":"StarburstLauncher","range":72000,"reload":30,"damage":9500,"aoe":640,
+ "role":"track","class":"nuke","edge":0.45,"expSpeed":49.286,"crater":640,"impulse":0.5,
+ "damages":{"commanders":2500,"indestructable":0},"stockpile":true,"stockpileTime":4200,
+ "targetable":1,"speed":53.333,"highTrajectory":2,"flightTime":12000,
+ "cp":{"nuclear":1,"stockpilelimit":10}}
+```
+
 ## Preamble
 
 The text line grammar the retired `.brsnap` stream used:
@@ -541,5 +634,6 @@ JSON), `T`, `P`, `READY`. The `GAME` line's `sampleEvery`/`gameSpeed` feed
 velocity de-quantization and frame timestamps (`t = frame/gameSpeed`), and its
 `protocol` selects the resource-income semantics (>= 3: written as the engine
 reports it; <= 2 or absent: over-scaled by gameSpeed, repaired at decode — see
-the frame-record section); metadata seeded by the caller (e.g. from the demo)
+the frame-record section) and says which record types may follow (4: the
+re-sim's `G H U V P`; 5: also `R`, `W` and the `stock` fact — widget 1.9.0); metadata seeded by the caller (e.g. from the demo)
 wins over `GAME` values.

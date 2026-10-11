@@ -157,6 +157,8 @@ offset  size  value
   "frames":      1952,         // total sampled frames
   "events":      48823,        // total events
   "unitRecords": 4223293,      // total per-frame unit rows (sum of frame unit counts)
+  "facts": 157, "hits": 53074, "unitEnds": 5909, "visibility": 1916,
+  "projectiles": 778, "blasts": 847,  // analysis record counts (v6; each omitted when 0)
   "chunkFrames": 64,           // nominal samples per chunk (the last chunk may be short)
   "chunks":      [ ... ],      // the chunk index, see §5
   "sections":    [             // the LAYOUT: every section after M, in file order
@@ -171,6 +173,10 @@ offset  size  value
   viewport. Omitted when the capture contains no units.
 - `frameTeams` (sorted ascending) exists so a consumer can colour/list teams
   that appear in frame or event data but are missing from `meta.teams`.
+- The analysis counts (`facts`, `damageWindows`, `lives`, `visibility`,
+  `hits`, `unitEnds`, `projectiles`, `blasts`) say how many records each
+  analysis section holds without decoding it; a key is absent when its section
+  is.
 - `unitRecords` counts **full frame contents** (live units per frame, summed),
   not stored changed-records — it is unaffected by delta-frame skipping.
 - `sections` lists every section after `M` — its one-character tag and its
@@ -684,8 +690,25 @@ then each row's points in row order:
                             (the previous point; the launch for the first)
 ```
 
-Velocity and gravity are quantized here (the stream carries them as f32): the
-arc a reader rebuilds from them drifts well under one elmo over a long shot.
+Velocity and gravity are quantized here (the stream carries them as f32):
+velocity to 0.01 elmo per frame and gravity to 1e-5 elmo per frame², so an
+arc rebuilt from them (`y(t) = y0 + vy·t + gravity·t(t+1)/2`, see the stream
+doc) drifts at most ~1.5 elmos after 10 s of flight. Every other column is
+exact. Rows are sorted by birth, then projectile id (then weapon, owner), so
+a capture always packs to the same bytes.
+
+Go: `BRPFile.Projectiles()` returns `[]snapshot.Projectile` — `Birth`, `End`,
+`ID`, `Weapon`, `Owner`, `Team` (-1 = unknown), `Class` (`ProjNuke` … `ProjBeam`,
+named by `ProjectileClassName`), `EndKind` (`TrackOpen`, `TrackExploded`,
+`TrackVanished`), `Flags` (`TrackEngaged`, `TrackIntercepted`,
+`TrackPathTruncated`; `Intercepted()`), launch `X0/Y0/Z0`, `VX/VY/VZ`,
+`Gravity`, `TargetType` (the engine's byte, 0 none), `Target`, `TX/TY/TZ`,
+end `X1/Y1/Z1`, `Path []PathPoint{DF, X, Y, Z}`. What each means — when a
+launch is seen, why a track vanishes, how an interception is flagged, how a
+beam's points are kept, which classes are steered and which fly an arc — is
+in `docs/brepstream-format.md`, "Protocol 5", with real decoded rows.
+
+Measured on four real 8v8 captures: `R` is 20–75 KB, 0.5–4.4% of the file.
 
 **`W` — blasts.** One row per explosion the widget watched that ended no
 track: kind 1, a unit's own death or self-destruct explosion (weapon strong
@@ -700,6 +723,12 @@ rows × svarint  x (delta)   rows × svarint y   rows × svarint z (delta)
 rows × uvarint  unit + 1    rows × uvarint team + 1
 rows × uvarint  kind
 ```
+
+Go: `BRPFile.Blasts()` returns `[]snapshot.Blast` — `Frame`, `Weapon`,
+`X/Y/Z`, `Unit`, `Team` (-1 = unknown), `Kind` (`BlastUnit` = 1: the unit
+that exploded; `BlastStray` = 2: a projectile's owner). The weapon's strength
+(damage per armour class, radius, falloff, blast-wave speed) is its entry in
+the `wdefs` fact; what it hit is in `H`. Measured: 3–5 KB per capture.
 
 **`G` — facts.** A JSON array of the widget's fact objects, verbatim (each
 has `"k"`, its kind, and usually `"f"`, its frame). Kept verbatim so a new
