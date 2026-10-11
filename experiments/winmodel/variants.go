@@ -11,12 +11,12 @@ type opts struct {
 	tradeK            float64
 	timeX             bool // add each feature times game time (min(t/T,1))
 	timeT             float64
-	noInc             bool    // drop last-minute income
-	median            bool    // income window median instead of mean
-	armyWin           int     // army averaged over this many steps (0/1 = none)
-	valueAdd          bool    // add value as another feature
-	skill             bool    // add the rating difference
-	skillDecay        float64 // seconds; 0 = constant
+	noInc             bool     // drop last-minute income
+	median            bool     // income window median instead of mean
+	armyWin           int      // army averaged over this many steps (0/1 = none)
+	valueAdd          bool     // add value as another feature
+	skill             bool     // add the rating difference
+	skillDecay        float64  // seconds; 0 = constant
 	lossKeys          []string // add each side's cumulative losses of these (geo.go)
 	lossK             float64
 	front             int  // add the army centres' advance, averaged over this many steps
