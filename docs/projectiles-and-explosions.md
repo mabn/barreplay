@@ -2,7 +2,8 @@
 
 Design notes for capturing **long-range projectiles** (nukes, anti-nukes, EMP,
 tactical nukes, long-range plasma cannons and their rapid-fire and "mini"
-variants, Junos, rocket artillery) and **explosions** (where, how big, what
+variants, Junos, rocket artillery), **heavy beam weapons** (Pulsar,
+Bulwark, Titan, Juggernaut, …) and **explosions** (where, how big, what
 they hit) during a re-simulation, for the post-game report.
 
 Status: **design, nothing implemented.** Every API claim below was checked
@@ -34,6 +35,12 @@ re-checked when either one moves on.
   speed, damage per armour class, impulse and crater size. The
   capture's `wdefs` fact already records a few of these, and extending it
   needs no codec change.
+- **Beams come through the same explosion callin.** A `BeamLaser` with a
+  `beamtime` fires one beam per frame for the whole beam time. Each frame
+  the engine creates a beam segment from the muzzle to the hit point, then
+  calls `Explosion` at the hit point with that segment's id. So one
+  Pulsar shot is 45 explosions, each carrying a 45th of the damage. The
+  widget folds them into one beam record per firing (§4.7).
 - **Damage actually dealt is already recorded.** Every `H` hit carries the
   weapon, and the engine hands the hit callin the projectile id. Linking a
   blast to its hits answers "what was in the blast".
@@ -179,6 +186,31 @@ fact doesn't record them (§6).
 | Artillery ship | Corinth (leganavyartyship) | leg_mobile_cluster_lrpc_cannon | Cannon | 2100 | 8.4 | 350 | 75 | cluster |
 | T3 artillery | Astraeus (legelrpcmech) | shocker_low | Cannon | 3100 | 14.4 | 600 | 75 | cluster |
 
+**Heavy beams.** All are `BeamLaser`. Damage is per **shot**, and the engine
+spreads it over `beamtime · 30` frames (`BeamLaser.cpp:104-110`). Beam time
+comes from the unit files.
+
+| Unit (def) | Weapon | Range | Reload s | Damage / shot | Beam time | AoE r | Notes |
+|---|---|---|---|---|---|---|---|
+| **Pulsar** (armanni), T2 defence | ata | 1400 | 9.9 | 10800 | 1.5 s (45 frames) | 8 | `largebeamlaser` |
+| Epic Pulsar (armannit3) | ata | 1800 | 15 | 48000 | | 8 | |
+| **Bulwark** (cordoom), T2 defence | atadr | 950 | 6 | 4500 | 0.3 s | 6 | plus two short beams (650 and 370 range) |
+| Epic Bulwark (cordoomt3) | armagmheat | 1350 | 4 | 7500 | | 36 | |
+| **Titan** (armbanth), T3 | tehlazerofdewm | 800 | 7.5 | 6000 | 1.05 s | 7 | Apex Titan (mod): 1150 range, 21000 |
+| **Juggernaut** (corkorg), T3 | corkorg_laser | 900 | 4 | 5500 | 0.6 s | 36 | also cratering (72) |
+| Adjudicator (coresuppt3) | laser | 900 | 4 | 5500 | | 36 | |
+| Thermite (corthermite), T3 | thermite_laser | 900 | 4 | 2000 | 0.6 s | 36 | |
+| Siegebreaker (corsiegebreaker), T2 | dreadovercharge | 910 | 8 | 4000 | 1 s | 30 | a sweeping beam (the Siegebreaker's sweep-fire stage) |
+| Starlight (armmanni), T2 tank | atam | 950 | 4.7 | 2500 | 0.3 s | 6 | mobile Pulsar |
+| Liquifier (armanavaldefturret) | armada_tachyon_emitter | 950 | 4.7 | 2500 | | 6 | naval |
+| Armada Commander lvl 8–10 | longgun | 600 | 8 | 60000 (**paralyze**) | 0.15 s | 30 | an EMP beam |
+
+Behemoth (corjugg) is not here: its beams are short (435 and 550 range, 75
+and 150 damage). Its heavy weapon is a `DGun` fireball, a flying projectile.
+Legion's railguns (Arquebus, Daedalus, Trident) and the Sharpshooter are
+`LaserCannon`. Despite the name, that is a fast **flying bolt**, so they
+belong on the projectile path (§4.3) if wanted.
+
 How often these actually fire, as a lower bound: impacts that **damaged a
 unit** (distinct shooter and frame pairs in `H`) in four cached re-sims.
 Misses aren't in `H`, so real launch counts are higher:
@@ -212,6 +244,10 @@ local function classify(wd)
   if cp.junotype then return "juno" end
   if cp.nuclear then
     return (wd.range >= 10000) and "nuke" or "tactical"
+  end
+  if wd.type == "BeamLaser" or wd.type == "LightningCannon" then
+    -- dmg is the whole shot; the engine divides it over the beam's frames
+    return (dmg >= 2000 and wd.range >= 600) and "beam" or nil  -- Pulsar, Bulwark, Titan, Juggernaut…
   end
   if wd.paralyzer and dmg >= 5000 then return "emp" end   -- armemp, armthor
   if wd.stockpile and wd.range >= 1500 then return "tactical" end  -- legperdition
@@ -356,6 +392,59 @@ Metal destroyed = hits whose `hpAfter <= 0`, priced by victim def. Blasts
 with a metal owner join `internal/combat`'s chain crediting ("a chain of
 exploding reactors goes to whoever killed the first").
 
+### 4.7 Beams (Pulsar, Bulwark, Titan, Juggernaut, …)
+
+**How the engine fires a beam** (`rts/Sim/Weapons/BeamLaser.cpp`):
+
+- **A shot is a salvo of one beam per frame.** Unless the weapon has
+  `beamburst`, firing starts `beamtime · 30` frames of beams (45 for the
+  Pulsar). Each carries `1 / that` of the shot's damage (lines 104-110).
+- **Every frame, the beam is traced from the muzzle** (`FireInternal`,
+  312-443). A shield can bend it into several segments. Each segment
+  becomes a short-lived beam projectile: position = segment start, end =
+  hit point, lifetime = `beamLaserTTL`.
+- **If the beam ended on something** (a unit, a feature, the ground or a
+  shield) before its full length, the engine calls `helper->Explosion` at
+  the hit point, with `projectileID` = the last segment's id.
+  - The damage also falls with distance:
+    `max(minIntensity, 1 − length / (2 · range))` × the frame's share.
+  - **A beam ending in empty air explodes nowhere**, so that frame produces
+    no callin.
+- **A sweep-fire beam** (the Siegebreaker's overcharge) moves its aim each
+  frame, so its hit points trace a line across the ground.
+
+**Recording.** The pieces already exist; beams need their own aggregation,
+because one Pulsar shot is 45 explosion callins:
+
+1. **Firing is detected like any tracked weapon:** the `reloadFrame`
+   change (§4.3). It opens a **beam record**:
+   - the owner and weapon;
+   - the first frame;
+   - the muzzle (`GetUnitWeaponVectors`);
+   - what it aims at (`GetUnitWeaponTarget`).
+2. **Each watched `Explosion` from that owner and weapon** while the
+   record is open appends a hit point: frame, x, y, z, and the segment's
+   id, which links the frame's `H` hits. `GetProjectilePosition(segment)`
+   gives the segment's start. It differs from the muzzle only when a
+   shield bent the beam.
+3. **The record closes** `beamtime · 30 + 2` frames after it opened, or when
+   the weapon fires again.
+4. **It is stored as one `R` record** of class `beam`, never as per-frame
+   `B` blasts:
+   - first and last frame, muzzle, and the number of frames that hit
+     something;
+   - the hit points thinned to the first, the last, every 5th, and any
+     that jumped more than 64 elmos. A sweep keeps its shape; a beam held
+     on one target costs a handful of points.
+
+Damage dealt is the `H` hits of that weapon from that owner in the record's
+frame range, or exactly by segment id if the `H` projectile column (§4.6)
+is added. That gives "this Pulsar shot did 10.8k damage and killed 2.4k
+metal", and how often a Titan's laser hits a unit rather than the ground.
+
+Volume: a Pulsar makes 4–5 explosion callins a second while firing, and
+writes one small record per 9.9 s shot. Cheap.
+
 ## 5. Formats
 
 ### Stream (`.brepstream`, protocol bump)
@@ -369,7 +458,11 @@ Two new record tags, both buffered per sample like `H`:
   - `u8 targetType`, then `i16 tx, ty, tz` or `u32 targetId`
   - `i16 x1, y1, z1` (end), `u8 flags` (bit 0: was intercepted)
   - `u16 nPath` followed by `i16 x, y, z` points (strategic classes only)
-- **`B` blasts:** one per `Explosion` call, columnar like `H`:
+  - for class `beam`: launch = the muzzle, velocity and gravity 0, end =
+    the last hit point, and each path point is a thinned hit point with a
+    `u16` frame offset in front of it (§4.7).
+- **`B` blasts:** one per `Explosion` call (except beam frames, which fold
+  into their `R` record), columnar like `H`:
   - `u16 df`, `u16 weapon`, `i16 x, y, z`, `u16 owner`, `u8 ownerTeam`
   - `u32 projectile` (`0xFFFFFFFF` = none)
 
@@ -417,6 +510,11 @@ damage, paralyzer, aoe`. Add:
   pulse's frame inside its radius).
 - **Biggest blasts:** the top explosions by metal destroyed, death explosions
   included, so "the fusion chain at 18:40" becomes a card of its own.
+- **Beam card:** per Pulsar, Bulwark, Titan or Juggernaut:
+  - shots fired, and the share that hit a unit rather than the ground;
+  - metal destroyed per shot, and the best shot;
+  - in the viewer, each beam drawn as a line from muzzle to hit point for
+    its duration.
 
 ## 7. The uploader widget (player captures)
 
@@ -441,3 +539,9 @@ recording, but it isn't the report, and it should wait.
 - **Re-sim speed:** overhead with every class on, on the large benchmark
   replay (see `patches/engine-2026.07.04/RESULTS.md` for the baselines). The
   output must stay byte-identical with the switches off.
+- **Beams:**
+  - that `reloadFrame` changes once, at the start of the salvo;
+  - that the per-frame callins carry the owner;
+  - what a shield-bent beam looks like.
+- **`LightningCannon`** (none of the heavy beams use it): read
+  `LightningCannon.cpp` before relying on the beam rule for it.
