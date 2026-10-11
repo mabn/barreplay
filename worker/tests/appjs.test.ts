@@ -2368,3 +2368,40 @@ test('the effect layers are fingerprinted, loaded before app.js and defined', ()
     assert.ok(new RegExp(`function ${fns[n]}\\s*\\(`).test(FX[i]), `${n} defines ${fns[n]}()`);
   });
 });
+
+// Where a projectile is between records (fx-projectiles.js projPos): a
+// ballistic shell follows the engine's own update from its launch velocity
+// and lands on its recorded end; a steered missile passes through its
+// sampled path; a pathless rocket runs from launch to end.
+test('projectiles fly the way their records say', () => {
+  const FXP = FX[0];
+  const GO = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/viewer.fx.json', import.meta.url)), 'utf8'));
+  const { projPos } = new Function(`
+    ${APP.match(/const FX_END = [^\n]+/)![0]}
+    ${FXP}
+    return { projPos };
+  `)();
+  const row = (id: number, birth: number) => {
+    const p = GO.projectiles.find((q: { id: number; birth: number }) => q.id === id && q.birth === birth);
+    return { flags: 0, targetType: 0, ...p, path: p.path ?? null };
+  };
+  const at = (p: object, t: number) => projPos(p, t, [0, 0, 0]).map((v: number) => Math.round(v));
+
+  const shell = row(17, 1000); // an LRPC shell: launch velocity + gravity
+  assert.deepEqual(at(shell, 0), [110, 210, 60]);
+  assert.deepEqual(at(shell, 93).slice(0, 2), [1250, -116], 'lands where it exploded');
+  // Height is the engine's arc: y0 + vy t + g t(t+1)/2.
+  assert.equal(at(shell, 40)[2], Math.round(60 + 6.04 * 40 - 0.13 * 40 * 41 / 2));
+  assert.deepEqual(at(shell, 500), at(shell, 93), 'clamped to the flight');
+
+  const nuke = row(4000, 900); // steered: through its path, to its end
+  assert.deepEqual(at(nuke, 0), [100, 200, 9]);
+  assert.deepEqual(at(nuke, 20), [100, 200, 42]);
+  assert.deepEqual(at(nuke, 250), [1150, 690, 2869]);
+  assert.deepEqual(at(nuke, 270), [1200, 700, 2875]);
+
+  // A starburst rocket stores no path and leaves the silo straight up.
+  const rocket = { ...shell, class: 7, vx: 0, vz: 0, x1: 900, z1: 210, path: null };
+  assert.deepEqual(at(rocket, 0).slice(0, 2), [110, 210]);
+  assert.deepEqual(at(rocket, 93).slice(0, 2), [900, 210]);
+});

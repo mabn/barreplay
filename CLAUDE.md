@@ -3181,6 +3181,14 @@ run dev` in `worker/` plus `pack -upload local`.)
   globals, loaded BEFORE it and fingerprinted with it (vite.config.ts
   SUBRESOURCES, index.html, public/_headers, the dev middleware and the smoke
   regex all name them). A replay without the sections hides the switch.
+  fx-projectiles.js draws the FLIGHT only (impacts are fx-blasts.js's): a
+  team-coloured fading trail and a class-coloured head, grown with height.
+  `projPos` places a row between records: a row with a path (nukes, anti-nukes,
+  EMP, tactical, Junos) is a Catmull-Rom curve through launch, path and end; a
+  pathless row with horizontal velocity is ballistic (the engine's own
+  `y0 + vy t + g t(t+1)/2`, eased onto the recorded end over the flight since
+  the stored velocity is quantized); a pathless starburst rocket flies a gentle
+  accelerating bow from launch to end.
 - **`internal/viz/icons.go`** renders **real BAR unit icons**. It embeds the vendored icon
   PNGs and BAR's `icontypes.lua` (a unit-name→bitmap gamedata table) under `bardata/`, and
   **parses the Lua data table directly in Go** (a small line/brace scanner, no `gopher-lua`)
