@@ -102,7 +102,7 @@ export function swingChart(ins: Insights, opts: SummaryOptions, watch: Watch | n
       s("circle", { cx: c.x(tt), cy: y, r: 10, fill: e.color, stroke: "var(--brs-bg)", "stroke-width": 2 }),
       s("text", { x: c.x(tt), y: y + 4, "text-anchor": "middle", style: "fill: #000; font-weight: 600; pointer-events: none" }, e.letter),
     );
-    tip(g, { title: named(ins, `${e.letter}. ${e.text}`), rows: e.rows, note: e.detail + (watch ? " Click to watch." : "") });
+    tip(g, { title: named(ins, `${e.letter}. ${e.text}`), rows: e.rows, note: named(ins, e.detail + (watch ? " Click to watch." : "")) });
     if (watch) g.addEventListener("click", (ev) => {
       ev.stopPropagation();
       watch(e.clip());
