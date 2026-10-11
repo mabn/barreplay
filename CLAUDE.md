@@ -1009,8 +1009,16 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           SHARE — stacking by value through a log would hand the bottom band
                           most of the height whatever its size. The BATTLES
                           section (once "Map story"; no army-centre lines since v7) numbers its battles in the order they happened, on the map and
-                          in a one-line-per-battle list (losses either side of a centre line,
-                          square-root scaled), one selection shared by both — a click on either
+                          in a one-line-per-battle list, and over both a TIMELINE (battles.ts
+                          timeline; Marcin's "C+B": a linear loss scale made every late battle
+                          look bigger than an early rout): each battle a bubble at its time,
+                          UP for the first side ahead, DOWN for the second, as far out as
+                          log10 of the loss ratio (gridlines 2x/5x/10x, capped at 10x), its
+                          area the metal lost, a faint ring the armies nearby, a line its
+                          span, grey when ownBlast decided it. Each list row carries the same
+                          verdict as a bar from a centre line (lean) ending in a dot sized by
+                          the metal lost, plus "blue : red" losses. One selection is shared
+                          by the map, the list and the timeline — a click on either
                           selects AND plays the battle's clip, marked on the slider as its whole span (clipEvent, like every clip of something with a duration — a killing-fields zone's busiest 30 s too); a picked battle
                           shows the two sides' losses SIDE BY SIDE, each KIND of unit as its
                           untinted BAR icon with a count (Battle.lost[].units, v4: def/n/metal,
