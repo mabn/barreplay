@@ -5,7 +5,9 @@
 // card uses. Pure, so the node tests can pin the wording rules.
 import { fmtClock, fmtMetal } from "./format";
 import { knockouts, wipedOf } from "./losses";
-import { lossWorth, POWER_WORTH, sideName, sideOfTeam } from "./model";
+import { lossWorth, POWER_WORTH, sideName, sideOfTeam, sideShort } from "./model";
+import { battlePhrase, battleWhere, marginPhrase, plural } from "./phrases";
+import { at as placeAt, place } from "./places";
 import { SIM_FPS, type Battle, type Insights, type Moment, type UnitLoss } from "./types";
 
 /** BAR's commanders, minus the scavenger bosses (app.js's COMMANDER_RE). */
@@ -271,15 +273,10 @@ export function isCommander(name: string): boolean {
 }
 
 /** compass names where a point sits on the map: "the north-west", "the
- * centre". Bounds are the capture's, which is what the map view draws. */
+ * middle", or what players call it on a map whose areas have names
+ * ("Blue geo"; places.ts). */
 export function compass(ins: Insights, x: number, z: number): string {
-  const b = ins.bounds;
-  const u = (x - b.minX) / Math.max(1, b.maxX - b.minX);
-  const v = (z - b.minZ) / Math.max(1, b.maxZ - b.minZ);
-  const ns = v < 1 / 3 ? "north" : v > 2 / 3 ? "south" : "";
-  const ew = u < 1 / 3 ? "west" : u > 2 / 3 ? "east" : "";
-  if (!ns && !ew) return "the centre";
-  return "the " + (ns && ew ? `${ns}-${ew}` : ns || ew);
+  return place(ins, x, z).name;
 }
 
 /** momentWindow is the frames whose deaths explain a moment: its own window
@@ -377,6 +374,10 @@ function possessive(name: string): string {
   return name.endsWith("s") ? `${name}'` : `${name}'s`;
 }
 
+function article(name: string): string {
+  return /^[aeiou]/i.test(name) ? "an" : "a";
+}
+
 /** momentStory names a moment and says what happened in it. */
 export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<number>): MomentStory {
   const [f0, f1] = momentWindow(ins, m);
@@ -394,8 +395,8 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
   // Where it happened: the focus when it has a place (the commander's
   // death, the fight's busiest spot), else the centre of what was lost.
   const at = (f: Focus | null) => {
-    if (f && typeof f.x === "number" && typeof f.z === "number") return ` in ${compass(ins, f.x, f.z)}`;
-    return ll.at ? ` in ${compass(ins, ll.at[0], ll.at[1])}` : "";
+    if (f && typeof f.x === "number" && typeof f.z === "number") return ` ${placeAt(ins, f.x, f.z)}`;
+    return ll.at ? ` ${placeAt(ins, ll.at[0], ll.at[1])}` : "";
   };
 
   // A player leaving takes their whole army off the board, which is the
@@ -445,8 +446,8 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
   } else if (ll.kinds.length && priced && ll.kinds[0][1] === 1 && ll.kinds[0][2] >= SINGLE_SHARE * ll.metal && ll.kinds[0][2] >= 500) {
     focus = deathFocus(ins, ll.top);
     title = selfDestructed(ins, ll.top)
-      ? `${L} self-destructs a ${ll.kinds[0][0]}${at(focus)}`
-      : `${L} loses a ${ll.kinds[0][0]}${at(focus)}`;
+      ? `${L} self-destructs ${article(ll.kinds[0][0])} ${ll.kinds[0][0]}${at(focus)}`
+      : `${L} loses ${article(ll.kinds[0][0])} ${ll.kinds[0][0]}${at(focus)}`;
   } else {
     // A fight: told as the EVENT it was — the battle running at its busiest
     // killing, from start to end, and only what died there — not as the sum
@@ -484,6 +485,7 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
         local = ev.local;
       }
     }
+    let phrase: string | null = null;
     const lw = local ? local[won] : wl;
     const lo = local ? local[lose] : ll;
     // The line moved toward W, but W can still have lost more there (its
@@ -496,6 +498,10 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     } else if (drop) {
       focus = { f: f0, f1 };
       title = `${L} loses ${Math.round(drop.share * 100)}% of its army${drop.mostly ? `, mostly ${drop.mostly}` : ""}`;
+    } else if (b && !whole && worth(lw) < worth(lo) && (phrase = battlePhrase(ins, b, won, at(focus).trim()))) {
+      // The whole battle is this story, so what its numbers say happened
+      // there is the title ("Blue Thunders level Ann's base").
+      title = phrase;
     } else title = worth(lw) === 0 || worth(lo) >= 2 * worth(lw) ? `${W} wins the fight${at(focus)}`
       : worth(lw) <= worth(lo) ? `${W} wins a close fight${at(focus)}`
       : `${W} trades ${unit(size(lw))} for ${unit(size(lo))}${at(focus)}`;
@@ -525,6 +531,14 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
   if (!local && !growth && said && focus && focus.f1 === undefined) {
     const span = deathSpan(ins, f0, f1);
     if (span && span[1] - span[0] >= SIM_FPS) focus = { ...focus, f: Math.min(focus.f, span[0]), f1: Math.max(focus.f, span[1]) };
+  }
+  if (!local && !growth) {
+    // Losses counted over the whole window take in any own-blast chain in
+    // it, which the battles list then leaves to this story: say it here.
+    for (const b of ins.battles) {
+      const side = ownBlast(b);
+      if (side >= 0 && b.f0 <= f1 && b.f1 >= f0) detail += ` ${ownBlastTitle(ins, b, side)} at ${fmtClock(b.f0 / SIM_FPS)}.`;
+    }
   }
   if (whole) detail += ` Part of a fight from ${fmtClock(whole.f0 / SIM_FPS)} to ${fmtClock(whole.f1 / SIM_FPS)}.`;
   let elsewhere: number[] | null = null;
@@ -767,6 +781,9 @@ export interface GapBattle {
   verdict: "decisive" | "win" | "even" | "blast";
   /** The title of a "blast" battle (ownBlastTitle). */
   blast?: string;
+  /** What the list says happened: the blast, a battle phrase when one is
+   * sure (phrases.ts battlePhrase), else the margin's words. */
+  title: string;
 }
 
 /** A side's losses in a battle are its own doing when its own side
@@ -789,7 +806,7 @@ export function ownBlast(b: Battle | undefined): number {
 }
 
 /** ownBlastTitle says what blew up and, when an enemy's kill set it off,
- * whose: "Blue team's Advanced Fusion Reactors blow up, set off by
+ * whose: "Blue Advanced Fusion Reactors blow up, set off by
  * [MANTA]'s Basilica". Losses to allies' fire rather than to blasts read
  * "Blue team loses 18.9k metal to its own side's fire". */
 export function ownBlastTitle(ins: Insights, b: Battle, side: number): string {
@@ -799,7 +816,7 @@ export function ownBlastTitle(ins: Insights, b: Battle, side: number): string {
   const name = def?.human || def?.name;
   const n = l.units?.find((u) => u.def === l.ownDef)?.n ?? 0;
   let title = def?.power && name
-    ? `${possessive(S)} ${n > 1 ? plural(name) : name} ${n > 1 ? "blow" : "blows"} up`
+    ? `${sideShort(ins, side)} ${n > 1 ? plural(name) : name} ${n > 1 ? "blow" : "blows"} up`
     : `${S} loses ${fmtMetal(l.own ?? 0)} metal to its own side's fire`;
   if (l.trigger) {
     const who = ins.teams.find((t) => t.team === l.trigger![0])?.player || `Team ${l.trigger[0]}`;
@@ -809,9 +826,6 @@ export function ownBlastTitle(ins: Insights, b: Battle, side: number): string {
   return title;
 }
 
-function plural(name: string): string {
-  return /(s|x|ch|sh)$/.test(name) ? name + "es" : name + "s";
-}
 
 /** A stretch of the game this long with nothing in the swing list is a gap
  * worth filling: a sixth of the game, at least four minutes. */
@@ -911,8 +925,16 @@ export function gapBattles(ins: Insights, moments: Moment[], stories: MomentStor
     const [x, y] = [ins.battles[i], ins.battles[j]];
     return Math.abs(x.f1 - y.f1) < apart && Math.hypot(x.x - y.x, x.z - y.z) < x.r + y.r;
   };
+  // A swing told over its whole window (a commander's death, an
+  // elimination, one big loss) counts every death in it, so a battle inside
+  // that window is already in its story; one told as a fight in one place
+  // covers the battles there. One told on what was built covers none.
+  const windows = moments.map((m, k) => ({ w: momentWindow(ins, m), st: stories[k] })).filter(({ st }) => st && !st.growth);
+  const covered = (b: Battle) => windows.some(({ w, st }) => b.f0 <= w[1] && b.f1 >= w[0]
+    && (st.shown === st.lost || !st.focus || typeof st.focus.x !== "number"
+      || Math.hypot(b.x - st.focus.x, b.z - (st.focus.z ?? 0)) < b.r + (st.focus.r ?? 0) + BATTLE_REACH));
   const storied = ins.battles.map((_, i) => i)
-    .filter((i) => !told.has(i) && storyBattle(ins.battles[i]))
+    .filter((i) => !told.has(i) && storyBattle(ins.battles[i]) && !covered(ins.battles[i]))
     .sort((x, y) => total(ins.battles[y]) - total(ins.battles[x]));
   for (const i of storied) {
     if (marks.length >= LIST_MAX || picked.some((j) => samePlace(i, j))) continue;
@@ -970,6 +992,9 @@ export function gapBattles(ins: Insights, moments: Moment[], stories: MomentStor
     const verdict = blast >= 0 && blast !== side ? "blast" as const
       : side < 0 ? "even" as const : lo === 0 || hi >= 2 * lo ? "decisive" as const : "win" as const;
     const move = pAt(b.f1 / SIM_FPS + ins.stepSec) - pAt(b.f0 / SIM_FPS);
-    return { battle: i, side, delta: side === 1 ? -move : move, verdict, ...(verdict === "blast" ? { blast: ownBlastTitle(ins, b, blast) } : {}) };
+    const where = battleWhere(ins, b);
+    const title = verdict === "blast" ? ownBlastTitle(ins, b, blast)
+      : (side >= 0 && battlePhrase(ins, b, side, where)) || marginPhrase(ins, b, i, side, verdict === "decisive", where, priced);
+    return { battle: i, side, delta: side === 1 ? -move : move, verdict, title, ...(verdict === "blast" ? { blast: title } : {}) };
   });
 }
