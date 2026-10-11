@@ -312,6 +312,8 @@
             title="Chat also pops up over the speaker on the map">Hide chat bubbles</button>
     <button type="button" id="togglehp" class="sidebtn"
             title="A green bar over every damaged unit, when zoomed in">Hide HP bars</button>
+    <button type="button" id="togglefx" class="sidebtn" style="display:none"
+            title="Long-range shells, missiles, heavy beams and big explosions (re-simulated replays)">Hide effects</button>
     <div class="hint">
       Scroll to zoom · middle-drag to pan · hover a unit for details.<br>
       ← / → step · space play/pause.
@@ -400,6 +402,12 @@
      src/summary/ by the Vite summary-bundle plugin), imported by app.js the
      first time a Summary tab opens. Same single-occurrence rule as above. -->
 <script>window.__SUMMARY_JS__ = "__SUMMARY_MODULE__";</script>
+<!-- The effect layers drawOverlay calls (see "effects" in app.js): plain
+     scripts declaring drawProjectiles / drawBeams / drawBlasts, loaded first
+     so they exist by the time app.js draws. Fingerprinted like app.js. -->
+<script src="/fx-projectiles.__ASSET_REV__.js"></script>
+<script src="/fx-beams.__ASSET_REV__.js"></script>
+<script src="/fx-blasts.__ASSET_REV__.js"></script>
 <script src="/app.__ASSET_REV__.js"></script>
 </body>
 </html>

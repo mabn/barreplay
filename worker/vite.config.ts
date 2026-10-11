@@ -8,6 +8,10 @@ import { cloudflare } from "@cloudflare/vite-plugin";
 const SUBRESOURCES = [
   { src: "./public/app.js", name: (rev: string) => `app.${rev}.js` },
   { src: "./public/style.css", name: (rev: string) => `style.${rev}.css` },
+  // The effect layers app.js draws through (see "effects" in app.js).
+  ...["fx-projectiles", "fx-beams", "fx-blasts"].map((n) => ({
+    src: `./public/${n}.js`, name: (rev: string) => `${n}.${rev}.js`,
+  })),
 ];
 
 const readAsset = (src: string) => readFileSync(fileURLToPath(new URL(src, import.meta.url)));
@@ -50,7 +54,7 @@ function assetRev(): Plugin {
     // Without this every `vite dev` session 404s its own app.js.
     configureServer(server) {
       server.middlewares.use((req, _res, next) => {
-        if (req.url) req.url = req.url.replace(/^\/(app|style)\.[0-9a-f]{8}\.(js|css)(\?|$)/, "/$1.$2$3");
+        if (req.url) req.url = req.url.replace(/^\/(app|style|fx-[a-z]+)\.[0-9a-f]{8}\.(js|css)(\?|$)/, "/$1.$2$3");
         next();
       });
     },
