@@ -134,7 +134,7 @@ export async function findInsights(gameId: string, opts: EmbedOptions = {}, onWa
  * again, which joins the computation still running rather than starting
  * another, until this much time has passed. A big game takes longer than
  * 15 s to download and compute, and without this its first reader was told
- * the summary "has not been built" while it was being built. */
+ * the summary "has not been built" while it was still being built. */
 export const NO_SUMMARY_WAIT_MS = 120_000;
 
 /** requestSummary asks the viewer's worker for rid's summary at the newest

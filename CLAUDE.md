@@ -1702,7 +1702,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           wait included (Marcin's pick — how long a reader is kept waiting; a
                           timed-out computation still finishes and publishes for the next visit)
                           (a timed-out request keeps its daemon's slot until it answers); readers
-                          of one replay share one computation, and a reader asking AGAIN after its 15 s ran out joins the one still running (per-reader deadlines; a page with NO summary at all re-asks on 504 for up to NO_SUMMARY_WAIT_MS = 2 min, app.js freshSummary / embed.ts requestSummary, since a big game's first summary takes longer than 15 s — cb4bcb6a, a 64 MB .brp, read "not built yet" while it was being built); a failure is remembered 10 min so
+                          of one replay share one computation, and a reader asking AGAIN after its 15 s ran out joins the one still running (per-reader deadlines; a page with NO summary at all re-asks on 504 for up to NO_SUMMARY_WAIT_MS = 2 min, app.js freshSummary / embed.ts requestSummary, since a big game's first summary takes longer than 15 s); a "not built yet" with a daemon connected can also be a viewer and daemon on DIFFERENT insights versions (the hub only sends a request to a daemon computing the version asked for, and answers "unavailable" otherwise), which a worker deploy fixes; a failure is remembered 10 min so
                           a broken replay costs a daemon once. Busy/unavailable answer 503,
                           timeout 504, failed 502. The page BLOCKS on the request (Marcin's call:
                           synchronous) — a stale summary is not drawn while the current one is
