@@ -2356,6 +2356,76 @@ test('effect records decode as Go decodes them, and index by frame', async () =>
   assert.deepEqual(long.between(600, 700).map((r: { s: number }) => r.s), [10]);
 });
 
+// Shield charge (.brp Q) decodes as snapshot/shields.go decodes it, and a
+// reading holds from its frame until the unit's next one.
+test('shield readings decode as Go decodes them and hold until the next', async () => {
+  const fixtures = new URL('./fixtures/', import.meta.url);
+  const BRP = new Uint8Array(readFileSync(fileURLToPath(new URL('viewer.brp', fixtures))));
+  const GO = JSON.parse(readFileSync(fileURLToPath(new URL('viewer.fx.json', fixtures)), 'utf8'));
+  const FXS = FX[FX_FILES.indexOf('fx-shields.js')];
+  const extract = (src: string, n: string) => {
+    const start = src.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    const isAsync = src.slice(start - 6, start) === 'async ';
+    let depth = 0;
+    for (let j = src.indexOf('{', start); j < src.length; j++) {
+      if (src[j] === '{') depth++;
+      else if (src[j] === '}' && --depth === 0) return (isAsync ? 'async ' : '') + src.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+  const api = new Function('BRP', `
+    const brpWhole = null;
+    const rangeFetch = async (url, off, len) => new Response(BRP.slice(off, off + len), { status: 206 });
+    const dataURL = p => p;
+    let data = null;
+    ${['gunzipU8', 'ridPath', 'brpPath', 'brpRange', 'brpMetaExtent', 'brpLayout', 'varints', 'brpSections']
+      .map(n => extract(APP, n)).join('\n')}
+    ${['decodeShields', 'shieldSeries', 'shieldReading'].map(n => extract(FXS, n)).join('\n')}
+    return { brpMetaExtent, brpLayout, brpSections, decodeShields, shieldSeries,
+      reading: (by, id, f) => { data = { shieldCharge: by }; const s = shieldReading(id, f); return s && [s.p[s.k], s.on[s.k]]; } };
+  `)(BRP);
+  const { mEnd } = api.brpMetaExtent(BRP);
+  const { gunzipSync } = await import('node:zlib');
+  const at = api.brpLayout(JSON.parse(gunzipSync(BRP.subarray(10, mEnd)).toString()), mEnd);
+  const sec = await api.brpSections('viewer', at, ['Q']);
+  const q = api.decodeShields(sec.Q);
+  const rows = Array.from(q.f, (f: number, i: number) => ({ f, unit: q.unit[i], power: q.power[i], on: q.on[i] === 1 }));
+  assert.deepEqual(rows, GO.shields);
+  const by = api.shieldSeries(q);
+  assert.equal(api.reading(by, 100, 899), null, 'no reading before the first');
+  assert.deepEqual(api.reading(by, 100, 900), [6175, 1]);
+  assert.deepEqual(api.reading(by, 100, 1099), [0, 1], 'held until the next');
+  assert.deepEqual(api.reading(by, 100, 5000), [3100, 1]);
+  assert.deepEqual(api.reading(by, 200, 1000), [4000, 0]);
+  assert.equal(api.reading(by, 300, 1000), null);
+});
+
+// The shield layer drops to its simple look when paints average under
+// ~30 fps, comes back after a stretch of fast ones, and stays simple after
+// SHIELD_MAX_DROPS drops; a pause (a long gap) is not a slow frame.
+test('shields fall back to the simple look when the frame rate drops', () => {
+  const FXS = FX[FX_FILES.indexOf('fx-shields.js')];
+  const consts = FXS.match(/^const SHIELD_(SLOW|FAST|MAX|GAP)[^\n]+/gm)!.join('\n');
+  const w = new Function(`${consts}
+    const console = { info() {} };
+    ${FXS.slice(FXS.indexOf('const shieldPerf'), FXS.indexOf('// Drawing.'))}
+    return { shieldPerf, shieldWatch };`)();
+  let t = 0;
+  const run = (ms: number, n: number) => { for (let i = 0; i < n; i++) w.shieldWatch((t += ms)); };
+  run(16, 100);
+  assert.equal(w.shieldPerf.level, 0);
+  run(1000, 50); // paused: gaps are not counted
+  assert.equal(w.shieldPerf.level, 0);
+  run(50, 100);
+  assert.equal(w.shieldPerf.level, 1, 'slow paints drop it');
+  run(10, 400);
+  assert.equal(w.shieldPerf.level, 0, 'fast paints bring it back');
+  run(50, 100);
+  run(10, 400);
+  assert.equal(w.shieldPerf.level, 1, 'after two drops it stays simple');
+});
+
 // Every effect layer is fingerprinted and loaded: listed in vite.config.ts's
 // assetRev (or public/_headers would cache a stale copy for a year), given a
 // script tag ahead of app.js, and defining the function drawEffects calls.

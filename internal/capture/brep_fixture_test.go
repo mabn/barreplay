@@ -157,6 +157,34 @@ func TestHarnessRecordsWhatEachModeOwes(t *testing.T) {
 	}
 
 	checkHarnessProjectiles(t, live, resim)
+	checkHarnessShields(t, live, resim)
+}
+
+// checkHarnessShields pins the protocol-6 Q records against the harness's
+// shield stub (GetUnitShieldState): both modes record them, only the shield
+// defs' units appear, and a row is written only when the reading moved.
+func checkHarnessShields(t *testing.T, live, resim decodedHarness) {
+	t.Helper()
+	for name, d := range map[string]decodedHarness{"live": live, "resim": resim} {
+		if len(d.w.shields) == 0 {
+			t.Errorf("%s capture recorded no shield readings", name)
+			continue
+		}
+		last := map[int32]snapshot.Shield{}
+		off := 0
+		for _, s := range d.w.shields {
+			if !s.Enabled {
+				off++
+			}
+			if p, ok := last[s.Unit]; ok && s.Frame == p.Frame+30 && p.Power == s.Power && p.Enabled == s.Enabled {
+				t.Errorf("%s: unit %d rewrote an unchanged reading at frame %d", name, s.Unit, s.Frame)
+			}
+			last[s.Unit] = s
+		}
+		if off == 0 {
+			t.Errorf("%s: no switched-off shield recorded", name)
+		}
+	}
 }
 
 // checkHarnessProjectiles pins the protocol-5 records against the harness's
@@ -335,6 +363,9 @@ func harnessDump(t *testing.T, path string) []byte {
 	}
 	for _, b := range d.w.blasts {
 		line("B", b)
+	}
+	for _, s := range d.w.shields {
+		line("Q", s)
 	}
 	line("PROF", d.st.Profile)
 	line("PROFD", d.st.ProfileSamples)

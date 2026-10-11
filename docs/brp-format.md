@@ -780,6 +780,27 @@ per record:
   units × uvarint  mask — bit 2i = in side i's LOS, bit 2i+1 = in its radar
 ```
 
+### 9.3 `Q` — shield charge (v6, widget ≥ 1.10.0)
+
+What `Spring.GetUnitShieldState` read for each shield generator, at the
+samples where the reading moved (see `docs/brepstream-format.md`, protocol 6).
+Written by BOTH modes (an uploader records the shields it can read: its own
+side's), gzipped, omitted when empty, after the analysis sections. Added
+inside v6 like `R`/`W`: an older reader skips the tag. Go: `BRPFile.Shields`
+(`snapshot/shields.go`); JS: `decodeShields` in `worker/public/fx-shields.js`.
+
+```
+count     uv
+frame[i]  sv   delta against the previous row (rows sorted by frame, stable)
+unit[i]   uv   unit id + 1 (0 = unknown)
+power[i]  sv   whole points of charge
+flags[i]  uv   bit 0: the shield is switched on
+```
+
+A reading holds until the unit's next one. Reach and full charge are on the
+unit def (`shieldRadius`, `shieldPower` in the meta's unit-def table, from
+customParams `shield_radius` / `shield_power`).
+
 ## 10. How a replay is served
 
 The published replay IS the file: a publish (`viz.WriteStaticBundle`, used by

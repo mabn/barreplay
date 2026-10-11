@@ -234,6 +234,12 @@ type UnitDef struct {
 	// came from.
 	DeathWeapon *int32 `json:"deathWeapon,omitempty"`
 	SelfDWeapon *int32 `json:"selfdWeapon,omitempty"`
+	// ShieldRadius and ShieldPower are the unit's shield (customParams
+	// shield_radius / shield_power, which BAR's own shield drawing reads):
+	// its reach in elmos and its full charge. Zero = no shield, or a capture
+	// from before stream protocol 6 recorded them.
+	ShieldRadius float32 `json:"shieldRadius,omitempty"`
+	ShieldPower  float32 `json:"shieldPower,omitempty"`
 }
 
 // RecorderInfo identifies the client that captured a live-game stream (the
@@ -318,6 +324,7 @@ type Writer interface {
 	WriteUnitEnd(UnitEnd) error
 	WriteProjectile(Projectile) error
 	WriteBlast(Blast) error
+	WriteShield(Shield) error
 	Close() error
 }
 
@@ -333,3 +340,4 @@ func (DiscardAnalysis) WriteHit(Hit) error               { return nil }
 func (DiscardAnalysis) WriteUnitEnd(UnitEnd) error       { return nil }
 func (DiscardAnalysis) WriteProjectile(Projectile) error { return nil }
 func (DiscardAnalysis) WriteBlast(Blast) error           { return nil }
+func (DiscardAnalysis) WriteShield(Shield) error         { return nil }

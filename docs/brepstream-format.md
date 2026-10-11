@@ -619,6 +619,27 @@ One watched weapon's entry, as the fact carries it (the Seadragon's nuke):
  "cp":{"nuclear":1,"stockpilelimit":10}}
 ```
 
+## Protocol 6: shield charge (widget ≥ 1.10.0)
+
+Both modes. A `DEF` line gains `shieldRadius` and `shieldPower` (customParams
+`shield_radius` / `shield_power`: reach in elmos, full charge) for a unit with
+a shield. Each sample may then add one `Q` record after its `F`:
+
+```
+frame   u32
+n       u32
+unit    u16 × n
+power   u32 × n   whole points, rounded
+flags   u8  × n   bit 0: switched on
+```
+
+A row is written for a recorded unit whose def has a shield and whose
+`Spring.GetUnitShieldState` answered (LOS-gated: a playing client reads its
+own side's), when it is first seen and then only when the reading MOVED: by at
+least 0.5% of the full charge, to empty or to full, or switched on/off. A unit
+missing from a sample is forgotten, so a recycled id starts afresh. Readers
+hold each row until the unit's next one.
+
 ## Preamble
 
 The text line grammar the retired `.brsnap` stream used:

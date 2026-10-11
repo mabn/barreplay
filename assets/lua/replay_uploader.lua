@@ -77,7 +77,7 @@
 -- Echo, and the stream's GAME line, so every capture records which encoder
 -- produced it (the copy on a player's machine can be arbitrarily old — the
 -- server/decoder needs to know, and the catalog stores it per replay).
-local widgetVersion = "1.9.0"
+local widgetVersion = "1.10.0"
 local widgetDate = "2026-10-11"
 
 -- Git SHA of this exact file, stamped when the widget is published for
@@ -166,7 +166,9 @@ end
 -- 5: the R (projectile and beam tracks) and B (strong explosions) record
 --    types, the "stock" fact, and explosion/flight keys on the wdefs entries
 --    of watched weapons. Re-simulation only; purely additive again.
-local protocolVersion = 5
+-- 6: the Q record type (shield charge) and the shieldRadius/shieldPower DEF
+--    keys. Both modes; purely additive.
+local protocolVersion = 6
 
 -- Enemy recording: units of other ally teams are recorded while visible (in
 -- LOS or on radar — Spring.GetAllUnits already returns only what this client
@@ -462,6 +464,19 @@ local function customParam(ud, key, kind)
 	return tostring(v)
 end
 
+-- shieldParams is a unit's shield as BAR's own shield drawing knows it
+-- (customParams shield_radius / shield_power): reach in elmos and full
+-- charge, or nil when it has none. Read from the def rather than hardcoded
+-- anywhere because tweakdefs change them.
+local function shieldParams(ud)
+	local r = customParam(ud, "shield_radius", "number")
+	local p = customParam(ud, "shield_power", "number")
+	if r and p and r > 0 and p > 0 then
+		return r, p
+	end
+	return nil
+end
+
 -- explosionWeapon is the weapon-def id of a unit's death or self-destruct
 -- explosion (UnitDefs carry the weapon's NAME), or nil.
 local function explosionWeapon(name)
@@ -502,6 +517,10 @@ local function defJSON(defID, ud)
 		-- with no attacker came from.
 		{ "deathWeapon", explosionWeapon(ud.deathExplosion) },
 		{ "selfdWeapon", explosionWeapon(ud.selfDExplosion) },
+		-- Protocol 6: the shield's reach and full charge (Q records hold
+		-- what it has left).
+		{ "shieldRadius", (shieldParams(ud)) },
+		{ "shieldPower", select(2, shieldParams(ud)) },
 	})
 end
 
@@ -775,6 +794,91 @@ end
 local lastSampleTime = nil
 local lastUnitCount = 0
 
+-- ---------------------------------------------------------------------------
+-- Shield charge (Q records; protocol 6, both modes). A shield generator's
+-- position is already in the frames and its size in its DEF; what only the
+-- engine knows is how much charge it has left, which Spring.GetUnitShieldState
+-- answers (power, and whether the shield is switched on). LOS-gated like
+-- everything else: a playing client reads its own side's shields and gets nil
+-- for the rest, which are then simply not recorded. A row is written only
+-- when the reading MOVED — by at least SHIELD_STEP of the full charge, or
+-- reaching empty or full, or switching — so a quiet base costs nothing and a
+-- reader holds each row until the unit's next one.
+local shields = (function()
+	local spGetUnitShieldState = Spring.GetUnitShieldState
+	local SHIELD_STEP = 0.005
+	local full = nil -- defID -> full power (false = no shield), built on first use
+	local last = {}  -- unitID -> { p, on, f }
+
+	local function fullOf(defID)
+		if full == nil then
+			full = {}
+		end
+		local v = full[defID]
+		if v == nil then
+			local ud = UnitDefs and UnitDefs[defID]
+			local _, p = nil, nil
+			if ud then
+				_, p = shieldParams(ud)
+			end
+			v = p or false
+			full[defID] = v
+		end
+		return v
+	end
+
+	-- read is called from sample's unit loop for every recorded unit with a
+	-- known def; it returns the row to write (or nil).
+	local function read(unitID, defID, frame)
+		if spGetUnitShieldState == nil or unitID > 65535 then
+			return nil
+		end
+		local fp = fullOf(defID)
+		if not fp then
+			return nil
+		end
+		local s, power = spGetUnitShieldState(unitID)
+		if power == nil then
+			return nil
+		end
+		local on = (s == true) or (type(s) == "number" and s ~= 0)
+		local q = mathFloor(power + 0.5)
+		if q < 0 then q = 0 elseif q > 2147483647 then q = 2147483647 end
+		local l = last[unitID]
+		if l == nil then
+			last[unitID] = { p = q, on = on, f = frame }
+			return q, on
+		end
+		l.f = frame
+		local d = q - l.p
+		if d < 0 then d = -d end
+		if on ~= l.on or d >= fp * SHIELD_STEP
+			or (q ~= l.p and (q == 0 or q >= fp)) then
+			l.p, l.on = q, on
+			return q, on
+		end
+		return nil
+	end
+
+	local function write(frame, ids, powers, flags)
+		-- Forget units not seen this sample, so a recycled id starts afresh.
+		for id, l in pairs(last) do
+			if l.f ~= frame then
+				last[id] = nil
+			end
+		end
+		local n = #ids
+		if n == 0 then
+			return
+		end
+		writeRecord("Q", table.concat({
+			PackU32({ frame }), PackU32({ n }), PackU16(ids), PackU32(powers), PackU8(flags),
+		}))
+	end
+
+	return { read = read, write = write }
+end)()
+
 local function sample(frame)
 	local t0 = startClock()
 	local all = recordAll()
@@ -801,6 +905,7 @@ local function sample(frame)
 
 	local doVis = recordVisibility and spGetUnitLosState ~= nil
 	local nv, vid, vlo, vhi = 0, {}, {}, {}
+	local sid, spow, sflag = {}, {}, {}
 	if doVis and visAllies == nil then
 		buildVisAllies()
 	end
@@ -905,6 +1010,13 @@ local function sample(frame)
 						p.hp, p.maxhp, p.def, p.team, p.b, p.t, p.f = qhp, qmax, qdef, qteam, qb, qt, frame
 					end
 				end
+				if defID ~= nil then
+					local sp, son = shields.read(unitID, defID, frame)
+					if sp ~= nil then
+						local k = #sid + 1
+						sid[k], spow[k], sflag[k] = unitID, sp, son and 1 or 0
+					end
+				end
 				if doVis and unitID <= 65535 then
 					local lo, hi = losMask(unitID)
 					local v = visPrev[unitID]
@@ -964,6 +1076,7 @@ local function sample(frame)
 
 	writeRecord("F", packFrameRecord(frame, keyframe, n,
 		cid, cdef, cteam, cx, cz, chp, cmax, cdvx, cdvz, cb, ct, dead, nR, rteam, rcols))
+	shields.write(frame, sid, spow, sflag)
 
 	if doVis then
 		-- Forget units that left, so a recycled id is recorded afresh.

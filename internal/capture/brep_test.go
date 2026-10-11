@@ -372,3 +372,34 @@ func (l *loadedSink) WriteFrame(f snapshot.Frame) error { l.frames = append(l.fr
 func (l *loadedSink) WriteEvent(e snapshot.Event) error { l.events = append(l.events, e); return nil }
 func (l *loadedSink) WriteComm(c snapshot.Comm) error   { l.comms = append(l.comms, c); return nil }
 func (l *loadedSink) Close() error                      { return nil }
+
+// A 'Q' record decodes to one snapshot.Shield per row at the record's
+// frame: unit id (0xFFFF unknown), whole-point power, the enabled bit.
+func TestConsumeBrepShields(t *testing.T) {
+	e := newBrepEnc(brepPreamble)
+	var b bytes.Buffer
+	w16 := func(v int) { var s [2]byte; binary.LittleEndian.PutUint16(s[:], uint16(v)); b.Write(s[:]) }
+	w32 := func(v uint32) { var s [4]byte; binary.LittleEndian.PutUint32(s[:], v); b.Write(s[:]) }
+	w32(1800)
+	w32(2)
+	w16(41)
+	w16(0xFFFF)
+	w32(6175)
+	w32(0)
+	b.WriteByte(1)
+	b.WriteByte(0)
+	e.record('Q', b.Bytes())
+
+	w := &recordingWriter{}
+	var st Stats
+	if err := ConsumeBrepStats(bytes.NewReader(e.buf.Bytes()), snapshot.Meta{}, w, &st); err != nil {
+		t.Fatalf("ConsumeBrep: %v", err)
+	}
+	want := []snapshot.Shield{
+		{Frame: 1800, Unit: 41, Power: 6175, Enabled: true},
+		{Frame: 1800, Unit: -1, Power: 0, Enabled: false},
+	}
+	if len(w.shields) != 2 || w.shields[0] != want[0] || w.shields[1] != want[1] || st.Shields != 2 {
+		t.Errorf("shields = %+v (stats %d), want %+v", w.shields, st.Shields, want)
+	}
+}

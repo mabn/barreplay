@@ -524,9 +524,13 @@ const own = (o, k) => o != null && Object.prototype.hasOwnProperty.call(o, k);
 // at publish time (internal/viz/wire.go, now gone).
 function headFromBrp(rec, at, icons) {
   const m = rec.meta || {};
-  const unitDefs = {}, unitNames = {}, unitIcons = {}, footprints = {}, armyCost = {};
+  const unitDefs = {}, unitNames = {}, unitIcons = {}, footprints = {}, armyCost = {}, shieldDefs = {};
   for (const [id, d] of Object.entries(m.unitDefs || {})) {
     unitDefs[id] = d.name;
+    // A shield's reach and full charge, as the capture's game build had them
+    // (tweakdefs change them); fx-shields.js falls back to its own table for
+    // captures from before they were recorded.
+    if (d.shieldRadius > 0 && d.shieldPower > 0) shieldDefs[id] = { r: d.shieldRadius, p: d.shieldPower };
     // Labels use the human name ("Construction Bot"); the internal one stays
     // the lookup key, and is the fallback when the capture recorded none.
     if (d.humanName && d.humanName !== d.name) unitNames[id] = d.humanName;
@@ -567,7 +571,7 @@ function headFromBrp(rec, at, icons) {
     gameId: m.gameId, engineVersion: m.engineVersion, gameVersion: m.gameVersion, mapName: m.mapName,
     sampleEvery: m.sampleEvery,
     bounds: rec.bounds || { minX: 0, maxX: 1024, minZ: 0, maxZ: 1024 },
-    teams, unitDefs, unitNames, unitIcons, footprints, armyCost, players,
+    teams, unitDefs, unitNames, unitIcons, footprints, armyCost, shieldDefs, players,
     frameCount: rec.frames || 0, chunks,
     keys: at.K ? { off: at.K.off, len: at.K.len } : { off: 0, len: 0 },
     extra: at.X || null,
@@ -575,6 +579,9 @@ function headFromBrp(rec, at, icons) {
     // table), read only when effects are shown (loadEffects); null when the
     // capture has none, which is every replay before widget 1.9.0.
     fxAt: at.R || at.W ? { G: at.G || null, R: at.R || null, W: at.W || null } : null,
+    // Shield charge readings (Q, widget 1.10.0), read by fx-shields.js
+    // loadShields; null when the capture has none.
+    shieldAt: at.Q || null,
   };
 }
 
@@ -4390,6 +4397,7 @@ async function loadReplay(id) {
   pumpBackground();
   loadResources(file, loadGen); // economy timeline for the player-list bars (async)
   if (showEffects) loadEffects(file, loadGen); // projectiles, beams, blasts (async)
+  loadShields(file, loadGen); // shield charge (async; fx-shields.js)
   show();
   seekFromURL();
   if (clip) startClip(); // a clip was asked for while the replay loaded

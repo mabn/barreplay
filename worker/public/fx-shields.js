@@ -1,38 +1,42 @@
-// fx-shields.js — shield domes (Keeper/Overseer plasma deflectors, the T3
-// gates, Legion's deflector, the shielded evolving commanders) drawn on the
-// replay map. A plain script loaded before app.js, sharing its globals (data,
-// viewW, viewH, center, scale, teamTint, F, STRIDE, interpPos, BUILD_DONE);
-// drawOverlay calls drawShields(c, simFrame, u) once per overlay paint.
+// fx-shields.js — shields (Keeper/Overseer plasma deflectors, the T3 gates,
+// Legion's deflector, the shielded evolving commanders) drawn on the replay
+// map. A plain script loaded before app.js, sharing its globals (data,
+// viewW, viewH, center, scale, F, STRIDE, interpPos, BUILD_DONE, varints,
+// brpSections, loadGen, scheduleDraw); drawOverlay calls
+// drawShields(c, simFrame, u) once per overlay paint, and loadReplay calls
+// loadShields(file, gen).
 //
-// PROTOTYPE (thread "shields"): four looks behind ?shields=, to compare.
-//   edge   the edge only: one thin ring per shield, coloured by charge
-//   union  the edge only, but only the OUTER boundary of a group of
-//          overlapping shields of one ally team — the shielded AREA's outline
-//   gauge  a faint ring plus a bright arc whose length is the charge
-//   pips   union, plus a small charge gauge round every generator, so a
-//          shield inside a cluster still shows its own charge
-//   dome   BAR-like: a cached dome sprite (clear centre, fresnel rim, faint hex
-//          lattice) tinted by charge
-//   off    (default while this is a prototype) nothing
+// THE LOOK (Marcin's pick, "C"): the EDGE only, never a filled dome — the
+// outline of the area a side's shields cover (overlapping shields of one ally
+// team merge into one outline), coloured by charge, plus a small charge
+// gauge round every generator, so a shield inside a cluster still shows its
+// own. A shield that is down (drained, or switched off) protects nothing: it
+// leaves the outline and is drawn as a dashed ring.
 //
-// SOURCE: where the shields are is already in every capture (the units are
-// in the frames); how big a shield is comes from SHIELD_DEFS below (static
-// per BAR version, read off the unit files' customParams shield_radius /
-// shield_power). The CHARGE is not captured yet — no widget records
-// Spring.GetUnitShieldState — so until it is, shieldCharge() SIMULATES one
-// (deterministic per unit and frame) purely so the looks can be judged.
-// ?shieldcharge=full draws every shield at 100%.
+// CHEAP BY CONSTRUCTION: no per-pixel work. Shields are bucketed into
+// SHIELD_STEPS colours and every arc of a bucket goes into ONE path, so 60
+// shields are ~25 stroke() calls; the outline maths is O(n²) circle tests
+// (60 shields: ~3600 cheap checks, well under a millisecond). What costs is
+// the stroked length, so when the viewer's frame rate falls (SHIELD_SLOW_MS)
+// the layer DROPS TO A SIMPLER LOOK on its own: the outline alone, one
+// colour, one stroke — no halo, no gauges. It goes back after a stretch of
+// fast frames, at most SHIELD_MAX_DROPS times per page, so a machine that is
+// slow for other reasons settles on the simple look instead of flickering
+// between the two. ?shields=full or ?shields=simple pins one, ?shields=off
+// hides them.
 //
-// COST: no per-pixel work anywhere. edge/gauge/union are a handful of
-// stroked paths per paint — shields are bucketed into SHIELD_STEPS colours
-// and every shield of a bucket goes into ONE path, so 60 shields are ~10
-// stroke() calls. dome is one drawImage per shield from a sprite rendered
-// once per colour bucket.
+// SOURCE: where a shield is comes from the frames; its reach and full charge
+// from the capture's unit defs (shieldRadius/shieldPower, widget 1.10.0),
+// else from SHIELD_DEFS below (static per BAR version); its CHARGE from the
+// Q section — the widget's Spring.GetUnitShieldState readings, written when
+// they move, held until the unit's next one. A capture without them (every
+// replay before widget 1.10.0, and an uploader's enemies it could not read)
+// shows the outline in a neutral colour and no gauge: unknown is not full.
 
-// SHIELD_DEFS: unit name (a scavenger copy's "_scav" stripped) -> radius (elmos)
-// and max power. From beyond-all-reason/Beyond-All-Reason units/ (2026-10-11),
-// the units carrying customParams.shield_radius (BAR's shield gadget draws
-// exactly those; the commanders' invisible 30-elmo shields are left out).
+// SHIELD_DEFS: unit name (a scavenger copy's "_scav" stripped) -> radius
+// (elmos) and full charge, from beyond-all-reason/Beyond-All-Reason units/
+// (2026-10-11): the units carrying customParams.shield_radius, which is what
+// BAR's own shield drawing reads.
 const SHIELD_DEFS = {
   armgate: { r: 550, p: 6175 },       // Keeper
   corgate: { r: 550, p: 6175 },       // Overseer
@@ -54,35 +58,22 @@ const SHIELD_DEFS = {
   corcomlvl10: { r: 100, p: 57000 },
 };
 
-const SHIELD_STEPS = 10;           // charge colour buckets (= stroke calls)
-const SHIELD_LINE_PX = 1.5;        // ring width on screen
-const SHIELD_SPRITE_PX = 256;      // dome sprite size
+const SHIELD_STEPS = 10;             // charge colour buckets
+const SHIELD_UNKNOWN = SHIELD_STEPS; // the bucket of a shield with no reading
+const SHIELD_LINE_PX = 1.5;          // outline width on screen
+const SHIELD_DOWN_FRAC = 0.02;       // at or under this a shield is down
+const SHIELD_PIP_PX = 9;             // charge gauge radius round a generator
 
-const shieldParams = new URLSearchParams(location.search);
-const shieldStyle = shieldParams.get('shields') || 'off';
-const shieldFull = shieldParams.get('shieldcharge') === 'full';
+// Frame-rate fallback. Intervals between paints longer than SHIELD_GAP_MS
+// are a paused or idle viewer, not a slow one, and are not counted.
+const SHIELD_SLOW_MS = 33;      // averaged paint interval that drops the look (~30 fps)
+const SHIELD_FAST_MS = 20;      // ... and that may bring it back (~50 fps)
+const SHIELD_SLOW_PAINTS = 45;  // paints the average must have seen first
+const SHIELD_FAST_PAINTS = 300;
+const SHIELD_MAX_DROPS = 2;     // after this many drops the simple look stays
+const SHIELD_GAP_MS = 250;
 
-// shieldDefTable maps def id -> {r, p} for the loaded replay (null = none).
-let shieldDefFor = null, shieldDefData = null;
-function shieldDefTable() {
-  if (shieldDefData === data) return shieldDefFor;
-  shieldDefData = data;
-  shieldDefFor = null;
-  const names = (data && data.unitDefs) || {};
-  for (const k of Object.keys(names)) {
-    const s = SHIELD_DEFS[String(names[k]).replace(/_scav$/, '')];
-    if (s) (shieldDefFor ||= {})[k] = s;
-  }
-  return shieldDefFor;
-}
-
-// shieldCharge: 0..1. SIMULATED (see the header) — a slow drain and refill,
-// different per unit, with some shields hammered to empty.
-function shieldCharge(id, simFrame) {
-  if (shieldFull) return 1;
-  const v = 0.55 + 0.6 * Math.sin(simFrame / 420 + id * 2.399);
-  return v < 0 ? 0 : v > 1 ? 1 : v;
-}
+const shieldPin = new URLSearchParams(location.search).get('shields'); // full | simple | off
 
 // shieldRGB: BAR's ramp, brightened for a dark map — full is a pale
 // blue-white, half amber, empty red.
@@ -92,14 +83,126 @@ function shieldRGB(frac) {
   const a = stops[i], b = stops[i + 1];
   return [a[0] + (b[0] - a[0]) * k | 0, a[1] + (b[1] - a[1]) * k | 0, a[2] + (b[2] - a[2]) * k | 0];
 }
-const SHIELD_COLORS = Array.from({ length: SHIELD_STEPS }, (_, b) => shieldRGB(b / (SHIELD_STEPS - 1)));
+const SHIELD_COLORS = Array.from({ length: SHIELD_STEPS }, (_, b) => shieldRGB(b / (SHIELD_STEPS - 1)))
+  .concat([[170, 200, 230]]); // SHIELD_UNKNOWN: a neutral steel blue
 const shieldBucket = (frac) => Math.round(frac * (SHIELD_STEPS - 1));
 
-// Per-paint scratch, reused: x, y (screen), r (screen px), bucket, ally, frac.
-let shieldScratch = [];
+// shieldDefTable maps def id -> {r, p} for the loaded replay (null = none).
+let shieldDefFor = null, shieldDefData = null;
+function shieldDefTable() {
+  if (shieldDefData === data) return shieldDefFor;
+  shieldDefData = data;
+  shieldDefFor = null;
+  const own = (data && data.shieldDefs) || {};
+  const names = (data && data.unitDefs) || {};
+  for (const k of Object.keys(names)) {
+    const s = own[k] || SHIELD_DEFS[String(names[k]).replace(/_scav$/, '')];
+    if (s) (shieldDefFor ||= {})[k] = s;
+  }
+  return shieldDefFor;
+}
+
+let shieldAllyData = null, shieldAllyMap = {};
+function shieldAllyOf() {
+  if (shieldAllyData !== data) {
+    shieldAllyData = data;
+    shieldAllyMap = {};
+    for (const t of (data && data.teams) || []) shieldAllyMap[t.team] = t.ally;
+  }
+  return shieldAllyMap;
+}
+
+// ---------------------------------------------------------------------------
+// Charge readings (Q). decodeShields is the twin of snapshot/shields.go's
+// decodeShields: count, then frame (delta), unit+1, power (zigzag), flags.
+
+function decodeShields(b) {
+  const { uv, sv } = varints(b);
+  const n = uv();
+  if (n > b.length) throw new Error('shield count ' + n + ' exceeds section');
+  const f = new Int32Array(n), unit = new Int32Array(n), power = new Int32Array(n), on = new Uint8Array(n);
+  let prev = 0;
+  for (let i = 0; i < n; i++) { prev += sv(); f[i] = prev; }
+  for (let i = 0; i < n; i++) unit[i] = uv() - 1;
+  for (let i = 0; i < n; i++) power[i] = sv();
+  for (let i = 0; i < n; i++) on[i] = uv() & 1;
+  return { f, unit, power, on };
+}
+
+// shieldSeries files the readings per unit (frame-ordered, as the section
+// is): unit id -> {f, p, on, k}; k is scratch for shieldReading.
+function shieldSeries(q) {
+  const by = new Map();
+  for (let i = 0; i < q.f.length; i++) {
+    let s = by.get(q.unit[i]);
+    if (!s) by.set(q.unit[i], (s = { f: [], p: [], on: [], k: 0 }));
+    s.f.push(q.f[i]); s.p.push(q.power[i]); s.on.push(q.on[i]);
+  }
+  return by;
+}
+
+// loadShields reads the current replay's Q section, once. Best-effort like
+// the effects: a failure leaves every shield at "unknown".
+async function loadShields(file, gen) {
+  const d = data;
+  if (!d || !d.shieldAt || d.shieldState) return;
+  d.shieldState = 'loading';
+  try {
+    const sec = await brpSections(file, { Q: d.shieldAt }, ['Q']);
+    if (gen !== loadGen || d !== data) return;
+    d.shieldCharge = shieldSeries(decodeShields(sec.Q));
+    d.shieldState = 'ready';
+    scheduleDraw();
+  } catch (err) {
+    console.error('shields:', err);
+    d.shieldState = 'failed';
+  }
+}
+
+// shieldReading: the unit's series with k at its last reading at or before
+// simFrame, or null (no reading yet, or none recorded).
+function shieldReading(id, simFrame) {
+  const by = data && data.shieldCharge;
+  const s = by && by.get(id);
+  if (!s || s.f[0] > simFrame) return null;
+  let lo = 0, hi = s.f.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (s.f[mid] <= simFrame) lo = mid; else hi = mid - 1;
+  }
+  s.k = lo;
+  return s;
+}
+
+// ---------------------------------------------------------------------------
+// Frame-rate watch: a running average of the intervals between paints that
+// drew shields; level 1 is the simple look.
+
+const shieldPerf = { level: 0, avg: 0, count: 0, last: 0, drops: 0 };
+function shieldWatch(now) {
+  const p = shieldPerf;
+  const dt = now - p.last;
+  p.last = now;
+  if (!(dt > 0) || dt > SHIELD_GAP_MS) return;
+  p.avg = p.count ? p.avg + (dt - p.avg) * 0.05 : dt;
+  p.count++;
+  if (p.level === 0 && p.count >= SHIELD_SLOW_PAINTS && p.avg > SHIELD_SLOW_MS) {
+    p.level = 1; p.drops++; p.count = 0;
+    console.info(`shields: ${Math.round(1000 / p.avg)} fps, switching to the simple outline`);
+  } else if (p.level === 1 && p.drops < SHIELD_MAX_DROPS && p.count >= SHIELD_FAST_PAINTS && p.avg < SHIELD_FAST_MS) {
+    p.level = 0; p.count = 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Drawing.
+
+// Per-paint scratch, reused: x, y (screen), r (screen px), b (bucket), ally,
+// frac (charge 0..1; -1 unknown), down (drained or switched off), off.
+const shieldScratch = [];
 
 function drawShields(c, simFrame, u) {
-  if (shieldStyle === 'off' || !u) return;
+  if (shieldPin === 'off' || !u) return;
   const defs = shieldDefTable();
   if (!defs) return;
   const t0 = performance.now();
@@ -114,102 +217,50 @@ function drawShields(c, simFrame, u) {
     const x = viewW / 2 + (p[0] - center.x) * scale;
     const y = viewH / 2 + (p[1] - center.z) * scale;
     if (x + r < 0 || y + r < 0 || x - r > viewW || y - r > viewH || r < 2) continue;
-    const frac = shieldCharge(u[i + F.ID], simFrame);
-    S[n++] = { x, y, r, b: shieldBucket(frac), ally: allyOf[u[i + F.TEAM]] ?? -1, frac };
+    const s = S[n] || (S[n] = {});
+    n++;
+    s.x = x; s.y = y; s.r = r; s.ally = allyOf[u[i + F.TEAM]] ?? -1;
+    const rd = shieldReading(u[i + F.ID], simFrame);
+    if (rd) {
+      s.frac = Math.max(0, Math.min(1, rd.p[rd.k] / d.p));
+      s.off = !rd.on[rd.k];
+      s.down = s.off || s.frac <= SHIELD_DOWN_FRAC;
+      s.b = shieldBucket(s.frac);
+    } else {
+      s.frac = -1; s.off = false; s.down = false; s.b = SHIELD_UNKNOWN;
+    }
   }
   if (n) {
+    const simple = shieldPin === 'simple' || (shieldPin !== 'full' && shieldPerf.level === 1);
     c.save();
-    if (shieldStyle === 'dome') drawShieldDomes(c, S, n);
-    else if (shieldStyle === 'gauge') drawShieldGauges(c, S, n);
-    else if (shieldStyle === 'union') drawShieldUnion(c, S, n);
-    else if (shieldStyle === 'pips') { drawShieldUnion(c, S, n); drawShieldPips(c, S, n); }
-    else drawShieldEdges(c, S, n);
+    drawShieldOutline(c, S, n, simple);
+    if (!simple) drawShieldPips(c, S, n);
     c.restore();
+    shieldWatch(t0);
   }
-  const ms = performance.now() - t0;
   const st = (window.__shieldStats ||= { calls: 0, ms: 0, max: 0, n: 0 });
-  st.calls++; st.ms += ms; st.n = n; if (ms > st.max) st.max = ms;
+  const ms = performance.now() - t0;
+  st.calls++; st.ms += ms; st.n = n; st.level = shieldPerf.level; st.avgPaintMs = shieldPerf.avg;
+  if (ms > st.max) st.max = ms;
 }
 
-let shieldAllyData = null, shieldAllyMap = {};
-function shieldAllyOf() {
-  if (shieldAllyData !== data) {
-    shieldAllyData = data;
-    shieldAllyMap = {};
-    for (const t of (data && data.teams) || []) shieldAllyMap[t.team] = t.ally;
-  }
-  return shieldAllyMap;
-}
-
-// edge: one ring per shield, one path per colour bucket.
-function drawShieldEdges(c, S, n) {
-  c.lineWidth = SHIELD_LINE_PX;
-  for (let b = 0; b < SHIELD_STEPS; b++) {
-    let any = false;
-    c.beginPath();
-    for (let k = 0; k < n; k++) {
-      const s = S[k];
-      if (s.b !== b) continue;
-      c.moveTo(s.x + s.r, s.y);
-      c.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-      any = true;
-    }
-    if (!any) continue;
-    const [r, g, bl] = SHIELD_COLORS[b];
-    c.strokeStyle = `rgba(${r},${g},${bl},0.85)`;
-    c.stroke();
-  }
-}
-
-// gauge: a faint full ring (one path) + a bright arc from 12 o'clock,
-// clockwise, as long as the charge (one path per colour bucket).
-function drawShieldGauges(c, S, n) {
-  c.lineWidth = SHIELD_LINE_PX;
-  c.strokeStyle = 'rgba(200,215,235,0.28)';
-  c.beginPath();
-  for (let k = 0; k < n; k++) {
-    const s = S[k];
-    c.moveTo(s.x + s.r, s.y);
-    c.arc(s.x, s.y, s.r, 0, Math.PI * 2);
-  }
-  c.stroke();
-  c.lineWidth = SHIELD_LINE_PX + 1;
-  c.lineCap = 'round';
-  const top = -Math.PI / 2;
-  for (let b = 0; b < SHIELD_STEPS; b++) {
-    let any = false;
-    c.beginPath();
-    for (let k = 0; k < n; k++) {
-      const s = S[k];
-      if (s.b !== b || s.frac <= 0) continue;
-      const a1 = top + s.frac * Math.PI * 2;
-      c.moveTo(s.x + s.r * Math.cos(top), s.y + s.r * Math.sin(top));
-      c.arc(s.x, s.y, s.r, top, a1);
-      any = true;
-    }
-    if (!any) continue;
-    const [r, g, bl] = SHIELD_COLORS[b];
-    c.strokeStyle = `rgb(${r},${g},${bl})`;
-    c.stroke();
-  }
-}
-
-// union: per shield, the arcs NOT inside another shield of its ally team,
-// so overlapping shields read as one outline around the protected area.
-// O(n²) circle tests — 60 shields is ~3600 cheap checks per paint.
-function drawShieldUnion(c, S, n) {
+// drawShieldOutline: per shield, the arcs NOT inside another live shield of
+// its ally team, so overlapping shields read as one outline round the
+// protected area. Simple: those arcs in one colour, one stroke. Otherwise a
+// dark halo under them (one path), one path per charge bucket, and the down
+// shields dashed.
+function drawShieldOutline(c, S, n, simple) {
   const TAU = Math.PI * 2;
   const arcs = []; // [k, a0, a1]
-  const down = [];
   for (let i = 0; i < n; i++) {
     const a = S[i];
-    if (a.frac <= 0.02) { down.push(a); continue; } // a collapsed shield protects nothing
+    if (a.down) continue; // a collapsed shield protects nothing
     const cover = [];
     let hidden = false;
     for (let j = 0; j < n && !hidden; j++) {
       if (j === i) continue;
       const b = S[j];
-      if (b.ally !== a.ally || b.frac <= 0.02) continue;
+      if (b.ally !== a.ally || b.down) continue;
       const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy);
       if (d >= a.r + b.r) continue;
       if (d + a.r <= b.r + 0.5) {
@@ -220,9 +271,8 @@ function drawShieldUnion(c, S, n) {
       if (d + b.r <= a.r) continue; // b inside a: covers none of a's edge
       const th = Math.atan2(dy, dx);
       const h = Math.acos(Math.max(-1, Math.min(1, (a.r * a.r + d * d - b.r * b.r) / (2 * a.r * d))));
-      let lo = th - h, hi = th + h;
-      lo = ((lo % TAU) + TAU) % TAU; hi = lo + 2 * h;
-      if (hi > TAU) { cover.push([lo, TAU], [0, hi - TAU]); } else cover.push([lo, hi]);
+      const lo = (((th - h) % TAU) + TAU) % TAU, hi = lo + 2 * h;
+      if (hi > TAU) cover.push([lo, TAU], [0, hi - TAU]); else cover.push([lo, hi]);
     }
     if (hidden) continue;
     if (!cover.length) { arcs.push([i, 0, TAU]); continue; }
@@ -234,53 +284,75 @@ function drawShieldUnion(c, S, n) {
     }
     if (at < TAU) arcs.push([i, at, TAU]);
   }
-  // dark halo under every arc (one path) so the line reads on any terrain
-  c.lineWidth = SHIELD_LINE_PX + 2;
-  c.strokeStyle = 'rgba(0,0,0,0.45)';
-  c.beginPath();
-  for (const [k, a0, a1] of arcs) {
-    const s = S[k];
-    c.moveTo(s.x + s.r * Math.cos(a0), s.y + s.r * Math.sin(a0));
-    c.arc(s.x, s.y, s.r, a0, a1);
-  }
-  c.stroke();
-  c.lineWidth = SHIELD_LINE_PX;
-  for (let b = 0; b < SHIELD_STEPS; b++) {
+  // path builds one path of the arcs in bucket b (-1: all of them).
+  const path = (b) => {
     let any = false;
     c.beginPath();
     for (const [k, a0, a1] of arcs) {
       const s = S[k];
-      if (s.b !== b) continue;
+      if (b >= 0 && s.b !== b) continue;
       c.moveTo(s.x + s.r * Math.cos(a0), s.y + s.r * Math.sin(a0));
       c.arc(s.x, s.y, s.r, a0, a1);
       any = true;
     }
-    if (!any) continue;
+    return any;
+  };
+  if (simple) {
+    c.lineWidth = SHIELD_LINE_PX;
+    c.strokeStyle = 'rgba(190,215,240,0.8)';
+    if (path(-1)) c.stroke();
+    return;
+  }
+  // dark halo under every arc so the line reads on any terrain
+  c.lineWidth = SHIELD_LINE_PX + 2;
+  c.strokeStyle = 'rgba(0,0,0,0.45)';
+  if (path(-1)) c.stroke();
+  c.lineWidth = SHIELD_LINE_PX;
+  for (let b = 0; b <= SHIELD_UNKNOWN; b++) {
+    if (!path(b)) continue;
     const [r, g, bl] = SHIELD_COLORS[b];
     c.strokeStyle = `rgba(${r},${g},${bl},0.9)`;
     c.stroke();
   }
-  if (down.length) {
-    c.setLineDash([6, 6]);
-    c.strokeStyle = 'rgba(255,60,40,0.55)';
+  // Down shields, dashed: red when drained, grey when switched off.
+  c.setLineDash([6, 6]);
+  for (const off of [false, true]) {
+    let any = false;
     c.beginPath();
-    for (const s of down) { c.moveTo(s.x + s.r, s.y); c.arc(s.x, s.y, s.r, 0, Math.PI * 2); }
+    for (let k = 0; k < n; k++) {
+      const s = S[k];
+      if (!s.down || s.off !== off) continue;
+      c.moveTo(s.x + s.r, s.y);
+      c.arc(s.x, s.y, s.r, 0, TAU);
+      any = true;
+    }
+    if (!any) continue;
+    c.strokeStyle = off ? 'rgba(170,180,190,0.5)' : 'rgba(255,60,40,0.55)';
     c.stroke();
-    c.setLineDash([]);
   }
+  c.setLineDash([]);
 }
 
-// pips: a 9 px gauge round each generator — dark track + charge arc.
+// drawShieldPips: a small gauge round each generator with a reading — a dark
+// track and a charge arc from 12 o'clock, clockwise.
 function drawShieldPips(c, S, n) {
-  const R = 9, top = -Math.PI / 2;
+  const R = SHIELD_PIP_PX, top = -Math.PI / 2;
+  let any = false;
   c.lineWidth = 3;
   c.strokeStyle = 'rgba(0,0,0,0.55)';
   c.beginPath();
-  for (let k = 0; k < n; k++) { const s = S[k]; c.moveTo(s.x + R, s.y); c.arc(s.x, s.y, R, 0, Math.PI * 2); }
+  for (let k = 0; k < n; k++) {
+    const s = S[k];
+    if (s.frac < 0) continue;
+    c.moveTo(s.x + R, s.y);
+    c.arc(s.x, s.y, R, 0, Math.PI * 2);
+    any = true;
+  }
+  if (!any) return;
   c.stroke();
   c.lineWidth = 2;
   for (let b = 0; b < SHIELD_STEPS; b++) {
-    let any = false;
+    any = false;
     c.beginPath();
     for (let k = 0; k < n; k++) {
       const s = S[k];
@@ -293,63 +365,5 @@ function drawShieldPips(c, S, n) {
     const [r, g, bl] = SHIELD_COLORS[b];
     c.strokeStyle = `rgb(${r},${g},${bl})`;
     c.stroke();
-  }
-}
-
-// dome: BAR's look reduced to what a top-down map shows of a sphere — clear
-// in the middle, brightening toward the rim (fresnel), a faint hex lattice,
-// a crisp edge. Rendered ONCE per colour bucket into a sprite.
-const shieldSprites = [];
-function shieldSprite(b) {
-  if (shieldSprites[b]) return shieldSprites[b];
-  const N = SHIELD_SPRITE_PX, R = N / 2;
-  const cv = document.createElement('canvas');
-  cv.width = cv.height = N;
-  const g = cv.getContext('2d');
-  const [r, gr, bl] = SHIELD_COLORS[b];
-  const rgba = (a) => `rgba(${r},${gr},${bl},${a})`;
-  const grad = g.createRadialGradient(R, R, 0, R, R, R);
-  grad.addColorStop(0, rgba(0.0));
-  grad.addColorStop(0.55, rgba(0.03));
-  grad.addColorStop(0.85, rgba(0.10));
-  grad.addColorStop(0.97, rgba(0.30));
-  grad.addColorStop(1, rgba(0));
-  g.fillStyle = grad;
-  g.beginPath(); g.arc(R, R, R, 0, Math.PI * 2); g.fill();
-  // hex lattice, masked by a rim-heavy radial alpha
-  const lat = document.createElement('canvas');
-  lat.width = lat.height = N;
-  const h = lat.getContext('2d');
-  h.strokeStyle = rgba(1); h.lineWidth = 1;
-  const s = 9, w = s * Math.sqrt(3);
-  h.beginPath();
-  for (let row = -1; row * s * 1.5 < N + s; row++) {
-    for (let col = -1; col * w < N + w; col++) {
-      const cx = col * w + (row & 1 ? w / 2 : 0), cy = row * s * 1.5;
-      for (let k = 0; k < 6; k++) {
-        const a0 = Math.PI / 6 + k * Math.PI / 3, a1 = a0 + Math.PI / 3;
-        h.moveTo(cx + s * Math.cos(a0), cy + s * Math.sin(a0));
-        h.lineTo(cx + s * Math.cos(a1), cy + s * Math.sin(a1));
-      }
-    }
-  }
-  h.stroke();
-  h.globalCompositeOperation = 'destination-in';
-  const m = h.createRadialGradient(R, R, 0, R, R, R);
-  m.addColorStop(0, 'rgba(0,0,0,0.02)');
-  m.addColorStop(0.7, 'rgba(0,0,0,0.06)');
-  m.addColorStop(0.97, 'rgba(0,0,0,0.22)');
-  m.addColorStop(1, 'rgba(0,0,0,0)');
-  h.fillStyle = m; h.fillRect(0, 0, N, N);
-  g.drawImage(lat, 0, 0);
-  g.strokeStyle = rgba(0.75); g.lineWidth = 2;
-  g.beginPath(); g.arc(R, R, R - 1.5, 0, Math.PI * 2); g.stroke();
-  return (shieldSprites[b] = cv);
-}
-
-function drawShieldDomes(c, S, n) {
-  for (let k = 0; k < n; k++) {
-    const s = S[k];
-    c.drawImage(shieldSprite(s.b), s.x - s.r, s.y - s.r, s.r * 2, s.r * 2);
   }
 }
