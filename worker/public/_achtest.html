@@ -1,0 +1,74 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Achievements test</title>
+<style>
+  body { background: #12181e; color: #dde3ea; font: 13px/1.45 system-ui, sans-serif; margin: 0; padding: 16px; }
+  #games { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 4px 24px; margin-bottom: 16px; }
+  #games h3 { margin: 0 0 4px; font-size: 14px; }
+  #games a { display: block; color: #8fc3ee; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #games a:hover { text-decoration: underline; }
+  #games a.cur { color: #ffe14d; font-weight: 600; }
+  #games .dim { color: #8a96a3; }
+  @media (max-width: 900px) { #games { grid-template-columns: 1fr; } }
+  /* Achievements only: the summary's header, then the Awards section without
+     its award cards. */
+  #s .brs-root > :not(:first-child):not(.brs-section:has(.brs-ach)) { display: none; }
+  #s .brs-section:has(.brs-ach) > :not(.brs-ach) { display: none; }
+</style>
+<div id="games"><div><h3>Lava</h3><div id="lava" class="dim">Loading…</div></div><div><h3>Other</h3><div id="other" class="dim">Loading…</div></div></div>
+<div id="s"></div>
+<script type="module">
+  // Local test page for the summary's achievements. Put it in worker/public/,
+  // run `npm run dev` in worker/ and open http://127.0.0.1:5173/_achtest.html.
+  // The game lists, replays and summaries come from the live site; only the
+  // demo goes through this dev server's /api/bar proxy (the new route).
+  import { mountGameSummary } from "/embed/summary.js";
+  const SITE = "https://replay.fogofwar.dev";
+  const N = 20;
+
+  const fmtDur = (s) => (s ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}` : "?");
+  const fmtDate = (u) => (u ? new Date(u * 1000).toISOString().slice(0, 16).replace("T", " ") : "?");
+  const sides = (g) => (g.players || []).length;
+  const size = (g) => (sides(g) >= 4 ? `FFA (${(g.players || []).reduce((n, a) => n + (a.count || 0), 0)})` : g.gameSize || "?");
+  const flags = (g) => (g.settings?.ranked ? "ranked" : "unranked") + (g.settings?.mods ? ", mods" : "");
+
+  const params = new URLSearchParams(location.search);
+  let current = params.get("id");
+
+  function link(g) {
+    const a = document.createElement("a");
+    a.href = `?id=${g.id}`;
+    a.className = g.id === current ? "cur" : "";
+    const info = [fmtDate(g.startUnix), g.map, size(g), fmtDur(g.durationSec), flags(g), g.lobbyName].filter(Boolean).join(" · ");
+    a.textContent = info;
+    a.title = `${g.id}\n${info}`;
+    return a;
+  }
+
+  async function list(query) {
+    const r = await fetch(`${SITE}/api/replays?${query}`);
+    if (!r.ok) throw new Error(`${r.status}`);
+    return (await r.json()).filter((g) => !g.placeholder);
+  }
+
+  function fill(id, games) {
+    const el = document.getElementById(id);
+    el.className = "";
+    el.replaceChildren(...games.map(link));
+  }
+
+  const [lava, all] = await Promise.all([list(`settings=lava&limit=${N + 5}`), list("limit=200")]);
+  const lavaGames = lava.slice(0, N);
+  const otherGames = all.filter((g) => !g.settings?.lava).slice(0, N);
+  fill("lava", lavaGames);
+  fill("other", otherGames);
+
+  if (!current) current = (lavaGames[0] || otherGames[0])?.id;
+  if (current) {
+    document.querySelectorAll("#games a").forEach((a) => a.classList.toggle("cur", a.href.endsWith(current)));
+    mountGameSummary(document.getElementById("s"), current, {
+      replayOrigin: SITE,
+      barApi: location.origin + "/api/bar",
+    });
+  }
+</script>
