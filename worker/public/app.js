@@ -1989,6 +1989,11 @@ function resize() {
     ovcv.style.height = viewH + 'px';
   }
   if (fitPending && data && viewW && viewH) fitView();
+  // Assigning a canvas's width CLEARS it, even to the same value, so the
+  // base layer must repaint: its skip key (lastBaseKey) only sees the size,
+  // and a resize that kept it (the clip window dragged, not resized) left
+  // the map solid black until something else changed.
+  lastBaseKey = '';
   draw();
 }
 window.addEventListener('resize', resize);
