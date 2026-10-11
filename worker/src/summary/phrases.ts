@@ -223,7 +223,7 @@ export function marginPhrase(ins: Insights, b: Battle, index: number, side: numb
   if (metal < FIGHT_METAL) {
     const words = decisive
       ? [`${W} wins a skirmish ${where}`, `${W} picks off ${Ls} units ${where}`, `${W} takes a clean fight ${where}`]
-      : [`${W} edges out ${Ls} ${where}`, `${W} narrowly wins a skirmish ${where}`, `${W} comes out ahead ${where}`];
+      : [`${W} gets the better of ${Ls} ${where}`, `${W} narrowly wins a skirmish ${where}`, `${W} comes out ahead ${where}`];
     return words[index % words.length];
   }
   if (decisive) {
@@ -232,7 +232,7 @@ export function marginPhrase(ins: Insights, b: Battle, index: number, side: numb
       : [`${W} decisively wins ${where}`, `${W} outfights ${Ls} ${where}`, `${W} beats ${Ls} ${where}`];
     return words[index % words.length];
   }
-  const words = [`${W} edges out ${Ls} ${where}`, `${W} narrowly wins ${where}`, `${W} comes out ahead ${where}`];
+  const words = [`${W} gets the better of ${Ls} ${where}`, `${W} narrowly wins ${where}`, `${W} comes out ahead ${where}`];
   return words[index % words.length];
 }
 

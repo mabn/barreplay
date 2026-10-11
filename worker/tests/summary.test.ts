@@ -128,6 +128,39 @@ test("two swings inside one long battle each tell their own part of it", () => {
   assert.deepEqual(momentStories(file, [a])[0].focus, momentStory(file, a).focus);
 });
 
+test("a battle told whole does not run over another swing's event", () => {
+  const defs = { "2": { name: "armpw", human: "Pawn", cost: 50 } };
+  // A long fight at (450, 450), and late in it a raid far away that the
+  // second swing is about.
+  const rows: [number, number, number][] = [
+    ...Array.from({ length: 10 }, () => [1000, 0, 450] as [number, number, number]),
+    ...Array.from({ length: 20 }, () => [4950, 1, 3000] as [number, number, number]),
+  ];
+  const file = ins({
+    bounds: { minX: 0, maxX: 4000, minZ: 0, maxZ: 4000 },
+    teams: [{ team: 0, side: 0, player: "Ann" }, { team: 1, side: 1, player: "Cy" }],
+    defs,
+    series: { t: [0, 15, 30, 45], army: [[0, 100, 200, 300], [0, 100, 900, 1200]], metalIncome: [], energyIncome: [], armyCats: [], armyByCat: [] },
+    battles: [
+      { f0: 900, f1: 5400, x: 450, z: 450, r: 300, lost: [] },
+      { f0: 4900, f1: 5000, x: 3000, z: 3000, r: 300, lost: [] },
+    ],
+    deaths: {
+      f: rows.map((r) => r[0]), def: rows.map(() => 2), team: rows.map((r) => r[1]), x: rows.map((r) => r[2]), z: rows.map((r) => r[2]),
+      cost: rows.map(() => 50), unfinished: rows.map(() => 0),
+    },
+  });
+  const a = { n: 1, f0: 900, f1: 1350, side: 1, delta: 0.3, battle: -1 };
+  const b = { n: 2, f0: 4800, f1: 5250, side: 0, delta: -0.3, battle: -1 };
+  // Alone, the first swing tells the whole long fight, raid and all.
+  assert.deepEqual([momentStory(file, a).focus?.f, momentStory(file, a).focus?.f1], [900, 5400]);
+  const [sa, sb] = momentStories(file, [a, b]);
+  assert.equal(sb.battle, 1);
+  // Beside the raid's own swing it tells only its part.
+  assert.deepEqual([sa.focus?.f, sa.focus?.f1], [900, 1350 + 450]);
+  assert.match(sa.detail, /Part of a fight from 0:30 to 3:00\.$/);
+});
+
 test("a moment is named after what died in it", () => {
   const base = {
     battles: [],

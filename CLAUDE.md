@@ -885,7 +885,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           its own span as Focus.f..f1 and only the deaths within its radius +
                           600 elmos counted; what died elsewhere meanwhile is a separate
                           "Elsewhere at the time" sentence when it is big enough to matter.
-                          The window it searches is the moment's +- one step (momentWindow),
+                          A battle one swing would tell whole that runs over ANOTHER swing's event is told in part too (momentStories; a long merged fight swallowed the next swing's bombing run). The window it searches is the moment's +- one step (momentWindow),
                           since a raid's buildings often blow up just after the line moved.
                           A side the line moved toward that still lost MORE there is not said
                           to win: the title states the trade ("trades 114k metal for 69.9k").
@@ -997,7 +997,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           section (once "Map story"; no army-centre lines since v7) numbers its battles in the order they happened, on the map and
                           in a one-line-per-battle list (losses either side of a centre line,
                           square-root scaled), one selection shared by both — a click on either
-                          selects AND plays the battle's clip; a picked battle
+                          selects AND plays the battle's clip, marked on the slider as its whole span (clipEvent, like every clip of something with a duration — a killing-fields zone's busiest 30 s too); a picked battle
                           shows the two sides' losses SIDE BY SIDE, each KIND of unit as its
                           untinted BAR icon with a count (Battle.lost[].units, v4: def/n/metal,
                           costliest first, at most 48). Defs sharing a bitmap are one kind,
