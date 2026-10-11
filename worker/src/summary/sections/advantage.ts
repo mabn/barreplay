@@ -110,20 +110,17 @@ function pctText(v: number): string {
   return `${a < 10 ? a.toFixed(1).replace(/\.0$/, "") : Math.round(a)}%`;
 }
 
-/** ratioLimit is the ratio axis's half-height: a little over what most of
- * the game reached (its 95th percentile), not its maximum. The last minutes
- * of a decided game run to a lead of thousands of percent as the losing army
- * melts, and scaled to that everything before is a flat line on zero. */
-export function ratioLimit(r: number[]): number {
-  const a = r.map(Math.abs).sort((x, y) => x - y);
-  const p = a.length ? a[Math.min(a.length - 1, Math.floor(a.length * 0.95))] : 0;
-  return Math.max(20, p * 1.2);
-}
+/** RATIO_CAP is the ratio axis's half-height, in percent. Past it the gap
+ * is not the story any more: the opening minutes, when one side has a
+ * couple of units more of almost nothing, read as thousands of percent, as
+ * do the last minutes of a decided game — scaled to those, every lead in
+ * between is a flat line on zero. The tooltip has the exact number. */
+const RATIO_CAP = 50;
 
 function ratioChart(ins: Insights, watch: Watch | null, group: ChartGroup, t: number[], spec: CompareSpec): SVGSVGElement {
   const [a, b] = spec.values;
   const r = leadPct(a, b, spec.k);
-  const lim = ratioLimit(r);
+  const lim = RATIO_CAP;
   // Past the scale the line runs along its edge; the tooltip has the number.
   const shown = r.map((v) => Math.max(-lim, Math.min(lim, v)));
   const c = timeChart({

@@ -769,9 +769,10 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           INCOME (advantage.ts comparePanel) on one time axis and crosshair, with eliminations marked on the swing line. The two
                           panels default to RATIO (series.ts leadPct: the first side a flat
                           line at 0%, the other at how much bigger the leader is, +20% / -20%,
-                          smoothed by the win model's own k so the opening reads even; the
-                          axis is the 95th percentile, not the max, since a decided game's
-                          last minutes run to thousands of percent) with a Ratio/Value
+                          smoothed by the win model's own k; the axis is FIXED at +-50%
+                          (RATIO_CAP, Marcin's call) since the opening minutes and a decided
+                          game's last ones run to thousands of percent — past it the line
+                          runs along the edge and the tooltip has the number) with a Ratio/Value
                           switch (scale.ts pairToggle); Value shows both sides' numbers with
                           a Linear/Log switch, log default, hidden under Ratio. The swings
                           list under it lays each swing out like a battle detail — the two
