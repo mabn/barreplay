@@ -56,6 +56,8 @@
   // The ring holds at the radius for at least this many frames once the
   // front gets there, so a fast front still reads as a circle.
   const RING_HOLD = 8;
+  // The ring is drawn at this share of the front's true radius (Marcin's call).
+  const RING_SCALE = 0.85;
 
   // Palettes: [core, body, rim] as r,g,b. Fire for an ordinary blast; EMP is
   // blue-white and does no fire at all; a Juno pulse is BAR's green; a nuke
@@ -148,10 +150,10 @@
     if (e.ring) {
       const travel = e.travel || 0;
       if (age < travel) {
-        s.ringR = e.front * age;
+        s.ringR = e.front * age * RING_SCALE;
         s.ringA = RING_ALPHA;
       } else {
-        s.ringR = e.aoe;
+        s.ringR = e.aoe * RING_SCALE;
         s.ringA = RING_ALPHA * (1 - (age - travel) / (span - travel));
       }
     }
@@ -266,7 +268,7 @@
     return n;
   }
 
-  const api = { look, collect, stage, draw, first, stretchFor, DEFAULT_AOE, MIN_RADIUS_PX, LIFE_MIN, LIFE_MAX, MAX_FIREBALLS };
+  const api = { look, collect, stage, draw, first, stretchFor, DEFAULT_AOE, MIN_RADIUS_PX, LIFE_MIN, LIFE_MAX, MAX_FIREBALLS, RING_SCALE };
   root.FxBlasts = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

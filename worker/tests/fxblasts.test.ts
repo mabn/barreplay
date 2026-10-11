@@ -112,12 +112,12 @@ test('a pile-up draws at most MAX_FIREBALLS, keeping the newest', () => {
 test('the shock ring is the engine damage front: expSpeed per frame, stopping at the radius', () => {
   const w = { aoe: 640, expSpeed: 16, class: 'nuke' }; // 40 frames to the rim
   const e = { ...Fx.look(w, 1, false), f: 0 };
-  assert.equal(Fx.stage(e, 10).ringR, 160);
-  assert.equal(Fx.stage(e, 10, 6).ringR, 160, 'playback stretch never slows the front');
-  assert.equal(Fx.stage(e, 40).ringR, 640);
-  assert.equal(Fx.stage(e, 45).ringR, 640, 'holds at the radius');
+  assert.equal(Fx.stage(e, 10).ringR, 160 * Fx.RING_SCALE);
+  assert.equal(Fx.stage(e, 10, 6).ringR, 160 * Fx.RING_SCALE, 'playback stretch never slows the front');
+  assert.equal(Fx.stage(e, 40).ringR, 640 * Fx.RING_SCALE);
+  assert.equal(Fx.stage(e, 45).ringR, 640 * Fx.RING_SCALE, 'holds at the radius');
   assert.ok(e.life >= 40 + 8);
   // no stated speed: the engine damages the whole radius at once
   const flat = { ...Fx.look({ aoe: 200 }, 0, false), f: 0 };
-  assert.equal(Fx.stage(flat, 0).ringR, 200);
+  assert.equal(Fx.stage(flat, 0).ringR, 200 * Fx.RING_SCALE);
 });
