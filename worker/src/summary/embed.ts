@@ -102,6 +102,12 @@ function ridPath(rid: string): string {
  * (mountGameSummary draws the loading scene there). A failure other than
  * "not there" throws. */
 export async function findInsights(gameId: string, opts: EmbedOptions = {}, onWait?: () => void): Promise<Insights | null> {
+  return (await findReplay(gameId, opts, onWait))?.ins ?? null;
+}
+
+/** findReplay is findInsights plus the revision it found the summary for,
+ * which mountGameSummary needs to name the replay's .brp. */
+async function findReplay(gameId: string, opts: EmbedOptions, onWait?: () => void): Promise<{ ins: Insights; rid: string } | null> {
   const replayOrigin = opts.replayOrigin ?? REPLAY_ORIGIN;
   const dataOrigin = opts.dataOrigin ?? DATA_ORIGIN;
   const res = await fetch(`${replayOrigin}/api/replays?id=${encodeURIComponent(gameId)}&limit=2`);
@@ -117,16 +123,17 @@ export async function findInsights(gameId: string, opts: EmbedOptions = {}, onWa
     if (r.status === 404) continue;
     if (!r.ok) throw new Error(`insights: HTTP ${r.status}`);
     const ins = (await r.json()) as Insights;
-    if (v === INSIGHTS_VERSIONS[0]) return ins;
+    if (v === INSIGHTS_VERSIONS[0]) return { ins, rid };
     // Older than this build draws: wait for the current one, computed on
     // demand, and fall back to this one only when that cannot answer.
     onWait?.();
-    return (await requestSummary(replayOrigin, rid)) ?? ins;
+    return { ins: (await requestSummary(replayOrigin, rid)) ?? ins, rid };
   }
   // None at all: worth waiting for, since there is nothing else to show —
   // past the hub's 15 s too, for a big game whose summary takes longer.
   onWait?.();
-  return requestSummary(replayOrigin, rid, NO_SUMMARY_WAIT_MS);
+  const fresh = await requestSummary(replayOrigin, rid, NO_SUMMARY_WAIT_MS);
+  return fresh ? { ins: fresh, rid } : null;
 }
 
 /** How long a page with NO summary at all keeps waiting for one. Each
@@ -166,18 +173,23 @@ async function requestSummary(replayOrigin: string, rid: string, waitMs = 0): Pr
  * viewer's own summary does, unless the host passes its own onClip/onSeek. */
 export async function mountGameSummary(el: HTMLElement, gameId: string, opts: EmbedOptions = {}): Promise<SummaryHandle | null> {
   let loading: SummaryHandle | null = null;
-  let ins: Insights | null;
+  let found: { ins: Insights; rid: string } | null;
   try {
-    ins = await findInsights(gameId, opts, () => (loading = mountLoading(el)));
+    found = await findReplay(gameId, opts, () => (loading = mountLoading(el)));
   } finally {
     (loading as SummaryHandle | null)?.destroy();
   }
-  if (!ins) return null;
-  const { replayOrigin = REPLAY_ORIGIN, dataOrigin: _d, ...rest } = opts;
+  if (!found) return null;
+  const { ins, rid } = found;
+  const { replayOrigin = REPLAY_ORIGIN, dataOrigin = DATA_ORIGIN, ...rest } = opts;
   // Icons live beside the viewer; bundled into another site, the module's
   // own origin (icons.ts's default) would be that site's. Maps go through the
   // viewer's caching BAR API proxy (app.ts barProxy) for the same reason.
-  const summaryOpts: SummaryOptions = { iconBase: replayOrigin, mapApi: `${replayOrigin}/api/bar`, ...rest };
+  // The achievements read the demo through that proxy too, and name build
+  // orders from the published .brp's def table.
+  const summaryOpts: SummaryOptions = {
+    iconBase: replayOrigin, mapApi: `${replayOrigin}/api/bar`, brpUrl: `${dataOrigin}/replays/${ridPath(rid)}.brp`, ...rest,
+  };
   if (!summaryOpts.onClip && !summaryOpts.onSeek) {
     summaryOpts.onClip = clipPlayer(gameId, replayOrigin);
     summaryOpts.onSeek = (f) => window.open(replayLink(gameId, f, replayOrigin), "_blank", "noopener");
