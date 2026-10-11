@@ -7052,6 +7052,7 @@ const INSIGHTS_VERSIONS = [7, 6, 5, 4, 3, 2, 1];
 let summaryModule = null;   // Promise of the imported library
 let summaryFor = null;      // currentFile the #summary pane was filled for
 let summaryHandle = null;   // the mounted summary, for destroy()
+let mapDismissed = false;   // the map window was closed on this replay's Summary tab
 
 function replayTab() {
   return new URLSearchParams(location.search).get('tab') === 'summary' ? 'summary' : 'replay';
@@ -7087,9 +7088,10 @@ function applyReplayTab() {
   if (tab === 'summary') {
     stopPlay();
     showSummary();
-    // The map window beside the summary, showing the whole game until a
-    // moment is clicked. Not embedded: there the window is the host's.
-    if (!clip && !embedClip) openClip(overviewClip());
+    // The map window over the summary, showing the whole game until a
+    // moment is clicked — unless the reader closed it on this replay. Not
+    // embedded: there the window is the host's.
+    if (!clip && !embedClip && !mapDismissed) openClip(overviewClip());
   } else if (clip) {
     closeClip(true); // carry on from the clip, where it was
   } else if (data) {
@@ -7108,6 +7110,7 @@ function leaveReplayTabs() {
 
 function resetSummary() {
   if (clip) closeClip(false);
+  mapDismissed = false;
   if (summaryHandle) summaryHandle.destroy();
   summaryHandle = null;
   summaryFor = null;
@@ -7230,8 +7233,7 @@ function overviewClip() {
 // ---- the map window's place on screen ----
 // Dragged by its title bar, resized from any edge, and remembered in
 // localStorage (a per-viewer convenience: without storage it simply opens at
-// its default place). The default fills the space left of the summary, which
-// style.css pushes against the right edge at the width computed here.
+// its default place, the middle of the screen).
 const CLIP_RECT_KEY = 'barreplay.mapwindow';
 const CLIP_MIN_W = 260, CLIP_MIN_H = 200;
 let clipRect = null; // {x, y, w, h} in CSS px while the window is placed
@@ -7240,11 +7242,8 @@ function clipDefaultRect() {
   const W = window.innerWidth, H = window.innerHeight;
   const head = document.querySelector('header');
   const top = (head ? head.getBoundingClientRect().bottom : 0) + 12;
-  const summaryW = Math.min(1100, Math.max(720, W * 0.6));
-  const left = W - summaryW - 16; // the summary's scrollbar
-  if (left >= 360) return { x: 12, y: top, w: left - 24, h: H - top - 12 };
-  const w = Math.min(680, W - 40), h = Math.min(520, H - 110);
-  return { x: W - w - 20, y: H - h - 20, w, h };
+  const w = Math.min(900, W - 40), h = Math.min(680, H - top - 20);
+  return { x: (W - w) / 2, y: top + (H - top - h) / 2, w, h };
 }
 
 function clampClipRect(r) {
@@ -7348,11 +7347,10 @@ function openClip(c) {
     box.style.display = 'flex';
     document.body.classList.add('clip-open');
   } else if (clip.focus && clip.focus.overview && !c.overview) {
-    // A moment played from the overview returns to the overview's view.
+    // Closing a moment played from the overview restores the overview's view.
     clip.home = { center: { ...center }, scale };
   }
-  // The overview stays until the tab closes; only a moment can be closed.
-  document.getElementById('clipclose').style.display = c.overview ? 'none' : '';
+
   clip.f0 = c.f0;
   // Playback starts a few seconds before the moment; the clip reaches back
   // further so the reader can scroll to what led up to it.
@@ -7450,15 +7448,8 @@ function closeClip(keepView) {
 // next clip.
 function dismissClip() {
   if (!embedClip) {
-    if (clip && clip.focus && clip.focus.overview) return; // nothing to close
-    // On the Summary tab a closed moment hands the window back to the
-    // whole-game map, at the view it had before.
-    if (document.body.classList.contains('summary-tab')) {
-      stopPlay();
-      center = clip.home.center; scale = clip.home.scale;
-      openClip(overviewClip());
-      return;
-    }
+    // Closed, it stays closed on this replay until a moment is clicked.
+    if (document.body.classList.contains('summary-tab')) mapDismissed = true;
     closeClip(false);
     return;
   }

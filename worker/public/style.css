@@ -70,10 +70,6 @@ body.summary-tab #wrap, body.summary-tab .controls { display: none; }
 body.summary-tab #summary { display: block !important; }
 #summary { flex: 1; min-height: 0; overflow-y: auto; }
 #summary .summarymsg { color: #9fb0bf; text-align: center; margin-top: 60px; }
-/* The summary sits against the RIGHT edge so the space on its left holds the
-   map window (app.js clipDefaultRect computes the same width). */
-#summary .brs-root { max-width: min(1100px, max(720px, 60vw)); margin: 0 0 0 auto; }
-#summary .summarymsg { margin-left: auto; margin-right: 0; max-width: min(1100px, max(720px, 60vw)); }
 /* The summary's clip player: a window over the summary holding the real map
    (#wrap is moved into #clipbody while it is open; two ids outrank the
    summary tab's rule hiding it). The sidebar stays behind: the window is the
