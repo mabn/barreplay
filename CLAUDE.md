@@ -2770,7 +2770,15 @@ run dev` in `worker/` plus `pack -upload local`.)
   the probe costs exactly one more read for the rest of the meta and one for E+C
   (adjacent wherever they are, so one span), and a FILE smaller than the probe — the
   206 comes back short — or a server that ignores Range (200) is kept whole
-  (`brpWhole`) and every later piece is sliced from it. Everything a published
+  (`brpWhole`) and every later piece is sliced from it. Every one of those Range
+  reads goes through `rangeFetch`, which keeps them in the CACHE STORAGE API
+  (one cache per file, the `RANGE_CACHE_KEEP` = 12 most recent kept, never on a
+  loopback host, whose simulator bucket is refilled under the same keys): the
+  browser's HTTP cache cannot be relied on for them although cdn-bar serves
+  them immutable and as HITs — Firefox never stores a sub-range request at all,
+  and Chrome's one sparse entry per URL lost the head, keys and economy on
+  every reload (measured), and everything when a page was left mid-download.
+  Sound only because a published key never changes bytes. Everything a published
   head used to carry precomputed is derived in the browser from the meta's full
   unit-def table (`headFromBrp`): internal names (`unitDefs`, the icon/footprint
   lookup key), human names (`unitNames`, "Construction Bot", what units are LABELLED

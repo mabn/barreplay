@@ -2041,6 +2041,8 @@ test('a published .brp is read by Range and decodes as Go decodes it', async () 
     let brpWhole = null;
     let iconTablePromise = null;
     ${APP.match(/const own = [^\n]+/)![0]}
+    const rangeCaches = new Map(); // no Cache Storage under node: rangeFetch is plain fetch
+    ${['rangeCacheable', 'rangeCacheFor', 'rangeFetch'].map(extract).join('\n')}
     ${['gunzipU8', 'ridPath', 'brpPath', 'brpRange', 'brpMetaExtent', 'brpLayout', 'headFromBrp', 'iconTable',
        'loadBrpHead', 'decodeEconomy', 'decodeEvents', 'decodeComms', 'publishEconomy'].map(extract).join('\n')}
     let econChunks = null, resByFrame = null, data = null, chunkStartIdx = [];
@@ -2187,4 +2189,82 @@ test("replay URLs keep a month folder's slash, and its page path parses", () => 
   assert.equal(parse('/replays/abc'), 'abc');
   // A legacy chunk directory is not a page.
   assert.equal(parse('/replays/abc-1a2b3c4d/c0'), null);
+});
+
+test('rangeFetch keeps .brp Range reads in Cache Storage, never on loopback, and keeps the latest files', async () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    const isAsync = APP.slice(start - 6, start) === 'async ';
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return (isAsync ? 'async ' : '') + APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+  const consts = ['RANGE_CACHE_PREFIX', 'RANGE_CACHE_KEEP', 'RANGE_CACHE_LRU']
+    .map(n => APP.match(new RegExp(`const ${n} = [^;]+;`))![0]).join('\n');
+  // A Cache Storage that, like the real one, refuses to store a 206.
+  const store = new Map<string, Map<string, { body: Uint8Array, headers: Headers }>>();
+  const caches = {
+    keys: async () => [...store.keys()],
+    delete: async (n: string) => store.delete(n),
+    open: async (n: string) => {
+      if (!store.has(n)) store.set(n, new Map());
+      const c = store.get(n)!;
+      return {
+        match: async (k: string) => c.has(k) ? new Response(c.get(k)!.body, { headers: c.get(k)!.headers }) : undefined,
+        put: async (k: string, r: Response) => {
+          if (r.status === 206) throw new TypeError('206 is not cacheable');
+          c.set(k, { body: new Uint8Array(await r.arrayBuffer()), headers: r.headers });
+        },
+      };
+    },
+  };
+  const ls = new Map<string, string>();
+  const localStorage = { getItem: (k: string) => ls.get(k) ?? null, setItem: (k: string, v: string) => { ls.set(k, v); } };
+  const sent: string[] = [];
+  const fetch = async (url: string, init: { headers: Record<string, string> }) => {
+    sent.push(url + ' ' + init.headers.Range);
+    if (url.endsWith('/whole.brp')) return new Response(new Uint8Array(10));
+    const [, a, b] = /bytes=(\d+)-(\d+)/.exec(init.headers.Range)!.map(Number);
+    return new Response(new Uint8Array(b - a + 1).fill(a % 251), { status: 206, headers: { 'content-range': `bytes ${a}-${b}/1000` } });
+  };
+  const { rangeFetch } = new Function('caches', 'localStorage', 'location', 'fetch', `${consts}
+    const rangeCaches = new Map();
+    ${['rangeCacheable', 'rangeCacheFor', 'rangeFetch'].map(extract).join('\n')}
+    return { rangeFetch };`)(caches, localStorage, { href: 'https://replay.fogofwar.dev/' }, fetch);
+
+  const U = 'https://cdn-bar.fogofwar.dev/replays/a-1.brp';
+  const first = await rangeFetch(U, 100, 50);
+  assert.equal(first.status, 206);
+  assert.equal((await first.arrayBuffer()).byteLength, 50);
+  await new Promise(r => setTimeout(r, 0)); // the tee'd copy lands
+  const again = await rangeFetch(U, 100, 50);
+  assert.equal(again.status, 206, 'a hit answers like the server did');
+  assert.equal(again.headers.get('content-range'), 'bytes 100-149/1000');
+  assert.deepEqual(new Uint8Array(await again.arrayBuffer()), new Uint8Array(50).fill(100));
+  assert.equal(sent.length, 1, 'the second read never reached the network');
+  await rangeFetch(U, 100, 60);
+  assert.equal(sent.length, 2, 'a different range is a different entry');
+
+  // A server that ignored Range (200, whole file) is passed through, uncached.
+  const W = 'https://cdn-bar.fogofwar.dev/replays/whole.brp';
+  assert.equal((await rangeFetch(W, 0, 5)).status, 200);
+  assert.equal((await rangeFetch(W, 0, 5)).status, 200);
+  assert.equal(sent.filter(s => s.startsWith(W)).length, 2);
+
+  // The dev simulator's bucket is refilled under the same keys: never cached.
+  const L = 'http://127.0.0.1:5173/replays/a-1.brp';
+  await rangeFetch(L, 0, 5); await rangeFetch(L, 0, 5);
+  assert.equal(sent.filter(s => s.startsWith(L)).length, 2);
+
+  // Only the RANGE_CACHE_KEEP most recently opened files keep a cache.
+  const keep = Number(/const RANGE_CACHE_KEEP = (\d+)/.exec(APP)![1]);
+  for (let i = 0; i < keep + 3; i++) await rangeFetch(`https://cdn-bar.fogofwar.dev/replays/n${i}.brp`, 0, 5);
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(store.size, keep);
+  assert.ok(!store.has('brp-ranges:' + U), 'the oldest file was dropped');
+  assert.ok(store.has(`brp-ranges:https://cdn-bar.fogofwar.dev/replays/n${keep + 2}.brp`));
 });

@@ -379,6 +379,93 @@ const BRP_PROBE = 256 * 1024;
 // than downloaded again. Reset per loadReplay.
 let brpWhole = null; // {file, u8}
 
+// ---- caching the Range reads ---------------------------------------------------
+// The browser's own HTTP cache cannot be relied on to keep a .brp's Range
+// reads, although every response is `immutable` and Cloudflare serves it as a
+// HIT. Firefox never stores a request for a byte SUB-range at all
+// (nsHttpChannel: only "bytes=0-" is cacheable), and Chrome keeps every range
+// of one URL in ONE sparse cache entry that the viewer's own access pattern
+// keeps losing: the head, the keyframes and the economy — read together at
+// the start — were missing on a reload (measured in headless Chrome 141 with
+// every request finished), and leaving the page while a chunk was still
+// downloading lost the lot. So the viewer keeps the ranges itself, in the
+// Cache Storage API, under a key naming the range, which every browser keeps
+// as an ordinary 200 entry.
+//
+// Sound because a published replay never changes bytes: a revision's key is
+// content-addressed and a main replay's key is never overwritten (see
+// internal/packer). The dev simulator's bucket is the exception — it is wiped
+// and refilled, so a main key can come back holding another capture — which is
+// why loopback hosts are never cached. One Cache Storage cache per file, the
+// RANGE_CACHE_KEEP most recently opened kept; that order lives in
+// localStorage, and without it only the current replay is kept.
+const RANGE_CACHE_PREFIX = 'brp-ranges:';
+const RANGE_CACHE_KEEP = 12;
+const RANGE_CACHE_LRU = 'brpRangeCaches';
+const rangeCaches = new Map(); // url -> Promise<Cache | null>
+
+function rangeCacheable(url) {
+  if (typeof caches === 'undefined') return false;
+  try {
+    const h = new URL(url, location.href).hostname;
+    return !(h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h.endsWith('.localhost'));
+  } catch (_) { return false; }
+}
+
+// rangeCacheFor opens url's cache, marks it most recently used and drops the
+// caches that fell off the end. Any failure means "no cache", never an error.
+function rangeCacheFor(url) {
+  if (!rangeCacheable(url)) return Promise.resolve(null);
+  let p = rangeCaches.get(url);
+  if (p) return p;
+  p = (async () => {
+    const name = RANGE_CACHE_PREFIX + url;
+    let order = [];
+    try { order = JSON.parse(localStorage.getItem(RANGE_CACHE_LRU) || '[]'); } catch (_) {}
+    if (!Array.isArray(order)) order = [];
+    order = order.filter(n => n !== name).concat(name).slice(-RANGE_CACHE_KEEP);
+    try { localStorage.setItem(RANGE_CACHE_LRU, JSON.stringify(order)); } catch (_) {}
+    const keep = new Set(order);
+    try {
+      for (const n of await caches.keys()) {
+        if (n.startsWith(RANGE_CACHE_PREFIX) && !keep.has(n)) caches.delete(n).catch(() => {});
+      }
+    } catch (_) {}
+    return await caches.open(name);
+  })().catch(() => null);
+  rangeCaches.set(url, p);
+  return p;
+}
+
+// rangeFetch fetches bytes [off, off+len) of url with a Range request, from
+// the range cache when it holds them. It answers exactly like fetch: a 206
+// with the bytes, or whatever the server said otherwise (a 200 with the whole
+// file, an error) — which is never cached, so callers keep handling those.
+// The body streams either way: a miss tees the network body into the cache.
+async function rangeFetch(url, off, len) {
+  const range = 'bytes=' + off + '-' + (off + len - 1);
+  const cache = await rangeCacheFor(url);
+  const key = url + (url.includes('?') ? '&' : '?') + 'range=' + off + '-' + (off + len - 1);
+  if (cache) {
+    try {
+      const hit = await cache.match(key);
+      if (hit && hit.body) return new Response(hit.body, { status: 206, headers: hit.headers });
+    } catch (_) {}
+  }
+  const r = await fetch(url, { headers: { Range: range } });
+  if (!cache || r.status !== 206 || !r.body) return r;
+  const [mine, kept] = r.body.tee();
+  const headers = new Headers();
+  for (const h of ['content-type', 'content-range', 'etag']) {
+    const v = r.headers.get(h);
+    if (v) headers.set(h, v);
+  }
+  // A body cut short errors the stream and put rejects, so nothing partial is
+  // ever stored.
+  cache.put(key, new Response(kept, { status: 200, headers })).catch(() => {});
+  return new Response(mine, { status: 206, headers: r.headers });
+}
+
 // ridPath is a rid as a URL path: each segment escaped, the slash between a
 // month folder and the name kept ("2026-10/<gameId>"). encodeURIComponent on
 // the whole rid would send %2F, which names no object in the bucket.
@@ -390,7 +477,7 @@ function brpPath(file) { return '/replays/' + ridPath(file) + '.brp'; }
 async function brpRange(file, off, len) {
   if (len <= 0) return new Uint8Array(0);
   if (brpWhole && brpWhole.file === file) return brpWhole.u8.subarray(off, off + len);
-  const r = await fetch(dataURL(brpPath(file)), { headers: { Range: 'bytes=' + off + '-' + (off + len - 1) } });
+  const r = await rangeFetch(dataURL(brpPath(file)), off, len);
   if (!r.ok) throw new Error('reading ' + file + '.brp: HTTP ' + r.status);
   const u8 = new Uint8Array(await r.arrayBuffer());
   if (r.status !== 200) return u8;
@@ -508,7 +595,7 @@ async function loadBrpHead(file) {
     throw new Error('this browser lacks DecompressionStream (needed to read the capture)');
   }
   const icons = iconTable(); // in parallel with the probe
-  const r = await fetch(dataURL(brpPath(file)), { headers: { Range: 'bytes=0-' + (BRP_PROBE - 1) } });
+  const r = await rangeFetch(dataURL(brpPath(file)), 0, BRP_PROBE);
   if (r.status === 404) return null;
   if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + await r.text());
   const head = new Uint8Array(await r.arrayBuffer());
@@ -638,7 +725,7 @@ async function pieceFetch(i) {
   const off = i < 0 ? data.keys.off : data.chunks[i].off;
   const len = i < 0 ? data.keys.len : data.chunks[i].len;
   if (brpWhole && brpWhole.file === currentFile) return new Response(brpWhole.u8.slice(off, off + len));
-  const r = await fetch(dataURL(base + '.brp'), { headers: { Range: 'bytes=' + off + '-' + (off + len - 1) } });
+  const r = await rangeFetch(dataURL(base + '.brp'), off, len);
   if (r.status !== 200) return r;
   const whole = new Uint8Array(await r.arrayBuffer());
   brpWhole = { file: currentFile, u8: whole };
