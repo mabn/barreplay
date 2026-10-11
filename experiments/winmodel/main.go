@@ -23,6 +23,9 @@
 // enemy start, and losses by place and kind; only the advance helped, and
 // only log loss.
 //
+// On Supreme Isthmus it also ranks each side's geo and eco players by metal
+// built among all players; that added nothing.
+//
 // -os adds the players' OpenSkill difference as a feature (catalog rosters,
 // one {"id","allies":[{"ally","os":[...]}]} per line); it added nothing.
 package main
@@ -60,6 +63,7 @@ type file struct {
 	Winner      int                    `json:"winner"`
 	MapName     string                 `json:"mapName"`
 	Defs        map[int32]insights.Def `json:"defs"`
+	Players     []insights.Player      `json:"players"`
 }
 
 // game is one two-sided game cut where it was decided.
@@ -85,6 +89,10 @@ type game struct {
 	pos     bool
 	adv     [2][]float64 // army centre's way from own start to the enemy's, 0..1; NaN with no army
 	lostBy  map[string]*[2][]float64
+	// roleRank[role][w][side][step]: where the side's player at that
+	// Isthmus position ranks by metal built (w 0 cumulative, 1 the last 3
+	// minutes) among every player in the game, 0 = most, 1 = least.
+	roleRank map[string]*[2][2][]float64
 }
 
 func main() {
@@ -107,7 +115,13 @@ func main() {
 	if *osFile != "" {
 		loadSkill(*osFile, gs)
 	}
-	fmt.Printf("%d games\n", len(gs))
+	roled := 0
+	for _, g := range gs {
+		if len(g.roleRank) == 2 {
+			roled++
+		}
+	}
+	fmt.Printf("%d games (%d with geo and eco players placed)\n", len(gs), roled)
 	var names []string
 	if *only != "" {
 		names = strings.Split(*only, ",")

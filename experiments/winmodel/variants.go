@@ -19,8 +19,10 @@ type opts struct {
 	skillDecay        float64  // seconds; 0 = constant
 	lossKeys          []string // add each side's cumulative losses of these (geo.go)
 	lossK             float64
-	front             int  // add the army centres' advance, averaged over this many steps
-	frontW            bool // weight each side's advance by its army's size
+	front             int      // add the army centres' advance, averaged over this many steps
+	frontW            bool     // weight each side's advance by its army's size
+	roles             []string // add how the sides' players at these spots rank by metal built
+	roleWin           int      // 0 cumulative, 1 the last 3 minutes
 }
 
 func base(o opts) func(g *game) [][]float64 {
@@ -73,6 +75,13 @@ func base(o opts) func(g *game) [][]float64 {
 					}
 				}
 				f = append(f, a[0]-a[1])
+			}
+			for _, role := range o.roles {
+				x := 0.0
+				if r := g.roleRank[role]; r != nil {
+					x = r[o.roleWin][1][i] - r[o.roleWin][0][i]
+				}
+				f = append(f, x)
 			}
 			if o.valueAdd {
 				f = append(f, math.Log((val[0]+o.armyK)/(val[1]+o.armyK)))
@@ -194,5 +203,11 @@ var variants = []variant{
 	{name: "v9+sea", feat: base(with(func(o *opts) { v9(o); o.lossKeys = []string{"sea"}; o.lossK = 5000 }))},
 	{name: "v9+def+eco", feat: base(with(func(o *opts) { v9(o); o.lossKeys = []string{"defence", "eco"}; o.lossK = 5000 }))},
 	{name: "v9+front4+def", feat: base(with(func(o *opts) { v9(o); o.front = 4; o.lossKeys = []string{"defence"}; o.lossK = 5000 }))},
+	{name: "v9+geo", feat: base(with(func(o *opts) { v9(o); o.roles = []string{"geo"} }))},
+	{name: "v9+eco pl", feat: base(with(func(o *opts) { v9(o); o.roles = []string{"eco"} }))},
+	{name: "v9+geo+eco pl", feat: base(with(func(o *opts) { v9(o); o.roles = []string{"geo", "eco"} }))},
+	{name: "v9+geo3m", feat: base(with(func(o *opts) { v9(o); o.roles = []string{"geo"}; o.roleWin = 1 }))},
+	{name: "v9+eco pl3m", feat: base(with(func(o *opts) { v9(o); o.roles = []string{"eco"}; o.roleWin = 1 }))},
+	{name: "v9+geo+eco pl3m", feat: base(with(func(o *opts) { v9(o); o.roles = []string{"geo", "eco"}; o.roleWin = 1 }))},
 	{name: "+trade win12 ema.5", feat: base(with(func(o *opts) { o.trade = true; o.tradeK = 25000; o.win = 12 })), post: ema(0.5)},
 }

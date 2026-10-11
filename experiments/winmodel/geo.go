@@ -163,6 +163,9 @@ func geo(g *game, f *file, side map[int32]int, died map[int32]int32) {
 		}
 	}
 	sea := isthmusRE.MatchString(f.MapName)
+	if sea {
+		roles(g, f)
+	}
 	for i, fr := range f.Deaths.F {
 		tm := f.Deaths.Team[i]
 		sd, ok := side[tm]
@@ -205,4 +208,105 @@ func (g *game) lostOf(key string, s, i int) float64 {
 		return a[s][i]
 	}
 	return 0
+}
+
+// isthmusRoles are the start spots whose players Marcin asked about, in the
+// south-west base (the north-east one is the same rotated half a turn).
+var isthmusRoles = map[string][2]float64{"geo": {0.387, 0.787}, "eco": {0.083, 0.84}}
+
+// roles ranks each side's geo and eco players by the metal they built.
+func roles(g *game, f *file) {
+	n := g.n
+	type pl struct {
+		side  int
+		u, v  float64
+		built []float64
+	}
+	var ps []pl
+	for _, p := range f.Players {
+		if p.Side < 0 || p.Side > 1 {
+			continue
+		}
+		for _, q := range p.Commander.Path {
+			if len(q) >= 2 {
+				ps = append(ps, pl{p.Side, float64(q[0]) / 12288, float64(q[1]) / 12288, pad(p.Strip.BuiltMetal, n)})
+				break
+			}
+		}
+	}
+	if len(ps) < 4 {
+		return
+	}
+	// Each player's cumulative and windowed built metal, ranked per step.
+	m := len(ps)
+	val := [2][][]float64{make([][]float64, m), make([][]float64, m)}
+	for k, p := range ps {
+		val[0][k] = make([]float64, n)
+		val[1][k] = make([]float64, n)
+		c := 0.0
+		for i := 0; i < n; i++ {
+			c += p.built[i]
+			val[0][k][i] = c
+			lo := max(0, i-11)
+			for j := lo; j <= i; j++ {
+				val[1][k][i] += p.built[j]
+			}
+		}
+	}
+	rank := func(w, k, i int) float64 {
+		better, same := 0, 0
+		for o := range ps {
+			switch {
+			case val[w][o][i] > val[w][k][i]:
+				better++
+			case o != k && val[w][o][i] == val[w][k][i]:
+				same++
+			}
+		}
+		return (float64(better) + float64(same)/2) / float64(m-1)
+	}
+	g.roleRank = map[string]*[2][2][]float64{}
+	for role, at := range isthmusRoles {
+		var who [2]int
+		for s := 0; s < 2; s++ {
+			// The spot in this side's half: the mirror nearer its players.
+			var cu, cv float64
+			k := 0
+			for _, p := range ps {
+				if p.side == s {
+					cu += p.u
+					cv += p.v
+					k++
+				}
+			}
+			cu, cv = cu/float64(k), cv/float64(k)
+			u, v := at[0], at[1]
+			if (u-cu)*(u-cu)+(v-cv)*(v-cv) > (1-u-cu)*(1-u-cu)+(1-v-cv)*(1-v-cv) {
+				u, v = 1-u, 1-v
+			}
+			who[s] = -1
+			best := math.Inf(1)
+			for j, p := range ps {
+				if d := (p.u-u)*(p.u-u) + (p.v-v)*(p.v-v); p.side == s && d < best {
+					best, who[s] = d, j
+				}
+			}
+			if best > 0.1*0.1 {
+				who[s] = -1
+			}
+		}
+		if who[0] < 0 || who[1] < 0 {
+			continue
+		}
+		r := &[2][2][]float64{}
+		for w := 0; w < 2; w++ {
+			for s := 0; s < 2; s++ {
+				r[w][s] = make([]float64, n)
+				for i := 0; i < n; i++ {
+					r[w][s][i] = rank(w, who[s], i)
+				}
+			}
+		}
+		g.roleRank[role] = r
+	}
 }
