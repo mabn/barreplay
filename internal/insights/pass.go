@@ -599,7 +599,7 @@ func (p *pass) finish() {
 	p.wiped = wipedDeaths(o.Deaths, o.Eliminated)
 	o.Battles = p.battles()
 	o.Winner = winner(o.Sides, p.in.Meta.Winners)
-	o.Swing = swing(o)
+	o.Swing = swing(o, func(id int32) bool { return isEcoBuilding(p.in.Meta.UnitDefs[id]) })
 	o.Awards = p.awards()
 	o.Players = p.players()
 	for side := range p.ro.sides {

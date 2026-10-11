@@ -106,6 +106,10 @@ export interface Moment {
   delta: number;
   /** Index into battles, -1 for none. */
   battle: number;
+  /** The share of the shift carried by army value and by metal income
+   * (version 7; summing to 1, absent from older files). */
+  army?: number;
+  eco?: number;
 }
 
 /** One team's part in a battle (version 4+), in metal. */

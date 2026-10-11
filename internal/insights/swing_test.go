@@ -61,7 +61,7 @@ func TestMoments(t *testing.T) {
 		Series:  series(a0, a1, flat(n, 10), flat(n, 10)),
 		Battles: []Battle{{F0: 20 * StepSec * simFPS, F1: 25 * StepSec * simFPS}, {F0: 29 * StepSec * simFPS, F1: 31 * StepSec * simFPS}},
 	}
-	sw := swing(o)
+	sw := swing(o, nil)
 	if sw == nil || len(sw.Moments) != 1 {
 		t.Fatalf("moments = %+v", sw)
 	}
@@ -69,13 +69,16 @@ func TestMoments(t *testing.T) {
 	if m.N != 1 || m.Side != 1 || m.Battle != 1 || m.Delta < momentMin {
 		t.Errorf("moment = %+v", m)
 	}
+	if m.Army != 1 || m.Eco != 0 {
+		t.Errorf("a wipe of the army is carried by the army: army %v eco %v", m.Army, m.Eco)
+	}
 	// The army fell between steps 29 and 30, whose values hold at the end
 	// of their windows: the trimmed window is exactly that one step.
 	if m.F0 != 30*StepSec*simFPS || m.F1 != 31*StepSec*simFPS {
 		t.Errorf("window %d..%d, want the one step of the wipe %d..%d", m.F0, m.F1, 30*StepSec*simFPS, 31*StepSec*simFPS)
 	}
 	o.POV = POVAlly
-	if swing(o) != nil {
+	if swing(o, nil) != nil {
 		t.Error("a one-sided capture got a swing line")
 	}
 }
@@ -90,5 +93,40 @@ func TestWinner(t *testing.T) {
 		if got := winner(sides, c.allies); got != c.want {
 			t.Errorf("winner(%v) = %d, want %d", c.allies, got, c.want)
 		}
+	}
+}
+
+// A shift carried by income in the opening minutes is no moment, unless the
+// side it moved against lost economy buildings in it; later it is one, and
+// says income carried it.
+func TestEarlyEconomyMoments(t *testing.T) {
+	n := 60
+	jump := func(at int) *Insights {
+		i0, i1 := flat(n, 5), flat(n, 5)
+		for i := at; i < n; i++ {
+			i0[i] = 15
+		}
+		return &Insights{
+			POV: POVFull, Sides: []Side{{Ally: 0}, {Ally: 1}}, DurationSec: float64(n * StepSec),
+			Teams:  []Team{{Team: 0, Side: 0}, {Team: 1, Side: 1}},
+			Series: series(flat(n, 0), flat(n, 0), i0, i1),
+		}
+	}
+	early := jump(6) // 1:30
+	if sw := swing(early, nil); len(sw.Moments) != 0 {
+		t.Errorf("an opening income lead is a moment: %+v", sw.Moments)
+	}
+	early.Deaths = Deaths{F: []int32{7 * StepSec * simFPS}, Def: []int32{42}, Team: []int32{1}}
+	eco := func(id int32) bool { return id == 42 }
+	sw := swing(early, eco)
+	if len(sw.Moments) == 0 {
+		t.Fatal("a raid on the opening economy is no moment")
+	}
+	if m := sw.Moments[0]; m.Side != 0 || m.Eco != 1 || m.Army != 0 {
+		t.Errorf("moment = %+v", m)
+	}
+	late := jump(30)
+	if sw := swing(late, nil); len(sw.Moments) == 0 || sw.Moments[0].Eco != 1 {
+		t.Errorf("a mid-game income lead: %+v", sw.Moments)
 	}
 }

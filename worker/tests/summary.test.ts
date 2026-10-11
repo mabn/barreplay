@@ -161,7 +161,7 @@ test("a moment is named after what died in it", () => {
     battles: [{ f0: 950, f1: 1300, x: 450, z: 450, r: 200, lost: [] }] }), m);
   assert.deepEqual(st.focus, { f: 950, f1: 1300, x: 450, z: 450, r: 200 });
   assert.match(st.detail, /^There, 0:32–0:43: Blue team lost 10 units/);
-  assert.match(st.detail, /Team 2 lost nothing/);
+  assert.doesNotMatch(st.detail, /lost nothing/, "a side that lost nothing is not mentioned");
   // With no battle, the fight is still the killing at one spot: from its
   // first death in the window to its last (the clip plays all of it), and
   // not what died across the map meanwhile.
@@ -179,8 +179,22 @@ test("a moment is named after what died in it", () => {
   assert.equal(st.title, "Team 2 trades 800 metal for 400 metal in the centre");
   // Nothing died: the armies pulled apart.
   st = momentStory(ins({ ...base, deaths: deaths([]) }), m);
-  assert.equal(st.title, "Team 2 out-builds Blue team");
+  assert.equal(st.title, "Team 2 out-builds Blue team's army");
   assert.equal(st.focus, null, "nothing happened at one place");
+  assert.doesNotMatch(st.detail, /lost/, "nobody lost anything, so nobody is said to have");
+  // A version 7 file says what carried the shift: income alone names only
+  // income, with the numbers the model read; both name both.
+  const inc = { ...base, series: { ...base.series, metalIncome: [[5, 5, 5, 5], [5, 5, 20, 30]] } };
+  st = momentStory(ins({ ...inc, deaths: deaths([]) }), { ...m, army: 0.1, eco: 0.9 });
+  assert.equal(st.title, "Team 2 builds up a bigger economy");
+  assert.match(st.detail, /^Metal income over the last minute: Team 2 /);
+  assert.doesNotMatch(st.detail, /Army|lost/);
+  assert.deepEqual(st.growth?.[1].income, [5, 10]);
+  const fell = { ...base, series: { ...base.series, metalIncome: [[20, 20, 4, 4], [5, 5, 5, 5]] } };
+  st = momentStory(ins({ ...fell, deaths: deaths([]) }), { ...m, army: 0, eco: 1 });
+  assert.equal(st.title, "Blue team loses metal income");
+  st = momentStory(ins({ ...inc, deaths: deaths([]) }), { ...m, army: 0.4, eco: 0.6 });
+  assert.equal(st.title, "Team 2 out-builds Blue team in army and economy");
   // Deaths outside the window (and the step before it) do not count.
   st = momentStory(ins({ ...base, deaths: deaths([[100, 1, 0, 100, 100]]) }), m);
   assert.equal(st.lost[0].n, 0);

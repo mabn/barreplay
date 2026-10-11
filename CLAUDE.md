@@ -619,7 +619,19 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           the model is never told who won. Moments are the biggest shifts
                           over a minute (>=12 points, 2 min apart, at most 6), each window
                           trimmed to where the line actually moved and tied to the battle
-                          overlapping it. WinModel.Coef started as HAND-SET PRIORS
+                          overlapping it. VERSION 7 splits each moment's move in the model's
+                          logit into what carried it (Moment.Army / Moment.Eco, shares toward
+                          the gaining side, income = last-minute + cumulative), and DROPS a
+                          moment starting in the first earlyEcoSec = 4 min that income
+                          carried (Eco >= 0.5) unless the other side lost an ECONOMY
+                          BUILDING in it (defs.go isEcoBuilding: UnitGroup metal/energy, a
+                          name pattern for captures without groups) — every opening is two
+                          economies growing a few seconds apart. The page (moments.ts
+                          growthStory) names in a no-fight story only what carried >= 20% of
+                          the shift, says for income whether the losing side's FELL or the
+                          other's grew faster, and gives the model's own numbers (last-minute
+                          income, metal mined so far); no story says a side "lost nothing".
+                          WinModel.Coef started as HAND-SET PRIORS
                           (Fitted=false, which the page states); VERSION 6 ships cmd/winfit's
                           fit over 933 games from the 10 days before 2026-10-11 (0.840 army,
                           3.428 last-minute income, 3.044 cumulative income: income carries
@@ -838,7 +850,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           winner + swing, v3 eliminations and peak battles, v4 owner removals
                           left out, owned value and battle teams, v5 self-destructs marked, v6 fitted
                           win weights, v7 the game ends at the resign rather than the first team knocked
-                          out before it) and app.js fetches .insights7, then 6, 5, 4, 3, 2, 1. A version bump needs `insights -all` after
+                          out before it, swing drivers and no opening economy swings) and app.js fetches .insights7, then 6, 5, 4, 3, 2, 1. A version bump needs `insights -all` after
                           the deploy, or published replays keep their older summary.
                           EMBEDDING ON ANOTHER SITE (lavabalance's game pages): the other site
                           IMPORTS THE LIBRARY AT RUN TIME — import("https://replay.fogofwar.dev/

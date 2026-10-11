@@ -34,6 +34,12 @@ type Moment struct {
 	// Battle is the index into Insights.Battles of a battle fought inside
 	// the window, -1 when none was.
 	Battle int `json:"battle"`
+	// Army and Eco split the shift between what moved it: the share of the
+	// model's move toward Side that came from army value, and from metal
+	// income (last-minute and accumulated together). They sum to 1; a
+	// feature that moved AGAINST Side counts as 0. Version 7 and later.
+	Army float64 `json:"army"`
+	Eco  float64 `json:"eco"`
 }
 
 // WinModel is a logistic model over SwingFeatures: P(side 0 wins) =
@@ -76,6 +82,11 @@ const (
 	// momentFlat is how little the line may move and still count as not yet
 	// (or no longer) shifting, when a moment's window is trimmed.
 	momentFlat = 0.02
+	// earlyEcoSec is the opening in which a shift carried mainly by income
+	// is no moment: every side is still building its first extractors, and
+	// one of them being a few seconds ahead says nothing about the game. A
+	// raid that destroys economy buildings there still counts.
+	earlyEcoSec = 4 * 60
 )
 
 // SwingFeatures returns the model's inputs at every step of a two-sided
@@ -130,7 +141,10 @@ func WinProb(coef [swingFeatures]float64, f [swingFeatures]float64) float64 {
 // swing computes the line and its moments, or nil when the game is not a
 // two-sided full-view one (the model compares both sides' numbers, which a
 // one-sided capture only half has).
-func swing(o *Insights) *Swing {
+//
+// ecoDef says which defs are economy buildings (isEcoBuilding), for the
+// opening's rule; nil treats none as one.
+func swing(o *Insights, ecoDef func(int32) bool) *Swing {
 	if len(o.Sides) != 2 || o.POV != POVFull {
 		return nil
 	}
@@ -142,11 +156,71 @@ func swing(o *Insights) *Swing {
 	for i, f := range feats {
 		sw.P[i] = math.Round(WinProb(WinModel.Coef, f)*1000) / 1000
 	}
-	sw.Moments = moments(sw.P, o.Battles, int32(o.DurationSec*simFPS))
+	// An opening shift carried by income alone is two economies growing at
+	// slightly different speeds — unless the side it moved against lost
+	// economy buildings in it.
+	skip := func(m Moment) bool {
+		if m.F0 >= earlyEcoSec*simFPS || m.Eco < 0.5 {
+			return false
+		}
+		return !ecoLost(o, ecoDef, 1-m.Side, m.F0-StepSec*simFPS, m.F1+StepSec*simFPS)
+	}
+	sw.Moments = moments(sw.P, feats, o.Battles, int32(o.DurationSec*simFPS), skip)
 	return sw
 }
 
-func moments(p []float64, battles []Battle, lastFrame int32) []Moment {
+// ecoLost is whether side lost an economy building in [f0, f1] — one that
+// was fought for, not one that went down with its eliminated team.
+func ecoLost(o *Insights, ecoDef func(int32) bool, side int, f0, f1 int32) bool {
+	if ecoDef == nil {
+		return false
+	}
+	teamSide := map[int32]int{}
+	for _, t := range o.Teams {
+		teamSide[t.Team] = t.Side
+	}
+	wiped := map[int32]int32{}
+	for _, e := range o.Eliminated {
+		wiped[e.Team] = e.F
+	}
+	d := o.Deaths
+	for i, f := range d.F {
+		if f < f0 || f > f1 {
+			continue
+		}
+		if s, ok := teamSide[d.Team[i]]; !ok || s != side {
+			continue
+		}
+		if w, ok := wiped[d.Team[i]]; ok && f >= w {
+			continue
+		}
+		if ecoDef(d.Def[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// drivers splits the model's move toward side between step lo and hi into
+// the share carried by army value and by income.
+func drivers(feats [][swingFeatures]float64, lo, hi, side int) (army, eco float64) {
+	if lo < 0 || hi >= len(feats) {
+		return 0, 0
+	}
+	sign := 1.0
+	if side == 1 {
+		sign = -1
+	}
+	dz := func(k int) float64 { return sign * WinModel.Coef[k] * (feats[hi][k] - feats[lo][k]) }
+	a := math.Max(0, dz(0))
+	e := math.Max(0, dz(1)+dz(2))
+	if a+e == 0 {
+		return 0, 0
+	}
+	return math.Round(a/(a+e)*100) / 100, math.Round(e/(a+e)*100) / 100
+}
+
+func moments(p []float64, feats [][swingFeatures]float64, battles []Battle, lastFrame int32, skip func(Moment) bool) []Moment {
 	type cand struct {
 		i  int
 		dp float64
@@ -158,23 +232,6 @@ func moments(p []float64, battles []Battle, lastFrame int32) []Moment {
 		}
 	}
 	sort.SliceStable(cs, func(a, b int) bool { return math.Abs(cs[a].dp) > math.Abs(cs[b].dp) })
-	var picked []cand
-	for _, c := range cs {
-		near := false
-		for _, q := range picked {
-			if d := c.i - q.i; d < momentGap && d > -momentGap {
-				near = true
-				break
-			}
-		}
-		if !near {
-			picked = append(picked, c)
-			if len(picked) == maxMoments {
-				break
-			}
-		}
-	}
-	sort.Slice(picked, func(a, b int) bool { return picked[a].i < picked[b].i })
 	frame := func(step int) int32 {
 		f := int32((step + 1) * StepSec * simFPS) // a step's value is its window's end
 		if f > lastFrame {
@@ -182,8 +239,7 @@ func moments(p []float64, battles []Battle, lastFrame int32) []Moment {
 		}
 		return f
 	}
-	out := make([]Moment, 0, len(picked))
-	for n, c := range picked {
+	moment := func(c cand) Moment {
 		// Trim the window to where the line actually moved: a shift that
 		// happened in one step should not read as a minute-long one.
 		lo, hi := c.i-momentSteps, c.i
@@ -193,10 +249,11 @@ func moments(p []float64, battles []Battle, lastFrame int32) []Moment {
 		for hi-1 > lo && math.Abs(p[hi-1]-p[c.i]) < momentFlat {
 			hi--
 		}
-		m := Moment{N: n + 1, F0: frame(lo), F1: frame(hi), Delta: math.Round(math.Abs(c.dp)*1000) / 1000, Battle: -1}
+		m := Moment{F0: frame(lo), F1: frame(hi), Delta: math.Round(math.Abs(c.dp)*1000) / 1000, Battle: -1}
 		if c.dp < 0 {
 			m.Side = 1
 		}
+		m.Army, m.Eco = drivers(feats, lo, hi, m.Side)
 		best := int32(0)
 		for b, bt := range battles {
 			lo, hi := max(bt.F0, m.F0), min(bt.F1, m.F1)
@@ -204,7 +261,37 @@ func moments(p []float64, battles []Battle, lastFrame int32) []Moment {
 				best, m.Battle = hi-lo, b
 			}
 		}
+		return m
+	}
+	var picked []cand
+	var out []Moment
+	for _, c := range cs {
+		near := false
+		for _, q := range picked {
+			if d := c.i - q.i; d < momentGap && d > -momentGap {
+				near = true
+				break
+			}
+		}
+		if near {
+			continue
+		}
+		m := moment(c)
+		if skip != nil && skip(m) {
+			continue
+		}
+		picked = append(picked, c)
 		out = append(out, m)
+		if len(out) == maxMoments {
+			break
+		}
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].F0 < out[b].F0 })
+	for n := range out {
+		out[n].N = n + 1
+	}
+	if out == nil {
+		out = []Moment{}
 	}
 	return out
 }

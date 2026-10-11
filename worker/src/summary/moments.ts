@@ -60,6 +60,95 @@ export interface MomentStory {
    * densest killing of a fight. Null when the line moved on what the sides
    * built rather than on anything that happened at one place. */
   focus: Focus | null;
+  /** For a moment the sides' building moved rather than a fight, what each
+   * side's army and metal income went from and to; null otherwise. */
+  growth: SideGrowth[] | null;
+}
+
+/** One side's army value (metal) and metal income (per second) at the start
+ * and the end of a moment's window. */
+export interface SideGrowth {
+  army: [number, number];
+  /** Averaged over the minute before each end, as the win model reads it. */
+  income: [number, number];
+  /** Metal produced since the start, at each end. */
+  mined: [number, number];
+}
+
+/** Steps the win model averages income over (swing.go swingIncomeSteps). */
+const INCOME_STEPS = 4;
+
+/** A share of a shift below this is not mentioned as what moved it. */
+const DRIVER_MIN = 0.2;
+
+interface Growth {
+  title: string;
+  detail: string;
+  sides: SideGrowth[];
+}
+
+/** growthStory tells a moment the line made on what the sides BUILT: by
+ * whichever of army value and income carried it (each named only when it
+ * carried at least DRIVER_MIN of the shift), and for income, whether the
+ * losing side's fell or the gaining side's simply grew faster. */
+export function growthStory(ins: Insights, m: Moment): Growth {
+  const won = m.side;
+  const lose = 1 - won;
+  const W = sideName(ins, won);
+  const L = sideName(ins, lose);
+  const s = ins.series;
+  const last = Math.max(0, s.t.length - 1);
+  const step = (f: number) => Math.max(0, Math.min(last, Math.round(f / SIM_FPS / ins.stepSec) - 1));
+  const i0 = step(m.f0);
+  const i1 = step(m.f1);
+  const pair = (xs: number[] | undefined): [number, number] => [xs?.[i0] ?? 0, xs?.[i1] ?? 0];
+  // Income as the model reads it: averaged over the last minute, and summed
+  // over the game so far (insights swing.go SwingFeatures).
+  const avg = (xs: number[] | undefined, i: number) => {
+    const lo = Math.max(0, i - INCOME_STEPS + 1);
+    let sum = 0;
+    for (let j = lo; j <= i; j++) sum += xs?.[j] ?? 0;
+    return sum / (i - lo + 1);
+  };
+  const mined = (xs: number[] | undefined, i: number) => {
+    let sum = 0;
+    for (let j = 0; j <= i; j++) sum += (xs?.[j] ?? 0) * ins.stepSec;
+    return sum;
+  };
+  const sides = ins.sides.map((_, sd) => {
+    const inc = s.metalIncome?.[sd];
+    return { army: pair(s.army[sd]), income: [avg(inc, i0), avg(inc, i1)] as [number, number], mined: [mined(inc, i0), mined(inc, i1)] as [number, number] };
+  });
+  // What carried it: the file says (version 7); older ones are read from
+  // whose army grew more.
+  let army: boolean;
+  let eco: boolean;
+  if (typeof m.army === "number" && typeof m.eco === "number" && m.army + m.eco > 0) {
+    army = m.army >= DRIVER_MIN;
+    eco = m.eco >= DRIVER_MIN;
+  } else {
+    army = armyGrew(ins, m, won);
+    eco = !army;
+  }
+  const gw = sides[won];
+  const gl = sides[lose];
+  const dIncW = gw.income[1] - gw.income[0];
+  const dIncL = gl.income[1] - gl.income[0];
+  // The losing side's income FELL by more than the other's rose: the story
+  // is what it lost, not what the other built.
+  const incomeLost = dIncL < 0 && -dIncL >= Math.max(0, dIncW);
+  let title: string;
+  if (army && eco) title = `${W} out-builds ${L} in army and economy`;
+  else if (army) title = `${W} out-builds ${possessive(L)} army`;
+  else title = incomeLost ? `${L} loses metal income` : `${W} builds up a bigger economy`;
+  const rate = (v: number) => `${fmtMetal(Math.round(v * 10) / 10)}/s`;
+  const parts: string[] = [];
+  if (eco) {
+    parts.push(`Metal income over the last minute: ${W} ${rate(gw.income[0])} → ${rate(gw.income[1])}, ${L} ${rate(gl.income[0])} → ${rate(gl.income[1])}.`);
+    parts.push(`Metal mined so far: ${W} ${fmtMetal(gw.mined[1])}, ${L} ${fmtMetal(gl.mined[1])}.`);
+  }
+  if (army) parts.push(`Army: ${W} ${fmtMetal(gw.army[0])} → ${fmtMetal(gw.army[1])} metal, ${L} ${fmtMetal(gl.army[0])} → ${fmtMetal(gl.army[1])}.`);
+  return { title, detail: parts.join(" "), sides };
 }
 
 /** An instant on the map: sim frame f, at world (x, z) within radius r. */
@@ -246,6 +335,8 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
   let focus: Focus | null;
   // A fight's own losses, when it is told as one event (see below).
   let local: SideLoss[] | null = null;
+  // What each side built, when the line moved on that rather than a fight.
+  let growth: Growth | null = null;
   // An elimination or a quiet stretch has no battle of its own to credit.
   let fight = true;
   // The battle a shared moment told only part of.
@@ -272,7 +363,8 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     // No real fight: the line moved on what each side built.
     fight = false;
     focus = null;
-    title = armyGrew(ins, m, won) ? `${W} out-builds ${L}` : `${W} pulls ahead on income`;
+    growth = growthStory(ins, m);
+    title = growth.title;
   } else if (ll.kinds.length && priced && ll.kinds[0][1] === 1 && ll.kinds[0][2] >= SINGLE_SHARE * ll.metal && ll.kinds[0][2] >= 500) {
     focus = deathFocus(ins, ll.top);
     title = selfDestructed(ins, ll.top)
@@ -330,9 +422,18 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
   }
   const dl = local ? local[lose] : ll;
   const dw = local ? local[won] : wl;
-  let detail = local
-    ? `There, ${fmtClock(focus!.f / SIM_FPS)}–${fmtClock((focus!.f1 ?? focus!.f) / SIM_FPS)}: ${L} lost ${lossText(dl, priced)}; ${W} lost ${lossText(dw, priced)}.`
-    : `${L} lost ${lossText(ll, priced)}; ${W} lost ${lossText(wl, priced)}.`;
+  // Losses are said only for a side that had some: "both lost nothing" is
+  // not a story.
+  const losses = (a: SideLoss, b: SideLoss) => [[L, a], [W, b]]
+    .filter(([, l]) => (l as SideLoss).n > 0)
+    .map(([name, l]) => `${name} lost ${lossText(l as SideLoss, priced)}`)
+    .join("; ");
+  const said = losses(dl, dw);
+  let detail = growth
+    ? growth.detail + (said ? ` ${said}.` : "")
+    : local
+      ? `There, ${fmtClock(focus!.f / SIM_FPS)}–${fmtClock((focus!.f1 ?? focus!.f) / SIM_FPS)}: ${said || "nothing was lost"}.`
+      : said ? `${said}.` : "";
   if (whole) detail += ` Part of a fight from ${fmtClock(whole.f0 / SIM_FPS)} to ${fmtClock(whole.f1 / SIM_FPS)}.`;
   let elsewhere: number[] | null = null;
   if (local && priced) {
@@ -347,7 +448,7 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
   }
   const battle = battleOfMoment(ins, focus, f0, f1);
   const fought = fight ? fighters(ins, ins.battles[battle]) : ins.sides.map(() => []);
-  return { title, detail, lost, shown: local ?? lost, elsewhere, whole, battle, focus, fighters: fought };
+  return { title, detail, lost, shown: local ?? lost, elsewhere, whole, battle, focus, fighters: fought, growth: growth?.sides ?? null };
 }
 
 /** momentStories tells every moment of a swing line. A battle that two or

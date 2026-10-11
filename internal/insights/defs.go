@@ -95,3 +95,22 @@ func armyCat(d snapshot.UnitDef) int {
 		return 3
 	}
 }
+
+// ecoNameRE matches BAR's economy buildings by name, for captures whose defs
+// carry no UnitGroup (before stream protocol 4): extractors, wind and tidal
+// generators, solars, fusions, geothermals and metal makers.
+var ecoNameRE = regexp.MustCompile(`^(arm|cor|leg)[a-z]*(mex|moho|win|sol|fus|geo|tide|makr|mmkr|mmm)`)
+
+// isEcoBuilding is whether a def is a structure that makes metal or energy.
+func isEcoBuilding(d snapshot.UnitDef) bool {
+	if !isStructure(d) {
+		return false
+	}
+	switch d.UnitGroup {
+	case "metal", "energy":
+		return true
+	case "":
+		return ecoNameRE.MatchString(d.Name)
+	}
+	return false
+}
