@@ -7063,7 +7063,6 @@ const INSIGHTS_VERSIONS = [7, 6, 5, 4, 3, 2, 1];
 let summaryModule = null;   // Promise of the imported library
 let summaryFor = null;      // currentFile the #summary pane was filled for
 let summaryHandle = null;   // the mounted summary, for destroy()
-let mapDismissed = false;   // the map window was closed on this replay's Summary tab
 
 function replayTab() {
   return new URLSearchParams(location.search).get('tab') === 'summary' ? 'summary' : 'replay';
@@ -7098,11 +7097,7 @@ function applyReplayTab() {
   }
   if (tab === 'summary') {
     stopPlay();
-    showSummary();
-    // The map window over the summary, showing the whole game until a
-    // moment is clicked — unless the reader closed it on this replay. Not
-    // embedded: there the window is the host's.
-    if (!clip && !embedClip && !mapDismissed) openClip(overviewClip());
+    showSummary(); // the map window opens only when a moment is clicked
   } else if (clip) {
     closeClip(true); // carry on from the clip, where it was
   } else if (data) {
@@ -7121,7 +7116,6 @@ function leaveReplayTabs() {
 
 function resetSummary() {
   if (clip) closeClip(false);
-  mapDismissed = false;
   if (summaryHandle) summaryHandle.destroy();
   summaryHandle = null;
   summaryFor = null;
@@ -7242,21 +7236,6 @@ let clip = null; // {f0, f1, focus, home: {center, scale}} while open
 
 const CLIP_WALL_SEC = 20;
 
-// overviewClip is what the map window shows on the Summary tab when no
-// moment is playing: the whole game, fitted, paused where the playhead is.
-// Its range needs the replay's chunks, so startClip fills it in again once
-// they are there.
-function overviewClip() {
-  const c = { overview: true, f0: 0, f1: 30, title: 'Map' };
-  if (data && data.chunks.length) {
-    const n = data.chunks.reduce((s, ch) => s + ch.count, 0);
-    c.f0 = data.chunks[0].frame;
-    c.f1 = Math.max(c.f0 + 30, frameNumAt(n - 1));
-  }
-  c.start = c.f0;
-  return c;
-}
-
 // ---- the map window's place on screen ----
 // Dragged by its title bar, resized from any edge, and remembered in
 // localStorage (a per-viewer convenience: without storage it simply opens at
@@ -7373,9 +7352,6 @@ function openClip(c) {
     if (!embedClip) placeClip(savedClipRect() || clipDefaultRect());
     box.style.display = 'flex';
     document.body.classList.add('clip-open');
-  } else if (clip.focus && clip.focus.overview && !c.overview) {
-    // Closing a moment played from the overview restores the overview's view.
-    clip.home = { center: { ...center }, scale };
   }
 
   clip.f0 = c.f0;
@@ -7422,20 +7398,6 @@ function openClip(c) {
 
 function startClip() {
   const c = clip.focus;
-  if (c.overview) {
-    // The whole game: its range is only known now the chunks are in.
-    const o = overviewClip();
-    clip.f0 = o.f0; clip.start = o.start; clip.f1 = o.f1;
-    // Fitted once; coming back from a moment keeps the view it had.
-    if (!clip.fitted) {
-      fitView();
-      document.getElementById('clipspeed').value = '16'; // a whole game
-    }
-    clip.fitted = true;
-    stopPlay();
-    show();
-    return;
-  }
   // A followed unit starts the clip where its route says it was; the
   // camera then rides along with it (followClipUnit).
   if (c.follow && Array.isArray(c.path) && c.path.length && typeof c.x !== 'number') {
@@ -7463,11 +7425,8 @@ function closeClip(keepView) {
   document.getElementById('clip').style.display = 'none';
   document.body.classList.remove('clip-open');
   if (!keepView) { center = clip.home.center; scale = clip.home.scale; }
-  const overview = clip.focus && clip.focus.overview;
   clip = null;
   resize();
-  // The overview was fitted to the small window; the Replay tab refits.
-  if (overview && keepView && data) { fitView(); draw(); }
 }
 
 // dismissClip is the reader closing the clip (✕ or Escape). Embedded, the
@@ -7475,8 +7434,6 @@ function closeClip(keepView) {
 // next clip.
 function dismissClip() {
   if (!embedClip) {
-    // Closed, it stays closed on this replay until a moment is clicked.
-    if (document.body.classList.contains('summary-tab')) mapDismissed = true;
     closeClip(false);
     return;
   }

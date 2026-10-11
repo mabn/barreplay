@@ -774,11 +774,10 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           and onSeek = seekToFrame (back to the Replay tab at that sim frame).
                           The two tabs are <a href> links (replayTabHref), so a middle- or
                           ctrl-click opens either in a new browser tab; a plain click stays
-                          in the page. On the Summary tab the clip window opens as a MAP
-                          WINDOW over the (centred) summary: the whole game, fitted and paused
-                          (overviewClip, focus.overview), until a moment is clicked. ✕ and
-                          Escape close it, and closed it stays closed on that replay
-                          (mapDismissed) until a moment is clicked. It drags by its title bar
+                          in the page. The clip window over the (centred) summary opens ONLY
+                          when a moment is clicked — never on its own when the tab opens
+                          (Marcin's call: an unasked-for popup over the page). ✕ and
+                          Escape close it. It drags by its title bar
                           and resizes from any edge (initClipWindow; edge presses are taken in
                           the capture phase so they do not also pan the map), and its rect is
                           kept in localStorage ('barreplay.mapwindow', clamped to the
