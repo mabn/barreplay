@@ -99,6 +99,9 @@ export const CSS = `
 .brs-root .brs-bar { display: block; height: 8px; background: var(--brs-grid); border-radius: 2px; overflow: hidden; }
 .brs-root .brs-bar i { display: block; height: 100%; }
 .brs-root .brs-panel-label { color: var(--brs-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; margin: 10px 0 2px; }
+.brs-root details.brs-more { margin-top: 8px; }
+.brs-root details.brs-more > summary { cursor: pointer; color: var(--brs-muted); font-size: 12px; padding: 4px 0; user-select: none; }
+.brs-root details.brs-more > summary:hover, .brs-root details.brs-more > summary:focus-visible { color: var(--brs-text); outline: none; }
 .brs-root svg text.brs-ko { font-size: 15px; font-weight: 700; }
 .brs-root .brs-grow { flex: 1; min-width: 0; }
 .brs-root .brs-play { font: inherit; font-size: 11px; line-height: 1; flex: 0 0 auto; cursor: pointer; color: var(--brs-text);

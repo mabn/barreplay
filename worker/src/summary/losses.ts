@@ -82,3 +82,18 @@ export function lossesByStep(ins: Insights): Losses {
     : null;
   return { priced, combat, wiped, owned };
 }
+
+/** destroyedBySide is the metal each side destroyed, per step and in total
+ * so far: the OTHER side's fought-for losses (lossesByStep's combat), which
+ * is the win model's fourth input (internal/insights Killed). Null when the
+ * file prices nothing, since a count of units is not what the model reads. */
+export function destroyedBySide(ins: Insights): { step: number[][]; total: number[][] } | null {
+  const l = lossesByStep(ins);
+  if (!l.priced || l.combat.length !== 2) return null;
+  const step = [l.combat[1], l.combat[0]];
+  const total = step.map((row) => {
+    let sum = 0;
+    return row.map((v) => (sum += v));
+  });
+  return { step, total };
+}

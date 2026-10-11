@@ -953,9 +953,14 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           once with the chosen one bold (a path is also a way to pick; a jump
                           no commander walks in a step is drawn as a gap), the diary/leaks/
                           style beside it and the built/lost strip below; names in the Sides
-                          cards select a tab. "Who was winning" stacks the swing line, ARMY VALUE and METAL
-                          INCOME (advantage.ts comparePanel) on one time axis and crosshair, with eliminations marked on the swing line. The two
-                          panels default to RATIO (series.ts leadPct: ONE white line, the first side's
+                          cards select a tab. "Who was winning" stacks the swing line, ARMY VALUE, METAL
+                          INCOME and METAL DESTROYED (advantage.ts comparePanel) on one time axis and crosshair, with eliminations marked on the swing line;
+                          the three panels sit FOLDED in a <details> under the line (Marcin's call: the line is what a reader came for), which
+                          is why the swing chart draws its own minutes axis. METAL DESTROYED is the win model's fourth input (losses.ts
+                          destroyedBySide = the other side's fought-for losses, Go's Killed): its Value mode, the default, draws per-step
+                          BARS like a player's Built and lost (first side up, second down), and its Ratio compares the totals so far
+                          with the model's own 25k k. The two
+                          ratio panels default to RATIO (series.ts leadPct: ONE white line, the first side's
                           lead UP like the swing line above it, +20% / -20%, shaded in the
                           leader's colour,
                           smoothed by the win model's own k; the axis spans the min and max

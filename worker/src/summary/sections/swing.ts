@@ -44,7 +44,7 @@ export function swingChart(ins: Insights, opts: SummaryOptions, watch: Watch | n
   const t = stepTimes(ins);
   const d = sw.p.map((p) => p - 0.5);
   const c = timeChart({
-    height: 200, durationSec: ins.durationSec, yMin: -0.5, yMax: 0.5, zeroLine: true, xAxis: false,
+    height: 218, durationSec: ins.durationSec, yMin: -0.5, yMax: 0.5, zeroLine: true, xAxis: true,
     yTick: (v) => pct(0.5 + Math.abs(v)),
     watch, group,
     readout: (tt) => {
@@ -170,7 +170,7 @@ export function swingChart(ins: Insights, opts: SummaryOptions, watch: Watch | n
   return {
     key: mirrorKey(ins, knockouts(ins).length ? h("span", undefined, "✕ a player out") : null),
     hint: h("p", { class: "brs-hint" },
-      `The chance each side wins, read from army value and metal income (a model ${model}; it is never told the result). The army value and income charts below share its time axis.`),
+      `The chance each side wins, read from ${ins.version >= 9 ? "army value, metal income, metal mined so far and metal destroyed so far" : "army value, metal income and metal mined so far"} (a model ${model}; it is never told the result). The charts folded away below share its time axis.`),
     svg: c.svg,
     list: rows.length ? h("div", undefined, ...rows) : null,
   };

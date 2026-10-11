@@ -5,7 +5,7 @@ import { test } from "node:test";
 
 import { fmtClock, fmtMetal, niceStep, timeStep } from "../src/summary/format";
 import { colorName, comparable, nameRuns, notices, readable, sideColor, sideName } from "../src/summary/model";
-import { knockouts, lossesByStep, wipedOf } from "../src/summary/losses";
+import { destroyedBySide, knockouts, lossesByStep, wipedOf } from "../src/summary/losses";
 import { armyDrop, compass, fighters, gapBattles, momentStories, momentStory } from "../src/summary/moments";
 import { clipAround, clipAt, clipEvent, clipSpan, watcher } from "../src/summary/watch";
 import { zonesOf } from "../src/summary/zones";
@@ -274,6 +274,10 @@ test("losses split what died fighting from what went down with its team", () => 
   assert.equal(l.priced, true);
   assert.deepEqual(l.combat, [[100, 0, 200], [0, 50, 0]], "Gaia's loss belongs to no side");
   assert.deepEqual(l.wiped, [[0, 0, 400], [0, 0, 0]]);
+  // What each side destroyed is the other's fought-for losses (the win
+  // model's Killed), per step and running.
+  assert.deepEqual(destroyedBySide(i), { step: [[0, 50, 0], [100, 0, 200]], total: [[0, 50, 50], [100, 100, 300]] });
+  assert.equal(destroyedBySide({ ...i, deaths: { ...i.deaths, cost: [0, 0, 0, 0, 0] } }), null, "unpriced: nothing the model reads");
   assert.deepEqual(knockouts(i), [{ f: 950, team: 0, side: 0, name: "Ann", label: "Ann is eliminated", handoff: false }]);
   assert.equal(knockouts({ ...i, eliminated: [{ f: 950, team: 0, recorded: false, to: 1 }] })[0].label, `Ann leaves, handing their units to ${i.teams.find((t) => t.team === 1)?.player ?? "Team 1"}`);
   assert.deepEqual(knockouts(ins()), [], "a file before version 3 names none");
