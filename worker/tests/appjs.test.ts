@@ -655,7 +655,7 @@ test('the catalog is fetched for the list view, not for a direct replay link', a
       get pathname() { return state.url.pathname; },
     };
     const history = { pushState(){}, replaceState: (_a, _b, u) => { state.url = new URL(u, state.url); } };
-    const initGL = () => {}, initUpload = () => {}, initReplayTabs = () => {}, startFpsMonitor = () => {}, stopPlay = () => {};
+    const initGL = () => {}, initUpload = () => {}, initReplayTabs = () => {}, initEmbedClip = () => {}, startFpsMonitor = () => {}, stopPlay = () => {};
     // The left menu: wiring the nav and the queue's pager, and picking the
     // section to show. None of it touches the catalog, which is what this
     // test counts.

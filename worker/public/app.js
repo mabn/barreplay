@@ -3902,7 +3902,7 @@ window.addEventListener('keydown', e => {
   // The clip player over the summary: Escape closes it, space plays (a
   // focused button already answers space with a click of its own).
   if (clip) {
-    if (e.key === 'Escape') closeClip(false);
+    if (e.key === 'Escape') dismissClip();
     else if (e.key === ' ' && e.target.tagName !== 'BUTTON') { e.preventDefault(); togglePlay(); }
     return;
   }
@@ -4021,6 +4021,7 @@ async function loadReplay(id) {
   show();
   seekFromURL();
   if (clip) startClip(); // a clip was asked for while the replay loaded
+  if (embedClip && parent !== window) parent.postMessage({ type: 'barreplay:ready' }, '*');
 }
 
 // The BAR maps API. The browser talks to it directly (the API allows
@@ -7255,6 +7256,7 @@ function startClip() {
 
 function closeClip(keepView) {
   if (!clip) return;
+  if (embedClip) return; // the window is the whole page; see dismissClip
   stopPlay();
   document.getElementById('summary').before(document.getElementById('wrap'));
   document.getElementById('clip').style.display = 'none';
@@ -7262,6 +7264,15 @@ function closeClip(keepView) {
   if (!keepView) { center = clip.home.center; scale = clip.home.scale; }
   clip = null;
   resize();
+}
+
+// dismissClip is the reader closing the clip (✕ or Escape). Embedded, the
+// window is the host's to hide: the player stays as it is, ready for the
+// next clip.
+function dismissClip() {
+  if (!embedClip) { closeClip(false); return; }
+  stopPlay();
+  parent.postMessage({ type: 'barreplay:close' }, '*');
 }
 
 function updateClipBar() {
@@ -7277,14 +7288,41 @@ function fmtClipTime(f) {
 }
 
 function initClip() {
-  document.getElementById('clipclose').onclick = () => closeClip(false);
-  document.getElementById('clipreplay').onclick = () => setReplayTab('replay');
+  document.getElementById('clipclose').onclick = dismissClip;
+  document.getElementById('clipreplay').onclick = () => {
+    if (!embedClip) { setReplayTab('replay'); return; }
+    // Embedded, the full replay is a page of its own, at where the clip is.
+    stopPlay();
+    const f = data ? frameNumAt(idx) : 0;
+    window.open(location.pathname + (f > 0 ? '?f=' + f : ''), '_blank', 'noopener');
+  };
   document.getElementById('clipplay').onclick = togglePlay;
   document.getElementById('clipslider').oninput = e => {
     if (!clip || !data) return;
     stopPlay();
     go(idxForFrame(clip.f0 + (+e.target.value / 1000) * (clip.f1 - clip.f0)));
   };
+}
+
+// ---- the clip player on another site ----------------------------------------
+// /replays/<id>?embed=clip is the clip player ALONE, for the summary embedded
+// on another site (src/summary/embed.ts), which frames this page in a window
+// of its own and hands it clips by postMessage — a clip carries a unit's
+// whole route, too long for a URL, and the frame then stays loaded between
+// clips, so the second one starts at once. Only the clip window is shown;
+// closing it asks the host to hide the frame. Clips are accepted from any
+// origin: all one can do is play a moment of a public replay.
+const embedClip = new URLSearchParams(location.search).get('embed') === 'clip';
+
+function initEmbedClip() {
+  if (!embedClip) return;
+  document.body.classList.add('clip-embed');
+  window.addEventListener('message', (e) => {
+    const m = e.data;
+    if (m && m.type === 'barreplay:clip' && m.clip && typeof m.clip.f0 === 'number') openClip(m.clip);
+  });
+  // 'barreplay:ready' is posted by loadReplay once the replay is in: a clip
+  // opened before then would draw a map that has no data yet.
 }
 
 function initReplayTabs() {
@@ -7310,6 +7348,7 @@ async function init() {
   initLavabalanceDialog();   // the Games rows' LOS upload preview
   initUpload(); // the dropzone works without the catalog being loaded
   initReplayTabs(); // Replay / Summary on a replay page, and the clip player
+  initEmbedClip();  // ?embed=clip: the clip player alone, framed by another site
   const params = new URLSearchParams(location.search);
   // Whether the maintenance controls may show: one round trip (no cookie,
   // no Durable Object — a 401 in a millisecond for an ordinary visit),
