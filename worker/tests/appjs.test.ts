@@ -23,7 +23,7 @@ const FX = FX_FILES.map((n) => readFileSync(fileURLToPath(new URL('../public/' +
 // Globals the browser provides that node does not, so `in globalThis` cannot
 // vouch for them. Listed explicitly rather than pattern-matched: a genuinely
 // new undefined call must fail, not be waved through.
-const BROWSER_GLOBALS = new Set(['Image', 'requestAnimationFrame', 'cancelAnimationFrame', 'XMLHttpRequest']);
+const BROWSER_GLOBALS = new Set(['Image', 'requestAnimationFrame', 'cancelAnimationFrame', 'XMLHttpRequest', 'OffscreenCanvas']);
 
 // The Size and Players columns abbreviate a free-for-all, and both do it past
 // the SAME side count. Every renderer harness below needs those four pure
