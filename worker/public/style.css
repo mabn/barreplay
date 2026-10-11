@@ -1,30 +1,64 @@
-:root { color-scheme: dark; }
+/* ---- the LAVA palette (Marcin's pick, 2026-10-11; mockup f-lava-replay in
+   the redesign files): a maroon-black page lit by an ember glow at the top,
+   plum panels, a gold accent. Every chrome colour below is one of these, so a
+   retheme is an edit here. Team colours, unit colours and the per-flag/state
+   chips keep their own meanings and are not part of it. The SUMMARY tab is
+   deliberately left on its own palette (its library carries one, --brs-*),
+   which is why #summary restores the old page colour behind it. */
+:root {
+  color-scheme: dark;
+  --bg: #170d10;          /* the page */
+  --glow: #6a2b18;        /* the ember glow at the top of the page */
+  --rail: #130a0d;        /* the left menu */
+  --panel: #1c1420;       /* bars, the sidebar, framed boxes */
+  --raised: #261b2c;      /* controls and hovered rows on a panel */
+  --raised-hi: #30233a;   /* a hovered control */
+  --well: #110a0d;        /* inputs, code, chart surfaces: below the panel */
+  --line: #352840;        /* borders */
+  --line-soft: #281e2f;   /* row separators, grids */
+  --line-hi: #4b3a54;     /* hovered/strong borders */
+  --text: #f1e8f2;
+  --text-2: #ddd0e8;      /* secondary bright text */
+  --muted: #b9a9c6;       /* values beside labels, quiet text */
+  --dim: #9a8aa8;         /* labels, menu entries */
+  --faint: #8a7a9a;       /* column headers, timestamps, empty cells */
+  --accent: #ffb547;      /* gold: the selected thing, links, focus */
+  --accent-hi: #ffc876;
+  --accent-ink: #170d10;  /* text on gold */
+  --accent-soft: #3a2614; /* a selected chip's fill */
+  --accent-line: #8a5e22; /* a selected chip's border */
+  --lilac: #c3a9dc;       /* work in flight: progress, running jobs, charts */
+  --lilac-soft: #2a1f33;
+  --lilac-line: #5a4670;
+}
 * { box-sizing: border-box; }
 body {
   margin: 0;
   font-family: system-ui, -apple-system, sans-serif;
-  background: #11151a;
-  color: #d7dee6;
+  /* The glow is the mockup's: an ellipse at the top centre, fading into the
+     page colour; the second layer covers whatever the gradient does not. */
+  background: radial-gradient(70% 70% at 50% 0%, var(--glow), var(--bg)) no-repeat, var(--bg);
+  color: var(--text);
   overflow: hidden;
   display: flex; flex-direction: column; height: 100vh;
 }
 header {
   padding: 8px 16px;
-  background: #1a2027;
-  border-bottom: 1px solid #2a323c;
+  background: transparent;
+  border-bottom: 1px solid var(--line);
   display: flex;
   align-items: center;
   gap: 14px;
 }
 h1 { font-size: 15px; margin: 0; white-space: nowrap; }
 h1 a { color: inherit; text-decoration: none; }
-h1 a:hover { color: #8fd3ff; }
-h1 .sub { color: #6f87a0; font-weight: 400; font-size: 12px; margin-left: 8px; }
+h1 a:hover { color: var(--accent); }
+h1 .sub { color: var(--faint); font-weight: 400; font-size: 12px; margin-left: 8px; }
 select, button {
-  background: #2a3742; color: #d7dee6; border: 1px solid #3a4856;
+  background: var(--raised); color: var(--text); border: 1px solid var(--line-hi);
   border-radius: 4px; padding: 5px 10px; cursor: pointer; font-size: 13px;
 }
-button:hover { background: #344450; }
+button:hover { background: var(--raised-hi); }
 button:disabled { opacity: .4; cursor: default; }
 /* Fixed width so toggling "▶ Play" / "⏸ Pause" doesn't reflow the controls row. */
 #play { min-width: 74px; text-align: center; }
@@ -32,12 +66,12 @@ select { padding: 5px 8px; }
 
 .controls {
   display: flex; gap: 8px; align-items: center;
-  padding: 7px 16px; background: #1a2027; border-bottom: 1px solid #2a323c;
+  padding: 7px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
 }
 /* Playback bar: sits below the map, so the border flips to the top edge. */
-#bottombar { border-bottom: none; border-top: 1px solid #2a323c; }
+#bottombar { border-bottom: none; border-top: 1px solid var(--line); }
 .controls .grow { flex: 1; }
-input[type=range] { flex: 1; min-width: 120px; accent-color: #5a9fd0; }
+input[type=range] { flex: 1; min-width: 120px; accent-color: var(--accent); }
 
 /* Timeline: the scrub slider with the downloaded-ranges bar underneath
    (video-player style: blue = fully loaded chunk, dim = keyframe only). */
@@ -46,7 +80,7 @@ input[type=range] { flex: 1; min-width: 120px; accent-color: #5a9fd0; }
 #buffbar { height: 3px; border-radius: 2px; background: transparent; }
 .timelabel {
   min-width: 190px; text-align: right; font-size: 12px;
-  font-variant-numeric: tabular-nums; color: #9fb0bf;
+  font-variant-numeric: tabular-nums; color: var(--muted);
 }
 
 /* ---- home view: the left menu and the section it selects, shown when no
@@ -85,10 +119,10 @@ body.replay-page #homelink { display: none; }
 body.replay-page #backlink {
   display: inline-flex; align-items: center; gap: 3px; vertical-align: middle;
   margin-right: 12px; padding: 3px 9px 3px 5px; border-radius: 6px;
-  border: 1px solid #2a323c; color: #9fb0bf; font-size: 12px; font-weight: 500;
+  border: 1px solid var(--line); color: var(--muted); font-size: 12px; font-weight: 500;
 }
-body.replay-page #backlink:hover { color: #fff; background: #1d252e; border-color: #3a4856; }
-#backlink:focus-visible { outline: 2px solid #8fd3ff; outline-offset: 2px; }
+body.replay-page #backlink:hover { color: #fff; background: var(--raised); border-color: var(--line-hi); }
+#backlink:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #backlink svg {
   width: 14px; height: 14px;
   fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; stroke-linecap: round;
@@ -97,37 +131,37 @@ body.replay-page h1 .sub { margin-left: 0; vertical-align: middle; }
 
 #rail {
   width: 72px; padding: 12px 0 10px;
-  background: #0f1317; border-right: 1px solid #2a323c;
+  background: var(--rail); border-right: 1px solid var(--line);
   display: flex; flex-direction: column; align-items: center; gap: 4px;
 }
 #raillogo {
   width: 36px; height: 36px; margin-bottom: 14px; border-radius: 10px;
   display: grid; place-items: center;
-  background: #d7dee6; color: #11151a; font-weight: 800; font-size: 16px;
+  background: var(--accent); color: var(--accent-ink); font-weight: 800; font-size: 16px;
   letter-spacing: -.02em; text-decoration: none;
 }
-#raillogo:hover { background: #fff; }
+#raillogo:hover { background: var(--accent-hi); }
 .railitem, .railsubitem {
   position: relative; border-radius: 10px;
   display: flex; flex-direction: column; align-items: center;
-  color: #7d8aa0; text-decoration: none;
+  color: var(--dim); text-decoration: none;
 }
 .railitem { width: 56px; padding: 8px 0 6px; gap: 4px; font-size: 10.5px; }
 .railitem svg, .railsubitem svg {
   width: 20px; height: 20px;
   fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round;
 }
-.railitem:hover, .railsubitem:hover { color: #cfe3f5; background: #1d252e; }
-.railitem.active, .railsubitem.active { color: #fff; background: #ffffff12; }
+.railitem:hover, .railsubitem:hover { color: var(--text); background: var(--raised); }
+.railitem.active, .railsubitem.active { color: var(--accent); background: #ffffff12; }
 /* The selected entry is also marked at the menu's edge, so it reads at a
    glance without depending on the tint alone. Only ever ONE mark: on a
    replay page it is the sub menu's, and Replays reads as open instead. */
 .railitem.active::before {
   content: ''; position: absolute; left: -8px; top: 12px; bottom: 12px;
-  width: 3px; border-radius: 0 2px 2px 0; background: #8fd3ff;
+  width: 3px; border-radius: 0 2px 2px 0; background: var(--accent);
 }
 #raillogo:focus-visible, .railitem:focus-visible, .railsubitem:focus-visible {
-  outline: 2px solid #8fd3ff; outline-offset: 2px;
+  outline: 2px solid var(--accent); outline-offset: 2px;
 }
 /* Admin-only entries (an Access sign-in — app.js adminMode()), same gate as
    the list's refresh button. homeTab() enforces it too, so a shared /queue
@@ -139,7 +173,7 @@ body.admin-mode .railitem.admin { display: flex; }
 .railitem .badge {
   position: absolute; top: 3px; right: 6px;
   font-size: 9px; line-height: 1; padding: 2px 5px; border-radius: 8px;
-  background: #2f6f9f; color: #fff; font-variant-numeric: tabular-nums;
+  background: var(--accent); color: var(--accent-ink); font-weight: 700; font-variant-numeric: tabular-nums;
 }
 .railitem .badge:empty { display: none; }
 
@@ -150,39 +184,39 @@ body.admin-mode .railitem.admin { display: flex; }
 .railgroup { width: 60px; display: flex; flex-direction: column; align-items: center; border-radius: 12px; }
 #replaytabs { display: none; }
 body.replay-page #railreplays {
-  padding: 2px 0 6px; background: #161d24; box-shadow: inset 0 0 0 1px #26303a;
+  padding: 2px 0 6px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--line-soft);
 }
-#railreplays > .railitem.open { color: #e6eef6; }
+#railreplays > .railitem.open { color: var(--text); }
 body.replay-page #replaytabs {
   position: relative; width: 100%; padding: 2px 0 0 12px;
   display: flex; flex-direction: column; gap: 2px;
 }
 #replaytabs::before {
   content: ''; position: absolute; left: 7px; top: 0; bottom: 6px;
-  width: 1px; background: #3a4856;
+  width: 1px; background: var(--line-hi);
 }
 .railsubitem { width: 45px; padding: 6px 0 5px; gap: 3px; font-size: 9.5px; border-radius: 8px; }
 .railsubitem svg { width: 16px; height: 16px; }
 .railsubitem.active::before {
   content: ''; position: absolute; left: -6px; top: 7px; bottom: 7px;
-  width: 3px; border-radius: 2px; background: #8fd3ff;
+  width: 3px; border-radius: 2px; background: var(--accent);
 }
 
 /* The admin corner at the foot of the menu (index.html #adminnote, app.js
    renderAdminNote): the signed-in admin's initial with a sign-out entry, or
    a muted sign-in entry. margin-top:auto pins it to the foot. */
 #adminnote { margin-top: auto; }
-#adminnote .railitem { color: #6f87a0; }
-#adminnote .railitem:hover { color: #cfe3f5; }
+#adminnote .railitem { color: var(--faint); }
+#adminnote .railitem:hover { color: var(--text); }
 #adminnote.error .railitem { color: #e0a060; cursor: help; }
 #adminnote .avatar {
   width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
-  background: #2f4a63; color: #d6ecff; font-size: 11px; font-weight: 700;
+  background: var(--line-hi); color: var(--text); font-size: 11px; font-weight: 700;
 }
 body.home #side, body.home #summary { display: none !important; }
 body.summary-tab #wrap, body.summary-tab .controls, body.summary-tab #side { display: none; }
 body.summary-tab #summary { display: block !important; }
-#summary { flex: 1; min-height: 0; overflow-y: auto; }
+#summary { flex: 1; min-height: 0; overflow-y: auto; background: #11151a; }
 #summary .summarymsg { color: #9fb0bf; text-align: center; margin-top: 60px; }
 /* The summary's clip player: a window over the summary holding the real map
    (#wrap is moved into #clipbody while it is open; two ids outrank the
@@ -192,12 +226,12 @@ body.summary-tab #summary { display: block !important; }
   position: fixed; right: 20px; bottom: 20px; z-index: 60;
   width: min(680px, calc(100vw - 40px)); height: min(520px, calc(100vh - 110px));
   display: flex; flex-direction: column; overflow: hidden;
-  background: #11151a; border: 1px solid #3a4856; border-radius: 8px;
+  background: var(--bg); border: 1px solid var(--line-hi); border-radius: 8px;
   box-shadow: 0 14px 44px rgba(0, 0, 0, .6);
 }
-#cliphead, #clipbar { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 12px; background: #1a2027; }
-#cliphead { border-bottom: 1px solid #2a323c; font-size: 13px; }
-#clipbar { border-top: 1px solid #2a323c; }
+#cliphead, #clipbar { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 12px; background: var(--panel); }
+#cliphead { border-bottom: 1px solid var(--line); font-size: 13px; }
+#clipbar { border-top: 1px solid var(--line); }
 #cliptitle { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
 #clipclose { padding: 3px 9px; }
 /* Drag by the title bar; resize from any edge (the edge's cursor wins over
@@ -221,26 +255,28 @@ body.clip-dragging #clip canvas { pointer-events: none; }
   left: calc(var(--thumb) / 2 + var(--at, 0) * (100% - var(--thumb)));
   /* A span (--len > 0) is a band from the moment's start to its end. */
   width: calc(3px + var(--len, 0) * (100% - var(--thumb)));
-  background: rgba(255, 210, 74, 0.55); border-left: 3px solid #ffd24a; box-sizing: border-box;
-  box-shadow: 0 0 0 1px #11151a; pointer-events: none;
+  /* Lilac, not yellow: the played part of the track is the gold accent, and
+     the moment has to stand apart from it. */
+  background: rgba(195, 169, 220, 0.45); border-left: 3px solid var(--lilac); box-sizing: border-box;
+  box-shadow: 0 0 0 1px var(--bg); pointer-events: none;
 }
 /* ?embed=clip: the clip player alone, filling a frame on another site. */
 body.clip-embed > *:not(#clip) { display: none !important; }
 body.clip-embed #clip {
   inset: 0; width: auto; height: auto; border: 0; border-radius: 0; box-shadow: none;
 }
-#cliptime { font-size: 12px; color: #9fb0bf; font-variant-numeric: tabular-nums; min-width: 90px; text-align: right; }
+#cliptime { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 90px; text-align: right; }
 #home { min-height: 0; display: flex; }
 #homemain { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; padding: 18px 24px; }
 #hometable { border-collapse: collapse; width: 100%; max-width: 1650px; margin: 0 auto; font-size: 13px; }
 #hometable th {
   text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
-  color: #6f87a0; font-weight: 600; padding: 4px 14px 6px 8px; border-bottom: 1px solid #2a323c;
+  color: var(--faint); font-weight: 600; padding: 4px 14px 6px 8px; border-bottom: 1px solid var(--line);
 }
 /* Each cell is filled by a block-level link (the row IS a link: middle/ctrl
    click opens the replay in a new tab), so the cell padding lives on the <a>
    to keep the whole row surface clickable. */
-#hometable td { padding: 0; border-bottom: 1px solid #202830; white-space: nowrap; }
+#hometable td { padding: 0; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
 #hometable td a,
 #hometable td > span {
   display: block; padding: 6px 14px 6px 8px;
@@ -253,7 +289,7 @@ body.clip-embed #clip {
 #hometable td.map a, #hometable td.map > span { display: flex; align-items: center; gap: 7px; }
 #hometable td.map .mapthumb {
   width: 18px; height: 18px; object-fit: cover; border-radius: 3px;
-  flex: none; background: #232e39;
+  flex: none; background: var(--raised);
 }
 /* Settings badges: small muted pills, wrapping within the row's link. */
 /* Shared with the Games section (#gamestable): the same flag must look the
@@ -262,7 +298,7 @@ body.clip-embed #clip {
 #hometable td.settings a, #hometable td.settings > span, #gamestable td.settings > span { display: flex; flex-wrap: wrap; gap: 4px; }
 #hometable .badge, #gamestable .badge {
   font-size: 10px; line-height: 1; padding: 3px 6px; border-radius: 8px;
-  background: #232e39; border: 1px solid #33404d; color: #9fb0bf;
+  background: var(--raised); border: 1px solid var(--line); color: var(--muted);
   white-space: nowrap;
 }
 /* Per-flag badge colours: lava glows orange, mods (tweaked unit/def tables)
@@ -305,15 +341,15 @@ body.clip-embed #clip {
 /* The Players header is a switch (players ⇄ lobby name) when the backend
    serves lobby names; the affordance is the cursor + a dotted underline. */
 #hometable th.swappable { cursor: pointer; text-decoration: underline dotted; user-select: none; }
-#hometable th.swappable:hover { color: #9fb6cc; }
-#hometable td.players .vs { color: #6f87a0; padding: 0 6px; font-size: 11px; }
+#hometable th.swappable:hover { color: var(--text-2); }
+#hometable td.players .vs { color: var(--faint); padding: 0 6px; font-size: 11px; }
 #hometable td.players .side.uploader::before { content: '◉ '; }
 /* Alternate uploads of the same game (superseded revisions keep playing). */
 #hometable td.links a.alt {
   display: inline-block; padding: 6px 5px; font-size: 11px;
-  color: #7fa6c4; text-decoration: none;
+  color: var(--lilac); text-decoration: none;
 }
-#hometable td.links a.alt:hover { text-decoration: underline; color: #8fd3ff; }
+#hometable td.links a.alt:hover { text-decoration: underline; color: var(--accent); }
 /* Admin-only columns (admin mode): the refresh-button column and the Data
    (bundle size) column stay hidden unless the page is in admin mode. */
 #hometable th.admin, #hometable td.admin, #gamestable th.admin, #gamestable td.admin,
@@ -323,32 +359,32 @@ body.admin-mode #gamestable th.admin, body.admin-mode #gamestable td.admin,
 body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display: table-cell; }
 #hometable td.admin button.refresh, #gamestable td.admin button {
   font: inherit; font-size: 13px; line-height: 1; padding: 4px 7px; margin: 2px 4px;
-  color: #9fb0bf; background: #232e39; border: 1px solid #33404d; border-radius: 6px;
+  color: var(--muted); background: var(--raised); border: 1px solid var(--line); border-radius: 6px;
   cursor: pointer;
 }
 #gamestable td.admin { white-space: nowrap; }
 #gamestable td.admin button { font-size: 11px; white-space: nowrap; }
 #hometable td.admin button.refresh:hover:enabled,
-#gamestable td.admin button:hover:enabled { color: #cfe3f5; border-color: #4a5a6c; }
+#gamestable td.admin button:hover:enabled { color: var(--text); border-color: var(--line-hi); }
 #hometable td.admin button.refresh:disabled,
 #gamestable td.admin button:disabled { opacity: .6; cursor: default; }
 /* External per-game links (gex, BAR): real links, visually distinct from the
    invisible row-link anchors filling the other cells. */
 #hometable td.links a.ext {
   display: inline-block; padding: 6px 5px;
-  color: #8fd3ff; text-decoration: none;
+  color: var(--accent); text-decoration: none;
 }
 #hometable td.links a.ext:hover { text-decoration: underline; }
 #hometable th.num, #hometable td.num { text-align: right; }
 #hometable td { font-variant-numeric: tabular-nums; }
 #hometable tbody tr { cursor: pointer; }
-#hometable tbody tr:hover { background: #1b232c; }
+#hometable tbody tr:hover { background: var(--raised); }
 /* A row with nothing published yet: no link, so nothing about it should
    behave like one — no pointer, and the hover highlight that promises a click
    is replaced by a flat tint. */
 #hometable tbody tr.unopenable { cursor: default; }
-#hometable tbody tr.unopenable:hover { background: #161d24; }
-#hometable td.dim { color: #6a7785; }
+#hometable tbody tr.unopenable:hover { background: var(--panel); }
+#hometable td.dim { color: var(--faint); }
 #homemsg { padding: 12px 8px; font-size: 13px; max-width: 1650px; margin: 0 auto; }
 
 /* ---- games section: the mirror of what BAR published ----
@@ -357,41 +393,41 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
 #gamestable { border-collapse: collapse; width: 100%; max-width: 1650px; margin: 0 auto; font-size: 13px; }
 #gamestable th {
   text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
-  color: #6f87a0; font-weight: 600; padding: 4px 14px 6px 8px; border-bottom: 1px solid #2a323c;
+  color: var(--faint); font-weight: 600; padding: 4px 14px 6px 8px; border-bottom: 1px solid var(--line);
 }
 #gamestable td {
-  padding: 5px 14px 5px 8px; border-bottom: 1px solid #202830; white-space: nowrap;
+  padding: 5px 14px 5px 8px; border-bottom: 1px solid var(--line-soft); white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
-#gamestable tbody tr:hover { background: #1b232c; }
-#gamestable td.dim { color: #6a7785; }
+#gamestable tbody tr:hover { background: var(--raised); }
+#gamestable td.dim { color: var(--faint); }
 #gamestable td.map .mapthumb { height: 18px; width: 18px; object-fit: cover; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
 /* Eleven columns of nowrap cells: the section scrolls sideways inside itself
    rather than clipping the Links and Here columns off the page. */
 #tab-games { overflow-x: auto; }
 #gamestable td.players { max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
-#gamestable td.players .vs { color: #6a7785; margin: 0 5px; font-size: 11px; }
-#gamestable td.lobby { max-width: 200px; overflow: hidden; text-overflow: ellipsis; color: #9fb0bf; }
-#gamestable td.engine { color: #7f8fa0; font-size: 12px; }
-#gamestable td.links a { color: #7f8fa0; text-decoration: none; font-size: 12px; margin-right: 8px; }
-#gamestable td.links a:hover { color: #8fd3ff; text-decoration: underline; }
-#gamestable td.links a.here { color: #8fd3ff; }
+#gamestable td.players .vs { color: var(--faint); margin: 0 5px; font-size: 11px; }
+#gamestable td.lobby { max-width: 200px; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+#gamestable td.engine { color: var(--dim); font-size: 12px; }
+#gamestable td.links a { color: var(--dim); text-decoration: none; font-size: 12px; margin-right: 8px; }
+#gamestable td.links a:hover { color: var(--accent); text-decoration: underline; }
+#gamestable td.links a.here { color: var(--accent); }
 #gamestable .have {
   display: inline-block; font-size: 11px; line-height: 1; padding: 3px 6px; border-radius: 3px;
-  border: 1px solid #2f3b47; color: #9fb0bf; background: #171e25;
+  border: 1px solid var(--line); color: var(--muted); background: var(--raised);
 }
 #gamestable .have-published { color: #7fd18b; border-color: #33663c; background: #16311b; }
-#gamestable .have-processing { color: #8fd3ff; border-color: #2f5878; background: #16293a; }
+#gamestable .have-processing { color: var(--lilac); border-color: var(--lilac-line); background: var(--lilac-soft); }
 #gamestable .have-pending { color: #d3b98f; border-color: #5c4a2f; background: #2b2417; }
 #gamestable .have-error { color: #ff9c8f; border-color: #7a3428; background: #34160f; }
 #gamespager {
   display: flex; align-items: center; gap: 10px; max-width: 1650px; margin: 0 auto 8px; padding: 0 8px;
 }
 #gamespager button {
-  background: #1d252e; border: 1px solid #2f3b47; border-radius: 4px; color: #9fb0bf;
+  background: var(--raised); border: 1px solid var(--line); border-radius: 4px; color: var(--muted);
   padding: 4px 10px; font-size: 12px;
 }
-#gamespager button:hover:not(:disabled) { color: #cfe3f5; border-color: #4a5a6c; }
+#gamespager button:hover:not(:disabled) { color: var(--text); border-color: var(--line-hi); }
 #gamespager button:disabled { opacity: .45; }
 #gamesmsg { padding: 12px 8px; font-size: 13px; max-width: 1650px; margin: 0 auto; }
 
@@ -401,35 +437,35 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
 #queuetable { border-collapse: collapse; width: 100%; max-width: 1650px; margin: 0 auto; font-size: 13px; }
 #queuetable th {
   text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
-  color: #6f87a0; font-weight: 600; padding: 4px 14px 6px 8px; border-bottom: 1px solid #2a323c;
+  color: var(--faint); font-weight: 600; padding: 4px 14px 6px 8px; border-bottom: 1px solid var(--line);
 }
 #queuetable td {
-  padding: 6px 14px 6px 8px; border-bottom: 1px solid #202830;
+  padding: 6px 14px 6px 8px; border-bottom: 1px solid var(--line-soft);
   white-space: nowrap; font-variant-numeric: tabular-nums;
 }
-#queuetable td.dim { color: #6a7785; }
+#queuetable td.dim { color: var(--faint); }
 /* The failure detail is the one cell that may be long: let it wrap. */
-#queuetable td.detail { white-space: normal; color: #9fb0bf; max-width: 640px; }
+#queuetable td.detail { white-space: normal; color: var(--muted); max-width: 640px; }
 #queuetable td.detail.error { color: #e2785b; }
 /* The game's own facts, joined on beside the job's. Quieter than the state
    and detail columns: they say WHICH game, not what is happening to it. */
-#queuetable td.size, #queuetable td.dur { color: #9fb0bf; }
-#queuetable td.links a.ext { color: #7f8fa0; text-decoration: none; font-size: 12px; }
-#queuetable td.links a.ext:hover { color: #8fd3ff; text-decoration: underline; }
-#queuetable td.game a { color: #8fd3ff; text-decoration: none; }
+#queuetable td.size, #queuetable td.dur { color: var(--muted); }
+#queuetable td.links a.ext { color: var(--dim); text-decoration: none; font-size: 12px; }
+#queuetable td.links a.ext:hover { color: var(--accent); text-decoration: underline; }
+#queuetable td.game a { color: var(--accent); text-decoration: none; }
 #queuetable td.game a:hover { text-decoration: underline; }
 #queuetable .state {
   font-size: 10px; line-height: 1; padding: 3px 7px; border-radius: 8px;
-  background: #232e39; border: 1px solid #33404d; color: #9fb0bf;
+  background: var(--raised); border: 1px solid var(--line); color: var(--muted);
 }
-#queuetable .state-processing { color: #8fd3ff; border-color: #2f5878; background: #16293a; }
+#queuetable .state-processing { color: var(--lilac); border-color: var(--lilac-line); background: var(--lilac-soft); }
 #queuetable .state-done { color: #7fd18b; border-color: #33663c; background: #16311b; }
 #queuetable .state-error { color: #ff9c8f; border-color: #7a3428; background: #34160f; }
 /* Which daemon a job waits on. Deliberately quieter than the state chips: the
    kind explains a row, the state is what you scan the column for. */
 #queuetable .kind {
   font-size: 10px; line-height: 1; padding: 3px 7px; border-radius: 8px;
-  background: #1b232c; border: 1px solid #2f3947; color: #8a98a6;
+  background: var(--raised); border: 1px solid var(--line); color: var(--dim);
 }
 #queuetable .kind-resim { color: #d3b98f; border-color: #5c4a2f; background: #2b2417; }
 /* Why a job failed, beside the state that says it did. Same weight as the kind
@@ -448,102 +484,102 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
 #queuetable td.act { text-align: right; padding-right: 10px; }
 #queuetable .jobbtn {
   font: inherit; font-size: 11px; line-height: 1; padding: 4px 9px; border-radius: 4px;
-  color: #8a98a6; background: #1b232c; border: 1px solid #2f3947; cursor: pointer;
+  color: var(--dim); background: var(--raised); border: 1px solid var(--line); cursor: pointer;
   opacity: 0; transition: opacity .12s;
 }
 #queuetable tr:hover .jobbtn, #queuetable .jobbtn:focus-visible, #queuetable .jobbtn.on { opacity: 1; }
-#queuetable .jobbtn:hover { color: #cfe3f5; border-color: #3f4b5a; background: #222c37; }
+#queuetable .jobbtn:hover { color: var(--text); border-color: var(--line-hi); background: var(--raised-hi); }
 #queuetable .jobbtn.on { color: #b9a9d0; border-color: #4a3f5c; background: #241f2e; }
 #queuetable .jobbtn:disabled { cursor: default; opacity: .6; }
 /* The row's action menu: the ⋯ button opens it in place, anchored to the
    cell, above the rows below. One open at a time (closeJobMenus). */
 #queuetable td.act { position: relative; }
 #queuetable .jobmenubtn { padding: 4px 7px; font-size: 13px; }
-#queuetable .jobmenubtn[aria-expanded] { opacity: 1; color: #cfe3f5; border-color: #3f4b5a; }
+#queuetable .jobmenubtn[aria-expanded] { opacity: 1; color: var(--text); border-color: var(--line-hi); }
 #queuetable .jobmenu {
   position: absolute; right: 10px; top: calc(100% - 4px); z-index: 5; min-width: 120px;
-  background: #1b232c; border: 1px solid #3f4b5a; border-radius: 5px; padding: 4px;
+  background: var(--raised); border: 1px solid var(--line-hi); border-radius: 5px; padding: 4px;
   box-shadow: 0 6px 18px rgba(0,0,0,.45); display: flex; flex-direction: column; gap: 2px;
 }
 #queuetable .jobmenu button {
   font: inherit; font-size: 12px; text-align: left; padding: 6px 10px; border-radius: 3px;
-  color: #c7d3de; background: none; border: 0; cursor: pointer; white-space: nowrap;
+  color: var(--text-2); background: none; border: 0; cursor: pointer; white-space: nowrap;
 }
-#queuetable .jobmenu button:hover, #queuetable .jobmenu button:focus-visible { background: #222c37; color: #fff; outline: none; }
+#queuetable .jobmenu button:hover, #queuetable .jobmenu button:focus-visible { background: var(--raised-hi); color: #fff; outline: none; }
 /* A running job's live self-report, in the same cell a finished one puts its
    failure detail — the two never coexist (the worker clears progress when a job
    reaches a terminal state). The bar is deliberately thin and unlabelled: the
    numbers are spelled out on the line under it, and the bar is only there to be
    read at a glance down a column of rows. */
 #queuetable .jobprog {
-  height: 4px; border-radius: 2px; background: #202830; overflow: hidden;
+  height: 4px; border-radius: 2px; background: var(--line-soft); overflow: hidden;
   margin: 0 0 4px; max-width: 260px;
 }
-#queuetable .jobprog > span { display: block; height: 100%; background: #4b90c4; }
-#queuetable .jobprogtext { color: #8fd3ff; font-size: 12px; }
+#queuetable .jobprog > span { display: block; height: 100%; background: var(--lilac); }
+#queuetable .jobprogtext { color: var(--lilac); font-size: 12px; }
 /* The processing record: how long it took in the row, the rest expanded from
    it. The whole row is the toggle, so it advertises itself with a cursor. */
 #queuetable tr.hasstats { cursor: pointer; }
-#queuetable tr.hasstats:hover { background: #161c23; }
-#queuetable td.took.expand { color: #c7d3de; }
-#queuetable tr.statsrow > td { padding: 2px 8px 14px 22px; border-bottom: 1px solid #202830; }
+#queuetable tr.hasstats:hover { background: var(--panel); }
+#queuetable td.took.expand { color: var(--text-2); }
+#queuetable tr.statsrow > td { padding: 2px 8px 14px 22px; border-bottom: 1px solid var(--line-soft); }
 #queuetable tr.statsrow:hover { background: none; }
 .statsgrid {
   display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px;
-  font-size: 12px; color: #c7d3de; max-width: 900px;
+  font-size: 12px; color: var(--text-2); max-width: 900px;
 }
-.statsgrid .k { color: #6f87a0; }
+.statsgrid .k { color: var(--faint); }
 /* A job's healthcheck history: three small multiples of the same run, sharing
    an X (the beats) and nothing else. Never one plot with three scales — bytes,
    percent-of-a-core and percent-of-a-game have no common axis, and overlaying
    them would invent a correlation the data does not contain.
    One hue for all three: each chart has a single series, so colour carries no
    information and the title is what says what is plotted. The value is
-   validated against this surface (dataviz six checks, dark, #12181e). */
+   lilac of in-flight work, on the --well surface. */
 .jobcharts {
   display: flex; flex-wrap: wrap; gap: 14px; margin: 12px 0 0; position: relative;
-  padding: 10px 12px; background: #12181e; border: 1px solid #202830; border-radius: 4px;
+  padding: 10px 12px; background: var(--well); border: 1px solid var(--line-soft); border-radius: 4px;
   width: max-content; max-width: 100%; outline: none;
 }
-.jobcharts:focus-visible { border-color: #3a5670; }
-.charttitle { color: #6f87a0; font-size: 11px; margin: 0 0 2px 2px; }
-.chartnote { color: #6a7785; font-size: 12px; margin: 12px 0 0; }
+.jobcharts:focus-visible { border-color: var(--accent-line); }
+.charttitle { color: var(--faint); font-size: 11px; margin: 0 0 2px 2px; }
+.chartnote { color: var(--faint); font-size: 12px; margin: 12px 0 0; }
 svg.chart { display: block; touch-action: none; }
 /* Chrome stays recessive: solid hairlines one step off the surface, never
    dashed — dashing reads as "threshold" when it is only a grid. */
-svg.chart .chgrid { stroke: #202830; stroke-width: 1; }
+svg.chart .chgrid { stroke: var(--line-soft); stroke-width: 1; }
 svg.chart .chtick {
-  fill: #6a7785; font-size: 9px; font-variant-numeric: tabular-nums; text-anchor: end;
+  fill: var(--faint); font-size: 9px; font-variant-numeric: tabular-nums; text-anchor: end;
 }
-svg.chart .chline { fill: none; stroke: #4b90c4; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+svg.chart .chline { fill: none; stroke: var(--lilac); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 /* A wash, never a saturated block. */
-svg.chart .charea { fill: #4b90c4; fill-opacity: .10; stroke: none; }
+svg.chart .charea { fill: var(--lilac); fill-opacity: .10; stroke: none; }
 /* The peak, labelled on the chart so the number is readable without hovering.
    The ring is the surface colour, so the mark stays legible over its own line. */
-svg.chart .chpeak { fill: #4b90c4; stroke: #12181e; stroke-width: 2; }
-svg.chart .chlabel { fill: #c7d3de; font-size: 10px; font-variant-numeric: tabular-nums; }
-svg.chart .chhair { stroke: #55677a; stroke-width: 1; display: none; }
-svg.chart .chdot { fill: #4b90c4; stroke: #12181e; stroke-width: 2; display: none; }
+svg.chart .chpeak { fill: var(--lilac); stroke: var(--well); stroke-width: 2; }
+svg.chart .chlabel { fill: var(--text-2); font-size: 10px; font-variant-numeric: tabular-nums; }
+svg.chart .chhair { stroke: var(--faint); stroke-width: 1; display: none; }
+svg.chart .chdot { fill: var(--lilac); stroke: var(--well); stroke-width: 2; display: none; }
 /* One tooltip for all three charts: the reader aims at a moment, not a line. */
 .charttip {
   display: none; position: absolute; top: 8px; z-index: 2; pointer-events: none;
-  background: #1a2027; border: 1px solid #2f3947; border-radius: 4px;
-  padding: 6px 9px; font-size: 11px; color: #9fb0bf; min-width: 150px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
+  padding: 6px 9px; font-size: 11px; color: var(--muted); min-width: 150px;
 }
-.charttip .tiphead { color: #c7d3de; margin-bottom: 3px; }
+.charttip .tiphead { color: var(--text-2); margin-bottom: 3px; }
 .charttip .tiprow { display: flex; align-items: baseline; gap: 6px; }
 /* A short stroke of the series colour keys the row; at this density a filled
    box is data-weight ink doing a label's job. */
 .charttip .tipkey {
-  width: 10px; height: 2px; border-radius: 1px; background: #4b90c4; flex: none;
+  width: 10px; height: 2px; border-radius: 1px; background: var(--lilac); flex: none;
   transform: translateY(-3px);
 }
-.charttip strong { color: #e6eef6; font-weight: 600; font-variant-numeric: tabular-nums; }
+.charttip strong { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
 /* The size report is a fixed-width table `pack -stats` formats with spaces;
    it scrolls inside itself rather than widening the page. */
 pre.sizereport {
-  margin: 10px 0 0; padding: 10px 12px; background: #12181e; border: 1px solid #202830;
-  border-radius: 4px; font-size: 11px; line-height: 1.45; color: #9fb0bf;
+  margin: 10px 0 0; padding: 10px 12px; background: var(--well); border: 1px solid var(--line-soft);
+  border-radius: 4px; font-size: 11px; line-height: 1.45; color: var(--muted);
   overflow-x: auto; max-height: 420px; overflow-y: auto; white-space: pre;
 }
 /* Pager + the read stamp. The section never refreshes itself, so "read at
@@ -554,10 +590,10 @@ pre.sizereport {
   display: flex; align-items: center; gap: 8px;
 }
 #queuepager button {
-  background: #1b232c; color: #9fb0bf; border: 1px solid #2f3947;
+  background: var(--raised); color: var(--muted); border: 1px solid var(--line);
   border-radius: 4px; padding: 3px 9px; font-size: 12px; cursor: pointer;
 }
-#queuepager button:hover:enabled { color: #cfe3f5; border-color: #4a5a6c; }
+#queuepager button:hover:enabled { color: var(--text); border-color: var(--line-hi); }
 #queuepager button:disabled { opacity: .45; cursor: default; }
 #queuepager #q_range { margin-right: auto; }
 #queuemsg { padding: 12px 8px; font-size: 13px; max-width: 1650px; margin: 0 auto; }
@@ -565,22 +601,22 @@ pre.sizereport {
    Framed like the dropzone above it — the two are the pipeline's two doors. */
 #resimbox {
   max-width: 1650px; margin: 0 auto 14px; padding: 12px 14px;
-  border: 1px solid #2a323c; border-radius: 6px; font-size: 12px; color: #8a98a6;
+  border: 1px solid var(--line); border-radius: 6px; font-size: 12px; color: var(--dim);
 }
 #resimbox label { display: block; margin-bottom: 7px; }
 #resimbox .row { display: flex; gap: 8px; }
 #resimbox input {
-  flex: 1; min-width: 0; background: #12181e; color: #cfe3f5;
-  border: 1px solid #2f3947; border-radius: 4px; padding: 4px 8px; font-size: 12px;
+  flex: 1; min-width: 0; background: var(--well); color: var(--text);
+  border: 1px solid var(--line); border-radius: 4px; padding: 4px 8px; font-size: 12px;
 }
-#resimbox input:focus { outline: none; border-color: #4a7fa8; }
+#resimbox input:focus { outline: none; border-color: var(--accent); }
 #resimbox button {
-  background: #1b232c; color: #9fb0bf; border: 1px solid #2f3947;
+  background: var(--raised); color: var(--muted); border: 1px solid var(--line);
   border-radius: 4px; padding: 4px 11px; font-size: 12px; cursor: pointer; white-space: nowrap;
 }
-#resimbox button:hover:enabled { color: #cfe3f5; border-color: #4a5a6c; }
+#resimbox button:hover:enabled { color: var(--text); border-color: var(--line-hi); }
 #resimbox button:disabled { opacity: .45; cursor: default; }
-#resimstatus { margin-top: 8px; font-size: 12px; color: #c7d3de; }
+#resimstatus { margin-top: 8px; font-size: 12px; color: var(--text-2); }
 #resimstatus.error { color: #e2785b; }
 #resimstatus.ok { color: #6fd07f; }
 
@@ -590,38 +626,38 @@ pre.sizereport {
    the body scrolls, since a 16-player detail is a few hundred lines. */
 #lbdialog {
   width: min(900px, calc(100vw - 40px)); max-height: calc(100vh - 40px); padding: 0;
-  background: #12181e; color: #c7d3de; border: 1px solid #33404d; border-radius: 8px;
+  background: var(--panel); color: var(--text-2); border: 1px solid var(--line); border-radius: 8px;
   box-shadow: 0 8px 30px rgba(0,0,0,0.6); font-size: 12px;
 }
 #lbdialog::backdrop { background: rgba(0,0,0,0.55); }
 #lbdialog .lbhead {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  padding: 10px 14px; border-bottom: 1px solid #2a323c; font-size: 13px; color: #cfe3f5;
+  padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--text);
 }
 #lbdialog #lbtitle { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 #lbdialog #lbclose {
   font: inherit; font-size: 16px; line-height: 1; padding: 2px 8px; cursor: pointer;
-  color: #9fb0bf; background: transparent; border: 1px solid transparent; border-radius: 6px;
+  color: var(--muted); background: transparent; border: 1px solid transparent; border-radius: 6px;
 }
-#lbdialog #lbclose:hover { color: #cfe3f5; border-color: #4a5a6c; }
+#lbdialog #lbclose:hover { color: var(--text); border-color: var(--line-hi); }
 #lbdialog #lbstatus { padding: 6px 14px 0; min-height: 1.4em; }
 #lbdialog #lbstatus.error { color: #e2785b; }
 #lbdialog #lbstatus.ok { color: #6fd07f; }
 #lbdialog .lbsection { padding: 8px 14px 12px; }
 #lbdialog .lblabel {
   display: flex; align-items: center; gap: 8px; margin-bottom: 5px;
-  font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #7f8f9e;
+  font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--dim);
 }
 #lbdialog #lbcopy {
   font: inherit; font-size: 11px; text-transform: none; letter-spacing: 0; line-height: 1;
-  padding: 3px 8px; cursor: pointer; color: #9fb0bf; background: #1b232c;
-  border: 1px solid #2f3947; border-radius: 4px;
+  padding: 3px 8px; cursor: pointer; color: var(--muted); background: var(--raised);
+  border: 1px solid var(--line); border-radius: 4px;
 }
-#lbdialog #lbcopy:hover:enabled { color: #cfe3f5; border-color: #4a5a6c; }
+#lbdialog #lbcopy:hover:enabled { color: var(--text); border-color: var(--line-hi); }
 #lbdialog pre {
-  margin: 0; padding: 8px 10px; background: #0d1116; border: 1px solid #2a323c; border-radius: 4px;
+  margin: 0; padding: 8px 10px; background: var(--well); border: 1px solid var(--line); border-radius: 4px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px;
-  line-height: 1.45; color: #cfe3f5; overflow: auto;
+  line-height: 1.45; color: var(--text); overflow: auto;
 }
 #lbdialog #lbcurl { white-space: pre-wrap; word-break: break-all; }
 #lbdialog #lbjson { max-height: 45vh; }
@@ -634,17 +670,17 @@ pre.sizereport {
    the full-page width inside its small window and drew the map off to the
    right, mostly black. */
 #left { flex: 1; position: relative; min-width: 0; min-height: 0; overflow: hidden; }
-canvas { display: block; width: 100%; height: 100%; background: #0c0f13; cursor: crosshair; }
+canvas { display: block; width: 100%; height: 100%; background: transparent; cursor: crosshair; }
 /* WebGL icon overlay: sits on the 2D base canvas; input goes to #cv below. */
 #glcv { position: absolute; left: 0; top: 0; background: transparent; pointer-events: none; }
 #ovcv { position: absolute; left: 0; top: 0; background: transparent; pointer-events: none; }
 
 #side {
-  width: 320px; background: #161b21; border-left: 1px solid #2a323c;
+  width: 320px; background: var(--panel); border-left: 1px solid var(--line);
   padding: 12px; overflow-y: auto; font-size: 13px;
 }
 #side h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
-  color: #6f87a0; margin: 14px 0 6px; }
+  color: var(--faint); margin: 14px 0 6px; }
 #side h2:first-child { margin-top: 0; }
 .stat { display: flex; justify-content: space-between; padding: 2px 0; }
 .stat b { color: #fff; font-variant-numeric: tabular-nums; }
@@ -670,7 +706,7 @@ canvas { display: block; width: 100%; height: 100%; background: #0c0f13; cursor:
    line up with the column of numbers beneath them. */
 .tslabel {
   flex: 0 0 26px; text-align: right;
-  color: #6f87a0; font-size: 11px; line-height: 1;
+  color: var(--faint); font-size: 11px; line-height: 1;
 }
 .tsbar { flex: 1; min-width: 0; display: flex; align-items: center; gap: 2px; }
 /* Knobs size to their own text, so "504k" and "7.0k" each get exactly the room
@@ -689,7 +725,7 @@ canvas { display: block; width: 100%; height: 100%; background: #0c0f13; cursor:
    One row per player: rank / flag / OS / name on the left, the metal + energy
    bars (small) on the right, laid out like BAR's in-game player list. */
 #players { display: flex; flex-direction: column; }
-.pgroup { border-top: 1px solid #2a323c; }
+.pgroup { border-top: 1px solid var(--line); }
 .pgroup:first-child { border-top: none; }
 .prow {
   display: flex; align-items: center; gap: 6px; padding: 3px 0;
@@ -709,7 +745,7 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 .prow .flag { flex: 0 0 auto; width: 15px; text-align: center; font-size: 12px; line-height: 1; }
 .prow .os {
   flex: 0 0 auto; min-width: 26px; text-align: right;
-  color: #9fb0bf; font-variant-numeric: tabular-nums; font-size: 11px;
+  color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11px;
 }
 .prow .pname {
   flex: 1; min-width: 0; font-weight: 600;
@@ -728,7 +764,7 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 .resrow { display: flex; align-items: center; font-size: 10px; line-height: 1; }
 .rmeter {
   position: relative; display: block; width: 70px; padding: 3px 4px;
-  background: #222c36; border-radius: 3px; overflow: hidden;
+  background: var(--raised); border-radius: 3px; overflow: hidden;
   text-align: right; font-variant-numeric: tabular-nums;
 }
 .rmeter > i { position: absolute; inset: 0 auto 0 0; opacity: .32; } /* the bar */
@@ -748,22 +784,22 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 
 #tooltip {
   position: absolute; pointer-events: none; display: none;
-  background: rgba(20,26,33,0.96); border: 1px solid #3a4856; border-radius: 4px;
-  padding: 7px 9px; font-size: 12px; line-height: 1.5; color: #d7dee6;
+  background: rgba(28, 20, 32, .96); border: 1px solid var(--line-hi); border-radius: 4px;
+  padding: 7px 9px; font-size: 12px; line-height: 1.5; color: var(--text);
   max-width: 240px; z-index: 10; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
 }
 #tooltip h3 { margin: 0 0 3px; font-size: 12px; color: #fff; }
 /* The internal def name next to the human one ("Construction Bot armck"). */
-#tooltip h3 .code { color: #7c8b99; font-weight: normal; margin-left: 5px; }
+#tooltip h3 .code { color: var(--dim); font-weight: normal; margin-left: 5px; }
 #tooltip .row { display: flex; justify-content: space-between; gap: 12px; }
-#tooltip .label { color: #8a98a6; }
-#tooltip .bar { height: 5px; background: #222c36; border-radius: 3px; margin: 3px 0 1px; overflow: hidden; }
+#tooltip .label { color: var(--dim); }
+#tooltip .bar { height: 5px; background: var(--raised); border-radius: 3px; margin: 3px 0 1px; overflow: hidden; }
 #tooltip .bar > div { height: 100%; }
 
 #zoomlabel {
   position: absolute; left: 8px; bottom: 8px; pointer-events: none;
-  background: rgba(20,26,33,0.82); border: 1px solid #2a323c; border-radius: 4px;
-  padding: 3px 7px; font-size: 11px; color: #9fb0bf;
+  background: rgba(28, 20, 32, .82); border: 1px solid var(--line); border-radius: 4px;
+  padding: 3px 7px; font-size: 11px; color: var(--muted);
   font-variant-numeric: tabular-nums; z-index: 5;
 }
 
@@ -778,26 +814,26 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
    view during playback. */
 #chat {
   max-height: 240px; overflow-y: auto; overscroll-behavior: contain;
-  border-top: 1px solid #2a323c; font-size: 12px; line-height: 1.4;
+  border-top: 1px solid var(--line); font-size: 12px; line-height: 1.4;
 }
 .chatrow { padding: 2px 0; cursor: pointer; word-break: break-word; }
-.chatrow:hover { background: #1d242c; }
+.chatrow:hover { background: var(--raised); }
 /* Not said yet at the playhead: not shown at all, so the log never spoils
    what is about to happen and the newest line is always the last one. */
 .chatrow.future { display: none; }
 .chattime {
-  color: #6a7785; font-variant-numeric: tabular-nums; margin-right: 5px;
+  color: var(--faint); font-variant-numeric: tabular-nums; margin-right: 5px;
   font-size: 11px;
 }
 .chattag {
-  color: #9fb0bf; background: #232b34; border-radius: 3px; padding: 0 4px;
+  color: var(--muted); background: var(--raised); border-radius: 3px; padding: 0 4px;
   margin-right: 4px; font-size: 10px; text-transform: uppercase;
 }
 
-.hint { font-size: 11px; color: #6a7785; line-height: 1.5; }
+.hint { font-size: 11px; color: var(--faint); line-height: 1.5; }
 #empty {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-  text-align: center; color: #6a7785; font-size: 14px; padding: 24px;
+  text-align: center; color: var(--faint); font-size: 14px; padding: 24px;
 }
 
 /* Catalog filters above the list. One wrapping row of controls, sized to the
@@ -806,9 +842,9 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
    the end is the true number of matching replays, not what fits on a page. */
 #filters {
   max-width: 1650px; margin: 0 auto 10px; padding: 8px 12px;
-  border: 1px solid #2a323c; border-radius: 6px; background: #141a20;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--panel);
   display: flex; flex-direction: column; gap: 8px;
-  font-size: 12px; color: #8a98a6;
+  font-size: 12px; color: var(--dim);
 }
 /* Two rows: the fields, then the settings chips with the actions pushed to
    the far end. Both wrap on their own, so a narrow window folds each row
@@ -820,21 +856,21 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 #homepager {
   max-width: 1650px; margin: 0 auto 6px;
   display: flex; align-items: center; gap: 10px;
-  font-size: 12px; color: #8a98a6;
+  font-size: 12px; color: var(--dim);
 }
 #homepager button {
-  background: #1b232c; color: #9fb0bf; border: 1px solid #2f3947;
+  background: var(--raised); color: var(--muted); border: 1px solid var(--line);
   border-radius: 4px; padding: 3px 9px; font-size: 12px; cursor: pointer;
 }
-#homepager button:hover:enabled { color: #cfe3f5; border-color: #4a5a6c; }
+#homepager button:hover:enabled { color: var(--text); border-color: var(--line-hi); }
 #homepager button:disabled { opacity: .4; cursor: default; }
 #homepager #p_range { font-variant-numeric: tabular-nums; }
 #filters label { display: flex; align-items: center; gap: 5px; }
 #filters input, #filters select {
-  background: #0f141a; color: #c7d3de; border: 1px solid #2f3947;
+  background: var(--well); color: var(--text-2); border: 1px solid var(--line);
   border-radius: 4px; padding: 3px 5px; font-size: 12px; font-family: inherit;
 }
-#filters input:focus, #filters select:focus { outline: none; border-color: #4a7fa8; }
+#filters input:focus, #filters select:focus { outline: none; border-color: var(--accent); }
 #filters input[type=search] { width: 130px; }
 /* Map names run long ("All That Glitters v2.2.3"); the combobox needs the room. */
 #filters #f_map { width: 200px; }
@@ -849,15 +885,15 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 }
 #filters .dualrange .rangetrack {
   position: absolute; left: 0; right: 0; top: 50%; height: 4px; margin-top: -2px;
-  background: #0f141a; border: 1px solid #2f3947; border-radius: 3px;
+  background: var(--well); border: 1px solid var(--line); border-radius: 3px;
 }
 /* The selected span. Dim while it spans everything (that is not a filter) and
    lit once either thumb has narrowed it, so "am I filtering" is answerable
    from across the bar. */
 #filters .dualrange .rangefill {
-  position: absolute; top: 0; bottom: 0; background: #33414f; border-radius: 3px;
+  position: absolute; top: 0; bottom: 0; background: var(--line-hi); border-radius: 3px;
 }
-#filters .dualrange.narrowed .rangefill { background: #4a7fa8; }
+#filters .dualrange.narrowed .rangefill { background: var(--accent); }
 #filters .dualrange input[type=range] {
   position: absolute; left: 0; top: 0; width: 100%; height: 100%;
   margin: 0; padding: 0; border: none; background: transparent;
@@ -868,29 +904,29 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 #filters .dualrange input[type=range]::-webkit-slider-thumb {
   -webkit-appearance: none; pointer-events: auto; cursor: ew-resize;
   width: 13px; height: 13px; border-radius: 50%;
-  background: #cfe3f5; border: 1px solid #16202a; box-shadow: 0 1px 2px rgba(0, 0, 0, .6);
+  background: var(--text); border: 1px solid var(--well); box-shadow: 0 1px 2px rgba(0, 0, 0, .6);
 }
 #filters .dualrange input[type=range]::-moz-range-thumb {
   pointer-events: auto; cursor: ew-resize;
-  width: 13px; height: 13px; border-radius: 50%; border: 1px solid #16202a;
-  background: #cfe3f5; box-shadow: 0 1px 2px rgba(0, 0, 0, .6);
+  width: 13px; height: 13px; border-radius: 50%; border: 1px solid var(--well);
+  background: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, .6);
 }
 #filters .dualrange input[type=range]:focus { outline: none; }
-#filters .dualrange input[type=range]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px rgba(74, 127, 168, .8); }
-#filters .dualrange input[type=range]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 3px rgba(74, 127, 168, .8); }
+#filters .dualrange input[type=range]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px rgba(255, 181, 71, .55); }
+#filters .dualrange input[type=range]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 3px rgba(255, 181, 71, .55); }
 /* The chosen bounds, in the label. Fixed width so the bar does not shuffle
    sideways as the numbers change while dragging. */
 #filters #f_sizeout, #filters #f_durout {
-  min-width: 52px; font-variant-numeric: tabular-nums; color: #c7d3de;
+  min-width: 52px; font-variant-numeric: tabular-nums; color: var(--text-2);
 }
 #filters #f_map { max-width: 200px; }
 #filters button {
-  background: #1b232c; color: #9fb0bf; border: 1px solid #2f3947;
+  background: var(--raised); color: var(--muted); border: 1px solid var(--line);
   border-radius: 4px; padding: 3px 9px; font-size: 12px; cursor: pointer;
 }
-#filters button:hover:enabled { color: #cfe3f5; border-color: #4a5a6c; }
+#filters button:hover:enabled { color: var(--text); border-color: var(--line-hi); }
 #filters button:disabled { opacity: .45; cursor: default; }
-#filters button.on { background: #24425c; border-color: #4a7fa8; color: #d6ecff; }
+#filters button.on { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
 /* Admin-only controls in the bar (admin mode), same gate as the list's
    per-row refresh button. */
 #filters .admin { display: none; }
@@ -901,25 +937,25 @@ body.admin-mode #filters .admin { display: inline-block; }
 #filters .chips { display: flex; flex-wrap: wrap; gap: 5px; }
 #filters .chip {
   padding: 2px 7px; border-radius: 9px; font-size: 11px; cursor: pointer;
-  border: 1px solid #2f3947; background: #0f141a; color: #7d8b99; user-select: none;
+  border: 1px solid var(--line); background: var(--well); color: var(--dim); user-select: none;
 }
-#filters .chip:hover { color: #c7d3de; border-color: #4a5a6c; }
-#filters .chip.on { background: #24425c; border-color: #4a7fa8; color: #d6ecff; }
+#filters .chip:hover { color: var(--text-2); border-color: var(--line-hi); }
+#filters .chip.on { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
 
 /* Drag&drop publishing (the landing view's dropzone). */
 #dropzone {
   display: none;
   max-width: 1650px; margin: 0 auto 14px; padding: 14px 18px;
-  border: 1px dashed #3a4856; border-radius: 6px;
-  font-size: 12px; color: #8a98a6; text-align: center;
+  border: 1px dashed var(--line-hi); border-radius: 6px;
+  font-size: 12px; color: var(--dim); text-align: center;
 }
 #dropzone.drag, #dropzone.busy { display: block; }
 #dropzone.busy:not(.drag) #droplabel { display: none; }
-#dropzone code { color: #a9bac9; }
-#dropzone.drag { border-color: #8fd3ff; background: #16202a; color: #c7d3de; }
-#dropzone .browse { color: #8fd3ff; cursor: pointer; text-decoration: underline; }
-#dropzone a { color: #8fd3ff; }
-#dropstatus { margin-top: 8px; font-size: 12px; color: #c7d3de; }
+#dropzone code { color: var(--muted); }
+#dropzone.drag { border-color: var(--accent); background: var(--accent-soft); color: var(--text-2); }
+#dropzone .browse { color: var(--accent); cursor: pointer; text-decoration: underline; }
+#dropzone a { color: var(--accent); }
+#dropstatus { margin-top: 8px; font-size: 12px; color: var(--text-2); }
 #dropstatus.error { color: #e2785b; }
 #dropstatus.ok { color: #6fd07f; }
 
@@ -931,13 +967,13 @@ body.admin-mode #filters .admin { display: inline-block; }
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  color: #9fb0bf;
+  color: var(--muted);
   white-space: nowrap;
 }
 #viewmark select { font-size: 12px; }
 /* Reserves its own width so the header does not reflow as the text changes
    between "saving…" and a result. */
-#viewstatus { min-width: 8ch; font-size: 11px; color: #6f87a0; }
+#viewstatus { min-width: 8ch; font-size: 11px; color: var(--faint); }
 #viewstatus.ok { color: #7fd18b; }
 #viewstatus.err { color: #ff9c8f; }
 
@@ -948,20 +984,20 @@ body.admin-mode #filters .admin { display: inline-block; }
 #sqlstatstable { border-collapse: collapse; margin: 0 auto; font-size: 13px; }
 #sqlstatstable th {
   text-align: right; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
-  color: #6f87a0; font-weight: 600; padding: 4px 8px 6px 16px; border-bottom: 1px solid #2a323c;
+  color: var(--faint); font-weight: 600; padding: 4px 8px 6px 16px; border-bottom: 1px solid var(--line);
 }
 #sqlstatstable td {
-  padding: 6px 8px 6px 16px; border-bottom: 1px solid #202830; text-align: right;
+  padding: 6px 8px 6px 16px; border-bottom: 1px solid var(--line-soft); text-align: right;
   white-space: nowrap; font-variant-numeric: tabular-nums;
 }
 #sqlstatstable th:first-child, #sqlstatstable td:first-child { text-align: left; padding-left: 8px; }
-#sqlstatstable td.op { color: #8fd3ff; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
-#sqlstatstable td.dim { color: #6a7785; }
-#sqlstatstable tfoot td { border-top: 1px solid #2a323c; border-bottom: none; color: #cfe3f5; font-weight: 600; }
-#sqlstatstable tfoot td.op { color: #cfe3f5; font-family: inherit; font-size: 13px; }
+#sqlstatstable td.op { color: var(--lilac); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+#sqlstatstable td.dim { color: var(--faint); }
+#sqlstatstable tfoot td { border-top: 1px solid var(--line); border-bottom: none; color: var(--text); font-weight: 600; }
+#sqlstatstable tfoot td.op { color: var(--text); font-family: inherit; font-size: 13px; }
 #sqlstatsbar { max-width: 1100px; margin: 10px auto 0; text-align: center; }
 #sqlstatsbar button {
-  background: #1a222b; color: #9fb0bf; border: 1px solid #33404d; border-radius: 4px;
+  background: var(--raised); color: var(--muted); border: 1px solid var(--line); border-radius: 4px;
   padding: 4px 12px; font-size: 12px; cursor: pointer;
 }
-#sqlstatsbar button:hover { color: #cfe3f5; border-color: #4a5a6c; }
+#sqlstatsbar button:hover { color: var(--text); border-color: var(--line-hi); }
