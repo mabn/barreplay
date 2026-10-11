@@ -68,6 +68,12 @@ export interface MomentStory {
   /** For a moment the sides' building moved rather than a fight, what each
    * side's army and metal income went from and to; null otherwise. */
   growth: SideGrowth[] | null;
+  /** Which of the growth's army value and income the story names. */
+  growthNamed: { army: boolean; eco: boolean } | null;
+  /** A build-up story's window held a fight the gaining side LOST: each
+   * side's losses there (the part inside the window), said beside the
+   * build-up; null otherwise. */
+  lostFight: SideLoss[] | null;
 }
 
 /** One side's army value (metal) and metal income (per second) at the start
@@ -124,6 +130,8 @@ interface Growth {
   title: string;
   detail: string;
   sides: SideGrowth[];
+  /** Which of army value and income the story names as carrying it. */
+  named: { army: boolean; eco: boolean };
 }
 
 /** growthStory tells a moment the line made on what the sides BUILT: by
@@ -200,7 +208,7 @@ export function growthStory(ins: Insights, m: Moment): Growth {
     // other way.
     parts.push(`${L} put more into its army: ${fmtMetal(gl.army[0])} → ${fmtMetal(gl.army[1])} metal, ${W} ${fmtMetal(gw.army[0])} → ${fmtMetal(gw.army[1])}.`);
   }
-  return { title, detail: parts.join(" "), sides };
+  return { title, detail: parts.join(" "), sides, named: { army, eco } };
 }
 
 /** An instant on the map: sim frame f, at world (x, z) within radius r. */
@@ -418,6 +426,9 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
   let whole: Battle | null = null;
   // A fight there that the line did not move on (see builtNotFought).
   let notFought = false;
+  // A fight the side the line moved toward LOST, while its army grew
+  // anyway (see lostButBuilt): told as the build-up, the fight beside it.
+  let lostFight: { won: SideLoss; lost: SideLoss; sides: SideLoss[]; focus: Focus | null; place: string } | null = null;
   if (out.length === 1) {
     fight = false;
     focus = eliminationFocus(ins, out[0].team, out[0].f);
@@ -492,6 +503,21 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     // army was bigger, or what it lost mattered less): then the title states
     // the trade rather than calling it a win the numbers beside it deny.
     const unit = (v: number) => (priced ? `${fmtMetal(v)} metal` : `${v} units`);
+    if (!drop && !(b && ownBlast(b) === lose) && priced && worth(lw) > worth(lo) && armyGrew(ins, m, won)) {
+      // W lost the fight, so the fight cannot be why the line moved toward
+      // it: W's army grew faster than L's despite it (the model reads army
+      // value, which a lost fight lowers). Said as that, with the fight as
+      // what it was — a fight L won (Marcin, f9c2cb6a's swing A).
+      // Only the part of it inside the moment's window: that is what the
+      // build-up story beside it covers (a long battle told whole would
+      // count losses from minutes outside it).
+      if (b && (b.f0 < f0 || b.f1 > f1) && Math.max(b.f0, f0) < Math.min(b.f1, f1)) {
+        const p0 = Math.max(b.f0, f0), p1 = Math.min(b.f1, f1);
+        const fp: Focus = { f: p0, f1: p1, x: b.x, z: b.z, r: b.r };
+        const lp = sideLosses(ins, p0, p1, { x: b.x, z: b.z, r: b.r + BATTLE_REACH });
+        lostFight = { won: lp[won], lost: lp[lose], sides: lp, focus: fp, place: at(fp) };
+      } else lostFight = { won: lw, lost: lo, sides: local ?? lost, focus, place: at(focus) };
+    }
     if (b && ownBlast(b) === lose) {
       // Its own blasts or allies' fire, not the other side, did most of it.
       title = ownBlastTitle(ins, b, lose);
@@ -506,6 +532,16 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
       : worth(lw) <= worth(lo) ? `${W} wins a close fight${at(focus)}`
       : `${W} trades ${unit(size(lw))} for ${unit(size(lo))}${at(focus)}`;
   }
+  if (lostFight) {
+    fight = false;
+    growth = growthStory(ins, m);
+    // Despite, not because of: the fight it lost is half of what happened.
+    title = `${growth.title} despite losing a fight${lostFight.place}`;
+    local = null;
+    whole = null;
+    focus = null;
+    notFought = true;
+  }
   const dl = local ? local[lose] : ll;
   const dw = local ? local[won] : wl;
   // Losses are said only for a side that had some: "both lost nothing" is
@@ -519,8 +555,9 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
   const traded = notFought && priced && Math.max(size(ll), size(wl)) >= QUIET_METAL
     ? ` Meanwhile ${L} lost ${fmtMetal(ll.metal)} metal in fighting and ${W} ${fmtMetal(wl.metal)}, which did not tip the armies toward ${W}.`
     : said ? ` ${said}.` : "";
+  const despite = lostFight ? ` ${lostFightNote(ins, lostFight, W, L)}` : traded;
   let detail = growth
-    ? growth.detail + traded
+    ? growth.detail + despite
     : local
       ? `There, ${fmtClock(focus!.f / SIM_FPS)}–${fmtClock((focus!.f1 ?? focus!.f) / SIM_FPS)}: ${said || "nothing was lost"}.`
       : said ? `${said}.` : "";
@@ -555,7 +592,30 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
   // A moment told on what was built despite a fight is not about that fight.
   const battle = notFought ? -1 : battleOfMoment(ins, focus, f0, f1);
   const fought = fight ? fighters(ins, ins.battles[battle]) : ins.sides.map(() => []);
-  return { title, detail, lost, shown: local ?? lost, elsewhere, whole, battle, focus, fighters: fought, growth: growth?.sides ?? null };
+  return { title, detail, lost, shown: local ?? lost, elsewhere, whole, battle, focus, fighters: fought, growth: growth?.sides ?? null, growthNamed: growth?.named ?? null, lostFight: lostFight?.sides ?? null };
+}
+
+/** NOTABLE_SHARE is the part of a side's loss in a fight ONE unit must
+ * carry, at NOTABLE_METAL or more, to be named on its own: an Epic Pulsar
+ * that was a third of everything lost, not the costliest of 200 Goblins. */
+const NOTABLE_SHARE = 0.3;
+const NOTABLE_METAL = 3000;
+
+/** notableLoss names the one unit that was a big part of a side's loss
+ * ("a half-built Epic Pulsar, 7.4k metal"), or null when none stands out. */
+export function notableLoss(ins: Insights, l: SideLoss): string | null {
+  const k = l.kinds[0];
+  if (!k || k[1] !== 1 || k[2] < NOTABLE_METAL || k[2] < NOTABLE_SHARE * l.metal) return null;
+  const half = l.top >= 0 && ins.deaths.unfinished?.[l.top] === 1 ? "half-built " : "";
+  return `${half ? "a" : article(k[0])} ${half}${k[0]} (${fmtMetal(k[2])} metal)`;
+}
+
+/** lostFightNote is the sentence beside a build-up story whose window held
+ * a fight the gaining side lost. */
+function lostFightNote(ins: Insights, f: { won: SideLoss; lost: SideLoss; focus: Focus | null; place: string }, W: string, L: string): string {
+  const when = f.focus ? ` (${fmtClock(f.focus.f / SIM_FPS)}–${fmtClock((f.focus.f1 ?? f.focus.f) / SIM_FPS)})` : "";
+  const big = notableLoss(ins, f.won);
+  return `Meanwhile ${L} won the fight${f.place}${when}: ${W} lost ${fmtMetal(f.won.metal)} metal${big ? `, including ${big}` : ""}, ${L} ${fmtMetal(f.lost.metal)}.`;
 }
 
 /** momentStories tells every moment of a swing line. A battle that two or

@@ -691,6 +691,15 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           the fighting a one-line "Meanwhile" note, no battle badge, and the side
                           that put more into its army instead said so; a fall in income names the
                           mines/converters the side lost in the window.
+                          A FIGHT THE GAINING SIDE LOST (lost more worth there) while its
+                          army still grew faster than the other's (moments.ts armyGrew) is
+                          not why the line moved: it is told as the build-up, titled "...
+                          despite losing a fight in the middle", with the fight a "Meanwhile
+                          Red team won the fight ..." sentence counting only its part INSIDE
+                          the moment's window (notableLoss names one unit carrying >= 30% and
+                          3000+ metal of it: "including a half-built Epic Pulsar"), and the
+                          swing row shows each side's army and income plus "in the fight"
+                          losses (MomentStory.lostFight; Marcin, f9c2cb6a's swing A).
                           VERSION 8 says WHAT DID THE KILLING, for the page's BATTLE PHRASES
                           (worker/src/summary/phrases.ts; Marcin's ask: "won battle" every
                           time is boring). Each battle side's BattleLoss.By lists the enemy
@@ -993,7 +1002,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           badge — the line lists only its biggest shifts, and a decided fight
                           can move it little. A swing told as one battle carries the badge too. LOG
                           SCALES (chart.ts TimeChartSpec.log: symlog, ticks at powers of ten,
-                          labels closer than a line apart dropped): metal income and army
+                          labels closer than a line apart dropped); every y tick drops a fraction of only zeros, "1.0k" -> "1k" (chart.ts tickText, Marcin's call): metal income and army
                           composition each carry a Linear/Log toggle (scale.ts scaleToggle,
                           which redraws the chart in place); composition defaults to LOG, and
                           there places each side's TOTAL on the log axis and splits it by

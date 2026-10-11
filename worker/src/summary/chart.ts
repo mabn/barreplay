@@ -55,6 +55,13 @@ export interface TimeChartSpec {
   overflow?: { top: number; bottom: number };
 }
 
+/** tickText drops a ".0" from an axis label ("1.0k" -> "1k", "2.0M" ->
+ * "2M"): a tick is a round number, and the summary is not that precise.
+ * Tooltips keep their decimals. */
+export function tickText(t: string): string {
+  return t.replace(/\.0+(?=\D|$)/g, "");
+}
+
 /** symlog is the log scale's transform. */
 export function symlog(v: number, unit: number): number {
   return Math.sign(v) * Math.log10(1 + Math.abs(v) / unit);
@@ -113,7 +120,7 @@ export function timeChart(spec: TimeChartSpec): TimeChart {
       if (drawn.some((d) => Math.abs(d - yy) < 14)) continue;
       drawn.push(yy);
       grid.append(s("line", { x1: left, x2: right, y1: yy, y2: yy }));
-      svg.append(s("text", { x: left - 6, y: yy + 4, "text-anchor": "end" }, spec.yTick(v)));
+      svg.append(s("text", { x: left - 6, y: yy + 4, "text-anchor": "end" }, tickText(spec.yTick(v))));
     }
   }
   if (spec.zeroLine && spec.yMin < 0 && spec.yMax > 0) {

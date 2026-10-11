@@ -6,7 +6,8 @@ import { test } from "node:test";
 import { fmtClock, fmtMetal, niceStep, timeStep } from "../src/summary/format";
 import { colorName, comparable, nameRuns, notices, readable, sideColor, sideName } from "../src/summary/model";
 import { destroyedBySide, knockouts, lossesByStep, wipedOf } from "../src/summary/losses";
-import { armyDrop, compass, fighters, gapBattles, momentStories, momentStory } from "../src/summary/moments";
+import { armyDrop, compass, fighters, gapBattles, momentStories, momentStory, notableLoss } from "../src/summary/moments";
+import { tickText } from "../src/summary/chart";
 import { clipAround, clipAt, clipEvent, clipSpan, watcher } from "../src/summary/watch";
 import { zonesOf } from "../src/summary/zones";
 import { lossKinds } from "../src/summary/losskinds";
@@ -213,8 +214,17 @@ test("a moment is named after what died in it", () => {
   // The line moved toward a side that lost MORE there: the title states the
   // trade instead of calling it a win.
   const trade = [...pawns10().slice(0, 8), ...Array.from({ length: 16 }, () => [1000, 2, 1, 450, 450] as [number, number, number, number, number])];
-  st = momentStory(ins({ ...base, deaths: deaths(trade) }), m);
+  const flat = { ...base, series: { ...base.series, army: [base.series.army[0], base.series.army[0]] } };
+  st = momentStory(ins({ ...flat, deaths: deaths(trade) }), m);
   assert.equal(st.title, "Team 2 trades 800 metal for 400 metal in the middle");
+  // ...unless its army still grew faster than the other's: then the fight is
+  // not why the line moved. It is told as the build-up, with the fight said
+  // as what it was, a fight the other side won (f9c2cb6a's swing A).
+  st = momentStory(ins({ ...base, deaths: deaths(trade) }), m);
+  assert.equal(st.title, "Team 2 out-builds Blue team's army despite losing a fight in the middle");
+  assert.equal(st.lostFight?.[1].metal, 800);
+  assert.match(st.detail, /Meanwhile Blue team won the fight in the middle \(0:33–0:33\): Team 2 lost 800 metal, Blue team 400\.$/);
+  assert.equal(st.battle, -1);
   // Nothing died: the armies pulled apart.
   st = momentStory(ins({ ...base, deaths: deaths([]) }), m);
   assert.equal(st.title, "Team 2 out-builds Blue team's army");
@@ -239,8 +249,9 @@ test("a moment is named after what died in it", () => {
   assert.equal(st.battle, -1);
   assert.equal(st.focus, null);
   assert.match(st.detail, /Meanwhile Blue team lost 400 metal in fighting and Team 2 800, which did not tip the armies toward Team 2\.$/);
-  // The same trade with the army carrying the shift is still the fight.
-  st = momentStory(ins({ ...fell, deaths: deaths(trade) }), { ...m, army: 0.6, eco: 0.4 });
+  // The same trade with the army carrying the shift is still the fight
+  // (when the armies grew alike, so the fight is what moved them).
+  st = momentStory(ins({ ...fell, series: { ...fell.series, army: flat.series.army }, deaths: deaths(trade) }), { ...m, army: 0.6, eco: 0.4 });
   assert.equal(st.title, "Team 2 trades 800 metal for 400 metal in the middle");
   st = momentStory(ins({ ...inc, deaths: deaths([]) }), { ...m, army: 0.4, eco: 0.6 });
   assert.equal(st.title, "Team 2 out-builds Blue team in army and economy");
@@ -614,4 +625,24 @@ test("Supreme Isthmus areas go by the names players use", () => {
   assert.equal(at(g, 9000, 9000), "in the south sea");
   // Without knowing who started where, a base is told by the compass.
   assert.equal(at({ ...g, bounds: { minX: 0, maxX: 12288, minZ: 0, maxZ: 12288 }, series: { ...g.series, front: [] } }, 0.387 * 12288, 0.787 * 12288), "in the south");
+});
+
+test("chart ticks drop a fraction that is only zeros", () => {
+  assert.equal(tickText("1.0k"), "1k");
+  assert.equal(tickText("10.0M"), "10M");
+  assert.equal(tickText("-20.0%"), "-20%");
+  assert.equal(tickText("1.5k"), "1.5k");
+  assert.equal(tickText("100%"), "100%");
+  assert.equal(tickText("12:00"), "12:00");
+});
+
+test("notableLoss names one unit that was a big part of a side's loss", () => {
+  const i = ins({ deaths: { f: [0, 0], x: [0, 0], z: [0, 0], def: [1, 2], team: [0, 0], cost: [7358.8, 30], unfinished: [1, 0] } });
+  const loss = (kinds: [string, number, number][], metal: number, top = 0) =>
+    ({ n: 10, metal, worth: metal, commanders: [], commanderDeaths: [], top, kinds, units: [], at: null }) as any;
+  assert.equal(notableLoss(i, loss([["Epic Pulsar", 1, 7358.8], ["Goblin", 219, 6570]], 19250)), "a half-built Epic Pulsar (7.4k metal)");
+  assert.equal(notableLoss(i, loss([["Juggernaut", 1, 20000]], 25000, 1)), "a Juggernaut (20.0k metal)");
+  assert.equal(notableLoss(i, loss([["Epic Pulsar", 1, 7358.8]], 74900)), null, "a small part of a big loss");
+  assert.equal(notableLoss(i, loss([["Goblin", 219, 6570]], 9000)), null, "many of one kind is no one unit");
+  assert.equal(notableLoss(i, loss([["Pulsar", 1, 2000]], 3000)), null, "too cheap to name");
 });
