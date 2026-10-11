@@ -10,7 +10,7 @@
 // nothing is copied between the two sites. The catalog route and the data
 // bucket both answer cross-origin reads for that reason (app.ts, r2-cors.json).
 import { INSIGHTS_VERSIONS, mountSummary } from "./index";
-import type { Insights, SummaryHandle, SummaryOptions } from "./types";
+import type { Clip, Insights, SummaryHandle, SummaryOptions } from "./types";
 
 /** The replay viewer: the catalog route and the replay pages. */
 export const REPLAY_ORIGIN = "https://replay.fogofwar.dev";
@@ -29,6 +29,61 @@ export interface EmbedOptions extends SummaryOptions {
 export function replayLink(gameId: string, frame?: number, origin = REPLAY_ORIGIN): string {
   const base = `${origin}/replays/${encodeURIComponent(gameId)}`;
   return frame != null && frame > 0 ? `${base}?f=${Math.round(frame)}` : base;
+}
+
+/** clipPlayer returns an onClip that plays each clip in a window over the
+ * host page: the replay viewer's own clip player, framed (app.js
+ * ?embed=clip), so the map, its streaming and its drawing are the viewer's
+ * and nothing is reimplemented here. The frame is made on the first clip and
+ * kept, hidden, between clips, so a second clip needs no reload; clips go to
+ * it by postMessage once it says it is ready. Escape, the window's close
+ * button, or a click outside hides it. */
+export function clipPlayer(gameId: string, origin = REPLAY_ORIGIN): (c: Clip) => void {
+  let box: HTMLDivElement | null = null;
+  let frame: HTMLIFrameElement | null = null;
+  let ready = false;
+  let pending: Clip | null = null;
+  const send = (c: Clip) => frame?.contentWindow?.postMessage({ type: "barreplay:clip", clip: c }, origin);
+  const hide = () => {
+    if (box) box.style.display = "none";
+  };
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === "Escape" && box?.style.display !== "none") hide();
+  };
+  return (c: Clip) => {
+    if (!box) {
+      box = document.createElement("div");
+      box.style.cssText =
+        "position:fixed;inset:0;z-index:2147483000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55)";
+      box.addEventListener("click", (e) => {
+        if (e.target === box) hide();
+      });
+      frame = document.createElement("iframe");
+      frame.title = "Replay clip";
+      frame.allow = "fullscreen";
+      frame.style.cssText =
+        "width:min(960px,calc(100vw - 32px));height:min(640px,calc(100vh - 32px));border:1px solid #3a4856;border-radius:8px;background:#11151a;box-shadow:0 14px 44px rgba(0,0,0,.6)";
+      frame.src = `${replayLink(gameId, undefined, origin)}?embed=clip`;
+      box.append(frame);
+      document.body.append(box);
+      window.addEventListener("keydown", onKey);
+      window.addEventListener("message", (e) => {
+        if (e.origin !== origin || e.source !== frame?.contentWindow) return;
+        const t = (e.data as { type?: string } | null)?.type;
+        if (t === "barreplay:ready") {
+          ready = true;
+          if (pending) send(pending);
+          pending = null;
+        } else if (t === "barreplay:close") {
+          hide();
+        }
+      });
+    }
+    box.style.display = "flex";
+    if (ready) send(c);
+    else pending = c;
+    frame?.focus();
+  };
 }
 
 /** ridPath turns a rid (a relative path since month folders) into a URL
@@ -62,8 +117,8 @@ export async function findInsights(gameId: string, opts: EmbedOptions = {}): Pro
 
 /** mountGameSummary draws gameId's summary into el and returns its handle,
  * or null (el untouched) when the game has no summary to show. A click on a
- * moment opens the replay at it in a new tab unless the host passes its own
- * onClip/onSeek. */
+ * moment plays it in a clip window over the page (clipPlayer), like the
+ * viewer's own summary does, unless the host passes its own onClip/onSeek. */
 export async function mountGameSummary(el: HTMLElement, gameId: string, opts: EmbedOptions = {}): Promise<SummaryHandle | null> {
   const ins = await findInsights(gameId, opts);
   if (!ins) return null;
@@ -72,6 +127,7 @@ export async function mountGameSummary(el: HTMLElement, gameId: string, opts: Em
   // own origin (icons.ts's default) would be that site's.
   const summaryOpts: SummaryOptions = { iconBase: replayOrigin, ...rest };
   if (!summaryOpts.onClip && !summaryOpts.onSeek) {
+    summaryOpts.onClip = clipPlayer(gameId, replayOrigin);
     summaryOpts.onSeek = (f) => window.open(replayLink(gameId, f, replayOrigin), "_blank", "noopener");
   }
   return mountSummary(el, ins, summaryOpts);

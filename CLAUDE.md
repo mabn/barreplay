@@ -789,8 +789,19 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           (embed.ts, mountGameSummary(el, gameId)) keeps every fact about where
                           things live HERE: it resolves the game's rid through GET /api/replays?id=
                           on replay.fogofwar.dev, fetches the newest insights from cdn-bar, and by
-                          default opens a clicked moment as /replays/<gameId>?f=<frame> in a new
-                          tab (app.js seekFromURL reads ?f= once per load, then drops it), and
+                          default PLAYS a clicked moment in a clip window over the host page
+                          (embed.ts clipPlayer): an iframe of /replays/<gameId>?embed=clip, the
+                          viewer's own clip player ALONE (app.js initEmbedClip; body.clip-embed
+                          hides everything but #clip), so the map, streaming and drawing stay
+                          the viewer's and nothing is reimplemented. Clips go in by postMessage
+                          ('barreplay:clip' — a unit's route is too long for a URL), only once
+                          the frame posts 'barreplay:ready' from loadReplay (a clip opened
+                          before the data draws a null map). ✕/Escape post 'barreplay:close'
+                          (dismissClip; closeClip is a no-op embedded, since the tab logic
+                          calls it during load) and the host HIDES the frame, keeping it, so
+                          the next clip starts at once. "Open in Replay" there, like onSeek's
+                          default, opens /replays/<gameId>?f=<frame> in a new tab (app.js
+                          seekFromURL reads ?f= once per load, then drops it). It also
                           points iconBase at replay.fogofwar.dev (bundled elsewhere, the
                           module's own origin would be the other site's). That
                           needs three CROSS-ORIGIN reads, each set up separately: /api/replays
