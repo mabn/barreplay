@@ -92,19 +92,21 @@ export function playerName(ins: Insights, name: string, tag: "span" | "b" = "spa
 }
 
 /** fighterNames is one side's fighters, each name in its colour with what
- * it brought on hover — the side's own name when it names nobody. */
-export function fighterNames(ins: Insights, list: Fighter[], sd: number): HTMLElement {
+ * it brought on hover — the side's own name when it names nobody. With max,
+ * only the first max are named and the rest counted ("+2"). */
+export function fighterNames(ins: Insights, list: Fighter[], sd: number, max = Infinity): HTMLElement {
   const out = h("span", { class: "brs-fnames" });
   if (!list.length) {
     out.append(h("span", { style: `color: ${sideColor(ins, sd)}` }, sideName(ins, sd)));
     return out;
   }
-  list.forEach((f, k) => {
+  list.slice(0, max).forEach((f, k) => {
     if (k) out.append(", ");
     const el = playerName(ins, f.name, "b");
     tip(el, { title: f.name, rows: [{ label: "Army there + lost + killed there", value: `${fmtMetal(f.metal)} metal · ${Math.round(f.share * 100)}% of ${sideName(ins, sd)}` }] });
     out.append(el);
   });
+  if (list.length > max) out.append(h("span", { class: "brs-muted" }, ` +${list.length - max}`));
   return out;
 }
 

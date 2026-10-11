@@ -17,7 +17,7 @@ import { comparable, lossWorth, sideColor, sideName, sideOfTeam } from "../model
 import { compass, fighters, ownBlast, ownBlastTitle } from "../moments";
 import { fighterNames } from "../names";
 import { fillUnits, inkOn } from "../unitchips";
-import { tip, type Tip, type TipRow } from "../tooltip";
+import { tip, type Tip } from "../tooltip";
 import { clipEvent, watcher } from "../watch";
 import { SIM_FPS, type Battle, type Insights, type SummaryOptions } from "../types";
 
@@ -103,11 +103,10 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
   const rings: SVGGElement[] = [];
   const rows: HTMLElement[] = [];
   const marks: SVGGElement[] = [];
-  const pickHint = h("p", { class: "brs-hint" }, "Point at a battle to see its losses; click to watch it.");
+  const pickHint = h("p", { class: "brs-hint" }, "Click a battle to watch it; its losses stay here.");
   const detail = h("div", { class: "brs-battledetail" }, pickHint);
   const details: HTMLElement[] = [];
   const detailOf = (i: number) => (details[i] ??= battleDetail(i));
-  let selected = -1;
   const light = (i: number, on: boolean) => {
     rings[i]?.classList.toggle("brs-hover", on);
     rows[i]?.classList.toggle("brs-hover", on);
@@ -118,7 +117,6 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     rows.forEach((r, k) => r.classList.toggle("brs-on", k === i));
     marks.forEach((m, k) => m.classList.toggle("brs-on", k === i));
     if (rings[i]) view.layer.append(rings[i]); // over its neighbours
-    selected = i;
     detail.replaceChildren(detailOf(i));
   };
   // A click both selects and plays: the losses are waiting under the clip.
@@ -127,34 +125,19 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     if (watch) watch(clipOf(ins.battles[i], i));
   };
   // One tooltip wherever a battle is pointed at (map, timeline, list): the
-  // two sides side by side, first side on the left.
-  const battleTip = (b: Battle, i: number): Tip => {
-    const rows: TipRow[] = [];
-    const add = (metric: string, v: (sd: number) => string) => {
-      for (const sd of [0, 1]) rows.push({ color: sideColor(ins, sd), label: sideName(ins, sd), metric, value: v(sd) });
-    };
-    add("Units lost", (sd) => String(b.lost[sd]?.n ?? 0));
-    if (priced) add("Metal lost", (sd) => fmtMetal(b.lost[sd]?.metal ?? 0));
-    const r = reach(b);
-    if (r[0] + r[1] > 0) add("Army nearby", (sd) => fmtMetal(r[sd]));
-    return {
-      title: `Battle ${i + 1} · ${when(b)} · ${compass(ins, b.x, b.z)}`,
-      rows,
-      note: verdict(b) + ratioText(b) + (watch ? " · click to watch" : ""),
-    };
-  };
-  // Pointing at a battle lights it everywhere and previews its losses
-  // below the list; leaving goes back to the picked one.
+  // battle's own detail panel — fighters, then the two sides' losses side by
+  // side, first side on the left — built once per battle, since its unit
+  // icons load asynchronously.
+  const tipDetails: HTMLElement[] = [];
+  const battleTip = (b: Battle, i: number): Tip => ({
+    title: (tipDetails[i] ??= h("div", { class: "brs-battletip" }, battleDetail(i, false))),
+    note: verdict(b) + ratioText(b) + (watch ? " · click to watch" : ""),
+  });
+  // Pointing at a battle lights it everywhere.
   const hover = (el: Element, i: number) => {
     tip(el, () => battleTip(ins.battles[i], i));
-    el.addEventListener("pointerenter", () => {
-      light(i, true);
-      detail.replaceChildren(detailOf(i));
-    });
-    el.addEventListener("pointerleave", () => {
-      light(i, false);
-      detail.replaceChildren(selected >= 0 ? detailOf(selected) : pickHint);
-    });
+    el.addEventListener("pointerenter", () => light(i, true));
+    el.addEventListener("pointerleave", () => light(i, false));
   };
   // Who came out ahead is decided by worth: a lost power plant costs its
   // output as well as its metal.
@@ -328,7 +311,7 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     return c.svg;
   }
 
-  function battleDetail(i: number): HTMLElement {
+  function battleDetail(i: number, withPlay = true): HTMLElement {
     const b = ins.battles[i];
     // The side that lost less is boxed in its colour: which side came out
     // ahead, without a sentence saying so (an even trade boxes neither).
@@ -357,9 +340,9 @@ export function mapStories(ins: Insights, opts: SummaryOptions): HTMLElement | n
     // Who fought, each side's names over its own column.
     const fs = fighters(ins, b);
     const names = fs.some((l) => l.length)
-      ? [fighterNames(ins, fs[0] ?? [], 0), h("span", { class: "brs-muted brs-vs" }, "vs"), fighterNames(ins, fs[1] ?? [], 1)]
+      ? [fighterNames(ins, fs[0] ?? [], 0, 2), h("span", { class: "brs-muted brs-vs" }, "vs"), fighterNames(ins, fs[1] ?? [], 1, 2)]
       : [];
-    const play = watch ? h("button", { class: "brs-watchbtn", type: "button" }, "▶ Watch this battle") : null;
+    const play = watch && withPlay ? h("button", { class: "brs-watchbtn", type: "button" }, "▶ Watch this battle") : null;
     if (play && watch) play.addEventListener("click", () => watch(clipOf(b, i)));
     return h("div", undefined,
       h("div", undefined, h("b", undefined, `Battle ${i + 1}`), h("span", { class: "brs-muted" }, ` · ${when(b)} · ${compass(ins, b.x, b.z)}`)),
