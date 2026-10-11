@@ -485,7 +485,9 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           events interleaved at their frames: per-side army value (the team
                           stats bar's rule: armed, mobile, priced, not a commander, weighted by
                           build progress) and income every StepSec, army split by category (no
-                          tech level exists in the defs, so ground units split by PRICE), every
+                          tech level exists in the defs, so ground units split by PRICE:
+                          <250/<800/<3000 metal, and anything at 3000+ is experimental, flying
+                          or not — v5), every
                           death with its last sampled position and cost, tech milestones from a
                           CURATED def-name table (defs.go — the defs carry no tier), chat and
                           pings. A piece is immutable, so ANY change to what is computed is a
@@ -538,6 +540,20 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           WriteStaticBundle writes the insights piece
                           beside the .brp on EVERY publish (a compute failure only warns), so
                           a publish uploads exactly two objects.
+                          VERSION 5 marks SELF-DESTRUCTS (Deaths.SelfD, pass.go selfDestructed):
+                          a death with the owner's "selfd" order standing (the engine toggles,
+                          so a second order cancels; at most selfdMaxSec = 60 s before) and no
+                          other unit named as its cause. It is a loss only when the unit WENT IN
+                          A FIGHT (pass.go fought): its blast killed something within blastSec =
+                          3 s (credited to it in a capture with causes — an enemy, or its own
+                          side's buildings, both worth telling), or it was hurt in the last
+                          fightSec = 20 s. Otherwise its owner cashed it in (a commander blown
+                          up for its metal) and it is an owner removal like a reclaim (Marcin's
+                          rule). A counted one reads "self-destructs their commander" on the
+                          page rather than "falls". A .brp packed before the demo's orders were
+                          read has no selfd events, so cmd/insights reads them from the demo
+                          when the input has none (packer.DemoSelfD; best-effort like the
+                          winners; the orders are kept in -cache as demo-orders/<gameId>.json).
                           VERSION 4 stops counting what an owner REMOVED as a loss (pass.go
                           removedByOwner, only when the capture records causes): a unit
                           reclaimed by its own side (cause weapon -12, the engine's reclaim id)
@@ -695,6 +711,13 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           since a raid's buildings often blow up just after the line moved.
                           A side the line moved toward that still lost MORE there is not said
                           to win: the title states the trade ("trades 114k metal for 69.9k").
+                          When NO battle holds the losses (spread over the map) and the losing
+                          side's army fell by >= ARMY_DROP_SHARE (25%) in the window, the moment
+                          is told as that: "Blue team loses 43% of its army[, mostly aircraft]"
+                          (moments.ts armyDrop), clipped over the whole window — the line moves
+                          on the army, which the losses chart (a share of everything owned)
+                          barely shows. The swing chart shades each moment's minute in the
+                          side's colour, since its dot marks where the line ARRIVED.
                           A span clip (watch.ts clipEvent) plays the WHOLE event however long,
                           20 s of context before it, and carries atEnd, which widens the
                           slider's #clipmark into a band over the event; capping it at a
@@ -744,23 +767,40 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           once with the chosen one bold (a path is also a way to pick; a jump
                           no commander walks in a step is drawn as a gap), the diary/leaks/
                           style beside it and the built/lost strip below; names in the Sides
-                          cards select a tab. "Who was winning" stacks the swing line (or the
-                          v1 army-difference chart), the metal LOST per step — as a SHARE of everything the side owned
-                          at the end of the step before when the file has Series.Value (v4),
-                          plain metal otherwise (losses.ts: what
-                          died fighting, with what went down with an eliminated team faint on
-                          top and left out of the scale) and metal income on one time axis
-                          and crosshair, with eliminations marked on the swing line. LOG
+                          cards select a tab. "Who was winning" stacks the swing line, ARMY VALUE and METAL
+                          INCOME (advantage.ts comparePanel) on one time axis and crosshair, with eliminations marked on the swing line. The two
+                          panels default to RATIO (series.ts leadPct: the first side a flat
+                          line at 0%, the other at how much bigger the leader is, +20% / -20%,
+                          smoothed by the win model's own k; the axis is FIXED at +-50%
+                          (RATIO_CAP, Marcin's call) since the opening minutes and a decided
+                          game's last ones run to thousands of percent — past it the line
+                          runs along the edge and the tooltip has the number) with a Ratio/Value
+                          switch (scale.ts pairToggle); Value shows both sides' numbers with
+                          a Linear/Log switch, log default, hidden under Ratio. The swings
+                          list under it lays each swing out like a battle detail — the two
+                          sides' columns side by side, each with its fighters and its losses
+                          as icon chips (unitchips.ts fillUnits, at most SWING_CHIPS), the
+                          side the line moved toward boxed with the shift — and the whole
+                          row plays the clip, as do the chart's lettered dots. Swings are
+                          LETTERED (A, B, C...) because battles are NUMBERED, and a long stretch
+                          with no swing is filled with BATTLES (moments.ts gapBattles: the
+                          biggest battle in the widest gap over an eighth of the game, at least
+                          4 min, until none is left or none holds a battle >= 10% of the
+                          game's biggest; at most 12 entries), each told as "Red team
+                          decisively wins battle (5)" with the battles list's white-circle
+                          badge — the line lists only its biggest shifts, and a decided fight
+                          can move it little. A swing told as one battle carries the badge too. LOG
                           SCALES (chart.ts TimeChartSpec.log: symlog, ticks at powers of ten,
                           labels closer than a line apart dropped): metal income and army
                           composition each carry a Linear/Log toggle (scale.ts scaleToggle,
                           which redraws the chart in place); composition defaults to LOG, and
                           there places each side's TOTAL on the log axis and splits it by
                           SHARE — stacking by value through a log would hand the bottom band
-                          most of the height whatever its size. The MAP
-                          STORY numbers its battles in the order they happened, on the map and
+                          most of the height whatever its size. The BATTLES
+                          section (once "Map story") numbers its battles in the order they happened, on the map and
                           in a one-line-per-battle list (losses either side of a centre line,
-                          square-root scaled), one selection shared by both; a picked battle
+                          square-root scaled), one selection shared by both — a click on either
+                          selects AND plays the battle's clip; a picked battle
                           shows the two sides' losses SIDE BY SIDE, each KIND of unit as its
                           untinted BAR icon with a count (Battle.lost[].units, v4: def/n/metal,
                           costliest first, at most 48). Defs sharing a bitmap are one kind,
@@ -775,10 +815,10 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           `icon` (its iconType) then its name; SummaryOptions.iconBase names
                           the origin, defaulting to the one the module was loaded from, null
                           = names; a def with no icon reads as its name.
-                          The library draws versions 1-4 (INSIGHTS_VERSIONS [4, 3, 2, 1]; v2 adds
+                          The library draws versions 1-5 (INSIGHTS_VERSIONS [5, 4, 3, 2, 1]; v2 adds
                           winner + swing, v3 eliminations and peak battles, v4 owner removals
-                          left out, owned value and battle teams) and app.js fetches
-                          .insights4, then 3, 2, 1. A version bump needs `insights -all` after
+                          left out, owned value and battle teams, v5 self-destructs marked) and
+                          app.js fetches .insights5, then 4, 3, 2, 1. A version bump needs `insights -all` after
                           the deploy, or published replays keep their older summary.
                           EMBEDDING ON ANOTHER SITE (lavabalance's game pages): the folder is an
                           installable package (src/summary/package.json, "barreplay-summary",
@@ -2916,8 +2956,10 @@ run dev` in `worker/` plus `pack -upload local`.)
   line in turns into a band of noise. It is deliberately NOT interpolated the
   way the build bar is: build progress really does creep between samples, where
   damage arrives in hits, so lerping it would draw a drain that never happened.
-  An UNFINISHED unit gets the build bar only — its missing hp IS the
-  construction, so a health bar would count the same progress twice — and a
+  An UNFINISHED unit's health rises with its build progress, so it gets a
+  health bar only when it has LESS hp than that progress accounts for (hit
+  while being built: hp < build x maxHp x UNFINISHED_SLACK = 0.9, measured
+  within 2.5% of 1 for 99% of undamaged builds) — and a
   unit with no recorded maxHp (an unidentified radar contact, 0/0) gets
   neither. The health bar is `BAR_H_SMALL` (2px) rather than `BAR_H` (3px) on a
   unit the bar is already WIDER than, i.e. one whose icon falls under the

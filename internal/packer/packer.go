@@ -192,6 +192,16 @@ func demoMeta(ctx context.Context, client *barapi.Client, id string) (demoInfo, 
 	}, nil
 }
 
+// DemoSelfD is the self-destruct orders in game id's demo, as capture events
+// (fetched like Pack's demo metadata). An error wraps ErrDemoUnavailable.
+func DemoSelfD(ctx context.Context, client *barapi.Client, id string) ([]snapshot.Event, error) {
+	d, err := demoMeta(ctx, client, id)
+	if err != nil {
+		return nil, fmt.Errorf("fetching the demo for %q: %w: %v", id, ErrDemoUnavailable, err)
+	}
+	return d.SelfD, nil
+}
+
 // inferSampleEvery returns the sampling interval implied by the frame stream:
 // the smallest positive gap between consecutive sampled sim frames. A raw
 // .brsnap does not record the capture's -every choice, and the .brp codec

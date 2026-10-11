@@ -1,0 +1,54 @@
+// What a side lost, drawn as KINDS of unit: one chip per icon (defs sharing
+// a bitmap add up) with a count, the kinds carrying 90% of the metal shown
+// and the rest behind a "+N more" chip. Shared by the battle detail and the
+// swings list, which show losses the same way side by side.
+import { h } from "./dom";
+import { fmtMetal } from "./format";
+import { iconImg, iconSrc } from "./icons";
+import { lossKinds, type LossKind } from "./losskinds";
+import { tip } from "./tooltip";
+import type { Insights, SummaryOptions, UnitLoss } from "./types";
+
+/** fillUnits fills list with the chips for units (icons load first), at
+ * most `max` of them up front when given. */
+export async function fillUnits(list: HTMLElement, ins: Insights, opts: SummaryOptions, units: UnitLoss[], priced: boolean, max = Infinity): Promise<void> {
+  const name = (d: number) => ins.defs[String(d)]?.human || ins.defs[String(d)]?.name || "?";
+  const src = new Map<number, string | null>();
+  await Promise.all(units.map(async (u) => src.set(u.def, await iconSrc(ins, opts, u.def))));
+  const split = lossKinds(units, (u) => src.get(u.def) ?? `def:${u.def}`);
+  const main = split.main.slice(0, max);
+  const rest = [...split.main.slice(max), ...split.rest];
+  const chip = (g: LossKind) => {
+    const label = g.defs.map((u) => name(u.def)).join(", ");
+    const icon = src.get(g.defs[0].def);
+    const el = h("span", { class: "brs-unit" }, icon ? iconImg(icon, label) : h("span", { class: "brs-uname" }, label), g.n ? h("span", undefined, `×${g.n}`) : null);
+    tip(el, {
+      title: g.defs.length > 1 ? `${g.n} lost` : name(g.defs[0].def),
+      rows: g.defs.map((u) => ({ label: g.defs.length > 1 ? `${name(u.def)} ×${u.n}` : `${u.n} lost`, value: priced && u.metal ? `${fmtMetal(u.metal)} metal` : "" })),
+    });
+    return el;
+  };
+  list.replaceChildren(...main.map(chip));
+  if (rest.length) {
+    const n = rest.reduce((a, g) => a + g.n, 0);
+    const more = h("button", { class: "brs-more", type: "button", "aria-expanded": "false" }, `+${rest.length} more`);
+    tip(more, { title: `${n} more lost`, rows: [{ label: rest.length > split.rest.length ? "The smaller losses" : "Less than a tenth of the metal" }], note: "Click to show" });
+    more.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      more.replaceWith(...rest.map(chip));
+    });
+    list.append(more);
+  }
+}
+
+/** inkOn is black or white, whichever reads on the colour hex. */
+export function inkOn(hex: string): string {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(hex);
+  if (!m) return "#000";
+  const lin = (x: string) => {
+    const c = parseInt(x, 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  };
+  const l = 0.2126 * lin(m[1]) + 0.7152 * lin(m[2]) + 0.0722 * lin(m[3]);
+  return l > 0.179 ? "#000" : "#fff";
+}

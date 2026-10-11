@@ -73,3 +73,75 @@ func TestLossCostCountsWhatWasBuilt(t *testing.T) {
 		}
 	}
 }
+
+// A unit is self-destructed when its owner's order still stands when it
+// goes and nothing else is named as its killer.
+func TestSelfDestructed(t *testing.T) {
+	p := &pass{selfdArmed: map[int32]int32{}}
+	order := func(f, id int32) { p.event(snapshot.Event{Frame: f, Kind: snapshot.EventSelfD, UnitID: id}) }
+	gone := func(f, id int32, cause *snapshot.EventCause) bool {
+		return p.selfDestructed(snapshot.Event{Frame: f, Kind: snapshot.EventDestroyed, UnitID: id, Cause: cause})
+	}
+	order(1009, 1)
+	if !gone(1170, 1, nil) {
+		t.Error("the commander that blew up after its order is not self-destructed")
+	}
+	order(100, 2)
+	order(130, 2) // ordered again: cancelled
+	if gone(200, 2, nil) {
+		t.Error("a cancelled order still counts")
+	}
+	order(100, 3)
+	if gone(150, 3, &snapshot.EventCause{UnitID: 9, DefID: 2, Team: 1, WeaponDef: 3}) {
+		t.Error("a unit an enemy killed during its countdown counts as self-destructed")
+	}
+	order(100, 4)
+	if gone(100+61*30, 4, nil) {
+		t.Error("a death long after the order counts")
+	}
+	if gone(500, 5, nil) {
+		t.Error("a unit with no order counts")
+	}
+}
+
+// A self-destruct is a loss only when the unit went in a fight: its blast
+// killed something, or it had been hurt shortly before.
+func TestSelfDestructOutsideAFightIsNotALoss(t *testing.T) {
+	p := &pass{
+		selfdArmed: map[int32]int32{1: 1000, 2: 1000, 3: 1000},
+		killsBy:    map[int32][]int32{1: {1170}},
+		tracks:     map[int32]*track{3: {id: 3, def: 1, hurt: true, hurtF: 1140}},
+		defs:       map[int32]defInfo{1: {cost: 2700}},
+		ro:         roster{teamSide: map[int32]int{0: 0}},
+	}
+	gone := func(id int32) snapshot.Event {
+		return snapshot.Event{Frame: 1170, Kind: snapshot.EventDestroyed, UnitID: id, DefID: 1, Team: 0}
+	}
+	if p.removedByOwner(gone(1)) {
+		t.Error("a self-destruct whose blast killed something is not a loss")
+	}
+	if !p.removedByOwner(gone(2)) {
+		t.Error("a self-destruct away from any fight counts as a loss")
+	}
+	if p.removedByOwner(gone(3)) {
+		t.Error("a self-destruct of a unit hurt moments before is not a loss")
+	}
+}
+
+func TestArmyCatPutsCostlyAircraftWithExperimentals(t *testing.T) {
+	for _, c := range []struct {
+		d    snapshot.UnitDef
+		want string
+	}{
+		{snapshot.UnitDef{CanFly: true, MetalCost: 200}, "air"},
+		{snapshot.UnitDef{CanFly: true, MetalCost: 3000}, "experimental"},
+		{snapshot.UnitDef{MetalCost: 249}, "light"},
+		{snapshot.UnitDef{MetalCost: 799}, "medium"},
+		{snapshot.UnitDef{MetalCost: 2999}, "heavy"},
+		{snapshot.UnitDef{MetalCost: 3000}, "experimental"},
+	} {
+		if got := armyCats[armyCat(c.d)]; got != c.want {
+			t.Errorf("%+v: got %s, want %s", c.d, got, c.want)
+		}
+	}
+}

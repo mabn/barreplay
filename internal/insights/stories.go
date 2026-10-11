@@ -147,6 +147,8 @@ type track struct {
 	pts    []pathPt
 	prevHP float32
 	maxHP  float32
+	hurt   bool  // its health has fallen between two samples
+	hurtF  int32 // the last sample where it had
 	// What it repaired while finished, in hp: health rises between samples
 	// (damage in between hides some, so it is a floor), and the busiest
 	// pressureBin of it, for Most healed.
@@ -224,6 +226,9 @@ func (p *pass) trackUnit(fr int32, u snapshot.UnitState, d defInfo) {
 			if t.hbinSum > t.hpeak {
 				t.hpeak, t.hpeakF = t.hbinSum, t.hbinF
 			}
+		}
+		if t.prevHP >= 0 && u.Health < t.prevHP {
+			t.hurt, t.hurtF = true, fr
 		}
 		t.prevHP = u.Health
 	}

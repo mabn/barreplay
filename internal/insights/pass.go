@@ -52,7 +52,11 @@ type pass struct {
 	deathKiller []int32
 
 	hasCauses bool // some destroyed event names a cause: a re-simulation
-	evolved   evolution
+	// selfdArmed is each unit with a self-destruct order standing: the frame
+	// it was given. A second order cancels the first (the engine toggles).
+	selfdArmed map[int32]int32
+	killsBy    map[int32][]int32 // unit id -> frames of the deaths credited to it
+	evolved    evolution
 
 	presence     []presence // army positions, one sample per step (stories.go)
 	presenceStep int        // the last step sampled into presence, -1 for none
@@ -100,16 +104,17 @@ func newPass(in Input, ro roster) *pass {
 				ArmyByCat:    make([][][]float64, ns),
 				Front:        make([][][]int32, ns),
 			},
-			Deaths: Deaths{F: []int32{}, X: []int32{}, Z: []int32{}, Def: []int32{}, Team: []int32{}, Cost: []float64{}, Unfinished: []int8{}},
+			Deaths: Deaths{F: []int32{}, X: []int32{}, Z: []int32{}, Def: []int32{}, Team: []int32{}, Cost: []float64{}, Unfinished: []int8{}, SelfD: []int8{}},
 		},
-		defs:    map[int32]defInfo{},
-		lastPos: map[int32][2]int32{},
-		pending: map[int32]bool{},
-		usedDef: map[int32]bool{},
-		built:   map[int32]float32{},
-		reached: map[[2]int]bool{},
-		incomeN: make([][]int, ns),
-		tracks:  map[int32]*track{},
+		defs:       map[int32]defInfo{},
+		lastPos:    map[int32][2]int32{},
+		pending:    map[int32]bool{},
+		selfdArmed: map[int32]int32{},
+		usedDef:    map[int32]bool{},
+		built:      map[int32]float32{},
+		reached:    map[[2]int]bool{},
+		incomeN:    make([][]int, ns),
+		tracks:     map[int32]*track{},
 
 		presenceStep: -1,
 
@@ -130,6 +135,12 @@ func newPass(in Input, ro roster) *pass {
 		}
 	}
 	p.evolved = evolutions(in.Events)
+	p.killsBy = map[int32][]int32{}
+	for _, e := range in.Events {
+		if e.Kind == snapshot.EventDestroyed && e.Cause != nil && e.Cause.UnitID >= 0 && e.Cause.UnitID != e.UnitID {
+			p.killsBy[e.Cause.UnitID] = append(p.killsBy[e.Cause.UnitID], e.Frame)
+		}
+	}
 	for _, e := range in.Events {
 		if e.Kind == snapshot.EventDestroyed && e.Cause != nil {
 			p.hasCauses = true
@@ -203,6 +214,12 @@ func (p *pass) runEvents(f int32, all bool) {
 func (p *pass) event(e snapshot.Event) {
 	p.playerEvent(e)
 	switch e.Kind {
+	case snapshot.EventSelfD:
+		if _, on := p.selfdArmed[e.UnitID]; on {
+			delete(p.selfdArmed, e.UnitID)
+		} else {
+			p.selfdArmed[e.UnitID] = e.Frame
+		}
 	case snapshot.EventCreated:
 		p.pending[e.UnitID] = true
 	case snapshot.EventFinished:
@@ -221,7 +238,10 @@ func (p *pass) event(e snapshot.Event) {
 			p.usedDef[e.DefID] = true
 		}
 	case snapshot.EventDestroyed:
-		if p.removedByOwner(e) {
+		selfd := p.selfDestructed(e)
+		removed := p.removedByOwner(e)
+		delete(p.selfdArmed, e.UnitID)
+		if removed {
 			// Taken down by its own side: the unit is gone, but nothing
 			// was lost and nothing was fought over.
 			delete(p.pending, e.UnitID)
@@ -251,6 +271,7 @@ func (p *pass) event(e snapshot.Event) {
 		dl.Team = append(dl.Team, e.Team)
 		dl.Cost = append(dl.Cost, round1(cost))
 		dl.Unfinished = append(dl.Unfinished, unfinished)
+		dl.SelfD = append(dl.SelfD, b2i(selfd))
 		p.usedDef[e.DefID] = true
 		delete(p.lastPos, e.UnitID)
 		p.deathUnit = append(p.deathUnit, e.UnitID)
@@ -277,6 +298,56 @@ func (p *pass) event(e snapshot.Event) {
 	}
 }
 
+// selfdMaxSec is the longest a self-destruct order is taken to stand before
+// the blast: BAR's countdowns are a few seconds (a commander's is the
+// longest), and a unit that dies a minute after an order nobody cancelled
+// died of something else.
+const selfdMaxSec = 60
+
+// selfDestructed is whether a destroyed unit blew itself up: its owner's
+// order was standing, and nothing else is named as the cause (a self-
+// destruct's blast names no killer; a capture with no causes names none
+// for any death, and then the standing order is the whole evidence).
+func (p *pass) selfDestructed(e snapshot.Event) bool {
+	at, on := p.selfdArmed[e.UnitID]
+	if !on || e.Frame-at > selfdMaxSec*30 {
+		return false
+	}
+	return e.Cause == nil || e.Cause.UnitID == e.UnitID || e.Cause.UnitID < 0
+}
+
+// fightSec is how recently a self-destructed unit must have been hurt to
+// count as fighting, and blastSec how long after its blast a death is still
+// its doing.
+const (
+	fightSec = 20
+	blastSec = 3
+)
+
+// fought is whether a self-destructed unit went in a fight: its blast killed
+// something (the engine credits the blast to the unit, in a capture that
+// names causes — an enemy or its own side's buildings, both worth telling),
+// or it had been hurt in the last fightSec. Otherwise its owner simply
+// cashed it in, which is no more a loss than a reclaim.
+func (p *pass) fought(e snapshot.Event) bool {
+	for _, f := range p.killsBy[e.UnitID] {
+		if f >= e.Frame && f <= e.Frame+blastSec*30 {
+			return true
+		}
+	}
+	if t := p.tracks[e.UnitID]; t != nil && !t.dead && t.def == e.DefID && t.hurt && e.Frame-t.hurtF <= fightSec*30 {
+		return true
+	}
+	return false
+}
+
+func b2i(b bool) int8 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // weaponReclaimed is the weapon id the engine names in a destroyed event's
 // cause when a builder reclaims a unit: one of its negative, engine-owned
 // damage types (measured on a real re-simulation: all 888 of them were a
@@ -301,6 +372,11 @@ const weaponReclaimed = -12
 //     aircraft dies later, in its crash, with no cause either. An
 //     UNFINISHED one going with no cause is a cancelled build.
 func (p *pass) removedByOwner(e snapshot.Event) bool {
+	if e.Kind == snapshot.EventDestroyed && p.selfDestructed(e) && !p.fought(e) {
+		// Blown up by its owner away from any fight: cashing it in (a
+		// commander for its metal), not a loss.
+		return true
+	}
 	if e.Kind == snapshot.EventDestroyed && p.evolved.replaced(e) {
 		// Evolved into its next form (evolve.go): replaced, not lost.
 		return true

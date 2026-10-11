@@ -6,10 +6,11 @@ import { test } from "node:test";
 import { fmtClock, fmtMetal, niceStep, timeStep } from "../src/summary/format";
 import { colorName, comparable, nameRuns, notices, readable, sideColor, sideName } from "../src/summary/model";
 import { knockouts, lossesByStep, wipedOf } from "../src/summary/losses";
-import { compass, fighters, momentStory } from "../src/summary/moments";
+import { armyDrop, compass, fighters, gapBattles, momentStories, momentStory } from "../src/summary/moments";
 import { clipAround, clipAt, clipEvent, clipSpan, watcher } from "../src/summary/watch";
 import { zonesOf } from "../src/summary/zones";
 import { lossKinds } from "../src/summary/losskinds";
+import { leadPct } from "../src/summary/series";
 import { clipOf } from "../src/summary/sections/awards";
 import type { Insights } from "../src/summary/types";
 
@@ -78,6 +79,50 @@ test("compass splits the map in thirds", () => {
   assert.equal(compass(i, 450, 800), "the south");
 });
 
+test("armyDrop measures the share of the army a side lost over a window", () => {
+  const file = ins({
+    series: {
+      t: [0, 15, 30, 45, 60], army: [[1000, 1000, 600, 500, 700], [0, 0, 0, 0, 0]], metalIncome: [], energyIncome: [],
+      armyCats: ["air", "heavy"], armyByCat: [[[600, 600, 200, 100, 300], [400, 400, 400, 400, 400]], [[], []]],
+    },
+  });
+  // From 1000 at the step before the window to its low of 500: half, and
+  // the aircraft are all of it.
+  assert.deepEqual(armyDrop(file, 0, 15 * 30, 45 * 30), { share: 0.5, mostly: "aircraft" });
+  // Under a quarter is not worth a story.
+  assert.equal(armyDrop(file, 0, 45 * 30, 60 * 30), null);
+});
+
+test("two swings inside one long battle each tell their own part of it", () => {
+  const defs = { "2": { name: "armpw", human: "Pawn", cost: 50 } };
+  const rows: [number, number][] = [
+    ...Array.from({ length: 10 }, () => [1000, 0] as [number, number]),
+    ...Array.from({ length: 6 }, () => [5000, 1] as [number, number]),
+  ];
+  const file = ins({
+    bounds: { minX: 0, maxX: 900, minZ: 0, maxZ: 900 },
+    teams: [{ team: 0, side: 0, player: "Ann" }, { team: 1, side: 1, player: "Cy" }],
+    defs,
+    series: { t: [0, 15, 30, 45], army: [[0, 100, 200, 300], [0, 100, 900, 1200]], metalIncome: [], energyIncome: [], armyCats: [], armyByCat: [] },
+    battles: [{ f0: 900, f1: 5400, x: 450, z: 450, r: 300, lost: [] }],
+    deaths: {
+      f: rows.map((r) => r[0]), def: rows.map(() => 2), team: rows.map((r) => r[1]), x: rows.map(() => 450), z: rows.map(() => 450),
+      cost: rows.map(() => 50), unfinished: rows.map(() => 0),
+    },
+  });
+  const a = { n: 1, f0: 900, f1: 1350, side: 1, delta: 0.3, battle: -1 };
+  const b = { n: 2, f0: 4800, f1: 5250, side: 0, delta: -0.3, battle: -1 };
+  // Told alone, each would be the whole battle.
+  assert.deepEqual(momentStory(file, a).focus, momentStory(file, b).focus);
+  const [sa, sb] = momentStories(file, [a, b]);
+  assert.notEqual(sa.title, sb.title);
+  assert.deepEqual([sa.focus?.f, sa.focus?.f1], [900, 1350 + 450]);
+  assert.deepEqual([sb.focus?.f, sb.focus?.f1], [4800 - 450, 5400]);
+  assert.match(sa.detail, /Part of a fight from 0:30 to 3:00\.$/);
+  // A battle only one moment tells stays whole.
+  assert.deepEqual(momentStories(file, [a])[0].focus, momentStory(file, a).focus);
+});
+
 test("a moment is named after what died in it", () => {
   const base = {
     battles: [],
@@ -94,6 +139,9 @@ test("a moment is named after what died in it", () => {
   // Ann's commander dies in the north-west: that names it.
   let st = momentStory(ins({ ...base, deaths: deaths([[1000, 1, 0, 100, 100], [1000, 2, 1, 100, 100]]) }), m);
   assert.equal(st.title, "Ann's commander falls in the north-west");
+  // One Ann blew up herself (a version 5 file marks it) says so.
+  const own = deaths([[1000, 1, 0, 100, 100], [1000, 2, 1, 100, 100]]);
+  assert.equal(momentStory(ins({ ...base, deaths: { ...own, selfd: [1, 0] } }), m).title, "Ann self-destructs their commander in the north-west");
   assert.equal(st.detail, "Blue team lost 1 unit (1.2k metal): Commander; Team 2 lost 1 unit (50 metal): Pawn.");
   // Its clip is about the commander's death, where it happened.
   assert.deepEqual(st.focus, { f: 1000, x: 100, z: 100, r: 700 });
@@ -285,4 +333,36 @@ test("embed: a game with no published replay has no summary", async (t) => {
   t.after(() => { globalThis.fetch = realFetch; });
   globalThis.fetch = (async () => Response.json([{ id: "bbbb", rid: null, placeholder: true }])) as unknown as typeof fetch;
   assert.equal(await findInsights("bbbb"), null);
+});
+
+test("leadPct reads the leader's margin both ways", () => {
+  const r = leadPct([100, 120, 0, 0], [120, 100, 0, 50], 0.0001);
+  assert.ok(Math.abs(r[0] - 20) < 0.01); // b 20% bigger
+  assert.ok(Math.abs(r[1] + 20) < 0.01); // a 20% bigger
+  assert.equal(Math.round(r[2]), 0); // both empty: even
+  // Smoothing keeps an opening lead finite.
+  const s = leadPct([0], [300], 300);
+  assert.equal(Math.round(s[0]), 100);
+});
+
+test("gapBattles fills a long stretch with no swing with its biggest battles", () => {
+  const F = 30;
+  const battle = (min: number, a: number, b: number) => ({ f0: min * 60 * F, f1: (min * 60 + 30) * F, x: 0, z: 0, r: 500,
+    lost: [{ n: 1, metal: a, top: [] }, { n: 1, metal: b, top: [] }] });
+  const steps = Array.from({ length: 40 }, (_, i) => i * 60);
+  const file = ins({
+    durationSec: 2400, stepSec: 60,
+    series: { t: steps, army: [], metalIncome: [], energyIncome: [], armyCats: [], armyByCat: [] },
+    battles: [battle(3, 5000, 4000), battle(15, 60000, 3000), battle(16, 500, 500), battle(25, 20000, 19500), battle(31, 4000, 6000)],
+    swing: { p: steps.map((_, i) => (i < 15 ? 0.5 : 0.3)), moments: [
+      { n: 1, f0: 3 * 60 * F, f1: 4 * 60 * F, side: 0, delta: 0.2, battle: 0 },
+      { n: 2, f0: 34 * 60 * F, f1: 35 * 60 * F, side: 1, delta: 0.2, battle: -1 },
+    ], fitted: false },
+  } as Partial<Insights>);
+  const got = gapBattles(file, file.swing!.moments, momentStories(file, file.swing!.moments));
+  // The 30-minute gap takes the 15-minute rout first, then the even trade
+  // at 25 and the small one at 31; the tiny one at 16 is not worth a line,
+  // and battle 1 overlaps a swing.
+  assert.deepEqual(got.map((g) => [g.battle, g.side, g.verdict]), [[1, 1, "decisive"], [3, -1, "even"], [4, 0, "win"]]);
+  assert.ok(got[0].delta > 0.15, "the line moved toward the side that won it");
 });

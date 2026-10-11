@@ -66,6 +66,16 @@ export const CSS = `
 .brs-root .brs-line { padding: 1px 0; overflow-wrap: anywhere; }
 .brs-root .brs-moment { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; border-top: 1px solid var(--brs-grid); }
 .brs-root .brs-moment:first-child { border-top: 0; }
+.brs-root .brs-rowplay { cursor: pointer; border-radius: 4px; padding-left: 4px; padding-right: 4px; }
+.brs-root .brs-rowplay:hover, .brs-root .brs-rowplay:focus-visible { background: var(--brs-bg); }
+.brs-root .brs-rowplay:hover .brs-play { border-color: var(--brs-accent); color: var(--brs-accent); }
+.brs-root .brs-swcols { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 4px; align-items: start; }
+.brs-root .brs-swcols .brs-losscol { padding: 3px 8px; min-width: 0; }
+.brs-root .brs-swloss { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; margin-top: 2px; }
+.brs-root .brs-swloss .brs-units { margin-top: 0; }
+.brs-root .brs-swingdot { cursor: pointer; }
+.brs-root .brs-swingdot circle { transition: r .1s; }
+.brs-root .brs-swingdot:hover circle, .brs-root .brs-swingdot:focus-visible circle { r: 13px; stroke: #fff; }
 .brs-root .brs-num { flex: 0 0 auto; width: 20px; height: 20px; border-radius: 50%; color: #000; font-weight: 600; font-size: 12px; text-align: center; line-height: 20px; margin-top: 1px; }
 .brs-root .brs-muted { color: var(--brs-muted); }
 .brs-root .brs-when { color: var(--brs-muted); font-variant-numeric: tabular-nums; }
@@ -109,6 +119,7 @@ export const CSS = `
 .brs-root .brs-brow.brs-on { background: var(--brs-bg); box-shadow: inset 2px 0 0 var(--brs-accent); }
 .brs-root .brs-numlight { background: var(--brs-text); }
 .brs-root .brs-brow.brs-on .brs-numlight { background: var(--brs-accent); }
+.brs-root .brs-num.brs-inline { display: inline-block; width: 18px; height: 18px; line-height: 18px; font-size: 11px; margin: 0; vertical-align: 1px; }
 .brs-root .brs-where { color: var(--brs-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .brs-root .brs-lossbar { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; height: 10px; }
 .brs-root .brs-half { display: flex; background: var(--brs-grid); border-radius: 2px; overflow: hidden; }
@@ -131,6 +142,7 @@ export const CSS = `
 .brs-root .brs-scale { display: inline-flex; margin-left: 10px; vertical-align: 1px; border: 1px solid var(--brs-line); border-radius: 4px; overflow: hidden; }
 .brs-root .brs-scale button { font: inherit; font-size: 10px; letter-spacing: .04em; text-transform: none; padding: 1px 7px; border: 0;
   background: transparent; color: var(--brs-muted); cursor: pointer; }
+.brs-root .brs-scale[hidden] { display: none; }
 .brs-root .brs-scale button + button { border-left: 1px solid var(--brs-line); }
 .brs-root .brs-scale button[aria-pressed="true"] { background: var(--brs-line); color: var(--brs-text); }
 .brs-root .brs-section > h3 .brs-scale { font-weight: 400; }
