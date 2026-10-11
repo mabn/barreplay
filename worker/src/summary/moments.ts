@@ -766,6 +766,8 @@ const GAP_MIN_SEC = 240;
 const GAP_APART_SEC = 90;
 /** A battle under this share of the game's biggest is not worth a line. */
 const GAP_BATTLE_SHARE = 0.1;
+/** ...nor one where neither side lost this much metal. */
+const GAP_MIN_METAL = 1000;
 /** The swing list holds at most this many entries in all. */
 const LIST_MAX = 20;
 /** A battle is a story of its own, wherever in the game, when it was over
@@ -813,6 +815,10 @@ export function gapBattles(ins: Insights, moments: Moment[], stories: MomentStor
   // Battles are judged by worth: a lost power plant costs its output too.
   const size = (l?: { n: number; metal: number; worth?: number }) => (l ? (priced ? lossWorth(l) : l.n) : 0);
   const total = (b: Battle) => size(b.lost[0]) + size(b.lost[1]);
+  // The floors below are plain METAL, like every number the page shows:
+  // judged by worth, 440 metal of wind turbines cleared a 1000-metal floor
+  // and read "decisively wins" over a 300-metal skirmish.
+  const metal = (l?: { metal: number }) => l?.metal ?? 0;
   const biggest = Math.max(...ins.battles.map(total));
   const told = new Set(stories.map((st) => st.battle).filter((b) => b >= 0));
   const gap = Math.max(GAP_MIN_SEC, ins.durationSec * GAP_SHARE) * SIM_FPS;
@@ -834,13 +840,14 @@ export function gapBattles(ins: Insights, moments: Moment[], stories: MomentStor
     const hi = Math.max(a, c);
     if (hi < EARLY_MARGIN * Math.min(a, c)) return false;
     if (!priced) return hi >= EARLY_MIN_UNITS;
-    return hi >= EARLY_MIN_METAL && hi >= EARLY_MIN_ARMY * armyAt(loser, b.f0);
+    const m = metal(b.lost[loser]);
+    return m >= EARLY_MIN_METAL && m >= EARLY_MIN_ARMY * armyAt(loser, b.f0);
   };
   const picked: number[] = [];
   // A story battle: short, and costly next to both armies.
   const storyBattle = (b: Battle) => {
     if (!priced || b.f1 - b.f0 > STORY_MAX_SEC * SIM_FPS) return false;
-    const [a, c] = [size(b.lost[0]), size(b.lost[1])];
+    const [a, c] = [metal(b.lost[0]), metal(b.lost[1])];
     return Math.max(a, c) >= STORY_MIN_METAL && a + c >= STORY_SHARE * Math.max(1, armyAt(0, b.f0) + armyAt(1, b.f0));
   };
   // Two battles at the same time and place are one story; at the same time
@@ -871,6 +878,7 @@ export function gapBattles(ins: Insights, moments: Moment[], stories: MomentStor
   const free = ins.battles.map((_, i) => i).filter((i) => {
     const b = ins.battles[i];
     return !told.has(i) && b.f0 >= opening && total(b) > 0 && total(b) >= GAP_BATTLE_SHARE * biggest
+      && (!priced || Math.max(metal(b.lost[0]), metal(b.lost[1])) >= GAP_MIN_METAL)
       && !moments.some((m) => b.f0 <= m.f1 && b.f1 >= m.f0);
   });
   while (marks.length < LIST_MAX) {
