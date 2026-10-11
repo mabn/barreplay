@@ -56,6 +56,24 @@ const PROJ_HEIGHT_GROW = 2000;
 const PROJ_HEIGHT_MAX = 0.6;
 // How far a starburst rocket's track bows sideways, as a share of its length.
 const PROJ_ROCKET_BOW = 0.08;
+// A shell's head and trail scale with its weapon's blast radius against a
+// full-size LRPC's (~70 elmos), so a Mini Starfall's 63-shell salvo (27.5)
+// reads as a spray of small shells rather than 63 Basilica rounds. Square
+// root, floored, so the smallest shell stays visible. Strategic missiles keep
+// their class size: their ring already says what they are.
+const PROJ_AOE_REF = 70;
+const PROJ_AOE_MIN_SCALE = 0.45;
+
+// projScale is row p's size factor from its weapon's blast radius (1 when
+// the weapon table does not say).
+function projScale(p, st) {
+  if (st.ring) return 1;
+  if (p._scale !== undefined) return p._scale;
+  const w = data && data.weapons && data.weapons.get(p.weapon);
+  const aoe = w && w.aoe;
+  p._scale = aoe > 0 ? Math.max(PROJ_AOE_MIN_SCALE, Math.min(1, Math.sqrt(aoe / PROJ_AOE_REF))) : 1;
+  return p._scale;
+}
 
 // projKnots is a steered row's flight as [df, x, y, z] knots: the launch,
 // its path, and the end position when the path stops short of it. Built once
@@ -161,6 +179,7 @@ function drawProjectiles(c, simFrame, u) {
     const reach = st.trail * 40 * scale + 60;
     if (hx < -reach || hx > viewW + reach || hy < -reach || hy > viewH + reach) continue;
     const [r, g, b] = projTeamRGB(p);
+    const size = projScale(p, st);
 
     // Trail: from max(birth, now - trail) to min(now, end), ONE stroke whose
     // gradient fades from nothing at the old end to the team colour at the
@@ -175,7 +194,7 @@ function drawProjectiles(c, simFrame, u) {
       grad.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${(0.85 * a0 * a0 * fade).toFixed(3)})`);
       grad.addColorStop(1, `rgba(${r}, ${g}, ${b}, ${(0.85 * a1 * fade).toFixed(3)})`);
       c.strokeStyle = grad;
-      c.lineWidth = st.width;
+      c.lineWidth = Math.max(1, st.width * size);
       c.beginPath();
       c.moveTo(tx, ty);
       for (let k = 1; k <= PROJ_TRAIL_STEPS; k++) {
@@ -187,7 +206,7 @@ function drawProjectiles(c, simFrame, u) {
     if (after > 0) continue; // landed: only the tail is left
 
     // The head, grown with height so an arc reads as an arc.
-    const rad = st.r * (1 + PROJ_HEIGHT_MAX * Math.min(1, Math.max(0, head[2]) / PROJ_HEIGHT_GROW));
+    const rad = st.r * size * (1 + PROJ_HEIGHT_MAX * Math.min(1, Math.max(0, head[2]) / PROJ_HEIGHT_GROW));
     if (st.ring) {
       c.fillStyle = `rgba(${r}, ${g}, ${b}, 0.35)`;
       c.beginPath();
