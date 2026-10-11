@@ -470,6 +470,96 @@ app.post("/api/admin/resim", async (c) => {
   return c.json({ job: res.job?.id, gameId, status: res.status });
 });
 
+// ON-DEMAND SUMMARIES: the viewer asks for a revision's newest game summary
+// when the one it found is older than the version it reads (or there is
+// none), and WAITS here while it is computed. Body {rid, version}: the
+// revision the page shows and the insights version it wants. The answer is
+// the summary itself (200, the insights JSON) — read from the bucket, so it
+// also gets past the CDN, which remembers the page's earlier 404 for hours.
+// When it cannot be had, a status the page reads as "keep what you show":
+// 503 busy/unavailable (no daemon connected, none computing that version, or
+// more readers waiting than the hub queues), 504 timeout, 502 failed.
+//
+// The work is done by a plain `bringest` holding a WebSocket to the
+// SummaryHub Durable Object (GET /api/insights/connect below), which owns
+// the capacity: summaryhub.ts has the rules.
+//
+// OPEN, like the upload route, because what it can cost is bounded: only a
+// revision that IS published (its .brp, or an older replay's .brw) whose
+// summary file is NOT, the hub's slots and short queue cap how much runs at
+// once, readers of one replay share one computation, and a failed one is not
+// retried for ten minutes. It answers any origin (the lavabalance embed asks
+// too) with a text/plain body, so the cross-origin POST needs no preflight.
+const INSIGHTS_RID_RE = /^(?:[0-9a-f]{32}(?:-[0-9a-f]{8})?|(?:[0-9]{4}-[0-9]{2}|undated)\/[0-9a-f]{32}(?:-[0-9a-f]{8})?)$/;
+export const hubStub = (env: Env) => env.SUMMARY_HUB.get(env.SUMMARY_HUB.idFromName("hub"));
+const anyOrigin = { "access-control-allow-origin": "*" };
+
+const insightsBody = async (env: Env, key: string, how: "fresh" | "computed"): Promise<Response | null> => {
+  const obj = await env.BUCKET.get(key);
+  if (obj === null) return null;
+  return new Response(obj.body, {
+    headers: { ...anyOrigin, "content-type": "application/json", "cache-control": "no-store", "x-summary": how },
+  });
+};
+
+app.options(
+  "/api/insights",
+  () =>
+    new Response(null, {
+      status: 204,
+      headers: { ...anyOrigin, "access-control-allow-methods": "POST", "access-control-allow-headers": "content-type" },
+    }),
+);
+
+app.post("/api/insights", async (c) => {
+  const fail = (body: Record<string, unknown>, status: 400 | 404 | 502 | 503 | 504) => c.json(body, status, anyOrigin);
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return fail({ error: "body must be JSON" }, 400);
+  }
+  const { rid, version } = (body ?? {}) as { rid?: unknown; version?: unknown };
+  if (typeof rid !== "string" || !INSIGHTS_RID_RE.test(rid)) {
+    return fail({ error: "rid must be a published revision id" }, 400);
+  }
+  if (typeof version !== "number" || !Number.isInteger(version) || version < 1 || version > 99) {
+    return fail({ error: "version must be an insights version number" }, 400);
+  }
+  const key = `replays/${rid}.insights${version}.json`;
+  const have = await insightsBody(c.env, key, "fresh");
+  if (have) return have;
+  const published =
+    (await c.env.BUCKET.head(`replays/${rid}.brp`)) !== null || (await c.env.BUCKET.head(`replays/${rid}.brw`)) !== null;
+  if (!published) return fail({ error: "no replay is published under that revision", rid }, 404);
+
+  const r = await hubStub(c.env).compute(rid, version);
+  switch (r.status) {
+    case "done": {
+      const made = await insightsBody(c.env, key, "computed");
+      return made ?? fail({ status: "failed", error: "the daemon reported success but published no file" }, 502);
+    }
+    case "failed":
+      return fail({ status: r.status, error: r.error }, 502);
+    case "timeout":
+      return fail({ status: r.status }, 504);
+    case "unavailable":
+      return fail({ status: r.status, reason: r.reason }, 503);
+    default:
+      return fail({ status: r.status }, 503);
+  }
+});
+
+// The summary daemon's connection: a WebSocket to the SummaryHub, opened by
+// `bringest` (cmd/bringest/summaries.go) with ?version=<insights version it
+// computes>&slots=<summaries at once>. Bearer-guarded like every other
+// daemon route; outbound from the daemon, so it still needs no inbound
+// connectivity.
+app.get("/api/insights/connect", async (c) => {
+  if (!authorized(c)) return c.json({ error: "unauthorized" }, 401);
+  return hubStub(c.env).fetch(c.req.raw);
+});
+
 // Job status for the browser that created it — a dropped stream or a pasted
 // re-sim link: pending -> processing -> done|error. Open, so like /api/admin/queue
 // it answers with a subset of the row rather than the row: the archive key is

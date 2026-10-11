@@ -7,12 +7,13 @@ interface __BaseEnv_Env {
 	ACCESS_TEAM_DOMAIN: "bartools.cloudflareaccess.com";
 	ACCESS_AUD: "94214a467ff0d56eac5a9b0f4637a189722107d5770b90d387af453642f2b83d";
 	REPLAY_INDEX: DurableObjectNamespace<import("./src/worker/index").ReplayIndex>;
+	SUMMARY_HUB: DurableObjectNamespace<import("./src/worker/index").SummaryHub>;
 	LAVABALANCE: Fetcher /* lavabalance */;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {
 		mainModule: typeof import("./src/worker/index");
-		durableNamespaces: "ReplayIndex";
+		durableNamespaces: "ReplayIndex" | "SummaryHub";
 	}
 	interface Env extends __BaseEnv_Env {}
 }

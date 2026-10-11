@@ -70,6 +70,7 @@
 //	bringest -once            # drain the backlog and exit
 //	bringest -resim -data ~/bar-data        # the independent full-view re-sim worker
 //	bringest -resim -data ~/bar-data -once  # re-sim the requested + current candidates and exit
+//	bringest -insights=false  # upload loop only, without serving on-demand summaries
 //
 // -upload names the whole deployment, not just a bucket: the job queue, the
 // stream downloads, the R2 pieces and the catalog row all belong to one worker
@@ -96,6 +97,8 @@ import (
 
 	"github.com/mabn/barreplay/internal/barapi"
 	"github.com/mabn/barreplay/internal/envfile"
+	"github.com/mabn/barreplay/internal/insights"
+	"github.com/mabn/barreplay/internal/insightsrun"
 	"github.com/mabn/barreplay/internal/packer"
 	"github.com/mabn/barreplay/internal/resim"
 )
@@ -135,6 +138,9 @@ func run() int {
 		minFree    = flag.Int("min-free", 512, "-resim: stop the engine when the host has less than this many MiB of memory left, instead of waiting for the kernel's OOM killer (0 disables)")
 		stats      = flag.Bool("stats", true, "print the packed .brp's size breakdown (per-section sizes + the top unit defs by encoded bytes) for each replay published, like pack -stats")
 		logPath    = flag.String("log", defaultLogPath, "also append everything printed to this file (empty disables)")
+		doInsights = flag.Bool("insights", true, "upload loop only: also compute game summaries on demand — hold a WebSocket to the worker, which hands this daemon the replays whose summary a reader found stale or missing, while they wait (summaries.go). Ignored with -resim")
+		insSlots   = flag.Int("insights-slots", 2, "-insights: how many summaries to compute at once")
+		cacheFlag  = flag.String("cache", "auto", "-insights: keep files read from the bucket here, shared with cmd/insights (empty keeps none; auto is "+insightsrun.AutoCacheHelp()+")")
 	)
 	flag.Parse()
 
@@ -219,6 +225,19 @@ func run() int {
 				return processStream(ctx, client, streamPath, *target, *workerDir, indexURL, *stats, st)
 			},
 		}
+	}
+
+	// The on-demand summaries are a service, not a backlog: nothing waits for
+	// them while the daemon is away, so -once has nothing to drain.
+	if !*doResim && *doInsights && !*once {
+		runner := insightsrun.New(insightsrun.Options{
+			Target:    dest,
+			Publish:   true,
+			WorkerDir: *workerDir,
+			Cache:     *cacheFlag,
+		})
+		svc := newSummaryService(indexURL, os.Getenv("REPLAY_PUT_TOKEN"), insights.Version, *insSlots, runner.One)
+		go svc.run(ctx)
 	}
 
 	if *once {

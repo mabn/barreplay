@@ -1844,3 +1844,86 @@ test("dev login: the callback stores a token that verifies, refuses one that doe
   const outHttps = await app.request("https://replay.example/admin/logout", {}, env);
   assert.match(outHttps.headers.get("set-cookie")!, /; Secure; Max-Age=0$/);
 });
+
+// The viewer's on-demand summary request: the summary itself when the
+// bucket has it, else whatever the hub answers — the file it just published,
+// or a status the page reads as "keep the summary you show".
+test("POST /api/insights answers with the summary, computed on demand", async () => {
+  const { env, bucket } = makeEnv();
+  const rid = `2026-10/${GAME_ID}`;
+  const key = `replays/${rid}.insights7.json`;
+  const asked: [string, number][] = [];
+  let answer: Record<string, unknown> = { status: "done" };
+  (env as unknown as { SUMMARY_HUB: unknown }).SUMMARY_HUB = {
+    idFromName: () => ({}),
+    get: () => ({
+      compute: async (r: string, v: number) => {
+        asked.push([r, v]);
+        if (answer.status === "done") bucket.objects.set(key, new TextEncoder().encode('{"version":7}'));
+        return answer;
+      },
+    }),
+  };
+  const post = (body: unknown, type = "application/json") =>
+    app.request("/api/insights", { method: "POST", body: JSON.stringify(body), headers: { "content-type": type } }, env);
+
+  // Not published: nothing to summarise, and the hub is not asked.
+  assert.equal((await post({ rid, version: 7 })).status, 404);
+  assert.equal(asked.length, 0);
+  bucket.objects.set(`replays/${rid}.brp`, new Uint8Array(10));
+
+  for (const [status, http] of [["busy", 503], ["unavailable", 503], ["timeout", 504], ["failed", 502]] as const) {
+    answer = { status, reason: "x", error: "x" };
+    const res = await post({ rid, version: 7 });
+    assert.equal(res.status, http, status);
+    assert.equal(res.headers.get("access-control-allow-origin"), "*");
+    assert.equal((await asJson(res)).status, status);
+  }
+
+  // Computed: the route reads what the daemon published and hands it over.
+  answer = { status: "done" };
+  const made = await post({ rid, version: 7 });
+  assert.equal(made.status, 200);
+  assert.equal(made.headers.get("x-summary"), "computed");
+  assert.equal(made.headers.get("access-control-allow-origin"), "*");
+  assert.deepEqual(await asJson(made), { version: 7 });
+  assert.deepEqual(asked.at(-1), [rid, 7]);
+
+  // Already there: served straight from the bucket (the page's earlier 404
+  // was the CDN's memory), with no work asked of anyone. The embed's
+  // text/plain body (no preflight) reads the same.
+  const n = asked.length;
+  const fresh = await post({ rid, version: 7 }, "text/plain");
+  assert.equal(fresh.status, 200);
+  assert.equal(fresh.headers.get("x-summary"), "fresh");
+  assert.equal(asked.length, n);
+
+  // An older replay published as pieces counts as published too.
+  bucket.objects.set(`replays/${GAME_ID}-0123abcd.brw`, new Uint8Array(10));
+  answer = { status: "busy" };
+  assert.equal((await post({ rid: `${GAME_ID}-0123abcd`, version: 7 })).status, 503);
+
+  for (const bad of [{ rid: "../x", version: 7 }, { rid, version: "7" }, { rid, version: 0 }, { rid: `${rid}/../y`, version: 7 }]) {
+    assert.equal((await post(bad)).status, 400, JSON.stringify(bad));
+  }
+});
+
+test("GET /api/insights/connect is bearer-guarded and hands the upgrade to the hub", async () => {
+  const { env } = makeEnv("secret");
+  let forwarded: Request | null = null;
+  (env as unknown as { SUMMARY_HUB: unknown }).SUMMARY_HUB = {
+    idFromName: () => ({}),
+    get: () => ({
+      fetch: async (r: Request) => {
+        forwarded = r;
+        return new Response("upgraded", { status: 200 });
+      },
+    }),
+  };
+  const url = "/api/insights/connect?version=7&slots=2";
+  assert.equal((await app.request(url, { headers: { upgrade: "websocket" } }, env)).status, 401);
+  assert.equal(forwarded, null);
+  const ok = await app.request(url, { headers: { upgrade: "websocket", authorization: "Bearer secret" } }, env);
+  assert.equal(await ok.text(), "upgraded");
+  assert.match(forwarded!.url, /version=7&slots=2$/);
+});

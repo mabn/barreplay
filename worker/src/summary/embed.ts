@@ -95,8 +95,9 @@ function ridPath(rid: string): string {
 }
 
 /** findInsights returns the newest insights file published for gameId, or
- * null when the game has no playable replay or no summary built yet. A
- * failure other than "not there" throws. */
+ * null when the game has no playable replay or no summary could be had (one
+ * missing at every version is computed on demand first). A failure other
+ * than "not there" throws. */
 export async function findInsights(gameId: string, opts: EmbedOptions = {}): Promise<Insights | null> {
   const replayOrigin = opts.replayOrigin ?? REPLAY_ORIGIN;
   const dataOrigin = opts.dataOrigin ?? DATA_ORIGIN;
@@ -112,9 +113,32 @@ export async function findInsights(gameId: string, opts: EmbedOptions = {}): Pro
     const r = await fetch(`${dataOrigin}/replays/${ridPath(rid)}.insights${v}.json`);
     if (r.status === 404) continue;
     if (!r.ok) throw new Error(`insights: HTTP ${r.status}`);
+    // An older summary is shown as it is, and the current one asked for in
+    // the background, so the NEXT visit finds it.
+    if (v !== INSIGHTS_VERSIONS[0]) void requestSummary(replayOrigin, rid);
     return (await r.json()) as Insights;
   }
-  return null;
+  // None at all: worth waiting for, since there is nothing else to show.
+  return requestSummary(replayOrigin, rid);
+}
+
+/** requestSummary asks the viewer's worker for rid's summary at the newest
+ * version (POST /api/insights), which computes it on demand and answers with
+ * it; null when it cannot (no daemon, too busy, failed). A text/plain body
+ * keeps the cross-origin POST a simple request — no preflight — and the
+ * route answers any origin, so the reply can be read. */
+async function requestSummary(replayOrigin: string, rid: string): Promise<Insights | null> {
+  try {
+    const r = await fetch(`${replayOrigin}/api/insights`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: JSON.stringify({ rid, version: INSIGHTS_VERSIONS[0] }),
+    });
+    if (!r.ok) return null;
+    return (await r.json()) as Insights;
+  } catch {
+    return null;
+  }
 }
 
 /** mountGameSummary draws gameId's summary into el and returns its handle,

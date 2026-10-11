@@ -1,4 +1,4 @@
-package main
+package insightsrun
 
 import (
 	"context"
@@ -159,6 +159,35 @@ func TestPrefersTheBRP(t *testing.T) {
 	ins := readInsights(t, filepath.Join(out, "replays", insights.FileName(rid)))
 	if ins.CostCoverage != insights.CostFull || ins.POV != insights.POVFull {
 		t.Errorf("cost/pov = %s/%s", ins.CostCoverage, ins.POV)
+	}
+}
+
+// A revision under a month folder (every publish since #83) is a revision,
+// not a game: the on-demand summary jobs name it exactly so.
+func TestMonthFolderRid(t *testing.T) {
+	bucket := t.TempDir()
+	brp := writeBRP(t, t.TempDir())
+	monthRid := "2026-10/" + gameID
+	dst := filepath.Join(bucket, "replays", "2026-10", gameID+".brp")
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(brp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := server(t, bucket, "")
+	defer srv.Close()
+	out := t.TempDir()
+	if err := newRunner(srv, out).one(context.Background(), monthRid); err != nil {
+		t.Fatal(err)
+	}
+	readInsights(t, filepath.Join(out, "replays", insights.FileName(monthRid)))
+	if ridRE.MatchString(gameID) || !ridRE.MatchString("undated/"+gameID+"-0123abcd") {
+		t.Error("ridRE: a bare gameId is a game, an undated revision is a revision")
 	}
 }
 

@@ -6,9 +6,10 @@ import app, { indexStub } from "./app";
 import { syncGames } from "./games";
 import { syncLava } from "./lavasync";
 import { JOB_SAMPLE_RETENTION_SEC, ReplayIndex } from "./replayindex";
+import { SummaryHub } from "./summaryhubdo";
 import { syncLobbies } from "./teiserver";
 
-export { ReplayIndex };
+export { ReplayIndex, SummaryHub };
 
 /** Which minute of the hour the sample sweep runs in. Any value does; not
  * zero, only so it does not share the tick with whatever else the platform
