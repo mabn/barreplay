@@ -58,6 +58,17 @@ export function swingChart(ins: Insights, watch: Watch | null, group: ChartGroup
     s("path", { d: linePath(c, t, d), fill: "none", stroke: "var(--brs-text)", "stroke-width": 1.5 }),
   );
 
+  // Each swing's minute, shaded in the colour of the side it moved toward:
+  // the numbered dot marks where the line ARRIVED, and without the band the
+  // drop leading up to it reads as something that happened before the swing.
+  const spans = s("g", { "pointer-events": "none" });
+  for (const m of sw.moments) {
+    const x0 = c.x(m.f0 / SIM_FPS);
+    const x1 = c.x(m.f1 / SIM_FPS);
+    spans.append(s("rect", { x: x0, y: c.top, width: Math.max(1, x1 - x0), height: c.bottom - c.top, fill: sideColor(ins, m.side), "fill-opacity": 0.12 }));
+  }
+  c.plot.prepend(spans);
+
   // Eliminations: a cross on the edge of the losing side's half.
   const marks = s("g");
   for (const k of knockouts(ins)) {

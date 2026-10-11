@@ -709,6 +709,13 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           since a raid's buildings often blow up just after the line moved.
                           A side the line moved toward that still lost MORE there is not said
                           to win: the title states the trade ("trades 114k metal for 69.9k").
+                          When NO battle holds the losses (spread over the map) and the losing
+                          side's army fell by >= ARMY_DROP_SHARE (25%) in the window, the moment
+                          is told as that: "Blue team loses 43% of its army[, mostly aircraft]"
+                          (moments.ts armyDrop), clipped over the whole window — the line moves
+                          on the army, which the losses chart (a share of everything owned)
+                          barely shows. The swing chart shades each moment's minute in the
+                          side's colour, since its dot marks where the line ARRIVED.
                           A span clip (watch.ts clipEvent) plays the WHOLE event however long,
                           20 s of context before it, and carries atEnd, which widens the
                           slider's #clipmark into a band over the event; capping it at a

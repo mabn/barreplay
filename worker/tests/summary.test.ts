@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { fmtClock, fmtMetal, niceStep, timeStep } from "../src/summary/format";
 import { colorName, comparable, nameRuns, notices, readable, sideColor, sideName } from "../src/summary/model";
 import { knockouts, lossesByStep, wipedOf } from "../src/summary/losses";
-import { compass, fighters, momentStories, momentStory } from "../src/summary/moments";
+import { armyDrop, compass, fighters, momentStories, momentStory } from "../src/summary/moments";
 import { clipAround, clipAt, clipEvent, clipSpan, watcher } from "../src/summary/watch";
 import { zonesOf } from "../src/summary/zones";
 import { lossKinds } from "../src/summary/losskinds";
@@ -76,6 +76,20 @@ test("compass splits the map in thirds", () => {
   assert.equal(compass(i, 450, 450), "the centre");
   assert.equal(compass(i, 800, 450), "the east");
   assert.equal(compass(i, 450, 800), "the south");
+});
+
+test("armyDrop measures the share of the army a side lost over a window", () => {
+  const file = ins({
+    series: {
+      t: [0, 15, 30, 45, 60], army: [[1000, 1000, 600, 500, 700], [0, 0, 0, 0, 0]], metalIncome: [], energyIncome: [],
+      armyCats: ["air", "heavy"], armyByCat: [[[600, 600, 200, 100, 300], [400, 400, 400, 400, 400]], [[], []]],
+    },
+  });
+  // From 1000 at the step before the window to its low of 500: half, and
+  // the aircraft are all of it.
+  assert.deepEqual(armyDrop(file, 0, 15 * 30, 45 * 30), { share: 0.5, mostly: "aircraft" });
+  // Under a quarter is not worth a story.
+  assert.equal(armyDrop(file, 0, 45 * 30, 60 * 30), null);
 });
 
 test("two swings inside one long battle each tell their own part of it", () => {

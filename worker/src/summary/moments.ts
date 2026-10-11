@@ -287,11 +287,18 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     }
     const lw = local ? local[won] : wl;
     const lo = local ? local[lose] : ll;
+    // No one battle holds it: the losses were spread over the map. The line
+    // moves on the ARMY, so say how much of it went — a ten-second burst
+    // somewhere is not what moved it — and watch the whole window.
+    const drop = b ? null : armyDrop(ins, lose, f0, f1);
     // The line moved toward W, but W can still have lost more there (its
     // army was bigger, or what it lost mattered less): then the title states
     // the trade rather than calling it a win the numbers beside it deny.
     const unit = (v: number) => (priced ? `${fmtMetal(v)} metal` : `${v} units`);
-    title = size(lw) === 0 || size(lo) >= 2 * size(lw) ? `${W} wins the fight${at(focus)}`
+    if (drop) {
+      focus = { f: f0, f1 };
+      title = `${L} loses ${Math.round(drop.share * 100)}% of its army${drop.mostly ? `, mostly ${drop.mostly}` : ""}`;
+    } else title = size(lw) === 0 || size(lo) >= 2 * size(lw) ? `${W} wins the fight${at(focus)}`
       : size(lw) <= size(lo) ? `${W} edges a trade${at(focus)}`
       : `${W} trades ${unit(size(lw))} for ${unit(size(lo))}${at(focus)}`;
   }
@@ -327,6 +334,49 @@ export function momentStories(ins: Insights, moments: Moment[]): MomentStory[] {
   const shared = new Set([...told].filter(([, n]) => n > 1).map(([b]) => b));
   if (!shared.size) return first;
   return moments.map((m, k) => (shared.has(first[k].battle) ? momentStory(ins, m, shared) : first[k]));
+}
+
+/** The share of its army a side must lose over a moment, with no single
+ * battle to tell, for the moment to be told as that loss. */
+const ARMY_DROP_SHARE = 0.25;
+
+/** What the army categories are called in a sentence ("mostly air"). */
+const CAT_WORDS: Record<string, string> = { air: "aircraft", light: "light units", medium: "medium units", heavy: "heavy units", experimental: "experimentals" };
+
+/** armyDrop is how much of side's army went over [f0, f1] — its value at
+ * the step before the window against the lowest it reached in it — and the
+ * category carrying most of that, when it is at least ARMY_DROP_SHARE. */
+export function armyDrop(ins: Insights, side: number, f0: number, f1: number): { share: number; mostly?: string } | null {
+  const s = ins.series;
+  const a = s.army?.[side];
+  if (!a?.length) return null;
+  // The last step at or before a frame.
+  const idx = (f: number) => {
+    let i = 0;
+    while (i + 1 < s.t.length && s.t[i + 1] <= f / SIM_FPS) i++;
+    return Math.min(i, a.length - 1);
+  };
+  const i0 = idx(f0);
+  const i1 = idx(f1);
+  let low = i0;
+  for (let i = i0; i <= i1; i++) if (a[i] < a[low]) low = i;
+  const start = a[i0];
+  if (!(start > 0) || (start - a[low]) / start < ARMY_DROP_SHARE) return null;
+  const out: { share: number; mostly?: string } = { share: (start - a[low]) / start };
+  const cats = s.armyByCat?.[side];
+  if (cats?.length === s.armyCats.length) {
+    let best = -1;
+    let bestDrop = 0;
+    cats.forEach((c, k) => {
+      const d = (c[i0] ?? 0) - (c[low] ?? 0);
+      if (d > bestDrop) {
+        bestDrop = d;
+        best = k;
+      }
+    });
+    if (best >= 0 && bestDrop >= 0.5 * (start - a[low])) out.mostly = CAT_WORDS[s.armyCats[best]] ?? s.armyCats[best];
+  }
+  return out;
 }
 
 /** biggestFight is the battle running inside [f0, f1] where the most metal
