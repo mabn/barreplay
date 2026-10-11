@@ -6,7 +6,7 @@
 // Below them, the ACHIEVEMENTS: the shortlist's rules a demo and the BAR API
 // can decide, judged in the browser (achievements/), loaded after the page
 // draws since they need the game's demo.
-import { loadAchievements, type AchievementResult, type Hit } from "../achievements";
+import { describe, loadAchievements, type AchievementResult, type Hit } from "../achievements";
 import { RARITY_NAMES, rarityOf } from "../achievements/rarity";
 import { h, s, section } from "../dom";
 import { comparable, sideColor, sideOfTeam, sideShort, teamColor } from "../model";
@@ -142,7 +142,7 @@ function renderAchievements(ins: Insights, opts: SummaryOptions, r: AchievementR
   const earned = [...r.earned].sort((a, b) => rarityOf(b.rule.id) - rarityOf(a.rule.id) || a.hits.length - b.hits.length);
   const cards = earned.map(({ rule, hits }) => h("div", { class: "brs-card brs-achcard" },
     h("div", { class: "brs-award-title" }, `★ ${rule.name} `, rarityChip(rule.id)),
-    h("div", { class: "brs-hint" }, rule.desc),
+    h("div", { class: "brs-hint" }, describe(rule)),
     h("ul", { class: "brs-achhits" }, ...hits.map((hit) => {
       const li = h("li", { class: hit.f !== undefined && watch ? "brs-seekable" : null }, whoOf(ins, hit), ": ", hit.text,
         hit.f !== undefined && watch ? h("span", { class: "brs-watch" }, " ▶") : null);
@@ -161,9 +161,9 @@ function renderAchievements(ins: Insights, opts: SummaryOptions, r: AchievementR
     h("div", { class: "brs-hint" }, "Judged from the game's demo (orders, chat, end-of-game totals) and the BAR API. Orders count what was ORDERED, which can include builds that were cancelled. End-of-game totals are per team."),
     ...r.notes.map((n) => h("div", { class: "brs-hint" }, `Note: ${n}.`)),
     cards.length ? h("div", { class: "brs-cards" }, ...cards) : h("div", { class: "brs-hint" }, "Nobody earned one in this game."),
-    r.missed.length ? h("details", { class: "brs-more" }, h("summary", undefined, `Not earned in this game (${r.missed.length})`), nameList(r.missed)) : null,
+    r.missed.length ? h("details", { class: "brs-more" }, h("summary", undefined, `Not earned in this game (${r.missed.length})`), nameList(r.missed.map((x) => ({ id: x.id, name: x.name, desc: describe(x) })))) : null,
     r.unknown.length ? h("details", { class: "brs-more" }, h("summary", undefined, `Can't be checked for this game (${r.unknown.length})`),
-      nameList(r.unknown.map((u) => ({ id: u.rule.id, name: u.rule.name, desc: u.rule.desc, why: u.why })))) : null,
+      nameList(r.unknown.map((u) => ({ id: u.rule.id, name: u.rule.name, desc: describe(u.rule), why: u.why })))) : null,
   ];
   return out.filter((x): x is Node => x !== null);
 }

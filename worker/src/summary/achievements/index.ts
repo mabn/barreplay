@@ -8,7 +8,8 @@ import { type Insights } from "../types";
 import { gather } from "./facts";
 import { RULES, type Hit, type Rule } from "./rules";
 
-export type { Hit, Rule } from "./rules";
+export type { Hit, Knob, Rule } from "./rules";
+export { describe } from "./rules";
 
 export interface AchievementResult {
   earned: { rule: Rule; hits: Hit[] }[];
@@ -35,7 +36,7 @@ export async function loadAchievements(ins: Insights, barApi: string, brpUrl: st
   const out: AchievementResult = { earned: [], missed: [], unknown: [], notes };
   for (const rule of RULES) {
     try {
-      const r = rule.check(F);
+      const r = rule.check(F, rule.knob?.value ?? NaN);
       if ("skip" in r) out.unknown.push({ rule, why: r.skip });
       else if (r.length) out.earned.push({ rule, hits: r });
       else out.missed.push(rule);
