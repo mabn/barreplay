@@ -711,6 +711,10 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           since a raid's buildings often blow up just after the line moved.
                           A side the line moved toward that still lost MORE there is not said
                           to win: the title states the trade ("trades 114k metal for 69.9k").
+                          With NO battle there, the fight is still ONE event: the burst's spot
+                          (moments.ts burstEvent: every death in the window within 1500 elmos
+                          of the densest 10 s burst, first to last), so the sentence counts
+                          exactly what the clip plays rather than the whole map's window.
                           When NO battle holds the losses (spread over the map) and the losing
                           side's army fell by >= ARMY_DROP_SHARE (25%) in the window, the moment
                           is told as that: "Blue team loses 43% of its army[, mostly aircraft]"
