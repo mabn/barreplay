@@ -886,7 +886,7 @@ function updateBuffBar() {
     if (chunkState[i] < 4 && !keyFrames[i]) continue;
     const a = (chunkStartIdx[i] / total * 100).toFixed(2) + '%';
     const b = ((chunkStartIdx[i] + data.chunks[i].count) / total * 100).toFixed(2) + '%';
-    const col = chunkState[i] >= 4 ? '#5a9fd0' : '#3a5568';
+    const col = chunkState[i] >= 4 ? '#d59a42' : '#5b4430';
     stops.push(`transparent ${a}`, `${col} ${a}`, `${col} ${b}`, `transparent ${b}`);
   }
   stops.push('transparent 100%');
@@ -3145,7 +3145,7 @@ function drawMapFrame() {
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(mapTex, x0, y0, x1 - x0, y1 - y0);
   } else {
-    ctx.fillStyle = '#0e1319';
+    ctx.fillStyle = '#1a1116';
     ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
   }
 
@@ -3163,7 +3163,7 @@ function drawMapFrame() {
     drawGrid(b, x0, y0, x1, y1, SMALL * 4, 'rgba(255,255,255,0.20)');   // large square (192) = 4x4 small
   }
 
-  ctx.strokeStyle = '#2d3a47';
+  ctx.strokeStyle = '#4b3a54';
   ctx.lineWidth = 1;
   ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
 }
@@ -3254,7 +3254,7 @@ function updateTooltip() {
   const name = defName(def), code = defCode(def);
   tooltip.innerHTML =
     `<h3>${name}${code !== name ? `<span class="code">${code}</span>` : ''}</h3>` +
-    (ghost ? `<div class="row"><span class="label">Status</span><span style="color:#8a98a6">ghost — last seen state</span></div>` : '') +
+    (ghost ? `<div class="row"><span class="label">Status</span><span style="color:#9a8aa8">ghost — last seen state</span></div>` : '') +
     `<div class="row"><span class="label">Unit</span><span>#${id}</span></div>` +
     `<div class="row"><span class="label">Team</span><span style="color:${teamColor[team] || '#fff'}">${teamNameById(team)}</span></div>` +
     `<div class="row"><span class="label">Position</span><span>${x}, ${z}</span></div>` +
@@ -3717,7 +3717,7 @@ function incomePeaks(simFrame, teams) {
 // HUD — bevelled panels, saturated knobs, a lit top edge — and beside this
 // sidebar's flat surfaces and muted labels it read as a transplant from another
 // program. So the row is built from the vocabulary the player list under it
-// already uses: the #222c36 track, the rounded 3px corners, a fill at low
+// already uses: the .rmeter track, the rounded 3px corners, a fill at low
 // opacity under a number in that series' own colour (.rmeter), and team colour
 // as the thing that says whose a number is (.pname). Where the two fills MEET
 // is the split BAR draws a knob on, and it carries the same reading without an
@@ -3744,7 +3744,7 @@ const TS_LEAD_MAX = 999;
 const TS_BAR_SHADE = 0.45;
 // A dead heat has no leading side, so its knob is neutral rather than one
 // team's colour (BAR's colorKnobMiddleGrey).
-const TS_TIE_KNOB = '#5a6773';
+const TS_TIE_KNOB = '#5e4f68';
 
 function shade(css, f) {
   return tintToCss(cssToTint(css).map(v => v * f));
@@ -4473,8 +4473,8 @@ function startFpsMonitor() {
   el.id = 'fpsmon';
   el.style.cssText =
     'position:absolute;left:8px;top:8px;z-index:20;pointer-events:none;' +
-    'background:rgba(20,26,33,0.82);border:1px solid #2a323c;border-radius:4px;' +
-    'padding:3px 7px;font:11px/1.5 monospace;color:#9fb0bf;' +
+    'background:rgba(28,20,32,0.82);border:1px solid #352840;border-radius:4px;' +
+    'padding:3px 7px;font:11px/1.5 monospace;color:#b9a9c6;' +
     'font-variant-numeric:tabular-nums;white-space:pre;';
   (document.getElementById('left') || document.body).appendChild(el);
 
@@ -5573,9 +5573,10 @@ function statsRow(j) {
 const SVGNS = 'http://www.w3.org/2000/svg';
 // The data hue, and the only colour in these charts. One series per chart, so
 // colour carries no information and must not vary: the title says what is
-// plotted. It is the same blue the collapsed row's progress bar is filled with.
-const CHART_HUE = '#4b90c4';
-const CHART_SURFACE = '#12181e';
+// plotted. It is the same lilac the collapsed row's progress bar is filled with
+// (style.css --lilac on --well, which is what the chart styles actually read).
+const CHART_HUE = '#c3a9dc';
+const CHART_SURFACE = '#110a0d';
 // Plot box. The height INCLUDES the x-axis band, so the labels are inside the
 // figure rather than in a scrollbar under it.
 const CH_W = 340, CH_H = 84, CH_L = 52, CH_R = 6, CH_T = 12, CH_B = 16;

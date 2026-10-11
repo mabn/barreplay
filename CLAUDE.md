@@ -1107,6 +1107,16 @@ internal/viz/             publish side of the viewer: the catalog row (catalog.g
 internal/viz/static.go    a replay's published form: its .brp alone (plus index.json), for serverless hosting
 worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as static files from R2 (no playback server);
                           worker/public + worker/index.html are THE front-end (the one copy in the repo).
+                          COLOURS (the LAVA scheme, Marcin's pick of the redesign mockups): every
+                          chrome colour in style.css is a token on :root — plum-black surfaces
+                          under an ember glow at the top of the page, gold (--accent) for the
+                          selected and the clickable, lilac for work in flight — so a restyle is
+                          an edit of that block. Team, unit, resource and status-chip colours
+                          are NOT tokens: they say something, and stay what they were. The
+                          SUMMARY keeps its own palette (worker/src/summary/styles.ts, the
+                          --brs-* variables, which the embed also themes) and #summary paints
+                          its own background, so the glow stops at its edge; setup.html, being
+                          self-contained, repeats the values inline.
                           UI CACHE-BUSTING: index.html references /app.<rev>.js /
                           /style.<rev>.css — the hash is in the FILENAME, not a ?v= query, so a
                           given byte sequence's URL never changes and public/_headers serves it
@@ -2405,8 +2415,8 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           ONE crosshair read all four at a moment, with one tooltip listing
                           every measure plus the phase (what explains a flat stretch); the same
                           readings come from keyboard focus + arrows, so no value is behind a
-                          pointer. ONE hue for all three (#4b90c4, the same blue the collapsed
-                          row's bar is filled with, validated against the #12181e surface): each
+                          pointer. ONE hue for all three (style.css --lilac, the colour the
+                          collapsed row's bar and every "processing" chip use, on --well): each
                           chart has a single series, so colour carries no information and the
                           title is what says what is plotted — and a single series needs no
                           legend. Marks are 2px lines over a 10% wash with hairline SOLID grid
