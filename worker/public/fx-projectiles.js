@@ -29,7 +29,8 @@
 
 // How each class looks. r: head radius in screen px; trail: its length in
 // sim frames; width: the trail's in px; head: the head's colour (the trail
-// is always the team's, which is what says whose it is); ring: a strategic
+// is always the team's, which is what says whose it is); glow: a soft halo
+// of this colour round the head (plasma shells); ring: a strategic
 // missile's head also gets a halo of this many radii in the team colour.
 // Keyed by the class CODE (FX_CLASS in app.js: 1 nuke, 2 anti-nuke, 3 EMP,
 // 4 tactical, 5 Juno, 6 artillery, 7 rocket): this file runs before app.js
@@ -40,7 +41,7 @@ const PROJ_STYLE = {
   3: { r: 4, trail: 60, width: 2.5, head: [175, 200, 255], ring: 2.2 }, // EMP
   4: { r: 3.5, trail: 45, width: 2.2, head: [255, 170, 90], ring: 2 }, // tactical
   5: { r: 3.5, trail: 45, width: 2.2, head: [150, 255, 150], ring: 2 }, // Juno
-  6: { r: 2.4, trail: 14, width: 1.6, head: [255, 225, 140], ring: 0 }, // artillery
+  6: { r: 2.4, trail: 14, width: 1.6, head: [255, 255, 255], ring: 0, glow: [225, 240, 255] }, // artillery: white plasma
   7: { r: 2.2, trail: 18, width: 1.4, head: [255, 255, 255], ring: 0 }, // rocket
 };
 const PROJ_DEFAULT_STYLE = { r: 2.2, trail: 14, width: 1.4, head: [255, 255, 255], ring: 0 };
@@ -211,6 +212,17 @@ function drawProjectiles(c, simFrame, u) {
       c.fillStyle = `rgba(${r}, ${g}, ${b}, 0.35)`;
       c.beginPath();
       c.arc(hx, hy, rad * st.ring, 0, Math.PI * 2);
+      c.fill();
+    }
+    if (st.glow) {
+      // Plasma: a soft white-blue glow round a white core.
+      const [gr, gg, gb] = st.glow;
+      const halo = c.createRadialGradient(hx, hy, 0, hx, hy, rad * 2.2);
+      halo.addColorStop(0, `rgba(${gr}, ${gg}, ${gb}, 0.7)`);
+      halo.addColorStop(1, `rgba(${gr}, ${gg}, ${gb}, 0)`);
+      c.fillStyle = halo;
+      c.beginPath();
+      c.arc(hx, hy, rad * 2.2, 0, Math.PI * 2);
       c.fill();
     }
     const [hr, hg, hb] = st.head;
