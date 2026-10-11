@@ -33,7 +33,10 @@
 // side's energy income), builds the model's income features from energy
 // instead of metal, and fits three models on the same games: the live one
 // (army + metal), army + energy, and army + metal + energy, printing them
-// side by side. Nothing it fits changes the live model:
+// side by side. It then fits every model again on each PHASE of a game alone
+// (early/mid/late thirds of each game, and 0-10 / 10-25 / 25+ minutes of
+// game time), to show which resource matters when. Nothing it fits changes
+// the live model:
 //
 //	go run ./cmd/winfit -energy ./ins
 //	go run ./cmd/winfit -energy -categories ./ins
@@ -94,6 +97,7 @@ type sample struct {
 	y    float64
 	w    float64
 	frac float64 // how far through its game, 0..1
+	sec  float64 // game time at the step's end, seconds
 }
 
 // minGames is the fewest games a fit is made from; under it a fit describes
@@ -171,6 +175,9 @@ func main() {
 		extra = []fitted{{energyModel, newton(energyModel, samples, *l2)}, {bothModel, newton(bothModel, samples, *l2)}}
 		fmt.Printf("\n== metal vs energy income, fitted on the same %d games (log loss / accuracy; all in-sample) ==\n", games)
 		table(append([]row{{"current", metalModel, current}, {"metal fit", metalModel, fit}}, fitRows(extra, " fit")...), samples)
+		models := []model{metalModel, energyModel, bothModel}
+		phaseReport("thirds of each game", thirds, models, samples, *l2)
+		phaseReport("game time", byClock, models, samples, *l2)
 	}
 	if *cats {
 		dir := *cacheDir
@@ -369,6 +376,62 @@ func table(rows []row, ss []sample) {
 	}
 }
 
+// A phase is a slice of every game's steps.
+type phase struct {
+	name string
+	in   func(sample) bool
+}
+
+// thirds splits each game by how far through it a step is, so every game
+// adds to every phase whatever its length.
+var thirds = []phase{
+	{"early", func(s sample) bool { return s.frac <= 1.0/3 }},
+	{"mid", func(s sample) bool { return s.frac > 1.0/3 && s.frac <= 2.0/3 }},
+	{"late", func(s sample) bool { return s.frac > 2.0/3 }},
+}
+
+// byClock splits by game time, which is what a player means by the early
+// game: a short game has no late phase here, a long one a long late phase.
+var byClock = []phase{
+	{"0-10 min", func(s sample) bool { return s.sec <= 600 }},
+	{"10-25 min", func(s sample) bool { return s.sec > 600 && s.sec <= 1500 }},
+	{"25+ min", func(s sample) bool { return s.sec > 1500 }},
+}
+
+// phaseReport fits every model on each phase's steps alone and scores it
+// there, so the coefficients say what each resource is worth at that point
+// of a game. Each step keeps its game weight, so within a phase a game counts
+// in proportion to the share of its steps that fall in it.
+func phaseReport(title string, phases []phase, models []model, ss []sample, l2 float64) {
+	fmt.Printf("\n== by phase (%s): each model fitted on that phase's steps only (in-sample) ==\n", title)
+	for _, ph := range phases {
+		var in []sample
+		for _, s := range ss {
+			if ph.in(s) {
+				in = append(in, s)
+			}
+		}
+		fmt.Printf("\n%s: %d steps\n", ph.name, len(in)/2)
+		if len(in) == 0 {
+			continue
+		}
+		cw := 0
+		for _, m := range models {
+			cw = max(cw, 5*len(m.feats)+2)
+		}
+		fmt.Printf("  %-14s %-24s %-*s %s\n", "", "features", cw, "coefficients", "log loss / accuracy")
+		for _, m := range models {
+			c := newton(m, in, l2)
+			a := measure(m, c, in).all
+			cs := make([]string, len(c))
+			for i, v := range c {
+				cs[i] = fmt.Sprintf("%.2f", v)
+			}
+			fmt.Printf("  %-14s %-24s %-*s %.3f %.1f%%\n", m.name, m.label, cw, strings.Join(cs, " "), a.loss/a.w, 100*a.right/a.w)
+		}
+	}
+}
+
 // load reads one insights file into mirrored, game-weighted samples, and
 // the game's id.
 func load(path string) (string, []sample, bool, error) {
@@ -408,7 +471,8 @@ func load(path string) (string, []sample, bool, error) {
 		for k := range f {
 			m[k] = -f[k]
 		}
-		out = append(out, sample{f, y, w, frac}, sample{m, 1 - y, w, frac})
+		sec := float64((i + 1) * insights.StepSec)
+		out = append(out, sample{f, y, w, frac, sec}, sample{m, 1 - y, w, frac, sec})
 	}
 	return ins.GameID, out, true, nil
 }
