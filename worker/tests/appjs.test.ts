@@ -15,6 +15,10 @@ import { fileURLToPath } from 'node:url';
 // opened. This test is that mistake's tripwire.
 
 const APP = readFileSync(fileURLToPath(new URL('../public/app.js', import.meta.url)), 'utf8');
+// The effect layers app.js draws through (see "effects" in app.js): separate
+// plain scripts sharing its globals, so the call check below reads them with it.
+const FX_FILES = ['fx-projectiles.js', 'fx-beams.js', 'fx-blasts.js'];
+const FX = FX_FILES.map((n) => readFileSync(fileURLToPath(new URL('../public/' + n, import.meta.url)), 'utf8'));
 
 // Globals the browser provides that node does not, so `in globalThis` cannot
 // vouch for them. Listed explicitly rather than pattern-matched: a genuinely
@@ -84,7 +88,7 @@ function declaredNames(code: string): Set<string> {
 }
 
 test('every function app.js calls is defined somewhere', () => {
-  const code = stripLiterals(APP);
+  const code = stripLiterals([APP, ...FX].join('\n'));
   const declared = declaredNames(code);
   const missing = new Set<string>();
   // Bare `name(` calls only — a leading '.' means it is a method on something
@@ -94,7 +98,7 @@ test('every function app.js calls is defined somewhere', () => {
     if (declared.has(n) || KEYWORDS.has(n) || BROWSER_GLOBALS.has(n) || n in globalThis) continue;
     missing.add(n);
   }
-  assert.deepEqual([...missing], [], 'called but never defined in app.js');
+  assert.deepEqual([...missing], [], 'called but never defined in app.js or its fx files');
 });
 
 // The pieces the viewer cannot start without. Named explicitly so deleting one
@@ -2268,4 +2272,99 @@ test('rangeFetch keeps .brp Range reads in Cache Storage, never on loopback, and
   assert.equal(store.size, keep);
   assert.ok(!store.has('brp-ranges:' + U), 'the oldest file was dropped');
   assert.ok(store.has(`brp-ranges:https://cdn-bar.fogofwar.dev/replays/n${keep + 2}.brp`));
+});
+
+
+// The effect records (.brp R, W and the wdefs fact in G) are read lazily at
+// the end of the file and decoded exactly as snapshot/projectiles.go decodes
+// them: viewer.fx.json is Go's own decode of the fixture's sections, written
+// by internal/viz's TestViewerFixtureUpToDate.
+test('effect records decode as Go decodes them, and index by frame', async () => {
+  const fixtures = new URL('./fixtures/', import.meta.url);
+  const BRP = new Uint8Array(readFileSync(fileURLToPath(new URL('viewer.brp', fixtures))));
+  const GO = JSON.parse(readFileSync(fileURLToPath(new URL('viewer.fx.json', fixtures)), 'utf8'));
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    if (start < 0) throw new Error('not found: ' + n);
+    const isAsync = APP.slice(start - 6, start) === 'async ';
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return (isAsync ? 'async ' : '') + APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+  const requests: string[] = [];
+  const api = new Function('BRP', 'requests', `
+    const brpWhole = null;
+    ${APP.match(/const FX_CLASS = [^\n]+/)![0]}
+    ${APP.match(/const FX_BUCKET = [^\n]+/)![0]}
+    const rangeFetch = async (url, off, len) => {
+      requests.push(off + '+' + len);
+      return new Response(BRP.slice(off, off + len), { status: 206 });
+    };
+    const dataURL = p => p;
+    ${['gunzipU8', 'ridPath', 'brpPath', 'brpRange', 'brpMetaExtent', 'brpLayout', 'varints',
+       'decodeProjectiles', 'decodeBlasts', 'weaponTable', 'fxIndex', 'brpSections', 'setEffects'].map(extract).join('\n')}
+    return { brpMetaExtent, brpLayout, brpSections, decodeProjectiles, decodeBlasts, weaponTable, fxIndex, setEffects };
+  `)(BRP, requests);
+
+  // The layout places G, R and W side by side at the end: one read for all.
+  const { mEnd } = api.brpMetaExtent(BRP);
+  const { gunzipSync } = await import('node:zlib');
+  const rec = JSON.parse(gunzipSync(BRP.subarray(10, mEnd)).toString());
+  const at = api.brpLayout(rec, mEnd);
+  const sec = await api.brpSections('viewer', at, ['G', 'R', 'W']);
+  assert.equal(requests.length, 1, requests.join(' '));
+
+  // Go omits an empty path and zero flags/targetType; the viewer always has
+  // the keys, path null when there is none.
+  const norm = (p: Record<string, unknown>) => ({ flags: 0, targetType: 0, ...p, path: p.path ?? null });
+  const tracks = api.decodeProjectiles(sec.R);
+  assert.deepEqual(tracks, GO.projectiles.map(norm));
+  assert.deepEqual(api.decodeBlasts(sec.W), GO.blasts);
+  const facts = JSON.parse(new TextDecoder().decode(sec.G));
+  assert.deepEqual(facts.map((f: { k: string }) => f.k), GO.factKinds);
+  const weapons = api.weaponTable(facts);
+  assert.equal(weapons.get(7).class, 'nuke');
+  assert.equal(weapons.get(10).beamtime, 0.3);
+  assert.equal(weapons.size, 6);
+
+  // Split and indexed: beams apart from the rest, each answerable by span.
+  const d: Record<string, any> = {};
+  api.setEffects(d, facts, tracks, api.decodeBlasts(sec.W));
+  assert.equal(d.fxState, 'ready');
+  assert.deepEqual(d.beams.map((p: { id: number }) => p.id), [6654]);
+  assert.deepEqual(d.projectiles.map((p: { id: number }) => p.id), [4000, 17, 4001, 17]);
+  const ids = (rows: { id: number; birth: number }[]) => rows.map((p) => p.id + '@' + p.birth);
+  assert.deepEqual(ids(d.fxIndex.projectiles.between(950, 950)), ['4000@900']);
+  assert.deepEqual(ids(d.fxIndex.projectiles.between(1094, 1094)), ['4000@900', '4001@1000']);
+  assert.deepEqual(ids(d.fxIndex.projectiles.between(0, 5000)), ['4000@900', '17@1000', '4001@1000', '17@2200']);
+  assert.deepEqual(ids(d.fxIndex.projectiles.between(1171, 2199)), []);
+  assert.deepEqual(d.fxIndex.blasts.between(1090, 1100).map((b: { f: number }) => b.f), [1095]);
+  assert.deepEqual(d.fxIndex.beams.between(1108, 1200).map((p: { id: number }) => p.id), [6654]);
+
+  // A long track sits in every bucket it spans and comes back once.
+  const long = api.fxIndex([{ s: 10, e: 1000 }, { s: 500, e: 520 }], (r: { s: number }) => r.s, (r: { e: number }) => r.e);
+  assert.deepEqual(long.between(0, 2000).map((r: { s: number }) => r.s), [10, 500]);
+  assert.deepEqual(long.between(600, 700).map((r: { s: number }) => r.s), [10]);
+});
+
+// Every effect layer is fingerprinted and loaded: listed in vite.config.ts's
+// assetRev (or public/_headers would cache a stale copy for a year), given a
+// script tag ahead of app.js, and defining the function drawEffects calls.
+test('the effect layers are fingerprinted, loaded before app.js and defined', () => {
+  const html = readFileSync(fileURLToPath(new URL('../index.html', import.meta.url)), 'utf8');
+  const vite = readFileSync(fileURLToPath(new URL('../vite.config.ts', import.meta.url)), 'utf8');
+  const app = html.indexOf('/app.__ASSET_REV__.js');
+  const fns: Record<string, string> = {
+    'fx-projectiles.js': 'drawProjectiles', 'fx-beams.js': 'drawBeams', 'fx-blasts.js': 'drawBlasts',
+  };
+  FX_FILES.forEach((n, i) => {
+    const base = n.replace(/\.js$/, '');
+    const tag = html.indexOf(`/${base}.__ASSET_REV__.js`);
+    assert.ok(tag > 0 && tag < app, `${n} is loaded before app.js`);
+    assert.ok(vite.includes(`"${base}"`), `${n} is fingerprinted`);
+    assert.ok(new RegExp(`function ${fns[n]}\\s*\\(`).test(FX[i]), `${n} defines ${fns[n]}()`);
+  });
 });

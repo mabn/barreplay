@@ -3166,6 +3166,21 @@ run dev` in `worker/` plus `pack -upload local`.)
   map you may be trying to read. The panel hides
   itself when the capture recorded no chat — which is what every replay published before
   the `C` section looks like.
+- **EFFECTS: projectiles, beams and blasts** (`app.js` "effects" part,
+  `public/fx-projectiles.js` / `fx-beams.js` / `fx-blasts.js`): a v6 re-sim from
+  widget 1.9.0 carries `R` tracks, `W` blasts and the `wdefs` weapon table in `G`.
+  None of it is in the head (`headFromBrp` only records where it is, `fxAt`):
+  `loadEffects` reads the three sections in one Range read (they sit side by side
+  at the end) while the sidebar's "Hide effects" switch is on, decodes them with
+  `decodeProjectiles`/`decodeBlasts` (twins of snapshot/projectiles.go, pinned by
+  worker/tests/fixtures/viewer.fx.json — Go's own decode of the viewer fixture)
+  and puts `tracks`/`projectiles`/`beams`/`blasts`/`weapons`/`facts` and
+  `fxIndex.{projectiles,beams,blasts}.between(f0, f1)` (128-frame buckets) on
+  `data`. `drawOverlay` calls `drawEffects` with the fractional sim frame, which
+  calls one function per fx file. Each fx file is a plain script sharing app.js's
+  globals, loaded BEFORE it and fingerprinted with it (vite.config.ts
+  SUBRESOURCES, index.html, public/_headers, the dev middleware and the smoke
+  regex all name them). A replay without the sections hides the switch.
 - **`internal/viz/icons.go`** renders **real BAR unit icons**. It embeds the vendored icon
   PNGs and BAR's `icontypes.lua` (a unit-name→bitmap gamedata table) under `bardata/`, and
   **parses the Lua data table directly in Go** (a small line/brace scanner, no `gopher-lua`)
