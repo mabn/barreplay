@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 const APP = readFileSync(fileURLToPath(new URL('../public/app.js', import.meta.url)), 'utf8');
 // The effect layers app.js draws through (see "effects" in app.js): separate
 // plain scripts sharing its globals, so the call check below reads them with it.
-const FX_FILES = ['fx-projectiles.js', 'fx-beams.js', 'fx-blasts.js'];
+const FX_FILES = ['fx-projectiles.js', 'fx-beams.js', 'fx-blasts.js', 'fx-shields.js'];
 const FX = FX_FILES.map((n) => readFileSync(fileURLToPath(new URL('../public/' + n, import.meta.url)), 'utf8'));
 
 // Globals the browser provides that node does not, so `in globalThis` cannot
@@ -2364,7 +2364,7 @@ test('the effect layers are fingerprinted, loaded before app.js and defined', ()
   const vite = readFileSync(fileURLToPath(new URL('../vite.config.ts', import.meta.url)), 'utf8');
   const app = html.indexOf('/app.__ASSET_REV__.js');
   const fns: Record<string, string> = {
-    'fx-projectiles.js': 'drawProjectiles', 'fx-beams.js': 'drawBeams', 'fx-blasts.js': 'drawBlasts',
+    'fx-projectiles.js': 'drawProjectiles', 'fx-beams.js': 'drawBeams', 'fx-blasts.js': 'drawBlasts', 'fx-shields.js': 'drawShields',
   };
   FX_FILES.forEach((n, i) => {
     const base = n.replace(/\.js$/, '');

@@ -2435,6 +2435,7 @@ function drawOverlay(u) {
   if (marks.length) drawMarks(simFrame);
   if (clip && clip.focus.path) drawClipPath(clip.focus.path, simFrame);
   if (!u) { drawEffects(octx, simFrame, null); return; }
+  drawShields(octx, simFrame, u); // fx-shields.js: under every other overlay mark
 
   // Cheap scan first: most frames have far fewer builders/under-construction
   // units than units, and many replays (v4) have none at all. Damage is the
