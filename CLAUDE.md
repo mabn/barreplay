@@ -836,12 +836,19 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           left out, owned value and battle teams, v5 self-destructs marked, v6 fitted
                           win weights) and app.js fetches .insights6, then 5, 4, 3, 2, 1. A version bump needs `insights -all` after
                           the deploy, or published replays keep their older summary.
-                          EMBEDDING ON ANOTHER SITE (lavabalance's game pages): the folder is an
-                          installable package (src/summary/package.json, "barreplay-summary",
-                          TypeScript source with no dependencies), which the other site pins to a
-                          commit with pnpm's subfolder git spec (github:mabn/barreplay#<sha>&path:
-                          /worker/src/summary) and bundles at ITS build time — no copied code, no
-                          stable URL on this deployment to keep alive. Its "./embed" entry
+                          EMBEDDING ON ANOTHER SITE (lavabalance's game pages): the other site
+                          IMPORTS THE LIBRARY AT RUN TIME — import("https://replay.fogofwar.dev/
+                          embed/summary.js") — so a deploy here reaches it with no change, pin or
+                          rebuild on its side (a build-time pnpm pin came first, and every
+                          summary fix then needed a lavabalance PR too). That URL is a one-line
+                          LOADER (`export * from "./summary.<hash>.js"`) that the summary-bundle
+                          plugin writes beside the fingerprinted build of embed.ts, both under
+                          /embed/: the loader is no-cache, the build immutable, and BOTH answer
+                          `access-control-allow-origin: *` (a cross-origin module import is
+                          refused without it). Those headers come from public/_headers, which
+                          is why /embed/* is excluded from run_worker_first; the smoke checks
+                          all three. `vite dev` serves /embed/summary.js as a fresh bundle.
+                          The module's entry
                           (embed.ts, mountGameSummary(el, gameId)) keeps every fact about where
                           things live HERE: it resolves the game's rid through GET /api/replays?id=
                           on replay.fogofwar.dev, fetches the newest insights from cdn-bar, and by
@@ -898,7 +905,8 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           (generateBundle) and rewrites the hashed URL back to the plain file
                           under `vite dev`.
                           STATIC ASSET CACHING: run_worker_first is ["/*", "!/icons/*",
-                          "!/ranks/*"]. The "/*" preserves the original guarantee (no route
+                          "!/ranks/*", ... "!/embed/*"] (the last for the embed's CORS/cache
+                          headers, see EMBEDDING ON ANOTHER SITE). The "/*" preserves the original guarantee (no route
                           falls through to the asset layer's single-page-application handling,
                           which would answer /api/* with index.html — the reason a plain LIST of
                           worker paths is a trap). The exclusions hand the two vendored prefixes

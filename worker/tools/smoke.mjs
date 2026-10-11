@@ -206,6 +206,30 @@ try {
     ico.status === 200 && !ico.headers.get("content-type")?.includes("text/html"),
     `${ico.status} ${ico.headers.get("content-type")}`);
 
+  // The game summary other sites import() at runtime (lavabalance). The
+  // stable name must revalidate so a deploy reaches them at once, the module
+  // it forwards to is immutable, and BOTH need CORS — a cross-origin module
+  // import is refused without it. All three come from public/_headers, so
+  // they only exist if /embed/* reaches the asset layer.
+  const loader = await get(base, "/embed/summary.js");
+  check("GET /embed/summary.js", loader.status === 200, String(loader.status));
+  check("/embed/summary.js is JavaScript",
+    /javascript/.test(loader.headers.get("content-type") ?? ""), String(loader.headers.get("content-type")));
+  check("/embed/summary.js allows any origin", loader.headers.get("access-control-allow-origin") === "*",
+    String(loader.headers.get("access-control-allow-origin")));
+  check("/embed/summary.js revalidates", loader.headers.get("cache-control") === "no-cache",
+    String(loader.headers.get("cache-control")));
+  const target = /from "\.\/(summary\.[0-9a-f]+\.js)"/.exec(loader.body)?.[1];
+  check("/embed/summary.js forwards to a fingerprinted module", Boolean(target), loader.body.slice(0, 200));
+  if (target) {
+    const mod = await get(base, `/embed/${target}`);
+    check(`GET /embed/${target}`, mod.status === 200 && mod.body.includes("mountGameSummary"), String(mod.status));
+    check("the embed module allows any origin", mod.headers.get("access-control-allow-origin") === "*",
+      String(mod.headers.get("access-control-allow-origin")));
+    check("the embed module is immutable",
+      (mod.headers.get("cache-control") ?? "").includes("immutable"), String(mod.headers.get("cache-control")));
+  }
+
   // A vendored unit icon: the other _headers rule, and the exclusion that
   // keeps a cold replay's 300-650 icon requests off the Worker. Named from the
   // synced directory rather than hardcoded — the bitmap set is BAR's, and a

@@ -95,9 +95,9 @@ function dataBase(): Plugin {
 // which app.js reads from window.__SUMMARY_JS__, so app.js itself does not
 // change when only the summary does. `vite dev` serves a fresh bundle per
 // request at a fixed /summary.dev.js.
-async function bundleSummary(): Promise<string> {
+async function bundleSummary(entry = "index.ts"): Promise<string> {
   const out = await esbuild({
-    entryPoints: [fileURLToPath(new URL("./src/summary/index.ts", import.meta.url))],
+    entryPoints: [fileURLToPath(new URL(`./src/summary/${entry}`, import.meta.url))],
     bundle: true,
     format: "esm",
     target: "es2022",
@@ -109,16 +109,30 @@ async function bundleSummary(): Promise<string> {
 
 const summaryName = (code: string) => `summary.${createHash("sha256").update(code).digest("hex").slice(0, 8)}.js`;
 
+// The summary for OTHER SITES (src/summary/embed.ts, mountGameSummary), which
+// import it from this deployment at run time — `import("https://replay.
+// fogofwar.dev/embed/summary.js")` — so a deploy here reaches them with no
+// change on their side. /embed/summary.js is the one stable name: a two-line
+// module, served no-cache, that re-exports the fingerprinted bundle beside it
+// (embed/summary.<rev>.js, immutable). Both live under /embed/, which
+// wrangler.jsonc hands to the asset layer so public/_headers can give them
+// their CORS and cache rules (a cross-origin module import needs the former).
+const EMBED_LOADER = "embed/summary.js";
+const embedLoader = (bundle: string) =>
+  "// The game summary for other sites; see worker/vite.config.ts.\n" +
+  `export * from "./${bundle}";\n`;
+
 function summaryBundle(): Plugin {
   let isBuild = false;
   let built: string | null = null;
+  let embed: string | null = null;
   return {
     name: "summary-bundle",
     configResolved(cfg) {
       isBuild = cfg.command === "build";
     },
     async buildStart() {
-      if (isBuild) built = await bundleSummary();
+      if (isBuild) [built, embed] = await Promise.all([bundleSummary(), bundleSummary("embed.ts")]);
     },
     async transformIndexHtml(html) {
       if (!isBuild) return html.replaceAll("__SUMMARY_MODULE__", "/summary.dev.js");
@@ -128,14 +142,22 @@ function summaryBundle(): Plugin {
     async generateBundle() {
       built ??= await bundleSummary();
       this.emitFile({ type: "asset", fileName: summaryName(built), source: built });
+      embed ??= await bundleSummary("embed.ts");
+      const embedFile = summaryName(embed);
+      this.emitFile({ type: "asset", fileName: "embed/" + embedFile, source: embed });
+      this.emitFile({ type: "asset", fileName: EMBED_LOADER, source: embedLoader(embedFile) });
     },
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
-        if (!req.url?.startsWith("/summary.dev.js")) return next();
+        const entry = req.url?.startsWith("/summary.dev.js")
+          ? "index.ts"
+          : req.url?.startsWith("/" + EMBED_LOADER) ? "embed.ts" : null;
+        if (!entry) return next();
         try {
-          const code = await bundleSummary();
+          const code = await bundleSummary(entry);
           res.setHeader("content-type", "text/javascript; charset=utf-8");
           res.setHeader("cache-control", "no-cache");
+          res.setHeader("access-control-allow-origin", "*");
           res.end(code);
         } catch (e) {
           next(e);
