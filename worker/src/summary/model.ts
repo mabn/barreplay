@@ -151,10 +151,11 @@ const VERSION_FEATURES: [number, string][] = [
   [6, "fitted win odds"],
   [7, "game end at the resign, story battles, friendly fire"],
   [8, "battle titles that say what did the killing"],
+  [9, "calmer win odds that move with the fighting"],
 ];
 
 /** The newest insights version the page knows (index.ts INSIGHTS_VERSIONS[0]). */
-export const LATEST_INSIGHTS = 8;
+export const LATEST_INSIGHTS = 9;
 
 /** notices are the caveats the page states up front, in reading order. */
 export function notices(ins: Insights): string[] {

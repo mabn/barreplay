@@ -18,7 +18,7 @@ import type { Insights } from "../src/summary/types";
 
 function ins(over: Partial<Insights> = {}): Insights {
   return {
-    version: 8, causes: true, gameId: "g", durationSec: 600, stepSec: 15, costCoverage: "full", pov: "full",
+    version: 9, causes: true, gameId: "g", durationSec: 600, stepSec: 15, costCoverage: "full", pov: "full",
     bounds: { minX: 0, maxX: 1, minZ: 0, maxZ: 1 },
     sides: [{ ally: 0, teams: [0], players: ["Ann", "Bob"], color: "#112233" }, { ally: 1, teams: [1], players: ["Cy"] }],
     teams: [], defs: {},
@@ -58,7 +58,7 @@ test("notices say why something is missing", () => {
   assert.match(notices(ins({ pov: "ally" }))[0], /re-simulation/);
   assert.match(notices(ins({ costCoverage: "army" }))[0], /armed mobile units only/);
   // An older file says what it lacks; a capture without killers says so.
-  assert.equal(notices(ins({ version: 5 }))[0], "Outdated report (v5), missing: fitted win odds, game end at the resign, story battles, friendly fire, battle titles that say what did the killing. It updates when summaries are recomputed.");
+  assert.equal(notices(ins({ version: 5 }))[0], "Outdated report (v5), missing: fitted win odds, game end at the resign, story battles, friendly fire, battle titles that say what did the killing, calmer win odds that move with the fighting. It updates when summaries are recomputed.");
   assert.match(notices(ins({ causes: false }))[0], /does not record killers/);
 });
 

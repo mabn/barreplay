@@ -35,8 +35,9 @@ type Moment struct {
 	// the window, -1 when none was.
 	Battle int `json:"battle"`
 	// Army and Eco split the shift between what moved it: the share of the
-	// model's move toward Side that came from army value, and from metal
-	// income (last-minute and accumulated together). They sum to 1; a
+	// model's move toward Side that came from the armies (army value, and
+	// from Version 9 the metal each side destroyed), and from metal income
+	// (recent and accumulated together). They sum to 1; a
 	// feature that moved AGAINST Side counts as 0. Version 7 and later.
 	Army float64 `json:"army"`
 	Eco  float64 `json:"eco"`
@@ -47,23 +48,31 @@ type Moment struct {
 // antisymmetric (swapping the sides negates every one), so an even game reads
 // 50% by construction.
 //
-// The coefficients are cmd/winfit's output over published games with a known
-// winner (2026-10-11: 1191 full-view Version 6 summaries, refitted with the
-// 25k smoothing below). Income carries the line; army value adds less. Fitting per
+// The coefficients are experiments/winmodel's fit over 1217 published
+// full-view games with a known winner (2026-10-11, Versions 6-8, each cut
+// where it was decided). Version 9 added the TRADE feature (metal each side
+// has destroyed) and stretched the income window from one minute to three:
+// out of sample the accuracy (77.0%) and log loss (0.478) are those of the
+// Version 7 model, but the line jitters a third less, and of its big moves
+// past the opening two thirds now come with a fight one side lost or an
+// elimination (44% before) — 0.57 moves a game with nothing to name, against
+// 1.71. Income still carries most of the line, which is why the window
+// matters: a one-minute window let every economy blip swing it. Fitting per
 // category (winfit -categories) made large ranked team games steeper and
-// unranked ones flatter but gained little over this one model.
+// unranked ones flatter but gained little over this one model; the players'
+// OpenSkill difference added nothing (BAR balances its teams).
 var WinModel = struct {
 	Coef   [swingFeatures]float64
 	Fitted bool
 	Games  int // games the fit saw
 }{
-	Coef:   [swingFeatures]float64{1.904, 4.925, 3.988},
+	Coef:   [swingFeatures]float64{1.597, 5.294, 4.149, 1.788},
 	Fitted: true,
-	Games:  1191,
+	Games:  1217,
 }
 
 const (
-	swingFeatures = 3
+	swingFeatures = 4
 	// The smoothing constants are VIRTUAL METAL added to both sides before
 	// a ratio is taken (metal for army and cumulative income, metal/s for
 	// income), so 190 against 559 metal of army in the opening reads as
@@ -75,8 +84,12 @@ const (
 	swingArmyK   = 25000
 	swingIncomeK = 250
 	swingCumK    = 25000
-	// swingIncomeSteps is the trailing window income is averaged over.
-	swingIncomeSteps = 4
+	swingTradeK  = 25000
+	// swingIncomeSteps is the trailing window income is averaged over:
+	// three minutes. One minute (Versions 2-8) predicted no better and made
+	// most of the line's big moves ones no event explains (an extractor
+	// field coming online, converters toggling, a refunded build).
+	swingIncomeSteps = 12
 
 	// A moment is a shift over momentSteps of at least momentMin, at least
 	// momentGap steps from a bigger one; at most maxMoments are kept.
@@ -102,19 +115,21 @@ const (
 
 // SwingFeatures returns the model's inputs at every step of a two-sided
 // series, side 0 against side 1: the log ratio of army value, of metal income
-// over the last minute, and of metal income accumulated so far.
-func SwingFeatures(s Series) [][swingFeatures]float64 {
+// over the last swingIncomeSteps, of metal income accumulated so far, and of
+// the metal each side has destroyed so far (killed, from Killed).
+func SwingFeatures(s Series, killed [2][]float64) [][swingFeatures]float64 {
 	if len(s.Army) != 2 || len(s.MetalIncome) != 2 {
 		return nil
 	}
 	n := len(s.T)
 	out := make([][swingFeatures]float64, n)
-	var cum [2]float64
+	var cum, kill [2]float64
 	for i := 0; i < n; i++ {
 		var army, inc [2]float64
 		for side := 0; side < 2; side++ {
 			army[side] = at(s.Army[side], i)
 			cum[side] += at(s.MetalIncome[side], i) * StepSec
+			kill[side] += at(killed[side], i)
 			lo := i - swingIncomeSteps + 1
 			if lo < 0 {
 				lo = 0
@@ -128,6 +143,35 @@ func SwingFeatures(s Series) [][swingFeatures]float64 {
 			math.Log((army[0] + swingArmyK) / (army[1] + swingArmyK)),
 			math.Log((inc[0] + swingIncomeK) / (inc[1] + swingIncomeK)),
 			math.Log((cum[0] + swingCumK) / (cum[1] + swingCumK)),
+			math.Log((kill[0] + swingTradeK) / (kill[1] + swingTradeK)),
+		}
+	}
+	return out
+}
+
+// Killed is the metal each of two sides destroyed in each step: the other
+// side's losses that were fought for (not those going down with an
+// eliminated team), by the step the death fell in. Every loss in Deaths
+// counts, whoever the engine credited, so it needs no causes.
+func Killed(o *Insights) [2][]float64 {
+	var out [2][]float64
+	n := len(o.Series.T)
+	for s := range out {
+		out[s] = make([]float64, n)
+	}
+	side := map[int32]int{}
+	for _, t := range o.Teams {
+		side[t.Team] = t.Side
+	}
+	wiped := wipedDeaths(o.Deaths, o.Eliminated)
+	d := o.Deaths
+	for i, f := range d.F {
+		s, ok := side[d.Team[i]]
+		if !ok || s < 0 || s > 1 || wiped[i] || i >= len(d.Cost) {
+			continue
+		}
+		if st := int(f) / (StepSec * simFPS); st < n {
+			out[1-s][st] += d.Cost[i]
 		}
 	}
 	return out
@@ -159,7 +203,7 @@ func swing(o *Insights, ecoDef func(int32) bool) *Swing {
 	if len(o.Sides) != 2 || o.POV != POVFull {
 		return nil
 	}
-	feats := SwingFeatures(o.Series)
+	feats := SwingFeatures(o.Series, Killed(o))
 	if len(feats) == 0 {
 		return nil
 	}
@@ -218,7 +262,8 @@ func ecoLost(o *Insights, ecoDef func(int32) bool, side int, f0, f1 int32) bool 
 }
 
 // drivers splits the model's move toward side between step lo and hi into
-// the share carried by army value and by income.
+// the share carried by the armies (their value, and the metal each side
+// destroyed: what fighting moves) and by income.
 func drivers(feats [][swingFeatures]float64, lo, hi, side int) (army, eco float64) {
 	if lo < 0 || hi >= len(feats) {
 		return 0, 0
@@ -228,7 +273,7 @@ func drivers(feats [][swingFeatures]float64, lo, hi, side int) (army, eco float6
 		sign = -1
 	}
 	dz := func(k int) float64 { return sign * WinModel.Coef[k] * (feats[hi][k] - feats[lo][k]) }
-	a := math.Max(0, dz(0))
+	a := math.Max(0, dz(0)+dz(3))
 	e := math.Max(0, dz(1)+dz(2))
 	if a+e == 0 {
 		return 0, 0

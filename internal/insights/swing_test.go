@@ -29,14 +29,14 @@ func TestSwingIsSymmetric(t *testing.T) {
 		a0[i] = float64(i * 2000)
 		a1[i] = float64(i * 1200)
 	}
-	even := SwingFeatures(series(a0, a0, flat(n, 10), flat(n, 10)))
+	even := SwingFeatures(series(a0, a0, flat(n, 10), flat(n, 10)), [2][]float64{flat(n, 500), flat(n, 500)})
 	for i, f := range even {
 		if p := WinProb(WinModel.Coef, f); p != 0.5 {
 			t.Fatalf("even game step %d = %v, want 0.5", i, p)
 		}
 	}
-	ab := SwingFeatures(series(a0, a1, flat(n, 240), flat(n, 160)))
-	ba := SwingFeatures(series(a1, a0, flat(n, 160), flat(n, 240)))
+	ab := SwingFeatures(series(a0, a1, flat(n, 240), flat(n, 160)), [2][]float64{flat(n, 900), flat(n, 300)})
+	ba := SwingFeatures(series(a1, a0, flat(n, 160), flat(n, 240)), [2][]float64{flat(n, 300), flat(n, 900)})
 	for i := range ab {
 		p, q := WinProb(WinModel.Coef, ab[i]), WinProb(WinModel.Coef, ba[i])
 		if math.Abs(p+q-1) > 1e-9 {
@@ -80,6 +80,32 @@ func TestMoments(t *testing.T) {
 	o.POV = POVAlly
 	if swing(o, nil) != nil {
 		t.Error("a one-sided capture got a swing line")
+	}
+}
+
+// Killed credits each side with the other side's fought-for losses, by
+// step, and the line moves toward the side that destroyed more.
+func TestKilledMovesTheLine(t *testing.T) {
+	n := 20
+	o := &Insights{
+		POV: POVFull, Sides: []Side{{Ally: 0}, {Ally: 1}}, DurationSec: float64(n * StepSec),
+		Teams:  []Team{{Team: 0, Side: 0}, {Team: 1, Side: 1}, {Team: 2, Side: -1}},
+		Series: series(flat(n, 20000), flat(n, 20000), flat(n, 50), flat(n, 50)),
+		Deaths: Deaths{
+			F:    []int32{10 * StepSec * simFPS, 10*StepSec*simFPS + 5, 11 * StepSec * simFPS, 12 * StepSec * simFPS, 15 * StepSec * simFPS},
+			Team: []int32{1, 1, 0, 2, 1},
+			Cost: []float64{30000, 10000, 2000, 999, 7777},
+		},
+		// Team 1 is out at step 15: what died with it is no kill.
+		Eliminated: []Elimination{{F: 15 * StepSec * simFPS, Team: 1}},
+	}
+	k := Killed(o)
+	if k[0][10] != 40000 || k[1][11] != 2000 || k[0][15] != 0 || k[0][12]+k[1][12] != 0 {
+		t.Fatalf("killed = %v", k)
+	}
+	f := SwingFeatures(o.Series, k)
+	if p, q := WinProb(WinModel.Coef, f[9]), WinProb(WinModel.Coef, f[10]); p != 0.5 || q <= 0.55 {
+		t.Errorf("side 0 destroying 40k metal moved the line %v -> %v", p, q)
 	}
 }
 
