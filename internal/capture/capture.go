@@ -34,6 +34,8 @@ type Stats struct {
 	Facts, DamageWindows, Lives, Visibility, Hits, UnitEnds int
 	// Projectile and beam tracks and strong explosions (protocol 5).
 	Projectiles, Blasts int
+	// Shield charge readings (protocol 6).
+	Shields int
 	// Profile holds the engine's internal time-profiler records (the final
 	// P record, emitted once at game over), largest first. Profiler scopes nest (e.g.
 	// "Sim::Path" is also inside "Sim"), so entries overlap and do not sum to

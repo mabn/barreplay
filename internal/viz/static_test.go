@@ -244,6 +244,17 @@ func writeViewerFixture(t *testing.T, dir string) string {
 			t.Fatal(err)
 		}
 	}
+	// Shield readings (Q): a unit drained and refilled, another switched off.
+	for _, sh := range []snapshot.Shield{
+		{Frame: 900, Unit: 100, Power: 6175, Enabled: true},
+		{Frame: 1000, Unit: 100, Power: 0, Enabled: true},
+		{Frame: 1100, Unit: 100, Power: 3100, Enabled: true},
+		{Frame: 1000, Unit: 200, Power: 4000, Enabled: false},
+	} {
+		if err := w.WriteShield(sh); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +303,7 @@ func economyJSON(t *testing.T, path string) []byte {
 }
 
 // fxJSON is what the viewer's projectile and blast decoders must produce for a
-// file: snapshot's own decode of the R and W sections, and the weapon table
+// file: snapshot's own decode of the R, W and Q sections, and the weapon table
 // out of the wdefs fact, as JSON.
 func fxJSON(t *testing.T, path string) []byte {
 	t.Helper()
@@ -313,6 +324,10 @@ func fxJSON(t *testing.T, path string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
+	shields, err := bf.Shields()
+	if err != nil {
+		t.Fatal(err)
+	}
 	facts, err := bf.Facts()
 	if err != nil {
 		t.Fatal(err)
@@ -321,7 +336,7 @@ func fxJSON(t *testing.T, path string) []byte {
 	for _, fc := range facts {
 		kinds = append(kinds, fc.Kind)
 	}
-	b, err := json.MarshalIndent(map[string]any{"projectiles": ps, "blasts": bs, "factKinds": kinds}, "", " ")
+	b, err := json.MarshalIndent(map[string]any{"projectiles": ps, "blasts": bs, "shields": shields, "factKinds": kinds}, "", " ")
 	if err != nil {
 		t.Fatal(err)
 	}

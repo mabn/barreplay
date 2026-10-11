@@ -24,6 +24,7 @@ type recordingWriter struct {
 	unitEnds    []snapshot.UnitEnd
 	projectiles []snapshot.Projectile
 	blasts      []snapshot.Blast
+	shields     []snapshot.Shield
 	closed      bool
 }
 
@@ -64,6 +65,10 @@ func (r *recordingWriter) WriteProjectile(p snapshot.Projectile) error {
 }
 func (r *recordingWriter) WriteBlast(b snapshot.Blast) error {
 	r.blasts = append(r.blasts, b)
+	return nil
+}
+func (r *recordingWriter) WriteShield(s snapshot.Shield) error {
+	r.shields = append(r.shields, s)
 	return nil
 }
 func (r *recordingWriter) Close() error { r.closed = true; return nil }

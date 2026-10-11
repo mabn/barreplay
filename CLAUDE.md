@@ -2874,6 +2874,7 @@ U  where unit lives ended  (re-sim, -damage)
 V  per-side visibility     (re-sim, -visibility)
 R  projectile/beam tracks  (re-sim, -projectiles; protocol 5)
 W  strong explosions       (re-sim, -projectiles; protocol 5)
+Q  shield charge           (both modes; protocol 6)
 P  engine profiler reading (re-sim, -profile)
 X  end of stream
 ```
@@ -3260,6 +3261,21 @@ run dev` in `worker/` plus `pack -upload local`.)
   `y0 + vy t + g t(t+1)/2`, eased onto the recorded end over the flight since
   the stored velocity is quantized); a pathless starburst rocket flies a gentle
   accelerating bow from launch to end.
+- **SHIELDS** (`public/fx-shields.js`, loaded and fingerprinted like the fx
+  files; drawOverlay calls `drawShields` under every other mark, loadReplay
+  calls `loadShields`): Marcin's pick "C" — the EDGE of the area each ally
+  team's shields cover (overlapping shields merge into one outline, O(n²)
+  circle tests), coloured by charge, plus a small charge gauge round every
+  generator; a drained or switched-off shield leaves the outline as a dashed
+  ring. No fill, no per-pixel work: one path per colour bucket. When the
+  paint interval averages over 33 ms it DROPS TO A SIMPLER LOOK on its own
+  (the outline alone, one colour, one stroke), coming back after 300 fast
+  paints, at most twice per page; `?shields=full|simple|off` pins it. Reach
+  and full charge come from the unit defs (`shieldRadius`/`shieldPower`,
+  widget 1.10.0) else the file's SHIELD_DEFS table; the CHARGE from the
+  `.brp` `Q` section (`decodeShields`, twin of snapshot/shields.go), each
+  reading held until the unit's next. A capture without it — every replay
+  before widget 1.10.0 — draws the outline in a neutral colour with no gauge.
 - **`internal/viz/icons.go`** renders **real BAR unit icons**. It embeds the vendored icon
   PNGs and BAR's `icontypes.lua` (a unit-name→bitmap gamedata table) under `bardata/`, and
   **parses the Lua data table directly in Go** (a small line/brace scanner, no `gopher-lua`)

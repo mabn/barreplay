@@ -271,6 +271,7 @@ type brpMetaRecord struct {
 	UnitEnds      int        `json:"unitEnds,omitempty"`
 	Projectiles   int        `json:"projectiles,omitempty"`
 	Blasts        int        `json:"blasts,omitempty"`
+	Shields       int        `json:"shields,omitempty"`
 	UnitRecords   int64      `json:"unitRecords"`
 	ChunkFrames   int        `json:"chunkFrames"` // samples per chunk (last may be short)
 	Chunks        []BRPChunk `json:"chunks,omitempty"`
@@ -1169,6 +1170,7 @@ type brpWriter struct {
 	unitEnds    []UnitEnd
 	projectiles []Projectile
 	blasts      []Blast
+	shields     []Shield
 	visibility  []Visibility
 	bounds      BRPBounds
 	anyUnit     bool
@@ -1304,6 +1306,11 @@ func (w *brpWriter) WriteBlast(b Blast) error {
 	return nil
 }
 
+func (w *brpWriter) WriteShield(s Shield) error {
+	w.shields = append(w.shields, s)
+	return nil
+}
+
 func (w *brpWriter) WriteUnitEnd(u UnitEnd) error {
 	w.unitEnds = append(w.unitEnds, u)
 	return nil
@@ -1327,6 +1334,7 @@ func (w *brpWriter) Close() error {
 		UnitEnds:      len(w.unitEnds),
 		Projectiles:   len(w.projectiles),
 		Blasts:        len(w.blasts),
+		Shields:       len(w.shields),
 		ChunkFrames:   w.chunkFrames,
 		Chunks:        w.chunks,
 	}
@@ -1383,6 +1391,9 @@ func (w *brpWriter) Close() error {
 	}
 	if len(w.blasts) > 0 {
 		data = append(data, Section{Tag: SecBlasts, Payload: gzipCompress(encodeBlasts(w.blasts))})
+	}
+	if len(w.shields) > 0 {
+		data = append(data, Section{Tag: SecShields, Payload: gzipCompress(encodeShields(w.shields))})
 	}
 	rec.Sections = sectionLayout(data)
 

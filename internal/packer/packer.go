@@ -53,6 +53,7 @@ type loaded struct {
 	unitEnds    []snapshot.UnitEnd
 	projectiles []snapshot.Projectile
 	blasts      []snapshot.Blast
+	shields     []snapshot.Shield
 }
 
 func (l *loaded) WriteMeta(m snapshot.Meta) error { l.meta = m; return nil }
@@ -87,8 +88,9 @@ func (l *loaded) WriteProjectile(p snapshot.Projectile) error {
 	l.projectiles = append(l.projectiles, p)
 	return nil
 }
-func (l *loaded) WriteBlast(b snapshot.Blast) error { l.blasts = append(l.blasts, b); return nil }
-func (l *loaded) Close() error                      { return nil }
+func (l *loaded) WriteBlast(b snapshot.Blast) error   { l.blasts = append(l.blasts, b); return nil }
+func (l *loaded) WriteShield(s snapshot.Shield) error { l.shields = append(l.shields, s); return nil }
+func (l *loaded) Close() error                        { return nil }
 
 // load reads a raw .brepstream capture through internal/capture — the exact
 // parser the capture pipeline uses — seeded with base, which carries whatever
@@ -152,6 +154,11 @@ func (l *loaded) writeAnalysis(w snapshot.Writer) error {
 	}
 	for _, b := range l.blasts {
 		if err := w.WriteBlast(b); err != nil {
+			return err
+		}
+	}
+	for _, s := range l.shields {
+		if err := w.WriteShield(s); err != nil {
 			return err
 		}
 	}

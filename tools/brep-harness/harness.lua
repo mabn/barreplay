@@ -407,6 +407,21 @@ Spring = {
 		end
 		return u.hp, u.maxHp, 0, 0, u.build
 	end,
+	-- Shields (protocol 6): a def%11==0 unit carries one. Its charge steps
+	-- every 2 game-seconds (so the widget's change-only rows have something
+	-- to drop: most samples move it under its 0.5% step), hits empty and
+	-- full, and every seventh unit's shield is switched off. LOS-gated like
+	-- health.
+	GetUnitShieldState = function(id)
+		local u = units[id]
+		local vs = visState(u)
+		if vs == "radar" or vs == "dot" or vs == "dying" then
+			return nil
+		end
+		local p = (id * 997 + math.floor(curFrame / 60) * 1500) % 7000 - 500
+		if p < 0 then p = 0 elseif p > 6000 then p = 6000 end
+		return (id % 7 ~= 0) and 1 or 0, p + (curFrame % 60) / 100
+	end,
 	GetGroundHeight = function(x, z) return 25 end,
 	-- Position-level LOS for the ghost scout check. True only inside an
 	-- active scoutWindows entry, near its target unit's frozen (or live)
@@ -523,7 +538,8 @@ for d = 1, 44 do
 		xsize = 2, zsize = 2, canMove = true, isBuilding = false,
 		maxWeaponRange = (d % 3 == 0) and 0 or 300 + d,
 		customParams = { techlevel = tostring(1 + d % 3), unitgroup = (d % 2 == 0) and "weapon" or "builder",
-			iscommander = (d == 1) and "1" or nil },
+			iscommander = (d == 1) and "1" or nil,
+			shield_radius = (d % 11 == 0) and "550" or nil, shield_power = (d % 11 == 0) and "6000" or nil },
 		deathExplosion = "deathblast" }
 end
 WeaponDefs = {}

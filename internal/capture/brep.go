@@ -317,6 +317,18 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 					return err
 				}
 			}
+		case 'Q':
+			shields, err := decodeShieldsRecord(payload)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "capture: bad shield record: %v\n", err)
+				continue
+			}
+			for _, s := range shields {
+				stats.Shields++
+				if err := w.WriteShield(s); err != nil {
+					return err
+				}
+			}
 		case 'V':
 			v, err := decodeVisibilityRecord(payload)
 			if err != nil {
@@ -835,6 +847,30 @@ func decodeBlastsRecord(payload []byte) ([]snapshot.Blast, error) {
 		}
 	}
 	return bs, c.err
+}
+
+// decodeShieldsRecord decodes one 'Q' payload: frame u32, n u32, then
+// columns unit u16, power u32 (whole points), flags u8 (bit 0 enabled).
+func decodeShieldsRecord(payload []byte) ([]snapshot.Shield, error) {
+	c := &cursor{b: payload}
+	frame := int32(c.u32())
+	n := int(c.u32())
+	// A row is 7 bytes.
+	if c.err == nil && n*7 > len(payload) {
+		return nil, fmt.Errorf("shield record declares %d rows in %d bytes", n, len(payload))
+	}
+	ss := make([]snapshot.Shield, n)
+	for i := range ss {
+		ss[i].Frame = frame
+		ss[i].Unit = unknown16(c.u16())
+	}
+	for i := range ss {
+		ss[i].Power = int32(c.u32())
+	}
+	for i := range ss {
+		ss[i].Enabled = c.u8()&1 != 0
+	}
+	return ss, c.err
 }
 
 // decodeUnitEndsRecord decodes one 'U' payload: frame u32, n u32, then
