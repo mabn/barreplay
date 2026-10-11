@@ -50,6 +50,9 @@ const BLOODY_ARMY = 0.15;
  * (overwhelms, smashes, crushes, a bloody stalemate) need BIG_METAL. */
 const FIGHT_METAL = 5000;
 const BIG_METAL = 20000;
+/** ...and the margin: a strong verb needs BOTH a big fight and the loser
+ * losing at least this many times the winner (Marcin's call). */
+const STRONG_MARGIN = 4;
 
 const AIR = new Set(["bomber", "fighter", "gunship", "air"]);
 const STRUCTURE = new Set(["defence", "lrgun", "nuke", "factory", "eco", "building"]);
@@ -168,7 +171,7 @@ export function battlePhrase(ins: Insights, b: Battle, won: number, where: strin
     // Defences HOLD only when the attack plainly failed.
     if (army && killed(new Set(["defence"])) >= MOSTLY && 3 * lossWorth(Wl) <= 2 * lossWorth(L)) return say(new Set(["defence"]), "defences", "hold off", `a ${Ls} attack ${where}`);
     if (top && (ins.defs[String(top.def)]?.cost ?? Infinity) < SWARM_COST && top.units >= SWARM_UNITS && top.metal >= MOSTLY * credited) {
-      return L.metal >= BIG_METAL
+      return L.metal >= BIG_METAL && lossWorth(L) >= STRONG_MARGIN * lossWorth(Wl)
         ? `A swarm of ${W} ${unitName(ins, top.def, 2)} overwhelms ${Ls} ${where}`
         : `${W} ${unitName(ins, top.def, 2)} swarm ${Ls} ${where}`;
     }
@@ -224,7 +227,7 @@ export function marginPhrase(ins: Insights, b: Battle, index: number, side: numb
     return words[index % words.length];
   }
   if (decisive) {
-    const words = metal >= BIG_METAL
+    const words = metal >= BIG_METAL && lsize >= STRONG_MARGIN * Math.max(wsize, 1e-9)
       ? [`${W} overwhelms ${Ls} ${where}`, `${W} smashes ${Ls} ${where}`, `${W} decisively wins ${where}`, `${W} outfights ${Ls} ${where}`]
       : [`${W} decisively wins ${where}`, `${W} outfights ${Ls} ${where}`, `${W} beats ${Ls} ${where}`];
     return words[index % words.length];

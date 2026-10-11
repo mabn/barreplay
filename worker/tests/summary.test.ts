@@ -548,8 +548,11 @@ test("battle phrases say what did the killing, and only when the numbers are sur
   const mid = battle([{ def: 4, n: 200, metal: 8000 }], [], 2000);
   assert.equal(marginPhrase(g, mid, 0, 0, true, where, true), "Blue decisively wins in the middle");
   assert.equal(marginPhrase(g, mid, 1, 0, true, where, true), "Blue outfights Red in the middle");
-  const big = battle([{ def: 4, n: 750, metal: 30000 }], [], 8000);
+  const big = battle([{ def: 4, n: 750, metal: 30000 }], [], 7000);
   assert.equal(marginPhrase(g, big, 0, 0, true, where, true), "Blue overwhelms Red in the middle");
+  // A big fight won by under 4x is not overwhelming: both must hold.
+  const close = battle([{ def: 4, n: 750, metal: 30000 }], [], 10000);
+  assert.equal(marginPhrase(g, close, 0, 0, true, where, true), "Blue decisively wins in the middle");
   // A lopsided result is a crush only when the fight was a real one.
   assert.equal(marginPhrase(g, battle([{ def: 4, n: 300, metal: 12000 }], [], 100), 0, 0, true, where, true), "Blue crushes Red in the middle");
   assert.equal(marginPhrase(g, battle([{ def: 4, n: 50, metal: 2000 }], [], 100), 0, 0, true, where, true), "Blue wins a skirmish in the middle");

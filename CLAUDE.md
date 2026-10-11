@@ -715,11 +715,11 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           rotates its words by battle number, SCALED BY THE FIGHT'S SIZE (the
                           loser's metal; Marcin: a 2.8k-for-628 kill is no "overwhelms"):
                           under 5k a skirmish ("wins a skirmish", "picks off Red units"),
-                          5k-20k "decisively wins"/"outfights"/"beats", 20k+ adds
-                          "overwhelms"/"smashes"; a 10x loss of 30% of an army and >= 10k
+                          5k+ "decisively wins"/"outfights"/"beats", and "overwhelms"/
+                          "smashes" only when BOTH 20k+ and a 4x margin hold (Marcin); a 10x loss of 30% of an army and >= 10k
                           "crushes", never "routs" (Marcin's call); "Bloody stalemate" for an
                           even fight that cost both armies 15% and >= 10k each; a swarm
-                          "overwhelms" only at 20k+. Units are named by the
+                          "overwhelms" only at 20k+ and 4x. Units are named by the
                           side's COLOUR alone, "Blue Juggernauts" (Marcin's call, also for
                           ownBlastTitle), which nameRuns colours like "Blue team". The phrases
                           title the gap battles in the swing list and a fight swing whose
