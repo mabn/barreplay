@@ -10,7 +10,7 @@ import { bandPath, linePath, stepAt, timeChart, type ChartGroup } from "../chart
 import { mirrorKey } from "../legend";
 import { knockouts } from "../losses";
 import { sideColor, sideName } from "../model";
-import { eliminationFocus, fighters, gapBattles, momentStories, type Fighter, type GapBattle, type MomentStory } from "../moments";
+import { eliminationFocus, fighters, gapBattles, momentStories, type BuildLine, type Fighter, type GapBattle, type MomentStory } from "../moments";
 import { fighterNames, named } from "../names";
 import { fillUnits, inkOn } from "../unitchips";
 import { stepTimes } from "../series";
@@ -136,15 +136,27 @@ export function swingChart(ins: Insights, opts: SummaryOptions, watch: Watch | n
       // lost in fighting the line did not move on.
       const inc = e.income?.[sd];
       const arm = e.army?.[sd];
-      const built = !!(inc || arm);
+      const bld = e.buildings?.[sd];
+      const built = !!(inc || arm || bld);
       if (l?.units.length && !built) void fillUnits(units, ins, opts, l.units, priced, SWING_CHIPS);
       const away = e.elsewhere?.[sd] ? ` (+${fmtMetal(e.elsewhere[sd])} elsewhere)` : "";
       const rate = (v: number) => `${fmtMetal(Math.round(v * 10) / 10)}/s`;
       const lostText = (x: { n: number; metal: number }) => `${x.n} lost` + (priced && x.metal ? ` · ${fmtMetal(x.metal)} metal` : "");
       const count = built
-        ? [arm ? `army ${fmtMetal(arm[0])} → ${fmtMetal(arm[1])}` : "", inc ? `income ${rate(inc[0])} → ${rate(inc[1])}` : ""].filter(Boolean).join(" · ")
+        ? [
+          arm ? `${e.armyDefences ? "army & defences" : "army"} ${fmtMetal(arm[0])} → ${fmtMetal(arm[1])}` : "",
+          inc ? `income ${rate(inc[0])} → ${rate(inc[1])}` : "",
+          bld ? `buildings ${fmtMetal(bld[0])} → ${fmtMetal(bld[1])}` : "",
+        ].filter(Boolean).join(" · ")
         : !l?.n ? "" : lostText(l) + away;
       const lines = [h("div", { class: "brs-swloss" }, h("span", { class: "brs-muted" }, count), units)];
+      // What the build-up was made of: the buildings each side finished,
+      // and lost, as icons with counts.
+      for (const bl of e.lines?.[sd] ?? []) {
+        const bu = h("span", { class: "brs-units" });
+        void fillUnits(bu, ins, opts, bl.units, priced, SWING_CHIPS, bl.verb);
+        lines.push(h("div", { class: "brs-swloss" }, h("span", { class: "brs-muted" }, bl.label), bu));
+      }
       // The fight it built through, lost: what this side lost there.
       const fl = e.fightLost?.[sd];
       if (built && fl?.n) {
@@ -162,6 +174,7 @@ export function swingChart(ins: Insights, opts: SummaryOptions, watch: Watch | n
       h("span", { class: "brs-num", style: `background: ${e.color}` }, e.letter),
       h("div", { class: "brs-grow" },
         h("div", undefined, title, " ", h("span", { class: "brs-muted" }, `· ${e.when}${e.part}`)),
+        e.quip ? named(ins, e.quip, { class: "brs-quip" }) : null,
         h("div", { class: "brs-swcols" }, col(0), col(1))),
       btn);
     if (watch) {
@@ -181,13 +194,17 @@ export function swingChart(ins: Insights, opts: SummaryOptions, watch: Watch | n
     return row;
   };
   const rows = entries.map((e) => entryRow(e, true));
+  const kind = sw.model === "lava" ? "lava " : sw.model === "ranked8v8" ? "ranked 8v8 " : "";
   const model = sw.fitted
-    ? `fitted to ${sw.games ?? "past"} games`
+    ? `fitted to ${sw.games ?? "past"} ${kind}games`
     : "with hand-set weights, not yet fitted to real games";
+  const inputs = ins.version >= 10 ? "army value with defences, standing buildings, metal income, metal mined so far and metal destroyed so far"
+    : ins.version >= 9 ? "army value, metal income, metal mined so far and metal destroyed so far"
+    : "army value, metal income and metal mined so far";
   return {
     key: mirrorKey(ins, knockouts(ins).length ? h("span", undefined, "✕ a player out") : null),
     hint: h("p", { class: "brs-hint" },
-      `The chance each side wins, read from ${ins.version >= 9 ? "army value, metal income, metal mined so far and metal destroyed so far" : "army value, metal income and metal mined so far"} (a model ${model}; it is never told the result). The charts folded away below share its time axis.`),
+      `The chance each side wins, read from ${inputs} (a model ${model}; it is never told the result). The charts folded away below share its time axis.`),
     svg: c.svg,
     list: rows.length ? h("div", undefined, ...rows) : null,
   };
@@ -227,8 +244,17 @@ interface Entry {
   /** What each side's metal income went from and to, for a swing the line
    * made on economy rather than a fight; null otherwise. */
   income: [number, number][] | null;
-  /** What each side's army value went from and to, when the story names it. */
+  /** What each side's army value went from and to, when the story names it
+   * (with the standing defences when armyDefences). */
   army: [number, number][] | null;
+  armyDefences: boolean;
+  /** What each side's buildings but the defences went from and to, when
+   * the story names them (version 10). */
+  buildings: [number, number][] | null;
+  /** What each side built and lost behind a build-up (version 10). */
+  lines: BuildLine[][] | null;
+  /** The story's aside, if it has one. */
+  quip: string | null;
   /** A fight the gaining side lost beside its build-up: each side's losses. */
   fightLost: { n: number; metal: number; units: UnitLoss[] }[] | null;
   clip: () => Clip;
@@ -257,6 +283,9 @@ function listEntries(ins: Insights, moments: Moment[], stories: MomentStory[], g
       shown: st.shown, elsewhere: st.elsewhere, fighters: st.fighters,
       income: st.growth && st.growthNamed?.eco !== false ? st.growth.map((g) => g.income) : null,
       army: st.growth && st.growthNamed?.army ? st.growth.map((g) => g.army) : null,
+      armyDefences: st.armyDefences,
+      buildings: st.growth && st.growthNamed?.build ? st.growth.map((g) => g.buildings) : null,
+      lines: st.buildLines, quip: st.quip?.text ?? null,
       fightLost: st.lostFight,
     });
     // A moment's clip opens just before the thing that made it — the
@@ -284,7 +313,7 @@ function listEntries(ins: Insights, moments: Moment[], stories: MomentStory[], g
       chip: gb.side < 0 ? null : moved ? `▲ +${pct(gb.delta)}` : "▲ ahead",
       chipTip: moved ? `${W}'s chance to win rose ${pct(gb.delta)} over it` : `${W} lost less here`,
       shown: b.lost.map((l) => ({ n: l.n, metal: l.metal, units: l.units ?? l.top.map((def) => ({ def, n: 0, metal: 0 })) })),
-      elsewhere: null, fighters: fighters(ins, b), income: null, army: null, fightLost: null,
+      elsewhere: null, fighters: fighters(ins, b), income: null, army: null, armyDefences: false, buildings: null, lines: null, quip: null, fightLost: null,
     });
     clips.push((t) => clipEvent(b.f0, b.f1, { x: b.x, z: b.z, r: Math.max(b.r, 800), title: t }));
   }

@@ -73,10 +73,18 @@ export interface Def {
   /** A power plant: its loss counts POWER_WORTH times its metal wherever a
    * battle's winner is decided (version 7+). */
   power?: boolean;
+  /** What its loss counts for per metal wherever a battle's winner is
+   * decided (version 10+): power plants, and in a capture that names killers
+   * every other building too. Absent = 1. */
+  worth?: number;
   /** What the unit is for (version 8+): bomber, fighter, gunship, air,
    * ship, experimental, army, commander, defence, lrgun, nuke, factory,
    * eco, building or unit. */
   class?: string;
+  /** Its building category (version 10+): defence, eco (power plants,
+   * converters, construction turrets), mex or other; absent for anything
+   * that is not a building. */
+  stand?: string;
 }
 
 export interface Series {
@@ -95,6 +103,10 @@ export interface Series {
   /** [side][step] = [x, z], the cost-weighted centre of the side's army,
    * or null while it has none. */
   front: (number[] | null)[][];
+  /** Standing buildings (version 10+): [side][category][step] in metal,
+   * categories in buildingCats (defence, eco, mex, other). */
+  buildingCats?: string[];
+  buildings?: number[][][];
 }
 
 export interface Swing {
@@ -104,6 +116,9 @@ export interface Swing {
   /** Whether the model was fitted to real games, and to how many. */
   fitted: boolean;
   games?: number;
+  /** Which model drew it (version 10+): "lava" for a lava game, "ranked8v8"
+   * for every other. */
+  model?: string;
 }
 
 export interface Moment {
@@ -115,10 +130,16 @@ export interface Moment {
   delta: number;
   /** Index into battles, -1 for none. */
   battle: number;
-  /** The share of the shift carried by army value and by metal income
-   * (version 7; summing to 1, absent from older files). */
+  /** The share of the shift carried by army value (with standing defences
+   * from version 10), by metal income and (version 10) by the other
+   * standing buildings (version 7; summing to 1, absent from older files). */
   army?: number;
   eco?: number;
+  build?: number;
+  /** What each side finished building from builtFrom to f1 (version 10),
+   * by def, the most metal first. */
+  built?: UnitLoss[][];
+  builtFrom?: number;
 }
 
 /** One team's part in a battle (version 4+), in metal. */
@@ -160,8 +181,9 @@ export interface Battle {
   /** Radius holding the deaths, elmos. */
   r: number;
   /** Indexed like sides. */
-  /** worth: the metal with power plants at POWER_WORTH times theirs, what
-   * a winner is decided by (version 7+; absent = metal). */
+  /** worth: the metal with power plants at POWER_WORTH times theirs (and
+   * since version 10 every other building at 2x when the capture names
+   * killers), what a winner is decided by (version 7+; absent = metal). */
   /** own: the metal of it the side's OWN side destroyed (its dying units'
    * blasts, allies' fire), ownDef the def that did most of it, trigger the
    * enemy [team, def] whose kill set it off (version 7+, causes only). */

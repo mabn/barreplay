@@ -280,9 +280,9 @@ func TestWinnerFromAPI(t *testing.T) {
 	brp := writeBRP(t, t.TempDir())
 	out := t.TempDir()
 	asked := ""
-	r := &runner{outDir: out, localRid: rid, winners: func(_ context.Context, id string) ([]int32, error) {
+	r := &runner{outDir: out, localRid: rid, game: func(_ context.Context, id string) (gameFacts, error) {
 		asked = id
-		return []int32{1}, nil
+		return gameFacts{Winners: []int32{1}}, nil
 	}}
 	if err := r.one(context.Background(), brp); err != nil {
 		t.Fatal(err)
@@ -357,6 +357,13 @@ func TestPiecesMatchBRP(t *testing.T) {
 		t.Error("a pieces rebuild reported owned value it cannot price")
 	}
 	want.Series.Value = nil
+	// Pieces carry no building prices or facts either: their buildings are
+	// read through the legacy table (insights buildings.go), at the price
+	// the study's games paid (a fusion 3350, where this capture says 3600).
+	if b := got.Series.Buildings; len(b) != 2 || b[1][1][0] != 3350 {
+		t.Errorf("pieces buildings = %v, want the fusion priced by the legacy table", b)
+	}
+	want.Series.Buildings, got.Series.Buildings = nil, nil
 	same("series", want.Series, got.Series)
 	same("sides", want.Sides, got.Sides)
 	same("milestones", want.Milestones, got.Milestones)

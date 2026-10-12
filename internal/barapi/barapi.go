@@ -71,6 +71,23 @@ type Replay struct {
 		AllyTeamID  int32 `json:"allyTeamId"`
 		WinningTeam bool  `json:"winningTeam"`
 	} `json:"AllyTeams"`
+	// GameSettings is the demo startscript's [modoptions], verbatim.
+	GameSettings map[string]any `json:"gameSettings"`
+}
+
+// Settings returns the lobby settings (GameSettings) that are strings,
+// which is every one BAR writes; nil when the detail carries none.
+func (r *Replay) Settings() map[string]string {
+	if len(r.GameSettings) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(r.GameSettings))
+	for k, v := range r.GameSettings {
+		if s, ok := v.(string); ok {
+			out[k] = s
+		}
+	}
+	return out
 }
 
 // Winners returns the ally teams the API marks as winning, nil when none is.

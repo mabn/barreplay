@@ -12,7 +12,7 @@ func TestPowerPlants(t *testing.T) {
 	}
 	for _, d := range []snapshot.UnitDef{plant("armfus", "energy"), plant("corafus", "energy"), plant("armwin", ""),
 		plant("legadvsol", "energy"), plant("armuwgeo", "energy"), plant("afuslegendary", "energy"), plant("cortide_scav", "energy")} {
-		if !isPowerPlant(d) || worthPerMetal(d) != powerWorth {
+		if !isPowerPlant(d) || worthPerMetal(d, false) != powerWorth || worthPerMetal(d, true) != powerWorth {
 			t.Errorf("%s is a power plant", d.Name)
 		}
 	}
@@ -22,6 +22,25 @@ func TestPowerPlants(t *testing.T) {
 		{Name: "armfus", UnitGroup: "energy", CanMove: true, Speed: 1}} {
 		if isPowerPlant(d) {
 			t.Errorf("%s is not a power plant", d.Name)
+		}
+	}
+}
+
+func TestBuildingWorth(t *testing.T) {
+	for _, c := range []struct {
+		d      snapshot.UnitDef
+		causes bool
+		want   float64
+	}{
+		{snapshot.UnitDef{Name: "armllt", IsBuilding: true, WeaponCount: 1}, true, buildingWorth},
+		{snapshot.UnitDef{Name: "armmex", UnitGroup: "metal", IsBuilding: true}, true, buildingWorth},
+		{snapshot.UnitDef{Name: "armlab", IsFactory: true, IsBuilding: true, CanMove: true}, true, buildingWorth},
+		// Without killers a reclaim reads as a loss: buildings stay plain.
+		{snapshot.UnitDef{Name: "armllt", IsBuilding: true, WeaponCount: 1}, false, 1},
+		{snapshot.UnitDef{Name: "armpw", CanMove: true, Speed: 1, WeaponCount: 1}, true, 1},
+	} {
+		if got := worthPerMetal(c.d, c.causes); got != c.want {
+			t.Errorf("%s (causes %v): worth %v, want %v", c.d.Name, c.causes, got, c.want)
 		}
 	}
 }

@@ -509,7 +509,7 @@ func publishBundle(ctx context.Context, o UploadOptions, native *R2Client, tmp, 
 		return "", 0, err
 	}
 	out := filepath.Join(stage, "out")
-	if _, err := viz.WriteStaticBundle(src, out); err != nil {
+	if _, err := viz.WriteStaticBundleWith(src, out, o.ModOptions); err != nil {
 		return "", 0, err
 	}
 	bundleDir := filepath.Join(stage, "bundle")

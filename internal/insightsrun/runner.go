@@ -21,10 +21,12 @@
 // pieces are immutable, and a changed computation is a new version with a new
 // name, so recomputing the same version can only produce the same bytes.
 //
-// A replay whose meta does not name the winner (every .brp packed before the
-// demo's winners were read, and every replay rebuilt from pieces) asks the BAR
-// API for it, and one packed before the demo's self-destruct orders were read
-// gets them from the demo.
+// Every summary asks the BAR API about its game: the lobby settings, which no
+// capture stores, say whether it is a lava game and so which win model reads
+// it (insights.WinModels), and a replay whose meta does not name the winner
+// (every .brp packed before the demo's winners were read, and every replay
+// rebuilt from pieces) takes the API's. One packed before the demo's
+// self-destruct orders were read gets them from the demo.
 package insightsrun
 
 import (
@@ -83,8 +85,8 @@ type Options struct {
 // (Each runs several replays through it at once).
 type Runner struct{ r *runner }
 
-// New builds a Runner. The BAR API is asked for winners and self-destruct
-// orders a capture lacks.
+// New builds a Runner. The BAR API is asked about every game (winners and
+// lobby settings), and the demo for self-destruct orders a capture lacks.
 func New(o Options) *Runner {
 	r := &runner{
 		indexURL: o.Target.IndexURL,
@@ -95,12 +97,12 @@ func New(o Options) *Runner {
 		localRid: o.LocalRid,
 		from:     o.From,
 		to:       o.To,
-		winners: func(ctx context.Context, gameID string) ([]int32, error) {
+		game: func(ctx context.Context, gameID string) (gameFacts, error) {
 			rep, err := barapi.New().Resolve(ctx, gameID)
 			if err != nil {
-				return nil, err
+				return gameFacts{}, err
 			}
-			return rep.Winners(), nil
+			return gameFacts{Winners: rep.Winners(), Settings: rep.Settings()}, nil
 		},
 		orders: func(ctx context.Context, gameID string) ([]snapshot.Event, error) {
 			return packer.DemoSelfD(ctx, barapi.New(), gameID)
@@ -199,13 +201,19 @@ type runner struct {
 	publish  func(ctx context.Context, dir, label string) error
 	// cache keeps what fetch downloads for the next run; nil keeps nothing.
 	cache *objectCache
-	// winners asks the BAR API who won, for a replay whose meta does not say
-	// (every .brp packed before the demo's winners were read). Nil skips it.
-	winners func(ctx context.Context, gameID string) ([]int32, error)
+	// game asks the BAR API about a game (gameFacts). Nil skips it.
+	game func(ctx context.Context, gameID string) (gameFacts, error)
 	// orders reads the self-destruct orders out of the game's demo, for a
 	// capture packed before they were (a .brp with no "selfd" events). Nil
 	// skips it.
 	orders func(ctx context.Context, gameID string) ([]snapshot.Event, error)
+}
+
+// gameFacts is what the BAR API says about a game that a capture may not:
+// who won, and the lobby settings (the demo's [modoptions], as gameSettings).
+type gameFacts struct {
+	Winners  []int32           `json:"winners"`
+	Settings map[string]string `json:"settings"`
 }
 
 // catalogRow is the part of a GET /api/replays row this command reads.
@@ -319,6 +327,10 @@ func (r *runner) rid(ctx context.Context, rid, view string) error {
 		}
 	}
 	var in insights.Input
+	// The BAR API's half starts now and runs while the replay downloads:
+	// whichever way it is read, the lobby settings are not in it.
+	l := &lookups{gameID: ridGameID(rid)}
+	r.startGame(ctx, l)
 	if b, err := r.fetch(ctx, "replays/"+rid+".brp"); err == nil {
 		bf, err := snapshot.ParseBRP(bytes.NewReader(b))
 		if err != nil {
@@ -333,9 +345,9 @@ func (r *runner) rid(ctx context.Context, rid, view string) error {
 		fmt.Fprintf(os.Stderr, "%s: read from its .brp\n", rid)
 	} else if errors.Is(err, viz.ErrNotFound) {
 		// A rebuilt replay knows neither its winners nor its self-destruct
-		// orders (pieces were last written before either was read), so both
-		// lookups start now and run while the pieces download.
-		pre := r.lookups(ctx, ridGameID(rid), true)
+		// orders (pieces were last written before either was read), so the
+		// orders are looked up while the pieces download too.
+		r.startOrders(ctx, l)
 		bf, res, err := viz.ReadStaticBundle(ctx, r.fetch, rid)
 		if err != nil {
 			return err
@@ -344,14 +356,10 @@ func (r *runner) rid(ctx context.Context, rid, view string) error {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "%s: rebuilt from %d published chunks (army costs only)\n", rid, len(bf.Chunks))
-		if pre == nil || pre.gameID != in.Meta.GameID {
-			return r.write(ctx, rid, in)
-		}
-		return r.writeWith(ctx, rid, in, pre)
 	} else {
 		return err
 	}
-	return r.write(ctx, rid, in)
+	return r.write(ctx, rid, in, l)
 }
 
 // local computes the summary of a .brp on disk, under the revision id a
@@ -387,7 +395,7 @@ func (r *runner) local(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	return r.write(ctx, rid, in)
+	return r.write(ctx, rid, in, nil)
 }
 
 // gameOrders is r.orders through the cache: a demo never changes, and a
@@ -422,12 +430,13 @@ func hasSelfD(events []snapshot.Event) bool {
 	return false
 }
 
-// lookups is the BAR API's half of a summary — who won and the demo's
-// self-destruct orders — fetched in the background; wait hands back what came.
+// lookups is the BAR API's half of a summary — the game's facts and the
+// demo's self-destruct orders — fetched in the background; writeWith takes
+// what came.
 type lookups struct {
-	gameID  string
-	winners chan lookupResult[[]int32]
-	orders  chan lookupResult[[]snapshot.Event]
+	gameID string
+	game   chan lookupResult[gameFacts]
+	orders chan lookupResult[[]snapshot.Event]
 }
 
 type lookupResult[T any] struct {
@@ -435,42 +444,60 @@ type lookupResult[T any] struct {
 	err error
 }
 
-// lookups starts the winners lookup, and the orders one when withOrders,
-// for gameID. Nil when the runner has neither to ask.
-func (r *runner) lookups(ctx context.Context, gameID string, withOrders bool) *lookups {
-	if gameID == "" {
-		return nil
+// startGame starts l's game lookup, unless it has one or nothing to ask.
+func (r *runner) startGame(ctx context.Context, l *lookups) {
+	if r.game == nil || l.game != nil || l.gameID == "" {
+		return
 	}
-	l := &lookups{gameID: gameID}
-	if r.winners != nil {
-		l.winners = make(chan lookupResult[[]int32], 1)
-		go func() {
-			w, err := r.winners(ctx, gameID)
-			l.winners <- lookupResult[[]int32]{w, err}
-		}()
-	}
-	if withOrders && r.orders != nil {
-		l.orders = make(chan lookupResult[[]snapshot.Event], 1)
-		go func() {
-			ev, err := r.gameOrders(ctx, gameID)
-			l.orders <- lookupResult[[]snapshot.Event]{ev, err}
-		}()
-	}
-	return l
+	l.game = make(chan lookupResult[gameFacts], 1)
+	go func() {
+		g, err := r.gameFacts(ctx, l.gameID)
+		l.game <- lookupResult[gameFacts]{g, err}
+	}()
 }
 
-func (r *runner) write(ctx context.Context, rid string, in insights.Input) error {
-	// Only what the capture lacks is asked for, both at once.
-	l := &lookups{gameID: in.Meta.GameID}
-	if in.Meta.GameID != "" {
-		needWinners := len(in.Meta.Winners) == 0
-		needOrders := !hasSelfD(in.Events)
-		if needWinners || needOrders {
-			l = r.lookups(ctx, in.Meta.GameID, needOrders)
-			if !needWinners {
-				l.winners = nil
-			}
+// startOrders starts l's orders lookup, unless it has one or nothing to ask.
+func (r *runner) startOrders(ctx context.Context, l *lookups) {
+	if r.orders == nil || l.orders != nil || l.gameID == "" {
+		return
+	}
+	l.orders = make(chan lookupResult[[]snapshot.Event], 1)
+	go func() {
+		ev, err := r.gameOrders(ctx, l.gameID)
+		l.orders <- lookupResult[[]snapshot.Event]{ev, err}
+	}()
+}
+
+// gameFacts is r.game through the cache: a finished game's winners and
+// settings never change.
+func (r *runner) gameFacts(ctx context.Context, gameID string) (gameFacts, error) {
+	key := "bar-api/" + gameID + ".json"
+	if b, ok := r.cache.get(key); ok {
+		var g gameFacts
+		if json.Unmarshal(b, &g) == nil {
+			return g, nil
 		}
+	}
+	g, err := r.game(ctx, gameID)
+	if err != nil {
+		return gameFacts{}, err
+	}
+	if b, err := json.Marshal(g); err == nil {
+		r.cache.put(key, b)
+	}
+	return g, nil
+}
+
+// write computes and publishes in's summary, with what l (nil: nothing yet)
+// has started or now starts asking: the game's facts always, the orders
+// when the capture has none.
+func (r *runner) write(ctx context.Context, rid string, in insights.Input, l *lookups) error {
+	if l == nil || l.gameID != in.Meta.GameID {
+		l = &lookups{gameID: in.Meta.GameID}
+	}
+	r.startGame(ctx, l)
+	if !hasSelfD(in.Events) {
+		r.startOrders(ctx, l)
 	}
 	return r.writeWith(ctx, rid, in, l)
 }
@@ -478,13 +505,16 @@ func (r *runner) write(ctx context.Context, rid string, in insights.Input) error
 // writeWith computes, writes and publishes the summary, merging in what
 // the lookups found (a nil one, or a nil half of one, asks nothing).
 func (r *runner) writeWith(ctx context.Context, rid string, in insights.Input, l *lookups) error {
-	if l != nil && l.winners != nil && len(in.Meta.Winners) == 0 && in.Meta.GameID == l.gameID {
-		// Unknown winners only cost the summary its result line, so a failed
-		// lookup is a warning.
-		if w := <-l.winners; w.err != nil {
-			fmt.Fprintf(os.Stderr, "%s: winner unknown (BAR API: %v)\n", rid, w.err)
+	if l != nil && l.game != nil && in.Meta.GameID == l.gameID {
+		// Unknown facts only cost the summary its result line and the lava
+		// model, so a failed lookup is a warning.
+		if g := <-l.game; g.err != nil {
+			fmt.Fprintf(os.Stderr, "%s: lobby settings unknown, read with the ranked 8v8 model (BAR API: %v)\n", rid, g.err)
 		} else {
-			in.Meta.Winners = w.v
+			if len(in.Meta.Winners) == 0 {
+				in.Meta.Winners = g.v.Winners
+			}
+			in.ModOptions = g.v.Settings
 		}
 	}
 	if l != nil && l.orders != nil && in.Meta.GameID == l.gameID && !hasSelfD(in.Events) {
@@ -523,8 +553,12 @@ func (r *runner) writeWith(ctx context.Context, rid string, in insights.Input, l
 	if ins.Winner >= 0 {
 		winner = fmt.Sprintf("side %d", ins.Winner+1)
 	}
-	fmt.Fprintf(os.Stderr, "%s: %d sides, %d deaths, %d milestones, winner %s, %.1f KB (cost coverage %s, view %s)\n",
-		rid, len(ins.Sides), len(ins.Deaths.F), len(ins.Milestones), winner, float64(len(b))/1024, ins.CostCoverage, ins.POV)
+	model := "no swing line"
+	if ins.Swing != nil {
+		model = ins.Swing.Model + " model"
+	}
+	fmt.Fprintf(os.Stderr, "%s: %d sides, %d deaths, %d milestones, winner %s, %s, %.1f KB (cost coverage %s, view %s)\n",
+		rid, len(ins.Sides), len(ins.Deaths.F), len(ins.Milestones), winner, model, float64(len(b))/1024, ins.CostCoverage, ins.POV)
 	if r.publish == nil {
 		fmt.Fprintf(os.Stderr, "wrote %s\n", path)
 		return nil

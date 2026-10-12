@@ -87,6 +87,7 @@ export const CSS = `
 .brs-root .brs-swcols .brs-losscol { padding: 3px 8px; min-width: 0; }
 .brs-root .brs-swloss { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; margin-top: 2px; }
 .brs-root .brs-swloss .brs-units { margin-top: 0; }
+.brs-root .brs-quip { display: block; color: var(--brs-muted); font-style: italic; margin-top: 2px; }
 .brs-root .brs-swingdot { cursor: pointer; }
 .brs-root .brs-swingdot circle { transition: r .1s; }
 .brs-root .brs-swingdot:hover circle, .brs-root .brs-swingdot:focus-visible circle { r: 13px; stroke: #fff; }

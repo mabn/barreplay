@@ -93,6 +93,11 @@ type game struct {
 	// Isthmus position ranks by metal built (w 0 cumulative, 1 the last 3
 	// minutes) among every player in the game, 0 = most, 1 = least.
 	roleRank map[string]*[2][2][]float64
+
+	// stand[cat][side][step] is the side's standing metal of a category
+	// (experiments/buildingworth), standHP the same weighted by health;
+	// nil when no .brp was read for the game.
+	stand, standHP standMap
 }
 
 func main() {
@@ -100,8 +105,21 @@ func main() {
 	mapRE := flag.String("map", "", "only games on maps matching this regexp")
 	osFile := flag.String("os", "", "catalog rosters (jsonl: id, allies[{ally, os[]}])")
 	flag.BoolVar(&debug, "debug", false, "print the series around the first unnamed income-carried moves")
+	bwDir := flag.String("bw", "", "standing metal by category per game (experiments/buildingworth output)")
+	defcat := flag.String("defcat", "", "def name -> category table (experiments/buildingworth) for the category variants")
+	flag.Float64Var(&evShare, "evshare", 0.5, "an event's category must be at least this share of the side's loss that minute")
+	flag.BoolVar(&eventsOn, "events", false, "print the event study (cats.go) for each variant run")
+	gamesFile := flag.String("games", "", "only the games listed in this file (the game id is each line's first tab-separated field)")
+	scoreFile := flag.String("score", "", "fit on every game but score only the games listed in this file (same format as -games)")
+	flag.IntVar(&bootCoef, "bootcoef", 0, "also refit the coefficients on this many game-bootstrap resamples and print their 95% intervals")
 	flag.Parse()
+	if *defcat != "" {
+		loadDefCat(*defcat)
+	}
 	gs := loadAll(flag.Args())
+	if *bwDir != "" {
+		loadStanding(*bwDir, gs)
+	}
 	if *mapRE != "" {
 		re := regexp.MustCompile(*mapRE)
 		var keep []*game
@@ -111,6 +129,15 @@ func main() {
 			}
 		}
 		gs = keep
+	}
+	if *gamesFile != "" {
+		gs = keepListed(*gamesFile, gs)
+	}
+	if *scoreFile != "" {
+		scoreOnly = map[string]bool{}
+		for _, g := range keepListed(*scoreFile, gs) {
+			scoreOnly[g.id] = true
+		}
 	}
 	if *osFile != "" {
 		loadSkill(*osFile, gs)
@@ -246,6 +273,7 @@ func build(f *file) *game {
 		}
 	}
 	geo(g, f, side, died)
+	catLosses(g, f, side, died)
 	for _, e := range f.Eliminated {
 		if sd, ok := side[e.Team]; ok && sd >= 0 && sd <= 1 {
 			g.elim[sd] = append(g.elim[sd], int(e.F)/(step*30))
@@ -457,6 +485,12 @@ func run(v variant, gs []*game) {
 		}
 		coefAll = fit(ss, nf)
 	}
+	if eventsOn {
+		eventStudy(v.name, gs, ps)
+	}
+	if bootCoef > 0 {
+		coefIntervals(v.name, gs, feats, nf, bootCoef)
+	}
 	var acc, loss, wsum float64
 	at := []float64{0.25, 0.5, 0.75, 0.9}
 	atAcc := make([]float64, 4)
@@ -464,7 +498,11 @@ func run(v variant, gs []*game) {
 	var jit, jitN, rev float64
 	var moves, named, inBattle float64
 	drv := make([]float64, nf)
+	perGame := make([]float64, len(gs))
 	for i, g := range gs {
+		if scoreOnly != nil && !scoreOnly[g.id] {
+			continue
+		}
 		p := ps[i]
 		w := 1 / float64(len(p))
 		for j, pj := range p {
@@ -479,6 +517,7 @@ func run(v variant, gs []*game) {
 			}
 			acc += w * r
 			loss += w * l
+			perGame[i] += w * l
 			wsum += w
 			fr := float64(j+1) / float64(len(p))
 			for k, a := range at {
@@ -498,7 +537,20 @@ func run(v variant, gs []*game) {
 		named += nm
 		inBattle += ib
 	}
+	if scoreOnly != nil {
+		var kept []float64
+		for i, g := range gs {
+			if scoreOnly[g.id] {
+				kept = append(kept, perGame[i])
+			}
+		}
+		perGame = kept
+	}
+	pairedLoss(v.name, perGame)
 	G := float64(len(gs))
+	if scoreOnly != nil {
+		G = float64(len(scoreOnly))
+	}
 	fmt.Printf("%-22s %5.1f%% %6.3f | %5.1f %5.1f %5.1f %5.1f | %6.2f %5.1f | %5.2f %4.0f%% %5.2f   coef %s\n", v.name,
 		100*acc/wsum, loss/wsum,
 		100*atAcc[0]/atN[0], 100*atAcc[1]/atN[1], 100*atAcc[2]/atN[2], 100*atAcc[3]/atN[3],

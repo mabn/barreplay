@@ -129,7 +129,10 @@ export function sideName(ins: Insights, side: number): string {
   return `${mine} team`;
 }
 
-/** sideShort names a side's units: "Blue" in "Blue Juggernauts". */
+/** sideShort is a side's name in a sentence: "Blue" in "Blue Juggernauts",
+ * and the subject of every story ("Blue loses 43% of its army"; Marcin's
+ * call: sides are "Blue" and "Red", never "Blue team"). sideName stays for
+ * labels (legends, column heads). */
 export function sideShort(ins: Insights, side: number): string {
   return sideName(ins, side).replace(/ team$/, "");
 }
@@ -152,10 +155,11 @@ const VERSION_FEATURES: [number, string][] = [
   [7, "game end at the resign, story battles, friendly fire"],
   [8, "battle titles that say what did the killing"],
   [9, "calmer win odds that move with the fighting"],
+  [10, "buildings in the win odds and in battle verdicts, build-up stories"],
 ];
 
 /** The newest insights version the page knows (index.ts INSIGHTS_VERSIONS[0]). */
-export const LATEST_INSIGHTS = 9;
+export const LATEST_INSIGHTS = 10;
 
 /** notices are the caveats the page states up front, in reading order. */
 export function notices(ins: Insights): string[] {
@@ -194,6 +198,13 @@ export function sideOfTeam(ins: Insights): Map<number, number> {
  * when deciding who won a fight (Go's powerWorth): losing a fusion loses its
  * metal AND the energy it would have made. */
 export const POWER_WORTH = 2.5;
+
+/** defWorth is what a loss of def counts for per metal when deciding who won
+ * a fight: the file's own worth (version 10+), else power plants at
+ * POWER_WORTH. */
+export function defWorth(def?: { power?: boolean; worth?: number }): number {
+  return def?.worth ?? (def?.power ? POWER_WORTH : 1);
+}
 
 /** lossWorth is what a battle side's losses decide the battle by: their
  * worth when the file records it, else their metal. */

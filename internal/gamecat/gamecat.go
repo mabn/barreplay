@@ -73,6 +73,25 @@ func Classify(d *Detail) Category {
 	return Ranked
 }
 
+// IsRanked8v8 is a ranked game between two teams of eight (players and AIs)
+// that is not a lava game: what the summary's ranked 8v8 win model is fitted
+// on (internal/insights WinModels).
+func IsRanked8v8(d *Detail) bool {
+	if Classify(d) == Lava {
+		return false
+	}
+	if s, _ := d.GameSettings["ranked_game"].(string); s != "1" {
+		return false
+	}
+	var sizes []int
+	for _, t := range d.AllyTeams {
+		if len(t.Players) > 0 || len(t.AIs) > 0 {
+			sizes = append(sizes, len(t.Players)+len(t.AIs))
+		}
+	}
+	return len(sizes) == 2 && sizes[0] == 8 && sizes[1] == 8
+}
+
 var (
 	coreSignatures  = []string{"lavapack", "lava qol", "lava sky ops"}
 	extraSignatures = []string{"onebignuke", "riot titan", "roomba", "tacmissilenerf", "legendary converter"}
@@ -81,7 +100,20 @@ var (
 // IsLavaGame is lavabalance's isLavaGame: the decoded tweakdefs/tweakunits
 // carry at least one core LAVA signature and two signatures in all.
 func IsLavaGame(d *Detail) bool {
-	text := decodedTweaks(d)
+	settings := make(map[string]string, len(d.GameSettings))
+	for k, v := range d.GameSettings {
+		if s, ok := v.(string); ok {
+			settings[k] = s
+		}
+	}
+	return LavaTweaks(settings)
+}
+
+// LavaTweaks is IsLavaGame over a game's lobby settings as the demo's
+// startscript names them ([modoptions], which the BAR API serves verbatim as
+// gameSettings): what a caller holding no API detail asks.
+func LavaTweaks(settings map[string]string) bool {
+	text := decodedTweaks(settings)
 	if text == "" {
 		return false
 	}
@@ -120,13 +152,12 @@ func lavaEligible(d *Detail) bool {
 }
 
 // decodedTweaks is the lowercased text of every non-empty tweak slot.
-func decodedTweaks(d *Detail) string {
+func decodedTweaks(settings map[string]string) string {
 	var parts []string
-	for k, v := range d.GameSettings {
+	for k, s := range settings {
 		if !strings.Contains(k, "tweakdefs") && !strings.Contains(k, "tweakunits") {
 			continue
 		}
-		s, _ := v.(string)
 		if s == "" || s == "0" {
 			continue
 		}

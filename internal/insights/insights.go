@@ -23,7 +23,7 @@ import (
 // Version names the file: replays/<rid>.insights<Version>.json. Pieces are
 // immutable, so any change to what is computed or how is a new version,
 // written beside the old one; the viewer asks for the one it understands.
-const Version = 9
+const Version = 10
 
 // FileName is the published piece's name for a revision id.
 func FileName(rid string) string { return fmt.Sprintf("%s.insights%d.json", rid, Version) }
@@ -114,10 +114,20 @@ type Def struct {
 	// Power marks a power plant, whose loss counts powerWorth times its
 	// metal wherever a battle's winner is decided (version 7 and later).
 	Power bool `json:"power,omitempty"`
+	// Worth is what a loss of it counts for per metal wherever a battle's
+	// winner is decided (worthPerMetal: power plants, and in a capture that
+	// names killers every other building too); absent = 1. Version 10.
+	Worth float64 `json:"worth,omitempty"`
 	// Class is what the unit is for (classes.go): bomber, fighter, gunship,
 	// air, ship, experimental, army, commander, defence, lrgun, nuke, factory, eco,
 	// building or unit. Version 8.
 	Class string `json:"class,omitempty"`
+	// Stand is the def's building category (Series.BuildingCats: defence,
+	// eco, mex, other), absent for anything that is not a building or is
+	// not priced (buildings.go). The win line counts a building the enemy
+	// destroyed killBuildingWorth times in metal destroyed when the capture
+	// names killers, and the page draws build-ups from it. Version 10.
+	Stand string `json:"stand,omitempty"`
 }
 
 // Series holds one value per side per step; T[i] is step i's time in seconds.
@@ -141,6 +151,13 @@ type Series struct {
 	// Front is each side's army centre per step, [side][step] = [x, z] (the
 	// cost-weighted mean position of its army), null while it has none.
 	Front [][][]int32 `json:"front"`
+	// Buildings is each side's STANDING buildings by category,
+	// [side][category][step] in metal (weighted by build progress, at the
+	// step's last sample), categories in BuildingCats (buildings.go). A
+	// replay rebuilt from its pieces prices its buildings by name from the
+	// legacy table. Version 10.
+	BuildingCats []string      `json:"buildingCats,omitempty"`
+	Buildings    [][][]float64 `json:"buildings,omitempty"`
 }
 
 // Deaths is every destroyed unit, columnar: the i-th entry of each slice
@@ -209,6 +226,7 @@ type roster struct {
 	teams      []Team
 	playerTeam map[int32]int32
 	playerName map[int32]string
+	ai         map[int32]bool // teams an AI plays (aiTeams)
 }
 
 // pveShare is the share of a team's units that must be scavenger or raptor
@@ -274,6 +292,7 @@ func buildRoster(m snapshot.Meta, events []snapshot.Event) roster {
 		human[team] = len(ps) > 0
 	}
 	ai := aiTeams(m, events, human)
+	r.ai = ai
 	allies := map[int32]bool{}
 	for team := range teamPlayers {
 		if a, ok := teamAlly[team]; ok {

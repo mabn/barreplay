@@ -652,7 +652,7 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           killer named), OwnDef the def that did most of it, Trigger the enemy
                           (team, def) whose kill came at most 5 s before the first of them. When
                           Own is >= 50% and >= 1000 metal of the side that lost more, nobody
-                          "wins" the battle (moments.ts ownBlast): it reads "Blue team's
+                          "wins" the battle (moments.ts ownBlast): it reads "Blue
                           Advanced Fusion Reactors blow up, set off by [MANTA]'s Basilica" in
                           the swing list, the battle tooltip and a swing story, with no
                           "ahead" box. FRIENDLY FIRE (key "friendly") is the LIVING unit (it
@@ -668,8 +668,15 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           POWER PLANTS COUNT 2.5x (defs.go powerWorth, isPowerPlant: wind,
                           tidal, solar, fusion, geo by name; storage shares their UnitGroup)
                           WHEREVER A BATTLE'S WINNER IS DECIDED — losing a fusion loses its
-                          output too (Marcin's rule). BattleLoss.Worth carries it, Def.Power
-                          marks the defs for the page's own tallies (moments.ts SideLoss.worth),
+                          output too (Marcin's rule). VERSION 10 counts every OTHER lost
+                          building at 2x too (defs.go buildingWorth; a building has to be
+                          rebuilt just to stand where its side stood), but only in a capture
+                          that names killers: without them a reclaim or an upgrade reads as a
+                          loss. Measured on 2,271 battles of 164 re-sims, 2x moved 6% of the
+                          verdicts and 68% of those named the eventual winner; 3x overshot
+                          (experiments/buildingworth). BattleLoss.Worth carries it, Def.Worth
+                          (v10; before it Def.Power) gives the page's own tallies the per-def
+                          figure (model.ts defWorth, moments.ts SideLoss.worth),
                           and every verdict — gapBattles' decisive/win/even, a fight story's
                           "wins"/"trades", the Battles list's "ahead" box — compares worth,
                           while every number SHOWN stays plain metal (model.ts lossWorth).
@@ -707,7 +714,7 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           army still grew faster than the other's (moments.ts armyGrew) is
                           not why the line moved: it is told as the build-up, titled "...
                           despite losing a fight in the middle", with the fight a "Meanwhile
-                          Red team won the fight ..." sentence counting only its part INSIDE
+                          Red won the fight ..." sentence counting only its part INSIDE
                           the moment's window (notableLoss names one unit carrying >= 30% and
                           3000+ metal of it: "including a half-built Epic Pulsar"), and the
                           swing row shows each side's army and income plus "in the fight"
@@ -746,6 +753,43 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           title the gap battles in the swing list and a fight swing whose
                           battle is told whole; a phrase never overrides a trade the numbers
                           contradict.
+                          Version 10 adds BUILDING rules after the factory one: a loss mostly of
+                          defences is "Blue breaks the Red defences" (5k+) or "picks off Red
+                          defences", one mostly of other buildings "Blue wrecks / breaks into /
+                          raids Ann's base" (20k+ and 4x worth / 5k+ / less).
+                          BUILD-UP AND BASE STORIES (moments.ts, version 10; Marcin's ask:
+                          insightful, not just "X built more eco"). growthStory names the
+                          buildings when Moment.Build >= 0.2 ("out-builds Red in economy and
+                          buildings", "on every front", "builds up a bigger base", "Red's base
+                          shrinks while Blue out-builds its army") and reads
+                          the army with its standing defences when they are >= 10% of it
+                          (armyDefences; the title says "defences" only when they moved at least
+                          half as much as the armies). Under each side it SHOWS what was built:
+                          "built since M:SS" and "lost since M:SS" rows of icons with counts
+                          (MomentStory.buildLines, unitchips.ts fillUnits with its verb) for the
+                          story's kinds — economy = eco + mex, buildings = eco + mex + other,
+                          army = the defences. A BASE GOING UP is a story of its own (baseLoss:
+                          the losing side's fought-for building losses >= 1000 metal, >= 15% of
+                          what it had standing and >= half of everything it lost in the window):
+                          "Red loses 35% of its base in the south-east, mostly its
+                          economy", with a "buildings: N lost" icon row under it. It leads
+                          (after an elimination, before a commander, who rides along as ", with
+                          Ann's commander") when buildings moved the line more than the armies
+                          and no one battle holds half of it — that battle's phrase is the
+                          better title; otherwise an elimination or commander title gains " as
+                          Red loses 24% of its base", and a fight with no battle and no
+                          army drop is told as the base. Every story names a side by its
+                          COLOUR alone (moments.ts and quips.ts take model.ts sideShort:
+                          "Blue loses 43% of its army"; Marcin's call, sides are never "Blue
+                          team"), the way the battle phrases always did; sideName's "Blue
+                          team" is for labels (legends, column heads). QUIPS (quips.ts): a line of colour
+                          under a build-up or base story of a v10 file, on plain facts only (a
+                          forest of 15+ wind turbines, 8+ of one defence, a 20-piece wall, 6+
+                          converters, a 20k+ building, a first fusion or a nuke silo the other
+                          side has no anti for, idle builders, three mines lost, half a base
+                          gone), words rotated by the moment's number, at most QUIPS_MAX = 2 a
+                          page and no rule twice (fewQuips). names.ts matches a unit's PLURAL
+                          too ("41 Wind Turbines" gets its icon and keeps its s).
                           PLACES (places.ts): compass() says "the middle", never "the centre"
                           (Marcin's call), and a map with community area names uses them.
                           Supreme Isthmus has Marcin's labels: each base's air, eco, beach,
@@ -780,6 +824,38 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           elimination (1.71 -> 0.57 unnamed moves a game). The unnamed ones
                           were nearly all last-minute income. Moment.Army counts the
                           destroyed feature as army (fighting moved it).
+                          VERSION 10 PUTS THE BUILDINGS IN THE LINE (buildings.go; Marcin's ask,
+                          the buildings-vs-units study in experiments/buildingworth +
+                          experiments/winmodel, PR #120). Each side's STANDING buildings are
+                          measured per step like its army (cost x build progress,
+                          Series.Buildings by Series.BuildingCats: defence, eco = power plants,
+                          converters and builder structures, mex, other = factories, radar,
+                          storage, walls), each def's category riding Def.Stand. buildingCat is
+                          the study's rule and the coefficients were fitted on it, so changing
+                          it needs a refit; refineCat only moves a def between eco/mex/other by
+                          NAME for the page, which the line cannot see (all three are one
+                          input). Standing DEFENCES join the army input; the rest are a FIFTH
+                          input (swingBuildK = 10k virtual metal); and in a capture that names
+                          killers a destroyed building counts killBuildingWorth = 3x in metal
+                          destroyed (without killers a reclaim or upgrade reads as destroyed, so
+                          plain metal). TWO MODELS (WinModels, Swing.Model): "lava" for
+                          lavabalance's lava games (gamecat.LavaTweaks on two sides of eight
+                          humans, no AI: modelFor) and "ranked8v8" for EVERY other game
+                          (Marcin's call) — fitted apart they beat one model out of sample in
+                          every group (log loss lava 0.511 -> 0.463, ranked 0.421 -> 0.408 on
+                          Isthmus, 0.449 -> 0.380 elsewhere); coefficients in swing.go's
+                          WinModels comment. The lobby's tweaks are NOT in the .brp, so
+                          Input.ModOptions comes from the demo (packer passes them through
+                          viz.WriteStaticBundleWith) or the BAR API's detail (insightsrun's
+                          gameFacts, cached with the winners); unknown means ranked. A replay
+                          rebuilt from pieces prices only armed mobile defs, so its buildings
+                          are priced and sorted by legacybuildings.json
+                          (experiments/buildingworth -table over the study's 166 games); an
+                          unknown def counts nothing. Moment.Build is the share of a moment's
+                          shift the buildings carried (Army + Eco + Build = 1), and
+                          Moment.Built/BuiltFrom are the structures each side FINISHED in the 3
+                          minutes up to F1, by def, at most momentBuiltDefs = 8 of each building
+                          category — what the page's build-up stories show as icons.
                           WINNERS come from the demo's tail (demofile.Demo.Winners: one byte
                           per winning ally team right after the packet stream, per
                           rts/System/LoadSave/demofile.h) into snapshot.Meta.Winners via
@@ -790,7 +866,27 @@ experiments/winmodel/      compares win-model VARIANTS on insights files (any ve
                           pre-7 files cut at the decision like v7 does): out-of-fold accuracy,
                           log loss, jitter, 5-point zigzags, and the share of big moves an
                           event can name. Where Version 9's model came from; add a variant to
-                          variants.go to try another idea.
+                          variants.go to try another idea. With -bw/-defcat (buildingworth's
+                          output) it also tries building weights: losses by unit category
+                          (killW), standing metal by category added to the army or as its own
+                          input; -events prints the calibration gap at minutes a side lost one
+                          category (does the line lag a lost base?), -bootcoef N each
+                          coefficient's game-bootstrap interval, -games/-score restrict the fit
+                          or only the scoring to listed games, and every variant's log loss is
+                          compared with the first's, paired by game.
+experiments/buildingworth/ per game, each side's STANDING metal by unit category (army, con,
+                          com, def, eco = power/converters/build turrets, mex, bld) every 15 s,
+                          for winmodel -bw. Reads .brp files, or (-legacy) an older replay's
+                          published pieces as KEYFRAMES ONLY (zero-filled chunk bodies, so a
+                          minute's resolution for a fraction of the download), priced by def
+                          name from a .brp run since those heads price only armed mobile defs.
+                          -groups sorts games into ranked Isthmus / ranked other maps / lava
+                          (internal/gamecat) from their BAR API details. Why it exists: the
+                          v6 summaries rebuilt from pieces price every BUILDING at 0, so any
+                          building-loss test on published summaries mostly measures nothing.
+                          -table writes internal/insights/legacybuildings.json (every building's
+                          category and cost by def name from its .brp runs), which prices the
+                          buildings of replays rebuilt from pieces.
 cmd/winfit/main.go        CLI: fits insights.WinModel to games with a known winner and prints
                           the coefficients to paste into swing.go. Input is insights files:
                           `insights -upload= -all -out ./ins` (compute-only mode SAVES an
@@ -799,7 +895,9 @@ cmd/winfit/main.go        CLI: fits insights.WinModel to games with a known winn
                           mirrored so there is no side bias; Newton's method with a small L2;
                           refuses under 20 games; reports log loss/accuracy of the current and
                           fitted weights overall and at 25/50/75/90% of a game. It reads files
-                          of Version 7 or later (games cut at the decision). A refit changes
+                          of Version 10 or later (the five inputs). -model lava|ranked8v8 fits one
+                          of the two models on the games it is for (lava games by their BAR API
+                          details, cached like -categories). A refit changes
                           what is computed, so it is a new insights Version.
                           -categories also fits each game CATEGORY on its own (internal/gamecat:
                           lava games lavabalance rates — the lobby's tweak stack, ported from
@@ -916,7 +1014,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           exactly what the clip plays rather than the whole map's window.
                           When NO battle holds the losses (spread over the map) and the losing
                           side's army fell by >= ARMY_DROP_SHARE (25%) in the window, the moment
-                          is told as that: "Blue team loses 43% of its army[, mostly aircraft]"
+                          is told as that: "Blue loses 43% of its army[, mostly aircraft]"
                           (moments.ts armyDrop), clipped over the whole window — the line moves
                           on the army, which the losses chart (a share of everything owned)
                           barely shows. The swing chart shades each moment's minute in the
@@ -1011,7 +1109,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           battle: at most 2 min long, >= 1000 metal lost by one side and both
                           sides' losses >= 15% of both armies then — a raid or a bombing run
                           too small next to the game's biggest yet decisive for the moment;
-                          at most LIST_MAX = 20 entries, one per time and place), each told as "Red team
+                          at most LIST_MAX = 20 entries, one per time and place), each told as "Red
                           decisively wins battle (5)" with the battles list's white-circle
                           badge — the line lists only its biggest shifts, and a decided fight
                           can move it little. A swing told as one battle carries the badge too. LOG
@@ -1052,11 +1150,11 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           `icon` (its iconType) then its name; SummaryOptions.iconBase names
                           the origin, defaulting to the one the module was loaded from, null
                           = names; a def with no icon reads as its name.
-                          The library draws versions 1-9 (INSIGHTS_VERSIONS [9, 8, 7, 6, 5, 4, 3, 2, 1]; v2 adds
+                          The library draws versions 1-10 (INSIGHTS_VERSIONS [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]; v2 adds
                           winner + swing, v3 eliminations and peak battles, v4 owner removals
                           left out, owned value and battle teams, v5 self-destructs marked, v6 fitted
                           win weights, v7 the game ends at the resign rather than the first team knocked
-                          out before it, swing drivers and no opening economy swings, v8 battle killers and unit classes for the battle phrases, v9 the calmer win model with metal destroyed and a 3-minute income window) and app.js fetches .insights9, then 8, 7, 6, 5, 4, 3, 2, 1. A version bump needs `insights -all` after
+                          out before it, swing drivers and no opening economy swings, v8 battle killers and unit classes for the battle phrases, v9 the calmer win model with metal destroyed and a 3-minute income window, v10 lost buildings at 2x in battle verdicts, standing buildings in the win line with a lava and a ranked 8v8 model, and the build-up and base stories) and app.js fetches .insights10, then 9, 8, 7, 6, 5, 4, 3, 2, 1. A version bump needs `insights -all` after
                           the deploy, or published replays keep their older summary — except the ones people OPEN, which
                           update themselves: see ON-DEMAND SUMMARIES under worker/ (so
                           `insights -all` is now only for having every summary current at once).
