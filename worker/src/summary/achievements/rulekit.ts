@@ -45,6 +45,9 @@ export interface Rule {
   /** The rarity a rule is DECIDED to have (1 common .. 5 legendary), which
    * wins over rarity.ts's measured one; every tier carries one. */
   rarity?: number;
+  /** Set on a rule switched OFF until its detection is fixed: why. It is
+   * kept so the fix has its code to start from, but nothing judges it. */
+  off?: string;
 }
 
 const ROMAN = ["I", "II", "III", "IV", "V", "VI"];

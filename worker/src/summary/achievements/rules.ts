@@ -12,7 +12,10 @@ import { holder, type Facts, type Hit, type Rule } from "./rulekit";
 export type { Hit, Knob, Need, Rule } from "./rulekit";
 export { describe, MIN_GAME_MIN } from "./rulekit";
 
-export const RULES: Rule[] = [...LOBBY, ...ENDSTATS, ...ORDERS_1, ...ORDERS_2];
+/** Every rule written, the switched-off ones included (see Rule.off). */
+export const ALL_RULES: Rule[] = [...LOBBY, ...ENDSTATS, ...ORDERS_1, ...ORDERS_2];
+/** The rules judged. */
+export const RULES: Rule[] = ALL_RULES.filter((r) => !r.off);
 
 export type Verdict = { rule: Rule; hits: Hit[] } | { rule: Rule; skip: string };
 

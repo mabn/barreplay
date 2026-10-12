@@ -9,7 +9,7 @@ import { test } from "node:test";
 
 import { gunzip, parseDemo, type BrpDef } from "../src/summary/demo";
 import { gather } from "../src/summary/achievements/facts";
-import { RULES, judge, type Knob, type Rule } from "../src/summary/achievements/rules";
+import { ALL_RULES, RULES, judge, type Knob, type Rule } from "../src/summary/achievements/rules";
 import { tiered } from "../src/summary/achievements/rulekit";
 
 const FIXTURE = new URL("../../internal/demofile/testdata/sample_header.sdfz", import.meta.url);
@@ -113,10 +113,11 @@ test("every rule runs on a sparse game: an answer or a reason, never a throw", a
 });
 
 test("the shortlist's ids are each implemented once", () => {
-  const ids = RULES.map((r) => r.id);
+  const ids = ALL_RULES.map((r) => r.id);
   assert.equal(new Set(ids).size, ids.length);
-  // 258 on the shortlist, 11 dropped after the first grading (2026-10-12).
-  assert.equal(new Set(RULES.map((r) => r.group ?? r.id)).size, 247);
+  // 258 on the shortlist, 10 dropped after the first grading (2026-10-12).
+  assert.equal(new Set(ALL_RULES.map((r) => r.group ?? r.id)).size, 248);
+  assert.ok(RULES.every((r) => !r.off));
 });
 
 test("a tiered achievement keeps only each player's highest tier", async () => {
