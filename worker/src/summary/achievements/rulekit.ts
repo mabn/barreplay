@@ -36,7 +36,39 @@ export interface Rule {
   /** Absent on a rule with no number to tune (a yes/no condition). */
   knob?: Knob;
   check: (F: Facts, k: number) => Hit[] | { skip: string };
+  /** A TIERED achievement's rung (1 = I): one rule per tier, each with its
+   * own knob value and rarity, all sharing the base rule's number as `group`.
+   * A player (or side, or game) keeps only the highest tier earned. The
+   * tier's id is the base id plus tier / 10 (563.1 for Carnage I). */
+  tier?: number;
+  group?: number;
+  /** The rarity a rule is DECIDED to have (1 common .. 5 legendary), which
+   * wins over rarity.ts's measured one; every tier carries one. */
+  rarity?: number;
 }
+
+const ROMAN = ["I", "II", "III", "IV", "V", "VI"];
+
+/** tiered expands one stat achievement into roman-numbered tiers, easiest
+ * first: each { value, rarity } is a rung, its knob value and its rarity. */
+export function tiered(base: Rule & { knob: Knob }, tiers: { value: number; rarity: number }[]): Rule[] {
+  return tiers.map((t, i) => ({
+    ...base,
+    id: base.id + (i + 1) / 10,
+    name: `${base.name} ${ROMAN[i]}`,
+    knob: { ...base.knob, value: t.value },
+    tier: i + 1,
+    group: base.id,
+    rarity: t.rarity,
+  }));
+}
+
+/** holder names who earned a hit: a player, a side, or the game itself. */
+export const holder = (h: Hit) => (h.player ? `p${h.player.id}` : h.side ? `s${h.side.index}` : "game");
+
+/** MIN_GAME_MIN: shorter games earn no achievement at all (Marcin's call: a
+ * game over in a few minutes is a remake or a crash, not a game). */
+export const MIN_GAME_MIN = 5;
 
 /** describe is a rule's desc at knob value k (its own by default). */
 export function describe(r: Rule, k = r.knob?.value): string {

@@ -21,7 +21,7 @@ import { join } from "node:path";
 
 import { gunzip, parseDemo, type BrpDef, type Demo } from "../src/summary/demo";
 import { gather, unwrap } from "../src/summary/achievements/facts";
-import { RULES } from "../src/summary/achievements/rules";
+import { MIN_GAME_MIN, RULES } from "../src/summary/achievements/rules";
 
 /** The knob values tried, as multiples of the rule's own. */
 const STEPS = [0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4, 5, 7, 10];
@@ -88,7 +88,7 @@ const ladders = new Map(RULES.map((r) => {
 const tally = new Map(RULES.map((r) => [r.id, ladders.get(r.id)!.map(() => ({ hits: 0, games: 0, players: 0 }))]));
 const judged = new Map(RULES.map((r) => [r.id, 0]));
 const skipWhy = new Map<number, Map<string, number>>();
-let done = 0, failed = 0, players = 0, noDefs = 0;
+let done = 0, failed = 0, players = 0, noDefs = 0, short = 0;
 const fits: number[] = [];
 
 for (const g of games) {
@@ -106,6 +106,8 @@ for (const g of games) {
     process.stderr.write(`${g.id}: ${(e as Error).message}\n`);
     continue;
   }
+  // Short games earn nothing (judge's gate), so they are not counted at all.
+  if (F.endMin < MIN_GAME_MIN) { short++; continue; }
   done++;
   players += F.players.filter((x) => !x.ai).length;
   for (const r of RULES) {
@@ -134,9 +136,9 @@ for (const g of games) {
 }
 
 process.stdout.write(JSON.stringify({
-  games: done, failed, players, noDefs, fits: fits.sort((a, b) => a - b),
+  games: done, failed, short, players, noDefs, fits: fits.sort((a, b) => a - b),
   rules: RULES.map((r) => ({
-    id: r.id, name: r.name, desc: r.desc, need: r.need, knob: r.knob ?? null,
+    id: r.id, name: r.name, desc: r.desc, need: r.need, knob: r.knob ?? null, rarity: r.rarity ?? null, group: r.group ?? null,
     judged: judged.get(r.id),
     skips: Object.fromEntries(skipWhy.get(r.id) ?? []),
     ks: ladders.get(r.id), rates: tally.get(r.id),

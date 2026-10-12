@@ -86,6 +86,8 @@ export interface Vote {
   command: string;
   outcome: "passed" | "failed" | "cancelled" | null;
   endF: number;
+  /** Players who voted yes while it ran (the caller's own vote included). */
+  yes: string[];
   /** Players who voted no while it ran. */
   no: string[];
 }
@@ -256,7 +258,7 @@ export function gather(demo: Demo, defs: Map<number, BrpDef> | null, ins: Insigh
       const call = RESIGN_VOTE.exec(c.text) ?? /called a vote for command "([^"]*)"/.exec(c.text);
       if (call) {
         const caller = /\* (.+?) called a vote/.exec(c.text)?.[1] ?? "";
-        votes.push({ f: c.f, caller, command: call[1], outcome: null, endF: -1, no: [] });
+        votes.push({ f: c.f, caller, command: call[1], outcome: null, endF: -1, yes: caller ? [caller] : [], no: [] });
         continue;
       }
       const end = VOTE_END.exec(c.text);
@@ -277,7 +279,8 @@ export function gather(demo: Demo, defs: Map<number, BrpDef> | null, ins: Insigh
       if (text.startsWith("!")) {
         p.commands.push({ f: c.f, text });
         const open = votes.find((v) => v.outcome === null);
-        if (open && /^!(vote )?n(o)?$/i.test(text)) open.no.push(p.name);
+        if (open && /^!(vote )?n(o)?$/i.test(text) && !open.no.includes(p.name)) open.no.push(p.name);
+        if (open && /^!(vote )?y(es)?$/i.test(text) && !open.yes.includes(p.name)) open.yes.push(p.name);
       } else p.chat.push({ f: c.f, dest: c.dest, text });
     } else {
       const s = specById.get(c.player);
@@ -353,6 +356,8 @@ export const winner = (F: Facts) => F.sides.find((s) => s.won === true) ?? null;
 export const losers = (F: Facts) => F.sides.filter((s) => s.won === false);
 export const isDuel = (F: Facts) => F.sides.length === 2 && F.sides.every((s) => s.players.length === 1);
 /** A team game: two sides, more than one player on each. */
+/** is8v8: two sides of eight players each, the lava lobby's shape. */
+export const is8v8 = (F: Facts) => F.sides.length === 2 && F.sides.every((s) => s.players.length === 8);
 export const isTeamGame = (F: Facts) => F.sides.length === 2 && F.sides.every((s) => s.players.length >= 2);
 export const playerCount = (F: Facts) => F.players.length;
 
@@ -409,8 +414,8 @@ export function playersAt(s: Side, f: number): number {
   return s.players.filter((p) => !((p.leftAt >= 0 && p.leftAt <= f) || (p.resignedAt >= 0 && p.resignedAt <= f))).length;
 }
 
-/** shortHanded is how long (frames) side `s` had fewer players than the
- * other side of a two-sided game, sampled every 10 s, and the first frame of
+/** shortHanded is how long (frames) side `s` had lost more players (leaves,
+ * resigns) than the other side of a two-sided game, sampled every 10 s, and the first frame of
  * the last such stretch running to the end (-1 if it was not short then). */
 export function shortHanded(F: Facts, s: Side): { frames: number; since: number } {
   const t = two(F);
@@ -420,7 +425,9 @@ export function shortHanded(F: Facts, s: Side): { frames: number; since: number 
   let frames = 0;
   let since = -1;
   for (let f = 0; f <= F.endF - FPS; f += step) {
-    const short = playersAt(s, f) < playersAt(other, f);
+    // Short means having LOST more players than the other side: a lobby
+    // that started uneven (7v8) is not a side gone short.
+    const short = s.players.length - playersAt(s, f) > other.players.length - playersAt(other, f);
     if (short) {
       frames += step;
       if (since < 0) since = f;

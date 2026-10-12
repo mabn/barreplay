@@ -121,12 +121,9 @@
     r.i0 = r.knob ? r.ks.reduce((b, k, i) => (Math.abs(k - r.knob.value) < Math.abs(r.ks[b] - r.knob.value) ? i : b), 0) : 0;
     r.now = r.perGame[r.i0] ?? 0;
   }
-  // The default plan keeps each achievement's place in today's order: the
-  // rarest fifth legendary, the next epic, ... the most common fifth common.
-  // The shortlist's own guess is its own column.
-  const order = [...R.rules].sort((a, b) => a.now - b.now || a.id - b.id);
-  order.forEach((r, i) => { r.byRank = 5 - Math.floor((5 * i) / order.length); });
-  const tierOf = (r) => plan[r.id] ?? r.byRank;
+  // The default plan is the rarity the summary's chip shows now (est): the
+  // one set by hand (tiers, your picks), else the measured one.
+  const tierOf = (r) => plan[r.id] ?? r.est;
   /** Per-achievement target rate: the tier's budget shared by its members. */
   function targets() {
     const n = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
@@ -152,7 +149,7 @@
   let sortKey = "now", sortDir = 1;
   const COLS = [
     ["id", "#"], ["name", "Achievement"], ["desc", "Now: earned when…"], ["knob", "Knob"], ["now", "How often"], ["share", "Games with it"],
-    ["mtier", "Rarity now"], ["guess", "Shortlist guess"], ["est", "Planned tier"], ["sk", "Suggested knob"], ["srate", "How often then"], ["stars", "Interest"],
+    ["mtier", "Rarity now"], ["guess", "Chip now"], ["est", "Planned tier"], ["sk", "Suggested knob"], ["srate", "How often then"], ["stars", "Interest"],
   ];
   // The cells are built in COLS order; shown with the editable ones (planned
   // tier, interest) right after the description.
@@ -264,7 +261,7 @@
   };
   document.getElementById("tunenote").textContent =
     `Measured over ${R.games} lava games since ${R.since} (${R.players} player-games), from their demos. "How often" is how often it is awarded at its current knob, counting every award (two players earning it in one game is two); ` +
-    `"Rarity now" is the tier whose per-achievement budget that rate is nearest. "Planned tier" starts from today's order (the rarest fifth legendary, the next fifth epic, and so on; "Shortlist guess" is the guess made before any game was checked); change it and the suggested knob follows: ` +
+    `"Rarity now" is the tier whose per-achievement budget that rate is nearest. "Chip now" is the rarity the summary shows (set by hand for tiers and your picks, else measured), and "Planned tier" starts from it; change it and the suggested knob follows: ` +
     `the swept value (0.1x to 10x the current one) whose measured rate is nearest the tier's per-achievement budget. ↑ means a bigger knob is harder, ↓ a smaller one. ` +
     `Rates in orange are over 2x off their target even at the best knob. Build-order achievements could be judged in ${R.games - R.noDefs} of the games (the rest had no matching unit table).`;
   render();

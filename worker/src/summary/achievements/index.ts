@@ -6,7 +6,7 @@
 import { fetchBrpDefs, fetchDemo } from "../demo";
 import { type Insights } from "../types";
 import { gather } from "./facts";
-import { RULES, type Hit, type Rule } from "./rules";
+import { MIN_GAME_MIN, judge, type Hit, type Rule } from "./rules";
 
 export type { Hit, Knob, Rule } from "./rules";
 export { describe } from "./rules";
@@ -23,7 +23,7 @@ export interface AchievementResult {
 
 /** loadAchievements fetches the demo through barApi (a BAR API proxy that
  * also serves /demos/<file>) and the def table out of brpUrl, then runs every
- * rule. A rule that throws is reported unknown rather than losing the rest. */
+ * rule (judge). A game shorter than MIN_GAME_MIN minutes earns nothing. */
 export async function loadAchievements(ins: Insights, barApi: string, brpUrl: string | null): Promise<AchievementResult> {
   const notes: string[] = [];
   const [{ demo, map }, defs] = await Promise.all([
@@ -34,15 +34,18 @@ export async function loadAchievements(ins: Insights, barApi: string, brpUrl: st
   ]);
   const F = gather(demo, defs, ins, map);
   const out: AchievementResult = { earned: [], missed: [], unknown: [], notes };
-  for (const rule of RULES) {
-    try {
-      const r = rule.check(F, rule.knob?.value ?? NaN);
-      if ("skip" in r) out.unknown.push({ rule, why: r.skip });
-      else if (r.length) out.earned.push({ rule, hits: r });
-      else out.missed.push(rule);
-    } catch (e) {
-      out.unknown.push({ rule, why: `the check failed: ${(e as Error).message}` });
-    }
+  if (F.endMin < MIN_GAME_MIN) {
+    notes.push(`games under ${MIN_GAME_MIN} minutes earn no achievements`);
+    return out;
   }
+  for (const v of judge(F)) {
+    if ("skip" in v) out.unknown.push({ rule: v.rule, why: v.skip });
+    else if (v.hits.length) out.earned.push(v);
+    else out.missed.push(v.rule);
+  }
+  // A tiered achievement somebody earned is not also "not earned" at its
+  // other tiers.
+  const got = new Set(out.earned.map((e) => e.rule.group).filter(Boolean));
+  out.missed = out.missed.filter((r) => !r.group || !got.has(r.group));
   return out;
 }

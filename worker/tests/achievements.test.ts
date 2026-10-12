@@ -9,7 +9,8 @@ import { test } from "node:test";
 
 import { gunzip, parseDemo, type BrpDef } from "../src/summary/demo";
 import { gather } from "../src/summary/achievements/facts";
-import { RULES } from "../src/summary/achievements/rules";
+import { RULES, judge, type Knob, type Rule } from "../src/summary/achievements/rules";
+import { tiered } from "../src/summary/achievements/rulekit";
 
 const FIXTURE = new URL("../../internal/demofile/testdata/sample_header.sdfz", import.meta.url);
 
@@ -114,5 +115,17 @@ test("every rule runs on a sparse game: an answer or a reason, never a throw", a
 test("the shortlist's ids are each implemented once", () => {
   const ids = RULES.map((r) => r.id);
   assert.equal(new Set(ids).size, ids.length);
-  assert.equal(ids.length, 258);
+  // 258 on the shortlist, 11 dropped after the first grading (2026-10-12).
+  assert.equal(new Set(RULES.map((r) => r.group ?? r.id)).size, 247);
+});
+
+test("a tiered achievement keeps only each player's highest tier", async () => {
+  const F = gather(await demoWithStream(), DEFS, null, null);
+  const p = F.players[0];
+  const base: Rule = { id: 9000, name: "Test", desc: "{k}", need: "meta", knob: { value: 1, harder: 1, int: true },
+    check: (_F, k) => (k <= 2 ? [{ player: p, text: "x" }] : []) };
+  const tiers = tiered(base as Rule & { knob: Knob }, [{ value: 1, rarity: 1 }, { value: 2, rarity: 2 }, { value: 3, rarity: 3 }]);
+  assert.deepEqual(tiers.map((t) => t.name), ["Test I", "Test II", "Test III"]);
+  const v = judge(F, tiers);
+  assert.deepEqual(v.map((x) => ("hits" in x ? x.hits.length : -1)), [0, 1, 0]);
 });

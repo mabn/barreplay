@@ -112,6 +112,9 @@ export interface Demo {
   rejoined: { f: number; player: number }[];
   /** NETMSG_TEAM: 1 give everything away, 4 a team died. */
   teamMsgs: { f: number; player: number; action: number; param: number }[];
+  /** NETMSG_SHARE: a player hands resources or their SELECTED units to
+   * another team; `units` is how many were selected (0: resources only). */
+  shares: { f: number; player: number; team: number; units: number; metal: number; energy: number }[];
   winners: number[] | null;
   /** By team; null when the demo has no totals (cut short, or older). */
   teamStats: Map<number, TeamStats> | null;
@@ -119,7 +122,7 @@ export interface Demo {
 
 const NET = {
   keyframe: 1, newframe: 2, playerName: 6, chat: 7, command: 11, select: 12, pause: 13,
-  aiCommand: 14, aiCommands: 15, startPos: 36, playerLeft: 39, mapDraw: 32, team: 51, newPlayer: 75, aiCommandTracked: 76,
+  aiCommand: 14, aiCommands: 15, share: 26, startPos: 36, playerLeft: 39, mapDraw: 32, team: 51, newPlayer: 75, aiCommandTracked: 76,
 };
 const MAX_PACKET = 1 << 20;
 const HEADER_MIN = 352;
@@ -178,7 +181,7 @@ export function parseDemo(b: Uint8Array): Demo {
     modOptions: Object.fromEntries(game.sub.get("modoptions")?.val ?? []),
     startPos: new Map(),
     players: [], teams: [], aiTeams: new Map(), commands: [], selections: new Map(), chat: [], draws: [],
-    pauses: [], left: [], rejoined: [], teamMsgs: [], winners: null, teamStats: null,
+    pauses: [], left: [], rejoined: [], teamMsgs: [], shares: [], winners: null, teamStats: null,
   };
   const ais = new Map<number, string>();
   for (const [name, sec] of game.sub) {
@@ -295,6 +298,10 @@ function scanStream(b: Uint8Array, v: DataView, p: number, end: number, demo: De
         break;
       case NET.playerLeft:
         if (n >= 3) demo.left.push({ f: frame, player: b[q + 1], reason: b[q + 2] });
+        break;
+      case NET.share:
+        // uint8 player, team, shareUnits; float metal, energy
+        if (n >= 12) demo.shares.push({ f: frame, player: b[q + 1], team: b[q + 2], units: b[q + 3] ? (selection.get(b[q + 1])?.length ?? 0) : 0, metal: v.getFloat32(q + 4, true), energy: v.getFloat32(q + 8, true) });
         break;
       case NET.team:
         if (n >= 4) demo.teamMsgs.push({ f: frame, player: b[q + 1], action: b[q + 2], param: b[q + 3] });

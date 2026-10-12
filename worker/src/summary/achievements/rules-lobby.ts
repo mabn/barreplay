@@ -1,16 +1,12 @@
 // Achievement rules (lobby); see rules.ts.
-import { FPS, type Side, byElimination, chatLines, clock, count, endstats, gameHit, humans, isDuel, isGG, isGL, isTeamGame, k as kfmt, losers, mins, needWinner, otherSide, per, playerCount, rating, resignVotes, sideOf, skip, st, sum, top, two, voteSide, winner, withStats, type Rule } from "./rulekit";
+import { FPS, is8v8, type Side, byElimination, chatLines, clock, count, endstats, gameHit, humans, isDuel, isGG, isGL, isTeamGame, k as kfmt, losers, mins, needWinner, otherSide, per, playerCount, rating, resignVotes, sideOf, skip, st, sum, top, two, voteSide, winner, withStats, type Rule } from "./rulekit";
 
 export const LOBBY: Rule[] = [
   // ---- the lobby: sizes, ratings, ranks, countries, length ------------------
-  { id: 173, name: "Masterpiece", desc: "A side with fewer players than its opponent (by {k}+) wins.", need: "meta", knob: { value: 2, harder: 1, int: true },
-    check: (F, k) => needWinner(F, () => { const w = winner(F), t = two(F); if (!w || !t) return []; const o = otherSide(F, w); return o.players.length - w.players.length >= k ? [{ side: w, text: `${w.players.length} players beat ${o.players.length}` }] : []; }) },
-  { id: 190, name: "Brutal+", desc: "An allied side beats a side with {k}% more players.", need: "meta", knob: { value: 50, harder: 1, int: true },
-    check: (F, k) => needWinner(F, () => { const w = winner(F); if (!w || !two(F)) return []; const o = otherSide(F, w); return o.players.length >= (1 + k / 100) * w.players.length && w.players.length >= 2 ? [{ side: w, text: `${w.players.length} beat ${o.players.length}` }] : []; }) },
   { id: 450, name: "Speed!", desc: "Game ends before minute {k} with 8+ players.", need: "meta", knob: { value: 8, harder: -1, int: true },
     check: (F, k) => (F.endMin < k && playerCount(F) >= 8 ? gameHit(`${playerCount(F)} players, over at ${mins(F)}`) : []) },
-  { id: 472, name: "Gone in 360 Seconds", desc: "A game won by elimination in under {k} minutes.", need: "meta", knob: { value: 6, harder: -1, int: true },
-    check: (F, k) => needWinner(F, () => (byElimination(F) && F.endMin < k ? gameHit(`no resign, over at ${mins(F)}`) : [])) },
+  { id: 472, name: "Gone in 360 Seconds", desc: "An 8v8 won by elimination in under {k} minutes.", need: "meta", knob: { value: 15, harder: -1, int: true }, rarity: 5,
+    check: (F, k) => needWinner(F, () => (is8v8(F) && byElimination(F) && F.endMin < k ? gameHit(`no resign, over at ${mins(F)}`) : [])) },
   { id: 570, name: "Short Work", desc: "The game is decided before minute {k} in a game of 8+ players.", need: "meta", knob: { value: 10, harder: -1, int: true },
     check: (F, k) => (F.endMin < k && playerCount(F) >= 8 ? gameHit(`${playerCount(F)} players, over at ${mins(F)}`) : []) },
   { id: 653, name: "Lightning War", desc: "A side wins a game of 6+ players in under {k} minutes.", need: "meta", knob: { value: 12, harder: -1, int: true },
@@ -19,14 +15,12 @@ export const LOBBY: Rule[] = [
     check: (F, k) => needWinner(F, () => { const w = winner(F); if (!w || !two(F)) return []; const o = otherSide(F, w); return o.skill - w.skill >= k ? [{ side: w, text: `average ${w.skill.toFixed(1)} beat ${o.skill.toFixed(1)}` }] : []; }) },
   { id: 703, name: "Hard Mode", desc: "Win against a side whose average OpenSkill is {k}+ higher.", need: "meta", knob: { value: 5, harder: 1 },
     check: (F, k) => needWinner(F, () => { const w = winner(F); if (!w || !two(F)) return []; const o = otherSide(F, w); return o.skill - w.skill >= k ? [{ side: w, text: `average ${w.skill.toFixed(1)} beat ${o.skill.toFixed(1)}` }] : []; }) },
-  { id: 720, name: "Are You Not Entertained?", desc: "A team game (4v4+) won in under {k} minutes.", need: "meta", knob: { value: 10, harder: -1, int: true },
-    check: (F, k) => needWinner(F, () => (two(F) && F.sides.every((s) => s.players.length >= 4) && F.endMin < k ? gameHit(`won at ${mins(F)}`) : [])) },
+  { id: 720, name: "Are You Not Entertained?", desc: "An 8v8 won in under {k} minutes.", need: "meta", knob: { value: 10, harder: -1, int: true },
+    check: (F, k) => needWinner(F, () => (is8v8(F) && F.endMin < k ? gameHit(`won at ${mins(F)}`) : [])) },
   { id: 880, name: "Turn of the Century", desc: "A game lasting over {k} minutes.", need: "meta", knob: { value: 100, harder: 1, int: true },
     check: (F, k) => (F.endMin > k ? gameHit(`${mins(F)} long`) : []) },
-  { id: 1014, name: "Blitz", desc: "The game was decided before {k} minutes.", need: "meta", knob: { value: 15, harder: -1, int: true },
+  { id: 1014, name: "Blitz", desc: "The game was decided before {k} minutes.", need: "meta", knob: { value: 12, harder: -1, int: true }, rarity: 4,
     check: (F, k) => (F.endMin < k ? gameHit(`over at ${mins(F)}`) : []) },
-  { id: 1026, name: "Seoul Power", desc: "A team game of 6+ players is decided before minute {k}.", need: "meta", knob: { value: 12, harder: -1, int: true },
-    check: (F, k) => (isTeamGame(F) && playerCount(F) >= 6 && F.endMin < k ? gameHit(`${playerCount(F)} players, over at ${mins(F)}`) : []) },
   { id: 1103, name: "Deep for Speed", desc: "A team game (6+ players) won by elimination in under {k} minutes.", need: "meta", knob: { value: 20, harder: -1, int: true },
     check: (F, k) => needWinner(F, () => (isTeamGame(F) && playerCount(F) >= 6 && byElimination(F) && F.endMin < k ? gameHit(`no resign, over at ${mins(F)}`) : [])) },
   { id: 1122, name: "Nexus Blitz", desc: "Win in under {k} minutes in a team game.", need: "meta", knob: { value: 12, harder: -1, int: true },
@@ -70,13 +64,11 @@ export const LOBBY: Rule[] = [
     // included (a plain ranked game lists ~200), and the defaults are not
     // known here.
     check: () => skip("the demo lists every modoption, defaults included, and the defaults are not known here") },
-  { id: 50, name: "Flip-Flop", desc: "A side starts a resign vote (!cv resign) that fails, then wins the game.", need: "chat",
-    check: (F) => needWinner(F, () => resignVotes(F).filter((v) => v.outcome === "failed" || v.outcome === "cancelled").flatMap((v) => { const s = voteSide(F, v.caller); return s?.won ? [{ side: s, text: `${v.caller}'s resign vote at ${clock(v.f)} failed`, f: v.f }] : []; }).slice(0, 1)) },
-  { id: 601, name: "No Time for Chitchat", desc: "The winning side of a team game sent no chat messages at all.", need: "chat",
-    check: (F) => needWinner(F, () => { const w = winner(F); return w && isTeamGame(F) && chatLines(w.players) === 0 ? [{ side: w, text: "not one chat line" }] : []; }) },
+  { id: 50, name: "Flip-Flop", desc: "A resign vote (!cv resign) that {k}+ players voted for fails, then their side wins the game.", need: "chat", knob: { value: 3, harder: 1, int: true },
+    check: (F, k) => needWinner(F, () => resignVotes(F).filter((v) => (v.outcome === "failed" || v.outcome === "cancelled") && v.yes.length >= k).flatMap((v) => { const s = voteSide(F, v.caller); return s?.won ? [{ side: s, text: `${v.caller}'s resign vote at ${clock(v.f)} failed with ${v.yes.length} for it`, f: v.f }] : []; }).slice(0, 1)) },
   { id: 775, name: "What a Save", desc: "Player chats 'what a save'/'nice shot' after an ally's loss.", need: "chat",
     check: (F) => per(humans(F), (p) => { const c = p.chat.find((x) => /\b(what a save|nice save|nice shot|great save)\b/i.test(x.text)); return c ? `"${c.text}" at ${clock(c.f)}` : null; }, (p) => p.chat.find((x) => /\b(what a save|nice save|nice shot|great save)\b/i.test(x.text))?.f) },
-  { id: 861, name: "Map Artist", desc: "A player draws >= {k} map line segments in one game.", need: "chat", knob: { value: 200, harder: 1, int: true },
+  { id: 861, name: "Map Artist", desc: "A player draws >= {k} map line segments in one game.", need: "chat", knob: { value: 440, harder: 1, int: true }, rarity: 4,
     check: (F, k) => per(humans(F), (p) => p.lines >= k && `${p.lines} line segments`) },
   { id: 896, name: "Graffiti Artist", desc: "A player draws {k}+ line segments on the map in one game.", need: "chat", knob: { value: 200, harder: 1, int: true },
     check: (F, k) => per(humans(F), (p) => p.lines >= k && `${p.lines} line segments`) },
