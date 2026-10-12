@@ -7019,10 +7019,17 @@ function renderQueue(errMsg) {
     {
       const td = document.createElement('td');
       td.className = 'game';
+      // A placeholder row (a re-sim still running, nothing published yet)
+      // would open a broken page, so its id is plain text. A published game
+      // links to its replay; one this site does not have yet links out to
+      // BAR's own page — which for a queued re-sim is where it came from.
       const e = replayList.find(x => x.id === j.gameId);
-      const a = document.createElement('a');
+      const simulating = e && e.placeholder;
+      const a = document.createElement(simulating ? 'span' : 'a');
       a.textContent = j.gameId;
-      if (e) {
+      if (simulating) {
+        a.title = 'Still being simulated — nothing to play yet';
+      } else if (e) {
         a.href = replayHref(e.id);
         a.addEventListener('click', (ev) => {
           if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;

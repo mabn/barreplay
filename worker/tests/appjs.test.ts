@@ -1472,7 +1472,7 @@ test('a running job shows its live progress instead of an empty row', () => {
 
   const render = eval(`(function(){
     const document = dom.document;
-    const replayList = [];
+    const replayList = [{ id: 'aaa', placeholder: true }];
     const queuePage = { jobs, total: jobs.length, active: 2 };
     const queueOffset = 0, queueReadAt = 0;
     const queueOpen = new Set();
@@ -1568,6 +1568,11 @@ test('a running job shows its live progress instead of an empty row', () => {
   assert.deepEqual(walk(cellOf(trs[0], 'settings')).filter((n: any) => n.className.includes('badge')).map((n: any) => n.textContent), ['lava']);
   assert.equal(cellOf(trs[2], 'map').textContent, '—');
   assert.equal(cellOf(trs[2], 'when').textContent, '—');
+  // A game still being simulated (a placeholder catalog row) is text, not a
+  // link to a page with nothing to play; one the catalog lacks links out.
+  assert.equal(walk(cellOf(trs[0], 'game')).find((n: any) => n.tag === 'a'), undefined);
+  assert.equal(walk(cellOf(trs[0], 'game')).find((n: any) => n.tag === 'span').textContent, 'aaa');
+  assert.match(walk(cellOf(trs[2], 'game')).find((n: any) => n.tag === 'a').href, /bar-rts\.com\/replays\/ccc/);
   // The game id carries a copy button.
   assert.ok(walk(cellOf(trs[0], 'game')).find((n: any) => n.className === 'copyid'));
   assert.equal(cellOf(trs[0], 'dur').textContent, '40m');
