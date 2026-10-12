@@ -790,7 +790,24 @@ experiments/winmodel/      compares win-model VARIANTS on insights files (any ve
                           pre-7 files cut at the decision like v7 does): out-of-fold accuracy,
                           log loss, jitter, 5-point zigzags, and the share of big moves an
                           event can name. Where Version 9's model came from; add a variant to
-                          variants.go to try another idea.
+                          variants.go to try another idea. With -bw/-defcat (buildingworth's
+                          output) it also tries building weights: losses by unit category
+                          (killW), standing metal by category added to the army or as its own
+                          input; -events prints the calibration gap at minutes a side lost one
+                          category (does the line lag a lost base?), -bootcoef N each
+                          coefficient's game-bootstrap interval, -games/-score restrict the fit
+                          or only the scoring to listed games, and every variant's log loss is
+                          compared with the first's, paired by game.
+experiments/buildingworth/ per game, each side's STANDING metal by unit category (army, con,
+                          com, def, eco = power/converters/build turrets, mex, bld) every 15 s,
+                          for winmodel -bw. Reads .brp files, or (-legacy) an older replay's
+                          published pieces as KEYFRAMES ONLY (zero-filled chunk bodies, so a
+                          minute's resolution for a fraction of the download), priced by def
+                          name from a .brp run since those heads price only armed mobile defs.
+                          -groups sorts games into ranked Isthmus / ranked other maps / lava
+                          (internal/gamecat) from their BAR API details. Why it exists: the
+                          v6 summaries rebuilt from pieces price every BUILDING at 0, so any
+                          building-loss test on published summaries mostly measures nothing.
 cmd/winfit/main.go        CLI: fits insights.WinModel to games with a known winner and prints
                           the coefficients to paste into swing.go. Input is insights files:
                           `insights -upload= -all -out ./ins` (compute-only mode SAVES an
