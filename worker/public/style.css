@@ -60,8 +60,6 @@ select, button {
 }
 button:hover { background: var(--raised-hi); }
 button:disabled { opacity: .4; cursor: default; }
-/* Fixed width so toggling "▶ Play" / "⏸ Pause" doesn't reflow the controls row. */
-#play { min-width: 74px; text-align: center; }
 select { padding: 5px 8px; }
 
 .controls {
@@ -73,15 +71,72 @@ select { padding: 5px 8px; }
 .controls .grow { flex: 1; }
 input[type=range] { flex: 1; min-width: 120px; accent-color: var(--accent); }
 
-/* Timeline: the scrub slider with the downloaded-ranges bar underneath
-   (video-player style: blue = fully loaded chunk, dim = keyframe only). */
-#timeline { flex: 1; min-width: 120px; display: flex; flex-direction: column; gap: 1px; }
-#timeline input[type=range] { width: 100%; margin: 0; }
-#buffbar { height: 3px; border-radius: 2px; background: transparent; }
-.timelabel {
-  min-width: 190px; text-align: right; font-size: 12px;
-  font-variant-numeric: tabular-nums; color: var(--muted);
+/* ---- the playback strip (index.html #bottombar) ----
+   A card under the map: a round play button, a step either way, the speed,
+   then the TIMELINE — a canvas drawing the whole game (app.js drawStrip: the
+   army lead, chat ticks, minutes) with the slider laid over it, its track
+   invisible and its thumb drawn as the playhead, a line through the strip
+   with a dot on the centre — and the clock. */
+body.replay-page #bottombar {
+  margin: 4px 10px 10px; padding: 8px 14px 8px 10px; gap: 6px;
+  border: 1px solid var(--line); border-radius: 12px;
 }
+#play {
+  width: 42px; height: 42px; padding: 0; margin-right: 4px; border: none; border-radius: 50%;
+  display: grid; place-items: center; background: var(--accent); color: var(--accent-ink);
+}
+#play:hover { background: var(--accent-hi); }
+#play svg { width: 20px; height: 20px; fill: currentColor; }
+#play .i-pause, #play.playing .i-play { display: none; }
+#play.playing .i-pause { display: block; }
+.stepbtn {
+  width: 30px; height: 30px; padding: 0; display: grid; place-items: center;
+  background: none; border: none; color: var(--muted); border-radius: 6px;
+}
+.stepbtn:hover { background: var(--raised); color: var(--text); }
+.stepbtn svg {
+  width: 16px; height: 16px; fill: currentColor;
+  stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round;
+}
+#speed {
+  padding: 3px 6px; margin: 0 6px 0 2px; border-radius: 999px; font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+#timeline { flex: 1; min-width: 120px; position: relative; height: 56px; }
+#stripcv { position: absolute; inset: 0; width: 100%; height: 100%; cursor: pointer; }
+/* Downloaded ranges along the graph's foot (app.js updateBuffBar: bright =
+   fully loaded chunk, dim = keyframe only), inset like the slider's ends. */
+#buffbar {
+  position: absolute; left: 7px; right: 7px; bottom: 11px; height: 2px;
+  border-radius: 1px; background: transparent; pointer-events: none;
+}
+/* The slider covers the whole strip, so a press anywhere seeks there. Its
+   thumb is 14px wide (app.js STRIP_THUMB) and as tall as the strip. */
+#timeline #slider {
+  -webkit-appearance: none; appearance: none;
+  position: absolute; inset: 0; width: 100%; height: 100%; margin: 0;
+  background: transparent; cursor: pointer;
+}
+#timeline #slider:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+#timeline #slider::-webkit-slider-runnable-track { height: 56px; background: transparent; }
+#timeline #slider::-moz-range-track { height: 56px; background: transparent; }
+#timeline #slider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none; width: 14px; height: 56px; border: none;
+  background:
+    radial-gradient(circle at 50% 50%, var(--accent) 0 5px, var(--panel) 5.5px 7px, transparent 7.5px),
+    linear-gradient(var(--accent), var(--accent)) 50% 0 / 2px 100% no-repeat;
+}
+#timeline #slider::-moz-range-thumb {
+  width: 14px; height: 56px; border: none; border-radius: 0;
+  background:
+    radial-gradient(circle at 50% 50%, var(--accent) 0 5px, var(--panel) 5.5px 7px, transparent 7.5px),
+    linear-gradient(var(--accent), var(--accent)) 50% 0 / 2px 100% no-repeat;
+}
+.timelabel {
+  min-width: 96px; margin-left: 8px; text-align: right; white-space: nowrap;
+  font-variant-numeric: tabular-nums; color: var(--dim); font-size: 12px;
+}
+#timelabel { color: var(--text); font-size: 17px; font-weight: 700; }
 
 /* ---- home view: the left menu and the section it selects, shown when no
    replay is selected. Toggled via body.home, which hides the playback chrome
@@ -128,6 +183,12 @@ body.replay-page #backlink:hover { color: #fff; background: var(--raised); borde
   fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; stroke-linecap: round;
 }
 body.replay-page h1 .sub { margin-left: 0; vertical-align: middle; }
+/* The replay's title: the map, then the game's facts quieter beside it
+   (app.js renderReplayTitle). No rule under the header: the map, the cards
+   and the strip float on the page. */
+body.replay-page header { border-bottom: none; padding: 10px 16px 6px; }
+body.replay-page h1 .sub .maptitle { color: var(--text); font-size: 17px; font-weight: 700; margin-right: 10px; }
+body.replay-page h1 .sub .facts { color: var(--dim); font-size: 12px; }
 
 #rail {
   width: 72px; padding: 12px 0 10px;
@@ -675,21 +736,34 @@ canvas { display: block; width: 100%; height: 100%; background: transparent; cur
 #glcv { position: absolute; left: 0; top: 0; background: transparent; pointer-events: none; }
 #ovcv { position: absolute; left: 0; top: 0; background: transparent; pointer-events: none; }
 
+/* The sidebar holds two CARDS on the page background rather than being a
+   panel itself: the game (clock, the two sides, every player) and the chat.
+   The game card takes the height it needs (scrolling inside itself past the
+   column's height) and the chat takes what is left. */
 #side {
-  width: 320px; background: var(--panel); border-left: 1px solid var(--line);
-  padding: 12px; overflow-y: auto; font-size: 13px;
+  width: 352px; padding: 10px 10px 10px 0;
+  display: flex; flex-direction: column; gap: 10px; min-height: 0; font-size: 13px;
 }
-#side h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
-  color: var(--faint); margin: 14px 0 6px; }
-#side h2:first-child { margin-top: 0; }
-.stat { display: flex; justify-content: space-between; padding: 2px 0; }
-.stat b { color: #fff; font-variant-numeric: tabular-nums; }
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  padding: 10px 12px;
+}
+#teamcard { flex: 0 1 auto; min-height: 0; overflow-y: auto; }
+#chatwrap { flex: 1 1 160px; min-height: 120px; display: flex; flex-direction: column; }
+.card h2, .cardhead h2 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--faint); margin: 0; font-weight: 600;
+}
+.cardhead { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+/* The clock: the moment the whole card is a reading of. */
+.clock { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+.clock b { font-size: 26px; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; line-height: 1; }
+.clock .hint { font-variant-numeric: tabular-nums; }
 
 /* ---- team statistics bar ----
-   The two sides compared, one row per metric, sitting above the Players
-   heading rather than under it — that heading belongs to the roster below it,
-   and these rows are about the two SIDES. It leads its own block, so it takes
-   an h2's top margin and leaves the bottom gap to the heading that follows.
+   The two sides compared, one row per metric, on the team card between the
+   clock and the player table and ruled off from the table: these rows are
+   about the two SIDES, the table about the players.
 
    The shape is BAR's (see renderTeamStats): each value in a KNOB of its side's
    colour with the number written across it, the lead in a knob of its own
@@ -700,7 +774,10 @@ canvas { display: block; width: 100%; height: 100%; background: transparent; cur
    neither has to compromise for the other. What is NOT copied is the widget's
    game-HUD finish: no bevels, no lit top edge, no gradients, since next to
    this sidebar's flat surfaces those read as a transplant. */
-#teamstats { display: flex; flex-direction: column; gap: 3px; margin-top: 14px; }
+#teamstats {
+  display: flex; flex-direction: column; gap: 3px;
+  padding-bottom: 10px; margin-bottom: 4px; border-bottom: 1px solid var(--line-soft);
+}
 .tsrow { display: flex; align-items: center; gap: 6px; }
 /* Same slot and muted tone as the player rows' OS column, so the metric names
    line up with the column of numbers beneath them. */
@@ -721,20 +798,46 @@ canvas { display: block; width: 100%; height: 100%; background: transparent; cur
    side has nothing, instead of forcing the row wider than the sidebar. */
 .tsfill { flex-basis: 0; min-width: 0; height: 7px; border-radius: 2px; }
 
-/* ---- player list ----
-   One row per player: rank / flag / OS / name on the left, the metal + energy
-   bars (small) on the right, laid out like BAR's in-game player list. */
+/* ---- player table ----
+   Every player in one table under one header row (app.js renderPlayers):
+   rank / flag / name / OS on the left, the metal + energy meters on the
+   right, laid out like BAR's in-game player list. The columns are fixed
+   widths, which is what lines them up across the two sides. Each side opens
+   with a row of its own tinted in its colour (--c), and each player row
+   carries its team colour as an edge. */
 #players { display: flex; flex-direction: column; }
-.pgroup { border-top: 1px solid var(--line); }
-.pgroup:first-child { border-top: none; }
-.prow {
-  display: flex; align-items: center; gap: 6px; padding: 3px 0;
+.pcols, .pside, .prow { display: flex; align-items: center; gap: 6px; padding: 2px 0 2px 8px; }
+.pcols {
+  padding-top: 4px; padding-bottom: 4px; font-size: 10px; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--faint); font-weight: 600;
 }
-.prow.spectator { opacity: .55; }
-.prow .phead {
+.pcname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Over a meter: its width, the text at its right edge like the meter's number. */
+.pcres { display: block; width: 70px; padding-right: 4px; text-align: right; }
+.pcols .os { color: inherit; font-size: inherit; }
+.pgroup { margin-top: 4px; }
+/* Sides of one (a free-for-all) have no side row to space them apart. */
+.pgroup:not(:has(.pside)) { margin-top: 0; }
+.pside {
+  padding-top: 4px; padding-bottom: 4px; border-radius: 6px; color: var(--text);
+  background: color-mix(in srgb, var(--c) 22%, transparent);
+  box-shadow: inset 3px 0 0 var(--c);
+}
+.pside .pcname { font-size: 12px; font-weight: 700; }
+.pside .pcount { margin-left: 6px; color: var(--muted); font-weight: 500; font-size: 11px; }
+.pside .os { color: var(--text-2); }
+.prow {
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--c) 80%, transparent);
+}
+.prow:hover { background: var(--raised); }
+.prow .phead, .pcols .phead, .pside .phead {
   flex: 1; min-width: 0; display: flex; align-items: center; gap: 5px;
   font-size: 12px; line-height: 1.3;
 }
+/* The spectators: one quiet line at the table's foot, every name in its
+   tooltip. */
+#players .specs { margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#players .specs b { color: var(--muted); font-weight: 600; }
 /* rank badge: BAR's chevron/star icon (served from /ranks/), constant-size slot
    so names align whether or not a player has a rank. */
 .prow .rank {
@@ -743,8 +846,8 @@ canvas { display: block; width: 100%; height: 100%; background: transparent; cur
 }
 span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 .prow .flag { flex: 0 0 auto; width: 15px; text-align: center; font-size: 12px; line-height: 1; }
-.prow .os {
-  flex: 0 0 auto; min-width: 26px; text-align: right;
+.prow .os, .pcols .os, .pside .os {
+  flex: 0 0 30px; text-align: right;
   color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11px;
 }
 .prow .pname {
@@ -797,15 +900,35 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 #tooltip .bar > div { height: 100%; }
 
 #zoomlabel {
-  position: absolute; left: 8px; bottom: 8px; pointer-events: none;
-  background: rgba(28, 20, 32, .82); border: 1px solid var(--line); border-radius: 4px;
-  padding: 3px 7px; font-size: 11px; color: var(--muted);
+  position: absolute; left: 10px; bottom: 8px; pointer-events: none;
+  background: rgba(28, 20, 32, .82); border: 1px solid var(--line); border-radius: 999px;
+  padding: 3px 10px; font-size: 11px; color: var(--muted);
   font-variant-numeric: tabular-nums; z-index: 5;
 }
 
-/* A full-width sidebar button, for the handful of view toggles that earn a
-   control rather than a constant at the top of app.js. */
-.sidebtn { width: 100%; margin-bottom: 8px; font-size: 12px; }
+/* ---- the map's Layers popover (index.html #layers) ----
+   The handful of view toggles that earn a control rather than a constant at
+   the top of app.js, floating in the map's top-right corner. */
+#layers { position: absolute; top: 10px; right: 10px; z-index: 6; }
+#layersbtn {
+  display: flex; align-items: center; gap: 6px; padding: 5px 11px 5px 9px; border-radius: 999px;
+  font-size: 12px; color: var(--muted); background: rgba(28, 20, 32, .86); border-color: var(--line);
+}
+#layersbtn:hover, #layersbtn[aria-expanded="true"] { color: var(--text); border-color: var(--line-hi); }
+#layersbtn svg {
+  width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6;
+  stroke-linejoin: round; stroke-linecap: round;
+}
+#layerspanel {
+  position: absolute; right: 0; top: calc(100% + 6px); width: 230px; padding: 8px 10px;
+  background: var(--panel); border: 1px solid var(--line-hi); border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .5); font-size: 13px;
+}
+#layerspanel[hidden] { display: none; }
+#layerspanel label { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; }
+#layerspanel input { accent-color: var(--accent); margin: 0; }
+#layerspanel .hint { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line-soft); }
+#clipbody #layers { display: none; }
 
 /* ---- chat transcript ----
    The whole conversation, not a ticker: lines past the playhead stay listed but
@@ -813,9 +936,18 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
    seeks to when the line was said). It scrolls itself to keep the playhead in
    view during playback. */
 #chat {
-  max-height: 240px; overflow-y: auto; overscroll-behavior: contain;
-  border-top: 1px solid var(--line); font-size: 12px; line-height: 1.4;
+  flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  font-size: 12px; line-height: 1.45;
 }
+/* The filter (app.js setChatFilter): the box carries the one it applies, and
+   the rows it does not keep drop out. */
+#chat.only-ally .chatrow:not(.ally), #chat.only-spec .chatrow:not(.byspec) { display: none; }
+.pills { display: flex; gap: 4px; }
+.pills button {
+  padding: 2px 9px; border-radius: 999px; font-size: 11px;
+  background: var(--raised); border-color: var(--line); color: var(--muted);
+}
+.pills button.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
 .chatrow { padding: 2px 0; cursor: pointer; word-break: break-word; }
 .chatrow:hover { background: var(--raised); }
 /* Not said yet at the playhead: not shown at all, so the log never spoils

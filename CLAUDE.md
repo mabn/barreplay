@@ -1485,7 +1485,13 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           pages are a CSS GRID (body.home / body.replay-page): the menu as a
                           full-height first column, the header beside it, then the section
                           (#home) or, on a replay page, the map and bottom bar column and
-                          #side as a full-height last column. body.admin-mode is set by
+                          #side as a full-height last column. On a replay page (mockup D,
+                          the "broadcast" layout) nothing there is a flat panel: the header
+                          has no rule, the map floats on the page, #side holds two CARDS —
+                          the game (#teamcard: the clock, the team statistics bar, ONE
+                          player table) and the chat (#chatwrap) — and #bottombar is a card
+                          too, the PLAYBACK STRIP (see the viewer section below); the view
+                          toggles are the map's Layers popover. body.admin-mode is set by
                           probeAdmin itself, since the menu's admin entries show on a replay
                           opened directly, where no table render sets it. #side is a body child rather than inside #wrap
                           because the summary's clip player moves #wrap into its window; the
@@ -3099,10 +3105,35 @@ run dev` in `worker/` plus `pack -upload local`.)
   footprints; the layer is off by default (`showFootprints`). Unlike icons, footprints are drawn
   in world space, so they scale with zoom and are centred on the unit position (the footprint
   centre).
-- **Team statistics bar (`app.js` `renderTeamStats`, above the sidebar's
-  "Players" HEADING — not under it: that heading names the roster below it,
-  and these rows are about the two SIDES, so the block leads with an `h2`'s
-  top margin and leaves the gap beneath it to the heading that follows)**:
+- **The playback strip (`index.html` `#bottombar`, `app.js` `drawStrip`)**: a
+  round play button, a step either way, the speed, the TIMELINE and the clock
+  ("11:31 / 20:57"; the sim frame moved to the team card). First/last are the
+  Home/End keys, not buttons. The timeline is a canvas drawing the WHOLE GAME
+  behind the slider — which side's army was ahead when (first side's lead above
+  the centre line in its colour, the second's below), a gold tick wherever
+  somebody said something, the minutes under it, and the downloaded ranges
+  (`#buffbar`) along the graph's foot — with the native range input laid over it,
+  its track invisible and its thumb styled as the playhead (a line through the
+  strip, a dot on the centre). The lead is `tsArmyValue`, the team statistics
+  bar's own reading, so the two cannot disagree, read per sample as each chunk
+  arrives (`noteStripChunk`: a point a minute once the keyframes are in, a point a
+  sample once the chunk is), as the log of the ratio with `STRIP_LEAD_FLOOR`
+  metal added to both and a 4:1 lead reaching the edge. Two sides and a cost
+  table, or the bare track. The canvas repaints only when something in it
+  changed, never per playback tick: the playhead is the thumb, and the x axis is
+  the slider's own (sample index, inset by half a thumb at each end).
+- **The player table (`app.js` `renderPlayers`, on the team card)**: every
+  player in ONE table under one header row (PLAYER, OS, METAL, ENERGY), side
+  after side, so the columns line up across the whole game — the reason for the
+  one panel (Marcin disliked teams split apart). Each side opens with a row in
+  its leader's colour, named like the summary names it (`sideNames`: "Blue team",
+  "Team N" when two would share a name — `sideColorName` is model.ts colorName
+  repeated, and the two must agree), with its player count and summed OS; a
+  free-for-all, all sides of one, gets no side rows. Spectators are one line at
+  the foot, every name in its tooltip.
+- **Team statistics bar (`app.js` `renderTeamStats`, on the team card under
+  the clock and above the player table, ruled off from it — these rows are
+  about the two SIDES, the table about the players)**:
   BAR's spectator team comparison
   (`luaui/Widgets/gui_spectator_hud.lua`), reproduced for the three metrics a
   capture can answer — metal income, energy income, and ARMY VALUE. One row per
@@ -3180,13 +3211,16 @@ run dev` in `worker/` plus `pack -upload local`.)
   still inside the lifetime horizon and stamps `erasedAt` on those within 100 elmos of
   it — the engine's `CInMapDrawModel::EraseNear` radius, mirrored as
   `snapshot.CommEraseRadius`), which keeps drawing O(marks on screen) instead of
-  O(marks × erases) per animation tick. CHAT lands in two places. The sidebar holds the
+  O(marks × erases) per animation tick. CHAT lands in two places. The chat card holds the
   conversation SO FAR: only lines already said at the playhead are shown (`.chatrow.future`
   is `display:none`, so the log never spoils what has not happened), clicking one seeks
   back to when it was said, and the box STICKS TO THE BOTTOM — scroll away and it stops
   following, scroll back down and it resumes (`chatStick`, re-evaluated from the box's own
   scroll event, which our own scrolling also fires and simply re-confirms, so no suppress
-  flag is needed). The map shows the same message as a BUBBLE over
+  flag is needed). Its pills FILTER it (`chatIn`/`setChatFilter`): All, Allies (the team
+  channel) and Spec — everything SPECTATORS said, on any channel, since most of their talk
+  goes to everyone and the spectator channel alone would hide it; a pill appears only when
+  it keeps something. The map shows the same message as a BUBBLE over
   its speaker, in team colour with black or white text picked by the colour's luminance
   (`textColorOn`), for `BUBBLE_LIFETIME` = 9 game-seconds — SCALED BY PLAYBACK SPEED,
   because that lifetime is game time but is read in wall time: at 16x it would be half a
@@ -3232,8 +3266,8 @@ run dev` in `worker/` plus `pack -upload local`.)
   public chat with an `[ALL]` prefix (`chatBody`): team chat is the norm during a game,
   so an unmarked bubble is something said to that player's own side and the exception is
   what earns the label. A battleroom relay, or
-  a team with nothing left, gets no bubble and lives only in the sidebar. The whole
-  layer switches off from the sidebar's "Hide chat bubbles" — one of the few view
+  a team with nothing left, gets no bubble and lives only in the chat card. The whole
+  layer switches off from the map's Layers popover ("Chat bubbles") — one of the few view
   toggles that earns a control rather than a `const`, since bubbles sit on top of the
   map you may be trying to read. The panel hides
   itself when the capture recorded no chat — which is what every replay published before
@@ -3243,7 +3277,7 @@ run dev` in `worker/` plus `pack -upload local`.)
   widget 1.9.0 carries `R` tracks, `W` blasts and the `wdefs` weapon table in `G`.
   None of it is in the head (`headFromBrp` only records where it is, `fxAt`):
   `loadEffects` reads the three sections in one Range read (they sit side by side
-  at the end) while the sidebar's "Hide effects" switch is on, decodes them with
+  at the end) while the Layers popover's "Effects" switch is on, decodes them with
   `decodeProjectiles`/`decodeBlasts` (twins of snapshot/projectiles.go, pinned by
   worker/tests/fixtures/viewer.fx.json — Go's own decode of the viewer fixture)
   and puts `tracks`/`projectiles`/`beams`/`blasts`/`weapons`/`facts` and
@@ -3364,7 +3398,7 @@ run dev` in `worker/` plus `pack -upload local`.)
   its footprint when zoomed in keeps the full height. One predicate,
   `damagedEnough`, serves both the pre-scan and the bar pass — they must agree
   or the scan enables a pass that draws nothing. The layer switches off from
-  the sidebar's "Hide HP bars" (`showHealthBars`, `#togglehp`) — the second
+  the Layers popover's "HP bars" (`showHealthBars`, `#togglehp`) — the second
   view toggle to earn a control rather than a `const`, for the chat bubbles'
   reason: in a big fight it is a bar over nearly every unit on screen, which is
   sometimes what you are trying to look at. It folds into the same per-draw

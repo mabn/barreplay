@@ -569,6 +569,7 @@ function headFromBrp(rec, at, icons) {
   }));
   return {
     gameId: m.gameId, engineVersion: m.engineVersion, gameVersion: m.gameVersion, mapName: m.mapName,
+    startUnix: m.startUnix || null,
     sampleEvery: m.sampleEvery,
     bounds: rec.bounds || { minX: 0, maxX: 1024, minZ: 0, maxZ: 1024 },
     teams, unitDefs, unitNames, unitIcons, footprints, armyCost, shieldDefs, players,
@@ -871,12 +872,189 @@ function pumpBackground() {
 function onChunkArrived(i) {
   if (!data) return;
   updateBuffBar();
+  noteStripChunk(i);
   const c = chunkOf(idx);
   if (i === c || i === c + 1) {
     // The playhead's chunk (or its interpolation neighbour) landed: recompute
     // the displayed frame and redraw. setPlayhead also restarts a stalled
     // play loop's frame advance naturally (the RAF keeps ticking).
     setPlayhead(playPos, true);
+  }
+}
+
+// ---- the timeline strip ------------------------------------------------------
+// The playback strip draws the whole game behind its slider (index.html
+// #timeline): which side's ARMY was ahead when — the first side's lead above
+// the centre line in its colour, the second's below it in its own — a tick over
+// it wherever somebody said something, and the minutes under it. The army is
+// the team statistics bar's own reading (tsArmyValue), so the strip and the AV
+// row on the team card cannot disagree. It is read off each sampled frame as
+// its chunk arrives, so the curve sharpens from a point a minute (the
+// keyframes, all here within seconds of opening) to a point a sample while the
+// replay downloads. Only a TWO-sided game has a lead to draw, as with the stats
+// bar; an FFA, a lone side and a replay with no cost table get the bare track.
+//
+// The x axis is the SLIDER's: sample index, inset by half a thumb at each end,
+// which is where a range input puts its minimum and maximum. Drawn that way the
+// playhead (the thumb, styled as a line with a dot on the centre) sits exactly
+// over the moment it is showing.
+
+const STRIP_THUMB = 14;        // px: the slider thumb's width (style.css #timeline)
+const STRIP_TICKS = 11;        // px above the graph, for the chat ticks
+const STRIP_LABELS = 11;       // px under it, for the minutes; equal to the ticks so
+                               // the thumb's centre (the input's) is the graph's
+const STRIP_LEAD_FLOOR = 3000; // metal added to both armies before comparing them
+const STRIP_LEAD_FULL = Math.log(4); // a 4:1 army lead fills half the graph
+const STRIP_LABEL_GAP = 64;    // px: the least room between two minute labels
+const STRIP_MINUTE_STEPS = [1, 2, 5, 10, 15, 20, 30, 60];
+let stripLead = null;          // Float32Array per sample: the first side's lead, NaN = unread
+let stripSides = null;         // tsSides(...) of this replay, or null: no lead to draw
+let stripPending = 0;          // a scheduled redraw's rAF handle
+
+// resetStrip starts the strip over for the replay just loaded: works out the
+// two sides (after applyTeamColors, whose colours they carry), clears the
+// curve, and draws the track, the chat ticks and the minutes straight away.
+function resetStrip() {
+  const playing = (data.players || []).filter(p => !p.spec);
+  stripSides = data.armyCost && playing.length ? tsSides(playing) : null;
+  stripLead = new Float32Array(data.frameCount || 0).fill(NaN);
+  const slider = document.getElementById('slider');
+  if (stripSides) {
+    const [a, b] = sideNames(stripSides.map(s => s.color));
+    slider.title = `Army value lead: ${a} above the line, ${b} below`;
+  } else {
+    slider.title = '';
+  }
+  scheduleStrip();
+  if (!stripObserved && typeof ResizeObserver !== 'undefined') {
+    stripObserved = true;
+    new ResizeObserver(scheduleStrip).observe(document.getElementById('timeline'));
+  }
+}
+let stripObserved = false;
+
+// noteStripChunk reads the lead off every frame of chunk i that has arrived
+// and not been read yet (a chunk lands twice: its keyframe, then its deltas).
+function noteStripChunk(i) {
+  if (!stripSides || !stripLead || !data.chunks[i]) return;
+  const lo = chunkStartIdx[i], hi = lo + data.chunks[i].count;
+  let any = false;
+  for (let k = lo; k < hi; k++) {
+    if (!Number.isNaN(stripLead[k]) || !data.frames[k]) continue;
+    const av = tsArmyValue(data.frames[k], stripSides);
+    if (!av) continue;
+    stripLead[k] = stripLeadOf(av[0], av[1]);
+    any = true;
+  }
+  if (any) scheduleStrip();
+}
+
+// stripLeadOf is the first side's lead as a share of the graph's half height,
+// -1..1: the log of the army ratio, with STRIP_LEAD_FLOOR of metal added to
+// both so the opening's few hundred metal do not swing it end to end, and a
+// STRIP_LEAD_FULL ratio reaching the edge.
+function stripLeadOf(a, b) {
+  const l = Math.log((a + STRIP_LEAD_FLOOR) / (b + STRIP_LEAD_FLOOR)) / STRIP_LEAD_FULL;
+  return Math.max(-1, Math.min(1, l));
+}
+
+function scheduleStrip() {
+  if (!stripPending) stripPending = requestAnimationFrame(drawStrip);
+}
+
+// drawStrip repaints the whole strip. It runs only when something in it
+// changed (a chunk's frames read, a resize, a new replay) — never per playback
+// tick, since the playhead is the slider's own thumb.
+function drawStrip() {
+  stripPending = 0;
+  const cv = document.getElementById('stripcv');
+  if (!data || !cv) return;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (!W || !H) return;
+  const dpr = window.devicePixelRatio || 1;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+    cv.width = Math.round(W * dpr);
+    cv.height = Math.round(H * dpr);
+  }
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  const n = data.frameCount || 0;
+  const x0 = STRIP_THUMB / 2, x1 = W - STRIP_THUMB / 2;
+  const top = STRIP_TICKS, bot = H - STRIP_LABELS, mid = (top + bot) / 2, half = (bot - top) / 2 - 1;
+  const xAt = k => x0 + (n > 1 ? k / (n - 1) : 0) * (x1 - x0);
+  // Sample index of a sim frame, for the ticks and the minutes: samples are
+  // evenly spaced, so this is the slider's own position for that moment.
+  const f0 = frameNumAt(0), step = data.sampleEvery > 0 ? data.sampleEvery : 30;
+  const kAt = f => (f - f0) / step;
+
+  // The track: the graph's surface, a well below the strip's panel.
+  ctx.fillStyle = '#110a0d';
+  ctx.beginPath();
+  ctx.roundRect(x0 - 3, top, x1 - x0 + 6, bot - top, 4);
+  ctx.fill();
+
+  // Minutes: a gridline through the graph and its label under it, at the
+  // smallest round step that leaves room between the labels.
+  const totalSec = n > 1 ? frameNumAt(n - 1) / 30 : 0;
+  if (totalSec > 0) {
+    const pxPerMin = (x1 - x0) / (totalSec / 60);
+    const stepMin = STRIP_MINUTE_STEPS.find(m => m * pxPerMin >= STRIP_LABEL_GAP) || 60;
+    ctx.font = '10px system-ui, -apple-system, sans-serif';
+    ctx.textBaseline = 'bottom';
+    for (let m = 0; m * 60 <= totalSec; m += stepMin) {
+      const x = xAt(kAt(m * 60 * 30));
+      if (m > 0) {
+        ctx.fillStyle = '#281e2f';
+        ctx.fillRect(Math.round(x), top, 1, bot - top);
+      }
+      ctx.fillStyle = '#8a7a9a';
+      ctx.textAlign = m === 0 ? 'left' : x > x1 - 20 ? 'right' : 'center';
+      ctx.fillText(fmtTime(m * 60), m === 0 ? x0 - 3 : x, H);
+    }
+  }
+
+  // The lead: one area, clipped above the centre line to the first side's
+  // colour and below it to the second's. Unread samples between two read ones
+  // are bridged, which only ever spans less than a chunk once the keyframes
+  // are in.
+  if (stripSides && stripLead) {
+    const pts = [];
+    for (let k = 0; k < stripLead.length; k++) {
+      if (!Number.isNaN(stripLead[k])) pts.push(xAt(k), mid - stripLead[k] * half);
+    }
+    if (pts.length >= 4) {
+      const area = new Path2D();
+      area.moveTo(pts[0], mid);
+      for (let j = 0; j < pts.length; j += 2) area.lineTo(pts[j], pts[j + 1]);
+      area.lineTo(pts[pts.length - 2], mid);
+      area.closePath();
+      stripSides.forEach((side, i) => {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, i === 0 ? 0 : mid, W, i === 0 ? mid : H - mid);
+        ctx.clip();
+        ctx.globalAlpha = 0.75;
+        ctx.fillStyle = side.color;
+        ctx.fill(area);
+        ctx.restore();
+      });
+    }
+  }
+  ctx.fillStyle = '#4b3a54';
+  ctx.fillRect(x0, Math.round(mid), x1 - x0, 1);
+
+  // Chat: a gold tick over the graph wherever something was said, one per
+  // pixel column however many messages share it.
+  if (chatLines.length && n > 1) {
+    ctx.fillStyle = '#ffb547';
+    let lastX = -1;
+    for (const c of chatLines) {
+      const x = Math.round(xAt(Math.max(0, Math.min(n - 1, kAt(c.f)))));
+      if (x === lastX) continue;
+      lastX = x;
+      ctx.fillRect(x - 1, 2, 2, STRIP_TICKS - 5);
+    }
   }
 }
 
@@ -2017,7 +2195,9 @@ function renderChat() {
     const row = document.createElement('div');
     // Every row starts UNSENT, which the stylesheet hides; updateChat reveals
     // them as the playhead reaches them. That is why chatCursor starts at -1.
-    row.className = 'chatrow future';
+    // Which filter keeps the row rides it as a class, which is all the chat
+    // card's filter needs (see setChatFilter).
+    row.className = 'chatrow future' + (chatIn(c, 'ally') ? ' ally' : '') + (chatIn(c, 'spec') ? ' byspec' : '');
     const tag = CHAT_DEST_TAG[c.d];
     row.innerHTML =
       `<span class="chattime">${escapeHtml(fmtTime(c.f / 30))}</span>` +
@@ -2035,6 +2215,55 @@ function renderChat() {
   box.onscroll = () => {
     chatStick = box.scrollHeight - box.scrollTop - box.clientHeight <= CHAT_STICK_SLACK;
   };
+}
+
+// CHAT_FILTERS: the chat card's pills. "All" is every message the capture
+// holds rather than the public channel alone — the box is the transcript, and
+// the other two narrow it to the teams' own channels or to the spectators'
+// talk. Only filters that keep something get a pill, and there are no pills at
+// all when there is nothing to narrow.
+const CHAT_FILTERS = [['all', 'All'], ['ally', 'Allies'], ['spec', 'Spec']];
+let chatFilter = 'all'; // kept across replays while it still applies
+
+// chatIn says whether a filter keeps a message. "Allies" is the team channel;
+// "Spec" is what the SPECTATORS said, on any channel — most of their talk goes
+// to everyone, and a filter showing only their own channel would hide it.
+function chatIn(c, k) {
+  if (k === 'ally') return c.d === 'ally';
+  if (k === 'spec') return c.d === 'spec' || commTeamOf.get(c.p) === -1;
+  return true;
+}
+
+function renderChatFilter() {
+  const box = document.getElementById('chatfilter');
+  const offered = CHAT_FILTERS.filter(([k]) => k === 'all' || chatLines.some(c => chatIn(c, k)));
+  if (!offered.some(([k]) => k === chatFilter)) chatFilter = 'all';
+  box.innerHTML = '';
+  if (offered.length > 1) {
+    for (const [k, label] of offered) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      b.dataset.f = k;
+      b.onclick = () => setChatFilter(k);
+      box.appendChild(b);
+    }
+  }
+  setChatFilter(chatFilter);
+}
+
+// setChatFilter applies a filter (a class on the box; the stylesheet hides the
+// rows it drops) and parks the box at the bottom again, since the rows it was
+// scrolled among may be gone.
+function setChatFilter(k) {
+  chatFilter = k;
+  const box = document.getElementById('chat');
+  box.className = k === 'all' ? '' : 'only-' + k;
+  for (const b of document.getElementById('chatfilter').children) {
+    b.classList.toggle('on', b.dataset.f === k);
+  }
+  chatStick = true;
+  box.scrollTop = box.scrollHeight;
 }
 
 // updateChat reveals the rows the playhead has now reached and keeps the box
@@ -3941,12 +4170,71 @@ function renderTeamStats(fr, playing) {
   root.style.display = '';
 }
 
-// Player list: rank, flag, OS (skill), name — then the metal and energy meters
-// side by side, one line per player — grouped by ally team. Economy comes from
-// the current frame's per-team
-// resources (a player controls one team). Spectators have no economy and are
-// listed dimmed at the end. Player-leaving isn't tracked yet, so everyone shows
-// for the whole replay.
+// sideColorName is the plain English name of a colour's hue ("Blue", "Red"),
+// the way players call a side by its colour. It is the summary's colorName
+// (src/summary/model.ts) repeated, because app.js imports nothing — the two
+// must agree, or one game's sides go by different names on its two tabs.
+function sideColorName(css) {
+  const [r, g, b] = cssToTint(css);
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2, d = max - min;
+  const sat = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
+  if (sat < 0.2 || d < 0.08) return l > 0.75 ? 'White' : l < 0.2 ? 'Black' : 'Grey';
+  let hue = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  hue = (hue * 60 + 360) % 360;
+  if (hue < 15 || hue >= 345) return 'Red';
+  if (hue < 40) return 'Orange';
+  if (hue < 70) return 'Yellow';
+  if (hue < 160) return 'Green';
+  if (hue < 195) return 'Cyan';
+  if (hue < 260) return 'Blue';
+  if (hue < 295) return 'Purple';
+  return 'Pink';
+}
+
+// sideNames labels each side by its leader's colour — "Blue team" — or "Team N"
+// where two sides would share a name, which is the summary's sideName rule.
+// `colors` is one css colour per side, in side order.
+function sideNames(colors) {
+  const names = colors.map(sideColorName);
+  return names.map((n, i) => names.indexOf(n) !== names.lastIndexOf(n) ? `Team ${i + 1}` : `${n} team`);
+}
+
+// renderReplayTitle fills the header for a replay: the map as its title, then
+// the game's size, when it started and the game build, shortened from "Beyond
+// All Reason test-…" to "BAR test-…". The game id is the URL's already, and
+// the title's tooltip.
+function renderReplayTitle() {
+  const el = document.getElementById('subtitle');
+  const allyOf = {};
+  (data.teams || []).forEach(t => { allyOf[t.team] = t.ally; });
+  const perAlly = new Map();
+  for (const p of data.players || []) {
+    if (p.spec || allyOf[p.team] === undefined) continue;
+    perAlly.set(allyOf[p.team], (perAlly.get(allyOf[p.team]) || 0) + 1);
+  }
+  const spec = perAlly.size > 1 ? [...perAlly.keys()].sort((a, b) => a - b).map(a => perAlly.get(a)).join('v') : null;
+  const build = (data.gameVersion || '').replace(/^Beyond All Reason\s*/, 'BAR ');
+  const facts = [sizeLabel(spec), data.startUnix ? fmtDate(data.startUnix) : null, build || null];
+  el.innerHTML = `<b class="maptitle">${escapeHtml(data.mapName || data.gameId || 'Replay')}</b>` +
+    `<span class="facts">${facts.filter(Boolean).map(escapeHtml).join(' · ')}</span>`;
+  el.title = data.gameId ? 'Game ' + data.gameId : '';
+}
+
+// SPEC_NAMES_SHOWN: spectators named on the card's last line before "+N"
+// stands for the rest (all of them are in its tooltip). A big game has a
+// dozen or more, and the line is a footnote to the players above it.
+const SPEC_NAMES_SHOWN = 3;
+
+// The player table: every player of the game in ONE table, side after side,
+// under one header row — PLAYER, OS, METAL, ENERGY — so each column lines up
+// down the whole game rather than within a side; that alignment is the point
+// of putting both sides in one panel. Each side opens with a row of its own in
+// its leader's colour (name, players, summed OS), and each player row carries
+// its team colour as an edge. Within a side, players sort by skill. Economy
+// comes from the current frame's per-team resources (a player controls one
+// team). Spectators are one line at the foot. Player-leaving isn't tracked
+// yet, so everyone shows for the whole replay.
 function renderPlayers() {
   const root = document.getElementById('players');
   root.innerHTML = '';
@@ -3954,8 +4242,8 @@ function renderPlayers() {
   const fr = dispIdx >= 0 ? data.frames[dispIdx] : null;
   const res = resourcesByTeam(fr ? fr.f : -1);
   const playing = players.filter(p => !p.spec);
-  // The comparison rows sit above this list and describe the same two groups,
-  // so they are rendered from the same roster and the same frame's economy.
+  // The comparison rows sit above this table and describe the same two
+  // groups, so they are rendered from the same roster and the same frame.
   renderTeamStats(fr, playing);
   if (!players.length) {
     root.innerHTML = '<div class="hint">no player roster in this capture</div>';
@@ -3963,8 +4251,6 @@ function renderPlayers() {
   }
   const allyOf = {};
   (data.teams || []).forEach(t => { allyOf[t.team] = t.ally; });
-
-  const specs = players.filter(p => p.spec);
 
   // The meters scale among the rows that exist, so the peak is taken over
   // exactly the teams below and no others (see incomePeaks: the records also
@@ -3976,25 +4262,59 @@ function renderPlayers() {
     (allyOf[a.team] ?? 999) - (allyOf[b.team] ?? 999) ||
     (b.skill || 0) - (a.skill || 0) ||
     a.team - b.team);
-
-  let lastAlly, group = null;
-  playing.forEach(p => {
+  const groups = [];
+  for (const p of playing) {
     const ally = allyOf[p.team];
-    if (ally !== lastAlly) {
-      group = document.createElement('div');
-      group.className = 'pgroup';
-      root.appendChild(group);
-      lastAlly = ally;
-    }
-    group.appendChild(playerRow(p, res[p.team], peaks));
+    const g = groups[groups.length - 1];
+    if (g && g.ally === ally) g.players.push(p);
+    else groups.push({ ally, players: [p] });
+  }
+  // A side is coloured by its lowest-numbered team, BAR's captain of it —
+  // the same choice the comparison rows make.
+  const colors = groups.map(g => teamColor[Math.min(...g.players.map(p => p.team))] || '#c7d0d9');
+  const names = sideNames(colors);
+
+  if (playing.length) {
+    const head = document.createElement('div');
+    head.className = 'pcols';
+    // The same two halves as a player row (.phead, .pres), so every header
+    // sits over its column whatever the widths turn out to be.
+    const res = 'title="Income per second; hover a player for stock against storage"';
+    head.innerHTML = '<div class="phead"><span class="pcname">Player</span><span class="os">OS</span></div>' +
+      `<div class="pres"><span class="pcres" ${res}>Metal</span><span class="pcres" ${res}>Energy</span></div>`;
+    root.appendChild(head);
+  }
+  // A free-for-all is sides of one, where a side's row would only repeat its
+  // player's; the side rows appear when some side is a team.
+  const sideRows = groups.some(g => g.players.length > 1);
+  groups.forEach((g, i) => {
+    const group = document.createElement('div');
+    group.className = 'pgroup';
+    root.appendChild(group);
+    for (const p of g.players) group.appendChild(playerRow(p, res[p.team], peaks));
+    if (!sideRows) return;
+    const os = g.players.reduce((sum, p) => sum + (p.skill || 0), 0);
+    const side = document.createElement('div');
+    side.className = 'pside';
+    side.style.setProperty('--c', colors[i]);
+    side.innerHTML =
+      `<div class="phead"><span class="pcname">${escapeHtml(names[i])}` +
+      `<span class="pcount">${g.players.length}</span></span>` +
+      `<span class="os" title="Summed OpenSkill">${os ? os.toFixed(1) : ''}</span></div>` +
+      '<div class="pres"><span class="pcres"></span><span class="pcres"></span></div>';
+    group.prepend(side);
   });
 
+  const specs = players.filter(p => p.spec);
   if (specs.length) {
-    const g = document.createElement('div');
-    g.className = 'pgroup';
-    g.innerHTML = `<div class="hint">Spectators ${specs.length}: ` +
-      specs.map(s => escapeHtml(s.name)).join(', ') + '</div>';
-    root.appendChild(g);
+    const line = document.createElement('div');
+    line.className = 'specs hint';
+    const shown = specs.slice(0, SPEC_NAMES_SHOWN).map(s => escapeHtml(s.name)).join(', ');
+    const more = specs.length - SPEC_NAMES_SHOWN;
+    line.innerHTML = `${specs.length} spectator${specs.length === 1 ? '' : 's'} · ${shown}` +
+      (more > 0 ? ` <b>+${more}</b>` : '');
+    line.title = specs.map(s => s.name).join(', ');
+    root.appendChild(line);
   }
 }
 
@@ -4002,14 +4322,15 @@ function playerRow(p, r, peaks) {
   const row = document.createElement('div');
   row.className = 'prow';
   const color = teamColor[p.team] || '#c7d0d9';
+  row.style.setProperty('--c', color);
   const rank = rankBadge(p);
   const flag = `<span class="flag">${flagEmoji(p.country)}</span>`;
   const os = `<span class="os">${p.skill ? p.skill.toFixed(1) : ''}</span>`;
   let html =
-    `<div class="phead">${rank}${flag}${os}` +
-    // Two meters on one line leave the name ~70px, so it ellipsizes often —
+    `<div class="phead">${rank}${flag}` +
+    // Two meters on one line leave the name ~80px, so it ellipsizes often —
     // the title keeps the full name reachable.
-    `<span class="pname" title="${escapeHtml(p.name)}" style="color:${color}">${escapeHtml(p.name)}</span></div>`;
+    `<span class="pname" title="${escapeHtml(p.name)}" style="color:${color}">${escapeHtml(p.name)}</span>${os}</div>`;
   if (r) {
     html += '<div class="pres">' +
       resRow('metal', r.metal, r.mStore, r.mInc, peaks.m) +
@@ -4062,11 +4383,12 @@ function updateSidebar() {
 let lastTimeText = null; // skip the label write when nothing changed: it runs
 let lastSliderPos = -1;  // every animation tick and costs style/layout
 function updateTimeLabel() {
-  const last = data.frameCount - 1;
   // Time derives from the index (uniform sampling), so the label tracks the
   // slider even before the frame has streamed in.
   const t = frameNumAt(idx) / 30 + renderFrac * secPerFrame;
-  const text = data.frameCount ? `${fmtTime(t)}   frame ${idx} / ${last}` : '—';
+  // The game clock; the total sits beside it (#timetotal, set once per
+  // replay), and the sim frame is on the team card.
+  const text = data.frameCount ? fmtTime(t) : '—';
   if (text !== lastTimeText) {
     lastTimeText = text;
     document.getElementById('timelabel').textContent = text;
@@ -4165,7 +4487,7 @@ function scrub(pos) {
 
 function stopPlay() {
   if (playRAF) { cancelAnimationFrame(playRAF); playRAF = null; }
-  document.getElementById('play').textContent = '▶ Play';
+  setPlayButton(false);
   document.getElementById('clipplay').textContent = '▶';
   // Flush a sidebar update the playback throttle skipped, so the panel matches
   // the frame the playhead stopped on.
@@ -4178,7 +4500,7 @@ function startPlay() {
   // A finished clip plays again from its start.
   if (clip && frameNumAt(idx) >= clip.f1) go(idxForFrame(clip.start));
   playLastTs = 0;
-  document.getElementById('play').textContent = '⏸ Pause';
+  setPlayButton(true);
   document.getElementById('clipplay').textContent = '⏸';
   const tick = (ts) => {
     if (!playLastTs) playLastTs = ts;
@@ -4210,6 +4532,14 @@ function startPlay() {
   playRAF = requestAnimationFrame(tick);
 }
 function togglePlay() { playRAF ? stopPlay() : startPlay(); }
+
+// The strip's play button is an icon (both are in the markup; the class picks
+// one), so its label is what says which it will do.
+function setPlayButton(playing) {
+  const b = document.getElementById('play');
+  b.classList.toggle('playing', playing);
+  b.setAttribute('aria-label', playing ? 'Pause (space)' : 'Play (space)');
+}
 
 // ---- input ----------------------------------------------------------------
 cv.addEventListener('mousemove', e => {
@@ -4249,30 +4579,37 @@ cv.addEventListener('wheel', e => {
   draw();
 }, { passive: false });
 
-document.getElementById('first').onclick = () => { stopPlay(); go(0); };
 document.getElementById('prev').onclick = () => { stopPlay(); go(idx - 1); };
 document.getElementById('next').onclick = () => { stopPlay(); go(idx + 1); };
-document.getElementById('last').onclick = () => { stopPlay(); go(data.frameCount - 1); };
 document.getElementById('play').onclick = togglePlay;
 // Speed is read live inside the play loop, so a change takes effect immediately.
 document.getElementById('speed').onchange = () => {};
 document.getElementById('slider').oninput = e => { stopPlay(); go(+e.target.value); };
-document.getElementById('togglebubbles').onclick = e => {
-  showBubbles = !showBubbles;
-  e.target.textContent = showBubbles ? 'Hide chat bubbles' : 'Show chat bubbles';
+document.getElementById('togglebubbles').onchange = e => {
+  showBubbles = e.target.checked;
   scheduleDraw(); // the overlay is only repainted on a draw; force one now
 };
-document.getElementById('togglehp').onclick = e => {
-  showHealthBars = !showHealthBars;
-  e.target.textContent = showHealthBars ? 'Hide HP bars' : 'Show HP bars';
+document.getElementById('togglehp').onchange = e => {
+  showHealthBars = e.target.checked;
   scheduleDraw(); // same overlay, same reason
 };
-document.getElementById('togglefx').onclick = e => {
-  showEffects = !showEffects;
-  e.target.textContent = showEffects ? 'Hide effects' : 'Show effects';
+document.getElementById('togglefx').onchange = e => {
+  showEffects = e.target.checked;
   if (showEffects && data && currentFile) loadEffects(currentFile, loadGen); // fetched on first use
   scheduleDraw(); // same overlay, same reason
 };
+
+// The map's Layers popover: the button opens it, and a press anywhere else
+// or Escape closes it again.
+function setLayersOpen(open) {
+  document.getElementById('layerspanel').hidden = !open;
+  document.getElementById('layersbtn').setAttribute('aria-expanded', String(open));
+}
+document.getElementById('layersbtn').onclick = () =>
+  setLayersOpen(document.getElementById('layerspanel').hidden);
+document.addEventListener('pointerdown', e => {
+  if (!document.getElementById('layers').contains(e.target)) setLayersOpen(false);
+});
 window.addEventListener('keydown', e => {
   if (e.target.tagName === 'SELECT') return;
   // The clip player over the summary: Escape closes it, space plays (a
@@ -4282,8 +4619,14 @@ window.addEventListener('keydown', e => {
     else if (e.key === ' ' && e.target.tagName !== 'BUTTON') { e.preventDefault(); togglePlay(); }
     return;
   }
-  // The Summary tab hides the playback; its keys are the page's own.
-  if (document.body.classList.contains('summary-tab')) return;
+  // The Summary tab hides the playback, and the landing page has none; their
+  // keys are the page's own.
+  if (!data || document.body.classList.contains('summary-tab') ||
+      document.body.classList.contains('home')) return;
+  if (e.key === 'Escape') setLayersOpen(false);
+  // A field answers its own keys (the Layers checkboxes take space, a text
+  // box takes Home and End).
+  if (e.target.tagName === 'TEXTAREA' || (e.target.tagName === 'INPUT' && e.target.type !== 'range')) return;
   // A FOCUSED slider would step natively on top of this, and since it carries
   // step="any" (so the thumb can glide between samples during playback) the
   // browser's own arrow step is a hundredth of the whole timeline rather than
@@ -4291,6 +4634,9 @@ window.addEventListener('keydown', e => {
   const onSlider = e.target.id === 'slider';
   if (e.key === 'ArrowLeft') { stopPlay(); go(idx - 1); if (onSlider) e.preventDefault(); }
   else if (e.key === 'ArrowRight') { stopPlay(); go(idx + 1); if (onSlider) e.preventDefault(); }
+  // The strip has no first/last buttons; the slider's ends and these keys do it.
+  else if (e.key === 'Home') { stopPlay(); go(0); e.preventDefault(); }
+  else if (e.key === 'End') { stopPlay(); go(data.frameCount - 1); e.preventDefault(); }
   else if (e.key === ' ') { e.preventDefault(); togglePlay(); }
 });
 
@@ -4364,20 +4710,23 @@ async function loadReplay(id) {
     setEmpty('');
   }
   // The effects switch only means something for a capture that has effects.
-  document.getElementById('togglefx').style.display = data.fxAt ? '' : 'none';
+  document.getElementById('fxlayer').style.display = data.fxAt ? '' : 'none';
   buildDefTables();
   buildCommanderDefs();
   buildDestroyedIndex();
   applyTeamColors();
   buildCommIndex();
   renderChat();      // after applyTeamColors: rows are coloured by the author's team
+  renderChatFilter();
   lastTimeText = null;
   lastSliderPos = -1;
   secPerFrame = data.sampleEvery > 0 ? data.sampleEvery / 30 : 1;
-  document.getElementById('subtitle').textContent =
-    [data.gameId, data.mapName, data.gameVersion].filter(Boolean).join(' · ') || 'replay state viewer';
+  renderReplayTitle();
   initViewMark(data.gameId);   // best-effort, never blocks playback
   document.getElementById('slider').max = Math.max(0, data.frameCount - 1);
+  document.getElementById('timetotal').textContent =
+    data.frameCount ? ' / ' + fmtTime(frameNumAt(data.frameCount - 1) / 30) : '';
+  resetStrip();
   idx = 0;
   playPos = 0;
   dispIdx = -1;
@@ -5115,6 +5464,7 @@ function showHome() {
   document.getElementById('home').style.display = '';
   document.getElementById('rail').style.display = '';
   document.getElementById('subtitle').textContent = 'replay state viewer';
+  document.getElementById('subtitle').title = '';
   document.getElementById('viewmark').style.display = 'none';
   renderHome();
   ensureHomeData();

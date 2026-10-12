@@ -23,7 +23,7 @@ const FX = FX_FILES.map((n) => readFileSync(fileURLToPath(new URL('../public/' +
 // Globals the browser provides that node does not, so `in globalThis` cannot
 // vouch for them. Listed explicitly rather than pattern-matched: a genuinely
 // new undefined call must fail, not be waved through.
-const BROWSER_GLOBALS = new Set(['Image', 'requestAnimationFrame', 'cancelAnimationFrame', 'XMLHttpRequest', 'OffscreenCanvas']);
+const BROWSER_GLOBALS = new Set(['Image', 'requestAnimationFrame', 'cancelAnimationFrame', 'XMLHttpRequest', 'OffscreenCanvas', 'ResizeObserver', 'Path2D']);
 
 // The Size and Players columns abbreviate a free-for-all, and both do it past
 // the SAME side count. Every renderer harness below needs those four pure
@@ -168,10 +168,12 @@ test('chat log shows only sent lines and sticks to the bottom', () => {
   const data = { sampleEvery: 30 };
   const escapeHtml = (s: any) => String(s), fmtTime = (s: number) => String(s | 0);
   const commColor = () => '#fff', commName = () => 'p', go = () => {};
+  const commTeamOf = new Map();
 
   const api = eval(`(function(){
     ${extract('renderChat')}
     ${extract('updateChat')}
+    ${extract('chatIn')}
     return { renderChat, updateChat, setChat: c => { chatLines = c; },
       stick: () => chatStick,
       shown: () => box.children.filter(r => !r.hidden).length,
@@ -203,6 +205,58 @@ test('chat log shows only sent lines and sticks to the bottom', () => {
   assert.equal(api.shown(), 4, 'scrubbing back re-hides later lines');
   assert.ok(CHAT_STICK_SLACK >= 0);
 });
+
+// The chat card's filters: "Spec" is what spectators SAID, on whatever channel
+// — most of it goes to everyone, so a filter on the spectator channel alone
+// would hide nearly all of their talk.
+test('the chat filters keep the team channel and everything spectators said', () => {
+  const start = APP.indexOf('function chatIn(');
+  let depth = 0, src = '';
+  for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+    if (APP[j] === '{') depth++;
+    else if (APP[j] === '}' && --depth === 0) { src = APP.slice(start, j + 1); break; }
+  }
+  const commTeamOf = new Map([[1, 0], [2, -1]]); // player 1 plays, player 2 spectates
+  const chatIn = eval(`(function(){ ${src} return chatIn; })()`);
+  const said = (p: number, d: string) => ({ p, d });
+  assert.equal(chatIn(said(1, 'ally'), 'ally'), true);
+  assert.equal(chatIn(said(1, 'all'), 'ally'), false, 'public chat is not the team channel');
+  assert.equal(chatIn(said(2, 'all'), 'spec'), true, "a spectator's public message is spectator talk");
+  assert.equal(chatIn(said(2, 'spec'), 'spec'), true);
+  assert.equal(chatIn(said(1, 'all'), 'spec'), false, "a player's is not");
+  for (const c of [said(1, 'ally'), said(2, 'all'), said(1, 'lobby')]) assert.equal(chatIn(c, 'all'), true, 'All is everything');
+});
+
+// The timeline strip's army lead, and the side names it and the player table
+// use — the summary's rule, so one game's sides are called the same on both tabs.
+test('the strip lead is symmetric and bounded, and sides are named by colour', () => {
+  const fn = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('not found: ' + n);
+  };
+  const consts = ['STRIP_LEAD_FLOOR', 'STRIP_LEAD_FULL'].map((n) => APP.match(new RegExp(`const ${n} = [^;]+;`))![0]).join('\n');
+  // The canvas-backed colour parser is the browser's; #rrggbb is all this needs.
+  const cssToTint = (c: string) => [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16) / 255);
+  const api = eval(`(function(){ ${consts} ${fn('stripLeadOf')} ${fn('sideColorName')} ${fn('sideNames')}
+    return { stripLeadOf, sideNames, FLOOR: STRIP_LEAD_FLOOR }; })()`);
+  void cssToTint;
+
+  assert.equal(api.stripLeadOf(5000, 5000), 0, 'even armies: no lead');
+  assert.ok(api.stripLeadOf(9000, 3000) > 0, 'the first side ahead is above the line');
+  assert.equal(api.stripLeadOf(9000, 3000), -api.stripLeadOf(3000, 9000), 'and the second the same distance below');
+  assert.ok(Math.abs(api.stripLeadOf(300, 100)) < 0.1, "the opening's few hundred metal barely move it");
+  assert.equal(api.stripLeadOf(4 * (1000 + api.FLOOR) - api.FLOOR, 1000), 1, 'a 4:1 lead reaches the edge');
+  assert.equal(api.stripLeadOf(1e6, 0), 1, 'and nothing goes past it');
+
+  assert.deepEqual(api.sideNames(['#0000ff', '#ff0000']), ['Blue team', 'Red team']);
+  assert.deepEqual(api.sideNames(['#0000ff', '#3050ff']), ['Team 1', 'Team 2'], 'two blues are numbered instead');
+});
+
 
 // Chat bubbles: the timing rules, which took three passes to get right and are
 // invisible to every other check. Lifted out and run against a recording
