@@ -61,3 +61,16 @@ export function ratioDomain(t: number[], lead: number[], durationSec: number): [
   }
   return [lo, hi];
 }
+
+/** windowSums adds a per-step series up over consecutive windows of `n`
+ * steps (the last window may be short): what each side destroyed per 15 s
+ * out of its 5 s steps. */
+export function windowSums(v: number[], n: number): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < v.length; i += n) {
+    let sum = 0;
+    for (let j = i; j < Math.min(v.length, i + n); j++) sum += v[j] ?? 0;
+    out.push(sum);
+  }
+  return out;
+}

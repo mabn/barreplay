@@ -980,7 +980,9 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           is why the swing chart draws its own minutes axis. METAL DESTROYED is the win model's fourth input (losses.ts
                           destroyedBySide = the other side's fought-for losses, Go's Killed): its Value mode, the default, draws per-step
                           BARS like a player's Built and lost (first side up, second down), and its Ratio compares the totals so far
-                          with the model's own 25k k. The two
+                          with the model's own 25k k; under that line Ratio adds a second chart, METAL DESTROYED PER 15S (advantage.ts
+                          windowRatio, Marcin's ask): per 15 s window on its own, the lead of whoever destroyed more, a bar up or down
+                          in its colour on a log scale capped at 10x, with 500 metal added to both sides (WINDOW_K). The two
                           ratio panels default to RATIO (series.ts leadPct: ONE white line, the first side's
                           lead UP like the swing line above it, +20% / -20%, shaded in the
                           leader's colour,
