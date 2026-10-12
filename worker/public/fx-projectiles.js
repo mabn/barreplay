@@ -33,8 +33,8 @@
 // of this colour round the head (plasma shells); ring: a strategic
 // missile's head also gets a halo of this many radii in the team colour.
 // Keyed by the class CODE (FX_CLASS in app.js: 1 nuke, 2 anti-nuke, 3 EMP,
-// 4 tactical, 5 Juno, 6 artillery, 7 rocket): this file runs before app.js
-// declares FX_CLASS.
+// 4 tactical, 5 Juno, 6 artillery, 7 rocket, 9 long-range AA): this file
+// runs before app.js declares FX_CLASS.
 const PROJ_STYLE = {
   1: { r: 4.5, trail: 75, width: 3, head: [255, 244, 200], ring: 2.4 }, // nuke
   2: { r: 3.5, trail: 45, width: 2.2, head: [170, 240, 255], ring: 2 }, // anti-nuke
@@ -43,6 +43,7 @@ const PROJ_STYLE = {
   5: { r: 3.5, trail: 45, width: 2.2, head: [150, 255, 150], ring: 2 }, // Juno
   6: { r: 2.4, trail: 14, width: 1.6, head: [255, 255, 255], ring: 0, glow: [225, 240, 255] }, // artillery: white plasma
   7: { r: 2.2, trail: 18, width: 1.4, head: [255, 255, 255], ring: 0 }, // rocket
+  9: { r: 2, trail: 12, width: 1.4, head: [200, 235, 255], ring: 0 }, // long-range AA missile / railgun
 };
 const PROJ_DEFAULT_STYLE = { r: 2.2, trail: 14, width: 1.4, head: [255, 255, 255], ring: 0 };
 

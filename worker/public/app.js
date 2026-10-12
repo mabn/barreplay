@@ -3615,7 +3615,7 @@ async function loadResources(file, gen) {
 // (fxAt null) simply draws none.
 
 // Track classes and how a track ended: snapshot/projectiles.go's codes.
-const FX_CLASS = { NUKE: 1, ANTINUKE: 2, EMP: 3, TACTICAL: 4, JUNO: 5, ARTILLERY: 6, ROCKET: 7, BEAM: 8 };
+const FX_CLASS = { NUKE: 1, ANTINUKE: 2, EMP: 3, TACTICAL: 4, JUNO: 5, ARTILLERY: 6, ROCKET: 7, BEAM: 8, AA: 9 };
 const FX_END = { OPEN: 0, EXPLODED: 1, VANISHED: 2 };
 const FX_FLAG = { ENGAGED: 1, INTERCEPTED: 2, TRUNCATED: 4 };
 const FX_BLAST = { UNIT: 1, STRAY: 2 };

@@ -553,7 +553,7 @@ WeaponDefs[5] = { id = 5, name = "deathblast", type = "Cannon", range = 0, reloa
 	damages = { [0] = 500 }, damageAreaOfEffect = 1e6 }
 -- The projectile script's weapons (resim): one per kind of thing the widget
 -- watches, plus three it must NOT (a weak death puff, a silo's dummy launch
--- weapon, an anti-air missile dealing 1 to ground).
+-- weapon, a long-range weapon dealing 1 to everything).
 WeaponDefs[6] = { name = "h_silo_nuke", type = "StarburstLauncher", range = 72000, reload = 30,
 	damages = { [0] = 12500, impulseFactor = 0.1 }, damageAreaOfEffect = 640, edgeEffectiveness = 0.45,
 	explosionSpeed = 10, stockpile = true, stockpileTime = 2700, targetable = 1, projectilespeed = 10,
@@ -574,7 +574,13 @@ WeaponDefs[12] = { name = "smallboom", type = "Cannon", range = 0, reload = 0,
 	damages = { [0] = 11 }, damageAreaOfEffect = 18 }
 WeaponDefs[13] = { name = "h_silo_launch", type = "Cannon", range = 0, reload = 30,
 	damages = { [0] = 0 }, customParams = { bogus = "1" } }
-WeaponDefs[14] = { name = "h_aa", type = "MissileLauncher", range = 2400, reload = 1.8, damages = { [0] = 1 } }
+-- A long-range AA missile (the Mercury): 1 to the ground, 750 to aircraft,
+-- homing. Tracked (class aa), its path sampled.
+WeaponDefs[14] = { name = "h_aa", type = "MissileLauncher", range = 2400, reload = 1.8,
+	damages = { [0] = 1, [1] = 750 }, damageAreaOfEffect = 212, tracks = true, projectilespeed = 61.7 }
+-- A long-range weapon dealing 1 to everything (a utility weapon): never tracked.
+WeaponDefs[16] = { name = "h_marker", type = "Cannon", range = 2400, reload = 5,
+	damages = { [0] = 1, [1] = 1, impulseFactor = 500 } }
 -- A volley gun that waits before its salvo (the Mini Starfall waits 2.5 s,
 -- then fires 63): the shells appear long after the reload frame moved.
 WeaponDefs[15] = { name = "h_starfall_starfire", type = "Cannon", range = 1750, reload = 7,
@@ -770,6 +776,8 @@ end
 --   beam 504      fires f1800 for 45 frames, sweeping, a jump at its 30th
 --                 frame, frames 1810-1814 into empty air (no explosion)
 --   fusion 505    dies f2100: UnitDestroyed, then its own blast (B kind 1)
+--   AA 502 slot 2 f700 fires homing AA missile 7006 (path sampled), which
+--                 explodes at f745
 --   volley 506    fires f3000 with a 75-frame windup: its 3 shells leave at
 --                 f3075, f3078 and f3081 and land 60 frames later
 
@@ -830,6 +838,12 @@ local function projectileScript(f)
 	if f == 2400 then
 		widget:StockpileChanged(501, 39, 0, 2, 1, 0)
 		spawn(7004, 501, 2, 6, 25, 8, 20, 0.11, { kind = "g", x = 4750, y = 0, z = 4000 }, 900)
+	end
+	if f == 700 then
+		spawn(7006, 502, 2, 14, 40, 12, 25, 0, { kind = "g", x = 2500, y = 600, z = 1800 }, 54)
+	end
+	if f == 745 then
+		explode(7006)
 	end
 	if f == 4150 then
 		spawn(7005, 502, 1, 8, 30, 3.6, 10, 0.12, { kind = "g", x = 6000, y = 0, z = 2000 }, 396)
@@ -1091,12 +1105,13 @@ widget:Shutdown()
 
 if resim then
 	-- What the widget must watch, and what it must not.
-	for _, wd in ipairs({ 5, 6, 7, 8, 9, 10, 11 }) do
+	for _, wd in ipairs({ 5, 6, 7, 8, 9, 10, 11, 14 }) do
 		assert(watchedExplosions[wd] == nil, "weapon " .. wd .. " still watched after shutdown")
 	end
-	assert(watchedEver[6] and watchedEver[7] and watchedEver[8] and watchedEver[9] and watchedEver[10] and watchedEver[11],
-		"resim must watch the nuke, anti-nuke, LRPC, beam, cluster and fusion blast weapons")
-	for _, wd in ipairs({ 0, 1, 2, 3, 4, 12, 13, 14 }) do
+	assert(watchedEver[6] and watchedEver[7] and watchedEver[8] and watchedEver[9] and watchedEver[10] and watchedEver[11]
+		and watchedEver[14],
+		"resim must watch the nuke, anti-nuke, LRPC, beam, cluster, fusion blast and long-range AA weapons")
+	for _, wd in ipairs({ 0, 1, 2, 3, 4, 12, 13, 16 }) do
 		assert(not watchedEver[wd], "weapon " .. wd .. " must not be watched")
 	end
 	assert(#disabledWidgets == 1 and disabledWidgets[1] == "Some BAR widget",

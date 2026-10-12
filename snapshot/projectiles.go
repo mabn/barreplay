@@ -32,11 +32,13 @@ const (
 	ProjArtillery uint8 = 6
 	ProjRocket    uint8 = 7
 	ProjBeam      uint8 = 8
+	ProjAA        uint8 = 9 // long-range anti-air (widget >= 1.11.0)
 )
 
 var projClassNames = map[uint8]string{
 	ProjNuke: "nuke", ProjAntiNuke: "antinuke", ProjEMP: "emp", ProjTactical: "tactical",
 	ProjJuno: "juno", ProjArtillery: "artillery", ProjRocket: "rocket", ProjBeam: "beam",
+	ProjAA: "aa",
 }
 
 // ProjectileClassName is the class's name as the wdefs fact spells it, or ""

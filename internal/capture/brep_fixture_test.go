@@ -199,8 +199,8 @@ func checkHarnessProjectiles(t *testing.T, live, resim decodedHarness) {
 	for _, p := range resim.w.projectiles {
 		tracks[[2]int32{p.ID, p.Birth}] = p
 	}
-	if len(tracks) != 10 {
-		t.Errorf("re-sim recorded %d tracks, want 10", len(tracks))
+	if len(tracks) != 11 {
+		t.Errorf("re-sim recorded %d tracks, want 11", len(tracks))
 	}
 	check := func(id, birth int32, class, end, flags uint8) snapshot.Projectile {
 		t.Helper()
@@ -228,6 +228,12 @@ func checkHarnessProjectiles(t *testing.T, live, resim decodedHarness) {
 	}
 	check(7004, 2400, snapshot.ProjNuke, snapshot.TrackExploded, 0) // not intercepted
 	check(7005, 4150, snapshot.ProjArtillery, snapshot.TrackOpen, 0)
+	// A homing long-range AA missile: tracked, its path sampled like a
+	// strategic track's.
+	aa := check(7006, 700, snapshot.ProjAA, snapshot.TrackExploded, 0)
+	if len(aa.Path) == 0 || aa.Path[0].DF != 10 {
+		t.Errorf("AA missile path %+v: a homing AA track is sampled every 10 frames", aa.Path)
+	}
 	// A volley gun with a windup: the shells leave 75 frames after the
 	// reload frame moved, each one still found and tracked.
 	for k, birth := range []int32{3075, 3078, 3081} {
