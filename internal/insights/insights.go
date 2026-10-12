@@ -122,6 +122,12 @@ type Def struct {
 	// air, ship, experimental, army, commander, defence, lrgun, nuke, factory, eco,
 	// building or unit. Version 8.
 	Class string `json:"class,omitempty"`
+	// Stand is the def's building category (Series.BuildingCats: defence,
+	// eco, mex, other), absent for anything that is not a building or is
+	// not priced (buildings.go). The win line counts a building the enemy
+	// destroyed killBuildingWorth times in metal destroyed when the capture
+	// names killers, and the page draws build-ups from it. Version 10.
+	Stand string `json:"stand,omitempty"`
 }
 
 // Series holds one value per side per step; T[i] is step i's time in seconds.
@@ -145,6 +151,13 @@ type Series struct {
 	// Front is each side's army centre per step, [side][step] = [x, z] (the
 	// cost-weighted mean position of its army), null while it has none.
 	Front [][][]int32 `json:"front"`
+	// Buildings is each side's STANDING buildings by category,
+	// [side][category][step] in metal (weighted by build progress, at the
+	// step's last sample), categories in BuildingCats (buildings.go). A
+	// replay rebuilt from its pieces prices its buildings by name from the
+	// legacy table. Version 10.
+	BuildingCats []string      `json:"buildingCats,omitempty"`
+	Buildings    [][][]float64 `json:"buildings,omitempty"`
 }
 
 // Deaths is every destroyed unit, columnar: the i-th entry of each slice
@@ -213,6 +226,7 @@ type roster struct {
 	teams      []Team
 	playerTeam map[int32]int32
 	playerName map[int32]string
+	ai         map[int32]bool // teams an AI plays (aiTeams)
 }
 
 // pveShare is the share of a team's units that must be scavenger or raptor
@@ -278,6 +292,7 @@ func buildRoster(m snapshot.Meta, events []snapshot.Event) roster {
 		human[team] = len(ps) > 0
 	}
 	ai := aiTeams(m, events, human)
+	r.ai = ai
 	allies := map[int32]bool{}
 	for team := range teamPlayers {
 		if a, ok := teamAlly[team]; ok {

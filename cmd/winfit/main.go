@@ -1,5 +1,5 @@
-// Command winfit fits the summary's win-probability model
-// (insights.WinModel) to games with a known winner, and prints the
+// Command winfit fits the summary's win-probability models
+// (insights.WinModels) to games with a known winner, and prints the
 // coefficients to commit in internal/insights/swing.go.
 //
 // Its input is insights files, the same ones the viewer reads: a game is used
@@ -8,12 +8,20 @@
 // published files as they are:
 //
 //	go run ./cmd/insights -upload= -all -out ./ins
-//	go run ./cmd/winfit ./ins
+//	go run ./cmd/winfit -model lava ./ins
+//	go run ./cmd/winfit -model ranked8v8 ./ins
+//
+// -model fits one of the two models on the games it is for, as their
+// coefficients were first fitted (experiments/winmodel, 2026-10-12): "lava"
+// on the lava games lavabalance stores, "ranked8v8" on ranked games between
+// two teams of eight that are not lava games — sorted by each game's BAR API
+// detail (internal/gamecat), fetched and cached as -categories does. Without
+// -model every game is fitted together, against the ranked 8v8 model.
 //
 // Every step of every game is a sample (features at that step, label = did
 // side 0 win), weighted so each game counts once however long it ran, and
 // mirrored (sides swapped) so the fit has no side bias to learn. The fit is
-// Newton's method on the L2-regularised log loss, which for four
+// Newton's method on the L2-regularised log loss, which for five
 // coefficients converges in a handful of iterations. It prints the log loss
 // and accuracy of the current coefficients and the fitted ones, overall and
 // at fixed points through a game, so a fit that is not better is visible
@@ -48,7 +56,9 @@ import (
 	"github.com/mabn/barreplay/internal/insights"
 )
 
-const nf = len(insights.WinModel.Coef)
+var zeroModel insights.WinModelFit
+
+const nf = len(zeroModel.Coef)
 
 type sample struct {
 	f    [nf]float64
@@ -70,7 +80,8 @@ func main() {
 	l2 := flag.Float64("l2", 1e-3, "L2 regularisation strength")
 	cats := flag.Bool("categories", false, "also fit each game category (lava / large ranked / ranked / unranked) on its own, from the BAR API's replay details")
 	apiBase := flag.String("api", "https://api.bar-rts.com", "BAR API base URL (-categories)")
-	cacheDir := flag.String("cache", "auto", "where -categories keeps fetched details (auto = the user cache dir; empty = no cache)")
+	cacheDir := flag.String("cache", "auto", "where -categories and -model keep fetched details (auto = the user cache dir; empty = no cache)")
+	model := flag.String("model", "", "fit one model on the games it is for: lava or ranked8v8 (empty: every game, compared against the ranked 8v8 model)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: winfit [flags] <insights file or dir> [...]\n\n")
 		flag.PrintDefaults()
@@ -112,31 +123,95 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	fmt.Printf("%d games (%d files skipped: no winner, no swing line, or older than Version 7)\n", games, skipped)
+	fmt.Printf("%d games (%d files skipped: no winner, no swing line, or older than Version %d)\n", games, skipped, minVersion)
 	if broken > 0 {
 		fmt.Printf("%d files unreadable (delete them and fetch again)\n", broken)
+	}
+	dir := *cacheDir
+	if dir == "auto" {
+		dir = ""
+		if d, err := os.UserCacheDir(); err == nil {
+			dir = filepath.Join(d, "barreplay", "api.bar-rts.com", "replays")
+		}
+	}
+	f := &detailFetcher{base: strings.TrimRight(*apiBase, "/"), dir: dir, http: &http.Client{Timeout: 30 * time.Second}}
+	current, ok := insights.WinModels[insights.ModelRanked]
+	switch *model {
+	case "":
+	case insights.ModelLava, insights.ModelRanked:
+		current = insights.WinModels[*model]
+		all = modelGames(all, f, *model)
+		samples = nil
+		for _, g := range all {
+			samples = append(samples, g.ss...)
+		}
+		games = len(all)
+		fmt.Printf("%d of them are %s games\n", games, *model)
+	default:
+		fmt.Fprintf(os.Stderr, "winfit: -model %q: want %s or %s\n", *model, insights.ModelLava, insights.ModelRanked)
+		os.Exit(2)
+	}
+	if !ok {
+		panic("winfit: no ranked 8v8 model")
 	}
 	if games < minGames {
 		fmt.Fprintln(os.Stderr, "winfit: fewer than 20 games; a fit would describe these games, not BAR")
 		os.Exit(1)
 	}
 	fit := newton(samples, *l2)
-	report("current", insights.WinModel.Coef, samples)
+	report("current", current.Coef, samples)
 	report("fitted", fit, samples)
-	fmt.Printf("\n// Paste into internal/insights/swing.go:\n")
-	fmt.Printf("\tCoef:   [swingFeatures]float64{%s},\n\tFitted: true,\n\tGames:  %d,\n", coefs(fit, "%.3f", ", "), games)
-	if *cats {
-		dir := *cacheDir
-		if dir == "auto" {
-			dir = ""
-			if d, err := os.UserCacheDir(); err == nil {
-				dir = filepath.Join(d, "barreplay", "api.bar-rts.com", "replays")
-			}
-		}
-		f := &detailFetcher{base: strings.TrimRight(*apiBase, "/"), dir: dir, http: &http.Client{Timeout: 30 * time.Second}}
-		byCat := categorize(all, f)
-		reportCategories(byCat, fit, *l2)
+	name := *model
+	if name == "" {
+		name = insights.ModelRanked
 	}
+	fmt.Printf("\n// Paste into WinModels in internal/insights/swing.go:\n")
+	fmt.Printf("\t%s: {Coef: [swingFeatures]float64{%s}, Fitted: true, Games: %d},\n", modelConst(name), coefs(fit, "%.3f", ", "), games)
+	if *cats {
+		byCat := categorize(all, f)
+		reportCategories(byCat, current.Coef, fit, *l2)
+	}
+}
+
+func modelConst(name string) string {
+	if name == insights.ModelLava {
+		return "ModelLava"
+	}
+	return "ModelRanked"
+}
+
+// modelGames keeps the games a model is fitted on, by their BAR API detail
+// (a game whose detail cannot be had is dropped).
+func modelGames(gs []game, f *detailFetcher, model string) []game {
+	keep := make([]bool, len(gs))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	for i, g := range gs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			d, err := f.detail(g.id)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "winfit: %s: %v\n", g.id, err)
+				return
+			}
+			if model == insights.ModelLava {
+				keep[i] = gamecat.Classify(d) == gamecat.Lava
+			} else {
+				keep[i] = gamecat.IsRanked8v8(d)
+			}
+		}()
+	}
+	wg.Wait()
+	var out []game
+	for i, g := range gs {
+		if keep[i] {
+			out = append(out, g)
+		}
+	}
+	return out
 }
 
 // categorize fetches every game's detail (8 at a time) and groups the games
@@ -245,7 +320,7 @@ func decodeDetail(b []byte) (*gamecat.Detail, error) {
 // reportCategories fits each category with enough games on its own and
 // compares, on that category's games, the current weights, the all-games fit
 // and the category's own fit.
-func reportCategories(byCat map[gamecat.Category][]game, overall [nf]float64, l2 float64) {
+func reportCategories(byCat map[gamecat.Category][]game, current, overall [nf]float64, l2 float64) {
 	fmt.Printf("\n== per category (log loss / accuracy on the category's own games; own fit is in-sample) ==\n")
 	for _, c := range append(append([]gamecat.Category{}, gamecat.All...), unknown) {
 		gs := byCat[c]
@@ -259,11 +334,11 @@ func reportCategories(byCat map[gamecat.Category][]game, overall [nf]float64, l2
 		fmt.Printf("\n%s: %d games\n", c, len(gs))
 		if len(gs) < minGames {
 			fmt.Printf("  too few for a fit of its own\n")
-			table([]row{{"current", insights.WinModel.Coef}, {"all-games fit", overall}}, ss)
+			table([]row{{"current", current}, {"all-games fit", overall}}, ss)
 			continue
 		}
 		own := newton(ss, l2)
-		table([]row{{"current", insights.WinModel.Coef}, {"all-games fit", overall}, {"own fit", own}}, ss)
+		table([]row{{"current", current}, {"all-games fit", overall}, {"own fit", own}}, ss)
 	}
 }
 
@@ -273,7 +348,7 @@ type row struct {
 }
 
 func table(rows []row, ss []sample) {
-	fmt.Printf("  %-14s %-24s %-14s %-14s %-14s %-14s %s\n", "", "coef army/inc/cum/kill", "all steps", "at 25%", "at 50%", "at 75%", "at 90%")
+	fmt.Printf("  %-14s %-24s %-14s %-14s %-14s %-14s %s\n", "", "coef army/inc/cum/kill/bld", "all steps", "at 25%", "at 50%", "at 75%", "at 90%")
 	for _, r := range rows {
 		m := measure(r.c, ss)
 		fmt.Printf("  %-14s %-24s", r.name, coefs(r.c, "%.2f", " "))
@@ -323,11 +398,10 @@ func load(path string) (string, []sample, bool, error) {
 	return ins.GameID, out, true, nil
 }
 
-// minVersion is the oldest insights file a fit reads: Version 7 cut every
-// game where it was decided, and nothing the features read has changed
-// since. An older file runs on past the resign, through the losing side's
-// whole army blowing up.
-const minVersion = 7
+// minVersion is the oldest insights file a fit reads: Version 10 is the
+// first to carry standing buildings (and which deaths were buildings), which
+// two of the features read. Older files would fit those two at zero.
+const minVersion = 10
 
 func coefs(c [nf]float64, f, sep string) string {
 	s := make([]string, nf)

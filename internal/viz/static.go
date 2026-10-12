@@ -59,6 +59,13 @@ type StaticReplay struct {
 // layout to a capture packed before the layout existed (a fresh capture is
 // copied byte-for-byte). Returns the replay's gameId.
 func WriteStaticBundle(brpPath, outDir string) (string, error) {
+	return WriteStaticBundleWith(brpPath, outDir, nil)
+}
+
+// WriteStaticBundleWith is WriteStaticBundle with the game's lobby settings
+// (the demo startscript's [modoptions]; nil when unknown), which a .brp does
+// not store and the summary reads to pick its win model.
+func WriteStaticBundleWith(brpPath, outDir string, modOptions map[string]string) (string, error) {
 	f, err := os.Open(brpPath)
 	if err != nil {
 		return "", err
@@ -99,18 +106,20 @@ func WriteStaticBundle(brpPath, outDir string) (string, error) {
 
 	// The game summary's data. A failure costs the summary, never the
 	// publish: the replay itself is complete without it.
-	if err := WriteInsights(bf, filepath.Join(replaysDir, insights.FileName(gameID))); err != nil {
+	if err := WriteInsights(bf, modOptions, filepath.Join(replaysDir, insights.FileName(gameID))); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: insights for %s: %v\n", gameID, err)
 	}
 	return gameID, nil
 }
 
-// WriteInsights computes a parsed .brp's game summary and writes it to path.
-func WriteInsights(bf *snapshot.BRPFile, path string) error {
+// WriteInsights computes a parsed .brp's game summary and writes it to path;
+// modOptions are the game's lobby settings, nil when unknown.
+func WriteInsights(bf *snapshot.BRPFile, modOptions map[string]string, path string) error {
 	in, err := insights.FromBRP(bf)
 	if err != nil {
 		return err
 	}
+	in.ModOptions = modOptions
 	ins, err := insights.Compute(in)
 	if err != nil {
 		return err

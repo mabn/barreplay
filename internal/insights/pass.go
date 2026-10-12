@@ -19,6 +19,8 @@ type defInfo struct {
 	transport bool
 	milestone int
 	worth     float64 // what a loss of it is worth per metal (worthPerMetal)
+	bcat      int     // building category (buildings.go), -1 for none
+	bcost     float64 // the metal it counts for standing (buildingOf)
 }
 
 // pass walks the frames once, with the lifecycle events interleaved at their
@@ -88,6 +90,17 @@ type pass struct {
 
 	carry carries    // transports seen carrying a unit (transports.go)
 	gives giveBursts // units handed to another team, by giver (wipes.go)
+
+	finished []builtRec // every building finished, in frame order (Moment.Built)
+	model    string     // the win model (WinModels), picked by modelFor
+}
+
+// builtRec is one building finished: what each moment's build-up is told from.
+type builtRec struct {
+	f    int32
+	side int
+	def  int32
+	cost float64
 }
 
 func newPass(in Input, ro roster) *pass {
@@ -116,6 +129,8 @@ func newPass(in Input, ro roster) *pass {
 				ArmyCats:     armyCats,
 				ArmyByCat:    make([][][]float64, ns),
 				Front:        make([][][]int32, ns),
+				BuildingCats: buildingCats,
+				Buildings:    make([][][]float64, ns),
 			},
 			Deaths: Deaths{F: []int32{}, X: []int32{}, Z: []int32{}, Def: []int32{}, Team: []int32{}, Cost: []float64{}, Unfinished: []int8{}, SelfD: []int8{}},
 		},
@@ -173,9 +188,15 @@ func newPass(in Input, ro roster) *pass {
 		for c := range armyCats {
 			p.out.Series.ArmyByCat[s][c] = []float64{}
 		}
+		p.out.Series.Buildings[s] = make([][]float64, len(buildingCats))
+		for c := range buildingCats {
+			p.out.Series.Buildings[s][c] = []float64{}
+		}
 		p.incomeN[s] = []int{}
 	}
+	legacy := in.CostCoverage == CostArmy
 	for id, d := range in.Meta.UnitDefs {
+		bcat, bcost := buildingOf(d, legacy)
 		p.defs[id] = defInfo{
 			army:      isArmy(d),
 			cat:       armyCat(d),
@@ -187,8 +208,11 @@ func newPass(in Input, ro roster) *pass {
 			transport: isTransport(d.Name),
 			worth:     worthPerMetal(d, p.hasCauses),
 			milestone: milestoneOf(d.Name),
+			bcat:      bcat,
+			bcost:     bcost,
 		}
 	}
+	p.model = modelFor(in, ro)
 	p.events = append([]snapshot.Event(nil), in.Events...)
 	sort.SliceStable(p.events, func(i, j int) bool { return p.events[i].Frame < p.events[j].Frame })
 	return p
@@ -212,6 +236,9 @@ func (p *pass) grow(i int) {
 			p.out.Marks[side] = append(p.out.Marks[side], 0)
 			for c := range armyCats {
 				s.ArmyByCat[side][c] = append(s.ArmyByCat[side][c], 0)
+			}
+			for c := range buildingCats {
+				s.Buildings[side][c] = append(s.Buildings[side][c], 0)
 			}
 		}
 	}
@@ -246,6 +273,9 @@ func (p *pass) event(e snapshot.Event) {
 		delete(p.built, e.UnitID)
 		d := p.defs[e.DefID]
 		side := p.ro.side(e.Team)
+		if d.bcat >= 0 && side >= 0 {
+			p.finished = append(p.finished, builtRec{e.Frame, side, e.DefID, d.bcost})
+		}
 		if d.milestone >= 0 && side >= 0 && !p.reached[[2]int{d.milestone, side}] {
 			p.reached[[2]int{d.milestone, side}] = true
 			ms := milestoneDefs[d.milestone]
@@ -459,6 +489,10 @@ func (p *pass) frame(fr snapshot.Frame) error {
 	for i := range byCat {
 		byCat[i] = make([]float64, len(armyCats))
 	}
+	bld := make([][]float64, ns)
+	for i := range bld {
+		bld[i] = make([]float64, len(buildingCats))
+	}
 	front := make([][3]float64, ns) // [side] cost-weighted x, z, weight
 	var here *presence
 	if step != p.presenceStep {
@@ -481,6 +515,9 @@ func (p *pass) frame(fr snapshot.Frame) error {
 		p.trackUnit(fr.Frame, u, d)
 		if side := p.ro.side(u.Team); side >= 0 {
 			value[side] += d.cost * float64(u.BuildProgress)
+			if d.bcat >= 0 {
+				bld[side][d.bcat] += d.bcost * float64(u.BuildProgress)
+			}
 		}
 		if !d.army {
 			continue
@@ -512,6 +549,9 @@ func (p *pass) frame(fr snapshot.Frame) error {
 		s.Value[side][step] = round1(value[side])
 		for c := range armyCats {
 			s.ArmyByCat[side][c][step] = byCat[side][c]
+		}
+		for c := range buildingCats {
+			s.Buildings[side][c][step] = bld[side][c]
 		}
 	}
 
@@ -625,13 +665,25 @@ func (p *pass) finish() {
 		for c := range armyCats {
 			round1All(o.Series.ArmyByCat[side][c])
 		}
+		for c := range buildingCats {
+			round1All(o.Series.Buildings[side][c])
+		}
 	}
 	sort.SliceStable(o.Milestones, func(i, j int) bool { return o.Milestones[i].F < o.Milestones[j].F })
 	o.Eliminated = withHandoffs(eliminations(o.Deaths, p.in.TeamDied, p.teamAlive, o.Teams), p.gives, p.teamAlive, o.Teams)
 	p.wiped = wipedDeaths(o.Deaths, o.Eliminated)
 	o.Battles = p.battles()
 	o.Winner = winner(o.Sides, p.in.Meta.Winners)
-	o.Swing = swing(o, func(id int32) bool { return isEcoBuilding(p.in.Meta.UnitDefs[id]) })
+	// The line reads which deaths were buildings off Defs, as cmd/winfit
+	// reads them off the file: fill them for what is used so far (the
+	// awards below may add more, filled at the end).
+	p.fillDefs()
+	o.Swing = swing(o, func(id int32) bool { return isEcoBuilding(p.in.Meta.UnitDefs[id]) }, p.model)
+	if o.Swing != nil {
+		for i := range o.Swing.Moments {
+			p.momentBuilt(&o.Swing.Moments[i])
+		}
+	}
 	o.Awards = p.awards()
 	o.Players = p.players()
 	for side := range p.ro.sides {
@@ -639,9 +691,68 @@ func (p *pass) finish() {
 			o.Series.Front[side] = append(o.Series.Front[side], nil)
 		}
 	}
+	p.fillDefs()
+}
+
+// fillDefs describes every def used so far in Insights.Defs.
+func (p *pass) fillDefs() {
 	for id := range p.usedDef {
+		if _, ok := p.out.Defs[id]; ok {
+			continue
+		}
 		d := p.in.Meta.UnitDefs[id]
-		o.Defs[id] = Def{Name: d.Name, Human: d.HumanName, Cost: round1(float64(d.MetalCost)), Icon: d.IconType, Power: isPowerPlant(d), Worth: worthOut(p.defs[id].worth), Class: unitClass(d)}
+		stand := ""
+		if di := p.defs[id]; di.bcat >= 0 {
+			stand = buildingCats[di.bcat]
+		}
+		p.out.Defs[id] = Def{Name: d.Name, Human: d.HumanName, Cost: round1(float64(d.MetalCost)), Icon: d.IconType, Power: isPowerPlant(d), Worth: worthOut(p.defs[id].worth), Class: unitClass(d), Stand: stand}
+	}
+}
+
+// builtSec is how far back a moment's build-up looks: the win model's income
+// window, since a building finished then is still in what the model reads.
+const builtSec = swingIncomeSteps * StepSec
+
+// momentBuiltDefs caps the defs one side's build-up lists.
+const momentBuiltDefs = 16
+
+// momentBuilt fills a moment's Built: what each side finished in the
+// builtSec up to its end, by def, the most metal first.
+func (p *pass) momentBuilt(m *Moment) {
+	m.BuiltFrom = max(0, m.F1-builtSec*simFPS)
+	m.Built = make([][]UnitLoss, len(p.ro.sides))
+	for side := range m.Built {
+		byDef := map[int32]*UnitLoss{}
+		for _, b := range p.finished {
+			if b.side != side || b.f <= m.BuiltFrom || b.f > m.F1 {
+				continue
+			}
+			u := byDef[b.def]
+			if u == nil {
+				u = &UnitLoss{Def: b.def}
+				byDef[b.def] = u
+			}
+			u.N++
+			u.Metal += b.cost
+		}
+		list := make([]UnitLoss, 0, len(byDef))
+		for _, u := range byDef {
+			u.Metal = round1(u.Metal)
+			list = append(list, *u)
+		}
+		sort.Slice(list, func(i, j int) bool {
+			if list[i].Metal != list[j].Metal {
+				return list[i].Metal > list[j].Metal
+			}
+			return list[i].Def < list[j].Def
+		})
+		if len(list) > momentBuiltDefs {
+			list = list[:momentBuiltDefs]
+		}
+		for _, u := range list {
+			p.usedDef[u.Def] = true
+		}
+		m.Built[side] = list
 	}
 }
 

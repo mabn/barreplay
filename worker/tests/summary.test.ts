@@ -59,7 +59,7 @@ test("notices say why something is missing", () => {
   assert.match(notices(ins({ pov: "ally" }))[0], /re-simulation/);
   assert.match(notices(ins({ costCoverage: "army" }))[0], /armed mobile units only/);
   // An older file says what it lacks; a capture without killers says so.
-  assert.equal(notices(ins({ version: 5 }))[0], "Outdated report (v5), missing: fitted win odds, game end at the resign, story battles, friendly fire, battle titles that say what did the killing, calmer win odds that move with the fighting, lost buildings counted double when judging battles. It updates when summaries are recomputed.");
+  assert.equal(notices(ins({ version: 5 }))[0], "Outdated report (v5), missing: fitted win odds, game end at the resign, story battles, friendly fire, battle titles that say what did the killing, calmer win odds that move with the fighting, buildings in the win odds and in battle verdicts, build-up stories. It updates when summaries are recomputed.");
   assert.match(notices(ins({ causes: false }))[0], /does not record killers/);
 });
 

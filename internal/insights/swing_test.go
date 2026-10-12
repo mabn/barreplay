@@ -31,19 +31,19 @@ func TestSwingIsSymmetric(t *testing.T) {
 	}
 	even := SwingFeatures(series(a0, a0, flat(n, 10), flat(n, 10)), [2][]float64{flat(n, 500), flat(n, 500)})
 	for i, f := range even {
-		if p := WinProb(WinModel.Coef, f); p != 0.5 {
+		if p := WinProb(WinModels[ModelRanked].Coef, f); p != 0.5 {
 			t.Fatalf("even game step %d = %v, want 0.5", i, p)
 		}
 	}
 	ab := SwingFeatures(series(a0, a1, flat(n, 240), flat(n, 160)), [2][]float64{flat(n, 900), flat(n, 300)})
 	ba := SwingFeatures(series(a1, a0, flat(n, 160), flat(n, 240)), [2][]float64{flat(n, 300), flat(n, 900)})
 	for i := range ab {
-		p, q := WinProb(WinModel.Coef, ab[i]), WinProb(WinModel.Coef, ba[i])
+		p, q := WinProb(WinModels[ModelRanked].Coef, ab[i]), WinProb(WinModels[ModelRanked].Coef, ba[i])
 		if math.Abs(p+q-1) > 1e-9 {
 			t.Fatalf("step %d: %v + %v != 1", i, p, q)
 		}
 	}
-	if p := WinProb(WinModel.Coef, ab[n-1]); p < 0.7 {
+	if p := WinProb(WinModels[ModelRanked].Coef, ab[n-1]); p < 0.7 {
 		t.Errorf("a side ahead on army and income all game reads %v at the end", p)
 	}
 }
@@ -61,7 +61,7 @@ func TestMoments(t *testing.T) {
 		Series:  series(a0, a1, flat(n, 10), flat(n, 10)),
 		Battles: []Battle{{F0: 20 * StepSec * simFPS, F1: 25 * StepSec * simFPS}, {F0: 29 * StepSec * simFPS, F1: 31 * StepSec * simFPS}},
 	}
-	sw := swing(o, nil)
+	sw := swing(o, nil, ModelRanked)
 	if sw == nil || len(sw.Moments) != 1 {
 		t.Fatalf("moments = %+v", sw)
 	}
@@ -78,7 +78,7 @@ func TestMoments(t *testing.T) {
 		t.Errorf("window %d..%d, want the one step of the wipe %d..%d", m.F0, m.F1, 30*StepSec*simFPS, 31*StepSec*simFPS)
 	}
 	o.POV = POVAlly
-	if swing(o, nil) != nil {
+	if swing(o, nil, ModelRanked) != nil {
 		t.Error("a one-sided capture got a swing line")
 	}
 }
@@ -104,7 +104,7 @@ func TestKilledMovesTheLine(t *testing.T) {
 		t.Fatalf("killed = %v", k)
 	}
 	f := SwingFeatures(o.Series, k)
-	if p, q := WinProb(WinModel.Coef, f[9]), WinProb(WinModel.Coef, f[10]); p != 0.5 || q <= 0.55 {
+	if p, q := WinProb(WinModels[ModelRanked].Coef, f[9]), WinProb(WinModels[ModelRanked].Coef, f[10]); p != 0.5 || q <= 0.55 {
 		t.Errorf("side 0 destroying 40k metal moved the line %v -> %v", p, q)
 	}
 }
@@ -143,22 +143,22 @@ func TestEarlyEconomyMoments(t *testing.T) {
 		return o
 	}
 	// The first 30% of the game has no moments, a raid included.
-	if sw := swing(raid(jump(60, 10), 11), eco); len(sw.Moments) != 0 {
+	if sw := swing(raid(jump(60, 10), 11), eco, ModelRanked); len(sw.Moments) != 0 {
 		t.Errorf("a moment in the opening 30%%: %+v", sw.Moments)
 	}
 	// A short game: past 30% but inside the first four minutes, income
 	// alone is no moment unless economy buildings were lost.
-	if sw := swing(jump(20, 10), nil); len(sw.Moments) != 0 {
+	if sw := swing(jump(20, 10), nil, ModelRanked); len(sw.Moments) != 0 {
 		t.Errorf("an opening income lead is a moment: %+v", sw.Moments)
 	}
-	sw := swing(raid(jump(20, 10), 11), eco)
+	sw := swing(raid(jump(20, 10), 11), eco, ModelRanked)
 	if len(sw.Moments) == 0 {
 		t.Fatal("a raid on the opening economy is no moment")
 	}
 	if m := sw.Moments[0]; m.Side != 0 || m.Eco != 1 || m.Army != 0 {
 		t.Errorf("moment = %+v", m)
 	}
-	if sw := swing(jump(60, 30), nil); len(sw.Moments) == 0 || sw.Moments[0].Eco != 1 {
+	if sw := swing(jump(60, 30), nil, ModelRanked); len(sw.Moments) == 0 || sw.Moments[0].Eco != 1 {
 		t.Errorf("a mid-game income lead: %+v", sw.Moments)
 	}
 }

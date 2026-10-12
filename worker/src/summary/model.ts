@@ -152,7 +152,7 @@ const VERSION_FEATURES: [number, string][] = [
   [7, "game end at the resign, story battles, friendly fire"],
   [8, "battle titles that say what did the killing"],
   [9, "calmer win odds that move with the fighting"],
-  [10, "lost buildings counted double when judging battles"],
+  [10, "buildings in the win odds and in battle verdicts, build-up stories"],
 ];
 
 /** The newest insights version the page knows (index.ts INSIGHTS_VERSIONS[0]). */

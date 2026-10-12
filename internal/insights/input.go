@@ -36,6 +36,11 @@ type Input struct {
 	// own record (a v6 .brp's teamdied facts). Nil when the capture keeps no
 	// facts; Compute then infers eliminations from the deaths.
 	TeamDied map[int32]int32
+	// ModOptions is the game's lobby settings (the demo startscript's
+	// [modoptions], which the BAR API serves as gameSettings), nil when
+	// unknown. They say whether it is a lava game, which picks the win
+	// model (WinModels); a .brp does not store them.
+	ModOptions map[string]string
 }
 
 const (

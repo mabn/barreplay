@@ -7,6 +7,7 @@
 //	go run ./experiments/buildingworth -out ./bw ./brp/*.brp
 //	go run ./experiments/buildingworth -legacy rids.txt -tables ./bw -out ./bwl
 //	go run ./experiments/buildingworth -groups groups.tsv ./ins
+//	go run ./experiments/buildingworth -table ./bw -out internal/insights/legacybuildings.json
 //
 // It fed the "should buildings count for more than units?" study:
 // experiments/winmodel -bw ./bw -defcat ./bw/defcat.json then compares
@@ -46,7 +47,12 @@ func main() {
 	cache := flag.String("cache", "pieces", "with -legacy: where downloaded pieces are kept")
 	groups := flag.String("groups", "", "sort the games behind the insights directory given as the argument into the map groups, writing a TSV here")
 	details := flag.String("details", "details", "with -groups: where api.bar-rts.com replay details are kept")
+	table := flag.String("table", "", "write internal/insights' legacy building table (to -out) from this directory's defcat.json and defcost.json")
 	flag.Parse()
+	if *table != "" {
+		writeTable(*table, *out)
+		return
+	}
 	if *groups != "" {
 		runGroups(flag.Arg(0), *details, *groups)
 		return
