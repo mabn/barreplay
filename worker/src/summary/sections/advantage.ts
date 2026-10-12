@@ -12,7 +12,7 @@ import { mirrorKey } from "../legend";
 import { comparable, sideColor, sideName } from "../model";
 import { swingChart } from "./swing";
 import { destroyedBySide } from "../losses";
-import { leadPct, maxOf, ratioDomain, stepTimes } from "../series";
+import { leadPct, maxOf, ratioDomain, stepTimes, windowSums } from "../series";
 import { pairToggle, scaleToggle } from "../scale";
 import { tip, type TipRow } from "../tooltip";
 import { watcher, type Watch } from "../watch";
@@ -115,18 +115,76 @@ function comparePanel(ins: Insights, watch: Watch | null, group: ChartGroup, t: 
   let value = spec.startValue ?? false;
   let log = true;
   const draw = () => {
-    const old = holder.firstElementChild;
-    // The old chart leaves the shared crosshair with its svg.
-    if (old) group.members = group.members.filter((m) => !old.contains(m.hair));
-    holder.replaceChildren(value ? (spec.perStep ? barChart(ins, watch, group, t, spec, spec.perStep, log) : valueChart(ins, watch, group, t, spec, log)) : ratioChart(ins, watch, group, t, spec));
+    // A shared crosshair member leaves with its svg, wherever in the holder
+    // it sat (Ratio mode of an accumulating measure draws two charts).
+    for (const old of [...holder.querySelectorAll("svg")]) group.members = group.members.filter((m) => !old.contains(m.hair));
+    holder.replaceChildren(value
+      ? (spec.perStep ? barChart(ins, watch, group, t, spec, spec.perStep, log) : valueChart(ins, watch, group, t, spec, log))
+      : ratioChart(ins, watch, group, t, spec.perStep ? { ...spec, xAxis: false, height: 130 } : spec),
+      ...(!value && spec.perStep ? windowRatio(ins, watch, group, t, spec, spec.perStep) : []));
   };
   draw();
   const scale = scaleToggle(log, (l) => { log = l; draw(); });
   scale.hidden = !value;
   const mode = pairToggle(["Ratio", "Value"], value, (v) => { value = v; scale.hidden = !v; draw(); }, "Show");
-  const lab = label(spec.name, `${spec.info} Ratio shows how far ahead the leading side is: +20% when ${sideName(ins, 0)} has 20% more, -20% when ${sideName(ins, 1)} has 20% more, shaded in the leader's colour.${spec.perStep ? " Ratio compares the totals so far." : ""} ${spec.perStep ? `Value shows what each side added every ${ins.stepSec} s: ${sideName(ins, 0)} above the axis, ${sideName(ins, 1)} below.` : "Value shows both sides' own numbers."}`);
+  const lab = label(spec.name, `${spec.info} Ratio shows how far ahead the leading side is: +20% when ${sideName(ins, 0)} has 20% more, -20% when ${sideName(ins, 1)} has 20% more, shaded in the leader's colour.${spec.perStep ? ` Ratio compares the totals so far; under it, ${perWindowName(spec)} compares what each side destroyed in each ${RATIO_WINDOW_SEC} s.` : ""} ${spec.perStep ? `Value shows what each side added every ${ins.stepSec} s: ${sideName(ins, 0)} above the axis, ${sideName(ins, 1)} below.` : "Value shows both sides' own numbers."}`);
   lab.append(mode, scale);
   return [lab, holder];
+}
+
+/** RATIO_WINDOW_SEC is the window the per-window ratio of an accumulating
+ * measure adds up over (Marcin's pick: 5 s steps are too few kills to compare). */
+const RATIO_WINDOW_SEC = 15;
+/** WINDOW_K is that ratio's leadPct k: a 15 s window's metal is small, and a
+ * raid of a few hundred metal against nothing is not an infinite lead. */
+const WINDOW_K = 500;
+/** WINDOW_CAP caps a window's lead (10x) so one lopsided trade cannot
+ * flatten every other bar. */
+const WINDOW_CAP = 900;
+
+function perWindowName(spec: CompareSpec): string {
+  return `${spec.name} per ${RATIO_WINDOW_SEC}s`;
+}
+
+/** windowRatio is RATIO mode's second chart for an accumulating measure:
+ * per RATIO_WINDOW_SEC, how far ahead the side that destroyed more was in
+ * that window alone, as a bar up (the first side) or down (the second) in
+ * its colour, on a log scale. The total's lead line above it says who is
+ * ahead so far; these bars say who was winning the fighting at the time. */
+function windowRatio(ins: Insights, watch: Watch | null, group: ChartGroup, t: number[], spec: CompareSpec, v: number[][]): HTMLElement[] {
+  const n = Math.max(1, Math.round(RATIO_WINDOW_SEC / ins.stepSec));
+  const [a, b] = [windowSums(v[0], n), windowSums(v[1], n)];
+  const lead = leadPct(b, a, WINDOW_K).map((x, w) => (a[w] + b[w] > 0 ? Math.max(-WINDOW_CAP, Math.min(WINDOW_CAP, x)) : 0));
+  const top = Math.max(100, ...lead.map(Math.abs));
+  const name = perWindowName(spec);
+  const c = timeChart({
+    height: 120, durationSec: ins.durationSec, yMin: -top, yMax: top, zeroLine: true, xAxis: spec.xAxis, log: { unit: 20 },
+    yTick: (y) => `${y > 0 ? "+" : y < 0 ? "-" : ""}${pctText(y)}`, gutter: GUTTER, watch, group,
+    readout: (tt) => {
+      const i = stepAt(t, tt);
+      if (i < 0) return null;
+      const w = Math.floor(i / n);
+      const ahead = a[w] + b[w] <= 0 || Math.abs(lead[w]) < 0.5 ? -1 : lead[w] > 0 ? 0 : 1;
+      return [0, 1].flatMap((sd): TipRow[] => [
+        { color: sideColor(ins, sd), label: sideName(ins, sd), metric: name, value: spec.fmt((sd ? b : a)[w] ?? 0) },
+        { color: sideColor(ins, sd), label: sideName(ins, sd), metric: `Lead per ${RATIO_WINDOW_SEC}s`, value: ahead < 0 ? "even" : ahead === sd ? pctText(lead[w]) : "" },
+      ]);
+    },
+  });
+  // Each window spans steps [w*n, w*n+n); a step's time is its END.
+  const t0 = (i: number) => (t[i] ?? 0) - ins.stepSec;
+  lead.forEach((x, w) => {
+    if (!x) return;
+    const i0 = w * n;
+    const i1 = Math.min(t.length, i0 + n) - 1;
+    const x0 = c.x(t0(i0));
+    const width = Math.max(1, (c.x(t[i1]) - x0) * 0.85);
+    const y0 = c.y(0);
+    const y1 = c.y(x);
+    c.plot.append(s("rect", { x: x0, y: Math.min(y0, y1), width, height: Math.abs(y1 - y0), fill: sideColor(ins, x > 0 ? 0 : 1), "fill-opacity": 0.75 }));
+  });
+  const lab = label(name, `For every ${RATIO_WINDOW_SEC} s on its own: how much more metal the side that destroyed more destroyed in it, +100% when ${sideName(ins, 0)} destroyed twice what ${sideName(ins, 1)} did, -100% the other way, on a log scale capped at 10x. ${WINDOW_K} metal is added to both sides first, so a small raid against nothing reads as a small lead.`);
+  return [lab, h("div", undefined, c.svg)];
 }
 
 /** pctText is a lead in percent, signless (the tooltip names the leader). */

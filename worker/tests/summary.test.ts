@@ -11,7 +11,7 @@ import { tickText } from "../src/summary/chart";
 import { clipAround, clipAt, clipEvent, clipSpan, watcher } from "../src/summary/watch";
 import { zonesOf } from "../src/summary/zones";
 import { lossKinds } from "../src/summary/losskinds";
-import { leadPct, ratioDomain } from "../src/summary/series";
+import { leadPct, ratioDomain, windowSums } from "../src/summary/series";
 import { clipOf } from "../src/summary/sections/awards";
 import { battlePhrase, marginPhrase } from "../src/summary/phrases";
 import { at, place } from "../src/summary/places";
@@ -645,4 +645,9 @@ test("notableLoss names one unit that was a big part of a side's loss", () => {
   assert.equal(notableLoss(i, loss([["Epic Pulsar", 1, 7358.8]], 74900)), null, "a small part of a big loss");
   assert.equal(notableLoss(i, loss([["Goblin", 219, 6570]], 9000)), null, "many of one kind is no one unit");
   assert.equal(notableLoss(i, loss([["Pulsar", 1, 2000]], 3000)), null, "too cheap to name");
+});
+
+test("windowSums adds steps up per window, the last one short", () => {
+  assert.deepEqual(windowSums([1, 2, 3, 4, 5, 6, 7], 3), [6, 15, 7]);
+  assert.deepEqual(windowSums([], 3), []);
 });
