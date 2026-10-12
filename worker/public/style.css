@@ -1,32 +1,42 @@
 /* ---- the LAVA palette (Marcin's pick, 2026-10-11; mockup f-lava-replay in
    the redesign files): a maroon-black page lit by an ember glow at the top,
-   plum panels, a gold accent. Every chrome colour below is one of these, so a
-   retheme is an edit here. Team colours, unit colours and the per-flag/state
-   chips keep their own meanings and are not part of it. The SUMMARY tab is
-   deliberately left on its own palette (its library carries one, --brs-*),
-   which is why #summary restores the old page colour behind it. */
+   with a teal accent.
+   Panels are SMOKE (Marcin's pick, 2026-10-12, over solid plum, warm glass and
+   no panels at all): translucent darkenings of whatever is behind them, so the
+   glow shows through and a panel reads as a shadow on the page rather than a
+   grey box. That is why everything that FLOATS over other content (tooltips,
+   menus, the map's own controls) takes --float instead, which is opaque. Every
+   chrome colour below is one of these, so a retheme is an edit here. Team
+   colours, unit colours and the per-flag/state chips keep their own meanings
+   and are not part of it. The SUMMARY tab is deliberately left on its own
+   palette (its library carries one, --brs-*), which is why #summary restores
+   the old page colour behind it. */
 :root {
   color-scheme: dark;
   --bg: #170d10;          /* the page */
   --glow: #6a2b18;        /* the ember glow at the top of the page */
   --rail: #130a0d;        /* the left menu */
-  --panel: #1c1420;       /* bars, the sidebar, framed boxes */
-  --raised: #261b2c;      /* controls and hovered rows on a panel */
-  --raised-hi: #30233a;   /* a hovered control */
-  --well: #110a0d;        /* inputs, code, chart surfaces: below the panel */
-  --line: #352840;        /* borders */
-  --line-soft: #281e2f;   /* row separators, grids */
-  --line-hi: #4b3a54;     /* hovered/strong borders */
-  --text: #f1e8f2;
-  --text-2: #ddd0e8;      /* secondary bright text */
-  --muted: #b9a9c6;       /* values beside labels, quiet text */
-  --dim: #9a8aa8;         /* labels, menu entries */
-  --faint: #8a7a9a;       /* column headers, timestamps, empty cells */
-  --accent: #ffb547;      /* gold: the selected thing, links, focus */
-  --accent-hi: #ffc876;
-  --accent-ink: #170d10;  /* text on gold */
-  --accent-soft: #3a2614; /* a selected chip's fill */
-  --accent-line: #8a5e22; /* a selected chip's border */
+  --panel: rgba(6, 2, 3, .42);          /* bars, the sidebar, framed boxes */
+  --raised: rgba(255, 190, 150, .07);   /* controls and hovered rows on a panel */
+  --raised-hi: rgba(255, 190, 150, .12); /* a hovered control */
+  --well: rgba(0, 0, 0, .5);            /* inputs, code, chart surfaces: below the panel */
+  --float: rgba(20, 9, 11, .96);        /* tooltips, menus, popovers: over content */
+  --line: rgba(255, 170, 130, .17);     /* borders */
+  --line-soft: rgba(255, 170, 130, .06); /* row separators, grids */
+  --line-hi: rgba(255, 170, 130, .22);  /* hovered/strong borders */
+  --text: #f6ebe9;
+  --text-2: #ecd9d5;      /* secondary bright text */
+  --muted: #c8afab;       /* values beside labels, quiet text */
+  --dim: #a88f8b;         /* labels, menu entries */
+  --faint: #957b78;       /* column headers, timestamps, empty cells */
+  /* Teal: the selected thing, links, focus. It replaced gold (Marcin, 2026-10-12:
+     "not a fan of this yellow"), and sits opposite the page's ember on the
+     colour wheel, so what can be clicked never reads as part of the lava. */
+  --accent: #4fdcc4;
+  --accent-hi: #86eadb;
+  --accent-ink: #062019;  /* text on the accent */
+  --accent-soft: rgba(79, 220, 196, .13); /* a selected chip's fill */
+  --accent-line: rgba(79, 220, 196, .5);  /* a selected chip's border */
   --lilac: #c3a9dc;       /* work in flight: progress, running jobs, charts */
   --lilac-soft: #2a1f33;
   --lilac-line: #5a4670;
@@ -266,15 +276,15 @@ body.replay-page #replaytabs {
    summary is easy to miss). It is part of the link, so clicking it opens the
    summary too. It nudges left and back, toward the entry, until the reader
    has opened the summary once (app.js initNewTag, remembered in
-   localStorage), then stays put. Over the map, so a solid gold tag with a
-   glow rather than text, which the terrain would swallow. */
+   localStorage), then stays put. Over the map, so a solid accent-coloured
+   tag with a glow rather than text, which the terrain would swallow. */
 .newtag {
   position: absolute; left: calc(100% + 15px); top: 50%; z-index: 30;
   height: 20px; margin-top: -10px; padding: 0 8px 0 7px;
   display: flex; align-items: center;
   background: var(--accent); color: var(--accent-ink); border-radius: 5px;
   font-size: 10.5px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, .5), 0 0 14px rgba(255, 181, 71, .45);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .5), 0 0 14px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 .newtag::before {
   content: ''; position: absolute; left: -6px; top: 50%; margin-top: -6px;
@@ -319,7 +329,7 @@ body.summary-tab #summary { display: block !important; }
   background: var(--bg); border: 1px solid var(--line-hi); border-radius: 8px;
   box-shadow: 0 14px 44px rgba(0, 0, 0, .6);
 }
-#cliphead, #clipbar { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 12px; background: var(--panel); }
+#cliphead, #clipbar { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 12px; background: var(--float); }
 #cliphead { border-bottom: 1px solid var(--line); font-size: 13px; }
 #clipbar { border-top: 1px solid var(--line); }
 #cliptitle { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
@@ -345,7 +355,7 @@ body.clip-dragging #clip canvas { pointer-events: none; }
   left: calc(var(--thumb) / 2 + var(--at, 0) * (100% - var(--thumb)));
   /* A span (--len > 0) is a band from the moment's start to its end. */
   width: calc(3px + var(--len, 0) * (100% - var(--thumb)));
-  /* Lilac, not yellow: the played part of the track is the gold accent, and
+  /* Lilac, not the accent: the played part of the track is the accent, and
      the moment has to stand apart from it. */
   background: rgba(195, 169, 220, 0.45); border-left: 3px solid var(--lilac); box-sizing: border-box;
   box-shadow: 0 0 0 1px var(--bg); pointer-events: none;
@@ -588,7 +598,7 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
 #queuetable .jobmenubtn[aria-expanded] { opacity: 1; color: var(--text); border-color: var(--line-hi); }
 #queuetable .jobmenu {
   position: absolute; right: 10px; top: calc(100% - 4px); z-index: 5; min-width: 120px;
-  background: var(--raised); border: 1px solid var(--line-hi); border-radius: 5px; padding: 4px;
+  background: var(--float); border: 1px solid var(--line-hi); border-radius: 5px; padding: 4px;
   box-shadow: 0 6px 18px rgba(0,0,0,.45); display: flex; flex-direction: column; gap: 2px;
 }
 #queuetable .jobmenu button {
@@ -653,7 +663,7 @@ svg.chart .chdot { fill: var(--lilac); stroke: var(--well); stroke-width: 2; dis
 /* One tooltip for all three charts: the reader aims at a moment, not a line. */
 .charttip {
   display: none; position: absolute; top: 8px; z-index: 2; pointer-events: none;
-  background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
+  background: var(--float); border: 1px solid var(--line); border-radius: 4px;
   padding: 6px 9px; font-size: 11px; color: var(--muted); min-width: 150px;
 }
 .charttip .tiphead { color: var(--text-2); margin-bottom: 3px; }
@@ -716,7 +726,7 @@ pre.sizereport {
    the body scrolls, since a 16-player detail is a few hundred lines. */
 #lbdialog {
   width: min(900px, calc(100vw - 40px)); max-height: calc(100vh - 40px); padding: 0;
-  background: var(--panel); color: var(--text-2); border: 1px solid var(--line); border-radius: 8px;
+  background: var(--float); color: var(--text-2); border: 1px solid var(--line); border-radius: 8px;
   box-shadow: 0 8px 30px rgba(0,0,0,0.6); font-size: 12px;
 }
 #lbdialog::backdrop { background: rgba(0,0,0,0.55); }
@@ -916,7 +926,7 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 
 #tooltip {
   position: absolute; pointer-events: none; display: none;
-  background: rgba(28, 20, 32, .96); border: 1px solid var(--line-hi); border-radius: 4px;
+  background: var(--float); border: 1px solid var(--line-hi); border-radius: 4px;
   padding: 7px 9px; font-size: 12px; line-height: 1.5; color: var(--text);
   max-width: 240px; z-index: 10; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
 }
@@ -930,7 +940,7 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 
 #zoomlabel {
   position: absolute; left: 10px; bottom: 8px; pointer-events: none;
-  background: rgba(28, 20, 32, .82); border: 1px solid var(--line); border-radius: 999px;
+  background: var(--float); border: 1px solid var(--line); border-radius: 999px;
   padding: 3px 10px; font-size: 11px; color: var(--muted);
   font-variant-numeric: tabular-nums; z-index: 5;
 }
@@ -941,7 +951,7 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 #layers { position: absolute; top: 10px; right: 10px; z-index: 6; }
 #layersbtn {
   display: flex; align-items: center; gap: 6px; padding: 5px 11px 5px 9px; border-radius: 999px;
-  font-size: 12px; color: var(--muted); background: rgba(28, 20, 32, .86); border-color: var(--line);
+  font-size: 12px; color: var(--muted); background: var(--float); border-color: var(--line);
 }
 #layersbtn:hover, #layersbtn[aria-expanded="true"] { color: var(--text); border-color: var(--line-hi); }
 #layersbtn svg {
@@ -950,7 +960,7 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 }
 #layerspanel {
   position: absolute; right: 0; top: calc(100% + 6px); width: 230px; padding: 8px 10px;
-  background: var(--panel); border: 1px solid var(--line-hi); border-radius: 10px;
+  background: var(--float); border: 1px solid var(--line-hi); border-radius: 10px;
   box-shadow: 0 10px 28px rgba(0, 0, 0, .5); font-size: 13px;
 }
 #layerspanel[hidden] { display: none; }
@@ -1073,8 +1083,8 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
   background: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, .6);
 }
 #filters .dualrange input[type=range]:focus { outline: none; }
-#filters .dualrange input[type=range]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px rgba(255, 181, 71, .55); }
-#filters .dualrange input[type=range]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 3px rgba(255, 181, 71, .55); }
+#filters .dualrange input[type=range]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 55%, transparent); }
+#filters .dualrange input[type=range]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 55%, transparent); }
 /* The chosen bounds, in the label. Fixed width so the bar does not shuffle
    sideways as the numbers change while dragging. */
 #filters #f_sizeout, #filters #f_durout {

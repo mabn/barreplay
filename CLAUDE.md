@@ -1108,10 +1108,14 @@ internal/viz/static.go    a replay's published form: its .brp alone (plus index.
 worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as static files from R2 (no playback server);
                           worker/public + worker/index.html are THE front-end (the one copy in the repo).
                           COLOURS (the LAVA scheme, Marcin's pick of the redesign mockups): every
-                          chrome colour in style.css is a token on :root — plum-black surfaces
-                          under an ember glow at the top of the page, gold (--accent) for the
-                          selected and the clickable, lilac for work in flight — so a restyle is
-                          an edit of that block. Team, unit, resource and status-chip colours
+                          chrome colour in style.css is a token on :root — a maroon-black page
+                          under an ember glow at the top, SMOKE panels (translucent darkenings,
+                          so the glow shows through; anything floating over content takes the
+                          opaque --float instead), teal (--accent, which replaced gold: Marcin
+                          was "not a fan of this yellow") for the selected and the clickable,
+                          lilac for work in flight — so a restyle is an edit of that block. The
+                          canvases cannot use var(), so they read the tokens through app.js
+                          themeColor. Team, unit, resource and status-chip colours
                           are NOT tokens: they say something, and stay what they were. The
                           SUMMARY keeps its own palette (worker/src/summary/styles.ts, the
                           --brs-* variables, which the embed also themes) and #summary paints
@@ -1480,7 +1484,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the ?tab=summary tabs — appear as a SUB MENU under Replays
                           (#replaytabs): boxed together with Replays, smaller, hung off a
                           guide line, the selected one marked on it. It stays 72px wide
-                          (Marcin: the replay area is what matters). A gold "NEW!" tag
+                          (Marcin: the replay area is what matters). A "NEW!" tag in the accent colour
                           points at Summary from just outside the menu (.newtag, part of
                           the link) and nudges toward it until this browser has opened the
                           summary once by any route (app.js initNewTag/summarySeen,
@@ -3115,7 +3119,7 @@ run dev` in `worker/` plus `pack -upload local`.)
   ("11:31 / 20:57"; the sim frame moved to the team card). First/last are the
   Home/End keys, not buttons. The timeline is a canvas drawing the WHOLE GAME
   behind the slider — which side's army was ahead when (first side's lead above
-  the centre line in its colour, the second's below), a gold tick wherever
+  the centre line in its colour, the second's below), an accent tick wherever
   somebody said something, the minutes under it, and the downloaded ranges
   (`#buffbar`) along the graph's foot — with the native range input laid over it,
   its track invisible and its thumb styled as the playhead (a line through the

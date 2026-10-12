@@ -962,6 +962,19 @@ function scheduleStrip() {
   if (!stripPending) stripPending = requestAnimationFrame(drawStrip);
 }
 
+// themeColor reads one of style.css's palette tokens (--accent, --well, ...)
+// for the canvases, which cannot use var(): a canvas takes a colour string.
+// Read once per page, since the palette never changes while it is open.
+const themeColors = {};
+function themeColor(name, fallback) {
+  if (!(name in themeColors)) {
+    let v = '';
+    try { v = getComputedStyle(document.documentElement).getPropertyValue('--' + name).trim(); } catch { /* no DOM */ }
+    themeColors[name] = v || fallback;
+  }
+  return themeColors[name];
+}
+
 // drawStrip repaints the whole strip. It runs only when something in it
 // changed (a chunk's frames read, a resize, a new replay) — never per playback
 // tick, since the playhead is the slider's own thumb.
@@ -989,7 +1002,7 @@ function drawStrip() {
   const kAt = f => (f - f0) / step;
 
   // The track: the graph's surface, a well below the strip's panel.
-  ctx.fillStyle = '#110a0d';
+  ctx.fillStyle = themeColor('well', '#110a0d');
   ctx.beginPath();
   ctx.roundRect(x0 - 3, top, x1 - x0 + 6, bot - top, 4);
   ctx.fill();
@@ -1005,10 +1018,10 @@ function drawStrip() {
     for (let m = 0; m * 60 <= totalSec; m += stepMin) {
       const x = xAt(kAt(m * 60 * 30));
       if (m > 0) {
-        ctx.fillStyle = '#281e2f';
+        ctx.fillStyle = themeColor('line-soft', '#281e2f');
         ctx.fillRect(Math.round(x), top, 1, bot - top);
       }
-      ctx.fillStyle = '#8a7a9a';
+      ctx.fillStyle = themeColor('faint', '#8a7a9a');
       ctx.textAlign = m === 0 ? 'left' : x > x1 - 20 ? 'right' : 'center';
       ctx.fillText(fmtTime(m * 60), m === 0 ? x0 - 3 : x, H);
     }
@@ -1041,13 +1054,13 @@ function drawStrip() {
       });
     }
   }
-  ctx.fillStyle = '#4b3a54';
+  ctx.fillStyle = themeColor('line-hi', '#4b3a54');
   ctx.fillRect(x0, Math.round(mid), x1 - x0, 1);
 
-  // Chat: a gold tick over the graph wherever something was said, one per
+  // Chat: an accent-coloured tick over the graph wherever something was said, one per
   // pixel column however many messages share it.
   if (chatLines.length && n > 1) {
-    ctx.fillStyle = '#ffb547';
+    ctx.fillStyle = themeColor('accent', '#4fdcc4');
     let lastX = -1;
     for (const c of chatLines) {
       const x = Math.round(xAt(Math.max(0, Math.min(n - 1, kAt(c.f)))));
@@ -1071,7 +1084,9 @@ function updateBuffBar() {
     if (chunkState[i] < 4 && !keyFrames[i]) continue;
     const a = (chunkStartIdx[i] / total * 100).toFixed(2) + '%';
     const b = ((chunkStartIdx[i] + data.chunks[i].count) / total * 100).toFixed(2) + '%';
-    const col = chunkState[i] >= 4 ? '#d59a42' : '#5b4430';
+    const col = chunkState[i] >= 4
+      ? 'color-mix(in srgb, var(--accent) 75%, transparent)'
+      : 'color-mix(in srgb, var(--accent) 28%, transparent)';
     stops.push(`transparent ${a}`, `${col} ${a}`, `${col} ${b}`, `transparent ${b}`);
   }
   stops.push('transparent 100%');
@@ -3400,7 +3415,7 @@ function drawMapFrame() {
     drawGrid(b, x0, y0, x1, y1, SMALL * 4, 'rgba(255,255,255,0.20)');   // large square (192) = 4x4 small
   }
 
-  ctx.strokeStyle = '#4b3a54';
+  ctx.strokeStyle = themeColor('line-hi', '#4b3a54');
   ctx.lineWidth = 1;
   ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
 }
@@ -3491,7 +3506,7 @@ function updateTooltip() {
   const name = defName(def), code = defCode(def);
   tooltip.innerHTML =
     `<h3>${name}${code !== name ? `<span class="code">${code}</span>` : ''}</h3>` +
-    (ghost ? `<div class="row"><span class="label">Status</span><span style="color:#9a8aa8">ghost — last seen state</span></div>` : '') +
+    (ghost ? `<div class="row"><span class="label">Status</span><span style="color:var(--dim)">ghost — last seen state</span></div>` : '') +
     `<div class="row"><span class="label">Unit</span><span>#${id}</span></div>` +
     `<div class="row"><span class="label">Team</span><span style="color:${teamColor[team] || '#fff'}">${teamNameById(team)}</span></div>` +
     `<div class="row"><span class="label">Position</span><span>${x}, ${z}</span></div>` +
@@ -4831,8 +4846,8 @@ function startFpsMonitor() {
   el.id = 'fpsmon';
   el.style.cssText =
     'position:absolute;left:8px;top:8px;z-index:20;pointer-events:none;' +
-    'background:rgba(28,20,32,0.82);border:1px solid #352840;border-radius:4px;' +
-    'padding:3px 7px;font:11px/1.5 monospace;color:#b9a9c6;' +
+    'background:var(--float);border:1px solid var(--line);border-radius:4px;' +
+    'padding:3px 7px;font:11px/1.5 monospace;color:var(--muted);' +
     'font-variant-numeric:tabular-nums;white-space:pre;';
   (document.getElementById('left') || document.body).appendChild(el);
 
