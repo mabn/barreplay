@@ -2368,9 +2368,9 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           button), MAP, START time (the header toggles it to the END time,
                           kept in localStorage), SIZE, DURATION, SETTINGS pills, a gex link, the KIND, state, what the
                           work TOOK, age and failure detail, a link to the replay once the
-                          catalog has it (and out
-                          to bar-rts.com until then, which for a queued re-sim is the whole point
-                          of the row), and a count of the jobs in flight on the menu entry
+                          catalog has it (and out to bar-rts.com until then; PLAIN TEXT while the
+                          catalog row is a placeholder — a re-sim still running, which would
+                          open a broken page), and a count of the jobs in flight on the menu entry
                           itself. The table spans the full width (no 1650px cap). Size, duration,
                           map, start and settings are JOINED ON by the worker
                           (ReplayIndex.queuePage), not stored on the job: the jobs table knows a
