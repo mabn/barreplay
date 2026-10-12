@@ -668,8 +668,15 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           POWER PLANTS COUNT 2.5x (defs.go powerWorth, isPowerPlant: wind,
                           tidal, solar, fusion, geo by name; storage shares their UnitGroup)
                           WHEREVER A BATTLE'S WINNER IS DECIDED — losing a fusion loses its
-                          output too (Marcin's rule). BattleLoss.Worth carries it, Def.Power
-                          marks the defs for the page's own tallies (moments.ts SideLoss.worth),
+                          output too (Marcin's rule). VERSION 10 counts every OTHER lost
+                          building at 2x too (defs.go buildingWorth; a building has to be
+                          rebuilt just to stand where its side stood), but only in a capture
+                          that names killers: without them a reclaim or an upgrade reads as a
+                          loss. Measured on 2,271 battles of 164 re-sims, 2x moved 6% of the
+                          verdicts and 68% of those named the eventual winner; 3x overshot
+                          (experiments/buildingworth). BattleLoss.Worth carries it, Def.Worth
+                          (v10; before it Def.Power) gives the page's own tallies the per-def
+                          figure (model.ts defWorth, moments.ts SideLoss.worth),
                           and every verdict — gapBattles' decisive/win/even, a fight story's
                           "wins"/"trades", the Battles list's "ahead" box — compares worth,
                           while every number SHOWN stays plain metal (model.ts lossWorth).
@@ -1067,11 +1074,11 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           `icon` (its iconType) then its name; SummaryOptions.iconBase names
                           the origin, defaulting to the one the module was loaded from, null
                           = names; a def with no icon reads as its name.
-                          The library draws versions 1-9 (INSIGHTS_VERSIONS [9, 8, 7, 6, 5, 4, 3, 2, 1]; v2 adds
+                          The library draws versions 1-10 (INSIGHTS_VERSIONS [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]; v2 adds
                           winner + swing, v3 eliminations and peak battles, v4 owner removals
                           left out, owned value and battle teams, v5 self-destructs marked, v6 fitted
                           win weights, v7 the game ends at the resign rather than the first team knocked
-                          out before it, swing drivers and no opening economy swings, v8 battle killers and unit classes for the battle phrases, v9 the calmer win model with metal destroyed and a 3-minute income window) and app.js fetches .insights9, then 8, 7, 6, 5, 4, 3, 2, 1. A version bump needs `insights -all` after
+                          out before it, swing drivers and no opening economy swings, v8 battle killers and unit classes for the battle phrases, v9 the calmer win model with metal destroyed and a 3-minute income window, v10 lost buildings at 2x in battle verdicts) and app.js fetches .insights10, then 9, 8, 7, 6, 5, 4, 3, 2, 1. A version bump needs `insights -all` after
                           the deploy, or published replays keep their older summary — except the ones people OPEN, which
                           update themselves: see ON-DEMAND SUMMARIES under worker/ (so
                           `insights -all` is now only for having every summary current at once).

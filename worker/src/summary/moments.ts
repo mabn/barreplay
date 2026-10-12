@@ -5,7 +5,7 @@
 // card uses. Pure, so the node tests can pin the wording rules.
 import { fmtClock, fmtMetal } from "./format";
 import { knockouts, wipedOf } from "./losses";
-import { lossWorth, POWER_WORTH, sideName, sideOfTeam, sideShort } from "./model";
+import { defWorth, lossWorth, sideName, sideOfTeam, sideShort } from "./model";
 import { battlePhrase, battleWhere, marginPhrase, plural } from "./phrases";
 import { at as placeAt, place } from "./places";
 import { SIM_FPS, type Battle, type Insights, type Moment, type UnitLoss } from "./types";
@@ -24,8 +24,9 @@ const QUIET_METAL = 300;
 export interface SideLoss {
   n: number;
   metal: number;
-  /** The metal with power plants at POWER_WORTH times theirs: what decides
-   * who won. */
+  /** The metal weighted by each def's worth (model.ts defWorth: power
+   * plants, and buildings in a capture that names killers): what decides who
+   * won. */
   worth: number;
   /** Commanders lost, by the player who owned each. */
   commanders: string[];
@@ -317,7 +318,7 @@ export function sideLosses(ins: Insights, f0: number, f1: number, area?: { x: nu
     const cost = d.cost[i] ?? 0;
     o.n++;
     o.metal += cost;
-    o.worth += def?.power ? cost * POWER_WORTH : cost;
+    o.worth += cost * defWorth(def);
     if (def && isCommander(def.name)) {
       o.commanders.push(owner.get(d.team[i]) || sideName(ins, side));
       o.commanderDeaths.push(i);

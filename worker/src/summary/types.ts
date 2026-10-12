@@ -73,6 +73,10 @@ export interface Def {
   /** A power plant: its loss counts POWER_WORTH times its metal wherever a
    * battle's winner is decided (version 7+). */
   power?: boolean;
+  /** What its loss counts for per metal wherever a battle's winner is
+   * decided (version 10+): power plants, and in a capture that names killers
+   * every other building too. Absent = 1. */
+  worth?: number;
   /** What the unit is for (version 8+): bomber, fighter, gunship, air,
    * ship, experimental, army, commander, defence, lrgun, nuke, factory,
    * eco, building or unit. */
@@ -160,8 +164,9 @@ export interface Battle {
   /** Radius holding the deaths, elmos. */
   r: number;
   /** Indexed like sides. */
-  /** worth: the metal with power plants at POWER_WORTH times theirs, what
-   * a winner is decided by (version 7+; absent = metal). */
+  /** worth: the metal with power plants at POWER_WORTH times theirs (and
+   * since version 10 every other building at 2x when the capture names
+   * killers), what a winner is decided by (version 7+; absent = metal). */
   /** own: the metal of it the side's OWN side destroyed (its dying units'
    * blasts, allies' fire), ownDef the def that did most of it, trigger the
    * enemy [team, def] whose kill set it off (version 7+, causes only). */

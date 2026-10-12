@@ -18,7 +18,7 @@ type defInfo struct {
 	fly       bool
 	transport bool
 	milestone int
-	worth     float64 // what a loss of it is worth per metal: powerWorth for a power plant, else 1
+	worth     float64 // what a loss of it is worth per metal (worthPerMetal)
 }
 
 // pass walks the frames once, with the lifecycle events interleaved at their
@@ -185,7 +185,7 @@ func newPass(in Input, ro roster) *pass {
 			builder:   d.IsBuilder,
 			fly:       d.CanFly,
 			transport: isTransport(d.Name),
-			worth:     worthPerMetal(d),
+			worth:     worthPerMetal(d, p.hasCauses),
 			milestone: milestoneOf(d.Name),
 		}
 	}
@@ -641,6 +641,14 @@ func (p *pass) finish() {
 	}
 	for id := range p.usedDef {
 		d := p.in.Meta.UnitDefs[id]
-		o.Defs[id] = Def{Name: d.Name, Human: d.HumanName, Cost: round1(float64(d.MetalCost)), Icon: d.IconType, Power: isPowerPlant(d), Class: unitClass(d)}
+		o.Defs[id] = Def{Name: d.Name, Human: d.HumanName, Cost: round1(float64(d.MetalCost)), Icon: d.IconType, Power: isPowerPlant(d), Worth: worthOut(p.defs[id].worth), Class: unitClass(d)}
 	}
+}
+
+// worthOut is Def.Worth: absent when a loss counts its plain metal.
+func worthOut(w float64) float64 {
+	if w == 1 {
+		return 0
+	}
+	return w
 }

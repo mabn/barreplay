@@ -68,7 +68,8 @@ type BattleLoss struct {
 	Metal float64 `json:"metal"`
 	// Worth is what the losses decide a battle by: their metal, with power
 	// plants at powerWorth times theirs (losing a fusion loses its output
-	// too). Version 7 and later.
+	// too), and since Version 10 every other building at buildingWorth when
+	// the capture names killers. Version 7 and later.
 	Worth float64 `json:"worth"`
 	// Top is the costliest defs lost, by total metal, at most battleTopDefs.
 	Top []int32 `json:"top"`

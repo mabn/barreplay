@@ -111,13 +111,29 @@ var powerNameRE = regexp.MustCompile(`^((arm|cor|leg)[a-z0-9]*(win|sol|fus|geo|t
 // AND the energy it would have made, which has a metal equivalent.
 const powerWorth = 2.5
 
+// buildingWorth is what any other lost building counts for per metal when a
+// battle's winner is decided (Version 10): a building has to be rebuilt just
+// to stand where its side stood, where a unit lost has already done its job.
+// Measured on 2,271 battles of 164 re-simulated games, 2x moved 6% of the
+// verdicts and 68% of the moved ones named the side that went on to win the
+// game; 3x moved more, but those extra ones were close to a coin toss.
+// Only in a capture that names killers: without them a reclaimed wind farm or
+// an upgraded extractor reads as a loss, and doubling it doubles the noise.
+const buildingWorth = 2.0
+
 func isPowerPlant(d snapshot.UnitDef) bool {
 	return isStructure(d) && (d.UnitGroup == "energy" || d.UnitGroup == "") && powerNameRE.MatchString(d.Name)
 }
 
-func worthPerMetal(d snapshot.UnitDef) float64 {
-	if isPowerPlant(d) {
+// worthPerMetal is what a lost unit of def d counts for per metal of its
+// cost when a battle's winner is decided; causes is whether the capture
+// names killers.
+func worthPerMetal(d snapshot.UnitDef, causes bool) float64 {
+	switch {
+	case isPowerPlant(d):
 		return powerWorth
+	case causes && isStructure(d):
+		return buildingWorth
 	}
 	return 1
 }

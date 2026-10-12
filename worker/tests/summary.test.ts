@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { fmtClock, fmtMetal, niceStep, timeStep } from "../src/summary/format";
-import { colorName, comparable, nameRuns, notices, readable, sideColor, sideName } from "../src/summary/model";
+import { colorName, comparable, defWorth, nameRuns, notices, POWER_WORTH, readable, sideColor, sideName } from "../src/summary/model";
 import { destroyedBySide, knockouts, lossesByStep, wipedOf } from "../src/summary/losses";
 import { armyDrop, compass, fighters, gapBattles, momentStories, momentStory, notableLoss } from "../src/summary/moments";
 import { tickText } from "../src/summary/chart";
@@ -19,7 +19,7 @@ import type { Insights } from "../src/summary/types";
 
 function ins(over: Partial<Insights> = {}): Insights {
   return {
-    version: 9, causes: true, gameId: "g", durationSec: 600, stepSec: 15, costCoverage: "full", pov: "full",
+    version: 10, causes: true, gameId: "g", durationSec: 600, stepSec: 15, costCoverage: "full", pov: "full",
     bounds: { minX: 0, maxX: 1, minZ: 0, maxZ: 1 },
     sides: [{ ally: 0, teams: [0], players: ["Ann", "Bob"], color: "#112233" }, { ally: 1, teams: [1], players: ["Cy"] }],
     teams: [], defs: {},
@@ -59,8 +59,16 @@ test("notices say why something is missing", () => {
   assert.match(notices(ins({ pov: "ally" }))[0], /re-simulation/);
   assert.match(notices(ins({ costCoverage: "army" }))[0], /armed mobile units only/);
   // An older file says what it lacks; a capture without killers says so.
-  assert.equal(notices(ins({ version: 5 }))[0], "Outdated report (v5), missing: fitted win odds, game end at the resign, story battles, friendly fire, battle titles that say what did the killing, calmer win odds that move with the fighting. It updates when summaries are recomputed.");
+  assert.equal(notices(ins({ version: 5 }))[0], "Outdated report (v5), missing: fitted win odds, game end at the resign, story battles, friendly fire, battle titles that say what did the killing, calmer win odds that move with the fighting, lost buildings counted double when judging battles. It updates when summaries are recomputed.");
   assert.match(notices(ins({ causes: false }))[0], /does not record killers/);
+});
+
+test("a loss's worth per metal comes from the file, else from the power flag", () => {
+  assert.equal(defWorth({ worth: 2 }), 2, "version 10 states it");
+  assert.equal(defWorth({ power: true, worth: 2.5 }), 2.5);
+  assert.equal(defWorth({ power: true }), POWER_WORTH, "older files mark only power plants");
+  assert.equal(defWorth({}), 1);
+  assert.equal(defWorth(undefined), 1);
 });
 
 test("side labels and colours", () => {

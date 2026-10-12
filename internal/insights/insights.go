@@ -23,7 +23,7 @@ import (
 // Version names the file: replays/<rid>.insights<Version>.json. Pieces are
 // immutable, so any change to what is computed or how is a new version,
 // written beside the old one; the viewer asks for the one it understands.
-const Version = 9
+const Version = 10
 
 // FileName is the published piece's name for a revision id.
 func FileName(rid string) string { return fmt.Sprintf("%s.insights%d.json", rid, Version) }
@@ -114,6 +114,10 @@ type Def struct {
 	// Power marks a power plant, whose loss counts powerWorth times its
 	// metal wherever a battle's winner is decided (version 7 and later).
 	Power bool `json:"power,omitempty"`
+	// Worth is what a loss of it counts for per metal wherever a battle's
+	// winner is decided (worthPerMetal: power plants, and in a capture that
+	// names killers every other building too); absent = 1. Version 10.
+	Worth float64 `json:"worth,omitempty"`
 	// Class is what the unit is for (classes.go): bomber, fighter, gunship,
 	// air, ship, experimental, army, commander, defence, lrgun, nuke, factory, eco,
 	// building or unit. Version 8.
