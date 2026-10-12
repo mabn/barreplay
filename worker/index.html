@@ -48,6 +48,7 @@
       <a href="" data-rtab="summary" class="railsubitem" title="The game summary">
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 16 V10 M8 16 V5 M12 16 V11 M16 16 V7"/></svg>
         <span>Summary</span>
+        <span class="newtag" aria-hidden="true">new!</span>
       </a>
     </div>
   </div>
@@ -308,50 +309,64 @@
     <canvas id="ovcv"></canvas>
     <div id="tooltip"></div>
     <div id="zoomlabel"></div>
+    <!-- The map's view switches, floating in its top-right corner (app.js
+         initLayers): what is drawn over the units, and the input hints. A
+         popover rather than a sidebar block, so the sidebar is the game and
+         the map keeps its width. Hidden inside the clip window, like the
+         zoom label: the clip is for watching one moment. -->
+    <div id="layers">
+      <button type="button" id="layersbtn" aria-expanded="false" aria-controls="layerspanel" title="What is drawn on the map">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 L17 6.5 L10 10 L3 6.5 Z M3 10 L10 13.5 L17 10 M3 13.5 L10 17 L17 13.5"/></svg>
+        Layers
+      </button>
+      <div id="layerspanel" hidden>
+        <label title="Chat also pops up over the speaker on the map"><input type="checkbox" id="togglebubbles" checked> Chat bubbles</label>
+        <label title="A green bar over every damaged unit, when zoomed in"><input type="checkbox" id="togglehp" checked> HP bars</label>
+        <label id="fxlayer" style="display:none" title="Long-range shells, missiles, heavy beams and big explosions (re-simulated replays)"><input type="checkbox" id="togglefx" checked> Effects</label>
+        <div class="hint">Scroll to zoom · middle-drag to pan · hover a unit for details.<br>← / → step · Home / End · space play/pause.</div>
+      </div>
+    </div>
     <div id="empty" style="display:none"></div>
   </div>
 </div>
 
 <!-- The sidebar: a column of its own, the full height of the page beside
      the header, the map and the playback bar (body.replay-page's grid in
-     style.css). It is deliberately NOT inside #wrap: the clip player moves
-     #wrap into its window, and the window is the map alone. -->
+     style.css), holding two cards: the game (clock, the two sides compared,
+     every player) and the chat. It is deliberately NOT inside #wrap: the clip
+     player moves #wrap into its window, and the window is the map alone. -->
 <div id="side">
-  <h2>Frame</h2>
-  <div class="stat"><span>Game time</span><b id="s_time">—</b></div>
-  <div class="stat"><span>Sim frame</span><b id="s_frame">—</b></div>
-  <div class="stat"><span>Units</span><b id="s_units">—</b></div>
+  <section id="teamcard" class="card">
+    <!-- The clock leads the card, as large as the map's title: it is what
+         the rest of the card is a reading OF. -->
+    <div class="clock">
+      <b id="s_time">—</b>
+      <span class="hint">frame <span id="s_frame">—</span> · <span id="s_units">—</span> units</span>
+    </div>
 
-  <!-- BAR's spectator team-comparison rows (see renderTeamStats in app.js).
-       It sits ABOVE the Players heading rather than under it: the heading
-       names the roster below it, and these rows describe the two SIDES, not
-       the players. Only a two-sided game has anything to compare, so this
-       stays hidden for an FFA, for a capture with no roster, and until the
-       economy timeline has landed. -->
-  <div id="teamstats" style="display:none"></div>
+    <!-- BAR's spectator team-comparison rows (see renderTeamStats in app.js).
+         Only a two-sided game has anything to compare, so this stays hidden
+         for an FFA, for a capture with no roster, and until the economy
+         timeline has landed. -->
+    <div id="teamstats" style="display:none"></div>
 
-  <h2>Players</h2>
-  <div id="players"></div>
+    <!-- Every player in ONE table, side after side, so the OS, metal and
+         energy columns line up down the whole game rather than per side. -->
+    <div id="players"></div>
+  </section>
 
   <!-- Chat transcript. Hidden when the capture recorded no messages — a
        re-simulated demo sees every channel, but a live player's upload only
        holds the chat their own client received. -->
-  <div id="chatwrap" style="display:none">
-    <h2>Chat</h2>
+  <section id="chatwrap" class="card" style="display:none">
+    <div class="cardhead">
+      <h2>Chat</h2>
+      <!-- Channel filter (app.js setChatFilter): offered only for channels
+           this capture has, since a pill that empties the box is no use. -->
+      <span id="chatfilter" class="pills" role="group" aria-label="Which messages"></span>
+    </div>
     <div id="chat" title="Click a line to jump to when it was said"></div>
-  </div>
-
-  <h2>Controls</h2>
-  <button type="button" id="togglebubbles" class="sidebtn"
-          title="Chat also pops up over the speaker on the map">Hide chat bubbles</button>
-  <button type="button" id="togglehp" class="sidebtn"
-          title="A green bar over every damaged unit, when zoomed in">Hide HP bars</button>
-  <button type="button" id="togglefx" class="sidebtn" style="display:none"
-          title="Long-range shells, missiles, heavy beams and big explosions (re-simulated replays)">Hide effects</button>
-  <div class="hint">
-    Scroll to zoom · middle-drag to pan · hover a unit for details.<br>
-    ← / → step · space play/pause.
-  </div>
+  </section>
 </div>
 
 <!-- The Summary tab's pane: filled by the src/summary library's
@@ -390,30 +405,39 @@
   </div>
 </div>
 
+<!-- The playback strip under the map: play, a step either way, the speed,
+     and the TIMELINE — the whole game drawn behind the slider (app.js
+     drawStrip): which side's army was ahead when, first side up and second
+     down, a tick above it wherever somebody said something, the minutes
+     under it, and the downloaded ranges along its foot. -->
 <div class="controls" id="bottombar">
-  <button id="first" title="First frame">⏮</button>
-  <button id="prev" title="Previous frame (←)">◀</button>
-  <button id="play" title="Play / pause (space)">▶ Play</button>
-  <button id="next" title="Next frame (→)">▶</button>
-  <button id="last" title="Last frame">⏭</button>
-  <label style="font-size:12px;color:var(--muted);">Speed
-    <select id="speed">
-      <option value="1">1× (real time)</option>
-      <option value="2">2×</option>
-      <option value="4">4×</option>
-      <option value="8">8×</option>
-      <option value="16" selected>16×</option>
-      <option value="30">30×</option>
-      <option value="60">60×</option>
-    </select>
-  </label>
+  <button type="button" id="play" aria-label="Play (space)" title="Play / pause (space)">
+    <svg class="i-play" viewBox="0 0 20 20" aria-hidden="true"><path d="M7 4.5 L15.5 10 L7 15.5 Z"/></svg>
+    <svg class="i-pause" viewBox="0 0 20 20" aria-hidden="true"><path d="M6.5 4.5 H9 V15.5 H6.5 Z M11 4.5 H13.5 V15.5 H11 Z"/></svg>
+  </button>
+  <button type="button" id="prev" class="stepbtn" aria-label="Previous frame" title="Previous frame (←)">
+    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 5 V15 M15 5 L8.5 10 L15 15 Z"/></svg>
+  </button>
+  <button type="button" id="next" class="stepbtn" aria-label="Next frame" title="Next frame (→)">
+    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M14 5 V15 M5 5 L11.5 10 L5 15 Z"/></svg>
+  </button>
+  <select id="speed" aria-label="Speed" title="Playback speed (1× is real time)">
+    <option value="1">1×</option>
+    <option value="2">2×</option>
+    <option value="4">4×</option>
+    <option value="8">8×</option>
+    <option value="16" selected>16×</option>
+    <option value="30">30×</option>
+    <option value="60">60×</option>
+  </select>
   <div id="timeline">
+    <canvas id="stripcv" aria-hidden="true"></canvas>
+    <div id="buffbar" title="Downloaded ranges"></div>
     <!-- step="any" so the thumb can sit between samples while playing; a
          DRAG still lands on a whole one, rounded by go(). -->
-    <input type="range" id="slider" min="0" max="0" value="0" step="any">
-    <div id="buffbar" title="Downloaded ranges"></div>
+    <input type="range" id="slider" min="0" max="0" value="0" step="any" aria-label="Position in the replay">
   </div>
-  <span class="timelabel" id="timelabel">—</span>
+  <span class="timelabel"><b id="timelabel">—</b><span id="timetotal"></span></span>
 </div>
 
 <!-- The ORIGIN the bulk replay data (heads, keyframes, chunk deltas, resources)
