@@ -1050,6 +1050,18 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           the deploy, or published replays keep their older summary — except the ones people OPEN, which
                           update themselves: see ON-DEMAND SUMMARIES under worker/ (so
                           `insights -all` is now only for having every summary current at once).
+                          ACHIEVEMENTS (achievements/ + demo.ts; Marcin's ask: run purely in the
+                          client "to see how well it works"): 258 rules from the shortlist that a
+                          demo + the BAR API can decide, listed under Awards. The BROWSER downloads
+                          the game's demo through the worker's /api/bar/demos/<file> (OVH sends no
+                          CORS; same caching as the map proxy), parses it in TypeScript (demo.ts:
+                          startscript, orders, selections, chat, pauses, leaves, the tail's winners
+                          and per-team end-of-game totals), and names build orders from the
+                          published .brp's def table (SummaryOptions.brpUrl, two Range reads of the
+                          meta). AICOMMAND instance 255 is NO AI (a player's Lua widget — area mex,
+                          build lines): those orders are the player's. Widget orders arrive one per
+                          unit, so action counts use Player.acts (one per frame and command).
+                          Nothing is stored; thresholds are the shortlist's, untuned.
                           EMBEDDING ON ANOTHER SITE (lavabalance's game pages): the other site
                           IMPORTS THE LIBRARY AT RUN TIME — import("https://replay.fogofwar.dev/
                           embed/summary.js") — so a deploy here reaches it with no change, pin or

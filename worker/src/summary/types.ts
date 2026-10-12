@@ -316,6 +316,13 @@ export interface SummaryOptions {
    * the bitmaps it names (the replay viewer). Defaults to the origin this
    * module was loaded from; null draws unit names instead. */
   iconBase?: string | null;
+  /** A BAR API proxy serving /replays/<id> and /demos/<file> (the viewer's
+   * /api/bar), for the achievements, which read the game's demo. Defaults to
+   * mapApi when that is set; null (or neither) leaves achievements out. */
+  barApi?: string | null;
+  /** The published .brp, whose meta holds the unit-def table that names
+   * build orders. Without it the build-order achievements cannot be checked. */
+  brpUrl?: string | null;
 }
 
 export interface SummaryHandle {

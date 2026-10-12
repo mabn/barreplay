@@ -62,6 +62,20 @@ export const CSS = `
 .brs-root .brs-award-title { font-weight: 600; margin-bottom: 3px; }
 .brs-root .brs-award-body { display: flex; gap: 10px; align-items: flex-start; }
 .brs-root .brs-awardmap { width: 64px; height: 64px; flex: none; }
+.brs-root .brs-ach { margin-top: 16px; }
+.brs-root .brs-ach h4 { margin: 0 0 4px; font-size: 14px; }
+.brs-root .brs-achhits { list-style: none; margin: 6px 0 0; padding: 0; font-size: 13px; }
+.brs-root .brs-achhits li { padding: 1px 0; }
+.brs-root .brs-achhits li.brs-seekable:hover { color: var(--brs-accent); }
+.brs-root .brs-achhits li.brs-seekable:hover .brs-watch { visibility: visible; }
+.brs-root .brs-achlist { margin: 4px 0 0; padding-left: 18px; font-size: 13px; }
+.brs-root .brs-achlist li { padding: 1px 0; }
+.brs-root .brs-rarity { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 11px; font-weight: 500; vertical-align: 1px; border: 1px solid currentColor; }
+.brs-root .brs-rarity1 { color: #9aa5b1; }
+.brs-root .brs-rarity2 { color: #6cc070; }
+.brs-root .brs-rarity3 { color: #4b9be0; }
+.brs-root .brs-rarity4 { color: #b77ee8; }
+.brs-root .brs-rarity5 { color: #f0a640; }
 .brs-root .brs-chat { max-height: 320px; overflow-y: auto; margin-top: 10px; border-top: 1px solid var(--brs-line); padding-top: 8px; }
 .brs-root .brs-line { padding: 1px 0; overflow-wrap: anywhere; }
 .brs-root .brs-moment { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; border-top: 1px solid var(--brs-grid); }

@@ -85,3 +85,23 @@ test("only map pieces are proxied: other assets, slashes and bad ids never reach
     assert.equal(s.seen.length, 0);
   } finally { s.restore(); }
 });
+
+test("a demo is proxied from BAR's OVH storage, re-escaped, with CORS", async () => {
+  const s = stub(() => new Response("demo", { headers: { "content-type": "application/octet-stream" } }));
+  try {
+    const r = await app.request("/api/bar/demos/2026-10-11_12-00-00-000_Supreme%20Isthmus%20v2.1_2026.07.04.sdfz", {}, env);
+    assert.equal(r.status, 200);
+    assert.equal(s.seen[0].url, "https://storage.uk.cloud.ovh.net/v1/AUTH_10286efc0d334efd917d476d7183232e/BAR/demos/2026-10-11_12-00-00-000_Supreme%20Isthmus%20v2.1_2026.07.04.sdfz");
+    assert.equal(r.headers.get("access-control-allow-origin"), "*");
+    assert.match(r.headers.get("cache-control") ?? "", /immutable/);
+  } finally { s.restore(); }
+});
+
+test("only .sdfz demo names reach the demo store", async () => {
+  const s = stub(() => new Response("x"));
+  try {
+    assert.equal((await app.request("/api/bar/demos/a%2F..%2Fsecret.sdfz", {}, env)).status, 400);
+    assert.equal((await app.request("/api/bar/demos/index.json", {}, env)).status, 400);
+    assert.equal(s.seen.length, 0);
+  } finally { s.restore(); }
+});

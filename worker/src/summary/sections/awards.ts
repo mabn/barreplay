@@ -2,8 +2,14 @@
 // goes to ONE unit among thousands, so each says which: a small route map
 // on the card, and a clip that follows the unit, rings it and draws where
 // it went (Clip.follow / Clip.path, Version 4 files).
+//
+// Below them, the ACHIEVEMENTS: the shortlist's rules a demo and the BAR API
+// can decide, judged in the browser (achievements/), loaded after the page
+// draws since they need the game's demo.
+import { describe, loadAchievements, type AchievementResult, type Hit, type Rule } from "../achievements";
+import { RARITY_NAMES, rarityOf, rarityWhy } from "../achievements/rarity";
 import { h, s, section } from "../dom";
-import { comparable, sideColor, sideOfTeam, teamColor } from "../model";
+import { comparable, sideColor, sideOfTeam, sideShort, teamColor } from "../model";
 import { named, unitRef } from "../names";
 import { tip } from "../tooltip";
 import { clipAround, clipEvent, watcher } from "../watch";
@@ -72,6 +78,14 @@ function routeMap(ins: Insights, a: Award, at: { x?: number; z?: number }): SVGS
 }
 
 export function awards(ins: Insights, opts: SummaryOptions): HTMLElement | null {
+  const cards = awardCards(ins, opts);
+  const ach = achievements(ins, opts);
+  if (!cards && !ach) return null;
+  const title = cards && !comparable(ins) ? "Awards (this capture saw every side)" : "Awards";
+  return section(title, cards, ach);
+}
+
+function awardCards(ins: Insights, opts: SummaryOptions): HTMLElement | null {
   // A one-sided capture's units are only the ones it saw; an award picked
   // from those would crown a unit for being watched.
   if (ins.pov !== "full" || !ins.awards?.length) return null;
@@ -100,5 +114,77 @@ export function awards(ins: Insights, opts: SummaryOptions): HTMLElement | null 
     if (watch) card.addEventListener("click", () => watch(clipOf(a, at, a.key === "blow" ? `${a.label}: ${who}` : `${a.label}: ${name} of ${who}`)));
     return card;
   });
-  return section(comparable(ins) ? "Awards" : "Awards (this capture saw every side)", h("div", { class: "brs-cards" }, ...cards));
+  return h("div", { class: "brs-cards" }, ...cards);
+}
+
+/** achievements is the achievements block: a placeholder while the demo
+ * downloads, then every rule the game earned, and folded lists of the ones
+ * nobody earned and the ones this game cannot decide. Null when the host
+ * names no BAR API proxy that serves demos (barApi). */
+function achievements(ins: Insights, opts: SummaryOptions): HTMLElement | null {
+  const api = opts.barApi !== undefined ? opts.barApi : opts.mapApi ?? null;
+  if (!api || !ins.gameId) return null;
+  const el = h("div", { class: "brs-ach" },
+    h("h4", undefined, "Achievements"),
+    h("div", { class: "brs-hint" }, "Checking achievements: reading the game's demo…"));
+  loadAchievements(ins, api, opts.brpUrl ?? null).then(
+    (r) => el.replaceChildren(...renderAchievements(ins, opts, r)),
+    (e: Error) => el.replaceChildren(h("h4", undefined, "Achievements"),
+      h("div", { class: "brs-hint" }, `Achievements could not be checked: ${e.message}.`)));
+  return el;
+}
+
+function renderAchievements(ins: Insights, opts: SummaryOptions, r: AchievementResult): Node[] {
+  const watch = watcher(opts);
+  // Rarest first, by rarity.ts and then by how many earned it
+  // here: a rule half the lobby earned says less than one only a single
+  // player did.
+  const earned = [...r.earned].sort((a, b) => rarityOf(b.rule) - rarityOf(a.rule) || a.hits.length - b.hits.length);
+  const cards = earned.map(({ rule, hits }) => h("div", { class: "brs-card brs-achcard" },
+    h("div", { class: "brs-award-title" }, `★ ${rule.name} `, rarityChip(rule)),
+    h("div", { class: "brs-hint" }, describe(rule)),
+    h("ul", { class: "brs-achhits" }, ...hits.map((hit) => {
+      const li = h("li", { class: hit.f !== undefined && watch ? "brs-seekable" : null }, whoOf(ins, hit), ": ", hit.text,
+        hit.f !== undefined && watch ? h("span", { class: "brs-watch" }, " ▶") : null);
+      if (hit.f !== undefined && watch) {
+        const f = hit.f;
+        li.addEventListener("click", () => watch(clipAround(f, { title: `${rule.name}: ${hit.text}` })));
+      }
+      return li;
+    }))));
+  const nameList = (rules: { rule: Rule; name: string; desc: string; why?: string }[]) =>
+    h("ul", { class: "brs-achlist" }, ...rules.map((x) => h("li", undefined,
+      h("span", { class: "brs-strong" }, x.name), " ", rarityChip(x.rule), " ", h("span", { class: "brs-hint" }, x.why ? `${x.desc} (${x.why})` : x.desc))));
+  const total = r.earned.length + r.missed.length + r.unknown.length;
+  const out: (Node | null)[] = [
+    h("h4", undefined, `Achievements: ${r.earned.length} of ${total} earned`),
+    h("div", { class: "brs-hint" }, "Judged from the game's demo (orders, chat, end-of-game totals) and the BAR API. Orders count what was ORDERED, which can include builds that were cancelled. End-of-game totals are per team."),
+    ...r.notes.map((n) => h("div", { class: "brs-hint" }, `Note: ${n}.`)),
+    cards.length ? h("div", { class: "brs-cards" }, ...cards) : h("div", { class: "brs-hint" }, "Nobody earned one in this game."),
+    r.missed.length ? h("details", { class: "brs-more" }, h("summary", undefined, `Not earned in this game (${r.missed.length})`), nameList(r.missed.map((x) => ({ rule: x, name: x.name, desc: describe(x) })))) : null,
+    r.unknown.length ? h("details", { class: "brs-more" }, h("summary", undefined, `Can't be checked for this game (${r.unknown.length})`),
+      nameList(r.unknown.map((u) => ({ rule: u.rule, name: u.rule.name, desc: describe(u.rule), why: u.why })))) : null,
+  ];
+  return out.filter((x): x is Node => x !== null);
+}
+
+/** rarityChip labels a rule with its rarity (achievements/rarity.ts, 1
+ * common to 5 legendary). */
+function rarityChip(rule: Rule): HTMLElement {
+  const n = rarityOf(rule);
+  const el = h("span", { class: `brs-rarity brs-rarity${n}` }, RARITY_NAMES[n]);
+  tip(el, { title: `Rarity ${n} of 5: ${rarityWhy(rule)}` });
+  return el;
+}
+
+/** whoOf names who earned a hit: the player in their colour, their side in
+ * its leader's, or the game itself. */
+function whoOf(ins: Insights, hit: Hit): HTMLElement {
+  if (hit.player) return h("span", { class: "brs-strong", style: `color: ${teamColor(ins, hit.player.team)}` }, hit.player.name);
+  if (hit.side) {
+    const i = ins.sides.findIndex((x) => x.ally === hit.side!.ally);
+    if (i >= 0) return h("span", { class: "brs-strong", style: `color: ${sideColor(ins, i)}` }, sideShort(ins, i));
+    return h("span", { class: "brs-strong" }, `Side ${hit.side.index + 1}`);
+  }
+  return h("span", { class: "brs-strong" }, "This game");
 }

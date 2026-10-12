@@ -1072,10 +1072,10 @@ const BAR_PROXY_BROWSER_SEC = 365 * 24 * 3600;
 const BAR_PROXY_MISS_SEC = 300;
 const MAP_ASSETS = new Set(["texture-mq.jpg", "texture-lq.jpg", "texture-thumb.jpg"]);
 
-async function barProxy(path: string, ifNoneMatch?: string): Promise<Response> {
+async function barProxy(path: string, ifNoneMatch?: string, base = BAR_API): Promise<Response> {
   let r: Response;
   try {
-    r = await fetch(BAR_API + path, {
+    r = await fetch(base + path, {
       cf: { cacheEverything: true, cacheTtlByStatus: { "200-299": BAR_PROXY_OK_SEC, "404": BAR_PROXY_MISS_SEC, "500-599": 0 } },
     } as RequestInit);
   } catch {
@@ -1118,6 +1118,20 @@ app.get("/api/bar/replays/:id", (c) => {
   const id = c.req.param("id");
   if (!GAME_ID_RE.test(id)) return c.text("bad game id", 400);
   return barProxy(`/replays/${id}`, c.req.header("if-none-match"));
+});
+
+// A game's DEMO (the .sdfz the BAR API names as its fileName), for the
+// summary's achievements, which read the order stream, chat and end-of-game
+// totals out of it in the browser. BAR keeps demos on OVH object storage,
+// which sends no CORS headers, so a page cannot fetch one itself. A demo
+// never changes once written, so it gets the same caching as a map. The file
+// name is checked like a map's: one path segment, re-escaped.
+const BAR_DEMOS = "https://storage.uk.cloud.ovh.net/v1/AUTH_10286efc0d334efd917d476d7183232e/BAR/demos";
+const okDemoFile = (f: string) => okMapFile(f) && f.endsWith(".sdfz");
+app.get("/api/bar/demos/:file", (c) => {
+  const file = c.req.param("file");
+  if (!okDemoFile(file)) return c.text("bad demo file", 400);
+  return barProxy(`/${encodeURIComponent(file)}`, c.req.header("if-none-match"), BAR_DEMOS);
 });
 
 // Non-R2, non-API requests reach the Worker only when no static asset matched.
