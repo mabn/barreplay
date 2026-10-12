@@ -26,7 +26,23 @@ app.onError((err, c) => {
 
 export default {
   fetch(req: Request, env: ProdDevEnv, ctx: ExecutionContext) {
-    const proxy = (r: Request) => env.PROD.fetch(r);
+    // Every call to production is logged with the page request behind it:
+    // the remote binding reports its failures as bare "Network connection
+    // lost" / "internal error; reference = ..." lines with no stack and no
+    // URL, so this is the only way to tell which request they belong to.
+    const page = `${req.method} ${new URL(req.url).pathname}`;
+    const proxy = async (r: Request) => {
+      const call = new URL(r.url).pathname;
+      const t0 = Date.now();
+      try {
+        const res = await env.PROD.fetch(r);
+        if (!res.ok) console.warn(`[prod] ${page} -> ${call}: HTTP ${res.status} (${Date.now() - t0} ms)`);
+        return res;
+      } catch (err) {
+        console.error(`[prod] ${page} -> ${call}: ${(err as Error).message} (${Date.now() - t0} ms)`);
+        throw err;
+      }
+    };
     const prodEnv = { ...env, REPLAY_INDEX: readOnlyIndex(proxy), BUCKET: readOnlyBucket(proxy) } as unknown as Env;
     return app.fetch(req, prodEnv, ctx);
   },
