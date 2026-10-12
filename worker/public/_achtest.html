@@ -152,6 +152,9 @@
     ["id", "#"], ["name", "Achievement"], ["desc", "Now: earned when…"], ["knob", "Knob"], ["now", "Per game"], ["share", "Games with it"],
     ["mtier", "Rarity now"], ["guess", "Shortlist guess"], ["est", "Planned tier"], ["sk", "Suggested knob"], ["srate", "Per game then"], ["stars", "Interest"],
   ];
+  // The cells are built in COLS order; shown with the editable ones (planned
+  // tier, interest) right after the description.
+  const SHOW = [0, 1, 2, 8, 11, 3, 4, 5, 6, 7, 9, 10];
   function render() {
     const { n, t } = targets();
     const rows = R.rules.map((r) => {
@@ -176,6 +179,7 @@
       th.onclick = () => { sortDir = k === sortKey ? -sortDir : 1; sortKey = k; render(); };
       head.append(th);
     }
+    head.replaceChildren(...SHOW.map((i) => head.children[i]));
     for (const { r, mtier, s } of rows) {
       const tr = tab.insertRow();
       const td = (html, cls) => { const c = tr.insertCell(); c.innerHTML = html; if (cls) c.className = cls; return c; };
@@ -217,6 +221,7 @@
       // No re-render while typing: that would rebuild the box under the cursor.
       cm.oninput = () => { const v = cm.value.replace(/\s*\n\s*/g, " "); if (v.trim()) notes[r.id] = v; else delete notes[r.id]; store.set("ach.notes", notes); writeGrades(); };
       st.append(cm);
+      tr.replaceChildren(...SHOW.map((i) => tr.children[i]));
     }
     writeGrades();
   }
