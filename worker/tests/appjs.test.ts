@@ -1530,6 +1530,10 @@ test('a running job shows its live progress instead of an empty row', () => {
   // the worker clears progress at exactly the moment an error appears.
   assert.equal(detailOf(trs[2]).textContent, 'host ran out of memory');
   assert.ok(detailOf(trs[2]).className.includes('error'));
+  // A failed row offers its re-sim as a button of its own; live rows do not.
+  const retryOf = (tr: any) => walk(tr).find((n: any) => n.tag === 'button' && n.className.includes('jobretrybtn'));
+  assert.equal(retryOf(trs[2])?.textContent, 'Re-sim');
+  assert.equal(retryOf(trs[0]), undefined);
 
   // The Took column has no cost to report on a running job, so it answers the
   // question that row actually raises: how much longer.

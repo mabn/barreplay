@@ -69,6 +69,9 @@ export interface IngestJob {
    * heartbeats stop moving it, though a daemon already mid-run may still
    * report a terminal state, which is recorded. */
   disabled: boolean;
+  /** A word from the worker about the row, e.g. why a pasted re-sim was
+   * recorded disabled ("Already simulated at .brp format version 6"). */
+  note: string | null;
   /** What the work cost, reported by the daemon with its terminal state — see
    * JobStats. Null until then (and for a job that predates the column). */
   stats: JobStats | null;

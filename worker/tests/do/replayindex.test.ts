@@ -1232,9 +1232,6 @@ test("the pill goes out with the job, whatever it was doing", async () => {
 test("announcing takes a game the catalog already holds", async () => {
   await inIndex((index) => {
     index.upsert(replay("onesided", { uploaderAlly: 1 }));
-    // The open door refuses it, which is right for a person pasting a link.
-    expect(index.resimEnqueue("a", "onesided").status).toBe("in-catalog");
-
     const first = index.jobAnnounce("b", "onesided", "resim");
     expect(first.status).toBe("queued");
     expect(first.job?.kind).toBe("resim");
@@ -1262,6 +1259,32 @@ test("announcing again after a failure is how a scanned game is retried", async 
     // ...and the published row it was upgrading is untouched by the failure.
     expect(index.list()).toMatchObject([{ id: "onesided", placeholder: false, processing: false }]);
     expect(index.jobAnnounce("b", "onesided", "resim").status).toBe("queued");
+  });
+});
+
+test("a pasted re-sim of an already simulated game is recorded disabled, with a note", async () => {
+  await inIndex((index) => {
+    index.upsert(replay("sim", { uploaderAlly: null, view: "full" }));
+    const res = index.resimEnqueue("a", "sim");
+    expect(res.status).toBe("in-catalog");
+    expect(res.rid).toBe("sim-abcd1234");
+    expect(index.jobGet("a")).toMatchObject({ kind: "resim", state: "pending", disabled: true, note: "Already simulated" });
+    expect(index.jobsPending("resim")).toEqual([]);
+    index.jobSetNote("a", "Already simulated at .brp format version 6");
+    expect(index.jobGet("a")?.note).toBe("Already simulated at .brp format version 6");
+    // Pasting it again hands back the held-back row rather than a second one.
+    expect(index.resimEnqueue("b", "sim")).toMatchObject({ status: "disabled", job: { id: "a" } });
+  });
+});
+
+test("a pasted re-sim of a game published only one-sided is queued for its full view", async () => {
+  await inIndex((index) => {
+    index.upsert(replay("onesided", { uploaderAlly: 1 }));
+    const announced = index.jobsPending("resim")[0]?.id;
+    const res = index.resimEnqueue("a", "onesided");
+    // The publish already announced it, so the paste gets that job back.
+    expect(res.status).toBe(announced ? "duplicate" : "queued");
+    expect(res.job?.disabled).toBe(false);
   });
 });
 
