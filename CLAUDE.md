@@ -3347,7 +3347,7 @@ run dev` in `worker/` plus `pack -upload local`.)
   ring. No fill, no per-pixel work: one path per colour bucket. When the
   paint interval averages over 33 ms it DROPS TO A SIMPLER LOOK on its own
   (the outline alone, one colour, one stroke; the down shields stay dashed, since a big fight both drains them and triggers the drop), coming back after 300 fast
-  paints, at most twice per page; `?shields=full|simple|off` pins it. Reach
+  paints, at most twice per page; `?shields=full|simple|off` pins it. The map's Layers popover has a Shields switch (shown when a def is a shield generator), the unit tooltip a one-row Shield line (charge bar + `power / full`, `? / full` without Q data, `off`), and the `?debug` FPS meter (any value) adds the shield look and its ms/paint. Reach
   and full charge come from the unit defs (`shieldRadius`/`shieldPower`,
   widget 1.10.0) else the file's SHIELD_DEFS table; the CHARGE from the
   `.brp` `Q` section (`decodeShields`, twin of snapshot/shields.go), each

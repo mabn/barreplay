@@ -3513,7 +3513,8 @@ function updateTooltip() {
     (maxHp > 0
       ? `<div class="row"><span class="label">Health</span><span>${hp} / ${maxHp}</span></div>` +
         `<div class="bar"><div style="width:${(frac * 100).toFixed(0)}%;background:${col};opacity:${ghost ? 0.55 : 1}"></div></div>`
-      : '');
+      : '') +
+    (ghost ? '' : shieldTipRow(def, id, frameNumAt(dispIdx))); // fx-shields.js
   tooltip.style.display = 'block';
   const parent = cv.parentElement.getBoundingClientRect();
   let px = mouse.x + 14, py = mouse.y + 14;
@@ -4608,6 +4609,10 @@ document.getElementById('togglehp').onchange = e => {
   showHealthBars = e.target.checked;
   scheduleDraw(); // same overlay, same reason
 };
+document.getElementById('toggleshields').onchange = e => {
+  showShields = e.target.checked; // fx-shields.js
+  scheduleDraw();
+};
 document.getElementById('togglefx').onchange = e => {
   showEffects = e.target.checked;
   if (showEffects && data && currentFile) loadEffects(currentFile, loadGen); // fetched on first use
@@ -4726,6 +4731,8 @@ async function loadReplay(id) {
   }
   // The effects switch only means something for a capture that has effects.
   document.getElementById('fxlayer').style.display = data.fxAt ? '' : 'none';
+  // ...and the shields switch for one with a shield generator among its defs.
+  document.getElementById('shieldlayer').style.display = shieldDefTable() ? '' : 'none';
   buildDefTables();
   buildCommanderDefs();
   buildDestroyedIndex();
@@ -4835,11 +4842,13 @@ async function loadMap(name, gameId) {
   draw(); // reflect the (possibly updated) map extent immediately
 }
 
-// Render-smoothness FPS monitor. Fully self-contained: when enabled (?debug=true)
+// Render-smoothness FPS monitor. Fully self-contained: when enabled (?debug, any value)
 // it drops a small overlay in the top-left of the map and runs its own
 // requestAnimationFrame loop, counting real browser animation frames (not sim
 // frames). It shows frames drawn in the last full second and in the last 5
-// seconds, each refreshed on every whole-second boundary. Nothing else in the
+// seconds, each refreshed on every whole-second boundary, plus which shield look
+// is drawn (fx-shields.js drops to the simple one when paints slow down) and the
+// average interval between the paints that drew shields. Nothing else in the
 // app references it — remove this one call and function to drop the feature.
 function startFpsMonitor() {
   const el = document.createElement('div');
@@ -4862,7 +4871,9 @@ function startFpsMonitor() {
       last5.push(frames);
       if (last5.length > 5) last5.shift();
       const fps5 = last5.reduce((a, b) => a + b, 0);
-      el.textContent = `${frames} fps\n${fps5} / 5s`;
+      const sh = window.__shieldStats;
+      const shLine = sh && sh.n ? `\nshields ${sh.level ? 'simple' : 'full'}${sh.avgPaintMs ? ', ' + sh.avgPaintMs.toFixed(0) + ' ms/paint' : ''}` : '';
+      el.textContent = `${frames} fps\n${fps5} / 5s${shLine}`;
       frames = 0;
       secStart = ts;
     }
@@ -8665,8 +8676,8 @@ async function init() {
   // before anything that consults adminMode() renders.
   await probeAdmin();
 
-  // Optional render-smoothness overlay, gated on ?debug=true.
-  if (params.get('debug') === 'true') startFpsMonitor();
+  // Optional render-smoothness overlay, on ?debug=<anything>.
+  if (params.has('debug')) startFpsMonitor();
 
   // The header title, and on a replay page the left menu's logo and the
   // header's Replays back link, return to the replay list without a page

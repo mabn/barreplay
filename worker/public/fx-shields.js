@@ -74,6 +74,7 @@ const SHIELD_MAX_DROPS = 2;     // after this many drops the simple look stays
 const SHIELD_GAP_MS = 250;
 
 const shieldPin = new URLSearchParams(location.search).get('shields'); // full | simple | off
+let showShields = true; // the map's Layers switch (app.js)
 
 // shieldRGB: BAR's ramp, brightened for a dark map — full is a pale
 // blue-white, half amber, empty red.
@@ -174,6 +175,32 @@ function shieldReading(id, simFrame) {
   return s;
 }
 
+// shieldTipRow: the unit tooltip's one-line shield reading — a charge bar
+// with the number beside it — or '' for a unit with no shield. A capture
+// without charge readings states only the full charge.
+function shieldTipRow(def, id, simFrame) {
+  const defs = shieldDefTable();
+  const d = defs && defs[def];
+  if (!d) return '';
+  const full = Math.round(d.p);
+  const rd = shieldReading(id, simFrame);
+  let text, w = 0, col = '';
+  if (!rd) {
+    text = `? / ${full}`;
+  } else {
+    const p = Math.max(0, rd.p[rd.k]);
+    const frac = Math.min(1, p / d.p);
+    w = frac * 100;
+    const [r, g, b] = shieldRGB(frac);
+    col = `rgb(${r},${g},${b})`;
+    text = rd.on[rd.k] ? `${p} / ${full}` : 'off';
+    if (!rd.on[rd.k]) col = 'rgb(140,150,160)';
+  }
+  return `<div class="row shield"><span class="label">Shield</span>` +
+    `<span class="shbar"><i style="width:${w.toFixed(0)}%;background:${col}"></i></span>` +
+    `<span>${text}</span></div>`;
+}
+
 // ---------------------------------------------------------------------------
 // Frame-rate watch: a running average of the intervals between paints that
 // drew shields; level 1 is the simple look.
@@ -202,7 +229,7 @@ function shieldWatch(now) {
 const shieldScratch = [];
 
 function drawShields(c, simFrame, u) {
-  if (shieldPin === 'off' || !u) return;
+  if (shieldPin === 'off' || !showShields || !u) return;
   const defs = shieldDefTable();
   if (!defs) return;
   const t0 = performance.now();
