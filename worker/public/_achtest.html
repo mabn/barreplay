@@ -112,7 +112,9 @@
   const stars = store.get("ach.stars", {});
   const plan = store.get("ach.tier", {});
   const notes = store.get("ach.notes", {});
-  const fmt = (x) => (x === 0 ? "0" : x >= 10 ? x.toFixed(0) : x >= 1 ? x.toFixed(1) : x >= 0.1 ? x.toFixed(2) : x >= 0.001 ? x.toFixed(3) : x.toExponential(0));
+  // A rate per game, as people read it: "1 in 53 games" under one a game,
+  // "2.3 a game" above.
+  const fmt = (x) => (!x ? "never" : x >= 1 ? `${x >= 10 ? x.toFixed(0) : x.toFixed(1)} a game` : `1 in ${Math.round(1 / x).toLocaleString("en")} games`);
   const fmtK = (k) => (Number.isInteger(k) ? String(k) : String(Math.round(k * 100) / 100));
   const desc = (r, k) => (k === undefined || k === null ? r.desc : r.desc.replace(/\{k\}/g, fmtK(k)));
   for (const r of R.rules) {
@@ -149,8 +151,8 @@
   }
   let sortKey = "now", sortDir = 1;
   const COLS = [
-    ["id", "#"], ["name", "Achievement"], ["desc", "Now: earned when…"], ["knob", "Knob"], ["now", "Per game"], ["share", "Games with it"],
-    ["mtier", "Rarity now"], ["guess", "Shortlist guess"], ["est", "Planned tier"], ["sk", "Suggested knob"], ["srate", "Per game then"], ["stars", "Interest"],
+    ["id", "#"], ["name", "Achievement"], ["desc", "Now: earned when…"], ["knob", "Knob"], ["now", "How often"], ["share", "Games with it"],
+    ["mtier", "Rarity now"], ["guess", "Shortlist guess"], ["est", "Planned tier"], ["sk", "Suggested knob"], ["srate", "How often then"], ["stars", "Interest"],
   ];
   // The cells are built in COLS order; shown with the editable ones (planned
   // tier, interest) right after the description.
@@ -165,8 +167,8 @@
     const nowBy = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }, thenBy = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
     for (const x of rows) { nowBy[x.mtier] += x.r.now; thenBy[tierOf(x.r)] += x.s ? x.s.rate : x.r.now; }
     const b = document.getElementById("budget");
-    b.innerHTML = "<tr><th>Tier</th><th>Achievements planned</th><th>Budget per game</th><th>Per achievement</th><th>Handed out now (by measured rarity)</th><th>With the suggested knobs</th></tr>" +
-      [5, 4, 3, 2, 1].map((x) => `<tr><td class="t${x}">${TIERS[x]}</td><td>${n[x]}</td><td>${BUDGET[x]}</td><td>${fmt(t[x])}</td><td>${fmt(nowBy[x])}</td><td>${fmt(thenBy[x])}</td></tr>`).join("") +
+    b.innerHTML = "<tr><th>Tier</th><th>Achievements planned</th><th>Budget</th><th>Per achievement</th><th>Handed out now (by measured rarity)</th><th>With the suggested knobs</th></tr>" +
+      [5, 4, 3, 2, 1].map((x) => `<tr><td class="t${x}">${TIERS[x]}</td><td>${n[x]}</td><td>${fmt(BUDGET[x])}</td><td>${fmt(t[x])}</td><td>${fmt(nowBy[x])}</td><td>${fmt(thenBy[x])}</td></tr>`).join("") +
       `<tr><td class="t0">never earned</td><td></td><td></td><td></td><td>${R.rules.filter((r) => !r.now).length} achievements</td><td></td></tr>`;
     const key = (x) => ({ id: x.r.id, name: x.r.name, desc: x.r.desc, knob: x.r.knob?.value ?? -1, now: x.r.now, share: x.r.share[x.r.i0], mtier: x.mtier * 10 + x.r.now, guess: x.r.est, est: tierOf(x.r), sk: x.s?.k ?? -1, srate: x.s?.rate ?? -1, stars: stars[x.r.id] ?? 0 }[sortKey]);
     rows.sort((a, c) => { const p = key(a), q = key(c); return (typeof p === "string" ? p.localeCompare(q) : p - q) * sortDir; });
@@ -261,7 +263,7 @@
     render();
   };
   document.getElementById("tunenote").textContent =
-    `Measured over ${R.games} lava games since ${R.since} (${R.players} player-games), from their demos. "Per game" is how many times it is awarded per game at its current knob; ` +
+    `Measured over ${R.games} lava games since ${R.since} (${R.players} player-games), from their demos. "How often" is how often it is awarded at its current knob, counting every award (two players earning it in one game is two); ` +
     `"Rarity now" is the tier whose per-achievement budget that rate is nearest. "Planned tier" starts from today's order (the rarest fifth legendary, the next fifth epic, and so on; "Shortlist guess" is the guess made before any game was checked); change it and the suggested knob follows: ` +
     `the swept value (0.1x to 10x the current one) whose measured rate is nearest the tier's per-achievement budget. ↑ means a bigger knob is harder, ↓ a smaller one. ` +
     `Rates in orange are over 2x off their target even at the best knob. Build-order achievements could be judged in ${R.games - R.noDefs} of the games (the rest had no matching unit table).`;
