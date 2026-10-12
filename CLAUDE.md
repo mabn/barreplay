@@ -3346,7 +3346,7 @@ run dev` in `worker/` plus `pack -upload local`.)
   generator; a drained or switched-off shield leaves the outline as a dashed
   ring. No fill, no per-pixel work: one path per colour bucket. When the
   paint interval averages over 33 ms it DROPS TO A SIMPLER LOOK on its own
-  (the outline alone, one colour, one stroke), coming back after 300 fast
+  (the outline alone, one colour, one stroke; the down shields stay dashed, since a big fight both drains them and triggers the drop), coming back after 300 fast
   paints, at most twice per page; `?shields=full|simple|off` pins it. Reach
   and full charge come from the unit defs (`shieldRadius`/`shieldPower`,
   widget 1.10.0) else the file's SHIELD_DEFS table; the CHARGE from the

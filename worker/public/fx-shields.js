@@ -247,8 +247,8 @@ function drawShields(c, simFrame, u) {
 // drawShieldOutline: per shield, the arcs NOT inside another live shield of
 // its ally team, so overlapping shields read as one outline round the
 // protected area. Simple: those arcs in one colour, one stroke. Otherwise a
-// dark halo under them (one path), one path per charge bucket, and the down
-// shields dashed.
+// dark halo under them (one path), one path per charge bucket. Both then draw
+// the down shields dashed (drawDownShields).
 function drawShieldOutline(c, S, n, simple) {
   const TAU = Math.PI * 2;
   const arcs = []; // [k, a0, a1]
@@ -301,6 +301,7 @@ function drawShieldOutline(c, S, n, simple) {
     c.lineWidth = SHIELD_LINE_PX;
     c.strokeStyle = 'rgba(190,215,240,0.8)';
     if (path(-1)) c.stroke();
+    drawDownShields(c, S, n);
     return;
   }
   // dark halo under every arc so the line reads on any terrain
@@ -314,7 +315,16 @@ function drawShieldOutline(c, S, n, simple) {
     c.strokeStyle = `rgba(${r},${g},${bl},0.9)`;
     c.stroke();
   }
-  // Down shields, dashed: red when drained, grey when switched off.
+  drawDownShields(c, S, n);
+}
+
+// drawDownShields: the shields that protect nothing right now, dashed — red
+// when drained, grey when switched off. Both looks draw them: they are the
+// ones a big fight produces, so the simple look (which a big fight is what
+// triggers) leaving them out made the shields seem to vanish exactly then.
+function drawDownShields(c, S, n) {
+  const TAU = Math.PI * 2;
+  c.lineWidth = SHIELD_LINE_PX;
   c.setLineDash([6, 6]);
   for (const off of [false, true]) {
     let any = false;
