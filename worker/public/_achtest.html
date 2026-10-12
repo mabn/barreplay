@@ -113,10 +113,15 @@
   const fmtK = (k) => (Number.isInteger(k) ? String(k) : String(Math.round(k * 100) / 100));
   const desc = (r, k) => (k === undefined || k === null ? r.desc : r.desc.replace(/\{k\}/g, fmtK(k)));
   for (const r of R.rules) {
-    r.i0 = r.ks.findIndex((k) => (r.knob ? Math.abs(k - r.knob.value) < 1e-9 : true));
-    r.now = r.perGame[r.i0];
+    r.i0 = r.knob ? r.ks.reduce((b, k, i) => (Math.abs(k - r.knob.value) < Math.abs(r.ks[b] - r.knob.value) ? i : b), 0) : 0;
+    r.now = r.perGame[r.i0] ?? 0;
   }
-  const tierOf = (r) => plan[r.id] ?? r.est;
+  // The default plan keeps each achievement's place in today's order: the
+  // rarest fifth legendary, the next epic, ... the most common fifth common.
+  // The shortlist's own guess is its own column.
+  const order = [...R.rules].sort((a, b) => a.now - b.now || a.id - b.id);
+  order.forEach((r, i) => { r.byRank = 5 - Math.floor((5 * i) / order.length); });
+  const tierOf = (r) => plan[r.id] ?? r.byRank;
   /** Per-achievement target rate: the tier's budget shared by its members. */
   function targets() {
     const n = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
@@ -142,7 +147,7 @@
   let sortKey = "now", sortDir = 1;
   const COLS = [
     ["id", "#"], ["name", "Achievement"], ["desc", "Now: earned when…"], ["knob", "Knob"], ["now", "Per game"], ["share", "Games with it"],
-    ["mtier", "Rarity now"], ["est", "Planned tier"], ["sk", "Suggested knob"], ["srate", "Per game then"], ["stars", "Interest"],
+    ["mtier", "Rarity now"], ["guess", "Shortlist guess"], ["est", "Planned tier"], ["sk", "Suggested knob"], ["srate", "Per game then"], ["stars", "Interest"],
   ];
   function render() {
     const { n, t } = targets();
@@ -157,7 +162,7 @@
     b.innerHTML = "<tr><th>Tier</th><th>Achievements planned</th><th>Budget per game</th><th>Per achievement</th><th>Handed out now (by measured rarity)</th><th>With the suggested knobs</th></tr>" +
       [5, 4, 3, 2, 1].map((x) => `<tr><td class="t${x}">${TIERS[x]}</td><td>${n[x]}</td><td>${BUDGET[x]}</td><td>${fmt(t[x])}</td><td>${fmt(nowBy[x])}</td><td>${fmt(thenBy[x])}</td></tr>`).join("") +
       `<tr><td class="t0">never earned</td><td></td><td></td><td></td><td>${R.rules.filter((r) => !r.now).length} achievements</td><td></td></tr>`;
-    const key = (x) => ({ id: x.r.id, name: x.r.name, desc: x.r.desc, knob: x.r.knob?.value ?? -1, now: x.r.now, share: x.r.share[x.r.i0], mtier: x.mtier * 10 + x.r.now, est: tierOf(x.r), sk: x.s?.k ?? -1, srate: x.s?.rate ?? -1, stars: stars[x.r.id] ?? 0 }[sortKey]);
+    const key = (x) => ({ id: x.r.id, name: x.r.name, desc: x.r.desc, knob: x.r.knob?.value ?? -1, now: x.r.now, share: x.r.share[x.r.i0], mtier: x.mtier * 10 + x.r.now, guess: x.r.est, est: tierOf(x.r), sk: x.s?.k ?? -1, srate: x.s?.rate ?? -1, stars: stars[x.r.id] ?? 0 }[sortKey]);
     rows.sort((a, c) => { const p = key(a), q = key(c); return (typeof p === "string" ? p.localeCompare(q) : p - q) * sortDir; });
     const tab = document.getElementById("achtab");
     tab.innerHTML = "";
@@ -174,15 +179,18 @@
       td(r.id, "num");
       td(`<b>${r.name}</b><br><span class="t0">${r.need}</span>`);
       const skips = Object.entries(r.skips || {}).map(([w, c]) => `skipped in ${c} games: ${w}`).join("; ");
-      td(desc(r, r.knob?.value) + (skips ? `<br><span class="t0">${skips}</span>` : ""), "desc");
+      const s0 = suggest(r, targets().t[tierOf(r)]);
+      const then = s0 && s0.k !== r.knob.value ? `<br><span class="new">Suggested: ${desc(r, s0.k)}</span>` : "";
+      td(desc(r, r.knob?.value) + then + (skips ? `<br><span class="t0">${skips}</span>` : ""), "desc");
       td(r.knob ? fmtK(r.knob.value) + (r.knob.harder > 0 ? " ↑" : " ↓") : "—", "num").title = r.knob ? (r.knob.harder > 0 ? "a bigger value is harder" : "a smaller value is harder") : "no number to tune";
       td(fmt(r.now), "num");
       td(`${Math.round(100 * r.share[r.i0])}%`, "num");
       td(TIERS[mtier] || "never", `t${mtier}`);
+      td(TIERS[r.est], `t${r.est}`);
       const sel = document.createElement("select");
-      for (const x of [5, 4, 3, 2, 1]) sel.add(new Option(TIERS[x] + (x === r.est ? " (estimate)" : ""), x, false, x === tierOf(r)));
+      for (const x of [5, 4, 3, 2, 1]) sel.add(new Option(TIERS[x], x, false, x === tierOf(r)));
       sel.className = `t${tierOf(r)}`;
-      sel.onchange = () => { plan[r.id] = Number(sel.value); if (plan[r.id] === r.est) delete plan[r.id]; store.set("ach.tier", plan); render(); };
+      sel.onchange = () => { plan[r.id] = Number(sel.value); if (plan[r.id] === r.byRank) delete plan[r.id]; store.set("ach.tier", plan); render(); };
       tr.insertCell().append(sel);
       if (!s) td("—", "num").title = "no knob";
       else {
@@ -206,7 +214,7 @@
   }
   document.getElementById("tunenote").textContent =
     `Measured over ${R.games} lava games since ${R.since} (${R.players} player-games), from their demos. "Per game" is how many times it is awarded per game at its current knob; ` +
-    `"Rarity now" is the tier whose per-achievement budget that rate is nearest. "Planned tier" starts at the shortlist's estimate; change it and the suggested knob follows: ` +
+    `"Rarity now" is the tier whose per-achievement budget that rate is nearest. "Planned tier" starts from today's order (the rarest fifth legendary, the next fifth epic, and so on; "Shortlist guess" is the guess made before any game was checked); change it and the suggested knob follows: ` +
     `the swept value (0.1x to 10x the current one) whose measured rate is nearest the tier's per-achievement budget. ↑ means a bigger knob is harder, ↓ a smaller one. ` +
     `Rates in orange are over 2x off their target even at the best knob. Build-order achievements could be judged in ${R.games - R.noDefs} of the games (the rest had no matching unit table).`;
   render();

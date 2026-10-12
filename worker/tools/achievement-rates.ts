@@ -2,7 +2,10 @@
 // as its knob turns: the data behind tuning rarity. Reads demos already on
 // disk (the browser's own parser, demo.ts), so it is run once over a folder:
 //
-//   npx tsx tools/achievement-rates.ts <dir> > rates.json
+//   npx tsx tools/achievement-rates.ts <dir> [i/n] > rates.json
+//
+// i/n judges only every n-th game from the i-th (0-based), so n processes can
+// share the work; their outputs add up (the counts are sums).
 //
 // <dir> holds games.json ([{id, version, map: {w, h} | null}]), demos/<id>.sdfz,
 // tables/<version>__<anything>.json (a unit-def id -> name table read off a
@@ -27,7 +30,8 @@ interface Game { id: string; version: string; map: { w: number; h: number } | nu
 
 const dir = process.argv[2];
 if (!dir) throw new Error("usage: achievement-rates.ts <dir>");
-const games = JSON.parse(readFileSync(join(dir, "games.json"), "utf8")) as Game[];
+const [shard, shards] = (process.argv[3] ?? "0/1").split("/").map(Number);
+const games = (JSON.parse(readFileSync(join(dir, "games.json"), "utf8")) as Game[]).filter((_, i) => i % shards === shard);
 
 const props = JSON.parse(readFileSync(join(dir, "props.json"), "utf8")) as Record<string, BrpDef>;
 const tables = readdirSync(join(dir, "tables")).map((f) => ({
@@ -74,7 +78,8 @@ function pickDefs(demo: Demo, version: string): { defs: Map<number, BrpDef> | nu
 const ladders = new Map(RULES.map((r) => {
   const kn = r.knob;
   if (!kn) return [r.id, [NaN]];
-  const ks = STEPS.map((m) => (kn.int ? Math.max(1, Math.round(kn.value * m)) : kn.value * m));
+  // A knob at zero (a rank) cannot be scaled: try small whole steps instead.
+  const ks = kn.value === 0 ? [0, 1, 2, 3, 4, 5, 7, 10] : STEPS.map((m) => (kn.int ? Math.max(1, Math.round(kn.value * m)) : kn.value * m));
   return [r.id, [...new Set(ks)].sort((a, b) => a - b)];
 }));
 
