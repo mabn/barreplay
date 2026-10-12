@@ -79,15 +79,26 @@ class FakeIndex {
       stats: null,
       progress: null,
       disabled: false,
+      note: null,
       createdUnix: 0,
       updatedUnix: 0,
     });
   }
   // Both refusals plus the insert, in one call, exactly as the real DO does
   // them — it is single-threaded, which is what makes them atomic there.
-  resimEnqueue(id: string, gameId: string): { status: string; job: IngestJob | null } {
-    if (this.entries.has(gameId)) return { status: "in-catalog", job: null };
-    return this.jobAnnounce(id, gameId, "resim");
+  // (The real DO also queues a game published only one-sided; this fake's
+  // entries are all treated as simulated.)
+  resimEnqueue(id: string, gameId: string): { status: string; job: IngestJob | null; rid?: string | null } {
+    if (!this.entries.has(gameId)) return this.jobAnnounce(id, gameId, "resim");
+    const res = this.jobAnnounce(id, gameId, "resim");
+    if (res.status !== "queued" || !res.job) return res;
+    res.job.disabled = true;
+    res.job.note = "Already simulated";
+    return { status: "in-catalog", job: res.job, rid: this.entries.get(gameId)?.rid ?? gameId };
+  }
+  jobSetNote(id: string, note: string | null): void {
+    const j = this.jobs.get(id);
+    if (j) j.note = note;
   }
   // The same thing WITHOUT the catalog refusal: work the daemon found for
   // itself, every candidate of which is in the catalog by definition.
@@ -275,10 +286,12 @@ class FakeBucket {
       truncated: false,
     };
   }
-  async get(key: string): Promise<unknown> {
-    const v = this.objects.get(key);
+  async get(key: string, opts?: { range?: { offset: number; length: number } }): Promise<unknown> {
+    let v = this.objects.get(key);
     if (!v) return null;
-    return { size: v.length, httpEtag: '"test"', writeHttpMetadata: () => {}, body: v, range: undefined };
+    if (opts?.range) v = v.subarray(opts.range.offset, opts.range.offset + opts.range.length);
+    const bytes = v;
+    return { arrayBuffer: async () => bytes.slice().buffer, size: v.length, httpEtag: '"test"', writeHttpMetadata: () => {}, body: v, range: undefined };
   }
 }
 
@@ -501,6 +514,7 @@ test("GET /api/admin/queue lists jobs for the viewer without the archive key", a
         stats: null,
         progress: null,
         disabled: false,
+        note: null,
         // Neither the catalog nor the mirror knows this id in the fake, which
         // is what a private-lobby upload looks like.
         game: null,
@@ -850,13 +864,38 @@ test("POST /api/admin/resim refuses what it cannot or should not run", async (t)
   const miss = await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: unknown }) }, env);
   assert.equal(miss.status, 404);
 
-  // Already published: re-simulating would mostly repeat a capture that exists.
-  await app.request(`/api/replays/${RESIM_ID}`, { method: "PUT", body: JSON.stringify({ durationSec: 60 }) }, env);
-  const dup = await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env);
-  assert.equal(dup.status, 409);
-  assert.equal((await asJson(dup)).gameId, RESIM_ID);
-
   assert.equal(index.jobs.size, 0, "no refusal may leave a job behind");
+});
+
+test("POST /api/admin/resim records an already simulated game as a disabled job with its .brp version", async (t) => {
+  const { env, index, bucket } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  await app.request(`/api/replays/${RESIM_ID}`, { method: "PUT", body: JSON.stringify({ durationSec: 60 }) }, env);
+  const rid = index.entries.get(RESIM_ID)?.rid ?? RESIM_ID;
+  await bucket.put(`replays/${rid}.brp`, new Uint8Array([0x42, 0x52, 0x50, 0x31, 6, 0x4d]));
+
+  const res = await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env);
+  assert.equal(res.status, 200);
+  const body = await asJson(res);
+  assert.equal(body.status, "in-catalog");
+  assert.equal(body.note, "Already simulated at .brp format version 6");
+  const job = index.jobs.get(body.job);
+  assert.equal(job?.disabled, true, "recorded, not run");
+  assert.equal(job?.note, "Already simulated at .brp format version 6");
+
+  // Pasting it again hands back the same held-back row.
+  const again = await asJson(await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env));
+  assert.equal(index.jobs.size, 1);
+  assert.equal(again.error !== undefined, true);
+});
+
+test("POST /api/admin/resim leaves the version out when no .brp can be read", async (t) => {
+  const { env, index } = makeEnv();
+  stubBarApi(t, new Set([RESIM_ID]));
+  await app.request(`/api/replays/${RESIM_ID}`, { method: "PUT", body: JSON.stringify({ durationSec: 60 }) }, env);
+  const body = await asJson(await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env));
+  assert.equal(body.note, "Already simulated");
+  assert.equal(index.jobs.get(body.job)?.note, "Already simulated");
 });
 
 test("POST /api/admin/resim with force queues a published game", async (t) => {
@@ -1304,11 +1343,9 @@ test("a job's healthcheck history is served on its own route", async (t) => {
 });
 
 // The daemon's catalog scan re-simulates games whose only upload is one-sided.
-// Every one of those is already IN the catalog, so /api/admin/resim refuses them all
-// — right for a person pasting a link, wrong for work that is already running.
-// Announcing is the door for it, and it is guarded because it is the one path
+// Every one of those is already IN the catalog. Announcing is the door for it, and it is guarded because it is the one path
 // into the job table with no refusals behind it.
-test("a daemon can announce work it found itself, which /api/admin/resim would refuse", async (t) => {
+test("a daemon can announce work it found itself", async (t) => {
   const { env, index } = makeEnv("s3cret");
   const auth = { Authorization: "Bearer s3cret" };
   const post = (body: unknown, headers = auth) =>
@@ -1316,12 +1353,6 @@ test("a daemon can announce work it found itself, which /api/admin/resim would r
 
   // The game is published, one-sided: exactly a scan candidate.
   index.upsert({ id: RESIM_ID, uploaderAlly: 1 } as ReplayEntry);
-  stubBarApi(t, new Set([RESIM_ID]));
-  assert.equal(
-    (await app.request("/api/admin/resim", { method: "POST", body: JSON.stringify({ link: RESIM_ID }) }, env)).status,
-    409,
-    "the open door refuses it as published",
-  );
 
   assert.equal((await post({ gameId: RESIM_ID }, {} as never)).status, 401, "and this one needs the token");
 

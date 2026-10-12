@@ -1709,7 +1709,13 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           cannot degrade past a missing demo, the demo IS the simulation input;
                           the fetch copies /refresh-settings' handling and lives in the ROUTE,
                           not the DO, so the node tests can stub globalThis.fetch); a game
-                          already in the catalog (409); and a game already queued or running,
+                          ALREADY SIMULATED (a full view in the catalog; one published only
+                          one-sided is queued normally) is not refused but RECORDED as a
+                          DISABLED job whose `note` (jobs.note) says "Already simulated at
+                          .brp format version N" — N read off the full view's file header
+                          (brpFormatVersion, a 5-byte Range read; omitted when unreadable) —
+                          so it shows on the queue page and enabling it is how to have it
+                          re-simulated anyway; and a game already queued or running,
                           which returns THAT job (so re-pasting a link is harmless rather than a
                           second hour of work). The catalog check, the duplicate check and the
                           insert are ONE DO call (resimEnqueue) — the DO is single-threaded, so
@@ -2419,7 +2425,9 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           spotting down a column of red rows, since it is a fact about the host
                           rather than a verdict on the replay. A kind the page has no label for
                           renders as a plain error, exactly as an unclassified failure does.
-                          The row's last cell is the ACTION MENU (actionCell): one ⋯ button
+                          The row's last cell is the ACTION MENU (actionCell; a FAILED row also
+                          gets its retry as an always-lit button beside it, "Re-sim" for a
+                          re-simulation): one ⋯ button
                           opening a dropdown (one open at a time, closeJobMenus on any other
                           click or Escape) with what can be done to the job. Disable/Enable
                           (setJobDisabled -> POST /api/admin/jobs/<id>/disabled, see the worker

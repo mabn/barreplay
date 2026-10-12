@@ -417,6 +417,24 @@ app.post("/api/upload", async (c) => {
   return c.json({ job, gameId: p.gameId, streamKey });
 });
 
+// brpFormatVersion reads the container version byte of a published revision:
+// "BRP1"/"BRW1" then one version byte, so a 5-byte Range read. Null when the
+// revision has neither file or the bytes are not one of ours.
+async function brpFormatVersion(bucket: R2Bucket, rid: string): Promise<number | null> {
+  for (const ext of [".brp", ".brw"]) {
+    try {
+      const obj = await bucket.get(`replays/${rid}${ext}`, { range: { offset: 0, length: 5 } });
+      if (!obj) continue;
+      const b = new Uint8Array(await obj.arrayBuffer());
+      const magic = String.fromCharCode(...b.subarray(0, 4));
+      if (b.length === 5 && (magic === "BRP1" || magic === "BRW1")) return b[4];
+    } catch {
+      // best-effort: the note just omits the version
+    }
+  }
+  return null;
+}
+
 // Queue a game NOBODY RECORDED for headless re-simulation, from a pasted
 // replay link. This is the only way into the pipeline for a game with no
 // .brepstream behind it: `bringest -resim` otherwise finds work by scanning
@@ -429,7 +447,8 @@ app.post("/api/upload", async (c) => {
 // engine time each is exactly what the refusals cannot price. The refusals
 // stay, since they are still right: the id has to parse, the BAR API has to know the game (a re-sim
 // cannot degrade past a missing demo the way an upload can — the demo IS the
-// simulation input), the game must not already be published, and a second
+// simulation input), a game already simulated (a full view published) is RECORDED as a disabled
+// job with a note naming the .brp format version it was simulated at, and a second
 // request for a game already queued returns the job that exists rather than
 // making another.
 app.post("/api/admin/resim", async (c) => {
@@ -466,7 +485,12 @@ app.post("/api/admin/resim", async (c) => {
   const index = indexStub(c.env);
   const res = force ? await index.jobAnnounce(crypto.randomUUID(), gameId, "resim") : await index.resimEnqueue(crypto.randomUUID(), gameId);
   if (res.status === "in-catalog") {
-    return c.json({ error: "this game is already published", gameId, status: res.status }, 409);
+    // Recorded rather than refused: the job is on the queue page, disabled,
+    // saying why — enabling it is how an admin asks for the re-sim anyway.
+    const version = res.rid ? await brpFormatVersion(c.env.BUCKET, res.rid) : null;
+    const note = version === null ? "Already simulated" : `Already simulated at .brp format version ${version}`;
+    if (res.job) await index.jobSetNote(res.job.id, note);
+    return c.json({ job: res.job?.id ?? null, gameId, status: res.status, note });
   }
   if (res.status === "disabled") {
     return c.json(
@@ -574,9 +598,9 @@ app.get("/api/insights/connect", async (c) => {
 app.get("/api/jobs/:id", async (c) => {
   const job = await indexStub(c.env).jobGet(c.req.param("id"));
   if (!job) return c.json({ error: "unknown job" }, 404);
-  const { id, gameId, kind, state, error, errorKind, stats, progress, disabled, createdUnix, updatedUnix } = job;
+  const { id, gameId, kind, state, error, errorKind, stats, progress, disabled, note, createdUnix, updatedUnix } = job;
   return c.json(
-    { id, gameId, kind, state, error, errorKind, stats, progress, disabled, createdUnix, updatedUnix },
+    { id, gameId, kind, state, error, errorKind, stats, progress, disabled, note, createdUnix, updatedUnix },
     200,
     {
       "cache-control": "no-cache",
@@ -625,7 +649,7 @@ app.get("/api/admin/queue", async (c) => {
   return c.json(
     {
       jobs: page.jobs.map(
-        ({ id, gameId, kind, state, error, errorKind, stats, progress, disabled, game, createdUnix, updatedUnix }) => ({
+        ({ id, gameId, kind, state, error, errorKind, stats, progress, disabled, note, game, createdUnix, updatedUnix }) => ({
           id,
           gameId,
           kind,
@@ -635,6 +659,7 @@ app.get("/api/admin/queue", async (c) => {
           stats,
           progress,
           disabled,
+          note,
           // What the game IS, joined on by the DO — the jobs table itself knows
           // only an id, and a queue of bare ids says nothing about what the
           // pipeline is actually spending its hour on.

@@ -6872,7 +6872,8 @@ function runEstimate(p) {
 //   Disable/Enable — hold the job back, or let it go again (pending or
 //     running jobs; a disabled one always, so it can be let go).
 //   Retry — queue the same work again under a fresh id (finished or failed
-//     jobs; a live one already covers the work). The old row stays as the
+//     jobs; a live one already covers the work). A failed job also shows it
+//     as a button beside the menu ("Re-sim" for a re-simulation). The old row stays as the
 //     record of the attempt. A FAILED re-sim has no other door from the
 //     browser: the paste box refuses its game once it has a job row.
 // A menu rather than a row of buttons because the entries grew past one and
@@ -6904,6 +6905,17 @@ function actionCell(j) {
     });
   }
   if (items.length === 0) return td;
+  // A FAILED job also gets its retry as a button of its own, beside the menu:
+  // it is the one action a red row is usually waiting for.
+  if (j.state === 'error') {
+    const rb = document.createElement('button');
+    rb.type = 'button';
+    rb.className = 'jobbtn jobretrybtn';
+    rb.textContent = j.kind === 'resim' ? 'Re-sim' : 'Retry';
+    rb.title = items.find(it => it.label === 'Retry').title;
+    rb.onclick = (ev) => { ev.stopPropagation(); retryJob(j, rb); };
+    td.appendChild(rb);
+  }
   const b = document.createElement('button');
   b.type = 'button';
   b.className = 'jobbtn jobmenubtn' + (j.disabled ? ' on' : '');
@@ -7151,7 +7163,9 @@ function renderQueue(errMsg) {
     // Detail says what went wrong, or — while the job is alive — what it is
     // doing. The two cannot collide: progress is cleared the moment a job
     // reaches a terminal state, which is the same moment an error appears.
-    const detail = cell(j.error || null, 'detail');
+    // A note (the worker's word on why a row looks the way it does, e.g. a
+    // pasted re-sim of a game already simulated) fills it when neither does.
+    const detail = cell(j.error || (j.progress ? null : j.note) || null, 'detail');
     if (j.error) detail.classList.add('error');
     else if (j.progress) fillProgressCell(detail, j.progress);
     tr.appendChild(actionCell(j));
@@ -8022,6 +8036,13 @@ async function submitResim() {
     return;
   }
   input.value = '';
+  if (resp.status === 'in-catalog') {
+    // Recorded, not run: the row is on the queue page, disabled, carrying
+    // the note. Enabling it there is how to have it re-simulated anyway.
+    resimStatus(`${resp.gameId}: ${resp.note || 'already simulated'} — added to the queue disabled; enable it to re-simulate anyway.`, 'ok');
+    refreshQueue();
+    return;
+  }
   resimStatus(resp.status === 'duplicate'
     ? `${resp.gameId} is already queued — following that request.`
     : `${resp.gameId} queued for re-simulation — this takes the engine host a while.`, 'ok');

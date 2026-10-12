@@ -176,7 +176,7 @@ export const JOB_SAMPLE_RETENTION_SEC = 30 * 24 * 60 * 60;
 
 /** Columns every jobs SELECT reads, in the order jobRow expects. */
 const JOB_COLS =
-  "id, stream_key, game_id, kind, state, error, error_kind, stats, progress, disabled, " +
+  "id, stream_key, game_id, kind, state, error, error_kind, stats, progress, disabled, note, " +
   "created_unix, updated_unix";
 
 /** The same columns qualified to `j`, for the one query that joins the jobs
@@ -194,6 +194,9 @@ const JOB_COLS_J = JOB_COLS.split(", ")
 export type JobEnqueue = {
   status: "queued" | "duplicate" | "disabled" | "in-catalog";
   job: IngestJob | null;
+  /** "in-catalog" only: the revision holding the game's full view, so the
+   * caller can read which .brp format version it was simulated at. */
+  rid?: string | null;
 };
 
 /** How long a MATCHED lobby observation is kept before pruning. Its payload
@@ -244,7 +247,7 @@ const DERIVED_VERSION = 3;
  * whether the DDL needs to run at all — a read, where the DDL statements are
  * write-classified even as no-ops. BUMP THIS whenever SCHEMA_DDL, INDEX_DDL
  * or ADDED_COLUMNS change, or the change never reaches a deployed database. */
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 /** Everything migrateSchema creates, split from the code so schemaCurrent can
  * scan the same text it executes (one source, nothing to drift). */
@@ -497,6 +500,10 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   // is null for every job that has not failed and for every failure with no
   // name, which is most of them.
   ["jobs", "error_kind TEXT"],
+  // A word from the worker about why the row looks the way it does, e.g. a
+  // pasted re-sim of a game already simulated, recorded disabled. Nullable:
+  // almost no job has one.
+  ["jobs", "note TEXT"],
   // Added after the other sample columns: a run's remaining-time estimate was
   // reported from the start but only ever overwritten in place, so the rows
   // written before this have none and chart as a gap.
@@ -1746,25 +1753,41 @@ export class ReplayIndex extends DurableObject<Env> {
     );
   }
 
-  /** resimEnqueue takes a re-simulation request for one game, refusing it when
-   * there is nothing to gain. Both checks and the insert happen in here, in one
-   * RPC, so two people pasting the same link at the same moment cannot both
-   * queue an hour of engine time.
+  /** resimEnqueue takes a re-simulation request for one game. Both checks and
+   * the insert happen in here, in one RPC, so two people pasting the same link
+   * at the same moment cannot both queue an hour of engine time.
    *
-   * "in-catalog": the game is already published, so re-simulating it would
-   * replace a capture that exists with one that mostly repeats it.
-   * "duplicate": a re-sim of this game is already queued or running — the
-   * caller gets that job back, which makes re-pasting a link harmless. */
-  resimEnqueue(id: string, gameId: string): JobEnqueue {
+   * "in-catalog": the game already has a FULL VIEW published (a re-sim or a
+   * spectator's capture), so re-simulating it would mostly repeat it. The
+   * request is not thrown away: it lands as a DISABLED job carrying `note`,
+   * so it is on the queue page and an admin who wants it anyway enables it.
+   * The answer carries the full view's rid, for the caller to name the .brp
+   * format version in the note (jobSetNote). A game published only from a
+   * playing client's side still wants its full view and is queued normally.
+   * "duplicate"/"disabled": a re-sim of this game is already queued or
+   * running (or held back) — the caller gets that job back, which makes
+   * re-pasting a link harmless. */
+  resimEnqueue(id: string, gameId: string, note = "Already simulated"): JobEnqueue {
     // `placeholder = 0`: a row that only exists because the game is being
     // worked on right now is not a reason to refuse — "already published" would
-    // be a lie, and the duplicate check just below is the honest answer, which
-    // hands back the job doing the work.
+    // be a lie, and the duplicate check in jobAnnounce is the honest answer,
+    // which hands back the job doing the work.
     const known = this.ctx.storage.sql
-      .exec(`SELECT 1 FROM replays WHERE id = ? AND placeholder = 0`, gameId)
+      .exec(`SELECT rid, uploads, uploader_ally FROM replays WHERE id = ? AND placeholder = 0`, gameId)
       .toArray();
-    if (known.length > 0) return { status: "in-catalog", job: null };
-    return this.jobAnnounce(id, gameId, "resim");
+    if (known.length === 0) return this.jobAnnounce(id, gameId, "resim");
+    const uploads: UploadRef[] | null = known[0].uploads != null ? JSON.parse(known[0].uploads as string) : null;
+    if (wantsFullView(known[0].uploader_ally as number | null, uploads)) return this.jobAnnounce(id, gameId, "resim");
+    const res = this.jobAnnounce(id, gameId, "resim");
+    if (res.status !== "queued") return res;
+    this.ctx.storage.sql.exec(`UPDATE jobs SET disabled = 1, note = ? WHERE id = ?`, note, id);
+    const full = (uploads ?? []).filter((u) => u.ally === null).pop();
+    return { status: "in-catalog", job: this.jobGet(id), rid: full?.rid ?? (known[0].rid as string | null) ?? gameId };
+  }
+
+  /** jobSetNote replaces one job's note (null clears it). */
+  jobSetNote(id: string, note: string | null): void {
+    this.ctx.storage.sql.exec(`UPDATE jobs SET note = ? WHERE id = ?`, note, id);
   }
 
   /** jobAnnounce records work a DAEMON found for itself, so that it has a job
@@ -2594,6 +2617,7 @@ function jobRow(r: Record<string, unknown>): IngestJob {
     // terminal state), so null here is the normal case, not a gap.
     progress: parseStored(r.progress as string | null, parseJobProgress),
     disabled: (r.disabled as number | null) === 1,
+    note: (r.note as string | null) ?? null,
     createdUnix: r.created_unix as number,
     updatedUnix: r.updated_unix as number,
   };
