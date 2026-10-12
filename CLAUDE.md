@@ -1397,7 +1397,9 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           predating the recorder fields — and most rows are the last case, which
                           nothing can derive after the fact. It is set two ways. A PUBLISHING
                           PUT states it when the capture knows: viz.BuildCatalogEntry fills it
-                          from the .brp's Meta.Recorder ("full" when Spectator, else "ally" +
+                          from the .brp's Meta.Recorder ("full" when a spectator who kept full view on
+                          the whole game — RecorderInfo.SawAll, read off the GAME line's fullView and
+                          the stream's "view" facts (widget >= 1.10.1) — else "ally" +
                           uploaderAlly), and a re-sim — whose capture has no recorder record at
                           all, since only the live uploader widget writes one — declares "full"
                           through packer.UploadOptions.View (set by bringest -resim), without

@@ -3,6 +3,7 @@ package capture
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -141,6 +142,57 @@ func TestConsumeWidgetBuildPartialAndAbsent(t *testing.T) {
 	resim, _ := consumeBrep(t, newBrepEnc(`BRSNAP GAME {"protocol":4,"widgetVersion":"1.8.0","mode":"live","resim":true}`+"\nBRSNAP READY\n"), snapshot.Meta{})
 	if resim.meta.Widget != nil || resim.meta.Recorder != nil {
 		t.Errorf("re-sim capture recorded widget %+v / recorder %+v, want neither", resim.meta.Widget, resim.meta.Recorder)
+	}
+}
+
+// A spectator sees every team only while full view is on. One who watched
+// through a single side's eyes — from the start, or for part of the game — has
+// a one-sided capture, and must not be published as the full view that would
+// take the game's main name and stop its re-simulation being queued.
+func TestConsumeSpectatorView(t *testing.T) {
+	game := func(extra string) string {
+		return `BRSNAP GAME {"protocol":6,"widgetVersion":"1.10.1","mode":"live","playerID":4,"allyTeam":0,"spectator":true` + extra + "}\nBRSNAP READY\n"
+	}
+	view := func(e *brepEnc, f int, spec, full bool, ally int) {
+		e.record('G', []byte(fmt.Sprintf(`{"k":"view","f":%d,"spec":%t,"full":%t,"ally":%d}`, f, spec, full, ally)))
+	}
+
+	full := newBrepEnc(game(`,"fullView":true`))
+	view(full, 0, true, true, 0)
+	view(full, 300, true, true, 1) // switching team under full view changes nothing
+	if w, _ := consumeBrep(t, full, snapshot.Meta{}); !w.meta.Recorder.SawAll() {
+		t.Errorf("full-view spectator: recorder %+v, want SawAll", *w.meta.Recorder)
+	}
+
+	// Widgets before 1.10.1 state neither; a spectator then counts as full view.
+	old, _ := consumeBrep(t, newBrepEnc(game("")), snapshot.Meta{})
+	if !old.meta.Recorder.SawAll() {
+		t.Errorf("old spectator stream: recorder %+v, want SawAll", *old.meta.Recorder)
+	}
+
+	start := newBrepEnc(game(`,"fullView":false`))
+	if w, _ := consumeBrep(t, start, snapshot.Meta{}); w.meta.Recorder.SawAll() || w.meta.Recorder.AllyTeam != 0 {
+		t.Errorf("limited from the start: recorder %+v, want one-sided ally 0", *w.meta.Recorder)
+	}
+
+	later := newBrepEnc(game(`,"fullView":true`))
+	view(later, 0, true, true, 0)
+	view(later, 900, true, false, 1)
+	view(later, 1800, true, true, 1)
+	w, _ := consumeBrep(t, later, snapshot.Meta{})
+	if r := w.meta.Recorder; r.SawAll() || r.AllyTeam != 1 {
+		t.Errorf("limited mid-game: recorder %+v, want one-sided ally 1", *r)
+	}
+	if len(w.facts) != 3 {
+		t.Errorf("view facts kept = %d, want 3", len(w.facts))
+	}
+
+	// A player who dies becomes a full-view spectator: still a player's capture.
+	player := newBrepEnc(`BRSNAP GAME {"protocol":6,"mode":"live","playerID":0,"allyTeam":1,"spectator":false}` + "\nBRSNAP READY\n")
+	view(player, 0, false, false, 1)
+	view(player, 3000, true, true, 1)
+	if w, _ := consumeBrep(t, player, snapshot.Meta{}); w.meta.Recorder.SawAll() || w.meta.Recorder.AllyTeam != 1 {
+		t.Errorf("player who died: recorder %+v, want one-sided ally 1", *w.meta.Recorder)
 	}
 }
 

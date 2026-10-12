@@ -41,7 +41,19 @@ const (
 	FactWeaponDefs = "wdefs"      // FactWeaponDefsData: the weapon table
 	FactTeamStats  = "teamstats"  // FactTeamStatsData: the engine's team statistics
 	FactBlast      = "blast"      // FactBlastData: a big death explosion
+	FactView       = "view"       // FactViewData: whose point of view the uploader records
 )
+
+// FactViewData is a change in whose point of view a live capture records
+// (uploader widget >= 1.10.1; written at the first sample and on every
+// change). Ally is the ally team the client is watching as; Full says a
+// spectator sees every team.
+type FactViewData struct {
+	Frame     int32 `json:"f"`
+	Spectator bool  `json:"spec"`
+	Full      bool  `json:"full"`
+	Ally      int32 `json:"ally"`
+}
 
 // FactEndData is the end of the game. Winners are ALLY team ids; empty for a
 // draw (or a game that ended with nobody standing).
