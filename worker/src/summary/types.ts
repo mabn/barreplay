@@ -323,6 +323,10 @@ export interface SummaryOptions {
   /** The published .brp, whose meta holds the unit-def table that names
    * build orders. Without it the build-order achievements cannot be checked. */
   brpUrl?: string | null;
+  /** Show the achievements block under Awards. Off by default while the
+   * rules are being tuned; the hosts turn it on for a page URL carrying an
+   * `achievements` query parameter (any value). */
+  achievements?: boolean;
 }
 
 export interface SummaryHandle {

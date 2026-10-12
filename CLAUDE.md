@@ -1062,6 +1062,10 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           build lines): those orders are the player's. Widget orders arrive one per
                           unit, so action counts use Player.acts (one per frame and command).
                           Nothing is stored; thresholds are the shortlist's, untuned.
+                          HIDDEN BY DEFAULT (Marcin's call): the block shows only when the
+                          page URL carries an `achievements` query parameter, any value
+                          (SummaryOptions.achievements, set from location.search by app.js
+                          and by embed.ts from the HOST page's URL).
                           EMBEDDING ON ANOTHER SITE (lavabalance's game pages): the other site
                           IMPORTS THE LIBRARY AT RUN TIME — import("https://replay.fogofwar.dev/
                           embed/summary.js") — so a deploy here reaches it with no change, pin or
