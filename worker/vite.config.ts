@@ -71,6 +71,12 @@ function assetRev(): Plugin {
 // which is the escape hatch if the bucket hostname ever misbehaves).
 const DATA_BASE = process.env.DATA_BASE ?? "https://cdn-bar.fogofwar.dev";
 
+// BARREPLAY_PROD=1 (`npm run dev:prod`) runs the same app against PRODUCTION
+// data, read-only, through the deployed proxy Worker: wrangler.proddev.jsonc
+// in place of wrangler.jsonc (see src/worker/readonly.ts), and the production
+// data origin. Only `vite dev` honours it; a build always uses wrangler.jsonc.
+const PROD_DEV = process.env.BARREPLAY_PROD === "1";
+
 // dataBase stamps index.html's __DATA_ORIGIN__ placeholder. Only a BUILD gets the real
 // origin: under `vite dev` the local worker serves the preview bucket's pieces
 // itself, and pointing dev at the production hostname would silently play
@@ -83,7 +89,12 @@ function dataBase(): Plugin {
       isBuild = cfg.command === "build";
     },
     transformIndexHtml(html) {
-      return html.replaceAll("__DATA_ORIGIN__", isBuild ? DATA_BASE : "");
+      // `npm run dev:prod` reads production on purpose, so it takes the real
+      // data origin too: the replay files then come straight from the CDN,
+      // as in production, instead of being streamed through the read-only
+      // proxy over the remote binding (which dropped connections on the big
+      // .brp reads). The bucket's CORS policy allows the dev origins on 5173.
+      return html.replaceAll("__DATA_ORIGIN__", isBuild || PROD_DEV ? DATA_BASE : "");
     },
   };
 }
@@ -174,12 +185,6 @@ function summaryBundle(): Plugin {
 // The Cloudflare plugin runs the Worker (src/worker/index.ts, per wrangler.jsonc) inside
 // the real workerd runtime during `vite dev`, and builds both the client bundle and the
 // Worker on `vite build`. No React/JSX plugin: the UI is plain TypeScript + Canvas/DOM.
-//
-// BARREPLAY_PROD=1 (`npm run dev:prod`) runs the same app against PRODUCTION
-// data, read-only, through the deployed proxy Worker: wrangler.proddev.jsonc
-// in place of wrangler.jsonc (see src/worker/readonly.ts). Only `vite dev`
-// honours it; a build always uses wrangler.jsonc.
-const PROD_DEV = process.env.BARREPLAY_PROD === "1";
 
 export default defineConfig(({ command }) => ({
   plugins: [

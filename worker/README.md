@@ -734,13 +734,19 @@ production:
 
 - **Writes answer 403** "read-only production mode": drag&drop uploads, the
   admin buttons (queue, retry, disable, POV, refresh), `PUT /api/replays`.
+- **No `/index.json`** (501): it walks the whole bucket, hundreds of list
+  calls through the proxy. The page then lists only catalog rows, and the
+  admin "Unregistered" button finds nothing.
 - **No cron**: `proddev.ts` exports no scheduled handler, since the games
   mirror, lobby poll and lava sync all write.
 - **On-demand summaries are local**: the `SummaryHub` is the dev server's own
   and no daemon connects to it, so a missing summary answers "unavailable"
   and the page shows the published one.
-- Replay files come through the proxy (the dev page uses the same origin, as
-  in `npm run dev`), not from `cdn-bar.fogofwar.dev`.
+- Replay files come straight from `cdn-bar.fogofwar.dev`, as in production
+  (the bucket's CORS policy, `r2-cors.json`, allows `localhost:5173` and
+  `127.0.0.1:5173`; on another port the browser blocks them). Only what the
+  worker itself reads from the bucket (summaries for
+  `/api/insights`, upload streams) goes through the proxy.
 - `ADMIN_OPEN=true` in `.dev.vars` applies here too, so admin pages show
   production's queue and SQL stats.
 
