@@ -112,9 +112,9 @@
   const stars = store.get("ach.stars", {});
   const plan = store.get("ach.tier", {});
   const notes = store.get("ach.notes", {});
-  // A rate per game, as people read it: "1 in 53 games" under one a game,
+  // A rate per game, as people read it: "1 in 53 games" under half a game,
   // "2.3 a game" above.
-  const fmt = (x) => (!x ? "never" : x >= 1 ? `${x >= 10 ? x.toFixed(0) : x.toFixed(1)} a game` : `1 in ${Math.round(1 / x).toLocaleString("en")} games`);
+  const fmt = (x) => (!x ? "never" : x >= 0.5 ? `${x >= 10 ? x.toFixed(0) : x.toFixed(1)} a game` : `1 in ${Math.round(1 / x).toLocaleString("en")} games`);
   const fmtK = (k) => (Number.isInteger(k) ? String(k) : String(Math.round(k * 100) / 100));
   const desc = (r, k) => (k === undefined || k === null ? r.desc : r.desc.replace(/\{k\}/g, fmtK(k)));
   for (const r of R.rules) {
