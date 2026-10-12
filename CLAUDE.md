@@ -1188,6 +1188,18 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the Durable Object, whose behaviour is its SQL and which plain node
                           cannot import) + `npm run smoke` + `vite dev`,
                           then deploy.
+                          PRODUCTION DATA, READ-ONLY (`npm run dev:prod`): the dev server
+                          with wrangler.proddev.jsonc (entry src/worker/proddev.ts) in place
+                          of wrangler.jsonc, its REPLAY_INDEX and BUCKET swapped for stand-ins
+                          (src/worker/readonly.ts) that reach production through a REMOTE
+                          service binding to the proxy Worker replay-prod-readonly
+                          (src/prodproxy, wrangler.prodproxy.jsonc, deployed by hand with
+                          `npm run deploy:prodproxy`, no public route). The proxy binds the
+                          production DO by script_name and answers only R2 get/head/list and
+                          the ReplayIndex methods on READ_METHODS — everything else is a 403
+                          THERE, so read-only does not depend on local code. A new
+                          ReplayIndex read is refused until listed (and the proxy redeployed).
+                          No cron and a local, daemon-less SummaryHub in that mode.
                           The BULK replay pieces (the .brp, plus the .brw/.resources/.keys/
                           c<n> of older replays) are NOT fetched
                           from it: they come from cdn-bar.fogofwar.dev, the R2 bucket bound

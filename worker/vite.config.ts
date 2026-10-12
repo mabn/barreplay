@@ -174,6 +174,18 @@ function summaryBundle(): Plugin {
 // The Cloudflare plugin runs the Worker (src/worker/index.ts, per wrangler.jsonc) inside
 // the real workerd runtime during `vite dev`, and builds both the client bundle and the
 // Worker on `vite build`. No React/JSX plugin: the UI is plain TypeScript + Canvas/DOM.
-export default defineConfig({
-  plugins: [assetRev(), dataBase(), summaryBundle(), cloudflare()],
-});
+//
+// BARREPLAY_PROD=1 (`npm run dev:prod`) runs the same app against PRODUCTION
+// data, read-only, through the deployed proxy Worker: wrangler.proddev.jsonc
+// in place of wrangler.jsonc (see src/worker/readonly.ts). Only `vite dev`
+// honours it; a build always uses wrangler.jsonc.
+const PROD_DEV = process.env.BARREPLAY_PROD === "1";
+
+export default defineConfig(({ command }) => ({
+  plugins: [
+    assetRev(),
+    dataBase(),
+    summaryBundle(),
+    cloudflare(PROD_DEV && command === "serve" ? { configPath: "./wrangler.proddev.jsonc" } : {}),
+  ],
+}));

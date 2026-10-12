@@ -1,0 +1,40 @@
+// The READ-ONLY PRODUCTION PROXY behind `npm run dev:prod` (src/prodproxy,
+// src/worker/readonly.ts). Deployed once, by hand, with
+// `npm run deploy:prodproxy`; redeploy it only when READ_METHODS changes.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "replay-prod-readonly",
+  "main": "src/prodproxy/index.ts",
+  "compatibility_date": "2026-06-27",
+  "account_id": "9a1829e6502587e153ffa45b76de7ed3",
+
+  // No public route at all: no workers.dev hostname, no preview URLs, no
+  // custom domain. A service binding from this account is the only way in.
+  "workers_dev": false,
+  "preview_urls": false,
+
+  // PRODUCTION's bucket and catalog. The proxy only ever reads them — every
+  // route it serves is a get/head/list or an allowlisted ReplayIndex read.
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "barreplay-replays"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        // The object of the deployed "replay" worker (wrangler.jsonc) — this
+        // script declares no Durable Object class of its own, so it needs no
+        // migrations.
+        "name": "REPLAY_INDEX",
+        "class_name": "ReplayIndex",
+        "script_name": "replay"
+      }
+    ]
+  },
+
+  "observability": {
+    "enabled": true
+  }
+}

@@ -1,0 +1,61 @@
+// `npm run dev:prod`: the local dev server reading PRODUCTION data, read-only.
+// The same app as wrangler.jsonc, with a different entry (src/worker/proddev.ts)
+// and bindings: no bucket and no catalog object of its own — both are read
+// through the deployed read-only proxy (wrangler.prodproxy.jsonc) over the
+// REMOTE service binding PROD. Never deployed; `vite` uses it only when
+// BARREPLAY_PROD=1 (see vite.config.ts).
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "replay-proddev",
+  "main": "src/worker/proddev.ts",
+  "compatibility_date": "2026-06-27",
+  "account_id": "9a1829e6502587e153ffa45b76de7ed3",
+
+  // As in wrangler.jsonc (see the comments there).
+  "assets": {
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": [
+      "/*",
+      "!/icons/*",
+      "!/ranks/*",
+      "!/favicon.ico",
+      "!/favicon.svg",
+      "!/replay_uploader.lua",
+      "!/embed/*"
+    ]
+  },
+
+  "vars": {
+    "ACCESS_TEAM_DOMAIN": "bartools.cloudflareaccess.com",
+    "ACCESS_AUD": "94214a467ff0d56eac5a9b0f4637a189722107d5770b90d387af453642f2b83d"
+  },
+
+  // The read-only proxy, reached in the REMOTE deployment: `remote: true` is
+  // what makes a local dev server talk to the deployed Worker rather than
+  // look for a local one. Needs `npx wrangler login` on this machine.
+  "services": [
+    {
+      "binding": "PROD",
+      "service": "replay-prod-readonly",
+      "remote": true
+    }
+  ],
+
+  // Only the summary hub is local (and idle: no daemon connects to a dev
+  // server). REPLAY_INDEX is the proxy's, so it is not declared here.
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SUMMARY_HUB",
+        "class_name": "SummaryHub"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SummaryHub"]
+    }
+  ]
+}

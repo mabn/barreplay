@@ -650,6 +650,8 @@ game leaves in `…\data`. Three things make that page work:
 ```sh
 npm install
 npm run dev         # vite dev — runs the Worker in workerd + HMR (needs a local R2, see below)
+npm run dev:prod    # the same, reading PRODUCTION data read-only (see "against production data")
+npm run deploy:prodproxy  # deploy the read-only proxy dev:prod reads through (once)
 npm run build       # sync icons + widget, build client bundle + Worker into dist/
 npm run preview     # vite preview — the client bundle alone, no Worker behind it
 npm run test        # both suites below
@@ -697,6 +699,58 @@ For local dev, seed the local R2 with a packed bundle (`wrangler dev` binds the
 ```sh
 npm run upload -- ../static --local
 ```
+
+### Local development against production data (read-only)
+
+`npm run dev:prod` runs the same dev server against **production's** replay
+files, catalog, games mirror and job queue, without being able to change any
+of them. A local Worker cannot bind a deployed Durable Object, so it goes
+through a proxy (Cloudflare's [remote bindings][rb] pattern):
+
+```
+local vite dev (src/worker/proddev.ts)
+  --remote service binding PROD-->  replay-prod-readonly (src/prodproxy, deployed)
+                                      --> production ReplayIndex DO (script "replay")
+                                      --> production R2 bucket barreplay-replays
+```
+
+The proxy answers only reads: R2 get/head/list, and the `ReplayIndex` methods
+on `READ_METHODS` in `src/worker/readonly.ts`. Any other method, any R2
+write, and any non-POST request gets a 403 **from the proxy**, so read-only
+holds whatever the local code does. A method added to `ReplayIndex` is refused
+until it is put on that list (and the proxy redeployed). The proxy has no
+public route (no workers.dev hostname, no custom domain): only a service
+binding in this account reaches it.
+
+Setup, once:
+
+```sh
+npx wrangler login              # remote bindings use your Cloudflare login
+npm run deploy:prodproxy        # deploys wrangler.prodproxy.jsonc as replay-prod-readonly
+```
+
+Then `npm run dev:prod` and open http://127.0.0.1:5173/. What differs from
+production:
+
+- **Writes answer 403** "read-only production mode": drag&drop uploads, the
+  admin buttons (queue, retry, disable, POV, refresh), `PUT /api/replays`.
+- **No cron**: `proddev.ts` exports no scheduled handler, since the games
+  mirror, lobby poll and lava sync all write.
+- **On-demand summaries are local**: the `SummaryHub` is the dev server's own
+  and no daemon connects to it, so a missing summary answers "unavailable"
+  and the page shows the published one.
+- Replay files come through the proxy (the dev page uses the same origin, as
+  in `npm run dev`), not from `cdn-bar.fogofwar.dev`.
+- `ADMIN_OPEN=true` in `.dev.vars` applies here too, so admin pages show
+  production's queue and SQL stats.
+
+`npm run dev` is unchanged: `BARREPLAY_PROD=1` (set by `dev:prod`) is what
+makes `vite.config.ts` load `wrangler.proddev.jsonc` instead of
+`wrangler.jsonc`, and a build always uses `wrangler.jsonc`. Before the proxy is
+deployed, `dev:prod` stops at startup with "Service binding 'PROD' references
+Worker 'replay-prod-readonly' which was not found".
+
+[rb]: https://developers.cloudflare.com/workers/local-development/#remote-bindings
 
 ## Serving replay data straight from the bucket (`cdn-bar.fogofwar.dev`)
 
