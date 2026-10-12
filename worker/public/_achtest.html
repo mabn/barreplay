@@ -14,9 +14,35 @@
      its award cards. */
   #s .brs-root > :not(:first-child):not(.brs-section:has(.brs-ach)) { display: none; }
   #s .brs-section:has(.brs-ach) > :not(.brs-ach) { display: none; }
+  /* The tuning table. */
+  #tune { margin-top: 32px; border-top: 1px solid #2a3540; padding-top: 16px; }
+  #tune h2 { font-size: 18px; margin: 0 0 6px; }
+  #tune .note { color: #8a96a3; max-width: 980px; }
+  #budget { border-collapse: collapse; margin: 10px 0 14px; }
+  #budget td, #budget th { padding: 2px 10px; text-align: right; border-bottom: 1px solid #222c36; }
+  #budget th:first-child, #budget td:first-child { text-align: left; }
+  #achtab { border-collapse: collapse; width: 100%; }
+  #achtab th { position: sticky; top: 0; background: #1a222b; text-align: left; padding: 4px 6px; cursor: pointer; user-select: none; white-space: nowrap; }
+  #achtab th:hover { color: #ffe14d; }
+  #achtab td { padding: 3px 6px; border-bottom: 1px solid #1f2830; vertical-align: top; }
+  #achtab tr:hover td { background: #161e26; }
+  #achtab .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #achtab .desc { color: #a9b4bf; max-width: 520px; }
+  #achtab .new { color: #ffe14d; }
+  #achtab .bad { color: #e08a5c; }
+  .stars { white-space: nowrap; cursor: pointer; font-size: 15px; color: #3b4652; }
+  .stars span.on { color: #ffcf3a; }
+  .stars span:hover { color: #fff3b0; }
+  .t1 { color: #9aa5b1; } .t2 { color: #6cc070; } .t3 { color: #4b9be0; } .t4 { color: #b77ee8; } .t5 { color: #f0a640; } .t0 { color: #5a6570; }
+  #achtab select { background: #12181e; color: inherit; border: 1px solid #33404c; font: inherit; }
+  #grades { width: 100%; min-height: 220px; margin-top: 12px; background: #0d1217; color: #dde3ea; border: 1px solid #33404c; font: 12px/1.4 ui-monospace, monospace; }
 </style>
 <div id="games"><div><h3>Lava</h3><div id="lava" class="dim">Loading…</div></div><div><h3>Other</h3><div id="other" class="dim">Loading…</div></div></div>
 <div id="s"></div>
+<div id="tune"><h2>Rarity tuning (lava games)</h2><div class="note" id="tunenote">Loading the measured rates…</div>
+<table id="budget"></table><table id="achtab"></table>
+<h3>Your grades</h3><div class="note">Click the stars in the table; every graded achievement lands here (kept in this browser). Copy it into the thread when you are done.</div>
+<textarea id="grades" readonly></textarea></div>
 <script type="module">
   // Local test page for the summary's achievements. Put it in worker/public/,
   // run `npm run dev` in worker/ and open http://127.0.0.1:5173/_achtest.html.
@@ -71,4 +97,117 @@
       barApi: location.origin + "/api/bar",
     });
   }
+</script>
+<script type="module">
+  // The tuning table: how often each achievement fired over the lava games
+  // (tools/achievement-rates.ts, run over their demos -> _achrates.json), and
+  // which knob value would give it the rate its tier is budgeted.
+  const TIERS = ["", "common", "uncommon", "rare", "epic", "legendary"];
+  // Awards per GAME across all achievements of a tier (Marcin's budget).
+  const BUDGET = { 5: 0.5, 4: 1, 3: 6, 2: 12, 1: 24 };
+  const R = await (await fetch("/_achrates.json")).json();
+  const store = { get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} } };
+  const stars = store.get("ach.stars", {});
+  const plan = store.get("ach.tier", {});
+  const fmt = (x) => (x === 0 ? "0" : x >= 10 ? x.toFixed(0) : x >= 1 ? x.toFixed(1) : x >= 0.1 ? x.toFixed(2) : x >= 0.001 ? x.toFixed(3) : x.toExponential(0));
+  const fmtK = (k) => (Number.isInteger(k) ? String(k) : String(Math.round(k * 100) / 100));
+  const desc = (r, k) => (k === undefined || k === null ? r.desc : r.desc.replace(/\{k\}/g, fmtK(k)));
+  for (const r of R.rules) {
+    r.i0 = r.ks.findIndex((k) => (r.knob ? Math.abs(k - r.knob.value) < 1e-9 : true));
+    r.now = r.perGame[r.i0];
+  }
+  const tierOf = (r) => plan[r.id] ?? r.est;
+  /** Per-achievement target rate: the tier's budget shared by its members. */
+  function targets() {
+    const n = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    for (const r of R.rules) if (tierOf(r) > 0) n[tierOf(r)]++;
+    const t = {};
+    for (const x in BUDGET) t[x] = n[x] ? BUDGET[x] / n[x] : 0;
+    return { n, t };
+  }
+  /** The tier a rate reads as now: the nearest target, in ratio. */
+  function measuredTier(rate, t) {
+    if (!rate) return 0;
+    let best = 1, d = Infinity;
+    for (const x of [1, 2, 3, 4, 5]) if (t[x]) { const e = Math.abs(Math.log(rate / t[x])); if (e < d) { d = e; best = x; } }
+    return best;
+  }
+  /** suggest is the knob value whose measured rate is nearest the target. */
+  function suggest(r, target) {
+    if (!r.knob || !target) return null;
+    let bi = r.i0, d = Infinity;
+    r.perGame.forEach((v, i) => { const e = Math.abs(Math.log(Math.max(v, 1e-6) / target)); if (e < d - 1e-12 || (Math.abs(e - d) < 1e-12 && Math.abs(i - r.i0) < Math.abs(bi - r.i0))) { d = e; bi = i; } });
+    return { k: r.ks[bi], rate: r.perGame[bi], off: Math.exp(d) };
+  }
+  let sortKey = "now", sortDir = 1;
+  const COLS = [
+    ["id", "#"], ["name", "Achievement"], ["desc", "Now: earned when…"], ["knob", "Knob"], ["now", "Per game"], ["share", "Games with it"],
+    ["mtier", "Rarity now"], ["est", "Planned tier"], ["sk", "Suggested knob"], ["srate", "Per game then"], ["stars", "Interest"],
+  ];
+  function render() {
+    const { n, t } = targets();
+    const rows = R.rules.map((r) => {
+      const s = suggest(r, t[tierOf(r)]);
+      return { r, mtier: measuredTier(r.now, t), s };
+    });
+    // Budget: what each tier hands out per game now and with the suggestions.
+    const nowBy = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }, thenBy = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    for (const x of rows) { nowBy[x.mtier] += x.r.now; thenBy[tierOf(x.r)] += x.s ? x.s.rate : x.r.now; }
+    const b = document.getElementById("budget");
+    b.innerHTML = "<tr><th>Tier</th><th>Achievements planned</th><th>Budget per game</th><th>Per achievement</th><th>Handed out now (by measured rarity)</th><th>With the suggested knobs</th></tr>" +
+      [5, 4, 3, 2, 1].map((x) => `<tr><td class="t${x}">${TIERS[x]}</td><td>${n[x]}</td><td>${BUDGET[x]}</td><td>${fmt(t[x])}</td><td>${fmt(nowBy[x])}</td><td>${fmt(thenBy[x])}</td></tr>`).join("") +
+      `<tr><td class="t0">never earned</td><td></td><td></td><td></td><td>${R.rules.filter((r) => !r.now).length} achievements</td><td></td></tr>`;
+    const key = (x) => ({ id: x.r.id, name: x.r.name, desc: x.r.desc, knob: x.r.knob?.value ?? -1, now: x.r.now, share: x.r.share[x.r.i0], mtier: x.mtier * 10 + x.r.now, est: tierOf(x.r), sk: x.s?.k ?? -1, srate: x.s?.rate ?? -1, stars: stars[x.r.id] ?? 0 }[sortKey]);
+    rows.sort((a, c) => { const p = key(a), q = key(c); return (typeof p === "string" ? p.localeCompare(q) : p - q) * sortDir; });
+    const tab = document.getElementById("achtab");
+    tab.innerHTML = "";
+    const head = tab.insertRow();
+    for (const [k, label] of COLS) {
+      const th = document.createElement("th");
+      th.textContent = label + (k === sortKey ? (sortDir > 0 ? " ▲" : " ▼") : "");
+      th.onclick = () => { sortDir = k === sortKey ? -sortDir : 1; sortKey = k; render(); };
+      head.append(th);
+    }
+    for (const { r, mtier, s } of rows) {
+      const tr = tab.insertRow();
+      const td = (html, cls) => { const c = tr.insertCell(); c.innerHTML = html; if (cls) c.className = cls; return c; };
+      td(r.id, "num");
+      td(`<b>${r.name}</b><br><span class="t0">${r.need}</span>`);
+      const skips = Object.entries(r.skips || {}).map(([w, c]) => `skipped in ${c} games: ${w}`).join("; ");
+      td(desc(r, r.knob?.value) + (skips ? `<br><span class="t0">${skips}</span>` : ""), "desc");
+      td(r.knob ? fmtK(r.knob.value) + (r.knob.harder > 0 ? " ↑" : " ↓") : "—", "num").title = r.knob ? (r.knob.harder > 0 ? "a bigger value is harder" : "a smaller value is harder") : "no number to tune";
+      td(fmt(r.now), "num");
+      td(`${Math.round(100 * r.share[r.i0])}%`, "num");
+      td(TIERS[mtier] || "never", `t${mtier}`);
+      const sel = document.createElement("select");
+      for (const x of [5, 4, 3, 2, 1]) sel.add(new Option(TIERS[x] + (x === r.est ? " (estimate)" : ""), x, false, x === tierOf(r)));
+      sel.className = `t${tierOf(r)}`;
+      sel.onchange = () => { plan[r.id] = Number(sel.value); if (plan[r.id] === r.est) delete plan[r.id]; store.set("ach.tier", plan); render(); };
+      tr.insertCell().append(sel);
+      if (!s) td("—", "num").title = "no knob";
+      else {
+        const c = td(s.k === r.knob.value ? fmtK(s.k) : `<span class="new">${fmtK(s.k)}</span>`, "num");
+        c.title = desc(r, s.k);
+      }
+      td(s ? `<span class="${s.off > 2 ? "bad" : ""}">${fmt(s.rate)}</span>` : "—", "num").title = s && s.off > 2 ? `the sweep cannot get within 2x of the target (${fmt(targets().t[tierOf(r)])})` : "";
+      const st = td("", "stars");
+      for (let i = 1; i <= 5; i++) {
+        const sp = document.createElement("span");
+        sp.textContent = "★";
+        if ((stars[r.id] ?? 0) >= i) sp.className = "on";
+        sp.onclick = () => { stars[r.id] = stars[r.id] === i ? 0 : i; if (!stars[r.id]) delete stars[r.id]; store.set("ach.stars", stars); render(); };
+        st.append(sp);
+      }
+    }
+    const byId = new Map(R.rules.map((r) => [r.id, r]));
+    document.getElementById("grades").value = Object.entries(stars).sort((a, c) => c[1] - a[1] || a[0] - c[0])
+      .map(([id, v]) => `${id} ${byId.get(Number(id))?.name ?? "?"}: ${"★".repeat(v)}${"☆".repeat(5 - v)} (${v}/5)`).join("\n") +
+      (Object.keys(plan).length ? "\n\nPlanned tiers changed:\n" + Object.entries(plan).map(([id, v]) => `${id} ${byId.get(Number(id))?.name}: ${TIERS[v]}`).join("\n") : "");
+  }
+  document.getElementById("tunenote").textContent =
+    `Measured over ${R.games} lava games since ${R.since} (${R.players} player-games), from their demos. "Per game" is how many times it is awarded per game at its current knob; ` +
+    `"Rarity now" is the tier whose per-achievement budget that rate is nearest. "Planned tier" starts at the shortlist's estimate; change it and the suggested knob follows: ` +
+    `the swept value (0.1x to 10x the current one) whose measured rate is nearest the tier's per-achievement budget. ↑ means a bigger knob is harder, ↓ a smaller one. ` +
+    `Rates in orange are over 2x off their target even at the best knob. Build-order achievements could be judged in ${R.games - R.noDefs} of the games (the rest had no matching unit table).`;
+  render();
 </script>
