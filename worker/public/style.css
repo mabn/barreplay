@@ -967,6 +967,10 @@ span.rank { width: 18px; } /* empty placeholder keeps the column when no icon */
 #tooltip .label { color: var(--dim); }
 #tooltip .bar { height: 5px; background: var(--raised); border-radius: 3px; margin: 3px 0 1px; overflow: hidden; }
 #tooltip .bar > div { height: 100%; }
+/* The shield row: label, a charge bar filling the middle, the number. */
+#tooltip .row.shield { align-items: center; gap: 8px; }
+#tooltip .shbar { flex: 1; min-width: 50px; height: 5px; background: var(--raised); border-radius: 3px; overflow: hidden; }
+#tooltip .shbar > i { display: block; height: 100%; }
 
 #zoomlabel {
   position: absolute; left: 10px; bottom: 8px; pointer-events: none;
