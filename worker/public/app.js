@@ -7926,6 +7926,7 @@ function applyReplayTab() {
     a.href = replayTabHref(a.dataset.rtab);
   }
   if (tab === 'summary') {
+    summarySeen();
     stopPlay();
     showSummary(); // the map window opens only when a moment is clicked
   } else if (clip) {
@@ -8408,8 +8409,34 @@ function initReplayTabs() {
       setReplayTab(a.dataset.rtab);
     };
   }
+  initNewTag();
   initClip();
   initClipWindow();
+}
+
+// The "new!" tag beside Summary in the menu (style.css .newtag) wiggles
+// until this browser has opened the summary once, then stays put. Opening
+// counts by any route — a click, a middle-click into a new tab, a shared
+// ?tab=summary link — since the wiggle's only job is to get the summary
+// found. A per-viewer convenience: without storage it wiggles every visit.
+const NEWTAG_KEY = 'barreplay.summaryseen';
+
+function initNewTag() {
+  const tag = document.querySelector('#replaytabs .newtag');
+  if (!tag) return;
+  let seen = false;
+  try { seen = localStorage.getItem(NEWTAG_KEY) === '1'; } catch { /* no storage */ }
+  tag.classList.toggle('wiggle', !seen);
+  // auxclick: a middle-click opens the summary in another tab, which is
+  // still this reader finding it.
+  tag.parentElement.addEventListener('click', summarySeen);
+  tag.parentElement.addEventListener('auxclick', summarySeen);
+}
+
+function summarySeen() {
+  const tag = document.querySelector('#replaytabs .newtag');
+  if (tag) tag.classList.remove('wiggle');
+  try { localStorage.setItem(NEWTAG_KEY, '1'); } catch { /* best-effort */ }
 }
 
 function openReplay(id) {

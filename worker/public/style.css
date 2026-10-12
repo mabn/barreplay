@@ -262,6 +262,35 @@ body.replay-page #replaytabs {
   content: ''; position: absolute; left: -6px; top: 7px; bottom: 7px;
   width: 3px; border-radius: 2px; background: var(--accent);
 }
+/* "new!" pointing at Summary from just outside the menu (Marcin's ask: the
+   summary is easy to miss). It is part of the link, so clicking it opens the
+   summary too. It nudges left and back, toward the entry, until the reader
+   has opened the summary once (app.js initNewTag, remembered in
+   localStorage), then stays put. Over the map, so a solid gold tag with a
+   glow rather than text, which the terrain would swallow. */
+.newtag {
+  position: absolute; left: calc(100% + 15px); top: 50%; z-index: 30;
+  height: 20px; margin-top: -10px; padding: 0 8px 0 7px;
+  display: flex; align-items: center;
+  background: var(--accent); color: var(--accent-ink); border-radius: 5px;
+  font-size: 10.5px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .5), 0 0 14px rgba(255, 181, 71, .45);
+}
+.newtag::before {
+  content: ''; position: absolute; left: -6px; top: 50%; margin-top: -6px;
+  border: 6px solid transparent; border-left: 0; border-right-color: var(--accent);
+}
+.railsubitem:hover .newtag { background: var(--accent-hi); }
+.railsubitem:hover .newtag::before { border-right-color: var(--accent-hi); }
+/* Two quick nudges toward the entry, then a rest, so it reads as pointing
+   rather than as something vibrating. */
+.newtag.wiggle { animation: newtag-wiggle 2.6s ease-in-out infinite; }
+@keyframes newtag-wiggle {
+  0%, 36%, 100% { transform: translateX(0); }
+  9%, 27% { transform: translateX(-6px); }
+  18% { transform: translateX(1px); }
+}
+@media (prefers-reduced-motion: reduce) { .newtag.wiggle { animation: none; } }
 
 /* The admin corner at the foot of the menu (index.html #adminnote, app.js
    renderAdminNote): the signed-in admin's initial with a sign-out entry, or

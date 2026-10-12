@@ -1480,7 +1480,12 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           the ?tab=summary tabs — appear as a SUB MENU under Replays
                           (#replaytabs): boxed together with Replays, smaller, hung off a
                           guide line, the selected one marked on it. It stays 72px wide
-                          (Marcin: the replay area is what matters). The header also leads
+                          (Marcin: the replay area is what matters). A gold "NEW!" tag
+                          points at Summary from just outside the menu (.newtag, part of
+                          the link) and nudges toward it until this browser has opened the
+                          summary once by any route (app.js initNewTag/summarySeen,
+                          localStorage 'barreplay.summaryseen'), then stays put (Marcin's
+                          ask). The header also leads
                           the replay's title with a "Replays" back link (#backlink). Both
                           pages are a CSS GRID (body.home / body.replay-page): the menu as a
                           full-height first column, the header beside it, then the section
