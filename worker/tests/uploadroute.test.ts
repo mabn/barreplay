@@ -336,32 +336,6 @@ test("upload archives the stream and records a pending job", async () => {
   assert.equal(job.state, "pending");
   assert.equal(job.streamKey, body.streamKey);
   assert.equal(job.gameId, GAME_ID);
-
-  // The archive prefix must stay invisible to the replay listing.
-  const idx = await app.request("/index.json", {}, env);
-  assert.deepEqual(await asJson(idx), []);
-});
-
-// A replay published today is its .brp alone, and that object is what lists
-// it; an older bundle is still listed by its .brw, with every piece counted.
-test("the listing names .brp replays and older .brw bundles", async () => {
-  const { env, bucket } = makeEnv();
-  bucket.objects.set("replays/new-1a2b3c4d.brp", new Uint8Array(100));
-  bucket.objects.set("replays/old.brw", new Uint8Array(10));
-  bucket.objects.set("replays/old.resources", new Uint8Array(5));
-  bucket.objects.set("replays/old.keys", new Uint8Array(3));
-  bucket.objects.set("replays/old/c0", new Uint8Array(7));
-  // Published since month folders: the folder is part of the replay's id.
-  bucket.objects.set("replays/2026-10/main.brp", new Uint8Array(40));
-  bucket.objects.set("replays/2026-10/main.insights3.json", new Uint8Array(2));
-  bucket.objects.set("replays/2026-10/main-1a2b3c4d.brp", new Uint8Array(30));
-  const idx = await app.request("/index.json", {}, env);
-  assert.deepEqual(await asJson(idx), [
-    { file: "2026-10/main", gameId: "main", size: 42 },
-    { file: "2026-10/main-1a2b3c4d", gameId: "main-1a2b3c4d", size: 30 },
-    { file: "new-1a2b3c4d", gameId: "new-1a2b3c4d", size: 100 },
-    { file: "old", gameId: "old", size: 25 },
-  ]);
 });
 
 // An uploaded stream is filed under the game's start month when the games

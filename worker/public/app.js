@@ -38,9 +38,9 @@
 // hostname, so those reads are answered from Cloudflare's cache instead of
 // costing a billed R2 GetObject through the Worker.
 //
-// Only the bulk per-replay pieces move. /index.json and /api/* stay
-// same-origin: the Worker BUILDS them (a bucket scan, the catalog Durable
-// Object), so they are not objects the bucket could serve.
+// Only the bulk per-replay pieces move. /api/* stays same-origin: the
+// Worker answers it from the catalog Durable Object, so it is not an object
+// the bucket could serve.
 //
 // Anything that is not an absolute http(s) origin is read as same-origin, so
 // an unsubstituted "__DATA_BASE__" token degrades instead of breaking.
@@ -4872,94 +4872,19 @@ function startFpsMonitor() {
 }
 
 // ---- replay list / home view ----------------------------------------------
-// The catalog: [{id, rid, startUnix, durationSec, map, gameSize, sizeBytes}].
-// Served by GET /api/replays (the worker's Durable Object table). /index.json
-// (the live bucket listing) is merged in so a replay whose files exist but
-// which was never PUT into the catalog still shows up — and it is the whole
-// fallback when /api/replays doesn't exist (old deployment, plain static host).
+// The catalog: [{id, rid, startUnix, durationSec, map, gameSize, sizeBytes}],
+// served by GET /api/replays (the worker's Durable Object table), filtered and
+// paged on the server. It is the only listing: nothing walks the bucket to
+// build one.
 async function fetchReplayList() {
-  const query = filterQuery();
-  // Paged on the SERVER, except in orphan mode: merging in the unregistered
-  // uploads means recognising which of them a catalog row already covers, and
-  // one page of rows cannot answer that for the whole bucket. That mode is
-  // the slow admin path anyway (it reads every object), so there it takes the
-  // whole catalog and pages in the browser.
-  const serverPaged = !orphanMode();
-  let catalog = [];
-  let haveCatalog = false;
-  try {
-    if (serverPaged) {
-      const params = new URLSearchParams(query);
-      // One row MORE than a page: whether it came back is the entire answer
-      // to "is there a next page", and it costs no count query.
-      params.set('limit', String(PAGE_SIZE + 1));
-      params.set('offset', String(homePage * PAGE_SIZE));
-      const r = await fetch('/api/replays?' + params.toString());
-      if (r.ok) { catalog = await r.json(); haveCatalog = true; }
-    } else {
-      // Orphan mode needs the WHOLE catalog (recognising which unregistered
-      // upload a row already covers is a question one page cannot answer),
-      // and the server now always caps a response at CATALOG_FETCH_LIMIT —
-      // so take it a full page at a time until a short page says it ended.
-      for (let offset = 0; offset < CATALOG_FETCH_LIMIT * 100; offset += CATALOG_FETCH_LIMIT) {
-        const params = new URLSearchParams(query);
-        params.set('limit', String(CATALOG_FETCH_LIMIT));
-        params.set('offset', String(offset));
-        const r = await fetch('/api/replays?' + params.toString());
-        if (!r.ok) break;
-        const page = await r.json();
-        haveCatalog = true;
-        catalog = catalog.concat(page);
-        if (page.length < CATALOG_FETCH_LIMIT) break;
-      }
-    }
-  } catch (_) { /* fall through to /index.json */ }
-
-  // /index.json is NOT a file — the worker builds it per request by paging the
-  // bucket's whole replays/ prefix (~3.4k objects: every head, keys, resources
-  // and 64-sample chunk of every published revision, 1000 per round trip). It
-  // costs ~1.5 s against the catalog's ~90 ms, and all it adds is replays whose
-  // FILES exist but which were never registered in the catalog. So fetch it
-  // only when it can change what is shown:
-  //   - no catalog: it is the whole listing (old deployment / plain static host)
-  //   - ?orphans=true: the admin bar's "Unregistered" button, an explicit ask
-  // and never under a filter — a stub has no map, size, roster or settings, so
-  // no filter can be true of it, and answering "8v8 on Supreme Isthmus" with
-  // rows that are neither would be a lie.
-  const wantFiles = !haveCatalog || (orphanMode() && query === '');
-  let files = [];
-  if (wantFiles) {
-    try {
-      const r = await fetch('/index.json');
-      if (r.ok) files = await r.json();
-    } catch (err) {
-      if (!catalog.length) throw err;
-    }
-  }
-  // Revisioned publishes are append-only, so the bucket accumulates every
-  // revision ever uploaded (<gameId>-<8 hex>, or since month folders
-  // <YYYY-MM>/<gameId>[-<8 hex>]); the catalog's rid names the current one. Hide the listing's other revisions of a cataloged game —
-  // an uncataloged upload (no row at all) still shows as a stub.
-  const seen = new Set();
-  const ids = new Set();
-  for (const e of catalog) {
-    seen.add(e.id);
-    ids.add(e.id);
-    if (e.rid) seen.add(e.rid);
-  }
-  for (const f of files) {
-    if (seen.has(f.file)) continue;
-    const m = /^(?:[^/]+\/)?(.+?)(?:-[0-9a-f]{8})?$/.exec(f.file);
-    if (m && ids.has(m[1])) continue; // another revision of a cataloged game, not its own replay
-    catalog.push({ id: f.file, rid: null, startUnix: null, durationSec: null, map: null, gameSize: null, sizeBytes: f.size ?? null });
-  }
-  // Whoever did not page above pages here: a backend that ignored the params
-  // (a plain static host) and orphan mode, which asked for
-  // everything on purpose.
-  if (!serverPaged || !haveCatalog) {
-    const start = homePage * PAGE_SIZE;
-    catalog = catalog.slice(start, start + PAGE_SIZE + 1);
-  }
+  const params = new URLSearchParams(filterQuery());
+  // One row MORE than a page: whether it came back is the entire answer to
+  // "is there a next page", and it costs no count query.
+  params.set('limit', String(PAGE_SIZE + 1));
+  params.set('offset', String(homePage * PAGE_SIZE));
+  const r = await fetch('/api/replays?' + params.toString());
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const catalog = await r.json();
   const hasNext = catalog.length > PAGE_SIZE;
   return { rows: hasNext ? catalog.slice(0, PAGE_SIZE) : catalog, hasNext };
 }
@@ -5031,12 +4956,6 @@ async function reloadList(keepPage) {
 /** Rows per page. The list is one screenful of a growing archive, not the
  * archive. */
 const PAGE_SIZE = 50;
-/** The most rows the backend serves per response (CATALOG_LIMIT_MAX in
- * worker/src/worker/app.ts) — an
- * absent or bigger ?limit= still gets this many, so a caller that wants the
- * whole catalog (orphan mode) must walk it in pages of exactly this size:
- * a shorter page is how it knows it reached the end. */
-const CATALOG_FETCH_LIMIT = 200;
 let homePage = 0;
 let homeHasNext = false;
 
@@ -5207,11 +5126,6 @@ async function initFilters() {
     reloadList();
   };
 
-  // "Unregistered" toggles ?orphans=true, which is what makes the list pay for
-  // the bucket scan (see fetchReplayList). It is NOT a filter param — the
-  // server never sees it — so it stays out of FILTER_KEYS and out of the query.
-  el('f_orphans').onclick = () => setFilter('orphans', orphanMode() ? '' : 'true');
-  syncOrphanButton();
 
   box.style.display = '';
 }
@@ -5223,7 +5137,7 @@ async function initFilters() {
 //
 // A thumb parked at its END writes NO param. That is what makes the full span
 // "no filter" rather than a filter matching everything — it keeps a fresh
-// visit's URL clean and the Unregistered button usable — and it is also what
+// visit's URL clean — and it is also what
 // gives the duration filter its open top end: the max thumb at 1h simply
 // stops restricting, so every longer game is included.
 function initDualRange(o) {
@@ -5370,26 +5284,6 @@ function initDurationRange(cur) {
   });
 }
 
-// orphanMode: ?orphans=true asks the list to include uploads that never made it
-// into the catalog, at the cost of a full bucket listing.
-function orphanMode() {
-  return new URLSearchParams(location.search).get('orphans') === 'true';
-}
-
-// syncOrphanButton reflects the toggle's state, and disables it while a filter
-// is active: an unregistered upload carries no metadata, so it could not match
-// a filter anyway and the button would silently do nothing.
-function syncOrphanButton() {
-  const b = document.getElementById('f_orphans');
-  if (!b) return;
-  const filtered = filterQuery() !== '';
-  b.classList.toggle('on', orphanMode());
-  b.disabled = filtered;
-  b.title = filtered
-    ? 'Clear the filters first — an unregistered upload has no map, size or settings to match'
-    : 'Scan the bucket for uploads that were never registered in the catalog (slow: reads every object)';
-}
-
 // ymd renders a filter date for an <input type=date>: the URL value when it is
 // already YYYY-MM-DD, else nothing. An unfiltered visit's inputs stay empty on
 // purpose — prefilling them with anything would make every visit look
@@ -5420,7 +5314,7 @@ function urlId(e) {
 // link keeps playing.
 //
 // replayList is no longer the whole catalog — it is what the current FILTERS
-// matched, and it omits the uncataloged stubs unless something asked for them —
+// matched —
 // so a miss here is not evidence that the replay does not exist. A well-formed
 // id is therefore worth trying on its own: loadReplay fetches one head and
 // reports a real failure if the bytes are not there, which beats silently
@@ -7624,7 +7518,6 @@ function renderHome(errMsg) {
     tbody.appendChild(tr);
   }
   document.body.classList.toggle('admin-mode', adminMode());
-  syncOrphanButton();
   renderPager();
   const filtered = filterQuery() !== '';
   const count = document.getElementById('f_count');
