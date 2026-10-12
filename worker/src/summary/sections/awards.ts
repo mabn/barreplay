@@ -120,8 +120,10 @@ function awardCards(ins: Insights, opts: SummaryOptions): HTMLElement | null {
 /** achievements is the achievements block: a placeholder while the demo
  * downloads, then every rule the game earned, and folded lists of the ones
  * nobody earned and the ones this game cannot decide. Null when the host
- * names no BAR API proxy that serves demos (barApi). */
+ * names no BAR API proxy that serves demos (barApi), and unless the host
+ * asked for it (opts.achievements). */
 function achievements(ins: Insights, opts: SummaryOptions): HTMLElement | null {
+  if (!opts.achievements) return null;
   const api = opts.barApi !== undefined ? opts.barApi : opts.mapApi ?? null;
   if (!api || !ins.gameId) return null;
   const el = h("div", { class: "brs-ach" },

@@ -8055,7 +8055,11 @@ function mountSummaryIns(lib, ins) {
   const el = document.getElementById('summary');
   el.textContent = '';
   // brpUrl: the achievements name build orders from the replay's def table.
-  summaryHandle = lib.mountSummary(el, ins, { onSeek: seekToFrame, onClip: openClip, mapApi: MAP_API, brpUrl: dataURL('/replays/' + ridPath(summaryFor) + '.brp') });
+  // They are shown only when the page URL carries ?achievements (any value).
+  summaryHandle = lib.mountSummary(el, ins, {
+    onSeek: seekToFrame, onClip: openClip, mapApi: MAP_API, brpUrl: dataURL('/replays/' + ridPath(summaryFor) + '.brp'),
+    achievements: new URLSearchParams(location.search).has('achievements'),
+  });
 }
 
 // ---- on-demand summaries ----------------------------------------------------

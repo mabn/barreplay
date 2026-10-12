@@ -186,8 +186,10 @@ export async function mountGameSummary(el: HTMLElement, gameId: string, opts: Em
   // own origin (icons.ts's default) would be that site's. Maps go through the
   // viewer's caching BAR API proxy (app.ts barProxy) for the same reason.
   // The achievements read the demo through that proxy too, and name build
-  // orders from the published .brp's def table.
+  // orders from the published .brp's def table, and show only on a host page
+  // whose URL carries ?achievements.
   const summaryOpts: SummaryOptions = {
+    achievements: new URLSearchParams(location.search).has("achievements"),
     iconBase: replayOrigin, mapApi: `${replayOrigin}/api/bar`, brpUrl: `${dataOrigin}/replays/${ridPath(rid)}.brp`, ...rest,
   };
   if (!summaryOpts.onClip && !summaryOpts.onSeek) {
