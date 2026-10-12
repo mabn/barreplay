@@ -64,7 +64,23 @@ function setup() {
       return { objects: objects.filter((o) => o.key.startsWith(opts.prefix ?? "")).map(meta), truncated: false, delimitedPrefixes: [] };
     },
   };
-  const target = { index, bucket: bucket as unknown as R2Bucket };
+  // Like a real Durable Object stub, every property is a remote method —
+  // `apply` and `call` included — so calling through them would hit the fake.
+  const stub = new Proxy(index, {
+    get: (t, prop) =>
+      prop in t
+        ? (t as Record<string | symbol, unknown>)[prop]
+        : () => {
+            calls.push(`rpc ${String(prop)}`);
+            throw new TypeError(`The RPC receiver does not implement the method "${String(prop)}".`);
+          },
+  });
+  for (const fn of Object.values(index)) {
+    if (typeof fn === "function") {
+      Object.defineProperty(fn, "apply", { value: () => { throw new TypeError('The RPC receiver does not implement the method "apply".'); } });
+    }
+  }
+  const target = { index: stub, bucket: bucket as unknown as R2Bucket };
   const proxy = (req: Request) => handleReadOnly(req, target);
   return { calls, proxy, target };
 }

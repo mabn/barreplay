@@ -120,9 +120,12 @@ export async function handleReadOnly(req: Request, target: ReadOnlyTarget): Prom
     const method = path.slice("/index/".length);
     if (!READ_METHODS.has(method)) return refuse(`ReplayIndex.${method}`);
     if (!Array.isArray(body)) return Response.json({ error: "body must be the argument array" }, { status: 400 });
-    const fn = target.index[method];
-    if (typeof fn !== "function") return Response.json({ error: `no method ${method}` }, { status: 404 });
-    const result = await (fn as (...a: unknown[]) => unknown).apply(target.index, body);
+    // Called as a method of the stub, never via fn.apply/call: a Durable
+    // Object stub answers ANY property as a remote method, so `.apply` is
+    // itself sent to the object ("does not implement the method apply").
+    const index = target.index as Record<string, (...a: unknown[]) => unknown>;
+    if (typeof index[method] !== "function") return Response.json({ error: `no method ${method}` }, { status: 404 });
+    const result = await index[method](...body);
     return Response.json({ result: result ?? null });
   }
 
