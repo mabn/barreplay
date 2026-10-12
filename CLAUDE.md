@@ -1206,8 +1206,8 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           directly to a hostname. A Worker runs BEFORE Cloudflare's cache, so
                           every /replays/* read through it is a billed Class B GetObject no
                           matter what cache-control it sets; served straight from the bucket a
-                          cache HIT never reaches R2 and costs nothing. /index.json and /api/*
-                          stay on the worker because it BUILDS them (bucket scan, catalog DO).
+                          cache HIT never reaches R2 and costs nothing. /api/* stays on the
+                          worker because it BUILDS it (the catalog DO).
                           app.js routes exactly those URLs through dataURL(), whose origin
                           comes from index.html's __DATA_ORIGIN__ placeholder: stamped by the
                           Vite dataBase plugin on a BUILD only ($DATA_BASE overrides), BLANKED
@@ -1593,7 +1593,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           arrives, so a gex or bar-rts link, a ?replay= URL or a log line all
                           resolve to the id, while a bare prefix stays a prefix and anything
                           with no id in it is passed through for the server to reject), then
-                          the settings chips with Clear/Unregistered/count pushed to the far end.
+                          the settings chips with Clear/count pushed to the far end.
                           Two rows because one wrapped at some widths and not others, which moved
                           the buttons around as the catalog gained flags.
                           Both ranges are ONE function (initDualRange): two <input type=range>
@@ -1635,41 +1635,32 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           ordered query; ignoring them would make the Next button lie), and an
                           absent limit serves the SAME 200-row cap as an explicit one
                           (CATALOG_LIMIT_MAX in app.ts): the whole-catalog response is gone,
-                          so a caller that really wants everything (orphan mode) walks offset
-                          in cap-sized pages until a short page. The page is
+                          so a caller that really wants everything walks offset in cap-sized
+                          pages until a short page. The page is
                           in-process state, NOT in the URL (like the queue's pager and unlike
                           the filters): "page 3" describes a moment in a growing list, not a set
-                          of replays. Any filter change returns to the first page. Orphan mode
-                          is the exception that pages in the BROWSER: merging in unregistered
-                          uploads means knowing which of them a catalog row already covers,
-                          which one page of rows cannot answer — and that mode already reads the
-                          whole bucket. Every control writes a URL param and
+                          of replays. Any filter change returns to the first page. Every control writes a URL param and
                           re-queries GET /api/replays — the filtering is the server's, so the count it
                           reports is the true number of matches, not what happened to be fetched. The
                           state lives in the URL (history.replaceState, so filtering is not
                           navigation and the back button leaves the list rather than stepping through
                           keystrokes), which makes a filtered list shareable and survive a refresh,
                           and replayHref carries it into a replay so returning lands on the same list.
-                          While any filter is active the /index.json-only stubs are dropped: they have
-                          no map, size, roster or settings, so no filter could be true of them. The
-                          bar stays HIDDEN unless GET /api/replays/maps answers — a backend with no
+                          The bar stays HIDDEN unless GET /api/replays/maps answers — a backend with no
                           filtering behind its catalog (a plain static host) must not show one, since
                           a filter bar that silently does nothing is worse than none.
-                          /index.json is NOT merged into the list by default, because it is not a
-                          file: the worker BUILDS it per request by paging the bucket's whole
-                          replays/ prefix (~3.4k objects — every head/keys/resources and 64-sample
-                          chunk of every published revision, 1000 per round trip), measured at ~1.5 s
-                          against the catalog's ~90 ms. All it adds is uploads whose files exist but
-                          which were never registered, so it is fetched only when it can change what
-                          is shown: when /api/replays is unavailable (it is then the WHOLE listing —
-                          an old deployment or a plain static host) or on ?orphans=true, the admin
-                          bar's "Unregistered" button (a button, not something admin mode does to
-                          every page load; disabled while a filter is active, since a stub has no
-                          metadata any filter could match). Consequence: an unregistered upload is
-                          invisible until someone asks for it. knownReplayURL therefore no longer
-                          treats replayList as the catalog — it is a filtered subset that also omits
-                          stubs, so any well-formed id is attempted and loadReplay reports a real
-                          failure rather than silently bouncing a shared ?replay= link to the list.
+                          THE CATALOG IS THE ONLY LISTING. There used to be an /index.json the
+                          worker built per request by listing the bucket's whole replays/ prefix,
+                          merged in to show uploads that were never registered (the admin
+                          "Unregistered" button, ?orphans=true) and as the whole listing when
+                          /api/replays failed. It was removed: the bucket had grown to 130k+
+                          objects, so one request was hundreds of list calls (and a dev:prod
+                          page whose /api/replays failed spent minutes on it). An unregistered
+                          upload therefore does not list; its /replays/<id> link still plays,
+                          and PUT /api/replays/<id> registers it. knownReplayURL does not treat
+                          replayList as the catalog — it is a filtered page — so any well-formed
+                          id is attempted and loadReplay reports a real failure rather than
+                          silently bouncing a shared link to the list.
                           DRAG&DROP UPLOADS: the landing page's dropzone POSTs a raw .brepstream to
                           /api/upload (open endpoint; the Hono app lives in src/worker/app.ts, kept
                           free of workerd imports so worker/tests drive the real routes; index.ts is
@@ -1687,7 +1678,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           to the last I/O so it does not advance within a request — concurrent uploads
                           collided and the second overwrote the first. Timestamp stays first so the
                           prefix sorts oldest-first, so identical bytes are re-archived, not deduped)
-                          (append-only prefix, never listed by /index.json, never served publicly;
+                          (append-only prefix, never listed, never served publicly;
                           the substrate for the future multi-player merge), and inserts a job row in
                           the DO's jobs table. cmd/bringest (see its entry) polls
                           GET /api/jobs, downloads via GET /api/streams/<gameId>/<file> (both
@@ -3016,7 +3007,7 @@ is the Go side that publishes a `.brp` (`static.go`, used by `pack -upload` and
 the catalog row the publisher registers (`catalog.go`). Nothing here touches the
 engine. **The viewer reads the current .brp version only** — convert a raw
 `.brepstream` once with `pack` (the converter owns the legacy parsing;
-viz has none). The URL scheme is `/index.json`, `/api/replays` and
+viz has none). The URL scheme is `/api/replays` and
 `/replays/<id>.brp` — the whole published replay, Range-read — plus, for OLDER
 replays, `/replays/<id>.brw`, `.resources`, and (older still) `.keys` and
 `/replays/<id>/c<n>`.

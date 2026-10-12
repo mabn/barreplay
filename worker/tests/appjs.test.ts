@@ -1012,7 +1012,7 @@ test('a game being processed is listed, badged first, and cannot be opened', () 
     // The real one is exercised by its own tests; here it only has to produce
     // a badge for the pill to be ahead of.
     const settingsBadges = (s) => (s ? [{ key: 'lava', label: 'lava' }] : []);
-    const adminMode = () => false, syncOrphanButton = () => {}, filterQuery = () => '';
+    const adminMode = () => false, filterQuery = () => '';
     // Paging state: this test is about the rows, so one page holds them all.
     const PAGE_SIZE = 50; let homePage = 0, homeHasNext = false;
     const goPage = () => {};
@@ -1093,7 +1093,7 @@ test('the Players header swaps the column to lobby names and back', () => {
     const replayHref = (id) => '/?replay=' + id;
     const fmtDate = () => 'date', fmtDateShort = () => 'date', fmtDuration = () => 'dur', fmtGameDuration = () => 'dur', fmtSize = () => 'size';
     const settingsBadges = () => [];
-    const adminMode = () => false, syncOrphanButton = () => {}, filterQuery = () => '';
+    const adminMode = () => false, filterQuery = () => '';
     const PAGE_SIZE = 50; let homePage = 0, homeHasNext = false;
     const goPage = () => {};
     ${extract('playersColumn')}
@@ -1972,7 +1972,7 @@ test('a 16-way free-for-all row stays the width of an 8v8 one', () => {
     const replayHref = (id) => '/?replay=' + id;
     const fmtDate = () => 'date', fmtDateShort = () => 'date', fmtDuration = () => 'dur', fmtGameDuration = () => 'dur', fmtSize = () => 'size';
     const settingsBadges = () => [];
-    const adminMode = () => false, syncOrphanButton = () => {}, filterQuery = () => '';
+    const adminMode = () => false, filterQuery = () => '';
     const PAGE_SIZE = 50; let homePage = 0, homeHasNext = false;
     const goPage = () => {};
     const playersColumn = () => 'players';
@@ -2034,7 +2034,7 @@ test('list rows link the bare game id; alt-upload links keep their revision', ()
     const replayHref = (id) => '/?replay=' + id;
     const fmtDate = () => 'date', fmtDateShort = () => 'date', fmtDuration = () => 'dur', fmtGameDuration = () => 'dur', fmtSize = () => 'size';
     const settingsBadges = () => [];
-    const adminMode = () => false, syncOrphanButton = () => {}, filterQuery = () => '';
+    const adminMode = () => false, filterQuery = () => '';
     const PAGE_SIZE = 50; let homePage = 0, homeHasNext = false;
     const goPage = () => {};
     const playersColumn = () => 'players';

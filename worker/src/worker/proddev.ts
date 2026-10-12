@@ -26,15 +26,6 @@ app.onError((err, c) => {
 
 export default {
   fetch(req: Request, env: ProdDevEnv, ctx: ExecutionContext) {
-    // /index.json lists the WHOLE production bucket (hundreds of thousands of
-    // objects, ~300 list calls through the remote binding). Here that takes
-    // minutes, prints a stream of "internal error" lines from the remote
-    // binding while it runs, and only adds uploads the catalog never
-    // registered. The page asks for it when /api/replays fails, or on the
-    // admin "Unregistered" button, and treats a non-200 as "no extra files".
-    if (new URL(req.url).pathname === "/index.json") {
-      return Response.json({ error: "/index.json is not served by npm run dev:prod" }, { status: 501 });
-    }
     const proxy = (r: Request) => env.PROD.fetch(r);
     const prodEnv = { ...env, REPLAY_INDEX: readOnlyIndex(proxy), BUCKET: readOnlyBucket(proxy) } as unknown as Env;
     return app.fetch(req, prodEnv, ctx);

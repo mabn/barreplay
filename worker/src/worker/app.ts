@@ -5,7 +5,6 @@
 // the Go publisher (`pack`, the ingest daemon, `barreplay-static`) put in the
 // R2 bucket:
 //
-//   /index.json                 the replay picker listing
 //   /replays/<id>.brp           the capture itself — the whole published
 //                               replay. The viewer Range-reads its head (meta,
 //                               events, comms), then the keyframes section (the
@@ -369,7 +368,7 @@ app.post("/api/admin/replays/:id/refresh-settings", async (c) => {
 
 // Drag&drop upload: the Worker does NOT transcode (the viewer's .brp wire is
 // produced by the Go pipeline). It validates the stream's preamble, archives
-// the raw bytes under streams/<gameId>/ — a prefix /index.json never lists and
+// the raw bytes under streams/<gameId>/ — a prefix nothing lists and
 // /replays/* never serves, and from which nothing is ever deleted — and
 // records a pending job for the ingest daemon (cmd/bringest), which
 // polls, transcodes, publishes the pieces under a fresh revision id, and
@@ -946,9 +945,6 @@ app.get("/api/streams/:month/:gameId/:file", async (c) => {
   return serveR2(c.env.BUCKET, key, c.req.raw, false);
 });
 
-// The replay listing is built live from the bucket (list the replays/ prefix), so
-// uploading a single replay's files makes it appear with no index.json to maintain.
-app.get("/index.json", (c) => handleIndex(c.env.BUCKET));
 // /replays/<id> with no extension is a PAGE — the viewer's canonical URL for
 // one replay (app.js routes on the path) — while every data piece under the
 // same prefix has an extension (<id>.brw/.brp/.keys/.resources) or a second
@@ -1140,66 +1136,9 @@ app.all("*", (c) => c.env.ASSETS.fetch(c.req.raw));
 
 export default app;
 
-// handleIndex builds the replay picker listing by scanning the bucket's replays/
-// prefix — one entry per replay (a <id>.brp, or an older bundle's <id>.brw,
-// exists), with size = the sum of that replay's objects. No index.json object
-// is needed, so a single-replay upload is self-sufficient.
-const REPLAY_PREFIX = "replays/";
-
-async function handleIndex(bucket: R2Bucket): Promise<Response> {
-  const sizes = new Map<string, number>();
-  const replays = new Set<string>();
-  let cursor: string | undefined;
-  do {
-    const page = await bucket.list({ prefix: REPLAY_PREFIX, cursor, limit: 1000 });
-    for (const o of page.objects) {
-      let rest = o.key.slice(REPLAY_PREFIX.length);
-      // A month folder is part of the replay's id (its rid), not a chunk
-      // directory: replays/<YYYY-MM>/<name>.brp is replay "<YYYY-MM>/<name>".
-      let folder = "";
-      const first = rest.indexOf("/");
-      if (first >= 0 && isReplayFolder(rest.slice(0, first))) {
-        folder = rest.slice(0, first + 1);
-        rest = rest.slice(first + 1);
-      }
-      const slash = rest.indexOf("/");
-      let id: string;
-      if (slash >= 0) {
-        id = rest.slice(0, slash); // replays/<id>/c<n>
-      } else if (rest.endsWith(".brw")) {
-        id = rest.slice(0, -".brw".length);
-        replays.add(id); // the marker file for a valid replay
-      } else if (rest.endsWith(".resources")) {
-        id = rest.slice(0, -".resources".length);
-      } else if (rest.endsWith(".brp")) {
-        id = rest.slice(0, -".brp".length);
-        replays.add(id); // a published replay is its .brp
-      } else if (rest.endsWith(".keys")) {
-        id = rest.slice(0, -".keys".length);
-      } else if (/\.insights\d+\.json$/.test(rest)) {
-        id = rest.replace(/\.insights\d+\.json$/, ""); // the game summary beside it
-      } else {
-        id = rest;
-      }
-      if (folder !== "") {
-        const bare = id;
-        id = folder + bare;
-        if (replays.delete(bare)) replays.add(id);
-      }
-      sizes.set(id, (sizes.get(id) ?? 0) + o.size);
-    }
-    cursor = page.truncated ? page.cursor : undefined;
-  } while (cursor);
-
-  const list = [...replays]
-    .sort()
-    .map((id) => ({ file: id, gameId: id.slice(id.lastIndexOf("/") + 1), size: sizes.get(id) ?? 0 }));
-  return Response.json(list, { headers: { "cache-control": "no-cache" } });
-}
-
 // serveR2 streams an object out of the bucket, honoring a byte Range request
 // (how the viewer reads keyframes and chunks out of a published .brp). `immutable` marks per-replay files that
-// never change once written; index.json is revalidated instead.
+// never change once written.
 async function serveR2(bucket: R2Bucket, key: string, req: Request, immutable: boolean): Promise<Response> {
   const rangeHeader = req.headers.get("range");
   const parsed = parseRange(rangeHeader);

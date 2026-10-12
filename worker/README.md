@@ -17,15 +17,13 @@ chunk are independently-gzipped byte ranges. The files are precomputed
 
 | URL | Static object (in R2) |
 | --- | --- |
-| `GET /index.json` | built live by the Worker from the bucket (no stored file) |
 | `GET /replays/<id>.brp` | `replays/<id>.brp` — the whole published replay. The viewer Range-reads its head (meta, events, comms), then its keyframes (the whole timeline becomes scrubbable), each chunk's delta frames and the economy, at the offsets the meta's section layout gives |
 | `GET /replays/<id>.brw`, `.resources` | only OLDER replays: a precomputed head and the economy as JSON. Still served and read (the viewer falls back to the `.brw` when there is no `.brp`), never written any more |
 | `GET /replays/<id>.keys`, `/replays/<id>/c<n>` | only replays older still, which split the keyframes and chunks into files; still served, never written any more |
 
 The Worker (`src/worker/index.ts`) is a thin Hono app that streams these out of R2 —
-no frame is ever decoded server-side. The replay listing (`/index.json`) is
-built **live** from the bucket (it lists the `replays/` prefix), so there is no listing file
-to maintain: uploading one replay's `.brp` makes it appear, and deleting it removes it. The SPA and the vendored unit/rank
+no frame is ever decoded server-side. The replay listing is the catalog
+(`GET /api/replays`, a Durable Object table); nothing walks the bucket to build one. The SPA and the vendored unit/rank
 icons (`/icons/*`, `/ranks/*`) are fixed static assets bundled with the deploy. Map terrain
 is fetched **browser-side directly** from `api.bar-rts.com` (degrades gracefully if
 unreachable), so there is no map proxy.
@@ -256,9 +254,8 @@ Writes can be guarded with a shared secret: `npx wrangler secret put REPLAY_PUT_
 makes the PUT require `Authorization: Bearer <token>`; `pack` sends the same-named env
 var. Without the secret (local dev) the endpoint is open.
 
-The front-end merges `GET /api/replays` with `/index.json`, so a replay whose files are
-in the bucket but was never registered still appears (with only its byte size). To
-(re-)register one replay by hand:
+A replay whose files are in the bucket but was never registered does not appear in
+the list (its `/replays/<id>` link still plays). To (re-)register one replay by hand:
 
 ```sh
 curl -X PUT https://<worker-host>/api/replays/<gameId> \
@@ -433,7 +430,7 @@ worker/
   public/replay_uploader.lua  the widget /setup hands out, synced from assets/lua by the same
                           script (gitignored — source of truth is assets/lua/replay_uploader.lua)
   src/worker/index.ts     wrangler entry: re-exports the app + the Durable Object class
-  src/worker/app.ts       Hono app: serve R2 (index.json, replays/**), /api/replays,
+  src/worker/app.ts       Hono app: serve R2 (replays/**), /api/replays,
                           /api/upload + jobs, SPA fallback (no workerd imports — node-testable)
   src/worker/replayindex.ts  the catalog + ingest-jobs Durable Object (SQLite)
   src/worker/replayentry.ts  catalog row shape + PUT body validation (node-testable, no workerd)
@@ -460,7 +457,7 @@ npx wrangler r2 bucket create barreplay-replays-preview
 go build ./cmd/barreplay-static
 ./barreplay-static -out ./static ./snapshots/*.brp     # writes index.json + replays/**
 
-# 2. upload to real R2 (walks only replays/**; no index.json — the listing is dynamic)
+# 2. upload to real R2 (walks only replays/**; no index.json — the listing is the catalog)
 cd worker
 npm run upload -- ../static <id>         # ONE replay to real R2 (the common case)
 npm run upload -- ../static              # every replay in the dir, to real R2
@@ -734,9 +731,6 @@ production:
 
 - **Writes answer 403** "read-only production mode": drag&drop uploads, the
   admin buttons (queue, retry, disable, POV, refresh), `PUT /api/replays`.
-- **No `/index.json`** (501): it walks the whole bucket, hundreds of list
-  calls through the proxy. The page then lists only catalog rows, and the
-  admin "Unregistered" button finds nothing.
 - **No cron**: `proddev.ts` exports no scheduled handler, since the games
   mirror, lobby poll and lava sync all write.
 - **On-demand summaries are local**: the `SummaryHub` is the dev server's own
@@ -770,11 +764,10 @@ answered at the edge, never becomes a `GetObject`, and so costs nothing.
 The viewer therefore fetches the per-replay data (the `.brp`, and an older
 replay's `.brw`, `.resources`, `.keys` and `/c<n>`) from
 `cdn-bar.fogofwar.dev`, and everything else —
-`/index.json`, `/api/*` — from the Worker, because the Worker *builds* those
-(a bucket scan, the catalog Durable Object); they are not objects a bucket
-could serve.
+`/api/*` — from the Worker, because the Worker *builds* it (the catalog
+Durable Object); it is not an object a bucket could serve.
 
-`replay.fogofwar.dev` (Worker)      SPA, /api/*, /index.json, uploads
+`replay.fogofwar.dev` (Worker)      SPA, /api/*, uploads
 `replay.bartools.workers.dev`       the same Worker on its workers.dev hostname
                                     (`workers_dev: true` in wrangler.jsonc —
                                     explicit, because configured routes flip
