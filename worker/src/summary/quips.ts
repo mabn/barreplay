@@ -1,5 +1,5 @@
 // Asides: now and then a swing's story gets a line of colour under its
-// title — "41 Wind Turbines: Blue team is betting the game on the weather"
+// title — "41 Wind Turbines: Blue is betting the game on the weather"
 // — about what a side built or lost. Each one fires only on a fact plain
 // in the file (Moment.built, the milestones, a base going up), rotates its
 // words by the moment's number so a page reads the same on every load, and

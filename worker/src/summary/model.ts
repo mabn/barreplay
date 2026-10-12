@@ -129,7 +129,10 @@ export function sideName(ins: Insights, side: number): string {
   return `${mine} team`;
 }
 
-/** sideShort names a side's units: "Blue" in "Blue Juggernauts". */
+/** sideShort is a side's name in a sentence: "Blue" in "Blue Juggernauts",
+ * and the subject of every story ("Blue loses 43% of its army"; Marcin's
+ * call: sides are "Blue" and "Red", never "Blue team"). sideName stays for
+ * labels (legends, column heads). */
 export function sideShort(ins: Insights, side: number): string {
   return sideName(ins, side).replace(/ team$/, "");
 }

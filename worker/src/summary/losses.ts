@@ -2,7 +2,7 @@
 // fighting: when a team is eliminated its remaining units go down with it,
 // and at the end of a game those are most of the deaths there are. Pure, so
 // the node tests can pin it.
-import { sideName, sideOfTeam } from "./model";
+import { sideOfTeam, sideShort } from "./model";
 import { SIM_FPS, type Insights } from "./types";
 
 export interface Losses {
@@ -38,7 +38,7 @@ export function knockouts(ins: Insights): Knockout[] {
   const owner = new Map(ins.teams.map((t) => [t.team, t.player ?? ""]));
   return (ins.eliminated ?? []).map((e) => {
     const sd = side.get(e.team) ?? -1;
-    const name = owner.get(e.team) || (sd >= 0 ? sideName(ins, sd) : `Team ${e.team}`);
+    const name = owner.get(e.team) || (sd >= 0 ? sideShort(ins, sd) : `Team ${e.team}`);
     const to = e.to !== undefined ? owner.get(e.to) || `Team ${e.to}` : null;
     return { f: e.f, team: e.team, side: sd, name, label: to ? `${name} leaves, handing their units to ${to}` : `${name} is eliminated`, handoff: to !== null };
   });

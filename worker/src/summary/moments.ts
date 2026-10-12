@@ -5,7 +5,7 @@
 // card uses. Pure, so the node tests can pin the wording rules.
 import { fmtClock, fmtMetal } from "./format";
 import { knockouts, wipedOf } from "./losses";
-import { defWorth, lossWorth, sideName, sideOfTeam, sideShort } from "./model";
+import { defWorth, lossWorth, sideOfTeam, sideShort } from "./model";
 import { battlePhrase, battleWhere, marginPhrase, plural } from "./phrases";
 import { at as placeAt, place } from "./places";
 import { QUIPS_MAX, quip, type Quip, type QuipFacts } from "./quips";
@@ -262,8 +262,8 @@ interface Growth {
 export function growthStory(ins: Insights, m: Moment): Growth {
   const won = m.side;
   const lose = 1 - won;
-  const W = sideName(ins, won);
-  const L = sideName(ins, lose);
+  const W = sideShort(ins, won);
+  const L = sideShort(ins, lose);
   const s = ins.series;
   const last = Math.max(0, s.t.length - 1);
   const step = (f: number) => Math.max(0, Math.min(last, Math.round(f / SIM_FPS / ins.stepSec) - 1));
@@ -325,8 +325,8 @@ export function growthStory(ins: Insights, m: Moment): Growth {
   const dBldL = gl.buildings[1] - gl.buildings[0];
   const buildingsFell = dBldL < 0 && -dBldL >= Math.max(0, dBldW);
   // "Bigger" only when it is: a side still behind at the end caught up.
-  // A base that SHRANK is said as that, whatever else moved: "Blue team
-  // out-builds Red team in buildings" over a Red base going down is false.
+  // A base that SHRANK is said as that, whatever else moved: "Blue
+  // out-builds Red in buildings" over a Red base going down is false.
   const list = (xs: string[]) => (xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
   const armyWords = army ? (defencesMoved ? ["army", "defences"] : ["army"]) : [];
   let title: string;
@@ -372,7 +372,7 @@ export function growthStory(ins: Insights, m: Moment): Growth {
   if (army && armyDefences) cats.add("defence");
   const lines = cats.size && m.built ? ins.sides.map((_, sd) => buildLines(ins, m, sd, cats)) : null;
   for (const [sd, ls] of (lines ?? []).entries()) {
-    for (const l of ls) parts.push(`${sideName(ins, sd)} ${l.label}: ${l.units.slice(0, 4).map((u) => `${u.n} ${defLabel(ins, u.def, u.n)}`).join(", ")}.`);
+    for (const l of ls) parts.push(`${sideShort(ins, sd)} ${l.label}: ${l.units.slice(0, 4).map((u) => `${u.n} ${defLabel(ins, u.def, u.n)}`).join(", ")}.`);
   }
   return { title, detail: parts.join(" "), sides, named: { army, eco, build }, armyDefences, lines: lines?.some((ls) => ls.length) ? lines : null, cats };
 }
@@ -492,7 +492,7 @@ export function sideLosses(ins: Insights, f0: number, f1: number, area?: { x: nu
     o.metal += cost;
     o.worth += cost * defWorth(def);
     if (def && isCommander(def.name)) {
-      o.commanders.push(owner.get(d.team[i]) || sideName(ins, side));
+      o.commanders.push(owner.get(d.team[i]) || sideShort(ins, side));
       o.commanderDeaths.push(i);
     }
     if (cost > o.topCost) {
@@ -605,11 +605,11 @@ export function baseLoss(ins: Insights, side: number, f0: number, f1: number, al
   return { share: Math.min(1, loss.metal / total), mostly, loss, focus };
 }
 
-/** baseTitle says it: "Blue team loses 35% of its base in the west, mostly
- * its economy", "Blue team loses most of its base". Without the place and
+/** baseTitle says it: "Blue loses 35% of its base in the west, mostly
+ * its economy", "Blue loses most of its base". Without the place and
  * the kind (short) it is a clause for another title. */
 function baseTitle(ins: Insights, side: number, b: BaseLoss, short = false): string {
-  const L = sideName(ins, side);
+  const L = sideShort(ins, side);
   const where = !short && typeof b.focus.x === "number" && typeof b.focus.z === "number" ? ` ${placeAt(ins, b.focus.x, b.focus.z)}` : "";
   if (b.share >= BASE_MOST) return `${L} loses most of its base${where}`;
   return `${L} loses ${Math.round(b.share * 100)}% of its base${where}${b.mostly && !short ? `, mostly ${b.mostly}` : ""}`;
@@ -628,7 +628,7 @@ function quipFacts(ins: Insights, m: Moment, kind: "growth" | "base", base: Base
   const before = (x: { f: number } | undefined) => !!x && x.f <= m.f1;
   const [w0, w1] = momentWindow(ins, m);
   return {
-    W: sideName(ins, won), L: sideName(ins, lose), n: m.n, kind,
+    W: sideShort(ins, won), L: sideShort(ins, lose), n: m.n, kind,
     // Only what the story is about: a forest of wind turbines is no aside
     // to an army that out-built the other.
     built: (m.built[won] ?? []).map((u) => {
@@ -650,8 +650,8 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
   const won = m.side;
   const lose = 1 - won;
   const priced = ins.costCoverage === "full" || lost.some((l) => l.metal > 0);
-  const W = sideName(ins, won);
-  const L = sideName(ins, lose);
+  const W = sideShort(ins, won);
+  const L = sideShort(ins, lose);
   const ll = lost[lose] ?? { n: 0, metal: 0, worth: 0, commanders: [], commanderDeaths: [], top: -1, kinds: [], units: [], at: null };
   const wl = lost[won] ?? { n: 0, metal: 0, worth: 0, commanders: [], commanderDeaths: [], top: -1, kinds: [], units: [], at: null };
   const size = (l: SideLoss) => (priced ? l.metal : l.n);
@@ -1207,10 +1207,10 @@ export function ownBlast(b: Battle | undefined): number {
 /** ownBlastTitle says what blew up and, when an enemy's kill set it off,
  * whose: "Blue Advanced Fusion Reactors blow up, set off by
  * [MANTA]'s Basilica". Losses to allies' fire rather than to blasts read
- * "Blue team loses 18.9k metal to its own side's fire". */
+ * "Blue loses 18.9k metal to its own side's fire". */
 export function ownBlastTitle(ins: Insights, b: Battle, side: number): string {
   const l = b.lost[side];
-  const S = sideName(ins, side);
+  const S = sideShort(ins, side);
   const def = l.ownDef !== undefined ? ins.defs[String(l.ownDef)] : undefined;
   const name = def?.human || def?.name;
   const n = l.units?.find((u) => u.def === l.ownDef)?.n ?? 0;

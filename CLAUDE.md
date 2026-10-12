@@ -652,7 +652,7 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           killer named), OwnDef the def that did most of it, Trigger the enemy
                           (team, def) whose kill came at most 5 s before the first of them. When
                           Own is >= 50% and >= 1000 metal of the side that lost more, nobody
-                          "wins" the battle (moments.ts ownBlast): it reads "Blue team's
+                          "wins" the battle (moments.ts ownBlast): it reads "Blue
                           Advanced Fusion Reactors blow up, set off by [MANTA]'s Basilica" in
                           the swing list, the battle tooltip and a swing story, with no
                           "ahead" box. FRIENDLY FIRE (key "friendly") is the LIVING unit (it
@@ -714,7 +714,7 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           army still grew faster than the other's (moments.ts armyGrew) is
                           not why the line moved: it is told as the build-up, titled "...
                           despite losing a fight in the middle", with the fight a "Meanwhile
-                          Red team won the fight ..." sentence counting only its part INSIDE
+                          Red won the fight ..." sentence counting only its part INSIDE
                           the moment's window (notableLoss names one unit carrying >= 30% and
                           3000+ metal of it: "including a half-built Epic Pulsar"), and the
                           swing row shows each side's army and income plus "in the fight"
@@ -759,9 +759,9 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           raids Ann's base" (20k+ and 4x worth / 5k+ / less).
                           BUILD-UP AND BASE STORIES (moments.ts, version 10; Marcin's ask:
                           insightful, not just "X built more eco"). growthStory names the
-                          buildings when Moment.Build >= 0.2 ("out-builds Red team in economy
-                          and buildings", "on every front", "builds up a bigger base", "Red
-                          team's base shrinks while Blue team out-builds its army") and reads
+                          buildings when Moment.Build >= 0.2 ("out-builds Red in economy and
+                          buildings", "on every front", "builds up a bigger base", "Red's base
+                          shrinks while Blue out-builds its army") and reads
                           the army with its standing defences when they are >= 10% of it
                           (armyDefences; the title says "defences" only when they moved at least
                           half as much as the armies). Under each side it SHOWS what was built:
@@ -771,14 +771,18 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           army = the defences. A BASE GOING UP is a story of its own (baseLoss:
                           the losing side's fought-for building losses >= 1000 metal, >= 15% of
                           what it had standing and >= half of everything it lost in the window):
-                          "Red team loses 35% of its base in the south-east, mostly its
+                          "Red loses 35% of its base in the south-east, mostly its
                           economy", with a "buildings: N lost" icon row under it. It leads
                           (after an elimination, before a commander, who rides along as ", with
                           Ann's commander") when buildings moved the line more than the armies
                           and no one battle holds half of it — that battle's phrase is the
                           better title; otherwise an elimination or commander title gains " as
-                          Red team loses 24% of its base", and a fight with no battle and no
-                          army drop is told as the base. QUIPS (quips.ts): a line of colour
+                          Red loses 24% of its base", and a fight with no battle and no
+                          army drop is told as the base. Every story names a side by its
+                          COLOUR alone (moments.ts and quips.ts take model.ts sideShort:
+                          "Blue loses 43% of its army"; Marcin's call, sides are never "Blue
+                          team"), the way the battle phrases always did; sideName's "Blue
+                          team" is for labels (legends, column heads). QUIPS (quips.ts): a line of colour
                           under a build-up or base story of a v10 file, on plain facts only (a
                           forest of 15+ wind turbines, 8+ of one defence, a 20-piece wall, 6+
                           converters, a 20k+ building, a first fusion or a nuke silo the other
@@ -1010,7 +1014,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           exactly what the clip plays rather than the whole map's window.
                           When NO battle holds the losses (spread over the map) and the losing
                           side's army fell by >= ARMY_DROP_SHARE (25%) in the window, the moment
-                          is told as that: "Blue team loses 43% of its army[, mostly aircraft]"
+                          is told as that: "Blue loses 43% of its army[, mostly aircraft]"
                           (moments.ts armyDrop), clipped over the whole window — the line moves
                           on the army, which the losses chart (a share of everything owned)
                           barely shows. The swing chart shades each moment's minute in the
@@ -1103,7 +1107,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           battle: at most 2 min long, >= 1000 metal lost by one side and both
                           sides' losses >= 15% of both armies then — a raid or a bombing run
                           too small next to the game's biggest yet decisive for the moment;
-                          at most LIST_MAX = 20 entries, one per time and place), each told as "Red team
+                          at most LIST_MAX = 20 entries, one per time and place), each told as "Red
                           decisively wins battle (5)" with the battles list's white-circle
                           badge — the line lists only its biggest shifts, and a decided fight
                           can move it little. A swing told as one battle carries the badge too. LOG
