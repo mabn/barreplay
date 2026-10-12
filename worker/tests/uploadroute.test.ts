@@ -188,7 +188,16 @@ class FakeIndex {
       const e = this.entries.get(j.gameId);
       return {
         ...j,
-        game: e ? { durationSec: e.durationSec ?? null, gameSize: e.gameSize ?? null } : null,
+        game: e
+          ? {
+              durationSec: e.durationSec ?? null,
+              gameSize: e.gameSize ?? null,
+              startUnix: e.startUnix ?? null,
+              map: e.map ?? null,
+              mapFile: null,
+              settings: e.settings ?? null,
+            }
+          : null,
       };
     };
     return {
@@ -1389,7 +1398,7 @@ test("queue rows carry the game's size and duration", async (t) => {
 
   const page = await asJson(await app.request("/api/admin/queue", {}, env));
   const byId = Object.fromEntries(page.jobs.map((j: { id: string }) => [j.id, j]));
-  assert.deepEqual(byId.known.game, { durationSec: 2417, gameSize: "8v8" });
+  assert.deepEqual(byId.known.game, { durationSec: 2417, gameSize: "8v8", startUnix: null, map: null, mapFile: null, settings: null });
   assert.equal(byId.stranger.game, null);
 });
 
