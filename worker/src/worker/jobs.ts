@@ -125,6 +125,9 @@ export interface JobProgress {
    * runs on somebody's workstation, behind NAT, and nothing else here can see
    * it. */
   cpuPct?: number;
+  /** How long the job has been running, so the page can put the time left
+   * against the whole run. */
+  elapsedSec?: number;
 }
 
 /** Cap on the stored progress JSON. It is a dozen small numbers; the cap only
@@ -158,6 +161,13 @@ export interface QueueGame {
   durationSec: number | null;
   /** The team spec, "8v8" / "1v1". */
   gameSize: string | null;
+  /** When the game started (unix seconds); its end is this plus durationSec. */
+  startUnix: number | null;
+  map: string | null;
+  /** The map's archive name, which BAR's maps API keys on (mirror only). */
+  mapFile: string | null;
+  /** The notable-settings flags the list draws as pills. */
+  settings: Record<string, boolean | string> | null;
 }
 
 /** One row of the queue page: the job, plus what is known about its game. */
@@ -234,6 +244,24 @@ export interface JobStats {
   };
   /** packer.ReportStats' output verbatim (the `pack -stats` breakdown). */
   sizeReport?: string;
+  /** Which bringest did the work: its git commit (dirty when the tree had
+   * uncommitted changes), the commit's time and the binary's build time. */
+  bringest?: {
+    sha?: string;
+    dirty?: boolean;
+    commitTime?: string;
+    time?: string;
+    /** "vcs" | "git" | "ldflags" — where the sha was read from. */
+    source?: string;
+    goVersion?: string;
+  };
+  /** The widget build behind the capture: the player's copy for an upload,
+   * the daemon's embedded one for a re-sim. */
+  widgetVersion?: string;
+  widgetSha?: string;
+  widgetDate?: string;
+  /** The .brp container version published. */
+  brpVersion?: number;
 }
 
 /** Cap on the stored stats JSON. The real thing is 2-4 KB, nearly all of it

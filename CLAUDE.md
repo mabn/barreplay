@@ -259,7 +259,15 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           sim (the split comes from watching the engine's stdout for the
                           widget's first "[barreplay]" line, exactly as cmd/barreplay does it),
                           frames against the demo's length, speed-up, engine version, and
-                          engine.SummarizeInfolog's read of infolog.txt. The size report rides
+                          engine.SummarizeInfolog's read of infolog.txt. EVERY job also records
+                          WHAT made it (buildinfo.go): the bringest binary's git sha, dirty flag,
+                          commit time and BUILD time (the toolchain's vcs stamp on `go build`; `git`
+                          in the working dir under `go run`, which stamps nothing; the executable's
+                          mtime as the build time; -ldflags -X main.buildSha/buildTime override),
+                          the widget build (the stream's own for an upload, the EMBEDDED widget's
+                          version for a re-sim, whose capture names none) and the .brp container
+                          version. A re-sim's healthcheck also carries elapsedSec, which the queue
+                          page adds to etaSec for the Took cell's estimated total. The size report rides
                           along as text, with the daemon's TEMP PATH rewritten to the basename
                           first — it is gone by the time anyone reads the page and is nobody
                           else's business. Reported on FAILURE too: resim.Run fills its
@@ -2356,13 +2364,15 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           deliberately NOT in the chain: it reports pre-existing noUnusedLocals
                           errors in tests/, so wiring it in would block every deploy.
                           QUEUE SECTION (app.js renderQueue): the landing page's second menu entry
-                          shows those jobs — one row per job with its game, its SIZE and
-                          DURATION, a gex link, the KIND, state, what the
+                          shows those jobs — one row per job with its game (plus a copy-id
+                          button), MAP, START time (the header toggles it to the END time,
+                          kept in localStorage), SIZE, DURATION, SETTINGS pills, a gex link, the KIND, state, what the
                           work TOOK, age and failure detail, a link to the replay once the
                           catalog has it (and out
                           to bar-rts.com until then, which for a queued re-sim is the whole point
                           of the row), and a count of the jobs in flight on the menu entry
-                          itself. Size and duration are JOINED ON by the worker
+                          itself. The table spans the full width (no 1650px cap). Size, duration,
+                          map, start and settings are JOINED ON by the worker
                           (ReplayIndex.queuePage), not stored on the job: the jobs table knows a
                           gameId and nothing else, and a queue of bare ids cannot answer the
                           first question anyone has about an hour of engine time — is this an

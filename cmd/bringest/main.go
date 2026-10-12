@@ -79,6 +79,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -95,12 +96,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mabn/barreplay/assets"
 	"github.com/mabn/barreplay/internal/barapi"
 	"github.com/mabn/barreplay/internal/envfile"
 	"github.com/mabn/barreplay/internal/insights"
 	"github.com/mabn/barreplay/internal/insightsrun"
 	"github.com/mabn/barreplay/internal/packer"
 	"github.com/mabn/barreplay/internal/resim"
+	"github.com/mabn/barreplay/snapshot"
 )
 
 // envPath is the local secrets file loaded at startup (R2 keys, catalog
@@ -155,6 +158,8 @@ func run() int {
 	for _, m := range envMsgs {
 		fmt.Fprintln(os.Stderr, m)
 	}
+	thisBuild = readBuildInfo()
+	fmt.Fprintf(os.Stderr, "bringest: build %s\n", thisBuild)
 
 	// One flag names the whole deployment: the daemon's job queue, the stream
 	// downloads, the bucket and the catalog are all the same worker, so there
@@ -352,6 +357,34 @@ type jobStats struct {
 	// numbers on purpose: it is read, not queried, and keeping it whole means
 	// the queue page shows exactly what the terminal would have.
 	SizeReport string `json:"sizeReport,omitempty"`
+
+	// WHAT made the replay, for "was this before or after the fix": the
+	// daemon binary (see buildInfo), the widget build that wrote the capture,
+	// and the container version of the .brp it became. An upload's widget is
+	// the player's own copy, read from the stream; a re-sim's is the one
+	// embedded in this binary, since a re-sim capture records none.
+	Bringest      *buildInfo `json:"bringest,omitempty"`
+	WidgetVersion string     `json:"widgetVersion,omitempty"`
+	WidgetSha     string     `json:"widgetSha,omitempty"`
+	WidgetDate    string     `json:"widgetDate,omitempty"`
+	BrpVersion    int        `json:"brpVersion,omitempty"`
+}
+
+// thisBuild is the running binary's build, read once by run().
+var thisBuild buildInfo
+
+// newJobStats starts a job's record with what is known before any work: which
+// binary is doing it and, for a re-sim, which widget it will inject.
+func newJobStats(kind string) *jobStats {
+	st := &jobStats{}
+	if thisBuild != (buildInfo{}) {
+		b := thisBuild
+		st.Bringest = &b
+	}
+	if kind == kindResim {
+		st.WidgetVersion = assets.WidgetVersion()
+	}
+	return st
 }
 
 type infologStats struct {
@@ -430,6 +463,10 @@ type jobProgress struct {
 	// swapping" and "this daemon is too old to know" must not arrive as the
 	// same absent field.
 	SwapBytes int64 `json:"swapBytes"`
+	// ElapsedSec is how long the job has been running. With EtaSec it gives
+	// the queue page an estimate of the whole run's length, which reads better
+	// than a countdown on a row nobody re-renders.
+	ElapsedSec float64 `json:"elapsedSec,omitempty"`
 }
 
 // resimProgress reads a live re-simulation and converts the reading to the wire
@@ -525,7 +562,7 @@ func (d *daemon) runOnce(ctx context.Context) (int, error) {
 // job that died carries what it managed to measure.
 func (d *daemon) handle(ctx context.Context, j ingestJob) (*jobStats, error) {
 	started := time.Now()
-	st := &jobStats{}
+	st := newJobStats(kindUpload)
 	defer func() { st.TookSec = time.Since(started).Seconds() }()
 
 	if err := d.report(ctx, j.ID, "processing", "", nil); err != nil {
@@ -788,6 +825,7 @@ func recordBRP(st *jobStats, brpPath string, wantReport bool) {
 	if fi, err := os.Stat(brpPath); err == nil {
 		st.BrpBytes = fi.Size()
 	}
+	recordBRPMeta(st, brpPath)
 	// The report names the file it measured, which here is a temp path on this
 	// machine — gone by the time anyone reads the queue page, and nobody
 	// else's business. The basename is the part that means anything.
@@ -796,6 +834,25 @@ func recordBRP(st *jobStats, brpPath string, wantReport bool) {
 		report = report[:maxSizeReport]
 	}
 	st.SizeReport = report
+}
+
+// recordBRPMeta notes the .brp's container version and, when the capture
+// names one, the widget build that wrote it. Best-effort: the bytes are about
+// to be published either way.
+func recordBRPMeta(st *jobStats, brpPath string) {
+	f, err := os.Open(brpPath)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	bf, err := snapshot.ParseBRP(bufio.NewReader(f))
+	if err != nil {
+		return
+	}
+	st.BrpVersion = int(bf.Version)
+	if w := bf.Meta.Widget; w != nil {
+		st.WidgetVersion, st.WidgetSha, st.WidgetDate = w.Version, w.Sha, w.Date
+	}
 }
 
 // reportStats prints the freshly packed .brp's size breakdown — the same
@@ -934,8 +991,14 @@ func (r *resimDaemon) runQueued(ctx context.Context) (int, error) {
 		// every tick and posts it, which is the only window anyone but this
 		// daemon has into an hour of engine time.
 		pr := &resim.Progress{}
-		stop := r.healthcheck(ctx, j.ID, func() *jobProgress { return resimProgress(pr) })
-		st := &jobStats{}
+		stop := r.healthcheck(ctx, j.ID, func() *jobProgress {
+			p := resimProgress(pr)
+			if p != nil {
+				p.ElapsedSec = float64(int64(time.Since(started).Seconds()))
+			}
+			return p
+		})
+		st := newJobStats(kindResim)
 		rerr := r.resim(ctx, j.GameID, st, pr)
 		st.TookSec = time.Since(started).Seconds()
 		stop() // before the terminal report, or a late beat undoes it

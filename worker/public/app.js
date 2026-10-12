@@ -5728,6 +5728,11 @@ let queueSeq = 0;          // ignore a reply overtaken by a newer request
 let queueSupported = true; // cleared by a 404: a backend won't grow the route
 const queueRelisted = new Set(); // games we already re-listed the catalog for
 const queueOpen = new Set();     // job ids whose processing details are expanded
+// Whether the game-time column shows when each game STARTED or ENDED. A
+// viewing preference, kept per browser (best-effort), not in the URL.
+let queueTimeCol = (() => {
+  try { return localStorage.getItem('barreplay.queuetime') === 'end' ? 'end' : 'start'; } catch { return 'start'; }
+})();
 
 // refreshQueue reads one page. Every caller is an explicit action; there is no
 // timer behind it.
@@ -5841,7 +5846,30 @@ function statsLines(j, s) {
   add('Uploaded in', s.uploadSec ? fmtDur(s.uploadSec) : null);
   add('.brp', s.brpBytes ? fmtSize(s.brpBytes) : null);
   add('Total', s.tookSec ? fmtDur(s.tookSec) : null);
+  // WHAT made it: the daemon binary, the widget build, the .brp format.
+  if (s.bringest) {
+    const b = s.bringest;
+    let v = b.sha ? b.sha.slice(0, 12) + (b.dirty ? ' (uncommitted changes)' : '') : 'unknown commit';
+    if (b.commitTime) v += ' · committed ' + fmtIso(b.commitTime);
+    add('bringest', v);
+    add('bringest built', b.time ? fmtIso(b.time) : null);
+  }
+  if (s.widgetVersion || s.widgetSha) {
+    let w = s.widgetVersion || 'unknown version';
+    const extra = [s.widgetSha ? s.widgetSha.slice(0, 12) : null, s.widgetDate].filter(Boolean);
+    if (extra.length) w += ' (' + extra.join(', ') + ')';
+    if (j.kind === 'resim') w += ' · embedded in bringest';
+    add('Widget', w);
+  }
+  add('.brp format', s.brpVersion ? 'v' + s.brpVersion : null);
   return out;
+}
+
+// fmtIso renders an RFC 3339 moment like the rest of the page's dates, or the
+// raw text if it does not parse.
+function fmtIso(iso) {
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? fmtDate(Math.round(t / 1000)) : iso;
 }
 
 // progressLines is the same idea for a job that is still RUNNING: what the
@@ -5861,7 +5889,9 @@ function progressLines(p) {
     if (p.simFps) sim += ` · ${p.simFps.toFixed(0)} sim-fps (${(p.simFps / 30).toFixed(1)}× realtime)`;
     add('Simulated', sim);
   }
+  add('Running for', p.elapsedSec ? fmtDur(p.elapsedSec) : null);
   add('Remaining', p.etaSec ? fmtDur(p.etaSec) : null);
+  add('Estimated total', p.etaSec && p.elapsedSec ? fmtDur(p.elapsedSec + p.etaSec) : null);
   // The engine's own footprint on whichever machine is running it — the only
   // window anybody has onto that host, which is somebody's workstation behind
   // NAT and reachable from here in no other way.
@@ -5905,7 +5935,7 @@ function statsRow(j) {
   const tr = document.createElement('tr');
   tr.className = 'statsrow';
   const td = document.createElement('td');
-  td.colSpan = 11;
+  td.colSpan = 14;
   const dl = document.createElement('div');
   dl.className = 'statsgrid';
   const lines = [...(j.progress ? progressLines(j.progress) : []),
@@ -6734,6 +6764,108 @@ function fillProgressCell(td, p) {
   td.appendChild(line);
 }
 
+// queueMapCell is the game's map, with the same lazy terrain thumbnail the
+// replay and games lists draw. The mirror knows the archive name; a game only
+// the catalog knows falls back to the guess, and a wrong guess just 404s into
+// no thumbnail.
+function queueMapCell(g) {
+  const td = document.createElement('td');
+  td.className = 'map';
+  if (!g.map) {
+    td.classList.add('dim');
+    td.textContent = '—';
+    return td;
+  }
+  const file = g.mapFile || mapFileGuess(g.map);
+  if (file) {
+    const img = document.createElement('img');
+    img.className = 'mapthumb';
+    img.loading = 'lazy';
+    img.alt = '';
+    img.onerror = () => { img.style.display = 'none'; };
+    img.src = `${MAP_API}/maps/${encodeURIComponent(file)}/texture-thumb.jpg`;
+    td.appendChild(img);
+  }
+  const name = document.createElement('span');
+  name.textContent = g.map;
+  td.appendChild(name);
+  return td;
+}
+
+// queueSettingsCell draws the game's settings as the replay list's pills —
+// the same flag reads the same everywhere. Empty, not a dash, when it has none.
+function queueSettingsCell(g) {
+  const td = document.createElement('td');
+  td.className = 'settings';
+  const wrap = document.createElement('span');
+  for (const b of settingsBadges(g.settings)) {
+    const pill = document.createElement('span');
+    pill.className = 'badge badge-' + b.key.replace(/[^\w-]/g, '');
+    pill.textContent = b.label;
+    wrap.appendChild(pill);
+  }
+  td.appendChild(wrap);
+  return td;
+}
+
+// queueGameTime is the game's start or end moment, whichever the header
+// switch picked; null when the game's start is unknown (or, for the end, its
+// length).
+function queueGameTime(g) {
+  if (g.startUnix == null) return null;
+  if (queueTimeCol === 'end') return g.durationSec != null ? g.startUnix + g.durationSec : null;
+  return g.startUnix;
+}
+
+// copyIdButton copies a game id to the clipboard and says so on the button
+// for a moment. It is a button inside the row, so the row's expand toggle
+// leaves it alone.
+function copyIdButton(id) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'copyid';
+  b.textContent = '⧉';
+  b.title = 'Copy the game id';
+  b.setAttribute('aria-label', 'Copy game id ' + id);
+  b.onclick = async (ev) => {
+    ev.stopPropagation();
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(id);
+      ok = true;
+    } catch {
+      // No async clipboard (an insecure origin, an old browser): the
+      // selection-based fallback still works in most of them.
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = id;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        ok = document.execCommand('copy');
+        ta.remove();
+      } catch { ok = false; }
+    }
+    b.textContent = ok ? '✓' : '✗';
+    b.classList.toggle('done', ok);
+    setTimeout(() => { b.textContent = '⧉'; b.classList.remove('done'); }, 1200);
+  };
+  return b;
+}
+
+// runEstimate is what a RUNNING job's Took cell shows: the estimated length of
+// the whole run — how long it has been going plus what the daemon thinks is
+// left. A daemon too old to report its elapsed time leaves only the countdown.
+function runEstimate(p) {
+  if (!p || !p.etaSec) return null;
+  if (p.elapsedSec) {
+    return { label: '~' + fmtDur(p.elapsedSec + p.etaSec),
+             title: `estimated total: ${fmtDur(p.elapsedSec)} so far + ~${fmtDur(p.etaSec)} left` };
+  }
+  return { label: '~' + fmtDur(p.etaSec) + ' left', title: null };
+}
+
 // actionCell is the row's control: one "⋯" button opening a menu of what can
 // be done to this job. Two entries, each offered only where it can change
 // anything:
@@ -6904,6 +7036,7 @@ function renderQueue(errMsg) {
         a.title = 'Not published here (yet) — open it on bar-rts.com';
       }
       td.appendChild(a);
+      td.appendChild(copyIdButton(j.gameId));
       tr.appendChild(td);
     }
     // What the game IS, not what the job is doing with it. Joined on by the
@@ -6913,10 +7046,18 @@ function renderQueue(errMsg) {
     // is this an 8v8 worth the machine time, or a three-minute duel?
     {
       const g = j.game || {};
+      tr.appendChild(queueMapCell(g));
+      const at = queueGameTime(g);
+      const when = cell(at != null ? fmtDateShort(at) : null, 'when');
+      if (g.startUnix != null) {
+        when.title = 'started ' + fmtDate(g.startUnix)
+          + (g.durationSec != null ? '\nended ' + fmtDate(g.startUnix + g.durationSec) : '');
+      }
       const size = cell(sizeLabel(g.gameSize), 'size');
       if (g.gameSize) size.title = g.gameSize + ' — the team spec BAR recorded';
       const dur = cell(g.durationSec ? fmtGameDuration(g.durationSec) : null, 'dur');
       if (g.durationSec) dur.title = fmtDur(g.durationSec) + ' of game time';
+      tr.appendChild(queueSettingsCell(g));
     }
     // Out to gex, which is where a BAR game gets read properly. Always
     // present, unlike the Game cell's bar-rts link, which is only there while
@@ -6987,8 +7128,9 @@ function renderQueue(errMsg) {
       if (s || p) {
         td.title = statsTooltip(j, s, p);
         td.classList.add('expand');
-        const label = headline ? fmtDur(headline)
-          : (p && p.etaSec ? '~' + fmtDur(p.etaSec) + ' left' : '—');
+        const est = headline ? null : runEstimate(p);
+        const label = headline ? fmtDur(headline) : (est ? est.label : '—');
+        if (est && est.title) td.title = est.title + '\n\n' + td.title;
         td.textContent = (queueOpen.has(j.id) ? '▾ ' : '▸ ') + label;
         td.classList.remove('dim');
       }
@@ -7022,6 +7164,19 @@ function renderQueue(errMsg) {
       });
       if (queueOpen.has(j.id)) tbody.appendChild(statsRow(j));
     }
+  }
+  // The game-time column's header is its own switch: start or end.
+  const tbtn = document.getElementById('q_timecol');
+  if (tbtn) {
+    tbtn.textContent = queueTimeCol === 'end' ? 'Ended ⇄' : 'Started ⇄';
+    tbtn.title = queueTimeCol === 'end'
+      ? 'When each game ended — click to show when it started'
+      : 'When each game started — click to show when it ended';
+    tbtn.onclick = () => {
+      queueTimeCol = queueTimeCol === 'end' ? 'start' : 'end';
+      try { localStorage.setItem('barreplay.queuetime', queueTimeCol); } catch { /* per-visit only */ }
+      renderQueue(errMsg);
+    };
   }
   // Counts come from the server, over the whole table — one window of rows
   // cannot say how many jobs are in flight, and claiming otherwise from what

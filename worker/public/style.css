@@ -396,7 +396,7 @@ body.clip-embed #clip {
    same in both lists, so the per-flag colours below are written once. */
 #hometable td.settings, #gamestable td.settings { white-space: normal; }
 #hometable td.settings a, #hometable td.settings > span, #gamestable td.settings > span { display: flex; flex-wrap: wrap; gap: 4px; }
-#hometable .badge, #gamestable .badge {
+#hometable .badge, #gamestable .badge, #queuetable .badge {
   font-size: 10px; line-height: 1; padding: 3px 6px; border-radius: 8px;
   background: var(--raised); border: 1px solid var(--line); color: var(--muted);
   white-space: nowrap;
@@ -404,17 +404,17 @@ body.clip-embed #clip {
 /* Per-flag badge colours: lava glows orange, mods (tweaked unit/def tables)
    warns yellow — the same yellow family as the energy bars; zombies rise in
    purple, ruins moss over in green, an explicitly unranked lobby cools blue. */
-#hometable .badge-lava, #gamestable .badge-lava {
+#hometable .badge-lava, #gamestable .badge-lava, #queuetable .badge-lava {
   color: #ffc46a; border-color: #b85c1a;
   /* ember gradient: hot orange rim fading into deep red coals */
   background: linear-gradient(180deg, #7a2606, #4a1204 55%, #38150a);
   text-shadow: 0 0 4px rgba(255, 140, 30, .5);
   box-shadow: 0 0 8px rgba(255, 110, 20, .35), inset 0 1px 3px rgba(255, 150, 40, .35), inset 0 -3px 6px rgba(230, 60, 0, .4);
 }
-#hometable .badge-mods, #gamestable .badge-mods { color: #e3c34a; border-color: #6e5c1e; background: #332b10; }
-#hometable .badge-zombies, #gamestable .badge-zombies { color: #c58aff; border-color: #5e3d85; background: #2a1a40; }
-#hometable .badge-ruins, #gamestable .badge-ruins { color: #7fd58a; border-color: #33663c; background: #16311b; }
-#hometable .badge-unranked, #gamestable .badge-unranked { color: #7fb2ff; border-color: #2f4d7a; background: #16243a; }
+#hometable .badge-mods, #gamestable .badge-mods, #queuetable .badge-mods { color: #e3c34a; border-color: #6e5c1e; background: #332b10; }
+#hometable .badge-zombies, #gamestable .badge-zombies, #queuetable .badge-zombies { color: #c58aff; border-color: #5e3d85; background: #2a1a40; }
+#hometable .badge-ruins, #gamestable .badge-ruins, #queuetable .badge-ruins { color: #7fd58a; border-color: #33663c; background: #16311b; }
+#hometable .badge-unranked, #gamestable .badge-unranked, #queuetable .badge-unranked { color: #7fb2ff; border-color: #2f4d7a; background: #16243a; }
 /* "processing": not a game setting at all — the pipeline is working on this
    game right now — so it leads the cell and is the one FILLED pill in a row
    of dark muted ones. Bright ground against the table's near-black is what
@@ -534,7 +534,9 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
 /* ---- queue section: the ingest jobs behind the drag&drop uploads ----
    Same table look as the replay list; only the state cell is coloured, since
    "is anything stuck" is the question this view answers. */
-#queuetable { border-collapse: collapse; width: 100%; max-width: 1650px; margin: 0 auto; font-size: 13px; }
+/* Full width, unlike the lists: a job row carries a game's facts AND the
+   job's, and every column it gains is one the 1650px cap would squeeze. */
+#queuetable { border-collapse: collapse; width: 100%; font-size: 13px; }
 #queuetable th {
   text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
   color: var(--faint); font-weight: 600; padding: 4px 14px 6px 8px; border-bottom: 1px solid var(--line);
@@ -554,6 +556,31 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
 #queuetable td.links a.ext:hover { color: var(--accent); text-decoration: underline; }
 #queuetable td.game a { color: var(--accent); text-decoration: none; }
 #queuetable td.game a:hover { text-decoration: underline; }
+/* Copy-the-id button beside the game id: quiet until hovered, like the row's
+   action button, so a column of them does not read as the point. */
+#queuetable .copyid {
+  font: inherit; font-size: 12px; line-height: 1; margin-left: 6px; padding: 2px 4px;
+  color: var(--dim); background: none; border: 1px solid transparent; border-radius: 3px;
+  cursor: pointer; opacity: .35; transition: opacity .12s;
+}
+#queuetable tr:hover .copyid, #queuetable .copyid:focus-visible { opacity: 1; }
+#queuetable .copyid:hover { color: var(--accent); border-color: var(--line); }
+#queuetable .copyid.done { opacity: 1; color: var(--accent); }
+/* The game's map, start/end and settings, joined on from the games mirror. */
+#queuetable td.map > span { vertical-align: middle; }
+#queuetable td.map .mapthumb {
+  width: 18px; height: 18px; object-fit: cover; border-radius: 3px;
+  vertical-align: middle; margin-right: 7px; background: var(--raised);
+}
+#queuetable td.map, #queuetable td.when { color: var(--muted); }
+#queuetable td.settings { white-space: normal; }
+#queuetable td.settings > span { display: flex; flex-wrap: wrap; gap: 4px; }
+/* The Started/Ended header is its own switch; it reads as a header. */
+#queuetable th .thtoggle {
+  font: inherit; text-transform: inherit; letter-spacing: inherit; color: inherit;
+  background: none; border: none; padding: 0; cursor: pointer;
+}
+#queuetable th .thtoggle:hover { color: var(--accent); }
 #queuetable .state {
   font-size: 10px; line-height: 1; padding: 3px 7px; border-radius: 8px;
   background: var(--raised); border: 1px solid var(--line); color: var(--muted);
@@ -686,7 +713,7 @@ pre.sizereport {
    <clock>" is part of the contract, not decoration: it says how old what you
    are looking at is, and Reload is how it moves. */
 #queuepager {
-  max-width: 1650px; margin: 10px auto 0; padding: 0 8px;
+  margin: 10px 0 0; padding: 0 8px;
   display: flex; align-items: center; gap: 8px;
 }
 #queuepager button {
@@ -696,11 +723,11 @@ pre.sizereport {
 #queuepager button:hover:enabled { color: var(--text); border-color: var(--line-hi); }
 #queuepager button:disabled { opacity: .45; cursor: default; }
 #queuepager #q_range { margin-right: auto; }
-#queuemsg { padding: 12px 8px; font-size: 13px; max-width: 1650px; margin: 0 auto; }
+#queuemsg { padding: 12px 8px; font-size: 13px; }
 /* Re-sim request box: the queue's own intake, for a game nobody uploaded.
    Framed like the dropzone above it — the two are the pipeline's two doors. */
 #resimbox {
-  max-width: 1650px; margin: 0 auto 14px; padding: 12px 14px;
+  margin: 0 0 14px; padding: 12px 14px;
   border: 1px solid var(--line); border-radius: 6px; font-size: 12px; color: var(--dim);
 }
 #resimbox label { display: block; margin-bottom: 7px; }

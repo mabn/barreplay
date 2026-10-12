@@ -1439,10 +1439,14 @@ test('a running job shows its live progress instead of an empty row', () => {
     {
       id: 'running', gameId: 'aaa', kind: 'resim', state: 'processing', error: null, stats: null,
       createdUnix: 1787349000, updatedUnix: 1787349900, disabled: false, errorKind: null,
-      game: { durationSec: 2417, gameSize: '8v8' },
+      game: {
+        durationSec: 2417, gameSize: '8v8', startUnix: 1787340000, map: 'Supreme Isthmus v2.1',
+        mapFile: 'supreme_isthmus_v2.1', settings: { lava: true, ranked: false },
+      },
       progress: {
         state: 'simulating', frame: 43000, totalFrames: 100170, percent: 42.9,
         etaSec: 840, simFps: 68.2, rssBytes: 3221225472, swapBytes: 0, cpuPct: 612.5,
+        elapsedSec: 1260,
       },
     },
     // Still loading: a phase with nothing to measure. It must still say what
@@ -1461,7 +1465,7 @@ test('a running job shows its live progress instead of an empty row', () => {
       id: 'failed', gameId: 'ccc', kind: 'resim', state: 'error',
       error: 'host ran out of memory', errorKind: 'oom',
       stats: null, progress: null, disabled: false,
-      game: { durationSec: 217, gameSize: '1v1' },
+      game: { durationSec: 217, gameSize: '1v1', startUnix: null, map: null, mapFile: null, settings: null },
       createdUnix: 1787349000, updatedUnix: 1787349900,
     },
   ];
@@ -1474,6 +1478,13 @@ test('a running job shows its live progress instead of an empty row', () => {
     const queueOpen = new Set();
     const fmtDate = () => 'date', fmtAgo = () => 'ago';
     const replayHref = (id) => '/?replay=' + id, urlId = (e) => e.id, openReplay = () => {};
+    let queueTimeCol = 'start';
+    const fmtDateShort = (u) => 'short ' + u;
+    const mapFileGuess = (m) => m.toLowerCase().replace(/ /g, '_');
+    const settingsBadges = (st) => st ? Object.keys(st).filter((k) => st[k]).map((k) => ({ key: k, label: k })) : [];
+    const localStorage = { setItem() {} };
+    ${extract('queueMapCell')} ${extract('queueSettingsCell')} ${extract('queueGameTime')}
+    ${extract('copyIdButton')} ${extract('runEstimate')} ${extract('fmtIso')}
     ${extract('fmtDur')}
     ${extract('fmtSize')}
     ${extract('statsLines')}
@@ -1487,8 +1498,10 @@ test('a running job shows its live progress instead of an empty row', () => {
     ${APP.slice(APP.indexOf('const ERROR_KIND_LABELS'), APP.indexOf('const QUEUE_PAGE'))}
     ${FFA_HELPERS}
     ${extract('renderQueue')}
+    renderQueue.runEstimate = runEstimate;
     return renderQueue;
   })()`);
+  const runEstimateFor = (p: any) => render.runEstimate(p).label;
 
   render();
 
@@ -1521,14 +1534,18 @@ test('a running job shows its live progress instead of an empty row', () => {
   // The Took column has no cost to report on a running job, so it answers the
   // question that row actually raises: how much longer.
   const tookOf = (tr: any) => tr.children.find((td: any) => td.className.includes('took'));
-  assert.equal(tookOf(trs[0]).textContent, '▸ ~14m 00s left');
+  // ...as the whole run's estimated length: elapsed plus what is left.
+  assert.equal(tookOf(trs[0]).textContent, '▸ ~35m 00s');
+  assert.match(tookOf(trs[0]).title, /estimated total: 21m 00s so far \+ ~14m 00s left/);
   assert.match(tookOf(trs[0]).title, /Now: simulating/);
+  // A daemon too old to say how long it has been running leaves only the countdown.
+  assert.equal(runEstimateFor({ etaSec: 840 }), '~14m 00s left');
   assert.ok(trs[0].className.includes('hasstats'), 'and the row expands for the rest');
 
   // The row's action menu: one ⋯ button, and what it opens depends on the
   // job. A live job can be held back; a finished or failed one can be retried
   // (a switch on it would do nothing, and a live one already covers the work).
-  const btnOf = (tr: any) => walk(tr).find((n: any) => n.tag === 'button');
+  const btnOf = (tr: any) => walk(tr).find((n: any) => n.tag === 'button' && n.className.includes('jobmenubtn'));
   const menuOf = (tr: any) => {
     btnOf(tr).onclick({ stopPropagation() {} });
     return walk(tr).filter((n: any) => n.attrs['role'] === 'menuitem').map((n: any) => n.textContent);
@@ -1543,6 +1560,16 @@ test('a running job shows its live progress instead of an empty row', () => {
   // say whether an hour of engine time is buying an 8v8 or a duel.
   const cellOf = (tr: any, cls: string) => tr.children.find((td: any) => td.className.includes(cls));
   assert.equal(cellOf(trs[0], 'size').textContent, '8v8');
+  // Map, start (or end, by the header switch) and settings pills, from the
+  // games mirror.
+  assert.equal(walk(cellOf(trs[0], 'map')).find((n: any) => n.tag === 'span').textContent, 'Supreme Isthmus v2.1');
+  assert.match(walk(cellOf(trs[0], 'map')).find((n: any) => n.tag === 'img').src, /supreme_isthmus_v2\.1\/texture-thumb/);
+  assert.equal(cellOf(trs[0], 'when').textContent, 'short 1787340000');
+  assert.deepEqual(walk(cellOf(trs[0], 'settings')).filter((n: any) => n.className.includes('badge')).map((n: any) => n.textContent), ['lava']);
+  assert.equal(cellOf(trs[2], 'map').textContent, '—');
+  assert.equal(cellOf(trs[2], 'when').textContent, '—');
+  // The game id carries a copy button.
+  assert.ok(walk(cellOf(trs[0], 'game')).find((n: any) => n.className === 'copyid'));
   assert.equal(cellOf(trs[0], 'dur').textContent, '40m');
   assert.equal(cellOf(trs[2], 'size').textContent, '1v1');
   // A game neither table knows still lists; it just has nothing to say.
@@ -1592,6 +1619,13 @@ test('a disabled job reads as disabled and offers the way back', () => {
     const queueOpen = new Set();
     const fmtDate = () => 'date', fmtAgo = () => 'ago';
     const replayHref = (id) => '/?replay=' + id, urlId = (e) => e.id, openReplay = () => {};
+    let queueTimeCol = 'start';
+    const fmtDateShort = (u) => 'short ' + u;
+    const mapFileGuess = (m) => m.toLowerCase().replace(/ /g, '_');
+    const settingsBadges = (st) => st ? Object.keys(st).filter((k) => st[k]).map((k) => ({ key: k, label: k })) : [];
+    const localStorage = { setItem() {} };
+    ${extract('queueMapCell')} ${extract('queueSettingsCell')} ${extract('queueGameTime')}
+    ${extract('copyIdButton')} ${extract('runEstimate')} ${extract('fmtIso')}
     ${extract('fmtDur')} ${extract('statsLines')} ${extract('progressLines')}
     ${extract('progressText')} ${extract('statsTooltip')} ${extract('fillProgressCell')}
     ${extract('fmtSize')} ${extract('actionCell')} ${extract('closeJobMenus')} ${extract('fmtDuration')} ${extract('fmtGameDuration')}
@@ -1607,7 +1641,7 @@ test('a disabled job reads as disabled and offers the way back', () => {
   assert.ok(state.className.includes('state-disabled'));
   assert.match(state.title, /Underlying state: pending/, 'the real state stays available');
 
-  const btn = walk(tr).find((n: any) => n.tag === 'button');
+  const btn = walk(tr).find((n: any) => n.tag === 'button' && n.className.includes('jobmenubtn'));
   assert.ok(btn.className.includes('on'), 'and the menu button stays lit rather than waiting for a hover');
   btn.onclick({ stopPropagation() {} });
   assert.deepEqual(
@@ -2534,4 +2568,35 @@ test('projectiles fly the way their records say', () => {
   const rocket = { ...shell, class: 7, vx: 0, vz: 0, x1: 900, z1: 210, path: null };
   assert.deepEqual(at(rocket, 0).slice(0, 2), [110, 210]);
   assert.deepEqual(at(rocket, 93).slice(0, 2), [900, 210]);
+});
+
+// Which code made a replay: the daemon's commit and build time, the widget
+// build behind the capture, the .brp format — so "before or after the fix" is
+// answerable from the queue page.
+test('a job\'s details name the bringest build, widget and .brp format', () => {
+  const extract = (n: string) => {
+    const start = APP.indexOf(`function ${n}(`);
+    let depth = 0;
+    for (let j = APP.indexOf('{', start); j < APP.length; j++) {
+      if (APP[j] === '{') depth++;
+      else if (APP[j] === '}' && --depth === 0) return APP.slice(start, j + 1);
+    }
+    throw new Error('unbalanced: ' + n);
+  };
+  const lines = eval(`(function(){
+    const fmtDate = (u) => 'at ' + u;
+    ${extract('fmtDur')} ${extract('fmtSize')} ${extract('fmtIso')} ${extract('statsLines')}
+    return statsLines;
+  })()`);
+  const got = Object.fromEntries(lines({ kind: 'resim' }, {
+    tookSec: 60,
+    bringest: { sha: '0123456789abcdef', dirty: true, commitTime: '2026-10-12T02:30:36Z', time: '2026-10-12T08:00:00Z' },
+    widgetVersion: '1.10.0', brpVersion: 6,
+  }));
+  assert.equal(got['bringest'], '0123456789ab (uncommitted changes) · committed at 1791772236');
+  assert.equal(got['bringest built'], 'at 1791792000');
+  assert.equal(got['Widget'], '1.10.0 · embedded in bringest');
+  assert.equal(got['.brp format'], 'v6');
+  const up = Object.fromEntries(lines({ kind: 'upload' }, { widgetVersion: '1.9.0', widgetSha: 'abcdef0123456789', widgetDate: '2026-10-01' }));
+  assert.equal(up['Widget'], '1.9.0 (abcdef012345, 2026-10-01)');
 });

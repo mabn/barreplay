@@ -1097,8 +1097,15 @@ test("queue rows join the game's size and duration from either table", async () 
     index.jobInsert("j3", "streams/x", "stranger");
 
     const byId = Object.fromEntries(index.queuePage(25, 0).jobs.map((j) => [j.id, j]));
-    expect(byId.j1.game).toEqual({ durationSec: 2417, gameSize: "8v8" });
-    expect(byId.j2.game).toEqual({ durationSec: 217, gameSize: "1v1" });
+    // The catalog has no archive name; a mirror row would add it.
+    expect(byId.j1.game).toEqual({
+      durationSec: 2417, gameSize: "8v8", startUnix: 1787349909, map: "Great Divide V1",
+      mapFile: null, settings: { lava: true },
+    });
+    expect(byId.j2.game).toEqual({
+      durationSec: 217, gameSize: "1v1", startUnix: 1787349909, map: "Great Divide V1",
+      mapFile: "great_divide_v1", settings: { unranked: true },
+    });
     expect(byId.j3.game).toBe(null);
     // The job's own fields survive the join unqualified-name-for-unqualified-name.
     expect(byId.j3).toMatchObject({ streamKey: "streams/x", kind: "upload", state: "pending" });
@@ -1109,10 +1116,14 @@ test("queue rows join the game's size and duration from either table", async () 
 // describes what was actually captured.
 test("the catalog's own numbers beat the mirror's", async () => {
   await inIndex((index) => {
-    index.gamesInsert([game("both", { durationSec: 100, gameSize: "1v1" })]);
-    index.upsert(replay("both", { durationSec: 2417, gameSize: "8v8" }));
+    index.gamesInsert([game("both", { durationSec: 100, gameSize: "1v1", map: "Mirror Map" })]);
+    index.upsert(replay("both", { durationSec: 2417, gameSize: "8v8", map: "Captured Map" }));
     index.jobInsert("j", "", "both", "resim");
-    expect(index.queuePage(25, 0).jobs[0].game).toEqual({ durationSec: 2417, gameSize: "8v8" });
+    // Except the archive name, which only the mirror has.
+    expect(index.queuePage(25, 0).jobs[0].game).toEqual({
+      durationSec: 2417, gameSize: "8v8", startUnix: 1787349909, map: "Captured Map",
+      mapFile: "great_divide_v1", settings: { lava: true },
+    });
   });
 });
 

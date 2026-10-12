@@ -2182,7 +2182,7 @@ export class ReplayIndex extends DurableObject<Env> {
    * paged. Deep pages still pay O(offset), like the catalog list. */
   queuePage(limit: number, offset: number): { jobs: QueueJob[]; total: number; active: number } {
     // The jobs table knows a gameId and nothing else about the game, so the
-    // duration and the team spec are joined on from whichever table knows
+    // duration, team spec, start, map and settings are joined on from whichever table knows
     // them: the catalog first (what was captured), the games mirror second
     // (what BAR published), which is what covers the re-sim of a game
     // nobody has uploaded — most of this queue.
@@ -2194,7 +2194,11 @@ export class ReplayIndex extends DurableObject<Env> {
     const select = `
       SELECT ${JOB_COLS_J},
              COALESCE(r.duration_sec, g.duration_sec) AS game_duration_sec,
-             COALESCE(r.game_size, g.game_size)       AS game_size
+             COALESCE(r.game_size, g.game_size)       AS game_size,
+             COALESCE(r.start_unix, g.start_unix)     AS game_start_unix,
+             COALESCE(r.map, g.map)                   AS game_map,
+             g.map_file                               AS game_map_file,
+             COALESCE(r.settings, g.settings)         AS game_settings
       FROM jobs j
       LEFT JOIN replays r ON r.id = j.game_id
       LEFT JOIN games   g ON g.id = j.game_id`;
@@ -2518,11 +2522,17 @@ export class ReplayIndex extends DurableObject<Env> {
  * `game` field is null only when NEITHER table knows the id — a drag&drop
  * upload of a private lobby the BAR API never indexed, say. */
 function queueJobRow(r: Record<string, unknown>): QueueJob {
-  const durationSec = (r.game_duration_sec as number | null) ?? null;
-  const gameSize = (r.game_size as string | null) ?? null;
-  const game: QueueGame | null =
-    durationSec === null && gameSize === null ? null : { durationSec, gameSize };
-  return { ...jobRow(r), game };
+  const game: QueueGame = {
+    durationSec: (r.game_duration_sec as number | null) ?? null,
+    gameSize: (r.game_size as string | null) ?? null,
+    startUnix: (r.game_start_unix as number | null) ?? null,
+    map: (r.game_map as string | null) ?? null,
+    mapFile: (r.game_map_file as string | null) ?? null,
+    settings: parseStored(r.game_settings as string | null, (v) => v as Record<string, boolean | string>),
+  };
+  // Null when neither table knows the game (an upload from a private lobby).
+  const known = Object.values(game).some((v) => v !== null);
+  return { ...jobRow(r), game: known ? game : null };
 }
 
 /** The Games listing's SELECT — one mirrored game plus the per-row joins
