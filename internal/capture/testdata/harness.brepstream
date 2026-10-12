@@ -1,6 +1,6 @@
 BREPSTREAM 1
 BRSNAP GID feed5eed00000000000000000000beef
-BRSNAP GAME {"protocol":6,"widgetVersion":"1.10.0","widgetDate":"2026-10-11","mode":"live","map":"Harness Map 1.0","gameVersion":"Beyond All Reason test-harness","engineVersion":"2026-harness","sampleEvery":30,"gameSpeed":30,"recordEnemies":true,"playerID":0,"allyTeam":0,"spectator":false}
+BRSNAP GAME {"protocol":6,"widgetVersion":"1.10.1","widgetDate":"2026-10-12","mode":"live","map":"Harness Map 1.0","gameVersion":"Beyond All Reason test-harness","engineVersion":"2026-harness","sampleEvery":30,"gameSpeed":30,"recordEnemies":true,"playerID":0,"allyTeam":0,"spectator":false}
 BRSNAP DEF {"id":1,"name":"def1","humanName":"Def 1","maxHealth":1001,"xsize":2,"zsize":2,"isBuilding":false,"canMove":true,"techLevel":2,"unitGroup":"builder","isCommander":true,"maxWeaponRange":301,"deathWeapon":5}
 BRSNAP DEF {"id":2,"name":"def2","humanName":"Def 2","maxHealth":1002,"xsize":2,"zsize":2,"isBuilding":false,"canMove":true,"techLevel":3,"unitGroup":"weapon","maxWeaponRange":302,"deathWeapon":5}
 BRSNAP DEF {"id":3,"name":"def3","humanName":"Def 3","maxHealth":1003,"xsize":2,"zsize":2,"isBuilding":false,"canMove":true,"techLevel":1,"unitGroup":"builder","deathWeapon":5}
@@ -51,7 +51,7 @@ BRSNAP T 2 0 armada #bf80bf
 BRSNAP P 0 0 0 Player 0
 BRSNAP P 1 1 0 Player 1
 BRSNAP READY
-FD      +     	        ! $ ' * - 0 3 6 9 < ? B E H K N Q T W Z ] ` c f i l o r u x Š  œ   
+G5   {"k":"view","f":0,"spec":false,"full":false,"ally":0}FD      +     	        ! $ ' * - 0 3 6 9 < ? B E H K N Q T W Z ] ` c f i l o r u x Š  œ   
         " %   	        ! $             #    
   " 	                     —5µ¾ E[ğrè	i
 ½—Ì>yÔ?¨	ü±ƒonË(÷Õ@	„F±Uˆ[Ø.*&‡s # &³H»¬ñ EãB}£	wÈ´÷5Ã©h‰
@@ -340,7 +340,7 @@ dbwR±îÌ¬  šG ´ç 	éA¼ã    æ
 Áö  ;  Ñ  ¥  #  ,  †  X  h  >  l   Ö  ]      :  €  ¾  ´  ©  ¨  &	  Ş  ÿ  ²  ¸  
      Æ	  4  û   u  s  „  ¿  Ö	  I  Ã    ©    B 3 :  " Ôÿ9 èÿÀÿ9 ïÿH ±ÿR üÿU üÿöÿ    ¦ÿY : »ÿ8  èÿ±ÿîÿ³ÿâÿëÿèÿ¦ÿ·ÿ¼ÿ¹ÿ¿ÿ  ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÁÌ                                          ÈB  ÌB  zD €zD  úC  úC €ÔE €ÔE   ?   @  ÈA  ØAX   shutdownBREPSTREAM 1
 BRSNAP GID feed5eed00000000000000000000beef
-BRSNAP GAME {"protocol":6,"widgetVersion":"1.10.0","widgetDate":"2026-10-11","mode":"live","map":"Harness Map 1.0","gameVersion":"Beyond All Reason test-harness","engineVersion":"2026-harness","sampleEvery":30,"gameSpeed":30,"recordEnemies":true,"playerID":0,"allyTeam":0,"spectator":false}
+BRSNAP GAME {"protocol":6,"widgetVersion":"1.10.1","widgetDate":"2026-10-12","mode":"live","map":"Harness Map 1.0","gameVersion":"Beyond All Reason test-harness","engineVersion":"2026-harness","sampleEvery":30,"gameSpeed":30,"recordEnemies":true,"playerID":0,"allyTeam":0,"spectator":false}
 BRSNAP DEF {"id":1,"name":"def1","humanName":"Def 1","maxHealth":1001,"xsize":2,"zsize":2,"isBuilding":false,"canMove":true,"techLevel":2,"unitGroup":"builder","isCommander":true,"maxWeaponRange":301,"deathWeapon":5}
 BRSNAP DEF {"id":2,"name":"def2","humanName":"Def 2","maxHealth":1002,"xsize":2,"zsize":2,"isBuilding":false,"canMove":true,"techLevel":3,"unitGroup":"weapon","maxWeaponRange":302,"deathWeapon":5}
 BRSNAP DEF {"id":3,"name":"def3","humanName":"Def 3","maxHealth":1003,"xsize":2,"zsize":2,"isBuilding":false,"canMove":true,"techLevel":1,"unitGroup":"builder","deathWeapon":5}
@@ -391,7 +391,7 @@ BRSNAP T 2 0 armada #bf80bf
 BRSNAP P 0 0 0 Player 0
 BRSNAP P 1 1 0 Player 1
 BRSNAP READY
-FŒ  ¬  .     ! $ ' * - 0 3 6 9 < ? B E H K N Q T W Z ] ` c f i l o r u x {  ¢ ´ · º ½ À Ã Æ É Ì Ï Ò   " %   	        ! $             #    
+G8   {"k":"view","f":2220,"spec":false,"full":false,"ally":0}FŒ  ¬  .     ! $ ' * - 0 3 6 9 < ? B E H K N Q T W Z ] ` c f i l o r u x {  ¢ ´ · º ½ À Ã Æ É Ì Ï Ò   " %   	        ! $             #    
   "  ! $                                     ğè	÷
 ½ÌˆèÔ¨	ë±¥
 o(Ë(]÷Õ@¦„~	±õQ~Ø

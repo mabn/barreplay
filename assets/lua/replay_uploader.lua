@@ -77,8 +77,8 @@
 -- Echo, and the stream's GAME line, so every capture records which encoder
 -- produced it (the copy on a player's machine can be arbitrarily old — the
 -- server/decoder needs to know, and the catalog stores it per replay).
-local widgetVersion = "1.10.0"
-local widgetDate = "2026-10-11"
+local widgetVersion = "1.10.1"
+local widgetDate = "2026-10-12"
 
 -- Git SHA of this exact file, stamped when the widget is published for
 -- download: worker/tools/sync-assets.mjs replaces the token below with the SHA
@@ -565,7 +565,11 @@ end
 
 local function buildPreamble()
 	local parts = {}
-	local spec = spGetSpectatingState()
+	local spec, fullView = spGetSpectatingState()
+	local specFullView = nil -- a player has no such setting
+	if spec then
+		specFullView = fullView and true or false
+	end
 	parts[#parts + 1] = "BRSNAP GAME " .. jsonObject({
 		{ "protocol", protocolVersion },
 		{ "widgetVersion", widgetVersion },
@@ -581,6 +585,10 @@ local function buildPreamble()
 		{ "playerID", spGetMyPlayerID and spGetMyPlayerID() or nil },
 		{ "allyTeam", spGetMyAllyTeamID and spGetMyAllyTeamID() or nil },
 		{ "spectator", spec and true or false },
+		-- A spectator is not always watching everything: with full view off
+		-- they see what the ally team they picked sees, like a player of it.
+		-- Only the start is stated here; the "view" facts follow changes.
+		{ "fullView", specFullView },
 		-- A re-simulation's sampler, not a player's capture: the decoder
 		-- then records neither a recorder nor a widget build for it.
 		{ "resim", resim or nil },
@@ -879,9 +887,43 @@ local shields = (function()
 	return { read = read, write = write }
 end)()
 
+-- noteView keeps myAllyTeam current and, in the uploader, writes a "view"
+-- fact whenever whose point of view the capture records changes:
+--
+--   {"k":"view","f":<frame>,"spec":<bool>,"full":<bool>,"ally":<allyTeam>}
+--
+-- The GAME line states only the start, and the start is not the whole story.
+-- A spectator can turn full view off and watch through one ally team's eyes,
+-- or switch from one team to another, and a player who dies or resigns
+-- becomes a full-view spectator. myAllyTeam has to follow, too: it decides
+-- which units are read as enemies (the radar-identity cache), so a spectator
+-- who switched teams would otherwise treat the side they now watch as the
+-- enemy and the side they left as their own.
+local lastView = nil
+
+local function noteView(frame, spec, fullView)
+	local ally = (spGetMyAllyTeamID and spGetMyAllyTeamID()) or -1
+	myAllyTeam = ally
+	if resim then
+		return -- one point of view, the whole game, declared at Initialize
+	end
+	local full = (spec and fullView) and true or false
+	spec = spec and true or false
+	local v = lastView
+	if v ~= nil and v.spec == spec and v.full == full and v.ally == ally then
+		return
+	end
+	lastView = { spec = spec, full = full, ally = ally }
+	writeRecord("G", jsonObject({
+		{ "k", "view" }, { "f", frame }, { "spec", spec }, { "full", full }, { "ally", ally },
+	}))
+end
+
 local function sample(frame)
 	local t0 = startClock()
-	local all = recordAll()
+	local spec, fullView = spGetSpectatingState()
+	local all = spec and fullView
+	noteView(frame, spec, fullView)
 	local units = spGetAllUnits()
 	local total = #units
 

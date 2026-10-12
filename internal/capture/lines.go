@@ -32,6 +32,9 @@ type gameLine struct {
 	PlayerID      int32  `json:"playerID"`
 	AllyTeam      int32  `json:"allyTeam"`
 	Spectator     bool   `json:"spectator"`
+	// FullView is a spectator's full-view setting at the start (nil from a
+	// player, and from widgets before 1.10.1).
+	FullView *bool `json:"fullView"`
 	// Resim marks the re-simulation sampler (the same widget file, injected
 	// by this tool): it is nobody's point of view and its build is the
 	// tool's own, so it records neither a Recorder nor a Widget.
@@ -93,6 +96,7 @@ func applyPreambleLine(fields []string, content string, base *snapshot.Meta) (*g
 				PlayerID:  g.PlayerID,
 				AllyTeam:  g.AllyTeam,
 				Spectator: g.Spectator,
+				Limited:   g.Spectator && g.FullView != nil && !*g.FullView,
 			}
 		}
 		return &g, true

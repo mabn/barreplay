@@ -66,6 +66,7 @@ func TestCapturesAllTeams(t *testing.T) {
 	}{
 		{"spectator upload", snapshot.Meta{Recorder: spec}, "", true},
 		{"player upload", snapshot.Meta{Recorder: player}, "", false},
+		{"spectator who watched one side", snapshot.Meta{Recorder: &snapshot.RecorderInfo{Spectator: true, Limited: true, AllyTeam: 1}}, "", false},
 		{"re-sim", snapshot.Meta{Resim: true}, "", true},
 		// No recorder and no re-sim mark: an uploader stream older than the
 		// recorder record. It must not take the main name on a guess.

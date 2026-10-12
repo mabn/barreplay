@@ -65,7 +65,7 @@ func CapturesAllTeams(m snapshot.Meta, view string) bool {
 		return false
 	}
 	if m.Recorder != nil {
-		return m.Recorder.Spectator
+		return m.Recorder.SawAll()
 	}
 	return m.Resim
 }

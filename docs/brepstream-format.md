@@ -294,6 +294,7 @@ sim frame when it has one. Both modes write the first three:
 | `stock` | `f`, `unit`, `def`, `team`, `w` (weapon slot, 1-based), `old`, `n` — a stockpile count changed: a round finished building (`n > old`) or was fired (`n < old`). Protocol ≥ 5, re-sim only, only for stockpiled weapons the capture tracks |
 | `blast` | `f`, `unit`, `def`, `team`, `x`, `z`, `weapon`, `byUnit`/`byDef`/`byTeam`, `damage`, `kills` — one big death explosion. No longer written: big blasts are derived from `H` (`snapshot.FactBlastData` is what `internal/combat` reports them as) |
 | `teamstats` | `team`, `fields`, `rows` — the engine's `GetTeamStatsHistory` for the team, one row per stats interval (re-sim only, at game over) |
+| `view` | `f`, `spec`, `full`, `ally` — whose point of view the capture records from here on: a spectator (`spec`) sees every team only with full view on (`full`), otherwise what ally team `ally` sees. Uploader only (widget ≥ 1.10.1), at the first sample and whenever it changes: a spectator turning full view off or switching team, a player who dies becoming a spectator. The decoder marks a spectator's capture one-sided (`RecorderInfo.Limited`) the first time one says `spec` without `full` |
 
 Facts are kept verbatim through the `.brp`, so a kind added here needs no
 codec change.
@@ -650,7 +651,8 @@ stamped into the copy published for download — absent from a widget installed
 straight from the repo; both widget >= 1.7.0), mode
 live/replay, map, game/engine versions, sampleEvery, gameSpeed, recordEnemies
 (whether the stream carries enemy units — see above), recording
-player id/allyTeam/spectator), `DEF` (full unit-def
+player id/allyTeam/spectator, and since widget 1.10.1 a spectator's `fullView`
+at the start — see the `view` fact), `DEF` (full unit-def
 JSON), `T`, `P`, `READY`. The `GAME` line's `sampleEvery`/`gameSpeed` feed
 velocity de-quantization and frame timestamps (`t = frame/gameSpeed`), and its
 `protocol` selects the resource-income semantics (>= 3: written as the engine

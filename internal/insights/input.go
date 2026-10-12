@@ -97,7 +97,7 @@ func (in Input) pov() string {
 	if in.POV != "" {
 		return in.POV
 	}
-	if r := in.Meta.Recorder; r != nil && !r.Spectator {
+	if r := in.Meta.Recorder; r != nil && !r.SawAll() {
 		return POVAlly
 	}
 	return POVFull

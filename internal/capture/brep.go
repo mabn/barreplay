@@ -244,6 +244,7 @@ func ConsumeBrepStats(r io.Reader, base snapshot.Meta, w snapshot.Writer, stats 
 				continue
 			}
 			stats.Facts++
+			noteViewFact(base.Recorder, fact)
 			if err := w.WriteFact(fact); err != nil {
 				return err
 			}
@@ -966,4 +967,22 @@ func applyProfileRecord(payload []byte, stats *Stats) {
 	for _, e := range entries {
 		stats.ProfileSamples = append(stats.ProfileSamples, ProfileSample{Frame: p.Frame, Units: p.Units, Ms: e.Ms, Name: e.Name})
 	}
+}
+
+// noteViewFact marks a spectator's capture Limited the first time a "view"
+// fact says they were watching through one ally team's eyes, and records
+// that team. A capture is one-sided if ANY part of it is: the main replay
+// name and the "no re-simulation needed" verdict both rest on SawAll.
+// Recorder is a pointer the writer already holds, which is how this reaches
+// the meta written at Close (see snapshot.Meta.Recorder).
+func noteViewFact(r *snapshot.RecorderInfo, fact snapshot.Fact) {
+	if r == nil || !r.Spectator || r.Limited || fact.Kind != snapshot.FactView {
+		return
+	}
+	var v snapshot.FactViewData
+	if fact.Decode(&v) != nil || !v.Spectator || v.Full {
+		return
+	}
+	r.Limited = true
+	r.AllyTeam = v.Ally
 }

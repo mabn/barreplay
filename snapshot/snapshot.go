@@ -244,12 +244,25 @@ type UnitDef struct {
 
 // RecorderInfo identifies the client that captured a live-game stream (the
 // uploader widget's GAME preamble line): whose point of view the capture
-// records. A spectator recorder sees everything; a playing recorder sees its
+// records. A full-view spectator sees everything; a playing recorder sees its
 // own ally team plus whatever the engine listed as visible enemies.
 type RecorderInfo struct {
 	PlayerID  int32 `json:"playerId"`
 	AllyTeam  int32 `json:"allyTeam"`
 	Spectator bool  `json:"spectator,omitempty"`
+	// Limited marks a spectator who watched through one ally team's eyes
+	// (full view off) for at least part of the game: their capture holds only
+	// what that side could see, like a player's. AllyTeam is then the first
+	// side they watched that way. Set from the GAME line's fullView and from
+	// the stream's "view" facts (widget >= 1.10.1); false for older streams,
+	// which could not say.
+	Limited bool `json:"limited,omitempty"`
+}
+
+// SawAll says whether the recorder saw every team for the whole game: a
+// spectator who never turned full view off.
+func (r *RecorderInfo) SawAll() bool {
+	return r.Spectator && !r.Limited
 }
 
 // WidgetInfo identifies the widget build that produced a capture: which
@@ -283,7 +296,10 @@ type Meta struct {
 	Teams         []TeamInfo        `json:"teams"`
 	Players       []PlayerInfo      `json:"players,omitempty"`
 	// Recorder is set for live-game captures (the uploader widget); nil for
-	// the engine re-sim pipeline, which sees the whole game.
+	// the engine re-sim pipeline, which sees the whole game. Its Limited flag
+	// can only be known once the stream's "view" facts have been read, so
+	// the decoder may set it AFTER WriteMeta: a Writer reads Recorder when it
+	// writes the meta out (at Close), never at WriteMeta.
 	Recorder *RecorderInfo `json:"recorder,omitempty"`
 	// Resim marks a capture made by the headless re-simulation (the stream's
 	// GAME line says so): it saw every team. It is what lets a publisher tell

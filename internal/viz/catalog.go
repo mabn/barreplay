@@ -163,9 +163,10 @@ func BuildCatalogEntry(id string, bf *snapshot.BRPFile, sizeBytes int64) Catalog
 		}
 	}
 	if r := bf.Meta.Recorder; r != nil {
-		if r.Spectator {
-			// A spectator saw every team; that is a fact about the capture, so
-			// state it rather than leaving it to be inferred from a nil ally.
+		if r.SawAll() {
+			// A full-view spectator saw every team; that is a fact about the
+			// capture, so state it rather than leaving it to be inferred from
+			// a nil ally. A spectator who watched one side is that side's view.
 			e.View = "full"
 		} else {
 			for _, t := range bf.Meta.Teams {
