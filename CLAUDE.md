@@ -2807,9 +2807,15 @@ assets/lua/replay_uploader.lua   THE widget, in two modes (widget >= 1.8.0; the 
                           TRACKS, W blasts and the "stock" fact (design + measurements:
                           docs/projectiles-and-explosions.md). What is watched is classified
                           from WeaponDefs at Initialize (nukes, anti-nukes, EMP, tactical,
-                          Junos, long-range artillery, rockets, heavy beams; death/self-d
+                          Junos, long-range artillery, rockets, heavy beams, and since widget
+                          1.11.0 LONG-RANGE AA — class 9 "aa": damages[0] <= 1 like all AA, but
+                          range >= 1500 and >= 100 to some other armour class, i.e. the
+                          Mercury, the Screamer and leglraa's railgun; a homing one has its
+                          path sampled like a strategic track; death/self-d
                           explosions with damage >= 400 and radius >= 64), never from unit
-                          names — mods change the numbers. Two non-obvious mechanisms: LuaUI
+                          names — mods change the numbers. Captures from older widgets hold no
+                          AA tracks: the widget never recorded them, so only a fresh re-sim
+                          shows them. Two non-obvious mechanisms: LuaUI
                           MAY watch explosions itself (Script.SetWatchExplosion), but BAR's
                           handler does not forward Explosion, so the widget installs it the
                           way it hooks UnitDamaged (handler UpdateCallIn, which needs an

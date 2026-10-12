@@ -413,7 +413,8 @@ whole shot; `range` in elmos):
 | `tactical` | 4 | `customParams.nuclear` (shorter range) |
 | `beam` | 8 | `BeamLaser`/`LightningCannon`, `damage ≥ 2000`, `range ≥ 600` (an EMP beam is a beam) |
 | `emp` | 3 | `paralyzer`, `damage ≥ 5000` |
-| — | | `damage ≤ 1` (AA, utility): never — before the stockpile rule, since the Mercury is a stockpiled long-range AA missile |
+| `aa` | 9 | `damage ≤ 1`, `range ≥ 1500` and `≥ 100` to some other armour class (the Mercury's and Screamer's missiles, leglraa's railgun; widget ≥ 1.11.0). A homing one (`tracks`) has its path sampled like a strategic track |
+| — | | any other `damage ≤ 1` (short-range AA, utility): never — before the stockpile rule, since the Mercury is a stockpiled AA missile |
 | `tactical` | 4 | `stockpile` and `range ≥ 1500` (Perdition) |
 | `artillery` | 6 | `Cannon`, `range ≥ 1500` |
 | `rocket` | 7 | `StarburstLauncher`/`MissileLauncher`, `range ≥ 1000` |
@@ -532,6 +533,11 @@ re-simulations (engine 2026.07.04; the four captures below):
   too short) and are best drawn as a curve from launch to end. For a steered
   missile `ty` is the height the engine steers toward (about 3,000 for a
   nuke), not the ground.
+- **Long-range AA** (`aa`): a homing missile (the Mercury, the Screamer:
+  `tracks`) carries a `path` every 10 frames like a strategic track, since
+  it turns after its aircraft; a straight bolt (leglraa's railgun) has none
+  and flies its launch velocity, like a ballistic row with no gravity. Its
+  explosion is an air burst round the aircraft it hit.
 - **End.** `endKind` 1 is an explosion the engine reported with this
   projectile's id: `x1/y1/z1` is where it went off and `end` its frame. A `y1`
   far above the ground is an air burst: an interception, or a shell meeting a

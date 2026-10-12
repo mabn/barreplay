@@ -26,7 +26,10 @@
   'use strict';
 
   // Track classes and end kinds (snapshot/projectiles.go).
-  const CLASS_NUKE = 1, CLASS_ANTINUKE = 2, CLASS_EMP = 3, CLASS_JUNO = 5, CLASS_BEAM = 8;
+  const CLASS_NUKE = 1, CLASS_ANTINUKE = 2, CLASS_EMP = 3, CLASS_JUNO = 5, CLASS_BEAM = 8, CLASS_AA = 9;
+  // A long-range AA missile bursts in the air, round its aircraft: a small
+  // puff, not its blast radius (the Mercury's 212 elmos) drawn on the ground.
+  const AA_BURST = 60;
   const END_EXPLODED = 1;
   const FLAG_INTERCEPTED = 2;
 
@@ -80,6 +83,7 @@
       // a 960-elmo fireball over the defended base would tell a lie.
       return { aoe: Math.min(aoe, 60), pal: PUFF, life: LIFE_MIN, ring: false };
     }
+    if (wcls === CLASS_AA) return { aoe: Math.min(aoe, AA_BURST), pal: PUFF, life: LIFE_MIN, ring: false };
     if (wcls === CLASS_JUNO || (w && w.cp && w.cp.junotype)) pal = JUNO;
     else if (wcls === CLASS_EMP || (w && w.paralyzer)) pal = EMP;
     else if (wcls === CLASS_NUKE || (w && w.cp && w.cp.nuclear)) { pal = NUKE; lifeMul = 1.5; }
@@ -103,6 +107,7 @@
       case 'emp': return CLASS_EMP;
       case 'juno': return CLASS_JUNO;
       case 'beam': return CLASS_BEAM;
+      case 'aa': return CLASS_AA;
       default: return 0;
     }
   }

@@ -77,7 +77,7 @@
 -- Echo, and the stream's GAME line, so every capture records which encoder
 -- produced it (the copy on a player's machine can be arbitrarily old — the
 -- server/decoder needs to know, and the catalog stores it per replay).
-local widgetVersion = "1.10.1"
+local widgetVersion = "1.11.0"
 local widgetDate = "2026-10-12"
 
 -- Git SHA of this exact file, stamped when the widget is published for
@@ -1520,7 +1520,8 @@ local projectiles = (function()
 	-- Class codes (the R record's class column; docs/brepstream-format.md).
 	local CLS_NUKE, CLS_ANTINUKE, CLS_EMP, CLS_TACTICAL = 1, 2, 3, 4
 	local CLS_JUNO, CLS_ARTILLERY, CLS_ROCKET, CLS_BEAM = 5, 6, 7, 8
-	local classNames = { "nuke", "antinuke", "emp", "tactical", "juno", "artillery", "rocket", "beam" }
+	local CLS_AA = 9
+	local classNames = { "nuke", "antinuke", "emp", "tactical", "juno", "artillery", "rocket", "beam", "aa" }
 	-- Strategic classes: few per game, and their path IS the story (a starburst
 	-- missile climbs, turns and dives), so their position is sampled in flight.
 	-- Everything else flies an arc the launch velocity and gravity describe.
@@ -1536,6 +1537,7 @@ local projectiles = (function()
 	local tacticalMinRange = 1500
 	local artilleryMinRange = 1500
 	local rocketMinRange = 1000
+	local aaMinRange, aaMinDamage = 1500, 100 -- long-range AA: Mercury, Screamer, leglraa
 	local blastMinDamage, blastMinRadius = 400, 64
 
 	local strategicPathEvery = 10 -- frames between a strategic track's path samples
@@ -1577,10 +1579,24 @@ local projectiles = (function()
 		return type(d) == "number" and d or 0
 	end
 
+	-- maxArmorDamage is the most the shot deals to any armour class (an AA
+	-- weapon's damages[0] is 1; its vtol entry is the real one).
+	local function maxArmorDamage(wd)
+		local best = 0
+		for k, v in pairs(wd.damages or {}) do
+			-- numeric keys are armour classes; the rest (impulseFactor, ...) are not
+			if type(k) == "number" and type(v) == "number" and v > best then
+				best = v
+			end
+		end
+		return best
+	end
+
 	-- classifyWeapon returns the track class of a weapon def, or nil. The order
 	-- matters: an anti-nuke and a Juno are stockpiled long-range starbursts too,
 	-- the Paralyzer is stockpiled, an EMP beam is a beam, and a stockpiled
-	-- long-range AA missile (the Mercury) deals 1 to the ground.
+	-- long-range AA missile (the Mercury) deals 1 to the ground: it is aa,
+	-- told from a utility weapon by what it deals to some other armour class.
 	local function classifyWeapon(wd)
 		if wcp(wd, "bogus") then
 			return nil -- silo dummies, energy chargers
@@ -1605,7 +1621,13 @@ local projectiles = (function()
 			return CLS_EMP
 		end
 		if dmg <= 1 then
-			return nil -- AA and utility weapons (a stockpiled long-range AA missile too)
+			-- Long-range AA (the Mercury's and Screamer's stockpiled missiles,
+			-- leglraa's railgun) is tracked; short-range AA and utility
+			-- weapons are not.
+			if range >= aaMinRange and maxArmorDamage(wd) >= aaMinDamage then
+				return CLS_AA
+			end
+			return nil
 		end
 		if wd.stockpile and range >= tacticalMinRange then
 			return CLS_TACTICAL
@@ -1661,7 +1683,10 @@ local projectiles = (function()
 					end
 					slots = slots or {}
 					slots[#slots + 1] = { slot = i, wd = wid, cls = c, window = window + 2,
-						radius = math.max(96, 4 * (wd.projectilespeed or 0)) }
+						radius = math.max(96, 4 * (wd.projectilespeed or 0)),
+						-- A homing AA missile's path is its story too: sampled
+						-- like a strategic track's.
+						path = strategicClass[c] or (c == CLS_AA and wd.tracks) or false }
 					local sub = wcp(wd, "cluster_def")
 					if sub then
 						local sw = WeaponDefNames and (WeaponDefNames[ud.name .. "_" .. sub] or WeaponDefNames[sub])
@@ -1856,7 +1881,7 @@ local projectiles = (function()
 			tt = tt, tg = tg, tx = tx, ty = ty, tz = tz, flags = 0,
 			pf = {}, px = {}, py = {}, pz = {}, next = frame + strategicPathEvery }
 		tracks[pid] = t
-		if strategicClass[info.cls] then
+		if info.path then
 			strategic[pid] = t
 		end
 		-- An interceptor names the projectile it is after: that one is engaged.

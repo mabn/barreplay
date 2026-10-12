@@ -259,7 +259,10 @@ local function classify(wd)
     return (dmg >= 2000 and wd.range >= 600) and "beam" or nil  -- Pulsar, Bulwark, Titan, Juggernaut…
   end
   if wd.paralyzer and dmg >= 5000 then return "emp" end   -- armemp, armthor (before the stockpile rule)
-  if dmg <= 1 then return nil end                          -- AA and utility (the Mercury is a stockpiled AA missile)
+  if dmg <= 1 then                                         -- AA and utility (the Mercury is a stockpiled AA missile)
+    if range >= 1500 and maxArmorDamage(wd) >= 100 then return 'aa' end  -- long-range AA (widget 1.11.0)
+    return nil
+  end
   if wd.stockpile and wd.range >= 1500 then return "tactical" end  -- legperdition
   if wd.type == "Cannon" and wd.range >= 1500 then return "artillery" end   -- LRPC, rapid, minis
   if (wd.type == "StarburstLauncher" or wd.type == "MissileLauncher")
