@@ -60,6 +60,7 @@ const MOBILE = new Set(["army", "experimental", "ship", "commander", "unit", ...
 
 
 export function plural(name: string): string {
+  if (/teeth$/i.test(name)) return name;
   return /(s|x|ch|sh)$/.test(name) ? name + "es" : /[^aeiou]y$/.test(name) ? name.slice(0, -1) + "ies" : name + "s";
 }
 
@@ -186,6 +187,16 @@ export function battlePhrase(ins: Insights, b: Battle, won: number, where: strin
   if (fac && fac.metal >= FACTORY_SHARE * L.metal) {
     const what = unitName(ins, fac.def, fac.n);
     return `${W} destroys ${victim ? `${possessive(victim)} ${what}` : fac.n > 1 ? `${Ls} ${what}` : `a ${Ls} ${what}`} ${where}`;
+  }
+  // What went down was mostly buildings, whoever did it: the defences
+  // broken, else the base raided, in words that grow with the fight like
+  // the margin words do — a strong verb needs a big fight AND a margin.
+  if (lost(new Set(["defence"])) >= MOSTLY) {
+    return L.metal >= FIGHT_METAL ? `${W} breaks the ${Ls} defences ${where}` : `${W} picks off ${Ls} defences ${where}`;
+  }
+  if (buildings) {
+    if (L.metal >= BIG_METAL && lossWorth(L) >= STRONG_MARGIN * lossWorth(Wl)) return `${W} wrecks ${base}`;
+    return L.metal >= FIGHT_METAL ? `${W} breaks into ${base}` : `${W} raids ${base}`;
   }
   return null;
 }

@@ -713,8 +713,9 @@ func (p *pass) fillDefs() {
 // window, since a building finished then is still in what the model reads.
 const builtSec = swingIncomeSteps * StepSec
 
-// momentBuiltDefs caps the defs one side's build-up lists.
-const momentBuiltDefs = 16
+// momentBuiltDefs caps the defs one side's build-up lists per building
+// category, so a stretch of turrets cannot push the mines out of it.
+const momentBuiltDefs = 8
 
 // momentBuilt fills a moment's Built: what each side finished in the
 // builtSec up to its end, by def, the most metal first.
@@ -746,13 +747,16 @@ func (p *pass) momentBuilt(m *Moment) {
 			}
 			return list[i].Def < list[j].Def
 		})
-		if len(list) > momentBuiltDefs {
-			list = list[:momentBuiltDefs]
-		}
+		kept := list[:0]
+		perCat := make([]int, len(buildingCats))
 		for _, u := range list {
-			p.usedDef[u.Def] = true
+			if c := p.defs[u.Def].bcat; c >= 0 && perCat[c] < momentBuiltDefs {
+				perCat[c]++
+				kept = append(kept, u)
+				p.usedDef[u.Def] = true
+			}
 		}
-		m.Built[side] = list
+		m.Built[side] = kept
 	}
 }
 

@@ -53,7 +53,8 @@ type Moment struct {
 	Build float64 `json:"build,omitempty"`
 	// Built is what each side finished building in the builtSec up to F1
 	// (from BuiltFrom), by def, the most metal first, at most
-	// momentBuiltDefs: what a build-up story shows. Version 10.
+	// momentBuiltDefs of each building category: what a build-up story
+	// shows. Version 10.
 	Built     [][]UnitLoss `json:"built,omitempty"`
 	BuiltFrom int32        `json:"builtFrom,omitempty"`
 }

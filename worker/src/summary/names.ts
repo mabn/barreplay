@@ -6,6 +6,7 @@ import { h } from "./dom";
 import { iconSrc } from "./icons";
 import { fmtMetal } from "./format";
 import { nameRuns, playerColor, sideColor, sideName } from "./model";
+import { plural } from "./phrases";
 import type { Fighter } from "./moments";
 import { tip } from "./tooltip";
 import type { Insights, SummaryOptions } from "./types";
@@ -27,10 +28,10 @@ export function bindIcons(ins: Insights, opts: SummaryOptions): void {
 
 /** unitRef is a unit's name led by its strategic icon (untinted, at text
  * size); the icon appears once it has loaded, and a def without one is just
- * its name. */
-export function unitRef(ins: Insights, def: number, bold = false): HTMLElement {
+ * its name. text replaces the name as written (a plural: "Wind Turbines"). */
+export function unitRef(ins: Insights, def: number, bold = false, text?: string): HTMLElement {
   const d = ins.defs[String(def)];
-  const label = d?.human || d?.name || "a unit";
+  const label = text || d?.human || d?.name || "a unit";
   const img = h("img", { class: "brs-uicon-inline", alt: "", style: "display: none" });
   void iconSrc(ins, iconOpts.get(ins) ?? {}, def).then((src) => {
     if (!src) return;
@@ -42,15 +43,18 @@ export function unitRef(ins: Insights, def: number, bold = false): HTMLElement {
 
 const unitNameCache = new WeakMap<Insights, { name: string; def: number }[]>();
 
-/** unitNames is every unit name the file describes, longest first, so
- * "Advanced Fusion Reactor" wins over "Fusion Reactor". */
+/** unitNames is every unit name the file describes, and its plural
+ * ("Wind Turbines"), longest first, so "Advanced Fusion Reactor" wins over
+ * "Fusion Reactor". */
 function unitNames(ins: Insights): { name: string; def: number }[] {
   let list = unitNameCache.get(ins);
   if (!list) {
     const seen = new Map<string, number>();
     for (const [id, d] of Object.entries(ins.defs)) {
       const name = d.human || d.name;
-      if (name && name.length >= 3 && !seen.has(name)) seen.set(name, Number(id));
+      if (!name || name.length < 3) continue;
+      if (!seen.has(name)) seen.set(name, Number(id));
+      if (!seen.has(plural(name))) seen.set(plural(name), Number(id));
     }
     list = [...seen].map(([name, def]) => ({ name, def })).sort((a, b) => b.name.length - a.name.length);
     unitNameCache.set(ins, list);
@@ -72,7 +76,7 @@ function withUnits(ins: Insights, text: string): (string | HTMLElement)[] {
         if (text.startsWith(n.name, i) && (end >= text.length || !word.test(text[end]))) {
           if (plain) out.push(plain);
           plain = "";
-          out.push(unitRef(ins, n.def));
+          out.push(unitRef(ins, n.def, false, n.name));
           i = end;
           continue outer;
         }

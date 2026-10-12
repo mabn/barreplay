@@ -10,8 +10,9 @@ import { tip } from "./tooltip";
 import type { Insights, SummaryOptions, UnitLoss } from "./types";
 
 /** fillUnits fills list with the chips for units (icons load first), at
- * most `max` of them up front when given. */
-export async function fillUnits(list: HTMLElement, ins: Insights, opts: SummaryOptions, units: UnitLoss[], priced: boolean, max = Infinity): Promise<void> {
+ * most `max` of them up front when given. verb is what happened to them,
+ * for the tooltips: "lost", or "built" for a build-up. */
+export async function fillUnits(list: HTMLElement, ins: Insights, opts: SummaryOptions, units: UnitLoss[], priced: boolean, max = Infinity, verb = "lost"): Promise<void> {
   const name = (d: number) => ins.defs[String(d)]?.human || ins.defs[String(d)]?.name || "?";
   const src = new Map<number, string | null>();
   await Promise.all(units.map(async (u) => src.set(u.def, await iconSrc(ins, opts, u.def))));
@@ -23,10 +24,10 @@ export async function fillUnits(list: HTMLElement, ins: Insights, opts: SummaryO
     const icon = src.get(g.defs[0].def);
     const el = h("span", { class: "brs-unit" }, icon ? iconImg(icon, label) : h("span", { class: "brs-uname" }, label), g.n ? h("span", undefined, `×${g.n}`) : null);
     tip(el, {
-      title: g.defs.length > 1 ? (g.n ? `${g.n} lost` : label) : name(g.defs[0].def),
+      title: g.defs.length > 1 ? (g.n ? `${g.n} ${verb}` : label) : name(g.defs[0].def),
       // n 0 is a count the file never recorded (a pre-v4 summary lists only
       // its top defs): say nothing rather than "0 lost".
-      rows: g.defs.map((u) => ({ label: g.defs.length > 1 ? (u.n ? `${name(u.def)} ×${u.n}` : name(u.def)) : u.n ? `${u.n} lost` : "Among the costliest lost", value: priced && u.metal ? `${fmtMetal(u.metal)} metal` : "" })),
+      rows: g.defs.map((u) => ({ label: g.defs.length > 1 ? (u.n ? `${name(u.def)} ×${u.n}` : name(u.def)) : u.n ? `${u.n} ${verb}` : `Among the costliest ${verb}`, value: priced && u.metal ? `${fmtMetal(u.metal)} metal` : "" })),
     });
     return el;
   };
@@ -34,7 +35,7 @@ export async function fillUnits(list: HTMLElement, ins: Insights, opts: SummaryO
   if (rest.length) {
     const n = rest.reduce((a, g) => a + g.n, 0);
     const more = h("button", { class: "brs-more", type: "button", "aria-expanded": "false" }, `+${rest.length} more`);
-    tip(more, { title: `${n} more lost`, rows: [{ label: rest.length > split.rest.length ? "The smaller losses" : "Less than a tenth of the metal" }], note: "Click to show" });
+    tip(more, { title: `${n} more ${verb}`, rows: [{ label: rest.length > split.rest.length ? (verb === "lost" ? "The smaller losses" : "The smaller ones") : "Less than a tenth of the metal" }], note: "Click to show" });
     more.addEventListener("click", (ev) => {
       ev.stopPropagation();
       more.replaceWith(...rest.map(chip));

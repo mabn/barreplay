@@ -8,6 +8,7 @@ import { knockouts, wipedOf } from "./losses";
 import { defWorth, lossWorth, sideName, sideOfTeam, sideShort } from "./model";
 import { battlePhrase, battleWhere, marginPhrase, plural } from "./phrases";
 import { at as placeAt, place } from "./places";
+import { QUIPS_MAX, quip, type Quip, type QuipFacts } from "./quips";
 import { SIM_FPS, type Battle, type Insights, type Moment, type UnitLoss } from "./types";
 
 /** BAR's commanders, minus the scavenger bosses (app.js's COMMANDER_RE). */
@@ -69,8 +70,18 @@ export interface MomentStory {
   /** For a moment the sides' building moved rather than a fight, what each
    * side's army and metal income went from and to; null otherwise. */
   growth: SideGrowth[] | null;
-  /** Which of the growth's army value and income the story names. */
-  growthNamed: { army: boolean; eco: boolean } | null;
+  /** Which of the growth's army value, income and buildings the story
+   * names. */
+  growthNamed: { army: boolean; eco: boolean; build: boolean } | null;
+  /** The growth's army numbers carry the standing defences (version 10:
+   * the line reads them with the army, and they were a real part of it). */
+  armyDefences: boolean;
+  /** For a build-up story, per side, what it built and lost of the kinds
+   * of building the story is about; for a base going up, the buildings the
+   * side lost (version 10); null otherwise. */
+  buildLines: BuildLine[][] | null;
+  /** A line of colour now and then (quips.ts), null mostly. */
+  quip: Quip | null;
   /** A build-up story's window held a fight the gaining side LOST: each
    * side's losses there (the part inside the window), said beside the
    * build-up; null otherwise. */
@@ -81,14 +92,115 @@ export interface MomentStory {
  * and the end of a moment's window. */
 export interface SideGrowth {
   army: [number, number];
-  /** Averaged over the minute before each end, as the win model reads it. */
+  /** Averaged over the minutes before each end, as the win model reads it. */
   income: [number, number];
   /** Metal produced since the start, at each end. */
   mined: [number, number];
+  /** Its standing buildings but the defences, and the defences, in metal
+   * (version 10; 0 before). */
+  buildings: [number, number];
+  defences: [number, number];
 }
 
-/** Steps the win model averages income over (swing.go swingIncomeSteps). */
-const INCOME_STEPS = 4;
+/** One line of buildings under a side in a build-up story: what it
+ * finished, or what it lost, by def. */
+export interface BuildLine {
+  verb: "built" | "lost";
+  /** Since when: "built since 21:15". */
+  label: string;
+  n: number;
+  metal: number;
+  units: UnitLoss[];
+}
+
+/** Steps the win model averages income over (swing.go swingIncomeSteps):
+ * a minute before version 9, three minutes since. */
+function incomeSteps(ins: Insights): number {
+  return ins.version >= 9 ? 12 : 4;
+}
+
+/** Standing defences are said with the army when they are at least this
+ * share of army and defences together. */
+const DEFENCE_SHARE = 0.1;
+
+/** standing is a side's standing buildings at step i (version 10): the
+ * defences, which the line reads with the army, and everything else, which
+ * it reads as buildings. */
+export function standing(ins: Insights, side: number, i: number): { defences: number; buildings: number } {
+  const b = ins.series.buildings?.[side];
+  const out = { defences: 0, buildings: 0 };
+  if (!b) return out;
+  (ins.series.buildingCats ?? []).forEach((c, k) => {
+    const xs = b[k] ?? [];
+    const v = xs[Math.max(0, Math.min(i, xs.length - 1))] ?? 0;
+    if (c === "defence") out.defences += v;
+    else out.buildings += v;
+  });
+  return out;
+}
+
+/** A side's loss of buildings: how many, how much metal, by def (the most
+ * metal first) and by category, the factories' part, where and when. */
+export interface BuildingLoss {
+  n: number;
+  metal: number;
+  units: UnitLoss[];
+  byCat: Map<string, number>;
+  factory: number;
+  pts: [number, number][];
+  first: number;
+  last: number;
+}
+
+/** buildingLosses is what side lost of its buildings (Def.stand, version
+ * 10) in [f0, f1], of the categories in cats when given. What went down
+ * with an eliminated team is left out, as everywhere a loss is told. */
+export function buildingLosses(ins: Insights, side: number, f0: number, f1: number, cats?: ReadonlySet<string>, area?: { x: number; z: number; r: number }): BuildingLoss {
+  const sideOf = sideOfTeam(ins);
+  const wiped = wipedOf(ins);
+  const d = ins.deaths;
+  const units = new Map<number, UnitLoss>();
+  const out: BuildingLoss = { n: 0, metal: 0, units: [], byCat: new Map(), factory: 0, pts: [], first: Infinity, last: -Infinity };
+  for (let i = 0; i < d.f.length; i++) {
+    if (d.f[i] < f0 || d.f[i] > f1 || wiped(i) || sideOf.get(d.team[i]) !== side) continue;
+    if (area && (d.x[i] < 0 || Math.hypot(d.x[i] - area.x, d.z[i] - area.z) > area.r)) continue;
+    const def = ins.defs[String(d.def[i])];
+    const cat = def?.stand;
+    if (!cat || (cats && !cats.has(cat))) continue;
+    const cost = d.cost[i] ?? 0;
+    out.n++;
+    out.metal += cost;
+    out.byCat.set(cat, (out.byCat.get(cat) ?? 0) + cost);
+    if (def.class === "factory") out.factory += cost;
+    const u = units.get(d.def[i]) ?? { def: d.def[i], n: 0, metal: 0 };
+    u.n++;
+    u.metal += cost;
+    units.set(d.def[i], u);
+    if (d.x[i] >= 0) out.pts.push([d.x[i], d.z[i]]);
+    out.first = Math.min(out.first, d.f[i]);
+    out.last = Math.max(out.last, d.f[i]);
+  }
+  out.units = [...units.values()].sort((a, b) => b.metal - a.metal || b.n - a.n);
+  return out;
+}
+
+/** buildLines is what side built (Moment.built) and lost of the building
+ * categories in cats around a moment, the lines a build-up story shows
+ * under it. A loss is said only when it was more than a stray turret. */
+function buildLines(ins: Insights, m: Moment, side: number, cats: ReadonlySet<string>): BuildLine[] {
+  const out: BuildLine[] = [];
+  const built = (m.built?.[side] ?? []).filter((u) => cats.has(ins.defs[String(u.def)]?.stand ?? ""));
+  if (built.length) {
+    out.push({
+      verb: "built", label: `built since ${fmtClock((m.builtFrom ?? m.f0) / SIM_FPS)}`,
+      n: built.reduce((a, u) => a + u.n, 0), metal: built.reduce((a, u) => a + u.metal, 0), units: built,
+    });
+  }
+  const [w0, w1] = momentWindow(ins, m);
+  const lost = buildingLosses(ins, side, w0, w1, cats);
+  if (lost.n >= 3 || lost.metal >= QUIET_METAL) out.push({ verb: "lost", label: `lost since ${fmtClock(w0 / SIM_FPS)}`, n: lost.n, metal: lost.metal, units: lost.units });
+  return out;
+}
 
 /** A share of a shift below this is not mentioned as what moved it. */
 const DRIVER_MIN = 0.2;
@@ -99,7 +211,7 @@ const DRIVER_MIN = 0.2;
  * — is not what moved the line. An even trade of 5.9k for 5.5k metal is
  * exactly that, while the incomes pulled apart. */
 function builtNotFought(m: Moment): boolean {
-  return typeof m.army === "number" && typeof m.eco === "number" && m.army + m.eco > 0 && m.army < DRIVER_MIN;
+  return typeof m.army === "number" && typeof m.eco === "number" && m.army + m.eco + (m.build ?? 0) > 0 && m.army < DRIVER_MIN;
 }
 
 /** BAR's metal producers by name — mines and energy converters — the
@@ -131,14 +243,22 @@ interface Growth {
   title: string;
   detail: string;
   sides: SideGrowth[];
-  /** Which of army value and income the story names as carrying it. */
-  named: { army: boolean; eco: boolean };
+  /** Which of army value, income and buildings the story names as carrying
+   * it. */
+  named: { army: boolean; eco: boolean; build: boolean };
+  armyDefences: boolean;
+  lines: BuildLine[][] | null;
+  /** The building categories the story is about (Def.stand). */
+  cats: Set<string>;
 }
 
 /** growthStory tells a moment the line made on what the sides BUILT: by
- * whichever of army value and income carried it (each named only when it
- * carried at least DRIVER_MIN of the shift), and for income, whether the
- * losing side's fell or the gaining side's simply grew faster. */
+ * whichever of army value, income and (version 10) buildings carried it
+ * (each named only when it carried at least DRIVER_MIN of the shift), and
+ * for income and buildings, whether the losing side's fell or the gaining
+ * side's simply grew faster. A version 10 file also says WHAT was built:
+ * the mines and power plants behind an economy, the buildings behind a
+ * base, by def, as icons under each side (buildLines). */
 export function growthStory(ins: Insights, m: Moment): Growth {
   const won = m.side;
   const lose = 1 - won;
@@ -150,10 +270,11 @@ export function growthStory(ins: Insights, m: Moment): Growth {
   const i0 = step(m.f0);
   const i1 = step(m.f1);
   const pair = (xs: number[] | undefined): [number, number] => [xs?.[i0] ?? 0, xs?.[i1] ?? 0];
-  // Income as the model reads it: averaged over the last minute, and summed
-  // over the game so far (insights swing.go SwingFeatures).
+  // Income as the model reads it: averaged over the last minutes, and
+  // summed over the game so far (insights swing.go SwingFeatures).
+  const steps = incomeSteps(ins);
   const avg = (xs: number[] | undefined, i: number) => {
-    const lo = Math.max(0, i - INCOME_STEPS + 1);
+    const lo = Math.max(0, i - steps + 1);
     let sum = 0;
     for (let j = lo; j <= i; j++) sum += xs?.[j] ?? 0;
     return sum / (i - lo + 1);
@@ -165,36 +286,68 @@ export function growthStory(ins: Insights, m: Moment): Growth {
   };
   const sides = ins.sides.map((_, sd) => {
     const inc = s.metalIncome?.[sd];
-    return { army: pair(s.army[sd]), income: [avg(inc, i0), avg(inc, i1)] as [number, number], mined: [mined(inc, i0), mined(inc, i1)] as [number, number] };
+    const a = standing(ins, sd, i0);
+    const b = standing(ins, sd, i1);
+    return {
+      army: pair(s.army[sd]), income: [avg(inc, i0), avg(inc, i1)] as [number, number], mined: [mined(inc, i0), mined(inc, i1)] as [number, number],
+      buildings: [a.buildings, b.buildings] as [number, number], defences: [a.defences, b.defences] as [number, number],
+    };
   });
   // What carried it: the file says (version 7); older ones are read from
   // whose army grew more.
   let army: boolean;
   let eco: boolean;
-  if (typeof m.army === "number" && typeof m.eco === "number" && m.army + m.eco > 0) {
+  let build = false;
+  if (typeof m.army === "number" && typeof m.eco === "number" && m.army + m.eco + (m.build ?? 0) > 0) {
     army = m.army >= DRIVER_MIN;
     eco = m.eco >= DRIVER_MIN;
+    build = (m.build ?? 0) >= DRIVER_MIN;
   } else {
     army = armyGrew(ins, m, won);
     eco = !army;
   }
+  // The line reads standing defences with the army (version 10): where they
+  // are a real part of it, the army's numbers carry them and say so — and
+  // the title names them when they moved more than the armies did.
+  const armyDefences = !!s.buildings && sides.some((g) => g.defences[1] >= DEFENCE_SHARE * (g.army[1] + g.defences[1]));
+  const gain = (xs: [number, number]) => xs[1] - xs[0];
+  const defGap = gain(sides[won].defences) - gain(sides[lose].defences);
+  const defencesMoved = armyDefences && defGap > 0 && defGap >= 0.5 * Math.abs(gain(sides[won].army) - gain(sides[lose].army));
+  if (armyDefences) for (const g of sides) g.army = [g.army[0] + g.defences[0], g.army[1] + g.defences[1]];
   const gw = sides[won];
   const gl = sides[lose];
   const dIncW = gw.income[1] - gw.income[0];
   const dIncL = gl.income[1] - gl.income[0];
   // The losing side's income FELL by more than the other's rose: the story
-  // is what it lost, not what the other built.
+  // is what it lost, not what the other built. The same for its buildings.
   const incomeLost = dIncL < 0 && -dIncL >= Math.max(0, dIncW);
+  const dBldW = gw.buildings[1] - gw.buildings[0];
+  const dBldL = gl.buildings[1] - gl.buildings[0];
+  const buildingsFell = dBldL < 0 && -dBldL >= Math.max(0, dBldW);
+  // "Bigger" only when it is: a side still behind at the end caught up.
+  // A base that SHRANK is said as that, whatever else moved: "Blue team
+  // out-builds Red team in buildings" over a Red base going down is false.
+  const list = (xs: string[]) => (xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
+  const armyWords = army ? (defencesMoved ? ["army", "defences"] : ["army"]) : [];
   let title: string;
-  if (army && eco) title = `${W} out-builds ${L} in army and economy`;
-  else if (army) title = `${W} out-builds ${possessive(L)} army`;
-  else title = incomeLost ? `${L} loses metal income` : `${W} builds up a bigger economy`;
+  if (build && buildingsFell) {
+    const also = list([...armyWords, eco && !incomeLost ? "economy" : ""].filter(Boolean));
+    const shrank = eco && incomeLost ? `${possessive(L)} base and income shrink` : `${possessive(L)} base shrinks`;
+    title = also ? `${shrank} while ${W} out-builds its ${also}` : shrank;
+  } else if (army && eco && build) title = `${W} out-builds ${L} on every front`;
+  else if (army && (eco || build)) title = `${W} out-builds ${L} in ${list([...armyWords, eco ? "economy" : "buildings"])}`;
+  else if (eco && build) title = `${W} out-builds ${L} in economy and buildings`;
+  else if (army) title = `${W} out-builds ${possessive(L)} ${list(armyWords)}`;
+  else if (build) title = gw.buildings[1] > gl.buildings[1] ? `${W} builds up a bigger base` : `${possessive(W)} base catches up`;
+  else title = incomeLost ? `${L} loses metal income` : gw.income[1] > gl.income[1] ? `${W} builds up a bigger economy` : `${possessive(W)} economy catches up`;
   const rate = (v: number) => `${fmtMetal(Math.round(v * 10) / 10)}/s`;
+  const over = steps === 4 ? "the last minute" : `the last ${Math.round(steps * ins.stepSec / 60)} minutes`;
   const parts: string[] = [];
   if (eco) {
-    parts.push(`Metal income over the last minute: ${W} ${rate(gw.income[0])} → ${rate(gw.income[1])}, ${L} ${rate(gl.income[0])} → ${rate(gl.income[1])}.`);
+    parts.push(`Metal income over ${over}: ${W} ${rate(gw.income[0])} → ${rate(gw.income[1])}, ${L} ${rate(gl.income[0])} → ${rate(gl.income[1])}.`);
     parts.push(`Metal mined so far: ${W} ${fmtMetal(gw.mined[1])}, ${L} ${fmtMetal(gl.mined[1])}.`);
   }
+  if (build) parts.push(`Buildings, defences aside: ${W} ${fmtMetal(gw.buildings[0])} → ${fmtMetal(gw.buildings[1])} metal, ${L} ${fmtMetal(gl.buildings[0])} → ${fmtMetal(gl.buildings[1])}.`);
   if (eco && incomeLost) {
     // Where it went, when that was the other side: the mines and
     // converters the losing side lost in the window.
@@ -202,14 +355,33 @@ export function growthStory(ins: Insights, m: Moment): Growth {
     const eb = ecoLost(ins, lose, w0, w1);
     if (eb.n >= 1) parts.push(`${L} lost ${eb.n} metal producer${eb.n === 1 ? "" : "s"} (${fmtMetal(eb.metal)} metal): ${eb.kinds.slice(0, 4).map(([name, n]) => (n > 1 ? `${n} ${name}` : name)).join(", ")}.`);
   }
-  if (army) parts.push(`Army: ${W} ${fmtMetal(gw.army[0])} → ${fmtMetal(gw.army[1])} metal, ${L} ${fmtMetal(gl.army[0])} → ${fmtMetal(gl.army[1])}.`);
+  const armyWord = armyDefences ? "Army and defences" : "Army";
+  if (army) parts.push(`${armyWord}: ${W} ${fmtMetal(gw.army[0])} → ${fmtMetal(gw.army[1])} metal, ${L} ${fmtMetal(gl.army[0])} → ${fmtMetal(gl.army[1])}.`);
   else if (gl.army[1] - gl.army[0] > Math.max(0, gw.army[1] - gw.army[0])) {
     // The other side spent the stretch on its army instead: worth saying,
     // since the army chart shows it pulling ahead while the line went the
     // other way.
     parts.push(`${L} put more into its army: ${fmtMetal(gl.army[0])} → ${fmtMetal(gl.army[1])} metal, ${W} ${fmtMetal(gw.army[0])} → ${fmtMetal(gw.army[1])}.`);
   }
-  return { title, detail: parts.join(" "), sides, named: { army, eco } };
+  // What was built behind it, and lost: an economy story its mines and
+  // power, a buildings story every building but the defences, an army story
+  // the defences when they count with it.
+  const cats = new Set<string>();
+  if (eco || build) cats.add("eco").add("mex");
+  if (build) cats.add("other");
+  if (army && armyDefences) cats.add("defence");
+  const lines = cats.size && m.built ? ins.sides.map((_, sd) => buildLines(ins, m, sd, cats)) : null;
+  for (const [sd, ls] of (lines ?? []).entries()) {
+    for (const l of ls) parts.push(`${sideName(ins, sd)} ${l.label}: ${l.units.slice(0, 4).map((u) => `${u.n} ${defLabel(ins, u.def, u.n)}`).join(", ")}.`);
+  }
+  return { title, detail: parts.join(" "), sides, named: { army, eco, build }, armyDefences, lines: lines?.some((ls) => ls.length) ? lines : null, cats };
+}
+
+/** defLabel is a def's name for a count: "Wind Turbines" for 2. */
+function defLabel(ins: Insights, def: number, n: number): string {
+  const d = ins.defs[String(def)];
+  const name = d?.human || d?.name || "unit";
+  return n > 1 ? plural(name) : name;
 }
 
 /** An instant on the map: sim frame f, at world (x, z) within radius r. */
@@ -387,6 +559,90 @@ function article(name: string): string {
   return /^[aeiou]/i.test(name) ? "an" : "a";
 }
 
+/** A side that loses at least BASE_SHARE of its standing buildings, and
+ * BASE_MIN metal of them, over a moment — buildings at least BASE_PART of
+ * everything it lost there — is told as losing its base (version 10): the
+ * line reads buildings, and a base going up is what a viewer remembers. */
+const BASE_SHARE = 0.15;
+const BASE_MIN = 1000;
+const BASE_PART = 0.5;
+/** "Most of its base", and "mostly" one kind of building, from this share. */
+const BASE_MOST = 0.6;
+/** Building losses spread wider than this are told without a place. */
+const BASE_SPREAD = 2500;
+
+/** A side's base going up over a moment: the share of its standing
+ * buildings lost, what kind most of it was, and where and when. */
+export interface BaseLoss {
+  share: number;
+  mostly: string | null;
+  loss: BuildingLoss;
+  focus: Focus;
+}
+
+/** baseLoss is side's loss of buildings over [f0, f1] when it is a story
+ * of its own (see BASE_SHARE), else null. all is everything side lost in
+ * the window. */
+export function baseLoss(ins: Insights, side: number, f0: number, f1: number, all: SideLoss): BaseLoss | null {
+  const s = ins.series;
+  if (!s.buildings) return null;
+  const loss = buildingLosses(ins, side, f0, f1);
+  if (loss.metal < BASE_MIN || loss.metal < BASE_PART * all.metal) return null;
+  // The base it had going in.
+  const i = Math.max(0, Math.min(s.t.length - 1, Math.round(f0 / SIM_FPS / ins.stepSec) - 1));
+  const had = standing(ins, side, i);
+  const total = had.defences + had.buildings;
+  if (total <= 0 || loss.metal < BASE_SHARE * total) return null;
+  const cat = (c: string) => loss.byCat.get(c) ?? 0;
+  const most = BASE_MOST * loss.metal;
+  const mostly = cat("defence") >= most ? "defences"
+    : loss.factory >= most ? "factories"
+    : cat("mex") >= most ? "metal extractors"
+    : cat("eco") + cat("mex") >= most ? "its economy"
+    : null;
+  const at = spread(loss.pts);
+  const focus: Focus = { f: loss.first, f1: loss.last, ...(at.r !== undefined && at.r <= BASE_SPREAD ? at : {}) };
+  return { share: Math.min(1, loss.metal / total), mostly, loss, focus };
+}
+
+/** baseTitle says it: "Blue team loses 35% of its base in the west, mostly
+ * its economy", "Blue team loses most of its base". Without the place and
+ * the kind (short) it is a clause for another title. */
+function baseTitle(ins: Insights, side: number, b: BaseLoss, short = false): string {
+  const L = sideName(ins, side);
+  const where = !short && typeof b.focus.x === "number" && typeof b.focus.z === "number" ? ` ${placeAt(ins, b.focus.x, b.focus.z)}` : "";
+  if (b.share >= BASE_MOST) return `${L} loses most of its base${where}`;
+  return `${L} loses ${Math.round(b.share * 100)}% of its base${where}${b.mostly && !short ? `, mostly ${b.mostly}` : ""}`;
+}
+
+/** quipFacts gathers what quips.ts may remark on about a moment (a
+ * version 10 file: it needs Moment.built). */
+function quipFacts(ins: Insights, m: Moment, kind: "growth" | "base", base: BaseLoss | null, cats: ReadonlySet<string>): QuipFacts | null {
+  if (!m.built) return null;
+  const won = m.side;
+  const lose = 1 - won;
+  const from = m.builtFrom ?? m.f0;
+  const metal = (sd: number) => (m.built?.[sd] ?? []).reduce((a, u) => a + u.metal, 0);
+  const first = (key: string, sd: number) => ins.milestones.find((x) => x.key === key && x.side === sd);
+  const inWindow = (x: { f: number } | undefined) => !!x && x.f > from && x.f <= m.f1;
+  const before = (x: { f: number } | undefined) => !!x && x.f <= m.f1;
+  const [w0, w1] = momentWindow(ins, m);
+  return {
+    W: sideName(ins, won), L: sideName(ins, lose), n: m.n, kind,
+    // Only what the story is about: a forest of wind turbines is no aside
+    // to an army that out-built the other.
+    built: (m.built[won] ?? []).map((u) => {
+      const d = ins.defs[String(u.def)];
+      return { name: d?.name ?? "", human: d?.human || d?.name || "unit", n: u.n, metal: u.metal, stand: d?.stand };
+    }).filter((u) => cats.has(u.stand ?? "")),
+    wonMetal: metal(won), loseMetal: metal(lose),
+    baseShare: base?.share ?? 0,
+    minesLost: kind === "base" || cats.has("mex") ? buildingLosses(ins, lose, w0, w1, new Set(["mex"])).n : 0,
+    fusionFirst: cats.has("eco") && inWindow(first("fusion", won)) && !before(first("fusion", lose)),
+    nukeNoAnti: inWindow(first("nuke", won)) && !before(first("antinuke", lose)),
+  };
+}
+
 /** momentStory names a moment and says what happened in it. */
 export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<number>): MomentStory {
   const [f0, f1] = momentWindow(ins, m);
@@ -427,9 +683,24 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
   let whole: Battle | null = null;
   // A fight there that the line did not move on (see builtNotFought).
   let notFought = false;
+  // A big loss of buildings: told as the loser's base going up, unless a
+  // battle holds it (whose title then says so: phrases.ts) or the army fell
+  // with it. A file without buildings (before version 10) has none.
+  const base = baseLoss(ins, lose, f0, f1, ll);
+  let raid: BaseLoss | null = null;
   // A fight the side the line moved toward LOST, while its army grew
   // anyway (see lostButBuilt): told as the build-up, the fight beside it.
   let lostFight: { won: SideLoss; lost: SideLoss; sides: SideLoss[]; focus: Focus | null; place: string } | null = null;
+  // The base going up IS the moment when buildings moved the line more than
+  // the armies did (version 10): told as that, whatever commander went with
+  // it — unless one battle holds most of it, whose title then says what
+  // happened there and who did it ("Red Stormbringers bomb the Blue base").
+  const bf = base && (m.build ?? 0) > (m.army ?? 0) ? biggestFight(ins, f0, f1) : -1;
+  const held = (i: number) => {
+    const b = ins.battles[i];
+    return buildingLosses(ins, lose, Math.max(b.f0, f0), Math.min(b.f1, f1), undefined, { x: b.x, z: b.z, r: b.r + BATTLE_REACH }).metal >= BASE_PART * base!.loss.metal;
+  };
+  const baseFirst = !!base && (m.build ?? 0) > (m.army ?? 0) && !(bf >= 0 && (ownBlast(ins.battles[bf]) === lose || held(bf)));
   if (out.length === 1) {
     fight = false;
     focus = eliminationFocus(ins, out[0].team, out[0].f);
@@ -438,6 +709,14 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     fight = false;
     focus = eliminationFocus(ins, out[0].team, out[0].f);
     title = `${out.length} of ${possessive(L)} players are out`;
+  } else if (baseFirst && base) {
+    // Who fought it is not one battle's question: no fighters, no badge.
+    fight = false;
+    raid = base;
+    focus = base.focus;
+    title = baseTitle(ins, lose, base);
+    if (ll.commanders.length === 1) title += `, with ${possessive(ll.commanders[0])} commander`;
+    else if (ll.commanders.length > 1) title += `, with ${ll.commanders.length} of its commanders`;
   } else if (ll.commanders.length === 1) {
     focus = deathFocus(ins, ll.commanderDeaths[0]);
     title = selfDestructed(ins, ll.commanderDeaths[0])
@@ -448,7 +727,7 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     title = ll.commanderDeaths.every((i) => selfDestructed(ins, i))
       ? `${ll.commanders.length} of ${possessive(L)} commanders self-destruct${at(focus)}`
       : `${ll.commanders.length} of ${possessive(L)} commanders fall${at(focus)}`;
-  } else if ((size(ll) < (priced ? QUIET_METAL : 3) && size(ll) <= size(wl) * 1.5) || (notFought = builtNotFought(m))) {
+  } else if ((size(ll) < (priced ? QUIET_METAL : 3) && size(ll) <= size(wl) * 1.5) || (notFought = builtNotFought(m) && !base)) {
     // No real fight, or one that did not move the line: it moved on what
     // each side built.
     fight = false;
@@ -486,7 +765,8 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     // moves on the ARMY, so say how much of it went — a ten-second burst
     // somewhere is not what moved it — and watch the whole window.
     const drop = b ? null : armyDrop(ins, lose, f0, f1);
-    if (!b && !drop && focus) {
+    raid = b || drop ? null : base;
+    if (!b && !drop && !raid && focus) {
       // Still told as ONE event: the killing around the busiest burst's spot,
       // from its first death in the window to its last, and only that — the
       // clip watches that spot, so the sentence must count what it shows,
@@ -504,7 +784,7 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     // army was bigger, or what it lost mattered less): then the title states
     // the trade rather than calling it a win the numbers beside it deny.
     const unit = (v: number) => (priced ? `${fmtMetal(v)} metal` : `${v} units`);
-    if (!drop && !(b && ownBlast(b) === lose) && priced && worth(lw) > worth(lo) && armyGrew(ins, m, won)) {
+    if (!drop && !raid && !(b && ownBlast(b) === lose) && priced && worth(lw) > worth(lo) && armyGrew(ins, m, won)) {
       // W lost the fight, so the fight cannot be why the line moved toward
       // it: W's army grew faster than L's despite it (the model reads army
       // value, which a lost fight lowers). Said as that, with the fight as
@@ -525,6 +805,11 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
     } else if (drop) {
       focus = { f: f0, f1 };
       title = `${L} loses ${Math.round(drop.share * 100)}% of its army${drop.mostly ? `, mostly ${drop.mostly}` : ""}`;
+    } else if (raid) {
+      // Spread over the map or not, ONE story: the base going up, from the
+      // first building lost to the last.
+      focus = raid.focus;
+      title = baseTitle(ins, lose, raid);
     } else if (b && !whole && worth(lw) < worth(lo) && (phrase = battlePhrase(ins, b, won, at(focus).trim()))) {
       // The whole battle is this story, so what its numbers say happened
       // there is the title ("Blue Thunders level Ann's base").
@@ -533,9 +818,20 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
       : worth(lw) <= worth(lo) ? `${W} wins a close fight${at(focus)}`
       : `${W} trades ${unit(size(lw))} for ${unit(size(lo))}${at(focus)}`;
   }
+  // The base going up that the title tells, whose buildings are then shown
+  // by def under the side that lost them.
+  let told = raid;
+  if (base && !baseFirst && (m.build ?? 0) > (m.army ?? 0) && (out.length || ll.commanders.length)) {
+    // A player out or a commander down names the moment, but the line moved
+    // on the base going with them: say that too.
+    title += ` as ${baseTitle(ins, lose, base, true)}`;
+    told = base;
+  }
   if (lostFight) {
     fight = false;
     growth = growthStory(ins, m);
+    // The fight's losses are said beside it; its buildings need no line too.
+    growth.lines = growth.lines?.map((ls) => ls.filter((l) => l.verb === "built")) ?? null;
     // Despite, not because of: the fight it lost is half of what happened.
     title = `${growth.title} despite losing a fight${lostFight.place}`;
     local = null;
@@ -593,7 +889,18 @@ export function momentStory(ins: Insights, m: Moment, shared?: ReadonlySet<numbe
   // A moment told on what was built despite a fight is not about that fight.
   const battle = notFought ? -1 : battleOfMoment(ins, focus, f0, f1);
   const fought = fight ? fighters(ins, ins.battles[battle]) : ins.sides.map(() => []);
-  return { title, detail, lost, shown: local ?? lost, elsewhere, whole, battle, focus, fighters: fought, growth: growth?.sides ?? null, growthNamed: growth?.named ?? null, lostFight: lostFight?.sides ?? null };
+  const facts = growth ? quipFacts(ins, m, "growth", null, growth.cats) : raid ? quipFacts(ins, m, "base", raid, new Set()) : null;
+  const baseLines = !growth && told
+    ? ins.sides.map((_, sd): BuildLine[] => (sd === lose ? [{
+      verb: "lost", label: `buildings: ${told!.loss.n} lost · ${fmtMetal(told!.loss.metal)} metal`,
+      n: told!.loss.n, metal: told!.loss.metal, units: told!.loss.units,
+    }] : []))
+    : null;
+  return {
+    title, detail, lost, shown: local ?? lost, elsewhere, whole, battle, focus, fighters: fought,
+    growth: growth?.sides ?? null, growthNamed: growth?.named ?? null, armyDefences: growth?.armyDefences ?? false,
+    buildLines: growth?.lines ?? baseLines, lostFight: lostFight?.sides ?? null, quip: facts ? quip(facts) : null,
+  };
 }
 
 /** NOTABLE_SHARE is the part of a side's loss in a fight ONE unit must
@@ -623,6 +930,22 @@ function lostFightNote(ins: Insights, f: { won: SideLoss; lost: SideLoss; focus:
  * more of them would each tell whole is told in parts instead: each moment
  * then covers only the stretch of it inside its own window. */
 export function momentStories(ins: Insights, moments: Moment[]): MomentStory[] {
+  return fewQuips(storiesOf(ins, moments));
+}
+
+/** fewQuips keeps the first QUIPS_MAX asides on a page, no two alike: one
+ * is a surprise, one under every swing a tic. */
+export function fewQuips(stories: MomentStory[]): MomentStory[] {
+  const seen = new Set<string>();
+  return stories.map((st) => {
+    if (!st.quip) return st;
+    if (seen.size >= QUIPS_MAX || seen.has(st.quip.key)) return { ...st, quip: null };
+    seen.add(st.quip.key);
+    return st;
+  });
+}
+
+function storiesOf(ins: Insights, moments: Moment[]): MomentStory[] {
   const first = moments.map((m) => momentStory(ins, m));
   const told = new Map<number, number>();
   for (const st of first) {

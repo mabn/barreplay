@@ -33,8 +33,8 @@ const (
 )
 
 var (
-	converterNameRE = regexp.MustCompile(`^(arm|cor|leg)[a-z0-9]*(makr|mmkr|mmm|metalmaker)`)
-	mexNameRE       = regexp.MustCompile(`^(arm|cor|leg)[a-z0-9]*(mex|moho)`)
+	converterNameRE = regexp.MustCompile(`^(arm|cor|leg)[a-z0-9]*(makr|mmkr|mmm|metalmaker|fmkr|conv|gmm)`)
+	mexNameRE       = regexp.MustCompile(`^((arm|cor|leg)[a-z0-9]*(mex|moho|uwmme)|t3mmex)`)
 )
 
 // buildingCat is a def's building category, -1 for anything that is not a
@@ -106,7 +106,7 @@ var legacyBuildings = func() map[string]struct {
 func buildingOf(d snapshot.UnitDef, legacy bool) (int, float64) {
 	if legacy {
 		if b, ok := legacyBuildings[d.Name]; ok {
-			return b.cat, b.cost
+			return refineCat(d.Name, b.cat), b.cost
 		}
 		return -1, 0
 	}
@@ -114,5 +114,24 @@ func buildingOf(d snapshot.UnitDef, legacy bool) (int, float64) {
 	if c < 0 || d.MetalCost <= 0 {
 		return -1, 0
 	}
-	return c, float64(d.MetalCost)
+	return refineCat(d.Name, c), float64(d.MetalCost)
+}
+
+// refineCat sorts a building the study filed under "other" by its name when
+// that says it is an extractor or a converter (Legion's converters, the
+// naval and the epic extractors, a mine that is also a factory). Display
+// only: the line reads every building but the defences as one input, so
+// moving one between eco, mex and other changes no number in it. A
+// defence stays a defence.
+func refineCat(name string, c int) int {
+	name = strings.TrimSuffix(name, "_scav")
+	switch {
+	case c == bcDefence:
+		return c
+	case mexNameRE.MatchString(name):
+		return bcMex
+	case powerNameRE.MatchString(name) || converterNameRE.MatchString(name):
+		return bcEco
+	}
+	return c
 }

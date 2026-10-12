@@ -6,7 +6,8 @@ import { test } from "node:test";
 import { fmtClock, fmtMetal, niceStep, timeStep } from "../src/summary/format";
 import { colorName, comparable, defWorth, nameRuns, notices, POWER_WORTH, readable, sideColor, sideName } from "../src/summary/model";
 import { destroyedBySide, knockouts, lossesByStep, wipedOf } from "../src/summary/losses";
-import { armyDrop, compass, fighters, gapBattles, momentStories, momentStory, notableLoss } from "../src/summary/moments";
+import { armyDrop, compass, fewQuips, fighters, gapBattles, momentStories, momentStory, notableLoss } from "../src/summary/moments";
+import { QUIPS_MAX, quip, type QuipFacts } from "../src/summary/quips";
 import { tickText } from "../src/summary/chart";
 import { clipAround, clipAt, clipEvent, clipSpan, watcher } from "../src/summary/watch";
 import { zonesOf } from "../src/summary/zones";
@@ -243,7 +244,7 @@ test("a moment is named after what died in it", () => {
   const inc = { ...base, series: { ...base.series, metalIncome: [[5, 5, 5, 5], [5, 5, 20, 30]] } };
   st = momentStory(ins({ ...inc, deaths: deaths([]) }), { ...m, army: 0.1, eco: 0.9 });
   assert.equal(st.title, "Team 2 builds up a bigger economy");
-  assert.match(st.detail, /^Metal income over the last minute: Team 2 /);
+  assert.match(st.detail, /^Metal income over the last 3 minutes: Team 2 /);
   assert.doesNotMatch(st.detail, /Army|lost/);
   assert.deepEqual(st.growth?.[1].income, [5, 10]);
   const fell = { ...base, series: { ...base.series, metalIncome: [[20, 20, 4, 4], [5, 5, 5, 5]] } };
@@ -550,6 +551,97 @@ test("ratioDomain scales to the leads from 40% to 95% of the game", () => {
   assert.ok(a < 0 && b > 1 && b - a >= 10);
 });
 
+test("a build-up says what was built, and a base going up is a story of its own", () => {
+  const defs = {
+    "1": { name: "armcom", human: "Commander", cost: 1200, class: "commander" },
+    "10": { name: "cormex", human: "Metal Extractor", cost: 50, class: "eco", stand: "mex" },
+    "11": { name: "corwin", human: "Wind Turbine", cost: 40, class: "eco", stand: "eco" },
+    "12": { name: "corllt", human: "Sentry", cost: 85, class: "defence", stand: "defence" },
+    "13": { name: "corlab", human: "Bot Lab", cost: 500, class: "factory", stand: "other" },
+  };
+  // [side][category][step]: defences, eco, mex, other.
+  const standing = (b0: number[][], b1: number[][]) => [b0, b1];
+  const flat = (v: number) => [v, v, v, v];
+  const base = {
+    battles: [],
+    bounds: { minX: 0, maxX: 900, minZ: 0, maxZ: 900 },
+    teams: [{ team: 0, side: 0, player: "Ann" }, { team: 1, side: 1, player: "Cy" }],
+    defs,
+    series: {
+      t: [0, 15, 30, 45], army: [flat(100), flat(100)], metalIncome: [flat(5), [5, 5, 20, 30]], energyIncome: [], armyCats: [], armyByCat: [],
+      buildingCats: ["defence", "eco", "mex", "other"],
+      buildings: standing([flat(0), flat(4000), flat(1000), flat(0)], [flat(0), [1000, 2000, 6000, 8000], [500, 800, 1200, 1500], [0, 500, 500, 500]]),
+    },
+  };
+  const deaths = (rows: [number, number, number, number, number][]) => ({
+    f: rows.map((r) => r[0]), def: rows.map((r) => r[1]), team: rows.map((r) => r[2]), x: rows.map((r) => r[3]), z: rows.map((r) => r[4]),
+    cost: rows.map((r) => (defs as Record<string, { cost: number }>)[String(r[1])].cost), unfinished: rows.map(() => 0),
+  });
+  const built = [[{ def: 11, n: 3, metal: 120 }], [{ def: 11, n: 20, metal: 800 }, { def: 13, n: 1, metal: 500 }, { def: 10, n: 4, metal: 200 }, { def: 12, n: 2, metal: 170 }]];
+  const m = { n: 1, f0: 900, f1: 1350, side: 1, delta: 0.3, battle: -1, army: 0, eco: 0.6, build: 0.4, builtFrom: 0, built };
+  // Economy and buildings carried it: the title says so, and under each side
+  // go the buildings of those kinds it finished — not its turrets.
+  let st = momentStory(ins({ ...base, deaths: deaths([]) }), m);
+  assert.equal(st.title, "Team 2 out-builds Blue team in economy and buildings");
+  assert.deepEqual(st.growthNamed, { army: false, eco: true, build: true });
+  assert.deepEqual(st.growth?.[1].buildings, [3300, 7700]);
+  assert.deepEqual(st.buildLines?.[1].map((l) => [l.label, l.units.map((u) => u.def)]), [["built since 0:00", [11, 13, 10]]]);
+  assert.deepEqual(st.buildLines?.[0].map((l) => l.n), [3]);
+  // ...and, now and then, a remark on it.
+  assert.equal(st.quip?.text, "Team 2 plants a forest of 20 Wind Turbines.");
+  // A base that SHRANK is told as that, not as the other side out-building it.
+  const shrink = { ...base, series: { ...base.series, buildings: standing([flat(0), [4000, 4000, 2000, 2000], flat(1000), flat(0)], [flat(0), flat(2000), flat(800), flat(500)]) } };
+  assert.equal(momentStory(ins({ ...shrink, deaths: deaths([]) }), { ...m, eco: 0, build: 1 }).title, "Blue team's base shrinks");
+  // Standing defences count with the army; the title names them when they
+  // moved more than the armies did, and the numbers carry them.
+  const dug = { ...base, series: { ...base.series, buildings: standing(base.series.buildings[0], [[0, 0, 3000, 5000], ...base.series.buildings[1].slice(1)]) } };
+  st = momentStory(ins({ ...dug, deaths: deaths([]) }), { ...m, army: 1, eco: 0, build: 0 });
+  assert.equal(st.title, "Team 2 out-builds Blue team's army and defences");
+  assert.equal(st.armyDefences, true);
+  assert.deepEqual(st.growth?.[1].army, [100, 3100]);
+  assert.deepEqual(st.buildLines?.[1][0].units.map((u) => u.def), [12]);
+  // A quarter of Blue's base going up, buildings moving the line more than
+  // the armies: that is the story, wherever it was fought.
+  const raid = [...Array.from({ length: 25 }, () => [1000, 11, 0, 100, 100] as [number, number, number, number, number]), ...Array.from({ length: 4 }, () => [1100, 10, 0, 150, 100] as [number, number, number, number, number])];
+  const hit = { ...m, army: 0.3, eco: 0, build: 0.7 };
+  st = momentStory(ins({ ...base, deaths: deaths(raid) }), hit);
+  assert.equal(st.title, "Blue team loses 24% of its base in the north-west, mostly its economy");
+  assert.deepEqual([st.focus?.f, st.focus?.f1], [1000, 1100]);
+  assert.equal(st.quip?.text, "No mines, no metal: Blue team finds out the hard way.");
+  // What went down is shown by def under the side that lost it.
+  assert.deepEqual(st.buildLines?.map((ls) => ls.map((l) => [l.label, l.units.map((u) => u.def)])), [[["buildings: 29 lost · 1.2k metal", [11, 10]]], []]);
+  // A commander lost with it rides along; with a battle holding it, the
+  // commander names the moment and the base comes after.
+  const com = [...raid, [1050, 1, 0, 100, 100] as [number, number, number, number, number]];
+  assert.equal(momentStory(ins({ ...base, deaths: deaths(com) }), hit).title, "Blue team loses 24% of its base in the north-west, mostly its economy, with Ann's commander");
+  const both = momentStory(ins({ ...base, deaths: deaths(com), battles: [{ f0: 950, f1: 1200, x: 100, z: 100, r: 200, lost: [] }] }), hit);
+  assert.equal(both.title, "Ann's commander falls in the north-west as Blue team loses 24% of its base");
+  assert.equal(both.buildLines?.[0][0].n, 29);
+  // The army moving the line more, a battle there is the story, as before;
+  // with no battle, the base going up still is.
+  const armyHit = { ...hit, army: 0.7, build: 0.3 };
+  assert.equal(momentStory(ins({ ...base, deaths: deaths(raid), battles: [{ f0: 950, f1: 1200, x: 100, z: 100, r: 200, lost: [] }] }), armyHit).title, "Team 2 wins the fight in the north-west");
+  assert.match(momentStory(ins({ ...base, deaths: deaths(raid) }), armyHit).title, /^Blue team loses 24% of its base/);
+});
+
+test("quips fire on plain facts, rotate their words and stay rare", () => {
+  const f: QuipFacts = { W: "Blue team", L: "Red team", n: 0, kind: "growth", built: [], wonMetal: 0, loseMetal: 0, baseShare: 0, minesLost: 0, fusionFirst: false, nukeNoAnti: false };
+  assert.equal(quip(f), null, "nothing to remark on");
+  const wind = { ...f, built: [{ name: "armwin", human: "Wind Turbine", n: 41, metal: 3075, stand: "eco" }] };
+  assert.equal(quip(wind)?.text, "41 Wind Turbines: Blue team is betting the game on the weather.");
+  assert.equal(quip({ ...wind, n: 1 })?.text, "Blue team plants a forest of 41 Wind Turbines.");
+  assert.equal(quip({ ...wind, wonMetal: 3075, loseMetal: 100 })?.key, "idle", "the other side building nothing says more");
+  assert.equal(quip({ ...wind, nukeNoAnti: true })?.text, "Blue team builds a nuke silo, and Red team has no anti-nuke. Awkward.");
+  assert.equal(quip({ ...f, kind: "base", baseShare: 0.6 })?.text, "Red team will need a new base.");
+  assert.equal(quip({ ...f, built: [{ name: "corllt", human: "Sentry", n: 9, metal: 765, stand: "defence" }] })?.text, "Blue team digs in: 9 Sentries.");
+  assert.equal(quip({ ...f, built: [{ name: "armdrag", human: "Dragon's Teeth", n: 24, metal: 192, stand: "other" }] })?.text, `Nothing says "keep out" like 24 Dragon's Teeth.`);
+  // A page carries at most QUIPS_MAX, no two of a kind.
+  const st = (key: string) => ({ quip: { key, text: key } }) as unknown as ReturnType<typeof momentStory>;
+  const kept = fewQuips([st("wind"), st("wind"), st("dig"), st("idle")]).map((s) => s.quip?.key ?? null);
+  assert.deepEqual(kept, ["wind", null, "dig", null]);
+  assert.equal(QUIPS_MAX, 2);
+});
+
 test("battle phrases say what did the killing, and only when the numbers are sure", () => {
   const defs = {
     "1": { name: "armthund", human: "Thunder", cost: 150, class: "bomber" },
@@ -593,7 +685,15 @@ test("battle phrases say what did the killing, and only when the numbers are sur
   // A lab that was a real part of the loss names the battle.
   assert.equal(battlePhrase(g, battle([{ def: 6, n: 1, metal: 1500 }, { def: 4, n: 10, metal: 400 }], []), 0, where), "Blue destroys Cy's Bot Lab in the middle");
   // Killers unknown for most of the loss: nothing but the margin is sure.
-  assert.equal(battlePhrase(g, battle([{ def: 2, n: 40, metal: 2000 }], [{ def: 1, n: 10, metal: 500, units: 2 }]), 0, where), null);
+  assert.equal(battlePhrase(g, battle([{ def: 4, n: 50, metal: 2000 }], [{ def: 1, n: 10, metal: 500, units: 2 }]), 0, where), null);
+  // Mostly buildings lost, whoever killed them: defences picked off or
+  // broken, a base raided, broken into or — big AND lopsided — wrecked.
+  assert.equal(battlePhrase(g, battle([{ def: 5, n: 20, metal: 1700 }], []), 0, where), "Blue picks off Red defences in the middle");
+  assert.equal(battlePhrase(g, battle([{ def: 5, n: 80, metal: 6800 }], []), 0, where), "Blue breaks the Red defences in the middle");
+  assert.equal(battlePhrase(g, battle([{ def: 2, n: 40, metal: 2000 }], [{ def: 1, n: 10, metal: 500, units: 2 }]), 0, where), "Blue raids Cy's base");
+  assert.equal(battlePhrase(g, battle([{ def: 8, n: 150, metal: 6000 }], [], 2000), 0, where), "Blue breaks into Cy's base");
+  assert.equal(battlePhrase(g, battle([{ def: 8, n: 600, metal: 24000 }], [], 7000), 0, where), "Blue breaks into Cy's base");
+  assert.equal(battlePhrase(g, battle([{ def: 8, n: 600, metal: 24000 }], [], 2000), 0, where), "Blue wrecks Cy's base");
   // The side that lost MORE is never the subject of a phrase.
   assert.equal(battlePhrase(g, battle([{ def: 2, n: 40, metal: 2000 }], [{ def: 1, n: 40, metal: 2000, units: 6 }], 2500), 0, where), null);
   // Margin words rotate by battle number and scale with the fight: a 2.8k

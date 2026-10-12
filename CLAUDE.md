@@ -753,6 +753,39 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           title the gap battles in the swing list and a fight swing whose
                           battle is told whole; a phrase never overrides a trade the numbers
                           contradict.
+                          Version 10 adds BUILDING rules after the factory one: a loss mostly of
+                          defences is "Blue breaks the Red defences" (5k+) or "picks off Red
+                          defences", one mostly of other buildings "Blue wrecks / breaks into /
+                          raids Ann's base" (20k+ and 4x worth / 5k+ / less).
+                          BUILD-UP AND BASE STORIES (moments.ts, version 10; Marcin's ask:
+                          insightful, not just "X built more eco"). growthStory names the
+                          buildings when Moment.Build >= 0.2 ("out-builds Red team in economy
+                          and buildings", "on every front", "builds up a bigger base", "Red
+                          team's base shrinks while Blue team out-builds its army") and reads
+                          the army with its standing defences when they are >= 10% of it
+                          (armyDefences; the title says "defences" only when they moved at least
+                          half as much as the armies). Under each side it SHOWS what was built:
+                          "built since M:SS" and "lost since M:SS" rows of icons with counts
+                          (MomentStory.buildLines, unitchips.ts fillUnits with its verb) for the
+                          story's kinds — economy = eco + mex, buildings = eco + mex + other,
+                          army = the defences. A BASE GOING UP is a story of its own (baseLoss:
+                          the losing side's fought-for building losses >= 1000 metal, >= 15% of
+                          what it had standing and >= half of everything it lost in the window):
+                          "Red team loses 35% of its base in the south-east, mostly its
+                          economy", with a "buildings: N lost" icon row under it. It leads
+                          (after an elimination, before a commander, who rides along as ", with
+                          Ann's commander") when buildings moved the line more than the armies
+                          and no one battle holds half of it — that battle's phrase is the
+                          better title; otherwise an elimination or commander title gains " as
+                          Red team loses 24% of its base", and a fight with no battle and no
+                          army drop is told as the base. QUIPS (quips.ts): a line of colour
+                          under a build-up or base story of a v10 file, on plain facts only (a
+                          forest of 15+ wind turbines, 8+ of one defence, a 20-piece wall, 6+
+                          converters, a 20k+ building, a first fusion or a nuke silo the other
+                          side has no anti for, idle builders, three mines lost, half a base
+                          gone), words rotated by the moment's number, at most QUIPS_MAX = 2 a
+                          page and no rule twice (fewQuips). names.ts matches a unit's PLURAL
+                          too ("41 Wind Turbines" gets its icon and keeps its s).
                           PLACES (places.ts): compass() says "the middle", never "the centre"
                           (Marcin's call), and a map with community area names uses them.
                           Supreme Isthmus has Marcin's labels: each base's air, eco, beach,
@@ -787,6 +820,38 @@ internal/insights/        the GAME SUMMARY's data: Compute reduces a replay (Inp
                           elimination (1.71 -> 0.57 unnamed moves a game). The unnamed ones
                           were nearly all last-minute income. Moment.Army counts the
                           destroyed feature as army (fighting moved it).
+                          VERSION 10 PUTS THE BUILDINGS IN THE LINE (buildings.go; Marcin's ask,
+                          the buildings-vs-units study in experiments/buildingworth +
+                          experiments/winmodel, PR #120). Each side's STANDING buildings are
+                          measured per step like its army (cost x build progress,
+                          Series.Buildings by Series.BuildingCats: defence, eco = power plants,
+                          converters and builder structures, mex, other = factories, radar,
+                          storage, walls), each def's category riding Def.Stand. buildingCat is
+                          the study's rule and the coefficients were fitted on it, so changing
+                          it needs a refit; refineCat only moves a def between eco/mex/other by
+                          NAME for the page, which the line cannot see (all three are one
+                          input). Standing DEFENCES join the army input; the rest are a FIFTH
+                          input (swingBuildK = 10k virtual metal); and in a capture that names
+                          killers a destroyed building counts killBuildingWorth = 3x in metal
+                          destroyed (without killers a reclaim or upgrade reads as destroyed, so
+                          plain metal). TWO MODELS (WinModels, Swing.Model): "lava" for
+                          lavabalance's lava games (gamecat.LavaTweaks on two sides of eight
+                          humans, no AI: modelFor) and "ranked8v8" for EVERY other game
+                          (Marcin's call) — fitted apart they beat one model out of sample in
+                          every group (log loss lava 0.511 -> 0.463, ranked 0.421 -> 0.408 on
+                          Isthmus, 0.449 -> 0.380 elsewhere); coefficients in swing.go's
+                          WinModels comment. The lobby's tweaks are NOT in the .brp, so
+                          Input.ModOptions comes from the demo (packer passes them through
+                          viz.WriteStaticBundleWith) or the BAR API's detail (insightsrun's
+                          gameFacts, cached with the winners); unknown means ranked. A replay
+                          rebuilt from pieces prices only armed mobile defs, so its buildings
+                          are priced and sorted by legacybuildings.json
+                          (experiments/buildingworth -table over the study's 166 games); an
+                          unknown def counts nothing. Moment.Build is the share of a moment's
+                          shift the buildings carried (Army + Eco + Build = 1), and
+                          Moment.Built/BuiltFrom are the structures each side FINISHED in the 3
+                          minutes up to F1, by def, at most momentBuiltDefs = 8 of each building
+                          category — what the page's build-up stories show as icons.
                           WINNERS come from the demo's tail (demofile.Demo.Winners: one byte
                           per winning ally team right after the packet stream, per
                           rts/System/LoadSave/demofile.h) into snapshot.Meta.Winners via
@@ -815,6 +880,9 @@ experiments/buildingworth/ per game, each side's STANDING metal by unit category
                           (internal/gamecat) from their BAR API details. Why it exists: the
                           v6 summaries rebuilt from pieces price every BUILDING at 0, so any
                           building-loss test on published summaries mostly measures nothing.
+                          -table writes internal/insights/legacybuildings.json (every building's
+                          category and cost by def name from its .brp runs), which prices the
+                          buildings of replays rebuilt from pieces.
 cmd/winfit/main.go        CLI: fits insights.WinModel to games with a known winner and prints
                           the coefficients to paste into swing.go. Input is insights files:
                           `insights -upload= -all -out ./ins` (compute-only mode SAVES an
@@ -823,7 +891,9 @@ cmd/winfit/main.go        CLI: fits insights.WinModel to games with a known winn
                           mirrored so there is no side bias; Newton's method with a small L2;
                           refuses under 20 games; reports log loss/accuracy of the current and
                           fitted weights overall and at 25/50/75/90% of a game. It reads files
-                          of Version 7 or later (games cut at the decision). A refit changes
+                          of Version 10 or later (the five inputs). -model lava|ranked8v8 fits one
+                          of the two models on the games it is for (lava games by their BAR API
+                          details, cached like -categories). A refit changes
                           what is computed, so it is a new insights Version.
                           -categories also fits each game CATEGORY on its own (internal/gamecat:
                           lava games lavabalance rates — the lobby's tweak stack, ported from
@@ -1078,7 +1148,7 @@ worker/src/summary/       the GAME SUMMARY page as a LIBRARY: mountSummary(el, i
                           winner + swing, v3 eliminations and peak battles, v4 owner removals
                           left out, owned value and battle teams, v5 self-destructs marked, v6 fitted
                           win weights, v7 the game ends at the resign rather than the first team knocked
-                          out before it, swing drivers and no opening economy swings, v8 battle killers and unit classes for the battle phrases, v9 the calmer win model with metal destroyed and a 3-minute income window, v10 lost buildings at 2x in battle verdicts) and app.js fetches .insights10, then 9, 8, 7, 6, 5, 4, 3, 2, 1. A version bump needs `insights -all` after
+                          out before it, swing drivers and no opening economy swings, v8 battle killers and unit classes for the battle phrases, v9 the calmer win model with metal destroyed and a 3-minute income window, v10 lost buildings at 2x in battle verdicts, standing buildings in the win line with a lava and a ranked 8v8 model, and the build-up and base stories) and app.js fetches .insights10, then 9, 8, 7, 6, 5, 4, 3, 2, 1. A version bump needs `insights -all` after
                           the deploy, or published replays keep their older summary — except the ones people OPEN, which
                           update themselves: see ON-DEMAND SUMMARIES under worker/ (so
                           `insights -all` is now only for having every summary current at once).
