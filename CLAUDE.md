@@ -3009,9 +3009,21 @@ still go through `Spring.Echo` (for `infolog.txt` / `-progress`).
 **Path sandbox (non-obvious):** Spring's `LuaIO::fopen` runs `IsSafePath`, which rejects
 **absolute paths** and any `..`, so the widget can only write a *relative* path resolved
 against the engine's working directory. `engine.Run` sets `cmd.Dir` to the write-dir and
-passes the widget a relative `barreplay/<gameId>.brepstream` (`Config.SnapshotStreamPath`);
-the tool reads it from `<data>/barreplay/<gameId>.brepstream` after the run and moves it to
+passes the widget a relative `LuaUI/Config/barreplay/<gameId>.brepstream`
+(`engine.StreamRelPath` -> `Config.SnapshotStreamPath`); the tool reads it from
+`<data>/LuaUI/Config/barreplay/<gameId>.brepstream` after the run and moves it to
 `<out>/<gameId>.brepstream`. An absolute path makes `io.open` return nil → no file at all.
+**BAR's own sandbox (game builds from the 2026.10.13 release, test-31614 on)** adds a
+second rule on top: the widget handler gives user widgets an `io.open` that WRITES only
+under `LuaUI/Config` and `LuaUI/Widgets` (luaui/barwidgets.lua `checkUserWritePath`), which
+is why the stream lives there — the old `barreplay/` path was refused, every re-sim of a
+game on those builds ended with "open widget output ...: no such file", and the uploader
+(`LuaUI/Config/barreplay/` too since widget 1.11.1) could not record live games either.
+The same release also took handler access away from user widgets
+(`widget.widgetHandler` is a restricted proxy), so on those builds the re-sim cannot
+disable BAR's widget suite (slower runs) and its hits name no attacker (both log an
+"unavailable" line), and the Explosion hook (projectile ends, blasts) most likely installs
+nothing — not yet verified on an engine run.
 
 Because that `cmd.Dir` is the data dir, **`engine.Locate` absolutizes `Config.DataDir` and
 every binary path it resolves** (`filepath.Abs`) — otherwise a relative `-data .bardata`

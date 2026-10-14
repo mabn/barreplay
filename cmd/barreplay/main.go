@@ -133,8 +133,8 @@ func run() error {
 	// absolute paths, so the widget uses a RELATIVE path resolved against the engine's
 	// write-dir (= dataDir); we read it back from there, then move it next to the
 	// snapshot output. Forward slashes keep the Lua path portable.
-	relStream := "barreplay/" + h.GameID + ".brepstream"
-	streamPath := filepath.Join(*dataDir, "barreplay", h.GameID+".brepstream")
+	relStream := engine.StreamRelPath(h.GameID)
+	streamPath := filepath.Join(*dataDir, filepath.FromSlash(relStream))
 	if err := os.MkdirAll(filepath.Dir(streamPath), 0o755); err != nil {
 		return err
 	}

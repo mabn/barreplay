@@ -77,8 +77,8 @@
 -- Echo, and the stream's GAME line, so every capture records which encoder
 -- produced it (the copy on a player's machine can be arbitrarily old — the
 -- server/decoder needs to know, and the catalog stores it per replay).
-local widgetVersion = "1.11.0"
-local widgetDate = "2026-10-12"
+local widgetVersion = "1.11.1"
+local widgetDate = "2026-10-14"
 
 -- Git SHA of this exact file, stamped when the widget is published for
 -- download: worker/tools/sync-assets.mjs replaces the token below with the SHA
@@ -127,6 +127,12 @@ local recordProjectiles = resim and ("__PROJECTILES__" == "1")
 -- (IsSafePath), so it is RELATIVE to the engine's write-dir, which the Go tool
 -- sets as the engine's working directory and reads the stream back from.
 local outputPath = resim and "__OUTPUT_PATH__" or nil
+-- Where the uploader writes <gameId>.brepstream, relative to the data dir.
+-- Since BAR's 2026.10.13 release (game builds test-31614 on) the widget
+-- handler sandboxes user widgets: io.open may WRITE only under LuaUI/Config
+-- and LuaUI/Widgets, so the data dir's root (where this used to write) is
+-- refused. The re-sim's path (internal/engine StreamDir) obeys the same rule.
+local uploadDir = "LuaUI/Config/barreplay"
 
 -- Log prefix. The Go tool watches the engine's stdout for the first
 -- "[barreplay]" line to split load time from sim time, and the -progress
@@ -382,8 +388,12 @@ local function openOutputs(id)
 	local frame = (spGetGameFrame and spGetGameFrame()) or 0
 	local append = not resim and frame > sampleEvery
 	local head = "BRSNAP GID " .. id .. "\n" .. (preambleStr or "")
-	local path = outputPath or (id .. ".brepstream")
-	bout = io.open(path, append and "ab" or "wb")
+	local path = outputPath or (uploadDir .. "/" .. id .. ".brepstream")
+	if not outputPath and Spring.CreateDir then
+		pcall(Spring.CreateDir, uploadDir)
+	end
+	local openErr
+	bout, openErr = io.open(path, append and "ab" or "wb")
 	if bout then
 		bout:write("BREPSTREAM 1\n", head)
 		for i = 1, #pendingBin do
@@ -392,7 +402,7 @@ local function openOutputs(id)
 		Echo(string.format("%s recording to %s%s (sampling every %d frames, keyframe every %d samples)",
 			logTag, path, append and " (appending)" or "", sampleEvery, keyframeEvery))
 	else
-		Echo(logTag .. " ERROR: could not open " .. path)
+		Echo(logTag .. " ERROR: could not open " .. path .. (openErr and (": " .. tostring(openErr)) or ""))
 	end
 	pendingBin = nil
 	flushOut()

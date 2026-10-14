@@ -71,7 +71,7 @@ type Config struct {
 	// SnapshotStreamPath is the path, RELATIVE to DataDir, the widget writes
 	// its .brepstream to (substituted into the Lua; the engine's Lua sandbox
 	// refuses absolute paths). Required for a real run; the tool reads this
-	// file back through capture after the engine exits.
+	// file back through capture after the engine exits. StreamRelPath builds it.
 	SnapshotStreamPath string
 	// Profile makes the widget enable the engine's internal time profiler
 	// ("debug 1 0": collection on, overlay drawer off), unlocking the fine-grained
@@ -100,6 +100,20 @@ type Config struct {
 	// changes local task scheduling, so it cannot desync the replay. Nil leaves
 	// the user's/engine's own setting in effect.
 	WorkerThreads *int
+}
+
+// StreamDir is the folder, relative to the data dir, the widget writes its
+// .brepstream into. It has to be under LuaUI/Config: since BAR's 2026.10.13
+// release (game builds test-31614 on) the widget handler sandboxes user
+// widgets, and io.open refuses to WRITE anywhere outside LuaUI/Config and
+// LuaUI/Widgets. Older game builds allow any relative path, so this works on
+// every build.
+const StreamDir = "LuaUI/Config/barreplay"
+
+// StreamRelPath is the widget's output path for gameID, relative to the data
+// dir, with forward slashes (it is substituted into the Lua as is).
+func StreamRelPath(gameID string) string {
+	return StreamDir + "/" + gameID + ".brepstream"
 }
 
 // Engine is a resolved, launch-ready engine.

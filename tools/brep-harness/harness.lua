@@ -293,6 +293,8 @@ local commScript = {
 }
 
 Spring = {
+	-- The uploader creates its output folder (LuaUI/Config/barreplay) first.
+	CreateDir = function(path) os.execute("mkdir -p '" .. path .. "'") return true end,
 	Echo = function(...) print(...) end,
 	GetGameRulesParam = function(k)
 		if k == "GameID" then
@@ -1121,6 +1123,7 @@ else
 	assert(#disabledWidgets == 0 and #sentCommands == 0, "the uploader must not touch the game")
 	local id = "feed5eed00000000000000000000beef"
 	os.remove(outName)
-	assert(os.rename(id .. ".brepstream", outName))
+	-- The uploader writes under LuaUI/Config (BAR's user-widget write sandbox).
+	assert(os.rename("LuaUI/Config/barreplay/" .. id .. ".brepstream", outName))
 end
 print("HARNESS: wrote " .. outName .. " (" .. SAMPLES .. " samples)")
