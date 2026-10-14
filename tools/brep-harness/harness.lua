@@ -13,6 +13,12 @@
 --              team statistics, per-side LOS and profiler readings, and a
 --              frame-by-frame projectile script (see projectileScript)
 --              -> harness_resim.brepstream
+--   sandboxed  the same re-simulation on a BAR build whose widget handler
+--              sandboxes user widgets (BAR 2026.10.13 on): the widget gets a
+--              handler PROXY, so it cannot disable other widgets, wrap
+--              UnitDamaged or install Explosion, and explosions arrive only as
+--              BAR's VisibleExplosionBatch (owned ones, no projectile id)
+--              -> harness_sandboxed.brepstream
 --
 -- The streams are committed as internal/capture/testdata fixtures, and the
 -- tests there decode them against golden JSON dumps (TestHarnessGolden),
@@ -22,13 +28,16 @@
 --	cd internal/capture/testdata
 --	lua5.4 ../../../tools/brep-harness/harness.lua ../../../assets/lua/replay_uploader.lua
 --	lua5.4 ../../../tools/brep-harness/harness.lua ../../../assets/lua/replay_uploader.lua resim
+--	lua5.4 ../../../tools/brep-harness/harness.lua ../../../assets/lua/replay_uploader.lua sandboxed
 --	cd .. && go test -run TestHarnessGolden -update .
 --
 -- and read the golden diff: it is the change in what the widget records.
 
 local widgetPath = arg[1] or "assets/lua/replay_uploader.lua"
-local resim = (arg[2] == "resim")
-local outName = resim and "harness_resim.brepstream" or "harness.brepstream"
+local sandboxed = (arg[2] == "sandboxed")
+local resim = (arg[2] == "resim") or sandboxed
+local outName = sandboxed and "harness_sandboxed.brepstream"
+	or resim and "harness_resim.brepstream" or "harness.brepstream"
 
 -- Deterministic PRNG (LCG) so regenerated fixtures only change when the codec
 -- does. Do not use math.random: it differs across Lua versions.
@@ -615,7 +624,31 @@ sentCommands = {}
 widgetHandler = { RemoveWidget = function() error("widget removed itself") end }
 -- The handler API the resim sampler uses to switch BAR's own widget suite off.
 local disabledWidgets = {}
+-- The real handler behind a sandboxed widget's proxy: it knows its own
+-- callins (UnitDamaged, with five arguments) and refuses any other name.
+local realHandler = {
+	UnitDamaged = function(self, unitID, unitDefID, unitTeam, damage, paralyzer)
+		if widget.UnitDamaged then
+			widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer)
+		end
+	end,
+}
 local function newWidget()
+	if sandboxed then
+		return {
+			widgetHandler = {
+				RemoveWidget = function() error("widget removed itself") end,
+				UpdateCallIn = function(self, name)
+					local f = realHandler[name]
+					if f then
+						engineCallIns[name] = function(...) return f(realHandler, ...) end
+					else
+						print("UpdateWidgetCallIn: bad name: " .. name)
+					end
+				end,
+			},
+		}
+	end
 	return {
 		widgetHandler = {
 			widgets = { 1, 2, 3 },
@@ -793,7 +826,19 @@ local function addStatic(id, def, team, x, z)
 end
 
 -- deliver is the engine calling LuaUI's Explosion — only for watched weapons.
+-- In sandboxed mode BAR's gfx_explosion_lights gadget is what delivers them:
+-- every OWNED explosion, batched per frame, without the projectile id.
+local visibleBatch, visibleCount = {}, 0
 local function deliver(wd, x, y, z, owner, pid)
+	if sandboxed then
+		if owner ~= nil then
+			local n = visibleCount
+			visibleBatch[n + 1], visibleBatch[n + 2], visibleBatch[n + 3] = x, y, z
+			visibleBatch[n + 4], visibleBatch[n + 5] = wd, owner
+			visibleCount = n + 5
+		end
+		return
+	end
 	if watchedExplosions[wd] and engineCallIns.Explosion then
 		engineCallIns.Explosion(wd, x, y, z, owner, pid)
 	end
@@ -1096,6 +1141,12 @@ for s = 0, SAMPLES - 1 do
 		for f = sampleFrame, math.min(sampleFrame + sampleEvery - 1, SAMPLES * sampleEvery - 6) do
 			curFrame = f
 			projectileScript(f)
+			-- The gadget's GameFramePost hands the frame's batch to LuaUI
+			-- before the widgets' own GameFramePost runs.
+			if visibleCount > 0 and widget.VisibleExplosionBatch then
+				widget:VisibleExplosionBatch(visibleBatch, visibleCount)
+			end
+			visibleBatch, visibleCount = {}, 0
 			widget:GameFramePost(f)
 		end
 		curFrame = sampleFrame
@@ -1105,7 +1156,11 @@ curFrame = SAMPLES * sampleEvery - 5
 widget:GameOver({ 0 })
 widget:Shutdown()
 
-if resim then
+if sandboxed then
+	assert(#disabledWidgets == 0, "a sandboxed widget cannot disable other widgets")
+	assert(next(watchedEver) == nil, "a sandboxed widget installs no Explosion callin")
+	assert(sentCommands[#sentCommands] == "quitforce", "resim must quit at game over")
+elseif resim then
 	-- What the widget must watch, and what it must not.
 	for _, wd in ipairs({ 5, 6, 7, 8, 9, 10, 11, 14 }) do
 		assert(watchedExplosions[wd] == nil, "weapon " .. wd .. " still watched after shutdown")

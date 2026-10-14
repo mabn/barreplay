@@ -3022,8 +3022,16 @@ game on those builds ended with "open widget output ...: no such file", and the 
 The same release also took handler access away from user widgets
 (`widget.widgetHandler` is a restricted proxy), so on those builds the re-sim cannot
 disable BAR's widget suite (slower runs) and its hits name no attacker (both log an
-"unavailable" line), and the Explosion hook (projectile ends, blasts) most likely installs
-nothing — not yet verified on an engine run.
+"unavailable" line). The Explosion hook cannot install either (the proxy has UpdateCallIn,
+but the real handler refuses a name it has no list for), so the widget falls back to
+`VisibleExplosionBatch`, which BAR's own gfx_explosion_lights gadget hands LuaUI once per
+frame: x, y, z, weaponDefID, ownerID of every OWNED explosion of a projectile weapon
+(Cannon/Laser/Beam/Missile/Starburst/Bomb/Torpedo/Flame; unfiltered in full view). No
+projectile id, so tracks are matched by owner + weapon + the projectile being gone; a
+beam's record carries id -1; ownerless explosions and Lightning/DGun hits are missing.
+The harness's `sandboxed` mode (harness_sandboxed fixture) runs exactly this: its tracks
+and blasts decode identical to the resim fixture's except the beam id and the hits'
+attackers.
 
 Because that `cmd.Dir` is the data dir, **`engine.Locate` absolutizes `Config.DataDir` and
 every binary path it resolves** (`filepath.Abs`) — otherwise a relative `-data .bardata`

@@ -2285,8 +2285,13 @@ local projectiles = (function()
 
 	local function hookExplosion()
 		local wh = widget.widgetHandler
-		if not (wh and type(wh.UpdateCallIn) == "function" and Script and Script.SetWatchExplosion) then
-			Echo(logTag .. " explosion callin unavailable; no projectile ends or blasts will be recorded")
+		-- knownWidgets marks the REAL handler: since BAR's 2026.10.13 sandbox a
+		-- user widget gets a proxy that has UpdateCallIn but whose handler
+		-- refuses an unknown callin, so hooking through it installs nothing.
+		if not (wh and type(wh.knownWidgets) == "table" and type(wh.UpdateCallIn) == "function"
+			and Script and Script.SetWatchExplosion) then
+			Echo(logTag .. " explosion callin unavailable; projectile ends and blasts come from"
+				.. " BAR's VisibleExplosionBatch (no projectile ids, no ownerless explosions)")
 			return
 		end
 		wh.ExplosionList = wh.ExplosionList or {}
@@ -2310,6 +2315,69 @@ local projectiles = (function()
 		end
 		Echo(string.format("%s watching %d weapons for explosions (%d tracked, launchers on %d unit types)",
 			logTag, n, nTracked, nLauncherDefs))
+	end
+
+	-- matchTrack finds the open track an explosion with no projectile id ends:
+	-- the owner's track of that weapon whose projectile is gone (it exploded
+	-- this frame), else the one last seen nearest the explosion.
+	local function matchTrack(wdID, ownerID, px, pz)
+		local best, bestGone, bestD = nil, false, math.huge
+		for pid, t in pairs(tracks) do
+			if t.owner == ownerID and t.wd == wdID then
+				local gone = spGetProjectilePosition(pid) == nil
+				local dx, dz = (t.lx or t.x0) - px, (t.lz or t.z0) - pz
+				local d = dx * dx + dz * dz
+				if (gone and not bestGone) or (gone == bestGone and d < bestD) then
+					best, bestGone, bestD = pid, gone, d
+				end
+			end
+		end
+		return best
+	end
+
+	-- reopenClosed turns a track the sweep closed THIS frame as vanished
+	-- (kind 2) into the explosion it really was, when the batch arrives after
+	-- the sweep: the row is still in the buffer, so only its kind and end move.
+	local function reopenClosed(wdID, ownerID, frame, px, py, pz)
+		local w, o = id16(wdID), id16(ownerID)
+		for _, r in pairs(closedRow) do
+			local b = r.buf
+			if r.f == frame and b == trackBuf and b.k[r.n] == 2 and b.w[r.n] == w and b.o[r.n] == o then
+				b.k[r.n] = 1
+				b.x1[r.n], b.y1[r.n], b.z1[r.n] = s16(px), s16(py), s16(pz)
+				return true
+			end
+		end
+		return false
+	end
+
+	-- onVisibleBatch is the fallback for game builds where a user widget cannot
+	-- install the Explosion callin (BAR's 2026.10.13 sandbox took the real
+	-- widget handler away). BAR's own gfx_explosion_lights gadget forwards one
+	-- batch per sim frame of x, y, z, weaponDefID, ownerID for every explosion
+	-- of a projectile weapon that has an owner (unfiltered in full view): no
+	-- projectile id, so a track is matched by owner, weapon and position. It
+	-- does not carry ownerless explosions, LightningCannon or DGun.
+	local function onVisibleBatch(events, count)
+		if explosionHooked or type(events) ~= "table" then
+			return
+		end
+		local frame = factFrame()
+		for i = 1, (count or #events), 5 do
+			local px, py, pz, wdID, ownerID = events[i], events[i + 1], events[i + 2], events[i + 3], events[i + 4]
+			if watchRole[wdID] ~= nil then
+				local pid = nil
+				if trackClassOf[wdID] and trackClassOf[wdID] ~= CLS_BEAM and ownerID ~= nil then
+					pid = matchTrack(wdID, ownerID, px, pz)
+					if pid == nil and reopenClosed(wdID, ownerID, frame, px, py, pz) then
+						wdID = nil
+					end
+				end
+				if wdID ~= nil then
+					onExplosion(wdID, px, py, pz, ownerID, pid)
+				end
+			end
+		end
 	end
 
 	-- unitGone drops a dead unit's launcher and remembers its team for the
@@ -2351,6 +2419,7 @@ local projectiles = (function()
 	return {
 		buildWatch = buildWatch,
 		hookExplosion = hookExplosion,
+		visibleBatch = onVisibleBatch,
 		unhook = function()
 			if unhookExplosion then
 				unhookExplosion()
@@ -2521,6 +2590,14 @@ local function hookDamage()
 		wh.UnitDamaged = orig
 		damageHooked = false
 		pcall(wh.UpdateCallIn, wh, "UnitDamaged")
+	end
+end
+
+if recordProjectiles then
+	-- The fallback for explosions when the Explosion hook could not be
+	-- installed (see projectiles.visibleBatch); a no-op when it was.
+	function widget:VisibleExplosionBatch(events, count)
+		pcall(projectiles.visibleBatch, events, count)
 	end
 end
 

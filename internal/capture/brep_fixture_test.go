@@ -31,7 +31,7 @@ var update = flag.Bool("update", false, "rewrite the harness golden dumps from t
 // header) and run `go test -run TestHarnessGolden -update`. The golden diff is
 // then exactly the change in what gets recorded; read it before committing.
 func TestHarnessGolden(t *testing.T) {
-	for _, name := range []string{"harness", "harness_resim"} {
+	for _, name := range []string{"harness", "harness_resim", "harness_sandboxed"} {
 		t.Run(name, func(t *testing.T) {
 			got := harnessDump(t, "testdata/"+name+".brepstream")
 			golden := "testdata/" + name + ".golden.txt.gz"
