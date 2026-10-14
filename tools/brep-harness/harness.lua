@@ -635,19 +635,31 @@ local realHandler = {
 }
 local function newWidget()
 	if sandboxed then
-		return {
-			widgetHandler = {
-				RemoveWidget = function() error("widget removed itself") end,
-				UpdateCallIn = function(self, name)
-					local f = realHandler[name]
-					if f then
-						engineCallIns[name] = function(...) return f(realHandler, ...) end
-					else
-						print("UpdateWidgetCallIn: bad name: " .. name)
-					end
-				end,
-			},
-		}
+		-- The hardened proxy answers the real handler's other members with an
+		-- empty table or a do-nothing function, so finding one proves nothing.
+		local emptyTables = { knownWidgets = true, widgets = true, orderList = true }
+		local noops = { UnitDamaged = true, DisableWidget = true, EnableWidget = true,
+			FindWidget = true, UpdateWidgetCallIn = true }
+		local proxy = setmetatable({
+			RemoveWidget = function() error("widget removed itself") end,
+			UpdateCallIn = function(self, name)
+				local f = realHandler[name]
+				if f then
+					engineCallIns[name] = function(...) return f(realHandler, ...) end
+				else
+					print("UpdateWidgetCallIn: bad name: " .. name)
+				end
+			end,
+		}, {
+			__index = function(_, k)
+				if emptyTables[k] then
+					return {}
+				elseif noops[k] then
+					return function() end
+				end
+			end,
+		})
+		return { widgetHandler = proxy }
 	end
 	return {
 		widgetHandler = {

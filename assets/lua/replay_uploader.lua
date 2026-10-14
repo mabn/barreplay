@@ -1512,6 +1512,19 @@ end
 -- n u32, then columns df u16, weapon u16, x/y/z s16, unit u16, team u8,
 -- kind u8 (1 a unit's own explosion, 2 a projectile no track was open for).
 
+-- realHandler returns BAR's real widget handler, or nil when the widget was
+-- given the sandbox's proxy (BAR 2026.10.13 on). The proxy cannot be told
+-- apart by which members exist: a hardened one answers any real-handler
+-- member with a do-nothing function or an empty table. So it is asked
+-- something only the real one knows, its record of this very widget.
+local function realHandler()
+	local wh = widget.widgetHandler
+	local ok, known = pcall(function()
+		return type(wh.knownWidgets) == "table" and wh.knownWidgets[widget:GetInfo().name] ~= nil
+	end)
+	return (ok and known) and wh or nil
+end
+
 -- The section lives in one closure so its state does not count against the
 -- main chunk's 200-local limit (Lua 5.1); it hands back its entry points.
 local projectiles = (function()
@@ -2284,12 +2297,10 @@ local projectiles = (function()
 	local unhookExplosion = nil
 
 	local function hookExplosion()
-		local wh = widget.widgetHandler
-		-- knownWidgets marks the REAL handler: since BAR's 2026.10.13 sandbox a
-		-- user widget gets a proxy that has UpdateCallIn but whose handler
-		-- refuses an unknown callin, so hooking through it installs nothing.
-		if not (wh and type(wh.knownWidgets) == "table" and type(wh.UpdateCallIn) == "function"
-			and Script and Script.SetWatchExplosion) then
+		-- Only through the REAL handler: the sandbox's proxy has UpdateCallIn,
+		-- but the handler behind it refuses a callin it has no list for.
+		local wh = realHandler()
+		if not (wh and type(wh.UpdateCallIn) == "function" and Script and Script.SetWatchExplosion) then
 			Echo(logTag .. " explosion callin unavailable; projectile ends and blasts come from"
 				.. " BAR's VisibleExplosionBatch (no projectile ids, no ownerless explosions)")
 			return
@@ -2524,7 +2535,7 @@ local lastDrawFrames = 0
 -- activeWidgetCount reports how many widgets are currently active ("-" if the
 -- handler is unavailable): confirms the default suite stayed disabled.
 local function activeWidgetCount()
-	local wh = widget.widgetHandler
+	local wh = realHandler()
 	local ok, n = pcall(function() return #wh.widgets end)
 	if ok and n then
 		return tostring(n)
@@ -2541,8 +2552,8 @@ end
 local widgetsDisabled = false
 local function disableOtherWidgets()
 	widgetsDisabled = true
-	local wh = widget.widgetHandler
-	if not (wh and wh.knownWidgets and wh.DisableWidget) then
+	local wh = realHandler()
+	if not (wh and wh.DisableWidget) then
 		Echo(logTag .. " widget handler API unavailable; leaving default widgets enabled")
 		return
 	end
@@ -2574,7 +2585,7 @@ local damageHooked = false
 local unhookDamage = nil
 
 local function hookDamage()
-	local wh = widget.widgetHandler
+	local wh = realHandler()
 	if not (wh and type(wh.UnitDamaged) == "function" and type(wh.UpdateCallIn) == "function") then
 		Echo(logTag .. " widget handler API unavailable; damage will name no attacker")
 		return

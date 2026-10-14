@@ -3029,7 +3029,13 @@ frame: x, y, z, weaponDefID, ownerID of every OWNED explosion of a projectile we
 (Cannon/Laser/Beam/Missile/Starburst/Bomb/Torpedo/Flame; unfiltered in full view). No
 projectile id, so tracks are matched by owner + weapon + the projectile being gone; a
 beam's record carries id -1; ownerless explosions and Lightning/DGun hits are missing.
-The harness's `sandboxed` mode (harness_sandboxed fixture) runs exactly this: its tracks
+Whether the widget holds the REAL handler is asked by `realHandler()` (does its
+knownWidgets record this widget?), never by a member existing: BAR's hardened proxy
+(branch fix/widget-env-hardening, the migration guide at
+gist.github.com/efrec/e8f302dce2b9d137020ceaccd0750b48) answers every real-handler member
+with an empty table or a do-nothing function, and checking `wh.UnitDamaged` there "hooked"
+a no-op and dropped every hit. The harness's `sandboxed` mode (harness_sandboxed fixture,
+a proxy that fakes members the same way) runs exactly this: its tracks
 and blasts decode identical to the resim fixture's except the beam id and the hits'
 attackers.
 
