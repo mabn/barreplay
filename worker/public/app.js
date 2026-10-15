@@ -5767,6 +5767,16 @@ function statsLines(j, s) {
     add('Widget', w);
   }
   add('.brp format', s.brpVersion ? 'v' + s.brpVersion : null);
+  // WHERE it ran: the daemon's machine, which nobody else can see.
+  if (s.host) {
+    const h = s.host;
+    add('Host', h.hostname || null);
+    // RAM is sold in binary units: fmtSize's decimal GB reads a 16 GiB box as 17.2.
+      add('Host RAM', h.memBytes ? (h.memBytes / 2 ** 30).toFixed(1) + ' GiB' : null);
+    const n = h.cores && h.threads && h.cores !== h.threads ? `${h.cores} cores / ${h.threads} threads`
+      : (h.cores || h.threads) ? `${h.cores || h.threads} cores` : null;
+    add('Host CPU', [n, h.cpuModel].filter(Boolean).join(' · ') || null);
+  }
   return out;
 }
 

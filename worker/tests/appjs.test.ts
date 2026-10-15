@@ -2608,4 +2608,13 @@ test('a job\'s details name the bringest build, widget and .brp format', () => {
   assert.equal(got['.brp format'], 'v6');
   const up = Object.fromEntries(lines({ kind: 'upload' }, { widgetVersion: '1.9.0', widgetSha: 'abcdef0123456789', widgetDate: '2026-10-01' }));
   assert.equal(up['Widget'], '1.9.0 (abcdef012345, 2026-10-01)');
+  const host = Object.fromEntries(lines({ kind: 'resim' }, {
+    host: { hostname: 'box', memBytes: 16 * 1024 ** 3, cores: 8, threads: 16, cpuModel: 'AMD Ryzen 7 5800X' },
+  }));
+  assert.equal(host['Host'], 'box');
+  assert.equal(host['Host RAM'], '16.0 GiB');
+  assert.equal(host['Host CPU'], '8 cores / 16 threads · AMD Ryzen 7 5800X');
+  const vm = Object.fromEntries(lines({ kind: 'upload' }, { host: { threads: 4 } }));
+  assert.equal(vm['Host CPU'], '4 cores');
+  assert.equal(vm['Host'], undefined);
 });

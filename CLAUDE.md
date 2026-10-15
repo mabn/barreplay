@@ -291,7 +291,12 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           mtime as the build time; -ldflags -X main.buildSha/buildTime override),
                           the widget build (the stream's own for an upload, the EMBEDDED widget's
                           version for a re-sim, whose capture names none) and the .brp container
-                          version. A re-sim's healthcheck also carries elapsedSec, which the queue
+                          version — and WHERE (hostinfo.go, read once at startup): hostname, total
+                          RAM (/proc/meminfo MemTotal), physical cores (distinct physical/core id
+                          pairs in /proc/cpuinfo, omitted when it names no topology), logical
+                          threads and the CPU model, shown in the queue row's details panel (Host,
+                          Host RAM in GiB, Host CPU) — a re-sim's timings and its OOM failures mean
+                          nothing without the box. A re-sim's healthcheck also carries elapsedSec, which the queue
                           page adds to etaSec for the Took cell's estimated total. The size report rides
                           along as text, with the daemon's TEMP PATH rewritten to the basename
                           first — it is gone by the time anyone reads the page and is nobody

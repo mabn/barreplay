@@ -160,6 +160,8 @@ func run() int {
 	}
 	thisBuild = readBuildInfo()
 	fmt.Fprintf(os.Stderr, "bringest: build %s\n", thisBuild)
+	thisHost = readHostInfo()
+	fmt.Fprintf(os.Stderr, "bringest: host %s\n", thisHost)
 
 	// One flag names the whole deployment: the daemon's job queue, the stream
 	// downloads, the bucket and the catalog are all the same worker, so there
@@ -368,10 +370,15 @@ type jobStats struct {
 	WidgetSha     string     `json:"widgetSha,omitempty"`
 	WidgetDate    string     `json:"widgetDate,omitempty"`
 	BrpVersion    int        `json:"brpVersion,omitempty"`
+	// WHERE it ran: hostname, total RAM, CPU (see hostInfo).
+	Host *hostInfo `json:"host,omitempty"`
 }
 
 // thisBuild is the running binary's build, read once by run().
 var thisBuild buildInfo
+
+// thisHost is the machine it runs on, read once by run().
+var thisHost hostInfo
 
 // newJobStats starts a job's record with what is known before any work: which
 // binary is doing it and, for a re-sim, which widget it will inject.
@@ -380,6 +387,10 @@ func newJobStats(kind string) *jobStats {
 	if thisBuild != (buildInfo{}) {
 		b := thisBuild
 		st.Bringest = &b
+	}
+	if thisHost != (hostInfo{}) {
+		h := thisHost
+		st.Host = &h
 	}
 	if kind == kindResim {
 		st.WidgetVersion = assets.WidgetVersion()

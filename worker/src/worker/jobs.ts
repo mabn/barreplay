@@ -265,6 +265,16 @@ export interface JobStats {
   widgetDate?: string;
   /** The .brp container version published. */
   brpVersion?: number;
+  /** The machine the daemon ran on: hostname, total RAM, CPU model and
+   * physical cores / logical threads (cores absent where /proc says none). */
+  host?: {
+    hostname?: string;
+    memBytes?: number;
+    cores?: number;
+    threads?: number;
+    cpuModel?: string;
+    os?: string;
+  };
 }
 
 /** Cap on the stored stats JSON. The real thing is 2-4 KB, nearly all of it
