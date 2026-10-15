@@ -12,6 +12,7 @@
 #   bench-ckpt.sh dump  <engine-binary> <replay> <frame>   # once per build
 #   bench-ckpt.sh trial <engine-binary> <replay> <frame> <frames> [n]
 #   bench-ckpt.sh ab    <binA> <binB> <replay> <frame> <frames> [pairs]
+#   bench-ckpt.sh flame <engine-binary> <replay> <frame> <frames> <out.svg> [title]
 #
 # <replay> is a gameId or a name from REPLAYS below. <engine-binary> must sit
 # in <data>/engine/<version>/ beside the stock engine (it finds base/ there)
@@ -21,6 +22,11 @@
 # build once (cached under $CKPT/<binary>/<replay>-<frame>) and interleaves
 # their trials; builds that pass the byte-identity gate reach the same state at
 # <frame>, so the trials are comparable.
+#
+# flame records the window with LBR call stacks (the CPU's last-branch record:
+# no frame pointers or DWARF needed, ~16 frames deep) and renders the MAIN
+# thread as a flame graph with FlameGraph ($FLAMEGRAPH, default
+# ~/dev/FlameGraph; git clone https://github.com/brendangregg/FlameGraph).
 #
 # PERF="<perf record args>" (e.g. PERF="-F 999 -e cycles") also records a
 # profile of the window into the checkpoint dir.
@@ -117,6 +123,18 @@ trial1() {
 	tail -1 "$dir/result"
 }
 
+flame() {
+	local bin=$(bindir "$1") replay=$2 frame=$3 n=$4 out=$5 title=${6:-}
+	local dir="$CKPT/$(basename "$bin")/$replay-$frame" fg=${FLAMEGRAPH:-$HOME/dev/FlameGraph}
+	local res=$(PERF="-F 499 -e cycles --call-graph lbr" trial1 "$1" "$replay" "$frame" "$n")
+	local data=$(ls -t "$dir"/perf-*.data | head -1)
+	perf script -i "$data" --comm recoil-main --no-inline 2>/dev/null | "$fg/stackcollapse-perf.pl" > "$data.folded"
+	"$fg/flamegraph.pl" --title "${title:-$(basename "$bin") $replay frames $frame+$n, main thread}" \
+		--subtitle "$(echo "$res" | grep -oE "units=[0-9]+|wall_ms=[0-9.]+" | tr '\n' ' ')" "$data.folded" > "$out"
+	echo "$res"
+	echo "flame graph: $out"
+}
+
 case "${1:-}" in
 	dump)  dump "$2" "$3" "$4" ;;
 	trial) for i in $(seq 1 "${6:-1}"); do echo "$(basename "$2") $(trial1 "$2" "$3" "$4" "$5")"; done ;;
@@ -124,5 +142,6 @@ case "${1:-}" in
 	           if [ $((i % 2)) -eq 1 ]; then o="$2 $3"; else o="$3 $2"; fi
 	           for b in $o; do echo "pair $i $(basename "$b") $(trial1 "$b" "$4" "$5" "$6")"; done
 	       done ;;
-	*) sed -n '2,32p' "$0"; exit 2 ;;
+	flame) flame "$2" "$3" "$4" "$5" "$6" "${7:-}" ;;
+	*) sed -n '2,40p' "$0"; exit 2 ;;
 esac

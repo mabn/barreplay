@@ -230,3 +230,22 @@ late game — the current profile is from medium + c04fd06a, small games that
 never exercise mass air/targeting/LOS. The instrumented run must stop after a
 late window, but the bench harness leaves by `_exit`, which skips gcov's
 dump: add a weak `__gcov_dump()` call before it (a no-op in normal builds).
+
+### 2026-10-15 10:45 — flame graphs; LTO link fix
+
+USER: include flame graphs in the log now and then.
+
+DWARF unwinding failed on the CRIU-restored engine, but Haswell's **LBR call
+stacks** (`perf record --call-graph lbr`) need neither frame pointers nor
+debug info and work there (~16 frames deep — enough to see who calls the hot
+leaves). New subcommand: `bench-ckpt.sh flame <bin> <replay> <frame> <frames>
+<out.svg>` (FlameGraph scripts in ~/dev/FlameGraph). Flame graphs go to
+`docs/flamegraphs/`; the first clean one comes after the LTO build (a test
+run made during the build already put weapon auto-targeting —
+SlowUpdateWeapons → AutoTarget → GenerateWeaponTargets — and the LOS update
+at the top).
+
+PGO+LTO's first link failed: "undefined reference to mi_new /
+SpringVersion::GetMajor" — the static libraries were archived by plain `ar`,
+which writes no LTO symbol index. Reconfigured with gcc-ar-13 / gcc-ranlib-13
+(only 31 steps: re-archive + link).
