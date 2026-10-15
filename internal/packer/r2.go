@@ -16,6 +16,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -227,6 +228,23 @@ func objectHTTPMeta(key string) (contentType, cacheControl string) {
 		return contentType, "no-cache"
 	}
 	return contentType, "public, max-age=31536000, immutable"
+}
+
+// NewR2ClientFromEnv is the native client the publishers use, for commands
+// that write something other than a replay into the bucket (cmd/publish-engine).
+// nil when the environment carries no R2 credentials — see r2ClientFromEnv.
+func NewR2ClientFromEnv(workerDir string) *R2Client {
+	return r2ClientFromEnv(workerDir)
+}
+
+// PutIfAbsent uploads one object only if its key is free. created is false,
+// with a nil error, when the key was already taken.
+func (c *R2Client) PutIfAbsent(ctx context.Context, key string, body []byte) (created bool, err error) {
+	err = c.put(ctx, key, body, true)
+	if errors.Is(err, errObjectExists) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // Put uploads one object, retrying once on a transient failure (5xx or a

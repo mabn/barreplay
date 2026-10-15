@@ -96,28 +96,14 @@ preferring it can be a default. `RESULTS.md` and `MEMORY.md` in that directory
 carry the measurements; what follows is how to produce one.
 
 ```sh
-# 1. Clean checkout of the tag, then the series, in this order. bench-harness
-#    first because the rest were authored on top of it; H31 before H30; the
-#    memory patch last. Nothing else in the series touches the file 0003 does,
-#    so only the speed patches are order-sensitive among themselves.
+# 1. Clean checkout of the tag, then the series, in the order its `series`
+#    file lists (the one source of truth for the order: bench-harness first
+#    because the rest were authored on top of it, H31 before H30, the memory
+#    patch last). That file plus the patches IS the build's revision — see
+#    "Versions" below.
 P=<barreplay>/patches/engine-2026.07.04
 git checkout -b patched 2026.07.04
-git am "$P/experiments/tools/bench-harness.patch" \
-       "$P/0001-demo-unpaced-playback.patch" \
-       "$P/0002-headless-replay-unsynced-cuts.patch" \
-       "$P/experiments/H1-skip-prevframe-transform-save.patch" \
-       "$P/experiments/H2-tickallanims-sort-skip-bfs-scratch.patch" \
-       "$P/experiments/H3-threadpool-clock-storm.patch" \
-       "$P/experiments/H4-skip-eager-piece-walk.patch" \
-       "$P/experiments/H5-formt-batch-claiming.patch" \
-       "$P/experiments/H6-cob-unchecked-fetch.patch" \
-       "$P/experiments/H23-tickallanims-switch-dispatch.patch" \
-       "$P/experiments/H31-movemath-flat-collision-cache.patch" \
-       "$P/experiments/H30-yardmap-coarse-exitonly-grid.patch" \
-       "$P/experiments/H21-cob-jumptable-dispatch.patch" \
-       "$P/experiments/H45-qtpfs-relink-grid-no-reinit.patch" \
-       "$P/experiments/H49-headless-skip-smt-tiles.patch" \
-       "$P/0003-static-mempool-lazy-zeroing.patch"
+git am $(grep -v '^#' "$P/series" | sed "s|^|$P/|")
 
 # 2. Build exactly as above (steps 2-4), then install BESIDE the stock binary,
 #    under the -patched name. Both live in the same dir on purpose: the engine
@@ -133,11 +119,51 @@ cp build-linux/spring-headless "$D/spring-headless-patched"
 #    patches/engine-2026.07.04/experiments/tools/refs.txt).
 barreplay -data <BARdata> -engine "$D/spring-headless-patched" -out /tmp/out <gameId>
 md5sum /tmp/out/<gameId>.brp
+
+# 4. PUBLISH IT, so no other host has to build it — one command, from the repo
+#    root (it reads patches/ to name the build), with any bringest -resim on
+#    the same -data idle or stopped (the gate takes the data dir's lock):
+go run ./cmd/publish-engine -data <BARdata>
+#    It re-simulates the version's gate replay on the stock engine, strips the
+#    build (strip --strip-debug: the ~780 MB of DWARF sections the release
+#    flags leave in, which the engine never loads but every host would
+#    download; code, data and function names stay), re-simulates the same
+#    replay on the STRIPPED copy — the exact file the pin will vouch for —
+#    and requires byte-identical .brp files from the two, then uploads it as
+#    engines/<ver>/spring-headless-patched-<semver>.gz and prints the line to
+#    add to patchedBuilds and the tag to push once that is merged. Both runs
+#    use this checkout's widget and codec, so it compares engines, not
+#    capture formats (step 3's reference md5s go stale when the format
+#    changes). -dry does everything but the upload; -gate <gameId,...> picks
+#    other replays (needed for a version with no default).
 ```
 
-A missing patched build is a warning, not a failure — nothing downloads these,
-so a daemon routinely meets engine versions nobody has patched and runs those at
-stock speed. Which build ran is recorded per job as `jobStats.enginePatched`,
+`bringest -resim` then installs it on any host that lacks it
+(`engine.EnsurePatchedEngine`: download, check the SHA-256 against the pin,
+install beside the stock binary; a build already there, e.g. one made locally,
+is never replaced).
+
+### Versions
+
+A patched build is named by a semver: the engine version without its leading
+zeros, then `-barreplay.<N>`, where N is the revision of the patch series
+(`internal/engine/patchrev.go`) — the first 2026.07.04 build is
+`2026.7.4-barreplay.1`. A pre-release rather than build metadata (`+barreplay.1`) because
+semver ignores build metadata when ordering, and revisions of one engine must
+order. A revision is a digest of `patches/engine-<version>/series` and every
+patch it lists; `TestPatchSeriesIsPinned` fails the moment either changes until
+the new digest is appended to `patchSeries`, which is what makes the next
+build `-barreplay.<N+1>`. So a name always says exactly which patches went in, and
+`publish-engine` refuses to publish from a series that is not pinned.
+
+The bucket holds one binary per name (the upload is conditional, and a
+different binary under a taken name is refused), and the barreplay commit the
+build came from is tagged `patched-engine/<semver>` — not `v<semver>`, which
+the Go module proxy would take for a version of this module.
+
+A missing patched build is a warning, not a failure — only versions somebody
+has patched, gated and published have one, so a daemon routinely meets engine
+versions nobody has patched and runs those at stock speed. Which build ran is recorded per job as `jobStats.enginePatched`,
 because the capture itself cannot say: being byte-identical is the whole point.
 
 ## Observations from the validated run

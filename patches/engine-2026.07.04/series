@@ -1,0 +1,21 @@
+# The patch series the published patched engine is built from, in apply order:
+#   git am $(grep -v '^#' series)   (from a clean checkout of the 2026.07.04 tag)
+# Any change here or to a listed patch is a new revision of the patched build:
+# append its digest to patchSeries in internal/engine/patchrev.go (the test there
+# fails until you do), and publish the build under the new version.
+experiments/tools/bench-harness.patch
+0001-demo-unpaced-playback.patch
+0002-headless-replay-unsynced-cuts.patch
+experiments/H1-skip-prevframe-transform-save.patch
+experiments/H2-tickallanims-sort-skip-bfs-scratch.patch
+experiments/H3-threadpool-clock-storm.patch
+experiments/H4-skip-eager-piece-walk.patch
+experiments/H5-formt-batch-claiming.patch
+experiments/H6-cob-unchecked-fetch.patch
+experiments/H23-tickallanims-switch-dispatch.patch
+experiments/H31-movemath-flat-collision-cache.patch
+experiments/H30-yardmap-coarse-exitonly-grid.patch
+experiments/H21-cob-jumptable-dispatch.patch
+experiments/H45-qtpfs-relink-grid-no-reinit.patch
+experiments/H49-headless-skip-smt-tiles.patch
+0003-static-mempool-lazy-zeroing.patch

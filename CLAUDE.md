@@ -19,6 +19,7 @@ go build ./cmd/barreplay-static # build the .brp -> static-hosting bundle packer
 go build ./cmd/insights         # build the game-summary backfill CLI (one replay, or -all)
 go build ./cmd/winfit           # build the win-probability model fitter (reads insights files; -categories fits lava / large ranked / ranked / unranked separately)
 go build ./cmd/bringest         # build the drag&drop upload daemon (polls the worker's job queue)
+go run ./cmd/publish-engine -data <BARdata>   # gate, strip and upload the patched engine build under <data>/engine/*/ to R2, then print the patchedBuilds pin to commit and the tag to push (hosts download it once the pin is merged; -dry = everything but the upload; -gate <gameIds> for a version with no default gate replay)
 go run ./cmd/insights <gameId|link|rid>   # compute a PUBLISHED replay's game summary and publish replays/<rid>.insights<N>.json beside it (-upload r2 default, local, or empty + -out to just write it; -all walks the catalog, -from/-to narrow it to games started in a date range (YYYY-MM-DD or unix seconds); -j N replays at once, default 4; -force recomputes; a local .brp/.brepstream with -rid gives full costs; everything read from the real bucket is kept under ~/.cache/barreplay/<bucket host>/ so a re-run downloads only what is new — -cache DIR moves it, -cache= turns it off)
 go test ./...                   # all unit tests (no engine required)
 go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
@@ -238,9 +239,33 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           ANOTHER version's patched binary whenever this version has none,
                           and since a version mismatch Locate did not choose is a hard
                           error, one patched build on the host would then fail every job
-                          for every other version. Missing is a WARNING, not a failure —
-                          nothing downloads these, so a daemon routinely meets versions
-                          nobody has patched and must still run them at stock speed. An
+                          for every other version. A host that has none DOWNLOADS the
+                          published one (engine.EnsurePatchedEngine, internal/engine/
+                          patcheddl.go, run by internal/resim right after EnsureEngine):
+                          building takes ~35 min in the pinned image and must be gated, so
+                          ONE gated build per version is uploaded by cmd/publish-engine to
+                          engines/<version>/spring-headless-patched-<semver>.gz and its
+                          SHA-256 pinned in patchedBuilds. The SEMVER (patchrev.go
+                          PatchedVersion) is the engine version without leading zeros plus
+                          -barreplay.<N>, N the revision of patches/engine-<version>/series: a
+                          digest of the series file and every patch it lists, pinned in
+                          patchSeries, and TestPatchSeriesIsPinned fails when they change
+                          until the new digest is appended — so a name says exactly which
+                          patches went in. A pre-release, not +build metadata, which semver
+                          ignores when ordering. One name, one binary: the PUT is
+                          conditional and a different binary under a taken name is refused.
+                          The source commit is tagged patched-engine/<semver> (never
+                          v<semver>: the Go module proxy would read that as a version of
+                          this module); publish-engine prints the tag command. THE PIN IN THE REPO IS THE TRUST ANCHOR,
+                          not the bucket: a download that does not hash to it is refused
+                          and never reaches the path Locate prefers (temp file + rename),
+                          and a pin is added only for a binary that passed the gate, so
+                          the table is also the record of what was verified. A build
+                          already on the host (e.g. made locally) is never replaced.
+                          Missing is a WARNING, not a failure — only versions somebody
+                          has patched, gated and published have a build, so a daemon
+                          routinely meets versions nobody has patched and must still run
+                          them at stock speed; a failed download warns the same way. An
                           explicit -engine wins over the preference (the operator named a
                           binary). The chosen build is logged once and recorded on the job
                           row as jobStats.enginePatched, since timings from a patched and a
@@ -306,6 +331,23 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           each line's START — which is also the more useful reading (when the run
                           reported, not when the next one did). Nothing is held back waiting for
                           a newline, so a process dying mid-print still leaves its half line.
+cmd/publish-engine/main.go CLI: publish a patched engine build for every re-sim host to
+                          download (see the -patched-engine note above), the WHOLE job in one
+                          command: name it (engine version from its --version, revision from
+                          ./patches — an unpinned series is refused), re-simulate the
+                          version's gate replay (gateReplays; -gate overrides) on the STOCK
+                          engine, `strip --strip-debug` a copy into the engine dir (the
+                          engine finds base/ relative to itself), re-simulate the replay on
+                          THAT copy — the exact file the pin vouches for — and require
+                          byte-identical .brp files, then PutIfAbsent a gzip to
+                          engines/<version>/spring-headless-patched-<semver>.gz (native R2
+                          credentials only; ./.env is read; an existing object must hold the
+                          same binary) and print the patchedBuilds line and the
+                          patched-engine/<semver> tag. The gate compares stock vs patched
+                          under THIS checkout rather than against fixed md5s, which go stale
+                          whenever the widget or codec changes the capture. A failed gate
+                          keeps both captures. Run from the repo root; it takes the data
+                          dir's lock, so a bringest -resim on the same -data must be idle.
 internal/envfile/         tiny stdlib KEY=VALUE loader for ./.env. Accepts the bash-sourceable
                           subset (`export FOO=bar`, # comments, optional surrounding quotes) so
                           ONE file works both auto-loaded and sourced. Already-set vars WIN (the
