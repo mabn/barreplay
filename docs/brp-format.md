@@ -701,7 +701,7 @@ Go: `BRPFile.Projectiles()` returns `[]snapshot.Projectile` — `Birth`, `End`,
 `ID`, `Weapon`, `Owner`, `Team` (-1 = unknown), `Class` (`ProjNuke` … `ProjBeam`,
 named by `ProjectileClassName`), `EndKind` (`TrackOpen`, `TrackExploded`,
 `TrackVanished`), `Flags` (`TrackEngaged`, `TrackIntercepted`,
-`TrackPathTruncated`; `Intercepted()`), launch `X0/Y0/Z0`, `VX/VY/VZ`,
+`TrackPathTruncated`, `TrackEndInferred`; `Intercepted()`), launch `X0/Y0/Z0`, `VX/VY/VZ`,
 `Gravity`, `TargetType` (the engine's byte, 0 none), `Target`, `TX/TY/TZ`,
 end `X1/Y1/Z1`, `Path []PathPoint{DF, X, Y, Z}`. What each means — when a
 launch is seen, why a track vanishes, how an interception is flagged, how a

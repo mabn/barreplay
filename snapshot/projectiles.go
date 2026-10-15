@@ -57,6 +57,10 @@ const (
 	TrackEngaged       uint8 = 1 // an interceptor targeted it
 	TrackIntercepted   uint8 = 2 // destroyed by the interceptor that targeted it
 	TrackPathTruncated uint8 = 4 // the path hit the widget's point cap
+	// TrackEndInferred: no explosion was seen (a sandboxed BAR build denies
+	// the widget the callin). A track's end is one frame past where the
+	// projectile was last seen; a beam's one hit is its target at firing.
+	TrackEndInferred   uint8 = 8
 	maxTrackPathPoints       = 1 << 16
 )
 

@@ -16,8 +16,9 @@
 --   sandboxed  the same re-simulation on a BAR build whose widget handler
 --              sandboxes user widgets (BAR 2026.10.13 on): the widget gets a
 --              handler PROXY, so it cannot disable other widgets, wrap
---              UnitDamaged or install Explosion, and explosions arrive only as
---              BAR's VisibleExplosionBatch (owned ones, no projectile id)
+--              UnitDamaged or install Explosion, and NO explosion reaches it
+--              (headless BAR skips the gfx_ gadget behind VisibleExplosionBatch),
+--              so projectile ends, beam hits and blasts are inferred
 --              -> harness_sandboxed.brepstream
 --
 -- The streams are committed as internal/capture/testdata fixtures, and the
@@ -838,17 +839,12 @@ local function addStatic(id, def, team, x, z)
 end
 
 -- deliver is the engine calling LuaUI's Explosion — only for watched weapons.
--- In sandboxed mode BAR's gfx_explosion_lights gadget is what delivers them:
--- every OWNED explosion, batched per frame, without the projectile id.
-local visibleBatch, visibleCount = {}, 0
+-- In sandboxed mode nothing is delivered: the widget cannot install the
+-- callin, and the gadget that forwards VisibleExplosionBatch (BAR's
+-- gfx_explosion_lights) is an unsynced gfx_ gadget, which a headless engine
+-- never loads.
 local function deliver(wd, x, y, z, owner, pid)
 	if sandboxed then
-		if owner ~= nil then
-			local n = visibleCount
-			visibleBatch[n + 1], visibleBatch[n + 2], visibleBatch[n + 3] = x, y, z
-			visibleBatch[n + 4], visibleBatch[n + 5] = wd, owner
-			visibleCount = n + 5
-		end
 		return
 	end
 	if watchedExplosions[wd] and engineCallIns.Explosion then
@@ -1153,12 +1149,6 @@ for s = 0, SAMPLES - 1 do
 		for f = sampleFrame, math.min(sampleFrame + sampleEvery - 1, SAMPLES * sampleEvery - 6) do
 			curFrame = f
 			projectileScript(f)
-			-- The gadget's GameFramePost hands the frame's batch to LuaUI
-			-- before the widgets' own GameFramePost runs.
-			if visibleCount > 0 and widget.VisibleExplosionBatch then
-				widget:VisibleExplosionBatch(visibleBatch, visibleCount)
-			end
-			visibleBatch, visibleCount = {}, 0
 			widget:GameFramePost(f)
 		end
 		curFrame = sampleFrame
