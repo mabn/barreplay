@@ -512,3 +512,17 @@ checkout reproduces the trained/built tree exactly (0 diff lines in `rts/`).
 `SeriesDigest` now also hashes every file under `pgo/` (sorted), so a new
 profile or new flags is a new revision like a changed patch; revisions 1 and 2
 (no pgo/) keep their digests. Test: `TestSeriesDigestTracksThePGODir`.
+
+### 2026-10-15 14:20 — revision 3 builds from the series
+
+`pgo/build.sh` built `spring-headless` from a fresh clone of the series
+(`2026.07.04-22-gc9fac20`, 101.9 MB unstripped) in ~15 min. Two fixes on
+the way, both now in the script and its header:
+
+| problem | fix |
+|---|---|
+| "Failed to fetch git-describe" | the source must be a real clone with the tag — a git WORKTREE's `.git` points outside the mounted tree |
+| root-owned leftovers of a failed build blocked `rm` | the container cleans `/build/out` itself (also guarantees the clean build a new profile needs) and `chown`s the output and profile back to the caller |
+
+The verylarge1 full-run identity gate is still running (base build at frame
+68400 after 22 min; slowed by the build).

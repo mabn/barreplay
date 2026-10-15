@@ -1,7 +1,11 @@
 #!/bin/bash
 # build.sh — build the PGO+LTO patched engine of this series (revision 3 on).
 #
-#   build.sh <recoil checkout with the series applied> <work dir> [gen|use]
+#   build.sh <recoil CLONE with the series applied> <work dir> [gen|use]
+#
+# The source must be a real clone (not a git worktree, whose .git points
+# outside the mounted tree) with the 2026.07.04 tag, since the engine takes
+# its version from git describe.
 #
 # use (default): unpack profile.tar.xz and build spring-headless with
 #   -O3 -flto=4 -fprofile-use -fprofile-partial-training   (no -g)
@@ -39,11 +43,15 @@ else
 	L="-fuse-ld=gold -flto=4 -fprofile-use=$PROF -fprofile-partial-training"
 	X="-DCMAKE_AR=/usr/bin/gcc-ar-13 -DCMAKE_RANLIB=/usr/bin/gcc-ranlib-13 -DCMAKE_CXX_COMPILER_AR=/usr/bin/gcc-ar-13 -DCMAKE_C_COMPILER_AR=/usr/bin/gcc-ar-13 -DCMAKE_CXX_COMPILER_RANLIB=/usr/bin/gcc-ranlib-13 -DCMAKE_C_COMPILER_RANLIB=/usr/bin/gcc-ranlib-13"
 fi
-OUT=$WORK/build-$MODE; rm -rf "$OUT"; mkdir -p "$OUT" "$PROF"
+OUT=$WORK/build-$MODE; mkdir -p "$OUT" "$PROF"
 $DOCKER run --rm --user=0:0 -v "$SRC":/build/src:ro -v "$OUT":/build/out:rw -v "$PROF":"$PROF":rw "$IMG" bash -c "
 git config --global safe.directory '*'
+rm -rf /build/out/* /build/out/.[!.]*   # a clean build: the profile is not a ninja dependency
 cd /build/src/docker-build-v2/scripts && ./configure.sh -DAI_TYPES=NONE \
 	-DCMAKE_CXX_FLAGS_RELWITHDEBINFO='$F' -DCMAKE_C_FLAGS_RELWITHDEBINFO='$F' \
 	-DCMAKE_EXE_LINKER_FLAGS='$L' -DCMAKE_SHARED_LINKER_FLAGS='$L' $X
-cd /build/out && ninja -j\$(nproc) spring-headless"
+cd /build/out && ninja -j\$(nproc) spring-headless
+status=\$?
+chown -R $(id -u):$(id -g) /build/out $PROF   # the container runs as root
+exit \$status"
 echo "built: $OUT/spring-headless"
