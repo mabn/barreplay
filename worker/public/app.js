@@ -7792,7 +7792,6 @@ function initUpload() {
 
 function uploadStatus(text, cls) {
   const el = document.getElementById('dropstatus');
-  document.getElementById('dropzone').classList.toggle('busy', !!text);
   el.style.display = text ? '' : 'none';
   el.className = cls || '';
   el.textContent = text || '';

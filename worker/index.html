@@ -104,10 +104,14 @@
          Outside the sections: a drop is accepted from either of them, and its
          progress line stays put while the Queue section is watched. -->
     <div id="dropzone">
-      <!-- No standing banner (nobody used it): the zone appears only while a
-           file is dragged over the page, or to report an upload's progress. -->
-      <span id="droplabel">Drop the <code>.brepstream</code> capture to publish it</span>
-      <input type="file" id="dropfile" accept=".brepstream" hidden>
+      <!-- A standing banner: it is the only place a visitor learns uploads
+           exist (removing it on 2026-10-10 left /setup linked from nowhere).
+           The setup link is RELATIVE: it resolves to /setup on whichever
+           origin serves the page (https://replay.fogofwar.dev/setup deployed,
+           the loopback origin under `vite dev`). -->
+      <span id="droplabel">Drop a <code>.brepstream</code> capture here to publish it —
+        or <label class="browse">browse<input type="file" id="dropfile" accept=".brepstream" hidden></label>.
+        Want to record your own games? <a href="/setup">Here is how.</a></span>
       <div id="dropstatus" style="display:none"></div>
     </div>
 
