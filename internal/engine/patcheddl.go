@@ -8,9 +8,14 @@
 // THE TRUST ANCHOR IS THIS FILE, not the bucket: patchedBuilds pins each
 // published binary's SHA-256, and a download that does not hash to it is
 // refused. A binary is only ever added here after it passed the gate, so the
-// pin is also the record of which build was verified. The object key carries
-// the hash too (content-addressed, like a replay revision), so publishing a
-// new build never overwrites one a host may be downloading.
+// pin is also the record of which build was verified.
+//
+// A build is NAMED by its semver (PatchedVersion: the engine version plus the
+// revision of the patch series, patchrev.go), and so is its object:
+// engines/<version>/spring-headless-patched-2026.7.4-bp.1.gz. One version is
+// one binary — publish-engine writes it only if the key is free and refuses a
+// different binary under a name already taken — so a new build is always a
+// new revision and never overwrites one a host may be downloading.
 //
 // The binary is GPL (Recoil). Its corresponding source is the upstream tag
 // plus the patch series in this repo's patches/engine-<version>/.
@@ -30,17 +35,18 @@ import (
 
 // PatchedBuild is one gated patched engine published to the bucket.
 type PatchedBuild struct {
-	// Key is the object's path in the bucket: a gzip of the binary.
-	Key string
+	// Rev is the revision of the patch series it was built from (patchSeries),
+	// which with the engine version makes its name: PatchedVersion.
+	Rev int
 	// SHA256 is the hex SHA-256 of the DECOMPRESSED binary — the bytes that
 	// were gated, independent of how they happened to be compressed.
 	SHA256 string
 }
 
-// patchedBuilds lists the published patched engines by engine version. Add an
-// entry only for a build that passed the byte-identity gate
-// (docs/building-recoil.md, "The PATCHED build"); cmd/publish-engine prints
-// the line to paste here.
+// patchedBuilds lists the published patched engine for each engine version
+// (the newest revision is the one hosts should run). Add an entry only for a
+// build that passed the byte-identity gate (docs/building-recoil.md, "The
+// PATCHED build"); cmd/publish-engine prints the line to paste here.
 var patchedBuilds = map[string]PatchedBuild{}
 
 // PatchedBuildBaseURL is where published patched engines are read back from:
@@ -48,10 +54,10 @@ var patchedBuilds = map[string]PatchedBuild{}
 // tests can point it at a local server.
 var PatchedBuildBaseURL = "https://cdn-bar.fogofwar.dev"
 
-// PatchedBuildKey names the object a patched binary with this hash is
-// published under.
-func PatchedBuildKey(version, sha256Hex string) string {
-	return "engines/" + version + "/" + patchedHeadlessName() + "-" + sha256Hex[:16] + ".gz"
+// PatchedBuildKey names the object the patched build of this engine version
+// and series revision is published under.
+func PatchedBuildKey(version string, rev int) string {
+	return "engines/" + version + "/" + patchedHeadlessName() + "-" + PatchedVersion(version, rev) + ".gz"
 }
 
 // EnsurePatchedEngine installs the published patched build for version beside
@@ -81,8 +87,9 @@ func EnsurePatchedEngine(ctx context.Context, cfg Config, version string) error 
 		return fmt.Errorf("engine: no stock %s install at %s to put the patched build beside", version, dir)
 	}
 
-	url := PatchedBuildBaseURL + "/" + build.Key
-	fmt.Fprintf(os.Stderr, "engine: downloading the patched %s build from %s\n", version, url)
+	name := PatchedVersion(version, build.Rev)
+	url := PatchedBuildBaseURL + "/" + PatchedBuildKey(version, build.Rev)
+	fmt.Fprintf(os.Stderr, "engine: downloading the patched build %s from %s\n", name, url)
 	// Written to a temp file in the same dir and renamed into place only once
 	// its hash checks out, so neither an interrupted download nor a wrong
 	// binary can ever be found at the path Locate prefers.
@@ -92,12 +99,12 @@ func EnsurePatchedEngine(ctx context.Context, cfg Config, version string) error 
 	}
 	defer os.Remove(tmp.Name())
 	defer tmp.Close()
-	got, err := downloadGunzipped(ctx, url, tmp)
+	got, err := DownloadGunzipped(ctx, url, tmp)
 	if err != nil {
 		return fmt.Errorf("engine: download patched build: %w", err)
 	}
 	if got != build.SHA256 {
-		return fmt.Errorf("engine: patched build from %s hashes to %s, want %s; not installing it", url, got, build.SHA256)
+		return fmt.Errorf("engine: patched build %s from %s hashes to %s, want %s; not installing it", name, url, got, build.SHA256)
 	}
 	if err := tmp.Close(); err != nil {
 		return err
@@ -108,7 +115,7 @@ func EnsurePatchedEngine(ctx context.Context, cfg Config, version string) error 
 	if err := os.Rename(tmp.Name(), dst); err != nil {
 		return fmt.Errorf("engine: install patched build: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "engine: installed the patched %s build -> %s\n", version, dst)
+	fmt.Fprintf(os.Stderr, "engine: installed the patched build %s -> %s\n", name, dst)
 	return nil
 }
 
@@ -126,9 +133,9 @@ func CheckBuildVersion(bin, version string) error {
 	return nil
 }
 
-// downloadGunzipped streams a gzip from url into dst, decompressed, and
+// DownloadGunzipped streams a gzip from url into dst, decompressed, and
 // returns the hex SHA-256 of what it wrote.
-func downloadGunzipped(ctx context.Context, url string, dst io.Writer) (string, error) {
+func DownloadGunzipped(ctx context.Context, url string, dst io.Writer) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err

@@ -17,16 +17,16 @@ import (
 
 const testVersion = "2026.07.04"
 
-// servePatched publishes body (gzipped) at the key a build with hash wantSHA
-// would have, pins that build, and returns the request counter. Both globals
-// are restored when the test ends.
+// servePatched publishes body (gzipped) as revision 1's build, pins that
+// build with hash wantSHA, and returns the request counter. Both globals are
+// restored when the test ends.
 func servePatched(t *testing.T, body []byte, wantSHA string) *atomic.Int32 {
 	t.Helper()
 	var gz bytes.Buffer
 	zw := gzip.NewWriter(&gz)
 	zw.Write(body)
 	zw.Close()
-	key := PatchedBuildKey(testVersion, wantSHA)
+	key := PatchedBuildKey(testVersion, 1)
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
@@ -40,7 +40,7 @@ func servePatched(t *testing.T, body []byte, wantSHA string) *atomic.Int32 {
 
 	oldURL, oldBuilds := PatchedBuildBaseURL, patchedBuilds
 	PatchedBuildBaseURL = srv.URL
-	patchedBuilds = map[string]PatchedBuild{testVersion: {Key: key, SHA256: wantSHA}}
+	patchedBuilds = map[string]PatchedBuild{testVersion: {Rev: 1, SHA256: wantSHA}}
 	t.Cleanup(func() { PatchedBuildBaseURL, patchedBuilds = oldURL, oldBuilds })
 	return &hits
 }

@@ -244,9 +244,19 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           patcheddl.go, run by internal/resim right after EnsureEngine):
                           building takes ~35 min in the pinned image and must be gated, so
                           ONE gated build per version is uploaded by cmd/publish-engine to
-                          engines/<version>/spring-headless-patched-<sha16>.gz (content-
-                          addressed, conditional PUT, never overwritten) and its SHA-256
-                          pinned in patchedBuilds. THE PIN IN THE REPO IS THE TRUST ANCHOR,
+                          engines/<version>/spring-headless-patched-<semver>.gz and its
+                          SHA-256 pinned in patchedBuilds. The SEMVER (patchrev.go
+                          PatchedVersion) is the engine version without leading zeros plus
+                          -bp.<N>, N the revision of patches/engine-<version>/series: a
+                          digest of the series file and every patch it lists, pinned in
+                          patchSeries, and TestPatchSeriesIsPinned fails when they change
+                          until the new digest is appended — so a name says exactly which
+                          patches went in. A pre-release, not +build metadata, which semver
+                          ignores when ordering. One name, one binary: the PUT is
+                          conditional and a different binary under a taken name is refused.
+                          The source commit is tagged patched-engine/<semver> (never
+                          v<semver>: the Go module proxy would read that as a version of
+                          this module); publish-engine prints the tag command. THE PIN IN THE REPO IS THE TRUST ANCHOR,
                           not the bucket: a download that does not hash to it is refused
                           and never reaches the path Locate prefers (temp file + rename),
                           and a pin is added only for a binary that passed the gate, so
@@ -323,10 +333,13 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           a newline, so a process dying mid-print still leaves its half line.
 cmd/publish-engine/main.go CLI: publish a GATED patched engine build for every re-sim host to
                           download (see the -patched-engine note above): checks the binary's
-                          --version against -version, gzips it, PutIfAbsent to
-                          engines/<version>/<name>-<sha16>.gz in the real bucket (native R2
-                          credentials only; ./.env is read) and prints the patchedBuilds
-                          line to commit. Strip the debug info first (~780 MB of it).
+                          --version against -version, names it by the revision of ./patches
+                          (refusing an unpinned series), gzips it, PutIfAbsent to
+                          engines/<version>/spring-headless-patched-<semver>.gz in the real
+                          bucket (native R2 credentials only; ./.env is read; an existing
+                          object must hold the same binary) and prints the patchedBuilds
+                          line to commit and the patched-engine/<semver> tag to push. Run it
+                          from the repo root. Strip the debug info first (~780 MB of it).
 internal/envfile/         tiny stdlib KEY=VALUE loader for ./.env. Accepts the bash-sourceable
                           subset (`export FOO=bar`, # comments, optional surrounding quotes) so
                           ONE file works both auto-loaded and sourced. Already-set vars WIN (the
