@@ -62,3 +62,38 @@ a widget WITHOUT going through the widget handler.
 - 2026-10-15: branch created; Docker + p7zip installed (via a passwordless
   apt-get/docker sudo rule the user added); Recoil 2026.07.04 and BAR master
   cloned into the scratchpad; findings above.
+- 2026-10-15: found a second reason the patch is needed: our own patch 0002
+  stops the unsynced halves of LuaRules/LuaGaia from getting events in a
+  headless replay. BAR's gfx_explosion_lights gadget is what sends
+  `VisibleExplosionBatch`, so on the PATCHED engine the widget's current
+  fallback receives no explosions at all: every track ends "vanished" and no
+  blast is recorded.
+- 2026-10-15: wrote `rts/Lua/LuaEngineEventLog.{h,cpp}` (+ CMakeLists, the
+  PushEntries call in `LuaUnsyncedRead`, `Reset()` from `~CLuaUI`) and
+  exported it as `patches/engine-2026.07.04/0004-engine-event-log.patch`
+  (appended to `series`). Explosion rows also carry the OWNER'S TEAM (stride
+  11): the widget drains after the sim, when a unit's own death explosion's
+  owner has already left the unit list.
+- 2026-10-15: widget 1.12.0 (`assets/lua/replay_uploader.lua`): when the
+  engine has `Spring.SetEngineEventLog`, the re-sim switches it on in
+  Initialize and PULLS instead of hooking:
+  - explosions drained at the start of GameFramePost (before the vanished-track
+    sweep, i.e. where the callin used to land them), filtered to the watched
+    weapons (the log records every explosion; the callin had a watch list);
+  - hits drained before each sample's window flush, at the start of
+    UnitDestroyed (a unit-end row counts the hits before it) and at game end.
+    `recordHit` is split into `recordHitAt` (the writer) and the callin half
+    that reads health/position/projectile off the live unit;
+  - no `UnitDamaged` callin is defined then (no Lua call per hit), the
+    `VisibleExplosionBatch` fallback is ignored, Shutdown switches the log
+    off, and events the engine dropped from a full buffer are logged.
+  Stock engines keep the old paths unchanged.
+- 2026-10-15: harness mode `enginelog` (sandboxed proxy + stubbed engine log;
+  BAR's batches still arrive and must be ignored) -> new fixture
+  `harness_enginelog`. Its decoded capture is IDENTICAL to `harness_resim`'s
+  (tracks, blasts, hits, unit ends, facts) except the harness's nil-weapon
+  hits, which the engine never produces; `TestEngineLogMatchesResim` pins
+  that. Other fixtures changed only by the widget version string.
+- Pre-existing, not from this branch: `TestViewerFixtureUpToDate` fails on
+  main too (viewer.brp stale).
+- In progress: building the patched engine in the official image (Docker).

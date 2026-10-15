@@ -77,8 +77,8 @@
 -- Echo, and the stream's GAME line, so every capture records which encoder
 -- produced it (the copy on a player's machine can be arbitrarily old — the
 -- server/decoder needs to know, and the catalog stores it per replay).
-local widgetVersion = "1.11.1"
-local widgetDate = "2026-10-14"
+local widgetVersion = "1.12.0"
+local widgetDate = "2026-10-15"
 
 -- Git SHA of this exact file, stamped when the widget is published for
 -- download: worker/tools/sync-assets.mjs replaces the token below with the SHA
@@ -123,6 +123,22 @@ local recordVisibility = resim and ("__VISIBILITY__" == "1")
 -- Long-range projectiles, heavy beams and strong explosions (R and W
 -- records, the stock fact; -projectiles).
 local recordProjectiles = resim and ("__PROJECTILES__" == "1")
+-- The engine's own explosion and damage log (barreplay's patched engine,
+-- patches/engine-2026.07.04/0004-engine-event-log.patch). A widget handler
+-- that hands user widgets only a proxy (BAR 2026.10.13 on) keeps the
+-- Explosion callin and UnitDamaged's weapon/projectile/attacker from them;
+-- these Spring functions bypass the handler, so the re-sim PULLS both from
+-- the engine instead. Preferred whenever present, with or without handler
+-- access: it costs no Lua call per event. One table, because the main chunk
+-- is at Lua 5.1's 200-local limit.
+local engineLog = {
+	available = resim and type(Spring.SetEngineEventLog) == "function"
+		and type(Spring.GetLoggedExplosions) == "function"
+		and type(Spring.GetLoggedDamage) == "function",
+	explosions = false, -- switched on in Initialize
+	damage = false,
+	dropped = 0, -- events the engine dropped from a full buffer
+}
 -- Output path for resim mode. Spring's LuaIO sandbox rejects absolute paths
 -- (IsSafePath), so it is RELATIVE to the engine's write-dir, which the Go tool
 -- sets as the engine's working directory and reads the stream back from.
@@ -1390,7 +1406,10 @@ end
 
 local flushDamage -- defined below; a full buffer flushes early
 
-local function recordHit(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
+-- recordHitAt writes one hit. hp, x and z are the victim's right after it;
+-- po/pt the projectile's shooter, read only when the engine named no
+-- attacker (65535/255 unknown).
+local function recordHitAt(frame, unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam, hp, x, z, po, pt)
 	if type(damage) ~= "number" or damage <= 0 then
 		return
 	end
@@ -1398,22 +1417,12 @@ local function recordHit(unitID, unitDefID, unitTeam, damage, paralyzer, weaponD
 	if attackerTeam ~= nil then dmgNamedAttacker = dmgNamedAttacker + 1 end
 	if weaponDefID ~= nil and weaponDefID >= 0 then dmgNamedWeapon = dmgNamedWeapon + 1 end
 	if weaponDefID ~= nil and weaponDefID < 0 then dmgEngineCause = dmgEngineCause + 1 end
+	if pt ~= 255 then dmgFromProjectile = dmgFromProjectile + 1 end
 	local isProj = projectileID ~= nil and projectileID >= 0
-	local po, pt = 65535, 255
-	if attackerTeam == nil and isProj and spGetProjectileTeamID then
-		local t = spGetProjectileTeamID(projectileID)
-		if t ~= nil then
-			pt = team8(t)
-			po = id16(spGetProjectileOwnerID and spGetProjectileOwnerID(projectileID))
-			dmgFromProjectile = dmgFromProjectile + 1
-		end
-	end
-	local hp = spGetUnitHealth(unitID)
-	local x, _, z = spGetUnitPosition(unitID)
 	local b = hits
 	local n = b.n + 1
 	b.n = n
-	b.df[n] = clamp(spGetGameFrame() - hitStart, 0, 65535)
+	b.df[n] = clamp(frame - hitStart, 0, 65535)
 	b.v[n] = id16(unitID)
 	b.vd[n] = id16(unitDefID)
 	b.vt[n] = team8(unitTeam)
@@ -1431,6 +1440,55 @@ local function recordHit(unitID, unitDefID, unitTeam, damage, paralyzer, weaponD
 	hitTotal = hitTotal + 1
 	if n >= 60000 then
 		flushDamage(spGetGameFrame(), true)
+	end
+end
+
+-- recordHit is the UnitDamaged callin's half: it reads what the engine log
+-- hands over ready-made off the live unit and projectile.
+local function recordHit(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
+	if type(damage) ~= "number" or damage <= 0 then
+		return
+	end
+	local po, pt = 65535, 255
+	if attackerTeam == nil and projectileID ~= nil and projectileID >= 0 and spGetProjectileTeamID then
+		local t = spGetProjectileTeamID(projectileID)
+		if t ~= nil then
+			pt = team8(t)
+			po = id16(spGetProjectileOwnerID and spGetProjectileOwnerID(projectileID))
+		end
+	end
+	local hp = spGetUnitHealth(unitID)
+	local x, _, z = spGetUnitPosition(unitID)
+	recordHitAt(spGetGameFrame(), unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID,
+		attackerID, attackerDefID, attackerTeam, hp, x, z, po, pt)
+end
+
+-- engineLog.drainDamage records the hits the engine logged since the last
+-- drain. It runs before anything that needs every hit so far: a sample's
+-- window flush, a unit's end (whose row counts the hits before it), the
+-- game's end — which keeps the order the callin gave. -1 is the log's "none".
+function engineLog.drainDamage()
+	if not engineLog.damage then
+		return
+	end
+	local v, n, dropped = Spring.GetLoggedDamage(engineLog.dmgBuf)
+	if v == nil then
+		return -- no full read (yet): the log keeps it for the next drain
+	end
+	engineLog.dmgBuf = v
+	engineLog.dropped = engineLog.dropped + (dropped or 0)
+	for i = 0, n - 1 do
+		local o = i * 16
+		local aID, aDef, aTeam = v[o + 9], v[o + 10], v[o + 11]
+		local projectileID = v[o + 8]
+		local po, pt = 65535, 255
+		if aTeam < 0 and projectileID >= 0 and v[o + 16] >= 0 then
+			pt = team8(v[o + 16])
+			po = id16(v[o + 15])
+		end
+		recordHitAt(v[o + 1], v[o + 2], v[o + 3], v[o + 4], v[o + 5], v[o + 6] ~= 0, v[o + 7], projectileID,
+			aID >= 0 and aID or nil, aDef >= 0 and aDef or nil, aTeam >= 0 and aTeam or nil,
+			v[o + 12], v[o + 13], v[o + 14], po, pt)
 	end
 end
 
@@ -2080,8 +2138,8 @@ local projectiles = (function()
 	-- onExplosion is the engine's Explosion callin for every watched weapon.
 	-- A projectile id arrives as a number; "none" is the engine's -1u, which
 	-- reaches Lua as 4294967295.
-	local function onExplosion(wdID, px, py, pz, ownerID, projID)
-		local frame = factFrame()
+	local function onExplosion(wdID, px, py, pz, ownerID, projID, frame, ownerTeam)
+		frame = frame or factFrame()
 		local pid = nil
 		if type(projID) == "number" and projID >= 0 and projID < 2147483648 then
 			pid = projID
@@ -2102,7 +2160,7 @@ local projectiles = (function()
 			return
 		end
 		if blastWeapon[wdID] and pid == nil then
-			local team = dyingTeam[ownerID or -1]
+			local team = dyingTeam[ownerID or -1] or ownerTeam
 			if team == nil and ownerID ~= nil then
 				team = spGetUnitTeam(ownerID)
 			end
@@ -2110,7 +2168,7 @@ local projectiles = (function()
 			return
 		end
 		if trackClassOf[wdID] or subWeapon[wdID] or blastWeapon[wdID] then
-			addBlast(frame, wdID, px, py, pz, ownerID, ownerID and spGetUnitTeam(ownerID) or nil, 2)
+			addBlast(frame, wdID, px, py, pz, ownerID, ownerTeam or (ownerID and spGetUnitTeam(ownerID)) or nil, 2)
 		end
 	end
 
@@ -2142,10 +2200,37 @@ local projectiles = (function()
 		end
 	end
 
+	-- drainExplosions feeds the explosions the engine logged since the last
+	-- drain (engineLog.explosions) to onExplosion, exactly as the callin did
+	-- one at a time: the log records EVERY explosion, so it is filtered to
+	-- the watched weapons here, which the callin's watch list did.
+	local function drainExplosions()
+		if not engineLog.explosions then
+			return
+		end
+		local v, n, dropped = Spring.GetLoggedExplosions(engineLog.explBuf)
+		if v == nil then
+			return -- no full read (yet): the log keeps it for the next drain
+		end
+		engineLog.explBuf = v
+		engineLog.dropped = engineLog.dropped + (dropped or 0)
+		for i = 0, n - 1 do
+			local o = i * 11
+			local wdID = v[o + 2]
+			if watchRole[wdID] ~= nil then
+				local ownerID, ownerTeam, pid = v[o + 7], v[o + 8], v[o + 9]
+				onExplosion(wdID, v[o + 3], v[o + 4], v[o + 5], ownerID >= 0 and ownerID or nil,
+					pid >= 0 and pid or nil, v[o + 1], ownerTeam >= 0 and ownerTeam or nil)
+			end
+		end
+	end
+
 	-- projectileFrame runs in GameFramePost: after the frame's unit and
 	-- projectile updates, so a weapon that fired this frame has its new
-	-- projectiles in the world and its reload frame moved.
+	-- projectiles in the world and its reload frame moved. The frame's
+	-- explosions go first, as the callin delivered them during the sim.
 	local function projectileFrame(frame)
+		drainExplosions()
 		local t0 = hiResTimer and spGetTimer() or nil
 		for unitID, L in pairs(launchers) do
 			for _, s in ipairs(L.slots) do
@@ -2328,6 +2413,18 @@ local projectiles = (function()
 			logTag, n, nTracked, nLauncherDefs))
 	end
 
+	-- useEngineLog takes explosions from the engine's log instead of the
+	-- callin; VisibleExplosionBatch, the other fallback, is then ignored.
+	local function useEngineLog()
+		explosionHooked = true
+		local n = 0
+		for _ in pairs(watchRole) do
+			n = n + 1
+		end
+		Echo(string.format("%s explosions from the engine's event log: %d weapons watched (%d tracked, launchers on %d unit types)",
+			logTag, n, nTracked, nLauncherDefs))
+	end
+
 	-- matchTrack finds the open track an explosion with no projectile id ends:
 	-- the owner's track of that weapon whose projectile is gone (it exploded
 	-- this frame), else the one last seen nearest the explosion.
@@ -2430,6 +2527,8 @@ local projectiles = (function()
 	return {
 		buildWatch = buildWatch,
 		hookExplosion = hookExplosion,
+		useEngineLog = useEngineLog,
+		drainExplosions = drainExplosions,
 		visibleBatch = onVisibleBatch,
 		unhook = function()
 			if unhookExplosion then
@@ -2612,10 +2711,11 @@ if recordProjectiles then
 	end
 end
 
-if recordDamage then
-	-- Defined only when recording: an unused UnitDamaged callin would still
-	-- cost a Lua call per hit. It also keeps the handler's callin list
-	-- non-empty, which is what makes UpdateCallIn install the hook above.
+if recordDamage and not engineLog.available then
+	-- Defined only when recording, and not when the engine logs the hits
+	-- itself: an unused UnitDamaged callin would still cost a Lua call per
+	-- hit. It also keeps the handler's callin list non-empty, which is what
+	-- makes UpdateCallIn install the hook above.
 	function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
 		if damageHooked then
 			return -- recorded by the hook, with the arguments BAR drops
@@ -2653,7 +2753,17 @@ function widget:Initialize()
 		removeSelf()
 		return
 	end
-	if resim and recordDamage then
+	if engineLog.available and (recordDamage or recordProjectiles) then
+		local eok, eerr = pcall(Spring.SetEngineEventLog, recordProjectiles, recordDamage)
+		if eok then
+			engineLog.explosions, engineLog.damage = recordProjectiles, recordDamage
+			Echo(logTag .. " engine event log on (explosions " .. (recordProjectiles and "on" or "off")
+				.. ", damage " .. (recordDamage and "on" or "off") .. ")")
+		else
+			Echo(logTag .. " engine event log failed (" .. tostring(eerr) .. "); damage will not be recorded")
+		end
+	end
+	if resim and recordDamage and not engineLog.available then
 		local hok, herr = pcall(hookDamage)
 		if not hok then
 			Echo(logTag .. " damage hook failed (" .. tostring(herr) .. "); damage will name no attacker")
@@ -2664,7 +2774,11 @@ function widget:Initialize()
 		-- protocol-5 keys, which need the watch list.
 		local pok, perr = pcall(function()
 			projectiles.buildWatch()
-			projectiles.hookExplosion()
+			if engineLog.explosions then
+				projectiles.useEngineLog()
+			else
+				projectiles.hookExplosion()
+			end
 			for _, unitID in ipairs(spGetAllUnits()) do
 				local _, _, _, _, build = spGetUnitHealth(unitID)
 				if (build or 0) >= 1 then
@@ -2823,7 +2937,10 @@ function widget:GameFrame(frame)
 		-- The damage window closes at the sample boundary, before the sample:
 		-- everything since the last one happened before this frame's sim.
 		if recordDamage then
-			local ok, err = pcall(flushDamage, frame)
+			local ok, err = pcall(function()
+				engineLog.drainDamage()
+				flushDamage(frame)
+			end)
 			if not ok then
 				Echo(logTag .. " damage flush failed (" .. tostring(err) .. ")")
 				hits, ends, hitStart = newHitBuf(), newEndBuf(), frame
@@ -2909,6 +3026,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 		lastKnown[unitID] = nil
 	end
 	if recordDamage then
+		pcall(engineLog.drainDamage) -- the hits before this death come first
 		pcall(recordEnd, unitID, false)
 	end
 	if recordProjectiles then
@@ -3190,6 +3308,7 @@ end
 local function finishResim(frame)
 	if recordDamage then
 		local okLives, errLives = pcall(function()
+			engineLog.drainDamage()
 			for _, unitID in ipairs(spGetAllUnits()) do
 				recordEnd(unitID, true)
 			end
@@ -3204,6 +3323,7 @@ local function finishResim(frame)
 	end
 	if recordProjectiles then
 		local okProj, errProj = pcall(function()
+			projectiles.drainExplosions()
 			projectiles.closeAll(frame)
 			projectiles.flush(frame)
 			Echo(logTag .. " projectiles: " .. projectiles.summary())
@@ -3211,6 +3331,9 @@ local function finishResim(frame)
 		if not okProj then
 			Echo(logTag .. " closing the projectile tracks failed (" .. tostring(errProj) .. ")")
 		end
+	end
+	if engineLog.dropped > 0 then
+		Echo(logTag .. " engine event log: " .. engineLog.dropped .. " events dropped from a full buffer")
 	end
 	local ok, err = pcall(writeTeamStats)
 	if not ok then
@@ -3256,5 +3379,9 @@ function widget:Shutdown()
 		unhookDamage()
 	end
 	pcall(projectiles.unhook)
+	if engineLog.explosions or engineLog.damage then
+		pcall(Spring.SetEngineEventLog, false, false)
+		engineLog.explosions, engineLog.damage = false, false
+	end
 	closeOut("shutdown")
 end

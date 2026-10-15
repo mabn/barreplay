@@ -31,7 +31,7 @@ var update = flag.Bool("update", false, "rewrite the harness golden dumps from t
 // header) and run `go test -run TestHarnessGolden -update`. The golden diff is
 // then exactly the change in what gets recorded; read it before committing.
 func TestHarnessGolden(t *testing.T) {
-	for _, name := range []string{"harness", "harness_resim", "harness_sandboxed"} {
+	for _, name := range []string{"harness", "harness_resim", "harness_sandboxed", "harness_enginelog"} {
 		t.Run(name, func(t *testing.T) {
 			got := harnessDump(t, "testdata/"+name+".brepstream")
 			golden := "testdata/" + name + ".golden.txt.gz"
@@ -74,6 +74,35 @@ func TestHarnessGolden(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestEngineLogMatchesResim pins the point of the patched engine's event log
+// (patches/engine-2026.07.04/0004-engine-event-log.patch): a widget that
+// cannot reach the real widget handler records, through the log, EXACTLY what
+// one with handler access records through the Explosion and UnitDamaged
+// callins — every track, blast, hit and unit end. The one difference is the
+// harness's own: its "no attacker at all" hits carry a nil weapon, which the
+// engine never passes (it always hands a number) and the log, being numbers,
+// cannot carry; it arrives as -1, the engine's debris cause, which decodes as
+// -2. Those lines are compared with the weapon masked.
+func TestEngineLogMatchesResim(t *testing.T) {
+	resim := strings.ReplaceAll(string(harnessDump(t, "testdata/harness_resim.brepstream")),
+		`"weapon":-1,"projOwner":-1,"projTeam":-1`, `"weapon":null,"projOwner":-1,"projTeam":-1`)
+	logged := strings.ReplaceAll(string(harnessDump(t, "testdata/harness_enginelog.brepstream")),
+		`"weapon":-2,"projOwner":-1,"projTeam":-1`, `"weapon":null,"projOwner":-1,"projTeam":-1`)
+	rl, ll := strings.Split(resim, "\n"), strings.Split(logged, "\n")
+	for i := 0; i < len(rl) || i < len(ll); i++ {
+		var r, l string
+		if i < len(rl) {
+			r = rl[i]
+		}
+		if i < len(ll) {
+			l = ll[i]
+		}
+		if r != l {
+			t.Fatalf("the engine log records differently from the callins at line %d:\n  log: %s\nresim: %s", i+1, l, r)
+		}
 	}
 }
 

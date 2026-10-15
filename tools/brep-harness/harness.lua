@@ -19,6 +19,13 @@
 --              UnitDamaged or install Explosion, and explosions arrive only as
 --              BAR's VisibleExplosionBatch (owned ones, no projectile id)
 --              -> harness_sandboxed.brepstream
+--   enginelog  the sandboxed re-simulation on barreplay's PATCHED engine
+--              (patches/engine-2026.07.04/0004-engine-event-log.patch): the
+--              same handler proxy and batches, plus Spring.SetEngineEventLog /
+--              GetLoggedExplosions / GetLoggedDamage, through which the engine
+--              hands over every explosion and hit with all its arguments. Its
+--              records must match the resim fixture's exactly
+--              -> harness_enginelog.brepstream
 --
 -- The streams are committed as internal/capture/testdata fixtures, and the
 -- tests there decode them against golden JSON dumps (TestHarnessGolden),
@@ -29,14 +36,17 @@
 --	lua5.4 ../../../tools/brep-harness/harness.lua ../../../assets/lua/replay_uploader.lua
 --	lua5.4 ../../../tools/brep-harness/harness.lua ../../../assets/lua/replay_uploader.lua resim
 --	lua5.4 ../../../tools/brep-harness/harness.lua ../../../assets/lua/replay_uploader.lua sandboxed
+--	lua5.4 ../../../tools/brep-harness/harness.lua ../../../assets/lua/replay_uploader.lua enginelog
 --	cd .. && go test -run TestHarnessGolden -update .
 --
 -- and read the golden diff: it is the change in what the widget records.
 
 local widgetPath = arg[1] or "assets/lua/replay_uploader.lua"
-local sandboxed = (arg[2] == "sandboxed")
+local enginelog = (arg[2] == "enginelog")
+local sandboxed = (arg[2] == "sandboxed") or enginelog
 local resim = (arg[2] == "resim") or sandboxed
-local outName = sandboxed and "harness_sandboxed.brepstream"
+local outName = enginelog and "harness_enginelog.brepstream"
+	or sandboxed and "harness_sandboxed.brepstream"
 	or resim and "harness_resim.brepstream" or "harness.brepstream"
 
 -- Deterministic PRNG (LCG) so regenerated fixtures only change when the codec
@@ -633,6 +643,67 @@ local realHandler = {
 		end
 	end,
 }
+-- The patched engine's event log (enginelog mode). The engine records every
+-- explosion and every hit as it happens, the full-view caller drains them:
+-- -1 is "none". Health and position are read off the same stubs the widget's
+-- own callin would have read, at the moment of the hit, as the engine does.
+local engineLog = { explosions = false, damage = false, expl = {}, dmg = {}, everOn = false }
+if enginelog then
+	local function drain(buf, fill)
+		local out = type(fill) == "table" and fill or {}
+		local prev = #out
+		for i = 1, #buf do
+			out[i] = buf[i]
+		end
+		for i = #buf + 1, prev do
+			out[i] = nil
+		end
+		return out
+	end
+	Spring.SetEngineEventLog = function(explosions, damage)
+		engineLog.explosions, engineLog.damage = explosions and true or false, damage and true or false
+		engineLog.everOn = engineLog.everOn or engineLog.explosions or engineLog.damage
+		if not engineLog.explosions then engineLog.expl = {} end
+		if not engineLog.damage then engineLog.dmg = {} end
+	end
+	Spring.GetLoggedExplosions = function(fill)
+		local out, n = drain(engineLog.expl, fill), #engineLog.expl / 11
+		engineLog.expl = {}
+		return out, n, 0
+	end
+	Spring.GetLoggedDamage = function(fill)
+		local out, n = drain(engineLog.dmg, fill), #engineLog.dmg / 16
+		engineLog.dmg = {}
+		return out, n, 0
+	end
+end
+
+local function logExplosion(wd, x, y, z, owner, pid)
+	if not engineLog.explosions then
+		return
+	end
+	local o = units[owner or -1]
+	local e = engineLog.expl
+	for _, v in ipairs({ curFrame, wd, x, y, z, 48, owner or -1, o and o.team or -1, pid or -1, -1, -1 }) do
+		e[#e + 1] = v
+	end
+end
+
+local function logDamage(unitID, unitDefID, unitTeam, damage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
+	if not engineLog.damage then
+		return
+	end
+	local hp = Spring.GetUnitHealth(unitID)
+	local x, _, z = Spring.GetUnitPosition(unitID)
+	local p = projectileID and projectileID >= 0 and projectiles[projectileID]
+	local d = engineLog.dmg
+	for _, v in ipairs({ curFrame, unitID, unitDefID, unitTeam, damage, paralyzer and 1 or 0,
+		weaponDefID or -1, projectileID or -1, attackerID or -1, attackerDefID or -1, attackerTeam or -1,
+		hp or 0, x or 0, z or 0, p and p.owner or -1, p and p.team or -1 }) do
+		d[#d + 1] = v
+	end
+end
+
 local function newWidget()
 	if sandboxed then
 		-- The hardened proxy answers the real handler's other members with an
@@ -693,7 +764,14 @@ widget.widgetHandler:UpdateCallIn("UnitDamaged")
 
 -- unitDamaged is the engine delivering a hit to LuaUI.
 local function unitDamaged(...)
+	logDamage(...)
 	engineCallIns.UnitDamaged(...)
+end
+
+-- damageOn says whether the engine is delivering hits to the widget at all:
+-- its callin, or (enginelog) the log it was switched on for.
+local function damageOn()
+	return resim and (widget.UnitDamaged ~= nil or engineLog.damage)
 end
 
 -- ---------------------------------------------------------------------------
@@ -749,7 +827,7 @@ end
 local function kill(id)
 	local u = units[id]
 	local aID, aDef, aTeam, weapon = killer(u)
-	if resim and widget.UnitDamaged and aID then
+	if damageOn() and aID then
 		local before = u.hp
 		u.hp = -25
 		unitDamaged(id, u.def, u.team, before + 25, false, weapon, 1, aID, aDef, aTeam)
@@ -758,7 +836,7 @@ local function kill(id)
 	killedShooters[#killedShooters + 1] = { id = id, team = u.team }
 	-- Its death blast hits a teammate: the engine names no attacker and no
 	-- projectile, only the blast weapon, and the widget credits the killer.
-	if resim and widget.UnitDamaged and aID then
+	if damageOn() and aID then
 		local n = firstOf(allyOf[u.team], id)
 		if n then
 			-- 159's blast is a big one (an advanced fusion): a "blast" fact.
@@ -777,7 +855,7 @@ end
 -- weapon (4) now and then, and every so often by nothing at all (a crash,
 -- a self-destruct: no attacker).
 local function combat(s)
-	if not (resim and widget.UnitDamaged) then
+	if not damageOn() then
 		return
 	end
 	for _, id in ipairs(order) do
@@ -842,6 +920,7 @@ end
 -- every OWNED explosion, batched per frame, without the projectile id.
 local visibleBatch, visibleCount = {}, 0
 local function deliver(wd, x, y, z, owner, pid)
+	logExplosion(wd, x, y, z, owner, pid)
 	if sandboxed then
 		if owner ~= nil then
 			local n = visibleCount
@@ -1168,6 +1247,11 @@ curFrame = SAMPLES * sampleEvery - 5
 widget:GameOver({ 0 })
 widget:Shutdown()
 
+if enginelog then
+	assert(engineLog.everOn, "the widget must switch the engine's event log on")
+	assert(not engineLog.explosions and not engineLog.damage, "Shutdown must switch the engine's event log off")
+	assert(widget.UnitDamaged == nil, "with the engine log there is no UnitDamaged callin to pay for")
+end
 if sandboxed then
 	assert(#disabledWidgets == 0, "a sandboxed widget cannot disable other widgets")
 	assert(next(watchedEver) == nil, "a sandboxed widget installs no Explosion callin")
