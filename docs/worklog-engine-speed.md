@@ -32,6 +32,7 @@ to the stock/rev-2 capture.
 | PGO (on H60-H62) | yes (medium, isthmus) | wall -3.8% (3/3), instr -3.3%; isthmus -4% | wall -1.9% / -3.7% (two sessions), instr -1.7..-3.3% | small |
 | H63 GenerateWeaponTargets: TestTarget after LOS/range | yes (medium) | — | 23.34 s -> 23.37 s, ±0 | no value; kept (exact, harmless) |
 | H64 prefetch in GenerateWeaponTargets | — | — | 23.32 s -> 23.36 s, ±0 | reverted |
+| THP `always` (host setting) | — | — | 20.9 s -> 26.9-31.1 s (much WORSE) | dropped |
 | **PGO + LTO** (on H60-H62) | yes (medium) | full run 1m25s -> **1m16s (-11%)** | wall **-10.2%** (3/3), instr **-15.3%** | **keep** |
 
 ## Log
@@ -427,3 +428,21 @@ between `always` and `madvise` across trials of ONE checkpoint measures the
 potential without a new dump. If it pays, the engine can `madvise` its own
 pools and set mimalloc's large-page option, which works under the `madvise`
 default every host has.
+
+### 2026-10-15 13:40 — huge pages: much worse
+
+PGO+LTO checkpoint, THP mode toggled between trials (3 pairs):
+
+| pair | THP madvise (default) wall ms | THP always wall ms |
+|---|---|---|
+| 1 | 21081 | 31149 |
+| 2 | 20795 | 26903 |
+| 3 | 20918 | 27852 |
+
+`always` costs 30-50%: on this 15 GB host, mostly page cache, building huge
+pages for the restored 5 GB means compaction stalls inside the window.
+Dropped (and it would have been a per-host setting anyway). THP back to
+`madvise`.
+
+Next: the PGO+LTO build retrained on the late game (`spring-headless-pgolto2`,
+clean build) — identity on medium, then its checkpoint.
