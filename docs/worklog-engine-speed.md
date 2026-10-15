@@ -64,3 +64,20 @@ the whole replay. First question: what does that cost?
   jumps) until `#pragma GCC optimize ("no-crossjumping", "no-gcse")` around
   Tick: now 67. Measuring (bench harness: instructions + SimFrame CPU + wall
   over frames 600-24000, 3 interleaved pairs).
+- 2026-10-15: RESULT H60+H61 (medium, bench harness over frames 600-24000,
+  3 interleaved pairs): main-thread instructions 265.96e9 -> 262.96e9
+  (-1.1%), SimFrame wall 51.35 s -> 51.13 s (-0.4%, inside the box's ±3%).
+  NOTE the bench harness `_exit(0)`s after its window, so a bench run's
+  capture is TRUNCATED (md5 `834d4722…` for every build) — identity is checked
+  on separate full runs (`~/dev/perf3/ab.sh`, BENCH=1 for timing only).
+- 2026-10-15: H62 Lua VM threaded dispatch (`lvm.cpp`, same pattern: 38
+  opcodes, per-handler fetch + hook check + `goto *disptab[op]`, the switch
+  kept; 40 indirect jumps after the same pragma). Byte-identical (2 full
+  runs), wall 1m25s/1m26s vs 1m24s/1m26s — no visible gain. Both interpreter
+  results agree with the known caveat: Haswell's indirect predictor already
+  learns a shared switch jump well. Kept for now (exact), will be re-judged
+  inside the final stack.
+- 2026-10-15: next: PGO (-fprofile-generate -> train on replays ->
+  -fprofile-use -fprofile-partial-training), `~/dev/barreplay-engine-build/pgo.sh`.
+  Same official image and flags otherwise; FP semantics unchanged (no FMA,
+  -frounding-math), and the gate checks byte-identity regardless.
