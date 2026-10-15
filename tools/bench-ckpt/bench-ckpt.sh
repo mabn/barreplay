@@ -31,6 +31,9 @@
 # PERF="<perf record args>" (e.g. PERF="-F 999 -e cycles") also records a
 # profile of the window into the checkpoint dir.
 #
+# CPUSET="<cpu list>" pins every engine thread for the trial (taskset -a);
+# MAINCPU=<cpu> OTHERCPUS=<list> pins the main thread alone and the rest apart.
+#
 # Each trial prints the bench harness line: frames, units alive at the start,
 # cycles, instructions (main thread) and the window's SimFrame wall time.
 #
@@ -115,6 +118,19 @@ trial1() {
 	rm -f "$dir/park.go" "$dir/result"
 	hostroot systemd-run --scope --quiet criu restore -D "$dir/img" -j -d --manage-cgroups=ignore \
 		--tcp-established -o restore.log -v2 || die "criu restore failed (see $dir/img/restore.log)"
+	if [ -n "${MAINCPU:-}" ]; then
+		# the main thread (tid == pid) alone on MAINCPU, every other thread on OTHERCPUS
+		local epid=$(cat "$dir/park.ready")
+		for t in /proc/$epid/task/*; do
+			local tid=${t##*/}
+			if [ "$tid" = "$epid" ]; then taskset -p -c "$MAINCPU" "$tid" > /dev/null
+			else taskset -p -c "${OTHERCPUS:?}" "$tid" > /dev/null; fi
+		done
+	fi
+	if [ -n "${CPUSET:-}" ]; then
+		# pin every thread of the restored engine before releasing it
+		taskset -a -p -c "$CPUSET" "$(cat "$dir/park.ready")" > /dev/null || die "taskset failed"
+	fi
 	local perfpid=
 	if [ -n "${PERF:-}" ]; then
 		# Profile exactly the timed window: attach to the restored engine

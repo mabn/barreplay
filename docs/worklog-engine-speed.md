@@ -33,6 +33,8 @@ to the stock/rev-2 capture.
 | H63 GenerateWeaponTargets: TestTarget after LOS/range | yes (medium) | — | 23.34 s -> 23.37 s, ±0 | no value; kept (exact, harmless) |
 | H64 prefetch in GenerateWeaponTargets | — | — | 23.32 s -> 23.36 s, ±0 | reverted |
 | THP `always` (host setting) | — | — | 20.9 s -> 26.9-31.1 s (much WORSE) | dropped |
+| PGO retrained on verylarge1's late game (`pgolto2`) | yes (medium) | — | 20.91 s -> 20.88 s, ±0 vs first PGO+LTO | no extra gain |
+| CPU pinning: one hyperthread per core / main thread alone on a core | — | — | -1.1% (2/3) / -0.7% (3/3) | host setting, small; noted only |
 | **PGO + LTO** (on H60-H62) | yes (medium) | full run 1m25s -> **1m16s (-11%)** | wall **-10.2%** (3/3), instr **-15.3%** | **keep** |
 
 ## Log
@@ -446,3 +448,32 @@ Dropped (and it would have been a per-host setting anyway). THP back to
 
 Next: the PGO+LTO build retrained on the late game (`spring-headless-pgolto2`,
 clean build) — identity on medium, then its checkpoint.
+
+### 2026-10-15 14:15 — late-game PGO profile: no extra gain; CPU pinning: ~1%
+
+`spring-headless-pgolto2` = PGO+LTO from a CLEAN build with the profile now
+also covering verylarge1 up to frame 65580. Byte-identical on medium
+(`0558d354…`, sim 1m16s). Its checkpoint dump is a useful whole-run number:
+reaching frame 63780 took **10m12s at 104 fps vs 12m00s at 89 fps** for the
+base build (-15% over the first 35 minutes of a big game).
+
+verylarge1 450 frames, `pgolto` (first profile) vs `pgolto2`, 3 pairs:
+20579/21109/21028 (mean 20905) vs 20884/21050/20705 (mean 20880) — the same.
+The small-game profile already put the code in the right shape.
+
+CPU placement (`bench-ckpt` `CPUSET=` / `MAINCPU= OTHERCPUS=`, new options;
+host: CPUs 0-3 one thread per core, 4-7 their siblings), `pgolto2`, 3 pairs:
+
+| placement | mean wall ms | vs unpinned |
+|---|---|---|
+| unpinned (all 8) | 20771 / 20732 | — |
+| all threads on 0-3 (no hyperthread siblings) | 20548 | -1.1% (2/3 wins) |
+| main thread alone on 0, the rest on 1-3,5-7 | 20586 | -0.7% (3/3 wins) |
+
+A worker spinning on the main thread's sibling costs little here. It is a
+per-host setting anyway (bringest could set it) — recorded, not pursued.
+
+**Where this leaves round 3:** PGO+LTO is the one large win (-10% on the late
+game, -11% medium, -15% over a big game's first 35 min, byte-identical).
+Everything targeted since — interpreter dispatch, targeting reorder,
+prefetching, huge pages, retraining, pinning — measured at noise or worse.
