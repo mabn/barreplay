@@ -126,3 +126,15 @@ a widget WITHOUT going through the widget handler.
 - In progress: gate replay `4936896a…` (older BAR, real handler: stock records
   through the CALLINS, the patched build through the LOG) — the .brp files
   should be byte-identical.
+- 2026-10-15: GATE PASSED on `4936896a…` (BAR test-31030, real handler): the
+  stock engine (recording through the CALLINS) and the patched build
+  (recording through the LOG) capture byte-identical .brp files
+  (md5 `0558d3540c8e3f97d669505d1382ec20`; 13915 hits, 151 blasts — this game
+  launches no tracked projectile). Sim 1m38s stock vs 1m26s patched.
+- 2026-10-15: pinned the series digest as revision 2 (`2026.7.4-barreplay.2`).
+- 2026-10-15: found that `EnsurePatchedEngine` never replaces an installed
+  build, so existing hosts would have stayed on revision 1 forever. Added
+  `PatchedBuild.Superseded` (SHA-256s of earlier published revisions): a host
+  holding one of those is upgraded, an unknown hash (built locally) is still
+  kept. Test `TestEnsurePatchedEngineUpgradesASupersededBuild`.
+- In progress: `publish-engine` for revision 2 (gate + strip + upload).
