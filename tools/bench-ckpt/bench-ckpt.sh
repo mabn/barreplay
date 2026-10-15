@@ -100,7 +100,7 @@ dump() {
 # copies the checkpoint's open files back into the DATA DIR — the infolog and
 # the widget stream — which would clobber another run's. (Also a timing rule.)
 alone() {
-	if pgrep -f "/engine/[^ ]*/spring-headless" > /dev/null; then
+	if pgrep -f "^[^ ]*/engine/[^ ]*/spring-headless" > /dev/null; then
 		die "another engine is running (pgrep -af spring-headless); trials and dumps need the host to themselves"
 	fi
 }

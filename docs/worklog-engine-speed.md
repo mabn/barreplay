@@ -30,6 +30,7 @@ to the stock/rev-2 capture.
 | `-worker-threads 7` | yes | ±0 | — | dropped |
 | H60 FindAnim + COB DIV shift, H61 COB threaded dispatch, H62 Lua threaded dispatch | yes | instr -1.1%, wall ±0 | wall +0.8%, instr -0.2% (noise) | no late-game value |
 | PGO (on H60-H62) | yes (medium, isthmus) | wall -3.8% (3/3), instr -3.3%; isthmus -4% | wall -1.9% / -3.7% (two sessions), instr -1.7..-3.3% | small |
+| H63 GenerateWeaponTargets: TestTarget after LOS/range | yes (medium) | — | 23.34 s -> 23.37 s, ±0 | no value; kept (exact, harmless) |
 | **PGO + LTO** (on H60-H62) | yes (medium) | full run 1m25s -> **1m16s (-11%)** | wall **-10.2%** (3/3), instr **-15.3%** | **keep** |
 
 ## Log
@@ -316,3 +317,23 @@ call resolved to null and was skipped. Fixed at link time only: the
 instrumented build links with `-Wl,-u,__gcov_dump` (now `T __gcov_dump`), the
 code keeps its weak reference (a no-op in normal builds). Rerunning the
 training after the H63 checkpoint.
+
+### 2026-10-15 12:15 — H63 measured: nothing
+
+verylarge1 from 63780, 450 frames, 3 interleaved pairs (`bench-ckpt.sh ab`):
+
+| pair | speed3 (`park`) wall ms | speed3 + H63 wall ms |
+|---|---|---|
+| 1 | 23587 | 23561 |
+| 2 | 23206 | 23149 |
+| 3 | 23217 | 23394 |
+| mean | 23337 | 23368 (+0.1%) |
+
+Byte-identical on medium (`0558d354…`). TestTarget was not the cost of
+auto-targeting: the loop's time is walking thousands of candidate CUnits (a
+cache miss each on `tempNum`/`losStatus`), which no reordering inside the loop
+avoids. Late-game PGO training rerunning now (fixed gcov dump).
+
+`bench-ckpt` `alone` fix: it matched its own caller's command line (a `strip`
+of an engine binary in the same shell command); now anchored to processes
+whose argv[0] is an engine binary.
