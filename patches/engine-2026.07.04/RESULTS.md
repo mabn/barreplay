@@ -1,5 +1,15 @@
 # Engine speed patches (engine 2026.07.04) — measured results
 
+**Round 3 (2026-10-15, revision 3 = `2026.7.4-barreplay.3`) is recorded in
+`docs/worklog-engine-speed.md`.** It moved benchmarking to the LATE GAME —
+CRIU checkpoints of a ~10k-unit state (`tools/bench-ckpt/bench-ckpt.sh`,
+"verylarge1" = 6a37d06a… at frame 63780) — where the numbers below (from
+whole runs of small games) said little. Its one large win is building with
+PGO + LTO (`pgo/`): -10.2% SimFrame wall per late-game frame (-15.3%
+main-thread instructions), -11% on medium, byte-identical on verylarge1's
+whole 90,900 frames. Patches 0005-0009 measured at noise there and are kept
+only because they are exact and the profile was trained on them.
+
 (Memory is a separate axis with its own record: `MEMORY.md`, and the
 `0003-static-mempool-lazy-zeroing.patch` that goes with it.)
 

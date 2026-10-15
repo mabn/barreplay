@@ -23,6 +23,7 @@ var patchSeries = map[string][]string{
 	"2026.07.04": {
 		"dc6c23e9b5915079323c8d3f51f8c430f8e20d928d1a59dd41f103fe3ccead9b",
 		"a81f8afeb38c3059e8c9351327d57f43e2eef09630aeed187519c93e79633bf3",
+		"8b5780d6c6eddca16aebc59143854857f7ea133f34a9ce1c932089914f332ea4",
 	},
 }
 

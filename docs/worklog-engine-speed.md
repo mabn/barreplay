@@ -35,7 +35,7 @@ to the stock/rev-2 capture.
 | THP `always` (host setting) | — | — | 20.9 s -> 26.9-31.1 s (much WORSE) | dropped |
 | PGO retrained on verylarge1's late game (`pgolto2`) | yes (medium) | — | 20.91 s -> 20.88 s, ±0 vs first PGO+LTO | no extra gain |
 | CPU pinning: one hyperthread per core / main thread alone on a core | — | — | -1.1% (2/3) / -0.7% (3/3) | host setting, small; noted only |
-| **PGO + LTO** (on H60-H62) | yes (medium) | full run 1m25s -> **1m16s (-11%)** | wall **-10.2%** (3/3), instr **-15.3%** | **keep** |
+| **PGO + LTO** (on H60-H63) = **revision 3, published** | yes (medium, isthmus, verylarge1 full 90,900 frames) | full run 1m25s -> **1m16s (-11%)** | wall **-10.2%** (3/3), instr **-15.3%** | **keep** |
 
 ## Log
 
@@ -526,3 +526,32 @@ the way, both now in the script and its header:
 
 The verylarge1 full-run identity gate is still running (base build at frame
 68400 after 22 min; slowed by the build).
+
+### 2026-10-15 15:05 — gate passed on the whole big game; revision 3 published
+
+verylarge1 re-simulated end to end (90,900 frames) on the base build and on
+`pgolto2`:
+
+| build | sim | fps | .brp md5 |
+|---|---|---|---|
+| base (rev 2 + park) | 37m54s | 40 | `a26e920d594a346884b93c3389053a1f` |
+| PGO + LTO (`pgolto2`) | 27m12s | 56 | `a26e920d594a346884b93c3389053a1f` |
+
+**Byte-identical over the whole game.** The wall times are NOT a fair
+comparison: the revision-3 builds ran during part of the base run. A clean
+rerun of base is queued for the headline number.
+
+Pinned and published:
+
+| item | value |
+|---|---|
+| series digest (revision 3) | `8b5780d6c6eddca16aebc59143854857f7ea133f34a9ce1c932089914f332ea4` |
+| build | `pgo/build.sh` from a fresh clone of the series (`2026.07.04-22-gc9fac20`) |
+| publish-engine gate (medium, stock vs stripped rev 3) | identical (capture sha256 `1facff5b…`) |
+| published | `engines/2026.07.04/spring-headless-patched-2026.7.4-barreplay.3.gz`, 36 MB (13 MB gz) |
+| sha256 (pinned in `patchedBuilds`, rev 1 and 2 superseded) | `2ea1aecf0528606631625c636fe3eb31905cab145371800ca1a42d8cdb4e9d74` — the public download hashes to it |
+
+Docs: `docs/building-recoil.md` ("PGO + LTO"), RESULTS.md (round-3 pointer),
+CLAUDE.md ("Benchmarking the late game"). Hosts pick it up once this branch is
+merged (the pin is what they trust); after the merge:
+`git tag -a patched-engine/2026.7.4-barreplay.3 … origin/main`.
