@@ -104,3 +104,25 @@ a widget WITHOUT going through the widget handler.
   which the memory guard stopped. Moved the Recoil tree, build dir and ccache
   to `~/dev/barreplay-engine-build/` (real disk; outside the repo) and resumed
   there with -j6; kept BAR's `barwidgets.lua` (master 24d6817) beside it.
+- 2026-10-15: built (official image, 2026.07.04 + series + 0004), stripped,
+  installed beside the stock binary as `.bardata/engine/2026.07.04/spring-headless-evlog`
+  (the published `spring-headless-patched` left alone). First real re-sim:
+  `c04fd06a6d78e87c418d09f698e84071` (BAR test-31620 = sandboxed handler, 16:14):
+
+  | | stock engine | patched + 0004 |
+  |---|---|---|
+  | hits recorded | 27354 | 27354 |
+  | hits naming an attacker | 0 | 25518 (+59 via the projectile's shooter) |
+  | hits naming a weapon | 0 | 27198 (156 engine causes) |
+  | blasts (W) | 0 | 153 |
+  | Juno tracks | 2, both "vanished" | 2, both "exploded", with ids |
+  | deaths naming a killer (credited) | — | 59% |
+  | sim | 1m52s, 262 fps | 1m32s, 318 fps (whole patched stack) |
+  | peak RSS | 4.6 GB | 3.5 GB |
+
+  Note the stock row's 0 blasts: on this BAR build even the
+  VisibleExplosionBatch fallback delivered nothing to the headless re-sim.
+  New tool `experiments/brp-fx` summarizes R/W sections for such comparisons.
+- In progress: gate replay `4936896a…` (older BAR, real handler: stock records
+  through the CALLINS, the patched build through the LOG) — the .brp files
+  should be byte-identical.
