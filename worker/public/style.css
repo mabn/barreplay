@@ -1149,13 +1149,10 @@ body.admin-mode #filters .admin { display: inline-block; }
 
 /* Drag&drop publishing (the landing view's dropzone). */
 #dropzone {
-  display: none;
   max-width: 1650px; margin: 0 auto 14px; padding: 14px 18px;
   border: 1px dashed var(--line-hi); border-radius: 6px;
   font-size: 12px; color: var(--dim); text-align: center;
 }
-#dropzone.drag, #dropzone.busy { display: block; }
-#dropzone.busy:not(.drag) #droplabel { display: none; }
 #dropzone code { color: var(--muted); }
 #dropzone.drag { border-color: var(--accent); background: var(--accent-soft); color: var(--text-2); }
 #dropzone .browse { color: var(--accent); cursor: pointer; text-decoration: underline; }

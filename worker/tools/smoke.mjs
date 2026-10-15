@@ -118,9 +118,10 @@ try {
   check("GET /api/health is the Worker, not the SPA", health.status === 200 && health.body.includes('"ok"'),
     `${health.status} ${health.body.slice(0, 60)}`);
 
-  // The SPA entry and its fingerprinted subresources.
+  // The SPA entry, its fingerprinted subresources, and the banner link.
   const home = await get(base, "/");
   check("GET / serves the viewer", home.status === 200, String(home.status));
+  check("the dropzone banner links to /setup", home.body.includes('href="/setup"'));
   check("index.html has no unsubstituted placeholders",
     !home.body.includes("__ASSET_REV__") && !home.body.includes("__DATA_ORIGIN__") && !home.body.includes("__SUMMARY_MODULE__"));
   // The summary library's module, imported by app.js on the first Summary
