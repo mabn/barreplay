@@ -3070,21 +3070,27 @@ The same release also took handler access away from user widgets
 (`widget.widgetHandler` is a restricted proxy), so on those builds the re-sim cannot
 disable BAR's widget suite (slower runs) and its hits name no attacker (both log an
 "unavailable" line). The Explosion hook cannot install either (the proxy has UpdateCallIn,
-but the real handler refuses a name it has no list for), so the widget falls back to
-`VisibleExplosionBatch`, which BAR's own gfx_explosion_lights gadget hands LuaUI once per
-frame: x, y, z, weaponDefID, ownerID of every OWNED explosion of a projectile weapon
-(Cannon/Laser/Beam/Missile/Starburst/Bomb/Torpedo/Flame; unfiltered in full view). No
-projectile id, so tracks are matched by owner + weapon + the projectile being gone; a
-beam's record carries id -1; ownerless explosions and Lightning/DGun hits are missing.
+but the real handler refuses a name it has no list for), and NO other source of
+explosions reaches a headless engine: BAR's `VisibleExplosionBatch` comes from the unsynced
+half of its gfx_explosion_lights gadget, and luarules/gadgets.lua skips every unsynced
+`gfx_`/`gui_`/`snd_` gadget when `Platform.isHeadless` (widget 1.11.1 relied on it and
+re-sims of those builds recorded every track as vanished and no blast at all). So since
+1.11.2 the ends are INFERRED when the hook is missing: open tracks are swept EVERY frame
+(15 otherwise) and a projectile gone closes as exploded one frame past where it was last
+seen (position + velocity), a beam firing gets one hit at its weapon target, and a unit's
+death (or, for kill codes -10/-18, self-destruct) weapon becomes its blast in
+UnitDestroyed unless the kill code says reclaimed/unknown or the unit was unfinished
+(CUnit::KillUnit's rule). Tracks and beams so closed carry R flag bit 3
+(`snapshot.TrackEndInferred`); a projectile deleted without exploding then reads as an
+explosion, and cluster sub-munitions, ownerless and Lightning/DGun hits are missing.
 Whether the widget holds the REAL handler is asked by `realHandler()` (does its
 knownWidgets record this widget?), never by a member existing: BAR's hardened proxy
 (branch fix/widget-env-hardening, the migration guide at
 gist.github.com/efrec/e8f302dce2b9d137020ceaccd0750b48) answers every real-handler member
 with an empty table or a do-nothing function, and checking `wh.UnitDamaged` there "hooked"
 a no-op and dropped every hit. The harness's `sandboxed` mode (harness_sandboxed fixture,
-a proxy that fakes members the same way) runs exactly this: its tracks
-and blasts decode identical to the resim fixture's except the beam id and the hits'
-attackers.
+a proxy that fakes members the same way, and no explosion is ever delivered) runs exactly
+this: its track ends match the resim fixture's within a frame's travel, flagged inferred.
 
 Because that `cmd.Dir` is the data dir, **`engine.Locate` absolutizes `Config.DataDir` and
 every binary path it resolves** (`filepath.Abs`) — otherwise a relative `-data .bardata`
