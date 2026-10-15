@@ -555,3 +555,15 @@ Docs: `docs/building-recoil.md` ("PGO + LTO"), RESULTS.md (round-3 pointer),
 CLAUDE.md ("Benchmarking the late game"). Hosts pick it up once this branch is
 merged (the pin is what they trust); after the merge:
 `git tag -a patched-engine/2026.7.4-barreplay.3 … origin/main`.
+
+### 2026-10-15 15:45 — the whole big game, measured cleanly: -12.4%
+
+verylarge1, all 90,900 frames, each run alone on the host:
+
+| build | sim | fps | .brp md5 |
+|---|---|---|---|
+| base (rev 2 + park), clean rerun | 31m03s | 49 | `a26e920d594a346884b93c3389053a1f` |
+| PGO + LTO (`pgolto2`, = revision 3's code) | 27m12s | 56 | `a26e920d594a346884b93c3389053a1f` |
+| | **-12.4%** | | identical |
+
+(The earlier 37m54s base run had builds beside it; this replaces it.)
