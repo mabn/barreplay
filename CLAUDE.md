@@ -260,12 +260,15 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           not the bucket: a download that does not hash to it is refused
                           and never reaches the path Locate prefers (temp file + rename),
                           and a pin is added only for a binary that passed the gate, so
-                          the table is also the record of what was verified. A build
-                          already on the host is replaced only when it hashes to an
-                          EARLIER published build (PatchedBuild.Superseded); any other
-                          (e.g. made locally) is kept, and the daemon prints a line naming
-                          the published build it is standing in for. Delete the binary to
-                          download the published one.
+                          the table is also the record of what was verified. Any other
+                          patched binary already on the host — an EARLIER published build
+                          (PatchedBuild.Superseded, which only lets the log say which) or
+                          one made locally — is REPLACED with the pinned build, so every
+                          host runs the latest gated one (Marcin's call: update by default).
+                          -keep-patched-engine (engine.Config.KeepPatchedEngine) keeps it
+                          instead, e.g. while testing a fresh local build before its pin
+                          lands — without it the daemon would swap that build back for
+                          the older pinned one.
                           Missing is a WARNING, not a failure — only versions somebody
                           has patched, gated and published have a build, so a daemon
                           routinely meets versions nobody has patched and must still run
