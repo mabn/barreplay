@@ -77,8 +77,8 @@
 -- Echo, and the stream's GAME line, so every capture records which encoder
 -- produced it (the copy on a player's machine can be arbitrarily old — the
 -- server/decoder needs to know, and the catalog stores it per replay).
-local widgetVersion = "1.11.0"
-local widgetDate = "2026-10-12"
+local widgetVersion = "1.11.1"
+local widgetDate = "2026-10-14"
 
 -- Git SHA of this exact file, stamped when the widget is published for
 -- download: worker/tools/sync-assets.mjs replaces the token below with the SHA
@@ -127,6 +127,12 @@ local recordProjectiles = resim and ("__PROJECTILES__" == "1")
 -- (IsSafePath), so it is RELATIVE to the engine's write-dir, which the Go tool
 -- sets as the engine's working directory and reads the stream back from.
 local outputPath = resim and "__OUTPUT_PATH__" or nil
+-- Where the uploader writes <gameId>.brepstream, relative to the data dir.
+-- Since BAR's 2026.10.13 release (game builds test-31614 on) the widget
+-- handler sandboxes user widgets: io.open may WRITE only under LuaUI/Config
+-- and LuaUI/Widgets, so the data dir's root (where this used to write) is
+-- refused. The re-sim's path (internal/engine StreamDir) obeys the same rule.
+local uploadDir = "LuaUI/Config/barreplay"
 
 -- Log prefix. The Go tool watches the engine's stdout for the first
 -- "[barreplay]" line to split load time from sim time, and the -progress
@@ -382,8 +388,12 @@ local function openOutputs(id)
 	local frame = (spGetGameFrame and spGetGameFrame()) or 0
 	local append = not resim and frame > sampleEvery
 	local head = "BRSNAP GID " .. id .. "\n" .. (preambleStr or "")
-	local path = outputPath or (id .. ".brepstream")
-	bout = io.open(path, append and "ab" or "wb")
+	local path = outputPath or (uploadDir .. "/" .. id .. ".brepstream")
+	if not outputPath and Spring.CreateDir then
+		pcall(Spring.CreateDir, uploadDir)
+	end
+	local openErr
+	bout, openErr = io.open(path, append and "ab" or "wb")
 	if bout then
 		bout:write("BREPSTREAM 1\n", head)
 		for i = 1, #pendingBin do
@@ -392,7 +402,7 @@ local function openOutputs(id)
 		Echo(string.format("%s recording to %s%s (sampling every %d frames, keyframe every %d samples)",
 			logTag, path, append and " (appending)" or "", sampleEvery, keyframeEvery))
 	else
-		Echo(logTag .. " ERROR: could not open " .. path)
+		Echo(logTag .. " ERROR: could not open " .. path .. (openErr and (": " .. tostring(openErr)) or ""))
 	end
 	pendingBin = nil
 	flushOut()
@@ -1502,6 +1512,19 @@ end
 -- n u32, then columns df u16, weapon u16, x/y/z s16, unit u16, team u8,
 -- kind u8 (1 a unit's own explosion, 2 a projectile no track was open for).
 
+-- realHandler returns BAR's real widget handler, or nil when the widget was
+-- given the sandbox's proxy (BAR 2026.10.13 on). The proxy cannot be told
+-- apart by which members exist: a hardened one answers any real-handler
+-- member with a do-nothing function or an empty table. So it is asked
+-- something only the real one knows, its record of this very widget.
+local function realHandler()
+	local wh = widget.widgetHandler
+	local ok, known = pcall(function()
+		return type(wh.knownWidgets) == "table" and wh.knownWidgets[widget:GetInfo().name] ~= nil
+	end)
+	return (ok and known) and wh or nil
+end
+
 -- The section lives in one closure so its state does not count against the
 -- main chunk's 200-local limit (Lua 5.1); it hands back its entry points.
 local projectiles = (function()
@@ -2274,9 +2297,12 @@ local projectiles = (function()
 	local unhookExplosion = nil
 
 	local function hookExplosion()
-		local wh = widget.widgetHandler
+		-- Only through the REAL handler: the sandbox's proxy has UpdateCallIn,
+		-- but the handler behind it refuses a callin it has no list for.
+		local wh = realHandler()
 		if not (wh and type(wh.UpdateCallIn) == "function" and Script and Script.SetWatchExplosion) then
-			Echo(logTag .. " explosion callin unavailable; no projectile ends or blasts will be recorded")
+			Echo(logTag .. " explosion callin unavailable; projectile ends and blasts come from"
+				.. " BAR's VisibleExplosionBatch (no projectile ids, no ownerless explosions)")
 			return
 		end
 		wh.ExplosionList = wh.ExplosionList or {}
@@ -2300,6 +2326,69 @@ local projectiles = (function()
 		end
 		Echo(string.format("%s watching %d weapons for explosions (%d tracked, launchers on %d unit types)",
 			logTag, n, nTracked, nLauncherDefs))
+	end
+
+	-- matchTrack finds the open track an explosion with no projectile id ends:
+	-- the owner's track of that weapon whose projectile is gone (it exploded
+	-- this frame), else the one last seen nearest the explosion.
+	local function matchTrack(wdID, ownerID, px, pz)
+		local best, bestGone, bestD = nil, false, math.huge
+		for pid, t in pairs(tracks) do
+			if t.owner == ownerID and t.wd == wdID then
+				local gone = spGetProjectilePosition(pid) == nil
+				local dx, dz = (t.lx or t.x0) - px, (t.lz or t.z0) - pz
+				local d = dx * dx + dz * dz
+				if (gone and not bestGone) or (gone == bestGone and d < bestD) then
+					best, bestGone, bestD = pid, gone, d
+				end
+			end
+		end
+		return best
+	end
+
+	-- reopenClosed turns a track the sweep closed THIS frame as vanished
+	-- (kind 2) into the explosion it really was, when the batch arrives after
+	-- the sweep: the row is still in the buffer, so only its kind and end move.
+	local function reopenClosed(wdID, ownerID, frame, px, py, pz)
+		local w, o = id16(wdID), id16(ownerID)
+		for _, r in pairs(closedRow) do
+			local b = r.buf
+			if r.f == frame and b == trackBuf and b.k[r.n] == 2 and b.w[r.n] == w and b.o[r.n] == o then
+				b.k[r.n] = 1
+				b.x1[r.n], b.y1[r.n], b.z1[r.n] = s16(px), s16(py), s16(pz)
+				return true
+			end
+		end
+		return false
+	end
+
+	-- onVisibleBatch is the fallback for game builds where a user widget cannot
+	-- install the Explosion callin (BAR's 2026.10.13 sandbox took the real
+	-- widget handler away). BAR's own gfx_explosion_lights gadget forwards one
+	-- batch per sim frame of x, y, z, weaponDefID, ownerID for every explosion
+	-- of a projectile weapon that has an owner (unfiltered in full view): no
+	-- projectile id, so a track is matched by owner, weapon and position. It
+	-- does not carry ownerless explosions, LightningCannon or DGun.
+	local function onVisibleBatch(events, count)
+		if explosionHooked or type(events) ~= "table" then
+			return
+		end
+		local frame = factFrame()
+		for i = 1, (count or #events), 5 do
+			local px, py, pz, wdID, ownerID = events[i], events[i + 1], events[i + 2], events[i + 3], events[i + 4]
+			if watchRole[wdID] ~= nil then
+				local pid = nil
+				if trackClassOf[wdID] and trackClassOf[wdID] ~= CLS_BEAM and ownerID ~= nil then
+					pid = matchTrack(wdID, ownerID, px, pz)
+					if pid == nil and reopenClosed(wdID, ownerID, frame, px, py, pz) then
+						wdID = nil
+					end
+				end
+				if wdID ~= nil then
+					onExplosion(wdID, px, py, pz, ownerID, pid)
+				end
+			end
+		end
 	end
 
 	-- unitGone drops a dead unit's launcher and remembers its team for the
@@ -2341,6 +2430,7 @@ local projectiles = (function()
 	return {
 		buildWatch = buildWatch,
 		hookExplosion = hookExplosion,
+		visibleBatch = onVisibleBatch,
 		unhook = function()
 			if unhookExplosion then
 				unhookExplosion()
@@ -2445,7 +2535,7 @@ local lastDrawFrames = 0
 -- activeWidgetCount reports how many widgets are currently active ("-" if the
 -- handler is unavailable): confirms the default suite stayed disabled.
 local function activeWidgetCount()
-	local wh = widget.widgetHandler
+	local wh = realHandler()
 	local ok, n = pcall(function() return #wh.widgets end)
 	if ok and n then
 		return tostring(n)
@@ -2462,8 +2552,8 @@ end
 local widgetsDisabled = false
 local function disableOtherWidgets()
 	widgetsDisabled = true
-	local wh = widget.widgetHandler
-	if not (wh and wh.knownWidgets and wh.DisableWidget) then
+	local wh = realHandler()
+	if not (wh and wh.DisableWidget) then
 		Echo(logTag .. " widget handler API unavailable; leaving default widgets enabled")
 		return
 	end
@@ -2495,7 +2585,7 @@ local damageHooked = false
 local unhookDamage = nil
 
 local function hookDamage()
-	local wh = widget.widgetHandler
+	local wh = realHandler()
 	if not (wh and type(wh.UnitDamaged) == "function" and type(wh.UpdateCallIn) == "function") then
 		Echo(logTag .. " widget handler API unavailable; damage will name no attacker")
 		return
@@ -2511,6 +2601,14 @@ local function hookDamage()
 		wh.UnitDamaged = orig
 		damageHooked = false
 		pcall(wh.UpdateCallIn, wh, "UnitDamaged")
+	end
+end
+
+if recordProjectiles then
+	-- The fallback for explosions when the Explosion hook could not be
+	-- installed (see projectiles.visibleBatch); a no-op when it was.
+	function widget:VisibleExplosionBatch(events, count)
+		pcall(projectiles.visibleBatch, events, count)
 	end
 end
 

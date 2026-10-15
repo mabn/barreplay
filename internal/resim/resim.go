@@ -173,8 +173,8 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 
 	// The widget can only write a RELATIVE path inside the engine write-dir
 	// (Spring's LuaIO sandbox rejects absolute paths); read it back from there.
-	relStream := "barreplay/" + h.GameID + ".brepstream"
-	streamPath := filepath.Join(o.DataDir, "barreplay", h.GameID+".brepstream")
+	relStream := engine.StreamRelPath(h.GameID)
+	streamPath := filepath.Join(o.DataDir, filepath.FromSlash(relStream))
 	if err := os.MkdirAll(filepath.Dir(streamPath), 0o755); err != nil {
 		return "", nil, err
 	}

@@ -3009,9 +3009,35 @@ still go through `Spring.Echo` (for `infolog.txt` / `-progress`).
 **Path sandbox (non-obvious):** Spring's `LuaIO::fopen` runs `IsSafePath`, which rejects
 **absolute paths** and any `..`, so the widget can only write a *relative* path resolved
 against the engine's working directory. `engine.Run` sets `cmd.Dir` to the write-dir and
-passes the widget a relative `barreplay/<gameId>.brepstream` (`Config.SnapshotStreamPath`);
-the tool reads it from `<data>/barreplay/<gameId>.brepstream` after the run and moves it to
+passes the widget a relative `LuaUI/Config/barreplay/<gameId>.brepstream`
+(`engine.StreamRelPath` -> `Config.SnapshotStreamPath`); the tool reads it from
+`<data>/LuaUI/Config/barreplay/<gameId>.brepstream` after the run and moves it to
 `<out>/<gameId>.brepstream`. An absolute path makes `io.open` return nil → no file at all.
+**BAR's own sandbox (game builds from the 2026.10.13 release, test-31614 on)** adds a
+second rule on top: the widget handler gives user widgets an `io.open` that WRITES only
+under `LuaUI/Config` and `LuaUI/Widgets` (luaui/barwidgets.lua `checkUserWritePath`), which
+is why the stream lives there — the old `barreplay/` path was refused, every re-sim of a
+game on those builds ended with "open widget output ...: no such file", and the uploader
+(`LuaUI/Config/barreplay/` too since widget 1.11.1) could not record live games either.
+The same release also took handler access away from user widgets
+(`widget.widgetHandler` is a restricted proxy), so on those builds the re-sim cannot
+disable BAR's widget suite (slower runs) and its hits name no attacker (both log an
+"unavailable" line). The Explosion hook cannot install either (the proxy has UpdateCallIn,
+but the real handler refuses a name it has no list for), so the widget falls back to
+`VisibleExplosionBatch`, which BAR's own gfx_explosion_lights gadget hands LuaUI once per
+frame: x, y, z, weaponDefID, ownerID of every OWNED explosion of a projectile weapon
+(Cannon/Laser/Beam/Missile/Starburst/Bomb/Torpedo/Flame; unfiltered in full view). No
+projectile id, so tracks are matched by owner + weapon + the projectile being gone; a
+beam's record carries id -1; ownerless explosions and Lightning/DGun hits are missing.
+Whether the widget holds the REAL handler is asked by `realHandler()` (does its
+knownWidgets record this widget?), never by a member existing: BAR's hardened proxy
+(branch fix/widget-env-hardening, the migration guide at
+gist.github.com/efrec/e8f302dce2b9d137020ceaccd0750b48) answers every real-handler member
+with an empty table or a do-nothing function, and checking `wh.UnitDamaged` there "hooked"
+a no-op and dropped every hit. The harness's `sandboxed` mode (harness_sandboxed fixture,
+a proxy that fakes members the same way) runs exactly this: its tracks
+and blasts decode identical to the resim fixture's except the beam id and the hits'
+attackers.
 
 Because that `cmd.Dir` is the data dir, **`engine.Locate` absolutizes `Config.DataDir` and
 every binary path it resolves** (`filepath.Abs`) — otherwise a relative `-data .bardata`
