@@ -3091,6 +3091,28 @@ with an empty table or a do-nothing function, and checking `wh.UnitDamaged` ther
 a no-op and dropped every hit. The harness's `sandboxed` mode (harness_sandboxed fixture,
 a proxy that fakes members the same way, and no explosion is ever delivered) runs exactly
 this: its track ends match the resim fixture's within a frame's travel, flagged inferred.
+**The patched engine gets all of it back (widget >= 1.12.0, patch
+`patches/engine-2026.07.04/0004-engine-event-log.patch`).** BAR's sandbox builds a user
+widget's `Spring` as a full copy of the engine's, so a function the ENGINE adds reaches
+the widget whatever the handler does; what the handler controls is callins. So the
+engine records explosions and hits itself and the widget PULLS them:
+`Spring.SetEngineEventLog(explosions, damage)` switches two unsynced event clients on
+(`rts/Lua/LuaEngineEventLog.cpp`), `Spring.GetLoggedExplosions([t])` /
+`GetLoggedDamage([t])` drain them as flat arrays (stride 11 / 16: every Explosion and
+UnitDamaged argument plus what the widget used to read off the live unit — owner's team,
+health after the hit, position, the projectile's shooter). The explosion client is
+ordered -100, ahead of every Lua handle, because `CEventHandler::Explosion` stops at the
+first client that claims one; the damage client 1999, just before LuaUI, so its health
+reading is the one LuaUI's callin made. Both return nothing to a caller without full
+read (a playing client cannot see enemy fire through them) and are off — unregistered —
+until switched on. The widget prefers the log whenever the functions exist: explosions
+drained at the top of GameFramePost (where the callin landed them, before the
+vanished-track sweep) and filtered to the watched weapons; hits drained before each
+window flush, at the top of UnitDestroyed (a U row counts the hits before it) and at game
+end; no UnitDamaged callin defined, so no Lua call per hit. The harness's `enginelog`
+mode (sandboxed proxy + stubbed log) decodes IDENTICAL to the resim fixture
+(`TestEngineLogMatchesResim`). With the log the explosions are REAL (ids, owners, ownerless ones, exact
+ends) and the inference above stays off; the inference is what a stock engine gets.
 
 Because that `cmd.Dir` is the data dir, **`engine.Locate` absolutizes `Config.DataDir` and
 every binary path it resolves** (`filepath.Abs`) — otherwise a relative `-data .bardata`

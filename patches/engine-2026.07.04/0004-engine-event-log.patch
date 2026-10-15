@@ -1,0 +1,445 @@
+From 72aeecb663fd23ea5d08f24ea2b8988bcd4fb0dd Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Thu, 15 Oct 2026 05:51:25 +0000
+Subject: [PATCH] Lua: engine-side explosion and damage log a sandboxed widget
+ can pull
+
+A game's widget handler decides which callins reach a widget and with
+which arguments. BAR's 2026.10.13 release gives user widgets a sandboxed
+proxy of its handler, through which a widget can no longer install the
+Explosion callin (projectile ids, ownerless explosions, LightningCannon
+and DGun hits) nor read UnitDamaged's weapon, projectile and attacker.
+It still hands user widgets a full copy of the Spring table.
+
+So the engine records both itself, for any unsynced Lua handle that asks:
+
+  Spring.SetEngineEventLog(explosions, damage)
+  Spring.GetLoggedExplosions([fill]) -> values, count, dropped
+  Spring.GetLoggedDamage([fill])     -> values, count, dropped
+
+Two unsynced event clients copy numbers out of the events into vectors:
+explosions at order -100, ahead of every Lua handle (Explosion dispatch
+stops at the first client that claims one), damage at 1999, just before
+LuaUI, so the post-hit health matches what a widget's own callin read.
+Explosion returns false, nothing synced is read beyond what the event
+hands over, and nothing is written, so the simulation and its graphics
+are unchanged. Off by default (not registered); the getters return
+nothing unless the caller has full read, so a playing client cannot see
+enemy fire through them. LuaUI's destruction switches both off.
+---
+ rts/Lua/CMakeLists.txt        |   1 +
+ rts/Lua/LuaEngineEventLog.cpp | 271 ++++++++++++++++++++++++++++++++++
+ rts/Lua/LuaEngineEventLog.h   |  66 +++++++++
+ rts/Lua/LuaUI.cpp             |   3 +
+ rts/Lua/LuaUnsyncedRead.cpp   |   4 +
+ 5 files changed, 345 insertions(+)
+ create mode 100644 rts/Lua/LuaEngineEventLog.cpp
+ create mode 100644 rts/Lua/LuaEngineEventLog.h
+
+diff --git a/rts/Lua/CMakeLists.txt b/rts/Lua/CMakeLists.txt
+index b14d9f0..bc2eff1 100644
+--- a/rts/Lua/CMakeLists.txt
++++ b/rts/Lua/CMakeLists.txt
+@@ -13,6 +13,7 @@ set(sources_engine_Lua
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/LuaDebugExtra.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/LuaVFSDownload.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/LuaEncoding.cpp"
++		"${CMAKE_CURRENT_SOURCE_DIR}/LuaEngineEventLog.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/LuaFBOs.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/LuaFeatureDefs.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/LuaFonts.cpp"
+diff --git a/rts/Lua/LuaEngineEventLog.cpp b/rts/Lua/LuaEngineEventLog.cpp
+new file mode 100644
+index 0000000..8df07fb
+--- /dev/null
++++ b/rts/Lua/LuaEngineEventLog.cpp
+@@ -0,0 +1,271 @@
++/* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
++
++#include "LuaEngineEventLog.h"
++
++#include "LuaHandle.h"
++#include "LuaInclude.h"
++#include "LuaUtils.h"
++
++#include "Game/GameHelper.h"
++#include "Sim/Misc/GlobalSynced.h"
++#include "Sim/Projectiles/Projectile.h"
++#include "Sim/Projectiles/ProjectileHandler.h"
++#include "Sim/Units/Unit.h"
++#include "Sim/Units/UnitDef.h"
++#include "Sim/Weapons/WeaponDef.h"
++#include "System/EventClient.h"
++#include "System/EventHandler.h"
++
++#include <vector>
++
++namespace {
++
++// A recorder may sit undrained (a widget that switched it on and then
++// failed); past this many values it stops growing and counts what it drops.
++// 16M doubles = 128 MB, about 1.6M explosions or 1M hits.
++constexpr size_t MAX_LOGGED_VALUES = 16u << 20;
++
++// Below every Lua handle (LuaRules is 100): CEventHandler::Explosion stops at
++// the first full-read client returning true, so a recorder ordered after a
++// gadget that claims an explosion would never see it.
++constexpr int EXPLOSION_LOG_ORDER = -100;
++// Just before LuaUI (2000): the unit's health read here is the reading a
++// widget's own UnitDamaged callin made, after every gadget's UnitDamaged.
++constexpr int DAMAGE_LOG_ORDER = 1999;
++
++struct ValueLog {
++	std::vector<double> values;
++	size_t dropped = 0;
++
++	bool Room(size_t n) {
++		if (values.size() + n <= MAX_LOGGED_VALUES)
++			return true;
++		dropped++;
++		return false;
++	}
++	void Clear() {
++		values.clear();
++		values.shrink_to_fit();
++		dropped = 0;
++	}
++};
++
++// projectileOwnerTeam reads the shooter off the projectile: the engine names
++// the attacker from the projectile's owner, which is gone once the shooter
++// died, while the projectile still knows who fired it.
++void projectileOwnerTeam(int projectileID, double& ownerID, double& teamID)
++{
++	ownerID = -1.0;
++	teamID = -1.0;
++
++	if (projectileID < 0)
++		return;
++
++	const CProjectile* p = projectileHandler.GetProjectileBySyncedID(projectileID);
++	if (p == nullptr)
++		return;
++
++	if (p->GetOwnerID() != -1u)
++		ownerID = p->GetOwnerID();
++	if (p->GetTeamID() != -1u)
++		teamID = p->GetTeamID();
++}
++
++class ExplosionLogClient : public CEventClient {
++public:
++	ExplosionLogClient(): CEventClient("[barreplay ExplosionLog]", EXPLOSION_LOG_ORDER, false) {}
++
++	bool WantsEvent(const std::string& eventName) override { return (eventName == "Explosion"); }
++	int GetReadAllyTeam() const override { return AllAccessTeam; }
++
++	bool Explosion(int weaponDefID, const WeaponDef* weaponDef, const CExplosionParams& params) override {
++		if (!log.Room(LuaEngineEventLog::LOG_EXPLOSION_STRIDE))
++			return false;
++
++		// "none" is -1u in params.projectileID, as in the Explosion callin
++		const int projectileID = (params.projectileID == -1u)? -1: static_cast<int>(params.projectileID);
++		double projOwner, projTeam;
++		projectileOwnerTeam(projectileID, projOwner, projTeam);
++
++		auto& v = log.values;
++		v.push_back(gs->frameNum);
++		v.push_back(weaponDefID);
++		v.push_back(params.pos.x);
++		v.push_back(params.pos.y);
++		v.push_back(params.pos.z);
++		v.push_back(params.damageAreaOfEffect);
++		v.push_back((params.owner != nullptr)? params.owner->id: -1);
++		v.push_back((params.owner != nullptr)? params.owner->team: -1);
++		v.push_back(projectileID);
++		v.push_back(projOwner);
++		v.push_back(projTeam);
++
++		// never claim the explosion: true would suppress its graphics
++		return false;
++	}
++
++	ValueLog log;
++};
++
++class DamageLogClient : public CEventClient {
++public:
++	DamageLogClient(): CEventClient("[barreplay DamageLog]", DAMAGE_LOG_ORDER, false) {}
++
++	bool WantsEvent(const std::string& eventName) override { return (eventName == "UnitDamaged"); }
++	int GetReadAllyTeam() const override { return AllAccessTeam; }
++
++	void UnitDamaged(
++		const CUnit* unit,
++		const CUnit* attacker,
++		float damage,
++		int weaponDefID,
++		int projectileID,
++		bool paralyzer
++	) override {
++		if (!log.Room(LuaEngineEventLog::LOG_DAMAGE_STRIDE))
++			return;
++
++		double projOwner, projTeam;
++		projectileOwnerTeam(projectileID, projOwner, projTeam);
++
++		auto& v = log.values;
++		v.push_back(gs->frameNum);
++		v.push_back(unit->id);
++		v.push_back(unit->unitDef->id);
++		v.push_back(unit->team);
++		v.push_back(damage);
++		v.push_back(paralyzer? 1: 0);
++		v.push_back(weaponDefID);
++		v.push_back(projectileID);
++		v.push_back((attacker != nullptr)? attacker->id: -1);
++		v.push_back((attacker != nullptr)? attacker->unitDef->id: -1);
++		v.push_back((attacker != nullptr)? attacker->team: -1);
++		v.push_back(unit->health);
++		v.push_back(unit->pos.x);
++		v.push_back(unit->pos.z);
++		v.push_back(projOwner);
++		v.push_back(projTeam);
++	}
++
++	ValueLog log;
++};
++
++// Allocated once and never freed: a static CEventClient would unregister
++// itself from eventHandler during static destruction, in an order relative to
++// eventHandler's own destruction that nothing guarantees.
++ExplosionLogClient* explosionLog()
++{
++	static ExplosionLogClient* c = new ExplosionLogClient();
++	return c;
++}
++
++DamageLogClient* damageLog()
++{
++	static DamageLogClient* c = new DamageLogClient();
++	return c;
++}
++
++void setRegistered(CEventClient* ec, ValueLog& log, bool on)
++{
++	// both calls are idempotent (ListInsert skips a client already listed)
++	if (on) {
++		eventHandler.AddClient(ec);
++		return;
++	}
++
++	eventHandler.RemoveClient(ec);
++	log.Clear();
++}
++
++// drain moves a log's values into the table at stack index 1 (or a new one)
++// and leaves table, count, dropped on the stack.
++int drain(lua_State* L, ValueLog& log, int stride)
++{
++	if (!CLuaHandle::GetHandleFullRead(L))
++		return 0;
++
++	int prevLen = 0;
++	if (lua_istable(L, 1)) {
++		prevLen = lua_objlen(L, 1);
++		lua_pushvalue(L, 1);
++	} else {
++		lua_createtable(L, log.values.size(), 0);
++	}
++
++	const int n = static_cast<int>(log.values.size());
++	for (int i = 0; i < n; i++) {
++		lua_pushnumber(L, log.values[i]);
++		lua_rawseti(L, -2, i + 1);
++	}
++	for (int i = n + 1; i <= prevLen; i++) {
++		lua_pushnil(L);
++		lua_rawseti(L, -2, i);
++	}
++
++	lua_pushnumber(L, n / stride);
++	lua_pushnumber(L, log.dropped);
++
++	log.values.clear();
++	log.dropped = 0;
++	return 3;
++}
++
++} // namespace
++
++
++bool LuaEngineEventLog::PushEntries(lua_State* L)
++{
++	REGISTER_LUA_CFUNC(SetEngineEventLog);
++	REGISTER_LUA_CFUNC(GetLoggedExplosions);
++	REGISTER_LUA_CFUNC(GetLoggedDamage);
++	return true;
++}
++
++void LuaEngineEventLog::Reset()
++{
++	setRegistered(explosionLog(), explosionLog()->log, false);
++	setRegistered(damageLog(), damageLog()->log, false);
++}
++
++
++/***
++ * [barreplay] Switches the engine's explosion and damage recorders on or off.
++ *
++ * @function Spring.SetEngineEventLog
++ * @param explosions boolean
++ * @param damage boolean
++ */
++int LuaEngineEventLog::SetEngineEventLog(lua_State* L)
++{
++	setRegistered(explosionLog(), explosionLog()->log, luaL_optboolean(L, 1, false));
++	setRegistered(damageLog(), damageLog()->log, luaL_optboolean(L, 2, false));
++	return 0;
++}
++
++/***
++ * [barreplay] Drains the explosions recorded since the previous call.
++ *
++ * @function Spring.GetLoggedExplosions
++ * @param fill table? reused for the result
++ * @return number[]? values flat, 11 per explosion
++ * @return integer? count explosions
++ * @return integer? dropped explosions lost to the buffer cap
++ */
++int LuaEngineEventLog::GetLoggedExplosions(lua_State* L)
++{
++	return drain(L, explosionLog()->log, LOG_EXPLOSION_STRIDE);
++}
++
++/***
++ * [barreplay] Drains the unit damage recorded since the previous call.
++ *
++ * @function Spring.GetLoggedDamage
++ * @param fill table? reused for the result
++ * @return number[]? values flat, 16 per hit
++ * @return integer? count hits
++ * @return integer? dropped hits lost to the buffer cap
++ */
++int LuaEngineEventLog::GetLoggedDamage(lua_State* L)
++{
++	return drain(L, damageLog()->log, LOG_DAMAGE_STRIDE);
++}
+diff --git a/rts/Lua/LuaEngineEventLog.h b/rts/Lua/LuaEngineEventLog.h
+new file mode 100644
+index 0000000..16bee54
+--- /dev/null
++++ b/rts/Lua/LuaEngineEventLog.h
+@@ -0,0 +1,66 @@
++/* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
++
++#ifndef LUA_ENGINE_EVENT_LOG_H
++#define LUA_ENGINE_EVENT_LOG_H
++
++struct lua_State;
++
++// [barreplay] An engine-side record of explosions and unit damage that a Lua
++// handle PULLS, instead of being handed callins.
++//
++// Why: a game's widget handler decides which callins reach a widget and with
++// which arguments. BAR's (from its 2026.10.13 release) gives user widgets a
++// sandboxed proxy of the handler, through which a widget can no longer
++// install the Explosion callin or read UnitDamaged's weapon/projectile/
++// attacker arguments. The game still hands user widgets a full copy of the
++// Spring table, so functions registered here reach them unchanged.
++//
++// Lua (unsynced read):
++//   Spring.SetEngineEventLog(explosions: boolean, damage: boolean)
++//       switches each recorder on or off. Off by default: an unused recorder
++//       is not registered with the event handler and costs nothing.
++//   Spring.GetLoggedExplosions([fill: table]) -> table, count
++//       drains the explosions recorded since the previous call; a flat
++//       array, LOG_EXPLOSION_STRIDE values per explosion:
++//         frame, weaponDefID, x, y, z, damageAreaOfEffect,
++//         ownerID, ownerTeam, projectileID, projectileOwnerID,
++//         projectileTeamID
++//       (-1 for "none"; weaponDefID is negative for engine causes such as
++//       a piece explosion, exactly as the Explosion callin reports it; the
++//       owner's team is read at the explosion, since a unit's own death
++//       explosion comes after it has left the unit list)
++//   Spring.GetLoggedDamage([fill: table]) -> table, count
++//       drains the damage recorded since the previous call; a flat array,
++//       LOG_DAMAGE_STRIDE values per hit:
++//         frame, unitID, unitDefID, unitTeam, damage, paralyzer (0/1),
++//         weaponDefID, projectileID, attackerID, attackerDefID,
++//         attackerTeam, healthAfter, x, z,
++//         projectileOwnerID, projectileTeamID
++//   Both getters return nothing at all unless the CALLER has full read
++//   access (a spectator with full view, e.g. any replay viewed in full
++//   view): a playing client must not see enemy fire through them. Passing a
++//   table reuses it (entries past the new end are cleared), so a per-frame
++//   drain makes no garbage.
++//
++// The recorders only copy numbers out of the events into plain vectors and
++// Explosion returns false, so neither the simulation nor its graphics change.
++// Each buffer is capped (an undrained one stops growing; the drop count is
++// the third return of the getters).
++class LuaEngineEventLog {
++public:
++	static constexpr int LOG_EXPLOSION_STRIDE = 11;
++	static constexpr int LOG_DAMAGE_STRIDE = 16;
++
++	static bool PushEntries(lua_State* L);
++
++	// Unregisters both recorders and drops what they hold; called when the
++	// Lua handle that switched them on goes away.
++	static void Reset();
++
++private:
++	static int SetEngineEventLog(lua_State* L);
++	static int GetLoggedExplosions(lua_State* L);
++	static int GetLoggedDamage(lua_State* L);
++};
++
++#endif // LUA_ENGINE_EVENT_LOG_H
+diff --git a/rts/Lua/LuaUI.cpp b/rts/Lua/LuaUI.cpp
+index 002184f..6fedc33 100644
+--- a/rts/Lua/LuaUI.cpp
++++ b/rts/Lua/LuaUI.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "LuaUI.h"
++#include "LuaEngineEventLog.h"
+ 
+ #include "LuaConfig.h"
+ #include "LuaInclude.h"
+@@ -173,6 +174,8 @@ CLuaUI::CLuaUI()
+ 
+ CLuaUI::~CLuaUI()
+ {
++	// [barreplay] whoever switched the recorders on is going away with LuaUI
++	LuaEngineEventLog::Reset();
+ 	luaUI = nullptr;
+ }
+ 
+diff --git a/rts/Lua/LuaUnsyncedRead.cpp b/rts/Lua/LuaUnsyncedRead.cpp
+index 91919e1..b4590dc 100644
+--- a/rts/Lua/LuaUnsyncedRead.cpp
++++ b/rts/Lua/LuaUnsyncedRead.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "LuaUnsyncedRead.h"
++#include "LuaEngineEventLog.h"
+ 
+ #include "LuaConfig.h"
+ #include "LuaInclude.h"
+@@ -103,6 +104,9 @@
+ 
+ bool LuaUnsyncedRead::PushEntries(lua_State* L)
+ {
++	// [barreplay] explosion/damage recorders a sandboxed widget can pull from
++	LuaEngineEventLog::PushEntries(L);
++
+ 	REGISTER_LUA_CFUNC(IsReplay);
+ 	REGISTER_LUA_CFUNC(GetReplayLength);
+ 
+-- 
+2.53.0
+

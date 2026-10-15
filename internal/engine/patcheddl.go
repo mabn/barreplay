@@ -41,6 +41,10 @@ type PatchedBuild struct {
 	// SHA256 is the hex SHA-256 of the DECOMPRESSED binary — the bytes that
 	// were gated, independent of how they happened to be compressed.
 	SHA256 string
+	// Superseded lists the SHA-256 of every EARLIER published build of the
+	// version. A host holding one of those is upgraded; a binary matching
+	// none of them was built locally and is never replaced.
+	Superseded []string
 }
 
 // patchedBuilds lists the published patched engine for each engine version
@@ -48,7 +52,8 @@ type PatchedBuild struct {
 // build that passed the byte-identity gate (docs/building-recoil.md, "The
 // PATCHED build"); cmd/publish-engine prints the line to paste here.
 var patchedBuilds = map[string]PatchedBuild{
-	"2026.07.04": {Rev: 1, SHA256: "eeb7625d02e251282aca4fea3162a21208ff0fcb468c83cf2d3bedc8b5070a27"}, // 2026.7.4-barreplay.1
+	"2026.07.04": {Rev: 2, SHA256: "1e7b3c417aab1afe34878cad9a557368ee0c7132c72a52d84b71314437df9c01", // 2026.7.4-barreplay.2
+		Superseded: []string{"eeb7625d02e251282aca4fea3162a21208ff0fcb468c83cf2d3bedc8b5070a27"}}, // .1
 }
 
 // PatchedBuildBaseURL is where published patched engines are read back from:
@@ -81,7 +86,11 @@ func EnsurePatchedEngine(ctx context.Context, cfg Config, version string) error 
 	dir := filepath.Join(cfg.DataDir, "engine", version)
 	dst := filepath.Join(dir, patchedHeadlessName())
 	if fileExists(dst) {
-		return nil
+		have, err := fileSHA256(dst)
+		if err != nil || have == build.SHA256 || !contains(build.Superseded, have) {
+			return nil // current, or built here: keep it
+		}
+		fmt.Fprintf(os.Stderr, "engine: the installed patched build (sha256 %s) is superseded; upgrading\n", have[:12])
 	}
 	// The patched binary resolves base/ relative to its own path, so it is
 	// only usable inside a stock install — EnsureEngine runs first.
@@ -173,4 +182,27 @@ func DownloadGunzipped(ctx context.Context, url string, dst io.Writer) (string, 
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// fileSHA256 returns the hex SHA-256 of a file's contents.
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }

@@ -140,8 +140,11 @@ go run ./cmd/publish-engine -data <BARdata>
 
 `bringest -resim` then installs it on any host that lacks it
 (`engine.EnsurePatchedEngine`: download, check the SHA-256 against the pin,
-install beside the stock binary; a build already there, e.g. one made locally,
-is never replaced).
+install beside the stock binary). A build already there is kept when it is the
+current one or one made locally (a hash no publish ever had); one that hashes to
+an EARLIER published revision — listed in the pin's `Superseded` — is replaced,
+which is how hosts move to a new revision. So publishing revision N+1 means
+moving revision N's SHA-256 into `Superseded` beside the new pin.
 
 ### Versions
 

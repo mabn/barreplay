@@ -122,6 +122,27 @@ func TestEnsurePatchedEngineKeepsAnExistingBuild(t *testing.T) {
 	}
 }
 
+func TestEnsurePatchedEngineUpgradesASupersededBuild(t *testing.T) {
+	binary := []byte("published rev 2")
+	servePatched(t, binary, sha(binary))
+	old := []byte("published rev 1")
+	b := patchedBuilds[testVersion]
+	b.Superseded = []string{sha(old)}
+	patchedBuilds[testVersion] = b
+	dataDir, engineDir := stockInstall(t)
+	installed := filepath.Join(engineDir, patchedHeadlessName())
+	if err := os.WriteFile(installed, old, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsurePatchedEngine(context.Background(), Config{DataDir: dataDir}, testVersion); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(installed); string(got) != string(binary) {
+		t.Errorf("a superseded published build was kept: %q", got)
+	}
+}
+
 func TestEnsurePatchedEngineSkipsUnpublishedVersions(t *testing.T) {
 	binary := []byte("published")
 	hits := servePatched(t, binary, sha(binary))

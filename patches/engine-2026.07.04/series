@@ -19,3 +19,4 @@ experiments/H21-cob-jumptable-dispatch.patch
 experiments/H45-qtpfs-relink-grid-no-reinit.patch
 experiments/H49-headless-skip-smt-tiles.patch
 0003-static-mempool-lazy-zeroing.patch
+0004-engine-event-log.patch
