@@ -12,7 +12,7 @@
 //
 // A build is NAMED by its semver (PatchedVersion: the engine version plus the
 // revision of the patch series, patchrev.go), and so is its object:
-// engines/<version>/spring-headless-patched-2026.7.4-bp.1.gz. One version is
+// engines/<version>/spring-headless-patched-2026.7.4-barreplay.1.gz. One version is
 // one binary — publish-engine writes it only if the key is free and refuses a
 // different binary under a name already taken — so a new build is always a
 // new revision and never overwrites one a host may be downloading.

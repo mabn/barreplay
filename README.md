@@ -176,7 +176,7 @@ benchmark VM drifts by ten percent across hours.
 
 `bringest -resim` prefers a patched `spring-headless-patched` beside the stock
 binary when one exists and otherwise runs stock. A gated build published with
-`publish-engine` (named by a semver such as `2026.7.4-bp.1`, the `-bp.N` being
+`publish-engine` (named by a semver such as `2026.7.4-barreplay.1`, the `-barreplay.N` being
 the revision of the patch series, and pinned by hash in
 `internal/engine/patcheddl.go`) is downloaded automatically; the capture cannot
 tell which build made it.

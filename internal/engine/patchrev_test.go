@@ -37,14 +37,14 @@ func TestPatchedVersion(t *testing.T) {
 		rev    int
 		want   string
 	}{
-		{"2026.07.04", 1, "2026.7.4-bp.1"},
-		{"2025.06.24", 12, "2025.6.24-bp.12"},
+		{"2026.07.04", 1, "2026.7.4-barreplay.1"},
+		{"2025.06.24", 12, "2025.6.24-barreplay.12"},
 	} {
 		if got := PatchedVersion(c.engine, c.rev); got != c.want {
 			t.Errorf("PatchedVersion(%q, %d) = %q, want %q", c.engine, c.rev, got, c.want)
 		}
 	}
-	if got := PatchedVersionTag("2026.07.04", 1); got != "patched-engine/2026.7.4-bp.1" {
+	if got := PatchedVersionTag("2026.07.04", 1); got != "patched-engine/2026.7.4-barreplay.1" {
 		t.Errorf("tag = %q", got)
 	}
 }

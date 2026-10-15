@@ -247,7 +247,7 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           engines/<version>/spring-headless-patched-<semver>.gz and its
                           SHA-256 pinned in patchedBuilds. The SEMVER (patchrev.go
                           PatchedVersion) is the engine version without leading zeros plus
-                          -bp.<N>, N the revision of patches/engine-<version>/series: a
+                          -barreplay.<N>, N the revision of patches/engine-<version>/series: a
                           digest of the series file and every patch it lists, pinned in
                           patchSeries, and TestPatchSeriesIsPinned fails when they change
                           until the new digest is appended — so a name says exactly which

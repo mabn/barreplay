@@ -27,7 +27,7 @@ var patchSeries = map[string][]string{
 // PatchedVersion is the semver of a patched build: the engine's version with
 // its leading zeros dropped (2026.07.04 is not valid semver), then the series
 // revision as a pre-release, so revisions of one engine order numerically —
-// "2026.7.4-bp.1" < "2026.7.4-bp.2". Not build metadata ("+bp.1"), which
+// "2026.7.4-barreplay.1" < "2026.7.4-barreplay.2". Not build metadata ("+barreplay.1"), which
 // semver ignores when ordering.
 func PatchedVersion(engineVersion string, rev int) string {
 	parts := strings.Split(engineVersion, ".")
@@ -36,7 +36,7 @@ func PatchedVersion(engineVersion string, rev int) string {
 			parts[i] = strconv.Itoa(n)
 		}
 	}
-	return strings.Join(parts, ".") + "-bp." + strconv.Itoa(rev)
+	return strings.Join(parts, ".") + "-barreplay." + strconv.Itoa(rev)
 }
 
 // PatchedVersionTag is the git tag marking the barreplay commit whose

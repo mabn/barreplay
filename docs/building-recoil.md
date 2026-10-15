@@ -120,17 +120,23 @@ cp build-linux/spring-headless "$D/spring-headless-patched"
 barreplay -data <BARdata> -engine "$D/spring-headless-patched" -out /tmp/out <gameId>
 md5sum /tmp/out/<gameId>.brp
 
-# 4. PUBLISH IT, so no other host has to build it. Run from the repo root (it
-#    reads patches/ to name the build). This uploads a gzip of the binary as
-#    engines/<ver>/spring-headless-patched-<semver>.gz and prints the line to
+# 4. PUBLISH IT, so no other host has to build it. Strip a copy first: the
+#    release flags (RELWITHDEBINFO) leave ~780 MB of DWARF debug info in the
+#    binary, which the engine never loads but every host would download.
+#    --strip-debug removes only the .debug_* sections — code, data and the
+#    symbol table (function names in backtraces and perf) stay — so it cannot
+#    change what the sim does. The pin will say THIS file passed step 3, so
+#    gate the stripped copy too; keep it in "$D" while doing so, since the
+#    engine finds base/ relative to its own path. Then, from the repo root (it
+#    reads patches/ to name the build), upload it: a gzip of the binary as
+#    engines/<ver>/spring-headless-patched-<semver>.gz, printing the line to
 #    add to patchedBuilds in internal/engine/patcheddl.go and the tag to push
-#    once it is merged. Strip a copy first —
-#    the debug info is ~780 MB that every host would otherwise download, and
-#    strip --strip-debug changes no code. Hosts download the build once that
-#    line is merged: the hash pinned in the repo is the record that this exact
-#    binary passed step 3, so publish nothing that has not.
-strip --strip-debug -o /tmp/spring-headless-patched "$D/spring-headless-patched"
-publish-engine -version 2026.07.04 /tmp/spring-headless-patched
+#    once that is merged. Hosts download the build only once the line is
+#    merged, so publish nothing that has not passed the gate.
+strip --strip-debug -o "$D/spring-headless-patched.stripped" "$D/spring-headless-patched"
+barreplay -data <BARdata> -engine "$D/spring-headless-patched.stripped" -out /tmp/out-stripped <gameId>
+md5sum /tmp/out-stripped/<gameId>.brp          # must equal step 3's
+publish-engine -version 2026.07.04 "$D/spring-headless-patched.stripped"
 ```
 
 `bringest -resim` then installs it on any host that lacks it
@@ -141,14 +147,14 @@ is never replaced).
 ### Versions
 
 A patched build is named by a semver: the engine version without its leading
-zeros, then `-bp.<N>`, where N is the revision of the patch series
+zeros, then `-barreplay.<N>`, where N is the revision of the patch series
 (`internal/engine/patchrev.go`) — the first 2026.07.04 build is
-`2026.7.4-bp.1`. A pre-release rather than build metadata (`+bp.1`) because
+`2026.7.4-barreplay.1`. A pre-release rather than build metadata (`+barreplay.1`) because
 semver ignores build metadata when ordering, and revisions of one engine must
 order. A revision is a digest of `patches/engine-<version>/series` and every
 patch it lists; `TestPatchSeriesIsPinned` fails the moment either changes until
 the new digest is appended to `patchSeries`, which is what makes the next
-build `-bp.<N+1>`. So a name always says exactly which patches went in, and
+build `-barreplay.<N+1>`. So a name always says exactly which patches went in, and
 `publish-engine` refuses to publish from a series that is not pinned.
 
 The bucket holds one binary per name (the upload is conditional, and a
