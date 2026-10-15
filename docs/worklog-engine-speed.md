@@ -28,9 +28,8 @@ to the stock/rev-2 capture.
 |---|---|---|---|---|
 | BAR widget suite left on (sandbox) | yes | ±0 | — | no cost; dropped |
 | `-worker-threads 7` | yes | ±0 | — | dropped |
-| H60 FindAnim + COB DIV shift, H61 COB threaded dispatch | yes | instr -1.1%, wall -0.4% (noise) | pending | keep (exact), re-judge |
-| H62 Lua threaded dispatch | yes | wall ±0 | pending | keep (exact), re-judge |
-| PGO (on H60-H62) | yes (medium, isthmus) | wall -3.8% (3/3), instr -3.3%; isthmus -4% | pending | promising |
+| H60 FindAnim + COB DIV shift, H61 COB threaded dispatch, H62 Lua threaded dispatch | yes | instr -1.1%, wall ±0 | wall +0.8%, instr -0.2% (noise) | no late-game value |
+| PGO (on H60-H62) | yes (medium, isthmus) | wall -3.8% (3/3), instr -3.3%; isthmus -4% | wall **-1.9%**, instr -3.3% | small |
 
 ## Log
 
@@ -169,3 +168,19 @@ USER: timestamps with hour/minute, tables for results, keep optimizing.
 
 `bench-ckpt.sh` gained `PERF="<perf record args>"`: a trial then also
 profiles exactly its window (attaches to the restored pid before the go).
+
+### 2026-10-15 09:55 — first verylarge1 results: the late game is somewhere else
+
+verylarge1 from 63780, 450-frame windows, 3 rounds with the build order
+rotated (raw: `~/dev/perf3/vl1-3way.txt`). Every trial starts at 9961 units.
+
+| build | SimFrame wall, mean (3 runs) | vs base | main-thread instructions, mean | vs base |
+|---|---|---|---|---|
+| base (rev 2 + park) | 23.07 s (23.21 / 23.09 / 22.93) | — | 78.66e9 | — |
+| speed3 (H60-H62) | 23.27 s (23.11 / 23.16 / 23.53) | +0.8% | 78.50e9 | -0.2% |
+| speed3 + PGO | 22.64 s (22.54 / 22.75 / 22.62) | **-1.9%** | 76.03e9 | -3.3% |
+
+At 19.5 fps the late game is ~14x slower per frame than medium's average,
+and what helped there (the interpreters) is noise here. Run-to-run spread on
+one checkpoint is ~1.5% of wall, ~1% of instructions. Next: profile this
+window (bench-ckpt `PERF=`).
