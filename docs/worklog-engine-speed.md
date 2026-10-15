@@ -409,3 +409,21 @@ own wall time (34 s) is not comparable; the shape is what matters.
 
 New candidates from it: **CBeamLaser::Update (4.3%)** — beam weapons — and
 the aircraft move type (6.5%).
+
+### 2026-10-15 13:25 — next: huge pages
+
+`CBeamLaser::Update` recomputes its weapon vectors on the main thread right
+after `UpdateUnitWeapons` computed every unit's in parallel — but not
+removable: an earlier weapon of the same unit can fire in between and its
+script may `turn ... now` a piece, so the second computation can differ.
+
+The late game is memory-latency-bound (luaH_get, the targeting walk), with a
+~5 GB working set — TLB-miss territory. The host's THP mode is `madvise`
+(`AnonHugePages: 0 kB`): nothing in the engine asks for huge pages (not
+mimalloc's heap, not the big .bss StaticMemPools). Huge pages cannot change
+a simulated value. Experiment planned: CRIU restores memory into fresh
+anonymous mappings, so toggling `/sys/kernel/mm/transparent_hugepage/enabled`
+between `always` and `madvise` across trials of ONE checkpoint measures the
+potential without a new dump. If it pays, the engine can `madvise` its own
+pools and set mimalloc's large-page option, which works under the `madvise`
+default every host has.
