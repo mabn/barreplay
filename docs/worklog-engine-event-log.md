@@ -97,3 +97,4 @@ a widget WITHOUT going through the widget handler.
 - Pre-existing, not from this branch: `TestViewerFixtureUpToDate` fails on
   main too (viewer.brp stale).
 - In progress: building the patched engine in the official image (Docker).
+- 2026-10-15: CLAUDE.md (BAR sandbox paragraph) and docs/projectiles-and-explosions.md §4.2a describe the engine log.

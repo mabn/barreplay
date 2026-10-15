@@ -311,6 +311,29 @@ Caveat: the watch mask belongs to the whole LuaUI handle, so another widget
 calling `SetWatchExplosion(id, false)` would switch ours off. The re-sim
 disables every other widget, so nothing else is running.
 
+### 4.2a Without the handler: the patched engine's event log
+
+From BAR's 2026.10.13 release a user widget gets a sandboxed PROXY of the
+handler, so neither hook above can install (CLAUDE.md, "BAR's own sandbox").
+barreplay's patched engine (patch `0004-engine-event-log.patch`) records the
+same events itself, and the widget pulls them through `Spring` functions,
+which the sandbox copies through unchanged:
+
+```lua
+Spring.SetEngineEventLog(true, true)          -- explosions, damage
+-- every GameFramePost, before the vanished-track sweep:
+local v, n = Spring.GetLoggedExplosions(buf)  -- 11 values per explosion:
+-- frame, weaponDefID, x, y, z, aoe, ownerID, ownerTeam, projectileID,
+-- projectileOwnerID, projectileTeamID  (-1 = none)
+```
+
+The log has no watch list — it records every explosion — so the widget
+filters on the watched set. Its client runs at event order -100, before
+every Lua handle, so an explosion a gadget claims (which stops the dispatch
+before LuaUI) is still recorded. It also gets the explosions of LuaUI's own
+callin regardless of the watch mask caveat above. The widget prefers the log
+whenever the engine has it, sandbox or not.
+
 ### 4.3 Finding each new projectile
 
 A **launcher registry**: on `UnitFinished`, `UnitGiven` and `UnitTaken`, any
