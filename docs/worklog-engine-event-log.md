@@ -98,3 +98,9 @@ a widget WITHOUT going through the widget handler.
   main too (viewer.brp stale).
 - In progress: building the patched engine in the official image (Docker).
 - 2026-10-15: CLAUDE.md (BAR sandbox paragraph) and docs/projectiles-and-explosions.md §4.2a describe the engine log.
+- 2026-10-15: first build attempt died at step 843/1298 with "No space left on
+  device": the scratchpad's /tmp is a 7.6 GB tmpfs (RAM), which the build tree
+  plus a 5.2 GB BAR clone filled — it also starved the stock baseline re-sim,
+  which the memory guard stopped. Moved the Recoil tree, build dir and ccache
+  to `~/dev/barreplay-engine-build/` (real disk; outside the repo) and resumed
+  there with -j6; kept BAR's `barwidgets.lua` (master 24d6817) beside it.
