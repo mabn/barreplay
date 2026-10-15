@@ -305,3 +305,14 @@ candidates in the scanned quads fail. Moved after them. Exact: every check is
 a pure function of state the loop does not change before AllowWeaponTarget,
 and TestTarget's own LOS test is a subset of the loop's; the same units pass
 in the same order with the same priorities.
+
+### 2026-10-15 11:50 — late-game PGO training wrote nothing; fixed
+
+The verylarge1 training run (63780+1800 frames, 251 s of instrumented
+SimFrame) completed but left every .gcda at its 10:42 timestamp: in the
+instrumented binary `__gcov_dump` was a weak UNDEFINED symbol (`nm`: `w`) — a
+linker does not pull an archive member in to satisfy a weak reference, so the
+call resolved to null and was skipped. Fixed at link time only: the
+instrumented build links with `-Wl,-u,__gcov_dump` (now `T __gcov_dump`), the
+code keeps its weak reference (a no-op in normal builds). Rerunning the
+training after the H63 checkpoint.
