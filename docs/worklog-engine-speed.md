@@ -92,3 +92,37 @@ the whole replay. First question: what does that cost?
   - bench harness, 3 interleaved pairs: SimFrame wall 50.29 s -> 48.38 s
     (-3.8%, PGO wins 3/3), main-thread instructions -3.3%.
   Medium was a TRAINING input; held-out check on isthmus (8v8, 27:31) running.
+- 2026-10-15: held-out check of PGO on isthmus (8v8 27:31, not a training
+  input): byte-identical to rev 2 (md5 `acba997c…`), sim 4m02s -> 3m52s (-4%).
+- 2026-10-15: USER: medium is far too small (1m40s of sim, few units); the
+  slow part of a re-sim is the late game of big ones (10k units, up to 20x
+  slower per frame). Asked for a harness that re-sims to a late frame ONCE,
+  snapshots the state, and restarts from it. Benchmark game: "verylarge1" =
+  `6a37d06acbb455b1d19179d8ec965f10` from frame 63780, windows of 15 s or 30 s
+  (450 / 900 frames).
+- 2026-10-15: DECISION: CRIU (process checkpoint/restore), not the engine's
+  savegame and not a VM. Savegame would have to round-trip BAR's whole gadget
+  Lua state, and a loaded save cannot go on reading the demo's packet stream,
+  so the window after it would not be the real game. A VM snapshot is exact
+  but adds virtualization overhead to every timing. CRIU restores a NATIVE
+  process with exact state (all threads, the demo server included). Its one
+  limit — an image restores only into the binary that made it — is handled by
+  dumping each build once: builds that pass the byte-identity gate reach the
+  same state at the frame.
+  Making CRIU work here: root through a privileged container entering pid 1's
+  namespaces (`nsenter -t 1 -m -u -i -n -p`), `--manage-cgroups=ignore`, and
+  the restore inside `systemd-run --scope` (otherwise the container's exit
+  kills the restored tree).
+- 2026-10-15: engine side, in the bench harness (NetCommands.cpp,
+  BARREPLAY_PARK=<prefix>): at the window's first frame it points
+  stdout/stderr at <prefix>.stdout (no pipe to the launcher left in the
+  image), writes <prefix>.ready, and sleeps (clearing the watchdog) until
+  <prefix>.go exists; the go file carries "<frames> <output>" because the
+  environment is frozen into the image. Perf counters open after the wake
+  (CRIU cannot carry perf fds). The bench line now also reports start= and
+  units=.
+- 2026-10-15: `tools/bench-ckpt/bench-ckpt.sh` (dump / trial / ab): dump runs
+  barreplay to the frame, copies every regular file the engine has open
+  (CRIU reopens them by path; each trial puts the copies back), then
+  `criu dump`; trial restores and times the window. First dump of verylarge1
+  at 63780 running.
