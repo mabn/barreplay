@@ -86,3 +86,9 @@ the whole replay. First question: what does that cost?
   ~4x slower than normal) + `c04fd06a…` (BAR test-31620, 5m54s). The engine's
   quitforce exit runs the gcov dump: 1073 .gcda files, 15 MB, in
   `~/dev/barreplay-engine-build/prof`. Building with -fprofile-use now.
+- 2026-10-15: RESULT PGO (on top of H60-H62), medium:
+  - full runs: byte-identical to the reference (md5 `0558d354…`), sim
+    1m26s/1m25s -> 1m23s/1m22s;
+  - bench harness, 3 interleaved pairs: SimFrame wall 50.29 s -> 48.38 s
+    (-3.8%, PGO wins 3/3), main-thread instructions -3.3%.
+  Medium was a TRAINING input; held-out check on isthmus (8v8, 27:31) running.
