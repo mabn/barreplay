@@ -216,3 +216,17 @@ dispatch, to hash 4 bytes. Inlining it with the size known computes the same
 value; that is a header change that recompiles everything, i.e. the same cost
 as LTO, which does it (and every other cross-file hot call) automatically. So
 the next build is PGO + LTO (`pgo.sh ltouse`, -flto=4, no -g), building now.
+
+### 2026-10-15 10:30 — what the late-game hot spots are made of
+
+| hot spot | finding | action |
+|---|---|---|
+| `luaH_get` (7.4%) | annotated: ~50% of its samples on chain-walk loads (`cmpl $type,0x18(node)` after `mov 0x20(node)`), ~20% loading the key string's hash, the number path's `div` (hashmod) only ~3.5% | memory latency on BAR's tables; an exact fastmod would buy ~0.2% — not worth a patch |
+| `spring::VectorErase<CUnit*>` (1.0%) | QuadField::MovedUnit swap-erases then re-inserts a moving unit in EVERY cell, even unchanged ones; the resulting order of units in a cell feeds unit queries (targeting) | cannot be shortcut without changing sim order — left alone |
+| `CSyncChecker::Sync` (4.7%) | out-of-line call per synced write, runtime size into XXH3 | LTO (building) |
+
+Plan: (1) PGO+LTO (building); (2) RE-TRAIN the PGO profile on verylarge1's
+late game — the current profile is from medium + c04fd06a, small games that
+never exercise mass air/targeting/LOS. The instrumented run must stop after a
+late window, but the bench harness leaves by `_exit`, which skips gcov's
+dump: add a weak `__gcov_dump()` call before it (a no-op in normal builds).
