@@ -120,23 +120,22 @@ cp build-linux/spring-headless "$D/spring-headless-patched"
 barreplay -data <BARdata> -engine "$D/spring-headless-patched" -out /tmp/out <gameId>
 md5sum /tmp/out/<gameId>.brp
 
-# 4. PUBLISH IT, so no other host has to build it. Strip a copy first: the
-#    release flags (RELWITHDEBINFO) leave ~780 MB of DWARF debug info in the
-#    binary, which the engine never loads but every host would download.
-#    --strip-debug removes only the .debug_* sections — code, data and the
-#    symbol table (function names in backtraces and perf) stay — so it cannot
-#    change what the sim does. The pin will say THIS file passed step 3, so
-#    gate the stripped copy too; keep it in "$D" while doing so, since the
-#    engine finds base/ relative to its own path. Then, from the repo root (it
-#    reads patches/ to name the build), upload it: a gzip of the binary as
-#    engines/<ver>/spring-headless-patched-<semver>.gz, printing the line to
-#    add to patchedBuilds in internal/engine/patcheddl.go and the tag to push
-#    once that is merged. Hosts download the build only once the line is
-#    merged, so publish nothing that has not passed the gate.
-strip --strip-debug -o "$D/spring-headless-patched.stripped" "$D/spring-headless-patched"
-barreplay -data <BARdata> -engine "$D/spring-headless-patched.stripped" -out /tmp/out-stripped <gameId>
-md5sum /tmp/out-stripped/<gameId>.brp          # must equal step 3's
-publish-engine -version 2026.07.04 "$D/spring-headless-patched.stripped"
+# 4. PUBLISH IT, so no other host has to build it — one command, from the repo
+#    root (it reads patches/ to name the build), with any bringest -resim on
+#    the same -data idle or stopped (the gate takes the data dir's lock):
+go run ./cmd/publish-engine -data <BARdata>
+#    It re-simulates the version's gate replay on the stock engine, strips the
+#    build (strip --strip-debug: the ~780 MB of DWARF sections the release
+#    flags leave in, which the engine never loads but every host would
+#    download; code, data and function names stay), re-simulates the same
+#    replay on the STRIPPED copy — the exact file the pin will vouch for —
+#    and requires byte-identical .brp files from the two, then uploads it as
+#    engines/<ver>/spring-headless-patched-<semver>.gz and prints the line to
+#    add to patchedBuilds and the tag to push once that is merged. Both runs
+#    use this checkout's widget and codec, so it compares engines, not
+#    capture formats (step 3's reference md5s go stale when the format
+#    changes). -dry does everything but the upload; -gate <gameId,...> picks
+#    other replays (needed for a version with no default).
 ```
 
 `bringest -resim` then installs it on any host that lacks it

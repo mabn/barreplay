@@ -119,15 +119,26 @@ func EnsurePatchedEngine(ctx context.Context, cfg Config, version string) error 
 	return nil
 }
 
-// CheckBuildVersion runs bin --version and refuses a binary that reports a
-// different engine version than the one it is about to be published for. A
-// banner with no recognizable version is let through, as Locate does.
-func CheckBuildVersion(bin, version string) error {
+// BuildVersion runs bin --version and returns the engine version it reports,
+// e.g. "2026.07.04"; ok is false when the banner names none.
+func BuildVersion(bin string) (version string, ok bool, err error) {
 	banner, err := engineBannerVersion(bin)
 	if err != nil {
-		return fmt.Errorf("engine: run %s --version: %w", bin, err)
+		return "", false, fmt.Errorf("engine: run %s --version: %w", bin, err)
 	}
-	if got, ok := parseEngineVersion(banner); ok && !engineVersionMatches(got, version) {
+	version, ok = parseEngineVersion(banner)
+	return version, ok, nil
+}
+
+// CheckBuildVersion refuses a binary that reports a different engine version
+// than the one it is about to be published for. A banner with no
+// recognizable version is let through, as Locate does.
+func CheckBuildVersion(bin, version string) error {
+	got, ok, err := BuildVersion(bin)
+	if err != nil {
+		return err
+	}
+	if ok && !engineVersionMatches(got, version) {
 		return fmt.Errorf("engine: %s is %s, not %s", bin, got, version)
 	}
 	return nil
