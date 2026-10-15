@@ -87,8 +87,15 @@ func EnsurePatchedEngine(ctx context.Context, cfg Config, version string) error 
 	dst := filepath.Join(dir, patchedHeadlessName())
 	if fileExists(dst) {
 		have, err := fileSHA256(dst)
-		if err != nil || have == build.SHA256 || !contains(build.Superseded, have) {
-			return nil // current, or built here: keep it
+		if err != nil || have == build.SHA256 {
+			return nil
+		}
+		if !contains(build.Superseded, have) {
+			// Built here (or by hand): kept, but said, since it may well
+			// predate the published build and nothing else would tell.
+			fmt.Fprintf(os.Stderr, "engine: keeping %s (sha256 %s): it is not a published patched build, so it is not replaced by %s; delete it to download that\n",
+				dst, have[:12], PatchedVersion(version, build.Rev))
+			return nil
 		}
 		fmt.Fprintf(os.Stderr, "engine: the installed patched build (sha256 %s) is superseded; upgrading\n", have[:12])
 	}

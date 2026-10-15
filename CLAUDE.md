@@ -261,7 +261,11 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           and never reaches the path Locate prefers (temp file + rename),
                           and a pin is added only for a binary that passed the gate, so
                           the table is also the record of what was verified. A build
-                          already on the host (e.g. made locally) is never replaced.
+                          already on the host is replaced only when it hashes to an
+                          EARLIER published build (PatchedBuild.Superseded); any other
+                          (e.g. made locally) is kept, and the daemon prints a line naming
+                          the published build it is standing in for. Delete the binary to
+                          download the published one.
                           Missing is a WARNING, not a failure — only versions somebody
                           has patched, gated and published have a build, so a daemon
                           routinely meets versions nobody has patched and must still run
