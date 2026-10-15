@@ -280,3 +280,28 @@ already in use") — and its file restore had copied the checkpoint's infolog
 and widget stream over the training run's own (same game, same data dir).
 Harmless for training (only the .gcda files matter), but no engine may run
 beside a dump or a trial.
+
+### 2026-10-15 10:50 — where the late-game main thread goes (by caller)
+
+From an LBR sample of the verylarge1 window (recorded during a build, so
+shares only), stacks summed by their two outermost frames:
+
+| caller path | share of main-thread samples |
+|---|---|
+| CUnitHandler::SlowUpdateUnits -> CUnit::SlowUpdateWeapons (auto-targeting) | 11.1% |
+| CUnitHandler::UpdateUnitWeapons -> CUnit::UpdateWeapons | 6.6% |
+| CUnitScriptEngine::Tick -> ThreadPool::WaitForFinished (parallel anims) | 5.9% |
+| UpdateUnitMoveTypes -> GeneralMoveSystem::Update (StrafeAir 3.2%) | 4.7% |
+| CGame::SimFrame -> CLosHandler::Update (for_mt over ~7 LOS types; the main thread waits for the slowest) | 4.5% |
+| luaD_precall -> luaB_pcall (gadgets) | 3.1% |
+| CUnitHandler::Update -> CUnit::UpdateLosStatus | 2.8% |
+
+**H63** (built as `spring-headless-h63`, speed3 + H63, no PGO; to be
+A/B'd against `spring-headless-park` once the training run frees the host):
+`CGameHelper::GenerateWeaponTargets` called the virtual, const
+`weapon->TestTarget()` — a dozen reads of each candidate CUnit — BEFORE the
+cheap LOS-state and 2D-range rejections that most of the thousands of
+candidates in the scanned quads fail. Moved after them. Exact: every check is
+a pure function of state the loop does not change before AllowWeaponTarget,
+and TestTarget's own LOS test is a subset of the loop's; the same units pass
+in the same order with the same priorities.
