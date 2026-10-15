@@ -175,8 +175,9 @@ were taken on a synced-instruction meter rather than wall time, because the
 benchmark VM drifts by ten percent across hours.
 
 `bringest -resim` prefers a patched `spring-headless-patched` beside the stock
-binary when one exists and otherwise runs stock; nothing downloads patched
-builds, and the capture cannot tell which build made it.
+binary when one exists and otherwise runs stock. A gated build published with
+`publish-engine` (and pinned by hash in `internal/engine/patcheddl.go`) is
+downloaded automatically; the capture cannot tell which build made it.
 
 ## Build and run
 

@@ -1,0 +1,157 @@
+package engine
+
+import (
+	"bytes"
+	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+)
+
+const testVersion = "2026.07.04"
+
+// servePatched publishes body (gzipped) at the key a build with hash wantSHA
+// would have, pins that build, and returns the request counter. Both globals
+// are restored when the test ends.
+func servePatched(t *testing.T, body []byte, wantSHA string) *atomic.Int32 {
+	t.Helper()
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	zw.Write(body)
+	zw.Close()
+	key := PatchedBuildKey(testVersion, wantSHA)
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.URL.Path != "/"+key {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write(gz.Bytes())
+	}))
+	t.Cleanup(srv.Close)
+
+	oldURL, oldBuilds := PatchedBuildBaseURL, patchedBuilds
+	PatchedBuildBaseURL = srv.URL
+	patchedBuilds = map[string]PatchedBuild{testVersion: {Key: key, SHA256: wantSHA}}
+	t.Cleanup(func() { PatchedBuildBaseURL, patchedBuilds = oldURL, oldBuilds })
+	return &hits
+}
+
+// stockInstall makes a data dir holding a stock engine for testVersion.
+func stockInstall(t *testing.T) (dataDir, engineDir string) {
+	t.Helper()
+	dataDir = t.TempDir()
+	engineDir = filepath.Join(dataDir, "engine", testVersion)
+	if err := os.MkdirAll(engineDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(engineDir, headlessName()), []byte("stock"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dataDir, engineDir
+}
+
+func sha(b []byte) string {
+	s := sha256.Sum256(b)
+	return hex.EncodeToString(s[:])
+}
+
+func TestEnsurePatchedEngineInstallsThePinnedBuild(t *testing.T) {
+	binary := []byte("patched engine bytes")
+	servePatched(t, binary, sha(binary))
+	dataDir, engineDir := stockInstall(t)
+
+	if err := EnsurePatchedEngine(context.Background(), Config{DataDir: dataDir}, testVersion); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(engineDir, patchedHeadlessName())
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, binary) {
+		t.Errorf("installed %q, want %q", got, binary)
+	}
+	if fi, _ := os.Stat(dst); fi.Mode().Perm()&0o100 == 0 {
+		t.Errorf("installed binary is not executable: %v", fi.Mode())
+	}
+}
+
+func TestEnsurePatchedEngineRefusesAWrongHash(t *testing.T) {
+	servePatched(t, []byte("tampered"), sha([]byte("what was gated")))
+	dataDir, engineDir := stockInstall(t)
+
+	err := EnsurePatchedEngine(context.Background(), Config{DataDir: dataDir}, testVersion)
+	if err == nil || !strings.Contains(err.Error(), "hashes to") {
+		t.Fatalf("err = %v, want a hash mismatch", err)
+	}
+	// Neither the binary nor a temp file may be left where Locate looks.
+	entries, _ := os.ReadDir(engineDir)
+	for _, e := range entries {
+		if e.Name() != headlessName() {
+			t.Errorf("left %s behind in the engine dir", e.Name())
+		}
+	}
+}
+
+func TestEnsurePatchedEngineKeepsAnExistingBuild(t *testing.T) {
+	binary := []byte("published")
+	hits := servePatched(t, binary, sha(binary))
+	dataDir, engineDir := stockInstall(t)
+	local := filepath.Join(engineDir, patchedHeadlessName())
+	if err := os.WriteFile(local, []byte("built here"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsurePatchedEngine(context.Background(), Config{DataDir: dataDir}, testVersion); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(local); string(got) != "built here" {
+		t.Errorf("a locally built patched engine was replaced with %q", got)
+	}
+	if hits.Load() != 0 {
+		t.Errorf("made %d requests with a build already installed", hits.Load())
+	}
+}
+
+func TestEnsurePatchedEngineSkipsUnpublishedVersions(t *testing.T) {
+	binary := []byte("published")
+	hits := servePatched(t, binary, sha(binary))
+	dataDir := t.TempDir()
+
+	if err := EnsurePatchedEngine(context.Background(), Config{DataDir: dataDir}, "2025.06.24"); err != nil {
+		t.Fatal(err)
+	}
+	for _, cfg := range []Config{
+		{DataDir: dataDir, SkipProvision: true},
+		{DataDir: dataDir, EngineBinary: "/opt/spring-headless"},
+	} {
+		if err := EnsurePatchedEngine(context.Background(), cfg, testVersion); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if hits.Load() != 0 {
+		t.Errorf("made %d requests; want none", hits.Load())
+	}
+}
+
+func TestEnsurePatchedEngineNeedsTheStockInstall(t *testing.T) {
+	binary := []byte("published")
+	hits := servePatched(t, binary, sha(binary))
+
+	err := EnsurePatchedEngine(context.Background(), Config{DataDir: t.TempDir()}, testVersion)
+	if err == nil {
+		t.Fatal("installed a patched build with no stock engine beside it")
+	}
+	if hits.Load() != 0 {
+		t.Errorf("downloaded before checking for the stock install")
+	}
+}

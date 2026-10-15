@@ -45,10 +45,10 @@ type Config struct {
 	// patched" beside the stock binary in <DataDir>/engine/<version>/ — over
 	// the stock one, per version. The patches it carries are the byte-identical
 	// speed work in patches/engine-<version>/: a re-sim on such a build
-	// produces the same .brp, faster. There is nothing to download, so a
-	// version with no patched build simply falls back to stock with a warning
-	// rather than failing — a daemon must still process games whose engine
-	// nobody has patched.
+	// produces the same .brp, faster. Only versions with a published build
+	// can be downloaded (EnsurePatchedEngine), so a version with no patched
+	// build simply falls back to stock with a warning rather than failing — a
+	// daemon must still process games whose engine nobody has patched.
 	//
 	// It lives BESIDE the stock binary rather than in its own <version>-patched
 	// directory because the engine resolves base/springcontent.sdz relative to
@@ -182,9 +182,10 @@ func Locate(cfg Config, engineVersion string) (*Engine, error) {
 	e := &Engine{cfg: cfg}
 
 	// A patched build is preferred per version when asked for, and its absence
-	// is a warning rather than an error: nothing downloads one, so a host will
-	// routinely meet a version nobody has patched, and refusing the job would
-	// be worse than running it at stock speed.
+	// is a warning rather than an error: EnsurePatchedEngine downloads one only
+	// for the versions that have a published build, so a host will routinely
+	// meet a version nobody has patched, and refusing the job would be worse
+	// than running it at stock speed.
 	if cfg.PatchedEngine && cfg.EngineBinary == "" && engineVersion != "" {
 		// Deliberately an exact-path check rather than findBinary: that walks
 		// every engine subdir and then $PATH, which for a patched build would

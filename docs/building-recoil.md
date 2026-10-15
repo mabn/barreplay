@@ -133,11 +133,26 @@ cp build-linux/spring-headless "$D/spring-headless-patched"
 #    patches/engine-2026.07.04/experiments/tools/refs.txt).
 barreplay -data <BARdata> -engine "$D/spring-headless-patched" -out /tmp/out <gameId>
 md5sum /tmp/out/<gameId>.brp
+
+# 4. PUBLISH IT, so no other host has to build it. This uploads a gzip of the
+#    binary to the bucket under a content-addressed key and prints the line to
+#    add to patchedBuilds in internal/engine/patcheddl.go. Strip a copy first —
+#    the debug info is ~780 MB that every host would otherwise download, and
+#    strip --strip-debug changes no code. Hosts download the build once that
+#    line is merged: the hash pinned in the repo is the record that this exact
+#    binary passed step 3, so publish nothing that has not.
+strip --strip-debug -o /tmp/spring-headless-patched "$D/spring-headless-patched"
+publish-engine -version 2026.07.04 /tmp/spring-headless-patched
 ```
 
-A missing patched build is a warning, not a failure — nothing downloads these,
-so a daemon routinely meets engine versions nobody has patched and runs those at
-stock speed. Which build ran is recorded per job as `jobStats.enginePatched`,
+`bringest -resim` then installs it on any host that lacks it
+(`engine.EnsurePatchedEngine`: download, check the SHA-256 against the pin,
+install beside the stock binary; a build already there, e.g. one made locally,
+is never replaced).
+
+A missing patched build is a warning, not a failure — only versions somebody
+has patched, gated and published have one, so a daemon routinely meets engine
+versions nobody has patched and runs those at stock speed. Which build ran is recorded per job as `jobStats.enginePatched`,
 because the capture itself cannot say: being byte-identical is the whole point.
 
 ## Observations from the validated run

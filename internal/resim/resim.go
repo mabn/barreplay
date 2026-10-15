@@ -49,8 +49,9 @@ type Options struct {
 	PRDownloaderBinary string
 	// SkipProvision assumes engine/game/map content is already installed.
 	SkipProvision bool
-	// PatchedEngine prefers the locally built patched engine for the replay's
-	// version when one is installed (engine.Config.PatchedEngine). The patches
+	// PatchedEngine prefers the patched engine for the replay's version
+	// (engine.Config.PatchedEngine), downloading the published build when the
+	// host has none (engine.EnsurePatchedEngine). The patches
 	// are output-safe by construction, so this changes how long the run takes
 	// and nothing about what it produces; a version with no patched build
 	// quietly runs stock.
@@ -205,6 +206,15 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 		SkipProvision: o.SkipProvision,
 	}, h.EngineVersion); err != nil {
 		return "", nil, err
+	}
+	if o.PatchedEngine {
+		if err := engine.EnsurePatchedEngine(ctx, engine.Config{
+			DataDir:       o.DataDir,
+			EngineBinary:  o.EngineBinary,
+			SkipProvision: o.SkipProvision,
+		}, h.EngineVersion); err != nil {
+			fmt.Fprintf(os.Stderr, "resim: warning: %v; using the stock engine\n", err)
+		}
 	}
 	eng, err := engine.Locate(engine.Config{
 		PatchedEngine:      o.PatchedEngine,
