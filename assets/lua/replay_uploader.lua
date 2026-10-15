@@ -1627,6 +1627,16 @@ local projectiles = (function()
 	local maxPathPoints = 400
 	local trackSweepEvery = 15    -- frames between checks for tracks gone silently
 
+	-- explosionHooked: the Explosion callin is installed (hookExplosion). On
+	-- game builds that sandbox user widgets it cannot be, and nothing else
+	-- reaches a headless engine (BAR skips its unsynced gfx_ gadgets there,
+	-- VisibleExplosionBatch's source included), so the ends are INFERRED:
+	-- tracks are swept every frame and close where the projectile would be
+	-- one frame after it was last seen, beams hit their target, and a dying
+	-- unit's death or self-destruct weapon is its blast.
+	local explosionHooked = false
+	local TRACK_END_INFERRED = 8 -- R flags bit 3
+
 	-- Engine target-type bytes (GetProjectileTarget), and the R record's codes
 	-- for GetUnitWeaponTarget's numeric types (0 none, 1 unit, 2 ground, 3 an
 	-- interceptor's projectile).
@@ -2038,6 +2048,26 @@ local projectiles = (function()
 		end
 	end
 
+	local function beamHit(b, frame, x, y, z, pid)
+		if b.id == nil and pid ~= nil then
+			b.id = pid
+		end
+		b.hits = b.hits + 1
+		local n = #b.pf
+		local keep = n == 0
+		if not keep then
+			local dx, dz = x - b.px[n], z - b.pz[n]
+			keep = (frame - b.birth) - b.pf[n] >= beamPathEvery or dx * dx + dz * dz > beamPathJump2
+		end
+		if keep then
+			addPathPoint(b, frame, x, y, z)
+			b.lastKept = true
+		else
+			b.lastKept = false
+		end
+		b.lf, b.lx, b.ly, b.lz = frame, x, y, z
+	end
+
 	-- openBeam starts (or returns, when it already started this frame) the beam
 	-- record of one firing. A beam's first frame usually reaches the explosion
 	-- callin before GameFramePost sees the weapon's reload change — the engine
@@ -2086,27 +2116,11 @@ local projectiles = (function()
 		beamsOf[owner] = beamsOf[owner] or {}
 		beamsOf[owner][wdID] = b
 		beamList[#beamList + 1] = b
+		if not explosionHooked and tx ~= nil then
+			b.flags = setFlag(b.flags, TRACK_END_INFERRED)
+			beamHit(b, frame, tx, ty or y, tz, nil)
+		end
 		return b
-	end
-
-	local function beamHit(b, frame, x, y, z, pid)
-		if b.id == nil and pid ~= nil then
-			b.id = pid
-		end
-		b.hits = b.hits + 1
-		local n = #b.pf
-		local keep = n == 0
-		if not keep then
-			local dx, dz = x - b.px[n], z - b.pz[n]
-			keep = (frame - b.birth) - b.pf[n] >= beamPathEvery or dx * dx + dz * dz > beamPathJump2
-		end
-		if keep then
-			addPathPoint(b, frame, x, y, z)
-			b.lastKept = true
-		else
-			b.lastKept = false
-		end
-		b.lf, b.lx, b.ly, b.lz = frame, x, y, z
 	end
 
 	local function closeBeam(b)
@@ -2269,7 +2283,24 @@ local projectiles = (function()
 				end
 			end
 		end
-		if frame % trackSweepEvery == 0 then
+		if explosionHooked then
+			if frame % trackSweepEvery == 0 then
+				local gone = {}
+				for pid, t in pairs(tracks) do
+					local x, y, z = spGetProjectilePosition(pid)
+					if x == nil or spGetProjectileDefID(pid) ~= t.wd then
+						gone[#gone + 1] = t
+					else
+						t.lx, t.ly, t.lz = x, y, z
+					end
+				end
+				for i = 1, #gone do
+					closeTrack(gone[i], frame, 2)
+				end
+			end
+		else
+			-- No explosion callin: every frame, so a projectile gone now
+			-- exploded during this frame, one step past where it was seen.
 			local gone = {}
 			for pid, t in pairs(tracks) do
 				local x, y, z = spGetProjectilePosition(pid)
@@ -2277,10 +2308,16 @@ local projectiles = (function()
 					gone[#gone + 1] = t
 				else
 					t.lx, t.ly, t.lz = x, y, z
+					if spGetProjectileVelocity then
+						t.lvx, t.lvy, t.lvz = spGetProjectileVelocity(pid)
+					end
 				end
 			end
 			for i = 1, #gone do
-				closeTrack(gone[i], frame, 2)
+				local t = gone[i]
+				t.flags = setFlag(t.flags, TRACK_END_INFERRED)
+				local vx, vy, vz = t.lvx or t.vx or 0, t.lvy or t.vy or 0, t.lvz or t.vz or 0
+				closeTrack(t, frame, 1, t.lx + vx, t.ly + vy, t.lz + vz)
 			end
 		end
 		if #beamList > 0 then
@@ -2378,7 +2415,6 @@ local projectiles = (function()
 	-- handler's method of that name, once the handler has a list for it — the
 	-- same handler access the damage hook uses. The callin returns nothing: a
 	-- true return would suppress the engine's own graphics for the explosion.
-	local explosionHooked = false
 	local unhookExplosion = nil
 
 	local function hookExplosion()
@@ -2386,8 +2422,8 @@ local projectiles = (function()
 		-- but the handler behind it refuses a callin it has no list for.
 		local wh = realHandler()
 		if not (wh and type(wh.UpdateCallIn) == "function" and Script and Script.SetWatchExplosion) then
-			Echo(logTag .. " explosion callin unavailable; projectile ends and blasts come from"
-				.. " BAR's VisibleExplosionBatch (no projectile ids, no ownerless explosions)")
+			Echo(logTag .. " explosion callin unavailable; projectile ends, beam hits and unit"
+				.. " blasts are inferred (tracks swept every frame)")
 			return
 		end
 		wh.ExplosionList = wh.ExplosionList or {}
@@ -2414,7 +2450,7 @@ local projectiles = (function()
 	end
 
 	-- useEngineLog takes explosions from the engine's log instead of the
-	-- callin; VisibleExplosionBatch, the other fallback, is then ignored.
+	-- callin; with it, nothing is inferred (the ends are real).
 	local function useEngineLog()
 		explosionHooked = true
 		local n = 0
@@ -2425,74 +2461,39 @@ local projectiles = (function()
 			logTag, n, nTracked, nLauncherDefs))
 	end
 
-	-- matchTrack finds the open track an explosion with no projectile id ends:
-	-- the owner's track of that weapon whose projectile is gone (it exploded
-	-- this frame), else the one last seen nearest the explosion.
-	local function matchTrack(wdID, ownerID, px, pz)
-		local best, bestGone, bestD = nil, false, math.huge
-		for pid, t in pairs(tracks) do
-			if t.owner == ownerID and t.wd == wdID then
-				local gone = spGetProjectilePosition(pid) == nil
-				local dx, dz = (t.lx or t.x0) - px, (t.lz or t.z0) - pz
-				local d = dx * dx + dz * dz
-				if (gone and not bestGone) or (gone == bestGone and d < bestD) then
-					best, bestGone, bestD = pid, gone, d
-				end
-			end
-		end
-		return best
-	end
-
-	-- reopenClosed turns a track the sweep closed THIS frame as vanished
-	-- (kind 2) into the explosion it really was, when the batch arrives after
-	-- the sweep: the row is still in the buffer, so only its kind and end move.
-	local function reopenClosed(wdID, ownerID, frame, px, py, pz)
-		local w, o = id16(wdID), id16(ownerID)
-		for _, r in pairs(closedRow) do
-			local b = r.buf
-			if r.f == frame and b == trackBuf and b.k[r.n] == 2 and b.w[r.n] == w and b.o[r.n] == o then
-				b.k[r.n] = 1
-				b.x1[r.n], b.y1[r.n], b.z1[r.n] = s16(px), s16(py), s16(pz)
-				return true
-			end
-		end
-		return false
-	end
-
-	-- onVisibleBatch is the fallback for game builds where a user widget cannot
-	-- install the Explosion callin (BAR's 2026.10.13 sandbox took the real
-	-- widget handler away). BAR's own gfx_explosion_lights gadget forwards one
-	-- batch per sim frame of x, y, z, weaponDefID, ownerID for every explosion
-	-- of a projectile weapon that has an owner (unfiltered in full view): no
-	-- projectile id, so a track is matched by owner, weapon and position. It
-	-- does not carry ownerless explosions, LightningCannon or DGun.
-	local function onVisibleBatch(events, count)
-		if explosionHooked or type(events) ~= "table" then
-			return
-		end
-		local frame = factFrame()
-		for i = 1, (count or #events), 5 do
-			local px, py, pz, wdID, ownerID = events[i], events[i + 1], events[i + 2], events[i + 3], events[i + 4]
-			if watchRole[wdID] ~= nil then
-				local pid = nil
-				if trackClassOf[wdID] and trackClassOf[wdID] ~= CLS_BEAM and ownerID ~= nil then
-					pid = matchTrack(wdID, ownerID, px, pz)
-					if pid == nil and reopenClosed(wdID, ownerID, frame, px, py, pz) then
-						wdID = nil
-					end
-				end
-				if wdID ~= nil then
-					onExplosion(wdID, px, py, pz, ownerID, pid)
-				end
-			end
-		end
-	end
+	-- Engine kill codes (-CSolidObject::DAMAGE_*) whose death makes no
+	-- explosion (reclaimed = true in CUnit::KillUnit), or may not (Lua and
+	-- unit scripts choose; an invented blast is worse than a missing one),
+	-- and those that use the self-destruct weapon.
+	local quietDeath = { [-9] = true, [-12] = true, [-15] = true, [-16] = true, [-17] = true,
+		[-19] = true, [-20] = true, [-21] = true }
+	local selfdDeath = { [-10] = true, [-18] = true }
 
 	-- unitGone drops a dead unit's launcher and remembers its team for the
-	-- explosion the engine makes right after UnitDestroyed.
-	local function unitGone(unitID, team)
+	-- explosion the engine makes right after UnitDestroyed. Without the
+	-- Explosion callin that explosion is recorded here: CUnit::KillUnit
+	-- explodes the death (or self-destruct) weapon unless the unit was
+	-- reclaimed or unfinished.
+	local function unitGone(unitID, team, unitDefID, weaponDefID)
 		launchers[unitID] = nil
 		dyingTeam[unitID] = team
+		if explosionHooked or quietDeath[weaponDefID] then
+			return
+		end
+		local ud = unitDefID and UnitDefs[unitDefID]
+		local name = ud and (selfdDeath[weaponDefID] and ud.selfDExplosion or ud.deathExplosion) or ""
+		local wd = name ~= "" and WeaponDefNames and WeaponDefNames[name]
+		if not (wd and blastWeapon[wd.id]) then
+			return
+		end
+		local _, _, _, _, build = spGetUnitHealth(unitID)
+		if build ~= nil and build < 1 then
+			return
+		end
+		local x, y, z = spGetUnitPosition(unitID)
+		if x ~= nil then
+			addBlast(factFrame(), wd.id, x, y, z, unitID, team, 1)
+		end
 	end
 
 	local function unitGiven(unitID, team)
@@ -2529,7 +2530,6 @@ local projectiles = (function()
 		hookExplosion = hookExplosion,
 		useEngineLog = useEngineLog,
 		drainExplosions = drainExplosions,
-		visibleBatch = onVisibleBatch,
 		unhook = function()
 			if unhookExplosion then
 				unhookExplosion()
@@ -2700,14 +2700,6 @@ local function hookDamage()
 		wh.UnitDamaged = orig
 		damageHooked = false
 		pcall(wh.UpdateCallIn, wh, "UnitDamaged")
-	end
-end
-
-if recordProjectiles then
-	-- The fallback for explosions when the Explosion hook could not be
-	-- installed (see projectiles.visibleBatch); a no-op when it was.
-	function widget:VisibleExplosionBatch(events, count)
-		pcall(projectiles.visibleBatch, events, count)
 	end
 end
 
@@ -3030,7 +3022,7 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 		pcall(recordEnd, unitID, false)
 	end
 	if recordProjectiles then
-		pcall(projectiles.unitGone, unitID, unitTeam)
+		pcall(projectiles.unitGone, unitID, unitTeam, unitDefID, weaponDefID)
 	end
 	-- Only a REAL attacker is a cause: the engine passes nils for a death
 	-- with none (self-destruct, a crash, a reclaim), and a weapon id alone

@@ -451,6 +451,10 @@ then n rows as COLUMNS:
                                     bit 1 intercepted: destroyed by the interceptor
                                     that targeted it
                                     bit 2 path truncated at the point cap
+                                    bit 3 end inferred (widget >= 1.11.2, a build whose
+                                    sandbox denies the Explosion callin): a track
+                                    closed exploded one frame past where it was last
+                                    seen; a beam's one hit is its target at firing
   s16 x0  s16 y0  s16 z0            launch position, whole elmos (a beam: its muzzle)
   f32 vx  f32 vy  f32 vz            launch velocity, elmos per frame (0 for a beam)
   f32 gravity                       the projectile's per-frame gravity as GetProjectileGravity
