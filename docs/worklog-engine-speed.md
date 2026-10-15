@@ -375,3 +375,37 @@ profile alone rebuilds nothing — and under LTO the profile is applied when
 each object is compiled, so a relink does not pick it up either. `ninja -t
 clean` and rebuilding (~1 h). Lesson for pgo.sh: a new profile needs a clean
 build dir.
+
+### 2026-10-15 13:15 — flame graph: verylarge1 late game, PGO+LTO build
+
+![verylarge1 late game, PGO+LTO, main thread](flamegraphs/2026-10-15-verylarge1-pgolto.svg)
+
+([open the SVG](flamegraphs/2026-10-15-verylarge1-pgolto.svg) for the
+interactive version — hover and click to zoom.) Main thread of the
+450-frame window from 63780 (9961 units), LBR call stacks (≤16 frames, so
+deep stacks start part-way up). Recorded while a build was running, so its
+own wall time (34 s) is not comparable; the shape is what matters.
+
+| caller > callee | share of main-thread samples |
+|---|---|
+| CGame::SimFrame > CUnitHandler::Update | 12.4% |
+| CUnitHandler::Update > CWeapon::SlowUpdate (auto-targeting) | 10.0% |
+| CUnitHandler::Update > CStrafeAirMoveType::Update (aircraft) | 6.5% |
+| CGame::SimFrame > ThreadPool::WaitForFinished | 5.2% |
+| CUnitHandler::Update > CUnit::SlowUpdate | 4.5% |
+| CGame::SimFrame > CLosHandler::Update | 4.4% |
+| CUnitHandler::Update > **CBeamLaser::Update** | 4.3% |
+| CUnitHandler::Update > WaitForFinished (UpdateWeaponVectors for_mt) | 3.3% |
+| CGame::SimFrame > CCobThread::Tick | 3.3% |
+
+| leaf (self) | share |
+|---|---|
+| CUnitHandler::Update (LTO inlined unit/weapon/move code into it) | 9.9% |
+| luaV_execute / luaV_gettable / luaD_precall | 5.5 / 4.7 / 2.6% |
+| CUnitScript::TickAllAnims | 3.8% |
+| CGameHelper::GenerateWeaponTargets | 3.5% |
+| CStrafeAirMoveType::UpdateAirPhysics / UpdateFlying | 2.8 / 1.9% |
+| CWeapon::UpdateWeaponVectors | 2.7% |
+
+New candidates from it: **CBeamLaser::Update (4.3%)** — beam weapons — and
+the aircraft move type (6.5%).
