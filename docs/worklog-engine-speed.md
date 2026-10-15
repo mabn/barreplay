@@ -81,3 +81,8 @@ the whole replay. First question: what does that cost?
   -fprofile-use -fprofile-partial-training), `~/dev/barreplay-engine-build/pgo.sh`.
   Same official image and flags otherwise; FP semantics unchanged (no FMA,
   -frounding-math), and the gate checks byte-identity regardless.
+- 2026-10-15: PGO instrumented build done (`build-pgogen`, 1296 steps, ~50
+  min at -j7). Training: medium gate replay (instrumented: sim 5m31s, 73 fps,
+  ~4x slower than normal) + `c04fd06a…` (BAR test-31620, 5m54s). The engine's
+  quitforce exit runs the gcov dump: 1073 .gcda files, 15 MB, in
+  `~/dev/barreplay-engine-build/prof`. Building with -fprofile-use now.
