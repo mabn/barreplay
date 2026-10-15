@@ -47,7 +47,9 @@ type PatchedBuild struct {
 // (the newest revision is the one hosts should run). Add an entry only for a
 // build that passed the byte-identity gate (docs/building-recoil.md, "The
 // PATCHED build"); cmd/publish-engine prints the line to paste here.
-var patchedBuilds = map[string]PatchedBuild{}
+var patchedBuilds = map[string]PatchedBuild{
+	"2026.07.04": {Rev: 1, SHA256: "eeb7625d02e251282aca4fea3162a21208ff0fcb468c83cf2d3bedc8b5070a27"}, // 2026.7.4-barreplay.1
+}
 
 // PatchedBuildBaseURL is where published patched engines are read back from:
 // the bucket's public hostname (packer's "r2" target DataURL). Exposed so
