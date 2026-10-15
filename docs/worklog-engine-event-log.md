@@ -138,3 +138,13 @@ a widget WITHOUT going through the widget handler.
   holding one of those is upgraded, an unknown hash (built locally) is still
   kept. Test `TestEnsurePatchedEngineUpgradesASupersededBuild`.
 - In progress: `publish-engine` for revision 2 (gate + strip + upload).
+- 2026-10-15: PUBLISHED `2026.7.4-barreplay.2` with `publish-engine` (gate on
+  `4936896a…` identical again, sha256 of the capture `1facff5b…`; 43 MB, 16 MB
+  gzipped) -> `engines/2026.07.04/spring-headless-patched-2026.7.4-barreplay.2.gz`.
+  The public download hashes to the pin (`1e7b3c41…`). Pinned in
+  `patchedBuilds` with revision 1 (`eeb7625d…`) as `Superseded`.
+  TODO after merge: `git tag -a patched-engine/2026.7.4-barreplay.2 … origin/main`.
+
+The assigned work (restore projectile/explosion/damage data on sandboxed BAR
+builds) is done. Engine speed work continues in
+`docs/worklog-engine-speed.md`.
