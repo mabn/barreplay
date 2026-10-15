@@ -31,6 +31,7 @@ to the stock/rev-2 capture.
 | H60 FindAnim + COB DIV shift, H61 COB threaded dispatch, H62 Lua threaded dispatch | yes | instr -1.1%, wall ±0 | wall +0.8%, instr -0.2% (noise) | no late-game value |
 | PGO (on H60-H62) | yes (medium, isthmus) | wall -3.8% (3/3), instr -3.3%; isthmus -4% | wall -1.9% / -3.7% (two sessions), instr -1.7..-3.3% | small |
 | H63 GenerateWeaponTargets: TestTarget after LOS/range | yes (medium) | — | 23.34 s -> 23.37 s, ±0 | no value; kept (exact, harmless) |
+| H64 prefetch in GenerateWeaponTargets | — | — | 23.32 s -> 23.36 s, ±0 | reverted |
 | **PGO + LTO** (on H60-H62) | yes (medium) | full run 1m25s -> **1m16s (-11%)** | wall **-10.2%** (3/3), instr **-15.3%** | **keep** |
 
 ## Log
@@ -353,3 +354,24 @@ candidate unit, so `GenerateWeaponTargets` now prefetches the `tempNum` and
 per-unit loops over the 10k active units (UpdateUnits, UpdateUnitWeapons,
 LOS status). Checkpoint dumping alongside the build; trials once the host is
 quiet.
+
+### 2026-10-15 13:10 — H64 measured: nothing (reverted); the PGO rebuild had not rebuilt
+
+| pair | H63 wall ms | H63 + H64 wall ms |
+|---|---|---|
+| 1 | 23281 | 23407 |
+| 2 | 23474 | 23035 |
+| 3 | 23194 | 23628 |
+| mean | 23316 | 23357 |
+
+Prefetching the candidates did nothing: either the out-of-order core
+already overlaps those misses or the time is elsewhere in the loop. Reverted,
+which also puts the source back exactly where the instrumented build was, so
+the late-game profile matches every function.
+
+The "PGO+LTO from the new profile" build finished in 10 minutes having
+recompiled 3 files: the .gcda files are not ninja dependencies, so a changed
+profile alone rebuilds nothing — and under LTO the profile is applied when
+each object is compiled, so a relink does not pick it up either. `ninja -t
+clean` and rebuilding (~1 h). Lesson for pgo.sh: a new profile needs a clean
+build dir.
