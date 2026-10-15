@@ -22,6 +22,9 @@
 # their trials; builds that pass the byte-identity gate reach the same state at
 # <frame>, so the trials are comparable.
 #
+# PERF="<perf record args>" (e.g. PERF="-F 999 -e cycles") also records a
+# profile of the window into the checkpoint dir.
+#
 # Each trial prints the bench harness line: frames, units alive at the start,
 # cycles, instructions (main thread) and the window's SimFrame wall time.
 #
@@ -94,6 +97,15 @@ trial1() {
 	rm -f "$dir/park.go" "$dir/result"
 	hostroot systemd-run --scope --quiet criu restore -D "$dir/img" -j -d --manage-cgroups=ignore \
 		--tcp-established -o restore.log -v2 || die "criu restore failed (see $dir/img/restore.log)"
+	local perfpid=
+	if [ -n "${PERF:-}" ]; then
+		# Profile exactly the timed window: attach to the restored engine
+		# (CRIU restores its pid) before releasing it; stops when it exits.
+		local pid=$(cat "$dir/park.ready")
+		perf record $PERF -p "$pid" -o "$dir/perf-$(date +%s).data" > "$dir/perf.log" 2>&1 &
+		perfpid=$!
+		sleep 1
+	fi
 	echo "$n $dir/result" > "$dir/park.go"
 	local t=0
 	while [ ! -s "$dir/result" ]; do
@@ -101,6 +113,7 @@ trial1() {
 		[ $t -gt 7200 ] && die "no result after an hour"
 	done
 	sleep 0.2
+	[ -n "$perfpid" ] && wait $perfpid 2>/dev/null
 	tail -1 "$dir/result"
 }
 

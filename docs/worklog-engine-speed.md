@@ -1,22 +1,41 @@
 # Work log: re-simulation speed (round 3)
 
-Branch `claude/engine-projectile-callins` (continues from the engine event
-log, `docs/worklog-engine-event-log.md`). Newest entries at the bottom.
-Round 1/2 history: `patches/engine-2026.07.04/RESULTS.md` and
-`experiments/LOG.md` — read the measurement rules there (interleaved pairs,
-never a sub-10% wall delta from single runs on one box).
+Branch `speed-optimization` (Recoil side: branch `speed3` in
+`~/dev/barreplay-engine-build/recoil`). Newest entries at the bottom; every
+entry from 2026-10-15 09:26 on carries the time (UTC). Round 1/2 history:
+`patches/engine-2026.07.04/RESULTS.md` and `experiments/LOG.md` — read the
+measurement rules there (interleaved pairs, never a sub-10% wall delta from
+single runs on one box).
 
-Host for this round: 8 cores, 15 GB RAM, no GPU; /tmp is a 7.6 GB tmpfs
-(builds and captures go elsewhere).
+Host for this round: i7-4980HQ (4 cores / 8 threads), 15 GB RAM, no GPU;
+/tmp is a 7.6 GB tmpfs (builds, captures and checkpoints live under ~/dev).
 
-## Starting point
+## Benchmarks
 
-BAR's 2026.10.13 sandbox also took away `-disable-widgets`: the re-sim widget
-can no longer disable BAR's widget suite (the handler proxy refuses), so every
-re-sim of a game on BAR test-31614+ runs BAR's ~240 default widgets through
-the whole replay. First question: what does that cost?
+| name | gameId | what | how |
+|---|---|---|---|
+| **verylarge1** | `6a37d06acbb455b1d19179d8ec965f10` | late game, ~10k units, 19.5 fps | CRIU checkpoint at frame **63780**, windows of 450 / 900 frames (`tools/bench-ckpt/bench-ckpt.sh`) |
+| medium | `4936896a8b258d038cbd28f55eb15ed2` | 16p 13:25, ~280 fps — TOO SMALL to judge speed by (the user's call); still the byte-identity gate | full runs |
+| isthmus | `6122896ac3328104d12093d975c61214` | 8v8 27:31, ~210 fps | full runs (held-out identity check) |
+
+## Results summary
+
+Speed is judged on **verylarge1** from now on; the medium/isthmus numbers
+below predate the checkpoint harness. "Identical" = the .brp is byte-identical
+to the stock/rev-2 capture.
+
+| candidate | identical | medium (full / bench window) | verylarge1 | verdict |
+|---|---|---|---|---|
+| BAR widget suite left on (sandbox) | yes | ±0 | — | no cost; dropped |
+| `-worker-threads 7` | yes | ±0 | — | dropped |
+| H60 FindAnim + COB DIV shift, H61 COB threaded dispatch | yes | instr -1.1%, wall -0.4% (noise) | pending | keep (exact), re-judge |
+| H62 Lua threaded dispatch | yes | wall ±0 | pending | keep (exact), re-judge |
+| PGO (on H60-H62) | yes (medium, isthmus) | wall -3.8% (3/3), instr -3.3%; isthmus -4% | pending | promising |
 
 ## Log
+
+(Entries before 09:26 carry only the date; their commits landed at 07:16,
+07:33, 08:07, 08:41, 08:52 and 09:08.)
 
 - 2026-10-15: BAR decides which widgets load from the saved order list
   (`LuaUI/Config/BYAR.lua`, `barwidgets.lua` ~l.1362): a name with order <= 0
@@ -134,3 +153,19 @@ the whole replay. First question: what does that cost?
 - 2026-10-15: (event-log branch) merged origin/main (#127, widget 1.11.2
   inferred ends) into it, opened and squash-merged PR #129 (`fbedbae`), tagged
   `patched-engine/2026.7.4-barreplay.2`.
+
+### 2026-10-15 09:28 — checkpoint harness in use; builds under test
+
+USER: timestamps with hour/minute, tables for results, keep optimizing.
+
+`speed-optimization` was rebased onto `main` after #129 (only the log and
+`tools/bench-ckpt` were on it). Builds checkpointed at verylarge1/63780:
+
+| build | source | checkpoint |
+|---|---|---|
+| `spring-headless-base` | rev 2 (`72aeecb`) + the two park commits | done (5.7 GB) |
+| `spring-headless-park` | `speed3`: H60-H62 + park | done (5.7 GB) |
+| `spring-headless-pgopark` | `speed3` with -fprofile-use (profile from the medium + c04fd06a runs) | dumping |
+
+`bench-ckpt.sh` gained `PERF="<perf record args>"`: a trial then also
+profiles exactly its window (attaches to the restored pid before the go).
