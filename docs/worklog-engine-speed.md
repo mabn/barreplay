@@ -29,7 +29,8 @@ to the stock/rev-2 capture.
 | BAR widget suite left on (sandbox) | yes | ±0 | — | no cost; dropped |
 | `-worker-threads 7` | yes | ±0 | — | dropped |
 | H60 FindAnim + COB DIV shift, H61 COB threaded dispatch, H62 Lua threaded dispatch | yes | instr -1.1%, wall ±0 | wall +0.8%, instr -0.2% (noise) | no late-game value |
-| PGO (on H60-H62) | yes (medium, isthmus) | wall -3.8% (3/3), instr -3.3%; isthmus -4% | wall **-1.9%**, instr -3.3% | small |
+| PGO (on H60-H62) | yes (medium, isthmus) | wall -3.8% (3/3), instr -3.3%; isthmus -4% | wall -1.9% / -3.7% (two sessions), instr -1.7..-3.3% | small |
+| **PGO + LTO** (on H60-H62) | yes (medium) | full run 1m25s -> **1m16s (-11%)** | wall **-10.2%** (3/3), instr **-15.3%** | **keep** |
 
 ## Log
 
@@ -249,3 +250,33 @@ PGO+LTO's first link failed: "undefined reference to mi_new /
 SpringVersion::GetMajor" — the static libraries were archived by plain `ar`,
 which writes no LTO symbol index. Reconfigured with gcc-ar-13 / gcc-ranlib-13
 (only 31 steps: re-archive + link).
+
+### 2026-10-15 11:00 — PGO + LTO: -10% on the late game
+
+`spring-headless-pgolto` (speed3 + park, -O3 -flto=4 -fprofile-use, no -g;
+101 MB unstripped). Medium full run: byte-identical (md5 `0558d354…`), sim
+1m16s vs ~1m25s for the same source without them.
+
+verylarge1 from 63780, 450 frames, 3 rounds, order rotated (raw:
+`~/dev/perf3/vl1-lto.txt`):
+
+| build | wall per round (ms) | mean | vs base | instructions, mean | vs base |
+|---|---|---|---|---|---|
+| base | 23310 / 23064 / 23117 | 23163 | — | 78.18e9 | — |
+| PGO | 22276 / 22247 / 22377 | 22300 | -3.7% | 76.82e9 | -1.7% |
+| **PGO + LTO** | 20933 / 20717 / 20759 | **20803** | **-10.2%** | **66.25e9** | **-15.3%** |
+
+LTO is most of it: cross-file inlining — `CSyncChecker::Sync` (4.7% of the
+main thread) is one obvious beneficiary.
+
+Next: retrain PGO on verylarge1's LATE game. The bench harness now calls a
+weak `__gcov_dump()` before `_exit`, so an instrumented run stops right after
+a late window with its profile written: running to 63780+1800 now (~1 h at
+~4x instrumented slowdown).
+
+Lesson (now enforced by bench-ckpt `alone`): a trial during that training run
+failed — the restored engine wants its UDP game-server port back ("Address
+already in use") — and its file restore had copied the checkpoint's infolog
+and widget stream over the training run's own (same game, same data dir).
+Harmless for training (only the .gcda files matter), but no engine may run
+beside a dump or a trial.

@@ -65,6 +65,7 @@ dump() {
 	local bin=$(bindir "$1") id=$(gameid "$2") frame=$3
 	[ -x "$bin" ] || die "no engine binary $1"
 	local dir="$CKPT/$(basename "$bin")/$2-$frame"
+	alone
 	rm -rf "$dir"; mkdir -p "$dir/img" "$dir/files"
 	[ -x "$BARREPLAY" ] || (cd "$BR" && go build -o "$BARREPLAY" ./cmd/barreplay) || die "build barreplay"
 	echo "== dump: $(basename "$bin") $2 ($id) up to frame $frame"
@@ -94,8 +95,19 @@ dump() {
 	echo "checkpoint: $dir ($(du -sh "$dir/img" | cut -f1))"
 }
 
+# alone: nothing else may run an engine meanwhile. A restored engine needs its
+# old UDP game-server port back (criu: "Address already in use"), and a trial
+# copies the checkpoint's open files back into the DATA DIR — the infolog and
+# the widget stream — which would clobber another run's. (Also a timing rule.)
+alone() {
+	if pgrep -f "/engine/[^ ]*/spring-headless" > /dev/null; then
+		die "another engine is running (pgrep -af spring-headless); trials and dumps need the host to themselves"
+	fi
+}
+
 # trial <bin> <replay> <frame> <frames>: restore once, time <frames> frames.
 trial1() {
+	alone
 	local bin=$(bindir "$1") replay=$2 frame=$3 n=$4
 	local dir="$CKPT/$(basename "$bin")/$replay-$frame"
 	[ -d "$dir/img" ] || dump "$1" "$replay" "$frame" >&2
