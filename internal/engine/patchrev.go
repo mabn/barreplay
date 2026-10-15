@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -91,6 +92,22 @@ func SeriesDigest(dir string) (string, error) {
 	}
 	if list.Len() == 0 {
 		return "", fmt.Errorf("engine: %s lists no patches", filepath.Join(dir, "series"))
+	}
+	// A PGO build (revision 3 on) is made from the patches AND pgo/: the
+	// profile and the script that sets the compile and link flags. Either
+	// changing is a different binary, so both are part of the revision.
+	pgo, err := filepath.Glob(filepath.Join(dir, "pgo", "*"))
+	if err != nil {
+		return "", err
+	}
+	sort.Strings(pgo)
+	for _, f := range pgo {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return "", fmt.Errorf("engine: patch series: %w", err)
+		}
+		sum := sha256.Sum256(b)
+		fmt.Fprintf(&list, "%s pgo/%s\n", hex.EncodeToString(sum[:]), filepath.Base(f))
 	}
 	sum := sha256.Sum256(list.Bytes())
 	return hex.EncodeToString(sum[:]), nil

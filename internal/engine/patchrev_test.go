@@ -82,3 +82,36 @@ func TestSeriesDigestTracksOrderAndContents(t *testing.T) {
 		t.Error("a series naming a missing patch hashed without error")
 	}
 }
+
+func TestSeriesDigestTracksThePGODir(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a.patch", "a")
+	write("series", "a.patch\n")
+	plain, err := SeriesDigest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write("pgo/profile.tar.xz", "profile 1")
+	write("pgo/build.sh", "flags")
+	withPGO, _ := SeriesDigest(dir)
+	if withPGO == plain {
+		t.Error("adding a pgo/ dir kept the digest")
+	}
+	write("pgo/profile.tar.xz", "profile 2")
+	if d, _ := SeriesDigest(dir); d == withPGO {
+		t.Error("a new profile kept the digest")
+	}
+	write("pgo/profile.tar.xz", "profile 1")
+	write("pgo/build.sh", "other flags")
+	if d, _ := SeriesDigest(dir); d == withPGO {
+		t.Error("new build flags kept the digest")
+	}
+}

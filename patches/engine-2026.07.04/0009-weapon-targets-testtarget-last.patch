@@ -1,0 +1,43 @@
+From c9fac20e69de3aff185bbd1c425e2a6680dbf784 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Thu, 15 Oct 2026 10:44:02 +0000
+Subject: [PATCH 9/9] H63 GenerateWeaponTargets: TestTarget after the LOS and
+ range rejections
+
+---
+ rts/Game/GameHelper.cpp | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/rts/Game/GameHelper.cpp b/rts/Game/GameHelper.cpp
+index e8c521e..37b0384 100644
+--- a/rts/Game/GameHelper.cpp
++++ b/rts/Game/GameHelper.cpp
+@@ -708,9 +708,12 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
+ 
+ 				targetUnit->tempNum = tempNum;
+ 
+-				if (!weapon->TestTarget(testPos, SWeaponTarget(targetUnit)))
+-					continue;
+-
++				// [barreplay] TestTarget (virtual, const, reads a dozen fields
++				// of the target) moved below the LOS and range rejections:
++				// with thousands of units in the scanned quads most candidates
++				// fail those, and every check here is a pure function of state
++				// nothing in this loop modifies before AllowWeaponTarget, so the
++				// same units pass, in the same order, with the same priority.
+ 				const unsigned short targetLOSState = targetUnit->losStatus[weaponOwner->allyteam];
+ 
+ 				float targetPriority = tgtPriorityMults[(targetUnit == avoidUnit) * 1];
+@@ -731,6 +734,9 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
+ 				if (sqDist2D > Square(modRange))
+ 					continue;
+ 
++				if (!weapon->TestTarget(testPos, SWeaponTarget(targetUnit)))
++					continue;
++
+ 				const float3 worldTargetDir = (targetPos - ownerPos).SafeNormalize();
+ 				const float angleOffset =  (1.f - worldMainDir.dot(worldTargetDir));
+ 				const float angleMod = angleOffset * weaponAimAdjustPriority + 1.f;
+-- 
+2.53.0
+

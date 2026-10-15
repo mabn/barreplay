@@ -1,0 +1,870 @@
+From f04f1f1cc8daffedbe3e293f53a8691aa223c352 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Thu, 15 Oct 2026 07:16:25 +0000
+Subject: [PATCH 7/9] COB threaded dispatch (computed goto, per-handler
+ fetch+jump)
+
+---
+ rts/Sim/Units/Scripts/CobThread.cpp | 466 ++++++++++++++++++++--------
+ 1 file changed, 340 insertions(+), 126 deletions(-)
+
+diff --git a/rts/Sim/Units/Scripts/CobThread.cpp b/rts/Sim/Units/Scripts/CobThread.cpp
+index 7dcc540..f392d42 100644
+--- a/rts/Sim/Units/Scripts/CobThread.cpp
++++ b/rts/Sim/Units/Scripts/CobThread.cpp
+@@ -240,6 +240,42 @@ void CCobThread::InitStack(unsigned int n, CCobThread* t)
+ #define GET_LONG_PC() (cobFile->code.at(pc++))
+ #endif
+ 
++// [barreplay] THREADED DISPATCH (GCC/Clang computed goto). The interpreter
++// used to return to ONE indirect jump - the switch - after every opcode, so
++// that jump's target was the next opcode of whatever script ran, and it was
++// one of the most mispredicted branches of a re-simulation. Here every handler
++// ends in its own copy of the fetch + jump (COB_NEXT), whose target the branch
++// predictor learns per opcode pair. The switch is kept, and is still how the
++// loop is entered and where any other break lands, so the behaviour of every
++// opcode is the code below unchanged: COB_NEXT checks `state == Run` exactly
++// as the loop condition did, and fetches the opcode the same way.
++#if defined(__GNUC__) && !defined(COB_NO_THREADED_DISPATCH)
++#define COB_THREADED_DISPATCH 1
++#define COB_LABEL(name) cob_op_##name:
++#define COB_NEXT() do { \
++	if (state != Run) \
++		goto cob_exit; \
++	opcode = GET_LONG_PC(); \
++	const unsigned cobSlot = static_cast<unsigned>(opcode >> 12) - 0x10000u; \
++	goto *cobOps[(cobSlot < (sizeof(cobOps) / sizeof(cobOps[0])))? cobSlot: 0]; \
++} while (false)
++#else
++#define COB_THREADED_DISPATCH 0
++#define COB_LABEL(name)
++#define COB_NEXT() break
++#endif
++#define COB_CASE(op) case (op >> 12): COB_LABEL(op)
++
++#if COB_THREADED_DISPATCH && defined(__GNUC__) && !defined(__clang__)
++// Without these GCC folds the per-handler jumps back into a shared one
++// (cross-jumping merges identical tails, GCSE hoists the common fetch) and the
++// replication above is undone. Integer bookkeeping only: neither pass touches
++// floating-point semantics.
++#pragma GCC push_options
++#pragma GCC optimize ("no-crossjumping", "no-gcse")
++#define COB_POP_OPTIONS 1
++#endif
++
+ bool CCobThread::Tick()
+ {
+ 	assert(state != Sleep);
+@@ -253,24 +289,195 @@ bool CCobThread::Tick()
+ 	state = Run;
+ 
+ 	int r1, r2, r3, r4, r5, r6;
++	int opcode;
++
++#if COB_THREADED_DISPATCH
++	// [barreplay] threaded dispatch: one slot per (opcode >> 12) - 0x10000,
++	// slot 0 (no such opcode) and every gap go to the unknown-opcode handler.
++	static const void* const cobOps[163] = {
++		&&cob_op_default,
++		&&cob_op_MOVE,
++		&&cob_op_TURN,
++		&&cob_op_SPIN,
++		&&cob_op_STOP_SPIN,
++		&&cob_op_SHOW,
++		&&cob_op_HIDE,
++		&&cob_op_CACHE,
++		&&cob_op_DONT_CACHE,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_MOVE_NOW,
++		&&cob_op_TURN_NOW,
++		&&cob_op_SHADE,
++		&&cob_op_DONT_SHADE,
++		&&cob_op_EMIT_SFX,
++		&&cob_op_default,
++		&&cob_op_WAIT_TURN,
++		&&cob_op_WAIT_MOVE,
++		&&cob_op_SLEEP,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_PUSH_CONSTANT,
++		&&cob_op_CREATE_LOCAL_VAR,
++		&&cob_op_POP_STATIC,
++		&&cob_op_POP_STACK,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_ADD,
++		&&cob_op_SUB,
++		&&cob_op_MUL,
++		&&cob_op_DIV,
++		&&cob_op_BITWISE_AND,
++		&&cob_op_BITWISE_OR,
++		&&cob_op_BITWISE_XOR,
++		&&cob_op_BITWISE_NOT,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_RAND,
++		&&cob_op_GET_UNIT_VALUE,
++		&&cob_op_GET,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_SET_LESS,
++		&&cob_op_SET_LESS_OR_EQUAL,
++		&&cob_op_SET_GREATER,
++		&&cob_op_SET_GREATER_OR_EQUAL,
++		&&cob_op_SET_EQUAL,
++		&&cob_op_SET_NOT_EQUAL,
++		&&cob_op_LOGICAL_AND,
++		&&cob_op_LOGICAL_OR,
++		&&cob_op_LOGICAL_XOR,
++		&&cob_op_LOGICAL_NOT,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_START,
++		&&cob_op_BATCH_LUA,
++		&&cob_op_default,
++		&&cob_op_JUMP,
++		&&cob_op_RETURN,
++		&&cob_op_JUMP_NOT_EQUAL,
++		&&cob_op_SIGNAL,
++		&&cob_op_SET_SIGNAL_MASK,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_EXPLODE,
++		&&cob_op_PLAY_SOUND,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_SET,
++		&&cob_op_ATTACH,
++		&&cob_op_DROP,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_SIGNATURE_LUA,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_default,
++		&&cob_op_SCALE,
++		&&cob_op_SCALE_NOW,
++		&&cob_op_WAIT_SCALE
++	};
++#endif
+ 
+ 	while (state == Run) {
+-		const int opcode = GET_LONG_PC();
++		opcode = GET_LONG_PC();
+ 
+ 		switch (opcode >> 12) {
+-			case (PUSH_CONSTANT >> 12): {
++			COB_CASE(PUSH_CONSTANT) {
+ 				switch (opcode) {
+ 					case PUSH_CONSTANT:
+ 				{
+ 				r1 = GET_LONG_PC();
+ 				PushDataStack(r1);
+-			} break;
++			} COB_NEXT();
+ 					case PUSH_LOCAL_VAR:
+ 				{
+ 				r1 = GET_LONG_PC();
+ 				r2 = dataStack[LocalStackFrame() + r1];
+ 				PushDataStack(r2);
+-			} break;
++			} COB_NEXT();
+ 
+ 
+ 					case PUSH_STATIC:
+@@ -279,12 +486,12 @@ bool CCobThread::Tick()
+ 
+ 				if (static_cast<size_t>(r1) < cobInst->staticVars.size())
+ 					PushDataStack(cobInst->staticVars[r1]);
+-			} break;
++			} COB_NEXT();
+ 
+ 					default: break;
+ 				}
+-			} break;
+-			case (SLEEP >> 12):
++			} COB_NEXT();
++			COB_CASE(SLEEP)
+ 				{
+ 				r1 = PopDataStack();
+ 				wakeTime = cobEngine->GetCurrTime() + r1;
+@@ -292,24 +499,24 @@ bool CCobThread::Tick()
+ 
+ 				cobEngine->ScheduleThread(this);
+ 				return true;
+-			} break;
+-			case (SPIN >> 12):
++			} COB_NEXT();
++			COB_CASE(SPIN)
+ 				{
+ 				r1 = GET_LONG_PC();
+ 				r2 = GET_LONG_PC();
+ 				r3 = PopDataStack();         // speed
+ 				r4 = PopDataStack();         // accel
+ 				cobInst->Spin(r1, r2, r3, r4);
+-			} break;
+-			case (STOP_SPIN >> 12):
++			} COB_NEXT();
++			COB_CASE(STOP_SPIN)
+ 				{
+ 				r1 = GET_LONG_PC();
+ 				r2 = GET_LONG_PC();
+ 				r3 = PopDataStack();         // decel
+ 
+ 				cobInst->StopSpin(r1, r2, r3);
+-			} break;
+-			case (RETURN >> 12):
++			} COB_NEXT();
++			COB_CASE(RETURN)
+ 				{
+ 				retCode = PopDataStack();
+ 
+@@ -327,39 +534,39 @@ bool CCobThread::Tick()
+ 					dataStack.resize(LocalStackFrame());
+ 
+ 				callStack.pop_back();
+-			} break;
++			} COB_NEXT();
+ 
+ 
+-			case (SHADE >> 12):
++			COB_CASE(SHADE)
+ 				{
+ 				r1 = GET_LONG_PC();
+-			} break;
+-			case (DONT_SHADE >> 12):
++			} COB_NEXT();
++			COB_CASE(DONT_SHADE)
+ 				{
+ 				r1 = GET_LONG_PC();
+-			} break;
+-			case (CACHE >> 12):
++			} COB_NEXT();
++			COB_CASE(CACHE)
+ 				{
+ 				r1 = GET_LONG_PC();
+-			} break;
+-			case (DONT_CACHE >> 12):
++			} COB_NEXT();
++			COB_CASE(DONT_CACHE)
+ 				{
+ 				r1 = GET_LONG_PC();
+-			} break;
++			} COB_NEXT();
+ 
+-			case (SIGNATURE_LUA >> 12):
++			COB_CASE(SIGNATURE_LUA)
+ 				{
+ 				LOG_L(L_ERROR, "BAD ACCESS: Entered a lua method reference.");
+ 				state = Dead;
+ 				return false;
+-			} break;
++			} COB_NEXT();
+ 
+-			case (BATCH_LUA >> 12): {
++			COB_CASE(BATCH_LUA) {
+ 				switch (opcode) {
+ 					case BATCH_LUA:
+ 				{
+ 				DeferredCall(false);
+-			} break;
++			} COB_NEXT();
+ 
+ 					case CALL:
+ 				{
+@@ -393,17 +600,17 @@ bool CCobThread::Tick()
+ 
+ 				// call cobFile->scriptNames[r1]
+ 				pc = cobFile->scriptOffsets[r1];
+-			} break;
++			} COB_NEXT();
+ 					case LUA_CALL:
+ 				{
+ 				LuaCall();
+-			} break;
++			} COB_NEXT();
+ 
+ 
+ 					default: break;
+ 				}
+-			} break;
+-			case (POP_STATIC >> 12): {
++			} COB_NEXT();
++			COB_CASE(POP_STATIC) {
+ 				switch (opcode) {
+ 					case POP_STATIC:
+ 				{
+@@ -412,23 +619,23 @@ bool CCobThread::Tick()
+ 
+ 				if (static_cast<size_t>(r1) < cobInst->staticVars.size())
+ 					cobInst->staticVars[r1] = r2;
+-			} break;
++			} COB_NEXT();
+ 					case POP_LOCAL_VAR:
+ 				{
+ 				r1 = GET_LONG_PC();
+ 				r2 = PopDataStack();
+ 				dataStack[LocalStackFrame() + r1] = r2;
+-			} break;
++			} COB_NEXT();
+ 					default: break;
+ 				}
+-			} break;
+-			case (POP_STACK >> 12):
++			} COB_NEXT();
++			COB_CASE(POP_STACK)
+ 				{
+ 				PopDataStack();
+-			} break;
++			} COB_NEXT();
+ 
+ 
+-			case (START >> 12):
++			COB_CASE(START)
+ 				{
+ 				r1 = GET_LONG_PC();
+ 				r2 = GET_LONG_PC();
+@@ -445,17 +652,17 @@ bool CCobThread::Tick()
+ 
+ 				// calling AddThread directly might move <this>, defer it
+ 				cobEngine->QueueAddThread(std::move(t));
+-			} break;
++			} COB_NEXT();
+ 
+-			case (CREATE_LOCAL_VAR >> 12):
++			COB_CASE(CREATE_LOCAL_VAR)
+ 				{
+ 				if (paramCount == 0) {
+ 					PushDataStack(0);
+ 				} else {
+ 					paramCount--;
+ 				}
+-			} break;
+-			case (GET_UNIT_VALUE >> 12):
++			} COB_NEXT();
++			COB_CASE(GET_UNIT_VALUE)
+ 				{
+ 				r1 = PopDataStack();
+ 				if ((r1 >= LUA0) && (r1 <= LUA9)) {
+@@ -464,10 +671,10 @@ bool CCobThread::Tick()
+ 				}
+ 				r1 = cobInst->GetUnitVal(r1, 0, 0, 0, 0);
+ 				PushDataStack(r1);
+-			} break;
++			} COB_NEXT();
+ 
+ 
+-			case (JUMP_NOT_EQUAL >> 12):
++			COB_CASE(JUMP_NOT_EQUAL)
+ 				{
+ 				r1 = GET_LONG_PC();
+ 				r2 = PopDataStack();
+@@ -475,133 +682,133 @@ bool CCobThread::Tick()
+ 				if (r2 == 0)
+ 					pc = r1;
+ 
+-			} break;
+-			case (JUMP >> 12):
++			} COB_NEXT();
++			COB_CASE(JUMP)
+ 				{
+ 				r1 = GET_LONG_PC();
+ 				// this seem to be an error in the docs..
+ 				//r2 = cobFile->scriptOffsets[LocalFunctionID()] + r1;
+ 				pc = r1;
+-			} break;
++			} COB_NEXT();
+ 
+ 
+-			case (BITWISE_AND >> 12):
++			COB_CASE(BITWISE_AND)
+ 				{
+ 				r1 = PopDataStack();
+ 				r2 = PopDataStack();
+ 				PushDataStack(r1 & r2);
+-			} break;
+-			case (BITWISE_OR >> 12):
++			} COB_NEXT();
++			COB_CASE(BITWISE_OR)
+ 				{
+ 				r1 = PopDataStack();
+ 				r2 = PopDataStack();
+ 				PushDataStack(r1 | r2);
+-			} break;
+-			case (BITWISE_XOR >> 12):
++			} COB_NEXT();
++			COB_CASE(BITWISE_XOR)
+ 				{
+ 				r1 = PopDataStack();
+ 				r2 = PopDataStack();
+ 				PushDataStack(r1 ^ r2);
+-			} break;
+-			case (BITWISE_NOT >> 12):
++			} COB_NEXT();
++			COB_CASE(BITWISE_NOT)
+ 				{
+ 				r1 = PopDataStack();
+ 				PushDataStack(~r1);
+-			} break;
++			} COB_NEXT();
+ 
+-			case (EXPLODE >> 12):
++			COB_CASE(EXPLODE)
+ 				{
+ 				r1 = GET_LONG_PC();
+ 				r2 = PopDataStack();
+ 				cobInst->Explode(r1, r2);
+-			} break;
++			} COB_NEXT();
+ 
+-			case (PLAY_SOUND >> 12):
++			COB_CASE(PLAY_SOUND)
+ 				{
+ 				r1 = GET_LONG_PC();
+ 				r2 = PopDataStack();
+ 				cobInst->PlayUnitSound(r1, r2);
+-			} break;
++			} COB_NEXT();
+ 
+-			case (SET_NOT_EQUAL >> 12):
++			COB_CASE(SET_NOT_EQUAL)
+ 				{
+ 				r1 = PopDataStack();
+ 				r2 = PopDataStack();
+ 
+ 				PushDataStack(int(r1 != r2));
+-			} break;
+-			case (SET_EQUAL >> 12):
++			} COB_NEXT();
++			COB_CASE(SET_EQUAL)
+ 				{
+ 				r1 = PopDataStack();
+ 				r2 = PopDataStack();
+ 
+ 				PushDataStack(int(r1 == r2));
+-			} break;
++			} COB_NEXT();
+ 
+-			case (SET_LESS >> 12):
++			COB_CASE(SET_LESS)
+ 				{
+ 				r2 = PopDataStack();
+ 				r1 = PopDataStack();
+ 
+ 				PushDataStack(int(r1 < r2));
+-			} break;
+-			case (SET_LESS_OR_EQUAL >> 12):
++			} COB_NEXT();
++			COB_CASE(SET_LESS_OR_EQUAL)
+ 				{
+ 				r2 = PopDataStack();
+ 				r1 = PopDataStack();
+ 
+ 				PushDataStack(int(r1 <= r2));
+-			} break;
++			} COB_NEXT();
+ 
+-			case (SET_GREATER >> 12):
++			COB_CASE(SET_GREATER)
+ 				{
+ 				r2 = PopDataStack();
+ 				r1 = PopDataStack();
+ 
+ 				PushDataStack(int(r1 > r2));
+-			} break;
+-			case (SET_GREATER_OR_EQUAL >> 12):
++			} COB_NEXT();
++			COB_CASE(SET_GREATER_OR_EQUAL)
+ 				{
+ 				r2 = PopDataStack();
+ 				r1 = PopDataStack();
+ 
+ 				PushDataStack(int(r1 >= r2));
+-			} break;
++			} COB_NEXT();
+ 
+-			case (RAND >> 12):
++			COB_CASE(RAND)
+ 				{
+ 				r2 = PopDataStack();
+ 				r1 = PopDataStack();
+ 				r3 = gsRNG.NextInt(r2 - r1 + 1) + r1;
+ 				PushDataStack(r3);
+-			} break;
+-			case (EMIT_SFX >> 12):
++			} COB_NEXT();
++			COB_CASE(EMIT_SFX)
+ 				{
+ 				r1 = PopDataStack();
+ 				r2 = GET_LONG_PC();
+ 				cobInst->EmitSfx(r1, r2);
+-			} break;
+-			case (MUL >> 12):
++			} COB_NEXT();
++			COB_CASE(MUL)
+ 				{
+ 				r1 = PopDataStack();
+ 				r2 = PopDataStack();
+ 				PushDataStack(r1 * r2);
+-			} break;
++			} COB_NEXT();
+ 
+ 
+-			case (SIGNAL >> 12):
++			COB_CASE(SIGNAL)
+ 				{
+ 				r1 = PopDataStack();
+ 				cobInst->Signal(r1);
+-			} break;
+-			case (SET_SIGNAL_MASK >> 12):
++			} COB_NEXT();
++			COB_CASE(SET_SIGNAL_MASK)
+ 				{
+ 				r1 = PopDataStack();
+ 				signalMask = r1;
+-			} break;
++			} COB_NEXT();
+ 
+ 
+-			case (TURN >> 12):
++			COB_CASE(TURN)
+ 				{
+ 				r2 = PopDataStack();
+ 				r1 = PopDataStack();
+@@ -609,8 +816,8 @@ bool CCobThread::Tick()
+ 				r4 = GET_LONG_PC(); // axis
+ 
+ 				cobInst->Turn(r3, r4, r1, r2);
+-			} break;
+-			case (GET >> 12):
++			} COB_NEXT();
++			COB_CASE(GET)
+ 				{
+ 				r5 = PopDataStack();
+ 				r4 = PopDataStack();
+@@ -623,22 +830,22 @@ bool CCobThread::Tick()
+ 				}
+ 				r6 = cobInst->GetUnitVal(r1, r2, r3, r4, r5);
+ 				PushDataStack(r6);
+-			} break;
+-			case (ADD >> 12):
++			} COB_NEXT();
++			COB_CASE(ADD)
+ 				{
+ 				r2 = PopDataStack();
+ 				r1 = PopDataStack();
+ 				PushDataStack(r1 + r2);
+-			} break;
+-			case (SUB >> 12):
++			} COB_NEXT();
++			COB_CASE(SUB)
+ 				{
+ 				r2 = PopDataStack();
+ 				r1 = PopDataStack();
+ 				r3 = r1 - r2;
+ 				PushDataStack(r3);
+-			} break;
++			} COB_NEXT();
+ 
+-			case (DIV >> 12): {
++			COB_CASE(DIV) {
+ 				switch (opcode) {
+ 					case DIV:
+ 				{
+@@ -660,7 +867,7 @@ bool CCobThread::Tick()
+ 					ShowError("division by zero");
+ 				}
+ 				PushDataStack(r3);
+-			} break;
++			} COB_NEXT();
+ 					case MOD:
+ 				{
+ 				r2 = PopDataStack();
+@@ -672,49 +879,49 @@ bool CCobThread::Tick()
+ 					PushDataStack(0);
+ 					ShowError("modulo division by zero");
+ 				}
+-			} break;
++			} COB_NEXT();
+ 
+ 
+ 					default: break;
+ 				}
+-			} break;
+-			case (MOVE >> 12):
++			} COB_NEXT();
++			COB_CASE(MOVE)
+ 				{
+ 				r1 = GET_LONG_PC();
+ 				r2 = GET_LONG_PC();
+ 				r4 = PopDataStack();
+ 				r3 = PopDataStack();
+ 				cobInst->Move(r1, r2, r3, r4);
+-			} break;
+-			case (MOVE_NOW >> 12):
++			} COB_NEXT();
++			COB_CASE(MOVE_NOW)
+ 				{
+ 				r1 = GET_LONG_PC();
+ 				r2 = GET_LONG_PC();
+ 				r3 = PopDataStack();
+ 				cobInst->MoveNow(r1, r2, r3);
+-			} break;
+-			case (TURN_NOW >> 12):
++			} COB_NEXT();
++			COB_CASE(TURN_NOW)
+ 				{
+ 				r1 = GET_LONG_PC();
+ 				r2 = GET_LONG_PC();
+ 				r3 = PopDataStack();
+ 				cobInst->TurnNow(r1, r2, r3);
+-			} break;
+-			case (SCALE >> 12):
++			} COB_NEXT();
++			COB_CASE(SCALE)
+ 				{
+ 				r1 = GET_LONG_PC();
+ 				r3 = PopDataStack();
+ 				r2 = PopDataStack();
+ 				cobInst->Scale(r1, r2, r3);
+-			} break;
+-			case (SCALE_NOW >> 12):
++			} COB_NEXT();
++			COB_CASE(SCALE_NOW)
+ 				{
+ 				r1 = GET_LONG_PC();
+ 				r2 = PopDataStack();
+ 				cobInst->ScaleNow(r1, r2);
+-			} break;
++			} COB_NEXT();
+ 
+-			case (WAIT_TURN >> 12):
++			COB_CASE(WAIT_TURN)
+ 				{
+ 				r1 = GET_LONG_PC();
+ 				r2 = GET_LONG_PC();
+@@ -725,8 +932,8 @@ bool CCobThread::Tick()
+ 					waitAxis = r2;
+ 					return true;
+ 				}
+-			} break;
+-			case (WAIT_MOVE >> 12):
++			} COB_NEXT();
++			COB_CASE(WAIT_MOVE)
+ 				{
+ 				r1 = GET_LONG_PC();
+ 				r2 = GET_LONG_PC();
+@@ -737,8 +944,8 @@ bool CCobThread::Tick()
+ 					waitAxis = r2;
+ 					return true;
+ 				}
+-			} break;
+-			case (WAIT_SCALE >> 12):
++			} COB_NEXT();
++			COB_CASE(WAIT_SCALE)
+ 				{
+ 				r1 = GET_LONG_PC();
+ 
+@@ -748,9 +955,9 @@ bool CCobThread::Tick()
+ 					waitAxis = -1;
+ 					return true;
+ 				}
+-			} break;
++			} COB_NEXT();
+ 
+-			case (SET >> 12):
++			COB_CASE(SET)
+ 				{
+ 				r2 = PopDataStack();
+ 				r1 = PopDataStack();
+@@ -761,55 +968,55 @@ bool CCobThread::Tick()
+ 				}
+ 
+ 				cobInst->SetUnitVal(r1, r2);
+-			} break;
++			} COB_NEXT();
+ 
+ 
+-			case (ATTACH >> 12):
++			COB_CASE(ATTACH)
+ 				{
+ 				r3 = PopDataStack();
+ 				r2 = PopDataStack();
+ 				r1 = PopDataStack();
+ 				cobInst->AttachUnit(r2, r1);
+-			} break;
+-			case (DROP >> 12):
++			} COB_NEXT();
++			COB_CASE(DROP)
+ 				{
+ 				r1 = PopDataStack();
+ 				cobInst->DropUnit(r1);
+-			} break;
++			} COB_NEXT();
+ 
+ 			// like bitwise ops, but only on values 1 and 0
+-			case (LOGICAL_NOT >> 12):
++			COB_CASE(LOGICAL_NOT)
+ 				{
+ 				r1 = PopDataStack();
+ 				PushDataStack(int(r1 == 0));
+-			} break;
+-			case (LOGICAL_AND >> 12):
++			} COB_NEXT();
++			COB_CASE(LOGICAL_AND)
+ 				{
+ 				r1 = PopDataStack();
+ 				r2 = PopDataStack();
+ 				PushDataStack(int(r1 && r2));
+-			} break;
+-			case (LOGICAL_OR >> 12):
++			} COB_NEXT();
++			COB_CASE(LOGICAL_OR)
+ 				{
+ 				r1 = PopDataStack();
+ 				r2 = PopDataStack();
+ 				PushDataStack(int(r1 || r2));
+-			} break;
+-			case (LOGICAL_XOR >> 12):
++			} COB_NEXT();
++			COB_CASE(LOGICAL_XOR)
+ 				{
+ 				r1 = PopDataStack();
+ 				r2 = PopDataStack();
+ 				PushDataStack(int((!!r1) ^ (!!r2)));
+-			} break;
++			} COB_NEXT();
+ 
+ 
+-			case (HIDE >> 12):
++			COB_CASE(HIDE)
+ 				{
+ 				r1 = GET_LONG_PC();
+ 				cobInst->SetVisibility(r1, false);
+-			} break;
++			} COB_NEXT();
+ 
+-			case (SHOW >> 12):
++			COB_CASE(SHOW)
+ 				{
+ 				r1 = GET_LONG_PC();
+ 
+@@ -824,9 +1031,10 @@ bool CCobThread::Tick()
+ 				} else {
+ 					cobInst->SetVisibility(r1, true);
+ 				}
+-			} break;
++			} COB_NEXT();
+ 
+ 			default:
++				COB_LABEL(default)
+ 				{
+ 				const char* name = cobFile->name.c_str();
+ 				const char* func = cobFile->scriptNames[LocalFunctionID()].c_str();
+@@ -843,13 +1051,19 @@ bool CCobThread::Tick()
+ 
+ 				state = Dead;
+ 				return false;
+-			} break;
++			} COB_NEXT();
+ 		}
+ 	}
+ 
++#if COB_THREADED_DISPATCH
++cob_exit:
++#endif
+ 	// can arrive here as dead, through CCobInstance::Signal()
+ 	return (state != Dead);
+ }
++#ifdef COB_POP_OPTIONS
++#pragma GCC pop_options
++#endif
+ 
+ void CCobThread::ShowError(const char* msg)
+ {
+-- 
+2.53.0
+

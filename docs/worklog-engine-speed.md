@@ -477,3 +477,38 @@ per-host setting anyway (bringest could set it) — recorded, not pursued.
 game, -11% medium, -15% over a big game's first 35 min, byte-identical).
 Everything targeted since — interpreter dispatch, targeting reorder,
 prefetching, huge pages, retraining, pinning — measured at noise or worse.
+
+### 2026-10-15 14:00 — preparing revision 3 (PGO + LTO); identity gate on verylarge1 running
+
+The flat profile of `pgolto2` on verylarge1: main thread 63.9%, workers
+~12% each; `CSyncChecker::Sync` fell from 4.7% to **0.84%** of the main
+thread (LTO inlined most calls); the top is now `CUnitHandler::Update` with
+the unit code LTO folded into it (12.8%), `luaV_gettable` 5.0%,
+`TickAllAnims` 4.4%, `luaV_execute` 3.9%, the LOS update 3.4%,
+`GenerateWeaponTargets` 3.3%. A thin spread again.
+
+PGO+LTO is the gain worth shipping, so it gets a stronger identity gate than
+medium: full re-sims of verylarge1 (~10k units, the whole late game) on the
+base build and on `pgolto2`, .brp md5 compared. Running.
+
+Revision 3 of `patches/engine-2026.07.04/` (prepared, NOT pinned until that
+gate passes):
+
+| patch | content |
+|---|---|
+| 0005-bench-harness-park-and-gcov-dump | PARK point + go file + weak `__gcov_dump` before `_exit` (one patch from three commits) |
+| 0006-findanim-and-cob-div-shift | H60 |
+| 0007-cob-threaded-dispatch | H61 |
+| 0008-lua-threaded-dispatch | H62 |
+| 0009-weapon-targets-testtarget-last | H63 |
+| `pgo/profile.tar.xz` | the training profile (16 MB of .gcda, 1.1 MB xz; deterministic tar) |
+| `pgo/build.sh` | the PGO+LTO build (and the instrumented `gen` build) in the official image |
+
+H60-H63 measured at noise on the late game but are kept: they are exact,
+and the profile was trained on that source (dropping them would orphan
+those functions' profile). `git am` of the series onto a clean 2026.07.04
+checkout reproduces the trained/built tree exactly (0 diff lines in `rts/`).
+
+`SeriesDigest` now also hashes every file under `pgo/` (sorted), so a new
+profile or new flags is a new revision like a changed patch; revisions 1 and 2
+(no pgo/) keep their digests. Test: `TestSeriesDigestTracksThePGODir`.

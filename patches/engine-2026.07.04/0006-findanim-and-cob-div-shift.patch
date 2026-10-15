@@ -1,0 +1,69 @@
+From eb81310fc3dc6de8a217924fe6470086bfbfe893 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Thu, 15 Oct 2026 07:08:55 +0000
+Subject: [PATCH 6/9] FindAnim binary search / branchless scan; COB DIV
+ power-of-two shift
+
+---
+ rts/Sim/Units/Scripts/CobThread.cpp  | 10 +++++++++-
+ rts/Sim/Units/Scripts/UnitScript.cpp | 23 ++++++++++++++++++++---
+ 2 files changed, 29 insertions(+), 4 deletions(-)
+
+diff --git a/rts/Sim/Units/Scripts/CobThread.cpp b/rts/Sim/Units/Scripts/CobThread.cpp
+index 068b091..7dcc540 100644
+--- a/rts/Sim/Units/Scripts/CobThread.cpp
++++ b/rts/Sim/Units/Scripts/CobThread.cpp
+@@ -645,7 +645,15 @@ bool CCobThread::Tick()
+ 				r2 = PopDataStack();
+ 				r1 = PopDataStack();
+ 
+-				if (r2 != 0) {
++				if (r2 > 0 && (r2 & (r2 - 1)) == 0) {
++					// [barreplay] a power-of-two divisor (BOS scripts divide by
++					// 2/4/65536/... constantly) as a shift: rounding toward zero
++					// like idiv by biasing a negative dividend by r2-1 first.
++					// Exact for every int (no overflow: the bias is only added
++					// to a negative r1); idiv was one of the costliest
++					// instructions in the interpreter.
++					r3 = (r1 + ((r1 >> 31) & (r2 - 1))) >> __builtin_ctz(r2);
++				} else if (r2 != 0) {
+ 					r3 = r1 / r2;
+ 				} else {
+ 					r3 = 1000; // infinity!
+diff --git a/rts/Sim/Units/Scripts/UnitScript.cpp b/rts/Sim/Units/Scripts/UnitScript.cpp
+index fb2f4a9..80b76e5 100644
+--- a/rts/Sim/Units/Scripts/UnitScript.cpp
++++ b/rts/Sim/Units/Scripts/UnitScript.cpp
+@@ -385,9 +385,26 @@ bool CUnitScript::TickScaleAnim(int tickRate, LocalModelPiece& lmp, AnimInfo& ai
+ CUnitScript::AnimContainerTypeIt CUnitScript::FindAnim(AnimType type, int piece, int axis)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	const auto& pred = [&](const AnimInfo& ai) { return ai.animType == type && ai.piece == piece && ai.axis == axis; };
+-	const auto& iter = std::find_if(anims.begin(), anims.end(), pred);
+-	return iter;
++	// [barreplay] (piece, animType, axis) is unique per anim, so whichever way
++	// the one match is found it is the same element. While <anims> is known
++	// sorted by that key (animsDirty false: TickAllAnims sorted it, nothing has
++	// appended or swap-erased since) a binary search finds it; otherwise a scan
++	// with ONE branch per element, where the short-circuit && took up to three
++	// data-dependent ones (this is among the top branch-miss sites of a re-sim).
++	if (!animsDirty) {
++		const auto key = std::make_tuple(piece, type, axis);
++		const auto it = std::lower_bound(anims.begin(), anims.end(), key, [](const AnimInfo& ai, const auto& k) {
++			return std::tie(ai.piece, ai.animType, ai.axis) < k;
++		});
++		if (it != anims.end() && it->piece == piece && it->animType == type && it->axis == axis)
++			return it;
++		return anims.end();
++	}
++	for (auto it = anims.begin(); it != anims.end(); ++it) {
++		if (((it->animType ^ type) | (it->piece ^ piece) | (it->axis ^ axis)) == 0)
++			return it;
++	}
++	return anims.end();
+ }
+ 
+ void CUnitScript::RemoveAnim(AnimType type, const AnimContainerTypeIt& animInfoIt)
+-- 
+2.53.0
+
