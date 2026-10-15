@@ -184,3 +184,35 @@ At 19.5 fps the late game is ~14x slower per frame than medium's average,
 and what helped there (the interpreters) is noise here. Run-to-run spread on
 one checkpoint is ~1.5% of wall, ~1% of instructions. Next: profile this
 window (bench-ckpt `PERF=`).
+
+### 2026-10-15 10:12 — late-game profile (verylarge1, base build)
+
+`PERF="-F 999 -e cycles"` over the 450-frame window. Threads: main 63.8%,
+workers 12.3 / 11.8 / 11.8% — MORE main-bound than medium (52%). Main-thread
+self time, as a share of the MAIN thread:
+
+| function | share | note |
+|---|---|---|
+| luaH_get | 7.4% | BAR gadget table lookups |
+| luaV_execute | 6.9% | |
+| **CSyncChecker::Sync** | **4.7%** | one out-of-line call + XXH3 per synced write |
+| GeneralMoveSystem::Update | 4.6% | |
+| CLosHandler::Update lambda | 4.2% | |
+| CGameHelper::GenerateWeaponTargets | 3.8% | |
+| CUnit::UpdateWeapons | 3.7% | |
+| CStrafeAirMoveType::Update + UpdateAirPhysics | 6.1% | aircraft |
+| CGround::GetHeightReal + GetHeightAboveWater | 5.4% | |
+| AMoveType::UpdateCollisionMap | 2.8% | |
+| luaD_precall | 2.7% | |
+| spring::VectorErase<CUnit*> | 1.0% | linear erase over a unit list |
+
+DWARF call graphs (`--call-graph dwarf`) did not unwind on the CRIU-restored
+process and `perf script` over the 800 MB debug info is too slow; working from
+self time + source.
+
+`CSyncChecker::Sync(const void*, unsigned)` is in SyncChecker.cpp, so every
+synced primitive write is a call with a RUNTIME size into XXH3's length
+dispatch, to hash 4 bytes. Inlining it with the size known computes the same
+value; that is a header change that recompiles everything, i.e. the same cost
+as LTO, which does it (and every other cross-file hot call) automatically. So
+the next build is PGO + LTO (`pgo.sh ltouse`, -flto=4, no -g), building now.
