@@ -126,3 +126,11 @@ the whole replay. First question: what does that cost?
   (CRIU reopens them by path; each trial puts the copies back), then
   `criu dump`; trial restores and times the window. First dump of verylarge1
   at 63780 running.
+- 2026-10-15: FIRST CHECKPOINT TRIAL WORKS: verylarge1 dumped at 63780
+  (12m19s of re-sim at 89 fps to get there; image 5.7 GB). Restore + a
+  450-frame window: units=9961, 23.1 s of SimFrame wall = 19.5 fps (medium
+  runs at ~280), 78.9e9 main-thread instructions; the whole trial, restore
+  included, took 33 s.
+- 2026-10-15: (event-log branch) merged origin/main (#127, widget 1.11.2
+  inferred ends) into it, opened and squash-merged PR #129 (`fbedbae`), tagged
+  `patched-engine/2026.7.4-barreplay.2`.
