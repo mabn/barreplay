@@ -337,3 +337,19 @@ avoids. Late-game PGO training rerunning now (fixed gcov dump).
 `bench-ckpt` `alone` fix: it matched its own caller's command line (a `strip`
 of an engine binary in the same shell command); now anchored to processes
 whose argv[0] is an engine binary.
+
+### 2026-10-15 12:55 — late-game profile collected; H64 prefetch; rebuilding PGO+LTO
+
+The rerun wrote its profile (gcda timestamps 12:50): instrumented
+verylarge1 63780+1800 frames, 250.7 s of SimFrame. The profile dir now holds
+medium + c04fd06a + verylarge1's whole game up to frame 65580 (counters
+accumulate). PGO+LTO rebuilding from it (full recompile: every object's
+profile changed).
+
+**H64** (`spring-headless-h64`): the auto-targeting walk is a cache miss per
+candidate unit, so `GenerateWeaponTargets` now prefetches the `tempNum` and
+`losStatus[allyteam]` lines of the candidate 4 entries ahead
+(`__builtin_prefetch`; changes no value). If it pays, the same applies to the
+per-unit loops over the 10k active units (UpdateUnits, UpdateUnitWeapons,
+LOS status). Checkpoint dumping alongside the build; trials once the host is
+quiet.
