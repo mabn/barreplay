@@ -1005,3 +1005,23 @@ and Lua setters; widget: the launcher loop keeps its order and rule and
 reads the logged value instead of calling `GetUnitWeaponState` per ready
 slot): harness fixtures unchanged (the enginelog run drained the log every
 frame, 9 changes applied). Building.
+
+### 2026-10-16 18:10 — W3: -1.7%; next: Lua GC pacing
+
+`speed8` (= `speed7` + W3 engine) with widget W2+W3 vs `speed7`, late window,
+4 rounds rotated, main thread pinned:
+
+| build | cycles per round (e9) | mean | wall mean |
+|---|---|---|---|
+| `speed7` | 63.01 / 63.29 / 62.58 / 63.29 | 63.04e9 | 16.97 s |
+| `speed8` | 62.18 / 61.72 / 62.41 / 61.45 | **61.94e9 (-1.7%)** | 16.68 s (-1.7%) |
+
+Every round. Next, Lua GC (2.4% of the main core): `CLuaHandle::CollectGarbage`
+runs collection only from the engine (automatic GC is stopped), skips a frame
+with a probability drawn from the UNSYNCED RNG (`spring_lua_alloc_skip_gc`) and
+stops on a wall-clock budget — so its timing already differs run to run and
+machine to machine, and the simulation cannot depend on it. Two config
+settings pace it: `LuaGarbageCollectionMemLoadMult` (1.33, min 1.0: lower
+skips more) and `LuaGarbageCollectionRunTimeMult` (5 ms, min 1). Testing both
+at their minimum (risk to watch: Lua memory; an allocation failure inside a
+synced gadget would break the game).
