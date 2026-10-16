@@ -3903,7 +3903,26 @@ in a systemd scope. A checkpoint restores only into the binary that made it
 one needs its UDP port back, and a trial copies its files into the data dir).
 Benchmark: "verylarge1" = 6a37d06acbb455b1d19179d8ec965f10 at frame 63780.
 The work log is docs/worklog-engine-speed.md; revision 3's PGO+LTO build recipe
-is patches/engine-2026.07.04/pgo/ (docs/building-recoil.md).
+is patches/engine-2026.07.04/pgo/ (docs/building-recoil.md). Other options:
+PERF= (perf record), PERFSTAT= (perf stat per thread), LUAPROF=1 (the Lua
+sampling profiler of a measurement build), MAINCPU=/OTHERCPUS= (pinning),
+BARREPLAY_ARGS= (extra barreplay flags for a dump).
+
+**Read results by CYCLES on a laptop host.** The dev host throttles hard under
+sustained load (2.6-3.3 GHz averaged over a whole game against ~3.8 in a short
+trial), so one whole-game wall time moves +-10% with the package temperature.
+Judge changes on the late window (interleaved rounds, main thread pinned,
+cycles); use whole games for identity and the trend. Thread count: the
+engine's default (4 here) beat 2 and 7 over a whole game; more threads heat
+the package more than they help.
+
+**The late game is fighters.** verylarge1 at 63780 has 5,711 aircraft of
+10,496 units (experiments/unitmix): aircraft movement ~14% of the main core,
+weapon auto-targeting ~11% (most of it BAR's AllowWeaponTarget Lua callin,
+3,100 a frame). Measured and ruled out: parallel aircraft updates (55% of
+updates have a collision neighbour already moved that frame), an air-only AA
+candidate list (~0.3%), approximate simulation (the demo carries every
+player's sync checksum every 60 frames).
 
 ## Running out of memory (why the engine is stopped, not killed)
 

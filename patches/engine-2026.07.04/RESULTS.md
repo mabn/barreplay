@@ -1,5 +1,15 @@
 # Engine speed patches (engine 2026.07.04) — measured results
 
+**Round 4 (2026-10-16/17, revision 4 = series digest `33b518d4…`, NOT YET
+PUBLISHED)**: patches 0010-0013 — Lua callin timers only while profiling,
+prefetch in the per-unit loops, a background thread collapsing the engine's
+memory into huge pages (no root, no host setting), and the event log's
+`GetUnitSampleData` + reload log for the widget. Late window, like for like:
+-18.0% cycles against revision 3. Whole verylarge1 with barreplay's widget
+config changes (BAR's widget suite not loaded, its profiler off) and widget
+1.13.0: best 20m16s against revision 3's 27m12s-29m46s, ~25-30% fewer
+main-thread cycles, byte-identical. All in docs/worklog-engine-speed.md.
+
 **Round 3 (2026-10-15, revision 3 = `2026.7.4-barreplay.3`) is recorded in
 `docs/worklog-engine-speed.md`.** It moved benchmarking to the LATE GAME —
 CRIU checkpoints of a ~10k-unit state (`tools/bench-ckpt/bench-ckpt.sh`,
