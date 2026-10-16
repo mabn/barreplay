@@ -1150,3 +1150,24 @@ New best whole-game time on this host, without root. W4 is worth more over
 the whole game than on the late window: BAR's widgets cost every frame of
 the game, and their absence also leaves the package cooler (+28,546 throttle
 events against +41,031).
+
+### 2026-10-17 03:30 — the Lua profile with W4; W5 (re-sim sample loop): -1.4%
+
+Lua sampler rebuilt on `speed8` (`luaprof8`), checkpoint taken under W4.
+In Lua: 15.1% of the main core — BAR's gadgets 10.6% (handler dispatch
+3.12%, `unit_shield_behaviour` 1.08, `unit_aa_targeting_priority` 0.67,
+`unit_builder_priority` 0.54, `api_teamstats` 0.53, `unit_crashing_aircraft`
+0.48, `api_unit_attributes` 0.43, ~50 more each < 0.25%) and OUR widget
+4.31%: `sample()` 2.40% (now pure Lua: quantization + predictor), the
+per-frame launcher loop 0.91%. BAR's widget handler: 0.10% (was 2.2%).
+
+**W5** (widget, `f9cd0df`): when the bulk sample is in hand (re-sim, full
+view, patched engine), a loop with what cannot happen there taken out —
+nothing is buried in a re-sim, no enemies, no last-known cache, no nil
+values — and the shield read skipped for non-shield defs (its own first
+checks). Every harness fixture byte-identical.
+
+| build (widget in the checkpoint) | cycles mean | wall mean |
+|---|---|---|
+| `speed8` + W4 | 57.69e9 | 15.64 s |
+| `speed8` + W4 + W5 | 56.87e9 (-1.4%) | 15.47 s (-1.1%) |
