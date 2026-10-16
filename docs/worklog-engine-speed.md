@@ -615,3 +615,41 @@ script: phases.py, kept with the perf data):
 Serial work is ~85% of the main thread (parallel sections ~14%). Caveat:
 LBR keeps the 16 innermost frames, so a gadget callin made from deep in a
 unit update can land under "outside units" when its stack was cut.
+
+## Round 4 (branch `speed-optimization-2`)
+
+Everything below is measured on the verylarge1 late window only (frames
+63780+450) and reported as the MAIN thread's time, % of one core, rows
+summing to 100% — the main thread is the whole bottleneck (see 01:02).
+
+### 2026-10-16 01:35 — plan, and two measurement tools under way
+
+| step | what | status |
+|---|---|---|
+| 1 | revision 3 rebuilt WITH debug info (`-g`: GCC emits the same code), own checkpoint — splits the 12.5% LTO-merged `CUnitHandler::Update` blob and gives per-line annotation | building (`~/dev/perf3/build-pgolto-g.sh`) |
+| 2 | aircraft movement (11.4%): exact-result speedups | profiled, waiting on step 1's lines |
+| 3 | weapon auto-targeting (9.3%) | queued |
+| 4 | BAR's Lua (~22%) by gadget: a sampling profiler in the bench harness | written (Recoil branch `luaprof`); build queued after step 1 |
+
+Aircraft's 11.4%, from the 01:02 stacks:
+
+| part of `CStrafeAirMoveType::Update` | % of core |
+|---|---|
+| `UpdateFlying` → `UpdateAirPhysics` | 4.7% |
+| `Update` itself (inlined helpers) | 2.3% |
+| `UpdateFlying` itself | 1.5% |
+| `GetControlSurfaceAngles` | 1.1% |
+| crash deaths → `ForcedKillUnit` → Lua `UnitDestroyed` | 0.9% |
+| other (`UpdateAirPhysics` direct, `Move`, heading, sync checks) | 0.9% |
+| **total** | **11.4%** |
+
+THE LUA PROFILER (measurement builds only, never published): every
+`luaV_execute` records which `lua_State` the thread is running (a
+thread-local set/restored by an RAII guard, so exceptions unwind it); a
+`CLOCK_THREAD_CPUTIME_ID` timer sends the main thread SIGPROF every 1 ms of
+ITS CPU time, and the handler walks that state's CallInfo array — reading
+only, no allocation, no Lua API — interning each frame (Lua: source file +
+line defined; C: function pointer, symbolized later against `nm`). Samples
+outside Lua are counted too, so the gadget table is a share of the same one
+core. `bench-ckpt.sh trial` with `LUAPROF=1` asks for it (third token of
+the go file); the folded stacks land in `<ckpt>/result.luaprof`.

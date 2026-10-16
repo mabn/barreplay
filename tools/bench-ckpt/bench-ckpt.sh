@@ -34,6 +34,10 @@
 # CPUSET="<cpu list>" pins every engine thread for the trial (taskset -a);
 # MAINCPU=<cpu> OTHERCPUS=<list> pins the main thread alone and the rest apart.
 #
+# LUAPROF=1 asks a build carrying the Lua sampling profiler (bench harness,
+# Recoil branch luaprof) to write the window's Lua call stacks, folded, to
+# <ckpt dir>/result.luaprof (1 kHz of main-thread CPU time).
+#
 # Each trial prints the bench harness line: frames, units alive at the start,
 # cycles, instructions (main thread) and the window's SimFrame wall time.
 #
@@ -140,13 +144,17 @@ trial1() {
 		perfpid=$!
 		sleep 1
 	fi
-	echo "$n $dir/result" > "$dir/park.go"
+	echo "$n $dir/result${LUAPROF:+ luaprof}" > "$dir/park.go"
 	local t=0
 	while [ ! -s "$dir/result" ]; do
 		sleep 0.5; t=$((t + 1))
 		[ $t -gt 7200 ] && die "no result after an hour"
 	done
 	sleep 0.2
+	if [ -n "${LUAPROF:-}" ]; then # the profile is written after the result line
+		local epid=$(cat "$dir/park.ready")
+		while kill -0 "$epid" 2>/dev/null; do sleep 0.2; done
+	fi
 	[ -n "$perfpid" ] && wait $perfpid 2>/dev/null
 	tail -1 "$dir/result"
 }
