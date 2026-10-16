@@ -904,3 +904,30 @@ with widget 1.13.0, not the old md5s.
 Estimate (not measured): the STOCK engine on verylarge1 ~45 min (rev 2
 was 31m03s here; stock was 39-45% slower than rev 2 on the largest game
 both were measured on).
+
+### 2026-10-16 10:35 — the "kernel time" was thermal throttling; H71 works
+
+Kernel call-stack samples of the main thread over the window (H71, mimalloc
+purge off; `kptr_restrict` lifted for the run and restored to 1): 0.19e9
+kernel cycles in 25 s, i.e. ~0.05 s — scheduler ticks and syscalls. The ~2 s
+gap between thread CPU time and user cycles was the CLOCK: those runs
+averaged ~3.1 GHz against ~3.78 GHz for the baseline and root runs. This
+laptop CPU throttles hard: `package_throttle_count` 182,692 since boot,
+`core_throttle_count` 25,041 on core 2, 2.79 GHz at the moment of reading.
+Fresh-run wall times therefore swing by +-0.5 s or more with the machine's
+temperature (17.05 / 17.93 / 17.90 s for one configuration). Decisions now go by CYCLES (frequency-
+independent) and interleaved A/Bs; whole-game wall times are reported but
+carry this noise.
+
+By cycles, the same fresh-run window:
+
+| huge pages | in use | main user cycles | vs none |
+|---|---|---|---|
+| none | 0 | 68.7e9 | — |
+| system-wide `always` (root, pre-compacted) | 4.96 GB | 57.9e9 | -15.7% |
+| H70 (engine marks regions) | 6.15 GB | 55.8e9 | -18.8% |
+| **H71 (background collapse, no marking)** | 6.28 GB | **55.6e9** | **-19.1%** |
+| H71, mimalloc purge off | 6.26 GB | 56.1e9 | -18.3% |
+
+H71 needs no root and no host setting and does at least as well as the root
+setup; purge-off adds nothing. Building `speed7` = H71 + W2.
