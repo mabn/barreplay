@@ -677,6 +677,35 @@ if enginelog then
 		engineLog.dmg = {}
 		return out, n, 0
 	end
+	-- The engine's bulk sample (Spring.GetUnitSampleData): what the per-unit
+	-- reads return under full read, in GetAllUnits' order, flat. Built from the
+	-- same stubs, so TestEngineLogMatchesResim checks the widget's bulk path
+	-- against its per-call path.
+	Spring.GetUnitSampleData = function(allyTeams, fill)
+		local out = type(fill) == "table" and fill or {}
+		local prev, k = #out, 0
+		local ids = Spring.GetAllUnits()
+		local stride = 11 + #allyTeams
+		for i = 1, #ids do
+			local id = ids[i]
+			local x, _, z = Spring.GetUnitPosition(id)
+			local hp, maxHp, _, _, b = Spring.GetUnitHealth(id)
+			local vx, _, vz = Spring.GetUnitVelocity(id)
+			local row = { id, Spring.GetUnitTeam(id), Spring.GetUnitDefID(id), x, z, hp, maxHp, b,
+				vx, vz, Spring.GetUnitIsBuilding(id) or 0 }
+			for j = 1, #allyTeams do
+				row[#row + 1] = Spring.GetUnitLosState(id, allyTeams[j], true) or 0
+			end
+			for j = 1, stride do
+				out[k + j] = row[j]
+			end
+			k = k + stride
+		end
+		for j = k + 1, prev do
+			out[j] = nil
+		end
+		return out, #ids, stride
+	end
 end
 
 local function logExplosion(wd, x, y, z, owner, pid)

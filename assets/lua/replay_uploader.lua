@@ -77,8 +77,8 @@
 -- Echo, and the stream's GAME line, so every capture records which encoder
 -- produced it (the copy on a player's machine can be arbitrarily old — the
 -- server/decoder needs to know, and the catalog stores it per replay).
-local widgetVersion = "1.12.0"
-local widgetDate = "2026-10-15"
+local widgetVersion = "1.13.0"
+local widgetDate = "2026-10-16"
 
 -- Git SHA of this exact file, stamped when the widget is published for
 -- download: worker/tools/sync-assets.mjs replaces the token below with the SHA
@@ -138,6 +138,12 @@ local engineLog = {
 	explosions = false, -- switched on in Initialize
 	damage = false,
 	dropped = 0, -- events the engine dropped from a full buffer
+	-- Spring.GetUnitSampleData (same patched engine, revision 4+): every
+	-- unit's sampled state in ONE call — the values GetUnitTeam/Position/
+	-- DefID/Health/Velocity/IsBuilding/LosState return under full read, in
+	-- GetAllUnits' order — instead of ~8 Lua->C calls per unit per sample.
+	sample = resim and type(Spring.GetUnitSampleData) == "function" and Spring.GetUnitSampleData or nil,
+	sampleBuf = {},
 }
 -- Output path for resim mode. Spring's LuaIO sandbox rejects absolute paths
 -- (IsSafePath), so it is RELATIVE to the engine's write-dir, which the Go tool
@@ -804,6 +810,22 @@ local function buildVisAllies()
 	end
 end
 
+-- losMaskFrom is losMask over the raw bits a bulk sample carries for the
+-- same visAllies (engineLog.sample), one per ally team after offset.
+local function losMaskFrom(bd, offset)
+	local lo, hi, scale = 0, 0, 1
+	for i = 1, #visAllies do
+		local bits = bd[offset + i]
+		if i <= 8 then
+			lo = lo + (bits % 4) * scale
+		else
+			hi = hi + (bits % 4) * scale
+		end
+		scale = (i == 8) and 1 or scale * 4
+	end
+	return lo, hi
+end
+
 local function losMask(unitID)
 	local lo, hi, scale = 0, 0, 1
 	for i = 1, #visAllies do
@@ -950,8 +972,11 @@ local function sample(frame)
 	local spec, fullView = spGetSpectatingState()
 	local all = spec and fullView
 	noteView(frame, spec, fullView)
-	local units = spGetAllUnits()
-	local total = #units
+	-- Full view on a patched engine: the whole sample in one engine call
+	-- (engineLog.sample). Same values, same order, so the same stream.
+	local bulk = all and engineLog.sample ~= nil
+	local units = (not bulk) and spGetAllUnits() or nil
+	local total = units and #units or 0
 
 	local keyframe = (sampleIdx % keyframeEvery == 0)
 	sampleIdx = sampleIdx + 1
@@ -977,18 +1002,35 @@ local function sample(frame)
 	if doVis and visAllies == nil then
 		buildVisAllies()
 	end
+	local bd, stride = nil, 0
+	if bulk then
+		local cnt
+		bd, cnt, stride = engineLog.sample(doVis and visAllies or {}, engineLog.sampleBuf)
+		engineLog.sampleBuf = bd
+		total = cnt
+	end
 
 	for i = 1, total do
-		local unitID = units[i]
-		local team = spGetUnitTeam(unitID)
+		local base = (i - 1) * stride
+		local unitID = bd and bd[base + 1] or units[i]
+		local team
+		if bd then team = bd[base + 2] else team = spGetUnitTeam(unitID) end
 		local isAlly = (team ~= nil and allyTeamOf[team] == myAllyTeam)
 		if (all or isAlly or recordEnemies)
 			and (buried[unitID] == nil or unburied(unitID, team)) then
 			local isEnemy = recordEnemies and not all and not isAlly
 			local g = isEnemy and lastKnown[unitID] or nil
-			local x, y, z = spGetUnitPosition(unitID)
-			local defID = spGetUnitDefID(unitID)
-			local hp, maxHp, _, _, buildProgress = spGetUnitHealth(unitID)
+			local x, z, defID, hp, maxHp, buildProgress
+			if bd then
+				defID, x, z = bd[base + 3], bd[base + 4], bd[base + 5]
+				hp, maxHp, buildProgress = bd[base + 6], bd[base + 7], bd[base + 8]
+			else
+				local _y
+				x, _y, z = spGetUnitPosition(unitID)
+				defID = spGetUnitDefID(unitID)
+				local _p, _c
+				hp, maxHp, _p, _c, buildProgress = spGetUnitHealth(unitID)
+			end
 			if hp ~= nil and hp <= 0 and not resim then
 				-- Readable but dead: the engine still holds a killed unit for its
 				-- death sequence. Bury it here rather than waiting for the
@@ -1005,10 +1047,17 @@ local function sample(frame)
 				buried[unitID] = { x = x, z = z, def = defID, team = team }
 				lastKnown[unitID] = nil
 			else
-				local vx, vy, vz = spGetUnitVelocity(unitID)
-				-- Build/assist/repair target (nil for non-builders, idle
-				-- builders, and units the widget cannot read).
-				local tgt = spGetUnitIsBuilding ~= nil and spGetUnitIsBuilding(unitID) or nil
+				local vx, vz, tgt
+				if bd then
+					-- the bulk read's "no buildee" is 0, which encodes as nil does
+					vx, vz, tgt = bd[base + 9], bd[base + 10], bd[base + 11]
+				else
+					local _vy
+					vx, _vy, vz = spGetUnitVelocity(unitID)
+					-- Build/assist/repair target (nil for non-builders, idle
+					-- builders, and units the widget cannot read).
+					tgt = spGetUnitIsBuilding ~= nil and spGetUnitIsBuilding(unitID) or nil
+				end
 				recorded = recorded + 1
 				-- Radar-only enemies read back nils (def/health unreadable, the
 				-- position wobbled): carry the last-known identity/health from
@@ -1086,7 +1135,12 @@ local function sample(frame)
 					end
 				end
 				if doVis and unitID <= 65535 then
-					local lo, hi = losMask(unitID)
+					local lo, hi
+					if bd then
+						lo, hi = losMaskFrom(bd, base + 11)
+					else
+						lo, hi = losMask(unitID)
+					end
 					local v = visPrev[unitID]
 					if v == nil then
 						visPrev[unitID] = { lo = lo, hi = hi, f = frame }
