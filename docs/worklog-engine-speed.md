@@ -1025,3 +1025,13 @@ settings pace it: `LuaGarbageCollectionMemLoadMult` (1.33, min 1.0: lower
 skips more) and `LuaGarbageCollectionRunTimeMult` (5 ms, min 1). Testing both
 at their minimum (risk to watch: Lua memory; an allocation failure inside a
 synced gadget would break the game).
+
+### 2026-10-16 18:50 — Lua GC pacing at its minimum: nothing
+
+| build | cycles per round (e9) | mean |
+|---|---|---|
+| `speed8` | 61.85 / 61.27 / 61.61 / 61.66 | 61.60e9 |
+| `speed8` + `LuaGarbageCollectionMemLoadMult=1.0`, `RunTimeMult=1` | 62.24 / 61.84 / 62.27 / 61.82 | 62.05e9 (+0.7%, noise) |
+
+Dropped (checkpoint image the same 6.0 GB, so no memory growth either). The
+GC's share is the cost of the garbage BAR's gadgets make, not of how it is paced.
