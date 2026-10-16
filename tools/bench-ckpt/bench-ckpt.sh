@@ -34,6 +34,9 @@
 # CPUSET="<cpu list>" pins every engine thread for the trial (taskset -a);
 # MAINCPU=<cpu> OTHERCPUS=<list> pins the main thread alone and the rest apart.
 #
+# PERFSTAT="<events>" counts hardware events per thread over the window
+# (perf stat) into <ckpt dir>/perfstat.txt.
+#
 # BARREPLAY_ARGS="<flags>" (dump only) passes extra barreplay flags to the
 # re-simulation, e.g. "-worker-threads 7"; they are frozen into the checkpoint,
 # so dump such a variant under its own binary name (a copy of the binary).
@@ -145,6 +148,12 @@ trial1() {
 		# (CRIU restores its pid) before releasing it; stops when it exits.
 		local pid=$(cat "$dir/park.ready")
 		perf record $PERF -p "$pid" -o "$dir/perf-$(date +%s).data" > "$dir/perf.log" 2>&1 &
+		perfpid=$!
+		sleep 1
+	fi
+	if [ -n "${PERFSTAT:-}" ]; then
+		# hardware counters per thread over exactly the window
+		perf stat -p "$(cat "$dir/park.ready")" --per-thread -e "$PERFSTAT" -o "$dir/perfstat.txt" &
 		perfpid=$!
 		sleep 1
 	fi

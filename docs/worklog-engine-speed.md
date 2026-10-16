@@ -796,3 +796,43 @@ Main thread of `speed4` (default threads), % of one core, for the record:
 | Lua GC | 1.5% | 1.5% |
 | map damage, pathfinding, features, draw, net, other | 5.0% | |
 | **total** | **100%** | **~21%** |
+
+### 2026-10-16 05:30 — GOAL: verylarge1 whole game in 10 minutes (was 5); where that time must come from
+
+USER set the goal: the whole of verylarge1 re-simulated in 10 minutes,
+byte-identical (first 5, then 10). Revision 3 takes 27m12s.
+
+Whole game, `speed4` + W1 + `-worker-threads 7`: **sim 24m08s**, md5
+`a26e920d…` (identical). -11% on revision 3. Time per game phase (from the
+infolog's wall clock at each frame marker):
+
+| game time | wall | frames/s | share |
+|---|---|---|---|
+| 0-10 min | 28 s | 650 | 1.9% |
+| 10-20 min | 105 s | 170 | 7.3% |
+| 20-30 min | 192 s | 94 | 13.4% |
+| 30-51 min | 1111 s | 27-48 | **77.4%** |
+
+So 10 minutes needs the late game ~2.5x faster per frame. What the main
+thread's cycles are, over the 450-frame window (`bench-ckpt.sh` new
+`PERFSTAT=` option, perf stat per thread):
+
+| counter (main thread) | cycles | share |
+|---|---|---|
+| all | 72.8e9 | 100% |
+| stalled with a memory load pending (`cycle_activity.stalls_ldm_pending`) | 40.0e9 | **55%** |
+| stalled on loads missing L2 (`stalls_l2_pending`) | 38.1e9 | **52%** |
+| data-load page walks (`dtlb_load_misses.walk_duration`) | 10.0e9 | **14%** |
+| store / instruction page walks | 0.75e9 | 1% |
+| IPC | 0.87 | |
+
+More than half the late game is waiting for memory, a seventh is TLB
+misses. That is the lever big enough for 2.5x: memory layout, not
+instruction count. First test: transparent huge pages on a FRESH run (round
+3's THP test restored a 5.7 GB checkpoint into huge pages, so the kernel's
+page collapsing ran inside the window; not a fair test).
+
+Approximate simulation is ruled out by measurement: the demo holds every
+player's sync checksum every 60 frames (~1500 per player here), over every
+synced write — an approximation changing any simulated value fails within 2
+game-seconds; one that never fails is an exact optimization.
