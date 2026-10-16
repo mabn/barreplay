@@ -960,3 +960,48 @@ yardstick for the 10-minute goal on this host is main-thread cycles —
 at ~3 GHz sustained, 10 minutes is ~1.8e12 cycles, 2.4x fewer than today's
 4.36e12; (3) on a thermally limited host, work removed from ANY thread
 (workers included) buys clock for the main one.
+
+### 2026-10-16 16:30 — the late game is 5,700 fighters; both big ideas measured and ruled out
+
+`experiments/unitmix` (the unit population of a .brp at one frame) at 63780:
+10,496 units — **5,711 aircraft** (legafigdef 2,878, corvamp 1,304, armhawk
+599, corveng 322, legvenator 246, armfig 100), 1,421 ground/sea mobile,
+3,364 structures. More than half the units are fighters: aircraft movement
+(12.9% of the main core), most of auto-targeting (9.8%) and their weapons.
+
+A measurement build (`measure7`, Recoil branch of the same name, never
+published) counted over the 450-frame window:
+
+| targeting (`GenerateWeaponTargets`) | count | per frame | share of candidates |
+|---|---|---|---|
+| scans | 234,366 | 521 | |
+| candidates visited | 8,555,158 | 19,011 | 100% |
+| rejected: not in LOS/radar | 395,282 | | 4.6% |
+| rejected: out of range | 3,291,988 | | 38.5% |
+| rejected: `TestTarget` (category, ...) | 3,472,169 | | 40.6% |
+| into BAR's Lua `AllowWeaponTarget` | 1,395,719 | 3,102 | 16.3% |
+| refused by the gadget | 0 | | |
+
+| general move loop (aircraft, statics) | per frame | share |
+|---|---|---|
+| unit updates | 8,997 (5,656 aircraft) | 100% |
+| draw from the synced RNG | 23 | 0.26% |
+| target already updated earlier this frame | 120 | 1.3% |
+| some unit within the collision query | 6,536 | 73% |
+| **a neighbour already updated earlier this frame** | **4,965** | **55%** |
+
+Ruled out:
+- **An air-only candidate list for AA scans**: scans average 36 candidates;
+  the cheap rejections are ~0.3% of the core. The cost is the 3,100 Lua
+  callins a frame, which BAR's gadgets must see in full and in order.
+- **Parallel aircraft updates (the moonshot)**: 55% of updates have a
+  collision neighbour that already moved this frame — fighters fly in dense
+  blobs, so an exact wavefront schedule would have almost nothing to run
+  side by side. (RNG use would have been manageable; the coupling is not.)
+
+**W3** (engine: Recoil `speed8`, every write of a weapon's `reloadStatus`
+logged — five sites: fire, beam laser, the stunned per-frame increment, COB
+and Lua setters; widget: the launcher loop keeps its order and rule and
+reads the logged value instead of calling `GetUnitWeaponState` per ready
+slot): harness fixtures unchanged (the enginelog run drained the log every
+frame, 9 changes applied). Building.
