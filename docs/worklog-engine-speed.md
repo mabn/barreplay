@@ -1137,3 +1137,16 @@ widgets — their callins, garbage and cache traffic cost the engine around
 them too. Medium gate `0558d354…` = reference (unsynced: cannot change the
 capture). Round 3 measured "suite on vs off" on MEDIUM as no difference; the
 late game is where it shows. Whole game running.
+
+### 2026-10-17 01:30 — whole game with W4: 20m16s
+
+| whole verylarge1 (all `a26e920d…`) | sim | main cycles | main avg clock |
+|---|---|---|---|
+| revision 3 | 29m46s (27m12s another day) | 5.87e12 | 3.26 GHz |
+| `speed8` (revision 4) | 25m29s | 4.43e12 | 2.98 GHz |
+| **`speed8` + W4** | **20m16s** | **3.92e12** | 3.35 GHz |
+
+New best whole-game time on this host, without root. W4 is worth more over
+the whole game than on the late window: BAR's widgets cost every frame of
+the game, and their absence also leaves the package cooler (+28,546 throttle
+events against +41,031).
