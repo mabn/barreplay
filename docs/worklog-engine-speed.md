@@ -653,3 +653,34 @@ line defined; C: function pointer, symbolized later against `nm`). Samples
 outside Lua are counted too, so the gadget table is a share of the same one
 core. `bench-ckpt.sh trial` with `LUAPROF=1` asks for it (third token of
 the go file); the folded stacks land in `<ckpt>/result.luaprof`.
+
+### 2026-10-16 02:30 — the 12.5% blob is four loops waiting on memory; H65, H66
+
+Debug-info build (`spring-headless-pgolto2g`, own checkpoint): same layout
+as revision 3 (every function at the same address and size; constants moved
+by the debug info, so not bit-identical) and the same table within 0.3 points
+per row (21.06 s window). The 12.5% LTO folded into `CUnitHandler::Update`,
+by the call it inlined, as % of the main core:
+
+| loop over all ~10k units | % of core | where it stalls |
+|---|---|---|
+| `UpdateUnits` (`CUnit::Update`, `UpdateCollisionMap`) | 3.3% | first read of each unit (`frameNum + owner->id`) |
+| `UpdateUnitMoveTypes` (general move types) | 3.1% | unit → `moveType` → vtable, before the virtual `Update()` |
+| `UpdateUnitWeapons` (the serial `UpdateWeapons` loop) | 2.9% | weapon-use flags, then each weapon's vtable |
+| `UpdateUnitLosStates` | 2.5% | `losStatus[at]`, first read of each unit |
+| `SlowUpdateUnits`, `QueueDeleteUnits` | 0.6% | |
+| **total** | **12.5%** | |
+
+Annotated, the hot instructions are the ones right after a pointer load
+(`mov 0x4f8(%rbp),%rdi; mov (%rdi),%rax` = 9.6% of the blob, `mov
+0xc0(%rax)` 9.1%, `call *0x40(%rax)` 9.0%): cache misses on scattered unit
+objects, not computation.
+
+Candidates (Recoil branch `speed4` = revision 3 + these; building):
+
+| id | change | why it is exact |
+|---|---|---|
+| H65 | Lua callin timers (`Lua::Callins::*`, 4 clock reads + 2 profile-map updates per callin, ~1.0% of the core, half in `AllowWeaponTarget`) run only while the profiler is on (`/debug`, barreplay `-profile`) | timings are never sim input |
+| H66 | software prefetch 8 units ahead (and the move type / first weapon 4 ahead) in those four loops | a prefetch changes no value and no order; the general-move-system loop first collects its units in the view's own order (a read-only pass) |
+
+Lua profiler build done; its checkpoint is being dumped.
