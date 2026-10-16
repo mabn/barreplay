@@ -1089,3 +1089,29 @@ cycles over the window (trials under perf recording), `speed8` 61.9e9 —
 roughly -22%, but not a like-for-like A/B. A same-setup interleaved A/B
 (revision 3 vs `speed8`, both under the new widget config) is queued; whole
 game, measured: ~25% fewer main-thread cycles (5.87e12 -> 4.43e12).
+
+### 2026-10-16 23:00 — revision 4 vs revision 3, like for like: -18%; thread count settled
+
+Late window, 4 rounds rotated, main thread pinned; both under the new widget
+config (W1), so this is the ENGINE + widget 1.13.0 (W2, W3) difference:
+
+| build | cycles per round (e9) | mean | wall mean |
+|---|---|---|---|
+| revision 3 (`pgolto2w`) | 75.26 / 74.72 / 75.50 / 75.44 | 75.23e9 | 20.09 s |
+| revision 4 (`speed8`) | 61.81 / 61.64 / 61.28 / 62.00 | **61.68e9 (-18.0%)** | 16.53 s (-17.7%) |
+
+This replaces the unmeasured "-11.7%" in `1194dbc`'s message. With W1's own
+-2.4%, revision 4 + the config is ~-20% on the late window against
+revision 3 as published.
+
+Whole game, `speed8`, by thread count (all `a26e920d…`):
+
+| threads | sim | main cycles | main avg clock | throttle events |
+|---|---|---|---|---|
+| 2 | 26m31s | 5.62e12 | 3.63 GHz | +9,395 |
+| **4 (engine default)** | **25m29s** | 4.43e12 | 2.98 GHz | +41,031 |
+| 7 | 26m47s | 4.36e12 | 2.65 GHz | +15,389 |
+
+On this laptop the default is best: fewer threads run cooler but leave the
+parallel work to the main thread, more run hotter. barreplay keeps the
+engine default.
