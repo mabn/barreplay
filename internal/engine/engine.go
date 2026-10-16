@@ -123,6 +123,7 @@ type Engine struct {
 	prdPath       string
 	engineCfgPath string // set by WriteEngineConfig; passed to the engine as --config
 	pid           int    // set by Run; see Pid
+	gameMD5       string // the game's rapid package, once EnsureContent resolved it; see EnableWidget
 	patched       bool   // resolved binary is the patched build (see Config.PatchedEngine)
 }
 
@@ -319,6 +320,7 @@ func (e *Engine) EnsureContent(ctx context.Context, gameVersion, mapName string)
 		if tag, md5, ok := e.resolveRapidGameTag(ctx, gameVersion); ok {
 			fmt.Fprintf(os.Stderr, "engine: resolved game %q -> rapid tag %s\n", gameVersion, tag)
 			game, gameMD5 = tag, md5
+			e.gameMD5 = md5
 		} else {
 			fmt.Fprintf(os.Stderr, "engine: could not resolve a rapid tag for %q; passing it to pr-downloader as-is\n", gameVersion)
 		}
