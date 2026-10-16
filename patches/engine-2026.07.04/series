@@ -20,3 +20,8 @@ experiments/H45-qtpfs-relink-grid-no-reinit.patch
 experiments/H49-headless-skip-smt-tiles.patch
 0003-static-mempool-lazy-zeroing.patch
 0004-engine-event-log.patch
+0005-bench-harness-park-and-gcov-dump.patch
+0006-findanim-and-cob-div-shift.patch
+0007-cob-threaded-dispatch.patch
+0008-lua-threaded-dispatch.patch
+0009-weapon-targets-testtarget-last.patch

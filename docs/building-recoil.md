@@ -146,6 +146,35 @@ an EARLIER published revision — listed in the pin's `Superseded` — is replac
 which is how hosts move to a new revision. So publishing revision N+1 means
 moving revision N's SHA-256 into `Superseded` beside the new pin.
 
+### PGO + LTO (revision 3 on)
+
+From revision 3 the published build is compiled with profile-guided and
+link-time optimization: `-O3 -flto=4 -fprofile-use -fprofile-partial-training`,
+no `-g`, the official image otherwise unchanged. The profile is versioned WITH
+the series, in `patches/engine-<version>/pgo/profile.tar.xz`, and
+`pgo/build.sh` is the whole recipe:
+
+```sh
+git clone <recoil> src && cd src && git checkout 2026.07.04 && \
+  git am $(grep -v '^#' $P/series | sed "s|^|$P/|")    # + submodules, as above
+$P/pgo/build.sh src work            # -> work/build-use/spring-headless
+go run ./cmd/publish-engine -data <BARdata> work/build-use/spring-headless
+```
+
+The source must be a real clone (a worktree's `.git` points outside the
+mounted tree, and the engine's version comes from `git describe`).
+`SeriesDigest` hashes `pgo/` too, so a new profile is a new revision.
+
+Retraining: `pgo/build.sh src work gen` builds the INSTRUMENTED engine; run it
+on training replays (a whole replay, or with `BARREPLAY_BENCH_START/N` to stop
+after a late window — the harness calls `__gcov_dump` before its `_exit`; the
+instrumented build is linked `-Wl,-u,__gcov_dump` because a weak reference
+alone does not pull libgcov's member in), then
+`tar --sort=name --mtime=@0 --owner=0 --group=0 -cf - prof | xz -9 > pgo/profile.tar.xz`.
+Measured on the late game (docs/worklog-engine-speed.md): -10% per frame at
+~10k units, -11% on the medium gate replay, byte-identical everywhere it was
+gated (medium, isthmus, and verylarge1's full 90,900 frames).
+
 ### Versions
 
 A patched build is named by a semver: the engine version without its leading

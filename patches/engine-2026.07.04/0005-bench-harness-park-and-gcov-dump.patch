@@ -1,0 +1,124 @@
+From 6375cc5eccd156d057d0c1bb06524a1fd0210544 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Thu, 15 Oct 2026 13:50:10 +0000
+Subject: [PATCH 5/9] bench harness: PARK point for checkpoint/restore
+ benchmarking; gcov dump before _exit
+
+BARREPLAY_PARK=<prefix>: at the bench window's first frame point stdout and
+stderr at <prefix>.stdout, write the pid to <prefix>.ready and sleep
+(clearing the watchdog) until <prefix>.go exists; the go file may carry
+"<frames> <output>", since the environment is frozen into a checkpoint.
+Used with CRIU by barreplay's tools/bench-ckpt to time late-game windows
+from one saved state. The bench line also reports start= and units=.
+
+Before the harness's _exit, call __gcov_dump through a weak reference, so an
+instrumented (-fprofile-generate) build can stop after a late-game window
+with its profile written (link it with -Wl,-u,__gcov_dump). Inert unless the
+BARREPLAY_BENCH_* variables are set; never touches synced state.
+---
+ rts/Net/NetCommands.cpp | 56 ++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 53 insertions(+), 3 deletions(-)
+
+diff --git a/rts/Net/NetCommands.cpp b/rts/Net/NetCommands.cpp
+index b645866..0fc410b 100644
+--- a/rts/Net/NetCommands.cpp
++++ b/rts/Net/NetCommands.cpp
+@@ -11,6 +11,8 @@
+ #include <sys/syscall.h>
+ 
+ #include "Game/Game.h"
++#include "Sim/Units/UnitHandler.h"
++#include "System/Platform/Watchdog.h"
+ #include "GameServer.h"
+ 
+ // [barreplay] CPU-time micro-benchmark of a fixed sim-frame window.
+@@ -20,6 +22,8 @@
+ // frames [START, START+N-1], prints to stderr, then _exit(0) — so the run is
+ // truncated right after the window for fast iteration. Zero effect unless the
+ // env vars are set; never touches synced state.
++extern "C" void __gcov_dump(void) __attribute__((weak));
++
+ namespace {
+ 	inline long long brNowNs(clockid_t c) {
+ 		struct timespec ts; clock_gettime(c, &ts);
+@@ -50,6 +54,43 @@ namespace {
+ 			if (const char* s = getenv("BARREPLAY_BENCH_START")) start = atoi(s);
+ 			if (const char* v = getenv("BARREPLAY_BENCH_N"))     n     = atoi(v);
+ 			out = getenv("BARREPLAY_BENCH_OUT");
++			park = getenv("BARREPLAY_PARK");
++		}
++		// [barreplay] PARK (checkpoint support, tools/bench-ckpt): at the start
++		// of the window, point stdout/stderr at <park>.stdout (so no pipe to the
++		// launcher is left for a checkpoint to carry), write our pid to
++		// <park>.ready, and sleep until <park>.go exists. A process parked here
++		// is what CRIU dumps; every restore of the image wakes here too, and the
++		// window - counters included, which CRIU could not have carried - starts
++		// only then, from exactly the same state each time.
++		const char* park = nullptr;
++		void parkHere() {
++			if (park == nullptr || park[0] == 0)
++				return;
++			char path[1024];
++			snprintf(path, sizeof(path), "%s.stdout", park);
++			if (FILE* f = freopen(path, "a", stdout)) (void)f;
++			if (FILE* f = freopen(path, "a", stderr)) (void)f;
++			snprintf(path, sizeof(path), "%s.ready", park);
++			if (FILE* f = fopen(path, "w")) { fprintf(f, "%d\n", (int)getpid()); fclose(f); }
++			snprintf(path, sizeof(path), "%s.go", park);
++			while (access(path, F_OK) != 0) {
++				Watchdog::ClearTimers();
++				usleep(20 * 1000);
++			}
++			Watchdog::ClearTimers();
++			// The environment was frozen into the checkpoint, so each restore
++			// says what it wants in the go file: "<frames> <output file>".
++			static char goOut[1024];
++			if (FILE* f = fopen(path, "r")) {
++				int goN = 0;
++				goOut[0] = 0;
++				if (fscanf(f, "%d %1023s", &goN, goOut) >= 1 && goN > 0)
++					n = goN;
++				if (goOut[0] != 0)
++					out = goOut;
++				fclose(f);
++			}
+ 		}
+ 		void countersOn() {
+ 			// frequency-independent work counters (core cycles) + deterministic
+@@ -677,8 +718,10 @@ void CGame::ClientReadNet()
+ 				if (g_brBench.start >= 0) {
+ 					const int about = gs->frameNum + 1; // frame SimFrame() is about to run
+ 					if (about >= g_brBench.start && about < g_brBench.start + g_brBench.n) {
+-						if (about == g_brBench.start)
++						if (about == g_brBench.start) {
++							g_brBench.parkHere();
+ 							g_brBench.countersOn();
++						}
+ 						const long long t0 = brNowNs(CLOCK_THREAD_CPUTIME_ID);
+ 						const long long w0 = brNowNs(CLOCK_MONOTONIC);
+ 						SimFrame();
+@@ -693,12 +736,19 @@ void CGame::ClientReadNet()
+ 							// thread_cpu/wall kept for reference only.
+ 							char line[320];
+ 							snprintf(line, sizeof(line),
+-								"[BARREPLAY_BENCH] frames=%d cycles=%lld instructions=%lld thread_cpu_ms=%.3f wall_ms=%.3f\n",
+-								g_brBench.seen, cyc, ins, g_brBench.tcpu / 1e6, g_brBench.wall / 1e6);
++								"[BARREPLAY_BENCH] frames=%d start=%d units=%d cycles=%lld instructions=%lld thread_cpu_ms=%.3f wall_ms=%.3f\n",
++								g_brBench.seen, g_brBench.start, (int)unitHandler.GetActiveUnits().size(),
++								cyc, ins, g_brBench.tcpu / 1e6, g_brBench.wall / 1e6);
+ 							if (g_brBench.out) {
+ 								if (FILE* f = fopen(g_brBench.out, "a")) { fputs(line, f); fclose(f); }
+ 							}
+ 							fputs(line, stderr); fflush(stderr);
++							// An instrumented (-fprofile-generate) build writes its
++							// profile at exit, which _exit skips: dump it first, so a
++							// training run can stop right after a late-game window.
++							// __gcov_dump only exists in such builds (weak: null else).
++							if (__gcov_dump != nullptr)
++								__gcov_dump();
+ 							_exit(0);
+ 						}
+ 					} else {
+-- 
+2.53.0
+

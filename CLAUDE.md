@@ -3889,6 +3889,22 @@ versions URL is derived from `-rapid-repo` (`…/repos.gz` → `…/byar/version
 The wrapper startscript `barreplay` writes forces max speed:
 `[game]{ demofile=<abs path>; } [modoptions]{ MinSpeed=9999; MaxSpeed=9999; }`.
 
+## Benchmarking the late game (`tools/bench-ckpt`)
+
+Whole runs of small replays say little about speed: a big game's late frames
+(~10k units) are ~15-20x slower than its early ones and are where re-sims spend
+their hours. `tools/bench-ckpt/bench-ckpt.sh` re-simulates a replay ONCE to a
+frame, CRIU-checkpoints the parked engine (the bench harness's BARREPLAY_PARK
+point, patch 0005), and restores it per trial to time the next N frames from the
+same state: `dump`, `trial`, `ab`, `flame` (LBR flame graph). Root for CRIU comes
+through sudo docker (privileged container + nsenter into pid 1); the restore runs
+in a systemd scope. A checkpoint restores only into the binary that made it
+(dump each build once). Nothing else may run an engine meanwhile (the restored
+one needs its UDP port back, and a trial copies its files into the data dir).
+Benchmark: "verylarge1" = 6a37d06acbb455b1d19179d8ec965f10 at frame 63780.
+The work log is docs/worklog-engine-speed.md; revision 3's PGO+LTO build recipe
+is patches/engine-2026.07.04/pgo/ (docs/building-recoil.md).
+
 ## Running out of memory (why the engine is stopped, not killed)
 
 A re-simulation of a big game wants 7-10 GB resident, which is more than a small
