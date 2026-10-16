@@ -1171,3 +1171,17 @@ checks). Every harness fixture byte-identical.
 |---|---|---|
 | `speed8` + W4 | 57.69e9 | 15.64 s |
 | `speed8` + W4 + W5 | 56.87e9 (-1.4%) | 15.47 s (-1.1%) |
+
+### 2026-10-17 04:20 — whole game with W4 + W5: thermal noise dominates
+
+| whole verylarge1 (all `a26e920d…`) | sim | main instructions | main cycles | avg clock | throttle events |
+|---|---|---|---|---|---|
+| `speed8` + W4 | 20m16s | 4.50e12 | 3.92e12 | 3.35 GHz | +28,546 |
+| `speed8` + W4 + W5 | 22m49s | 4.47e12 | 4.02e12 | 3.04 GHz | +46,036 |
+
+W5 removes instructions as expected, but this run throttled far more and
+took 2.5 minutes longer. One whole-game wall time on this laptop moves by
++-10% with the package temperature — more than the last several changes
+together — so changes are judged on the late window (interleaved, pinned)
+and whole games only check identity and the trend. Best measured remains
+20m16s.
