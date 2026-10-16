@@ -450,3 +450,14 @@ func TestLocateExplicitBinaryBeatsPatchedPreference(t *testing.T) {
 		t.Error("Patched() = true, but -engine named the stock binary")
 	}
 }
+
+func TestEngineEnvAsksForLargePages(t *testing.T) {
+	env := engineEnv([]string{"A=1"})
+	if env[len(env)-1] != "MIMALLOC_ALLOW_LARGE_OS_PAGES=1" {
+		t.Fatalf("engineEnv did not add the large-pages option: %v", env)
+	}
+	keep := engineEnv([]string{"MIMALLOC_ALLOW_LARGE_OS_PAGES=0"})
+	if len(keep) != 1 || keep[0] != "MIMALLOC_ALLOW_LARGE_OS_PAGES=0" {
+		t.Fatalf("engineEnv overrode the caller's setting: %v", keep)
+	}
+}
