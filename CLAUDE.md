@@ -4100,6 +4100,17 @@ deterministic) — diff against a previous run to verify any change here.
   `widgetHandler:DisableWidget(name)` (applied between callins; never mutate the widget
   list mid-callin via the `*Raw` variants) for every `knownWidgets` entry that is
   `active` and not itself. pcall-guarded like the profiler dump.
+  **On sandboxed BAR builds (2026.10.13 on) that runtime path is gone** (user
+  widgets get a proxy handler), and the seeded config now does the job: the
+  config barreplay writes (`engine.widgetConfigLua`) lists every widget the
+  game package ships at order 0 — the names read from the rapid package
+  (`engine.gameWidgetNames`: `packages/<md5>.sdp` index -> `pool/` files ->
+  `luaui/widgets/*.lua` GetInfo literals, 320 for a current build), which
+  answers "the names vary by game version" — and switches the Widget
+  Selector's profiler column off (it wrapped every widget callin in a timer).
+  Only the selector and BAR's "hidden" widgets stay forced on. On a 10k-unit
+  late game this measured -6.2% main-thread cycles and 5 minutes of a whole
+  verylarge1 re-sim (docs/worklog-engine-speed.md, W1 and W4).
 - **`-throttle-draw` (default true):** in demo playback the engine yields from sim to
   draw every `GAME_SPEED/MinDrawFPS` sim frames and reserves `MinSimDrawBalance`
   (default **0.15** = 15%!) of CPU time for drawing; each draw runs the full unsynced
