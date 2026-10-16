@@ -836,3 +836,38 @@ Approximate simulation is ruled out by measurement: the demo holds every
 player's sync checksum every 60 frames (~1500 per player here), over every
 synced write — an approximation changing any simulated value fails within 2
 game-seconds; one that never fails is an exact optimization.
+
+### 2026-10-16 07:10 — huge pages: -15.7% on the window, -9.6% on the whole game; making it work without root
+
+Fresh runs (re-simulated from the start; the bench harness times the same
+450-frame window at 63780), `speed4` + W1 + 7 threads
+(`~/dev/perf3/thp-window.sh`):
+
+| THP setting | huge pages in use | window wall | main cycles |
+|---|---|---|---|
+| default (`madvise`, nothing marked) | 0 | 18.19 s | 68.7e9 |
+| `always`, memory fragmented | 96 MB | 17.93 s | 67.7e9 |
+| `always` + `defrag=always` + caches dropped + compacted + mimalloc large pages | **4.96 GB** | **15.34 s (-15.7%)** | 57.9e9 |
+
+Whole game under the last setting: **sim 21m49s** (24m08s without),
+`a26e920d…` identical. Running total: 27m12s (rev 3) -> 24m08s (speed4, W1,
+7 threads) -> 21m49s (+ huge pages).
+
+DRAM-missing loads (`mem_load_uops_retired.l3_miss`, precise, with data
+addresses) are spread over everything that walks units and weapons: the
+unit loops 7.1% of all misses, targeting 5.4, LOS 3.8, `CUnit::Update` 3.5,
+weapon vectors 3.5, aircraft 4.3, ... — ~10k unit objects of several KB each
+plus their weapons against a 6 MB L3: every pass over the units streams from
+DRAM.
+
+Making it work WITHOUT root (a host's default is `enabled=madvise
+defrag=madvise`: only memory marked MADV_HUGEPAGE gets huge pages, compacted
+on demand):
+
+| attempt | result |
+|---|---|
+| H69: StaticMemPool constructors mark their page arrays | only one pool is resident enough to matter |
+| `MIMALLOC_ALLOW_LARGE_OS_PAGES=1` (barreplay now sets it) | ignored for the arenas: mimalloc reserves them uncommitted, and `if (!commit) allow_large = false` |
+| both, measured | 61 MB huge, window 18.69 s: nothing |
+| `/proc/<pid>/smaps` of the engine | 1 GB mimalloc arenas, a 628 MB brk `[heap]` and 640/256/128 MB anonymous blocks, none marked |
+| **H70**: the engine marks every private anonymous mapping >= 16 MB (heap included) MADV_HUGEPAGE every 300 frames, and MADV_COLLAPSEs them on frame 0 (what loading made resident) | building (`speed6`) |
