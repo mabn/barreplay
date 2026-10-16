@@ -871,3 +871,36 @@ on demand):
 | both, measured | 61 MB huge, window 18.69 s: nothing |
 | `/proc/<pid>/smaps` of the engine | 1 GB mimalloc arenas, a 628 MB brk `[heap]` and 640/256/128 MB anonymous blocks, none marked |
 | **H70**: the engine marks every private anonymous mapping >= 16 MB (heap included) MADV_HUGEPAGE every 300 frames, and MADV_COLLAPSEs them on frame 0 (what loading made resident) | building (`speed6`) |
+
+### 2026-10-16 09:40 — huge pages without root: the pages arrive, the time does not (yet); W2 written
+
+Fresh-run window (450 frames at 63780), host defaults (`enabled=madvise
+defrag=madvise`, no compaction beforehand), `speed6` builds:
+
+| run | huge pages | window wall | main user cycles | main time outside user mode |
+|---|---|---|---|---|
+| none (`speed4`) | 0 | 18.19 s | 68.7e9 | ~0 |
+| system-wide `always` (root, pre-compacted) | 4.96 GB | 15.34 s | 57.9e9 | ~0 |
+| H70: engine marks large regions MADV_HUGEPAGE every 300 frames | 6.15 GB | 17.76 s | 55.8e9 | ~2.7 s |
+| H71: no marking, low-priority thread MADV_COLLAPSEs resident memory every 2 s | 6.28 GB | 17.70 s | 55.6e9 | ~2.7 s |
+
+Both get the pages and cut user-mode cycles 19% — more than the root setup
+— but the main thread loses ~2.7 s to the kernel. Not fault-time
+compaction (H71 marks nothing). Suspect: mimalloc returns freed memory
+(`MADV_DONTNEED` after `purge_delay`), splitting huge pages; the next
+allocation re-faults 4 KiB zero pages; the collapser rebuilds them. The
+root run had mimalloc's large-page mode, which does not purge that way.
+Testing H71 with `MIMALLOC_PURGE_DELAY=-1`.
+
+**W2** (widget 1.13.0 + `Spring.GetUnitSampleData`, Recoil `speed7`): the 1 Hz
+sample in one engine call — id, team, def, x, z, health, max health, build,
+x/z speed, buildee and raw LOS bits per ally team, in GetAllUnits' order,
+the same float values the per-unit calls push under full read. The harness
+stubs it from its per-unit stubs; enginelog mode ran the bulk path on all
+140 samples and wrote the same bytes. NOTE the version bump changes every
+capture's GAME line, so identity is now checked against revision 3 run
+with widget 1.13.0, not the old md5s.
+
+Estimate (not measured): the STOCK engine on verylarge1 ~45 min (rev 2
+was 31m03s here; stock was 39-45% slower than rev 2 on the largest game
+both were measured on).
