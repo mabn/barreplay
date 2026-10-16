@@ -931,3 +931,32 @@ By cycles, the same fresh-run window:
 
 H71 needs no root and no host setting and does at least as well as the root
 setup; purge-off adds nothing. Building `speed7` = H71 + W2.
+
+### 2026-10-16 12:40 — whole game by cycles: -26% main-thread work, eaten by heat
+
+`speed7` = revision 3 + H65 + H66 + H71 (huge pages, no root) + W2 (engine
+side) with widget 1.13.0. Whole verylarge1, perf stat per thread
+(`~/dev/perf3/fullstat.sh`). Every run byte-identical (`a26e920d…`; the
+widget version turns out not to reach a re-sim's .brp, so the old reference
+holds — re-checked with revision 3 + widget 1.13.0).
+
+| run | sim | main cycles | main avg clock | throttle events during the run |
+|---|---|---|---|---|
+| revision 3, default threads | 29m46s | 5.87e12 | 3.26 GHz | +11,419 |
+| `speed7`, 7 threads | 26m47s | **4.36e12 (-26%)** | **2.65 GHz** | +15,389 |
+| `speed7`, default threads | 25m14s | (counter merged every thread: attached before the pool existed) | — | +13,075 |
+
+The patches cut the main thread's work by a quarter over the whole game, but
+this laptop's SUSTAINED clock is set by heat: with 7 threads the package runs
+hotter and the main thread averaged 2.65 GHz against revision 3's 3.26, so the
+wall-clock gain is 10%. 7 threads won 6% in 20-second checkpoint trials on a
+cool CPU and LOSE over 25 minutes (26m47s vs 25m14s with the default 4).
+The same configuration also measured 27m12s and 29m46s for revision 3 on
+different occasions: whole-game wall times here swing +-10% with the
+machine's thermal state.
+
+Consequences: (1) barreplay should NOT default to more threads; (2) the
+yardstick for the 10-minute goal on this host is main-thread cycles —
+at ~3 GHz sustained, 10 minutes is ~1.8e12 cycles, 2.4x fewer than today's
+4.36e12; (3) on a thermally limited host, work removed from ANY thread
+(workers included) buys clock for the main one.
