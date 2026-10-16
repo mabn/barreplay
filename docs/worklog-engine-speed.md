@@ -1035,3 +1035,24 @@ synced gadget would break the game).
 
 Dropped (checkpoint image the same 6.0 GB, so no memory growth either). The
 GC's share is the cost of the garbage BAR's gadgets make, not of how it is paced.
+
+### 2026-10-16 19:30 — `speed8` whole game; where the 10-minute goal stands
+
+| run (whole verylarge1, all identical `a26e920d…`) | sim | main cycles | main avg clock | throttle events |
+|---|---|---|---|---|
+| revision 3, default threads | 29m46s | 5.87e12 | 3.26 GHz | +11,419 |
+| `speed7`, 7 threads | 26m47s | 4.36e12 | 2.65 GHz | +15,389 |
+| `speed8` (W2+W3+H71+W1+H65+H66), default threads | 25m29s | 4.43e12 (from minute 1) | 2.98 GHz | +41,031 |
+| best on record: `speed4` + root huge pages, 7 threads | 21m49s | — | — | — |
+
+Main-thread work is ~25% below revision 3 for the whole game. On this laptop
+the sustained clock (2.6-3.3 GHz under load, throttling all the time) decides
+most of the wall time, and it varies from run to run by more than the last
+several patches together.
+
+The 10-minute goal needs ~2.4x less main-thread work than now. Measured and
+ruled out on the way: approximate simulation (sync checksums every 60
+frames), an air-only AA candidate list (cheap rejections are ~0.3%),
+parallel aircraft movement (55% of updates touch an already-moved
+neighbour), lighter Lua GC pacing, more threads (a loss over a whole game
+on a throttling host). What remains is a list of 1-2% exact items.
