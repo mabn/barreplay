@@ -1115,3 +1115,25 @@ Whole game, `speed8`, by thread count (all `a26e920d…`):
 On this laptop the default is best: fewer threads run cooler but leave the
 parallel work to the main thread, more run hotter. barreplay keeps the
 engine default.
+
+### 2026-10-17 00:40 — W4: BAR's widget suite off again, -6.2%
+
+The sandbox (BAR 2026.10.13) took `widgetHandler:DisableWidget` away from user
+widgets, so every re-sim since then ran BAR's whole widget suite. W4 (barreplay
+`6156ec4`): the widget config barreplay seeds lists every game widget at order
+0, which BAR's handler reads as do-not-load. The names come from the game's
+rapid package (`packages/<md5>.sdp` index -> `pool/` files ->
+`luaui/widgets/*.lua` GetInfo name literals): 320 for this game. The widget
+selector and "hidden" widgets stay forced on; the heartbeat now reports
+`widgets=1`.
+
+| build | cycles per round (e9) | mean | wall mean |
+|---|---|---|---|
+| `speed8` | 62.00 / 62.06 / 61.69 / 61.72 | 61.87e9 | 16.55 s |
+| `speed8` + W4 | 57.57 / 57.99 / 58.59 / 57.99 | **58.04e9 (-6.2%)** | 15.69 s (-5.2%) |
+
+Every round. Far more than the ~1.5% the Lua profile attributed to BAR's
+widgets — their callins, garbage and cache traffic cost the engine around
+them too. Medium gate `0558d354…` = reference (unsynced: cannot change the
+capture). Round 3 measured "suite on vs off" on MEDIUM as no difference; the
+late game is where it shows. Whole game running.
