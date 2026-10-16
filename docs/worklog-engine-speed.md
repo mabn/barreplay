@@ -1185,3 +1185,16 @@ took 2.5 minutes longer. One whole-game wall time on this laptop moves by
 together — so changes are judged on the late window (interleaved, pinned)
 and whole games only check identity and the trend. Best measured remains
 20m16s.
+
+### 2026-10-17 06:00 — host tuning: capping the worker cores does not help
+
+Whole verylarge1, `speed8` + W4 + W5, main thread pinned to cpu3, every other
+cpu but 3's sibling capped at 2.0 GHz (`scaling_max_freq`, restored to 4.0 GHz
+afterwards; `~/dev/perf3/capfull.sh`): **sim 23m06s**, `a26e920d…`, +53,830
+throttle events. No better than uncapped (20m16s-22m49s): Haswell's cores
+share one clock domain, so the cap cannot buy the main core headroom.
+
+Every main-thread bucket of the late window has now been drilled into (COB
+scripts last: FindAnim ~0.5%, thread-map lookups, the sleep queue — no line
+above 0.22%). Nothing measured or sized is above 1-2%; the 10-minute goal
+needs about half of today's main-thread work.
