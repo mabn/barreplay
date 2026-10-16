@@ -721,3 +721,25 @@ every re-sim (`engine.widgetConfigLua`) now carries
 `data = { ["Widget Selector"] = { profiler = false } }`. Unsynced, so the
 capture cannot change. Being measured: fresh checkpoints of revision 3
 (`pgolto2w`) and of `speed4` (H65+H66), both with the new config.
+
+### 2026-10-16 03:20 — W1 -2.4%, H65+H66 another -5.3%: -7.6% together
+
+Fresh checkpoints at 63780 for revision 3 under the new widget config
+(`pgolto2w`, same binary as `pgolto2`) and for `speed4` (revision 3 + H65 +
+H66, new config). 450-frame window, 4 rounds, order rotated, main thread
+pinned alone on core 3 (`MAINCPU=3 OTHERCPUS=0,1,2,4,5,6`; 7 is 3's
+hyperthread). Raw: `~/dev/perf3/vl1-w1-h65h66.txt`.
+
+| build | wall per round (ms) | mean | vs revision 3 | instructions, mean |
+|---|---|---|---|---|
+| revision 3 | 20732 / 20702 / 20584 / 20662 | 20670 | — | 66.73e9 |
+| + W1 (selector profiler off) | 20162 / 20222 / 20221 / 20097 | 20176 | **-2.4%** | 65.03e9 |
+| + W1 + H65 + H66 (`speed4`) | 19057 / 18956 / 19052 / 19325 | 19098 | **-7.6%** (-5.3% on W1) | 64.76e9 |
+
+No overlap between the groups. `speed4` runs ~the same instructions as W1
+and 5% fewer cycles: the prefetches hiding memory stalls, as intended. (H65
+and H66 are not yet measured apart.)
+
+Gate (medium, full run, new config): `speed4` and revision 3 both
+`0558d3540c8e3f97d669505d1382ec20` = the reference. verylarge1 full run on
+`speed4` running.
