@@ -939,7 +939,13 @@ local shields = (function()
 		}))
 	end
 
-	return { read = read, write = write }
+	-- isShieldDef: whether read can return anything for this def (read's own
+	-- first checks), so a loop can skip the call for every other unit.
+	local function isShieldDef(defID)
+		return spGetUnitShieldState ~= nil and fullOf(defID) ~= false
+	end
+
+	return { read = read, write = write, isShieldDef = isShieldDef }
 end)()
 
 -- noteView keeps myAllyTeam current and, in the uploader, writes a "view"
@@ -1015,6 +1021,96 @@ local function sample(frame)
 		bd, cnt, stride = engineLog.sample(doVis and visAllies or {}, engineLog.sampleBuf)
 		engineLog.sampleBuf = bd
 		total = cnt
+	end
+
+	if bd then
+		-- The re-simulation's loop over a bulk sample (full view, patched
+		-- engine): the general loop below with what cannot happen here taken
+		-- out — every unit is recorded (all; nothing is buried in a re-sim),
+		-- there are no enemies or last-known entries (lastKnown was emptied
+		-- above), and the bulk read never returns nil. Same quantization, same
+		-- predictor, same order: the same stream (TestEngineLogMatchesResim).
+		local shieldRead, isShieldDef = shields.read, shields.isShieldDef
+		local nva = doVis and #visAllies or 0
+		local se = sampleEvery
+		for i = 1, total do
+			local base = (i - 1) * stride
+			local unitID = bd[base + 1]
+			recorded = recorded + 1
+			local qx = mathFloor(bd[base + 4] + 0.5)
+			if qx > 32767 then qx = 32767 elseif qx < -32768 then qx = -32768 end
+			local qz = mathFloor(bd[base + 5] + 0.5)
+			if qz > 32767 then qz = 32767 elseif qz < -32768 then qz = -32768 end
+			local qhp = mathFloor(bd[base + 6] + 0.5)
+			if qhp < 0 then qhp = 0 end
+			local qmax = mathFloor(bd[base + 7] + 0.5)
+			if qmax < 0 then qmax = 0 end
+			local qdvx = mathFloor(bd[base + 9] * se + 0.5)
+			if qdvx > 32767 then qdvx = 32767 elseif qdvx < -32768 then qdvx = -32768 end
+			local qdvz = mathFloor(bd[base + 10] * se + 0.5)
+			if qdvz > 32767 then qdvz = 32767 elseif qdvz < -32768 then qdvz = -32768 end
+			local qb = mathFloor(bd[base + 8] * 255 + 0.5)
+			if qb > 255 then qb = 255 elseif qb < 0 then qb = 0 end
+			local defID = bd[base + 3]
+			local qdef = defID
+			if qdef > 65535 or qdef < 0 then qdef = 0 end
+			local qteam = bd[base + 2]
+			if qteam > 255 or qteam < 0 then qteam = unknownTeam end
+			local qt = bd[base + 11]
+			if qt > 65535 or qt < 0 then qt = 0 end
+			local p = prev[unitID]
+			if p ~= nil and not keyframe
+				and p.dvx == qdvx and p.dvz == qdvz
+				and p.x + qdvx == qx and p.z + qdvz == qz
+				and p.hp == qhp and p.maxhp == qmax and p.b == qb
+				and p.def == qdef and p.team == qteam and p.t == qt then
+				p.x, p.z, p.f = qx, qz, frame
+			else
+				n = n + 1
+				cid[n], cdef[n], cteam[n] = unitID, qdef, qteam
+				cx[n], cz[n], chp[n], cmax[n] = qx, qz, qhp, qmax
+				cdvx[n], cdvz[n], cb[n], ct[n] = qdvx, qdvz, qb, qt
+				if p == nil then
+					prev[unitID] = { x = qx, z = qz, dvx = qdvx, dvz = qdvz,
+						hp = qhp, maxhp = qmax, def = qdef, team = qteam, b = qb, t = qt, f = frame }
+				else
+					p.x, p.z, p.dvx, p.dvz = qx, qz, qdvx, qdvz
+					p.hp, p.maxhp, p.def, p.team, p.b, p.t, p.f = qhp, qmax, qdef, qteam, qb, qt, frame
+				end
+			end
+			if unitID <= 65535 and isShieldDef(defID) then
+				local sp, son = shieldRead(unitID, defID, frame)
+				if sp ~= nil then
+					local k = #sid + 1
+					sid[k], spow[k], sflag[k] = unitID, sp, son and 1 or 0
+				end
+			end
+			if doVis and unitID <= 65535 then
+				local lo, hi, scale = 0, 0, 1
+				for a = 1, nva do
+					local bits = bd[base + 11 + a]
+					if a <= 8 then
+						lo = lo + (bits % 4) * scale
+					else
+						hi = hi + (bits % 4) * scale
+					end
+					scale = (a == 8) and 1 or scale * 4
+				end
+				local v = visPrev[unitID]
+				if v == nil then
+					visPrev[unitID] = { lo = lo, hi = hi, f = frame }
+					nv = nv + 1
+					vid[nv], vlo[nv], vhi[nv] = unitID, lo, hi
+				else
+					if keyframe or v.lo ~= lo or v.hi ~= hi then
+						nv = nv + 1
+						vid[nv], vlo[nv], vhi[nv] = unitID, lo, hi
+					end
+					v.lo, v.hi, v.f = lo, hi, frame
+				end
+			end
+		end
+		total = 0 -- the general loop below has nothing left to do
 	end
 
 	for i = 1, total do
