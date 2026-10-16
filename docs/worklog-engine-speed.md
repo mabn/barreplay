@@ -1198,3 +1198,59 @@ Every main-thread bucket of the late window has now been drilled into (COB
 scripts last: FindAnim ~0.5%, thread-map lookups, the sleep queue — no line
 above 0.22%). Nothing measured or sized is above 1-2%; the 10-minute goal
 needs about half of today's main-thread work.
+
+### 2026-10-16 21:31 — aircraft movement, and the sync checker: -7.9%
+
+(Host clock; the four entries above carry dates ahead of it.)
+
+Fresh LBR profile of the late window on `speed8` + W5, main thread as % of one
+core (the huge-page collapser thread, which shares the main thread's name and
+took the equivalent of 11% of a core on its own cpu right after the restore,
+filtered out):
+
+| phase | % of main core | of which Lua |
+|---|---|---|
+| unit updates | 64.5% | 4.9% |
+| Lua callins not from unit updates | 9.6% | 9.6% |
+| unit-script anims (parallel section) | 6.5% | |
+| LOS update (parallel section) | 4.8% | |
+| projectiles + collisions | 4.1% | 1.5% |
+| COB scripts | 4.1% | |
+| Lua GC | 1.7% | 1.7% |
+| map damage / terrain | 1.6% | |
+| pathfinding | 1.4% | |
+| rest | 1.6% | |
+
+Inside `CStrafeAirMoveType::Update` (13.7%): its own code 7.9% (UpdateAirPhysics
+3.2, Update 2.9, UpdateFlying 1.7), CSolidObject::Move 1.5, control surfaces
+1.3, CSyncChecker::Sync 1.2, crash kills 0.9. By source line, **xxhash** (the
+sync checker's hash) is all over it, and summed over the whole main thread the
+sync checker costs **6.2%**: every write to a `SyncedFloat3`/`SyncedPrimitive`
+(pos, midPos, aimPos, the direction vectors, speed...) hashes the new value
+into a running checksum, and with `SYNC_HISTORY` (defined in these builds)
+appends it to a 10 MB ring buffer too.
+
+That checksum is only ever SENT (NETMSG_SYNCRESPONSE) or compared with the
+demo's; nothing in the simulation reads it. The one Lua reader in the game
+package, `Spring.GetPrevFrameSyncChecksum` / `Platform.hasSyncChecksums`, is
+BAR's dev-only `dbg_synctest.lua`, which runs only on an authorised
+developer's command. So **build with `-DSYNCCHECK=OFF`** (`speed9` = `speed8` +
+the fixes upstream needs to compile that way, which it never does):
+`float3::bitExactEquals` (GroundMoveType compares waypoints with it — same
+comparison, so a -0.0/0.0 waypoint keeps the old value exactly as before),
+the in-synced-code counter kept (the thread pool picks queue priority by it),
+sync history and its dump only with the checker, and six includes that came
+through the sync headers.
+
+| | |
+|---|---|
+| medium gate | `0558d354…` = reference |
+
+| late window, 4 interleaved pairs, main pinned | cycles | instructions | wall |
+|---|---|---|---|
+| `speed8` + W5 | 58.51e9 | 58.82e9 | 15.77 s |
+| `speed9` + W5 (SYNCCHECK=OFF) | **53.88e9 (-7.9%)** | 54.18e9 (-7.9%) | 14.54 s (-7.8%) |
+
+Every pair won by 4.3-4.6e9 cycles. The cost: a re-sim no longer reports
+desyncs in its infolog (no checksums to compare) — the byte-identity gate on
+publish is the check that remains, and it is the one that matters.
