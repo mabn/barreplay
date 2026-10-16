@@ -684,3 +684,40 @@ Candidates (Recoil branch `speed4` = revision 3 + these; building):
 | H66 | software prefetch 8 units ahead (and the move type / first weapon 4 ahead) in those four loops | a prefetch changes no value and no order; the general-move-system loop first collects its units in the view's own order (a read-only pass) |
 
 Lua profiler build done; its checkpoint is being dumped.
+
+### 2026-10-16 03:05 — the Lua profile: our own widget is the biggest Lua cost
+
+Lua sampler build (`spring-headless-luaprof` = revision 3 + the sampler; its
+window ran 20.75 s, so the sampler costs nothing visible). 21,203 samples of
+main-thread CPU, 3,690 of them inside a Lua VM = **17.4% of the main core**
+(perf's ~22% also counts callin entry/exit and GC, which run outside the VM).
+Each sample goes to the innermost gadget/widget FILE on its Lua stack (handler
+plumbing skipped); `~/dev/perf3/luaprof.py` makes the table.
+
+| owner | % of main core | where |
+|---|---|---|
+| **LuaUI (widgets)** | **7.5%** | |
+| ├ `snapshot_widget.lua` — barreplay's OWN re-sim widget | **4.55%** | `sample()` 2.16% (the 1 Hz unit read), `projectileFrame` 1.31% (polls `reloadFrame` of every ready launcher slot, every frame), `UnitDestroyed` 0.39% |
+| ├ BAR `widget_profiling.lua` (wraps every widget callin) | 1.41% | `GetLuaMemUsage` 0.48% |
+| ├ BAR `barwidgets.lua` (handler dispatch) | 0.75% | |
+| └ BAR widgets (ecostats, notifications, nametags, ...) | ~0.8% | |
+| **LuaRules (gadgets)** | **9.8%** | |
+| ├ `gadgets.lua` (handler dispatch) | 2.92% | |
+| ├ `unit_shield_behaviour` | 1.06% | `GetUnitsInSphere` |
+| ├ `unit_aa_targeting_priority` (its `AllowWeaponTarget`) | 0.60% | `GetUnitDefID` 0.30% |
+| ├ `unit_builder_priority` | 0.55% | |
+| ├ `api_teamstats`, `unit_crashing_aircraft`, `api_unit_attributes` | 1.05% | |
+| └ ~60 other gadgets | ~3.6% | each < 0.3% |
+| other | 0.1% | |
+| **total in Lua** | **17.4%** | |
+
+WHY BAR's widget profiler runs at all: the Widget Selector always loads and
+its load column defaults ON (`filters.profiler = data.profiler ~= false` for
+a config that never saved it), which subscribes to `widget_profiling.lua` —
+a timer and a `GetLuaMemUsage` call around every callin of every widget.
+
+**W1** (barreplay, no engine change): the widget config barreplay seeds for
+every re-sim (`engine.widgetConfigLua`) now carries
+`data = { ["Widget Selector"] = { profiler = false } }`. Unsynced, so the
+capture cannot change. Being measured: fresh checkpoints of revision 3
+(`pgolto2w`) and of `speed4` (H65+H66), both with the new config.

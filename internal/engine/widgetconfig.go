@@ -70,14 +70,23 @@ func (e *Engine) EnableWidget() (func() error, error) {
 // widgetConfigLua renders the minimal widget-config that enables name. BAR's
 // LoadConfigData loads it with loadfile and reads chunk().order, so the file just
 // has to return a table with a positive order entry for the widget.
+//
+// It also switches off the Widget Selector's load column (data.profiler =
+// false). BAR always loads the selector, and with that column on — its default
+// for a config that never saved one — the selector subscribes to
+// luaui/Include/widget_profiling.lua, which wraps EVERY callin of every widget
+// in a timer and a Spring.GetLuaMemUsage call: ~1.4% of the main thread on a
+// 10k-unit late game (docs/worklog-engine-speed.md, 2026-10-16), nearly all of
+// it on this widget's own callins. Nothing headless reads the column.
 func widgetConfigLua(name string) string {
 	return fmt.Sprintf(`-- Written by barreplay to force-enable its read-only snapshot widget for a
 -- headless replay. BAR only auto-runs user widgets already present in this order
 -- list, so enabled=true in the widget's GetInfo is not enough on its own. The
--- original config (if any) is restored after the run.
+-- Widget Selector's load column is switched off: it wraps every widget callin in
+-- a profiler. The original config (if any) is restored after the run.
 return {
 	order = { [%q] = 1 },
-	data = {},
+	data = { ["Widget Selector"] = { profiler = false } },
 	allowUserWidgets = true,
 }
 `, name)
