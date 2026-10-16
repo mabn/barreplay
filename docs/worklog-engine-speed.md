@@ -1056,3 +1056,19 @@ frames), an air-only AA candidate list (cheap rejections are ~0.3%),
 parallel aircraft movement (55% of updates touch an already-moved
 neighbour), lighter Lua GC pacing, more threads (a loss over a whole game
 on a throttling host). What remains is a list of 1-2% exact items.
+
+### 2026-10-16 21:10 — x86-64-v3 (AVX2, no FMA contraction): exact, but slower
+
+`speed8` rebuilt with `-march=x86-64-v3 -mtune=haswell -ffp-contract=off`
+appended after the official `-mno-sse3 ... -mno-avx2` list (so it wins;
+`-frounding-math -mieee-fp -mfpmath=sse` kept): medium gate
+`0558d354…` = reference, no desync warnings. Late window, 4 rounds:
+
+| build | cycles (e9) | mean | instructions mean |
+|---|---|---|---|
+| `speed8` | 61.89 / 62.22 / 61.55 / 61.77 | 61.86e9 | 64.11e9 |
+| `speed8` x86-64-v3 | 62.12 / 62.42 / 62.54 / 62.59 | 62.42e9 (+0.9%) | 63.36e9 (-1.2%) |
+
+Fewer instructions, more cycles, every round: dropped. (Also the beam laser's
+3.7% is spread over ~20 lines of under 0.2% each, and BAR's handler loop for
+`AllowWeaponTarget` carries no Tracy calls: nothing to take from either.)
