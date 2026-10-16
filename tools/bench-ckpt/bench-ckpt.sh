@@ -34,6 +34,10 @@
 # CPUSET="<cpu list>" pins every engine thread for the trial (taskset -a);
 # MAINCPU=<cpu> OTHERCPUS=<list> pins the main thread alone and the rest apart.
 #
+# BARREPLAY_ARGS="<flags>" (dump only) passes extra barreplay flags to the
+# re-simulation, e.g. "-worker-threads 7"; they are frozen into the checkpoint,
+# so dump such a variant under its own binary name (a copy of the binary).
+#
 # LUAPROF=1 asks a build carrying the Lua sampling profiler (bench harness,
 # Recoil branch luaprof) to write the window's Lua call stacks, folded, to
 # <ckpt dir>/result.luaprof (1 kHz of main-thread CPU time).
@@ -77,7 +81,7 @@ dump() {
 	[ -x "$BARREPLAY" ] || (cd "$BR" && go build -o "$BARREPLAY" ./cmd/barreplay) || die "build barreplay"
 	echo "== dump: $(basename "$bin") $2 ($id) up to frame $frame"
 	(cd "$BR" && BARREPLAY_BENCH_START=$frame BARREPLAY_BENCH_N=1 BARREPLAY_PARK="$dir/park" \
-		"$BARREPLAY" -data "$DATA" -progress=true -engine "$bin" -out "$dir/out" "$id" > "$dir/barreplay.log" 2>&1) &
+		"$BARREPLAY" -data "$DATA" -progress=true ${BARREPLAY_ARGS:-} -engine "$bin" -out "$dir/out" "$id" > "$dir/barreplay.log" 2>&1) &
 	local brpid=$!
 	while [ ! -s "$dir/park.ready" ]; do
 		kill -0 $brpid 2>/dev/null || die "the re-simulation ended before frame $frame (see $dir/barreplay.log)"

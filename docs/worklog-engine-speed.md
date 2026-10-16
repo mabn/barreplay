@@ -757,3 +757,42 @@ lines of the debug-info profile (global, main thread):
 |---|---|---|---|
 | H67 | terrain height reads (`InterpolateCornerHeight`, Ground.cpp:51: the height-map load), from unit physics 0.83%, aircraft flight control 1.35%, weapon vectors 0.5% | 3.1% | `CGround::PrefetchHeightReal(x, z)` for the unit 4 ahead in the `UpdateUnits` and general-move-type loops |
 | H68 | `CStrafeAirMoveType::Update` reading `cmdQue.front()` (StrafeAirMoveType.cpp:470) | 0.75% | prefetch the command AI 4 ahead and its queue front 2 ahead in the general-move-type loop |
+
+### 2026-10-16 04:35 — H67+H68: nothing; 7 ThreadPool threads: -6.0%
+
+| comparison (4 rounds each, order rotated) | A mean | B mean | delta |
+|---|---|---|---|
+| `speed4` vs `speed5` (+H67 height-map prefetch, +H68 command-queue prefetch), pinned | 19076 ms | 19024 ms | -0.3%, noise: **dropped** |
+| `speed4` default threads vs `-worker-threads 7`, unpinned | 19165 ms | 18015 ms | **-6.0%** (every round: 18157 / 17985 / 17900 / 18019 vs 19079 / 19105 / 19347 / 19128) |
+
+`WorkerThreadCount` counts the MAIN thread too ("Number of workers
+(including the main thread!)"); auto (-1) gives main + 3 here (4 cores), 7
+gives main + 6 workers on the hyperthreads. It was measured as nothing on
+medium in round 3's first hours, because a mid-size game has little parallel
+work; this late window spends 15.6% of the main thread inside parallel
+sections (anims 6.0, weapon vectors 5.0, LOS 4.6), and the main thread runs
+its own share of each, which drops from 1/4 to 1/7. Scheduling only; medium
+full run with 7: `0558d354…` = the reference. verylarge1 whole game with 7
+running. (`bench-ckpt.sh dump` gained BARREPLAY_ARGS for such variants.)
+
+Main thread of `speed4` (default threads), % of one core, for the record:
+
+| phase | % of core | of which Lua |
+|---|---|---|
+| units | 61.5% | 5.4% |
+| ├ aircraft (`CStrafeAirMoveType::Update`) | 12.1% | 0.8% |
+| ├ weapon auto-targeting (`CWeapon::SlowUpdate`) | 9.4% | 1.9% |
+| ├ ground movement | 5.8% | |
+| ├ LTO-inlined unit loops (was 12.5%) | 5.7% | |
+| ├ weapon vectors (parallel) | 5.0% | |
+| ├ `CUnit::SlowUpdate` | 4.7% | 0.4% |
+| ├ beam lasers | 3.9% | 1.1% |
+| └ other unit work (weapon update, `CUnit::Update`, quad field, LOS checks, factories, builders, hover air) | 14.9% | 1.0% |
+| BAR gadget callins outside units | 11.4% | 11.4% |
+| projectiles + collisions | 6.0% | 1.4% |
+| unit-script anims (parallel) | 6.0% | |
+| LOS update (parallel) | 4.6% | |
+| COB scripts | 4.0% | |
+| Lua GC | 1.5% | 1.5% |
+| map damage, pathfinding, features, draw, net, other | 5.0% | |
+| **total** | **100%** | **~21%** |
