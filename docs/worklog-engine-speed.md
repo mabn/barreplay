@@ -567,3 +567,51 @@ verylarge1, all 90,900 frames, each run alone on the host:
 | | **-12.4%** | | identical |
 
 (The earlier 37m54s base run had builds beside it; this replaces it.)
+
+### 2026-10-16 01:02 — where the main thread's time goes (verylarge1 late window)
+
+USER: report the main thread as % of ONE core (rows sum to 100%), workers
+separately; only the late window matters, and only the main thread needs
+optimizing. Published build (`pgolto2`), frames 63780+450, 9961 units.
+
+**Threads** (task-clock sampling, 999 Hz):
+
+| thread | CPU over the window | % of one core |
+|---|---|---|
+| main | 21.2 s (SimFrame thread-CPU 21,217 ms of 21,219 ms wall) | **~100%** — never sleeps |
+| worker 1 / 2 / 3 | 4.4 / 4.2 / 4.2 s | ~20% each |
+
+Workers run only the parallel sections (TickAllAnims, UpdateWeaponVectors,
+LOS, projectile/weapon for_mt chunks, QTPFS node layers). The main thread
+is CPU-bound; it does its share of each parallel section itself
+(`WaitForFinished` self time 0.3%), so it is not waiting idle.
+
+**Main thread, % of one core** (LBR call stacks, cycles at 1999 Hz; each
+stack goes to the first phase found in it — 0.3% could not be placed;
+script: phases.py, kept with the perf data):
+
+| phase | % of core | of which Lua |
+|---|---|---|
+| **units** (`CUnitHandler::Update`) | **62.5%** | 6.9% |
+| ├ LTO-inlined unit/weapon code (no debug info to split) | 12.5% | |
+| ├ aircraft: `CStrafeAirMoveType::Update` | 11.4% | 0.9% |
+| ├ weapon auto-targeting: `CWeapon::SlowUpdate` | 9.3% | 2.8% |
+| ├ ground movement: `GroundMoveSystem::Update` | 5.3% | |
+| ├ weapon vectors (parallel section) | 4.6% | |
+| ├ `CUnit::SlowUpdate` | 4.3% | 0.6% |
+| ├ `CBeamLaser::Update` | 3.6% | 1.1% |
+| ├ `CWeapon::Update` | 2.4% | |
+| ├ `CQuadField::MovedUnit` | 2.1% | |
+| └ factories, builders, physics, LOS status, hover air, ... | 7.0% | |
+| BAR gadget callins outside units (GameFrame etc.) | 11.7% | 11.7% |
+| projectiles + collisions | 5.6% | 1.3% |
+| unit-script anims (parallel section) | 5.4% | |
+| LOS update (parallel section) | 4.2% | |
+| COB scripts | 3.5% | |
+| Lua GC | 2.1% | 2.1% |
+| map damage, pathfinding, features, draw, net, other | 5.0% | |
+| **total** | **100%** | **~22%** |
+
+Serial work is ~85% of the main thread (parallel sections ~14%). Caveat:
+LBR keeps the 16 innermost frames, so a gadget callin made from deep in a
+unit update can land under "outside units" when its stack was cut.
