@@ -648,7 +648,7 @@ local realHandler = {
 -- explosion and every hit as it happens, the full-view caller drains them:
 -- -1 is "none". Health and position are read off the same stubs the widget's
 -- own callin would have read, at the moment of the hit, as the engine does.
-local engineLog = { explosions = false, damage = false, expl = {}, dmg = {}, everOn = false }
+local engineLog = { explosions = false, damage = false, reloads = false, expl = {}, dmg = {}, rel = {}, everOn = false }
 if enginelog then
 	local function drain(buf, fill)
 		local out = type(fill) == "table" and fill or {}
@@ -661,8 +661,10 @@ if enginelog then
 		end
 		return out
 	end
-	Spring.SetEngineEventLog = function(explosions, damage)
+	Spring.SetEngineEventLog = function(explosions, damage, reloads)
 		engineLog.explosions, engineLog.damage = explosions and true or false, damage and true or false
+		engineLog.reloads = reloads and true or false
+		if not engineLog.reloads then engineLog.rel = {} end
 		engineLog.everOn = engineLog.everOn or engineLog.explosions or engineLog.damage
 		if not engineLog.explosions then engineLog.expl = {} end
 		if not engineLog.damage then engineLog.dmg = {} end
@@ -671,6 +673,11 @@ if enginelog then
 		local out, n = drain(engineLog.expl, fill), #engineLog.expl / 11
 		engineLog.expl = {}
 		return out, n, 0
+	end
+	Spring.GetLoggedReloads = function(fill)
+		local out, n = drain(engineLog.rel, fill), #engineLog.rel / 3
+		engineLog.rel = {}
+		return out, n
 	end
 	Spring.GetLoggedDamage = function(fill)
 		local out, n = drain(engineLog.dmg, fill), #engineLog.dmg / 16
@@ -705,6 +712,16 @@ if enginelog then
 			out[j] = nil
 		end
 		return out, #ids, stride
+	end
+end
+
+-- setReload changes a launcher's reload frame, logging the change the way the
+-- engine's reload log does (enginelog mode, once switched on).
+function setReload(id, slot, value)
+	weaponState[id][slot] = value
+	if engineLog.reloads then
+		local r = engineLog.rel
+		r[#r + 1], r[#r + 2], r[#r + 3] = id, slot - 1, value
 	end
 end
 
@@ -962,7 +979,7 @@ end
 
 local function spawn(pid, owner, slot, wd, vx, vy, vz, g, target, reloadFrames)
 	local u = units[owner]
-	weaponState[owner][slot] = curFrame + reloadFrames
+	setReload(owner, slot, curFrame + reloadFrames)
 	projectiles[pid] = { owner = owner, team = u.team, wd = wd, x = u.x, y = 120, z = u.z,
 		vx = vx, vy = vy, vz = vz, g = g, target = target }
 end
@@ -996,7 +1013,7 @@ local function projectileScript(f)
 		projectiles[7002].intercepted = true
 	end
 	if f == 1800 then
-		weaponState[504][1] = f + 297
+		setReload(504, 1, f + 297)
 	end
 	if f == 2400 then
 		widget:StockpileChanged(501, 39, 0, 2, 1, 0)
@@ -1046,7 +1063,7 @@ local function projectileScript(f)
 		explode(7004)
 	end
 	if f == 3000 then
-		weaponState[506][1] = f + 210
+		setReload(506, 1, f + 210)
 	end
 	for k = 0, 2 do
 		if f == 3075 + 3 * k then

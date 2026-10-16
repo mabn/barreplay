@@ -143,6 +143,13 @@ local engineLog = {
 	-- DefID/Health/Velocity/IsBuilding/LosState return under full read, in
 	-- GetAllUnits' order — instead of ~8 Lua->C calls per unit per sample.
 	sample = resim and type(Spring.GetUnitSampleData) == "function" and Spring.GetUnitSampleData or nil,
+	-- Spring.GetLoggedReloads (same engine): every change of a weapon's
+	-- reload frame, so launcher slots read a table instead of calling
+	-- GetUnitWeaponState per ready slot per frame. Switched on with the
+	-- projectile log (third flag of SetEngineEventLog).
+	reloadsAvailable = resim and type(Spring.GetLoggedReloads) == "function",
+	reloads = false,
+	reloadBuf = {},
 	sampleBuf = {},
 }
 -- Output path for resim mode. Spring's LuaIO sandbox rejects absolute paths
@@ -1983,7 +1990,9 @@ local projectiles = (function()
 		end
 		local L = { team = team, slots = {} }
 		for i, info in ipairs(slots) do
-			L.slots[i] = { info = info, rf = spGetUnitWeaponState(unitID, info.slot, "reloadFrame"), untilF = -1 }
+			local rf = spGetUnitWeaponState(unitID, info.slot, "reloadFrame")
+			-- cur: the engine's current value, kept by drainReloads
+			L.slots[i] = { info = info, rf = rf, cur = rf, untilF = -1 }
 		end
 		launchers[unitID] = L
 	end
@@ -2293,12 +2302,41 @@ local projectiles = (function()
 		end
 	end
 
+	-- drainReloads applies the reload-frame changes the engine logged since
+	-- the last frame to the launcher slots (engine weaponNum is 0-based, the
+	-- Lua weapon index 1-based). Every write of reloadStatus is logged, so a
+	-- slot's cur is what GetUnitWeaponState would return right now.
+	local function drainReloads()
+		if not engineLog.reloads then
+			return
+		end
+		local v, n = Spring.GetLoggedReloads(engineLog.reloadBuf)
+		if v == nil then
+			return
+		end
+		engineLog.reloadBuf = v
+		for i = 0, n - 1 do
+			local o = i * 3
+			local L = launchers[v[o + 1]]
+			if L then
+				local slot = v[o + 2] + 1
+				for _, s in ipairs(L.slots) do
+					if s.info.slot == slot then
+						s.cur = v[o + 3]
+					end
+				end
+			end
+		end
+	end
+
 	-- projectileFrame runs in GameFramePost: after the frame's unit and
 	-- projectile updates, so a weapon that fired this frame has its new
 	-- projectiles in the world and its reload frame moved. The frame's
 	-- explosions go first, as the callin delivered them during the sim.
 	local function projectileFrame(frame)
 		drainExplosions()
+		drainReloads()
+		local useLog = engineLog.reloads
 		local t0 = hiResTimer and spGetTimer() or nil
 		for unitID, L in pairs(launchers) do
 			for _, s in ipairs(L.slots) do
@@ -2306,7 +2344,7 @@ local projectiles = (function()
 				-- there is nothing to read (the cost here is per slot per
 				-- frame, so this is most of it).
 				local rf = (s.rf == nil or frame >= s.rf)
-					and spGetUnitWeaponState(unitID, s.info.slot, "reloadFrame") or s.rf
+					and ((useLog and s.cur) or spGetUnitWeaponState(unitID, s.info.slot, "reloadFrame")) or s.rf
 				if rf ~= nil and rf ~= s.rf then
 					s.rf = rf
 					if rf > frame then -- a shot moves it into the future
@@ -2800,9 +2838,11 @@ function widget:Initialize()
 		return
 	end
 	if engineLog.available and (recordDamage or recordProjectiles) then
-		local eok, eerr = pcall(Spring.SetEngineEventLog, recordProjectiles, recordDamage)
+		local wantReloads = recordProjectiles and engineLog.reloadsAvailable
+		local eok, eerr = pcall(Spring.SetEngineEventLog, recordProjectiles, recordDamage, wantReloads)
 		if eok then
 			engineLog.explosions, engineLog.damage = recordProjectiles, recordDamage
+			engineLog.reloads = wantReloads
 			Echo(logTag .. " engine event log on (explosions " .. (recordProjectiles and "on" or "off")
 				.. ", damage " .. (recordDamage and "on" or "off") .. ")")
 		else
@@ -3426,7 +3466,7 @@ function widget:Shutdown()
 	end
 	pcall(projectiles.unhook)
 	if engineLog.explosions or engineLog.damage then
-		pcall(Spring.SetEngineEventLog, false, false)
+		pcall(Spring.SetEngineEventLog, false, false, false)
 		engineLog.explosions, engineLog.damage = false, false
 	end
 	closeOut("shutdown")
