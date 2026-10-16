@@ -1072,3 +1072,20 @@ appended after the official `-mno-sse3 ... -mno-avx2` list (so it wins;
 Fewer instructions, more cycles, every round: dropped. (Also the beam laser's
 3.7% is spread over ~20 lines of under 0.2% each, and BAR's handler loop for
 `AllowWeaponTarget` carries no Tracy calls: nothing to take from either.)
+
+### 2026-10-16 22:00 — revision 4's series written (not published); a correction
+
+Recoil branch `rev4` = four clean commits on revision 3 (same `rts/` tree as
+`speed8`), exported as 0010-0013 (callin timers, unit-loop prefetch,
+background huge-page collapse, unit sample + reload log). Applying the whole
+series to a clean `2026.07.04` checkout reproduces that tree exactly. Series
+digest `33b518d4…` appended to `patchSeries`; no `patchedBuilds` pin yet (the
+build is not gated, uploaded or tagged).
+
+CORRECTION: the commit adding the series (`1194dbc`) says "late window
+-11.7% main-thread cycles vs revision 3". That figure was not measured. What
+was measured, in checkpoint trials of different setups: revision 3 ~79-80e9
+cycles over the window (trials under perf recording), `speed8` 61.9e9 —
+roughly -22%, but not a like-for-like A/B. A same-setup interleaved A/B
+(revision 3 vs `speed8`, both under the new widget config) is queued; whole
+game, measured: ~25% fewer main-thread cycles (5.87e12 -> 4.43e12).
