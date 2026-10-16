@@ -618,7 +618,6 @@ func (e *Engine) Run(ctx context.Context, scriptPath string) (io.Reader, func() 
 	// relative path (Spring's LuaIO sandbox forbids absolute paths), resolved against
 	// the CWD, so this makes SnapshotStreamPath land where the tool expects to read it.
 	cmd.Dir = e.cfg.DataDir
-	cmd.Env = engineEnv(os.Environ())
 
 	// An os.Pipe (not io.Pipe) is passed to the child as a real fd, so the read
 	// end reaches EOF on its own when the child exits — no deadlock between
@@ -666,21 +665,3 @@ func (e *Engine) HeadlessPath() string { return e.headlessPath }
 // growing a fourth return value; a data dir takes only one run at a time
 // (LockDataDir), so there is never a second live process to confuse it with.
 func (e *Engine) Pid() int { return e.pid }
-
-// engineEnv is the engine's environment: the caller's, plus
-// MIMALLOC_ALLOW_LARGE_OS_PAGES=1 unless the caller set it. The engine's heap is
-// mimalloc (rts/System/MemoryOverride.cpp), which with that option marks its
-// segments MADV_HUGEPAGE — and under the usual transparent-huge-page setting
-// ("madvise") only marked memory gets huge pages. A late game is memory-bound
-// and ~14% of its main thread is page-table walks; huge pages measured -15.7% on
-// verylarge1's late window (docs/worklog-engine-speed.md, 2026-10-16). Page size
-// changes no simulated value.
-func engineEnv(env []string) []string {
-	const k = "MIMALLOC_ALLOW_LARGE_OS_PAGES="
-	for _, kv := range env {
-		if strings.HasPrefix(kv, k) {
-			return env
-		}
-	}
-	return append(env, k+"1")
-}
