@@ -743,3 +743,17 @@ and H66 are not yet measured apart.)
 Gate (medium, full run, new config): `speed4` and revision 3 both
 `0558d3540c8e3f97d669505d1382ec20` = the reference. verylarge1 full run on
 `speed4` running.
+
+### 2026-10-16 03:45 — `speed4` identical on verylarge1's whole game; H67, H68 built
+
+| check | result |
+|---|---|
+| verylarge1, all 90,900 frames, `speed4` + W1 | `a26e920d594a346884b93c3389053a1f` = stock / revision 3 (its 33m21s is NOT a timing: a build shared the CPU) |
+
+Next build `speed5` = `speed4` + two more prefetches, aimed at the hottest
+lines of the debug-info profile (global, main thread):
+
+| id | stall it targets | % of core | change |
+|---|---|---|---|
+| H67 | terrain height reads (`InterpolateCornerHeight`, Ground.cpp:51: the height-map load), from unit physics 0.83%, aircraft flight control 1.35%, weapon vectors 0.5% | 3.1% | `CGround::PrefetchHeightReal(x, z)` for the unit 4 ahead in the `UpdateUnits` and general-move-type loops |
+| H68 | `CStrafeAirMoveType::Update` reading `cmdQue.front()` (StrafeAirMoveType.cpp:470) | 0.75% | prefetch the command AI 4 ahead and its queue front 2 ahead in the general-move-type loop |
