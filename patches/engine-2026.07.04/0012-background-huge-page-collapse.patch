@@ -1,0 +1,105 @@
+From 01194a8bda2976593a49cba08a60e853f418e2e0 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Fri, 16 Oct 2026 13:42:31 +0000
+Subject: [PATCH 12/13] Collapse the engine's resident memory into huge pages
+ from a background thread
+
+A low-priority thread MADV_COLLAPSEs every private anonymous mapping of
+16 MiB or more (mimalloc arenas, the brk heap, the static pools) every 2 s.
+Under the usual THP setting nothing else gets huge pages; a late game spends
+~14% of the main thread walking page tables. Nothing is marked, so page
+faults stay 4 KiB and never compact in the simulation thread. Mapping only.
+BARREPLAY_NO_THP_COLLAPSE turns it off.
+---
+ rts/Game/Game.cpp | 68 +++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 68 insertions(+)
+
+diff --git a/rts/Game/Game.cpp b/rts/Game/Game.cpp
+index f2649f4..64fbc7a 100644
+--- a/rts/Game/Game.cpp
++++ b/rts/Game/Game.cpp
+@@ -1679,6 +1679,70 @@ void CGame::StartPlaying()
+ 
+ static const char* const tracingSimFrameName = "SimFrame";
+ 
++#if defined(__linux__)
++#include <sys/mman.h>
++#include <sys/resource.h>
++#include <sys/syscall.h>
++#include <unistd.h>
++#include <cstdio>
++#include <cinttypes>
++#include <thread>
++#ifndef MADV_COLLAPSE
++#define MADV_COLLAPSE 25
++#endif
++// [barreplay] H71: transparent huge pages for the engine's large anonymous
++// memory, whichever allocator made it (mimalloc arenas, the brk heap, pools),
++// WITHOUT stalling the simulation. A late game is memory-bound and spends ~14%
++// of the main thread on page-table walks. Marking memory MADV_HUGEPAGE (H70)
++// worked but made every new 2 MiB fault compact and zero synchronously in the
++// faulting thread - the main thread. So nothing is marked (faults stay 4 KiB)
++// and a low-priority background thread collapses what is resident into huge
++// pages (MADV_COLLAPSE, kernel >= 6.1) every couple of seconds instead. Mapping
++// only: no address or content changes, so the simulation cannot see it.
++static void BrCollapseHugePages()
++{
++	FILE* f = fopen("/proc/self/maps", "r");
++	if (f == nullptr)
++		return;
++	char line[512];
++	constexpr uintptr_t HP = uintptr_t(2) << 20;
++	while (fgets(line, sizeof(line), f) != nullptr) {
++		uintptr_t a = 0, b = 0;
++		char perms[8] = {0};
++		unsigned long long off = 0, inode = 0;
++		char dev[16] = {0};
++		char path[400] = {0};
++		const int n = sscanf(line, "%" SCNxPTR "-%" SCNxPTR " %7s %llx %15s %llu %399s", &a, &b, perms, &off, dev, &inode, path);
++		if (n < 6 || inode != 0 || strcmp(perms, "rw-p") != 0)
++			continue;
++		if (n == 7 && strcmp(path, "[heap]") != 0)
++			continue;
++		const uintptr_t beg = (a + HP - 1) & ~(HP - 1);
++		const uintptr_t end = b & ~(HP - 1);
++		if (end <= beg || (end - beg) < (uintptr_t(16) << 20))
++			continue;
++		// one 2 MiB range at a time, so a failure (EAGAIN while something
++		// writes the range, or memory not resident) costs only that range
++		for (uintptr_t p = beg; p < end; p += HP)
++			madvise(reinterpret_cast<void*>(p), HP, MADV_COLLAPSE);
++	}
++	fclose(f);
++}
++
++static void BrStartHugePageCollapser()
++{
++	if (getenv("BARREPLAY_NO_THP_COLLAPSE") != nullptr)
++		return;
++	std::thread([]() {
++		setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
++		for (;;) {
++			BrCollapseHugePages();
++			std::this_thread::sleep_for(std::chrono::seconds(2));
++		}
++	}).detach();
++}
++#endif
++
+ void CGame::SimFrame() {
+ 	ENTER_SYNCED_CODE();
+ 	ASSERT_SYNCED(gsRNG.GetGenState());
+@@ -1691,6 +1755,10 @@ void CGame::SimFrame() {
+ 
+ 	// note: starts at -1, first actual frame is 0
+ 	gs->frameNum += 1;
++#if defined(__linux__)
++	if (gs->frameNum == 0)
++		BrStartHugePageCollapser();
++#endif
+ #ifdef SYNC_HISTORY
+ 	CSyncChecker::NewGameFrame();
+ #endif
+-- 
+2.53.0
+
