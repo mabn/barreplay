@@ -1,0 +1,270 @@
+From 5650a54108c94b590cf0c28ae9fa43da9a86ddbc Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 01:42:38 +0000
+Subject: [PATCH 08/30] P1: nested parallel loops inline during serial items
+ (deadlock fix); P1 v3 crashing aircraft that cannot land this frame in
+ parallel, trails deferred in loop order (toggle bit 3); H72 anim checksum
+ only with SYNCCHECK
+
+---
+ rts/Sim/MoveTypes/StrafeAirMoveType.cpp       |  8 ++-
+ rts/Sim/MoveTypes/Systems/BrParallelAir.h     |  7 +-
+ .../MoveTypes/Systems/GeneralMoveSystem.cpp   | 69 +++++++++++++++++--
+ rts/Sim/Units/Scripts/UnitScript.cpp          |  3 +
+ rts/System/Threading/ThreadPool.cpp           |  8 ++-
+ rts/System/Threading/ThreadPool.h             |  1 +
+ 6 files changed, 88 insertions(+), 8 deletions(-)
+
+diff --git a/rts/Sim/MoveTypes/StrafeAirMoveType.cpp b/rts/Sim/MoveTypes/StrafeAirMoveType.cpp
+index 280451b..c487748 100644
+--- a/rts/Sim/MoveTypes/StrafeAirMoveType.cpp
++++ b/rts/Sim/MoveTypes/StrafeAirMoveType.cpp
+@@ -531,10 +531,16 @@ bool CStrafeAirMoveType::Update()
+ 			// NOTE: the crashing-state can only be set (and unset) by scripts
+ 			if (UpdateAirPhysics({crashRudder, crashElevator, crashAileron, 0.0f}, owner->frontdir)
+ 					|| (CGround::GetHeightAboveWater(owner->pos.x, owner->pos.z) + 5.0f + owner->radius) > owner->pos.y){
++				// [barreplay] P1: a parallel crashing aircraft was checked not to get here
++				if (BrParAir::Active())
++					BrParAir::stats.crashKills++;
+ 				owner->ForcedKillUnit(nullptr, true, false, -CSolidObject::DAMAGE_AIRCRAFT_CRASHED);
+ 			}
+ 
+-			amtEmitCrashTrailFuncs[crashExpGenID != -1u](owner, crashExpGenID);
++			if (BrParAir::Active())
++				BrParAir::DeferTrail(owner, crashExpGenID);
++			else
++				amtEmitCrashTrailFuncs[crashExpGenID != -1u](owner, crashExpGenID);
+ 		} break;
+ 		case AIRCRAFT_TAKEOFF:
+ 			UpdateTakeOff();
+diff --git a/rts/Sim/MoveTypes/Systems/BrParallelAir.h b/rts/Sim/MoveTypes/Systems/BrParallelAir.h
+index 330dad9..7dfd606 100644
+--- a/rts/Sim/MoveTypes/Systems/BrParallelAir.h
++++ b/rts/Sim/MoveTypes/Systems/BrParallelAir.h
+@@ -10,6 +10,8 @@
+ #include <atomic>
+ #include <immintrin.h>
+ 
++class CUnit;
++
+ // experiment switches: BARREPLAY_TOGGLES (hex) at startup, or the bench
+ // harness's go file ("t=<hex>") on each restore of a checkpoint
+ extern unsigned g_brToggles;
+@@ -24,6 +26,9 @@ namespace BrParAir {
+ 	// sequential order matters globally (a draw from the synced RNG)
+ 	void SerialPoint();
+ 
++	// a crashing aircraft's trail, emitted later in loop order (unsynced particles)
++	void DeferTrail(CUnit* owner, unsigned int expGenID);
++
+ 	// death dependencies insert into the OTHER object's listener lists, which
+ 	// two items can touch at once; the lists are sorted, so the order of the
+ 	// insertions does not matter, only that they do not race
+@@ -42,7 +47,7 @@ namespace BrParAir {
+ 	};
+ 
+ 	struct Stats {
+-		std::atomic<long long> frames{0}, serialFrames{0}, items{0}, parallel{0}, serial{0}, replanned{0}, statics{0}, targetEdges{0};
++		std::atomic<long long> frames{0}, serialFrames{0}, items{0}, parallel{0}, serial{0}, replanned{0}, statics{0}, targetEdges{0}, deferredTrails{0}, crashKills{0};
+ 		std::atomic<long long> serialPoints{0}, scriptCalls{0}, collisionWrites{0}, bigWrites{0}, oobKills{0};
+ 	};
+ 	extern Stats stats;
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index 3645d6e..91f2305 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -20,6 +20,8 @@
+ #include "System/Misc/TracyDefs.h"
+ 
+ #include "BrParallelAir.h"
++#include "Map/MapDimensions.h"
++#include "Map/ReadMap.h"
+ #include "Sim/Misc/GlobalConstants.h"
+ #include "Sim/Misc/ModInfo.h"
+ #include "Sim/MoveTypes/StaticMoveType.h"
+@@ -32,6 +34,8 @@
+ 
+ using namespace MoveTypes;
+ 
++extern AAirMoveType::EmitCrashTrailFunc amtEmitCrashTrailFuncs[2];
++
+ static unsigned BrReadTogglesEnv() {
+ 	const char* s = std::getenv("BARREPLAY_TOGGLES");
+ 	return (s != nullptr)? unsigned(std::strtoul(s, nullptr, 16)): 0u;
+@@ -78,14 +82,16 @@ namespace BrParAir {
+ 	static std::vector<const CUnit*> tgtUnit;
+ 	static std::vector<int> tgtType;
+ 	static std::unique_ptr<std::atomic<uint8_t>[]> done;
++	static std::vector<std::pair<CUnit*, unsigned int>> trails; // per rank: a crash trail to emit
++	static int trailsFlushed = 0;
+ 	static size_t doneCap = 0;
+ 	static std::atomic<int> claim{0}, frontier{0}, nextStart{0}, handoff{-1};
+ 
+ 	int StatsLine(char* buf, int size) {
+ 		return snprintf(buf, size,
+-			"[BR_PARAIR] frames=%lld serialFrames=%lld items=%lld parallel=%lld serial=%lld replanned=%lld statics=%lld targetEdges=%lld serialPoints=%lld scriptCalls=%lld collisionWrites=%lld bigWrites=%lld oobKills=%lld\n",
++			"[BR_PARAIR] frames=%lld serialFrames=%lld items=%lld parallel=%lld serial=%lld replanned=%lld statics=%lld targetEdges=%lld deferredTrails=%lld crashKills=%lld serialPoints=%lld scriptCalls=%lld collisionWrites=%lld bigWrites=%lld oobKills=%lld\n",
+ 			stats.frames.load(), stats.serialFrames.load(), stats.items.load(), stats.parallel.load(), stats.serial.load(), stats.replanned.load(), stats.statics.load(),
+-			stats.targetEdges.load(), stats.serialPoints.load(), stats.scriptCalls.load(), stats.collisionWrites.load(), stats.bigWrites.load(), stats.oobKills.load());
++			stats.targetEdges.load(), stats.deferredTrails.load(), stats.crashKills.load(), stats.serialPoints.load(), stats.scriptCalls.load(), stats.collisionWrites.load(), stats.bigWrites.load(), stats.oobKills.load());
+ 	}
+ 
+ 	static void RunItem(CUnit* unit) {
+@@ -112,6 +118,20 @@ namespace BrParAir {
+ 		}
+ 	}
+ 
++	void DeferTrail(CUnit* owner, unsigned int expGenID) {
++		trails[curRank] = {owner, expGenID};
++		stats.deferredTrails++;
++	}
++
++	// main thread, every item before <upTo> finished: emit their trails in order
++	static void FlushTrails(int upTo) {
++		for (; trailsFlushed < upTo; ++trailsFlushed) {
++			const auto& t = trails[trailsFlushed];
++			if (t.first != nullptr)
++				amtEmitCrashTrailFuncs[t.second != -1u](t.first, t.second);
++		}
++	}
++
+ 	void SerialPoint() {
+ 		if (curRank < 0)
+ 			return;
+@@ -123,9 +143,14 @@ namespace BrParAir {
+ 
+ 	// main thread only: every earlier item has finished and no later one has started
+ 	static void RunExclusive(int k) {
++		FlushTrails(k);
+ 		const bool mt = ThreadPool::IsInMultiThreadedSection();
+ 		ThreadPool::SetInMultiThreadedSection(false);
++		// the workers are spinning in this loop: a parallel loop started from
++		// inside the item would wait for them forever
++		ThreadPool::SetInlineOnly(true);
+ 		RunItem(work[k]);
++		ThreadPool::SetInlineOnly(false);
+ 		ThreadPool::SetInMultiThreadedSection(mt);
+ 
+ 		Finish(k);
+@@ -143,6 +168,31 @@ namespace BrParAir {
+ 		return true;
+ 	}
+ 
++	// A crashing aircraft dies when it reaches the ground (UpdateAirPhysics'
++	// ground contact, or 5 + radius above it). It moves at most its speed plus
++	// a frame of gravity, and the terrain under any point is no higher than the
++	// highest height-map corner around it (and water is 0), so this bound says it
++	// cannot happen in this frame's update.
++	static bool CrashCannotEndThisFrame(const CUnit* u) {
++		const float reach = u->speed.w + 4.0f;
++		const float lowY = std::min(u->pos.y, u->midPos.y) - reach - u->pos.distance(u->midPos);
++		const float* hm = readMap->GetCornerHeightMapSynced();
++
++		const int x0 = std::clamp(int((u->pos.x - reach) / SQUARE_SIZE) - 1, 0, mapDims.mapx);
++		const int x1 = std::clamp(int((u->pos.x + reach) / SQUARE_SIZE) + 2, 0, mapDims.mapx);
++		const int z0 = std::clamp(int((u->pos.z - reach) / SQUARE_SIZE) - 1, 0, mapDims.mapy);
++		const int z1 = std::clamp(int((u->pos.z + reach) / SQUARE_SIZE) + 2, 0, mapDims.mapy);
++
++		float hmax = 0.0f;
++		for (int z = z0; z <= z1; ++z) {
++			for (int x = x0; x <= x1; ++x) {
++				hmax = std::max(hmax, hm[z * mapDims.mapxp1 + x]);
++			}
++		}
++
++		return (lowY > (hmax + 5.0f + u->radius + 1.0f));
++	}
++
+ 	static bool ParallelSafe(const CUnit* u) {
+ 		const AMoveType* mt = u->moveType;
+ 
+@@ -152,14 +202,19 @@ namespace BrParAir {
+ 			return false;
+ 
+ 		const CStrafeAirMoveType* amt = static_cast<const CStrafeAirMoveType*>(mt);
+-		if (amt->aircraftState != AAirMoveType::AIRCRAFT_FLYING || amt->collide)
++		if (amt->collide)
+ 			return false;
+-		if (u->IsStunned() || u->IsCrashing() || u->beingBuilt || u->UnderFirstPersonControl() || u->GetTransporter() != nullptr)
++		if (u->IsStunned() || u->beingBuilt || u->UnderFirstPersonControl() || u->GetTransporter() != nullptr)
+ 			return false;
+ 		if (u->speed.w > (MAX_UNIT_SPEED * 0.5f) || u->speed == ZeroVector)
+ 			return false;
+ 
+-		return true;
++		if (amt->aircraftState == AAirMoveType::AIRCRAFT_FLYING)
++			return !u->IsCrashing();
++		if (amt->aircraftState == AAirMoveType::AIRCRAFT_CRASHING)
++			return ((g_brToggles & 8) != 0 && CrashCannotEndThisFrame(u));
++
++		return false;
+ 	}
+ 
+ 	// still what the plan assumed, now that every earlier serial item has run
+@@ -313,6 +368,9 @@ namespace BrParAir {
+ 			return true;
+ 		}
+ 
++		trails.assign(n, {nullptr, 0u});
++		trailsFlushed = 0;
++
+ 		if (doneCap < size_t(n)) {
+ 			doneCap = size_t(n) * 2;
+ 			done.reset(new std::atomic<uint8_t>[doneCap]);
+@@ -337,6 +395,7 @@ namespace BrParAir {
+ 		ThreadPool::NotifyWorkerThreads(true, false);
+ 
+ 		Loop(true);
++		FlushTrails(n);
+ 
+ 		{
+ 			// the worker slices find nothing left to claim, whoever runs them
+diff --git a/rts/Sim/Units/Scripts/UnitScript.cpp b/rts/Sim/Units/Scripts/UnitScript.cpp
+index 1bcb5b6..f531e37 100644
+--- a/rts/Sim/Units/Scripts/UnitScript.cpp
++++ b/rts/Sim/Units/Scripts/UnitScript.cpp
+@@ -244,7 +244,10 @@ void CUnitScript::TickAllAnims(int deltaTime)
+ 		}
+ 
+ 		// checksum all anims (live + done)
++		// [barreplay] H72: read only by the sync checker
++#ifdef SYNCCHECK
+ 		checksum = spring::LiteHash(ai, checksum);
++#endif
+ 	}
+ 
+ 	// [barreplay] order-preserving erase (was swap-erase VectorEraseIfAll), so a
+diff --git a/rts/System/Threading/ThreadPool.cpp b/rts/System/Threading/ThreadPool.cpp
+index 60913af..e8d0407 100644
+--- a/rts/System/Threading/ThreadPool.cpp
++++ b/rts/System/Threading/ThreadPool.cpp
+@@ -135,7 +135,13 @@ static int GetDefaultNumWorkers() {
+ int GetNumThreads() { return (workerThreads[false].size() + 1); }
+ int GetMaxThreads() { return std::min(MAX_THREADS, Threading::GetLogicalCpuCores()); }
+ 
+-bool HasThreads() { return !workerThreads[false].empty(); }
++// [barreplay] P1: while the main thread runs a serial item of the parallel
++// move-type loop, the workers are busy waiting for it, so any parallel loop
++// started from inside that item must run inline (the engine's single-thread
++// mode, which multithreaded results must equal anyway).
++static _threadlocal bool brInlineOnly(false);
++void SetInlineOnly(bool b) { brInlineOnly = b; }
++bool HasThreads() { return !brInlineOnly && !workerThreads[false].empty(); }
+ 
+ 
+ 
+diff --git a/rts/System/Threading/ThreadPool.h b/rts/System/Threading/ThreadPool.h
+index aa77c26..bebba3c 100644
+--- a/rts/System/Threading/ThreadPool.h
++++ b/rts/System/Threading/ThreadPool.h
+@@ -128,6 +128,7 @@ namespace ThreadPool {
+ 	void SetMaximumThreadCount();
+ 	void SetDefaultThreadCount();
+ 	void SetThreadCount(int num);
++	void SetInlineOnly(bool b); // [barreplay] this thread's parallel loops run inline
+ 	int GetThreadNum();
+ 	int IsInMultiThreadedSection();
+ 	void SetInMultiThreadedSection(const bool value);
+-- 
+2.53.0
+

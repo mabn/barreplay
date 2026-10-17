@@ -1,0 +1,25 @@
+From e19a32f60754db4598fb134425d7d68b55f36b80 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 10:56:09 +0000
+Subject: [PATCH 17/30] R1: fix Load<T> return type
+
+---
+ rts/Sim/Units/UnitHandler.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 086eff6..611e068 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -115,7 +115,7 @@ namespace BrRunAhead {
+ 
+ 	static inline void PF(const void* p) { __builtin_prefetch(p, 0, 3); }
+ 
+-	template<typename T> static inline T Load(T* const& field) {
++	template<typename T> static inline T* Load(T* const& field) {
+ 		return __atomic_load_n(&field, __ATOMIC_RELAXED);
+ 	}
+ 
+-- 
+2.53.0
+

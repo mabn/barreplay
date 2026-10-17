@@ -1,0 +1,25 @@
+From 03b051770a2ba1d53e3943e603a99a8d969d2610 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 11:49:57 +0000
+Subject: [PATCH 3/3] luaprof16: toggles token may be the third word
+
+---
+ rts/Net/NetCommands.cpp | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/rts/Net/NetCommands.cpp b/rts/Net/NetCommands.cpp
+index 9d0e9cb..57779a6 100644
+--- a/rts/Net/NetCommands.cpp
++++ b/rts/Net/NetCommands.cpp
+@@ -96,6 +96,8 @@ namespace {
+ 				if (fscanf(f, "%d %1023s %63s", &goN, goOut, goOpt) >= 1 && goN > 0)
+ 					n = goN;
+ 				luaProf = (strcmp(goOpt, "luaprof") == 0);
++				if (strncmp(goOpt, "t=", 2) == 0)
++					g_brToggles = unsigned(strtoul(goOpt + 2, nullptr, 16));
+ 				if (goOut[0] != 0)
+ 					out = goOut;
+ 				// further words: "t=<hex>" sets the experiment toggles of this trial
+-- 
+2.53.0
+

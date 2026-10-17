@@ -1,0 +1,40 @@
+From eedb4f217e862f04f2ce53457aa503dcca1a4c05 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Thu, 15 Oct 2026 11:57:18 +0000
+Subject: [PATCH] H64 GenerateWeaponTargets: prefetch candidates'
+ tempNum/losStatus lines 4 ahead
+
+---
+ rts/Game/GameHelper.cpp | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Game/GameHelper.cpp b/rts/Game/GameHelper.cpp
+index 37b0384..5db0b77 100644
+--- a/rts/Game/GameHelper.cpp
++++ b/rts/Game/GameHelper.cpp
+@@ -701,8 +701,21 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
+ 
+ 		for (const int qi: *qfQuery.quads) {
+ 			const std::vector<CUnit*>& allyTeamUnits = quadField.GetQuad(qi).teamUnits[t];
++			const size_t numAllyTeamUnits = allyTeamUnits.size();
++
++			for (size_t ui = 0; ui < numAllyTeamUnits; ui++) {
++				CUnit* targetUnit = allyTeamUnits[ui];
++
++				// [barreplay] the walk over thousands of candidates is a cache
++				// miss per unit (tempNum at the head of the object, losStatus deep
++				// inside it): fetch both lines a few units ahead. A prefetch
++				// changes no value.
++				if (ui + 4 < numAllyTeamUnits) {
++					const CUnit* ahead = allyTeamUnits[ui + 4];
++					__builtin_prefetch(&ahead->tempNum);
++					__builtin_prefetch(&ahead->losStatus[weaponOwner->allyteam]);
++				}
+ 
+-			for (CUnit* targetUnit: allyTeamUnits) {
+ 				if (targetUnit->tempNum == tempNum)
+ 					continue;
+ 
+-- 
+2.53.0
+

@@ -1,0 +1,46 @@
+From 6e088a1f48c1df61c80b175c844be1d4d4565034 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Fri, 16 Oct 2026 01:40:18 +0000
+Subject: [PATCH 2/3] luaprof: std includes before Lua headers
+
+---
+ rts/lib/lua/src/lvm.cpp | 16 +++++++++-------
+ 1 file changed, 9 insertions(+), 7 deletions(-)
+
+diff --git a/rts/lib/lua/src/lvm.cpp b/rts/lib/lua/src/lvm.cpp
+index 5dbdddf..2973c4c 100644
+--- a/rts/lib/lua/src/lvm.cpp
++++ b/rts/lib/lua/src/lvm.cpp
+@@ -11,6 +11,15 @@
+ 
+ //SPRING
+ #include <algorithm>
++// [barreplay] Lua profiler (std headers before Lua's, which #define getline)
++#include <signal.h>
++#include <time.h>
++#include <unistd.h>
++#include <sys/syscall.h>
++#include <map>
++#include <string>
++#include <vector>
++
+ #include "streflop_cond.h"
+ 
+ #define lvm_c
+@@ -892,13 +901,6 @@ void luaV_execute (lua_State *L, int nexeccalls) {
+ ** see it. Frames are interned in a fixed table keyed by Proto* / C function
+ ** pointer at first sight; brLuaProfStop() folds the samples to <path>.
+ */
+-#include <signal.h>
+-#include <time.h>
+-#include <unistd.h>
+-#include <sys/syscall.h>
+-#include <map>
+-#include <string>
+-#include <vector>
+ 
+ namespace {
+ 	enum { BRP_MAXDEPTH = 40, BRP_MAXSAMPLES = 400000, BRP_FUNCS = 1 << 16, BRP_SRC = 120 };
+-- 
+2.53.0
+

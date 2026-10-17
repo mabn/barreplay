@@ -1,0 +1,63 @@
+From bedcad9322cff8c45b759c330b1d711309c848dc Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 04:16:25 +0000
+Subject: [PATCH 12/30] H73 without the unsynced-projectile expiry (a missile
+ updates its unsynced smoke trail: freeing it early crashes); P1 spin waits
+ yield when long
+
+---
+ rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp |  5 +++++
+ rts/Sim/Projectiles/ProjectileHandler.cpp       | 14 +++++---------
+ 2 files changed, 10 insertions(+), 9 deletions(-)
+
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index 3fd24a6..f07023f 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -32,6 +32,7 @@
+ #include <cstdlib>
+ #include <memory>
+ #include <typeinfo>
++#include <thread>
+ 
+ using namespace MoveTypes;
+ 
+@@ -131,6 +132,10 @@ namespace BrParAir {
+ 	// finish was ever missed
+ 	static inline void Spin(unsigned& n) {
+ 		_mm_pause();
++		// past ~a few thousand pauses the thread waited for is probably not
++		// running (an oversubscribed host): give it the core now and then
++		if (n > 4096 && (n & 15) == 0)
++			std::this_thread::yield();
+ 		if (((++n) & 1023) != 0)
+ 			return;
+ 		AdvanceFrontier();
+diff --git a/rts/Sim/Projectiles/ProjectileHandler.cpp b/rts/Sim/Projectiles/ProjectileHandler.cpp
+index 86895dc..1961b82 100644
+--- a/rts/Sim/Projectiles/ProjectileHandler.cpp
++++ b/rts/Sim/Projectiles/ProjectileHandler.cpp
+@@ -373,15 +373,11 @@ void CProjectileHandler::AddProjectile(CProjectile* p)
+ 		p->id = static_cast<int>(projectiles[true ].Add(p, rngFuncs[true]));
+ 	else {
+ 		p->id = static_cast<int>(projectiles[false].Add(p)); //don't bother with shuffling unsynced ids
+-		// [barreplay] H73: run-time test (engineSim never sees -DHEADLESS)
+-		// [barreplay] unsynced projectiles are render-only decoration (nano
+-		// spray, smoke, flying pieces); in a headless demo replay nothing ever
+-		// draws them, so expire them on arrival - the regular deletion sweep
+-		// frees them and the unsynced update loop stays empty. Synced code
+-		// never reads the unsynced container, so the sim is unaffected.
+-		static const bool brHeadless = SpringVersion::IsHeadless();
+-		if (brHeadless && (g_brToggles & 0x10) != 0 && gameSetup != nullptr && gameSetup->hostDemo)
+-			p->deleteMe = true;
++		// [barreplay] (an unsynced projectile used to be expired on arrival here
++		// "in a headless demo replay", behind #ifdef HEADLESS - which engineSim
++		// never sees, so it never ran; and it is WRONG: a missile keeps a
++		// pointer to its unsynced smoke trail and updates it every frame, so
++		// freeing the trail early crashes. H73 left it out.)
+ 	}
+ 
+ 	if (p->synced) {
+-- 
+2.53.0
+

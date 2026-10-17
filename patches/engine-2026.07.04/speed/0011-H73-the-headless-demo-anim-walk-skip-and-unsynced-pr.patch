@@ -1,0 +1,82 @@
+From 073225969966db61787e55187fbdd7a899cca754 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 03:42:12 +0000
+Subject: [PATCH 11/30] H73: the headless-demo anim walk skip and
+ unsynced-projectile expiry as run-time tests (engineSim never sees
+ -DHEADLESS; toggle bit 4)
+
+---
+ rts/Sim/Projectiles/ProjectileHandler.cpp | 8 +++++---
+ rts/Sim/Units/Scripts/UnitScript.cpp      | 9 ++++++---
+ 2 files changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/rts/Sim/Projectiles/ProjectileHandler.cpp b/rts/Sim/Projectiles/ProjectileHandler.cpp
+index 9933a76..86895dc 100644
+--- a/rts/Sim/Projectiles/ProjectileHandler.cpp
++++ b/rts/Sim/Projectiles/ProjectileHandler.cpp
+@@ -6,6 +6,8 @@
+ #include "ProjectileHandler.h"
+ #include "ProjectileMemPool.h"
+ #include "Game/GameSetup.h"
++#include "Game/GameVersion.h"
++#include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ #include "Game/GlobalUnsynced.h"
+ #include "Game/TraceRay.h"
+ #include "Map/Ground.h"
+@@ -371,15 +373,15 @@ void CProjectileHandler::AddProjectile(CProjectile* p)
+ 		p->id = static_cast<int>(projectiles[true ].Add(p, rngFuncs[true]));
+ 	else {
+ 		p->id = static_cast<int>(projectiles[false].Add(p)); //don't bother with shuffling unsynced ids
+-#ifdef HEADLESS
++		// [barreplay] H73: run-time test (engineSim never sees -DHEADLESS)
+ 		// [barreplay] unsynced projectiles are render-only decoration (nano
+ 		// spray, smoke, flying pieces); in a headless demo replay nothing ever
+ 		// draws them, so expire them on arrival - the regular deletion sweep
+ 		// frees them and the unsynced update loop stays empty. Synced code
+ 		// never reads the unsynced container, so the sim is unaffected.
+-		if (gameSetup != nullptr && gameSetup->hostDemo)
++		static const bool brHeadless = SpringVersion::IsHeadless();
++		if (brHeadless && (g_brToggles & 0x10) != 0 && gameSetup != nullptr && gameSetup->hostDemo)
+ 			p->deleteMe = true;
+-#endif
+ 	}
+ 
+ 	if (p->synced) {
+diff --git a/rts/Sim/Units/Scripts/UnitScript.cpp b/rts/Sim/Units/Scripts/UnitScript.cpp
+index f531e37..fa2e8d6 100644
+--- a/rts/Sim/Units/Scripts/UnitScript.cpp
++++ b/rts/Sim/Units/Scripts/UnitScript.cpp
+@@ -13,6 +13,8 @@
+ 
+ #include "Game/GameHelper.h"
+ #include "Game/GameSetup.h"
++#include "Game/GameVersion.h"
++#include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ #include "Game/GlobalUnsynced.h"
+ #include "Map/Ground.h"
+ #include "Sim/Misc/GlobalSynced.h"
+@@ -254,7 +256,8 @@ void CUnitScript::TickAllAnims(int deltaTime)
+ 	// sorted <anims> stays sorted and the per-tick sort above can stay skipped
+ 	std::erase_if(anims, [](const auto& ai) { return ai.done; });
+ 
+-#ifdef HEADLESS
++	// [barreplay] H73: a run-time test - this file is compiled into engineSim,
++	// which never sees -DHEADLESS, so the #ifdef it had kept this dead
+ 	// [barreplay] the walk below eagerly recomputes every dirty piece's
+ 	// transforms and sets the wasUpdated / boundaries-recalc flags - all of it
+ 	// for the benefit of rendering. Synced readers (weapon aim, script
+@@ -264,9 +267,9 @@ void CUnitScript::TickAllAnims(int deltaTime)
+ 	// engine already depends on that equivalence, since those readers run
+ 	// between walks. In a headless demo replay nothing draws, so skip the
+ 	// eager walk; pieces stay dirty until a synced reader actually needs them.
+-	if (gameSetup != nullptr && gameSetup->hostDemo)
++	static const bool brHeadless = SpringVersion::IsHeadless();
++	if (brHeadless && (g_brToggles & 0x10) != 0 && gameSetup != nullptr && gameSetup->hostDemo)
+ 		return;
+-#endif
+ #if 1
+ 	// BFS pass
+ 	// [barreplay] reuses a per-thread scratch buffer instead of constructing a
+-- 
+2.53.0
+

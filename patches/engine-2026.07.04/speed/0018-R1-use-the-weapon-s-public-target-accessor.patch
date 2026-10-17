@@ -1,0 +1,28 @@
+From 33b944b36b723fef6c5691571f3dbb5f846e51ea Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 11:10:37 +0000
+Subject: [PATCH 18/30] R1: use the weapon's public target accessor
+
+---
+ rts/Sim/Units/UnitHandler.cpp | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 611e068..fbde90c 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -153,8 +153,9 @@ namespace BrRunAhead {
+ 			PF(reinterpret_cast<const char*>(w) + 64);
+ 			PF(reinterpret_cast<const char*>(w) + 128);
+ 			PF(reinterpret_cast<const char*>(w) + 192);
+-			PF(&w->currentTarget);
+-			const CUnit* t = __atomic_load_n(&w->currentTarget.unit, __ATOMIC_RELAXED);
++			const SWeaponTarget& ct = w->GetCurrentTarget();
++			PF(&ct);
++			const CUnit* t = __atomic_load_n(&ct.unit, __ATOMIC_RELAXED);
+ 			if (t != nullptr)
+ 				PF(&t->pos);
+ 		}
+-- 
+2.53.0
+

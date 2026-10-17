@@ -1,0 +1,285 @@
+From ae4431eabe46485b2ce0e528cf8840a84630acf5 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 10:41:05 +0000
+Subject: [PATCH 15/30] R1 (toggle bit 6): run-ahead prefetch helper on the
+ main thread's hyperthread sibling for the serial unit loops
+
+---
+ rts/Sim/Units/BrRunAhead.h    |  27 ++++++
+ rts/Sim/Units/UnitHandler.cpp | 169 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 196 insertions(+)
+ create mode 100644 rts/Sim/Units/BrRunAhead.h
+
+diff --git a/rts/Sim/Units/BrRunAhead.h b/rts/Sim/Units/BrRunAhead.h
+new file mode 100644
+index 0000000..2c91d54
+--- /dev/null
++++ b/rts/Sim/Units/BrRunAhead.h
+@@ -0,0 +1,27 @@
++/* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
++
++#ifndef BR_RUN_AHEAD_H__
++#define BR_RUN_AHEAD_H__
++
++// [barreplay] R1 (toggle bit 6): a helper thread on the main thread's
++// hyperthread sibling runs ahead of the serial per-unit loops (UpdateUnits,
++// the serial weapon pass, SlowUpdateUnits) and prefetches the cache lines the
++// main thread is about to touch. It only issues prefetches and relaxed loads of
++// pointers living in unit/weapon pool memory, so it cannot change any result.
++
++#include <atomic>
++#include <vector>
++
++class CUnit;
++
++namespace BrRunAhead {
++	extern std::atomic<int> cursor;
++
++	// main thread: a loop over units[beg, end) starts / ends
++	void Begin(int phase, const std::vector<CUnit*>& units, size_t beg, size_t end);
++	void End();
++
++	inline void At(int i) { cursor.store(i, std::memory_order_relaxed); }
++}
++
++#endif
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 2c168de..016da25 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -3,6 +3,15 @@
+ #include <cassert>
+ 
+ #include "UnitHandler.h"
++#include "BrRunAhead.h"
++#include "Sim/MoveTypes/MoveType.h"
++#include "Sim/Units/Scripts/UnitScript.h"
++#include "Sim/Units/CommandAI/CommandAI.h"
++#include "Sim/Weapons/Weapon.h"
++#include <thread>
++#include <pthread.h>
++#include <sched.h>
++#include <immintrin.h>
+ #include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ #include "Unit.h"
+ #include "UnitDefHandler.h"
+@@ -93,6 +102,157 @@ CUnit* CUnitHandler::NewUnit(const UnitDef* ud)
+ 
+ 
+ 
++
++// [barreplay] R1: see BrRunAhead.h
++namespace BrRunAhead {
++	std::atomic<int> cursor{0};
++	static std::atomic<int> phase{0};
++	static std::atomic<unsigned> epoch{0};
++	static std::vector<CUnit*> list;
++	static std::atomic<int> listN{0};
++	static std::thread helper;
++	static int helperCpu = -2;
++
++	static inline void PF(const void* p) { __builtin_prefetch(p, 0, 3); }
++
++	template<typename T> static inline T Load(T* const& field) {
++		return __atomic_load_n(&field, __ATOMIC_RELAXED);
++	}
++
++	static void PrefetchUnit(const CUnit* u) {
++		PF(u);
++		PF(reinterpret_cast<const char*>(u) + 64);
++		PF(&u->pos);
++		PF(&u->physicalState);
++		PF(&u->losStatus[0]);
++		PF(&u->moveType);
++		PF(&u->curTarget);
++		PF(&u->weapons);
++		PF(&u->health);
++		PF(&u->beingBuilt);
++		const AMoveType* mt = Load(u->moveType);
++		if (mt != nullptr) {
++			PF(mt);
++			PF(reinterpret_cast<const char*>(mt) + 64);
++		}
++		const CUnitScript* sc = Load(u->script);
++		if (sc != nullptr)
++			PF(sc);
++		const CCommandAI* cai = Load(u->commandAI);
++		if (cai != nullptr) {
++			PF(cai);
++			PF(&cai->commandQue);
++		}
++		CWeapon* const* wb = __atomic_load_n(reinterpret_cast<CWeapon* const* const*>(&u->weapons), __ATOMIC_RELAXED);
++		const size_t nw = u->weapons.size();
++		for (size_t i = 0; i < nw && i < 8; ++i) {
++			const CWeapon* w = __atomic_load_n(&wb[i], __ATOMIC_RELAXED);
++			if (w == nullptr)
++				continue;
++			PF(w);
++			PF(reinterpret_cast<const char*>(w) + 64);
++			PF(reinterpret_cast<const char*>(w) + 128);
++			PF(reinterpret_cast<const char*>(w) + 192);
++			PF(&w->currentTarget);
++			const CUnit* t = __atomic_load_n(&w->currentTarget.unit, __ATOMIC_RELAXED);
++			if (t != nullptr)
++				PF(&t->pos);
++		}
++	}
++
++	static std::atomic<bool> busy{false};
++	static pthread_t helperTid;
++
++	static void HelperLoop() {
++		constexpr int AHEAD = 16;
++		for (;;) {
++			const int ph = phase.load(std::memory_order_acquire);
++			if (ph == 0) {
++				// parked between loops (futex): a spinning sibling would take the main thread's issue slots
++				phase.wait(0, std::memory_order_acquire);
++				continue;
++			}
++			busy.store(true, std::memory_order_seq_cst);
++			const unsigned ep = epoch.load(std::memory_order_seq_cst);
++			if (phase.load(std::memory_order_seq_cst) != ph) {
++				busy.store(false, std::memory_order_release);
++				continue;
++			}
++			const int n = listN.load(std::memory_order_acquire);
++			int j = 0;
++			while (j < n && phase.load(std::memory_order_relaxed) == ph && epoch.load(std::memory_order_relaxed) == ep) {
++				const int c = cursor.load(std::memory_order_relaxed);
++				if (j < c)
++					j = c;
++				if (j >= std::min(n, c + AHEAD)) {
++					_mm_pause();
++					continue;
++				}
++				PrefetchUnit(list[j]);
++				j += 1;
++			}
++			busy.store(false, std::memory_order_release);
++			// done with this loop's list: wait for the next one
++			while (phase.load(std::memory_order_acquire) == ph && epoch.load(std::memory_order_acquire) == ep)
++				phase.wait(ph, std::memory_order_acquire);
++		}
++	}
++
++	static int SiblingOf(int cpu) {
++		char path[128];
++		snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list", cpu);
++		FILE* f = fopen(path, "r");
++		if (f == nullptr)
++			return -1;
++		int a = -1, b = -1;
++		char sep = 0;
++		const int r = fscanf(f, "%d%c%d", &a, &sep, &b);
++		fclose(f);
++		if (r < 3)
++			return -1;
++		return (a == cpu)? b: a;
++	}
++
++	void Begin(int ph, const std::vector<CUnit*>& units, size_t beg, size_t end) {
++		if ((g_brToggles & 0x40) == 0)
++			return;
++
++		const int cpu = sched_getcpu();
++		if (helperCpu == -2) {
++			helper = std::thread(HelperLoop);
++			helperTid = helper.native_handle();
++			helper.detach();
++			helperCpu = -1;
++		}
++		const int sib = SiblingOf(cpu);
++		if (sib >= 0 && sib != helperCpu) {
++			cpu_set_t set;
++			CPU_ZERO(&set);
++			CPU_SET(sib, &set);
++			pthread_setaffinity_np(helperTid, sizeof(set), &set);
++			helperCpu = sib;
++		}
++
++		// the helper must be done with the previous list before it is rewritten
++		while (busy.load(std::memory_order_acquire))
++			_mm_pause();
++		// the helper only ever reads this copy: <units> may reallocate as units are created
++		list.assign(units.begin() + beg, units.begin() + end);
++		listN.store(int(list.size()), std::memory_order_relaxed);
++		cursor.store(0, std::memory_order_relaxed);
++		epoch.fetch_add(1, std::memory_order_release);
++		phase.store(ph, std::memory_order_release);
++		phase.notify_one();
++	}
++
++	void End() {
++		if (phase.load(std::memory_order_relaxed) == 0)
++			return;
++		// the helper sees this within one prefetch; Begin waits for it to let go of the list
++		phase.store(0, std::memory_order_release);
++	}
++}
++
+ void CUnitHandler::Init() {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	GroundMoveSystem::Init();
+@@ -402,12 +562,14 @@ void CUnitHandler::SlowUpdateUnits()
+ 
+ 	activeSlowUpdateUnit = idxEnd;
+ 	// stagger the SlowUpdate's
++	BrRunAhead::Begin(3, activeUnits, idxBeg, idxEnd);
+ 
+ 	static std::vector<CUnit*> updateBoundingVolumeList;
+ 	updateBoundingVolumeList.clear();
+ 	{
+ 		ZoneScopedN("Sim::Unit::SlowUpdateST");
+ 		for (size_t i = idxBeg; i < idxEnd; ++i) {
++			BrRunAhead::At(int(i - idxBeg));
+ 			CUnit* unit = activeUnits[i];
+ 
+ 			unit->SanityCheck();
+@@ -419,6 +581,7 @@ void CUnitHandler::SlowUpdateUnits()
+ 				updateBoundingVolumeList.emplace_back(unit);
+ 		}
+ 	}
++	BrRunAhead::End();
+ 	// Since the bounding volumes are calculated from the maximum piecematrix-offset piece vertices
+ 	// They dont have much of an effect if updated late-ish.
+ 	{
+@@ -434,7 +597,9 @@ void CUnitHandler::UpdateUnits()
+ 	SCOPED_TIMER("Sim::Unit::Update");
+ 
+ 	size_t activeUnitCount = activeUnits.size();
++	BrRunAhead::Begin(1, activeUnits, 0, activeUnitCount);
+ 	for (size_t i = 0; i < activeUnitCount; ++i) {
++		BrRunAhead::At(int(i));
+ 		// [barreplay] H66: prefetch the unit 8 ahead and its move type 4 ahead
+ 		if (i + 8 < activeUnits.size()) __builtin_prefetch(activeUnits[i + 8]);
+ 		if (i + 4 < activeUnits.size()) __builtin_prefetch(activeUnits[i + 4]->moveType);
+@@ -449,6 +614,7 @@ void CUnitHandler::UpdateUnits()
+ 
+ 		assert(activeUnits[i] == unit);
+ 	}
++	BrRunAhead::End();
+ }
+ 
+ void CUnitHandler::UpdateUnitWeapons()
+@@ -463,7 +629,9 @@ void CUnitHandler::UpdateUnitWeapons()
+ 	}
+ 	{
+ 		SCOPED_TIMER("Sim::Unit::Weapon");
++		BrRunAhead::Begin(2, activeUnits, 0, activeUnits.size());
+ 		for (activeUpdateUnit = 0; activeUpdateUnit < activeUnits.size(); ++activeUpdateUnit) {
++			BrRunAhead::At(int(activeUpdateUnit));
+ 			// [barreplay] H66: the weapon-use flags 8 ahead, the first weapon 4 ahead
+ 			const size_t ahead = activeUpdateUnit;
+ 			if (ahead + 8 < activeUnits.size()) {
+@@ -476,6 +644,7 @@ void CUnitHandler::UpdateUnitWeapons()
+ 			}
+ 			activeUnits[activeUpdateUnit]->UpdateWeapons();
+ 		}
++		BrRunAhead::End();
+ 	}
+ }
+ 
+-- 
+2.53.0
+

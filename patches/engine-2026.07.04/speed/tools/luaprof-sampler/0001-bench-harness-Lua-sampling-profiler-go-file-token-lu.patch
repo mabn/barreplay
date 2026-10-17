@@ -1,0 +1,211 @@
+From ec06d362ba5751a8d8b994a7648ad625bcbb17e9 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Fri, 16 Oct 2026 01:27:16 +0000
+Subject: [PATCH 1/3] bench harness: Lua sampling profiler (go file token
+ 'luaprof')
+
+---
+ rts/Net/NetCommands.cpp |  15 ++++-
+ rts/lib/lua/src/lvm.cpp | 126 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 140 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Net/NetCommands.cpp b/rts/Net/NetCommands.cpp
+index fe19082..9d0e9cb 100644
+--- a/rts/Net/NetCommands.cpp
++++ b/rts/Net/NetCommands.cpp
+@@ -26,6 +26,9 @@ int BrLuaGcStatsLine(char* buf, int size);
+ // truncated right after the window for fast iteration. Zero effect unless the
+ // env vars are set; never touches synced state.
+ extern "C" void __gcov_dump(void) __attribute__((weak));
++// Lua sampling profiler (lvm.cpp); a go file's third token "luaprof" turns it on
++extern "C" void brLuaProfStart(int periodUs);
++extern "C" void brLuaProfStop(const char* path);
+ 
+ namespace {
+ 	inline long long brNowNs(clockid_t c) {
+@@ -49,6 +52,7 @@ namespace {
+ 		int  start = -1, n = 0;
+ 		bool init = false;
+ 		const char* out = nullptr;
++		bool luaProf = false;
+ 		int  fdCyc = -1, fdIns = -1;
+ 		long long tcpu = 0, pcpu = 0, wall = 0; int seen = 0;
+ 		void ensure() {
+@@ -88,8 +92,10 @@ namespace {
+ 			if (FILE* f = fopen(path, "r")) {
+ 				int goN = 0;
+ 				goOut[0] = 0;
+-				if (fscanf(f, "%d %1023s", &goN, goOut) >= 1 && goN > 0)
++				char goOpt[64] = {0};
++				if (fscanf(f, "%d %1023s %63s", &goN, goOut, goOpt) >= 1 && goN > 0)
+ 					n = goN;
++				luaProf = (strcmp(goOpt, "luaprof") == 0);
+ 				if (goOut[0] != 0)
+ 					out = goOut;
+ 				// further words: "t=<hex>" sets the experiment toggles of this trial
+@@ -730,6 +736,8 @@ void CGame::ClientReadNet()
+ 						if (about == g_brBench.start) {
+ 							g_brBench.parkHere();
+ 							g_brBench.countersOn();
++							if (g_brBench.luaProf)
++								brLuaProfStart(1000);
+ 						}
+ 						const long long t0 = brNowNs(CLOCK_THREAD_CPUTIME_ID);
+ 						const long long w0 = brNowNs(CLOCK_MONOTONIC);
+@@ -758,6 +766,11 @@ void CGame::ClientReadNet()
+ 							}
+ 							fprintf(stderr, "toggles=%x %s%s", g_brToggles, pline, gline);
+ 							fputs(line, stderr); fflush(stderr);
++							if (g_brBench.luaProf && g_brBench.out) {
++								char lp[1100];
++								snprintf(lp, sizeof(lp), "%s.luaprof", g_brBench.out);
++								brLuaProfStop(lp);
++							}
+ 							// An instrumented (-fprofile-generate) build writes its
+ 							// profile at exit, which _exit skips: dump it first, so a
+ 							// training run can stop right after a late-game window.
+diff --git a/rts/lib/lua/src/lvm.cpp b/rts/lib/lua/src/lvm.cpp
+index 845e242..5dbdddf 100644
+--- a/rts/lib/lua/src/lvm.cpp
++++ b/rts/lib/lua/src/lvm.cpp
+@@ -437,7 +437,14 @@ static void Arith (lua_State *L, StkId ra, const TValue *rb,
+ #define vmnext() continue
+ #endif
+ 
++// [barreplay] Lua sampling profiler (measurement builds only): which lua_State
++// this thread is executing. Set for the extent of every luaV_execute, restored
++// on return or exception unwind; read by the sampler's signal handler.
++thread_local lua_State* brLuaCurL = nullptr;
++namespace { struct BRCurL { lua_State* prev; explicit BRCurL(lua_State* L): prev(brLuaCurL) { brLuaCurL = L; } ~BRCurL() { brLuaCurL = prev; } }; }
++
+ void luaV_execute (lua_State *L, int nexeccalls) {
++  BRCurL brCurLGuard(L);
+   LClosure *cl;
+   StkId base;
+   TValue *k;
+@@ -874,3 +881,122 @@ void luaV_execute (lua_State *L, int nexeccalls) {
+ #pragma GCC pop_options
+ #endif
+ 
++
++
++/*
++** [barreplay] Lua sampling profiler (measurement builds only; started by the
++** bench harness). A CLOCK_THREAD_CPUTIME_ID timer interrupts the calling
++** thread every <periodUs> of ITS CPU time; the SIGPROF handler records the
++** Lua call stack of the state brLuaCurL names (or "not in Lua"). The handler
++** only READS Lua state (no allocation, no Lua API), so the simulation cannot
++** see it. Frames are interned in a fixed table keyed by Proto* / C function
++** pointer at first sight; brLuaProfStop() folds the samples to <path>.
++*/
++#include <signal.h>
++#include <time.h>
++#include <unistd.h>
++#include <sys/syscall.h>
++#include <map>
++#include <string>
++#include <vector>
++
++namespace {
++	enum { BRP_MAXDEPTH = 40, BRP_MAXSAMPLES = 400000, BRP_FUNCS = 1 << 16, BRP_SRC = 120 };
++	struct BRPFunc { const void* key; int line; char isC; char src[BRP_SRC]; };
++	BRPFunc brpFuncs[BRP_FUNCS];
++	struct BRPSample { unsigned short depth; unsigned short truncated; unsigned int f[BRP_MAXDEPTH]; };
++	BRPSample* brpSamples = nullptr;
++	volatile int brpN = 0, brpOutside = 0, brpLost = 0, brpTableFull = 0;
++	timer_t brpTimer;
++	bool brpOn = false;
++
++	unsigned int brpIntern(const void* key, bool isC, const Proto* p) {
++		size_t h = ((size_t)key >> 4) * 0x9E3779B97F4A7C15ull;
++		for (unsigned int k = 0; k < BRP_FUNCS; k++) {
++			unsigned int i = (unsigned int)((h >> 40) + k) & (BRP_FUNCS - 1);
++			BRPFunc& f = brpFuncs[i];
++			if (f.key == key) return i;
++			if (f.key == nullptr) {
++				f.key = key; f.isC = isC;
++				if (!isC && p != nullptr) {
++					f.line = p->linedefined;
++					const char* s = (p->source != nullptr) ? getstr(p->source) : "?";
++					size_t n = 0; while (s[n] != 0 && n < BRP_SRC - 1) { f.src[n] = s[n]; n++; }
++					f.src[n] = 0;
++				}
++				return i;
++			}
++		}
++		brpTableFull = brpTableFull + 1;
++		return 0xffffffffu;
++	}
++
++	void brpHandler(int, siginfo_t*, void*) {
++		lua_State* L = brLuaCurL;
++		if (L == nullptr) { brpOutside = brpOutside + 1; return; }
++		if (brpN >= BRP_MAXSAMPLES) { brpLost = brpLost + 1; return; }
++		BRPSample& s = brpSamples[brpN];
++		s.depth = 0; s.truncated = 0;
++		CallInfo* ci = L->ci;
++		CallInfo* base = L->base_ci;
++		if (ci == nullptr || base == nullptr || ci < base || ci >= L->end_ci) { brpOutside = brpOutside + 1; return; }
++		// innermost first; keep the innermost BRP_MAXDEPTH frames
++		for (; ci > base; ci--) {
++			StkId fn = ci->func;
++			if (fn < L->stack || fn > L->stack_last || !ttisfunction(fn)) continue;
++			Closure* cl = clvalue(fn);
++			unsigned int id = cl->c.isC ? brpIntern((const void*)cl->c.f, true, nullptr)
++			                            : brpIntern((const void*)cl->l.p, false, cl->l.p);
++			if (id == 0xffffffffu) continue;
++			if (s.depth == BRP_MAXDEPTH) { s.truncated = 1; break; }
++			s.f[s.depth++] = id;
++		}
++		brpN = brpN + 1;
++	}
++}
++
++extern "C" void brLuaProfStart(int periodUs) {
++	if (brpOn) return;
++	brpSamples = new BRPSample[BRP_MAXSAMPLES];
++	struct sigaction sa; memset(&sa, 0, sizeof(sa));
++	sa.sa_sigaction = brpHandler; sa.sa_flags = SA_SIGINFO | SA_RESTART;
++	sigemptyset(&sa.sa_mask);
++	sigaction(SIGPROF, &sa, nullptr);
++	struct sigevent sev; memset(&sev, 0, sizeof(sev));
++	sev.sigev_notify = SIGEV_THREAD_ID; sev.sigev_signo = SIGPROF;
++	sev._sigev_un._tid = (pid_t)syscall(SYS_gettid);
++	if (timer_create(CLOCK_THREAD_CPUTIME_ID, &sev, &brpTimer) != 0) return;
++	struct itimerspec its; memset(&its, 0, sizeof(its));
++	its.it_interval.tv_nsec = its.it_value.tv_nsec = (long)periodUs * 1000L;
++	timer_settime(brpTimer, 0, &its, nullptr);
++	brpOn = true;
++}
++
++extern "C" void brLuaProfStop(const char* path) {
++	if (!brpOn) return;
++	timer_delete(brpTimer);
++	brpOn = false;
++	FILE* f = fopen(path, "w");
++	if (f == nullptr) return;
++	// header: the runtime address of luaV_execute, so C function pointers can
++	// be symbolized against `nm` of the same binary (PIE)
++	fprintf(f, "# luaV_execute=%p samples=%d outside=%d lost=%d tablefull=%d\n",
++		(void*)&luaV_execute, (int)brpN, (int)brpOutside, (int)brpLost, (int)brpTableFull);
++	std::map<std::string, int> folded;
++	char buf[64];
++	for (int n = 0; n < brpN; n++) {
++		const BRPSample& s = brpSamples[n];
++		std::string st = s.truncated ? "(truncated)" : "";
++		for (int d = s.depth - 1; d >= 0; d--) { // root first
++			const BRPFunc& fn = brpFuncs[s.f[d]];
++			if (!st.empty()) st += ';';
++			if (fn.isC) { snprintf(buf, sizeof(buf), "C:%p", fn.key); st += buf; }
++			else { st += fn.src; snprintf(buf, sizeof(buf), ":%d", fn.line); st += buf; }
++		}
++		if (st.empty()) st = "(no frames)";
++		folded[st]++;
++	}
++	for (const auto& kv: folded)
++		fprintf(f, "%s %d\n", kv.first.c_str(), kv.second);
++	fclose(f);
++}
+-- 
+2.53.0
+

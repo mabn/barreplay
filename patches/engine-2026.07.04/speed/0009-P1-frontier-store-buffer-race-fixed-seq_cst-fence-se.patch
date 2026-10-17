@@ -1,0 +1,126 @@
+From ed31fec8e7b5436cfdc5dc1095d357542d973862 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 02:18:03 +0000
+Subject: [PATCH 09/30] P1: frontier store-buffer race fixed (seq_cst + fence,
+ self-healing spins); long-wait log
+
+---
+ .../MoveTypes/Systems/GeneralMoveSystem.cpp   | 49 ++++++++++++++-----
+ 1 file changed, 37 insertions(+), 12 deletions(-)
+
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index 91f2305..31d0beb 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -20,6 +20,7 @@
+ #include "System/Misc/TracyDefs.h"
+ 
+ #include "BrParallelAir.h"
++#include "System/Log/ILog.h"
+ #include "Map/MapDimensions.h"
+ #include "Map/ReadMap.h"
+ #include "Sim/Misc/GlobalConstants.h"
+@@ -107,14 +108,35 @@ namespace BrParAir {
+ 		}
+ 	}
+ 
++	// advance the frontier (the lowest unfinished rank) past every finished item
++	static void AdvanceFrontier() {
++		int f = frontier.load(std::memory_order_seq_cst);
++		while (f < int(work.size()) && done[f].load(std::memory_order_seq_cst)) {
++			if (frontier.compare_exchange_weak(f, f + 1, std::memory_order_seq_cst))
++				f += 1;
++		}
++	}
++
+ 	static void Finish(int k) {
+-		done[k].store(1, std::memory_order_release);
++		// seq_cst store + fence before reading the frontier: two items finishing
++		// together must not each miss the other's flag (store-buffer race), or
++		// the frontier would stop short of both
++		done[k].store(1, std::memory_order_seq_cst);
++		std::atomic_thread_fence(std::memory_order_seq_cst);
++		AdvanceFrontier();
++	}
+ 
+-		// advance the frontier (the lowest unfinished rank) past every finished item
+-		int f = frontier.load(std::memory_order_acquire);
+-		while (f < int(work.size()) && done[f].load(std::memory_order_acquire)) {
+-			if (frontier.compare_exchange_weak(f, f + 1, std::memory_order_acq_rel))
+-				f += 1;
++	// every spin also re-scans the frontier now and then: self-healing if a
++	// finish was ever missed
++	static inline void Spin(unsigned& n) {
++		_mm_pause();
++		if (((++n) & 1023) != 0)
++			return;
++		AdvanceFrontier();
++		// ~seconds of spinning: say where the schedule stands (once per wait)
++		if ((n & ((1u << 26) - 1)) == 0) {
++			LOG_L(L_WARNING, "[BrParAir] long wait: thread=%d rank=%d items=%d claim=%d nextStart=%d frontier=%d handoff=%d",
++				ThreadPool::GetThreadNum(), curRank, int(work.size()), claim.load(), nextStart.load(), frontier.load(), handoff.load());
+ 		}
+ 	}
+ 
+@@ -137,8 +159,9 @@ namespace BrParAir {
+ 			return;
+ 
+ 		stats.serialPoints++;
++		unsigned n = 0;
+ 		while (frontier.load(std::memory_order_acquire) < curRank)
+-			_mm_pause();
++			Spin(n);
+ 	}
+ 
+ 	// main thread only: every earlier item has finished and no later one has started
+@@ -230,17 +253,18 @@ namespace BrParAir {
+ 	}
+ 
+ 	static void Process(int k, bool isMain) {
++		unsigned n = 0;
+ 		// in-order start
+ 		while (nextStart.load(std::memory_order_acquire) != k) {
+ 			if (!isMain || !ServiceHandoff())
+-				_mm_pause();
++				Spin(n);
+ 		}
+ 
+ 		if (!isSerial[k]) {
+ 			for (int i = predBeg[k], e = predBeg[k + 1]; i < e; ++i) {
+ 				const int j = preds[i];
+ 				while (!done[j].load(std::memory_order_acquire))
+-					_mm_pause();
++					Spin(n);
+ 			}
+ 
+ 			if (StillAsPlanned(k)) {
+@@ -258,12 +282,12 @@ namespace BrParAir {
+ 		// serial: nothing later starts before it is done (nextStart stays at k)
+ 		if (isMain) {
+ 			while (frontier.load(std::memory_order_acquire) != k)
+-				_mm_pause();
++				Spin(n);
+ 			RunExclusive(k);
+ 		} else {
+ 			handoff.store(k, std::memory_order_release);
+ 			while (!done[k].load(std::memory_order_acquire))
+-				_mm_pause();
++				Spin(n);
+ 		}
+ 	}
+ 
+@@ -279,9 +303,10 @@ namespace BrParAir {
+ 		}
+ 		if (!isMain)
+ 			return;
++		unsigned spins = 0;
+ 		while (frontier.load(std::memory_order_acquire) < n) {
+ 			if (!ServiceHandoff())
+-				_mm_pause();
++				Spin(spins);
+ 		}
+ 	}
+ 
+-- 
+2.53.0
+

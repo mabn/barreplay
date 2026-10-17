@@ -1,0 +1,36 @@
+From 966d2f7c06c4c8c9b4dad50e891ad74536f6546e Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 10:41:41 +0000
+Subject: [PATCH 16/30] R1: seq_cst phase store / busy load (Dekker with the
+ helper)
+
+---
+ rts/Sim/Units/UnitHandler.cpp | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 016da25..086eff6 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -234,7 +234,7 @@ namespace BrRunAhead {
+ 		}
+ 
+ 		// the helper must be done with the previous list before it is rewritten
+-		while (busy.load(std::memory_order_acquire))
++		while (busy.load(std::memory_order_seq_cst))
+ 			_mm_pause();
+ 		// the helper only ever reads this copy: <units> may reallocate as units are created
+ 		list.assign(units.begin() + beg, units.begin() + end);
+@@ -249,7 +249,8 @@ namespace BrRunAhead {
+ 		if (phase.load(std::memory_order_relaxed) == 0)
+ 			return;
+ 		// the helper sees this within one prefetch; Begin waits for it to let go of the list
+-		phase.store(0, std::memory_order_release);
++		// seq_cst: against the helper's busy-store / phase-load (Begin reads busy after this)
++		phase.store(0, std::memory_order_seq_cst);
+ 	}
+ }
+ 
+-- 
+2.53.0
+
