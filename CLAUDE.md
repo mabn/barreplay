@@ -372,7 +372,7 @@ cmd/fogofwar/             FogOfWar.exe: a Windows desktop app that re-simulates 
                           developed and screenshotted) and bodgit/sevenzip (Windows has no 7z for
                           the engine release; wired in through engine.Extract7z). app.go's
                           exported methods are the page's whole API, kept narrow (no paths or
-                          commands from the page; ShowReplay only opens paths in the history).
+                          commands from the page; OpenReplay only opens the site's /replays/<gameId> for a valid game id).
                           No admin rights: everything lives in %LOCALAPPDATA%\FogOfWar
                           (FOGOFWAR_HOME overrides) — config.json (folders, faster-engine toggle,
                           memory floor, history), data\ (engine, game, maps; the engine's write
@@ -391,8 +391,8 @@ cmd/fogofwar/             FogOfWar.exe: a Windows desktop app that re-simulates 
                           DownloadProgress (byte counts for any engine download), and the
                           Windows patched build: PatchedBuildKey's engines/<v>/windows-amd64/
                           spring-headless-patched-<semver>.exe.gz, pinned in
-                          patchedBuildsWindows (empty until a gated Windows build exists; until
-                          then Windows runs stock).
+                          patchedBuildsWindows (2026.07.04 rev 3 pinned; a version with no pin
+                          runs stock on Windows).
 cmd/publish-engine/main.go CLI: publish a patched engine build for every re-sim host to
                           download (see the -patched-engine note above), the WHOLE job in one
                           command: name it (engine version from its --version, revision from
