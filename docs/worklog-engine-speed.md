@@ -1991,3 +1991,49 @@ gate `t=7fbf` `0558d354…`. Late window, cooled, 3 interleaved pairs each:
 Everything on (`speed24`, `t=7fbf`): **10.54 s**, against 14.82 s with every
 toggle off (-28.9%) and `speed18`'s 11.18 s (-5.7%). Governed whole game
 running.
+
+### 2026-10-17 20:15 — governed whole game, everything on: identical, ~14m39s active; flame graph
+
+`speed24` `t=7fbf`, 4 threads, pause at 88 C / resume at 55 C: sim 38m19s,
+paused 24m26s, **identical** (`a26e920d…`). Sim minus paused is 13m53s, but
+the run started right after the A/B trials on a hot package and paused during
+load as well (load 1m5s against ~19 s unpaused), so the like-for-like figure is
+**~14m39s active** (`speed18` with the same correction: ~15m42s, -6.7%). The
+clock-free reading agrees: main thread 3.27e12 cycles over the whole game
+against `speed18`'s 3.51e12 (-6.8%); workers 1.09 / 0.94 / … e12.
+
+![verylarge1 late game, speed24 t=7fbf, main thread](flamegraphs/2026-10-17-verylarge1-speed24.svg)
+
+Main thread, late window (`t=7fbf`, 10.21 s under perf), % of one core:
+
+| phase | % of main core |
+|---|---|
+| unit updates | 61.8% |
+| ├ weapon auto-targeting (`CWeapon::SlowUpdate`) | 10.2% |
+| ├ aircraft loop (P1) | 8.2% |
+| ├ parallel sections under `CUnitHandler::Update` (weapon vectors, LOS states, bounding volumes) | 7.7% |
+| ├ ground movement | 6.8% |
+| ├ inlined unit/weapon loops | 6.0% |
+| ├ `CUnit::SlowUpdate` 5.9, beam lasers 5.0, weapon update 3.6 | 14.5% |
+| ├ quad field 2.3, `UpdatePhysicalState` 1.6 | 3.9% |
+| └ builders 1.6, factories 1.6, rest 1.0 | 4.2% |
+| Lua callins, not from units | 9.5% |
+| COB scripts | 6.0% |
+| LOS update (parallel section) | 5.4% |
+| projectiles + collisions | 5.2% |
+| unit-script anims (parallel) | 3.3% |
+| Lua GC 2.5, map damage 2.2, pathfinding 2.1, rest 2.0 | 8.8% |
+| **total** | **100%** |
+
+**H81** (toggle `0x8000`, `speed25`, building): weapon vectors are recomputed
+in three places a frame or a slow update apart: the parallel weapon-vectors
+pass, `CWeapon::SlowUpdate`, and every beam laser's `Update` (1.0% of the main
+core, right after the pass that computed the same). `UpdateWeaponVectors` reads
+the two pieces' transforms, the unit's script, position and direction vectors,
+and the synced height map at one point. H81 stamps those inputs: a per-model
+counter bumped by every change of a piece's position, rotation or scale
+(bit-exact) and by `SetModel`, a counter bumped by every synced height-map
+write (`CReadMap::SetHeight`), the piece indices and script pointer, and the
+position and directions compared bit for bit. It skips the recompute when all
+match. Anything else writing the outputs (the beam laser's sweep path,
+`LoadWeaponVectors` after `TryTargetHeading`) drops the stamp.
