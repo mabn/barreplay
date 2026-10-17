@@ -1760,3 +1760,67 @@ rectangles merge depends on the draw cadence), and nothing showed it in the
 .brp hashes. Fix: `CReadMap::UpdateDraw` clamps each rectangle to corner space
 before the unsynced update (drawing data only; it cannot reach the
 simulation). `speed18` = `speed17` + the clamp, building.
+
+### 2026-10-17 14:40 — W6 + W7 measured: late window -7.2%, governed whole game 15m25s active, identical
+
+`speed18` = `speed17` + the heightmap-rectangle clamp (W6 now uses
+`math::floor`, exactly what Lua's `math.floor` and `%` use). Medium gate
+`0558d354…`. One intermittent failure is still unexplained: one of three
+verylarge1 dumps with the new widget exited with status 21 at frame 78
+(infolog lost to the next run); the retry and both later runs went through.
+
+Late window, cooled, `t=3f`, the same engine with the old and the new widget
+(two checkpoints, `speed18w0` is a copy of the binary):
+
+| widget | wall per trial | mean | main cycles |
+|---|---|---|---|
+| old (`speed18w0`) | 12.10 / 11.96 / 12.09 / 12.01 s | 12.04 s | 44.7e9 |
+| W6 + W7 (`speed18`) | 11.15 / 11.15 / 11.17 / 11.26 s | **11.18 s (-7.2%)** | 41.6e9 |
+
+More than the Lua profile's 4.4%: the old loop also built a predictor table
+per new unit and pushed ~130k numbers per sample through the Lua stack, which
+its GC then had to clear.
+
+Governed whole game (`speed18`, new widget, `t=3f`, 4 threads, pause at
+88 C / resume at 55 C): sim 35m26s, paused 20m01s, **15m25s active** (speed15:
+16m39s), **identical** (`a26e920d…`). Both runs also paused during load
+(load 36 s / 31 s against ~19 s unpaused), which this subtraction counts as
+sim time saved; correcting for it, -6.8%.
+
+![verylarge1 late game, speed18 + W6/W7, main thread](flamegraphs/2026-10-17-verylarge1-speed18-w6.svg)
+
+Main thread, late window (`t=3f`, 10.91 s), % of one core:
+
+| phase | % of main core |
+|---|---|
+| unit updates | 64.5% |
+| ├ weapon auto-targeting (`CWeapon::SlowUpdate`; 6.6 of it `GenerateWeaponTargets`) | 10.3% |
+| ├ aircraft loop (P1) | 9.6% |
+| ├ weapon vectors (parallel section) | 9.4% |
+| ├ ground movement (3.6 of it its parallel sections) | 6.4% |
+| ├ `CUnit::SlowUpdate` 5.9, beam lasers 5.3, weapon update 3.5 | 14.7% |
+| ├ quad field 3.0, `CUnit::Update` 2.4, inlined loops 4.2 | 9.6% |
+| └ builders 1.7, factories 1.6, rest 1.1 | 4.4% |
+| Lua callins, not from units (was 11.4%: our widget went from 5.5% to ~1%) | 8.7% |
+| COB scripts | 5.8% |
+| LOS update (parallel section) | 5.4% |
+| projectiles + collisions | 4.5% |
+| unit-script anims (parallel) | 2.8% |
+| Lua GC 2.3, map damage 2.1, pathfinding 2.0, rest 1.5 | 7.9% |
+| **total** | **100%** |
+
+Workers over the whole game (perf stat): main 3.51e12 cycles, the three
+workers 1.17 / 1.03 / 1.02e12.
+
+Next (`speed19`, building): **P1 v6** (toggle `0x80`): landed aircraft and
+aircraft taking off as parallel items. Of the 253 serial items a frame, 116
+are stationary (nearly all landed hover aircraft, which v5 let through the
+type check) and 127 are landing / taking off. A landed aircraft only settles on
+the terrain under it (its own speed, position, direction vectors and aim
+point), and the one transition a take-off can make (to FLYING) only sets its
+own flags. The transitions with outside effects (Activate/UnBlock leaving
+LANDED, StopMove/Deactivate/Block on touching down) start from neither state,
+so landing stays serial. **PW** (toggle `0x100`): the serial weapon loop
+prefetches every weapon of the unit 4 ahead (H66 took only the first) and the
+target units of the unit 2 ahead's weapons (`Update` reads the target's
+`isDead`, position and speed every frame).
