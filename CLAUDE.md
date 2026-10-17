@@ -20,6 +20,7 @@ go build ./cmd/insights         # build the game-summary backfill CLI (one repla
 go build ./cmd/winfit           # build the win-probability model fitter (reads insights files; -categories fits lava / large ranked / ranked / unranked separately)
 go build ./cmd/bringest         # build the drag&drop upload daemon (polls the worker's job queue)
 go run ./cmd/publish-engine -data <BARdata>   # gate, strip and upload the patched engine build under <data>/engine/*/ to R2, then print the patchedBuilds pin to commit and the tag to push (hosts download it once the pin is merged; -dry = everything but the upload; -gate <gameIds> for a version with no default gate replay)
+go run ./cmd/publish-engine -data <BARdata> -windows <spring-headless.exe>   # the WINDOWS build of the same series (patches/engine-<ver>/windows/build.sh, MinGW cross-compile) for FogOfWar.exe: gated under Wine against the stock LINUX engine, uploaded to engines/<ver>/windows-amd64/, pinned in patchedBuildsWindows (needs wine64)
 go run ./cmd/insights <gameId|link|rid>   # compute a PUBLISHED replay's game summary and publish replays/<rid>.insights<N>.json beside it (-upload r2 default, local, or empty + -out to just write it; -all walks the catalog, -from/-to narrow it to games started in a date range (YYYY-MM-DD or unix seconds); -j N replays at once, default 4; -force recomputes; a local .brp/.brepstream with -rid gives full costs; everything read from the real bucket is kept under ~/.cache/barreplay/<bucket host>/ so a re-run downloads only what is new — -cache DIR moves it, -cache= turns it off)
 go test ./...                   # all unit tests (no engine required)
 go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
@@ -367,6 +368,16 @@ cmd/publish-engine/main.go CLI: publish a patched engine build for every re-sim 
                           whenever the widget or codec changes the capture. A failed gate
                           keeps both captures. Run from the repo root; it takes the data
                           dir's lock, so a bringest -resim on the same -data must be idle.
+                          -windows publishes the WINDOWS build of the series instead
+                          (windows.go; built by patches/engine-<ver>/windows/build.sh in
+                          Recoil's pinned MinGW image, plus windows/windows-series fixes):
+                          it installs the stock Windows release beside the native one
+                          (engine.EnsureWindowsEngine, <data>/engine/<ver>-windows-amd64),
+                          strips the exe into it and gates it UNDER WINE against the stock
+                          LINUX engine — byte-identical across platforms, the claim the
+                          volunteer pool rests on — through a wrapper that rewrites absolute
+                          unix paths to Z: (a bare /tmp/x write-dir makes the Windows build's
+                          archive scan find nothing). No PGO (the profile is Linux GCC data).
 internal/envfile/         tiny stdlib KEY=VALUE loader for ./.env. Accepts the bash-sourceable
                           subset (`export FOO=bar`, # comments, optional surrounding quotes) so
                           ONE file works both auto-loaded and sourced. Already-set vars WIN (the

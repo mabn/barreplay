@@ -198,6 +198,57 @@ has patched, gated and published have one, so a daemon routinely meets engine
 versions nobody has patched and runs those at stock speed. Which build ran is recorded per job as `jobStats.enginePatched`,
 because the capture itself cannot say: being byte-identical is the whole point.
 
+## The WINDOWS patched build (for FogOfWar.exe)
+
+FogOfWar.exe, the Windows volunteer re-sim worker, runs the same patch series
+as the Linux hosts, cross-compiled with MinGW in Recoil's own pinned
+`amd64-windows` image (the one that builds the official Windows release).
+Validated 2026-10-17 on a GPU-less 4-core Linux VM: the build re-simulated the
+gate replay `4936896a…` under Wine 9.0 to a `.brp` **byte-identical** to the
+stock LINUX engine's (and to the stock Windows release's, also under Wine), with
+no desyncs. So a Windows worker's capture is interchangeable with a Linux
+host's, at least on this replay; a run on real Windows is still to be done.
+
+```sh
+# 1. The source exactly as for the Linux patched build (a real clone, every
+#    submodule but AI/Skirmish/*, git am of the series), PLUS the Windows-only
+#    fixes in windows/windows-series (today one: the bench harness reads Linux
+#    perf counters, so it is compiled out elsewhere — it is inert unless its
+#    env vars are set, so nothing a re-sim does changes).
+P=<barreplay>/patches/engine-2026.07.04
+git am $(grep -v '^#' "$P/series" | sed "s|^|$P/|")
+git am $(grep -v '^#' "$P/windows/windows-series" | sed "s|^|$P/windows/|")
+
+# 2. Build (~40 min on 4 cores; -O3, no -g, no PGO+LTO: the profile in pgo/
+#    is GCC data for the Linux objects and does not apply).
+$P/windows/build.sh src work         # -> work/out/spring-headless.exe
+
+# 3. Gate and publish from a LINUX host with Wine (apt-get install wine64):
+go run ./cmd/publish-engine -data <BARdata> -windows work/out/spring-headless.exe
+```
+
+`publish-engine -windows` installs the stock Windows release beside the
+native one (`<data>/engine/<version>-windows-amd64/`), strips the exe into it
+(`strip --strip-debug`: 70 MB -> 37 MB, function names kept for crash traces;
+~12 MB gzipped), re-simulates the gate replay on the stock Linux engine and on
+the stripped exe under Wine, requires identical `.brp` files, uploads
+`engines/<version>/windows-amd64/spring-headless-patched-<semver>.exe.gz` and
+prints the line for `patchedBuildsWindows`. Same revision number as the Linux
+build (one series), different codegen (no PGO).
+
+Two things about running a Windows engine under Wine that the wrapper
+publish-engine writes takes care of: every absolute unix path the engine is
+handed (`--write-dir`, `--config`, the script) is rewritten to its `Z:` form —
+given a bare `/tmp/data`, the Windows build's archive scan finds nothing there
+and the replay dies with its map "not found" — and `WINEDEBUG=-all`.
+
+What FogOfWar.exe installs: the stock `recoil_<version>_amd64-windows.7z`
+(base/, fonts/, `pr-downloader.exe` and the DLLs), then the patched exe beside
+`spring-headless.exe` as `spring-headless-patched.exe`. It imports exactly the
+DLLs the stock `spring-headless.exe` does (libIL, libcurl, libfreetype-6,
+zlib1, plus system DLLs), all in the stock 7z, so nothing else ships with it.
+It reports `2026.07.04-23-g<sha> patched` as its version.
+
 ## Observations from the validated run
 
 - **GPU-less headless works on 2025.06.24.** The icon-atlas wall described in

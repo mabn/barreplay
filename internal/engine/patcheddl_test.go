@@ -213,3 +213,11 @@ func TestEnsurePatchedEngineNeedsTheStockInstall(t *testing.T) {
 		t.Errorf("downloaded before checking for the stock install")
 	}
 }
+
+func TestPatchedBuildKeyWindows(t *testing.T) {
+	got := PatchedBuildKeyWindows("2026.07.04", 3)
+	want := "engines/2026.07.04/windows-amd64/spring-headless-patched-2026.7.4-barreplay.3.exe.gz"
+	if got != want {
+		t.Errorf("PatchedBuildKeyWindows = %q, want %q", got, want)
+	}
+}
