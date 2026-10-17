@@ -2017,3 +2017,46 @@ test("a rare filter answers a short page with a cursor to keep searching", async
     expect(second.next).toBeNull();
   });
 });
+
+// FogOfWar.exe's runs: the app creates the job when it starts simulating, so
+// it is "processing" from its first moment and its game is work in progress.
+test("an app job starts processing, puts its game in the list, and expires when the app goes silent", async () => {
+  await inIndex((index, sql) => {
+    index.gamesInsert([game("g1")]);
+    const job = index.appJobStart("a1", "g1", "01920000-0000-7000-8000-000000000001", { app: { version: "0.2.5" } });
+    expect(job).toMatchObject({ kind: "app", state: "processing", installId: "01920000-0000-7000-8000-000000000001" });
+    expect(index.list()).toMatchObject([{ id: "g1", placeholder: true, processing: true }]);
+    // Never handed to a daemon of either kind.
+    expect(index.jobsPending("resim")).toEqual([]);
+    expect(index.jobsPending("upload")).toEqual([]);
+    expect(index.appJobUpdate("a1", "processing", null, null, { state: "simulating", percent: 12 }, null)).toBe("ok");
+    expect(index.jobSamples("a1")).toHaveLength(1);
+
+    // Fresh: nothing to expire. Silent past the window: failed, and the
+    // placeholder goes with it.
+    expect(index.appJobsExpire()).toBe(0);
+    rows(sql, `UPDATE jobs SET updated_unix = updated_unix - 3600 WHERE id = 'a1'`);
+    expect(index.appJobsExpire()).toBe(1);
+    expect(index.jobGet("a1")).toMatchObject({ state: "error", progress: null });
+    expect(index.list()).toEqual([]);
+  });
+});
+
+test("the app's update refuses a daemon's job, and an install's jobs list together", async () => {
+  await inIndex((index) => {
+    const install = "01920000-0000-7000-8000-000000000002";
+    index.jobInsert("d1", "", "g9", "resim");
+    expect(index.appJobUpdate("d1", "done", null, null, null, null)).toBe("not-app");
+    expect(index.jobGet("d1")?.state).toBe("pending");
+    expect(index.appJobUpdate("nope", "done", null, null, null, null)).toBe("unknown");
+
+    index.appJobStart("a2", "g2", install, null);
+    index.jobInsert("u2", "streams/x", "g2", "upload", install, "Uploaded by FogOfWar 0.2.5");
+    const page = index.jobsByInstall(install, 10, 0);
+    expect(page.total).toBe(2);
+    expect(page.jobs.map((j) => j.id).sort()).toEqual(["a2", "u2"]);
+    // A retry of an app run is an ordinary re-sim.
+    index.appJobUpdate("a2", "error", "crashed", null, null, null);
+    expect(index.jobRetry("r2", "a2")).toMatchObject({ status: "queued", job: { kind: "resim", gameId: "g2" } });
+  });
+});

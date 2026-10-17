@@ -37,7 +37,7 @@ const (
 // uploadBRP posts a finished .brp to the site's open upload route, which
 // archives it and queues it for publishing; the answer is the job that does
 // that. progress is called as the bytes go out.
-func uploadBRP(ctx context.Context, path string, progress func(done, total int64)) (string, error) {
+func uploadBRP(ctx context.Context, path, installID string, progress func(done, total int64)) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -48,7 +48,12 @@ func uploadBRP(ctx context.Context, path string, progress func(done, total int64
 		return "", err
 	}
 	body := &countingReader{r: f, total: st.Size(), progress: progress}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, siteURL()+"/api/upload", body)
+	// The install and app version mark the upload's queue job as this app's.
+	q := url.Values{"app": {version}}
+	if installID != "" {
+		q.Set("install", installID)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, siteURL()+"/api/upload?"+q.Encode(), body)
 	if err != nil {
 		return "", err
 	}
@@ -124,14 +129,16 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // upload sends a finished replay to the site and records the outcome on its
 // history row. It runs inside the job, as its last phase, so the window shows
 // the transfer; a failed upload never fails the job, the file is saved.
-func (a *App) upload(ctx context.Context, run *jobRun, item *HistoryItem) {
+func (a *App) upload(ctx context.Context, run *jobRun, item *HistoryItem, installID string, st *jobStats) {
 	a.setJobPhase(run, "uploading")
 	a.logf("Uploading %s to %s", run.gameID, siteURL())
 	uctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
-	job, err := uploadBRP(uctx, item.Path, func(done, total int64) {
+	t0 := time.Now()
+	job, err := uploadBRP(uctx, item.Path, installID, func(done, total int64) {
 		a.onDownload("Uploading "+run.gameID+".brp", done, total)
 	})
+	st.UploadSec = round1(time.Since(t0).Seconds())
 	if err != nil {
 		item.Upload, item.UploadError = uploadFailed, err.Error()
 		a.logf("upload failed: %v", err)

@@ -52,11 +52,20 @@ func run() error {
 		return err
 	}
 	cfg, cerr := loadConfig(root)
+	fresh := cfg.InstallID == ""
+	if fresh {
+		cfg.InstallID = newInstallID()
+	}
 	app = NewApp(root, cfg, log)
 	if cerr != nil {
 		app.logf("config.json could not be read (%v); using defaults", cerr)
 	}
-	app.logf("FogOfWar %s, folder %s", version, root)
+	if fresh && cerr == nil {
+		if err := saveConfig(root, cfg); err != nil {
+			app.logf("save config: %v", err)
+		}
+	}
+	app.logf("FogOfWar %s, folder %s, install %s", version, root, cfg.InstallID)
 
 	// The engine download is a 7z, which Windows cannot open by itself.
 	engine.Extract7z = extract7z

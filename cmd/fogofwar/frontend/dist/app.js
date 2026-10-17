@@ -564,6 +564,10 @@ function renderSettings(st) {
     ? `Engine ${st.setup.engineVersion} · ${(st.setup.gameVersion || '').replace('Beyond All Reason ', '')}`
     : 'Not downloaded yet';
   $('sVersion').textContent = 'FogOfWar ' + st.version;
+  // The install id is on every job this PC reports; showing it lets a user
+  // name their machine when they ask about one.
+  $('sVersion').title = st.installId ? 'Install ID ' + st.installId : '';
+  if (st.installId) $('sVersion').textContent += ' · install ' + st.installId.slice(-12);
 }
 
 async function saveSettings(patch) {
@@ -727,7 +731,7 @@ function makeMock(scene) {
   const st = {
     mode: 'ready', steps: steps(), setup: { engineVersion: '2026.07.04', gameVersion: 'Beyond All Reason test-31620-b0a3bbf', doneAt: new Date().toISOString() },
     history: hist, settings: { dataDir: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\data', outputDir: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays', patchedEngine: true, minFreeMB: 512 },
-    hostRam: 16 * GB, cores: 8, version: '0.1.0',
+    hostRam: 16 * GB, cores: 8, version: '0.1.0', installId: '0192f3a1-7c2e-7d41-9b0e-5a3c8e21f4d7',
   };
   let timer = 0;
   const run = (from) => {

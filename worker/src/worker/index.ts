@@ -128,5 +128,14 @@ export default {
         console.error(`job sample prune failed: ${e}`);
       }
     }
+    // FogOfWar.exe runs that went silent (window closed, PC asleep) are failed
+    // here, since no daemon will ever claim an "app" job to time it out.
+    // Every tick: a seek over the app jobs in flight, which are a handful.
+    try {
+      const expired = await indexStub(env).appJobsExpire();
+      if (expired > 0) console.log(`app jobs expired: ${expired}`);
+    } catch (e) {
+      console.error(`app job expiry failed: ${e}`);
+    }
   },
 } satisfies ExportedHandler<Env>;

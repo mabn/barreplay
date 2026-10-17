@@ -134,6 +134,7 @@ type State struct {
 	HostRAM    int64         `json:"hostRam"`
 	Cores      int           `json:"cores"`
 	Version    string        `json:"version"`
+	InstallID  string        `json:"installId"`
 }
 
 // Settings is the part of the config the page may change.
@@ -450,6 +451,10 @@ func (a *App) runJob(ctx context.Context, run *jobRun) {
 	cfg := a.config()
 	work := filepath.Join(a.root, "work")
 	item := HistoryItem{GameID: run.gameID, Auto: run.auto}
+	// The run is a job in the site's queue from its first moment: live
+	// progress while it works, its whole record when it ends.
+	q := a.startQueueJob(run, cfg)
+	st := &jobStats{}
 	err := func() error {
 		if err := os.MkdirAll(work, 0o755); err != nil {
 			return err
@@ -481,10 +486,11 @@ func (a *App) runJob(ctx context.Context, run *jobRun) {
 		// hundreds of megabytes it is not worth keeping.
 		os.Remove(filepath.Join(work, run.gameID+".brepstream"))
 		item.Path = dst
-		if st, err := os.Stat(dst); err == nil {
-			item.Bytes = st.Size()
+		if fi, err := os.Stat(dst); err == nil {
+			item.Bytes = fi.Size()
 		}
-		a.upload(ctx, run, &item)
+		st.recordBRP(dst)
+		a.upload(ctx, run, &item, cfg.InstallID, st)
 		return nil
 	}()
 	s := run.stats
@@ -515,6 +521,21 @@ func (a *App) runJob(ctx context.Context, run *jobRun) {
 		item.Error = err.Error()
 		a.logf("failed: %v", err)
 	}
+	st.fromRunStats(*s)
+	st.TookSec = round1(item.TookSec)
+	st.UploadJob = item.UploadJob
+	switch {
+	case err == nil && item.Upload == uploadFailed:
+		q.finish(st, "Re-simulated, but the upload failed: "+item.UploadError, "")
+	case err == nil:
+		q.finish(st, "", "")
+	case ctx.Err() != nil:
+		q.finish(st, "Stopped in the app", "")
+	case errors.Is(err, resim.ErrOutOfMemory):
+		q.finish(st, err.Error(), "oom")
+	default:
+		q.finish(st, err.Error(), "")
+	}
 	// Never leave a half-written stream behind in the work folder.
 	if err != nil {
 		os.Remove(filepath.Join(work, run.gameID+".brepstream"))
@@ -522,6 +543,7 @@ func (a *App) runJob(ctx context.Context, run *jobRun) {
 	}
 
 	a.mu.Lock()
+	a.cfg.Runs++
 	a.cfg.History = append([]HistoryItem{item}, a.cfg.History...)
 	if len(a.cfg.History) > maxHistory {
 		a.cfg.History = a.cfg.History[:maxHistory]
@@ -671,6 +693,7 @@ func (a *App) snapshot() State {
 		HostRAM:    host,
 		Cores:      runtime.NumCPU(),
 		Version:    version,
+		InstallID:  a.cfg.InstallID,
 	}
 	if a.mode == modeSetup {
 		if d := a.currentDownload(); d != nil {

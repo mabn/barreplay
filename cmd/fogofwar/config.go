@@ -28,6 +28,12 @@ type Config struct {
 	// AutoReplay re-simulates the site's newest unreplayed games one after
 	// another while the app is idle.
 	AutoReplay bool `json:"autoReplay"`
+	// InstallID names this install of the app (a UUIDv7 made on first
+	// launch). Every job the app reports and every replay it uploads carries
+	// it, so the site can find all of one PC's work.
+	InstallID string `json:"installId,omitempty"`
+	// Runs counts the re-simulations this install has started.
+	Runs int `json:"runs,omitempty"`
 	// Setup records the first-run download, so it runs once.
 	Setup SetupRecord `json:"setup"`
 	// History is the replays made so far, newest first.
