@@ -25,6 +25,9 @@ type Config struct {
 	PatchedEngine bool `json:"patchedEngine"`
 	// MinFreeMB stops a run before Windows runs out of memory.
 	MinFreeMB int `json:"minFreeMB"`
+	// AutoReplay re-simulates the site's newest unreplayed games one after
+	// another while the app is idle.
+	AutoReplay bool `json:"autoReplay"`
 	// Setup records the first-run download, so it runs once.
 	Setup SetupRecord `json:"setup"`
 	// History is the replays made so far, newest first.
@@ -52,6 +55,13 @@ type HistoryItem struct {
 	Patched    bool      `json:"patched,omitempty"`
 	Error      string    `json:"error,omitempty"`
 	FinishedAt time.Time `json:"finishedAt"`
+	// Upload is how far sending it to the replay site got: queued,
+	// published or failed; empty when it was never sent (a failed run).
+	Upload      string `json:"upload,omitempty"`
+	UploadJob   string `json:"uploadJob,omitempty"`
+	UploadError string `json:"uploadError,omitempty"`
+	// Auto marks a game the auto-replay picked rather than one pasted.
+	Auto bool `json:"auto,omitempty"`
 }
 
 const maxHistory = 50

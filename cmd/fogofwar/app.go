@@ -49,6 +49,11 @@ type App struct {
 	dirty     bool
 	quitting  bool
 	startedAt time.Time
+
+	autoNote  string        // what auto-replay is doing, for the page
+	autoNext  time.Time     // auto-replay looks no sooner than this
+	autoFails int           // auto-picked runs failed in a row
+	autoPoke  chan struct{} // wakes the auto-replay loop
 }
 
 const (
@@ -92,6 +97,7 @@ type jobRun struct {
 	stats    *resim.RunStats
 	started  time.Time
 	phase    string // overrides the progress phase once Run returns
+	auto     bool   // picked by auto-replay
 }
 
 // JobView is the running re-simulation.
@@ -108,6 +114,7 @@ type JobView struct {
 	CPUPercent  float64      `json:"cpuPercent"`
 	ElapsedSec  float64      `json:"elapsedSec"`
 	Patched     bool         `json:"patched"`
+	Auto        bool         `json:"auto"`
 	Download    *Download    `json:"download,omitempty"`
 }
 
@@ -121,6 +128,9 @@ type State struct {
 	Last       *HistoryItem  `json:"last,omitempty"`
 	History    []HistoryItem `json:"history"`
 	Settings   Settings      `json:"settings"`
+	AutoReplay bool          `json:"autoReplay"`
+	AutoNote   string        `json:"autoNote,omitempty"`
+	Site       string        `json:"site"`
 	HostRAM    int64         `json:"hostRam"`
 	Cores      int           `json:"cores"`
 	Version    string        `json:"version"`
@@ -145,12 +155,16 @@ func NewApp(root string, cfg Config, log *logTee) *App {
 		fc:     &resim.Forecaster{},
 		mode:   modeReady,
 		steps:  newSetupSteps(),
+
+		autoPoke: make(chan struct{}, 1),
 	}
 }
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	go a.pump()
+	go a.autoLoop()
+	a.resumeUploadWatches()
 	if setupNeeded(a.config()) {
 		a.beginSetup()
 	}
@@ -235,6 +249,10 @@ func (a *App) StartResim(input string) error {
 	if err != nil {
 		return errors.New("That doesn't look like a game link or ID.")
 	}
+	return a.startResim(id, false)
+}
+
+func (a *App) startResim(id string, auto bool) error {
 	a.mu.Lock()
 	if a.mode != modeReady && a.mode != modeSetupFailed {
 		a.mu.Unlock()
@@ -249,6 +267,7 @@ func (a *App) StartResim(input string) error {
 		progress: &resim.Progress{},
 		stats:    &resim.RunStats{},
 		started:  time.Now(),
+		auto:     auto,
 	}
 	a.job, a.last, a.mode = run, nil, modeRunning
 	a.cancel, a.done = cancel, make(chan struct{})
@@ -282,6 +301,16 @@ func (a *App) StartResim(input string) error {
 func (a *App) Cancel() {
 	a.mu.Lock()
 	cancel := a.cancel
+	// Stop means stop: stopping a game auto-replay picked hands control
+	// back, rather than starting the next one a second later.
+	if cancel != nil && a.job != nil && a.job.auto && a.cfg.AutoReplay {
+		a.cfg.AutoReplay, a.autoNote = false, ""
+		if err := saveConfig(a.root, a.cfg); err != nil {
+			a.log.Logf("save config: " + err.Error())
+		}
+		a.log.Logf("Auto-replay off (the run was stopped)")
+		a.dirty = true
+	}
 	a.mu.Unlock()
 	if cancel != nil {
 		a.logf("Stopping…")
@@ -363,19 +392,15 @@ func (a *App) OpenFolder(which string) error {
 	return openPath(dir, false)
 }
 
-// ShowReplay selects a finished replay in the file manager. Only paths in the
-// history can be named, so the page cannot open arbitrary files.
-func (a *App) ShowReplay(gameID string) error {
-	c := a.config()
-	for _, h := range c.History {
-		if h.GameID == gameID && h.Path != "" {
-			if !fileExists(h.Path) {
-				return errors.New("The file is no longer there.")
-			}
-			return openPath(h.Path, true)
-		}
+// OpenReplay opens the game's replay page on the site in the browser. Only a
+// game id can be named, so the page cannot open arbitrary addresses.
+func (a *App) OpenReplay(gameID string) error {
+	id, err := barapi.ParseGameID(gameID)
+	if err != nil {
+		return errors.New("No replay for that game.")
 	}
-	return errors.New("No replay for that game.")
+	wruntime.BrowserOpenURL(a.ctx, replayURL(id))
+	return nil
 }
 
 // OpenLog opens fogofwar.log in the default text editor.
@@ -424,7 +449,7 @@ func (a *App) beginSetup() {
 func (a *App) runJob(ctx context.Context, run *jobRun) {
 	cfg := a.config()
 	work := filepath.Join(a.root, "work")
-	item := HistoryItem{GameID: run.gameID}
+	item := HistoryItem{GameID: run.gameID, Auto: run.auto}
 	err := func() error {
 		if err := os.MkdirAll(work, 0o755); err != nil {
 			return err
@@ -459,6 +484,7 @@ func (a *App) runJob(ctx context.Context, run *jobRun) {
 		if st, err := os.Stat(dst); err == nil {
 			item.Bytes = st.Size()
 		}
+		a.upload(ctx, run, &item)
 		return nil
 	}()
 	s := run.stats
@@ -507,6 +533,14 @@ func (a *App) runJob(ctx context.Context, run *jobRun) {
 	a.last = &last
 	a.dirty = true
 	a.mu.Unlock()
+
+	if item.Upload == uploadQueued {
+		go a.watchUpload(item.GameID, item.UploadJob)
+	}
+	if run.auto {
+		a.autoFinished(err == nil, ctx.Err() != nil)
+	}
+	a.pokeAuto()
 }
 
 func (a *App) setJobPhase(run *jobRun, phase string) {
@@ -630,9 +664,12 @@ func (a *App) snapshot() State {
 			PatchedEngine: a.cfg.PatchedEngine,
 			MinFreeMB:     a.cfg.MinFreeMB,
 		},
-		HostRAM: host,
-		Cores:   runtime.NumCPU(),
-		Version: version,
+		AutoReplay: a.cfg.AutoReplay,
+		AutoNote:   a.autoNote,
+		Site:       siteURL(),
+		HostRAM:    host,
+		Cores:      runtime.NumCPU(),
+		Version:    version,
 	}
 	if a.mode == modeSetup {
 		if d := a.currentDownload(); d != nil {
@@ -658,6 +695,7 @@ func (a *App) snapshot() State {
 			CPUPercent:  p.CPUPercent,
 			ElapsedSec:  time.Since(r.started).Seconds(),
 			Patched:     r.stats.EnginePatched,
+			Auto:        r.auto,
 		}
 		if r.phase != "" {
 			v.Phase = r.phase

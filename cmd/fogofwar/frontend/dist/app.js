@@ -199,7 +199,37 @@ function renderReady(st, prevMode) {
   $('btnGo').disabled = !$('gameInput').value.trim().match(ID_RE) || st.mode === 'setup';
   if (st.mode === 'setupFailed') setHint('The first-run download did not finish. Open Settings to try again; a game can still be re-simulated.', true);
   renderSlot();
+  renderAuto(st);
   renderHistory(st.history);
+}
+
+const AUTO_ABOUT = 'Re-simulate the newest games that have no replay yet, one after another, and upload each one.';
+function renderAuto(st) {
+  const on = !!st.autoReplay;
+  $('autoSwitch').setAttribute('aria-checked', on ? 'true' : 'false');
+  $('autoBar').classList.toggle('on', on);
+  $('autoSwitch').disabled = st.mode === 'setup';
+  $('autoNote').textContent = on ? (st.autoNote || 'Looking for a game…') : AUTO_ABOUT;
+}
+
+async function setAuto(on) {
+  try { setState(await api.SetAutoReplay(on)); } catch (e) { toastErr(e); }
+}
+
+function openReplay(id) { api.OpenReplay(id).catch(toastErr); }
+
+// What became of a replay's upload, in words and as a chip.
+function uploadWords(h) {
+  if (h.upload === 'published') return 'On replay.fogofwar.dev';
+  if (h.upload === 'queued') return 'Uploaded; the site is publishing it';
+  if (h.upload === 'failed') return 'Not uploaded: ' + (h.uploadError || 'unknown error');
+  return '';
+}
+function uploadChip(h) {
+  if (h.upload === 'published') return el('span', 'st', 'online');
+  if (h.upload === 'queued') return el('span', 'st busy', 'publishing');
+  if (h.upload === 'failed') return el('span', 'st warn', 'not uploaded');
+  return el('span', 'st', '.brp');
 }
 
 function renderSlot(loading) {
@@ -237,8 +267,8 @@ function previewCard(p) {
   if (p.done) {
     const n = el('div', 'notice info');
     n.append('You already made this replay. ');
-    const b = el('button', 'link', 'Show it');
-    b.onclick = () => api.ShowReplay(p.id).catch(toastErr);
+    const b = el('button', 'link', 'Open it');
+    b.onclick = () => openReplay(p.id);
     n.append(b);
     c.append(n);
   }
@@ -302,12 +332,13 @@ function resultCard(h) {
     add('Took', fmtDur(h.tookSec));
     if (h.speedUp) add('Speed', h.speedUp.toFixed(1) + '×');
     mid.append(st);
+    if (h.upload) mid.append(el('p', 'up ' + h.upload, uploadWords(h)));
   }
   r.append(mid);
   const acts = el('div', 'acts');
   if (ok) {
-    const b = el('button', 'btn primary', 'Show in folder');
-    b.onclick = () => api.ShowReplay(h.gameId).catch(toastErr);
+    const b = el('button', 'btn primary', 'Open replay');
+    b.onclick = () => openReplay(h.gameId);
     acts.append(b);
   } else {
     const b = el('button', 'btn primary', 'Try again');
@@ -351,10 +382,10 @@ function renderHistory(hist) {
     mid.style.minWidth = '0';
     mid.append(el('div', 't', h.map || shortId(h.gameId)), el('div', 's', `${h.size ? h.size + ' · ' : ''}${h.gameSec ? fmtClock(h.gameSec) + ' · ' : ''}${shortId(h.gameId)}`));
     const right = el('div', 'r', h.error ? fmtAgo(h.finishedAt) : `${fmtBytes(h.bytes)} · ${fmtAgo(h.finishedAt)}`);
-    const st = h.error === 'Stopped' ? el('span', 'st stop', 'stopped') : h.error ? el('span', 'st err', 'failed') : el('span', 'st', '.brp');
+    const st = h.error === 'Stopped' ? el('span', 'st stop', 'stopped') : h.error ? el('span', 'st err', 'failed') : uploadChip(h);
     li.append(mini, mid, right, st);
-    li.title = h.error ? h.error : h.path;
-    li.onclick = () => h.error ? fillGame(h.gameId) : api.ShowReplay(h.gameId).catch(toastErr);
+    li.title = h.error ? h.error : ['Open the replay in the browser', uploadWords(h)].filter(Boolean).join('\n');
+    li.onclick = () => h.error ? fillGame(h.gameId) : openReplay(h.gameId);
     list.append(li);
   });
 }
@@ -377,7 +408,7 @@ async function startResim(input) {
 // ---------- running ----------
 const PHASE_STEP = {
   'fetching demo': 0, 'provisioning content': 1, 'starting engine': 2, 'loading': 2,
-  'simulating': 3, 'reading capture': 4, 'saving': 4,
+  'simulating': 3, 'reading capture': 4, 'saving': 4, 'uploading': 5,
 };
 const PHASE_WORDS = {
   'fetching demo': 'Downloading the demo',
@@ -387,6 +418,7 @@ const PHASE_WORDS = {
   'simulating': 'Simulating',
   'reading capture': 'Writing the replay',
   'saving': 'Saving',
+  'uploading': 'Uploading to replay.fogofwar.dev',
 };
 
 function renderRun(st) {
@@ -431,7 +463,7 @@ function renderRun(st) {
   }
 
   const sim = j.phase === 'simulating' || j.percent > 0;
-  const pct = j.phase === 'reading capture' || j.phase === 'saving' ? 100 : j.percent || 0;
+  const pct = j.phase === 'reading capture' || j.phase === 'saving' || j.phase === 'uploading' ? 100 : j.percent || 0;
   $('pctNum').textContent = sim || pct ? Math.floor(pct) : '0';
   $('mainFill').style.width = pct + '%';
   $('mainBar').classList.toggle('indet', !sim && !pct);
@@ -463,7 +495,8 @@ function renderRun(st) {
   const be = $('runEngine');
   be.hidden = !j.patched;
   be.textContent = 'Faster engine';
-  $('runEyebrow').textContent = j.phase === 'simulating' ? 'Simulating' : 'Re-simulating';
+  $('runEyebrow').textContent = (j.auto ? 'Auto-replay · ' : '') + (j.phase === 'simulating' ? 'Simulating' : j.phase === 'uploading' ? 'Uploading' : 'Re-simulating');
+  $('runAuto').hidden = !st.autoReplay;
 }
 
 // One point a second for all three charts, so they share a time axis.
@@ -588,6 +621,8 @@ function wire() {
     inputChanged();
   });
   $('btnOpenOut').onclick = () => api.OpenFolder('output').catch(toastErr);
+  $('autoSwitch').onclick = () => setAuto($('autoSwitch').getAttribute('aria-checked') !== 'true');
+  $('runAuto').onclick = () => setAuto(false);
 
   $('btnStop').onclick = async () => {
     if (await confirmBox('Stop this re-simulation?', 'The progress so far is thrown away; nothing is saved.', 'Stop', 'Keep running')) api.Cancel();
@@ -653,7 +688,7 @@ function makeMock(scene) {
     { key: 'game', label: 'Download Beyond All Reason', status: 'active', detail: 'test-31620-b0a3bbf', percent: 37, done: 0, total: 0 },
   ];
   const hist = [
-    { gameId: 'c1f0e7a2b8d94f3a9e1c2b3a4d5e6f70', map: 'Glitters 1.2', mapFile: 'glitters_1.2', size: '4v4', gameSec: 1520, path: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays\\c1f0e7a2b8d94f3a9e1c2b3a4d5e6f70.brp', bytes: 6.2e6, tookSec: 402, speedUp: 3.8, finishedAt: new Date(now - 3600e3 * 3).toISOString() },
+    { gameId: 'c1f0e7a2b8d94f3a9e1c2b3a4d5e6f70', map: 'Glitters 1.2', mapFile: 'glitters_1.2', size: '4v4', gameSec: 1520, path: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays\\c1f0e7a2b8d94f3a9e1c2b3a4d5e6f70.brp', bytes: 6.2e6, tookSec: 402, speedUp: 3.8, upload: 'published', auto: true, finishedAt: new Date(now - 3600e3 * 3).toISOString() },
     { gameId: '9b2d4e6f8a0c1e3f5a7b9c1d3e5f7a9b', map: 'All That Glitters v2.2', mapFile: 'all_that_glitters_v2.2', size: '8v8', gameSec: 2410, error: 'This computer ran out of memory for this game. Close other programs, or try a smaller game.', finishedAt: new Date(now - 3600e3 * 26).toISOString() },
     { gameId: '4936896a8e1c2b3a4d5e6f7081928374', map: 'Red Comet Remake 1.8', mapFile: 'red_comet_remake_1.8', size: '1v1', gameSec: 812, path: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays\\4936896a8e1c2b3a4d5e6f7081928374.brp', bytes: 1.9e6, tookSec: 96, speedUp: 8.5, finishedAt: new Date(now - 3600e3 * 50).toISOString() },
   ];
@@ -682,15 +717,19 @@ function makeMock(scene) {
         j.rssBytes = (2.6 + j.percent * 0.014 + Math.random() * 0.05) * GB;
         j.cpuPercent = 380 + Math.random() * 90;
         j.etaSec = Math.max(0, 1330 * (1 - j.percent / 100) * 1.1);
-      } else { j.phase = 'saving'; }
+      } else if (t < 380) { j.phase = 'saving'; } else {
+        j.phase = 'uploading';
+        j.download = { label: 'Uploading ' + P.id + '.brp', done: (t - 380) * 0.5e6, total: 8.4e6, percent: (t - 380) * 0.5e6 / 8.4e6 * 100 };
+      }
       emit('state', JSON.parse(JSON.stringify(st)));
-      if (j.phase === 'saving' && t > 400) finish();
+      if (j.phase === 'uploading' && t > 400) finish();
     }, scene === 'running' ? 50 : 300);
   };
   const finish = (err) => {
     clearInterval(timer);
     st.mode = 'ready'; st.job = null;
-    const h = { gameId: P.id, map: P.map, mapFile: P.mapFile, size: P.size, gameSec: P.durationSec, path: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays\\' + P.id + '.brp', bytes: 8.4e6, tookSec: 1187, speedUp: 2.55, patched: true, finishedAt: new Date().toISOString() };
+    const h = { gameId: P.id, map: P.map, mapFile: P.mapFile, size: P.size, gameSec: P.durationSec, path: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays\\' + P.id + '.brp', bytes: 8.4e6, tookSec: 1187, speedUp: 2.55, patched: true, finishedAt: new Date().toISOString(), upload: 'queued', uploadJob: 'j1' };
+    if (err) { delete h.upload; delete h.uploadJob; }
     if (err) { delete h.path; h.error = err; }
     st.last = h; st.history = [h, ...st.history];
     emit('state', JSON.parse(JSON.stringify(st)));
@@ -706,6 +745,7 @@ function makeMock(scene) {
     void bytes;
   }
   if (scene === 'running') setTimeout(() => run(9), 50);
+  if (scene === 'auto') { st.autoReplay = true; st.autoNote = 'All of the 10 newest games have a replay or are being worked on; looking again at 14:32'; }
   if (scene === 'done') { st.history = hist; finish(); }
   if (scene === 'fail') finish('This computer ran out of memory for this game. Close other programs, or try a smaller game.');
   const later = (v, ms) => new Promise((r) => setTimeout(() => r(v), ms || 0));
@@ -726,7 +766,8 @@ function makeMock(scene) {
       SaveSettings: (s) => { st.settings = s; return later(JSON.parse(JSON.stringify(st))); },
       ChooseFolder: () => later(''),
       OpenFolder: () => later(null),
-      ShowReplay: () => { toast('Would open Explorer'); return later(null); },
+      OpenReplay: (id) => { toast('Would open replay.fogofwar.dev/replays/' + shortId(id)); return later(null); },
+      SetAutoReplay: (on) => { st.autoReplay = on; st.autoNote = on ? 'All of the 10 newest games have a replay or are being worked on; looking again at 14:32' : ''; return later(JSON.parse(JSON.stringify(st))); },
       OpenLog: () => later(null),
       PasteText: () => later('https://www.bar-rts.com/replays/6a37d06acbb455b1d19179d8ec965f10'),
       Quit: () => toast('Would quit'),
