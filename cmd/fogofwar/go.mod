@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/bodgit/sevenzip v1.6.5
 	github.com/mabn/barreplay v0.0.0
+	github.com/tc-hib/winres v0.3.1
 	github.com/wailsapp/wails/v2 v2.16.0
 	golang.org/x/sys v0.46.0
 )
@@ -30,6 +31,7 @@ require (
 	github.com/leaanthony/u v1.1.1 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646 // indirect
 	github.com/pierrec/lz4/v4 v4.1.27 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
@@ -45,6 +47,7 @@ require (
 	github.com/wailsapp/mimetype v1.4.1 // indirect
 	go4.org v0.0.0-20260112195520-a5071408f32f // indirect
 	golang.org/x/crypto v0.53.0 // indirect
+	golang.org/x/image v0.41.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 )
