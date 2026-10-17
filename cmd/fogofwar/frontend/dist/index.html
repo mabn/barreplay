@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: https://api.bar-rts.com; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'">
+<title>FogOfWar</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="fog" aria-hidden="true"><i></i><i></i><i></i></div>
+
+<header class="titlebar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+      <defs>
+        <linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#86eadb"/><stop offset="1" stop-color="#2fb8a2"/>
+        </linearGradient>
+        <radialGradient id="sweep" cx="16" cy="16" r="14" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stop-color="#4fdcc4" stop-opacity=".55"/><stop offset="1" stop-color="#4fdcc4" stop-opacity="0"/>
+        </radialGradient>
+      </defs>
+      <circle cx="16" cy="16" r="13" fill="none" stroke="url(#lg)" stroke-width="2"/>
+      <circle cx="16" cy="16" r="7.5" fill="none" stroke="#4fdcc4" stroke-opacity=".35" stroke-width="1.2"/>
+      <path class="sweep" d="M16 16 L16 3 A13 13 0 0 1 28.4 12 Z" fill="url(#sweep)"/>
+      <circle cx="21.5" cy="10.5" r="1.8" fill="#ff8a4c"/>
+      <circle cx="16" cy="16" r="2" fill="#86eadb"/>
+    </svg>
+    <span class="word">Fog<b>Of</b>War</span>
+    <span class="tag">re-simulator</span>
+  </div>
+  <div class="tb-actions">
+    <button class="tb-btn" id="btnLog" title="Activity log"><svg viewBox="0 0 20 20"><path d="M4 5h12M4 10h12M4 15h7"/></svg></button>
+    <button class="tb-btn" id="btnSettings" title="Settings"><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.6"/><path d="M10 2.5v2.2M10 15.3v2.2M2.5 10h2.2M15.3 10h2.2M4.7 4.7l1.6 1.6M13.7 13.7l1.6 1.6M4.7 15.3l1.6-1.6M13.7 6.3l1.6-1.6"/></svg></button>
+    <span class="tb-sep"></span>
+    <button class="tb-btn win" id="btnMin" title="Minimise"><svg viewBox="0 0 20 20"><path d="M5 10h10"/></svg></button>
+    <button class="tb-btn win" id="btnMax" title="Maximise"><svg viewBox="0 0 20 20"><rect x="5.5" y="5.5" width="9" height="9" rx="1.5"/></svg></button>
+    <button class="tb-btn win close" id="btnClose" title="Close"><svg viewBox="0 0 20 20"><path d="M5.5 5.5l9 9M14.5 5.5l-9 9"/></svg></button>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- First launch -->
+  <section class="view" id="viewSetup" hidden>
+    <div class="setup-head">
+      <div class="orb"><span></span><span></span><span></span></div>
+      <h1 id="setupTitle">Getting ready</h1>
+      <p class="lede" id="setupLede">First launch: downloading the engine and the game. This happens once, then FogOfWar waits for a game to replay.</p>
+    </div>
+    <ol class="steps" id="steps"></ol>
+    <div class="setup-fail" id="setupFail" hidden>
+      <div class="fail-msg"><b>The download stopped.</b> <span id="setupErr"></span></div>
+      <button class="btn primary" id="btnRetry">Try again</button>
+    </div>
+    <div class="setup-foot" id="setupFoot">
+      <span id="setupElapsed"></span>
+      <button class="btn ghost small" id="btnSetupStop">Stop</button>
+    </div>
+  </section>
+
+  <!-- Paste a game -->
+  <section class="view" id="viewReady" hidden>
+    <div class="hero">
+      <h1 class="big">Replay any game, <span class="glow">see everything.</span></h1>
+      <p class="lede">Paste a Beyond All Reason game. FogOfWar re-simulates it on this computer and saves a full-view replay.</p>
+    </div>
+
+    <form class="paste" id="pasteForm" autocomplete="off">
+      <div class="field" id="field">
+        <svg class="field-ico" viewBox="0 0 20 20"><path d="M8.5 11.5l3-3M7 9.5l-1.8 1.8a2.6 2.6 0 0 0 3.7 3.7L10.7 13M13 10.5l1.8-1.8a2.6 2.6 0 0 0-3.7-3.7L9.3 7"/></svg>
+        <input id="gameInput" spellcheck="false" placeholder="Paste a game link or ID" aria-label="Game link or ID">
+        <button type="button" class="chip-btn" id="btnPaste">Paste</button>
+        <button type="submit" class="btn primary go" id="btnGo" disabled>
+          <span>Re-simulate</span>
+          <svg viewBox="0 0 20 20"><path d="M5 10h10M11 6l4 4-4 4"/></svg>
+        </button>
+      </div>
+      <p class="hint" id="hint">A bar-rts.com or gex link, or the 32-character game ID.</p>
+    </form>
+
+    <div class="slot" id="slot"></div>
+
+    <div class="recent" id="recent" hidden>
+      <div class="recent-head"><h2>Your replays</h2><button class="link" id="btnOpenOut">Open folder</button></div>
+      <ul class="rows" id="rows"></ul>
+    </div>
+  </section>
+
+  <!-- Running -->
+  <section class="view" id="viewRun" hidden>
+    <div class="run-card">
+      <div class="run-banner" id="runBanner">
+        <div class="run-bg" id="runBg"></div>
+        <div class="run-title">
+          <div class="eyebrow"><span class="pulse"></span><span id="runEyebrow">Re-simulating</span></div>
+          <h2 id="runMap">Looking up the game…</h2>
+          <div class="meta" id="runMeta"></div>
+        </div>
+        <div class="run-teams" id="runTeams"></div>
+      </div>
+
+      <ol class="phases" id="phases">
+        <li data-i="0"><i></i><span>Demo</span></li>
+        <li data-i="1"><i></i><span>Content</span></li>
+        <li data-i="2"><i></i><span>Engine</span></li>
+        <li data-i="3"><i></i><span>Simulate</span></li>
+        <li data-i="4"><i></i><span>Save</span></li>
+      </ol>
+
+      <div class="progress-block">
+        <div class="pct-row">
+          <div class="pct"><span id="pctNum">0</span><small>%</small></div>
+          <div class="pct-side">
+            <div class="phase-words" id="phaseWords">Starting…</div>
+            <div class="eta" id="eta"></div>
+          </div>
+        </div>
+        <div class="bar big" id="mainBar"><i id="mainFill"></i></div>
+        <div class="dl" id="dlRow" hidden>
+          <span id="dlLabel"></span>
+          <div class="bar thin"><i id="dlFill"></i></div>
+          <span id="dlBytes"></span>
+        </div>
+      </div>
+
+      <div class="tiles">
+        <div class="tile"><label>Game time</label><b id="tGame">–</b><small id="tGameOf"></small></div>
+        <div class="tile"><label>Speed</label><b id="tSpeed">–</b><small>× real time</small><svg class="spark" id="spSpeed" viewBox="0 0 100 28" preserveAspectRatio="none"></svg></div>
+        <div class="tile"><label>Engine memory</label><b id="tMem">–</b><small id="tMemOf"></small><svg class="spark" id="spMem" viewBox="0 0 100 28" preserveAspectRatio="none"></svg></div>
+        <div class="tile"><label>Engine CPU</label><b id="tCpu">–</b><small id="tCpuOf"></small><svg class="spark" id="spCpu" viewBox="0 0 100 28" preserveAspectRatio="none"></svg></div>
+      </div>
+
+      <div class="run-foot">
+        <span id="runElapsed"></span>
+        <span class="badge" id="runEngine" hidden></span>
+        <button class="btn danger ghost" id="btnStop">Stop</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- Settings -->
+<aside class="drawer" id="settings" aria-hidden="true">
+  <div class="drawer-head"><h2>Settings</h2><button class="tb-btn" data-close><svg viewBox="0 0 20 20"><path d="M5.5 5.5l9 9M14.5 5.5l-9 9"/></svg></button></div>
+  <div class="drawer-body">
+    <div class="set">
+      <label>Replays folder</label>
+      <div class="path-row"><code id="sOut"></code><button class="btn ghost small" data-pick="out">Change</button><button class="btn ghost small" data-open="output">Open</button></div>
+      <p>Finished .brp files go here.</p>
+    </div>
+    <div class="set">
+      <label>Data folder</label>
+      <div class="path-row"><code id="sData"></code><button class="btn ghost small" data-pick="data">Change</button><button class="btn ghost small" data-open="data">Open</button></div>
+      <p>The engine, game and maps (several GB). Moving it downloads them again.</p>
+    </div>
+    <div class="set toggle-set">
+      <div><label>Faster engine</label><p>Use the patched engine build when one is published for a game's engine. Same replay, about a quarter faster, 1.5 GB less memory.</p></div>
+      <button class="switch" id="sPatched" role="switch" aria-checked="true"><i></i></button>
+    </div>
+    <div class="set">
+      <label>Memory safety margin <b id="sMinVal"></b></label>
+      <input type="range" id="sMin" min="256" max="4096" step="128">
+      <p>The run stops before Windows has less than this much memory left, instead of freezing the computer.</p>
+    </div>
+    <div class="set">
+      <label>Downloads</label>
+      <div class="path-row"><span id="sSetup" class="muted"></span><button class="btn ghost small" id="sRecheck">Check again</button></div>
+    </div>
+    <div class="set-foot">
+      <button class="link" id="sOpenLog">Open log file</button>
+      <span class="muted" id="sVersion"></span>
+    </div>
+  </div>
+</aside>
+
+<!-- Activity log -->
+<aside class="logpanel" id="logpanel" aria-hidden="true">
+  <div class="drawer-head"><h2>Activity</h2><button class="tb-btn" data-close><svg viewBox="0 0 20 20"><path d="M5.5 5.5l9 9M14.5 5.5l-9 9"/></svg></button></div>
+  <pre id="logText"></pre>
+</aside>
+
+<div class="scrim" id="scrim"></div>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-card">
+    <h3 id="modalTitle"></h3>
+    <p id="modalText"></p>
+    <div class="modal-actions"><button class="btn ghost" id="modalNo"></button><button class="btn danger" id="modalYes"></button></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

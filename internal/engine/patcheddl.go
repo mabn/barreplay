@@ -31,6 +31,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // PatchedBuild is one gated patched engine published to the bucket.
@@ -64,11 +65,30 @@ var patchedBuilds = map[string]PatchedBuild{
 // PatchedBuildBaseURL is where published patched engines are read back from:
 // the bucket's public hostname (packer's "r2" target DataURL). Exposed so
 // tests can point it at a local server.
+// patchedBuildsWindows is patchedBuilds for the Windows build of the patch
+// series (spring-headless-patched.exe, published under PatchedBuildKey's
+// windows-amd64/ prefix). Same rules: a pin only for a gated binary. Until a
+// version has one, a Windows host runs that version on the stock engine.
+var patchedBuildsWindows = map[string]PatchedBuild{}
+
+// patchedBuildFor picks this platform's pin for version.
+func patchedBuildFor(version string) (PatchedBuild, bool) {
+	if runtime.GOOS == "windows" {
+		b, ok := patchedBuildsWindows[version]
+		return b, ok
+	}
+	b, ok := patchedBuilds[version]
+	return b, ok
+}
+
 var PatchedBuildBaseURL = "https://cdn-bar.fogofwar.dev"
 
 // PatchedBuildKey names the object the patched build of this engine version
 // and series revision is published under.
 func PatchedBuildKey(version string, rev int) string {
+	if runtime.GOOS == "windows" {
+		return "engines/" + version + "/windows-amd64/spring-headless-patched-" + PatchedVersion(version, rev) + ".exe.gz"
+	}
 	return "engines/" + version + "/" + patchedHeadlessName() + "-" + PatchedVersion(version, rev) + ".gz"
 }
 
@@ -86,7 +106,7 @@ func EnsurePatchedEngine(ctx context.Context, cfg Config, version string) error 
 	if cfg.SkipProvision || cfg.EngineBinary != "" || version == "" {
 		return nil
 	}
-	build, ok := patchedBuilds[version]
+	build, ok := patchedBuildFor(version)
 	if !ok {
 		return nil
 	}
@@ -187,7 +207,7 @@ func DownloadGunzipped(ctx context.Context, url string, dst io.Writer) (string, 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("%s: %s", url, resp.Status)
 	}
-	zr, err := gzip.NewReader(resp.Body)
+	zr, err := gzip.NewReader(progressReader(url, resp))
 	if err != nil {
 		return "", err
 	}
