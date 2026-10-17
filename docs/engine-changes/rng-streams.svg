@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="330" viewBox="0 0 860 330" font-family="Helvetica, Arial, sans-serif" font-size="13">
+  <rect width="860" height="330" fill="#ffffff"/>
+  <text x="20" y="28" font-size="16" font-weight="bold">Today: one synced RNG, drawn in loop order</text>
+  <text x="460" y="28" font-size="16" font-weight="bold">Proposed: keyed (counter-based) draws</text>
+  <!-- left: chain -->
+  <g>
+    <rect x="30" y="50" width="380" height="34" rx="5" fill="#fde2e1" stroke="#c0392b"/>
+    <text x="220" y="72" text-anchor="middle">gsRNG state s₀ → s₁ → s₂ → s₃ → … (one sequence)</text>
+    <g fill="#eef3fb" stroke="#3a6ea5">
+      <rect x="40" y="120" width="80" height="34" rx="5"/><rect x="140" y="120" width="80" height="34" rx="5"/>
+      <rect x="240" y="120" width="80" height="34" rx="5"/><rect x="340" y="120" width="60" height="34" rx="5"/>
+    </g>
+    <g text-anchor="middle"><text x="80" y="142">unit 17</text><text x="180" y="142">unit 4</text><text x="280" y="142">unit 902</text><text x="370" y="142">…</text></g>
+    <g stroke="#c0392b" stroke-width="2" fill="none" marker-end="url(#a)">
+      <path d="M80 84 V118"/><path d="M180 84 V118"/><path d="M280 84 V118"/>
+      <path d="M120 137 H138"/><path d="M220 137 H238"/><path d="M320 137 H338"/>
+    </g>
+    <text x="30" y="190">Which value a unit gets depends on how many draws every</text>
+    <text x="30" y="208">earlier unit made this frame (weapon aim error, maneuvers,</text>
+    <text x="30" y="226">hover wind, COB rand, Lua math.random…). So the unit loops</text>
+    <text x="30" y="244">must run strictly in order: a draw is a global barrier.</text>
+    <text x="30" y="276" fill="#c0392b">P1 here: every draw = wait for all earlier items</text>
+    <text x="30" y="294" fill="#c0392b">(SerialPoint); weapons: 4 draws per SlowUpdate</text>
+  </g>
+  <!-- right: keyed -->
+  <g>
+    <g fill="#e6f4ea" stroke="#2e7d32">
+      <rect x="470" y="120" width="110" height="34" rx="5"/><rect x="600" y="120" width="110" height="34" rx="5"/><rect x="730" y="120" width="110" height="34" rx="5"/>
+    </g>
+    <g text-anchor="middle"><text x="525" y="142">unit 17</text><text x="655" y="142">unit 4</text><text x="785" y="142">unit 902</text></g>
+    <g font-size="11" text-anchor="middle" fill="#2e7d32">
+      <text x="525" y="104">H(seed, frame, 17, site, n)</text><text x="655" y="104">H(seed, frame, 4, site, n)</text><text x="785" y="104">H(seed, frame, 902, site, n)</text>
+    </g>
+    <text x="470" y="190">Each draw is a pure function of (game seed, frame,</text>
+    <text x="470" y="208">object id, call site, per-object counter): e.g. Philox</text>
+    <text x="470" y="226">or a 64-bit hash. Same value whatever order or thread</text>
+    <text x="470" y="244">computes it; still fully deterministic and synced.</text>
+    <text x="470" y="276" fill="#2e7d32">No ordering edge between units at all:</text>
+    <text x="470" y="294" fill="#2e7d32">targeting, maneuvers, scripts can run side by side</text>
+  </g>
+  <defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#c0392b"/></marker></defs>
+</svg>
