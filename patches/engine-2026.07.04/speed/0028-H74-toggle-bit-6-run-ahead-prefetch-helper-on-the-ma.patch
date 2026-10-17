@@ -1,7 +1,7 @@
-From ae4431eabe46485b2ce0e528cf8840a84630acf5 Mon Sep 17 00:00:00 2001
+From 5d81694b5fa2748d0969e16843b1505fcd2ae03d Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 10:41:05 +0000
-Subject: [PATCH 15/30] R1 (toggle bit 6): run-ahead prefetch helper on the
+Subject: [PATCH 28/43] H74 (toggle bit 6): run-ahead prefetch helper on the
  main thread's hyperthread sibling for the serial unit loops
 
 ---
@@ -12,7 +12,7 @@ Subject: [PATCH 15/30] R1 (toggle bit 6): run-ahead prefetch helper on the
 
 diff --git a/rts/Sim/Units/BrRunAhead.h b/rts/Sim/Units/BrRunAhead.h
 new file mode 100644
-index 0000000..2c91d54
+index 0000000..ba8873d
 --- /dev/null
 +++ b/rts/Sim/Units/BrRunAhead.h
 @@ -0,0 +1,27 @@
@@ -21,7 +21,7 @@ index 0000000..2c91d54
 +#ifndef BR_RUN_AHEAD_H__
 +#define BR_RUN_AHEAD_H__
 +
-+// [barreplay] R1 (toggle bit 6): a helper thread on the main thread's
++// [barreplay] H74 (toggle bit 6): a helper thread on the main thread's
 +// hyperthread sibling runs ahead of the serial per-unit loops (UpdateUnits,
 +// the serial weapon pass, SlowUpdateUnits) and prefetches the cache lines the
 +// main thread is about to touch. It only issues prefetches and relaxed loads of
@@ -44,7 +44,7 @@ index 0000000..2c91d54
 +
 +#endif
 diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
-index 2c168de..016da25 100644
+index 2c168de..52468bc 100644
 --- a/rts/Sim/Units/UnitHandler.cpp
 +++ b/rts/Sim/Units/UnitHandler.cpp
 @@ -3,6 +3,15 @@
@@ -68,7 +68,7 @@ index 2c168de..016da25 100644
  
  
 +
-+// [barreplay] R1: see BrRunAhead.h
++// [barreplay] H74: see BrRunAhead.h
 +namespace BrRunAhead {
 +	std::atomic<int> cursor{0};
 +	static std::atomic<int> phase{0};

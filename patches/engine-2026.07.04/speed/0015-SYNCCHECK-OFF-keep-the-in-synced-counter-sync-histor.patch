@@ -1,7 +1,7 @@
-From 9383b881bb52c156db896fce32c4805150ad43b3 Mon Sep 17 00:00:00 2001
+From 7941c0d6862396a06be29da17bb4a3f6c95a8d65 Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Fri, 16 Oct 2026 20:29:33 +0000
-Subject: [PATCH 02/30] SYNCCHECK=OFF: keep the in-synced counter; sync history
+Subject: [PATCH 15/43] SYNCCHECK=OFF: keep the in-synced counter; sync history
  only with the checker
 
 ---

@@ -1,7 +1,7 @@
-From 966d2f7c06c4c8c9b4dad50e891ad74536f6546e Mon Sep 17 00:00:00 2001
+From 76e137fa36f0c29eeb6856e65f5148c449b829cd Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 10:41:41 +0000
-Subject: [PATCH 16/30] R1: seq_cst phase store / busy load (Dekker with the
+Subject: [PATCH 29/43] H74: seq_cst phase store / busy load (Dekker with the
  helper)
 
 ---
@@ -9,7 +9,7 @@ Subject: [PATCH 16/30] R1: seq_cst phase store / busy load (Dekker with the
  1 file changed, 3 insertions(+), 2 deletions(-)
 
 diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
-index 016da25..086eff6 100644
+index 52468bc..083d2f6 100644
 --- a/rts/Sim/Units/UnitHandler.cpp
 +++ b/rts/Sim/Units/UnitHandler.cpp
 @@ -234,7 +234,7 @@ namespace BrRunAhead {

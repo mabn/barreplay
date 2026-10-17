@@ -1658,7 +1658,7 @@ Main thread now (`t=3f`, late window), % of core:
 | Lua GC 2.3, pathfinding 2.3, map damage 1.9, rest 1.8 | 8.3% |
 | **total** | **100%** |
 
-### 2026-10-17 11:20 — 7 threads governed: 15m54s active; the main thread is 44% memory-stalled everywhere; R1 (run-ahead prefetch helper)
+### 2026-10-17 11:20 — 7 threads governed: 15m54s active; the main thread is 44% memory-stalled everywhere; H74 (run-ahead prefetch helper)
 
 - Governed whole game, `speed15` `t=3f` with `-worker-threads 7`: sim 42m18s,
   paused 26m24s, **15m54s active** (-4.5% vs 4 threads), identical. Real,
@@ -1676,7 +1676,7 @@ Main thread now (`t=3f`, late window), % of core:
   CanFire / CanCallAimingScript / salvo / sweep rules exactly, or buffer every
   global COB opcode — each a big, risky change for ~3-5%. Parked; see
   engine-changes-for-speed.md for why upstream changes would make them easy.
-- **R1** (Recoil `speed16`, toggle bit 6, building): a helper thread pinned to
+- **H74** (Recoil `speed16`, toggle bit 6, building): a helper thread pinned to
   the main thread's hyperthread sibling (shared L1/L2) walks the three serial
   unit loops (UpdateUnits, the serial weapon pass, SlowUpdateUnits) 16 units
   ahead of the main thread's cursor and prefetches the unit's hot lines, its
@@ -1684,15 +1684,15 @@ Main thread now (`t=3f`, late window), % of core:
   relaxed pointer loads from pool memory only; it parks on a futex between
   loops (a spinning sibling would take the main thread's issue slots).
 
-### 2026-10-17 12:40 — R1 (prefetch helper on the hyperthread sibling): +11%, dropped; where the goal stands
+### 2026-10-17 12:40 — H74 (prefetch helper on the hyperthread sibling): +11%, dropped; where the goal stands
 
-`speed16` = `speed15` + R1 (toggle bit 6). Medium gate `0558d354…`. Late
+`speed16` = `speed15` + H74 (toggle bit 6). Medium gate `0558d354…`. Late
 window, cooled, main on cpu 3, workers on 0-2,4-6 (cpu 7 left to the helper):
 
 | toggles | wall per trial | mean | main cycles |
 |---|---|---|---|
 | `t=3f` | 12.00 / 11.98 / 11.95 / 11.81 s | 11.93 s | 44.3e9 |
-| `t=7f` (+R1) | 13.38 / 13.18 / 13.32 / 13.41 s | 13.32 s (**+11.6%**) | 49.4e9 |
+| `t=7f` (+H74) | 13.38 / 13.18 / 13.32 / 13.41 s | 13.32 s (**+11.6%**) | 49.4e9 |
 
 A busy sibling takes the main thread's issue slots and L1/L2 bandwidth; the
 prefetches do not pay for that. Off (it stays behind its toggle).
@@ -1820,14 +1820,14 @@ the terrain under it (its own speed, position, direction vectors and aim
 point), and the one transition a take-off can make (to FLYING) only sets its
 own flags. The transitions with outside effects (Activate/UnBlock leaving
 LANDED, StopMove/Deactivate/Block on touching down) start from neither state,
-so landing stays serial. **PW** (toggle `0x100`): the serial weapon loop
+so landing stays serial. **H75** (toggle `0x100`): the serial weapon loop
 prefetches every weapon of the unit 4 ahead (H66 took only the first) and the
 target units of the unit 2 ahead's weapons (`Update` reads the target's
 `isDead`, position and speed every frame).
 
 ### 2026-10-17 15:05 — the heap overflow's real cause: a use-after-free in `CRectangleOverlapHandler::StageSplitTooLarge`
 
-The clamp (13:00 entry) treated a symptom. `speed20` (v6 + PW + CH, below)
+The clamp (13:00 entry) treated a symptom. `speed20` (v6 + H75 + H76, below)
 crashed its verylarge1 dump at frame 78 again, this time inside
 `CRectangleOverlapHandler::Process`. The cause, upstream Recoil:
 
@@ -1857,32 +1857,32 @@ reallocation happened. `HandleOverlapping` also takes pointers into the vector
 and pushes, but it writes before the push and returns right after, so it is
 fine. Worth reporting upstream (not done: outward-facing).
 
-`speed20` = `speed19` + **CH** (toggle `0x200`): the unit loops'
+`speed20` = `speed19` + **H76** (toggle `0x200`): the unit loops'
 `for_mt_chunk` calls (weapon vectors, LOS states, P1's plan pass) cut their
 range into ONE chunk per thread, so the main thread, done with its own,
 spun in `ThreadPool::DoTask` until the slowest worker finished: **4.1% of
 the main core** in the late window (speed18 profile), all of it under
 `CUnitHandler::Update`. With chunks of at most 32 units the task group's
 guided slices balance them. Each element still runs once, independently.
-`speed21` = `speed20` + the fix + **PG** (toggle `0x400`):
+`speed21` = `speed20` + the fix + **H77** (toggle `0x400`):
 `GenerateWeaponTargets` (6.6% of the main core, 4.2% in its own candidate
 loop) prefetches the candidate 6 ahead in the quad's unit list: the three
 lines it reads before rejecting most candidates (`tempNum` at offset 188,
 `losStatus[allyTeam]` at 3464, `aimPos` at 1072). Medium gates: `speed19`
 `t=1bf` and `speed20` `t=3bf` both `0558d354…`.
 
-### 2026-10-17 16:50 — v6 -0.8%, PW -0.5%, CH -2.2%, PG -1.2%; BOLT tried and dropped
+### 2026-10-17 16:50 — v6 -0.8%, H75 -0.5%, H76 -2.2%, H77 -1.2%; BOLT tried and dropped
 
-`speed21` (v6, PW, CH, PG, the use-after-free fix), medium gate `t=7bf`
+`speed21` (v6, H75, H76, H77, the use-after-free fix), medium gate `t=7bf`
 `0558d354…`. Late window, cooled, one checkpoint, each toggle added on top of
 the previous ones, 3 interleaved pairs:
 
 | step | before | after | change |
 |---|---|---|---|
 | v6 (`3f` → `bf`) | 11.77 / 11.46 / 11.86 s | 11.61 / 11.74 / 11.47 s | -0.8% (noise level) |
-| PW (`bf` → `1bf`) | 11.67 / 11.48 / 11.49 s | 11.56 / 11.57 / 11.35 s | -0.5% (noise level) |
-| CH (`1bf` → `3bf`) | 11.55 / 11.50 / 11.42 s | 11.30 / 11.18 / 11.25 s | **-2.2%**, every pair |
-| PG (`3bf` → `7bf`) | 11.37 / 11.28 / 11.55 s | 11.21 / 11.25 / 11.33 s | **-1.2%**, every pair |
+| H75 (`bf` → `1bf`) | 11.67 / 11.48 / 11.49 s | 11.56 / 11.57 / 11.35 s | -0.5% (noise level) |
+| H76 (`1bf` → `3bf`) | 11.55 / 11.50 / 11.42 s | 11.30 / 11.18 / 11.25 s | **-2.2%**, every pair |
+| H77 (`3bf` → `7bf`) | 11.37 / 11.28 / 11.55 s | 11.21 / 11.25 / 11.33 s | **-1.2%**, every pair |
 
 Together -3.8% (11.70 → 11.26 s). v6 helps less than the 116 + 127 barriers a
 frame suggested: a landed aircraft is cheap to update, so the barriers it
@@ -1903,15 +1903,15 @@ twice. On the medium replay, interleaved, `t=3bf`: gold `speed20`, GNU-ld
 `speed21` and BOLTed `speed21b` all simulate in 1m7s ±1 s. No visible gain, a
 slower base link, and no checkpoints: dropped. Back to gold links.
 
-`speed22` = `speed21` + **MU** (toggle `0x800`): `CQuadField::MovedUnit` copies
+`speed22` = `speed21` + **H78** (toggle `0x800`): `CQuadField::MovedUnit` copies
 the new quad list into the unit's own buffer instead of taking the pooled
 query vector's buffer. Moving it left the pool with an empty vector to allocate
 again and freed the unit's old buffer: a malloc and a free per unit changing
 quads, ~0.3% of the main core in mimalloc. Same contents. Building (gold).
 
-### 2026-10-17 17:45 — `speed22`, every toggle on: whole game identical; PGO retraining; QG
+### 2026-10-17 17:45 — `speed22`, every toggle on: whole game identical; PGO retraining; H79
 
-`speed22` (gold link) `t=fbf` (P1 v1-v6, P2, N1, H72/H73, PW, CH, PG, MU): medium
+`speed22` (gold link) `t=fbf` (P1 v1-v6, P2, N1, H72/H73, H75, H76, H77, H78): medium
 gate `0558d354…`, and the **whole verylarge1 game identical** (`a26e920d…`;
 an ungoverned md5 run sharing the CPU with a build, so its time means
 nothing).
@@ -1922,16 +1922,16 @@ every toggle on: instrumented build done (`pgo22-work`), training running
 (the medium replay and the sandboxed-BAR game c04fd06a whole, verylarge1 up to
 frame 65580, as before).
 
-**QG** (toggle `0x1000`, `speed23`): `CQuadField::GetQuads` is 3.7% of the main
+**H79** (toggle `0x1000`, `speed23`): `CQuadField::GetQuads` is 3.7% of the main
 core (weapon auto-targeting, the air command AI, `MovedUnit`), almost all of it
 the per-quad centre and distance test, not memory. In one row of quads the test
 is `dx*dx + dz*dz < maxSqLength` with `dz` fixed and `dx = pos.x - centre.x`
 falling as `x` grows. IEEE rounding is monotone, so the sum first does not
-grow, then does not shrink, and the quads that pass form one unbroken run. QG
+grow, then does not shrink, and the quads that pass form one unbroken run. H79
 finds the run's two ends with exactly the same float expressions and pushes
 the run: the same quads, in the same order, with the tests only at the ends.
 
-### 2026-10-17 18:50 — new PGO profile trained; P1 v7 (release the start chain before waiting for targets); FA
+### 2026-10-17 18:50 — new PGO profile trained; P1 v7 (release the start chain before waiting for targets); H80
 
 **Training** (`pgo22-work` instrumented build, every toggle on, `t=fbf`): the
 medium replay 5m53s, c04fd06a 8m8s, verylarge1 up to frame 65580. The same
@@ -1949,11 +1949,29 @@ writes, so v7 runs the check, passes the start on, and only then waits for its
 targets. The targets are earlier items, already started (they were claimed and
 started before it), so the wait cannot close a cycle; an item that fails its
 check still turns serial before passing anything on. Medium gate `t=3fbf`
-(QG + v7) `0558d354…`.
+(H79 + v7) `0558d354…`.
 
-**FA** (toggle `0x4000`, `speed24`): `CUnitScript::FindAnim` (1.9% of the main
+**H80** (toggle `0x4000`, `speed24`): `CUnitScript::FindAnim` (1.9% of the main
 core under `AddAnim`, COB `turn`/`move`) binary-searches the unit's anims on
 `(piece, animType, axis)` compared as a tuple, which is up to three dependent
-branches per step. FA compares one 64-bit key, built from the three values
+branches per step. H80 compares one 64-bit key, built from the three values
 offset into 32/16/16-bit fields, which orders exactly like the tuple for any
 piece index and the small type and axis values, so it finds the same element.
+
+### 2026-10-17 19:10 — the engine branches as patches; identifiers renumbered
+
+The Recoil branches of this work are now patch files under
+[`patches/engine-2026.07.04/speed/`](../patches/engine-2026.07.04/speed/README.md),
+numbered on from the series so that every patch number in the directory is
+unique: 0014-0043 the main line (the published series plus these reproduce
+the work branch exactly), 0044-0045 rejected experiments, 0046-0051 tools.
+Not listed in `series`, so no pinned digest changes.
+
+The change identifiers of this work that were not letter + number, or sat next
+to another meaning, moved into the H-series after H73. In the order they were
+introduced: R1 -> **H74** (run-ahead prefetch helper; R2 is the storage
+bucket elsewhere in the repo), PW -> **H75**, CH -> **H76**, PG -> **H77**,
+MU -> **H78**, QG -> **H79**, FA -> **H80**. The entries above use the new
+names. The engine branch with the renamed comments is `speed24h` (identical
+to `speed24` but for 8 comment lines). P1 (v2-v7), P2, N1 and the widget's
+W1-W7 do not occur in main and keep their names.

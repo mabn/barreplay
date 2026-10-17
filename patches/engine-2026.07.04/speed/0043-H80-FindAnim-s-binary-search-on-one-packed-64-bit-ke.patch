@@ -1,7 +1,7 @@
-From c1d4c9dad68b71b3aa4d327e0e198e2736063e3b Mon Sep 17 00:00:00 2001
+From f29a37a3f712cfa4d3bbc4a323e520e5b6ef1b9c Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 18:12:58 +0000
-Subject: [PATCH 30/30] FA: FindAnim's binary search on one packed 64-bit key
+Subject: [PATCH 43/43] H80: FindAnim's binary search on one packed 64-bit key
  (toggle 0x4000)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -10,7 +10,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 16 insertions(+)
 
 diff --git a/rts/Sim/Units/Scripts/UnitScript.cpp b/rts/Sim/Units/Scripts/UnitScript.cpp
-index fa2e8d6..b79600c 100644
+index fa2e8d6..28a1575 100644
 --- a/rts/Sim/Units/Scripts/UnitScript.cpp
 +++ b/rts/Sim/Units/Scripts/UnitScript.cpp
 @@ -397,6 +397,22 @@ CUnitScript::AnimContainerTypeIt CUnitScript::FindAnim(AnimType type, int piece,
@@ -18,7 +18,7 @@ index fa2e8d6..b79600c 100644
  	// with ONE branch per element, where the short-circuit && took up to three
  	// data-dependent ones (this is among the top branch-miss sites of a re-sim).
 +	if (!animsDirty && (g_brToggles & 0x4000) != 0) {
-+		// [barreplay] FA (toggle 0x4000): the same search on one 64-bit key that
++		// [barreplay] H80 (toggle 0x4000): the same search on one 64-bit key that
 +		// orders exactly like the tuple for piece >= -2^30 and type, axis >= -2^14
 +		// (the values are a piece index, 0..3 and 0..2): one compare per step
 +		// instead of up to three dependent branches.

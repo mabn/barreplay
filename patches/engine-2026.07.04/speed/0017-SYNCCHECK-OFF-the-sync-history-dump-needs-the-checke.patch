@@ -1,7 +1,7 @@
-From 8299bc14cf143c6dcfb6350e52bb1f1ca088c1c8 Mon Sep 17 00:00:00 2001
+From 28fd2063cd95b9757da41d91e9c0278e5089fcec Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Fri, 16 Oct 2026 21:01:00 +0000
-Subject: [PATCH 04/30] SYNCCHECK=OFF: the sync-history dump needs the checker
+Subject: [PATCH 17/43] SYNCCHECK=OFF: the sync-history dump needs the checker
 
 ---
  rts/System/Sync/DumpHistory.cpp | 2 +-

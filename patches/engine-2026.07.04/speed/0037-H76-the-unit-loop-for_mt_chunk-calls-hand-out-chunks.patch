@@ -1,8 +1,8 @@
-From 35ad06eeafc7cffd1dcb00d8cf393c1abfb9e4d2 Mon Sep 17 00:00:00 2001
+From d3bd84161097c96c7c1810d96eae80c9d671b29b Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 14:31:14 +0000
-Subject: [PATCH 24/30] CH: the unit-loop for_mt_chunk calls hand out chunks of
- at most 32 (toggle 0x200)
+Subject: [PATCH 37/43] H76: the unit-loop for_mt_chunk calls hand out chunks
+ of at most 32 (toggle 0x200)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
@@ -12,7 +12,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  3 files changed, 14 insertions(+), 3 deletions(-)
 
 diff --git a/rts/Sim/MoveTypes/Systems/BrParallelAir.h b/rts/Sim/MoveTypes/Systems/BrParallelAir.h
-index a21f60f..a7b28e0 100644
+index a21f60f..0f00937 100644
 --- a/rts/Sim/MoveTypes/Systems/BrParallelAir.h
 +++ b/rts/Sim/MoveTypes/Systems/BrParallelAir.h
 @@ -7,7 +7,9 @@
@@ -29,7 +29,7 @@ index a21f60f..a7b28e0 100644
  // harness's go file ("t=<hex>") on each restore of a checkpoint
  extern unsigned g_brToggles;
  
-+// [barreplay] CH (toggle 0x200): the largest chunk a for_mt_chunk call of the
++// [barreplay] H76 (toggle 0x200): the largest chunk a for_mt_chunk call of the
 +// unit loops hands one thread. for_mt_chunk cuts its range into one chunk per
 +// thread, so the calling thread waits for the slowest worker (a late wake-up,
 +// or two workers on one core); small chunks let the slice queue balance them.
@@ -55,7 +55,7 @@ index 0354730..96d5e1e 100644
  		long long nPar = 0;
  		static std::vector<int> tgtIds;
 diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
-index d0e0174..dabfed4 100644
+index 88be7d3..fcf67f9 100644
 --- a/rts/Sim/Units/UnitHandler.cpp
 +++ b/rts/Sim/Units/UnitHandler.cpp
 @@ -522,7 +522,7 @@ void CUnitHandler::UpdateUnitLosStates()

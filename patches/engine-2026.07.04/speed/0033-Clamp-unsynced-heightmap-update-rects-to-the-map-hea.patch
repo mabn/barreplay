@@ -1,7 +1,7 @@
-From 2d66a143a4b91ea1343fbb14755c13d19b8c57b6 Mon Sep 17 00:00:00 2001
+From b711b546fd2882d04e0a1ec2df6f2b5d48fdd6da Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 13:02:50 +0000
-Subject: [PATCH 20/30] Clamp unsynced heightmap update rects to the map (heap
+Subject: [PATCH 33/43] Clamp unsynced heightmap update rects to the map (heap
  overflow in UpdateFaceNormalsUnsynced); W6 uses math::floor like Lua
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

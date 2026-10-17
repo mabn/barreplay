@@ -1,7 +1,7 @@
-From 5b9f875583f6470d6bdc4057eea4a840705044e5 Mon Sep 17 00:00:00 2001
+From 6b6856425cbff8d32b5a4bbe92926a878dfe3cba Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 07:24:58 +0000
-Subject: [PATCH 14/30] P1 v5 (toggle bit 5): hover aircraft flying or
+Subject: [PATCH 27/43] P1 v5 (toggle bit 5): hover aircraft flying or
  hovering, and stunned/unfinished aircraft, in parallel; hover RNG draws wait
  (SerialPoint)
 

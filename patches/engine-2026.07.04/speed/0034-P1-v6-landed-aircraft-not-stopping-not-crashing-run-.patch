@@ -1,7 +1,7 @@
-From bd1ea0e5d007786fff66774f80efb85e3b293a05 Mon Sep 17 00:00:00 2001
+From be10e8ed3e551aca7385936c221ce0ce20884831 Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 13:54:50 +0000
-Subject: [PATCH 21/30] P1 v6: landed aircraft (not stopping, not crashing) run
+Subject: [PATCH 34/43] P1 v6: landed aircraft (not stopping, not crashing) run
  as parallel items (toggle 0x80)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

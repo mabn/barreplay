@@ -1,7 +1,7 @@
-From c83cbeaefbd7716d0d228d4fced02075fe3d174b Mon Sep 17 00:00:00 2001
+From 5d1ad195a3b592d764c4c1a6c521b1b207bf440f Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 00:52:20 +0000
-Subject: [PATCH 06/30] P2: unit LOS states computed on all threads, applied in
+Subject: [PATCH 19/43] P2: unit LOS states computed on all threads, applied in
  order (toggle bit 1); N1: BAR's AA-priority AllowWeaponTarget natively when
  its Lua path is verified (toggle bit 2)
 

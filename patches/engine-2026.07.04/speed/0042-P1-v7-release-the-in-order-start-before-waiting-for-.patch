@@ -1,7 +1,7 @@
-From 91e3d7536c0ce134d8546c0cd55a87e3f4a16d53 Mon Sep 17 00:00:00 2001
+From 278102457d34a027d7a7bfd244450ddb9aec875b Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 17:46:33 +0000
-Subject: [PATCH 29/30] P1 v7: release the in-order start before waiting for
+Subject: [PATCH 42/43] P1 v7: release the in-order start before waiting for
  the item's targets (toggle 0x2000)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

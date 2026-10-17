@@ -1,7 +1,7 @@
-From bedcad9322cff8c45b759c330b1d711309c848dc Mon Sep 17 00:00:00 2001
+From 7ee48102356628171d0d77b2108385c5e42dc46b Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 04:16:25 +0000
-Subject: [PATCH 12/30] H73 without the unsynced-projectile expiry (a missile
+Subject: [PATCH 25/43] H73 without the unsynced-projectile expiry (a missile
  updates its unsynced smoke trail: freeing it early crashes); P1 spin waits
  yield when long
 

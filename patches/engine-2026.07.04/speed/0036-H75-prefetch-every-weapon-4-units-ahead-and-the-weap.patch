@@ -1,7 +1,7 @@
-From 8831fc5ef10dc279263420f8318b13157c2f454e Mon Sep 17 00:00:00 2001
+From 0c12dc18db8d26a942858b021add3e192d0c5f4f Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 13:57:53 +0000
-Subject: [PATCH 23/30] PW: prefetch every weapon 4 units ahead and the
+Subject: [PATCH 36/43] H75: prefetch every weapon 4 units ahead and the
  weapons' targets 2 ahead in the serial weapon loop (toggle 0x100)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -10,7 +10,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 21 insertions(+), 1 deletion(-)
 
 diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
-index fbde90c..d0e0174 100644
+index 3c202ee..88be7d3 100644
 --- a/rts/Sim/Units/UnitHandler.cpp
 +++ b/rts/Sim/Units/UnitHandler.cpp
 @@ -642,7 +642,27 @@ void CUnitHandler::UpdateUnitWeapons()
@@ -19,7 +19,7 @@ index fbde90c..d0e0174 100644
  				const std::vector<CWeapon*>& ws = activeUnits[ahead + 4]->weapons;
 -				if (!ws.empty()) __builtin_prefetch(ws[0]);
 +				if ((g_brToggles & 0x100) != 0) {
-+					// [barreplay] PW: every weapon of the unit 4 ahead (its first
++					// [barreplay] H75: every weapon of the unit 4 ahead (its first
 +					// two lines), and the targets of the unit 2 ahead's weapons
 +					// (Update reads the target's isDead, pos and speed)
 +					for (const CWeapon* w: ws) {

@@ -1,7 +1,7 @@
-From 4324103d088e6b959812b7592b18bdb50ebc963e Mon Sep 17 00:00:00 2001
+From 8ebd97f7fd6fb6b3107effdd29c5d0deaef0f20b Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 13:56:50 +0000
-Subject: [PATCH 22/30] P1 v6: aircraft taking off too
+Subject: [PATCH 35/43] P1 v6: aircraft taking off too
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---

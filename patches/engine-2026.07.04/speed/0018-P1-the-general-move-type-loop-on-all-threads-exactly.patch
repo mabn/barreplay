@@ -1,7 +1,7 @@
-From f9f6c09b62ae69add7bac952c0019ae2d8f34ab9 Mon Sep 17 00:00:00 2001
+From 2e8224f3ff27e749aa35c5f0658bad953050472b Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 00:32:50 +0000
-Subject: [PATCH 05/30] P1: the general move-type loop on all threads, exactly
+Subject: [PATCH 18/43] P1: the general move-type loop on all threads, exactly
  sequential (toggle bit 0); bench harness toggles t=<hex>
 
 ---

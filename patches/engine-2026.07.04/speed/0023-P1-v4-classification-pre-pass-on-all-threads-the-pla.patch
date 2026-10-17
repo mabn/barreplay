@@ -1,7 +1,7 @@
-From bd7b99111bbe591e2f523819961ee42714ea2826 Mon Sep 17 00:00:00 2001
+From b4762f589772a84a4bee01fc893d45c8856f5cde Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 03:05:30 +0000
-Subject: [PATCH 10/30] P1 v4: classification pre-pass on all threads; the plan
+Subject: [PATCH 23/43] P1 v4: classification pre-pass on all threads; the plan
  check runs ahead of the item's turn and is redone only if a serial item ran
  meanwhile
 

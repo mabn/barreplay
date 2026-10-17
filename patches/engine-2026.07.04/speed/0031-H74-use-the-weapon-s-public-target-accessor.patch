@@ -1,14 +1,14 @@
-From 33b944b36b723fef6c5691571f3dbb5f846e51ea Mon Sep 17 00:00:00 2001
+From 26a8dff792503027b081ee1e252dd42b53e07fb9 Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 11:10:37 +0000
-Subject: [PATCH 18/30] R1: use the weapon's public target accessor
+Subject: [PATCH 31/43] H74: use the weapon's public target accessor
 
 ---
  rts/Sim/Units/UnitHandler.cpp | 5 +++--
  1 file changed, 3 insertions(+), 2 deletions(-)
 
 diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
-index 611e068..fbde90c 100644
+index bfebea8..3c202ee 100644
 --- a/rts/Sim/Units/UnitHandler.cpp
 +++ b/rts/Sim/Units/UnitHandler.cpp
 @@ -153,8 +153,9 @@ namespace BrRunAhead {

@@ -1,7 +1,7 @@
-From a0051746179f0bf34c3aa8c67c81132e79ef6c30 Mon Sep 17 00:00:00 2001
+From f6bc281cc55ca6e3992ffe21491fcd043662f698 Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 06:42:22 +0000
-Subject: [PATCH 13/30] P1 only with >= 256 parallel items; serial-reason
+Subject: [PATCH 26/43] P1 only with >= 256 parallel items; serial-reason
  counters; Lua GC cycles per state in the bench line
 
 ---

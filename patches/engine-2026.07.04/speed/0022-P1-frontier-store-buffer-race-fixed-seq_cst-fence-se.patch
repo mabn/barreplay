@@ -1,7 +1,7 @@
-From ed31fec8e7b5436cfdc5dc1095d357542d973862 Mon Sep 17 00:00:00 2001
+From 5c8c0ae7ff9e8e406dfe14fc0bd5ec71d184a69d Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 02:18:03 +0000
-Subject: [PATCH 09/30] P1: frontier store-buffer race fixed (seq_cst + fence,
+Subject: [PATCH 22/43] P1: frontier store-buffer race fixed (seq_cst + fence,
  self-healing spins); long-wait log
 
 ---

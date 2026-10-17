@@ -1,7 +1,7 @@
-From 5650a54108c94b590cf0c28ae9fa43da9a86ddbc Mon Sep 17 00:00:00 2001
+From 62f734a522a197f45d668e51b2d0fe90c2823688 Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 01:42:38 +0000
-Subject: [PATCH 08/30] P1: nested parallel loops inline during serial items
+Subject: [PATCH 21/43] P1: nested parallel loops inline during serial items
  (deadlock fix); P1 v3 crashing aircraft that cannot land this frame in
  parallel, trails deferred in loop order (toggle bit 3); H72 anim checksum
  only with SYNCCHECK

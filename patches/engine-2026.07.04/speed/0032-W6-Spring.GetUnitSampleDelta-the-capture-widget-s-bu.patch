@@ -1,7 +1,7 @@
-From 2c232208feb3c3a068d59dcea95ad0792eafd2c6 Mon Sep 17 00:00:00 2001
+From 5d199407323a317dc28696f0efc78ab112672d4a Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 12:24:59 +0000
-Subject: [PATCH 19/30] =?UTF-8?q?W6:=20Spring.GetUnitSampleDelta=20?=
+Subject: [PATCH 32/43] =?UTF-8?q?W6:=20Spring.GetUnitSampleDelta=20?=
  =?UTF-8?q?=E2=80=94=20the=20capture=20widget's=20bulk=20sample=20loop=20i?=
  =?UTF-8?q?n=20the=20engine?=
 MIME-Version: 1.0

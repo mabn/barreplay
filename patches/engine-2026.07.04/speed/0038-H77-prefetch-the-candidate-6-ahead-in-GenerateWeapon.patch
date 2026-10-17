@@ -1,7 +1,7 @@
-From a57847e9b9f68bfe5d47b7f1d11f65f4114f84e4 Mon Sep 17 00:00:00 2001
+From 420c639627b6c65d881d89a9fe886139d6147534 Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 15:02:32 +0000
-Subject: [PATCH 25/30] PG: prefetch the candidate 6 ahead in
+Subject: [PATCH 38/43] H77: prefetch the candidate 6 ahead in
  GenerateWeaponTargets (toggle 0x400)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -10,7 +10,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 13 insertions(+), 1 deletion(-)
 
 diff --git a/rts/Game/GameHelper.cpp b/rts/Game/GameHelper.cpp
-index 37b0384..b2b8781 100644
+index 37b0384..2772224 100644
 --- a/rts/Game/GameHelper.cpp
 +++ b/rts/Game/GameHelper.cpp
 @@ -1,6 +1,7 @@
@@ -35,7 +35,7 @@ index 37b0384..b2b8781 100644
  
 -			for (CUnit* targetUnit: allyTeamUnits) {
 +			for (size_t ui = 0, un = allyTeamUnits.size(); ui < un; ++ui) {
-+				// [barreplay] PG: the candidate 6 ahead's three lines this loop
++				// [barreplay] H77: the candidate 6 ahead's three lines this loop
 +				// reads before most candidates are rejected (tempNum, the LOS
 +				// state for our ally team, aimPos); a prefetch changes nothing
 +				if (prefetchCandidates && ui + 6 < un) {

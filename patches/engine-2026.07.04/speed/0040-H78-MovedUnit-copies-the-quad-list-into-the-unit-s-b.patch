@@ -1,7 +1,7 @@
-From 53e0155008487772b955c9686b4559cfa48cdff6 Mon Sep 17 00:00:00 2001
+From 82f60d9f1d5b5e37d94270397657905dc460cfde Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 16:49:33 +0000
-Subject: [PATCH 27/30] MU: MovedUnit copies the quad list into the unit's
+Subject: [PATCH 40/43] H78: MovedUnit copies the quad list into the unit's
  buffer (toggle 0x800)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -10,7 +10,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 9 insertions(+), 1 deletion(-)
 
 diff --git a/rts/Sim/Misc/QuadField.cpp b/rts/Sim/Misc/QuadField.cpp
-index 348b178..444cfd0 100644
+index 348b178..4a3dbb4 100644
 --- a/rts/Sim/Misc/QuadField.cpp
 +++ b/rts/Sim/Misc/QuadField.cpp
 @@ -3,6 +3,7 @@
@@ -26,7 +26,7 @@ index 348b178..444cfd0 100644
  	}
  
 -	unit->quads = std::move(*qfQuery.quads);
-+	// [barreplay] MU (toggle 0x800): copy into the unit's own buffer instead of
++	// [barreplay] H78 (toggle 0x800): copy into the unit's own buffer instead of
 +	// taking the pooled query vector's, which left the pool an empty vector to
 +	// allocate again and freed the unit's old buffer: a malloc and a free per
 +	// unit changing quads. Same contents either way.

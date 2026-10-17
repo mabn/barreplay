@@ -1,7 +1,7 @@
-From a3e78630f262d9b42f8ebacda98d378f7e73affd Mon Sep 17 00:00:00 2001
+From b3892f9e6499f129a1b0dd020bc8cb047e213f45 Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 17:43:04 +0000
-Subject: [PATCH 28/30] QG: GetQuads finds each row's run of quads by its two
+Subject: [PATCH 41/43] H79: GetQuads finds each row's run of quads by its two
  ends (toggle 0x1000)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -10,14 +10,14 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 34 insertions(+)
 
 diff --git a/rts/Sim/Misc/QuadField.cpp b/rts/Sim/Misc/QuadField.cpp
-index 444cfd0..c9540c0 100644
+index 4a3dbb4..720dcda 100644
 --- a/rts/Sim/Misc/QuadField.cpp
 +++ b/rts/Sim/Misc/QuadField.cpp
 @@ -154,6 +154,40 @@ void CQuadField::GetQuads(QuadFieldQuery& qfq, float3 pos, float radius)
  	// qsx and qsz are always equal
  	const float maxSqLength = (radius + quadSizeX * 0.72f) * (radius + quadSizeZ * 0.72f);
  
-+	// [barreplay] QG (toggle 0x1000): the same quads in the same order, found
++	// [barreplay] H79 (toggle 0x1000): the same quads in the same order, found
 +	// per row instead of tested one by one. In a row the distance test is
 +	// dx*dx + dz*dz < maxSqLength with dz fixed, and dx = pos.x - (quad centre x)
 +	// falls as x grows; IEEE rounding is monotone, so dx*dx (and the sum) first

@@ -1,7 +1,7 @@
-From 1725fd092c8d5b7ba979eabbd3654af8c67a6491 Mon Sep 17 00:00:00 2001
+From ea5a81fdbd4e71513bbfe3165b92cb818d96400b Mon Sep 17 00:00:00 2001
 From: mabn <github@mabn.pl>
 Date: Sat, 17 Oct 2026 15:07:08 +0000
-Subject: [PATCH 26/30] RectangleOverlapHandler::StageSplitTooLarge: no
+Subject: [PATCH 39/43] RectangleOverlapHandler::StageSplitTooLarge: no
  reference into the vector across push_back (use-after-free, heap corruption)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
