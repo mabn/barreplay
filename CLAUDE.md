@@ -1603,7 +1603,11 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           down the trail of cursors this visit came through (gamesTrail),
                           the pager states the range and NO total or page count; the cursors
                           are component state, not in the URL, and a backend that 404s
-                          the route is what the section says; open to every visitor, since
+                          the route is what the section says; the replay list's FILTER BAR
+                          moves over to it (placeFilters, Player hidden; the filters stay in
+                          the URL, so they carry between the two sections, and the replay
+                          list re-reads on the way back when they changed — listQuery; a map
+                          the catalog's datalist does not know applies as typed on Enter); open to every visitor, since
                           it is public games rather than the pipeline's state), "Queue"
                           (the ingest jobs, below) and "SQL" (the DO's row accounting).
                           Queue and SQL are ADMIN-ONLY — the entry is hidden when signed
@@ -2094,20 +2098,37 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           latest-ENDED first, KEYSET-paged — ?after=<endUnix>:<id> is the
                           order key of the previous page's last row (games.ts
                           encodeGamesCursor/parseGamesCursor; the reply's `next`, null on
-                          the last page) and the query resumes strictly after it. Both the
-                          ORDER BY and the cursor predicate repeat games_backfill_end's
-                          expression textually, so the planner seeks into the index and
-                          walks to the page edge — a page deep in the mirror costs the same
-                          as the first (rowcost.test.ts bounds both), where an OFFSET stepped
-                          over every row before it and shifted under a list that gains a
-                          game a minute. Two indexed queries: the dated walk (`expr <= end`,
-                          the shown tie rows filtered off; `IS NOT NULL` on the first page,
-                          or the DESC walk runs on into the undated rows the tail then
-                          repeats) and the undated tail (`expr IS NULL AND id > ?`, an
-                          equality seek), the tail only when the walk fell short. Each row
-                          is joined with whether a playable catalog row exists and the
-                          state of the game's last job, both seeks. No total and no count
-                          anywhere: `next` is read off one row more than the page shows.
+                          the last page) and the query resumes strictly after it. The order
+                          key is games.END_UNIX, a STORED column (start + duration, written
+                          by gamesInsert, backfilled by the schema-7 migration) rather than
+                          the expression it replaced, so it can lead the four (x, end_unix
+                          DESC, id) indexes the listing walks: games_end (the plain listing
+                          and every walk below), games_map_end, games_count_end and
+                          games_durmin_end (on duration_sec / 60). A page deep in the
+                          mirror costs the same as the first (rowcost.test.ts bounds it),
+                          where an OFFSET stepped over every row before it and shifted under
+                          a list that gains a game a minute. Games with no start (none
+                          observed) are not listed. Each row is joined with whether a
+                          playable catalog row exists and the state of the game's last job,
+                          both seeks. No total and no count anywhere: `next` is read off one
+                          row more than the page shows.
+                          FILTERS (the Games page's bar, the replay list's own, moved there
+                          by app.js placeFilters): from/to on END time, map (exact),
+                          min/maxPlayers, min/maxDuration, idPrefix (?id= is fetch-by-ids
+                          below), settings — parsed by the same parseReplayFilter. NO player
+                          name: the mirror's rosters are indexed nowhere (see ROW BUDGET).
+                          gamesPage DRIVES the walk from the most selective index the filter
+                          names — the PK range for an id prefix of 4+ characters, else
+                          games_map_end, else ONE seek per player count (lo..32 plus a "> 32"
+                          branch) or per duration minute (lo..90 plus "> 90"), merged by end
+                          — and checks everything else row by row. Settings chips are such a
+                          per-row check (an EXISTS on replay_settings' covering index), never
+                          a driver: the common flags hold most games, and a rare one (lava
+                          ~2%) is too sparse to drive by end order without sorting all its
+                          rows. A walk stops after GAMES_SCAN_MAX = 2000 rows; when that cut
+                          it short before the page filled, the reply says `partial: true`
+                          and `next` resumes past what was searched, so the page reads "Next
+                          keeps looking" instead of a short page passing for the end.
                           FETCH-BY-IDS: ?id=<id>[,<id>...] (up to 100 ids) answers exactly
                           the named games instead of a listing page (ReplayIndex.gamesByIds:
                           chunked IN() PK seeks with the same per-row joins, rows in asked
@@ -2708,7 +2729,7 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           three were lava-map team games, the same thing to a spectator.
                           8v8 is the game_size SPEC, not player_count=16 (a 4v4v4v4 FFA is
                           16 players too). No ranking beyond recency inside it: every 8v8
-                          is sixteen players. The walk is games_backfill_end stopped at the
+                          is sixteen players. The walk is games_end stopped at the
                           window's edge, so it costs a DAY of BAR's output (~2200 rows,
                           measured; rowcost.test.ts bounds it) whatever the mirror has
                           grown to — a seek through every lava game ever mirrored would
@@ -2783,14 +2804,14 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           none) is neither refused nor preferred; it ranks by size, as it did
                           before. And the scan is
                           cheap because it STOPS EARLY, not because it looks at a slice, and
-                          because games_backfill_end — an EXPRESSION index on
-                          ((start_unix + COALESCE(duration_sec, 0)) DESC, id, player_count),
-                          which the ORDER BY must match TEXTUALLY or the planner sorts the
-                          whole mirror into a temp b-tree (the rowcost test guards this) —
+                          because games_end — an index on (end_unix DESC, id, player_count),
+                          end_unix being the stored end time (it replaced games_backfill_end,
+                          an EXPRESSION index on start + duration that the ORDER BY had to
+                          match textually) —
                           COVERS exactly what the walk reads, so it never touches the games
-                          table and its id tiebreak needs no sort (it replaced the
-                          start-ordered games_backfill, which itself replaced games_start). It
-                          walks games_backfill_end latest-ended-first and quits at the 200th
+                          table and its id tiebreak needs no sort (the rowcost test guards
+                          that the planner never sorts the mirror into a temp b-tree). It
+                          walks games_end latest-ended-first and quits at the 200th
                           candidate, which on a mirror no host can keep up with is the first
                           two hundred rows
                           it touches. The distinction is the design. A fixed window over the

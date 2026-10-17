@@ -18,6 +18,7 @@
 // got a little slower.
 import { env, runInDurableObject } from "cloudflare:test";
 import { expect, test } from "vitest";
+import { emptyFilter } from "../../src/worker/replayentry";
 
 import type { ReplayIndex } from "../../src/worker/replayindex";
 
@@ -86,9 +87,9 @@ function seed(index: ReplayIndex): void {
   // stamped with its own age: a query that reads "the last minute of
   // arrivals" must find two rows here, not five thousand.
   sql.exec(`INSERT INTO games (id, start_unix, duration_sec, map, map_file, game_size, preset,
-              player_count, players, settings, engine_version, game_version, synced_unix)
+              player_count, players, settings, engine_version, game_version, synced_unix, end_unix)
     SELECT printf('g%06d', n), ${NOW} - n*40, 900, 'Map ' || (n % 40), 'map_' || (n % 40), '8v8', 'team', 16,
-           ${roster}, '{"ranked":true}', 'e', 'v', ${NOW} - n*40
+           ${roster}, '{"ranked":true}', 'e', 'v', ${NOW} - n*40, ${NOW} - n*40 + 900
     FROM (${seq(GAMES)})`);
   sql.exec(`INSERT INTO replays (id, start_unix, duration_sec, map, game_size, size_bytes,
               player_count, players, settings, updated_unix, placeholder)
@@ -150,9 +151,9 @@ test("the lava priority lookup costs a day of the mirror, not the mirror", async
     // so the first IN_WINDOW rows fall inside the 24h window and the other
     // ~2800 sit behind it, where the walk must stop.
     sql.exec(`INSERT INTO games (id, start_unix, duration_sec, map, map_file, game_size, preset,
-                player_count, players, settings, engine_version, game_version, synced_unix)
+                player_count, players, settings, engine_version, game_version, synced_unix, end_unix)
       SELECT printf('g%06d', n), ${now} - n*40 - 900, 900, 'Map ' || (n % 40), 'map_' || (n % 40),
-             '8v8', 'team', 16, ${roster}, '{"ranked":true}', 'e', 'v', ${now} - n*40
+             '8v8', 'team', 16, ${roster}, '{"ranked":true}', 'e', 'v', ${now} - n*40, ${now} - n*40
       FROM (WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < ${GAMES})
             SELECT n FROM seq)`);
     sql.exec(`INSERT INTO replay_settings (replay_id, flag)
@@ -266,7 +267,7 @@ test("the polled and cron reads do not scan the tables they read from", async ()
 
     // A page of the games mirror, as the admin's Games section asks for it.
     // Not on a timer, but the mirror is the one table here that a person
-    // cannot bound: it walks games_backfill_end and stops at the page edge,
+    // cannot bound: it walks games_end and stops at the page edge,
     // with a primary-key seek and one index seek per row for the join.
     const gamesFirst = index.gamesPage(50, null);
     out.gamesPage = tally();
@@ -276,6 +277,24 @@ test("the polled and cron reads do not scan the tables they read from", async ()
     index.gamesPage(50, { endUnix: NOW - 4000 * 40 + 900, id: "g004000" });
     out.gamesPageDeep = tally();
     expect(gamesFirst.next, "a full page hands out a cursor").not.toBeNull();
+
+    // FILTERED listings (the Games page's filter bar): each driven from its
+    // own (column, end_unix) index, so a page costs about what it shows.
+    const byMap = index.gamesPage(50, null, { ...emptyFilter(), map: "Map 7" });
+    out.gamesPageMap = tally();
+    expect(byMap.games.length, "125 games sit on Map 7").toBe(50);
+    index.gamesPage(50, null, { ...emptyFilter(), minPlayers: 10, maxPlayers: 20 });
+    out.gamesPagePlayers = tally();
+    index.gamesPage(50, null, { ...emptyFilter(), minDuration: 600, maxDuration: 1200 });
+    out.gamesPageDuration = tally();
+    index.gamesPage(50, null, { ...emptyFilter(), id: "g0042" });
+    out.gamesPageId = tally();
+    // A settings chip no game carries: the walk checks rows one by one and
+    // STOPS at its cap, handing back a cursor to keep looking — bounded,
+    // never the whole 5000-row mirror.
+    const noLava = index.gamesPage(50, null, { ...emptyFilter(), settings: ["lava"] });
+    out.gamesPageRare = tally();
+    expect(noLava.partial, "a capped search says it stopped early").toBe(true);
 
     // Fetch-by-ids at the route's cap (100 ids), on an OPEN route: a PK seek
     // per id plus the same two join seeks a listing row pays — never a scan
@@ -354,6 +373,13 @@ test("the polled and cron reads do not scan the tables they read from", async ()
   // whole mirror (5000 rows here) into a temp b-tree.
   expect(costs.gamesPage, report).toBeLessThan(400);
   expect(costs.gamesPageDeep, report).toBeLessThan(400);
+  expect(costs.gamesPageMap, report).toBeLessThan(400);
+  expect(costs.gamesPagePlayers, report).toBeLessThan(600);
+  expect(costs.gamesPageDuration, report).toBeLessThan(600);
+  expect(costs.gamesPageId, report).toBeLessThan(400);
+  // The walk's cap, GAMES_SCAN_MAX = 2000 rows (the flag check is a covering
+  // index probe that reads no extra row).
+  expect(costs.gamesPageRare, report).toBeLessThan(2500);
   // 100 ids: a seek and two join seeks each, not the 5000-row mirror.
   expect(costs.gamesByIds, report).toBeLessThan(800);
   // gamesUnknown over a 200-id window: a seek per id (the 100 that exist), not
@@ -433,9 +459,9 @@ test("the lava retry lookup costs the window's failures, not the queue", async (
     const seqOf = (n: number) =>
       `WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < ${n}) SELECT n FROM seq`;
     sql.exec(`INSERT INTO games (id, start_unix, duration_sec, map, map_file, game_size, preset,
-                player_count, players, settings, engine_version, game_version, synced_unix)
+                player_count, players, settings, engine_version, game_version, synced_unix, end_unix)
       SELECT printf('g%06d', n), ${now} - n*120, 900, 'Map', 'map', '8v8', 'team', 16, '[]',
-             '{"ranked":true}', 'e', 'v', ${now} - n*120
+             '{"ranked":true}', 'e', 'v', ${now} - n*120, ${now} - n*120 + 900
       FROM (${seqOf(GAMES)})`);
     // 20k jobs, one every two minutes back from now: 1 in 20 failed (so ~500
     // failures inside the two-week window), the rest done.

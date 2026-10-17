@@ -879,6 +879,7 @@ test('the games section lists the mirror with what this site has of each game', 
     const document = dom.document;
     const window = { scrollTo() {} };
     const gamesRows = games, gamesNext = '1787350500:pub', gamesBefore = 20, gamesTrail = [{ after: null, before: 0 }];
+    const gamesPartial = false, gamesFiltered = false;
     const fmtDate = () => 'date', fmtDateShort = () => 'short';
     const replayHref = (id) => '/?replay=' + id, openReplay = () => {};
     const mapFileGuess = (m) => m;

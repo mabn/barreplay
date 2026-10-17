@@ -727,9 +727,27 @@ app.get("/api/games", async (c) => {
     if (after === null) return c.json({ error: "after is not a cursor this listing issued" }, 400);
   }
 
-  const page = await indexStub(c.env).gamesPage(limit, after);
+  // The replay list's filters (parseReplayFilter), on END time for the dates,
+  // with two differences: the id PREFIX is ?idPrefix= because ?id= above is
+  // already the fetch-by-ids lookup, and there is no player-name filter (see
+  // ReplayIndex.gamesPage).
+  const fp = new URLSearchParams(params);
+  fp.delete("id");
+  fp.delete("player");
+  const prefix = params.get("idPrefix");
+  if (prefix !== null) fp.set("id", prefix);
+  const filter = parseReplayFilter(fp);
+  if (typeof filter === "string") return c.json({ error: filter.replace(/^id /, "idPrefix ") }, 400);
+
+  const page = await indexStub(c.env).gamesPage(limit, after, filter);
   return c.json(
-    { games: page.games, next: page.next === null ? null : encodeGamesCursor(page.next) },
+    {
+      games: page.games,
+      next: page.next === null ? null : encodeGamesCursor(page.next),
+      // A filtered page that stopped searching before it filled: `next`
+      // resumes the search, and there may be nothing more to find.
+      partial: page.partial,
+    },
     200,
     { "cache-control": "no-cache" },
   );

@@ -18,7 +18,7 @@ import type {
   JobStats,
   QueueJob,
 } from "../src/worker/jobs";
-import type { ReplayEntry } from "../src/worker/replayentry";
+import type { ReplayEntry, ReplayFilter } from "../src/worker/replayentry";
 import type { GameListRow, GamesCursor } from "../src/worker/games";
 
 const FIXTURE = new URL("../../internal/capture/testdata/harness.brepstream", import.meta.url);
@@ -179,8 +179,10 @@ class FakeIndex {
     return out;
   }
   lastGamesQuery: { limit: number; after: GamesCursor | null } | null = null;
-  gamesPage(limit: number, after: GamesCursor | null): { games: GameListRow[]; next: GamesCursor | null } {
+  lastGamesFilter: ReplayFilter | null = null;
+  gamesPage(limit: number, after: GamesCursor | null, filter?: ReplayFilter): { games: GameListRow[]; next: GamesCursor | null; partial?: boolean } {
     this.lastGamesQuery = { limit, after };
+    this.lastGamesFilter = filter ?? null;
     const from = after === null ? 0 : this.games.findIndex((g) => g.id === after.id) + 1;
     const games = this.games.slice(from, from + limit);
     const last = games[games.length - 1];
@@ -555,6 +557,27 @@ test("GET /api/games pages the mirror by cursor, and counts nothing", async () =
   // A cursor into the undated tail (blank end) is a valid one.
   assert.equal((await app.request("/api/games?after=:game-9", {}, env)).status, 200);
   assert.deepEqual(index.lastGamesQuery?.after, { endUnix: null, id: "game-9" });
+});
+
+// The Games page's filter bar: the replay list's filters, minus the player
+// name, with the id PREFIX under ?idPrefix= since ?id= is the fetch-by-ids.
+test("GET /api/games filters like the replay list, minus the player name", async () => {
+  const { env, index } = makeEnv();
+  const q = "/api/games?from=2026-10-01&to=2026-10-02&map=Supreme%20Isthmus&minPlayers=10&maxPlayers=16"
+    + "&minDuration=600&maxDuration=1800&idPrefix=AB12&settings=lava,ranked&player=bob";
+  assert.equal((await app.request(q, {}, env)).status, 200);
+  const f = index.lastGamesFilter!;
+  assert.equal(f.map, "Supreme Isthmus");
+  assert.deepEqual([f.minPlayers, f.maxPlayers, f.minDuration, f.maxDuration], [10, 16, 600, 1800]);
+  assert.equal(f.id, "ab12", "the prefix is lower-cased like the replay list's");
+  assert.deepEqual(f.settings, ["lava", "ranked"]);
+  assert.equal(f.player, null, "a player name is not a filter the mirror offers");
+  assert.equal(f.from, Date.UTC(2026, 9, 1) / 1000);
+  // A malformed filter is a 400 naming the param the caller sent.
+  const bad = await app.request("/api/games?idPrefix=xyz", {}, env);
+  assert.equal(bad.status, 400);
+  assert.match((await asJson(bad)).error, /^idPrefix /);
+  assert.equal((await app.request("/api/games?minPlayers=lots", {}, env)).status, 400);
 });
 
 // Fetch-by-ids: ?id= answers the named games instead of a listing page.
