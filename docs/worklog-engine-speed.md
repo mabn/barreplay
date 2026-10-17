@@ -1419,3 +1419,66 @@ time, waiting for the main thread's serial loops. Over the whole game
   correctly stays off there; verylarge1's own build is the one hashed.
 - **H72**: the per-anim checksum in `TickAllAnims` is read only by the sync
   checker; computed only with SYNCCHECK.
+
+### 2026-10-17 03:30 — `speed11`: P1 + P2 + N1 + H72 = -12.9% main cycles, -14.6% wall on the late window
+
+`speed11` (Recoil `ed31fec`): medium gate with every switch on (`t=f`)
+`0558d354…` = reference, no hang. Late window, interleaved pairs, main thread
+pinned (cpu 3, the rest on 0-2,4-7):
+
+| toggles | cycles (e9) per trial | mean | wall mean |
+|---|---|---|---|
+| `t=0` (all off = `speed9` behaviour) | (63.90 cold first restore) / 54.03 / 54.34 / 53.48 | **53.95** | 16.00 s |
+| `t=f` (P1 + v3 + P2 + N1) | 47.41 / 47.15 / 47.89 / 45.42 | **46.97 (-12.9%)** | **13.65 s (-14.6%)** |
+
+Separately (a hotter host, 3 pairs each):
+
+| comparison | cycles | wall |
+|---|---|---|
+| P1 (parallel aircraft): `t=f` vs `t=e` | 45.88 vs 50.01 (**-8.3%**) | 15.64 vs 16.76 s (-6.7%) |
+| P1 v3 (crashing aircraft too): `t=f` vs `t=7` | 47.24 vs 46.56 (noise) | 15.40 vs 15.60 s (-1.3%) |
+| so P2 + N1 + H72: `t=e` vs `t=0` | ~50.0 vs ~53.95 (**~-7%**) | |
+
+Counters with `t=f`, per frame: 5,656 non-static items, **5,231 run in
+parallel**, 425 serial (hover aircraft, aircraft that may land or crash into
+the ground, colliding ones), 3,340 static move types skipped, 254 target edges,
+405 crashing aircraft in parallel with deferred trails; no plan had to be
+redone, and none of the should-never-happen counters moved (no crash kill, no
+script call, no RNG serial point in a parallel item). N1: "native AA targeting
+priority: on" — verylarge1's BAR build is the one whose files are hashed.
+
+Flame graph and main-thread breakdown, `t=f`:
+
+![verylarge1 late game, speed11 t=f, main thread](flamegraphs/2026-10-17-verylarge1-speed11.svg)
+
+| phase | % of main core | of which Lua |
+|---|---|---|
+| unit updates | 58.8% | 3.6% |
+| ├ aircraft / general move-type loop (P1) | 11.1% | 0.8% |
+| ├ weapon auto-targeting | 9.5% | 0.3% (N1: was 2.6%) |
+| ├ ground movement | 6.1% | |
+| ├ weapon vectors (parallel section) | 5.8% | |
+| ├ `CUnit::SlowUpdate` | 5.4% | 0.3% |
+| ├ beam lasers | 4.8% | 1.3% |
+| ├ LTO-inlined unit loops (P2 took the LOS states out) | 3.8% | |
+| ├ `CUnit::Update` 3.0, weapon update 3.0, quad field 2.5 | 8.5% | 0.2% |
+| └ factories 1.5, builders 1.3, rest 1.1 | 3.9% | 0.7% |
+| Lua callins (gadgets), not from units | 11.4% | 11.4% |
+| unit-script anims (parallel section) | 6.6% | |
+| COB scripts | 5.5% | 0.1% |
+| LOS update (parallel section) | 5.1% | |
+| projectiles + collisions | 4.4% | 1.8% |
+| Lua GC | 2.8% | 2.8% |
+| map damage 1.8, pathfinding 1.8, rest 1.7 | 5.3% | 0.1% |
+| **total** | **100%** | |
+
+Workers over the window (samples relative to the main thread's): 34% / 32% /
+32% of a core (was 24/23/22%).
+
+What the main thread still spends in the P1 loop (11.1%) is mostly serial
+overhead: the classification pre-pass (`Run` 2.2% + `ParallelSafe` 1.3%, a
+cache miss per unit for ~9000 units) and the in-order start chain (`Process`
+1.7%). **P1 v4** (building): the classification on all threads, and each
+item's plan check done ahead of its turn, redone only if a serial item ran in
+between. Whole-game identity run of `speed11 t=f` under way (alongside the
+build, so its time does not count).
