@@ -248,6 +248,14 @@ h1.big { font-size: 38px; line-height: 1.12; font-weight: 750; letter-spacing: -
 .chip { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 99px; font-size: 12px; font-weight: 600; background: var(--smoke-2); color: var(--muted); border: 1px solid transparent; font-variant-numeric: tabular-nums; }
 .chip.size { color: var(--text); background: rgba(255, 122, 61, .16); border-color: rgba(255, 122, 61, .35); }
 .chip.ok { color: var(--accent); background: rgba(79, 220, 196, .1); border-color: rgba(79, 220, 196, .3); }
+.chip.gtag { height: 22px; padding: 0 8px; font-size: 11px; letter-spacing: .02em; color: var(--text); background: rgba(255, 255, 255, .05); border-color: rgba(255, 255, 255, .12); }
+.chip.gtag.sm { height: 18px; padding: 0 6px; font-size: 10px; margin-left: 6px; vertical-align: 1px; }
+.chip.tag-ranked { color: var(--accent); background: rgba(79, 220, 196, .08); border-color: rgba(79, 220, 196, .28); }
+.chip.tag-lava { color: #ffb08a; background: rgba(255, 122, 61, .12); border-color: rgba(255, 122, 61, .38); }
+.chip.tag-mods, .chip.tag-zombies { color: var(--lilac); background: rgba(195, 169, 220, .1); border-color: rgba(195, 169, 220, .32); }
+.lobby { margin-top: 3px; color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lobby::before { content: '⚑ '; color: var(--dim); }
+.lobby.sm { margin-top: 1px; font-size: 12px; color: var(--dim); }
 .chip.warn { color: var(--warn); background: rgba(255, 195, 92, .1); border-color: rgba(255, 195, 92, .3); }
 .teams { display: grid; grid-template-columns: 1fr auto 1fr; gap: 10px; margin-top: 14px; align-items: start; }
 .teams.many { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }

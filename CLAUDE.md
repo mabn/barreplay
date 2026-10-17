@@ -360,11 +360,16 @@ cmd/fogofwar/             FogOfWar.exe: a Windows desktop app that re-simulates 
                           published/failed, and a failed upload never fails the run). An
                           AUTO-REPLAY switch (autoreplay.go) re-simulates, while idle, the first
                           of the site's 10 newest games (GET /api/games?limit=10) that is not
-                          published, has no pending/processing job and is not in the local
+                          MODDED (no "mods" settings flag; unknown settings count as modded —
+                          Marcin's call), not published, has no pending/processing job and is not in the local
                           history (failed ones included), looking again a minute later when none
                           qualifies; Stop on an auto-picked run turns it off, three failures in a
                           row pause it 10 min. History rows open /replays/<gameId> in the browser
-                          (FOGOFWAR_SITE overrides the site). It takes no jobs from the queue. Its OWN Go module (go.mod with a replace onto the
+                          (FOGOFWAR_SITE overrides the site). Wherever a game is shown (preview,
+                          run banner, result, history) it carries its LOBBY NAME (the site's GET
+                          /api/games?id=, absent when the mirror never matched a lobby) and its
+                          settings TAGS (preview.go gameTags: viz.SettingsFlags over the BAR
+                          API's gameSettings, badged like app.js settingsBadges). It takes no jobs from the queue. Its OWN Go module (go.mod with a replace onto the
                           repo root) because it needs third-party code the root keeps out: Wails
                           v2 (the window is a WebView2 page; frontend/dist is plain HTML/CSS/JS,
                           embedded, no Node, no build step — opened in a browser it runs a MOCK
