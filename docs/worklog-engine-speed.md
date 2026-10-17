@@ -1930,3 +1930,30 @@ falling as `x` grows. IEEE rounding is monotone, so the sum first does not
 grow, then does not shrink, and the quads that pass form one unbroken run. QG
 finds the run's two ends with exactly the same float expressions and pushes
 the run: the same quads, in the same order, with the tests only at the ends.
+
+### 2026-10-17 18:50 — new PGO profile trained; P1 v7 (release the start chain before waiting for targets); FA
+
+**Training** (`pgo22-work` instrumented build, every toggle on, `t=fbf`): the
+medium replay 5m53s, c04fd06a 8m8s, verylarge1 up to frame 65580. The same
+1800-frame late window now executes **229e9 instructions** where revision 3's
+training run executed 363e9 (37% fewer, the speed work since then, counted by
+the instrumented builds). Profile: 1071 `.gcda` files, 1.15 MB as `.tar.xz`
+(`~/dev/perf3/pgo22-profile.tar.xz`). `speed24` builds with it.
+
+**P1 v7** (toggle `0x2000`, `speed23`): in `Process`, a parallel item waited
+for its targets (target edges, ~250 a frame) BEFORE passing the in-order start
+on to the next item, so while it waited for a target still being updated,
+every later item stalled behind it. The plan check it makes at its turn reads
+only its own unit (state and target pointer), which no other parallel item
+writes, so v7 runs the check, passes the start on, and only then waits for its
+targets. The targets are earlier items, already started (they were claimed and
+started before it), so the wait cannot close a cycle; an item that fails its
+check still turns serial before passing anything on. Medium gate `t=3fbf`
+(QG + v7) `0558d354…`.
+
+**FA** (toggle `0x4000`, `speed24`): `CUnitScript::FindAnim` (1.9% of the main
+core under `AddAnim`, COB `turn`/`move`) binary-searches the unit's anims on
+`(piece, animType, axis)` compared as a tuple, which is up to three dependent
+branches per step. FA compares one 64-bit key, built from the three values
+offset into 32/16/16-bit fields, which orders exactly like the tuple for any
+piece index and the small type and axis values, so it finds the same element.
