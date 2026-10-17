@@ -1712,7 +1712,7 @@ forbid while the output must stay byte-identical: the sequential synced RNG,
 order-dependent reads, and synced Lua inside the unit loops
 (engine-changes-for-speed.md).
 
-### 2026-10-17 14:10 — W6 (widget sample loop in the engine), W7 (launcher slots visited on change), and an upstream heap overflow
+### 2026-10-17 13:00 — W6 (widget sample loop in the engine), W7 (launcher slots visited on change), and an upstream heap overflow
 
 Lua profile of the late window on `speed16` (`luaprof16` = speed16 + the
 sampler; 12.4 s window, 16.0% of the main core in Lua): LuaRules 10.35%,
