@@ -57,6 +57,13 @@
 # Each trial prints the bench harness line: frames, units alive at the start,
 # cycles, instructions (main thread) and the window's SimFrame wall time.
 #
+# MEMMAX=<size> (default 11G) and SWAPMAX=<size> (default 1G) cap the engine's
+# memory, dumps and restores alike, in a scope of its own with OOMPolicy=
+# continue: a runaway engine then dies by a cgroup OOM inside that scope. A
+# GLOBAL OOM instead tears down the whole user scope it was started from — the
+# tmux pane, and whatever was driving the benchmark (it happened once, an
+# engine at 14.6 GB on a replay that peaks at 3.7).
+#
 # Needs: criu (apt install criu) and root for it, which this script gets
 # through sudo docker (a privileged container entering the host's namespaces;
 # the restore runs in its own systemd scope so the container's exit does not
@@ -68,6 +75,7 @@ BR=${BR:-$(cd "$(dirname "$0")/../.." && pwd)}
 DATA=${DATA:-$BR/.bardata}
 CKPT=${CKPT:-$HOME/dev/perf3/ckpt}
 BARREPLAY=${BARREPLAY:-$BR/barreplay-bench}
+MEMMAX=${MEMMAX:-11G}; SWAPMAX=${SWAPMAX:-1G}
 IMG=${CRIU_IMAGE:-ghcr.io/beyond-all-reason/recoil-build-amd64-linux@sha256:31b3667ba0d37620b4ad9b45d1840c8d3e95317f2b233044d2e17697ce8fe61d}
 
 die() { echo "bench-ckpt: $*" >&2; exit 1; }
@@ -93,6 +101,7 @@ dump() {
 	[ -x "$BARREPLAY" ] || (cd "$BR" && go build -o "$BARREPLAY" ./cmd/barreplay) || die "build barreplay"
 	echo "== dump: $(basename "$bin") $2 ($id) up to frame $frame"
 	(cd "$BR" && BARREPLAY_BENCH_START=$frame BARREPLAY_BENCH_N=1 BARREPLAY_PARK="$dir/park" \
+		systemd-run --user --scope --quiet -p OOMPolicy=continue -p MemoryMax="$MEMMAX" -p MemorySwapMax="$SWAPMAX" \
 		"$BARREPLAY" -data "$DATA" -progress=true ${BARREPLAY_ARGS:-} -engine "$bin" -out "$dir/out" "$id" > "$dir/barreplay.log" 2>&1) &
 	local brpid=$!
 	while [ ! -s "$dir/park.ready" ]; do
@@ -143,7 +152,7 @@ trial1() {
 		local waited=0
 		while [ "$(cat /sys/class/hwmon/hwmon1/temp1_input)" -ge "$COOL" ] && [ $waited -lt 300 ]; do sleep 2; waited=$((waited + 1)); done
 	fi
-	hostroot systemd-run --scope --quiet criu restore -D "$dir/img" -j -d --manage-cgroups=ignore \
+	hostroot systemd-run --scope --quiet -p OOMPolicy=continue -p MemoryMax="$MEMMAX" -p MemorySwapMax="$SWAPMAX" criu restore -D "$dir/img" -j -d --manage-cgroups=ignore \
 		--tcp-established -o restore.log -v2 || die "criu restore failed (see $dir/img/restore.log)"
 	if [ -n "${MAINCPU:-}" ]; then
 		# the main thread (tid == pid) alone on MAINCPU, every other thread on OTHERCPUS

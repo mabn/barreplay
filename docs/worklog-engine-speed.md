@@ -2066,3 +2066,48 @@ trees, one each per build. The symptom was a CRIU restore refusing
 `infolog.txt` ("bad size 0"): the trial's copy of it back into the data dir
 had failed for lack of space, silently (`cp … 2>/dev/null`). Superseded
 checkpoints, build trees and engine binaries deleted: 122 GB free.
+
+### 2026-10-17 23:20 — a gate run OOM'd the host once and took the session with it
+
+`speed27` = `speed24h` + **H83** (layout only, no toggle: in `CSolidObject`
+the direction vectors and mid/aim positions moved up next to
+`physicalState`/`allyteam`, and in `CUnit` the state flags every unit loop
+tests — `activated`, `isDead`, `onTempHoldFire`, `deathScriptFinished`,
+`beingBuilt`, `stunned`, `forceUseWeapons`/`allowUseWeapons` — next to the
+`moveType`/`script` pointers; the speed24 latency profile had those fields in
+four separate cache lines carrying 18% of all slow loads). Its first medium
+gate (`t=7fbf`) never finished: `recoil-main` grew to **14.6 GB resident plus
+2.6 GB swapped, 33.6 GB virtual**, swap ran out, and the global OOM killer
+took it, along with the tmux scope it had been started from (user scopes
+default to `OOMPolicy=stop`), which was the session driving the benchmark.
+The medium replay peaks at ~3.7 GB.
+
+It did not happen again. The same binary, rerun twice inside a capped scope,
+gated byte-identical (`0558d354…`) at a 3.68 GB peak and 6.3 GB virtual. The
+dead run was slow long before it died (`Sim` 54 s by frame 23400 against
+33 s), so it was probably growing for most of the game, and it stopped
+logging at frame 23685 (the resign) with the log buffer unflushed. The
+kernel's report puts the main thread in a write fault on fresh anonymous
+memory, with `R12 = 0x40000000` and two glibc-`mmap`-style pointers 16 GiB
+apart. Nothing in H83 depends on layout (no `offsetof` on unit fields, no
+copies of member ranges; the speed patches only prefetch by address).
+Something nondeterministic in the patch set (one of the threaded passes, the
+prefetch helper) or about the host at the time is more likely, but this is
+unproven.
+
+Not H71's huge-page collapser either, though it looked like it at first.
+`MADV_COLLAPSE` ignores `khugepaged`'s `max_ptes_none`, so it fills any
+2 MiB range holding one resident page, and the 1 GiB `.bss` pools and
+mimalloc's 1 GiB arenas are sparse. Measured with a pagemap scan through a
+whole gate run: collapsing every touched range would add 224 MiB at most
+(during load), 15-21 MiB in the sim, with 3.6 of 3.7 GB already in huge
+pages. And the dead run's 27 GB of extra *virtual* memory was allocated, not
+inflated.
+
+From now on every engine runs capped so this cannot kill anything else:
+`bench-ckpt` puts dumps (`systemd-run --user --scope`) and restores (the root
+scope) under `MemoryMax=$MEMMAX` (11G) / `MemorySwapMax=$SWAPMAX` (1G) with
+`OOMPolicy=continue`, and gates and whole games run the same way. A watchdog
+beside each run (`~/dev/perf3/memwatch.sh`) logs the engine's RSS and, past a
+limit, takes gdb backtraces of every thread and its smaps before killing it,
+so a recurrence comes with stacks.
