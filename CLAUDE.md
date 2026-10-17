@@ -2721,6 +2721,25 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           than jobsPending; its OWN meta key (lava_after), so neither
                           scan's rest can silence the other. Only the empty answer rests,
                           for the same reason as below.
+                          LAVA ORDERING (Marcin, 2026-10-17: lava first, NEWEST first): a
+                          resim poll's pending list is reordered with its 8v8 lava jobs at the
+                          head, latest-ENDED first (lavaEnds), and the lava lookup runs even
+                          when work is pending, jumping that list when its game ended later
+                          than every queued lava game. The daemon runs ONE job per poll
+                          (runQueued returns after it; the loop re-polls at once), so a lava
+                          game that ends while another runs is what the next poll gets.
+                          LAVA RETRIES (lavaRetryCandidate, after the pending list, before the
+                          ranked window): a failed job is never re-offered by the scans, which
+                          lost every lava 8v8 that ran out of memory on the 8 GB host (19 of
+                          29 uncaptured in four days; the other 10 were the pre-1.11.1 widget
+                          sandbox). The resim poll carries ?mem=<host RAM> (bringest, from
+                          hostinfo), and a lava 8v8 whose jobs are all failures (none active,
+                          done or disabled), with no catalog row, is offered again when it
+                          ran out of memory and no host with >= this RAM ever did on it
+                          (stats.host.memBytes; none = 0), or when it failed ONCE for any
+                          other reason. Walks the jobs_failed partial index over two weeks
+                          (LAVA_RETRY_WINDOW_SEC), rests 5 min per GiB size on the empty
+                          answer; a poll without ?mem= gets no retries.
                           THEN the ranked window: of the BACKFILL_WINDOW=200 most recently ENDED
                           eligible ones, the one
                           that is MODDED, and failing that the one with the MOST PLAYERS —

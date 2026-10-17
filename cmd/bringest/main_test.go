@@ -210,7 +210,9 @@ func TestResimDaemonDrainsQueue(t *testing.T) {
 			return nil
 		},
 	}
-	n, err := r.runOnce(context.Background())
+	// One job per poll (the worker orders the work and the next poll must see
+	// what changed), so draining the queue takes a poll per job.
+	n, err := drainResim(r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -700,7 +702,7 @@ func TestResimDaemonCarriesOnAfterOOM(t *testing.T) {
 			return nil
 		},
 	}
-	if _, err := r.runOnce(context.Background()); err != nil {
+	if _, err := drainResim(r); err != nil {
 		t.Fatal(err)
 	}
 	// The queue carried on: the game after the OOM'd one still ran.
@@ -728,5 +730,43 @@ func TestErrorKind(t *testing.T) {
 		if got := errorKind(err); got != "" {
 			t.Errorf("errorKind(%v) = %q, want none", err, got)
 		}
+	}
+}
+
+// drainResim polls until a round attempts nothing, the way the daemon's loop
+// does when there is work, and returns how many jobs ran in total.
+func drainResim(r *resimDaemon) (int, error) {
+	total := 0
+	for {
+		n, err := r.runOnce(context.Background())
+		total += n
+		if err != nil || n == 0 {
+			return total, err
+		}
+	}
+}
+
+// A round runs ONE job and stops, so that the next poll — which the worker
+// answers with the most recently ended lava game first — decides what runs
+// next, rather than the rest of a list read before the job started.
+func TestResimDaemonRunsOneJobPerPoll(t *testing.T) {
+	m := newMock(t)
+	m.resim = []ingestJob{
+		{ID: "rj-1", GameID: "aaaa0000000000000000000000000001", Kind: kindResim, State: "pending"},
+		{ID: "rj-2", GameID: "aaaa0000000000000000000000000002", Kind: kindResim, State: "pending"},
+	}
+	srv := httptest.NewServer(m.handler(""))
+	t.Cleanup(srv.Close)
+	var ran []string
+	r := &resimDaemon{
+		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
+		resim: func(_ context.Context, gameID string, _ *jobStats, _ *resim.Progress) error {
+			ran = append(ran, gameID)
+			return nil
+		},
+	}
+	n, err := r.runOnce(context.Background())
+	if err != nil || n != 1 || len(ran) != 1 {
+		t.Fatalf("one round attempted %d (%v, err %v), want exactly the first job", n, ran, err)
 	}
 }

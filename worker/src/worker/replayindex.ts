@@ -150,6 +150,28 @@ const BACKFILL_COOLDOWN_SEC = 60;
 const LAVA_WINDOW_SEC = 24 * 3600;
 const LAVA_COOLDOWN_SEC = 300;
 
+/** The lava RETRY lookup (lavaRetryCandidate): how far back a failed job
+ * still counts, and how long the lookup rests on an empty answer.
+ *
+ * A failed re-sim is never offered again by the scans above — a game that
+ * cannot re-simulate would otherwise come back every poll — which is right
+ * for a game that is broken and wrong for one that ran out of MEMORY: "oom"
+ * says the HOST was too small (an 8v8 lava game wants ~6 GB resident, and a
+ * 16 GB box runs what an 8 GB one cannot), so the same job is worth handing
+ * to a daemon with more memory than the one that failed. On 2026-10-17 that
+ * was 19 of the 29 lava 8v8s of four days with no capture: every one of them
+ * queued within the hour, run first, and lost for good on the one 8 GB host
+ * that was running. The other 10 failed on BAR's widget sandbox before
+ * widget 1.11.1 — a cause since fixed — which is why any OTHER failure gets
+ * exactly one automatic second attempt.
+ *
+ * Two weeks bounds what the lookup reads (failed jobs, through jobs_failed),
+ * and is also past the point where a late capture still matters to anyone.
+ * The rest is per MEMORY SIZE (a GiB bucket) because the answer is: a small
+ * host finding nothing it can retry says nothing about a big one. */
+const LAVA_RETRY_WINDOW_SEC = 14 * 24 * 3600;
+const LAVA_RETRY_COOLDOWN_SEC = 300;
+
 /** How far back the lava sync will still offer a game it has never offered
  * (see gamesLavaPending). Its whole job is to bound that query, and the first
  * run after lava_offered_unix was added — when every lava game in the mirror
@@ -247,7 +269,7 @@ const DERIVED_VERSION = 3;
  * whether the DDL needs to run at all — a read, where the DDL statements are
  * write-classified even as no-ops. BUMP THIS whenever SCHEMA_DDL, INDEX_DDL
  * or ADDED_COLUMNS change, or the change never reaches a deployed database. */
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 /** Everything migrateSchema creates, split from the code so schemaCurrent can
  * scan the same text it executes (one source, nothing to drift). */
@@ -469,6 +491,12 @@ const INDEX_DDL = `
       -- a table that keeps every unmatched observation forever: which
       -- observations are still open, and which matched ones are old
       -- enough to drop.
+      -- The lava retry lookup (lavaRetryCandidate): failed jobs, newest
+      -- first. PARTIAL, over the only rows the lookup can want, so its walk
+      -- costs the failures in its window and not the whole queue; its WHERE
+      -- repeats this clause textually, like jobs_settled's.
+      CREATE INDEX IF NOT EXISTS jobs_failed ON jobs (created_unix DESC)
+        WHERE state = 'error';
       CREATE INDEX IF NOT EXISTS lobbies_open    ON lobbies (lobby_id, started_unix)
         WHERE ended_unix IS NULL;
       CREATE INDEX IF NOT EXISTS lobbies_matched ON lobbies (started_unix)
@@ -2005,10 +2033,10 @@ export class ReplayIndex extends DurableObject<Env> {
    * No ranking beyond recency: every 8v8 is sixteen players, so within one
    * shape and one window the newest is simply the one someone might still be
    * asking about. */
-  private lavaCandidate(now: number): string | null {
+  private lavaCandidate(now: number): { id: string; end: number } | null {
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT g.id AS id FROM games g
+        `SELECT g.id AS id, (g.start_unix + COALESCE(g.duration_sec, 0)) AS end_unix FROM games g
           WHERE (g.start_unix + COALESCE(g.duration_sec, 0)) >= ?
             AND g.game_size = ?
             AND EXISTS (SELECT 1 FROM replay_settings s
@@ -2020,6 +2048,78 @@ export class ReplayIndex extends DurableObject<Env> {
         now - LAVA_WINDOW_SEC,
         LAVA_GAME_SIZE,
         SETTINGS_LAVA_FLAG,
+      )
+      .toArray();
+    return rows.length === 0 ? null : { id: rows[0].id as string, end: rows[0].end_unix as number };
+  }
+
+  /** lavaEnds maps each of gameIds that is an 8v8 lava game to when it ENDED
+   * — what jobsOffer orders the waiting lava work by. One primary-key seek
+   * and one flag seek per id, over a pending list that is a handful long. */
+  private lavaEnds(gameIds: string[]): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const id of new Set(gameIds)) {
+      const r = this.ctx.storage.sql
+        .exec(
+          `SELECT (g.start_unix + COALESCE(g.duration_sec, 0)) AS end_unix FROM games g
+            WHERE g.id = ? AND g.game_size = ? AND g.start_unix IS NOT NULL
+              AND EXISTS (SELECT 1 FROM replay_settings s
+                          WHERE s.replay_id = g.id AND s.flag = ?)`,
+          id,
+          LAVA_GAME_SIZE,
+          SETTINGS_LAVA_FLAG,
+        )
+        .toArray();
+      if (r.length > 0) out.set(id, r[0].end_unix as number);
+    }
+    return out;
+  }
+
+  /** lavaRetryCandidate is the lava lookup's SECOND chance: an 8v8 lava game
+   * whose re-simulation FAILED and that the asking host might still finish,
+   * or null. See LAVA_RETRY_WINDOW_SEC for why failures need one.
+   *
+   * A game qualifies when its jobs are ALL failures (none active, none done,
+   * none disabled — a disabled job is how a person says "leave it"), nothing
+   * is in the catalog for it, and either
+   *   - it ran out of memory, and no host with at least the asker's memory
+   *     ever did on it (memBytes is the failing host's total RAM, which
+   *     bringest reports with every job; an older daemon's failure carries
+   *     none and counts as a small host's), or
+   *   - it failed once, for any other reason: one automatic retry, so a bug
+   *     since fixed does not lose the game, and a game that is simply broken
+   *     costs one extra attempt and is then left alone.
+   * Each retry is a fresh job (the old row stays the record of the attempt),
+   * so a retry that runs out of memory again is a failure on THIS host's
+   * memory, and only a bigger one will try after it.
+   *
+   * THE WALK is jobs_failed, newest failure first, stopped at the window's
+   * edge: its cost is the failures of two weeks (a few hundred) and a few
+   * seeks each, and it rests per memory size on the empty answer. */
+  private lavaRetryCandidate(now: number, memBytes: number): string | null {
+    const rows = this.ctx.storage.sql
+      .exec(
+        `SELECT g.id AS id FROM jobs j JOIN games g ON g.id = j.game_id
+          WHERE j.state = 'error'
+            AND j.created_unix >= ?
+            AND j.kind = 'resim'
+            AND g.game_size = ?
+            AND EXISTS (SELECT 1 FROM replay_settings s
+                        WHERE s.replay_id = g.id AND s.flag = ?)
+            AND NOT EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id)
+            AND NOT EXISTS (SELECT 1 FROM jobs k WHERE k.game_id = g.id
+                            AND (k.state != 'error' OR k.disabled != 0))
+            AND NOT EXISTS (SELECT 1 FROM jobs k WHERE k.game_id = g.id
+                            AND k.state = 'error' AND k.error_kind = 'oom'
+                            AND COALESCE(json_extract(k.stats, '$.host.memBytes'), 0) >= ?)
+            AND (j.error_kind = 'oom'
+                 OR (SELECT COUNT(*) FROM jobs k WHERE k.game_id = g.id) = 1)
+          ORDER BY j.created_unix DESC
+          LIMIT 1`,
+        now - LAVA_RETRY_WINDOW_SEC,
+        LAVA_GAME_SIZE,
+        SETTINGS_LAVA_FLAG,
+        memBytes,
       )
       .toArray();
     return rows.length === 0 ? null : (rows[0].id as string);
@@ -2071,8 +2171,10 @@ export class ReplayIndex extends DurableObject<Env> {
    * BAR's output, so excluding them bought nothing and cost the only games in
    * the mirror that are not interchangeable.
    *
-   * It backfills only into an EMPTY pending list, so at most one auto-queued
-   * job is ever waiting: the next poll finds that job rather than making
+   * The ranked window backfills only into an EMPTY pending list (the lava
+   * lookup alone may add to a non-empty one, and only a game that ended later
+   * than every queued lava game), so at most one auto-queued job is ever
+   * waiting: the next poll finds that job rather than making
    * another. The check and the insert are one RPC — the DO is single-threaded,
    * so two daemons polling together cannot both queue the same game.
    *
@@ -2097,29 +2199,61 @@ export class ReplayIndex extends DurableObject<Env> {
    * daemon's protocol alone: a poll that returns a job it just created is
    * indistinguishable, to the daemon, from one that returns a job a person
    * queued a minute ago. */
-  jobsOffer(kind: JobKind, newJobId: string): IngestJob[] {
+  jobsOffer(kind: JobKind, newJobId: string, hostMemBytes = 0): IngestJob[] {
     const pending = this.jobsPending(kind);
-    if (pending.length > 0 || kind !== "resim") return pending;
-    // Everything above this line is a seek; the scan below is the one query on
-    // the poll path whose cost is measured in the size of the mirror, and an
-    // idle daemon asks 8640 times a day. So a scan that comes up EMPTY rests
-    // (at the bottom of this method) — that is the state a poll can repeat
+    if (kind !== "resim") return pending;
+    // Everything below the lava lookups is a scan whose cost is measured in
+    // the size of the mirror, and an idle daemon asks 8640 times a day. So a
+    // scan that comes up EMPTY rests — that is the state a poll can repeat
     // forever with nothing changing. A scan that finds a game does not: the
     // daemon leaves with it and stops asking.
     const now = Math.floor(Date.now() / 1000);
 
-    // The PRIORITY lookup, ahead of the general scan and rested separately:
-    // an 8v8 lava game of the last day outranks anything the ranked window
-    // below could offer, and is the one class of game that window cannot see
-    // at all (see lavaCandidate). Its own cooldown, because its empty answer
-    // is both the common one and much more expensive than jobsPending — and
-    // because sharing the general backfill's would let either one's rest
-    // silence the other.
+    // LAVA FIRST, NEWEST FIRST (Marcin, 2026-10-17): of every 8v8 lava game
+    // waiting — queued by hand, announced, or finished a minute ago and not
+    // queued yet — the one that ENDED most recently is the most relevant and
+    // runs first, and no other game runs while one is waiting. So the pending
+    // list is reordered with its lava games at the head, latest-ended first,
+    // and the newest unqueued lava game (lavaCandidate, on its own rest)
+    // jumps that list when it ended later than everything on it. The daemon
+    // takes one job per poll, so a game that finishes while another runs is
+    // what the NEXT poll is handed.
+    const ends = this.lavaEnds(pending.map((p) => p.gameId));
+    const lavaPending = pending.filter((p) => ends.has(p.gameId));
+    lavaPending.sort((a, b) => ends.get(b.gameId)! - ends.get(a.gameId)!);
+    const ordered = [...lavaPending, ...pending.filter((p) => !ends.has(p.gameId))];
+    const newestQueued = lavaPending.length > 0 ? ends.get(lavaPending[0].gameId)! : null;
+
+    // The unqueued lava lookup, rested on its own key: its empty answer is
+    // both the common one and much more expensive than jobsPending, and
+    // sharing the general backfill's rest would let either one silence the
+    // other. It is also the one class of game the ranked window below cannot
+    // see at all (see lavaCandidate).
     const lavaRest = this.metaGet("lava_after");
     if (lavaRest === null || now >= lavaRest) {
       const lava = this.lavaCandidate(now);
-      if (lava !== null) return this.offerBackfilled(newJobId, lava);
-      this.metaPut("lava_after", now + LAVA_COOLDOWN_SEC);
+      if (lava !== null) {
+        if (newestQueued === null || lava.end > newestQueued) {
+          return [...this.offerBackfilled(newJobId, lava.id), ...ordered];
+        }
+      } else {
+        this.metaPut("lava_after", now + LAVA_COOLDOWN_SEC);
+      }
+    }
+    if (ordered.length > 0) return ordered;
+
+    // Then the lava games that FAILED and this host might finish (see
+    // lavaRetryCandidate) — still ahead of everything that is not lava. Only
+    // for a daemon that says how much memory it has: without that, an oom
+    // retry could go straight back to a host as small as the one it failed on.
+    if (hostMemBytes > 0) {
+      const restKey = `lava_retry_after_${Math.floor(hostMemBytes / 2 ** 30)}`;
+      const retryRest = this.metaGet(restKey);
+      if (retryRest === null || now >= retryRest) {
+        const retry = this.lavaRetryCandidate(now, hostMemBytes);
+        if (retry !== null) return this.offerBackfilled(newJobId, retry);
+        this.metaPut(restKey, now + LAVA_RETRY_COOLDOWN_SEC);
+      }
     }
 
     const restUntil = this.metaGet("backfill_after");

@@ -1850,3 +1850,104 @@ test("gameStartUnix reads the mirror's start time", async () => {
     expect(index.gameStartUnix("nope")).toBe(null);
   });
 });
+
+// ---- Lava first, newest first, and a second chance on a bigger host ------
+
+const lava8 = (id: string, endedAgo: number): GameEntry =>
+  game(id, {
+    startUnix: AGO(endedAgo + 1800), durationSec: 1800, gameSize: "8v8",
+    playerCount: 16, settings: { lava: true, mods: true },
+  });
+const GiB = 2 ** 30;
+/** Fails job id the way a daemon on a host with memBytes of RAM reports it. */
+function fail(index: ReplayIndex, id: string, kind: "oom" | null, memBytes?: number): void {
+  index.jobUpdate(id, "processing", null);
+  index.jobUpdate(
+    id, "error", kind === "oom" ? "ran out of memory" : "open widget output: no such file",
+    memBytes === undefined ? null : ({ host: { memBytes } } as never), null, kind,
+  );
+}
+
+test("queued lava games run newest-ended first, ahead of everything else queued", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([lava8("lava-old", 30000), lava8("lava-new", 4000), game("plain", { startUnix: AGO(900) })]);
+    // Queued in the opposite order: the plain game first, then the old lava
+    // game, then the new one — as a person pasting links might.
+    index.jobInsert("q-plain", "", "plain", "resim");
+    index.jobInsert("q-old", "", "lava-old", "resim");
+    index.jobInsert("q-new", "", "lava-new", "resim");
+    expect(index.jobsOffer("resim", OFFER).map((j) => j.gameId)).toEqual(["lava-new", "lava-old", "plain"]);
+  });
+});
+
+test("a lava game that just ended jumps the queued ones", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([lava8("queued-lava", 30000), lava8("just-ended", 600)]);
+    index.jobInsert("q-1", "", "queued-lava", "resim");
+    const offered = index.jobsOffer("resim", OFFER);
+    expect(offered.map((j) => j.gameId)).toEqual(["just-ended", "queued-lava"]);
+    expect(offered[0].id).toBe(OFFER);
+  });
+});
+
+test("an unqueued lava game OLDER than the queued ones waits its turn", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([lava8("queued-lava", 600), lava8("older-lava", 30000)]);
+    index.jobInsert("q-1", "", "queued-lava", "resim");
+    expect(index.jobsOffer("resim", OFFER).map((j) => j.gameId)).toEqual(["queued-lava"]);
+    expect(index.jobGet(OFFER)).toBeNull();
+  });
+});
+
+test("a lava game that ran out of memory goes to a BIGGER host, once per size", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([lava8("big-lava", 4000)]);
+    index.jobInsert("r-1", "", "big-lava", "resim");
+    fail(index, "r-1", "oom", 8 * GiB);
+    // Not to a host as small as the one it failed on, nor to a daemon that
+    // does not say how big it is.
+    expect(index.jobsOffer("resim", "o-1", 8 * GiB)).toEqual([]);
+    expect(index.jobsOffer("resim", "o-2")).toEqual([]);
+    // A 16 GB host gets it, as a fresh job.
+    const got = index.jobsOffer("resim", "o-3", 16 * GiB);
+    expect(got.map((j) => [j.id, j.gameId])).toEqual([["o-3", "big-lava"]]);
+    // It runs out of memory there too: from now on only something bigger.
+    fail(index, "o-3", "oom", 16 * GiB);
+    expect(index.jobsOffer("resim", "o-4", 16 * GiB)).toEqual([]);
+    expect(index.jobsOffer("resim", "o-5", 32 * GiB)[0]).toMatchObject({ id: "o-5", gameId: "big-lava" });
+  });
+});
+
+test("any other lava failure is retried exactly once", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([lava8("sandboxed", 4000)]);
+    index.jobInsert("r-1", "", "sandboxed", "resim");
+    fail(index, "r-1", null, 8 * GiB);
+    expect(index.jobsOffer("resim", "o-1", 8 * GiB)[0]).toMatchObject({ id: "o-1", gameId: "sandboxed" });
+    fail(index, "o-1", null, 8 * GiB);
+    // Two plain failures: a game that is simply broken is left alone.
+    expect(index.jobsOffer("resim", "o-2", 64 * GiB)).toEqual([]);
+  });
+});
+
+test("a retry never undoes a person's choice or repeats finished work", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([lava8("held", 4000), lava8("done-too", 5000), game("plain-oom", { startUnix: AGO(5000) })]);
+    index.jobInsert("h-1", "", "held", "resim");
+    fail(index, "h-1", "oom", 8 * GiB);
+    index.jobInsert("h-2", "", "held", "resim");
+    index.jobSetDisabled("h-2", true);
+    index.jobInsert("d-1", "", "done-too", "resim");
+    fail(index, "d-1", "oom", 8 * GiB);
+    index.jobInsert("d-2", "", "done-too", "resim");
+    index.jobUpdate("d-2", "processing", null);
+    index.jobUpdate("d-2", "done", null);
+    // Only lava games get the second chance.
+    index.jobInsert("p-1", "", "plain-oom", "resim");
+    fail(index, "p-1", "oom", 8 * GiB);
+    const got = index.jobsOffer("resim", "o-1", 64 * GiB);
+    expect(got.map((j) => j.gameId)).not.toContain("held");
+    expect(got.map((j) => j.gameId)).not.toContain("done-too");
+    expect(got.map((j) => j.gameId)).not.toContain("plain-oom");
+  });
+});

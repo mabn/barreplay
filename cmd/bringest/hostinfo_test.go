@@ -1,6 +1,12 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
 
 func TestParseMemTotal(t *testing.T) {
 	if got := parseMemTotal("MemTotal:       16318412 kB\nMemFree: 1 kB\n"); got != 16318412*1024 {
@@ -57,5 +63,33 @@ func TestReadHostInfo(t *testing.T) {
 	h := readHostInfo()
 	if h.Threads < 1 || h.OS == "" {
 		t.Errorf("host = %+v", h)
+	}
+}
+
+// A re-sim poll carries the host's RAM, which is what lets the worker hand a
+// lava game that ran out of memory elsewhere to a bigger host; an upload poll
+// has no use for it and stays as it was.
+func TestResimPollSaysHostMemory(t *testing.T) {
+	defer func(h hostInfo) { thisHost = h }(thisHost)
+	thisHost = hostInfo{MemBytes: 1 << 34}
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.URL.RawQuery)
+		w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+	api := &workerAPI{indexURL: srv.URL, client: http.DefaultClient}
+	for _, kind := range []string{kindResim, kindUpload} {
+		if _, err := api.pendingJobs(context.Background(), kind); err != nil {
+			t.Fatal(err)
+		}
+	}
+	thisHost = hostInfo{}
+	if _, err := api.pendingJobs(context.Background(), kindResim); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"kind=resim&mem=17179869184", "kind=upload", "kind=resim"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("queries = %q, want %q", got, want)
 	}
 }

@@ -418,3 +418,52 @@ test("the recurring writes stay a handful of rows", async () => {
   // A daemon heartbeat: the job row update + one sample row.
   expect(costs.healthcheck, report).toBeLessThan(15);
 });
+
+/** The lava RETRY lookup (jobsOffer -> lavaRetryCandidate) walks FAILED jobs
+ * of the last two weeks, newest first, through the jobs_failed partial index.
+ * Seeded: a jobs table far bigger than the deployment's, most of it done and
+ * most of the failures older than the window, and inside the window a few
+ * hundred failures of games that are not lava — the empty answer, the one a
+ * daemon can ask for repeatedly. What must hold is that the cost is the
+ * window's failures, not the queue. */
+test("the lava retry lookup costs the window's failures, not the queue", async () => {
+  const costs = await measured((index, tally) => {
+    const sql = (index as unknown as { ctx: DurableObjectState }).ctx.storage.sql;
+    const now = Math.floor(Date.now() / 1000);
+    const seqOf = (n: number) =>
+      `WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < ${n}) SELECT n FROM seq`;
+    sql.exec(`INSERT INTO games (id, start_unix, duration_sec, map, map_file, game_size, preset,
+                player_count, players, settings, engine_version, game_version, synced_unix)
+      SELECT printf('g%06d', n), ${now} - n*120, 900, 'Map', 'map', '8v8', 'team', 16, '[]',
+             '{"ranked":true}', 'e', 'v', ${now} - n*120
+      FROM (${seqOf(GAMES)})`);
+    // 20k jobs, one every two minutes back from now: 1 in 20 failed (so ~500
+    // failures inside the two-week window), the rest done.
+    sql.exec(`INSERT INTO jobs (id, stream_key, game_id, kind, state, error, error_kind, stats,
+                created_unix, updated_unix)
+      SELECT printf('j%06d', n), '', printf('g%06d', n % ${GAMES}), 'resim',
+             CASE WHEN n % 20 = 0 THEN 'error' ELSE 'done' END,
+             CASE WHEN n % 20 = 0 THEN 'x' END,
+             CASE WHEN n % 40 = 0 THEN 'oom' END,
+             '{"host":{"memBytes":8000000000}}', ${now} - n*120, ${now} - n*120
+      FROM (${seqOf(20000)})`);
+    tally();
+    index.jobsOffer("resim", "job-retry-empty", 16 * 2 ** 30);
+    const out: Record<string, number> = {};
+    // Measure the retry lookup on its own: the other two scans rest.
+    sql.exec(`DELETE FROM jobs WHERE id = 'job-retry-empty'`);
+    sql.exec(`INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('lava_after', ${now + 3600}),
+                ('backfill_after', ${now + 3600})`);
+    sql.exec(`DELETE FROM schema_meta WHERE key LIKE 'lava_retry_after_%'`);
+    tally();
+    index.jobsOffer("resim", "job-retry-empty-2", 16 * 2 ** 30);
+    out.retryScanEmpty = tally();
+    // And its rest: the next poll from the same size of host reads nothing.
+    index.jobsOffer("resim", "job-retry-empty-3", 16 * 2 ** 30);
+    out.retryScanRested = tally();
+    return out;
+  });
+  const report = JSON.stringify(costs, null, 2);
+  expect(costs.retryScanEmpty, report).toBeLessThan(3000);
+  expect(costs.retryScanRested, report).toBeLessThan(20);
+});

@@ -849,7 +849,15 @@ app.get("/api/jobs", async (c) => {
   if (!JOB_KINDS.includes(kind as JobKind)) {
     return c.json({ error: `kind must be one of ${JOB_KINDS.join(", ")}` }, 400);
   }
-  const jobs = await indexStub(c.env).jobsOffer(kind as JobKind, crypto.randomUUID());
+  // ?mem= is the daemon's total RAM in bytes (bringest -resim sends it), which
+  // is what lets a lava game that ran out of memory on a small host go to a
+  // bigger one. Anything unparseable reads as "not said".
+  const mem = Number(new URL(c.req.url).searchParams.get("mem") ?? 0);
+  const jobs = await indexStub(c.env).jobsOffer(
+    kind as JobKind,
+    crypto.randomUUID(),
+    Number.isFinite(mem) && mem > 0 ? Math.floor(mem) : 0,
+  );
   return c.json(jobs, 200, { "cache-control": "no-cache" });
 });
 
