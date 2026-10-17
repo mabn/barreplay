@@ -52,8 +52,13 @@ const DefaultMinFreeBytes int64 = 512 << 20
 // handed out without swapping — /proc/meminfo's MemAvailable, which already
 // accounts for reclaimable page cache, and is therefore the right number to
 // watch rather than MemFree. Best-effort: ok=false where there is no
-// /proc/meminfo, or no such line on an ancient kernel.
+// /proc/meminfo, or no such line on an ancient kernel. On Windows it is
+// GlobalMemoryStatusEx's available physical memory (platform_windows.go).
 func MemAvailable() (int64, bool) {
+	return memAvailable()
+}
+
+func memAvailableProc() (int64, bool) {
 	b, err := os.ReadFile("/proc/meminfo")
 	if err != nil {
 		return 0, false
@@ -61,11 +66,16 @@ func MemAvailable() (int64, bool) {
 	return parseMemAvailable(string(b))
 }
 
-// parseMemAvailable pulls MemAvailable out of /proc/meminfo, in bytes. The
-// file's lines are "Key:<space>N kB"; the unit is always kB for these entries.
+// parseMemAvailable pulls MemAvailable out of /proc/meminfo, in bytes.
 func parseMemAvailable(meminfo string) (int64, bool) {
+	return parseMeminfo(meminfo, "MemAvailable:")
+}
+
+// parseMeminfo pulls one entry out of /proc/meminfo, in bytes. The file's
+// lines are "Key:<space>N kB"; the unit is always kB for these entries.
+func parseMeminfo(meminfo, key string) (int64, bool) {
 	for _, line := range strings.Split(meminfo, "\n") {
-		rest, ok := strings.CutPrefix(line, "MemAvailable:")
+		rest, ok := strings.CutPrefix(line, key)
 		if !ok {
 			continue
 		}
