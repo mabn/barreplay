@@ -1975,3 +1975,19 @@ MU -> **H78**, QG -> **H79**, FA -> **H80**. The entries above use the new
 names. The engine branch with the renamed comments is `speed24h` (identical
 to `speed24` but for 8 comment lines). P1 (v2-v7), P2, N1 and the widget's
 W1-W7 do not occur in main and keep their names.
+
+### 2026-10-17 19:35 — new profile -1.1%, H79 -1.7%, P1 v7 -1.5%, H80 noise; the late window at 10.54 s
+
+`speed24` = `speed23` (H79, P1 v7) + H80, built with the new profile. Medium
+gate `t=7fbf` `0558d354…`. Late window, cooled, 3 interleaved pairs each:
+
+| step | before | after | change |
+|---|---|---|---|
+| profile: `speed23` → `speed24`, `t=fbf` | 10.93 / 10.98 / 10.85 s | 10.97 / 10.69 / 10.74 s | **-1.1%** |
+| H79 (`fbf` → `1fbf`) | 10.82 / 11.06 / 11.03 s | 10.83 / 10.75 / 10.75 s | **-1.7%** |
+| P1 v7 (`1fbf` → `3fbf`) | 11.01 / 10.92 / 10.77 s | 10.79 / 10.72 / 10.70 s | **-1.5%**, every pair |
+| H80 (`3fbf` → `7fbf`) | 10.61 / 10.70 / 10.45 s | 10.46 / 10.53 / 10.63 s | -0.4% (noise level) |
+
+Everything on (`speed24`, `t=7fbf`): **10.54 s**, against 14.82 s with every
+toggle off (-28.9%) and `speed18`'s 11.18 s (-5.7%). Governed whole game
+running.

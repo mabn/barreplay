@@ -33,8 +33,11 @@ the sync checker hashes every synced write: 7.9% of the late game, read only
 by multiplayer desync detection. `tools/build-pgolto-g.sh` is the PGO+LTO
 build used throughout (with `-g`, plus `EXTRA_CMAKE`, `LDEXTRA` and `PROFILE`
 hooks). `tools/pgo-profile-speed22.tar.xz` is a PGO profile trained on this
-code with every toggle on; the published `../pgo/profile.tar.xz` is
-revision 3's.
+code with every toggle on (-1.1% in the late window against revision 3's
+profile, which `../pgo/profile.tar.xz` still is).
+
+All of it together (`t=7fbf`, the new profile): the late window runs 10.54 s
+against 14.82 s with every toggle off (-28.9%).
 
 ## Toggles
 
@@ -58,9 +61,9 @@ everything up to `0xfbf`, the whole verylarge1 game `a26e920d…`.
 | `0x200` | H76 | 0037 | the unit loops' `for_mt_chunk` hand out chunks of at most 32 (the main thread waited for the slowest worker's quarter) | **-2.2%** | on |
 | `0x400` | H77 | 0038 | `GenerateWeaponTargets` prefetches the candidate 6 ahead (three lines) | **-1.2%** | on |
 | `0x800` | H78 | 0040 | `MovedUnit` copies the quad list instead of taking the pooled buffer (a malloc + free per move) | not measured alone | on |
-| `0x1000` | H79 | 0041 | `GetQuads` finds each row's run of quads by its two ends | being measured | ? |
-| `0x2000` | P1 v7 | 0042 | an item passes the in-order start on before waiting for its targets | being measured | ? |
-| `0x4000` | H80 | 0043 | `FindAnim` searches on one packed 64-bit key | being measured | ? |
+| `0x1000` | H79 | 0041 | `GetQuads` finds each row's run of quads by its two ends | **-1.7%** | on |
+| `0x2000` | P1 v7 | 0042 | an item passes the in-order start on before waiting for its targets | **-1.5%** | on |
+| `0x4000` | H80 | 0043 | `FindAnim` searches on one packed 64-bit key | -0.4% (noise level) | on |
 
 Not toggled (always on in these builds):
 
