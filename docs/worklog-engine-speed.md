@@ -1614,3 +1614,46 @@ flying/hovering and stunned/unfinished aircraft in parallel, toggle bit 5).
 
 USER also asked which engine changes (not exact, but not changing gameplay)
 would unlock the most: [engine-changes-for-speed.md](engine-changes-for-speed.md).
+
+### 2026-10-17 09:50 — `speed15` (P1 v5): late window -18% vs all off; governed whole game 18m23s -> 16m39s active
+
+- **P1 v5** (toggle bit 5): hover aircraft flying or hovering run in parallel
+  (their state changes there only set own flags; the RNG draws for hover wind
+  and circling wait at a SerialPoint), and so do stunned or unfinished aircraft
+  of both kinds (that path is the unit's own physics, collide being off).
+  Serial items per frame 425 -> **253** (116 standing still, 127 landing or
+  taking off, 10 crashing near the ground); 6.6 SerialPoints and 0.2 script
+  calls per frame inside parallel items. Medium gate `0558d354…`.
+- Late window, cooled (50 C), fans max, 4 pairs: `t=1f` 12.41 s -> `t=3f`
+  **12.12 s (-2.3%)**; against everything off (14.82 s, `speed14`): **-18%**.
+- **Governed whole games** (`speed15`, pause at 88 C / resume at 55 C):
+
+| toggles | sim | paused | **active** | md5 |
+|---|---|---|---|---|
+| `t=0` | 35m49s | 17m26s | **18m23s** | `a26e920d…` |
+| `t=3f` | 37m21s | 20m42s | **16m39s (-9.4%)** | `a26e920d…` |
+
+  The whole game gains half the late window's share: the early and middle
+  game have few aircraft (P1 does nothing there) and less of everything else.
+
+Main thread now (`t=3f`, late window), % of core:
+
+![verylarge1 late game, speed15 t=3f, main thread](flamegraphs/2026-10-17-verylarge1-speed15.svg)
+
+| phase | % of main core |
+|---|---|
+| unit updates | 61.8% |
+| ├ weapon auto-targeting | 10.0% |
+| ├ aircraft loop (P1: ~3% own items, ~3.6% waits/plan/dispatch, 1.4% serial items' Lua) | 9.6% |
+| ├ weapon vectors (parallel section; H73 moved the lazy piece transforms here) | 8.9% |
+| ├ ground movement | 6.4% |
+| ├ `CUnit::SlowUpdate` 5.3, beam lasers 4.5, weapon update 3.5 | 13.3% |
+| ├ quad field 2.9, `CUnit::Update` 2.5, inlined loops 3.5 | 8.9% |
+| └ factories 1.8, builders 1.7, rest 1.1 | 4.6% |
+| Lua callins (gadgets), not from units | 11.4% |
+| LOS update (parallel section) | 5.9% |
+| COB scripts | 5.4% |
+| projectiles + collisions | 4.4% |
+| unit-script anims (parallel; was 6.6% before H73) | 3.0% |
+| Lua GC 2.3, pathfinding 2.3, map damage 1.9, rest 1.8 | 8.3% |
+| **total** | **100%** |
