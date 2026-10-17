@@ -1908,3 +1908,25 @@ the new quad list into the unit's own buffer instead of taking the pooled
 query vector's buffer. Moving it left the pool with an empty vector to allocate
 again and freed the unit's old buffer: a malloc and a free per unit changing
 quads, ~0.3% of the main core in mimalloc. Same contents. Building (gold).
+
+### 2026-10-17 17:45 — `speed22`, every toggle on: whole game identical; PGO retraining; QG
+
+`speed22` (gold link) `t=fbf` (P1 v1-v6, P2, N1, H72/H73, PW, CH, PG, MU): medium
+gate `0558d354…`, and the **whole verylarge1 game identical** (`a26e920d…`;
+an ungoverned md5 run sharing the CPU with a build, so its time means
+nothing).
+
+The PGO profile is still revision 3's: none of P1, P2, N1, W6, H72/H73 or the
+prefetches existed when it was trained. Retraining on `speed22`'s code with
+every toggle on: instrumented build done (`pgo22-work`), training running
+(the medium replay and the sandboxed-BAR game c04fd06a whole, verylarge1 up to
+frame 65580, as before).
+
+**QG** (toggle `0x1000`, `speed23`): `CQuadField::GetQuads` is 3.7% of the main
+core (weapon auto-targeting, the air command AI, `MovedUnit`), almost all of it
+the per-quad centre and distance test, not memory. In one row of quads the test
+is `dx*dx + dz*dz < maxSqLength` with `dz` fixed and `dx = pos.x - centre.x`
+falling as `x` grows. IEEE rounding is monotone, so the sum first does not
+grow, then does not shrink, and the quads that pass form one unbroken run. QG
+finds the run's two ends with exactly the same float expressions and pushes
+the run: the same quads, in the same order, with the tests only at the ends.
