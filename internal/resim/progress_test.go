@@ -264,3 +264,22 @@ func TestExpiredForecastSaysNothing(t *testing.T) {
 		t.Errorf("expired forecast reports %v, want none", got)
 	}
 }
+
+// Which engine a run uses is reported from the moment it is located and kept
+// through every later phase, since the window shows it for the whole run.
+func TestProgressReportsEngine(t *testing.T) {
+	p := &Progress{}
+	if got := p.Snapshot().Engine; got != "" {
+		t.Fatalf("before the engine is located: Engine = %q, want empty", got)
+	}
+	p.setEngine(true)
+	p.SetPhase(PhaseLoading)
+	p.SetPhase(PhaseSimulating)
+	if got := p.Snapshot().Engine; got != EnginePatched {
+		t.Errorf("Engine = %q, want %q", got, EnginePatched)
+	}
+	p.setEngine(false)
+	if got := p.Snapshot().Engine; got != EngineStock {
+		t.Errorf("Engine = %q, want %q", got, EngineStock)
+	}
+}

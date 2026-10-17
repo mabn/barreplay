@@ -113,7 +113,7 @@ type JobView struct {
 	RSSBytes    int64        `json:"rssBytes"`
 	CPUPercent  float64      `json:"cpuPercent"`
 	ElapsedSec  float64      `json:"elapsedSec"`
-	Patched     bool         `json:"patched"`
+	Engine      string       `json:"engine"` // resim.EnginePatched/EngineStock, "" until located
 	Auto        bool         `json:"auto"`
 	Download    *Download    `json:"download,omitempty"`
 }
@@ -694,7 +694,7 @@ func (a *App) snapshot() State {
 			RSSBytes:    p.RSSBytes,
 			CPUPercent:  p.CPUPercent,
 			ElapsedSec:  time.Since(r.started).Seconds(),
-			Patched:     r.stats.EnginePatched,
+			Engine:      p.Engine,
 			Auto:        r.auto,
 		}
 		if r.phase != "" {

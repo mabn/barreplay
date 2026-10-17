@@ -69,7 +69,18 @@ type ProgressState struct {
 	RSSBytes   int64
 	SwapBytes  int64
 	CPUPercent float64
+	// Engine is which build the run is using once it has located one:
+	// EnginePatched or EngineStock, "" before then. It is known at engine
+	// start, long before RunStats.EnginePatched, which is written when the
+	// engine exits.
+	Engine string
 }
+
+// The values of ProgressState.Engine.
+const (
+	EnginePatched = "patched"
+	EngineStock   = "stock"
+)
 
 // Progress is a live, concurrency-safe view of a running re-simulation. Pass
 // one in through Options.Progress and read it with Snapshot from any goroutine
@@ -163,6 +174,19 @@ func (p *Progress) SetPhase(phase string) {
 		p.st.Frame, p.st.Percent, p.st.ETASec, p.st.SimFPS = 0, 0, 0, 0
 	}
 	p.st.Phase = phase
+}
+
+// setEngine records which engine build the run is using.
+func (p *Progress) setEngine(patched bool) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.st.Engine = EngineStock
+	if patched {
+		p.st.Engine = EnginePatched
+	}
 }
 
 // setSim records one measurement of the simulation's progress.
