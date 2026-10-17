@@ -231,7 +231,7 @@ func run() int {
 				client:   &http.Client{Timeout: 5 * time.Minute},
 			},
 			process: func(ctx context.Context, streamPath string, st *jobStats) error {
-				return processStream(ctx, client, streamPath, *target, *workerDir, indexURL, *stats, st)
+				return processUpload(ctx, client, streamPath, *target, *workerDir, indexURL, *stats, st)
 			},
 		}
 	}
@@ -344,6 +344,9 @@ type jobStats struct {
 	PackSec   float64 `json:"packSec,omitempty"`
 	UploadSec float64 `json:"uploadSec,omitempty"`
 	BrpBytes  int64   `json:"brpBytes,omitempty"`
+	// ViewCheck is what an upload's opening frames said about whose view it
+	// is (packer.ViewCheck), which decides the view it was published under.
+	ViewCheck string `json:"viewCheck,omitempty"`
 
 	// Re-sim only, from resim.RunStats.
 	ResimSec      float64 `json:"resimSec,omitempty"`
@@ -575,9 +578,10 @@ func (d *daemon) runOnce(ctx context.Context) (int, error) {
 	return attempted, nil
 }
 
-// handle runs one job: claim it, download the archived stream to a temp file
-// named after the gameId (packer.Pack keys the replay off the basename), and
-// hand it to the pipeline. The stats come back on the failure path too, so a
+// handle runs one job: claim it, download the archived upload to a temp file
+// named after the gameId (packer.Pack keys the replay off the basename) with
+// the archive's own extension — .brepstream, or .brp for a capture uploaded
+// already packed — and hand it to the pipeline. The stats come back on the failure path too, so a
 // job that died carries what it managed to measure.
 func (d *daemon) handle(ctx context.Context, j ingestJob) (*jobStats, error) {
 	started := time.Now()
@@ -592,7 +596,11 @@ func (d *daemon) handle(ctx context.Context, j ingestJob) (*jobStats, error) {
 		return st, err
 	}
 	defer os.RemoveAll(tmp)
-	streamPath := filepath.Join(tmp, j.GameID+".brepstream")
+	ext := ".brepstream"
+	if strings.EqualFold(filepath.Ext(j.StreamKey), ".brp") {
+		ext = ".brp"
+	}
+	streamPath := filepath.Join(tmp, j.GameID+ext)
 	if err := d.download(ctx, j.StreamKey, streamPath); err != nil {
 		return st, fmt.Errorf("downloading %s: %w", j.StreamKey, err)
 	}
@@ -798,18 +806,34 @@ func (d *workerAPI) auth(req *http.Request) {
 // BAR API knows the game, the stream's own metadata otherwise) and publish it
 // under its content-addressed revision. Idempotent: the same stream re-lands
 // on the same keys and catalog row.
-func processStream(ctx context.Context, client *barapi.Client, streamPath, target, workerDir, indexURL string, stats bool, st *jobStats) error {
+// processUpload publishes one uploaded capture. A .brepstream is packed; a
+// .brp arrives packed and is never repacked, only given the demo's
+// self-destruct orders when it lacks them (what `pack -upload x.brp` does).
+// Either way the point of view the catalog records comes from the frames
+// (packer.ViewFromFrames), not from what the capture says about itself.
+func processUpload(ctx context.Context, client *barapi.Client, streamPath, target, workerDir, indexURL string, stats bool, st *jobStats) error {
 	packStart := time.Now()
-	brpPath, modOptions, err := packer.Pack(ctx, client, streamPath, filepath.Dir(streamPath), "", false)
-	if errors.Is(err, packer.ErrDemoUnavailable) {
-		fmt.Fprintf(os.Stderr, "bringest: %v; publishing with the stream's own metadata\n", err)
-		brpPath, modOptions, err = packer.Pack(ctx, client, streamPath, filepath.Dir(streamPath), "", true)
+	var brpPath string
+	var modOptions map[string]string
+	var err error
+	if strings.EqualFold(filepath.Ext(streamPath), ".brp") {
+		brpPath, modOptions, err = checkedBRP(ctx, client, streamPath)
+	} else {
+		brpPath, modOptions, err = packer.Pack(ctx, client, streamPath, filepath.Dir(streamPath), "", false)
+		if errors.Is(err, packer.ErrDemoUnavailable) {
+			fmt.Fprintf(os.Stderr, "bringest: %v; publishing with the stream's own metadata\n", err)
+			brpPath, modOptions, err = packer.Pack(ctx, client, streamPath, filepath.Dir(streamPath), "", true)
+		}
 	}
 	if err != nil {
 		return err
 	}
 	if st != nil {
 		st.PackSec = time.Since(packStart).Seconds()
+	}
+	view, ally, err := frameView(brpPath, st)
+	if err != nil {
+		return err
 	}
 	recordBRP(st, brpPath, stats)
 	// AFTER the pack, and from the packed file: the fallback just above is
@@ -828,12 +852,70 @@ func processStream(ctx context.Context, client *barapi.Client, streamPath, targe
 		IndexURL:   indexURL,
 		Rev:        rev,
 		ModOptions: modOptions,
+		View:       view,
+		Ally:       ally,
 		BarAPI:     client,
 	})
 	if st != nil {
 		st.UploadSec = time.Since(uploadStart).Seconds()
 	}
 	return err
+}
+
+// checkedBRP validates an uploaded .brp — the container, the meta and every
+// chunk, decoded one at a time and dropped, so a big game is never held
+// whole — and returns the file to publish: the upload itself, or a copy
+// with the demo's self-destruct orders added. A game whose demo cannot be had
+// publishes without them, as a stream upload does without its demo metadata.
+func checkedBRP(ctx context.Context, client *barapi.Client, path string) (string, map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", nil, err
+	}
+	bf, err := snapshot.ParseBRP(bufio.NewReader(f))
+	f.Close()
+	if err != nil {
+		return "", nil, fmt.Errorf("not a readable .brp: %w", err)
+	}
+	for i := range bf.Chunks {
+		if _, err := bf.DecodeChunk(i); err != nil {
+			return "", nil, fmt.Errorf("not a readable .brp: %w", err)
+		}
+	}
+	dir := filepath.Join(filepath.Dir(path), "orders") // inside the job's temp dir
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", nil, err
+	}
+	out, modOptions, err := packer.AddDemoOrders(ctx, client, path, dir, "")
+	if errors.Is(err, packer.ErrDemoUnavailable) {
+		fmt.Fprintf(os.Stderr, "bringest: %v; publishing without the demo's orders\n", err)
+		return path, nil, nil
+	}
+	return out, modOptions, err
+}
+
+// frameView decides the point of view to publish under from the capture's
+// opening frames (packer.UploadView) and notes the verdict on the job.
+func frameView(brpPath string, st *jobStats) (string, *int32, error) {
+	f, err := os.Open(brpPath)
+	if err != nil {
+		return "", nil, err
+	}
+	bf, err := snapshot.ParseBRP(bufio.NewReader(f))
+	f.Close()
+	if err != nil {
+		return "", nil, err
+	}
+	vc, err := packer.ViewFromFrames(bf)
+	if err != nil {
+		return "", nil, fmt.Errorf("reading the opening frames: %w", err)
+	}
+	view, ally := packer.UploadView(bf.Meta, vc)
+	fmt.Fprintf(os.Stderr, "bringest: %s: %s -> view %q\n", bf.Meta.GameID, vc, view)
+	if st != nil {
+		st.ViewCheck = vc.String()
+	}
+	return view, ally, nil
 }
 
 // recordBRP measures the finished .brp and — when the size report is wanted —

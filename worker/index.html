@@ -99,7 +99,7 @@
 <div id="home" style="display:none">
   <div id="homemain">
     <!-- Drag&drop publishing: a .brepstream (the Replay uploader widget's
-         capture) POSTs to /api/upload; the worker archives it and the ingest
+         capture) or a .brp (a capture already packed) POSTs to /api/upload; the worker archives it and the ingest
          daemon publishes it. Hidden with a note on hosts without the API.
          Outside the sections: a drop is accepted from either of them, and its
          progress line stays put while the Queue section is watched. -->
@@ -109,8 +109,8 @@
            The setup link is RELATIVE: it resolves to /setup on whichever
            origin serves the page (https://replay.fogofwar.dev/setup deployed,
            the loopback origin under `vite dev`). -->
-      <span id="droplabel">Drop a <code>.brepstream</code> capture here to publish it —
-        or <label class="browse">browse<input type="file" id="dropfile" accept=".brepstream" hidden></label>.
+      <span id="droplabel">Drop a <code>.brepstream</code> or <code>.brp</code> capture here to publish it —
+        or <label class="browse">browse<input type="file" id="dropfile" accept=".brepstream,.brp" hidden></label>.
         Want to record your own games? <a href="/setup">Here is how.</a></span>
       <div id="dropstatus" style="display:none"></div>
     </div>

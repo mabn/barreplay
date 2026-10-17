@@ -131,7 +131,14 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           the guarded GET /api/streams/<gameId>/<file> route (daemon->worker is
                           HTTPS only: no S3 reads, no inbound connectivity — runs behind NAT),
                           publishes via internal/packer under the stream's content-addressed
-                          revision (demo fetch falling back to the stream's own GAME metadata
+                          revision (an archived .brp is never repacked: it is fully decoded once
+                          as a check and given the demo's self-destruct orders and modoptions via
+                          packer.AddDemoOrders; WHOSE VIEW an upload of either kind is published
+                          under comes from its FRAMES, not its own claim — packer.ViewFromFrames
+                          counts the sides owning an identified unit in the first 10 s, when no
+                          side can have seen another yet: two or more = "full", one = "ally";
+                          with no opening frames a one-sided claim stands and a full one becomes
+                          "unknown" (packer.UploadView); the verdict rides jobStats.viewCheck) (demo fetch falling back to the stream's own GAME metadata
                           when the BAR API doesn't know the game), and reports done/error for
                           the browser to poll. -once drains the backlog and exits; jobs survive
                           daemon downtime as pending, stalled "processing" jobs are re-offered
@@ -1833,8 +1840,11 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           replayList as the catalog — it is a filtered page — so any well-formed
                           id is attempted and loadReplay reports a real failure rather than
                           silently bouncing a shared link to the list.
-                          DRAG&DROP UPLOADS: the landing page's dropzone POSTs a raw .brepstream to
-                          /api/upload (open endpoint; the Hono app lives in src/worker/app.ts, kept
+                          DRAG&DROP UPLOADS: the landing page's dropzone POSTs a raw .brepstream OR an
+                          already-packed .brp to /api/upload (told apart by the first bytes, never the
+                          file name; a .brp's head is checked by src/worker/brphead.ts — magic, version
+                          5/6, the gzipped M meta's gameId and recorder — and archived the same way with
+                          a .brp extension, which is what tells bringest not to pack it) (open endpoint; the Hono app lives in src/worker/app.ts, kept
                           free of workerd imports so worker/tests drive the real routes; index.ts is
                           the wrangler entry re-exporting the DO class). The worker never transcodes
                           (viewer serves the .brp wire only; the Go pipeline produces it): it scans
