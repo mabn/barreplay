@@ -1683,3 +1683,31 @@ Main thread now (`t=3f`, late window), % of core:
   move type, script, command AI, weapons and their targets. Prefetches and
   relaxed pointer loads from pool memory only; it parks on a futex between
   loops (a spinning sibling would take the main thread's issue slots).
+
+### 2026-10-17 12:40 — R1 (prefetch helper on the hyperthread sibling): +11%, dropped; where the goal stands
+
+`speed16` = `speed15` + R1 (toggle bit 6). Medium gate `0558d354…`. Late
+window, cooled, main on cpu 3, workers on 0-2,4-6 (cpu 7 left to the helper):
+
+| toggles | wall per trial | mean | main cycles |
+|---|---|---|---|
+| `t=3f` | 12.00 / 11.98 / 11.95 / 11.81 s | 11.93 s | 44.3e9 |
+| `t=7f` (+R1) | 13.38 / 13.18 / 13.32 / 13.41 s | 13.32 s (**+11.6%**) | 49.4e9 |
+
+A busy sibling takes the main thread's issue slots and L1/L2 bandwidth; the
+prefetches do not pay for that. Off (it stays behind its toggle).
+
+Also sized and left: map damage's `RecalcArea` (1.6%) is mostly
+`ILosType::UpdateHeightMapSynced` scanning every LOS instance of the terrain-
+blocked LOS types for each finished crater (~1%); pathfinding's 1.9% on the
+main thread is its own threaded node-layer update.
+
+**Where the 10-minute goal stands.** Best exact results: late window -18%
+(14.8 -> 12.1 s); governed whole game 18m23s -> 16m39s active (4 threads),
+15m54s (7 threads); real runs on a cool laptop ~19 min. What is left exact is
+a list of 0.5-3% items (weapon loop, COB ticks, LOS overlap scan, widget),
+perhaps ~10% together. Getting to 10 minutes needs most of the remaining
+serial ~75% of the main thread to run in parallel, which the engine's rules
+forbid while the output must stay byte-identical: the sequential synced RNG,
+order-dependent reads, and synced Lua inside the unit loops
+(engine-changes-for-speed.md).
