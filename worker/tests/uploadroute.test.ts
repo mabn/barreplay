@@ -180,6 +180,8 @@ class FakeIndex {
   }
   lastGamesQuery: { limit: number; after: GamesCursor | null } | null = null;
   lastGamesFilter: ReplayFilter | null = null;
+  /** Answer like the DO before the filters existed: no `partial`, filter ignored. */
+  gamesPageUnfiltering = false;
   gamesPage(limit: number, after: GamesCursor | null, filter?: ReplayFilter): { games: GameListRow[]; next: GamesCursor | null; partial?: boolean } {
     this.lastGamesQuery = { limit, after };
     this.lastGamesFilter = filter ?? null;
@@ -187,7 +189,7 @@ class FakeIndex {
     const games = this.games.slice(from, from + limit);
     const last = games[games.length - 1];
     const next = from + limit < this.games.length && last ? { endUnix: last.startUnix, id: last.id } : null;
-    return { games, next };
+    return this.gamesPageUnfiltering ? { games, next } : { games, next, partial: false };
   }
   lastQueueQuery: { limit: number; offset: number } | null = null;
   queuePage(limit: number, offset: number): { jobs: QueueJob[]; total: number; active: number } {
@@ -530,7 +532,7 @@ test("GET /api/games pages the mirror by cursor, and counts nothing", async () =
 
   const first = await asJson(await app.request("/api/games?limit=5", {}, env));
   assert.equal(first.games.length, 5);
-  assert.deepEqual(Object.keys(first).sort(), ["games", "next"], "no total, no page count, no offset");
+  assert.deepEqual(Object.keys(first).sort(), ["games", "next", "partial"], "no total, no page count, no offset");
   assert.equal(first.games[0].published, true);
   assert.equal(first.games[1].jobState, "pending");
   assert.equal(typeof first.next, "string", "a page with more behind it hands out the cursor of the next one");
@@ -578,6 +580,20 @@ test("GET /api/games filters like the replay list, minus the player name", async
   assert.equal(bad.status, 400);
   assert.match((await asJson(bad)).error, /^idPrefix /);
   assert.equal((await app.request("/api/games?minPlayers=lots", {}, env)).status, 400);
+});
+
+// During a deploy the new route can reach a ReplayIndex still running the
+// build before filters (it took two arguments and dropped the third): it
+// answered every filtered request with the UNFILTERED mirror. A filtered
+// request must never come back unfiltered.
+test("GET /api/games refuses to pass off an unfiltered page as a filtered one", async () => {
+  const { env, index } = makeEnv();
+  index.gamesPageUnfiltering = true;
+  const res = await app.request("/api/games?map=Supreme%20Isthmus", {}, env);
+  assert.equal(res.status, 503);
+  assert.match((await asJson(res)).error, /filter/);
+  // An unfiltered listing is the same either way, so it still answers.
+  assert.equal((await app.request("/api/games?limit=5", {}, env)).status, 200);
 });
 
 // Fetch-by-ids: ?id= answers the named games instead of a listing page.

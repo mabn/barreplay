@@ -6321,12 +6321,15 @@ async function refreshGames() {
       renderGames(GAMES_UNSUPPORTED);
       return;
     }
-    if (r.status === 400) {
+    if (r.status === 400 || r.status === 503) {
+      // 400: a malformed filter. 503: the catalog cannot filter yet (an older
+      // build mid-deploy) — said, rather than listing games that do not match.
       const body = await r.json().catch(() => null);
       if (seq !== gamesSeq) return;
       gamesRows = [];
       gamesNext = null;
-      renderGames('Invalid filter: ' + ((body && body.error) || 'HTTP 400'));
+      const why = (body && body.error) || `HTTP ${r.status}`;
+      renderGames(r.status === 400 ? 'Invalid filter: ' + why : 'Could not filter the games: ' + why);
       return;
     }
     if (!r.ok) { renderGames(`Could not read the games: HTTP ${r.status}`); return; }

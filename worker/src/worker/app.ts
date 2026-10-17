@@ -35,7 +35,7 @@ import { parseGameId } from "./gameid";
 import { JOB_KINDS, parseJobErrorKind, parseJobProgress, parseJobStats } from "./jobs";
 import type { JobKind } from "./jobs";
 import { archiveSuffix, scanStreamPreamble } from "./preamble";
-import { isReplayFolder, monthFolder, parseReplayFilter, parseViewRequest, playersFromApi, sanitizeEntry, settingsFlags } from "./replayentry";
+import { isEmptyFilter, isReplayFolder, monthFolder, parseReplayFilter, parseViewRequest, playersFromApi, sanitizeEntry, settingsFlags } from "./replayentry";
 
 /** Upload size cap: keeps a whole raw stream inside Worker memory. Real
  * streams are single-digit MB (~6.5x smaller than the text format), so this
@@ -740,6 +740,16 @@ app.get("/api/games", async (c) => {
   if (typeof filter === "string") return c.json({ error: filter.replace(/^id /, "idPrefix ") }, 400);
 
   const page = await indexStub(c.env).gamesPage(limit, after, filter);
+  // A ReplayIndex from before the filters drops the third argument and answers
+  // with the whole mirror — which happens for a while after a deploy, when the
+  // new route reaches the old instance (and always under dev:prod until
+  // production is deployed). Its reply has no `partial`; a filtered request
+  // then fails loudly rather than listing games that do not match.
+  if (typeof page.partial !== "boolean" && !isEmptyFilter(filter)) {
+    return c.json({ error: "game filters are not available yet: the catalog is still running an older build" }, 503, {
+      "cache-control": "no-store",
+    });
+  }
   return c.json(
     {
       games: page.games,
