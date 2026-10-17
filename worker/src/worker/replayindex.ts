@@ -38,6 +38,7 @@ import {
   SETTINGS_LAVA_FLAG,
   SETTINGS_MODS_FLAG,
   derivePlayerCount,
+  emptyFilter,
   isMainRid,
   mergeUploads,
   wantsFullView,
@@ -147,8 +148,39 @@ const BACKFILL_COOLDOWN_SEC = 60;
  * to ~288 walks a day. As with the general backfill, ONLY the empty answer
  * rests: a walk that queues a game is not repeated, because the daemon leaves
  * with it. */
+/** gamesPage's filters (see its note): the rows one filtered page may read
+ * before it answers short with a cursor to keep searching; the player counts
+ * and the duration minutes walked one branch each (the rest is one branch);
+ * and the id prefix long enough to walk the primary key rather than check
+ * each row (4 hex characters = 1/65536 of the mirror). */
+const GAMES_SCAN_MAX = 2000;
+const GAMES_COUNT_BRANCH_MAX = 32;
+const GAMES_DURMIN_BRANCH_MAX = 90;
+const GAMES_ID_WALK_MIN = 4;
+
 const LAVA_WINDOW_SEC = 24 * 3600;
 const LAVA_COOLDOWN_SEC = 300;
+
+/** The lava RETRY lookup (lavaRetryCandidate): how far back a failed job
+ * still counts, and how long the lookup rests on an empty answer.
+ *
+ * A failed re-sim is never offered again by the scans above — a game that
+ * cannot re-simulate would otherwise come back every poll — which is right
+ * for a game that is broken and wrong for one that ran out of MEMORY: "oom"
+ * says the HOST was too small (an 8v8 lava game wants ~6 GB resident, and a
+ * 16 GB box runs what an 8 GB one cannot), so the same job is worth handing
+ * to a daemon with more memory than the one that failed. On 2026-10-17 that
+ * was 19 of the 29 lava 8v8s of four days with no capture: every one of them
+ * queued within the hour, run first, and lost for good on the one 8 GB host
+ * that was running. (The other 10 failed on BAR's widget sandbox before
+ * widget 1.11.1; failures other than "oom" are not retried automatically.)
+ *
+ * Two weeks bounds what the lookup reads (failed jobs, through jobs_failed),
+ * and is also past the point where a late capture still matters to anyone.
+ * The rest is per MEMORY SIZE (a GiB bucket) because the answer is: a small
+ * host finding nothing it can retry says nothing about a big one. */
+const LAVA_RETRY_WINDOW_SEC = 14 * 24 * 3600;
+const LAVA_RETRY_COOLDOWN_SEC = 300;
 
 /** How far back the lava sync will still offer a game it has never offered
  * (see gamesLavaPending). Its whole job is to bound that query, and the first
@@ -247,7 +279,7 @@ const DERIVED_VERSION = 3;
  * whether the DDL needs to run at all — a read, where the DDL statements are
  * write-classified even as no-ops. BUMP THIS whenever SCHEMA_DDL, INDEX_DDL
  * or ADDED_COLUMNS change, or the change never reaches a deployed database. */
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 /** Everything migrateSchema creates, split from the code so schemaCurrent can
  * scan the same text it executes (one source, nothing to drift). */
@@ -425,28 +457,23 @@ const INDEX_DDL = `
       -- the games mirrored since the last run instead of every game inside the
       -- oldest open observation's time window.
       CREATE INDEX IF NOT EXISTS games_synced   ON games (synced_unix);
-      -- The re-sim backfill's walk (jobsOffer), COVERING it: most recently
-      -- ENDED first is the order it reads in — an EXPRESSION index, because
-      -- end time is start_unix + duration_sec and storing it as a column
-      -- would mean a migration UPDATE over the whole mirror for a number the
-      -- row already implies. The expression in jobsOffer's ORDER BY must
-      -- match this one TEXTUALLY or the planner sorts the whole mirror into
-      -- a temp b-tree (the rowcost test is the guard). COALESCE so a game
-      -- with no recorded duration still ranks by its start rather than
-      -- falling to the very end as NULL; a NULL start still sorts last (NULL
-      -- is smaller than every value, so DESC puts it there by itself).
-      -- id + player_count ride along so the walk never touches the games
-      -- table and the id tiebreak needs no sort.
-      --
-      -- It REPLACES games_backfill (start_unix DESC, id, player_count), which
-      -- ordered the walk by START time: a game only reaches the mirror once
-      -- it has ENDED, so a long game arrived pre-buried under every shorter
-      -- game that started after it — see BACKFILL_WINDOW. Dropped rather than
-      -- kept because nothing else ordered by it, and a second index is a
-      -- second write per mirrored game against a write budget already two
-      -- thirds spent.
-      CREATE INDEX IF NOT EXISTS games_backfill_end
-        ON games ((start_unix + COALESCE(duration_sec, 0)) DESC, id, player_count);
+      -- The END-TIME order every games walk reads in (the Games listing, the
+      -- re-sim backfill, the lava lookups): most recently ENDED first, which is
+      -- ARRIVAL order — a game is mirrored only once it is over. player_count
+      -- rides along so the backfill's walk never touches the games table and
+      -- the id tiebreak needs no sort. It replaces games_backfill_end, the same
+      -- index over the EXPRESSION start_unix + COALESCE(duration_sec, 0),
+      -- which end_unix now stores.
+      CREATE INDEX IF NOT EXISTS games_end ON games (end_unix DESC, id, player_count);
+      -- The Games listing's filters, each an equality the walk can seek on and
+      -- then read in end order (gamesPage): one map; one player count per
+      -- branch of a range; one MINUTE of duration per branch of a range (the
+      -- filter's own granularity — a range over raw seconds could not be read
+      -- in end order without sorting every game in it).
+      CREATE INDEX IF NOT EXISTS games_map_end    ON games (map, end_unix DESC, id);
+      CREATE INDEX IF NOT EXISTS games_count_end  ON games (player_count, end_unix DESC, id);
+      CREATE INDEX IF NOT EXISTS games_durmin_end ON games ((duration_sec / 60), end_unix DESC, id);
+      DROP INDEX IF EXISTS games_backfill_end;
       DROP INDEX IF EXISTS games_backfill;
       DROP INDEX IF EXISTS games_start;
       -- See the replay_settings note in SCHEMA_DDL: the roster index table is
@@ -469,6 +496,12 @@ const INDEX_DDL = `
       -- a table that keeps every unmatched observation forever: which
       -- observations are still open, and which matched ones are old
       -- enough to drop.
+      -- The lava retry lookup (lavaRetryCandidate): failed jobs, newest
+      -- first. PARTIAL, over the only rows the lookup can want, so its walk
+      -- costs the failures in its window and not the whole queue; its WHERE
+      -- repeats this clause textually, like jobs_settled's.
+      CREATE INDEX IF NOT EXISTS jobs_failed ON jobs (created_unix DESC)
+        WHERE state = 'error';
       CREATE INDEX IF NOT EXISTS lobbies_open    ON lobbies (lobby_id, started_unix)
         WHERE ended_unix IS NULL;
       CREATE INDEX IF NOT EXISTS lobbies_matched ON lobbies (started_unix)
@@ -534,6 +567,13 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   // gamesLavaPending. Like the lobby columns, NOT in gamesInsert's upsert list:
   // a re-sync of a game says nothing about whether it was offered.
   ["games", "lava_offered_unix INTEGER"],
+  // When the game ENDED: start_unix + COALESCE(duration_sec, 0), NULL with no
+  // start. Stored rather than derived per read because it is what the Games
+  // listing sorts and filters by, and a plain column is what composite indexes
+  // (games_map_end, games_count_end, games_durmin_end) can lead with or
+  // follow. gamesInsert writes it with the two it comes from; migrateSchema
+  // backfills the rows from before it.
+  ["games", "end_unix INTEGER"],
   ["replays", "settings TEXT"],
   ["replays", "rid TEXT"],
   ["replays", "players TEXT"],
@@ -806,6 +846,13 @@ export class ReplayIndex extends DurableObject<Env> {
         if (!String(e).includes("duplicate column")) throw e;
       }
     }
+    // end_unix for the rows from before it (see ADDED_COLUMNS). Before
+    // INDEX_DDL, so the indexes on it are built once over filled rows rather
+    // than rewritten row by row; WHERE end_unix IS NULL keeps a re-run cheap.
+    sql.exec(
+      `UPDATE games SET end_unix = start_unix + COALESCE(duration_sec, 0)
+        WHERE end_unix IS NULL AND start_unix IS NOT NULL`,
+    );
     sql.exec(INDEX_DDL);
     sql.exec(`DELETE FROM schema_version`);
     sql.exec(`INSERT INTO schema_version (version) VALUES (?)`, SCHEMA_VERSION);
@@ -1340,12 +1387,12 @@ export class ReplayIndex extends DurableObject<Env> {
     return this.ctx.storage.sql
       .exec(
         `SELECT g.id AS id, g.start_unix AS start_unix,
-                g.start_unix + COALESCE(g.duration_sec, 0) AS end_unix,
+                g.end_unix AS end_unix,
                 g.lobby_name, g.lobby_details
            FROM replay_settings rs JOIN games g ON g.id = rs.replay_id
           WHERE rs.flag = ? AND g.game_size = ? AND g.start_unix IS NOT NULL
             AND g.lava_offered_unix IS NULL
-            AND g.start_unix + COALESCE(g.duration_sec, 0) >= ?
+            AND g.end_unix >= ?
           ORDER BY g.start_unix ASC, g.id LIMIT ?`,
         SETTINGS_LAVA_FLAG,
         LAVA_GAME_SIZE,
@@ -1399,11 +1446,12 @@ export class ReplayIndex extends DurableObject<Env> {
     const now = Math.floor(Date.now() / 1000);
     for (const g of games) {
       sql.exec(
-        `INSERT INTO games (id, start_unix, duration_sec, map, map_file, game_size, preset, player_count, players, settings, engine_version, game_version, synced_unix)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO games (id, start_unix, duration_sec, end_unix, map, map_file, game_size, preset, player_count, players, settings, engine_version, game_version, synced_unix)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            start_unix = excluded.start_unix,
            duration_sec = excluded.duration_sec,
+           end_unix = excluded.end_unix,
            map = excluded.map,
            map_file = excluded.map_file,
            game_size = excluded.game_size,
@@ -1417,6 +1465,7 @@ export class ReplayIndex extends DurableObject<Env> {
         g.id,
         g.startUnix,
         g.durationSec,
+        g.startUnix === null ? null : g.startUnix + (g.durationSec ?? 0),
         g.map,
         g.mapFile,
         g.gameSize,
@@ -1438,74 +1487,158 @@ export class ReplayIndex extends DurableObject<Env> {
     return games.length;
   }
 
-  /** gamesPage lists the mirror for the admin's Games section: one page of
-   * mirrored games, latest-ENDED first, each with whether this site has a
-   * replay of it and what its last ingest job did, plus the cursor of the
-   * page after it (null on the last page).
+  /** gamesPage lists the mirror for the Games section: one page of mirrored
+   * games, latest-ENDED first, narrowed by the same filters as the replay list
+   * (minus the player name — see below), each with whether this site has a
+   * replay of it and what its last job did, plus the cursor of the page after
+   * it (null on the last page).
    *
-   * The order is end time, not start time, for the same reason jobsOffer
-   * walks that way: end order is ARRIVAL order (the mirror learns a game
-   * once it is over), and it is the one order the mirror has an index for.
-   * Both the ORDER BY and the cursor predicate repeat games_backfill_end's
-   * expression TEXTUALLY, which is what lets the planner seek into the index
-   * and walk it to the page edge instead of sorting the whole mirror into a
-   * temp b-tree — a mirror that grows by ~2000 rows a day, so a sort per
-   * page would be a scan on a click (see ROW BUDGET).
+   * End time is ARRIVAL order (the mirror learns a game once it is over), and
+   * end_unix is what every games index is built on. KEYSET, not OFFSET:
+   * `after` is the order key of the previous page's last row and the walk
+   * resumes strictly after it, so a page deep in the mirror costs what the
+   * first does and never repeats a row as games keep landing.
    *
-   * KEYSET, not OFFSET: `after` is the order key of the previous page's last
-   * row, and the query resumes strictly after it. An OFFSET reads every row
-   * before the page (page 40 of 50 = 2000 index entries stepped over) and
-   * shifts under a list that gains a game a minute — reload page 2 after a
-   * new game lands and its first row is the old page's last; a cursor costs
-   * the same on every page and never repeats a row.
+   * HOW A FILTER STAYS CHEAP. Each filter has an index it can WALK in end
+   * order, and the one walked is the most selective set:
+   *   - id prefix (4+ hex characters): the primary key, its few matches sorted;
+   *   - map: games_map_end, an equality seek read in end order;
+   *   - players: games_count_end, one branch per count in the range, merged;
+   *   - duration: games_durmin_end, one branch per MINUTE in the range, merged
+   *     (the filter's own step; the exact seconds are checked per row);
+   *   - otherwise games_end itself. Dates bound every walk's range.
+   * Everything not walked — and settings flags always — is checked per row
+   * (a flag is a replay_settings primary-key seek). Walking even a rare flag
+   * beats driving from the flag index: that would sort every game ever
+   * flagged on each click, where the walk stops at the page edge.
+   * Each branch reads at most GAMES_SCAN_MAX / branches rows when anything is
+   * checked per row, so a filter that matches almost nothing costs a bounded
+   * read and answers with a SHORT page whose `next` resumes where the search
+   * stopped (`partial`), rather than reading the whole mirror for it.
    *
-   * Two indexed queries, because the DESC order puts the games with NO
-   * recorded end (null start) LAST and a range on the expression cannot
-   * reach them: the dated walk is `expr <= end` — one index range, with the
-   * tie rows already shown (same end, id at or before the cursor's) filtered
-   * off the few entries that share that second — and the undated tail is
-   * `expr IS NULL AND id > ?`, an equality seek on the same index. The tail
-   * runs only when the dated walk has fewer rows than the page wants.
-   *
-   * Nothing here counts the table: `next` is read off one row more than the
-   * page shows, and there is no total anywhere. */
-  gamesPage(limit: number, after: GamesCursor | null): { games: GameListRow[]; next: GamesCursor | null } {
-    const select = GAMES_LIST_SELECT;
-    const order = `ORDER BY (start_unix + COALESCE(duration_sec, 0)) DESC, id`;
+   * No player-name filter (Marcin's call): a name is inside the roster JSON
+   * and indexing it is the replay_players table the 2026-08-23 outage
+   * dropped. Undated games (no start) are not listed: the API has never
+   * returned one. */
+  gamesPage(
+    limit: number,
+    after: GamesCursor | null,
+    f: ReplayFilter = emptyFilter(),
+  ): { games: GameListRow[]; next: GamesCursor | null; partial: boolean } {
     const want = limit + 1; // the extra row is "there is a next page"
-    let rows: Record<string, unknown>[] = [];
-    if (after === null || after.endUnix !== null) {
-      // The first page's IS NOT NULL is not decoration: without it the
-      // DESC walk runs on into the undated rows at the end, which the tail
-      // query below then lists a second time.
-      const where =
-        after === null
-          ? `WHERE (start_unix + COALESCE(duration_sec, 0)) IS NOT NULL`
-          : `WHERE (start_unix + COALESCE(duration_sec, 0)) <= ?
-               AND NOT ((start_unix + COALESCE(duration_sec, 0)) = ? AND id <= ?)`;
-      const args = after === null ? [] : [after.endUnix, after.endUnix, after.id];
-      rows = this.ctx.storage.sql.exec(`${select} ${where} ${order} LIMIT ?`, ...args, want).toArray();
+
+    // The range every walk reads: end_unix bounded by the dates and resumed
+    // after the cursor (the tie rows already shown — same second, id at or
+    // before the cursor's — filtered off).
+    const base: string[] = ["g.end_unix IS NOT NULL"];
+    const baseArgs: unknown[] = [];
+    if (f.from !== null) { base.push("g.end_unix >= ?"); baseArgs.push(f.from); }
+    if (f.to !== null) { base.push("g.end_unix <= ?"); baseArgs.push(f.to); }
+    if (after !== null && after.endUnix !== null) {
+      base.push("g.end_unix <= ?", "NOT (g.end_unix = ? AND g.id <= ?)");
+      baseArgs.push(after.endUnix, after.endUnix, after.id);
     }
-    if (rows.length < want) {
-      // The undated tail, resumed after the cursor when the cursor is
-      // already in it, from its start otherwise.
-      const afterId = after !== null && after.endUnix === null ? after.id : "";
-      const tail = this.ctx.storage.sql
+
+    // The per-row checks, as one boolean column. Each filter the chosen walk
+    // does not answer exactly lands here.
+    const checks: string[] = [];
+    const checkArgs: unknown[] = [];
+    const branches: { where: string; args: unknown[] }[] = [];
+    const idPrefix = f.id ?? "";
+    const range = (lo: number, hi: number) => Array.from({ length: hi - lo + 1 }, (_, k) => lo + k);
+    if (idPrefix.length >= GAMES_ID_WALK_MIN) {
+      branches.push({ where: "g.id >= ? AND g.id < ?", args: [idPrefix, idPrefix + "g"] });
+    } else if (f.map !== null) {
+      branches.push({ where: "g.map = ?", args: [f.map] });
+    } else if (f.minPlayers !== null || f.maxPlayers !== null) {
+      const lo = Math.max(f.minPlayers ?? 1, 1);
+      const hi = Math.min(f.maxPlayers ?? GAMES_COUNT_BRANCH_MAX, GAMES_COUNT_BRANCH_MAX);
+      for (const n of range(lo, hi)) branches.push({ where: "g.player_count = ?", args: [n] });
+      if (f.maxPlayers === null || f.maxPlayers > GAMES_COUNT_BRANCH_MAX) {
+        branches.push({
+          where: "g.player_count > ?" + (f.maxPlayers === null ? "" : " AND g.player_count <= ?"),
+          args: f.maxPlayers === null ? [GAMES_COUNT_BRANCH_MAX] : [GAMES_COUNT_BRANCH_MAX, f.maxPlayers],
+        });
+      }
+    } else if (f.minDuration !== null || f.maxDuration !== null) {
+      const lo = Math.floor((f.minDuration ?? 0) / 60);
+      const hiMin = f.maxDuration === null ? null : Math.floor(f.maxDuration / 60);
+      const hi = Math.min(hiMin ?? GAMES_DURMIN_BRANCH_MAX, GAMES_DURMIN_BRANCH_MAX);
+      for (const m of range(lo, hi)) branches.push({ where: "(g.duration_sec / 60) = ?", args: [m] });
+      if (hiMin === null || hiMin > GAMES_DURMIN_BRANCH_MAX) {
+        branches.push({ where: "(g.duration_sec / 60) > ?", args: [GAMES_DURMIN_BRANCH_MAX] });
+      }
+    } else {
+      branches.push({ where: "1", args: [] });
+    }
+    // Every filter is re-checked here except the one walked exactly; a
+    // redundant check is a comparison on a row already read.
+    if (idPrefix !== "" && idPrefix.length < GAMES_ID_WALK_MIN) {
+      checks.push("substr(g.id, 1, ?) = ?");
+      checkArgs.push(idPrefix.length, idPrefix);
+    }
+    if (f.map !== null) { checks.push("g.map = ?"); checkArgs.push(f.map); }
+    if (f.minPlayers !== null) { checks.push("g.player_count >= ?"); checkArgs.push(f.minPlayers); }
+    if (f.maxPlayers !== null) { checks.push("g.player_count <= ?"); checkArgs.push(f.maxPlayers); }
+    if (f.minDuration !== null) { checks.push("g.duration_sec >= ?"); checkArgs.push(f.minDuration); }
+    if (f.maxDuration !== null) { checks.push("g.duration_sec <= ?"); checkArgs.push(f.maxDuration); }
+    for (const flag of f.settings) {
+      checks.push("EXISTS (SELECT 1 FROM replay_settings s WHERE s.replay_id = g.id AND s.flag = ?)");
+      checkArgs.push(flag);
+    }
+    const hit = checks.length === 0 ? "1" : checks.join(" AND ");
+    // With nothing checked per row every row read is a match, so a page's
+    // worth per branch is enough; otherwise the scan budget is shared out.
+    const perBranch =
+      checks.length === 0 ? want : Math.max(want, Math.floor(GAMES_SCAN_MAX / branches.length));
+
+    type Key = { id: string; end: number; hit: boolean };
+    const before = (a: Key, b: Key) => a.end > b.end || (a.end === b.end && a.id < b.id);
+    let rows: Key[] = [];
+    let frontier: Key | null = null; // the earliest point a cut-off branch stopped at
+    for (const br of branches) {
+      const got = this.ctx.storage.sql
         .exec(
-          `${select} WHERE (start_unix + COALESCE(duration_sec, 0)) IS NULL AND id > ? ${order} LIMIT ?`,
-          afterId,
-          want - rows.length,
+          `SELECT g.id AS id, g.end_unix AS end_unix, (${hit}) AS hit FROM games g
+            WHERE ${base.join(" AND ")} AND ${br.where}
+            ORDER BY g.end_unix DESC, g.id LIMIT ?`,
+          ...checkArgs,
+          ...baseArgs,
+          ...br.args,
+          perBranch,
         )
-        .toArray();
-      rows = rows.concat(tail);
+        .toArray()
+        .map((r) => ({ id: r.id as string, end: Number(r.end_unix), hit: Number(r.hit) === 1 }));
+      if (got.length === perBranch) {
+        const last = got[got.length - 1];
+        if (frontier === null || before(last, frontier)) frontier = last;
+      }
+      rows = rows.concat(got);
     }
-    const games = rows.slice(0, limit).map(gameListRow);
-    const last = games[games.length - 1];
-    const next =
-      rows.length > limit && last
-        ? { endUnix: last.startUnix === null ? null : last.startUnix + (last.durationSec ?? 0), id: last.id }
-        : null;
-    return { games, next };
+    rows.sort((a, b) => (before(a, b) ? -1 : before(b, a) ? 1 : 0));
+    // Past the frontier a cut-off branch may still hold rows it never read,
+    // so the merged order is only complete up to it.
+    if (frontier !== null) {
+      const fr = frontier;
+      rows = rows.filter((r) => !before(fr, r));
+    }
+    const hits = rows.filter((r) => r.hit);
+    let pageKeys: Key[];
+    let next: GamesCursor | null;
+    let partial = false;
+    if (hits.length > limit) {
+      pageKeys = hits.slice(0, limit);
+      const last = pageKeys[limit - 1];
+      next = { endUnix: last.end, id: last.id };
+    } else if (frontier !== null) {
+      pageKeys = hits;
+      next = { endUnix: frontier.end, id: frontier.id };
+      partial = true;
+    } else {
+      pageKeys = hits;
+      next = null;
+    }
+    return { games: this.gamesByIds(pageKeys.map((k) => k.id)), next, partial };
   }
 
   /** gamesByIds answers GET /api/games?id=: the named mirrored games, in the
@@ -1992,34 +2125,99 @@ export class ReplayIndex extends DurableObject<Env> {
    * the next poll, an hour of engine time at a time. Pasting its link stays the
    * retry.
    *
-   * THE WALK is games_backfill_end, latest-ended-first, stopped at the window's
+   * THE WALK is games_end, latest-ended-first, stopped at the window's
    * edge — a range over the index, so its cost is a day of BAR's output (~2000
    * rows) whatever the mirror has grown to, and it stops at the FIRST match, so
-   * a lava game near the head costs a handful. The ORDER BY repeats the index's
-   * expression textually (COALESCE included) for the reason the general
-   * backfill's does: anything else sorts the window into a temp b-tree. The
-   * flag test is a seek into replay_settings' (flag, replay_id) index, and a
+   * a lava game near the head costs a handful. The flag test is a seek into replay_settings' (flag, replay_id) index, and a
    * mirrored game always owns its own entries there (see indexSettings), so the
    * flag read is the game's own.
    *
    * No ranking beyond recency: every 8v8 is sixteen players, so within one
    * shape and one window the newest is simply the one someone might still be
    * asking about. */
-  private lavaCandidate(now: number): string | null {
+  private lavaCandidate(now: number): { id: string; end: number } | null {
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT g.id AS id FROM games g
-          WHERE (g.start_unix + COALESCE(g.duration_sec, 0)) >= ?
+        `SELECT g.id AS id, g.end_unix AS end_unix FROM games g
+          WHERE g.end_unix >= ?
             AND g.game_size = ?
             AND EXISTS (SELECT 1 FROM replay_settings s
                         WHERE s.replay_id = g.id AND s.flag = ?)
             AND NOT EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id)
             AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = g.id)
-          ORDER BY (g.start_unix + COALESCE(g.duration_sec, 0)) DESC, g.id
+          ORDER BY g.end_unix DESC, g.id
           LIMIT 1`,
         now - LAVA_WINDOW_SEC,
         LAVA_GAME_SIZE,
         SETTINGS_LAVA_FLAG,
+      )
+      .toArray();
+    return rows.length === 0 ? null : { id: rows[0].id as string, end: rows[0].end_unix as number };
+  }
+
+  /** lavaEnds maps each of gameIds that is an 8v8 lava game to when it ENDED
+   * — what jobsOffer orders the waiting lava work by. One primary-key seek
+   * and one flag seek per id, over a pending list that is a handful long. */
+  private lavaEnds(gameIds: string[]): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const id of new Set(gameIds)) {
+      const r = this.ctx.storage.sql
+        .exec(
+          `SELECT g.end_unix AS end_unix FROM games g
+            WHERE g.id = ? AND g.game_size = ? AND g.start_unix IS NOT NULL
+              AND EXISTS (SELECT 1 FROM replay_settings s
+                          WHERE s.replay_id = g.id AND s.flag = ?)`,
+          id,
+          LAVA_GAME_SIZE,
+          SETTINGS_LAVA_FLAG,
+        )
+        .toArray();
+      if (r.length > 0) out.set(id, r[0].end_unix as number);
+    }
+    return out;
+  }
+
+  /** lavaRetryCandidate is the lava lookup's SECOND chance: an 8v8 lava game
+   * whose re-simulation FAILED and that the asking host might still finish,
+   * or null. See LAVA_RETRY_WINDOW_SEC for why failures need one.
+   *
+   * A game qualifies when its jobs are ALL failures (none active, none done,
+   * none disabled — a disabled job is how a person says "leave it"), nothing
+   * is in the catalog for it, it ran out of memory, and no host with at least
+   * the asker's memory ever did on it (memBytes is the failing host's total
+   * RAM, which bringest reports with every job; an older daemon's failure
+   * carries none and counts as a small host's). Any other failure is never
+   * retried automatically (Marcin's call); the queue page's Retry is the door.
+   * Each retry is a fresh job (the old row stays the record of the attempt),
+   * so a retry that runs out of memory again is a failure on THIS host's
+   * memory, and only a bigger one will try after it.
+   *
+   * THE WALK is jobs_failed, newest failure first, stopped at the window's
+   * edge: its cost is the failures of two weeks (a few hundred) and a few
+   * seeks each, and it rests per memory size on the empty answer. */
+  private lavaRetryCandidate(now: number, memBytes: number): string | null {
+    const rows = this.ctx.storage.sql
+      .exec(
+        `SELECT g.id AS id FROM jobs j JOIN games g ON g.id = j.game_id
+          WHERE j.state = 'error'
+            AND j.created_unix >= ?
+            AND j.kind = 'resim'
+            AND g.game_size = ?
+            AND EXISTS (SELECT 1 FROM replay_settings s
+                        WHERE s.replay_id = g.id AND s.flag = ?)
+            AND NOT EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id)
+            AND NOT EXISTS (SELECT 1 FROM jobs k WHERE k.game_id = g.id
+                            AND (k.state != 'error' OR k.disabled != 0))
+            AND NOT EXISTS (SELECT 1 FROM jobs k WHERE k.game_id = g.id
+                            AND k.state = 'error' AND k.error_kind = 'oom'
+                            AND COALESCE(json_extract(k.stats, '$.host.memBytes'), 0) >= ?)
+            AND j.error_kind = 'oom'
+          ORDER BY j.created_unix DESC
+          LIMIT 1`,
+        now - LAVA_RETRY_WINDOW_SEC,
+        LAVA_GAME_SIZE,
+        SETTINGS_LAVA_FLAG,
+        memBytes,
       )
       .toArray();
     return rows.length === 0 ? null : (rows[0].id as string);
@@ -2071,13 +2269,15 @@ export class ReplayIndex extends DurableObject<Env> {
    * BAR's output, so excluding them bought nothing and cost the only games in
    * the mirror that are not interchangeable.
    *
-   * It backfills only into an EMPTY pending list, so at most one auto-queued
-   * job is ever waiting: the next poll finds that job rather than making
+   * The ranked window backfills only into an EMPTY pending list (the lava
+   * lookup alone may add to a non-empty one, and only a game that ended later
+   * than every queued lava game), so at most one auto-queued job is ever
+   * waiting: the next poll finds that job rather than making
    * another. The check and the insert are one RPC — the DO is single-threaded,
    * so two daemons polling together cannot both queue the same game.
    *
    * The scan is cheap because it STOPS EARLY, not because it looks at a slice:
-   * it walks games_backfill_end latest-ended-first and quits at the 200th
+   * it walks games_end latest-ended-first and quits at the 200th
    * candidate, which on a mirror this daemon cannot keep up with is the first
    * two hundred rows it touches. That distinction is the whole design. A fixed
    * window over the newest N games reads the same rows in the good case and then LIES
@@ -2097,29 +2297,61 @@ export class ReplayIndex extends DurableObject<Env> {
    * daemon's protocol alone: a poll that returns a job it just created is
    * indistinguishable, to the daemon, from one that returns a job a person
    * queued a minute ago. */
-  jobsOffer(kind: JobKind, newJobId: string): IngestJob[] {
+  jobsOffer(kind: JobKind, newJobId: string, hostMemBytes = 0): IngestJob[] {
     const pending = this.jobsPending(kind);
-    if (pending.length > 0 || kind !== "resim") return pending;
-    // Everything above this line is a seek; the scan below is the one query on
-    // the poll path whose cost is measured in the size of the mirror, and an
-    // idle daemon asks 8640 times a day. So a scan that comes up EMPTY rests
-    // (at the bottom of this method) — that is the state a poll can repeat
+    if (kind !== "resim") return pending;
+    // Everything below the lava lookups is a scan whose cost is measured in
+    // the size of the mirror, and an idle daemon asks 8640 times a day. So a
+    // scan that comes up EMPTY rests — that is the state a poll can repeat
     // forever with nothing changing. A scan that finds a game does not: the
     // daemon leaves with it and stops asking.
     const now = Math.floor(Date.now() / 1000);
 
-    // The PRIORITY lookup, ahead of the general scan and rested separately:
-    // an 8v8 lava game of the last day outranks anything the ranked window
-    // below could offer, and is the one class of game that window cannot see
-    // at all (see lavaCandidate). Its own cooldown, because its empty answer
-    // is both the common one and much more expensive than jobsPending — and
-    // because sharing the general backfill's would let either one's rest
-    // silence the other.
+    // LAVA FIRST, NEWEST FIRST (Marcin, 2026-10-17): of every 8v8 lava game
+    // waiting — queued by hand, announced, or finished a minute ago and not
+    // queued yet — the one that ENDED most recently is the most relevant and
+    // runs first, and no other game runs while one is waiting. So the pending
+    // list is reordered with its lava games at the head, latest-ended first,
+    // and the newest unqueued lava game (lavaCandidate, on its own rest)
+    // jumps that list when it ended later than everything on it. The daemon
+    // takes one job per poll, so a game that finishes while another runs is
+    // what the NEXT poll is handed.
+    const ends = this.lavaEnds(pending.map((p) => p.gameId));
+    const lavaPending = pending.filter((p) => ends.has(p.gameId));
+    lavaPending.sort((a, b) => ends.get(b.gameId)! - ends.get(a.gameId)!);
+    const ordered = [...lavaPending, ...pending.filter((p) => !ends.has(p.gameId))];
+    const newestQueued = lavaPending.length > 0 ? ends.get(lavaPending[0].gameId)! : null;
+
+    // The unqueued lava lookup, rested on its own key: its empty answer is
+    // both the common one and much more expensive than jobsPending, and
+    // sharing the general backfill's rest would let either one silence the
+    // other. It is also the one class of game the ranked window below cannot
+    // see at all (see lavaCandidate).
     const lavaRest = this.metaGet("lava_after");
     if (lavaRest === null || now >= lavaRest) {
       const lava = this.lavaCandidate(now);
-      if (lava !== null) return this.offerBackfilled(newJobId, lava);
-      this.metaPut("lava_after", now + LAVA_COOLDOWN_SEC);
+      if (lava !== null) {
+        if (newestQueued === null || lava.end > newestQueued) {
+          return [...this.offerBackfilled(newJobId, lava.id), ...ordered];
+        }
+      } else {
+        this.metaPut("lava_after", now + LAVA_COOLDOWN_SEC);
+      }
+    }
+    if (ordered.length > 0) return ordered;
+
+    // Then the lava games that FAILED and this host might finish (see
+    // lavaRetryCandidate) — still ahead of everything that is not lava. Only
+    // for a daemon that says how much memory it has: without that, an oom
+    // retry could go straight back to a host as small as the one it failed on.
+    if (hostMemBytes > 0) {
+      const restKey = `lava_retry_after_${Math.floor(hostMemBytes / 2 ** 30)}`;
+      const retryRest = this.metaGet(restKey);
+      if (retryRest === null || now >= retryRest) {
+        const retry = this.lavaRetryCandidate(now, hostMemBytes);
+        if (retry !== null) return this.offerBackfilled(newJobId, retry);
+        this.metaPut(restKey, now + LAVA_RETRY_COOLDOWN_SEC);
+      }
     }
 
     const restUntil = this.metaGet("backfill_after");
@@ -2128,7 +2360,7 @@ export class ReplayIndex extends DurableObject<Env> {
       .exec(
         `SELECT id FROM (
            SELECT g.id AS id, g.player_count AS player_count,
-                  (g.start_unix + COALESCE(g.duration_sec, 0)) AS end_unix,
+                  g.end_unix AS end_unix,
                   -- Ranked on below, not filtered on: a modded game is the
                   -- one this pipeline is most worth spending an hour of engine
                   -- time on, since it is the one nobody else can look at.
@@ -2140,16 +2372,15 @@ export class ReplayIndex extends DurableObject<Env> {
            FROM games g
            WHERE NOT EXISTS (SELECT 1 FROM replays r WHERE r.id = g.id)
              AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.game_id = g.id)
-           -- Walks games_backfill_end latest-ended-first and STOPS at the
+           -- Walks games_end latest-ended-first and STOPS at the
            -- BACKFILL_WINDOWth candidate, which is what makes the scan cost
-           -- the size of its answer instead of the size of the mirror. The
-           -- expression must match the index's TEXTUALLY (COALESCE included)
-           -- or the planner sorts the whole mirror into a temp b-tree; no
-           -- leading IS-NULL term for the same reason — NULL is smaller than
-           -- every value, so DESC puts the start-less rows last by itself.
+           -- the size of its answer instead of the size of the mirror. No
+           -- leading IS-NULL term: it would hide the column from the index
+           -- and sort the whole mirror; NULL is smaller than every value, so
+           -- DESC puts the start-less rows last by itself.
            -- The trailing id only block-sorts each equal-timestamp group, so
            -- early termination survives it.
-           ORDER BY (g.start_unix + COALESCE(g.duration_sec, 0)) DESC, g.id
+           ORDER BY g.end_unix DESC, g.id
            LIMIT ${BACKFILL_WINDOW}
          )
          -- MODDED first, then the biggest; a game whose roster the API never

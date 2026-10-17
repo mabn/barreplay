@@ -294,7 +294,8 @@ test("gamesPage lists the mirror latest-ended first, saying what this site has o
     index.jobInsert("j-late", "", "late-duel", "resim");
 
     const page = index.gamesPage(10, null);
-    expect(page.games.map((g) => g.id)).toEqual(["long", "late-duel", "early", "undated"]);
+    // An undated game (no start, which the API never sends) is not listed.
+    expect(page.games.map((g) => g.id)).toEqual(["long", "late-duel", "early"]);
     expect(page.next).toBeNull();
     // The row is the whole GameEntry plus the join.
     expect(page.games[0]).toMatchObject({
@@ -310,7 +311,7 @@ test("gamesPage lists the mirror latest-ended first, saying what this site has o
   });
 });
 
-test("gamesPage pages by cursor across ties and into the undated tail, never counting", async () => {
+test("gamesPage pages by cursor across ties, never counting", async () => {
   await inIndex((index) => {
     index.gamesInsert([
       // Three games ending in the SAME second: the id tiebreak is what the
@@ -321,10 +322,6 @@ test("gamesPage pages by cursor across ties and into the undated tail, never cou
       game("t-c", { startUnix: 3000, durationSec: 2000 }),
       game("g2", { startUnix: 2000, durationSec: 0 }),
       game("g1", { startUnix: 1000, durationSec: 0 }),
-      // No recorded start: last, in id order, and reachable only through
-      // the tail query.
-      game("u-b", { startUnix: null, durationSec: null }),
-      game("u-a", { startUnix: null, durationSec: null }),
     ]);
     const walk: string[] = [];
     let after = null as ReturnType<typeof index.gamesPage>["next"];
@@ -335,20 +332,18 @@ test("gamesPage pages by cursor across ties and into the undated tail, never cou
       walk.push(...p.games.map((g) => g.id));
       after = p.next;
     } while (after !== null);
-    expect(pages).toEqual([["t-a", "t-b"], ["t-c", "g2"], ["g1", "u-a"], ["u-b"]]);
-    expect(walk).toEqual(["t-a", "t-b", "t-c", "g2", "g1", "u-a", "u-b"]);
+    expect(pages).toEqual([["t-a", "t-b"], ["t-c", "g2"], ["g1"]]);
+    expect(walk).toEqual(["t-a", "t-b", "t-c", "g2", "g1"]);
 
     // The cursor handed out is the last row's own key, and it is exact: the
     // page after the first tie row resumes at the next tie row.
     const first = index.gamesPage(1, null);
     expect(first.next).toEqual({ endUnix: 5000, id: "t-a" });
     expect(index.gamesPage(1, first.next).games.map((g) => g.id)).toEqual(["t-b"]);
-    // A cursor at the last row of the dated walk lands in the tail.
-    expect(index.gamesPage(5, { endUnix: 1000, id: "g1" }).games.map((g) => g.id)).toEqual(["u-a", "u-b"]);
-    // ...and past everything is empty, not an error.
-    expect(index.gamesPage(5, { endUnix: null, id: "u-b" })).toEqual({ games: [], next: null });
+    // Past everything is empty, not an error.
+    expect(index.gamesPage(5, { endUnix: 1000, id: "g1" })).toEqual({ games: [], next: null, partial: false });
     // A page that exactly fits has no next: the extra row is the signal.
-    expect(index.gamesPage(7, null).next).toBeNull();
+    expect(index.gamesPage(5, null).next).toBeNull();
   });
 });
 
@@ -1848,5 +1843,177 @@ test("gameStartUnix reads the mirror's start time", async () => {
     index.gamesInsert([game("m1")]);
     expect(typeof index.gameStartUnix("m1")).toBe("number");
     expect(index.gameStartUnix("nope")).toBe(null);
+  });
+});
+
+// ---- Lava first, newest first, and a second chance on a bigger host ------
+
+const lava8 = (id: string, endedAgo: number): GameEntry =>
+  game(id, {
+    startUnix: AGO(endedAgo + 1800), durationSec: 1800, gameSize: "8v8",
+    playerCount: 16, settings: { lava: true, mods: true },
+  });
+const GiB = 2 ** 30;
+/** Fails job id the way a daemon on a host with memBytes of RAM reports it. */
+function fail(index: ReplayIndex, id: string, kind: "oom" | null, memBytes?: number): void {
+  index.jobUpdate(id, "processing", null);
+  index.jobUpdate(
+    id, "error", kind === "oom" ? "ran out of memory" : "open widget output: no such file",
+    memBytes === undefined ? null : ({ host: { memBytes } } as never), null, kind,
+  );
+}
+
+test("queued lava games run newest-ended first, ahead of everything else queued", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([lava8("lava-old", 30000), lava8("lava-new", 4000), game("plain", { startUnix: AGO(900) })]);
+    // Queued in the opposite order: the plain game first, then the old lava
+    // game, then the new one — as a person pasting links might.
+    index.jobInsert("q-plain", "", "plain", "resim");
+    index.jobInsert("q-old", "", "lava-old", "resim");
+    index.jobInsert("q-new", "", "lava-new", "resim");
+    expect(index.jobsOffer("resim", OFFER).map((j) => j.gameId)).toEqual(["lava-new", "lava-old", "plain"]);
+  });
+});
+
+test("a lava game that just ended jumps the queued ones", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([lava8("queued-lava", 30000), lava8("just-ended", 600)]);
+    index.jobInsert("q-1", "", "queued-lava", "resim");
+    const offered = index.jobsOffer("resim", OFFER);
+    expect(offered.map((j) => j.gameId)).toEqual(["just-ended", "queued-lava"]);
+    expect(offered[0].id).toBe(OFFER);
+  });
+});
+
+test("an unqueued lava game OLDER than the queued ones waits its turn", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([lava8("queued-lava", 600), lava8("older-lava", 30000)]);
+    index.jobInsert("q-1", "", "queued-lava", "resim");
+    expect(index.jobsOffer("resim", OFFER).map((j) => j.gameId)).toEqual(["queued-lava"]);
+    expect(index.jobGet(OFFER)).toBeNull();
+  });
+});
+
+test("a lava game that ran out of memory goes to a BIGGER host, once per size", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([lava8("big-lava", 4000)]);
+    index.jobInsert("r-1", "", "big-lava", "resim");
+    fail(index, "r-1", "oom", 8 * GiB);
+    // Not to a host as small as the one it failed on, nor to a daemon that
+    // does not say how big it is.
+    expect(index.jobsOffer("resim", "o-1", 8 * GiB)).toEqual([]);
+    expect(index.jobsOffer("resim", "o-2")).toEqual([]);
+    // A 16 GB host gets it, as a fresh job.
+    const got = index.jobsOffer("resim", "o-3", 16 * GiB);
+    expect(got.map((j) => [j.id, j.gameId])).toEqual([["o-3", "big-lava"]]);
+    // It runs out of memory there too: from now on only something bigger.
+    fail(index, "o-3", "oom", 16 * GiB);
+    expect(index.jobsOffer("resim", "o-4", 16 * GiB)).toEqual([]);
+    expect(index.jobsOffer("resim", "o-5", 32 * GiB)[0]).toMatchObject({ id: "o-5", gameId: "big-lava" });
+  });
+});
+
+test("no other lava failure is retried automatically", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([lava8("sandboxed", 4000)]);
+    index.jobInsert("r-1", "", "sandboxed", "resim");
+    fail(index, "r-1", null, 8 * GiB);
+    expect(index.jobsOffer("resim", "o-1", 64 * GiB)).toEqual([]);
+  });
+});
+
+test("a retry never undoes a person's choice or repeats finished work", async () => {
+  await inIndex((index) => {
+    index.gamesInsert([lava8("held", 4000), lava8("done-too", 5000), game("plain-oom", { startUnix: AGO(5000) })]);
+    index.jobInsert("h-1", "", "held", "resim");
+    fail(index, "h-1", "oom", 8 * GiB);
+    index.jobInsert("h-2", "", "held", "resim");
+    index.jobSetDisabled("h-2", true);
+    index.jobInsert("d-1", "", "done-too", "resim");
+    fail(index, "d-1", "oom", 8 * GiB);
+    index.jobInsert("d-2", "", "done-too", "resim");
+    index.jobUpdate("d-2", "processing", null);
+    index.jobUpdate("d-2", "done", null);
+    // Only lava games get the second chance.
+    index.jobInsert("p-1", "", "plain-oom", "resim");
+    fail(index, "p-1", "oom", 8 * GiB);
+    const got = index.jobsOffer("resim", "o-1", 64 * GiB);
+    expect(got.map((j) => j.gameId)).not.toContain("held");
+    expect(got.map((j) => j.gameId)).not.toContain("done-too");
+    expect(got.map((j) => j.gameId)).not.toContain("plain-oom");
+  });
+});
+
+// ---- Games listing filters --------------------------------------------------
+
+/** Games for the filter tests: start 1000*i, so end order is index order
+ * reversed unless a duration says otherwise. */
+function filterGames(index: ReplayIndex): void {
+  index.gamesInsert([
+    game("a1", { startUnix: 1000, durationSec: 600, map: "Isthmus", playerCount: 16, gameSize: "8v8", settings: { ranked: true } }),
+    game("a2", { startUnix: 2000, durationSec: 1500, map: "Glitters", playerCount: 4, gameSize: "2v2", settings: { ranked: true, lava: true } }),
+    game("a3", { startUnix: 3000, durationSec: 2400, map: "Isthmus", playerCount: 12, gameSize: "6v6", settings: { unranked: true } }),
+    game("a4", { startUnix: 4000, durationSec: 59, map: "Isthmus", playerCount: 2, gameSize: "1v1", settings: { ranked: true } }),
+    game("a5", { startUnix: 5000, durationSec: 4000, map: "Glitters", playerCount: 40, gameSize: "20v20", settings: { lava: true } }),
+    game("b1", { startUnix: 6000, durationSec: 61, map: "Isthmus", playerCount: 16, gameSize: "8v8", settings: { lava: true } }),
+  ]);
+}
+const f = (over: Partial<ReplayFilter>): ReplayFilter => ({ ...emptyFilter(), ...over });
+const ids = (p: { games: { id: string }[] }) => p.games.map((g) => g.id);
+
+test("gamesPage filters by end time, map, players, duration, id prefix and settings", async () => {
+  await inIndex((index) => {
+    filterGames(index);
+    // End times: a1 1600, a2 3500, a3 5400, a4 4059, a5 9000, b1 6061.
+    expect(ids(index.gamesPage(10, null))).toEqual(["a5", "b1", "a3", "a4", "a2", "a1"]);
+    expect(ids(index.gamesPage(10, null, f({ from: 3500, to: 6061 })))).toEqual(["b1", "a3", "a4", "a2"]);
+    expect(ids(index.gamesPage(10, null, f({ map: "Isthmus" })))).toEqual(["b1", "a3", "a4", "a1"]);
+    expect(ids(index.gamesPage(10, null, f({ minPlayers: 12, maxPlayers: 16 })))).toEqual(["b1", "a3", "a1"]);
+    // Open top: the count past the per-value branches still matches.
+    expect(ids(index.gamesPage(10, null, f({ minPlayers: 16 })))).toEqual(["a5", "b1", "a1"]);
+    // Exact seconds inside the minute buckets: 59s is out, 61s is in.
+    expect(ids(index.gamesPage(10, null, f({ minDuration: 60, maxDuration: 1500 })))).toEqual(["b1", "a2", "a1"]);
+    expect(ids(index.gamesPage(10, null, f({ minDuration: 3600 })))).toEqual(["a5"]);
+    expect(ids(index.gamesPage(10, null, f({ id: "a" })))).toEqual(["a5", "a3", "a4", "a2", "a1"]);
+    expect(ids(index.gamesPage(10, null, f({ id: "b1b1" })))).toEqual([]);
+    expect(ids(index.gamesPage(10, null, f({ settings: ["lava"] })))).toEqual(["a5", "b1", "a2"]);
+    // Combined: the map walk checks the rest per row.
+    expect(ids(index.gamesPage(10, null, f({ map: "Isthmus", settings: ["lava"], minPlayers: 16 })))).toEqual(["b1"]);
+  });
+});
+
+test("a filtered listing pages by cursor through merged branches", async () => {
+  await inIndex((index) => {
+    filterGames(index);
+    const filter = f({ minPlayers: 2, maxPlayers: 16 });
+    const walk: string[] = [];
+    let after = null as ReturnType<typeof index.gamesPage>["next"];
+    do {
+      const p = index.gamesPage(2, after, filter);
+      walk.push(...ids(p));
+      after = p.next;
+    } while (after !== null);
+    expect(walk).toEqual(["b1", "a3", "a4", "a2", "a1"]);
+  });
+});
+
+test("a rare filter answers a short page with a cursor to keep searching", async () => {
+  await inIndex((index) => {
+    // 2500 games on one map, newest first; the one lava game is the oldest,
+    // past the 2000-row scan budget.
+    index.gamesInsert(
+      Array.from({ length: 2500 }, (_, i) =>
+        game(`m${String(i).padStart(4, "0")}`, {
+          startUnix: 100000 - i * 10, durationSec: 0, map: "Same",
+          settings: i === 2499 ? { lava: true } : { ranked: true },
+        })),
+    );
+    const first = index.gamesPage(10, null, f({ map: "Same", settings: ["lava"] }));
+    expect(first.games).toEqual([]);
+    expect(first.partial).toBe(true);
+    expect(first.next).not.toBeNull();
+    const second = index.gamesPage(10, first.next, f({ map: "Same", settings: ["lava"] }));
+    expect(ids(second)).toEqual(["m2499"]);
+    expect(second.next).toBeNull();
   });
 });

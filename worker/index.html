@@ -119,7 +119,8 @@
       <!-- Catalog filters. Hidden unless the backend answers GET
            /api/replays/maps: filtering is a SQL feature of the Worker's catalog,
            and a plain static host has none, so the bar appears only where it
-           works. -->
+           works. The SAME bar filters the Games section: app.js applyHomeTab
+           moves it into whichever of the two is shown. -->
       <div id="filters" style="display:none">
         <!-- Row 1 is the fields, row 2 the settings chips and the actions.
              One row could not hold both without wrapping at some widths and
@@ -160,8 +161,10 @@
           <output id="f_durout" for="f_dmin f_dmax"></output>
         </label>
         <!-- Player: free text, matched as a prefix server-side. No completion
-             list — offering one meant walking every roster in the catalog. -->
-        <label>Player <input type="search" id="f_player" placeholder="name" autocomplete="off"></label>
+             list — offering one meant walking every roster in the catalog.
+             Hidden on the Games section: the mirror's rosters are indexed
+             nowhere, so a name filter there would scan the whole mirror. -->
+        <label id="f_playerfilter">Player <input type="search" id="f_player" placeholder="name" autocomplete="off"></label>
         <!-- Game id: a paste target, not something anyone types out. It
              takes the id, the start of one, or a link with one in it (app.js
              lifts the hex out), and matches as a prefix. -->

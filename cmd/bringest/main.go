@@ -69,7 +69,7 @@
 //	bringest -upload local    # ...the dev simulator's instead
 //	bringest -once            # drain the backlog and exit
 //	bringest -resim -data ~/bar-data        # the independent full-view re-sim worker
-//	bringest -resim -data ~/bar-data -once  # re-sim the requested + current candidates and exit
+//	bringest -resim -data ~/bar-data -once  # re-sim the first job the worker offers and exit
 //	bringest -insights=false  # upload loop only, without serving on-demand summaries
 //
 // -upload names the whole deployment, not just a bucket: the job queue, the
@@ -92,6 +92,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -259,8 +260,14 @@ func run() int {
 	ticker := time.NewTicker(*poll)
 	defer ticker.Stop()
 	for {
-		if _, err := loop.runOnce(ctx); err != nil && ctx.Err() == nil {
+		n, err := loop.runOnce(ctx)
+		if err != nil && ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "bringest: %v\n", err)
+		}
+		// A round that did work polls again at once: a re-sim round runs one
+		// job, and the next one should not wait out a tick behind it.
+		if n > 0 && err == nil {
+			continue
 		}
 		select {
 		case <-ctx.Done():
@@ -626,9 +633,16 @@ func (d *workerAPI) download(ctx context.Context, streamKey, path string) error 
 }
 
 // pendingJobs lists the worker's pending (and stalled) jobs of one kind.
+// A re-sim poll also says how much memory this host has: a lava game that ran
+// out of memory on a smaller host is offered again only to a bigger one
+// (ReplayIndex.lavaRetryCandidate), and only a daemon that says can get it.
 func (d *workerAPI) pendingJobs(ctx context.Context, kind string) ([]ingestJob, error) {
 	var jobs []ingestJob
-	if err := d.api(ctx, http.MethodGet, "/api/jobs?kind="+url.QueryEscape(kind), nil, &jobs); err != nil {
+	path := "/api/jobs?kind=" + url.QueryEscape(kind)
+	if kind == kindResim && thisHost.MemBytes > 0 {
+		path += "&mem=" + strconv.FormatInt(thisHost.MemBytes, 10)
+	}
+	if err := d.api(ctx, http.MethodGet, path, nil, &jobs); err != nil {
 		return nil, err
 	}
 	return jobs, nil
@@ -930,7 +944,7 @@ type resimDaemon struct {
 // scrolling.
 const idleNoteEvery = 10 * time.Minute
 
-// runOnce works through the queued re-sims. Returns how many it attempted; the
+// runOnce runs the first queued re-sim it can claim. Returns how many it attempted; the
 // error covers the listing only — per-game failures are reported onto their
 // rows and do not stop the round.
 func (r *resimDaemon) runOnce(ctx context.Context) (int, error) {
@@ -1022,10 +1036,15 @@ func (r *resimDaemon) runQueued(ctx context.Context) (int, error) {
 			// With the stats: forty minutes of engine time that ended badly is
 			// the record most worth keeping, not the one to throw away.
 			r.reportError(ctx, j.ID, rerr, st)
-			continue
+			return attempted, nil
 		}
 		fmt.Fprintf(os.Stderr, "bringest: %s: full view published\n", j.GameID)
 		r.report(ctx, j.ID, "done", "", st)
+		// ONE job per poll, never the rest of the list: the worker orders the
+		// work (the most recently ended lava game first, see
+		// ReplayIndex.jobsOffer), and a lava game that finished while this one
+		// ran must be what comes next, not the tail of a list read an hour ago.
+		return attempted, nil
 	}
 	return attempted, nil
 }

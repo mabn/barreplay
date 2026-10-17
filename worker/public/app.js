@@ -4944,11 +4944,24 @@ function setFilter(key, value) {
 }
 
 let reloadSeq = 0;
+// The filters the replay list was last read with: a filter changed on the
+// Games section (the bar is shared) leaves the list stale, and applyHomeTab
+// re-reads it on the way back.
+let listQuery = '';
 // keepPage is for the pager itself; every other caller is a filter change,
 // and staying on page 4 of a listing that just became something else would
 // show an empty table for no visible reason.
 async function reloadList(keepPage) {
+  // The bar also filters the Games section (applyHomeTab moves it there),
+  // whose listing is cursor-paged: a filter change starts it over.
+  if (homeTab() === 'games') {
+    gamesAfter = null; gamesNext = null; gamesBefore = 0; gamesTrail = [];
+    listQuery = null; // the replay list is re-read when it is next shown
+    refreshGames();
+    return;
+  }
   if (!keepPage) homePage = 0;
+  listQuery = filterQuery();
   const seq = ++reloadSeq;
   try {
     const page = await fetchReplayList();
@@ -5064,6 +5077,17 @@ async function initFilters() {
       const pick = exact ?? (holding.length === 1 ? holding[0] : null);
       if (pick) setFilter('map', pick);
     }, 300);
+  };
+  // The datalist is the CATALOG's maps; the games mirror holds many more
+  // (every map BAR played), so on the Games section a typed name the list
+  // cannot resolve still applies, as typed, once it is committed (Enter or
+  // leaving the field).
+  mapIn.onchange = () => {
+    if (homeTab() !== 'games') return;
+    clearTimeout(mapTyping);
+    const v = mapIn.value.trim();
+    const exact = knownMaps.find(m => m.toLowerCase() === v.toLowerCase());
+    setFilter('map', exact ?? v);
   };
 
   // Players: a range with two thumbs. Both bounds are one gesture — drag the
@@ -5495,6 +5519,34 @@ function applyHomeTab() {
   // The Games section likewise reads when opened (the mirror gains a game a
   // minute, so a page shown an hour ago is stale), staying on its page.
   if (tab === 'games') refreshGames();
+  placeFilters(tab);
+  if (tab === 'replays' && listQuery !== filterQuery()) reloadList();
+}
+
+// placeFilters moves the one filter bar into the section shown: the replay
+// list and the games mirror share it, and its state, which lives in the URL,
+// carries from one to the other. The Player field is the one control the
+// games listing does not take (its rosters are indexed nowhere).
+function placeFilters(tab) {
+  const box = document.getElementById('filters');
+  if (!box) return;
+  const host = document.getElementById(tab === 'games' ? 'tab-games' : 'tab-replays');
+  if (box.parentElement !== host) host.insertBefore(box, host.firstChild);
+  document.getElementById('f_playerfilter').style.display = tab === 'games' ? 'none' : '';
+  if (tab === 'games') document.getElementById('f_count').textContent = '';
+}
+
+// gamesQuery is the filter bar's state as GET /api/games takes it: the game
+// id is a PREFIX there under idPrefix (?id= names whole games to fetch), and
+// a player name is not a filter it offers.
+function gamesQuery() {
+  const q = new URLSearchParams(filterQuery());
+  q.delete('player');
+  const id = q.get('id');
+  q.delete('id');
+  if (id) q.set('idPrefix', id);
+  const s = q.toString();
+  return s ? '&' + s : '';
 }
 
 function initHomeNav() {
@@ -6247,6 +6299,8 @@ let gamesBefore = 0;         // rows on the pages before this one, for the range
 let gamesTrail = [];         // [{after, before}] of the pages Prev returns to
 let gamesSeq = 0;            // ignore a reply overtaken by a newer request
 let gamesSupported = true;   // cleared by a 404: a backend won't grow the route
+let gamesPartial = false;    // the reply stopped searching before filling the page
+let gamesFiltered = false;   // the shown page was read with filters
 // lavabalance (the sibling LOS-ratings worker) takes a game as the verbatim
 // BAR API replay detail, POSTed to this URL; the admin LOS button on each
 // row previews exactly that (previewLavabalance below).
@@ -6259,10 +6313,23 @@ async function refreshGames() {
   let page;
   try {
     const after = gamesAfter ? `&after=${encodeURIComponent(gamesAfter)}` : '';
-    const r = await fetch(`/api/games?limit=${GAMES_PAGE}${after}`);
+    const filters = gamesQuery();
+    gamesFiltered = filters !== '';
+    const r = await fetch(`/api/games?limit=${GAMES_PAGE}${after}${filters}`);
     if (r.status === 404 || r.status === 405) {
       gamesSupported = false;
       renderGames(GAMES_UNSUPPORTED);
+      return;
+    }
+    if (r.status === 400 || r.status === 503) {
+      // 400: a malformed filter. 503: the catalog cannot filter yet (an older
+      // build mid-deploy) — said, rather than listing games that do not match.
+      const body = await r.json().catch(() => null);
+      if (seq !== gamesSeq) return;
+      gamesRows = [];
+      gamesNext = null;
+      const why = (body && body.error) || `HTTP ${r.status}`;
+      renderGames(r.status === 400 ? 'Invalid filter: ' + why : 'Could not filter the games: ' + why);
       return;
     }
     if (!r.ok) { renderGames(`Could not read the games: HTTP ${r.status}`); return; }
@@ -6275,6 +6342,7 @@ async function refreshGames() {
   if (seq !== gamesSeq) return; // a newer read already went out
   gamesRows = page.games;
   gamesNext = typeof page.next === 'string' && page.next ? page.next : null;
+  gamesPartial = page.partial === true && !!gamesNext;
   renderGames();
 }
 
@@ -6650,9 +6718,19 @@ function renderGames(errMsg) {
     document.getElementById('g_prev').disabled = gamesTrail.length === 0;
     document.getElementById('g_next').disabled = !gamesNext;
   }
-  msg.style.display = rows.length ? 'none' : '';
-  if (!rows.length) msg.textContent = gamesRows === null ? 'Reading the mirror…'
-    : 'The mirror is empty — the worker\'s cron has not recorded a game yet.';
+  const filtered = gamesFiltered;
+  // A PARTIAL page: the worker stopped searching before the page filled (a
+  // rare filter, see ReplayIndex.gamesPage), so a short page is not the end —
+  // Next carries on from where it stopped.
+  const text = gamesRows === null ? 'Reading the mirror…'
+    : gamesPartial
+      ? (rows.length ? 'Searched part of the mirror for these filters — Next keeps looking further back.'
+        : 'Nothing matching yet in this stretch of the mirror — Next keeps looking further back.')
+      : rows.length ? ''
+        : filtered ? 'No games match these filters.'
+          : 'The mirror is empty — the worker\'s cron has not recorded a game yet.';
+  msg.textContent = text;
+  msg.style.display = text ? '' : 'none';
 }
 
 // fillProgressCell renders a running job's live self-report into the Detail
