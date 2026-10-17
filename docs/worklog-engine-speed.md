@@ -1504,3 +1504,41 @@ build, so its time does not count).
   trail and updates it every frame, so freeing the trail early is wrong. Left
   out for good. The COB fetch stays checked: an out-of-range program counter in
   the live game threw, and the re-sim must throw the same way.
+
+### 2026-10-17 06:05 — whole games are measuring the laptop's temperature; at a fixed clock the gains hold (P1 v4, H73, 7 threads)
+
+Whole verylarge1 runs, both identical (`a26e920d…`), back to back after a
+day of continuous load:
+
+| run | sim | main avg clock | throttle events |
+|---|---|---|---|
+| `speed9` (yesterday, cool host) | 19m14s | 3.34 GHz | +26,835 |
+| `speed13`, everything on (`t=1f`) | 22m49s | (stat broken, see below) | +46,975 |
+| `speed13`, everything off (`t=0`) | **23m21s** | **2.78 GHz** (3.94e12 cycles — the same work as `speed9`) | +45,736 |
+
+Everything off was SLOWER than everything on, and did `speed9`'s exact work at
+2.78 GHz instead of 3.34: the heat-soaked laptop, not the code. (`fullrun.sh`
+attached perf stat before the thread pool existed, which folds later threads
+into the main thread's counts; it now waits for the threads.)
+
+So A/Bs now run with **every core capped at 2.6 GHz** (`capall.sh`), a clock
+the laptop holds without throttling. `speed13` (P1 v4 + H73), `t=0` vs
+`t=1f`, 3 pairs, wall:
+
+| window | all off | all on | |
+|---|---|---|---|
+| frame 20,000 +1,800 (minute 11) | 8.76 s | 8.88 s | +1.3% (noise; no gain this early) |
+| frame 40,000 +900 (minute 22) | 9.18 s | 8.85 s | **-3.6%** |
+| frame 63,780 +450 (minute 35) | 18.93 s | 16.37 s | **-13.5%** |
+
+The late game is ~77% of a whole run, so a whole game should come out ~9-10%
+faster at equal clocks. At the late window, same toggles (`t=1f`), capped:
+
+| threads | wall (3 pairs) | mean |
+|---|---|---|
+| default (main + 3) | 16.56 / 16.76 / 16.38 s | 16.57 s |
+| `-worker-threads 7` (main + 6) | 15.40 / 15.77 / 15.45 s | **15.54 s (-6.2%)** |
+
+Uncapped late-window pairs (earlier, noisy): P1 v4 vs v3 no clear difference;
+H73 (anim walk skip) -2.9% wall. Whole game uncapped with 7 threads and
+`t=1f` running.
