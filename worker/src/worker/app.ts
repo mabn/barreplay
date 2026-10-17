@@ -35,6 +35,7 @@ import { parseGameId } from "./gameid";
 import { JOB_KINDS, parseJobErrorKind, parseJobProgress, parseJobStats } from "./jobs";
 import type { JobKind } from "./jobs";
 import { archiveSuffix, scanStreamPreamble } from "./preamble";
+import { isBrp, scanBrpHead } from "./brphead";
 import { isEmptyFilter, isReplayFolder, monthFolder, parseReplayFilter, parseViewRequest, playersFromApi, sanitizeEntry, settingsFlags } from "./replayentry";
 
 /** Upload size cap: keeps a whole raw stream inside Worker memory. Real
@@ -367,7 +368,9 @@ app.post("/api/admin/replays/:id/refresh-settings", async (c) => {
 });
 
 // Drag&drop upload: the Worker does NOT transcode (the viewer's .brp wire is
-// produced by the Go pipeline). It validates the stream's preamble, archives
+// produced by the Go pipeline). It accepts a raw .brepstream or a capture
+// already packed into a .brp — told apart by their first bytes, never by a
+// file name — validates the stream's preamble or the .brp's meta, archives
 // the raw bytes under streams/<gameId>/ — a prefix nothing lists and
 // /replays/* never serves, and from which nothing is ever deleted — and
 // records a pending job for the ingest daemon (cmd/bringest), which
@@ -379,7 +382,8 @@ app.post("/api/upload", async (c) => {
   const body = new Uint8Array(await c.req.arrayBuffer());
   if (body.length > MAX_UPLOAD) return c.json({ error: `upload exceeds ${MAX_UPLOAD} bytes` }, 413);
 
-  const p = scanStreamPreamble(body);
+  const brp = isBrp(body);
+  const p = brp ? await scanBrpHead(body) : scanStreamPreamble(body);
   if (typeof p === "string") return c.json({ error: p }, 400);
 
   // The key carries a hash of the BYTES, because nothing else in it is unique.
@@ -408,7 +412,7 @@ app.post("/api/upload", async (c) => {
   // under the month it was uploaded in.
   const started = await indexStub(c.env).gameStartUnix(p.gameId);
   const month = monthFolder(started ?? Math.floor(Date.now() / 1000));
-  const streamKey = `streams/${month}/${p.gameId}/${Date.now()}-${hash}-${archiveSuffix(p)}.brepstream`;
+  const streamKey = `streams/${month}/${p.gameId}/${Date.now()}-${hash}-${archiveSuffix(p)}${brp ? ".brp" : ".brepstream"}`;
   await c.env.BUCKET.put(streamKey, body);
 
   const job = crypto.randomUUID();

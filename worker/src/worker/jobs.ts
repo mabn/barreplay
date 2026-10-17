@@ -223,6 +223,9 @@ export interface JobStats {
   packSec?: number;
   uploadSec?: number;
   brpBytes?: number;
+  /** An upload's view as its opening frames showed it (packer.ViewCheck):
+   * what decided the view it was published under. */
+  viewCheck?: string;
   /** Re-sim only: engine wall time, and its load/sim split. */
   resimSec?: number;
   loadSec?: number;

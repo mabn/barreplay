@@ -390,6 +390,10 @@ type UploadOptions struct {
 	// construction saw every team, has to declare "full" here. Without it the
 	// row would keep the marking of the one-sided upload it just superseded.
 	View string
+	// Ally names the side that recorded this publish when View is "ally" and
+	// the publisher, not the capture, decided it (bringest's frame check:
+	// ViewFromFrames). Nil keeps the side the capture's recorder record names.
+	Ally *int32
 	// BarAPI, when set, supplies the game's start time for its month folder
 	// when the capture has none (a no-demo pack). Nil skips the lookup, and
 	// such a replay goes under UndatedFolder.
@@ -486,7 +490,7 @@ func UploadStatic(ctx context.Context, brpPath string, o UploadOptions) error {
 		fmt.Fprintf(os.Stderr, "%s: uploaded, but NOT registered in the replay catalog: the caller set no IndexURL\n", gameID)
 		return nil
 	}
-	if err := putCatalogEntry(ctx, o.IndexURL, gameID, rid, o.Rev, brpPath, size, o.ModOptions, o.View); err != nil {
+	if err := putCatalogEntry(ctx, o.IndexURL, gameID, rid, o.Rev, brpPath, size, o.ModOptions, o.View, o.Ally); err != nil {
 		return fmt.Errorf("registering %s in the replay catalog at %s: %w", gameID, o.IndexURL, err)
 	}
 	fmt.Fprintf(os.Stderr, "%s: registered in the replay catalog at %s\n", gameID, o.IndexURL)
@@ -652,7 +656,7 @@ func checkWorkerDir(workerDir string) error {
 // view overrides the capture's own point of view (UploadOptions.View); empty
 // keeps whatever the .brp's recorder record implies, and an entry with no view
 // at all leaves the row's existing marking alone (the worker COALESCEs it).
-func putCatalogEntry(ctx context.Context, indexURL, gameID, rid, rev, brpPath string, sizeBytes int64, modOptions map[string]string, view string) error {
+func putCatalogEntry(ctx context.Context, indexURL, gameID, rid, rev, brpPath string, sizeBytes int64, modOptions map[string]string, view string, ally *int32) error {
 	f, err := os.Open(brpPath)
 	if err != nil {
 		return err
@@ -674,6 +678,8 @@ func putCatalogEntry(ctx context.Context, indexURL, gameID, rid, rev, brpPath st
 		// also a statement that no single side recorded this revision.
 		if view != "ally" {
 			entry.UploaderAlly = nil
+		} else if ally != nil {
+			entry.UploaderAlly = ally
 		}
 	}
 	body, err := json.Marshal(entry)
@@ -748,50 +754,51 @@ func mb(n int64) float64 { return float64(n) / (1024 * 1024) }
 // temp dir when empty) and returning its path — or the input's own path when
 // there is nothing to add, which includes a file that already has them. It is
 // what lets a replay packed before orders were read get them with no
-// re-simulation.
-func AddDemoOrders(ctx context.Context, client *barapi.Client, in, outDir, idArg string) (string, error) {
+// re-simulation. It also returns the demo's modoptions, which a .brp does not
+// store and the catalog's settings flags and the summary's win model need.
+func AddDemoOrders(ctx context.Context, client *barapi.Client, in, outDir, idArg string) (string, map[string]string, error) {
 	f, err := os.Open(in)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	bf, err := snapshot.ParseBRP(f)
 	f.Close()
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", in, err)
+		return "", nil, fmt.Errorf("%s: %w", in, err)
 	}
 	id := idArg
 	if id == "" {
 		id = bf.Meta.GameID
 	}
 	if id == "" {
-		return "", fmt.Errorf("%s: no gameId in its meta (pass -id)", in)
+		return "", nil, fmt.Errorf("%s: no gameId in its meta (pass -id)", in)
 	}
 	d, err := demoMeta(ctx, client, id)
 	if err != nil {
-		return "", fmt.Errorf("fetching the demo for %q: %w: %v", id, ErrDemoUnavailable, err)
+		return "", nil, fmt.Errorf("fetching the demo for %q: %w: %v", id, ErrDemoUnavailable, err)
 	}
 	if len(d.SelfD) == 0 {
-		return in, nil
+		return in, d.ModOptions, nil
 	}
 	if outDir == "" {
 		if outDir, err = os.MkdirTemp("", "barreplay-orders-"); err != nil {
-			return "", err
+			return "", nil, err
 		}
 	}
 	out := filepath.Join(outDir, filepath.Base(in))
 	ai, _ := filepath.Abs(in)
 	ao, _ := filepath.Abs(out)
 	if ai == ao {
-		return "", fmt.Errorf("%s: -out would overwrite the input", in)
+		return "", nil, fmt.Errorf("%s: -out would overwrite the input", in)
 	}
 	src, err := os.Open(in)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	defer src.Close()
 	dst, err := os.Create(out)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	n, err := snapshot.AddEventsBRP(src, dst, d.SelfD)
 	if cerr := dst.Close(); err == nil {
@@ -799,12 +806,12 @@ func AddDemoOrders(ctx context.Context, client *barapi.Client, in, outDir, idArg
 	}
 	if err != nil {
 		os.Remove(out)
-		return "", err
+		return "", nil, err
 	}
 	if n == 0 {
 		os.Remove(out)
-		return in, nil
+		return in, d.ModOptions, nil
 	}
 	fmt.Fprintf(os.Stderr, "%s: added %d self-destruct orders from the demo -> %s\n", in, n, out)
-	return out, nil
+	return out, d.ModOptions, nil
 }

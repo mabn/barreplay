@@ -5802,6 +5802,7 @@ function statsLines(j, s) {
   add('Packed in', s.packSec ? fmtDur(s.packSec) : null);
   add('Uploaded in', s.uploadSec ? fmtDur(s.uploadSec) : null);
   add('.brp', s.brpBytes ? fmtSize(s.brpBytes) : null);
+  add('View check', s.viewCheck);
   add('Total', s.tookSec ? fmtDur(s.tookSec) : null);
   // WHAT made it: the daemon binary, the widget build, the .brp format.
   if (s.bringest) {
@@ -7215,7 +7216,7 @@ function renderQueue(errMsg) {
   }
 
   const text = errMsg || (rows.length ? '' :
-    'Nothing in the queue. Drop a .brepstream above, or paste a replay link to re-simulate one nobody uploaded, and it shows up here until a daemon has published it.');
+    'Nothing in the queue. Drop a .brepstream or .brp above, or paste a replay link to re-simulate one nobody uploaded, and it shows up here until a daemon has published it.');
   msg.style.display = text ? '' : 'none';
   msg.textContent = text;
 }
@@ -7636,7 +7637,7 @@ function renderHome(errMsg) {
       ? 'Nothing on this page any more — go back a page.'
       : filtered
         ? 'No replays match these filters.'
-        : 'No replays yet. Drop a .brepstream above, or upload one with: go run ./cmd/pack -upload r2 <capture>.'));
+        : 'No replays yet. Drop a .brepstream or .brp above, or upload one with: go run ./cmd/pack -upload r2 <capture>.'));
   msg.style.display = text ? '' : 'none';
   msg.textContent = text;
 }
@@ -7831,7 +7832,7 @@ function settingsBadges(settings) {
 }
 
 // ---- drag&drop publishing --------------------------------------------------
-// A dropped .brepstream POSTs to /api/upload; the worker archives it and
+// A dropped .brepstream or .brp POSTs to /api/upload; the worker archives it and
 // records an ingest job, the Go daemon publishes it, and we poll the job
 // until the replay is ready to open. The same front-end also runs against
 // backends without the upload API (a plain static host) — there the attempt

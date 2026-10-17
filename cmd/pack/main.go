@@ -119,7 +119,7 @@ func main() {
 				err = fmt.Errorf("input is already a .brp (use -stats to analyze it, or pass the raw .brepstream to pack)")
 			}
 			if err == nil && *upload != "" && !*noDemo {
-				brpPath, err = packer.AddDemoOrders(ctx, client, in, *outDir, *idArg)
+				brpPath, modOptions, err = packer.AddDemoOrders(ctx, client, in, *outDir, *idArg)
 			}
 		} else {
 			brpPath, modOptions, err = packer.Pack(ctx, client, in, *outDir, *idArg, *noDemo)

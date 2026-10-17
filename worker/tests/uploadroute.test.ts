@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import app from "../src/worker/app";
+import { brp } from "./brpfixture";
 import { MAX_JOB_PROGRESS_BYTES, MAX_JOB_STATS_BYTES } from "../src/worker/jobs";
 import type {
   IngestJob,
@@ -340,6 +341,27 @@ test("upload archives the stream and records a pending job", async () => {
   assert.equal(job.state, "pending");
   assert.equal(job.streamKey, body.streamKey);
   assert.equal(job.gameId, GAME_ID);
+});
+
+// A capture uploaded already packed takes the same door: archived byte for
+// byte beside the streams, with its own extension (which is how the daemon
+// knows not to pack it), and an ordinary upload job.
+test("upload accepts a .brp and archives it as one", async () => {
+  const { env, index, bucket } = makeEnv();
+  const body = brp({ gameId: GAME_ID, recorder: { playerId: 1, allyTeam: 0, spectator: true } });
+  const res = await app.request("/api/upload", { method: "POST", body }, env);
+  assert.equal(res.status, 200);
+  const r = await asJson(res);
+  assert.equal(r.gameId, GAME_ID);
+  assert.match(r.streamKey, new RegExp(`^streams/\\d{4}-\\d{2}/${GAME_ID}/\\d+-[0-9a-f]{8}-spec\\.brp$`));
+  assert.deepEqual(bucket.objects.get(r.streamKey), body);
+  const job = index.jobs.get(r.job);
+  assert.equal(job?.kind, "upload");
+  assert.equal(job?.streamKey, r.streamKey);
+
+  const bad = await app.request("/api/upload", { method: "POST", body: brp({ gameId: GAME_ID }, 3) }, env);
+  assert.equal(bad.status, 400);
+  assert.match((await asJson(bad)).error, /unsupported \.brp version 3/);
 });
 
 // An uploaded stream is filed under the game's start month when the games
