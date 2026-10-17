@@ -203,7 +203,7 @@ function renderReady(st, prevMode) {
   renderHistory(st.history);
 }
 
-const AUTO_ABOUT = 'Re-simulate the newest games that have no replay yet, one after another, and upload each one.';
+const AUTO_ABOUT = 'Re-simulate the newest unmodded games that have no replay yet, one after another, and upload each one.';
 function renderAuto(st) {
   const on = !!st.autoReplay;
   $('autoSwitch').setAttribute('aria-checked', on ? 'true' : 'false');
@@ -251,8 +251,11 @@ function previewCard(p) {
   const top = el('div', 'pv-top');
   top.append(el('h3', '', p.map || 'Unknown map'));
   body.append(top);
+  const lb = lobbyLine(p.lobbyName);
+  if (lb) body.append(lb);
   const chips = el('div', 'chips');
   if (p.size) chips.append(el('span', 'chip size', p.size));
+  tagChips(p.tags, chips);
   chips.append(el('span', 'chip', fmtClock(p.durationSec)));
   if (p.startTime) chips.append(el('span', 'chip', fmtDate(p.startTime)));
   if (p.spectators) chips.append(el('span', 'chip', `${p.spectators} spectating`));
@@ -282,6 +285,19 @@ function previewCard(p) {
   foot.append(eng);
   c.append(foot);
   return c;
+}
+
+// The lobby's title as the battle room showed it, when the site saw it.
+function lobbyLine(name, cls) {
+  if (!name) return null;
+  const d = el('div', 'lobby' + (cls ? ' ' + cls : ''), name);
+  d.title = 'Lobby: ' + name;
+  return d;
+}
+
+// The game's settings as badges (ranked, lava, mods, ...), coloured per key.
+function tagChips(tags, into, small) {
+  (tags || []).forEach((t) => into.append(el('span', `chip gtag tag-${t.key}${small ? ' sm' : ''}`, t.label)));
 }
 
 function teamsBlock(sides) {
@@ -321,6 +337,8 @@ function resultCard(h) {
   r.append(ico);
   const mid = el('div');
   mid.append(el('h3', '', ok ? 'Replay saved' : stopped ? 'Stopped' : 'Re-simulation failed'));
+  const lb = lobbyLine(h.lobbyName);
+  if (lb) mid.append(lb);
   const msg = el('p', '', ok ? (h.path || '').split(/[\\/]/).pop() : stopped ? 'Nothing was saved.' : h.error);
   if (ok) msg.title = h.path || '';
   mid.append(msg);
@@ -332,6 +350,7 @@ function resultCard(h) {
     add('Took', fmtDur(h.tookSec));
     if (h.speedUp) add('Speed', h.speedUp.toFixed(1) + '×');
     mid.append(st);
+    if (h.tags && h.tags.length) { const tc = el('div', 'chips'); tagChips(h.tags, tc); mid.append(tc); }
     if (h.upload) mid.append(el('p', 'up ' + h.upload, uploadWords(h)));
   }
   r.append(mid);
@@ -380,7 +399,12 @@ function renderHistory(hist) {
     if (h.mapFile) mini.style.backgroundImage = `url("${thumbURL(h.mapFile)}")`;
     const mid = el('div');
     mid.style.minWidth = '0';
-    mid.append(el('div', 't', h.map || shortId(h.gameId)), el('div', 's', `${h.size ? h.size + ' · ' : ''}${h.gameSec ? fmtClock(h.gameSec) + ' · ' : ''}${shortId(h.gameId)}`));
+    mid.append(el('div', 't', h.map || shortId(h.gameId)));
+    const lb = lobbyLine(h.lobbyName, 'sm');
+    if (lb) mid.append(lb);
+    const sub = el('div', 's', `${h.size ? h.size + ' · ' : ''}${h.gameSec ? fmtClock(h.gameSec) + ' · ' : ''}${shortId(h.gameId)}`);
+    tagChips(h.tags, sub, true);
+    mid.append(sub);
     const right = el('div', 'r', h.error ? fmtAgo(h.finishedAt) : `${fmtBytes(h.bytes)} · ${fmtAgo(h.finishedAt)}`);
     const st = h.error === 'Stopped' ? el('span', 'st stop', 'stopped') : h.error ? el('span', 'st err', 'failed') : uploadChip(h);
     li.append(mini, mid, right, st);
@@ -432,9 +456,12 @@ function renderRun(st) {
   $('runMap').textContent = p ? (p.map || 'Unknown map') : 'Game ' + shortId(j.gameId);
   const meta = $('runMeta');
   meta.textContent = '';
+  const lb = p && lobbyLine(p.lobbyName);
+  if (lb) meta.append(lb);
   const chips = el('div', 'chips');
   if (p) {
     if (p.size) chips.append(el('span', 'chip size', p.size));
+    tagChips(p.tags, chips);
     chips.append(el('span', 'chip', fmtClock(p.durationSec)));
     if (p.startTime) chips.append(el('span', 'chip', fmtDate(p.startTime)));
   }
@@ -679,6 +706,7 @@ function makeMock(scene) {
     thumb: 'https://api.bar-rts.com/maps/supreme_isthmus_v2.1/texture-thumb.jpg',
     startTime: '2026-10-15T02:16:10.000Z', durationSec: 3030, engineVersion: '2026.07.04', gameVersion: 'test-31620-b0a3bbf',
     preset: 'team', size: '8v8', players: 16, spectators: 5,
+    lobbyName: 'Low Tier Supreme | 8v8 | Min chev: 4 | Rating: 10-32', tags: [{ key: 'ranked', label: 'ranked' }],
     sides: [
       side(['Zekain', 'haaven', 'rilaxin', 'XuunnY', 'GazzGrim', '[APM]Akile', 'DRM', 'Vaticineur'], ['#1b702f', '#2e9b48', '#5bc96a', '#96d36b', '#0f9d8a', '#3dbfa6', '#74d9c2', '#b6efe2'], false, [8.9, 31.2, 24.7, 19.3, 28.4, 22.1, 15.6, 26.8]),
       side(['DouglasBacon', 'Tregan', 'Uncle_Cane', 'XakHarbinger', 'Crimsco', 'Zippo9', 'krtf', 'RTS_MaJoR'], ['#c4302b', '#e2572e', '#f28a3c', '#f7b84b', '#b02a63', '#d9488c', '#ef7fb2', '#a8323c'], true, [33.5, 21.4, 18.8, 27.1, 24.9, 16.2, 29.7, 20.3]),
@@ -692,9 +720,9 @@ function makeMock(scene) {
     { key: 'game', label: 'Download Beyond All Reason', status: 'active', detail: 'test-31620-b0a3bbf', percent: 37, done: 0, total: 0 },
   ];
   const hist = [
-    { gameId: 'c1f0e7a2b8d94f3a9e1c2b3a4d5e6f70', map: 'Glitters 1.2', mapFile: 'glitters_1.2', size: '4v4', gameSec: 1520, path: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays\\c1f0e7a2b8d94f3a9e1c2b3a4d5e6f70.brp', bytes: 6.2e6, tookSec: 402, speedUp: 3.8, upload: 'published', auto: true, finishedAt: new Date(now - 3600e3 * 3).toISOString() },
-    { gameId: '9b2d4e6f8a0c1e3f5a7b9c1d3e5f7a9b', map: 'All That Glitters v2.2', mapFile: 'all_that_glitters_v2.2', size: '8v8', gameSec: 2410, error: 'This computer ran out of memory for this game. Close other programs, or try a smaller game.', finishedAt: new Date(now - 3600e3 * 26).toISOString() },
-    { gameId: '4936896a8e1c2b3a4d5e6f7081928374', map: 'Red Comet Remake 1.8', mapFile: 'red_comet_remake_1.8', size: '1v1', gameSec: 812, path: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays\\4936896a8e1c2b3a4d5e6f7081928374.brp', bytes: 1.9e6, tookSec: 96, speedUp: 8.5, finishedAt: new Date(now - 3600e3 * 50).toISOString() },
+    { gameId: 'c1f0e7a2b8d94f3a9e1c2b3a4d5e6f70', map: 'Glitters 1.2', mapFile: 'glitters_1.2', size: '4v4', lobbyName: '[teh] Glitters 4v4 | all welcome', tags: [{ key: 'ranked', label: 'ranked' }, { key: 'quickStart', label: 'quick start' }], gameSec: 1520, path: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays\\c1f0e7a2b8d94f3a9e1c2b3a4d5e6f70.brp', bytes: 6.2e6, tookSec: 402, speedUp: 3.8, upload: 'published', auto: true, finishedAt: new Date(now - 3600e3 * 3).toISOString() },
+    { gameId: '9b2d4e6f8a0c1e3f5a7b9c1d3e5f7a9b', map: 'All That Glitters v2.2', mapFile: 'all_that_glitters_v2.2', size: '8v8', lobbyName: 'LAVA SUPREME | 8v8 | OS 20+', tags: [{ key: 'unranked', label: 'unranked' }, { key: 'lava', label: 'lava' }], gameSec: 2410, error: 'This computer ran out of memory for this game. Close other programs, or try a smaller game.', finishedAt: new Date(now - 3600e3 * 26).toISOString() },
+    { gameId: '4936896a8e1c2b3a4d5e6f7081928374', map: 'Red Comet Remake 1.8', mapFile: 'red_comet_remake_1.8', size: '1v1', lobbyName: 'practice 1v1s', tags: [{ key: 'ranked', label: 'ranked' }], gameSec: 812, path: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays\\4936896a8e1c2b3a4d5e6f7081928374.brp', bytes: 1.9e6, tookSec: 96, speedUp: 8.5, finishedAt: new Date(now - 3600e3 * 50).toISOString() },
   ];
   const st = {
     mode: 'ready', steps: steps(), setup: { engineVersion: '2026.07.04', gameVersion: 'Beyond All Reason test-31620-b0a3bbf', doneAt: new Date().toISOString() },
@@ -733,7 +761,7 @@ function makeMock(scene) {
   const finish = (err) => {
     clearInterval(timer);
     st.mode = 'ready'; st.job = null;
-    const h = { gameId: P.id, map: P.map, mapFile: P.mapFile, size: P.size, gameSec: P.durationSec, path: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays\\' + P.id + '.brp', bytes: 8.4e6, tookSec: 1187, speedUp: 2.55, patched: true, finishedAt: new Date().toISOString(), upload: 'queued', uploadJob: 'j1' };
+    const h = { gameId: P.id, map: P.map, mapFile: P.mapFile, size: P.size, lobbyName: P.lobbyName, tags: P.tags, gameSec: P.durationSec, path: 'C:\\Users\\marcin\\AppData\\Local\\FogOfWar\\replays\\' + P.id + '.brp', bytes: 8.4e6, tookSec: 1187, speedUp: 2.55, patched: true, finishedAt: new Date().toISOString(), upload: 'queued', uploadJob: 'j1' };
     if (err) { delete h.upload; delete h.uploadJob; }
     if (err) { delete h.path; h.error = err; }
     st.last = h; st.history = [h, ...st.history];
@@ -750,7 +778,7 @@ function makeMock(scene) {
     void bytes;
   }
   if (scene === 'running') setTimeout(() => run(9), 50);
-  if (scene === 'auto') { st.autoReplay = true; st.autoNote = 'All of the 10 newest games have a replay or are being worked on; looking again at 14:32'; }
+  if (scene === 'auto') { st.autoReplay = true; st.autoNote = 'All of the 10 newest games are modded, have a replay or are being worked on; looking again at 14:32'; }
   if (scene === 'done') { st.history = hist; finish(); }
   if (scene === 'fail') finish('This computer ran out of memory for this game. Close other programs, or try a smaller game.');
   const later = (v, ms) => new Promise((r) => setTimeout(() => r(v), ms || 0));

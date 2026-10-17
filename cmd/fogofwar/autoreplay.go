@@ -14,8 +14,9 @@ import (
 // that has no replay yet and that nobody is working on — neither the site's
 // own pipeline (a job pending or processing) nor this app before (any game in
 // the history, failed ones included, so a game that cannot be re-simulated is
-// not tried again forever). When none of them qualifies it looks again a
-// minute later.
+// not tried again forever). Modded games are skipped (Marcin's call), and so
+// is a game whose settings the site does not know, since it may be one. When
+// none of them qualifies it looks again a minute later.
 
 const (
 	autoListSize   = 10
@@ -29,6 +30,19 @@ type siteGame struct {
 	ID        string  `json:"id"`
 	Published bool    `json:"published"`
 	JobState  *string `json:"jobState"`
+	// Settings are the site's settings flags (viz.SettingsFlags); nil when
+	// the BAR API gave none.
+	Settings map[string]any `json:"settings"`
+}
+
+// modded is true when a game ran tweaked unit tables (the "mods" flag) or
+// its settings are unknown.
+func (g siteGame) modded() bool {
+	if g.Settings == nil {
+		return true
+	}
+	v, ok := g.Settings["mods"]
+	return ok && v != false
 }
 
 // fetchSiteGames reads the first page of the site's games list.
@@ -54,11 +68,11 @@ func fetchSiteGames(ctx context.Context, n int) ([]siteGame, error) {
 	return out.Games, nil
 }
 
-// pickAutoGame is the first game that wants a replay: not published, no job
-// in flight on the site, never tried here.
+// pickAutoGame is the first game that wants a replay: not modded, not
+// published, no job in flight on the site, never tried here.
 func pickAutoGame(games []siteGame, tried map[string]bool) string {
 	for _, g := range games {
-		if g.ID == "" || g.Published || tried[g.ID] {
+		if g.ID == "" || g.Published || tried[g.ID] || g.modded() {
 			continue
 		}
 		if g.JobState != nil && (*g.JobState == "pending" || *g.JobState == "processing") {
@@ -135,7 +149,7 @@ func (a *App) autoStep() {
 		if err != nil {
 			a.autoNote = "Couldn't reach the games list; trying again at " + a.autoNext.Format("15:04")
 		} else {
-			a.autoNote = fmt.Sprintf("All of the %d newest games have a replay or are being worked on; looking again at %s", autoListSize, a.autoNext.Format("15:04"))
+			a.autoNote = fmt.Sprintf("All of the %d newest games are modded, have a replay or are being worked on; looking again at %s", autoListSize, a.autoNext.Format("15:04"))
 		}
 		a.dirty = true
 		a.mu.Unlock()
@@ -152,7 +166,7 @@ func (a *App) autoStep() {
 		return
 	}
 	a.mu.Lock()
-	a.autoNote = "Replaying the newest game without a replay"
+	a.autoNote = "Replaying the newest unmodded game without a replay"
 	a.dirty = true
 	a.mu.Unlock()
 }

@@ -496,6 +496,7 @@ func (a *App) runJob(ctx context.Context, run *jobRun) {
 	a.mu.Lock()
 	if p := run.preview; p != nil {
 		item.Map, item.MapFile, item.Size = p.Map, p.MapFile, p.Size
+		item.LobbyName, item.Tags = p.LobbyName, p.Tags
 		if item.GameSec == 0 {
 			item.GameSec = p.DurationSec
 		}

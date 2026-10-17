@@ -13,19 +13,39 @@ import (
 
 func TestPickAutoGame(t *testing.T) {
 	s := func(v string) *string { return &v }
+	plain := map[string]any{"ranked": true}
 	games := []siteGame{
-		{ID: "a1", Published: true},
-		{ID: "b2", JobState: s("processing")},
-		{ID: "c3", JobState: s("pending")},
-		{ID: "d4"}, // tried here before
-		{ID: "e5", JobState: s("error")},
-		{ID: "f6"},
+		{ID: "a1", Published: true, Settings: plain},
+		{ID: "b2", JobState: s("processing"), Settings: plain},
+		{ID: "c3", JobState: s("pending"), Settings: plain},
+		{ID: "d4", Settings: plain}, // tried here before
+		{ID: "m1", Settings: map[string]any{"ranked": true, "mods": true}},
+		{ID: "m2", Settings: map[string]any{"lava": true, "mods": true}},
+		{ID: "u1"}, // settings unknown: may be modded
+		{ID: "e5", JobState: s("error"), Settings: map[string]any{"unranked": true}},
+		{ID: "f6", Settings: plain},
 	}
 	if got := pickAutoGame(games, map[string]bool{"d4": true}); got != "e5" {
-		t.Fatalf("picked %q, want e5 (a failed site job is fair game)", got)
+		t.Fatalf("picked %q, want e5 (unmodded; a failed site job is fair game)", got)
 	}
-	if got := pickAutoGame(games[:4], map[string]bool{"d4": true}); got != "" {
-		t.Fatalf("picked %q from games that all have a replay or a job", got)
+	if got := pickAutoGame(games[:7], map[string]bool{"d4": true}); got != "" {
+		t.Fatalf("picked %q from games that are modded or have a replay or a job", got)
+	}
+}
+
+func TestGameTags(t *testing.T) {
+	got := gameTags(map[string]any{"ranked": true, "lava": true, "mods": true, "noAir": true, "quickStart": "enabled", "zombies": "hard", "newFlag": "x"})
+	want := []Tag{{"ranked", "ranked"}, {"lava", "lava"}, {"zombies", "zombies: hard"}, {"quickStart", "quick start"}, {"newFlag", "newFlag: x"}}
+	if len(got) != len(want) {
+		t.Fatalf("tags %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("tags %v, want %v", got, want)
+		}
+	}
+	if m := gameTags(map[string]any{"mods": true}); len(m) != 1 || m[0].Label != "mods" {
+		t.Fatalf("mods alone: %v", m)
 	}
 }
 

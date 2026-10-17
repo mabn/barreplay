@@ -5,13 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mabn/barreplay/internal/engine"
+	"github.com/mabn/barreplay/internal/viz"
 )
 
 // GamePreview is what the window shows about a pasted game before and while
@@ -30,6 +34,11 @@ type GamePreview struct {
 	Players       int     `json:"players"`
 	Spectators    int     `json:"spectators"`
 	Sides         []Side  `json:"sides"`
+	// LobbyName is the battle room's title, from the site's games list
+	// (empty when the site did not see the lobby); Tags are the game's
+	// notable settings, as the site badges them.
+	LobbyName string `json:"lobbyName,omitempty"`
+	Tags      []Tag  `json:"tags,omitempty"`
 
 	// Filled in by annotate, from this machine's point of view.
 	EstimateSec  float64 `json:"estimateSec"`
@@ -91,10 +100,19 @@ type apiDetail struct {
 			} `json:"rgbColor"`
 		} `json:"AIs"`
 	} `json:"AllyTeams"`
-	Spectators []json.RawMessage `json:"Spectators"`
+	Spectators   []json.RawMessage `json:"Spectators"`
+	GameSettings map[string]any    `json:"gameSettings"`
 }
 
 func fetchPreview(ctx context.Context, id string) (*GamePreview, error) {
+	// The lobby name only the site knows; asked beside the BAR API and never
+	// waited on past a few seconds.
+	lobby := make(chan string, 1)
+	go func() {
+		lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		lobby <- fetchLobbyName(lctx, id)
+	}()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.bar-rts.com/replays/"+url.PathEscape(id), nil)
 	if err != nil {
 		return nil, err
@@ -165,8 +183,122 @@ func fetchPreview(ctx context.Context, id string) (*GamePreview, error) {
 	if len(sizes) >= 4 {
 		p.Size = fmt.Sprintf("FFA (%d)", p.Players)
 	}
+	mo := map[string]string{}
+	for k, v := range d.GameSettings {
+		if s, ok := v.(string); ok {
+			mo[k] = s
+		}
+	}
+	p.Tags = gameTags(viz.SettingsFlags(mo))
+	p.LobbyName = <-lobby
 	return p, nil
 }
+
+// fetchLobbyName is the lobby's title from the site's games mirror, or ""
+// when the site has none (it missed the lobby, or is unreachable).
+func fetchLobbyName(ctx context.Context, id string) string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, siteURL()+"/api/games?id="+url.QueryEscape(id), nil)
+	if err != nil {
+		return ""
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	var out struct {
+		Games []struct {
+			ID        string `json:"id"`
+			LobbyName string `json:"lobbyName"`
+		} `json:"games"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out) != nil {
+		return ""
+	}
+	for _, g := range out.Games {
+		if g.ID == id {
+			return strings.TrimSpace(g.LobbyName)
+		}
+	}
+	return ""
+}
+
+// Tag is one badge for a game setting.
+type Tag struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+}
+
+// tagOrder is the site's badge vocabulary in display order (app.js
+// SETTINGS_BADGES); valueless ones show their label alone.
+var tagOrder = []struct {
+	key, label string
+	valueless  bool
+}{
+	{"ranked", "ranked", false},
+	{"unranked", "unranked", false},
+	{"lava", "lava", false},
+	{"mods", "mods", false},
+	{"zombies", "zombies", false},
+	{"ruins", "ruins", false},
+	{"quickStart", "quick start", true},
+	{"comBuilders", "base builder", true},
+	{"noNukes", "no nukes", false},
+	{"noLrpc", "no lrpc", false},
+	{"noEndgameLrpc", "no endgame lrpc", false},
+}
+
+// gameTags badges settings flags the way the site does (app.js
+// settingsBadges): scavUnits/extraUnits/noAir are too common to show, mods
+// is implied by lava and zombies, akumu zombies imply the lava, and a flag
+// the vocabulary lacks still shows as "key: value".
+func gameTags(flags map[string]any) []Tag {
+	if len(flags) == 0 {
+		return nil
+	}
+	seen := map[string]bool{"scavUnits": true, "extraUnits": true, "noAir": true}
+	var out []Tag
+	for _, t := range tagOrder {
+		v, ok := flags[t.key]
+		if !ok || v == false {
+			continue
+		}
+		seen[t.key] = true
+		if (t.key == "mods" && (truthy(flags["lava"]) || truthy(flags["zombies"]))) ||
+			(t.key == "lava" && flags["zombies"] == "akumu") {
+			continue
+		}
+		label := t.label
+		if v != true && !t.valueless {
+			label = fmt.Sprintf("%s: %v", t.label, v)
+		}
+		out = append(out, Tag{t.key, label})
+	}
+	var rest []string
+	for k := range flags {
+		if !seen[k] {
+			rest = append(rest, k)
+		}
+	}
+	sort.Strings(rest)
+	for _, k := range rest {
+		v := flags[k]
+		if v == false || v == nil {
+			continue
+		}
+		label := k
+		if v != true {
+			label = fmt.Sprintf("%s: %v", k, v)
+		}
+		out = append(out, Tag{k, label})
+	}
+	return out
+}
+
+func truthy(v any) bool { return v != nil && v != false }
 
 // annotate adds what depends on this machine: how long the run should take,
 // how much memory it needs against how much there is, and whether an engine

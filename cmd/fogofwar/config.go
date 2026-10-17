@@ -47,6 +47,8 @@ type HistoryItem struct {
 	Map        string    `json:"map,omitempty"`
 	MapFile    string    `json:"mapFile,omitempty"`
 	Size       string    `json:"size,omitempty"`
+	LobbyName  string    `json:"lobbyName,omitempty"`
+	Tags       []Tag     `json:"tags,omitempty"`
 	Path       string    `json:"path,omitempty"`
 	Bytes      int64     `json:"bytes,omitempty"`
 	TookSec    float64   `json:"tookSec,omitempty"`
