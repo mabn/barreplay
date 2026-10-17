@@ -1542,3 +1542,38 @@ faster at equal clocks. At the late window, same toggles (`t=1f`), capped:
 Uncapped late-window pairs (earlier, noisy): P1 v4 vs v3 no clear difference;
 H73 (anim walk skip) -2.9% wall. Whole game uncapped with 7 threads and
 `t=1f` running.
+
+### 2026-10-17 06:55 — the laptop is power-limited, so measure at a fixed package power; there the late window is -15%, with less energy
+
+Whole game, `speed13`, uncapped, `t=1f` with `-worker-threads 7`: **24m27s**,
+identical. Per-thread average clocks from perf stat:
+
+| run | main thread | each worker |
+|---|---|---|
+| 4 threads, everything off | 2.78 GHz over 1416 s | 2.3-2.4 GHz, ~395 s busy |
+| 7 threads, everything on | **2.36 GHz** over 1488 s (15% fewer instructions) | 1.7-1.9 GHz, ~460 s busy |
+
+On this chassis every busy core takes clock from the main thread; a whole
+game is decided by total energy, not the main thread's critical path, and the
+starting temperature moves it by ±10%. Two tools:
+
+- `rapl.sh`: package energy (RAPL, read as root through the privileged
+  container).
+- `pkgcap.sh <W>`: a fixed package power limit (PL1 = PL2). At 30 W the CPU
+  never reaches its thermal limit (0 throttle events), so the clocks follow the
+  workload's power draw and runs repeat — the throttled regime, reproducibly.
+
+Late window, `speed13`, 30 W cap, main pinned:
+
+| toggles | wall | package energy per trial (incl. restore) |
+|---|---|---|
+| `t=0` | 15.55 / 15.61 s | 561 / 566 J |
+| `t=1f` | 13.12 / 13.29 s (**-15.3%**) | 497 / 497 J (**-12%**) |
+
+Uncapped on a cooled host: 14.35/14.63 s vs 12.28/12.17 s (-15.5%), 657 vs
+596 J. So the late-window gain is not bought with power. Workers' time in that
+window (speed11 `t=f`): 13% spinning in P1's waits, ~9% in the anim piece
+transforms H73 now skips, 9% weapon vectors, 6% LOS, 3.6% pathfinding node
+updates — P1's waits are the clearest waste left. `speed14` (building): P1
+engages only with >= 256 parallel items (no gain in the early game), counters
+for why items are serial, Lua GC cycles per Lua state. Then whole games at 30 W.
