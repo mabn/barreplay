@@ -55,6 +55,11 @@ type Config struct {
 	// its own executable: a separate directory would have to duplicate the
 	// whole base/ + fonts payload for every version.
 	PatchedEngine bool
+	// KeepPatchedEngine stops EnsurePatchedEngine from replacing a patched
+	// binary that is not the published build pinned for its version (an older
+	// published one, or one built here). By default such a binary is replaced,
+	// so every host runs the latest gated build.
+	KeepPatchedEngine bool
 	// SkipProvision disables all pr-downloader calls (assume content present).
 	SkipProvision bool
 	// ForceProvision re-runs pr-downloader even for content already recorded in the

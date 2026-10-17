@@ -56,6 +56,10 @@ type Options struct {
 	// and nothing about what it produces; a version with no patched build
 	// quietly runs stock.
 	PatchedEngine bool
+	// KeepPatchedEngine keeps a patched binary that is not the published
+	// build pinned for its version instead of updating it
+	// (engine.Config.KeepPatchedEngine).
+	KeepPatchedEngine bool
 	// ProgressEvery prints the same frame/ETA line cmd/barreplay's -progress
 	// does, polled off the engine's infolog, this often. 0 disables it. A
 	// re-sim of a long game runs for many minutes with no other output, so a
@@ -209,9 +213,10 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 	}
 	if o.PatchedEngine {
 		if err := engine.EnsurePatchedEngine(ctx, engine.Config{
-			DataDir:       o.DataDir,
-			EngineBinary:  o.EngineBinary,
-			SkipProvision: o.SkipProvision,
+			DataDir:           o.DataDir,
+			EngineBinary:      o.EngineBinary,
+			SkipProvision:     o.SkipProvision,
+			KeepPatchedEngine: o.KeepPatchedEngine,
 		}, h.EngineVersion); err != nil {
 			fmt.Fprintf(os.Stderr, "resim: warning: %v; using the stock engine\n", err)
 		}

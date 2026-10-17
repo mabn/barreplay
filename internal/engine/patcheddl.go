@@ -42,8 +42,9 @@ type PatchedBuild struct {
 	// were gated, independent of how they happened to be compressed.
 	SHA256 string
 	// Superseded lists the SHA-256 of every EARLIER published build of the
-	// version. A host holding one of those is upgraded; a binary matching
-	// none of them was built locally and is never replaced.
+	// version; a binary matching none of them was built locally. Both are
+	// replaced (unless Config.KeepPatchedEngine); the list only lets the log
+	// say which it was.
 	Superseded []string
 }
 
@@ -72,9 +73,11 @@ func PatchedBuildKey(version string, rev int) string {
 
 // EnsurePatchedEngine installs the published patched build for version beside
 // the stock engine (<DataDir>/engine/<version>/spring-headless-patched), where
-// Locate looks for it. It is a no-op when one is already there — a build made
-// locally is never replaced — when provisioning is disabled, when an explicit
-// binary is pinned, or when no build is published for the version.
+// Locate looks for it, and REPLACES whatever other patched binary is there —
+// an earlier published build or one made locally — unless cfg.
+// KeepPatchedEngine says to keep it. It is a no-op when the pinned build is
+// already installed, when provisioning is disabled, when an explicit binary is
+// pinned, or when no build is published for the version.
 //
 // Callers treat an error as a warning: without the patched build a re-sim
 // still runs, on the stock engine, at stock speed.
@@ -90,10 +93,20 @@ func EnsurePatchedEngine(ctx context.Context, cfg Config, version string) error 
 	dst := filepath.Join(dir, patchedHeadlessName())
 	if fileExists(dst) {
 		have, err := fileSHA256(dst)
-		if err != nil || have == build.SHA256 || !contains(build.Superseded, have) {
-			return nil // current, or built here: keep it
+		if err != nil || have == build.SHA256 {
+			return nil
 		}
-		fmt.Fprintf(os.Stderr, "engine: the installed patched build (sha256 %s) is superseded; upgrading\n", have[:12])
+		what := "a patched build that is not a published one (built here?)"
+		if contains(build.Superseded, have) {
+			what = "an earlier published patched build"
+		}
+		if cfg.KeepPatchedEngine {
+			fmt.Fprintf(os.Stderr, "engine: keeping %s (sha256 %s), %s, rather than updating to %s\n",
+				dst, have[:12], what, PatchedVersion(version, build.Rev))
+			return nil
+		}
+		fmt.Fprintf(os.Stderr, "engine: %s (sha256 %s) is %s; updating to %s\n",
+			dst, have[:12], what, PatchedVersion(version, build.Rev))
 	}
 	// The patched binary resolves base/ relative to its own path, so it is
 	// only usable inside a stock install — EnsureEngine runs first.
