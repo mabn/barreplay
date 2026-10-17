@@ -134,7 +134,9 @@ trial1() {
 	local bin=$(bindir "$1") replay=$2 frame=$3 n=$4
 	local dir="$CKPT/$(basename "$bin")/$replay-$frame"
 	[ -d "$dir/img" ] || dump "$1" "$replay" "$frame" >&2
-	while read -r k p; do cp -p "$dir/files/$k" "$p" 2>/dev/null; done < "$dir/files/manifest"
+	# a failed copy (a full disk) otherwise shows up only as CRIU refusing the
+	# file's size ("bad size 0") with no hint why
+	while read -r k p; do cp -p "$dir/files/$k" "$p" || die "restoring $p for the trial failed"; done < "$dir/files/manifest"
 	rm -f "$dir/park.go" "$dir/result"
 	if [ -n "${COOL:-}" ]; then
 		# start every trial from the same package temperature (milli-degC)
