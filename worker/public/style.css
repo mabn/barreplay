@@ -632,6 +632,14 @@ body.admin-mode #hometable th.data, body.admin-mode #hometable td.data { display
   background: var(--raised); border: 1px solid var(--line); color: var(--dim);
 }
 #queuetable .kind-resim { color: #d3b98f; border-color: #5c4a2f; background: #2b2417; }
+#queuetable .kind-app { color: #9fd8cf; border-color: #2f5c55; background: #172b28; }
+/* A control that reads as a link: the install id in a job's details, and the
+   pager's way back from one install's jobs to all of them. */
+button.linkish {
+  font: inherit; color: var(--accent); background: none; border: 0; padding: 0;
+  cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px;
+}
+button.linkish:hover { text-decoration-style: solid; }
 /* Why a job failed, beside the state that says it did. Same weight as the kind
    chip — it explains a row, it is not what you scan the column for. */
 #queuetable .errkind {

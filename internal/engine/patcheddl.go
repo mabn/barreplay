@@ -83,6 +83,17 @@ func patchedBuildFor(version string) (PatchedBuild, bool) {
 	return b, ok
 }
 
+// PinnedPatchedVersion names the patched build pinned for this engine
+// version on this platform ("2026.7.4-barreplay.3"), or "" when none is —
+// which build a run on the patched engine used, for its job's record.
+func PinnedPatchedVersion(version string) string {
+	b, ok := patchedBuildFor(version)
+	if !ok {
+		return ""
+	}
+	return PatchedVersion(version, b.Rev)
+}
+
 var PatchedBuildBaseURL = "https://cdn-bar.fogofwar.dev"
 
 // PatchedBuildKey names the object the patched build of this engine version

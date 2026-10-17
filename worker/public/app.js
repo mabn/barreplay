@@ -5754,6 +5754,9 @@ let queueOffset = 0;       // first row of the page being shown
 let queueReadAt = 0;       // when that page was read (the pager says so)
 let queueSeq = 0;          // ignore a reply overtaken by a newer request
 let queueSupported = true; // cleared by a 404: a backend won't grow the route
+// When set, the queue shows only the jobs of one FogOfWar.exe install (an
+// "Install" line in a row's details sets it; the pager's "show all" clears it).
+let queueInstall = null;
 const queueRelisted = new Set(); // games we already re-listed the catalog for
 const queueOpen = new Set();     // job ids whose processing details are expanded
 // Whether the game-time column shows when each game STARTED or ENDED. A
@@ -5776,7 +5779,8 @@ async function refreshQueue() {
   queueSamples.clear();
   let page;
   try {
-    const r = await fetch(`/api/admin/queue?offset=${queueOffset}&limit=${QUEUE_PAGE}`);
+    const inst = queueInstall ? `&install=${encodeURIComponent(queueInstall)}` : '';
+    const r = await fetch(`/api/admin/queue?offset=${queueOffset}&limit=${QUEUE_PAGE}${inst}`);
     if (r.status === 401) { adminSignedOut(); return; }
     if (r.status === 404 || r.status === 405) {
       // A backend without the endpoint will not grow one while the page is
@@ -5845,6 +5849,23 @@ function fmtDur(sec) {
 function statsLines(j, s) {
   const out = [];
   const add = (k, v) => { if (v) out.push([k, v]); };
+  // FogOfWar.exe: which app, on which install, asked how.
+  if (s.app) {
+    const a = s.app;
+    const bits = [(a.name || 'FogOfWar') + ' ' + (a.version || '?')];
+    bits.push(a.auto ? 'picked by auto-replay' : 'pasted by the user');
+    if (a.runs != null) bits.push(`run ${(a.runs + 1).toLocaleString()} on this install`);
+    add('App', bits.join(' · '));
+    const set = [];
+    if (a.patchedEngine != null) set.push(a.patchedEngine ? 'faster engine on' : 'faster engine off');
+    if (a.minFreeMB) set.push(`stop under ${a.minFreeMB} MB free`);
+    add('App settings', set.join(' · ') || null);
+  }
+  if (j.installId) add('Install', installLink(j.installId));
+  if (s.uploadJob) add('Upload job', s.uploadJob);
+  if (s.phases && s.phases.length) {
+    add('Phases', s.phases.map(p => `${p.phase} ${fmtDur(p.sec)}`).join(' · '));
+  }
   if (s.resimSec) {
     let engine = fmtDur(s.resimSec);
     if (s.loadSec) engine += ` (load ${fmtDur(s.loadSec)} + sim ${fmtDur(s.simSec || s.resimSec - s.loadSec)})`;
@@ -5857,7 +5878,14 @@ function statsLines(j, s) {
     if (s.speedUp) sim += `, ${s.speedUp.toFixed(1)}× realtime`;
     add('Simulated', sim);
   }
-  add('Engine version', s.engineVersion);
+  if (s.engineVersion) {
+    let ev = s.engineVersion;
+    if (s.enginePatched) ev += ' · patched' + (s.patchedBuild ? ' (' + s.patchedBuild + ')' : '');
+    else if (j.kind === 'app' && s.resimSec) ev += ' · stock';
+    add('Engine version', ev);
+  }
+  add('Peak engine memory', s.peakRssBytes ? fmtSize(s.peakRssBytes)
+    + (s.peakSwapBytes ? ` · ${fmtSize(s.peakSwapBytes)} swapped` : '') : null);
   if (s.infolog) {
     const i = s.infolog;
     const bits = [];
@@ -5900,8 +5928,27 @@ function statsLines(j, s) {
     const n = h.cores && h.threads && h.cores !== h.threads ? `${h.cores} cores / ${h.threads} threads`
       : (h.cores || h.threads) ? `${h.cores || h.threads} cores` : null;
     add('Host CPU', [n, h.cpuModel].filter(Boolean).join(' · ') || null);
+    add('Host OS', [h.os, h.osBuild].filter(Boolean).join(' · ') || null);
+    add('Free at start', h.memFreeBytes ? (h.memFreeBytes / 2 ** 30).toFixed(1) + ' GiB RAM'
+      + (h.diskFreeBytes ? ' · ' + fmtSize(h.diskFreeBytes) + ' disk' : '') : null);
   }
   return out;
+}
+
+// installLink is an install id as a control that narrows the queue to every
+// job that install made.
+function installLink(id) {
+  const b = document.createElement('button');
+  b.className = 'linkish installid';
+  b.textContent = id;
+  b.title = 'Show every job from this FogOfWar.exe install';
+  b.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    queueInstall = id;
+    queueOffset = 0;
+    refreshQueue();
+  });
+  return b;
 }
 
 // fmtIso renders an RFC 3339 moment like the rest of the page's dates, or the
@@ -5984,7 +6031,8 @@ function statsRow(j) {
     key.className = 'k';
     key.textContent = k;
     const val = document.createElement('span');
-    val.textContent = v;
+    if (v instanceof Node) val.appendChild(v);
+    else val.textContent = v;
     dl.append(key, val);
   }
   td.appendChild(dl);
@@ -6949,7 +6997,8 @@ function actionCell(j) {
   td.className = 'act';
   const live = j.state === 'pending' || j.state === 'processing';
   const items = [];
-  if (live || j.disabled) {
+  // An app job is never offered to a daemon, so there is nothing to hold back.
+  if ((live || j.disabled) && j.kind !== 'app') {
     items.push({
       label: j.disabled ? 'Enable' : 'Disable',
       title: j.disabled
@@ -6963,7 +7012,7 @@ function actionCell(j) {
   if (!live) {
     items.push({
       label: 'Retry',
-      title: j.kind === 'resim'
+      title: j.kind === 'resim' || j.kind === 'app'
         ? 'Queue this game\'s re-simulation again, as a new job. This row stays as the record of this attempt.'
         : 'Queue this upload\'s publish again from its archived stream, as a new job.',
       run: (btn) => retryJob(j, btn),
@@ -6976,7 +7025,7 @@ function actionCell(j) {
     const rb = document.createElement('button');
     rb.type = 'button';
     rb.className = 'jobbtn jobretrybtn';
-    rb.textContent = j.kind === 'resim' ? 'Re-sim' : 'Retry';
+    rb.textContent = j.kind === 'resim' || j.kind === 'app' ? 'Re-sim' : 'Retry';
     rb.title = items.find(it => it.label === 'Retry').title;
     rb.onclick = (ev) => { ev.stopPropagation(); retryJob(j, rb); };
     td.appendChild(rb);
@@ -7168,7 +7217,8 @@ function renderQueue(errMsg) {
       const k = document.createElement('span');
       const kind = j.kind || 'upload';
       k.className = 'kind kind-' + String(kind).replace(/[^\w-]/g, '');
-      k.textContent = kind === 'resim' ? 're-sim' : kind;
+      k.textContent = kind === 'resim' ? 're-sim' : kind === 'app' ? 'app' : kind;
+      if (kind === 'app') k.title = 'Re-simulated in FogOfWar.exe on somebody\'s own PC';
       td.appendChild(k);
       tr.appendChild(td);
     }
@@ -7279,9 +7329,18 @@ function renderQueue(errMsg) {
     // line on its own, so a relative age would freeze at the moment of the
     // read and quietly become false.
     const read = queueReadAt ? ' · read at ' + new Date(queueReadAt).toLocaleTimeString() : '';
-    document.getElementById('q_range').textContent = rows.length
+    const range = document.getElementById('q_range');
+    range.textContent = rows.length
       ? `${queueOffset + 1}–${queueOffset + rows.length} of ${total}${read}`
       : `no jobs${read}`;
+    if (queueInstall) {
+      range.textContent = `install ${queueInstall.slice(0, 8)}… · ` + range.textContent + ' · ';
+      const all = document.createElement('button');
+      all.className = 'linkish';
+      all.textContent = 'show all jobs';
+      all.addEventListener('click', () => { queueInstall = null; queueOffset = 0; refreshQueue(); });
+      range.appendChild(all);
+    }
     document.getElementById('q_prev').disabled = queueOffset <= 0;
     document.getElementById('q_next').disabled = queueOffset + rows.length >= total;
   }

@@ -32,7 +32,7 @@ import { AccessVerifier, accessCookie, accessToken, devCallbackNext, isLoopbackH
 import { decodeJwt } from "jose";
 import { GAME_ID_RE, encodeGamesCursor, gameFromApi, parseGamesCursor } from "./games";
 import { parseGameId } from "./gameid";
-import { JOB_KINDS, parseJobErrorKind, parseJobProgress, parseJobStats } from "./jobs";
+import { DAEMON_KINDS, parseInstallId, parseJobErrorKind, parseJobProgress, parseJobStats } from "./jobs";
 import type { JobKind } from "./jobs";
 import { archiveSuffix, scanStreamPreamble } from "./preamble";
 import { isBrp, scanBrpHead } from "./brphead";
@@ -415,8 +415,14 @@ app.post("/api/upload", async (c) => {
   const streamKey = `streams/${month}/${p.gameId}/${Date.now()}-${hash}-${archiveSuffix(p)}${brp ? ".brp" : ".brepstream"}`;
   await c.env.BUCKET.put(streamKey, body);
 
+  // FogOfWar.exe says who it is (?install=, ?app=<version>), so the upload of
+  // a .brp it re-simulated is found with the rest of that install's jobs.
+  // Optional and only shape-checked, like everything else on this open route.
+  const installId = parseInstallId(c.req.query("install"));
+  const appVersion = (c.req.query("app") ?? "").replace(/[^\w.+-]/g, "").slice(0, 40);
+  const note = installId !== null ? `Uploaded by FogOfWar ${appVersion || "?"}` : null;
   const job = crypto.randomUUID();
-  await indexStub(c.env).jobInsert(job, streamKey, p.gameId, "upload");
+  await indexStub(c.env).jobInsert(job, streamKey, p.gameId, "upload", installId, note);
   return c.json({ job, gameId: p.gameId, streamKey });
 });
 
@@ -601,9 +607,10 @@ app.get("/api/insights/connect", async (c) => {
 app.get("/api/jobs/:id", async (c) => {
   const job = await indexStub(c.env).jobGet(c.req.param("id"));
   if (!job) return c.json({ error: "unknown job" }, 404);
-  const { id, gameId, kind, state, error, errorKind, stats, progress, disabled, note, createdUnix, updatedUnix } = job;
+  const { id, gameId, kind, state, error, errorKind, stats, progress, disabled, note, installId, createdUnix, updatedUnix } =
+    job;
   return c.json(
-    { id, gameId, kind, state, error, errorKind, stats, progress, disabled, note, createdUnix, updatedUnix },
+    { id, gameId, kind, state, error, errorKind, stats, progress, disabled, note, installId, createdUnix, updatedUnix },
     200,
     {
       "cache-control": "no-cache",
@@ -648,11 +655,20 @@ app.get("/api/admin/queue", async (c) => {
   const offset = num("offset", 0);
   if (typeof offset === "string") return c.json({ error: offset }, 400);
 
-  const page = await indexStub(c.env).queuePage(Math.min(Math.max(limit, 1), QUEUE_LIMIT_MAX), offset);
+  const pageSize = Math.min(Math.max(limit, 1), QUEUE_LIMIT_MAX);
+  // ?install= narrows the queue to one FogOfWar.exe install's jobs, newest
+  // first (every job from one PC). `active` is then not counted.
+  const installRaw = params.get("install");
+  const install = installRaw === null ? null : parseInstallId(installRaw);
+  if (installRaw !== null && install === null) return c.json({ error: "install must be an install id" }, 400);
+  const page =
+    install !== null
+      ? { ...(await indexStub(c.env).jobsByInstall(install, pageSize, offset)), active: 0 }
+      : await indexStub(c.env).queuePage(pageSize, offset);
   return c.json(
     {
       jobs: page.jobs.map(
-        ({ id, gameId, kind, state, error, errorKind, stats, progress, disabled, note, game, createdUnix, updatedUnix }) => ({
+        ({
           id,
           gameId,
           kind,
@@ -663,6 +679,22 @@ app.get("/api/admin/queue", async (c) => {
           progress,
           disabled,
           note,
+          installId,
+          game,
+          createdUnix,
+          updatedUnix,
+        }) => ({
+          id,
+          gameId,
+          kind,
+          state,
+          error,
+          errorKind,
+          stats,
+          progress,
+          disabled,
+          note,
+          installId,
           // What the game IS, joined on by the DO — the jobs table itself knows
           // only an id, and a queue of bare ids says nothing about what the
           // pipeline is actually spending its hour on.
@@ -674,6 +706,7 @@ app.get("/api/admin/queue", async (c) => {
       total: page.total,
       active: page.active,
       offset,
+      install,
     },
     200,
     { "cache-control": "no-cache" },
@@ -878,8 +911,8 @@ app.post("/api/games/backfill", async (c) => {
 app.get("/api/jobs", async (c) => {
   if (!authorized(c)) return c.json({ error: "unauthorized" }, 401);
   const kind = new URL(c.req.url).searchParams.get("kind") ?? "upload";
-  if (!JOB_KINDS.includes(kind as JobKind)) {
-    return c.json({ error: `kind must be one of ${JOB_KINDS.join(", ")}` }, 400);
+  if (!DAEMON_KINDS.includes(kind as JobKind)) {
+    return c.json({ error: `kind must be one of ${DAEMON_KINDS.join(", ")}` }, 400);
   }
   // ?mem= is the daemon's total RAM in bytes (bringest -resim sends it), which
   // is what lets a lava game that ran out of memory on a small host go to a
@@ -929,8 +962,8 @@ app.post("/api/jobs/:id", async (c) => {
   if (b.claim === true) {
     if (b.state !== "processing") return c.json({ error: "claim is only valid with state=processing" }, 400);
     const kind = b.kind === undefined ? "upload" : b.kind;
-    if (!JOB_KINDS.includes(kind as JobKind)) {
-      return c.json({ error: `kind must be one of ${JOB_KINDS.join(", ")}` }, 400);
+    if (!DAEMON_KINDS.includes(kind as JobKind)) {
+      return c.json({ error: `kind must be one of ${DAEMON_KINDS.join(", ")}` }, 400);
     }
     const took = await indexStub(c.env).jobClaim(c.req.param("id"), kind as JobKind);
     if (!took) return c.json({ error: "job already claimed" }, 409);
@@ -949,6 +982,55 @@ app.post("/api/jobs/:id", async (c) => {
   const errorKind = parseJobErrorKind(b.errorKind);
   const ok = await indexStub(c.env).jobUpdate(c.req.param("id"), b.state, detail, stats, progress, errorKind);
   if (!ok) return c.json({ error: "unknown job" }, 404);
+  return c.json({ ok: true });
+});
+
+// FogOfWar.exe's re-simulations, reported by the app itself: it creates the
+// job when it starts simulating, beats every 10 s with its progress (the same
+// JobProgress a daemon sends, so the queue page charts it), and ends it with
+// done/error and its stats. OPEN — the app has no token (Marcin: no
+// authentication for now) — which is why these routes touch only "app" jobs:
+// the guarded POST /api/jobs/:id is the door to a daemon's. An "app" job is
+// never offered to a daemon (DAEMON_KINDS), and the cron fails one that
+// stops reporting (APP_JOB_STALE_SEC).
+app.post("/api/app/jobs", async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "body must be JSON" }, 400);
+  }
+  const b = body as { gameId?: unknown; installId?: unknown; stats?: unknown };
+  const gameId = typeof b.gameId === "string" ? parseGameId(b.gameId) : null;
+  if (!gameId) return c.json({ error: "gameId must be a BAR game id" }, 400);
+  const installId = parseInstallId(b.installId);
+  if (installId === null) return c.json({ error: "installId must be a UUID" }, 400);
+  const job = await indexStub(c.env).appJobStart(crypto.randomUUID(), gameId, installId, parseJobStats(b.stats));
+  return c.json({ job: job?.id ?? null, gameId });
+});
+
+app.post("/api/app/jobs/:id", async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "body must be JSON" }, 400);
+  }
+  const b = body as { state?: unknown; error?: unknown; stats?: unknown; progress?: unknown; errorKind?: unknown };
+  if (b.state !== "processing" && b.state !== "done" && b.state !== "error") {
+    return c.json({ error: "state must be processing, done or error" }, 400);
+  }
+  const detail = typeof b.error === "string" ? b.error.slice(0, 2000) : null;
+  const res = await indexStub(c.env).appJobUpdate(
+    c.req.param("id"),
+    b.state,
+    detail,
+    parseJobStats(b.stats),
+    parseJobProgress(b.progress),
+    parseJobErrorKind(b.errorKind),
+  );
+  if (res === "unknown") return c.json({ error: "unknown job" }, 404);
+  if (res === "not-app") return c.json({ error: "not an app job" }, 403);
   return c.json({ ok: true });
 });
 

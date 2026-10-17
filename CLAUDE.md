@@ -377,7 +377,16 @@ cmd/fogofwar/             FogOfWar.exe: a Windows desktop app that re-simulates 
                           run banner, result, history) it carries its LOBBY NAME (the site's GET
                           /api/games?id=, absent when the mirror never matched a lobby) and its
                           settings TAGS (preview.go gameTags: viz.SettingsFlags over the BAR
-                          API's gameSettings, badged like app.js settingsBadges). It takes no jobs from the queue. Its OWN Go module (go.mod with a replace onto the
+                          API's gameSettings, badged like app.js settingsBadges). It takes no jobs from the queue,
+                          but every run IS one (report.go): an "app" job created over the open POST /api/app/jobs
+                          when the run starts, healthchecked every 10 s with bringest's JobProgress (so the queue
+                          page charts it), and ended with done/error and a jobStats that mirrors bringest's
+                          (RunStats, size report, widget/.brp version, patched build) plus app {version, installId,
+                          auto, settings, runs}, phases (wall time per phase, downloads included), peak engine
+                          RSS/swap, uploadJob, and host {RAM, cores, CPU model, Windows name + build, free RAM and
+                          disk at start} — NO hostname (a volunteer's PC name is theirs). Best-effort: a site it
+                          cannot reach never costs a run. INSTALL ID: a UUIDv7 made on first launch (config.json
+                          installId), on every app job and on the .brp upload (/api/upload?install=&app=). Its OWN Go module (go.mod with a replace onto the
                           repo root) because it needs third-party code the root keeps out: Wails
                           v2 (the window is a WebView2 page; frontend/dist is plain HTML/CSS/JS,
                           embedded, no Node, no build step — opened in a browser it runs a MOCK
@@ -2073,7 +2082,16 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           silent for 90 s. The dispatcher's rules are node-tested
                           (tests/summaryhub.test.ts), the DO's socket handling in workerd
                           (tests/do/summaryhub.test.ts).
-                          JOB KINDS: jobs.kind is "upload" | "resim", a KIND rather than a fifth
+                          APP JOBS (kind "app", FogOfWar.exe): created ALREADY processing by the OPEN POST
+                          /api/app/jobs {gameId, installId, stats} and reported on over the OPEN POST
+                          /api/app/jobs/<id> (Marcin: no authentication for now), which refuses anything but
+                          an "app" job (403) — the guarded /api/jobs/<id> stays the daemons' door. Never offered
+                          to a daemon (DAEMON_KINDS = upload|resim for GET /api/jobs and claims); the cron fails
+                          one silent for APP_JOB_STALE_SEC = 5 min (appJobsExpire, a jobs_kind seek); a Retry of
+                          one is an ordinary resim. jobs.install_id (schema 8, partial index jobs_install) ties
+                          an install's app jobs and .brp uploads together: GET /api/admin/queue?install=<id>
+                          (jobsByInstall), reached from a row's Install line on the queue page.
+                          JOB KINDS: jobs.kind is "upload" | "resim" | "app", a KIND rather than a fifth
                           state because the four states describe both equally well — what
                           differs is the work, not the progress. The contract (JobKind,
                           JOB_KINDS, IngestJob) lives in its own src/worker/jobs.ts because
