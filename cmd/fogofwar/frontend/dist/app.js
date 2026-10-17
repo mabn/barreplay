@@ -493,8 +493,12 @@ function renderRun(st) {
 
   $('runElapsed').textContent = 'Running for ' + fmtDur(j.elapsedSec);
   const be = $('runEngine');
-  be.hidden = !j.patched;
-  be.textContent = 'Faster engine';
+  be.hidden = !j.engine;
+  be.textContent = j.engine === 'patched' ? 'Faster engine' : 'Stock engine';
+  be.classList.toggle('stock', j.engine === 'stock');
+  be.title = j.engine === 'patched'
+    ? 'Running the patched engine build: same replay, faster, less memory'
+    : 'No patched build for this engine version (or Faster engine is off in Settings)';
   $('runEyebrow').textContent = (j.auto ? 'Auto-replay · ' : '') + (j.phase === 'simulating' ? 'Simulating' : j.phase === 'uploading' ? 'Uploading' : 'Re-simulating');
   $('runAuto').hidden = !st.autoReplay;
 }
@@ -701,11 +705,12 @@ function makeMock(scene) {
   const run = (from) => {
     clearInterval(timer);
     st.mode = 'running';
-    const j = st.job = { gameId: P.id, preview: P, phase: 'fetching demo', frame: 0, totalFrames: 90921, percent: 0, etaSec: 1330, simFps: 0, rssBytes: 0, cpuPercent: 0, elapsedSec: 0, patched: true };
+    const j = st.job = { gameId: P.id, preview: P, phase: 'fetching demo', frame: 0, totalFrames: 90921, percent: 0, etaSec: 1330, simFps: 0, rssBytes: 0, cpuPercent: 0, elapsedSec: 0, engine: '' };
     let t = from || 0;
     timer = setInterval(() => {
       t += 1;
       j.elapsedSec = t;
+      if (t >= 6) j.engine = 'patched';
       if (t < 3) j.phase = 'fetching demo';
       else if (t < 6) { j.phase = 'provisioning content'; j.download = { label: 'BAR content', percent: (t - 3) * 33, done: 0, total: 0 }; }
       else if (t < 8) { j.phase = 'loading'; j.download = null; j.rssBytes = 2.1 * GB; j.cpuPercent = 100; }

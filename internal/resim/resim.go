@@ -240,6 +240,7 @@ func Run(ctx context.Context, client *barapi.Client, gameID string, o Options) (
 	if err != nil {
 		return "", nil, err
 	}
+	o.Progress.setEngine(eng.Patched())
 	if err := eng.EnsureContent(ctx, demo.Startscript.GameType, demo.Startscript.MapName); err != nil {
 		return "", nil, err
 	}
