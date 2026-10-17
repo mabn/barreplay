@@ -88,7 +88,7 @@ var PatchedBuildBaseURL = "https://cdn-bar.fogofwar.dev"
 // and series revision is published under.
 func PatchedBuildKey(version string, rev int) string {
 	if runtime.GOOS == "windows" {
-		return "engines/" + version + "/windows-amd64/spring-headless-patched-" + PatchedVersion(version, rev) + ".exe.gz"
+		return PatchedBuildKeyWindows(version, rev)
 	}
 	return "engines/" + version + "/" + patchedHeadlessName() + "-" + PatchedVersion(version, rev) + ".gz"
 }
