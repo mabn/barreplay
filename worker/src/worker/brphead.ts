@@ -3,7 +3,8 @@
 // does not need: the gameId names the archive, the recorder record its suffix.
 // The container (docs/brp-format.md) is "BRP1" <version u8> and then tagged
 // sections <tag u8><len u32le><payload>, the M meta (one gzip stream of JSON)
-// always first. The
+// always first; its JSON is the writer's record,
+// with the capture's Meta under "meta". The
 // ingest daemon parses the whole file before publishing it; this only refuses
 // what is plainly not one. Kept free of any workerd import so the node-side
 // tests can use it directly.
@@ -50,7 +51,11 @@ export async function scanBrpHead(data: Uint8Array): Promise<StreamPreamble | st
     return "malformed .brp: the meta section is not JSON";
   }
   if (typeof meta !== "object" || meta === null) return "malformed .brp: the meta section is not an object";
-  const m = meta as { gameId?: unknown; recorder?: { allyTeam?: unknown; spectator?: unknown } | null };
+  // The section is the writer's whole M record (snapshot/brp.go brpMetaRecord):
+  // the capture's Meta sits in its "meta" field, beside the counts and index.
+  const inner = (meta as { meta?: unknown }).meta;
+  if (typeof inner !== "object" || inner === null) return "the .brp names no game (its meta has no 32-hex gameId)";
+  const m = inner as { gameId?: unknown; recorder?: { allyTeam?: unknown; spectator?: unknown } | null };
   if (typeof m.gameId !== "string" || !/^[0-9a-fA-F]{32}$/.test(m.gameId)) {
     return "the .brp names no game (its meta has no 32-hex gameId)";
   }

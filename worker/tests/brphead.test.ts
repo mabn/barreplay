@@ -2,22 +2,32 @@
 // viewer fixture Go writes, plus the reject paths.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { gunzipSync } from "node:zlib";
 import test from "node:test";
 
 import { isBrp, scanBrpHead } from "../src/worker/brphead";
 import { archiveSuffix } from "../src/worker/preamble";
-import { brp } from "./brpfixture";
+import { brp, brpRecord } from "./brpfixture";
 
 const FIXTURE = new URL("./fixtures/viewer.brp", import.meta.url);
 
 const GID = "feed5eed00000000000000000000beef";
 
-// The fixture's game is called "viewer", which no real game is — so reaching
-// that refusal proves the header, the gunzip and the JSON of a meta Go wrote.
+// The fixture's game is called "viewer", which no real game is, so its M
+// record is re-packed with a real-looking id: what is read is then exactly the
+// record Go wrote, gameId and recorder at the depth the writer puts them.
 test("the Go-written viewer fixture's meta is read", async () => {
   const data = new Uint8Array(readFileSync(FIXTURE));
   assert.ok(isBrp(data));
   assert.match((await scanBrpHead(data)) as string, /names no game/);
+  const len = Buffer.from(data.subarray(6, 10)).readUInt32LE(0);
+  const record = JSON.parse(gunzipSync(data.subarray(10, 10 + len)).toString());
+  record.meta.gameId = GID;
+  record.meta.recorder = { playerId: 2, allyTeam: 1 };
+  const got = await scanBrpHead(brpRecord(record, data[4]));
+  assert.ok(typeof got === "object", String(got));
+  assert.equal(got.gameId, GID);
+  assert.equal(archiveSuffix(got), "a1");
 });
 
 test("gameId and recorder are read from the meta", async () => {
@@ -42,6 +52,7 @@ test("what is not a readable .brp head is refused", async () => {
     [brp({ gameId: GID }, 6, false), /not a gzip stream/],
     [brp({ gameId: "nope" }), /names no game/],
     [brp([1, 2]), /names no game/],
+    [brpRecord({ gameId: GID }), /names no game/], // a bare Meta is not the record
   ];
   for (const [data, want] of cases) {
     const got = await scanBrpHead(data);
