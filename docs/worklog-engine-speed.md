@@ -1324,3 +1324,46 @@ zero, its script. So:
 Upstream already runs ground movement this way in parts and names the sync
 checker's synced variables as what stops the rest ("the vars are synced and
 that's what is stopping this being MT'ed"); `speed9` removed that. Building.
+
+### 2026-10-17 00:50 — flame graph and main-thread breakdown: `speed9` (SYNCCHECK=OFF)
+
+USER (again): a flame graph and the main thread's breakdown after each major
+improvement. This is the late window on `speed9` + W5 (the state after the
+sync-checker removal), LBR call stacks at 499 Hz:
+
+![verylarge1 late game, speed9, main thread](flamegraphs/2026-10-17-verylarge1-speed9.svg)
+
+([open the SVG](flamegraphs/2026-10-17-verylarge1-speed9.svg) to zoom.)
+
+Main thread, % of one core (sums to 100%):
+
+| phase | % of main core | of which Lua |
+|---|---|---|
+| unit updates | 62.9% | 5.8% |
+| ├ weapon auto-targeting (`CWeapon::SlowUpdate`) | 11.5% | 2.6% |
+| ├ aircraft movement (`CStrafeAirMoveType::Update`) | 10.9% | 0.9% |
+| ├ LTO-inlined unit loops (LOS states, update/weapon loops) | 6.2% | |
+| ├ ground movement (`GroundMoveSystem`, partly parallel) | 5.3% | |
+| ├ weapon vectors (parallel section) | 4.7% | |
+| ├ `CUnit::SlowUpdate` | 4.5% | 0.2% |
+| ├ beam lasers | 4.2% | 1.0% |
+| ├ weapon update | 2.9% | 0.1% |
+| ├ `CUnit::Update` | 2.6% | |
+| ├ quad field (`MovedUnit`) | 2.3% | |
+| ├ LOS checks (`InLos`) | 2.2% | |
+| └ builders 1.5, factories 1.4, hover aircraft 0.7, rest 1.8 | 5.4% | 0.9% |
+| Lua callins (gadgets), not from units | 9.6% | 9.6% |
+| unit-script anims (parallel section) | 6.8% | |
+| LOS update (parallel section) | 5.0% | |
+| COB scripts | 4.5% | |
+| projectiles + collisions | 3.9% | 1.2% |
+| Lua GC | 2.0% | 2.0% |
+| pathfinding (QTPFS) | 1.8% | |
+| map damage / terrain | 1.8% | |
+| SimFrame other, draw/unsynced, events, net, features | 1.7% | |
+| **total** | **100%** | **~18.6%** |
+
+Other threads over the same window (samples relative to the main thread's):
+worker1 24%, worker2 23%, worker3 22% of a core — they are idle most of the
+time, waiting for the main thread's serial loops. Over the whole game
+(perf stat): main 1174 s, workers 336 / 307 / 307 s.
