@@ -1577,3 +1577,40 @@ transforms H73 now skips, 9% weapon vectors, 6% LOS, 3.6% pathfinding node
 updates — P1's waits are the clearest waste left. `speed14` (building): P1
 engages only with >= 256 parallel items (no gain in the early game), counters
 for why items are serial, Lua GC cycles per Lua state. Then whole games at 30 W.
+
+### 2026-10-17 08:00 — clean measurements: cooled trials, fans pinned, a pause governor for whole games
+
+USER: wait for the CPU to cool before each benchmark, raise the fan speed, and
+for whole games pause the sim when it nears throttling. Done:
+
+- `fans.sh max|auto`: both fans at maximum (`mbpfan` stopped) or back to
+  `mbpfan`. At idle with max fans the package reaches ~48 C in a minute.
+- `bench-ckpt.sh` `COOL=<milli-C>`: each trial waits until the package is
+  below that before the restore. (A first version reused the script's `n` —
+  the trial's frame count — as its loop counter, so the engine ran 1 frame;
+  fixed.)
+- `fullrun.sh` thermal governor: SIGSTOP the engine at 88 C, SIGCONT at 55 C,
+  report the paused seconds; **active time = sim time - paused**.
+
+Late window, `speed14`, uncapped, every trial from 50 C, fans max, 4 pairs,
+**0 throttle events**:
+
+| toggles | wall per trial | mean |
+|---|---|---|
+| `t=0` | 14.59 / 14.95 / 14.94 / 14.79 s | 14.82 s |
+| `t=1f` | 11.94 / 11.92 / 12.23 / 11.78 s | **11.97 s (-19.2%)** |
+
+Counters (`t=1f`, per frame): 425 serial items — 222 not strafe aircraft
+(hover: gunships, transports, constructors), 114 landing / take-off, 72
+stunned or unfinished, 10 crashing near the ground, 6 standing still; the
+early plan check stood for 84% of items. Lua GC per state over the whole game
+up to the window: LuaUI (our widget) 19.3e9 cycles, LuaRules 15.3e9, the rest
+~0.2e9 — together under 1% of the game's main-thread cycles.
+
+Whole game, `speed14`, `t=1f`, governor on: sim 37m27s, paused 20m39s, so
+**16m48s active**, identical (`a26e920d…`), 230 throttle events. A governed
+`t=0` run is next for the baseline (after `speed15`: P1 v5, hover aircraft
+flying/hovering and stunned/unfinished aircraft in parallel, toggle bit 5).
+
+USER also asked which engine changes (not exact, but not changing gameplay)
+would unlock the most: [engine-changes-for-speed.md](engine-changes-for-speed.md).
