@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="330" viewBox="0 0 860 330" font-family="Helvetica, Arial, sans-serif" font-size="12">
+  <rect width="860" height="330" fill="#ffffff"/>
+  <text x="20" y="26" font-size="16" font-weight="bold">Late-game main thread (verylarge1, frame 63780): what blocks parallelism</text>
+  <text x="20" y="46">bar = 100% of the main core today (speed11, everything on); colour = what keeps that time serial</text>
+  <!-- bar: widths proportional, total 800px -->
+  <g transform="translate(30,70)">
+    <rect x="0"   y="0" width="88"  height="46" fill="#9dc3e6"/><text x="44"  y="62" text-anchor="middle">aircraft 11</text>
+    <rect x="88"  y="0" width="76"  height="46" fill="#f8cbad"/><text x="126" y="62" text-anchor="middle">targeting 9.5</text>
+    <rect x="164" y="0" width="91"  height="46" fill="#f4b183"/><text x="210" y="62" text-anchor="middle">gadgets 11.4</text>
+    <rect x="255" y="0" width="44"  height="46" fill="#ffe699"/><text x="277" y="62" text-anchor="middle">COB 5.5</text>
+    <rect x="299" y="0" width="62"  height="46" fill="#f8cbad"/><text x="330" y="62" text-anchor="middle">weapons 7.8</text>
+    <rect x="361" y="0" width="43"  height="46" fill="#f8cbad"/><text x="382" y="80" text-anchor="middle">SlowUpd 5.4</text>
+    <rect x="404" y="0" width="68"  height="46" fill="#c9c9c9"/><text x="438" y="62" text-anchor="middle">unit/quad 8.5</text>
+    <rect x="472" y="0" width="186" height="46" fill="#a9d18e"/><text x="565" y="62" text-anchor="middle">parallel sections 23.6</text>
+    <rect x="658" y="0" width="35"  height="46" fill="#f4b183"/><text x="675" y="62" text-anchor="middle">proj 4.4</text>
+    <rect x="693" y="0" width="22"  height="46" fill="#bdd7ee"/><text x="704" y="80" text-anchor="middle">GC</text>
+    <rect x="715" y="0" width="85"  height="46" fill="#e7e6e6"/><text x="757" y="62" text-anchor="middle">rest 10.6</text>
+  </g>
+  <g transform="translate(30,170)" font-size="12">
+    <rect x="0" y="0" width="14" height="14" fill="#9dc3e6"/><text x="20" y="12">P1 already parallel; residual = serial items (hover, landing), in-order start, pre-pass</text>
+    <rect x="0" y="22" width="14" height="14" fill="#f8cbad"/><text x="20" y="34">blocked by the sequential synced RNG (4 draws per weapon SlowUpdate, firing spread) + COB aim calls + Lua</text>
+    <rect x="0" y="44" width="14" height="14" fill="#f4b183"/><text x="20" y="56">synced Lua callins: run on the one Lua state, in order, can touch anything</text>
+    <rect x="0" y="66" width="14" height="14" fill="#ffe699"/><text x="20" y="78">COB interpreter: per-unit scripts, but rand / emit-sfx / GET of other units are global</text>
+    <rect x="0" y="88" width="14" height="14" fill="#c9c9c9"/><text x="20" y="100">order-sensitive shared structures (quad-field lists, builder/factory resource draws)</text>
+    <rect x="0" y="110" width="14" height="14" fill="#a9d18e"/><text x="20" y="122">anims, LOS maps, weapon vectors, ground movement: already for_mt; main does its 1/4 share</text>
+    <text x="0" y="150" font-size="13">Amdahl: with today's rules ~75% of the main thread stays serial, so 4 cores cap the speed-up near 1.3x.</text>
+  </g>
+</svg>

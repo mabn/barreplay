@@ -1,0 +1,94 @@
+From 594366fa568670c33d9f783a9b4c189221923cb9 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Fri, 16 Oct 2026 13:42:31 +0000
+Subject: [PATCH 11/13] Prefetch ahead in the per-unit loops
+
+The LOS-state, Update, weapon and general-move-type loops stall on the first
+touch of each unit object (10k units of several KB against a few MB of
+cache). Prefetch the unit 8 ahead and its move type / first weapon 4 ahead.
+No value or order changes.
+---
+ .../MoveTypes/Systems/GeneralMoveSystem.cpp    | 16 +++++++++++++++-
+ rts/Sim/Units/UnitHandler.cpp                  | 18 +++++++++++++++++-
+ 2 files changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index ef7b2eb..e142133 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -4,6 +4,8 @@
+ 
+ #include "GeneralMoveSystem.h"
+ 
++#include <vector>
++
+ #include "Sim/Ecs/Registry.h"
+ #include "Sim/MoveTypes/Components/MoveTypesComponents.h"
+ #include "Sim/MoveTypes/MoveMath/MoveMath.h"
+@@ -30,7 +32,19 @@ void GeneralMoveSystem::Update() {
+     auto view = Sim::registry.view<GeneralMoveType>();
+ 	{
+         SCOPED_TIMER("Sim::Unit::MoveType::5::Update");
+-        view.each([](GeneralMoveType& unitId){
++        // [barreplay] H66: the loop below stalls on each unit's first touch
++        // (unit -> moveType -> vtable). Collect the units in the view's own
++        // order first (a read-only pass), then prefetch ahead while updating.
++        // Prefetches change no value and no order.
++        static std::vector<CUnit*> brOrder;
++        brOrder.clear();
++        view.each([](GeneralMoveType& unitId){ brOrder.push_back(unitHandler.GetUnit(unitId.value)); });
++        size_t brK = 0;
++        view.each([&brK](GeneralMoveType& unitId){
++            constexpr size_t PF = 8;
++            if (brK + PF < brOrder.size()) __builtin_prefetch(brOrder[brK + PF]);
++            if (brK + PF / 2 < brOrder.size()) __builtin_prefetch(brOrder[brK + PF / 2]->moveType);
++            ++brK;
+             CUnit* unit = unitHandler.GetUnit(unitId.value);
+             AMoveType* moveType = unit->moveType;
+ 
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 3de11a0..1e398d4 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -337,7 +337,10 @@ void CUnitHandler::UpdateUnitMoveTypes()
+ void CUnitHandler::UpdateUnitLosStates()
+ {
+ 	ZoneScopedC(tracy::Color::Goldenrod);
+-	for (CUnit* unit: activeUnits) {
++	// [barreplay] H66: prefetch ahead (same iteration as the range-for)
++	for (auto it = activeUnits.begin(), end = activeUnits.end(); it != end; ++it) {
++		if ((end - it) > 8) __builtin_prefetch(&(*(it + 8))->losStatus[0]);
++		CUnit* unit = *it;
+ 		for (int at = 0; at < teamHandler.ActiveAllyTeams(); ++at) {
+ 			unit->UpdateLosStatus(at);
+ 		}
+@@ -396,6 +399,9 @@ void CUnitHandler::UpdateUnits()
+ 
+ 	size_t activeUnitCount = activeUnits.size();
+ 	for (size_t i = 0; i < activeUnitCount; ++i) {
++		// [barreplay] H66: prefetch the unit 8 ahead and its move type 4 ahead
++		if (i + 8 < activeUnits.size()) __builtin_prefetch(activeUnits[i + 8]);
++		if (i + 4 < activeUnits.size()) __builtin_prefetch(activeUnits[i + 4]->moveType);
+ 		CUnit* unit = activeUnits[i];
+ 
+ 		unit->SanityCheck();
+@@ -422,6 +428,16 @@ void CUnitHandler::UpdateUnitWeapons()
+ 	{
+ 		SCOPED_TIMER("Sim::Unit::Weapon");
+ 		for (activeUpdateUnit = 0; activeUpdateUnit < activeUnits.size(); ++activeUpdateUnit) {
++			// [barreplay] H66: the weapon-use flags 8 ahead, the first weapon 4 ahead
++			const size_t ahead = activeUpdateUnit;
++			if (ahead + 8 < activeUnits.size()) {
++				__builtin_prefetch(&activeUnits[ahead + 8]->onTempHoldFire);
++				__builtin_prefetch(&activeUnits[ahead + 8]->weapons);
++			}
++			if (ahead + 4 < activeUnits.size()) {
++				const std::vector<CWeapon*>& ws = activeUnits[ahead + 4]->weapons;
++				if (!ws.empty()) __builtin_prefetch(ws[0]);
++			}
+ 			activeUnits[activeUpdateUnit]->UpdateWeapons();
+ 		}
+ 	}
+-- 
+2.53.0
+

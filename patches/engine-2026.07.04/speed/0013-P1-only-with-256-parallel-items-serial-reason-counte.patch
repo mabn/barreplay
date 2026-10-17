@@ -1,0 +1,193 @@
+From a0051746179f0bf34c3aa8c67c81132e79ef6c30 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 06:42:22 +0000
+Subject: [PATCH 13/30] P1 only with >= 256 parallel items; serial-reason
+ counters; Lua GC cycles per state in the bench line
+
+---
+ rts/Lua/LuaHandle.cpp                         | 27 ++++++++++++
+ rts/Net/NetCommands.cpp                       |  9 ++--
+ .../MoveTypes/Systems/GeneralMoveSystem.cpp   | 44 ++++++++++++++-----
+ 3 files changed, 65 insertions(+), 15 deletions(-)
+
+diff --git a/rts/Lua/LuaHandle.cpp b/rts/Lua/LuaHandle.cpp
+index 195d7aa..8bb8c16 100644
+--- a/rts/Lua/LuaHandle.cpp
++++ b/rts/Lua/LuaHandle.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "LuaHandle.h"
++#include <x86intrin.h>
+ #include "lua_privileges.h"
+ 
+ #include "LuaGaia.h"
+@@ -4176,9 +4177,35 @@ void CLuaHandle::DownloadProgress(int ID, long downloaded, long total)
+ /******************************************************************************/
+ /******************************************************************************/
+ 
++// [barreplay] GC cost per Lua state, for the bench harness
++namespace {
++	struct BrGcStat { std::string name; unsigned long long cycles = 0, calls = 0; };
++	std::vector<BrGcStat> brGcStats;
++}
++int BrLuaGcStatsLine(char* buf, int size) {
++	int n = snprintf(buf, size, "[BR_LUAGC]");
++	for (const auto& g: brGcStats) {
++		if (n >= size) break;
++		n += snprintf(buf + n, size - n, " %s=%.2fe9/%llu", g.name.c_str(), g.cycles * 1e-9, g.calls);
++	}
++	if (n < size) n += snprintf(buf + n, size - n, "\n");
++	return n;
++}
++
+ void CLuaHandle::CollectGarbage(bool forced)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	const unsigned long long brT0 = __rdtsc();
++	struct BrGcAcc {
++		const CLuaHandle* h; unsigned long long t0;
++		~BrGcAcc() {
++			const std::string key = h->GetName() + (h->GetSynced()? "/s": "/u");
++			for (auto& g: brGcStats) {
++				if (g.name == key) { g.cycles += __rdtsc() - t0; g.calls++; return; }
++			}
++			brGcStats.push_back({key, __rdtsc() - t0, 1});
++		}
++	} brGcAcc{this, brT0};
+ 	const float gcMemLoadMult = D.gcCtrl.baseMemLoadMult;
+ 	const float gcRunTimeMult = D.gcCtrl.baseRunTimeMult;
+ 
+diff --git a/rts/Net/NetCommands.cpp b/rts/Net/NetCommands.cpp
+index 9d32710..fe19082 100644
+--- a/rts/Net/NetCommands.cpp
++++ b/rts/Net/NetCommands.cpp
+@@ -7,6 +7,7 @@
+ #include <unistd.h>
+ #include <cstring>
+ #include "Sim/MoveTypes/Systems/BrParallelAir.h"
++int BrLuaGcStatsLine(char* buf, int size);
+ #include <cstring>
+ #include <linux/perf_event.h>
+ #include <sys/ioctl.h>
+@@ -747,13 +748,15 @@ void CGame::ClientReadNet()
+ 								"[BARREPLAY_BENCH] frames=%d start=%d units=%d cycles=%lld instructions=%lld thread_cpu_ms=%.3f wall_ms=%.3f\n",
+ 								g_brBench.seen, g_brBench.start, (int)unitHandler.GetActiveUnits().size(),
+ 								cyc, ins, g_brBench.tcpu / 1e6, g_brBench.wall / 1e6);
+-							char pline[512];
++							char pline[1024];
+ 							BrParAir::StatsLine(pline, sizeof(pline));
++							char gline[1024];
++							BrLuaGcStatsLine(gline, sizeof(gline));
+ 							// the bench line last: bench-ckpt reads the result's last line
+ 							if (g_brBench.out) {
+-								if (FILE* f = fopen(g_brBench.out, "a")) { fprintf(f, "toggles=%x %s", g_brToggles, pline); fputs(line, f); fclose(f); }
++								if (FILE* f = fopen(g_brBench.out, "a")) { fprintf(f, "toggles=%x %s%s", g_brToggles, pline, gline); fputs(line, f); fclose(f); }
+ 							}
+-							fprintf(stderr, "toggles=%x %s", g_brToggles, pline);
++							fprintf(stderr, "toggles=%x %s%s", g_brToggles, pline, gline);
+ 							fputs(line, stderr); fflush(stderr);
+ 							// An instrumented (-fprofile-generate) build writes its
+ 							// profile at exit, which _exit skips: dump it first, so a
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index f07023f..1db1b3a 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -74,6 +74,10 @@ unsigned g_brToggles = BrReadTogglesEnv();
+ // check cannot fire for a unit standing still, so those items are skipped.
+ namespace BrParAir {
+ 	thread_local int curRank = -1;
++
++	// why an item is serial (counted from the pre-pass only)
++	enum { WHY_TYPE, WHY_SCRIPT, WHY_COLLIDE, WHY_STUN, WHY_SPEED, WHY_STATE, WHY_CRASH, WHY_N };
++	static std::atomic<long long> why[WHY_N];
+ 	std::atomic_flag depLock = ATOMIC_FLAG_INIT;
+ 	Stats stats;
+ 
+@@ -91,10 +95,16 @@ namespace BrParAir {
+ 	static std::atomic<unsigned> serialRuns{0};
+ 
+ 	int StatsLine(char* buf, int size) {
+-		return snprintf(buf, size,
++		char w[256];
++		snprintf(w, sizeof(w), " serialWhy: type=%lld script=%lld collide=%lld stun=%lld speed=%lld state=%lld crash=%lld",
++			why[0].load(), why[1].load(), why[2].load(), why[3].load(), why[4].load(), why[5].load(), why[6].load());
++		const int a = snprintf(buf, size,
+ 			"[BR_PARAIR] frames=%lld serialFrames=%lld items=%lld parallel=%lld serial=%lld replanned=%lld earlyChecks=%lld statics=%lld targetEdges=%lld deferredTrails=%lld crashKills=%lld serialPoints=%lld scriptCalls=%lld collisionWrites=%lld bigWrites=%lld oobKills=%lld\n",
+ 			stats.frames.load(), stats.serialFrames.load(), stats.items.load(), stats.parallel.load(), stats.serial.load(), stats.replanned.load(), stats.earlyChecks.load(), stats.statics.load(),
+ 			stats.targetEdges.load(), stats.deferredTrails.load(), stats.crashKills.load(), stats.serialPoints.load(), stats.scriptCalls.load(), stats.collisionWrites.load(), stats.bigWrites.load(), stats.oobKills.load());
++		if (a > 0 && a < size && buf[a - 1] == '\n')
++			snprintf(buf + a - 1, size - a + 1, "%s\n", w);
++		return a;
+ 	}
+ 
+ 	static void RunItem(CUnit* unit) {
+@@ -223,28 +233,34 @@ namespace BrParAir {
+ 		return (lowY > (hmax + 5.0f + u->radius + 1.0f));
+ 	}
+ 
+-	static bool ParallelSafe(const CUnit* u) {
++
++	static bool ParallelSafeWhy(const CUnit* u, int& w) {
+ 		const AMoveType* mt = u->moveType;
+ 
+ 		if (typeid(*mt) != typeid(CStrafeAirMoveType))
+-			return false;
++			return (w = WHY_TYPE, false);
+ 		if (u->UsingScriptMoveType() || mt->UseHeading())
+-			return false;
++			return (w = WHY_SCRIPT, false);
+ 
+ 		const CStrafeAirMoveType* amt = static_cast<const CStrafeAirMoveType*>(mt);
+ 		if (amt->collide)
+-			return false;
++			return (w = WHY_COLLIDE, false);
+ 		if (u->IsStunned() || u->beingBuilt || u->UnderFirstPersonControl() || u->GetTransporter() != nullptr)
+-			return false;
++			return (w = WHY_STUN, false);
+ 		if (u->speed.w > (MAX_UNIT_SPEED * 0.5f) || u->speed == ZeroVector)
+-			return false;
++			return (w = WHY_SPEED, false);
+ 
+ 		if (amt->aircraftState == AAirMoveType::AIRCRAFT_FLYING)
+-			return !u->IsCrashing();
++			return (w = WHY_STATE, !u->IsCrashing());
+ 		if (amt->aircraftState == AAirMoveType::AIRCRAFT_CRASHING)
+-			return ((g_brToggles & 8) != 0 && CrashCannotEndThisFrame(u));
++			return (w = WHY_CRASH, ((g_brToggles & 8) != 0 && CrashCannotEndThisFrame(u)));
+ 
+-		return false;
++		return (w = WHY_STATE, false);
++	}
++
++	static bool ParallelSafe(const CUnit* u) {
++		int w;
++		return ParallelSafeWhy(u, w);
+ 	}
+ 
+ 	// still what the plan assumed, now that every earlier serial item has run
+@@ -356,7 +372,10 @@ namespace BrParAir {
+ 				p.kind = 0;
+ 				return;
+ 			}
+-			p.kind = ParallelSafe(u)? 1: 2;
++			int w = 0;
++			p.kind = ParallelSafeWhy(u, w)? 1: 2;
++			if (p.kind == 2)
++				why[w].fetch_add(1, std::memory_order_relaxed);
+ 			p.tgtType = int(u->curTarget.type);
+ 			p.tgtUnit = (u->curTarget.type == Target_Unit)? u->curTarget.unit: nullptr;
+ 			p.tgtId = (p.tgtUnit != nullptr)? p.tgtUnit->id: -1;
+@@ -427,7 +446,8 @@ namespace BrParAir {
+ 		if (n == 0)
+ 			return true;
+ 
+-		if (nPar == 0) {
++		// too few parallel items to pay for waking the workers (the early game)
++		if (nPar < 256) {
+ 			stats.serialFrames++;
+ 			for (CUnit* u: work)
+ 				RunItem(u);
+-- 
+2.53.0
+

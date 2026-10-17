@@ -1,0 +1,66 @@
+From 9383b881bb52c156db896fce32c4805150ad43b3 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Fri, 16 Oct 2026 20:29:33 +0000
+Subject: [PATCH 02/30] SYNCCHECK=OFF: keep the in-synced counter; sync history
+ only with the checker
+
+---
+ rts/Game/Game.cpp                     | 2 +-
+ rts/System/Sync/SyncChecker.cpp       | 9 +++++++--
+ rts/System/Sync/SyncedPrimitiveBase.h | 5 ++---
+ 3 files changed, 10 insertions(+), 6 deletions(-)
+
+diff --git a/rts/Game/Game.cpp b/rts/Game/Game.cpp
+index 64fbc7a..07c43d8 100644
+--- a/rts/Game/Game.cpp
++++ b/rts/Game/Game.cpp
+@@ -1759,7 +1759,7 @@ void CGame::SimFrame() {
+ 	if (gs->frameNum == 0)
+ 		BrStartHugePageCollapser();
+ #endif
+-#ifdef SYNC_HISTORY
++#if defined(SYNCCHECK) && defined(SYNC_HISTORY)
+ 	CSyncChecker::NewGameFrame();
+ #endif
+ 	lastFrameTime = spring_gettime();
+diff --git a/rts/System/Sync/SyncChecker.cpp b/rts/System/Sync/SyncChecker.cpp
+index edb0cb0..415a464 100644
+--- a/rts/System/Sync/SyncChecker.cpp
++++ b/rts/System/Sync/SyncChecker.cpp
+@@ -1,10 +1,15 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ 
+-#ifdef SYNCCHECK
+-
+ #include "SyncChecker.h"
+ 
++// SYNCCHECK=OFF still needs the counter behind ENTER/LEAVE_SYNCED_CODE
++#ifndef SYNCCHECK
++int CSyncChecker::inSyncedCode;
++#endif
++
++#ifdef SYNCCHECK
++
+ // This cannot be included in the header file (SyncChecker.h) because include conflicts will occur.
+ #include "System/Threading/ThreadPool.h"
+ #include "System/HashSpec.h"
+diff --git a/rts/System/Sync/SyncedPrimitiveBase.h b/rts/System/Sync/SyncedPrimitiveBase.h
+index bd9bcfa..061adec 100644
+--- a/rts/System/Sync/SyncedPrimitiveBase.h
++++ b/rts/System/Sync/SyncedPrimitiveBase.h
+@@ -3,9 +3,8 @@
+ #ifndef SYNCED_PRIMITIVE_BASSE_H
+ #define SYNCED_PRIMITIVE_BASSE_H
+ 
+-#ifdef SYNCCHECK
+-	#include "SyncChecker.h"
+-#endif
++// always: ENTER/LEAVE_SYNCED_CODE keep the in-synced counter the thread pool reads, even with SYNCCHECK=OFF
++#include "SyncChecker.h"
+ 
+ #ifdef SYNCDEBUG
+ 	#include "SyncDebugger.h"
+-- 
+2.53.0
+

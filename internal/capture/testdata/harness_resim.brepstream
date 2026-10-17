@@ -1,6 +1,6 @@
 BREPSTREAM 1
 BRSNAP GID feed5eed00000000000000000000beef
-BRSNAP GAME {"protocol":6,"widgetVersion":"1.12.0","widgetDate":"2026-10-15","mode":"replay","map":"Harness Map 1.0","gameVersion":"Beyond All Reason test-harness","engineVersion":"2026-harness","sampleEvery":30,"gameSpeed":30,"recordEnemies":true,"playerID":0,"allyTeam":0,"spectator":true,"fullView":true,"resim":true}
+BRSNAP GAME {"protocol":6,"widgetVersion":"1.13.0","widgetDate":"2026-10-16","mode":"replay","map":"Harness Map 1.0","gameVersion":"Beyond All Reason test-harness","engineVersion":"2026-harness","sampleEvery":30,"gameSpeed":30,"recordEnemies":true,"playerID":0,"allyTeam":0,"spectator":true,"fullView":true,"resim":true}
 BRSNAP DEF {"id":1,"name":"def1","humanName":"Def 1","maxHealth":1001,"xsize":2,"zsize":2,"isBuilding":false,"canMove":true,"techLevel":2,"unitGroup":"builder","isCommander":true,"maxWeaponRange":301,"deathWeapon":5}
 BRSNAP DEF {"id":2,"name":"def2","humanName":"Def 2","maxHealth":1002,"xsize":2,"zsize":2,"isBuilding":false,"canMove":true,"techLevel":3,"unitGroup":"weapon","maxWeaponRange":302,"deathWeapon":5}
 BRSNAP DEF {"id":3,"name":"def3","humanName":"Def 3","maxHealth":1003,"xsize":2,"zsize":2,"isBuilding":false,"canMove":true,"techLevel":1,"unitGroup":"builder","deathWeapon":5}

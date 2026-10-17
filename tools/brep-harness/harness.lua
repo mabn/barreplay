@@ -648,7 +648,7 @@ local realHandler = {
 -- explosion and every hit as it happens, the full-view caller drains them:
 -- -1 is "none". Health and position are read off the same stubs the widget's
 -- own callin would have read, at the moment of the hit, as the engine does.
-local engineLog = { explosions = false, damage = false, expl = {}, dmg = {}, everOn = false }
+local engineLog = { explosions = false, damage = false, reloads = false, expl = {}, dmg = {}, rel = {}, everOn = false }
 if enginelog then
 	local function drain(buf, fill)
 		local out = type(fill) == "table" and fill or {}
@@ -661,8 +661,10 @@ if enginelog then
 		end
 		return out
 	end
-	Spring.SetEngineEventLog = function(explosions, damage)
+	Spring.SetEngineEventLog = function(explosions, damage, reloads)
 		engineLog.explosions, engineLog.damage = explosions and true or false, damage and true or false
+		engineLog.reloads = reloads and true or false
+		if not engineLog.reloads then engineLog.rel = {} end
 		engineLog.everOn = engineLog.everOn or engineLog.explosions or engineLog.damage
 		if not engineLog.explosions then engineLog.expl = {} end
 		if not engineLog.damage then engineLog.dmg = {} end
@@ -672,10 +674,165 @@ if enginelog then
 		engineLog.expl = {}
 		return out, n, 0
 	end
+	Spring.GetLoggedReloads = function(fill)
+		local out, n = drain(engineLog.rel, fill), #engineLog.rel / 3
+		engineLog.rel = {}
+		return out, n
+	end
 	Spring.GetLoggedDamage = function(fill)
 		local out, n = drain(engineLog.dmg, fill), #engineLog.dmg / 16
 		engineLog.dmg = {}
 		return out, n, 0
+	end
+	-- The engine's bulk sample (Spring.GetUnitSampleData): what the per-unit
+	-- reads return under full read, in GetAllUnits' order, flat. Built from the
+	-- same stubs, so TestEngineLogMatchesResim checks the widget's bulk path
+	-- against its per-call path.
+	Spring.GetUnitSampleData = function(allyTeams, fill)
+		local out = type(fill) == "table" and fill or {}
+		local prev, k = #out, 0
+		local ids = Spring.GetAllUnits()
+		local stride = 11 + #allyTeams
+		for i = 1, #ids do
+			local id = ids[i]
+			local x, _, z = Spring.GetUnitPosition(id)
+			local hp, maxHp, _, _, b = Spring.GetUnitHealth(id)
+			local vx, _, vz = Spring.GetUnitVelocity(id)
+			local row = { id, Spring.GetUnitTeam(id), Spring.GetUnitDefID(id), x, z, hp, maxHp, b,
+				vx, vz, Spring.GetUnitIsBuilding(id) or 0 }
+			for j = 1, #allyTeams do
+				row[#row + 1] = Spring.GetUnitLosState(id, allyTeams[j], true) or 0
+			end
+			for j = 1, stride do
+				out[k + j] = row[j]
+			end
+			k = k + stride
+		end
+		for j = k + 1, prev do
+			out[j] = nil
+		end
+		return out, #ids, stride
+	end
+	-- The engine-side sample loop (Spring.GetUnitSampleDelta): the widget's
+	-- bulk loop over GetUnitSampleData with the predictor state kept here, the
+	-- dead list in ascending id order like the engine's. TestEngineLogMatchesResim
+	-- then checks the widget's glue around it (shields, visibility, dead list).
+	local deltaPrev, deltaVis = {}, {}
+	Spring.GetUnitSampleDelta = function(allyTeams, se, keyframe, frame, unknownTeam, shieldDefs, doVis, o)
+		local bd, cnt, stride = Spring.GetUnitSampleData(allyTeams, nil)
+		local isShield = {}
+		for _, d in ipairs(shieldDefs) do
+			isShield[d] = true
+		end
+		if keyframe then
+			deltaPrev = {}
+		end
+		local keys = { "cid", "cdef", "cteam", "cx", "cz", "chp", "cmax", "cdvx", "cdvz", "cb", "ct",
+			"dead", "sid", "sdef", "vid", "vlo", "vhi" }
+		local t = {}
+		for _, k in ipairs(keys) do
+			t[k] = {}
+		end
+		local function push(k, v)
+			local a = t[k]
+			a[#a + 1] = v
+		end
+		local floor = math.floor
+		local nva = doVis and #allyTeams or 0
+		for i = 1, cnt do
+			local base = (i - 1) * stride
+			local unitID = bd[base + 1]
+			local qx = floor(bd[base + 4] + 0.5)
+			if qx > 32767 then qx = 32767 elseif qx < -32768 then qx = -32768 end
+			local qz = floor(bd[base + 5] + 0.5)
+			if qz > 32767 then qz = 32767 elseif qz < -32768 then qz = -32768 end
+			local qhp = floor(bd[base + 6] + 0.5)
+			if qhp < 0 then qhp = 0 end
+			local qmax = floor(bd[base + 7] + 0.5)
+			if qmax < 0 then qmax = 0 end
+			local qdvx = floor(bd[base + 9] * se + 0.5)
+			if qdvx > 32767 then qdvx = 32767 elseif qdvx < -32768 then qdvx = -32768 end
+			local qdvz = floor(bd[base + 10] * se + 0.5)
+			if qdvz > 32767 then qdvz = 32767 elseif qdvz < -32768 then qdvz = -32768 end
+			local qb = floor(bd[base + 8] * 255 + 0.5)
+			if qb > 255 then qb = 255 elseif qb < 0 then qb = 0 end
+			local defID = bd[base + 3]
+			local qdef = defID
+			if qdef > 65535 or qdef < 0 then qdef = 0 end
+			local qteam = bd[base + 2]
+			if qteam > 255 or qteam < 0 then qteam = unknownTeam end
+			local qt = bd[base + 11]
+			if qt > 65535 or qt < 0 then qt = 0 end
+			local p = deltaPrev[unitID]
+			if p ~= nil and not keyframe
+				and p.dvx == qdvx and p.dvz == qdvz
+				and p.x + qdvx == qx and p.z + qdvz == qz
+				and p.hp == qhp and p.maxhp == qmax and p.b == qb
+				and p.def == qdef and p.team == qteam and p.t == qt then
+				p.x, p.z, p.f = qx, qz, frame
+			else
+				push("cid", unitID); push("cdef", qdef); push("cteam", qteam)
+				push("cx", qx); push("cz", qz); push("chp", qhp); push("cmax", qmax)
+				push("cdvx", qdvx); push("cdvz", qdvz); push("cb", qb); push("ct", qt)
+				deltaPrev[unitID] = { x = qx, z = qz, dvx = qdvx, dvz = qdvz,
+					hp = qhp, maxhp = qmax, def = qdef, team = qteam, b = qb, t = qt, f = frame }
+			end
+			if unitID <= 65535 and isShield[defID] then
+				push("sid", unitID); push("sdef", defID)
+			end
+			if doVis and unitID <= 65535 then
+				local lo, hi, scale = 0, 0, 1
+				for a = 1, nva do
+					local bits = bd[base + 11 + a]
+					if a <= 8 then
+						lo = lo + (bits % 4) * scale
+					else
+						hi = hi + (bits % 4) * scale
+					end
+					scale = (a == 8) and 1 or scale * 4
+				end
+				local v = deltaVis[unitID]
+				if v == nil or keyframe or v.lo ~= lo or v.hi ~= hi then
+					push("vid", unitID); push("vlo", lo); push("vhi", hi)
+				end
+				deltaVis[unitID] = { lo = lo, hi = hi, f = frame }
+			end
+		end
+		if not keyframe then
+			local gone = {}
+			for id, p in pairs(deltaPrev) do
+				if p.f ~= frame then
+					gone[#gone + 1] = id
+				end
+			end
+			table.sort(gone)
+			for _, id in ipairs(gone) do
+				deltaPrev[id] = nil
+				push("dead", id)
+			end
+		end
+		if doVis then
+			for id, v in pairs(deltaVis) do
+				if v.f ~= frame then
+					deltaVis[id] = nil
+				end
+			end
+		end
+		for _, k in ipairs(keys) do
+			o[k] = t[k]
+		end
+		o.n, o.nv, o.total = #t.cid, #t.vid, cnt
+		return true
+	end
+end
+
+-- setReload changes a launcher's reload frame, logging the change the way the
+-- engine's reload log does (enginelog mode, once switched on).
+function setReload(id, slot, value)
+	weaponState[id][slot] = value
+	if engineLog.reloads then
+		local r = engineLog.rel
+		r[#r + 1], r[#r + 2], r[#r + 3] = id, slot - 1, value
 	end
 end
 
@@ -933,7 +1090,7 @@ end
 
 local function spawn(pid, owner, slot, wd, vx, vy, vz, g, target, reloadFrames)
 	local u = units[owner]
-	weaponState[owner][slot] = curFrame + reloadFrames
+	setReload(owner, slot, curFrame + reloadFrames)
 	projectiles[pid] = { owner = owner, team = u.team, wd = wd, x = u.x, y = 120, z = u.z,
 		vx = vx, vy = vy, vz = vz, g = g, target = target }
 end
@@ -967,7 +1124,7 @@ local function projectileScript(f)
 		projectiles[7002].intercepted = true
 	end
 	if f == 1800 then
-		weaponState[504][1] = f + 297
+		setReload(504, 1, f + 297)
 	end
 	if f == 2400 then
 		widget:StockpileChanged(501, 39, 0, 2, 1, 0)
@@ -1017,7 +1174,7 @@ local function projectileScript(f)
 		explode(7004)
 	end
 	if f == 3000 then
-		weaponState[506][1] = f + 210
+		setReload(506, 1, f + 210)
 	end
 	for k = 0, 2 do
 		if f == 3075 + 3 * k then

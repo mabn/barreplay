@@ -13,6 +13,7 @@
 #   bench-ckpt.sh trial <engine-binary> <replay> <frame> <frames> [n]
 #   bench-ckpt.sh ab    <binA> <binB> <replay> <frame> <frames> [pairs]
 #   bench-ckpt.sh flame <engine-binary> <replay> <frame> <frames> <out.svg> [title]
+#   bench-ckpt.sh abt   <engine-binary> <replay> <frame> <frames> <togglesA> <togglesB> [pairs]
 #
 # <replay> is a gameId or a name from REPLAYS below. <engine-binary> must sit
 # in <data>/engine/<version>/ beside the stock engine (it finds base/ there)
@@ -33,6 +34,25 @@
 #
 # CPUSET="<cpu list>" pins every engine thread for the trial (taskset -a);
 # MAINCPU=<cpu> OTHERCPUS=<list> pins the main thread alone and the rest apart.
+#
+# PERFSTAT="<events>" counts hardware events per thread over the window
+# (perf stat) into <ckpt dir>/perfstat.txt.
+#
+# COOL=<milli-degC> waits before each trial until the package is that cool
+# (with the fans pinned at max, ~48 C is reachable at idle on the dev host).
+#
+# TOGGLES=<hex> passes the experiment toggles of a build that has them (the
+# go file's "t=<hex>"; g_brToggles in the engine) to each trial, and `abt`
+# interleaves two toggle settings of ONE binary from the same checkpoint —
+# variants of an experiment need no second build or dump.
+#
+# BARREPLAY_ARGS="<flags>" (dump only) passes extra barreplay flags to the
+# re-simulation, e.g. "-worker-threads 7"; they are frozen into the checkpoint,
+# so dump such a variant under its own binary name (a copy of the binary).
+#
+# LUAPROF=1 asks a build carrying the Lua sampling profiler (bench harness,
+# Recoil branch luaprof) to write the window's Lua call stacks, folded, to
+# <ckpt dir>/result.luaprof (1 kHz of main-thread CPU time).
 #
 # Each trial prints the bench harness line: frames, units alive at the start,
 # cycles, instructions (main thread) and the window's SimFrame wall time.
@@ -73,7 +93,7 @@ dump() {
 	[ -x "$BARREPLAY" ] || (cd "$BR" && go build -o "$BARREPLAY" ./cmd/barreplay) || die "build barreplay"
 	echo "== dump: $(basename "$bin") $2 ($id) up to frame $frame"
 	(cd "$BR" && BARREPLAY_BENCH_START=$frame BARREPLAY_BENCH_N=1 BARREPLAY_PARK="$dir/park" \
-		"$BARREPLAY" -data "$DATA" -progress=true -engine "$bin" -out "$dir/out" "$id" > "$dir/barreplay.log" 2>&1) &
+		"$BARREPLAY" -data "$DATA" -progress=true ${BARREPLAY_ARGS:-} -engine "$bin" -out "$dir/out" "$id" > "$dir/barreplay.log" 2>&1) &
 	local brpid=$!
 	while [ ! -s "$dir/park.ready" ]; do
 		kill -0 $brpid 2>/dev/null || die "the re-simulation ended before frame $frame (see $dir/barreplay.log)"
@@ -114,8 +134,13 @@ trial1() {
 	local bin=$(bindir "$1") replay=$2 frame=$3 n=$4
 	local dir="$CKPT/$(basename "$bin")/$replay-$frame"
 	[ -d "$dir/img" ] || dump "$1" "$replay" "$frame" >&2
-	while read -r k p; do cp -p "$dir/files/$k" "$p"; done < "$dir/files/manifest"
+	while read -r k p; do cp -p "$dir/files/$k" "$p" 2>/dev/null; done < "$dir/files/manifest"
 	rm -f "$dir/park.go" "$dir/result"
+	if [ -n "${COOL:-}" ]; then
+		# start every trial from the same package temperature (milli-degC)
+		local waited=0
+		while [ "$(cat /sys/class/hwmon/hwmon1/temp1_input)" -ge "$COOL" ] && [ $waited -lt 300 ]; do sleep 2; waited=$((waited + 1)); done
+	fi
 	hostroot systemd-run --scope --quiet criu restore -D "$dir/img" -j -d --manage-cgroups=ignore \
 		--tcp-established -o restore.log -v2 || die "criu restore failed (see $dir/img/restore.log)"
 	if [ -n "${MAINCPU:-}" ]; then
@@ -140,13 +165,23 @@ trial1() {
 		perfpid=$!
 		sleep 1
 	fi
-	echo "$n $dir/result" > "$dir/park.go"
+	if [ -n "${PERFSTAT:-}" ]; then
+		# hardware counters per thread over exactly the window
+		perf stat -p "$(cat "$dir/park.ready")" --per-thread -e "$PERFSTAT" -o "$dir/perfstat.txt" &
+		perfpid=$!
+		sleep 1
+	fi
+	echo "$n $dir/result${LUAPROF:+ luaprof}${TOGGLES:+ t=$TOGGLES}" > "$dir/park.go"
 	local t=0
 	while [ ! -s "$dir/result" ]; do
 		sleep 0.5; t=$((t + 1))
 		[ $t -gt 7200 ] && die "no result after an hour"
 	done
 	sleep 0.2
+	if [ -n "${LUAPROF:-}" ]; then # the profile is written after the result line
+		local epid=$(cat "$dir/park.ready")
+		while kill -0 "$epid" 2>/dev/null; do sleep 0.2; done
+	fi
 	[ -n "$perfpid" ] && wait $perfpid 2>/dev/null
 	tail -1 "$dir/result"
 }
@@ -171,5 +206,9 @@ case "${1:-}" in
 	           for b in $o; do echo "pair $i $(basename "$b") $(trial1 "$b" "$4" "$5" "$6")"; done
 	       done ;;
 	flame) flame "$2" "$3" "$4" "$5" "$6" "${7:-}" ;;
+	abt)   for i in $(seq 1 "${8:-3}"); do
+	           if [ $((i % 2)) -eq 1 ]; then o="$6 $7"; else o="$7 $6"; fi
+	           for t in $o; do echo "pair $i t=$t $(TOGGLES=$t trial1 "$2" "$3" "$4" "$5")"; done
+	       done ;;
 	*) sed -n '2,40p' "$0"; exit 2 ;;
 esac

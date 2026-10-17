@@ -1,0 +1,67 @@
+From fc71df69392b4487d6602636ee4c985cbf7d1a77 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Fri, 16 Oct 2026 13:42:31 +0000
+Subject: [PATCH 10/13] Lua callin timers only while the profiler is on
+
+Every Lua callin was wrapped in a special timer (four clock reads and two
+profile-map updates per call, per candidate target in AllowWeaponTarget):
+~1% of a late game's main thread for numbers nothing reads unless profiling.
+Timings are never simulation input.
+---
+ rts/Lua/LuaCallInCheck.h  | 21 +++++++++++++++++++--
+ rts/System/TimeProfiler.h |  5 ++++-
+ 2 files changed, 23 insertions(+), 3 deletions(-)
+
+diff --git a/rts/Lua/LuaCallInCheck.h b/rts/Lua/LuaCallInCheck.h
+index 5d1b215..487dbf9 100644
+--- a/rts/Lua/LuaCallInCheck.h
++++ b/rts/Lua/LuaCallInCheck.h
+@@ -6,10 +6,27 @@
+ #include "System/TimeProfiler.h"
+ #include "LuaUtils.h"
+ 
++#include <optional>
++
++// [barreplay] A Lua callin's "Lua::Callins::*" timer runs only while the
++// profiler is enabled (/debug): as a special timer it otherwise cost four
++// clock reads and two profile-map updates on EVERY callin - per candidate
++// target in AllowWeaponTarget - for numbers nothing reads unless profiling.
++// Timings are never simulation input, so the sim cannot see the difference.
++class ScopedCallInTimer {
++public:
++	explicit ScopedCallInTimer(unsigned nameHash) {
++		if (CTimeProfiler::Enabled())
++			timer.emplace(nameHash, false, true);
++	}
++private:
++	std::optional<ScopedTimer> timer;
++};
++
+ #if DEBUG_LUA
+-#  define LUA_CALL_IN_CHECK_NAMED(L, name, ...) SCOPED_SPECIAL_TIMER_NOREG(name); LuaUtils::ScopedStackChecker ciCheck((L));
++#  define LUA_CALL_IN_CHECK_NAMED(L, name, ...) ScopedCallInTimer __scopedCallInTimer(hashString(name)); LuaUtils::ScopedStackChecker ciCheck((L));
+ #else
+-#  define LUA_CALL_IN_CHECK_NAMED(L, name, ...) SCOPED_SPECIAL_TIMER_NOREG(name);
++#  define LUA_CALL_IN_CHECK_NAMED(L, name, ...) ScopedCallInTimer __scopedCallInTimer(hashString(name));
+ #endif
+ 
+ #define LUA_CALL_IN_CHECK(L, ...) LUA_CALL_IN_CHECK_NAMED(L, (GetLuaContextData(L)->synced)? "Lua::Callins::Synced": "Lua::Callins::Unsynced", __VA_ARGS__);
+diff --git a/rts/System/TimeProfiler.h b/rts/System/TimeProfiler.h
+index dedebd6..c8da096 100644
+--- a/rts/System/TimeProfiler.h
++++ b/rts/System/TimeProfiler.h
+@@ -187,7 +187,10 @@ public:
+ 	void RefreshProfilesRaw();
+ 	void CleanupOldThreadProfiles();
+ 
+-	void SetEnabled(bool b) { enabled = b; }
++	void SetEnabled(bool b) { enabled = b; sEnabled.store(b, std::memory_order_relaxed); }
++	// [barreplay] cheap global read of the flag, for timers on hot paths
++	static bool Enabled() { return sEnabled.load(std::memory_order_relaxed); }
++	static inline std::atomic<bool> sEnabled{false};
+ 	void PrintProfilingInfo() const;
+ 
+ 	void AddTime(
+-- 
+2.53.0
+

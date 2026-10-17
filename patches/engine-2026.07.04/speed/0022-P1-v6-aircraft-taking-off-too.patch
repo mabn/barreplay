@@ -1,0 +1,38 @@
+From 4324103d088e6b959812b7592b18bdb50ebc963e Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 13:56:50 +0000
+Subject: [PATCH 22/30] P1 v6: aircraft taking off too
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index 022c18e..0354730 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -262,10 +262,16 @@ namespace BrParAir {
+ 		// v6: a landed aircraft that is not stopping or crashing only settles on
+ 		// the terrain under it (UpdateLanded: gravity and drag on its own speed,
+ 		// its own position, direction vectors and aim point; a hover one also
+-		// turns to its own wanted heading); with collide off its collision step
+-		// only keeps it on the map, and the script call when it starts or stops
+-		// moving waits for every earlier item (SerialPoint)
+-		if ((g_brToggles & 0x80) != 0 && amt->aircraftState == AAirMoveType::AIRCRAFT_LANDED && !u->IsCrashing()) {
++		// turns to its own wanted heading). One taking off climbs on its own
++		// physics, and its one possible transition (to FLYING) sets only its own
++		// state: flags, landing position, wanted height, hold-fire. Leaving
++		// LANDED (Activate/UnBlock) and touching down (StopMove, Deactivate,
++		// Block) are the transitions with outside effects, and neither starts
++		// from these two states. With collide off the collision step only keeps
++		// it on the map, and the script call when it starts or stops moving waits
++		// for every earlier item (SerialPoint)
++		const bool landedOrTakeoff = (amt->aircraftState == AAirMoveType::AIRCRAFT_LANDED || amt->aircraftState == AAirMoveType::AIRCRAFT_TAKEOFF);
++		if ((g_brToggles & 0x80) != 0 && landedOrTakeoff && !u->IsCrashing()) {
+ 			if (!hover || !static_cast<const CHoverAirMoveType*>(mt)->wantToStop)
+ 				return (w = WHY_STATE, true);
+ 		}
+-- 
+2.53.0
+

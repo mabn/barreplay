@@ -1,0 +1,169 @@
+From bd7b99111bbe591e2f523819961ee42714ea2826 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 03:05:30 +0000
+Subject: [PATCH 10/30] P1 v4: classification pre-pass on all threads; the plan
+ check runs ahead of the item's turn and is redone only if a serial item ran
+ meanwhile
+
+---
+ rts/Sim/MoveTypes/Systems/BrParallelAir.h     |  2 +-
+ .../MoveTypes/Systems/GeneralMoveSystem.cpp   | 78 ++++++++++++++-----
+ 2 files changed, 58 insertions(+), 22 deletions(-)
+
+diff --git a/rts/Sim/MoveTypes/Systems/BrParallelAir.h b/rts/Sim/MoveTypes/Systems/BrParallelAir.h
+index 7dfd606..a21f60f 100644
+--- a/rts/Sim/MoveTypes/Systems/BrParallelAir.h
++++ b/rts/Sim/MoveTypes/Systems/BrParallelAir.h
+@@ -47,7 +47,7 @@ namespace BrParAir {
+ 	};
+ 
+ 	struct Stats {
+-		std::atomic<long long> frames{0}, serialFrames{0}, items{0}, parallel{0}, serial{0}, replanned{0}, statics{0}, targetEdges{0}, deferredTrails{0}, crashKills{0};
++		std::atomic<long long> frames{0}, serialFrames{0}, items{0}, parallel{0}, serial{0}, replanned{0}, earlyChecks{0}, statics{0}, targetEdges{0}, deferredTrails{0}, crashKills{0};
+ 		std::atomic<long long> serialPoints{0}, scriptCalls{0}, collisionWrites{0}, bigWrites{0}, oobKills{0};
+ 	};
+ 	extern Stats stats;
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index 31d0beb..3fd24a6 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -87,11 +87,12 @@ namespace BrParAir {
+ 	static int trailsFlushed = 0;
+ 	static size_t doneCap = 0;
+ 	static std::atomic<int> claim{0}, frontier{0}, nextStart{0}, handoff{-1};
++	static std::atomic<unsigned> serialRuns{0};
+ 
+ 	int StatsLine(char* buf, int size) {
+ 		return snprintf(buf, size,
+-			"[BR_PARAIR] frames=%lld serialFrames=%lld items=%lld parallel=%lld serial=%lld replanned=%lld statics=%lld targetEdges=%lld deferredTrails=%lld crashKills=%lld serialPoints=%lld scriptCalls=%lld collisionWrites=%lld bigWrites=%lld oobKills=%lld\n",
+-			stats.frames.load(), stats.serialFrames.load(), stats.items.load(), stats.parallel.load(), stats.serial.load(), stats.replanned.load(), stats.statics.load(),
++			"[BR_PARAIR] frames=%lld serialFrames=%lld items=%lld parallel=%lld serial=%lld replanned=%lld earlyChecks=%lld statics=%lld targetEdges=%lld deferredTrails=%lld crashKills=%lld serialPoints=%lld scriptCalls=%lld collisionWrites=%lld bigWrites=%lld oobKills=%lld\n",
++			stats.frames.load(), stats.serialFrames.load(), stats.items.load(), stats.parallel.load(), stats.serial.load(), stats.replanned.load(), stats.earlyChecks.load(), stats.statics.load(),
+ 			stats.targetEdges.load(), stats.deferredTrails.load(), stats.crashKills.load(), stats.serialPoints.load(), stats.scriptCalls.load(), stats.collisionWrites.load(), stats.bigWrites.load(), stats.oobKills.load());
+ 	}
+ 
+@@ -176,6 +177,7 @@ namespace BrParAir {
+ 		ThreadPool::SetInlineOnly(false);
+ 		ThreadPool::SetInMultiThreadedSection(mt);
+ 
++		serialRuns.fetch_add(1, std::memory_order_acq_rel);
+ 		Finish(k);
+ 		nextStart.store(k + 1, std::memory_order_release);
+ 	}
+@@ -254,6 +256,14 @@ namespace BrParAir {
+ 
+ 	static void Process(int k, bool isMain) {
+ 		unsigned n = 0;
++
++		// check the plan ahead of the item's turn, off the in-order start chain;
++		// only a serial item can change what it checks (parallel items touch
++		// nothing but themselves), so at the turn the early answer stands if no
++		// serial item ran meanwhile
++		const unsigned runs0 = serialRuns.load(std::memory_order_acquire);
++		const bool early = !isSerial[k] && StillAsPlanned(k);
++
+ 		// in-order start
+ 		while (nextStart.load(std::memory_order_acquire) != k) {
+ 			if (!isMain || !ServiceHandoff())
+@@ -267,7 +277,10 @@ namespace BrParAir {
+ 					Spin(n);
+ 			}
+ 
+-			if (StillAsPlanned(k)) {
++			const bool same = (serialRuns.load(std::memory_order_acquire) == runs0);
++			if (same)
++				stats.earlyChecks++;
++			if (same? early: StillAsPlanned(k)) {
+ 				nextStart.store(k + 1, std::memory_order_release);
+ 				curRank = k;
+ 				RunItem(work[k]);
+@@ -323,28 +336,49 @@ namespace BrParAir {
+ 		tgtType.clear();
+ 		edges.clear();
+ 
+-		long long nPar = 0;
+-
+-		for (CUnit* u: order) {
++		// classify every unit on all threads (reads only: the cache misses on
++		// ~9000 scattered units were most of the serial pre-pass)
++		struct Plan { int kind; int tgtType; const CUnit* tgtUnit; int id; int tgtId; }; // kind: 0 skip, 1 parallel, 2 serial
++		static std::vector<Plan> plans;
++		const int m = int(order.size());
++		plans.resize(m);
++		for_mt_chunk(0, m, [&order](const int i) {
++			const CUnit* u = order[i];
+ 			const AMoveType* mt = u->moveType;
+-
++			Plan& p = plans[i];
++			p.id = u->id;
+ 			if (typeid(*mt) == typeid(CStaticMoveType) && (u->pos.IsInBounds() || u->speed.w <= MAX_UNIT_SPEED)) {
++				p.kind = 0;
++				return;
++			}
++			p.kind = ParallelSafe(u)? 1: 2;
++			p.tgtType = int(u->curTarget.type);
++			p.tgtUnit = (u->curTarget.type == Target_Unit)? u->curTarget.unit: nullptr;
++			p.tgtId = (p.tgtUnit != nullptr)? p.tgtUnit->id: -1;
++		}, 64);
++
++		long long nPar = 0;
++		static std::vector<int> tgtIds;
++		tgtIds.clear();
++
++		for (int i = 0; i < m; ++i) {
++			const Plan& p = plans[i];
++			if (p.kind == 0) {
+ 				stats.statics++;
+ 				continue;
+ 			}
+ 
+ 			const int k = int(work.size());
+-			work.push_back(u);
+-			if (rankOf.size() <= size_t(u->id))
+-				rankOf.resize(u->id + 1024, -1);
+-			rankOf[u->id] = k;
+-
+-			tgtType.push_back(int(u->curTarget.type));
+-			tgtUnit.push_back((u->curTarget.type == Target_Unit)? u->curTarget.unit: nullptr);
+-
+-			const bool par = ParallelSafe(u);
+-			isSerial.push_back(!par);
+-			nPar += par;
++			work.push_back(order[i]);
++			if (rankOf.size() <= size_t(p.id))
++				rankOf.resize(p.id + 1024, -1);
++			rankOf[p.id] = k;
++
++			tgtType.push_back(p.tgtType);
++			tgtUnit.push_back(p.tgtUnit);
++			tgtIds.push_back(p.tgtId);
++			isSerial.push_back(p.kind == 2);
++			nPar += (p.kind == 1);
+ 		}
+ 
+ 		// an item reads its target's position: if the target is an item of the
+@@ -353,7 +387,7 @@ namespace BrParAir {
+ 		for (int k = 0; k < n; ++k) {
+ 			if (isSerial[k] || tgtUnit[k] == nullptr)
+ 				continue;
+-			const int t = (size_t(tgtUnit[k]->id) < rankOf.size())? rankOf[tgtUnit[k]->id]: -1;
++			const int t = (size_t(tgtIds[k]) < rankOf.size())? rankOf[tgtIds[k]]: -1;
+ 			if (t < 0 || t == k || work[t] != tgtUnit[k] || isSerial[t])
+ 				continue;
+ 			if (t < k)
+@@ -361,8 +395,10 @@ namespace BrParAir {
+ 			else
+ 				edges.emplace_back(t, k);
+ 		}
+-		for (CUnit* u: work)
+-			rankOf[u->id] = -1;
++		for (int i = 0; i < m; ++i) {
++			if (plans[i].kind != 0)
++				rankOf[plans[i].id] = -1;
++		}
+ 
+ 		predBeg.assign(n + 1, 0);
+ 		for (const auto& e: edges)
+-- 
+2.53.0
+

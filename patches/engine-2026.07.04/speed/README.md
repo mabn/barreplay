@@ -1,0 +1,93 @@
+# Speed work on top of the published series (2026-10-16/17)
+
+The Recoil engine branches of the verylarge1 speed work
+([docs/worklog-engine-speed.md](../../../docs/worklog-engine-speed.md)), as
+patch files. None of them is listed in `../series`, so they are not part of
+any published revision. `SeriesDigest` hashes only the files listed there
+plus `../pgo/`, so adding them changes no pinned digest. Making them a
+revision means listing them in `series`, which needs a new digest pinned,
+a gate and a publish.
+
+## Applying
+
+From a clean checkout of the `2026.07.04` tag:
+
+```sh
+P=patches/engine-2026.07.04
+git am $(grep -v '^#' $P/series | sed "s|^|$P/|")   # the published series
+git am $P/speed/00*.patch                          # this directory, in order
+```
+
+That reproduces branch `speed24` of the work tree exactly (checked: no
+difference in `git diff`). Build with `-DSYNCCHECK=OFF` (patches 0001-0004
+make that configuration compile; the sync checker hashes every synced write,
+7.9% of the late game, and only multiplayer desync detection reads it).
+`tools/build-pgolto-g.sh` is the PGO+LTO build used throughout (with `-g`,
+plus `EXTRA_CMAKE`, `LDEXTRA` and `PROFILE` hooks);
+`tools/pgo-profile-speed22.tar.xz` is a PGO profile trained on this code with
+every toggle on (the published `../pgo/profile.tar.xz` is revision 3's).
+
+## Toggles
+
+Most changes are behind bits of one switch, read from `BARREPLAY_TOGGLES`
+(hex) at startup, or from the bench harness's go file (`t=<hex>`) on each
+checkpoint restore. `0` is stock behaviour for everything toggled. Every bit
+below keeps the output byte-identical: medium gate `0558d354…` and, for
+everything up to `0xfbf`, the whole verylarge1 game `a26e920d…`.
+
+| bit | name | patches | what | late window, measured | status |
+|---|---|---|---|---|---|
+| `0x1` | P1 | 0005, 0007-0010, 0013 | the general move-type (aircraft) loop on all threads, exactly sequential: in-order start, target edges, serial items as barriers, RNG draws wait for every earlier item | with 0x2-0x20: -19.2% (`speed14`, `t=1f` vs `t=0`) | on |
+| `0x2` | P2 | 0006 | unit LOS states computed on all threads, applied in order | (in the -19.2%) | on |
+| `0x4` | N1 | 0006 | BAR's AA-priority `AllowWeaponTarget` done natively when its Lua is verified unchanged | (in the -19.2%) | on |
+| `0x8` | P1 v3 | 0008 | crashing aircraft that cannot reach the ground this frame in parallel, trails deferred in loop order | (in the -19.2%) | on |
+| `0x10` | H73 | 0011-0012 | headless demo: skip the eager piece-transform walk (run-time test; `#ifdef HEADLESS` never reaches `rts/Sim`) | (in the -19.2%) | on |
+| `0x20` | P1 v5 | 0014 | hover aircraft flying or hovering, and stunned or unfinished aircraft, in parallel | `speed15`: -18% vs all off | on |
+| `0x40` | R1 | 0015-0018 | run-ahead prefetch helper on the main thread's hyperthread sibling | **+11.6%** (slower) | **rejected**, leave off |
+| `0x80` | P1 v6 | 0021-0022 | landed aircraft and aircraft taking off in parallel | -0.8% (noise level) | on |
+| `0x100` | PW | 0023 | serial weapon loop prefetches every weapon 4 units ahead, and their targets 2 ahead | -0.5% (noise level) | on |
+| `0x200` | CH | 0024 | the unit loops' `for_mt_chunk` hand out chunks of at most 32 (the main thread waited for the slowest worker's quarter) | **-2.2%** | on |
+| `0x400` | PG | 0025 | `GenerateWeaponTargets` prefetches the candidate 6 ahead (three lines) | **-1.2%** | on |
+| `0x800` | MU | 0027 | `MovedUnit` copies the quad list instead of taking the pooled buffer (a malloc + free per move) | not measured alone | on |
+| `0x1000` | QG | 0028 | `GetQuads` finds each row's run of quads by its two ends | being measured | ? |
+| `0x2000` | P1 v7 | 0029 | an item passes the in-order start on before waiting for its targets | being measured | ? |
+| `0x4000` | FA | 0030 | `FindAnim` searches on one packed 64-bit key | being measured | ? |
+
+Not toggled (always on in these builds):
+
+| patches | what |
+|---|---|
+| 0001-0004 | `SYNCCHECK=OFF` compiles: `float3::bitExactEquals`, includes, the in-synced counter kept, the sync-history dump only with the checker |
+| 0008 (H72) | the per-anim checksum in `TickAllAnims` only with `SYNCCHECK` (it fed nothing else) |
+| 0019 | W6: `Spring.GetUnitSampleDelta`, the capture widget's bulk sample loop in the engine (with widget W7, -7.2% of the late window, governed whole game 16m39s -> 15m25s active) |
+| 0020 | clamp unsynced height-map update rectangles to the map (a symptom of the next one) |
+| 0026 | **upstream bug fix**: `CRectangleOverlapHandler::StageSplitTooLarge` wrote through a reference into a vector across `push_back` (use-after-free, heap corruption; seen as an RmlUi crash at frame 78 of verylarge1 in some builds) |
+
+## rejected/
+
+| patch | what | measured |
+|---|---|---|
+| `0064-H64…` | prefetch `tempNum`/`losStatus` of the candidate 4 ahead in `GenerateWeaponTargets` (2026-10-15) | 23.32 -> 23.36 s, nothing; reverted. PG (0025) later measured -1.2% with `aimPos` too, 6 ahead |
+| `0067-H67…` | H67: prefetch height-map cells under upcoming units; H68: prefetch aircraft command-queue fronts | 19076 -> 19024 ms, -0.3%, noise (2026-10-16 04:35); dropped |
+
+R1 (0015-0018) stayed in the main line because later patches were built on
+it; it is off unless bit `0x40` is set. Other experiments of the work that
+were not engine patches: BOLT (needs a GNU ld link, which alone was ~4.6%
+slower than gold; CRIU could not checkpoint the result) and x86-64-v3
+(exact, slower) — both in the work log.
+
+## tools/
+
+- `luaprof-sampler/`: the Lua sampling profiler of the bench harness (go-file
+  token `luaprof`), applies on top of `0018`. Costs PGO quality in `lvm.cpp`,
+  so profile with it, measure without it.
+- `measure7-counters/`: measurement-only counters for the targeting scan and
+  the aircraft loop's dependencies.
+- `build-pgolto-g.sh`, `pgo-profile-speed22.tar.xz`: see above.
+- `scripts/`: the measurement scripts of the work (paths are this host's):
+  `fullrun.sh` (whole game with the thermal pause governor), `cool.sh`,
+  `fans.sh`, `capall.sh`, `pkgcap.sh`, `rapl.sh` (cooling, frequency and
+  power caps), `pgotrain.sh` (PGO training replays), `phases.py` (main-thread
+  breakdown from folded stacks), `hotlines.py` (source lines of a function's
+  samples), `memfields.py` (load-latency samples mapped to object fields),
+  `luaprof.py`, `bolt.sh`, `ab.sh`.

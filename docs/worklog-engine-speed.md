@@ -567,3 +567,1393 @@ verylarge1, all 90,900 frames, each run alone on the host:
 | | **-12.4%** | | identical |
 
 (The earlier 37m54s base run had builds beside it; this replaces it.)
+
+### 2026-10-16 01:02 — where the main thread's time goes (verylarge1 late window)
+
+USER: report the main thread as % of ONE core (rows sum to 100%), workers
+separately; only the late window matters, and only the main thread needs
+optimizing. Published build (`pgolto2`), frames 63780+450, 9961 units.
+
+**Threads** (task-clock sampling, 999 Hz):
+
+| thread | CPU over the window | % of one core |
+|---|---|---|
+| main | 21.2 s (SimFrame thread-CPU 21,217 ms of 21,219 ms wall) | **~100%** — never sleeps |
+| worker 1 / 2 / 3 | 4.4 / 4.2 / 4.2 s | ~20% each |
+
+Workers run only the parallel sections (TickAllAnims, UpdateWeaponVectors,
+LOS, projectile/weapon for_mt chunks, QTPFS node layers). The main thread
+is CPU-bound; it does its share of each parallel section itself
+(`WaitForFinished` self time 0.3%), so it is not waiting idle.
+
+**Main thread, % of one core** (LBR call stacks, cycles at 1999 Hz; each
+stack goes to the first phase found in it — 0.3% could not be placed;
+script: phases.py, kept with the perf data):
+
+| phase | % of core | of which Lua |
+|---|---|---|
+| **units** (`CUnitHandler::Update`) | **62.5%** | 6.9% |
+| ├ LTO-inlined unit/weapon code (no debug info to split) | 12.5% | |
+| ├ aircraft: `CStrafeAirMoveType::Update` | 11.4% | 0.9% |
+| ├ weapon auto-targeting: `CWeapon::SlowUpdate` | 9.3% | 2.8% |
+| ├ ground movement: `GroundMoveSystem::Update` | 5.3% | |
+| ├ weapon vectors (parallel section) | 4.6% | |
+| ├ `CUnit::SlowUpdate` | 4.3% | 0.6% |
+| ├ `CBeamLaser::Update` | 3.6% | 1.1% |
+| ├ `CWeapon::Update` | 2.4% | |
+| ├ `CQuadField::MovedUnit` | 2.1% | |
+| └ factories, builders, physics, LOS status, hover air, ... | 7.0% | |
+| BAR gadget callins outside units (GameFrame etc.) | 11.7% | 11.7% |
+| projectiles + collisions | 5.6% | 1.3% |
+| unit-script anims (parallel section) | 5.4% | |
+| LOS update (parallel section) | 4.2% | |
+| COB scripts | 3.5% | |
+| Lua GC | 2.1% | 2.1% |
+| map damage, pathfinding, features, draw, net, other | 5.0% | |
+| **total** | **100%** | **~22%** |
+
+Serial work is ~85% of the main thread (parallel sections ~14%). Caveat:
+LBR keeps the 16 innermost frames, so a gadget callin made from deep in a
+unit update can land under "outside units" when its stack was cut.
+
+## Round 4 (branch `speed-optimization-2`)
+
+Everything below is measured on the verylarge1 late window only (frames
+63780+450) and reported as the MAIN thread's time, % of one core, rows
+summing to 100% — the main thread is the whole bottleneck (see 01:02).
+
+### 2026-10-16 01:35 — plan, and two measurement tools under way
+
+| step | what | status |
+|---|---|---|
+| 1 | revision 3 rebuilt WITH debug info (`-g`: GCC emits the same code), own checkpoint — splits the 12.5% LTO-merged `CUnitHandler::Update` blob and gives per-line annotation | building (`~/dev/perf3/build-pgolto-g.sh`) |
+| 2 | aircraft movement (11.4%): exact-result speedups | profiled, waiting on step 1's lines |
+| 3 | weapon auto-targeting (9.3%) | queued |
+| 4 | BAR's Lua (~22%) by gadget: a sampling profiler in the bench harness | written (Recoil branch `luaprof`); build queued after step 1 |
+
+Aircraft's 11.4%, from the 01:02 stacks:
+
+| part of `CStrafeAirMoveType::Update` | % of core |
+|---|---|
+| `UpdateFlying` → `UpdateAirPhysics` | 4.7% |
+| `Update` itself (inlined helpers) | 2.3% |
+| `UpdateFlying` itself | 1.5% |
+| `GetControlSurfaceAngles` | 1.1% |
+| crash deaths → `ForcedKillUnit` → Lua `UnitDestroyed` | 0.9% |
+| other (`UpdateAirPhysics` direct, `Move`, heading, sync checks) | 0.9% |
+| **total** | **11.4%** |
+
+THE LUA PROFILER (measurement builds only, never published): every
+`luaV_execute` records which `lua_State` the thread is running (a
+thread-local set/restored by an RAII guard, so exceptions unwind it); a
+`CLOCK_THREAD_CPUTIME_ID` timer sends the main thread SIGPROF every 1 ms of
+ITS CPU time, and the handler walks that state's CallInfo array — reading
+only, no allocation, no Lua API — interning each frame (Lua: source file +
+line defined; C: function pointer, symbolized later against `nm`). Samples
+outside Lua are counted too, so the gadget table is a share of the same one
+core. `bench-ckpt.sh trial` with `LUAPROF=1` asks for it (third token of
+the go file); the folded stacks land in `<ckpt>/result.luaprof`.
+
+### 2026-10-16 02:30 — the 12.5% blob is four loops waiting on memory; H65, H66
+
+Debug-info build (`spring-headless-pgolto2g`, own checkpoint): same layout
+as revision 3 (every function at the same address and size; constants moved
+by the debug info, so not bit-identical) and the same table within 0.3 points
+per row (21.06 s window). The 12.5% LTO folded into `CUnitHandler::Update`,
+by the call it inlined, as % of the main core:
+
+| loop over all ~10k units | % of core | where it stalls |
+|---|---|---|
+| `UpdateUnits` (`CUnit::Update`, `UpdateCollisionMap`) | 3.3% | first read of each unit (`frameNum + owner->id`) |
+| `UpdateUnitMoveTypes` (general move types) | 3.1% | unit → `moveType` → vtable, before the virtual `Update()` |
+| `UpdateUnitWeapons` (the serial `UpdateWeapons` loop) | 2.9% | weapon-use flags, then each weapon's vtable |
+| `UpdateUnitLosStates` | 2.5% | `losStatus[at]`, first read of each unit |
+| `SlowUpdateUnits`, `QueueDeleteUnits` | 0.6% | |
+| **total** | **12.5%** | |
+
+Annotated, the hot instructions are the ones right after a pointer load
+(`mov 0x4f8(%rbp),%rdi; mov (%rdi),%rax` = 9.6% of the blob, `mov
+0xc0(%rax)` 9.1%, `call *0x40(%rax)` 9.0%): cache misses on scattered unit
+objects, not computation.
+
+Candidates (Recoil branch `speed4` = revision 3 + these; building):
+
+| id | change | why it is exact |
+|---|---|---|
+| H65 | Lua callin timers (`Lua::Callins::*`, 4 clock reads + 2 profile-map updates per callin, ~1.0% of the core, half in `AllowWeaponTarget`) run only while the profiler is on (`/debug`, barreplay `-profile`) | timings are never sim input |
+| H66 | software prefetch 8 units ahead (and the move type / first weapon 4 ahead) in those four loops | a prefetch changes no value and no order; the general-move-system loop first collects its units in the view's own order (a read-only pass) |
+
+Lua profiler build done; its checkpoint is being dumped.
+
+### 2026-10-16 03:05 — the Lua profile: our own widget is the biggest Lua cost
+
+Lua sampler build (`spring-headless-luaprof` = revision 3 + the sampler; its
+window ran 20.75 s, so the sampler costs nothing visible). 21,203 samples of
+main-thread CPU, 3,690 of them inside a Lua VM = **17.4% of the main core**
+(perf's ~22% also counts callin entry/exit and GC, which run outside the VM).
+Each sample goes to the innermost gadget/widget FILE on its Lua stack (handler
+plumbing skipped); `~/dev/perf3/luaprof.py` makes the table.
+
+| owner | % of main core | where |
+|---|---|---|
+| **LuaUI (widgets)** | **7.5%** | |
+| ├ `snapshot_widget.lua` — barreplay's OWN re-sim widget | **4.55%** | `sample()` 2.16% (the 1 Hz unit read), `projectileFrame` 1.31% (polls `reloadFrame` of every ready launcher slot, every frame), `UnitDestroyed` 0.39% |
+| ├ BAR `widget_profiling.lua` (wraps every widget callin) | 1.41% | `GetLuaMemUsage` 0.48% |
+| ├ BAR `barwidgets.lua` (handler dispatch) | 0.75% | |
+| └ BAR widgets (ecostats, notifications, nametags, ...) | ~0.8% | |
+| **LuaRules (gadgets)** | **9.8%** | |
+| ├ `gadgets.lua` (handler dispatch) | 2.92% | |
+| ├ `unit_shield_behaviour` | 1.06% | `GetUnitsInSphere` |
+| ├ `unit_aa_targeting_priority` (its `AllowWeaponTarget`) | 0.60% | `GetUnitDefID` 0.30% |
+| ├ `unit_builder_priority` | 0.55% | |
+| ├ `api_teamstats`, `unit_crashing_aircraft`, `api_unit_attributes` | 1.05% | |
+| └ ~60 other gadgets | ~3.6% | each < 0.3% |
+| other | 0.1% | |
+| **total in Lua** | **17.4%** | |
+
+WHY BAR's widget profiler runs at all: the Widget Selector always loads and
+its load column defaults ON (`filters.profiler = data.profiler ~= false` for
+a config that never saved it), which subscribes to `widget_profiling.lua` —
+a timer and a `GetLuaMemUsage` call around every callin of every widget.
+
+**W1** (barreplay, no engine change): the widget config barreplay seeds for
+every re-sim (`engine.widgetConfigLua`) now carries
+`data = { ["Widget Selector"] = { profiler = false } }`. Unsynced, so the
+capture cannot change. Being measured: fresh checkpoints of revision 3
+(`pgolto2w`) and of `speed4` (H65+H66), both with the new config.
+
+### 2026-10-16 03:20 — W1 -2.4%, H65+H66 another -5.3%: -7.6% together
+
+Fresh checkpoints at 63780 for revision 3 under the new widget config
+(`pgolto2w`, same binary as `pgolto2`) and for `speed4` (revision 3 + H65 +
+H66, new config). 450-frame window, 4 rounds, order rotated, main thread
+pinned alone on core 3 (`MAINCPU=3 OTHERCPUS=0,1,2,4,5,6`; 7 is 3's
+hyperthread). Raw: `~/dev/perf3/vl1-w1-h65h66.txt`.
+
+| build | wall per round (ms) | mean | vs revision 3 | instructions, mean |
+|---|---|---|---|---|
+| revision 3 | 20732 / 20702 / 20584 / 20662 | 20670 | — | 66.73e9 |
+| + W1 (selector profiler off) | 20162 / 20222 / 20221 / 20097 | 20176 | **-2.4%** | 65.03e9 |
+| + W1 + H65 + H66 (`speed4`) | 19057 / 18956 / 19052 / 19325 | 19098 | **-7.6%** (-5.3% on W1) | 64.76e9 |
+
+No overlap between the groups. `speed4` runs ~the same instructions as W1
+and 5% fewer cycles: the prefetches hiding memory stalls, as intended. (H65
+and H66 are not yet measured apart.)
+
+Gate (medium, full run, new config): `speed4` and revision 3 both
+`0558d3540c8e3f97d669505d1382ec20` = the reference. verylarge1 full run on
+`speed4` running.
+
+### 2026-10-16 03:45 — `speed4` identical on verylarge1's whole game; H67, H68 built
+
+| check | result |
+|---|---|
+| verylarge1, all 90,900 frames, `speed4` + W1 | `a26e920d594a346884b93c3389053a1f` = stock / revision 3 (its 33m21s is NOT a timing: a build shared the CPU) |
+
+Next build `speed5` = `speed4` + two more prefetches, aimed at the hottest
+lines of the debug-info profile (global, main thread):
+
+| id | stall it targets | % of core | change |
+|---|---|---|---|
+| H67 | terrain height reads (`InterpolateCornerHeight`, Ground.cpp:51: the height-map load), from unit physics 0.83%, aircraft flight control 1.35%, weapon vectors 0.5% | 3.1% | `CGround::PrefetchHeightReal(x, z)` for the unit 4 ahead in the `UpdateUnits` and general-move-type loops |
+| H68 | `CStrafeAirMoveType::Update` reading `cmdQue.front()` (StrafeAirMoveType.cpp:470) | 0.75% | prefetch the command AI 4 ahead and its queue front 2 ahead in the general-move-type loop |
+
+### 2026-10-16 04:35 — H67+H68: nothing; 7 ThreadPool threads: -6.0%
+
+| comparison (4 rounds each, order rotated) | A mean | B mean | delta |
+|---|---|---|---|
+| `speed4` vs `speed5` (+H67 height-map prefetch, +H68 command-queue prefetch), pinned | 19076 ms | 19024 ms | -0.3%, noise: **dropped** |
+| `speed4` default threads vs `-worker-threads 7`, unpinned | 19165 ms | 18015 ms | **-6.0%** (every round: 18157 / 17985 / 17900 / 18019 vs 19079 / 19105 / 19347 / 19128) |
+
+`WorkerThreadCount` counts the MAIN thread too ("Number of workers
+(including the main thread!)"); auto (-1) gives main + 3 here (4 cores), 7
+gives main + 6 workers on the hyperthreads. It was measured as nothing on
+medium in round 3's first hours, because a mid-size game has little parallel
+work; this late window spends 15.6% of the main thread inside parallel
+sections (anims 6.0, weapon vectors 5.0, LOS 4.6), and the main thread runs
+its own share of each, which drops from 1/4 to 1/7. Scheduling only; medium
+full run with 7: `0558d354…` = the reference. verylarge1 whole game with 7
+running. (`bench-ckpt.sh dump` gained BARREPLAY_ARGS for such variants.)
+
+Main thread of `speed4` (default threads), % of one core, for the record:
+
+| phase | % of core | of which Lua |
+|---|---|---|
+| units | 61.5% | 5.4% |
+| ├ aircraft (`CStrafeAirMoveType::Update`) | 12.1% | 0.8% |
+| ├ weapon auto-targeting (`CWeapon::SlowUpdate`) | 9.4% | 1.9% |
+| ├ ground movement | 5.8% | |
+| ├ LTO-inlined unit loops (was 12.5%) | 5.7% | |
+| ├ weapon vectors (parallel) | 5.0% | |
+| ├ `CUnit::SlowUpdate` | 4.7% | 0.4% |
+| ├ beam lasers | 3.9% | 1.1% |
+| └ other unit work (weapon update, `CUnit::Update`, quad field, LOS checks, factories, builders, hover air) | 14.9% | 1.0% |
+| BAR gadget callins outside units | 11.4% | 11.4% |
+| projectiles + collisions | 6.0% | 1.4% |
+| unit-script anims (parallel) | 6.0% | |
+| LOS update (parallel) | 4.6% | |
+| COB scripts | 4.0% | |
+| Lua GC | 1.5% | 1.5% |
+| map damage, pathfinding, features, draw, net, other | 5.0% | |
+| **total** | **100%** | **~21%** |
+
+### 2026-10-16 05:30 — GOAL: verylarge1 whole game in 10 minutes (was 5); where that time must come from
+
+USER set the goal: the whole of verylarge1 re-simulated in 10 minutes,
+byte-identical (first 5, then 10). Revision 3 takes 27m12s.
+
+Whole game, `speed4` + W1 + `-worker-threads 7`: **sim 24m08s**, md5
+`a26e920d…` (identical). -11% on revision 3. Time per game phase (from the
+infolog's wall clock at each frame marker):
+
+| game time | wall | frames/s | share |
+|---|---|---|---|
+| 0-10 min | 28 s | 650 | 1.9% |
+| 10-20 min | 105 s | 170 | 7.3% |
+| 20-30 min | 192 s | 94 | 13.4% |
+| 30-51 min | 1111 s | 27-48 | **77.4%** |
+
+So 10 minutes needs the late game ~2.5x faster per frame. What the main
+thread's cycles are, over the 450-frame window (`bench-ckpt.sh` new
+`PERFSTAT=` option, perf stat per thread):
+
+| counter (main thread) | cycles | share |
+|---|---|---|
+| all | 72.8e9 | 100% |
+| stalled with a memory load pending (`cycle_activity.stalls_ldm_pending`) | 40.0e9 | **55%** |
+| stalled on loads missing L2 (`stalls_l2_pending`) | 38.1e9 | **52%** |
+| data-load page walks (`dtlb_load_misses.walk_duration`) | 10.0e9 | **14%** |
+| store / instruction page walks | 0.75e9 | 1% |
+| IPC | 0.87 | |
+
+More than half the late game is waiting for memory, a seventh is TLB
+misses. That is the lever big enough for 2.5x: memory layout, not
+instruction count. First test: transparent huge pages on a FRESH run (round
+3's THP test restored a 5.7 GB checkpoint into huge pages, so the kernel's
+page collapsing ran inside the window; not a fair test).
+
+Approximate simulation is ruled out by measurement: the demo holds every
+player's sync checksum every 60 frames (~1500 per player here), over every
+synced write — an approximation changing any simulated value fails within 2
+game-seconds; one that never fails is an exact optimization.
+
+### 2026-10-16 07:10 — huge pages: -15.7% on the window, -9.6% on the whole game; making it work without root
+
+Fresh runs (re-simulated from the start; the bench harness times the same
+450-frame window at 63780), `speed4` + W1 + 7 threads
+(`~/dev/perf3/thp-window.sh`):
+
+| THP setting | huge pages in use | window wall | main cycles |
+|---|---|---|---|
+| default (`madvise`, nothing marked) | 0 | 18.19 s | 68.7e9 |
+| `always`, memory fragmented | 96 MB | 17.93 s | 67.7e9 |
+| `always` + `defrag=always` + caches dropped + compacted + mimalloc large pages | **4.96 GB** | **15.34 s (-15.7%)** | 57.9e9 |
+
+Whole game under the last setting: **sim 21m49s** (24m08s without),
+`a26e920d…` identical. Running total: 27m12s (rev 3) -> 24m08s (speed4, W1,
+7 threads) -> 21m49s (+ huge pages).
+
+DRAM-missing loads (`mem_load_uops_retired.l3_miss`, precise, with data
+addresses) are spread over everything that walks units and weapons: the
+unit loops 7.1% of all misses, targeting 5.4, LOS 3.8, `CUnit::Update` 3.5,
+weapon vectors 3.5, aircraft 4.3, ... — ~10k unit objects of several KB each
+plus their weapons against a 6 MB L3: every pass over the units streams from
+DRAM.
+
+Making it work WITHOUT root (a host's default is `enabled=madvise
+defrag=madvise`: only memory marked MADV_HUGEPAGE gets huge pages, compacted
+on demand):
+
+| attempt | result |
+|---|---|
+| H69: StaticMemPool constructors mark their page arrays | only one pool is resident enough to matter |
+| `MIMALLOC_ALLOW_LARGE_OS_PAGES=1` (barreplay now sets it) | ignored for the arenas: mimalloc reserves them uncommitted, and `if (!commit) allow_large = false` |
+| both, measured | 61 MB huge, window 18.69 s: nothing |
+| `/proc/<pid>/smaps` of the engine | 1 GB mimalloc arenas, a 628 MB brk `[heap]` and 640/256/128 MB anonymous blocks, none marked |
+| **H70**: the engine marks every private anonymous mapping >= 16 MB (heap included) MADV_HUGEPAGE every 300 frames, and MADV_COLLAPSEs them on frame 0 (what loading made resident) | building (`speed6`) |
+
+### 2026-10-16 09:40 — huge pages without root: the pages arrive, the time does not (yet); W2 written
+
+Fresh-run window (450 frames at 63780), host defaults (`enabled=madvise
+defrag=madvise`, no compaction beforehand), `speed6` builds:
+
+| run | huge pages | window wall | main user cycles | main time outside user mode |
+|---|---|---|---|---|
+| none (`speed4`) | 0 | 18.19 s | 68.7e9 | ~0 |
+| system-wide `always` (root, pre-compacted) | 4.96 GB | 15.34 s | 57.9e9 | ~0 |
+| H70: engine marks large regions MADV_HUGEPAGE every 300 frames | 6.15 GB | 17.76 s | 55.8e9 | ~2.7 s |
+| H71: no marking, low-priority thread MADV_COLLAPSEs resident memory every 2 s | 6.28 GB | 17.70 s | 55.6e9 | ~2.7 s |
+
+Both get the pages and cut user-mode cycles 19% — more than the root setup
+— but the main thread loses ~2.7 s to the kernel. Not fault-time
+compaction (H71 marks nothing). Suspect: mimalloc returns freed memory
+(`MADV_DONTNEED` after `purge_delay`), splitting huge pages; the next
+allocation re-faults 4 KiB zero pages; the collapser rebuilds them. The
+root run had mimalloc's large-page mode, which does not purge that way.
+Testing H71 with `MIMALLOC_PURGE_DELAY=-1`.
+
+**W2** (widget 1.13.0 + `Spring.GetUnitSampleData`, Recoil `speed7`): the 1 Hz
+sample in one engine call — id, team, def, x, z, health, max health, build,
+x/z speed, buildee and raw LOS bits per ally team, in GetAllUnits' order,
+the same float values the per-unit calls push under full read. The harness
+stubs it from its per-unit stubs; enginelog mode ran the bulk path on all
+140 samples and wrote the same bytes. NOTE the version bump changes every
+capture's GAME line, so identity is now checked against revision 3 run
+with widget 1.13.0, not the old md5s.
+
+Estimate (not measured): the STOCK engine on verylarge1 ~45 min (rev 2
+was 31m03s here; stock was 39-45% slower than rev 2 on the largest game
+both were measured on).
+
+### 2026-10-16 10:35 — the "kernel time" was thermal throttling; H71 works
+
+Kernel call-stack samples of the main thread over the window (H71, mimalloc
+purge off; `kptr_restrict` lifted for the run and restored to 1): 0.19e9
+kernel cycles in 25 s, i.e. ~0.05 s — scheduler ticks and syscalls. The ~2 s
+gap between thread CPU time and user cycles was the CLOCK: those runs
+averaged ~3.1 GHz against ~3.78 GHz for the baseline and root runs. This
+laptop CPU throttles hard: `package_throttle_count` 182,692 since boot,
+`core_throttle_count` 25,041 on core 2, 2.79 GHz at the moment of reading.
+Fresh-run wall times therefore swing by +-0.5 s or more with the machine's
+temperature (17.05 / 17.93 / 17.90 s for one configuration). Decisions now go by CYCLES (frequency-
+independent) and interleaved A/Bs; whole-game wall times are reported but
+carry this noise.
+
+By cycles, the same fresh-run window:
+
+| huge pages | in use | main user cycles | vs none |
+|---|---|---|---|
+| none | 0 | 68.7e9 | — |
+| system-wide `always` (root, pre-compacted) | 4.96 GB | 57.9e9 | -15.7% |
+| H70 (engine marks regions) | 6.15 GB | 55.8e9 | -18.8% |
+| **H71 (background collapse, no marking)** | 6.28 GB | **55.6e9** | **-19.1%** |
+| H71, mimalloc purge off | 6.26 GB | 56.1e9 | -18.3% |
+
+H71 needs no root and no host setting and does at least as well as the root
+setup; purge-off adds nothing. Building `speed7` = H71 + W2.
+
+### 2026-10-16 12:40 — whole game by cycles: -26% main-thread work, eaten by heat
+
+`speed7` = revision 3 + H65 + H66 + H71 (huge pages, no root) + W2 (engine
+side) with widget 1.13.0. Whole verylarge1, perf stat per thread
+(`~/dev/perf3/fullstat.sh`). Every run byte-identical (`a26e920d…`; the
+widget version turns out not to reach a re-sim's .brp, so the old reference
+holds — re-checked with revision 3 + widget 1.13.0).
+
+| run | sim | main cycles | main avg clock | throttle events during the run |
+|---|---|---|---|---|
+| revision 3, default threads | 29m46s | 5.87e12 | 3.26 GHz | +11,419 |
+| `speed7`, 7 threads | 26m47s | **4.36e12 (-26%)** | **2.65 GHz** | +15,389 |
+| `speed7`, default threads | 25m14s | (counter merged every thread: attached before the pool existed) | — | +13,075 |
+
+The patches cut the main thread's work by a quarter over the whole game, but
+this laptop's SUSTAINED clock is set by heat: with 7 threads the package runs
+hotter and the main thread averaged 2.65 GHz against revision 3's 3.26, so the
+wall-clock gain is 10%. 7 threads won 6% in 20-second checkpoint trials on a
+cool CPU and LOSE over 25 minutes (26m47s vs 25m14s with the default 4).
+The same configuration also measured 27m12s and 29m46s for revision 3 on
+different occasions: whole-game wall times here swing +-10% with the
+machine's thermal state.
+
+Consequences: (1) barreplay should NOT default to more threads; (2) the
+yardstick for the 10-minute goal on this host is main-thread cycles —
+at ~3 GHz sustained, 10 minutes is ~1.8e12 cycles, 2.4x fewer than today's
+4.36e12; (3) on a thermally limited host, work removed from ANY thread
+(workers included) buys clock for the main one.
+
+### 2026-10-16 16:30 — the late game is 5,700 fighters; both big ideas measured and ruled out
+
+`experiments/unitmix` (the unit population of a .brp at one frame) at 63780:
+10,496 units — **5,711 aircraft** (legafigdef 2,878, corvamp 1,304, armhawk
+599, corveng 322, legvenator 246, armfig 100), 1,421 ground/sea mobile,
+3,364 structures. More than half the units are fighters: aircraft movement
+(12.9% of the main core), most of auto-targeting (9.8%) and their weapons.
+
+A measurement build (`measure7`, Recoil branch of the same name, never
+published) counted over the 450-frame window:
+
+| targeting (`GenerateWeaponTargets`) | count | per frame | share of candidates |
+|---|---|---|---|
+| scans | 234,366 | 521 | |
+| candidates visited | 8,555,158 | 19,011 | 100% |
+| rejected: not in LOS/radar | 395,282 | | 4.6% |
+| rejected: out of range | 3,291,988 | | 38.5% |
+| rejected: `TestTarget` (category, ...) | 3,472,169 | | 40.6% |
+| into BAR's Lua `AllowWeaponTarget` | 1,395,719 | 3,102 | 16.3% |
+| refused by the gadget | 0 | | |
+
+| general move loop (aircraft, statics) | per frame | share |
+|---|---|---|
+| unit updates | 8,997 (5,656 aircraft) | 100% |
+| draw from the synced RNG | 23 | 0.26% |
+| target already updated earlier this frame | 120 | 1.3% |
+| some unit within the collision query | 6,536 | 73% |
+| **a neighbour already updated earlier this frame** | **4,965** | **55%** |
+
+Ruled out:
+- **An air-only candidate list for AA scans**: scans average 36 candidates;
+  the cheap rejections are ~0.3% of the core. The cost is the 3,100 Lua
+  callins a frame, which BAR's gadgets must see in full and in order.
+- **Parallel aircraft updates (the moonshot)**: 55% of updates have a
+  collision neighbour that already moved this frame — fighters fly in dense
+  blobs, so an exact wavefront schedule would have almost nothing to run
+  side by side. (RNG use would have been manageable; the coupling is not.)
+
+**W3** (engine: Recoil `speed8`, every write of a weapon's `reloadStatus`
+logged — five sites: fire, beam laser, the stunned per-frame increment, COB
+and Lua setters; widget: the launcher loop keeps its order and rule and
+reads the logged value instead of calling `GetUnitWeaponState` per ready
+slot): harness fixtures unchanged (the enginelog run drained the log every
+frame, 9 changes applied). Building.
+
+### 2026-10-16 18:10 — W3: -1.7%; next: Lua GC pacing
+
+`speed8` (= `speed7` + W3 engine) with widget W2+W3 vs `speed7`, late window,
+4 rounds rotated, main thread pinned:
+
+| build | cycles per round (e9) | mean | wall mean |
+|---|---|---|---|
+| `speed7` | 63.01 / 63.29 / 62.58 / 63.29 | 63.04e9 | 16.97 s |
+| `speed8` | 62.18 / 61.72 / 62.41 / 61.45 | **61.94e9 (-1.7%)** | 16.68 s (-1.7%) |
+
+Every round. Next, Lua GC (2.4% of the main core): `CLuaHandle::CollectGarbage`
+runs collection only from the engine (automatic GC is stopped), skips a frame
+with a probability drawn from the UNSYNCED RNG (`spring_lua_alloc_skip_gc`) and
+stops on a wall-clock budget — so its timing already differs run to run and
+machine to machine, and the simulation cannot depend on it. Two config
+settings pace it: `LuaGarbageCollectionMemLoadMult` (1.33, min 1.0: lower
+skips more) and `LuaGarbageCollectionRunTimeMult` (5 ms, min 1). Testing both
+at their minimum (risk to watch: Lua memory; an allocation failure inside a
+synced gadget would break the game).
+
+### 2026-10-16 18:50 — Lua GC pacing at its minimum: nothing
+
+| build | cycles per round (e9) | mean |
+|---|---|---|
+| `speed8` | 61.85 / 61.27 / 61.61 / 61.66 | 61.60e9 |
+| `speed8` + `LuaGarbageCollectionMemLoadMult=1.0`, `RunTimeMult=1` | 62.24 / 61.84 / 62.27 / 61.82 | 62.05e9 (+0.7%, noise) |
+
+Dropped (checkpoint image the same 6.0 GB, so no memory growth either). The
+GC's share is the cost of the garbage BAR's gadgets make, not of how it is paced.
+
+### 2026-10-16 19:30 — `speed8` whole game; where the 10-minute goal stands
+
+| run (whole verylarge1, all identical `a26e920d…`) | sim | main cycles | main avg clock | throttle events |
+|---|---|---|---|---|
+| revision 3, default threads | 29m46s | 5.87e12 | 3.26 GHz | +11,419 |
+| `speed7`, 7 threads | 26m47s | 4.36e12 | 2.65 GHz | +15,389 |
+| `speed8` (W2+W3+H71+W1+H65+H66), default threads | 25m29s | 4.43e12 (from minute 1) | 2.98 GHz | +41,031 |
+| best on record: `speed4` + root huge pages, 7 threads | 21m49s | — | — | — |
+
+Main-thread work is ~25% below revision 3 for the whole game. On this laptop
+the sustained clock (2.6-3.3 GHz under load, throttling all the time) decides
+most of the wall time, and it varies from run to run by more than the last
+several patches together.
+
+The 10-minute goal needs ~2.4x less main-thread work than now. Measured and
+ruled out on the way: approximate simulation (sync checksums every 60
+frames), an air-only AA candidate list (cheap rejections are ~0.3%),
+parallel aircraft movement (55% of updates touch an already-moved
+neighbour), lighter Lua GC pacing, more threads (a loss over a whole game
+on a throttling host). What remains is a list of 1-2% exact items.
+
+### 2026-10-16 21:10 — x86-64-v3 (AVX2, no FMA contraction): exact, but slower
+
+`speed8` rebuilt with `-march=x86-64-v3 -mtune=haswell -ffp-contract=off`
+appended after the official `-mno-sse3 ... -mno-avx2` list (so it wins;
+`-frounding-math -mieee-fp -mfpmath=sse` kept): medium gate
+`0558d354…` = reference, no desync warnings. Late window, 4 rounds:
+
+| build | cycles (e9) | mean | instructions mean |
+|---|---|---|---|
+| `speed8` | 61.89 / 62.22 / 61.55 / 61.77 | 61.86e9 | 64.11e9 |
+| `speed8` x86-64-v3 | 62.12 / 62.42 / 62.54 / 62.59 | 62.42e9 (+0.9%) | 63.36e9 (-1.2%) |
+
+Fewer instructions, more cycles, every round: dropped. (Also the beam laser's
+3.7% is spread over ~20 lines of under 0.2% each, and BAR's handler loop for
+`AllowWeaponTarget` carries no Tracy calls: nothing to take from either.)
+
+### 2026-10-16 22:00 — revision 4's series written (not published); a correction
+
+Recoil branch `rev4` = four clean commits on revision 3 (same `rts/` tree as
+`speed8`), exported as 0010-0013 (callin timers, unit-loop prefetch,
+background huge-page collapse, unit sample + reload log). Applying the whole
+series to a clean `2026.07.04` checkout reproduces that tree exactly. Series
+digest `33b518d4…` appended to `patchSeries`; no `patchedBuilds` pin yet (the
+build is not gated, uploaded or tagged).
+
+CORRECTION: the commit adding the series (`1194dbc`) says "late window
+-11.7% main-thread cycles vs revision 3". That figure was not measured. What
+was measured, in checkpoint trials of different setups: revision 3 ~79-80e9
+cycles over the window (trials under perf recording), `speed8` 61.9e9 —
+roughly -22%, but not a like-for-like A/B. A same-setup interleaved A/B
+(revision 3 vs `speed8`, both under the new widget config) is queued; whole
+game, measured: ~25% fewer main-thread cycles (5.87e12 -> 4.43e12).
+
+### 2026-10-16 23:00 — revision 4 vs revision 3, like for like: -18%; thread count settled
+
+Late window, 4 rounds rotated, main thread pinned; both under the new widget
+config (W1), so this is the ENGINE + widget 1.13.0 (W2, W3) difference:
+
+| build | cycles per round (e9) | mean | wall mean |
+|---|---|---|---|
+| revision 3 (`pgolto2w`) | 75.26 / 74.72 / 75.50 / 75.44 | 75.23e9 | 20.09 s |
+| revision 4 (`speed8`) | 61.81 / 61.64 / 61.28 / 62.00 | **61.68e9 (-18.0%)** | 16.53 s (-17.7%) |
+
+This replaces the unmeasured "-11.7%" in `1194dbc`'s message. With W1's own
+-2.4%, revision 4 + the config is ~-20% on the late window against
+revision 3 as published.
+
+Whole game, `speed8`, by thread count (all `a26e920d…`):
+
+| threads | sim | main cycles | main avg clock | throttle events |
+|---|---|---|---|---|
+| 2 | 26m31s | 5.62e12 | 3.63 GHz | +9,395 |
+| **4 (engine default)** | **25m29s** | 4.43e12 | 2.98 GHz | +41,031 |
+| 7 | 26m47s | 4.36e12 | 2.65 GHz | +15,389 |
+
+On this laptop the default is best: fewer threads run cooler but leave the
+parallel work to the main thread, more run hotter. barreplay keeps the
+engine default.
+
+### 2026-10-17 00:40 — W4: BAR's widget suite off again, -6.2%
+
+The sandbox (BAR 2026.10.13) took `widgetHandler:DisableWidget` away from user
+widgets, so every re-sim since then ran BAR's whole widget suite. W4 (barreplay
+`6156ec4`): the widget config barreplay seeds lists every game widget at order
+0, which BAR's handler reads as do-not-load. The names come from the game's
+rapid package (`packages/<md5>.sdp` index -> `pool/` files ->
+`luaui/widgets/*.lua` GetInfo name literals): 320 for this game. The widget
+selector and "hidden" widgets stay forced on; the heartbeat now reports
+`widgets=1`.
+
+| build | cycles per round (e9) | mean | wall mean |
+|---|---|---|---|
+| `speed8` | 62.00 / 62.06 / 61.69 / 61.72 | 61.87e9 | 16.55 s |
+| `speed8` + W4 | 57.57 / 57.99 / 58.59 / 57.99 | **58.04e9 (-6.2%)** | 15.69 s (-5.2%) |
+
+Every round. Far more than the ~1.5% the Lua profile attributed to BAR's
+widgets — their callins, garbage and cache traffic cost the engine around
+them too. Medium gate `0558d354…` = reference (unsynced: cannot change the
+capture). Round 3 measured "suite on vs off" on MEDIUM as no difference; the
+late game is where it shows. Whole game running.
+
+### 2026-10-17 01:30 — whole game with W4: 20m16s
+
+| whole verylarge1 (all `a26e920d…`) | sim | main cycles | main avg clock |
+|---|---|---|---|
+| revision 3 | 29m46s (27m12s another day) | 5.87e12 | 3.26 GHz |
+| `speed8` (revision 4) | 25m29s | 4.43e12 | 2.98 GHz |
+| **`speed8` + W4** | **20m16s** | **3.92e12** | 3.35 GHz |
+
+New best whole-game time on this host, without root. W4 is worth more over
+the whole game than on the late window: BAR's widgets cost every frame of
+the game, and their absence also leaves the package cooler (+28,546 throttle
+events against +41,031).
+
+### 2026-10-17 03:30 — the Lua profile with W4; W5 (re-sim sample loop): -1.4%
+
+Lua sampler rebuilt on `speed8` (`luaprof8`), checkpoint taken under W4.
+In Lua: 15.1% of the main core — BAR's gadgets 10.6% (handler dispatch
+3.12%, `unit_shield_behaviour` 1.08, `unit_aa_targeting_priority` 0.67,
+`unit_builder_priority` 0.54, `api_teamstats` 0.53, `unit_crashing_aircraft`
+0.48, `api_unit_attributes` 0.43, ~50 more each < 0.25%) and OUR widget
+4.31%: `sample()` 2.40% (now pure Lua: quantization + predictor), the
+per-frame launcher loop 0.91%. BAR's widget handler: 0.10% (was 2.2%).
+
+**W5** (widget, `f9cd0df`): when the bulk sample is in hand (re-sim, full
+view, patched engine), a loop with what cannot happen there taken out —
+nothing is buried in a re-sim, no enemies, no last-known cache, no nil
+values — and the shield read skipped for non-shield defs (its own first
+checks). Every harness fixture byte-identical.
+
+| build (widget in the checkpoint) | cycles mean | wall mean |
+|---|---|---|
+| `speed8` + W4 | 57.69e9 | 15.64 s |
+| `speed8` + W4 + W5 | 56.87e9 (-1.4%) | 15.47 s (-1.1%) |
+
+### 2026-10-17 04:20 — whole game with W4 + W5: thermal noise dominates
+
+| whole verylarge1 (all `a26e920d…`) | sim | main instructions | main cycles | avg clock | throttle events |
+|---|---|---|---|---|---|
+| `speed8` + W4 | 20m16s | 4.50e12 | 3.92e12 | 3.35 GHz | +28,546 |
+| `speed8` + W4 + W5 | 22m49s | 4.47e12 | 4.02e12 | 3.04 GHz | +46,036 |
+
+W5 removes instructions as expected, but this run throttled far more and
+took 2.5 minutes longer. One whole-game wall time on this laptop moves by
++-10% with the package temperature — more than the last several changes
+together — so changes are judged on the late window (interleaved, pinned)
+and whole games only check identity and the trend. Best measured remains
+20m16s.
+
+### 2026-10-17 06:00 — host tuning: capping the worker cores does not help
+
+Whole verylarge1, `speed8` + W4 + W5, main thread pinned to cpu3, every other
+cpu but 3's sibling capped at 2.0 GHz (`scaling_max_freq`, restored to 4.0 GHz
+afterwards; `~/dev/perf3/capfull.sh`): **sim 23m06s**, `a26e920d…`, +53,830
+throttle events. No better than uncapped (20m16s-22m49s): Haswell's cores
+share one clock domain, so the cap cannot buy the main core headroom.
+
+Every main-thread bucket of the late window has now been drilled into (COB
+scripts last: FindAnim ~0.5%, thread-map lookups, the sleep queue — no line
+above 0.22%). Nothing measured or sized is above 1-2%; the 10-minute goal
+needs about half of today's main-thread work.
+
+### 2026-10-16 21:31 — aircraft movement, and the sync checker: -7.9%
+
+(Host clock; the four entries above carry dates ahead of it.)
+
+Fresh LBR profile of the late window on `speed8` + W5, main thread as % of one
+core (the huge-page collapser thread, which shares the main thread's name and
+took the equivalent of 11% of a core on its own cpu right after the restore,
+filtered out):
+
+| phase | % of main core | of which Lua |
+|---|---|---|
+| unit updates | 64.5% | 4.9% |
+| Lua callins not from unit updates | 9.6% | 9.6% |
+| unit-script anims (parallel section) | 6.5% | |
+| LOS update (parallel section) | 4.8% | |
+| projectiles + collisions | 4.1% | 1.5% |
+| COB scripts | 4.1% | |
+| Lua GC | 1.7% | 1.7% |
+| map damage / terrain | 1.6% | |
+| pathfinding | 1.4% | |
+| rest | 1.6% | |
+
+Inside `CStrafeAirMoveType::Update` (13.7%): its own code 7.9% (UpdateAirPhysics
+3.2, Update 2.9, UpdateFlying 1.7), CSolidObject::Move 1.5, control surfaces
+1.3, CSyncChecker::Sync 1.2, crash kills 0.9. By source line, **xxhash** (the
+sync checker's hash) is all over it, and summed over the whole main thread the
+sync checker costs **6.2%**: every write to a `SyncedFloat3`/`SyncedPrimitive`
+(pos, midPos, aimPos, the direction vectors, speed...) hashes the new value
+into a running checksum, and with `SYNC_HISTORY` (defined in these builds)
+appends it to a 10 MB ring buffer too.
+
+That checksum is only ever SENT (NETMSG_SYNCRESPONSE) or compared with the
+demo's; nothing in the simulation reads it. The one Lua reader in the game
+package, `Spring.GetPrevFrameSyncChecksum` / `Platform.hasSyncChecksums`, is
+BAR's dev-only `dbg_synctest.lua`, which runs only on an authorised
+developer's command. So **build with `-DSYNCCHECK=OFF`** (`speed9` = `speed8` +
+the fixes upstream needs to compile that way, which it never does):
+`float3::bitExactEquals` (GroundMoveType compares waypoints with it — same
+comparison, so a -0.0/0.0 waypoint keeps the old value exactly as before),
+the in-synced-code counter kept (the thread pool picks queue priority by it),
+sync history and its dump only with the checker, and six includes that came
+through the sync headers.
+
+| | |
+|---|---|
+| medium gate | `0558d354…` = reference |
+
+| late window, 4 interleaved pairs, main pinned | cycles | instructions | wall |
+|---|---|---|---|
+| `speed8` + W5 | 58.51e9 | 58.82e9 | 15.77 s |
+| `speed9` + W5 (SYNCCHECK=OFF) | **53.88e9 (-7.9%)** | 54.18e9 (-7.9%) | 14.54 s (-7.8%) |
+
+Every pair won by 4.3-4.6e9 cycles. The cost: a re-sim no longer reports
+desyncs in its infolog (no checksums to compare) — the byte-identity gate on
+publish is the check that remains, and it is the one that matters.
+
+### 2026-10-17 00:35 — `speed9` whole game 19m14s; parallel aircraft after all (P1)
+
+| run (whole verylarge1) | sim | main cycles | main instructions | md5 |
+|---|---|---|---|---|
+| `speed8` + W4 | 20m16s | 3.92e12 | 4.50e12 | `a26e920d…` |
+| `speed8` + W5 | 22m49s | 4.02e12 | 4.47e12 | `a26e920d…` |
+| **`speed9` + W5** (SYNCCHECK=OFF) | **19m14s** | 3.92e12 | 4.39e12 | `a26e920d…` |
+
+Identical, and the best whole game so far (3.34 GHz average main clock, a
+cool run). The whole game's main-thread instructions fall only 1.8% where the
+late window's fall 7.9%: the cheaper the frame, the more of the main thread's
+time is spent outside SimFrame (the early game runs ahead of the demo feed).
+
+Fresh late-window profile on `speed9` (main thread, % of core): units 62.9%
+(weapon auto-targeting 11.5, **aircraft movement 10.9**, LTO-inlined unit
+loops 6.2, ground movement 5.3, weapon vectors 4.7, CUnit::SlowUpdate 4.5, beam
+lasers 4.2), gadget callins 9.6, anims 6.8, LOS 5.0, COB 4.5, projectiles 3.9,
+Lua GC 2.0. Sync hashing is gone from every function.
+
+**The parallel-aircraft argument of 16:30 was wrong as a bound**, as the
+user said: "55% of updates have a neighbour already moved" says nothing about
+how many updates could overlap. The right measure is the critical path of
+the dependency DAG — item k must follow every earlier item it can interact
+with. `experiments/airdag` builds it from the .brp's aircraft positions
+(random update order, crashing aircraft as barriers: they can die and
+explode):
+
+| frame | aircraft | crashing | neighbourhood | critical path | bound | 4 threads, free start | 4 threads, in-order start |
+|---|---|---|---|---|---|---|---|
+| 54780 | 2635 | 1 | 1024-elmo cells, ±1 | 637 | 4.1x | | |
+| 60780 | 3221 | 66 | 512, ±2 | 1219 | 2.6x | 2.50x | 2.33x |
+| **63780** | 5711 | 187 | 1024, ±1 | 1696 | 3.4x | 2.70x | 2.47x |
+| **63780** | 5711 | 187 | 512, ±2 | 1547 | 3.7x | 2.81x | 2.61x |
+| 66780 | 2388 | 573 | 512, ±2 | 1287 | 1.9x | 1.80x | 1.76x |
+
+Fighters fly in blobs, but there are many blobs. What blocks is mostly the
+crashing aircraft (barriers), not the neighbours.
+
+**P1** (Recoil `speed10`, behind toggle bit 0 — `BARREPLAY_TOGGLES` or the
+bench harness's new `t=<hex>`, so one binary A/Bs itself from one
+checkpoint): the general move-type loop on all threads, exactly sequential.
+What a flying strafe aircraft's update touches outside its own unit (read
+off StrafeAirMoveType/AAirMoveType line by line): its target's position, the
+units its two quad-field collision queries list (positions), a unit it
+overlaps (moved), the death-dependence lists of its collidee, the synced RNG
+(loop-back maneuvers, ~23 draws a frame) and, on a speed transition to/from
+zero, its script. So:
+
+- items START in loop order, and each waits for the last earlier item
+  touching a grid cell within R of its own position's cell or its target's
+  (interaction reach bounded at ~1255 elmos: query reach + radii + a quad +
+  the quad field's registration lag; R*S must cover it);
+- at its start an item checks again that it is still a flying strafe
+  aircraft in the planned cell with the planned target — anything run before
+  it may have changed that, and the in-order start makes this the first
+  moment nothing later has started — and otherwise runs SERIAL: after every
+  earlier item, before any later one, on the main thread (crashing, landing,
+  hover aircraft, scripted, stunned, unfinished, transported);
+- RNG draws wait for every earlier item (`SerialPoint`); death-dependence
+  edits take a lock (the lists are sorted, insertion order is moot); the
+  queries use the calling thread's buffers (`threadOwner`; 0 on the main
+  thread, as before). Static move types (empty Update) are skipped.
+- counters for anything that should never happen in a parallel item (script
+  calls, out-of-bounds kills, moving a unit of radius > 250) and for how often
+  a plan had to be redone.
+
+Upstream already runs ground movement this way in parts and names the sync
+checker's synced variables as what stops the rest ("the vars are synced and
+that's what is stopping this being MT'ed"); `speed9` removed that. Building.
+
+### 2026-10-17 00:50 — flame graph and main-thread breakdown: `speed9` (SYNCCHECK=OFF)
+
+USER (again): a flame graph and the main thread's breakdown after each major
+improvement. This is the late window on `speed9` + W5 (the state after the
+sync-checker removal), LBR call stacks at 499 Hz:
+
+![verylarge1 late game, speed9, main thread](flamegraphs/2026-10-17-verylarge1-speed9.svg)
+
+([open the SVG](flamegraphs/2026-10-17-verylarge1-speed9.svg) to zoom.)
+
+Main thread, % of one core (sums to 100%):
+
+| phase | % of main core | of which Lua |
+|---|---|---|
+| unit updates | 62.9% | 5.8% |
+| ├ weapon auto-targeting (`CWeapon::SlowUpdate`) | 11.5% | 2.6% |
+| ├ aircraft movement (`CStrafeAirMoveType::Update`) | 10.9% | 0.9% |
+| ├ LTO-inlined unit loops (LOS states, update/weapon loops) | 6.2% | |
+| ├ ground movement (`GroundMoveSystem`, partly parallel) | 5.3% | |
+| ├ weapon vectors (parallel section) | 4.7% | |
+| ├ `CUnit::SlowUpdate` | 4.5% | 0.2% |
+| ├ beam lasers | 4.2% | 1.0% |
+| ├ weapon update | 2.9% | 0.1% |
+| ├ `CUnit::Update` | 2.6% | |
+| ├ quad field (`MovedUnit`) | 2.3% | |
+| ├ LOS checks (`InLos`) | 2.2% | |
+| └ builders 1.5, factories 1.4, hover aircraft 0.7, rest 1.8 | 5.4% | 0.9% |
+| Lua callins (gadgets), not from units | 9.6% | 9.6% |
+| unit-script anims (parallel section) | 6.8% | |
+| LOS update (parallel section) | 5.0% | |
+| COB scripts | 4.5% | |
+| projectiles + collisions | 3.9% | 1.2% |
+| Lua GC | 2.0% | 2.0% |
+| pathfinding (QTPFS) | 1.8% | |
+| map damage / terrain | 1.8% | |
+| SimFrame other, draw/unsynced, events, net, features | 1.7% | |
+| **total** | **100%** | **~18.6%** |
+
+Other threads over the same window (samples relative to the main thread's):
+worker1 24%, worker2 23%, worker3 22% of a core — they are idle most of the
+time, waiting for the main thread's serial loops. Over the whole game
+(perf stat): main 1174 s, workers 336 / 307 / 307 s.
+
+### 2026-10-17 02:19 — P1 reworked: aircraft do not collide; two hangs found and fixed; P2, N1, H72
+
+- **P1 never engaged on `speed10`**: BAR's modrules set
+  `allowUnitCollisionDamage = true`, which P1 refused (a collision does damage,
+  whose Lua callins can reach anything), so the loop fell back to sequential —
+  and the medium gate's "identical" meant nothing. But `alldefs_post.lua` sets
+  **`collide = false` on every aircraft** except four flying fortresses
+  (fepoch, fblackhy, corcrw, legfort), and with collide off both collision
+  queries (CheckForCollision, HandleCollisions) are skipped outright. A flying
+  non-colliding strafe aircraft then touches nothing outside its own unit but
+  its target (position, isDead, def) and the RNG. **P1 v2**: no grid; the only
+  dependencies are target edges (an item after its target if the target is
+  earlier in the loop, before it if later); colliding aircraft are serial.
+- **P1 v3** (toggle bit 3): a crashing aircraft that provably cannot reach the
+  ground this frame (it moves at most speed + a frame of gravity; the terrain
+  under any point is at most the highest height-map corner around it) runs in
+  parallel too; its smoke trail (unsynced particles, unsynced RNG) is deferred
+  and emitted in loop order before the next serial item, so even the unsynced
+  state is created in the sequential order. A crashing aircraft that may land
+  stays serial (it dies and explodes).
+- **Hang 1**: a serial item on the main thread (a crash kill) starts a nested
+  parallel loop; the thread pool waits for every worker to pop the task, and
+  the workers are spinning in P1 waiting for that same item. Fix: while the main
+  thread runs a serial item, `ThreadPool::HasThreads()` is false for it, so
+  nested parallel loops run inline (the engine's single-thread mode, which
+  multithreaded results must equal).
+- **Hang 2**: the frontier (the lowest unfinished item) was advanced after a
+  release store of the item's done flag; two items finishing together could each
+  read the other's flag as unset through their store buffers (x86 TSO, the
+  Dekker pattern) and the frontier stopped short of both, forever. Fix: seq_cst
+  store + fence; every spin also re-scans the frontier every 1024 iterations,
+  and a wait of seconds logs the schedule's state once.
+- **P2** (toggle bit 1): unit LOS states. A unit's new status is a pure function
+  of its own state and the LOS maps, and no SYNCED client receives the
+  Unit{Entered,Left}{Los,Radar} events in BAR (only unsynced gfx/debug gadgets),
+  so: compute all on all threads, then apply in order, firing the same events
+  at the same points (only changed statuses are applied; an unchanged one is a
+  no-op in SetLosStatus).
+- **N1** (toggle bit 2): BAR's only `AllowWeaponTarget` handler, "AA Targeting
+  Priority", multiplies the priority by a per-target-def constant (bombers 0.1,
+  gunships/transports/builders 1, fighters 2, scouts 100) and always allows
+  (`lua_Number` is float in Recoil, so the product is the same single-precision
+  multiply). Taken natively only after checking, once: the files' hashes
+  (gadgets.lua, the gadget), the installed global closure, the handler's list
+  holding exactly that gadget, its function's source and line, its upvalues
+  (`spGetUnitDefID` is the engine's C function, the multiplier table read from
+  the gadget itself) — and each frame: same closure, same single list entry, no
+  pending gadget reorder. The medium gate replay runs another BAR build, so N1
+  correctly stays off there; verylarge1's own build is the one hashed.
+- **H72**: the per-anim checksum in `TickAllAnims` is read only by the sync
+  checker; computed only with SYNCCHECK.
+
+### 2026-10-17 03:06 — `speed11`: P1 + P2 + N1 + H72 = -12.9% main cycles, -14.6% wall on the late window
+
+`speed11` (Recoil `ed31fec`): medium gate with every switch on (`t=f`)
+`0558d354…` = reference, no hang. Late window, interleaved pairs, main thread
+pinned (cpu 3, the rest on 0-2,4-7):
+
+| toggles | cycles (e9) per trial | mean | wall mean |
+|---|---|---|---|
+| `t=0` (all off = `speed9` behaviour) | (63.90 cold first restore) / 54.03 / 54.34 / 53.48 | **53.95** | 16.00 s |
+| `t=f` (P1 + v3 + P2 + N1) | 47.41 / 47.15 / 47.89 / 45.42 | **46.97 (-12.9%)** | **13.65 s (-14.6%)** |
+
+Separately (a hotter host, 3 pairs each):
+
+| comparison | cycles | wall |
+|---|---|---|
+| P1 (parallel aircraft): `t=f` vs `t=e` | 45.88 vs 50.01 (**-8.3%**) | 15.64 vs 16.76 s (-6.7%) |
+| P1 v3 (crashing aircraft too): `t=f` vs `t=7` | 47.24 vs 46.56 (noise) | 15.40 vs 15.60 s (-1.3%) |
+| so P2 + N1 + H72: `t=e` vs `t=0` | ~50.0 vs ~53.95 (**~-7%**) | |
+
+Counters with `t=f`, per frame: 5,656 non-static items, **5,231 run in
+parallel**, 425 serial (hover aircraft, aircraft that may land or crash into
+the ground, colliding ones), 3,340 static move types skipped, 254 target edges,
+405 crashing aircraft in parallel with deferred trails; no plan had to be
+redone, and none of the should-never-happen counters moved (no crash kill, no
+script call, no RNG serial point in a parallel item). N1: "native AA targeting
+priority: on" — verylarge1's BAR build is the one whose files are hashed.
+
+Flame graph and main-thread breakdown, `t=f`:
+
+![verylarge1 late game, speed11 t=f, main thread](flamegraphs/2026-10-17-verylarge1-speed11.svg)
+
+| phase | % of main core | of which Lua |
+|---|---|---|
+| unit updates | 58.8% | 3.6% |
+| ├ aircraft / general move-type loop (P1) | 11.1% | 0.8% |
+| ├ weapon auto-targeting | 9.5% | 0.3% (N1: was 2.6%) |
+| ├ ground movement | 6.1% | |
+| ├ weapon vectors (parallel section) | 5.8% | |
+| ├ `CUnit::SlowUpdate` | 5.4% | 0.3% |
+| ├ beam lasers | 4.8% | 1.3% |
+| ├ LTO-inlined unit loops (P2 took the LOS states out) | 3.8% | |
+| ├ `CUnit::Update` 3.0, weapon update 3.0, quad field 2.5 | 8.5% | 0.2% |
+| └ factories 1.5, builders 1.3, rest 1.1 | 3.9% | 0.7% |
+| Lua callins (gadgets), not from units | 11.4% | 11.4% |
+| unit-script anims (parallel section) | 6.6% | |
+| COB scripts | 5.5% | 0.1% |
+| LOS update (parallel section) | 5.1% | |
+| projectiles + collisions | 4.4% | 1.8% |
+| Lua GC | 2.8% | 2.8% |
+| map damage 1.8, pathfinding 1.8, rest 1.7 | 5.3% | 0.1% |
+| **total** | **100%** | |
+
+Workers over the window (samples relative to the main thread's): 34% / 32% /
+32% of a core (was 24/23/22%).
+
+What the main thread still spends in the P1 loop (11.1%) is mostly serial
+overhead: the classification pre-pass (`Run` 2.2% + `ParallelSafe` 1.3%, a
+cache miss per unit for ~9000 units) and the in-order start chain (`Process`
+1.7%). **P1 v4** (building): the classification on all threads, and each
+item's plan check done ahead of its turn, redone only if a serial item ran in
+between. Whole-game identity run of `speed11 t=f` under way (alongside the
+build, so its time does not count).
+
+### 2026-10-17 04:20 — whole game identical with P1/P2/N1/H72; three "headless" patches were dead code, one of them wrong
+
+- **Identity**: verylarge1, all 90,900 frames, `speed11` with `t=f` (P1 + v3 +
+  P2 + N1 + H72): `a26e920d…` = reference. (Its 58 min is no timing: two
+  engine builds shared the CPU — and spin-waiting threads suffer badly when
+  oversubscribed, so P1's waits now yield to the OS after a few thousand
+  pauses.) `speed12` (P1 v4) medium gate with `t=f`: `0558d354…`.
+- **`#ifdef HEADLESS` in `rts/Sim` never compiles**: only `rts/builds/headless`
+  adds `-DHEADLESS`, and `rts/Sim` builds once into the shared `engineSim`
+  library. Three earlier patches gated that way never ran (their "identical"
+  gates were trivially so): the eager piece-transform walk skip in
+  `TickAllAnims` (the profile shows the walk), the expiry of unsynced
+  projectiles on arrival, and the unchecked COB bytecode fetch. `rts/Game` IS
+  per build, so `SpringVersion::IsHeadless()` answers at run time.
+- **H73** (toggle bit 4) = the anim walk skip as a run-time test. Turning the
+  projectile expiry on the same way crashed the medium replay at frame 6597
+  (SIGSEGV in `CSmokeTrailProjectile::UpdateEndPos` from
+  `CMissileProjectile::Update`): a missile keeps a pointer to its unsynced smoke
+  trail and updates it every frame, so freeing the trail early is wrong. Left
+  out for good. The COB fetch stays checked: an out-of-range program counter in
+  the live game threw, and the re-sim must throw the same way.
+
+### 2026-10-17 06:05 — whole games are measuring the laptop's temperature; at a fixed clock the gains hold (P1 v4, H73, 7 threads)
+
+Whole verylarge1 runs, both identical (`a26e920d…`), back to back after a
+day of continuous load:
+
+| run | sim | main avg clock | throttle events |
+|---|---|---|---|
+| `speed9` (yesterday, cool host) | 19m14s | 3.34 GHz | +26,835 |
+| `speed13`, everything on (`t=1f`) | 22m49s | (stat broken, see below) | +46,975 |
+| `speed13`, everything off (`t=0`) | **23m21s** | **2.78 GHz** (3.94e12 cycles — the same work as `speed9`) | +45,736 |
+
+Everything off was SLOWER than everything on, and did `speed9`'s exact work at
+2.78 GHz instead of 3.34: the heat-soaked laptop, not the code. (`fullrun.sh`
+attached perf stat before the thread pool existed, which folds later threads
+into the main thread's counts; it now waits for the threads.)
+
+So A/Bs now run with **every core capped at 2.6 GHz** (`capall.sh`), a clock
+the laptop holds without throttling. `speed13` (P1 v4 + H73), `t=0` vs
+`t=1f`, 3 pairs, wall:
+
+| window | all off | all on | |
+|---|---|---|---|
+| frame 20,000 +1,800 (minute 11) | 8.76 s | 8.88 s | +1.3% (noise; no gain this early) |
+| frame 40,000 +900 (minute 22) | 9.18 s | 8.85 s | **-3.6%** |
+| frame 63,780 +450 (minute 35) | 18.93 s | 16.37 s | **-13.5%** |
+
+The late game is ~77% of a whole run, so a whole game should come out ~9-10%
+faster at equal clocks. At the late window, same toggles (`t=1f`), capped:
+
+| threads | wall (3 pairs) | mean |
+|---|---|---|
+| default (main + 3) | 16.56 / 16.76 / 16.38 s | 16.57 s |
+| `-worker-threads 7` (main + 6) | 15.40 / 15.77 / 15.45 s | **15.54 s (-6.2%)** |
+
+Uncapped late-window pairs (earlier, noisy): P1 v4 vs v3 no clear difference;
+H73 (anim walk skip) -2.9% wall. Whole game uncapped with 7 threads and
+`t=1f` running.
+
+### 2026-10-17 06:55 — the laptop is power-limited, so measure at a fixed package power; there the late window is -15%, with less energy
+
+Whole game, `speed13`, uncapped, `t=1f` with `-worker-threads 7`: **24m27s**,
+identical. Per-thread average clocks from perf stat:
+
+| run | main thread | each worker |
+|---|---|---|
+| 4 threads, everything off | 2.78 GHz over 1416 s | 2.3-2.4 GHz, ~395 s busy |
+| 7 threads, everything on | **2.36 GHz** over 1488 s (15% fewer instructions) | 1.7-1.9 GHz, ~460 s busy |
+
+On this chassis every busy core takes clock from the main thread; a whole
+game is decided by total energy, not the main thread's critical path, and the
+starting temperature moves it by ±10%. Two tools:
+
+- `rapl.sh`: package energy (RAPL, read as root through the privileged
+  container).
+- `pkgcap.sh <W>`: a fixed package power limit (PL1 = PL2). At 30 W the CPU
+  never reaches its thermal limit (0 throttle events), so the clocks follow the
+  workload's power draw and runs repeat — the throttled regime, reproducibly.
+
+Late window, `speed13`, 30 W cap, main pinned:
+
+| toggles | wall | package energy per trial (incl. restore) |
+|---|---|---|
+| `t=0` | 15.55 / 15.61 s | 561 / 566 J |
+| `t=1f` | 13.12 / 13.29 s (**-15.3%**) | 497 / 497 J (**-12%**) |
+
+Uncapped on a cooled host: 14.35/14.63 s vs 12.28/12.17 s (-15.5%), 657 vs
+596 J. So the late-window gain is not bought with power. Workers' time in that
+window (speed11 `t=f`): 13% spinning in P1's waits, ~9% in the anim piece
+transforms H73 now skips, 9% weapon vectors, 6% LOS, 3.6% pathfinding node
+updates — P1's waits are the clearest waste left. `speed14` (building): P1
+engages only with >= 256 parallel items (no gain in the early game), counters
+for why items are serial, Lua GC cycles per Lua state. Then whole games at 30 W.
+
+### 2026-10-17 08:00 — clean measurements: cooled trials, fans pinned, a pause governor for whole games
+
+USER: wait for the CPU to cool before each benchmark, raise the fan speed, and
+for whole games pause the sim when it nears throttling. Done:
+
+- `fans.sh max|auto`: both fans at maximum (`mbpfan` stopped) or back to
+  `mbpfan`. At idle with max fans the package reaches ~48 C in a minute.
+- `bench-ckpt.sh` `COOL=<milli-C>`: each trial waits until the package is
+  below that before the restore. (A first version reused the script's `n` —
+  the trial's frame count — as its loop counter, so the engine ran 1 frame;
+  fixed.)
+- `fullrun.sh` thermal governor: SIGSTOP the engine at 88 C, SIGCONT at 55 C,
+  report the paused seconds; **active time = sim time - paused**.
+
+Late window, `speed14`, uncapped, every trial from 50 C, fans max, 4 pairs,
+**0 throttle events**:
+
+| toggles | wall per trial | mean |
+|---|---|---|
+| `t=0` | 14.59 / 14.95 / 14.94 / 14.79 s | 14.82 s |
+| `t=1f` | 11.94 / 11.92 / 12.23 / 11.78 s | **11.97 s (-19.2%)** |
+
+Counters (`t=1f`, per frame): 425 serial items — 222 not strafe aircraft
+(hover: gunships, transports, constructors), 114 landing / take-off, 72
+stunned or unfinished, 10 crashing near the ground, 6 standing still; the
+early plan check stood for 84% of items. Lua GC per state over the whole game
+up to the window: LuaUI (our widget) 19.3e9 cycles, LuaRules 15.3e9, the rest
+~0.2e9 — together under 1% of the game's main-thread cycles.
+
+Whole game, `speed14`, `t=1f`, governor on: sim 37m27s, paused 20m39s, so
+**16m48s active**, identical (`a26e920d…`), 230 throttle events. A governed
+`t=0` run is next for the baseline (after `speed15`: P1 v5, hover aircraft
+flying/hovering and stunned/unfinished aircraft in parallel, toggle bit 5).
+
+USER also asked which engine changes (not exact, but not changing gameplay)
+would unlock the most: [engine-changes-for-speed.md](engine-changes-for-speed.md).
+
+### 2026-10-17 09:50 — `speed15` (P1 v5): late window -18% vs all off; governed whole game 18m23s -> 16m39s active
+
+- **P1 v5** (toggle bit 5): hover aircraft flying or hovering run in parallel
+  (their state changes there only set own flags; the RNG draws for hover wind
+  and circling wait at a SerialPoint), and so do stunned or unfinished aircraft
+  of both kinds (that path is the unit's own physics, collide being off).
+  Serial items per frame 425 -> **253** (116 standing still, 127 landing or
+  taking off, 10 crashing near the ground); 6.6 SerialPoints and 0.2 script
+  calls per frame inside parallel items. Medium gate `0558d354…`.
+- Late window, cooled (50 C), fans max, 4 pairs: `t=1f` 12.41 s -> `t=3f`
+  **12.12 s (-2.3%)**; against everything off (14.82 s, `speed14`): **-18%**.
+- **Governed whole games** (`speed15`, pause at 88 C / resume at 55 C):
+
+| toggles | sim | paused | **active** | md5 |
+|---|---|---|---|---|
+| `t=0` | 35m49s | 17m26s | **18m23s** | `a26e920d…` |
+| `t=3f` | 37m21s | 20m42s | **16m39s (-9.4%)** | `a26e920d…` |
+
+  The whole game gains half the late window's share: the early and middle
+  game have few aircraft (P1 does nothing there) and less of everything else.
+
+Main thread now (`t=3f`, late window), % of core:
+
+![verylarge1 late game, speed15 t=3f, main thread](flamegraphs/2026-10-17-verylarge1-speed15.svg)
+
+| phase | % of main core |
+|---|---|
+| unit updates | 61.8% |
+| ├ weapon auto-targeting | 10.0% |
+| ├ aircraft loop (P1: ~3% own items, ~3.6% waits/plan/dispatch, 1.4% serial items' Lua) | 9.6% |
+| ├ weapon vectors (parallel section; H73 moved the lazy piece transforms here) | 8.9% |
+| ├ ground movement | 6.4% |
+| ├ `CUnit::SlowUpdate` 5.3, beam lasers 4.5, weapon update 3.5 | 13.3% |
+| ├ quad field 2.9, `CUnit::Update` 2.5, inlined loops 3.5 | 8.9% |
+| └ factories 1.8, builders 1.7, rest 1.1 | 4.6% |
+| Lua callins (gadgets), not from units | 11.4% |
+| LOS update (parallel section) | 5.9% |
+| COB scripts | 5.4% |
+| projectiles + collisions | 4.4% |
+| unit-script anims (parallel; was 6.6% before H73) | 3.0% |
+| Lua GC 2.3, pathfinding 2.3, map damage 1.9, rest 1.8 | 8.3% |
+| **total** | **100%** |
+
+### 2026-10-17 11:20 — 7 threads governed: 15m54s active; the main thread is 44% memory-stalled everywhere; R1 (run-ahead prefetch helper)
+
+- Governed whole game, `speed15` `t=3f` with `-worker-threads 7`: sim 42m18s,
+  paused 26m24s, **15m54s active** (-4.5% vs 4 threads), identical. Real,
+  ungoverned runs lose this to heat (24m27s measured earlier), so 4 threads
+  stays the default on this laptop.
+- Late window, cooled, `t=3f`, perf stat per thread: main thread 45.3e9
+  cycles, IPC 1.03, **44% of cycles with an L2 miss pending**
+  (`cycle_activity.stalls_l2_pending` 20.1e9), dTLB walks 1.3% (huge pages).
+  Workers ~50% stalled. A stall-sampled profile spreads the stalls like the
+  cycles: ~44% of every phase, no hot spot — memory latency on scattered unit,
+  weapon, piece and script objects, loop after loop.
+- Weapon loop and COB scripts reviewed for P1-style parallelism: both possible
+  in principle (most weapon updates in a frame only reload or aim; most COB
+  ticks only animate their own pieces) but the plan checks would have to replay
+  CanFire / CanCallAimingScript / salvo / sweep rules exactly, or buffer every
+  global COB opcode — each a big, risky change for ~3-5%. Parked; see
+  engine-changes-for-speed.md for why upstream changes would make them easy.
+- **R1** (Recoil `speed16`, toggle bit 6, building): a helper thread pinned to
+  the main thread's hyperthread sibling (shared L1/L2) walks the three serial
+  unit loops (UpdateUnits, the serial weapon pass, SlowUpdateUnits) 16 units
+  ahead of the main thread's cursor and prefetches the unit's hot lines, its
+  move type, script, command AI, weapons and their targets. Prefetches and
+  relaxed pointer loads from pool memory only; it parks on a futex between
+  loops (a spinning sibling would take the main thread's issue slots).
+
+### 2026-10-17 12:40 — R1 (prefetch helper on the hyperthread sibling): +11%, dropped; where the goal stands
+
+`speed16` = `speed15` + R1 (toggle bit 6). Medium gate `0558d354…`. Late
+window, cooled, main on cpu 3, workers on 0-2,4-6 (cpu 7 left to the helper):
+
+| toggles | wall per trial | mean | main cycles |
+|---|---|---|---|
+| `t=3f` | 12.00 / 11.98 / 11.95 / 11.81 s | 11.93 s | 44.3e9 |
+| `t=7f` (+R1) | 13.38 / 13.18 / 13.32 / 13.41 s | 13.32 s (**+11.6%**) | 49.4e9 |
+
+A busy sibling takes the main thread's issue slots and L1/L2 bandwidth; the
+prefetches do not pay for that. Off (it stays behind its toggle).
+
+Also sized and left: map damage's `RecalcArea` (1.6%) is mostly
+`ILosType::UpdateHeightMapSynced` scanning every LOS instance of the terrain-
+blocked LOS types for each finished crater (~1%); pathfinding's 1.9% on the
+main thread is its own threaded node-layer update.
+
+**Where the 10-minute goal stands.** Best exact results: late window -18%
+(14.8 -> 12.1 s); governed whole game 18m23s -> 16m39s active (4 threads),
+15m54s (7 threads); real runs on a cool laptop ~19 min. What is left exact is
+a list of 0.5-3% items (weapon loop, COB ticks, LOS overlap scan, widget),
+perhaps ~10% together. Getting to 10 minutes needs most of the remaining
+serial ~75% of the main thread to run in parallel, which the engine's rules
+forbid while the output must stay byte-identical: the sequential synced RNG,
+order-dependent reads, and synced Lua inside the unit loops
+(engine-changes-for-speed.md).
+
+### 2026-10-17 13:00 — W6 (widget sample loop in the engine), W7 (launcher slots visited on change), and an upstream heap overflow
+
+Lua profile of the late window on `speed16` (`luaprof16` = speed16 + the
+sampler; 12.4 s window, 16.0% of the main core in Lua): LuaRules 10.35%,
+LuaUI 5.59%, of which our own capture widget **5.48%**:
+
+| widget function | % of main core |
+|---|---|
+| `sample()` — the 1 Hz bulk loop over ~10k units (quantize, predict, compare) | 2.79% (+0.34% in `GetUnitSampleData`) |
+| `projectileFrame` — every launcher slot, every frame | 1.32% |
+| `UnitDestroyed` (unit ends, hit drains) | 0.67% |
+
+- **W6**: `Spring.GetUnitSampleDelta` (Recoil `speed17`): the widget's bulk
+  sample loop in C++, the delta predictor kept engine-side, only changed rows
+  (and the dead list, shield candidates and visibility changes) coming back.
+  Every value goes through the same float operations the Lua loop applies to
+  the numbers `GetUnitSampleData` returns (`lua_Number` is float; `math::floor`
+  as Lua's `math.floor` and `%` use it; the build has `-mno-fma`, so nothing is
+  contracted). Engaged and left only at a keyframe. The dead list comes out
+  sorted by id where `pairs()` order was arbitrary; the decoder treats it as a
+  set. A harness stub of the same function (`tools/brep-harness`) reproduces the
+  enginelog fixture **byte for byte** (140 samples through the new path).
+- **W7** (widget only): with the reload log on, `projectileFrame` visits only
+  the slots whose visit can do anything — touched by the log this frame, due
+  (cur moved while rf was still ahead), in a launch window, or with no reading —
+  instead of every slot of every launcher every frame. A slot left out has
+  `cur == rf` (or rf still ahead with nothing logged), so the old walk read rf
+  back unchanged and looked for nothing. Visited in (unit, slot) order: the old
+  `pairs()` order was arbitrary already, and the .brp sorts tracks by birth and
+  id. Harness: identical fixture (4194 frames through the new path, 106 visits
+  in total).
+- Medium gate on `speed17` + the new widget: `0558d354…` (identical).
+
+**The heap overflow.** `speed17` (and `speed17` with the OLD widget) segfaulted
+at frame 78 of verylarge1 in `Rml::Element::Update`: an RmlUi context's root
+element read as all zeroes. A gdb watchpoint on it caught the writer:
+`CSMFReadMap::UpdateFaceNormalsUnsynced` copying face normals past the end of
+its arrays. The unsynced heightmap update rectangles come out of
+`CRectangleOverlapHandler::Process` (which merges the queued rectangles) with
+corners far outside the map — `z1=1263 z2=2553` and `z1=1319 z2=2353` on a
+1536-row map, on this lava map from frame ~78 on — and nothing clamps them
+again. Upstream Recoil, not ours: every earlier build ran the same overflow,
+and only the heap layout decided what it hit (`speed17`'s few extra bytes of
+`.bss` moved it onto RmlUi). It is unsynced and timing-dependent (which
+rectangles merge depends on the draw cadence), and nothing showed it in the
+.brp hashes. Fix: `CReadMap::UpdateDraw` clamps each rectangle to corner space
+before the unsynced update (drawing data only; it cannot reach the
+simulation). `speed18` = `speed17` + the clamp, building.
+
+### 2026-10-17 14:25 — W6 + W7 measured: late window -7.2%, governed whole game 15m25s active, identical
+
+`speed18` = `speed17` + the heightmap-rectangle clamp (W6 now uses
+`math::floor`, exactly what Lua's `math.floor` and `%` use). Medium gate
+`0558d354…`. One intermittent failure is still unexplained: one of three
+verylarge1 dumps with the new widget exited with status 21 at frame 78
+(infolog lost to the next run); the retry and both later runs went through.
+
+Late window, cooled, `t=3f`, the same engine with the old and the new widget
+(two checkpoints, `speed18w0` is a copy of the binary):
+
+| widget | wall per trial | mean | main cycles |
+|---|---|---|---|
+| old (`speed18w0`) | 12.10 / 11.96 / 12.09 / 12.01 s | 12.04 s | 44.7e9 |
+| W6 + W7 (`speed18`) | 11.15 / 11.15 / 11.17 / 11.26 s | **11.18 s (-7.2%)** | 41.6e9 |
+
+More than the Lua profile's 4.4%: the old loop also built a predictor table
+per new unit and pushed ~130k numbers per sample through the Lua stack, which
+its GC then had to clear.
+
+Governed whole game (`speed18`, new widget, `t=3f`, 4 threads, pause at
+88 C / resume at 55 C): sim 35m26s, paused 20m01s, **15m25s active** (speed15:
+16m39s), **identical** (`a26e920d…`). Both runs also paused during load
+(load 36 s / 31 s against ~19 s unpaused), which this subtraction counts as
+sim time saved; correcting for it, -6.8%.
+
+![verylarge1 late game, speed18 + W6/W7, main thread](flamegraphs/2026-10-17-verylarge1-speed18-w6.svg)
+
+Main thread, late window (`t=3f`, 10.91 s), % of one core:
+
+| phase | % of main core |
+|---|---|
+| unit updates | 64.5% |
+| ├ weapon auto-targeting (`CWeapon::SlowUpdate`; 6.6 of it `GenerateWeaponTargets`) | 10.3% |
+| ├ aircraft loop (P1) | 9.6% |
+| ├ weapon vectors (parallel section) | 9.4% |
+| ├ ground movement (3.6 of it its parallel sections) | 6.4% |
+| ├ `CUnit::SlowUpdate` 5.9, beam lasers 5.3, weapon update 3.5 | 14.7% |
+| ├ quad field 3.0, `CUnit::Update` 2.4, inlined loops 4.2 | 9.6% |
+| └ builders 1.7, factories 1.6, rest 1.1 | 4.4% |
+| Lua callins, not from units (was 11.4%: our widget went from 5.5% to ~1%) | 8.7% |
+| COB scripts | 5.8% |
+| LOS update (parallel section) | 5.4% |
+| projectiles + collisions | 4.5% |
+| unit-script anims (parallel) | 2.8% |
+| Lua GC 2.3, map damage 2.1, pathfinding 2.0, rest 1.5 | 7.9% |
+| **total** | **100%** |
+
+Workers over the whole game (perf stat): main 3.51e12 cycles, the three
+workers 1.17 / 1.03 / 1.02e12.
+
+Next (`speed19`, building): **P1 v6** (toggle `0x80`): landed aircraft and
+aircraft taking off as parallel items. Of the 253 serial items a frame, 116
+are stationary (nearly all landed hover aircraft, which v5 let through the
+type check) and 127 are landing / taking off. A landed aircraft only settles on
+the terrain under it (its own speed, position, direction vectors and aim
+point), and the one transition a take-off can make (to FLYING) only sets its
+own flags. The transitions with outside effects (Activate/UnBlock leaving
+LANDED, StopMove/Deactivate/Block on touching down) start from neither state,
+so landing stays serial. **PW** (toggle `0x100`): the serial weapon loop
+prefetches every weapon of the unit 4 ahead (H66 took only the first) and the
+target units of the unit 2 ahead's weapons (`Update` reads the target's
+`isDead`, position and speed every frame).
+
+### 2026-10-17 15:05 — the heap overflow's real cause: a use-after-free in `CRectangleOverlapHandler::StageSplitTooLarge`
+
+The clamp (13:00 entry) treated a symptom. `speed20` (v6 + PW + CH, below)
+crashed its verylarge1 dump at frame 78 again, this time inside
+`CRectangleOverlapHandler::Process`. The cause, upstream Recoil:
+
+```cpp
+for (size_t i = frontIdx; i < rectangles.size(); i++) {
+	SRectangle& rect1 = rectangles[i];          // a reference into the vector
+	...
+	while ((width * height) > maxAreaPerRect) {
+		...
+		rectangles.push_back(rect2);           // can reallocate
+		width  = rect1.GetWidth();             // reads the freed buffer
+```
+
+Once `push_back` reallocates, every later split writes through a dangling
+reference into freed heap memory and reads back whatever is there. The garbage
+rectangles (`z2 = 2553` on a 1536-row map) were that, and so was the zeroed
+RmlUi context. It needs a split (an unsynced heightmap update larger than
+`maxAreaPerRect`, here the lava map's) and a reallocation at that moment, which
+depends on the draw cadence. So it is intermittent, and the layout of each
+build decides what the stale writes hit. It explains every early failure today:
+the `speed17` segfault, the one exit-21 run, and the `speed20` crash. It is
+unsynced; the simulation never reads these rectangles.
+
+Fix (Recoil `speed21`): work on a copy and store it back by index before each
+`push_back`, which produces exactly what the old loop did whenever no
+reallocation happened. `HandleOverlapping` also takes pointers into the vector
+and pushes, but it writes before the push and returns right after, so it is
+fine. Worth reporting upstream (not done: outward-facing).
+
+`speed20` = `speed19` + **CH** (toggle `0x200`): the unit loops'
+`for_mt_chunk` calls (weapon vectors, LOS states, P1's plan pass) cut their
+range into ONE chunk per thread, so the main thread, done with its own,
+spun in `ThreadPool::DoTask` until the slowest worker finished: **4.1% of
+the main core** in the late window (speed18 profile), all of it under
+`CUnitHandler::Update`. With chunks of at most 32 units the task group's
+guided slices balance them. Each element still runs once, independently.
+`speed21` = `speed20` + the fix + **PG** (toggle `0x400`):
+`GenerateWeaponTargets` (6.6% of the main core, 4.2% in its own candidate
+loop) prefetches the candidate 6 ahead in the quad's unit list: the three
+lines it reads before rejecting most candidates (`tempNum` at offset 188,
+`losStatus[allyTeam]` at 3464, `aimPos` at 1072). Medium gates: `speed19`
+`t=1bf` and `speed20` `t=3bf` both `0558d354…`.
+
+### 2026-10-17 16:50 — v6 -0.8%, PW -0.5%, CH -2.2%, PG -1.2%; BOLT tried and dropped
+
+`speed21` (v6, PW, CH, PG, the use-after-free fix), medium gate `t=7bf`
+`0558d354…`. Late window, cooled, one checkpoint, each toggle added on top of
+the previous ones, 3 interleaved pairs:
+
+| step | before | after | change |
+|---|---|---|---|
+| v6 (`3f` → `bf`) | 11.77 / 11.46 / 11.86 s | 11.61 / 11.74 / 11.47 s | -0.8% (noise level) |
+| PW (`bf` → `1bf`) | 11.67 / 11.48 / 11.49 s | 11.56 / 11.57 / 11.35 s | -0.5% (noise level) |
+| CH (`1bf` → `3bf`) | 11.55 / 11.50 / 11.42 s | 11.30 / 11.18 / 11.25 s | **-2.2%**, every pair |
+| PG (`3bf` → `7bf`) | 11.37 / 11.28 / 11.55 s | 11.21 / 11.25 / 11.33 s | **-1.2%**, every pair |
+
+Together -3.8% (11.70 → 11.26 s). v6 helps less than the 116 + 127 barriers a
+frame suggested: a landed aircraft is cheap to update, so the barriers it
+removed were short ones.
+
+**BOLT** (post-link layout optimizer; exact, it moves code and changes no
+instruction's meaning). It needs relocations in the binary (`-Wl,-q`), and gold
+cannot emit them for this link (`internal error in do_layout`, and
+`emit_relocs_scan` without `--icf`), so `speed21` was linked with GNU ld.
+That link alone measured ~4.6% slower in the late window than the gold builds
+(`t=3f` 11.70 s against `speed18`'s 11.18 s; no gold `--icf=all`, no
+`-Wl,-O3`). BOLT then needed OpenSSL's hand-written asm skipped (`RC4_options`
+keeps data in `.text`), and so were both threaded interpreters (`luaV_execute`,
+`CCobThread::Tick`: computed gotos BOLT cannot follow). Result:
+`spring-headless-speed21b`, exact (medium `0558d354…`), but CRIU cannot
+checkpoint it: the process takes a SIGSEGV as soon as CRIU's parasite runs,
+twice. On the medium replay, interleaved, `t=3bf`: gold `speed20`, GNU-ld
+`speed21` and BOLTed `speed21b` all simulate in 1m7s ±1 s. No visible gain, a
+slower base link, and no checkpoints: dropped. Back to gold links.
+
+`speed22` = `speed21` + **MU** (toggle `0x800`): `CQuadField::MovedUnit` copies
+the new quad list into the unit's own buffer instead of taking the pooled
+query vector's buffer. Moving it left the pool with an empty vector to allocate
+again and freed the unit's old buffer: a malloc and a free per unit changing
+quads, ~0.3% of the main core in mimalloc. Same contents. Building (gold).
+
+### 2026-10-17 17:45 — `speed22`, every toggle on: whole game identical; PGO retraining; QG
+
+`speed22` (gold link) `t=fbf` (P1 v1-v6, P2, N1, H72/H73, PW, CH, PG, MU): medium
+gate `0558d354…`, and the **whole verylarge1 game identical** (`a26e920d…`;
+an ungoverned md5 run sharing the CPU with a build, so its time means
+nothing).
+
+The PGO profile is still revision 3's: none of P1, P2, N1, W6, H72/H73 or the
+prefetches existed when it was trained. Retraining on `speed22`'s code with
+every toggle on: instrumented build done (`pgo22-work`), training running
+(the medium replay and the sandboxed-BAR game c04fd06a whole, verylarge1 up to
+frame 65580, as before).
+
+**QG** (toggle `0x1000`, `speed23`): `CQuadField::GetQuads` is 3.7% of the main
+core (weapon auto-targeting, the air command AI, `MovedUnit`), almost all of it
+the per-quad centre and distance test, not memory. In one row of quads the test
+is `dx*dx + dz*dz < maxSqLength` with `dz` fixed and `dx = pos.x - centre.x`
+falling as `x` grows. IEEE rounding is monotone, so the sum first does not
+grow, then does not shrink, and the quads that pass form one unbroken run. QG
+finds the run's two ends with exactly the same float expressions and pushes
+the run: the same quads, in the same order, with the tests only at the ends.
+
+### 2026-10-17 18:50 — new PGO profile trained; P1 v7 (release the start chain before waiting for targets); FA
+
+**Training** (`pgo22-work` instrumented build, every toggle on, `t=fbf`): the
+medium replay 5m53s, c04fd06a 8m8s, verylarge1 up to frame 65580. The same
+1800-frame late window now executes **229e9 instructions** where revision 3's
+training run executed 363e9 (37% fewer, the speed work since then, counted by
+the instrumented builds). Profile: 1071 `.gcda` files, 1.15 MB as `.tar.xz`
+(`~/dev/perf3/pgo22-profile.tar.xz`). `speed24` builds with it.
+
+**P1 v7** (toggle `0x2000`, `speed23`): in `Process`, a parallel item waited
+for its targets (target edges, ~250 a frame) BEFORE passing the in-order start
+on to the next item, so while it waited for a target still being updated,
+every later item stalled behind it. The plan check it makes at its turn reads
+only its own unit (state and target pointer), which no other parallel item
+writes, so v7 runs the check, passes the start on, and only then waits for its
+targets. The targets are earlier items, already started (they were claimed and
+started before it), so the wait cannot close a cycle; an item that fails its
+check still turns serial before passing anything on. Medium gate `t=3fbf`
+(QG + v7) `0558d354…`.
+
+**FA** (toggle `0x4000`, `speed24`): `CUnitScript::FindAnim` (1.9% of the main
+core under `AddAnim`, COB `turn`/`move`) binary-searches the unit's anims on
+`(piece, animType, axis)` compared as a tuple, which is up to three dependent
+branches per step. FA compares one 64-bit key, built from the three values
+offset into 32/16/16-bit fields, which orders exactly like the tuple for any
+piece index and the small type and axis values, so it finds the same element.

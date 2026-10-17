@@ -1,0 +1,53 @@
+From a57847e9b9f68bfe5d47b7f1d11f65f4114f84e4 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 15:02:32 +0000
+Subject: [PATCH 25/30] PG: prefetch the candidate 6 ahead in
+ GenerateWeaponTargets (toggle 0x400)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Game/GameHelper.cpp | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Game/GameHelper.cpp b/rts/Game/GameHelper.cpp
+index 37b0384..b2b8781 100644
+--- a/rts/Game/GameHelper.cpp
++++ b/rts/Game/GameHelper.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "GameHelper.h"
++#include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ 
+ #include "Camera.h"
+ #include "GameSetup.h"
+@@ -694,6 +695,7 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
+ 	targets.reserve(32);
+ 
+ 	const int tempNum = gs->GetTempNum();
++	const bool prefetchCandidates = ((g_brToggles & 0x400) != 0);
+ 
+ 	for (int t = 0; t < teamHandler.ActiveAllyTeams(); ++t) {
+ 		if (teamHandler.Ally(weaponOwner->allyteam, t))
+@@ -702,7 +704,17 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
+ 		for (const int qi: *qfQuery.quads) {
+ 			const std::vector<CUnit*>& allyTeamUnits = quadField.GetQuad(qi).teamUnits[t];
+ 
+-			for (CUnit* targetUnit: allyTeamUnits) {
++			for (size_t ui = 0, un = allyTeamUnits.size(); ui < un; ++ui) {
++				// [barreplay] PG: the candidate 6 ahead's three lines this loop
++				// reads before most candidates are rejected (tempNum, the LOS
++				// state for our ally team, aimPos); a prefetch changes nothing
++				if (prefetchCandidates && ui + 6 < un) {
++					const CUnit* pu = allyTeamUnits[ui + 6];
++					__builtin_prefetch(&pu->tempNum);
++					__builtin_prefetch(&pu->losStatus[weaponOwner->allyteam]);
++					__builtin_prefetch(&pu->aimPos);
++				}
++				CUnit* targetUnit = allyTeamUnits[ui];
+ 				if (targetUnit->tempNum == tempNum)
+ 					continue;
+ 
+-- 
+2.53.0
+

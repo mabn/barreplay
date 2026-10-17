@@ -1,0 +1,47 @@
+From 8831fc5ef10dc279263420f8318b13157c2f454e Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 13:57:53 +0000
+Subject: [PATCH 23/30] PW: prefetch every weapon 4 units ahead and the
+ weapons' targets 2 ahead in the serial weapon loop (toggle 0x100)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Units/UnitHandler.cpp | 22 +++++++++++++++++++++-
+ 1 file changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index fbde90c..d0e0174 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -642,7 +642,27 @@ void CUnitHandler::UpdateUnitWeapons()
+ 			}
+ 			if (ahead + 4 < activeUnits.size()) {
+ 				const std::vector<CWeapon*>& ws = activeUnits[ahead + 4]->weapons;
+-				if (!ws.empty()) __builtin_prefetch(ws[0]);
++				if ((g_brToggles & 0x100) != 0) {
++					// [barreplay] PW: every weapon of the unit 4 ahead (its first
++					// two lines), and the targets of the unit 2 ahead's weapons
++					// (Update reads the target's isDead, pos and speed)
++					for (const CWeapon* w: ws) {
++						__builtin_prefetch(w);
++						__builtin_prefetch(reinterpret_cast<const char*>(w) + 64);
++					}
++				} else if (!ws.empty()) {
++					__builtin_prefetch(ws[0]);
++				}
++			}
++			if ((g_brToggles & 0x100) != 0 && ahead + 2 < activeUnits.size()) {
++				for (const CWeapon* w: activeUnits[ahead + 2]->weapons) {
++					const SWeaponTarget& t = w->GetCurrentTarget();
++					if (t.type == Target_Unit && t.unit != nullptr) {
++						__builtin_prefetch(t.unit);
++						__builtin_prefetch(&t.unit->pos);
++						__builtin_prefetch(&t.unit->speed);
++					}
++				}
+ 			}
+ 			activeUnits[activeUpdateUnit]->UpdateWeapons();
+ 		}
+-- 
+2.53.0
+

@@ -1,0 +1,60 @@
+From 91e3d7536c0ce134d8546c0cd55a87e3f4a16d53 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 17:46:33 +0000
+Subject: [PATCH 29/30] P1 v7: release the in-order start before waiting for
+ the item's targets (toggle 0x2000)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../MoveTypes/Systems/GeneralMoveSystem.cpp   | 28 ++++++++++++++++---
+ 1 file changed, 24 insertions(+), 4 deletions(-)
+
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index 96d5e1e..a11e983 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -332,10 +332,21 @@ namespace BrParAir {
+ 		}
+ 
+ 		if (!isSerial[k]) {
+-			for (int i = predBeg[k], e = predBeg[k + 1]; i < e; ++i) {
+-				const int j = preds[i];
+-				while (!done[j].load(std::memory_order_acquire))
+-					Spin(n);
++			// v7 (toggle 0x2000): the plan check reads only this item's own unit
++			// (its state and its target pointer), which no other parallel item
++			// writes, so it does not wait for the targets; and once it passes,
++			// later items may start while this one waits for its targets. Those
++			// are earlier items that have already started (they were claimed and
++			// started before it), so the wait cannot close a cycle. Before v7 an
++			// item waited for its targets while holding the in-order start, and
++			// every later item stalled behind it (~250 target edges a frame).
++			const bool releaseEarly = ((g_brToggles & 0x2000) != 0);
++			if (!releaseEarly) {
++				for (int i = predBeg[k], e = predBeg[k + 1]; i < e; ++i) {
++					const int j = preds[i];
++					while (!done[j].load(std::memory_order_acquire))
++						Spin(n);
++				}
+ 			}
+ 
+ 			const bool same = (serialRuns.load(std::memory_order_acquire) == runs0);
+@@ -343,6 +354,15 @@ namespace BrParAir {
+ 				stats.earlyChecks++;
+ 			if (same? early: StillAsPlanned(k)) {
+ 				nextStart.store(k + 1, std::memory_order_release);
++				if (releaseEarly) {
++					for (int i = predBeg[k], e = predBeg[k + 1]; i < e; ++i) {
++						const int j = preds[i];
++						while (!done[j].load(std::memory_order_acquire)) {
++							if (!isMain || !ServiceHandoff())
++								Spin(n);
++						}
++					}
++				}
+ 				curRank = k;
+ 				RunItem(work[k]);
+ 				curRank = -1;
+-- 
+2.53.0
+

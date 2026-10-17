@@ -3971,7 +3971,26 @@ in a systemd scope. A checkpoint restores only into the binary that made it
 one needs its UDP port back, and a trial copies its files into the data dir).
 Benchmark: "verylarge1" = 6a37d06acbb455b1d19179d8ec965f10 at frame 63780.
 The work log is docs/worklog-engine-speed.md; revision 3's PGO+LTO build recipe
-is patches/engine-2026.07.04/pgo/ (docs/building-recoil.md).
+is patches/engine-2026.07.04/pgo/ (docs/building-recoil.md). Other options:
+PERF= (perf record), PERFSTAT= (perf stat per thread), LUAPROF=1 (the Lua
+sampling profiler of a measurement build), MAINCPU=/OTHERCPUS= (pinning),
+BARREPLAY_ARGS= (extra barreplay flags for a dump).
+
+**Read results by CYCLES on a laptop host.** The dev host throttles hard under
+sustained load (2.6-3.3 GHz averaged over a whole game against ~3.8 in a short
+trial), so one whole-game wall time moves +-10% with the package temperature.
+Judge changes on the late window (interleaved rounds, main thread pinned,
+cycles); use whole games for identity and the trend. Thread count: the
+engine's default (4 here) beat 2 and 7 over a whole game; more threads heat
+the package more than they help.
+
+**The late game is fighters.** verylarge1 at 63780 has 5,711 aircraft of
+10,496 units (experiments/unitmix): aircraft movement ~14% of the main core,
+weapon auto-targeting ~11% (most of it BAR's AllowWeaponTarget Lua callin,
+3,100 a frame). Measured and ruled out: parallel aircraft updates (55% of
+updates have a collision neighbour already moved that frame), an air-only AA
+candidate list (~0.3%), approximate simulation (the demo carries every
+player's sync checksum every 60 frames).
 
 ## Running out of memory (why the engine is stopped, not killed)
 
@@ -4149,6 +4168,17 @@ deterministic) — diff against a previous run to verify any change here.
   `widgetHandler:DisableWidget(name)` (applied between callins; never mutate the widget
   list mid-callin via the `*Raw` variants) for every `knownWidgets` entry that is
   `active` and not itself. pcall-guarded like the profiler dump.
+  **On sandboxed BAR builds (2026.10.13 on) that runtime path is gone** (user
+  widgets get a proxy handler), and the seeded config now does the job: the
+  config barreplay writes (`engine.widgetConfigLua`) lists every widget the
+  game package ships at order 0 — the names read from the rapid package
+  (`engine.gameWidgetNames`: `packages/<md5>.sdp` index -> `pool/` files ->
+  `luaui/widgets/*.lua` GetInfo literals, 320 for a current build), which
+  answers "the names vary by game version" — and switches the Widget
+  Selector's profiler column off (it wrapped every widget callin in a timer).
+  Only the selector and BAR's "hidden" widgets stay forced on. On a 10k-unit
+  late game this measured -6.2% main-thread cycles and 5 minutes of a whole
+  verylarge1 re-sim (docs/worklog-engine-speed.md, W1 and W4).
 - **`-throttle-draw` (default true):** in demo playback the engine yields from sim to
   draw every `GAME_SPEED/MinDrawFPS` sim frames and reserves `MinSimDrawBalance`
   (default **0.15** = 15%!) of CPU time for drawing; each draw runs the full unsynced

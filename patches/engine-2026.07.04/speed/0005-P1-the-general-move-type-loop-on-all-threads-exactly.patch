@@ -1,0 +1,642 @@
+From f9f6c09b62ae69add7bac952c0019ae2d8f34ab9 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 00:32:50 +0000
+Subject: [PATCH 05/30] P1: the general move-type loop on all threads, exactly
+ sequential (toggle bit 0); bench harness toggles t=<hex>
+
+---
+ rts/Net/NetCommands.cpp                       |  14 +-
+ rts/Sim/MoveTypes/AAirMoveType.cpp            |   7 +
+ rts/Sim/MoveTypes/StrafeAirMoveType.cpp       |  33 +-
+ rts/Sim/MoveTypes/Systems/BrParallelAir.h     |  54 +++
+ .../MoveTypes/Systems/GeneralMoveSystem.cpp   | 371 ++++++++++++++++++
+ rts/System/EventHandler.h                     |   2 +
+ 6 files changed, 475 insertions(+), 6 deletions(-)
+ create mode 100644 rts/Sim/MoveTypes/Systems/BrParallelAir.h
+
+diff --git a/rts/Net/NetCommands.cpp b/rts/Net/NetCommands.cpp
+index 0fc410b..9d32710 100644
+--- a/rts/Net/NetCommands.cpp
++++ b/rts/Net/NetCommands.cpp
+@@ -6,6 +6,8 @@
+ #include <cstdio>
+ #include <unistd.h>
+ #include <cstring>
++#include "Sim/MoveTypes/Systems/BrParallelAir.h"
++#include <cstring>
+ #include <linux/perf_event.h>
+ #include <sys/ioctl.h>
+ #include <sys/syscall.h>
+@@ -89,6 +91,12 @@ namespace {
+ 					n = goN;
+ 				if (goOut[0] != 0)
+ 					out = goOut;
++				// further words: "t=<hex>" sets the experiment toggles of this trial
++				char word[64];
++				while (fscanf(f, "%63s", word) == 1) {
++					if (strncmp(word, "t=", 2) == 0)
++						g_brToggles = unsigned(strtoul(word + 2, nullptr, 16));
++				}
+ 				fclose(f);
+ 			}
+ 		}
+@@ -739,9 +747,13 @@ void CGame::ClientReadNet()
+ 								"[BARREPLAY_BENCH] frames=%d start=%d units=%d cycles=%lld instructions=%lld thread_cpu_ms=%.3f wall_ms=%.3f\n",
+ 								g_brBench.seen, g_brBench.start, (int)unitHandler.GetActiveUnits().size(),
+ 								cyc, ins, g_brBench.tcpu / 1e6, g_brBench.wall / 1e6);
++							char pline[512];
++							BrParAir::StatsLine(pline, sizeof(pline));
++							// the bench line last: bench-ckpt reads the result's last line
+ 							if (g_brBench.out) {
+-								if (FILE* f = fopen(g_brBench.out, "a")) { fputs(line, f); fclose(f); }
++								if (FILE* f = fopen(g_brBench.out, "a")) { fprintf(f, "toggles=%x %s", g_brToggles, pline); fputs(line, f); fclose(f); }
+ 							}
++							fprintf(stderr, "toggles=%x %s", g_brToggles, pline);
+ 							fputs(line, stderr); fflush(stderr);
+ 							// An instrumented (-fprofile-generate) build writes its
+ 							// profile at exit, which _exit skips: dump it first, so a
+diff --git a/rts/Sim/MoveTypes/AAirMoveType.cpp b/rts/Sim/MoveTypes/AAirMoveType.cpp
+index 9c7c455..9e590d3 100644
+--- a/rts/Sim/MoveTypes/AAirMoveType.cpp
++++ b/rts/Sim/MoveTypes/AAirMoveType.cpp
+@@ -1,6 +1,8 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "AAirMoveType.h"
++#include "Systems/BrParallelAir.h"
++#include "System/Threading/ThreadPool.h"
+ 
+ #include "Components/MoveTypesComponents.h"
+ #include "Game/GlobalUnsynced.h"
+@@ -257,9 +259,12 @@ void AAirMoveType::CheckForCollision()
+ 	float dist = 200.0f;
+ 
+ 	QuadFieldQuery qfQuery;
++	// [barreplay] P1: the calling thread's query buffers (0 on the main thread, as before)
++	qfQuery.threadOwner = ThreadPool::GetThreadNum();
+ 	quadField.GetUnitsExact(qfQuery, pos + forward * 121.0f, dist);
+ 
+ 	if (lastCollidee != nullptr) {
++		BrParAir::DepGuard depGuard;
+ 		DeleteDeathDependence(lastCollidee, DEPENDENCE_LASTCOLWARN);
+ 
+ 		lastCollidee = nullptr;
+@@ -291,6 +296,7 @@ void AAirMoveType::CheckForCollision()
+ 
+ 	if (lastCollidee != nullptr) {
+ 		collisionState = COLLISION_DIRECT;
++		BrParAir::DepGuard depGuard;
+ 		AddDeathDependence(lastCollidee, DEPENDENCE_LASTCOLWARN);
+ 		return;
+ 	}
+@@ -307,6 +313,7 @@ void AAirMoveType::CheckForCollision()
+ 
+ 	if (lastCollidee != nullptr) {
+ 		collisionState = COLLISION_NEARBY;
++		BrParAir::DepGuard depGuard;
+ 		AddDeathDependence(lastCollidee, DEPENDENCE_LASTCOLWARN);
+ 		return;
+ 	}
+diff --git a/rts/Sim/MoveTypes/StrafeAirMoveType.cpp b/rts/Sim/MoveTypes/StrafeAirMoveType.cpp
+index cb50ff9..280451b 100644
+--- a/rts/Sim/MoveTypes/StrafeAirMoveType.cpp
++++ b/rts/Sim/MoveTypes/StrafeAirMoveType.cpp
+@@ -2,6 +2,8 @@
+ 
+ 
+ #include "StrafeAirMoveType.h"
++#include "Systems/BrParallelAir.h"
++#include "System/Threading/ThreadPool.h"
+ #include "Game/Players/Player.h"
+ #include "Map/Ground.h"
+ #include "Map/MapInfo.h"
+@@ -356,13 +358,20 @@ static int SelectLoopBackManeuver(
+ 	if (math::fabs(rightdir.y) > 0.05f)
+ 		return CStrafeAirMoveType::MANEUVER_FLY_STRAIGHT;
+ 
++	// [barreplay] P1: a draw from the synced RNG must come in loop order
+ 	if (groundDist > TurnRadius(turnRadius, spd.w)) {
+-		if (math::fabs(frontdir.y) <= 0.2f && gsRNG.NextFloat() > 0.3f)
+-			return CStrafeAirMoveType::MANEUVER_IMMELMAN_INV;
++		if (math::fabs(frontdir.y) <= 0.2f) {
++			BrParAir::SerialPoint();
++			if (gsRNG.NextFloat() > 0.3f)
++				return CStrafeAirMoveType::MANEUVER_IMMELMAN_INV;
++		}
+ 
+ 	} else {
+-		if (frontdir.y > -0.2f && gsRNG.NextFloat() > 0.7f)
+-			return CStrafeAirMoveType::MANEUVER_IMMELMAN;
++		if (frontdir.y > -0.2f) {
++			BrParAir::SerialPoint();
++			if (gsRNG.NextFloat() > 0.7f)
++				return CStrafeAirMoveType::MANEUVER_IMMELMAN;
++		}
+ 
+ 	}
+ 
+@@ -534,6 +543,12 @@ bool CStrafeAirMoveType::Update()
+ 			break;
+ 	}
+ 
++	// [barreplay] P1: a parallel item never starts or stops moving (it is flying
++	// with speed); count it if it ever does, and keep the script call in order
++	if ((lastSpd == ZeroVector) != (owner->speed == ZeroVector) && BrParAir::Active()) {
++		BrParAir::stats.scriptCalls++;
++		BrParAir::SerialPoint();
++	}
+ 	if (lastSpd == ZeroVector && owner->speed != ZeroVector) { owner->script->StartMoving(false); }
+ 	if (lastSpd != ZeroVector && owner->speed == ZeroVector) { owner->script->StopMoving(); }
+ 
+@@ -575,6 +590,8 @@ bool CStrafeAirMoveType::HandleCollisions(bool checkCollisions) {
+ 		if (checkCollisions) {
+ 			// copy on purpose, since the below can call Lua
+ 			QuadFieldQuery qfQuery;
++			// [barreplay] P1: the calling thread's query buffers (0 on the main thread, as before)
++			qfQuery.threadOwner = ThreadPool::GetThreadNum();
+ 			quadField.GetUnitsExact(qfQuery, pos, owner->radius + 6);
+ 
+ 			for (CUnit* unit: *qfQuery.units) {
+@@ -632,8 +649,14 @@ bool CStrafeAirMoveType::HandleCollisions(bool checkCollisions) {
+ 					owner->Move(-dif * (dist - totRad) * (1 - part), true);
+ 					owner->SetVelocity(owner->speed * 0.99f);
+ 
+-					if (!unit->UsingScriptMoveType())
++					if (!unit->UsingScriptMoveType()) {
++						if (BrParAir::Active()) {
++							BrParAir::stats.collisionWrites++;
++							if (unit->radius > 250.0f)
++								BrParAir::stats.bigWrites++;
++						}
+ 						unit->Move(dif * (dist - totRad) * (part), true);
++					}
+ 
+ 					if (modInfo.allowUnitCollisionDamage) {
+ 						owner->DoDamage(DamageArray(damage), ZeroVector, nullptr, -CSolidObject::DAMAGE_COLLISION_OBJECT, -1);
+diff --git a/rts/Sim/MoveTypes/Systems/BrParallelAir.h b/rts/Sim/MoveTypes/Systems/BrParallelAir.h
+new file mode 100644
+index 0000000..9cc0de8
+--- /dev/null
++++ b/rts/Sim/MoveTypes/Systems/BrParallelAir.h
+@@ -0,0 +1,54 @@
++/* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
++
++#ifndef BR_PARALLEL_AIR_H__
++#define BR_PARALLEL_AIR_H__
++
++// [barreplay] P1: the general move-type loop (aircraft and statics) run on
++// several threads with EXACTLY the sequential result. See GeneralMoveSystem.cpp
++// for the schedule; these are the hooks the move types call while one runs.
++
++#include <atomic>
++#include <immintrin.h>
++
++// experiment switches: BARREPLAY_TOGGLES (hex) at startup, or the bench
++// harness's go file ("t=<hex>") on each restore of a checkpoint
++extern unsigned g_brToggles;
++
++namespace BrParAir {
++	// rank of the item this thread is running inside the parallel loop, -1 outside it
++	extern thread_local int curRank;
++
++	inline bool Active() { return (curRank >= 0); }
++
++	// wait until every item before this one has finished: a point where the
++	// sequential order matters globally (a draw from the synced RNG)
++	void SerialPoint();
++
++	// death dependencies insert into the OTHER object's listener lists, which
++	// two items can touch at once; the lists are sorted, so the order of the
++	// insertions does not matter, only that they do not race
++	extern std::atomic_flag depLock;
++
++	struct DepGuard {
++		const bool on;
++		DepGuard(): on(Active()) {
++			if (on)
++				while (depLock.test_and_set(std::memory_order_acquire)) _mm_pause();
++		}
++		~DepGuard() {
++			if (on)
++				depLock.clear(std::memory_order_release);
++		}
++	};
++
++	struct Stats {
++		std::atomic<long long> frames{0}, serialFrames{0}, items{0}, parallel{0}, serial{0}, replanned{0}, statics{0};
++		std::atomic<long long> serialPoints{0}, scriptCalls{0}, collisionWrites{0}, bigWrites{0}, oobKills{0};
++	};
++	extern Stats stats;
++
++	// "[BR_PARAIR] ..." one line for the bench harness
++	int StatsLine(char* buf, int size);
++}
++
++#endif
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index e142133..406b833 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -19,8 +19,377 @@
+ 
+ #include "System/Misc/TracyDefs.h"
+ 
++#include "BrParallelAir.h"
++#include "Sim/Misc/GlobalConstants.h"
++#include "Sim/Misc/ModInfo.h"
++#include "Sim/MoveTypes/StaticMoveType.h"
++#include "Sim/MoveTypes/StrafeAirMoveType.h"
++
++#include <cstdio>
++#include <cstdlib>
++#include <memory>
++#include <typeinfo>
++
+ using namespace MoveTypes;
+ 
++static unsigned BrReadTogglesEnv() {
++	const char* s = std::getenv("BARREPLAY_TOGGLES");
++	return (s != nullptr)? unsigned(std::strtoul(s, nullptr, 16)): 0u;
++}
++unsigned g_brToggles = BrReadTogglesEnv();
++
++// [barreplay] P1: the general move-type loop, run on all threads with exactly
++// the sequential result.
++//
++// The loop updates ~9000 move types a frame in the late game (5700 aircraft,
++// the rest buildings' static move types, whose Update does nothing). With the
++// sync checker compiled out (SYNCCHECK=OFF), a flying strafe aircraft's update
++// touches only its own unit, a few units around it (the quad-field collision
++// queries read their positions; an actual overlap moves the other unit too),
++// the unit it targets, and the synced RNG (rarely, when it picks a loop-back
++// maneuver). So:
++//
++// - items START in loop order (each waits for the one before it to start), and
++//   an item starts only once every earlier item touching a grid cell within R
++//   of one of its own cells has FINISHED: its own position's cell and, if it has
++//   a unit target, the target's (waiting for the last such item per cell is
++//   enough: that one waited for the ones before it). Items that can see each
++//   other's effects therefore run in loop order; items far apart overlap.
++// - when its turn to start comes, an item checks again that it is a flying
++//   strafe aircraft in the cell and with the target it was planned with:
++//   anything run before it may have changed that (a crash explosion, a Lua
++//   callin giving orders), and it is the first moment nothing later has started;
++// - anything else is SERIAL: it waits for every earlier item to finish, nothing
++//   later starts until it is done, and it runs on the main thread (a crashing
++//   aircraft can die and explode; landing, take-off, hover aircraft,
++//   script-controlled units, stunned or unfinished ones);
++// - the RNG draw waits for every earlier item to finish first (SerialPoint),
++//   so draws happen in loop order; neighbours' death-dependence lists are
++//   updated under a lock (they are sorted, the order of insertions is moot).
++//
++// A static move type's Update is an empty function and the loop's out-of-bounds
++// check cannot fire for a unit standing still, so those items are skipped.
++namespace BrParAir {
++	thread_local int curRank = -1;
++	std::atomic_flag depLock = ATOMIC_FLAG_INIT;
++	Stats stats;
++
++	static std::vector<CUnit*> work;
++	static std::vector<uint8_t> isSerial;
++	static std::vector<int> predBeg, preds, cell0, lastInCell;
++	static std::vector<const CUnit*> tgtUnit;
++	static std::vector<int> tgtType;
++	static std::unique_ptr<std::atomic<uint8_t>[]> done;
++	static size_t doneCap = 0;
++	static std::atomic<int> claim{0}, frontier{0}, nextStart{0}, handoff{-1};
++	static int gridW = 0, gridH = 0;
++	static float cellSize = 1024.0f;
++	static int cellReach = 1;
++
++	int StatsLine(char* buf, int size) {
++		return snprintf(buf, size,
++			"[BR_PARAIR] frames=%lld serialFrames=%lld items=%lld parallel=%lld serial=%lld replanned=%lld statics=%lld serialPoints=%lld scriptCalls=%lld collisionWrites=%lld bigWrites=%lld oobKills=%lld cell=%.0f reach=%d\n",
++			stats.frames.load(), stats.serialFrames.load(), stats.items.load(), stats.parallel.load(), stats.serial.load(), stats.replanned.load(), stats.statics.load(),
++			stats.serialPoints.load(), stats.scriptCalls.load(), stats.collisionWrites.load(), stats.bigWrites.load(), stats.oobKills.load(), cellSize, cellReach);
++	}
++
++	static void RunItem(CUnit* unit) {
++		AMoveType* moveType = unit->moveType;
++
++		if (moveType->Update())
++			eventHandler.UnitMoved(unit);
++
++		if (!unit->pos.IsInBounds() && (unit->speed.w > MAX_UNIT_SPEED)) {
++			if (Active())
++				stats.oobKills++;
++			unit->ForcedKillUnit(nullptr, false, true, -CSolidObject::DAMAGE_KILLED_OOB);
++		}
++	}
++
++	static void Finish(int k) {
++		done[k].store(1, std::memory_order_release);
++
++		// advance the frontier (the lowest unfinished rank) past every finished item
++		int f = frontier.load(std::memory_order_acquire);
++		while (f < int(work.size()) && done[f].load(std::memory_order_acquire)) {
++			if (frontier.compare_exchange_weak(f, f + 1, std::memory_order_acq_rel))
++				f += 1;
++		}
++	}
++
++	void SerialPoint() {
++		if (curRank < 0)
++			return;
++
++		stats.serialPoints++;
++		while (frontier.load(std::memory_order_acquire) < curRank)
++			_mm_pause();
++	}
++
++	// main thread only: every earlier item has finished and no later one has started
++	static void RunExclusive(int k) {
++		const bool mt = ThreadPool::IsInMultiThreadedSection();
++		ThreadPool::SetInMultiThreadedSection(false);
++		RunItem(work[k]);
++		ThreadPool::SetInMultiThreadedSection(mt);
++
++		Finish(k);
++		nextStart.store(k + 1, std::memory_order_release);
++	}
++
++	// main thread only: run a serial item a worker handed over, once it may
++	static bool ServiceHandoff() {
++		const int k = handoff.load(std::memory_order_acquire);
++		if (k < 0 || frontier.load(std::memory_order_acquire) != k)
++			return false;
++
++		handoff.store(-1, std::memory_order_relaxed);
++		RunExclusive(k);
++		return true;
++	}
++
++	static int CellOf(const float3& p) {
++		const int cx = std::clamp(int(p.x / cellSize), 0, gridW - 1);
++		const int cz = std::clamp(int(p.z / cellSize), 0, gridH - 1);
++		return (cz * gridW + cx);
++	}
++
++	static bool ParallelSafe(const CUnit* u) {
++		const AMoveType* mt = u->moveType;
++
++		if (typeid(*mt) != typeid(CStrafeAirMoveType))
++			return false;
++		if (u->UsingScriptMoveType() || mt->UseHeading())
++			return false;
++		if (static_cast<const CStrafeAirMoveType*>(mt)->aircraftState != AAirMoveType::AIRCRAFT_FLYING)
++			return false;
++		if (u->IsStunned() || u->IsCrashing() || u->beingBuilt || u->UnderFirstPersonControl() || u->GetTransporter() != nullptr)
++			return false;
++		if (u->speed.w > (MAX_UNIT_SPEED * 0.5f) || u->speed == ZeroVector || u->radius > 150.0f)
++			return false;
++
++		return true;
++	}
++
++	// still what the plan assumed, now that every earlier serial item has run
++	static bool StillAsPlanned(int k) {
++		const CUnit* u = work[k];
++
++		if (!ParallelSafe(u) || CellOf(u->pos) != cell0[k] || int(u->curTarget.type) != tgtType[k])
++			return false;
++		if (u->curTarget.type == Target_Unit && u->curTarget.unit != tgtUnit[k])
++			return false;
++
++		return true;
++	}
++
++	static void Process(int k, bool isMain) {
++		// in-order start
++		while (nextStart.load(std::memory_order_acquire) != k) {
++			if (!isMain || !ServiceHandoff())
++				_mm_pause();
++		}
++
++		if (!isSerial[k]) {
++			for (int i = predBeg[k], e = predBeg[k + 1]; i < e; ++i) {
++				const int j = preds[i];
++				while (!done[j].load(std::memory_order_acquire))
++					_mm_pause();
++			}
++
++			if (StillAsPlanned(k)) {
++				nextStart.store(k + 1, std::memory_order_release);
++				curRank = k;
++				RunItem(work[k]);
++				curRank = -1;
++				Finish(k);
++				return;
++			}
++
++			stats.replanned++;
++		}
++
++		// serial: nothing later starts before it is done (nextStart stays at k)
++		if (isMain) {
++			while (frontier.load(std::memory_order_acquire) != k)
++				_mm_pause();
++			RunExclusive(k);
++		} else {
++			handoff.store(k, std::memory_order_release);
++			while (!done[k].load(std::memory_order_acquire))
++				_mm_pause();
++		}
++	}
++
++	static void Loop(bool isMain) {
++		const int n = int(work.size());
++		for (;;) {
++			if (isMain)
++				ServiceHandoff();
++			const int k = claim.fetch_add(1, std::memory_order_relaxed);
++			if (k >= n)
++				break;
++			Process(k, isMain);
++		}
++		if (!isMain)
++			return;
++		while (frontier.load(std::memory_order_acquire) < n) {
++			if (!ServiceHandoff())
++				_mm_pause();
++		}
++	}
++
++	// Two items can only interact through a unit u one of them moves (it
++	// overlaps u) and the other reads (u is listed in a quad its collision
++	// query covers), or by one reading the other. With aircraft radius <= 150
++	// (ParallelSafe) and every other mobile unit's <= 250 (a write to a bigger
++	// one is counted), the moved unit is within 150 + 6 + 250 + 20 of the
++	// mover, and a read one within 121 + 20 + 50 (query centre ahead of
++	// midPos) + 200 (query radius) + 250 + a quad + the quad registration's
++	// drift of the reader; the grid's R cells either side must cover the sum.
++	static float SafeReach() {
++		const float q = float(modInfo.quadFieldQuadSizeInElmos);
++		const float drift = float(modInfo.unitQuadPositionUpdateRate) * 20.0f;
++		const float read = 121.0f + 20.0f + 50.0f + 200.0f + 250.0f + q + drift;
++		const float write = 150.0f + 6.0f + 250.0f + 20.0f;
++		return (read + write);
++	}
++
++	// true if it ran the loop; false = run the plain sequential one
++	static bool Run(const std::vector<CUnit*>& order) {
++		if ((g_brToggles & 1) == 0 || !ThreadPool::HasThreads() || ThreadPool::GetNumThreads() < 2)
++			return false;
++		if (order.size() < 64 || eventHandler.HasUnitMovedClients() || modInfo.allowUnitCollisionDamage)
++			return false;
++
++		{
++			const unsigned cq = (g_brToggles >> 8) & 0xff;
++			const unsigned cr = (g_brToggles >> 16) & 0xf;
++			cellReach = (cr == 0)? 2: int(cr);
++			cellSize = (cq == 0)? 0.0f: float(cq) * 128.0f;
++			const float need = SafeReach();
++			if (cellSize * cellReach < need)
++				cellSize = std::ceil(need / cellReach / 128.0f) * 128.0f;
++
++			gridW = int(float3::maxxpos / cellSize) + 1;
++			gridH = int(float3::maxzpos / cellSize) + 1;
++			lastInCell.assign(size_t(gridW) * gridH, -1);
++		}
++
++		work.clear();
++		isSerial.clear();
++		predBeg.clear();
++		preds.clear();
++		cell0.clear();
++		tgtUnit.clear();
++		tgtType.clear();
++		predBeg.push_back(0);
++
++		long long nPar = 0;
++
++		for (CUnit* u: order) {
++			const AMoveType* mt = u->moveType;
++
++			if (typeid(*mt) == typeid(CStaticMoveType) && (u->pos.IsInBounds() || u->speed.w <= MAX_UNIT_SPEED)) {
++				stats.statics++;
++				continue;
++			}
++
++			const int k = int(work.size());
++			work.push_back(u);
++
++			const int c0 = CellOf(u->pos);
++			cell0.push_back(c0);
++			tgtType.push_back(int(u->curTarget.type));
++			tgtUnit.push_back((u->curTarget.type == Target_Unit)? u->curTarget.unit: nullptr);
++
++			if (!ParallelSafe(u)) {
++				isSerial.push_back(1);
++				predBeg.push_back(int(preds.size()));
++				continue;
++			}
++
++			isSerial.push_back(0);
++			nPar += 1;
++
++			int cells[2] = {c0, -1};
++			if (u->curTarget.type == Target_Unit && u->curTarget.unit != nullptr) {
++				cells[1] = CellOf(u->curTarget.unit->pos);
++				if (cells[1] == cells[0])
++					cells[1] = -1;
++			}
++
++			for (const int c: cells) {
++				if (c < 0)
++					continue;
++				const int cx = c % gridW;
++				const int cz = c / gridW;
++				for (int z = std::max(0, cz - cellReach); z <= std::min(gridH - 1, cz + cellReach); ++z) {
++					for (int x = std::max(0, cx - cellReach); x <= std::min(gridW - 1, cx + cellReach); ++x) {
++						const int j = lastInCell[z * gridW + x];
++						if (j >= 0 && (preds.size() == size_t(predBeg.back()) || preds.back() != j))
++							preds.push_back(j);
++					}
++				}
++			}
++			for (const int c: cells) {
++				if (c >= 0)
++					lastInCell[c] = k;
++			}
++
++			predBeg.push_back(int(preds.size()));
++		}
++
++		stats.frames++;
++		stats.items += work.size();
++		stats.parallel += nPar;
++		stats.serial += (work.size() - nPar);
++
++		const int n = int(work.size());
++		if (n == 0)
++			return true;
++
++		if (nPar == 0) {
++			stats.serialFrames++;
++			for (CUnit* u: work)
++				RunItem(u);
++			return true;
++		}
++
++		if (doneCap < size_t(n)) {
++			doneCap = size_t(n) * 2;
++			done.reset(new std::atomic<uint8_t>[doneCap]);
++		}
++		for (int k = 0; k < n; ++k)
++			done[k].store(0, std::memory_order_relaxed);
++
++		claim.store(0, std::memory_order_relaxed);
++		handoff.store(-1, std::memory_order_relaxed);
++		nextStart.store(0, std::memory_order_relaxed);
++		frontier.store(0, std::memory_order_release);
++
++		auto workerFn = [](const int) { Loop(false); };
++		static TaskPool<ForTaskGroup, decltype(workerFn)> pool;
++		auto taskGroup = pool.GetTaskGroup();
++		taskGroup->Enqueue(0, ThreadPool::GetNumThreads() - 1, 1, workerFn);
++		taskGroup->UpdateId();
++		for (int i = 1; i < ThreadPool::GetNumThreads(); ++i) {
++			taskGroup->wantedThread.store(i);
++			ThreadPool::PushTaskGroup(taskGroup);
++		}
++		ThreadPool::NotifyWorkerThreads(true, false);
++
++		Loop(true);
++
++		{
++			// the worker slices find nothing left to claim, whoever runs them
++			MultithreadedSection mtSection;
++			ThreadPool::WaitForFinished(taskGroup);
++		}
++		return true;
++	}
++}
++
+ void GeneralMoveSystem::Init() {
+     RECOIL_DETAILED_TRACY_ZONE;
+     CMoveMath::InitRangeIsBlockedHashes();
+@@ -39,6 +408,8 @@ void GeneralMoveSystem::Update() {
+         static std::vector<CUnit*> brOrder;
+         brOrder.clear();
+         view.each([](GeneralMoveType& unitId){ brOrder.push_back(unitHandler.GetUnit(unitId.value)); });
++        if (BrParAir::Run(brOrder))
++            return;
+         size_t brK = 0;
+         view.each([&brK](GeneralMoveType& unitId){
+             constexpr size_t PF = 8;
+diff --git a/rts/System/EventHandler.h b/rts/System/EventHandler.h
+index 31d7779..4f05e03 100644
+--- a/rts/System/EventHandler.h
++++ b/rts/System/EventHandler.h
+@@ -123,6 +123,8 @@ class CEventHandler
+ 		bool UnitUnitCollision(const CUnit* collider, const CUnit* collidee);
+ 		bool UnitFeatureCollision(const CUnit* collider, const CFeature* collidee);
+ 		void UnitMoved(const CUnit* unit);
++		// [barreplay] P1: the parallel move-type loop needs nobody to listen
++		bool HasUnitMovedClients() const { return !listUnitMoved.empty(); }
+ 		void UnitMoveFailed(const CUnit* unit);
+ 		void UnitArrivedAtGoal(const CUnit* unit);
+ 
+-- 
+2.53.0
+
