@@ -1368,7 +1368,7 @@ worker1 24%, worker2 23%, worker3 22% of a core — they are idle most of the
 time, waiting for the main thread's serial loops. Over the whole game
 (perf stat): main 1174 s, workers 336 / 307 / 307 s.
 
-### 2026-10-17 02:25 — P1 reworked: aircraft do not collide; two hangs found and fixed; P2, N1, H72
+### 2026-10-17 02:19 — P1 reworked: aircraft do not collide; two hangs found and fixed; P2, N1, H72
 
 - **P1 never engaged on `speed10`**: BAR's modrules set
   `allowUnitCollisionDamage = true`, which P1 refused (a collision does damage,
@@ -1420,7 +1420,7 @@ time, waiting for the main thread's serial loops. Over the whole game
 - **H72**: the per-anim checksum in `TickAllAnims` is read only by the sync
   checker; computed only with SYNCCHECK.
 
-### 2026-10-17 03:30 — `speed11`: P1 + P2 + N1 + H72 = -12.9% main cycles, -14.6% wall on the late window
+### 2026-10-17 03:06 — `speed11`: P1 + P2 + N1 + H72 = -12.9% main cycles, -14.6% wall on the late window
 
 `speed11` (Recoil `ed31fec`): medium gate with every switch on (`t=f`)
 `0558d354…` = reference, no hang. Late window, interleaved pairs, main thread
@@ -1482,3 +1482,25 @@ cache miss per unit for ~9000 units) and the in-order start chain (`Process`
 item's plan check done ahead of its turn, redone only if a serial item ran in
 between. Whole-game identity run of `speed11 t=f` under way (alongside the
 build, so its time does not count).
+
+### 2026-10-17 04:20 — whole game identical with P1/P2/N1/H72; three "headless" patches were dead code, one of them wrong
+
+- **Identity**: verylarge1, all 90,900 frames, `speed11` with `t=f` (P1 + v3 +
+  P2 + N1 + H72): `a26e920d…` = reference. (Its 58 min is no timing: two
+  engine builds shared the CPU — and spin-waiting threads suffer badly when
+  oversubscribed, so P1's waits now yield to the OS after a few thousand
+  pauses.) `speed12` (P1 v4) medium gate with `t=f`: `0558d354…`.
+- **`#ifdef HEADLESS` in `rts/Sim` never compiles**: only `rts/builds/headless`
+  adds `-DHEADLESS`, and `rts/Sim` builds once into the shared `engineSim`
+  library. Three earlier patches gated that way never ran (their "identical"
+  gates were trivially so): the eager piece-transform walk skip in
+  `TickAllAnims` (the profile shows the walk), the expiry of unsynced
+  projectiles on arrival, and the unchecked COB bytecode fetch. `rts/Game` IS
+  per build, so `SpringVersion::IsHeadless()` answers at run time.
+- **H73** (toggle bit 4) = the anim walk skip as a run-time test. Turning the
+  projectile expiry on the same way crashed the medium replay at frame 6597
+  (SIGSEGV in `CSmokeTrailProjectile::UpdateEndPos` from
+  `CMissileProjectile::Update`): a missile keeps a pointer to its unsynced smoke
+  trail and updates it every frame, so freeing the trail early is wrong. Left
+  out for good. The COB fetch stays checked: an out-of-range program counter in
+  the live game threw, and the re-sim must throw the same way.
