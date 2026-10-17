@@ -209,3 +209,12 @@ func contains(list []string, s string) bool {
 	}
 	return false
 }
+
+// PatchedBuildKeyWindows names the object the WINDOWS patched build of this
+// engine version and series revision is published under, for FogOfWar.exe:
+// engines/<version>/windows-amd64/spring-headless-patched-<semver>.exe.gz.
+// Same revision numbers as the Linux build (one series, two platforms); the
+// platform is a directory so the two never share a name.
+func PatchedBuildKeyWindows(version string, rev int) string {
+	return "engines/" + version + "/windows-amd64/spring-headless-patched-" + PatchedVersion(version, rev) + ".exe.gz"
+}

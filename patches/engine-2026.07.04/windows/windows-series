@@ -1,0 +1,7 @@
+# Applied with `git am` AFTER ../series, for the Windows build only:
+#   git am $(grep -v '^#' windows-series | sed "s|^|$PWD/|")
+# Each is a build fix that changes nothing a Linux build compiles.
+# 0001: the bench harness (series entry experiments/tools/bench-harness.patch
+#       and 0005) uses Linux perf_event counters and CLOCK_THREAD_CPUTIME_ID;
+#       compiled out on other platforms, where NEWFRAME just runs SimFrame().
+0001-bench-harness-linux-only.patch

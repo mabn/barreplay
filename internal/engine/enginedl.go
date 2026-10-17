@@ -77,6 +77,35 @@ func EnsureEngine(ctx context.Context, cfg Config, version string) error {
 	if err != nil {
 		return fmt.Errorf("engine: %w", err)
 	}
+	return installRelease(ctx, version, asset, dir, headlessName(), prdName())
+}
+
+// WindowsReleaseDir is where EnsureWindowsEngine installs the stock WINDOWS
+// release of an engine version inside a (Linux) data dir: a dir of its own
+// beside the native one, since the two releases share file names (base/,
+// fonts/). Not inside it: EnsureEngine replaces the native dir wholesale.
+// Locate never picks it up, since nothing in it has the native binary's name.
+func WindowsReleaseDir(dataDir, version string) string {
+	return filepath.Join(dataDir, "engine", version+"-windows-amd64")
+}
+
+// EnsureWindowsEngine installs the stock amd64-windows release of version at
+// WindowsReleaseDir, whatever platform this runs on. It exists for
+// cmd/publish-engine -windows, which gates a Windows patched build under Wine
+// from a Linux host: the patched exe resolves base/ relative to itself, so it
+// has to run from inside a stock Windows install.
+func EnsureWindowsEngine(ctx context.Context, dataDir, version string) (string, error) {
+	dir := WindowsReleaseDir(dataDir, version)
+	if fileExists(filepath.Join(dir, "spring-headless.exe")) {
+		return dir, nil
+	}
+	asset := fmt.Sprintf("recoil_%s_amd64-windows.7z", version)
+	return dir, installRelease(ctx, version, asset, dir, "spring-headless.exe", "pr-downloader.exe")
+}
+
+// installRelease downloads one Recoil release asset and extracts it into dir,
+// which must end up holding headless.
+func installRelease(ctx context.Context, version, asset, dir, headless, prd string) error {
 	extractor, err := sevenZip()
 	if err != nil {
 		return fmt.Errorf("engine %s is not installed at %s and cannot be extracted: %w", version, dir, err)
@@ -101,10 +130,10 @@ func EnsureEngine(ctx context.Context, cfg Config, version string) error {
 	// the next run would treat as installed.
 	// A fresh data dir has no engine/ yet, and MkdirTemp will not create its
 	// parent.
-	if err := os.MkdirAll(filepath.Join(cfg.DataDir, "engine"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		return err
 	}
-	staging, err := os.MkdirTemp(filepath.Join(cfg.DataDir, "engine"), ".staging-*")
+	staging, err := os.MkdirTemp(filepath.Dir(dir), ".staging-*")
 	if err != nil {
 		return err
 	}
@@ -114,12 +143,12 @@ func EnsureEngine(ctx context.Context, cfg Config, version string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("engine: extract %s with %s: %w", asset, extractor, err)
 	}
-	if !fileExists(filepath.Join(staging, headlessName())) {
-		return fmt.Errorf("engine: %s contains no %s", asset, headlessName())
+	if !fileExists(filepath.Join(staging, headless)) {
+		return fmt.Errorf("engine: %s contains no %s", asset, headless)
 	}
 	// 7z restores the archived permission bits, but a release built elsewhere
 	// may not carry them; exec needs +x regardless.
-	for _, n := range []string{headlessName(), prdName()} {
+	for _, n := range []string{headless, prd} {
 		if p := filepath.Join(staging, n); fileExists(p) {
 			os.Chmod(p, 0o755)
 		}

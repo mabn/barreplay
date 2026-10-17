@@ -32,6 +32,11 @@
 //  6. Prints the line to add to patchedBuilds in internal/engine/patcheddl.go
 //     and the git tag to push once it is merged.
 //
+// -windows publishes the Windows build of the same series instead (from
+// patches/engine-<version>/windows/build.sh, for FogOfWar.exe), from this
+// same Linux host: it gates the exe under Wine against the stock LINUX engine
+// and uploads engines/<version>/windows-amd64/...exe.gz. See windows.go.
+//
 // Hosts start downloading the build only once the pin is merged: the pin in
 // the repo, not the presence of an object in the bucket, is what says a build
 // passed the gate. A failed gate keeps both captures and says where.
@@ -95,8 +100,11 @@ func run() error {
 	workerDir := flag.String("worker-dir", "./worker", "worker project dir, for the account id and bucket in wrangler.jsonc")
 	patchesDir := flag.String("patches", "./patches", "the repo's patches dir; the series in it names the build's revision")
 	dry := flag.Bool("dry", false, "strip and gate, but upload nothing")
+	windows := flag.Bool("windows", false, "publish a WINDOWS build (the named spring-headless.exe), gated under Wine against the stock Linux engine")
+	wine := flag.String("wine", "", "with -windows: the Wine loader to run it with (default: wine64, wine, or /usr/lib/wine/wine64)")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: publish-engine -data <BARdata> [-version <ver>] [path to spring-headless-patched]")
+		fmt.Fprintln(os.Stderr, "       publish-engine -data <BARdata> -windows [-version <ver>] <path to spring-headless.exe>")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -106,6 +114,14 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	if *windows {
+		if flag.NArg() != 1 {
+			flag.Usage()
+			os.Exit(2)
+		}
+		return runWindows(ctx, windowsOptions{dataDir: *dataDir, version: *version, gate: *gate,
+			workerDir: *workerDir, patchesDir: *patchesDir, wine: *wine, exe: flag.Arg(0), dry: *dry})
+	}
 
 	// 1. Name it.
 	bin, err := pickBinary(*dataDir, *version, flag.Arg(0))
