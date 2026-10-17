@@ -1761,7 +1761,7 @@ rectangles merge depends on the draw cadence), and nothing showed it in the
 before the unsynced update (drawing data only; it cannot reach the
 simulation). `speed18` = `speed17` + the clamp, building.
 
-### 2026-10-17 14:40 — W6 + W7 measured: late window -7.2%, governed whole game 15m25s active, identical
+### 2026-10-17 14:25 — W6 + W7 measured: late window -7.2%, governed whole game 15m25s active, identical
 
 `speed18` = `speed17` + the heightmap-rectangle clamp (W6 now uses
 `math::floor`, exactly what Lua's `math.floor` and `%` use). Medium gate
