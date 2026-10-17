@@ -19,6 +19,7 @@ go build ./cmd/barreplay-static # build the .brp -> static-hosting bundle packer
 go build ./cmd/insights         # build the game-summary backfill CLI (one replay, or -all)
 go build ./cmd/winfit           # build the win-probability model fitter (reads insights files; -categories fits lava / large ranked / ranked / unranked separately)
 go build ./cmd/bringest         # build the drag&drop upload daemon (polls the worker's job queue)
+(cd cmd/fogofwar && GOOS=windows go build -tags desktop,production -ldflags "-H windowsgui -s -w" -o FogOfWar.exe .)   # the Windows desktop re-simulator (its own module: Wails; see cmd/fogofwar below)
 go run ./cmd/publish-engine -data <BARdata>   # gate, strip and upload the patched engine build under <data>/engine/*/ to R2, then print the patchedBuilds pin to commit and the tag to push (hosts download it once the pin is merged; -dry = everything but the upload; -gate <gameIds> for a version with no default gate replay)
 go run ./cmd/publish-engine -data <BARdata> -windows <spring-headless.exe>   # the WINDOWS build of the same series (patches/engine-<ver>/windows/build.sh, MinGW cross-compile) for FogOfWar.exe: gated under Wine against the stock LINUX engine, uploaded to engines/<ver>/windows-amd64/, pinned in patchedBuildsWindows (needs wine64)
 go run ./cmd/insights <gameId|link|rid>   # compute a PUBLISHED replay's game summary and publish replays/<rid>.insights<N>.json beside it (-upload r2 default, local, or empty + -out to just write it; -all walks the catalog, -from/-to narrow it to games started in a date range (YYYY-MM-DD or unix seconds); -j N replays at once, default 4; -force recomputes; a local .brp/.brepstream with -rid gives full costs; everything read from the real bucket is kept under ~/.cache/barreplay/<bucket host>/ so a re-run downloads only what is new — -cache DIR moves it, -cache= turns it off)
@@ -351,6 +352,38 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           each line's START — which is also the more useful reading (when the run
                           reported, not when the next one did). Nothing is held back waiting for
                           a newline, so a process dying mid-print still leaves its half line.
+cmd/fogofwar/             FogOfWar.exe: a Windows desktop app that re-simulates ONE pasted game
+                          (link or id) on the user's own PC and writes <gameId>.brp — internal/
+                          resim.Run, the same call bringest -resim makes. Version 1 fetches no jobs
+                          and uploads nothing. Its OWN Go module (go.mod with a replace onto the
+                          repo root) because it needs third-party code the root keeps out: Wails
+                          v2 (the window is a WebView2 page; frontend/dist is plain HTML/CSS/JS,
+                          embedded, no Node, no build step — opened in a browser it runs a MOCK
+                          backend, ?mock=setup|ready|running|done|fail, which is how it is
+                          developed and screenshotted) and bodgit/sevenzip (Windows has no 7z for
+                          the engine release; wired in through engine.Extract7z). app.go's
+                          exported methods are the page's whole API, kept narrow (no paths or
+                          commands from the page; ShowReplay only opens paths in the history).
+                          No admin rights: everything lives in %LOCALAPPDATA%\FogOfWar
+                          (FOGOFWAR_HOME overrides) — config.json (folders, faster-engine toggle,
+                          memory floor, history), data\ (engine, game, maps; the engine's write
+                          dir), replays\ (output), work\, webview\, fogofwar.log (every line the
+                          pipeline prints: logtee.go swaps os.Stderr for a pipe, which also feeds
+                          pr-downloader's "[Progress] N%" into the download bars). FIRST LAUNCH
+                          (setup.go) downloads the engine, the published patched build and the
+                          game that the newest game on api.bar-rts.com needs, then waits. The
+                          engine runs with --only-local (engine.Config.OnlyLocal: no listening
+                          socket, so no firewall prompt), CREATE_NO_WINDOW and below-normal
+                          priority (engine/platform_windows.go hideChild), and the app puts
+                          itself in a kill-on-close job object so a killed window takes its
+                          engine with it. Windows ports in internal/engine: platform_windows.go
+                          (GlobalMemoryStatusEx for the memory guard and MemTotal,
+                          GetProcessTimes/K32GetProcessMemoryInfo for the engine's RSS/CPU),
+                          DownloadProgress (byte counts for any engine download), and the
+                          Windows patched build: PatchedBuildKey's engines/<v>/windows-amd64/
+                          spring-headless-patched-<semver>.exe.gz, pinned in
+                          patchedBuildsWindows (empty until a gated Windows build exists; until
+                          then Windows runs stock).
 cmd/publish-engine/main.go CLI: publish a patched engine build for every re-sim host to
                           download (see the -patched-engine note above), the WHOLE job in one
                           command: name it (engine version from its --version, revision from
@@ -4178,7 +4211,7 @@ never their content — and is the main remaining speed lever (~25-35% at the 60
 
 ## Conventions / gotchas
 
-- Go module: `github.com/mabn/barreplay`, Go 1.24. No third-party deps (stdlib only).
+- Go module: `github.com/mabn/barreplay`, Go 1.24. No third-party deps (stdlib only). The one exception is `cmd/fogofwar`, a separate module (Wails, 7z) so the root stays stdlib-only; `go test ./...` from the root does not reach it — run it in `cmd/fogofwar`.
 - Unit-def internal names (`armcom`, `corllt`, …) and side names (`armada`, `cortex`)
   have no spaces — the preamble `T` parser relies on that.
 - `fileName` from the API contains spaces; always `url.PathEscape` it (see `barapi.DownloadURL`).
