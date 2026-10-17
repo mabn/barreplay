@@ -1824,3 +1824,49 @@ so landing stays serial. **PW** (toggle `0x100`): the serial weapon loop
 prefetches every weapon of the unit 4 ahead (H66 took only the first) and the
 target units of the unit 2 ahead's weapons (`Update` reads the target's
 `isDead`, position and speed every frame).
+
+### 2026-10-17 15:05 — the heap overflow's real cause: a use-after-free in `CRectangleOverlapHandler::StageSplitTooLarge`
+
+The clamp (13:00 entry) treated a symptom. `speed20` (v6 + PW + CH, below)
+crashed its verylarge1 dump at frame 78 again, this time inside
+`CRectangleOverlapHandler::Process`. The cause, upstream Recoil:
+
+```cpp
+for (size_t i = frontIdx; i < rectangles.size(); i++) {
+	SRectangle& rect1 = rectangles[i];          // a reference into the vector
+	...
+	while ((width * height) > maxAreaPerRect) {
+		...
+		rectangles.push_back(rect2);           // can reallocate
+		width  = rect1.GetWidth();             // reads the freed buffer
+```
+
+Once `push_back` reallocates, every later split writes through a dangling
+reference into freed heap memory and reads back whatever is there. The garbage
+rectangles (`z2 = 2553` on a 1536-row map) were that, and so was the zeroed
+RmlUi context. It needs a split (an unsynced heightmap update larger than
+`maxAreaPerRect`, here the lava map's) and a reallocation at that moment, which
+depends on the draw cadence. So it is intermittent, and the layout of each
+build decides what the stale writes hit. It explains every early failure today:
+the `speed17` segfault, the one exit-21 run, and the `speed20` crash. It is
+unsynced; the simulation never reads these rectangles.
+
+Fix (Recoil `speed21`): work on a copy and store it back by index before each
+`push_back`, which produces exactly what the old loop did whenever no
+reallocation happened. `HandleOverlapping` also takes pointers into the vector
+and pushes, but it writes before the push and returns right after, so it is
+fine. Worth reporting upstream (not done: outward-facing).
+
+`speed20` = `speed19` + **CH** (toggle `0x200`): the unit loops'
+`for_mt_chunk` calls (weapon vectors, LOS states, P1's plan pass) cut their
+range into ONE chunk per thread, so the main thread, done with its own,
+spun in `ThreadPool::DoTask` until the slowest worker finished: **4.1% of
+the main core** in the late window (speed18 profile), all of it under
+`CUnitHandler::Update`. With chunks of at most 32 units the task group's
+guided slices balance them. Each element still runs once, independently.
+`speed21` = `speed20` + the fix + **PG** (toggle `0x400`):
+`GenerateWeaponTargets` (6.6% of the main core, 4.2% in its own candidate
+loop) prefetches the candidate 6 ahead in the quad's unit list: the three
+lines it reads before rejecting most candidates (`tempNum` at offset 188,
+`losStatus[allyTeam]` at 3464, `aimPos` at 1072). Medium gates: `speed19`
+`t=1bf` and `speed20` `t=3bf` both `0558d354…`.
