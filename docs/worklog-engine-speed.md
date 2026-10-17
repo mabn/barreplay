@@ -2111,3 +2111,33 @@ scope) under `MemoryMax=$MEMMAX` (11G) / `MemorySwapMax=$SWAPMAX` (1G) with
 beside each run (`~/dev/perf3/memwatch.sh`) logs the engine's RSS and, past a
 limit, takes gdb backtraces of every thread and its smaps before killing it,
 so a recurrence comes with stacks.
+
+### 2026-10-17 23:45 — H83 +1.1%: dropped; a stale barreplay had faked +7.6%
+
+Late window, cooled, 3 pairs, both `t=7fbf`:
+
+| | speed24 | speed27 (H83) | change |
+|---|---|---|---|
+| wall | 10.54 / 10.40 / 10.31 s | 10.51 / 10.64 / 10.44 s | **+1.1%** (pairs -0.3, +2.3, +1.3%) |
+| main-thread cycles | 38.73e9 | 39.08e9 | +0.9% |
+| main-thread instructions | 37.05e9 | 36.84e9 | -0.6% |
+
+The fields the latency profile blamed are no cheaper in fewer lines. A guess
+at why, not measured: the moved direction vectors and mid/aim positions are
+written by the parallel movement passes and now share a line with what other
+threads read (`physicalState`, `allyteam`), which may cost as much as the
+saved misses. Dropped (`speed/rejected/0055`).
+
+The first A/B read **+7.6%**, and that was wrong. The instructions were up
+5.5% too, which a layout change cannot do, and a per-symbol diff showed why:
+the speed27 checkpoint's widget sampled with `GetUnitSampleData` (W5) where
+speed24's used `GetUnitSampleDelta` (W6/W7), +50% Lua on the main thread. A
+checkpoint freezes the widget's Lua state, so the barreplay that dumps it
+picks the widget every trial runs, and `bench-ckpt` had kept the
+`barreplay-bench` it built once (October 16, before W6). The speed24 dump
+had been made with a newer binary by hand. Now `bench-ckpt` rebuilds the
+default barreplay from the checkout at every dump, keeps its id in the
+checkpoint (`barreplay.id`), and `ab` refuses two checkpoints whose ids
+differ. Earlier cross-build pairs are not affected: speed24 against speed26
+read +1.5%, where a W5 widget costs ~8%, and every toggle A/B runs one
+checkpoint.

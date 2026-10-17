@@ -46,6 +46,11 @@
 # interleaves two toggle settings of ONE binary from the same checkpoint —
 # variants of an experiment need no second build or dump.
 #
+# BARREPLAY=<path> (dump only) names the barreplay binary to re-simulate with;
+# by default it is built from this checkout at each dump. Its id is kept in the
+# checkpoint (barreplay.id) and `ab` refuses two checkpoints made by different
+# ones: the checkpoint freezes the capture widget, which is part of the timing.
+#
 # BARREPLAY_ARGS="<flags>" (dump only) passes extra barreplay flags to the
 # re-simulation, e.g. "-worker-threads 7"; they are frozen into the checkpoint,
 # so dump such a variant under its own binary name (a copy of the binary).
@@ -74,7 +79,7 @@ REPLAYS="verylarge1=6a37d06acbb455b1d19179d8ec965f10 medium=4936896a8b258d038cbd
 BR=${BR:-$(cd "$(dirname "$0")/../.." && pwd)}
 DATA=${DATA:-$BR/.bardata}
 CKPT=${CKPT:-$HOME/dev/perf3/ckpt}
-BARREPLAY=${BARREPLAY:-$BR/barreplay-bench}
+BARREPLAY=${BARREPLAY:-}
 MEMMAX=${MEMMAX:-11G}; SWAPMAX=${SWAPMAX:-1G}
 IMG=${CRIU_IMAGE:-ghcr.io/beyond-all-reason/recoil-build-amd64-linux@sha256:31b3667ba0d37620b4ad9b45d1840c8d3e95317f2b233044d2e17697ce8fe61d}
 
@@ -98,11 +103,21 @@ dump() {
 	local dir="$CKPT/$(basename "$bin")/$2-$frame"
 	alone
 	rm -rf "$dir"; mkdir -p "$dir/img" "$dir/files"
-	[ -x "$BARREPLAY" ] || (cd "$BR" && go build -o "$BARREPLAY" ./cmd/barreplay) || die "build barreplay"
+	# The checkpoint freezes the capture widget's Lua state, so the barreplay that
+	# made it decides which widget every trial runs. Unless BARREPLAY names one,
+	# build it from this checkout now: a binary built once and kept goes stale
+	# (a W5 widget against a W7 one read as H83 +7.6%, 2026-10-17).
+	local br=$BARREPLAY
+	if [ -z "$br" ]; then
+		br=$BR/barreplay-bench
+		(cd "$BR" && go build -o "$br" ./cmd/barreplay) || die "build barreplay"
+	fi
+	[ -x "$br" ] || die "no barreplay binary $br"
+	echo "$(sha256sum "$br" | cut -c1-16) $(go version -m "$br" | awk '$2 ~ /^vcs\.(revision|modified)=/ {printf "%s ", $2}')" > "$dir/barreplay.id"
 	echo "== dump: $(basename "$bin") $2 ($id) up to frame $frame"
 	(cd "$BR" && BARREPLAY_BENCH_START=$frame BARREPLAY_BENCH_N=1 BARREPLAY_PARK="$dir/park" \
 		systemd-run --user --scope --quiet -p OOMPolicy=continue -p MemoryMax="$MEMMAX" -p MemorySwapMax="$SWAPMAX" \
-		"$BARREPLAY" -data "$DATA" -progress=true ${BARREPLAY_ARGS:-} -engine "$bin" -out "$dir/out" "$id" > "$dir/barreplay.log" 2>&1) &
+		"$br" -data "$DATA" -progress=true ${BARREPLAY_ARGS:-} -engine "$bin" -out "$dir/out" "$id" > "$dir/barreplay.log" 2>&1) &
 	local brpid=$!
 	while [ ! -s "$dir/park.ready" ]; do
 		kill -0 $brpid 2>/dev/null || die "the re-simulation ended before frame $frame (see $dir/barreplay.log)"
@@ -134,6 +149,18 @@ dump() {
 alone() {
 	if pgrep -f "^[^ ]*/engine/[^ ]*/spring-headless" > /dev/null; then
 		die "another engine is running (pgrep -af spring-headless); trials and dumps need the host to themselves"
+	fi
+}
+
+# samewidget <bin> <bin> <replay> <frame>: two checkpoints compare only if the
+# same barreplay (so the same capture widget) made them; one without a record
+# (dumped before it was kept) only warns.
+samewidget() {
+	local a="$CKPT/$(basename "$(bindir "$1")")/$3-$4/barreplay.id" b="$CKPT/$(basename "$(bindir "$2")")/$3-$4/barreplay.id"
+	if [ -s "$a" ] && [ -s "$b" ]; then
+		[ "$(cat "$a")" = "$(cat "$b")" ] || die "the two checkpoints were dumped by different barreplay builds (so different widgets): $(cat "$a") vs $(cat "$b"); redump one"
+	else
+		echo "bench-ckpt: warning: no barreplay record for one of the checkpoints; make sure both were dumped by the same barreplay" >&2
 	fi
 }
 
@@ -212,7 +239,8 @@ flame() {
 case "${1:-}" in
 	dump)  dump "$2" "$3" "$4" ;;
 	trial) for i in $(seq 1 "${6:-1}"); do echo "$(basename "$2") $(trial1 "$2" "$3" "$4" "$5")"; done ;;
-	ab)    for i in $(seq 1 "${7:-3}"); do
+	ab)    samewidget "$2" "$3" "$4" "$5"
+	       for i in $(seq 1 "${7:-3}"); do
 	           if [ $((i % 2)) -eq 1 ]; then o="$2 $3"; else o="$3 $2"; fi
 	           for b in $o; do echo "pair $i $(basename "$b") $(trial1 "$b" "$4" "$5" "$6")"; done
 	       done ;;

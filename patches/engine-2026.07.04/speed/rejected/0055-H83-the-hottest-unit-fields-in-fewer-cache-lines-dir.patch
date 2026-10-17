@@ -1,0 +1,142 @@
+From 3225e8995a5d0f1494a44dd8a48f355585b227b0 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 22:00:39 +0000
+Subject: [PATCH] H83: the hottest unit fields in fewer cache lines: direction
+ vectors and mid/aim positions next to physicalState/allyteam, the state flags
+ tested by every unit loop next to the moveType/script pointers (layout only)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Objects/SolidObject.h | 32 ++++++++++++++++------------
+ rts/Sim/Units/Unit.h          | 39 ++++++++++++++++++++---------------
+ 2 files changed, 41 insertions(+), 30 deletions(-)
+
+diff --git a/rts/Sim/Objects/SolidObject.h b/rts/Sim/Objects/SolidObject.h
+index 00df653..b9631ff 100644
+--- a/rts/Sim/Objects/SolidObject.h
++++ b/rts/Sim/Objects/SolidObject.h
+@@ -388,6 +388,25 @@ public:
+ 	///< allyteam that this->team is part of
+ 	int allyteam = 0;
+ 
++	// [barreplay] H83: the direction vectors and mid/aim positions, moved up here
++	// from below the LocalModel and the collision volumes (~550 bytes further
++	// on), so the unit loops find them in the cache lines they already read
++	// physicalState/allyteam from. Same members, same order among themselves,
++	// constant initializers only: layout, not behaviour.
++	///< object-local {z,x,y}-axes (in WS)
++	SyncedFloat3 frontdir =  FwdVector;
++	SyncedFloat3 rightdir = -RgtVector;
++	SyncedFloat3    updir =   UpVector;
++
++	///< local-space vector from pos to midPos (read from model, used to initialize midPos)
++	SyncedFloat3 relMidPos;
++	///< local-space vector from pos to aimPos (read from model, used to initialize aimPos)
++	SyncedFloat3 relAimPos;
++	///< mid-position of model in WS, used as center of mass (etc)
++	SyncedFloat3 midPos;
++	///< aim-position of model in WS, used by weapons
++	SyncedFloat3 aimPos;
++
+ 	///< Palette index for color lookup in the teamColor UBO (0..254 = team color, 256..2047 = custom).
+ 	///< Custom values are permanent until explicitly reset via Lua, and are NOT affected by team changes.
+ 	uint16_t paletteIndex = 0;
+@@ -408,19 +427,6 @@ public:
+ 	///< pieces that were last hit by a {[0] := unsynced, [1] := synced} projectile
+ 	const LocalModelPiece* hitModelPieces[2];
+ 
+-	///< object-local {z,x,y}-axes (in WS)
+-	SyncedFloat3 frontdir =  FwdVector;
+-	SyncedFloat3 rightdir = -RgtVector;
+-	SyncedFloat3    updir =   UpVector;
+-
+-	///< local-space vector from pos to midPos (read from model, used to initialize midPos)
+-	SyncedFloat3 relMidPos;
+-	///< local-space vector from pos to aimPos (read from model, used to initialize aimPos)
+-	SyncedFloat3 relAimPos;
+-	///< mid-position of model in WS, used as center of mass (etc)
+-	SyncedFloat3 midPos;
+-	///< aim-position of model in WS, used by weapons
+-	SyncedFloat3 aimPos;
+ 
+ 	///< current position on GroundBlockingObjectMap
+ 	int2 mapPos;
+diff --git a/rts/Sim/Units/Unit.h b/rts/Sim/Units/Unit.h
+index 81cd737..c14787c 100644
+--- a/rts/Sim/Units/Unit.h
++++ b/rts/Sim/Units/Unit.h
+@@ -295,6 +295,28 @@ public:
+ 	CCommandAI* commandAI = nullptr;
+ 	CUnitScript* script = nullptr;
+ 
++	// [barreplay] H83: the state flags every unit loop tests (CanUpdateWeapons,
++	// IsStunned, the death and build checks), moved up from the end of CUnit
++	// (~3000 bytes on) next to the moveType and script pointers those loops read
++	// anyway. Same members, same order among themselves, constant initializers.
++	// if the unit is in it's 'on'-state
++	bool activated = false;
++	// prevent damage from hitting an already dead unit (causing multi wreck etc)
++	bool isDead = false;
++	// used by landed gunships to block weapon Update()'s, also by builders to
++	// prevent weapon SlowUpdate()'s and Attack{Unit,Ground}()'s during certain
++	// commands
++	bool onTempHoldFire = false;
++	// signals if script has finished executing Killed and the unit can be deleted
++	bool deathScriptFinished = false;
++	// if unit is currently incompletely constructed (implies buildProgress < 1)
++	bool beingBuilt = true;
++	// if we are stunned by a weapon or for other reason, access via IsStunned/SetStunned(bool)
++	bool stunned = false;
++	// Lua overrides for CanUpdateWeapons
++	bool forceUseWeapons = false;
++	bool allowUseWeapons =  true;
++
+ 	// current attackee
+ 	SWeaponTarget curTarget;
+ 
+@@ -488,10 +510,6 @@ public:
+ 	int cegDamage = 0;
+ 
+ 
+-	// if the unit is in it's 'on'-state
+-	bool activated = false;
+-	// prevent damage from hitting an already dead unit (causing multi wreck etc)
+-	bool isDead = false;
+ 
+ 	bool armoredState = false;
+ 
+@@ -502,22 +520,11 @@ public:
+ 	bool inBuildStance = false;
+ 	// tells weapons that support it to try to use a high trajectory
+ 	bool useHighTrajectory = false;
+-	// used by landed gunships to block weapon Update()'s, also by builders to
+-	// prevent weapon SlowUpdate()'s and Attack{Unit,Ground}()'s during certain
+-	// commands
+-	bool onTempHoldFire = false;
+ 
+-	// Lua overrides for CanUpdateWeapons
+-	bool forceUseWeapons = false;
+-	bool allowUseWeapons =  true;
+ 
+-	// signals if script has finished executing Killed and the unit can be deleted
+-	bool deathScriptFinished = false;
+ 
+ 	// if true, unit will not be automatically fired upon unless attacker's fireState is set to > FIREATWILL
+ 	bool neutral = false;
+-	// if unit is currently incompletely constructed (implies buildProgress < 1)
+-	bool beingBuilt = true;
+ 	// if the updir is straight up or align to the ground vector
+ 	bool upright = true;
+ 	// whether the ground below this unit has been terraformed
+@@ -546,8 +553,6 @@ public:
+ 
+ 	bool drawIcon = true;
+ private:
+-	// if we are stunned by a weapon or for other reason, access via IsStunned/SetStunned(bool)
+-	bool stunned = false;
+ };
+ 
+ struct GlobalUnitParams {
+-- 
+2.53.0
+

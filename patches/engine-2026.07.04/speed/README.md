@@ -10,8 +10,8 @@ a gate and a publish.
 
 Numbering: the 4-digit prefixes continue the series (`../0001`-`0013`), so
 every patch number under `engine-2026.07.04/` is unique: 0014-0043 here,
-0044-0045 and 0052-0054 in `rejected/`, 0046-0051 in `tools/`. Change
-identifiers continue the work log's H-series (H1-H73), with H74-H82 for the
+0044-0045 and 0052-0055 in `rejected/`, 0046-0051 in `tools/`. Change
+identifiers continue the work log's H-series (H1-H73), with H74-H83 for the
 ones below.
 P1 (with its versions v2-v7), P2, N1 and the widget-side W1-W7 are families
 of their own.
@@ -84,6 +84,7 @@ Not toggled (always on in these builds):
 | `0045-H67…` | H67: prefetch height-map cells under upcoming units; H68: prefetch aircraft command-queue fronts | 19076 -> 19024 ms, -0.3%, noise (2026-10-16 04:35); dropped |
 | `0052-`, `0053-H81…` | H81: skip recomputing weapon vectors whose inputs (piece transforms by a per-model change counter, the unit's script, position and direction vectors bit for bit, a height-map write counter) did not change since the last computation; in the beam laser, the weapon-vectors pass and `CWeapon::SlowUpdate` (toggle `0x8000`, on top of 0043) | on: -1.0%, mixed pairs; but the bookkeeping, always on, made the build +1.5% slower with the toggle off (speed24 vs speed26, both `t=7fbf`): a wash, dropped |
 | `0054-H82…` | H82: `GenerateWeaponTargets` prefetches through the next quads (Quad 3 ahead, list header 2 ahead, pointer array 1 ahead, first 6 candidates) (toggle `0x10000`, on top of 0053) | -0.5%, noise level; dropped |
+| `0055-H83…` | H83: layout only — `CSolidObject`'s direction vectors and mid/aim positions next to `physicalState`/`allyteam`, `CUnit`'s state flags (`activated`, `isDead`, `onTempHoldFire`, `deathScriptFinished`, `beingBuilt`, `stunned`, `forceUseWeapons`/`allowUseWeapons`) next to `moveType`/`script`, from the latency profile's hottest unit cache lines (on top of 0043) | +1.1% wall, +0.9% cycles, mixed pairs (2026-10-17 23:45); dropped |
 
 H74 (0028-0031) stayed in the main line because later patches were built on
 it; it is off unless bit `0x40` is set. Other experiments of the work that
