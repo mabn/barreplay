@@ -64,7 +64,7 @@
   <section class="view" id="viewReady" hidden>
     <div class="hero">
       <h1 class="big">Replay any game, <span class="glow">see everything.</span></h1>
-      <p class="lede">Paste a Beyond All Reason game. FogOfWar re-simulates it on this computer and saves a full-view replay.</p>
+      <p class="lede">Paste a Beyond All Reason game. FogOfWar re-simulates it on this computer, saves a full-view replay and uploads it to replay.fogofwar.dev.</p>
     </div>
 
     <form class="paste" id="pasteForm" autocomplete="off">
@@ -79,6 +79,15 @@
       </div>
       <p class="hint" id="hint">A bar-rts.com or gex link, or the 32-character game ID.</p>
     </form>
+
+    <div class="auto" id="autoBar">
+      <div class="auto-ico"><svg viewBox="0 0 20 20"><path d="M15.5 8A6 6 0 0 0 4.6 6.4M4.5 12a6 6 0 0 0 10.9 1.6"/><path d="M15.8 3.6V8h-4.4M4.2 16.4V12h4.4"/></svg></div>
+      <div class="auto-txt">
+        <b>Auto-replay</b>
+        <span id="autoNote">Re-simulate the newest games that have no replay yet, one after another, and upload each one.</span>
+      </div>
+      <button class="switch" id="autoSwitch" role="switch" aria-checked="false" aria-label="Auto-replay"><i></i></button>
+    </div>
 
     <div class="slot" id="slot"></div>
 
@@ -107,6 +116,7 @@
         <li data-i="2"><i></i><span>Engine</span></li>
         <li data-i="3"><i></i><span>Simulate</span></li>
         <li data-i="4"><i></i><span>Save</span></li>
+        <li data-i="5"><i></i><span>Upload</span></li>
       </ol>
 
       <div class="progress-block">
@@ -135,6 +145,7 @@
       <div class="run-foot">
         <span id="runElapsed"></span>
         <span class="badge" id="runEngine" hidden></span>
+        <button class="badge auto-badge" id="runAuto" hidden title="Turn auto-replay off; this game still finishes">Auto-replay on · turn off</button>
         <button class="btn danger ghost" id="btnStop">Stop</button>
       </div>
     </div>

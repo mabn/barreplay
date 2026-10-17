@@ -354,8 +354,17 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           a newline, so a process dying mid-print still leaves its half line.
 cmd/fogofwar/             FogOfWar.exe: a Windows desktop app that re-simulates ONE pasted game
                           (link or id) on the user's own PC and writes <gameId>.brp — internal/
-                          resim.Run, the same call bringest -resim makes. Version 1 fetches no jobs
-                          and uploads nothing. Its OWN Go module (go.mod with a replace onto the
+                          resim.Run, the same call bringest -resim makes. Each finished .brp is
+                          UPLOADED (upload.go: the open POST /api/upload, then GET /api/jobs/<id>
+                          until plain bringest has published it; the history row says queued/
+                          published/failed, and a failed upload never fails the run). An
+                          AUTO-REPLAY switch (autoreplay.go) re-simulates, while idle, the first
+                          of the site's 10 newest games (GET /api/games?limit=10) that is not
+                          published, has no pending/processing job and is not in the local
+                          history (failed ones included), looking again a minute later when none
+                          qualifies; Stop on an auto-picked run turns it off, three failures in a
+                          row pause it 10 min. History rows open /replays/<gameId> in the browser
+                          (FOGOFWAR_SITE overrides the site). It takes no jobs from the queue. Its OWN Go module (go.mod with a replace onto the
                           repo root) because it needs third-party code the root keeps out: Wails
                           v2 (the window is a WebView2 page; frontend/dist is plain HTML/CSS/JS,
                           embedded, no Node, no build step — opened in a browser it runs a MOCK
