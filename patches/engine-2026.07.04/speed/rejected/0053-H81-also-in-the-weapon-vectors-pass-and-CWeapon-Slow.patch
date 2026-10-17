@@ -1,0 +1,94 @@
+From df913c83593d5bfc018883c427161d5b2b121319 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sat, 17 Oct 2026 19:54:23 +0000
+Subject: [PATCH 53/54] H81: also in the weapon-vectors pass and
+ CWeapon::SlowUpdate; the stamp includes the unit's script
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Units/Unit.cpp     | 7 ++++++-
+ rts/Sim/Weapons/Weapon.cpp | 7 ++++++-
+ rts/Sim/Weapons/Weapon.h   | 1 +
+ 3 files changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Sim/Units/Unit.cpp b/rts/Sim/Units/Unit.cpp
+index 99dd767..a2fe5f6 100644
+--- a/rts/Sim/Units/Unit.cpp
++++ b/rts/Sim/Units/Unit.cpp
+@@ -27,6 +27,7 @@
+ #include "Game/SelectedUnitsHandler.h"
+ #include "Game/Players/Player.h"
+ #include "Map/Ground.h"
++#include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ #include "Map/MapInfo.h"
+ #include "Map/ReadMap.h"
+ 
+@@ -698,9 +699,13 @@ void CUnit::UpdateWeaponVectors()
+ 	if (!CanUpdateWeapons())
+ 		return;
+ 
++	// [barreplay] H81 (toggle 0x8000): a weapon whose inputs did not move since
++	// it last computed its vectors (an idle turret on a building) keeps them
++	const bool skipCurrent = ((g_brToggles & 0x8000) != 0);
+ 	for (CWeapon* w : weapons) {
+ 		w->UpdateWeaponErrorVector();
+-		w->UpdateWeaponVectors();
++		if (!skipCurrent || !w->BrVectorsCurrent())
++			w->UpdateWeaponVectors();
+ 	}
+ }
+ 
+diff --git a/rts/Sim/Weapons/Weapon.cpp b/rts/Sim/Weapons/Weapon.cpp
+index 4c216d2..cf62e52 100644
+--- a/rts/Sim/Weapons/Weapon.cpp
++++ b/rts/Sim/Weapons/Weapon.cpp
+@@ -11,6 +11,7 @@ std::vector<int> g_brReloadLog;
+ #include "Game/Players/Player.h"
+ #include "Lua/LuaConfig.h"
+ #include "Map/Ground.h"
++#include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ #include "Map/ReadMap.h"
+ #include "Map/MapInfo.h"
+ #include "Sim/Misc/CollisionHandler.h"
+@@ -306,6 +307,7 @@ void CWeapon::UpdateWeaponVectors()
+ 	brVecStamp.heights = readMap->brHeightChanges;
+ 	brVecStamp.aimFromPiece = aimFromPiece;
+ 	brVecStamp.muzzlePiece = muzzlePiece;
++	brVecStamp.script = owner->script;
+ 	brVecStamp.pos = owner->pos;
+ 	brVecStamp.front = owner->frontdir;
+ 	brVecStamp.up = owner->updir;
+@@ -326,6 +328,7 @@ bool CWeapon::BrVectorsCurrent() const
+ 		&& s.heights == readMap->brHeightChanges
+ 		&& s.aimFromPiece == aimFromPiece
+ 		&& s.muzzlePiece == muzzlePiece
++		&& s.script == owner->script
+ 		&& std::memcmp(&s.pos, &owner->pos, sizeof(float3)) == 0
+ 		&& std::memcmp(&s.front, &owner->frontdir, sizeof(float3)) == 0
+ 		&& std::memcmp(&s.up, &owner->updir, sizeof(float3)) == 0
+@@ -821,7 +824,9 @@ void CWeapon::SlowUpdate()
+ 	predictSpeedMod = 1.0f + (gsRNG.NextFloat() - 0.5f) * 2 * ExperienceErrorScale();
+ 
+ 	UpdateWeaponPieces();
+-	UpdateWeaponVectors();
++	// [barreplay] H81 (toggle 0x8000)
++	if ((g_brToggles & 0x8000) == 0 || !BrVectorsCurrent())
++		UpdateWeaponVectors();
+ 
+ 	// HoldFire: if Weapon Target isn't valid
+ 	HoldIfTargetInvalid();
+diff --git a/rts/Sim/Weapons/Weapon.h b/rts/Sim/Weapons/Weapon.h
+index 18c293e..ebd558c 100644
+--- a/rts/Sim/Weapons/Weapon.h
++++ b/rts/Sim/Weapons/Weapon.h
+@@ -240,6 +240,7 @@ protected:
+ 		bool valid = false;
+ 		uint32_t pieces = 0, heights = 0;
+ 		int aimFromPiece = -1, muzzlePiece = -1;
++		const void* script = nullptr;
+ 		float3 pos, front, up, right;
+ 	} brVecStamp;
+ 	float3 currentTargetPos;
+-- 
+2.53.0
+

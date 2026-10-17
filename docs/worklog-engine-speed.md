@@ -2037,3 +2037,32 @@ write (`CReadMap::SetHeight`), the piece indices and script pointer, and the
 position and directions compared bit for bit. It skips the recompute when all
 match. Anything else writing the outputs (the beam laser's sweep path,
 `LoadWeaponVectors` after `TryTargetHeading`) drops the stamp.
+
+### 2026-10-17 21:50 — H81 a wash, H82 noise: both dropped; the disk filled up
+
+`speed26` = `speed24h` + H81 + H82 (**H82**, toggle `0x10000`: in
+`GenerateWeaponTargets` a prefetch pipeline through the next quads, because
+H77 only reaches 6 candidates ahead inside one list and most lists there are
+short: the Quad 3 ahead, its list header 2 ahead, its pointer array 1 ahead,
+the first 6 candidates of the current one). Medium gate `t=ffbf` (H81) and
+`t=1ffbf` (both) `0558d354…`. Late window, cooled, 3 pairs each:
+
+| step | before | after | change |
+|---|---|---|---|
+| H81 (`7fbf` → `ffbf`) | 10.95 / 11.21 / 11.11 s | 11.10 / 10.76 / 11.07 s | -1.0%, mixed pairs |
+| H82 (`ffbf` → `1ffbf`) | 10.91 / 10.97 / 11.08 s | 10.94 / 10.86 / 10.98 s | -0.5%, noise level |
+| `speed24` → `speed26`, both `t=7fbf` | 10.86 / 10.65 / 10.92 s | 11.06 / 10.86 / 11.00 s | **+1.5%** |
+
+H81's bookkeeping runs whatever the toggle says (the stamp written on every
+vector computation, the change counter bumped on every piece change, both on
+paths that run for every unit every frame), and it costs about what H81 saves
+when on. Both dropped (`speed/rejected/0052-0054`); the main line stays at
+0043. (Every number here is ~2.5% above the 19:35 ones: a warmer evening
+room, the same binary `speed24` at `t=7fbf` reads 10.81 s now against 10.54 s
+then. Only interleaved pairs compare.)
+
+**The disk filled up** (227 GB, 100%) with 6 GB checkpoints and 2.3 GB build
+trees, one each per build. The symptom was a CRIU restore refusing
+`infolog.txt` ("bad size 0"): the trial's copy of it back into the data dir
+had failed for lack of space, silently (`cp … 2>/dev/null`). Superseded
+checkpoints, build trees and engine binaries deleted: 122 GB free.
