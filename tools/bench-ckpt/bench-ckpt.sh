@@ -38,6 +38,9 @@
 # PERFSTAT="<events>" counts hardware events per thread over the window
 # (perf stat) into <ckpt dir>/perfstat.txt.
 #
+# COOL=<milli-degC> waits before each trial until the package is that cool
+# (with the fans pinned at max, ~48 C is reachable at idle on the dev host).
+#
 # TOGGLES=<hex> passes the experiment toggles of a build that has them (the
 # go file's "t=<hex>"; g_brToggles in the engine) to each trial, and `abt`
 # interleaves two toggle settings of ONE binary from the same checkpoint —
@@ -131,8 +134,13 @@ trial1() {
 	local bin=$(bindir "$1") replay=$2 frame=$3 n=$4
 	local dir="$CKPT/$(basename "$bin")/$replay-$frame"
 	[ -d "$dir/img" ] || dump "$1" "$replay" "$frame" >&2
-	while read -r k p; do cp -p "$dir/files/$k" "$p"; done < "$dir/files/manifest"
+	while read -r k p; do cp -p "$dir/files/$k" "$p" 2>/dev/null; done < "$dir/files/manifest"
 	rm -f "$dir/park.go" "$dir/result"
+	if [ -n "${COOL:-}" ]; then
+		# start every trial from the same package temperature (milli-degC)
+		local waited=0
+		while [ "$(cat /sys/class/hwmon/hwmon1/temp1_input)" -ge "$COOL" ] && [ $waited -lt 300 ]; do sleep 2; waited=$((waited + 1)); done
+	fi
 	hostroot systemd-run --scope --quiet criu restore -D "$dir/img" -j -d --manage-cgroups=ignore \
 		--tcp-established -o restore.log -v2 || die "criu restore failed (see $dir/img/restore.log)"
 	if [ -n "${MAINCPU:-}" ]; then

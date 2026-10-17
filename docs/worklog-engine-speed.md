@@ -1711,3 +1711,52 @@ serial ~75% of the main thread to run in parallel, which the engine's rules
 forbid while the output must stay byte-identical: the sequential synced RNG,
 order-dependent reads, and synced Lua inside the unit loops
 (engine-changes-for-speed.md).
+
+### 2026-10-17 14:10 — W6 (widget sample loop in the engine), W7 (launcher slots visited on change), and an upstream heap overflow
+
+Lua profile of the late window on `speed16` (`luaprof16` = speed16 + the
+sampler; 12.4 s window, 16.0% of the main core in Lua): LuaRules 10.35%,
+LuaUI 5.59%, of which our own capture widget **5.48%**:
+
+| widget function | % of main core |
+|---|---|
+| `sample()` — the 1 Hz bulk loop over ~10k units (quantize, predict, compare) | 2.79% (+0.34% in `GetUnitSampleData`) |
+| `projectileFrame` — every launcher slot, every frame | 1.32% |
+| `UnitDestroyed` (unit ends, hit drains) | 0.67% |
+
+- **W6**: `Spring.GetUnitSampleDelta` (Recoil `speed17`): the widget's bulk
+  sample loop in C++, the delta predictor kept engine-side, only changed rows
+  (and the dead list, shield candidates and visibility changes) coming back.
+  Every value goes through the same float operations the Lua loop applies to
+  the numbers `GetUnitSampleData` returns (`lua_Number` is float; `math::floor`
+  as Lua's `math.floor` and `%` use it; the build has `-mno-fma`, so nothing is
+  contracted). Engaged and left only at a keyframe. The dead list comes out
+  sorted by id where `pairs()` order was arbitrary; the decoder treats it as a
+  set. A harness stub of the same function (`tools/brep-harness`) reproduces the
+  enginelog fixture **byte for byte** (140 samples through the new path).
+- **W7** (widget only): with the reload log on, `projectileFrame` visits only
+  the slots whose visit can do anything — touched by the log this frame, due
+  (cur moved while rf was still ahead), in a launch window, or with no reading —
+  instead of every slot of every launcher every frame. A slot left out has
+  `cur == rf` (or rf still ahead with nothing logged), so the old walk read rf
+  back unchanged and looked for nothing. Visited in (unit, slot) order: the old
+  `pairs()` order was arbitrary already, and the .brp sorts tracks by birth and
+  id. Harness: identical fixture (4194 frames through the new path, 106 visits
+  in total).
+- Medium gate on `speed17` + the new widget: `0558d354…` (identical).
+
+**The heap overflow.** `speed17` (and `speed17` with the OLD widget) segfaulted
+at frame 78 of verylarge1 in `Rml::Element::Update`: an RmlUi context's root
+element read as all zeroes. A gdb watchpoint on it caught the writer:
+`CSMFReadMap::UpdateFaceNormalsUnsynced` copying face normals past the end of
+its arrays. The unsynced heightmap update rectangles come out of
+`CRectangleOverlapHandler::Process` (which merges the queued rectangles) with
+corners far outside the map — `z1=1263 z2=2553` and `z1=1319 z2=2353` on a
+1536-row map, on this lava map from frame ~78 on — and nothing clamps them
+again. Upstream Recoil, not ours: every earlier build ran the same overflow,
+and only the heap layout decided what it hit (`speed17`'s few extra bytes of
+`.bss` moved it onto RmlUi). It is unsynced and timing-dependent (which
+rectangles merge depends on the draw cadence), and nothing showed it in the
+.brp hashes. Fix: `CReadMap::UpdateDraw` clamps each rectangle to corner space
+before the unsynced update (drawing data only; it cannot reach the
+simulation). `speed18` = `speed17` + the clamp, building.
