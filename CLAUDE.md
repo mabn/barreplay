@@ -2736,8 +2736,8 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           hostinfo), and a lava 8v8 whose jobs are all failures (none active,
                           done or disabled), with no catalog row, is offered again when it
                           ran out of memory and no host with >= this RAM ever did on it
-                          (stats.host.memBytes; none = 0), or when it failed ONCE for any
-                          other reason. Walks the jobs_failed partial index over two weeks
+                          (stats.host.memBytes; none = 0). No other failure is retried
+                          automatically (Marcin's call). Walks the jobs_failed partial index over two weeks
                           (LAVA_RETRY_WINDOW_SEC), rests 5 min per GiB size on the empty
                           answer; a poll without ?mem= gets no retries.
                           THEN the ranked window: of the BACKFILL_WINDOW=200 most recently ENDED

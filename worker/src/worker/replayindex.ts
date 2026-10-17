@@ -161,9 +161,8 @@ const LAVA_COOLDOWN_SEC = 300;
  * to a daemon with more memory than the one that failed. On 2026-10-17 that
  * was 19 of the 29 lava 8v8s of four days with no capture: every one of them
  * queued within the hour, run first, and lost for good on the one 8 GB host
- * that was running. The other 10 failed on BAR's widget sandbox before
- * widget 1.11.1 — a cause since fixed — which is why any OTHER failure gets
- * exactly one automatic second attempt.
+ * that was running. (The other 10 failed on BAR's widget sandbox before
+ * widget 1.11.1; failures other than "oom" are not retried automatically.)
  *
  * Two weeks bounds what the lookup reads (failed jobs, through jobs_failed),
  * and is also past the point where a late capture still matters to anyone.
@@ -2081,14 +2080,11 @@ export class ReplayIndex extends DurableObject<Env> {
    *
    * A game qualifies when its jobs are ALL failures (none active, none done,
    * none disabled — a disabled job is how a person says "leave it"), nothing
-   * is in the catalog for it, and either
-   *   - it ran out of memory, and no host with at least the asker's memory
-   *     ever did on it (memBytes is the failing host's total RAM, which
-   *     bringest reports with every job; an older daemon's failure carries
-   *     none and counts as a small host's), or
-   *   - it failed once, for any other reason: one automatic retry, so a bug
-   *     since fixed does not lose the game, and a game that is simply broken
-   *     costs one extra attempt and is then left alone.
+   * is in the catalog for it, it ran out of memory, and no host with at least
+   * the asker's memory ever did on it (memBytes is the failing host's total
+   * RAM, which bringest reports with every job; an older daemon's failure
+   * carries none and counts as a small host's). Any other failure is never
+   * retried automatically (Marcin's call); the queue page's Retry is the door.
    * Each retry is a fresh job (the old row stays the record of the attempt),
    * so a retry that runs out of memory again is a failure on THIS host's
    * memory, and only a bigger one will try after it.
@@ -2112,8 +2108,7 @@ export class ReplayIndex extends DurableObject<Env> {
             AND NOT EXISTS (SELECT 1 FROM jobs k WHERE k.game_id = g.id
                             AND k.state = 'error' AND k.error_kind = 'oom'
                             AND COALESCE(json_extract(k.stats, '$.host.memBytes'), 0) >= ?)
-            AND (j.error_kind = 'oom'
-                 OR (SELECT COUNT(*) FROM jobs k WHERE k.game_id = g.id) = 1)
+            AND j.error_kind = 'oom'
           ORDER BY j.created_unix DESC
           LIMIT 1`,
         now - LAVA_RETRY_WINDOW_SEC,

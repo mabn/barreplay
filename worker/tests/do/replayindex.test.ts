@@ -1918,15 +1918,12 @@ test("a lava game that ran out of memory goes to a BIGGER host, once per size", 
   });
 });
 
-test("any other lava failure is retried exactly once", async () => {
+test("no other lava failure is retried automatically", async () => {
   await inIndex((index) => {
     index.gamesInsert([lava8("sandboxed", 4000)]);
     index.jobInsert("r-1", "", "sandboxed", "resim");
     fail(index, "r-1", null, 8 * GiB);
-    expect(index.jobsOffer("resim", "o-1", 8 * GiB)[0]).toMatchObject({ id: "o-1", gameId: "sandboxed" });
-    fail(index, "o-1", null, 8 * GiB);
-    // Two plain failures: a game that is simply broken is left alone.
-    expect(index.jobsOffer("resim", "o-2", 64 * GiB)).toEqual([]);
+    expect(index.jobsOffer("resim", "o-1", 64 * GiB)).toEqual([]);
   });
 });
 
