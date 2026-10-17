@@ -1657,3 +1657,29 @@ Main thread now (`t=3f`, late window), % of core:
 | unit-script anims (parallel; was 6.6% before H73) | 3.0% |
 | Lua GC 2.3, pathfinding 2.3, map damage 1.9, rest 1.8 | 8.3% |
 | **total** | **100%** |
+
+### 2026-10-17 11:20 — 7 threads governed: 15m54s active; the main thread is 44% memory-stalled everywhere; R1 (run-ahead prefetch helper)
+
+- Governed whole game, `speed15` `t=3f` with `-worker-threads 7`: sim 42m18s,
+  paused 26m24s, **15m54s active** (-4.5% vs 4 threads), identical. Real,
+  ungoverned runs lose this to heat (24m27s measured earlier), so 4 threads
+  stays the default on this laptop.
+- Late window, cooled, `t=3f`, perf stat per thread: main thread 45.3e9
+  cycles, IPC 1.03, **44% of cycles with an L2 miss pending**
+  (`cycle_activity.stalls_l2_pending` 20.1e9), dTLB walks 1.3% (huge pages).
+  Workers ~50% stalled. A stall-sampled profile spreads the stalls like the
+  cycles: ~44% of every phase, no hot spot — memory latency on scattered unit,
+  weapon, piece and script objects, loop after loop.
+- Weapon loop and COB scripts reviewed for P1-style parallelism: both possible
+  in principle (most weapon updates in a frame only reload or aim; most COB
+  ticks only animate their own pieces) but the plan checks would have to replay
+  CanFire / CanCallAimingScript / salvo / sweep rules exactly, or buffer every
+  global COB opcode — each a big, risky change for ~3-5%. Parked; see
+  engine-changes-for-speed.md for why upstream changes would make them easy.
+- **R1** (Recoil `speed16`, toggle bit 6, building): a helper thread pinned to
+  the main thread's hyperthread sibling (shared L1/L2) walks the three serial
+  unit loops (UpdateUnits, the serial weapon pass, SlowUpdateUnits) 16 units
+  ahead of the main thread's cursor and prefetches the unit's hot lines, its
+  move type, script, command AI, weapons and their targets. Prefetches and
+  relaxed pointer loads from pool memory only; it parks on a futex between
+  loops (a spinning sibling would take the main thread's issue slots).
