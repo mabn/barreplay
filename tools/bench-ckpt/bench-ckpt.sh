@@ -13,6 +13,7 @@
 #   bench-ckpt.sh trial <engine-binary> <replay> <frame> <frames> [n]
 #   bench-ckpt.sh ab    <binA> <binB> <replay> <frame> <frames> [pairs]
 #   bench-ckpt.sh flame <engine-binary> <replay> <frame> <frames> <out.svg> [title]
+#   bench-ckpt.sh abt   <engine-binary> <replay> <frame> <frames> <togglesA> <togglesB> [pairs]
 #
 # <replay> is a gameId or a name from REPLAYS below. <engine-binary> must sit
 # in <data>/engine/<version>/ beside the stock engine (it finds base/ there)
@@ -36,6 +37,11 @@
 #
 # PERFSTAT="<events>" counts hardware events per thread over the window
 # (perf stat) into <ckpt dir>/perfstat.txt.
+#
+# TOGGLES=<hex> passes the experiment toggles of a build that has them (the
+# go file's "t=<hex>"; g_brToggles in the engine) to each trial, and `abt`
+# interleaves two toggle settings of ONE binary from the same checkpoint —
+# variants of an experiment need no second build or dump.
 #
 # BARREPLAY_ARGS="<flags>" (dump only) passes extra barreplay flags to the
 # re-simulation, e.g. "-worker-threads 7"; they are frozen into the checkpoint,
@@ -157,7 +163,7 @@ trial1() {
 		perfpid=$!
 		sleep 1
 	fi
-	echo "$n $dir/result${LUAPROF:+ luaprof}" > "$dir/park.go"
+	echo "$n $dir/result${LUAPROF:+ luaprof}${TOGGLES:+ t=$TOGGLES}" > "$dir/park.go"
 	local t=0
 	while [ ! -s "$dir/result" ]; do
 		sleep 0.5; t=$((t + 1))
@@ -192,5 +198,9 @@ case "${1:-}" in
 	           for b in $o; do echo "pair $i $(basename "$b") $(trial1 "$b" "$4" "$5" "$6")"; done
 	       done ;;
 	flame) flame "$2" "$3" "$4" "$5" "$6" "${7:-}" ;;
+	abt)   for i in $(seq 1 "${8:-3}"); do
+	           if [ $((i % 2)) -eq 1 ]; then o="$6 $7"; else o="$7 $6"; fi
+	           for t in $o; do echo "pair $i t=$t $(TOGGLES=$t trial1 "$2" "$3" "$4" "$5")"; done
+	       done ;;
 	*) sed -n '2,40p' "$0"; exit 2 ;;
 esac

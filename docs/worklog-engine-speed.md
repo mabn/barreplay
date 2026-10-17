@@ -1254,3 +1254,73 @@ through the sync headers.
 Every pair won by 4.3-4.6e9 cycles. The cost: a re-sim no longer reports
 desyncs in its infolog (no checksums to compare) — the byte-identity gate on
 publish is the check that remains, and it is the one that matters.
+
+### 2026-10-17 00:35 — `speed9` whole game 19m14s; parallel aircraft after all (P1)
+
+| run (whole verylarge1) | sim | main cycles | main instructions | md5 |
+|---|---|---|---|---|
+| `speed8` + W4 | 20m16s | 3.92e12 | 4.50e12 | `a26e920d…` |
+| `speed8` + W5 | 22m49s | 4.02e12 | 4.47e12 | `a26e920d…` |
+| **`speed9` + W5** (SYNCCHECK=OFF) | **19m14s** | 3.92e12 | 4.39e12 | `a26e920d…` |
+
+Identical, and the best whole game so far (3.34 GHz average main clock, a
+cool run). The whole game's main-thread instructions fall only 1.8% where the
+late window's fall 7.9%: the cheaper the frame, the more of the main thread's
+time is spent outside SimFrame (the early game runs ahead of the demo feed).
+
+Fresh late-window profile on `speed9` (main thread, % of core): units 62.9%
+(weapon auto-targeting 11.5, **aircraft movement 10.9**, LTO-inlined unit
+loops 6.2, ground movement 5.3, weapon vectors 4.7, CUnit::SlowUpdate 4.5, beam
+lasers 4.2), gadget callins 9.6, anims 6.8, LOS 5.0, COB 4.5, projectiles 3.9,
+Lua GC 2.0. Sync hashing is gone from every function.
+
+**The parallel-aircraft argument of 16:30 was wrong as a bound**, as the
+user said: "55% of updates have a neighbour already moved" says nothing about
+how many updates could overlap. The right measure is the critical path of
+the dependency DAG — item k must follow every earlier item it can interact
+with. `experiments/airdag` builds it from the .brp's aircraft positions
+(random update order, crashing aircraft as barriers: they can die and
+explode):
+
+| frame | aircraft | crashing | neighbourhood | critical path | bound | 4 threads, free start | 4 threads, in-order start |
+|---|---|---|---|---|---|---|---|
+| 54780 | 2635 | 1 | 1024-elmo cells, ±1 | 637 | 4.1x | | |
+| 60780 | 3221 | 66 | 512, ±2 | 1219 | 2.6x | 2.50x | 2.33x |
+| **63780** | 5711 | 187 | 1024, ±1 | 1696 | 3.4x | 2.70x | 2.47x |
+| **63780** | 5711 | 187 | 512, ±2 | 1547 | 3.7x | 2.81x | 2.61x |
+| 66780 | 2388 | 573 | 512, ±2 | 1287 | 1.9x | 1.80x | 1.76x |
+
+Fighters fly in blobs, but there are many blobs. What blocks is mostly the
+crashing aircraft (barriers), not the neighbours.
+
+**P1** (Recoil `speed10`, behind toggle bit 0 — `BARREPLAY_TOGGLES` or the
+bench harness's new `t=<hex>`, so one binary A/Bs itself from one
+checkpoint): the general move-type loop on all threads, exactly sequential.
+What a flying strafe aircraft's update touches outside its own unit (read
+off StrafeAirMoveType/AAirMoveType line by line): its target's position, the
+units its two quad-field collision queries list (positions), a unit it
+overlaps (moved), the death-dependence lists of its collidee, the synced RNG
+(loop-back maneuvers, ~23 draws a frame) and, on a speed transition to/from
+zero, its script. So:
+
+- items START in loop order, and each waits for the last earlier item
+  touching a grid cell within R of its own position's cell or its target's
+  (interaction reach bounded at ~1255 elmos: query reach + radii + a quad +
+  the quad field's registration lag; R*S must cover it);
+- at its start an item checks again that it is still a flying strafe
+  aircraft in the planned cell with the planned target — anything run before
+  it may have changed that, and the in-order start makes this the first
+  moment nothing later has started — and otherwise runs SERIAL: after every
+  earlier item, before any later one, on the main thread (crashing, landing,
+  hover aircraft, scripted, stunned, unfinished, transported);
+- RNG draws wait for every earlier item (`SerialPoint`); death-dependence
+  edits take a lock (the lists are sorted, insertion order is moot); the
+  queries use the calling thread's buffers (`threadOwner`; 0 on the main
+  thread, as before). Static move types (empty Update) are skipped.
+- counters for anything that should never happen in a parallel item (script
+  calls, out-of-bounds kills, moving a unit of radius > 250) and for how often
+  a plan had to be redone.
+
+Upstream already runs ground movement this way in parts and names the sync
+checker's synced variables as what stops the rest ("the vars are synced and
+that's what is stopping this being MT'ed"); `speed9` removed that. Building.
