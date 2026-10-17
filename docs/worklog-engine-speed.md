@@ -1367,3 +1367,55 @@ Other threads over the same window (samples relative to the main thread's):
 worker1 24%, worker2 23%, worker3 22% of a core — they are idle most of the
 time, waiting for the main thread's serial loops. Over the whole game
 (perf stat): main 1174 s, workers 336 / 307 / 307 s.
+
+### 2026-10-17 02:25 — P1 reworked: aircraft do not collide; two hangs found and fixed; P2, N1, H72
+
+- **P1 never engaged on `speed10`**: BAR's modrules set
+  `allowUnitCollisionDamage = true`, which P1 refused (a collision does damage,
+  whose Lua callins can reach anything), so the loop fell back to sequential —
+  and the medium gate's "identical" meant nothing. But `alldefs_post.lua` sets
+  **`collide = false` on every aircraft** except four flying fortresses
+  (fepoch, fblackhy, corcrw, legfort), and with collide off both collision
+  queries (CheckForCollision, HandleCollisions) are skipped outright. A flying
+  non-colliding strafe aircraft then touches nothing outside its own unit but
+  its target (position, isDead, def) and the RNG. **P1 v2**: no grid; the only
+  dependencies are target edges (an item after its target if the target is
+  earlier in the loop, before it if later); colliding aircraft are serial.
+- **P1 v3** (toggle bit 3): a crashing aircraft that provably cannot reach the
+  ground this frame (it moves at most speed + a frame of gravity; the terrain
+  under any point is at most the highest height-map corner around it) runs in
+  parallel too; its smoke trail (unsynced particles, unsynced RNG) is deferred
+  and emitted in loop order before the next serial item, so even the unsynced
+  state is created in the sequential order. A crashing aircraft that may land
+  stays serial (it dies and explodes).
+- **Hang 1**: a serial item on the main thread (a crash kill) starts a nested
+  parallel loop; the thread pool waits for every worker to pop the task, and
+  the workers are spinning in P1 waiting for that same item. Fix: while the main
+  thread runs a serial item, `ThreadPool::HasThreads()` is false for it, so
+  nested parallel loops run inline (the engine's single-thread mode, which
+  multithreaded results must equal).
+- **Hang 2**: the frontier (the lowest unfinished item) was advanced after a
+  release store of the item's done flag; two items finishing together could each
+  read the other's flag as unset through their store buffers (x86 TSO, the
+  Dekker pattern) and the frontier stopped short of both, forever. Fix: seq_cst
+  store + fence; every spin also re-scans the frontier every 1024 iterations,
+  and a wait of seconds logs the schedule's state once.
+- **P2** (toggle bit 1): unit LOS states. A unit's new status is a pure function
+  of its own state and the LOS maps, and no SYNCED client receives the
+  Unit{Entered,Left}{Los,Radar} events in BAR (only unsynced gfx/debug gadgets),
+  so: compute all on all threads, then apply in order, firing the same events
+  at the same points (only changed statuses are applied; an unchanged one is a
+  no-op in SetLosStatus).
+- **N1** (toggle bit 2): BAR's only `AllowWeaponTarget` handler, "AA Targeting
+  Priority", multiplies the priority by a per-target-def constant (bombers 0.1,
+  gunships/transports/builders 1, fighters 2, scouts 100) and always allows
+  (`lua_Number` is float in Recoil, so the product is the same single-precision
+  multiply). Taken natively only after checking, once: the files' hashes
+  (gadgets.lua, the gadget), the installed global closure, the handler's list
+  holding exactly that gadget, its function's source and line, its upvalues
+  (`spGetUnitDefID` is the engine's C function, the multiplier table read from
+  the gadget itself) — and each frame: same closure, same single list entry, no
+  pending gadget reorder. The medium gate replay runs another BAR build, so N1
+  correctly stays off there; verylarge1's own build is the one hashed.
+- **H72**: the per-anim checksum in `TickAllAnims` is read only by the sync
+  checker; computed only with SYNCCHECK.
