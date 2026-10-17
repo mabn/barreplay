@@ -1870,3 +1870,41 @@ loop) prefetches the candidate 6 ahead in the quad's unit list: the three
 lines it reads before rejecting most candidates (`tempNum` at offset 188,
 `losStatus[allyTeam]` at 3464, `aimPos` at 1072). Medium gates: `speed19`
 `t=1bf` and `speed20` `t=3bf` both `0558d354…`.
+
+### 2026-10-17 16:50 — v6 -0.8%, PW -0.5%, CH -2.2%, PG -1.2%; BOLT tried and dropped
+
+`speed21` (v6, PW, CH, PG, the use-after-free fix), medium gate `t=7bf`
+`0558d354…`. Late window, cooled, one checkpoint, each toggle added on top of
+the previous ones, 3 interleaved pairs:
+
+| step | before | after | change |
+|---|---|---|---|
+| v6 (`3f` → `bf`) | 11.77 / 11.46 / 11.86 s | 11.61 / 11.74 / 11.47 s | -0.8% (noise level) |
+| PW (`bf` → `1bf`) | 11.67 / 11.48 / 11.49 s | 11.56 / 11.57 / 11.35 s | -0.5% (noise level) |
+| CH (`1bf` → `3bf`) | 11.55 / 11.50 / 11.42 s | 11.30 / 11.18 / 11.25 s | **-2.2%**, every pair |
+| PG (`3bf` → `7bf`) | 11.37 / 11.28 / 11.55 s | 11.21 / 11.25 / 11.33 s | **-1.2%**, every pair |
+
+Together -3.8% (11.70 → 11.26 s). v6 helps less than the 116 + 127 barriers a
+frame suggested: a landed aircraft is cheap to update, so the barriers it
+removed were short ones.
+
+**BOLT** (post-link layout optimizer; exact, it moves code and changes no
+instruction's meaning). It needs relocations in the binary (`-Wl,-q`), and gold
+cannot emit them for this link (`internal error in do_layout`, and
+`emit_relocs_scan` without `--icf`), so `speed21` was linked with GNU ld.
+That link alone measured ~4.6% slower in the late window than the gold builds
+(`t=3f` 11.70 s against `speed18`'s 11.18 s; no gold `--icf=all`, no
+`-Wl,-O3`). BOLT then needed OpenSSL's hand-written asm skipped (`RC4_options`
+keeps data in `.text`), and so were both threaded interpreters (`luaV_execute`,
+`CCobThread::Tick`: computed gotos BOLT cannot follow). Result:
+`spring-headless-speed21b`, exact (medium `0558d354…`), but CRIU cannot
+checkpoint it: the process takes a SIGSEGV as soon as CRIU's parasite runs,
+twice. On the medium replay, interleaved, `t=3bf`: gold `speed20`, GNU-ld
+`speed21` and BOLTed `speed21b` all simulate in 1m7s ±1 s. No visible gain, a
+slower base link, and no checkpoints: dropped. Back to gold links.
+
+`speed22` = `speed21` + **MU** (toggle `0x800`): `CQuadField::MovedUnit` copies
+the new quad list into the unit's own buffer instead of taking the pooled
+query vector's buffer. Moving it left the pool with an empty vector to allocate
+again and freed the unit's old buffer: a malloc and a free per unit changing
+quads, ~0.3% of the main core in mimalloc. Same contents. Building (gold).
