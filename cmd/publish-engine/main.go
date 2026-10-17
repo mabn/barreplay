@@ -112,6 +112,14 @@ func run() error {
 		flag.Usage()
 		os.Exit(2)
 	}
+	// The credentials are checked before any work: a missing key found after
+	// two re-simulations wastes the whole gate.
+	var r2 *packer.R2Client
+	if !*dry {
+		if r2 = packer.NewR2ClientFromEnv(*workerDir); r2 == nil {
+			return fmt.Errorf("no R2 credentials: set R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY (or put them in ./.env), or pass -dry")
+		}
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	if *windows {
@@ -120,7 +128,7 @@ func run() error {
 			os.Exit(2)
 		}
 		return runWindows(ctx, windowsOptions{dataDir: *dataDir, version: *version, gate: *gate,
-			workerDir: *workerDir, patchesDir: *patchesDir, wine: *wine, exe: flag.Arg(0), dry: *dry})
+			patchesDir: *patchesDir, wine: *wine, exe: flag.Arg(0), r2: r2})
 	}
 
 	// 1. Name it.
@@ -238,14 +246,10 @@ func run() error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "\n== %s: %d MB, %d MB gzipped, sha256 %s\n", name, len(raw)>>20, gz.Len()>>20, shaHex)
-	if *dry {
+	if r2 == nil {
 		fmt.Fprintf(os.Stderr, "-dry: not uploading %s\n", key)
 	} else {
-		c := packer.NewR2ClientFromEnv(*workerDir)
-		if c == nil {
-			return fmt.Errorf("no R2 credentials: set R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY (or put them in ./.env)")
-		}
-		created, err := c.PutIfAbsent(ctx, key, gz.Bytes())
+		created, err := r2.PutIfAbsent(ctx, key, gz.Bytes())
 		if err != nil {
 			return err
 		}

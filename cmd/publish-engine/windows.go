@@ -19,9 +19,8 @@ import (
 
 // windowsOptions is what -windows needs from the command line.
 type windowsOptions struct {
-	dataDir, version, gate, workerDir, patchesDir, wine string
-	exe                                                 string
-	dry                                                 bool
+	dataDir, version, gate, patchesDir, wine, exe string
+	r2                                            *packer.R2Client // nil = -dry
 }
 
 // runWindows publishes a WINDOWS patched build (spring-headless.exe from
@@ -160,14 +159,10 @@ func runWindows(ctx context.Context, o windowsOptions) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "\n== %s (windows-amd64): %d MB, %d MB gzipped, sha256 %s\n", name, len(raw)>>20, gz.Len()>>20, shaHex)
-	if o.dry {
+	if o.r2 == nil {
 		fmt.Fprintf(os.Stderr, "-dry: not uploading %s\n", key)
 	} else {
-		c := packer.NewR2ClientFromEnv(o.workerDir)
-		if c == nil {
-			return fmt.Errorf("no R2 credentials: set R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY (or put them in ./.env)")
-		}
-		created, err := c.PutIfAbsent(ctx, key, gz.Bytes())
+		created, err := o.r2.PutIfAbsent(ctx, key, gz.Bytes())
 		if err != nil {
 			return err
 		}
