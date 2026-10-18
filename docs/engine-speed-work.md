@@ -1,13 +1,5 @@
 # Making BAR re-simulation faster: what was done and what it measured
 
-*Written 2026-10-18 for readers who know the Recoil engine but have not
-followed this repo's speed work. It replaces an HTML explainer of PR #131
-("Speed optimization 2") and describes the state of the branch
-`speed-optimization-2` as of 2026-10-18 12:39 UTC. Everything here comes from
-[worklog-engine-speed.md](worklog-engine-speed.md) on that branch. The
-companion document,
-[engine-changes-for-speed.md](engine-changes-for-speed.md), proposes the
-engine-wide changes that the next step would need.*
 
 ## Context
 
