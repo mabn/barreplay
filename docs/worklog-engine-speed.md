@@ -3380,3 +3380,59 @@ Most read values (late window, 150 frames):
 - **`AddAnim` is not the cost.** The registry insert is a plain append and
   `FindAnim` is H80's binary search, so the 8.8k cycles are the scripts
   themselves.
+
+### 2026-10-18 12:22 — H92, H93 and P5 written; speed36 gates identical
+
+Three more exact changes:
+- **H92** (toggle `0x4000000`): `UpdateWeaponVectors` keeps last frame's
+  aim and muzzle vectors while every input is bitwise unchanged: the unit's
+  position and direction vectors, both pieces clean with the same transform
+  version, and the outputs still as it left them (beam-laser sweeps and the
+  heading test write them directly). Only the ground clamp is redone. Every
+  write of a piece's model-space transform bumps the piece's version, which
+  starts at a value unique to the piece object.
+  - **Insight:** a missing muzzle piece leaves the outputs as they were, and
+    the next call transforms `weaponDir` again, so that case is never
+    cached.
+- **H93** (toggle `0x8000000`): the LOS update ran each of its 7 types'
+  loops over all ~10k units (`UpdateUnit` per unit and type), and most calls
+  return at once.
+  - A parallel pre-pass computes a 7-bit "needs work" mask per unit with
+    `BrNeedsUpdate`, a read-only mirror of `UpdateUnit`'s tests. Each type's
+    serial loop then visits only the flagged units, in order.
+  - **Insight:** this is exact for two reasons. Every early return of
+    `UpdateUnit` writes nothing (`RemoveUnit` is a no-op on a unit with no
+    instance). And no type's update reads what another type's writes (each
+    touches only its own `unit->los[type]` and instances).
+  - **Insight:** in the profile, the main thread's LOS share was mostly these
+    loops (2.97% `CLosHandler::Update` self of 4.81%).
+- **P5** (toggle `0x10000000`, Recoil `speed37`): the COB tick on all
+  threads, exactly sequential.
+  - **Order:** ticks run in the engine's order. The running list, then the due
+    sleepers, popped up front: nothing a tick schedules can fall due in the
+    same tick, so the due set and its order are fixed.
+  - **Which ticks:** a tick runs on a worker when every function on its call
+    stack (and their callees) uses only own-unit operations: script state,
+    pieces, animations, sleep/wait, signals, own-flag sets
+    (`INBUILDSTANCE`/`BUSY`), and reads of unit values from a read-only
+    list. A read's id is found by walking back over the bytecode to its
+    `PUSH_CONSTANT`.
+  - **Within a segment:** `RAND` and `START` are serial points (wait for
+    every earlier tick, then act in place), and a unit's ticks keep their
+    order. Sleeps scheduled, threads ended, kills signalled and animation-list
+    joins and leaves are buffered and applied in tick order at the segment's
+    end.
+  - **Insight:** sleep pushes commute, because the sleep queue orders by
+    (wake time, id).
+  - **Insight:** a dying thread's callback (`AimScriptFinished`,
+    `KilledScriptFinished`) only touches its own unit, so it runs at once;
+    only the thread table's erase waits.
+  - **Everything else** (sfx, explode, show, other sets and reads, Lua)
+    runs alone on the main thread, as before.
+  - Offline, under these rules, 9,312 of BAR's 12,173 COB functions qualify
+    (`experiments/cobpurity/p5safe.py`).
+
+`speed36` (= `speed34` + H92 + H93) medium gate: `cd87a3f` (P4, H92, H93
+on) and `587a3f` (all off) both **`0558d354…`**. Its late-window A/Bs and
+`speed37`'s build are queued behind a per-script COB measurement and a
+fresh Lua profile.
