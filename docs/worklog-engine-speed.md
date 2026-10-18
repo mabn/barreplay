@@ -2726,3 +2726,30 @@ every recorded pause subtracted:
 10 minutes means saving 3.8 minutes, nearly all of it from the last 20
 game minutes, which would have to run ~37% faster: the late window
 (frames 63780+) is the right benchmark.
+
+### 2026-10-18 04:46 — H90 added to the speed31 batch; pipeline restarted
+
+**H90** (toggle `0x200000`): `CQuadField::MovedUnit` runs for every
+unit whose position changed, which in the late game is mostly 5,700
+aircraft every frame. It costs 1.7% plus 0.6% in its `memcmp`. It
+recomputes the unit's quad list (`GetQuads`) and compares it with the
+stored one, which almost never changed.
+
+`GetQuads(pos, r)` is a fixed set of tests: the bounding rectangle's four
+quad indices `int((p ∓ r) / q)`, a distance test per quad in it, and a
+clamp to the map. After a full computation H90 records the distance to the
+nearest point where any of those tests could flip, in double precision,
+less 0.01 elmo. That margin is far above the tests' float rounding (~1e-4
+elmo at these magnitudes: positions up to 12,288, quads of 128). While the
+unit stays within that distance (squared, times 0.98), the list is provably
+the one stored, and the old code would have compared, found it equal and
+returned. So H90 returns.
+
+The cache sits after `CUnit`'s last member and is invalidated wherever
+else a unit's list is edited: `RemoveUnit` (death, transport, team change),
+`InsertUnitIf` and `RemoveUnitIf`. Aircraft move 5-15 elmos a frame
+through 128-elmo quads, so most calls should take the shortcut.
+
+`speed31` = `speed30` + H88 + H89 + H90. The pipeline (instrumented
+build, training at `t=387fbf`, PGO+LTO build, gate, checkpoint, A/Bs) was
+restarted with it.
