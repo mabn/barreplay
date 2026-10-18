@@ -2861,3 +2861,27 @@ The items kept so far (H87, H88, H89, H91) are each at noise level, around
 -0.5 to -1%. The governed whole game on `speed32` with all of them on
 (`t=587fbf`), 7 threads and the main thread pinned (`PIN=1`) is
 running, to see what they add up to on the measure that counts.
+
+**The unit-pool latency by line of the unit object** (speed24 load-latency
+profile, `~/dev/perf3/memlines.py`): about 20 lines per unit carry it.
+
+| unit-object line | main thread's latency | fields |
+|---|---|---|
+| 3 (+192) | 3.9% | position |
+| 16 (+1024) | 3.4% | updir, midPos, aimPos |
+| 15 (+960) | 3.2% | frontdir, rightdir |
+| 66 (+4224) | 3.2% | beingBuilt, deathScriptFinished, isDead, onTempHoldFire, weapon-use flags |
+| 7 (+448) | 1.5% | physicalState, allyteam, team |
+| 65 (+4160) | 1.4% | flanking bonus, recentDamage, armor multiple |
+| 67 (+4288) | 1.3% | stunned |
+| 19 (+1216) | 1.2% | moveType, transporter |
+| 29-31 (+1856-2047) | 2.8% | the embedded move type's state |
+| ~10 more | ~0.5-1% each | script buffer, `id`/`tempNum`, losRadius/category, radius, ... |
+
+The direct way to compress that is to put the tail flags (lines 65-67) next
+to the move-type and script pointers (lines 19-20). **H83 did exactly that,
+and lost 1.1%.** The layout moonshot has been tried in its most direct form.
+A fuller repack would need the hot fields of three classes
+(`CWorldObject`, `CSolidObject`, `CUnit`), which can only be reordered
+within each class, and several build-and-retrain cycles to find a layout
+that does not trade one loop's locality for another's.
