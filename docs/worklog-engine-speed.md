@@ -3865,3 +3865,56 @@ update itself (one sensor type's unit loop 3.7%, its map update 1.9%).
 - **The risk is capacity.** The window's own parallel work (P5's segments,
   the animation tick) needs the same workers, so the overlap may be partial.
   Est. -2 to -4%.
+
+### 2026-10-18 16:08 — P7 written (v2: a read-only phase A); P5's worker count as a toggle
+
+`speed41` = `speed40` + P7 + a P5 worker-count toggle.
+
+**The first P7 (two phases over the LOS instances) had an exactness bug,
+found in review before any build.** Phase A ran the real `UpdateUnit` early,
+on inputs from before the window. Take a unit that crossed an LOS square and
+then died in the window:
+- In the ordinary order, its `UnitDestroyed` removes the instance it had
+  (with the 1.5 s delayed removal that keeps a dead unit's sight a little
+  longer), and the LOS update then skips it as dead.
+- In the two-phase version, phase A had already moved it to a new instance,
+  and that one would have been the lingering one: 45 frames of different
+  LOS maps.
+
+**P7 v2** (`toggle2` `0x10`):
+- **Phase A only tests.** It runs H93's predicate (`UpdateUnit`'s tests in
+  its own order, reads only): would `UpdateUnit` act on this unit for this
+  type? It runs for every unit and type, in chunks of 256 units, as a
+  background task on the workers during the script tick.
+- **The LOS point does the ordinary work for fewer units.** In unit order,
+  each type runs the real `UpdateUnit` for the units phase A flagged and
+  the units marked in the window, then its ordinary `Update()`.
+- **Why that is exact.** A unit whose inputs did not change in the window
+  gets the same answer from the predicate then as now, and skipping a call
+  that would do nothing changes nothing. Every write of an input in the
+  window marks its unit:
+  - `SetUnitVal` (all values; radii, activation and heading are inputs);
+  - `Activate`, `Deactivate`, `ChangeLos`, `SetStunned`,
+    `ForcedKillUnit`, `ChangeTeam`, `FinishedBuilding`,
+    `TurnIntoNanoframe`;
+  - attach and detach;
+  - the transportees moved after the animations;
+  - the LOS handler's own events.
+- **A Lua write anywhere in the window** (the P4 trampoline: `LuaSyncedCtrl`
+  and `MoveCtrl`) redoes the whole ordinary update. Lua unit scripts get a
+  trampoline of their own without that, since their writes go through
+  `SetUnitVal` and the engine's own marked paths.
+- **Unit order is unchanged**, so even the LOS bookkeeping (instance ids,
+  cache order) comes out as in the ordinary update.
+- **The expected saving** is the per-unit scan the main thread does today
+  (its own type's loop, 3.7%) minus the flagged units it still updates.
+  `BARREPLAY_P7_STATS` logs how many unit/type pairs were flagged and how
+  often a Lua write forced the full redo.
+
+**H93 was noise because it moved the scan, not off the main thread.** H93
+ran the same predicate as a parallel pre-pass at the LOS point, where the
+main thread does its share. P7 moves the scan into the script tick's window.
+
+`toggle2` bits 1-3 set P5's worker count (0 = 6): six spinning workers
+for the whole COB tick may cost more power than they save, and the window
+P7 uses needs the same workers.
