@@ -3980,3 +3980,62 @@ the hooks) had cost about as much as P5 gained. A retrain belongs after every
 batch that touches hot functions, not only at the end. The profile is
 `~/dev/perf3/pgo39-profile.tar.xz` (to be copied into `speed/tools/` with
 the next export).
+
+### 2026-10-18 17:41 — H94 -1.8%, P1 v8 -0.4%; P1's real cost is its in-order start chain (4.4% of the main thread); P1 v9
+
+`speed41` checkpoint (new profile), late window, 3 interleaved pairs each:
+
+| A/B | without | with | change |
+|---|---|---|---|
+| H94 (`10d87a3f` → `50d87a3f`) | 9.86 / 9.78 / 9.72 s (9.79) | 9.65 / 9.54 / 9.65 s (9.61) | **-1.8%** wall, -1.3% cycles (every pair) |
+| P1 v8 (`10d87a3f` → `90d87a3f`) | 9.77 / 9.67 / 9.79 s (9.74) | 9.71 / 9.74 / 9.67 s (9.70) | -0.4% wall, -0.9% cycles (noise level) |
+
+Both kept (exact either way).
+
+**P1's main-thread waits** (the new counters, one 450-frame trial):
+
+| wait | cycles | count |
+|---|---|---|
+| in-order start (the item before must have started) | **1,554e6** | 216,143 |
+| serial items (all earlier items done) | 38e6 | 15,961 |
+| targets | 8.6e6 | 415,052 |
+| serial points (RNG, script calls) | 3.0e6 | 1,409 |
+| final | 0.9e6 | 450 |
+
+Serial aircraft by type, state (0 landed, 1 flying, 2 landing, 3 crashing,
+4 takeoff, 5 hovering) and speed (z = zero), over the trial:
+
+| | count |
+|---|---|
+| strafe, takeoff | 50,646 |
+| hover, landed, zero speed | 30,886 |
+| strafe, crashing | 4,525 |
+| hover, landing | 3,241 |
+| hover, takeoff | 2,212 |
+| strafe, landed, zero speed | 1,992 |
+| the rest | under 1,000 each |
+
+**Insight: P1's cost is the chain, not the barriers.**
+- The main thread waits 1.55e9 cycles, **4.4% of all its cycles in the
+  window**, for the in-order start. That is 480 waits a frame at ~7k cycles
+  each, against 0.1% for all serial items together.
+- Every item has to see the one before it start: a token passed through all
+  ~5,600 items a frame, one cache-line hop between cores at a time
+  (~200 ns). So the loop cannot end sooner than ~1 ms however many
+  threads work on it.
+- The serial-reason table says where P1 v8 missed. The common serial
+  aircraft are strafe aircraft taking off and hover aircraft parked
+  landed. The flying zero-speed ones v8 targeted are only a few hundred.
+
+**P1 v9** (`toggle2` `0x20`, `speed42`):
+- **Items are claimed in batches** of consecutive planned-parallel units:
+  8 (`toggle2` bits 6-7: 8, 4, 16, 32), never across a planned serial
+  item, which stays a batch of its own.
+- **The batch takes the in-order start once.** The owner checks every item's
+  plan (early, off the chain, re-checked at the turn if a serial item ran
+  meanwhile), passes the start past the items that still hold, and runs
+  them in order, each waiting for its targets as in v7.
+- **An item whose plan fails keeps the start.** Nothing later can begin
+  while it runs serially, exactly as `Process` handles it, and the rest of
+  its batch goes item by item.
+- The chain drops from ~5,600 hops a frame to ~700-950.
