@@ -13,8 +13,8 @@
     <text x="30" y="166">ordering edge (here: C after A, B; C before D, E, F).</text>
     <rect x="30" y="182" width="12" height="12" fill="#d9e8f6" stroke="#3a6ea5"/><text x="48" y="193">new state (frame N+1)</text>
     <rect x="200" y="182" width="12" height="12" fill="#f2f2f2" stroke="#999"/><text x="218" y="193">old state (frame N)</text>
-    <text x="30" y="230" fill="#c0392b">P1 has to keep "my target after me / before me"</text>
-    <text x="30" y="248" fill="#c0392b">edges and start items in loop order to stay exact.</text>
+    <text x="30" y="230" fill="#c0392b">Our exact parallel aircraft loop must keep "after/before my</text>
+    <text x="30" y="248" fill="#c0392b">target" edges and start aircraft in loop order.</text>
   </g>
   <g>
     <rect x="470" y="60" width="370" height="30" fill="#f2f2f2" stroke="#999"/>
