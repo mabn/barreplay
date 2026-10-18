@@ -2516,3 +2516,42 @@ in `CQuadField::GetQuads` called from P3's precompute on a worker thread. A
 the main thread's, so two workers corrupted it; the existing parallel callers
 (move types, trap checks) set `threadOwner = ThreadPool::GetThreadNum()`, and
 now P3 does too. Rebuilding.
+
+### 2026-10-18 04:45 — speed29 identical, but slower: +3.0% with its toggles off, +2.4% more with them on
+
+`speed29` (P3's thread-pool fix in), medium gate with everything on
+(`t=7ffbf`): **`0558d354…`, identical**, no desync lines. P3 replays ~85% of
+the scans even with the coarse invalidation: 34k replays against 5k
+fallbacks per 1800 frames in the second half of the game.
+
+H84's join site is `ILosType::InSight` (not inlined in this build). The
+first synced reader after the background start is BAR's `api_teamstats`
+gadget: its `GameFrame` runs `scanStep` every frame, and that calls
+`GetPositionLosState` for a quota of map points and every ally team. So the
+overlap H84 gets is the end of the frame (intercepts, team and player
+updates, `GameFramePost`) plus the stretch between frames, up to that gadget
+in the next frame's `GameFrame`. A Lua LOS query has to see the frame's
+final maps, so nothing exact can move it later.
+
+Late window, interleaved, 3 pairs each:
+
+| A/B | A | B | change |
+|---|---|---|---|
+| `speed29` base vs everything on (`t=7fbf` vs `t=7ffbf`) | 11.17 / 11.10 / 11.23 s (11.17) | 11.44 / 11.38 / 11.50 s (11.44) | **+2.4%** wall, +2.0% cycles, instructions ±0 |
+| `speed24` vs `speed29`, both `t=7fbf` | 10.82 / 10.63 / 10.51 s (10.65) | 10.84 / 11.04 / 11.03 s (10.97) | **+3.0%** wall, +3.1% cycles, **+2.5% instructions** |
+
+**The new build is slower with every new toggle off.** The extra
+instructions point at two things:
+
+- **The always-on hook checks.** One flag load and branch each: in every
+  `InSight`, `UpdateMidAndAimPos`, `SetSpeed`, `SetPosition` and Lua control
+  call.
+- **Lost PGO, more likely the bulk of it.** GCC drops a function's profile
+  when its control flow no longer matches the one it was trained on, and the
+  hooks inline into hot code: `UpdateMidAndAimPos` into every move path,
+  `SetSpeed` into the move types, plus the reworked scan, the unit handler's
+  loops, the LOS handler and all 188 Lua control functions. Those functions
+  now compile without their profile, and PGO was worth ~10% when introduced.
+
+The per-toggle A/Bs (H84, H85, P3 and H86 each alone) are running. A
+profile retrained on this code would separate the two causes.
