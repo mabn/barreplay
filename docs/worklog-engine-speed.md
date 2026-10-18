@@ -2685,3 +2685,29 @@ it is also the test of whether the blow-up is gone.
 other thread on 0-2,4-6, as the bench harness runs. Threads created later
 (H71's huge-page collapser starts at frame 0) inherit the main thread's cpu,
 so they are moved off it every 10 s.
+
+### 2026-10-18 04:42 — governed whole game, H87 + 7 threads: 13m50s active, identical, no runaway memory
+
+`speed30` (`speed24h` + H87), `t=87fbf`, `-worker-threads 7`
+(unpinned), the same governor (pause at 88 C, resume at 55 C, start at 50 C):
+
+| governed whole game | active sim | main-thread cycles | peak memory |
+|---|---|---|---|
+| `speed24`, 4 threads (10-17 20:15) | ~14m39s | 3.27e12 | — |
+| `speed30` (H87), 7 threads | **13m50.1s** | 3.08e12 | 6.03 GiB |
+| change | **-5.6%** | -5.8% | |
+
+Details: sim 30m58s, of which 17m08s paused; load 18 s; **`a26e920d…`,
+identical**; +306 throttle events. The six workers ran 0.84 / 0.67 / 0.67 /
+0.67 / 0.66 / ... e12 cycles. The cycles, which do not depend on the clock,
+agree with the time. The late window showed -2.5% from 7 threads. The whole
+game gains more because earlier phases have proportionally more fork-join
+work: pathfinding, LOS and ground movement with fewer units each.
+
+The memory stayed flat to the end: 6.0 GB at the peak, 5.0 GB at the last
+frame. The previous attempt with the same thread count, without H87, was
+killed at frame 60 at 12.5 GB.
+
+Next (running automatically): `speed31` = `speed30` + H88 + H89, with
+a PGO profile retrained on its own code (instrumented build, the three
+training replays, PGO+LTO build), then its gate and A/Bs.
