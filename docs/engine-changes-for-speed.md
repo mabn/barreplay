@@ -3,7 +3,8 @@
 *First written 2026-10-17, rewritten 2026-10-18 for readers who know the Recoil
 engine but have not followed this repo's speed work. The measurements come
 from [worklog-engine-speed.md](worklog-engine-speed.md); the engine patches
-they refer to are listed at the end.*
+they refer to are listed at the end. What was done and how it was measured
+is described in [engine-speed-work.md](engine-speed-work.md).*
 
 ## Context
 

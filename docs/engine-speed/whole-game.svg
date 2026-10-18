@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="220" viewBox="0 0 900 220" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1d1f23">
+  <rect width="900" height="220" fill="#ffffff"/>
+  <text x="20" y="22" font-size="15" font-weight="bold">verylarge1, whole game (90,900 frames), active simulation time</text>
+  <g stroke="#d9d6cf"><line x1="260" y1="36" x2="260" y2="180"/><line x1="410" y1="36" x2="410" y2="180"/><line x1="560" y1="36" x2="560" y2="180"/><line x1="710" y1="36" x2="710" y2="180"/></g>
+  <g font-size="12" fill="#5d6470" text-anchor="middle"><text x="260" y="210">0</text><text x="410" y="210">10 min</text><text x="560" y="210">20 min</text><text x="710" y="210">30 min</text></g>
+  <text x="250" y="62" text-anchor="end">stock 2026.07.04</text>
+  <rect x="260" y="46" width="574" height="24" fill="#8a919c"/><text x="840" y="63">38m17s</text>
+  <text x="250" y="102" text-anchor="end">published patched build</text>
+  <rect x="260" y="86" width="408" height="24" fill="#e6e7ea" stroke="#8a919c"/><text x="674" y="103">27m12s-29m46s</text>
+  <text x="250" y="142" text-anchor="end">all exact changes, 4 threads</text>
+  <rect x="260" y="126" width="220" height="24" fill="#7cc4bd"/><text x="486" y="143">~14m39s (2.6x)</text>
+  <text x="250" y="182" text-anchor="end">... + 4 more, 7 threads, pinned</text>
+  <rect x="260" y="166" width="200" height="24" fill="#0f8f86"/><text x="466" y="183" font-weight="bold">13m21s (2.9x)</text>
+</svg>

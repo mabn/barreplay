@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="240" viewBox="0 0 900 240" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1d1f23">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5d6470"/></marker></defs>
+  <rect width="900" height="240" fill="#ffffff"/>
+  <text x="582" y="30" text-anchor="middle" font-size="12" font-weight="bold">frame 63,780</text>
+  <rect x="30" y="44" width="540" height="32" rx="4" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="300" y="65" text-anchor="middle">re-simulate once, frames 0 to 63,780</text>
+  <rect x="570" y="44" width="24" height="32" rx="4" fill="#d5efec" stroke="#0f8f86"/>
+  <rect x="594" y="44" width="276" height="32" rx="4" fill="#efede8" stroke="#d9d6cf"/>
+  <text x="732" y="65" text-anchor="middle" fill="#5d6470">rest of the game (to frame 90,900)</text>
+  <text x="582" y="98" text-anchor="middle" font-size="12" fill="#5d6470">~10,500 units</text>
+  <path d="M582 104 L582 130" stroke="#5d6470" stroke-width="1.5" marker-end="url(#a)"/>
+  <rect x="440" y="132" width="284" height="40" rx="6" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="582" y="149" text-anchor="middle" font-weight="bold">CRIU checkpoint of the parked engine</text>
+  <text x="582" y="165" text-anchor="middle" font-size="12" fill="#5d6470">about 6 GB; one per engine build</text>
+  <path d="M440 152 L300 152 L300 184" stroke="#5d6470" stroke-width="1.5" fill="none" marker-end="url(#a)"/>
+  <path d="M724 152 L740 152 L740 184" stroke="#5d6470" stroke-width="1.5" fill="none" marker-end="url(#a)"/>
+  <rect x="140" y="186" width="320" height="40" rx="6" fill="#ffffff" stroke="#d9d6cf"/>
+  <text x="300" y="203" text-anchor="middle">trial A: restore, time the next 450 frames</text>
+  <text x="300" y="219" text-anchor="middle" font-size="12" fill="#5d6470">15 s of game time, main thread pinned</text>
+  <rect x="580" y="186" width="300" height="40" rx="6" fill="#ffffff" stroke="#d9d6cf"/>
+  <text x="730" y="203" text-anchor="middle">trial B: the same state, one switch flipped</text>
+  <text x="730" y="219" text-anchor="middle" font-size="12" fill="#5d6470">A B A B ..., compared in cycles</text>
+</svg>
