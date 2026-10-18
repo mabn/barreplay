@@ -3498,3 +3498,40 @@ tick's cycles:
   25 hottest, only 3 stay serial: `ARMBANTH` `Walk` (a detonate-weapon
   stomp), `LEGNANOTCTEMP` `RequestState` (`SHOW`) and `armmar` `Walk`
   (`lua_UnitScriptDecal`).
+
+### 2026-10-18 13:38 — P5 v1: identical, but no faster yet
+
+`speed37` (P5 v1). Medium gate `1cd87a3f` (P4, H92, H93, P5): **`0558d354…`**.
+On the medium game 85% of the COB ticks ran on workers, in segments of
+~23 ticks. Its sim was 1m12s against 1m08s: on a small game the scheduling
+costs more than it gives.
+
+Late window, 3 interleaved pairs against `cd87a3f`:
+
+| | without P5 | with P5 v1 | |
+|---|---|---|---|
+| wall | 9.92 / 9.66 / 9.65 s (9.74) | 9.86 / 9.66 / 9.81 s (9.78) | +0.4% |
+| main cycles | 36.10e9 | 36.35e9 | +0.7% |
+| main instructions | 35.78e9 | 34.86e9 | -2.6% |
+
+P5's counters over 900 late frames, per frame:
+
+| | per frame |
+|---|---|
+| ticks | 1,050 |
+| on workers | 49% |
+| segments | 27.5 (18.8 ticks each) |
+| serial points (`RAND`, `START`) | 82 |
+
+**Insights:**
+- **Only half the late game's ticks qualify, against 85% in the medium
+  game.** The late game has many more hover units, and each one's
+  `HoverCraftMotion` is a barrier because of its wake sfx. v2 removes that
+  (`speed38`, building).
+- **The main thread did not save the cycles the workers took.** Two costs
+  are suspects. Classification costs two hash lookups per tick (the thread
+  table, and the per-script safety memo keyed by `CCobFile*`), plus a hash
+  map for per-unit chaining, for ~1,050 ticks a frame on the main thread.
+  v3 (`speed39`) moves the memo into the COB file and the chaining into the
+  instance, and reuses the classification's thread pointer (the registry is
+  node-based, and only a thread's own tick erases it).
