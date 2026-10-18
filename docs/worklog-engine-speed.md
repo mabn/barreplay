@@ -2425,3 +2425,61 @@ They add up to ~15-18%. Moonshots that could cover the rest:
 | M1: optimistic parallel unit loops (slow update, weapons) with per-object write tracking and in-order commit or rollback, P1 generalized | up to the bound above | weeks; COB calls on every weapon `SlowUpdate` (`QueryWeapon`, `AimFromWeapon`) would need a thread-safe pure-COB evaluator first |
 | M2: compile BAR's hot gadget Lua ahead of time to C on the same VM primitives (same table operations in the same order, so the same state) | <= 8% (the interpreter's share) | high |
 | M3: clang + ThinLTO + its own PGO | +-5% | the pinned build image (Ubuntu 18.04) has gcc-13 only; UB could desync |
+
+### 2026-10-18 02:50 — H85 and P3 written; the first H84 build had the sync checker on
+
+The first `speed28` build failed: `build-pgolto-g.sh` was run without
+`EXTRA_CMAKE="-DSYNCCHECK=OFF"`, so `SyncedFloat3` came back and P1's crash
+check no longer compiled. The speed README says to pass it; rebuilt with it.
+
+**H85** (toggle `0x10000`, in `speed28`): P2's serial apply pass walked all
+~10k units' LOS states every frame to apply the few that changed. The
+parallel pass already compares each new status with the current one, so it
+now marks the units that changed, and the serial pass visits only those, in
+the same order. This is exact: an unmarked unit had new == current, and
+nothing between the two passes can change a status (an apply fires only
+unsynced events), so the old pass found it equal and did nothing.
+
+**P3** (toggle `0x20000`, Recoil `speed29` = `speed28` + P3): the slow-update
+slice's targeting scans (`GenerateWeaponTargets`, 4.7% of the main thread)
+are precomputed on all threads before the slice's serial loop, then replayed
+in order.
+
+- **What the scan really depends on.** It visits, team by team, the enemy
+  units in the quads around the owner, in quad and list order, keeping each
+  unit's first occurrence. Of most candidates it reads only two things
+  before rejecting them: the LOS state for the owner's ally team, and the
+  target position (aimPos, or the radar position with the weapon's error).
+  Every other read happens after the range check, on the few that pass.
+- **Precompute.** For each weapon in the slice that can auto-target, it
+  records every enemy unit in a slightly larger set of quads, with those two
+  values. `GetQuads` of a larger radius returns a superset in the same
+  row-major order: its rectangle and its circle test both grow with the
+  radius.
+- **Replay.** At the weapon's turn it takes the exact quads, keeps the first
+  occurrence of each unit, and hands each to the scan's own scoring (the
+  original loop body, factored out unchanged as `BrScoreCandidate`). So the
+  same `AllowWeaponTarget` calls are made, in the same order, and the same
+  sorted list comes out. Only units that pass range and LOS have their
+  memory touched.
+- **Validity.** Write hooks (`BrLosJoin.h`) mark:
+  - a unit, when its LOS state, mid/aim position, position or speed is
+    written (the speed scales a radar target's error);
+  - a quad, when its unit lists change (`MovedUnit`, `RemoveUnit`);
+  - everything, on any synced Lua control call, COB set-value, team change
+    or radar error size change.
+
+  A replay also needs the owner unmarked and at the same position, its exact
+  radius inside the precomputed one, and the weapon's error vector,
+  ground-target flag and move-error experience as recorded. Otherwise the
+  weapon scans the old way.
+- **Inputs stable during the loop by construction**: the radar position
+  error (`posErrorVector` changes in `CUnit::Update`, after the loop), the
+  weapon error vector (also in `CUnit::Update`) and the height bounds (frame
+  start).
+- **tempNum.** The replay sets no tempNum marks. Each scan takes a fresh
+  number and nothing compares a mark against an older one, but
+  `gs->GetTempNum()` is still called once per scan to keep the counter
+  where it was.
+
+`BARREPLAY_P3_STATS=1` logs replays against fallbacks.
