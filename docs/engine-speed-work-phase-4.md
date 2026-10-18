@@ -116,21 +116,17 @@ rules to change, which is what
 ## The changes
 
 Every change belongs to one of five kinds, and each kind has its own section
-below. Each change also has a "where" column saying how far it has got. Only
-the first two are in use today; the other three exist only on the
-`speed-optimization-2` branch, which is not merged.
+below. Each change also has a "where" column saying how far it has got:
 
 - **tagged**: in the patched engine re-sim hosts download today,
   `patched-engine/2026.7.4-barreplay.3` (revision 3 of the patch series);
 - **main**: in barreplay's main branch, outside the engine (the engine config
   barreplay writes);
-- **series**: engine patches listed in the patch series file, so they become
-  revision 4 of the patched engine once it is built, gated and tagged;
-- **widget**: barreplay's capture widget and the widget config it seeds; these
-  need no engine build and apply to every re-sim once merged;
-- **speed**: engine patches kept outside the series, behind on/off toggles and
-  built without the sync checker. They are the experimental part: gated
-  byte-identical, but not yet in any revision.
+- **rev 4**: engine patches for revision 4 of the patched engine, which is
+  still being put together on the `speed-optimization-2` branch;
+- **widget**: barreplay's capture widget and the widget config it seeds, also
+  on `speed-optimization-2`; they need no engine build and apply to every
+  re-sim once merged.
 
 "Where each change lives" below has the details. Gains are on the late window
 unless stated otherwise, each measured alone against the build before it, so
@@ -146,13 +142,13 @@ are older and were measured on other games, so they are only in the tables.
 | demo playback not paced by the client-CPU governor: in demo playback the local `CGameServer` holds the client's sim at 60% of the CPU (`LagProtection`); a replay has nothing to protect | tagged | -15% wall |
 | no save of the previous frame's transforms (draw interpolation state) in headless runs | tagged | -3.7% instructions |
 | no `.smt` map tile decode in headless runs | tagged | -25% load time |
-| Lua callin timers run only while the profiler is on (they wrapped every callin) | series | -5.3% together with the loop prefetch (section 3) |
+| Lua callin timers run only while the profiler is on (they wrapped every callin) | rev 4 | -5.3% together with the loop prefetch (section 3) |
 | the Widget Selector's profiler column off (it wrapped every widget callin in a timer) | widget | -2.4% wall |
 | BAR's ~320 game widgets set to off in the seeded widget config, names read from the game package; BAR's 2026.10.13 sandbox took away the widget's old runtime way of doing this | widget | -6.2% |
-| build with `SYNCCHECK=OFF`: the sync checker hashes every synced write, and only multiplayer desync detection reads the hash (needed four small compile fixes) | speed | -7.9% |
-| the per-animation checksum in `TickAllAnims` computed only with the sync checker | speed | in the above |
-| skip the eager piece-transform walk in headless demo playback; the transforms only feed drawing (the old `#ifdef HEADLESS` versions of such patches never compiled in `rts/Sim`) | speed | -2.9% wall |
-| a headless demo queues no unsynced height-map updates (their rectangle queue once grew to 4 GiB from garbage rectangles) | speed | robustness, speed-neutral |
+| build with `SYNCCHECK=OFF`: the sync checker hashes every synced write, and only multiplayer desync detection reads the hash (needed four small compile fixes) | rev 4 | -7.9% |
+| the per-animation checksum in `TickAllAnims` computed only with the sync checker | rev 4 | in the above |
+| skip the eager piece-transform walk in headless demo playback; the transforms only feed drawing (the old `#ifdef HEADLESS` versions of such patches never compiled in `rts/Sim`) | rev 4 | -2.9% wall |
+| a headless demo queues no unsynced height-map updates (their rectangle queue once grew to 4 GiB from garbage rectangles) | rev 4 | robustness, speed-neutral |
 
 ### 2. Running serial work in parallel, exactly
 
@@ -215,10 +211,10 @@ make the same work cheaper rather than removing it.
 |---|---|---|
 | `StaticMemPool` pages zeroed when handed out, not all at startup (the loader already zeroed them) | tagged | -1.05 GiB memory |
 | `TextureMemPoolSize = 0` in the engine config, so no 512 MB bitmap arena is zeroed at startup | main | -0.5 GB memory |
-| prefetch the unit 8 ahead (its move type and first weapon 4 ahead) in the four per-unit loops | series | in the -5.3% above |
-| a low-priority thread folds every large private anonymous mapping into huge pages every 2 s (no root, no host setting) | series | -19% main-thread user cycles on a fresh run |
-| `GenerateWeaponTargets` prefetches the candidate 6 ahead | speed | -1.2% (4 threads; costs time at 7, off there) |
-| `MovedUnit` copies the quad list instead of taking a pooled buffer (a malloc and free per move) | speed | not measured alone |
+| prefetch the unit 8 ahead (its move type and first weapon 4 ahead) in the four per-unit loops | rev 4 | in the -5.3% above |
+| a low-priority thread folds every large private anonymous mapping into huge pages every 2 s (no root, no host setting) | rev 4 | -19% main-thread user cycles on a fresh run |
+| `GenerateWeaponTargets` prefetches the candidate 6 ahead | rev 4 | -1.2% (4 threads; costs time at 7, off there) |
+| `MovedUnit` copies the quad list instead of taking a pooled buffer (a malloc and free per move) | rev 4 | not measured alone |
 
 ### 4. Less work per call
 
@@ -227,12 +223,12 @@ make the same work cheaper rather than removing it.
 | a coarse grid of "exit-only" yardmap squares, so footprint checks skip blocks that have none ([upstream PR #3254](https://github.com/beyond-all-reason/RecoilEngine/pull/3254), open) | tagged | -16% instructions |
 | PGO + LTO build | tagged | -10% |
 | smaller cuts: a cached collision lookup, COB jump-table dispatch, animation ticks, thread-pool batching, path-grid relinking | tagged | -0.3% to -1.1% each |
-| unit loops hand out chunks of at most 32 units (the main thread used to wait for the slowest worker's quarter) | speed | -2.2% |
-| quad lookups (`GetQuads`) find each row's run of quads from its two ends | speed | -1.7% |
-| `FindAnim` searches on one packed 64-bit key | speed | noise level |
-| `UpdatePhysicalState` reuses the ground height while the unit's x/z and the height map are unchanged | speed | -2.2% at 7 threads |
-| the Lua VM's table get and set do their first step inline | speed | in the 7-thread result |
-| `UpdateUnits` does `UpdateCollisionMap`'s rate test itself, so two units in three never touch their move type | speed | in the 7-thread result |
+| unit loops hand out chunks of at most 32 units (the main thread used to wait for the slowest worker's quarter) | rev 4 | -2.2% |
+| quad lookups (`GetQuads`) find each row's run of quads from its two ends | rev 4 | -1.7% |
+| `FindAnim` searches on one packed 64-bit key | rev 4 | noise level |
+| `UpdatePhysicalState` reuses the ground height while the unit's x/z and the height map are unchanged | rev 4 | -2.2% at 7 threads |
+| the Lua VM's table get and set do their first step inline | rev 4 | in the 7-thread result |
+| `UpdateUnits` does `UpdateCollisionMap`'s rate test itself, so two units in three never touch their move type | rev 4 | in the 7-thread result |
 
 At seven threads, three changes tuned at four (landed and taking-off aircraft
 in P1, and two prefetches) cost time and are switched off in the best
@@ -245,10 +241,10 @@ calls into the engine.
 
 | change | where | gain |
 |---|---|---|
-| `Spring.GetUnitSampleData`: the widget's per-second sample in one engine call instead of ~8 per unit | series | part of revision 4 |
-| the engine logs every write of a weapon's reload state, so the widget reads that log instead of polling every launcher every frame | series | -1.7% |
+| `Spring.GetUnitSampleData`: the widget's per-second sample in one engine call instead of ~8 per unit | rev 4 | part of revision 4 |
+| the engine logs every write of a weapon's reload state, so the widget reads that log instead of polling every launcher every frame | rev 4 | -1.7% |
 | a re-sim-only sample loop in the widget, without branches a full-view re-sim cannot take | widget | -1.4% |
-| `Spring.GetUnitSampleDelta`: the widget's whole sample loop done in the engine | speed | -7.2% with its widget side |
+| `Spring.GetUnitSampleDelta`: the widget's whole sample loop done in the engine | rev 4 | -7.2% with its widget side |
 
 ### A bug fix worth taking upstream
 
@@ -304,20 +300,22 @@ qualify.
 
 Everything below is only on `speed-optimization-2`:
 
-- **Series** (patches 0010-0013): added to the `series` file, so the next
-  build of the patched engine includes them. That build has not been made,
-  gated, uploaded or tagged yet, so hosts still use revision 3.
+- **Rev 4**: revision 4 of the patched engine, in progress. No build of it has
+  been gated, uploaded or tagged yet, so hosts still use revision 3. Its
+  patches are in two places for now:
+  - 0010-0013 are already listed in the `series` file, so a build of the
+    series includes them;
+  - 0014-0043, 0063-0067 and 0069-0070 (`patches/engine-2026.07.04/speed/`,
+    from the Recoil branches up to `speed37`) are not listed yet. Most sit
+    behind bits of `BARREPLAY_TOGGLES` so that one build can compare them, and
+    they need a build with `SYNCCHECK=OFF`, which also means a re-sim no longer
+    reports desyncs in its log; the byte-identity gate is what remains.
+  Finishing revision 4 means listing the kept ones in `series` and gating and
+  tagging a build.
 - **Widget**: the capture widget (1.13.0) and its seeded widget config. They
   take effect for every re-sim as soon as the branch is merged and the re-sim
-  daemon restarted; the two engine calls the widget uses (series) switch on
-  only on an engine that has them.
-- **Speed** (patches 0014-0043, 0063-0067 and 0069-0070 under
-  `patches/engine-2026.07.04/speed/`, plus Recoil branches up to `speed37`):
-  not in the `series` file, so no revision includes them. Most sit behind bits
-  of `BARREPLAY_TOGGLES`, and they need a build with `SYNCCHECK=OFF`, which
-  also means a re-sim no longer reports desyncs in its log; the byte-identity
-  gate is what remains. Making them revision 5 means listing them in `series`,
-  gating and tagging a build.
+  daemon restarted; the two engine calls the widget uses switch on only on an
+  engine that has them.
 
 ## Appendix: this repo's names for the changes
 
