@@ -2836,10 +2836,10 @@ says where the main thread's latency goes:
 | everything else (Lua heap, pieces, scripts, quads, LOS maps) | 56.8% |
 
 Inside the unit pool the hottest fields are spread over the whole ~4.4 KB
-object, each 0.6-1.3%: \`id\` (+184), the position (+224/232),
-\`physicalState\` (+464), the direction vectors (+1000-1032), \`moveType\`
+object, each 0.6-1.3%: `id` (+184), the position (+224/232),
+`physicalState` (+464), the direction vectors (+1000-1032), `moveType`
 (+1272) and its embedded state (+1880), and the state flags at the far end
-(\`isDead\`, \`beingBuilt\`, \`deathScriptFinished\`, \`stunned\`:
+(`isDead`, `beingBuilt`, `deathScriptFinished`, `stunned`:
 +4245-4321). A loop reading a handful of them touches a handful of lines per
 unit. Packing the fields by which loops read them together is the one exact
 lever aimed at this. It covers about a third of the latency, and H83's
