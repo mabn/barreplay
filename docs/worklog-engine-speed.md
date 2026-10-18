@@ -2483,3 +2483,27 @@ in order.
   where it was.
 
 `BARREPLAY_P3_STATS=1` logs replays against fallbacks.
+
+### 2026-10-18 03:30 — H84 + H85 gate identical; H84's join comes before the work is done
+
+`speed28` (H84 + H85, rebuilt with `SYNCCHECK=OFF`), medium gate with both
+on (`t=1ffbf`): **`0558d354…`, identical**, no desync lines. The join
+statistics (`BARREPLAY_H84_STATS=1`) show exactly one join per frame, and
+in the second half of the game every join waits:
+
+| frames | joins | waited | time waiting |
+|---|---|---|---|
+| 0-1800 | 1800 | 47 | 0.1 ms |
+| 5400-7200 | 1800 | 447 | 12.0 ms |
+| 10800-12600 | 1800 | 1608 | 97.9 ms |
+| 14400-16200 | 1800 | 1800 | 126.9 ms (0.07 ms a frame) |
+
+So whatever reads LOS first comes before the background update has
+finished, and part of its time is still on the main thread's path. `speed29`
+(H84 + H85 + P3 + H86) logs the call site of each join, to tell whether that
+reader is a gadget in `GameFramePost`/`GameFrame` (a Lua LOS query) or the
+next frame's map damage / unit update.
+
+H86 (toggle `0x40000`): `QueueDeleteUnits` prefetches the death flag 16
+units ahead. The loop reads one byte of every unit, a DRAM miss each (1.9%
+of the main thread's L3 misses).
