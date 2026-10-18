@@ -2507,3 +2507,12 @@ next frame's map damage / unit update.
 H86 (toggle `0x40000`): `QueueDeleteUnits` prefetches the death flag 16
 units ahead. The loop reads one byte of every unit, a DRAM miss each (1.9%
 of the main thread's L3 misses).
+
+### 2026-10-18 03:55 — P3's first build crashed in its own precompute
+
+`speed29`, medium gate with everything on (`t=7ffbf`): segfault at frame 393
+in `CQuadField::GetQuads` called from P3's precompute on a worker thread. A
+`QuadFieldQuery` draws its vectors from a per-thread pool and defaults to
+the main thread's, so two workers corrupted it; the existing parallel callers
+(move types, trap checks) set `threadOwner = ThreadPool::GetThreadNum()`, and
+now P3 does too. Rebuilding.
