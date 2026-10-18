@@ -2091,6 +2091,11 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           one is an ordinary resim. jobs.install_id (schema 8, partial index jobs_install) ties
                           an install's app jobs and .brp uploads together: GET /api/admin/queue?install=<id>
                           (jobsByInstall), reached from a row's Install line on the queue page.
+                          The app uploads its .brp with ?appJob=<its app job>, which makes the upload
+                          job a CHILD (jobs.parent_id, schema 9, partial index jobs_parent; accepted
+                          only for an app job of the same game): bringest still publishes it as any
+                          upload, but the queue lists only the app row and shows the publish inside it
+                          (QueueJob.publish, app.js publishText) — two rows for one run read as two runs.
                           JOB KINDS: jobs.kind is "upload" | "resim" | "app", a KIND rather than a fifth
                           state because the four states describe both equally well — what
                           differs is the work, not the progress. The contract (JobKind,

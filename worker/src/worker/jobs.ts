@@ -74,6 +74,9 @@ export interface IngestJob {
    * of the .brp it produced), so every job from one PC can be found. Null for
    * everything bringest does. */
   installId: string | null;
+  /** The "app" job an upload job publishes the .brp of; null otherwise. The
+   * queue shows such an upload inside its parent's row (QueueJob.publish). */
+  parentId: string | null;
   /** R2 key of the archived raw stream (streams/<gameId>/<ts>-<who>.brepstream).
    * Empty for a "resim" job, which has no uploaded stream — the demo it works
    * from is fetched from the BAR API by the daemon. */
@@ -200,8 +203,20 @@ export interface QueueGame {
   settings: Record<string, boolean | string> | null;
 }
 
-/** One row of the queue page: the job, plus what is known about its game. */
-export type QueueJob = IngestJob & { game: QueueGame | null };
+/** The publish of an app run's .brp: the upload job created for it, as the
+ * queue shows it inside the app's row. */
+export interface JobPublish {
+  id: string;
+  state: IngestJob["state"];
+  error: string | null;
+  /** What bringest measured publishing it (pack/upload time, its host). */
+  stats: JobStats | null;
+  updatedUnix: number;
+}
+
+/** One row of the queue page: the job, plus what is known about its game,
+ * plus — for an "app" job — the publish of the .brp it made. */
+export type QueueJob = IngestJob & { game: QueueGame | null; publish: JobPublish | null };
 
 /** JobSample is one healthcheck kept as HISTORY — the same reading JobProgress
  * carries, plus the moment the worker recorded it, stored as its own row in

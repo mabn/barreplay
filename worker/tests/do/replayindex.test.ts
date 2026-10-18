@@ -2042,6 +2042,38 @@ test("an app job starts processing, puts its game in the list, and expires when 
   });
 });
 
+// The .brp an app run uploads is published by an ordinary upload job, but it
+// is part of the run: one entry in the queue, the publish shown inside it.
+test("an app run's upload is shown inside the run's queue row, not as a row of its own", async () => {
+  await inIndex((index) => {
+    const install = "01920000-0000-7000-8000-000000000004";
+    index.gamesInsert([game("g5")]);
+    index.appJobStart("a5", "g5", install, null);
+    index.jobInsert("u5", "streams/x", "g5", "upload", install, "Uploaded by FogOfWar 0.2.6", "a5");
+    // The daemon still gets it as ordinary work.
+    expect(index.jobsPending("upload").map((j) => j.id)).toEqual(["u5"]);
+    expect(index.jobGet("u5")?.parentId).toBe("a5");
+
+    const page = index.queuePage(25, 0);
+    expect(page.jobs.map((j) => j.id)).toEqual(["a5"]);
+    expect(page.total).toBe(1);
+    expect(page.jobs[0].publish).toMatchObject({ id: "u5", state: "pending", stats: null });
+
+    index.jobUpdate("u5", "done", null, { packSec: 2, uploadSec: 3 }, null);
+    index.appJobUpdate("a5", "done", null, { tookSec: 131 }, null, null);
+    const done = index.queuePage(25, 0);
+    expect(done.jobs.map((j) => j.id)).toEqual(["a5"]);
+    expect(done.jobs[0].publish).toMatchObject({ id: "u5", state: "done", stats: { packSec: 2, uploadSec: 3 } });
+    expect(index.jobsByInstall(install, 10, 0)).toMatchObject({ total: 1, jobs: [{ id: "a5" }] });
+
+    // A parent that is not an app job of the same game is ignored: the
+    // upload stays a row of its own.
+    index.jobInsert("u6", "streams/y", "g6", "upload", install, null, "a5");
+    expect(index.jobGet("u6")?.parentId).toBeNull();
+    expect(index.queuePage(25, 0).jobs.map((j) => j.id).sort()).toEqual(["a5", "u6"]);
+  });
+});
+
 test("the app's update refuses a daemon's job, and an install's jobs list together", async () => {
   await inIndex((index) => {
     const install = "01920000-0000-7000-8000-000000000002";

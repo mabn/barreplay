@@ -75,10 +75,12 @@ class FakeIndex {
     kind: JobKind = "upload",
     installId: string | null = null,
     note: string | null = null,
+    parentId: string | null = null,
   ): void {
     this.jobs.set(id, {
       id,
       installId,
+      parentId,
       streamKey,
       gameId,
       kind,
@@ -2114,6 +2116,16 @@ test("the app's open routes refuse a daemon's job and bad input", async () => {
   assert.equal(noInstall.status, 400);
 });
 
+test("an upload names the app run it publishes (?appJob=), and a malformed id is ignored", async () => {
+  const { env, index } = makeEnv();
+  const run = "0192aaaa-0000-7000-8000-000000000001";
+  const up = await app.request(`/api/upload?install=${INSTALL}&app=0.2.6&appJob=${run}`, { method: "POST", body: fixture() }, env);
+  assert.equal(up.status, 200);
+  assert.equal(index.jobGet((await asJson(up)).job)!.parentId, run);
+  const bad = await app.request(`/api/upload?appJob=x'--`, { method: "POST", body: fixture() }, env);
+  assert.equal(index.jobGet((await asJson(bad)).job)!.parentId, null);
+});
+
 test("an upload names the app install it came from, and the queue filters by it", async () => {
   const { env, index } = makeEnv();
   const up = await app.request(`/api/upload?install=${INSTALL}&app=0.2.5`, { method: "POST", body: fixture() }, env);
@@ -2121,6 +2133,7 @@ test("an upload names the app install it came from, and the queue filters by it"
   const { job } = await asJson(up);
   assert.equal(index.jobGet(job)!.installId, INSTALL);
   assert.equal(index.jobGet(job)!.note, "Uploaded by FogOfWar 0.2.5");
+  assert.equal(index.jobGet(job)!.parentId, null);
   await app.request("/api/upload", { method: "POST", body: fixture() }, env); // not the app's
 
   const page = await asJson(await app.request(`/api/admin/queue?install=${INSTALL}`, {}, env));

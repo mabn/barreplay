@@ -5862,7 +5862,11 @@ function statsLines(j, s) {
     add('App settings', set.join(' · ') || null);
   }
   if (j.installId) add('Install', installLink(j.installId));
-  if (s.uploadJob) add('Upload job', s.uploadJob);
+  // An app run's .brp is published on the site by an ordinary upload job,
+  // shown here rather than as a second row: its own numbers (and the
+  // publishing server's bringest) are about the publish, not the re-sim.
+  if (j.publish) add('Published', publishText(j.publish));
+  else if (s.uploadJob) add('Upload job', s.uploadJob);
   if (s.phases && s.phases.length) {
     add('Phases', s.phases.map(p => `${p.phase} ${fmtDur(p.sec)}`).join(' · '));
   }
@@ -5933,6 +5937,19 @@ function statsLines(j, s) {
       + (h.diskFreeBytes ? ' · ' + fmtSize(h.diskFreeBytes) + ' disk' : '') : null);
   }
   return out;
+}
+
+// publishText says how far the site got publishing an app run's .brp, and
+// what that cost — done by bringest on the site's server, not by the app.
+function publishText(p) {
+  const words = { pending: 'waiting for the site to publish it', processing: 'publishing',
+    done: 'on the site', error: 'failed: ' + (p.error || 'unknown error') };
+  const bits = [words[p.state] || p.state];
+  const s = p.stats || {};
+  if (s.packSec) bits.push('packed in ' + fmtDur(s.packSec));
+  if (s.uploadSec) bits.push('stored in ' + fmtDur(s.uploadSec));
+  if (s.bringest && s.bringest.sha) bits.push('by bringest ' + s.bringest.sha.slice(0, 12));
+  return bits.join(' · ');
 }
 
 // installLink is an install id as a control that narrows the queue to every
@@ -7283,6 +7300,14 @@ function renderQueue(errMsg) {
     const detail = cell(j.error || (j.progress ? null : j.note) || null, 'detail');
     if (j.error) detail.classList.add('error');
     else if (j.progress) fillProgressCell(detail, j.progress);
+    // A finished app run whose .brp the site has not published (yet, or at
+    // all) says so: the run is done, the replay is not playable until then.
+    else if (j.publish && j.publish.state !== 'done') {
+      detail.textContent = j.publish.state === 'error'
+        ? 'Publishing failed: ' + (j.publish.error || 'unknown error')
+        : 'Publishing on the site…';
+      if (j.publish.state === 'error') detail.classList.add('error');
+    }
     tr.appendChild(actionCell(j));
     tbody.appendChild(tr);
 
