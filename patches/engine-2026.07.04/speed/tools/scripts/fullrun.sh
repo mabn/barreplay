@@ -26,6 +26,18 @@ date +%s.%N > /home/mabn/dev/perf3/full-$tag.start
 : > /home/mabn/dev/perf3/full-$tag.pauses
 # attach only once the thread pool exists: perf stat -p folds threads created later into their parent
 until [ "$(ls /proc/$pid/task 2>/dev/null | wc -l)" -ge 8 ]; do kill -0 $pid 2>/dev/null || { echo "fullrun: engine $pid gone before its thread pool" >&2; exit 1; }; sleep 1; done; sleep 10
+# PIN=1: the main thread alone on cpu ${MAINCPU:-3}, every other thread on ${OTHERCPUS:-0,1,2,4,5,6}
+# (cpu 7, the main thread's hyperthread sibling, left idle), as the bench harness runs
+if [ "${PIN:-0}" = 1 ]; then
+	for t in /proc/$pid/task/*; do taskset -p -c ${OTHERCPUS:-0,1,2,4,5,6} ${t##*/} >/dev/null; done
+	taskset -p -c ${MAINCPU:-3} $pid >/dev/null
+	# threads started later (the huge-page collapser, at frame 0) inherit the
+	# main thread's cpu: move them off it while the engine runs
+	( while kill -0 $pid 2>/dev/null; do
+		for t in /proc/$pid/task/*; do [ "${t##*/}" != $pid ] && taskset -p -c ${OTHERCPUS:-0,1,2,4,5,6} ${t##*/} >/dev/null 2>&1; done
+		sleep 10
+	  done ) &
+fi
 perf stat --per-thread -e instructions:u,cycles:u,task-clock -p $pid -o /home/mabn/dev/perf3/full-$tag.stat &
 sp=$!
 # thermal governor (HOT=0 disables): SIGSTOP the engine near the throttling

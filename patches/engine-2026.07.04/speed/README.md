@@ -9,9 +9,10 @@ revision means listing them in `series`, which needs a new digest pinned,
 a gate and a publish.
 
 Numbering: the 4-digit prefixes continue the series (`../0001`-`0013`), so
-every patch number under `engine-2026.07.04/` is unique: 0014-0043 here,
-0044-0045 and 0052-0062 in `rejected/`, 0046-0051 in `tools/`. Change
-identifiers continue the work log's H-series (H1-H73), with H74-H86 for the
+every patch number under `engine-2026.07.04/` is unique: 0014-0043 and
+0063-0067 here, 0044-0045, 0052-0062 and 0068 in `rejected/`, 0046-0051 in
+`tools/`. Change
+identifiers continue the work log's H-series (H1-H73), with H74-H91 for the
 ones below.
 P1 (with its versions v2-v7), P2, P3, N1 and the widget-side W1-W7 are families
 of their own.
@@ -54,7 +55,8 @@ came from, with only identifiers in comments renamed. Build with
 the sync checker hashes every synced write: 7.9% of the late game, read only
 by multiplayer desync detection. `tools/build-pgolto-g.sh` is the PGO+LTO
 build used throughout (with `-g`, plus `EXTRA_CMAKE`, `LDEXTRA` and `PROFILE`
-hooks). `tools/pgo-profile-speed22.tar.xz` is a PGO profile trained on this
+hooks). `tools/pgo-profile-speed31.tar.xz` is the profile retrained on
+0063-0066 (and H90), which `speed32` builds with. `tools/pgo-profile-speed22.tar.xz` is a PGO profile trained on this
 code with every toggle on (-1.1% in the late window against revision 3's
 profile, which `../pgo/profile.tar.xz` still is).
 
@@ -96,6 +98,10 @@ Not toggled (always on in these builds):
 | 0032 | W6: `Spring.GetUnitSampleDelta`, the capture widget's bulk sample loop in the engine (with widget W7, -7.2% of the late window, governed whole game 16m39s -> 15m25s active) |
 | 0033 | clamp unsynced height-map update rectangles to the map (a symptom of the next one) |
 | 0039 | **upstream bug fix**: `CRectangleOverlapHandler::StageSplitTooLarge` wrote through a reference into a vector across `push_back` (use-after-free, heap corruption; seen as an RmlUi crash at frame 78 of verylarge1 in some builds) |
+| 0063 (H87, toggle `0x80000`) | a headless demo replay queues no unsynced height-map updates: their rectangle queue blew up to 4 GiB from garbage rectangles (the runaway memory of 10-17/18); speed-neutral, kept for robustness |
+| 0064-0065 (H89, no toggle) | the Lua VM's table gets and sets do `luaV_gettable` / `luaV_settable`'s first step inline |
+| 0066 (H88, toggle `0x100000`) | `UpdatePhysicalState` reuses the ground height while the unit's x/z and the height map are unchanged |
+| 0067 (H91, toggle `0x400000`) | `UpdateUnits` does `UpdateCollisionMap`'s rate test itself, so two units in three never touch their move type |
 
 ## rejected/
 
@@ -110,6 +116,7 @@ Not toggled (always on in these builds):
 | `0057-H85…` | H85: the LOS-state apply pass visits only the units whose status changed (toggle `0x10000`) | identical; +0.3% wall, -1.2% instructions, noise |
 | `0058-`, `0061-`, `0062-P3…` | P3: the slow-update slice's targeting scans precomputed on all threads (every enemy unit in a superset of the quads, with its LOS state and target position) and replayed in order, checked against write marks on units, quads and everything (toggle `0x20000`); `0061` gives the precompute's quad queries their own thread's pool (the first build crashed), `0062` narrows the marks (built, not measured) | identical; 85% of scans replayed, but +1.8% wall, +1.4% cycles: the precompute visits more than the scan (larger radius, no dedup) and is a fork-join section of its own |
 | `0059-H86…` | H86: `QueueDeleteUnits` prefetches the death flag 16 units ahead (toggle `0x40000`) | +0.7% wall, noise or worse |
+| `0068-H90…` | H90: `MovedUnit` skips `GetQuads` while the unit stays within the distance at which none of its tests can flip (toggle `0x200000`) | +0.8%: with 128-elmo quads the nearest threshold is a few elmos away and aircraft move 5-15 a frame, so the full computation runs anyway, plus the safe-distance square roots |
 
 H74 (0028-0031) stayed in the main line because later patches were built on
 it; it is off unless bit `0x40` is set. Other experiments of the work that
@@ -132,6 +139,6 @@ slower than gold; CRIU could not checkpoint the result) and x86-64-v3
   power caps), `pgotrain.sh` (PGO training replays), `phases.py` (main-thread
   breakdown from folded stacks), `hotlines.py` (source lines of a function's
   samples), `memfields.py` (load-latency samples mapped to object fields),
-  `luaprof.py`, `bolt.sh`, `ab.sh`, `memwatch.sh` (an engine's RSS every 2 s;
+  `luaprof.py`, `bolt.sh`, `ab.sh`, `memlines.py` (the main thread's unit-pool load latency by 64-byte line of the unit object), `lineprof.sh` (a plain-cycles trial and `perf annotate -l` of the hottest serial functions), `pgobatch.sh` (instrumented build, the training replays, the PGO+LTO build, gate, checkpoint, A/Bs), `memwatch.sh` (an engine's RSS every 2 s;
   past a limit, gdb stacks of every thread and smaps, then kill), `thpscan.py`
   (what collapsing every touched 2 MiB range would cost).

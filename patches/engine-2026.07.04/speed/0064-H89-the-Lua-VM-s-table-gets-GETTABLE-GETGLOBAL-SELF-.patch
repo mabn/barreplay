@@ -1,0 +1,66 @@
+From 1fe6920fc6e31ffcc6fae3f0e21b62ca6b7a2231 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 04:02:14 +0000
+Subject: [PATCH 64/67] H89: the Lua VM's table gets (GETTABLE, GETGLOBAL,
+ SELF) do luaV_gettable's first step inline
+
+(cherry picked from commit a6ffc67f6ab2c6e2649242e4e2b4161e800fc961)
+---
+ rts/lib/lua/src/lvm.cpp | 30 ++++++++++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
+
+diff --git a/rts/lib/lua/src/lvm.cpp b/rts/lib/lua/src/lvm.cpp
+index 845e242..4e337d4 100644
+--- a/rts/lib/lua/src/lvm.cpp
++++ b/rts/lib/lua/src/lvm.cpp
+@@ -540,10 +540,32 @@ void luaV_execute (lua_State *L, int nexeccalls) {
+         TValue *rb = KBx(i);
+         sethvalue(L, &g, cl->env);
+         lua_assert(ttisstring(rb));
++        /* [barreplay] H89: luaV_gettable's first step inline (a primitive get that
++           finds a value, or no __index to consult); otherwise the full call, which
++           repeats the same get first, so the result is the same either way */
++        {
++          Table *h = cl->env;
++          const TValue *res = luaH_getstr(h, rawtsvalue(rb));
++          if (!ttisnil(res) || fasttm(L, h->metatable, TM_INDEX) == NULL) {
++            setobj2s(L, ra, res);
++            vmnext();
++          }
++        }
+         Protect(luaV_gettable(L, &g, rb, ra));
+         vmnext();
+       }
+       vmcase(OP_GETTABLE) {
++        {
++          TValue *rb = RB(i);
++          if (ttistable(rb)) {  /* [barreplay] H89, as in OP_GETGLOBAL */
++            Table *h = hvalue(rb);
++            const TValue *res = luaH_get(h, RKC(i));
++            if (!ttisnil(res) || fasttm(L, h->metatable, TM_INDEX) == NULL) {
++              setobj2s(L, ra, res);
++              vmnext();
++            }
++          }
++        }
+         Protect(luaV_gettable(L, RB(i), RKC(i), ra));
+         vmnext();
+       }
+@@ -574,6 +596,14 @@ void luaV_execute (lua_State *L, int nexeccalls) {
+       vmcase(OP_SELF) {
+         StkId rb = RB(i);
+         setobjs2s(L, ra+1, rb);
++        if (ttistable(rb)) {  /* [barreplay] H89, as in OP_GETGLOBAL */
++          Table *h = hvalue(rb);
++          const TValue *res = luaH_get(h, RKC(i));
++          if (!ttisnil(res) || fasttm(L, h->metatable, TM_INDEX) == NULL) {
++            setobj2s(L, ra, res);
++            vmnext();
++          }
++        }
+         Protect(luaV_gettable(L, rb, RKC(i), ra));
+         vmnext();
+       }
+-- 
+2.53.0
+

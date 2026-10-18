@@ -1,0 +1,59 @@
+From ecb4f37e563ff855b5805d6b23ca47bfc3806b44 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 04:02:54 +0000
+Subject: [PATCH 65/67] H89: table sets (SETTABLE, SETGLOBAL) do
+ luaV_settable's first step inline
+
+(cherry picked from commit 930e6031c212a5aa6436995fbcc0805bc6c150eb)
+---
+ rts/lib/lua/src/lvm.cpp | 27 +++++++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/rts/lib/lua/src/lvm.cpp b/rts/lib/lua/src/lvm.cpp
+index 4e337d4..ad02ecd 100644
+--- a/rts/lib/lua/src/lvm.cpp
++++ b/rts/lib/lua/src/lvm.cpp
+@@ -573,6 +573,21 @@ void luaV_execute (lua_State *L, int nexeccalls) {
+         TValue g;
+         sethvalue(L, &g, cl->env);
+         lua_assert(ttisstring(KBx(i)));
++        /* [barreplay] H89: luaV_settable's first step inline (a primitive set into
++           a slot that holds a value, or no __newindex). Otherwise the full call,
++           whose own primitive set then finds the slot this one made: the table
++           ends up the same either way */
++        {
++          Table *h = cl->env;
++          L->savedpc = pc;  /* luaH_set can raise an error */
++          TValue *oldval = luaH_set(L, h, KBx(i));
++          if (!ttisnil(oldval) || fasttm(L, h->metatable, TM_NEWINDEX) == NULL) {
++            setobj2t(L, oldval, ra);
++            h->flags = 0;
++            luaC_barriert(L, h, ra);
++            vmnext();
++          }
++        }
+         Protect(luaV_settable(L, &g, KBx(i), ra));
+         vmnext();
+       }
+@@ -583,6 +598,18 @@ void luaV_execute (lua_State *L, int nexeccalls) {
+         vmnext();
+       }
+       vmcase(OP_SETTABLE) {
++        if (ttistable(ra)) {  /* [barreplay] H89, as in OP_SETGLOBAL */
++          Table *h = hvalue(ra);
++          TValue *rc = RKC(i);
++          L->savedpc = pc;  /* luaH_set can raise an error */
++          TValue *oldval = luaH_set(L, h, RKB(i));
++          if (!ttisnil(oldval) || fasttm(L, h->metatable, TM_NEWINDEX) == NULL) {
++            setobj2t(L, oldval, rc);
++            h->flags = 0;
++            luaC_barriert(L, h, rc);
++            vmnext();
++          }
++        }
+         Protect(luaV_settable(L, ra, RKB(i), RKC(i)));
+         vmnext();
+       }
+-- 
+2.53.0
+

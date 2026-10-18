@@ -1,0 +1,43 @@
+From 8f315f1622ae2f25ea520af0e52b2bfec7aefa58 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 06:42:39 +0000
+Subject: [PATCH 67/67] H91: UpdateUnits does UpdateCollisionMap's rate test
+ itself, so two units in three never touch their move type (toggle 0x400000)
+
+(cherry picked from commit cb5c910a75d970c65db0c8f9c85a9e9aaced219e)
+---
+ rts/Sim/Units/UnitHandler.cpp | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index fcf67f9..867db6f 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -604,12 +604,22 @@ void CUnitHandler::UpdateUnits()
+ 		BrRunAhead::At(int(i));
+ 		// [barreplay] H66: prefetch the unit 8 ahead and its move type 4 ahead
+ 		if (i + 8 < activeUnits.size()) __builtin_prefetch(activeUnits[i + 8]);
+-		if (i + 4 < activeUnits.size()) __builtin_prefetch(activeUnits[i + 4]->moveType);
++		if (i + 4 < activeUnits.size()) {
++			// [barreplay] H91: only the move types the collision-map update will read
++			const CUnit* u4 = activeUnits[i + 4];
++			if ((g_brToggles & 0x400000) == 0 || ((gs->frameNum + u4->id) % modInfo.unitQuadPositionUpdateRate) == 0)
++				__builtin_prefetch(u4->moveType);
++		}
+ 		CUnit* unit = activeUnits[i];
+ 
+ 		unit->SanityCheck();
+ 		unit->Update();
+-		unit->moveType->UpdateCollisionMap();
++		// [barreplay] H91 (toggle 0x400000): UpdateCollisionMap first tests
++		// (frameNum + owner->id) % unitQuadPositionUpdateRate and returns unless it
++		// is 0 (two calls in three, at BAR's rate of 3); owner is this unit, so do
++		// that test here, without reaching into the move type for nothing
++		if ((g_brToggles & 0x400000) == 0 || ((gs->frameNum + unit->id) % modInfo.unitQuadPositionUpdateRate) == 0)
++			unit->moveType->UpdateCollisionMap();
+ 		// unsynced; done on-demand when drawing unit
+ 		// unit->UpdateLocalModel();
+ 		unit->SanityCheck();
+-- 
+2.53.0
+

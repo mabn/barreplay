@@ -1,0 +1,144 @@
+From 32adc280846ffc0bbb2bb50401aad49b6f55c6cd Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 04:46:25 +0000
+Subject: [PATCH] H90: MovedUnit skips GetQuads while the unit is within the
+ distance at which none of its tests can flip (toggle 0x200000)
+
+---
+ rts/Sim/Misc/QuadField.cpp | 61 ++++++++++++++++++++++++++++++++++++++
+ rts/Sim/Misc/QuadField.h   |  1 +
+ rts/Sim/Units/Unit.h       | 10 +++++++
+ 3 files changed, 72 insertions(+)
+
+diff --git a/rts/Sim/Misc/QuadField.cpp b/rts/Sim/Misc/QuadField.cpp
+index 720dcda..76c388d 100644
+--- a/rts/Sim/Misc/QuadField.cpp
++++ b/rts/Sim/Misc/QuadField.cpp
+@@ -425,6 +425,7 @@ bool CQuadField::InsertUnitIf(CUnit* unit, const float3& wpos)
+ 	// unit might also be overlapping the cell, so test for uniqueness
+ 	if (!spring::VectorInsertUnique(unit->quads, wposQuadIdx, true))
+ 		return false;
++	unit->brQuadsValid = false; // [barreplay] H90: the list is no longer GetQuads'
+ 
+ 	spring::VectorInsertUnique(baseQuads[wposQuadIdx].units, unit, false);
+ 	spring::VectorInsertUnique(baseQuads[wposQuadIdx].teamUnits[unit->allyteam], unit, false);
+@@ -456,6 +457,7 @@ bool CQuadField::RemoveUnitIf(CUnit* unit, const float3& wpos)
+ 
+ 	if (!spring::VectorErase(unit->quads, wposQuadIdx))
+ 		return false;
++	unit->brQuadsValid = false; // [barreplay] H90
+ 
+ 	spring::VectorErase(baseQuads[wposQuadIdx].units, unit);
+ 	spring::VectorErase(baseQuads[wposQuadIdx].teamUnits[unit->allyteam], unit);
+@@ -466,9 +468,67 @@ bool CQuadField::RemoveUnitIf(CUnit* unit, const float3& wpos)
+ 
+ 
+ #ifndef UNIT_TEST
++// [barreplay] H90: how far a circle of <radius> can move from <pos> before any
++// test in GetQuads(pos, radius) could come out differently: the four quad
++// indices of its bounding rectangle, every quad's distance test, and the
++// map-bounds clamp. Exact arithmetic in double, less a margin (0.01 elmo) far
++// above the float rounding of those tests (~1e-5 elmo at these magnitudes), so
++// within it the float tests give what they gave at <pos>. Negative = none.
++float CQuadField::BrQuadsSafeDist(float3 pos, float radius) const
++{
++	if (pos.x < 0.0f || pos.z < 0.0f || pos.x > float3::maxxpos || pos.z > float3::maxzpos)
++		return -1.0f;
++
++	double safe = std::min(std::min(double(pos.x), double(float3::maxxpos) - pos.x), std::min(double(pos.z), double(float3::maxzpos) - pos.z));
++
++	// rectangle: int((p -/+ r) / q) changes when p -/+ r crosses a multiple of q
++	const auto toBoundary = [](double v, double q) {
++		const double f = v / q;
++		const double d = std::min(f - std::floor(f), std::ceil(f) - f);
++		return ((d == 0.0)? 0.0: d) * q;
++	};
++	safe = std::min(safe, toBoundary(double(pos.x) - radius, quadSizeX));
++	safe = std::min(safe, toBoundary(double(pos.x) + radius, quadSizeX));
++	safe = std::min(safe, toBoundary(double(pos.z) - radius, quadSizeZ));
++	safe = std::min(safe, toBoundary(double(pos.z) + radius, quadSizeZ));
++
++	// distance tests, over every quad the rectangle can reach while the
++	// rectangle itself holds (it holds while moving less than <safe>)
++	const int2 min = WorldPosToQuadField(pos - radius);
++	const int2 max = WorldPosToQuadField(pos + radius);
++	const double maxLen = (double(radius) + quadSizeX * 0.72) ; // quadSizeX == quadSizeZ
++	for (int z = min.y; z <= max.y; ++z) {
++		const double dz = double(pos.z) - (z * double(quadSizeZ) + quadSizeZ * 0.5);
++		for (int x = min.x; x <= max.x; ++x) {
++			const double dx = double(pos.x) - (x * double(quadSizeX) + quadSizeX * 0.5);
++			safe = std::min(safe, std::abs(std::sqrt(dx * dx + dz * dz) - maxLen));
++		}
++	}
++	return float(safe - 0.01);
++}
++
+ void CQuadField::MovedUnit(CUnit* unit)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	// [barreplay] H90 (toggle 0x200000): within the safe distance of the last
++	// full computation the quads are the same, and then the code below would
++	// compare them, find them equal and return
++	const bool brSafe = ((g_brToggles & 0x200000) != 0);
++	if (brSafe && unit->brQuadsValid && unit->radius == unit->brQuadsR) {
++		const float dx = unit->pos.x - unit->brQuadsX;
++		const float dz = unit->pos.z - unit->brQuadsZ;
++		if ((dx * dx + dz * dz) < unit->brQuadsSafeSq)
++			return;
++	}
++	if (brSafe) {
++		const float sd = BrQuadsSafeDist(unit->pos, unit->radius);
++		unit->brQuadsValid = (sd > 0.0f);
++		unit->brQuadsX = unit->pos.x;
++		unit->brQuadsZ = unit->pos.z;
++		unit->brQuadsR = unit->radius;
++		unit->brQuadsSafeSq = sd * sd * 0.98f; // and a little under, for the float compare above
++	}
++
+ 	QuadFieldQuery qfQuery;
+ 	GetQuads(qfQuery, unit->pos, unit->radius);
+ 
+@@ -507,6 +567,7 @@ void CQuadField::RemoveUnit(CUnit* unit)
+ 	}
+ 
+ 	unit->quads.clear();
++	unit->brQuadsValid = false; // [barreplay] H90
+ 
+ 	#ifdef DEBUG_QUADFIELD
+ 	for (const Quad& q: baseQuads) {
+diff --git a/rts/Sim/Misc/QuadField.h b/rts/Sim/Misc/QuadField.h
+index 288dfc0..e1932bf 100644
+--- a/rts/Sim/Misc/QuadField.h
++++ b/rts/Sim/Misc/QuadField.h
+@@ -149,6 +149,7 @@ public:
+ 	bool RemoveUnitIf(CUnit* unit, const float3& wpos);
+ 
+ 	void MovedUnit(CUnit* unit);
++	float BrQuadsSafeDist(float3 pos, float radius) const; // [barreplay] H90
+ 	void RemoveUnit(CUnit* unit);
+ 
+ 	void AddFeature(CFeature* feature);
+diff --git a/rts/Sim/Units/Unit.h b/rts/Sim/Units/Unit.h
+index fa84a39..29b914d 100644
+--- a/rts/Sim/Units/Unit.h
++++ b/rts/Sim/Units/Unit.h
+@@ -556,6 +556,16 @@ private:
+ 	float brPhysX = 0.0f;
+ 	float brPhysZ = 0.0f;
+ 	float brPhysGround = 0.0f;
++
++public:
++	// [barreplay] H90: CQuadField::MovedUnit's last full GetQuads was at
++	// (brQuadsX, brQuadsZ) with radius brQuadsR, and no test in it flips while
++	// the unit stays within sqrt(brQuadsSafeSq) of there
++	bool brQuadsValid = false;
++	float brQuadsX = 0.0f;
++	float brQuadsZ = 0.0f;
++	float brQuadsR = 0.0f;
++	float brQuadsSafeSq = 0.0f;
+ };
+ 
+ struct GlobalUnitParams {
+-- 
+2.53.0
+
