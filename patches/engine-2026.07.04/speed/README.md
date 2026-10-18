@@ -10,9 +10,9 @@ a gate and a publish.
 
 Numbering: the 4-digit prefixes continue the series (`../0001`-`0013`), so
 every patch number under `engine-2026.07.04/` is unique: 0014-0043,
-0063-0067 and 0069-0070 here, 0044-0045, 0052-0062 and 0068 in `rejected/`, 0046-0051 in
+0063-0067, 0069-0070 and 0073-0078 here, 0044-0045, 0052-0062, 0068 and 0071-0072 in `rejected/`, 0046-0051 in
 `tools/`. Change
-identifiers continue the work log's H-series (H1-H73), with H74-H91 for the
+identifiers continue the work log's H-series (H1-H73), with H74-H93 for the
 ones below.
 P1 (with its versions v2-v7), P2, P3, P4, N1 and the widget-side W1-W7 are
 families of their own.
@@ -90,6 +90,7 @@ everything up to `0xfbf`, the whole verylarge1 game `a26e920d…`.
 | `0x4000` | H80 | 0043 | `FindAnim` searches on one packed 64-bit key | -0.4% (noise level) | on |
 | `0x800000` | P4 | 0069-0070 | the slow-update loop's weapon target searches (`GenerateWeaponTargets` + the `TryTarget` walk) on worker threads, applied in launch order; the main thread waits only before writes a search may read (an enemy of a running search's weapon inside its circle, Lua's writing functions, deaths, damage, moves, quad changes...) | **-4.1%** wall, -4.4% main cycles (`speed34`, `t=d87a3f` vs `587a3f`) | on |
 | bits 24-25 | P4 workers | 0070 | 2 + 2k workers take searches (0 = `BARREPLAY_P4_WORKERS`, default 2) | 6 workers +1.5% against 2 | 0 |
+| `0x10000000` | P5 | 0073-0078 | the COB engine's thread ticks on the workers with the sequential result: a tick runs out of order when every function its thread can be in uses only own-unit operations (decided once per function from the bytecode); `RAND` and `START` wait for every earlier tick; the global bookkeeping (sleeps, thread ends, the animation list, visual sfx) is applied in tick order at each segment's end. `BARREPLAY_P5_STATS=<frames>` logs counters | **-1.2%** wall and cycles, -6.3% instructions (`speed39`, `t=1cd87a3f` vs `cd87a3f`) | on |
 
 Not toggled (always on in these builds):
 
@@ -118,6 +119,8 @@ Not toggled (always on in these builds):
 | `0057-H85…` | H85: the LOS-state apply pass visits only the units whose status changed (toggle `0x10000`) | identical; +0.3% wall, -1.2% instructions, noise |
 | `0058-`, `0061-`, `0062-P3…` | P3: the slow-update slice's targeting scans precomputed on all threads (every enemy unit in a superset of the quads, with its LOS state and target position) and replayed in order, checked against write marks on units, quads and everything (toggle `0x20000`); `0061` gives the precompute's quad queries their own thread's pool (the first build crashed), `0062` narrows the marks (built, not measured) | identical; 85% of scans replayed, but +1.8% wall, +1.4% cycles: the precompute visits more than the scan (larger radius, no dedup) and is a fork-join section of its own |
 | `0059-H86…` | H86: `QueueDeleteUnits` prefetches the death flag 16 units ahead (toggle `0x40000`) | +0.7% wall, noise or worse |
+| `0071-H92…` | H92: `UpdateWeaponVectors` keeps its outputs while every input is bitwise unchanged (toggle `0x4000000`) | identical; noise level (`speed36`) |
+| `0072-H93…` | H93: the LOS types' per-unit tests in one parallel pre-pass, each type's loop visits only the units that need it (toggle `0x8000000`) | identical; noise level (`speed36`); P5 applies without 0071-0072 |
 | `0068-H90…` | H90: `MovedUnit` skips `GetQuads` while the unit stays within the distance at which none of its tests can flip (toggle `0x200000`) | +0.8%: with 128-elmo quads the nearest threshold is a few elmos away and aircraft move 5-15 a frame, so the full computation runs anyway, plus the safe-distance square roots |
 
 H74 (0028-0031) stayed in the main line because later patches were built on
