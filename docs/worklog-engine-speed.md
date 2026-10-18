@@ -2997,3 +2997,87 @@ The design notes behind that order:
   identical. Everything else stays in the sandboxed interpreter:
   tweakdefs, mods, any unknown or user file. No untrusted code is ever
   compiled, so the sandbox keeps exactly its present guarantees.
+
+### 2026-10-18 09:00 — which items of the weapon and slow-update loops are local: the counting build
+
+`measure-par` (`speed32` + counters, `BARREPLAY_PM=1`): every global
+action counted, per item, around each unit's step in the serial weapon loop
+and the slow-update loop. The actions:
+
+- COB calls, query functions apart;
+- synced RNG draws;
+- `Fire`, projectile creation, damage;
+- Lua callins;
+- `GetTempNum`;
+- `SetAttackTarget`;
+- `UseResources`;
+- quad-list changes;
+- unit creation and death;
+- `FinishCommand`.
+
+Late window, 150 frames:
+
+**Weapon loop** (7.3M cycles a frame, ~2 ms):
+
+| class | share of items | share of cycles |
+|---|---|---|
+| purely local | 97.7% | 40.1% |
+| firing (COB, RNG, projectiles, often damage and Lua) | ~1% | ~45% |
+| COB only (aiming) | 0.4% | 5.5% |
+| resources only | 1.0% | 1.5% |
+
+**Slow-update loop** (11.6M cycles a frame, ~3.1 ms, ~700 units a frame):
+
+| class | share of items | share of cycles |
+|---|---|---|
+| COB queries + RNG + `tempNum` + resources (weapon units) | 48.8% | 43.5% |
+| ... plus attack-target changes | 2.6% | 26.7% |
+| ... plus Lua callins | 12.8% | 10.6% |
+| resources only (units without weapons) | 20.7% | 4.0% |
+| COB + resources + command finished | 2.5% | 5.5% |
+
+Whole game (to frame 64,230):
+
+| | whole game | parallelizable as-is | blocker |
+|---|---|---|---|
+| weapon loop | 75.8 G cycles | 54.9% purely local | firing, aiming |
+| slow update | 151.6 G cycles | ~57%, once the obstacles below are handled | 33.2% of its cycles make Lua callins and must stay serial |
+
+The two loops are ~22% of the main thread in the late game. What follows:
+
+- **Weapon loop.** The local items are the cheap ones (~285 cycles each),
+  so parallel items must be runs of consecutive local units. Ceiling ~3%
+  of the frame.
+- **Slow update.** The larger prize, ~8% of the frame in the late game.
+  Four things stand in the way:
+  1. RNG: every weapon draws, so items need pre-computed stream positions.
+  2. COB queries: they must be evaluated without the VM's thread-id
+     counter, whose order is visible to scheduling.
+  3. `tempNum`: each thread needs its own dedup.
+  4. Team resources: check the slice's draws against the team's storage,
+     subtract in item order (float rounding).
+- **Lua compilation** (step 3) speeds up exactly the serial, Lua-calling
+  third of the slow update. The steps compound.
+
+**P4 design (weapon loop, Recoil `speed33`).** P1's scheduler (in-order
+start, frontier, serial items exclusive on the main thread), with parallel
+items made of runs of consecutive local units.
+
+- **Serial items:**
+  - a unit whose weapons may fire (all of `CanFire`'s early-outs fail:
+    `angleGood`, salvo, target, reload, stockpile) or have a salvo due;
+  - re-targeting (dead target with fast auto-retarget; a free weapon while
+    the unit has a target);
+  - pending stockpiles and shields.
+
+  Anything that can deal damage or reach Lua is in one of these.
+- **COB aiming** (`AimWeapon`) in a parallel item waits at a serial point,
+  so it runs once every earlier item has finished. That is allowed only when
+  the script's function, and everything it calls, is statically free of
+  `LUA_CALL`, `BATCH_LUA`, `EMIT_SFX`, `EXPLODE`, `ATTACH`,
+  `DROP` and globally acting `SET`s. Later items are local and never
+  touch COB, so COB still runs in exactly serial order.
+- **The plan check** runs in parallel ahead of each item's turn and is redone
+  at the turn if a serial item ran meanwhile, so it always sees final state.
+- **Violation counters** on every global action point catch a misprediction
+  during gating.
