@@ -2209,3 +2209,121 @@ patched reference capture. A stock engine can't produce it for this game.
 
 `memwatch.sh` (the RSS watchdog) and `thpscan.py` (the huge-page scan of the
 23:20 entry) are beside it. The watchdog saw this run peak at 6.48 GiB.
+
+### 2026-10-18 01:40 — GOAL again: 10 minutes, byte-identical; where the main thread's time is now
+
+USER set the goal: verylarge1 in 10 minutes, the output byte-identical. If
+clear improvements run out, try moonshots, approaches unlikely to work but
+with a large payoff if they do. From ~14m39s active that is **-32%**. The
+patches of the last day each moved the late window 1-2% or less, so the
+search starts over from the measurements.
+
+**About 23% of the main thread's time is fork-join.** The main thread
+takes its share of a parallel section's chunks, then waits for the slowest
+worker (`ThreadPool::WaitForFinished` on its stack in the speed24 late-window
+profile):
+
+| parallel section | % of main thread |
+|---|---|
+| weapon vectors + unit LOS states (`UpdateUnitWeapons`, P2) | 7.66% (vectors 3.4, piece matrices 1.5, LOS states ~1.3, spinning ~1.9) |
+| LOS update (`CLosHandler::Update`, one task per sensor type) | 5.41% |
+| ground movement (`GroundMoveSystem`) | 3.41% |
+| unit-script anims (`TickAllAnims`) | 3.31% |
+| QTPFS node layers | 1.78% |
+| P1 aircraft | 0.79% |
+| **total** | **22.8%** (~3% of it pure spinning) |
+
+Making a section asynchronous saves its whole share only if serial work that
+cannot touch the section's data runs meanwhile. That holds for the LOS update
+(nothing reads the LOS maps until a Lua call or the next frame's map damage /
+LOS states), not for the weapon vectors (the serial weapon loop reads them
+right after).
+
+**Half of the main thread's L2 misses go to DRAM, with no hotspot.** Over
+the late window (450 frames, 10.3 s):
+
+| main thread, late window | count |
+|---|---|
+| cycles | 38.4e9 |
+| stalled with an L2 miss pending | 16.8e9 (44%) |
+| loads missing L2 | 438M |
+| ├ served from L3 | 190M (43%) |
+| └ served from DRAM | 230M (52%) |
+| loads hitting an in-flight fill buffer | 780M |
+
+L3 misses sampled with call stacks (`mem_load_uops_retired.l3_miss`, LBR):
+the largest are terrain height reads at 5.8%
+(`GetHeightReal`/`InterpolateCornerHeight`, which H67 already tried to
+prefetch), the unit collision-map update in `UpdateUnits` at 4.0%, the
+weapon loop at 3.6 + 2.8%, radar position errors at 2.1%, the unit
+iterators of `QueueDeleteUnits` at 1.9% and P1's per-aircraft check at
+2.9%. The rest each fall under 1.7%. DRAM misses are spread like the cycles,
+over every loop that walks ~10k unit, weapon, piece and script objects.
+
+**H74 on its own physical core: nothing gained, nothing lost.** H74's
+run-ahead prefetch helper lost 11.6% on 10-17 because it ran on the main
+thread's hyperthread sibling and took its issue slots. The idea behind
+trying it on another core: Haswell's L3 is shared and inclusive, so a line
+the helper fetches would be an L3 hit (~40 cycles) for the main thread
+instead of a DRAM miss (~300). `speed24` still has H74 (toggle `0x40`); its
+helper thread was moved to cpu 2 from outside (`taskset`) as soon as it
+appeared, with the workers on 0,1,4,5,6:
+
+| 3 pairs, interleaved | wall | main-thread cycles |
+|---|---|---|
+| H74 off (`t=7fbf`) | 10.90 / 10.84 / 11.08 s (10.94) | 41.06e9 |
+| H74 on its own core (`t=7fff`) | 10.90 / 10.96 / 10.86 s (10.91) | 40.87e9 |
+| change | -0.3% (noise) | -0.4% |
+
+So H74's whole loss was the shared issue slots, and the prefetches are worth
+nothing: the lines it fetches (each unit's hot lines, move type, script,
+command AI, weapons, their targets) are already covered by the loops' own
+prefetches (H66, H75). The misses that remain are on data no simple walk
+ahead of the unit list predicts. The memory route has no cheap lever left.
+
+**What keeps the serial loops serial** (read from the code):
+
+- **Weapon `SlowUpdate`'s random draws depend only on the RNG stream.**
+  Every call draws `NextVector()` (rejection sampling, 3 floats per attempt)
+  and one `NextFloat()` first, unconditionally. The number of draws depends
+  only on the stream, not on the simulation, and the targeting after it
+  draws nothing (`GetUnitPositionWithError` uses the unit's stored error).
+  So the draws of a whole slow-update pass could be precomputed in order. RNG
+  is not what pins targeting.
+- What does pin it:
+  - `CUnitHandler::SlowUpdateUnits` interleaves `CUnit::SlowUpdate` and
+    `SlowUpdateWeapons` unit by unit, and the first can change what the
+    second reads for a later unit. For example, auto-heal changes `health`,
+    which is in every target priority.
+  - The scan's dedup writes `tempNum` into every candidate.
+  - `SetAttackTarget` writes the target's death-dependence list.
+  - `AllowWeaponTarget` is Lua unless N1 holds.
+  - A parallel scan would have to be validated against all of that in order.
+- **The serial weapon loop (`CWeapon::Update`, 14.6% inclusive) can change
+  later weapons' reads.**
+  - Beam lasers apply their damage inside `Fire`, so `UnitPreDamaged` /
+    `UnitDamaged` / `UnitDestroyed` callins, impulses and kills happen in
+    the middle of the loop.
+  - A later weapon reads its target's speed (lead prediction), `isDead` and
+    health.
+  - Weapons with a cost read and write their team's resources in loop order.
+  - `AimWeapon`, `FireWeapon` and `Shot` are COB calls.
+  - Running it in parallel needs optimistic execution with in-order
+    validation and rollback of a weapon's own state. That is P1-sized work.
+
+Inclusive main-thread shares from the same profile, for scale: weapons
+`Update` 14.6% (beam lasers 5.2), weapons `SlowUpdate` 10.2%, Lua callins
+16.8% in all (`GameFrame` 3.3, GC 2.5, `UnitPreDamaged` 1.7, `UnitDestroyed`
+1.5, ~20 more under 1% each), COB 6.3%, `CUnit::SlowUpdate` 5.9%,
+projectiles 5.4%.
+
+Plan, ordered by cost:
+
+| step | what | est. main-thread gain | status |
+|---|---|---|---|
+| 1 | 7 threads (main alone on its core, 6 workers): fork-join shrinks | 4-8% | checkpoint dumping |
+| 2 | H84: LOS update async on the workers; join at every LOS read or mutation, read unit fields from a snapshot | <=5% | sized |
+| 3 | P3: weapon `SlowUpdate` candidate scan precomputed in parallel, validated in order | ~4% | sized |
+| 4 | anims async (join at every piece read) | <=3% | |
+| 5 | serial weapon loop optimistic in parallel (P1-style, with rollback) | 5-8% | moonshot |
+| 6 | COB tick: per-unit local opcodes in parallel, global ones in order | ~4% | moonshot |
