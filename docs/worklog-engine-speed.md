@@ -4259,3 +4259,48 @@ search overlaps the slow updates of LATER units. Its per-thread state
 Next: engine state dumps (`DumpState`, gated by `BARREPLAY_DUMPSTATE`,
 with each weapon's target, reload and aim added) every 6,000 frames, P4 off
 and on, to find the first frame and object that differ.
+
+### 2026-10-18 23:57 — P4's race is intermittent; a race detector finds the uncovered write
+
+Reproducibility of plain P4 (`t=d87a3f`) to frame 66,720:
+
+| binary | machine | first differing record |
+|---|---|---|
+| `speed42` (runs at 20:46, 20:53, two whole games) | idle | 66706, kill credit 65 instead of 30226 |
+| `speed42` (22:51) | idle | none |
+| `diag2` (speed42 + dump and knob code) | idle | none |
+| `diag3` | a build running beside it | 66706, the same |
+
+So it is a race that does not fire in every run, and the `waitLaunch` and
+`unitSync` results above prove nothing (their control was exact too).
+When it does fire, the wrong outcome is always the same.
+
+**The detector** (`BARREPLAY_P4_RACE=1`, diagnostic branch `diag-dump`): a
+worker runs each search, waits until the main thread has slow-updated two
+more units (bounded; never while the main thread waits for that very
+search), runs it again and compares the candidate lists, priorities and
+`TryTarget` results. While a search is unfinished, P4's drains promise
+that nothing it reads is written, so any difference is a write no drain
+covers, whether or not it changes the chosen target. Over 8.0 million checks
+to frame 66,720 it found **three**. In all three, one candidate's
+`TryTarget` flipped while its priority stayed the same, and all three
+candidates were Legion Goblins (`leggob`) that died 1-33 frames later. The
+first (frame 31,991) is followed at once by checksum mismatches against the
+demo.
+
+Version 2 adds snapshots of the candidates and the list of units
+slow-updated between the two runs. Frame 65,348: searcher 18040 (Glaucus,
+`legsh`, team 10, ally team 1), target Goblin 4536 (team 2).
+`TryTarget` 0 then 1, the Goblin identical in both runs (position, speed,
+aim, lead position, 4.4 health, physical and collidable state, heading).
+Between the runs the main thread slow-updated only 13517 (Grunt, team 13)
+and 23172 (another Glaucus from the same factory, built 15 frames after the
+searcher). Both are the searcher's ALLIES.
+
+**Insight:** `BeforeUnit` drains only for later units that are ENEMIES of
+a running search inside its area. But `TryTarget`'s line-of-fire cone
+(`TraceRay::TestCone`) reads the searcher's allies along the ray: their
+collision volumes, transforms and collidable bits. So an ally's slow update
+can change a running search's `TryTarget` unless every write it makes to
+those fields has a hook. Version 3 snapshots every ally in the search's
+area at both runs to find which field changes.
