@@ -2141,3 +2141,60 @@ checkpoint (`barreplay.id`), and `ab` refuses two checkpoints whose ids
 differ. Earlier cross-build pairs are not affected: speed24 against speed26
 read +1.5%, where a W5 widget costs ~8%, and every toggle A/B runs one
 checkpoint.
+
+### 2026-10-18 00:55 — the stock engine, governed whole game: 38m17s active, 2.6x the patched build's time
+
+The release `spring-headless` 2026.07.04 with no patches, run under the same
+conditions as `speed24`'s governed run (20:15): the same barreplay
+(`barreplay-w6`, widget 1.13.0), 4 threads, pause at 88 C and resume at 55 C,
+started from a 50 C package, in a memory-capped scope.
+
+| | stock | `speed24` `t=7fbf` | stock / patched |
+|---|---|---|---|
+| **active sim** (sim minus pauses during it) | **38m17s** | ~14m39s | **2.61x** |
+| sim, pauses included | 1h0m38s | 38m19s | |
+| paused during sim | 22m21s (272 pauses) | — | |
+| load | 41 s | 1m5s (paused) | |
+| main thread cycles | 8.44e12 | 3.27e12 | 2.58x |
+| main thread instructions | 7.15e12 | 3.18e12 | 2.25x |
+| main thread CPU time | 2305 s | 891 s | 2.59x |
+| main thread average clock | 3.66 GHz | 3.68 GHz | |
+| worker cycles (3 workers) | 6.07e12 | 2.97e12 | 2.04x |
+| peak RSS | 6.48 GiB | — | |
+
+The two main threads ran at the same average clock, so the governor held the
+thermal conditions equal, and the clock-free ratio (cycles, 2.58x) agrees
+with the wall-clock one (2.61x). The patched figure is the 20:15 entry's
+estimate, corrected by hand for its pauses during load. This run's figure
+comes from `fullrun.sh`'s new accounting: it records every pause and
+subtracts only those after the sim started. For comparison, the ungoverned
+estimate for stock was ~45 min (2026-10-16: 39-45% slower than revision 2's
+31m03s).
+
+The stock capture is **not** `a26e920d…` but `dd4d2f00…`, and that is not a
+desync. Section by section, K, F, X, E, C, G, V, U and Q are byte-identical:
+the simulation and every sampled record. Only H (hits), R (projectile tracks)
+and W (blasts) differ, and M only by the section lengths it lists. This game
+build sandboxes user widgets, so on a stock engine the widget has neither
+the real handler nor the engine event log (patch 0004):
+
+- Hits name no attacker: the same 1,059,959 hits, in a smaller H.
+- Explosions are inferred: 2,086 blasts against 6,722, and 47,234 tracks
+  against 47,454.
+
+The stock time also includes what the patched engine takes off the widget:
+the Lua sample loop (no `GetUnitSampleDelta`) and the every-frame sweep of
+open tracks. So earlier entries that call `a26e920d…` "stock" mean the
+patched reference capture. A stock engine can't produce it for this game.
+
+`fullrun.sh` changes, now also in `speed/tools/scripts/`:
+
+- It waits for a 50 C start.
+- It runs the engine in a capped scope (`OOMPolicy=continue`).
+- It matches the engine by its `--write-dir`. The first stock attempt
+  latched onto barreplay's `--version` probe and ran 4 minutes with no
+  governor and no perf stat.
+- It prints the active sim.
+
+`memwatch.sh` (the RSS watchdog) and `thpscan.py` (the huge-page scan of the
+23:20 entry) are beside it. The watchdog saw this run peak at 6.48 GiB.

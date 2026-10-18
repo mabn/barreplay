@@ -107,4 +107,6 @@ slower than gold; CRIU could not checkpoint the result) and x86-64-v3
   power caps), `pgotrain.sh` (PGO training replays), `phases.py` (main-thread
   breakdown from folded stacks), `hotlines.py` (source lines of a function's
   samples), `memfields.py` (load-latency samples mapped to object fields),
-  `luaprof.py`, `bolt.sh`, `ab.sh`.
+  `luaprof.py`, `bolt.sh`, `ab.sh`, `memwatch.sh` (an engine's RSS every 2 s;
+  past a limit, gdb stacks of every thread and smaps, then kill), `thpscan.py`
+  (what collapsing every touched 2 MiB range would cost).
