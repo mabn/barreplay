@@ -3311,3 +3311,23 @@ searches.
 search the main thread runs itself is fast: its caches are warm from the
 unit's own slow update. A worker takes searches sooner, so the main thread
 then waits for a slower search it could have run.
+
+### 2026-10-18 11:29 — speed34 on the late window: P4 -4.1% wall, -4.4% main cycles
+
+`speed34` checkpoint, late window, 3 interleaved pairs, main thread pinned:
+
+| | P4 off (`587a3f`) | P4 on (`d87a3f`) | |
+|---|---|---|---|
+| wall | 11.26 / 11.00 / 10.95 s (11.07) | 10.63 / 10.78 / 10.44 s (10.62) | **-4.1%** |
+| main cycles | 40.49e9 | 38.70e9 | **-4.4%** |
+| main instructions | 37.27e9 | 34.09e9 | -8.5% |
+
+That is twice what `speed33`'s P4 gave (-2.3% wall, -1.9% cycles); the Lua
+waits were the difference.
+
+**Open question:** this checkpoint's P4-off baseline runs ~5% more cycles
+than `speed33`'s (40.5e9 against 38.5e9). Each binary has its own
+checkpoint, and 7-thread dumps land in different heap layouts. An A/B
+between the two builds with P4 off is queued, to tell whether speed34's
+P4-off code got slower (the Lua trampoline sits on every synced-control
+call, P4 or not) or the checkpoints differ.
