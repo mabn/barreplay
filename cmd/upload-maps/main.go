@@ -55,7 +55,7 @@ func run() error {
 	}
 	var o options
 	flag.StringVar(&o.prefix, "prefix", "maps/highres/", "key prefix in the bucket")
-	flag.StringVar(&o.cacheControl, "cache-control", "public, max-age=604800", "Cache-Control stored on each object")
+	flag.StringVar(&o.cacheControl, "cache-control", "public, max-age=31536000, immutable", "Cache-Control stored on each object (the names carry the map version, so the bytes under one never change)")
 	flag.IntVar(&o.jobs, "j", 8, "uploads at once")
 	flag.BoolVar(&o.dry, "dry", false, "check the bucket and list what would be uploaded, upload nothing")
 	flag.BoolVar(&o.force, "force", false, "upload even when the bucket already has a file of the same size")
