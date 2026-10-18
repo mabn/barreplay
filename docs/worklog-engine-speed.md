@@ -2385,3 +2385,43 @@ It engages only with full view (otherwise `CLosMap::AddRaycast` calls into
 the unsynced read map) and worker threads. `BARREPLAY_H84_STATS=1` logs how
 many joins found the tasks unfinished and how long they waited, which is the
 overlap lost.
+
+### 2026-10-18 03:05 — sizing what is left: no single exact lever, a bound, and the moonshots
+
+From the speed24 late-window profile, main thread, % of one core:
+
+| part | % | what limits it |
+|---|---|---|
+| Lua interpreter loop (`luaV_execute`, leaf only) | 8.1% | the largest single function left; BAR's gadget handler already dispatches with tight while-loops (`gadgets.lua` of test-31620), and the 2 Tracy zone calls per gadget per callin cost ~0.3% |
+| allocator, memcpy/memcmp, hash tables (leaf) | < 3% together | nothing to win |
+| serial weapon loop (`CWeapon::Update`, not under `SlowUpdate`) | 9.4% | beam lasers 5.2%, of which `Fire` 2.8% deals damage in the loop; the purely local part is ~5% |
+| COB (`CCobThread::Tick`) | 5.8% | interpreter 2.6%, `AddAnim` 2.4% (memory latency on script objects; `FindAnim` is H80's already) |
+| our capture widget, engine side | ~1.5-2.5% | `GetUnitSampleDelta` 0.56%, the event log 0.56%, its `GameFramePost` 0.31%, writes 0.08% |
+| unsynced effects (smoke, explosion generators, drawers) | < 1.5% | |
+
+Running the weapon loop's local part in parallel would save ~3-4% for
+P1-sized work, so it is not worth doing alone.
+
+**A bound.** The parts that must stay serial under exactness are Lua
+callins (16.8% inclusive), COB (5.8%), firing (3.3%), the quad field (2.3%)
+and smaller ones, ~30% in all. If everything else ran on 4 cores, the main
+thread would be at ~30% + 70%/3 ≈ 53% of now, so -47% is possible in
+principle. The goal needs ~-40% of the late game (it is ~77% of the whole).
+The exact candidates found are each 1-5%:
+
+| candidate | est. on the late window | status |
+|---|---|---|
+| 7 threads | -2.5% | measured (host setting) |
+| H84 LOS update async | <= -5% | building |
+| P3 weapon `SlowUpdate` scan precomputed in parallel, validated by per-unit write stamps | ~-3% | designed |
+| weapon loop local part in parallel | ~-3% | sized |
+| Lua VM exact fast paths | ~-1-2% | |
+| engine-side recorder | ~-1.5% | |
+
+They add up to ~15-18%. Moonshots that could cover the rest:
+
+| moonshot | gain if it works | cost / risk |
+|---|---|---|
+| M1: optimistic parallel unit loops (slow update, weapons) with per-object write tracking and in-order commit or rollback, P1 generalized | up to the bound above | weeks; COB calls on every weapon `SlowUpdate` (`QueryWeapon`, `AimFromWeapon`) would need a thread-safe pure-COB evaluator first |
+| M2: compile BAR's hot gadget Lua ahead of time to C on the same VM primitives (same table operations in the same order, so the same state) | <= 8% (the interpreter's share) | high |
+| M3: clang + ThinLTO + its own PGO | +-5% | the pinned build image (Ubuntu 18.04) has gcc-13 only; UB could desync |
