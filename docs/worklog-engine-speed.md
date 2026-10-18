@@ -2426,7 +2426,7 @@ They add up to ~15-18%. Moonshots that could cover the rest:
 | M2: compile BAR's hot gadget Lua ahead of time to C on the same VM primitives (same table operations in the same order, so the same state) | <= 8% (the interpreter's share) | high |
 | M3: clang + ThinLTO + its own PGO | +-5% | the pinned build image (Ubuntu 18.04) has gcc-13 only; UB could desync |
 
-### 2026-10-18 02:50 — H85 and P3 written; the first H84 build had the sync checker on
+### 2026-10-18 02:15 — H85 and P3 written; the first H84 build had the sync checker on
 
 The first `speed28` build failed: `build-pgolto-g.sh` was run without
 `EXTRA_CMAKE="-DSYNCCHECK=OFF"`, so `SyncedFloat3` came back and P1's crash
@@ -2484,7 +2484,7 @@ in order.
 
 `BARREPLAY_P3_STATS=1` logs replays against fallbacks.
 
-### 2026-10-18 03:30 — H84 + H85 gate identical; H84's join comes before the work is done
+### 2026-10-18 02:25 — H84 + H85 gate identical; H84's join comes before the work is done
 
 `speed28` (H84 + H85, rebuilt with `SYNCCHECK=OFF`), medium gate with both
 on (`t=1ffbf`): **`0558d354…`, identical**, no desync lines. The join
@@ -2508,7 +2508,7 @@ H86 (toggle `0x40000`): `QueueDeleteUnits` prefetches the death flag 16
 units ahead. The loop reads one byte of every unit, a DRAM miss each (1.9%
 of the main thread's L3 misses).
 
-### 2026-10-18 03:55 — P3's first build crashed in its own precompute
+### 2026-10-18 02:45 — P3's first build crashed in its own precompute
 
 `speed29`, medium gate with everything on (`t=7ffbf`): segfault at frame 393
 in `CQuadField::GetQuads` called from P3's precompute on a worker thread. A
@@ -2517,7 +2517,7 @@ the main thread's, so two workers corrupted it; the existing parallel callers
 (move types, trap checks) set `threadOwner = ThreadPool::GetThreadNum()`, and
 now P3 does too. Rebuilding.
 
-### 2026-10-18 04:45 — speed29 identical, but slower: +3.0% with its toggles off, +2.4% more with them on
+### 2026-10-18 03:20 — speed29 identical, but slower: +3.0% with its toggles off, +2.4% more with them on
 
 `speed29` (P3's thread-pool fix in), medium gate with everything on
 (`t=7ffbf`): **`0558d354…`, identical**, no desync lines. P3 replays ~85% of
