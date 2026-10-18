@@ -2844,3 +2844,20 @@ object, each 0.6-1.3%: `id` (+184), the position (+224/232),
 unit. Packing the fields by which loops read them together is the one exact
 lever aimed at this. It covers about a third of the latency, and H83's
 smaller version lost 1.1%, so it is a gamble.
+
+### 2026-10-18 07:14 — speed32 identical; H91 -0.6% (noise level); governed whole game with every kept item running
+
+`speed32` (`speed31` − H90 + H91, built with `speed31`'s profile),
+medium gate at `t=587fbf`: **`0558d354…`, identical**. Late window, 4
+pairs:
+
+| H91, on top of H87+H88, 4 pairs | wall | cycles | instructions |
+|---|---|---|---|
+| without (`t=187fbf`) | 10.67 / 10.86 / 10.65 / 10.51 s (10.67) | | |
+| with (`t=587fbf`) | 10.56 / 10.58 / 10.61 / 10.70 s (10.61) | | |
+| change | -0.6% (pairs -1.0, -2.6, -0.4, +1.8) | -0.6% | -0.1% |
+
+The items kept so far (H87, H88, H89, H91) are each at noise level, around
+-0.5 to -1%. The governed whole game on `speed32` with all of them on
+(`t=587fbf`), 7 threads and the main thread pinned (`PIN=1`) is
+running, to see what they add up to on the measure that counts.
