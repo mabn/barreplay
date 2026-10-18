@@ -2626,3 +2626,42 @@ textures, the ROAM mesh) and the `UnsyncedHeightMapUpdate` callin, and
 nothing unsynced can reach the simulation in demo playback. So the capture
 cannot change, and both the victim and the suspected source of the
 corruption are gone. Building.
+
+### 2026-10-18 04:06 — speed30 (H87) identical; the next batch (H88, H89) for one PGO retrain
+
+`speed30` medium gate with H87 on (`t=87fbf`): **`0558d354…`,
+identical**, no desync lines. Its late-window A/B and a governed whole game
+with 7 threads are running.
+
+The last batches showed that a changed hot function loses its PGO profile,
+and the loss alone is ~3% (`speed29`). So the next exact items go into
+one branch, `speed31` = `speed30` + H88 + H89, which will be built once
+with a profile retrained on its own code and compared against `speed24`:
+
+- **H88** (toggle `0x100000`): `CUnit::UpdatePhysicalState` runs for
+  every unit every frame (1.8% of the main thread). It reads the ground
+  height under the unit (`GetHeightReal`: four corners of the height map,
+  the biggest single source of the main thread's DRAM misses at 5.8%). The
+  rest of it is arithmetic on the unit's own fields; water is a constant
+  plane. For a unit whose x and z are bit-for-bit the same as last time
+  (buildings, landed and parked units), with no synced height write since
+  (a version counter in `CReadMap::SetHeight`, the one way the synced
+  corner map is written), the height is the one the last call read. The
+  cache lives after `CUnit`'s last member, so no unit field moves.
+- **H89** (no toggle; it lives in the Lua library): `OP_GETTABLE`,
+  `OP_GETGLOBAL` and `OP_SELF` do `luaV_gettable`'s first step inline:
+  a primitive get that finds a value, or no `__index` to consult.
+  `OP_SETTABLE` and `OP_SETGLOBAL` do `luaV_settable`'s first step
+  the same way. Otherwise they make the full call, whose own first step
+  repeats the same primitive get or set. For a set that is a slot the first
+  call already made, so the table ends up identical. `luaV_gettable` alone
+  was 3.2% of the main thread (self), a call per table read. The
+  short-circuit order is unchanged, so `fasttm`'s cached-absence flags are
+  updated in the same cases. `L->savedpc` is set before `luaH_set`,
+  which can raise an error.
+
+**Note for production.** The published series (0001-0013) has neither
+patch 0039 (the upstream use-after-free in `StageSplitTooLarge`) nor H87.
+So re-sim hosts run the stock draw-side height-map path, with that bug and
+whatever corrupts the queue. Some re-sims recorded as out-of-memory may be
+this, not load-time memory.
