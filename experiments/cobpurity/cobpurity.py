@@ -93,4 +93,5 @@ def main():
     print('\nwhy harmful (top):')
     for (k, w), v in whys.most_common(25): print(f"  {v:4d}  {k}: {w}")
 
-main()
+if __name__ == '__main__':
+    main()
