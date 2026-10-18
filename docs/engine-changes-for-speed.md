@@ -7,7 +7,7 @@ they refer to are listed at the end.*
 
 ## Context
 
-barreplay re-simulates finished BAR games: it plays the game's demo file in
+barreplay ([replay.fogofwar.dev](https://replay.fogofwar.dev)) re-simulates finished BAR games: it plays the game's demo file in
 `spring-headless` with a read-only widget that records every unit. The demo
 holds only player inputs, so the engine has to compute the whole game again,
 and the result must match the original game bit for bit. (The demo carries
@@ -21,20 +21,30 @@ Supreme Isthmus game of 51 minutes. At frame 63,780 it has about 10,000 units,
 to re-simulate on a 4-core laptop. More than three quarters of that time is
 spent in the last 20 minutes of the game, where each frame takes 20-35 ms.
 
-Two words used below:
+Terms used below:
 
 - **Exact**: a change that leaves every simulated value unchanged, so old
   replays still re-simulate correctly.
 - **Serial loop**: a loop over units that must visit them one at a time, in a
   fixed order, on the main thread.
+- **Slow-update loop**: `CUnitHandler::SlowUpdateUnits`. Each frame it runs
+  `CUnit::SlowUpdate` and then the unit's weapons' `SlowUpdate` for a slice of
+  the units, so every unit gets one about twice a second. Periodic work lives
+  there: resource upkeep and income, auto-heal, and the weapons' search for a
+  new target.
 
 ## What exact changes have achieved, and where they stop
 
-Over three days, exact changes brought verylarge1 from 38m17s to 13m21s
+The improvements brought verylarge1 from 38m17s on the stock engine to 13m21s
 (2.9x), with the output still byte-identical. The main ones, in plain terms:
 
 | change | gain |
 |---|---|
+| demo playback not paced by the client-CPU governor (the local server held the sim at 60% of the CPU) | -15% wall |
+| a coarse grid of "exit-only" yardmap squares, so footprint checks skip blocks that have none ([upstream PR #3254](https://github.com/beyond-all-reason/RecoilEngine/pull/3254)) | -16% instructions |
+| no previous-frame transform save (draw interpolation state) in headless runs | -3.7% instructions |
+| no `.smt` map tile decode in headless runs | -25% load time |
+| `StaticMemPool` pages zeroed lazily instead of all at startup | -1.05 GiB memory |
 | PGO + LTO build | -10% on the late game |
 | build without the per-write sync checker (it hashes every synced write, and only multiplayer desync detection reads the hash) | -7.9% |
 | aircraft movement loop run on all threads, with every result and every side effect still in the original order | -8.3% |
@@ -52,7 +62,8 @@ target comes earlier in the loop, stop every thread at each random-number draw,
 and run ~250 aircraft a frame alone (landing, taking off, about to hit the
 ground). On 4 cores that gets about 1.3x on the loop, not 4x.
 
-This is where the main thread's time goes now in the late game:
+This is where the main thread's time goes now in the late game, with all the
+improvements included:
 
 ![main thread budget](engine-changes/main-thread-budget.svg)
 
@@ -80,10 +91,10 @@ loop's time is in items that touch nothing shared.
 Each proposal changes simulation results, so a replay recorded on today's
 engine would not re-simulate on an engine that has it. That is acceptable for
 new games: every demo pins its engine version, and all players of a game run
-the same engine. What a proposal must not do is change how the game plays.
+the same engine. What a proposal must not do is change how the game plays in general.
 They are ranked by what they unlock.
 
-### 1. Keyed random streams instead of one shared sequence
+### 1. Keyed random generator streams instead of one shared sequence
 
 ![RNG streams](engine-changes/rng-streams.svg)
 
@@ -266,28 +277,22 @@ benefit from all of them.
 | eager piece-transform walk when nothing draws | ~2-3% of all threads | skipped in headless builds. Note that `#ifdef HEADLESS` never compiles in `rts/Sim`, which builds once for all targets; a run-time test is needed. |
 | unsynced particles (crash smoke, nano spray, CEGs) in headless runs | under 1.5% | kept: a missile holds a raw pointer to its smoke trail, so they cannot simply be dropped |
 | Lua callin timers outside profiling | ~1% | only while profiling |
-| BAR's LuaUI widget suite in replays | 6.2% | not loaded (seeded widget config) |
-| the unsynced height-map update queue in headless replays | grew to 4 GiB once | not queued |
 
 Fixed along the way: a use-after-free in
 `CRectangleOverlapHandler::StageSplitTooLarge` (a reference into a vector kept
-across `push_back`), seen as heap corruption on verylarge1.
+across `push_back`), seen as heap corruption on verylarge1
+([issue #3548](https://github.com/beyond-all-reason/RecoilEngine/issues/3548)).
 
-### 8. Thread pool energy policy
+### 8. Thread pool: idle workers should sleep, not spin
 
-On a laptop, every busy core takes clock speed from the main thread. Measured
-on verylarge1:
-
-- 7 threads instead of 4, every core capped at the same clock: the late game
-  is 2.5-6% faster.
-- 7 threads uncapped over a whole game: slower, because the main thread drops
-  from 2.78 to 2.36 GHz while six workers draw power.
-- In the parallel target search, more workers made the main thread wait longer,
-  because a search it ran itself had warm caches.
-
-Workers that spin while waiting cost speed on any power- or heat-limited host,
-which is most laptops and many loaded servers. The pool should park idle
-workers quickly and hand out fewer, larger tasks.
+The simulation is mostly one main thread; the `ThreadPool` workers help only in
+short parallel sections, and between them they
+spin-wait for the next task. On a laptop or any power-limited host, a spinning
+core takes clock speed from the main thread, which is the one that sets the
+pace. On verylarge1, 7 threads were 2.5-6% faster than 4 at a fixed clock, but
+slower over a whole real game, because the main thread dropped from 2.78 to
+2.36 GHz. Parking idle workers quickly, and handing out fewer, larger tasks,
+would let extra threads help instead of hurt.
 
 ## What it would add up to
 
@@ -303,22 +308,10 @@ These are estimates from the profiles, not measurements.
 The last row is roughly what verylarge1 in 10 minutes needs. It also needs a
 host that can keep four busy cores at a reasonable clock.
 
-## Order of work that would pay off soonest
-
-1. **Keyed random streams.** Self-contained and mechanical, and everything
-   else builds on it.
-2. **Integer team resources with proportional grants.** Small in code, but a
-   rule change BAR must agree to; it can land in the same engine version as 1.
-3. **Declarative `AllowWeaponTarget`.** A small engine API and a ten-line
-   gadget change.
-4. **Previous-frame reads for aircraft and weapons first**, then the other
-   passes.
-5. **Queued damage and kill effects, batched Lua events, COB effects,
-   bookkeeping.**
-
 ## Appendix: this repo's names for the exact changes
 
-The work log and the patch files use short identifiers. Patches are under
+The work log and the patch files use short identifiers. Some of these changes
+are not merged yet and exist only on the `speed-optimization-2` branch. Patches are under
 [`patches/engine-2026.07.04/`](../patches/engine-2026.07.04/) (0001-0013, the
 published series) and
 [`patches/engine-2026.07.04/speed/`](../patches/engine-2026.07.04/speed/README.md)
