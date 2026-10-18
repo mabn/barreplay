@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -99,5 +100,60 @@ func TestNotePhaseTimesEachPhase(t *testing.T) {
 	want := []phaseTime{{"fetching demo", 3}, {"simulating", 7}}
 	if len(q.phases) != 2 || q.phases[0] != want[0] || q.phases[1] != want[1] {
 		t.Fatalf("phases = %v", q.phases)
+	}
+}
+
+// A run shorter than one report interval still leaves two readings — one as
+// it starts and one as it ends — so its queue row has a chart rather than a
+// dot (Marcin: "at least 2 data points").
+func TestQueueJobBeatsAtStartAndEnd(t *testing.T) {
+	var mu sync.Mutex
+	var states []string
+	var progress []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var m map[string]any
+		json.Unmarshal(b, &m)
+		if r.URL.Path == "/api/app/jobs" {
+			json.NewEncoder(w).Encode(map[string]string{"job": "app1"})
+			return
+		}
+		mu.Lock()
+		states = append(states, fmt.Sprint(m["state"]))
+		p, _ := m["progress"].(map[string]any)
+		progress = append(progress, p)
+		mu.Unlock()
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+	t.Setenv("FOGOFWAR_SITE", srv.URL)
+	old := reportEvery
+	reportEvery = time.Hour
+	defer func() { reportEvery = old }()
+
+	a := NewApp(t.TempDir(), Config{InstallID: "0192aaaa-0000-7000-8000-000000000000"}, &logTee{})
+	run := &jobRun{gameID: "abc", progress: &resim.Progress{}, stats: &resim.RunStats{}, started: time.Now()}
+	run.progress.SetPhase(resim.PhaseLoading)
+	q := a.startQueueJob(run, a.config())
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		n := len(states)
+		mu.Unlock()
+		if n >= 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	run.progress.SetPhase(resim.PhaseSimulating)
+	q.finish(&jobStats{TookSec: 1}, "", "")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(states) != 3 || states[0] != "processing" || states[1] != "processing" || states[2] != "done" {
+		t.Fatalf("reports = %v, want processing (start), processing (end), done", states)
+	}
+	if progress[0]["state"] != resim.PhaseLoading || progress[1]["state"] != resim.PhaseSimulating {
+		t.Fatalf("readings = %v, want the start's phase then the end's", progress[:2])
 	}
 }

@@ -293,7 +293,9 @@ func (a *App) startQueueJob(run *jobRun, cfg Config) *queueJob {
 
 func (q *queueJob) loop() {
 	defer close(q.done)
-	q.create()
+	if q.create() {
+		q.beat() // the run's first reading, however short it turns out
+	}
 	sample := time.NewTicker(time.Second)
 	defer sample.Stop()
 	beat := time.NewTicker(reportEvery)
@@ -306,19 +308,31 @@ func (q *queueJob) loop() {
 			q.observe()
 		case <-beat.C:
 			if q.jobID() == "" {
-				q.create()
+				if q.create() {
+					q.beat()
+				}
 				continue
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			err := postJSON(ctx, "/api/app/jobs/"+url.PathEscape(q.jobID()), map[string]any{
-				"state":    "processing",
-				"progress": q.progress(),
-			}, nil)
-			cancel()
-			if err != nil {
-				q.a.logf("queue report: %v", err)
-			}
+			q.beat()
 		}
+	}
+}
+
+// beat posts one healthcheck with the run's reading now. The queue page
+// charts these, so a run beats as it starts and once more as it ends, on top
+// of every reportEvery: a run of a few seconds still draws a line.
+func (q *queueJob) beat() {
+	id := q.jobID()
+	if id == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := postJSON(ctx, "/api/app/jobs/"+url.PathEscape(id), map[string]any{
+		"state":    "processing",
+		"progress": q.progress(),
+	}, nil); err != nil {
+		q.a.logf("queue report: %v", err)
 	}
 }
 
@@ -328,7 +342,8 @@ func (q *queueJob) jobID() string {
 	return q.id
 }
 
-func (q *queueJob) create() {
+// create adds the run to the site's queue and says whether it did.
+func (q *queueJob) create() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	var out struct {
@@ -344,12 +359,13 @@ func (q *queueJob) create() {
 			err = fmt.Errorf("the site named no job")
 		}
 		q.a.logf("queue: could not add this run to the site's queue: %v", err)
-		return
+		return false
 	}
 	q.mu.Lock()
 	q.id = out.Job
 	q.mu.Unlock()
 	q.a.logf("Reporting progress to the site's queue (job %s)", out.Job)
+	return true
 }
 
 // current is the run's reading and phase as the window would show them.
@@ -401,6 +417,9 @@ func (q *queueJob) finish(st *jobStats, errMsg, errKind string) {
 	close(q.stop)
 	<-q.done
 	q.observe() // the phase that was running now, however short
+	// The last reading, before done/error clears the live one: with the
+	// first, a run shorter than reportEvery still has two points to chart.
+	q.beat()
 	q.mu.Lock()
 	q.notePhase("", time.Now())
 	st.Phases = q.phases
