@@ -7,12 +7,12 @@
   <text x="34" y="61" font-weight="bold">Tagged patched engine (patched-engine/2026.7.4-barreplay.3)</text>
   <text x="34" y="80" font-size="12" fill="#5d6470">downloaded by every re-sim host today: unpaced playback, exit-only yardmap grid, PGO + LTO, lazy pool zeroing, engine event log</text>
   <rect x="20" y="102" width="860" height="52" rx="6" fill="#d5efec" stroke="#0f8f86"/>
-  <text x="34" y="123" font-weight="bold">Patch series revision 4 (0010-0013), in this repo</text>
-  <text x="34" y="142" font-size="12" fill="#5d6470">not yet built, gated, uploaded or pinned: callin timers, loop prefetch, huge-page collapse, bulk sample call, reload log</text>
+  <text x="34" y="123" font-weight="bold">Series: patches 0010-0013, the next revision (speed-optimization-2 only)</text>
+  <text x="34" y="142" font-size="12" fill="#5d6470">listed in the series file, no build tagged yet: callin timers, loop prefetch, huge-page collapse, bulk sample call, reload log</text>
   <rect x="20" y="164" width="860" height="52" rx="6" fill="#d5efec" stroke="#0f8f86"/>
-  <text x="34" y="185" font-weight="bold">Widget and engine config</text>
-  <text x="34" y="204" font-size="12" fill="#5d6470">in use for every re-sim now: widget profiler off, BAR widgets off, re-sim-only sample loop, no texture arena</text>
+  <text x="34" y="185" font-weight="bold">Widget: capture widget and its config (speed-optimization-2 only)</text>
+  <text x="34" y="204" font-size="12" fill="#5d6470">apply to every re-sim once merged, no engine build needed: widget profiler off, BAR widgets off, re-sim-only sample loop</text>
   <rect x="20" y="226" width="860" height="52" rx="6" fill="#f6e3d4" stroke="#b0602a"/>
-  <text x="34" y="247" font-weight="bold">Only on the speed-optimization-2 branch</text>
-  <text x="34" y="266" font-size="12" fill="#5d6470">gated byte-identical, not merged, no build tagged: no sync checker, parallel aircraft, LOS states, native AA priority, target searches on workers, ...</text>
+  <text x="34" y="247" font-weight="bold">Speed: patches outside the series, behind toggles (speed-optimization-2 only)</text>
+  <text x="34" y="266" font-size="12" fill="#5d6470">gated byte-identical, in no revision yet: no sync checker, parallel aircraft, LOS states, native AA priority, target searches on workers, ...</text>
 </svg>

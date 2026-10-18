@@ -47,9 +47,9 @@
   <rect x="340" y="398" width="60.0" height="18" rx="2" fill="#b0602a"/>
   <text x="406.0" y="412" font-size="12">-1.2%</text>
   <rect x="340" y="431" width="12" height="12" rx="2" fill="#0f8f86"/>
-  <text x="358" y="442" font-size="12">patch series (revision 4)</text>
+  <text x="358" y="442" font-size="12">series (next revision)</text>
   <rect x="530" y="431" width="12" height="12" rx="2" fill="#7cc4bd"/>
-  <text x="548" y="442" font-size="12">widget and config, in use now</text>
+  <text x="548" y="442" font-size="12">widget</text>
   <rect x="720" y="431" width="12" height="12" rx="2" fill="#b0602a"/>
-  <text x="738" y="442" font-size="12">only on speed-optimization-2</text>
+  <text x="738" y="442" font-size="12">speed patches</text>
 </svg>
