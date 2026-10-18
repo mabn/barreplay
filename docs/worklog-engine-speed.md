@@ -2776,3 +2776,41 @@ The PGO+LTO build gates **`0558d354…`, identical** (medium, `t=387fbf`).
   fast paths) it reads -0.9%.
 - **H88 and H90 add 1.4% instructions and save nothing.** Each is being
   measured alone, with a line-level profile after.
+
+### 2026-10-18 06:43 — H88 alone -1.1% (noisy), H90 alone +0.8% (dropped); CUnitHandler::Update's own time by line; H91
+
+`speed31` checkpoint, each alone against `t=7fbf`, 3 pairs:
+
+| alone, late window | base | with it | wall | cycles | instructions |
+|---|---|---|---|---|---|
+| H88 (ground-height reuse) | 10.99 / 10.46 / 10.67 s (10.70) | 10.47 / 10.76 / 10.53 s (10.58) | -1.1% (pairs -4.7, +2.9, -1.3: noisy) | -1.1% | -0.1% |
+| H90 (`MovedUnit` safe distance) | 10.55 / 10.62 / 10.50 s (10.56) | 10.68 / 10.63 / 10.61 s (10.64) | **+0.8%** | +0.5% | +0.2% |
+
+**Why H90 fails.** With 128-elmo quads the nearest threshold is typically
+only a few elmos away. Each of the four rectangle edges lies within ~13
+elmos of its boundary on average, and each quad's circle test adds more
+chances. Aircraft move 5-15 elmos a frame, so they leave the safe distance
+most frames and pay for the full computation plus the safe-distance square
+roots. It is reverted in `speed32`.
+
+**`CUnitHandler::Update`'s own samples by source line** (plain cycles,
+`perf annotate -l`, the code inlined into it):
+
+| line | share of its own time | what |
+|---|---|---|
+| `MoveType.cpp:90` | 27.2% | `UpdateCollisionMap`'s `(frameNum + owner->id) % unitQuadPositionUpdateRate`: reaches the unit id through the move-type object, plus an integer division |
+| `Unit.cpp:674` | 9.8% | `UpdatePosErrorParams(true, false)`: `posErrorVector += posErrorDelta` for every unit, every frame |
+| `float3.cpp:92` | 7.8% | `float3::equals`, the `pos != oldCollisionUpdatePos` of the same function |
+| `UnitHandler.cpp:660`, `:650` | 5.6%, 5.1% | the serial weapon loop's prefetch code (H75, H66), which loads each unit's weapon list to find what to prefetch |
+| `Unit.cpp:682` | 4.2% | `recentDamage *= 0.9f` and the per-frame unit counters |
+| `UnitHandler.cpp:428` | 3.8% | `QueueDeleteUnits` |
+
+**H91** (toggle `0x400000`, `speed32` = `speed31` − H90 + H91):
+`UpdateUnits` does `UpdateCollisionMap`'s rate test itself, using the
+unit's own id. The move type's owner is the unit, so the arithmetic is the
+same; the function is non-virtual and repeats the test. H66's move-type
+prefetch then covers only the units that will pass it. At BAR's rate of 3,
+two units in three no longer touch their move type in this loop.
+`speed32` is built with `speed31`'s profile: a toggle A/B inside one
+binary cancels the profile mismatch of the one changed function, and the
+retrain waits until the batch is settled.
