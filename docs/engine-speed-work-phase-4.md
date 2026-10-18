@@ -153,7 +153,19 @@ are older and were measured on other games, so they are only in the tables.
 ### 2. Running serial work in parallel, exactly
 
 All of these are branch only. Each runs work on several threads while proving
-that no unit can see a difference; that proof is most of the work.
+that no unit can see a difference; that proof is most of the work. Each is
+described under the table.
+
+| change | where | gain |
+|---|---|---|
+| P1: the aircraft move-type loop on all threads | rev 4 | -8.3% main-thread cycles (first version) |
+| P1: crashing aircraft that cannot reach the ground this frame in parallel | rev 4 | -19.2% together with P2, N1 and the piece-transform skip (section 1) |
+| P1: hovering, stunned and unfinished aircraft in parallel | rev 4 | not measured alone |
+| P1: landed aircraft and aircraft taking off in parallel | rev 4 | -0.8% at 4 threads; +4.0% at 7, so off there |
+| P1: an item passes the in-order start on before waiting for its target | rev 4 | -1.5% |
+| P2: unit LOS states computed in parallel, applied in order | rev 4 | in the -19.2% |
+| N1: BAR's AA-priority `AllowWeaponTarget` done in C++ | rev 4 | in the -19.2% |
+| P4: the slow-update loop's target searches on worker threads | rev 4 | -4.1% wall, -4.4% main-thread cycles |
 
 **P1: the aircraft move-type loop on all threads.** BAR sets `collide = false`
 on every aircraft except four flying fortresses, so a flying fighter's update
