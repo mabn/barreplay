@@ -3535,3 +3535,30 @@ P5's counters over 900 late frames, per frame:
   v3 (`speed39`) moves the memo into the COB file and the chaining into the
   instance, and reuses the classification's thread pointer (the registry is
   node-based, and only a thread's own tick erases it).
+
+### 2026-10-18 14:38 — P5 v2 and v3 identical; the frame-60 runaway is back with H87 on; the disk filled again
+
+- **Gates.** `speed38` (P5 v2, visual sfx deferred) and `speed39` (P5 v3,
+  O(1) classification plus counters) both give **`0558d354…`** at
+  `t=1cd87a3f`. With wakes deferred, 87.2% of the medium game's COB ticks
+  run on workers (v1: 85%).
+- **v3's counters on the medium game.** Of the ticks run in parallel, the
+  main thread took 16% and the workers 84%. The main thread spent 3.1e9
+  cycles over 24,160 frames (~128k a frame) waiting at segment ends for the
+  frontier, and 0.3e9 waking workers.
+- **The runaway memory again, with H87 on.** `speed38`'s verylarge1
+  checkpoint run (`t=587a3f`, which has H87 and not P5) was killed by its
+  scope's 11 GiB limit **at frame 60**: 11.5 GB anonymous resident, 4 fps
+  over those 60 frames. A normal run of the same game peaks at ~6 GB, late in
+  the game. This is the same shape as the frame-60 runaway on 10-18 03:41,
+  but H87 now stops every push into the draw-side height-map queue (its only
+  two push sites are behind H87's return), so that queue cannot be the
+  victim this time. **So H87 removed one victim, not the cause.** The cause
+  is still unknown. It is timing-dependent: `speed39`'s run of the same
+  checkpoint, armed with the memory watchdog (`memwatch.sh`, gdb stacks at
+  8.9 GB), went through at a 6.1 GB peak. The watchdog stays armed on every
+  dump until it catches one.
+- **The disk filled** (227 GB, 0 free) while `speed39`'s A/B started, so
+  the A/B produced nothing. Old checkpoints (6.2 GB each) and build
+  directories (2.3 GB each) of superseded builds were deleted: 82 GB free.
+  The A/B is re-running.
