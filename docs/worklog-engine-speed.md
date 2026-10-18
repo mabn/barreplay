@@ -3081,3 +3081,135 @@ items made of runs of consecutive local units.
   at the turn if a serial item ran meanwhile, so it always sees final state.
 - **Violation counters** on every global action point catch a misprediction
   during gating.
+
+### 2026-10-18 09:51 — P4: the slow-update loop's target searches pipelined onto the workers
+
+**Where the late window's main thread goes now** (`speed32`, 7 threads,
+`t=587a3f`, LBR call graphs, the main thread's tid only). The previous
+"main thread" profiles filtered by thread NAME, and the huge-page collapser
+thread (H71) shares it: here it was 30% of the samples (44% of a core over
+the window, which starts from a 4 KiB-page restore). Inclusive shares, so
+rows overlap:
+
+| | % of main |
+|---|---|
+| fork-join sections (main's own share): LOS 6.0, unit LOS states 5.6, ground moves 2.8, paths 1.8 | 19.9 |
+| Lua (`luaV_execute` inclusive) | 14.0 |
+| `CWeapon::SlowUpdate` | 10.6 |
+| ├ `GenerateWeaponTargets` | 6.6 |
+| ├ `TryTarget` (the candidates' line-of-fire rays) | 2.6 |
+| └ weapon vectors, COB queries | ~1.3 |
+| P1's air loop (`BrParAir::Loop`) | 9.7 |
+| `CWeapon::Update` (5.9 of it beam lasers firing) | 8.8 |
+| COB tick (`CCobEngine::Tick`) | 5.8 |
+| `CUnit::SlowUpdate` (mostly command AI) | 5.5 |
+| explosions 3.8, projectiles 3.2, `CUnit::Update` 3.6 | |
+
+The target search (`GenerateWeaponTargets` + `TryTarget`, 9.2%) is the
+largest block of pure computation left on the main thread. It only reads.
+
+**Counting build, whole game** (to frame 64,230; cycles summed per class):
+
+| loop | cycles | purely local | biggest classes |
+|---|---|---|---|
+| weapons (`Update`) | 75.8 G | 54.9% | firing 30% (COB + RNG + projectiles + Lua + damage), COB aiming 5.2% |
+| slow update | 151.6 G | 7.8% (resources only) | COB queries + RNG + tempNum + resources 33.6%, the same + Lua 33.2%, + attack 12.5% |
+
+The slow update's RNG draws are 7.1-7.5 per item at ~1.0-1.1 weapons per
+item, and 0 for units without weapons. That is exactly `CWeapon::SlowUpdate`'s
+two lines: `NextVector` (rejection sampling, 3 draws a try, expected
+3/(π/6) = 5.73) plus `NextFloat`. They depend only on the stream, so they
+stay on the main thread in order, at no cost.
+
+**P4's design.** The search of each weapon's `AutoTarget` runs on a worker
+while the main thread goes on with the next units' slow updates. Each result
+(`SetAttackTarget`) is applied in launch order. Everything else stays on the
+main thread exactly where it was: the RNG draws, COB queries, tempNum, Lua.
+
+What a search reads:
+1. the ENEMY units in the scan quads around its weapon;
+2. the units and features its rays meet (any team);
+3. the ground, its weapon and owner, and global tables.
+
+The main thread waits for the searches still running only before something
+that could change those:
+- **before a unit's slow update**, when the unit is an enemy of a running
+  search's weapon and stands inside its scan circle. A slow update writes its
+  own unit (health, paralysis, radar error, cloak state...), and only the
+  scan reads those fields of other units;
+- **before every Lua callin** (a hook in `ScopedCallInTimer`, which every
+  callin constructs);
+- **before every COB call that can reach Lua, or move pieces at once on a
+  unit whose collision volume is its piece tree** (rays read those);
+- **before every write the rays or the scan read**, at the engine function
+  that makes it:
+  - deaths and damage (units and features), explosions;
+  - quad-list changes;
+  - moves, rotations, mid/aim position changes, cloak changes;
+  - collidable bits and the void state;
+  - transport attach/detach, team changes, LOS-state changes.
+
+**Offline estimate of the wait rule** (`experiments/p4conflict`: verylarge1's
+late frames, random slice order, each unit's longest weapon as its scan):
+
+| searches in flight | units that must wait, any team | enemy only | enemy and damaged |
+|---|---|---|---|
+| 2 | 8.8% | 1.1% | 0.4% |
+| 4 | 16.0% | 2.0% | 0.7% |
+| 6 | 22.1% | 2.8% | 1.0% |
+| 12 | 36.5% | 5.1% | 1.8% |
+
+Units mostly stand among their own side, so waiting only for enemies is what
+makes this work. A search takes ~4.4 µs and the main thread spends ~2.4 µs
+per unit, so ~1.5 searches are in flight on average, and the enemy rule
+stalls ~1%.
+
+**COB** (`experiments/cobpurity`, the same rules over BAR's 744 `.cob`
+files). Every weapon query function is harmless:
+- `QueryWeaponN` 631/631;
+- `AimFromWeaponN` 578/578;
+- `QueryPrimary` 123/124 (one does a `GET_UNIT_VALUE`).
+
+So the per-weapon COB queries never wait. `Activate`/`Deactivate`/
+`StartBuilding` are often `SET`/`EMIT_SFX`. Those effects go through hooked
+engine functions anyway, so P4 drains only for Lua and for piece writes
+(`*_NOW`, `SHOW`/`HIDE`, `EXPLODE`) on piece-tree units.
+
+**Two non-obvious things found on the way:**
+
+- **Reading a piece matrix can be a write.**
+  - BAR gives many units (tanks, pop-up defences) piece-tree collision
+    volumes (`usepiececollisionvolumes`, ~60 unit defs), and
+    `IntersectPieceTree` reads every piece's matrix.
+  - Those are computed lazily: `UpdateParentMatricesRec` clears `dirty`
+    BEFORE writing the matrices, so a concurrent reader can see a clean flag
+    and a half-written matrix.
+  - The fix: while a slice runs, a dirty piece is computed into
+    thread-local scratch by the same operations (bitwise the same value),
+    and nobody writes the cache.
+- **N1's once-a-frame validation reads the Lua state.** It used to run at the
+  frame's first `AllowWeaponTarget` call. If a worker made that first call,
+  it would read the Lua state off the main thread. P4 now asks
+  `eventHandler.BrAllowWeaponTargetNative(def)` on the main thread at launch,
+  which runs the check there. A weapon whose `AllowWeaponTarget` would run
+  Lua (N1 off, another client, or a COB/Lua `TargetWeight`) is searched in
+  order as before.
+
+**Dedup marks.** A search on a worker marks candidates with its thread's
+`mtTempNum` (the per-thread marks the engine's parallel quad queries already
+use), and the main thread takes the synced tempNum at the launch, so the
+counter advances exactly as before. Nothing compares a unit's tempNum
+against anything but the number its own scan just took, so marks a search
+does not leave behind are never missed. `QueryVectorCache` pools are per
+thread; `QuadFieldQuery`'s default owner is now a thread-local, set to the
+worker's index while it runs a search, so the queries deep inside `TraceRay`
+use the worker's pool.
+
+`BARREPLAY_P4_CHECK=1` also runs every search in order at its launch and
+logs any difference from the pipelined result (using the in-order one).
+`BARREPLAY_P4_STATS=1` logs the drain reasons. `BARREPLAY_P4_WORKERS`
+(default 2) sets how many workers take searches: ~1.5 are in flight on
+average, and spinning cores heat the package.
+
+Recoil `speed33` (`f12a67b`) = `speed32` + P4, building with the speed31
+profile; gate with check mode first.
