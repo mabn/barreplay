@@ -32,9 +32,10 @@ capture differs in its hit/projectile/blast sections only: work log,
 | worker cycles (3 workers) | 6.07e12 | 2.97e12 | 2.04x |
 | peak memory | 6.48 GiB | — | |
 
-Best so far: `speed30` (= `speed24h` + H87, below) with `-worker-threads 7`,
-the same governor: **13m50.1s active** (-5.6% against `speed24`), identical
-(`a26e920d…`), peak memory 6.03 GiB (work log, 2026-10-18).
+Best so far: `speed32` (= `speed24h` + H87 + H88 + H89 + H91, Recoil branch
+`speed32`), `t=587fbf`, `-worker-threads 7`, the main thread pinned alone on a
+core, the same governor: **13m21.3s active** (-8.9% against `speed24`),
+identical (`a26e920d…`), peak memory 6.09 GiB (work log, 2026-10-18).
 
 ## Applying
 

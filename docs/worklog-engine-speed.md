@@ -2885,3 +2885,23 @@ A fuller repack would need the hot fields of three classes
 (`CWorldObject`, `CSolidObject`, `CUnit`), which can only be reordered
 within each class, and several build-and-retrain cycles to find a layout
 that does not trade one loop's locality for another's.
+
+### 2026-10-18 07:48 — governed whole game, speed32 (H87+H88+H89+H91), 7 threads, pinned: 13m21s active, identical
+
+| governed whole game | active sim | main-thread cycles |
+|---|---|---|
+| `speed24`, 4 threads | ~14m39s | 3.27e12 |
+| `speed30` (H87), 7 threads, unpinned | 13m50.1s | 3.08e12 |
+| `speed32` (H87+H88+H89+H91), 7 threads, pinned | **13m21.3s** | 2.98e12 |
+| change from `speed24` | **-8.9%** | -8.9% |
+
+`t=587fbf`, `PIN=1` (main thread alone on cpu 3), sim 32m57s with
+19m36s paused, **`a26e920d…`, identical**, peak memory 6.09 GiB, +148
+throttle events. The kept small items and the pinning add up to -3.5% on
+the whole game, where each read at noise level alone on the late window.
+
+Until now the late-window A/Bs used 4-thread checkpoints, while the whole
+games run 7 threads. The older toggles were tuned at 4 threads; H76's chunk
+size for the parallel loops especially may want something else at 7. So
+next: a 7-thread `speed32` checkpoint, and each existing toggle switched
+off against it (no build).
