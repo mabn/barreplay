@@ -4218,3 +4218,44 @@ run on a whole verylarge1 game; the last exact whole game was `speed32`,
 before both. The bisection now uses runs from frame 0 to 66,720 (stopped by
 the bench harness, ~12 minutes each without the heat governor), comparing
 events and frames from 60,000 to 66,715 with the exact reference stream.
+
+### 2026-10-18 22:35 — the divergence is P4's, and only with searches running beside the main thread
+
+Runs from frame 0 to 66,720, events and frames from 60,000 to 66,715
+compared with the exact reference (`speed42`, or the `diag2` build of it
+with two diagnostic knobs):
+
+| run | toggles | first differing record |
+|---|---|---|
+| P4 + P5 | `10d87a3f` | 66706: kill credited to 65, not 30226 |
+| P4 | `d87a3f` | 66706, the same |
+| P5 | `10587a3f` | none |
+| P4, check mode (`BARREPLAY_P4_CHECK`) | `d87a3f` | none, 0 mismatches |
+| P4, 0 workers (every search inline on the main thread, at its drain) | `d87a3f` | none |
+| P4, `waitLaunch` (search on a worker, main waits for it at once) | `d87a3f` | none |
+| P4, `unitSync` (all searches done before the next unit's slow update) | `d87a3f` | none |
+
+So P5, H94, N2, P7, P1 v8 and v9 are not involved. P4 is wrong only when a
+search overlaps the slow updates of LATER units. Its per-thread state
+(temp-number counters and marks, quad pools, scratch matrices) is fine:
+`waitLaunch` keeps the search on a worker thread and is exact.
+
+**Insights:**
+- The zero-worker run runs every search late, at the next drain, and applies
+  it late, and it is exact. So the drains cover everything a search reads in
+  sequential order, and applying late is harmless. The conflicting write
+  must be one a search only sees half-way: a value set and restored, or a
+  container changed in place while a worker walks it.
+- `BeforeUnit` waits only for later units that are ENEMIES of a running
+  search inside its area, so the writer is a unit that rule leaves out: an
+  ally on a line-of-fire ray, or a unit outside the area.
+- Check mode is no use against this kind of bug. It runs the in-order search
+  on the main thread before publishing the task, so a worker search
+  overlaps almost nothing.
+- Both whole games with P4 (with and without P1 v8) were byte-identical to
+  each other. A race that resolves the same way in every run still looks
+  like a deterministic bug.
+
+Next: engine state dumps (`DumpState`, gated by `BARREPLAY_DUMPSTATE`,
+with each weapon's target, reload and aim added) every 6,000 frames, P4 off
+and on, to find the first frame and object that differ.
