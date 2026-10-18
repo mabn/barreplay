@@ -68,6 +68,12 @@ def analyze(code, offs, lens, names, fn, memo, why):
             c = opnds[0]
             if names[c].startswith('lua_') or not analyze(code, offs, lens, names, c, memo, why):
                 ok = False; why[fn] = 'calls ' + names[c] + ('' if names[c].startswith('lua_') else ' (' + why.get(c, '?') + ')'); break
+        elif name == 'EMIT_SFX':
+            # visual sfx (wakes, smoke, bubbles, CEGs) only make unsynced
+            # particles: deferred; fire/detonate-weapon types are synced
+            v = get_id(ins, j, targets, 1)
+            if v is None or (not (v & 0x4000) and not (v & 0x400) and (v & 0x1800)):
+                ok = False; why[fn] = 'EMIT_SFX type %s' % v; break
         elif name == 'SET':
             v = get_id(ins, j, targets, 2)
             if v is None or v not in SET_IDS:

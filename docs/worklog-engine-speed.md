@@ -3459,3 +3459,42 @@ fresh Lua profile.
   wall time is not made of those loops alone.
 
 Both stay in the code behind their toggles, off (patches not exported).
+
+### 2026-10-18 13:06 — one walk script is 43% of the COB tick
+
+The COB counting build again, with each tick attributed to (script, the
+function the thread was in). Late window, 150 frames, share of the COB
+tick's cycles:
+
+| script : function | ticks | share | cycles/tick | operations | P5 (static rule) |
+|---|---|---|---|---|---|
+| `CORAK` : `Walk` | 25,662 | **42.9%** | 9,802 | anim, sleep | worker |
+| `ARMSH` : `HoverCraftMotion` | 16,830 | 11.1% | 3,880 | rand, get, sfx, anim, sleep | serial: `EMIT_SFX` |
+| `ARMPW` : `Walk` | 3,028 | 3.5% | 6,687 | anim, sleep | worker |
+| `CORAK` : `AimWeapon1` | 5,250 | 2.4% | 2,628 | start, anim, sleep | worker |
+| `ARMBANTH` : `Walk` | 930 | 2.0% | 12,781 | get, sfx, Lua, anim | serial: detonate sfx |
+| `legsh` : `StartMoving` | 4,125 | 1.8% | 2,601 | sfx, sleep | serial: `EMIT_SFX` |
+| `legsh` : `BankControl`, `CORAK` : `UnitSpeed`, `LEGSTR` : `Walk` | | 1.7% each | | | worker |
+| ... 16 more over 0.7% | | | | | 12 worker |
+
+**Insights:**
+- **The COB tick is mostly one unit type walking.** `CORAK` (Cortex's AK
+  raider) runs its `Walk` 171 times a frame at ~9.8k cycles: a long
+  sequence of turns and moves per step. It is worker-safe.
+- **Visual sfx are the main barrier.** `HoverCraftMotion` and
+  `StartMoving` are serial only because they `EMIT_SFX`, and the hover
+  ticks (112 a frame) are interleaved with everything else. As barriers they
+  would cut the parallel runs to ~4 ticks.
+- **The barrier is unnecessary.** Their sfx are wakes, i.e. VISUAL types
+  (wake, smoke, bubble, CEG). `EmitAbsSFX` turns those into unsynced
+  particles using the unsynced RNG (`guRNG`), so nothing synced depends on
+  when or in what order they are made. Only the fire-weapon and
+  detonate-weapon types are synced.
+- **P5 v2 (`speed38`)** therefore treats an `EMIT_SFX` whose type is a
+  constant visual type as worker-safe. It captures `EmitAbsSFX`'s
+  arguments (positions already computed) and emits the particles at the
+  segment's end, in tick order.
+- **Coverage:** with that, 10,399 of BAR's 12,173 functions qualify. Of the
+  25 hottest, only 3 stay serial: `ARMBANTH` `Walk` (a detonate-weapon
+  stomp), `LEGNANOTCTEMP` `RequestState` (`SHOW`) and `armmar` `Walk`
+  (`lua_UnitScriptDecal`).
