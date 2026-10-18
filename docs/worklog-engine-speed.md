@@ -2814,3 +2814,33 @@ two units in three no longer touch their move type in this loop.
 `speed32` is built with `speed31`'s profile: a toggle A/B inside one
 binary cancels the profile mismatch of the one changed function, and the
 retrain waits until the batch is settled.
+
+**Every serial hotspot left is latency on scattered objects** (line-level
+annotations, `speed31`):
+
+- **The targeting scan** (`GenerateWeaponTargets`): 20% of its time on the
+  quads' per-team unit-list headers (a dependent load per scanned quad,
+  enemies in it or not), 12% on the candidates' `tempNum`, 10% on the list
+  elements. H82 already tried prefetching through the next quads.
+- **`CWeapon::Update`**: 69% on one line, `GetLeadTargetPos`, which reads
+  the target's position and speed (a miss on the target despite H75).
+
+The speed24 load-latency profile (`mem-loads`, ldlat 50, `memfields.py`)
+says where the main thread's latency goes:
+
+| main thread's load latency | share |
+|---|---|
+| unit pool (`CUnit` objects) | 36.3% |
+| weapon pool | 5.3% |
+| projectiles | 1.5% |
+| everything else (Lua heap, pieces, scripts, quads, LOS maps) | 56.8% |
+
+Inside the unit pool the hottest fields are spread over the whole ~4.4 KB
+object, each 0.6-1.3%: \`id\` (+184), the position (+224/232),
+\`physicalState\` (+464), the direction vectors (+1000-1032), \`moveType\`
+(+1272) and its embedded state (+1880), and the state flags at the far end
+(\`isDead\`, \`beingBuilt\`, \`deathScriptFinished\`, \`stunned\`:
++4245-4321). A loop reading a handful of them touches a handful of lines per
+unit. Packing the fields by which loops read them together is the one exact
+lever aimed at this. It covers about a third of the latency, and H83's
+smaller version lost 1.1%, so it is a gamble.
