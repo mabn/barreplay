@@ -18,5 +18,6 @@ internal/viz/bardata/
       icontypes.lua   BAR game code, GNU GPL v2
     See internal/viz/bardata/README.md for details.
 
-Maps, map images and replay data are not part of this repository. They are
-fetched from BAR's public services at run time and belong to their authors.
+Map images and replay data are not part of this repository. Map images were
+provided by uBdead of the Beyond All Reason team; replay data is fetched from
+BAR's public services at run time.
