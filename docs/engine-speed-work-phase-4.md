@@ -102,9 +102,11 @@ target searches moved to workers, below):
 
 ![main thread budget](engine-changes/main-thread-budget.svg)
 
-The weapon target search (`GenerateWeaponTargets` 6.6% plus `TryTarget` 2.6%)
-was the largest block of pure computation left on the main thread, and only
-reads, which is why it was moved next.
+In that profile, 9.2% of the main thread is weapons searching for a new
+target in the slow-update loop (`GenerateWeaponTargets` 6.6% plus `TryTarget`
+2.6%). A search only reads the game state and writes nothing until its result
+is stored, so it can run on another thread while the main thread carries on.
+That is the last change below: target searches on worker threads.
 
 Nothing left is bigger than about 10%, so what remains is either many small
 wins or running more of the serial loops in parallel. The second needs engine
