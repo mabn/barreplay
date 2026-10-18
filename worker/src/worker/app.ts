@@ -422,7 +422,11 @@ app.post("/api/upload", async (c) => {
   const appVersion = (c.req.query("app") ?? "").replace(/[^\w.+-]/g, "").slice(0, 40);
   const note = installId !== null ? `Uploaded by FogOfWar ${appVersion || "?"}` : null;
   const job = crypto.randomUUID();
-  await indexStub(c.env).jobInsert(job, streamKey, p.gameId, "upload", installId, note);
+  // ?appJob= names the app run this .brp came from: the upload is then shown
+  // inside that run's queue row instead of as a second entry for the game.
+  const appJob = c.req.query("appJob");
+  const parentId = appJob && /^[0-9a-f-]{36}$/.test(appJob) ? appJob : null;
+  await indexStub(c.env).jobInsert(job, streamKey, p.gameId, "upload", installId, note, parentId);
   return c.json({ job, gameId: p.gameId, streamKey });
 });
 

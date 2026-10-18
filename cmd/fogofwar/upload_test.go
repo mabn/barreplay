@@ -52,12 +52,13 @@ func TestGameTags(t *testing.T) {
 func TestUploadBRP(t *testing.T) {
 	body := []byte("BRP1\x06 not really a replay")
 	var gotBody []byte
-	var gotInstall string
+	var gotInstall, gotAppJob string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/upload":
 			gotBody, _ = io.ReadAll(r.Body)
 			gotInstall = r.URL.Query().Get("install")
+			gotAppJob = r.URL.Query().Get("appJob")
 			json.NewEncoder(w).Encode(map[string]string{"job": "j1", "gameId": "g"})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/jobs/j1":
 			json.NewEncoder(w).Encode(map[string]string{"state": "done"})
@@ -73,12 +74,12 @@ func TestUploadBRP(t *testing.T) {
 		t.Fatal(err)
 	}
 	var last int64
-	job, err := uploadBRP(context.Background(), p, "0192-test", func(done, total int64) { last = done })
+	job, err := uploadBRP(context.Background(), p, "0192-test", "0192-run", func(done, total int64) { last = done })
 	if err != nil || job != "j1" {
 		t.Fatalf("upload = %q, %v", job, err)
 	}
-	if gotInstall != "0192-test" {
-		t.Fatalf("install = %q", gotInstall)
+	if gotInstall != "0192-test" || gotAppJob != "0192-run" {
+		t.Fatalf("install = %q, appJob = %q", gotInstall, gotAppJob)
 	}
 	if string(gotBody) != string(body) || last != int64(len(body)) {
 		t.Fatalf("sent %q, progress %d", gotBody, last)
@@ -100,7 +101,7 @@ func TestUploadBRPRefused(t *testing.T) {
 	t.Setenv("FOGOFWAR_SITE", srv.URL)
 	p := filepath.Join(t.TempDir(), "g.brp")
 	os.WriteFile(p, []byte("x"), 0o644)
-	if _, err := uploadBRP(context.Background(), p, "", nil); err == nil || err.Error() != "the site refused the upload: not a .brp" {
+	if _, err := uploadBRP(context.Background(), p, "", "", nil); err == nil || err.Error() != "the site refused the upload: not a .brp" {
 		t.Fatalf("err = %v", err)
 	}
 }

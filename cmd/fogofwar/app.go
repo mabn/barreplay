@@ -490,7 +490,7 @@ func (a *App) runJob(ctx context.Context, run *jobRun) {
 			item.Bytes = fi.Size()
 		}
 		st.recordBRP(dst)
-		a.upload(ctx, run, &item, cfg.InstallID, st)
+		a.upload(ctx, run, &item, cfg.InstallID, q.jobID(), st)
 		return nil
 	}()
 	s := run.stats

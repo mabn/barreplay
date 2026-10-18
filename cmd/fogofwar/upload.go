@@ -36,8 +36,10 @@ const (
 
 // uploadBRP posts a finished .brp to the site's open upload route, which
 // archives it and queues it for publishing; the answer is the job that does
-// that. progress is called as the bytes go out.
-func uploadBRP(ctx context.Context, path, installID string, progress func(done, total int64)) (string, error) {
+// that. appJob is the run's own queue job, if the site gave it one, so the
+// queue shows the publish inside the run's row. progress is called as the
+// bytes go out.
+func uploadBRP(ctx context.Context, path, installID, appJob string, progress func(done, total int64)) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -52,6 +54,9 @@ func uploadBRP(ctx context.Context, path, installID string, progress func(done, 
 	q := url.Values{"app": {version}}
 	if installID != "" {
 		q.Set("install", installID)
+	}
+	if appJob != "" {
+		q.Set("appJob", appJob)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, siteURL()+"/api/upload?"+q.Encode(), body)
 	if err != nil {
@@ -129,13 +134,13 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // upload sends a finished replay to the site and records the outcome on its
 // history row. It runs inside the job, as its last phase, so the window shows
 // the transfer; a failed upload never fails the job, the file is saved.
-func (a *App) upload(ctx context.Context, run *jobRun, item *HistoryItem, installID string, st *jobStats) {
+func (a *App) upload(ctx context.Context, run *jobRun, item *HistoryItem, installID, appJob string, st *jobStats) {
 	a.setJobPhase(run, "uploading")
 	a.logf("Uploading %s to %s", run.gameID, siteURL())
 	uctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
 	t0 := time.Now()
-	job, err := uploadBRP(uctx, item.Path, installID, func(done, total int64) {
+	job, err := uploadBRP(uctx, item.Path, installID, appJob, func(done, total int64) {
 		a.onDownload("Uploading "+run.gameID+".brp", done, total)
 	})
 	st.UploadSec = round1(time.Since(t0).Seconds())
