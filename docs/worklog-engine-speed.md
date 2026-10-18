@@ -3331,3 +3331,52 @@ checkpoint, and 7-thread dumps land in different heap layouts. An A/B
 between the two builds with P4 off is queued, to tell whether speed34's
 P4-off code got slower (the Lua trampoline sits on every synced-control
 call, P4 or not) or the checkpoints differ.
+
+### 2026-10-18 12:03 — the COB tick, counted: two thirds of it touches nothing but its own unit
+
+Measurement build `measure-cob` (`speed33` + counters, `BARREPLAY_CM=1`):
+every thread tick of the COB engine's frame (the running list, then the
+sleepers due), classified by the global operations it performed. Late window
+(frames 63,900-64,050, 150 frames):
+
+| | per frame |
+|---|---|
+| thread ticks | ~1,040 |
+| their cycles | ~4.1M (~1.1 ms, ~4.6% of the frame) |
+| COB calls the engine makes outside the tick (queries, `AimWeapon`, ...) | ~1,330, ~0.9M cycles |
+| a tick of the same unit as the tick before it | 5% |
+
+| class (operations performed) | share of ticks | share of cycles | cycles/tick |
+|---|---|---|---|
+| anim + sleep (turns/moves, then sleep) | 28.2% | **63.9%** | 8,849 |
+| get + get-unit-value + anim + sleep | 11.2% | 9.1% | 3,164 |
+| get + get-unit-value + sfx + anim + sleep | 4.1% | 5.1% | 4,816 |
+| get-unit-value + sleep | 12.7% | 3.4% | 1,054 |
+| get-unit-value + sfx + sleep | 4.4% | 3.3% | 2,899 |
+| get-unit-value + anim + sleep | 7.7% | 2.9% | 1,471 |
+| rand + get-unit-value + sleep | 7.8% | 1.8% | 917 |
+| dies | 5.8% | 1.3% | 882 |
+| ... with Lua | 0.2% | 1.6% | 26-40k |
+
+Most read values (late window, 150 frames):
+- `GET_UNIT_VALUE`: 29 (56k), 82 `HEADING` (32k), 28 (19k), 75 `MAX_SPEED`
+  (7k), 9 `UNIT_XZ` (5k);
+- `GET`: 135, 133, 78 `GROUND_WATER_HEIGHT`, 132, 131.
+- The only `SET` is 5, `INBUILDSTANCE` (3.2k).
+
+**Insights:**
+- **The anim-only ticks are the COB tick's bulk.** 64% of its cycles are
+  threads that only animate their own unit and sleep: walk cycles and turret
+  idles. Their only effects beyond the unit's own script state are scheduling
+  (the sleep queue, ordered by (wake time, id), so its pop order does not
+  depend on push order) and the animation registry (an append). Those ticks
+  can run in parallel with per-unit ordering and in-order bookkeeping.
+- **That is a ~2.5% ceiling** (64% of ~4.6%, on 7 threads, minus
+  scheduling).
+- **Ticks that read unit values (`GET`) are another matter.** Damage from
+  an earlier tick's sfx/fire can change what they read (speed after an
+  impulse, health), so they would wait for every earlier tick (P1's serial
+  point).
+- **`AddAnim` is not the cost.** The registry insert is a plain append and
+  `FindAnim` is H80's binary search, so the 8.8k cycles are the scripts
+  themselves.
