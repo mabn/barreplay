@@ -189,7 +189,9 @@ cmd/bringest/main.go      CLI: the drag&drop upload daemon. Polls the worker's j
                           anyone has onto the host doing the work, which is somebody's machine
                           behind NAT. The healthcheck is cancelled AND JOINED before the terminal
                           report, since a beat still in flight would flip a finished row back to
-                          processing forever.
+                          processing forever. It also beats once as the job STARTS and once
+                          more, inside stop, as it ENDS (FogOfWar's app jobs the same), so a run
+                          shorter than one interval still charts two points.
                           Every job re-simulates the demo headlessly via internal/resim (the
                           cmd/barreplay pipeline packaged as one call: demo download -> provision
                           -> widget inject -> engine run -> .brp) and publishes the full-view

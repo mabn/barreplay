@@ -245,8 +245,8 @@ func TestResimDaemonDrainsQueue(t *testing.T) {
 	if n != 2 || strings.Join(ran, ",") != "aaaa0000000000000000000000000001,aaaa0000000000000000000000000002" {
 		t.Fatalf("attempted %d (%v), want both queued games in order", n, ran)
 	}
-	if got := strings.Join(m.transitions, ","); got != "claim,done,claim,done" {
-		t.Errorf("transitions = %q, want a claim and a report for each run", got)
+	if got := strings.Join(m.transitions, ","); got != "claim,processing,processing,done,claim,processing,processing,done" {
+		t.Errorf("transitions = %q, want a claim, a start and end beat, and a report for each run", got)
 	}
 }
 
@@ -291,8 +291,8 @@ func TestResimDaemonReportsStats(t *testing.T) {
 			if _, err := r.runOnce(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			if got := strings.Join(m.transitions, ","); got != "claim,"+tc.state {
-				t.Fatalf("transitions = %q, want claim,%s", got, tc.state)
+			if got := strings.Join(m.transitions, ","); got != "claim,processing,processing,"+tc.state {
+				t.Fatalf("transitions = %q, want claim, start and end beats, %s", got, tc.state)
 			}
 			if len(m.statsSeen) != 1 {
 				t.Fatalf("reports carrying stats = %d, want 1", len(m.statsSeen))
@@ -332,8 +332,8 @@ func TestResimDaemonQueuedFailure(t *testing.T) {
 	if _, err := r.runOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(m.transitions, ","); got != "claim,error:no engine" {
-		t.Errorf("transitions = %q, want claim,error:no engine", got)
+	if got := strings.Join(m.transitions, ","); got != "claim,processing,processing,error:no engine" {
+		t.Errorf("transitions = %q, want claim, start and end beats, error:no engine", got)
 	}
 }
 
@@ -464,8 +464,9 @@ func TestResimDaemonHealthchecksCarryProgress(t *testing.T) {
 	if len(m.progressSeen) < 3 {
 		t.Fatalf("progress reports = %d, want every beat to carry one", len(m.progressSeen))
 	}
-	if got := m.progressSeen[0].State; got != resim.PhaseStartingEngine {
-		t.Errorf("first beat's state = %q, want %q", got, resim.PhaseStartingEngine)
+	// [0] is the beat sent as the job starts, before the run has a phase.
+	if got := m.progressSeen[1].State; got != resim.PhaseStartingEngine {
+		t.Errorf("second beat's state = %q, want %q", got, resim.PhaseStartingEngine)
 	}
 	last := m.progressSeen[len(m.progressSeen)-1]
 	if last.State != resim.PhaseSimulating {
@@ -794,5 +795,45 @@ func TestResimDaemonRunsOneJobPerPoll(t *testing.T) {
 	n, err := r.runOnce(context.Background())
 	if err != nil || n != 1 || len(ran) != 1 {
 		t.Fatalf("one round attempted %d (%v, err %v), want exactly the first job", n, ran, err)
+	}
+}
+
+// A re-sim shorter than one healthcheck interval still reports twice — as it
+// starts and as it ends, before the terminal report — so the queue page has a
+// line to chart rather than one point (Marcin: "at least 2 data points").
+func TestResimDaemonBeatsAtStartAndEnd(t *testing.T) {
+	old := healthcheckEvery
+	healthcheckEvery = time.Hour
+	t.Cleanup(func() { healthcheckEvery = old })
+
+	m := newMock(t)
+	m.resim = []ingestJob{{ID: "rj-1", GameID: "aaaa0000000000000000000000000001", Kind: kindResim, State: "pending"}}
+	mux := http.NewServeMux()
+	mux.Handle("/api/jobs", m.handler(""))
+	mux.Handle("/api/jobs/", m.handler(""))
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	r := &resimDaemon{
+		workerAPI: workerAPI{indexURL: srv.URL, client: http.DefaultClient},
+		resim: func(ctx context.Context, _ string, _ *jobStats, pr *resim.Progress) error {
+			wctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+			waitForBeats(wctx, m, 1)
+			pr.SetPhase(resim.PhaseSimulating)
+			return nil
+		},
+	}
+	if _, err := r.runOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	want := []string{"claim", "processing", "processing", "done"}
+	if fmt.Sprint(m.transitions) != fmt.Sprint(want) {
+		t.Fatalf("transitions = %v, want %v", m.transitions, want)
+	}
+	if len(m.progressSeen) != 2 || m.progressSeen[1].State != resim.PhaseSimulating {
+		t.Fatalf("readings = %+v, want two, the last at the run's end", m.progressSeen)
 	}
 }
