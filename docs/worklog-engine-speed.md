@@ -1624,7 +1624,7 @@ Whole game, `speed14`, `t=1f`, governor on: sim 37m27s, paused 20m39s, so
 flying/hovering and stunned/unfinished aircraft in parallel, toggle bit 5).
 
 USER also asked which engine changes (not exact, but not changing gameplay)
-would unlock the most: [engine-changes-for-speed.md](engine-changes-for-speed.md).
+would unlock the most: [proposed-engine-breaking-changes.md](proposed-engine-breaking-changes.md).
 
 ### 2026-10-17 09:50 — `speed15` (P1 v5): late window -18% vs all off; governed whole game 18m23s -> 16m39s active
 
@@ -1686,7 +1686,7 @@ Main thread now (`t=3f`, late window), % of core:
   ticks only animate their own pieces) but the plan checks would have to replay
   CanFire / CanCallAimingScript / salvo / sweep rules exactly, or buffer every
   global COB opcode — each a big, risky change for ~3-5%. Parked; see
-  engine-changes-for-speed.md for why upstream changes would make them easy.
+  proposed-engine-breaking-changes.md for why upstream changes would make them easy.
 - **H74** (Recoil `speed16`, toggle bit 6, building): a helper thread pinned to
   the main thread's hyperthread sibling (shared L1/L2) walks the three serial
   unit loops (UpdateUnits, the serial weapon pass, SlowUpdateUnits) 16 units
@@ -1721,7 +1721,7 @@ perhaps ~10% together. Getting to 10 minutes needs most of the remaining
 serial ~75% of the main thread to run in parallel, which the engine's rules
 forbid while the output must stay byte-identical: the sequential synced RNG,
 order-dependent reads, and synced Lua inside the unit loops
-(engine-changes-for-speed.md).
+(proposed-engine-breaking-changes.md).
 
 ### 2026-10-17 13:00 — W6 (widget sample loop in the engine), W7 (launcher slots visited on change), and an upstream heap overflow
 

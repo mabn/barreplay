@@ -100,7 +100,7 @@ each: they mostly wait for the main thread's serial loops. The main thread's
 late-window profile, with every change in place except the last one (the
 target searches moved to workers, below):
 
-![main thread budget](engine-changes/main-thread-budget.svg)
+![main thread budget](proposed-engine-breaking-changes/main-thread-budget.svg)
 
 In that profile, 9.2% of the main thread is weapons searching for a new
 target in the slow-update loop (`GenerateWeaponTargets` 6.6% plus `TryTarget`
@@ -111,7 +111,7 @@ Moving those searches to worker threads is described below (P4).
 Nothing left is bigger than about 10%, so what remains is either many small
 wins or running more of the serial loops in parallel. The second needs engine
 rules to change, which is what
-[engine-changes-for-speed.md](engine-changes-for-speed.md) is about.
+[proposed-engine-breaking-changes.md](proposed-engine-breaking-changes.md) is about.
 
 ## The changes
 

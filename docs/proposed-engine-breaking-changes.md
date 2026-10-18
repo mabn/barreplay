@@ -60,7 +60,7 @@ ground). On 4 cores that gets about 1.3x on the loop, not 4x.
 This is where the main thread's time goes now in the late game, with all the
 improvements included:
 
-![main thread budget](engine-changes/main-thread-budget.svg)
+![main thread budget](proposed-engine-breaking-changes/main-thread-budget.svg)
 
 Each of the remaining exact candidates is worth 1-5%. Reaching the goal of
 verylarge1 in 10 minutes needs about -30% more, and that needs the serial
@@ -91,7 +91,7 @@ They are ranked by what they unlock.
 
 ### 1. Keyed random generator streams instead of one shared sequence
 
-![RNG streams](engine-changes/rng-streams.svg)
+![RNG streams](proposed-engine-breaking-changes/rng-streams.svg)
 
 **Change.** Today `gsRNG` is one global sequence, so each value depends on how
 many draws came before it. Instead, a draw would be a pure function of its
@@ -144,7 +144,7 @@ and the unit-order dependence.
 
 ### 2. Integer team resources, granted in proportion
 
-![team resources](engine-changes/team-resources.svg)
+![team resources](proposed-engine-breaking-changes/team-resources.svg)
 
 **The problem is rounding, not speed.** Each float addition rounds its result,
 so the total depends on the order of the additions. In 32-bit floats,
@@ -189,7 +189,7 @@ step for its grant.
 
 ### 3. Units read the previous frame's state of other units
 
-![snapshot reads](engine-changes/snapshot-reads.svg)
+![snapshot reads](proposed-engine-breaking-changes/snapshot-reads.svg)
 
 **Change.** During a unit pass, reads of another unit's position, speed,
 health or flags go to a copy taken at the start of the frame, and each unit
@@ -212,7 +212,7 @@ only cross-unit read is their target) and weapons.
 
 ### 4. Synced Lua out of the unit loops
 
-![callin queue](engine-changes/callin-queue.svg)
+![callin queue](proposed-engine-breaking-changes/callin-queue.svg)
 
 **Change.** Callins that run inside a unit's update today are queued with a
 sort key and dispatched in one batch at a fixed point of the frame:
