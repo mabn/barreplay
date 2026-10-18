@@ -3612,3 +3612,59 @@ sample loop into C++, the interpreter is a smaller share than the ~8% the
 plan of 10-18 02:00 assumed. The profile will show whether a few hot gadget
 callins (ported natively, the way N1 ported `AllowWeaponTarget`) are worth
 more than a general compiler.
+
+### 2026-10-18 15:08 — the Lua profile on the current line: 15% of the main core, no hot spot
+
+`luaprof35` (= `speed36` + the Lua sampler), late window, `t=cd87a3f`
+(P4 on). 10,107 main-core samples, 1,514 of them (15.0%) with Lua on the
+stack:
+
+| Lua state | % of main core |
+|---|---|
+| LuaRules (BAR's gadgets) | 12.57% |
+| LuaUI (our capture widget; BAR's widgets are disabled) | 2.32% |
+
+By the gadget function each callin entered (the innermost non-handler frame
+nearest the root):
+
+| gadget : function | % of main core |
+|---|---|
+| `gadgets.lua` (the handler's own dispatch: `installed` wrappers, the per-callin `ipairs` loops) | 2.91% |
+| `snapshot_widget.lua` (ours) | 2.05% |
+| `unit_shield_behaviour` : `GameFrame` | 1.17% |
+| `unit_builder_priority` : `GameFrame` | 0.71% |
+| `api_unit_attributes` : `GameFrame` | 0.63% |
+| `unit_shield_behaviour` : `ShieldPreDamaged` | 0.50% |
+| `unit_crashing_aircraft` : `UnitPreDamaged` | 0.45% |
+| `unit_lightning_splash_dmg` : `ProjectileDestroyed` | 0.34% |
+| `map_lava` : `GameFrame` | 0.30% |
+| `api_teamstats` : `UnitDestroyed` + `GameFrame` | 0.42% |
+| `unit_jammed_fix` : `GameFrame` | 0.23% |
+| ~60 more under 0.2% each | ~5% |
+
+**Insights:**
+- **There is no hot spot to port.** The largest gadget function is 1.2% of
+  the main core. `unit_shield_behaviour` is BAR's game-side shield system,
+  ~1,100 lines of state that other gadgets reach through `GG.Shields`.
+  Porting it natively the way N1 ported `AllowWeaponTarget` (one
+  stateless multiply) would mean re-implementing that state exactly, for
+  1.7%.
+- **The handler's dispatch is the biggest single item (2.9%).** BAR wraps
+  every top-level callin in an `installed = function(...)` closure
+  (`callinDepth` counter, varargs) and then loops over the callin's
+  gadget list with `ipairs`. Calling the listed gadget functions from C++
+  would skip both. The trust anchor would be the same as N1's: `gadgets.lua`'s
+  hash, the installed closures and the lists checked each frame.
+- **A general ahead-of-time compiler is the only thing that reaches the
+  whole tail.** Its ceiling is the interpreter's own time: 3.7% of the main
+  thread (`luaV_execute` self, `speed32`), maybe 4-5% with direct
+  Lua-to-Lua calls replacing `luaD_precall`. Table lookups (2.9%), the
+  allocator and GC stay as they are, because exactness needs the same table
+  operations in the same order.
+- **Security and tweakdefs.** A compiler must not widen what Lua can do.
+  Translating the bytecode the Lua compiler made from source, op for op onto
+  the same VM primitives, keeps every sandbox check where it is: in the
+  environment tables and metatables the code runs against, not in the
+  interpreter. The risk is translator bugs. Compiling only files whose
+  content hash is on a built-in list (BAR's own gadgets) contains it:
+  tweakdefs, mods and user widgets always run interpreted, exactly as now.
