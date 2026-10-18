@@ -3828,8 +3828,9 @@ run dev` in `worker/` plus `pack -upload local`.)
   (only the demo startscript path does), so a `.brp` packed from a raw `.brepstream` with
   `pack -no-demo` has an empty `mapName` and renders the plain background; the
   default pack fetches the demo by gameId and fills it in.
-  HIGH-RES TERRAIN: once the API texture is up, loadMap also asks the data
-  origin for `maps/highres/<name>_<W>x<H>.png` (the BAR team's images, uploaded
+  HIGH-RES TERRAIN: once the API texture is up, loadMap also asks the CDN
+  hostname (`HIGHRES_MAP_ORIGIN`: the data origin, or cdn-bar under `vite dev`,
+  since only the production bucket has them) for `maps/highres/<name>_<W>x<H>.png` (the BAR team's images, uploaded
   by cmd/upload-maps) and swaps it in when it arrives; a 404 keeps the API
   texture. The key is computed, never looked up (`highResMapFile`): the map name
   exactly as the startscript spells it (R2 is case-sensitive) with spaces as

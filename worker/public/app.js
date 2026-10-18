@@ -4817,6 +4817,12 @@ async function resolveMapFile(name, gameId) {
   return (await res.json()).Map || null;
 }
 
+// The high-res map images live only in the production bucket, so they are
+// always read from its CDN hostname — also under `vite dev`, whose data origin
+// is the local simulator bucket. Its CORS policy (r2-cors.json) lists the dev
+// server's origins.
+const HIGHRES_MAP_ORIGIN = DATA_BASE || 'https://cdn-bar.fogofwar.dev';
+
 // highResMapFile names the BAR team's high-res image of a map in the bucket
 // (maps/highres/, uploaded by cmd/upload-maps), or '' when it cannot be named.
 // The files are "<map name, spaces as _>_<W>x<H>.png": the name exactly as the
@@ -4873,7 +4879,7 @@ async function loadMap(name, gameId) {
     hi.crossOrigin = 'anonymous'; // the bucket's CORS policy allows the viewer's origins
     hi.onload = () => { if (gen !== loadGen) return; hiResShown = true; mapTex = hi; mapTexGen++; draw(); };
     hi.onerror = () => { /* no high-res image of this map: keep the API's texture */ };
-    hi.src = dataURL('/maps/highres/' + encodeURIComponent(hiRes));
+    hi.src = HIGHRES_MAP_ORIGIN + '/maps/highres/' + encodeURIComponent(hiRes);
   }
   draw(); // reflect the (possibly updated) map extent immediately
 }
