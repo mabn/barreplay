@@ -3243,3 +3243,48 @@ What the main thread waited for (whole medium game):
 would run Lua: this gate replay's BAR build differs from verylarge1's, so N1
 is off there. In the medium game P4 changes nothing measurable: its slow
 updates are small, and most of their searches are not native.
+
+### 2026-10-18 10:29 — P4 on the late window: -2.3% wall; the main thread waits ~1 ms a frame, mostly at Lua callins
+
+`speed33` checkpoint (7 threads, `t=587a3f` up to frame 63780), late
+window, 3 interleaved pairs, main thread pinned:
+
+| | P4 off (`587a3f`) | P4 on (`d87a3f`) | |
+|---|---|---|---|
+| wall | 10.56 / 10.40 / 10.50 s (10.49) | 10.18 / 10.34 / 10.22 s (10.25) | **-2.3%** |
+| main cycles | 38.52e9 | 37.79e9 | -1.9% |
+| main instructions | 37.08e9 | 33.59e9 | **-9.4%** |
+
+The search work left the main thread (instructions -9.4%, about the 9.2%
+the profile gave the searches), but most of its cycles did not. P4's
+counters over 900 late frames (a 1000-frame trial):
+
+| | per frame |
+|---|---|
+| searches launched | 461 |
+| times the main thread waited | 82 |
+| time waiting | ~0.96 ms (~12 µs a wait) |
+| waits at a Lua callin | 58 |
+| waits for an enemy in a running search's circle | 6.3 |
+| searches run by the main thread itself | 0.3 |
+
+**Insight:** the pattern is a launch followed almost at once by a Lua callin.
+Unit j's weapon launches its search; unit j+1's command AI runs a callin
+(`UnitCmdDone`, `AllowCommand`...); the drain then waits out the search
+just started, which takes longer on a worker with cold caches. The entry
+drain was conservative: a callin that only reads cannot observe a running
+search, because a search writes nothing until it is applied, and the only
+state an application changes is the weapon's target.
+
+`speed34` therefore:
+- **Lua waits only at the functions that write sim state** (every
+  `LuaSyncedCtrl`, `MoveCtrl` and Lua unit-script function, and
+  `Script.SetWatch*`), **or read a weapon's target** (`GetUnitWeapon*`).
+  A trampoline (`BrLuaDrainingCall`, a C closure carrying the original
+  function) drains before calling through. COB's Lua calls are relaxed the
+  same way.
+- **A slaved weapon's target copy** is queued behind its master's pending
+  search instead of waiting for it.
+- **The waiting main thread runs pending searches** nobody has taken.
+- **The worker count is a toggle** (bits 24-25: 2 + 2k workers), so one
+  checkpoint can compare counts.
