@@ -3772,3 +3772,57 @@ It fails on the units with their own `Update`:
 - Running all plain units first is not exact either. A builder's Lua callin
   may read a plain unit's flanking or physical state, and in the original
   order a later unit has not been updated yet.
+
+### 2026-10-18 15:49 — speed40: P1 v8, N2, measurement counters; the pipeline
+
+`speed40` (= `speed39` + the following), built on the profile retrained
+on `speed39`:
+
+- **Measurement.** P1's main-thread waits by kind (in-order start, targets,
+  serial items, serial points, the final wait) and its serial items by
+  (hover/strafe, aircraft state, zero speed). P4's and P5's counters go on
+  the bench harness's result line, so a trial reports them with no
+  environment set at dump time.
+- **H94** (above).
+- **P1 v8** (toggle `0x80000000`): a hover aircraft standing still in the
+  air (`FLYING`/`HOVERING`, not stopping, not crashing) runs as a
+  parallel item. Its paths are those of a moving one: the
+  `StartMoving`/`StopMoving` script calls and the RNG draws already wait
+  for every earlier item, state changes there set only its own flags, and
+  with collide off nothing reads another unit. The move rate's script call
+  is in `SlowUpdate`, outside the loop. Zero speed made ~116 aircraft a
+  frame serial before.
+- **N2** (`toggle2` `0x1`): BAR's callin dispatch done natively for
+  `UnitPreDamaged`, `UnitDamaged`, `Explosion` and `ProjectileDestroyed`.
+  The damage callins are 3.6% of the main thread, the handler's own share
+  ~1.3%: per hit, the `installed` wrapper and the handler loop are two Lua
+  calls, plus two calls of the empty tracy stubs.
+  - **When it engages.** The global the engine fetches must be BAR's
+    `installed` wrapper over the handler function. Both are checked by a hash
+    of their bytecode, constants, nested functions and upvalue names (no
+    debug info, so moved lines do not matter), against an allowlist. The
+    handler's tracy upvalues must be empty stubs, i.e. a headless build.
+  - **What it does.** A C function takes the same steps: the same table
+    reads (with metamethods), the same method lookups, the same gadget
+    calls with the same arguments in the same order, Lua's arithmetic
+    (coercion and metamethods through Lua itself for anything but two
+    numbers), the same depth counter and deferred-reorder check.
+  - **What differs.** Only error tracebacks, and the C-call depth is one
+    higher.
+  - **Security.** It never runs code the handler would not run; tweakdefs,
+    mods and changed handlers are simply not on the allowlist.
+  - **The allowlist.** It starts empty: the first run logs the hashes, and
+    `BARREPLAY_N2_HASHES` supplies them until they are built in.
+- A second toggles word (`BARREPLAY_TOGGLES2`, the go file's `t2=`;
+  bench-ckpt `TOGGLES2`, and `abt` settings written `<t>/<t2>`): the
+  first word's 32 bits are all used.
+
+The queued pipeline (`pipe-next.sh`):
+1. Train the profile and build `speed39p` and `speed40` on it.
+2. Gate `speed39p`, and `speed40` with H94 + P1 v8.
+3. Learn N2's hashes on the medium game and on verylarge1's own BAR build,
+   then gate with N2 native.
+4. Dump both checkpoints (memory watchdog armed).
+5. A/B the PGO retrain (`speed39` against `speed39p`, same toggles), then
+   H94, P1 v8 and N2 one at a time on `speed40`.
+6. Run a governed whole game on `speed39p`.
