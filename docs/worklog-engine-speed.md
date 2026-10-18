@@ -2905,3 +2905,31 @@ games run 7 threads. The older toggles were tuned at 4 threads; H76's chunk
 size for the parallel loops especially may want something else at 7. So
 next: a 7-thread `speed32` checkpoint, and each existing toggle switched
 off against it (no build).
+
+### 2026-10-18 08:21 — at 7 threads, existing toggles switched off one at a time
+
+`speed32` dumped again with `-worker-threads 7` (`spring-headless-speed32t7`),
+each toggle off against `t=587fbf`, 3 pairs, every trial from 50 C. The
+base drifted from 11.02 s to 11.70 s over the sweep (room and package
+heat), so only the pairs inside each A/B compare:
+
+| off, 7-thread checkpoint, 3 pairs | base | off | wall | cycles | pairs |
+|---|---|---|---|---|---|
+| H75 (weapon-loop prefetch) | 11.02 s | 10.79 s | **-2.1%** | -1.7% | +0.3 -4.7 -1.9 |
+| H76 (chunks of 32) | 11.19 s | 11.07 s | -1.1% | -0.4% | -4.0 -4.4 +5.3 |
+| H77 (scan prefetch) | 11.42 s | 11.25 s | -1.4% | -1.3% | -1.0 -0.3 -2.9 |
+| H79 (row runs in `GetQuads`) | 11.61 s | 11.69 s | +0.8% | +1.6% | -0.1 +0.2 +2.2 |
+| H80 (`FindAnim` key) | 11.64 s | 11.62 s | -0.1% | -0.4% | +1.3 -1.9 +0.2 |
+| P1 v6 (landed / take-off aircraft in parallel) | 11.70 s | 11.24 s | **-4.0%** | -0.9% | -6.7 -3.2 -2.0 |
+
+Three toggles tuned at 4 threads now seem to cost time:
+
+- **P1 v6** loses wall time far beyond its cycles, which points at
+  synchronisation waits (landed aircraft made more parallel items, each
+  with in-order start and target edges).
+- **H75 and H77**, both prefetches: the line profile had H75's prefetch
+  code itself at ~11% of `CUnitHandler::Update`'s own time, loading each
+  unit's weapon list to find what to prefetch.
+
+A combined A/B (all three off, `t=587a3f`, 5 pairs) is running to
+confirm.
