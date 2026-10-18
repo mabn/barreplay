@@ -4081,3 +4081,45 @@ what N2 does". The allowlist is now built in (`ebda0df`) with exactly the
 verified five: the wrapper and `Explosion` (identical in both builds), plus
 test-31620's three loops. A new BAR build's hashes are added only after
 reading its handlers.
+
+### 2026-10-18 18:24 — speed42: everything on is identical; N2 -2.2%; P1 v9 moves the wait rather than removing it
+
+`speed42` (= `speed41` + N2's tracy fix + P1 v9), medium gate with every
+item on (`t=d0d87a3f`, `t2=31`: P4, P5, H94, P1 v8, N2, P7, v9):
+**`0558d354…`**. On the medium game's BAR build only `Explosion` goes
+native, by design (its other handlers are test-31030 code).
+
+Late window, `speed42` checkpoint, 3 interleaved pairs:
+
+| A/B | without | with | wall | cycles | instructions |
+|---|---|---|---|---|---|
+| N2 (`t2` `30` → `31`), all four callins native | 10.08 / 10.27 / 10.34 s (10.23) | 9.99 / 10.12 / 9.91 s (10.01) | **-2.2%** (every pair) | -1.6% | -0.7% |
+| P1 v9 (`t2` `11` → `31`) | 10.35 / 10.44 / 10.02 s (10.27) | 10.04 / 10.05 / 10.20 s (10.10) | -1.7% | **+0.2%** | +1.2% |
+
+N2 is kept.
+
+**v9's wall gain is not real work saved.** Main-thread cycles are flat; the
+main clock read 3.68 GHz in the baseline trials and 3.75 GHz in v9's. Its
+own counters (last trial) show why:
+
+| P1 main-thread waits | v8 (`speed41`) | v9 (`speed42`) |
+|---|---|---|
+| in-order start | 1,554e6 cycles / 216,143 | **1,857e6 / 55,836** |
+| serial items (all earlier done) | 38e6 / 15,961 | **226e6 / 15,657** |
+
+**Insight: the start chain's cost is the serial aircraft, not the hop
+latency.**
+- The chain stops at each of the ~250 serial items a frame until every
+  earlier item has *finished*.
+- With batches of 8, the batch just before a serial item takes longer to
+  drain, so every one of those barriers costs more.
+- The serial aircraft are mostly what P1 v6 parallelizes: strafe aircraft
+  taking off (50,646 in the window, 112 a frame) and hover aircraft parked
+  (30,886).
+- v6 was switched off at 7 threads (10-18 08:30), because each of its items
+  then paid the chain. With v9's batches it may pay off: queued as
+  `d0d87abf`. So is v9 with batches of 4, and a repeat of v9 on/off.
+
+The `speed42` checkpoint runs ~5% slower than `speed41`'s with the same
+toggles, another heap-layout difference between dumps. Only pairs inside one
+checkpoint compare.
