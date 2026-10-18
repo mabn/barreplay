@@ -3562,3 +3562,53 @@ P5's counters over 900 late frames, per frame:
   the A/B produced nothing. Old checkpoints (6.2 GB each) and build
   directories (2.3 GB each) of superseded builds were deleted: 82 GB free.
   The A/B is re-running.
+
+### 2026-10-18 14:52 — P5 v3 on the late window: -1.2% wall
+
+`speed39` checkpoint, late window, 3 interleaved pairs against `cd87a3f`
+(P4, H92, H93):
+
+| late window | without P5 (`cd87a3f`) | with P5 v3 (`1cd87a3f`) | change |
+|---|---|---|---|
+| wall | 10.44 / 10.34 / 10.56 s (10.45) | 10.23 / 10.43 / 10.32 s (10.33) | **-1.2%** (every pair) |
+| main cycles | 38.19e9 | 37.74e9 | -1.2% |
+| main instructions | 36.07e9 | 33.78e9 | -6.3% |
+
+**Insights:**
+- **v3 turned P5 from a loss into a gain.** v1 was +0.4% wall on the same
+  pairs. The difference is v2's deferred wakes, plus v3's per-tick
+  classification without hash maps.
+- **The ceiling is the COB tick's share, ~5.5% of the main thread,** and
+  P5 takes a fifth of it. Instructions fall 6.3% but cycles only 1.2%: the
+  ticks left on the main thread are the ones that wait for memory. Each
+  segment's end also waits for the slowest worker's tick, and a tick that
+  misses cache on another core's data costs as much there as it did here.
+- **This checkpoint runs ~7% slower than `speed37`'s with the same
+  toggles** (10.45 s against 9.74 s for `cd87a3f`). Each dump is a separate
+  re-simulation, and its heap layout differs, so absolute times are not
+  comparable across checkpoints. Only pairs within one checkpoint are.
+
+P5 is kept (toggle `0x10000000`). Next, the Lua profile (`luaprof35`,
+building) decides the Lua step.
+
+Sizing that step from `speed32`'s main-thread profile (late window, % of
+the main thread):
+
+| | inclusive | own |
+|---|---|---|
+| all Lua (callins + GC) | ~14% | |
+| `luaV_execute` (the interpreter loop) | 14.0% | **3.7%** |
+| `luaH_get` (table reads) | | 2.9% |
+| `luaD_precall` (calls) | 6.6% | 1.5% |
+| GC (`CollectGarbage`) | 2.2% | |
+| allocator | 1.3% | |
+
+**Insight: compiling Lua ahead of time can remove at most the interpreter's
+own 3.7%, plus part of the call setup.** The rest is table lookups
+(`luaH_get`: mostly cache misses on unit-id-keyed tables of ~10k
+entries), engine calls, allocation and GC. A compiler would make exactly
+the same table operations, so they stay. Since W6/W7 moved our widget's
+sample loop into C++, the interpreter is a smaller share than the ~8% the
+plan of 10-18 02:00 assumed. The profile will show whether a few hot gadget
+callins (ported natively, the way N1 ported `AllowWeaponTarget`) are worth
+more than a general compiler.
