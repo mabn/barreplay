@@ -3826,3 +3826,42 @@ The queued pipeline (`pipe-next.sh`):
 5. A/B the PGO retrain (`speed39` against `speed39p`, same toggles), then
    H94, P1 v8 and N2 one at a time on `speed40`.
 6. Run a governed whole game on `speed39p`.
+
+### 2026-10-18 15:54 — next structural candidate: P7, the LOS update overlapped with the script tick
+
+Running the LOS update asynchronously after its usual point (H84, 10-18
+02:25) bought nothing: the first LOS reader comes almost at once (in the
+medium game a gadget's `GameFrame` LOS queries, and the interceptor update
+runs right after the LOS point). The other side of the LOS point is free of
+readers: **nothing in the script tick reads LOS** (COB threads, animations,
+`UpdatePostAnimation`, `envResHandler`). That window costs the main thread
+~6% (P5 3.3%, anims 2.5%), and the main thread spends ~5.6% in the LOS
+update itself (one sensor type's unit loop 3.7%, its map update 1.9%).
+
+**P7 design** (not built yet):
+- **Split the LOS update in two.** Phase A is each type's per-unit loop:
+  instance lookup, creation and refcounts, `unit->los[type]`, and the
+  raycasts of new and recalculated instances. Phase B is the map update
+  (`LosRemove`/`LosAdd`) and the cache bookkeeping.
+- **Phase A starts on the workers when the script tick starts.** It reads
+  the LOS inputs (`isDead`, `beingBuilt`, `activated`, `stunned`,
+  `midPos`, the sensor radii, `allyteam`, the global-LOS flags) and writes
+  only instance state, which nothing in the window reads: LOS queries read
+  the maps.
+- **Phase B stays at the LOS point**, so every reader before it still sees
+  last frame's maps.
+- **Inputs that change in the window are fixed up in phase B.** The writers
+  in the window:
+  - COB `SET` of activation or a sensor radius: per unit, hooked in
+    `SetUnitVal`.
+  - Transportees moved in `UpdatePostAnimation`: per unit.
+  - Lua writes through the P4 trampoline, e.g. from a Lua unit script's
+    `AnimFinished` (any unit; global).
+
+  A marked unit gets `UpdateUnit` again for each type in phase B. A global
+  mark redoes the whole loop, sequentially, as today. Re-running the loop is
+  exact: it brings each unit's instance in line with its current inputs,
+  and the map contributions are integer sums.
+- **The risk is capacity.** The window's own parallel work (P5's segments,
+  the animation tick) needs the same workers, so the overlap may be partial.
+  Est. -2 to -4%.
