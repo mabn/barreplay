@@ -2665,3 +2665,23 @@ patch 0039 (the upstream use-after-free in `StageSplitTooLarge`) nor H87.
 So re-sim hosts run the stock draw-side height-map path, with that bug and
 whatever corrupts the queue. Some re-sims recorded as out-of-memory may be
 this, not load-time memory.
+
+### 2026-10-18 04:10 — H87 speed-neutral (kept for robustness); governed whole game with it running
+
+`speed30` checkpoint, late window, 3 interleaved pairs:
+
+| late window, 3 pairs | wall | cycles | instructions |
+|---|---|---|---|
+| base (`t=7fbf`) | 10.94 / 10.80 / 10.74 s (10.83) | 40.31e9 | 37.05e9 |
+| H87 (`t=87fbf`) | 10.69 / 10.67 / 10.95 s (10.77) | 39.96e9 | 36.93e9 |
+| change | -0.5% (pairs -2.3, -1.2, +1.9: noise) | -0.9% | -0.3% |
+
+As expected, the draw-side height-map work was small in the late window.
+H87's value is that the runaway-memory path no longer runs. The governed
+whole game (`speed30`, `t=87fbf`, 7 threads, unpinned) is running, and
+it is also the test of whether the blow-up is gone.
+
+`fullrun.sh` gained `PIN=1`: the main thread alone on cpu 3, every
+other thread on 0-2,4-6, as the bench harness runs. Threads created later
+(H71's huge-page collapser starts at frame 0) inherit the main thread's cpu,
+so they are moved off it every 10 s.
