@@ -3828,6 +3828,15 @@ run dev` in `worker/` plus `pack -upload local`.)
   (only the demo startscript path does), so a `.brp` packed from a raw `.brepstream` with
   `pack -no-demo` has an empty `mapName` and renders the plain background; the
   default pack fetches the demo by gameId and fills it in.
+  HIGH-RES TERRAIN: once the API texture is up, loadMap also asks the data
+  origin for `maps/highres/<name>_<W>x<H>.png` (the BAR team's images, uploaded
+  by cmd/upload-maps) and swaps it in when it arrives; a 404 keeps the API
+  texture. The key is computed, never looked up (`highResMapFile`): the map name
+  exactly as the startscript spells it (R2 is case-sensitive) with spaces as
+  `_`, and the size from the map record already fetched: 4096 on the long side,
+  the short side scaled to the aspect and rounded DOWN to a multiple of 4
+  (checked against every uploaded file). `mapTexGen` is in the base layer's
+  repaint key, since a texture swap changes nothing else in it.
 - **`worker/public/`** (+ `worker/index.html`) is plain HTML/Canvas/vanilla-JS — **no
   framework, no build step for the app itself** (Vite only wraps it for the Cloudflare
   deploy). `app.js` reads the flat unit arrays by index (no per-unit objects), renders
