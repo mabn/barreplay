@@ -3668,3 +3668,61 @@ nearest the root):
   interpreter. The risk is translator bugs. Compiling only files whose
   content hash is on a built-in list (BAR's own gadgets) contains it:
   tweakdefs, mods and user widgets always run interpreted, exactly as now.
+
+### 2026-10-18 15:29 — where the main thread's time is now (speed39, P4 + P5 on)
+
+Main-thread profile of the late window (`speed39`, `t=10d87a3f`: P4 and P5
+on, H92/H93 off; LBR call stacks, 4,854 main-thread samples). Wall 9.59 s,
+30.7e9 instructions.
+
+| block | % of main thread | how it runs now |
+|---|---|---|
+| Lua (callins and GC) | ~15.4 | serial (see the Lua profile above) |
+| weapon loop: `CBeamLaser::Update` 6.5, other `CWeapon::Update` 4.5 | 10.7 | serial; firing (`Fire`: damage, projectiles) 4.6 of it |
+| LOS update | 6.7 | parallel by sensor type; the main thread runs one type itself (`ILosType::UpdateUnit` 3.7, `ILosType::Update` 1.9) |
+| weapon vectors + unit LOS states (P2's section) | 6.2 | parallel; main does its share (vectors 3.7) and spins 1.5 |
+| `CUnit::SlowUpdate` (command AI: `CAirCAI::ExecuteFight` 1.5, `SlowUpdate` 1.2, `FinishCommand` 1.1) | 6.5 | serial |
+| ground movement | 3.6 | parallel; main's share + 0.7 spin |
+| P1 (aircraft) | 5.1 + 8.2 (`Loop`: own items 2.3, exclusive items 1.6, **spinning 2.9**) | ordered-parallel |
+| P4 | 3.1 (**`CommitThrough` waiting 2.1**, own searches 0.9) | pipelined |
+| P5 | 3.3 (own ticks 2.2, scheduling 1.0) | ordered-parallel |
+| `CUnit::Update` 3.4, `UpdatePhysicalState` 2.9, `MovedUnit` 2.7 | 9.0 | serial |
+| projectiles 3.5, map damage 2.5, QTPFS 2.2 | 8.2 | mixed |
+
+Three worker threads sampled in the same window are busy only **35-49%** of
+it. What they do:
+
+| worker activity | share of samples |
+|---|---|
+| P1 | 22.5% |
+| P4 | 20.2% |
+| P5 | 9.8% |
+| LOS | 9.8% |
+| weapon vectors | 8.5% |
+| ground move | 6.4% |
+| anims | 5.4% |
+| idle in the pool | 13.6% |
+
+**Insights:**
+- **The workers have capacity to spare; the main thread does not.** The main
+  thread spends **~10% of its time waiting for workers**: P1's spinning
+  (2.9%), P4's commit waits (2.1%), P5's segment ends (~1.3%), and the
+  fork-join spins (~3.5%). That is the waiting cost of the ordered schemes
+  and the barriers, not a shortage of threads.
+- **No exact lever left is bigger than ~3%.** Estimated ceilings:
+
+  | candidate | est. gain | size of job |
+  |---|---|---|
+  | PGO retrained on the current code | ~3% (`speed39` runs 3.1% more cycles than `speed37` for the same instructions; P5's changes to hot COB code lost their profile) | running |
+  | fewer barriers in P1 (~243 serial aircraft a frame), and P4's commit waits | 1-3% | medium; instrumented build `speed40` (`dba618c`) queued |
+  | engine-side recorder for re-sim mode (our widget is 2.05% plus its GC) | ~2-2.5% | large |
+  | weapon loop in ordered parallel (P6) | 1.5-2.5% | large: the local weapons cost ~285 cycles each, and every firing one is a barrier |
+  | Lua compiled ahead of time | 2-3% | very large; the interpreter's own time is 4.6%, dispatch is already threaded |
+  | native dispatch of the gadget handler's callins (N2) | ~1% | medium |
+
+  Together that is ~12-15%, against the ~22% the 10-minute goal needs from
+  here.
+- **The Lua compiler and security.** If built, it compiles only files whose
+  content hash is on a built-in list. Its translation calls the same VM
+  primitives, so the sandbox's checks (environment tables, metatables) are
+  untouched, and tweakdefs and user code run interpreted.
