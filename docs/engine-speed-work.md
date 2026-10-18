@@ -1,6 +1,5 @@
 # Making BAR re-simulation faster: what was done and what it measured
 
-
 ## Context
 
 barreplay ([replay.fogofwar.dev](https://replay.fogofwar.dev)) re-simulates

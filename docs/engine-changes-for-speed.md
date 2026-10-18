@@ -1,6 +1,5 @@
 # Engine changes that would make BAR's simulation much faster
 
-
 ## Context
 
 barreplay ([replay.fogofwar.dev](https://replay.fogofwar.dev)) re-simulates finished BAR games: it plays the game's demo file in
