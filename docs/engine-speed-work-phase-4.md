@@ -135,6 +135,8 @@ are older and were measured on other games, so they are only in the tables.
 
 ![single gains](engine-speed/single-gains.svg)
 
+Here are the five categories of changes implemented:
+
 ### 1. Removing work nothing reads
 
 | change | where | gain |
