@@ -3436,3 +3436,26 @@ Three more exact changes:
 on) and `587a3f` (all off) both **`0558d354…`**. Its late-window A/Bs and
 `speed37`'s build are queued behind a per-script COB measurement and a
 fresh Lua profile.
+
+### 2026-10-18 12:39 — H92 and H93: noise level; both left off
+
+`speed36` checkpoint, late window, 3 interleaved pairs each, against P4 on
+(`d87a3f`):
+
+| | base | with it | wall | main cycles | main instructions |
+|---|---|---|---|---|---|
+| H92 (`4d87a3f`, weapon-vector skip) | 10.06 / 10.13 / 10.17 s | 10.14 / 9.99 / 10.11 s | -0.4% | -0.2% | -0.6% |
+| H93 (`8d87a3f`, LOS pre-pass) | 9.99 / 10.05 / 10.08 s | 10.00 / 9.92 / 10.06 s | -0.5% | -0.5% | **+6.6%** |
+
+**Insights:**
+- **H92 skips too little.** In the late game nearly every armed unit is
+  either moving (5.7k aircraft) or has a turret that animated since its
+  last update, so a dirty piece or a changed transform forces the
+  recompute.
+- **H93 moved the cost instead of removing it.** The per-unit test reads the
+  same instance fields (`basePos`, `baseHeight`, `radius`) as the loops it
+  replaces, so the misses happen in the pre-pass instead. The main thread's
+  instructions rise by its share of a test for all 7 types. The LOS phase's
+  wall time is not made of those loops alone.
+
+Both stay in the code behind their toggles, off (patches not exported).
