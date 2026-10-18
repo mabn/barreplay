@@ -9,13 +9,13 @@ revision means listing them in `series`, which needs a new digest pinned,
 a gate and a publish.
 
 Numbering: the 4-digit prefixes continue the series (`../0001`-`0013`), so
-every patch number under `engine-2026.07.04/` is unique: 0014-0043 and
-0063-0067 here, 0044-0045, 0052-0062 and 0068 in `rejected/`, 0046-0051 in
+every patch number under `engine-2026.07.04/` is unique: 0014-0043,
+0063-0067 and 0069-0070 here, 0044-0045, 0052-0062 and 0068 in `rejected/`, 0046-0051 in
 `tools/`. Change
 identifiers continue the work log's H-series (H1-H73), with H74-H91 for the
 ones below.
-P1 (with its versions v2-v7), P2, P3, N1 and the widget-side W1-W7 are families
-of their own.
+P1 (with its versions v2-v7), P2, P3, P4, N1 and the widget-side W1-W7 are
+families of their own.
 
 ## Result
 
@@ -88,6 +88,8 @@ everything up to `0xfbf`, the whole verylarge1 game `a26e920d…`.
 | `0x1000` | H79 | 0041 | `GetQuads` finds each row's run of quads by its two ends | **-1.7%** | on |
 | `0x2000` | P1 v7 | 0042 | an item passes the in-order start on before waiting for its targets | **-1.5%** | on |
 | `0x4000` | H80 | 0043 | `FindAnim` searches on one packed 64-bit key | -0.4% (noise level) | on |
+| `0x800000` | P4 | 0069-0070 | the slow-update loop's weapon target searches (`GenerateWeaponTargets` + the `TryTarget` walk) on worker threads, applied in launch order; the main thread waits only before writes a search may read (an enemy of a running search's weapon inside its circle, Lua's writing functions, deaths, damage, moves, quad changes...) | **-4.1%** wall, -4.4% main cycles (`speed34`, `t=d87a3f` vs `587a3f`) | on |
+| bits 24-25 | P4 workers | 0070 | 2 + 2k workers take searches (0 = `BARREPLAY_P4_WORKERS`, default 2) | 6 workers +1.5% against 2 | 0 |
 
 Not toggled (always on in these builds):
 

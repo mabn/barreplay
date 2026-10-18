@@ -1,0 +1,1395 @@
+From f12a67b50cb9178227c6d1a185a905bf366f863a Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 09:49:15 +0000
+Subject: [PATCH 69/70] [barreplay] P4: weapon target searches of the
+ slow-update loop on worker threads, applied in order (toggle 0x800000)
+
+---
+ rts/Game/GameHelper.cpp                  |  27 +-
+ rts/Game/GameHelper.h                    |   1 +
+ rts/Lua/LuaCallInCheck.h                 |   3 +
+ rts/Lua/LuaHandleSynced.cpp              |  43 ++-
+ rts/Lua/LuaHandleSynced.h                |   1 +
+ rts/Rendering/Models/LocalModelPiece.cpp |  44 ++-
+ rts/Rendering/Models/LocalModelPiece.hpp |   8 +
+ rts/Sim/CMakeLists.txt                   |   1 +
+ rts/Sim/Features/Feature.cpp             |   3 +
+ rts/Sim/Misc/QuadField.cpp               |  12 +
+ rts/Sim/Misc/QuadField.h                 |   6 +-
+ rts/Sim/Objects/SolidObject.cpp          |  13 +
+ rts/Sim/Objects/SolidObject.h            |   9 +-
+ rts/Sim/Units/Scripts/CobInstance.cpp    |   6 +
+ rts/Sim/Units/Unit.cpp                   |  16 +
+ rts/Sim/Units/UnitHandler.cpp            |  11 +
+ rts/Sim/Weapons/BrPipeTarget.cpp         | 458 +++++++++++++++++++++++
+ rts/Sim/Weapons/BrPipeTarget.h           |  73 ++++
+ rts/Sim/Weapons/Weapon.cpp               |  41 +-
+ rts/Sim/Weapons/Weapon.h                 |   3 +-
+ rts/System/EventClient.h                 |   4 +
+ rts/System/EventHandler.h                |   8 +
+ 22 files changed, 754 insertions(+), 37 deletions(-)
+ create mode 100644 rts/Sim/Weapons/BrPipeTarget.cpp
+ create mode 100644 rts/Sim/Weapons/BrPipeTarget.h
+
+diff --git a/rts/Game/GameHelper.cpp b/rts/Game/GameHelper.cpp
+index 2772224..fa66526 100644
+--- a/rts/Game/GameHelper.cpp
++++ b/rts/Game/GameHelper.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "GameHelper.h"
++#include "Sim/Weapons/BrPipeTarget.h"
+ #include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ 
+ #include "Camera.h"
+@@ -249,6 +250,8 @@ void CGameHelper::DamageObjectsInExplosionRadius(
+ }
+ 
+ void CGameHelper::Explosion(const CExplosionParams& params) {
++	// [barreplay] P4 (BrPipeTarget.h)
++	BrP4::Drain(BrP4::DR_EXPLOSION);
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	const DamageArray& damages = params.damages;
+ 
+@@ -656,6 +659,18 @@ namespace {
+ 
+ 
+ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* avoidUnit, std::vector<std::pair<float, CUnit*>>& targets)
++{
++	return GenerateWeaponTargets(weapon, avoidUnit, targets, -1, -1);
++}
++
++// [barreplay] P4: <tempNum> < 0 takes the next synced tempNum here as before;
++// otherwise it is the number the main thread took for this search in order.
++// <mtThread> >= 0 runs the search on that pool thread (BrPipeTarget.h): the
++// quad query uses its pools and the dedup marks are its per-thread marks
++// (mtTempNum), so the units' synced tempNum is left alone. Nothing compares
++// a unit's tempNum with any number but the one its own scan just took, so
++// the marks a search does not leave behind are never missed.
++size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* avoidUnit, std::vector<std::pair<float, CUnit*>>& targets, int tempNumArg, int mtThread)
+ {
+ 	const CUnit*  weaponOwner = weapon->owner;
+ 	const CUnit* lastAttacker = ((weaponOwner->lastAttackFrame + 200) <= gs->frameNum) ? weaponOwner->lastAttacker : nullptr;
+@@ -689,12 +704,15 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
+ 
+ 	// copy on purpose since the below calls lua
+ 	QuadFieldQuery qfQuery;
++	if (mtThread >= 0)
++		qfQuery.threadOwner = mtThread;
+ 	quadField.GetQuads(qfQuery, ownerPos, scanRadius);
+ 
+ 	targets.clear();
+ 	targets.reserve(32);
+ 
+-	const int tempNum = gs->GetTempNum();
++	const bool mt = (mtThread >= 0);
++	const int tempNum = mt? gs->GetMtTempNum(mtThread): ((tempNumArg >= 0)? tempNumArg: gs->GetTempNum());
+ 	const bool prefetchCandidates = ((g_brToggles & 0x400) != 0);
+ 
+ 	for (int t = 0; t < teamHandler.ActiveAllyTeams(); ++t) {
+@@ -715,10 +733,11 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
+ 					__builtin_prefetch(&pu->aimPos);
+ 				}
+ 				CUnit* targetUnit = allyTeamUnits[ui];
+-				if (targetUnit->tempNum == tempNum)
++				int& mark = mt? targetUnit->mtTempNum[mtThread]: targetUnit->tempNum;
++				if (mark == tempNum)
+ 					continue;
+ 
+-				targetUnit->tempNum = tempNum;
++				mark = tempNum;
+ 
+ 				// [barreplay] TestTarget (virtual, const, reads a dozen fields
+ 				// of the target) moved below the LOS and range rejections:
+@@ -789,7 +808,7 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
+ 				const bool allowTarget = eventHandler.AllowWeaponTarget(weaponOwner->id, targetUnit->id, weapon->weaponNum, weaponDef->id, &targetPriority);
+ 
+ 				// Lua call may have changed tempNum, so needs to be set again
+-				targetUnit->tempNum = tempNum;
++				mark = tempNum;
+ 
+ 				if (!allowTarget)
+ 					continue;
+diff --git a/rts/Game/GameHelper.h b/rts/Game/GameHelper.h
+index 5080500..9239efd 100644
+--- a/rts/Game/GameHelper.h
++++ b/rts/Game/GameHelper.h
+@@ -209,6 +209,7 @@ public:
+ 	);
+ 
+ 	static size_t GenerateWeaponTargets(const CWeapon* weapon, const CUnit* avoidUnit, std::vector<std::pair<float, CUnit*>>& targets);
++	static size_t GenerateWeaponTargets(const CWeapon* weapon, const CUnit* avoidUnit, std::vector<std::pair<float, CUnit*>>& targets, int tempNum, int mtThread);
+ 
+ 	void Init();
+ 	void Kill();
+diff --git a/rts/Lua/LuaCallInCheck.h b/rts/Lua/LuaCallInCheck.h
+index 487dbf9..c3d75d1 100644
+--- a/rts/Lua/LuaCallInCheck.h
++++ b/rts/Lua/LuaCallInCheck.h
+@@ -5,6 +5,7 @@
+ 
+ #include "System/TimeProfiler.h"
+ #include "LuaUtils.h"
++#include "Sim/Weapons/BrPipeTarget.h"
+ 
+ #include <optional>
+ 
+@@ -16,6 +17,8 @@
+ class ScopedCallInTimer {
+ public:
+ 	explicit ScopedCallInTimer(unsigned nameHash) {
++		// [barreplay] P4: Lua may read or write anything
++		BrP4::Drain(BrP4::DR_LUA);
+ 		if (CTimeProfiler::Enabled())
+ 			timer.emplace(nameHash, false, true);
+ 	}
+diff --git a/rts/Lua/LuaHandleSynced.cpp b/rts/Lua/LuaHandleSynced.cpp
+index f9ccaa5..d751650 100644
+--- a/rts/Lua/LuaHandleSynced.cpp
++++ b/rts/Lua/LuaHandleSynced.cpp
+@@ -1958,6 +1958,36 @@ namespace {
+ 	}
+ }
+ 
++// N1's checks, once a frame, on the main thread (they read the Lua state)
++static void BrFastAAFrame(lua_State* L)
++{
++	if (brFastAA.frame == gs->frameNum)
++		return;
++
++	brFastAA.frame = gs->frameNum;
++	if (!brFastAA.validated) {
++		brFastAA.validated = true;
++		brFastAA.ok = BrCheckFastAA(L, true);
++		LOG("[barreplay] N1 native AA targeting priority: %s", brFastAA.ok ? "on" : "off (the Lua path differs)");
++	} else if (brFastAA.ok) {
++		brFastAA.ok = BrCheckFastAA(L, false);
++		if (!brFastAA.ok)
++			LOG("[barreplay] N1 native AA targeting priority: off from frame %d", gs->frameNum);
++	}
++}
++
++// [barreplay] P4: no Lua for this def: not watched, or N1 takes the call
++bool CSyncedLuaHandle::BrAllowWeaponTargetNative(unsigned int weaponDefID)
++{
++	if (weaponDefID >= watchAllowTargetDefs.size() || !watchAllowTargetDefs[weaponDefID])
++		return true;
++	if ((g_brToggles & 4) == 0 || GetName() != "LuaRules")
++		return false;
++
++	BrFastAAFrame(L);
++	return brFastAA.ok;
++}
++
+ bool CSyncedLuaHandle::AllowWeaponTarget(
+ 	unsigned int attackerID,
+ 	unsigned int targetID,
+@@ -1972,18 +2002,7 @@ bool CSyncedLuaHandle::AllowWeaponTarget(
+ 		return ret;
+ 
+ 	if ((g_brToggles & 4) != 0 && GetName() == "LuaRules" && targetPriority != nullptr && int(targetID) >= 0 && int(attackerWeaponNum) >= 0) {
+-		if (brFastAA.frame != gs->frameNum) {
+-			brFastAA.frame = gs->frameNum;
+-			if (!brFastAA.validated) {
+-				brFastAA.validated = true;
+-				brFastAA.ok = BrCheckFastAA(L, true);
+-				LOG("[barreplay] N1 native AA targeting priority: %s", brFastAA.ok ? "on" : "off (the Lua path differs)");
+-			} else if (brFastAA.ok) {
+-				brFastAA.ok = BrCheckFastAA(L, false);
+-				if (!brFastAA.ok)
+-					LOG("[barreplay] N1 native AA targeting priority: off from frame %d", gs->frameNum);
+-			}
+-		}
++		BrFastAAFrame(L);
+ 		if (brFastAA.ok) {
+ 			const CUnit* target = unitHandler.GetUnit(targetID);
+ 			if (target != nullptr) {
+diff --git a/rts/Lua/LuaHandleSynced.h b/rts/Lua/LuaHandleSynced.h
+index 6acda8a..6ce650f 100644
+--- a/rts/Lua/LuaHandleSynced.h
++++ b/rts/Lua/LuaHandleSynced.h
+@@ -89,6 +89,7 @@ class CSyncedLuaHandle : public CLuaHandle
+ 			float* targetPriority
+ 		) override;
+ 		bool AllowWeaponInterceptTarget(const CUnit* interceptorUnit, const CWeapon* interceptorWeapon, const CProjectile* interceptorTarget) override;
++		bool BrAllowWeaponTargetNative(unsigned int weaponDefID) override;
+ 
+ 		bool UnitPreDamaged(
+ 			const CUnit* unit,
+diff --git a/rts/Rendering/Models/LocalModelPiece.cpp b/rts/Rendering/Models/LocalModelPiece.cpp
+index 67f8801..16c7a0b 100644
+--- a/rts/Rendering/Models/LocalModelPiece.cpp
++++ b/rts/Rendering/Models/LocalModelPiece.cpp
+@@ -1,4 +1,5 @@
+ #include "LocalModelPiece.hpp"
++#include "Sim/Weapons/BrPipeTarget.h"
+ 
+ #include "3DModelPiece.hpp"
+ #include "LocalModel.hpp"
+@@ -139,20 +140,59 @@ bool LocalModelPiece::SetPieceSpaceMatrix(const CMatrix44f& mat)
+ 
+ const Transform& LocalModelPiece::GetModelSpaceTransform() const
+ {
+-	if (dirty)
++	if (dirty) {
++		if (__builtin_expect(BrP4::inWorker || BrP4::Active(), false))
++			return BrScratchModelSpaceTransform();
+ 		UpdateParentMatricesRec();
++	}
+ 
+ 	return modelSpaceTra;
+ }
+ 
+ const CMatrix44f& LocalModelPiece::GetModelSpaceMatrix() const
+ {
+-	if (dirty)
++	if (dirty) {
++		if (__builtin_expect(BrP4::inWorker || BrP4::Active(), false))
++			return BrScratchModelSpaceMatrix();
+ 		UpdateParentMatricesRec();
++	}
+ 
+ 	return modelSpaceMat;
+ }
+ 
++// the operations of UpdateParentMatricesRec, in the same order, on copies
++Transform LocalModelPiece::BrComputeModelSpaceTransform() const
++{
++	if (!dirty)
++		return modelSpaceTra;
++
++	const Transform pst = CalcPieceSpaceTransform(pos, rot, scale);
++
++	if (parent != nullptr)
++		return (parent->BrComputeModelSpaceTransform() * pst);
++
++	return pst;
++}
++
++// callers copy the result at once; a ring keeps a few calls' worth alive
++static thread_local Transform brScratchTra[16];
++static thread_local CMatrix44f brScratchMat[16];
++static thread_local unsigned brScratchIdx = 0;
++
++const Transform& LocalModelPiece::BrScratchModelSpaceTransform() const
++{
++	Transform& t = brScratchTra[(brScratchIdx++) & 15];
++	t = BrComputeModelSpaceTransform();
++	return t;
++}
++
++const CMatrix44f& LocalModelPiece::BrScratchModelSpaceMatrix() const
++{
++	CMatrix44f& m = brScratchMat[(brScratchIdx++) & 15];
++	m = BrComputeModelSpaceTransform().ToMatrix();
++	return m;
++}
++
+ void LocalModelPiece::SetScriptVisible(bool b)
+ {
+ 	scriptSetVisible = b;
+diff --git a/rts/Rendering/Models/LocalModelPiece.hpp b/rts/Rendering/Models/LocalModelPiece.hpp
+index a1439e4..1cc798a 100644
+--- a/rts/Rendering/Models/LocalModelPiece.hpp
++++ b/rts/Rendering/Models/LocalModelPiece.hpp
+@@ -50,6 +50,14 @@ struct LocalModelPiece
+ 	void UpdateModelSpaceTransform(const LocalModelPiece* parent);
+ 	void UpdateChildTransformRec(bool updateChildMatrices) const;
+ 	void UpdateParentMatricesRec() const;
++	// [barreplay] P4 (BrPipeTarget.h): what UpdateParentMatricesRec would cache
++	// for a dirty piece, computed by the same operations into thread-local
++	// scratch, leaving the piece untouched (pieces are read from worker threads
++	// while the slow-update loop runs, and the lazy update clears <dirty>
++	// before it writes the matrices)
++	Transform BrComputeModelSpaceTransform() const;
++	const Transform& BrScratchModelSpaceTransform() const;
++	const CMatrix44f& BrScratchModelSpaceMatrix() const;
+ 
+ 	Transform CalcPieceSpaceTransformOrig(const float3& p, const float3& r, float s) const;
+ 	Transform CalcPieceSpaceTransform(const float3& p, const float3& r, float s) const;
+diff --git a/rts/Sim/CMakeLists.txt b/rts/Sim/CMakeLists.txt
+index 882f06b..569cfc5 100644
+--- a/rts/Sim/CMakeLists.txt
++++ b/rts/Sim/CMakeLists.txt
+@@ -152,6 +152,7 @@ add_library(engineSim STATIC
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/Weapons/StarburstLauncher.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/Weapons/TorpedoLauncher.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/Weapons/Weapon.cpp"
++		"${CMAKE_CURRENT_SOURCE_DIR}/Weapons/BrPipeTarget.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/Weapons/WeaponDef.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/Weapons/WeaponDefHandler.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/Weapons/WeaponLoader.cpp"
+diff --git a/rts/Sim/Features/Feature.cpp b/rts/Sim/Features/Feature.cpp
+index b458e7a..6b3b92c 100644
+--- a/rts/Sim/Features/Feature.cpp
++++ b/rts/Sim/Features/Feature.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "Feature.h"
++#include "Sim/Weapons/BrPipeTarget.h"
+ #include "FeatureDef.h"
+ #include "FeatureDefHandler.h"
+ #include "FeatureMemPool.h"
+@@ -400,6 +401,8 @@ void CFeature::DoDamage(
+ 	// do nothing if already marked for deletion this frame, i.e. isDead
+ 	if (deleteMe)
+ 		return;
++	// [barreplay] P4 (BrPipeTarget.h)
++	BrP4::Drain(BrP4::DR_FEATURE);
+ 	// paralyzers do not damage features
+ 	if (damages.paralyzeDamageTime)
+ 		return;
+diff --git a/rts/Sim/Misc/QuadField.cpp b/rts/Sim/Misc/QuadField.cpp
+index 720dcda..896e9e2 100644
+--- a/rts/Sim/Misc/QuadField.cpp
++++ b/rts/Sim/Misc/QuadField.cpp
+@@ -3,6 +3,7 @@
+ #include <algorithm>
+ 
+ #include "QuadField.h"
++#include "Sim/Weapons/BrPipeTarget.h"
+ #include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ #include "Map/ReadMap.h"
+ #include "Sim/Misc/CollisionVolume.h"
+@@ -50,6 +51,7 @@ CR_REG_METADATA_SUB(CQuadField, Quad, (
+ 
+ 
+ CQuadField quadField;
++thread_local int g_brQfThread = 0;
+ //#define DEBUG_QUADFIELD
+ 
+ void CQuadField::Quad::PostLoad()
+@@ -422,6 +424,9 @@ bool CQuadField::InsertUnitIf(CUnit* unit, const float3& wpos)
+ 	if (wposQuadIdx == uposQuadIdx)
+ 		return false;
+ 
++	// [barreplay] P4: the unit lists change
++	BrP4::Drain(BrP4::DR_QUAD);
++
+ 	// unit might also be overlapping the cell, so test for uniqueness
+ 	if (!spring::VectorInsertUnique(unit->quads, wposQuadIdx, true))
+ 		return false;
+@@ -454,6 +459,8 @@ bool CQuadField::RemoveUnitIf(CUnit* unit, const float3& wpos)
+ 		return false;
+ 	}
+ 
++	BrP4::Drain(BrP4::DR_QUAD);
++
+ 	if (!spring::VectorErase(unit->quads, wposQuadIdx))
+ 		return false;
+ 
+@@ -478,6 +485,8 @@ void CQuadField::MovedUnit(CUnit* unit)
+ 			return;
+ 	}
+ 
++	BrP4::Drain(BrP4::DR_QUAD);
++
+ 	for (const int qi: unit->quads) {
+ 		spring::VectorErase(baseQuads[qi].units, unit);
+ 		spring::VectorErase(baseQuads[qi].teamUnits[unit->allyteam], unit);
+@@ -501,6 +510,7 @@ void CQuadField::MovedUnit(CUnit* unit)
+ void CQuadField::RemoveUnit(CUnit* unit)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrP4::Drain(BrP4::DR_QUAD);
+ 	for (const int qi: unit->quads) {
+ 		spring::VectorErase(baseQuads[qi].units, unit);
+ 		spring::VectorErase(baseQuads[qi].teamUnits[unit->allyteam], unit);
+@@ -567,6 +577,7 @@ void CQuadField::RemoveRepulser(CPlasmaRepulser* repulser)
+ void CQuadField::AddFeature(CFeature* feature)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrP4::Drain(BrP4::DR_QUAD);
+ 	QuadFieldQuery qfQuery;
+ 	GetQuads(qfQuery, feature->pos, feature->radius);
+ 
+@@ -578,6 +589,7 @@ void CQuadField::AddFeature(CFeature* feature)
+ void CQuadField::RemoveFeature(CFeature* feature)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrP4::Drain(BrP4::DR_QUAD);
+ 	QuadFieldQuery qfQuery;
+ 	GetQuads(qfQuery, feature->pos, feature->radius);
+ 
+diff --git a/rts/Sim/Misc/QuadField.h b/rts/Sim/Misc/QuadField.h
+index 288dfc0..24c90f2 100644
+--- a/rts/Sim/Misc/QuadField.h
++++ b/rts/Sim/Misc/QuadField.h
+@@ -253,6 +253,10 @@ private:
+ extern CQuadField quadField;
+ 
+ 
++// [barreplay] P4: the pool a query defaults to: the main thread's (0), or the
++// worker's own while it runs a pipelined target search (BrPipeTarget.h)
++extern thread_local int g_brQfThread;
++
+ struct QuadFieldQuery {
+ 	~QuadFieldQuery() {
+ 		quadField.ReleaseVector(units, threadOwner);
+@@ -267,7 +271,7 @@ struct QuadFieldQuery {
+ 	std::vector<CProjectile*>* projectiles = nullptr;
+ 	std::vector<CSolidObject*>* solids = nullptr;
+ 	std::vector<int>* quads = nullptr;
+-	int threadOwner = 0;
++	int threadOwner = g_brQfThread;
+ };
+ 
+ 
+diff --git a/rts/Sim/Objects/SolidObject.cpp b/rts/Sim/Objects/SolidObject.cpp
+index f7aa8c4..f8b272c 100644
+--- a/rts/Sim/Objects/SolidObject.cpp
++++ b/rts/Sim/Objects/SolidObject.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "SolidObject.h"
++#include "Sim/Weapons/BrPipeTarget.h"
+ #include "SolidObjectDef.h"
+ #include "Map/ReadMap.h"
+ #include "Map/Ground.h"
+@@ -155,6 +156,12 @@ void CSolidObject::Move(const float3& v, bool relative)
+ {
+ 	const float3& dv = relative ? v : (v - pos);
+ 
++	// [barreplay] P4 (BrPipeTarget.h): searches read positions; a move by
++	// nothing changes no bits unless a coordinate is a zero (whose sign the
++	// addition can flip)
++	if (BrP4::Active() && (dv.x != 0.0f || dv.y != 0.0f || dv.z != 0.0f || pos.x == 0.0f || pos.y == 0.0f || pos.z == 0.0f || midPos.y == 0.0f || aimPos.y == 0.0f))
++		BrP4::DrainSlow(BrP4::DR_MOVE);
++
+ 	pos    += dv;
+ 	midPos += dv;
+ 	aimPos += dv;
+@@ -169,6 +176,8 @@ bool CSolidObject::SetVoidState()
+ 	if (IsInVoid())
+ 		return false;
+ 
++	BrP4::Drain(BrP4::DR_TRANSPORT);
++
+ 	// make us transparent to raycasts, quadfield queries, etc.
+ 	// need to push and pop state bits in case Lua changes them
+ 	// (otherwise gadgets must listen to all Unit*Loaded events)
+@@ -406,6 +415,7 @@ float3 CSolidObject::GetWantedUpDir(bool useGroundNormal, bool useObjectNormal,
+ void CSolidObject::SetDirVectorsEuler(const float3& angles)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrP4::Drain(BrP4::DR_MOVE);
+ 	CMatrix44f matrix;
+ 
+ 	// our system is left-handed, so R(X)R(Y)R(Z) is really T(R(-Z)R(-Y)R(-X))
+@@ -440,6 +450,7 @@ void CSolidObject::UpdateDirVectors(bool useGroundNormal, bool useObjectNormal,
+ void CSolidObject::UpdateDirVectors(const float3& uDir)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrP4::Drain(BrP4::DR_MOVE);
+ 	// set initial rotation of the object around updir=UpVector first
+ 	const float3 fDir = GetVectorFromHeading(heading);
+ 	const float3 rDir = float3{ -fDir.z, 0.0f, fDir.x };
+@@ -478,6 +489,7 @@ void CSolidObject::UpdatePrevFrameTransform()
+ void CSolidObject::ForcedSpin(const float3& zdir)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrP4::Drain(BrP4::DR_MOVE);
+ 	// new front-direction should be normalized
+ 	assert(math::fabsf(zdir.SqLength() - 1.0f) <= float3::cmp_eps());
+ 
+@@ -499,6 +511,7 @@ void CSolidObject::ForcedSpin(const float3& zdir)
+ 
+ void CSolidObject::ForcedSpin(const float3& newFrontDir, const float3& newRightDir)
+ {
++	BrP4::Drain(BrP4::DR_MOVE);
+ 	// new front & right directions should be normalized
+ 	assert(math::fabsf(newFrontDir.SqLength() - 1.0f) <= float3::cmp_eps());
+ 	assert(math::fabsf(newRightDir.SqLength() - 1.0f) <= float3::cmp_eps());
+diff --git a/rts/Sim/Objects/SolidObject.h b/rts/Sim/Objects/SolidObject.h
+index 954a318..6262e36 100644
+--- a/rts/Sim/Objects/SolidObject.h
++++ b/rts/Sim/Objects/SolidObject.h
+@@ -9,6 +9,7 @@
+ #include "Lua/LuaRulesParams.h"
+ #include "Rendering/Models/LocalModel.hpp"
+ #include "Sim/Misc/CollisionVolume.h"
++#include "Sim/Weapons/BrPipeTarget.h"
+ #include "System/Matrix44f.h"
+ #include "System/type2.h"
+ #include "System/Ecs/EcsMain.h"
+@@ -153,6 +154,7 @@ public:
+ 	// vectors are changed (ie. after a rotation) in
+ 	// eg. movetype code
+ 	void UpdateMidAndAimPos() {
++		BrP4::Drain(BrP4::DR_MOVE);
+ 		midPos = GetMidPos();
+ 		aimPos = GetAimPos();
+ 	}
+@@ -164,6 +166,7 @@ public:
+ 
+ 	void SetDirVectorsEuler(const float3& angles);
+ 	void SetDirVectors(const CMatrix44f& matrix) {
++		BrP4::Drain(BrP4::DR_MOVE);
+ 		rightdir.x = -matrix[0]; updir.x = matrix[4]; frontdir.x = matrix[ 8];
+ 		rightdir.y = -matrix[1]; updir.y = matrix[5]; frontdir.y = matrix[ 9];
+ 		rightdir.z = -matrix[2]; updir.z = matrix[6]; frontdir.z = matrix[10];
+@@ -290,8 +293,8 @@ public:
+ 	}
+ 
+ 	bool    HasCollidableStateBit(unsigned int bit) const { return ((collidableState & bit) != 0); }
+-	void    SetCollidableStateBit(unsigned int bit) { unsigned int cs = collidableState; cs |= ( bit); collidableState = static_cast<CollidableState>(cs); }
+-	void  ClearCollidableStateBit(unsigned int bit) { unsigned int cs = collidableState; cs &= (~bit); collidableState = static_cast<CollidableState>(cs); }
++	void    SetCollidableStateBit(unsigned int bit) { BrP4::Drain(BrP4::DR_TRANSPORT); unsigned int cs = collidableState; cs |= ( bit); collidableState = static_cast<CollidableState>(cs); }
++	void  ClearCollidableStateBit(unsigned int bit) { BrP4::Drain(BrP4::DR_TRANSPORT); unsigned int cs = collidableState; cs &= (~bit); collidableState = static_cast<CollidableState>(cs); }
+ 	void   PushCollidableStateBit(unsigned int bit) { UpdateCollidableStateBit(1u << (31u - std::countr_zero(bit)), HasCollidableStateBit(bit)); }
+ 	void    PopCollidableStateBit(unsigned int bit) { UpdateCollidableStateBit(bit, HasCollidableStateBit(1u << (31u - std::countr_zero(bit)))); }
+ 	bool UpdateCollidableStateBit(unsigned int bit, bool set) {
+@@ -311,6 +314,7 @@ public:
+ 
+ private:
+ 	void SetMidPos(const float3& mp, bool relative) {
++		BrP4::Drain(BrP4::DR_MOVE);
+ 		if (relative) {
+ 			relMidPos = mp; midPos = GetMidPos();
+ 		} else {
+@@ -318,6 +322,7 @@ private:
+ 		}
+ 	}
+ 	void SetAimPos(const float3& ap, bool relative) {
++		BrP4::Drain(BrP4::DR_MOVE);
+ 		if (relative) {
+ 			relAimPos = ap; aimPos = GetAimPos();
+ 		} else {
+diff --git a/rts/Sim/Units/Scripts/CobInstance.cpp b/rts/Sim/Units/Scripts/CobInstance.cpp
+index e073959..864d37a 100644
+--- a/rts/Sim/Units/Scripts/CobInstance.cpp
++++ b/rts/Sim/Units/Scripts/CobInstance.cpp
+@@ -5,6 +5,7 @@
+ #include "CobFile.h"
+ #include "CobFileHandler.h"
+ #include "CobInstance.h"
++#include "Sim/Weapons/BrPipeTarget.h"
+ #include "CobThread.h"
+ 
+ #include "Game/GameHelper.h"
+@@ -580,6 +581,11 @@ int CCobInstance::RealCall(int functionId, std::array<int, 1 + MAX_COB_ARGS>& ar
+ 
+ 	// LOG_L(L_DEBUG, "Calling %s:%s", cobFile->name.c_str(), cobFile->scriptNames[functionId].c_str());
+ 
++	// [barreplay] P4: a script reaching Lua, or moving pieces at once on a unit
++	// whose collision volume is its piece tree (what line-of-fire rays read)
++	if (BrP4::Active() && BrP4::CobCallNeedsDrain(cobFile, functionId, unit->collisionVolume.DefaultToPieceTree()))
++		BrP4::DrainSlow(BrP4::DR_COB);
++
+ 	// tick the thread locally in case we're recursively running this function and then the threads may reallocate
+ 	CCobThread newThread(this);
+ 	newThread.SetID(cobEngine->GenThreadID());
+diff --git a/rts/Sim/Units/Unit.cpp b/rts/Sim/Units/Unit.cpp
+index 0b84139..b407840 100644
+--- a/rts/Sim/Units/Unit.cpp
++++ b/rts/Sim/Units/Unit.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "UnitDef.h"
+ #include "Unit.h"
++#include "Sim/Weapons/BrPipeTarget.h"
+ #include "UnitHandler.h"
+ #include "UnitDefHandler.h"
+ #include "UnitLoader.h"
+@@ -478,6 +479,9 @@ void CUnit::ForcedKillUnit(CUnit* attacker, bool selfDestruct, bool reclaimed, i
+ 	if (isDead)
+ 		return;
+ 
++	// [barreplay] P4 (BrPipeTarget.h): a death touches the searches' inputs
++	BrP4::Drain(BrP4::DR_KILL);
++
+ 	isDead = true;
+ 
+ 	// release attached units
+@@ -870,6 +874,9 @@ void CUnit::SetLosStatus(int at, unsigned short newStatus)
+ 	const unsigned short currStatus = losStatus[at];
+ 	const unsigned short diffBits = (currStatus ^ newStatus);
+ 
++	if (diffBits != 0)
++		BrP4::Drain(BrP4::DR_LOS);
++
+ 	// add to the state before running the callins
+ 	//
+ 	// note that is not symmetric: UnitEntered* and
+@@ -1120,6 +1127,8 @@ void CUnit::SlowUpdateWeapons()
+ 		return;
+ 
+ 	for (CWeapon* w: weapons) {
++		if (BrP4::Active())
++			BrP4::BeforeWeapon(w);
+ 		w->SlowUpdate();
+ 	}
+ }
+@@ -1320,6 +1329,8 @@ void CUnit::DoDamage(
+ 	if (IsCrashing() || IsInVoid())
+ 		return;
+ 
++	BrP4::Drain(BrP4::DR_DAMAGE);
++
+ 	float baseDamage = damages.Get(armorType);
+ 	float experienceMod = globalUnitParams.expMultiplier;
+ 	float impulseMult = 1.0f;
+@@ -1519,6 +1530,7 @@ void CUnit::ChangeLos(int losRad, int airRad)
+ 
+ bool CUnit::ChangeTeam(int newteam, ChangeType type)
+ {
++	BrP4::Drain(BrP4::DR_TEAM);
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	if (isDead)
+ 		return false;
+@@ -2547,6 +2559,7 @@ void CUnit::SlowUpdateCloak(bool stunCheck)
+ 	const bool newCloak = wantCloak && GetNewCloakState(stunCheck);
+ 
+ 	if (oldCloak != newCloak) {
++		BrP4::Drain(BrP4::DR_RAYS);
+ 		if (newCloak) {
+ 			eventHandler.UnitCloaked(this);
+ 		} else {
+@@ -2589,6 +2602,7 @@ bool CUnit::ScriptDecloak(const CSolidObject* object, const CWeapon* weapon)
+ 	if (!eventHandler.AllowUnitDecloak(this, object, weapon))
+ 		return false;
+ 
++	BrP4::Drain(BrP4::DR_RAYS);
+ 	// wantCloak = false;
+ 	isCloaked = false;
+ 
+@@ -2653,6 +2667,7 @@ bool CUnit::CanTransport(const CUnit* unit) const
+ 
+ bool CUnit::AttachUnit(CUnit* unit, int piece, bool force)
+ {
++	BrP4::Drain(BrP4::DR_TRANSPORT);
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	assert(unit != this);
+ 
+@@ -2733,6 +2748,7 @@ bool CUnit::AttachUnit(CUnit* unit, int piece, bool force)
+ 
+ bool CUnit::DetachUnitCore(CUnit* unit)
+ {
++	BrP4::Drain(BrP4::DR_TRANSPORT);
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	if (unit->GetTransporter() != this)
+ 		return false;
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 867db6f..2fed2c4 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -3,6 +3,7 @@
+ #include <cassert>
+ 
+ #include "UnitHandler.h"
++#include "Sim/Weapons/BrPipeTarget.h"
+ #include "BrRunAhead.h"
+ #include "Sim/MoveTypes/MoveType.h"
+ #include "Sim/Units/Scripts/UnitScript.h"
+@@ -570,10 +571,17 @@ void CUnitHandler::SlowUpdateUnits()
+ 	updateBoundingVolumeList.clear();
+ 	{
+ 		ZoneScopedN("Sim::Unit::SlowUpdateST");
++		// [barreplay] P4: weapon target searches on worker threads, applied in
++		// order (Sim/Weapons/BrPipeTarget.h)
++		const bool pipelined = (idxEnd > idxBeg) && BrP4::Begin();
++
+ 		for (size_t i = idxBeg; i < idxEnd; ++i) {
+ 			BrRunAhead::At(int(i - idxBeg));
+ 			CUnit* unit = activeUnits[i];
+ 
++			if (pipelined)
++				BrP4::BeforeUnit(unit);
++
+ 			unit->SanityCheck();
+ 			unit->SlowUpdate();
+ 			unit->SlowUpdateWeapons();
+@@ -582,6 +590,9 @@ void CUnitHandler::SlowUpdateUnits()
+ 			if (!unit->isDead && unit->localModel.GetBoundariesNeedsRecalc())
+ 				updateBoundingVolumeList.emplace_back(unit);
+ 		}
++
++		if (pipelined)
++			BrP4::End();
+ 	}
+ 	BrRunAhead::End();
+ 	// Since the bounding volumes are calculated from the maximum piecematrix-offset piece vertices
+diff --git a/rts/Sim/Weapons/BrPipeTarget.cpp b/rts/Sim/Weapons/BrPipeTarget.cpp
+new file mode 100644
+index 0000000..56b0dd3
+--- /dev/null
++++ b/rts/Sim/Weapons/BrPipeTarget.cpp
+@@ -0,0 +1,458 @@
++/* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
++
++// [barreplay] P4: pipelined weapon target searches in the slow-update loop.
++// See BrPipeTarget.h for what is read, what is waited for, and why the result
++// is the sequential one.
++
++#include "BrPipeTarget.h"
++
++#include <algorithm>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <memory>
++#include <unordered_map>
++#include <vector>
++#include <immintrin.h>
++#include <x86intrin.h>
++
++#include "Weapon.h"
++#include "WeaponDef.h"
++#include "Map/ReadMap.h"
++#include "Sim/Misc/GlobalSynced.h"
++#include "Sim/Misc/QuadField.h"
++#include "Sim/Misc/TeamHandler.h"
++#include "Sim/Units/Unit.h"
++#include "Sim/Units/Scripts/CobFile.h"
++#include "Sim/Units/Scripts/CobOpCodes.h"
++#include "System/EventHandler.h"
++#include "System/Log/ILog.h"
++#include "System/Threading/ThreadPool.h"
++
++namespace BrP4 {
++	std::atomic<bool> active{false};
++	thread_local bool inWorker = false;
++
++	namespace {
++		struct Task {
++			CWeapon* w;
++			const CUnit* avoid;
++			float cx, cz, r;    // the scan circle: GenerateWeaponTargets' GetQuads
++			int ownerAlly;
++			CUnit* result;
++			CUnit* checkResult; // BARREPLAY_P4_CHECK: the search run in order
++			std::atomic<int> done;
++		};
++
++		constexpr int MAX_TASKS = 8192;
++		std::unique_ptr<Task[]> tasks;
++
++		// tasks [0, published) launched, [0, claimNext) taken by some thread,
++		// [0, committed) applied (main thread only)
++		std::atomic<int> published{0};
++		std::atomic<int> claimNext{0};
++		std::atomic<bool> closed{false};
++		int committed = 0;
++		int lastNear = -1;
++
++		float margin = 0.0f;
++		int nWorkers = 2;
++		bool check = false;
++		bool statsOn = false;
++		bool draining = false;
++		bool inited = false;
++
++		thread_local std::vector<std::pair<float, CUnit*>> tlPairs;
++		std::vector<std::pair<float, CUnit*>> checkPairs;
++
++		struct Stats {
++			long long slices = 0, launched = 0, notNative = 0, targetWeight = 0, full = 0;
++			long long drains[DR_N] = {};
++			long long waits = 0, waitCycles = 0, inlineRuns = 0, mismatches = 0, workerHooks = 0;
++			int lastFrame = 0;
++		} st;
++
++		const char* DrainName(int r) {
++			static const char* names[DR_N] = {"lua", "cob", "kill", "damage", "quad", "move", "team", "transport", "explosion", "los", "feature", "enemy", "rays", "slave"};
++			return (r >= 0 && r < DR_N)? names[r]: "?";
++		}
++
++		void RunTask(Task& t, int thread) {
++			t.result = t.w->BrSearchTarget(t.avoid, tlPairs, -1, thread);
++			t.done.store(1, std::memory_order_release);
++		}
++
++		void WorkerLoop() {
++			const int thread = ThreadPool::GetThreadNum();
++			inWorker = true;
++			// quad queries made deeper down (TraceRay) use this thread's pools
++			g_brQfThread = thread;
++
++			for (;;) {
++				int i = claimNext.load(std::memory_order_acquire);
++
++				if (i < published.load(std::memory_order_acquire)) {
++					if (claimNext.compare_exchange_weak(i, i + 1, std::memory_order_acq_rel))
++						RunTask(tasks[i], thread);
++					continue;
++				}
++				if (closed.load(std::memory_order_acquire))
++					break;
++
++				_mm_pause();
++			}
++
++			g_brQfThread = 0;
++			inWorker = false;
++		}
++
++		// main: task i has finished; run it here if no thread has taken it yet
++		void Complete(int i) {
++			Task& t = tasks[i];
++
++			if (t.done.load(std::memory_order_acquire))
++				return;
++
++			int c = i;
++			if (claimNext.compare_exchange_strong(c, i + 1, std::memory_order_acq_rel)) {
++				RunTask(t, 0);
++				st.inlineRuns++;
++				return;
++			}
++
++			const unsigned long long t0 = __rdtsc();
++			while (!t.done.load(std::memory_order_acquire))
++				_mm_pause();
++			st.waits++;
++			st.waitCycles += (__rdtsc() - t0);
++		}
++
++		void Apply(Task& t) {
++			CUnit* r = t.result;
++
++			if (check && t.checkResult != r) {
++				st.mismatches++;
++				LOG_L(L_WARNING, "[BR_P4] mismatch f=%d unit %d weapon %d: pipelined %d, in order %d", gs->frameNum, t.w->owner->id, t.w->weaponNum, (r != nullptr)? r->id: -1, (t.checkResult != nullptr)? t.checkResult->id: -1);
++				r = t.checkResult;
++			}
++
++			// AutoTarget's tail
++			if (r != nullptr)
++				t.w->SetAttackTarget(SWeaponTarget(r));
++		}
++
++		// apply every finished task at the head, in order
++		void CommitDone() {
++			const int n = published.load(std::memory_order_relaxed);
++
++			while (committed < n && tasks[committed].done.load(std::memory_order_acquire)) {
++				Apply(tasks[committed]);
++				committed++;
++			}
++		}
++
++		// main: finish and apply tasks [committed, last]
++		void CommitThrough(int last) {
++			while (committed <= last) {
++				Complete(committed);
++				Apply(tasks[committed]);
++				committed++;
++			}
++		}
++
++		void StatsLine() {
++			if (!statsOn || (gs->frameNum - st.lastFrame) < 900)
++				return;
++			st.lastFrame = gs->frameNum;
++
++			char buf[512];
++			int k = snprintf(buf, sizeof(buf), "[BR_P4] f=%d slices=%lld launched=%lld serial(notNative=%lld weight=%lld full=%lld) waits=%lld waitMs=%.1f inline=%lld mismatches=%lld workerHooks=%lld drains:", gs->frameNum, st.slices, st.launched, st.notNative, st.targetWeight, st.full, st.waits, st.waitCycles / 3.0e6, st.inlineRuns, st.mismatches, st.workerHooks);
++			for (int r = 0; r < DR_N && k < int(sizeof(buf)); ++r)
++				k += snprintf(buf + k, sizeof(buf) - k, " %s=%lld", DrainName(r), st.drains[r]);
++			LOG("%s", buf);
++		}
++
++		auto workerFn = [](const int) { WorkerLoop(); };
++		std::shared_ptr<ForTaskGroup<decltype(workerFn)>> taskGroup;
++	}
++
++
++	bool Begin()
++	{
++		if ((g_brToggles & 0x800000) == 0)
++			return false;
++
++		if (!inited) {
++			inited = true;
++			tasks.reset(new Task[MAX_TASKS]);
++			check = (getenv("BARREPLAY_P4_CHECK") != nullptr);
++			statsOn = (getenv("BARREPLAY_P4_STATS") != nullptr);
++			if (const char* w = getenv("BARREPLAY_P4_WORKERS"))
++				nWorkers = std::max(0, atoi(w));
++			LOG("[barreplay] P4 pipelined target searches: %d workers%s", nWorkers, check? ", checking every result against the search run in order": "");
++		}
++
++		if (!ThreadPool::HasThreads())
++			return false;
++
++		const int nw = std::min(nWorkers, ThreadPool::GetNumThreads() - 1);
++		if (nw <= 0)
++			return false;
++
++		published.store(0, std::memory_order_relaxed);
++		claimNext.store(0, std::memory_order_relaxed);
++		closed.store(false, std::memory_order_relaxed);
++		committed = 0;
++		margin = 3.0f * std::max(quadField.GetQuadSizeX(), quadField.GetQuadSizeZ());
++		st.slices++;
++
++		static TaskPool<ForTaskGroup, decltype(workerFn)> pool;
++		taskGroup = pool.GetTaskGroup();
++		taskGroup->Enqueue(0, nw, 1, workerFn);
++		taskGroup->UpdateId();
++		for (int i = 1; i <= nw; ++i) {
++			taskGroup->wantedThread.store(i);
++			ThreadPool::PushTaskGroup(taskGroup);
++		}
++		ThreadPool::NotifyWorkerThreads(true, false);
++
++		// the workers are spinning in this slice: a parallel loop started from
++		// inside it would wait for them forever, so those run inline
++		ThreadPool::SetInlineOnly(true);
++		active.store(true, std::memory_order_relaxed);
++		return true;
++	}
++
++	void End()
++	{
++		CommitThrough(published.load(std::memory_order_relaxed) - 1);
++
++		closed.store(true, std::memory_order_release);
++		ThreadPool::SetInlineOnly(false);
++		{
++			// a worker slice nobody had started finds the slice closed
++			MultithreadedSection mtSection;
++			ThreadPool::WaitForFinished(taskGroup);
++		}
++		taskGroup.reset();
++		active.store(false, std::memory_order_relaxed);
++		StatsLine();
++	}
++
++	void BeforeUnit(const CUnit* u)
++	{
++		CommitDone();
++
++		const int n = published.load(std::memory_order_relaxed);
++		if (committed == n)
++			return;
++
++		// the unit's slow update writes the unit; the scans read enemy units
++		// in the quads around their weapons (any unit whose quads overlap the
++		// scan circle: its own radius plus a quad's slack on each side)
++		const float ux = u->pos.x;
++		const float uz = u->pos.z;
++		const float ur = u->radius + margin;
++		const int ua = u->allyteam;
++		int last = -1;
++
++		for (int i = committed; i < n; ++i) {
++			const Task& t = tasks[i];
++			const float dx = ux - t.cx;
++			const float dz = uz - t.cz;
++			const float rr = t.r + ur;
++
++			if ((dx * dx + dz * dz) > (rr * rr))
++				continue;
++			if (teamHandler.Ally(t.ownerAlly, ua))
++				continue;
++
++			last = i;
++		}
++
++		if (last < 0)
++			return;
++
++		st.drains[DR_ENEMY]++;
++		CommitThrough(last);
++	}
++
++	void BeforeWeapon(const CWeapon* w)
++	{
++		if (w->slavedTo == nullptr)
++			return;
++
++		const int n = published.load(std::memory_order_relaxed);
++		for (int i = n - 1; i >= committed; --i) {
++			if (tasks[i].w != w->slavedTo)
++				continue;
++			st.drains[DR_SLAVE]++;
++			CommitThrough(i);
++			return;
++		}
++	}
++
++	bool Launch(CWeapon* w, const CUnit* avoidUnit)
++	{
++		if (w->hasTargetWeight) {
++			// the script decides the weight: COB or Lua, in order
++			st.targetWeight++;
++			return false;
++		}
++
++		const WeaponDef* wd = w->weaponDef;
++		if (!eventHandler.BrAllowWeaponTargetNative(wd->id)) {
++			st.notNative++;
++			return false;
++		}
++
++		const int n = published.load(std::memory_order_relaxed);
++		if (n >= MAX_TASKS) {
++			st.full++;
++			return false;
++		}
++
++		const CUnit* o = w->owner;
++		Task& t = tasks[n];
++		t.w = w;
++		t.avoid = avoidUnit;
++		t.cx = o->pos.x;
++		t.cz = o->pos.z;
++		// GenerateWeaponTargets' scanRadius
++		const float minMapHeight = std::max(0.0f, readMap->GetCurrMinHeight());
++		t.r = std::fabs(w->range + w->autoTargetRangeBoost + (w->aimFromPos.y - minMapHeight) * wd->heightmod);
++		t.ownerAlly = o->allyteam;
++		t.result = nullptr;
++		t.checkResult = nullptr;
++
++		// the synced tempNum the search would take here; the search itself
++		// marks with its thread's own numbers
++		const int tempNum = gs->GetTempNum();
++
++		if (check)
++			t.checkResult = w->BrSearchTarget(avoidUnit, checkPairs, tempNum, -1);
++
++		t.done.store(0, std::memory_order_relaxed);
++		published.store(n + 1, std::memory_order_release);
++		st.launched++;
++		return true;
++	}
++
++	void DrainSlow(int reason)
++	{
++		if (inWorker) {
++			// a search wrote something: a hook in a path searches were
++			// believed not to take (the check mode would show what it cost)
++			st.workerHooks++;
++			return;
++		}
++		if (draining)
++			return;
++
++		const int n = published.load(std::memory_order_relaxed);
++		if (committed == n)
++			return;
++
++		draining = true;
++		st.drains[reason]++;
++		CommitThrough(n - 1);
++		draining = false;
++	}
++
++
++	// COB: a function is harmless when nothing it runs reaches Lua; piece
++	// writes that take effect at once (TURN_NOW, MOVE_NOW, SCALE_NOW, SHOW,
++	// HIDE, EXPLODE's hiding) matter only on a unit whose collision volume is
++	// its piece tree,
++	// which the line-of-fire rays read. Every other global effect a script
++	// can have (kills, damage, explosions, moves, turns, transport, cloak,
++	// team) goes through a hooked engine function.
++	namespace {
++		enum : uint8_t { CF_UNKNOWN = 0, CF_HARMLESS = 1, CF_PIECES = 2, CF_HARMFUL = 3, CF_VISITING = 4 };
++
++		std::unordered_map<const CCobFile*, std::vector<uint8_t>> cobMemo;
++
++		uint8_t AnalyzeCob(const CCobFile* f, std::vector<uint8_t>& memo, int fn) {
++			if (fn < 0 || size_t(fn) >= f->scriptNames.size())
++				return CF_HARMFUL;
++
++			uint8_t& m = memo[fn];
++			if (m == CF_VISITING)
++				return CF_HARMFUL; // recursion: not worth proving
++			if (m != CF_UNKNOWN)
++				return m;
++
++			m = CF_VISITING;
++
++			uint8_t res = CF_HARMLESS;
++			const auto& code = f->code;
++			const int beg = f->scriptOffsets[fn];
++			const int end = std::min<int>(beg + f->scriptLengths[fn], code.size());
++
++			for (int pc = beg; pc < end && res != CF_HARMFUL; ) {
++				const int op = code[pc++];
++
++				switch (op) {
++					case PUSH_CONSTANT: case PUSH_LOCAL_VAR: case PUSH_STATIC:
++					case POP_LOCAL_VAR: case POP_STATIC:
++					case JUMP: case JUMP_NOT_EQUAL:
++					case SHADE: case DONT_SHADE: case CACHE: case DONT_CACHE:
++					case PLAY_SOUND: case SCALE: case WAIT_SCALE:
++					case EMIT_SFX: {
++						pc += 1;
++					} break;
++					case SPIN: case STOP_SPIN: case TURN: case MOVE:
++					case WAIT_TURN: case WAIT_MOVE:
++					case START: { // the started thread runs in the COB tick, not here
++						pc += 2;
++					} break;
++					case MOVE_NOW: case TURN_NOW: {
++						pc += 2;
++						res = std::max<uint8_t>(res, CF_PIECES);
++					} break;
++					case SCALE_NOW: case SHOW: case HIDE: case EXPLODE: {
++						pc += 1;
++						res = std::max<uint8_t>(res, CF_PIECES);
++					} break;
++					case SLEEP: case RETURN: case CREATE_LOCAL_VAR: case POP_STACK:
++					case ADD: case SUB: case MUL: case DIV: case MOD:
++					case BITWISE_AND: case BITWISE_OR: case BITWISE_XOR: case BITWISE_NOT:
++					case LOGICAL_AND: case LOGICAL_OR: case LOGICAL_XOR: case LOGICAL_NOT:
++					case SET_LESS: case SET_LESS_OR_EQUAL: case SET_GREATER: case SET_GREATER_OR_EQUAL:
++					case SET_EQUAL: case SET_NOT_EQUAL:
++					case RAND: case SIGNAL: case SET_SIGNAL_MASK:
++					case GET_UNIT_VALUE: case GET: case SET: case ATTACH: case DROP: {
++					} break;
++					case CALL: case REAL_CALL: {
++						const int callee = (pc < end)? code[pc]: -1;
++						pc += 2;
++						if (callee < 0 || size_t(callee) >= f->scriptNames.size() || f->scriptNames[callee].find("lua_") == 0)
++							res = CF_HARMFUL;
++						else
++							res = std::max<uint8_t>(res, AnalyzeCob(f, memo, callee));
++					} break;
++					default: { // LUA_CALL, BATCH_LUA, SIGNATURE_LUA, anything unknown
++						res = CF_HARMFUL;
++					} break;
++				}
++			}
++
++			memo[fn] = res;
++			return res;
++		}
++	}
++
++	bool CobCallNeedsDrain(const void* cobFileV, int functionId, bool pieceTreeUnit)
++	{
++		const CCobFile* f = static_cast<const CCobFile*>(cobFileV);
++		if (f == nullptr)
++			return true;
++
++		std::vector<uint8_t>& memo = cobMemo[f];
++		if (memo.size() != f->scriptNames.size())
++			memo.assign(f->scriptNames.size(), CF_UNKNOWN);
++
++		const uint8_t r = AnalyzeCob(f, memo, functionId);
++		return (r == CF_HARMFUL || (r == CF_PIECES && pieceTreeUnit));
++	}
++}
+diff --git a/rts/Sim/Weapons/BrPipeTarget.h b/rts/Sim/Weapons/BrPipeTarget.h
+new file mode 100644
+index 0000000..008b408
+--- /dev/null
++++ b/rts/Sim/Weapons/BrPipeTarget.h
+@@ -0,0 +1,73 @@
++/* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
++
++#ifndef BR_PIPE_TARGET_H
++#define BR_PIPE_TARGET_H
++
++// [barreplay] P4 (toggle 0x800000): the slow-update loop's weapon target
++// searches (CWeapon::AutoTarget: GenerateWeaponTargets and the TryTarget walk
++// over its candidates) run on worker threads while the main thread goes on
++// with the next units' slow updates, with EXACTLY the sequential result.
++//
++// A search only reads. What it reads is: the enemy units in the quads around
++// its weapon (what GenerateWeaponTargets lists), the units and features the
++// line-of-fire rays meet inside that area, the ground, its own weapon and
++// owner, and some global tables. The main thread keeps everything else in
++// sequential order (RNG draws, COB queries, tempNum, Lua) and applies each
++// search's result (SetAttackTarget) in launch order. It waits for the
++// searches still running before anything that could change what they read:
++//   - before a unit's slow update, when the unit is an ENEMY of a running
++//     search's weapon and inside its area (the slow update writes the unit's
++//     own health, paralysis, radar error and so on, which only the scan
++//     reads);
++//   - before every Lua callin, every COB call that may reach Lua or move
++//     pieces a ray reads (CobCallNeedsDrain), every death, damage, explosion,
++//     quad-list change, position, rotation or cloak change, team change,
++//     transport change and LOS-state change.
++// Piece matrices are recomputed lazily on read, which is a write: while a
++// slice runs, nobody writes them; a dirty one is computed into scratch
++// (LocalModelPiece::BrScratchModelSpaceMatrix), by the same operations.
++
++#include <atomic>
++
++class CUnit;
++class CWeapon;
++
++extern unsigned g_brToggles;
++
++namespace BrP4 {
++	// inside a pipelined slow-update slice (written by the main thread only)
++	extern std::atomic<bool> active;
++	// this thread is running a search out of order
++	extern thread_local bool inWorker;
++
++	inline bool Active() { return active.load(std::memory_order_relaxed); }
++
++	// the slow-update slice: Begin returns whether searches are pipelined
++	bool Begin();
++	void End();
++
++	// before u's slow update (main)
++	void BeforeUnit(const CUnit* u);
++	// before w's slow update: a slaved weapon reads its master's target
++	void BeforeWeapon(const CWeapon* w);
++
++	// AutoTarget's search for w, run out of order; false = run it now
++	bool Launch(CWeapon* w, const CUnit* avoidUnit);
++
++	// a write the searches may read is about to happen: finish and apply all
++	void DrainSlow(int reason);
++	inline void Drain(int reason) {
++		if (__builtin_expect(Active(), false))
++			DrainSlow(reason);
++	}
++
++	// a COB call must wait for the searches: the function (or one it calls)
++	// reaches Lua, or moves pieces at once and the unit's collision volume is
++	// its piece tree; decided once per function from its bytecode. Every
++	// other global effect a script can have goes through a hooked function.
++	bool CobCallNeedsDrain(const void* cobFile, int functionId, bool pieceTreeUnit);
++
++	enum DrainReason { DR_LUA, DR_COB, DR_KILL, DR_DAMAGE, DR_QUAD, DR_MOVE, DR_TEAM, DR_TRANSPORT, DR_EXPLOSION, DR_LOS, DR_FEATURE, DR_ENEMY, DR_RAYS, DR_SLAVE, DR_N };
++}
++
++#endif
+diff --git a/rts/Sim/Weapons/Weapon.cpp b/rts/Sim/Weapons/Weapon.cpp
+index d4fb6e6..480e89b 100644
+--- a/rts/Sim/Weapons/Weapon.cpp
++++ b/rts/Sim/Weapons/Weapon.cpp
+@@ -27,6 +27,7 @@ std::vector<int> g_brReloadLog;
+ #include "Sim/Units/CommandAI/CommandAI.h"
+ #include "Sim/Units/Unit.h"
+ #include "Sim/Units/UnitDef.h"
++#include "Sim/Weapons/BrPipeTarget.h"
+ #include "Sim/Weapons/Cannon.h"
+ #include "Sim/Weapons/NoWeapon.h"
+ #include "System/EventHandler.h"
+@@ -721,7 +722,7 @@ bool CWeapon::AllowWeaponAutoTarget() const
+ 	return (gs->frameNum > (lastTargetRetry + 65));
+ }
+ 
+-bool CWeapon::AutoTarget()
++bool CWeapon::AutoTarget(bool mayPipeline)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	if (!AllowWeaponAutoTarget())
+@@ -732,16 +733,35 @@ bool CWeapon::AutoTarget()
+ 
+ 	const CUnit* avoidUnit = (avoidTarget && HaveUnitTarget()) ? currentTarget.unit : nullptr;
+ 
++	// [barreplay] P4: from the slow-update loop the search may run on a worker
++	// and its result be applied later, in order (BrPipeTarget.h); nothing in
++	// that loop reads the return value
++	if (mayPipeline && BrP4::Active() && BrP4::Launch(this, avoidUnit))
++		return false;
++
++	CUnit* goodTargetUnit = BrSearchTarget(avoidUnit, helper->targetPairs, -1, -1);
++
++	if (goodTargetUnit != nullptr) {
++		// pick our new target
++		SetAttackTarget(SWeaponTarget(goodTargetUnit));
++		return true;
++	}
++
++	return false;
++}
++
++// [barreplay] AutoTarget's search, apart from applying its result: reads only.
++// <tempNum>/<mtThread> as for CGameHelper::GenerateWeaponTargets.
++CUnit* CWeapon::BrSearchTarget(const CUnit* avoidUnit, std::vector<std::pair<float, CUnit*>>& targetPairs, int tempNum, int mtThread) const
++{
+ 	CUnit* goodTargetUnit = nullptr;
+ 	CUnit*  badTargetUnit = nullptr;
+ 
+-	auto& targetPairs = helper->targetPairs;
+-
+ 	// NOTE:
+ 	//   GenerateWeaponTargets sorts by INCREASING order of priority, so lower equals better
+ 	//   <targetPairs> is normally sorted such that all bad TargetCategory units live at the
+ 	//   end, but Lua can mess with the ordering arbitrarily
+-	for (size_t i = 0, n = CGameHelper::GenerateWeaponTargets(this, avoidUnit, targetPairs); i < n; i++, assert(n == targetPairs.size())) {
++	for (size_t i = 0, n = CGameHelper::GenerateWeaponTargets(this, avoidUnit, targetPairs, tempNum, mtThread); i < n; i++, assert(n == targetPairs.size())) {
+ 		CUnit* unit = targetPairs[i].second;
+ 
+ 		// save the "best" bad target in case we have no other
+@@ -768,16 +788,7 @@ bool CWeapon::AutoTarget()
+ 		break;
+ 	}
+ 
+-	if (goodTargetUnit == nullptr)
+-		goodTargetUnit = badTargetUnit;
+-
+-	if (goodTargetUnit != nullptr) {
+-		// pick our new target
+-		SetAttackTarget(SWeaponTarget(goodTargetUnit));
+-		return true;
+-	}
+-
+-	return false;
++	return ((goodTargetUnit != nullptr)? goodTargetUnit: badTargetUnit);
+ }
+ 
+ 
+@@ -812,7 +823,7 @@ void CWeapon::SlowUpdate()
+ 		Attack(owner->lastAttacker);
+ 	}
+ 	// AutoTarget: Find new/better Target
+-	AutoTarget();
++	AutoTarget(true);
+ }
+ 
+ 
+diff --git a/rts/Sim/Weapons/Weapon.h b/rts/Sim/Weapons/Weapon.h
+index 0908112..17c7112 100644
+--- a/rts/Sim/Weapons/Weapon.h
++++ b/rts/Sim/Weapons/Weapon.h
+@@ -98,7 +98,8 @@ public:
+ 	virtual void UpdateProjectileSpeed(const float val) { projectileSpeed = val; }
+ 	virtual void UpdateRange(const float val) { range = val; }
+ 
+-	bool AutoTarget();
++	bool AutoTarget(bool mayPipeline = false);
++	CUnit* BrSearchTarget(const CUnit* avoidUnit, std::vector<std::pair<float, CUnit*>>& targetPairs, int tempNum, int mtThread) const;
+ 	void AimReady(const int value);
+ 	void Fire(const bool scriptCall);
+ 
+diff --git a/rts/System/EventClient.h b/rts/System/EventClient.h
+index 6d938ce..fb804d0 100644
+--- a/rts/System/EventClient.h
++++ b/rts/System/EventClient.h
+@@ -242,6 +242,10 @@ class CEventClient
+ 			float* targetPriority
+ 		) { return true; }
+ 		virtual bool AllowWeaponInterceptTarget(const CUnit* interceptorUnit, const CWeapon* interceptorWeapon, const CProjectile* interceptorTarget) { return true; }
++		// [barreplay] P4 (BrPipeTarget.h): this client's AllowWeaponTarget for
++		// the weapon def runs no Lua and writes nothing, so it may be called
++		// from a worker thread this frame (asked on the main thread)
++		virtual bool BrAllowWeaponTargetNative(unsigned int weaponDefID) { return false; }
+ 
+ 		virtual bool UnitPreDamaged(
+ 			const CUnit* unit,
+diff --git a/rts/System/EventHandler.h b/rts/System/EventHandler.h
+index 2e9ea5d..ef88e67 100644
+--- a/rts/System/EventHandler.h
++++ b/rts/System/EventHandler.h
+@@ -181,6 +181,14 @@ class CEventHandler
+ 		bool MoveCtrlNotify(const CUnit* unit, int data);
+ 
+ 		int AllowWeaponTargetCheck(unsigned int attackerID, unsigned int attackerWeaponNum, unsigned int attackerWeaponDefID);
++		// [barreplay] P4: every AllowWeaponTarget client is native for this def
++		bool BrAllowWeaponTargetNative(unsigned int weaponDefID) {
++			for (CEventClient* ec: listAllowWeaponTarget) {
++				if (!ec->BrAllowWeaponTargetNative(weaponDefID))
++					return false;
++			}
++			return true;
++		}
+ 		bool AllowWeaponTarget(
+ 			unsigned int attackerID,
+ 			unsigned int targetID,
+-- 
+2.53.0
+

@@ -1,0 +1,471 @@
+From 760eba838381429791203ac13c84f9109590efc7 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 11:37:18 +0000
+Subject: [PATCH 70/70] [barreplay] P4 v2: Lua waits only at the functions that
+ write sim state or read weapon targets (a draining trampoline), COB's Lua
+ calls likewise; a slaved weapon's target copy is queued behind its master's
+ search; the waiting main thread runs pending searches; worker count from
+ toggle bits 24-25; stats interval from BARREPLAY_P4_STATS
+
+---
+ rts/Lua/LuaCallInCheck.h                |  3 -
+ rts/Lua/LuaHandleSynced.cpp             | 16 ++---
+ rts/Lua/LuaSyncedCtrl.cpp               |  7 +++
+ rts/Lua/LuaSyncedMoveCtrl.cpp           |  7 +++
+ rts/Lua/LuaSyncedRead.cpp               | 18 +++---
+ rts/Lua/LuaUtils.cpp                    |  8 +++
+ rts/Lua/LuaUtils.h                      | 13 ++++
+ rts/Sim/Units/Scripts/LuaUnitScript.cpp |  7 +++
+ rts/Sim/Units/Unit.cpp                  |  2 -
+ rts/Sim/Weapons/BrPipeTarget.cpp        | 82 ++++++++++++++++++-------
+ rts/Sim/Weapons/BrPipeTarget.h          | 18 +++---
+ rts/Sim/Weapons/Weapon.cpp              |  4 +-
+ 12 files changed, 133 insertions(+), 52 deletions(-)
+
+diff --git a/rts/Lua/LuaCallInCheck.h b/rts/Lua/LuaCallInCheck.h
+index c3d75d1..487dbf9 100644
+--- a/rts/Lua/LuaCallInCheck.h
++++ b/rts/Lua/LuaCallInCheck.h
+@@ -5,7 +5,6 @@
+ 
+ #include "System/TimeProfiler.h"
+ #include "LuaUtils.h"
+-#include "Sim/Weapons/BrPipeTarget.h"
+ 
+ #include <optional>
+ 
+@@ -17,8 +16,6 @@
+ class ScopedCallInTimer {
+ public:
+ 	explicit ScopedCallInTimer(unsigned nameHash) {
+-		// [barreplay] P4: Lua may read or write anything
+-		BrP4::Drain(BrP4::DR_LUA);
+ 		if (CTimeProfiler::Enabled())
+ 			timer.emplace(nameHash, false, true);
+ 	}
+diff --git a/rts/Lua/LuaHandleSynced.cpp b/rts/Lua/LuaHandleSynced.cpp
+index d751650..281fbce 100644
+--- a/rts/Lua/LuaHandleSynced.cpp
++++ b/rts/Lua/LuaHandleSynced.cpp
+@@ -489,20 +489,20 @@ bool CSyncedLuaHandle::Init(std::string code, const std::string& file)
+ 	lua_pop(L, 1); // pop the global math table
+ 
+ 	lua_getglobal(L, "Script");
+-		LuaPushNamedCFunc(L, "AddActionFallback",    AddSyncedActionFallback);
+-		LuaPushNamedCFunc(L, "RemoveActionFallback", RemoveSyncedActionFallback);
++		BrPushDrainingRawNamedCFunc(L, "AddActionFallback", AddSyncedActionFallback); // [barreplay] P4
++		BrPushDrainingRawNamedCFunc(L, "RemoveActionFallback", RemoveSyncedActionFallback); // [barreplay] P4
+ 		LuaPushNamedCFunc(L, "GetWatchUnit",         GetWatchUnitDef);
+-		LuaPushNamedCFunc(L, "SetWatchUnit",         SetWatchUnitDef);
++		BrPushDrainingRawNamedCFunc(L, "SetWatchUnit", SetWatchUnitDef); // [barreplay] P4
+ 		LuaPushNamedCFunc(L, "GetWatchFeature",      GetWatchFeatureDef);
+-		LuaPushNamedCFunc(L, "SetWatchFeature",      SetWatchFeatureDef);
++		BrPushDrainingRawNamedCFunc(L, "SetWatchFeature", SetWatchFeatureDef); // [barreplay] P4
+ 		LuaPushNamedCFunc(L, "GetWatchExplosion",    GetWatchExplosionDef);
+-		LuaPushNamedCFunc(L, "SetWatchExplosion",    SetWatchExplosionDef);
++		BrPushDrainingRawNamedCFunc(L, "SetWatchExplosion", SetWatchExplosionDef); // [barreplay] P4
+ 		LuaPushNamedCFunc(L, "GetWatchProjectile",   GetWatchProjectileDef);
+-		LuaPushNamedCFunc(L, "SetWatchProjectile",   SetWatchProjectileDef);
++		BrPushDrainingRawNamedCFunc(L, "SetWatchProjectile", SetWatchProjectileDef); // [barreplay] P4
+ 		LuaPushNamedCFunc(L, "GetWatchAllowTarget",  GetWatchAllowTargetDef);
+-		LuaPushNamedCFunc(L, "SetWatchAllowTarget",  SetWatchAllowTargetDef);
++		BrPushDrainingRawNamedCFunc(L, "SetWatchAllowTarget", SetWatchAllowTargetDef); // [barreplay] P4
+ 		LuaPushNamedCFunc(L, "GetWatchWeapon",       GetWatchWeaponDef);
+-		LuaPushNamedCFunc(L, "SetWatchWeapon",       SetWatchWeaponDef);
++		BrPushDrainingRawNamedCFunc(L, "SetWatchWeapon", SetWatchWeaponDef); // [barreplay] P4
+ 	lua_pop(L, 1);
+ 
+ 	// add the custom file loader
+diff --git a/rts/Lua/LuaSyncedCtrl.cpp b/rts/Lua/LuaSyncedCtrl.cpp
+index 2af3976..4ad0bae 100644
+--- a/rts/Lua/LuaSyncedCtrl.cpp
++++ b/rts/Lua/LuaSyncedCtrl.cpp
+@@ -125,6 +125,13 @@ Synced Lua API
+ 
+ /******************************************************************************/
+ 
++
++// [barreplay] P4: every function this file registers writes simulation state
++#undef REGISTER_LUA_CFUNC
++#undef REGISTER_NAMED_LUA_CFUNC
++#define REGISTER_LUA_CFUNC(func)             BrPushDrainingRawNamedCFunc(L, #func, func)
++#define REGISTER_NAMED_LUA_CFUNC(name, func) BrPushDrainingRawNamedCFunc(L,  name, func)
++
+ bool LuaSyncedCtrl::PushEntries(lua_State* L)
+ {
+ 	{
+diff --git a/rts/Lua/LuaSyncedMoveCtrl.cpp b/rts/Lua/LuaSyncedMoveCtrl.cpp
+index aa81f21..65a7adc 100644
+--- a/rts/Lua/LuaSyncedMoveCtrl.cpp
++++ b/rts/Lua/LuaSyncedMoveCtrl.cpp
+@@ -30,6 +30,13 @@
+ ******************************************************************************/
+ 
+ 
++
++// [barreplay] P4: every function this file registers writes simulation state
++#undef REGISTER_LUA_CFUNC
++#undef REGISTER_NAMED_LUA_CFUNC
++#define REGISTER_LUA_CFUNC(func)             BrPushDrainingRawNamedCFunc(L, #func, func)
++#define REGISTER_NAMED_LUA_CFUNC(name, func) BrPushDrainingRawNamedCFunc(L,  name, func)
++
+ bool LuaSyncedMoveCtrl::PushMoveCtrl(lua_State* L)
+ {
+ 	/***
+diff --git a/rts/Lua/LuaSyncedRead.cpp b/rts/Lua/LuaSyncedRead.cpp
+index 65c2cd1..d8a2a2f 100644
+--- a/rts/Lua/LuaSyncedRead.cpp
++++ b/rts/Lua/LuaSyncedRead.cpp
+@@ -259,15 +259,15 @@ bool LuaSyncedRead::PushEntries(lua_State* L)
+ 	REGISTER_LUA_CFUNC(GetUnitIsTransporting);
+ 	REGISTER_LUA_CFUNC(GetUnitShieldState);
+ 	REGISTER_LUA_CFUNC(GetUnitFlanking);
+-	REGISTER_LUA_CFUNC(GetUnitWeaponState);
+-	REGISTER_LUA_CFUNC(GetUnitWeaponDamages);
+-	REGISTER_LUA_CFUNC(GetUnitWeaponVectors);
+-	REGISTER_LUA_CFUNC(GetUnitWeaponTryTarget);
+-	REGISTER_LUA_CFUNC(GetUnitWeaponTestTarget);
+-	REGISTER_LUA_CFUNC(GetUnitWeaponTestRange);
+-	REGISTER_LUA_CFUNC(GetUnitWeaponHaveFreeLineOfFire);
+-	REGISTER_LUA_CFUNC(GetUnitWeaponCanFire);
+-	REGISTER_LUA_CFUNC(GetUnitWeaponTarget);
++	BrPushDrainingRawNamedCFunc(L, "GetUnitWeaponState", GetUnitWeaponState); // [barreplay] P4: weapon targets
++	BrPushDrainingRawNamedCFunc(L, "GetUnitWeaponDamages", GetUnitWeaponDamages); // [barreplay] P4: weapon targets
++	BrPushDrainingRawNamedCFunc(L, "GetUnitWeaponVectors", GetUnitWeaponVectors); // [barreplay] P4: weapon targets
++	BrPushDrainingRawNamedCFunc(L, "GetUnitWeaponTryTarget", GetUnitWeaponTryTarget); // [barreplay] P4: weapon targets
++	BrPushDrainingRawNamedCFunc(L, "GetUnitWeaponTestTarget", GetUnitWeaponTestTarget); // [barreplay] P4: weapon targets
++	BrPushDrainingRawNamedCFunc(L, "GetUnitWeaponTestRange", GetUnitWeaponTestRange); // [barreplay] P4: weapon targets
++	BrPushDrainingRawNamedCFunc(L, "GetUnitWeaponHaveFreeLineOfFire", GetUnitWeaponHaveFreeLineOfFire); // [barreplay] P4: weapon targets
++	BrPushDrainingRawNamedCFunc(L, "GetUnitWeaponCanFire", GetUnitWeaponCanFire); // [barreplay] P4: weapon targets
++	BrPushDrainingRawNamedCFunc(L, "GetUnitWeaponTarget", GetUnitWeaponTarget); // [barreplay] P4: weapon targets
+ 	REGISTER_LUA_CFUNC(GetUnitTravel);
+ 	REGISTER_LUA_CFUNC(GetUnitFuel);
+ 	REGISTER_LUA_CFUNC(GetUnitEstimatedPath);
+diff --git a/rts/Lua/LuaUtils.cpp b/rts/Lua/LuaUtils.cpp
+index caebc42..587eb21 100644
+--- a/rts/Lua/LuaUtils.cpp
++++ b/rts/Lua/LuaUtils.cpp
+@@ -6,6 +6,14 @@
+ #include <cctype>
+ 
+ #include "LuaUtils.h"
++#include "Sim/Weapons/BrPipeTarget.h"
++
++int BrLuaDrainingCall(lua_State* L)
++{
++	BrP4::Drain(BrP4::DR_LUA);
++	const lua_CFunction f = reinterpret_cast<lua_CFunction>(lua_touserdata(L, lua_upvalueindex(1)));
++	return f(L);
++}
+ #include "LuaConfig.h"
+ 
+ #include "Game/GameVersion.h"
+diff --git a/rts/Lua/LuaUtils.h b/rts/Lua/LuaUtils.h
+index 4c40fcb..e232ead 100644
+--- a/rts/Lua/LuaUtils.h
++++ b/rts/Lua/LuaUtils.h
+@@ -370,6 +370,19 @@ static inline void LuaPushString(lua_State* L, const string& str) {
+ 	lua_pushsstring(L, str);
+ } 
+ 
++// [barreplay] P4 (Sim/Weapons/BrPipeTarget.h): the Lua functions that write
++// simulation state, or read weapon targets, are entered through this
++// trampoline, which first finishes and applies the slow-update loop's
++// pipelined target searches; Lua that only reads cannot see them running
++int BrLuaDrainingCall(lua_State* L);
++static inline void BrPushDrainingRawNamedCFunc(lua_State* L, const char* key, lua_CFunction func)
++{
++	lua_pushstring(L, key);
++	lua_pushlightuserdata(L, reinterpret_cast<void*>(func));
++	lua_pushcclosure(L, BrLuaDrainingCall, 1);
++	lua_rawset(L, -3);
++}
++
+ #define REGISTER_LUA_CFUNC(func)                LuaPushRawNamedCFunc(L, #func,        func)
+ #define REGISTER_NAMED_LUA_CFUNC(name, func)    LuaPushRawNamedCFunc(L,  name,        func)
+ #define REGISTER_SCOPED_LUA_CFUNC(scope, func)  LuaPushRawNamedCFunc(L, #func, scope::func)
+diff --git a/rts/Sim/Units/Scripts/LuaUnitScript.cpp b/rts/Sim/Units/Scripts/LuaUnitScript.cpp
+index 92047c1..a1045ef 100644
+--- a/rts/Sim/Units/Scripts/LuaUnitScript.cpp
++++ b/rts/Sim/Units/Scripts/LuaUnitScript.cpp
+@@ -1030,6 +1030,13 @@ void CLuaUnitScript::EndBurst(int weaponNum) { ZoneScoped; Call(LUAFN_EndBurst,
+  * @see Spring.UnitScript
+  * @class UnitScriptTable
+  */
++
++// [barreplay] P4: every function this file registers writes simulation state
++#undef REGISTER_LUA_CFUNC
++#undef REGISTER_NAMED_LUA_CFUNC
++#define REGISTER_LUA_CFUNC(func)             BrPushDrainingRawNamedCFunc(L, #func, func)
++#define REGISTER_NAMED_LUA_CFUNC(name, func) BrPushDrainingRawNamedCFunc(L,  name, func)
++
+ bool CLuaUnitScript::PushEntries(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+diff --git a/rts/Sim/Units/Unit.cpp b/rts/Sim/Units/Unit.cpp
+index b407840..896997c 100644
+--- a/rts/Sim/Units/Unit.cpp
++++ b/rts/Sim/Units/Unit.cpp
+@@ -1127,8 +1127,6 @@ void CUnit::SlowUpdateWeapons()
+ 		return;
+ 
+ 	for (CWeapon* w: weapons) {
+-		if (BrP4::Active())
+-			BrP4::BeforeWeapon(w);
+ 		w->SlowUpdate();
+ 	}
+ }
+diff --git a/rts/Sim/Weapons/BrPipeTarget.cpp b/rts/Sim/Weapons/BrPipeTarget.cpp
+index 56b0dd3..a7bdbce 100644
+--- a/rts/Sim/Weapons/BrPipeTarget.cpp
++++ b/rts/Sim/Weapons/BrPipeTarget.cpp
+@@ -36,6 +36,7 @@ namespace BrP4 {
+ 	namespace {
+ 		struct Task {
+ 			CWeapon* w;
++			bool slave;         // a slaved weapon's copy of its master's target
+ 			const CUnit* avoid;
+ 			float cx, cz, r;    // the scan circle: GenerateWeaponTargets' GetQuads
+ 			int ownerAlly;
+@@ -59,6 +60,7 @@ namespace BrP4 {
+ 		int nWorkers = 2;
+ 		bool check = false;
+ 		bool statsOn = false;
++		int statsEvery = 900; // BARREPLAY_P4_STATS=<frames>
+ 		bool draining = false;
+ 		bool inited = false;
+ 
+@@ -68,7 +70,7 @@ namespace BrP4 {
+ 		struct Stats {
+ 			long long slices = 0, launched = 0, notNative = 0, targetWeight = 0, full = 0;
+ 			long long drains[DR_N] = {};
+-			long long waits = 0, waitCycles = 0, inlineRuns = 0, mismatches = 0, workerHooks = 0;
++			long long waits = 0, waitCycles = 0, inlineRuns = 0, mismatches = 0, workerHooks = 0, slaveCopies = 0;
+ 			int lastFrame = 0;
+ 		} st;
+ 
+@@ -78,7 +80,8 @@ namespace BrP4 {
+ 		}
+ 
+ 		void RunTask(Task& t, int thread) {
+-			t.result = t.w->BrSearchTarget(t.avoid, tlPairs, -1, thread);
++			if (!t.slave)
++				t.result = t.w->BrSearchTarget(t.avoid, tlPairs, -1, thread);
+ 			t.done.store(1, std::memory_order_release);
+ 		}
+ 
+@@ -120,14 +123,28 @@ namespace BrP4 {
+ 				return;
+ 			}
+ 
++			// a worker has it: run later searches nobody has taken meanwhile
+ 			const unsigned long long t0 = __rdtsc();
+-			while (!t.done.load(std::memory_order_acquire))
++			while (!t.done.load(std::memory_order_acquire)) {
++				int k = claimNext.load(std::memory_order_relaxed);
++				if (k < published.load(std::memory_order_relaxed) && claimNext.compare_exchange_weak(k, k + 1, std::memory_order_acq_rel)) {
++					RunTask(tasks[k], 0);
++					st.inlineRuns++;
++					continue;
++				}
+ 				_mm_pause();
++			}
+ 			st.waits++;
+ 			st.waitCycles += (__rdtsc() - t0);
+ 		}
+ 
+ 		void Apply(Task& t) {
++			if (t.slave) {
++				// CWeapon::SlowUpdate's copy, where its master's result now is
++				t.w->SetAttackTarget(t.w->slavedTo->GetCurrentTarget());
++				return;
++			}
++
+ 			CUnit* r = t.result;
+ 
+ 			if (check && t.checkResult != r) {
+@@ -161,12 +178,12 @@ namespace BrP4 {
+ 		}
+ 
+ 		void StatsLine() {
+-			if (!statsOn || (gs->frameNum - st.lastFrame) < 900)
++			if (!statsOn || (gs->frameNum - st.lastFrame) < statsEvery)
+ 				return;
+ 			st.lastFrame = gs->frameNum;
+ 
+ 			char buf[512];
+-			int k = snprintf(buf, sizeof(buf), "[BR_P4] f=%d slices=%lld launched=%lld serial(notNative=%lld weight=%lld full=%lld) waits=%lld waitMs=%.1f inline=%lld mismatches=%lld workerHooks=%lld drains:", gs->frameNum, st.slices, st.launched, st.notNative, st.targetWeight, st.full, st.waits, st.waitCycles / 3.0e6, st.inlineRuns, st.mismatches, st.workerHooks);
++			int k = snprintf(buf, sizeof(buf), "[BR_P4] f=%d slices=%lld launched=%lld slaveCopies=%lld serial(notNative=%lld weight=%lld full=%lld) waits=%lld waitMs=%.1f inline=%lld mismatches=%lld workerHooks=%lld drains:", gs->frameNum, st.slices, st.launched, st.slaveCopies, st.notNative, st.targetWeight, st.full, st.waits, st.waitCycles / 3.0e6, st.inlineRuns, st.mismatches, st.workerHooks);
+ 			for (int r = 0; r < DR_N && k < int(sizeof(buf)); ++r)
+ 				k += snprintf(buf + k, sizeof(buf) - k, " %s=%lld", DrainName(r), st.drains[r]);
+ 			LOG("%s", buf);
+@@ -186,7 +203,10 @@ namespace BrP4 {
+ 			inited = true;
+ 			tasks.reset(new Task[MAX_TASKS]);
+ 			check = (getenv("BARREPLAY_P4_CHECK") != nullptr);
+-			statsOn = (getenv("BARREPLAY_P4_STATS") != nullptr);
++			if (const char* st = getenv("BARREPLAY_P4_STATS")) {
++				statsOn = true;
++				statsEvery = std::max(1, atoi(st));
++			}
+ 			if (const char* w = getenv("BARREPLAY_P4_WORKERS"))
+ 				nWorkers = std::max(0, atoi(w));
+ 			LOG("[barreplay] P4 pipelined target searches: %d workers%s", nWorkers, check? ", checking every result against the search run in order": "");
+@@ -195,7 +215,8 @@ namespace BrP4 {
+ 		if (!ThreadPool::HasThreads())
+ 			return false;
+ 
+-		const int nw = std::min(nWorkers, ThreadPool::GetNumThreads() - 1);
++		const int tw = int((g_brToggles >> 24) & 3);
++		const int nw = std::min((tw != 0)? (2 + 2 * tw): nWorkers, ThreadPool::GetNumThreads() - 1);
+ 		if (nw <= 0)
+ 			return false;
+ 
+@@ -258,6 +279,8 @@ namespace BrP4 {
+ 
+ 		for (int i = committed; i < n; ++i) {
+ 			const Task& t = tasks[i];
++			if (t.slave)
++				continue;
+ 			const float dx = ux - t.cx;
+ 			const float dz = uz - t.cz;
+ 			const float rr = t.r + ur;
+@@ -277,19 +300,28 @@ namespace BrP4 {
+ 		CommitThrough(last);
+ 	}
+ 
+-	void BeforeWeapon(const CWeapon* w)
++	bool DeferSlaveCopy(CWeapon* w)
+ 	{
+-		if (w->slavedTo == nullptr)
+-			return;
+-
++		// only while the master's own search is still to be applied
+ 		const int n = published.load(std::memory_order_relaxed);
+-		for (int i = n - 1; i >= committed; --i) {
+-			if (tasks[i].w != w->slavedTo)
+-				continue;
+-			st.drains[DR_SLAVE]++;
+-			CommitThrough(i);
+-			return;
+-		}
++		int i = n - 1;
++		while (i >= committed && tasks[i].w != w->slavedTo)
++			--i;
++		if (i < committed || n >= MAX_TASKS)
++			return false;
++
++		Task& t = tasks[n];
++		t.w = w;
++		t.slave = true;
++		t.avoid = nullptr;
++		t.cx = t.cz = t.r = 0.0f;
++		t.ownerAlly = w->owner->allyteam;
++		t.result = nullptr;
++		t.checkResult = nullptr;
++		t.done.store(1, std::memory_order_relaxed);
++		published.store(n + 1, std::memory_order_release);
++		st.slaveCopies++;
++		return true;
+ 	}
+ 
+ 	bool Launch(CWeapon* w, const CUnit* avoidUnit)
+@@ -315,6 +347,7 @@ namespace BrP4 {
+ 		const CUnit* o = w->owner;
+ 		Task& t = tasks[n];
+ 		t.w = w;
++		t.slave = false;
+ 		t.avoid = avoidUnit;
+ 		t.cx = o->pos.x;
+ 		t.cz = o->pos.z;
+@@ -360,7 +393,7 @@ namespace BrP4 {
+ 	}
+ 
+ 
+-	// COB: a function is harmless when nothing it runs reaches Lua; piece
++	// COB: a function is harmless unless it moves pieces at once; piece
+ 	// writes that take effect at once (TURN_NOW, MOVE_NOW, SCALE_NOW, SHOW,
+ 	// HIDE, EXPLODE's hiding) matter only on a unit whose collision volume is
+ 	// its piece tree,
+@@ -426,12 +459,17 @@ namespace BrP4 {
+ 					case CALL: case REAL_CALL: {
+ 						const int callee = (pc < end)? code[pc]: -1;
+ 						pc += 2;
+-						if (callee < 0 || size_t(callee) >= f->scriptNames.size() || f->scriptNames[callee].find("lua_") == 0)
++						if (callee < 0 || size_t(callee) >= f->scriptNames.size())
+ 							res = CF_HARMFUL;
+-						else
++						else if (f->scriptNames[callee].find("lua_") != 0)
+ 							res = std::max<uint8_t>(res, AnalyzeCob(f, memo, callee));
+ 					} break;
+-					default: { // LUA_CALL, BATCH_LUA, SIGNATURE_LUA, anything unknown
++					case LUA_CALL: case BATCH_LUA: {
++						// Lua waits for the searches at the functions that write
++						// (BrLuaDrainingCall)
++						pc += 2;
++					} break;
++					default: { // SIGNATURE_LUA, anything unknown
+ 						res = CF_HARMFUL;
+ 					} break;
+ 				}
+diff --git a/rts/Sim/Weapons/BrPipeTarget.h b/rts/Sim/Weapons/BrPipeTarget.h
+index 008b408..2c4dd44 100644
+--- a/rts/Sim/Weapons/BrPipeTarget.h
++++ b/rts/Sim/Weapons/BrPipeTarget.h
+@@ -19,8 +19,11 @@
+ //     search's weapon and inside its area (the slow update writes the unit's
+ //     own health, paralysis, radar error and so on, which only the scan
+ //     reads);
+-//   - before every Lua callin, every COB call that may reach Lua or move
+-//     pieces a ray reads (CobCallNeedsDrain), every death, damage, explosion,
++//   - when Lua calls a function that writes simulation state or reads a
++//     weapon's target (BrLuaDrainingCall: Lua that only reads cannot see a
++//     search running, since searches write nothing until applied);
++//   - before every COB call that moves pieces a ray reads at once
++//     (CobCallNeedsDrain), every death, damage, explosion,
+ //     quad-list change, position, rotation or cloak change, team change,
+ //     transport change and LOS-state change.
+ // Piece matrices are recomputed lazily on read, which is a write: while a
+@@ -48,8 +51,9 @@ namespace BrP4 {
+ 
+ 	// before u's slow update (main)
+ 	void BeforeUnit(const CUnit* u);
+-	// before w's slow update: a slaved weapon reads its master's target
+-	void BeforeWeapon(const CWeapon* w);
++	// a slaved weapon's copy of its master's target, queued behind the
++	// master's search when that is still to be applied; false = copy now
++	bool DeferSlaveCopy(CWeapon* w);
+ 
+ 	// AutoTarget's search for w, run out of order; false = run it now
+ 	bool Launch(CWeapon* w, const CUnit* avoidUnit);
+@@ -62,9 +66,9 @@ namespace BrP4 {
+ 	}
+ 
+ 	// a COB call must wait for the searches: the function (or one it calls)
+-	// reaches Lua, or moves pieces at once and the unit's collision volume is
+-	// its piece tree; decided once per function from its bytecode. Every
+-	// other global effect a script can have goes through a hooked function.
++	// moves pieces at once and the unit's collision volume is its piece tree;
++	// decided once per function from its bytecode. Every other global effect
++	// a script can have goes through a hooked function (Lua's too).
+ 	bool CobCallNeedsDrain(const void* cobFile, int functionId, bool pieceTreeUnit);
+ 
+ 	enum DrainReason { DR_LUA, DR_COB, DR_KILL, DR_DAMAGE, DR_QUAD, DR_MOVE, DR_TEAM, DR_TRANSPORT, DR_EXPLOSION, DR_LOS, DR_FEATURE, DR_ENEMY, DR_RAYS, DR_SLAVE, DR_N };
+diff --git a/rts/Sim/Weapons/Weapon.cpp b/rts/Sim/Weapons/Weapon.cpp
+index 480e89b..2aed918 100644
+--- a/rts/Sim/Weapons/Weapon.cpp
++++ b/rts/Sim/Weapons/Weapon.cpp
+@@ -807,7 +807,9 @@ void CWeapon::SlowUpdate()
+ 	// SlavedWeapon: Update Weapon Target
+ 	if (slavedTo != nullptr) {
+ 		// clone targets from the weapon we are slaved to
+-		SetAttackTarget(slavedTo->currentTarget);
++		// [barreplay] P4: after the master's search is applied, if it is pending
++		if (!(BrP4::Active() && BrP4::DeferSlaveCopy(this)))
++			SetAttackTarget(slavedTo->currentTarget);
+ 	} else
+ 	if (weaponDef->interceptor) {
+ 		// keep track of the closest projectile heading our way (if any)
+-- 
+2.53.0
+
