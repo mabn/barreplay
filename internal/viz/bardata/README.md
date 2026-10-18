@@ -23,7 +23,7 @@ https://github.com/mabn/claudebar under `optimizer/Beyond-All-Reason`).
 
 ## Licences (NOT barreplay's own licence)
 
-These files keep their upstream licences, whatever licence the rest of this
+These files keep their upstream licences, not the MIT License the rest of this
 repository carries. As stated by BAR itself (checked 2026-10-18):
 
 - `icons/` — BAR's `license_icons.txt`: "Icons made for Beyond All Reason. By

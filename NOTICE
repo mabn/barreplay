@@ -1,0 +1,22 @@
+barreplay is licensed under the MIT License (see LICENSE), EXCEPT for the
+parts below, which keep the licence of the work they come from.
+
+patches/
+    Patches to the Recoil engine (https://github.com/beyond-all-reason/RecoilEngine)
+    and the scripts that build patched engines from them. Recoil is licensed
+    under the GNU General Public License version 2 or later, and so are these
+    patches and the engine binaries built with them: see patches/LICENSE.
+    The source of a published patched build is Recoil at the release tag named
+    by its version, plus the patches listed in patches/engine-<version>/series
+    (git tag patched-engine/<semver> marks the exact commit).
+
+internal/viz/bardata/
+    Files vendored from Beyond All Reason (https://github.com/beyond-all-reason/Beyond-All-Reason),
+    under BAR's licences, NOT under the MIT License:
+      icons/          unit icons by IceXuick, Floris and PtaQ, CC BY-NC-ND 4.0
+      ranks/          rank badges by IceXuick, all rights reserved
+      icontypes.lua   BAR game code, GNU GPL v2
+    See internal/viz/bardata/README.md for details.
+
+Maps, map images and replay data are not part of this repository. They are
+fetched from BAR's public services at run time and belong to their authors.

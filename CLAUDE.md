@@ -4224,6 +4224,7 @@ pacing changes only when pre-recorded packets are released, never their content
 
 ## Conventions / gotchas
 
+- LICENSING: the repo is MIT (LICENSE), `patches/` is GPL-2.0-or-later (patches/LICENSE, it derives from Recoil), `internal/viz/bardata/` keeps BAR's licences — NOTICE says which is which, and the Credits dialog repeats it.
 - Go module: `github.com/mabn/barreplay`, Go 1.24. No third-party deps (stdlib only).
 - Unit-def internal names (`armcom`, `corllt`, …) and side names (`armada`, `cortex`)
   have no spaces — the preamble `T` parser relies on that.
