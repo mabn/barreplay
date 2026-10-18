@@ -2328,7 +2328,7 @@ Plan, ordered by cost:
 | 5 | serial weapon loop optimistic in parallel (P1-style, with rollback) | 5-8% | moonshot |
 | 6 | COB tick: per-unit local opcodes in parallel, global ones in order | ~4% | moonshot |
 
-### 2026-10-18 02:35 — 7 threads -2.5% on the late window; anims cannot go async; unsynced work is negligible; H84 building
+### 2026-10-18 01:54 — 7 threads -2.5% on the late window; anims cannot go async; unsynced work is negligible; H84 building
 
 `speed24` dumped a second time with `-worker-threads 7`
 (`spring-headless-speed24t7`, same binary): main thread alone on core 3,
@@ -2386,7 +2386,7 @@ the unsynced read map) and worker threads. `BARREPLAY_H84_STATS=1` logs how
 many joins found the tasks unfinished and how long they waited, which is the
 overlap lost.
 
-### 2026-10-18 03:05 — sizing what is left: no single exact lever, a bound, and the moonshots
+### 2026-10-18 02:00 — sizing what is left: no single exact lever, a bound, and the moonshots
 
 From the speed24 late-window profile, main thread, % of one core:
 
