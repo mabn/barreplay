@@ -2555,3 +2555,38 @@ instructions point at two things:
 
 The per-toggle A/Bs (H84, H85, P3 and H86 each alone) are running. A
 profile retrained on this code would separate the two causes.
+
+### 2026-10-18 03:33 — H84, H85, P3, H86 each measured alone: none helps; all rejected
+
+`speed29` checkpoint, late window, each toggle alone against the base
+(`t=7fbf`), 3 interleaved pairs each:
+
+| on its own, late window | base | with it | wall | cycles | instructions |
+|---|---|---|---|---|---|
+| H84 (LOS update async) | 10.89 s | 10.88 s | -0.1% | ±0 | -0.8% |
+| H85 (apply only changed LOS states) | 10.76 s | 10.80 s | +0.3% | ±0 | -1.2% |
+| P3 (targeting scans precomputed + replayed) | 10.81 s | 11.00 s | **+1.8%** | +1.4% | +1.3% |
+| H86 (prefetch in `QueueDeleteUnits`) | 10.74 s | 10.82 s | +0.7% | +0.7% | +0.5% |
+
+Why each failed:
+
+- **H84 has too little to overlap.** `api_teamstats` asks for LOS at the
+  top of the next frame's `GameFrame`. Then the main thread waits for the
+  longest sensor-type task, which is about what the fork-join cost it.
+- **H85's pass was already cheap.** The apply loop it removes was a
+  prefetched walk over a contiguous array of pointers. Instructions fell
+  1.2%; time did not.
+- **P3 costs more than it saves.** Its precompute is a fork-join section of
+  its own. It visits more than the scan (a larger radius, every occurrence
+  without dedup, a radar position for each), and the main thread does its
+  share and waits. The replay then still walks the occurrence list. 85% of
+  replays succeeded, so the loss is cost, not invalidation.
+- **H86 hides nothing.** The loop's miss latency was already overlapped by
+  the out-of-order core; the prefetch only adds instructions.
+
+All four are exported to `speed/rejected/0056-0062` (`0060`-`0062` are
+H84's statistics and P3's two fixes). The main line stays `speed24h`, whose
+PGO profile matches its code. Lesson for anything further: **every hook in
+a hot inline path, and every changed hot function, costs PGO.** speed29 was
+3% slower with all of these off, so a candidate now has to beat ~3% before
+it shows.

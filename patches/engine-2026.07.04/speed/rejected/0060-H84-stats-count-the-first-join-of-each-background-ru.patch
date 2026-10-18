@@ -1,0 +1,55 @@
+From 394c232c12f2bb843ebea80eadc95f0d3e120734 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 02:27:11 +0000
+Subject: [PATCH 60/62] H84 stats: count the first join of each background run
+ by call site (offset from BrLosJoinSlow, for addr2line)
+
+---
+ rts/Sim/Misc/LosHandler.cpp | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/rts/Sim/Misc/LosHandler.cpp b/rts/Sim/Misc/LosHandler.cpp
+index 0e7567a..b5d43af 100644
+--- a/rts/Sim/Misc/LosHandler.cpp
++++ b/rts/Sim/Misc/LosHandler.cpp
+@@ -22,6 +22,7 @@
+ 
+ #include <immintrin.h>
+ #include <chrono>
++#include <array>
+ #include <cstdlib>
+ 
+ #define USE_STAGGERED_UPDATES 0
+@@ -853,7 +854,17 @@ static const bool brLosStats = (getenv("BARREPLAY_H84_STATS") != nullptr);
+ static std::atomic<long long> brLosWaitNs{0};
+ static std::atomic<int> brLosWaits{0}, brLosJoins{0};
+ 
++// where the joins come from (BARREPLAY_H84_STATS): the first join of each
++// background run, by return address (addr2line -e <binary> resolves it)
++static std::array<std::pair<const void*, int>, 16> brLosSites{};
++
+ void BrLosJoinSlow() {
++	if (brLosStats && g_brLosPending.load(std::memory_order_relaxed) != 0) {
++		const void* ra = __builtin_return_address(0);
++		for (auto& p: brLosSites) {
++			if (p.first == ra || p.first == nullptr) { p.first = ra; p.second += 1; break; }
++		}
++	}
+ 	const bool unfinished = brLosDone.load(std::memory_order_acquire) < brLosCount;
+ 	const auto t0 = brLosStats? std::chrono::steady_clock::now(): std::chrono::steady_clock::time_point();
+ 	BrLosRunSome();
+@@ -903,6 +914,11 @@ void CLosHandler::Update()
+ 		brLosGroup = for_mt_background(0, brLosCount, std::function<void(int)>{[](int) { BrLosRunSome(); }});
+ 		if (brLosStats && (gs->frameNum % 1800) == 0) {
+ 			LOG("[H84] frame %d: %d joins, %d waited, %.1f ms waiting", gs->frameNum, brLosJoins.exchange(0), brLosWaits.exchange(0), brLosWaitNs.exchange(0) * 1e-6);
++			for (auto& p: brLosSites) {
++				if (p.first != nullptr)
++					LOG("[H84]   join site BrLosJoinSlow%+lld: %d", (long long)((const char*)p.first - (const char*)(const void*)&BrLosJoinSlow), p.second);
++				p = {nullptr, 0};
++			}
+ 		}
+ 		return;
+ 	}
+-- 
+2.53.0
+

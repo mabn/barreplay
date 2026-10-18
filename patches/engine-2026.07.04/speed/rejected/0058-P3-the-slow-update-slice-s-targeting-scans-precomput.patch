@@ -1,0 +1,3053 @@
+From f24d191fe5197fc45f7e5cb9a97e2091a3079c7c Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 02:15:50 +0000
+Subject: [PATCH 58/62] P3: the slow-update slice's targeting scans precomputed
+ on all threads and replayed in order, each replay checked against write marks
+ (toggle 0x20000)
+
+---
+ rts/Game/GameHelper.cpp                 | 464 ++++++++++++++++++++----
+ rts/Lua/LuaSyncedCtrl.cpp               | 376 +++++++++----------
+ rts/Lua/LuaSyncedMoveCtrl.cpp           |  60 +--
+ rts/Sim/Misc/BrLosJoin.h                |  30 ++
+ rts/Sim/Misc/LosHandler.h               |  10 +-
+ rts/Sim/Misc/QuadField.cpp              |   4 +
+ rts/Sim/Objects/SolidObject.h           |   2 +
+ rts/Sim/Objects/WorldObject.h           |   8 +-
+ rts/Sim/Units/Scripts/LuaUnitScript.cpp |  76 ++--
+ rts/Sim/Units/Scripts/UnitScript.cpp    |   2 +-
+ rts/Sim/Units/Unit.cpp                  |   3 +-
+ rts/Sim/Units/UnitHandler.cpp           |  12 +
+ 12 files changed, 702 insertions(+), 345 deletions(-)
+
+diff --git a/rts/Game/GameHelper.cpp b/rts/Game/GameHelper.cpp
+index 2772224..2882687 100644
+--- a/rts/Game/GameHelper.cpp
++++ b/rts/Game/GameHelper.cpp
+@@ -1,6 +1,11 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "GameHelper.h"
++#include "Sim/Misc/BrLosJoin.h"
++#include "System/Threading/ThreadPool.h"
++#include "System/Log/ILog.h"
++#include <cstring>
++#include <cstdlib>
+ #include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ 
+ #include "Camera.h"
+@@ -655,41 +660,396 @@ namespace {
+ 
+ 
+ 
+-size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* avoidUnit, std::vector<std::pair<float, CUnit*>>& targets)
+-{
+-	const CUnit*  weaponOwner = weapon->owner;
+-	const CUnit* lastAttacker = ((weaponOwner->lastAttackFrame + 200) <= gs->frameNum) ? weaponOwner->lastAttacker : nullptr;
++namespace {
++	// what GenerateWeaponTargets holds fixed for one weapon's scan
++	struct BrScanCtx {
++		const CWeapon* weapon;
++		const CUnit* weaponOwner;
++		const CUnit* avoidUnit;
++		const CUnit* lastAttacker;
++		const WeaponDef* weaponDef;
++		const DynDamageArray* weaponDmg;
++		float3 ownerPos;
++		float3 testPos;
++		float aimPosHeight;
++		float secDamage;
++		float heightMod;
++		float3 worldMainDir;
++		float weaponAimAdjustPriority;
++		float baseRange;
++		float rangeBoost;
++		bool paralyzer;
++	};
++
++	// [0] := default, [1,2,3,4,5,6] := target is {avoidee, in bad category, crashing, last attacker, paralyzed, outside unboosted range}
++	constexpr float tgtPriorityMults[] = {1.0f, 10.0f, 100.0f, 1000.0f, 0.5f, 4.0f, 100000.0f};
+ 
+-	const      WeaponDef* weaponDef = weapon->weaponDef;
+-	const DynDamageArray* weaponDmg = weapon->damages;
++	BrScanCtx BrMakeScanCtx(const CWeapon* weapon, const CUnit* avoidUnit) {
++		BrScanCtx c;
++		c.weapon = weapon;
++		c.weaponOwner = weapon->owner;
++		c.avoidUnit = avoidUnit;
++		c.lastAttacker = ((c.weaponOwner->lastAttackFrame + 200) <= gs->frameNum) ? c.weaponOwner->lastAttacker : nullptr;
++		c.weaponDef = weapon->weaponDef;
++		c.weaponDmg = weapon->damages;
++		c.ownerPos = c.weaponOwner->pos;
++		c.testPos = float3();
++		c.aimPosHeight = weapon->aimFromPos.y;
++		// how much damage the weapon deals over 1 second
++		c.secDamage = c.weaponDmg->GetDefault() * weapon->salvoSize / weapon->reloadTime * GAME_SPEED;
++		c.heightMod = c.weaponDef->heightmod;
++		c.worldMainDir = weapon->weaponDir;
++		c.weaponAimAdjustPriority = weapon->weaponAimAdjustPriority;
++		c.baseRange = weapon->range;
++		c.rangeBoost = weapon->autoTargetRangeBoost;
++		c.paralyzer = (c.weaponDmg->paralyzeDamageTime != 0);
++		return c;
++	}
+ 
+-	const float3& ownerPos = weaponOwner->pos;
+-	const float3 testPos;
++	// everything the scan does to one candidate after the LOS-state lookup and
++	// its target position: the range and TestTarget rejections, the priority,
++	// the AllowWeaponTarget callin. Shared by the scan and P3's replay of it.
++	inline void BrScoreCandidate(const BrScanCtx& c, CUnit* targetUnit, unsigned short targetLOSState, const float3& targetPos, float targetPriority, std::vector<std::pair<float, CUnit*>>& targets, const int* tempNum) {
++		const CWeapon* weapon = c.weapon;
++		const float modRange = weapon->GetRange2D(c.rangeBoost, (targetPos.y - c.aimPosHeight) * c.heightMod);
++		const float sqDist2D = c.ownerPos.SqDistance2D(targetPos);
+ 
+-	const float aimPosHeight = weapon->aimFromPos.y;
+-	const float minMapHeight = std::max(0.0f, readMap->GetCurrMinHeight());
++		if (sqDist2D > Square(modRange))
++			return;
+ 
+-	// how much damage the weapon deals over 1 second
+-	const float secDamage = weaponDmg->GetDefault() * weapon->salvoSize / weapon->reloadTime * GAME_SPEED;
+-	const float heightMod = weaponDef->heightmod;
++		if (!weapon->TestTarget(c.testPos, SWeaponTarget(targetUnit)))
++			return;
+ 
+-	const float3 worldMainDir = weapon->weaponDir;
+-	const float weaponAimAdjustPriority = weapon->weaponAimAdjustPriority;
++		const float3 worldTargetDir = (targetPos - c.ownerPos).SafeNormalize();
++		const float angleOffset =  (1.f - c.worldMainDir.dot(worldTargetDir));
++		const float angleMod = angleOffset * c.weaponAimAdjustPriority + 1.f;
+ 
+-	const float  baseRange = weapon->range;
+-	const float rangeBoost = weapon->autoTargetRangeBoost;
+-	// find theoretical maximum range based on height above lowest point on map
+-	// const float scanRadius = weapon->GetRange2D(rangeBoost, (minMapHeight - aimPosHeight) * heightMod);
+-	const float scanRadius = baseRange + rangeBoost + (aimPosHeight - minMapHeight) * heightMod;
++		// Strengthen focus towards the front, desire should weaken quadratically rather
++		// than linearly otherwise target distance can too easily cause units to choose a
++		// target that requires turning around to fire at.
++		const float angleMul = angleMod*angleMod;
+ 
+-	// [0] := default, [1,2,3,4,5,6] := target is {avoidee, in bad category, crashing, last attacker, paralyzed, outside unboosted range}
+-	constexpr float tgtPriorityMults[] = {1.0f, 10.0f, 100.0f, 1000.0f, 0.5f, 4.0f, 100000.0f};
++		const float dist2D = math::sqrt(sqDist2D);
++		const float rangeMul = (dist2D * c.weaponDef->proximityPriority + modRange * 0.4f + 100.0f);
++		const float damageMul = std::max(0.0001f, c.weaponDmg->Get(targetUnit->armorType) * targetUnit->curArmorMultiple);
++
++		targetPriority *= angleMul;
++		targetPriority *= rangeMul;
++		targetPriority *= tgtPriorityMults[(dist2D > c.baseRange) * 6];
++
++		if (targetLOSState & LOS_INLOS) {
++			targetPriority *= (c.secDamage + targetUnit->health);
++
++			if (c.paralyzer && targetUnit->paralyzeDamage > (modInfo.paralyzeOnMaxHealth? targetUnit->maxHealth: targetUnit->health))
++				targetPriority *= tgtPriorityMults[5];
++
++			if (weapon->hasTargetWeight)
++				targetPriority *= weapon->TargetWeight(targetUnit);
++
++		} else {
++			targetPriority *= (c.secDamage + 10000.0f);
++		}
++
++		if (targetLOSState & LOS_PREVLOS) {
++			targetPriority /= (damageMul * targetUnit->power);
++			targetPriority *= tgtPriorityMults[((targetUnit->category & weapon->badTargetCategory) != 0) * 2];
++			targetPriority *= tgtPriorityMults[(targetUnit->IsCrashing()) * 3];
++			targetPriority *= tgtPriorityMults[(targetUnit == c.lastAttacker) * 4];
++		}
++
++		const bool allowTarget = eventHandler.AllowWeaponTarget(c.weaponOwner->id, targetUnit->id, weapon->weaponNum, c.weaponDef->id, &targetPriority);
++
++		// Lua call may have changed tempNum, so needs to be set again
++		if (tempNum != nullptr)
++			targetUnit->tempNum = *tempNum;
++
++		if (!allowTarget)
++			return;
++
++		targets.emplace_back(targetPriority, targetUnit);
++	}
++
++	float BrScanRadius(const BrScanCtx& c) {
++		const float minMapHeight = std::max(0.0f, readMap->GetCurrMinHeight());
++		// find theoretical maximum range based on height above lowest point on map
++		// const float scanRadius = weapon->GetRange2D(rangeBoost, (minMapHeight - aimPosHeight) * heightMod);
++		return c.baseRange + c.rangeBoost + (c.aimPosHeight - minMapHeight) * c.heightMod;
++	}
++}
++
++
++// [barreplay] P3 (toggle 0x20000): the targeting scans of a slow-update slice,
++// precomputed on all threads before the slice's serial loop and replayed in it.
++//
++// A scan visits, team by team, the enemy units in the quads around the weapon
++// owner, in quad and list order, the first occurrence of each counting. What
++// it reads of each candidate before rejecting most of them is the LOS state
++// for the owner's ally team and the target position (aimPos, or the radar
++// position with the weapon's error). The precompute records every unit of
++// every enemy team in a slightly LARGER set of quads (GetQuads of a larger
++// radius returns a superset, in the same order), with those two values. The
++// replay takes the exact quads, keeps the first occurrence of each unit in
++// them, and gives each to the same scoring as the scan (BrScoreCandidate), in
++// the same order, so the same AllowWeaponTarget calls are made and the same
++// list comes out.
++//
++// It is only valid if nothing the precompute read changed before the replay:
++// the hooks in BrLosJoin.h mark a unit when its LOS state or mid/aim position
++// is written, a quad when its unit lists change, and everything on a synced Lua
++// control call, a COB set-value, a team change or a radar error size change.
++// The replay also requires the owner unmarked and at the same position, its
++// exact radius inside the precomputed one, and the weapon's error vector,
++// ground-target flag and move-error experience as they were. Otherwise the
++// weapon scans the old way.
++//
++// Not done in the replay: the scan's tempNum marks (each scan takes a fresh
++// tempNum, and nothing compares a unit's mark against an older number), so
++// gs->GetTempNum() is still called once to keep the counter where it was.
++bool g_brScanActive = false;
++bool g_brScanAllDirty = false;
++unsigned char* g_brScanUnitDirty = nullptr;
++int g_brScanUnitDirtyN = 0;
++unsigned char* g_brScanQuadDirty = nullptr;
++
++namespace BrScan {
++	struct Occ {
++		CUnit* unit;
++		int quad;
++		unsigned short los;
++		float3 tpos;
++	};
++	struct Entry {
++		const CWeapon* weapon = nullptr;
++		float3 ownerPos;
++		float superRadius = 0.0f;
++		float3 errorVector;
++		float moveErrorExp = 0.0f;
++		bool doTargetGroundPos = false;
++		std::vector<int> quads;
++		std::vector<Occ> occ;
++	};
++
++	static std::vector<Entry> entries;
++	static int numEntries = 0;
++	static std::vector<int> unitEntryBeg;
++	static int curPos = -1;
++
++	static std::vector<unsigned char> unitDirty;
++	static std::vector<unsigned char> quadDirty;
++	static std::vector<unsigned> quadExact;
++	static unsigned quadSerial = 0;
++	static std::vector<unsigned> unitSeen;
++	static unsigned unitSerial = 0;
++	static std::vector<const Occ*> firsts;
++
++	static long long statReplays = 0, statFallbacks = 0;
++	static const bool stats = (getenv("BARREPLAY_P3_STATS") != nullptr);
++
++	// worth precomputing: the weapon can reach AutoTarget's scan this slow update
++	static bool Candidate(const CWeapon* w) {
++		if (w->weaponDef->noAutoTarget || w->noAutoTarget)
++			return false;
++		if (w->slavedTo != nullptr || w->weaponDef->interceptor)
++			return false;
++		return (w->owner->fireState >= FIRESTATE_FIREATWILL);
++	}
++
++	// margin on the aim height the scan radius is computed from: the weapon's
++	// aim point is recomputed in its own SlowUpdate (pieces animated, owner moved
++	// since the last computation); a replay needing more falls back
++	static constexpr float AIM_MARGIN = 64.0f;
++
++	static void Fill(Entry& e) {
++		const CWeapon* weapon = e.weapon;
++		const CUnit* owner = weapon->owner;
++
++		BrScanCtx c = BrMakeScanCtx(weapon, nullptr);
++		e.ownerPos = c.ownerPos;
++		e.errorVector = weapon->errorVector;
++		e.moveErrorExp = weapon->MoveErrorExperience();
++		e.doTargetGroundPos = weapon->doTargetGroundPos;
++
++		c.aimPosHeight += AIM_MARGIN;
++		const float r1 = BrScanRadius(c);
++		c.aimPosHeight -= 2.0f * AIM_MARGIN;
++		const float r2 = BrScanRadius(c);
++		e.superRadius = std::max(r1, r2);
++
++		QuadFieldQuery qfQuery;
++		quadField.GetQuads(qfQuery, e.ownerPos, e.superRadius);
++		e.quads.assign(qfQuery.quads->begin(), qfQuery.quads->end());
++		e.occ.clear();
++
++		for (int t = 0; t < teamHandler.ActiveAllyTeams(); ++t) {
++			if (teamHandler.Ally(owner->allyteam, t))
++				continue;
++
++			for (const int qi: e.quads) {
++				for (CUnit* u: quadField.GetQuad(qi).teamUnits[t]) {
++					Occ o;
++					o.unit = u;
++					o.quad = qi;
++					o.los = u->losStatus[owner->allyteam];
++					if (o.los & LOS_INLOS)
++						o.tpos = u->aimPos;
++					else if (o.los & LOS_INRADAR)
++						o.tpos = weapon->GetUnitPositionWithError(u);
++					e.occ.push_back(o);
++				}
++			}
++		}
++	}
++
++	void Begin(const std::vector<CUnit*>& units, size_t beg, size_t end) {
++		numEntries = 0;
++		unitEntryBeg.assign(end - beg + 1, 0);
++		for (size_t p = beg; p < end; ++p) {
++			unitEntryBeg[p - beg] = numEntries;
++			for (const CWeapon* w: units[p]->weapons) {
++				if (!Candidate(w))
++					continue;
++				if (size_t(numEntries) >= entries.size())
++					entries.emplace_back();
++				entries[numEntries++].weapon = w;
++			}
++		}
++		unitEntryBeg[end - beg] = numEntries;
++
++		for_mt_chunk(0, numEntries, [](const int k) { Fill(entries[k]); }, 1, 16);
++
++		unitDirty.assign(unitHandler.MaxUnits(), 0);
++		quadDirty.assign(quadField.GetNumQuadsX() * quadField.GetNumQuadsZ(), 0);
++		if (quadExact.size() != quadDirty.size())
++			quadExact.assign(quadDirty.size(), 0);
++		if (unitSeen.size() != unitDirty.size())
++			unitSeen.assign(unitDirty.size(), 0);
++
++		g_brScanUnitDirty = unitDirty.data();
++		g_brScanUnitDirtyN = int(unitDirty.size());
++		g_brScanQuadDirty = quadDirty.data();
++		g_brScanAllDirty = false;
++		curPos = -1;
++		g_brScanActive = true;
++	}
++
++	void SetPos(int p) { curPos = p; }
+ 
+-	const bool paralyzer = (weaponDmg->paralyzeDamageTime != 0);
++	void End() {
++		g_brScanActive = false;
++		curPos = -1;
++		if (stats && (gs->frameNum % 1800) == 0) {
++			LOG("[P3] frame %d: %lld replays, %lld fallbacks", gs->frameNum, statReplays, statFallbacks);
++			statReplays = statFallbacks = 0;
++		}
++	}
++
++	static const Entry* Find(const CWeapon* weapon) {
++		if (curPos < 0 || size_t(curPos + 1) >= unitEntryBeg.size())
++			return nullptr;
++		for (int k = unitEntryBeg[curPos]; k < unitEntryBeg[curPos + 1]; ++k) {
++			if (entries[k].weapon == weapon)
++				return &entries[k];
++		}
++		return nullptr;
++	}
++
++	// the scan from the precomputed occurrences, or false (nothing done) if they
++	// may not be what the scan would read now
++	static bool Replay(const CWeapon* weapon, const CUnit* avoidUnit, std::vector<std::pair<float, CUnit*>>& targets) {
++		if (!g_brScanActive || g_brScanAllDirty)
++			return false;
++		const Entry* e = Find(weapon);
++		if (e == nullptr)
++			return false;
++
++		const CUnit* owner = weapon->owner;
++		if (unitDirty[owner->id] != 0 || !owner->pos.bitExactEquals(e->ownerPos))
++			return false;
++		if (!weapon->errorVector.bitExactEquals(e->errorVector) || weapon->doTargetGroundPos != e->doTargetGroundPos)
++			return false;
++		const float mee = weapon->MoveErrorExperience();
++		if (std::memcmp(&mee, &e->moveErrorExp, sizeof(float)) != 0)
++			return false;
++
++		const BrScanCtx c = BrMakeScanCtx(weapon, avoidUnit);
++		const float scanRadius = BrScanRadius(c);
++		if (!(scanRadius <= e->superRadius))
++			return false;
++
++		QuadFieldQuery qfQuery;
++		quadField.GetQuads(qfQuery, c.ownerPos, scanRadius);
++
++		if (++quadSerial == 0) {
++			std::fill(quadExact.begin(), quadExact.end(), 0);
++			quadSerial = 1;
++		}
++		for (const int qi: *qfQuery.quads) {
++			if (quadDirty[qi] != 0)
++				return false;
++			quadExact[qi] = quadSerial;
++		}
++
++		// first pass: the occurrences the scan would see first, all unchanged
++		if (++unitSerial == 0) {
++			std::fill(unitSeen.begin(), unitSeen.end(), 0);
++			unitSerial = 1;
++		}
++		firsts.clear();
++		for (const Occ& o: e->occ) {
++			if (quadExact[o.quad] != quadSerial)
++				continue;
++			const int id = o.unit->id;
++			if (unitSeen[id] == unitSerial)
++				continue;
++			unitSeen[id] = unitSerial;
++			if (unitDirty[id] != 0)
++				return false;
++			firsts.push_back(&o);
++		}
++
++		// second pass: the scan's own work on each, in its order
++		gs->GetTempNum();
++		targets.clear();
++		targets.reserve(32);
++
++		for (const Occ* o: firsts) {
++			float targetPriority = tgtPriorityMults[(o->unit == avoidUnit) * 1];
++			if (o->los & LOS_INLOS) {
++			} else if (o->los & LOS_INRADAR) {
++				targetPriority *= tgtPriorityMults[1];
++			} else {
++				continue;
++			}
++			BrScoreCandidate(c, o->unit, o->los, o->tpos, targetPriority, targets, nullptr);
++		}
++
++		std::stable_sort(targets.begin(), targets.end(), [](const std::pair<float, CUnit*>& a, const std::pair<float, CUnit*>& b) { return (a.first < b.first); });
++		return true;
++	}
++}
++
++void BrScanBegin(const std::vector<CUnit*>& units, size_t beg, size_t end) { BrScan::Begin(units, beg, end); }
++void BrScanSetPos(int p) { BrScan::SetPos(p); }
++void BrScanEnd() { BrScan::End(); }
++
++
++size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* avoidUnit, std::vector<std::pair<float, CUnit*>>& targets)
++{
++	if (__builtin_expect(g_brScanActive, 0)) {
++		if (BrScan::Replay(weapon, avoidUnit, targets)) {
++			BrScan::statReplays += BrScan::stats;
++			return (targets.size());
++		}
++		BrScan::statFallbacks += BrScan::stats;
++	}
++
++	const BrScanCtx c = BrMakeScanCtx(weapon, avoidUnit);
++	const CUnit* weaponOwner = c.weaponOwner;
++	const float scanRadius = BrScanRadius(c);
+ 
+ 	// copy on purpose since the below calls lua
+ 	QuadFieldQuery qfQuery;
+-	quadField.GetQuads(qfQuery, ownerPos, scanRadius);
++	quadField.GetQuads(qfQuery, c.ownerPos, scanRadius);
+ 
+ 	targets.clear();
+ 	targets.reserve(32);
+@@ -740,61 +1100,7 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
+ 					continue;
+ 				}
+ 
+-				const float modRange = weapon->GetRange2D(rangeBoost, (targetPos.y - aimPosHeight) * heightMod);
+-				const float sqDist2D = ownerPos.SqDistance2D(targetPos);
+-
+-				if (sqDist2D > Square(modRange))
+-					continue;
+-
+-				if (!weapon->TestTarget(testPos, SWeaponTarget(targetUnit)))
+-					continue;
+-
+-				const float3 worldTargetDir = (targetPos - ownerPos).SafeNormalize();
+-				const float angleOffset =  (1.f - worldMainDir.dot(worldTargetDir));
+-				const float angleMod = angleOffset * weaponAimAdjustPriority + 1.f;
+-
+-				// Strengthen focus towards the front, desire should weaken quadratically rather
+-				// than linearly otherwise target distance can too easily cause units to choose a
+-				// target that requires turning around to fire at.
+-				const float angleMul = angleMod*angleMod;
+-
+-				const float dist2D = math::sqrt(sqDist2D);
+-				const float rangeMul = (dist2D * weaponDef->proximityPriority + modRange * 0.4f + 100.0f);
+-				const float damageMul = std::max(0.0001f, weaponDmg->Get(targetUnit->armorType) * targetUnit->curArmorMultiple);
+-
+-				targetPriority *= angleMul;
+-				targetPriority *= rangeMul;
+-				targetPriority *= tgtPriorityMults[(dist2D > baseRange) * 6];
+-
+-				if (targetLOSState & LOS_INLOS) {
+-					targetPriority *= (secDamage + targetUnit->health);
+-
+-					if (paralyzer && targetUnit->paralyzeDamage > (modInfo.paralyzeOnMaxHealth? targetUnit->maxHealth: targetUnit->health))
+-						targetPriority *= tgtPriorityMults[5];
+-
+-					if (weapon->hasTargetWeight)
+-						targetPriority *= weapon->TargetWeight(targetUnit);
+-
+-				} else {
+-					targetPriority *= (secDamage + 10000.0f);
+-				}
+-
+-				if (targetLOSState & LOS_PREVLOS) {
+-					targetPriority /= (damageMul * targetUnit->power);
+-					targetPriority *= tgtPriorityMults[((targetUnit->category & weapon->badTargetCategory) != 0) * 2];
+-					targetPriority *= tgtPriorityMults[(targetUnit->IsCrashing()) * 3];
+-					targetPriority *= tgtPriorityMults[(targetUnit == lastAttacker) * 4];
+-				}
+-
+-				const bool allowTarget = eventHandler.AllowWeaponTarget(weaponOwner->id, targetUnit->id, weapon->weaponNum, weaponDef->id, &targetPriority);
+-
+-				// Lua call may have changed tempNum, so needs to be set again
+-				targetUnit->tempNum = tempNum;
+-
+-				if (!allowTarget)
+-					continue;
+-
+-				targets.emplace_back(targetPriority, targetUnit);
++				BrScoreCandidate(c, targetUnit, targetLOSState, targetPos, targetPriority, targets, &tempNum);
+ 			}
+ 		}
+ 	}
+diff --git a/rts/Lua/LuaSyncedCtrl.cpp b/rts/Lua/LuaSyncedCtrl.cpp
+index aca814d..ba18727 100644
+--- a/rts/Lua/LuaSyncedCtrl.cpp
++++ b/rts/Lua/LuaSyncedCtrl.cpp
+@@ -895,7 +895,7 @@ static inline bool IsPlayerSynced(const CPlayer* player)
+  */
+ int LuaSyncedCtrl::SetAlly(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const int firstAllyTeamID = luaL_checkint(L, 1);
+ 	const int secondAllyTeamID = luaL_checkint(L, 2);
+ 
+@@ -921,7 +921,7 @@ int LuaSyncedCtrl::SetAlly(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetAllyTeamStartBox(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const unsigned int allyTeamID = luaL_checkint(L, 1);
+ 	const float xMin = luaL_checkfloat(L, 2);
+ 	const float zMin = luaL_checkfloat(L, 3);
+@@ -951,7 +951,7 @@ int LuaSyncedCtrl::SetAllyTeamStartBox(lua_State* L)
+  */
+ int LuaSyncedCtrl::AssignPlayerToTeam(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const int playerID = luaL_checkint(L, 1);
+ 	const int teamID = luaL_checkint(L, 2);
+ 
+@@ -983,7 +983,7 @@ int LuaSyncedCtrl::AssignPlayerToTeam(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetTeamStartPosition(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const unsigned int teamID = luaL_checkint(L, 1);
+ 	float3 pickPos =
+ 		{ luaL_checkfloat(L, 2)
+@@ -1015,7 +1015,7 @@ int LuaSyncedCtrl::SetTeamStartPosition(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetPlayerReadyState(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const unsigned int playerID = luaL_checkint(L, 1);
+ 	const bool isReady = luaL_checkboolean(L, 2);
+ 
+@@ -1039,7 +1039,7 @@ int LuaSyncedCtrl::SetPlayerReadyState(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetGlobalLos(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const int allyTeam = luaL_checkint(L, 1);
+ 
+ 	if (!teamHandler.IsValidAllyTeam(allyTeam))
+@@ -1058,7 +1058,7 @@ int LuaSyncedCtrl::SetGlobalLos(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetCheatingEnabled(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	gs->cheatEnabled = luaL_checkboolean(L, 1);
+ 	return 0;
+ }
+@@ -1073,7 +1073,7 @@ int LuaSyncedCtrl::SetCheatingEnabled(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetGodMode(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const bool controlAllies  = luaL_optboolean(L, 1, (gs->godMode & GODMODE_ATC_BIT) != 0);
+ 	const bool controlEnemies = luaL_optboolean(L, 2, (gs->godMode & GODMODE_ETC_BIT) != 0);
+ 
+@@ -1102,7 +1102,7 @@ int LuaSyncedCtrl::SetGodMode(lua_State* L)
+  */
+ int LuaSyncedCtrl::KillTeam(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const int teamID = luaL_checkint(L, 1);
+ 
+ 	if (!teamHandler.IsValidTeam(teamID))
+@@ -1135,7 +1135,7 @@ int LuaSyncedCtrl::KillTeam(lua_State* L)
+  */
+ int LuaSyncedCtrl::GameOver(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (!lua_istable(L, 1)) {
+ 		luaL_error(L, "Incorrect arguments to GameOver()");
+ 		return 0;
+@@ -1178,7 +1178,7 @@ int LuaSyncedCtrl::GameOver(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetTidal(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	envResHandler.LoadTidal(luaL_optnumber(L, 1, envResHandler.GetCurrentTidalStrength()));
+ 	return 0;
+ }
+@@ -1193,7 +1193,7 @@ int LuaSyncedCtrl::SetTidal(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetWind(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	envResHandler.LoadWind(luaL_optnumber(L, 1, envResHandler.GetMinWindStrength()), luaL_optnumber(L, 2, envResHandler.GetMaxWindStrength()));
+ 	return 0;
+ }
+@@ -1209,7 +1209,7 @@ int LuaSyncedCtrl::SetWind(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddTeamResource(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const int teamID = luaL_checkint(L, 1);
+ 
+ 	if (!teamHandler.IsValidTeam(teamID))
+@@ -1259,7 +1259,7 @@ int LuaSyncedCtrl::AddTeamResource(lua_State* L)
+  */
+ int LuaSyncedCtrl::UseTeamResource(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const int teamID = luaL_checkint(L, 1);
+ 
+ 	if (!teamHandler.IsValidTeam(teamID))
+@@ -1343,7 +1343,7 @@ int LuaSyncedCtrl::UseTeamResource(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetTeamResource(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const int teamID = luaL_checkint(L, 1);
+ 
+ 	if (!teamHandler.IsValidTeam(teamID))
+@@ -1395,7 +1395,7 @@ int LuaSyncedCtrl::SetTeamResource(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetTeamShareLevel(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const int teamID = luaL_checkint(L, 1);
+ 
+ 	if (!teamHandler.IsValidTeam(teamID))
+@@ -1437,7 +1437,7 @@ int LuaSyncedCtrl::SetTeamShareLevel(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddTeamResourceExcessStats(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const int teamID = luaL_checkint(L, 1);
+ 
+ 	if (!teamHandler.IsValidTeam(teamID))
+@@ -1485,7 +1485,7 @@ int LuaSyncedCtrl::AddTeamResourceExcessStats(lua_State* L)
+  */
+ int LuaSyncedCtrl::ShareTeamResource(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const int teamID1 = luaL_checkint(L, 1);
+ 
+ 	if (!teamHandler.IsValidTeam(teamID1))
+@@ -1639,7 +1639,7 @@ void SetRulesParam(lua_State* L, const char* caller, int offset,
+  */
+ int LuaSyncedCtrl::SetGameRulesParam(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	SetRulesParam(L, __func__, 0, CSplitLuaHandle::gameParams);
+ 	return 0;
+ }
+@@ -1655,7 +1655,7 @@ int LuaSyncedCtrl::SetGameRulesParam(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetTeamRulesParam(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CTeam* team = ParseTeam(L, __func__, 1);
+ 	if (team == nullptr)
+ 		return 0;
+@@ -1674,7 +1674,7 @@ int LuaSyncedCtrl::SetTeamRulesParam(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetPlayerRulesParam(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const int playerID = luaL_checkint(L, 1);
+ 	if (!playerHandler.IsValidPlayer(playerID))
+ 		return 0;
+@@ -1699,7 +1699,7 @@ int LuaSyncedCtrl::SetPlayerRulesParam(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitRulesParam(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -1720,7 +1720,7 @@ int LuaSyncedCtrl::SetUnitRulesParam(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureRulesParam(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 	if (feature == nullptr)
+ 		return 0;
+@@ -1785,7 +1785,7 @@ static inline void ParseCobArgs(
+  */
+ int LuaSyncedCtrl::CallCOBScript(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const int numArgs = lua_gettop(L);
+ 
+ 	if (numArgs < 3)
+@@ -1844,7 +1844,7 @@ int LuaSyncedCtrl::CallCOBScript(lua_State* L)
+  */
+ int LuaSyncedCtrl::GetCOBScriptID(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const int args = lua_gettop(L); // number of arguments
+ 
+ 	if ((args < 2) || !lua_isnumber(L, 1) || !lua_isstring(L, 2))
+@@ -1896,7 +1896,7 @@ int LuaSyncedCtrl::GetCOBScriptID(lua_State* L)
+  */
+ int LuaSyncedCtrl::CreateUnit(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (inCreateUnit >= MAX_CMD_RECURSION_DEPTH) {
+ 		luaL_error(L, "[%s()]: recursion is not permitted, max depth: %d", __func__, MAX_CMD_RECURSION_DEPTH);
+ 		return 0;
+@@ -1989,7 +1989,7 @@ int LuaSyncedCtrl::CreateUnit(lua_State* L)
+  */
+ int LuaSyncedCtrl::DestroyUnit(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2032,7 +2032,7 @@ int LuaSyncedCtrl::DestroyUnit(lua_State* L)
+  */
+ int LuaSyncedCtrl::TransferUnit(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2097,7 +2097,7 @@ int LuaSyncedCtrl::TransferUnit(lua_State* L)
+  */
+ int LuaSyncedCtrl::TransferTeamMaxUnits(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const int fromTeamID = luaL_checkint(L, 1);
+ 	if (!teamHandler.IsValidTeam(fromTeamID))
+ 		return 0;
+@@ -2135,7 +2135,7 @@ int LuaSyncedCtrl::TransferTeamMaxUnits(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitCosts(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2273,7 +2273,7 @@ static bool SetUnitStorageParam(CUnit* unit, const char* name, float value)
+  */
+ int LuaSyncedCtrl::SetUnitResourcing(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2318,7 +2318,7 @@ int LuaSyncedCtrl::SetUnitResourcing(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitStorage(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2352,7 +2352,7 @@ int LuaSyncedCtrl::SetUnitStorage(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitTooltip(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2393,7 +2393,7 @@ int LuaSyncedCtrl::SetUnitTooltip(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitHealth(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2451,7 +2451,7 @@ int LuaSyncedCtrl::SetUnitHealth(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitMaxHealth(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2472,7 +2472,7 @@ int LuaSyncedCtrl::SetUnitMaxHealth(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitStockpile(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2616,7 +2616,7 @@ static bool SetSingleUnitWeaponState(lua_State* L, CWeapon* weapon, int index)
+  */
+ int LuaSyncedCtrl::SetUnitUseWeapons(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2645,7 +2645,7 @@ int LuaSyncedCtrl::SetUnitUseWeapons(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitWeaponState(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2781,7 +2781,7 @@ static int SetSingleDynDamagesKey(lua_State* L, DynDamageArray* damages, int ind
+  */
+ int LuaSyncedCtrl::SetUnitWeaponDamages(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2833,7 +2833,7 @@ int LuaSyncedCtrl::SetUnitWeaponDamages(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitMaxRange(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2854,7 +2854,7 @@ int LuaSyncedCtrl::SetUnitMaxRange(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitExperience(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2874,7 +2874,7 @@ int LuaSyncedCtrl::SetUnitExperience(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddUnitExperience(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2895,7 +2895,7 @@ int LuaSyncedCtrl::AddUnitExperience(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitArmored(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -2988,7 +2988,7 @@ static unsigned char ParseLosBits(lua_State* L, int index, unsigned char bits)
+  */
+ int LuaSyncedCtrl::SetUnitLosMask(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3036,7 +3036,7 @@ int LuaSyncedCtrl::SetUnitLosMask(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitLosState(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3077,7 +3077,7 @@ int LuaSyncedCtrl::SetUnitLosState(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitCloak(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3114,7 +3114,7 @@ int LuaSyncedCtrl::SetUnitCloak(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitStealth(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3133,7 +3133,7 @@ int LuaSyncedCtrl::SetUnitStealth(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitSonarStealth(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3151,7 +3151,7 @@ int LuaSyncedCtrl::SetUnitSonarStealth(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitSeismicSignature(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* const unit = ParseUnit(L, __func__, 1);
+ 	if (unit == nullptr)
+ 		return 0;
+@@ -3170,7 +3170,7 @@ int LuaSyncedCtrl::SetUnitSeismicSignature(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitLeavesGhost(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (!gameSetup->ghostedBuildings)
+ 		return 0;
+ 
+@@ -3191,7 +3191,7 @@ int LuaSyncedCtrl::SetUnitLeavesGhost(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitAlwaysVisible(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetWorldObjectAlwaysVisible(L, ParseUnit(L, __func__, 1), __func__));
+ }
+ 
+@@ -3205,7 +3205,7 @@ int LuaSyncedCtrl::SetUnitAlwaysVisible(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitUseAirLos(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetWorldObjectUseAirLos(L, ParseUnit(L, __func__, 1), __func__));
+ }
+ 
+@@ -3219,7 +3219,7 @@ int LuaSyncedCtrl::SetUnitUseAirLos(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitMetalExtraction(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3247,7 +3247,7 @@ int LuaSyncedCtrl::SetUnitMetalExtraction(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitHarvestStorage(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3270,7 +3270,7 @@ int LuaSyncedCtrl::SetUnitHarvestStorage(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitBuildParams(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3307,7 +3307,7 @@ int LuaSyncedCtrl::SetUnitBuildParams(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitBuildSpeed(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3360,7 +3360,7 @@ int LuaSyncedCtrl::SetUnitBuildSpeed(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitNanoPieces(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3422,7 +3422,7 @@ int LuaSyncedCtrl::SetUnitNanoPieces(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitBlocking(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetSolidObjectBlocking(L, ParseUnit(L, __func__, 1)));
+ }
+ 
+@@ -3472,7 +3472,7 @@ int LuaSyncedCtrl::SetUnitCrashing(lua_State* L) {
+  */
+ int LuaSyncedCtrl::SetUnitShieldState(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3510,7 +3510,7 @@ int LuaSyncedCtrl::SetUnitShieldState(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitShieldRechargeDelay(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const auto unit = ParseUnit(L, __func__, 1);
+ 	if (unit == nullptr)
+ 		return 0;
+@@ -3550,7 +3550,7 @@ int LuaSyncedCtrl::SetUnitShieldRechargeDelay(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitFlanking(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3595,7 +3595,7 @@ int LuaSyncedCtrl::SetUnitFlanking(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitPhysicalStateBit(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3614,7 +3614,7 @@ int LuaSyncedCtrl::SetUnitPhysicalStateBit(lua_State* L)
+  */
+ int LuaSyncedCtrl::GetUnitPhysicalState(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3641,7 +3641,7 @@ int LuaSyncedCtrl::SetUnitFuel(lua_State* L) { return 0; } // FIXME: DELETE ME
+  */
+ int LuaSyncedCtrl::SetUnitNeutral(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3678,7 +3678,7 @@ int LuaSyncedCtrl::SetUnitNeutral(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitTarget(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3749,7 +3749,7 @@ int LuaSyncedCtrl::SetUnitTarget(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitMidAndAimPos(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr) {
+@@ -3793,7 +3793,7 @@ int LuaSyncedCtrl::SetUnitMidAndAimPos(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitRadiusAndHeight(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr) {
+@@ -3830,7 +3830,7 @@ int LuaSyncedCtrl::SetUnitRadiusAndHeight(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitBuildeeRadius(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3852,7 +3852,7 @@ int LuaSyncedCtrl::SetUnitBuildeeRadius(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitPieceParent(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -3897,7 +3897,7 @@ int LuaSyncedCtrl::SetUnitPieceParent(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitPieceMatrix(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 	return Impl::SetObjectPieceMatrix(L, unit);
+ }
+@@ -3939,7 +3939,7 @@ int LuaSyncedCtrl::SetUnitPieceMatrix(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitCollisionVolumeData(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetSolidObjectCollisionVolumeData(L, ParseUnit(L, __func__, 1)));
+ }
+ 
+@@ -3961,7 +3961,7 @@ int LuaSyncedCtrl::SetUnitCollisionVolumeData(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitPieceCollisionVolumeData(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetSolidObjectPieceCollisionVolumeData(L, ParseUnit(L, __func__, 1)));
+ }
+ 
+@@ -3976,7 +3976,7 @@ int LuaSyncedCtrl::SetUnitPieceCollisionVolumeData(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitPieceVisible(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetSolidObjectPieceVisible(L, ParseUnit(L, __func__, 1)));
+ }
+ 
+@@ -3990,7 +3990,7 @@ int LuaSyncedCtrl::SetUnitPieceVisible(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitSensorRadius(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4051,7 +4051,7 @@ int LuaSyncedCtrl::SetUnitSensorRadius(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitPosErrorParams(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4087,7 +4087,7 @@ int LuaSyncedCtrl::SetUnitPosErrorParams(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitMoveGoal(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4122,7 +4122,7 @@ int LuaSyncedCtrl::SetUnitMoveGoal(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitLandGoal(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4149,7 +4149,7 @@ int LuaSyncedCtrl::SetUnitLandGoal(lua_State* L)
+  */
+ int LuaSyncedCtrl::ClearUnitGoal(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4179,7 +4179,7 @@ int LuaSyncedCtrl::ClearUnitGoal(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitPhysics(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetSolidObjectPhysicalState(L, ParseUnit(L, __func__, 1)));
+ }
+ 
+@@ -4191,7 +4191,7 @@ int LuaSyncedCtrl::SetUnitPhysics(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitMass(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetSolidObjectMass(L, ParseUnit(L, __func__, 1)));
+ }
+ 
+@@ -4222,7 +4222,7 @@ int LuaSyncedCtrl::SetUnitMass(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitPosition(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4263,7 +4263,7 @@ int LuaSyncedCtrl::SetUnitPosition(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitRotation(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetSolidObjectRotation(L, ParseUnit(L, __func__, 1)));
+ }
+ 
+@@ -4300,7 +4300,7 @@ int LuaSyncedCtrl::SetUnitRotation(lua_State* L)
+   */
+ int LuaSyncedCtrl::SetUnitDirection(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return SetSolidObjectDirection(L, ParseUnit(L, __func__, 1), __func__);
+ }
+ 
+@@ -4339,7 +4339,7 @@ int LuaSyncedCtrl::SetUnitDirection(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitHeadingAndUpDir(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return SetSolidObjectHeadingAndUpDir(L, ParseUnit(L, __func__, 1));
+ }
+ 
+@@ -4354,7 +4354,7 @@ int LuaSyncedCtrl::SetUnitHeadingAndUpDir(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitVelocity(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetWorldObjectVelocity(L, ParseUnit(L, __func__, 1)));
+ }
+ 
+@@ -4373,7 +4373,7 @@ int LuaSyncedCtrl::SetUnitVelocity(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFactoryBuggerOff(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* u = ParseUnit(L, __func__, 1);
+ 	if (u == nullptr)
+ 		return 0;
+@@ -4410,7 +4410,7 @@ int LuaSyncedCtrl::SetFactoryBuggerOff(lua_State* L)
+  */
+ int LuaSyncedCtrl::BuggerOff(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	float3 pos;
+ 	pos.x = luaL_checkfloat(L, 1);
+ 	pos.z = luaL_checkfloat(L, 3);
+@@ -4489,7 +4489,7 @@ static std::optional<std::tuple<float, int, CUnit*, int, float3> > ParseDamagePa
+  */
+ int LuaSyncedCtrl::AddFeatureDamage(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -4525,7 +4525,7 @@ int LuaSyncedCtrl::AddFeatureDamage(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddUnitDamage(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4559,7 +4559,7 @@ int LuaSyncedCtrl::AddUnitDamage(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddUnitImpulse(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4582,7 +4582,7 @@ int LuaSyncedCtrl::AddUnitImpulse(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddUnitSeismicPing(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4604,7 +4604,7 @@ int LuaSyncedCtrl::AddUnitSeismicPing(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddUnitResource(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4641,7 +4641,7 @@ int LuaSyncedCtrl::AddUnitResource(lua_State* L)
+  */
+ int LuaSyncedCtrl::UseUnitResource(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4712,7 +4712,7 @@ int LuaSyncedCtrl::UseUnitResource(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddObjectDecal(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4730,7 +4730,7 @@ int LuaSyncedCtrl::AddObjectDecal(lua_State* L)
+  */
+ int LuaSyncedCtrl::RemoveObjectDecal(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -4755,7 +4755,7 @@ int LuaSyncedCtrl::RemoveObjectDecal(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddGrass(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const float3 pos(luaL_checkfloat(L, 1), 0.0f, luaL_checkfloat(L, 2));
+ 	const uint8_t grassValue = static_cast<uint8_t>(luaL_optint(L, 3, 1));
+ 
+@@ -4771,7 +4771,7 @@ int LuaSyncedCtrl::AddGrass(lua_State* L)
+  */
+ int LuaSyncedCtrl::RemoveGrass(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const float3 pos(luaL_checkfloat(L, 1), 0.0f, luaL_checkfloat(L, 2));
+ 
+ 	grassDrawer->RemoveGrass(pos.cClampInBounds());
+@@ -4798,7 +4798,7 @@ int LuaSyncedCtrl::RemoveGrass(lua_State* L)
+  */
+ int LuaSyncedCtrl::CreateFeature(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const FeatureDef* featureDef = nullptr;
+ 
+ 	if (lua_israwstring(L, 1)) {
+@@ -4891,7 +4891,7 @@ void LuaSyncedCtrl::DestroyFeatureCommon(lua_State* L, CFeature* feature)
+  */
+ int LuaSyncedCtrl::DestroyFeature(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 	if (feature == nullptr)
+ 		return 0;
+@@ -4911,7 +4911,7 @@ int LuaSyncedCtrl::DestroyFeature(lua_State* L)
+  */
+ int LuaSyncedCtrl::TransferFeature(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 	if (feature == nullptr)
+ 		return 0;
+@@ -4933,7 +4933,7 @@ int LuaSyncedCtrl::TransferFeature(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureAlwaysVisible(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetWorldObjectAlwaysVisible(L, ParseFeature(L, __func__, 1), __func__));
+ }
+ 
+@@ -4946,7 +4946,7 @@ int LuaSyncedCtrl::SetFeatureAlwaysVisible(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureUseAirLos(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetWorldObjectUseAirLos(L, ParseFeature(L, __func__, 1), __func__));
+ }
+ 
+@@ -4960,7 +4960,7 @@ int LuaSyncedCtrl::SetFeatureUseAirLos(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureHealth(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -4984,7 +4984,7 @@ int LuaSyncedCtrl::SetFeatureHealth(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureMaxHealth(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -5004,7 +5004,7 @@ int LuaSyncedCtrl::SetFeatureMaxHealth(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureReclaim(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -5027,7 +5027,7 @@ int LuaSyncedCtrl::SetFeatureReclaim(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureResources(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -5055,7 +5055,7 @@ int LuaSyncedCtrl::SetFeatureResources(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureResurrect(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -5128,7 +5128,7 @@ int LuaSyncedCtrl::SetFeatureResurrect(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureMoveCtrl(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -5176,7 +5176,7 @@ int LuaSyncedCtrl::SetFeatureMoveCtrl(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeaturePhysics(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetSolidObjectPhysicalState(L, ParseFeature(L, __func__, 1)));
+ }
+ 
+@@ -5189,7 +5189,7 @@ int LuaSyncedCtrl::SetFeaturePhysics(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureMass(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetSolidObjectMass(L, ParseFeature(L, __func__, 1)));
+ }
+ 
+@@ -5205,7 +5205,7 @@ int LuaSyncedCtrl::SetFeatureMass(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeaturePosition(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -5232,7 +5232,7 @@ int LuaSyncedCtrl::SetFeaturePosition(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureRotation(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetSolidObjectRotation(L, ParseFeature(L, __func__, 1)));
+ }
+ 
+@@ -5269,7 +5269,7 @@ int LuaSyncedCtrl::SetFeatureRotation(lua_State* L)
+   */
+ int LuaSyncedCtrl::SetFeatureDirection(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return SetSolidObjectDirection(L, ParseFeature(L, __func__, 1), __func__);
+ }
+ 
+@@ -5288,7 +5288,7 @@ int LuaSyncedCtrl::SetFeatureDirection(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureHeadingAndUpDir(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return SetSolidObjectHeadingAndUpDir(L, ParseFeature(L, __func__, 1));
+ }
+ 
+@@ -5303,7 +5303,7 @@ int LuaSyncedCtrl::SetFeatureHeadingAndUpDir(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureVelocity(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetWorldObjectVelocity(L, ParseFeature(L, __func__, 1)));
+ }
+ 
+@@ -5322,7 +5322,7 @@ int LuaSyncedCtrl::SetFeatureVelocity(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureBlocking(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetSolidObjectBlocking(L, ParseFeature(L, __func__, 1)));
+ }
+ 
+@@ -5335,7 +5335,7 @@ int LuaSyncedCtrl::SetFeatureBlocking(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureNoSelect(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -5363,7 +5363,7 @@ int LuaSyncedCtrl::SetFeatureNoSelect(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureMidAndAimPos(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr) {
+@@ -5407,7 +5407,7 @@ int LuaSyncedCtrl::SetFeatureMidAndAimPos(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureRadiusAndHeight(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr) {
+@@ -5453,7 +5453,7 @@ int LuaSyncedCtrl::SetFeatureRadiusAndHeight(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureCollisionVolumeData(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetSolidObjectCollisionVolumeData(L, ParseFeature(L, __func__, 1)));
+ }
+ 
+@@ -5476,7 +5476,7 @@ int LuaSyncedCtrl::SetFeatureCollisionVolumeData(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeaturePieceCollisionVolumeData(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetSolidObjectPieceCollisionVolumeData(L, ParseFeature(L, __func__, 1)));
+ }
+ 
+@@ -5490,7 +5490,7 @@ int LuaSyncedCtrl::SetFeaturePieceCollisionVolumeData(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeaturePieceVisible(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetSolidObjectPieceVisible(L, ParseFeature(L, __func__, 1)));
+ }
+ 
+@@ -5505,7 +5505,7 @@ int LuaSyncedCtrl::SetFeaturePieceVisible(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeaturePieceMatrix(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 	return Impl::SetObjectPieceMatrix(L, feature);
+ }
+@@ -5523,7 +5523,7 @@ int LuaSyncedCtrl::SetFeaturePieceMatrix(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureFireTime(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -5559,7 +5559,7 @@ int LuaSyncedCtrl::SetFeatureFireTime(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetFeatureSmokeTime(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -5597,7 +5597,7 @@ int LuaSyncedCtrl::SetFeatureSmokeTime(lua_State* L)
+  */
+ int LuaSyncedCtrl::CreateUnitWreck(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -5629,7 +5629,7 @@ int LuaSyncedCtrl::CreateUnitWreck(lua_State* L)
+ 
+ int LuaSyncedCtrl::CreateFeatureWreck(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CFeature* feature = ParseFeature(L, __func__, 1);
+ 
+ 	if (feature == nullptr)
+@@ -5661,7 +5661,7 @@ int LuaSyncedCtrl::CreateFeatureWreck(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileAlwaysVisible(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetWorldObjectAlwaysVisible(L, ParseProjectile(L, __func__, 1), __func__));
+ }
+ 
+@@ -5675,7 +5675,7 @@ int LuaSyncedCtrl::SetProjectileAlwaysVisible(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileUseAirLos(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetWorldObjectUseAirLos(L, ParseProjectile(L, __func__, 1), __func__));
+ }
+ 
+@@ -5694,7 +5694,7 @@ int LuaSyncedCtrl::SetProjectileUseAirLos(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileMoveControl(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr)
+@@ -5716,7 +5716,7 @@ int LuaSyncedCtrl::SetProjectileMoveControl(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectilePosition(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr)
+@@ -5745,7 +5745,7 @@ int LuaSyncedCtrl::SetProjectilePosition(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileVelocity(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetWorldObjectVelocity(L, ParseProjectile(L, __func__, 1)));
+ }
+ 
+@@ -5755,7 +5755,7 @@ int LuaSyncedCtrl::SetProjectileVelocity(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileCollision(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr)
+@@ -5794,7 +5794,7 @@ int LuaSyncedCtrl::SetProjectileCollision(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileTarget(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CProjectile* pro = ParseProjectile(L, __func__, 1);
+ 	CWeaponProjectile* wpro = nullptr;
+ 
+@@ -5875,7 +5875,7 @@ int LuaSyncedCtrl::SetProjectileTarget(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileTimeToLive(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	const int newTimeToLive = luaL_checkint(L, 2);
+@@ -5896,7 +5896,7 @@ int LuaSyncedCtrl::SetProjectileTimeToLive(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileIsIntercepted(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr || !proj->weapon)
+@@ -5919,7 +5919,7 @@ int LuaSyncedCtrl::SetProjectileIsIntercepted(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileDamages(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr || !proj->weapon)
+@@ -5954,7 +5954,7 @@ int LuaSyncedCtrl::SetProjectileDamages(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileIgnoreTrackingError(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr)
+@@ -5985,7 +5985,7 @@ int LuaSyncedCtrl::SetProjectileIgnoreTrackingError(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileGravity(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr)
+@@ -6016,7 +6016,7 @@ int LuaSyncedCtrl::SetProjectileSpinVec(lua_State* L) { return 0; } // FIXME: DE
+  */
+ int LuaSyncedCtrl::SetPieceProjectileParams(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr || !proj->piece)
+@@ -6044,7 +6044,7 @@ int LuaSyncedCtrl::SetPieceProjectileParams(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetProjectileCEG(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr)
+@@ -6082,7 +6082,7 @@ int LuaSyncedCtrl::SetProjectileCEG(lua_State* L)
+  */
+ int LuaSyncedCtrl::UnitFinishCommand(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 	if (unit == nullptr)
+ 		luaL_error(L, "[%s] invalid unitID", __func__);
+@@ -6106,7 +6106,7 @@ int LuaSyncedCtrl::UnitFinishCommand(lua_State* L)
+  */
+ int LuaSyncedCtrl::GiveOrderToUnit(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -6144,7 +6144,7 @@ int LuaSyncedCtrl::GiveOrderToUnit(lua_State* L)
+  */
+ int LuaSyncedCtrl::GiveOrderToUnitMap(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	// units
+ 	std::vector<CUnit*> units;
+ 
+@@ -6187,7 +6187,7 @@ int LuaSyncedCtrl::GiveOrderToUnitMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::GiveOrderToUnitArray(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	// units
+ 	std::vector<CUnit*> units;
+ 
+@@ -6229,7 +6229,7 @@ int LuaSyncedCtrl::GiveOrderToUnitArray(lua_State* L)
+  */
+ int LuaSyncedCtrl::GiveOrderArrayToUnit(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* const unit = ParseUnit(L, __func__, 1);
+ 	if (unit == nullptr)
+ 		luaL_error(L, "[%s] invalid unitID", __func__);
+@@ -6268,7 +6268,7 @@ int LuaSyncedCtrl::GiveOrderArrayToUnit(lua_State* L)
+  */
+ int LuaSyncedCtrl::GiveOrderArrayToUnitMap(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	std::vector<CUnit*> units;
+ 	std::vector<Command> commands;
+ 
+@@ -6316,7 +6316,7 @@ int LuaSyncedCtrl::GiveOrderArrayToUnitMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::GiveOrderArrayToUnitArray(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	// units
+ 	std::vector<CUnit*> units;
+ 	std::vector<Command> commands;
+@@ -6451,7 +6451,7 @@ static inline void ParseMapParams(lua_State* L, const char* caller,
+  */
+ int LuaSyncedCtrl::LevelHeightMap(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (mapDamage->Disabled()) {
+ 		return 0;
+ 	}
+@@ -6492,7 +6492,7 @@ int LuaSyncedCtrl::LevelHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::AdjustHeightMap(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (mapDamage->Disabled()) {
+ 		return 0;
+ 	}
+@@ -6533,7 +6533,7 @@ int LuaSyncedCtrl::AdjustHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::RevertHeightMap(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (mapDamage->Disabled()) {
+ 		return 0;
+ 	}
+@@ -6580,7 +6580,7 @@ int LuaSyncedCtrl::RevertHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddHeightMap(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (!inHeightMap) {
+ 		luaL_error(L, "AddHeightMap() can only be called in SetHeightMapFunc()");
+ 	}
+@@ -6631,7 +6631,7 @@ int LuaSyncedCtrl::AddHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetHeightMap(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (!inHeightMap) {
+ 		luaL_error(L, "SetHeightMap() can only be called in SetHeightMapFunc()");
+ 	}
+@@ -6697,7 +6697,7 @@ int LuaSyncedCtrl::SetHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetHeightMapFunc(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (mapDamage->Disabled()) {
+ 		return 0;
+ 	}
+@@ -6761,7 +6761,7 @@ int LuaSyncedCtrl::SetHeightMapFunc(lua_State* L)
+  */
+ int LuaSyncedCtrl::LevelOriginalHeightMap(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (mapDamage->Disabled()) {
+ 		return 0;
+ 	}
+@@ -6798,7 +6798,7 @@ int LuaSyncedCtrl::LevelOriginalHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::AdjustOriginalHeightMap(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (mapDamage->Disabled()) {
+ 		return 0;
+ 	}
+@@ -6839,7 +6839,7 @@ int LuaSyncedCtrl::AdjustOriginalHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::RevertOriginalHeightMap(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (mapDamage->Disabled()) {
+ 		return 0;
+ 	}
+@@ -6888,7 +6888,7 @@ int LuaSyncedCtrl::RevertOriginalHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddOriginalHeightMap(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (!inOriginalHeightMap) {
+ 		luaL_error(L, "AddOriginalHeightMap() can only be called in SetOriginalHeightMapFunc()");
+ 	}
+@@ -6932,7 +6932,7 @@ int LuaSyncedCtrl::AddOriginalHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetOriginalHeightMap(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (!inOriginalHeightMap) {
+ 		luaL_error(L, "SetOriginalHeightMap() can only be called in SetOriginalHeightMapFunc()");
+ 	}
+@@ -6982,7 +6982,7 @@ int LuaSyncedCtrl::SetOriginalHeightMap(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetOriginalHeightMapFunc(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (mapDamage->Disabled()) {
+ 		return 0;
+ 	}
+@@ -7034,7 +7034,7 @@ static inline void ParseSmoothMeshParams(lua_State* L, const char* caller,
+  */
+ int LuaSyncedCtrl::RebuildSmoothMesh(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	smoothGround.MakeSmoothMesh();
+ 	return 0;
+ }
+@@ -7057,7 +7057,7 @@ int LuaSyncedCtrl::RebuildSmoothMesh(lua_State* L)
+ 
+ int LuaSyncedCtrl::LevelSmoothMesh(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	float height;
+ 	int x1, x2, z1, z2;
+ 	ParseSmoothMeshParams(L, __func__, height, x1, z1, x2, z2);
+@@ -7089,7 +7089,7 @@ int LuaSyncedCtrl::LevelSmoothMesh(lua_State* L)
+  */
+ int LuaSyncedCtrl::AdjustSmoothMesh(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	float height;
+ 	int x1, x2, z1, z2;
+ 	ParseSmoothMeshParams(L, __func__, height, x1, z1, x2, z2);
+@@ -7120,7 +7120,7 @@ int LuaSyncedCtrl::AdjustSmoothMesh(lua_State* L)
+  */
+ int LuaSyncedCtrl::RevertSmoothMesh(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	float origFactor;
+ 	int x1, x2, z1, z2;
+ 	ParseSmoothMeshParams(L, __func__, origFactor, x1, z1, x2, z2);
+@@ -7162,7 +7162,7 @@ int LuaSyncedCtrl::RevertSmoothMesh(lua_State* L)
+  */
+ int LuaSyncedCtrl::AddSmoothMesh(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (!inSmoothMesh) {
+ 		luaL_error(L, "AddSmoothMesh() can only be called in SetSmoothMeshFunc()");
+ 	}
+@@ -7202,7 +7202,7 @@ int LuaSyncedCtrl::AddSmoothMesh(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetSmoothMesh(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (!inSmoothMesh) {
+ 		luaL_error(L, "SetSmoothMesh() can only be called in SetSmoothMeshFunc()");
+ 	}
+@@ -7249,7 +7249,7 @@ int LuaSyncedCtrl::SetSmoothMesh(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetSmoothMeshFunc(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const int args = lua_gettop(L); // number of arguments
+ 	if ((args < 1) || !lua_isfunction(L, 1)) {
+ 		luaL_error(L, "Incorrect arguments to Spring.SetSmoothMeshFunc(func, ...)");
+@@ -7291,7 +7291,7 @@ int LuaSyncedCtrl::SetSmoothMeshFunc(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetMapSquareTerrainType(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const int hx = int(luaL_checkfloat(L, 1) / SQUARE_SIZE);
+ 	const int hz = int(luaL_checkfloat(L, 2) / SQUARE_SIZE);
+ 
+@@ -7324,7 +7324,7 @@ int LuaSyncedCtrl::SetMapSquareTerrainType(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetTerrainTypeData(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const int args = lua_gettop(L);
+ 	const int tti = luaL_checkint(L, 1);
+ 
+@@ -7372,7 +7372,7 @@ int LuaSyncedCtrl::SetTerrainTypeData(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetSquareBuildingMask(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const int x = luaL_checkint(L, 1);
+ 	const int z = luaL_checkint(L, 2);
+ 	const int mask = luaL_checkint(L, 3);
+@@ -7402,7 +7402,7 @@ int LuaSyncedCtrl::SetSquareBuildingMask(lua_State* L)
+  */
+ int LuaSyncedCtrl::UnitWeaponFire(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -7426,7 +7426,7 @@ int LuaSyncedCtrl::UnitWeaponFire(lua_State* L)
+  */
+ int LuaSyncedCtrl::UnitWeaponHoldFire(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -7457,7 +7457,7 @@ int LuaSyncedCtrl::UnitWeaponHoldFire(lua_State* L)
+  */
+ int LuaSyncedCtrl::ForceUnitCollisionUpdate(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const auto* const unit = ParseUnit(L, __func__, 1);
+ 	if (!unit)
+ 		return 0;
+@@ -7479,7 +7479,7 @@ int LuaSyncedCtrl::ForceUnitCollisionUpdate(lua_State* L)
+  */
+ int LuaSyncedCtrl::UnitAttach(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* transporter = ParseUnit(L, __func__, 1);
+ 
+ 	if (transporter == nullptr)
+@@ -7518,7 +7518,7 @@ int LuaSyncedCtrl::UnitAttach(lua_State* L)
+  */
+ int LuaSyncedCtrl::UnitDetach(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* transportee = ParseUnit(L, __func__, 1);
+ 
+ 	if (transportee == nullptr)
+@@ -7541,7 +7541,7 @@ int LuaSyncedCtrl::UnitDetach(lua_State* L)
+  */
+ int LuaSyncedCtrl::UnitDetachFromAir(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* transportee = ParseUnit(L, __func__, 1);
+ 
+ 	if (transportee == nullptr)
+@@ -7576,7 +7576,7 @@ int LuaSyncedCtrl::UnitDetachFromAir(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetUnitLoadingTransport(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -7626,7 +7626,7 @@ int LuaSyncedCtrl::SetUnitLoadingTransport(lua_State* L)
+  */
+ int LuaSyncedCtrl::SpawnProjectile(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	ProjectileParams params;
+ 
+ 	if ((params.weaponDef = weaponDefHandler->GetWeaponDefByID(luaL_checkint(L, 1))) == nullptr)
+@@ -7648,7 +7648,7 @@ int LuaSyncedCtrl::SpawnProjectile(lua_State* L)
+  */
+ int LuaSyncedCtrl::DeleteProjectile(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CProjectile* proj = ParseProjectile(L, __func__, 1);
+ 
+ 	if (proj == nullptr)
+@@ -7805,7 +7805,7 @@ static int SetExplosionParam(lua_State* L, CExplosionParams& params, DamageArray
+  */
+ int LuaSyncedCtrl::SpawnExplosion(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const float3 pos = {luaL_checkfloat(L, 1      ), luaL_checkfloat(L, 2      ), luaL_checkfloat(L, 3      )};
+ 	const float3 dir = {luaL_optfloat  (L, 4, 0.0f), luaL_optfloat  (L, 5, 0.0f), luaL_optfloat  (L, 6, 0.0f)};
+ 
+@@ -7881,7 +7881,7 @@ int LuaSyncedCtrl::SpawnExplosion(lua_State* L)
+  */
+ int LuaSyncedCtrl::SpawnCEG(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const float3 pos = {luaL_optfloat(L, 2, 0.0f), luaL_optfloat(L, 3, 0.0f), luaL_optfloat(L, 4, 0.0f)};
+ 	const float3 dir = {luaL_optfloat(L, 5, 0.0f), luaL_optfloat(L, 6, 0.0f), luaL_optfloat(L, 7, 0.0f)};
+ 
+@@ -7925,7 +7925,7 @@ int LuaSyncedCtrl::SpawnCEG(lua_State* L)
+  */
+ int LuaSyncedCtrl::SpawnSFX(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -7955,7 +7955,7 @@ int LuaSyncedCtrl::SpawnSFX(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetNoPause(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (!FullCtrl(L))
+ 		return 0;
+ 
+@@ -7978,7 +7978,7 @@ int LuaSyncedCtrl::SetNoPause(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetExperienceGrade(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (!FullCtrl(L))
+ 		return 0;
+ 
+@@ -8010,7 +8010,7 @@ int LuaSyncedCtrl::SetExperienceGrade(lua_State* L)
+  */
+ int LuaSyncedCtrl::SetRadarErrorParams(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	const int allyTeamID = lua_tonumber(L, 1);
+ 
+ 	if (!teamHandler.IsValidAllyTeam(allyTeamID))
+@@ -8143,7 +8143,7 @@ static bool ParseCommandDescription(lua_State* L, int table,
+  */
+ int LuaSyncedCtrl::EditUnitCmdDesc(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (!FullCtrl(L))
+ 		return 0;
+ 
+@@ -8185,7 +8185,7 @@ int LuaSyncedCtrl::EditUnitCmdDesc(lua_State* L)
+  */
+ int LuaSyncedCtrl::InsertUnitCmdDesc(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (!FullCtrl(L))
+ 		return 0;
+ 
+@@ -8225,7 +8225,7 @@ int LuaSyncedCtrl::InsertUnitCmdDesc(lua_State* L)
+  */
+ int LuaSyncedCtrl::RemoveUnitCmdDesc(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (!FullCtrl(L))
+ 		return 0;
+ 
+diff --git a/rts/Lua/LuaSyncedMoveCtrl.cpp b/rts/Lua/LuaSyncedMoveCtrl.cpp
+index 4437010..331cfaa 100644
+--- a/rts/Lua/LuaSyncedMoveCtrl.cpp
++++ b/rts/Lua/LuaSyncedMoveCtrl.cpp
+@@ -145,7 +145,7 @@ static inline DerivedMoveType* ParseDerivedMoveType(lua_State* L, const char* ca
+  */
+ int LuaSyncedMoveCtrl::IsEnabled(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -162,7 +162,7 @@ int LuaSyncedMoveCtrl::IsEnabled(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::Enable(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -179,7 +179,7 @@ int LuaSyncedMoveCtrl::Enable(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::Disable(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -199,7 +199,7 @@ int LuaSyncedMoveCtrl::Disable(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetTag(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -216,7 +216,7 @@ int LuaSyncedMoveCtrl::SetTag(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::GetTag(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -244,7 +244,7 @@ int LuaSyncedMoveCtrl::GetTag(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetProgressState(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -289,7 +289,7 @@ int LuaSyncedMoveCtrl::SetProgressState(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetExtrapolate(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -317,7 +317,7 @@ int LuaSyncedMoveCtrl::SetExtrapolate(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetPhysics(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -343,7 +343,7 @@ int LuaSyncedMoveCtrl::SetPhysics(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetPosition(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -367,7 +367,7 @@ int LuaSyncedMoveCtrl::SetPosition(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetVelocity(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -391,7 +391,7 @@ int LuaSyncedMoveCtrl::SetVelocity(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetRelativeVelocity(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -415,7 +415,7 @@ int LuaSyncedMoveCtrl::SetRelativeVelocity(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetRotation(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -436,7 +436,7 @@ int LuaSyncedMoveCtrl::SetRotation(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetRotationOffset(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	// DEPRECATED
+ 	return 0;
+ }
+@@ -451,7 +451,7 @@ int LuaSyncedMoveCtrl::SetRotationOffset(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetRotationVelocity(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -472,7 +472,7 @@ int LuaSyncedMoveCtrl::SetRotationVelocity(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetHeading(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -494,7 +494,7 @@ int LuaSyncedMoveCtrl::SetHeading(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetTrackSlope(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -512,7 +512,7 @@ int LuaSyncedMoveCtrl::SetTrackSlope(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetTrackGround(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -530,7 +530,7 @@ int LuaSyncedMoveCtrl::SetTrackGround(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetTrackLimits(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -548,7 +548,7 @@ int LuaSyncedMoveCtrl::SetTrackLimits(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetGroundOffset(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -566,7 +566,7 @@ int LuaSyncedMoveCtrl::SetGroundOffset(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetGravity(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -584,7 +584,7 @@ int LuaSyncedMoveCtrl::SetGravity(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetDrag(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -602,7 +602,7 @@ int LuaSyncedMoveCtrl::SetDrag(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetWindFactor(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -625,7 +625,7 @@ int LuaSyncedMoveCtrl::SetWindFactor(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetLimits(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -646,7 +646,7 @@ int LuaSyncedMoveCtrl::SetLimits(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetNoBlocking(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -670,7 +670,7 @@ int LuaSyncedMoveCtrl::SetSlopeStop(lua_State* L) { return 0; }
+  */
+ int LuaSyncedMoveCtrl::SetCollideStop(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -688,7 +688,7 @@ int LuaSyncedMoveCtrl::SetCollideStop(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetLimitsStop(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CScriptMoveType* moveType = ParseScriptMoveType(L, __func__, 1);
+ 
+ 	if (moveType == nullptr)
+@@ -858,7 +858,7 @@ static int SetMoveTypeData(lua_State* L, AMoveType* moveType, const char* caller
+  */
+ int LuaSyncedMoveCtrl::SetGunshipMoveTypeData(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetMoveTypeData(L, ParseDerivedMoveType<CHoverAirMoveType>(L, __func__, 1), __func__));
+ }
+ 
+@@ -932,7 +932,7 @@ int LuaSyncedMoveCtrl::SetGunshipMoveTypeData(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetAirMoveTypeData(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetMoveTypeData(L, ParseDerivedMoveType<CStrafeAirMoveType>(L, __func__, 1), __func__));
+ }
+ 
+@@ -998,7 +998,7 @@ int LuaSyncedMoveCtrl::SetAirMoveTypeData(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetGroundMoveTypeData(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return (SetMoveTypeData(L, ParseDerivedMoveType<CGroundMoveType>(L, __func__, 1), __func__));
+ }
+ 
+@@ -1015,7 +1015,7 @@ int LuaSyncedMoveCtrl::SetGroundMoveTypeData(lua_State* L)
+  */
+ int LuaSyncedMoveCtrl::SetMoveDef(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 	MoveDef* moveDef = nullptr;
+ 
+diff --git a/rts/Sim/Misc/BrLosJoin.h b/rts/Sim/Misc/BrLosJoin.h
+index 4b8293e..dc983ab 100644
+--- a/rts/Sim/Misc/BrLosJoin.h
++++ b/rts/Sim/Misc/BrLosJoin.h
+@@ -21,4 +21,34 @@ static inline void BrLosJoin() {
+ 		BrLosJoinSlow();
+ }
+ 
++
++// [barreplay] P3 (toggle 0x20000): while CUnitHandler::SlowUpdateUnits runs its
++// serial loop with targeting scans precomputed (CGameHelper::GenerateWeaponTargets),
++// every write to what a scan read marks the unit, the quad or everything as
++// changed, and a scan whose inputs were touched is done again the old way.
++extern bool g_brScanActive;
++extern bool g_brScanAllDirty;
++extern unsigned char* g_brScanUnitDirty;
++extern int g_brScanUnitDirtyN;
++extern unsigned char* g_brScanQuadDirty;
++static inline void BrScanTouchObject(int id) {
++	// solid objects: a feature's id can coincide with a unit's, which only
++	// costs that unit's scans a needless recompute
++	if (__builtin_expect(g_brScanActive, 0) && unsigned(id) < unsigned(g_brScanUnitDirtyN))
++		g_brScanUnitDirty[id] = 1;
++}
++static inline void BrScanTouchQuad(int qi) {
++	if (__builtin_expect(g_brScanActive, 0))
++		g_brScanQuadDirty[qi] = 1;
++}
++static inline void BrScanTouchAll() {
++	if (__builtin_expect(g_brScanActive, 0))
++		g_brScanAllDirty = true;
++}
++// a synced write that may reach anything (Lua control functions, COB set-value)
++static inline void BrSyncedWrite() {
++	BrLosJoin();
++	BrScanTouchAll();
++}
++
+ #endif
+diff --git a/rts/Sim/Misc/LosHandler.h b/rts/Sim/Misc/LosHandler.h
+index d83290c..e96c4f4 100644
+--- a/rts/Sim/Misc/LosHandler.h
++++ b/rts/Sim/Misc/LosHandler.h
+@@ -278,15 +278,15 @@ public:
+ 
+ public:
+ 	// default operations for targeting-facilities
+-	void IncreaseAllyTeamRadarErrorSize(int allyTeam) { radarErrorSizes[allyTeam] *= baseRadarErrorMult; }
+-	void DecreaseAllyTeamRadarErrorSize(int allyTeam) { radarErrorSizes[allyTeam] /= baseRadarErrorMult; }
++	void IncreaseAllyTeamRadarErrorSize(int allyTeam) { BrScanTouchAll(); radarErrorSizes[allyTeam] *= baseRadarErrorMult; }
++	void DecreaseAllyTeamRadarErrorSize(int allyTeam) { BrScanTouchAll(); radarErrorSizes[allyTeam] /= baseRadarErrorMult; }
+ 
+ 	// API functions
+-	void SetAllyTeamRadarErrorSize(int allyTeam, float size) { radarErrorSizes[allyTeam] = size; }
++	void SetAllyTeamRadarErrorSize(int allyTeam, float size) { BrScanTouchAll(); radarErrorSizes[allyTeam] = size; }
+ 	float GetAllyTeamRadarErrorSize(int allyTeam) const { return radarErrorSizes[allyTeam]; }
+ 
+-	void SetBaseRadarErrorSize(float size) { baseRadarErrorSize = size; }
+-	void SetBaseRadarErrorMult(float mult) { baseRadarErrorMult = mult; }
++	void SetBaseRadarErrorSize(float size) { BrScanTouchAll(); baseRadarErrorSize = size; }
++	void SetBaseRadarErrorMult(float mult) { BrScanTouchAll(); baseRadarErrorMult = mult; }
+ 	float GetBaseRadarErrorSize() const { return baseRadarErrorSize; }
+ 	float GetBaseRadarErrorMult() const { return baseRadarErrorMult; }
+ 
+diff --git a/rts/Sim/Misc/QuadField.cpp b/rts/Sim/Misc/QuadField.cpp
+index 720dcda..e22e95b 100644
+--- a/rts/Sim/Misc/QuadField.cpp
++++ b/rts/Sim/Misc/QuadField.cpp
+@@ -3,6 +3,7 @@
+ #include <algorithm>
+ 
+ #include "QuadField.h"
++#include "Sim/Misc/BrLosJoin.h"
+ #include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ #include "Map/ReadMap.h"
+ #include "Sim/Misc/CollisionVolume.h"
+@@ -479,11 +480,13 @@ void CQuadField::MovedUnit(CUnit* unit)
+ 	}
+ 
+ 	for (const int qi: unit->quads) {
++		BrScanTouchQuad(qi); // [barreplay] P3
+ 		spring::VectorErase(baseQuads[qi].units, unit);
+ 		spring::VectorErase(baseQuads[qi].teamUnits[unit->allyteam], unit);
+ 	}
+ 
+ 	for (const int qi: *qfQuery.quads) {
++		BrScanTouchQuad(qi); // [barreplay] P3
+ 		spring::VectorInsertUnique(baseQuads[qi].units, unit, false);
+ 		spring::VectorInsertUnique(baseQuads[qi].teamUnits[unit->allyteam], unit, false);
+ 	}
+@@ -502,6 +505,7 @@ void CQuadField::RemoveUnit(CUnit* unit)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+ 	for (const int qi: unit->quads) {
++		BrScanTouchQuad(qi); // [barreplay] P3
+ 		spring::VectorErase(baseQuads[qi].units, unit);
+ 		spring::VectorErase(baseQuads[qi].teamUnits[unit->allyteam], unit);
+ 	}
+diff --git a/rts/Sim/Objects/SolidObject.h b/rts/Sim/Objects/SolidObject.h
+index aa0e8f5..3164557 100644
+--- a/rts/Sim/Objects/SolidObject.h
++++ b/rts/Sim/Objects/SolidObject.h
+@@ -153,11 +153,13 @@ public:
+ 	// eg. movetype code
+ 	void UpdateMidAndAimPos() {
+ 		BrLosJoin(); // [barreplay] H84
++		BrScanTouchObject(id); // [barreplay] P3
+ 		midPos = GetMidPos();
+ 		aimPos = GetAimPos();
+ 	}
+ 	void SetMidAndAimPos(const float3& mp, const float3& ap, bool relative) {
+ 		BrLosJoin(); // [barreplay] H84
++		BrScanTouchObject(id); // [barreplay] P3
+ 		SetMidPos(mp, relative);
+ 		SetAimPos(ap, relative);
+ 	}
+diff --git a/rts/Sim/Objects/WorldObject.h b/rts/Sim/Objects/WorldObject.h
+index 81c5881..9f137ca 100644
+--- a/rts/Sim/Objects/WorldObject.h
++++ b/rts/Sim/Objects/WorldObject.h
+@@ -4,6 +4,7 @@
+ #define WORLD_OBJECT_H
+ 
+ #include "System/Object.h"
++#include "Sim/Misc/BrLosJoin.h"
+ #include "System/float4.h"
+ #include "System/Transform.hpp"
+ #include "System/Threading/ThreadPool.h"
+@@ -40,7 +41,7 @@ public:
+ 	virtual float GetDrawRadius() const { return drawRadius; }
+ 	virtual void  SetDrawRadius(float r) { drawRadius = r; }
+ 
+-	virtual void SetPosition(const float3& p) {   pos = p; }
++	virtual void SetPosition(const float3& p) { BrScanTouchObject(id); pos = p; } // [barreplay] P3
+ 	virtual void SetVelocity(const float3& v) { speed = v; }
+ 
+ 	virtual void SetVelocityAndSpeed(const float3& v) {
+@@ -51,8 +52,9 @@ public:
+ 
+ 	// by default, SetVelocity does not set magnitude (for efficiency)
+ 	// so SetSpeed must be explicitly called to update the w-component
+-	float SetSpeed(const float3& v) { return (speed.w = v.Length()); }
+-	float SetSpeed(const float s) { return (speed.w = s); }
++	// [barreplay] P3: a radar target's scan position scales with its speed
++	float SetSpeed(const float3& v) { BrScanTouchObject(id); return (speed.w = v.Length()); }
++	float SetSpeed(const float s) { BrScanTouchObject(id); return (speed.w = s); }
+ 
+ 	void SetRadiusAndHeight(float r, float h) {
+ 		radius = r;
+diff --git a/rts/Sim/Units/Scripts/LuaUnitScript.cpp b/rts/Sim/Units/Scripts/LuaUnitScript.cpp
+index a32ce01..2cecdd2 100644
+--- a/rts/Sim/Units/Scripts/LuaUnitScript.cpp
++++ b/rts/Sim/Units/Scripts/LuaUnitScript.cpp
+@@ -1162,7 +1162,7 @@ static inline int ParseAxis(lua_State* L, const char* caller, int index)
+ int CLuaUnitScript::CreateScript(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -1199,7 +1199,7 @@ int CLuaUnitScript::CreateScript(lua_State* L)
+ int CLuaUnitScript::UpdateCallIn(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -1232,7 +1232,7 @@ int CLuaUnitScript::UpdateCallIn(lua_State* L)
+ int CLuaUnitScript::CallAsUnit(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -1309,7 +1309,7 @@ int CLuaUnitScript::GetUnitValue(lua_State* L, CUnitScript* script, int arg)
+ int CLuaUnitScript::GetUnitCOBValue(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -1328,7 +1328,7 @@ int CLuaUnitScript::GetUnitCOBValue(lua_State* L)
+ int CLuaUnitScript::GetUnitValue(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (activeScript == nullptr)
+ 		return 0;
+ 
+@@ -1368,7 +1368,7 @@ int CLuaUnitScript::SetUnitValue(lua_State* L, CUnitScript* script, int arg)
+ int CLuaUnitScript::SetUnitCOBValue(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	CUnit* unit = ParseUnit(L, __func__, 1);
+ 
+ 	if (unit == nullptr)
+@@ -1388,7 +1388,7 @@ int CLuaUnitScript::SetUnitCOBValue(lua_State* L)
+ int CLuaUnitScript::SetUnitValue(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (activeScript == nullptr)
+ 		return 0;
+ 
+@@ -1406,7 +1406,7 @@ int CLuaUnitScript::SetUnitValue(lua_State* L)
+ int CLuaUnitScript::SetPieceVisibility(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	// void SetVisibility(int piece, bool visible);
+ 	if (activeScript == nullptr)
+ 		return 0;
+@@ -1431,7 +1431,7 @@ int CLuaUnitScript::SetPieceVisibility(lua_State* L)
+ int CLuaUnitScript::EmitSfx(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	// void EmitSfx(int type, int piece);
+ 	if (activeScript == nullptr)
+ 		return 0;
+@@ -1455,7 +1455,7 @@ int CLuaUnitScript::EmitSfx(lua_State* L)
+ int CLuaUnitScript::AttachUnit(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	// void AttachUnit(int piece, int unit);
+ 	if (activeScript == nullptr)
+ 		return 0;
+@@ -1479,7 +1479,7 @@ int CLuaUnitScript::AttachUnit(lua_State* L)
+ int CLuaUnitScript::DropUnit(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	// void DropUnit(int unit);
+ 	if (activeScript == nullptr)
+ 		return 0;
+@@ -1504,7 +1504,7 @@ int CLuaUnitScript::DropUnit(lua_State* L)
+ int CLuaUnitScript::Explode(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	// void Explode(int piece, int flags);
+ 	if (activeScript == nullptr)
+ 		return 0;
+@@ -1525,7 +1525,7 @@ int CLuaUnitScript::Explode(lua_State* L)
+ int CLuaUnitScript::ShowFlare(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	// void ShowFlare(int piece);
+ 	if (activeScript == nullptr)
+ 		return 0;
+@@ -1548,7 +1548,7 @@ int CLuaUnitScript::ShowFlare(lua_State* L)
+ int CLuaUnitScript::Spin(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	// void Spin(int piece, int axis, int speed, int accel);
+ 	if (activeScript == nullptr)
+ 		return 0;
+@@ -1574,7 +1574,7 @@ int CLuaUnitScript::Spin(lua_State* L)
+ int CLuaUnitScript::StopSpin(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	// void StopSpin(int piece, int axis, int decel);
+ 	if (activeScript == nullptr)
+ 		return 0;
+@@ -1600,7 +1600,7 @@ int CLuaUnitScript::StopSpin(lua_State* L)
+ int CLuaUnitScript::Turn(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	// void Turn(int piece, int axis, int speed, int destination);
+ 	// void TurnNow(int piece, int axis, int destination);
+ 	if (activeScript == nullptr)
+@@ -1633,7 +1633,7 @@ int CLuaUnitScript::Turn(lua_State* L)
+ int CLuaUnitScript::Move(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	// void Move(int piece, int axis, int speed, int destination);
+ 	// void MoveNow(int piece, int axis, int destination);
+ 	if (activeScript == nullptr)
+@@ -1664,7 +1664,7 @@ int CLuaUnitScript::Move(lua_State* L)
+ int CLuaUnitScript::Scale(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	// void Scale(int speed, int destination);
+ 	// void ScaleNow(int destination);
+ 	if (activeScript == nullptr)
+@@ -1707,43 +1707,43 @@ int CLuaUnitScript::MultiExec(lua_State *L, int (*const func)(lua_State*), const
+ 
+ int CLuaUnitScript::MultiSetPieceVisibility(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return MultiExec(L, &SetPieceVisibility, 2);
+ }
+ 
+ int CLuaUnitScript::MultiSpin(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return MultiExec(L, &Spin, 4);
+ }
+ 
+ int CLuaUnitScript::MultiStopSpin(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return MultiExec(L, &StopSpin, 3);
+ }
+ 
+ int CLuaUnitScript::MultiTurn(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return MultiExec(L, &Turn, 4);
+ }
+ 
+ int CLuaUnitScript::MultiExplode(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return MultiExec(L, &Explode, 2);
+ }
+ 
+ int CLuaUnitScript::MultiMove(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return MultiExec(L, &Move, 4);
+ }
+ 
+ int CLuaUnitScript::MultiScale(lua_State* L)
+ {
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return MultiExec(L, &Scale, 3);
+ }
+ 
+@@ -1771,7 +1771,7 @@ int CLuaUnitScript::IsInAnimation(lua_State* L, const char* caller, AnimType typ
+ int CLuaUnitScript::IsInTurn(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return IsInAnimation(L, __func__, ATurn);
+ }
+ 
+@@ -1786,7 +1786,7 @@ int CLuaUnitScript::IsInTurn(lua_State* L)
+ int CLuaUnitScript::IsInMove(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return IsInAnimation(L, __func__, AMove);
+ }
+ 
+@@ -1801,7 +1801,7 @@ int CLuaUnitScript::IsInMove(lua_State* L)
+ int CLuaUnitScript::IsInSpin(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return IsInAnimation(L, __func__, ASpin);
+ }
+ 
+@@ -1814,7 +1814,7 @@ int CLuaUnitScript::IsInSpin(lua_State* L)
+ int CLuaUnitScript::IsInScale(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (activeScript == nullptr)
+ 		return 0;
+ 
+@@ -1854,7 +1854,7 @@ int CLuaUnitScript::WaitForAnimation(lua_State* L, const char* caller, AnimType
+ int CLuaUnitScript::WaitForTurn(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return WaitForAnimation(L, __func__, ATurn);
+ }
+ 
+@@ -1869,7 +1869,7 @@ int CLuaUnitScript::WaitForTurn(lua_State* L)
+ int CLuaUnitScript::WaitForMove(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	return WaitForAnimation(L, __func__, AMove);
+ }
+ 
+@@ -1882,7 +1882,7 @@ int CLuaUnitScript::WaitForMove(lua_State* L)
+ int CLuaUnitScript::WaitForScale(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 
+ 	if (activeScript == nullptr)
+ 		return 0;
+@@ -1908,7 +1908,7 @@ int CLuaUnitScript::WaitForScale(lua_State* L)
+ int CLuaUnitScript::SetDeathScriptFinished(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (activeUnit == nullptr || activeScript == nullptr)
+ 		return 0;
+ 
+@@ -1934,7 +1934,7 @@ int CLuaUnitScript::SetDeathScriptFinished(lua_State* L)
+ int CLuaUnitScript::GetPieceTranslation(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (activeScript == nullptr)
+ 		return 0;
+ 
+@@ -1954,7 +1954,7 @@ int CLuaUnitScript::GetPieceTranslation(lua_State* L)
+ int CLuaUnitScript::GetPieceRotation(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (activeScript == nullptr)
+ 		return 0;
+ 
+@@ -1971,7 +1971,7 @@ int CLuaUnitScript::GetPieceRotation(lua_State* L)
+ int CLuaUnitScript::GetPieceScale(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (activeScript == nullptr)
+ 		return 0;
+ 
+@@ -1995,7 +1995,7 @@ int CLuaUnitScript::GetPieceScale(lua_State* L)
+ int CLuaUnitScript::GetPiecePosDir(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (activeScript == nullptr)
+ 		return 0;
+ 
+@@ -2023,7 +2023,7 @@ int CLuaUnitScript::GetPiecePosDir(lua_State* L)
+ int CLuaUnitScript::GetActiveUnitID(lua_State* L)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (activeScript == nullptr)
+ 		return 0;
+ 	if (activeUnit == nullptr)
+diff --git a/rts/Sim/Units/Scripts/UnitScript.cpp b/rts/Sim/Units/Scripts/UnitScript.cpp
+index ff83ac1..477fff8 100644
+--- a/rts/Sim/Units/Scripts/UnitScript.cpp
++++ b/rts/Sim/Units/Scripts/UnitScript.cpp
+@@ -1626,7 +1626,7 @@ int CUnitScript::GetUnitVal(int val, int p1, int p2, int p3, int p4)
+ void CUnitScript::SetUnitVal(int val, int param)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	// may happen in case one uses Spring.SetUnitCOBValue (Lua) on a unit with CNullUnitScript
+ 	if (unit == nullptr) {
+ 		ShowUnitScriptError("[US::SetUnitVal] invoked for null-scripted unit");
+diff --git a/rts/Sim/Units/Unit.cpp b/rts/Sim/Units/Unit.cpp
+index f033f14..f63dac8 100644
+--- a/rts/Sim/Units/Unit.cpp
++++ b/rts/Sim/Units/Unit.cpp
+@@ -869,6 +869,7 @@ void CUnit::UpdateResources()
+ void CUnit::SetLosStatus(int at, unsigned short newStatus)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	BrScanTouchObject(id); // [barreplay] P3
+ 	const unsigned short currStatus = losStatus[at];
+ 	const unsigned short diffBits = (currStatus ^ newStatus);
+ 
+@@ -1524,7 +1525,7 @@ void CUnit::ChangeLos(int losRad, int airRad)
+ bool CUnit::ChangeTeam(int newteam, ChangeType type)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+-	BrLosJoin(); // [barreplay] H84
++	BrSyncedWrite(); // [barreplay] H84, P3
+ 	if (isDead)
+ 		return false;
+ 
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index bf9bb55..07f598a 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -4,6 +4,10 @@
+ 
+ #include "UnitHandler.h"
+ #include "Sim/Misc/BrLosJoin.h"
++
++void BrScanBegin(const std::vector<CUnit*>& units, size_t beg, size_t end);
++void BrScanSetPos(int p);
++void BrScanEnd();
+ #include "BrRunAhead.h"
+ #include "Sim/MoveTypes/MoveType.h"
+ #include "Sim/Units/Scripts/UnitScript.h"
+@@ -598,10 +602,16 @@ void CUnitHandler::SlowUpdateUnits()
+ 
+ 	static std::vector<CUnit*> updateBoundingVolumeList;
+ 	updateBoundingVolumeList.clear();
++	// [barreplay] P3 (toggle 0x20000): the slice's targeting scans, precomputed
++	const bool brScan = ((g_brToggles & 0x20000) != 0) && ThreadPool::HasThreads() && idxEnd > idxBeg;
++	if (brScan)
++		BrScanBegin(activeUnits, idxBeg, idxEnd);
+ 	{
+ 		ZoneScopedN("Sim::Unit::SlowUpdateST");
+ 		for (size_t i = idxBeg; i < idxEnd; ++i) {
+ 			BrRunAhead::At(int(i - idxBeg));
++			if (brScan)
++				BrScanSetPos(int(i - idxBeg));
+ 			CUnit* unit = activeUnits[i];
+ 
+ 			unit->SanityCheck();
+@@ -614,6 +624,8 @@ void CUnitHandler::SlowUpdateUnits()
+ 		}
+ 	}
+ 	BrRunAhead::End();
++	if (brScan)
++		BrScanEnd();
+ 	// Since the bounding volumes are calculated from the maximum piecematrix-offset piece vertices
+ 	// They dont have much of an effect if updated late-ish.
+ 	{
+-- 
+2.53.0
+

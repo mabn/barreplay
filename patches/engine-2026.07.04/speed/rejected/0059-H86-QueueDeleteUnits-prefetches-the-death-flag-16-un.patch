@@ -1,0 +1,30 @@
+From 15fba73e8a1c06449d62a3b13263c49da2249ad9 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 02:18:12 +0000
+Subject: [PATCH 59/62] H86: QueueDeleteUnits prefetches the death flag 16
+ units ahead (toggle 0x40000)
+
+---
+ rts/Sim/Units/UnitHandler.cpp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 07f598a..1b56f19 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -422,7 +422,12 @@ void CUnitHandler::QueueDeleteUnits()
+ {
+ 	ZoneScoped;
+ 	// gather up dead units
++	// [barreplay] H86 (toggle 0x40000): the loop reads one byte of every unit,
++	// a DRAM miss each (1.9% of the main thread's); prefetch 16 units ahead
++	const bool prefetch = ((g_brToggles & 0x40000) != 0);
+ 	for (activeUpdateUnit = 0; activeUpdateUnit < activeUnits.size(); ++activeUpdateUnit) {
++		if (prefetch && activeUpdateUnit + 16 < activeUnits.size())
++			__builtin_prefetch(&activeUnits[activeUpdateUnit + 16]->deathScriptFinished);
+ 		QueueDeleteUnit(activeUnits[activeUpdateUnit]);
+ 	}
+ }
+-- 
+2.53.0
+
