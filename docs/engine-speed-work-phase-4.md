@@ -115,62 +115,43 @@ rules to change, which is what
 
 ## The changes
 
-They fall into four kinds: removing work nothing reads, running work in
-parallel while proving the order of results is unchanged, making memory access
-cheaper, and moving the capture widget's work into the engine. Gains are on the
-late window unless stated otherwise, each measured on its own against the
-build before it.
+Every change belongs to one of five kinds, and each kind has its own section
+below. Each change also has a "where" column saying how far it has got:
+
+- **tagged**: in the patched engine re-sim hosts download today,
+  `patched-engine/2026.7.4-barreplay.3` (revision 3 of the patch series);
+- **rev 4**: in the next revision of the patch series in this repo, not yet
+  built or tagged;
+- **config**: in barreplay's capture widget or the engine config it writes, in
+  use for every re-sim now;
+- **branch**: only on the `speed-optimization-2` branch, not merged.
+
+"Where each change lives" below has the details. Gains are on the late window
+unless stated otherwise, each measured alone against the build before it, so
+they do not add up. The chart shows the late-window gains; the tagged changes
+are older and were measured on other games, so they are only in the tables.
 
 ![single gains](engine-speed/single-gains.svg)
 
-### Earlier rounds
+### 1. Removing work nothing reads
 
-These are in the tagged patched engine, `patched-engine/2026.7.4-barreplay.3` (revision 3 of the patch
-series), which is the build re-sim hosts download.
+| change | where | gain |
+|---|---|---|
+| demo playback not paced by the client-CPU governor: in demo playback the local `CGameServer` holds the client's sim at 60% of the CPU (`LagProtection`); a replay has nothing to protect | tagged | -15% wall |
+| no save of the previous frame's transforms (draw interpolation state) in headless runs | tagged | -3.7% instructions |
+| no `.smt` map tile decode in headless runs | tagged | -25% load time |
+| Lua callin timers run only while the profiler is on (they wrapped every callin) | rev 4 | -5.3% together with the loop prefetch (section 3) |
+| the Widget Selector's profiler column off (it wrapped every widget callin in a timer) | config | -2.4% wall |
+| BAR's ~320 game widgets set to off in the seeded widget config, names read from the game package; BAR's 2026.10.13 sandbox took away the widget's old runtime way of doing this | config | -6.2% |
+| build with `SYNCCHECK=OFF`: the sync checker hashes every synced write, and only multiplayer desync detection reads the hash (needed four small compile fixes) | branch | -7.9% |
+| the per-animation checksum in `TickAllAnims` computed only with the sync checker | branch | in the above |
+| skip the eager piece-transform walk in headless demo playback; the transforms only feed drawing (the old `#ifdef HEADLESS` versions of such patches never compiled in `rts/Sim`) | branch | -2.9% wall |
+| a headless demo queues no unsynced height-map updates (their rectangle queue once grew to 4 GiB from garbage rectangles) | branch | robustness, speed-neutral |
 
-| change | gain |
-|---|---|
-| demo playback not paced by the client-CPU governor: in demo playback the local `CGameServer` holds the client's sim at 60% of the CPU (`LagProtection`); a replay has nothing to protect | -15% wall |
-| a coarse grid of "exit-only" yardmap squares, so footprint checks skip blocks that have none ([upstream PR #3254](https://github.com/beyond-all-reason/RecoilEngine/pull/3254), open) | -16% instructions |
-| no save of the previous frame's transforms (draw interpolation state) in headless runs | -3.7% instructions |
-| no `.smt` map tile decode in headless runs | -25% load time |
-| `StaticMemPool` pages zeroed when handed out, not all at startup (the loader already zeroed them) | -1.05 GiB memory |
-| `TextureMemPoolSize = 0` in the engine config, so no 512 MB bitmap arena is zeroed at startup | -0.5 GB memory |
-| PGO + LTO build | -10% |
-| smaller cuts: a cached collision lookup, COB jump-table dispatch, animation ticks, thread-pool batching, path-grid relinking | -0.3% to -1.1% each |
+### 2. Running serial work in parallel, exactly
 
-### Revision 4 of the patch series (in this repo, not yet tagged)
-
-| change | gain |
-|---|---|
-| Lua callin timers run only while the profiler is on (they wrapped every callin) | -5.3% together with the next |
-| prefetch the unit 8 ahead (its move type and first weapon 4 ahead) in the four per-unit loops | (in the -5.3%) |
-| a low-priority thread folds every large private anonymous mapping into huge pages every 2 s (no root, no host setting) | -19% main-thread user cycles on a fresh run |
-| `Spring.GetUnitSampleData`: the widget's per-second sample in one engine call instead of ~8 per unit | part of revision 4 |
-| the engine logs every write of a weapon's reload state, so the widget reads that log instead of polling every launcher every frame | -1.7% |
-
-Changes on the widget and engine-config side, in use for every re-sim:
-
-| change | gain |
-|---|---|
-| the Widget Selector's profiler column off (it wrapped every widget callin in a timer) | -2.4% wall |
-| BAR's ~320 game widgets set to off in the seeded widget config, names read from the game package; BAR's 2026.10.13 sandbox took away the widget's old runtime way of doing this | -6.2% |
-| a re-sim-only sample loop in the widget, without branches a full-view re-sim cannot take | -1.4% |
-
-### Removing work nothing reads (branch only)
-
-| change | gain |
-|---|---|
-| build with `SYNCCHECK=OFF`: the sync checker hashes every synced write, and only multiplayer desync detection reads the hash (needed four small compile fixes) | -7.9% |
-| the per-animation checksum in `TickAllAnims` computed only with the sync checker | in the above |
-| skip the eager piece-transform walk in headless demo playback; the transforms only feed drawing (the old `#ifdef HEADLESS` versions of such patches never compiled in `rts/Sim`) | -2.9% wall |
-| a headless demo queues no unsynced height-map updates (their rectangle queue once grew to 4 GiB from garbage rectangles) | robustness, speed-neutral |
-| `Spring.GetUnitSampleDelta`: the widget's whole sample loop done in the engine | -7.2% with its widget side |
-
-### Running serial work in parallel, exactly (branch only)
-
-Each of these runs work on several threads while proving that no unit can see
-a difference. That proof is most of the work.
+All of these are branch only. Each runs work on several threads while proving
+that no unit can see a difference; that proof is most of the work.
 
 **P1: the aircraft move-type loop on all threads.** BAR sets `collide = false`
 on every aircraft except four flying fortresses, so a flying fighter's update
@@ -219,24 +200,53 @@ One finding from P4: more search workers made the main thread wait longer. A
 search the main thread runs itself is fast because its caches are warm from the
 unit's own slow update; a worker's are cold.
 
-### Cheaper memory access and smaller fixes (branch only)
+### 3. Cheaper memory access
 
-| change | gain |
-|---|---|
-| unit loops hand out chunks of at most 32 units (the main thread used to wait for the slowest worker's quarter) | -2.2% |
-| quad lookups (`GetQuads`) find each row's run of quads from its two ends | -1.7% |
-| `GenerateWeaponTargets` prefetches the candidate 6 ahead | -1.2% (4 threads; costs time at 7, off there) |
-| `MovedUnit` copies the quad list instead of taking a pooled buffer (a malloc and free per move) | not measured alone |
-| `FindAnim` searches on one packed 64-bit key | noise level |
-| `UpdatePhysicalState` reuses the ground height while the unit's x/z and the height map are unchanged | -2.2% at 7 threads |
-| the Lua VM's table get and set do their first step inline | in the 7-thread result |
-| `UpdateUnits` does `UpdateCollisionMap`'s rate test itself, so two units in three never touch their move type | in the 7-thread result |
+The main thread mostly waits for memory (see "Where the time goes"), so these
+make the same work cheaper rather than removing it.
+
+| change | where | gain |
+|---|---|---|
+| `StaticMemPool` pages zeroed when handed out, not all at startup (the loader already zeroed them) | tagged | -1.05 GiB memory |
+| `TextureMemPoolSize = 0` in the engine config, so no 512 MB bitmap arena is zeroed at startup | config | -0.5 GB memory |
+| prefetch the unit 8 ahead (its move type and first weapon 4 ahead) in the four per-unit loops | rev 4 | in the -5.3% above |
+| a low-priority thread folds every large private anonymous mapping into huge pages every 2 s (no root, no host setting) | rev 4 | -19% main-thread user cycles on a fresh run |
+| `GenerateWeaponTargets` prefetches the candidate 6 ahead | branch | -1.2% (4 threads; costs time at 7, off there) |
+| `MovedUnit` copies the quad list instead of taking a pooled buffer (a malloc and free per move) | branch | not measured alone |
+
+### 4. Less work per call
+
+| change | where | gain |
+|---|---|---|
+| a coarse grid of "exit-only" yardmap squares, so footprint checks skip blocks that have none ([upstream PR #3254](https://github.com/beyond-all-reason/RecoilEngine/pull/3254), open) | tagged | -16% instructions |
+| PGO + LTO build | tagged | -10% |
+| smaller cuts: a cached collision lookup, COB jump-table dispatch, animation ticks, thread-pool batching, path-grid relinking | tagged | -0.3% to -1.1% each |
+| unit loops hand out chunks of at most 32 units (the main thread used to wait for the slowest worker's quarter) | branch | -2.2% |
+| quad lookups (`GetQuads`) find each row's run of quads from its two ends | branch | -1.7% |
+| `FindAnim` searches on one packed 64-bit key | branch | noise level |
+| `UpdatePhysicalState` reuses the ground height while the unit's x/z and the height map are unchanged | branch | -2.2% at 7 threads |
+| the Lua VM's table get and set do their first step inline | branch | in the 7-thread result |
+| `UpdateUnits` does `UpdateCollisionMap`'s rate test itself, so two units in three never touch their move type | branch | in the 7-thread result |
 
 At seven threads, three changes tuned at four (landed and taking-off aircraft
 in P1, and two prefetches) cost time and are switched off in the best
 configuration (-2.5%).
 
-**A bug fix worth taking upstream:** `CRectangleOverlapHandler::StageSplitTooLarge`
+### 5. The capture widget's work moved into the engine
+
+The widget samples every unit once a second; these let it do so with fewer
+calls into the engine.
+
+| change | where | gain |
+|---|---|---|
+| `Spring.GetUnitSampleData`: the widget's per-second sample in one engine call instead of ~8 per unit | rev 4 | part of revision 4 |
+| the engine logs every write of a weapon's reload state, so the widget reads that log instead of polling every launcher every frame | rev 4 | -1.7% |
+| a re-sim-only sample loop in the widget, without branches a full-view re-sim cannot take | config | -1.4% |
+| `Spring.GetUnitSampleDelta`: the widget's whole sample loop done in the engine | branch | -7.2% with its widget side |
+
+### A bug fix worth taking upstream
+
+`CRectangleOverlapHandler::StageSplitTooLarge`
 wrote through a reference into a vector across `push_back`. That is a
 use-after-free and corrupted the heap, seen as an RmlUi crash at frame 78 of
 verylarge1 in some builds
@@ -280,16 +290,17 @@ qualify.
 
 ![where changes live](engine-speed/where-changes-live.svg)
 
-- **Tagged patched engine** (`patched-engine/2026.7.4-barreplay.3`, revision 3: the series in
+- **Tagged** (`patched-engine/2026.7.4-barreplay.3`, revision 3: the series in
   `patches/engine-2026.07.04/series` up to 0009, plus the PGO+LTO recipe):
   what re-sim hosts download today. It also carries the engine-side event log
-  (0004) that lets the widget record hits and explosions under BAR's sandbox. The memory config is in barreplay
-  itself.
-- **Revision 4** (patches 0010-0013): in this repo's patch series, but not yet
+  (0004) that lets the widget record hits and explosions under BAR's sandbox.
+- **Config**: barreplay's capture widget and the engine config it writes (the
+  widget config and `TextureMemPoolSize`), used by every re-sim now.
+- **Rev 4** (patches 0010-0013): in this repo's patch series, but not yet
   built, gated, uploaded or pinned, so hosts still use revision 3.
-- **Branch only** (patches 0014-0043, 0063-0067 and 0069-0070 under
+- **Branch** (patches 0014-0043, 0063-0067 and 0069-0070 under
   `patches/engine-2026.07.04/speed/`, plus Recoil branches up to `speed37`):
-  everything from "Removing work nothing reads" on. These changes have not been
+  every change marked "branch" above. These changes have not been
   merged into this repo's main branch and are only on `speed-optimization-2`.
   They are gated byte-identical, but no build of them has been tagged.
   Building with `SYNCCHECK=OFF` also means a re-sim no longer reports desyncs in
