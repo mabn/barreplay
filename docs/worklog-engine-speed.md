@@ -4123,3 +4123,40 @@ latency.**
 The `speed42` checkpoint runs ~5% slower than `speed41`'s with the same
 toggles, another heap-layout difference between dumps. Only pairs inside one
 checkpoint compare.
+
+### 2026-10-18 19:24 — the whole game with everything on DIFFERS; hunting the divergence
+
+Governed whole game, `speed42`, every item on (`t=d0d87a3f`, `t2=31`: P4,
+P5, H94, P1 v8, N2, P7, P1 v9), 7 threads, pinned: md5 **`635e45f2…`**,
+not `a26e920d…`. Active sim 15m10s (2467 s of sim, 1557 s of it paused
+for heat). Until the output is exact, that time means nothing: a
+re-simulation that has left the recorded game plays a different one.
+
+Where it differs (raw streams against `speed32`'s exact whole game, same
+widget binary, per record type):
+- **Chat records differ from frame 0.** That is only the widget's console
+  path stamping chat at draw time, which varies run to run; the `.brp`
+  takes the demo's comms instead.
+- **Every other type agrees until frame ~66,690**: frames, events, hits,
+  unit ends, visibility, projectile tracks, blasts, shields, facts.
+- **The first event that differs** is at frame 66,706: unit 16369 dies to
+  the same killer def (1237), team 0 and weapon (1674), but credited to unit
+  65 instead of 30226.
+
+**From the `speed42` checkpoint at frame 63,780 the divergence does not
+happen.** That checkpoint was simulated with every new item off. 3,000-frame
+trials from it, comparing frames and events up to 66,780 with the
+reference, are equal for:
+- every new item off (`587a3f`);
+- every item on (`d0d87a3f`/`31`);
+- P4 + P5 only.
+
+**Insight:** the cause lies before frame 63,780 and stayed out of
+everything the capture records for a long time. That means hidden state: the
+synced RNG, a script's state, Lua state, weapon timers, the order of
+something. The medium gate never exercised it.
+
+**Next:** `speed42` rebuilt with the sync checker, which compares every
+frame's checksum with what the original players recorded in the demo and
+logs the first mismatch as `[DESYNC WARNING]`. Then a run with everything
+on, stopped at the first warning, then bisection with short runs.
