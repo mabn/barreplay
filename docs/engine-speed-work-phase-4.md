@@ -123,10 +123,10 @@ build before it.
 
 ![single gains](engine-speed/single-gains.svg)
 
-### Earlier rounds (in the published patched engine)
+### Earlier rounds
 
-These are in the build re-sim hosts already download (revision 3 of the patch
-series).
+These are in the tagged patched engine, `patched-engine/2026.7.4-barreplay.3` (revision 3 of the patch
+series), which is the build re-sim hosts download.
 
 | change | gain |
 |---|---|
@@ -139,7 +139,7 @@ series).
 | PGO + LTO build | -10% |
 | smaller cuts: a cached collision lookup, COB jump-table dispatch, animation ticks, thread-pool batching, path-grid relinking | -0.3% to -1.1% each |
 
-### Revision 4 of the patch series (in this repo, not yet published)
+### Revision 4 of the patch series (in this repo, not yet tagged)
 
 | change | gain |
 |---|---|
@@ -280,7 +280,7 @@ qualify.
 
 ![where changes live](engine-speed/where-changes-live.svg)
 
-- **Published patched engine** (revision 3: the series in
+- **Tagged patched engine** (`patched-engine/2026.7.4-barreplay.3`, revision 3: the series in
   `patches/engine-2026.07.04/series` up to 0009, plus the PGO+LTO recipe):
   what re-sim hosts download today. It also carries the engine-side event log
   (0004) that lets the widget record hits and explosions under BAR's sandbox. The memory config is in barreplay
@@ -291,7 +291,7 @@ qualify.
   `patches/engine-2026.07.04/speed/`, plus Recoil branches up to `speed37`):
   everything from "Removing work nothing reads" on. These changes have not been
   merged into this repo's main branch and are only on `speed-optimization-2`.
-  They are gated byte-identical, but no build of them has been published.
+  They are gated byte-identical, but no build of them has been tagged.
   Building with `SYNCCHECK=OFF` also means a re-sim no longer reports desyncs in
   its log; the byte-identity gate is what remains.
 

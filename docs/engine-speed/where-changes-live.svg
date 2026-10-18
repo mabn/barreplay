@@ -4,7 +4,7 @@
   <rect width="900" height="288" fill="#ffffff"/>
   <text x="20" y="24" font-size="15" font-weight="bold">Where each change lives</text>
   <rect x="20" y="40" width="860" height="52" rx="6" fill="#e6e7ea" stroke="#8a919c"/>
-  <text x="34" y="61" font-weight="bold">Published patched engine (revision 3)</text>
+  <text x="34" y="61" font-weight="bold">Tagged patched engine (patched-engine/2026.7.4-barreplay.3)</text>
   <text x="34" y="80" font-size="12" fill="#5d6470">downloaded by every re-sim host today: unpaced playback, exit-only yardmap grid, PGO + LTO, lazy pool zeroing, engine event log</text>
   <rect x="20" y="102" width="860" height="52" rx="6" fill="#d5efec" stroke="#0f8f86"/>
   <text x="34" y="123" font-weight="bold">Patch series revision 4 (0010-0013), in this repo</text>
@@ -14,5 +14,5 @@
   <text x="34" y="204" font-size="12" fill="#5d6470">in use for every re-sim now: widget profiler off, BAR widgets off, re-sim-only sample loop, no texture arena</text>
   <rect x="20" y="226" width="860" height="52" rx="6" fill="#f6e3d4" stroke="#b0602a"/>
   <text x="34" y="247" font-weight="bold">Only on the speed-optimization-2 branch</text>
-  <text x="34" y="266" font-size="12" fill="#5d6470">gated byte-identical, not merged, no build published: no sync checker, parallel aircraft, LOS states, native AA priority, target searches on workers, ...</text>
+  <text x="34" y="266" font-size="12" fill="#5d6470">gated byte-identical, not merged, no build tagged: no sync checker, parallel aircraft, LOS states, native AA priority, target searches on workers, ...</text>
 </svg>

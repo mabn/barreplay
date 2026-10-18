@@ -5,7 +5,7 @@
   <g font-size="12" fill="#5d6470" text-anchor="middle"><text x="260" y="210">0</text><text x="410" y="210">10 min</text><text x="560" y="210">20 min</text><text x="710" y="210">30 min</text></g>
   <text x="250" y="62" text-anchor="end">stock 2026.07.04</text>
   <rect x="260" y="46" width="574" height="24" fill="#8a919c"/><text x="840" y="63">38m17s</text>
-  <text x="250" y="102" text-anchor="end">published patched build</text>
+  <text x="250" y="102" text-anchor="end">tagged build (barreplay.3)</text>
   <rect x="260" y="86" width="408" height="24" fill="#e6e7ea" stroke="#8a919c"/><text x="674" y="103">27m12s-29m46s</text>
   <text x="250" y="142" text-anchor="end">all exact changes, 4 threads</text>
   <rect x="260" y="126" width="220" height="24" fill="#7cc4bd"/><text x="486" y="143">~14m39s (2.6x)</text>

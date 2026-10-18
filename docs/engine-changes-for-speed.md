@@ -308,7 +308,7 @@ host that can keep four busy cores at a reasonable clock.
 The work log and the patch files use short identifiers. Some of these changes
 are not merged yet and exist only on the `speed-optimization-2` branch. Patches are under
 [`patches/engine-2026.07.04/`](../patches/engine-2026.07.04/) (0001-0013, the
-published series) and
+patch series; 0001-0009 are tagged as `patched-engine/2026.7.4-barreplay.3`) and
 [`patches/engine-2026.07.04/speed/`](../patches/engine-2026.07.04/speed/README.md)
 (0014 on, with toggle bits and measurements).
 
