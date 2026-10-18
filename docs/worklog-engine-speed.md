@@ -3961,3 +3961,22 @@ Medium gates (7 threads):
 **Insight:** moving units, aircraft above all, change their LOS key nearly
 every frame (their LOS square or their height bucket). So P7 can save at most
 about half of the scan, not all of it.
+
+### 2026-10-18 17:29 — the profile retrained on speed39: -3.6% on the late window
+
+Same code, same toggles (`10d87a3f`: P4 + P5), the old profile
+(`speed39`, trained on `speed31`) against the new one (`speed39p`);
+two checkpoints, 3 interleaved pairs:
+
+| late window | `speed39` | `speed39p` | change |
+|---|---|---|---|
+| wall | 9.92 / 9.80 / 9.81 s (9.84) | 9.54 / 9.43 / 9.51 s (9.49) | **-3.6%** (every pair) |
+| main cycles | 36.16e9 | 34.96e9 | -3.3% |
+| main instructions | 31.34e9 | 30.92e9 | -1.4% |
+| main clock | 3.72 GHz | 3.73 GHz | |
+
+**Insight:** the drift since the `speed31` profile (P4, P5, N1's changes,
+the hooks) had cost about as much as P5 gained. A retrain belongs after every
+batch that touches hot functions, not only at the end. The profile is
+`~/dev/perf3/pgo39-profile.tar.xz` (to be copied into `speed/tools/` with
+the next export).
