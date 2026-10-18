@@ -2711,3 +2711,18 @@ killed at frame 60 at 12.5 GB.
 Next (running automatically): `speed31` = `speed30` + H88 + H89, with
 a PGO profile retrained on its own code (instrumented build, the three
 training replays, PGO+LTO build), then its gate and A/Bs.
+
+Where those 13m50s go, by game time. Infolog heartbeat timestamps with
+every recorded pause subtracted:
+
+| game time | active time | share | frames/s | average units |
+|---|---|---|---|---|
+| 0–10 min | 0.3 min | 2.4% | 906 | 1,077 |
+| 10–20 min | 1.1 min | 8.1% | 271 | 2,756 |
+| 20–30 min | 1.9 min | 14.1% | 156 | 4,724 |
+| 30–40 min | 4.3 min | 31.6% | 70 | 7,577 |
+| 40–50 min | 6.0 min | 43.9% | 53 | 8,637 |
+
+10 minutes means saving 3.8 minutes, nearly all of it from the last 20
+game minutes, which would have to run ~37% faster: the late window
+(frames 63780+) is the right benchmark.
