@@ -3213,3 +3213,33 @@ average, and spinning cores heat the package.
 
 Recoil `speed33` (`f12a67b`) = `speed32` + P4, building with the speed31
 profile; gate with check mode first.
+
+### 2026-10-18 10:13 — P4 gates byte-identical, 0 mismatches in check mode
+
+`speed33` (PGO-LTO with the speed31 profile; built in 17 min, mostly from
+ccache). Medium gate, 7 threads:
+
+| toggles | md5 | sim |
+|---|---|---|
+| `d87a3f` (P4 on), `BARREPLAY_P4_CHECK=1` | `0558d354…` | 1m09s |
+| `d87a3f` (P4 on) | `0558d354…` | 1m08s |
+| `587a3f` (P4 off) | `0558d354…` | 1m08s |
+
+Check mode ran each search in order at its launch and compared it with the
+pipelined result: **210,486 searches, 0 mismatches**, and no hook fired on a
+worker.
+
+What the main thread waited for (whole medium game):
+
+| reason | drains |
+|---|---|
+| Lua callin | 17,697 |
+| slaved weapon (reads its master's target) | 4,871 |
+| enemy inside a running search's circle | 3,732 |
+| move with a non-zero step | 17 |
+| death | 9 |
+
+58,025 searches ran in order because their weapon's `AllowWeaponTarget`
+would run Lua: this gate replay's BAR build differs from verylarge1's, so N1
+is off there. In the medium game P4 changes nothing measurable: its slow
+updates are small, and most of their searches are not native.
