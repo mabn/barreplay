@@ -2327,3 +2327,61 @@ Plan, ordered by cost:
 | 4 | anims async (join at every piece read) | <=3% | |
 | 5 | serial weapon loop optimistic in parallel (P1-style, with rollback) | 5-8% | moonshot |
 | 6 | COB tick: per-unit local opcodes in parallel, global ones in order | ~4% | moonshot |
+
+### 2026-10-18 02:35 — 7 threads -2.5% on the late window; anims cannot go async; unsynced work is negligible; H84 building
+
+`speed24` dumped a second time with `-worker-threads 7`
+(`spring-headless-speed24t7`, same binary): main thread alone on core 3,
+six workers on the other cores' hyperthreads. Late window, `t=7fbf`, 3
+pairs, every pair faster:
+
+| late window, `t=7fbf` | wall | main-thread cycles | main-thread instructions | worker CPU |
+|---|---|---|---|---|
+| 4 threads | 10.41 / 10.13 / 10.24 s (10.26) | 38.27e9 | 36.69e9 | 3 × ~3.3 s |
+| 7 threads | 10.01 / 10.02 / 10.02 s (10.01) | 36.89e9 | 36.13e9 | 6 × ~2.9 s |
+| change | **-2.5%** | -3.6% | -1.5% | +76% |
+
+The fork-join sections finish sooner, and the main thread spins less
+(instructions -1.5%). The price is worker CPU, +76%. That is why real,
+ungoverned whole games on this laptop lost the gain to heat before (10-17
+11:20), while the governed whole game counts only active time and read
+-4.5%. So 7 threads helps wherever heat is not the limit; it is a host
+setting, not a code change.
+
+**The anims cannot go async.** `CUnitScriptEngine::Tick` runs the COB
+threads, then `TickAllAnims` in parallel, then a serial pass that reads
+every script's finished-anim flags (`TickAnimFinished`) and wakes the COB
+threads waiting on them, in the same frame. The anims' results are needed
+immediately.
+
+**Unsynced work is negligible in the late window.** Smoke trails,
+explosion generators, particle constructors, the unsynced projectile update,
+the drawers and the unsynced game update add up to under 1.5% of the main
+thread. Dropping them would be exact but would not pay.
+
+**H84** (Recoil `speed28` = `speed24h` + H84, toggle `0x8000`, building).
+`CLosHandler::Update` hands its seven sensor-type tasks to the workers
+(`for_mt_background`) and returns. The tasks iterate a copy of the active-unit
+list and use the frame number Update was called in, since the main thread
+increments `gs->frameNum` before the next join. `BrLosJoin()` waits for them
+and runs any task not yet started, so a join from any thread cannot
+deadlock. Joins happen:
+
+- in every LOS read (`ILosType::InSight`, which `CLosHandler::In*` all go
+  through) and every LOS mutation (unit destroyed, taken, loaded, reverse
+  built; global LOS; height-map updates; kill);
+- in every write to a field the tasks read: `midPos` (`UpdateMidAndAimPos`,
+  `SetMidAndAimPos`), `isDead` (`ForcedKillUnit`), `stunned`, `beingBuilt`
+  (`FinishedBuilding`, `TurnIntoNanoframe`), `activated`, `allyteam`
+  (`ChangeTeam`), the sensor radii (`ChangeLos`, COB `SetUnitVal`);
+- at the top of every synced Lua control function (`LuaSyncedCtrl` 188,
+  `MoveCtrl` 30, `UnitScript` 38);
+- at the start of the next frame's map damage, unit update and synced
+  height-map rebuild;
+- before the bench harness parks, so no checkpoint holds LOS tasks in
+  flight.
+
+It engages only with full view (otherwise `CLosMap::AddRaycast` calls into
+the unsynced read map) and worker threads. `BARREPLAY_H84_STATS=1` logs how
+many joins found the tasks unfinished and how long they waited, which is the
+overlap lost.
