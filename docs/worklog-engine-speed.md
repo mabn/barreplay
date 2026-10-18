@@ -3918,3 +3918,46 @@ main thread does its share. P7 moves the scan into the script tick's window.
 `toggle2` bits 1-3 set P5's worker count (0 = 6): six spinning workers
 for the whole COB tick may cost more power than they save, and the window
 P7 uses needs the same workers.
+
+### 2026-10-18 17:09 — profile retrained on speed39; gates: speed39p, H94 + P1 v8, N2, P7 all identical
+
+Training of the new profile (instrumented `speed39`, `t=10d87a3f`): the
+medium gate replay (6m02s), the sandboxed-BAR game (5m28s), and verylarge1
+to frame 65580. It packs to 1.2 MB (`pgo39-profile.tar.xz`); `speed39p`
+and `speed41` are built on it.
+
+Medium gates (7 threads):
+
+| build, toggles | md5 | sim |
+|---|---|---|
+| `speed39p`, `10d87a3f` (P4, P5) | **`0558d354…`** | 1m10s |
+| `speed41`, `d0d87a3f` (+ H94 + P1 v8), N2 learning | **`0558d354…`** | 1m09s |
+| `speed41`, + N2 with the learned hashes | **`0558d354…`** | 1m09s |
+| `speed41`, + N2 + P7 | **`0558d354…`** | 1m07s |
+
+**N2.**
+- The handler wrapper's hash is the same for every callin
+  (`01272659fbb8cef7`), as it should be: one `installed` closure body.
+- Handler hashes: `Explosion` `66262d25…`, `UnitPreDamaged` `a40bbe22…`,
+  `UnitDamaged` `795c83f0…` (in both the synced and unsynced LuaRules
+  states), `ProjectileDestroyed` `7365bbaa…`.
+- **Only `Explosion` went native.** The other three handlers call the
+  tracy helpers, and in this headless build those are not BAR's Lua stubs:
+  without Tracy compiled in, the engine registers every `tracy.*` function
+  as the same C `noop` (`TracyLua.hpp`).
+- **Fix (`speed42`, `758d495`):** also accept that function. The tests are
+  a build without `TRACY_ENABLE` and `tracy.ZoneBeginN`, `ZoneEnd` and
+  `Message` all one C function (a real Tracy build registers a different
+  function for each).
+- Skipping a call to a C function that only returns is exact.
+
+**P7 counters on the medium game:**
+- the window opened on every one of the 23,401 frames;
+- a Lua write forced the full redo on **209** of them (0.9%);
+- ~2 units a frame were marked;
+- in the last frame **5,075 of 11,088 unit/type pairs (46%)** still needed
+  the real `UpdateUnit`.
+
+**Insight:** moving units, aircraft above all, change their LOS key nearly
+every frame (their LOS square or their height bucket). So P7 can save at most
+about half of the scan, not all of it.
