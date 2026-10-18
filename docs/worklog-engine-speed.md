@@ -2590,3 +2590,39 @@ PGO profile matches its code. Lesson for anything further: **every hook in
 a hot inline path, and every changed hot function, costs PGO.** speed29 was
 3% slower with all of these off, so a candidate now has to beat ~3% before
 it shows.
+
+### 2026-10-18 03:41 — the runaway memory caught with stacks: a 4 GiB rectangle queue in the draw-side height-map update; H87
+
+The governed whole game on `speed24` with 7 threads never got going: at
+frame 60 the engine was at 12.5 GB resident and growing, and the watchdog
+(`memwatch.sh`) took gdb stacks of every thread and killed it. This is the
+same runaway growth as last night's OOM (14.6 GB resident in a medium gate),
+and this time it is in hand. The main thread was in
+`CRectangleOverlapHandler::StageSplitTooLarge`, reallocating a vector of
+rectangles that already spanned **4 GiB** (~268M of them), called from
+`CReadMap::UpdateDraw`. That is the unsynced, draw-side height-map update,
+run from `CGame::UpdateUnsynced`.
+
+**How a 4 GiB rectangle queue happens.** The split loop cuts every rectangle
+over 250,000 squares in half until it fits, so a rectangle of area A becomes
+about A / 250,000 pieces. Rectangles enter the queue clamped to the map
+(1536 × 1536 corners here, ~10 pieces at most), and the merge and overlap
+stages only shrink, split or join them. So 268M pieces need an input
+rectangle of millions by millions of squares: garbage. Something corrupted
+the queue, and it is the victim, not the cause. It is the same queue patch
+0033 had to clamp (z2 = 2553 on a 1536-row map) and patch 0039 found a
+use-after-free in. The draw-side normal update fed by it once overflowed its
+own arrays. Draw frames are scheduled by wall-clock time, which explains why
+it strikes at random: frame 60 here, frame ~23,700 last night, and not at
+all in most runs.
+
+**H87** (toggle `0x80000`, Recoil `speed30` = `speed24h` + H87): a
+headless demo replay queues no unsynced height-map updates.
+`CReadMap::UpdateHeightMapSynced` keeps all of its synced work (center
+height map, mip maps, face normals, slope map) and skips only the draw-side
+queueing that follows: the rectangle push, the view digests and
+`HeightMapUpdateLOSCheck`. Their only consumers are drawing (normals,
+textures, the ROAM mesh) and the `UnsyncedHeightMapUpdate` callin, and
+nothing unsynced can reach the simulation in demo playback. So the capture
+cannot change, and both the victim and the suspected source of the
+corruption are gone. Building.
