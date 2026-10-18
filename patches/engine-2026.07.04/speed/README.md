@@ -16,6 +16,22 @@ ones below.
 P1 (with its versions v2-v7), P2, N1 and the widget-side W1-W7 are families
 of their own.
 
+## Result
+
+Both runs: same barreplay (widget 1.13.0), 4 threads, the engine paused at
+88 C and resumed at 55 C, started from 50 C. Details and why the stock
+capture differs in its hit/projectile/blast sections only: work log,
+2026-10-18 00:55.
+
+| verylarge1, whole game (90,900 frames), governed | stock 2026.07.04 | `speed24` `t=7fbf` (0014-0043) | ratio |
+|---|---|---|---|
+| active sim | 38m17s | ~14m39s | 2.61x |
+| sim including thermal pauses | 1h0m38s | 38m19s | |
+| main-thread cycles | 8.44e12 | 3.27e12 | 2.58x |
+| main-thread average clock | 3.66 GHz | 3.68 GHz | |
+| worker cycles (3 workers) | 6.07e12 | 2.97e12 | 2.04x |
+| peak memory | 6.48 GiB | — | |
+
 ## Applying
 
 From a clean checkout of the `2026.07.04` tag:

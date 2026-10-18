@@ -37,6 +37,17 @@ to the stock/rev-2 capture.
 | CPU pinning: one hyperthread per core / main thread alone on a core | — | — | -1.1% (2/3) / -0.7% (3/3) | host setting, small; noted only |
 | **PGO + LTO** (on H60-H63) = **revision 3, published** | yes (medium, isthmus, verylarge1 full 90,900 frames) | full run 1m25s -> **1m16s (-11%)** | wall **-10.2%** (3/3), instr **-15.3%** | **keep** |
 
+Whole game against the stock engine (2026-10-18 00:55):
+
+| verylarge1, whole game (90,900 frames), governed | stock 2026.07.04 | `speed24` `t=7fbf` (0014-0043) | ratio |
+|---|---|---|---|
+| active sim | 38m17s | ~14m39s | 2.61x |
+| sim including thermal pauses | 1h0m38s | 38m19s | |
+| main-thread cycles | 8.44e12 | 3.27e12 | 2.58x |
+| main-thread average clock | 3.66 GHz | 3.68 GHz | |
+| worker cycles (3 workers) | 6.07e12 | 2.97e12 | 2.04x |
+| peak memory | 6.48 GiB | — | |
+
 ## Log
 
 (Entries before 09:26 carry only the date; their commits landed at 07:16,
