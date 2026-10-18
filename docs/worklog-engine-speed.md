@@ -2753,3 +2753,26 @@ through 128-elmo quads, so most calls should take the shortcut.
 `speed31` = `speed30` + H88 + H89 + H90. The pipeline (instrumented
 build, training at `t=387fbf`, PGO+LTO build, gate, checkpoint, A/Bs) was
 restarted with it.
+
+### 2026-10-18 06:33 — speed31 (H88, H89, H90, own PGO profile): identical; the profile retrain works, H88 + H90 do not pay
+
+Pipeline: instrumented build, then training at `t=387fbf`:
+
+- the medium replay, 5m9s;
+- c04fd06a, 5m4s;
+- verylarge1's 1800-frame late window: **227e9 instructions**, against
+  229e9 in the speed22 training.
+
+The profile has 1071 `.gcda` files (`~/dev/perf3/pgo31-profile.tar.xz`).
+The PGO+LTO build gates **`0558d354…`, identical** (medium, `t=387fbf`).
+
+| late window, 3 pairs | A | B | wall | cycles | instructions |
+|---|---|---|---|---|---|
+| `speed31`: base vs H87+H88+H90 (`t=7fbf` vs `t=387fbf`) | 10.65 / 10.45 / 10.51 s (10.54) | 10.73 / 10.67 / 10.55 s (10.65) | **+1.1%** | +1.0% | **+1.4%** |
+| `speed24` vs `speed31`, both `t=7fbf` (H89 is always on) | 10.66 / 10.55 / 10.80 s (10.67) | 10.53 / 10.59 / 10.60 s (10.57) | -0.9% (noise level) | -0.6% | -0.4% |
+
+- **Retraining removes the PGO penalty.** `speed29`'s extra code cost 3%
+  with its toggles off; `speed31`'s costs nothing, and with H89 (Lua
+  fast paths) it reads -0.9%.
+- **H88 and H90 add 1.4% instructions and save nothing.** Each is being
+  measured alone, with a line-level profile after.
