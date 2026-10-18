@@ -240,7 +240,8 @@ func NewR2ClientFromEnv(workerDir string) *R2Client {
 // PutIfAbsent uploads one object only if its key is free. created is false,
 // with a nil error, when the key was already taken.
 func (c *R2Client) PutIfAbsent(ctx context.Context, key string, body []byte) (created bool, err error) {
-	err = c.put(ctx, key, body, true)
+	ct, cc := objectHTTPMeta(key)
+	err = c.put(ctx, key, body, ct, cc, true)
 	if errors.Is(err, errObjectExists) {
 		return false, nil
 	}
@@ -250,14 +251,47 @@ func (c *R2Client) PutIfAbsent(ctx context.Context, key string, body []byte) (cr
 // Put uploads one object, retrying once on a transient failure (5xx or a
 // transport error) like the TS s3Put.
 func (c *R2Client) Put(ctx context.Context, key string, body []byte) error {
-	return c.put(ctx, key, body, false)
+	ct, cc := objectHTTPMeta(key)
+	return c.put(ctx, key, body, ct, cc, false)
+}
+
+// PutWithMeta is Put for an object that is not a replay piece, so
+// objectHTTPMeta does not know its type (cmd/upload-maps: PNG map images).
+func (c *R2Client) PutWithMeta(ctx context.Context, key string, body []byte, contentType, cacheControl string) error {
+	return c.put(ctx, key, body, contentType, cacheControl, false)
+}
+
+// Size reports an object's size through a HEAD request; exists is false,
+// with a nil error, when there is no such object.
+func (c *R2Client) Size(ctx context.Context, key string) (size int64, exists bool, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, c.Endpoint+"/"+uriEncodePath(c.Bucket+"/"+key), nil)
+	if err != nil {
+		return 0, false, err
+	}
+	c.sign(req)
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, false, err
+	}
+	resp.Body.Close()
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		return 0, false, nil
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		return resp.ContentLength, true, nil
+	}
+	return 0, false, fmt.Errorf("HEAD %s: %s", key, resp.Status)
 }
 
 // put is Put, optionally conditional: ifAbsent sends If-None-Match: *, which
 // R2 honours on PutObject, so the object is written only if the key is free
 // (412 otherwise, reported as errObjectExists). Unsigned like Content-Type —
 // SigV4 checks only the headers it lists.
-func (c *R2Client) put(ctx context.Context, key string, body []byte, ifAbsent bool) error {
+func (c *R2Client) put(ctx context.Context, key string, body []byte, ct, cc string, ifAbsent bool) error {
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.Endpoint+"/"+uriEncodePath(c.Bucket+"/"+key), bytes.NewReader(body))
@@ -270,7 +304,6 @@ func (c *R2Client) put(ctx context.Context, key string, body []byte, ifAbsent bo
 		// but deliberately NOT signed: sign covers exactly
 		// host;x-amz-content-sha256;x-amz-date (pinned against an aws4fetch
 		// fixture), and SigV4 only verifies the headers it lists.
-		ct, cc := objectHTTPMeta(key)
 		req.Header.Set("Content-Type", ct)
 		req.Header.Set("Cache-Control", cc)
 		if ifAbsent {

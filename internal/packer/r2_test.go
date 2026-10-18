@@ -471,3 +471,48 @@ func TestUploadStaticIDFromMeta(t *testing.T) {
 		t.Errorf("catalog PUT to %q, want /api/replays/somegameid", catalogPath)
 	}
 }
+
+// Size is a signed HEAD: a 404 is "no object", a 200 carries the length, and
+// PutWithMeta stores exactly the type and caching it is given.
+func TestSizeAndPutWithMeta(t *testing.T) {
+	var mu sync.Mutex
+	stored := map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256 ") {
+			http.Error(w, "unsigned", http.StatusForbidden)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Method {
+		case http.MethodPut:
+			body, _ := io.ReadAll(r.Body)
+			stored[r.URL.Path] = string(body)
+			stored[r.URL.Path+" meta"] = r.Header.Get("Content-Type") + "|" + r.Header.Get("Cache-Control")
+		case http.MethodHead:
+			body, ok := stored[r.URL.Path]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := &R2Client{Bucket: "bkt", AccessKeyID: "k", SecretAccessKey: "s", Endpoint: srv.URL}
+	ctx := context.Background()
+	key := "maps/highres/Eye Of Horus_1.6_4096x4096.png"
+	if _, exists, err := c.Size(ctx, key); err != nil || exists {
+		t.Fatalf("missing object: exists=%v err=%v", exists, err)
+	}
+	if err := c.PutWithMeta(ctx, key, []byte("12345"), "image/png", "public, max-age=60"); err != nil {
+		t.Fatal(err)
+	}
+	size, exists, err := c.Size(ctx, key)
+	if err != nil || !exists || size != 5 {
+		t.Fatalf("Size = %d, %v, %v; want 5, true, nil", size, exists, err)
+	}
+	if got := stored["/bkt/"+key+" meta"]; got != "image/png|public, max-age=60" {
+		t.Errorf("stored meta = %q", got)
+	}
+}
