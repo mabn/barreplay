@@ -3288,3 +3288,26 @@ state an application changes is the weapon's target.
 - **The waiting main thread runs pending searches** nobody has taken.
 - **The worker count is a toggle** (bits 24-25: 2 + 2k workers), so one
   checkpoint can compare counts.
+
+### 2026-10-18 11:17 — speed34 gates: identical; Lua waits 30x fewer
+
+`speed34` = `speed33` + Lua waiting only at writing functions, slave copies
+queued, the waiting main thread running pending searches, and the worker
+count toggle. Medium gate, P4 on (`d87a3f`, check mode) and with 6 workers
+(`2d87a3f`): both **`0558d354…`**, **0 mismatches** in 210,486 checked
+searches.
+
+| whole medium game | speed33 | speed34, 2 workers | speed34, 6 workers |
+|---|---|---|---|
+| waits at Lua | 17,697 | **585** | 573 |
+| waits for a slaved weapon's master | 4,871 | 0 (4,871 copies queued) | 0 |
+| waits for an enemy in range | 3,732 | 3,820 | 4,694 |
+| waits at a move | 17 | 234 | 253 |
+| times waited | 26,583 | 10,227 | 12,670 |
+| time waiting | 43.0 ms | **20.8 ms** | 42.2 ms |
+| searches the main thread ran itself | 1,487 | 754 | 508 |
+
+**Insight:** more workers make the main thread wait longer, not shorter. A
+search the main thread runs itself is fast: its caches are warm from the
+unit's own slow update. A worker takes searches sooner, so the main thread
+then waits for a slower search it could have run.
