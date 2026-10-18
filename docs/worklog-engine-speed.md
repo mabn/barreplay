@@ -4160,3 +4160,41 @@ something. The medium gate never exercised it.
 frame's checksum with what the original players recorded in the demo and
 logs the first mismatch as `[DESYNC WARNING]`. Then a run with everything
 on, stopped at the first warning, then bisection with short runs.
+
+### 2026-10-18 19:54 — the sync checker points at P1 v8
+
+`speed42s` = `speed42` built with `SYNCCHECK` on. It needed one fix
+(`25f051f`): `std::min` over a `SyncedFloat` in P1's crash bound.
+verylarge1, every item on: the first `[DESYNC WARNING]` (our checksum
+against the one the original players recorded) is at **frame 20,880**.
+
+The same build with every new item off flags **frame 20,940**. The checksum
+hashes the *sequence* of synced writes, not only the state, so earlier
+patches that skip a redundant write or reorder writes move it away from the
+original players' without changing the game. Against the demo it is a
+relative signal for these builds, not an absolute one. Runs to frame 21,000,
+each item alone:
+
+| toggles | first mismatch with the demo |
+|---|---|
+| every new item off (`587a3f`) | 20,940 |
+| P4 + P5 (`10d87a3f`) | 20,940 |
+| H94 | 20,940 |
+| N2 | 20,940 |
+| P7 | 20,940 |
+| P1 v9 | 20,940 |
+| **P1 v8** | **20,880** |
+| today's five together | 20,880 |
+
+**P1 v8 alone changes the synced state 60 frames earlier than everything
+else does; it is rejected** (it measured -0.4%, noise). Its code stays
+behind its toggle (`0x80000000`), off. Which zero-speed hover path is
+unsafe in parallel is not found yet. `CanLandAt` reads the ground-blocking
+map, but only serial items write it.
+
+**Insight:** a 21,000-frame run on a sync-checked build (~1.5 min) bisects
+exactness far faster than whole games (~40 min). The medium gate never
+caught v8: zero-speed hovering aircraft are rare there.
+
+Running: a governed whole game with everything else on (`t=50d87a3f`,
+`t2=31`), which should be exact again.
