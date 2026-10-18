@@ -2619,3 +2619,22 @@ test('a job\'s details name the bringest build, widget and .brp format', () => {
   assert.equal(vm['Host CPU'], '4 cores');
   assert.equal(vm['Host'], undefined);
 });
+
+// The high-res map images are keyed by the startscript's map name and the
+// image size, which is computed from the map record loadMap already fetched.
+// These are real keys from maps/highres/ beside the API's width/height.
+test('highResMapFile names the uploaded high-res map image', () => {
+  const start = APP.indexOf('function highResMapFile(');
+  const src = APP.slice(start, APP.indexOf('\n}\n', start) + 2);
+  const highResMapFile = new Function(`${src}; return highResMapFile;`)();
+  const cases: [string, number, number, string][] = [
+    ['Supreme Isthmus v2.1', 24, 24, 'Supreme_Isthmus_v2.1_4096x4096.png'],
+    ['Isidis crack 1.1', 16, 16, 'Isidis_crack_1.1_4096x4096.png'],
+    ['Ice Scream v2.5.1', 24, 8, 'Ice_Scream_v2.5.1_4096x1364.png'],
+    ['Eye Of Horus 1.7.1', 12, 14, 'Eye_Of_Horus_1.7.1_3508x4096.png'],
+    ['Hooked 1.1.1', 24, 16, 'Hooked_1.1.1_4096x2728.png'],
+  ];
+  for (const [name, w, h, want] of cases) assert.equal(highResMapFile(name, w, h), want, name);
+  assert.equal(highResMapFile('', 16, 16), '', 'no name, no key');
+  assert.equal(highResMapFile('Hooked 1.1.1', 0, 16), '', 'no size, no key');
+});

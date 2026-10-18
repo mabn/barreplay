@@ -1029,6 +1029,15 @@ app.on(["GET", "HEAD"], "/replays/:folder/:id", (c) => {
   if (isReplayFolder(c.req.param("folder")) && !c.req.param("id").includes(".")) return serveEntry(c);
   return serveR2(c.env.BUCKET, c.req.path.slice(1), c.req.raw, true);
 });
+// The BAR team's high-res map images (cmd/upload-maps). In production the
+// viewer reads them from the data origin (cdn-bar) directly; this route is
+// what `vite dev` and `dev:prod` serve them through, since there the data
+// origin is the dev server itself.
+app.on(["GET", "HEAD"], "/maps/highres/:file", async (c) => {
+  const res = await serveR2(c.env.BUCKET, c.req.path.slice(1), c.req.raw, true);
+  if (res.ok) res.headers.set("content-type", "image/png");
+  return res;
+});
 app.on(["GET", "HEAD"], "/replays/*", (c) => {
   const key = c.req.path.slice(1); // strip leading "/"
   return serveR2(c.env.BUCKET, key, c.req.raw, true);
