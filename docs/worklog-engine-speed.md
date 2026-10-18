@@ -3726,3 +3726,49 @@ it. What they do:
   content hash is on a built-in list. Its translation calls the same VM
   primitives, so the sandbox's checks (environment tables, metatables) are
   untouched, and tweakdefs and user code run interpreted.
+
+### 2026-10-18 15:38 — the interpreter's own time is memory, not dispatch; H94; H95 designed and dropped
+
+**Where `luaV_execute`'s own cycles go** (`perf annotate`, `speed39` late
+window). The single hottest instruction, **12.5% of the interpreter's own
+samples**, is one load: `OP_GETUPVAL`'s read of the value an upvalue points
+to (`cl->upvals[b]->v`, two dependent pointer loads into heap objects).
+Neighbouring loads of the same handler add ~7% more. The dispatch sequence
+(fetch, hook-mask test, decode, `jmp *disptab[op]`) is a few percent.
+
+**Insight: compiling Lua ahead of time would remove the dispatch, but the
+interpreter is waiting on memory.** BAR's gadgets keep their engine functions
+and state tables in upvalues (`local spGetUnitDefID = Spring.GetUnitDefID`
+at file scope). Each use is a pointer chase into a separately allocated
+`UpVal` object, and with ~70 gadgets those objects are spread over the heap.
+A compiled function makes the same loads. The estimate for compiling Lua
+drops to ~1% of the main thread. It is not worth a compiler's size and risk,
+and it stays parked.
+
+**H94** (toggle `0x40000000`, `speed40`): `CLosHandler::UpdateHeightMapSynced`
+runs its seven sensor types on all threads. Map damage calls it once per
+crater (`CBasicMapDamage::RecalcArea`), and each type then scans every one
+of its instances for overlap with the changed rectangle: `RecalcArea` is
+1.9% of the main thread, nearly all of it that scan inlined. Each type
+touches only its own instances, cache and queues, in its own order, so
+running the types side by side is exact. Est. -1%.
+
+**H95, designed and dropped: `UpdateUnits` in two passes.** The serial unit
+loop runs `CUnit::Update` (3.7% of the main thread). Almost all of it touches
+only the unit itself: physical state, radar error, recent damage, rest
+time. The plan was:
+1. A pure pass marks the units whose physical state changes, since those fire
+   `UnitEnteredAir`/`Water`/... Lua events (BAR has handlers that write
+   state: speed modifiers, fall damage).
+2. Everything between marked units runs in parallel.
+3. The marked units and the collision-map updates run in order.
+
+It fails on the units with their own `Update`:
+- `CBuilder` and `CFactory` are **1,273 of 10,496 units** at frame 63780.
+- Their `Update` writes other units (build progress, `beingBuilt`,
+  reclaim kills) and makes Lua callins.
+- So they would have to be serial too: ~1,400 barriers a frame, segments of
+  ~7 units. The barrier costs P1 and P5 already show would eat the gain.
+- Running all plain units first is not exact either. A builder's Lua callin
+  may read a plain unit's flanking or physical state, and in the original
+  order a later unit has not been updated yet.
