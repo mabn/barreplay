@@ -4198,3 +4198,23 @@ caught v8: zero-speed hovering aircraft are rare there.
 
 Running: a governed whole game with everything else on (`t=50d87a3f`,
 `t2=31`), which should be exact again.
+
+### 2026-10-18 20:39 — not P1 v8 after all: the whole game without it is byte-identical to the one with it
+
+Governed whole game, `speed42`, every item but P1 v8 (`t=50d87a3f`,
+`t2=31`): md5 **`635e45f2…`**, the same as with v8 (and 15m14s active).
+**v8 never changed the output.** Its earlier sync-checksum difference was
+only a different order of synced writes, which the checker's running hash
+sees and the game does not. The diverging output is also deterministic: two
+runs, one md5.
+
+**Insight: the sync checker cannot judge exactness for these builds.** It
+keeps one order-sensitive hash over every synced write (`CSyncChecker::Sync`
+is a running `LiteHash`, not thread-aware), so any change in write order
+flags it. Ground truth stays the output.
+
+So the cause is one of P4, P5, H94, N2, P7 and P1 v9. P4 and P5 were never
+run on a whole verylarge1 game; the last exact whole game was `speed32`,
+before both. The bisection now uses runs from frame 0 to 66,720 (stopped by
+the bench harness, ~12 minutes each without the heat governor), comparing
+events and frames from 60,000 to 66,715 with the exact reference stream.
