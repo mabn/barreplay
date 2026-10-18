@@ -4039,3 +4039,45 @@ Serial aircraft by type, state (0 landed, 1 flying, 2 landing, 3 crashing,
   while it runs serially, exactly as `Process` handles it, and the rest of
   its batch goes item by item.
 - The chain drops from ~5,600 hops a frame to ~700-950.
+
+### 2026-10-18 17:50 — P7 -1.5%; P5 with 2 workers worse; N2's allowlist must name verified code only
+
+`speed41` checkpoint, late window, 3 interleaved pairs:
+
+| A/B | without | with | change |
+|---|---|---|---|
+| P7 (`t2` `1` → `11`) | 9.85 / 9.96 / 9.60 s (9.81) | 9.68 / 9.69 / 9.61 s (9.66) | **-1.5%** wall, -1.4% cycles |
+| N2, `Explosion` only (`t2` `0` → `1`) | 9.60 / 9.86 / 9.72 s (9.73) | 9.64 / 9.60 / 9.73 s (9.65) | -0.8% (one trial disturbed by a syntax check; noise) |
+| P5 with 2 workers instead of 6 (`t2` `1` → `5`) | 9.70 / 9.65 / 9.64 s (9.66) | 9.85 / 9.71 / 9.63 s (9.73) | +0.7%: six stay |
+
+P7 is kept.
+
+**N2 on verylarge1's own BAR build (test-31620)** logged different handler
+hashes from the medium game's (test-31030):
+
+| | test-31620 (verylarge1) | test-31030 (medium gate) |
+|---|---|---|
+| wrapper | `01272659…` | `01272659…` |
+| `Explosion` | `66262d25…` | `66262d25…` |
+| `UnitPreDamaged` | `812ad0ef…` | `a40bbe22…` |
+| `UnitDamaged` | `61eea1fd…` | `795c83f0…` |
+| `ProjectileDestroyed` | `f4541253…` | `7365bbaa…` |
+
+Reading test-31030's `gadgets.lua` (extracted from the rapid pool) shows
+why they differ:
+- it loops with `ipairs` (raw reads, stops at the first nil), where
+  test-31620 uses `while g do … list[i]` (reads with metamethods, stops at
+  the first false value);
+- it calls `tracy.ZoneBeginN` through the global table on every call,
+  where test-31620 uses captured upvalues.
+
+So those are not the code N2 replicates. N2's structural check already
+refused them (it requires exactly the two tracy upvalues), but they had been
+put on the learned allowlist all the same.
+
+**Insight:** a hash a run *logged* says only "this is what the code is".
+Only a hash whose source was read against the native code may say "this is
+what N2 does". The allowlist is now built in (`ebda0df`) with exactly the
+verified five: the wrapper and `Explosion` (identical in both builds), plus
+test-31620's three loops. A new BAR build's hashes are added only after
+reading its handlers.
