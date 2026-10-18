@@ -44,7 +44,9 @@
 # TOGGLES=<hex> passes the experiment toggles of a build that has them (the
 # go file's "t=<hex>"; g_brToggles in the engine) to each trial, and `abt`
 # interleaves two toggle settings of ONE binary from the same checkpoint —
-# variants of an experiment need no second build or dump.
+# variants of an experiment need no second build or dump. TOGGLES2=<hex> is the
+# second word ("t2=<hex>"; g_brToggles2) once the first ran out of bits; in
+# `abt` a setting written <t>/<t2> sets both.
 #
 # BARREPLAY=<path> (dump only) names the barreplay binary to re-simulate with;
 # by default it is built from this checkout at each dump. Its id is kept in the
@@ -209,7 +211,7 @@ trial1() {
 		perfpid=$!
 		sleep 1
 	fi
-	echo "$n $dir/result${LUAPROF:+ luaprof}${TOGGLES:+ t=$TOGGLES}" > "$dir/park.go"
+	echo "$n $dir/result${LUAPROF:+ luaprof}${TOGGLES:+ t=$TOGGLES}${TOGGLES2:+ t2=$TOGGLES2}" > "$dir/park.go"
 	local t=0
 	while [ ! -s "$dir/result" ]; do
 		sleep 0.5; t=$((t + 1))
@@ -247,7 +249,7 @@ case "${1:-}" in
 	flame) flame "$2" "$3" "$4" "$5" "$6" "${7:-}" ;;
 	abt)   for i in $(seq 1 "${8:-3}"); do
 	           if [ $((i % 2)) -eq 1 ]; then o="$6 $7"; else o="$7 $6"; fi
-	           for t in $o; do echo "pair $i t=$t $(TOGGLES=$t trial1 "$2" "$3" "$4" "$5")"; done
+	           for t in $o; do echo "pair $i t=$t $(TOGGLES=${t%%/*} TOGGLES2=$([ "${t#*/}" != "$t" ] && echo "${t#*/}") trial1 "$2" "$3" "$4" "$5")"; done
 	       done ;;
 	*) sed -n '2,40p' "$0"; exit 2 ;;
 esac
