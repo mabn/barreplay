@@ -2933,3 +2933,67 @@ Three toggles tuned at 4 threads now seem to cost time:
 
 A combined A/B (all three off, `t=587a3f`, 5 pairs) is running to
 confirm.
+
+### 2026-10-18 08:30 — at 7 threads: P1 v6, H75, H77 off -2.5%; H88 confirmed; the best configuration is now t=587a3f
+
+7-thread `speed32` checkpoint, late window:
+
+| 7-thread checkpoint, late window | base (`t=587fbf`) | with it | wall | cycles | instructions | pairs |
+|---|---|---|---|---|---|---|
+| P1 v6 + H75 + H77 off (`t=587a3f`), 5 pairs | 11.50 / 11.98 / 11.76 / 11.92 / 11.99 s (11.83) | 11.04 / 12.88 / 11.32 / 11.29 / 11.17 s (11.54) | **-2.5%** | -0.9% | -1.1% | -4.0 +7.5 -3.7 -5.3 -6.9 |
+| H88 off (`t=487fbf`), 3 pairs | 11.99 / 11.76 / 11.81 s (11.85) | 12.48 / 11.84 / 12.01 s (12.11) | **+2.2%** | +1.3% | +1.0% | +4.1 +0.7 +1.7 |
+
+- Four of the five pairs are 4-7% faster with the three off; the second
+  pair's 12.88 s is an outlier.
+- The wall gain is well beyond the cycle saving. That points at less
+  waiting: P1 v6's extra parallel items each start in order and wait on
+  target edges, which costs more than it saves once six workers share the
+  aircraft.
+- H88 helps at 7 threads.
+
+The best configuration is `t=587a3f`. (The late window now reads ~11.5 s
+where it read ~10.5 s earlier in the night: the host's heat; only pairs
+compare.)
+
+**Direction from here (USER):** no more thread and toggle tuning. The
+large changes, in this order:
+
+1. ordered parallel execution of the weapon and slow-update loops;
+2. a parallel COB tick, or a replacement for COB;
+3. ahead-of-time compiled Lua, or a replacement.
+
+Tweakdefs (game-supplied Lua) and BAR's Lua sandbox must keep working and
+stay secure.
+
+The design notes behind that order:
+
+- **Weapons and slow update.** P1's machinery generalizes: in-order start,
+  edges, serial items as barriers, re-checked plans. The weapon loop's
+  global actions are COB calls (`AimWeapon`, `FireWeapon`, `Shot`),
+  firing (beam lasers deal damage inside the loop; projectile creation
+  assigns ids in order), RNG, Lua callins, team resources and `tempNum`
+  marks on other units (line-of-fire and targeting queries).
+
+  The slow update adds COB `QueryWeapon`/`AimFromWeapon` on every weapon,
+  every time, and an unconditional RNG draw per weapon. Its items would
+  need pre-computed stream positions, which work only if the items with
+  extra conditional draws (Lua `math.random`, CAI) can be told apart in
+  advance.
+
+  First step: a counting build. Per frame, which items take which global
+  actions, and what the purely local ones cost. It tells whether this pays
+  off before it is built.
+- **COB** is an integer-only stack VM, so there is no floating-point trap,
+  and compiling its bytecode exactly is very feasible. Query functions that
+  return a piece from static variables could be evaluated without the VM's
+  global machinery, which is also what unblocks a parallel slow update.
+  COB files are game assets; tweakdefs cannot add COB.
+- **Lua.** Another VM (LuaJIT, Luau) cannot be exact: doubles instead of
+  Recoil's floats, a different table layout and so a different `pairs`
+  order, and no `setfenv`, which BAR's gadget handler relies on. The exact
+  route is to compile BAR's known gadget files, matched by content hash,
+  ahead of time into native code shipped with the engine. That code calls
+  the same Lua 5.1 table, string and GC primitives, so the state comes out
+  identical. Everything else stays in the sandboxed interpreter:
+  tweakdefs, mods, any unknown or user file. No untrusted code is ever
+  compiled, so the sandbox keeps exactly its present guarantees.
