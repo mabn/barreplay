@@ -1229,6 +1229,7 @@ const growIcons = true;      // grow a building's icon toward its footprint when
 const autoTeamColors = false; // true: distinct auto colours per team; false: the real in-game team colours from the replay
 let mapW = 0, mapH = 0;    // map world extent in elmos (0 if unknown)
 let mapTex = null;         // HTMLImageElement of the terrain texture, or null
+let mapCredit = null;      // {name, author} of the open replay's map, for the credits dialog
 // Viewport in CSS pixels + the device-pixel ratio. The canvas backing store is
 // viewW*DPR x viewH*DPR and the context is pre-scaled by DPR, so all drawing is
 // done in CSS px while staying crisp on HiDPI displays.
@@ -4823,6 +4824,7 @@ async function loadMap(name, gameId) {
   const gen = loadGen; // ignore responses if the user switched replays mid-fetch
   mapW = mapH = 0;
   mapTex = null;
+  mapCredit = name ? { name, author: '' } : null;
   let file = mapFileGuess(name);
   try {
     const info = await resolveMapFile(name, gameId);
@@ -4831,6 +4833,8 @@ async function loadMap(name, gameId) {
       file = info.fileName || file;
       mapW = (info.width || 0) * MAP_ELMOS_PER_UNIT;
       mapH = (info.height || 0) * MAP_ELMOS_PER_UNIT;
+      const mapName = info.scriptName || info.name || name;
+      if (mapName) mapCredit = { name: mapName, author: info.author || '' };
     }
   } catch (_) { /* offline/unknown: keep unit-bounds extent, still try the texture */ }
   if (gen !== loadGen || !file) return;
@@ -4840,6 +4844,35 @@ async function loadMap(name, gameId) {
   img.onerror = () => { /* no texture for this map: keep the plain background */ };
   img.src = MAP_API + '/maps/' + encodeURIComponent(file) + '/texture-mq.jpg';
   draw(); // reflect the (possibly updated) map extent immediately
+}
+
+// initCredits wires the menu's Credits entry to its dialog. The dialog's text
+// is static (index.html) except for the line naming the open replay's map and
+// who made it, filled in each time it opens. Closes on ✕, Escape (native) and
+// a backdrop click, like the lavabalance preview.
+function initCredits() {
+  const dialog = document.getElementById('creditsdialog');
+  const button = document.getElementById('railcredits');
+  if (!dialog || !button) return;
+  button.addEventListener('click', () => {
+    const line = document.getElementById('creditsmap');
+    const onReplay = document.body.classList.contains('replay-page');
+    if (line && onReplay && mapCredit) {
+      line.textContent = 'This replay: ' + mapCredit.name;
+      if (mapCredit.author) {
+        const who = document.createElement('span');
+        who.className = 'who';
+        who.textContent = ' by ' + mapCredit.author;
+        line.append(who);
+      }
+      line.style.display = '';
+    } else if (line) {
+      line.style.display = 'none';
+    }
+    dialog.showModal();
+  });
+  document.getElementById('creditsclose').addEventListener('click', () => dialog.close());
+  dialog.addEventListener('click', (ev) => { if (ev.target === dialog) dialog.close(); });
 }
 
 // Render-smoothness FPS monitor. Fully self-contained: when enabled (?debug, any value)
@@ -8648,6 +8681,7 @@ async function init() {
   initQueue();   // the queue's pager buttons (it reads on demand only)
   initResim();   // the queue's "re-simulate this replay" box
   initLavabalanceDialog();   // the Games rows' LOS upload preview
+  initCredits();             // the menu's Credits entry
   initUpload(); // the dropzone works without the catalog being loaded
   initReplayTabs(); // Replay / Summary on a replay page, and the clip player
   initEmbedClip();  // ?embed=clip: the clip player alone, framed by another site

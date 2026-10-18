@@ -1677,7 +1677,12 @@ worker/                   Cloudflare Worker (Hono + Vite) hosting the viewer as 
                           /admin/logout clears that cookie on any origin and is the
                           menu's sign-out entry (the admin's initial, the address in its
                           tooltip — the menu is 72px); signed out, the foot of the menu
-                          carries a muted sign-in entry (#adminnote), on every page. A 404 from /api/admin/me (a backend
+                          carries a muted sign-in entry (#adminnote), on every page. Just above
+                          it, a CREDITS entry (#railcredits) opens #creditsdialog (app.js
+                          initCredits): BAR's artwork and its licences, the open replay's map
+                          and its author (mapCredit, from the maps API record loadMap reads),
+                          the Recoil engine (GPL v2+) and where the patches' source is — keep
+                          it in step with internal/viz/bardata/README.md's licence list. A 404 from /api/admin/me (a backend
                           with no login and no admin routes) shows nothing and no admin
                           controls. Every admin fetch in app.js treats a
                           401 as adminSignedOut (controls off, sign-in link back). Why: app.js is served unminified, the
