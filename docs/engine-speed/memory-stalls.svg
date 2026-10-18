@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="290" viewBox="0 0 900 290" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1d1f23">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5d6470"/></marker>
+  <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#b0602a"/></marker></defs>
+  <rect width="900" height="290" fill="#ffffff"/>
+  <text x="20" y="24" font-size="15" font-weight="bold">Late window, main thread: what its cycles are spent on</text>
+  <text x="20" y="44" fill="#5d6470" font-size="12">perf counters over 450 frames at ~10,500 units; the two rows overlap (a page walk is also a wait)</text>
+  <text x="250" y="81" text-anchor="end">stalled on a memory load</text>
+  <rect x="260" y="64" width="600" height="24" rx="2" fill="#e6e7ea"/>
+  <rect x="260" y="64" width="330" height="24" rx="2" fill="#0f8f86"/>
+  <text x="596" y="81" font-weight="bold">55%</text>
+  <text x="250" y="121" text-anchor="end">walking page tables</text>
+  <rect x="260" y="104" width="600" height="24" rx="2" fill="#e6e7ea"/>
+  <rect x="260" y="104" width="84" height="24" rx="2" fill="#b0602a"/>
+  <text x="350" y="121" font-weight="bold">14%</text>
+  <text x="260" y="166" fill="#5d6470">instructions per cycle: 0.87</text>
+  <text x="20" y="200" font-weight="bold">Why: the data does not fit in cache</text>
+  <rect x="20" y="212" width="250" height="60" rx="4" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="145" y="237" text-anchor="middle" font-weight="bold">~10,500 units</text>
+  <text x="145" y="257" text-anchor="middle" font-size="12">several KB each, plus weapons, move types</text>
+  <text x="300" y="247" font-size="28" fill="#5d6470">&gt;</text>
+  <rect x="330" y="222" width="90" height="40" rx="4" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="375" y="247" text-anchor="middle" font-weight="bold">6 MB L3</text>
+  <text x="450" y="232" >so every pass over the units streams from main memory.</text>
+  <text x="450" y="252" >Prefetching the next units and huge pages for the engine&#x27;s</text>
+  <text x="450" y="272" >memory paid off here, and did nothing on small games.</text>
+</svg>

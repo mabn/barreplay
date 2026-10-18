@@ -91,29 +91,20 @@ the 7-thread run above.
 
 ## Where the time goes
 
-**The main thread waits for memory.** Over the late window, 55% of its cycles
-stall on a memory load and 14% go to page-table walks (0.87 instructions per
-cycle). Ten thousand unit objects of several KB each, plus their weapons and
-move types, do not fit a 6 MB L3 cache, so every pass over the units streams
-from main memory. This is why prefetching and huge pages paid off here and
-did nothing on small games.
+**The main thread waits for memory.**
+
+![memory stalls](engine-speed/memory-stalls.svg)
 
 **The main thread is the bottleneck.** Workers run at about a third of a core
 each: they mostly wait for the main thread's serial loops. The main thread's
-late-window profile with every change in place but before the last one (P4,
-below), as inclusive shares, so rows overlap:
+late-window profile, with every change in place except the last one (the
+target searches moved to workers, below):
 
-| | % of the main thread |
-|---|---|
-| fork-join sections (main's own share): LOS 6.0, unit LOS states 5.6, ground moves 2.8, paths 1.8 | 19.9 |
-| synced Lua (BAR's gadgets) | 14.0 |
-| `CWeapon::SlowUpdate` | 10.6 |
-| of which the target search (`GenerateWeaponTargets` 6.6, `TryTarget` 2.6) | 9.2 |
-| the aircraft move-type loop (already parallel, see P1) | 9.7 |
-| `CWeapon::Update` (5.9 of it beam lasers firing) | 8.8 |
-| COB tick (`CCobEngine::Tick`) | 5.8 |
-| `CUnit::SlowUpdate` (mostly the command AI) | 5.5 |
-| explosions 3.8, projectiles 3.2, `CUnit::Update` 3.6 | |
+![main thread budget](engine-changes/main-thread-budget.svg)
+
+The weapon target search (`GenerateWeaponTargets` 6.6% plus `TryTarget` 2.6%)
+was the largest block of pure computation left on the main thread, and only
+reads, which is why it was moved next.
 
 Nothing left is bigger than about 10%, so what remains is either many small
 wins or running more of the serial loops in parallel. The second needs engine
@@ -127,6 +118,8 @@ parallel while proving the order of results is unchanged, making memory access
 cheaper, and moving the capture widget's work into the engine. Gains are on the
 late window unless stated otherwise, each measured on its own against the
 build before it.
+
+![single gains](engine-speed/single-gains.svg)
 
 ### Earlier rounds (in the published patched engine)
 
@@ -197,6 +190,8 @@ computed in parallel, then applied and evented in loop order. They are a pure
 function of the unit and the LOS maps, so only the application has to be
 ordered.
 
+![compute in parallel, apply in order](engine-speed/compute-apply.svg)
+
 **N1: BAR's "AA Targeting Priority" `AllowWeaponTarget` done in C++.** It is a
 per-unit-def multiplier, called about 3,100 times a frame in the late game. The
 native version is used only after the gadget files hash to the known content
@@ -215,6 +210,8 @@ or dying inside a running search's circle, damage, quad changes, and Lua
 functions that write sim state or read a weapon's target. A check mode compared
 210,486 searches against the serial result with no mismatch. -4.1% wall, -4.4%
 main-thread cycles.
+
+![target search pipeline](engine-speed/target-search-pipeline.svg)
 
 One finding from P4: more search workers made the main thread wait longer. A
 search the main thread runs itself is fast because its caches are warm from the
@@ -256,6 +253,8 @@ bookkeeping is buffered and applied in tick order. `rand` and starting a new
 script thread are serial points. Offline, 9,312 of BAR's 12,173 COB functions
 qualify.
 
+![COB tick](engine-speed/cob-tick.svg)
+
 ## Measured and ruled out
 
 | idea | finding |
@@ -276,6 +275,8 @@ qualify.
 | expiring unsynced projectiles early | crashed at frame 6597: a missile keeps updating its smoke trail |
 
 ## Where each change lives
+
+![where changes live](engine-speed/where-changes-live.svg)
 
 - **Published patched engine** (revision 3: the series in
   `patches/engine-2026.07.04/series` up to 0009, plus the PGO+LTO recipe):

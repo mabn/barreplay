@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="318" viewBox="0 0 900 318" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1d1f23">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5d6470"/></marker>
+  <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#b0602a"/></marker></defs>
+  <rect width="900" height="318" fill="#ffffff"/>
+  <text x="20" y="24" font-size="15" font-weight="bold">Target searches pipelined onto the workers (slow-update loop)</text>
+  <text x="20" y="72" fill="#5d6470">main</text>
+  <text x="20" y="142" fill="#5d6470">worker 1</text>
+  <text x="20" y="182" fill="#5d6470">worker 2</text>
+  <rect x="90" y="54" width="110" height="28" rx="4" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="145" y="73" text-anchor="middle" font-size="12">unit A</text>
+  <rect x="206" y="54" width="110" height="28" rx="4" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="261" y="73" text-anchor="middle" font-size="12">unit B</text>
+  <rect x="322" y="54" width="110" height="28" rx="4" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="377" y="73" text-anchor="middle" font-size="12">unit C</text>
+  <rect x="438" y="54" width="46" height="28" rx="4" fill="#f6e3d4" stroke="#b0602a"/>
+  <text x="461" y="73" text-anchor="middle" font-size="12" fill="#b0602a">wait</text>
+  <rect x="490" y="54" width="110" height="28" rx="4" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="545" y="73" text-anchor="middle" font-size="12">unit D</text>
+  <rect x="606" y="54" width="110" height="28" rx="4" fill="#d5efec" stroke="#0f8f86"/>
+  <text x="661" y="73" text-anchor="middle" font-size="12">unit E</text>
+  <rect x="170" y="124" width="150" height="26" rx="3" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="245.0" y="141" text-anchor="middle" font-size="12">search for A</text>
+  <path d="M170 82 L170 122" stroke="#5d6470" stroke-width="1" stroke-dasharray="3 3"/>
+  <rect x="286" y="164" width="150" height="26" rx="3" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="361.0" y="181" text-anchor="middle" font-size="12">search for B</text>
+  <path d="M286 82 L286 162" stroke="#5d6470" stroke-width="1" stroke-dasharray="3 3"/>
+  <rect x="326" y="124" width="150" height="26" rx="3" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="401.0" y="141" text-anchor="middle" font-size="12">search for C</text>
+  <path d="M402 82 L402 122" stroke="#5d6470" stroke-width="1" stroke-dasharray="3 3"/>
+  <rect x="570" y="164" width="150" height="26" rx="3" fill="#e6e7ea" stroke="#8a919c"/>
+  <text x="645.0" y="181" text-anchor="middle" font-size="12">search for D</text>
+  <path d="M570 82 L570 162" stroke="#5d6470" stroke-width="1" stroke-dasharray="3 3"/>
+  <path d="M478 136 C 498 120, 478 100, 468 86" stroke="#b0602a" stroke-width="1.5" fill="none" marker-end="url(#o)"/>
+  <text x="90" y="216" font-size="12" fill="#b0602a">wait: unit D is about to move an enemy inside C&#x27;s search circle, so the main thread lets that search finish first</text>
+  <text x="90" y="246" font-size="12">Each unit&#x27;s slow update hands its weapons&#x27; target searches to a worker and goes on to the next unit.</text>
+  <text x="90" y="264" font-size="12">Results are applied in launch order. The random draws, COB queries and Lua stay on the main thread where they were.</text>
+  <text x="90" y="282" font-size="12">The main thread waits only before a write a running search might read: an enemy moving or dying in its circle,</text>
+  <text x="90" y="300" font-size="12">damage, a quad change, or a Lua function that writes sim state. Late game: 461 searches a frame, ~1 ms of waiting.</text>
+</svg>

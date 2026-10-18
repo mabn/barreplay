@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="458" viewBox="0 0 900 458" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#1d1f23">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5d6470"/></marker>
+  <marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#b0602a"/></marker></defs>
+  <rect width="900" height="458" fill="#ffffff"/>
+  <text x="20" y="24" font-size="15" font-weight="bold">Late window, single changes: % saved, each measured alone against the build before it</text>
+  <text x="20" y="44" font-size="12" fill="#5d6470">Not additive: baselines and metrics (wall or cycles) differ. The parallel aircraft loop, LOS states and native AA priority together: -19.2%.</text>
+  <text x="330" y="75" text-anchor="end" font-size="12">build without the sync checker</text>
+  <rect x="340" y="60" width="395.0" height="18" rx="2" fill="#b0602a"/>
+  <text x="741.0" y="74" font-size="12">-7.9%</text>
+  <text x="330" y="101" text-anchor="end" font-size="12">widget sample loop in the engine</text>
+  <rect x="340" y="86" width="360.0" height="18" rx="2" fill="#b0602a"/>
+  <text x="706.0" y="100" font-size="12">-7.2%</text>
+  <text x="330" y="127" text-anchor="end" font-size="12">BAR widgets off in a replay</text>
+  <rect x="340" y="112" width="310.0" height="18" rx="2" fill="#7cc4bd"/>
+  <text x="656.0" y="126" font-size="12">-6.2%</text>
+  <text x="330" y="153" text-anchor="end" font-size="12">Lua callin timers only when profiling + prefetch</text>
+  <rect x="340" y="138" width="265.0" height="18" rx="2" fill="#0f8f86"/>
+  <text x="611.0" y="152" font-size="12">-5.3%</text>
+  <text x="330" y="179" text-anchor="end" font-size="12">target searches on workers</text>
+  <rect x="340" y="164" width="204.99999999999997" height="18" rx="2" fill="#b0602a"/>
+  <text x="551.0" y="178" font-size="12">-4.1%</text>
+  <text x="330" y="205" text-anchor="end" font-size="12">no eager piece-transform walk</text>
+  <rect x="340" y="190" width="145.0" height="18" rx="2" fill="#b0602a"/>
+  <text x="491.0" y="204" font-size="12">-2.9%</text>
+  <text x="330" y="231" text-anchor="end" font-size="12">Widget Selector profiler off</text>
+  <rect x="340" y="216" width="120.0" height="18" rx="2" fill="#7cc4bd"/>
+  <text x="466.0" y="230" font-size="12">-2.4%</text>
+  <text x="330" y="257" text-anchor="end" font-size="12">loop chunks of at most 32 units</text>
+  <rect x="340" y="242" width="110.00000000000001" height="18" rx="2" fill="#b0602a"/>
+  <text x="456.0" y="256" font-size="12">-2.2%</text>
+  <text x="330" y="283" text-anchor="end" font-size="12">ground height reused</text>
+  <rect x="340" y="268" width="110.00000000000001" height="18" rx="2" fill="#b0602a"/>
+  <text x="456.0" y="282" font-size="12">-2.2%</text>
+  <text x="330" y="309" text-anchor="end" font-size="12">quad row runs</text>
+  <rect x="340" y="294" width="85.0" height="18" rx="2" fill="#b0602a"/>
+  <text x="431.0" y="308" font-size="12">-1.7%</text>
+  <text x="330" y="335" text-anchor="end" font-size="12">reload-state log</text>
+  <rect x="340" y="320" width="85.0" height="18" rx="2" fill="#0f8f86"/>
+  <text x="431.0" y="334" font-size="12">-1.7%</text>
+  <text x="330" y="361" text-anchor="end" font-size="12">aircraft start pass-on</text>
+  <rect x="340" y="346" width="75.0" height="18" rx="2" fill="#b0602a"/>
+  <text x="421.0" y="360" font-size="12">-1.5%</text>
+  <text x="330" y="387" text-anchor="end" font-size="12">re-sim-only sample loop</text>
+  <rect x="340" y="372" width="70.0" height="18" rx="2" fill="#7cc4bd"/>
+  <text x="416.0" y="386" font-size="12">-1.4%</text>
+  <text x="330" y="413" text-anchor="end" font-size="12">target-scan prefetch</text>
+  <rect x="340" y="398" width="60.0" height="18" rx="2" fill="#b0602a"/>
+  <text x="406.0" y="412" font-size="12">-1.2%</text>
+  <rect x="340" y="431" width="12" height="12" rx="2" fill="#0f8f86"/>
+  <text x="358" y="442" font-size="12">patch series (revision 4)</text>
+  <rect x="530" y="431" width="12" height="12" rx="2" fill="#7cc4bd"/>
+  <text x="548" y="442" font-size="12">widget and config, in use now</text>
+  <rect x="720" y="431" width="12" height="12" rx="2" fill="#b0602a"/>
+  <text x="738" y="442" font-size="12">only on speed-optimization-2</text>
+</svg>
