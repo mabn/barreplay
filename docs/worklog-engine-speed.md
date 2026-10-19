@@ -4304,3 +4304,54 @@ collision volumes, transforms and collidable bits. So an ally's slow update
 can change a running search's `TryTarget` unless every write it makes to
 those fields has a hook. Version 3 snapshots every ally in the search's
 area at both runs to find which field changes.
+
+### 2026-10-19 01:54 — found: `CWeapon::TryTargetHeading` turns a unit for a moment, and P4's searches can see it
+
+How it was cornered, after the detector named the units in between:
+
+1. **A sequential probe** (`BARREPLAY_P4_PROBE`, P4 off): in frame 65,348's
+   slow-update loop, `TryTarget(Glaucus 18040 → Goblin 4536)` re-evaluated
+   after every unit's slow update. It is 0 at the start, 0 after the
+   searcher's own slow update, and 0 after every unit. Frame 31,991
+   (`18716 → 1718`) is 1 throughout. So the value the detector's second
+   run saw **never exists between two slow updates**. It is a transient.
+2. **A spinning probe** (`BARREPLAY_P4_PROBE2`, P4 on): from the
+   searcher's slow update to the end of the loop, a separate thread
+   evaluates the same `TryTarget` over and over, recording each change with
+   a phase marker the main thread writes (unit id and step: before and after
+   each part of `CUnit::SlowUpdate`, the move type's `Block()`, the
+   weapons, the result applies). In 1,418 evaluations it changed twice:
+   0 → 1 and back to 0, **both inside Glaucus 23172's
+   `commandAI->SlowUpdate()`**.
+
+The cause: `CMobileCAI` (attack orders, hold-position target checks) calls
+`CWeapon::TryTargetRotate`/`TryTargetHeading`, which answer "could I hit
+this after turning?" by writing the owner's `heading`, `frontdir` and
+`rightdir` directly, calling `TryTarget`, and writing them back. For that
+moment the unit's collision volume is rotated. A worker search by one of its
+ALLIES whose friendly-fire ray passes it sees the rotated volume: here the
+heat ray from 18040 slipped past its turned neighbour 23172, so the Goblin
+read as a free shot, and the Glaucus took it a frame early.
+
+**Insights:**
+- Every P4 hook so far is on a write that STAYS: positions, deaths, quad
+  lists. A write that is undone a few lines later is invisible to anything
+  that checks state at drain points or unit boundaries: the zero-worker run,
+  check mode, the sequential probe. Only a reader running *during* the
+  window sees it, and the window is a few microseconds per call, which is
+  why the race fired in about half the runs.
+- `BeforeUnit` waits only for ENEMY units because the target scan reads
+  only enemies. But the line-of-fire rays read the searcher's OWN side
+  (`TraceRay` and `TestCone` scan allied and neutral units, never
+  enemies), so any write to a unit that its allies' rays read needs its own
+  rule.
+- The only other direct transform write in the sim, `CalcSkidRot`, runs in
+  the per-frame update, outside the slice. The Lua path drains before any
+  write.
+
+**The fix** (`speed43`, `25a1367`): `TryTargetHeading` first calls
+`BrP4::BeforeTurn(owner)`. That waits for the running searches by the
+unit's ally team (or any side, if the unit is neutral) whose area contains
+it, by `BeforeUnit`'s distance rule (new drain reason `turn`). Running:
+the medium gate, three runs to frame 66,720 and a governed whole game, all
+with everything on except P1 v8.
