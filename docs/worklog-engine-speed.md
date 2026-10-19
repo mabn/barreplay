@@ -4673,3 +4673,21 @@ core summed over all six:
   to 3.95 GHz).
 - The main thread waits 10.8%, the same as `speed39`'s ~10%. The ordered
   schemes' barriers have not grown, but they have not shrunk either.
+
+### 2026-10-19 06:14 — fewer P5 workers: no clock to win back
+
+`speed44`, everything on, P5's worker count set by `t2` bits 1-3, 3
+interleaved rounds:
+
+| P5 workers | 63,780 wall | main instructions | 82,000 wall | main instructions |
+|---|---|---|---|---|
+| 7 (`t2=1f`, the whole games') | 9.74 s | 33.33e9 | 8.72 s | 29.15e9 |
+| 4 (`19`) | -0.3% | -7.0% | -0.4% | -7.4% |
+| 3 (`17`) | -1.1% | -7.6% | -0.3% | -8.4% |
+
+**Insight:** with fewer workers the main thread spins 7-8% fewer
+instructions, but its cycles barely move (-0.4 to -0.9%), and its clock stays
+at 3.71-3.73 GHz. In these pinned, cool trials, workers spinning do not
+lower the main core's clock measurably. The turbo-bin lever (up to 7%) needs
+the other cores idle, and at this level of parallelism they never are. The
+whole games use 3 P5 workers from now on (`t2=17`): no slower, less heat.
