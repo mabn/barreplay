@@ -4976,3 +4976,29 @@ items a frame are serial, which leaves runs of ~43 cheap local items between
 them. A fork-join per run costs more than it saves, and running past a
 serial item is unsafe: firing applies damage, impulses and area explosions
 to units that cannot be bounded in advance. Estimated under 1%.
+
+### 2026-10-19 10:38 — H97: leaving a quad without a linear search
+
+In the trio profile `CQuadField::MovedUnit` is 2.7% of the main thread:
+1.92% its own code, 0.56% `memcmp` (the unchanged-quads check), 0.15%
+`GetQuads`. The own time is `spring::VectorErase`, inlined: a unit that
+changed quads leaves each old quad's `units` and `teamUnits` lists by a
+linear `find`, then the last element moves into its slot. In the late
+game's dense air swarms those lists hold hundreds of units.
+
+**H97** (`6480b7b`, `speed46`, `t2` `0x400`): beside `unit->quads` the
+engine keeps the unit's slot in each of those lists. The erase goes straight
+to the slot and moves the same last element into the same slot (then updates
+that element's slot), so the lists come out exactly as the search would
+leave them. All five writers keep the table (`MovedUnit`, `RemoveUnit`,
+`InsertUnitIf`/`RemoveUnitIf`, which a weapon uses to add its target to
+an extra quad and which reorder `unit->quads` by swap-with-last; and team
+changes, which go through `RemoveUnit` and `MovedUnit`). **Every slot is
+checked before use** (`list[slot] == unit`). A wrong one falls back to the
+search and the table is rebuilt from the lists, so bookkeeping can only cost
+time, never change a list. It is also rebuilt whenever the toggle comes on,
+which is what makes checkpoint A/Bs work. `[BR_H97]` logs rebuilds and misses.
+
+Expected: most of the 1.9%. Not attempted: precomputing the projectile
+collision queries (`GetUnitsAndFeaturesColVol`, 1.35%), whose results
+explosions can change mid-pass (new wrecks).
