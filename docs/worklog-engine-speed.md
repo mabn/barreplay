@@ -4450,3 +4450,29 @@ main thread pinned:
   middle and late.
 
 Running: each item alone against the same base, early and middle.
+
+### 2026-10-19 03:54 — per item: P7 is the early cost
+
+`speed43`, each item alone against `587a3f`, 3 interleaved pairs, main thread
+pinned (late: the items' own late-window A/Bs from before):
+
+| item | early: frame 15,000 (1,405 units, 1.4 ms a frame) | middle: frame 35,000 (3,719 units, 5.1 ms) | late: frame 63,780 (9,961 units, 24 ms) |
+|---|---|---|---|
+| P4 | -0.6% | **-3.7%** | -4.1% |
+| P5 | +0.4% | -0.7% | -1.2% |
+| H94 | +0.2% | -1.5% | -1.8% |
+| N2 | -0.7% | +0.8% | -2.2% |
+| **P7** | **+7.6%** wall, +17.7% main instructions | **+2.9%** | -1.5% |
+
+**Insights:**
+- **P7 alone is the early game's loss.** It launches phase A on the workers
+  and waits for it at the LOS point every frame. With a short script tick the
+  main thread gets there first and spins until the workers wake and finish.
+  And whenever any unit was marked, it clears a 32,000-entry index (128 KB)
+  every frame. Neither depends on how many units there are, so both stand out
+  when frames are short.
+- Weighted by where the whole game's time goes (about 5% early, 20% middle,
+  75% late), P7 nets about 0, and every other item pays or is at noise
+  level.
+- **Fix:** run P7 only in frames with enough units (it loses at 3,719 and wins
+  at 9,961), and clear only the index entries it set.
