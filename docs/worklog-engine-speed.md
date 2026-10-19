@@ -4899,3 +4899,29 @@ items. P1 v8, rejected alone at -0.4%, is part of the best setting.
 Running: the same at 15,000 and 35,000, then a governed whole game with
 `t=d0d87abf t2=37`. v9 has never run in an exact whole game, and v8 only
 in the diverged ones (where it changed nothing).
+
+### 2026-10-19 10:32 — whole game with the P1 trio: 12m18.2s active, identical, the best so far
+
+Early and middle windows of the trio (`d0d87abf/37` against `50d87a3f/17`):
+**+0.9%** at 15,000, **-1.5%** at 35,000. Weighted with the late windows,
+about -1.8% for the game.
+
+Governed whole game, `speed44`, `t=d0d87abf t2=37` (P4, P5 with 3 workers,
+H94, N2, P7 gated, P1 v6 + v8 + v9), 7 threads, main pinned:
+**`a26e920d…`, identical**, **12m18.2s** active (paused 1111 s). This is the
+first exact whole game with v9, and with v8 apart from the diverged runs.
+
+| whole game, governed | active | main cycles | main instructions |
+|---|---|---|---|
+| `speed32` (`587fbf`) | 13m21.3s | 2.978e12 | 3.028e12 |
+| `speed44` (`50d87a3f/1f`) | 12m41.4s | 2.843e12 | 2.912e12 |
+| `speed44` + BOLT (`50d87a3f/17`) | 12m30.5s | 2.800e12 | 2.669e12 |
+| **`speed44` (`d0d87abf/37`)** | **12m18.2s** | **2.751e12** | 2.643e12 |
+
+Active time by frame range against `speed44`'s first run: 0-20k 22.7 s
+(22.6), 20k-40k 76.9 (76.0), 40k-60k 143.3 (146.3), 60k-70k 139.8 (146.0),
+70k-80k 158.6 (163.4), 80k-90.9k 186.8 (196.5). The gain is where the
+aircraft are.
+
+Against `speed32`, the best line two days ago: -7.9%. Against stock 2026.07.04
+(38m17s): 3.11x.

@@ -52,6 +52,12 @@ windows (15,000, 35,000, 63,780, 72,000, 82,000): the late window alone
 stands for a fifth of the game's time, and its air-heavy mix flatters the
 parallel items.
 
+Best so far: `speed44`, `t=d0d87abf`, `t2=37` (P1 v6, v8 and v9 added; P5 with
+3 workers): **12m18.2s active**, identical (`a26e920d…`), -7.9% against
+`speed32` and 3.11x stock. v6, v8 and v9 each lose alone and win together
+(-1.4 to -3.3% late): they remove different serial aircraft, so only all
+three shorten P1's start chain (work log, 2026-10-19).
+
 ## Applying
 
 From a clean checkout of the `2026.07.04` tag:
@@ -107,7 +113,7 @@ everything up to `0xfbf`, the whole verylarge1 game `a26e920d…`.
 | `0x10` | H73 | 0024-0025 | headless demo: skip the eager piece-transform walk (run-time test; `#ifdef HEADLESS` never reaches `rts/Sim`) | (in the -19.2%) | on |
 | `0x20` | P1 v5 | 0027 | hover aircraft flying or hovering, and stunned or unfinished aircraft, in parallel | `speed15`: -18% vs all off | on |
 | `0x40` | H74 | 0028-0031 | run-ahead prefetch helper on the main thread's hyperthread sibling | **+11.6%** (slower) | **rejected**, leave off |
-| `0x80` | P1 v6 | 0034-0035 | landed aircraft and aircraft taking off in parallel | -0.8% (noise level) | on |
+| `0x80` | P1 v6 | 0034-0035 | landed aircraft and aircraft taking off in parallel | -0.8% (noise level); alone +0.5 to +3.6% in `speed44`, with v8 and v9 -1.4 to -3.3% | on (with v8 and v9) |
 | `0x100` | H75 | 0036 | serial weapon loop prefetches every weapon 4 units ahead, and their targets 2 ahead | -0.5% (noise level) | on |
 | `0x200` | H76 | 0037 | the unit loops' `for_mt_chunk` hand out chunks of at most 32 (the main thread waited for the slowest worker's quarter) | **-2.2%** | on |
 | `0x400` | H77 | 0038 | `GenerateWeaponTargets` prefetches the candidate 6 ahead (three lines) | **-1.2%** | on |
@@ -118,7 +124,7 @@ everything up to `0xfbf`, the whole verylarge1 game `a26e920d…`.
 | `0x800000` | P4 | 0069-0070 | the slow-update loop's weapon target searches (`GenerateWeaponTargets` + the `TryTarget` walk) on worker threads, applied in launch order; the main thread waits only before writes a search may read (an enemy of a running search's weapon inside its circle, Lua's writing functions, deaths, damage, moves, quad changes...) | **-4.1%** wall, -4.4% main cycles (`speed34`, `t=d87a3f` vs `587a3f`) | on |
 | bits 24-25 | P4 workers | 0070 | 2 + 2k workers take searches (0 = `BARREPLAY_P4_WORKERS`, default 2) | 6 workers +1.5% against 2 | 0 |
 | `0x40000000` | H94 | 0080 | the LOS types' height-map updates (each type scans all its instances per crater) on all threads | **-1.8%** | on |
-| `0x80000000` | P1 v8 | 0081 | hover aircraft standing still in the air (flying or hovering, not stopping or crashing) as parallel items | -0.4% (noise level); exact over the whole game | off |
+| `0x80000000` | P1 v8 | 0081 | hover aircraft standing still in the air (flying or hovering, not stopping or crashing) as parallel items | -0.4% alone; part of the v6 + v8 + v9 trio, exact over the whole game | on (with v6 and v9) |
 | `0x10000000` | P5 | 0073-0078 | the COB engine's thread ticks on the workers with the sequential result: a tick runs out of order when every function its thread can be in uses only own-unit operations (decided once per function from the bytecode); `RAND` and `START` wait for every earlier tick; the global bookkeeping (sleeps, thread ends, the animation list, visual sfx) is applied in tick order at each segment's end. `BARREPLAY_P5_STATS=<frames>` logs counters | **-1.2%** wall and cycles, -6.3% instructions (`speed39`, `t=1cd87a3f` vs `cd87a3f`) | on |
 
 The second word, `BARREPLAY_TOGGLES2` / the go file's `t2=<hex>` (0084 on):
@@ -126,9 +132,9 @@ The second word, `BARREPLAY_TOGGLES2` / the go file's `t2=<hex>` (0084 on):
 | bit | id | patches | what | late window, measured | status |
 |---|---|---|---|---|---|
 | `0x1` | N2 | 0082-0083, 0086, 0088 | BAR's gadget-handler callin wrapper and handler loop for `UnitPreDamaged`, `UnitDamaged`, `Explosion` and `ProjectileDestroyed` done in C when their bytecode hashes are on the built-in list (verified against BAR's source; anything else, tweakdefs included, runs interpreted). `BARREPLAY_N2_HASHES` adds hashes | **-2.2%** | on |
-| bits 1-3 | P5 workers | 0084 | the COB tick's worker count (0 = `BARREPLAY_P5_WORKERS`, default 6) | 2 workers +0.7% | 7 in the whole game above |
+| bits 1-3 | P5 workers | 0084 | the COB tick's worker count (0 = `BARREPLAY_P5_WORKERS`, default 6) | 2 workers +0.7%; 3 against 7: -0.3 to -1.1% | 3 (`t2=17`/`37`) |
 | `0x10` | P7 | 0084-0085, 0091 | the LOS update's per-unit tests (H93's read-only predicate, every sensor type) on the workers during the script tick; the LOS point runs the real update for the flagged and the changed units in order. 0091 (v3): only in frames with at least `BARREPLAY_P7_MINUNITS` (6,000) active units, and no per-frame clear of a 32,000-entry index | **-1.5%** late; ungated +7.6% early (1,405 units), +2.9% middle (3,719) | on |
-| `0x20` | P1 v9 | 0087 | P1's items claimed in batches of consecutive planned-parallel units (bits 6-7: 8/4/16/32 a batch) | -1.7% wall, +0.2% cycles: the waits moved to the serial aircraft | off |
+| `0x20` | P1 v9 | 0087 | P1's items claimed in batches of consecutive planned-parallel units (bits 6-7: 8/4/16/32 a batch) | alone +0.2 to +1.8%; with v6 and v8 -1.4 to -3.3% (late), exact over the whole game | on (`t2=37`) |
 
 Not toggled (always on in these builds):
 
