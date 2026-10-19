@@ -4736,3 +4736,31 @@ few percent available from scheduling alone, which cannot change any result.
 (`0x100`) or 20 ms (`0x200`, about a late frame) after its last task and
 sleeps at most 0.5 ms at a time. Measuring it at three windows. The P5 test
 showed spinning does not cost the main core clock.
+
+### 2026-10-19 07:32 — H96 rejected: spinning pool workers make everything slower
+
+`speed45` = `speed44` + H96 (`1afd03b`). Medium gate identical, but its
+unpinned sim took 1m16s against 1m06s. Late window, everything else on, 3
+interleaved rounds, main thread pinned alone:
+
+| pool workers idle | wall | main cycles | main instructions | clock |
+|---|---|---|---|---|
+| stock (sleep at once, backoff to 30 ms) | 9.91 s | 36.38e9 | 31.49e9 | 3.71 GHz |
+| spin 2 ms, sleep ≤ 0.5 ms (`t2=117`) | **+7.0%** | +7.2% | **+40.4%** | 3.71 GHz |
+| spin 20 ms (`t2=217`) | **+28.2%** | +11.8% | +38.6% | **3.26 GHz** |
+
+**Insights:**
+- **The main thread's large share of each parallel section is not wake-up
+  latency.** Keeping the workers awake makes the main thread run 40% more
+  instructions. Spinning workers poll the task queue (`DoTask`) and contend
+  with it for the queue's cache lines, so every waiting loop on the main
+  thread (P1, P4, P5, fork-join) runs longer.
+- **Spinning does cost clock once enough of it runs at once:** 20 ms of spin
+  on every worker pushes the package to its power limit (3.26 GHz). The
+  shorter spins of P1, P4 and P5 stayed under it.
+- Unpinned (the gate), a spinning worker can land on the main core's SMT
+  sibling: +15% there.
+- H96 stays in the code behind its toggle, off. Why the main thread does a
+  third of each section is still open. Candidates are uneven chunks (the
+  last chunk taken by the main thread) and workers still busy with P7's
+  background phase A when a section starts.
