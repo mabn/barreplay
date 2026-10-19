@@ -4545,3 +4545,26 @@ binary are within 0.2% of `speed32`'s best, so the forecast is ~12m40s.
   the window. If the first is slower, whole runs lose something that 450-frame
   trials restored from a base checkpoint cannot see (heap layout built up by
   the workers' allocations, for instance).
+
+### 2026-10-19 05:26 — a run's history does not slow the window
+
+Late window, everything on in the window, from two `speed44` checkpoints at
+63,780: one dumped with the base settings (as every A/B so far), one with
+everything on since frame 0. 3 interleaved rounds:
+
+| checkpoint dumped with | wall | cycles | instructions | clock |
+|---|---|---|---|---|
+| base settings | 9.77 s | 36.45e9 | 34.07e9 | 3.76 GHz |
+| everything on | 9.68 s (-1.0%) | 36.16e9 (-0.8%) | 34.26e9 | 3.77 GHz |
+
+**Insights:**
+- The heap layout and state the workers build up over a whole run do not
+  make the window slower. Base-dumped checkpoints measure the items fairly.
+- One real difference between trials and whole games: from a cool start, the
+  trials run everything-on at a higher clock than the base (3.76 against
+  3.70 GHz). The whole games ran both at 3.68 GHz. So a trial's wall gain
+  overstates a hot whole game's by the clock part, about 1.5%.
+- Redone in cycles with the 1.2% base overhead, the five windows forecast
+  about -2.6% for `speed43` against `speed32`. It measured -1.2%, a gap of
+  the size single whole-game runs cannot resolve. The `speed44` whole game
+  (running) is the check.
