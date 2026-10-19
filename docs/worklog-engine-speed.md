@@ -4764,3 +4764,47 @@ interleaved rounds, main thread pinned alone:
   third of each section is still open. Candidates are uneven chunks (the
   last chunk taken by the main thread) and workers still busy with P7's
   background phase A when a section starts.
+
+### 2026-10-19 07:35 — what the main thread does in the parallel sections; the front end; BOLT
+
+**Work or waiting** (main thread, `speed44` late profile):
+
+| section | main thread working | main thread waiting |
+|---|---|---|
+| weapon vectors (+ the serial weapon loop under the same caller) | 3.5% | 0.9% |
+| ground movement | 5.7% | 0.8% |
+| LOS update | 2.9% | **4.3%** |
+
+**Insights:**
+- In ground movement and the weapon section the main thread mostly
+  *works*: those systems have serial phases, so the main thread's large
+  share is their serial part, not scheduling (H96 already ruled that out).
+- **LOS is waiting.** P7's finish runs one task per sensor type. The
+  terrain raycasts (`CLosMap::UnsafeLosAdd`, 6.2% of a core) already run in
+  parallel inside each type (`PrepareRaycast`). What the main thread waits
+  for is the heaviest type's serial bookkeeping: per-unit instance updates
+  (`UpdateUnit`), adding and removing sight on the map, the instance cache.
+  The map changes are integer adds, so their order does not matter and they
+  could run in parallel exactly, but splitting a type means partitioning its
+  shared state (instance hash, queues). Estimated 2-3%, a large refactor.
+
+**The front end.** Late window, everything on, main thread (`perf stat`):
+
+| | value |
+|---|---|
+| cycles | 36.2e9 |
+| instructions | 31.2e9 |
+| uop slots not delivered by the front end | 15.1e9 = **10.4%** of 4 × cycles |
+| instruction-cache misses | 80.1M = 2.6 per 1,000 instructions |
+| iTLB walks | 2.4M |
+| mispredicted branches | 150M = 4.8 per 1,000 instructions |
+
+**BOLT** (moonshot, running). Post-link layout optimization: LBR profiles
+reorder basic blocks (ext-tsp) and functions (cdsort) and split cold code
+out, on top of PGO+LTO. It changes no instruction's meaning, only where code
+sits, so results cannot change, but the gate and a whole game still check
+that. With 10% front-end stalls, a few percent is a realistic hope. Steps:
+`speed44r` (= `speed44` linked with `-Wl,--emit-relocs`), one LBR-profiled
+run of the game to frame 88,000, `perf2bolt` and `llvm-bolt` (LLVM 20), the
+gate, then interleaved trials at 63,780 and 82,000, bolted against the same
+binary unbolted.
