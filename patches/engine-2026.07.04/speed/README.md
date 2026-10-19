@@ -10,9 +10,10 @@ a gate and a publish.
 
 Numbering: the 4-digit prefixes continue the series (`../0001`-`0013`), so
 every patch number under `engine-2026.07.04/` is unique: 0014-0043,
-0063-0067, 0069-0070 and 0073-0091 here, 0044-0045, 0052-0062, 0068 and 0071-0072 in `rejected/`, 0046-0051 in
-`tools/`. Change
-identifiers continue the work log's H-series (H1-H73), with H74-H94 for the
+0063-0067, 0069-0070, 0073-0091, 0095-0099, 0101, 0104 and 0106-0108 here,
+0044-0045, 0052-0062, 0068, 0071-0072, 0092-0094, 0100, 0102-0103 and 0105 in
+`rejected/`, 0046-0051 in `tools/`. Change
+identifiers continue the work log's H-series (H1-H73), with H74-H104 for the
 ones below.
 P1 (with its versions v2-v9), P2, P3, P4, P5, P7, N1, N2 and the widget-side
 W1-W7 are families of their own.
@@ -81,7 +82,16 @@ git am $P/speed/rejected/0071-*.patch $P/speed/rejected/0072-*.patch
 git am $(ls $P/speed/00*.patch | awk -F/ '$NF > "0072"')
 ```
 
-`tools/pgo-profile-speed39.tar.xz` is the profile `speed43` and `speed44` build with
+The line after it, Recoil branch `speed53`, is `speed44` plus 0092-0108 in
+number order, kept and rejected alike (the rejected ones are toggled off;
+later patches were written on top of them). Checked: applied to `speed44` they
+give `speed53` with no difference.
+
+```sh
+git am $(ls $P/speed/0*.patch $P/speed/rejected/0*.patch | awk -F/ '{print $NF" "$0}' | awk '$1 >= "0092"' | sort | cut -d' ' -f2)
+```
+
+`tools/pgo-profile-speed39.tar.xz` is the profile `speed43` to `speed53` build with
 (retrained on `speed39`: -3.6% in the late window against the `speed31` one). It is `speed24`, the branch the measured builds
 came from, with only identifiers in comments renamed. Build with
 `-DSYNCCHECK=OFF`. Patches 0014-0017 make that configuration compile, and
@@ -135,6 +145,16 @@ The second word, `BARREPLAY_TOGGLES2` / the go file's `t2=<hex>` (0084 on):
 | bits 1-3 | P5 workers | 0084 | the COB tick's worker count (0 = `BARREPLAY_P5_WORKERS`, default 6) | 2 workers +0.7%; 3 against 7: -0.3 to -1.1% | 3 (`t2=17`/`37`) |
 | `0x10` | P7 | 0084-0085, 0091 | the LOS update's per-unit tests (H93's read-only predicate, every sensor type) on the workers during the script tick; the LOS point runs the real update for the flagged and the changed units in order. 0091 (v3): only in frames with at least `BARREPLAY_P7_MINUNITS` (6,000) active units, and no per-frame clear of a 32,000-entry index | **-1.5%** late; ungated +7.6% early (1,405 units), +2.9% middle (3,719) | on |
 | `0x20` | P1 v9 | 0087 | P1's items claimed in batches of consecutive planned-parallel units (bits 6-7: 8/4/16/32 a batch) | alone +0.2 to +1.8%; with v6 and v8 -1.4 to -3.3% (late), exact over the whole game | on (`t2=37`) |
+| bits 8-9 | H96 | 0092-0093 (rejected) | pool workers spin 2 ms (`0x100`) or 20 ms (`0x200`) after their last task, sleeping at most 0.5 ms | +7.0% / +28.2% | off |
+| `0x400` | H97 | 0094 (rejected) | each unit's slot in its quad lists kept, so leaving a quad needs no search | +1.0%; on huge-page memory -0.1% / +1.1% | off |
+| `0x800` | H98 | 0095 | the unit loop prefetches the quad bookkeeping (the unit's `quads` line, the list's buffer, the first quads) of the units whose collision-map update runs this frame | -0.5% / -0.3% | on |
+| `0x1000` | H99 | 0098, 0101 | the per-frame Lua GC step on its own thread during the LOS update (the collector is stopped between calls and runs on a wall-clock budget; the LOS update runs no Lua) | -0.4 to -1.9% / -3.4 to -3.5% | on |
+| `0x2000` | H100 | 0099 | the ground system's two single-threaded loops (heading changes, the final `Update`) on all threads; serial while a Lua unit script defines `ChangeHeading` or anything listens to `UnitMoved`; from 512 entries | -1.4% / -2.6% | on |
+| `0x4000` | H101 | 0100, 0103, 0105 (rejected) | `CUnit::Update` on all threads in runs between serial points (busy builders and factories, units firing a synced-received air/water event) | +2.0% / +3.9%; refined +1.5% / +0.5% (752 busy builders a frame) | off |
+| `0x8000`, `0x10000` | H102 | 0102 (rejected) | a push wakes any sleeping worker; worker 1 spins 1 ms | -2.1% beside the first H101, noise without | off |
+| `0x20000` | H103 | 0104 | synced `next` calls `lua_next` directly instead of the original `next` through `lua_call` | -0.7% / -0.7% (noise level) | on |
+| `0x40000` | H104 | 0106-0107 | in a demo replay the unsynced halves of LuaRules and LuaGaia receive no events and no `SendToUnsynced` messages (the arguments are still checked) | -2.2% / -2.4% | on |
+| `0x80000` | P7 v4 | 0108 | P7's phase A runs each sensor type's per-unit loop itself (a task per type); the handler's event functions and the height-map hook join it; `Update` discards an instance created and released before it | -1.2% / -0.8% | on |
 
 Not toggled (always on in these builds):
 
@@ -151,6 +171,7 @@ Not toggled (always on in these builds):
 | 0067 (H91, toggle `0x400000`) | `UpdateUnits` does `UpdateCollisionMap`'s rate test itself, so two units in three never touch their move type |
 | 0079 | measurement: P1's main-thread waits by kind, its serial items by type, state and speed; P4 and P5 counters on the bench harness's result line |
 | 0089 | P1's crash bound compiles with the sync checker on (`std::min<float>` over a `SyncedFloat`) |
+| 0096-0097 | bench harness: after a restore the engine waits until transparent huge pages cover what a real run has (98%, or until the share stops growing for 6 s; at most 120 s) before the window. A restored heap is on 4 KiB pages until H71's collapser runs over it again, and a window started at once ran ~19% slower than a fresh run (now ~4%) |
 | 0090 | **P4 fix**: `CWeapon::TryTargetHeading` turns its unit for a moment (heading and dir vectors, written directly) and back; first it waits for the running searches of the unit's ally team (or any, if the unit is neutral) whose area holds it, since their line-of-fire rays read their own side's units. Without it P4 diverged in about half the whole-game runs (work log, 2026-10-19) |
 
 ## rejected/
@@ -168,6 +189,10 @@ Not toggled (always on in these builds):
 | `0059-H86…` | H86: `QueueDeleteUnits` prefetches the death flag 16 units ahead (toggle `0x40000`) | +0.7% wall, noise or worse |
 | `0071-H92…` | H92: `UpdateWeaponVectors` keeps its outputs while every input is bitwise unchanged (toggle `0x4000000`) | identical; noise level (`speed36`) |
 | `0072-H93…` | H93: the LOS types' per-unit tests in one parallel pre-pass, each type's loop visits only the units that need it (toggle `0x8000000`) | identical; noise level (`speed36`); P5 applies without 0071-0072 |
+| `0092-`, `0093-H96…` | H96: every pool worker spins 2 ms or 20 ms after its last task and sleeps at most 0.5 ms (toggle2 bits 8-9). Kept in the line (toggled off) | +7.0% / +28.2%: the main thread ran 40% more instructions, polling the queue against the spinners; 20 ms of spin hit the package power limit (3.26 GHz) |
+| `0094-H97…` | H97: each unit's slot in its quad lists kept beside `unit->quads`, so leaving a quad erases without a search (toggle2 `0x400`). Kept in the line | +1.0% wall, +0.0% instructions: `MovedUnit`'s time is three dependent cache misses (the unit's `quads`, the list's buffer, the quad), not the searches; H98 prefetches those instead |
+| `0100-`, `0103-`, `0105-H101…` | H101: `CUnit::Update` on all threads in runs, then events, reload log and collision maps in order; busy builders and factories and units firing a synced-received air/water event are serial points (toggle2 `0x4000`). Kept in the line | +2.0% / +3.9%; refined +1.5% / +0.5%: a late frame has 752 busy builders among 10,496 units (nano turrets assisting factories), so the runs stay short |
+| `0102-H102…` | H102: a push wakes any sleeping worker (toggle2 `0x8000`); worker 1 spins 1 ms (`0x10000`). Kept in the line | the wake -2.1% / -1.9% beside the first H101 (dozens of small sections a frame), +0.8% / -1.2% without it; the spin nothing |
 | `0068-H90…` | H90: `MovedUnit` skips `GetQuads` while the unit stays within the distance at which none of its tests can flip (toggle `0x200000`) | +0.8%: with 128-elmo quads the nearest threshold is a few elmos away and aircraft move 5-15 a frame, so the full computation runs anyway, plus the safe-distance square roots |
 
 H74 (0028-0031) stayed in the main line because later patches were built on

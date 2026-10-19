@@ -1,0 +1,216 @@
+From 8024801a162086caaaf5940b624fdea310bb2a7c Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 13:22:23 +0000
+Subject: [PATCH 100/108] [barreplay] H101: CUnit::Update on all threads, then
+ events, reload log and collision maps in order (toggle2 0x4000)
+
+Update changes only its own unit except for the physical-state events and the
+reload log; the collision-map update after it reads only that unit and writes
+the quad field, which Update never reads. Only while no synced client
+receives the physical-state events; from 512 units.
+---
+ rts/Sim/Units/Unit.cpp        | 75 +++++++++++++++++++++++++++++++++++
+ rts/Sim/Units/Unit.h          |  5 +++
+ rts/Sim/Units/UnitHandler.cpp | 62 +++++++++++++++++++++++++++++
+ rts/System/EventHandler.h     | 10 +++++
+ 4 files changed, 152 insertions(+)
+
+diff --git a/rts/Sim/Units/Unit.cpp b/rts/Sim/Units/Unit.cpp
+index 2e871e9..389fb9e 100644
+--- a/rts/Sim/Units/Unit.cpp
++++ b/rts/Sim/Units/Unit.cpp
+@@ -1856,6 +1856,81 @@ void CUnit::DependentDied(CObject* o)
+ 
+ 
+ 
++uint8_t CUnit::BrUpdateLocal()
++{
++	const uint8_t bits = uint8_t(IsInAir()) | (uint8_t(IsInWater()) << 1) | (uint8_t(IsUnderWater()) << 2);
++
++	if ((g_brToggles & 0x100000) != 0) {
++		if (pos.x != brPhysX || pos.z != brPhysZ || g_brHeightMapVersion != brPhysHmv || !brPhysValid) {
++			brPhysX = pos.x;
++			brPhysZ = pos.z;
++			brPhysHmv = g_brHeightMapVersion;
++			brPhysGround = CGround::GetHeightReal(pos.x, pos.z);
++			brPhysValid = true;
++		}
++		CSolidObject::UpdatePhysicalStateAt(0.1f, brPhysGround);
++	} else {
++		CSolidObject::UpdatePhysicalState(0.1f);
++	}
++	UpdatePosErrorParams(true, false);
++
++	// 0x40: a physical-state event is due
++	const uint8_t now = uint8_t(IsInAir()) | (uint8_t(IsInWater()) << 1) | (uint8_t(IsUnderWater()) << 2);
++	const uint8_t ret = bits | ((now != bits) ? 0x40 : 0);
++
++	if (beingBuilt)
++		return ret;
++	if (isDead)
++		return ret;
++
++	recentDamage *= 0.9f;
++	flankingBonusMobility += flankingBonusMobilityAdd;
++
++	if (IsStunned()) {
++		for (CWeapon* w: weapons) {
++			++(w->reloadStatus);
++		}
++		return ret | 0x80;
++	}
++
++	restTime += 1;
++	return ret;
++}
++
++void CUnit::BrUpdateFinish(uint8_t bits)
++{
++	const bool inAir      = (bits & 1) != 0;
++	const bool inWater    = (bits & 2) != 0;
++	const bool underWater = (bits & 4) != 0;
++
++	if (IsInAir() != inAir) {
++		if (IsInAir()) {
++			eventHandler.UnitEnteredAir(this);
++		} else {
++			eventHandler.UnitLeftAir(this);
++		}
++	}
++	if (IsInWater() != inWater) {
++		if (IsInWater()) {
++			eventHandler.UnitEnteredWater(this);
++		} else {
++			eventHandler.UnitLeftWater(this);
++		}
++	}
++	if (IsUnderWater() != underWater) {
++		if (underWater) {
++			eventHandler.UnitLeftUnderwater(this);
++		} else {
++			eventHandler.UnitEnteredUnderwater(this);
++		}
++	}
++	if ((bits & 0x80) != 0) {
++		for (CWeapon* w: weapons) {
++			BR_RELOAD_CHANGED(w);
++		}
++	}
++}
++
+ void CUnit::UpdatePhysicalState(float eps)
+ {
+ 	RECOIL_DETAILED_TRACY_ZONE;
+diff --git a/rts/Sim/Units/Unit.h b/rts/Sim/Units/Unit.h
+index fa84a39..c772a11 100644
+--- a/rts/Sim/Units/Unit.h
++++ b/rts/Sim/Units/Unit.h
+@@ -144,6 +144,11 @@ public:
+ 	void CalculateTerrainType();
+ 	void UpdateTerrainType();
+ 	void UpdatePhysicalState(float eps) override;
++	// [barreplay] H101: Update() in two halves. The first changes only this
++	// unit (any thread) and returns what the second needs; the second fires
++	// the physical-state events and logs the reloads, in the loop's order.
++	uint8_t BrUpdateLocal();
++	void BrUpdateFinish(uint8_t bits);
+ 
+ 	float3 GetErrorVector(int allyteam) const;
+ 	float3 GetErrorPos(int allyteam, bool aiming = false) const { return (aiming? aimPos: midPos) + GetErrorVector(allyteam); }
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 15c8688..af14f0b 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -611,6 +611,68 @@ void CUnitHandler::UpdateUnits()
+ 	SCOPED_TIMER("Sim::Unit::Update");
+ 
+ 	size_t activeUnitCount = activeUnits.size();
++
++	if ((g_brToggles2 & 0x4000) != 0) {
++		static int brLogFrame = -1000000;
++		if ((gs->frameNum - brLogFrame) >= 9000) {
++			brLogFrame = gs->frameNum;
++			LOG("[BR_H101] f=%d syncedPhysicalStateClients=%d units=%zu", gs->frameNum, int(eventHandler.HasSyncedPhysicalStateClients()), activeUnitCount);
++		}
++	}
++
++	// [barreplay] H101 (toggle2 0x4000): CUnit::Update changes only its own
++	// unit (physical state from its position and the height and water maps,
++	// position error, damage decay, rest time, a stunned unit's reloads),
++	// except for the physical-state events and the reload log. The collision
++	// map update after it reads only that unit and writes the quad field,
++	// which Update never reads. So every Update runs first, on all threads,
++	// and then, in the loop's order, each unit's events, its reload-log
++	// entries and its collision-map update: the same calls in the same order
++	// as before for everything outside the units. Only while no SYNCED client
++	// receives the physical-state events (an unsynced one cannot change the
++	// simulation, so it may see them after the other units' updates).
++	if ((g_brToggles2 & 0x4000) != 0 && activeUnitCount >= 512 && ThreadPool::HasThreads() && !eventHandler.HasSyncedPhysicalStateClients()) {
++		static std::vector<uint8_t> brBits;
++		brBits.resize(activeUnitCount);
++		for_mt_chunk(0, int(activeUnitCount), [&](const int i) {
++			brBits[i] = activeUnits[i]->BrUpdateLocal();
++		}, 1, BrChunkMax());
++
++		const int rate = modInfo.unitQuadPositionUpdateRate;
++		for (size_t i = 0; i < activeUnitCount; ++i) {
++			if ((g_brToggles2 & 0x800) != 0) {
++				if (i + 8 < activeUnitCount) {
++					const CUnit* u8 = activeUnits[i + 8];
++					if (((gs->frameNum + u8->id) % rate) == 0)
++						__builtin_prefetch(&u8->quads);
++				}
++				if (i + 4 < activeUnitCount) {
++					const CUnit* u4 = activeUnits[i + 4];
++					if (((gs->frameNum + u4->id) % rate) == 0) {
++						__builtin_prefetch(u4->moveType);
++						if (!u4->quads.empty())
++							__builtin_prefetch(u4->quads.data());
++					}
++				}
++				if (i + 2 < activeUnitCount) {
++					const CUnit* u2 = activeUnits[i + 2];
++					if (((gs->frameNum + u2->id) % rate) == 0) {
++						const size_t nq = std::min<size_t>(u2->quads.size(), 2);
++						for (size_t k = 0; k < nq; ++k)
++							__builtin_prefetch(&quadField.GetQuad(u2->quads[k]));
++					}
++				}
++			}
++			CUnit* unit = activeUnits[i];
++			if ((brBits[i] & 0xC0) != 0)
++				unit->BrUpdateFinish(brBits[i]);
++			if ((g_brToggles & 0x400000) == 0 || ((gs->frameNum + unit->id) % rate) == 0)
++				unit->moveType->UpdateCollisionMap();
++			assert(activeUnits[i] == unit);
++		}
++		return;
++	}
++
+ 	BrRunAhead::Begin(1, activeUnits, 0, activeUnitCount);
+ 	for (size_t i = 0; i < activeUnitCount; ++i) {
+ 		BrRunAhead::At(int(i));
+diff --git a/rts/System/EventHandler.h b/rts/System/EventHandler.h
+index ef88e67..fec7df7 100644
+--- a/rts/System/EventHandler.h
++++ b/rts/System/EventHandler.h
+@@ -135,6 +135,16 @@ class CEventHandler
+ 			}
+ 			return false;
+ 		}
++		// [barreplay] H101: may a physical-state event's receiver change synced state?
++		bool HasSyncedPhysicalStateClients() const {
++			for (const auto* l: {&listUnitEnteredAir, &listUnitLeftAir, &listUnitEnteredWater, &listUnitLeftWater, &listUnitEnteredUnderwater, &listUnitLeftUnderwater}) {
++				for (const CEventClient* ec: *l) {
++					if (ec->GetSynced())
++						return true;
++				}
++			}
++			return false;
++		}
+ 		void UnitMoveFailed(const CUnit* unit);
+ 		void UnitArrivedAtGoal(const CUnit* unit);
+ 
+-- 
+2.53.0
+

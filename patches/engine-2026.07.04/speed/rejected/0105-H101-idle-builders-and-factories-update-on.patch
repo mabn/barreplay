@@ -1,0 +1,144 @@
+From 162a59f1667dec6cf0271640a69949c9913b9019 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 14:57:27 +0000
+Subject: [PATCH 105/108] [barreplay] H101: idle builders and factories update
+ on all threads too (only busy ones are serial points); counts by kind
+
+---
+ rts/Sim/Units/Unit.cpp            |  1 +
+ rts/Sim/Units/Unit.h              |  8 ++++++--
+ rts/Sim/Units/UnitHandler.cpp     | 14 ++++++++++----
+ rts/Sim/Units/UnitTypes/Builder.h | 11 ++++++++++-
+ rts/Sim/Units/UnitTypes/Factory.h | 10 +++++++++-
+ 5 files changed, 36 insertions(+), 8 deletions(-)
+
+diff --git a/rts/Sim/Units/Unit.cpp b/rts/Sim/Units/Unit.cpp
+index c0641ef..2a23151 100644
+--- a/rts/Sim/Units/Unit.cpp
++++ b/rts/Sim/Units/Unit.cpp
+@@ -1858,6 +1858,7 @@ void CUnit::DependentDied(CObject* o)
+ 
+ uint8_t CUnit::BrUpdateLocal()
+ {
++	BrUpdateLocalExtra();
+ 	const uint8_t bits = uint8_t(IsInAir()) | (uint8_t(IsInWater()) << 1) | (uint8_t(IsUnderWater()) << 2);
+ 
+ 	if ((g_brToggles & 0x100000) != 0) {
+diff --git a/rts/Sim/Units/Unit.h b/rts/Sim/Units/Unit.h
+index 4f87b72..503cc7f 100644
+--- a/rts/Sim/Units/Unit.h
++++ b/rts/Sim/Units/Unit.h
+@@ -151,8 +151,12 @@ public:
+ 	void BrUpdateFinish(uint8_t bits);
+ 	// whether UpdatePhysicalState would fire an event now (fills H88's cache)
+ 	bool BrPredictPhysicalStateEvent();
+-	// Update is overridden (CBuilder, CFactory: work beyond the unit itself)
+-	virtual bool BrOwnUpdate() const { return false; }
++	// 0: Update is CUnit::Update (and BrUpdateLocal does it); 2: an idle
++	// builder or factory, whose Update is BrUpdateLocalExtra and then
++	// CUnit::Update; 1: Update does work beyond the unit (a busy CBuilder or
++	// CFactory)
++	virtual int BrUpdateKind() const { return 0; }
++	virtual void BrUpdateLocalExtra() {}
+ 
+ 	float3 GetErrorVector(int allyteam) const;
+ 	float3 GetErrorPos(int allyteam, bool aiming = false) const { return (aiming? aimPos: midPos) + GetErrorVector(allyteam); }
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 5bbceab..b7b48b6 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -640,7 +640,8 @@ void CUnitHandler::UpdateUnits()
+ 		static std::vector<uint8_t> brBits;
+ 		static std::vector<uint8_t> brSerial;
+ 		// serial points (builders/factories, events), runs on all threads, units in them, re-plans, mispredictions, frames
+-		static long long brStat[7] = {0, 0, 0, 0, 0, 0, 0};
++		// ..., serial points that were busy builders/factories, ones that were events
++		static long long brStat[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+ 		static int brLogFrame = -1000000;
+ 
+ 		brBits.resize(activeUnitCount);
+@@ -652,7 +653,8 @@ void CUnitHandler::UpdateUnits()
+ 		const auto plan = [&](size_t from) {
+ 			for_mt_chunk(int(from), int(activeUnitCount), [&](const int i) {
+ 				CUnit* u = activeUnits[i];
+-				brSerial[i] = uint8_t(u->BrOwnUpdate() ? 2 : 0) | uint8_t((synced && u->BrPredictPhysicalStateEvent()) ? 1 : 0);
++				const int kind = u->BrUpdateKind();
++				brSerial[i] = uint8_t((kind == 1) ? 2 : 0) | uint8_t((synced && u->BrPredictPhysicalStateEvent()) ? 1 : 0) | uint8_t((kind == 2) ? 4 : 0);
+ 			}, 1, BrChunkMax());
+ 		};
+ 		const auto collisionMap = [&](CUnit* unit) {
+@@ -695,7 +697,7 @@ void CUnitHandler::UpdateUnits()
+ 		size_t cur = 0;
+ 		while (cur < activeUnitCount) {
+ 			size_t k = cur;
+-			while (k < activeUnitCount && brSerial[k] == 0)
++			while (k < activeUnitCount && (brSerial[k] & 3) == 0)
+ 				++k;
+ 
+ 			if ((k - cur) >= 64) {
+@@ -725,6 +727,7 @@ void CUnitHandler::UpdateUnits()
+ 				break;
+ 
+ 			// the serial point
++			brStat[(brSerial[k] & 2) ? 7 : 8] += 1;
+ 			const unsigned luaWrites = g_brLuaWrites;
+ 			const unsigned hmv = g_brHeightMapVersion;
+ 			const size_t numActive = activeUnits.size();
+@@ -741,7 +744,10 @@ void CUnitHandler::UpdateUnits()
+ 		brStat[5] += 1;
+ 		if ((gs->frameNum - brLogFrame) >= 9000) {
+ 			brLogFrame = gs->frameNum;
+-			LOG("[BR_H101] f=%d units=%zu synced=%d frames=%lld serialPoints=%lld runs=%lld inRuns=%lld replans=%lld mispredictions=%lld", gs->frameNum, activeUnitCount, int(synced), brStat[5], brStat[0], brStat[1], brStat[2], brStat[3], brStat[4]);
++			size_t idle = 0;
++			for (size_t i = 0; i < activeUnitCount; ++i)
++				idle += ((brSerial[i] & 4) != 0);
++			LOG("[BR_H101] f=%d units=%zu synced=%d frames=%lld serialPoints=%lld (busyBuilders=%lld events=%lld) runs=%lld inRuns=%lld replans=%lld mispredictions=%lld idleBuildersNow=%zu", gs->frameNum, activeUnitCount, int(synced), brStat[5], brStat[0], brStat[7], brStat[8], brStat[1], brStat[2], brStat[3], brStat[4], idle);
+ 		}
+ 		return;
+ 	}
+diff --git a/rts/Sim/Units/UnitTypes/Builder.h b/rts/Sim/Units/UnitTypes/Builder.h
+index 07e8a0e..1afd0d8 100644
+--- a/rts/Sim/Units/UnitTypes/Builder.h
++++ b/rts/Sim/Units/UnitTypes/Builder.h
+@@ -32,7 +32,16 @@ public:
+ 	CBuilder();
+ 
+ 	void Update();
+-	bool BrOwnUpdate() const override { return true; } // [barreplay] H101
++	// [barreplay] H101: with no target and no terraform every Update* below
++	// returns at once (as it does when being built or stunned), and what is
++	// left is the nano-piece mask and CUnit::Update
++	int BrUpdateKind() const override {
++		if (beingBuilt || IsStunned())
++			return 2;
++		const bool idle = (curBuild == nullptr && curReclaim == nullptr && curResurrect == nullptr && curCapture == nullptr && !terraforming && helpTerraform == nullptr);
++		return idle? 2: 1;
++	}
++	void BrUpdateLocalExtra() override { nanoPieceCache.Update(); }
+ 	void SlowUpdate();
+ 	void DependentDied(CObject* o);
+ 
+diff --git a/rts/Sim/Units/UnitTypes/Factory.h b/rts/Sim/Units/UnitTypes/Factory.h
+index 3734210..8dda938 100644
+--- a/rts/Sim/Units/UnitTypes/Factory.h
++++ b/rts/Sim/Units/UnitTypes/Factory.h
+@@ -28,7 +28,15 @@ public:
+ 	unsigned int QueueBuild(const UnitDef* buildeeDef, const Command& buildCmd);
+ 
+ 	void Update();
+-	bool BrOwnUpdate() const override { return true; } // [barreplay] H101
++	// [barreplay] H101: nothing being built, and either under construction or
++	// with nothing queued and the yard closed (so nothing to open or close):
++	// what is left is the nano-piece mask and CUnit::Update
++	int BrUpdateKind() const override {
++		if (curBuild != nullptr)
++			return 1;
++		return (beingBuilt || (curBuildDef == nullptr && !yardOpen))? 2: 1;
++	}
++	void BrUpdateLocalExtra() override { nanoPieceCache.Update(); }
+ 
+ 	void DependentDied(CObject* o);
+ 	void CreateNanoParticle(bool highPriority = false);
+-- 
+2.53.0
+

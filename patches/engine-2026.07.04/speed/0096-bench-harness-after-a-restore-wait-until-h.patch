@@ -1,0 +1,54 @@
+From 6ecd274adf182e14b5774f45c964146d97fa5440 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 11:49:52 +0000
+Subject: [PATCH 096/108] [barreplay] bench harness: after a restore, wait
+ until huge pages cover 90% of the resident memory (at most 90 s) before the
+ window
+
+A restored heap is on 4 KiB pages until H71's collapser has run over it again;
+a window started at once ran ~19% slower than the same frames of a fresh run.
+---
+ rts/Net/NetCommands.cpp | 27 +++++++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/rts/Net/NetCommands.cpp b/rts/Net/NetCommands.cpp
+index 89f5a48..b824d9b 100644
+--- a/rts/Net/NetCommands.cpp
++++ b/rts/Net/NetCommands.cpp
+@@ -104,6 +104,33 @@ namespace {
+ 				}
+ 				fclose(f);
+ 			}
++			// [barreplay] a restored heap is on 4 KiB pages until H71's collapser
++			// (every 2 s, nice 19) has run over it again; a window started at once
++			// ran ~19% slower than the same frames of a fresh run (late window:
++			// 36.4e9 cycles against 30.7e9). Wait until the huge pages cover what a
++			// real run has (90% of the resident memory; a fresh run has 99%), at
++			// most 90 s, so trials measure the memory a real run uses.
++			{
++				const long long w0 = brNowNs(CLOCK_MONOTONIC);
++				long rss = 0, ahp = 0;
++				for (;;) {
++					rss = 0; ahp = 0;
++					if (FILE* sm = fopen("/proc/self/smaps_rollup", "r")) {
++						char line[256];
++						while (fgets(line, sizeof(line), sm) != nullptr) {
++							if (strncmp(line, "Rss:", 4) == 0) rss = atol(line + 4);
++							else if (strncmp(line, "AnonHugePages:", 14) == 0) ahp = atol(line + 14);
++						}
++						fclose(sm);
++					}
++					if (rss <= 0 || ahp * 10 >= rss * 9 || (brNowNs(CLOCK_MONOTONIC) - w0) > 90000000000LL)
++						break;
++					Watchdog::ClearTimers();
++					usleep(200 * 1000);
++				}
++				Watchdog::ClearTimers();
++				LOG("[BR_BENCH] huge pages %ld of %ld kB after %.1f s", ahp, rss, (brNowNs(CLOCK_MONOTONIC) - w0) / 1e9);
++			}
+ 		}
+ 		void countersOn() {
+ 			// frequency-independent work counters (core cycles) + deterministic
+-- 
+2.53.0
+
