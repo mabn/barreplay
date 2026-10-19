@@ -4605,3 +4605,71 @@ Active time by frame range, `speed43` → `speed44`:
 - **The five-window forecast now matches the whole game to 1 second.**
   Five base-dumped windows, weighted by the game's time per range, are a
   sound proxy, and the single late window was not.
+
+### 2026-10-19 06:03 — where the time is now: `speed44`, late window, everything on
+
+Late window (63,780 +450, 9,961 units), `speed44` `t=50d87a3f t2=1f`, LBR
+call stacks at 499 Hz, main thread pinned alone on its core. Wall 9.81 s, main
+thread 36.4e9 cycles. (The huge-page collapser thread, which shares the main
+thread's name, is filtered out.)
+
+![verylarge1 late game, speed44 t=50d87a3f t2=1f, main thread](flamegraphs/2026-10-19-verylarge1-speed44.svg)
+
+**Main thread**, % of one core:
+
+| block | % | of which Lua |
+|---|---|---|
+| **units** | **61.2** | 3.7 |
+| ├ aircraft move loop (P1) | 12.5 | 0.8 |
+| ├ ground movement (parallel section) | 6.5 | |
+| ├ `CUnit::SlowUpdate` (command AI, move type) | 6.1 | 0.3 |
+| ├ weapon vectors (parallel section) | 6.1 | |
+| ├ `CBeamLaser::Update` | 5.3 | 1.1 |
+| ├ LTO-inlined unit and weapon code | 5.2 | |
+| ├ `CWeapon::Update` (other weapons) | 4.1 | 0.2 |
+| ├ `CQuadField::MovedUnit` | 2.7 | |
+| ├ `CUnit::UpdatePhysicalState` | 2.6 | |
+| ├ `CWeapon::SlowUpdate` | 2.5 | |
+| ├ P4 (commits, waits, own searches) | 2.4 | 0.1 |
+| ├ `CFactory::Update` | 2.0 | 0.8 |
+| ├ `CBuilder::Update` | 1.9 | 0.3 |
+| └ rest | 1.3 | |
+| Lua callins (gadgets), not from units | 12.2 | 12.2 |
+| LOS update | 7.2 | |
+| projectiles and collisions | 5.2 | 1.4 |
+| `SimFrame`, other | 4.4 | |
+| Lua GC | 2.6 | 2.6 |
+| unit-script anims (parallel section) | 2.5 | |
+| pathfinding (QTPFS) | 2.3 | |
+| map damage, features, COB, net, other | 2.1 | 0.1 |
+| **total** | **100** | **~18.5** |
+
+Of that, the main thread **waits** for 10.8%: fork-join sections 4.6, P4 2.1,
+P1 2.1, P5 1.6, P7 0.4.
+
+**Workers** (six threads, together 191% of one core, about 32% each), % of one
+core summed over all six:
+
+| activity | % |
+|---|---|
+| P1 aircraft work | 41.5 |
+| weapon vectors | 16.3 |
+| LOS update (by type) | 12.8 |
+| ground movement | 12.6 |
+| unit-script anims | 10.7 |
+| P4 target searches | 8.5 |
+| P7 LOS phase A | 8.1 |
+| pathfinding (QTPFS) | 6.9 |
+| P5 COB ticks | 5.8 |
+| **spinning, waiting for work: P1 14.5, P5 13.3, P4 11.6** | **39.4** |
+| other (pool, unresolved) | 28.4 |
+
+**Insights:**
+- **Lua is the largest block outside the unit loops**: ~18.5% of the main
+  thread with GC, and serial by nature. Every other block is under 8%.
+- **The workers spin about 39% of a core.** P5 spins twice as long as it
+  ticks, and P4 longer than it searches. That spinning keeps every core
+  active, and with it the main core in its lowest turbo bin (3.69 against up
+  to 3.95 GHz).
+- The main thread waits 10.8%, the same as `speed39`'s ~10%. The ordered
+  schemes' barriers have not grown, but they have not shrunk either.
