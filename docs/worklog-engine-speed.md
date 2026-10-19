@@ -4852,3 +4852,26 @@ is the worker change and noise, not BOLT.
 
 BOLT is dropped. The engine-side recorder (~1%) and N2 for more callins (~1%)
 are next.
+
+### 2026-10-19 09:26 — page walks in a fresh run: under 1%
+
+Fresh run of `speed44` (everything on, `t2=17`), main thread pinned,
+`perf stat` attached to the main thread for 10 s from frame ~63,800:
+
+| counter | value | of main cycles |
+|---|---|---|
+| cycles | 30.69e9 | |
+| data-TLB load walks | 175M cycles | 0.57% |
+| data-TLB store walks | 18M cycles | 0.06% |
+| instruction-TLB walks | 81M cycles | 0.26% |
+| L1 DTLB misses that hit the STLB | 221M | (~7 cycles each, ~5%) |
+| resident memory / of it on huge pages | 6.17 GB / 6.11 GB (99%) | |
+
+**Insights:**
+- **H71's background collapser does its job.** By the late game 99% of the
+  heap is on 2 MB pages, and page walks cost under 1% of the main thread.
+  That is also why a checkpoint restore runs 19% slower: it starts on
+  4 KB pages, and the collapser (every 2 s, at nice 19) has not caught up
+  within a 10 s window.
+- 1 GB pages would not help. Haswell's STLB does not hold them, so the
+  ~5% of L1-DTLB misses served by the STLB would become walks.
