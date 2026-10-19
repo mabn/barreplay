@@ -5176,3 +5176,58 @@ Queued in `speed50`, measured next against `t2=837` and `1837`:
   30 ms backoff). `0x8000`: the push wakes any sleeper. `0x10000`:
   worker 1 alone spins 1 ms (pausing) instead of 30 µs, so it takes each
   section's first chunk and wakes the rest at its own cost. Scheduling only.
+
+### 2026-10-19 15:40 — speed50: H100 -1.4%/-2.6%, H102's wake -2.1%/-1.9%; H101 (first form) +2%/+4%, rejected
+
+`speed50` = `speed49` + the H99 exit fix + H100 + H101 + H102. Medium gate
+with H98-H101 on (`t2=7837`): **`0558d354…`, identical**, and it exits in
+76 s again. Its logs: no Lua unit script defines `ChangeHeading`, nothing
+listens to `UnitMoved`, but the medium game never reaches H100's 512
+ground units (285 at the last log line), so for H100's exactness the gate
+says little; the next whole verylarge1 game must.
+
+Late windows, 3 interleaved rounds each, against trio + H98
+(`d0d87abf/837`), main thread cycles:
+
+| added | 63,780 wall | cycles | 82,000 wall | cycles |
+|---|---|---|---|---|
+| H99 (`/1837`) | +0.5% | -0.4% | -3.0% | -3.4% |
+| H100 (`/2837`) | **-1.6%** | **-1.4%** | **-2.2%** | **-2.6%** |
+| H101 (`/4837`) | +1.8% | +2.0% | +3.9% | +3.9% |
+| all three (`/7837`) | -1.4% | -2.2% | -0.7% | -0.9% |
+
+H102, on top of all three (`d0d87abf/7837`):
+
+| added | 63,780 wall | cycles | 82,000 wall | cycles |
+|---|---|---|---|---|
+| the push wakes any sleeper (`0x8000`) | **-2.0%** | **-2.1%** | **-1.2%** | **-1.9%** |
+| worker 1 spins 1 ms (`0x10000`) | -0.8% | +0.5% | -0.4% | 0.0% |
+| both | -0.9% | -0.9% | -1.3% | -1.8% |
+
+**Insights:**
+- **H100 pays where the ground armies are big.** The two loops it spreads
+  are ~3% of the main thread; most of that comes back.
+- **H101 in its first form loses.** In the late window it finds 1,276
+  serial points among 10,496 units in one frame: 26 runs cover 2,577 units,
+  the rest go the ordinary way with the planning on top. Every
+  `CBuilder` and `CFactory` was a serial point. `speed51` treats idle
+  ones as plain units (no target, no terraform; a factory with nothing
+  queued and its yard closed): what their `Update` adds is then only a bit
+  shift of the nano-piece mask.
+- **H99's late-window gain moves between builds** (-1.9% at 63,780 on
+  `speed49`, -0.4% here; -3.5% and -3.4% at 82,000). Run-to-run noise of
+  about 1.5% at one window is the floor of this harness.
+- **Waking the sleepers at each push works where spinning did not:** the
+  workers join a section at once, and nothing polls the queue between
+  sections. One futex wake per push is cheap next to a section that runs
+  with half its workers. Kept: `0x8000`. The 1 ms spin of worker 1 adds
+  nothing and is dropped.
+
+**H103** (`f2950f9`, `speed51`, `t2` `0x20000`): synced Lua's `next`
+(`CSyncedLuaHandle::SyncedNext`, 0.56% of the main thread) fetched the
+original `next` from the registry and entered it through `lua_call`, only
+for that to run `lua_next`. It now calls `lua_next` itself, the same keys
+in the same order, then makes the same key-type check.
+
+`speed51` is building; it measures, against H98-H100 (`/3837`), the wake
+(`/b837`), the refined H101 (`/f837`) and H103 (`/2b837`, `/2f837`).
