@@ -4925,3 +4925,54 @@ aircraft are.
 
 Against `speed32`, the best line two days ago: -7.9%. Against stock 2026.07.04
 (38m17s): 3.11x.
+
+### 2026-10-19 10:33 — profile with the P1 trio (`speed44`, `t=d0d87abf t2=37`)
+
+Late window (63,780 +450, 9,961 units), LBR at 499 Hz, main thread pinned.
+Wall 9.22 s, 34.2e9 main cycles (checkpoint restore; a fresh run is ~19%
+fewer, see above).
+
+![verylarge1 late game, speed44 t=d0d87abf t2=37, main thread](flamegraphs/2026-10-19-verylarge1-speed44-trio.svg)
+
+**Main thread**, % of one core:
+
+| block | % | of which Lua | was (`50d87a3f/1f`) |
+|---|---|---|---|
+| **units** | **60.5** | 2.7 | 61.2 |
+| ├ aircraft move loop (P1) | **9.3** | 0.8 | 12.5 |
+| ├ weapon vectors (parallel section; 4.1 work, 1.0 waiting) | 7.1 | | 6.1 |
+| ├ ground movement (parallel section) | 6.7 | | 6.5 |
+| ├ `CUnit::SlowUpdate` | 6.4 | 0.3 | 6.1 |
+| ├ `CBeamLaser::Update` | 5.5 | 0.7 | 5.3 |
+| ├ LTO-inlined unit and weapon code | 5.2 | | 5.2 |
+| ├ `CWeapon::Update` | 4.1 | 0.1 | 4.1 |
+| ├ `CQuadField::MovedUnit` | 2.7 | | 2.7 |
+| ├ P4 | 2.7 | | 2.4 |
+| ├ `CUnit::UpdatePhysicalState` | 2.6 | | 2.6 |
+| ├ `CWeapon::SlowUpdate` | 2.6 | | 2.5 |
+| ├ `CBuilder::Update` | 2.1 | 0.2 | 1.9 |
+| ├ `CFactory::Update` | 2.0 | 0.6 | 2.0 |
+| └ rest | 1.2 | | 1.3 |
+| Lua callins (gadgets) | 12.6 | 12.6 | 12.2 |
+| LOS update | 6.5 | | 7.2 |
+| projectiles and collisions | 5.5 | 1.5 | 5.2 |
+| `SimFrame`, other | 5.3 | | 4.4 |
+| Lua GC | 2.7 | 2.7 | 2.6 |
+| unit-script anims | 2.1 | | 2.5 |
+| pathfinding (QTPFS) | 2.0 | | 2.3 |
+| map damage, events, net, COB, other | 2.8 | 0.1 | 2.1 |
+| **total** | **100** | **~17.5** | |
+
+**Insight:** the trio took a quarter of P1's main-thread share (12.5 → 9.3).
+Of P1's main-thread wait, the in-order start chain is what is left (1.06e9
+cycles in the window, about 3%), with ~38 serial aircraft a frame, most of
+them state transitions. The chain exists so that an item whose plan check
+fails at its turn can still run alone with nothing after it started.
+Removing it would need a proof that a run's checks cannot fail once the
+serial item before it is done.
+
+**P6 (the weapon loop in ordered parallel) is dropped.** About 230 weapon
+items a frame are serial, which leaves runs of ~43 cheap local items between
+them. A fork-join per run costs more than it saves, and running past a
+serial item is unsafe: firing applies damage, impulses and area explosions
+to units that cannot be bounded in advance. Estimated under 1%.
