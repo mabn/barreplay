@@ -5404,3 +5404,59 @@ add two event lists and a revert per unit dying in a window).
 Patches 0092-0109 are exported (`patches/engine-2026.07.04/speed`, the
 rejected ones in `rejected/`) and the speed README has the new toggles,
 apply order and best result.
+
+### 2026-10-19 20:28 — speed54 late window A/B and profile
+
+`speed54` trials, 3 rounds, everything kept (`d0d87abf/e3837`) against
+H98-H100 (`/3837`): 63,780 **-4.1% cycles** (-2.9% wall), 82,000 **-2.9%
+cycles** (-2.1% wall). The fixes of 0109 cost nothing measurable.
+
+![verylarge1 late game, speed54 t=d0d87abf t2=e3837, main thread](flamegraphs/2026-10-19-verylarge1-speed54.svg)
+
+**Main thread**, % of one core (huge-page-backed restore, collapser thread
+removed; `speed48` trio + H98 for comparison):
+
+| block | % | of which Lua | was (`speed48`) |
+|---|---|---|---|
+| **units** | **62.5** | 2.9 | 60.4 |
+| ├ aircraft move loop (P1) | 9.1 | 0.7 | 9.0 |
+| ├ weapon vectors (parallel section) | 7.5 | | 6.1 |
+| ├ `CUnit::SlowUpdate` | 7.3 | 0.3 | 7.0 |
+| ├ ground movement | 5.2 | | 6.7 |
+| ├ `CBeamLaser::Update` | 5.1 | 0.6 | 5.3 |
+| ├ `CWeapon::Update` | 5.1 | 0.2 | 4.1 |
+| ├ LTO-inlined unit and weapon code | 4.8 | | 4.9 |
+| ├ `CUnit::Update` | 3.3 | | 4.3 |
+| ├ P4 | 3.2 | | 2.7 |
+| ├ `CWeapon::SlowUpdate` | 2.8 | 0.1 | 2.3 |
+| ├ `UpdateUnits` (collision maps) | 2.4 | 0.3 | |
+| ├ `CFactory::Update` | 2.1 | 0.6 | 2.2 |
+| ├ `CBuilder::Update` | 1.5 | 0.2 | 2.4 |
+| ├ `CQuadField::MovedUnit` | 1.3 | | 1.6 |
+| └ rest | 1.8 | | |
+| Lua callins (gadgets) | **11.5** | 11.5 | 13.0 |
+| script tick (P5 COB 4.3, animations 3.1, own 1.2) | 9.0 | | 7.4 (3.4 under "SimFrame, other") |
+| projectiles and collisions | 6.2 | 1.7 | 5.2 |
+| LOS update | **4.7** | | 6.1 |
+| pathfinding (QTPFS) | 2.6 | | 2.2 |
+| Lua GC | **0.0** | | 2.9 |
+| map damage, events, net, other | 3.5 | 0.1 | 4.1 |
+| **total** | **100** | **~16** | |
+
+Threads (samples against the main thread's): the six workers together 2.1
+cores, the Lua GC thread (H99) 0.03 of a core, which is the 2.9% the main
+thread no longer spends.
+
+**Insights:**
+- **Shares move as the work moves.** The GC is gone from the main thread,
+  LOS phase B is 1.4 points smaller, and Lua is 1.5 smaller (the unsynced
+  gadgets). Everything else is a slightly larger share of a smaller whole.
+- **P7 v4's phase A competes with the script tick for workers.** Its
+  per-type tasks (two of them long: LOS and air LOS over 10,000 units) run in
+  the background during exactly the window where P5's COB phases and the
+  animation section want the workers, and the main thread's share of the
+  animation section went from ~2.3% to 3.1%.
+- **The serial unit loop is now nearly two thirds of the main thread**, and
+  what remains in it is the hard part: command AI, weapons firing, builders
+  and factories, P4's in-order application, each with effects on other
+  units.
