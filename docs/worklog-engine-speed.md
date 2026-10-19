@@ -4421,3 +4421,32 @@ the all-busy bin, because the workers spin through the P1, P4 and P5
 sections whether they have work or not. Idle workers sleeping instead of
 spinning would put the main core in a higher bin part of the time: worth
 perhaps 2-4%, and less heat, so fewer governor pauses.
+
+### 2026-10-19 03:33 — the new items cost early in the game and pay late
+
+`speed43` checkpoints, `speed32`-like settings (`587a3f`: P4, P5, H94, N2
+and P7 off) against everything on (`50d87a3f/1f`), 3 interleaved pairs each,
+main thread pinned:
+
+| window | wall | main cycles | main instructions |
+|---|---|---|---|
+| early: frame 15,000, +1,800 frames | **+6.7%** | +7.3% | +16.5% |
+| middle: frame 35,000, +900 | -2.5% | -1.6% | -4.2% |
+| late: frame 63,780, +450 | -6.5% | -5.4% | -11.4% |
+
+**Insights:**
+- **This is where the whole game's gain went.** Each of P4, P5, H94, N2 and
+  P7 was measured only on the late window, where it won. In the early game,
+  with a few hundred units, their per-frame fixed costs (starting workers,
+  spinning, publishing tasks, phase A over small lists) are larger than the
+  work they move. The late window, which every A/B so far used, cannot show
+  that.
+- **Together they give less than the sum of their parts.** On the late
+  window they measured -1.2% to -4.1% each, about -11% summed, but -6.5%
+  together: they compete for the same workers and the same idle time.
+- **Fix:** gate each item by the size of its frame's work (the slice's
+  units, the COB tick's threads, the LOS update's units). It stays exact,
+  since every item is exact either way. Every A/B from now on runs early,
+  middle and late.
+
+Running: each item alone against the same base, early and middle.
