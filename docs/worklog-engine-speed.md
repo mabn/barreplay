@@ -5460,3 +5460,37 @@ thread no longer spends.
   what remains in it is the hard part: command AI, weapons firing, builders
   and factories, P4's in-order application, each with effects on other
   units.
+
+### 2026-10-19 21:17 — the engine built for Haswell: 2-3% fewer cycles, eaten by the AVX clock
+
+Upstream builds the engine for baseline x86-64 (`-march=x86-64 -mtune=generic
+-msse -mfpmath=sse`, SSE3 and up, AVX and FMA all switched off) so that
+every player's CPU computes the same floats. A re-simulation only has to
+compute the same floats as that build. Every IEEE operation rounds the same
+whatever instruction encodes it, so the one real danger is FMA contraction
+(one rounding instead of two). `speed54h` = `speed54` built with
+`-DMARCH_FLAG=haswell -DSSE_FLAGS='-mno-fma -mno-fma4 -ffp-contract=off'`
+(`-march=haswell -mtune=haswell` on every object, contraction off on every
+object, not only the 145 where upstream sets it), with the same PGO profile.
+Medium gate: **`0558d354…`, identical**.
+
+Late windows, 3 rounds, `t=d0d87abf t2=e3837`, against `speed54`:
+
+| | 63,780 | 82,000 |
+|---|---|---|
+| main-thread cycles | **-1.8%** | **-2.8%** |
+| instructions | -6.4% | -7.8% |
+| clock | 3.66 against 3.77 GHz | 3.62 against 3.73 GHz |
+| wall | **+0.9%** | **+0.3%** |
+
+**Insight: Haswell lowers its turbo clock for 256-bit AVX code** (the AVX
+frequency offset), and the auto-vectorized loops now use it, on the workers
+as much as the main thread. The cycles are saved and the clock gives them
+back. 128-bit VEX code does not trigger the offset, so `speed55h` keeps the
+Haswell instructions with `-mprefer-vector-width=128`. It is `speed55`, so
+it also measures **P7 v4.1** (`15bd2f9`, `t2` `0x100000`): phase A in two
+stages, the per-unit tests in short chunks on all threads (which also record
+each unit's instances for the revert), then each type's `UpdateUnit` over
+the units its test flagged only, instead of v4's task per type walking all
+10,000 units. Every task claims chunks, waits only for chunks already
+claimed, then claims types.
