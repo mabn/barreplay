@@ -5032,3 +5032,94 @@ time goes:
 already prefetches each unit 8 ahead, H66) prefetches, for the units whose
 collision-map update runs this frame, the unit's `quads` line 8 ahead, the
 list's buffer 4 ahead, and the first two `Quad`s 2 ahead. Loads only. Building.
+
+### 2026-10-19 13:13 — trials on huge-page memory; H97 and H98 again; the profile without TLB misses
+
+**The harness** (`6ecd274`/`46dba91`, `speed48`): after a restore, the
+engine waits until transparent huge pages cover 90% of its resident memory
+(at most 90 s) before the window starts. H71's collapser gets there in
+1.6-6.5 s; a fresh run has 99%. Late window, speed44-like setting
+(`50d87a3f/17`), main thread cycles:
+
+| run | cycles | instructions |
+|---|---|---|
+| restored, window at once (`speed43`, earlier) | ~36-37e9 | |
+| restored, waited for huge pages (`speed48`) | 32.90e9 | 29.80e9 |
+| fresh run to the window (trio + H98, `speed48`) | 30.72e9 | 30.09e9 |
+| restored, waited, same setting | 32.59e9 | 29.69e9 |
+
+A/Bs on the waited trials, `speed48`, 3 interleaved rounds, main thread
+pinned:
+
+| setting | 63,780 wall | cycles | 82,000 wall | cycles |
+|---|---|---|---|---|
+| speed44-like (`50d87a3f/17`) | 8.75 s | 32.90e9 | 7.60 s | 28.50e9 |
+| trio (`d0d87abf/37`) | -1.5% | -1.1% | -1.8% | -1.6% |
+| trio + H97 (`/437`) | -1.4% | -1.2% | -0.6% | -0.5% |
+| trio + H98 (`/837`) | **-1.8%** | **-1.6%** | **-2.0%** | **-1.9%** |
+
+![verylarge1 late game, speed48 trio + H98, huge-page-backed restore, main thread](flamegraphs/2026-10-19-verylarge1-speed48-hugepages.svg)
+
+**Main thread**, % of one core (`t=d0d87abf t2=837`, collapser thread
+removed):
+
+| block | % | of which Lua | was (speed44 trio, 4 KiB pages) |
+|---|---|---|---|
+| **units** | **60.4** | 3.0 | 60.5 |
+| ├ aircraft move loop (P1) | 9.0 | 0.8 | 9.3 |
+| ├ `CUnit::SlowUpdate` | 7.0 | 0.3 | 6.4 |
+| ├ ground movement (parallel section) | 6.7 | | 6.7 |
+| ├ weapon vectors (parallel section) | 6.1 | | 7.1 |
+| ├ `CBeamLaser::Update` | 5.3 | 0.7 | 5.5 |
+| ├ LTO-inlined unit and weapon code | 4.9 | | 5.2 |
+| ├ `CUnit::Update` | 4.3 | | |
+| ├ `CWeapon::Update` | 4.1 | 0.2 | 4.1 |
+| ├ P4 | 2.7 | | 2.7 |
+| ├ `CBuilder::Update` | 2.4 | 0.3 | 2.1 |
+| ├ `CWeapon::SlowUpdate` | 2.3 | | 2.6 |
+| ├ `CFactory::Update` | 2.2 | 0.7 | 2.0 |
+| ├ `CQuadField::MovedUnit` | **1.6** | | **2.7** |
+| └ rest | 1.8 | | |
+| Lua callins (gadgets) | 13.0 | 13.0 | 12.6 |
+| LOS update | 6.1 | | 6.5 |
+| projectiles and collisions | 5.2 | 1.4 | 5.5 |
+| `SimFrame`, other | 5.1 | | 5.3 |
+| Lua GC | 2.9 | 2.9 | 2.7 |
+| unit-script anims | 2.3 | | 2.1 |
+| pathfinding (QTPFS) | 2.2 | | 2.0 |
+| map damage, events, net, COB, other | 3.0 | 0.1 | 2.8 |
+| **total** | **100** | **~19** | |
+
+**Insights:**
+- **Restored trials ran on 4 KiB pages.** Waiting for the collapser brings
+  a trial from ~19% to ~6% above a fresh run of the same frames. The rest
+  is the last ~8% of memory being collapsed during the window (the
+  collapser thread used ~1.9 s of CPU in it) and whatever else a restore
+  leaves different. `speed49` waits until the share stops growing.
+- **The earlier flame graphs counted the collapser as the main thread:**
+  it inherits the main thread's name (`recoil-main`), and here it was
+  17.8% of that name's samples. Its samples are removed above; the
+  shares barely move once they are, so the target list stands.
+- **In a fresh run the collapser is idle:** 0.03 s of CPU per 10 s at
+  frame ~41,600, 99% of resident memory on huge pages, and 86 involuntary
+  switches of the main thread per 10 s.
+- **H97 stays rejected** on huge-page memory (-0.1% and +1.1% against the
+  trio). **H98 holds** at -0.5% and -0.3% cycles: small, but a load-only
+  change.
+- `MovedUnit` drops from 2.7% to 1.6% with huge pages: its dependent
+  loads were partly page walks.
+- **Half the Lua GC is the capture widget.** Cumulative GC cycles per Lua
+  state from frame 0 to 63,780: LuaUI (our widget plus BAR's hidden
+  widgets) 16.2e9, LuaRules 15.1e9, LuaGaia 0.08e9. An engine-side
+  recorder would cut that half as well as the widget's own ~1.8%.
+
+**H99** (`abda66c`, `speed49`, `t2` `0x1000`): the per-frame Lua GC
+step moves to its own thread during the LOS update. All Lua GC work happens
+in `CLuaHandle::CollectGarbage` (the collector is stopped between calls)
+on a wall-clock budget, so no Lua code can depend on when or how much is
+collected. The LOS update runs no Lua on any thread, and each Lua state's
+allocator touches only its own pool and an atomic total. The step starts
+right before the LOS update and is joined right after it, in place of the
+call at the start of the frame. The thread exists from frame 0 whatever the
+toggles, so a checkpoint holds it and trials pin it with the workers. Up to
+2.9% of the main thread. Building.
