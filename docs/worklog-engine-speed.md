@@ -4808,3 +4808,47 @@ that. With 10% front-end stalls, a few percent is a realistic hope. Steps:
 run of the game to frame 88,000, `perf2bolt` and `llvm-bolt` (LLVM 20), the
 gate, then interleaved trials at 63,780 and 82,000, bolted against the same
 binary unbolted.
+
+### 2026-10-19 09:18 — BOLT: nothing in non-relocation mode; checkpoints run the late window 19% slower than fresh runs
+
+**Relocation mode is blocked.** BOLT moves whole functions only in a binary
+linked with `--emit-relocs`, and gold (the linker Recoil's build uses, with
+`--icf=all`) dies on it: `internal error in do_layout` (object.cc:1814), and
+with ICF off `internal error in emit_relocs_scan` (reloc.cc:518). bfd rejects
+the gold-only `--icf=all` the CMake adds, and lld cannot link GCC's LTO
+objects.
+
+**Non-relocation mode** (`speed44` as built, LBR profile of one run to frame
+88,000, `-reorder-blocks=ext-tsp -split-functions -split-all-cold`):
+2,548 of 55,190 functions rewritten, covering 99.86% of the executed simple
+functions. The gate is identical. CRIU cannot checkpoint the result: its
+parasite crashes the process (SIGSEGV), likely on the new code segment. So
+the A/B ran without checkpoints: fresh runs from frame 0 measuring
+63,780 +450 with the bench harness's counters, main thread pinned, the two
+binaries alternating, cooled to 50 °C before each run:
+
+| binary | wall | main cycles | main instructions |
+|---|---|---|---|
+| `speed44` | 9.14 s | 30.67e9 | 30.00e9 |
+| `speed44b` (BOLT) | 9.31 s (+1.9%, a lower clock) | 30.70e9 (**+0.1%**) | 30.04e9 |
+
+The bolted governed whole game is identical (`a26e920d…`), 12m30.5s active
+(`t2=17`, 3 P5 workers). Against `speed44`'s 12m41.4s (7 P5 workers) that
+is the worker change and noise, not BOLT.
+
+**Insights:**
+- **PGO+LTO has already laid the code out.** With GCC's profile-driven block
+  and function ordering, what BOLT can still do without moving functions is
+  worth nothing here. The 10% of slots the front end leaves empty are not a
+  layout problem it can fix.
+- **A checkpoint restore runs the late window 19% slower than a fresh run**
+  (36.4e9 against 30.7e9 cycles, the same binary, settings and frames).
+  The likely cause is that restored memory loses the transparent huge pages
+  the engine collapses its heap into at frame 0, so the window takes more
+  TLB misses. A/Bs within one checkpoint still compare like with like, but
+  items whose gain is memory or TLB behaviour can measure differently in
+  real runs. That may be part of why late-window gains have overstated
+  whole games.
+
+BOLT is dropped. The engine-side recorder (~1%) and N2 for more callins (~1%)
+are next.
