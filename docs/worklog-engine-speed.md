@@ -4875,3 +4875,27 @@ Fresh run of `speed44` (everything on, `t2=17`), main thread pinned,
   within a 10 s window.
 - 1 GB pages would not help. Haswell's STLB does not hold them, so the
   ~5% of L1-DTLB misses served by the STLB would become walks.
+
+### 2026-10-19 09:56 — P1 v6, v8 and v9 pay together: -1.4 to -3.3% late
+
+The P1 variants queued before the divergence hunt, now on `speed44`
+(base `t=50d87a3f t2=17`), 3 rounds each, wall (main cycles):
+
+| setting | 63,780 | 72,000 | 82,000 |
+|---|---|---|---|
+| + v6 (`0x80`: aircraft landing and taking off in parallel) | +1.6% (+0.4%) | +0.5% (-0.8%) | +3.6% (+0.2%) |
+| + v9 (`t2` `0x20`: claims in batches of 8) | +0.2% (+1.5%) | +1.8% (+2.1%) | +1.7% (+2.0%) |
+| + v6 + v9 | -1.8% (-0.5%) | -1.0% (-1.0%) | -1.0% (-1.2%) |
+| **+ v6 + v8 + v9** (`t=d0d87abf t2=37`) | **-3.3% (-2.2%)** | **-2.5% (-2.5%)** | **-1.4% (-1.7%)** |
+
+**Insight: the barriers have to go together.** v6 makes aircraft landing
+and taking off parallel items, v8 aircraft parked in the air, and v9 lets
+the start chain hand items out in batches. Each alone leaves the other kinds
+of serial aircraft as barriers, and v6 or v9 alone loses: v6's new
+parallel items pay the start chain each, v9's batches drain slower before
+each remaining barrier. With all three the chain stops at far fewer serial
+items. P1 v8, rejected alone at -0.4%, is part of the best setting.
+
+Running: the same at 15,000 and 35,000, then a governed whole game with
+`t=d0d87abf t2=37`. v9 has never run in an exact whole game, and v8 only
+in the diverged ones (where it changed nothing).
