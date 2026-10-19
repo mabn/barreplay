@@ -4691,3 +4691,48 @@ at 3.71-3.73 GHz. In these pinned, cool trials, workers spinning do not
 lower the main core's clock measurably. The turbo-bin lever (up to 7%) needs
 the other cores idle, and at this level of parallelism they never are. The
 whole games use 3 P5 workers from now on (`t2=17`): no slower, less heat.
+
+### 2026-10-19 06:42 — the Lua profile on `speed44`; the main thread does a third of every parallel section
+
+**Lua** (`luaprof44` = `speed44` + the sampler, late window, everything on,
+`t2=17`): 9,887 main-core samples, 14.0% with Lua on the stack (LuaRules
+11.9%, LuaUI 2.0%).
+
+| owner | % of main core | of it |
+|---|---|---|
+| `gadgets.lua` (the handler) | 1.87 | was 2.91 before N2 |
+| our capture widget | 1.82 | `GetUnitSampleDelta` (C++) 0.64, Lua 0.73, `string.format` 0.11 |
+| `unit_shield_behaviour` | 1.78 | |
+| `unit_builder_priority` | 0.69 | |
+| `unit_crashing_aircraft` | 0.64 | |
+| `api_teamstats` | 0.61 | |
+| `api_unit_attributes` | 0.57 | |
+| ~60 more | ~6 | under 0.35 each |
+
+Most of the widget's time is `sample()`: the engine fills Lua tables with
+each sample's delta, then Lua packs them into the binary frame record.
+Packing in C++ would save **at most ~1%**, so it waits behind bigger levers.
+
+**The thread pool.** In the `speed44` profile the main thread does far more
+than its share of each parallel section:
+
+| parallel section | main thread | workers | main's share | fair share (1 of 8) |
+|---|---|---|---|---|
+| weapon vectors | 6.1% | 16.3% | 27% | 12.5% |
+| ground movement | 6.5% | 12.6% | 34% | 12.5% |
+| LOS update | 7.2% | 12.8% | 36% | 12.5% |
+
+The cause is `ThreadPool::WorkerLoop`: only worker 1 spins (30 µs) when
+idle. Every other worker sleeps at once, with an exponential backoff up to
+**30 ms**, and `NotifyWorkerThreads(false)` wakes nobody unless all of them
+sleep. So a section often starts with one or two workers awake, the main
+thread takes chunks immediately, and the sleepers wake on their own timeouts,
+sometimes after the section is over.
+
+**Insight:** about 20% of the main thread is these sections. At a fair share
+the main thread would do roughly a third as much of them, so there are a
+few percent available from scheduling alone, which cannot change any result.
+**H96** (`a4827c9`, `speed45`, `t2` bits 8-9): every worker spins 2 ms
+(`0x100`) or 20 ms (`0x200`, about a late frame) after its last task and
+sleeps at most 0.5 ms at a time. Measuring it at three windows. The P5 test
+showed spinning does not cost the main core clock.
