@@ -5231,3 +5231,41 @@ in the same order, then makes the same key-type check.
 
 `speed51` is building; it measures, against H98-H100 (`/3837`), the wake
 (`/b837`), the refined H101 (`/f837`) and H103 (`/2b837`, `/2f837`).
+
+### 2026-10-19 16:44 — speed51: H101 rejected for good (752 busy builders a frame); H102's wake and H103 at noise level
+
+`speed51` = `speed50` + H103 + H101 with idle builders and factories as plain
+units. Medium gate with H98-H103 on (`t2=2f837`): **`0558d354…`,
+identical**. Late windows against H98+H99+H100 (`d0d87abf/3837`), 3 rounds:
+
+| added | 63,780 wall | cycles | 82,000 wall | cycles |
+|---|---|---|---|---|
+| base (`/3837`) | 8.19 s | 30.60e9 | 7.18 s | 26.91e9 |
+| H102's wake (`/b837`) | +1.1% | +0.8% | -0.6% | -1.2% |
+| + refined H101 (`/f837`) | +2.2% | +1.5% | +1.8% | +0.5% |
+| + H103 (`/2b837`) | -0.6% | -0.7% | -0.5% | -0.7% |
+| all (`/2f837`) | +2.5% | +1.6% | +1.7% | +0.9% |
+
+H101's counters at frame 63,780: 10,496 units, **755 serial points, 752 of
+them busy builders and factories**, 3 events, 33 runs. In the medium game
+too: 81 busy builders a frame, 4 events.
+
+**Insights:**
+- **Most builders are busy in a late game.** BAR's nano turrets assist
+  factories all the time, and every busy builder adds build power to some
+  other unit (its buildee's health, progress and `beingBuilt`, which
+  `CUnit::Update` reads), so each one is a serial point. Taking the loop
+  apart around them would need speculative updates committed in order,
+  and the commit touches the same unit lines on the main thread that the
+  update does. **H101 is rejected** (code stays, toggle off).
+- **H102's wake measured -2% only beside the first H101**, whose dozens of
+  small parallel sections per frame started without their sleepers. Without
+  them it is -1.2% to +0.8%: noise. Not kept.
+- **H103 is a pure cut of work and measures at noise level** (-0.7% at
+  both windows against the base, within the 1.5% floor). Kept for the
+  whole game, where it cannot hurt.
+- **The base (H98+H99+H100) is 4% below `speed50`'s `/837`** at 63,780
+  (30.60e9 against 31.87e9 cycles) and 4.8% at 82,000.
+
+`speed52` (H104) is building: its trials compare `/3837`, `/43837`
+(H104), `/23837` (H103) and `/63837` (both).
