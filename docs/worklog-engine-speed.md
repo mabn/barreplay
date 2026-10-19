@@ -4476,3 +4476,42 @@ pinned (late: the items' own late-window A/Bs from before):
   level.
 - **Fix:** run P7 only in frames with enough units (it loses at 3,719 and wins
   at 9,961), and clear only the index entries it set.
+
+### 2026-10-19 04:00 — the late window is 9.2% faster than `speed32`; half the game's time is after frame 70,000
+
+**Two binaries, interleaved** (`trial`, 3 rounds, late window 63,780 +450):
+
+| | wall | cycles | instructions | clock |
+|---|---|---|---|---|
+| `speed32`, `t=587fbf` (its best) | 10.72 s | 38.74e9 | 36.31e9 | 3.65 GHz |
+| `speed43`, `t=587fbf` | +0.2% | +1.2% | +1.7% | 3.68 GHz |
+| `speed43`, everything on | **-9.2%** | -6.4% | -11.1% | 3.77 GHz |
+
+The always-on hooks cost about 1% of cycles; the items themselves give 9.2%
+on this window.
+
+**Where the whole game's active time goes** (`speed43`, from the infolog's
+frame stamps minus the governor's pauses; 778 s against the reported 788 s):
+
+| frames | active | share |
+|---|---|---|
+| 0-20,000 | 20.7 s | 2.6% |
+| 20,000-40,000 | 78.3 s | 10.1% |
+| 40,000-60,000 | 148.2 s | 19.0% |
+| 60,000-70,000 | 151.8 s | 19.5% |
+| 70,000-80,000 | 170.2 s | 21.9% |
+| 80,000-90,900 | 208.9 s | 26.9% |
+
+**Insights:**
+- **Half the game's time (47%) is after frame 70,000, and no A/B has
+  measured there.** The late window at 63,780, every A/B's checkpoint so far,
+  stands for only the 60,000-70,000 range. With 9.2% there and the early
+  results, the whole game should be at least 4% faster than `speed32`. It is
+  1.7%, so the items gain less after frame 70,000, or lose.
+- **From now on every A/B covers five windows** (15,000, 35,000, 63,780,
+  72,000, 82,000), each standing for its share of the game.
+
+Running: `speed44` = `speed43` + P7 v3 (`2c991a0`: no window under
+`BARREPLAY_P7_MINUNITS` = 6,000 active units; phase A records each unit's
+index instead of the per-frame clear of a 32,000-entry map), gated, then the
+five windows.
