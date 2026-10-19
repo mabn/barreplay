@@ -5561,3 +5561,52 @@ interceptors). Units created during the loop get none, as in stock. It is
 worth up to the 7.5% the section costs, less what the first Lua write in a
 frame forces; `speed56`'s counters (the index of the first Lua write in the
 loop) will say how much.
+
+### 2026-10-19 23:25 — P8's audit (who reads another unit in the weapon loop); P9 (the collision-map check on all threads)
+
+**P8, second pass** (`9f35034`). Going through what the weapon loop reads
+of units other than the one updating turned up more than the first pass had:
+- **Piece matrices.** A weapon vector is computed from the unit's piece
+  matrices, which the engine updates lazily on read. Collision tests against
+  piece-tree volumes (a beam's `TraceRay`) and Lua's piece reads do that
+  too. With P8 such a read could race a worker computing the same unit, so
+  `CCollisionHandler::DetectHit` and the piece-volume transform make the
+  object ready first.
+- **P4's search tasks** run on workers during the loop and read the searching
+  weapon's `aimFromPos`. Each task makes its unit ready first, on its own
+  worker: computing it there, or waiting for whoever is.
+- **Shields:** the quad field's repulser query (beams) reads every nearby
+  shield's muzzle. **Lua:** every unit lookup in synced and unsynced reads, and
+  `CallAsUnit`. **Weapon-use flags:** `SetHoldFire` and the hover-aircraft
+  landing state.
+
+The map is fixed during the loop: map damage is queued and applied in its own
+phase. A gate replay that never reaches 2,048 units would not exercise P8 or
+P9, so `BARREPLAY_P8_MINUNITS` / `BARREPLAY_P9_MINUNITS` lower the start,
+and the gate runs both from frame 0.
+
+**Insights:**
+- **The weapon-vector section had a second job nobody wrote down:** it left
+  every unit's aim and muzzle piece chains clean (matrices up to date), so
+  everything after it in the loop, including P4's workers, read those
+  matrices without writing them. A pipeline that removes a parallel section
+  must take over its side effects too, not only its results.
+
+**P9** (`c5fe655`, made exact by construction in its third commit; `t2`
+`0x400000`, needs H91; from 2,048 units): `UpdateUnits`' collision-map
+update (2.4% of the main thread in the loop itself, 1.3% more in
+`MovedUnit`) mostly decides that nothing changed: the unit did not move, or
+moved within the same quads. That decision runs on all threads before the
+loop, for the units due this frame, and writes nothing. It records every
+input it read (position, the move type's last collision position, radius, and
+a per-unit version of the quad list, which the quad field bumps on each of its
+two writes). At the unit's turn the recorded answer is used only if all of
+them are still bitwise the same. Then the move type does exactly what
+`UpdateCollisionMap` would have done with that answer; otherwise
+`UpdateCollisionMap` runs as always. It needs no list of who might move a
+unit during the loop: the answer is a pure function of inputs it checks.
+
+**Queue:** the retrain's use build, gate, A/B and whole game; then P4 with
+2/4/6 workers; then `speed58` (P8 + P9 under the new profile): gate from
+frame 0, trials for each alone and both at 63,780 and 82,000, and a governed
+whole game with both.
