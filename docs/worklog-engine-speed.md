@@ -4568,3 +4568,40 @@ everything on since frame 0. 3 interleaved rounds:
   about -2.6% for `speed43` against `speed32`. It measured -1.2%, a gap of
   the size single whole-game runs cannot resolve. The `speed44` whole game
   (running) is the check.
+
+### 2026-10-19 06:00 — `speed44` whole game: 12m41.4s active, identical, -5.0% against `speed32`
+
+Governed whole game, `speed44`, `t=50d87a3f`, `t2=1f`, 7 threads, main pinned:
+**`a26e920d…`, identical**, active **12m41.4s** (paused 1188 s). The
+five-window forecast was ~12m40s.
+
+| whole game, governed | `speed32` | `speed43` | `speed44` |
+|---|---|---|---|
+| active sim | 13m21.3s | 13m07.8s | **12m41.4s** (-5.0%, -3.4%) |
+| main-thread instructions | 3.028e12 | 2.779e12 | 2.912e12 |
+| main-thread cycles | 2.978e12 | 2.941e12 | 2.843e12 (-4.5%, -3.3%) |
+| main-thread IPC | 1.017 | 0.945 | 1.024 |
+| worker cycles | 4.17e12 | 6.49e12 | 6.44e12 |
+
+Active time by frame range, `speed43` → `speed44`:
+
+| frames | `speed43` | `speed44` |
+|---|---|---|
+| 0-20,000 | 20.7 s | 22.6 s |
+| 20,000-40,000 | 78.3 s | 76.0 s |
+| 40,000-60,000 | 148.2 s | 146.3 s |
+| 60,000-70,000 | 151.8 s | 146.0 s |
+| 70,000-80,000 | 170.2 s | 163.4 s |
+| 80,000-90,900 | 208.9 s | 196.5 s |
+
+**Insights:**
+- **Gating P7 gave the main thread its IPC back** (0.945 → 1.024). In
+  frames under 6,000 units it now runs the LOS update itself, more
+  instructions but no waiting. That is also why the main thread's
+  instruction count went up while its cycles went down.
+- The late game improved too (-4 to -6% from frame 60,000), where P7 still
+  runs in most frames. That is the index fix (no 128 KB clear a frame), plus
+  the frames between 60k and 90k that dip under 6,000 units.
+- **The five-window forecast now matches the whole game to 1 second.**
+  Five base-dumped windows, weighted by the game's time per range, are a
+  sound proxy, and the single late window was not.

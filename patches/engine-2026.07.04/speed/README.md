@@ -10,7 +10,7 @@ a gate and a publish.
 
 Numbering: the 4-digit prefixes continue the series (`../0001`-`0013`), so
 every patch number under `engine-2026.07.04/` is unique: 0014-0043,
-0063-0067, 0069-0070 and 0073-0090 here, 0044-0045, 0052-0062, 0068 and 0071-0072 in `rejected/`, 0046-0051 in
+0063-0067, 0069-0070 and 0073-0091 here, 0044-0045, 0052-0062, 0068 and 0071-0072 in `rejected/`, 0046-0051 in
 `tools/`. Change
 identifiers continue the work log's H-series (H1-H73), with H74-H94 for the
 ones below.
@@ -44,6 +44,14 @@ identical (`a26e920d…`). Against `speed32` that is only -1.7%: the main thread
 executes 8.2% fewer instructions at 7.1% lower IPC (2.941e12 cycles against
 2.978e12), and the workers run 56% more cycles (work log, 2026-10-19).
 
+Best so far: `speed44` (= `speed43` + 0091, P7 gated by unit count), the same
+settings: **12m41.4s active**, identical (`a26e920d…`), -5.0% against
+`speed32`. P7 cost +7.6% at 1,405 units and +2.9% at 3,719 until gated; the
+main thread's IPC is back to 1.024 (work log, 2026-10-19). A/Bs now run five
+windows (15,000, 35,000, 63,780, 72,000, 82,000): the late window alone
+stands for a fifth of the game's time, and its air-heavy mix flatters the
+parallel items.
+
 ## Applying
 
 From a clean checkout of the `2026.07.04` tag:
@@ -55,10 +63,10 @@ git am $P/speed/00*.patch                          # 0014-0043, in order
 ```
 
 That reproduces the work tree's branch `speed24h` exactly (checked: no
-difference in `git diff`). The current line, Recoil branch `speed43`, is the
+difference in `git diff`). The current line, Recoil branch `speed44`, is the
 series, then 0014-0070, then `rejected/0071-0072` (H92 and H93: toggled off,
 but P5 was written on top of them and P7 uses H93's predicate), then
-0073-0090 (checked the same way):
+0073-0091 (checked the same way for `speed43`; 0091 is one patch on top):
 
 ```sh
 git am $(grep -v '^#' $P/series | sed "s|^|$P/|")
@@ -67,7 +75,7 @@ git am $P/speed/rejected/0071-*.patch $P/speed/rejected/0072-*.patch
 git am $(ls $P/speed/00*.patch | awk -F/ '$NF > "0072"')
 ```
 
-`tools/pgo-profile-speed39.tar.xz` is the profile `speed43` builds with
+`tools/pgo-profile-speed39.tar.xz` is the profile `speed43` and `speed44` build with
 (retrained on `speed39`: -3.6% in the late window against the `speed31` one). It is `speed24`, the branch the measured builds
 came from, with only identifiers in comments renamed. Build with
 `-DSYNCCHECK=OFF`. Patches 0014-0017 make that configuration compile, and
@@ -119,7 +127,7 @@ The second word, `BARREPLAY_TOGGLES2` / the go file's `t2=<hex>` (0084 on):
 |---|---|---|---|---|---|
 | `0x1` | N2 | 0082-0083, 0086, 0088 | BAR's gadget-handler callin wrapper and handler loop for `UnitPreDamaged`, `UnitDamaged`, `Explosion` and `ProjectileDestroyed` done in C when their bytecode hashes are on the built-in list (verified against BAR's source; anything else, tweakdefs included, runs interpreted). `BARREPLAY_N2_HASHES` adds hashes | **-2.2%** | on |
 | bits 1-3 | P5 workers | 0084 | the COB tick's worker count (0 = `BARREPLAY_P5_WORKERS`, default 6) | 2 workers +0.7% | 7 in the whole game above |
-| `0x10` | P7 | 0084-0085 | the LOS update's per-unit tests (H93's read-only predicate, every sensor type) on the workers during the script tick; the LOS point runs the real update for the flagged and the changed units in order | **-1.5%** | on |
+| `0x10` | P7 | 0084-0085, 0091 | the LOS update's per-unit tests (H93's read-only predicate, every sensor type) on the workers during the script tick; the LOS point runs the real update for the flagged and the changed units in order. 0091 (v3): only in frames with at least `BARREPLAY_P7_MINUNITS` (6,000) active units, and no per-frame clear of a 32,000-entry index | **-1.5%** late; ungated +7.6% early (1,405 units), +2.9% middle (3,719) | on |
 | `0x20` | P1 v9 | 0087 | P1's items claimed in batches of consecutive planned-parallel units (bits 6-7: 8/4/16/32 a batch) | -1.7% wall, +0.2% cycles: the waits moved to the serial aircraft | off |
 
 Not toggled (always on in these builds):
