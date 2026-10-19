@@ -5527,3 +5527,37 @@ weapon-loop counters), the Haswell-128 flags, training with `t2=e3837` and
 7 threads (`pgotrain2.sh`; the old training passed neither the second
 toggle word nor the thread count, so the newer parallel paths went
 untrained). Then the old profile against the new, and a governed whole game.
+
+### 2026-10-19 22:40 — queued: P4's search workers again, and P8 (weapon vectors pipelined into the weapon loop)
+
+**P4's main-thread time is waiting.** In the `speed54` profile P4 is 3.5% of
+the main thread, 2.5% of it `CommitThrough` itself (applying results in
+order, spinning on the ones not ready). Its own counter agrees: 688M cycles
+of waits in the late window (2.3%). Its log line says **2 workers**: bits
+24-25 of the first toggle word give 2 + 2k, and 6 measured +1.5% against 2 when
+it was introduced, many changes ago. Since the count is read per slice, a
+retest needs no build: 2 / 4 / 6 workers on `speed57`'s checkpoints, after
+the retrain.
+
+**P8** (`d9fd1db`, branch `speed57-p8`, `t2` `0x200000`, from 2,048
+units): the weapon-vectors section (7.5% of the main thread, a parallel
+section the serial weapon loop waits for) becomes a pipeline. The workers
+compute units' vectors in unit order, chunk by chunk, while the main thread's
+weapon loop runs behind them. The vectors read only the unit's position,
+direction vectors, piece matrices, weapon-use flags and the height map, so
+each is exact as long as it is computed before anything in the loop changes
+those for that unit. Every unit is "made ready" (computed by whoever claims
+it first, else waited for) before:
+- its own weapons update;
+- damage to it (hit-by-weapon scripts move pieces, stuns and kills clear its
+  weapon-use flags), a kill, a stun, a team change, a move or turn (the solid
+  object's position and direction writers);
+- anything that reads another unit's vectors in the loop: a beam laser's
+  shield hit (the shield weapon's muzzle), Lua's two weapon-vector reads;
+
+and every unit is made ready before every Lua write, every transport change
+and every interceptable projectile's creation (its intercept check reads all
+interceptors). Units created during the loop get none, as in stock. It is
+worth up to the 7.5% the section costs, less what the first Lua write in a
+frame forces; `speed56`'s counters (the index of the first Lua write in the
+loop) will say how much.
