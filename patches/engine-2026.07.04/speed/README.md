@@ -10,12 +10,12 @@ a gate and a publish.
 
 Numbering: the 4-digit prefixes continue the series (`../0001`-`0013`), so
 every patch number under `engine-2026.07.04/` is unique: 0014-0043,
-0063-0067, 0069-0070 and 0073-0078 here, 0044-0045, 0052-0062, 0068 and 0071-0072 in `rejected/`, 0046-0051 in
+0063-0067, 0069-0070 and 0073-0090 here, 0044-0045, 0052-0062, 0068 and 0071-0072 in `rejected/`, 0046-0051 in
 `tools/`. Change
-identifiers continue the work log's H-series (H1-H73), with H74-H93 for the
+identifiers continue the work log's H-series (H1-H73), with H74-H94 for the
 ones below.
-P1 (with its versions v2-v7), P2, P3, P4, N1 and the widget-side W1-W7 are
-families of their own.
+P1 (with its versions v2-v9), P2, P3, P4, P5, P7, N1, N2 and the widget-side
+W1-W7 are families of their own.
 
 ## Result
 
@@ -38,6 +38,12 @@ Best so far: `speed32` (= `speed24h` + H87 + H88 + H89 + H91, Recoil branch
 core, the same governor: **13m21.3s active** (-8.9% against `speed24`),
 identical (`a26e920d…`), peak memory 6.09 GiB (work log, 2026-10-18).
 
+Best so far: `speed43`, `t=50d87a3f`, `t2=1f` (everything below on except P1
+v8 and v9), the same threads, pinning and governor: **13m07.8s active**,
+identical (`a26e920d…`). Against `speed32` that is only -1.7%: the main thread
+executes 8.2% fewer instructions at 7.1% lower IPC (2.941e12 cycles against
+2.978e12), and the workers run 56% more cycles (work log, 2026-10-19).
+
 ## Applying
 
 From a clean checkout of the `2026.07.04` tag:
@@ -49,7 +55,20 @@ git am $P/speed/00*.patch                          # 0014-0043, in order
 ```
 
 That reproduces the work tree's branch `speed24h` exactly (checked: no
-difference in `git diff`). It is `speed24`, the branch the measured builds
+difference in `git diff`). The current line, Recoil branch `speed43`, is the
+series, then 0014-0070, then `rejected/0071-0072` (H92 and H93: toggled off,
+but P5 was written on top of them and P7 uses H93's predicate), then
+0073-0090 (checked the same way):
+
+```sh
+git am $(grep -v '^#' $P/series | sed "s|^|$P/|")
+git am $(ls $P/speed/00*.patch | awk -F/ '$NF < "0071"')
+git am $P/speed/rejected/0071-*.patch $P/speed/rejected/0072-*.patch
+git am $(ls $P/speed/00*.patch | awk -F/ '$NF > "0072"')
+```
+
+`tools/pgo-profile-speed39.tar.xz` is the profile `speed43` builds with
+(retrained on `speed39`: -3.6% in the late window against the `speed31` one). It is `speed24`, the branch the measured builds
 came from, with only identifiers in comments renamed. Build with
 `-DSYNCCHECK=OFF`. Patches 0014-0017 make that configuration compile, and
 the sync checker hashes every synced write: 7.9% of the late game, read only
@@ -90,7 +109,18 @@ everything up to `0xfbf`, the whole verylarge1 game `a26e920d…`.
 | `0x4000` | H80 | 0043 | `FindAnim` searches on one packed 64-bit key | -0.4% (noise level) | on |
 | `0x800000` | P4 | 0069-0070 | the slow-update loop's weapon target searches (`GenerateWeaponTargets` + the `TryTarget` walk) on worker threads, applied in launch order; the main thread waits only before writes a search may read (an enemy of a running search's weapon inside its circle, Lua's writing functions, deaths, damage, moves, quad changes...) | **-4.1%** wall, -4.4% main cycles (`speed34`, `t=d87a3f` vs `587a3f`) | on |
 | bits 24-25 | P4 workers | 0070 | 2 + 2k workers take searches (0 = `BARREPLAY_P4_WORKERS`, default 2) | 6 workers +1.5% against 2 | 0 |
+| `0x40000000` | H94 | 0080 | the LOS types' height-map updates (each type scans all its instances per crater) on all threads | **-1.8%** | on |
+| `0x80000000` | P1 v8 | 0081 | hover aircraft standing still in the air (flying or hovering, not stopping or crashing) as parallel items | -0.4% (noise level); exact over the whole game | off |
 | `0x10000000` | P5 | 0073-0078 | the COB engine's thread ticks on the workers with the sequential result: a tick runs out of order when every function its thread can be in uses only own-unit operations (decided once per function from the bytecode); `RAND` and `START` wait for every earlier tick; the global bookkeeping (sleeps, thread ends, the animation list, visual sfx) is applied in tick order at each segment's end. `BARREPLAY_P5_STATS=<frames>` logs counters | **-1.2%** wall and cycles, -6.3% instructions (`speed39`, `t=1cd87a3f` vs `cd87a3f`) | on |
+
+The second word, `BARREPLAY_TOGGLES2` / the go file's `t2=<hex>` (0084 on):
+
+| bit | id | patches | what | late window, measured | status |
+|---|---|---|---|---|---|
+| `0x1` | N2 | 0082-0083, 0086, 0088 | BAR's gadget-handler callin wrapper and handler loop for `UnitPreDamaged`, `UnitDamaged`, `Explosion` and `ProjectileDestroyed` done in C when their bytecode hashes are on the built-in list (verified against BAR's source; anything else, tweakdefs included, runs interpreted). `BARREPLAY_N2_HASHES` adds hashes | **-2.2%** | on |
+| bits 1-3 | P5 workers | 0084 | the COB tick's worker count (0 = `BARREPLAY_P5_WORKERS`, default 6) | 2 workers +0.7% | 7 in the whole game above |
+| `0x10` | P7 | 0084-0085 | the LOS update's per-unit tests (H93's read-only predicate, every sensor type) on the workers during the script tick; the LOS point runs the real update for the flagged and the changed units in order | **-1.5%** | on |
+| `0x20` | P1 v9 | 0087 | P1's items claimed in batches of consecutive planned-parallel units (bits 6-7: 8/4/16/32 a batch) | -1.7% wall, +0.2% cycles: the waits moved to the serial aircraft | off |
 
 Not toggled (always on in these builds):
 
@@ -105,6 +135,9 @@ Not toggled (always on in these builds):
 | 0064-0065 (H89, no toggle) | the Lua VM's table gets and sets do `luaV_gettable` / `luaV_settable`'s first step inline |
 | 0066 (H88, toggle `0x100000`) | `UpdatePhysicalState` reuses the ground height while the unit's x/z and the height map are unchanged |
 | 0067 (H91, toggle `0x400000`) | `UpdateUnits` does `UpdateCollisionMap`'s rate test itself, so two units in three never touch their move type |
+| 0079 | measurement: P1's main-thread waits by kind, its serial items by type, state and speed; P4 and P5 counters on the bench harness's result line |
+| 0089 | P1's crash bound compiles with the sync checker on (`std::min<float>` over a `SyncedFloat`) |
+| 0090 | **P4 fix**: `CWeapon::TryTargetHeading` turns its unit for a moment (heading and dir vectors, written directly) and back; first it waits for the running searches of the unit's ally team (or any, if the unit is neutral) whose area holds it, since their line-of-fire rays read their own side's units. Without it P4 diverged in about half the whole-game runs (work log, 2026-10-19) |
 
 ## rejected/
 

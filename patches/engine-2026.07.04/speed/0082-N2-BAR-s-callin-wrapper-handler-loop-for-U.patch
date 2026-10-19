@@ -1,0 +1,649 @@
+From 84b997795d04ebd5c049c3de06cc85dbc49a761e Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Sun, 18 Oct 2026 15:46:19 +0000
+Subject: [PATCH 82/90] [barreplay] N2: BAR's callin wrapper + handler loop for
+ UnitPreDamaged/UnitDamaged/Explosion/ProjectileDestroyed done natively when
+ their bytecode hashes are known (toggle2 0x1); a second toggles word
+ (BARREPLAY_TOGGLES2, go file t2=)
+
+---
+ rts/Lua/BrNativeHandler.cpp                   | 457 ++++++++++++++++++
+ rts/Lua/BrNativeHandler.h                     |  32 ++
+ rts/Lua/CMakeLists.txt                        |   1 +
+ rts/Lua/LuaHandle.cpp                         |   4 +
+ rts/Lua/LuaHandleSynced.cpp                   |   2 +
+ rts/Net/NetCommands.cpp                       |   6 +-
+ rts/Sim/MoveTypes/Systems/BrParallelAir.h     |   2 +
+ .../MoveTypes/Systems/GeneralMoveSystem.cpp   |   7 +
+ 8 files changed, 509 insertions(+), 2 deletions(-)
+ create mode 100644 rts/Lua/BrNativeHandler.cpp
+ create mode 100644 rts/Lua/BrNativeHandler.h
+
+diff --git a/rts/Lua/BrNativeHandler.cpp b/rts/Lua/BrNativeHandler.cpp
+new file mode 100644
+index 0000000..7c6e9b4
+--- /dev/null
++++ b/rts/Lua/BrNativeHandler.cpp
+@@ -0,0 +1,457 @@
++/* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
++
++#include "BrNativeHandler.h"
++
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++#include <vector>
++
++#include "LuaInclude.h"
++#include "lib/lua/src/lobject.h"
++#include "lib/lua/src/lopcodes.h"
++#include "Sim/MoveTypes/Systems/BrParallelAir.h" // g_brToggles2
++#include "System/Log/ILog.h"
++
++namespace BrN2 {
++	namespace {
++		const char* const CALLIN_NAMES[CI_N] = {"UnitPreDamaged", "UnitDamaged", "Explosion", "ProjectileDestroyed"};
++		const char* const LIST_NAMES[CI_N] = {"UnitPreDamagedList", "UnitDamagedList", "ExplosionList", "ProjectileDestroyedList"};
++		// the handler functions' upvalues: the tracy stubs, or none
++		const bool HANDLER_TRACY[CI_N] = {true, true, false, true};
++
++		// the (wrapper, handler) bytecode hashes known to be the code this
++		// replicates; BARREPLAY_N2_HASHES adds more (hex, comma separated)
++		const uint64_t KNOWN_HASHES[] = {0};
++
++		struct Entry {
++			const void* installed = nullptr; // the validated global (kept alive by installedRef)
++			int installedRef = LUA_NOREF;
++			int nativeRef = LUA_NOREF;
++			bool ok = false;
++			int uvDepth = 0, uvSelf = 0, uvReorder = 0;
++		};
++		struct State {
++			lua_State* L = nullptr;
++			Entry ci[CI_N];
++			int mulRef = LUA_NOREF; // a * b and a + b with Lua's semantics, for non-numbers
++			int addRef = LUA_NOREF;
++		};
++		std::vector<uint64_t> allowed;
++		char stateKey; // the registry key of a state's State (light userdata)
++		bool inited = false;
++
++		uint64_t Mix(uint64_t h, uint64_t v) {
++			h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
++			return h * 0x100000001b3ull;
++		}
++		uint64_t MixBytes(uint64_t h, const void* p, size_t n) {
++			const unsigned char* c = static_cast<const unsigned char*>(p);
++			for (size_t i = 0; i < n; ++i)
++				h = Mix(h, c[i]);
++			return h;
++		}
++
++		// everything that decides what the function does: its code, constants,
++		// nested functions, shape and upvalue names; not where it was written
++		uint64_t ProtoHash(const Proto* p) {
++			uint64_t h = 0xcbf29ce484222325ull;
++			h = Mix(h, p->nups); h = Mix(h, p->numparams); h = Mix(h, p->is_vararg); h = Mix(h, p->maxstacksize);
++			h = Mix(h, uint64_t(p->sizecode));
++			h = MixBytes(h, p->code, sizeof(Instruction) * p->sizecode);
++			h = Mix(h, uint64_t(p->sizek));
++			for (int i = 0; i < p->sizek; ++i) {
++				const TValue* o = &p->k[i];
++				h = Mix(h, uint64_t(ttype(o)));
++				if (ttisnumber(o)) {
++					const lua_Number n = nvalue(o);
++					h = MixBytes(h, &n, sizeof(n));
++				} else if (ttisstring(o)) {
++					const TString* s = rawtsvalue(o);
++					h = Mix(h, s->tsv.len);
++					h = MixBytes(h, getstr(s), s->tsv.len);
++				} else if (ttisboolean(o)) {
++					h = Mix(h, uint64_t(bvalue(o)));
++				}
++			}
++			h = Mix(h, uint64_t(p->sizeupvalues));
++			for (int i = 0; i < p->sizeupvalues; ++i) {
++				const TString* s = p->upvalues[i];
++				h = Mix(h, (s != nullptr)? s->tsv.len: ~0u);
++				if (s != nullptr)
++					h = MixBytes(h, getstr(s), s->tsv.len);
++			}
++			h = Mix(h, uint64_t(p->sizep));
++			for (int i = 0; i < p->sizep; ++i)
++				h = Mix(h, ProtoHash(p->p[i]));
++			return h;
++		}
++
++		// a stack slot (not a pseudo-index)
++		const TValue* StackAt(lua_State* L, int idx) {
++			return (idx > 0)? (L->base + (idx - 1)): (L->top + idx);
++		}
++
++		const LClosure* LuaClosureAt(lua_State* L, int idx) {
++			if (lua_type(L, idx) != LUA_TFUNCTION || lua_iscfunction(L, idx))
++				return nullptr;
++			return &clvalue(StackAt(L, idx))->l;
++		}
++
++		// `function() end`: one RETURN 0 1, nothing else
++		bool IsEmptyStub(const LClosure* c) {
++			const Proto* p = c->p;
++			return (p->sizecode == 1 && GET_OPCODE(p->code[0]) == OP_RETURN && GETARG_B(p->code[0]) == 1 &&
++			        p->sizek == 0 && p->sizep == 0 && p->nups == 0);
++		}
++
++		bool Allowed(uint64_t h) {
++			for (const uint64_t a: allowed)
++				if (a == h)
++					return true;
++			return false;
++		}
++
++		void Init() {
++			inited = true;
++			for (const uint64_t h: KNOWN_HASHES)
++				if (h != 0)
++					allowed.push_back(h);
++			if (const char* s = getenv("BARREPLAY_N2_HASHES")) {
++				for (const char* p = s; *p != 0; ) {
++					char* end = nullptr;
++					const uint64_t h = strtoull(p, &end, 16);
++					if (end == p)
++						break;
++					allowed.push_back(h);
++					p = (*end == ',')? end + 1: end;
++				}
++			}
++		}
++
++		// kept in the state's own registry, so a state created later at the
++		// same address starts afresh (its registry is new)
++		State& StateOf(lua_State* L) {
++			lua_pushlightuserdata(L, &stateKey);
++			lua_rawget(L, LUA_REGISTRYINDEX);
++			State* s = static_cast<State*>(lua_touserdata(L, -1));
++			lua_pop(L, 1);
++			if (s != nullptr)
++				return *s;
++			s = new State();
++			s->L = L;
++			lua_pushlightuserdata(L, &stateKey);
++			lua_pushlightuserdata(L, s);
++			lua_rawset(L, LUA_REGISTRYINDEX);
++			return *s;
++		}
++
++		// the upvalue named <name> of the function at <fi>: its index, 0 if none
++		int UpvalueIndex(lua_State* L, int fi, const char* name) {
++			for (int i = 1; ; ++i) {
++				const char* n = lua_getupvalue(L, fi, i);
++				if (n == nullptr)
++					return 0;
++				lua_pop(L, 1);
++				if (strcmp(n, name) == 0)
++					return i;
++			}
++		}
++
++		int Dispatch(lua_State* L);
++
++		// the global at the stack top, for callin <ci>; pushes nothing
++		bool Validate(lua_State* L, Callin ci, Entry& e) {
++			const int top = lua_gettop(L);
++			const int fi = top;
++			bool ok = false;
++			uint64_t hw = 0, hh = 0;
++
++			do {
++				const LClosure* w = LuaClosureAt(L, fi);
++				if (w == nullptr || w->nupvalues != 4)
++					break;
++				hw = ProtoHash(w->p);
++
++				e.uvDepth = UpvalueIndex(L, fi, "callinDepth");
++				e.uvSelf = UpvalueIndex(L, fi, "self");
++				e.uvReorder = UpvalueIndex(L, fi, "reorderNeeded");
++				const int uvFunc = UpvalueIndex(L, fi, "selffunc");
++				if (e.uvDepth == 0 || e.uvSelf == 0 || e.uvReorder == 0 || uvFunc == 0)
++					break;
++
++				lua_getupvalue(L, fi, uvFunc);
++				const LClosure* h = LuaClosureAt(L, -1);
++				if (h == nullptr)
++					break;
++				hh = ProtoHash(h->p);
++				if (HANDLER_TRACY[ci]) {
++					if (h->nupvalues != 2)
++						break;
++					bool stubs = true;
++					for (int i = 1; i <= 2; ++i) {
++						lua_getupvalue(L, -1 - (i - 1), i);
++						const LClosure* t = LuaClosureAt(L, -1);
++						stubs = stubs && (t != nullptr && IsEmptyStub(t));
++					}
++					if (!stubs)
++						break;
++				} else if (h->nupvalues != 0) {
++					break;
++				}
++				lua_settop(L, top);
++
++				lua_getupvalue(L, fi, e.uvSelf);
++				if (!lua_istable(L, -1))
++					break;
++
++				ok = Allowed(hw) && Allowed(hh);
++			} while (false);
++
++			lua_settop(L, top);
++			LOG("[barreplay] N2 %s: wrapper %016llx handler %016llx: %s", CALLIN_NAMES[ci], (unsigned long long) hw, (unsigned long long) hh, ok? "native": "Lua");
++			return ok;
++		}
++
++		// helpers for the steps of the Lua code, on values at absolute indices
++
++		// a <op> b with Lua's semantics (string coercion, metamethods) for
++		// anything but two numbers; a and b absolute; pushes the result
++		void ArithSlow(lua_State* L, int& ref, const char* chunk, int a, int b) {
++			if (ref == LUA_NOREF) {
++				luaL_loadstring(L, chunk);
++				ref = luaL_ref(L, LUA_REGISTRYINDEX);
++			}
++			lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
++			lua_pushvalue(L, a);
++			lua_pushvalue(L, b);
++			lua_call(L, 2, 1);
++		}
++
++		void Mul(lua_State* L, State& st, int a, int b) {
++			if (lua_type(L, a) == LUA_TNUMBER && lua_type(L, b) == LUA_TNUMBER) {
++				lua_pushnumber(L, lua_tonumber(L, a) * lua_tonumber(L, b));
++				return;
++			}
++			ArithSlow(L, st.mulRef, "local a, b = ... return a * b", a, b);
++		}
++
++		// callinDepth = callinDepth + 1, callinDepth = callinDepth - 1 (the
++		// wrapper's upvalue arithmetic; x - 1 and x + -1 are the same float)
++		void AddDepth(lua_State* L, State& st, const Entry& e, int inst, float d) {
++			lua_getupvalue(L, inst, e.uvDepth);
++			if (lua_type(L, -1) == LUA_TNUMBER) {
++				const lua_Number v = lua_tonumber(L, -1);
++				lua_pop(L, 1);
++				lua_pushnumber(L, v + d);
++			} else {
++				const int v = lua_gettop(L);
++				lua_pushnumber(L, d);
++				ArithSlow(L, st.addRef, "local a, b = ... return a + b", v, v + 1);
++				lua_replace(L, v);
++				lua_settop(L, v);
++			}
++			lua_setupvalue(L, inst, e.uvDepth);
++		}
++
++		// the handler bodies; args at 1..nargs (the callin's arguments), the
++		// gadget list at <list>; push the handler's two results
++		void HandlerPreDamaged(lua_State* L, State& st, int nargs, int list, int key) {
++			// local retDamage = damage; local retImpulse = 1.0
++			if (nargs >= 4) lua_pushvalue(L, 4); else lua_pushnil(L);
++			const int retDamage = lua_gettop(L);
++			lua_pushnumber(L, 1.0f);
++			const int retImpulse = lua_gettop(L);
++
++			for (lua_Number i = 1; ; i = i + 1) {
++				lua_pushnumber(L, i);
++				lua_gettable(L, list);
++				if (!lua_toboolean(L, -1)) {
++					lua_pop(L, 1);
++					break;
++				}
++				const int g = lua_gettop(L);
++				// g:UnitPreDamaged(unitID, unitDefID, unitTeam, retDamage, paralyzer, weaponDefID, projectileID, attackerID, attackerDefID, attackerTeam)
++				lua_pushvalue(L, key);
++				lua_gettable(L, g);
++				lua_pushvalue(L, g);
++				for (int a = 1; a <= 10; ++a) {
++					if (a == 4)
++						lua_pushvalue(L, retDamage);
++					else if (a <= nargs)
++						lua_pushvalue(L, a);
++					else
++						lua_pushnil(L);
++				}
++				lua_call(L, 11, 2);
++				const int dmg = lua_gettop(L) - 1, imp = lua_gettop(L);
++				if (!lua_isnil(L, dmg)) {
++					lua_pushvalue(L, dmg);
++					lua_replace(L, retDamage);
++				}
++				if (!lua_isnil(L, imp)) {
++					Mul(L, st, retImpulse, imp);
++					lua_replace(L, retImpulse);
++				}
++				lua_settop(L, g - 1);
++			}
++		}
++
++		void HandlerDamaged(lua_State* L, int nargs, int list, int key, int nparams) {
++			for (lua_Number i = 1; ; i = i + 1) {
++				lua_pushnumber(L, i);
++				lua_gettable(L, list);
++				if (!lua_toboolean(L, -1)) {
++					lua_pop(L, 1);
++					break;
++				}
++				const int g = lua_gettop(L);
++				lua_pushvalue(L, key);
++				lua_gettable(L, g);
++				lua_pushvalue(L, g);
++				for (int a = 1; a <= nparams; ++a) {
++					if (a <= nargs)
++						lua_pushvalue(L, a);
++					else
++						lua_pushnil(L);
++				}
++				lua_call(L, 1 + nparams, 0);
++				lua_settop(L, g - 1);
++			}
++			lua_pushnil(L);
++			lua_pushnil(L);
++		}
++
++		void HandlerExplosion(lua_State* L, int nargs, int list, int key) {
++			// for i = #list, 1, -1 do local g = list[i]; if g:Explosion(...) then return true end end; return false
++			bool res = false;
++			for (lua_Number i = lua_Number(lua_objlen(L, list)); i >= 1; i = i - 1) {
++				lua_pushnumber(L, i);
++				lua_gettable(L, list);
++				const int g = lua_gettop(L);
++				lua_pushvalue(L, key);
++				lua_gettable(L, g);
++				lua_pushvalue(L, g);
++				for (int a = 1; a <= 6; ++a) {
++					if (a <= nargs)
++						lua_pushvalue(L, a);
++					else
++						lua_pushnil(L);
++				}
++				lua_call(L, 7, 1);
++				const bool r = lua_toboolean(L, -1);
++				lua_settop(L, g - 1);
++				if (r) {
++					res = true;
++					break;
++				}
++			}
++			lua_pushboolean(L, res);
++			lua_pushnil(L);
++		}
++
++		// the installed wrapper: upvalue 1 the wrapper closure, 2 the Entry, 3
++		// the State, 4 the callin index, 5 the method key ("UnitPreDamaged")
++		int Dispatch(lua_State* L) {
++			const int nargs = lua_gettop(L);
++			State& st = *static_cast<State*>(lua_touserdata(L, lua_upvalueindex(3)));
++			const Entry& e = *static_cast<Entry*>(lua_touserdata(L, lua_upvalueindex(2)));
++			const Callin ci = Callin(lua_tointeger(L, lua_upvalueindex(4)));
++
++			lua_pushvalue(L, lua_upvalueindex(1));
++			const int inst = lua_gettop(L);
++			lua_pushvalue(L, lua_upvalueindex(5));
++			const int key = lua_gettop(L);
++
++			// callinDepth = callinDepth + 1
++			AddDepth(L, st, e, inst, 1.0f);
++
++			// local res1, res2 = selffunc(self, ...): the handler
++			// (its tracy stubs do nothing; the handler reads self.<X>List first)
++			lua_getupvalue(L, inst, e.uvSelf);
++			const int self = lua_gettop(L);
++			lua_getfield(L, self, LIST_NAMES[ci]);
++			const int list = lua_gettop(L);
++
++			switch (ci) {
++				case CI_UnitPreDamaged:      { HandlerPreDamaged(L, st, nargs, list, key); } break;
++				case CI_UnitDamaged:         { HandlerDamaged(L, nargs, list, key, 10); } break;
++				case CI_Explosion:           { HandlerExplosion(L, nargs, list, key); } break;
++				case CI_ProjectileDestroyed: { HandlerDamaged(L, nargs, list, key, 3); } break;
++				default: { lua_pushnil(L); lua_pushnil(L); } break;
++			}
++			const int res = lua_gettop(L) - 1;
++
++			// callinDepth = callinDepth - 1
++			AddDepth(L, st, e, inst, -1.0f);
++
++			// if reorderNeeded and callinDepth == 0 then self:PerformReorders() end
++			lua_getupvalue(L, inst, e.uvReorder);
++			const bool reorder = lua_toboolean(L, -1);
++			lua_pop(L, 1);
++			if (reorder) {
++				lua_getupvalue(L, inst, e.uvDepth);
++				lua_pushnumber(L, 0.0f);
++				const bool zero = lua_equal(L, -1, -2);
++				lua_pop(L, 2);
++				if (zero) {
++					lua_getupvalue(L, inst, e.uvSelf);
++					const int s = lua_gettop(L);
++					lua_getfield(L, s, "PerformReorders");
++					lua_pushvalue(L, s);
++					lua_call(L, 1, 0);
++					lua_settop(L, s - 1);
++				}
++			}
++
++			// return res1, res2
++			lua_pushvalue(L, res);
++			lua_pushvalue(L, res + 1);
++			return 2;
++		}
++	}
++
++	void Substitute(lua_State* L, Callin ci)
++	{
++		if ((g_brToggles2 & 1) == 0)
++			return;
++		if (!inited)
++			Init();
++
++		State& st = StateOf(L);
++		Entry& e = st.ci[ci];
++		const void* p = lua_topointer(L, -1);
++
++		if (p != e.installed) {
++			if (e.installedRef != LUA_NOREF)
++				luaL_unref(L, LUA_REGISTRYINDEX, e.installedRef);
++			if (e.nativeRef != LUA_NOREF)
++				luaL_unref(L, LUA_REGISTRYINDEX, e.nativeRef);
++			e.installedRef = e.nativeRef = LUA_NOREF;
++			// (the State lives in this state's registry, so these refs are its)
++			e.installed = p;
++			e.ok = Validate(L, ci, e);
++
++			// keep the global alive while it is the one validated, so its
++			// address cannot come back as another function's
++			lua_pushvalue(L, -1);
++			e.installedRef = luaL_ref(L, LUA_REGISTRYINDEX);
++
++			if (e.ok) {
++				lua_pushvalue(L, -1);
++				lua_pushlightuserdata(L, &e);
++				lua_pushlightuserdata(L, &st);
++				lua_pushinteger(L, int(ci));
++				lua_pushstring(L, CALLIN_NAMES[ci]);
++				lua_pushcclosure(L, Dispatch, 5);
++				e.nativeRef = luaL_ref(L, LUA_REGISTRYINDEX);
++			}
++		}
++
++		if (!e.ok)
++			return;
++
++		lua_pop(L, 1);
++		lua_rawgeti(L, LUA_REGISTRYINDEX, e.nativeRef);
++	}
++}
+diff --git a/rts/Lua/BrNativeHandler.h b/rts/Lua/BrNativeHandler.h
+new file mode 100644
+index 0000000..ff427b4
+--- /dev/null
++++ b/rts/Lua/BrNativeHandler.h
+@@ -0,0 +1,32 @@
++/* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
++
++#ifndef BR_NATIVE_HANDLER_H
++#define BR_NATIVE_HANDLER_H
++
++// [barreplay] N2 (toggle2 0x1): BAR's gadget handler dispatches every callin
++// through an `installed` wrapper closure (callin depth, deferred gadget
++// reorders) and then a handler function that loops over the callin's gadget
++// list (luarules/gadgets.lua). For the hot damage callins that is two Lua
++// calls, two calls of the tracy stubs and the loop, per hit. When the global
++// the engine fetched is exactly that wrapper over exactly that handler - their
++// bytecode, constants and upvalue names hashed (debug info left out), the
++// tracy upvalues the empty stubs of a headless build - a C function does the
++// same steps instead: the same table reads (with metamethods), the same calls
++// of the same gadget functions with the same arguments in the same order, the
++// same arithmetic, the same depth counter and reorder check. Anything else and
++// the Lua wrapper runs as before.
++//
++// Only the error path differs: a traceback names this function where the
++// handler's frames were, and the C boundary adds one to the C-call depth.
++
++struct lua_State;
++
++namespace BrN2 {
++	enum Callin { CI_UnitPreDamaged, CI_UnitDamaged, CI_Explosion, CI_ProjectileDestroyed, CI_N };
++
++	// the stack top is the global the engine fetched for the callin: replace
++	// it with the native dispatcher when it is BAR's wrapper over the handler
++	void Substitute(lua_State* L, Callin ci);
++}
++
++#endif
+diff --git a/rts/Lua/CMakeLists.txt b/rts/Lua/CMakeLists.txt
+index bc2eff1..2bdea4d 100644
+--- a/rts/Lua/CMakeLists.txt
++++ b/rts/Lua/CMakeLists.txt
+@@ -14,6 +14,7 @@ set(sources_engine_Lua
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/LuaVFSDownload.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/LuaEncoding.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/LuaEngineEventLog.cpp"
++		"${CMAKE_CURRENT_SOURCE_DIR}/BrNativeHandler.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/LuaFBOs.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/LuaFeatureDefs.cpp"
+ 		"${CMAKE_CURRENT_SOURCE_DIR}/LuaFonts.cpp"
+diff --git a/rts/Lua/LuaHandle.cpp b/rts/Lua/LuaHandle.cpp
+index 8bb8c16..f3a4494 100644
+--- a/rts/Lua/LuaHandle.cpp
++++ b/rts/Lua/LuaHandle.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "LuaHandle.h"
++#include "BrNativeHandler.h"
+ #include <x86intrin.h>
+ #include "lua_privileges.h"
+ 
+@@ -1414,6 +1415,7 @@ void CLuaHandle::UnitDamaged(
+ 
+ 	if (!cmdStr.GetGlobalFunc(L))
+ 		return;
++	BrN2::Substitute(L, BrN2::CI_UnitDamaged); // [barreplay] N2
+ 
+ 	static constexpr int argCount = 7 + 3;
+ 
+@@ -2238,6 +2240,7 @@ void CLuaHandle::ProjectileDestroyed(const CProjectile* p)
+ 
+ 	if (!cmdStr.GetGlobalFunc(L))
+ 		return;
++	BrN2::Substitute(L, BrN2::CI_ProjectileDestroyed); // [barreplay] N2
+ 
+ 	lua_pushnumber(L, p->id);
+ 	lua_pushnumber(L, ownerID);
+@@ -2302,6 +2305,7 @@ bool CLuaHandle::Explosion(int weaponDefID, const WeaponDef* weaponDef, const CE
+ 	static const LuaHashString cmdStr(__func__);
+ 	if (!cmdStr.GetGlobalFunc(L))
+ 		return false;
++	BrN2::Substitute(L, BrN2::CI_Explosion); // [barreplay] N2
+ 
+ 	lua_pushnumber(L, weaponDefID);
+ 	lua_pushnumber(L, params.pos.x);
+diff --git a/rts/Lua/LuaHandleSynced.cpp b/rts/Lua/LuaHandleSynced.cpp
+index 281fbce..b4f5d79 100644
+--- a/rts/Lua/LuaHandleSynced.cpp
++++ b/rts/Lua/LuaHandleSynced.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "LuaHandleSynced.h"
++#include "BrNativeHandler.h"
+ #include <strings.h>
+ #include "LuaRules.h"
+ #include "Sim/MoveTypes/Systems/BrParallelAir.h"
+@@ -1527,6 +1528,7 @@ bool CSyncedLuaHandle::UnitPreDamaged(
+ 
+ 	if (!cmdStr.GetGlobalFunc(L))
+ 		return false;
++	BrN2::Substitute(L, BrN2::CI_UnitPreDamaged); // [barreplay] N2
+ 
+ 	int inArgCount = 5;
+ 	int outArgCount = 2;
+diff --git a/rts/Net/NetCommands.cpp b/rts/Net/NetCommands.cpp
+index 4741723..89f5a48 100644
+--- a/rts/Net/NetCommands.cpp
++++ b/rts/Net/NetCommands.cpp
+@@ -99,6 +99,8 @@ namespace {
+ 				while (fscanf(f, "%63s", word) == 1) {
+ 					if (strncmp(word, "t=", 2) == 0)
+ 						g_brToggles = unsigned(strtoul(word + 2, nullptr, 16));
++					if (strncmp(word, "t2=", 3) == 0)
++						g_brToggles2 = unsigned(strtoul(word + 3, nullptr, 16));
+ 				}
+ 				fclose(f);
+ 			}
+@@ -759,9 +761,9 @@ void CGame::ClientReadNet()
+ 							BrP5::BenchLine(p5line, sizeof(p5line));
+ 							// the bench line last: bench-ckpt reads the result's last line
+ 							if (g_brBench.out) {
+-								if (FILE* f = fopen(g_brBench.out, "a")) { fprintf(f, "toggles=%x %s%s%s%s", g_brToggles, pline, gline, p4line, p5line); fputs(line, f); fclose(f); }
++								if (FILE* f = fopen(g_brBench.out, "a")) { fprintf(f, "toggles=%x toggles2=%x %s%s%s%s", g_brToggles, g_brToggles2, pline, gline, p4line, p5line); fputs(line, f); fclose(f); }
+ 							}
+-							fprintf(stderr, "toggles=%x %s%s%s%s", g_brToggles, pline, gline, p4line, p5line);
++							fprintf(stderr, "toggles=%x toggles2=%x %s%s%s%s", g_brToggles, g_brToggles2, pline, gline, p4line, p5line);
+ 							fputs(line, stderr); fflush(stderr);
+ 							// An instrumented (-fprofile-generate) build writes its
+ 							// profile at exit, which _exit skips: dump it first, so a
+diff --git a/rts/Sim/MoveTypes/Systems/BrParallelAir.h b/rts/Sim/MoveTypes/Systems/BrParallelAir.h
+index 0f00937..74d30bc 100644
+--- a/rts/Sim/MoveTypes/Systems/BrParallelAir.h
++++ b/rts/Sim/MoveTypes/Systems/BrParallelAir.h
+@@ -17,6 +17,8 @@ class CUnit;
+ // experiment switches: BARREPLAY_TOGGLES (hex) at startup, or the bench
+ // harness's go file ("t=<hex>") on each restore of a checkpoint
+ extern unsigned g_brToggles;
++// BARREPLAY_TOGGLES2 / "t2=<hex>": the second word of switches
++extern unsigned g_brToggles2;
+ 
+ // [barreplay] H76 (toggle 0x200): the largest chunk a for_mt_chunk call of the
+ // unit loops hands one thread. for_mt_chunk cuts its range into one chunk per
+diff --git a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+index a98db58..064c35e 100644
+--- a/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
++++ b/rts/Sim/MoveTypes/Systems/GeneralMoveSystem.cpp
+@@ -46,6 +46,13 @@ static unsigned BrReadTogglesEnv() {
+ }
+ unsigned g_brToggles = BrReadTogglesEnv();
+ 
++// the second word (BARREPLAY_TOGGLES2, go file "t2=<hex>"): the first is full
++static unsigned BrReadToggles2Env() {
++	const char* s = std::getenv("BARREPLAY_TOGGLES2");
++	return (s != nullptr)? unsigned(std::strtoul(s, nullptr, 16)): 0u;
++}
++unsigned g_brToggles2 = BrReadToggles2Env();
++
+ // [barreplay] P1: the general move-type loop, run on all threads with exactly
+ // the sequential result.
+ //
+-- 
+2.53.0
+
