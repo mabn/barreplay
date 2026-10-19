@@ -4515,3 +4515,33 @@ Running: `speed44` = `speed43` + P7 v3 (`2c991a0`: no window under
 `BARREPLAY_P7_MINUNITS` = 6,000 active units; phase A records each unit's
 index instead of the per-frame clear of a 32,000-entry map), gated, then the
 five windows.
+
+### 2026-10-19 05:13 — `speed44` (P7 v3, gated at 6,000 units): five windows
+
+`speed44` = `speed43` + `2c991a0`. Medium gate identical (`0558d354…`).
+Base settings (`587a3f`) against everything on (`50d87a3f/1f`), 3
+interleaved pairs per window, from checkpoints dumped with the base settings:
+
+| window | units | wall | main cycles | main instructions | share of the game it stands for |
+|---|---|---|---|---|---|
+| 15,000 +1,800 | 1,405 | +1.7% (was +6.7% with P7 ungated) | +1.6% | +0.6% | 0-20k: 2.6% |
+| 35,000 +900 | 3,719 | -2.4% | -2.3% | -9.3% | 20k-40k: 10.1% |
+| 63,780 +450 | 9,961 | **-7.9%** (was -6.5%) | -6.2% | -7.1% | 60k-70k: 19.5% |
+| 72,000 +450 | 7,228 | -6.4% | -5.4% | -4.0% | 70k-80k: 21.9% |
+| 82,000 +450 | 9,576 | -4.2% | -3.5% | -4.7% | 80k-91k: 26.9% |
+
+Weighted by those shares (and -5% assumed for 40k-60k), the whole game
+should be about **-5%** against the base settings. The base settings in this
+binary are within 0.2% of `speed32`'s best, so the forecast is ~12m40s.
+`speed43`'s whole game measured -1.7%.
+
+**Insights:**
+- The gain shrinks after the air-heavy peak at 63,780. The 82,000 window,
+  where the game's longest stretch is, has 43% aircraft against 54% and gains
+  half as much. P1, already in the base, is what scales with aircraft;
+  the new items gain most where units are many and air-heavy.
+- **Running:** the late window from a checkpoint dumped with everything on
+  since frame 0 against the usual base-dumped one, both with everything on in
+  the window. If the first is slower, whole runs lose something that 450-frame
+  trials restored from a base checkpoint cannot see (heap layout built up by
+  the workers' allocations, for instance).
