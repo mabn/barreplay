@@ -4400,3 +4400,24 @@ late game differs (845k hits against 1.06M).
 Running next: early (15,000), middle (35,000) and late (63,780) checkpoints of
 `speed43`, `speed32`-like settings (`587a3f`) against everything on, to see
 where over the game the new items gain or lose.
+
+### 2026-10-19 03:12 — turbo bins: how much clock the main core loses to the others
+
+The main core (cpu3) spinning alone for 3 s, with other logical CPUs spinning
+beside it (idle machine, `perf stat` cycles):
+
+| other CPUs busy | main core clock |
+|---|---|
+| none | 3.95 GHz |
+| cpu0 | 3.83 GHz |
+| cpu0, 1 | 3.79 GHz |
+| cpu0, 1, 2 | 3.76 GHz |
+| cpu0 and its SMT sibling cpu4 | 3.80 GHz |
+| cpu0-2 and their siblings 4-6 | 3.69 GHz |
+
+**Insight:** the most the clock can give is 7% (3.69 → 3.95 GHz), and only
+with nothing else running. Both whole games ran the main thread at 3.68 GHz,
+the all-busy bin, because the workers spin through the P1, P4 and P5
+sections whether they have work or not. Idle workers sleeping instead of
+spinning would put the main core in a higher bin part of the time: worth
+perhaps 2-4%, and less heat, so fewer governor pauses.
