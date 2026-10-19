@@ -4355,3 +4355,48 @@ unit's ally team (or any side, if the unit is neutral) whose area contains
 it, by `BeforeUnit`'s distance rule (new drain reason `turn`). Running:
 the medium gate, three runs to frame 66,720 and a governed whole game, all
 with everything on except P1 v8.
+
+### 2026-10-19 03:10 — `speed43` (the P4 fix): exact over the whole game, 13m07.8s active, the best so far
+
+`speed43` = `speed42` + `25a1367`, everything on except P1 v8
+(`t=50d87a3f`, `t2=31`):
+
+| check | result |
+|---|---|
+| medium gate | `0558d354…`, identical |
+| three runs to frame 66,720 | all three identical to the reference |
+| governed whole game, 7 threads, main pinned | **`a26e920d…`, identical**; active 13m07.8s, paused 1298 s |
+
+Against the last exact whole game:
+
+| whole game, governed | `speed32` (`t=587fbf`) | `speed43` (all on but v8) | change |
+|---|---|---|---|
+| active sim | 13m21.3s | **13m07.8s** | -1.7% |
+| main-thread instructions | 3.028e12 | 2.779e12 | -8.2% |
+| main-thread cycles | 2.978e12 | 2.941e12 | -1.2% |
+| main-thread IPC | 1.017 | 0.945 | -7.1% |
+| main-thread clock while running | 3.66 GHz | 3.68 GHz | |
+| worker instructions | 2.74e12 | 4.34e12 | +59% |
+| worker cycles | 4.17e12 | 6.49e12 | +56% |
+| worker CPU time | 1,423 s | 2,005 s | +41% |
+
+The diverged `speed42` game (`635e45f2…`, 15m14s) is not comparable: its
+late game differs (845k hits against 1.06M).
+
+**Insights:**
+- **The late-window gains do not carry over to the whole game.** Since
+  `speed32` the items measured -1.2% to -4.4% each on the late window,
+  about -15% together, but the whole game's main thread runs only 1.2% fewer
+  cycles.
+- **What the main thread gives up in instructions it loses in IPC.** It
+  executes 8.2% fewer instructions (the work moved to workers) at 7.1% lower
+  IPC. The likely causes are its own spin-waits for workers (a `pause`
+  loop is about one instruction per ten cycles) and workers using the shared
+  L3 and memory bandwidth 56% more.
+- **The clock is not the lever.** The main thread ran at 3.68 GHz while
+  running in both games, the 4-core turbo bin of this i7-4980HQ (1-core
+  4.0 GHz). Pauses grow with the heat, but active time does not.
+
+Running next: early (15,000), middle (35,000) and late (63,780) checkpoints of
+`speed43`, `speed32`-like settings (`587a3f`) against everything on, to see
+where over the game the new items gain or lose.
