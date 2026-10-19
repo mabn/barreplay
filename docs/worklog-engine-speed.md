@@ -5384,3 +5384,23 @@ ordinary update.
   the two apart in minutes.
 - 11m34.0s is the time this setting reaches; the fixes cost nearly nothing
   (two event lists kept, a revert per unit dying in the window).
+
+### 2026-10-19 19:55 — speed54: 11m38.6s, identical
+
+`speed54` = `speed53` + `4aa6b05` (patch 0109). Medium gate (`t2=e3837`, P7
+every frame): **`0558d354…`**. Governed whole game, `t=d0d87abf t2=e3837`,
+7 threads, the main thread pinned, the usual governor:
+
+| governed whole game | active sim | against `speed44` trio |
+|---|---|---|
+| `speed44` `t=d0d87abf t2=37` | 12m18.2s | |
+| `speed53` `t2=e3837` (capture differed) | 11m34.0s | -6.0% |
+| **`speed54` `t2=e3837`** | **11m38.6s** | **-5.4%** |
+
+**`a26e920d…`, identical.** Against stock (38m17s) that is 3.29x. The 4.6 s
+between `speed53` and `speed54` is within run-to-run spread (the two fixes
+add two event lists and a revert per unit dying in a window).
+
+Patches 0092-0109 are exported (`patches/engine-2026.07.04/speed`, the
+rejected ones in `rejected/`) and the speed README has the new toggles,
+apply order and best result.

@@ -10,7 +10,7 @@ a gate and a publish.
 
 Numbering: the 4-digit prefixes continue the series (`../0001`-`0013`), so
 every patch number under `engine-2026.07.04/` is unique: 0014-0043,
-0063-0067, 0069-0070, 0073-0091, 0095-0099, 0101, 0104 and 0106-0108 here,
+0063-0067, 0069-0070, 0073-0091, 0095-0099, 0101, 0104 and 0106-0109 here,
 0044-0045, 0052-0062, 0068, 0071-0072, 0092-0094, 0100, 0102-0103 and 0105 in
 `rejected/`, 0046-0051 in `tools/`. Change
 identifiers continue the work log's H-series (H1-H73), with H74-H104 for the
@@ -59,6 +59,14 @@ Best so far: `speed44`, `t=d0d87abf`, `t2=37` (P1 v6, v8 and v9 added; P5 with
 (-1.4 to -3.3% late): they remove different serial aircraft, so only all
 three shorten P1's start chain (work log, 2026-10-19).
 
+Best so far: `speed54` (= `speed44` + 0092-0109), `t=d0d87abf`, `t2=e3837`
+(H98, H99, H100, H103, H104 and P7 v4 added): **11m38.6s active**, identical
+(`a26e920d…`), -5.4% against `speed44`'s 12m18.2s, -12.8% against `speed32`
+and 3.29x stock. `speed53` without 0109 ran 11m34.0s but its capture differed
+(the simulation did not): BAR's unsynced "Widget Events" gadget forwards
+`UnitGiven` to LuaUI and the capture widget records both calls, and P7 v4
+moved a dying unit's lingering sight (work log, 2026-10-19).
+
 ## Applying
 
 From a clean checkout of the `2026.07.04` tag:
@@ -82,10 +90,10 @@ git am $P/speed/rejected/0071-*.patch $P/speed/rejected/0072-*.patch
 git am $(ls $P/speed/00*.patch | awk -F/ '$NF > "0072"')
 ```
 
-The line after it, Recoil branch `speed53`, is `speed44` plus 0092-0108 in
+The line after it, Recoil branch `speed54`, is `speed44` plus 0092-0109 in
 number order, kept and rejected alike (the rejected ones are toggled off;
-later patches were written on top of them). Checked: applied to `speed44` they
-give `speed53` with no difference.
+later patches were written on top of them). Checked: applied to `speed44`,
+0092-0108 give `speed53` with no difference; 0109 is one commit on top.
 
 ```sh
 git am $(ls $P/speed/0*.patch $P/speed/rejected/0*.patch | awk -F/ '{print $NF" "$0}' | awk '$1 >= "0092"' | sort | cut -d' ' -f2)
@@ -153,8 +161,8 @@ The second word, `BARREPLAY_TOGGLES2` / the go file's `t2=<hex>` (0084 on):
 | `0x4000` | H101 | 0100, 0103, 0105 (rejected) | `CUnit::Update` on all threads in runs between serial points (busy builders and factories, units firing a synced-received air/water event) | +2.0% / +3.9%; refined +1.5% / +0.5% (752 busy builders a frame) | off |
 | `0x8000`, `0x10000` | H102 | 0102 (rejected) | a push wakes any sleeping worker; worker 1 spins 1 ms | -2.1% beside the first H101, noise without | off |
 | `0x20000` | H103 | 0104 | synced `next` calls `lua_next` directly instead of the original `next` through `lua_call` | -0.7% / -0.7% (noise level) | on |
-| `0x40000` | H104 | 0106-0107 | in a demo replay the unsynced halves of LuaRules and LuaGaia receive no events and no `SendToUnsynced` messages (the arguments are still checked) | -2.2% / -2.4% | on |
-| `0x80000` | P7 v4 | 0108 | P7's phase A runs each sensor type's per-unit loop itself (a task per type); the handler's event functions and the height-map hook join it; `Update` discards an instance created and released before it | -1.2% / -0.8% | on |
+| `0x40000` | H104 | 0106-0107, 0109 | in a demo replay the unsynced halves of LuaRules and LuaGaia receive no events and no `SendToUnsynced` messages (the arguments are still checked) | -2.2% / -2.4% | on |
+| `0x80000` | P7 v4 | 0108-0109 | P7's phase A runs each sensor type's per-unit loop itself (a task per type); the handler's event functions and the height-map hook join it; `Update` discards an instance created and released before it | -1.2% / -0.8% | on |
 
 Not toggled (always on in these builds):
 
