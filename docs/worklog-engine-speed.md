@@ -5123,3 +5123,56 @@ right before the LOS update and is joined right after it, in place of the
 call at the start of the frame. The thread exists from frame 0 whatever the
 toggles, so a checkpoint holds it and trials pin it with the workers. Up to
 2.9% of the main thread. Building.
+
+### 2026-10-19 14:17 — H99 (Lua GC beside the LOS update): -1.9% and -3.5% late, identical
+
+`speed49` = `speed48` + H99 (`abda66c`). Medium gate with H98+H99 on
+(`t2=1837`): **`0558d354…`, identical**. The harness now waits until the
+huge-page share stops growing: trials start with 98-99% of resident memory
+on huge pages after 6-8 s, and the late window costs 31.85e9 cycles against
+a fresh run's 30.72e9 (3.7% apart; 6% with the 90% rule, 19% with none).
+
+| H99, on top of trio + H98 (`d0d87abf/837`), 3 rounds | wall | cycles | instructions |
+|---|---|---|---|
+| 63,780: without | 8.46 s | 31.85e9 | 29.88e9 |
+| 63,780: with (`/1837`) | 8.32 s (**-1.7%**) | **-1.9%** | +4.7% |
+| 82,000: without | 7.55 s | 28.16e9 | 26.19e9 |
+| 82,000: with | 7.31 s (**-3.2%**) | **-3.5%** | +3.5% |
+
+**Insights:**
+- **The GC step fits beside the LOS update.** The main thread's GC share
+  (2.9% at 63,780) is nearly all gone; at 82,000 the gain is larger than
+  that share, the end of the game being where the most garbage is made.
+- **The first build hung at exit:** the GC thread waits on a static
+  condition variable, and destroying a condition variable that still has a
+  waiter blocks. Trials end with `_exit` and never got there; the gate's
+  normal exit did. `speed50` keeps both primitives on the heap, never
+  destroyed (`5fa13e3`).
+
+Queued in `speed50`, measured next against `t2=837` and `1837`:
+
+- **H100** (`1a8bf86`, `t2` `0x2000`): the ground system's two
+  single-threaded loops, applying heading changes and the final
+  `CGroundMoveType::Update`, on all threads. Upstream keeps them serial
+  "due to the numerous synced vars", which matters only to its sync
+  checker. Each unit's work reads and writes only that unit, its move type
+  and the static maps. Two things reach beyond it and each keeps its loop
+  serial: a Lua unit script that defines `ChangeHeading` (COB's is empty;
+  counted as scripts are made and freed) and a `UnitMoved` listener. ~3%
+  of the main thread is in those loops.
+- **H101** (`8024801`, `d4fde36`, `t2` `0x4000`): `CUnit::Update`
+  (4.3%) on all threads in runs, then each unit's reload-log entries and
+  collision-map update in order. BAR's synced gadgets receive the air and
+  water events (`unit_collision_damage_behavior`,
+  `unit_water_depth_damage`, `unit_waterspeedmultiplier`), and
+  `CBuilder`/`CFactory` override `Update` with work on other units, so
+  those units are serial points, planned on all threads and planned again
+  after one that wrote through Lua (a counter in the trampoline P4 and P7
+  rely on), changed the height map or created a unit.
+- **H102** (`bf11700`, `t2` `0x8000` / `0x10000`): only 2.6 of 6
+  workers are present on average in the weapon-vectors section. A push
+  wakes sleepers only when every worker sleeps, so a section that starts
+  while one is busy runs without the rest until their timers expire (up to
+  30 ms backoff). `0x8000`: the push wakes any sleeper. `0x10000`:
+  worker 1 alone spins 1 ms (pausing) instead of 30 µs, so it takes each
+  section's first chunk and wakes the rest at its own cost. Scheduling only.
