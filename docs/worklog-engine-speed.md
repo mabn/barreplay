@@ -5331,3 +5331,56 @@ sim 1m03s (1m05-1m07s before). Late windows, 3 rounds, against H98+H99+H100
 
 A governed whole game with everything kept is running (`speed53`,
 `t=d0d87abf t2=e3837`).
+
+### 2026-10-19 19:03 — speed53 whole game: 11m34.0s, but the capture differs; two causes found, fixed in speed54
+
+Governed whole game, `speed53`, `t=d0d87abf t2=e3837` (the trio, H98, H99,
+H100, H103, H104, P7 v4), the usual settings: **11m34.0s active** (-6.0%
+against 12m18.2s), but the `.brp` is `4c62538b…`, **not `a26e920d…`**.
+
+Record by record against the reference stream:
+
+| records | result |
+|---|---|
+| F (all 3,031 sampled frames) | identical: every unit's position, health, team, build progress |
+| E (events) | 191 fewer, all `given`, at frames 77,176 and 82,033 only |
+| V (visibility) | 8 of 2,947 differ, from frame 65,400 |
+| C (chat), P (profiler) | differ, as in every run (draw-timed; the packer replaces C with the demo's) |
+
+Trials from the 63,780 checkpoint through frame 77,300, one toggle at a
+time, pin each difference on one item: `given` events at 77,176 are 451
+on the base, 268 with H104, 451 with P7 v4 or H103; the visibility record
+at 65,400 changes with P7 v4 only.
+
+**H104:** no transfer was missing. The reference recorded 181 of the 266
+units given at 77,176 **twice**. BAR's unsynced `api_widget_events.lua`
+("Widget Events") forwards `UnitGiven` and `UnitTaken` to LuaUI
+(`Script.LuaUI.UnitGiven`) when neither team is allied with the local one
+and the unit is in its radar or LOS. Unlike its other forwards it does not
+skip a full-view spectator, and the capture widget records every call it
+gets. Muting the unsynced gadgets removed the second call. Fix (`4aa6b05`):
+the muted handles keep `UnitGiven` and `UnitTaken` (also through
+`UpdateCallIn`).
+
+**P7 v4:** a unit that dies inside the window has, in stock, its sight
+released with a delay (it keeps seeing for 1.5 s) at its old square, since
+the LOS update skips dead units. In v4, phase A had already moved its
+instance, so the delayed release kept the new one. Fix (`4aa6b05`): phase A
+records each unit's previous instance per type. The first LOS handler event
+for a unit in the window (destroyed, taken, reverse-built, loaded) takes
+phase A's change back for that unit before the stock logic runs. Phase B's
+redo of the marked unit then does what the stock update would. A height-map
+change in the window takes it back for every unit and runs the full
+ordinary update.
+
+**Insights:**
+- **The medium gate cannot see either one.** Its transfers are between
+  allied teams, which BAR's forwarder skips, and P7's window only opens from
+  6,000 units, so in the gate no unit died inside a v4 window except by
+  chance. The whole verylarge1 game is the gate for these.
+- **The simulation stayed identical in both cases.** Both are capture
+  differences: a callback a gadget makes into the recorder, and 1.5 s of a
+  dead unit's sight. Comparing the raw stream record by record is what told
+  the two apart in minutes.
+- 11m34.0s is the time this setting reaches; the fixes cost nearly nothing
+  (two event lists kept, a revert per unit dying in the window).
