@@ -5494,3 +5494,36 @@ each unit's instances for the revert), then each type's `UpdateUnit` over
 the units its test flagged only, instead of v4's task per type walking all
 10,000 units. Every task claims chunks, waits only for chunks already
 claimed, then claims types.
+
+### 2026-10-19 22:13 — Haswell with 128-bit vectors: -1.0%/-1.3% wall, no clock loss; P7 v4.1 adds nothing
+
+`speed55h` = `speed55` (P7 v4.1 in the code, toggle `0x100000`) built with
+`-march=haswell -mtune=haswell -mno-fma -ffp-contract=off
+-mprefer-vector-width=128`, the old PGO profile. Medium gate (P7 v4.1 on,
+P7 every frame): **`0558d354…`, identical**. Late windows, 3 rounds,
+against `speed54` at `t2=e3837`:
+
+| | 63,780 wall | cycles | instr | clock | 82,000 wall | cycles | instr | clock |
+|---|---|---|---|---|---|---|---|---|
+| `speed54` (x86-64) | 8.06 s | 29.62e9 | 28.59e9 | 3.75 GHz | 7.03 s | 25.92e9 | 25.27e9 | 3.74 GHz |
+| `speed55h` `/e3837` | **-1.0%** | **-0.8%** | -6.5% | 3.74 GHz | **-1.3%** | **-1.3%** | -7.9% | 3.72 GHz |
+| `speed55h` `/1e3837` (+P7 v4.1) | -0.8% | -1.0% | -4.8% | 3.73 GHz | -0.5% | -1.3% | -7.6% | 3.72 GHz |
+
+**Insights:**
+- **Holding vectors to 128 bits keeps the clock** (3.74 against 3.75 GHz;
+  the 256-bit build lost 0.11 GHz) and keeps nearly all of the instruction
+  saving: 6.5-7.9% fewer instructions, 1.0-1.3% less wall time. Most of the
+  saving is scalar: VEX three-operand forms, `roundss`, BMI, `popcnt`.
+- **P7 v4.1 is not worth it:** the chunked tests make the phase-A tasks
+  shorter, but the separate pass and its barrier cost as much again. P7
+  stays at v4.
+- The first attempt at these trials ran into a full disk (sixteen 6 GB
+  checkpoints); the failed restore left the data dir's map empty. It was
+  restored from a checkpoint's copy (md5 checked) and the old checkpoints
+  deleted.
+
+**Next: a PGO retrain on this line** (`speed56` = `speed55` + the P8
+weapon-loop counters), the Haswell-128 flags, training with `t2=e3837` and
+7 threads (`pgotrain2.sh`; the old training passed neither the second
+toggle word nor the thread count, so the newer parallel paths went
+untrained). Then the old profile against the new, and a governed whole game.
