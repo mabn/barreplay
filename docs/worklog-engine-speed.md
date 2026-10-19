@@ -5269,3 +5269,65 @@ too: 81 busy builders a frame, 4 events.
 
 `speed52` (H104) is building: its trials compare `/3837`, `/43837`
 (H104), `/23837` (H103) and `/63837` (both).
+
+### 2026-10-19 18:07 — speed53: H104 (unsynced Lua muted) -2.2%/-2.4%, P7 v4 -1.2%/-0.8%; with H103, -3.4%/-3.6%
+
+**H104** (`9f557f8`, `f19680f`, `t2` `0x40000`): in a demo replay the
+unsynced halves of LuaRules and LuaGaia leave every event list at the first
+frame (and do not put themselves back through `UpdateCallIn`), and
+`SendToUnsynced` keeps its argument checks (all a synced caller can
+observe) but delivers nothing. Unsynced Lua cannot change the simulation,
+and the capture widget reads only the engine: it uses no `WG`, `GG`,
+`SYNCED`, `Script.LuaRules` or `RegisterGlobal`. In a headless replay
+those halves only kept state for drawing that never happens: they received
+every unit event, and `SendToUnsynced` alone was 0.79% of the main thread
+(0.61% of it the unsynced gadgets' Lua).
+
+**P7 v4** (`0ec9c91`, `t2` `0x80000`): P7's phase A only tested which
+units' sensor instances would change; phase B then did those changes
+(`ILosType::UpdateUnit`, 1.9% of the main thread) and the map updates,
+and the main thread ran the heaviest type alone. Phase A now runs the
+ordinary per-unit loop itself, one task per sensor type (each type's
+instances, hash, queues and cache are its own, and the LOS maps are integer
+sums of the active instances' squares, so the order of instance changes
+within a type cannot change a map). Phase B redoes the units marked in the
+window, then each type's `Update`. What it needed besides:
+- The LOS handler's event functions (`UnitDestroyed`, `UnitTaken`,
+  `UnitReverseBuilt`, `UnitLoaded`) and `UpdateHeightMapSynced` now join
+  phase A first, since it writes the types' state. A join claims any type
+  nobody has started and runs it itself, so it never waits on a worker
+  that is waiting in turn.
+- A marked unit's phase-A instance can be created (`NEW`) and released
+  again before `Update`. The stock status logic would add it to the map
+  (`NEW` wins; the zero-count assert is debug-only), so `Update` now
+  discards such an instance: no `LosRemove`, no cache (a cached instance
+  must have its squares). Stock never makes one, since nothing runs between
+  a type's per-unit loop and its `Update`.
+
+Medium gate with H98-H100, H103, H104 and P7 v4 on (`t2=e3837`, P7 forced
+on every frame with `BARREPLAY_P7_MINUNITS=0`): **`0558d354…`, identical**,
+sim 1m03s (1m05-1m07s before). Late windows, 3 rounds, against H98+H99+H100
+(`d0d87abf/3837`):
+
+| added | 63,780 wall | cycles | instr | 82,000 wall | cycles | instr |
+|---|---|---|---|---|---|---|
+| base | 8.16 s | 30.48e9 | 31.06e9 | 7.12 s | 26.53e9 | 26.92e9 |
+| H104 (`/43837`) | **-2.0%** | **-2.2%** | -1.9% | **-2.3%** | **-2.4%** | -1.1% |
+| P7 v4 (`/83837`) | -0.7% | -1.2% | -5.0% | -0.1% | -0.8% | -3.7% |
+| H103 + H104 + P7 v4 (`/e3837`) | **-3.0%** | **-3.4%** | -7.5% | **-2.4%** | **-3.6%** | -6.7% |
+
+**Insights:**
+- **Muting the unsynced gadgets is worth more than its visible part.**
+  `SendToUnsynced` was 0.79%; the whole effect is 2.2-2.4%, the rest being
+  the unsynced halves' own unit-event callins, which a profile cannot tell
+  from the synced ones (they share `CLuaHandle`'s symbols).
+- **P7 v4 removes 4-5% of the main thread's instructions but only ~1% of
+  its cycles:** the instance work moved off the main thread was mostly
+  cache misses on units the main thread no longer touches, but phase B still
+  waits for the heaviest type's map update.
+- One P7 v4 trial in the first batch never produced a result and its CRIU
+  restore log was empty; 25 trials with P7 v4 since then ran normally. The
+  whole game below is the check.
+
+A governed whole game with everything kept is running (`speed53`,
+`t=d0d87abf t2=e3837`).
