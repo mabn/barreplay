@@ -5002,3 +5002,33 @@ which is what makes checkpoint A/Bs work. `[BR_H97]` logs rebuilds and misses.
 Expected: most of the 1.9%. Not attempted: precomputing the projectile
 collision queries (`GetUnitsAndFeaturesColVol`, 1.35%), whose results
 explosions can change mid-pass (new wrecks).
+
+### 2026-10-19 11:18 — H97 rejected: `MovedUnit`'s time is cache misses, not searches; H98
+
+`speed46` (H97) gates identical with H97 on (one rebuild at the toggle, no
+misses over the medium game). Late window (63,780), `d0d87abf/37` against
+`/437`: **+1.0% wall, +0.9% cycles, +0.0% instructions**. Unchanged
+instructions mean the searches were never the cost.
+
+`perf annotate` of `MovedUnit` (`speed44` trio profile) shows where its own
+time goes:
+
+| instruction | share of `MovedUnit`'s self samples | what it waits on |
+|---|---|---|
+| `mov 0xeb0(%rbx),%rax` (after `mov 0xea8(%rbx),%rsi`) | 23.6% | the `CUnit` line holding `quads` (begin/end at 0xea8/0xeb0) |
+| `mov (%r14),%r10` (after `movslq (%rsi),%rax`) | 27.0% | the `quads` vector's heap buffer |
+| `mov (%r10),%rax` | 7.9% | the `Quad` object of the first quad |
+| the `find` loops' compares | ~2% each | |
+
+**Insights:**
+- **It is three dependent cache misses per moved unit:** the unit line with
+  its quad list, the list's buffer, then the quad. The VectorErase searches
+  H97 removed run over lists already in cache. H97's slot table only added
+  memory traffic. It stays in the code, off.
+- **Lesson: annotate a hot function before rewriting it.** "Self time" in a
+  flame graph includes everything inlined, and here it was memory latency.
+
+**H98** (`1e9f2e0`, `speed47`, `t2` `0x800`): the unit loop (which
+already prefetches each unit 8 ahead, H66) prefetches, for the units whose
+collision-map update runs this frame, the unit's `quads` line 8 ahead, the
+list's buffer 4 ahead, and the first two `Quad`s 2 ahead. Loads only. Building.
