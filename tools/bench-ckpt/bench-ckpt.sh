@@ -200,21 +200,39 @@ trial1() {
 		taskset -a -p -c "$CPUSET" "$(cat "$dir/park.ready")" > /dev/null || die "taskset failed"
 	fi
 	local perfpid=
-	if [ -n "${PERF:-}" ]; then
-		# Profile exactly the timed window: attach to the restored engine
-		# (CRIU restores its pid) before releasing it; stops when it exits.
+	# A profiler must see the timed window only. The engine waits for huge
+	# pages AFTER the go file (up to 120 s, the collapser busy meanwhile), so a
+	# build that knows the "sync" word reports <park>.window when the window is
+	# about to start and waits for <park>.go2; the profiler attaches in
+	# between. An older build gets the profiler before the release, as before
+	# (its profile then includes the huge-page wait).
+	local sync=
+	if [ -n "${PERF:-}${PERFSTAT:-}" ] && grep -qa '%s.window' "$bin"; then sync=1; fi
+	rm -f "$dir/park.window" "$dir/park.go2"
+	startprof() {
 		local pid=$(cat "$dir/park.ready")
-		perf record $PERF -p "$pid" -o "$dir/perf-$(date +%s).data" > "$dir/perf.log" 2>&1 &
-		perfpid=$!
+		if [ -n "${PERF:-}" ]; then
+			perf record $PERF -p "$pid" -o "$dir/perf-$(date +%s).data" > "$dir/perf.log" 2>&1 &
+			perfpid=$!
+		fi
+		if [ -n "${PERFSTAT:-}" ]; then
+			# hardware counters per thread
+			perf stat -p "$pid" --per-thread -e "$PERFSTAT" -o "$dir/perfstat.txt" &
+			perfpid=$!
+		fi
 		sleep 1
+	}
+	[ -n "${PERF:-}${PERFSTAT:-}" ] && [ -z "$sync" ] && startprof
+	echo "$n $dir/result${LUAPROF:+ luaprof}${TOGGLES:+ t=$TOGGLES}${TOGGLES2:+ t2=$TOGGLES2}${P4CHECK:+ p4check}${sync:+ sync}" > "$dir/park.go"
+	if [ -n "$sync" ]; then
+		local w=0
+		while [ ! -e "$dir/park.window" ]; do
+			sleep 0.2; w=$((w + 1))
+			[ $w -gt 1500 ] && die "no window signal after 300 s"
+		done
+		startprof
+		touch "$dir/park.go2"
 	fi
-	if [ -n "${PERFSTAT:-}" ]; then
-		# hardware counters per thread over exactly the window
-		perf stat -p "$(cat "$dir/park.ready")" --per-thread -e "$PERFSTAT" -o "$dir/perfstat.txt" &
-		perfpid=$!
-		sleep 1
-	fi
-	echo "$n $dir/result${LUAPROF:+ luaprof}${TOGGLES:+ t=$TOGGLES}${TOGGLES2:+ t2=$TOGGLES2}${P4CHECK:+ p4check}" > "$dir/park.go"
 	local t=0
 	while [ ! -s "$dir/result" ]; do
 		sleep 0.5; t=$((t + 1))
