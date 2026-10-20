@@ -6265,3 +6265,24 @@ with everything on from frame 0, dumps, trials of `pipe64`'s best `t3` against
 what to prefetch read fields of the units 8 ahead that were themselves not
 in cache, so each one stalled on the miss it was meant to hide; H98
 measured -0.5% net with ~1% of the main thread spent this way.
+
+Two more for `speed64`, from the same profile:
+- **H116** (`t3` `0x400`, `e101952`): `CBuilder::Update` started with
+  `const Command& fCommand = !q.empty() ? q.front() : Command(CMD_STOP);` — the
+  ternary mixes an lvalue with a temporary, so it COPIES the front command, for
+  every builder every frame: `Command(const Command&)` is 46% of the
+  function's own time (a pooled command also takes and releases a pool page per
+  copy). Each `Update*` reads the command only for its `CMD_WAIT` test, at its
+  top, after early exits that change nothing, so the live front (or a standing
+  stop command) answers the same.
+- **H117** (`t3` `0x800`, `9d45615`): `CCobEngine::AddThread` (0.9%) is
+  nearly all the hash map's insert probe. Thread ids only grow and an erase
+  leaves a tombstone that only an insert reusing it removes, so in a long game
+  the table has almost no never-used bucket left and every new id scans the
+  whole probe length (lookups of absent ids too). Once the erases since the
+  last rebuild exceed the live threads + 1024, the live threads are
+  re-inserted into a fresh table at the end of the tick; the map is only
+  looked up and inserted into (iterated in sync dumps and saves), and no
+  thread's address is held across ticks.
+
+`pipe66` trials `t3` base, +0x80, +0x100, +0x200, +0x400, +0x800 and all five.
