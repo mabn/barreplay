@@ -10,8 +10,8 @@ a gate and a publish.
 
 Numbering: the 4-digit prefixes continue the series (`../0001`-`0013`), so
 every patch number under `engine-2026.07.04/` is unique: 0014-0043,
-0063-0067, 0069-0070, 0073-0091, 0095-0099, 0101, 0104, 0106-0109, 0111-0112 and 0116-0123 here,
-0044-0045, 0052-0062, 0068, 0071-0072, 0092-0094, 0100, 0102-0103, 0105, 0110 and 0113-0115 in
+0063-0067, 0069-0070, 0073-0091, 0095-0099, 0101, 0104, 0106-0109, 0111-0112, 0116-0127 and 0129-0130 here,
+0044-0045, 0052-0062, 0068, 0071-0072, 0092-0094, 0100, 0102-0103, 0105, 0110, 0113-0115 and 0128 in
 `rejected/`, 0046-0051 in `tools/`. Change
 identifiers continue the work log's H-series (H1-H73), with H74-H104 for the
 ones below.
@@ -79,6 +79,11 @@ profile), `t=d0d87abf`, `t2=1ee3837` (P8, P9, the data exemption and P10 on):
 **11m04.2s active**, identical (`a26e920d…`), -4.6% against `speed57`. P9
 loses in the late windows and H92 now wins (work log, 2026-10-20), so `speed59`
 measures `t=d4d87abf`, `t2=1ae3837`.
+
+Best so far: `speed60` (= `speed58` + 0122-0123, i.e. `Recoil 1ca986d`, with a
+PGO profile trained on that code), `t=d4d87abf`, `t2=3ae383f` (H92, P4 v2, P5
+with 7 workers, P8, the data exemption, P10; P9 off): **10m41.1s active**,
+identical (`a26e920d…`), -3.5% against `speed58` and 3.58x stock (38m17s).
 
 ## Applying
 
@@ -181,7 +186,12 @@ The second word, `BARREPLAY_TOGGLES2` / the go file's `t2=<hex>` (0084 on):
 | `0x400000` | P9 | 0113-0115 (rejected), 0117 | `UpdateUnits`' collision-map decision on all threads before the loop, used at the unit's turn only while every input it read is bitwise unchanged (needs H91) | +0.9% / -0.1% | off |
 | `0x800000` | P8 data writes | 0118 | Lua writes of rules params and team resources make no unit ready | +1.0% / -0.4% (noise) | on |
 | `0x1000000` | P10 | 0119-0120, 0123 | the fighters' enemy-aircraft searches (`CAirCAI`: fight, auto-targeting) launched at the slow-update slice's start on P4's workers; an answer is taken when the slow update's own arguments are bitwise the predicted ones and nothing was drained since the launch (and the synced tempNum is drawn as the search would have); entering the crash state drains | -2.2% / -0.7% (instructions -2.6% / -2.4%) | on |
-| `0x2000000` | P4 v2 | 0122 | P4's enemy drain waits only for the searches whose scan reads the unit: not for one its ally team neither sees nor has on radar, nor for a seen one out of the scan's range (the same test on the same inputs) | in `speed59` | |
+| `0x2000000` | P4 v2 | 0122 | P4's enemy drain waits only for the searches whose scan reads the unit: not for one its ally team neither sees nor has on radar, nor for a seen one out of the scan's range (the same test on the same inputs) | halves the enemy drains; -1.3% / +0.6% (`speed59`), 0 mismatches in check mode | on |
+| `0x4000000` | H105 | 0124 | the huge-page collapser backs off from 2 MiB ranges whose collapse failed; its thread named `recoil-thp` (it inherited `recoil-main`, so main-thread profiles counted it) | failures are cheap `EINVAL`s, 22 ms a 2 s pass | off |
+| `0x8000000` | H92b | 0125 | H92's hit path compares inline (it called `memcmp` nine times) and keeps the ground clamp's answer while the height map's version is unchanged | -0.9% / -0.9% (`speed61`) | on |
+| `0x10000000` | H106 | 0127, 0130 | a unit above its 32x32-square block's height bound (raised by every raising synced write, never lowered) takes its physical state from the bound, skipping the corner lookup; 0130 updates the bounds only on raising writes | +0.2% / -0.5% before 0130 (`speed61`) | in `speed62` |
+| `0x20000000`, `0x40000000` | H107 | 0128 (rejected) | P7's phase A starts after the COB tick or after the animations' parallel section | +2.8% / +5.9% at 63,780 | off |
+| `0x80000000` | P11 | 0129 | the animation tick's parallel section and in-order pass as one pipeline (a Lua unit script's `AnimFinished` first has every script ticked); from 512 scripts | -0.3% / -0.5% beside H92b + H106 (`speed61`) | in `speed62` |
 
 Not toggled (always on in these builds):
 
@@ -202,6 +212,7 @@ Not toggled (always on in these builds):
 | 0090 | **P4 fix**: `CWeapon::TryTargetHeading` turns its unit for a moment (heading and dir vectors, written directly) and back; first it waits for the running searches of the unit's ally team (or any, if the unit is neutral) whose area holds it, since their line-of-fire rays read their own side's units. Without it P4 diverged in about half the whole-game runs (work log, 2026-10-19) |
 | 0111 | measurement for P8: Lua writes, damage and kill calls in the weapon loop and the index of the first Lua write per frame (`BARREPLAY_P8_STATS`) |
 | 0121 | bench harness: a `p4check` word in `park.go` (`P4CHECK=1`) turns P4's and P10's check mode on after a restore; 0123 makes P4's first-slice init keep it |
+| 0126 | bench harness: a `sync` word in `park.go` makes the engine report `<park>.window` after its huge-page wait and wait for `<park>.go2`, so `PERF`/`PERFSTAT` profile the timed window only (they had included the wait since 0096) |
 
 ## rejected/
 
@@ -224,6 +235,7 @@ Not toggled (always on in these builds):
 | `0102-H102…` | H102: a push wakes any sleeping worker (toggle2 `0x8000`); worker 1 spins 1 ms (`0x10000`). Kept in the line | the wake -2.1% / -1.9% beside the first H101 (dozens of small sections a frame), +0.8% / -1.2% without it; the spin nothing |
 | `0110-P7-v4.1…` | P7 v4.1 (`t2` `0x100000`): phase A in two stages, the tests in chunks on all threads, then each type's `UpdateUnit` over the flagged units only | no gain on the Haswell-128 build; `speed56` and later are built on it |
 | `0113-`, `0114-`, `0115-P9…` | P9 (`t2` `0x400000`): the collision-map decision on all threads before the unit loop, exact by construction (inputs compared bitwise at the unit's turn, quad lists versioned) | +0.9% / -0.1%; most due units return at the first position comparison anyway, so the pre-check costs about what it saves |
+| `0128-H107…` | H107 (`t2` `0x20000000` / `0x40000000`): P7's phase A started later inside the script tick | +2.8% / +5.9% at 63,780: phase A needs the whole tick |
 | `0068-H90…` | H90: `MovedUnit` skips `GetQuads` while the unit stays within the distance at which none of its tests can flip (toggle `0x200000`) | +0.8%: with 128-elmo quads the nearest threshold is a few elmos away and aircraft move 5-15 a frame, so the full computation runs anyway, plus the safe-distance square roots |
 
 H74 (0028-0031) stayed in the main line because later patches were built on
