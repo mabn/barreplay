@@ -5943,3 +5943,75 @@ Also looked at and set aside:
   caches, which other units' slow updates change inside the slice.
 - **The explosion-listener `VectorErase`:** it is identical-code folding;
   the time is `MovedUnit`'s quad lists, known cache misses.
+
+### 2026-10-20 18:32 — speed60 (profile retrained on the final code): whole game 10m41.1s identical; worker pinning; speed61's variants
+
+**`speed60`** = `speed59`'s code (`1ca986d`) with a PGO profile trained on it
+(`t=d4d87abf`, `t2=3ae383f`). Medium gate identical. Late windows, warm-ups
+discarded, 3 rounds:
+
+| window | `speed59` | `speed60` | wall | cycles | instructions |
+|---|---|---|---|---|---|
+| 63,780 | 7.29 / 7.42 / 7.30 s | 7.21 / 7.32 / 7.29 s | -0.9% | -1.0% | +0.2% |
+| 82,000 | 6.51 / 6.67 / 6.63 s | 6.36 / 6.41 / 6.45 s | **-3.0%** | -2.7% | +0.2% |
+
+**Governed whole game: 10m41.1s active** (sim 1750 s, paused 1109 s, load
+18 s), **identical** (`a26e920d…`). Against `speed58`'s 11m04.2s: **-3.5%**;
+against `speed59` (same code, `speed57`'s profile): -5.1%.
+
+**Where the workers run** (`speed60`, the dump's 7 worker threads pinned per
+trial, main thread on CPU 3; the host is a 4-core / 8-thread i7-4980HQ, CPU
+`n` and `n+4` share a core):
+
+| workers on | 63,780 | 82,000 | main clock |
+|---|---|---|---|
+| 0,1,2,4,5,6 (three cores, both threads; now) | 7.31 s | 6.34 s | 3.77 / 3.74 GHz |
+| 0,1,4,5 (two cores) | +39.6% | +34.9% | 3.37 / 3.42 GHz |
+| 0,1,2 (three cores, one thread each) | +45.2% | +40.1% | 3.34 / 3.36 GHz |
+| 0,1,2,4,5,6,7 (with the main core's sibling) | +5.2% | +6.9% | 3.76 / 3.72 GHz |
+
+**`speed61`** (= the code plus H92b, H105, the `sync` word, H106, H107,
+P11, built with `speed60`'s profile, which does not know the changed
+functions). Gate identical with H92b, H106, H107 (second position) and P11 on
+from frame 0. Variants within the one binary:
+
+| `t2` | what | 63,780 | 82,000 |
+|---|---|---|---|
+| `3ae383f` | `speed60`'s setting | 7.42 s | 6.51 s |
+| `bae383f` | + H92b | **-0.9%** | **-0.9%** |
+| `13ae383f` | + H106 | +0.2% (instructions +2.3%) | -0.5% |
+| `1bae383f` | + H92b + H106 | +0.9% | -1.8% |
+| `3bae383f` | + both + H107 (P7 after the COB tick) | +2.8% | -0.5% |
+| `5bae383f` | + both + H107 (P7 after the animation section) | **+5.9%** | +1.6% |
+| `9bae383f` | + both + P11 | +0.6% | -2.2% |
+| `dbae383f` | + both + H107 (second) + P11 | +6.1% | +4.5% |
+
+Governed whole game with the fastest mean (`bae383f`, H92b): **10m48.4s**,
+identical, on the profile that predates the code. H105's counters over
+that game: 390 passes, 1.70M `madvise` calls, 559,650 `EINVAL` (ranges the
+kernel cannot collapse: cheap), 10 `EAGAIN`, 1 `ENOMEM`, 21.9 ms a pass.
+
+**Insights:**
+- **A profile trained on the code it builds is worth 3-5% on the whole game**
+  here: the same code went from 11m15.3s (`speed59`, an older profile) to
+  10m41.1s. Every code change now loses a little until the next retrain, so
+  changes are tested inside one binary and kept with a retrain after.
+- **The workers' placement is right as it is.** Fewer cores for the workers is
+  35-45% slower and drops the main core's clock (3.34-3.42 GHz): with less
+  parallel capacity the main thread waits on its sections, and the package
+  runs hotter for longer. The main thread's own core must stay free (+5-7% when
+  it is shared).
+- **P7's phase A needs the whole script tick:** starting it later (H107) costs
+  up to 6%, much more than the animations and COB ticks it hands the workers
+  back. H107 rejected.
+- **H106's bound upkeep cost more than it saved:** every synced height write
+  (craters, constantly) paid a block lookup with an integer division (+2.3%
+  instructions). A write that lowers a corner cannot raise a bound, so
+  `70207be` updates only on raising writes; `speed62` measures it again.
+- **The collapser fails cheaply:** its failures are `EINVAL` (ranges that can
+  never be collapsed), at 22 ms per 2-second pass on a worker core. H105's
+  backoff stays off; its thread name is what mattered.
+
+**Next:** `speed62`: a profile retrained on `70207be` with H92b, H106 and P11
+on, variants inside it, a window-only flame graph (the `sync` word), and a
+governed whole game.
