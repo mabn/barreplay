@@ -6286,3 +6286,29 @@ Two more for `speed64`, from the same profile:
   thread's address is held across ticks.
 
 `pipe66` trials `t3` base, +0x80, +0x100, +0x200, +0x400, +0x800 and all five.
+
+And three more for `speed64`:
+- **H118** (`t3` `0x1000`, `272116d`): `QueueDeleteUnits` reads every unit's
+  `deathScriptFinished` (line 66 of 68) every frame, a miss per unit (16% of
+  `CUnitHandler::Update`'s own time); prefetched 16 ahead. Trialled together
+  with H115 (both prefetch-only).
+- **H119** (`t3` `0x2000`, `6c40660`): `CUnitScript::AddAnim` (1.2%) is 57%
+  `FindAnim`'s linear scan, taken whenever the anim list has changed since the
+  last `TickAllAnims` (which leaves it sorted). The list keeps a sorted
+  PREFIX: an append adds to the tail, a swap-erase cuts the prefix at its slot.
+  So the prefix is binary-searched and only the tail scanned; the key is unique
+  per anim (H80's invariant), so the element found is the full scan's.
+- **H120** (`t3` `0x4000`, `b75d6f0`): `CGround::LineGroundCol` (1.2%: beam
+  traces, lines of fire, many between aircraft far above the ground) walks
+  every square between the clamped ends. The squares walked lie in the ends'
+  bounding box, and every corner there is at most its block's H106 bound, so a
+  synced segment whose lower end is more than an elmo above the bound of every
+  block in the box misses every triangle: -1 at once.
+
+`pipe66` trials base, +0x80 (P11 v2), +0x100 (H114), +0x1200 (H115 + H118),
++0x400 (H116), +0x800 (H117), +0x2000 (H119), +0x4000 (H120) and all eight.
+
+`speed63`'s gates (all from zero work): `t3=0`, `t3=7b` with P12's check mode
+and `t3=7f` (P12 really skipping, H109 latched from the environment) — all
+three **identical** (`0558d354…`), and the check mode found **0** skips that
+acted over the whole medium game.
