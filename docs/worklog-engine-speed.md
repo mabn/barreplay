@@ -5610,3 +5610,37 @@ unit during the loop: the answer is a pure function of inputs it checks.
 2/4/6 workers; then `speed58` (P8 + P9 under the new profile): gate from
 frame 0, trials for each alone and both at 63,780 and 82,000, and a governed
 whole game with both.
+
+### 2026-10-20 00:50 — the PGO retrain on Haswell-128: -1.0% / -0.6% late, whole game 11m36.1s identical
+
+`speed57` = `speed56` (`speed55` + the P8 counters) built for Haswell with
+128-bit vectors and a profile trained on that build (`t2=e3837`), against
+`speed55ht7` (same flags and code, the old profile). Medium gate identical
+(`0558d354…`). Late windows, 3 interleaved rounds:
+
+| window | `speed55ht7` (old profile) | `speed57` (new profile) | wall | cycles | instructions |
+|---|---|---|---|---|---|
+| 63,780, rounds 2-3 | 7.97 / 7.82 s | 7.85 / 7.77 s | **-1.0%** | -1.6% | -2.3% |
+| 63,780, round 1 | 10.69 s | 9.89 s | | | |
+| 82,000 | 6.86 / 7.04 / 6.87 s | 6.89 / 6.92 / 6.85 s | **-0.6%** | -1.4% | -2.8% |
+
+**Governed whole game** (`t=d0d87abf`, `t2=e3837`): **11m36.1s active**
+(sim 1787 s, paused 1091 s, load 17 s), **identical** (`a26e920d…`), against
+`speed54`'s 11m38.6s (-0.4%).
+
+P8's counters over the whole game (at frame 81,000): Lua writes run in the
+weapon loop in 27% of frames (0.79 per frame on average, 4.1 damage calls,
+0.08 kills); in a frame that has one, the first comes at unit 2,583 on
+average (of about 4,500 averaged over the game).
+
+**Insights:**
+- **The first trial after a dump runs slow, whichever binary it restores**
+  (10.7 s and 9.9 s, then 7.8-8.0 s): the dump runs leave memory fragmented and
+  the first restore gets fewer huge pages. Every window now starts with a
+  discarded warm-up trial (pipe58 and the P4-worker test).
+- **A profile retrained on the build it optimizes is worth about 1%** on top
+  of the flags. The new profile cuts instructions (-2.3% / -2.8%) more than
+  cycles: better inlining and layout decisions for the Haswell code.
+- **For P8, the first Lua write in a frame comes late enough to matter
+  little:** around unit 2,500, by which time six workers have long finished
+  the vectors (each unit's vectors cost far less than its weapon update).
