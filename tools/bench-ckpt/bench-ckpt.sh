@@ -47,6 +47,9 @@
 # variants of an experiment need no second build or dump. TOGGLES2=<hex> is the
 # second word ("t2=<hex>"; g_brToggles2) once the first ran out of bits; in
 # `abt` a setting written <t>/<t2> sets both.
+# P4CHECK=1 adds "p4check": the engine's P4 (and P10) check mode for the
+# trial, which runs every pipelined search in order too and counts mismatches
+# (a correctness test; the timings mean nothing).
 #
 # BARREPLAY=<path> (dump only) names the barreplay binary to re-simulate with;
 # by default it is built from this checkout at each dump. Its id is kept in the
@@ -211,7 +214,7 @@ trial1() {
 		perfpid=$!
 		sleep 1
 	fi
-	echo "$n $dir/result${LUAPROF:+ luaprof}${TOGGLES:+ t=$TOGGLES}${TOGGLES2:+ t2=$TOGGLES2}" > "$dir/park.go"
+	echo "$n $dir/result${LUAPROF:+ luaprof}${TOGGLES:+ t=$TOGGLES}${TOGGLES2:+ t2=$TOGGLES2}${P4CHECK:+ p4check}" > "$dir/park.go"
 	local t=0
 	while [ ! -s "$dir/result" ]; do
 		sleep 0.5; t=$((t + 1))
