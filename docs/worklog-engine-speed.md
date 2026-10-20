@@ -6015,3 +6015,81 @@ kernel cannot collapse: cheap), 10 `EAGAIN`, 1 `ENOMEM`, 21.9 ms a pass.
 **Next:** `speed62`: a profile retrained on `70207be` with H92b, H106 and P11
 on, variants inside it, a window-only flame graph (the `sync` word), and a
 governed whole game.
+
+### 2026-10-20 19:15 — queued for speed63: H108, P12, H109, H110, H111 (a third toggle word)
+
+`t2` is full, so a third word: `BARREPLAY_TOGGLES3`, `t3=<hex>` in `park.go`,
+`TOGGLES3=` in the harness (`a13fdc4`). From `speed59`'s window-only profile:
+
+- **H108** (`t3` `0x1`, `a13fdc4`): every crater of a frame's map damage
+  called `ILosType::UpdateHeightMapSynced`, which scans every cached and every
+  used sensor instance of every type (1.3% of the main thread). The batch
+  collects the frame's crater rectangles and makes one pass per type: cached
+  instances nobody holds that overlap any crater are deleted, used ones that
+  overlap any are queued for recalculation. Those are the same two sets the
+  craters produce one by one: nothing between them reads or changes an
+  instance (heights, features, the smooth mesh and pathing are updated in
+  between, none of which looks at sensors), a crater only deletes instances
+  nobody holds and only queues instances somebody does, and a deleted one is
+  never queued. Only the order of queueing can differ, and the queue is drained
+  whole into an update whose map changes are integer sums.
+- **P12** (`t3` `0x2`, `5b526e1`, `aaa5072`): the synced projectile collision
+  pass (1.8% of the main thread) runs its detections on all threads first. A
+  projectile whose detection found nothing to act on is skipped in the pass,
+  drawing the synced `tempNum` its query would have, when nothing it read can
+  have changed: the pass's effects mark the cells (256 elmos) of what they
+  touch (a damaged or killed unit and its shields, an added or removed
+  feature, a shield taking a projectile), and a Lua write other than rules
+  params and team resources, a unit or shield changing quads, or a transport
+  dying marks everything. The projectile's own position, speed and radius must
+  also be unchanged, exactly. Every other projectile runs the ordinary code.
+  `BARREPLAY_P12_CHECK` (or `p12check` in `park.go`, `P12CHECK=1` in the
+  harness) runs the ordinary code for every would-be skip and counts the ones
+  that acted; the bench line carries the pass's counters either way.
+- **H109** (`t3` `0x4`, from the environment at engine start only;
+  `10f3cef`): the unit, feature and projectile drawers take no events in a
+  headless run. Adding and removing units and projectiles in their lists
+  (linear searches over ~10k entries, two allocators) was ~0.9% of the main
+  thread. Nothing synced reads those lists or the fields they write (icon
+  index, draw flags, LOD); the capture widget uses none of Lua's render reads.
+  Latched, because emptying the lists in the middle of a run would leave dead
+  objects in other drawing state, so it is measured across two checkpoints
+  (`speed63t7`, `speed63t7n`).
+- **H110** (`t3` `0x8`, `10f3cef`): builders' nano particles (0.68%, three
+  quarters of it the nano piece's lazy matrix) are skipped after the piece
+  query, which runs the unit's script and so stays.
+- **H111** (`t3` `0x10`, `b4c4578`): Lua's table hash for number and pointer keys takes
+  `n % ((sizenode-1)|1)`, a 32-bit division (~25 cycles) on every unit-id
+  lookup. `lsizenode` is at most 26, so there are 27 divisors, each given
+  Lemire's reciprocal (`M = floor((2^64-1)/d) + 1`, then
+  `((M*n mod 2^64) * d) >> 64`, exact for every 32-bit `n` and `d`). Every
+  key lands where it did, so `pairs` order is unchanged. The table's struct is
+  untouched on purpose: a bigger `Table` would move allocations, and the
+  iteration order of tables keyed by tables or functions follows addresses.
+  Tested against `%` for 41.6e9 numerators (exhaustive for tables of up to
+  256 nodes, every 7th number up to 4,096 nodes, plus each size's multiples of
+  `d` and 20M random numbers): 0 differences. `b4c4578`.
+
+Looked at and set aside:
+- **Smoke trails:** a missile copies its newest trail's `useAirLos`, which
+  `CLosHandler::InLos` reads, so the trails stay.
+- **CEG explosions:** their spawn loop depends only on particle saturation (a
+  client setting, so synced code cannot depend on it) and the return value
+  does not depend on it; ~0.2%, left for later.
+- **QTPFS's per-frame node-layer update** (2.0%): the main thread does about
+  its fair share of a section the path searches need right after it in the
+  same call. Overlapping it means moving it across other frame work.
+- **The builders' repair search** (0.73% in `GetUnitsExact`): a memo of the
+  query, validated like P12, would need the search radius ahead of the slice.
+
+**Insight:** a client-side setting is a safety argument. Particle limits
+(`MaxParticles`, `MaxNanoParticles`) differ between the players of one game,
+so nothing synced can depend on what they decide; what a visual effect
+returns or writes back to synced state still has to be checked (the trails'
+`useAirLos`).
+
+`pipe64` builds `speed63` (`speed62`'s profile) after `speed62`, then:
+gates with `t3=0`, `t3=1b` with P12's check mode and `t3=1f` (H109 from the
+environment), everything from zero work; trials of `t3` 0, 1, 2, 8, 10 and `1b`
+with the P12 counters; a P12 check trial per window; `speed63t7` against
+`speed63t7n` for H109; and a governed whole game with the best.
