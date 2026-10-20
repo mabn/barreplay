@@ -5733,3 +5733,39 @@ through the slice.
 `t2=1ae3837` (P8, data, P10; P9 off) against `speed58`, plus P4 v2, P4 with
 4 and 6 workers, and P5 with 5 and 7 workers; a real P4/P10 check trial; then
 a governed whole game with the fastest.
+
+### 2026-10-20 02:47 — speed58 governed whole game: 11m04.2s, identical (P8, P9, data, P10 on)
+
+`speed58`, `t=d0d87abf`, `t2=1ee3837` (P8, P9, the data exemption, P10;
+H92 off): **11m04.2s active** (sim 1755 s, paused 1091 s, load 18 s),
+**identical** (`a26e920d…`). Against `speed57`'s 11m36.1s: **-4.6%**,
+with P9 (a small loss in the late windows) still on and H92 still off.
+
+P8's counters over the game (to frame 90,434): the weapon loop's Lua writes
+made every unit ready 77,179 times; 28,588 data writes skipped it. By
+function:
+
+| Lua function | calls in the weapon loop | |
+|---|---|---|
+| `SpawnCEG` | 33,798 | makes every unit ready |
+| `SetUnitRulesParam` | 28,515 | skipped (data) |
+| `GiveOrderToUnit` | 13,719 | |
+| `GetUnitWeaponState` | 6,996 | a read, in the draining list for P4 |
+| `SetUnitWeaponState` | 6,066 | |
+| `Turn` (a Lua unit script) | 2,568 | |
+| `SetUnitBlocking` | 2,180 | |
+| `GetUnitWeaponVectors` | 1,303 | a read, already hooked per unit |
+
+(1.17 Lua writes per frame in the weapon loop on average, 28,460 frames with
+any; the first one at unit 2,795 on average.)
+
+**Insights:**
+- **P8 and P10 are exact over the whole game**, and so are P9 and the data
+  exemption. That is the test the hook audits were for: the pipeline moved the
+  vectors of ~10,000 units a frame off their fixed point in the frame without
+  changing one byte of the capture.
+- **Half of what still makes every unit ready is visual effects and reads:**
+  `SpawnCEG` creates explosion generators (no unit state), and the two weapon
+  reads are in the draining list only for P4. Exempting them would remove
+  ~42,000 of the 77,179, but the first write already comes after the workers
+  are done in most frames, so this is worth little.
