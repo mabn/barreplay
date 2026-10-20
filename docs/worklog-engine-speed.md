@@ -6133,3 +6133,23 @@ with the P12 counters; a P12 check trial per window; `speed63t7` against
 - **Unit creation** (`CUnitLoader::LoadUnit`, 1.6% in factories): Lua's
   `UnitCreated` 0.76%, the drawer's 0.25% (H109 removes it), the id pool
   0.19% (a sorted map; too small to replace).
+
+### 2026-10-20 20:35 — speed62 gated identical; its 82000 dump died of the old runaway: dumps ran with H87 off
+
+`speed62` (`70207be`: H92b, the fixed H106 and P11; profile retrained on it
+with `t2=9bae383f`) gated **identical** (`0558d354…`, 1m06s sim, 368 fps)
+with all three on from frame 0. Its 63780 dump took 7m43s (5.9 GB). Its 82000
+dump died 40 s in: the cgroup's OOM killer, **11.4 GB anonymous memory at
+frame ~60**, crawling at 3 fps through swap.
+
+It is the runaway of 10-18 03:41 (a 4 GiB rectangle queue in the draw-side
+height-map update, `CReadMap::UpdateDraw`, struck at random because draw frames
+follow wall time), which **H87** (`t` `0x80000`) prevents. **The harness never
+gave a dump any toggles:** `TOGGLES` reaches trials through `park.go`, but a
+dump ran with `g_brToggles` = 0, so H87 was off. The journal has two earlier
+runs with the same signature, both 82000 dumps (10-19 11:49, `speed47`; 10-19
+21:43, `speed55h`): 11 GB, OOM-killed within 40 s. Every other engine run of
+the last two days peaked at 3.6-6.3 GB. Fixed in `adc66ef`: dumps run with
+`BARREPLAY_TOGGLES=80000` unless told otherwise (H87 is unsynced, so the
+checkpoint is the same), and the queued pipelines pass it too. A replacement
+tail re-dumps 82000 and finishes `speed62`'s trials, flame graph and whole game.
