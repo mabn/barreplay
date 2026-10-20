@@ -6318,3 +6318,47 @@ acted over the whole medium game.
   position and mark lines, then the repair loop's reads of each candidate's
   ally team and health. Both loops prefetch those 4 ahead; trialled with H115
   and H118 as the prefetch-only group (`0x9200`).
+
+### 2026-10-20 23:05 — speed63: the six together -1.0% / -0.4%; P12 skips a third (most no-hit projectiles find their cells marked)
+
+`speed63` (`d0764af`, `speed62`'s profile), `t=d4d87abf`, `t2=9bae383f`, inside
+the one binary, 3 rounds, against `t3=0`:
+
+| `t3` | adds | 63,780 wall | cycles | 82,000 wall | cycles |
+|---|---|---|---|---|---|
+| `0` | (base) | 7.36 s | 27.25e9 | 6.55 s | 24.16e9 |
+| `1` | H108 (crater LOS batched) | +1.1% | +0.9% | -0.3% | -0.0% |
+| `2` | P12 (collision pre-pass) | +0.0% | +0.1% | +0.4% | +0.0% |
+| `10` | H111 (Lua hash reciprocal) | +0.1% | +0.2% | -0.1% | -0.4% |
+| `20` | H112 (Update prefetches) | +0.3% | -0.2% | +1.0% | +0.5% |
+| `48` | H110 + H113 (nano particles, CEG spawns) | -0.3% | -0.5% | -0.5% | **-1.0%** |
+| `7b` | all six | **-1.0%** | **-0.9%** | -0.4% | -0.7% |
+
+P12's counters (450 frames at 63,780 / 82,000):
+
+| | 63,780 | 82,000 |
+|---|---|---|
+| synced pass: projectiles checked | 261,381 | 105,008 |
+| candidates from the queries | 1,521,496 | 307,675 |
+| checks ending in a hit | 12,366 | 6,762 |
+| the pass's cycles (of the main thread's) | 992M (3.6%) | 427M (1.8%) |
+| pre-passed | 369,422 | 174,157 |
+| skipped | 88,047 (34% of checked) | 41,388 (39%) |
+| no hit, but cells marked (ran) | 154,803 (59%) | 55,688 (53%) |
+| would act (ran) | 18,531 (7%) | 7,216 (7%) |
+| check trial: would-be skips run in full / of them acted | 88,047 / **0** | |
+
+**Insights:**
+- **The items are each within the noise; together they are -0.7%.** H110 +
+  H113 (the unsynced effects) is the only single one past half a percent at
+  both windows.
+- **P12's predicate is right (0 wrong in a full check trial) but its
+  validation is too coarse:** 93% of projectiles would not act, yet only 34%
+  are skipped, because 59% find a cell of their query marked by then. A Lua
+  write marks everything, and a hit's damage reaches gadgets that write
+  (unit rules params are exempt, but health, experience and the like are not),
+  so after the first such hit of a pass the rest of it runs in full. Marking
+  the written unit instead of everything for the unit-targeted writes would
+  lift the skip rate; until then P12 pays its pre-pass and saves about as much.
+- **H108 gains nothing:** few craters land per frame, so the batch does one
+  pass where there were one or two, and adds a parallel section.
