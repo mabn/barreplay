@@ -6312,3 +6312,9 @@ And three more for `speed64`:
 and `t3=7f` (P12 really skipping, H109 latched from the environment) — all
 three **identical** (`0558d354…`), and the check mode found **0** skips that
 acted over the whole medium game.
+- **H121** (`t3` `0x8000`, `343d9a1`): `GetUnitsExact` was 2.5% of the main
+  thread inclusive, 1.3 of it the builders' repair search and 0.3 their
+  reclaim search (0.7 ground-unit collisions); the time is the candidates'
+  position and mark lines, then the repair loop's reads of each candidate's
+  ally team and health. Both loops prefetch those 4 ahead; trialled with H115
+  and H118 as the prefetch-only group (`0x9200`).
