@@ -6221,3 +6221,47 @@ window only, and the main thread by name now that the collapser has its own).
   The `CUnit::Update` block grew to 9.0% (H106's bound is checked there) and
   the script tick fell to 5.4% (8.4) because P11's pass is now inlined into
   `SimFrame`.
+
+### 2026-10-20 21:50 — queued for speed64: P11 v2, H114, H115 (from speed62's line-level profile)
+
+`perf annotate` on `speed62`'s window-only data, the main thread's largest
+own-time functions (% of the main thread):
+
+| function | % | where it goes |
+|---|---|---|
+| `CGame::SimFrame` (inlined) | 5.0 | 2.8 P11's wait (`UnitScriptEngine.cpp:177`); 0.5 COB thread lookups |
+| `luaV_execute` | 3.8 | the interpreter |
+| `CUnitHandler::UpdateUnits` | 3.8 | a third of it the collision-map bookkeeping (below) |
+| `luaH_get` | 2.9 | Lua table reads |
+| `CUnit::UpdatePhysicalState` | 2.5 | misses on `midPos`/`radius`, H88's cache line and the physical state (H112 prefetches them) |
+| `CUnitHandler::UpdateUnitWeapons` | 2.5 | P8's setup and `Ensure`, the weapons buffer, `stunned` (below) |
+| `CCobThread::Tick` | 2.3 | COB |
+| `CWeapon::UpdateWeaponVectors` | 2.2 | |
+| `CQuadField::GetUnitsExact` | 2.1 | builders' searches and others |
+
+- **P11 v2** (`t3` `0x80`, `15ae5d1`): see the speed62 entry.
+- **H114** (`t3` `0x100`, `c8dbeff`): deciding which units' collision maps
+  are due this frame (H98's prefetches 8, 4 and 2 ahead, H91's own test) read
+  each unit's `id`, in its third cache line, which nothing had prefetched,
+  and divided by the rate (a mod option, so a real division); then
+  `UpdateCollisionMap` repeated the test. Lines 844-856 and 881 of
+  `UnitHandler.cpp` were ~32% of `UpdateUnits`' own time. Now the `id` and
+  `moveType` lines are prefetched 16 ahead, the rate of 3 divides as a
+  constant (both operands non-negative: the same remainder), and a due update
+  is called forced (its owner is the unit, so the skipped test is the same).
+- **H115** (`t3` `0x200`, `f77e0a4`): P8's setup filled its id map reading
+  every unit's `id` in turn with nothing prefetched (18% of the weapon loop's
+  own time); P8's `Ensure` read the `id` again (25% with its lookups); the
+  first weapon's prefetch loaded its pointer from the vector's buffer (13%);
+  `CanUpdateWeapons` tested `stunned` in the unit's last line (9%). Prefetched
+  16 ahead in the setup, 8 ahead (`id`, last line) and 6 ahead (the buffer)
+  in the loop.
+
+`pipe66` builds `speed64` (`speed62`'s profile) after the Lua profile: a gate
+with everything on from frame 0, dumps, trials of `pipe64`'s best `t3` against
++0x80, +0x100, +0x200 and all three, and a governed whole game.
+
+**Insight:** prefetch bookkeeping can cost what it saves. The decision of
+what to prefetch read fields of the units 8 ahead that were themselves not
+in cache, so each one stalled on the miss it was meant to hide; H98
+measured -0.5% net with ~1% of the main thread spent this way.
