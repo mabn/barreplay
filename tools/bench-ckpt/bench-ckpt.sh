@@ -123,7 +123,11 @@ dump() {
 	[ -x "$br" ] || die "no barreplay binary $br"
 	echo "$(sha256sum "$br" | cut -c1-16) $(go version -m "$br" | awk '$2 ~ /^vcs\.(revision|modified)=/ {printf "%s ", $2}')" > "$dir/barreplay.id"
 	echo "== dump: $(basename "$bin") $2 ($id) up to frame $frame"
-	(cd "$BR" && BARREPLAY_BENCH_START=$frame BARREPLAY_BENCH_N=1 BARREPLAY_PARK="$dir/park" \
+	# H87 (toggle 0x80000) on while dumping, unless BARREPLAY_TOGGLES says
+	# otherwise: a dump otherwise runs with every toggle off, and then the
+	# draw-side height-map queue can run away (11 GB in 40 s; three dumps lost
+	# to it, 10-19 and 10-20). It is unsynced, so the checkpoint is the same.
+	(cd "$BR" && BARREPLAY_TOGGLES=${BARREPLAY_TOGGLES:-80000} BARREPLAY_BENCH_START=$frame BARREPLAY_BENCH_N=1 BARREPLAY_PARK="$dir/park" \
 		systemd-run --user --scope --quiet -p OOMPolicy=continue -p MemoryMax="$MEMMAX" -p MemorySwapMax="$SWAPMAX" \
 		"$br" -data "$DATA" -progress=true ${BARREPLAY_ARGS:-} -engine "$bin" -out "$dir/out" "$id" > "$dir/barreplay.log" 2>&1) &
 	local brpid=$!
