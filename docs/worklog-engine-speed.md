@@ -5817,3 +5817,24 @@ waits in that run) and **0** for P10's 75,665 used answers.
   build and the governed whole game are what count.
 - **Whole game** with the fastest mean (`d4d87abf` / `3ae383f`), then the
   flame graph of that setting and a PGO retrain on this code (`speed60`).
+
+### 2026-10-20 04:30 — speed59 governed whole game: 11m15.3s, identical (H92, P8, data, P10, P4 v2, P5 x7)
+
+`speed59`, `t=d4d87abf`, `t2=3ae383f` (the fastest mean of the late
+windows): **11m15.3s active** (sim 1809 s, paused 1134 s, load 18 s),
+**identical** (`a26e920d…`).
+
+That is +1.7% against `speed58`'s 11m04.2s (`d0d87abf` / `1ee3837`), in line
+with the late windows, where `speed59` at `speed58`'s setting already trailed
+by 0.8% / 2.1%. The settings gained inside `speed59` (P4 v2 -1.3% at 63,780,
+P5 with more workers -1 to -2%, H92 on and P9 off since `speed58`) and the build
+gave it back.
+
+**Insights:**
+- **Exactness holds for every change now on:** H92 with P8, P4 v2 and P5's
+  worker count. That last one is by design: it decides who runs a tick, not
+  what the tick does.
+- **Two builds of nearly the same code differ by 1-2% here,** with the same
+  profile and flags: code layout. This is now as large as a typical change,
+  so a retrained profile is the fair baseline for the next comparison.
+  `speed60` (retrain on `1ca986d` with this setting) is building.
