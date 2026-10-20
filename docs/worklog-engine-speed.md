@@ -5769,3 +5769,51 @@ any; the first one at unit 2,795 on average.)
   reads are in the draining list only for P4. Exempting them would remove
   ~42,000 of the 77,179, but the first write already comes after the workers
   are done in most frames, so this is worth little.
+
+### 2026-10-20 04:09 — speed59: P4 v2 halves P4's enemy waits; P4 and P10 checked (0 mismatches); worker counts within noise
+
+`speed59` = `speed58` + P4 v2 (`t2` `0x2000000`) and the check-mode init
+fix, same profile. **Medium gate identical** with H92, P8, the data
+exemption, P10 and P4 v2 on from frame 0 (P4 v2 skipped 2,391 waits for unseen
+enemies and 1,181 for out-of-range ones there). Late windows, warm-ups
+discarded, 3 rounds; the speed59 rows also compare against each other:
+
+| variant (`t` / `t2`) | 63,780 | 82,000 | mean |
+|---|---|---|---|
+| `speed58` `d4d87abf` / `1ae3837` | 7.54 s | 6.55 s | 7.05 s |
+| `speed59` `d4d87abf` / `1ae3837` | 7.60 s | 6.69 s | 7.15 s |
+| + P4 v2 (`3ae3837`) | 7.50 s | 6.73 s | 7.12 s |
+| + P4 v2, 4 P4 workers (`d5d87abf`) | 7.55 s | 6.75 s | 7.15 s |
+| + P4 v2, 6 P4 workers (`d6d87abf`) | 7.55 s | 6.69 s | 7.12 s |
+| + P4 v2, 5 P5 workers (`3ae383b`) | 7.47 s | 6.71 s | 7.09 s |
+| + P4 v2, 7 P5 workers (`3ae383f`) | 7.50 s | 6.66 s | **7.08 s** |
+
+P4's own counters at 63,780 (one trial each):
+
+| | enemy drains | main-thread waits | wait cycles | searches run by the main thread |
+|---|---|---|---|---|
+| P4 v1 | 3,370 | 8,392 | 711M | 10,682 |
+| P4 v2 | 1,778 | 5,559 | 591M | 9,185 |
+| P4 v2, 4 workers | 1,691 | 3,576 | 592M | 1,757 |
+| P4 v2, 6 workers | 1,743 | 3,488 | 694M | 693 |
+
+(P4 v2 skipped 964 waits for unseen enemies and 8,212 for out-of-range ones.)
+
+**The check trial** (`P4CHECK=1`, 63,780, P4 v2 on, the init fix in): 8.41 s
+against ~7.5 s, i.e. it really ran every search a second time in order, and
+found **0 mismatches** for P4's 230,282 searches (with P4 v2 skipping 3,593
+waits in that run) and **0** for P10's 75,665 used answers.
+
+**Insights:**
+- **P4 v2 is exact** by the check trial: no search whose wait it skipped read
+  anything different. It halves the enemy drains.
+- **The searches the main thread runs itself fall from 9,185 to 1,757 with 4
+  P4 workers,** yet the wall time does not move: the work moves to the
+  workers, but what the main thread waits for at a drain is still a search
+  that started moments earlier.
+- **`speed59` trails `speed58` by 0.8% / 2.1% at the same setting,** though the
+  code that setting runs is the same. A different binary and a different dump
+  are a 1-2% confound for comparisons across builds; comparisons within one
+  build and the governed whole game are what count.
+- **Whole game** with the fastest mean (`d4d87abf` / `3ae383f`), then the
+  flame graph of that setting and a PGO retrain on this code (`speed60`).
