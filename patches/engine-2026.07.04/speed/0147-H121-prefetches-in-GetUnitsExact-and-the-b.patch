@@ -1,0 +1,75 @@
+From 343d9a193a3ee0831c7f5b72d95b490309ef4013 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 21:55:14 +0000
+Subject: [PATCH 147/149] [barreplay] H121: prefetches in GetUnitsExact and the
+ builders' repair search (toggle3 0x8000)
+
+GetUnitsExact was 2.5% of the main thread in speed62's late window (inclusive;
+1.3 in the builders' repair search, 0.3 in their reclaim search), its time the
+candidates' position and mark lines; the repair loop then reads each
+candidate's ally team and health lines. Both loops now prefetch those 4 ahead.
+Loads only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Misc/QuadField.cpp             | 13 ++++++++++++-
+ rts/Sim/Units/CommandAI/BuilderCAI.cpp | 12 +++++++++++-
+ 2 files changed, 23 insertions(+), 2 deletions(-)
+
+diff --git a/rts/Sim/Misc/QuadField.cpp b/rts/Sim/Misc/QuadField.cpp
+index 918ef56..c8de4c2 100644
+--- a/rts/Sim/Misc/QuadField.cpp
++++ b/rts/Sim/Misc/QuadField.cpp
+@@ -859,8 +859,19 @@ void CQuadField::GetUnitsExact(QuadFieldQuery& qfq, const float3& pos, float rad
+ 	const int tempNum = gs->GetMtTempNum(curThread);
+ 	qfq.units = tempUnits[curThread].ReserveVector();
+ 
++	// [barreplay] H121 (toggle3 0x8000): the unit 4 ahead's position and mark
++	// lines, so the misses overlap (the builders' repair and reclaim searches
++	// are most of this function's 2.1% of the main thread). Loads only.
++	const bool brH121 = (g_brToggles3 & 0x8000) != 0;
+ 	for (const int qi: *qfQuery.quads) {
+-		for (CUnit* u: baseQuads[qi].units) {
++		const auto& brUnits = baseQuads[qi].units;
++		for (size_t k = 0; k < brUnits.size(); ++k) {
++			if (brH121 && k + 4 < brUnits.size()) {
++				const CUnit* pu = brUnits[k + 4];
++				__builtin_prefetch(&pu->pos);
++				__builtin_prefetch(&pu->mtTempNum[curThread]);
++			}
++			CUnit* u = brUnits[k];
+ 			if (u->mtTempNum[curThread] == tempNum)
+ 				continue;
+ 
+diff --git a/rts/Sim/Units/CommandAI/BuilderCAI.cpp b/rts/Sim/Units/CommandAI/BuilderCAI.cpp
+index e1faddb..93cac03 100644
+--- a/rts/Sim/Units/CommandAI/BuilderCAI.cpp
++++ b/rts/Sim/Units/CommandAI/BuilderCAI.cpp
+@@ -1,5 +1,6 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
++#include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ #include <cassert>
+ 
+ #include "BuilderCAI.h"
+@@ -1645,7 +1646,16 @@ bool CBuilderCAI::FindRepairTargetAndRepair(
+ 	bool trySelfRepair = false;
+ 	bool stationary = false;
+ 
+-	for (const CUnit* unit: *qfQuery.units) {
++	// [barreplay] H121 (toggle3 0x8000): each candidate's ally team and health
++	// lines 4 ahead. Loads only.
++	const bool brH121 = (g_brToggles3 & 0x8000) != 0;
++	const std::vector<CUnit*>& brCands = *qfQuery.units;
++	for (size_t brK = 0; brK < brCands.size(); ++brK) {
++		if (brH121 && brK + 4 < brCands.size()) {
++			__builtin_prefetch(&brCands[brK + 4]->allyteam);
++			__builtin_prefetch(&brCands[brK + 4]->health);
++		}
++		const CUnit* unit = brCands[brK];
+ 		if (teamHandler.Ally(owner->allyteam, unit->allyteam)) {
+ 			if (!haveEnemy && (unit->health < unit->maxHealth)) {
+ 				// don't help allies build unless set on roam
+-- 
+2.53.0
+

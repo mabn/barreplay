@@ -1,0 +1,70 @@
+From e101952f98d5464c3b37fc6c1074b96b4bc4186f Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 21:46:36 +0000
+Subject: [PATCH 142/149] [barreplay] H116: CBuilder::Update without copying
+ the front command (toggle3 0x400)
+
+The ternary mixed the queue's front (an lvalue) with a temporary
+Command(CMD_STOP), so it copied the front command for every builder every frame:
+46% of CBuilder::Update's own time in speed62's late window, and a pooled
+command takes a pool page per copy. Each Update* reads the command only for its
+CMD_WAIT test, at its top, after early exits that change nothing (and
+NanoPieceCache::Update before them is a bit shift), so the live front or a
+standing stop command answers the same.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Units/UnitTypes/Builder.cpp | 34 ++++++++++++++++++++---------
+ 1 file changed, 24 insertions(+), 10 deletions(-)
+
+diff --git a/rts/Sim/Units/UnitTypes/Builder.cpp b/rts/Sim/Units/UnitTypes/Builder.cpp
+index a9f0209..c0afa21 100644
+--- a/rts/Sim/Units/UnitTypes/Builder.cpp
++++ b/rts/Sim/Units/UnitTypes/Builder.cpp
+@@ -543,19 +543,33 @@ void CBuilder::Update()
+ 	const CBuilderCAI* cai = static_cast<CBuilderCAI*>(commandAI);
+ 
+ 	const CCommandQueue& cQueue = cai->commandQue;
+-	const Command& fCommand = (!cQueue.empty())? cQueue.front(): Command(CMD_STOP);
+ 
+-	bool updated = false;
++	const auto updates = [&](const Command& fCommand) {
++		bool updated = false;
+ 
+-	nanoPieceCache.Update();
++		nanoPieceCache.Update();
+ 
+-	if (!beingBuilt && !IsStunned()) {
+-		updated = updated || UpdateTerraform(fCommand);
+-		updated = updated || AssistTerraform(fCommand);
+-		updated = updated || UpdateBuild(fCommand);
+-		updated = updated || UpdateReclaim(fCommand);
+-		updated = updated || UpdateResurrect(fCommand);
+-		updated = updated || UpdateCapture(fCommand);
++		if (!beingBuilt && !IsStunned()) {
++			updated = updated || UpdateTerraform(fCommand);
++			updated = updated || AssistTerraform(fCommand);
++			updated = updated || UpdateBuild(fCommand);
++			updated = updated || UpdateReclaim(fCommand);
++			updated = updated || UpdateResurrect(fCommand);
++			updated = updated || UpdateCapture(fCommand);
++		}
++	};
++	// [barreplay] H116 (toggle3 0x400): the ternary below mixes an lvalue with a
++	// temporary, so it copied the front command, for every builder every frame
++	// (half of this function's own time; a pooled command also takes a pool page
++	// per copy). Each Update* reads the command only for its CMD_WAIT test, at
++	// its top, after early exits that change nothing, so the live front (or a
++	// standing stop command) gives the same answers.
++	if ((g_brToggles3 & 0x400) != 0) {
++		static const Command brStop(CMD_STOP);
++		updates(cQueue.empty()? brStop: cQueue.front());
++	} else {
++		const Command& fCommand = (!cQueue.empty())? cQueue.front(): Command(CMD_STOP);
++		updates(fCommand);
+ 	}
+ 
+ 	CUnit::Update();
+-- 
+2.53.0
+

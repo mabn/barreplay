@@ -1,0 +1,37 @@
+From 272116d0f75e499200922026caf63b2937f61863 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 21:49:19 +0000
+Subject: [PATCH 144/149] [barreplay] H118: prefetch deathScriptFinished 16
+ units ahead in QueueDeleteUnits (toggle3 0x1000)
+
+The per-frame scan for dead units reads every unit's deathScriptFinished, in its
+66th of 68 lines: a miss per unit, 16% of CUnitHandler::Update's own time in
+speed62's late window. Loads only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Units/UnitHandler.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index afbbfbf..f93e04d 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -426,7 +426,14 @@ void CUnitHandler::QueueDeleteUnits()
+ {
+ 	ZoneScoped;
+ 	// gather up dead units
++	// [barreplay] H118 (toggle3 0x1000): the test reads every unit's
++	// deathScriptFinished (line 66 of 68), a miss per unit (16% of
++	// CUnitHandler::Update's own time in speed62's late window); prefetch it
++	// 16 units ahead. Loads only.
++	const bool brH118 = (g_brToggles3 & 0x1000) != 0;
+ 	for (activeUpdateUnit = 0; activeUpdateUnit < activeUnits.size(); ++activeUpdateUnit) {
++		if (brH118 && activeUpdateUnit + 16 < activeUnits.size())
++			__builtin_prefetch(&activeUnits[activeUpdateUnit + 16]->deathScriptFinished);
+ 		QueueDeleteUnit(activeUnits[activeUpdateUnit]);
+ 	}
+ }
+-- 
+2.53.0
+

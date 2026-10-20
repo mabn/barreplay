@@ -1,0 +1,102 @@
+From c8dbeff711ba6159985c3ce0445fa2f0b5cf31f5 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 21:40:24 +0000
+Subject: [PATCH 140/149] [barreplay] H114: the unit loop's collision-map
+ bookkeeping without its misses and divisions (toggle3 0x100)
+
+speed62's late window, UpdateUnits' own time (3.8% of the main thread): a
+third of it was deciding which units' collision maps are due, at 8, 4 and 2
+units ahead (H98) and for the unit itself (H91): each read the unit's id, in
+its third cache line, which nothing prefetched, and divided by the rate, a mod
+option and so a real division. With H114 the id and moveType lines of the unit
+16 ahead are prefetched, the test divides by a constant at BAR's rate of 3
+(both operands non-negative: the same remainder), and a collision-map update
+the loop found due is called forced, skipping UpdateCollisionMap's repeat of
+the same test (its owner is the unit).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Units/UnitHandler.cpp | 33 ++++++++++++++++++++++++++-------
+ 1 file changed, 26 insertions(+), 7 deletions(-)
+
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 507acb8..1810742 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -834,8 +834,28 @@ void CUnitHandler::UpdateUnits()
+ 	};
+ 
+ 	BrRunAhead::Begin(1, activeUnits, 0, activeUnitCount);
++	// [barreplay] H114 (toggle3 0x100): this loop's bookkeeping. Deciding which
++	// units' collision maps are due this frame read each unit's id (its third
++	// line, which nothing had prefetched) at 8, 4 and 2 units ahead and divided
++	// by the rate, a mod option and so a real division; and UpdateCollisionMap
++	// repeated the test the loop had just made. With H114 the id and moveType
++	// lines of the unit 16 ahead are prefetched, the test divides by a constant
++	// at BAR's rate of 3 (the same remainder: both operands are non-negative),
++	// and a collision-map update the loop found due is forced past the repeat.
++	const bool brH114 = (g_brToggles3 & 0x100) != 0;
++	const int brRate = modInfo.unitQuadPositionUpdateRate;
++	const auto brDue = [&](int id) -> bool {
++		if (brH114 && brRate == 3)
++			return (unsigned(gs->frameNum + id) % 3u) == 0;
++		return ((gs->frameNum + id) % brRate) == 0;
++	};
+ 	for (size_t i = 0; i < activeUnitCount; ++i) {
+ 		BrRunAhead::At(int(i));
++		if (brH114 && i + 16 < activeUnitCount) {
++			const CUnit* u16 = activeUnits[i + 16];
++			__builtin_prefetch(&u16->id);
++			__builtin_prefetch(&u16->moveType);
++		}
+ 		// [barreplay] H66: prefetch the unit 8 ahead and its move type 4 ahead
+ 		if (i + 8 < activeUnits.size()) __builtin_prefetch(activeUnits[i + 8]);
+ 		// [barreplay] H112 (toggle3 0x20): and the other lines CUnit::Update
+@@ -858,7 +878,7 @@ void CUnitHandler::UpdateUnits()
+ 		if (i + 4 < activeUnits.size()) {
+ 			// [barreplay] H91: only the move types the collision-map update will read
+ 			const CUnit* u4 = activeUnits[i + 4];
+-			if ((g_brToggles & 0x400000) == 0 || ((gs->frameNum + u4->id) % modInfo.unitQuadPositionUpdateRate) == 0)
++			if ((g_brToggles & 0x400000) == 0 || brDue(u4->id))
+ 				__builtin_prefetch(u4->moveType);
+ 		}
+ 		// [barreplay] H98 (toggle2 0x800): MovedUnit's own time is three
+@@ -867,20 +887,19 @@ void CUnitHandler::UpdateUnits()
+ 		// Quad it names. Prefetch them for the units whose collision-map update
+ 		// runs this frame, 8, 4 and 2 units ahead. Loads only.
+ 		if ((g_brToggles2 & 0x800) != 0) {
+-			const int rate = modInfo.unitQuadPositionUpdateRate;
+ 			if (i + 8 < activeUnitCount) {
+ 				const CUnit* u8 = activeUnits[i + 8];
+-				if (((gs->frameNum + u8->id) % rate) == 0)
++				if (brDue(u8->id))
+ 					__builtin_prefetch(&u8->quads);
+ 			}
+ 			if (i + 4 < activeUnitCount) {
+ 				const CUnit* u4 = activeUnits[i + 4];
+-				if (((gs->frameNum + u4->id) % rate) == 0 && !u4->quads.empty())
++				if (brDue(u4->id) && !u4->quads.empty())
+ 					__builtin_prefetch(u4->quads.data());
+ 			}
+ 			if (i + 2 < activeUnitCount) {
+ 				const CUnit* u2 = activeUnits[i + 2];
+-				if (((gs->frameNum + u2->id) % rate) == 0) {
++				if (brDue(u2->id)) {
+ 					const size_t nq = std::min<size_t>(u2->quads.size(), 2);
+ 					for (size_t k = 0; k < nq; ++k)
+ 						__builtin_prefetch(&quadField.GetQuad(u2->quads[k]));
+@@ -895,9 +914,9 @@ void CUnitHandler::UpdateUnits()
+ 		// (frameNum + owner->id) % unitQuadPositionUpdateRate and returns unless it
+ 		// is 0 (two calls in three, at BAR's rate of 3); owner is this unit, so do
+ 		// that test here, without reaching into the move type for nothing
+-		if ((g_brToggles & 0x400000) == 0 || ((gs->frameNum + unit->id) % modInfo.unitQuadPositionUpdateRate) == 0) {
++		if ((g_brToggles & 0x400000) == 0 || brDue(unit->id)) {
+ 			if (!brP9 || !brP9Use(i, unit))
+-				unit->moveType->UpdateCollisionMap();
++				unit->moveType->UpdateCollisionMap(brH114 && (g_brToggles & 0x400000) != 0);
+ 		}
+ 		// unsynced; done on-demand when drawing unit
+ 		// unit->UpdateLocalModel();
+-- 
+2.53.0
+

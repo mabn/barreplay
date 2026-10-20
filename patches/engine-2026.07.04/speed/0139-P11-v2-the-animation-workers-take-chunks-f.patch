@@ -1,0 +1,66 @@
+From 15ae5d1fd69f92efcaf7490577bf98728dd4c439 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Tue, 20 Oct 2026 21:36:49 +0000
+Subject: [PATCH 139/149] [barreplay] P11 v2: the animation workers take chunks
+ from the back (toggle3 0x80)
+
+In speed62's window-only profile the main thread spent 2.8% of its time
+spinning in P11's wait (TickIdx, UnitScriptEngine.cpp:177): its in-order pass
+starts at the front, where the workers start too, so it catches up with a
+slower hyperthreaded worker inside the chunk it needs. With the workers coming
+from the back, the pass ticks what nobody has claimed itself and meets them
+once. Ticks of different scripts are independent (P11's premise), so the order
+they are ticked in changes nothing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ rts/Sim/Units/Scripts/UnitScriptEngine.cpp | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/rts/Sim/Units/Scripts/UnitScriptEngine.cpp b/rts/Sim/Units/Scripts/UnitScriptEngine.cpp
+index 98a5dc8..a0f54d2 100644
+--- a/rts/Sim/Units/Scripts/UnitScriptEngine.cpp
++++ b/rts/Sim/Units/Scripts/UnitScriptEngine.cpp
+@@ -151,6 +151,7 @@ void CUnitScriptEngine::RemoveInstance(CUnitScript* instance)
+ // Lua and therefore first has every script ticked (BrP11EnsureAll). A script
+ // the pass appends this frame was not ticked in stock either and is not here.
+ // From 512 animating scripts (BARREPLAY_P11_MINSCRIPTS).
++extern unsigned g_brToggles3;
+ namespace BrP11 {
+ 	std::atomic<bool> active{false};
+ 	namespace {
+@@ -162,6 +163,13 @@ namespace BrP11 {
+ 		int tickDelta = 0;
+ 		int frame = -1;
+ 		constexpr int CHUNK = 16;
++		// [barreplay] P11 v2 (toggle3 0x80): the workers take chunks from the
++		// back. The main thread's pass walks from the front and ticks what nobody
++		// has claimed itself, so it no longer catches up with a worker inside the
++		// chunk it needs and waits there (2.8% of the main thread in speed62's
++		// late window, spinning at the wait below). The pass's removals bring
++		// scripts from the back forward, which the workers have ticked by then.
++		bool backward = false;
+ 
+ 		void TickIdx(size_t k, bool main) {
+ 			if (state[k].load(std::memory_order_acquire) == 2)
+@@ -179,7 +187,8 @@ namespace BrP11 {
+ 		}
+ 		void WorkerLoop() {
+ 			for (int c; (c = nextChunk.fetch_add(1, std::memory_order_acq_rel)) < numChunks; ) {
+-				const size_t b = size_t(c) * CHUNK, e = std::min(snap.size(), b + CHUNK);
++				const int cc = backward? (numChunks - 1 - c): c;
++				const size_t b = size_t(cc) * CHUNK, e = std::min(snap.size(), b + CHUNK);
+ 				for (size_t k = b; k < e; ++k)
+ 					TickIdx(k, false);
+ 			}
+@@ -209,6 +218,7 @@ namespace BrP11 {
+ 		}
+ 		numChunks = int((n + CHUNK - 1) / CHUNK);
+ 		nextChunk.store(0, std::memory_order_relaxed);
++		backward = (g_brToggles3 & 0x80) != 0;
+ 
+ 		const int nw = ThreadPool::GetNumThreads() - 1;
+ 		static TaskPool<ForTaskGroup, decltype(workerFn)> pool;
+-- 
+2.53.0
+
