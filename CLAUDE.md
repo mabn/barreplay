@@ -4133,10 +4133,11 @@ median/max distinction is moot, so this is a free ~+25% ceiling). Consequences: 
 idles ~40%/~25% of wall time by design, and whenever the client outruns the feed its
 packet queue starves, `ClientReadNet` returns empty-handed, and the main loop spins full
 `UpdateUnsynced`+`Draw` passes (the heartbeat `draws=` counter exposes this: hundreds of
-draws/s late game despite `MinDrawFPS=1`). Fully removing the governor (pin
-`internalSpeed` to `userSpeedFactor` when a demo is being read) needs a small engine
-patch — sync-safe, since pacing changes only when pre-recorded packets are released,
-never their content — and is the main remaining speed lever (~25-35% at the 60% target).
+draws/s late game despite `MinDrawFPS=1`). The PATCHED engine removes the governor:
+`patches/engine-2026.07.04/0001-demo-unpaced-playback.patch` releases a demo's packets
+at the client's consumption rate instead of `internalSpeed`'s pace — sync-safe, since
+pacing changes only when pre-recorded packets are released, never their content
+(measured +35% sim fps on an 8v8, sim 93% of wall). A stock engine still runs governed.
 
 ## Conventions / gotchas
 
