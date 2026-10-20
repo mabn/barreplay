@@ -6093,3 +6093,43 @@ gates with `t3=0`, `t3=1b` with P12's check mode and `t3=1f` (H109 from the
 environment), everything from zero work; trials of `t3` 0, 1, 2, 8, 10 and `1b`
 with the P12 counters; a P12 check trial per window; `speed63t7` against
 `speed63t7n` for H109; and a governed whole game with the best.
+
+### 2026-10-20 20:05 — two more for speed63 (H112, H113); the whole game runs at full clock; hits are few
+
+- **H112** (`t3` `0x20`, `364e365`): `CUnit::Update` (4.4% of the main
+  thread, nearly all its own time) touches ten of a unit's 68 cache lines:
+  `pos`, `radius`, the physical state and `midPos` in the base classes, and
+  lines 60-62 and 65-67 of `CUnit` (position error, `restTime`,
+  `recentDamage` and the flanking bonus, `isDead`/`beingBuilt`, `stunned` and
+  H88's ground cache). H66 prefetched only the first line of the unit 8 ahead,
+  and H74's helper, which covers more, is off; H112 prefetches the rest. The
+  layout study of 10-18 had already ranked lines 65 and 67 among the misses
+  (1.4% and 1.3%), where H83's move of those fields lost 1.1%.
+- **H113** (`t3` `0x40`, `d0764af`): the explosion generators give their
+  answer without spawning anything. Every class a CEG can spawn
+  (`CExpGenSpawnable`'s list) is an unsynced effect drawing on the unsynced
+  random generator, the standard generator always answers true and a custom
+  one true or the standard's answer, so `SpawnCEG`'s result in Lua, weapon
+  explosions and crash trails are unchanged. ~0.2-0.3%.
+- `pipe64` now trials `t3` 0, 1, 2, 10, 20, `48` (H110 + H113, the two
+  unsynced-effect cuts) and `7b`, and gates `7b` checked and `7f`. `pipe65`
+  then builds `luaprof63` (the Lua sampler on this code, `3a2e5d2`) for a Lua
+  profile of the late window.
+
+**Insights:**
+- **The governed whole game is not clock-starved.** `speed60`'s whole game:
+  the main thread was busy 660 s of a 641 s active sim (plus load) at 3.65 GHz
+  of user-mode cycles, the workers 3.1-3.4 GHz and ~40% busy. The governor
+  keeps the package out of throttling, so what decides a whole game is the
+  main thread's work, as in the late window.
+- **Hits are few:** the whole game records 1.06M hits, 4-10 per frame before
+  frame 55,000 and 26-52 in the late windows. The capture widget's per-hit Lua
+  (`recordHitAt`, ten small calls) is therefore ~0.25% of the game; inlining
+  it is not worth a widget change.
+- **The builders' repair search** (`GetUnitsExact`, 0.73%, reached through
+  `FinishCommand` and `ExecuteFight`): a precompute on all threads would meet
+  P3's fate (85% of scans replayed, yet +1.8% wall: more work than the scans
+  and a fork-join section of its own). Set aside.
+- **Unit creation** (`CUnitLoader::LoadUnit`, 1.6% in factories): Lua's
+  `UnitCreated` 0.76%, the drawer's 0.25% (H109 removes it), the id pool
+  0.19% (a sorted map; too small to replace).
