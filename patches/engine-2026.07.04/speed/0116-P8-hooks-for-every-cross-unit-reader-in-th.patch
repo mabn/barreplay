@@ -1,0 +1,257 @@
+From 9f35034a93b29640c6309a2331addbadb3698ad1 Mon Sep 17 00:00:00 2001
+From: mabn <github@mabn.pl>
+Date: Mon, 19 Oct 2026 23:22:37 +0000
+Subject: [PATCH] [barreplay] P8: hooks for every cross-unit reader in the loop
+
+Collision tests (piece-tree volumes read and lazily update another unit's
+piece matrices, which its weapon vectors also do), the quad field's shield
+query (muzzle positions), Lua's unit lookups (synced and unsynced reads may
+read pieces or weapons), CallAsUnit, P4's search tasks (they read the
+searching weapon's vectors on a worker), and the hold-fire flag writers.
+Stats counted atomically (workers ensure too).
+---
+ rts/Lua/LuaSyncedRead.cpp               |  6 +++++-
+ rts/Lua/LuaUnsyncedRead.cpp             |  3 +++
+ rts/Sim/Misc/CollisionHandler.cpp       |  4 ++++
+ rts/Sim/Misc/CollisionVolume.cpp        |  2 ++
+ rts/Sim/Misc/QuadField.cpp              |  2 ++
+ rts/Sim/MoveTypes/HoverAirMoveType.cpp  |  2 ++
+ rts/Sim/Units/Scripts/LuaUnitScript.cpp |  2 ++
+ rts/Sim/Units/Unit.h                    |  3 ++-
+ rts/Sim/Units/UnitHandler.cpp           | 13 +++++++------
+ rts/Sim/Weapons/BrPipeTarget.cpp        |  4 ++++
+ 10 files changed, 33 insertions(+), 8 deletions(-)
+
+diff --git a/rts/Lua/LuaSyncedRead.cpp b/rts/Lua/LuaSyncedRead.cpp
+index 5afdbf4..4459a31 100644
+--- a/rts/Lua/LuaSyncedRead.cpp
++++ b/rts/Lua/LuaSyncedRead.cpp
+@@ -608,7 +608,11 @@ static inline CUnit* ParseRawUnit(lua_State* L, const char* caller, int index)
+ 		return nullptr;
+ 	}
+ 
+-	return (unitHandler.GetUnit(lua_toint(L, index)));
++	CUnit* unit = unitHandler.GetUnit(lua_toint(L, index));
++	// [barreplay] P8: a read of a unit may read its pieces or weapons
++	if (unit != nullptr)
++		BrP8::Ensure(unit);
++	return unit;
+ }
+ 
+ static inline const CUnit* ParseUnit(lua_State* L, const char* caller, int index)
+diff --git a/rts/Lua/LuaUnsyncedRead.cpp b/rts/Lua/LuaUnsyncedRead.cpp
+index b4590dc..f6264fd 100644
+--- a/rts/Lua/LuaUnsyncedRead.cpp
++++ b/rts/Lua/LuaUnsyncedRead.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "LuaUnsyncedRead.h"
++#include "Sim/Units/BrWeaponVectors.h"
+ #include "LuaEngineEventLog.h"
+ 
+ #include "LuaConfig.h"
+@@ -347,6 +348,8 @@ static inline CUnit* ParseUnit(lua_State* L, const char* caller, int index)
+ 	}
+ 
+ 	CUnit* unit = unitHandler.GetUnit(lua_toint(L, index));
++	if (unit != nullptr)
++		BrP8::Ensure(unit); // [barreplay] P8: a read of a unit may read its pieces or weapons
+ 
+ 	if (unit == nullptr)
+ 		return nullptr;
+diff --git a/rts/Sim/Misc/CollisionHandler.cpp b/rts/Sim/Misc/CollisionHandler.cpp
+index 15c7a0a..c8b5b10 100644
+--- a/rts/Sim/Misc/CollisionHandler.cpp
++++ b/rts/Sim/Misc/CollisionHandler.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "CollisionHandler.h"
++#include "Sim/Units/BrWeaponVectors.h"
+ #include "CollisionVolume.h"
+ #include "Map/ReadMap.h" // mapDims
+ #include "Sim/Misc/GroundBlockingObjectMap.h"
+@@ -46,6 +47,9 @@ bool CCollisionHandler::DetectHit(
+ 	bool forceTrace
+ ) {
+ 	RECOIL_DETAILED_TRACY_ZONE;
++	// [barreplay] P8: a piece-tree test reads (and lazily updates) the object's
++	// piece matrices, which its weapon vectors also do
++	BrP8::EnsureObj(o);
+ 	bool hit = false;
+ 
+ 	if (cq != nullptr)
+diff --git a/rts/Sim/Misc/CollisionVolume.cpp b/rts/Sim/Misc/CollisionVolume.cpp
+index 73c0cf4..6eca126 100644
+--- a/rts/Sim/Misc/CollisionVolume.cpp
++++ b/rts/Sim/Misc/CollisionVolume.cpp
+@@ -1,6 +1,7 @@
+ /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+ 
+ #include "CollisionVolume.h"
++#include "Sim/Units/BrWeaponVectors.h"
+ #include "Sim/Units/Unit.h"
+ #include "Sim/Features/Feature.h"
+ #include "System/Matrix44f.h"
+@@ -257,6 +258,7 @@ float CollisionVolume::GetPointSurfaceDistance(
+ 	CMatrix44f vm = mat;
+ 
+ 	if (lmp != nullptr && (obj->collisionVolume).DefaultToPieceTree()) {
++		BrP8::EnsureObj(obj); // [barreplay] P8: piece matrices
+ 		// NOTE: if we get here, <this> is the piece-volume
+ 		assert(this == lmp->GetCollisionVolume());
+ 
+diff --git a/rts/Sim/Misc/QuadField.cpp b/rts/Sim/Misc/QuadField.cpp
+index 1a1f8b5..4d6af55 100644
+--- a/rts/Sim/Misc/QuadField.cpp
++++ b/rts/Sim/Misc/QuadField.cpp
+@@ -3,6 +3,7 @@
+ #include <algorithm>
+ 
+ #include "QuadField.h"
++#include "Sim/Units/BrWeaponVectors.h"
+ #include "Sim/Weapons/BrPipeTarget.h"
+ #include "Sim/MoveTypes/Systems/BrParallelAir.h"
+ #include "Map/ReadMap.h"
+@@ -1188,6 +1189,7 @@ void CQuadField::GetUnitsAndFeaturesColVol(
+ 				const auto* colvol = &r->collisionVolume;
+ 				const float totRad = radius + colvol->GetBoundingRadius();
+ 
++				BrP8::Ensure(r->owner); // [barreplay] P8: the shield's muzzle
+ 				if (pos.SqDistance(r->weaponMuzzlePos) >= (totRad * totRad))
+ 					continue;
+ 
+diff --git a/rts/Sim/MoveTypes/HoverAirMoveType.cpp b/rts/Sim/MoveTypes/HoverAirMoveType.cpp
+index 4ffbae1..c3ab10d 100644
+--- a/rts/Sim/MoveTypes/HoverAirMoveType.cpp
++++ b/rts/Sim/MoveTypes/HoverAirMoveType.cpp
+@@ -2,6 +2,7 @@
+ 
+ 
+ #include "HoverAirMoveType.h"
++#include "Sim/Units/BrWeaponVectors.h"
+ #include "Systems/BrParallelAir.h"
+ #include "Game/Players/Player.h"
+ #include "Map/Ground.h"
+@@ -181,6 +182,7 @@ void CHoverAirMoveType::SetState(AircraftState newState)
+ 		return;
+ 
+ 
++	BrP8::Ensure(owner); // [barreplay] P8: a weapon-use flag
+ 	owner->onTempHoldFire = (newState == AIRCRAFT_LANDED);
+ 	owner->useAirLos = (newState != AIRCRAFT_LANDED);
+ 
+diff --git a/rts/Sim/Units/Scripts/LuaUnitScript.cpp b/rts/Sim/Units/Scripts/LuaUnitScript.cpp
+index eafebdd..5246065 100644
+--- a/rts/Sim/Units/Scripts/LuaUnitScript.cpp
++++ b/rts/Sim/Units/Scripts/LuaUnitScript.cpp
+@@ -3,6 +3,7 @@
+ #define LUA_SYNCED_ONLY
+ 
+ #include "LuaUnitScript.h"
++#include "Sim/Units/BrWeaponVectors.h"
+ 
+ #include "CobDefines.h"
+ #include "CobInstance.h"
+@@ -1257,6 +1258,7 @@ int CLuaUnitScript::CallAsUnit(lua_State* L)
+ 
+ 	if (unit == nullptr)
+ 		return 0;
++	BrP8::Ensure(unit); // [barreplay] P8: the function acts on this unit's script
+ 
+ 	const int funcIndex = 2;
+ 
+diff --git a/rts/Sim/Units/Unit.h b/rts/Sim/Units/Unit.h
+index 503cc7f..a00daac 100644
+--- a/rts/Sim/Units/Unit.h
++++ b/rts/Sim/Units/Unit.h
+@@ -3,6 +3,7 @@
+ #ifndef UNIT_H
+ #define UNIT_H
+ 
++#include "Sim/Units/BrWeaponVectors.h"
+ #include <vector>
+ 
+ #include "Sim/Objects/SolidObject.h"
+@@ -253,7 +254,7 @@ public:
+ 	CFeature* CreateWreck(int wreckLevel, int smokeTime);
+ 
+ 	void TempHoldFire(int cmdID);
+-	void SetHoldFire(bool b) { onTempHoldFire = b; }
++	void SetHoldFire(bool b) { BrP8::Ensure(this); onTempHoldFire = b; } // [barreplay] P8
+ 
+ 	// start this unit in free fall from parent unit
+ 	void Drop(const float3& parentPos, const float3& parentDir, CUnit* parent);
+diff --git a/rts/Sim/Units/UnitHandler.cpp b/rts/Sim/Units/UnitHandler.cpp
+index 20e4cdb..6015d29 100644
+--- a/rts/Sim/Units/UnitHandler.cpp
++++ b/rts/Sim/Units/UnitHandler.cpp
+@@ -885,7 +885,8 @@ namespace BrP8 {
+ 		std::atomic<int> nextChunk{0};
+ 		int numChunks = 0;
+ 		constexpr int CHUNK = 32;
+-		struct Stats { long long frames = 0, units = 0, byMain = 0, waits = 0, all = 0; } st;
++		// byMain/waits/all are counted from any thread (P4's search tasks ensure too)
++		struct Stats { long long frames = 0, units = 0; std::atomic<long long> byMain{0}, waits{0}, all{0}; } st;
+ 		int lastLog = -1000000;
+ 
+ 		inline void Compute(size_t k) { units[k]->UpdateWeaponVectors(); }
+@@ -899,10 +900,10 @@ namespace BrP8 {
+ 			if (state[k].compare_exchange_strong(z, 1, std::memory_order_acq_rel)) {
+ 				Compute(k);
+ 				state[k].store(2, std::memory_order_release);
+-				st.byMain += 1;
++				st.byMain.fetch_add(1, std::memory_order_relaxed);
+ 				return;
+ 			}
+-			st.waits += 1;
++			st.waits.fetch_add(1, std::memory_order_relaxed);
+ 			while (state[k].load(std::memory_order_acquire) != 2)
+ 				_mm_pause();
+ 		}
+@@ -949,7 +950,7 @@ namespace BrP8 {
+ 
+ 	void EnsureAllSlow()
+ 	{
+-		st.all += 1;
++		st.all.fetch_add(1, std::memory_order_relaxed);
+ 		for (size_t k = 0; k < units.size(); ++k)
+ 			EnsureIdx(k);
+ 	}
+@@ -1001,8 +1002,8 @@ namespace BrP8 {
+ 		if ((gs->frameNum - lastLog) >= 900 && getenv("BARREPLAY_P8_STATS") != nullptr) {
+ 			lastLog = gs->frameNum;
+ 			LOG("[BR_P8] f=%d pipelined frames=%lld avgUnits=%.0f byMain/frame=%.1f waits/frame=%.2f ensureAll/frame=%.2f",
+-				gs->frameNum, st.frames, double(st.units) / st.frames, double(st.byMain) / st.frames,
+-				double(st.waits) / st.frames, double(st.all) / st.frames);
++				gs->frameNum, st.frames, double(st.units) / st.frames, double(st.byMain.load()) / st.frames,
++				double(st.waits.load()) / st.frames, double(st.all.load()) / st.frames);
+ 		}
+ 	}
+ }
+diff --git a/rts/Sim/Weapons/BrPipeTarget.cpp b/rts/Sim/Weapons/BrPipeTarget.cpp
+index f31e093..351709e 100644
+--- a/rts/Sim/Weapons/BrPipeTarget.cpp
++++ b/rts/Sim/Weapons/BrPipeTarget.cpp
+@@ -5,6 +5,7 @@
+ // is the sequential one.
+ 
+ #include "BrPipeTarget.h"
++#include "Sim/Units/BrWeaponVectors.h"
+ 
+ #include <algorithm>
+ #include <cstdio>
+@@ -80,6 +81,9 @@ namespace BrP4 {
+ 		}
+ 
+ 		void RunTask(Task& t, int thread) {
++			// [barreplay] P8: the search reads the weapon's own vectors
++			if (!t.slave)
++				BrP8::Ensure(t.w->owner);
+ 			if (!t.slave)
+ 				t.result = t.w->BrSearchTarget(t.avoid, tlPairs, -1, thread);
+ 			t.done.store(1, std::memory_order_release);
+-- 
+2.53.0
+

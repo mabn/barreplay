@@ -10,8 +10,8 @@ a gate and a publish.
 
 Numbering: the 4-digit prefixes continue the series (`../0001`-`0013`), so
 every patch number under `engine-2026.07.04/` is unique: 0014-0043,
-0063-0067, 0069-0070, 0073-0091, 0095-0099, 0101, 0104, 0106-0109 and 0111 here,
-0044-0045, 0052-0062, 0068, 0071-0072, 0092-0094, 0100, 0102-0103, 0105 and 0110 in
+0063-0067, 0069-0070, 0073-0091, 0095-0099, 0101, 0104, 0106-0109, 0111-0112 and 0116-0123 here,
+0044-0045, 0052-0062, 0068, 0071-0072, 0092-0094, 0100, 0102-0103, 0105, 0110 and 0113-0115 in
 `rejected/`, 0046-0051 in `tools/`. Change
 identifiers continue the work log's H-series (H1-H73), with H74-H104 for the
 ones below.
@@ -73,6 +73,12 @@ Best so far: `speed57` (= `speed54` + 0110-0111, built for Haswell with
 trained on that build), `t=d0d87abf`, `t2=e3837`: **11m36.1s active**,
 identical (`a26e920d…`), -0.4% against `speed54` (late windows -1.6% to
 -2.3% for the flags and the profile together; work log, 2026-10-19/20).
+
+Best so far: `speed58` (= `speed57` + 0112-0121, same flags, `speed57`'s
+profile), `t=d0d87abf`, `t2=1ee3837` (P8, P9, the data exemption and P10 on):
+**11m04.2s active**, identical (`a26e920d…`), -4.6% against `speed57`. P9
+loses in the late windows and H92 now wins (work log, 2026-10-20), so `speed59`
+measures `t=d4d87abf`, `t2=1ae3837`.
 
 ## Applying
 
@@ -171,6 +177,11 @@ The second word, `BARREPLAY_TOGGLES2` / the go file's `t2=<hex>` (0084 on):
 | `0x40000` | H104 | 0106-0107, 0109 | in a demo replay the unsynced halves of LuaRules and LuaGaia receive no events and no `SendToUnsynced` messages (the arguments are still checked) | -2.2% / -2.4% | on |
 | `0x80000` | P7 v4 | 0108-0109 | P7's phase A runs each sensor type's per-unit loop itself (a task per type); the handler's event functions and the height-map hook join it; `Update` discards an instance created and released before it | -1.2% / -0.8% | on |
 | `0x100000` | P7 v4.1 | 0110 (rejected) | phase A in two stages: the tests in chunks on all threads, then each type's `UpdateUnit` over the flagged units only | no gain (Haswell-128 build, both windows) | off |
+| `0x200000` | P8 | 0112, 0116-0118 | the weapon vectors computed by the workers in unit order while the weapon loop runs behind them; every unit made ready (computed by whoever claims it, else waited for) before its weapons update and before anything in the loop writes or reads another unit's vector inputs: damage, kills, stuns, team and hold-fire changes, moves and turns, transport changes and Lua writes (all units), collision tests (piece matrices), the shield query, Lua's unit lookups, `CallAsUnit`, interceptable projectiles; from 2048 units (`BARREPLAY_P8_MINUNITS`) | -2.7% / -2.9% (against `speed58` with nothing new on) | on |
+| `0x400000` | P9 | 0113-0115 (rejected), 0117 | `UpdateUnits`' collision-map decision on all threads before the loop, used at the unit's turn only while every input it read is bitwise unchanged (needs H91) | +0.9% / -0.1% | off |
+| `0x800000` | P8 data writes | 0118 | Lua writes of rules params and team resources make no unit ready | +1.0% / -0.4% (noise) | on |
+| `0x1000000` | P10 | 0119-0120, 0123 | the fighters' enemy-aircraft searches (`CAirCAI`: fight, auto-targeting) launched at the slow-update slice's start on P4's workers; an answer is taken when the slow update's own arguments are bitwise the predicted ones and nothing was drained since the launch (and the synced tempNum is drawn as the search would have); entering the crash state drains | -2.2% / -0.7% (instructions -2.6% / -2.4%) | on |
+| `0x2000000` | P4 v2 | 0122 | P4's enemy drain waits only for the searches whose scan reads the unit: not for one its ally team neither sees nor has on radar, nor for a seen one out of the scan's range (the same test on the same inputs) | in `speed59` | |
 
 Not toggled (always on in these builds):
 
@@ -190,6 +201,7 @@ Not toggled (always on in these builds):
 | 0096-0097 | bench harness: after a restore the engine waits until transparent huge pages cover what a real run has (98%, or until the share stops growing for 6 s; at most 120 s) before the window. A restored heap is on 4 KiB pages until H71's collapser runs over it again, and a window started at once ran ~19% slower than a fresh run (now ~4%) |
 | 0090 | **P4 fix**: `CWeapon::TryTargetHeading` turns its unit for a moment (heading and dir vectors, written directly) and back; first it waits for the running searches of the unit's ally team (or any, if the unit is neutral) whose area holds it, since their line-of-fire rays read their own side's units. Without it P4 diverged in about half the whole-game runs (work log, 2026-10-19) |
 | 0111 | measurement for P8: Lua writes, damage and kill calls in the weapon loop and the index of the first Lua write per frame (`BARREPLAY_P8_STATS`) |
+| 0121 | bench harness: a `p4check` word in `park.go` (`P4CHECK=1`) turns P4's and P10's check mode on after a restore; 0123 makes P4's first-slice init keep it |
 
 ## rejected/
 
@@ -204,13 +216,14 @@ Not toggled (always on in these builds):
 | `0057-H85…` | H85: the LOS-state apply pass visits only the units whose status changed (toggle `0x10000`) | identical; +0.3% wall, -1.2% instructions, noise |
 | `0058-`, `0061-`, `0062-P3…` | P3: the slow-update slice's targeting scans precomputed on all threads (every enemy unit in a superset of the quads, with its LOS state and target position) and replayed in order, checked against write marks on units, quads and everything (toggle `0x20000`); `0061` gives the precompute's quad queries their own thread's pool (the first build crashed), `0062` narrows the marks (built, not measured) | identical; 85% of scans replayed, but +1.8% wall, +1.4% cycles: the precompute visits more than the scan (larger radius, no dedup) and is a fork-join section of its own |
 | `0059-H86…` | H86: `QueueDeleteUnits` prefetches the death flag 16 units ahead (toggle `0x40000`) | +0.7% wall, noise or worse |
-| `0071-H92…` | H92: `UpdateWeaponVectors` keeps its outputs while every input is bitwise unchanged (toggle `0x4000000`) | identical; noise level (`speed36`) |
+| `0071-H92…` | H92: `UpdateWeaponVectors` keeps its outputs while every input is bitwise unchanged (toggle `0x4000000`) | identical; noise level (`speed36`). **With P8 it pays** (-1.4% / -0.7%, `speed58`): the beam laser's own update repeats the frame's computation and hits, and the misses run on the workers. On from `speed59` |
 | `0072-H93…` | H93: the LOS types' per-unit tests in one parallel pre-pass, each type's loop visits only the units that need it (toggle `0x8000000`) | identical; noise level (`speed36`); P5 applies without 0071-0072 |
 | `0092-`, `0093-H96…` | H96: every pool worker spins 2 ms or 20 ms after its last task and sleeps at most 0.5 ms (toggle2 bits 8-9). Kept in the line (toggled off) | +7.0% / +28.2%: the main thread ran 40% more instructions, polling the queue against the spinners; 20 ms of spin hit the package power limit (3.26 GHz) |
 | `0094-H97…` | H97: each unit's slot in its quad lists kept beside `unit->quads`, so leaving a quad erases without a search (toggle2 `0x400`). Kept in the line | +1.0% wall, +0.0% instructions: `MovedUnit`'s time is three dependent cache misses (the unit's `quads`, the list's buffer, the quad), not the searches; H98 prefetches those instead |
 | `0100-`, `0103-`, `0105-H101…` | H101: `CUnit::Update` on all threads in runs, then events, reload log and collision maps in order; busy builders and factories and units firing a synced-received air/water event are serial points (toggle2 `0x4000`). Kept in the line | +2.0% / +3.9%; refined +1.5% / +0.5%: a late frame has 752 busy builders among 10,496 units (nano turrets assisting factories), so the runs stay short |
 | `0102-H102…` | H102: a push wakes any sleeping worker (toggle2 `0x8000`); worker 1 spins 1 ms (`0x10000`). Kept in the line | the wake -2.1% / -1.9% beside the first H101 (dozens of small sections a frame), +0.8% / -1.2% without it; the spin nothing |
 | `0110-P7-v4.1…` | P7 v4.1 (`t2` `0x100000`): phase A in two stages, the tests in chunks on all threads, then each type's `UpdateUnit` over the flagged units only | no gain on the Haswell-128 build; `speed56` and later are built on it |
+| `0113-`, `0114-`, `0115-P9…` | P9 (`t2` `0x400000`): the collision-map decision on all threads before the unit loop, exact by construction (inputs compared bitwise at the unit's turn, quad lists versioned) | +0.9% / -0.1%; most due units return at the first position comparison anyway, so the pre-check costs about what it saves |
 | `0068-H90…` | H90: `MovedUnit` skips `GetQuads` while the unit stays within the distance at which none of its tests can flip (toggle `0x200000`) | +0.8%: with 128-elmo quads the nearest threshold is a few elmos away and aircraft move 5-15 a frame, so the full computation runs anyway, plus the safe-distance square roots |
 
 H74 (0028-0031) stayed in the main line because later patches were built on
