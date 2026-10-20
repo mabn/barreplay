@@ -48,6 +48,8 @@
 # second word ("t2=<hex>"; g_brToggles2) once the first ran out of bits; in
 # `abt` a setting written <t>/<t2> sets both.
 # TOGGLES3=<hex> is the third word ("t3=<hex>"; g_brToggles3).
+# P12CHECK=1 adds "p12check": P12's check mode (every would-be skip runs the
+# ordinary code; the bench line counts the ones that acted as wrong=).
 # P4CHECK=1 adds "p4check": the engine's P4 (and P10) check mode for the
 # trial, which runs every pipelined search in order too and counts mismatches
 # (a correctness test; the timings mean nothing).
@@ -224,7 +226,7 @@ trial1() {
 		sleep 1
 	}
 	[ -n "${PERF:-}${PERFSTAT:-}" ] && [ -z "$sync" ] && startprof
-	echo "$n $dir/result${LUAPROF:+ luaprof}${TOGGLES:+ t=$TOGGLES}${TOGGLES2:+ t2=$TOGGLES2}${TOGGLES3:+ t3=$TOGGLES3}${P4CHECK:+ p4check}${sync:+ sync}" > "$dir/park.go"
+	echo "$n $dir/result${LUAPROF:+ luaprof}${TOGGLES:+ t=$TOGGLES}${TOGGLES2:+ t2=$TOGGLES2}${TOGGLES3:+ t3=$TOGGLES3}${P4CHECK:+ p4check}${P12CHECK:+ p12check}${sync:+ sync}" > "$dir/park.go"
 	if [ -n "$sync" ]; then
 		local w=0
 		while [ ! -e "$dir/park.window" ]; do
