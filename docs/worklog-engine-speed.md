@@ -5838,3 +5838,74 @@ gave it back.
   profile and flags: code layout. This is now as large as a typical change,
   so a retrained profile is the fair baseline for the next comparison.
   `speed60` (retrain on `1ca986d` with this setting) is building.
+
+### 2026-10-20 04:39 — speed59's profile; every perf profile since speed48 included the huge-page wait
+
+Flame graph: [2026-10-20-verylarge1-speed59.svg](flamegraphs/2026-10-20-verylarge1-speed59.svg)
+(`speed59`, `t=d4d87abf`, `t2=3ae383f`, 63,780 + 450 frames, LBR call
+stacks at 499 Hz, the main thread only, cut to the window).
+
+**The profiles were wrong.** The bench harness attached perf before
+releasing the engine, which then waits for huge pages (up to 120 s) before
+the window starts. So every perf profile since that wait went in (`speed48`)
+also profiled the wait: the main thread in its `smaps_rollup` loop
+(`fgets`), and H71's huge-page collapser thread at work on the restored
+heap. That thread inherited the name `recoil-main`, so a profile filtered on
+the main thread's name counted it as the main thread: **20% of this "main
+thread" profile was the collapser**, all of it in the ~2 s of wait (16 samples
+inside the window, against 1,002 in the recording). Fixes: the harness
+attaches the profiler after the wait (the `sync` word, `afdf751` and the engine
+side `278439c`), the
+collapser is named `recoil-thp` (H105, `85e33ca`), and this profile is cut to
+the window by time and filtered by thread id.
+
+| block | main thread, % | workers, % of one core |
+|---|---|---|
+| Lua callins (gadgets) | **18.1** | 0.5 |
+| aircraft move loop (P1) | 8.7 | 52.3 |
+| `CUnit::Update` | 8.5 | |
+| script tick (COB, animations, P5) | 8.4 | 32.1 |
+| `CUnit::SlowUpdate` (command AI) | 5.5 | |
+| ground movement | 5.4 | 22.3 |
+| LOS update | 5.1 | 38.1 |
+| projectiles and collisions | 4.6 | 0.2 |
+| `CWeapon::Update` | 4.4 | |
+| weapon vectors | 4.3 | 37.5 |
+| `CFactory` / `CBuilder` | 3.9 | |
+| beam lasers | 3.7 | |
+| P4 searches (P10 included on the workers) | 3.3 | 24.6 |
+| weapon loop, inlined weapon code | 3.1 | |
+| unit handler, inlined unit code | 2.6 | 4.4 |
+| pathfinding (QTPFS) | 2.2 | 9.8 |
+| SimFrame, own and inlined | 2.2 | |
+| UpdateUnits (collision maps) | 2.0 | |
+| `CWeapon::SlowUpdate` | 1.8 | |
+| map damage and height map | 1.5 | 0.2 |
+| unit deletion, other | 0.8 | 27.4 (mostly idle spinning) |
+| **total** | **100** | **249** |
+
+(Each sample goes to the first block of the list any of its frames matches,
+Lua first, so Lua called from anywhere counts as Lua; the script is
+`perf3/s2/tools/maintable.py`.)
+
+Where the main thread's remaining weapon-vector time goes (3.9%): 1.4% is
+the beam lasers' own update hitting H92's cache, 1.6% `CWeapon::SlowUpdate`
+(before the weapon loop, a miss for every unit that moved), 0.35% P8 making
+units ready from a collision test, the rest attacks and shields.
+
+**Insights:**
+- **Lua is now the largest block, at 18% of the main thread,** larger than
+  any engine loop. It is BAR's gadgets, which the engine can only call faster,
+  not change.
+- **H92's hit path costs 1.4% by itself:** nine out-of-line `memcmp` calls
+  (GCC does not inline a 12-byte compare here) and a height-map lookup for the
+  ground clamp on every hit. **H92b** (`t2` `0x8000000`, next build) compares
+  inline and keeps the clamp's answer while the height map's version is
+  unchanged.
+- **The workers spend 37.5% of a core on the weapon vectors**, against 16.3%
+  in `speed44`'s section, for the same computation: they now run beside the
+  main thread on hyperthreads, and with H92 on, the first call of a frame pays
+  H92's cache fill. That costs the main thread nothing it waits for.
+- **Profiles from before this entry overstate the main thread's blocks by up
+  to a fifth** (the collapser's share), unevenly. Use them for what is inside
+  a block, not for comparisons across them.
