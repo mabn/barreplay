@@ -5913,11 +5913,11 @@ units ready from a collision test, the rest attacks and shields.
 ### 2026-10-20 05:02 — queued for speed61: H92b, H106, H107 (and H105, the sync word)
 
 From `speed59`'s window-only profile:
-- **H92b** (`t2` `0x8000000`, `dea1d27`): H92's hit path compares inline (it
+- **H92b** (`t2` `0x8000000`, `b1c3104`): H92's hit path compares inline (it
   called `memcmp` nine times per hit) and keeps the ground clamp's answer while
   the height map's version is unchanged. The hit path was 1.4% of the main
   thread, almost all from the beam lasers' own vector update.
-- **H106** (`t2` `0x10000000`): half of `CUnit::Update`'s own time is
+- **H106** (`t2` `0x10000000`, `f8e31b5`): half of `CUnit::Update`'s own time is
   `GetHeightReal`'s corner interpolation in `UpdatePhysicalState` (about 2.3%
   of the main thread), mostly for aircraft far above the ground. Per block of
   32 x 32 squares the map keeps an upper bound of the synced corner heights,
@@ -5927,7 +5927,7 @@ From `speed59`'s window-only profile:
   false whatever the real height, and in-air is decided by whichever of bound
   and water is higher, both of which put the unit above. So the bits are the
   same.
-- **H107** (`t2` `0x20000000` / `0x40000000`): the main thread ticks most
+- **H107** (`t2` `0x20000000` / `0x40000000`, `7b2213c`): the main thread ticks most
   animations itself (3.4%) and half of P5's COB ticks, because P7's LOS phase A
   holds the workers through the script tick. H107 starts phase A after the COB
   tick, or after the animations' parallel section. Phase A then overlaps less,
