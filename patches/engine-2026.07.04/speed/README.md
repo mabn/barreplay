@@ -205,7 +205,7 @@ the harness's `TOGGLES3=`):
 
 | bit | id | patches | what | late window, measured | status |
 |---|---|---|---|---|---|
-| `0x1` | H108 | 0131 | a frame's crater LOS updates in one pass per sensor type (cached instances nobody holds deleted, used ones queued, the same sets) | +1.1% / -0.3% (`speed63`): few craters a frame | off |
+| `0x1` | H108 | 0131 | a frame's crater LOS updates in one pass per sensor type (cached instances nobody holds deleted, used ones queued, the same sets) | +1.1% / -0.3% (`speed63`): few craters a frame | on in `7f`; no gain alone |
 | `0x2` | P12 | 0133-0134 | the synced projectile collision pass's detections on all threads first; a projectile that would act on nothing is skipped when no effect of the pass has marked a cell of its query (check mode: `p12check`, `P12CHECK=1`) | ±0.4% (`speed63`): 34% skipped, 59% find a marked cell; check trial 0 wrong of 88,047 | on |
 | `0x4` | H109 | 0135 | the unit, feature and projectile drawers take no events in a headless run (from the environment at engine start only) | -0.2% / -1.7% across two dumps (`speed63`) | on (environment) |
 | `0x8` | H110 | 0135 | builders' nano particles skipped after the piece query (which runs the script) | with H113: -0.3% / -0.5% | on |

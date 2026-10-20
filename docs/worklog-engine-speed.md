@@ -6362,3 +6362,22 @@ P12's counters (450 frames at 63,780 / 82,000):
   lift the skip rate; until then P12 pays its pre-pass and saves about as much.
 - **H108 gains nothing:** few craters land per frame, so the batch does one
   pass where there were one or two, and adds a parallel section.
+
+### 2026-10-20 23:45 — speed63 governed whole game: 10m37.4s, identical — the best so far; H109 -0.2% / -1.7% across dumps
+
+**H109** (latched at start, so across two dumps of the one binary,
+`t3=7b`, 3 rounds): -0.2% wall / -0.5% cycles at 63,780, -1.7% / -2.7% at
+82,000 (instructions -0.6% / +0.4%). Kept.
+
+**Governed whole game**, `t=d4d87abf`, `t2=9bae383f`, `t3=7f` (H108-H113 and
+P12, H109 from the environment): **10m37.4s active** (sim 1781 s, paused
+1144 s, load 18 s), **identical** (`a26e920d…`). Against `speed60`'s
+10m41.1s -0.6%, against `speed62`'s 10m45.4s -1.2%; 3.60x stock. The speed
+README's best line moves to it, and patches 0131-0149 (everything through
+H122) are exported.
+
+`speed64` (`d78eff2` = P11 v2, H114-H122, P12 v2 on top) builds after the Lua
+profile; its trials take single items where one could pass 0.5% (P11 v2, H116,
+H117, P12 v2, H122) and the rest in two groups (prefetches only: H115, H118 —
+H86 again, rejected then as noise — and H121; the small cuts: H114, H119,
+H120), with a P12 check trial for v2.
