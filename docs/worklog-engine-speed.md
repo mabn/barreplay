@@ -5644,3 +5644,29 @@ average (of about 4,500 averaged over the game).
 - **For P8, the first Lua write in a frame comes late enough to matter
   little:** around unit 2,500, by which time six workers have long finished
   the vectors (each unit's vectors cost far less than its weapon update).
+
+### 2026-10-20 01:03 — P4 with more search workers: nothing
+
+`speed57`, `t2=e3837`, a discarded warm-up trial then 3 interleaved rounds;
+the worker count is bits 24-25 of the first word (2 + 2k):
+
+| P4 workers | 63,780 | 82,000 |
+|---|---|---|
+| 2 (`d0d87abf`) | 7.78 s, 28.68e9 cycles | 6.81 s, 24.97e9 cycles |
+| 4 (`d1d87abf`) | -0.2% wall, -0.2% cycles | +0.3%, +0.5% |
+| 6 (`d2d87abf`) | +0.3%, +0.4% | +0.7%, +1.1% |
+
+A 6-worker trial's own counters (63,780): 230,282 searches in 450 frames,
+5,131 main-thread waits costing 831M cycles (2.9% of the main thread), and
+3,219 "enemy" drains (before a unit's slow update, every running search whose
+area holds the unit must finish, since the update writes what the scan reads).
+
+**Insights:**
+- **P4's waits are not a shortage of workers:** they come from the enemy
+  drains, which make the main thread wait for searches it has only just
+  launched. More workers only add contention for the claim counter. The count
+  stays at 2.
+- **The enemy drain guards a whole slow update** (position error, health,
+  paralysis, the command AI, the move type). Waiting less there would need the
+  searches to read versioned copies of what they read from enemies. That is a
+  bigger change than the 2.9% it could recover.
