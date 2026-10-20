@@ -6153,3 +6153,71 @@ the last two days peaked at 3.6-6.3 GB. Fixed in `adc66ef`: dumps run with
 `BARREPLAY_TOGGLES=80000` unless told otherwise (H87 is unsynced, so the
 checkpoint is the same), and the queued pipelines pass it too. A replacement
 tail re-dumps 82000 and finishes `speed62`'s trials, flame graph and whole game.
+
+### 2026-10-20 21:45 — speed62: whole game 10m45.4s identical (no gain on speed60); its profile: 2.8% of the main thread spins in P11's wait; P11 v2
+
+`speed62` (`70207be` with a profile retrained on it). Late windows, inside the
+one binary, 3 rounds each (base = `speed60`'s setting, `t2=3ae383f`):
+
+| `t2` | adds | 63,780 wall | cycles | 82,000 wall | cycles |
+|---|---|---|---|---|---|
+| `3ae383f` | (base) | 7.35 s | 27.10e9 | 6.40 s | 23.52e9 |
+| `bae383f` | H92b | -1.0% | -0.7% | -0.5% | -0.1% |
+| `1bae383f` | H92b + H106 | -0.6% | -0.5% | -0.8% | -0.4% |
+| `8bae383f` | H92b + P11 | -1.1% | -0.6% | **+0.7%** | **+0.9%** |
+| `9bae383f` | all three | **-1.2%** | **-1.0%** | -0.4% | -0.2% |
+
+**Governed whole game** (`9bae383f`, the fastest mean): **10m45.4s active,
+identical** (`a26e920d…`), against `speed60`'s 10m41.1s: +0.7%, within the
+spread of whole games. The retrain and the three changes bought nothing that
+a whole game can see.
+
+Flame graph: [2026-10-20-verylarge1-speed62.svg](flamegraphs/2026-10-20-verylarge1-speed62.svg)
+(`speed62`, `t=d4d87abf`, `t2=9bae383f`, 63,780 + 450 frames, LBR call
+stacks at 499 Hz; the first profile taken with the `sync` word, so the
+window only, and the main thread by name now that the collapser has its own).
+
+| block | main thread, % | workers, % of one core |
+|---|---|---|
+| Lua callins (gadgets) | **17.0** | 0.3 |
+| `CUnit::Update` | 9.0 | |
+| aircraft move loop (P1) | 8.4 | 51.9 |
+| `CUnit::SlowUpdate` (command AI) | 6.2 | |
+| ground movement | 5.7 | 23.5 |
+| LOS update | 5.7 | 39.3 |
+| SimFrame, own and inlined (2.8 of it P11's wait) | 5.6 | |
+| script tick (COB, animations, P5) | 5.4 | 34.2 |
+| `CWeapon::Update` | 4.9 | |
+| projectiles and collisions | 4.6 | 0.1 |
+| beam lasers | 4.3 | |
+| `CFactory` / `CBuilder` | 3.8 | |
+| weapon vectors | 3.5 | 35.9 |
+| P4 searches (P10 included on the workers) | 2.8 | 26.0 |
+| weapon loop, inlined weapon code | 2.6 | |
+| pathfinding (QTPFS) | 2.4 | 11.3 |
+| unit handler, inlined unit code | 2.1 | 4.5 |
+| `CWeapon::SlowUpdate` | 1.8 | |
+| map damage and height map | 1.7 | 0.2 |
+| UpdateUnits (collision maps) | 1.4 | |
+| unit deletion, other | 1.0 | 28.3 (mostly idle spinning) |
+| **total** | **100** | **255** |
+
+**Insights:**
+- **P11's pipeline makes the main thread wait.** 5.0% of the main thread's
+  samples have `CGame::SimFrame` itself as the leaf (inlined code), and over
+  half of those sit in one loop, `UnitScriptEngine.cpp:177`: `pause`, load,
+  compare with 2 — the main thread spinning until a worker finishes the
+  script it needs. The in-order pass starts at the front of the list, where
+  the workers start too, so the main thread keeps catching up with a slower
+  hyperthreaded worker inside the chunk it needs. That is why P11 gains at
+  63,780 and loses at 82,000. **P11 v2** (`t3` `0x80`, `15ae5d1`, next
+  build): the workers take chunks from the back; the pass ticks what nobody
+  has claimed itself and meets them once. The pass's own removals bring
+  scripts from the back forward, which the workers have ticked by then.
+- **COB's thread lookups** (`CCobEngine::GetThread`, an open-addressing map
+  keyed by ever-growing thread ids) are ~0.5% of the main thread, in the
+  probe loop. It is only looked up, never iterated outside sync dumps.
+- The table moved little since `speed59`: Lua 17.0% (18.1), P1 8.4% (8.7).
+  The `CUnit::Update` block grew to 9.0% (H106's bound is checked there) and
+  the script tick fell to 5.4% (8.4) because P11's pass is now inlined into
+  `SimFrame`.
