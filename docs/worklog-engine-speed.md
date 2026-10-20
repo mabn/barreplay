@@ -5670,3 +5670,66 @@ area holds the unit must finish, since the update writes what the scan reads).
   paralysis, the command AI, the move type). Waiting less there would need the
   searches to read versioned copies of what they read from enemies. That is a
   bigger change than the 2.9% it could recover.
+
+### 2026-10-20 02:19 — speed58: P8 -2.7%/-2.9%, P10 -2.2%/-0.7%, H92 now pays; P9 rejected
+
+`speed58` = `speed57` + P8 (with the cross-unit hooks and the Lua-write
+counting), P9, P10, the bench `p4check` word, built with `speed57`'s
+profile and flags. **Medium gate identical** (`0558d354…`) with P8, P9, the
+data exemption and P10 on from frame 0
+(`BARREPLAY_P8_MINUNITS=0 BARREPLAY_P9_MINUNITS=0`). Late windows, two
+discarded warm-up trials, then 3 interleaved rounds:
+
+| variant (`t` / `t2`) | 63,780 | vs `speed57` | 82,000 | vs `speed57` |
+|---|---|---|---|---|
+| `speed57` `d0d87abf` / `e3837` | 7.78 s | | 6.85 s | |
+| `speed58`, nothing new on | 7.87 s | +1.1% | 6.88 s | +0.5% |
+| + P8 (`2e3837`) | **7.66 s** | **-1.6%** | **6.68 s** | **-2.4%** |
+| + P9 (`4e3837`) | 7.94 s | +2.0% | 6.87 s | +0.4% |
+| + P8 + P9 (`6e3837`) | 7.72 s | -0.8% | 6.72 s | -1.8% |
+| + P8 + P9 + data (`ee3837`) | 7.80 s | +0.3% | 6.69 s | -2.3% |
+| the same + H92 (`d4d87abf`) | 7.69 s | -1.2% | 6.64 s | -3.0% |
+| the same + P10 (`1ee3837`) | **7.63 s** | **-2.0%** | **6.64 s** | **-3.0%** |
+
+Against `speed58` with nothing new on: **P8 -2.7% / -2.9%**, P9 +0.9% /
+-0.1%. Against P8 + P9 + data: **P10 -2.2% / -0.7%** (instructions -2.6% /
+-2.4%), **H92 -1.4% / -0.7%**. The data exemption reads +1.0% / -0.4%
+against P8 + P9, which is noise for a change that only skips work.
+
+P10's counters over the 63,780 window: 80,206 searches launched, **75,665
+answers used (94%)**, 2,635 stale (a drain after the launch), 160 with
+different arguments, 3,917 searches that were never launched. The main thread
+still ran 11,292 of them itself: P4's two workers fall behind the main thread
+through the slice.
+
+**Insights:**
+- **P8 is the first change to the weapon loop that pays.** The vectors
+  section ran on all threads already, but the main thread did a third of it
+  and the loop waited for its end. Pipelined, the main thread computes only
+  what the workers have not reached.
+- **P9 rejected:** most units due a collision-map update return at the first
+  position comparison anyway, so the pre-check saves `GetQuads` only for the
+  ones that moved, which is about what one more fork-join section per frame
+  costs (the main thread does part of the pre-check itself).
+- **H92 pays now, after it lost at `speed36`:** the beam laser's own vector
+  update repeats a computation from moments earlier in the same frame, so
+  H92's cache hits there. Its misses (the vectors section) cost the
+  workers, not the main thread, once P8 moves that section off it.
+- **P10's searches outrun the workers:** 15% of the used answers were
+  computed by the main thread at the fighter's turn, so P4 with more workers
+  is worth retrying now that its queue holds P10's work too (it gained
+  nothing without it).
+- **`speed58` with nothing new on is 0.5-1.1% slower than `speed57`:** the
+  new code paths lost their profile data (the profile was trained on
+  `speed56`). A retrain on the final code should take that back.
+- **The first P4/P10 check trial ran unchecked:** a checkpoint dumped with P4
+  off (`t=587a3f`) had not initialized P4, so its first slice ran after the
+  park and reset the check flag from the environment. Fixed in `1ca986d` (the
+  init keeps a flag the harness set). Its "0 mismatches" therefore says
+  nothing. `speed59`'s check trial reads the result file, which carries the
+  counters (the harness prints only the timing line).
+
+**Next** (`speed59`, building after `speed58`'s whole game): `t=d4d87abf`,
+`t2=1ae3837` (P8, data, P10; P9 off) against `speed58`, plus P4 v2, P4 with
+4 and 6 workers, and P5 with 5 and 7 workers; a real P4/P10 check trial; then
+a governed whole game with the fastest.
