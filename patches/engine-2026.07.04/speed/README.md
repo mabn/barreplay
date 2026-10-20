@@ -10,8 +10,8 @@ a gate and a publish.
 
 Numbering: the 4-digit prefixes continue the series (`../0001`-`0013`), so
 every patch number under `engine-2026.07.04/` is unique: 0014-0043,
-0063-0067, 0069-0070, 0073-0091, 0095-0099, 0101, 0104 and 0106-0109 here,
-0044-0045, 0052-0062, 0068, 0071-0072, 0092-0094, 0100, 0102-0103 and 0105 in
+0063-0067, 0069-0070, 0073-0091, 0095-0099, 0101, 0104, 0106-0109 and 0111 here,
+0044-0045, 0052-0062, 0068, 0071-0072, 0092-0094, 0100, 0102-0103, 0105 and 0110 in
 `rejected/`, 0046-0051 in `tools/`. Change
 identifiers continue the work log's H-series (H1-H73), with H74-H104 for the
 ones below.
@@ -66,6 +66,13 @@ and 3.29x stock. `speed53` without 0109 ran 11m34.0s but its capture differed
 (the simulation did not): BAR's unsynced "Widget Events" gadget forwards
 `UnitGiven` to LuaUI and the capture widget records both calls, and P7 v4
 moved a dying unit's lingering sight (work log, 2026-10-19).
+
+Best so far: `speed57` (= `speed54` + 0110-0111, built for Haswell with
+128-bit vectors and no FMA: `-DMARCH_FLAG=haswell -DSSE_FLAGS='-mno-fma
+-mno-fma4 -ffp-contract=off -mprefer-vector-width=128'`, with a PGO profile
+trained on that build), `t=d0d87abf`, `t2=e3837`: **11m36.1s active**,
+identical (`a26e920d…`), -0.4% against `speed54` (late windows -1.6% to
+-2.3% for the flags and the profile together; work log, 2026-10-19/20).
 
 ## Applying
 
@@ -163,6 +170,7 @@ The second word, `BARREPLAY_TOGGLES2` / the go file's `t2=<hex>` (0084 on):
 | `0x20000` | H103 | 0104 | synced `next` calls `lua_next` directly instead of the original `next` through `lua_call` | -0.7% / -0.7% (noise level) | on |
 | `0x40000` | H104 | 0106-0107, 0109 | in a demo replay the unsynced halves of LuaRules and LuaGaia receive no events and no `SendToUnsynced` messages (the arguments are still checked) | -2.2% / -2.4% | on |
 | `0x80000` | P7 v4 | 0108-0109 | P7's phase A runs each sensor type's per-unit loop itself (a task per type); the handler's event functions and the height-map hook join it; `Update` discards an instance created and released before it | -1.2% / -0.8% | on |
+| `0x100000` | P7 v4.1 | 0110 (rejected) | phase A in two stages: the tests in chunks on all threads, then each type's `UpdateUnit` over the flagged units only | no gain (Haswell-128 build, both windows) | off |
 
 Not toggled (always on in these builds):
 
