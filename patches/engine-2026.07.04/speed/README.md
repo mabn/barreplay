@@ -189,6 +189,7 @@ Not toggled (always on in these builds):
 | 0089 | P1's crash bound compiles with the sync checker on (`std::min<float>` over a `SyncedFloat`) |
 | 0096-0097 | bench harness: after a restore the engine waits until transparent huge pages cover what a real run has (98%, or until the share stops growing for 6 s; at most 120 s) before the window. A restored heap is on 4 KiB pages until H71's collapser runs over it again, and a window started at once ran ~19% slower than a fresh run (now ~4%) |
 | 0090 | **P4 fix**: `CWeapon::TryTargetHeading` turns its unit for a moment (heading and dir vectors, written directly) and back; first it waits for the running searches of the unit's ally team (or any, if the unit is neutral) whose area holds it, since their line-of-fire rays read their own side's units. Without it P4 diverged in about half the whole-game runs (work log, 2026-10-19) |
+| 0111 | measurement for P8: Lua writes, damage and kill calls in the weapon loop and the index of the first Lua write per frame (`BARREPLAY_P8_STATS`) |
 
 ## rejected/
 
@@ -209,6 +210,7 @@ Not toggled (always on in these builds):
 | `0094-H97…` | H97: each unit's slot in its quad lists kept beside `unit->quads`, so leaving a quad erases without a search (toggle2 `0x400`). Kept in the line | +1.0% wall, +0.0% instructions: `MovedUnit`'s time is three dependent cache misses (the unit's `quads`, the list's buffer, the quad), not the searches; H98 prefetches those instead |
 | `0100-`, `0103-`, `0105-H101…` | H101: `CUnit::Update` on all threads in runs, then events, reload log and collision maps in order; busy builders and factories and units firing a synced-received air/water event are serial points (toggle2 `0x4000`). Kept in the line | +2.0% / +3.9%; refined +1.5% / +0.5%: a late frame has 752 busy builders among 10,496 units (nano turrets assisting factories), so the runs stay short |
 | `0102-H102…` | H102: a push wakes any sleeping worker (toggle2 `0x8000`); worker 1 spins 1 ms (`0x10000`). Kept in the line | the wake -2.1% / -1.9% beside the first H101 (dozens of small sections a frame), +0.8% / -1.2% without it; the spin nothing |
+| `0110-P7-v4.1…` | P7 v4.1 (`t2` `0x100000`): phase A in two stages, the tests in chunks on all threads, then each type's `UpdateUnit` over the flagged units only | no gain on the Haswell-128 build; `speed56` and later are built on it |
 | `0068-H90…` | H90: `MovedUnit` skips `GetQuads` while the unit stays within the distance at which none of its tests can flip (toggle `0x200000`) | +0.8%: with 128-elmo quads the nearest threshold is a few elmos away and aircraft move 5-15 a frame, so the full computation runs anyway, plus the safe-distance square roots |
 
 H74 (0028-0031) stayed in the main line because later patches were built on
