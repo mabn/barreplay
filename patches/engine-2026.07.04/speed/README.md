@@ -234,9 +234,9 @@ the harness's `TOGGLES3=`):
 | `0x200000` | H125 | 0153 | no smoke trails behind missiles, starbursts and debris; the trail's `useAirLos` computed without it | **-0.9% / -1.9%** (`speed65`) | on |
 | `0x400000` | H126 | 0154-0155 | the LOS update's map work as one set of tasks: per type the units and filtering, every type's raycasts at once, each (type, ally team, band of rows)'s removes and adds, per type the cache; full view only | +0.3% / -0.2% (`speed65`) | on |
 | `0x800000` | H127 | 0156 | H108's crater pass rejects instances outside every crater's reach (from the boxes `CheckOverlap` really tests) at once | -0.1% / -0.2% (`speed65`); all six -1.9% / -2.8% | on |
-| `0x1000000` | N3 | 0157 | N2 for `UnitCreated`, `UnitDestroyed` and `UnitCommand`: the handlers' Meta calls, list walks, `_unitCommandIDs` filter and `markIdle` in C when their hashes are listed (learned in `speed66`) | (`speed66`) | |
-| `0x2000000` | H128 | 0158 | `TraceRay` skips a unit or feature whose collision volume its segment cannot reach (orthonormal axes, half-scale bound, margin) before building and inverting its transform | (`speed66`) | |
-| `0x4000000` | H129 | 0159-0160 | the weapon loop prefetches the lines `CWeapon::Update` reads (the owner's `curTarget`, four weapon lines H75's raw offsets no longer hit, the target's `isDead`) and `stunned`, now a line before the last | (`speed66`) | |
+| `0x1000000` | N3 | 0157 | N2 for `UnitCreated`, `UnitDestroyed` and `UnitCommand`: the handlers' Meta calls, list walks, `_unitCommandIDs` filter and `markIdle` in C when their hashes are listed (verylarge1's build has two handlers per callin for two of them, unattributed: not listed) | +0.9% / +1.0% with the bit on and nothing native (`speed66`) | **off** |
+| `0x2000000` | H128 | 0158 | `TraceRay` skips a unit or feature whose collision volume its segment cannot reach (orthonormal axes, half-scale bound, margin) before building and inverting its transform | -0.8% / -1.0% (`speed66`) | on |
+| `0x4000000` | H129 | 0159-0160 | the weapon loop prefetches the lines `CWeapon::Update` reads (the owner's `curTarget`, four weapon lines H75's raw offsets no longer hit, the target's `isDead`) and `stunned`, now a line before the last | -0.5% / -0.8% (`speed66`) | on |
 
 Not toggled (always on in these builds):
 
