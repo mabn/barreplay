@@ -6811,3 +6811,22 @@ off), on `speed66`: governed whole game below.
   keyed on the game's code: the medium replay never exercised N2 or N3.
 - **A hash allow-list needs the source attributed per Lua state**: two states
   can each run their own handler behind the same wrapper.
+
+### 2026-10-21 07:00 — speed66 whole game with H128 + H129: 10m15.1s identical, slower than speed65 — a stale profile
+
+`speed66`, `t3=6ffffff` (speed65's setting + H128 + H129, N3 off), widget
+1.13.1: **10m15.1s active** (sim 1754 s, paused 1139 s), identical
+(`a26e920d…`), **+2.6%** against `speed65`'s 9m59.3s.
+
+The trials explain it: `speed66` running `speed65`'s exact setting (its base,
+`fffffb`) took 6.90 s at 63,780 and 6.03 s at 82,000, against `speed65`'s
+6.75 s and 5.88 s: **the binary itself is ~2.3% slower**, and H128 + H129 win
+back ~1.8% of that. `speed66` was built with `pgo65`'s profile, trained on
+`163e18a`; GCC discards a function's profile when its control flow no longer
+matches, and H129 rewrote the weapon loop and `UpdateUnits`' prefetch block,
+H128 `TraceRay`, N3 the Lua callins' entry. Those hot functions then build
+without their profile.
+
+**Insight:** with PGO, an item is worth only what it measures against the
+previous build retrained on its own code; trials inside one binary compare
+toggles, not builds. `speed70` retrains on `779e4af` with the final setting.
