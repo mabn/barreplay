@@ -6381,3 +6381,108 @@ profile; its trials take single items where one could pass 0.5% (P11 v2, H116,
 H117, P12 v2, H122) and the rest in two groups (prefetches only: H115, H118 —
 H86 again, rejected then as noise — and H121; the small cuts: H114, H119,
 H120), with a P12 check trial for v2.
+
+### 2026-10-21 00:50 — luaprof63: Lua is 14.9% of the main core; four items from it (H123, H124, P12 v3, W8)
+
+The Lua sampler on `d0764af` (`luaprof63`, `pgo62`'s profile), 63,780 + 450
+frames at `speed63`'s setting (`t3=7f`): 7,362 main-core samples, 1,100 in Lua.
+
+| % of the main core | by Lua state |
+|---|---|
+| 11.84% | LuaRules (gadgets) |
+| 2.83% | LuaUI (widgets) |
+| 0.27% | other |
+
+| % of the main core | owner | top C functions it was in |
+|---|---|---|
+| 2.57% | the capture widget | Lua code 1.15%, `GetUnitSampleDelta` 0.90%, `str_format` 0.11% |
+| 1.96% | `gadgets.lua` (handler) | Lua code 1.83%, `ipairsaux` 0.12% |
+| 1.83% | `unit_shield_behaviour.lua` | Lua code 1.36%, `SyncedNext` 0.34%, `GetUnitsInSphere` 0.08% |
+| 0.80% | `unit_builder_priority.lua` | Lua code 0.64%, `GetUnitIsBuilding` 0.08% |
+| 0.77% | `api_unit_attributes.lua` | Lua code 0.53%, `SyncedPairs` 0.07%, `SyncedNext` 0.07% |
+| 0.64% | `unit_crashing_aircraft.lua` | Lua code 0.26%, `BrLuaDrainingCall` 0.18%, `GetUnitMoveTypeData` 0.14% |
+| 0.50% | `unit_stockpile_limit.lua` | `BrLuaDrainingCall` 0.48% |
+| 0.38% | `game_apm_broadcast.lua` | Lua code 0.24%, `SyncedNext` 0.14% |
+| 0.35% | `map_lava.lua` | Lua code 0.14%, `GetUnitsInBox` 0.12% |
+| 0.31% | `unit_lightning_splash_dmg.lua` | Lua code 0.15%, `BrLuaDrainingCall` 0.10% |
+
+By callin (the handler's frame under its installed wrapper):
+
+| % of the main core | callin | largest gadgets |
+|---|---|---|
+| 4.63% | `GameFrame` | shield behaviour 1.22, unit attributes 0.76, builder priority 0.72, lava 0.34, jammed fix 0.26, APM broadcast 0.24 |
+| 1.11% | `UnitDestroyed` | the handler itself 0.29, resurrected 0.12, reclaim fx 0.11 |
+| 0.65% | `UnitCreated` | the handler 0.18, target on the move 0.10 |
+| 0.60% | `ShieldPreDamaged` | shield behaviour 0.46 |
+| 0.53% | `AllowCommand` | |
+| 0.52% | `StockpileChanged` | stockpile limit (its orders drain P8) |
+| 0.41% | `UnitCommand` | |
+
+The capture widget, by callin and by function (its own code):
+
+| % | entry | | % | innermost function |
+|---|---|---|---|---|
+| 1.17% | `GameFrame` | | 0.91% | `sample` (with `GetUnitSampleDelta`) |
+| 0.80% | `UnitDestroyed` | | 0.34% | `recordHitAt` |
+| 0.42% | `GameFramePost` (projectiles) | | 0.16% | `event` |
+| | | | 0.15% | `writeRecord` |
+| | | | 0.14% | `drainDamage` |
+
+**Insights:**
+- **`BrLuaDrainingCall`'s time is all P8's drain.** The trampoline tail-calls
+  the wrapped function, so its frames hold only what it does itself:
+  `speed62`'s window-only profile puts 0.75% of the main thread under it, every
+  sample in `BrP8::EnsureAllSlow`. A Lua write in the weapon loop makes the
+  main thread finish every vector the workers have not reached.
+- **The stockpile gadget drains P8 from inside the weapon loop.** BAR's
+  `unit_stockpile_limit.lua` answers `StockpileChanged` (fired by a weapon's
+  stockpile update and by firing, both in the weapon loop) with
+  `GiveOrderToUnit(CMD.STOCKPILE)` until the queue matches its target.
+- **The widget's `GetUnitSampleDelta` is mostly its own loop:** 0.65% of its
+  0.83% is the per-unit pass (two `dynamic_cast`s and misses on ~10,000
+  units), 0.15% the casts themselves.
+- **The game's Lua stays the game's.** The largest blocks
+  (`unit_shield_behaviour`'s `GameFrame` and `ShieldPreDamaged`, unit
+  attributes, builder priority) are BAR's code: the engine can change what a
+  call costs, not what the gadget asks. Native substitutes would bypass the
+  game's own (and any mod's) Lua, which the sandbox work exists to protect.
+- **The capture widget's version is not in a re-sim's `.brp`** (the decoder
+  records it only for live captures), so a widget change that writes the same
+  stream keeps every md5.
+
+**Items** (`speed57-p8`, built into `speed65`; `t3` bits):
+- **H123** (`0x40000`, `7311ae0`): `GetUnitSampleDelta`'s per-unit half on
+  all threads (from 1024 units). Each unit reads only itself and writes only
+  its own predictor entries, keyed by its unique id; the main thread then fills
+  the output arrays in `GetAllUnits`' order.
+- **H124** (`0x80000`, `9466697`): the draining-list calls that change no
+  weapon-vector input skip P8's make-every-unit-ready: `GetUnitWeaponState` and
+  `GetUnitWeaponVectors` (reads, there for P4; the second ensures its own
+  unit), `SpawnCEG` (only unsynced effects, H113's audit), and a stockpile
+  order on a unit whose stockpile command is non-queueing (through every
+  command AI it reaches `ExecuteStateCommand` with none of a queueing
+  command's side effects: no stopped build, no dropped temporary order; it
+  changes the queue count and the icon). The callins on the way are Lua, whose
+  writes come through the trampoline themselves. Also: after a frame's first
+  make-all-ready, the next ones visit nothing (a unit's state only goes
+  0 -> 1 -> 2 until the next frame). From `speed58`'s whole-game tally these
+  are 55,816 of the loop's 77,179 drains, if every `GiveOrderToUnit` there was
+  a stockpile order.
+- **P12 v3** (`0x100000`, same commit): the same calls mark nothing in P12's
+  collision pass.
+- **W8** (`18a95c8` + widget 1.13.1, `3a47a43`): the widget's damage drain
+  in the engine. `Spring.DrainLoggedDamageColumns` runs `drainDamage` +
+  `recordHitAt` over the logged hits with the Lua path's float steps and keeps
+  an H record's columns; `TakeLoggedDamageColumns` hands them over packed. The
+  harness's new `enginecols` mode stubs the two with the widget's own
+  transforms and writes the `enginelog` fixture byte for byte
+  (`TestEngineColumnsMatchEngineLog`); the C++ is checked by the gates.
+
+`pipe67` (`speed65`) now gates these on the instrumented build first (widget
+1.13.1 with the three bits; if that differs, widget 1.13.0, then the bits
+off), trains the profile with them on, trials each bit against `speed64`'s
+pick, and measures W8 across two dumps of the one binary (widget 1.13.0 /
+1.13.1).
+
+`speed64` (`d78eff2`): gate identical with everything on from frame 0
+(`t3=3ffff`), 1m15s.
