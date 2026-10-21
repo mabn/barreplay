@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration for FogOfWar.exe. SignPath keeps its own copy
+  (project > Artifact Configurations); this file is the source to paste there.
+  The workflow (.github/workflows/fogofwar.yml) uploads the exe with
+  actions/upload-artifact, which zips it, hence the zip-file root. The pe-file
+  restrictions make SignPath refuse an exe whose version resource does not say
+  FogOfWar at the version the workflow passed (winres stamps it from the tag).
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="FogOfWar.exe" product-name="FogOfWar" product-version="${version}"
+             file-version="${version}" original-filename="FogOfWar.exe">
+      <authenticode-sign description="FogOfWar" description-url="https://replay.fogofwar.dev/" />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>
