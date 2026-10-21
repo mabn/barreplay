@@ -22,6 +22,7 @@ go build ./cmd/bringest         # build the drag&drop upload daemon (polls the w
 go run ./cmd/publish-engine -data <BARdata>   # gate, strip and upload the patched engine build under <data>/engine/*/ to R2, then print the patchedBuilds pin to commit and the tag to push (hosts download it once the pin is merged; -dry = everything but the upload; -gate <gameIds> for a version with no default gate replay)
 go run ./cmd/publish-engine -data <BARdata> -windows <spring-headless.exe>   # the WINDOWS build of the same series (patches/engine-<ver>/windows/build.sh, MinGW cross-compile) for FogOfWar.exe: gated under Wine against the stock LINUX engine, uploaded to engines/<ver>/windows-amd64/, pinned in patchedBuildsWindows (needs wine64)
 go run ./cmd/insights <gameId|link|rid>   # compute a PUBLISHED replay's game summary and publish replays/<rid>.insights<N>.json beside it (-upload r2 default, local, or empty + -out to just write it; -all walks the catalog, -from/-to narrow it to games started in a date range (YYYY-MM-DD or unix seconds); -j N replays at once, default 4; -force recomputes; a local .brp/.brepstream with -rid gives full costs; everything read from the real bucket is kept under ~/.cache/barreplay/<bucket host>/ so a re-run downloads only what is new — -cache DIR moves it, -cache= turns it off)
+go run ./cmd/upload-maps <dir>   # upload the BAR team's high-res map PNGs to the replay bucket as maps/highres/<file name> (image/png; same-size objects skipped, so a rerun resumes; -j 8 at once, -dry lists only; R2 keys from ./.env)
 go test ./...                   # all unit tests (no engine required)
 go vet ./... && gofmt -l .      # lint; gofmt -l prints nothing when clean
 go run ./cmd/barreplay -no-run <link|gameId|file.sdfz>   # download+parse only, no engine
@@ -3827,6 +3828,16 @@ run dev` in `worker/` plus `pack -upload local`.)
   (only the demo startscript path does), so a `.brp` packed from a raw `.brepstream` with
   `pack -no-demo` has an empty `mapName` and renders the plain background; the
   default pack fetches the demo by gameId and fills it in.
+  HIGH-RES TERRAIN: once the API texture is up, loadMap also asks the CDN
+  hostname (`HIGHRES_MAP_ORIGIN`: the data origin, or cdn-bar under `vite dev`,
+  since only the production bucket has them) for `maps/highres/<name>_<W>x<H>.png` (the BAR team's images, uploaded
+  by cmd/upload-maps) and swaps it in when it arrives; a 404 keeps the API
+  texture. The key is computed, never looked up (`highResMapFile`): the map name
+  exactly as the startscript spells it (R2 is case-sensitive) with spaces as
+  `_`, and the size from the map record already fetched: 4096 on the long side,
+  the short side scaled to the aspect and rounded DOWN to a multiple of 4
+  (checked against every uploaded file). `mapTexGen` is in the base layer's
+  repaint key, since a texture swap changes nothing else in it.
 - **`worker/public/`** (+ `worker/index.html`) is plain HTML/Canvas/vanilla-JS — **no
   framework, no build step for the app itself** (Vite only wraps it for the Cloudflare
   deploy). `app.js` reads the flat unit arrays by index (no per-unit objects), renders

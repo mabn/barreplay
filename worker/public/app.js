@@ -1230,6 +1230,7 @@ const autoTeamColors = false; // true: distinct auto colours per team; false: th
 let mapW = 0, mapH = 0;    // map world extent in elmos (0 if unknown)
 let mapTex = null;         // HTMLImageElement of the terrain texture, or null
 let mapCredit = null;      // {name, author} of the open replay's map, for the credits dialog
+let mapTexGen = 0;         // bumped whenever mapTex changes (the base layer's repaint key)
 // Viewport in CSS pixels + the device-pixel ratio. The canvas backing store is
 // viewW*DPR x viewH*DPR and the context is pre-scaled by DPR, so all drawing is
 // done in CSS px while staying crisp on HiDPI displays.
@@ -2406,7 +2407,7 @@ function draw() {
     const b = data.bounds;
     const key = loadGen + ',' + dispIdx + ',' + scale + ',' + center.x + ',' + center.z + ',' +
       viewW + ',' + viewH + ',' + DPR + ',' + showTexture + ',' + showGrid + ',' + showFootprints + ',' +
-      (mapTex && mapTex.complete ? 1 : 0) + ',' + mapW + ',' + mapH + ',' + colorGen + ',' +
+      (mapTex && mapTex.complete ? mapTexGen : 0) + ',' + mapW + ',' + mapH + ',' + colorGen + ',' +
       b.minX + ',' + b.maxX;
     if (key === lastBaseKey) { updateTooltip(); return; }
     lastBaseKey = key;
@@ -4816,16 +4817,44 @@ async function resolveMapFile(name, gameId) {
   return (await res.json()).Map || null;
 }
 
+// The high-res map images live only in the production bucket, so they are
+// always read from its CDN hostname — also under `vite dev`, whose data origin
+// is the local simulator bucket. Its CORS policy (r2-cors.json) lists the dev
+// server's origins.
+const HIGHRES_MAP_ORIGIN = DATA_BASE || 'https://cdn-bar.fogofwar.dev';
+
+// highResMapFile names the BAR team's high-res image of a map in the bucket
+// (maps/highres/, uploaded by cmd/upload-maps), or '' when it cannot be named.
+// The files are "<map name, spaces as _>_<W>x<H>.png": the name exactly as the
+// startscript spells it (R2 keys are case-sensitive, and it is the API's
+// scriptName too), and the image's size, 4096 on the long side and the short
+// side scaled to the map's aspect, rounded DOWN to a multiple of 4. Checked
+// against all 124 uploaded files: every one the API knows matches. Nothing is
+// asked to find it — the size comes from the map record loadMap already has —
+// so a map with no image costs one cached 404 on the data origin.
+function highResMapFile(name, mapUnitsW, mapUnitsH) {
+  if (!name || !(mapUnitsW > 0) || !(mapUnitsH > 0)) return '';
+  const long = Math.max(mapUnitsW, mapUnitsH);
+  const side = (u) => u === long ? 4096 : Math.floor(Math.floor(4096 * u / long) / 4) * 4;
+  return name.trim().replace(/ /g, '_') + '_' + side(mapUnitsW) + 'x' + side(mapUnitsH) + '.png';
+}
+
 // Fetch this replay's map extent + terrain texture straight from the BAR maps
 // API, using the map name stored in the capture's meta. Best-effort: if the
 // map is unknown or the API unreachable, the viewer just keeps the plain
 // background (and falls back to unit bounds for the field extent).
+//
+// The API's texture (1-2 MB) is drawn first; when the bucket holds the
+// high-res image of the map (highResMapFile, ~20 MB) it replaces that once it
+// has downloaded, and a missing one simply leaves the API's texture in place.
 async function loadMap(name, gameId) {
   const gen = loadGen; // ignore responses if the user switched replays mid-fetch
   mapW = mapH = 0;
   mapTex = null;
   mapCredit = name ? { name, author: '' } : null;
+  mapTexGen++;
   let file = mapFileGuess(name);
+  let hiRes = '';
   try {
     const info = await resolveMapFile(name, gameId);
     if (gen !== loadGen) return;
@@ -4835,14 +4864,23 @@ async function loadMap(name, gameId) {
       mapH = (info.height || 0) * MAP_ELMOS_PER_UNIT;
       const mapName = info.scriptName || info.name || name;
       if (mapName) mapCredit = { name: mapName, author: info.author || '' };
+      hiRes = highResMapFile(name || info.scriptName, info.width, info.height);
     }
   } catch (_) { /* offline/unknown: keep unit-bounds extent, still try the texture */ }
   if (gen !== loadGen || !file) return;
+  let hiResShown = false;
   const img = new Image();
   img.crossOrigin = 'anonymous'; // the API sends CORS headers; keeps the canvas untainted
-  img.onload = () => { if (gen !== loadGen) return; mapTex = img; draw(); };
+  img.onload = () => { if (gen !== loadGen || hiResShown) return; mapTex = img; mapTexGen++; draw(); };
   img.onerror = () => { /* no texture for this map: keep the plain background */ };
   img.src = MAP_API + '/maps/' + encodeURIComponent(file) + '/texture-mq.jpg';
+  if (hiRes) {
+    const hi = new Image();
+    hi.crossOrigin = 'anonymous'; // the bucket's CORS policy allows the viewer's origins
+    hi.onload = () => { if (gen !== loadGen) return; hiResShown = true; mapTex = hi; mapTexGen++; draw(); };
+    hi.onerror = () => { /* no high-res image of this map: keep the API's texture */ };
+    hi.src = HIGHRES_MAP_ORIGIN + '/maps/highres/' + encodeURIComponent(hiRes);
+  }
   draw(); // reflect the (possibly updated) map extent immediately
 }
 
