@@ -6684,7 +6684,14 @@ lines, but the members `Update` and `CanFire` read have moved past them since
 640-695). H129 prefetches the owner's `curTarget` 8 units ahead, those four
 lines of each weapon 4 ahead, and each target's `isDead` 2 ahead.
 
+The same check found the "last line" prefetches stale too (H112 in
+`UpdateUnits`, H115 in the weapon loop: `sizeof(CUnit) - 1`, meant for
+`stunned` and H88's cache): in this layout `stunned` (4337) and most of H88's
+cache (4338-4351) are in line 67 of 69 and the last line holds only
+`brPhysGround`. H129 also prefetches `stunned` in both loops (`779e4af`).
+
 **Insight:** a prefetch by raw offset goes stale when members are added in
-front of what it was aimed at; this one had been fetching the wrong lines for
-many builds. Prefetches written by member address (H112, H115, H121) follow
+front of what it was aimed at; H75's had been fetching the wrong lines for many
+builds, and the end-relative ones moved when H88's cache was appended. Only
+prefetches written by member address (H112's others, H115's `id`, H121) follow
 the layout.
