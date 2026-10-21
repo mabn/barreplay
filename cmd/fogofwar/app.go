@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -775,25 +778,81 @@ func patchedExe() string {
 }
 
 // PatchedInfo is one faster engine build in the data folder: the engine
-// version it is for, and the published build it is ("2026.7.4-barreplay.3"),
-// empty when nothing pins one for that version (a build made locally).
+// version it is for, and the published build pinned for it
+// ("2026.7.4-barreplay.5"), empty when nothing pins one for that version.
+// Stale says the binary on disk is NOT that build (an earlier published one,
+// or one made locally): the next game on that version replaces it.
 type PatchedInfo struct {
 	Engine string `json:"engine"`
 	Build  string `json:"build"`
+	Stale  bool   `json:"stale,omitempty"`
 }
 
 // installedPatchedBuilds lists the engine versions in dataDir that have a
-// patched binary beside the stock one. A download only ever lands the pinned
-// build, so the pin names what is there.
+// patched binary beside the stock one, and whether each is the pinned build.
+// The pin alone does not say what is on disk: a new pin names a build that is
+// only downloaded when the next game on that version runs.
 func installedPatchedBuilds(dataDir string) []PatchedInfo {
 	ents, _ := os.ReadDir(filepath.Join(dataDir, "engine"))
 	out := []PatchedInfo{}
 	for _, e := range ents {
-		if e.IsDir() && fileExists(filepath.Join(dataDir, "engine", e.Name(), patchedExe())) {
-			out = append(out, PatchedInfo{Engine: e.Name(), Build: engine.PinnedPatchedVersion(e.Name())})
+		exe := filepath.Join(dataDir, "engine", e.Name(), patchedExe())
+		if !e.IsDir() || !fileExists(exe) {
+			continue
 		}
+		info := PatchedInfo{Engine: e.Name(), Build: engine.PinnedPatchedVersion(e.Name())}
+		if info.Build != "" {
+			sum, err := cachedSHA256(exe)
+			info.Stale = err == nil && sum != pinnedSHA256(e.Name())
+		}
+		out = append(out, info)
 	}
 	return out
+}
+
+// pinnedSHA256 is engine.PinnedPatchedSHA256; a test swaps it, since no
+// test can write bytes that hash to a real pin.
+var pinnedSHA256 = engine.PinnedPatchedSHA256
+
+// hashCache keeps each file's SHA-256 by path, size and modification time,
+// so the settings panel (redrawn on every state push) hashes a 40 MB binary
+// once rather than on every redraw.
+var hashCache = struct {
+	sync.Mutex
+	m map[string]hashEntry
+}{m: map[string]hashEntry{}}
+
+type hashEntry struct {
+	size int64
+	mod  time.Time
+	sum  string
+}
+
+func cachedSHA256(path string) (string, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	hashCache.Lock()
+	e, ok := hashCache.m[path]
+	hashCache.Unlock()
+	if ok && e.size == st.Size() && e.mod.Equal(st.ModTime()) {
+		return e.sum, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	sum := hex.EncodeToString(h.Sum(nil))
+	hashCache.Lock()
+	hashCache.m[path] = hashEntry{st.Size(), st.ModTime(), sum}
+	hashCache.Unlock()
+	return sum, nil
 }
 
 // moveInto renames src to dst, replacing dst, copying across volumes (the

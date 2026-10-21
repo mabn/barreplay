@@ -415,7 +415,7 @@ cmd/fogofwar/             FogOfWar.exe: a Windows desktop app that re-simulates 
                           DownloadProgress (byte counts for any engine download), and the
                           Windows patched build: PatchedBuildKey's engines/<v>/windows-amd64/
                           spring-headless-patched-<semver>.exe.gz, pinned in
-                          patchedBuildsWindows (2026.07.04 rev 3 pinned; a version with no pin
+                          patchedBuildsWindows (2026.07.04 rev 5 pinned; a version with no pin
                           runs stock on Windows).
 cmd/publish-engine/main.go CLI: publish a patched engine build for every re-sim host to
                           download (see the -patched-engine note above), the WHOLE job in one
