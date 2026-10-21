@@ -92,6 +92,11 @@ the second word; H108-H113 and P12 in the third, H109 from the environment):
 **10m37.4s active**, identical (`a26e920d…`), -0.6% against `speed60` and
 3.60x stock.
 
+Best so far: `speed65` (= everything through 0156, i.e. `Recoil 163e18a`, with
+a PGO profile retrained on it with every bit on), `t=d4d87abf`, `t2=9bae383f`,
+`t3=ffffff`, widget 1.13.1 (W8): **9m59.3s active**, identical
+(`a26e920d…`), -6.0% against `speed63` and 3.83x stock.
+
 ## Applying
 
 From a clean checkout of the `2026.07.04` tag:
@@ -223,12 +228,12 @@ the harness's `TOGGLES3=`):
 | `0x8000` | H121 | 0147 | prefetches in `GetUnitsExact` and the builders' repair search (candidates 4 ahead) | with H115 | on |
 | `0x10000` | P12 v2 | 0148 | inside the pass, a Lua write to one unit marks that unit (before and after the call) instead of everything | -1.9% / -0.4%; check 0 wrong of 97,515 + 42,619 (`speed64`) | on |
 | `0x20000` | H122 | 0149 | the ground move type hands the ground height it just read to H88's cache | -0.9% / -0.7% (`speed64`) | on |
-| `0x40000` | H123 | 0150 | `GetUnitSampleDelta`'s per-unit half on all threads (from 1024 units), the output filled in order by the main thread | (`speed65`) | |
-| `0x80000` | H124 | 0151 | the draining-list calls that change no weapon-vector input (`SpawnCEG`, two weapon reads, a non-queueing stockpile order) skip P8's make-every-unit-ready; a frame's later make-all-readies visit nothing | (`speed65`) | |
-| `0x100000` | P12 v3 | 0151 | the same calls mark nothing in P12's pass | (`speed65`) | |
-| `0x200000` | H125 | 0153 | no smoke trails behind missiles, starbursts and debris; the trail's `useAirLos` computed without it | (`speed65`) | |
-| `0x400000` | H126 | 0154-0155 | the LOS update's map work as one set of tasks: per type the units and filtering, every type's raycasts at once, each (type, ally team, band of rows)'s removes and adds, per type the cache; full view only | (`speed65`) | |
-| `0x800000` | H127 | 0156 | H108's crater pass rejects instances outside every crater's reach (from the boxes `CheckOverlap` really tests) at once | (`speed65`) | |
+| `0x40000` | H123 | 0150 | `GetUnitSampleDelta`'s per-unit half on all threads (from 1024 units), the output filled in order by the main thread | -0.0% / -0.5% (`speed65`) | on |
+| `0x80000` | H124 | 0151 | the draining-list calls that change no weapon-vector input (`SpawnCEG`, two weapon reads, a non-queueing stockpile order) skip P8's make-every-unit-ready; a frame's later make-all-readies visit nothing | -0.5% / -0.2% (`speed65`) | on |
+| `0x100000` | P12 v3 | 0151 | the same calls mark nothing in P12's pass | -0.3% / +0.3% (noise, `speed65`) | on |
+| `0x200000` | H125 | 0153 | no smoke trails behind missiles, starbursts and debris; the trail's `useAirLos` computed without it | **-0.9% / -1.9%** (`speed65`) | on |
+| `0x400000` | H126 | 0154-0155 | the LOS update's map work as one set of tasks: per type the units and filtering, every type's raycasts at once, each (type, ally team, band of rows)'s removes and adds, per type the cache; full view only | +0.3% / -0.2% (`speed65`) | on |
+| `0x800000` | H127 | 0156 | H108's crater pass rejects instances outside every crater's reach (from the boxes `CheckOverlap` really tests) at once | -0.1% / -0.2% (`speed65`); all six -1.9% / -2.8% | on |
 | `0x1000000` | N3 | 0157 | N2 for `UnitCreated`, `UnitDestroyed` and `UnitCommand`: the handlers' Meta calls, list walks, `_unitCommandIDs` filter and `markIdle` in C when their hashes are listed (learned in `speed66`) | (`speed66`) | |
 | `0x2000000` | H128 | 0158 | `TraceRay` skips a unit or feature whose collision volume its segment cannot reach (orthonormal axes, half-scale bound, margin) before building and inverting its transform | (`speed66`) | |
 | `0x4000000` | H129 | 0159-0160 | the weapon loop prefetches the lines `CWeapon::Update` reads (the owner's `curTarget`, four weapon lines H75's raw offsets no longer hit, the target's `isDead`) and `stunned`, now a line before the last | (`speed66`) | |
@@ -254,7 +259,7 @@ Not toggled (always on in these builds):
 | 0121 | bench harness: a `p4check` word in `park.go` (`P4CHECK=1`) turns P4's and P10's check mode on after a restore; 0123 makes P4's first-slice init keep it |
 | 0126 | bench harness: a `sync` word in `park.go` makes the engine report `<park>.window` after its huge-page wait and wait for `<park>.go2`, so `PERF`/`PERFSTAT` profile the timed window only (they had included the wait since 0096) |
 | 0132 | measurement: the projectile collision pass's checks, candidates, hits and cycles per kind, and P12's counters, on the bench line |
-| 0152 (W8) | the capture widget's damage drain in the engine: `Spring.DrainLoggedDamageColumns` / `TakeLoggedDamageColumns` (`recordHitAt`'s float steps, the H record's columns kept and packed natively); widget 1.13.1 uses them when offered |
+| 0152 (W8) | -0.6% wall / -1.4% instructions at 63,780 (`speed65`): the capture widget's damage drain in the engine: `Spring.DrainLoggedDamageColumns` / `TakeLoggedDamageColumns` (`recordHitAt`'s float steps, the H record's columns kept and packed natively); widget 1.13.1 uses them when offered |
 
 ## rejected/
 
